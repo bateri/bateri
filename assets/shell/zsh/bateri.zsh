@@ -1,77 +1,79 @@
-# bateri'nin zsh sarmalayıcısı — ortak gövde.
+# bateri's zsh wrapper — the shared body.
 #
-# Yükleyeni bizim ZDOTDIR'ımızdaki dört dosya (`.zshenv`, `.zprofile`,
-# `.zshrc`, `.zlogin`). Gövde ZDOTDIR takasını ve kancaları tutuyor; `source`
-# **burada değil**, her dosyanın kendi en üst seviyesinde.
+# Loaded by the four files in our ZDOTDIR (`.zshenv`, `.zprofile`, `.zshrc`,
+# `.zlogin`). The body holds the ZDOTDIR swap and the hooks; `source` is
+# **not here**, it is at the top level of each file.
 #
-# KULLANICININ DOSYASI FONKSİYON İÇİNDEN `source` EDİLMEZ (009 phase-5) ve bu
-# kuralın bedeli ölçüldü: zsh'te fonksiyon içindeki `typeset` YERELDİR, yani
-# `typeset -U path; path+=(…)` — Homebrew, asdf, pyenv ve nvm'in standart PATH
-# deyimi — dönüşte silinirdi. Belirti sessiz: kullanıcının araçları yalnız
-# bateri'de kaybolur, her başka terminalde çalışır. Aynı sınır konumsal
-# parametreleri de bozuyordu (dosya `$#`'i 1 görüyordu). Bu yüzden gövde iki
-# parçaya ayrıldı: [`__bateri_begin`] hazırlar, dosya top-level `source`
-# yapar, [`__bateri_end`] toplar.
+# THE USER'S FILE IS NOT `source`D FROM INSIDE A FUNCTION (009 phase-5) and the
+# cost of this rule was measured: in zsh a `typeset` inside a function is LOCAL,
+# so `typeset -U path; path+=(…)` — the standard PATH idiom of Homebrew, asdf,
+# pyenv and nvm — would be deleted on return. The symptom is silent: the user's
+# tools vanish only in bateri and work in every other terminal. The same
+# boundary also broke the positional parameters (the file saw `$#` as 1). That
+# is why the body was split in two: [`__bateri_begin`] prepares, the file does
+# a top-level `source`, [`__bateri_end`] collects.
 #
-# SÖZLEŞME (kuran taraf `bt-shell-macos`'un `app::shell_integration_env`'i):
-#   ZDOTDIR         bu dizin
-#   BATERI_ZDOTDIR  kullanıcının özgün ZDOTDIR'ı. Ortamda yoksa kullanıcının
-#                   da yoktu; geri koyarken ZDOTDIR silinir, $HOME'a
-#                   eşitlenmez — ihraç edilen bir ZDOTDIR ile hiç olmayan
-#                   ZDOTDIR çocuklar için farklı şeyler.
-#   BATERI_DOCK     `off` ise bu oturumda DOCK YOK
-#                   (`[shell] integration = "blocks"`): prompt kullanıcının
-#                   kalır ve dock'u besleyen kollar hiç kurulmaz. Yokluğu
-#                   varsayılan, yani dock VAR. Kararı terminal veriyor,
-#                   burada sorulmuyor.
+# CONTRACT (the setting side is `bt-shell-macos`'s `app::shell_integration_env`):
+#   ZDOTDIR         this directory
+#   BATERI_ZDOTDIR  the user's original ZDOTDIR. If it is absent from the
+#                   environment the user had none either; on restore ZDOTDIR is
+#                   unset, not set equal to $HOME — an exported ZDOTDIR and a
+#                   ZDOTDIR that does not exist at all are different things to
+#                   children.
+#   BATERI_DOCK     if `off`, there is NO DOCK in this session
+#                   (`[shell] integration = "blocks"`): the prompt stays the
+#                   user's and the arms that feed the dock are never set up. Its
+#                   absence is the default, i.e. the dock EXISTS. The terminal
+#                   makes the decision, it is not asked here.
 #
-# BİLİNEN VE SINIRLI FARK: top-level `source` içinde zsh `$0`'ı yüklenen
-# dosyanın yoluna kuruyor; gerçek başlangıçta kabuğun adı olurdu. Çaresi
-# `function_argzero`'yu geçici kapatmak olurdu — kullanıcının kodunun
-# etrafında option çevirmek, tam da kaçındığımız görünmez mutasyon. kitty'nin
-# sarmalayıcısı da aynı farkı kabul ediyor.
+# A KNOWN AND LIMITED DIFFERENCE: inside a top-level `source` zsh sets `$0` to
+# the path of the file being loaded; at a real startup it would be the shell's
+# name. The fix would be to turn `function_argzero` off temporarily — flipping
+# an option around the user's code is exactly the invisible mutation we avoid.
+# kitty's wrapper accepts the same difference.
 #
-# HİÇBİR KOLDA ÖLÜMCÜL DEĞİL: `exit` yok, kullanıcının her dosyası korunarak
-# okunuyor. Gerekçe sert — çocuk ölünce uygulama kapanıyor (`bt-shell-macos`'un
-# `child_exit` → `terminate:` yolu), yani düşen bir sarmalayıcı kullanıcıyı
-# Settings…'e bile ulaşamaz bırakırdı.
+# NOT FATAL IN ANY ARM: there is no `exit`, each of the user's files is read
+# guarded. The reason is harsh — when the child dies the app closes
+# (`bt-shell-macos`'s `child_exit` → `terminate:` path), so a wrapper that
+# fell over would leave the user unable to even reach Settings….
 #
-# KULLANICININ DOSYALARINA YAZILMAZ, yalnız okunur (`make denetim` kapısı).
+# THE USER'S FILES ARE NOT WRITTEN TO, only read (the `make audit` gate).
 #
-# SİSTEMİN rc dosyaları (`/etc/zshrc`) her aşamada bizimkinden ÖNCE okunuyor
-# ve o sırada ZDOTDIR bizi gösteriyor. Yazan tek kalem `HISTFILE` ve
-# [`__bateri_begin`] onu düzeltiyor. Kalan kalem salt okunur ve bilerek
-# bırakıldı: `/etc/zshrc` `${ZDOTDIR:-$HOME}/.zkbd/${TERM}-${VENDOR}`
-# arıyor, yani `~/.zkbd` ile tuş bağlaması üretmiş bir kullanıcı onu
-# yükleyemez ve terminfo'dan gelen varsayılana düşer. Çaresi sistemin rc
-# mantığını kopyalamak olurdu — macOS sürümüne bağlı, kırılgan bir
-# tekrar; veri kaybı yok.
+# The SYSTEM's rc files (`/etc/zshrc`) are read BEFORE ours at every stage and
+# ZDOTDIR points at us at that time. The only item that writes is `HISTFILE`
+# and [`__bateri_begin`] fixes it. The remaining item is read-only and was left
+# deliberately: `/etc/zshrc` looks for `${ZDOTDIR:-$HOME}/.zkbd/${TERM}-${VENDOR}`,
+# so a user who generated key bindings with `~/.zkbd` cannot load them and falls
+# back to the default from terminfo. The fix would be to copy the system's rc
+# logic — a fragile duplicate that depends on the macOS version; there is no
+# data loss.
 #
-# `.zlogout` bizde YOK ve bu bir eksik değil: ZDOTDIR en geç `.zlogin`'de
-# kullanıcıya geri konuyor, yani çıkışta zsh zaten kullanıcının kendi
-# `.zlogout`'unu okuyor. Beşinci bir dosya koysaydık hiçbir kolda koşmazdı —
-# geri koymayı ertelemek ise ZDOTDIR'ı bütün oturum boyunca çocuklara
-# sızdırmak olurdu (tmux, iç içe kabuk).
+# We have NO `.zlogout` and this is not an omission: ZDOTDIR is restored to the
+# user at the latest in `.zlogin`, so on exit zsh already reads the user's own
+# `.zlogout`. Had we put a fifth file it would have run in no arm — deferring
+# the restore would mean leaking ZDOTDIR to children for the whole session
+# (tmux, nested shell).
 
-# Bizim dizinimiz. zsh bu dosyayı bulmak için ZDOTDIR'ı kullandı, yani değer
-# şu an bizimki; `${0:A:h}` yalnız `unsetopt function_argzero` kenarı için
-# yedek.
+# Our directory. zsh used ZDOTDIR to find this file, so the value is ours right
+# now; `${0:A:h}` is only a fallback for the `unsetopt function_argzero` edge.
 : ${__bateri_dir:=${ZDOTDIR:-${0:A:h}}}
 
-# Kullanıcının dizini ve ZDOTDIR'ının VAR OLUP OLMADIĞI — ikisi ayrı bilgi.
-# Bir kez saptanıyor: `.zshenv` her zsh'te okunuyor ve ortam değişkenini
-# oradan alıp siliyoruz.
+# The user's directory and WHETHER THEIR ZDOTDIR EXISTS — two separate pieces of
+# information. Determined once: `.zshenv` is read by every zsh and we take the
+# environment variable from there and delete it.
 if (( ! ${+__bateri_had} )); then
-  # KENDİNE DÖNÜK DEĞER REDDEDİLİYOR: `BATERI_ZDOTDIR` bizim dizinimizi
-  # gösteriyorsa "kullanıcının özgün değeri"ni değil kendimizi geri koyardık
-  # — `__bateri_begin` kendi `.zshenv`'imizi yeniden yükler ve zsh'in
-  # FUNCNEST sınırına kadar özyineler (ölçüldü: 336 satır hata, oturum
-  # ZDOTDIR'sız kalıyor). Kapının ilk katı Rust tarafında
-  # (`shell_integration_env`); bu ikinci kat, ortamı elle kuran hâller için.
-  # Sağ taraf TIRNAKLI: `[[ ]]` içinde tırnaksız sağ işlenen bir **glob
-  # deseni**, düz metin değil. Paket `/Applications/[dev] bateri.app/…` gibi
-  # bir yolda dursaydı desen kendi düz değeriyle eşleşmez, kapı açılır ve tam
-  # da önlediği özyinelemeye düşerdik (`/code-review`, 009 phase-5).
+  # A SELF-POINTING VALUE IS REJECTED: if `BATERI_ZDOTDIR` points at our own
+  # directory we would put ourselves back instead of "the user's original
+  # value" — `__bateri_begin` would reload our own `.zshenv` and recurse up to
+  # zsh's FUNCNEST limit (measured: 336 lines of errors, the session is left
+  # without ZDOTDIR). The first layer of the gate is on the Rust side
+  # (`shell_integration_env`); this second layer is for the cases where the
+  # environment is set up by hand.
+  # The right-hand side is QUOTED: inside `[[ ]]` an unquoted right operand is a
+  # **glob pattern**, not plain text. Had the package sat at a path like
+  # `/Applications/[dev] bateri.app/…` the pattern would not match its own plain
+  # value, the gate would open and we would fall into exactly the recursion it
+  # prevents (`/code-review`, 009 phase-5).
   if [[ -n ${BATERI_ZDOTDIR} && ${BATERI_ZDOTDIR:A} != "${__bateri_dir:A}" ]]; then
     __bateri_had=1
     __bateri_user=$BATERI_ZDOTDIR
@@ -80,21 +82,24 @@ if (( ! ${+__bateri_had} )); then
     __bateri_user=$HOME
   fi
   unset BATERI_ZDOTDIR
-  # BU OTURUMDA DOCK VAR MI. Tek değişken, çünkü tek karar: dock varsa giriş
-  # satırı TERMİNALİN — prompt sıfırlanır, ZLE aynalanır, bağlamın dalı
-  # basılır. Dock yoksa üçü de anlamsız ve üçü de KAPANIR; ayrı ayrı
-  # sorulsalardı "prompt terminalin ama dock yok" gibi tutarsız bir hâl
-  # mümkün olurdu — 012 phase-10 tam da onu kapattı.
+  # WHETHER THERE IS A DOCK IN THIS SESSION. A single variable, because it is a
+  # single decision: if there is a dock the input line is the TERMINAL's — the
+  # prompt is reset, ZLE is mirrored, the context's branch is printed. If there
+  # is no dock all three are meaningless and all three are TURNED OFF; had they
+  # been asked separately an inconsistent state like "the prompt is the
+  # terminal's but there is no dock" would have been possible — 012 phase-10
+  # closed exactly that.
   #
-  # Ortam değişkeni yalnız dock'suz kademede geliyor
-  # (`shell_integration_env`), yani yokluğu "dock var" demek. Tanınmayan bir
-  # değer de oraya düşüyor: bu uçta tanı basacak yer yok ve varsayılana
-  # düşmek GÖRÜNÜR bir sonuç (kullanıcı dock'u görür, yanlış yazdığını anlar).
+  # The environment variable comes only at the dock-less tier
+  # (`shell_integration_env`), so its absence means "there is a dock". An
+  # unrecognized value also falls there: there is no place to print a
+  # diagnostic at this end and falling back to the default is a VISIBLE outcome
+  # (the user sees the dock and realizes they mistyped).
   #
-  # `unset`: değişken yalnız BİZE ait ve alt süreçlere sızmasının anlamı yok
-  # (`BATERI_ZDOTDIR` emsali). Değeri saklayan kabuk değişkeni kancaların
-  # oturum durumu, yani `__bateri_restore` onu SİLMİYOR (`__bateri_block`
-  # gibi).
+  # `unset`: the variable belongs only to US and there is no point in leaking it
+  # into child processes (`BATERI_ZDOTDIR` precedent). The shell variable that
+  # keeps the value is the hooks' session state, so `__bateri_restore` does NOT
+  # delete it (like `__bateri_block`).
   if [[ $BATERI_DOCK == off ]]; then
     __bateri_dock=0
   else
@@ -102,75 +107,79 @@ if (( ! ${+__bateri_had} )); then
   fi
   unset BATERI_DOCK
 
-  # TAŞAN TAMAMLAMA LİSTESİ EKRANI SİLMESİN. zsh'in varsayılan ölçütü
-  # `LISTMAX=100` ve SEÇENEK SAYISINA bakıyor, kapladığı YERE değil: yüzün
-  # altında kalan bir liste sormadan basılıyor, satır sayısı ekranı aşsa da.
-  # Belirti kullanıcıda görüldü (2026-09-21, `ls -` tamamlaması): liste
-  # sorulmadan basıldı, ızgarayı aştı ve satır silinince ekranda KALDI. `0`
-  # ölçütü sayıdan yere çeviriyor: "ekrana sığmıyorsa sor". Kaç seçeneğin kaç
-  # satır tuttuğu kullanıcının `zstyle`'ına bağlı ve burada bir sayı
-  # yazılmıyor — ölçüt zaten sayı değil.
+  # LET AN OVERFLOWING COMPLETION LIST NOT ERASE THE SCREEN. zsh's default
+  # criterion is `LISTMAX=100` and it looks at the NUMBER OF OPTIONS, not the
+  # SPACE it takes: a list under a hundred is printed without asking, even if
+  # the line count exceeds the screen. The symptom was seen by the user
+  # (2026-09-21, `ls -` completion): the list was printed without asking,
+  # overflowed the grid and STAYED on screen when the line was erased. `0`
+  # turns the criterion from a count into a space: "ask if it does not fit on
+  # the screen". How many lines how many options take depends on the user's
+  # `zstyle` and no number is written here — the criterion is not a number
+  # anyway.
   #
-  # Gerekçe ölçüldü (2026-09-21, saf PTY, aynı 37 satırlık liste iki ekran
-  # boyunda): liste SIĞDIĞINDA (60 satır) zsh Tab'da `\e[37A` ile imleci
-  # listenin üstüne alıyor ve satır silinince `\e[J` gönderiyor — 017'nin
-  # doldurma bandı boşluğu defterden dolduruyor ve ekran Tab öncesine
-  # dönüyor. Liste AŞTIĞINDA (26 satır) zsh ikisini de göndermiyor; satır
-  # silmede yalnız backspace geliyor, çünkü normal bir terminalde kaydırıp
-  # geçmişe giden satırları geri getiremez ve yarım temizlemek ekranı
-  # bozardı. Terminale "liste bitti" diyen bir sinyal HİÇ gelmiyor: defter
-  # bizde duruyor ama geri getirmenin tetiği yok. `LISTMAX=0` ekranı silmeyi
-  # geri dönüşsüz bir adım olmaktan çıkarıyor — aşan listede zsh önce soruyor
-  # ve `n` ekranı olduğu gibi bırakıyor.
+  # The rationale was measured (2026-09-21, pure PTY, the same 37-line list at
+  # two screen heights): when the list FITS (60 lines) zsh on Tab moves the
+  # cursor above the list with `\e[37A` and sends `\e[J` when the line is
+  # erased — 017's fill band fills the gap from the scrollback and the screen
+  # returns to its pre-Tab state. When the list OVERFLOWS (26 lines) zsh sends
+  # neither; on line erase only a backspace arrives, because in a normal
+  # terminal it cannot bring back the lines that scrolled into the history and
+  # half-clearing would corrupt the screen. No signal that tells the terminal
+  # "the list is over" ever arrives: the scrollback is with us but there is no
+  # trigger to bring it back. `LISTMAX=0` stops erasing the screen from being
+  # an irreversible step — for an overflowing list zsh asks first and `n`
+  # leaves the screen as it is.
   #
-  # BİLİNEN SINIR: `y` dendiğinde liste basılıyor ve yine kalıcı oluyor.
-  # Ölçüt "bozulmadan önce sor", "geri getir" değil.
+  # A KNOWN LIMIT: when `y` is answered the list is printed and is permanent
+  # again. The criterion is "ask before it breaks", not "bring it back".
   #
-  # DEĞER KULLANICININ DOSYALARINDAN ÖNCE KONUYOR ve yerin kendisi bir karar:
-  # `LISTMAX` zsh'te varsayılan olarak SET (`typeset -i LISTMAX=100`), yani
-  # "kullanıcı mı ayarlamış" diye sınanamaz. Bu blok `.zshenv`'den bir kez
-  # koşuyor, kullanıcının hiçbir başlangıç dosyası okunmadan önce; kendi
-  # `LISTMAX`'ını yazan kullanıcı SONRA koşuyor ve kazanıyor. Değer
-  # `__bateri_hooks` içine konsaydı tam tersi olur, kullanıcının tercihi
-  # ezilirdi.
+  # THE VALUE IS SET BEFORE THE USER'S FILES and the place itself is a
+  # decision: `LISTMAX` is SET by default in zsh (`typeset -i LISTMAX=100`), so
+  # "did the user set it" cannot be tested. This block runs once from
+  # `.zshenv`, before any of the user's startup files is read; a user who
+  # writes their own `LISTMAX` runs LATER and wins. Had the value been put
+  # inside `__bateri_hooks` the opposite would happen and the user's preference
+  # would be overridden.
   #
-  # DOCK'A KOŞULLU, çünkü koruduğu şey dock'un vaadi (017, ekranın geri
-  # dönüşü) ve `integration = "blocks"` kademesinde o vaat yok — orada giriş
-  # satırı kullanıcının ve kabuk klasik davranmalı. `__bateri_dock`'un
-  # tükettiği üçüncü karar; ayrı bir anahtar açılsaydı "dock yok ama
-  # completion bizim" gibi tutarsız bir hâl doğardı.
+  # CONDITIONAL ON THE DOCK, because what it protects is the dock's promise
+  # (017, the return of the screen) and at the `integration = "blocks"` tier
+  # that promise does not exist — there the input line is the user's and the
+  # shell should behave classically. It is the third decision `__bateri_dock`
+  # consumes; had a separate key been opened an inconsistent state like "no
+  # dock but completion is ours" would have arisen.
   if (( __bateri_dock )); then
     LISTMAX=0
   fi
 fi
 
-# Kullanıcının aynı adlı başlangıç dosyasını yüklemeye HAZIRLAR; yüklemeyi
-# çağıran dosya kendi en üst seviyesinde yapar.
+# PREPARES the loading of the user's same-named startup file; the calling file
+# does the loading at its own top level.
 #
-# ZDOTDIR yükleme boyunca KULLANICININ değerini taşıyor ve bunun iki sebebi
-# var: dosyanın kendisi `$ZDOTDIR`'ı doğru görsün, ve o dosyadan doğan alt
-# süreçler (brew shellenv, nvm, direnv) bizim dizinimizi miras almasın.
+# ZDOTDIR carries the USER's value during loading, for two reasons: so the file
+# itself sees `$ZDOTDIR` correctly, and so that child processes born from that
+# file (brew shellenv, nvm, direnv) do not inherit our directory.
 __bateri_begin() {
   if (( __bateri_had )); then
     ZDOTDIR=$__bateri_user
   else
     unset ZDOTDIR
   fi
-  # SİSTEMİN rc dosyası bizden ÖNCE okundu ve ZDOTDIR o sırada bizi
-  # gösteriyordu: macOS'un `/etc/zshrc`'si `HISTFILE`'ı
-  # `${ZDOTDIR:-$HOME}/.zsh_history` diye kuruyor. Düzeltmezsek kullanıcının
-  # komut geçmişi uygulamanın paketine yazılır ve kendi dosyası donardı —
-  # belirtisi de sessiz olurdu. Düzeltme kullanıcının dosyası yüklenmeden
-  # ÖNCE, çünkü onun rc'si `HISTFILE`'ı okuyup üstüne kurabiliyor. Kendi
-  # yolunu yazmış kullanıcıya dokunulmuyor: koşul yalnız BİZİM dizinimizi
-  # gösteren değeri yakalıyor.
+  # The SYSTEM's rc file was read BEFORE us and ZDOTDIR was pointing at us at
+  # that time: macOS's `/etc/zshrc` sets `HISTFILE` to
+  # `${ZDOTDIR:-$HOME}/.zsh_history`. If we did not fix it the user's command
+  # history would be written into the application's package and their own file
+  # would freeze — and the symptom would be silent. The fix comes BEFORE the
+  # user's file is loaded, because their rc can read `HISTFILE` and build on it.
+  # A user who wrote their own path is not touched: the condition only catches a
+  # value that points at OUR directory.
   if [[ -n $HISTFILE && $HISTFILE == "$__bateri_dir"/* ]]; then
     HISTFILE=${ZDOTDIR:-$HOME}/${HISTFILE#"$__bateri_dir"/}
   fi
-  # `typeset -g`: değeri okuyacak olan, bu fonksiyon değil ÇAĞIRAN dosyanın
-  # en üst seviyesi. `-r` okunamayan dosyayı (yok, izin yok) boş değerle
-  # eler; `source`'un kendi hatası da ölümcül değil — sözdizimi hatası o
-  # dosyayı bırakır, kabuğu değil.
+  # `typeset -g`: the one who will read the value is the top level of the CALLING
+  # file, not this function. `-r` filters out an unreadable file (missing, no
+  # permission) with an empty value; `source`'s own error is not fatal either —
+  # a syntax error abandons that file, not the shell.
   local file=${ZDOTDIR:-$HOME}/$1
   if [[ -r $file ]]; then
     typeset -g __bateri_file=$file
@@ -179,11 +188,12 @@ __bateri_begin() {
   fi
 }
 
-# Yükleme bitti: kullanıcının değerini yeniden okur ve ZDOTDIR'ı bize alır.
+# Loading is done: re-reads the user's value and takes ZDOTDIR back to us.
 #
-# Değer YENİDEN OKUNUYOR: bir kullanıcının ZDOTDIR'ı olmasının en yaygın yolu
-# `~/.zshenv` içinde onu atamaktır. Okumasaydık kalan dosyaları eski dizinden
-# arar, yani tam da kullanıcının taşıdığı yapılandırmayı kaçırırdık.
+# The value is RE-READ: the most common way for a user to have a ZDOTDIR is to
+# assign it inside `~/.zshenv`. Had we not read it we would look for the
+# remaining files in the old directory, i.e. miss exactly the configuration the
+# user moved.
 __bateri_end() {
   if (( ${+ZDOTDIR} )); then
     __bateri_had=1
@@ -196,112 +206,118 @@ __bateri_end() {
   unset __bateri_file
 }
 
-# OSC 133 işaretlerini zsh'in kendi kancalarına bağlar.
+# Attaches the OSC 133 marks to zsh's own hooks.
 #
-# `.zshrc`'den, kullanıcının dosyası yüklendikten SONRA çağrılıyor:
-# `add-zsh-hook` sona ekliyor, yani bizim kancamız kullanıcının kancalarının
-# arkasında koşuyor ve onların PS1'e yaptığını görüyor.
+# Called from `.zshrc`, AFTER the user's file is loaded: `add-zsh-hook` appends,
+# so our hook runs behind the user's hooks and sees what they did to PS1.
 __bateri_hooks() {
   autoload -Uz add-zsh-hook
-  # "Son prompt'tan beri bir komut koştu mu": `D` yalnız gerçekten koşan bir
-  # komutun ardından basılır. Boş satıra basılan Enter yeni bir prompt doğurur
-  # ama biten bir komut yoktur.
+  # "Has a command run since the last prompt": `D` is printed only after a command
+  # that really ran. An Enter on an empty line spawns a new prompt but there is
+  # no command that finished.
   typeset -g __bateri_ran=0
-  # Blok sayacı. Her prompt bir blok açar ve kimliği hem OSC 133'e
-  # (`bt_block=`) hem prompt'un hücrelerine (OSC 8) girer; terminal bloğun
-  # hangi satırda başladığını böyle ÖĞRENMEZ, her karede IZGARADAN OKUR.
-  # `__bateri_restore` bunu silmiyor: yükleyicinin izleri gidiyor, kancaların
-  # oturum durumu değil.
+  # Block counter. Every prompt opens a block and its id enters both OSC 133
+  # (`bt_block=`) and the prompt's cells (OSC 8); the terminal does not LEARN
+  # which line a block started on this way, it READS IT FROM THE GRID on every
+  # frame. `__bateri_restore` does not delete it: the loader's traces go, not
+  # the hooks' session state.
   #
-  # ALAN ADI BİZE ÖZEL, `aid` DEĞİL: şartnamede `aid` "uygulama kimliği"dir ve
-  # genellikle pid taşır, yani oturum boyunca SABİTTİR. Sayacımızı oraya
-  # yazsaydık şartnameye uyan başka bir entegrasyonun sabit değeri bizim
-  # defterimizle karışırdı.
+  # THE FIELD NAME IS OURS, NOT `aid`: in the spec `aid` is the "application id"
+  # and usually carries the pid, i.e. it is CONSTANT for the whole session. Had
+  # we written our counter there, the constant value of another integration that
+  # follows the spec would get mixed with our ledger.
   typeset -g __bateri_block=0
-  # ÇIPA: prompt'un hücrelerine binen, kimlik taşıyan bir OSC 8 bağlantısı.
-  # Terminal bloğun hangi satırda başladığını hatırlamıyor, her karede
-  # ızgaradan okuyor — bu yüzden satır kaydırmadan, pencere yeniden
-  # akıtmasından (reflow) ve geçmiş dolduktan sonra da doğru kalıyor.
+  # ANCHOR: an id-carrying OSC 8 link laid over the prompt's cells. The terminal
+  # does not remember which line a block started on, it reads it from the grid
+  # on every frame — so it stays correct after line scrolling, window reflow
+  # and once the history has filled.
   #
-  # DEĞER GÖMÜLMÜYOR, `%9v` ile prompt anında genişliyor: PS1'e eklenen parça
-  # SABİT kalınca `shell` kolunun "zaten var mı" nöbeti çalışıyor. Kimlik
-  # URI'ye yazılsaydı ek her prompt'ta değişir, nöbet tutamaz ve PS1 her
-  # seferinde yıkıcı biçimde sökülüp yeniden kurulurdu — PS1'i kendisi kuran
-  # temalarla tam da kaçtığımız yarış. Açılışı `print` ile basmak da çözüm
-  # DEĞİL: zsh prompt'u precmd koşmadan yeniden çiziyor (SIGWINCH, Ctrl-L,
-  # `zle reset-prompt`) ve o hücreler çıpasız yazılırdı.
+  # THE VALUE IS NOT EMBEDDED, it expands at prompt time with `%9v`: when the
+  # part added to PS1 stays CONSTANT the `shell` arm's "is it already there"
+  # guard works. Had the id been written into the URI the addition would change
+  # on every prompt, the guard could not hold and PS1 would be destructively
+  # taken apart and rebuilt every time — exactly the race we avoid with themes
+  # that set PS1 themselves. Printing the opening with `print` is NOT a solution
+  # either: zsh redraws the prompt without running precmd (SIGWINCH, Ctrl-L,
+  # `zle reset-prompt`) and those cells would be written without an anchor.
   #
-  # Açılış ÖNEKTİR: OSC 8 iç içe geçmiyor, yeni URI öncekini değiştiriyor —
-  # `shell` kolunda kendi prompt'unda bağlantı kullanan bir tema varsa ondan
-  # ÖNCEKİ hücreler bizim çıpamızı taşır. Temanın bağlantısı ilk karakterde
-  # başlıyorsa çıpa hiç doğmaz ve şerit çizilmez; bilinen sınır, yanlış çizim
-  # değil.
+  # The opening is a PREFIX: OSC 8 does not nest, a new URI replaces the
+  # previous one — in the `shell` arm, if a theme uses a link in its own prompt
+  # the cells BEFORE it carry our anchor. If the theme's link starts at the
+  # first character the anchor is never born and the stripe is not drawn; a
+  # known limit, not a wrong drawing.
   typeset -g __bateri_anchor=$'%{\e]8;;bateri://block/%9v\a%}'
-  # Prompt TERMİNALİN olduğunda PS1: iki sıfır genişlikli işaret ve **iki
-  # gerçek boşluk**. `>` dock'ta ve ızgarada terminalin kendisi çiziyor, ama
-  # ızgarada onu koyacak yer lazım — o yer bu iki sütun.
+  # PS1 when the prompt is the TERMINAL's: two zero-width marks and **two real
+  # spaces**. The terminal itself draws `>` in the dock and in the grid, but in
+  # the grid a place is needed to put it — that place is these two columns.
   #
-  # BOŞLUKLAR ÇİZİM HİLESİ DEĞİL, GERÇEK GENİŞLİK. Alternatifi komut satırını
-  # çizerken iki sütun sağa kaydırmaktı ve üç şeyi birden bozardı: fare
-  # eşlemesi o satırda kayardı, tam genişlikteki bir komutun son iki karakteri
-  # ekrandan taşardı ve zsh satır sarmayı yanlış hesaplardı. Prompt gerçekten
-  # iki sütunsa üçü de kendiliğinden doğru — zsh zaten prompt genişliğini
-  # biliyor.
+  # THE SPACES ARE NOT A DRAWING TRICK, THEY ARE REAL WIDTH. The alternative was
+  # to shift the command line two columns to the right while drawing it, and it
+  # would have broken three things at once: the mouse mapping would shift on that
+  # line, the last two characters of a full-width command would overflow the
+  # screen and zsh would miscalculate line wrapping. If the prompt really is two
+  # columns all three are right on their own — zsh already knows the prompt
+  # width.
   #
-  # SAYI `bt-core`'un `dock::TEXT_COL`'u ile AYNI olmak zorunda: dock'un metni
-  # de işaretten iki sütun sonra başlıyor ve ikisi ayrışırsa ızgara ile dock
-  # farklı sütundan başlar. Sabit paylaşılamıyor (biri zsh, biri Rust), o
-  # yüzden bir sınama bu satırı okuyup sayıyı bağlıyor.
+  # THE NUMBER MUST BE THE SAME AS `bt-core`'s `dock::TEXT_COL`: the dock's text
+  # also starts two columns after the mark and if the two diverge the grid and
+  # the dock start from different columns. The constant cannot be shared (one is
+  # zsh, one is Rust), so a test reads this line and ties the number.
   #
-  # SIRA: çıpa → boşluklar → `B`. `B` prompt'un SONU, yani girdinin başladığı
-  # yer; boşluklar ondan önce olmak zorunda. Çıpa en başta, çünkü açtığı
-  # bağlantıyı boşluklar da taşıyor — ve bu bir yan kazanç: boş promptta bile
-  # çıpalı bir hücre var, oysa sıfır genişlikli PS1'de hiç yoktu.
+  # ORDER: anchor → spaces → `B`. `B` is the END of the prompt, i.e. where the
+  # input starts; the spaces must come before it. The anchor is first, because
+  # the spaces also carry the link it opens — and that is a side gain: even an
+  # empty prompt has an anchored cell, whereas a zero-width PS1 had none.
   #
-  # `%{…%}` "sıfır genişlik" demek; boşluklar bilerek DIŞARIDA, sayılmalılar.
+  # `%{…%}` means "zero width"; the spaces are deliberately OUTSIDE, they must be
+  # counted.
   typeset -g __bateri_ps1=$__bateri_anchor'  '$'%{\e]133;B\a%}'
   add-zsh-hook precmd __bateri_precmd
   add-zsh-hook preexec __bateri_preexec
-  # AYNA: ZLE'nin görüntü durumu her satır çiziminde terminale gidiyor.
+  # MIRROR: ZLE's display state goes to the terminal on every line draw.
   #
-  # `zle -N zle-line-pre-redraw` DEĞİL: o bağlama tek sahiplidir ve
-  # zsh-syntax-highlighting ile zsh-autosuggestions aynı widget'ı istiyor —
-  # son yazan ötekini düşürürdü (011 ölçtü). `add-zle-hook-widget` yerine bir
-  # dağıtıcı kurup hepsini sırayla çağırıyor.
+  # NOT `zle -N zle-line-pre-redraw`: that binding has a single owner and
+  # zsh-syntax-highlighting and zsh-autosuggestions both want the same widget —
+  # the last writer would drop the other (011 measured). Instead of
+  # `add-zle-hook-widget` it sets up a dispatcher and calls them all in order.
   #
-  # NÖBET KANCANIN KENDİSİNDE: `add-zle-hook-widget` aynı widget'ı iki kez
-  # eklemiyor (`zstyle` listesinde içerme sorar), yani `PS1`'in eklerinde
-  # elle yazdığımız nöbetin karşılığı burada hazır. Doğrulandı: iki kez
-  # kaydedip `add-zle-hook-widget -L line-pre-redraw` listesi tek satır.
+  # THE GUARD IS IN THE HOOK ITSELF: `add-zle-hook-widget` does not add the same
+  # widget twice (it asks the `zstyle` list for containment), so the counterpart
+  # of the guard we wrote by hand for PS1's additions is ready here. Verified:
+  # registered twice, the `add-zle-hook-widget -L line-pre-redraw` list is a
+  # single line.
   #
-  # BİZDEN SONRA KAYIT OLAN EKLENTİ: `add-zle-hook-widget` sona ekliyor, yani
-  # bizim kancamız kullanıcının eklentilerinden SONRA koşuyor ve onların
-  # `region_highlight`/`POSTDISPLAY` katkısını görüyor. Bunun iki bilinen
-  # sınırı var ve ikisi de belirtisiz: (1) kaydını erteleyen bir eklenti
-  # (zsh-defer) bizden sonra gelir ve katkısı aynaya bir çizim GEÇ düşer;
-  # (2) `zle -N zle-line-<kanca>` diyen bir eklenti dağıtıcının kendisini ezer
-  # ve o kancaya bağlı her şey — bizimki dahil — sessizce ölür. Üç kancadan
-  # hangisi ezilirse o kol susuyor ve belirtileri ayrı: `line-pre-redraw`
-  # giderse dock donar, `line-init` giderse prompt anında boş kalır,
-  # `line-finish` giderse biten komut aynada asılı durur. `line-init` en
-  # muhtemel olanı — kullanıcı rc'lerinde imleç şekli için yaygın.
+  # A PLUGIN THAT REGISTERS AFTER US: `add-zle-hook-widget` appends, so our hook
+  # runs AFTER the user's plugins and sees their `region_highlight`/`POSTDISPLAY`
+  # contribution. This has two known limits and both are symptomless: (1) a
+  # plugin that defers its registration (zsh-defer) comes after us and its
+  # contribution reaches the mirror one draw LATE; (2) a plugin that says
+  # `zle -N zle-line-<hook>` overrides the dispatcher itself and everything tied
+  # to that hook — ours included — dies silently. Whichever of the three hooks
+  # is overridden, that arm goes quiet and the symptoms differ: if
+  # `line-pre-redraw` goes the dock freezes, if `line-init` goes the prompt
+  # stays empty for a moment, if `line-finish` goes a finished command hangs on
+  # in the mirror. `line-init` is the most likely — common in users' rc files
+  # for the cursor shape.
   #
-  # `line-init` DE BAĞLI ve bu bir süs değil: `line-pre-redraw` yalnız satır
-  # DEĞİŞİNCE koşuyor, prompt'un ilk (boş) çiziminde değil — gerçek bir
-  # oturumda gözlendi, ilk ayna ancak ilk tuş vuruşunda geliyordu. Onsuz dock
-  # prompt anında ölü kalır ve ilk harfte birden belirirdi.
+  # `line-init` IS ALSO HOOKED and this is not decoration: `line-pre-redraw` runs
+  # only when the line CHANGES, not on the prompt's first (empty) draw — observed
+  # in a real session, the first mirror came only at the first keystroke.
+  # Without it the dock would stay dead at prompt time and would appear suddenly
+  # at the first letter.
   #
-  # DOCK YOKSA HİÇ KURULMUYOR. Aynanın tek tüketicisi dock; `blocks`
-  # kademesinde kancalar kurulsaydı her tuş vuruşunda beş değişken base64'e
-  # kodlanıp akışa yazılır ve okuyan kimse olmazdı. Tuş başına ödenen bir
-  # bedelin karşılıksız kalması, ölçülmemiş olsa bile kabul edilebilir
-  # değil — hele maliyetin şekli zaten borç listesinde dururken.
+  # IF THERE IS NO DOCK IT IS NOT SET UP AT ALL. The mirror's only consumer is
+  # the dock; had the hooks been set up at the `blocks` tier, five variables
+  # would be base64-encoded and written to the stream on every keystroke with no
+  # one reading them. A cost paid per key going unanswered is unacceptable even
+  # if unmeasured — especially when the shape of the cost already sits in the
+  # debt list.
   if (( __bateri_dock )); then
     autoload -Uz add-zle-hook-widget
-    # DÜZENLEME WIDGET'I (031): terminalin tek komutu buraya gidiyor. Tanımı
-    # bir kez, bağlaması her `line-init`'te (`__bateri_dock_arm`) — ve arm
-    # aynadan ÖNCE kayıtlı, yani yetenek aynı prompt'un ilk aynasından önce
-    # telde.
+    # THE EDIT WIDGET (031): the terminal's only command goes here. The definition
+    # once, the binding on every `line-init` (`__bateri_dock_arm`) — and arm is
+    # registered BEFORE the mirror, so the capability is on the wire before the
+    # first mirror of the same prompt.
     zle -N __bateri_dock_edit
     add-zle-hook-widget line-init __bateri_dock_arm
     add-zle-hook-widget line-init __bateri_dock_redraw
@@ -310,55 +326,57 @@ __bateri_hooks() {
   fi
 }
 
-# Prompt çizilmeden önce: biten komutun kodu (`D`), sonra prompt başlangıcı (`A`).
+# Before the prompt is drawn: the finished command's code (`D`), then the prompt start (`A`).
 __bateri_precmd() {
-  # İLK satır olmak zorunda: sonraki her komut `$?`'ı ezer — `emulate` dahil,
-  # o yüzden o da bunun ALTINDA.
+  # MUST be the FIRST line: every following command overwrites `$?` — `emulate`
+  # included, so that too is BELOW this.
   local code=$?
-  # Kancanın gövdesi kullanıcının seçenekleriyle koşuyor ve aşağıdaki
-  # `psvar[9]` bir DİZİ İNDEKSİ: `KSH_ARRAYS` açıkken atama zsh'in 10.
-  # yuvasına düşerken `%9v` hâlâ 9.'yu okur, yani çıpa boş kimlik taşır ve
-  # bloklar TANISIZ kaybolur (`/code-review`, 010 phase-2; `zsh -f` ile
-  # doğrulandı). `-L` fonksiyon yereldir, dönüşte geri alınır.
+  # The hook body runs with the user's options and the `psvar[9]` below is an
+  # ARRAY INDEX: with `KSH_ARRAYS` on, the assignment lands in zsh's 10th slot
+  # while `%9v` still reads the 9th, so the anchor carries an empty id and the
+  # blocks vanish WITHOUT A DIAGNOSTIC (`/code-review`, 010 phase-2; verified
+  # with `zsh -f`). `-L` is function-local, undone on return.
   emulate -L zsh
-  # `D` BİTEN bloğu kapatıyor, yani kimliği sayaç artmadan ÖNCEKİ değer.
+  # `D` closes the FINISHED block, i.e. its id is the value BEFORE the counter increments.
   if (( __bateri_ran )); then
     __bateri_ran=0
     print -nr -- $'\e]133;D;'$code$';bt_block='$__bateri_block$'\a'
   fi
   (( __bateri_block++ ))
-  # Kimliği prompt'a taşıyan yuva; `%9v` aşağıdaki çıpada onu okuyor. İndeks
-  # iki yerde geçiyor ve birlikte değişmek zorunda.
+  # The slot that carries the id to the prompt; `%9v` reads it in the anchor
+  # below. The index appears in two places and they must change together.
   #
-  # YÜKSEK İNDEKS BİLEREK: `psvar` kullanıcının ad alanı ve alışıldık kullanım
-  # baştan birkaç yuva. Kancamız `add-zsh-hook` ile SONA eklendiği için
-  # kullanıcının precmd'lerinden sonra koşuyor — `psvar`'ı toptan kuran bir
-  # tema bizim yuvamızı ezemiyor.
+  # A HIGH INDEX ON PURPOSE: `psvar` is the user's namespace and customary use is
+  # the first few slots. Since our hook is appended LAST with `add-zsh-hook` it
+  # runs after the user's precmds — a theme that sets `psvar` wholesale cannot
+  # override our slot.
   psvar[9]=$__bateri_block
   print -nr -- $'\e]133;A;bt_block='$__bateri_block$'\a'
   __bateri_prompt_set
-  # DOCK'UN BAĞLAM SATIRI. Prompt başına, tuş başına DEĞİL: ikisi de değişmek
-  # için bir komut bekliyor (`cd`, `git checkout`) ve o komut bittiğinde
-  # buradayız.
-  # OSC 7 KALIYOR, DALIN FORK'U KALMIYOR. İkisi de bugün yalnız dock'un bağlam
-  # satırını besliyor ama bedelleri kıyaslanamaz: OSC 7 tek bir `print` ve
-  # STANDART bir dizi (yeni sekmeyi aynı dizinde açmak gibi işlerin yolu, yani
-  # dock'tan bağımsız bir geleceği var). Dal ise prompt başına bir `git`
-  # FORK'U ve tek tüketicisi dock — dock yokken ödenmesi saf israf.
+  # THE DOCK'S CONTEXT LINE. Per prompt, NOT per key: both wait for a command to
+  # change (`cd`, `git checkout`) and when that command finishes we are here.
+  # OSC 7 STAYS, THE BRANCH'S FORK DOES NOT. Both feed only the dock's context
+  # line today but their costs are not comparable: OSC 7 is a single `print` and
+  # a STANDARD sequence (the path for jobs like opening a new tab in the same
+  # directory, i.e. it has a future independent of the dock). The branch is a
+  # `git` FORK per prompt and its only consumer is the dock — paying for it
+  # while there is no dock is pure waste.
   __bateri_cwd
   (( __bateri_dock )) && __bateri_branch_print
 }
 
-# Çalışma dizinini OSC 7 ile bildirir.
+# Reports the working directory with OSC 7.
 #
-# YETKİ BÖLÜMÜ BOŞ (`file:///…`), `file://$HOST…` DEĞİL: terminal tarafındaki
-# kapı adlı her host'u yabancı sayıyor (`LOCAL_AUTHORITIES`) ve bunun sebebi
-# bir eksiklik değil, bir bağımlılık kararı — ad karşılaştırması `bt-core`'a
-# `gethostname` demek. Boş yetkiyle basınca kapı hiçbir zaman bir ad
-# uyuşmasına bağlı olmuyor: makine yeniden adlandırılsa da dizin görünür.
+# THE AUTHORITY PART IS EMPTY (`file:///…`), NOT `file://$HOST…`: the gate on the
+# terminal side counts every named host as foreign (`LOCAL_AUTHORITIES`) and the
+# reason is not a shortcoming but a dependency decision — comparing names would
+# mean `gethostname` in `bt-core`. When printed with an empty authority the gate
+# never depends on a name match: the directory stays visible even if the machine
+# is renamed.
 #
-# YÜZDE KODLAMASI ZORUNLU: `$PWD` içinde boşluk, `%`, `;` ve çok baytlı
-# karakterler olabilir; `;` OSC alanını, kontrol baytları diziyi bozardı.
+# PERCENT ENCODING IS MANDATORY: `$PWD` can contain spaces, `%`, `;` and
+# multi-byte characters; `;` would break the OSC field, control bytes would
+# break the sequence.
 __bateri_cwd() {
   emulate -L zsh
   local REPLY
@@ -366,19 +384,21 @@ __bateri_cwd() {
   print -nr -- $'\e]7;file://'$REPLY$'\a'
 }
 
-# Git dalını aynanın kanalından gönderir; depo değilse gövde BOŞ.
+# Sends the git branch through the mirror's channel; if it is not a repository
+# the body is EMPTY.
 #
-# TEK FORK, olağan hâlde: `--abbrev-ref` depo dışında da tek çağrı, detached
-# HEAD'de ikinci bir çağrı kısa SHA için. Bedel PROMPT başına ve büyük depoda
-# hissedilir — p10k'nın `gitstatusd` daemon'ı bu yüzden var; hızlandırma ayrı
-# bir iş (`plan.md` → Kapsam Dışı).
+# A SINGLE FORK in the usual case: `--abbrev-ref` is one call even outside a
+# repository, a second call on a detached HEAD for the short SHA. The cost is
+# per PROMPT and is felt in a large repository — p10k's `gitstatusd` daemon
+# exists for this reason; speeding it up is a separate job (`plan.md` → Kapsam
+# Dışı).
 #
-# `command`: kullanıcının `git` alias'ı ya da fonksiyonu araya girmesin.
+# `command`: so that the user's `git` alias or function does not interfere.
 __bateri_branch_print() {
   emulate -L zsh
   local REPLY ref
   ref=$(command git rev-parse --abbrev-ref HEAD 2>/dev/null)
-  # `HEAD` bir dal adı değil, detached HEAD'in cevabı: yerine kısa SHA.
+  # `HEAD` is not a branch name, it is the answer of a detached HEAD: the short SHA instead.
   if [[ $ref == HEAD ]]; then
     ref=$(command git rev-parse --short HEAD 2>/dev/null)
   fi
@@ -386,19 +406,20 @@ __bateri_branch_print() {
   print -nr -- $'\e]8133;b;'$REPLY$'\a'
 }
 
-# Prompt'u bu oturumun sahibine göre kurar; çağıranı `precmd`.
+# Sets up the prompt according to the owner of this session; its caller is `precmd`.
 #
-# İKİ KOL, tek fark PS1'in SAHİBİ:
+# TWO ARMS, the only difference is the OWNER of PS1:
 #
-# - `terminal` (varsayılan): PS1 bütünüyle BİZİM ve görünür genişliği sıfır.
-#   Kullanıcının prompt'u çizilmiyor; yerine dock'un `>` işareti geçiyor.
-#   `RPS1`/`RPROMPT` de boşalıyor ve bu bir ayrıntı değil ZORUNLU: sağ prompt
-#   PS1'den bağımsız yaşıyor, yalnız PS1'i sıfırlamak ekranın sağında asılı
-#   bir tema parçası bırakırdı.
-# - dock YOKSA (`integration = "blocks"`): kullanıcının prompt'u yerinde, biz
-#   yalnız işaretleri EKLİYORUZ (010'un yolu). Bir dönem "prompt kullanıcının
-#   ama dock yine de açık" diye üçüncü bir hâl vardı ve ekranda İKİ PROMPT
-#   üretiyordu; tek karara indirildi (012 phase-10).
+# - `terminal` (default): PS1 is entirely OURS and its visible width is zero.
+#   The user's prompt is not drawn; the dock's `>` mark takes its place.
+#   `RPS1`/`RPROMPT` are emptied too and this is not a detail but MANDATORY: the
+#   right prompt lives independently of PS1, resetting only PS1 would leave a
+#   theme fragment hanging on the right of the screen.
+# - if there is NO dock (`integration = "blocks"`): the user's prompt stays in
+#   place, we only ADD the marks (010's path). At one time there was a third
+#   state, "the prompt is the user's but the dock is open anyway", and it
+#   produced TWO PROMPTS on screen; it was reduced to a single decision
+#   (012 phase-10).
 __bateri_prompt_set() {
   if (( __bateri_dock )); then
     PS1=$__bateri_ps1
@@ -406,48 +427,51 @@ __bateri_prompt_set() {
     RPROMPT=
     return 0
   fi
-  # Nöbet İÇERME sorar, konum değil (`/code-review`, 010 phase-2): `B` ekinin
-  # nöbetiyle aynı biçim. Önek testi PS1'e BAŞKASI dokunduğunda idempotan
-  # değil — her precmd'de PS1'i süsleyen bir tema (virtualenv, git bilgisi)
-  # ekimizi başa taşımaz, biz de her turda bir yenisini eklerdik ve PS1
-  # oturum boyunca sınırsız büyürdü.
+  # The guard asks for CONTAINMENT, not position (`/code-review`, 010 phase-2):
+  # the same form as the `B` addition's guard. A prefix test is not idempotent
+  # when SOMEONE ELSE touches PS1 — a theme that decorates PS1 on every precmd
+  # (virtualenv, git info) does not move our addition to the front, so we would
+  # add a new one every round and PS1 would grow without bound over the session.
   #
-  # Sağ taraf TIRNAKLI: `[[ ]]` içinde tırnaksız sağ işlenen glob desenidir.
+  # The right-hand side is QUOTED: inside `[[ ]]` an unquoted right operand is a
+  # glob pattern.
   [[ $PS1 == *"$__bateri_anchor"* ]] || PS1=$__bateri_anchor$PS1
-  # `B` prompt'un SONU, yani bir kanca değil prompt'un kendisi. Her prompt'ta
-  # yeniden denenmesinin sebebi temalar: PS1'i her precmd'de yeniden kuran bir
-  # tema bizim ekimizi siler. Koşul da onun için — aynı ek iki kez girmesin.
+  # `B` is the END of the prompt, i.e. not a hook but the prompt itself. The
+  # reason it is retried on every prompt is themes: a theme that rebuilds PS1 on
+  # every precmd deletes our addition. The condition is for that too — so the
+  # same addition does not go in twice.
   [[ $PS1 == *$'\e]133;B\a'* ]] || PS1=$PS1$'%{\e]133;B\a%}'
 }
 
-# Temanın geri yazdığı prompt'u geri alır; çağıranı aynanın ZLE kancası.
+# Takes back the prompt the theme wrote back; its caller is the mirror's ZLE hook.
 #
-# NEDEN PRECMD YETMİYOR: p10k ve starship PS1'i `precmd`'den SONRA, kendi ZLE
-# kancalarından yeniden kuruyor ve `zle reset-prompt`'luyor — precmd'de
-# yazdığımız değer ekrandan siliniyor. Aynı yerden dayatılmazsa tema kazanır.
+# WHY PRECMD IS NOT ENOUGH: p10k and starship rebuild PS1 AFTER `precmd`, from
+# their own ZLE hooks, and `zle reset-prompt` it — the value we wrote in precmd
+# is erased from the screen. If it is not imposed from the same place the theme
+# wins.
 #
-# NEDEN TEK BAŞINA DA YETMİYOR — ÖLÇÜLDÜ, seçilmedi: ZLE kancasından atanan
-# PS1 kendiliğinden HİÇBİR ŞEY yapmıyor. Prompt `line-init` koşmadan önce
-# basılıyor ve zsh genişlettiği hâli tutuyor; `zsh -i` PTY probe'unda kancadan
-# atanan değer ekranda hiç görünmedi. Etkili olmasının tek yolu
-# `zle reset-prompt`. Yani ikisi BİRLİKTE gerekiyor: precmd ilk basımı
-# doğru yapıyor, bu kanca temanın geri yazdığını geri alıyor.
+# WHY IT IS NOT ENOUGH ALONE EITHER — MEASURED, not chosen: a PS1 assigned from
+# a ZLE hook does NOTHING by itself. The prompt is printed before `line-init`
+# runs and zsh keeps the expanded form; in a `zsh -i` PTY probe the value
+# assigned from the hook never appeared on screen. The only way for it to take
+# effect is `zle reset-prompt`. So the two are needed TOGETHER: precmd gets the
+# first print right, this hook takes back what the theme wrote back.
 #
-# PRECMD'İ ATMANIN İKİ BEDELİ ÖLÇÜLDÜ ve ikisi de precmd'yi hak ettiriyor:
-# (1) yalnız `precmd`'den kuran bir temada (starship) prompt ilk basımda
-# zaten doğru olur ve nöbet hiç sıfırlamaz — precmd olmasaydı HER prompt bir
-# `reset-prompt` yeniden çizimi öderdi; (2) `zle -N zle-line-init` diyen bir
-# eklenti dağıtıcıyı ezerse (bu dosyanın en muhtemel saydığı sınır) bu kanca
-# büsbütün susar ve prompt geri gelirdi. Tersi de doğru: yalnız precmd
-# kalsaydı p10k prompt'u geri yazardı.
+# TWO COSTS OF DROPPING PRECMD WERE MEASURED and both justify precmd:
+# (1) with a theme that sets it only from `precmd` (starship) the prompt is
+# already right on first print and the guard never resets — without precmd EVERY
+# prompt would pay a `reset-prompt` redraw; (2) if a plugin that says
+# `zle -N zle-line-init` overrides the dispatcher (the limit this file counts as
+# most likely) this hook goes completely silent and the prompt would come back.
+# The reverse is also true: had only precmd remained, p10k would write the
+# prompt back.
 #
-# NÖBET PING-PONG'U KESİYOR: `reset-prompt` yeni bir çizim doğuruyor, o çizim
-# de `line-pre-redraw`'ı yeniden çağırıyor. Koşulsuz bir sıfırlama kendi
-# kendini besleyen bir döngü olurdu; nöbetle prompt başına TEK sıfırlama
-# ölçüldü.
+# THE GUARD CUTS THE PING-PONG: `reset-prompt` spawns a new draw and that draw
+# calls `line-pre-redraw` again. An unconditional reset would be a self-feeding
+# loop; with the guard a SINGLE reset per prompt was measured.
 #
-# DOCK'SUZ KOLDA SUSUYOR: prompt'unu geri isteyen kullanıcının temasıyla
-# kavga etmenin anlamı yok.
+# IT GOES SILENT IN THE DOCK-LESS ARM: there is no point fighting the theme of a
+# user who wants their prompt back.
 __bateri_prompt_guard() {
   (( __bateri_dock )) || return 0
   [[ $PS1 == "$__bateri_ps1" && -z $RPS1 && -z $RPROMPT ]] && return 0
@@ -457,113 +481,115 @@ __bateri_prompt_guard() {
   zle reset-prompt
 }
 
-# Komut koşmadan hemen önce: çıpa kapanıyor, çıktı başlıyor (`C`).
+# Right before a command runs: the anchor closes, output begins (`C`).
 __bateri_preexec() {
   __bateri_ran=1
-  # ÇIPANIN KAPANIŞI BURADA, PROMPT'UN SONUNDA DEĞİL — ve bu, sıfır genişlikli
-  # PS1'in zorunlu eşlikçisi: PS1 artık hiçbir hücre yazmıyor, yani kapanış
-  # PS1'in sonunda kalsaydı ÇIPAYI TAŞIYAN HÜCRE HİÇ DOĞMAZDI. Blok şeridi de
-  # giriş satırının bastırılması da o hücreden türüyor (`Session::frame`),
-  # yani ikisi birden sessizce ölürdü.
+  # THE ANCHOR CLOSES HERE, NOT AT THE END OF THE PROMPT — and this is the
+  # mandatory companion of the zero-width PS1: PS1 no longer writes any cell, so
+  # had the closing stayed at the end of PS1 THE CELL CARRYING THE ANCHOR WOULD
+  # NEVER BE BORN. Both the block stripe and the suppression of the input line
+  # derive from that cell (`Session::frame`), so both would die silently.
   #
-  # Bağlantı `Input` boyunca AÇIK kalıyor: ZLE'nin yazdığı her hücre kimliği
-  # taşıyor. Komutun ÇIKTISI taşımıyor, çünkü kapanış çıktıdan hemen önce —
-  # işaret komutun kendi satırında, çıktısında değil.
+  # The link stays OPEN throughout `Input`: every cell ZLE writes carries the id.
+  # The command's OUTPUT does not, because the closing is right before the output
+  # — the mark is on the command's own line, not its output.
   #
-  # KOŞULSUZ, iki kolda da: `shell` kolunda da giriş satırı bastırılıyor
-  # (dock kapanmıyor) ve o da aynı çıpaya bakıyor.
+  # UNCONDITIONAL, in both arms: in the `shell` arm too the input line is
+  # suppressed (the dock does not close) and it looks at the same anchor.
   #
-  # BİLİNEN SINIR: `preexec` koşmayan yollarda (Ctrl-C, boş satıra Enter)
-  # bağlantı bir sonraki prompt'un PS1 genişlemesine kadar açık kalıyor.
-  # Ölçüldü: o pencerede yalnız kullanıcının kendi `precmd` kancalarının
-  # bastığı hücreler var ve onlar ÖNCEKİ bloğun kimliğini taşıyor — kancamız
-  # `add-zsh-hook` ile sona eklendiği için onlardan sonra koşuyoruz, yani
-  # daha erken kapatmanın yolu yok. Yön güvenli: fazladan bir şerit işareti
-  # çizilir, bastırma ise etkilenmez (o bloğun kimliği artık yazılan blok
-  # değil).
+  # A KNOWN LIMIT: on paths where `preexec` does not run (Ctrl-C, Enter on an
+  # empty line) the link stays open until the next prompt's PS1 expansion.
+  # Measured: in that window there are only the cells printed by the user's own
+  # `precmd` hooks and they carry the PREVIOUS block's id — since our hook is
+  # appended with `add-zsh-hook` we run after them, so there is no way to close
+  # earlier. The direction is safe: an extra stripe mark gets drawn, suppression
+  # is unaffected (that block's id is no longer the block being written).
   print -nr -- $'\e]8;;\a'
   print -nr -- $'\e]133;C\a'
 }
 
-# ── ZLE'nin görüntü aynası ───────────────────────────────────────────────
+# ── ZLE's display mirror ─────────────────────────────────────────────────
 #
-# TEL BİÇİMİ (çözücüsü `bt-core`'un `parse_dock`'u; ikisi birlikte değişir):
+# WIRE FORMAT (its decoder is `bt-core`'s `parse_dock`; the two change together):
 #
 #   ESC ] 8133 ; u ; CURSOR ; b64(PREDISPLAY) ; b64(BUFFER) ;
 #                             b64(POSTDISPLAY) ; b64(region_highlight) ;
 #                             b64(KEYMAP) ; b64(PREBUFFER) BEL
-#   ESC ] 8133 ; e BEL   satır bitti (`line-finish`)
-#   ESC ] 8133 ; o BEL   görüntü aynaya sığmıyor (aşağıdaki kapı)
-#   ESC ] 8133 ; b ; b64(dal) BEL   bağlam satırının dalı (`precmd`)
-#   ESC ] 8133 ; w BEL   bu prompt'ta düzenleme widget'ı bağlı (`line-init`)
+#   ESC ] 8133 ; e BEL   line finished (`line-finish`)
+#   ESC ] 8133 ; o BEL   the display does not fit the mirror (the gate below)
+#   ESC ] 8133 ; b ; b64(branch) BEL   the context line's branch (`precmd`)
+#   ESC ] 8133 ; w BEL   the edit widget is bound in this prompt (`line-init`)
 #
-# TERS YÖN — TERMİNALDEN KABUĞA, telin iki dizisi (031, 032):
+# REVERSE DIRECTION — FROM THE TERMINAL TO THE SHELL, the wire's two sequences (031, 032):
 #
 #   ESC [ 8133 ~ d ; S ; E ; L BEL
-#   ESC [ 8133 ~ r BEL   yalnız aynala (032): satır sonlu yapıştırmanın
-#                        arkasında; `bracketed-paste-magic` yükü `zle -U` ile
-#                        kuyruğa basıp redisplay'i atlattığı için ayna bir tuş
-#                        bayat kalıyordu. Widget'ın `d` olmayan her yükteki
-#                        davranışı zaten bu: `BUFFER`'a dokunmadan aynayı basar.
+#   ESC [ 8133 ~ r BEL   only mirror (032): behind a paste with line breaks;
+#                        since `bracketed-paste-magic` pushes the payload onto the
+#                        queue with `zle -U` and skips the redisplay, the mirror
+#                        stayed stale for a key. The widget's behavior on every
+#                        payload that is not `d` is already this: it prints the
+#                        mirror without touching `BUFFER`.
 #
-# `BUFFER`'ın `[S, E)` karakter aralığını sil, caret'i `S`'e koy; `S == E`
-# yalnız caret'i taşır. `L` terminalin gördüğü `${#BUFFER}`: tutmazsa
-# terminal bayat bir aynaya bakıyordu ve widget HİÇBİR ŞEY yapmıyor. Dizi
-# kullanıcının girdisiyle aynı PTY'den geliyor ve ZLE onu bir tuş gibi
-# okuyor; `CSI 8133 ~` hiçbir klavyenin üretmediği bir tuş, numarası aynanın
-# numarası. Metin tele HİÇ girmiyor: seçimin yerine yazılan harf `d`'den
-# sonra olağan yoldan geliyor, yani kabukta base64 çözücü yok ve harf yine
-# `self-insert`'ten geçiyor. Terminal diziyi yalnız bu prompt'ta `w`'yi
-# gördüyse gönderiyor — bağlamasız bir kabukta sondaki BEL `send-break`
-# olurdu (ölçüldü, 031 discussion → Muhakeme).
+# Delete the `[S, E)` character range of `BUFFER`, put the caret at `S`; `S == E`
+# only moves the caret. `L` is the `${#BUFFER}` the terminal saw: if it does not
+# match the terminal was looking at a stale mirror and the widget does NOTHING.
+# The sequence comes from the same PTY as the user's input and ZLE reads it like
+# a key; `CSI 8133 ~` is a key no keyboard produces, its number is the mirror's
+# number. The text NEVER enters the wire: the letter typed in place of the
+# selection comes after `d` by the usual path, i.e. there is no base64 decoder
+# in the shell and the letter still passes through `self-insert`. The terminal
+# sends the sequence only if it has seen `w` in this prompt — in a shell without
+# the binding the trailing BEL would be `send-break` (measured, 031 discussion →
+# Muhakeme).
 #
-# KEYMAP ALTINCI GÖVDE ve taşıdığı şey bir POLİTİKA DEĞİL, ZLE'nin durumu:
-# hangi keymap'lerin "yazılan tuş metne dönüşür" anlamına geldiğine karar veren
-# taraf terminal (`bt-core`, `insert_keymap`). Adı olduğu gibi gönderiyoruz,
-# çünkü `bindkey -N` ile kullanıcı kendi keymap'ini yaratabiliyor ve bu uçta
-# onu sınıflandıracak bilgi yok. base64, çünkü o ad `;` taşıyabilir.
+# KEYMAP IS THE SIXTH BODY and what it carries is not a POLICY but ZLE's state:
+# the side that decides which keymaps mean "a typed key turns into text" is the
+# terminal (`bt-core`, `insert_keymap`). We send the name as is, because the
+# user can create their own keymap with `bindkey -N` and there is no information
+# at this end to classify it. base64, because that name may contain `;`.
 #
-# PREBUFFER YEDİNCİ GÖVDE (032): çok satırlı bir komutun ZLE'nin artık
-# düzenlemediği önceki satırları (`for`, heredoc, `\`-devam). Sona eklendi,
-# çünkü tel yalnız sona büyüyor — çözücü onu isteğe bağlı okuyor, yani eski
-# betikle koşan pencere de çözülüyor. Görüntünün parçası, yani taşma kapısının
-# toplamına giriyor.
+# PREBUFFER IS THE SEVENTH BODY (032): the earlier lines of a multi-line command
+# that ZLE no longer edits (`for`, heredoc, `\`-continuation). Appended at the
+# end, because the wire only grows at the end — the decoder reads it as optional,
+# so a window running with an old script is decoded too. It is part of the
+# display, i.e. it enters the overflow gate's total.
 #
-# GÖVDELER base64: kullanıcının yazdığı metnin içinde `;`, `ESC` ve C0
-# baytları olabilir ve üçü de dizinin çerçevesini bozar. base64'ün alfabesinde
-# üçünden hiçbiri yok.
+# THE BODIES are base64: the text the user typed can contain `;`, `ESC` and C0
+# bytes and all three break the sequence's framing. None of the three is in
+# base64's alphabet.
 
-# base64 alfabesi, indeks sırasında.
+# The base64 alphabet, in index order.
 typeset -ga __bateri_b64_table
 __bateri_b64_table=( {A..Z} {a..z} {0..9} + / )
 
-# Aynanın taşıyacağı en uzun görüntü, KARAKTER.
+# The longest display the mirror will carry, in CHARACTERS.
 #
-# Sayı türetildi, seçilmedi — ve terminal tarafındaki `DOCK_PAYLOAD_LIMIT`
-# (64 KiB) ile AYNI bütçenin öteki ucu: o sınır "4096 karakter × en kötü 4
-# bayt UTF-8 × base64'ün 4/3 şişmesi" aritmetiğinden çıkmıştı, bu onun
-# karakter cinsinden hâli.
+# The number was derived, not chosen — and it is the other end of the SAME
+# budget as the terminal side's `DOCK_PAYLOAD_LIMIT` (64 KiB): that limit came
+# out of the arithmetic "4096 characters × worst-case 4 bytes of UTF-8 × base64's
+# 4/3 inflation", this is its form in characters.
 #
-# NEDEN BU UÇTA DA BİR KAPI VAR: kodlama saf zsh ve maliyeti girdinin
-# uzunluğuyla doğrusal — üstelik her TUŞ VURUŞUNDA ödeniyor. Kapı olmasaydı
-# yapıştırılmış bir blok terminalin zaten reddedeceği bir yükü kodlamak için
-# harcanır, yani bedeli öder karşılığını alamazdık. Aşımda ayna "gösteremiyorum"
-# diyor ve giriş satırı ızgarada kalıyor; kullanıcı yazdığını yine görüyor.
+# WHY THIS END ALSO HAS A GATE: encoding is pure zsh and its cost is linear in
+# the input length — and it is paid on EVERY KEYSTROKE. Without the gate a pasted
+# block would be spent on encoding a payload the terminal will reject anyway,
+# i.e. we would pay the cost and get nothing back. On overflow the mirror says "I
+# cannot show it" and the input line stays in the grid; the user still sees what
+# they typed.
 typeset -g __bateri_dock_limit=4096
 
-# `$1`'i base64'e çevirir; sonuç `REPLY`'de.
+# Converts `$1` to base64; the result is in `REPLY`.
 #
-# FORK YOK: kodlama tuş başına koşuyor ve bir `base64` süreci doğurmak bu
-# yolun en pahalı kalemi olurdu. `nomultibyte` her elemanı bir BAYT yapıyor —
-# base64 baytların kodlaması, karakterlerin değil.
+# NO FORK: encoding runs per keystroke and spawning a `base64` process would be
+# the most expensive item of this path. `nomultibyte` makes every element a
+# BYTE — base64 is an encoding of bytes, not of characters.
 #
-# BAYT DEĞERİ ÖNCE SKALERE ALINIYOR (`x=$bytes[i]`, sonra `#x`), doğrudan
-# `##${bytes[i]}` ile DEĞİL: aritmetiğin `##` biçimi kaçış dizisi yorumluyor
-# ve ters bölü baytı (`\`) 92 yerine 32 okunuyordu — komut satırında sık geçen
-# bir bayt için sessiz bir bozulma.
+# THE BYTE VALUE IS TAKEN INTO A SCALAR FIRST (`x=$bytes[i]`, then `#x`), NOT
+# directly with `##${bytes[i]}`: the arithmetic `##` form interprets escape
+# sequences and the backslash byte (`\`) was read as 32 instead of 92 — a silent
+# corruption for a byte that is common on command lines.
 #
-# DOLGU BASILMIYOR: çözücü dolgulu ve dolgusuz gövdeyi birlikte okuyor
-# (`decode_base64`'ün doc'u) ve basmamak tuş başına birkaç bayt eksiltiyor.
+# PADDING IS NOT PRINTED: the decoder reads padded and unpadded bodies alike
+# (`decode_base64`'s doc) and not printing saves a few bytes per keystroke.
 __bateri_b64() {
   emulate -L zsh
   setopt nomultibyte
@@ -593,20 +619,22 @@ __bateri_b64() {
   REPLY=$out
 }
 
-# Onaltılık haneler, yüzde kodlamasının iki basamağı için.
+# Hexadecimal digits, for the two digits of percent encoding.
 typeset -ga __bateri_hex
 __bateri_hex=( 0 1 2 3 4 5 6 7 8 9 A B C D E F )
 
-# `$1`'i yüzde kodlar (RFC 3986'nın "unreserved" kümesi + `/`); sonuç `REPLY`'de.
+# Percent-encodes `$1` (RFC 3986's "unreserved" set + `/`); the result is in `REPLY`.
 #
-# FORK YOK, `__bateri_b64` ile aynı gerekçe ve aynı iki incelik: `nomultibyte`
-# her elemanı bir BAYT yapıyor (yüzde kodlaması baytların, karakterlerin
-# değil) ve bayt değeri önce skalere alınıyor (`x=…`, sonra `#x`) — aritmetiğin
-# `##` biçimi kaçış dizisi yorumluyor ve ters bölüyü 92 yerine 32 okuyor.
+# NO FORK, the same reason as `__bateri_b64` and the same two subtleties:
+# `nomultibyte` makes every element a BYTE (percent encoding is of bytes, not
+# characters) and the byte value is first taken into a scalar (`x=…`, then
+# `#x`) — the arithmetic `##` form interprets escape sequences and reads the
+# backslash as 32 instead of 92.
 #
-# `/` KODLANMIYOR: yol ayracı ve kodlanmış bir `/` yolu tek bir bileşen gibi
-# gösterirdi. Çözen taraf ikisini de okuyor, yani bu bir zorunluk değil
-# okunabilirlik: kullanıcının yolu bize de insan gözüyle bakılabilir kalıyor.
+# `/` IS NOT ENCODED: it is the path separator and an encoded `/` would make the
+# path look like a single component. The decoding side reads both, so this is
+# not a necessity but readability: the user's path stays human-readable to us
+# too.
 __bateri_percent() {
   emulate -L zsh
   setopt nomultibyte
@@ -627,38 +655,38 @@ __bateri_percent() {
   REPLY=$out
 }
 
-# ZLE'nin görüntü durumunu aynaya basar; kancası `line-init` ve
-# `line-pre-redraw` (ilki prompt'un ilk çizimi, ikincisi her değişiklik).
+# Prints ZLE's display state to the mirror; its hooks are `line-init` and
+# `line-pre-redraw` (the first is the prompt's first draw, the second every change).
 #
-# BEŞ DEĞİŞKEN, biri eksik olsa ayna kullanıcının gördüğünden az gösterirdi:
-# `POSTDISPLAY` autosuggestions'ın önerisi, `region_highlight` de syntax
-# highlighting'in rengi.
+# FIVE VARIABLES, if one were missing the mirror would show less than the user
+# sees: `POSTDISPLAY` is autosuggestions' suggestion, `region_highlight` is
+# syntax highlighting's color.
 #
-# `emulate -L zsh` ZORUNLU: gövde kullanıcının seçenekleriyle koşuyor ve
-# aşağısı hem dizi indeksine (`KSH_ARRAYS`) hem de çok baytlı `${#...}`
-# sayımına bağlı. `-L` fonksiyon yereldir, dönüşte geri alınır.
+# `emulate -L zsh` IS MANDATORY: the body runs with the user's options and what
+# follows depends both on array indexing (`KSH_ARRAYS`) and on the multibyte
+# `${#...}` count. `-L` is function-local, undone on return.
 #
-# `REPLY` YEREL: kullanıcının ad alanında yaşayan bir değişken ve kancamız
-# onun satır düzenlemesinin ortasında koşuyor.
+# `REPLY` IS LOCAL: it is a variable that lives in the user's namespace and our
+# hook runs in the middle of their line editing.
 __bateri_dock_redraw() {
   emulate -L zsh
-  # PROMPT'UN DAYATILMASI, aynadan ÖNCE ve aynı kancadan: gerekçesi
-  # `__bateri_prompt_guard`'ın başlığında. Aynanın kendi yük kapısının
-  # üstünde, çünkü prompt'un sahipliği yükün uzunluğuna bağlı değil — taşan
-  # bir satırda ayna susarken temanın prompt'u geri gelseydi belirti de
-  # açıklanamaz olurdu.
+  # IMPOSING THE PROMPT, BEFORE the mirror and from the same hook: the rationale
+  # is in `__bateri_prompt_guard`'s header. Above the mirror's own payload gate,
+  # because the prompt's ownership does not depend on the payload's length — had
+  # the theme's prompt come back while the mirror stays silent on an overflowing
+  # line the symptom would be unexplainable too.
   __bateri_prompt_guard
-  # Kayıtlar satır sonuyla ayrılıyor; çözücü gövdeyi `lines()` ile okuyor.
-  # Birleştirme kapıdan ÖNCE, çünkü dördüncü gövde de kapıya tabi.
+  # Records are separated by line breaks; the decoder reads the body with `lines()`.
+  # The join is BEFORE the gate, because the fourth body is also subject to the gate.
   local REPLY entries=${(F)region_highlight} pre buf post highlights keymap prebuf
-  # Kapı KODLAMADAN ÖNCE, çünkü bütün anlamı kodlamadan kaçınmak — ve BEŞ
-  # gövdeyi birden ölçüyor (`PREBUFFER` 032'de toplama girdi: görüntünün
-  # parçası ve yapıştırılmış bir döngünün önceki satırları sınırı tek başına
-  # aşabilir). `region_highlight` ayrı sayılıyor, toplama
-  # girmiyor: sözdizimi vurgusu jeton başına bir kayıt bırakıyor, yani uzun
-  # bir satırda metnin kendisiyle aynı mertebede ve **kendi başına** sınırı
-  # aşabilir (`DOCK_PAYLOAD_LIMIT`'in türetmesi de onu metnin yanında ayrı bir
-  # terim sayıyor).
+  # The gate is BEFORE ENCODING, because its whole meaning is avoiding encoding —
+  # and it measures all FIVE bodies at once (`PREBUFFER` entered the total in
+  # 032: it is part of the display and the earlier lines of a pasted loop can
+  # exceed the limit by themselves). `region_highlight` is counted separately, it
+  # does not enter the total: syntax highlighting leaves one record per token, so
+  # on a long line it is of the same order as the text itself and can exceed the
+  # limit **on its own** (`DOCK_PAYLOAD_LIMIT`'s derivation also counts it as a
+  # separate term beside the text).
   if (( ${#PREBUFFER} + ${#PREDISPLAY} + ${#BUFFER} + ${#POSTDISPLAY} > __bateri_dock_limit
         || ${#entries} > __bateri_dock_limit )); then
     print -nr -- $'\e]8133;o\a'
@@ -669,56 +697,57 @@ __bateri_dock_redraw() {
   __bateri_b64 "$POSTDISPLAY"; post=$REPLY
   __bateri_b64 "$entries"; highlights=$REPLY
   __bateri_b64 "$PREBUFFER"; prebuf=$REPLY
-  # KEYMAP kapının DIŞINDA sayılıyor: en uzun keymap adı bir avuç bayt ve onu
-  # yük bütçesine katmak, sınırı taşan bir satırda aynanın susmasına ikinci bir
-  # gerekçe eklerdi.
+  # KEYMAP is counted OUTSIDE the gate: the longest keymap name is a handful of
+  # bytes and adding it to the payload budget would add a second reason for the
+  # mirror to go silent on a line that overflows the limit.
   __bateri_b64 "$KEYMAP"; keymap=$REPLY
-  # `$CURSOR` KARAKTER ofsetidir ve teli de karakter istiyor — `BUFFER`'ın
-  # başından sayılan hâli olduğu gibi gidiyor, `PREDISPLAY`'e kaydırmayı
-  # sınırın öteki tarafı yapıyor (`DockState::cursor`'ın doc'u).
+  # `$CURSOR` IS A CHARACTER offset and the wire wants characters too — the form
+  # counted from the start of `BUFFER` goes as is, the shift by `PREDISPLAY` is
+  # made the other side of the boundary's job (`DockState::cursor`'s doc).
   print -nr -- $'\e]8133;u;'$CURSOR';'$pre';'$buf';'$post';'$highlights';'$keymap';'$prebuf$'\a'
 }
 
-# `line-finish`: ZLE satırı bıraktı, ayna kapanıyor.
+# `line-finish`: ZLE let go of the line, the mirror closes.
 #
-# OLMASAYDI son `BUFFER` asılı kalırdı: Enter'dan sonra dock koşan komutun
-# satırını göstermeye devam ederdi.
+# WITHOUT IT the last `BUFFER` would hang on: after Enter the dock would keep
+# showing the running command's line.
 __bateri_dock_finish() {
   emulate -L zsh
   print -nr -- $'\e]8133;e\a'
 }
 
-# Düzenleme komutunun yükünü beklemenin üst sınırı, SANİYE.
+# The upper limit of waiting for the edit command's payload, in SECONDS.
 #
-# Terminal diziyi tek yazımda gönderiyor, yani yük widget koştuğunda zaten
-# okunmayı bekliyor ve süre hiç harcanmıyor. Sınır yalnız BOZUK bir telde —
-# BEL'i gelmeyen bir dizide — ZLE'nin ne kadar donacağını belirliyor:
-# kullanıcının fark edeceği ama kabuğu kilitlemeyecek bir an. Ölçülmüş bir
-# sayı değil, bir his eşiği (emsal `HANDOVER_HOLD`).
+# The terminal sends the sequence in a single write, so by the time the widget
+# runs the payload is already waiting to be read and no time is spent. The limit
+# only determines, on a CORRUPT wire — a sequence whose BEL never arrives — how
+# long ZLE will freeze: a moment the user will notice but that will not lock the
+# shell. Not a measured number, a feel threshold (precedent `HANDOVER_HOLD`).
 typeset -g __bateri_dock_edit_wait=0.5
 
-# Terminalin düzenleme komutu (`CSI 8133 ~ d;S;E;L BEL`, tel başlığı yukarıda).
+# The terminal's edit command (`CSI 8133 ~ d;S;E;L BEL`, wire header above).
 #
-# HER KOŞULDA SESSİZ: bozuk yük, tutmayan `L` ya da aralık dışı sayı
-# `BUFFER`'a dokunmadan dönüyor. Yanlışın yönü "düzenleme olmadı" — satırı
-# bozmaktansa kullanıcının tuşu boşa gitsin.
+# SILENT IN EVERY CASE: a corrupt payload, an `L` that does not match or an
+# out-of-range number returns without touching `BUFFER`. The wrong direction is
+# "no edit happened" — let the user's key go to waste rather than corrupt the
+# line.
 #
-# `S == E` BUFFER'A YAZMIYOR, yalnız `CURSOR`: atama boş bile olsa bir geri
-# alma kaydı doğururdu. Silme ise ZLE'nin tek geri alma birimi (ölçüldü,
+# `S == E` DOES NOT WRITE TO BUFFER, only `CURSOR`: even an empty assignment
+# would spawn an undo record. Deletion is ZLE's single undo unit (measured,
 # `context.md` → Ölçüm).
 #
-# AYNA WIDGET'IN SONUNDA AÇIKÇA BASILIYOR: `line-pre-redraw` yalnız görüntü
-# değişince koşuyor ve caret'i zaten olduğu yere koyan (ya da `L` tutmadığı
-# için hiçbir şey yapmayan) bir komut hiç ayna doğurmazdı. Terminal her
-# girdisine bir cevap bekliyor (`DockState::answers`); cevapsız kalan komut
-# düzenleme kapısını bir sonraki tuşa kadar kapalı bırakırdı.
+# THE MIRROR IS EXPLICITLY PRINTED AT THE END OF THE WIDGET: `line-pre-redraw`
+# runs only when the display changes and a command that puts the caret where it
+# already was (or does nothing because `L` did not match) would never spawn a
+# mirror. The terminal expects an answer to every input (`DockState::answers`); a
+# command left unanswered would keep the edit gate closed until the next key.
 __bateri_dock_edit() {
   emulate -L zsh
   local payload= ch=
   while read -k 1 -t $__bateri_dock_edit_wait ch; do
     [[ $ch == $'\a' ]] && break
     payload+=$ch
-    # Meşru yük dört sayı: sınırsız okumak bozuk bir telde satırı yutardı.
+    # A legitimate payload is four numbers: reading without limit would swallow the line on a corrupt wire.
     (( ${#payload} > 64 )) && break
   done
   if [[ $ch == $'\a' && $payload == d\;<->\;<->\;<-> ]]; then
@@ -735,21 +764,21 @@ __bateri_dock_edit() {
   __bateri_dock_redraw
 }
 
-# `line-init`: widget'ı bağla ve yeteneği bildir.
+# `line-init`: bind the widget and report the capability.
 #
-# HER PROMPT'TA YENİDEN, çünkü bağlama kalıcı değil: `bindkey -v`/`-e` yeni
-# bir keymap'i `main`'e bağlıyor, ertelenmiş bir eklenti keymap'i
-# sıfırlayabiliyor ve `bindkey -A mymap main` diyen kullanıcının keymap'i
-# bizim kurulumumuzdan sonra doğuyor. Üçü de bir sonraki prompt'ta
-# onarılıyor. Bedeli üç yerleşik — fork yok.
+# ON EVERY PROMPT AGAIN, because the binding is not persistent: `bindkey -v`/`-e`
+# binds a new keymap to `main`, a deferred plugin can reset the keymap, and the
+# keymap of a user who says `bindkey -A mymap main` is born after our setup.
+# All three are repaired at the next prompt. The cost is three builtins — no
+# fork.
 #
-# `main` DAHİL: kullanıcının kendi keymap'ini `main`'e bağlaması yaygın ve
-# `emacs`/`viins`'e bağlamak onu kapsamazdı. Terminal diziyi yalnız ekleme
-# keymap'inde gönderiyor (`INSERT_KEYMAPS`), yani `vicmd` bilerek dışarıda.
+# `main` INCLUDED: it is common for users to bind their own keymap to `main` and
+# binding to `emacs`/`viins` would not cover it. The terminal sends the sequence
+# only in the insert keymap (`INSERT_KEYMAPS`), so `vicmd` is deliberately out.
 #
-# `w` BAĞLAMADAN SONRA: yetenek "şu an bağlı" demek. Terminal onu
-# `line-finish`'te (`e`) unutuyor, yani betiği eski olan ya da bu kanca
-# ezilmiş bir oturumda kapı kapalı kalıyor ve dizi hiç gönderilmiyor.
+# `w` AFTER THE BINDING: the capability means "bound right now". The terminal
+# forgets it at `line-finish` (`e`), so in a session whose script is old or
+# whose hook was overridden the gate stays closed and the sequence is never sent.
 __bateri_dock_arm() {
   emulate -L zsh
   local map
@@ -759,11 +788,11 @@ __bateri_dock_arm() {
   print -nr -- $'\e]8133;w\a'
 }
 
-# Kullanıcının ZDOTDIR'ını KALICI olarak geri koyar ve izlerimizi siler.
+# Restores the user's ZDOTDIR PERMANENTLY and erases our traces.
 #
-# Çağıranı `.zshrc` ile `.zlogin`, hangisi okunursa; ayrıca `.zshenv`, bizim
-# dosyalarımızdan başkasının okunmayacağı kabuklarda (`no_rcs`; ya da ne
-# etkileşimli ne login olan `zsh -c`).
+# Its callers are `.zshrc` and `.zlogin`, whichever is read; also `.zshenv`, in
+# shells where no file of ours other than itself will be read (`no_rcs`; or
+# `zsh -c`, which is neither interactive nor login).
 __bateri_restore() {
   if (( __bateri_had )); then
     export ZDOTDIR=$__bateri_user
@@ -771,7 +800,7 @@ __bateri_restore() {
     unset ZDOTDIR
   fi
   unset __bateri_dir __bateri_user __bateri_had __bateri_file
-  # Kancalar kalıyor, yükleyici gidiyor: ilki oturum boyunca çalışıyor,
-  # ikincisinin işi bitti ve kullanıcının ad alanında durmasının anlamı yok.
+  # The hooks stay, the loader goes: the first works throughout the session, the
+  # second's job is done and there is no point in it staying in the user's namespace.
   unfunction __bateri_begin __bateri_end __bateri_hooks __bateri_restore
 }
