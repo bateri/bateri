@@ -34,7 +34,7 @@ bulunamaz.
 | # | İş | Neden burada |
 |---|---|---|
 | 005 | ölçüm kancaları | 002, 003 ve 004'ün bekleyen on iki iddiası tek bir kanca setine bağlı. Taban, **bir sonraki büyük render değişikliğinden önce** alınırsa "hangi set yavaşlattı" sorusu cevaplanabilir olur; sonra alınırsa o soru kalıcı olarak cevapsız kalır. `docs/OLCUMLER.md` bilerek **kapsam dışı** bırakıldı (onu ilk `/measure` kurar) ve bench (`criterion`) de öyle; **bench'in dışarıda kalması** on ikinin ikisini bu setten sonra da açık bırakıyor — ikisi de saf `cargo bench` iddiası |
-| 006 | pano + seçim + kaydırma + bundle | **Eşiği tek hamlede geçmek için bilerek şişirilmiş set.** Cila feda edilir: yapıştır, kopyala, fareyle seçim, tekerlek, `.app` bundle. Bundle burada çünkü bundle'sız süreç öne çıkamıyor, Dock ikonu almıyor ve varsayılan terminal olamıyor. 002'nin ertelenmiş Apache-2.0 attribution'ı da burada kapanır. **Bundle'ın bir yan ödevi var:** görünür pencere meşru kare sayısını değiştirir, yani `IDLE_FRAME_LIMIT` (boşta sıfır kare kapısı) bu sette **yeniden ölçülmeli** — bugünkü değeri görünmeyen bir pencerede ölçüldü *(sonradan: 006 phase-5 yoklamasında bundle'sız `make duman` penceresi de ekranda ve öndeydi; 005'in penceresi ise yoklanmamıştı, yani iki gerekçe de ölçülmüş değildi — sonuç `docs/OLCUMLER.md` → `## Boşta kare`)* |
+| 006 | pano + seçim + kaydırma + bundle | **Eşiği tek hamlede geçmek için bilerek şişirilmiş set.** Cila feda edilir: yapıştır, kopyala, fareyle seçim, tekerlek, `.app` bundle. Bundle burada çünkü bundle'sız süreç öne çıkamıyor, Dock ikonu almıyor ve varsayılan terminal olamıyor. 002'nin ertelenmiş Apache-2.0 attribution'ı da burada kapanır. **Bundle'ın bir yan ödevi var:** görünür pencere meşru kare sayısını değiştirir, yani `IDLE_FRAME_LIMIT` (boşta sıfır kare kapısı) bu sette **yeniden ölçülmeli** — bugünkü değeri görünmeyen bir pencerede ölçüldü *(sonradan: 006 phase-5 yoklamasında bundle'sız `make smoke` penceresi de ekranda ve öndeydi; 005'in penceresi ise yoklanmamıştı, yani iki gerekçe de ölçülmüş değildi — sonuç `docs/OLCUMLER.md` → `## Boşta kare`)* |
 
 > **006'nın kapsamı — karar verildi (2026-09-12).** Tek hamlede eşik **(b)**
 > tutuldu: panel üç koldan bundle'ın ayrı sete çıkmasını önerdi, kullanıcı
@@ -93,9 +93,9 @@ hiç kurulmasın) ve o değişmez bir kod kısıtından *karar* diye türetilmi�
 | — | tam uzak entegrasyon | 036'nın kapsam dışı bıraktığı yarı (2026-09-26): uzakta blok, işaret, süre sayacı ve dock aynası — kitty'nin `kitten ssh`'ı, Ghostty'nin ssh-integration'ı gibi sarmalayıcı betiği (ve istenirse terminfo'yu) ssh üstünden taşımak. 036 yalnız **yerel** tarafı biliyor: host, uzak OSC 7 ve başlık. **Bedeli kayıtlı:** betik taşımak üç kabuk ve uzak makinenin rc'sine dokunmama kuralı demek; terminfo taşımak `TERM`'in ssh'ta ncurses'ı kırdığı yere (Metalterm #23, `docs/ARASTIRMA.md`) yeniden girmek. Ön koşulu 036 |
 | — | uzun yerel komutta giriş satırını gizleme | **Kullanıcı reddetti (2026-09-26, 036'nın sohbeti)** — kayıt yeniden önerilmesin diye burada. 036 dock'un giriş satırını **yalnız ssh/mosh** boyunca kaldırıyor; uzun süren yerel komutta aynısı reddedildi: süre eşiği kullanıcı okurken ekranı oynatır ve komut bitince ters bir sıçrama doğurur. Açılacaksa gerekçesi bu iki bedeli karşılamalı |
 | 040 | Linux kapısı + wgpu renderer'ı | **Kullanıcı kararı (2026-09-28)**: bateri macOS'ta aynen kalırken Linux'ta da koşsun (pencere katmanı winit, Wayland birincil, X11 best-effort; bağımlılıklar onaylı). Yolun ilk adımı: Docker'lı `make linux` kapısı ve renderer'ın ölçümlü wgpu geçişi — bitti, `bt-gpu` platform kütüphanesi görmüyor → `.tasks/040-linux-kapisi-ve-wgpu/` |
-| 041 | yedek glyph'in küçültülmesi | **Kullanıcı gördü (2026-09-29)**: Claude Code'un artifact bağlantısı `⧉` kutu çıkıyor — mürekkebi hücreden %11 geniş ve 019'un kapısı "kutu ya da tam glyph" diyordu. Tek kural bütün aileyi kapsıyor (tek karakterlik yordamsal çizim reddedildi): sınırın içindeki aday küçük puntolu kopyasıyla çiziliyor, tek sütunlu emoji dahil (kullanıcı küçük emojiyi kutuya tercih etti). Önde, çünkü `bt-atlas`'ta ve 040'ın `bt-gpu` yasağına dokunmuyor; kusurlu karakterin kullanıcıdan önce bilinmesi için önce bir tarama (`make tarama`) ve araç karakterlerinin bekçisi → `.tasks/041-yedek-glyph-kucultme/` |
+| 041 | yedek glyph'in küçültülmesi | **Kullanıcı gördü (2026-09-29)**: Claude Code'un artifact bağlantısı `⧉` kutu çıkıyor — mürekkebi hücreden %11 geniş ve 019'un kapısı "kutu ya da tam glyph" diyordu. Tek kural bütün aileyi kapsıyor (tek karakterlik yordamsal çizim reddedildi): sınırın içindeki aday küçük puntolu kopyasıyla çiziliyor, tek sütunlu emoji dahil (kullanıcı küçük emojiyi kutuya tercih etti). Önde, çünkü `bt-atlas`'ta ve 040'ın `bt-gpu` yasağına dokunmuyor; kusurlu karakterin kullanıcıdan önce bilinmesi için önce bir tarama (`make scan`) ve araç karakterlerinin bekçisi → `.tasks/041-yedek-glyph-kucultme/` |
 | 042 | font sistemi soyutlaması + Linux font yığını | 040'tan sonra — trait'in kendisi 040'a bağlı değil, ama kapının büyümesi (`bt-gpu`'nun Linux'ta piksel sınaması) wgpu'yu istiyor: `bt-atlas`'ın CoreText yarısı (`font.rs`'in açma/türetme/metrik/mürekkep/yedek/şekillendirme yüzeyi ve `raster.rs`'in iki çizim fonksiyonu) bir `FontSystem` trait'inin arkasına; macOS'ta CoreText kalır, Linux'ta FreeType + fontconfig (cascade = `FcFontSort`) + HarfBuzz ailesi (`harfrust`/`rustybuzz`, emoji kümeleri). Kapı mantığı (`ink_fits_box`, `centre_shift`, sıra), atlas ve yordamsal çizim dokunulmaz; macOS kalibrasyon sınamaları `cfg(target_os = "macos")`, değişmez bekçileri platformsuz. **Kapı büyür:** `make linux` `bt-atlas`'ı ve lavapipe (Mesa'nın yazılım Vulkan'ı) üstünde `bt-gpu`'nun offscreen piksel sınamalarını da koşar — bu setten sonra renderer Linux'ta da piksel bekçili. Kapının `bt-gpu`'yu Linux'ta derlemek için beklediği **tek** şey `bt-atlas`: `bt-gpu`'nun kendisi 040'tan beri platformsuz. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı) → `.tasks/042-font-sistemi-linux/` |
-| 043 | `bt-shell` ayrımı | Font setinden sonra, winit'ten önce: `bt-shell` → `bt-shell-common` (AppKit'siz modüller: ayar okuma, bölme ağacı, punto, tanılar, jest defteri, kaçış; küçük uyarlamayla yükleme kuralı, `jobs` (`proc_*` → `/proc`), `child` (`NSLocale` → ortam, `login -flp` → `$SHELL -l`), `watch` (kqueue vnode → inotify), `keys`) + `bt-shell-macos` (bugünkü AppKit kodu; 040'ın macOS `Pacer`'ı buraya taşınır). Davranış değişmez; katman kuralı `bateri → bt-shell-{macos,linux} → bt-shell-common → bt-gpu → {bt-atlas, bt-core}` olur ve `make denetim`'in katman yönü kontrolü ona göre yazılır. `make linux` `bt-shell-common`'ı da koşar. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı). Bitti: macOS'ta fark yok, `make denetim` ortak crate'in platform sınırını denetliyor ve `make linux` onu da koşuyor → `.tasks/043-bt-shell-ayrimi/` |
+| 043 | `bt-shell` ayrımı | Font setinden sonra, winit'ten önce: `bt-shell` → `bt-shell-common` (AppKit'siz modüller: ayar okuma, bölme ağacı, punto, tanılar, jest defteri, kaçış; küçük uyarlamayla yükleme kuralı, `jobs` (`proc_*` → `/proc`), `child` (`NSLocale` → ortam, `login -flp` → `$SHELL -l`), `watch` (kqueue vnode → inotify), `keys`) + `bt-shell-macos` (bugünkü AppKit kodu; 040'ın macOS `Pacer`'ı buraya taşınır). Davranış değişmez; katman kuralı `bateri → bt-shell-{macos,linux} → bt-shell-common → bt-gpu → {bt-atlas, bt-core}` olur ve `make audit`'in katman yönü kontrolü ona göre yazılır. `make linux` `bt-shell-common`'ı da koşar. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı). Bitti: macOS'ta fark yok, `make audit` ortak crate'in platform sınırını denetliyor ve `make linux` onu da koşuyor → `.tasks/043-bt-shell-ayrimi/` |
 | — | `bt-shell-linux` (winit) MVP | Ayrımdan sonra. Pencere, klavye + IME (winit IME), fare, pano (primary selection dahil), sekmeler, bölmeler, arama çubuğu ve **ayar penceresi** — üçü GPU'da kendimiz çiziyoruz (kullanıcı kararı); Ctrl+Shift kısayolları, Option → Alt/Meta. Linux `Pacer`'ı (Wayland frame callback'i; X11 best-effort, adıyla yazılı bilinen sınır) ve yüzey `raw-window-handle`'dan. Kalite kapıları (boşta sıfır kare, animasyon ritmi) Wayland'de; kapı başsız bir Wayland bileşimcisiyle duman koşusuna büyür. Dock zsh üstünde aynen çalışmalı. Sete sığmazsa GPU'da çizilen kromun (sekme çubuğu, arama, ayar penceresi) ikinci bir sete ayrılması o setin `/rfc`'sinin kararı. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı) |
 | — | Linux platform hizmetleri | MVP'den sonra: bildirim (D-Bus), açık/koyu ve Hareketi Azalt (xdg-desktop-portal), `bateri://` için `.desktop` `x-scheme-handler`, `/proc` ve inotify'ın MVP'de kalmayan kolları, yüklemenin bildirimi ve ilerlemesi. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı) |
 | — | Linux paketleme | Son: `.deb` ve AppImage. Flatpak **sonra**: sandbox kullanıcının host kabuğunu koşturmayı engelliyor ve terminalin varlık sebebi o. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı) |
@@ -498,8 +498,8 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   — `Motion::finish`'in doc'u sonucu zaten tarif ediyor. Çarenin yönü belli
   (deadline'da pencere hiç görünmediyse hareket kapısı muaf, `Workload`
   muafiyetinin emsali) ama kapıyı gevşetiyor: gerçek bir durma koşulu
-  kusurunu da örtmemeli. `make duman`'ın belgelenmiş tek kaçış hâli başsız
-  ortamdaki `ATLANDI`; bu üçüncü hâl hiçbir yerde yazılı değil.
+  kusurunu da örtmemeli. `make smoke`'ın belgelenmiş tek kaçış hâli başsız
+  ortamdaki `SKIPPED`; bu üçüncü hâl hiçbir yerde yazılı değil.
 - **Tema kare başına iki kez okunuyor.** `Session::frame` kopyayı `Term`
   kilidinden önce kendi içinde alıyor, `link.rs` aynı karede `session.theme()`
   ile ikinci kez alıyor; araya düşen bir `set_theme` o kareyi hücreler eski,
@@ -513,7 +513,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   gövdesi arasına girince doc yeni fonksiyona geçiyor, eskisi **doc'suz**
   kalıyor ve yeni fonksiyonun doc'u bambaşka bir şeyi anlatıyor. `rustdoc`
   şikâyet etmiyor, `clippy` yalnız araya **boş satır** girerse görüyor
-  (`empty_line_after_doc_comments`). Çaresi bir kapı: `make denetim`'e "doc
+  (`empty_line_after_doc_comments`). Çaresi bir kapı: `make audit`'e "doc
   bloğu ile `fn`/`pub` arasında başka bir öğe yok" taraması ya da her eklemede
   `git diff`'te doc sınırını gözle doğrulamak. Şimdilik ikincisi, yani
   **kural yazılı ama mekanik değil**.
@@ -572,7 +572,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   bildirimler `tools/third_party_notices.py` ile ürün grafından üretiliyor
   (MIT'in hepsi + Sparkle). 006 phase-4'ün açık sorusu da kapandı: karantina
   etiketli indirilen zip'i Gatekeeper `accepted, source=Notarized Developer
-  ID` diye geçiriyor (notarize + zımbalı paket, `make paket`). Eski metin: 006 yalnız `alacritty_terminal`'ın
+  ID` diye geçiriyor (notarize + zımbalı paket, `make package`). Eski metin: 006 yalnız `alacritty_terminal`'ın
   (Apache-2.0) borcunu kapattı. macOS ağacındaki diğer dış paketlerin çoğu
   MIT ya da MIT seçeneği taşıyor (`objc2` ailesinin dördü yalnız MIT) ve MIT
   de bildirimin kopyalarla gitmesini istiyor. 007 phase-1 `toml_edit` ile
@@ -935,12 +935,12 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   doğrulandı, yani **bu setin kusuru değil**: `child.rs`'in sarmalayıcı
   arayışı depo kolunda `target/debug` üzerinden gidiyor ve `cargo test
   --release` o yolu bulamıyor (`sarmalayıcı bulunamadı`). Kapının profili
-  debug (`make hepsi`), yani bugün hiçbir şeyi bloke etmiyor — ama
+  debug (`make check`), yani bugün hiçbir şeyi bloke etmiyor — ama
   `cargo test --release` koşturan biri beş kırmızı görüp yanlış yere bakar.
   Çaresi yolu profile duyarlı yapmak ya da `CARGO_MANIFEST_DIR`'dan
   türetmek; ikisi de tek satırlık. `bt-shell-common`'ın `child` modülüne meşru
   biçimde dokunan ilk set toplar.
-- **Küçük hijyen.** `make kur` boş hedef dizinini denetlemiyor — bugün
+- **Küçük hijyen.** `make bundle` boş hedef dizinini denetlemiyor — bugün
   zararsız. Pano sınamaları oluşturdukları geçici panoları bırakmıyor
   (`releaseGlobally` yok) — kullanıcıya görünmez. İkisi de doğrulanmadı;
   kullanıcı 006'ya almadı. **Panonun yarısı 2026-09-22'de görünür oldu:**

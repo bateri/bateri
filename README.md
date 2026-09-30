@@ -125,9 +125,9 @@ Requirements: macOS 14+ and a Rust toolchain (1.88 or later).
 
 ```sh
 cargo run -p bateri   # run a debug build
-make hepsi            # format check, lints, clippy and the full test suite
-make kur              # build target/release/bateri.app (signed if a signing identity is available)
-make yukle            # build and install to /Applications
+make check            # format check, lints, clippy and the full test suite
+make bundle              # build target/release/bateri.app (signed if a signing identity is available)
+make install            # build and install to /Applications
 ```
 
 The Makefile targets are named in Turkish, as are the project's internal
@@ -158,14 +158,14 @@ the keychain.
    [`CHANGELOG.md`](CHANGELOG.md) as they land.
 2. To release, bump `version` in `Cargo.toml`, rename **Unreleased** to that
    version and today's date, and commit.
-3. Run `make gonder`. It builds and notarizes the app and the disk image,
+3. Run `make ship`. It builds and notarizes the app and the disk image,
    writes a one-item Sparkle feed signed with the EdDSA key, pushes `main`,
    tags the built commit `v<version>` and creates the GitHub release with
    `bateri.dmg`, `bateri-<version>.zip` and `appcast.xml`, using the changelog
    section as its notes.
 
-`make gonder` is `make yayin` (build everything locally, nothing public yet —
-try the app first) followed by a push and `make yayinla` (tag and publish).
+`make ship` is `make release` (build everything locally, nothing public yet —
+try the app first) followed by a push and `make publish` (tag and publish).
 Publishing the release is publishing the update: installed copies read the
 newest release's `appcast.xml`, and the website's download button points at
 the newest `bateri.dmg`, so neither needs a change. A bad release is fixed by
@@ -176,7 +176,7 @@ releasing a newer version; Sparkle never downgrades.
 Bug reports and pull requests are welcome on
 [GitHub](https://github.com/bateri/bateri). By contributing you agree that your
 contribution is licensed under the same terms as bateri (GPL-3.0-or-later).
-Run `make hepsi` before opening a pull request; it is the same gate the project
+Run `make check` before opening a pull request; it is the same gate the project
 uses.
 
 ## License

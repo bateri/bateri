@@ -1050,7 +1050,7 @@ eşleşme yalnız kesin kaynaklarla içeriğine yapışıyor, kalanında
 **kayboluyor** ve son geçişte en yakına dönüyor (`search::ledger_shift`):
 yanlış satırı geçerli göstermektense hiçbirini. Ayrıntı
 `.tasks/033-gecmiste-arama/phase-5.md` → Uygulama Notları.
-Dock ve komutlar arası atlama henüz yok (`docs/YOL-HARITASI.md` → komut işaretleri üstünde gezinme). `make kur` `bateri.app` paketini
+Dock ve komutlar arası atlama henüz yok (`docs/YOL-HARITASI.md` → komut işaretleri üstünde gezinme). `make bundle` `bateri.app` paketini
 üretir.
 **Geniş karakter ve renkli emoji çiziliyor** (023) ve ikisi tek
 mekanizmadan: mürekkebi bir hücreye sığmayan **iki sütunlu** karakter iki
@@ -1192,35 +1192,35 @@ aynı commit'te düzelir.
 ## Komutlar
 
 ```sh
-make hepsi        # rustc sürümü + fmt --check + denetim + clippy -D warnings + test (definition of done)
+make check        # rustc sürümü + fmt --check + audit + clippy -D warnings + test (definition of done)
 make fmt          # cargo fmt --all -- --check
-make denetim      # kuralların mekanik yarısı: katman yönü, bt-core'da gerekçesiz panik, rc dosyasına yazma; Cargo.lock değiştiyse uyarır
+make audit        # kuralların mekanik yarısı: katman yönü, bt-core'da gerekçesiz panik, rc dosyasına yazma; Cargo.lock değiştiyse uyarır
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make shader       # WGSL kanaryası: cargo test -p bt-gpu wgsl_pipelines_build (naga doğrulaması + bütün pipeline'ların kurulumu)
-make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
-                  # kare=N hucre=K glif=G kural=R yuva=U/T yuva2=U/T yuk=smoke istek=I icerik=C hareket=M kayma=S sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
-                  # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT ise, sessiz < QUIET_FLOOR ya da sessiz=none ise
+make smoke        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
+                  # frames=N cells=K glyphs=G rules=R slots=U/T slots2=U/T load=smoke requests=I content=C motion=M slide=S quiet=Sms teardown=clean profile=debug samples=off pipeline=ok
+                  # ilk dördünden ya da motion'dan biri 0 ise, content > IDLE_FRAME_LIMIT ise, quiet < QUIET_FLOOR ya da quiet=none ise
                   # ya da deadline'da animasyon yerleşmemişse kırmızı. iki sınır da ölçülmüş; değerleri ve türetmeleri sabitlerin doc'unda.
                   # süreli koşuda pencere kayan seviyede açılır: wgpu örtülü pencereye drawable vermez, kapı öndeki uygulamaya bağlı kalmasın (`TerminalWindow::float_for_timed_run`).
-                  # üst sınır kare'de değil icerik'te: icerik çizilmeye karar verilen kare, kare GPU'nun bitirdiği — animasyon ikincisini meşru olarak şişirir.
-                  # sessiz'in kuralı ters (sağlıklıda büyük) ve kapının en duyarlı katı: icerik sınırının göremediği yavaş sızıntıyı o görüyor.
-                  # yuva/yuva2/yuk/istek/kayma/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
-                  # yuva atlasın maske düzlemi, yuva2 renk düzlemi (023): ikisi aynı yuva ızgarasını paylaşıyor, ayrı sayaçları var ve toplamları aynı.
-                  # hareket ile kayma iki ayrı animatörün tanığı (imleç / içeriğin ötelemesi): aynı karede ikisi birden artabilir, toplamları kare değildir.
+                  # üst sınır frames'te değil content'te: content çizilmeye karar verilen kare, frames GPU'nun bitirdiği — animasyon ikincisini meşru olarak şişirir.
+                  # quiet'in kuralı ters (sağlıklıda büyük) ve kapının en duyarlı katı: content sınırının göremediği yavaş sızıntıyı o görüyor.
+                  # slots/slots2/load/requests/slide/profile sayaç ve etiket; teardown kısmen kapı (değerler teardown_token'da); samples=off'ta ölçüm jetonu basılmaz.
+                  # slots atlasın maske düzlemi, slots2 renk düzlemi (023): ikisi aynı yuva ızgarasını paylaşıyor, ayrı sayaçları var ve toplamları aynı.
+                  # motion ile slide iki ayrı animatörün tanığı (imleç / içeriğin ötelemesi): aynı karede ikisi birden artabilir, toplamları kare değildir.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
-make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
-make tarama       # yedek glyph kapısının envanteri (041): sembol/emoji bloklarını 13/16pt × @1x/@2x kapıdan geçirir; make hepsi'de yok (kurulu fontlara bağlı), BT_SCAN_FONT taban aileyi değiştirir
-make linux        # bt-core'un, bt-atlas'ın, bt-gpu'nun ve bt-shell-common'ın Linux kapısı: Docker'da clippy -D warnings + test --locked (bt-gpu Vulkan'da, piksel sınamaları lavapipe'ta; bt-shell-common'da gerçek PTY ve zsh); yerel rustc ≠ imaj etiketi kırmızı, Docker yoksa ATLANDI
-make kur          # release derler, target/release/bateri.app'i kurar (Sparkle dahil; ilk koşuda sha256'lı indirir), anahtarlıktaki Developer ID ya da Apple Development kimliğiyle hardened runtime'la, yoksa ad-hoc imzalar (SIGN_ID ile ezilir) ve içeriğini denetler (Info.plist, URL şeması, ikon, lisans, shell betiği, Sparkle ve imzaları)
-make paket        # kur + target/release/bateri-<sürüm>.zip (Sparkle'ın) ve bateri.dmg (ilk kurulumun, sürümsüz ad; dmgbuild, düzen assets/dmg/); Developer ID'de ikisi de notarize + staple (NOTARY_PROFILE=bateri-notary)
-make yayin        # kapı (temiz ağaç, v<sürüm> etiketi yok, CHANGELOG.md'de ## [<sürüm>] — not oradan kesilir) + paket + tek öğeli imzalı appcast → target/release/v<sürüm>/; derlenen commit'i kaydeder, hiçbir şey yayınlamaz
-make yayinla      # o commit origin/main'deyse v<sürüm> diye etiketler, push eder ve GitHub release'ini (bateri.dmg, zip, appcast.xml, notlar) --latest açar
-make gonder       # main'de: yayin + git push origin main + yayinla — sürüm yayınlamanın tek komutu
-make yukle        # kur + bu Mac'e kurar: /Applications/bateri.app (INSTALL_DIR ile değişir); açık bateri varken durur
+make test-race    # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
+make scan         # yedek glyph kapısının envanteri (041): sembol/emoji bloklarını 13/16pt × @1x/@2x kapıdan geçirir; make check'de yok (kurulu fontlara bağlı), BT_SCAN_FONT taban aileyi değiştirir
+make linux        # bt-core'un, bt-atlas'ın, bt-gpu'nun ve bt-shell-common'ın Linux kapısı: Docker'da clippy -D warnings + test --locked (bt-gpu Vulkan'da, piksel sınamaları lavapipe'ta; bt-shell-common'da gerçek PTY ve zsh); yerel rustc ≠ imaj etiketi kırmızı, Docker yoksa SKIPPED
+make bundle       # release derler, target/release/bateri.app'i kurar (Sparkle dahil; ilk koşuda sha256'lı indirir), anahtarlıktaki Developer ID ya da Apple Development kimliğiyle hardened runtime'la, yoksa ad-hoc imzalar (SIGN_ID ile ezilir) ve içeriğini denetler (Info.plist, URL şeması, ikon, lisans, shell betiği, Sparkle ve imzaları)
+make package      # bundle + target/release/bateri-<sürüm>.zip (Sparkle'ın) ve bateri.dmg (ilk kurulumun, sürümsüz ad; dmgbuild, düzen assets/dmg/); Developer ID'de ikisi de notarize + staple (NOTARY_PROFILE=bateri-notary)
+make release      # kapı (temiz ağaç, v<sürüm> etiketi yok, CHANGELOG.md'de ## [<sürüm>] — not oradan kesilir) + package + tek öğeli imzalı appcast → target/release/v<sürüm>/; derlenen commit'i kaydeder, hiçbir şey yayınlamaz
+make publish      # o commit origin/main'deyse v<sürüm> diye etiketler, push eder ve GitHub release'ini (bateri.dmg, zip, appcast.xml, notlar) --latest açar
+make ship         # main'de: release + git push origin main + publish — sürüm yayınlamanın tek komutu
+make install      # bundle + bu Mac'e kurar: /Applications/bateri.app (INSTALL_DIR ile değişir); açık bateri varken durur
 ```
 
-Girdisi henüz olmayan hedefler "henüz yok" deyip kırmızı düşer; hangileri
+Girdisi henüz olmayan hedefler "not yet" deyip kırmızı düşer; hangileri
 olduğu `.claude/is-akisi/proje.md` → Doğrulama'da.
 
 Tek crate / tek sınama:
@@ -1245,10 +1245,10 @@ ikisine de bağlanmaz.
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve **okuyucu döngünün sahibi** (alacritty 0.26.0 döngüsünün kopyası, `reader`; `Term` `Handler`'ı aktaran sarmalayıcının arkasında, `handler` — emoji dizisini ızgarada orada kümeliyor, 035), PTY okuma yolu **taranıyor** (araya giren sarmalayıcı baytları aynen geçirir, geçerken **üç** OSC numarasını ve **bir** CSI dizisini çeker), OSC (0/2/7/8/9/52; 0/2 uygulamanın başlığını `Term` kilidi altındaki olaydan yaprak bir yuvaya indirir ve pencere başlığı ondan kurulur — öncelik OSC 0/2 → dizinin son bileşeni (ev `~`) → `bateri`, `Session::title`; uzak oturumda (036) `⇄ {OSC başlığı}`, yoksa `⇄ {host}`; başlık ya da **değişen** OSC 7 dizini `Wake::title_changed` ile yüksüz haber verir, 7 çalışma dizinini **yetkisiyle** verir (yerel yetki dock'un bağlam satırına, uzak oturumda ya da yabancı yetkide uzak yuvaya) (`Session::working_directory` onu okur), 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, geçmişte arama (sorgunun derlenmesi, görünür satırların eşleşmeleri, bütün defterin parça parça sayımı; `search`), girdi kodlaması (DECCKM'e uyan oklar, farenin düğme/hareket/tekerlek raporu; kipten karar veren tablolar `input::button_route`/`motion_route`/`wheel_route`), ayar modeli, shell bağlamı. Tarayıcının üç kolu var ve üçü de alacritty'de **yok** (`vte` üçünü de `unhandled`'a düşürüyor): OSC 133 oturumun safhasını ve blok kimliklerini `ShellState`'e yazar (`Session::shell_state()`) ve `Running`'e her **geçişte** bir komut nesli artırıp `Wake::command_started` ile yüksüz haber verir (036, uzak oturum yoklamasının tetiği); kimliğimizi (`bt_block=`) bir kez görmüş bir oturumda **uzak oturumu yalnız bizim işaretimiz bitiriyor** — uzak oturum etkinken kimliksiz `A`/`B`/`C`/`D` yok sayılıyor, çünkü ssh'ın öbür ucundaki fish 4 ya da kitty/iTerm2 entegrasyonu aynı PTY'ye 133 basıyor ve uzak `A` göstergeyi silip uzak `C` yeni bir nesil açardı; yoklamadan önce gelen uzak `A` için komut bizim `D`'mize kadar açık sayılıyor (`ShellLog::command_open`). Kapı `Running`'e değil uzak oturuma bağlı, yoksa `exec fish` `Running`'i hiç bitirmez ve saat boşta kare isterdi (`.tasks/036-ssh-uzak-oturum/phase-3.md` → Uygulama Notları), OSC 8133 ZLE'nin görüntü aynasını — `PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlight`, `CURSOR`, base64 gövdelerle; `KEYMAP` ve `PREBUFFER` sondaki isteğe bağlı gövdeler, eski betik onlarsız da çözülüyor — çözüp `DockState`'e (`Session::dock_state()`), dalı `DockContext`'e ve düzenleme widget'ının yeteneğini (`8133;w`) `ShellLog::dock_editable`'a, OSC 7 de çalışma dizinini yine `DockContext`'e (yüzde çözme ve yabancı host elenmesi orada; bozuk URI panik değil yoksayma). Aynanın kendi yük sınırı var ve aşımı **görünür** (`DockStatus::Unavailable`), sessizce düşmez; dock'un çizmediği kontrol karakteri de görünür bir durum (`DockStatus::Control`) ve satırı ızgaraya bırakıyor. **Dördüncü kol OSC değil CSI** ve yükü yok: `CSI 2 J`'yi tanıyıp "ekran kasten temizlendi" bayrağını kurar (`Session::observe_screen_clear`; `3J` ve RIS için kol **yok**, ikisi de geçmişi siliyor — geçmişi silen tek yol terminal tarafı temizlik, ⌘K/⌥⌘K). **Sayacın iki yazarı var** (`screen_clears`): tarayıcı `2J`'yi baytlar uygulanmadan **önce** sayıyor, terminal tarafı temizlik (034) `Term` kilidi altında ve uygulandıktan **sonra** adlı tek yöntemden (`Session::note_screen_clear`) — ikisi de yalnız artırıyor ve tüketici tek. **Alternatif ekranda kurmaz** — orada `ClearMode::All` `reset_region(..)` çağırıyor, geçmiş büyümüyor ve birincil ekranın durumuna dokunulmuyor, yani geri getirilmeyecek bir şey yok; nesil yine de **tüketilir**, yoksa `vim`'den çıkışta birikmiş sayaç bayrağı kurar ve doldurma ilk `vim`'den sonra kalıcı olarak kapanırdı. Bayrak **defter temizlemeden sonra büyüyünce** düşer: geçmişe temizlemeden sonra satır düşmüş demektir ve doldurma o kadarını güvenle geri verebilir. Ölçüt bir damga ve tek karşılaştırma (`Session::screen_clear_history`); damga bayrak kurulduktan **sonraki** ilk karede alınıyor, çünkü kuran kare ızgarayı henüz temizlenmemiş görebiliyor ve temizlemenin kendisi satırları geçmişe itiyor — bayat damga anında aşılırdı. Üstünde iki koşul var — alternatif ekranda değil ve `display_offset == 0`; ikincisi olmasa geçmişe kaydırılan pencere dolu **görünür** ve tek bir tekerlek jesti Ctrl-L'i geri alırdı. (Bu koşul **bayrağın ömrüne** ait; doldurmanın kendi `display_offset` kapısı ayrı bir şey ve ayrı gerekçeli.) **Bayrak bir kapı, damga bir ölçü:** kapı "hiç" der, aynı damga doldurmada ikinci kez okunup `fill`'i temizlemeden beri gelen satır sayısına **kırpar** — yoksa tek satırlık bir büyüme bayrağı düşürür ve doldurma boşluğun tamamını, yani kullanıcının sildiği ekranı geri getirirdi (ölçüldü). `content_rows == rows` kolu yok: dock'lu pencerede doluluk giriş satırını saymadığı için erişilemez. **Bilinen sınır**, defter `scrollback`'te doyunca damganın üstüne çıkacak sayı kalmıyor ve o oturumda bir Ctrl-L'den sonra doldurma koşmuyor; yönü güvenli. Yarışı kapatan şey bir **nesil sayacı**: tarayıcı baytları uygulamadan **önce** sayıyor, kare yolu sayacı `Term` kilidinin **altında** doluluk sayısıyla aynı okumada tüketiyor, ve henüz hesaba katılmamış bir nesil aynı karede doldurma kuralını ezer. Bayrağın tek tüketicisi doldurmanın kapısı (`Session::fill_rows`) ve sıra zorunlu: ömür **önce** işliyor. Komut blokları `frame()` sınırından **çözülmüş** geçer (komutun satırı + renk, çıkış kodu değil; bölge değil işaret): kimlik prompt'un OSC 8 çıpasından `Term` kilidi altında toplanır, renk kilit bırakıldıktan sonra kabuk defterinden çözülür. Giriş satırının **bastırılması** da burada: safha ile aynanın durumu tek yüklemde birleşiyor (`ShellLog::suppressed_input`) ve kopya `Term` kilidinden **önce** alınıyor — yaprak kilit `Term`'ün altına girmez | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir — `make linux` (Docker, `tools/linux/Dockerfile`), çünkü platformsuzluğu yalnız Linux'ta gerçekten derlemek kanıtlar |
-| `bt-atlas` | glyph rasterizasyonu, atlas paketleme, **emoji dizisinin şekillendirilmesi** (`Sprite::Cluster`, tek glyph — macOS'ta `CTLine`, Linux'ta `harfrust`; atlasın interner'ı, şekillenmeyen dizi taban karakteriyle), **iki düzlem** (maske `R8`, renk `RGBA8`; ayrı sayaç, ortak yuva ızgarası), **geniş glyph'in iki yarısı** (`Half`; kutu iki hücre, yuva yine bir hücre), **sistemin cascade'inden yedek glyph** (kapı geometrik ve **sıralı**: önce tek hücre, sonra iki; ikisine de sığmayan aday kutu kalır), **yordamsal karakterler** (blok elemanları, Braille ve çizgi çizim — köşegenler hariç; fonta sorulmadan, yüzden bağımsız, yalnız büyük sınıfta), font seti. **Doku kenarı sabit değil**: hedeflenen **yuva sayısından** türüyor (`SLOT_TARGET` = 1024 yuva; kenarın kendisi `MIN_EDGE` = 1024 px ile `MAX_EDGE` = 4096 px arasında, iki 1024 tesadüfen aynı sayı), çünkü hücre büyüdükçe kapasite düşüyor ve bir yerde yordamsal ailenin altına iniyordu — ölçülen kırılma Retina'da 29pt'ti (406 yuva, ailenin istediği 429: 421 karakter + tofu + kural payı). Varsayılan punto tabanda kalıyor, yani ızgara ve raster bit bit aynı. Tahliye **yok**: dolan atlas hâlâ tofu'ya düşüyor ve kalan senaryo (tek karede hedeften fazla farklı glyph) ölçülmedi | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation` — yalnız macOS hedefinde ve yalnız CoreText arka ucunda (`coretext.rs`; kural yarısı `FontSystem` trait'inin arkasında platformsuz, `make denetim` bekçisi — 042). `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil. Linux hedefinde `freetype-rs` + `fontconfig` (+ ham `yeslogic-fontconfig-sys`), pkg-config ile dinamik ve yalnız FreeType arka ucunda (`freetype.rs`: maske, `CBDT`/`COLR` renk düzlemi, `harfrust` ile küme). Arka ucun ölçülmüş örnek karakterleri (`fixture`) `fixture` özelliğiyle dışarı açık — yalnız `bt-gpu`'nun sınamaları için, API değil |
-| `bt-gpu` | wgpu renderer, shader'lar (`.wgsl`), **geniş glyph'in yelpazelenmesi** (`prepare`; karar `Atlas::slot`'ta doğduğu için sink'te değil), kare döngüsü ve `Waker` (`DisplayLink`: platformsuz `tick`; ritim dışarıdan, dört görevli `Pacer` dikişiyle — vsync tik'i, her thread'den `set_running`, tek gecikmeli uyandırma, zaman tabanı), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `set_viewport`, kendi listeleri ve caret'i; PTY payı `DOCK_ROWS`, çizilen bant `Cursor::input_rows` giriş satırı + bağlam satırı), **doldurma bandı** (üçüncü `set_viewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet), durum çubuğu | `wgpu` (arka uç hedefe göre sabit: macOS'ta Metal, Linux'ta Vulkan — `make linux` piksel sınamalarını lavapipe'ta koşar; doğrudan bağımlılığında ve kaynağında platform kütüphanesi yok: pencerenin katmanı tek `unsafe` girişle — `Surface::from_layer`, yalnız macOS; Linux'unki pencere setiyle — ve ritim `Pacer` olarak `bt-shell-macos`'tan geliyor; `make denetim` doğrudan bağımlılıkta ve kaynakta `objc2`/`dispatch2`/`block2`/`metal` arar, wgpu'nun dolaylı çektikleri konusu değil) |
+| `bt-atlas` | glyph rasterizasyonu, atlas paketleme, **emoji dizisinin şekillendirilmesi** (`Sprite::Cluster`, tek glyph — macOS'ta `CTLine`, Linux'ta `harfrust`; atlasın interner'ı, şekillenmeyen dizi taban karakteriyle), **iki düzlem** (maske `R8`, renk `RGBA8`; ayrı sayaç, ortak yuva ızgarası), **geniş glyph'in iki yarısı** (`Half`; kutu iki hücre, yuva yine bir hücre), **sistemin cascade'inden yedek glyph** (kapı geometrik ve **sıralı**: önce tek hücre, sonra iki; ikisine de sığmayan aday kutu kalır), **yordamsal karakterler** (blok elemanları, Braille ve çizgi çizim — köşegenler hariç; fonta sorulmadan, yüzden bağımsız, yalnız büyük sınıfta), font seti. **Doku kenarı sabit değil**: hedeflenen **yuva sayısından** türüyor (`SLOT_TARGET` = 1024 yuva; kenarın kendisi `MIN_EDGE` = 1024 px ile `MAX_EDGE` = 4096 px arasında, iki 1024 tesadüfen aynı sayı), çünkü hücre büyüdükçe kapasite düşüyor ve bir yerde yordamsal ailenin altına iniyordu — ölçülen kırılma Retina'da 29pt'ti (406 yuva, ailenin istediği 429: 421 karakter + tofu + kural payı). Varsayılan punto tabanda kalıyor, yani ızgara ve raster bit bit aynı. Tahliye **yok**: dolan atlas hâlâ tofu'ya düşüyor ve kalan senaryo (tek karede hedeften fazla farklı glyph) ölçülmedi | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation` — yalnız macOS hedefinde ve yalnız CoreText arka ucunda (`coretext.rs`; kural yarısı `FontSystem` trait'inin arkasında platformsuz, `make audit` bekçisi — 042). `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil. Linux hedefinde `freetype-rs` + `fontconfig` (+ ham `yeslogic-fontconfig-sys`), pkg-config ile dinamik ve yalnız FreeType arka ucunda (`freetype.rs`: maske, `CBDT`/`COLR` renk düzlemi, `harfrust` ile küme). Arka ucun ölçülmüş örnek karakterleri (`fixture`) `fixture` özelliğiyle dışarı açık — yalnız `bt-gpu`'nun sınamaları için, API değil |
+| `bt-gpu` | wgpu renderer, shader'lar (`.wgsl`), **geniş glyph'in yelpazelenmesi** (`prepare`; karar `Atlas::slot`'ta doğduğu için sink'te değil), kare döngüsü ve `Waker` (`DisplayLink`: platformsuz `tick`; ritim dışarıdan, dört görevli `Pacer` dikişiyle — vsync tik'i, her thread'den `set_running`, tek gecikmeli uyandırma, zaman tabanı), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `set_viewport`, kendi listeleri ve caret'i; PTY payı `DOCK_ROWS`, çizilen bant `Cursor::input_rows` giriş satırı + bağlam satırı), **doldurma bandı** (üçüncü `set_viewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet), durum çubuğu | `wgpu` (arka uç hedefe göre sabit: macOS'ta Metal, Linux'ta Vulkan — `make linux` piksel sınamalarını lavapipe'ta koşar; doğrudan bağımlılığında ve kaynağında platform kütüphanesi yok: pencerenin katmanı tek `unsafe` girişle — `Surface::from_layer`, yalnız macOS; Linux'unki pencere setiyle — ve ritim `Pacer` olarak `bt-shell-macos`'tan geliyor; `make audit` doğrudan bağımlılıkta ve kaynakta `objc2`/`dispatch2`/`block2`/`metal` arar, wgpu'nun dolaylı çektikleri konusu değil) |
 | `bt-shell-macos` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye (metin yolu AppKit'in yığınından: `BateriView` `NSTextInputClient`, ölü tuş bileşimi orada tamamlanır), **Finder damlası** (`NSDraggingDestination`, yalnız dosya URL'si; yol `quote::shell_quote`'tan geçip `Session::paste`'e gider), servisler, ayar penceresi, **terminal pane'i** (`pane::TerminalPane`, `NSView` alt sınıfı: oturumun çekirdeği, pane düzeyindeki menü seçicileri; sahiple sınırı `PaneLaunch` + `PaneHost`, 039), **bölmeler** (kapsayıcı `split_view`, saf ağacı `bt-shell-common`'ın `split`'i; 039), **arama paneli** ve sayım dizininin ana kuyruk sürücüsü (`search_bar`, `TerminalPane::kick_search`), **uzak oturumun algılanması** (036: `C` kenarında ön plan grubunun en üstteki ssh/mosh süreci ve argv'sinden hedefi, `jobs::remote`; kararsızsa sonraki çıktıda yeniden, ana kuyrukta en çok bir iş — `pane::RemoteProbe`; host yazıldığı gibi, etkileşimsiz ssh uzak sayılmıyor), **uzak dizine yükleme** (037: kural, metin ve `ssh`/`tar` süreçleri `bt-shell-common`'ın `upload`'ında; sayfa, kuyruk sürücüsü, popover, durdurma sorusu, başlık öneki, bildirim ve Dock simgesi `uploader`'da; kuyruk pane'in, Dock simgesi pane'lerin toplamı); kapanış sırasının ve duman bekçisinin sahibi; sistemin dil/bölge çifti (`locale`, `NSLocale`; kararı `child::locale_env`), entegrasyonun kurulup kurulmayacağı ve `ZDOTDIR`/`BATERI_ZDOTDIR` çifti (`app::shell_integration_env`), **güncelleme** (`updater`: paketteki `Sparkle.framework`'ü çalışma zamanında `NSBundle`'dan yükler ve "Check for Updates…"ın hedefi olur; framework link'lenmiyor, yani paketsiz ve süreli koşu Sparkle'sız) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli; `NSUUID`: sekme kimliği), `objc2-app-kit`, `objc2-quartz-core` (pane'in `CAMetalLayer`'ı — wgpu yüzeyi ondan açılıyor, ölçeği pane'in — ve macOS `Pacer`'ı: `NSView.displayLink` yalnız zamanlayıcı olarak ve `CACurrentMediaTime`; `pacer`), `objc2-user-notifications` (yüklemenin bildirimi, `UNUserNotificationCenter`; paketsiz süreçte çağrılmıyor), `block2` (kapatma sorusu sayfasının tamamlanma bloğu), `dispatch2` (ana kuyruk: `Pacer`'ın `set_running`'i ve gecikmeli uyandırması; `child_exit` → o pane'in kapanışı, süreli koşuda `terminate:`; OSC 52'nin pano işi; arama sayımının parçaları; uzak oturum yoklaması; ayar izlemenin bildirimini ana kuyruğa taşıma — kaynaklar `bt-shell-common`'ın kendi seri kuyruğunda), `libc` (bekçinin `write` + `_exit`'i) |
-| `bt-shell-common` | kabuk katmanının AppKit görmeyen yarısı (043): ayar dosyasının okunması ve tanısı (`settings`, `notices`), bölmelerin saf ağacı (`split`), geçici punto (`zoom`), fare jest defteri (`gesture`), kabuk kaçışı (`quote`), tuş kodlaması (`keys`), uzak yüklemenin kuralı, metni ve `ssh`/`tar` süreçleri (`upload`), süreç tablosu (`jobs`: kapatma sorusunun ön plan işi ve uzak oturumun hedefi), kabuğun doğuşu (`child`: başlangıç dizini, yerel kararı, hangi kabuk, sarmalayıcı betiğin yeri) ve dosya izleme (`watch`). Sistem hizmetinin gövdesi `cfg(target_os)` arkasında ve adlı (`jobs::Libproc`/`jobs::Procfs`, çağıranın adı `jobs::SystemTable`; `watch`); kabuk komutu ebeveyniyle tek dönüşten (`child::shell_command`: macOS `login -qflp` + `Login`, Linux `$SHELL -l` + `Direct`); Linux gövdelerinin kapısı `make linux`; sınama yardımcıları `test-support` özelliğinin arkasında | AppKit, Foundation, Quartz ve bildirim merkezi **yok**; `libc` (passwd kaydı için `getpwuid_r`, macOS'ta `proc_*` ve `sysctl(KERN_PROCARGS2)`, Linux'ta `/proc` — `jobs` —, yükleme iptalinin `kill`'i, izlemenin `O_EVTONLY`'si ve Linux'ta inotify/`eventfd`/`poll`'u) ve yalnız macOS hedefinde `dispatch2` (`watch`'ın vnode kaynakları); `make denetim` doğrudan bağımlılıkta AppKit ailesini, `block2`'yi ve platform kabuklarını, kaynakta `objc2`/`dispatch2`/`block2`'yi `watch`'ın macOS gövdesinin (`watch/dispatch.rs`) dışında arar |
+| `bt-shell-common` | kabuk katmanının AppKit görmeyen yarısı (043): ayar dosyasının okunması ve tanısı (`settings`, `notices`), bölmelerin saf ağacı (`split`), geçici punto (`zoom`), fare jest defteri (`gesture`), kabuk kaçışı (`quote`), tuş kodlaması (`keys`), uzak yüklemenin kuralı, metni ve `ssh`/`tar` süreçleri (`upload`), süreç tablosu (`jobs`: kapatma sorusunun ön plan işi ve uzak oturumun hedefi), kabuğun doğuşu (`child`: başlangıç dizini, yerel kararı, hangi kabuk, sarmalayıcı betiğin yeri) ve dosya izleme (`watch`). Sistem hizmetinin gövdesi `cfg(target_os)` arkasında ve adlı (`jobs::Libproc`/`jobs::Procfs`, çağıranın adı `jobs::SystemTable`; `watch`); kabuk komutu ebeveyniyle tek dönüşten (`child::shell_command`: macOS `login -qflp` + `Login`, Linux `$SHELL -l` + `Direct`); Linux gövdelerinin kapısı `make linux`; sınama yardımcıları `test-support` özelliğinin arkasında | AppKit, Foundation, Quartz ve bildirim merkezi **yok**; `libc` (passwd kaydı için `getpwuid_r`, macOS'ta `proc_*` ve `sysctl(KERN_PROCARGS2)`, Linux'ta `/proc` — `jobs` —, yükleme iptalinin `kill`'i, izlemenin `O_EVTONLY`'si ve Linux'ta inotify/`eventfd`/`poll`'u) ve yalnız macOS hedefinde `dispatch2` (`watch`'ın vnode kaynakları); `make audit` doğrudan bağımlılıkta AppKit ailesini, `block2`'yi ve platform kabuklarını, kaynakta `objc2`/`dispatch2`/`block2`'yi `watch`'ın macOS gövdesinin (`watch/dispatch.rs`) dışında arar |
 | `bateri` | `main`, app bundle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -1257,7 +1257,7 @@ ikisine de bağlanmaz.
 ## Bilinmesi gerekenler
 
 - **Taban macOS 14, tek kaynağı `.cargo/config.toml`'daki
-  `MACOSX_DEPLOYMENT_TARGET`.** rustc binary'nin minos'unu oradan alır; `make kur`
+  `MACOSX_DEPLOYMENT_TARGET`.** rustc binary'nin minos'unu oradan alır; `make bundle`
   `LSMinimumSystemVersion`'ı binary'nin `minos`'undan, yani dolaylı olarak yine
   oradan doldurur. Metalterm'in tabanıyla aynı. Xcode'un `metal` derleyicisi
   derleme şartı değil: shader'lar WGSL ve `include_str!` ile gömülü.
@@ -1297,7 +1297,7 @@ ikisine de bağlanmaz.
   `dlopen` kapalı, sessiz C derlemesi yok). macOS ürün grafı değişmedi.
   Kullanıcı onayı 2026-09-30, geçişli crate'lerle birlikte
   (`.tasks/042-font-sistemi-linux/phase-4.md`, `discussion.md` → Karar 5).
-  **Sparkle 2** bir crate değil, pakete gömülen bir framework (`make kur`
+  **Sparkle 2** bir crate değil, pakete gömülen bir framework (`make bundle`
   sürümü ve sha256'sı `Makefile`'da sabit indirir, depoya girmez) ve
   `bt-shell-macos` onu link'lemeden, çalışma zamanında yüklüyor
   (`bt-shell-macos::updater`). Besleme GitHub'ın
@@ -1315,7 +1315,7 @@ ikisine de bağlanmaz.
   `.tasks/037-ssh-ikinci-tur/phase-7.md` → Uygulama Notları). `Cargo.lock`
   depodadır.
   **bateri'nin kendi lisansı GPL-3.0-or-later** (`Cargo.toml`; metni kökteki
-  `LICENSE`, gnu.org'un metni, `make kur` onu pakete kopyalayıp `cmp`'liyor,
+  `LICENSE`, gnu.org'un metni, `make bundle` onu pakete kopyalayıp `cmp`'liyor,
   bekçisi `bundle_assets::own_license_ships_with_notice`): ürün grafındaki
   her lisans (Apache-2.0, MIT, Zlib, Unlicense) v3'le uyumlu ve yeni
   bağımlılık da öyle olmak zorunda — **GPL-2.0-only bir crate giremez**.
@@ -1426,7 +1426,7 @@ ikisine de bağlanmaz.
   sürülür (macOS: `NSView.displayLink` zamanlayıcı olarak, `bt-shell-macos::pacer`;
   drawable'ı wgpu yüzeyinden yalnız çizen tik alır).
 - **PTY ve ayrıştırma yolunda panik yok.** Bilinmeyen dizi yoksayılır, loglanır
-  (`make denetim` `bt-core`'da gerekçesiz `unwrap`/`expect`/`panic!` arar).
+  (`make audit` `bt-core`'da gerekçesiz `unwrap`/`expect`/`panic!` arar).
   Loglama yarısı **henüz borç**: `tracing` bağlanmadı, yoksayılan olaylar ve
   alacritty'nin `log` satırları sessizce düşüyor; logger gelince bu cümle kalkar.
 - **`tty::setup_env()` çağrılmaz**: *kendi* sürecimizin ortamını değiştirir ve
@@ -1523,9 +1523,9 @@ ikisine de bağlanmaz.
   `bt-shell-macos`'un `app::Inputs`'u.
 - **Shell entegrasyonu bugün yalnız zsh'tir** (`ZDOTDIR`); bash (`--rcfile`) ve
   fish (`vendor_conf.d`) sonraki settedir. Kullanıcının rc dosyasına **asla**
-  yazılmaz — kapısı `make denetim` ve listesi zsh'in beş dosyasını da kapsar.
-  Betik `assets/shell/` altında **kaynaktır**, üretilmez: `make kur` onu
-  pakete kopyalar ve kopyayı `cmp` ile denetler, `make hepsi` de girdi
+  yazılmaz — kapısı `make audit` ve listesi zsh'in beş dosyasını da kapsar.
+  Betik `assets/shell/` altında **kaynaktır**, üretilmez: `make bundle` onu
+  pakete kopyalar ve kopyayı `cmp` ile denetler, `make check` de girdi
   dizininin envanterini (`bundle_assets`). Sarmalayıcı hiçbir kolda ölümcül
   değildir ve kullanıcının özgün `ZDOTDIR`'ını geri koyar; gerekçeler
   `assets/shell/zsh/bateri.zsh`'in başlığında. Komut durumu OSC 133
@@ -1567,25 +1567,20 @@ ikisine de bağlanmaz.
   kare sayımı da aynı durumda. Hangi iddianın hangi araca baktığı `/measure`
   skill'inin tablosunda, bekleyen iddialar `docs/OLCUMLER.md` → `## Bekleyen
   iddialar`'da — bir setin durumu ölçüm beklemez.
-- **Dil:** yorumlar, commit iletileri ve belgeler Türkçe ve "neden"i anlatır.
-  **Kod tanımlayıcılarının tamamı İngilizce** — pub adlar da, yerel yardımcı,
-  alan, değişken ve sınama adı da; `build.rs` dahil, istisnasız. UI dizgileri,
-  ayar anahtarları, tema ve materyal adları İngilizce. **Üç öbek Türkçe kalır ve
-  üçü de kod değildir:** tanı metni (stderr, `assert!` gerekçeleri, `make
-  duman`'ın düşen koşuda bastığı açıklama); `Makefile` hedefleri (projenin
-  komut yüzeyi); süreli koşunun jeton satırındaki **anahtarlar** (`kare=`,
-  `hucre=`, …). Pencerede görünen tanı (alt başlıktaki ayar hatası) tanı
-  metni değil **UI dizgisidir**, İngilizce; stderr'e aynı metin kopyalanır.
-  Jeton satırı bir **makine sözleşmesidir**: anahtar Türkçe ve
-  donmuş, **değer İngilizce**, tanı metni satırın dışında (gerekçe
-  `Report::token_line`'ın doc'unda). Depo geneli kural: **jeton silinmez,
-  eklenir** — okuyan taraf tanımadığı jetonu atlayabilir, kaybolanı arayamaz.
-  `ATLANDI` da aynı sözleşmenin parçası. **İstisna — Linux/wgpu refactor'ı:**
-  refactor'ın yazdığı, baştan yazdığı ya da taşıdığı kodda (wgpu renderer,
-  `.wgsl`, `Pacer`, `FontSystem`, `bt-shell-common`/`-linux`…) yorumlar,
-  doc-comment'ler ve tanı metinleri İngilizce; refactor dışı küçük dokunuşta
-  yalnız yeni yorum — Linux'a açılan kod Türkçe bilmeyen katkıcıya da
-  okunmalı (`.tasks/040-linux-kapisi-ve-wgpu/plan.md` → Yaklaşım).
+- **Dil:** **kod düzeyindeki her şey İngilizce** (2026-10-01'den beri,
+  istisnasız): tanımlayıcılar, yorumlar, doc-comment'ler, tanı metni (stderr,
+  `assert!` gerekçeleri), `Makefile` hedefleri ve mesajları, `.wgsl`, zsh
+  betiği, `tools/`. UI dizgileri, ayar anahtarları, tema ve materyal adları da
+  İngilizce. Türkçe kalan yalnız **test verisi** (Türkçe karakterli girdi
+  sınanıyorsa) ve Türkçe belgelere işaretçiler (`.tasks/…` yolları, `→ Karar
+  N`, bölüm adları) — işaret ettikleri belgeler Türkçe. Belgeler (`CLAUDE.md`,
+  `docs/`, `.tasks/`, `.claude/`) ve commit iletileri Türkçe ve "neden"i
+  anlatır. Jeton satırı bir **makine sözleşmesidir**: anahtar ve değer
+  İngilizce, tanı metni satırın dışında (gerekçe `Report::token_line`'ın
+  doc'unda). Depo geneli kural: **jeton silinmez, eklenir** — okuyan taraf
+  tanımadığı jetonu atlayabilir, kaybolanı arayamaz. Anahtarlar 2026-10-01'de
+  bir kez Türkçeden İngilizceye çevrildi (eski → yeni tablosu
+  `docs/OLCUMLER.md`'nin başında). `SKIPPED` da aynı sözleşmenin parçası.
 
 ## İş akışı
 
@@ -1593,7 +1588,7 @@ ikisine de bağlanmaz.
 yürür: `/rfc → /plan-review → /implement → /ship`, sürücüsü `/akis`. Kurallar
 `.claude/README.md` ve `.claude/is-akisi/`'de; iş setleri `.tasks/` altında.
 Tek dosyalık düzeltme için set açılmaz; set yürürken çıkan tek commit'lik
-düzeltme de phase açmaz. Her phase'in kapısı `make hepsi`'dir, `/code-review`
+düzeltme de phase açmaz. Her phase'in kapısı `make check`'dir, `/code-review`
 ve `/audit` set sonunda bir kez koşar; set defteri (`teslim.md`) ve "ölçüm
 bekliyor" kalemi yoktur, panel yalnız pahalı kararda açılır
 (`.claude/README.md` → Sadeleştirme).

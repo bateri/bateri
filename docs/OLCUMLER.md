@@ -16,6 +16,27 @@ sınanan dört hipotezin hiçbiri onu ayıramadı (`## Kare süresi` → GPU
 sütununun gezintisi). Bellek, giriş gecikmesi ve bench bölümlerinde sayı
 yok; hangisinin kancası olduğu `/measure` skill'inin tablosunda.
 
+**Jeton anahtarları 2026-10-01'de İngilizceye çevrildi** (değerler aynı,
+sözleşme aynı: silinmez, eklenir). Bu dosyadaki o tarihten önceki satırlar
+eski anahtarlarla kayıtlı ve öyle kalıyor; karşılıkları:
+
+| eski | yeni | eski | yeni |
+|---|---|---|---|
+| `kare` | `frames` | `sessiz` | `quiet` |
+| `hucre` | `cells` | `kapanis` | `teardown` |
+| `glif` | `glyphs` | `profil` | `profile` |
+| `kural` | `rules` | `ornek` | `samples` |
+| `yuva` / `yuva2` | `slots` / `slots2` | `dusen` | `dropped` |
+| `yuk` | `load` | `gpu_ornek` | `gpu_samples` |
+| `istek` | `requests` | `gpu_elenen` | `gpu_discarded` |
+| `icerik` | `content` | `taban` | `floor` |
+| `hareket` | `motion` | `acilis` | `startup` |
+| `kayma` | `slide` | `cpu_kare_*` | `cpu_frame_*` |
+| `arka_uc` | `backend` | `ATLANDI` | `SKIPPED` |
+
+Make hedefleri de aynı gün çevrildi (`duman` → `smoke`, `hepsi` → `check`,
+`kur` → `bundle`, …); tam liste `CLAUDE.md` → Komutlar'da.
+
 ## Yöntem
 
 Önce yöntem, sonra sayı: yöntemsiz bir sayı sonraki ölçümle karşılaştırılamaz.
@@ -54,7 +75,7 @@ yok; hangisinin kancası olduğu `/measure` skill'inin tablosunda.
 
 ### Boşta kare (`IDLE_FRAME_LIMIT` ve `QUIET_FLOOR`)
 
-`make duman` yükünde (`Workload::Smoke`) pencere ilk çizimden sonra boşta
+`make smoke` yükünde (`Workload::Smoke`) pencere ilk çizimden sonra boşta
 durur ve kapı **iki** ölçülmüş sayıya bakar: çizilen içerik karesi bir üst
 sınırın altında (`icerik ≤ IDLE_FRAME_LIMIT`), son kareyle deadline
 arasındaki sessizlik bir alt sınırın üstünde (`sessiz ≥ QUIET_FLOOR`,
@@ -366,7 +387,7 @@ uçlar arasında ayrışmıştır ve `cpu_encode` farkı yorumlanamaz.
 ### Atlas yuva ayak izi
 
 Prob **depoda durmuyor**: ölçüm bir kapı değil ve `tests/` altında kalan bir
-dosya `make hepsi`'nin her koşusunda derlenirdi. İki çalışma ağacı açılır
+dosya `make check`'nin her koşusunda derlenirdi. İki çalışma ağacı açılır
 (ölçülen commit ve taban), aynı prob ikisine kopyalanır, koşulur ve silinir:
 
 ```sh
@@ -402,10 +423,10 @@ ARM=broken N=3     # bozuk kol; sağlıklı kolda: ARM=healthy N=10
 
 cargo build -p bateri   # derleme süresi yoklamanın bekleme payına girmesin
 for i in $(seq 1 $N); do  # debug — kapının kendi tarifi
-  make duman 2>&1 | tee "target/duman-$ARM-debug-$i.out" | grep -E 'kare=|bozuldu'
+  make smoke 2>&1 | tee "target/duman-$ARM-debug-$i.out" | grep -E 'kare=|bozuldu'
 done
 
-make kur
+make bundle
 for i in $(seq 1 $N); do  # release paket — LaunchServices yolu
   env -u BT_SCROLL_TEST -u BT_FRAME_STATS open -W -n --env BT_RUN_SECONDS=3 \
     --stdout "$PWD/target/duman-$ARM-release-$i.out" --stderr "$PWD/target/duman-$ARM-release-$i.err" \
@@ -455,7 +476,7 @@ kaydında, gövdeleri burada:
 
 Her mutasyondan sonra `git checkout -- {dosya}` ve `git diff` boş. Sağlıklı kolun
 5 saniyelik kıyası aynı döngülerde `BT_RUN_SECONDS=5` ile koşar (debug'da
-`make duman` yerine Makefile tarifinin aynısı:
+`make smoke` yerine Makefile tarifinin aynısı:
 `env -u BT_SCROLL_TEST -u BT_FRAME_STATS BT_RUN_SECONDS=5 cargo run -q -p bateri`).
 
 Paket yolunun dört tuzağı (profil ayrımı yukarıda, `## Yöntem`'de):
@@ -488,7 +509,7 @@ print(NSScreen.main?.maximumFramesPerSecond ?? -1)
 
 `swiftc -o probe probe.swift`. Ayrı bir koşu açmaz: iki döngünün **ilk**
 turunda komutun yanında koşar ve o koşu `n`'e sayılır — debug'da
-`(make duman … & ./probe; wait)`, pakette `(env … open -W … & ./probe; wait)`.
+`(make smoke … & ./probe; wait)`, pakette `(env … open -W … & ./probe; wait)`.
 Sahibi `bateri` olan, ekran genişliğinde ve 33 pt yüksekliğinde ekran dışı
 pencereler de listede çıkıyor; ana pencere onlar değil (ne oldukları
 doğrulanmadı), boyutundan tanınır.
@@ -516,8 +537,8 @@ tarafında, üç bozuk kolun üçü de kırmızı.
 | ekran | 120 Hz (`maximumFramesPerSecond`); pencere 900×632 pt, `kCGWindowIsOnscreen = 1`, ön planda koşunun kendisi |
 | kullanıcı | makine kullanımdaydı (Safari ön plandaydı, `/Applications/bateri.app` açık) |
 
-**Yol sapması — debug kolu `make duman` değil, `open` ile bir paket.** İlk
-`make duman` iki kez `kare=0` verdi: `cargo run`'ın penceresi ekrandaydı
+**Yol sapması — debug kolu `make smoke` değil, `open` ile bir paket.** İlk
+`make smoke` iki kez `kare=0` verdi: `cargo run`'ın penceresi ekrandaydı
 (`onscreen=1`) ama ön planda Safari vardı ve pencerenin tamamını örtüyordu;
 wgpu örtülü pencereye drawable vermiyor. Ortamın kusuru, kodun değil — aynı
 debug binary'si `open` ile açılınca ön plana geçti ve yeşil düştü. Debug kolu
@@ -601,7 +622,7 @@ hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke istek=4 hareket=27 kayma=0 kapani
 
 | profil · yol · süre | n | `icerik` | `kare` | `sessiz` (ms) |
 |---|---|---|---|---|
-| debug · `make duman` · 3 sn | 10 | `2` ×10 | `29` ×10 | 1737,12 – 1751,58 (ort. 1745,02) |
+| debug · `make smoke` · 3 sn | 10 | `2` ×10 | `29` ×10 | 1737,12 – 1751,58 (ort. 1745,02) |
 | release · paket (`open`) · 3 sn | 10 | `3` ×10 | `30` ×10 | 1739,36 – 1756,28 (ort. 1748,61) |
 
 Bozuk kol **koşulmadı**: sınırları doğuran dağılım 2026-09-16'da ölçüldü ve bu
@@ -683,7 +704,7 @@ hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke istek=4 kapanis=clean profil={deb
 
 | profil · yol · süre | n | `icerik` | `kare` | `hareket` | `sessiz` (ms) |
 |---|---|---|---|---|---|
-| debug · `make duman` · 3 sn | 10 | `3` ×9, `2` ×1 | `30` ×9, `29` ×1 | `27` ×10 | 1745,95 – 1755,25 |
+| debug · `make smoke` · 3 sn | 10 | `3` ×9, `2` ×1 | `30` ×9, `29` ×1 | `27` ×10 | 1745,95 – 1755,25 |
 | release · paket (`open`) · 3 sn | 10 | `2` ×7, `3` ×3 | `29` ×7, `30` ×2, `27` ×1 | `27` ×8, `26` ×1, `25` ×1 | 1746,88 – 1757,29 |
 | debug · `cargo run` · 5 sn | 5 | `3` ×5 | `30` ×5 | `27` ×5 | 3742,95 – 3755,83 |
 | release · paket (`open`) · 5 sn | 5 | `3` ×5 | `30` ×3, `29` ×2 | `27` ×3, `26` ×2 | 3746,16 – 3754,35 |
@@ -691,7 +712,7 @@ hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke istek=4 kapanis=clean profil={deb
 
 Son satır dağılımın **parçasıdır**, ayrı bir kol değil: gürültü kuralı hiçbir
 sağlıklı koşuyu düşürmüyor ve bu yedi koşu türetmenin bağlayıcı ucunu
-1745,95'ten **1742,29**'a indiriyor (dördü debug `make duman`, üçü release
+1745,95'ten **1742,29**'a indiriyor (dördü debug `make smoke`, üçü release
 paket).
 
 **Bozuk koşular** (3 sn, debug; hızlı sızıntı ayrıca release pakette):
@@ -790,12 +811,12 @@ geri kalanı aynıydı; oynayan yalnız `kare` ve `istek`:
 hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke kapanis=clean profil={debug|release} ornek=off pipeline=ok
 ```
 
-**Sağlıklı koşular** (`kare/istek`, koşu sırasıyla; `make duman` ve paket
+**Sağlıklı koşular** (`kare/istek`, koşu sırasıyla; `make smoke` ve paket
 koşularının hepsi yeşil):
 
 | profil · yol · süre | n | `kare` dağılımı | `istek` dağılımı | koşular |
 |---|---|---|---|---|
-| debug · `make duman` · 3 sn | 21 | `1` ×20, `2` ×1 | `2` ×9, `3` ×12 | 1/2 1/2 1/3 1/2 1/3 1/3 2/3 1/3 1/3 1/2 · 1/3 (yoklamalı) · 1/3 1/2 1/3 1/2 1/3 1/2 1/3 1/2 1/3 1/2 |
+| debug · `make smoke` · 3 sn | 21 | `1` ×20, `2` ×1 | `2` ×9, `3` ×12 | 1/2 1/2 1/3 1/2 1/3 1/3 2/3 1/3 1/3 1/2 · 1/3 (yoklamalı) · 1/3 1/2 1/3 1/2 1/3 1/2 1/3 1/2 1/3 1/2 |
 | release · paket (`open`) · 3 sn | 20 | `2` ×18, `1` ×2 | `3` ×20 | 2/3 (yoklamalı) 2/3 2/3 2/3 2/3 1/3 2/3 2/3 2/3 2/3 · 1/3 2/3 2/3 2/3 2/3 2/3 2/3 2/3 2/3 2/3 |
 | debug · `cargo run` · 5 sn | 5 | `1` ×5 | `3` ×5 | 1/3 1/3 1/3 1/3 1/3 |
 | release · paket (`open`) · 5 sn | 5 | `2` ×3, `1` ×2 | `3` ×5 | 1/3 2/3 2/3 1/3 2/3 |
@@ -804,7 +825,7 @@ koşularının hepsi yeşil):
 
 | profil · yol | n | `kare` | kare talebi |
 |---|---|---|---|
-| debug · `make duman` (çıkış 2) | 3 | 353, 354, 353 | 356, 356, 356 |
+| debug · `make smoke` (çıkış 2) | 3 | 353, 354, 353 | 356, 356, 356 |
 | release · paket (`open`, stdout boş) | 3 | 356, 357, 357 | 359, 360, 360 |
 
 **Türetme.** Sağlıklı en yüksek gözlem `2` (iki profilde de), bozuk en düşük

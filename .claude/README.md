@@ -49,7 +49,7 @@ Değişen kural ve sahibi:
 
 | ne vardı | ne oldu | neden | sahibi |
 |---|---|---|---|
-| her phase'de `/simplify` → `/code-review` → `/audit` | her phase'de yalnız doğrulama (`make hepsi`, içinde `make denetim`); riskli phase'de ayrıca `/code-review`; set sonunda bir kez `/code-review` + `/audit` | kapı 17 phase'de 243 ajan açtı ve implementer'ın bağlamını şişirdi; mekanik mercekler grep'ti | `duzen.md` → Kalite kapısı |
+| her phase'de `/simplify` → `/code-review` → `/audit` | her phase'de yalnız doğrulama (`make check`, içinde `make audit`); riskli phase'de ayrıca `/code-review`; set sonunda bir kez `/code-review` + `/audit` | kapı 17 phase'de 243 ajan açtı ve implementer'ın bağlamını şişirdi; mekanik mercekler grep'ti | `duzen.md` → Kalite kapısı |
 | hash'i checklist'e ve `## Durum`'a yaz | ✅ kod commit'inin içinde, hash yok; commit gövdesi `{set} phase-{N}` | hash commit'ten sonra belli olduğu için 121 commit'in 57'si defterdi | `duzen.md` → Durum |
 | sadakat kontrolü | kaldırıldı | 17 phase'de 17 "makas yok"; kuralın kendi günbatımı şartı | `otonom-serit.md` §4 |
 | kapıyı arka planda başlat, yokla | ön planda koş; bekleme döngüsü yasak | üç implementer'ın harcamasının büyük kısmı `echo tick`/`sleep` turuydu | `otonom-serit.md` → Ajan kuralları |
@@ -70,7 +70,7 @@ daraltma; yeni kapı, defter ya da ajan yok.
 
 | ne vardı | ne oldu | neden | sahibi |
 |---|---|---|---|
-| kare/gecikme iddiası taşıyan phase "ölçüm bekliyor" yazar, `/ship` bekleyen adımı 🔨 sayar | iddia yazılmaz; 🟢 = kod `main`'de + `make hepsi` yeşil + `kapı` satırı kapalı; bekleyen iddiaların tek yeri `docs/OLCUMLER.md` | bir phase'in iddiası setin durumuna dönüşüyordu; 12 iddianın kancası ya da yükü yoktu, bench'inki reddedilmiş bir bağımlılığı bekliyordu | `proje.md` → Doğrulama, `duzen.md` → İndeks |
+| kare/gecikme iddiası taşıyan phase "ölçüm bekliyor" yazar, `/ship` bekleyen adımı 🔨 sayar | iddia yazılmaz; 🟢 = kod `main`'de + `make check` yeşil + `kapı` satırı kapalı; bekleyen iddiaların tek yeri `docs/OLCUMLER.md` | bir phase'in iddiası setin durumuna dönüşüyordu; 12 iddianın kancası ya da yükü yoktu, bench'inki reddedilmiş bir bağımlılığı bekliyordu | `proje.md` → Doğrulama, `duzen.md` → İndeks |
 | `teslim.md` (doğrulama + yayın checklist'i + geri alma) | yok; kapanış = kapı commit'i + indeks satırı + devir mesajı | 21 sette 21 kez "revert et", 61 `[komut]`/`[elle]` adımı, 49 `[~]`; hash yazan defter commit'leri `teslim.md`'de yeniden doğmuştu (017'de üç kez) | `proje.md` → Teslim; şablon silindi |
 | phase'de `## Yayın Etkisi`, plan'da `## Göç`, context'te `## Kanıt` ve `## Mevcut Mimari` | hepsi yok | 94 phase'in 93'ü konusu olmayan başlığı doldurdu (tek branch, terminfo yok, bash/fish yok); gerçek yayın etkisi zaten `/audit` mercekleri ve eskalasyon listesi | `sablonlar/` |
 | panel her discussion.md'de varsayılan açık, 3 × `opus` | yalnız birden çok yaklaşım **ve** pahalı sınıf (bağımlılık, katman, `Cell`, `TERM`, shell, her karede CPU) | 71 verdiktin 65'i SORUNLU, 1'i TEMİZ: %99 "sorunlu" diyen kapı ayırt etmiyor; gerçek KIRMIZI üç sette | `rfc` adım 6, `plan-review` → Ne zaman koşulur |
@@ -94,7 +94,7 @@ satır). Kullanıcı sordu; her satır yine bir çıkarma.
 | `/rfc` adım 7 her kararı kullanıcıya sorar | yalnız ürün kararı; teknik karar gerekçesiyle `## Karar`'a | kullanıcı teknik seçimi değerlendiremiyor ("bilmiyorum") | `rfc` adım 7, `plan-review` adım 4 |
 | panel sınıfı konu adıyla ("shell entegrasyonu") | değişecek dosyayla (`assets/shell/`) | 025 betiğe dokunmadan panel açtı | `rfc` adım 6 |
 | aynı bilgi birden çok set dosyasında ve `CLAUDE.md`'de | her bilgi tek yerde; `CLAUDE.md` kural + tek cümle + işaretçi | `CLAUDE.md` her oturumda okunuyor ve her set bir paragraf ekliyordu | `duzen.md` → Teslim |
-| skill'lerde proje komutu, yolu ve set geçmişi; `audit`/`measure` bu projeye yazılmış; `proje.md`'de genel kurallar | iki kat: genel (skill'ler, `duzen.md`, şablonlar) ve proje (`proje.md`, `olcum.md`, `settings.json`); `make denetim` genel kata sızan proje izini yakalar | skill'ler başka projede kullanılamıyordu; taşıma her seferinde gövdeleri yeniden yazmayı istiyordu | bu dosya → Düzen |
+| skill'lerde proje komutu, yolu ve set geçmişi; `audit`/`measure` bu projeye yazılmış; `proje.md`'de genel kurallar | iki kat: genel (skill'ler, `duzen.md`, şablonlar) ve proje (`proje.md`, `olcum.md`, `settings.json`); `make audit` genel kata sızan proje izini yakalar | skill'ler başka projede kullanılamıyordu; taşıma her seferinde gövdeleri yeniden yazmayı istiyordu | bu dosya → Düzen |
 | genel katta sayılı set anekdotları ("ilk altı set", "65 phase'in 59'u"), aynı kuralın 3–6 kopyası ("son phase hariç", "ayrı kapı commit'i yok"), `proje.md` → Tuzaklar | genel katta kural + sayısız tek cümle gerekçe, sayılar yalnız bu dosyanın tablolarında; kuralın tek kopyası `duzen.md`'de, skill'ler bağlanır; Tuzaklar düştü (iki maddesi jüri notlarının tekrarıydı, üçüncüsü Doğrulama'ya indi) | anekdot sözcük listesinden geçiyordu ama başka projede yanlıştı; kopyalar bir önceki turda ayrışmaya başlamıştı (`/plan-review`'un `/implement`'e yüklediği ölü Muhakeme kontrolü, `/akis`'in zorunlu saydığı `## Muhakeme`) | bu dosya → Düzen |
 
 ## Düzen
@@ -126,7 +126,7 @@ taşımaz — gerekçesini sayısız, tek cümleyle verir; "kapı komutu", "kili
 sınıfı" gibi **rollerle** konuşur. Proje katı (`proje.md`, `olcum.md`,
 `settings.json`, bu dosya) o rollerin bu projede neye karşılık geldiğini söyler. Genel
 kata proje izi girerse projenin mekanik denetimi kırmızı düşer (bu projede
-`make denetim`; sözcük listesi sayılı anekdotu göremez, onu kat sınırını
+`make audit`; sözcük listesi sayılı anekdotu göremez, onu kat sınırını
 değiştiren göz yakalar). **Bu dosya proje katıdır**: zincirin genel bakışı
 artı bu projede ölçülmüş tarihçenin **tek yeri** (tur tabloları); genel
 dosyalar sayıya ihtiyaç duyduğunda buraya bağlanır. Skill'ler kuralları gövdelerinde **tekrar etmez**,

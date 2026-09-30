@@ -433,7 +433,7 @@ sinyal.
 `cursor_blink_interval` blink'in **yarım** periyodu: imleç bu kadar açık, bu
 kadar kapalı kalır. Kısaltmanın bedeli doğrusal — `0.25` saniyede dört kare
 ister — ve alt sınır (`0.05`) tavanı orada durdurur. Bu anahtarın yanlış
-değeri `make duman`'ın sessizlik katına **yakalanmaz**: süreli koşu ayar
+değeri `make smoke`'ın sessizlik katına **yakalanmaz**: süreli koşu ayar
 dosyasını hiç okumaz ve blink varsayılanı kapalıdır, yani tek koruma kabul
 aralığının kendisidir.
 

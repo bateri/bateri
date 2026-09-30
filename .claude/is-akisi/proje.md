@@ -5,7 +5,7 @@ Skill'ler ve `duzen.md` **projeden bağımsızdır**: "kapı komutunu koş",
 olduğunu **yalnız burası** söyler. Başka bir projeye taşırken yeniden yazılan
 dosyalar bu dosya, `olcum.md` ve `.claude/settings.json`'dur — skill'lere,
 `duzen.md`'ye ve şablonlara dokunulmaz. Genel dosyalara proje adı, komutu ya
-da yolu girerse `make denetim` kırmızı düşer.
+da yolu girerse `make audit` kırmızı düşer.
 
 Proje sözleşmesinin tamamı `CLAUDE.md`'dedir ve **burada tekrarlanmaz**; her
 ajan onu zaten yükler, iki kopya hem bağlam hem drift demektir.
@@ -37,19 +37,19 @@ ajan onu zaten yükler, iki kopya hem bağlam hem drift demektir.
 
 | durum | komut |
 |---|---|
-| **kapı komutu** — her phase | `make hepsi` — sürüm + `fmt` + `denetim` + `clippy -D warnings` + `test` |
+| **kapı komutu** — her phase | `make check` — sürüm + `fmt` + `denetim` + `clippy -D warnings` + `test` |
 | hızlı iç döngü | `cargo test -p {crate}` |
-| mekanik denetim (kapının içinde) | `make denetim` — katman yönü, `bt-core`'da gerekçesiz panik, rc dosyasına yazma, `bt-gpu`'nun platformsuzluğu (doğrudan bağımlılıkta ve kaynakta `objc2`/`dispatch2`/`block2`/`metal` yok), `bt-shell-common`'ın platform sınırı (doğrudan bağımlılıkta AppKit ailesi, `block2` ve `bt-shell-{macos,linux}` yok; kaynakta `objc2`/`dispatch2`/`block2` yalnız `watch`'ın macOS gövdesinde), bağımlılık uyarısı, genel iş akışı dosyalarının projeden bağımsızlığı |
+| mekanik denetim (kapının içinde) | `make audit` — katman yönü, `bt-core`'da gerekçesiz panik, rc dosyasına yazma, `bt-gpu`'nun platformsuzluğu (doğrudan bağımlılıkta ve kaynakta `objc2`/`dispatch2`/`block2`/`metal` yok), `bt-shell-common`'ın platform sınırı (doğrudan bağımlılıkta AppKit ailesi, `block2` ve `bt-shell-{macos,linux}` yok; kaynakta `objc2`/`dispatch2`/`block2` yalnız `watch`'ın macOS gövdesinde), bağımlılık uyarısı, genel iş akışı dosyalarının projeden bağımsızlığı |
 | `.wgsl` değiştiyse | `make shader` — pipeline'ları kuran sınama (`wgsl_pipelines_build`: naga doğrulaması + Vulkan'ın immediate tabanıyla istenmiş device'ta pipeline kurulumu) |
-| `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz girdisi yok*: koşunca "henüz yok" deyip kırmızı düşer; tetiklenirse doğrulama "yeşil" değil "koşamadı"dır, `[~]` işaretlenir |
-| `assets/bundle/*`, `assets/shell/*`, `crates/bateri` ya da `kur` hedefi değiştiyse | `make kur` — **ürünü** denetler, düşerse çıkış 2; neyi denetlediği `Makefile`'ın `kur` yorumunda. Developer ID varsa imza zaman damgalı, yani ağ ister; notarization yalnız `make paket`'te. `assets/shell/*` aynı satırda, çünkü betik de pakete kopyalanıp `cmp` ile denetleniyor ve `make hepsi` yalnız **girdiyi** görüyor |
-| PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — iki zamanlama profili, ikisi de geçmeli. TSan nightly ister ve araç zinciri pin'li değil: "TSan koşmadı" waive değil, bilinen sınırdır |
-| Linux'ta derlenen bir crate (bugün `bt-core`, `bt-atlas`, `bt-gpu`, `bt-shell-common`) değiştiyse | `make linux` — Docker'da `clippy -D warnings` + `test`, `--locked` (`bt-gpu` Vulkan'da: `wgsl_pipelines_build` ve offscreen piksel sınamaları lavapipe'ta; `bt-shell-common`'da `jobs`'un gerçek PTY'si ve `child`'ın gerçek zsh'i; Mesa'nın `XDG_RUNTIME_DIR` satırları stderr gürültüsü, düşüş değil); ne sınadığı `Makefile`'ın `linux` yorumunda. Docker yoksa ya da daemon cevap vermiyorsa "ATLANDI" → `[~]`, **yalnız** o kolda; yerel rustc ile imaj etiketinin uyuşmazlığı "koşamadı" değil kırmızıdır (çaresi `tools/linux/Dockerfile`'ın `FROM` satırı) |
-| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — geçme ölçütü `CLAUDE.md` → Komutlar'da, jetonların anlamı `Makefile`'ın `duman` yorumunda ve `Report::token_line`'da. Sayaçlar CPU'nundur: GPU'nun boyadığını `make hepsi`'deki offscreen sınamalar, pencerenin görünürlüğünü hiçbiri kanıtlamaz. Başsız ortamda "ATLANDI" → `[~]`. Süreli koşuda pencere kayan seviyede açılıyor, yani öndeki uygulama kapıyı düşürmüyor; ekran uykudaysa pencere yine örtülü sayılır ve `kare=0` ortamdır, kod değil. `IDLE_FRAME_LIMIT` ölçülmüş bir sözleşmedir: değişikliği kod phase'lerinden **ayrı** commit'le iner |
+| `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz girdisi yok*: koşunca "not yet" deyip kırmızı düşer; tetiklenirse doğrulama "yeşil" değil "koşamadı"dır, `[~]` işaretlenir |
+| `assets/bundle/*`, `assets/shell/*`, `crates/bateri` ya da `kur` hedefi değiştiyse | `make bundle` — **ürünü** denetler, düşerse çıkış 2; neyi denetlediği `Makefile`'ın `kur` yorumunda. Developer ID varsa imza zaman damgalı, yani ağ ister; notarization yalnız `make package`'te. `assets/shell/*` aynı satırda, çünkü betik de pakete kopyalanıp `cmp` ile denetleniyor ve `make check` yalnız **girdiyi** görüyor |
+| PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-race` — iki zamanlama profili, ikisi de geçmeli. TSan nightly ister ve araç zinciri pin'li değil: "TSan koşmadı" waive değil, bilinen sınırdır |
+| Linux'ta derlenen bir crate (bugün `bt-core`, `bt-atlas`, `bt-gpu`, `bt-shell-common`) değiştiyse | `make linux` — Docker'da `clippy -D warnings` + `test`, `--locked` (`bt-gpu` Vulkan'da: `wgsl_pipelines_build` ve offscreen piksel sınamaları lavapipe'ta; `bt-shell-common`'da `jobs`'un gerçek PTY'si ve `child`'ın gerçek zsh'i; Mesa'nın `XDG_RUNTIME_DIR` satırları stderr gürültüsü, düşüş değil); ne sınadığı `Makefile`'ın `linux` yorumunda. Docker yoksa ya da daemon cevap vermiyorsa "SKIPPED" → `[~]`, **yalnız** o kolda; yerel rustc ile imaj etiketinin uyuşmazlığı "koşamadı" değil kırmızıdır (çaresi `tools/linux/Dockerfile`'ın `FROM` satırı) |
+| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make smoke` — geçme ölçütü `CLAUDE.md` → Komutlar'da, jetonların anlamı `Makefile`'ın `smoke` yorumunda ve `Report::token_line`'da. Sayaçlar CPU'nundur: GPU'nun boyadığını `make check`'deki offscreen sınamalar, pencerenin görünürlüğünü hiçbiri kanıtlamaz. Başsız ortamda "SKIPPED" → `[~]`. Süreli koşuda pencere kayan seviyede açılıyor, yani öndeki uygulama kapıyı düşürmüyor; ekran uykudaysa pencere yine örtülü sayılır ve `frames=0` ortamdır, kod değil. `IDLE_FRAME_LIMIT` ölçülmüş bir sözleşmedir: değişikliği kod phase'lerinden **ayrı** commit'le iner |
 
 **Araç zinciri pin'li değil** (Homebrew rustc; `rustup` ve
 `rust-toolchain.toml` bilinçli olarak yok): `brew upgrade` sonrası yeni bir
-clippy lint'i dokunulmamış kodu kırmızıya çevirebilir. `make hepsi` sürümü
+clippy lint'i dokunulmamış kodu kırmızıya çevirebilir. `make check` sürümü
 başta basar; kırmızıda önce sürüme bak.
 
 ## Dosya sınıfları
@@ -67,7 +67,7 @@ başta basar; kırmızıda önce sürüme bak.
 
 ## Riskli phase tetikleyicileri
 
-Doğrulama tablosundan türer, ayrı tutulmaz: phase `make test-yaris`
+Doğrulama tablosundan türer, ayrı tutulmaz: phase `make test-race`
 (paylaşılan durum) ya da `make shader` (`#[repr(C)]` ↔ `.wgsl` düzeni:
 `var<immediate>` blokları ve instance'ın vertex düzeni) gerektirdiyse, ya da
 kilit dosyası değiştiyse.
@@ -133,8 +133,8 @@ konuları:
 
 - **Uygulamanın süreç adı** `bateri`: `pkill`/`killall bateri` yasak,
   kullanıcı aynı anda kendi örneğini açık tutuyor olabilir.
-- **Uzun komutlar** (ön planda, `timeout`'la): `make hepsi`, `make kur`,
-  `make test-yaris`, `make linux`.
+- **Uzun komutlar** (ön planda, `timeout`'la): `make check`, `make bundle`,
+  `make test-race`, `make linux`.
 - **Yayın etkili sürprizler** (eskalasyon): beklenmeyen `Cargo.lock`
   değişimi, yeni bağımlılık ihtiyacı, ayar şeması / `TERM` / shell
   entegrasyonu etkisi, beklenmeyen ölçüm gerilemesi ya da boşta kare üreten
@@ -143,9 +143,9 @@ konuları:
 ## Denetim mercekleri
 
 `/audit`'in mercekleri. Kuralların gerekçesi `CLAUDE.md`'dedir; aşağıdakiler
-onların **kontrol edilebilir hâlleridir**. Mekanik yarı `make denetim`'de.
+onların **kontrol edilebilir hâlleridir**. Mekanik yarı `make audit`'de.
 
-1. **Bağımlılık kararı.** `make denetim` `Cargo.toml`/`Cargo.lock` uyarısı
+1. **Bağımlılık kararı.** `make audit` `Cargo.toml`/`Cargo.lock` uyarısı
    verdiyse: kararın kaydı (`discussion.md` → `## Karar` ya da phase notu)
    var mı? Yoksa bulgudur ve kullanıcıya sorulur.
 2. **Ayar ve tema şeması.** `settings.rs` ya da tema modeli değiştiyse: yeni
