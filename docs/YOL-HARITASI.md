@@ -304,6 +304,20 @@ GitHub Releases'a taşındı, lisans GPL-3.0-or-later oldu).
 Bunlar kendi setlerini hak etmiyor; yukarıdaki setlerden birine yamanırlar.
 Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 
+- **Linux borcu — tek kod noktalı emoji tek renk.** DejaVu Sans Emoticons
+  bloğunu (U+1F600–1F64F) taşıyor ve cascade'de Noto'dan önce, yani `😀`
+  Linux'ta maske düzleminde çiziliyor (`👍` renkli); çaresi Unicode'un
+  Emoji_Presentation kuralı, `bt-atlas`'a `unicode-width` kenarı ister
+  (onaylı listede yok). winit/pencere gelmeden kullanıcı görmüyor. Kaynak:
+  042 `phase-5.md` → Uygulama Notları.
+- **Reddedilen geniş karakter ikinci karede iki kutu (platformsuz).**
+  `Atlas::slot`'un önbellek kolu `TOFU` kaydını `want` yarısıyla
+  cevaplıyor, taze ret `Whole` diyor: `bt-gpu` ilk karede bir, sonrakilerde
+  iki kutu çiziyor. macOS'ta orantılı ailenin eğik/kalın yüzünde görülüyor
+  (tanık: Helvetica `☕`/`⚡`), Linux'ta fontu olmayan her CJK karakterde.
+  Çare tek dal + bekçi, tanığı değiştirdiği için 042'ye girmedi. Kaynak:
+  042 `phase-6.md` → Uygulama Notları.
+
 - **035'in kapsam dışı bıraktığı kümeler.** Emoji dizileri tek glyph, ama:
   eşlenmemiş tek RI kutu kalıyor; emoji dışı UAX #29 kümeleri (Arapça
   lam-elif, Hangul jamo, Hint SpacingMark) ve tek sütunlu birleştirici

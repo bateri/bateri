@@ -13,3 +13,8 @@ bt-atlas = { workspace = true }
 # layer and the vsync rhythm come from `bt-shell` (`Surface::from_layer`,
 # `Pacer`).
 wgpu = { workspace = true }
+
+[dev-dependencies]
+# The glyph guards' sample characters come from the atlas backend's fixture
+# (042 Karar 7): one measurement per font, not a copy here.
+bt-atlas = { workspace = true, features = ["fixture"] }

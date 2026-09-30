@@ -128,10 +128,10 @@ pub(crate) type Font = <Backend as FontSystem>::Font;
 
 /// Backend-specific sample characters and family names for the
 /// platformless tests (Karar 7).
-#[cfg(all(test, target_os = "macos"))]
-pub(crate) use crate::coretext::fixture;
+#[cfg(all(any(test, feature = "fixture"), target_os = "macos"))]
+pub use crate::coretext::fixture;
 
 /// Backend-specific sample characters and family names for the
 /// platformless tests (Karar 7).
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use crate::freetype::fixture;
+#[cfg(all(any(test, feature = "fixture"), target_os = "linux"))]
+pub use crate::freetype::fixture;

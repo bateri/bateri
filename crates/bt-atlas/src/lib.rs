@@ -1,14 +1,14 @@
 //! bt-atlas — glyph rasterizasyonu ve atlas paketleme.
 //!
-//! CoreText ile rasterizasyon, sabit yuva ızgarası ve hücre metriği burada
-//! yaşar.
-//! The font stack sits behind the `FontSystem` trait (`system`): the rules
+//! Rasterization, the fixed slot grid and the cell metric live here. The
+//! font stack sits behind the `FontSystem` trait (`system`): the rules
 //! (`rules`) are platformless and only the backend of the platform being
-//! built sees its font libraries — on macOS `coretext`, the one module that
-//! sees `objc2-core-text` / `objc2-core-graphics` / `objc2-core-foundation`
-//! (042). AppKit ve **Metal görülmez**. Dokunun sahibi `bt-gpu`'dur — buradan çıkan şey bir yuva
-//! numarası ve CPU bitmap'idir, `MTLTexture` değil; `bt-gpu` onu
-//! `replaceRegion` ile kendi `R8Unorm` dokusuna yazıyor.
+//! built sees its font libraries — on macOS `coretext`
+//! (`objc2-core-text` / `objc2-core-graphics` / `objc2-core-foundation`), on
+//! Linux `freetype` (FreeType + fontconfig, `harfrust` for clusters; 042).
+//! AppKit and the GPU are **not seen**: the textures are `bt-gpu`'s — what
+//! leaves here is a slot number and CPU bitmaps, which `bt-gpu` uploads into
+//! its own two textures (mask `R8Unorm`, colour `RGBA8Unorm_sRGB`).
 //!
 //! Dört font yüzü (`Face`) ve kural çizgileri (`RuleKind`) burada: kural
 //! sprite'ları fonttan glyph almıyor, yordamsal çiziliyor. Aile ayardan
@@ -58,6 +58,14 @@ use rules::Faces;
 pub use rules::{Face, FontIssue, Metrics, SizeClass};
 pub use rules::{family_issue, monospaced_families};
 use system::{Backend, Font, FontSystem};
+
+/// The backend's sample characters and family names, measured on its fonts
+/// (042 Karar 7). Test support, not API: `bt-gpu`'s glyph guards take their
+/// samples from here (feature `fixture`, a dev-dependency there) so a
+/// measurement lives in one place.
+#[cfg(feature = "fixture")]
+#[doc(hidden)]
+pub use system::fixture;
 
 /// Atlasta yuva tutan şey: bir karakter, bir kural çizgisi ya da bir grapheme
 /// dizisi.

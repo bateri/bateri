@@ -547,18 +547,19 @@ impl FontSystem for CoreText {
 /// (`.tasks/042-font-sistemi-linux/discussion.md` → Karar 7): a test body
 /// names no font and assumes no character of the base font; what it needs
 /// comes from here, measured on this backend's fonts.
-#[cfg(test)]
-pub(crate) mod fixture {
+#[cfg(any(test, feature = "fixture"))]
+pub mod fixture {
+    #[cfg(test)]
     use super::{CoreText, FontSystem};
 
     /// The default chain's guaranteed base family.
-    pub(crate) const DEFAULT_FAMILY: &str = super::FALLBACK;
+    pub const DEFAULT_FAMILY: &str = super::FALLBACK;
 
     /// A family that is installed everywhere and is **not** monospaced.
-    pub(crate) const PROPORTIONAL_FAMILY: &str = "Helvetica";
+    pub const PROPORTIONAL_FAMILY: &str = "Helvetica";
 
     /// A second monospaced family, not the default one.
-    pub(crate) const SECOND_FAMILY: &str = "Monaco";
+    pub const SECOND_FAMILY: &str = "Monaco";
 
     /// A character the **one-cell** gate rejects: on the sixteenth plane's
     /// private use area, no installed font covers it and the cascade gives
@@ -566,18 +567,18 @@ pub(crate) mod fixture {
     /// same in all four combinations) and which the shrink arm keeps out by
     /// name. Tests reading "tofu" from it assume the gate works; the gate's
     /// own guard is `the_gate_decides_by_ink_alone`.
-    pub(crate) const UNKNOWN_CHAR: char = '\u{10FFFC}';
+    pub const UNKNOWN_CHAR: char = '\u{10FFFC}';
 
     /// A character rejected in one cell but accepted in **two** (a pair of
     /// slots for a wide request): `.LastResort`'s box fits two cells.
-    pub(crate) const WIDE_CHAR: char = UNKNOWN_CHAR;
+    pub const WIDE_CHAR: char = UNKNOWN_CHAR;
 
     /// A character the fallback **accepts**, 019's reason to exist: `⏵` is
     /// not in Menlo and comes from STIX Two Math (measured, macOS 26.4.1),
     /// advancing 0.84 of the cell with ink 0.69 — the ratio is scale-free, so
     /// it passes the gate in both size classes. Its side bearings are
     /// asymmetric (1.04 left, 0.13 right), so centring really moves it.
-    pub(crate) const FALLBACK_CHAR: char = '⏵';
+    pub const FALLBACK_CHAR: char = '⏵';
 
     /// The character that tests the gate's **criterion**: its advance exceeds
     /// the cell but its ink fits. `⏺` is Claude Code's tool marker and used
@@ -585,14 +586,14 @@ pub(crate) mod fixture {
     /// paints 0.914 (measured, Menlo 16pt). [`FALLBACK_CHAR`] passes both
     /// criteria and [`UNKNOWN_CHAR`] fails both, so only this one would see
     /// the criterion reverted.
-    pub(crate) const INK_CHAR: char = '⏺';
+    pub const INK_CHAR: char = '⏺';
 
     /// Characters that exercise the gate's **rule**; none is in Menlo, so
     /// they take the fallback path. The expectation is not written here —
     /// whether a character becomes a box depends on the installed fonts
     /// (`U+E0B0` falls to `.LastResort` here but draws with a Nerd Font) — it
     /// is derived from the candidate's own ink by the test.
-    pub(crate) const GATE_PROBES: [char; 9] = [
+    pub const GATE_PROBES: [char; 9] = [
         FALLBACK_CHAR,
         INK_CHAR,
         '𝔸',
@@ -613,12 +614,12 @@ pub(crate) mod fixture {
     /// the base font: box drawing, the base font's own symbols and two
     /// combining marks (a zero-advance glyph would rasterize in the middle of
     /// the cell; in Menlo U+0301 advances a full cell — measured).
-    pub(crate) const BASE_SYMBOLS: &str = "─│┌┐└┘├┤┬┴┼✓⚠▶\u{0300}\u{0301}";
+    pub const BASE_SYMBOLS: &str = "─│┌┐└┘├┤┬┴┼✓⚠▶\u{0300}\u{0301}";
 
     /// Grapheme clusters that shape into a single colour glyph: a flag (two
     /// RIs), ZWJ, a skin tone and two VS16 — `❤` and `🌡` alone are
     /// single-column, VS16 makes them two.
-    pub(crate) const CLUSTERS: [&str; 5] = [
+    pub const CLUSTERS: [&str; 5] = [
         "\u{1F1F9}\u{1F1F7}",                          // 🇹🇷
         "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", // 👨‍👩‍👧
         "\u{1F44D}\u{1F3FD}",                          // 👍🏽
@@ -628,16 +629,34 @@ pub(crate) mod fixture {
 
     /// An emoji whose doubled string does not shape into one glyph, so the
     /// cluster falls back to it.
-    pub(crate) const CLUSTER_BASE: char = '\u{1F44D}'; // 👍
+    pub const CLUSTER_BASE: char = '\u{1F44D}'; // 👍
 
     /// The display scale of the cluster tests: **Retina**. At 13pt@1x even
     /// the single-code-point `👍` is rejected by the two-cell gate (measured
     /// on the flag's glyph: ink 16.25 pt, two cells 15.65 pt), so there a
     /// cluster's rejection would say nothing about shaping and the fallback
     /// to the base character would stay green against tofu.
-    pub(crate) const CLUSTER_SCALE: f64 = 2.0;
+    pub const CLUSTER_SCALE: f64 = 2.0;
+
+    /// The families the default chain may open: SF Mono where it is
+    /// installed, Menlo everywhere else.
+    pub const CHAIN_FAMILIES: [&str; 2] = [super::PREFERRED[0], super::FALLBACK];
+
+    /// A wide character drawn as **two halves** with ink on both sides of
+    /// the seam: `漢` comes from the cascade (PingFang SC) and its ink wants
+    /// two cells. `bt-gpu`'s fan-out and typing-effect guards draw it.
+    pub const PAIR_CHAR: char = '漢';
+
+    /// A pair whose ink is one horizontal stroke crossing the seam: `一`
+    /// spans nearly the full em in any CJK font (`bt-gpu`'s seam guard).
+    pub const STROKE_PAIR_CHAR: char = '一';
+
+    /// Two columns in Unicode but its ink fits one cell: Menlo's own `☕`,
+    /// whose advance is the cell's (a wide request answers `Whole`).
+    pub const ONE_CELL_WIDE_CHAR: char = '☕';
 
     /// The family name a font reports — diagnostics in test messages only.
+    #[cfg(test)]
     pub(crate) fn family_name(font: &<CoreText as FontSystem>::Font) -> String {
         // SAFETY: `font` is alive; a pure read.
         unsafe { font.family_name() }.to_string()

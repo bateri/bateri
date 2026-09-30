@@ -77,4 +77,4 @@ _Requirements: R7, R8_
 - **Waive (low):** `COLR` dış hat kolunda kapı tabanın tek renk dış hattını
   ölçüyor, çizilen renkli katmanlar; kesirli öteleme de katmanlar yeniden
   yüklendiği için kayboluyor (≤ 1 px). Yalnız `COLR` fontu (Twemoji COLR)
-  etkileniyor, imajın `CBDT` Noto'su değil; düzeltmesi katmanlardan ölçmek.
+  etkileniyor, imajın `CBDT` Noto'su değil; düzeltmesi katmanlardan ölçmek. Kabul: orkestratör, 2026-09-30.

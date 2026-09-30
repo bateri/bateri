@@ -89,5 +89,5 @@ yalnız macOS'ta ve yeni bağımlılık getirmiyor.
 | phase-3 | ✅ |
 | phase-4 | ✅ |
 | phase-5 | ✅ |
-| phase-6 | |
-| kapı | |
+| phase-6 | ✅ |
+| kapı | ✅ |

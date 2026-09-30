@@ -356,6 +356,17 @@ fn slot_ink(face: &::freetype::Face, scale: f64) -> InkRect {
     }
 }
 
+/// fontconfig's best match for `name`, opened at `size`, with the family it
+/// resolved to (empty when nothing matched).
+fn open_named(name: &str, size: f64) -> (FtFont, String) {
+    let matched = find(name, None, None);
+    let family = matched
+        .as_ref()
+        .map(|m| m.family.clone())
+        .unwrap_or_default();
+    (FtFont::open(matched, size, Rc::default()), family)
+}
+
 /// The cascade's walk ([`FreeType::cascade`]): with `colour_first`, the
 /// colour fonts of the sorted list are tried before the rest.
 fn cascade_from(base: &FtFont, text: &str, colour_first: bool) -> Option<FtFont> {
@@ -364,7 +375,12 @@ fn cascade_from(base: &FtFont, text: &str, colour_first: bool) -> Option<FtFont>
         let mut pattern = Pattern::new(fc).ok()?;
         let family = CString::new(base.source.family.as_str()).ok()?;
         pattern.add_string(FC_FAMILY, &family).ok()?;
-        pattern.sort_fonts(UnicodeCoverage::Trim).ok()
+        // Not trimmed: `Trim` drops every font whose charset adds nothing to
+        // the fonts before it, so a colour font whose code points a text
+        // font earlier in the sort already covers (Symbola) would vanish
+        // from the colour-first walk, and a font covering a whole cluster
+        // would vanish when two earlier fonts cover its pieces between them.
+        pattern.sort_fonts(UnicodeCoverage::NoTrim).ok()
     });
     let sorted = sorted.as_ref()?;
     let first = |colour_only: bool| {
@@ -388,13 +404,21 @@ fn cascade_from(base: &FtFont, text: &str, colour_first: bool) -> Option<FtFont>
 impl FontSystem for FreeType {
     type Font = FtFont;
 
+    /// A bitmap-only **text** face (a PCF/BDF family such as `Fixed` or
+    /// `Terminus`) answers with no family: the mask path draws outlines only
+    /// ([`FreeType::draw_mask`]) and such a face has no `units_per_EM` for
+    /// [`FreeType::raw_metrics`], so opening it would give a one-pixel-high
+    /// cell full of boxes. Reported as "not found", the chain falls back to
+    /// the default one and the settings list leaves it out.
     fn open(name: &str, size: f64) -> (Self::Font, String) {
-        let matched = find(name, None, None);
-        let family = matched
+        let (font, family) = open_named(name, size);
+        let bitmap_text = font
+            .face
             .as_ref()
-            .map(|m| m.family.clone())
-            .unwrap_or_default();
-        let font = FtFont::open(matched, size, Rc::default());
+            .is_some_and(|face| !face.is_scalable() && !face.has_color());
+        if bitmap_text {
+            return (font, String::new());
+        }
         (font, family)
     }
 
@@ -403,7 +427,7 @@ impl FontSystem for FreeType {
     /// no name of its own to compare, so there is no substitution warning
     /// here (Karar 3.1).
     fn open_default(size: f64) -> (Self::Font, String) {
-        let (font, family) = Self::open(MONOSPACE, size);
+        let (font, family) = open_named(MONOSPACE, size);
         if font.face.is_none() {
             // Process output, not a UI string; the repository's stderr prefix.
             eprintln!("bateri: fontconfig found no '{MONOSPACE}' font, drawing boxes only");
@@ -848,25 +872,26 @@ fn resample(
 /// Sample characters and family names for the platformless tests
 /// (`.tasks/042-font-sistemi-linux/discussion.md` → Karar 7), measured on
 /// the `make linux` image's fonts (`fonts-dejavu-core`).
-#[cfg(test)]
-pub(crate) mod fixture {
+#[cfg(any(test, feature = "fixture"))]
+pub mod fixture {
+    #[cfg(test)]
     use super::FtFont;
 
     /// The family `monospace` resolves to in the image.
-    pub(crate) const DEFAULT_FAMILY: &str = "DejaVu Sans Mono";
+    pub const DEFAULT_FAMILY: &str = "DejaVu Sans Mono";
 
     /// An installed family that is **not** monospaced.
-    pub(crate) const PROPORTIONAL_FAMILY: &str = "DejaVu Sans";
+    pub const PROPORTIONAL_FAMILY: &str = "DejaVu Sans";
 
     /// A second family, not the default one. The image has a single
     /// monospaced family, so this one is not monospaced; its one consumer
     /// (`ensure_rebuilds_when_family_changes`) asks only for the rebuild.
-    pub(crate) const SECOND_FAMILY: &str = "DejaVu Serif";
+    pub const SECOND_FAMILY: &str = "DejaVu Serif";
 
     /// A character no installed font covers: the cascade has **no**
     /// candidate (there is no last-resort font), so the answer is tofu
     /// without the gate being asked.
-    pub(crate) const UNKNOWN_CHAR: char = '\u{10FFFC}';
+    pub const UNKNOWN_CHAR: char = '\u{10FFFC}';
 
     /// A character rejected in one cell but accepted in **two** (a pair of
     /// slots for a wide request): `⁂` comes from DejaVu Sans with ink
@@ -874,22 +899,22 @@ pub(crate) mod fixture {
     /// `.LastResort` box, a single-cell request for it is **shrunk**, not
     /// rejected: every glyph that fits two cells fits one at half the size,
     /// under `SHRINK_LIMIT`.
-    pub(crate) const WIDE_CHAR: char = '\u{2042}';
+    pub const WIDE_CHAR: char = '\u{2042}';
 
     /// A character the fallback **accepts**: `⁊` is not in DejaVu Sans Mono
     /// and comes from DejaVu Sans, advancing 0.83 of the cell with ink
     /// 0.08..0.75 — narrower than the cell, so centring really moves it.
-    pub(crate) const FALLBACK_CHAR: char = '\u{204A}';
+    pub const FALLBACK_CHAR: char = '\u{204A}';
 
     /// Advance wider than the cell, ink inside it: `∖` from DejaVu Sans
     /// advances 1.058 cells and paints 0.32..0.88 (measured).
-    pub(crate) const INK_CHAR: char = '\u{2216}';
+    pub const INK_CHAR: char = '\u{2216}';
 
     /// Characters that exercise the gate's **rule**; none is in DejaVu Sans
     /// Mono. `⟹` paints 2.3 cells, beyond `SHRINK_LIMIT` — the box side of
     /// the experiment; `⁂` is shrunk; the private-use ones have no candidate.
     /// The expectation is derived from each candidate's own ink by the test.
-    pub(crate) const GATE_PROBES: [char; 7] = [
+    pub const GATE_PROBES: [char; 7] = [
         FALLBACK_CHAR,
         INK_CHAR,
         UNKNOWN_CHAR,
@@ -902,14 +927,14 @@ pub(crate) mod fixture {
     /// Symbols beyond ASCII whose advance must equal the cell's: all of them,
     /// the two combining marks included, advance exactly one cell in DejaVu
     /// Sans Mono (measured).
-    pub(crate) const BASE_SYMBOLS: &str = "─│┌┐└┘├┤┬┴┼✓⚠▶\u{0300}\u{0301}";
+    pub const BASE_SYMBOLS: &str = "─│┌┐└┘├┤┬┴┼✓⚠▶\u{0300}\u{0301}";
 
     /// Grapheme clusters that shape into a single colour glyph; the same
     /// sequences as the CoreText fixture, drawn from Noto Color Emoji
     /// (`fonts-noto-color-emoji`). The two selector sequences are the ones
     /// the cascade has to steer: Noto's charset has no U+FE0F and DejaVu
     /// Sans maps both `❤` and the selector (measured).
-    pub(crate) const CLUSTERS: [&str; 5] = [
+    pub const CLUSTERS: [&str; 5] = [
         "\u{1F1F9}\u{1F1F7}",
         "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
         "\u{1F44D}\u{1F3FD}",
@@ -918,12 +943,35 @@ pub(crate) mod fixture {
     ];
 
     /// An emoji whose doubled string does not shape into one glyph.
-    pub(crate) const CLUSTER_BASE: char = '\u{1F44D}';
+    pub const CLUSTER_BASE: char = '\u{1F44D}';
 
     /// The display scale of the cluster tests.
-    pub(crate) const CLUSTER_SCALE: f64 = 2.0;
+    pub const CLUSTER_SCALE: f64 = 2.0;
+
+    /// The families the default chain may open: the image has one
+    /// monospaced family.
+    pub const CHAIN_FAMILIES: [&str; 1] = [DEFAULT_FAMILY];
+
+    /// A wide character drawn as **two halves** with ink on both sides of
+    /// the seam. The image has no CJK font, so it is [`WIDE_CHAR`]: `⁂`'s
+    /// ink spans 1.56 cells and is centred in the two-cell box, the top
+    /// asterisk on the seam. `bt-gpu`'s fan-out and typing-effect guards
+    /// draw it.
+    pub const PAIR_CHAR: char = WIDE_CHAR;
+
+    /// A pair whose ink is horizontal strokes crossing the seam, for
+    /// `bt-gpu`'s seam guard (no CJK `一` in the image): `⟺` from DejaVu
+    /// Sans draws across both cells and its two shafts meet the seam with
+    /// equal columns on either side (measured at 13pt@2x). `⁂` would not
+    /// do: its asterisk sits on the seam and differs column to column.
+    pub const STROKE_PAIR_CHAR: char = '\u{27FA}';
+
+    /// Two columns in Unicode but its ink fits one cell: DejaVu Sans Mono's
+    /// own `☕` (a wide request answers `Whole`).
+    pub const ONE_CELL_WIDE_CHAR: char = '\u{2615}';
 
     /// The family name a font reports — diagnostics in test messages only.
+    #[cfg(test)]
     pub(crate) fn family_name(font: &FtFont) -> String {
         font.source.family.clone()
     }
