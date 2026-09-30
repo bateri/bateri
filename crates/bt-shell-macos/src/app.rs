@@ -350,7 +350,7 @@ fn initial_line(opening: Opening, remote_line: Option<String>) -> Option<String>
 /// **Kararın tamamı burada ve saf**: hangi kabuk, hangi ayar, betik nerede.
 /// Yeri `child` değil `app`, çünkü kapının ilk katı [`Inputs`] ve o bu modüle
 /// özel ([`resolve_reduce_motion`] emsali; orada da sistemi okuyan taraf
-/// `bt-shell` ama kararı `Inputs` kapılıyor).
+/// `bt-shell-macos` ama kararı `Inputs` kapılıyor).
 ///
 /// `shell` ve `script_dir` birer **closure**: süreli koşuda ve `"off"` diyen
 /// kullanıcının oturumunda ikisine de hiç gidilmiyor. Süreli koşununki bir
@@ -619,7 +619,7 @@ fn dock_rows_at_birth(integration: &[(String, String)], setting: ShellIntegratio
 /// `dock_rows` alanı üstüne yazılsaydı `DOCK_ROWS` sabitinden geri kurmak
 /// gerekirdi ve o, olmayan bir dock'u var etmenin tam yolu.
 ///
-/// Saf: `bt-shell`'in AppKit'siz sınanabilen tek yarısı burası.
+/// Saf: `bt-shell-macos`'un AppKit'siz sınanabilen tek yarısı burası.
 pub(crate) fn dock_rows_for(alt_screen: bool, birth: u16) -> u16 {
     if alt_screen { 0 } else { birth }
 }

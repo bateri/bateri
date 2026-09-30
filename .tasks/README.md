@@ -44,7 +44,7 @@
 | 040 | [linux-kapisi-ve-wgpu](040-linux-kapisi-ve-wgpu/) | 🟢 | 7 phase + kapı tamam |
 | 041 | [yedek-glyph-kucultme](041-yedek-glyph-kucultme/) | 🟢 | 2 phase + kapı tamam — hücreyi aşan yedek glyph (`⧉`, tek sütunlu emoji) sınırın içindeyse küçük puntoyla ve hücrede ortalanarak çiziliyor; `make tarama` envanteri ve araç karakterlerinin bekçisi (gözle kontrol bekliyor) |
 | 042 | [font-sistemi-linux](042-font-sistemi-linux/) | 🟢 | 7 phase + kapı tamam: `FontSystem` arkasında macOS CoreText (raster bit bit aynı), Linux FreeType + fontconfig + harfrust; `make linux` `bt-gpu`'yu lavapipe'ta koşar |
-| 043 | [bt-shell-ayrimi](043-bt-shell-ayrimi/) | 🔨 | `bt-shell` → `bt-shell-common` (AppKit'siz modüller, `/proc`/inotify/`$SHELL -l` Linux kolları) + `bt-shell-macos`; davranış değişmez |
+| 043 | [bt-shell-ayrimi](043-bt-shell-ayrimi/) | 🟢 | 5 phase + kapı tamam — kabuk katmanı `bt-shell-common` (AppKit'siz, Linux gövdeleriyle `make linux`'ta) ve `bt-shell-macos` olarak ayrıldı, macOS'ta fark yok (3 bulgu giderildi, 6 waive) |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

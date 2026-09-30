@@ -726,7 +726,7 @@ define_class!(
         /// açıldığı için **her pencerede** geliyor, kip açık olmasa da:
         /// olayın bedeli bir koordinat aritmetiği ve hücre değişmediyse
         /// `bt-core` hiç çağrılmıyor ([`BateriView::motion_event`]). Kipe
-        /// göre açmak kipi `bt-shell`'e yayınlamayı, yani yeni bir paylaşılan
+        /// göre açmak kipi `bt-shell-macos`'a yayınlamayı, yani yeni bir paylaşılan
         /// durumu isterdi (`.tasks/020-fare-raporlama/discussion.md` →
         /// Karar 4); belirti görülürse o kola dönülür.
         ///

@@ -1,42 +1,40 @@
-//! bt-shell — AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler.
+//! bt-shell-macos — the AppKit shell: windows, tabs, splits, menus, keyboard,
+//! services.
 //!
-//! `objc2-app-kit` üzerinden doğrudan AppKit; Metal'i görmez, çizimi
-//! `bt-gpu`'ya bırakır ve device'ı `Renderer::system_default` kurar — pane
-//! başına bir renderer (`pane`). Kareyi de sürmez: pane'i, oturumu ve
-//! display link'i birbirine bağlar, gerisi `bt-gpu`'nun ritmidir. Uygulama
-//! geneli (`app`), pencere başına olan (`window`: krom, sekme, kapatma
-//! sorusu, sekme eylemleri) ve oturum başına olan (`pane`: `NSView` alt
-//! sınıfı; oturumun çekirdeği, arama paneli, yükleme kuyruğu ve pane
-//! düzeyindeki menü seçicileri) ayrı nesnelerde. Pane ile sahibi arasındaki
-//! sınır üç parça (039 Karar 1–3): girdiler doğumda tek pakette
-//! (`pane::PaneLaunch`), olaylar bir trait'ten (`pane::PaneHost`; bugünkü
-//! sahip `window::WindowHost`), menünün karşıladığı her iş pane'de adlı bir
-//! yöntem — seçici onu çağıran sarmalayıcı. Pane modülü `AppDelegate`'e
-//! uzanmıyor; ana kuyruk dönüşleri pane'i sahibin verdiği yoldan
-//! (`pane::PaneLookup`) kimlikle buluyor. Klavye buradan PTY'ye akar (`keys`, `view`,
-//! `clipboard`), fare de buradan oturuma (seçim ve kaydırma, `view`);
-//! Finder'dan bırakılan dosyanın yolu da buradan giriş satırına düşer
-//! (`view`'ın sürükleme hedefi + `quote`'un kabuk kaçışı);
-//! kabuğun hangi dizinde ve hangi yerelle açılacağına (`child`) ve kapanış
-//! sırasına da bu crate karar verir; kabuğun ön planında koşan işi süreç
-//! tablosundan okuyan da (`jobs`). Ayar dosyasını okuyan (`settings`),
-//! kayıt anında yeniden okuyabilsin diye izleyen (`watch`) ve tanısını
-//! pencere alt başlığında gösteren (`notices`) de burası; ayrıştırma ve fark
-//! `bt-core`'da; ayar penceresi (`settings_window`, Settings…) dosyaya o
-//! yazma yolundan yazar. Sistemin açık/koyu görünümünü okuyup temayı seçen de
-//! (`app`, `NSApp.effectiveAppearance`'ın KVO'suyla) ve pencere kromunu
-//! temaya boyayan (`window`). Ana menü (`menu`) uygulama, Shell,
-//! Edit, View ve Window menüsü; öğeleri hedefsiz eylem. View'da Theme ▸ seçimi
-//! ayar dosyasına yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan ve pane'e
-//! ait geçici punto (`zoom`).
-//! **Çok pencere ve macOS'un kendi sekmeleri** (`.tasks/026-sekmeler`): her
-//! sekme bir `NSWindow` (`window`); **bölmeler** (`.tasks/039-terminal-pane-bolmeler`)
-//! sekmeyi pane'lere ayırıyor — düzen, gezinme, boyutlama, eşitleme ve büyütme
-//! saf bir ağaçta (`split`), onu uygulayan ve ayırıcı sürüklemesini ağaca
-//! yazan kapsayıcı `split_view`, her pane'in kendi oturumu ve soluk örtüsü
-//! (`pane`). Pencereleri ve
-//! bölmeleri açan, listeleyen ve kapanışı paralel yürüten `app`. IME sonraki
-//! setlerde.
+//! AppKit directly through `objc2-app-kit`; it never sees Metal, leaves drawing
+//! to `bt-gpu` and lets `Renderer::system_default` set up the device — one
+//! renderer per pane (`pane`). It does not drive the frame either: it wires the
+//! pane, the session and the display link together and the rest is `bt-gpu`'s
+//! rhythm; the vsync ticks come from this crate's `Pacer` (`pacer`:
+//! `NSView.displayLink` used as a timer, `CACurrentMediaTime` as the time base).
+//! App-wide state (`app`), per-window state (`window`: chrome, tabs, the close
+//! question, tab actions) and per-session state (`pane`: an `NSView` subclass;
+//! the session's core, the search bar, the upload queue and the pane-level menu
+//! selectors) live in separate objects. The boundary between a pane and its
+//! owner has three parts (039 Karar 1–3): inputs arrive in one package at birth
+//! (`pane::PaneLaunch`), events go through a trait (`pane::PaneHost`; today's
+//! owner is `window::WindowHost`), and every menu job is a named method on the
+//! pane — the selector is a wrapper calling it. The pane module does not reach
+//! into `AppDelegate`; main-queue callbacks find the pane by id through the
+//! path its owner hands over (`pane::PaneLookup`).
+//!
+//! The keyboard flows to the PTY from here (`view`, `clipboard`) and the mouse
+//! to the session (selection and scrolling, `view`); a file dropped from Finder
+//! lands on the input line through `view`'s drag destination. The main menu
+//! (`menu`), the settings window (`settings_window`, writing through the
+//! settings edit path), the floating search bar (`search_bar`), the split
+//! container (`split_view`), the remote upload's sheet, queue driver and
+//! notifications (`uploader`), the updater (`updater`, Sparkle loaded at run
+//! time) and the shell's locale from `NSLocale` (`locale`) are here too. The
+//! system's light/dark appearance is read here (`app`, KVO on
+//! `NSApp.effectiveAppearance`) and the window chrome is painted to the theme
+//! (`window`). This crate also owns the teardown order and the smoke watchdog.
+//!
+//! The platform-independent half — settings reading, the split tree, zoom,
+//! notices, the gesture ledger, shell quoting, key encoding, the upload rules,
+//! the process table, the child's command and environment, and the file watch
+//! — lives in `bt-shell-common` (043) and is imported at the crate root below,
+//! so `crate::settings` and friends keep resolving.
 
 pub(crate) mod app;
 mod clipboard;
@@ -150,7 +148,7 @@ pub struct Options {
 /// ve oraya konan bir adım o yolda sessizce atlanır.
 pub fn run(opts: Options) -> Result<(), GpuError> {
     // audit: giriş noktası; ana thread dışından çağrılması programlama hatasıdır.
-    let mtm = MainThreadMarker::new().expect("bt_shell::run ana thread'de çağrılır");
+    let mtm = MainThreadMarker::new().expect("bt_shell_macos::run ana thread'de çağrılır");
     // Açılış damgası ilk renderer'dan (ilk pencere) **önce** alınmış olmalı ve
     // tipi bunu zorluyor: `Options` bir `Instant` taşıyor, bir bayrak değil.
     let app = NSApplication::sharedApplication(mtm);

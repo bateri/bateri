@@ -95,7 +95,7 @@ hiç kurulmasın) ve o değişmez bir kod kısıtından *karar* diye türetilmi�
 | 040 | Linux kapısı + wgpu renderer'ı | **Kullanıcı kararı (2026-09-28)**: bateri macOS'ta aynen kalırken Linux'ta da koşsun (pencere katmanı winit, Wayland birincil, X11 best-effort; bağımlılıklar onaylı). Yolun ilk adımı: Docker'lı `make linux` kapısı ve renderer'ın ölçümlü wgpu geçişi — bitti, `bt-gpu` platform kütüphanesi görmüyor → `.tasks/040-linux-kapisi-ve-wgpu/` |
 | 041 | yedek glyph'in küçültülmesi | **Kullanıcı gördü (2026-09-29)**: Claude Code'un artifact bağlantısı `⧉` kutu çıkıyor — mürekkebi hücreden %11 geniş ve 019'un kapısı "kutu ya da tam glyph" diyordu. Tek kural bütün aileyi kapsıyor (tek karakterlik yordamsal çizim reddedildi): sınırın içindeki aday küçük puntolu kopyasıyla çiziliyor, tek sütunlu emoji dahil (kullanıcı küçük emojiyi kutuya tercih etti). Önde, çünkü `bt-atlas`'ta ve 040'ın `bt-gpu` yasağına dokunmuyor; kusurlu karakterin kullanıcıdan önce bilinmesi için önce bir tarama (`make tarama`) ve araç karakterlerinin bekçisi → `.tasks/041-yedek-glyph-kucultme/` |
 | 042 | font sistemi soyutlaması + Linux font yığını | 040'tan sonra — trait'in kendisi 040'a bağlı değil, ama kapının büyümesi (`bt-gpu`'nun Linux'ta piksel sınaması) wgpu'yu istiyor: `bt-atlas`'ın CoreText yarısı (`font.rs`'in açma/türetme/metrik/mürekkep/yedek/şekillendirme yüzeyi ve `raster.rs`'in iki çizim fonksiyonu) bir `FontSystem` trait'inin arkasına; macOS'ta CoreText kalır, Linux'ta FreeType + fontconfig (cascade = `FcFontSort`) + HarfBuzz ailesi (`harfrust`/`rustybuzz`, emoji kümeleri). Kapı mantığı (`ink_fits_box`, `centre_shift`, sıra), atlas ve yordamsal çizim dokunulmaz; macOS kalibrasyon sınamaları `cfg(target_os = "macos")`, değişmez bekçileri platformsuz. **Kapı büyür:** `make linux` `bt-atlas`'ı ve lavapipe (Mesa'nın yazılım Vulkan'ı) üstünde `bt-gpu`'nun offscreen piksel sınamalarını da koşar — bu setten sonra renderer Linux'ta da piksel bekçili. Kapının `bt-gpu`'yu Linux'ta derlemek için beklediği **tek** şey `bt-atlas`: `bt-gpu`'nun kendisi 040'tan beri platformsuz. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı) → `.tasks/042-font-sistemi-linux/` |
-| 043 | `bt-shell` ayrımı | Font setinden sonra, winit'ten önce: `bt-shell` → `bt-shell-common` (AppKit'siz modüller: ayar okuma, bölme ağacı, punto, tanılar, jest defteri, kaçış; küçük uyarlamayla yükleme kuralı, `jobs` (`proc_*` → `/proc`), `child` (`NSLocale` → ortam, `login -flp` → `$SHELL -l`), `watch` (kqueue vnode → inotify), `keys`) + `bt-shell-macos` (bugünkü AppKit kodu; 040'ın macOS `Pacer`'ı buraya taşınır). Davranış değişmez; katman kuralı `bateri → bt-shell-{macos,linux} → bt-shell-common → bt-gpu → {bt-atlas, bt-core}` olur ve `make denetim`'in katman yönü kontrolü ona göre yazılır. `make linux` `bt-shell-common`'ı da koşar. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı) → `.tasks/043-bt-shell-ayrimi/` |
+| 043 | `bt-shell` ayrımı | Font setinden sonra, winit'ten önce: `bt-shell` → `bt-shell-common` (AppKit'siz modüller: ayar okuma, bölme ağacı, punto, tanılar, jest defteri, kaçış; küçük uyarlamayla yükleme kuralı, `jobs` (`proc_*` → `/proc`), `child` (`NSLocale` → ortam, `login -flp` → `$SHELL -l`), `watch` (kqueue vnode → inotify), `keys`) + `bt-shell-macos` (bugünkü AppKit kodu; 040'ın macOS `Pacer`'ı buraya taşınır). Davranış değişmez; katman kuralı `bateri → bt-shell-{macos,linux} → bt-shell-common → bt-gpu → {bt-atlas, bt-core}` olur ve `make denetim`'in katman yönü kontrolü ona göre yazılır. `make linux` `bt-shell-common`'ı da koşar. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı). Bitti: macOS'ta fark yok, `make denetim` ortak crate'in platform sınırını denetliyor ve `make linux` onu da koşuyor → `.tasks/043-bt-shell-ayrimi/` |
 | — | `bt-shell-linux` (winit) MVP | Ayrımdan sonra. Pencere, klavye + IME (winit IME), fare, pano (primary selection dahil), sekmeler, bölmeler, arama çubuğu ve **ayar penceresi** — üçü GPU'da kendimiz çiziyoruz (kullanıcı kararı); Ctrl+Shift kısayolları, Option → Alt/Meta. Linux `Pacer`'ı (Wayland frame callback'i; X11 best-effort, adıyla yazılı bilinen sınır) ve yüzey `raw-window-handle`'dan. Kalite kapıları (boşta sıfır kare, animasyon ritmi) Wayland'de; kapı başsız bir Wayland bileşimcisiyle duman koşusuna büyür. Dock zsh üstünde aynen çalışmalı. Sete sığmazsa GPU'da çizilen kromun (sekme çubuğu, arama, ayar penceresi) ikinci bir sete ayrılması o setin `/rfc`'sinin kararı. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı) |
 | — | Linux platform hizmetleri | MVP'den sonra: bildirim (D-Bus), açık/koyu ve Hareketi Azalt (xdg-desktop-portal), `bateri://` için `.desktop` `x-scheme-handler`, `/proc` ve inotify'ın MVP'de kalmayan kolları, yüklemenin bildirimi ve ilerlemesi. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı) |
 | — | Linux paketleme | Son: `.deb` ve AppImage. Flatpak **sonra**: sandbox kullanıcının host kabuğunu koşturmayı engelliyor ve terminalin varlık sebebi o. Kısıt: yazılan/taşınan kodun yorumları İngilizce (040 plan.md → dil kısıtı) |
@@ -609,7 +609,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   jest durumunu `NSEvent` görmeyen bir struct'a taşımak; bedeli orta ve
   ancak `view.rs`'in fare yolunu zaten elden geçiren bir set içinde ucuz.
   Yamandığı yer belli değil — hareketin ikinci tüketicisi ya da çift/üçlü
-  tıkla seçim doğal ev. **031 phase-1'de kapandı:** defter `bt-shell`'in
+  tıkla seçim doğal ev. **031 phase-1'de kapandı:** defter `bt-shell-common`'ın
   `gesture::Gesture`'ına taşındı ve dört geçiş (basış, sürükleme, bırakma,
   kayıp bırakma) orada sınanıyor → `.tasks/031-fare-ile-secim/`.
 - **Tamamlama listesi ızgarayı kaydırıyor.** ZLE'nin `BUFFER` olmayan çıktısı
@@ -756,7 +756,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   020'nin ölçümünde çıktı (2026-09-21, Claude Code bir pty'ye koşturuldu) ve
   o setin kapsamı dışında bırakıldı — konusu fare değil. İkisi de aynı
   şekle sahip: **sinyal elimizde, söyleyecek kanal yok.**
-  `?1004` (odak): `bt-shell` odağı biliyor (`TerminalWindow::apply_focus` →
+  `?1004` (odak): `bt-shell-macos` odağı biliyor (`TerminalWindow::apply_focus` →
   `DisplayLink::set_focused`) ama uygulamaya `\e[I`/`\e[O` demiyor.
   Bedeli "~20 satır" değil: `CLAUDE.md`'de **adıyla yazılı** bir mimari
   kararın ("Odak `bt-core`'a hiç girmiyor … kapı çağrı yerinde") inceltilmesi
@@ -766,7 +766,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   diye inceltir.
   `?2031` (tema): sistemin açık/koyu geçişini `Session::set_theme` canlı
   izliyor; uygulama bunu öğrenemediği için Claude Code kendi paletini bizim
-  temamıza uyduramıyor. `bt-shell`'in görünüm izleyicisine ve `Theme` yoluna
+  temamıza uyduramıyor. `bt-shell-macos`'un görünüm izleyicisine ve `Theme` yoluna
   dokunuyor.
   İkisi tek sette birleşebilir: ortak yanları fare değil **bildirim yönü**.
 - **`line_height = 1.0` bir no-op değil: hücreye bir piksel ekliyor.**
@@ -917,7 +917,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   (palet, arama) de aynı yüzeyi isteyecek. 018'in **içine alınmamasının**
   sebebi bu: o set `view.rs` + `keys.rs`'te kalıyor. Sırası overlay'lerle
   birlikte; bugünkü bedeli Türkçe/İngilizce klavyede **görünmüyor**.
-- **Odak raporu (DEC 1004) yok.** Odak `bt-shell`'den `DisplayLink`'e giriyor
+- **Odak raporu (DEC 1004) yok.** Odak `bt-shell-macos`'tan `DisplayLink`'e giriyor
   (caret'in içi boşalıyor, blink duruyor) ama uygulamaya **bildirilmiyor**:
   `\e[?1004h` isteyen program (vim'in `FocusGained`, tmux) pencere öne çıkınca
   haber almıyor. Kipi alacritty tutuyor (`TermMode::FOCUS_IN_OUT`), eksik olan
@@ -930,7 +930,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   kurulu. `{dil}_{etiket bölgesi}` ara kolu bir ürün kararı; düşüş `en_US`
   olduğu için etkisi görünür (ABD tarih biçimi). Kaynak: 006 `phase-4c.md` →
   `/code-review` WAIVE (5) ve orkestratör kararı.
-- **`bt-shell`'in beş sınaması release profilinde düşüyor.** 023'ün
+- **`bt-shell-common`'ın beş sınaması release profilinde düşüyor.** 023'ün
   uygulamasında görüldü (2026-09-22) ve `git stash` ile taban commit'te de
   doğrulandı, yani **bu setin kusuru değil**: `child.rs`'in sarmalayıcı
   arayışı depo kolunda `target/debug` üzerinden gidiyor ve `cargo test
@@ -938,7 +938,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   debug (`make hepsi`), yani bugün hiçbir şeyi bloke etmiyor — ama
   `cargo test --release` koşturan biri beş kırmızı görüp yanlış yere bakar.
   Çaresi yolu profile duyarlı yapmak ya da `CARGO_MANIFEST_DIR`'dan
-  türetmek; ikisi de tek satırlık. `bt-shell`'in `child` modülüne meşru
+  türetmek; ikisi de tek satırlık. `bt-shell-common`'ın `child` modülüne meşru
   biçimde dokunan ilk set toplar.
 - **Küçük hijyen.** `make kur` boş hedef dizinini denetlemiyor — bugün
   zararsız. Pano sınamaları oluşturdukları geçici panoları bırakmıyor

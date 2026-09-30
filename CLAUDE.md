@@ -90,7 +90,7 @@ geçerli eşleşme → seçim → caret → glyph, yani kullanıcının seçimi 
 üstünde ve metin kendi renginde; ızgarada ve doldurma bandının viewport'unda
 ayrı listeler. Köşeler **eşleşme başına** (`Frame::push_search`,
 `SearchRun::continues`): ardışık satırlardaki iki eşleşme iki şekil, sarılan
-tek eşleşme tek şekil. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
+tek eşleşme tek şekil. `bt-shell-macos` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
 yığınından geçer**: `keyDown:` tek kapı değil beş kollu bir arbitraj —
 Cmd'li olay **kapalı bir izin listesinin üç tuşu dışında** yutulur (⌘⌫ →
 `\x15` `kill-whole-line`, ⌘← → `\x01` `beginning-of-line`, ⌘→ → `\x05`
@@ -155,7 +155,7 @@ ekranında yoklar). **Hareket de raporlanıyor**: 1003 her hareketi ister, 1002
 yalnız basılı olanı, 1000 hiçbirini (`input::motion_route`) — düğme yolunda
 tek cevap veren üç bit burada ayrışıyor. Pencere hareket olaylarını
 **koşulsuz** dinliyor (`setAcceptsMouseMovedEvents`), çünkü kipe göre açmak
-kipi `bt-shell`'e yayınlamayı isterdi; bedeli düşüren şey kısmanın `bt-core`
+kipi `bt-shell-macos`'a yayınlamayı isterdi; bedeli düşüren şey kısmanın `bt-core`
 çağrısından **önce** koşması — rapor hücre başına bir kez gidiyor
 (`Gesture::moved_to`, ölçü görünür pencere hücresi) ve aynı hücrede
 kalan hareket `Term` kilidine hiç uğramıyor. Çentiği basış ve bırakma da
@@ -204,7 +204,7 @@ değişmiyor. Alanda ⏎ daha eski, ⇧⏎ daha yeni eşleşme, Esc paneli kapat
 geçerli eşleşmeyi seçim bırakır ve pencereyi yerinde tutar; geçerli
 eşleşme, gezinme ve pencerenin ona süzülmesi `bt-core`'da
 (`Session::set_search`/`search_next`/`search_reveal`, hedef vurgunun
-kümesinden) ve panelin örttüğü hücreleri `bt-shell` satır/sütun olarak
+kümesinden) ve panelin örttüğü hücreleri `bt-shell-macos` satır/sütun olarak
 veriyor (`SearchCover`). Etiketin sayımını ("3 of 17…") ana kuyrukta tur
 başına **bir parça** süren `TerminalPane::kick_search` sürüyor, çünkü tuş
 olayları turların arasına girmeli; tetiği yüksüz ve kenarda
@@ -319,7 +319,7 @@ anında** uygulanır (`watch`: macOS'ta vnode kaynakları, Linux'ta inotify; bil
 varsayılan tema sistemin açık/koyu görünümünü, `reduce_motion = "system"` de
 sistemin Hareketi Azalt ayarını canlı izler; tek istisna `[shell] integration`,
 kabuk çoktan doğduğu için **sonraki oturumda** geçerlidir. Kabuk zsh ise
-`bt-shell` sarmalayıcıyı `ZDOTDIR` ile kurar (betik `.app`'in
+`bt-shell-macos` sarmalayıcıyı `ZDOTDIR` ile kurar (betik `.app`'in
 `Contents/Resources/shell`'inden, debug'da depodan) ve kabuğun bastığı OSC 133
 işaretleri `Session::shell_state()`'te birikir. Aynı betik her satır çiziminde
 ZLE'nin görüntüsünü (`PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlight`,
@@ -405,7 +405,7 @@ caret içi boş), seçim ve arama vurgusu ise yalnız pencere key değilken
 soluyor; birleştirme `bt-gpu`'da tek yerde. Odak `bt-core`'a **hiç girmiyor**
 (`DisplayLink::set_focused`; `CaretShape`'e de eklenmedi — o enum ayar
 dosyasının sözlüğü, odak ona dik bir eksen) ve hermetik koşuda **hiç
-okunmuyor**: kapı çağrı yerinde, `bt-shell`'in pencere delegate'inde. **Alternatif ekrandan çıkışta imlecin
+okunmuyor**: kapı çağrı yerinde, `bt-shell-macos`'un pencere delegate'inde. **Alternatif ekrandan çıkışta imlecin
 stili kullanıcının tabanına dönüyor** (`Term::set_cursor_style(None)`,
 `Session::frame`'de `alt_screen` bayrağının **düşen kenarında**): ölçüt
 "uygulama bitti", yani bıraktığı şekil de sönme de bitiyor. Gerekçe ölçüldü
@@ -520,7 +520,7 @@ düşülüyor ve **yalnız entegrasyonlu zsh oturumunda** ayrılıyor — ayrım
 doğarken kararlaşıyor, yani `/bin/sh` koşan duman reçetesi dock almıyor.
 **Alternatif ekranda dock kalkıyor** (vim, htop, `less`): `frame()` bayrağı
 `Term` kilidi altındayken yayınlıyor (`Session::alt_screen`), kare yolu onu her
-karede karşılaştırıyor ve değişince `bt-shell`'e enjekte edilmiş haberciyi
+karede karşılaştırıyor ve değişince `bt-shell-macos`'a enjekte edilmiş haberciyi
 çağırıyor; resize **çizilen karenin içinde değil**, `dispatch2` ana kuyruğunun
 bir sonraki turunda koşuyor. Bedel komut başına değil **geçiş başına**: `git
 log` gibi alternatif ekrana girmeyen komutlar hiç resize görmüyor. Dock'u
@@ -589,7 +589,7 @@ açıkça söylüyor. Uzak komut `sh -c`'ye sarılı ve tırnağı ters bölüs�
 7'nin yetkisinden**: uzak oturum sürerken her OSC 7, değilken yabancı
 yetkili olanı uzak yuvaya gidiyor ve yerel dizine yazmıyor. Uzak durum
 `bt-core`'da (`Session::set_remote(nesil, host)`, `DockContext::remote`) ve
-`C`/`D`/`A`'da kendiliğinden siliniyor; algılama `bt-shell`'de, aşağıda.
+`C`/`D`/`A`'da kendiliğinden siliniyor; algılama `bt-shell-macos`'ta, aşağıda.
 Dock'a tık giriş satırı yokken no-op. Gerekçeler
 `.tasks/036-ssh-uzak-oturum/discussion.md` → Karar 3–8 ve
 `.tasks/037-ssh-ikinci-tur/discussion.md`.
@@ -917,7 +917,7 @@ yazıcısını (dibe dönüş, Shift+PgUp, geçmişteyken gelen çıktı, resize
 karede ezerdi. `scroll_wheel` olayı kesirli ve tam satır hâliyle birlikte
 alıyor ve rota önce seçiliyor: kesir yalnız kaydırma kolunda, ok ve rapor tam
 satırla; niyet (`ScrollIntent`: satır, doğrudan, çentik, yerleşme, jest başı)
-çağıranın. `bt-shell` onu olayın **jest fazından** sınıflıyor (`view::smooth_wheel`,
+çağıranın. `bt-shell-macos` onu olayın **jest fazından** sınıflıyor (`view::smooth_wheel`,
 saf): fazlı olay (trackpad, Magic Mouse) doğrudan kesir, `Ended`/`Cancelled`
 yerleşme, `Began`/`MayBegin` ve momentum başı jest başı; fazsız olay çentik ve
 miktarı **tam satır** — bitişini söyleyen faz yok, kesirli hedef pencereyi
@@ -1234,17 +1234,21 @@ cargo test -p bt-core -- osc::tests
 Katmanlar tek yönlüdür; **hiçbir bağımlılık yukarı doğru gitmez**:
 
 ```
-bateri (bin) → bt-shell → bt-shell-common → bt-gpu → {bt-atlas, bt-core}
-                   └──────────────┴──────────────────────→ bt-core
+bateri (bin) → bt-shell-macos → bt-shell-common → bt-gpu → {bt-atlas, bt-core}
+                   └────────────────┴──────────────────────→ bt-core
 ```
+
+`bt-shell-linux` (winit) doğduğunda `bt-shell-macos`'un yanına, aynı kata
+girer: iki platform kabuğu da `bt-shell-common`'a bağlanır, ortak crate
+ikisine de bağlanmaz.
 
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve **okuyucu döngünün sahibi** (alacritty 0.26.0 döngüsünün kopyası, `reader`; `Term` `Handler`'ı aktaran sarmalayıcının arkasında, `handler` — emoji dizisini ızgarada orada kümeliyor, 035), PTY okuma yolu **taranıyor** (araya giren sarmalayıcı baytları aynen geçirir, geçerken **üç** OSC numarasını ve **bir** CSI dizisini çeker), OSC (0/2/7/8/9/52; 0/2 uygulamanın başlığını `Term` kilidi altındaki olaydan yaprak bir yuvaya indirir ve pencere başlığı ondan kurulur — öncelik OSC 0/2 → dizinin son bileşeni (ev `~`) → `bateri`, `Session::title`; uzak oturumda (036) `⇄ {OSC başlığı}`, yoksa `⇄ {host}`; başlık ya da **değişen** OSC 7 dizini `Wake::title_changed` ile yüksüz haber verir, 7 çalışma dizinini **yetkisiyle** verir (yerel yetki dock'un bağlam satırına, uzak oturumda ya da yabancı yetkide uzak yuvaya) (`Session::working_directory` onu okur), 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, geçmişte arama (sorgunun derlenmesi, görünür satırların eşleşmeleri, bütün defterin parça parça sayımı; `search`), girdi kodlaması (DECCKM'e uyan oklar, farenin düğme/hareket/tekerlek raporu; kipten karar veren tablolar `input::button_route`/`motion_route`/`wheel_route`), ayar modeli, shell bağlamı. Tarayıcının üç kolu var ve üçü de alacritty'de **yok** (`vte` üçünü de `unhandled`'a düşürüyor): OSC 133 oturumun safhasını ve blok kimliklerini `ShellState`'e yazar (`Session::shell_state()`) ve `Running`'e her **geçişte** bir komut nesli artırıp `Wake::command_started` ile yüksüz haber verir (036, uzak oturum yoklamasının tetiği); kimliğimizi (`bt_block=`) bir kez görmüş bir oturumda **uzak oturumu yalnız bizim işaretimiz bitiriyor** — uzak oturum etkinken kimliksiz `A`/`B`/`C`/`D` yok sayılıyor, çünkü ssh'ın öbür ucundaki fish 4 ya da kitty/iTerm2 entegrasyonu aynı PTY'ye 133 basıyor ve uzak `A` göstergeyi silip uzak `C` yeni bir nesil açardı; yoklamadan önce gelen uzak `A` için komut bizim `D`'mize kadar açık sayılıyor (`ShellLog::command_open`). Kapı `Running`'e değil uzak oturuma bağlı, yoksa `exec fish` `Running`'i hiç bitirmez ve saat boşta kare isterdi (`.tasks/036-ssh-uzak-oturum/phase-3.md` → Uygulama Notları), OSC 8133 ZLE'nin görüntü aynasını — `PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlight`, `CURSOR`, base64 gövdelerle; `KEYMAP` ve `PREBUFFER` sondaki isteğe bağlı gövdeler, eski betik onlarsız da çözülüyor — çözüp `DockState`'e (`Session::dock_state()`), dalı `DockContext`'e ve düzenleme widget'ının yeteneğini (`8133;w`) `ShellLog::dock_editable`'a, OSC 7 de çalışma dizinini yine `DockContext`'e (yüzde çözme ve yabancı host elenmesi orada; bozuk URI panik değil yoksayma). Aynanın kendi yük sınırı var ve aşımı **görünür** (`DockStatus::Unavailable`), sessizce düşmez; dock'un çizmediği kontrol karakteri de görünür bir durum (`DockStatus::Control`) ve satırı ızgaraya bırakıyor. **Dördüncü kol OSC değil CSI** ve yükü yok: `CSI 2 J`'yi tanıyıp "ekran kasten temizlendi" bayrağını kurar (`Session::observe_screen_clear`; `3J` ve RIS için kol **yok**, ikisi de geçmişi siliyor — geçmişi silen tek yol terminal tarafı temizlik, ⌘K/⌥⌘K). **Sayacın iki yazarı var** (`screen_clears`): tarayıcı `2J`'yi baytlar uygulanmadan **önce** sayıyor, terminal tarafı temizlik (034) `Term` kilidi altında ve uygulandıktan **sonra** adlı tek yöntemden (`Session::note_screen_clear`) — ikisi de yalnız artırıyor ve tüketici tek. **Alternatif ekranda kurmaz** — orada `ClearMode::All` `reset_region(..)` çağırıyor, geçmiş büyümüyor ve birincil ekranın durumuna dokunulmuyor, yani geri getirilmeyecek bir şey yok; nesil yine de **tüketilir**, yoksa `vim`'den çıkışta birikmiş sayaç bayrağı kurar ve doldurma ilk `vim`'den sonra kalıcı olarak kapanırdı. Bayrak **defter temizlemeden sonra büyüyünce** düşer: geçmişe temizlemeden sonra satır düşmüş demektir ve doldurma o kadarını güvenle geri verebilir. Ölçüt bir damga ve tek karşılaştırma (`Session::screen_clear_history`); damga bayrak kurulduktan **sonraki** ilk karede alınıyor, çünkü kuran kare ızgarayı henüz temizlenmemiş görebiliyor ve temizlemenin kendisi satırları geçmişe itiyor — bayat damga anında aşılırdı. Üstünde iki koşul var — alternatif ekranda değil ve `display_offset == 0`; ikincisi olmasa geçmişe kaydırılan pencere dolu **görünür** ve tek bir tekerlek jesti Ctrl-L'i geri alırdı. (Bu koşul **bayrağın ömrüne** ait; doldurmanın kendi `display_offset` kapısı ayrı bir şey ve ayrı gerekçeli.) **Bayrak bir kapı, damga bir ölçü:** kapı "hiç" der, aynı damga doldurmada ikinci kez okunup `fill`'i temizlemeden beri gelen satır sayısına **kırpar** — yoksa tek satırlık bir büyüme bayrağı düşürür ve doldurma boşluğun tamamını, yani kullanıcının sildiği ekranı geri getirirdi (ölçüldü). `content_rows == rows` kolu yok: dock'lu pencerede doluluk giriş satırını saymadığı için erişilemez. **Bilinen sınır**, defter `scrollback`'te doyunca damganın üstüne çıkacak sayı kalmıyor ve o oturumda bir Ctrl-L'den sonra doldurma koşmuyor; yönü güvenli. Yarışı kapatan şey bir **nesil sayacı**: tarayıcı baytları uygulamadan **önce** sayıyor, kare yolu sayacı `Term` kilidinin **altında** doluluk sayısıyla aynı okumada tüketiyor, ve henüz hesaba katılmamış bir nesil aynı karede doldurma kuralını ezer. Bayrağın tek tüketicisi doldurmanın kapısı (`Session::fill_rows`) ve sıra zorunlu: ömür **önce** işliyor. Komut blokları `frame()` sınırından **çözülmüş** geçer (komutun satırı + renk, çıkış kodu değil; bölge değil işaret): kimlik prompt'un OSC 8 çıpasından `Term` kilidi altında toplanır, renk kilit bırakıldıktan sonra kabuk defterinden çözülür. Giriş satırının **bastırılması** da burada: safha ile aynanın durumu tek yüklemde birleşiyor (`ShellLog::suppressed_input`) ve kopya `Term` kilidinden **önce** alınıyor — yaprak kilit `Term`'ün altına girmez | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir — `make linux` (Docker, `tools/linux/Dockerfile`), çünkü platformsuzluğu yalnız Linux'ta gerçekten derlemek kanıtlar |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, **emoji dizisinin şekillendirilmesi** (`Sprite::Cluster`, tek glyph — macOS'ta `CTLine`, Linux'ta `harfrust`; atlasın interner'ı, şekillenmeyen dizi taban karakteriyle), **iki düzlem** (maske `R8`, renk `RGBA8`; ayrı sayaç, ortak yuva ızgarası), **geniş glyph'in iki yarısı** (`Half`; kutu iki hücre, yuva yine bir hücre), **sistemin cascade'inden yedek glyph** (kapı geometrik ve **sıralı**: önce tek hücre, sonra iki; ikisine de sığmayan aday kutu kalır), **yordamsal karakterler** (blok elemanları, Braille ve çizgi çizim — köşegenler hariç; fonta sorulmadan, yüzden bağımsız, yalnız büyük sınıfta), font seti. **Doku kenarı sabit değil**: hedeflenen **yuva sayısından** türüyor (`SLOT_TARGET` = 1024 yuva; kenarın kendisi `MIN_EDGE` = 1024 px ile `MAX_EDGE` = 4096 px arasında, iki 1024 tesadüfen aynı sayı), çünkü hücre büyüdükçe kapasite düşüyor ve bir yerde yordamsal ailenin altına iniyordu — ölçülen kırılma Retina'da 29pt'ti (406 yuva, ailenin istediği 429: 421 karakter + tofu + kural payı). Varsayılan punto tabanda kalıyor, yani ızgara ve raster bit bit aynı. Tahliye **yok**: dolan atlas hâlâ tofu'ya düşüyor ve kalan senaryo (tek karede hedeften fazla farklı glyph) ölçülmedi | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation` — yalnız macOS hedefinde ve yalnız CoreText arka ucunda (`coretext.rs`; kural yarısı `FontSystem` trait'inin arkasında platformsuz, `make denetim` bekçisi — 042). `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil. Linux hedefinde `freetype-rs` + `fontconfig` (+ ham `yeslogic-fontconfig-sys`), pkg-config ile dinamik ve yalnız FreeType arka ucunda (`freetype.rs`: maske, `CBDT`/`COLR` renk düzlemi, `harfrust` ile küme). Arka ucun ölçülmüş örnek karakterleri (`fixture`) `fixture` özelliğiyle dışarı açık — yalnız `bt-gpu`'nun sınamaları için, API değil |
-| `bt-gpu` | wgpu renderer, shader'lar (`.wgsl`), **geniş glyph'in yelpazelenmesi** (`prepare`; karar `Atlas::slot`'ta doğduğu için sink'te değil), kare döngüsü ve `Waker` (`DisplayLink`: platformsuz `tick`; ritim dışarıdan, dört görevli `Pacer` dikişiyle — vsync tik'i, her thread'den `set_running`, tek gecikmeli uyandırma, zaman tabanı), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `set_viewport`, kendi listeleri ve caret'i; PTY payı `DOCK_ROWS`, çizilen bant `Cursor::input_rows` giriş satırı + bağlam satırı), **doldurma bandı** (üçüncü `set_viewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet), durum çubuğu | `wgpu` (arka uç hedefe göre sabit: macOS'ta Metal, Linux'ta Vulkan — `make linux` piksel sınamalarını lavapipe'ta koşar; doğrudan bağımlılığında ve kaynağında platform kütüphanesi yok: pencerenin katmanı tek `unsafe` girişle — `Surface::from_layer`, yalnız macOS; Linux'unki pencere setiyle — ve ritim `Pacer` olarak `bt-shell`'den geliyor; `make denetim` doğrudan bağımlılıkta ve kaynakta `objc2`/`dispatch2`/`block2`/`metal` arar, wgpu'nun dolaylı çektikleri konusu değil) |
-| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye (metin yolu AppKit'in yığınından: `BateriView` `NSTextInputClient`, ölü tuş bileşimi orada tamamlanır), **Finder damlası** (`NSDraggingDestination`, yalnız dosya URL'si; yol `quote::shell_quote`'tan geçip `Session::paste`'e gider), servisler, ayar penceresi, **terminal pane'i** (`pane::TerminalPane`, `NSView` alt sınıfı: oturumun çekirdeği, pane düzeyindeki menü seçicileri; sahiple sınırı `PaneLaunch` + `PaneHost`, 039), **bölmeler** (kapsayıcı `split_view`, saf ağacı `bt-shell-common`'ın `split`'i; 039), **arama paneli** ve sayım dizininin ana kuyruk sürücüsü (`search_bar`, `TerminalPane::kick_search`), **uzak oturumun algılanması** (036: `C` kenarında ön plan grubunun en üstteki ssh/mosh süreci ve argv'sinden hedefi, `jobs::remote`; kararsızsa sonraki çıktıda yeniden, ana kuyrukta en çok bir iş — `pane::RemoteProbe`; host yazıldığı gibi, etkileşimsiz ssh uzak sayılmıyor), **uzak dizine yükleme** (037: kural, metin ve `ssh`/`tar` süreçleri `bt-shell-common`'ın `upload`'ında; sayfa, kuyruk sürücüsü, popover, durdurma sorusu, başlık öneki, bildirim ve Dock simgesi `uploader`'da; kuyruk pane'in, Dock simgesi pane'lerin toplamı); kapanış sırasının ve duman bekçisinin sahibi; sistemin dil/bölge çifti (`locale`, `NSLocale`; kararı `child::locale_env`), entegrasyonun kurulup kurulmayacağı ve `ZDOTDIR`/`BATERI_ZDOTDIR` çifti (`app::shell_integration_env`), **güncelleme** (`updater`: paketteki `Sparkle.framework`'ü çalışma zamanında `NSBundle`'dan yükler ve "Check for Updates…"ın hedefi olur; framework link'lenmiyor, yani paketsiz ve süreli koşu Sparkle'sız) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli; `NSUUID`: sekme kimliği), `objc2-app-kit`, `objc2-quartz-core` (pane'in `CAMetalLayer`'ı — wgpu yüzeyi ondan açılıyor, ölçeği pane'in — ve macOS `Pacer`'ı: `NSView.displayLink` yalnız zamanlayıcı olarak ve `CACurrentMediaTime`; `pacer`), `objc2-user-notifications` (yüklemenin bildirimi, `UNUserNotificationCenter`; paketsiz süreçte çağrılmıyor), `block2` (kapatma sorusu sayfasının tamamlanma bloğu), `dispatch2` (ana kuyruk: `Pacer`'ın `set_running`'i ve gecikmeli uyandırması; `child_exit` → o pane'in kapanışı, süreli koşuda `terminate:`; OSC 52'nin pano işi; arama sayımının parçaları; uzak oturum yoklaması; ayar izlemenin bildirimini ana kuyruğa taşıma — kaynaklar `bt-shell-common`'ın kendi seri kuyruğunda), `libc` (bekçinin `write` + `_exit`'i) |
-| `bt-shell-common` | kabuk katmanının AppKit görmeyen yarısı (043): ayar dosyasının okunması ve tanısı (`settings`, `notices`), bölmelerin saf ağacı (`split`), geçici punto (`zoom`), fare jest defteri (`gesture`), kabuk kaçışı (`quote`), tuş kodlaması (`keys`), uzak yüklemenin kuralı, metni ve `ssh`/`tar` süreçleri (`upload`), süreç tablosu (`jobs`: kapatma sorusunun ön plan işi ve uzak oturumun hedefi), kabuğun doğuşu (`child`: başlangıç dizini, yerel kararı, hangi kabuk, sarmalayıcı betiğin yeri) ve dosya izleme (`watch`). Sistem hizmetinin gövdesi `cfg(target_os)` arkasında ve adlı (`jobs::Libproc`/`jobs::Procfs`, çağıranın adı `jobs::SystemTable`; `watch`); kabuk komutu ebeveyniyle tek dönüşten (`child::shell_command`: macOS `login -qflp` + `Login`, Linux `$SHELL -l` + `Direct`); Linux gövdelerinin kapısı `make linux`; sınama yardımcıları `test-support` özelliğinin arkasında | AppKit, Foundation, Quartz ve bildirim merkezi **yok**; `libc` (passwd kaydı için `getpwuid_r`, macOS'ta `proc_*` ve `sysctl(KERN_PROCARGS2)`, Linux'ta `/proc` — `jobs` —, yükleme iptalinin `kill`'i, izlemenin `O_EVTONLY`'si ve Linux'ta inotify/`eventfd`/`poll`'u) ve yalnız macOS hedefinde `dispatch2` (`watch`'ın vnode kaynakları) |
+| `bt-gpu` | wgpu renderer, shader'lar (`.wgsl`), **geniş glyph'in yelpazelenmesi** (`prepare`; karar `Atlas::slot`'ta doğduğu için sink'te değil), kare döngüsü ve `Waker` (`DisplayLink`: platformsuz `tick`; ritim dışarıdan, dört görevli `Pacer` dikişiyle — vsync tik'i, her thread'den `set_running`, tek gecikmeli uyandırma, zaman tabanı), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `set_viewport`, kendi listeleri ve caret'i; PTY payı `DOCK_ROWS`, çizilen bant `Cursor::input_rows` giriş satırı + bağlam satırı), **doldurma bandı** (üçüncü `set_viewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet), durum çubuğu | `wgpu` (arka uç hedefe göre sabit: macOS'ta Metal, Linux'ta Vulkan — `make linux` piksel sınamalarını lavapipe'ta koşar; doğrudan bağımlılığında ve kaynağında platform kütüphanesi yok: pencerenin katmanı tek `unsafe` girişle — `Surface::from_layer`, yalnız macOS; Linux'unki pencere setiyle — ve ritim `Pacer` olarak `bt-shell-macos`'tan geliyor; `make denetim` doğrudan bağımlılıkta ve kaynakta `objc2`/`dispatch2`/`block2`/`metal` arar, wgpu'nun dolaylı çektikleri konusu değil) |
+| `bt-shell-macos` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye (metin yolu AppKit'in yığınından: `BateriView` `NSTextInputClient`, ölü tuş bileşimi orada tamamlanır), **Finder damlası** (`NSDraggingDestination`, yalnız dosya URL'si; yol `quote::shell_quote`'tan geçip `Session::paste`'e gider), servisler, ayar penceresi, **terminal pane'i** (`pane::TerminalPane`, `NSView` alt sınıfı: oturumun çekirdeği, pane düzeyindeki menü seçicileri; sahiple sınırı `PaneLaunch` + `PaneHost`, 039), **bölmeler** (kapsayıcı `split_view`, saf ağacı `bt-shell-common`'ın `split`'i; 039), **arama paneli** ve sayım dizininin ana kuyruk sürücüsü (`search_bar`, `TerminalPane::kick_search`), **uzak oturumun algılanması** (036: `C` kenarında ön plan grubunun en üstteki ssh/mosh süreci ve argv'sinden hedefi, `jobs::remote`; kararsızsa sonraki çıktıda yeniden, ana kuyrukta en çok bir iş — `pane::RemoteProbe`; host yazıldığı gibi, etkileşimsiz ssh uzak sayılmıyor), **uzak dizine yükleme** (037: kural, metin ve `ssh`/`tar` süreçleri `bt-shell-common`'ın `upload`'ında; sayfa, kuyruk sürücüsü, popover, durdurma sorusu, başlık öneki, bildirim ve Dock simgesi `uploader`'da; kuyruk pane'in, Dock simgesi pane'lerin toplamı); kapanış sırasının ve duman bekçisinin sahibi; sistemin dil/bölge çifti (`locale`, `NSLocale`; kararı `child::locale_env`), entegrasyonun kurulup kurulmayacağı ve `ZDOTDIR`/`BATERI_ZDOTDIR` çifti (`app::shell_integration_env`), **güncelleme** (`updater`: paketteki `Sparkle.framework`'ü çalışma zamanında `NSBundle`'dan yükler ve "Check for Updates…"ın hedefi olur; framework link'lenmiyor, yani paketsiz ve süreli koşu Sparkle'sız) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli; `NSUUID`: sekme kimliği), `objc2-app-kit`, `objc2-quartz-core` (pane'in `CAMetalLayer`'ı — wgpu yüzeyi ondan açılıyor, ölçeği pane'in — ve macOS `Pacer`'ı: `NSView.displayLink` yalnız zamanlayıcı olarak ve `CACurrentMediaTime`; `pacer`), `objc2-user-notifications` (yüklemenin bildirimi, `UNUserNotificationCenter`; paketsiz süreçte çağrılmıyor), `block2` (kapatma sorusu sayfasının tamamlanma bloğu), `dispatch2` (ana kuyruk: `Pacer`'ın `set_running`'i ve gecikmeli uyandırması; `child_exit` → o pane'in kapanışı, süreli koşuda `terminate:`; OSC 52'nin pano işi; arama sayımının parçaları; uzak oturum yoklaması; ayar izlemenin bildirimini ana kuyruğa taşıma — kaynaklar `bt-shell-common`'ın kendi seri kuyruğunda), `libc` (bekçinin `write` + `_exit`'i) |
+| `bt-shell-common` | kabuk katmanının AppKit görmeyen yarısı (043): ayar dosyasının okunması ve tanısı (`settings`, `notices`), bölmelerin saf ağacı (`split`), geçici punto (`zoom`), fare jest defteri (`gesture`), kabuk kaçışı (`quote`), tuş kodlaması (`keys`), uzak yüklemenin kuralı, metni ve `ssh`/`tar` süreçleri (`upload`), süreç tablosu (`jobs`: kapatma sorusunun ön plan işi ve uzak oturumun hedefi), kabuğun doğuşu (`child`: başlangıç dizini, yerel kararı, hangi kabuk, sarmalayıcı betiğin yeri) ve dosya izleme (`watch`). Sistem hizmetinin gövdesi `cfg(target_os)` arkasında ve adlı (`jobs::Libproc`/`jobs::Procfs`, çağıranın adı `jobs::SystemTable`; `watch`); kabuk komutu ebeveyniyle tek dönüşten (`child::shell_command`: macOS `login -qflp` + `Login`, Linux `$SHELL -l` + `Direct`); Linux gövdelerinin kapısı `make linux`; sınama yardımcıları `test-support` özelliğinin arkasında | AppKit, Foundation, Quartz ve bildirim merkezi **yok**; `libc` (passwd kaydı için `getpwuid_r`, macOS'ta `proc_*` ve `sysctl(KERN_PROCARGS2)`, Linux'ta `/proc` — `jobs` —, yükleme iptalinin `kill`'i, izlemenin `O_EVTONLY`'si ve Linux'ta inotify/`eventfd`/`poll`'u) ve yalnız macOS hedefinde `dispatch2` (`watch`'ın vnode kaynakları); `make denetim` doğrudan bağımlılıkta AppKit ailesini, `block2`'yi ve platform kabuklarını, kaynakta `objc2`/`dispatch2`/`block2`'yi `watch`'ın macOS gövdesinin (`watch/dispatch.rs`) dışında arar |
 | `bateri` | `main`, app bundle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -1295,15 +1299,15 @@ bateri (bin) → bt-shell → bt-shell-common → bt-gpu → {bt-atlas, bt-core}
   (`.tasks/042-font-sistemi-linux/phase-4.md`, `discussion.md` → Karar 5).
   **Sparkle 2** bir crate değil, pakete gömülen bir framework (`make kur`
   sürümü ve sha256'sı `Makefile`'da sabit indirir, depoya girmez) ve
-  `bt-shell` onu link'lemeden, çalışma zamanında yüklüyor
-  (`bt-shell::updater`). Besleme GitHub'ın
+  `bt-shell-macos` onu link'lemeden, çalışma zamanında yüklüyor
+  (`bt-shell-macos::updater`). Besleme GitHub'ın
   `releases/latest/download/appcast.xml`'i — her zaman en yeni release'in
   tek öğeli beslemesi, yani sürüm yayınlamak güncellemeyi yayınlamak ve site
   sürüm tutmuyor (indirme düğmesi aynı yolun `bateri.dmg`'si); açık
   EdDSA anahtarı `Info.plist.in`'de, gizli anahtar kullanıcının
   anahtarlığında (`generate_keys`); paket kimliği `dev.bateri.bateri` ve
   güncellemeler ona bağlı, değişmez.
-  `objc2-user-notifications` (yalnız `bt-shell`, aynı 0.3 nesli, varsayılan
+  `objc2-user-notifications` (yalnız `bt-shell-macos`, aynı 0.3 nesli, varsayılan
   set kırpık — `objc2-core-location` grafa girmiyor) yüklemenin macOS
   bildirimini taşıyor, çünkü `NSUserNotification` macOS 11'den beri
   kullanımdan kalkmış; izin ilk bildirimde isteniyor ve paketsiz süreçte
@@ -1391,7 +1395,7 @@ bateri (bin) → bt-shell → bt-shell-common → bt-gpu → {bt-atlas, bt-core}
   sık gelen hareketlerde (akan çıktı) imleç opak kalır, yoksa alfa sıfıra
   çakılır ve imleç büsbütün kaybolurdu.
   İndirgemenin tek yeri `bt-gpu::motion` (`Mode::Fade`); üç değerli
-  ayar ile sistemin cevabı `bt-shell`'de tek `bool`'a iniyor, `bt-gpu` AppKit
+  ayar ile sistemin cevabı `bt-shell-macos`'ta tek `bool`'a iniyor, `bt-gpu` AppKit
   görmüyor. `cursor_motion = "snap"` bunun üstündedir: hareketi zaten kapatmış
   olana erişilebilirlik ayarı animasyon *eklemez*.
 - **Kapanış sınırlı bekler, çocuk yine de ölmeyebilir.**
@@ -1419,7 +1423,7 @@ bateri (bin) → bt-shell → bt-shell-common → bt-gpu → {bt-atlas, bt-core}
   (026 → Karar 5, 9).
 - **Render yolu bloklanmaz.** PTY okuma ve ayrıştırma kendi thread'inde; AppKit
   çağrıları `MainThreadMarker` ile ana thread'de; renderer platformun `Pacer`'ıyla
-  sürülür (macOS: `NSView.displayLink` zamanlayıcı olarak, `bt-shell::pacer`;
+  sürülür (macOS: `NSView.displayLink` zamanlayıcı olarak, `bt-shell-macos::pacer`;
   drawable'ı wgpu yüzeyinden yalnız çizen tik alır).
 - **PTY ve ayrıştırma yolunda panik yok.** Bilinmeyen dizi yoksayılır, loglanır
   (`make denetim` `bt-core`'da gerekçesiz `unwrap`/`expect`/`panic!` arar).
@@ -1447,7 +1451,7 @@ bateri (bin) → bt-shell → bt-shell-common → bt-gpu → {bt-atlas, bt-core}
   (`en`) verir ve `cargo run` bunu göstermez. Kendi sürecimizde
   `set_current_dir`, `set_var` ve `setlocale` **yok**; `LC_ALL` değil `LANG`
   yazılır ki kabuğun rc dosyası `LC_*`'ı üstüne yazabilsin. Politika
-  `bt-shell-common`'da (`child`; `NSLocale` okuması `bt-shell`'de), `bt-core` yalnız geçirir
+  `bt-shell-common`'da (`child`; `NSLocale` okuması `bt-shell-macos`'ta), `bt-core` yalnız geçirir
   (`SessionOptions.working_directory`, `.env`). Sebep Dock'tan açılış:
   LaunchServices süreci `cwd=/` ile başlatıyor ve launchd'nin ortamında `LANG` yok.
 - **Kabuğu doğuran komutu da biz kuruyoruz** (`child::shell_command`, macOS kolu `login_command`) ve
@@ -1516,7 +1520,7 @@ bateri (bin) → bt-shell → bt-shell-common → bt-gpu → {bt-atlas, bt-core}
   çözülemeyen ev dizini) panoyu **kapalıya** düşürür
   (`Settings::for_unusable_file`) — yanlış tahmini görünmeyen tek anahtar. Süreli koşu
   (`BT_RUN_SECONDS`) dosyayı **hiç okumaz ve izlemez**: dalın tek yeri
-  `bt-shell`'in `app::Inputs`'u.
+  `bt-shell-macos`'un `app::Inputs`'u.
 - **Shell entegrasyonu bugün yalnız zsh'tir** (`ZDOTDIR`); bash (`--rcfile`) ve
   fish (`vendor_conf.d`) sonraki settedir. Kullanıcının rc dosyasına **asla**
   yazılmaz — kapısı `make denetim` ve listesi zsh'in beş dosyasını da kapsar.
@@ -1555,7 +1559,7 @@ bateri (bin) → bt-shell → bt-shell-common → bt-gpu → {bt-atlas, bt-core}
   `BT_RUN_SECONDS`'ı **sıfırdan büyük** ister, yoksa süreç çıkış 1 verir —
   rapor yalnız deadline yolunda basılır, süresiz ölçüm örnekleri sessizce
   atardı. Kapı kapalıyken tek bir saat okuması bile yok. Kancanın dürüst
-  sınırları (**kapsam** / **açık kalem** etiketli) `bt-shell`'de `Measured`'ın
+  sınırları (**kapsam** / **açık kalem** etiketli) `bt-shell-macos`'ta `Measured`'ın
   doc'unda emanettir; o türün ilk `/measure`'ı onları `docs/OLCUMLER.md`'nin
   `## Yöntem`'ine taşır. **Bench seti borçtur:** `criterion` ayrı bir
   bağımlılık kararı; `cargo bench` satırı yukarıdaki komut bloğuna bench seti

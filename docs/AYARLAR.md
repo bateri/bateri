@@ -6,17 +6,17 @@ dosya bozukken ne olacağının **tek sahibidir**; kod tarafındaki karşılığ
 `crates/bt-core/src/settings.rs` ve `theme.rs` (ayrıştırma),
 `crates/bt-shell-common/src/settings.rs` (okuma ve tema adının çözümü),
 `watch.rs` (dosyaların izlenmesi), `zoom.rs` (geçici punto),
-`crates/bt-shell/src/menu.rs` (View menüsü: tema seçimi ve geçici punto),
+`crates/bt-shell-macos/src/menu.rs` (View menüsü: tema seçimi ve geçici punto),
 `clipboard.rs` ve `app.rs`'in `ShellWake`'i
 (OSC 52'nin yuvası, ana kuyruğa geçişi ve panoya yazması),
 `crates/bt-atlas/src/font.rs` (font ailesinin bulunması),
 `crates/bt-gpu/src/motion.rs` ve `link.rs` (imleç hareketinin ve Hareketi
 Azalt'ın uygulanması; üç değerli ayarın tek `bool`'a indiği yer
-`crates/bt-shell/src/app.rs`'in `resolve_reduce_motion`'ı),
+`crates/bt-shell-macos/src/app.rs`'in `resolve_reduce_motion`'ı),
 `crates/bt-shell-common/src/child.rs` (hangi kabuk koşuyor, sarmalayıcı
-betiği nerede), `crates/bt-shell/src/app.rs`'in `shell_integration_env`'i
+betiği nerede), `crates/bt-shell-macos/src/app.rs`'in `shell_integration_env`'i
 (shell entegrasyonu kurulacak mı ve hangi ortamla),
-`crates/bt-shell-common/src/jobs.rs` ile `crates/bt-shell/src/window.rs`
+`crates/bt-shell-common/src/jobs.rs` ile `crates/bt-shell-macos/src/window.rs`
 (kapatma onayı: ön planda ne koşuyor, ne zaman sorulur);
 betiğin kendisi `assets/shell/zsh/`.
 

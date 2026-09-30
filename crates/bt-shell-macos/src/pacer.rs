@@ -81,7 +81,7 @@ struct Inner {
     /// **Its drop blocks off the main thread:** it hops to the main queue
     /// with `exec_sync`. The `Waker` holding this pacer is also held by the
     /// reader thread, so the last reference must not drop there while the
-    /// main thread waits on shutdown; `bt-shell` detaches that copy on close
+    /// main thread waits on shutdown; `bt-shell-macos` detaches that copy on close
     /// (`TerminalPane::begin_close`) — `bt_gpu::Waker`'s doc.
     link: MainThreadBound<Retained<CADisplayLink>>,
     /// The link's target; the ticker is put in it once the `DisplayLink`

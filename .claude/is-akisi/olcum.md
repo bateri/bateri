@@ -12,7 +12,7 @@ Kare süresi ve açılışın yöntemini sıfırdan yazmak gerekmiyor: kancanın
 sınırları **kodda** emaneten duruyor ve o türün ilk ölçümü onları
 `docs/OLCUMLER.md` → `## Yöntem`'e taşır.
 
-- `crates/bt-shell/src/app.rs` → `Measured`'ın doc'u, "**Ölçümün dürüst
+- `crates/bt-shell-macos/src/app.rs` → `Measured`'ın doc'u, "**Ölçümün dürüst
   sınırları**" başlığı — her kalem **kapsam** ya da **açık kalem** diye
   etiketli; kopyalanmıyor, eksik kopyalanan bir liste sessizce ayrışır.
 - Aynı dosyada `IDLE_FRAME_LIMIT` ve `Report::token_line`: kapının gerekçesi

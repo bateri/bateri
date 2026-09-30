@@ -103,7 +103,7 @@ iki profili birden taşımalıdır.
 ### Kare süresi ve açılış
 
 Yöntem 2026-09-21'de kuruldu; kancanın (`BT_FRAME_STATS`) dürüst sınırları o
-gün `crates/bt-shell/src/app.rs`'teki `Measured`'ın doc'undan **buraya
+gün `crates/bt-shell-macos/src/app.rs`'teki `Measured`'ın doc'undan **buraya
 taşındı** ve sahibi artık burası. Her kalem **kapsam** ya da **açık kalem**
 diye etiketli, çünkü okuyanın yapacağı şey farklı: kapsam bilinip geçilir,
 açık kalem eylem bekler.
@@ -495,7 +495,7 @@ doğrulanmadı), boyutundan tanınır.
 
 ## Boşta kare
 
-**Üst sınır: `icerik ≤ 8`** (`crates/bt-shell/src/app.rs` → `IDLE_FRAME_LIMIT`).
+**Üst sınır: `icerik ≤ 8`** (`crates/bt-shell-macos/src/app.rs` → `IDLE_FRAME_LIMIT`).
 **Alt sınır: `sessiz ≥ 868 ms`** (aynı dosya → `QUIET_FLOOR`; 2026-09-17'de
 870'ten indirildi, gerekçe aşağıda).
 

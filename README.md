@@ -140,11 +140,13 @@ documents; code, identifiers, UI strings and settings are in English.
 | `bt-core` | Platform-independent terminal core: VT parsing (via `alacritty_terminal`), grid and scrollback, PTY, shell integration, command blocks, search, settings |
 | `bt-atlas` | Glyph rasterization with Core Text and the glyph atlas |
 | `bt-gpu` | wgpu renderer, WGSL shaders, frame pacing and motion |
-| `bt-shell` | The AppKit app: windows, tabs, splits, menus, input, settings window, updates |
+| `bt-shell-common` | The platform-independent half of the app shell: settings reading, split tree, key encoding, upload rules, process table, the shell's command and environment, file watching |
+| `bt-shell-macos` | The AppKit app: windows, tabs, splits, menus, input, settings window, updates |
 | `bateri` | The binary and app bundle |
 
-Dependencies only point downward; `bt-core` has no macOS dependencies and is
-also built and tested on Linux (`make linux`).
+Dependencies only point downward; `bt-core`, `bt-atlas`, `bt-gpu` and
+`bt-shell-common` have no AppKit dependencies and are also built and tested on
+Linux (`make linux`).
 
 ## Releasing
 
