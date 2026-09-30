@@ -1,14 +1,15 @@
-# bateri — zsh sarmalayıcısı. Gövde `bateri.zsh`'te.
+# bateri — the zsh wrapper. The body is in `bateri.zsh`.
 #
-# Bu dosya yalnız `.zshrc` okunmayan bir login kabukta (etkileşimsiz) koşar:
-# etkileşimlide `.zshrc` ZDOTDIR'ı çoktan geri koymuştur ve zsh `.zlogin`'i
-# kullanıcının dizininde arar. Bizim oturumumuz etkileşimli, yani olağan yol
-# burası değil — dosya, ZDOTDIR'ın hiçbir kolda bizde kalmaması için var.
+# This file runs only in a login shell in which `.zshrc` is not read
+# (non-interactive): in an interactive one `.zshrc` has already restored
+# ZDOTDIR and zsh looks for `.zlogin` in the user's directory. Our session is
+# interactive, so this is not the usual path — the file exists so that ZDOTDIR
+# is left hanging on us in no arm.
 #
-# Kanca bağlanmıyor: etkileşimsiz kabukta prompt yok, dolayısıyla işaret de yok.
+# No hook is attached: a non-interactive shell has no prompt, hence no mark.
 #
-# İlk satırın gerekçesi `.zprofile`'daki ile aynı: dosya kendi kendine yeter
-# (ulaşılabilir hâli okunamayan bir `.zshenv`, `no_rcs` değil).
+# The reason for the first line is the same as in `.zprofile`: the file is
+# self-sufficient (the reachable case is an unreadable `.zshenv`, not `no_rcs`).
 if (( $+functions[__bateri_begin] )) || source ${ZDOTDIR}/bateri.zsh 2>/dev/null; then
   __bateri_begin .zlogin
   [[ -n $__bateri_file ]] && source $__bateri_file

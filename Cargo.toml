@@ -15,60 +15,63 @@ edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
 
-# Dış crate sürümleri tek yerden; üyeler `{ workspace = true }` der.
+# External crate versions from one place; members say `{ workspace = true }`.
 [workspace.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-# Framework crate'leri varsayılanda her başlığı açar; kullanılanlar sayılır.
-# Üye başına `default-features = false` mirası ezemediği için kırpma burada.
+# Framework crates enable every header by default; the ones used are counted.
+# Trimming is here because per-member `default-features = false` cannot
+# override inheritance.
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSGraphics",
     "NSRunningApplication", "NSEvent", "NSPasteboard", "objc2-core-foundation",
     "objc2-quartz-core",
 ] }
-# Glyph rasterizasyonu (`bt-atlas`): CTFont metriği + alfa-only bitmap bağlamı.
-# Kullanıcı onaylı bağımlılık kararı: .tasks/003-glyph-atlas/discussion.md →
-# Karar. Servo ailesi (`core-text` 22) reddedildi: ikinci bir CF sarmalayıcı
-# yığını `Cargo.lock`'a girerdi, workspace zaten objc2 ailesini pinliyor.
-# `CTFontDescriptor` süs değil — `CTFontGetAdvancesForGlyphs` yönelim tipini
-# (`CTFontOrientation`) oradan alıyor ve o feature olmadan derlenmiyor.
+# Glyph rasterization (`bt-atlas`): CTFont metrics + alpha-only bitmap context.
+# User-approved dependency decision: .tasks/003-glyph-atlas/discussion.md →
+# Karar. The Servo family (`core-text` 22) was rejected: a second CF wrapper
+# stack would enter `Cargo.lock`, and the workspace already pins the objc2 family.
+# `CTFontDescriptor` is not decoration — `CTFontGetAdvancesForGlyphs` takes its
+# orientation type (`CTFontOrientation`) from there and it does not compile
+# without that feature.
 objc2-core-text = { version = "0.3", default-features = false, features = [
     "std", "CTFont", "CTFontDescriptor", "CTFontTraits", "objc2-core-graphics",
-# `CTFontTraits` da süs değil: `CTFontSymbolicTraits` tipi ve onunla çalışan
-# `copy_with_symbolic_traits` / `symbolic_traits` kapıları o feature'ın
-# arkasında. Dört font yüzü (kalın, eğik, kalın-eğik) onlarsız türetilemiyor.
-# `CTLine` + `CTRun` grapheme dizisini (bayrak, ZWJ, ten rengi, VS16) tek
-# glyph'e şekillendiriyor — `CTFontGetGlyphsForCharacters` kod noktası başına
-# bakıyor, diziyi birleştirmiyor. `CTStringAttributes` `kCTFontAttributeName`
-# için: satırın fontu attributed string'e onunla veriliyor ve run'ın gerçekten
-# kullandığı font onunla okunuyor (.tasks/035-grapheme-dizileri, phase-1).
+# `CTFontTraits` is not decoration either: the `CTFontSymbolicTraits` type and
+# the `copy_with_symbolic_traits` / `symbolic_traits` gates that work with it
+# are behind that feature. The four font faces (bold, italic, bold-italic)
+# cannot be derived without them.
+# `CTLine` + `CTRun` shape a grapheme sequence (flag, ZWJ, skin tone, VS16) into
+# a single glyph — `CTFontGetGlyphsForCharacters` looks per code point and does
+# not join the sequence. `CTStringAttributes` is for `kCTFontAttributeName`:
+# the line's font is handed to the attributed string through it and the font
+# the run actually used is read through it (.tasks/035-grapheme-dizileri, phase-1).
     "CTLine", "CTRun", "CTStringAttributes",
 ] }
-# `CGBitmapContextCreate` dört başlığın kesişiminde (kendi `CGBitmapContext`
-# başlığı + `CGColorSpace` + `CGContext` + `CGImage`), `CGFont` ise `CGGlyph`
-# tipi için. Varsayılan feature seti `objc2-io-surface`'i de çekiyordu;
-# kırpma onu grafın dışında tutuyor.
+# `CGBitmapContextCreate` is at the intersection of four headers (its own
+# `CGBitmapContext` header + `CGColorSpace` + `CGContext` + `CGImage`), `CGFont`
+# is for the `CGGlyph` type. The default feature set also pulled in
+# `objc2-io-surface`; trimming keeps it out of the graph.
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGFont", "CGImage",
 ] }
-# Yeni bir crate DEĞİL — grafta zaten vardı (objc2-app-kit çekiyor) ve sürüm
-# oynamıyor; `Cargo.lock`'ta yalnız `bt-atlas`'ın listesine kenar ekleniyor.
-# `CFString` font adı, `CFCGTypes` ise CGPoint/CGSize/CGRect için.
-# `CFAttributedString`, `CFDictionary` ve `CFArray` grapheme dizisinin
-# şekillendirilmesi için (`CTLine`'ın girdisi, run'ın öznitelikleri ve run
-# listesi); `CTLine` üçünü de zaten açıyor, burada adları kullandığımız için
-# açıkça yazılı.
+# NOT a new crate — it was already in the graph (objc2-app-kit pulls it) and the
+# version does not move; in `Cargo.lock` only an edge is added to `bt-atlas`'s list.
+# `CFString` is for the font name, `CFCGTypes` for CGPoint/CGSize/CGRect.
+# `CFAttributedString`, `CFDictionary` and `CFArray` are for shaping the grapheme
+# sequence (the input of `CTLine`, the run's attributes and the run list);
+# `CTLine` already enables all three, they are written out explicitly because
+# we use the names here.
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std", "CFString", "CFCGTypes", "CFAttributedString", "CFDictionary", "CFArray",
 ] }
-# Yüklemenin macOS bildirimi (`bt-shell-macos::uploader::notify`, 037 phase-7).
-# Kullanıcı onaylı bağımlılık kararı (2026-09-27): kullanımdan kalkmış
-# `NSUserNotification` yerine Apple'ın desteklediği `UNUserNotificationCenter`
-# — kayıt .tasks/037-ssh-ikinci-tur/phase-7.md → Uygulama Notları. Aynı objc2
-# nesli (0.3.2). Varsayılan set `objc2-core-location`'ı çekiyordu; kırpma onu
-# grafın dışında tutuyor. `UNNotificationTrigger` süs değil:
-# `requestWithIdentifier:content:trigger:` o bayrağın arkasında.
+# The macOS notification for uploads (`bt-shell-macos::uploader::notify`, 037 phase-7).
+# User-approved dependency decision (2026-09-27): Apple's supported
+# `UNUserNotificationCenter` instead of the deprecated `NSUserNotification`
+# — record in .tasks/037-ssh-ikinci-tur/phase-7.md → Uygulama Notları. Same objc2
+# generation (0.3.2). The default set pulled in `objc2-core-location`; trimming
+# keeps it out of the graph. `UNNotificationTrigger` is not decoration:
+# `requestWithIdentifier:content:trigger:` is behind that flag.
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std", "block2", "UNUserNotificationCenter", "UNNotificationContent",
     "UNNotificationRequest", "UNNotificationTrigger",
@@ -80,59 +83,61 @@ dispatch2 = { version = "0.3", features = ["block2"] }
 # Objective-C blocks (`RcBlock`) for `bt-shell-macos`'s completion handlers; already
 # in the graph through wgpu's Metal backend and `dispatch2`.
 block2 = "0.6"
-# VT ayrıştırma, grid, scrollback, hasar, PTY ve okuyucu thread. bt-core onu
-# KAPSÜLLER: pub API'de alacritty tipi görünmez. Kullanıcı onaylı bağımlılık
-# kararı: .tasks/002-vt-motoru/discussion.md → Karar. Tek varsayılan feature
-# serde'dir ve kapatılır: hiçbir yerde serialize etmiyoruz.
-# Sürüm **tam** sabit (`=`): okuyucu döngüsü bu sürümün `event_loop.rs`'inin
-# kopyası (`bt-core/src/reader.rs`) ve kopya onun `pub(crate)` iki sabitine
-# (PTY token'ları) yaslanıyor — yama sürümü bile onları sessizce kaydırabilirdi
-# (035 phase-2). vte'yi bu pin sabitlemiyor (alacritty onu `^0.15.0` istiyor):
-# onun sürümünü `Cargo.lock`, `Handler`'a gelecek yeni metodu da
-# sarmalayıcının `missing_trait_methods` bekçisi tutuyor.
+# VT parsing, grid, scrollback, damage, PTY and the reader thread. bt-core
+# ENCAPSULATES it: no alacritty type appears in the pub API. User-approved
+# dependency decision: .tasks/002-vt-motoru/discussion.md → Karar. The only
+# default feature is serde and it is turned off: we serialize nowhere.
+# The version is pinned **exactly** (`=`): the reader loop is a copy of this
+# version's `event_loop.rs` (`bt-core/src/reader.rs`) and the copy leans on its
+# two `pub(crate)` constants (the PTY tokens) — even a patch release could
+# silently shift them (035 phase-2). This pin does not pin vte (alacritty asks
+# for `^0.15.0`): its version is held by `Cargo.lock`, and a new method that
+# arrives in `Handler` is caught by the wrapper's `missing_trait_methods` guard.
 alacritty_terminal = { version = "=0.26.0", default-features = false }
-# Ayar ve tema dosyası (`bt-core::settings`). Kullanıcı onaylı bağımlılık
-# kararı: .tasks/007-ayarlar-ve-tema/discussion.md → Karar. `toml` + `serde`
-# yerine: menüden seçilen tema dosyaya yazılacak ve sözleşme "tanımadığını
-# bırakır" diyor — serde yolu yorumu, düzeni ve bilinmeyen anahtarın yerini
-# kaybeder. `parse` okuma, `display` biçim koruyan yazma (Tema menüsü, 007
-# phase-7; `toml_writer`'ı çekiyor). `Cargo.lock`'taki
-# `serde_core`/`serde_derive`/`syn` satırları **derlenmiyor**: `toml_datetime`'ın
-# zayıf `serde_core?/std` özelliği kilit dosyasına yazdırıyor, `cargo tree -p
-# bt-core` onları göstermez.
+# Settings and theme files (`bt-core::settings`). User-approved dependency
+# decision: .tasks/007-ayarlar-ve-tema/discussion.md → Karar. Instead of `toml` +
+# `serde`: the theme chosen from the menu will be written to the file and the
+# contract says "leaves what it does not recognize" — the serde path loses
+# comments, layout and the place of unknown keys. `parse` is reading, `display`
+# is format-preserving writing (Theme menu, 007 phase-7; it pulls in
+# `toml_writer`). The `serde_core`/`serde_derive`/`syn` lines in `Cargo.lock`
+# are **not compiled**: `toml_datetime`'s weak `serde_core?/std` feature makes
+# them get written to the lock file, `cargo tree -p bt-core` does not show them.
 toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
-# `Handler`'ı aktaran sarmalayıcı için (`bt-core::handler`): trait'in
-# `set_mouse_cursor_icon` metodu imzasında `CursorIcon` geçiriyor ve ne vte ne
-# alacritty onu yeniden ihraç ediyor (vte `ansi`'de özel `use`). Aktarım
-# listesinin bekçisi `clippy::missing_trait_methods` metodu atlamaya izin
-# vermiyor. `polling` emsali: yeni bir crate DEĞİL — grafta zaten vardı (vte'nin
-# `ansi` özelliği), aynı 1.2.0'a çözülüyor; `Cargo.lock`'ta yalnız `bt-core`'un
-# bağımlılık listesine bir kenar ekleniyor. Kullanıcı kararı:
+# For the wrapper that forwards `Handler` (`bt-core::handler`): the trait's
+# `set_mouse_cursor_icon` method passes `CursorIcon` in its signature and neither
+# vte nor alacritty re-exports it (a private `use` in vte's `ansi`). The guard of
+# the forwarding list, `clippy::missing_trait_methods`, does not allow skipping a
+# method. `polling` precedent: NOT a new crate — it was already in the graph
+# (vte's `ansi` feature), resolves to the same 1.2.0; in `Cargo.lock` only an edge
+# is added to `bt-core`'s dependency list. User decision:
 # .tasks/035-grapheme-dizileri/discussion.md → Karar.
 cursor-icon = { version = "1.2", default-features = false }
-# Bekçi thread'in son çaresi: `write(2, …)` + `_exit(70)`, ikisi de
-# async-signal-safe (`bt-shell-macos::bekci`). Yeni bir crate DEĞİL — grafta zaten
-# vardı (alacritty PTY'yi onunla açıyor) ve sürüm oynamıyor; `Cargo.lock`'ta
-# yalnız `bt-shell-macos`'un bağımlılık listesine bir kenar ekleniyor. Kararın kaydı:
+# The last resort of the watchdog thread: `write(2, …)` + `_exit(70)`, both
+# async-signal-safe (`bt-shell-macos::bekci`). NOT a new crate — it was already in the
+# graph (alacritty opens the PTY with it) and the version does not move; in `Cargo.lock`
+# only an edge is added to `bt-shell-macos`'s dependency list. Record of the decision:
 # .tasks/002-vt-motoru/phase-4.md → Uygulama Notları.
 libc = "0.2"
-# `EventedReadWrite`'ı uygulayabilmek için (`bt-core::session`'ın `TappedPty`'si):
-# trait'in üç kayıt metodu imzasında `Poller`, `Event` ve `PollMode` geçiriyor ve
-# alacritty bu crate'i yeniden ihraç ETMİYOR (yalnız `vte`'yi ediyor), yani
-# tipleri adlandırmanın başka yolu yok. `libc` emsali: yeni bir crate DEĞİL —
-# grafta zaten vardı (alacritty PTY'yi onunla yokluyor), sürüm sınırı onunkiyle
-# aynı (3.8) ve aynı 3.11'e çözülüyor; `Cargo.lock`'ta yalnız `bt-core`'un
-# bağımlılık listesine bir kenar ekleniyor. Kararın kaydı:
+# To be able to implement `EventedReadWrite` (`bt-core::session`'s `TappedPty`):
+# the trait's three registration methods pass `Poller`, `Event` and `PollMode` in
+# their signature and alacritty does NOT re-export this crate (it only does so for
+# `vte`), so there is no other way to name the types. `libc` precedent: NOT a new
+# crate — it was already in the graph (alacritty polls the PTY with it), the
+# version bound is the same as its (3.8) and it resolves to the same 3.11; in
+# `Cargo.lock` only an edge is added to `bt-core`'s dependency list. Record of
+# the decision:
 # .tasks/009-shell-entegrasyonu/phase-2.md → Uygulama Notları.
 polling = "3.8"
-# Dock'un sütun aritmetiği (`bt-core::dock`) ve — aynı setin ikinci
-# phase'inde — bastırmanın tazelik kapısı (`bt-core::shell`). Yeni bir crate DEĞİL — grafta zaten vardı ve **ızgaranın
-# kullandığının ta kendisi**: alacritty `Flags::WIDE_CHAR`'ı
-# `unicode_width::UnicodeWidthChar` ile kuruyor ama onu yeniden **ihraç
-# etmiyor** (ölçüldü). Aynı crate'in aynı sürümü olması kararın özü: ikinci
-# bir genişlik kaynağı ızgaranınkiyle ayrıştığı gün belirtisi sessizdir —
-# dock bir sütun kayar. `Cargo.lock`'ta yalnız `bt-core`'un listesine bir
-# kenar ekleniyor, hiçbir sürüm oynamıyor. Kararın kaydı:
+# The dock's column arithmetic (`bt-core::dock`) and — in the second phase of
+# the same set — the suppression's freshness gate (`bt-core::shell`). NOT a new
+# crate — it was already in the graph and is **the very one the grid uses**:
+# alacritty sets `Flags::WIDE_CHAR` with `unicode_width::UnicodeWidthChar` but
+# does **not re-export** it (measured). Being the same version of the same crate
+# is the heart of the decision: the day a second width source diverges from the
+# grid's the symptom is silent — the dock shifts by a column. In `Cargo.lock`
+# only an edge is added to `bt-core`'s list, no version moves. Record of the
+# decision:
 # .tasks/024-dock-sutun-aritmetigi/discussion.md → Karar 1.
 unicode-width = "0.2"
 

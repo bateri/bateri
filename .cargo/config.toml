@@ -1,6 +1,6 @@
-# Taban macOS sürümünün tek kaynağı. rustc binary'nin minos'unu buradan alır;
-# crates/bt-gpu/build.rs shader'ların -mmacos-version-min'ini buradan okur;
-# `make kur` Info.plist'in LSMinimumSystemVersion'ını binary'nin minos'undan,
-# yani dolaylı olarak buradan doldurur.
+# The single source of the macOS floor version. rustc takes the binary's minos from here;
+# crates/bt-gpu/build.rs reads the shaders' -mmacos-version-min from here;
+# `make bundle` fills Info.plist's LSMinimumSystemVersion from the binary's minos,
+# i.e. indirectly from here.
 [env]
 MACOSX_DEPLOYMENT_TARGET = "14.0"

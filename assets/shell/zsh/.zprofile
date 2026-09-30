@@ -1,17 +1,17 @@
-# bateri — zsh sarmalayıcısı. Gövde `bateri.zsh`'te.
+# bateri — the zsh wrapper. The body is in `bateri.zsh`.
 #
-# Login kabukta `.zshrc`'den ÖNCE okunuyor ve devredilmesi zorunlu: çoğu
-# kurulumda kullanıcının PATH'i (Homebrew, nvm, asdf) burada doğuyor. Yalnız
-# `.zshrc`'yi devreden bir sarmalayıcı onu sessizce düşürürdü.
+# Read BEFORE `.zshrc` in a login shell and handing it over is mandatory: in
+# most setups the user's PATH (Homebrew, nvm, asdf) is born here. A wrapper
+# that handed over only `.zshrc` would silently drop it.
 #
-# İskeletin ilk satırı bu dosyayı KENDİ KENDİNE YETER kılıyor: gövde yüklü
-# değilse kendisi yükler. Ulaşılabilir hâli, bizim `.zshenv`'imizin okunamamış
-# olması (eksik ya da izni kapalı dosya — elle bozulmuş bir paket); `no_rcs`
-# DEĞİL, çünkü o seçenek kapandıktan sonra zsh başka hiçbir başlangıç dosyası
-# okumuyor, `/etc/zprofile` dahil (`/code-review`, 009 phase-5: ilk yazımdaki
-# gerekçe yanlıştı). Çıplak bir `return` yine de olmaz — `ZDOTDIR` bizde
-# asılı kalır, `BATERI_ZDOTDIR` ihraçlı durur ve `elif` kolunun yaptığı geri
-# düşüş hiç koşmazdı.
+# The first line of the skeleton makes this file SELF-SUFFICIENT: if the body
+# is not loaded it loads it itself. The reachable case is our `.zshenv` having
+# gone unread (a missing or unreadable file — a hand-corrupted package); NOT
+# `no_rcs`, because once that option is on zsh reads no other startup file at
+# all, `/etc/zprofile` included (`/code-review`, 009 phase-5: the rationale in
+# the first draft was wrong). A bare `return` still will not do — `ZDOTDIR`
+# stays hanging on us, `BATERI_ZDOTDIR` stays exported and the fallback the
+# `elif` arm performs would never run.
 if (( $+functions[__bateri_begin] )) || source ${ZDOTDIR}/bateri.zsh 2>/dev/null; then
   __bateri_begin .zprofile
   [[ -n $__bateri_file ]] && source $__bateri_file
