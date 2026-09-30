@@ -70,7 +70,9 @@ _Requirements: R8, R9, R1.2_
   (fark 0x29). 13pt@2x'te on sekiz aday tarandı; `⟺`, `⟼`, `⤚` geçti.
   `☕` DejaVu Sans Mono'da var, yani tek hücreye sığan geniş sınaması
   Linux'ta da boş değil.
-- **Bulunan platformsuz kusur — bu commit'te yok, karar bekliyor.**
+- **Bulunan platformsuz kusur — düzeltildi: phase-6'dan sonraki istisna
+  commit'i ("Önbellekteki reddedilen geniş karakteri tek kutu cevapla";
+  kullanıcı onayı 2026-09-30).**
   `Atlas::slot`'un önbellek kolu kaydı `half: want` ile cevaplıyor; ret kolu
   `TOFU`'yu `Left` ve `Right` anahtarlarına da yazıyor ve taze cevap `Whole`.
   Yani reddedilen geniş karakter ilk karede **bir**, sonraki her karede
@@ -82,8 +84,8 @@ _Requirements: R8, R9, R1.2_
   yok. Çare önbellek kolunda tek dal (`(TOFU, Plane::Mask)` → `Half::Whole`)
   ve platformsuz bekçi (`GATE_PROBES`'un her karakteri için `Left` iki kez
   sorulunca aynı `Placed`; çaresiz Linux'ta kırmızı olduğu doğrulandı).
-  R1.1 ("tanık ebeveynle aynı") yüzünden uygulanmadı, `docs/YOL-HARITASI.md`
-  → Sete bağlanmamış borçlar'da.
+  R1.1 ("tanık ebeveynle aynı") yüzünden phase-6'ya girmedi; ayrı commit'te
+  tanığın farkı yine yalnız bu 160 → 80 satır.
 - `PAIR_CHAR` olarak `⁂` kabul edildiği için hayalet sınaması tofu yoluna
   hiç girmiyor; yukarıdaki kusur bu phase'in kabulünü etkilemiyor.
 - Tanık: ebeveyn (`427c1f4`) worktree'de, 38 676 satır, fark boş.
@@ -96,9 +98,10 @@ _Requirements: R8, R9, R1.2_
 - **Waive (low):** değişken fontta (`JetBrains Mono VF`) `derive`'ın stil
   kapısı dosyanın varsayılan örneğinin bitlerini görüyor olabilir, o zaman
   kalın yüz düz yüze çöker; doğrulanmadı ve fontconfig'in ağırlığına güvenmek
-  sentetik kalın kuralını delerdi.
+  sentetik kalın kuralını delerdi. Kabul: orkestratör, 2026-09-30.
 - **Waive (low, `/audit` mercek 4 ile aynı):** bayt önbelleği `Weak`, yani
   kabul edilen yedeğin dosyası (Noto ~10 MB) her yeni yedek karakterde ana
   thread'de yeniden okunuyor — render yolunda dosya G/Ç. Bellek ↔ yeniden
   okuma dengesi phase-4'ün kayıtlı kararı; Linux'ta pencere yok, kullanıcı
   görmüyor. Çaresi kabul edilen yedek fontları atlasın ömrünce tutmak.
+  Kabul: orkestratör, 2026-09-30.

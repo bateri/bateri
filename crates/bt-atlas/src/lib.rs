@@ -667,14 +667,17 @@ impl Atlas {
         // atlasın ömründe bir kez koşuyor.
         let key = (sprite, face, size, want);
         if let Some(&(slot, plane)) = self.slots.get(&key) {
-            return (
-                Placed {
-                    slot,
-                    half: want,
-                    plane,
-                },
-                None,
-            );
+            // A cached **rejection** answers `Whole`, like the fresh one: the
+            // rejection arm below writes `TOFU` under the `Left` and `Right`
+            // keys too, and answering `want` from them made the second ask
+            // for a rejected wide character a pair — `bt-gpu` then drew one
+            // box on the first frame and two from the second on.
+            let half = if (slot, plane) == (TOFU, Plane::Mask) {
+                Half::Whole
+            } else {
+                want
+            };
+            return (Placed { slot, half, plane }, None);
         }
         // `Left` istendi ama karakter daha önce **tek hücrelik kabul**
         // edilmişse cevabı o veriyor. Bu dal olmasaydı `☕` iki kez rasterize
@@ -1817,6 +1820,36 @@ mod tests {
             again.is_none(),
             "yuva zaten yüklü: doku el değmeden kalmalı"
         );
+    }
+
+    #[test]
+    fn a_wide_request_gets_the_same_answer_from_the_cache() {
+        // The cache must answer exactly what the gate answered: `bt-gpu`
+        // asks every frame and fans a `Left` answer out to two quads. A
+        // rejected wide request used to come back `Whole` fresh and `Left`
+        // cached — one box on the first frame, two from the second on. The
+        // probes cover a pair, a shrunk glyph and (on Linux, with no
+        // last-resort font) a rejection.
+        for size in [POINT_SIZE, 16.0] {
+            let mut a = atlas(size, 1.0);
+            for ch in GATE_PROBES {
+                let ask = |a: &mut Atlas| {
+                    a.slot(
+                        Sprite::Char(ch),
+                        Face::Regular,
+                        SizeClass::Normal,
+                        Half::Left,
+                    )
+                    .0
+                };
+                let fresh = ask(&mut a);
+                let cached = ask(&mut a);
+                assert_eq!(
+                    fresh, cached,
+                    "{size}pt '{ch}': the cache changed the answer"
+                );
+            }
+        }
     }
 
     #[test]
