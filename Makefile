@@ -550,15 +550,16 @@ yukle: kur
 terminfo:
 	$(call henuz_yok,assets/terminfo bir shell/TERM setiyle gelir)
 
-# bt-core'un Linux kapısı: `clippy -D warnings` ve `test`, Docker'da,
+# bt-core'un ve bt-atlas'ın Linux kapısı: `clippy -D warnings` ve `test`, Docker'da,
 # `tools/linux/Dockerfile`'ın imajında, `--locked` (Cargo.lock'u değiştiren
 # koşu kırmızı düşer, sessizce yeni sürüm çözmez). CLAUDE.md'nin "bt-core
 # platformsuz, kapı Linux hedefiyle derlemedir" sözü bu komuttur.
 # `make hepsi`'nin DIŞINDA, çünkü Docker ister ve ilk koşusu imajı kurup bütün
 # grafı Linux için derler; ne zaman koştuğu `.claude/is-akisi/proje.md` →
 # Doğrulama'da (Linux'ta derlenen bir crate değiştiyse).
-# Kapsam setlerle büyür — bugün yalnız bt-core; sırası (bt-atlas + lavapipe
-# üstünde bt-gpu, sonra bt-shell-common) `docs/YOL-HARITASI.md`'de. Büyürken
+# Kapsam setlerle büyür — bugün bt-core ve bt-atlas'ın FreeType/fontconfig
+# arka ucu (042 phase-4; renk ve küme yolu phase-5'te, lavapipe üstünde bt-gpu
+# phase-6'da, sonra bt-shell-common) — sıra `docs/YOL-HARITASI.md`'de. Büyürken
 # `-p` listesi ve imaj tarifi birlikte değişir.
 # Sıra:
 # 1. Sürüm: yerel `rustc`'nin major.minor'ü imaj etiketininkiyle aynı değilse
@@ -574,7 +575,7 @@ terminfo:
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
-LINUX_CRATES = -p bt-core
+LINUX_CRATES = -p bt-core -p bt-atlas
 
 linux:
 	@yerel=$$(rustc --version | sed -n 's/^rustc \([0-9]*\.[0-9]*\).*/\1/p'); \

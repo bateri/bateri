@@ -44,6 +44,8 @@
 mod census;
 #[cfg(target_os = "macos")]
 mod coretext;
+#[cfg(target_os = "linux")]
+mod freetype;
 mod raster;
 mod rules;
 mod system;
@@ -729,7 +731,13 @@ impl Atlas {
         // turundan dönüyor. Dolu atlasta ise önbelleğe yazılmadığı için
         // buraya düşer ve tofu alır — sol yarısı da aynı sayıdan tofu
         // aldığı için cevap tutarlı kalıyor.
-        let need = u32::from(if want == Half::Left { 2u16 } else { 1 });
+        // `Right` counts **two** as well: it is one half of the same pair, and
+        // only the same count makes "the left half got tofu from the same
+        // number" true. Counted as one, a full atlas with a single free slot
+        // turned the right half into a shrunk whole glyph beside a tofu left
+        // half — hidden on macOS, where the fixture's wide character is
+        // `.LastResort` and never shrinks (042 phase-4, seen on Linux).
+        let need = u32::from(if want == Half::Whole { 1u16 } else { 2 });
         // Ölçüt **maskenin** sayacı ve bu bilinçli bir daraltma. Düzlem ancak
         // çizim sırasında biliniyor, yani düzleme duyarlı bir ön kapı yok.
         // Üç seçenek tartıldı (ölçülmedi — hiçbirinin sayısı alınmadı, ayıran
@@ -2676,7 +2684,19 @@ mod tests {
     fn bold_face_gets_own_slot() {
         let mut a = atlas(POINT_SIZE, 1.0);
         let mut slots = Vec::new();
-        for face in [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic] {
+        // Only the faces the family really has: a missing face collapses to
+        // the regular one **by design** (`Faces::effective`) and shares its
+        // slot. On macOS Menlo has all four; the Linux image's DejaVu Sans
+        // Mono has no italic (042 phase-4).
+        let faces: Vec<Face> = [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic]
+            .into_iter()
+            .filter(|&face| a.faces.effective(face) == face)
+            .collect();
+        assert!(
+            faces.contains(&Face::Bold),
+            "the base family has no bold face"
+        );
+        for &face in &faces {
             let slot = a
                 .slot(Sprite::Char('M'), face, SizeClass::Normal, Half::Whole)
                 .0
@@ -2690,7 +2710,7 @@ mod tests {
             );
             slots.push(slot);
         }
-        assert_eq!(slots.len(), 4);
+        assert_eq!(slots.len(), faces.len());
     }
 
     /// Uzak oturumun işareti (`bt_core::dock::REMOTE_MARK`, 036 Karar 7).
@@ -4486,6 +4506,12 @@ mod tests {
     /// ad o tofu kaydını geçirirse setin tamamı o karakter için atlasın ömrü
     /// boyunca ölü kalır — ve belirti sessiz: kutu çizilir, hiçbir sayaç
     /// kıpırdamaz.
+    // Calibration: the single-cell rejection comes from CoreText's
+    // `.LastResort`, which the shrink arm keeps out by name. A backend
+    // without a last-resort font cannot produce it — a glyph that fits two
+    // cells fits one at half the size, under `SHRINK_LIMIT` — so the premise
+    // exists only on macOS (042 phase-4).
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_single_cell_rejection_does_not_answer_the_wide_request() {
         let mut a = atlas(POINT_SIZE, 1.0);
@@ -4587,6 +4613,10 @@ mod tests {
     /// yani 023'ün iki hücrelik kapısından geçmeli. Sağ yarının boş olmaması
     /// şart — boş bir sağ yarı "iki yuva aldı" sınamasını yeşil bırakıp
     /// ekranda yarım bir emoji çizerdi.
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "phase-5: no shaping or colour font on Linux yet"
+    )]
     #[test]
     fn a_cluster_takes_two_colour_slots() {
         let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
@@ -4631,6 +4661,10 @@ mod tests {
     /// Kimlik anahtarın parçası, yani ikinci soruluşta yeni bir kimlik
     /// üretmek aynı glyph'i her karede yeniden şekillendirip yeni yuvaya
     /// koymak olurdu — atlas dolana kadar sessizce.
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "phase-5: no shaping or colour font on Linux yet"
+    )]
     #[test]
     fn the_same_cluster_is_interned_and_cached_once() {
         let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
@@ -4685,6 +4719,10 @@ mod tests {
     /// sınır bu kolu sınamanın en temiz yolu. Cevap bayt bayt `Char('👍')`'nin
     /// ki: ayrı bir atlasta sorulan tek karakterle karşılaştırılıyor, yani
     /// "taban karakter" bir benzetme değil aynı raster.
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "phase-5: no shaping or colour font on Linux yet"
+    )]
     #[test]
     fn an_unshaped_cluster_answers_with_its_base_char() {
         let mut reference = atlas(POINT_SIZE, CLUSTER_SCALE);
