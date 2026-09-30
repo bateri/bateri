@@ -1,83 +1,77 @@
-//! Kabuğun başlangıç koşulları: hangi dizinde ve hangi yerelle açılır.
+//! The shell's starting conditions: in which directory and with which locale it opens.
 //!
-//! Dock'tan açılan paket LaunchServices'ten `cwd=/` ve launchd'nin ortamını
-//! alıyor; launchd'nin kullanıcı alanında `LANG` yok (`launchctl getenv
-//! LANG` boş). Kabuk olduğu gibi miras alsaydı `/`'da ve UTF-8'siz başlardı.
-//! `cargo run` ikisini de göstermez: çağıranın dizinini ve ortamını miras
-//! alır.
+//! A bundle opened from the Dock gets `cwd=/` and launchd's environment from LaunchServices;
+//! launchd's user domain has no `LANG` (`launchctl getenv LANG` is empty). Had the shell
+//! inherited as is, it would start in `/` and without UTF-8. `cargo run` shows neither: it
+//! inherits the caller's directory and environment.
 //!
-//! Politika **burada**, `bt-core`'da değil: "ev dizini" ve "hangi yerel"
-//! uygulamanın kararı, `bt-core` yalnız verileni çocuğa geçirir
-//! (`SessionOptions`). İkisi de **yalnız çocuğa** gider — kendi sürecimizin
-//! dizini ve ortamı hiçbir hâlde değişmez (`set_current_dir`, `set_var`,
-//! `setlocale` yok; `CLAUDE.md` → `tty::setup_env()` çağrılmaz). alacritty
-//! aynı iki işi kendi sürecinde yapıyor; izlenmemesinin sebebi bu.
+//! The policy lives **here**, not in `bt-core`: "home directory" and "which locale" are the
+//! application's decision, `bt-core` only passes what it is given on to the child
+//! (`SessionOptions`). Both go **only to the child** — our own process's directory and
+//! environment never change (no `set_current_dir`, `set_var` or `setlocale`; `CLAUDE.md` →
+//! `tty::setup_env()` çağrılmaz). alacritty does the same two jobs in its own process; that is
+//! why it is not followed.
 //!
-//! Hangi kabuğun koşacağı ([`shell`]) ve shell entegrasyonunun betiğinin
-//! nerede durduğu ([`zsh_wrapper_dir`]) da burada: ikisi de kabuğun doğuşuna
-//! ait ve ikisi de **spawn'dan önce** cevaplanmak zorunda.
+//! Which shell runs ([`shell`]) and where the shell integration script lives
+//! ([`zsh_wrapper_dir`]) are here too: both belong to the shell's birth and both must be
+//! answered **before the spawn**.
 //!
-//! Kararlar saf fonksiyonlarda ([`home_directory`], [`decide_locale`],
-//! [`is_zsh`]): sistemin okunduğu tek yer birkaç ince sarmalayıcı, geri kalanı
-//! sınanıyor.
+//! The decisions are in pure functions ([`home_directory`], [`decide_locale`], [`is_zsh`]):
+//! the only places where the system is read are a few thin wrappers, the rest is tested.
 
 use std::ffi::{CStr, OsString};
 use std::path::{Path, PathBuf};
 
 use objc2_foundation::NSLocale;
 
-/// Kabuğun başlangıç dizini: kullanıcının ev dizini — **her** açılışta,
-/// `cargo run` dahil (alacritty ve Terminal.app ile aynı). "Yalnız `/`
-/// gelirse ev dizini" reddedildi: kural iki kollu olurdu
-/// (`discussion.md` → Karar 6 eki).
+/// The shell's starting directory: the user's home directory — on **every** launch, `cargo
+/// run` included (same as alacritty and Terminal.app). "Home directory only if `/` comes in"
+/// was rejected: the rule would have two branches (`discussion.md` → Karar 6 eki).
 ///
-/// Kaynak `std::env::home_dir`: `HOME`, o yoksa kullanıcının passwd kaydı
-/// (`getpwuid_r`) — alacritty'nin çocuğa `HOME` yazarken izlediği sıra
-/// (`ShellUser::from_env`), yani olağan hâlde kabuğun `pwd`'si ile `$HOME`'u
-/// aynı dizin. Yeni bağımlılık istemiyor. İkisinin ayrışabildiği tek kenar
-/// UTF-8 olmayan bir `HOME`: `std` onu olduğu gibi alıyor, alacritty
-/// (`env::var`) passwd'ye düşüyor.
+/// The source is `std::env::home_dir`: `HOME`, or if that is missing the user's passwd entry
+/// (`getpwuid_r`) — the order alacritty follows when writing `HOME` for the child
+/// (`ShellUser::from_env`), so in the ordinary case the shell's `pwd` and its `$HOME` are the
+/// same directory. It needs no new dependency. The only edge where the two can diverge is a
+/// non-UTF-8 `HOME`: `std` takes it as is, alacritty (`env::var`) falls back to passwd.
 pub(crate) fn working_directory() -> Option<PathBuf> {
     home()
 }
 
-/// Kullanıcının ev dizini, [`working_directory`] ile **aynı çözümle**: ayar
-/// dizini (`~/.config/bateri/`) de buradan türüyor ve kabuğun `$HOME`'u ile
-/// ayarın okunduğu ev iki ayrı kuralla ayrışmasın.
+/// The user's home directory, with **the same resolution** as [`working_directory`]: the
+/// settings directory (`~/.config/bateri/`) is derived from here too, so the shell's `$HOME`
+/// and the home the settings are read from do not diverge through two separate rules.
 pub(crate) fn home() -> Option<PathBuf> {
     home_directory(std::env::home_dir())
 }
 
-/// Ev dizini → başlangıç dizini; **mutlak değilse** `None`, yani çocuk bizim
-/// dizinimizi miras alır.
+/// Home directory → starting directory; `None` **if it is not absolute**, i.e. the child
+/// inherits our directory.
 ///
-/// İki kenar tek koşulda: `HOME=""` passwd'ye düşürmüyor, `std` `Some("")`
-/// veriyor; göreli bir `HOME` ise `chdir`'de **bizim** dizinimize (Dock'ta
-/// `/`) göre çözülürdü. İkisini de `chdir`'e vermenin anlamı yok; miras
-/// dürüst olan.
+/// Two edges in a single condition: `HOME=""` does not fall back to passwd, `std` gives
+/// `Some("")`; a relative `HOME`, on the other hand, would be resolved in `chdir` relative to
+/// **our** directory (`/` from the Dock). There is no point in giving either to `chdir`;
+/// inheriting is the honest choice.
 fn home_directory(home: Option<PathBuf>) -> Option<PathBuf> {
     home.filter(|home| home.is_absolute())
 }
 
-/// Kabuğa eklenecek yerel değişkeni, gerekiyorsa: ortamda yerel yoksa
-/// macOS'un dil/bölge ayarından.
+/// The locale variable to add to the shell, if needed: from macOS's language/region setting
+/// when the environment has no locale.
 ///
-/// **Dil `preferredLanguages`'ın ilkinden**, `currentLocale().languageCode`
-/// değil: paketin içinde o, **kullanıcının** dilini değil paketin
-/// yerelleştirmesinden seçilen dili veriyor — `bateri.app` `.lproj`
-/// taşımıyor ve `CFBundleDevelopmentRegion` `en`, yani her Dock açılışında
-/// `en`. Paketle yoklandı (`-AppleLanguages (tr-TR) -AppleLocale tr_TR`):
-/// Türk kullanıcı `tr_TR.UTF-8` yerine düşüş yerelini, `fr-CA` kullanıcı
-/// `fr_CA.UTF-8` yerine `en_CA.UTF-8` alıyordu. `cargo run` (paketsiz)
-/// doğru dili verdiği için hata orada görünmüyordu. alacritty
-/// `currentLocale`'i kullanıyor; izlenmedi.
+/// **The language comes from the first of `preferredLanguages`**, not from
+/// `currentLocale().languageCode`: inside the bundle that one gives not the **user's**
+/// language but the language chosen from the bundle's localizations — `bateri.app` carries no
+/// `.lproj` and `CFBundleDevelopmentRegion` is `en`, so `en` on every Dock launch. Probed with
+/// the bundle (`-AppleLanguages (tr-TR) -AppleLocale tr_TR`): a Turkish user got the fallback
+/// locale instead of `tr_TR.UTF-8`, a `fr-CA` user got `en_CA.UTF-8` instead of `fr_CA.UTF-8`.
+/// Since `cargo run` (unbundled) gives the right language, the bug did not show there.
+/// alacritty uses `currentLocale`; not followed.
 ///
-/// **Bölge `currentLocale().regionCode`'dan** (paket onu etkilemiyor),
-/// `countryCode`'dan değil: SDK ikincisini `regionCode` lehine kalkacak diye
-/// işaretliyor (objc2'de `#[deprecated]`, `-D warnings` altında hata).
-/// `regionCode` macOS 14'te geldi; taban zaten 14. Farkı `@rg=` alt
-/// etiketi: kullanıcı bölge biçimini ayrıca seçtiyse (`en_US@rg=gbzzzz`) o
-/// bölgeyi veriyor.
+/// **The region comes from `currentLocale().regionCode`** (the bundle does not affect it),
+/// not from `countryCode`: the SDK marks the latter as going away in favour of `regionCode`
+/// (`#[deprecated]` in objc2, an error under `-D warnings`). `regionCode` arrived in macOS 14;
+/// the baseline is 14 anyway. The difference is the `@rg=` subtag: if the user separately
+/// chose a region format (`en_US@rg=gbzzzz`), it gives that region.
 pub(crate) fn locale_env() -> Option<(String, String)> {
     let language = NSLocale::preferredLanguages().firstObject();
     let region = NSLocale::currentLocale().regionCode();
@@ -88,39 +82,37 @@ pub(crate) fn locale_env() -> Option<(String, String)> {
     decide_locale(|name| std::env::var_os(name), system, locale_installed)
 }
 
-/// Yerel kararı: `env` ortamı okur, `system` sistemin `(dil, bölge)` kodu,
-/// `installed` "bu adda yerel kurulu mu" sorusu.
+/// The locale decision: `env` reads the environment, `system` is the system's `(language,
+/// region)` code, `installed` is the question "is a locale with this name installed".
 ///
-/// 1. `LC_ALL`, `LC_CTYPE` ya da `LANG`'dan **biri** boş olmayan bir değerle
-///    tanımlıysa → hiçbir şey; kullanıcının ortamına dokunulmaz (`cargo run`
-///    bu yoldan geçer). Boş değer tanımsız sayılır: POSIX'te de öyle.
-///    Değerin geçerliliği sorulmuyor — `LANG=C` de dokunulmaz.
-/// 2. Değilse ve `{dil}_{bölge}.UTF-8` kuruluysa → `LANG` o ad.
-/// 3. Değilse (bölge yok, ya da ör. İngilizce dil + Türkiye bölgesi →
-///    `en_TR.UTF-8` yok) → `LANG=en_US.UTF-8`: mesajlar İngilizce; tarih,
-///    sayı biçimi ve sıralama `en_US`'ninki, ama UTF-8 girişi çalışır.
+/// 1. If **one** of `LC_ALL`, `LC_CTYPE` or `LANG` is defined with a non-empty value →
+///    nothing; the user's environment is not touched (`cargo run` takes this path). An empty
+///    value counts as undefined: POSIX says so too. The value's validity is not questioned —
+///    `LANG=C` is left alone as well.
+/// 2. Otherwise, if `{language}_{region}.UTF-8` is installed → `LANG` is that name.
+/// 3. Otherwise (no region, or e.g. English language + Turkey region → there is no
+///    `en_TR.UTF-8`) → `LANG=en_US.UTF-8`: messages in English; date, number format and
+///    collation are `en_US`'s, but UTF-8 input works.
 ///
-/// **`LC_ALL` değil `LANG`**, yazan iki kolda da: en zayıf değişken
-/// (Terminal.app'in yaptığı), kabuğun rc dosyası kendi `LC_*`'ını üstüne
-/// yazabilsin. alacritty `LC_ALL` yazıyor ve o, rc'deki her `LC_*`'ı ezer.
+/// **`LANG`, not `LC_ALL`**, in both writing branches: the weakest variable (what
+/// Terminal.app does), so the shell's rc file can write its own `LC_*` on top. alacritty
+/// writes `LC_ALL`, and that overrides every `LC_*` in the rc.
 ///
-/// **Düşüş `LC_CTYPE=UTF-8` değil** — alacritty ve iTerm2'nin düşüşünden
-/// bilerek ayrılıyoruz. `UTF-8` macOS'ta geçerli bir `LC_CTYPE` ama Linux'ta
-/// yerel adı değil, ve macOS'un `ssh_config`'i `LANG` ile `LC_*`'ı uzak
-/// makineye taşıyor (`SendEnv LANG LC_*`): oradaki araçlar `setlocale`
-/// uyarısı basıp `C`'ye düşerdi. `en_US.UTF-8` Linux'ta da bir yerel adı ve
-/// sunucuların çoğunda kurulu; kurulu olmayanda (ör. yalnız `C.UTF-8`
-/// taşıyan bir imaj) uyarı yine çıkar — `LANG=en_US.UTF-8` veren her
-/// terminalin bedeli. Üstelik `LC_CTYPE` `LANG`'dan güçlü: rc'de yalnız
-/// `LANG` değiştiren kullanıcının karakter sınıfını da kilitlerdi.
-/// Kullanıcı kararı (`discussion.md` → Karar 6 eki, son madde).
+/// **The fallback is not `LC_CTYPE=UTF-8`** — we deliberately depart from alacritty's and
+/// iTerm2's fallback. `UTF-8` is a valid `LC_CTYPE` on macOS but not a locale name on Linux,
+/// and macOS's `ssh_config` carries `LANG` and `LC_*` to the remote machine (`SendEnv LANG
+/// LC_*`): the tools there would print a `setlocale` warning and fall back to `C`.
+/// `en_US.UTF-8` is a locale name on Linux too and is installed on most servers; where it is
+/// not (e.g. an image carrying only `C.UTF-8`) the warning still appears — the cost for every
+/// terminal that sets `LANG=en_US.UTF-8`. Moreover `LC_CTYPE` is stronger than `LANG`: it
+/// would also lock the character class of a user who changes only `LANG` in their rc. User
+/// decision (`discussion.md` → Karar 6 eki, son madde).
 ///
-/// `en_US.UTF-8`'in kurulu olup olmadığı **sorulmuyor**: `bt-shell` yalnız
-/// macOS'ta derleniyor ve o yerel sistemle geliyor (`/usr/share/locale`
-/// salt okunur sistem biriminde). "O da yoksa `LC_CTYPE=UTF-8`" diye bir
-/// son çare hiç koşmayacak bir dal olurdu. İkisinin karakter sınıfı zaten
-/// aynı dosya: `en_US.UTF-8/LC_CTYPE` → `../C.UTF-8/LC_CTYPE`, o da
-/// `UTF-8/LC_CTYPE` ile aynı inode.
+/// Whether `en_US.UTF-8` is installed is **not asked**: `bt-shell` builds only on macOS and
+/// that locale ships with the system (`/usr/share/locale` is on the read-only system volume).
+/// A last resort of "if that is missing too, `LC_CTYPE=UTF-8`" would be a branch that never
+/// runs. The two share the same character class file anyway: `en_US.UTF-8/LC_CTYPE` →
+/// `../C.UTF-8/LC_CTYPE`, which is the same inode as `UTF-8/LC_CTYPE`.
 fn decide_locale(
     env: impl Fn(&str) -> Option<OsString>,
     system: Option<(String, String)>,
@@ -139,36 +131,36 @@ fn decide_locale(
     Some(("LANG".to_owned(), name))
 }
 
-/// Yerel kurulu mu: `/usr/share/locale/{ad}` dizini var mı.
+/// Whether the locale is installed: does the `/usr/share/locale/{name}` directory exist.
 ///
-/// `setlocale` ile **sınanmıyor**: o, kendi sürecimizin global yerelini
-/// değiştirir. `/` taşıyan ad reddediliyor, dizinin dışına çıkamasın.
+/// **Not tested** with `setlocale`: that changes our own process's global locale. A name
+/// carrying `/` is rejected, so it cannot escape the directory.
 fn locale_installed(name: &str) -> bool {
     !name.contains('/') && Path::new("/usr/share/locale").join(name).is_dir()
 }
 
-/// Çocuk olarak koşacak kabuğun yolu — alacritty'nin `tty::new` içinde
-/// yaptığı çözümün **aynısı**, ama spawn'dan **önce**.
+/// The path of the shell that will run as the child — **the same** resolution alacritty does
+/// inside `tty::new`, but **before** the spawn.
 ///
-/// İkinci bir çözüm doğuyor ve bu bilinçli: shell entegrasyonu "bu zsh mi"
-/// sorusunun cevabını `SessionOptions` kurulurken istiyor, alacritty ise aynı
-/// soruyu `tty::new`'un içinde, biz artık karışamazken cevaplıyor. Emsali
-/// aynı dosyadaki [`home`]: orada da politika bizde, çözüm alacritty'nin
-/// sırasıyla **parite** hâlinde.
+/// A second resolution is born and that is deliberate: shell integration wants the answer to
+/// "is this zsh" while `SessionOptions` is being built, whereas alacritty answers the same
+/// question inside `tty::new`, when we can no longer intervene. The precedent is [`home`] in
+/// the same file: there too the policy is ours and the resolution is in **parity** with
+/// alacritty's order.
 ///
-/// **Parite:** `$SHELL`, yoksa kullanıcının passwd kaydındaki `pw_shell`
-/// (`ShellUser::from_env`). İki kenarda alacritty ile **aynı** davranıyoruz,
-/// çünkü ikisi de aynı `env::var` çağrısından doğuyor: UTF-8 olmayan bir
-/// `$SHELL` passwd'ye düşürüyor, boş bir `SHELL=""` ise olduğu gibi
-/// alınıyor — o da bizde "zsh değil", alacritty'de çalıştırılamayan bir
-/// program demek. Ayrıştığımız tek yer passwd'nin **okunamaması**: alacritty
-/// orada oturumu hiç açmıyor, biz yalnız entegrasyonu kurmuyoruz. Kabuğu
-/// seçen yine o, biz yalnız aynı cevabı önceden hesaplıyoruz.
+/// **Parity:** `$SHELL`, otherwise `pw_shell` from the user's passwd entry
+/// (`ShellUser::from_env`). On two edges we behave **the same** as alacritty, because both
+/// arise from the same `env::var` call: a non-UTF-8 `$SHELL` falls back to passwd, while an
+/// empty `SHELL=""` is taken as is — which for us means "not zsh" and for alacritty a program
+/// that cannot be executed. The only place we diverge is passwd being **unreadable**:
+/// alacritty does not open the session at all there, we merely do not install the
+/// integration. It is still alacritty that chooses the shell; we only compute the same answer
+/// in advance.
 ///
-/// Dock'tan açılışta bu yolun ikinci yarısı **zorunlu**: launchd'nin
-/// ortamında `SHELL` yok (`launchctl getenv SHELL` boş), yani yalnız `$SHELL`
-/// bakan bir çözüm entegrasyonu tam da sevk edilen pakette kapatırdı. Aynı
-/// tuzağın `LANG` hâli [`decide_locale`]'in doc'unda.
+/// On a Dock launch the second half of this path is **mandatory**: launchd's environment has
+/// no `SHELL` (`launchctl getenv SHELL` is empty), so a resolution that only looked at
+/// `$SHELL` would disable the integration precisely in the shipped bundle. The `LANG` form of
+/// the same trap is in [`decide_locale`]'s doc.
 pub(crate) fn shell() -> Option<PathBuf> {
     std::env::var("SHELL")
         .ok()
@@ -176,32 +168,31 @@ pub(crate) fn shell() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Kullanıcının passwd kaydındaki kabuk (`pw_shell`); okunamazsa `None`.
+/// The shell in the user's passwd entry (`pw_shell`); `None` if it cannot be read.
 fn passwd_shell() -> Option<String> {
     passwd_field(|entry| entry.pw_shell)
 }
 
-/// Kullanıcının passwd kaydındaki adı (`pw_name`); okunamazsa `None`.
+/// The name in the user's passwd entry (`pw_name`); `None` if it cannot be read.
 fn passwd_name() -> Option<String> {
     passwd_field(|entry| entry.pw_name)
 }
 
-/// passwd kaydından **tek** bir alan; okunamazsa `None`.
+/// A **single** field from the passwd entry; `None` if it cannot be read.
 ///
-/// `getpwuid_r`, `getpwuid` değil: ikincisi süreç genelinde paylaşılan statik
-/// bir tampon döndürüyor ve başka bir thread'in çağrısı onu tazeliyor.
-/// Tampon alacritty'nin `ShellUser::from_env`'iyle aynı 1024 bayt; sığmayan
-/// kayıt `ERANGE` ile düşer.
+/// `getpwuid_r`, not `getpwuid`: the latter returns a static buffer shared process-wide, and
+/// another thread's call refreshes it. The buffer is 1024 bytes, the same as alacritty's
+/// `ShellUser::from_env`; an entry that does not fit fails with `ERANGE`.
 ///
-/// Alanı çağıran seçiyor ki `unsafe` muhakemesi **tek** yerde kalsın: iki
-/// kopya, ikisi de kendi `getpwuid_r`'ını çağıran iki blok demekti.
+/// The caller picks the field so that the `unsafe` reasoning stays in **one** place: two
+/// copies would have meant two blocks, each calling its own `getpwuid_r`.
 fn passwd_field(pick: impl Fn(&libc::passwd) -> *mut std::ffi::c_char) -> Option<String> {
     let mut buf = [0; 1024];
     let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
     let mut found: *mut libc::passwd = std::ptr::null_mut();
-    // SAFETY: `entry` ve `found` bu çerçevede yaşayan geçerli yazılabilir
-    // yuvalar; `buf` de `buf.len()` bayt. `getpwuid_r` kaydı `entry`'ye,
-    // dizgileri `buf`'a yazıyor ve `found`'u `entry`'ye ya da null'a çeviriyor.
+    // SAFETY: `entry` and `found` are valid writable slots living in this frame; `buf` is
+    // `buf.len()` bytes. `getpwuid_r` writes the entry into `entry`, the strings into `buf`,
+    // and sets `found` to `entry` or to null.
     let status = unsafe {
         libc::getpwuid_r(
             libc::getuid(),
@@ -218,50 +209,48 @@ fn passwd_field(pick: impl Fn(&libc::passwd) -> *mut std::ffi::c_char) -> Option
     if field.is_null() {
         return None;
     }
-    // SAFETY: `found` null değil, yani `entry` dolduruldu ve seçilen alan
-    // `buf`'un içinde NUL ile biten bir dizgiyi gösteriyor. Dilim `buf`
-    // yaşarken okunuyor ve hemen sahipli bir `String`'e kopyalanıyor.
+    // SAFETY: `found` is not null, so `entry` was filled and the chosen field points to a
+    // NUL-terminated string inside `buf`. The slice is read while `buf` is alive and is copied
+    // into an owned `String` right away.
     let value = unsafe { CStr::from_ptr(field) };
-    // UTF-8 olmayan değer `None`: sınırın öteki tarafı (`SessionOptions`)
-    // `String` istiyor ve geri düşüşler zaten kurulu.
+    // A non-UTF-8 value is `None`: the other side of the boundary (`SessionOptions`) wants a
+    // `String`, and the fallbacks are already in place.
     value.to_str().ok().map(str::to_owned)
 }
 
-/// macOS'ta kabuğu doğuran komut — alacritty'nin `default_shell_command`'ının
-/// **`-q`'lu** eşi; `None` → alacritty'nin kendi yolu.
+/// The command that spawns the shell on macOS — the **`-q`** counterpart of alacritty's
+/// `default_shell_command`; `None` → alacritty's own path.
 ///
-/// Tek fark `-q` ve tek amacı o: `login(1)` her oturumda `Last login: …`
-/// banner'ını basıyor ve o satır ızgaranın ilk satırında duruyor. Bateri'de
-/// prompt terminalin ve ızgara komutların; açılışta oraya düşen bir sistem
-/// satırı kimsenin yazmadığı bir bloktur.
+/// The only difference is `-q` and that is its only purpose: `login(1)` prints the `Last
+/// login: …` banner in every session and that line sits on the grid's first row. In bateri the
+/// prompt belongs to the terminal and the grid to the commands; a system line landing there at
+/// launch is a block nobody wrote.
 ///
-/// **Neden `~/.hushlogin` yazmıyoruz:** kullanıcının ev dizinindeki dosyalara
-/// yazmak bu deponun yasağı (`make denetim`) ve banner'ı susturmak için
-/// kullanıcının makinesinde kalıcı bir iz bırakmak, bir terminalin
-/// kendi penceresi için isteyebileceği şeyin çok ötesinde. alacritty'nin
-/// `-q`'yu koşullu ekleme sebebi de zaten o dosyayı **aramak**; biz koşulu
-/// kaldırıyoruz, mekanizmayı değil.
+/// **Why we do not write `~/.hushlogin`:** writing to files in the user's home directory is
+/// forbidden in this repo (`make denetim`), and leaving a permanent trace on the user's
+/// machine to silence a banner goes far beyond what a terminal may ask for its own window.
+/// alacritty's reason for adding `-q` conditionally is precisely to **look for** that file;
+/// we remove the condition, not the mechanism.
 ///
-/// Geri kalan her şey **parite** ve kasıtlı: `-flp` bayrakları, argv[0]'ı
-/// `-zsh` yapan `exec -a`, ve o `exec -a`'yı koşturan `/bin/zsh` (alacritty'nin
-/// notu: `sh`'ta `exec -a` yok). Politika bizde, çözüm parite hâlinde —
-/// [`home`] ve [`shell`] ile aynı örüntü.
+/// Everything else is **parity** and deliberate: the `-flp` flags, the `exec -a` that makes
+/// argv[0] `-zsh`, and the `/bin/zsh` that runs that `exec -a` (alacritty's note: `sh` has no
+/// `exec -a`). The policy is ours, the resolution in parity — the same pattern as [`home`]
+/// and [`shell`].
 ///
-/// **Çözülemeyen kullanıcı ya da kabuk `None`'a düşüyor** ve oturum
-/// alacritty'nin kendi yoluyla açılıyor: banner geri gelir, pencere çalışır.
-/// Ters yön — komutu yarım kurup yine de vermek — açılmayan bir terminal
-/// demekti.
+/// **An unresolvable user or shell falls back to `None`** and the session opens through
+/// alacritty's own path: the banner comes back, the window works. The opposite direction —
+/// building the command halfway and handing it over anyway — meant a terminal that does not
+/// open.
 pub(crate) fn login_command() -> Option<(String, Vec<String>)> {
     login_command_from(shell(), std::env::var("USER").ok().or_else(passwd_name))
 }
 
-/// [`login_command`]'ın **saf** yarısı: çözülmüş girdilerden komut.
+/// The **pure** half of [`login_command`]: the command from resolved inputs.
 ///
-/// Ayrı fonksiyon, çünkü sınanabilen kısım bu — ötekinin cevabı sınama
-/// sürecinin `$USER`'ına ve `$SHELL`'ine bağlı ve o ikisi enjekte edilemiyor.
-/// Geri düşüşün **iki** kolu var (kullanıcı ve kabuk) ve ikisi de burada
-/// sınanıyor: `?` zinciri onları doğru yapıyor ama sınanmamış bir doğruluk
-/// sonraki düzenlemede sessizce kaybolabilirdi.
+/// A separate function, because this is the testable part — the other's answer depends on
+/// the test process's `$USER` and `$SHELL`, and those two cannot be injected. The fallback
+/// has **two** branches (user and shell) and both are tested here: the `?` chain gets them
+/// right, but untested correctness could silently get lost in the next edit.
 fn login_command_from(
     shell: Option<PathBuf>,
     user: Option<String>,
@@ -270,10 +259,10 @@ fn login_command_from(
     Some(login_argv(shell.to_str()?, &user?))
 }
 
-/// Çözülmüş kullanıcı ve kabuktan argv.
+/// argv from the resolved user and shell.
 fn login_argv(shell: &str, user: &str) -> (String, Vec<String>) {
-    // `rsplit` her zaman en az bir parça verir; boş bir `$SHELL`'de o parça da
-    // boş olur ve `exec -a -` ile açılan oturum alacritty'de de bozuktu.
+    // `rsplit` always yields at least one piece; with an empty `$SHELL` that piece is empty
+    // too, and a session opened with `exec -a -` was broken in alacritty as well.
     let name = shell.rsplit('/').next().unwrap_or(shell);
     (
         "/usr/bin/login".to_owned(),
@@ -287,42 +276,42 @@ fn login_argv(shell: &str, user: &str) -> (String, Vec<String>) {
     )
 }
 
-/// Kabuk zsh mi: yolun son parçası tam olarak `zsh`.
+/// Whether the shell is zsh: the last component of the path is exactly `zsh`.
 ///
-/// Yol değil **ad** soruluyor: Homebrew'un `/opt/homebrew/bin/zsh`'i de
-/// sistemin `/bin/zsh`'i de aynı kabuk. `zsh-5.9` gibi bir ad tanınmıyor —
-/// zsh o adla kurulmuyor ve tanımadığımız bir kabuğa sarmalayıcı kurmak,
-/// yükleyemeyeceği dosyalarla açılan bir oturum demek olurdu.
+/// The **name** is asked, not the path: Homebrew's `/opt/homebrew/bin/zsh` and the system's
+/// `/bin/zsh` are the same shell. A name like `zsh-5.9` is not recognized — zsh is not
+/// installed under that name, and installing the wrapper for a shell we do not recognize
+/// would mean a session that opens with files it cannot load.
 pub(crate) fn is_zsh(shell: &Path) -> bool {
     shell.file_name().is_some_and(|name| name == "zsh")
 }
 
-/// zsh sarmalayıcısının dizini: pakette `Contents/Resources/shell/zsh`,
-/// debug derlemede deponun `assets/shell/zsh`'i.
+/// The zsh wrapper's directory: `Contents/Resources/shell/zsh` in the bundle, the repo's
+/// `assets/shell/zsh` in a debug build.
 ///
-/// İki kol da **gövdenin varlığıyla** doğrulanıyor (`bateri.zsh`): dizin adı
-/// tek başına bir kanıt değil ve eksik betikle kurulan bir `ZDOTDIR`,
-/// kullanıcının bütün yapılandırmasını yüklenmemiş bırakırdı.
+/// Both branches are verified by **the presence of the body** (`bateri.zsh`): a directory
+/// name alone is no proof, and a `ZDOTDIR` set up with a missing script would leave the
+/// user's entire configuration unloaded.
 ///
-/// Depo kolu **yalnız debug'da** ve `cargo run` yüzünden: geliştirme
-/// paketsiz koşuyor, yalnız pakete bakan bir çözüm özelliği en çok
-/// koştuğumuz yolda kapatırdı (009 Karar 4). Release'te o kol hiç
-/// derlenmiyor — sevk edilen binary'nin bir geliştirme makinesindeki yola
-/// düşmesi, ürünü o makineye bağlamak olurdu.
+/// The repo branch exists **only in debug**, because of `cargo run`: development runs
+/// unbundled, and a resolution that only looked at the bundle would disable the feature on
+/// the path we run most (009 Karar 4). In release that branch is not compiled at all — the
+/// shipped binary falling back to a path on a development machine would tie the product to
+/// that machine.
 pub(crate) fn zsh_wrapper_dir() -> Option<PathBuf> {
     bundle_shell_dir()
         .and_then(wrapper_dir)
         .or_else(repo_wrapper_dir)
 }
 
-/// Deponun `assets/shell/zsh`'i — **yalnız debug derlemede var**.
+/// The repo's `assets/shell/zsh` — **exists only in a debug build**.
 ///
-/// `#[cfg]`, `cfg!` değil (`/code-review`, 009 kapısı): ikincisi bir çalışma
-/// zamanı `bool`'u, yani `env!("CARGO_MANIFEST_DIR")` ile gömülen geliştirme
-/// makinesinin mutlak yolu release binary'sinde de tip denetiminden ve kod
-/// üretiminden geçiyordu; onu ürünün dışında tutan şey dilin garantisi değil
-/// LLVM'in ölü kod elemesiydi. Yukarıdaki doc'un "release'te o kol hiç
-/// derlenmiyor" cümlesi ancak bu ayrımla doğru.
+/// `#[cfg]`, not `cfg!` (`/code-review`, 009 gate): the latter is a runtime `bool`, so the
+/// development machine's absolute path embedded via `env!("CARGO_MANIFEST_DIR")` went through
+/// type checking and code generation in the release binary too; what kept it out of the
+/// product was not a language guarantee but LLVM's dead code elimination. The sentence "in
+/// release that branch is not compiled at all" in the doc above is true only with this
+/// distinction.
 #[cfg(debug_assertions)]
 fn repo_wrapper_dir() -> Option<PathBuf> {
     wrapper_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell"))
@@ -333,37 +322,37 @@ fn repo_wrapper_dir() -> Option<PathBuf> {
     None
 }
 
-/// `{shell}/zsh`, yalnız gövde okunabilir bir dosyaysa.
+/// `{shell}/zsh`, only if the body is a readable file.
 fn wrapper_dir(shell: PathBuf) -> Option<PathBuf> {
     let dir = shell.join("zsh");
     dir.join("bateri.zsh").is_file().then_some(dir)
 }
 
-/// Paketin `Contents/Resources/shell`'i: `…/bateri.app/Contents/MacOS/bateri`
-/// → iki üst dizin → `Resources/shell`.
+/// The bundle's `Contents/Resources/shell`: `…/bateri.app/Contents/MacOS/bateri` → two
+/// parent directories up → `Resources/shell`.
 ///
-/// Paket olup olmadığı **sorulmuyor**; çağıranın gövde denetimi zaten
-/// cevabı veriyor ve `target/debug/bateri`'nin iki üstünde öyle bir dosya yok.
+/// Whether it is a bundle is **not asked**; the caller's body check already gives the answer,
+/// and there is no such file two levels above `target/debug/bateri`.
 fn bundle_shell_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let contents = exe.parent()?.parent()?;
     Some(contents.join("Resources/shell"))
 }
 
-/// BCP 47 dil etiketinin dil alt etiketi: `tr-TR` → `tr`, `zh-Hans-CN` →
-/// `zh`. `preferredLanguages` `-` ile veriyor; `_` eski yerel adları için.
+/// The language subtag of a BCP 47 language tag: `tr-TR` → `tr`, `zh-Hans-CN` → `zh`.
+/// `preferredLanguages` uses `-`; `_` is for old locale names.
 fn primary_language(tag: &str) -> Option<&str> {
     tag.split(['-', '_'])
         .next()
         .filter(|language| !language.is_empty())
 }
 
-/// Sınamanın `Wake`'i: hiçbir şey yapmıyor.
+/// The tests' `Wake`: does nothing.
 ///
-/// Kare istemeye gerek yok — sorulan tek şey `shell_state()` ve o, `Term`
-/// kilidine dokunmayan ayrı bir sorgu (`Session::shell_state`'in doc'u).
-/// Modül düzeyinde, çünkü süreç tablosunun gerçek PTY sınaması (`jobs`) da
-/// oturum doğuruyor ([`crate::settings::TempRoot`] emsali).
+/// No need to request frames — the only thing asked is `shell_state()`, and that is a
+/// separate query that does not touch the `Term` lock (`Session::shell_state`'s doc). At
+/// module level, because the process table's real PTY test (`jobs`) also spawns sessions
+/// (precedent: [`crate::settings::TempRoot`]).
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct SilentWake;
@@ -375,12 +364,12 @@ impl bt_core::Wake for SilentWake {
     fn copy_to_clipboard(&self, _text: String) {}
     fn title_changed(&self) {}
     fn search_changed(&self) {}
-    // Sınama uzak oturumu yoklamıyor (036); süreli koşunun `ShellWake`'i de
-    // yoklamıyor (`timed` kolu).
+    // The tests do not probe for a remote session (036); the timed run's `ShellWake` does not
+    // probe either (the `timed` branch).
     fn command_started(&self) {}
 }
 
-/// `ready` doğru diyene kadar bekler; süre dolarsa `message` ile düşer.
+/// Waits until `ready` says true; if time runs out, fails with `message`.
 #[cfg(test)]
 pub(crate) fn wait_until(message: &str, ready: impl Fn() -> bool) {
     use std::time::{Duration, Instant};
@@ -409,7 +398,8 @@ mod tests {
     use super::*;
     use crate::settings::TempRoot;
 
-    /// Ortamı sabit bir listeden okuyan okuyucu; listede olmayan tanımsız.
+    /// A reader that reads the environment from a fixed list; anything not in the list is
+    /// undefined.
     fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
         let vars: HashMap<String, OsString> = vars
             .iter()
@@ -428,39 +418,40 @@ mod tests {
 
     #[test]
     fn the_login_command_always_silences_the_banner() {
-        // Bütün değişiklik bu tek harfte: `-q` olmadan `login(1)` her oturumda
-        // `Last login: …` basıyor ve o satır ızgaranın ilk satırında kalıyor.
-        // alacritty aynı bayrağı yalnız `~/.hushlogin` **varsa** ekliyor; biz
-        // koşulu kaldırdık, çünkü alternatifi kullanıcının ev dizinine dosya
-        // yazmaktı ve o bu deponun yasağı.
+        // The whole change is in this single letter: without `-q`, `login(1)` prints `Last
+        // login: …` in every session and that line stays on the grid's first row. alacritty
+        // adds the same flag only **if** `~/.hushlogin` exists; we removed the condition,
+        // because the alternative was writing a file into the user's home directory, and that
+        // is forbidden in this repo.
         let (program, args) = login_argv("/bin/zsh", "someone");
         assert_eq!(program, "/usr/bin/login");
-        assert_eq!(args[0], "-qflp", "banner susturulmadı");
+        assert_eq!(args[0], "-qflp", "banner not silenced");
 
-        // Geri kalanı **parite** ve sınamanın ikinci yarısı o: argv[0]'ı `-zsh`
-        // yapan `exec -a`, onu koşturan `/bin/zsh` (`sh`'ta `exec -a` yok) ve
-        // kullanıcı adı alacritty'nin yazdığı sırada.
+        // The rest is **parity** and that is the test's second half: the `exec -a` that makes
+        // argv[0] `-zsh`, the `/bin/zsh` that runs it (`sh` has no `exec -a`) and the user
+        // name in the order alacritty writes it.
         assert_eq!(args[1], "someone");
         assert_eq!(args[2], "/bin/zsh");
         assert_eq!(args[3], "-fc");
         assert_eq!(args[4], "exec -a -zsh /bin/zsh");
 
-        // Kabuğun **adı** yolun son parçası: Homebrew'un zsh'i de aynı kabuk ve
-        // argv[0] yine `-zsh` olmalı, yoksa login kabuğu login kabuğu saymazdı.
+        // The shell's **name** is the last component of the path: Homebrew's zsh is the same
+        // shell and argv[0] must still be `-zsh`, otherwise the login shell would not count
+        // itself as a login shell.
         let (_, args) = login_argv("/opt/homebrew/bin/zsh", "someone");
         assert_eq!(args[4], "exec -a -zsh /opt/homebrew/bin/zsh");
     }
 
     #[test]
     fn an_unresolved_user_or_shell_falls_back_to_the_default_command() {
-        // **Geri düşüşün yönü:** komutu yarım kurup yine de vermek açılmayan
-        // bir terminal demekti. `None` alacritty'nin kendi yolunu geri
-        // getiriyor — banner döner ama pencere çalışır, ve o takas doğru yönde.
+        // **The direction of the fallback:** building the command halfway and handing it over
+        // anyway meant a terminal that does not open. `None` brings back alacritty's own path
+        // — the banner returns but the window works, and that trade-off is the right way.
         assert!(login_command_from(Some("/bin/zsh".into()), Some("someone".into())).is_some());
         assert!(login_command_from(None, Some("someone".into())).is_none());
         assert!(login_command_from(Some("/bin/zsh".into()), None).is_none());
-        // UTF-8 olmayan kabuk yolu da aynı kol: sınırın öteki tarafı `String`
-        // istiyor ve tahmin etmek yanlış kabuğu doğurmak olurdu.
+        // A non-UTF-8 shell path takes the same branch: the other side of the boundary wants a
+        // `String`, and guessing would mean spawning the wrong shell.
         let raw = PathBuf::from(OsString::from_vec(vec![0x2f, 0x62, 0xff]));
         assert!(login_command_from(Some(raw), Some("someone".into())).is_none());
     }
@@ -488,18 +479,18 @@ mod tests {
 
     #[test]
     fn locale_in_env_is_left_alone() {
-        // Üçünden **biri** yeter; hangisi olduğu fark etmez. Kurulu bir
-        // sistem yereli bile verildi: karar ona hiç bakmamalı.
+        // **One** of the three is enough; which one does not matter. An installed system
+        // locale is even given: the decision must not look at it at all.
         for name in ["LC_ALL", "LC_CTYPE", "LANG"] {
             let decided = decide_locale(env_of(&[(name, "C")]), system("tr", "TR"), |_| true);
-            assert_eq!(decided, None, "{name} tanımlıyken yerel eklendi");
+            assert_eq!(decided, None, "locale added while {name} was defined");
         }
     }
 
     #[test]
     fn empty_locale_var_counts_as_unset() {
-        // POSIX'te boş `LC_ALL`/`LC_CTYPE`/`LANG` tanımsızla aynı: kabuk
-        // onları yoksayıp `C`'ye düşer.
+        // In POSIX an empty `LC_ALL`/`LC_CTYPE`/`LANG` is the same as undefined: the shell
+        // ignores them and falls back to `C`.
         let env = env_of(&[("LC_ALL", ""), ("LC_CTYPE", ""), ("LANG", "")]);
         let decided = decide_locale(env, system("tr", "TR"), |_| true);
         assert_eq!(decided, pair("LANG", "tr_TR.UTF-8"));
@@ -515,8 +506,8 @@ mod tests {
 
     #[test]
     fn missing_system_locale_falls_back_to_en_us_lang() {
-        // Bu makinenin hâli: İngilizce dil + Türkiye bölgesi, `en_TR.UTF-8`
-        // yok (`ls /usr/share/locale`).
+        // This machine's situation: English language + Turkey region, no `en_TR.UTF-8`
+        // (`ls /usr/share/locale`).
         let decided = decide_locale(env_of(&[]), system("en", "TR"), |name| {
             name == "tr_TR.UTF-8"
         });
@@ -525,88 +516,84 @@ mod tests {
 
     #[test]
     fn locale_without_region_falls_back_to_en_us_lang() {
-        // Bölgesiz yerelden (`en`) `{dil}_{ülke}` kurulamaz. Her ad "kurulu"
-        // diyen sorgu bu dalın varlık sorgusundan geçmediğini gösteriyor.
+        // `{language}_{country}` cannot be built from a region-less locale (`en`). A query that
+        // says "installed" for every name shows this branch does not go through the
+        // existence query.
         let decided = decide_locale(env_of(&[]), None, |_| true);
         assert_eq!(decided, pair("LANG", "en_US.UTF-8"));
     }
 
     #[test]
     fn zsh_is_recognized_by_name_not_by_path() {
-        // Homebrew'un zsh'i de sistemin zsh'i de aynı kabuk: yol değil ad
-        // soruluyor.
+        // Homebrew's zsh and the system's zsh are the same shell: the name is asked, not the
+        // path.
         assert!(is_zsh(Path::new("/bin/zsh")));
         assert!(is_zsh(Path::new("/opt/homebrew/bin/zsh")));
         assert!(is_zsh(Path::new("zsh")));
-        // Tanımadığımız kabuğa sarmalayıcı kurmak, yükleyemeyeceği dosyalarla
-        // açılan bir oturum demek olurdu.
+        // Installing the wrapper for a shell we do not recognize would mean a session that
+        // opens with files it cannot load.
         assert!(!is_zsh(Path::new("/bin/bash")));
         assert!(!is_zsh(Path::new("/usr/local/bin/fish")));
         assert!(!is_zsh(Path::new("/usr/local/bin/zsh-5.9")));
-        // `SHELL=""`: alacritty onu olduğu gibi alıp çalıştıramaz, bizde
-        // "zsh değil" demek (parite, [`shell`]'in doc'u).
+        // `SHELL=""`: alacritty takes it as is and cannot execute it, for us it means "not
+        // zsh" (parity, [`shell`]'s doc).
         assert!(!is_zsh(Path::new("")));
-        // Sondaki eğik çizgi adı değiştirmiyor (`Path::file_name`) ve bu
-        // sorulmuyor: `/bin/zsh/` bir dizin, yani exec düşer ve oturum hiç
-        // açılmaz — entegrasyonun kurulup kurulmadığının bir anlamı kalmaz.
+        // A trailing slash does not change the name (`Path::file_name`) and this is not
+        // questioned: `/bin/zsh/` is a directory, so exec fails and the session never opens —
+        // whether the integration was installed stops mattering.
         assert!(is_zsh(Path::new("/bin/zsh/")));
     }
 
     #[test]
     fn this_user_has_a_resolvable_shell() {
-        // Çözümün iki yarısı da gerçek: `$SHELL` sınama sürecinde tanımlı,
-        // passwd kaydı da okunabilir olmalı. İkincisi Dock'tan açılışın tek
-        // yolu (`launchctl getenv SHELL` boş) ve onu **yalnız** bu sınama
-        // koruyor — `$SHELL` her zaman öne geçtiği için kusur sessiz kalırdı.
+        // Both halves of the resolution are real: `$SHELL` is defined in the test process,
+        // and the passwd entry must be readable too. The latter is the only path on a Dock
+        // launch (`launchctl getenv SHELL` is empty) and **only** this test guards it — since
+        // `$SHELL` always takes precedence, the defect would stay silent.
         assert!(passwd_shell().is_some_and(|shell| shell.starts_with('/')));
         assert!(shell().is_some_and(|shell| shell.is_absolute()));
     }
 
     #[test]
     fn the_zsh_wrapper_ships_with_the_crate() {
-        // Sınamalar debug derlemede koşuyor, yani bu depo kolunu sınıyor:
-        // `assets/shell/zsh` yerinde ve gövdesi okunabilir mi. Dizin adı tek
-        // başına yetmiyor — gövdesiz bir `ZDOTDIR` kullanıcının bütün
-        // yapılandırmasını yüklenmemiş bırakırdı.
-        let dir = zsh_wrapper_dir().expect("depo kolunda sarmalayıcı bulunamadı");
+        // Tests run in a debug build, so this tests the repo branch: is `assets/shell/zsh` in
+        // place and is its body readable. The directory name alone is not enough — a
+        // `ZDOTDIR` without a body would leave the user's entire configuration unloaded.
+        let dir = zsh_wrapper_dir().expect("wrapper not found in the repo branch");
         assert!(dir.ends_with("zsh"));
-        // zsh'in başlangıç dosyalarının dördü de yerinde. `.zlogout` bilerek
-        // yok: `ZDOTDIR` en geç `.zlogin`'de kullanıcıya geri konuyor, yani
-        // çıkışta zsh zaten kullanıcının kendi `.zlogout`'unu okuyor
-        // (`bateri.zsh`'in başlığı).
+        // All four of zsh's startup files are in place. `.zlogout` is deliberately absent:
+        // `ZDOTDIR` is restored to the user's at `.zlogin` at the latest, so on exit zsh
+        // already reads the user's own `.zlogout` (`bateri.zsh`'s header).
         for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin", "bateri.zsh"] {
-            assert!(dir.join(file).is_file(), "sarmalayıcıda {file} yok");
+            assert!(dir.join(file).is_file(), "{file} missing from the wrapper");
         }
-        assert!(!dir.join(".zlogout").exists(), ".zlogout beklenmiyordu");
+        assert!(!dir.join(".zlogout").exists(), ".zlogout was not expected");
     }
 
-    /// Sarmalayıcının deponun dışına alınmış kopyası; `ZDOTDIR` olarak bu
-    /// verilir, depo dizini **değil**.
+    /// A copy of the wrapper taken outside the repo; this is what is given as `ZDOTDIR`,
+    /// **not** the repo directory.
     ///
-    /// Gerekçe (`/code-review`, 009 kapısı): `ZDOTDIR` oturum boyunca bir süre
-    /// bizi gösteriyor ve `HISTFILE` düzeltmesi gerilerse zsh oraya
-    /// `.zsh_history` bırakır. Depo yolunda bu, çalışma kopyasını kirletmenin
-    /// ötesinde **başka bir crate'in** sınamasını
-    /// (`zsh_wrapper_inventory_is_exactly_what_the_bundle_copies`, `bateri`)
-    /// kalıcı kırmızıya çevirirdi — üstelik ayrı bir test binary'sinde, yani
-    /// belirti rastgele bir koşuda görünürdü.
+    /// Rationale (`/code-review`, 009 gate): `ZDOTDIR` points at us for a while during the
+    /// session, and if the `HISTFILE` fix regresses zsh leaves a `.zsh_history` there. On the
+    /// repo path this, beyond dirtying the working copy, would turn **another crate's** test
+    /// (`zsh_wrapper_inventory_is_exactly_what_the_bundle_copies`, `bateri`) permanently red —
+    /// in a separate test binary to boot, so the symptom would appear on a random run.
     fn copy_wrapper(into: &Path) -> PathBuf {
-        let source = zsh_wrapper_dir().expect("sarmalayıcı bulunamadı");
+        let source = zsh_wrapper_dir().expect("wrapper not found");
         let wrapper = into.join("wrapper");
-        std::fs::create_dir_all(&wrapper).expect("sarmalayıcı kopyası kurulamadı");
+        std::fs::create_dir_all(&wrapper).expect("could not set up the wrapper copy");
         for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin", "bateri.zsh"] {
             std::fs::copy(source.join(file), wrapper.join(file))
-                .unwrap_or_else(|e| panic!("{file} kopyalanamadı: {e}"));
+                .unwrap_or_else(|e| panic!("could not copy {file}: {e}"));
         }
         wrapper
     }
 
-    /// Bu karede çizilen metin, satır satır — mürekkepsiz sütun boşluk.
+    /// The text drawn in this frame, row by row — an inkless column is a space.
     ///
-    /// `Cell`'leri sırayla dizmek **yetmezdi**: boşluk hücresi sink'e hiç
-    /// uğramıyor, yani `"$ ls"` ile `"$ls"` aynı dizgiye inerdi ve "prompt
-    /// çizilmedi" iddiası her hâlde yeşil kalırdı (012 phase-4'ün ölçtüğü
-    /// tuzak).
+    /// Lining up the `Cell`s in order **would not be enough**: a space cell never reaches the
+    /// sink, so `"$ ls"` and `"$ls"` would reduce to the same string and the "prompt was not
+    /// drawn" claim would stay green in every case (the trap 012 phase-4 measured).
     fn screen(session: &Session, blocks: &mut Blocks) -> Vec<String> {
         let mut rows: Vec<Vec<char>> = Vec::new();
         session.frame(
@@ -621,9 +608,9 @@ mod tests {
                 }
                 rows[row][col] = cell.ch.unwrap_or(' ');
             },
-            // Sorulan şey **ızgarada** çizilen metin; doldurma ayrı bir kanal
-            // ve satırları fill-yerel, yani aynı tampona dökülseydi ızgaranın
-            // ilk satırlarını ezerdi.
+            // What is asked is the text drawn **on the grid**; the fill is a separate channel
+            // with fill-local rows, so if it were poured into the same buffer it would
+            // overwrite the grid's first rows.
             |_| (),
             blocks,
             &mut bt_core::SelectionRuns::default(),
@@ -642,23 +629,23 @@ mod tests {
 
     #[test]
     fn the_terminal_takes_the_prompt_and_the_block_survives_it() {
-        // **Setin en sessiz kusurunun bekçisi** (012 phase-5): sıfır genişlikli
-        // `PS1` hiçbir hücre yazmıyor, yani çıpanın kapanışı `PS1`'in sonunda
-        // kalsaydı çıpayı taşıyan hücre **hiç doğmazdı** — blok şeridi de
-        // giriş satırının bastırılması da o hücreden türüyor ve ikisi birden
-        // sessizce ölürdü. Üstelik `make hepsi`, `make duman` ve `make kur`
-        // üçü de yeşil kalırdı: duman `/bin/sh` koşuyor, öteki sınamalar
-        // çıpayı elle basıyor. Gerçek zsh'ten başka tanığı yok.
+        // **The guard of the set's most silent defect** (012 phase-5): a zero-width `PS1`
+        // writes no cell, so had the anchor's close stayed at the end of `PS1`, the cell
+        // carrying the anchor would **never be born** — both the block stripe and the
+        // suppression of the input line derive from that cell, and both would silently die
+        // together. On top of that `make hepsi`, `make duman` and `make kur` would all three
+        // stay green: the smoke run runs `/bin/sh`, the other tests print the anchor by hand.
+        // It has no witness other than real zsh.
         //
-        // İki iddia bir turda: kullanıcının prompt'u ızgarada **yok**, ve
-        // yazılan komut yine de bir blok doğuruyor.
+        // Two claims in one round: the user's prompt is **not** on the grid, and the typed
+        // command still gives birth to a block.
         let root = TempRoot::new("prompt-terminal");
         let home = root.0.join("home");
-        std::fs::create_dir_all(&home).expect("sahte ev dizini kurulamadı");
-        // Prompt uzun ve **benzersiz**: kısa bir `$ ` ekranda başka
-        // sebeplerle de belirebilirdi, yani iddia kendi kendini kandırırdı.
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        // The prompt is long and **unique**: a short `$ ` could appear on screen for other
+        // reasons too, so the claim would fool itself.
         std::fs::write(home.join(".zshrc"), "PS1='ZSHPROMPTXY> '\nRPS1='RIGHTXY'\n")
-            .expect(".zshrc yazılamadı");
+            .expect(".zshrc not written");
         let wrapper = copy_wrapper(&root.0);
 
         let session = Session::spawn(
@@ -683,8 +670,8 @@ mod tests {
                     blink: CursorBlink::default(),
                 },
                 theme: Theme::BATERI,
-                // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
-                // dock alırdı.
+                // Real zsh, real wrapper: in the app this session would get
+                // a dock.
                 dock: true,
                 cluster: false,
                 initial_input: None,
@@ -693,9 +680,9 @@ mod tests {
             },
             Arc::new(SilentWake),
         )
-        .expect("oturum açılamadı");
+        .expect("could not open the session");
 
-        wait_until("prompt işaretleri gelmedi", || {
+        wait_until("prompt marks did not arrive", || {
             session.shell_state()
                 == Some(ShellState {
                     phase: ShellPhase::Input,
@@ -703,16 +690,15 @@ mod tests {
                 })
         });
 
-        // **Yazma anı: bastırma yeni çıpa biçimi altında hâlâ çalışıyor mu.**
-        // R4.2 teli değiştirdi — çıpa `Input` boyunca açık, yani ZLE'nin
-        // yazdığı **her** hücre kimlik taşıyor. phase-4'ün bütün birim
-        // bekçileri çıpayı prompt'un sonunda kapanan **eski** biçimle kuruyor
-        // (`anchored_prompt`), yani yeni biçime özgü bir regresyonu hiçbiri
-        // göremez: bastırma yazarken ölse ızgara ile dock aynı satırı birden
-        // gösterirdi — phase-4'ün kapatmaya geldiği çift görüntü — ve üç kapı
-        // da yeşil kalırdı. Tanığı yalnız gerçek zsh.
+        // **The moment of typing: does suppression still work under the new anchor format.**
+        // R4.2 changed the wire — the anchor is open throughout `Input`, so **every** cell ZLE
+        // writes carries the id. All of phase-4's unit guards build the anchor in the **old**
+        // format that closes at the end of the prompt (`anchored_prompt`), so none of them can
+        // see a regression specific to the new format: if suppression died while typing, the
+        // grid and the dock would show the same line at once — the double image phase-4 came
+        // to close — and all three gates would stay green. Its only witness is real zsh.
         session.write(b"true");
-        wait_until("ayna yazılan satırı göstermedi", || {
+        wait_until("the mirror did not show the typed line", || {
             let mut mirror = DockState::default();
             session.dock_state(&mut mirror);
             mirror.status == DockStatus::Live && mirror.buffer == "true"
@@ -720,22 +706,22 @@ mod tests {
         let typing = screen(&session, &mut Blocks::default()).join("\n");
         assert!(
             !typing.contains("true"),
-            "yazılmakta olan satır ızgarada da çizildi (çift görüntü):\n{typing}"
+            "the line being typed was drawn on the grid too (double image):\n{typing}"
         );
 
-        // **İddialar komut koştuktan SONRA ve bu sıra zorunlu** — ölçüldü:
-        // boştaki prompt'ta "çizilmedi" demek yükü olmayan bir iddia, çünkü
-        // phase-4'ün bastırması kullanıcının prompt'unu **zaten** gizliyor
-        // (aralık çıpa satırından imlecin satırına ve prompt o aralıkta).
-        // Devri geri alan bir regresyonda bile yeşil kalıyordu, üstelik
-        // zamanlamaya duyarlıydı: ayna `Live` olmadan alınan kare prompt'u
-        // görür ve iddia **rastgele** kırmızıya düşerdi.
+        // **The claims come AFTER the command runs, and this order is mandatory** — measured:
+        // saying "not drawn" at an idle prompt is a claim that carries no weight, because
+        // phase-4's suppression **already** hides the user's prompt (the range runs from the
+        // anchor row to the cursor's row and the prompt is in that range). It stayed green
+        // even under a regression that undid the handover, and it was timing-sensitive on top:
+        // a frame taken before the mirror was `Live` would see the prompt and the claim would
+        // turn red **at random**.
         //
-        // Koşmuş bir komutun satırı bastırmanın dışında (bastırma yalnız
-        // **yazılmakta olan** bloğu kapatıyor), yani cevabı kesin: devir
-        // varsa satır `true`, yoksa `ZSHPROMPTXY> true`.
+        // The line of a command that has run is outside the suppression (suppression covers
+        // only the block **being typed**), so the answer is definite: with the handover the
+        // line is `true`, without it `ZSHPROMPTXY> true`.
         session.write(b"\n");
-        wait_until("komutun çıkış kodu duruma düşmedi", || {
+        wait_until("the command's exit code did not reach the state", || {
             session
                 .shell_state()
                 .is_some_and(|state| state.last_exit == Some(0))
@@ -743,46 +729,45 @@ mod tests {
 
         let mut blocks = Blocks::default();
         let drawn = screen(&session, &mut blocks).join("\n");
-        // `RPS1` ayrı sorulur: `PS1`'i sıfırlayıp sağ prompt'u unutmak
-        // ekranın sağında asılı bir tema parçası bırakırdı ve `PS1` iddiası
-        // bunu görmezdi.
+        // `RPS1` is asked separately: resetting `PS1` and forgetting the right prompt would
+        // leave a piece of the theme hanging on the right of the screen, and the `PS1` claim
+        // would not see it.
         assert!(
             !drawn.contains("ZSHPROMPTXY"),
-            "kullanıcının prompt'u ızgarada çizildi:\n{drawn}"
+            "the user's prompt was drawn on the grid:\n{drawn}"
         );
         assert!(
             !drawn.contains("RIGHTXY"),
-            "kullanıcının sağ prompt'u ızgarada çizildi:\n{drawn}"
+            "the user's right prompt was drawn on the grid:\n{drawn}"
         );
-        // Komutun satırı duruyor: "prompt görünmüyor" iddiasının **ekran
-        // gerçekten çizildi** yarısı. Olmasaydı boş bir ızgara da yukarıdaki
-        // iki iddiayı geçerdi.
-        assert!(drawn.contains("true"), "komutun satırı çizilmedi:\n{drawn}");
-        // Çıpası `preexec`'ten kapanan bloğun işareti komutun satırında.
+        // The command's line is there: the **screen really was drawn** half of the "prompt is
+        // not visible" claim. Without it an empty grid would also pass the two claims above.
+        assert!(drawn.contains("true"), "command line not drawn:\n{drawn}");
+        // The mark of the block whose anchor closes in `preexec` is on the command's line.
         assert!(
             !blocks.as_slice().is_empty(),
-            "sıfır genişlikli prompt'ta blok doğmadı — çıpayı taşıyan hücre \
-             yok. `anchor_close` `preexec`'te mi?\nızgara:\n{drawn}"
+            "no block was born with the zero-width prompt — no cell carries \
+             the anchor. Is `anchor_close` in `preexec`?\ngrid:\n{drawn}"
         );
         session.shutdown();
     }
 
-    /// **`👍🏽` zsh'in sarma sınırında** (035 phase-3, `discussion.md` →
-    /// Karar, bedel 3): zsh diziyi wcwidth'le dört sütun sayıyor, kümeli
-    /// ızgara ve dock iki. On sütunda prompt'un iki boşluğu + `abcdef`
-    /// `👍`'yi son iki sütuna koyuyor — zsh'e göre `🏽` alt satırda, ızgarada
-    /// aynı hücrede; dokuz sütunda `👍` sığmayıp iniyor. İki hâlde de
-    /// bastırmanın aralığı girişin **bütün** satırlarını örtmeli ve üstteki
-    /// çıktıya taşmamalı: giriş ızgarada hiç görünmüyor, `TOP3` görünüyor.
-    /// Gerçek zsh'ten başka tanığı yok — bastırmanın birim bekçileri
-    /// ızgarayı elle basıyor, yani zsh'in kendi aritmetiğini göremez.
+    /// **`👍🏽` at zsh's wrap edge** (035 phase-3, `discussion.md` → Karar, bedel 3): zsh
+    /// counts the sequence as four columns with wcwidth, the clustered grid and the dock as
+    /// two. At ten columns the prompt's two spaces + `abcdef` put `👍` in the last two
+    /// columns — by zsh's count `🏽` is on the next row, on the grid in the same cell; at nine
+    /// columns `👍` does not fit and wraps down. In both cases the suppression range must
+    /// cover **all** rows of the input and must not spill into the output above: the input is
+    /// not visible on the grid at all, `TOP3` is. It has no witness other than real zsh — the
+    /// suppression's unit guards print the grid by hand, so they cannot see zsh's own
+    /// arithmetic.
     #[test]
     fn a_clustered_emoji_at_the_wrap_edge_stays_suppressed() {
         for cols in [9, 10] {
             let root = TempRoot::new("cluster-wrap");
             let home = root.0.join("home");
-            std::fs::create_dir_all(&home).expect("sahte ev dizini kurulamadı");
-            std::fs::write(home.join(".zshrc"), "").expect(".zshrc yazılamadı");
+            std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+            std::fs::write(home.join(".zshrc"), "").expect(".zshrc not written");
             let wrapper = copy_wrapper(&root.0);
             let session = Session::spawn(
                 SessionOptions {
@@ -795,8 +780,8 @@ mod tests {
                     env: HashMap::from([
                         ("HOME".to_owned(), home.display().to_string()),
                         ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
-                        // zsh çok baytlı karakteri ancak UTF-8 yerelde
-                        // tek karakter sayıyor.
+                        // zsh counts a multibyte character as a single
+                        // character only in a UTF-8 locale.
                         ("LANG".to_owned(), "en_US.UTF-8".to_owned()),
                     ]),
                     cols,
@@ -817,20 +802,20 @@ mod tests {
                 },
                 Arc::new(SilentWake),
             )
-            .expect("oturum açılamadı");
+            .expect("could not open the session");
             session.write(b"echo TOP3\n");
-            wait_until("komut bitmedi", || {
+            wait_until("the command did not finish", || {
                 session.shell_state()
                     == Some(ShellState {
                         phase: ShellPhase::Input,
                         last_exit: Some(0),
                     })
             });
-            // İki durak: satır `👍🏽`'de bitiyorken (zsh'e göre `🏽` alt
-            // satırda) ve arkasına düz harfler geldikten sonra. Tazelik
-            // kapısının içerik yarısını bu bekçi görmüyor — ayna tuşun
-            // cevabıyken kapı zamandan "taze" diyor (ölçüldü: aynayı kümesiz
-            // okuyan mutasyonda yeşil); o yarının bekçisi
+            // Two stops: while the line ends at `👍🏽` (by zsh's count `🏽` is on the next
+            // row) and after plain letters follow it. This guard does not see the content
+            // half of the freshness gate — while the mirror is the key's answer, the gate
+            // says "fresh" from time (measured: green under a mutation that reads the mirror
+            // without clusters); the guard of that half is
             // `the_clustered_last_ink_is_the_head_of_the_last_cluster`.
             let mut typed = String::new();
             for (piece, hidden) in [
@@ -839,23 +824,23 @@ mod tests {
             ] {
                 session.write(piece.as_bytes());
                 typed.push_str(piece);
-                wait_until("ayna yazılan satırı göstermedi", || {
+                wait_until("the mirror did not show the typed line", || {
                     let mut mirror = DockState::default();
                     session.dock_state(&mut mirror);
                     mirror.status == DockStatus::Live && mirror.buffer == typed
                 });
-                // Aynadan sonra ızgaranın da oturması için bir tur: zsh satırı
-                // aynadan önce basıyor, yani bu bir güvenlik payı.
+                // One round for the grid to settle after the mirror too: zsh prints the
+                // line before the mirror, so this is a safety margin.
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 let drawn = screen(&session, &mut Blocks::default()).join("\n");
                 assert!(
                     drawn.contains("TOP3"),
-                    "bastırma üstteki çıktıya taştı ({cols} sütun, {typed:?}):\n{drawn}"
+                    "suppression spilled into the output above ({cols} cols, {typed:?}):\n{drawn}"
                 );
                 for piece in hidden {
                     assert!(
                         !drawn.contains(piece),
-                        "giriş ızgarada da çizildi ({cols} sütun, {typed:?}, {piece:?}):\n{drawn}"
+                        "input drawn on the grid too ({cols} cols, {typed:?}, {piece:?}):\n{drawn}"
                     );
                 }
             }
@@ -865,14 +850,14 @@ mod tests {
 
     #[test]
     fn the_shell_keeps_the_prompt_when_the_user_asks_for_it() {
-        // `integration = "blocks"`in öteki ucu: ortama `BATERI_DOCK=off`
-        // düşünce kullanıcının prompt'u **yerinde** kalıyor. Kademenin bütün
-        // varlık sebebi bu ve tek tanığı gerçek zsh — `shell_integration_env`
-        // yalnız çiftin gönderildiğini görüyor, betiğin onu okuduğunu değil.
+        // The other end of `integration = "blocks"`: once `BATERI_DOCK=off` lands in the
+        // environment, the user's prompt stays **in place**. That is the tier's whole reason
+        // for existing and its only witness is real zsh — `shell_integration_env` only sees
+        // that the pair is sent, not that the script reads it.
         let root = TempRoot::new("prompt-shell");
         let home = root.0.join("home");
-        std::fs::create_dir_all(&home).expect("sahte ev dizini kurulamadı");
-        std::fs::write(home.join(".zshrc"), "PS1='ZSHPROMPTXY> '\n").expect(".zshrc yazılamadı");
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        std::fs::write(home.join(".zshrc"), "PS1='ZSHPROMPTXY> '\n").expect(".zshrc not written");
         let wrapper = copy_wrapper(&root.0);
 
         let session = Session::spawn(
@@ -886,8 +871,8 @@ mod tests {
                 env: HashMap::from([
                     ("HOME".to_owned(), home.display().to_string()),
                     ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
-                    // `blocks` kademesinin teli: dock yok, yani betik ne
-                    // `PS1`'i sıfırlıyor ne aynayı kuruyor ne dalı basıyor.
+                    // The `blocks` tier's wire: no dock, so the script neither
+                    // resets `PS1` nor sets up the mirror nor prints the branch.
                     ("BATERI_DOCK".to_owned(), "off".to_owned()),
                 ]),
                 cols: 40,
@@ -900,8 +885,8 @@ mod tests {
                     blink: CursorBlink::default(),
                 },
                 theme: Theme::BATERI,
-                // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
-                // dock alırdı.
+                // Real zsh, real wrapper: in the app this session would get
+                // a dock.
                 dock: true,
                 cluster: false,
                 initial_input: None,
@@ -910,81 +895,78 @@ mod tests {
             },
             Arc::new(SilentWake),
         )
-        .expect("oturum açılamadı");
+        .expect("could not open the session");
 
-        wait_until("prompt işaretleri gelmedi", || {
+        wait_until("prompt marks did not arrive", || {
             session.shell_state()
                 == Some(ShellState {
                     phase: ShellPhase::Input,
                     last_exit: None,
                 })
         });
-        // Defter **her turda** yeniden: `wait_until` `Fn` istiyor ve sınamada
-        // kare başına ayırmanın bir maliyeti yok (üretimdeki gerekçesi
-        // `Blocks`'un doc'unda).
-        wait_until("kullanıcının prompt'u ızgarada çizilmedi", || {
+        // The ledger is fresh **every round**: `wait_until` wants an `Fn`, and in a test a
+        // per-frame allocation costs nothing (the production rationale is in `Blocks`'s
+        // doc).
+        wait_until("the user's prompt was not drawn on the grid", || {
             screen(&session, &mut Blocks::default())
                 .join("\n")
                 .contains("ZSHPROMPTXY")
         });
-        // **VE AYNA HİÇ KURULMADI.** Bu kademede dock yok, yani aynanın
-        // okuyucusu da yok; kancalar yine de kurulsaydı her tuş vuruşunda beş
-        // değişken base64'e kodlanıp akışa yazılır ve karşılığında hiçbir şey
-        // çizilmezdi. Tanığı `DockState`: prompt çoktan basıldı (yukarıdaki
-        // iki bekleme geçti), yani ayna gelecekse gelmişti.
+        // **AND THE MIRROR WAS NEVER SET UP.** This tier has no dock, so no reader for the
+        // mirror either; had the hooks been installed anyway, on every keystroke five
+        // variables would be base64-encoded and written to the stream and nothing would be
+        // drawn in return. The witness is `DockState`: the prompt was printed long ago (the
+        // two waits above passed), so if the mirror were coming it would have come.
         //
-        // Ölçüt `Live` **olmaması**: kanal hiç konuşmadıysa durum doğuştan
-        // geldiği gibi kalır. `Unavailable` da kabul değil — o "ayna var ama
-        // gösteremedik" demek olurdu.
+        // The criterion is **not** being `Live`: if the channel never spoke, the state stays
+        // as it was born. `Unavailable` is not accepted either — that would mean "there is a
+        // mirror but we could not show it".
         let mut dock = DockState::default();
         session.dock_state(&mut dock);
         assert_eq!(
             dock.status,
             DockStatus::Idle,
-            "dock'suz kademede ayna kuruldu: tuş başına bedel, karşılığı yok"
+            "mirror set up in the dockless tier: a per-key cost with no return"
         );
         session.shutdown();
     }
 
     #[test]
     fn the_zsh_wrapper_loads_the_users_files_and_reports_marks() {
-        // Setin **asıl** sınaması: gerçek bir zsh, gerçek bir PTY ve gerçek
-        // bir kullanıcı yapılandırması. Tek turda dört iddia birden:
+        // The set's **real** test: a real zsh, a real PTY and a real user configuration. Four
+        // claims at once in a single round:
         //
-        // 1. Kullanıcının `.zshenv`'i okundu **ve** oradaki `ZDOTDIR` ataması
-        //    geri okundu — bir kullanıcının `ZDOTDIR`'ı olmasının en yaygın
-        //    yolu bu ve okumasaydık kalan dosyaları eski dizinden arardık.
-        // 2. Kullanıcının `.zprofile`'ı okundu: login kabuğun PATH'i orada
-        //    doğuyor ve yalnız `.zshrc`'yi devreden bir sarmalayıcı onu
-        //    sessizce düşürürdü.
-        // 3. **Bozuk** bir `.zshrc` kabuğu düşürmedi ve işaretler yine geldi.
-        // 4. `ZDOTDIR` kullanıcıya geri kondu: `.zlogin` artık bizim
-        //    dizinimizden değil onun dizininden okunuyor ve içeride gördüğü
-        //    değer kendi dizini.
-        // 5. `HISTFILE` kullanıcının dizinini gösteriyor. Sistemin
-        //    `/etc/zshrc`'si bizim dosyalarımızdan **önce** okunuyor ve onu
-        //    `${ZDOTDIR:-$HOME}/.zsh_history` diye kuruyor: düzeltilmezse
-        //    kullanıcının geçmişi uygulamanın paketine yazılır, kendi dosyası
-        //    donar ve hiçbir yerde uyarı çıkmaz. Sınamanın gördüğü tek yer
-        //    burası — kusur ilk yazımda gerçekten oluştu ve izini
-        //    `assets/shell/zsh/.zsh_history` olarak bıraktı.
+        // 1. The user's `.zshenv` was read **and** the `ZDOTDIR` assignment in it was read
+        //    back — that is the most common way for a user to have a `ZDOTDIR`, and had we not
+        //    read it we would look for the remaining files in the old directory.
+        // 2. The user's `.zprofile` was read: the login shell's PATH is born there, and a
+        //    wrapper that handed over only `.zshrc` would silently drop it.
+        // 3. A **broken** `.zshrc` did not bring the shell down and the marks still arrived.
+        // 4. `ZDOTDIR` was restored to the user's: `.zlogin` is now read from their directory,
+        //    not ours, and the value it sees inside is its own directory.
+        // 5. `HISTFILE` points to the user's directory. The system's `/etc/zshrc` is read
+        //    **before** our files and sets it to `${ZDOTDIR:-$HOME}/.zsh_history`: if not
+        //    fixed, the user's history is written into the app's bundle, their own file
+        //    freezes and no warning appears anywhere. This is the only place the test sees it
+        //    — the defect really happened in the first draft and left its trace as
+        //    `assets/shell/zsh/.zsh_history`.
         let root = TempRoot::new("shell-wrapper");
         let home = root.0.join("home");
         let cfg = home.join("cfg");
-        std::fs::create_dir_all(&cfg).expect("sahte ev dizini kurulamadı");
+        std::fs::create_dir_all(&cfg).expect("could not set up the fake home directory");
         let write = |path: PathBuf, text: &str| {
             std::fs::write(&path, text)
-                .unwrap_or_else(|e| panic!("{} yazılamadı: {e}", path.display()))
+                .unwrap_or_else(|e| panic!("could not write {}: {e}", path.display()))
         };
         write(
             home.join(".zshenv"),
             "export ZDOTDIR=$HOME/cfg\nexport SEEN_ZSHENV=1\n",
         );
-        // R3.5'in pini. `typeset` fonksiyon içinde **yereldir**: kullanıcının
-        // dosyası fonksiyondan `source` edilirse bu iki satır dönüşte silinir
-        // ve belirti sessizdir. Seçilen deyim uydurma değil — Homebrew, asdf,
-        // pyenv ve nvm PATH'i tam böyle kuruyor, yani kusur o araçların
-        // bateri'de kaybolması demekti (009 phase-5, ölçüm o dosyada).
+        // R3.5's pin. `typeset` is **local** inside a function: if the user's file is
+        // `source`d from a function, these two lines are erased on return and the symptom is
+        // silent. The chosen idiom is not made up — Homebrew, asdf, pyenv and nvm set up PATH
+        // exactly like this, so the defect meant those tools vanishing in bateri (009
+        // phase-5, the measurement is in that file).
         write(
             cfg.join(".zprofile"),
             "export SEEN_ZPROFILE=1\n\
@@ -993,14 +975,14 @@ mod tests {
              typeset -A probe_map=(k v)\n\
              export SEEN_ARGC=$#\n",
         );
-        // Kasıtlı bozuk: olmayan bir komut **ve** bir sözdizimi hatası. İkisi
-        // de `source`'u yarıda bırakır; kabuğu bırakmamalı.
+        // Deliberately broken: a nonexistent command **and** a syntax error. Both abort the
+        // `source` halfway; they must not bring the shell down.
         write(
             cfg.join(".zshrc"),
             "PS1='$ '\nbateri_missing_command\nif then fi\n",
         );
-        // `path`'teki indeks makineye bağlı (kalıtılan PATH'in uzunluğu), o
-        // yüzden **varlık** basılıyor: `> 0` deterministik.
+        // The index in `path` depends on the machine (the length of the inherited PATH), so
+        // **presence** is printed: `> 0` is deterministic.
         write(
             cfg.join(".zlogin"),
             "print -r -- \"$ZDOTDIR $SEEN_ZSHENV $SEEN_ZPROFILE $HISTFILE \
@@ -1011,9 +993,9 @@ mod tests {
         let wrapper = copy_wrapper(&root.0);
         let session = Session::spawn(
             SessionOptions {
-                // `-l -i`: bizim oturumumuzun hâli (alacritty `login` ile
-                // argv[0]'ı `-zsh` yapıyor). Beş dosyanın hangisinin okunacağı
-                // buna bağlı, yani sınamanın sınadığı zincir bu iki bayrak.
+                // `-l -i`: the shape of our session (alacritty makes argv[0]
+                // `-zsh` via `login`). Which of the five files are read depends on
+                // this, so the chain the test checks is these two flags.
                 command: Some((
                     "/bin/zsh".to_owned(),
                     vec!["-l".to_owned(), "-i".to_owned()],
@@ -1034,8 +1016,8 @@ mod tests {
                     blink: CursorBlink::default(),
                 },
                 theme: Theme::BATERI,
-                // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
-                // dock alırdı.
+                // Real zsh, real wrapper: in the app this session would get
+                // a dock.
                 dock: true,
                 cluster: false,
                 initial_input: None,
@@ -1044,12 +1026,12 @@ mod tests {
             },
             Arc::new(SilentWake),
         )
-        .expect("oturum açılamadı");
+        .expect("could not open the session");
 
-        // `A` sonra `B`: prompt çizildi ve bitti. Buraya gelmek 1–3'ü birden
-        // kanıtlıyor — kanca yüklenmiş, PS1'e ek girmiş ve bozuk dosya
-        // kabuğu düşürmemiş.
-        wait_until("prompt işaretleri gelmedi", || {
+        // `A` then `B`: the prompt was drawn and finished. Getting here proves 1–3 at once —
+        // the hook was loaded, the addition went into PS1 and the broken file did not bring
+        // the shell down.
+        wait_until("prompt marks did not arrive", || {
             session.shell_state()
                 == Some(ShellState {
                     phase: ShellPhase::Input,
@@ -1057,89 +1039,86 @@ mod tests {
                 })
         });
 
-        // Bir komut koştur: `C` çalışmayı, sonraki prompt'un `D`'si çıkış
-        // kodunu getirir. `false` seçildi ki kod sıfırdan farklı olsun —
-        // `0` "kodu okuyamadım"la karışırdı.
+        // Run a command: `C` brings the running state, the next prompt's `D` the exit code.
+        // `false` was chosen so the code is non-zero — `0` would be confused with "could not
+        // read the code".
         session.write(b"false\n");
-        wait_until("komutun çıkış kodu duruma düşmedi", || {
+        wait_until("the command's exit code did not reach the state", || {
             session
                 .shell_state()
                 .is_some_and(|state| state.last_exit == Some(1))
         });
 
         session.write(b"exit\n");
-        // 4 ve 5: `.zlogin` çıkışta değil **açılışta** okundu (login kabuk),
-        // ama dosyayı yazan satır kabuk çıkana kadar diske inmiş olmayabilir;
-        // beklemek yerine dosyanın varlığını bekliyoruz. `.zlogin` geri
-        // koymadan **sonra** koştuğu için gördüğü `HISTFILE` düzeltilmiş olan.
+        // 4 and 5: `.zlogin` was read **at startup**, not at exit (login shell), but the line
+        // writing the file may not have reached the disk until the shell exits; instead of
+        // waiting blindly we wait for the file to exist. Since `.zlogin` runs **after** the
+        // restore, the `HISTFILE` it sees is the corrected one.
         let seen = home.join("zlogin");
-        wait_until("kullanıcının .zlogin'i okunmadı", || seen.is_file());
-        let seen = std::fs::read_to_string(&seen).expect("zlogin izi okunamadı");
-        // Son üç alan R3.5: `typeset -U path` ile eklenen dizin `path`'te
-        // duruyor, `typeset -A` dizisi hâlâ bir association ve kullanıcının
-        // dosyası konumsal parametre görmüyor. Üçü de fonksiyon içinden
-        // `source` edilen bir dosyada başarısız olur.
+        wait_until("the user's .zlogin was not read", || seen.is_file());
+        let seen = std::fs::read_to_string(&seen).expect("could not read zlogin trace");
+        // The last three fields are R3.5: the directory added with `typeset -U path` is in
+        // `path`, the `typeset -A` array is still an association and the user's file sees no
+        // positional parameters. All three fail in a file `source`d from inside a function.
         assert_eq!(
             seen.trim(),
             format!("{0} 1 1 {0}/.zsh_history 1 association 0", cfg.display()),
-            "ZDOTDIR/HISTFILE geri konmadı, kullanıcının dosyaları yüklenmedi \
-             ya da dosya zsh'in okuduğu bağlamda okunmadı (`typeset` yerel \
-             kaldı / konumsal parametre sızdı)"
+            "ZDOTDIR/HISTFILE not restored, the user's files were not loaded \
+             or the file was not read in zsh's own context (`typeset` stayed \
+             local / positional parameters leaked)"
         );
-        // Kusurun kendi izi: geçmiş **bizim** dizinimize yazılmış olmamalı.
+        // The defect's own trace: the history must not have been written into **our**
+        // directory.
         //
-        // Kapanışı BEKLEMEK zorunlu (`/code-review`, 009 kapısı): zsh
-        // `$HISTFILE`'ı **çıkışta** yazıyor (zincirde `inc_append_history` ya
-        // da `share_history` kuran yok). `exit`ten mikrosaniyeler sonra
-        // bakan bir iddia yarışı her seferinde kazanır ve kusur gerilese de
-        // yeşil kalırdı — tuzağın kendisi tuzağa düşerdi.
+        // WAITING for shutdown is mandatory (`/code-review`, 009 gate): zsh writes
+        // `$HISTFILE` **at exit** (nothing in the chain sets `inc_append_history` or
+        // `share_history`). A claim that looks microseconds after `exit` wins the race every
+        // time and would stay green even if the defect regressed — the trap's guard would fall
+        // into the trap itself.
         //
-        // Senkron noktası **olayın kendisi**: geçmiş dosyasının kullanıcının
-        // dizininde belirmesi. İki aday reddedildi — `reader_alive()`
-        // `shutdown()` okuyucuyu `take` ettiği için dönüşte zaten `false`,
-        // `Teardown::Clean` ise burada garanti değil (ölçüldü: `Abandoned`
-        // geliyor; çıkışın içinde takılan çocuk kapanışı asamıyor, kayıtlı
-        // borç — `CLAUDE.md` → Kapanış). Beklenen olay aynı zamanda
-        // **pozitif** iddia: negatif iddia tek başına "doğru yere yazıldı"
-        // ile "hiç yazılmadı"yı ayırt edemezdi, ikisi de sarmalayıcının
-        // dizinini boş bırakır.
+        // The synchronization point is **the event itself**: the history file appearing in the
+        // user's directory. Two candidates were rejected — `reader_alive()` is already `false`
+        // on return because `shutdown()` `take`s the reader, and `Teardown::Clean` is not
+        // guaranteed here (measured: `Abandoned` arrives; a child stuck in its exit cannot hang
+        // the shutdown, a recorded debt — `CLAUDE.md` → Kapanış). The awaited event is also a
+        // **positive** claim: a negative claim alone could not tell "written to the right
+        // place" from "never written", both leave the wrapper's directory empty.
         wait_until(
-            "komut geçmişi kullanıcının dizinine yazılmadı",
+            "command history was not written to the user's directory",
             || cfg.join(".zsh_history").is_file(),
         );
         assert!(
             !wrapper.join(".zsh_history").exists(),
-            "komut geçmişi sarmalayıcının dizinine yazıldı"
+            "command history was written to the wrapper's directory"
         );
         session.shutdown();
     }
 
     #[test]
     fn locale_name_with_slash_is_not_installed() {
-        // `/usr/share/locale/../../../usr` gerçek bir dizin (`/usr`): denetim olmasa
-        // "kurulu" derdi.
+        // `/usr/share/locale/../../../usr` is a real directory (`/usr`): without the check it
+        // would say "installed".
         assert!(!locale_installed("../../../usr"));
     }
 
-    /// **Gerçek zsh'te komutun süresi ekrana düşüyor mu** (013).
+    /// **Does the command's duration reach the screen in real zsh** (013).
     ///
-    /// `bt-core`'un bütün sayaç sınamaları OSC 133'ü **elle** basıyor; gerçek
-    /// betiğin sırası (çıpa `preexec`'te kapanıyor, `D` ile bir sonraki `A`
-    /// aynı `precmd`'de) hiçbirinde denenmiyor. Kullanıcı "bitince süre
-    /// gözükmüyor" dedi ve hiçbir kapı kızarmadı — tanığı yalnız bu.
+    /// All of `bt-core`'s counter tests print OSC 133 **by hand**; the real script's order
+    /// (the anchor closes in `preexec`, `D` and the next `A` in the same `precmd`) is tried in
+    /// none of them. The user said "the duration does not show when it finishes" and no gate
+    /// turned red — this is its only witness.
     #[test]
     fn a_real_zsh_command_shows_its_duration() {
         let root = TempRoot::new("duration-terminal");
         let home = root.0.join("home");
-        std::fs::create_dir_all(&home).expect("sahte ev dizini kurulamadı");
-        // **İKİNCİ BİR OSC 133 KAYNAĞI** — iTerm2'nin
-        // `~/.iterm2_shell_integration.zsh`'ının taklidi. Sahte değil
-        // temsilî: kullanıcının makinesinde ölçülen dizinin aynısını üretiyor
-        // (kimliksiz `C` ve `D`, bizimkilerden önce). VS Code ve Ghostty de
-        // aynı protokolü basıyor, yani bu kurulum **yaygın**.
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        // **A SECOND OSC 133 SOURCE** — an imitation of iTerm2's
+        // `~/.iterm2_shell_integration.zsh`. Not fake but representative: it produces exactly
+        // the sequence measured on the user's machine (id-less `C` and `D`, before ours). VS
+        // Code and Ghostty print the same protocol too, so this setup is **common**.
         //
-        // Boş bir `.zshrc` ile sınamak, kullanıcıların çoğunun yaşamadığı bir
-        // dünyayı sınamaktı: süre sıfıra düşüyordu ve hiçbir kapı görmüyordu.
+        // Testing with an empty `.zshrc` was testing a world most users do not live in: the
+        // duration dropped to zero and no gate saw it.
         std::fs::write(
             home.join(".zshrc"),
             "autoload -Uz add-zsh-hook\n\
@@ -1148,7 +1127,7 @@ mod tests {
              add-zsh-hook preexec foreign_preexec\n\
              add-zsh-hook precmd foreign_precmd\n",
         )
-        .expect(".zshrc yazılamadı");
+        .expect(".zshrc not written");
         let wrapper = copy_wrapper(&root.0);
 
         let session = Session::spawn(
@@ -1181,26 +1160,26 @@ mod tests {
             },
             Arc::new(SilentWake),
         )
-        .expect("oturum açılamadı");
+        .expect("could not open the session");
 
-        // **Yalnız safha sorulur, `last_exit` değil:** yabancı kaynak daha
-        // ilk prompt'ta bir `D;0` basıyor, yani `last_exit` açılışta da dolu.
-        // Ön koşulu ona bağlamak sınamayı gerçek dünyada hiç başlatmazdı.
-        wait_until("prompt işaretleri gelmedi", || {
+        // **Only the phase is asked, not `last_exit`:** the foreign source prints a `D;0`
+        // already at the first prompt, so `last_exit` is filled at startup too. Tying the
+        // precondition to it would never start the test in the real world.
+        wait_until("prompt marks did not arrive", || {
             session
                 .shell_state()
                 .is_some_and(|state| state.phase == ShellPhase::Input)
         });
 
-        // Eşiği **geçen** bir komut: bir saniyenin altı zaten sayaç
-        // doğurmuyor ve sınama onu kusur sanardı.
+        // A command that **exceeds** the threshold: below one second no counter is born
+        // anyway, and the test would mistake that for a defect.
         //
-        // Bitişi `last_exit` ile beklemiyoruz (yukarıdaki gerekçe): ölçüt
-        // doğrudan **aranan şeyin kendisi**, yani süre ekranda mı. Sayaç
-        // bitmiş değerde ondalıklı (`2.0s`); ekranın tamamında arıyoruz,
-        // çünkü satırın yeri tabana yaslanmaya göre oynuyor.
+        // We do not wait for the end via `last_exit` (reason above): the criterion is directly
+        // **the thing being looked for itself**, i.e. is the duration on screen. The counter
+        // has a decimal in its finished value (`2.0s`); we search the whole screen, because
+        // the line's position shifts with the bottom alignment.
         session.write(b"sleep 2\n");
-        wait_until("bitmiş komutun süresi ekranda görünmedi", || {
+        wait_until("finished command's duration not shown", || {
             let drawn = screen(&session, &mut Blocks::default()).join("\n");
             drawn.contains("2.0s") || drawn.contains("2.1s")
         });

@@ -86,7 +86,7 @@ phase-5  bt-shell → bt-shell-macos ── denetim ── belgeler ── make 
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | phase-3 | |
 | phase-4 | |

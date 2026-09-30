@@ -1,134 +1,142 @@
-//! Bir pencerenin kabuğunun dışında ön planda koşan iş var mı, varsa adı ne
-//! (028, kapatma onayının girdisi).
+//! Whether a job is running in the foreground outside a window's shell, and
+//! if so, its name (028, the input to the close confirmation).
 //!
-//! **Yetkili süreç tablosu, OSC 133 değil** (`.tasks/028-kapatma-onayi/
-//! discussion.md` → Karar 1): safha entegrasyonsuz kabukta (`integration =
-//! "off"`, bash, fish) hiç yok, `exec bash` gibi bir geçişte kalıcı olarak
-//! `Running`'de takılıyor ve programın adını söylemiyor. Terminalin ön plan
-//! süreç grubu ise her kabukta aynı soruyu cevaplıyor: grup kabuğun kendi
-//! grubu değilse kabuğun dışında bir iş ön planda.
+//! **The process table is authoritative, not OSC 133** (`.tasks/028-kapatma-onayi/
+//! discussion.md` → Karar 1): the phase does not exist at all in a shell
+//! without integration (`integration = "off"`, bash, fish), gets stuck in
+//! `Running` permanently on a transition like `exec bash`, and does not name
+//! the program. The terminal's foreground process group answers the same
+//! question in every shell: if the group is not the shell's own group, a job
+//! outside the shell is in the foreground.
 //!
-//! **Ön plan grubu kabuğun `e_tpgid`'inden**, PTY çocuğununkinden değil:
-//! süresiz oturumda çocuk `login(1)` ve root'a ait, yani `PROC_PIDTBSDINFO`
-//! onda sıfır bayt dönüyor (ölçüldü, discussion.md → Muhakeme). Kabuk
-//! kullanıcının ve aynı çağrı onda `ps`'in TPGID sütununu veriyor. Ön plan
-//! grubunun üyelerine yalnız kısa bilgi (`PROC_PIDT_SHORTBSDINFO`) soruluyor,
-//! çünkü o root'a ait süreçte de (`sudo` grubu) çalışıyor.
+//! **The foreground group comes from the shell's `e_tpgid`**, not the PTY
+//! child's: in an untimed session the child is `login(1)` and owned by root,
+//! so `PROC_PIDTBSDINFO` returns zero bytes for it (measured, discussion.md →
+//! Muhakeme). The shell belongs to the user and the same call gives `ps`'s
+//! TPGID column for it. Members of the foreground group are asked only for
+//! short info (`PROC_PIDT_SHORTBSDINFO`), because that works on root-owned
+//! processes too (a `sudo` group).
 //!
-//! Adlar grubun **yapraklarından**: lider bir sarmalayıcı olabiliyor (lider
-//! `bash`, program onun torunu `claude`; context.md'deki üçüncü satır).
+//! Names come from the group's **leaves**: the leader may be a wrapper (leader
+//! `bash`, the program its grandchild `claude`; the third row in context.md).
 //!
-//! İki yarı: saf karar ([`foreground`], girdisi bir [`ProcessTable`]) ve
-//! arayüzün `libc` gövdesi ([`Libproc`]). Karar sahte tabloyla, gövde gerçek
-//! bir PTY'yle sınanıyor — sahte tablo login'in root olduğunu göremezdi.
+//! Two halves: the pure decision ([`foreground`], whose input is a
+//! [`ProcessTable`]) and the interface's `libc` body ([`Libproc`]). The
+//! decision is tested with a fake table, the body with a real PTY — a fake
+//! table could not see that login is root.
 //!
-//! **İkinci tüketici: uzak oturum** (036, [`remote`]). Aynı ön plan grubu,
-//! ters yön: kapatma sorusu grubun **yapraklarını** adlandırıyor, uzak oturum
-//! grubun **en üstteki** ssh/mosh sürecini arıyor (`ssh -J`'in `ssh -W`
-//! çocuğu jump host'u verirdi) ve onun argümanlarını okuyor
-//! (`KERN_PROCARGS2`, yalnız aday adlı üyeler için). Yoklama `C` kenarında
-//! ve kararsızsa sonraki çıktı kenarında (`window::RemoteProbe`); bilinen
-//! sınırları `.tasks/036-ssh-uzak-oturum/discussion.md` → Karar 2: ssh'ı
-//! sonradan başlatan sarmalayıcı betik ilk yoklamada "yerel" kilitleniyor,
-//! `exec ssh` `C` üretmiyor, `~^Z` göstergeyi `fg`'ye kadar kaldırıyor.
-//! Cevap host'tan fazlası (037 Karar 1, [`Target`]): aynı yere ikinci bir
-//! kapı açacak argv de aynı yürüyüşten çıkıyor.
+//! **Second consumer: the remote session** (036, [`remote`]). Same foreground
+//! group, opposite direction: the close question names the group's
+//! **leaves**, the remote session looks for the group's **topmost** ssh/mosh
+//! process (`ssh -J`'s `ssh -W` child would give the jump host) and reads its
+//! arguments (`KERN_PROCARGS2`, only for members with candidate names). The
+//! probe runs on the `C` edge and, if undecided, on the next output edge
+//! (`window::RemoteProbe`); known limits in
+//! `.tasks/036-ssh-uzak-oturum/discussion.md` → Karar 2: a wrapper script that
+//! starts ssh later locks in as "local" on the first probe, `exec ssh` does
+//! not produce `C`, and `~^Z` removes the indicator until `fg`. The answer is
+//! more than the host (037 Karar 1, [`Target`]): the argv that opens a second
+//! door to the same place comes out of the same walk.
 //!
-//! **Bilinen sınırlar** (Karar 7): arka plan işleri (`sleep 100 &`) ön planda
-//! değil ve sayılmıyor; kabuğun kendi içinde koşan iş (yerleşik döngü, `read`
-//! bekleyen bir fonksiyon) ayrı bir grup açmıyor ve boşta görünüyor; `exec
-//! vim` kabuğun pid'ini ve grubunu devraldığı için o da boşta.
+//! **Known limits** (Karar 7): background jobs (`sleep 100 &`) are not in the
+//! foreground and are not counted; a job running inside the shell itself (a
+//! builtin loop, a function waiting on `read`) opens no separate group and
+//! looks idle; `exec vim` inherits the shell's pid and group, so it is idle
+//! too.
 
 use std::ffi::{c_int, c_void};
 
 use bt_core::RemoteKind;
 
-/// Kabuğun PTY çocuğuna göre yeri — kabuğu doğuran taraf biliyor ve
-/// doğumda kaydediyor (`pane::TerminalPane::start_session`), ad
-/// karşılaştırmasıyla tahmin edilmiyor.
+/// The shell's position relative to the PTY child — the side that spawns the
+/// shell knows it and records it at spawn (`pane::TerminalPane::start_session`);
+/// it is not guessed by comparing names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShellParent {
-    /// Çocuk `login(1)`, kabuk onun çocuğu: süresiz oturumun iki yolu da
-    /// (`child::login_command` ve alacritty'nin macOS yolu).
+    /// The child is `login(1)` and the shell is its child: both paths of an
+    /// untimed session (`child::login_command` and alacritty's macOS path).
     Login,
-    /// Çocuk kabuğun kendisi: süreli koşunun sabit betikleri ve gerçek PTY
-    /// sınaması (login root izni istiyor, sınamada doğurulamıyor).
+    /// The child is the shell itself: the timed run's fixed scripts and the
+    /// real PTY test (login needs root, so it cannot be spawned in a test).
     Direct,
 }
 
-/// Ön planda ne var.
+/// What is in the foreground.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Foreground {
-    /// Kabuk ön planda — ya da sorulacak bir kabuk kalmadı.
+    /// The shell is in the foreground — or there is no shell left to ask.
     Idle,
-    /// Kabuğun dışında bir iş ön planda; adları pid sırasıyla, tekrarsız.
-    /// **Boş vektör adsız demek**: tablo okunamadı ama koşuyor sayıldı.
+    /// A job outside the shell is in the foreground; its names in pid order,
+    /// without duplicates. **An empty vector means nameless**: the table could
+    /// not be read but it was counted as running.
     Running(Vec<String>),
 }
 
-/// Kabuğun kendi grubu ve terminalinin ön plan grubu — ikisi tek çağrıdan.
+/// The shell's own group and its terminal's foreground group — both from one call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Groups {
     pub(crate) own: u32,
     pub(crate) foreground: u32,
 }
 
-/// Uzak oturum yoklamasının cevabı ([`remote`]).
+/// The answer of the remote session probe ([`remote`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Probe {
-    /// Kabuk hâlâ ön planda ya da çatalladığı çocuk henüz `exec` etmedi:
-    /// sonraki çıktı kenarında yeniden sorulur.
+    /// The shell is still in the foreground or the child it forked has not
+    /// `exec`ed yet: asked again on the next output edge.
     Undecided,
-    /// Ön planda ssh/mosh yok, etkileşimli değil ya da tablo okunamadı.
+    /// No ssh/mosh in the foreground, not interactive, or the table is unreadable.
     Local,
-    /// Etkileşimli bir ssh/mosh ve hedefi ([`Target`]).
+    /// An interactive ssh/mosh and its target ([`Target`]).
     Remote(Target),
 }
 
-/// Yoklamanın bulduğu uzak hedef (037 Karar 1): gösterilecek host ve aynı
-/// yere ikinci bir kapı açacak argv. Kaçırılmış satırı `window::probe_remote`
-/// üretiyor (`quote::command_line`), yani burada ne kabuk ne kaçırma var.
+/// The remote target the probe found (037 Karar 1): the host to display and the
+/// argv that opens a second door to the same place. The escaped line is
+/// produced by `window::probe_remote` (`quote::command_line`), so there is
+/// neither a shell nor escaping here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Target {
-    /// Kullanıcının yazdığı gibi; `ssh://` şeması ve port atılmış.
+    /// As the user typed it; the `ssh://` scheme and the port are stripped.
     pub(crate) host: String,
     pub(crate) kind: RemoteKind,
-    /// Yeniden koşturulacak argv ([`ssh_target`], [`mosh_argv`]).
+    /// The argv to re-run ([`ssh_target`], [`mosh_argv`]).
     pub(crate) argv: Vec<String>,
 }
 
-/// Kararın süreç tablosundan sorduğu altı şey.
+/// The six things the decision asks of the process table.
 ///
-/// Listeler `Vec`, `Option` değil: macOS'un listeleme çağrıları "süreç yok"
-/// ile "çocuğu yok"u ayırmıyor (ölçüldü: var olmayan pid'e sıfır), yani
-/// `None` taşıyacak bir bilgi yok. Kabuğun canlılığının tek tanığı bu yüzden
-/// okuyucu thread'i (`Session::reader_alive`).
+/// Lists are `Vec`, not `Option`: macOS's listing calls do not distinguish "no
+/// such process" from "no children" (measured: zero for a nonexistent pid), so
+/// there is no information for `None` to carry. The only witness to the
+/// shell being alive is therefore the reader thread (`Session::reader_alive`).
 pub(crate) trait ProcessTable {
     fn children(&self, pid: u32) -> Vec<u32>;
-    /// Yalnız kabuğa sorulur (aynı kullanıcı): uzun bilgi root'ta okunmuyor.
+    /// Asked only of the shell (same user): long info is unreadable for root.
     fn groups(&self, shell: u32) -> Option<Groups>;
     fn members(&self, group: u32) -> Vec<u32>;
     fn parent(&self, pid: u32) -> Option<u32>;
     fn name(&self, pid: u32) -> Option<String>;
-    /// Sürecin argv'si; okunamıyorsa `None`. Yalnız aday adlı üyelere
-    /// sorulur ([`remote`]).
+    /// The process's argv; `None` if unreadable. Asked only of members with
+    /// candidate names ([`remote`]).
     fn args(&self, pid: u32) -> Option<Vec<String>>;
 }
 
-/// Kararın kendisi: `child` PTY'nin çocuğunun pid'i.
+/// The decision itself: `child` is the pid of the PTY's child.
 ///
-/// Başarısızlık kolları (R1.5) yanlışın yönüne göre: çocuksuz `login`
-/// (sekme doğar doğmaz ⌘W) boşta, çünkü kapatılacak bir iş yok; kabuğun
-/// grubu okunamazsa **adsız koşuyor**, çünkü sistematik bir kırılma sessiz
-/// "hiç sormuyor" değil görünür "hep soruyor" olmalı.
+/// The failure branches (R1.5) follow the direction of the error: a childless
+/// `login` (⌘W right as the tab is born) is idle, because there is no job to
+/// close; if the shell's group cannot be read it is **running without a
+/// name**, because a systematic breakage should be a visible "always asks",
+/// not a silent "never asks".
 pub(crate) fn foreground(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Foreground {
-    // `login` tek bir kabuk çatallıyor; henüz yoksa kapatılacak iş de yok.
+    // `login` forks a single shell; if there is none yet, there is no job to close.
     let Some(shell) = shell_pid(parent, child, table) else {
         return Foreground::Idle;
     };
-    // Sıfır grup "terminalin ön planı yok" demek: kabuğun kontrol terminali
-    // okunmuyor ve o da okunamayan tablonun kolu — `members(0)` bir grubun
-    // değil çekirdeğin cevabı olurdu.
+    // A zero group means "the terminal has no foreground": the shell's
+    // controlling terminal is not readable, and that too is the unreadable-table
+    // branch — `members(0)` would be the kernel's answer, not a group's.
     let Some(groups) = table.groups(shell).filter(|groups| groups.foreground != 0) else {
         return Foreground::Running(Vec::new());
     };
@@ -138,8 +146,8 @@ pub(crate) fn foreground(parent: ShellParent, child: u32, table: &impl ProcessTa
     Foreground::Running(names(groups.foreground, table))
 }
 
-/// Kabuğun pid'i: doğrudan yolda çocuğun kendisi, `login` yolunda onun tek
-/// çocuğu (henüz yoksa `None`).
+/// The shell's pid: on the direct path the child itself, on the `login` path
+/// its only child (`None` if there is none yet).
 fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<u32> {
     match parent {
         ShellParent::Direct => Some(child),
@@ -147,19 +155,20 @@ fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Opti
     }
 }
 
-/// Ön planda uzak bir oturum var mı (036 Karar 2, 3).
+/// Whether a remote session is in the foreground (036 Karar 2, 3).
 ///
-/// Başarısızlığın dili [`foreground`]'ınkinin **tersi**: okunamayan tablo
-/// `Local`. Orada güvenli yön "hep sor"du, burada göstergenin **olmaması** —
-/// ve kararsız sayılsaydı sistematik bir okuma hatası komut boyunca her
-/// çıktı kenarında bir yoklama doğururdu.
+/// The failure semantics are the **opposite** of [`foreground`]'s: an
+/// unreadable table is `Local`. There the safe direction was "always ask";
+/// here it is the indicator's **absence** — and if it counted as undecided, a
+/// systematic read error would produce a probe on every output edge for the
+/// whole command.
 ///
-/// `Undecided` yalnız iki hâlde: kabuğun grubu hâlâ ön planda (`C` fork'tan
-/// önce basılıyor) ya da hiçbir ssh/mosh tanınmadı ve grubun bir üyesi
-/// kabuğun adını taşıyor (çatallanmış, henüz `exec` etmemiş çocuk). Bedeli
-/// Karar 2'de adıyla: kabuğun kendi içinde koşan döngü ya da `zsh betik`
-/// komut boyunca kararsız kalıyor ve çıktı kenarı başına (ana kuyruk turu
-/// başına en çok bir) yoklama doğuruyor.
+/// `Undecided` only in two cases: the shell's group is still in the foreground
+/// (`C` is printed before the fork), or no ssh/mosh was recognized and a group
+/// member carries the shell's name (a forked child that has not `exec`ed yet).
+/// The cost is named in Karar 2: a loop running inside the shell itself, or
+/// `zsh script`, stays undecided for the whole command and produces a probe per
+/// output edge (at most one per main queue turn).
 pub(crate) fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Probe {
     let Some(shell) = shell_pid(parent, child, table) else {
         return Probe::Local;
@@ -176,7 +185,7 @@ pub(crate) fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable)
     }
     members.sort_unstable();
     let names: Vec<Option<String>> = members.iter().map(|&pid| table.name(pid)).collect();
-    // Tanınan üyeler ve hedefleri; argv yalnız aday adlılara soruluyor.
+    // Recognized members and their targets; argv is asked only of candidate names.
     let recognized: Vec<(u32, Option<Target>)> = members
         .iter()
         .zip(&names)
@@ -190,10 +199,10 @@ pub(crate) fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable)
         })
         .collect();
     let is_recognized = |pid: u32| recognized.iter().any(|&(member, _)| member == pid);
-    // Grubun en üstteki tanınan süreçleri — atası grupta tanınan bir süreç
-    // olan üye bir alt adım (`ssh -J`'in `ssh -W` çocuğu, mosh'un bootstrap
-    // ssh'ı). Yürüyüş grubun boyuyla sınırlı: bozuk bir tablo (kendi
-    // ebeveyni olan süreç) döngü kuramasın.
+    // The group's topmost recognized processes — a member with a recognized
+    // ancestor in the group is a substep (`ssh -J`'s `ssh -W` child, mosh's
+    // bootstrap ssh). The walk is bounded by the group's size: a corrupt table
+    // (a process that is its own parent) must not create a loop.
     let top = recognized.iter().filter(|(pid, _)| {
         let mut ancestor = table.parent(*pid);
         for _ in 0..members.len() {
@@ -207,8 +216,8 @@ pub(crate) fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable)
         }
         true
     });
-    // Birden çok tepe varsa (boru hattı) etkileşimli olan kazanıyor:
-    // `ssh backup cat dump | ssh prod`'da ilki yerel cevabı dayatmamalı.
+    // With several tops (a pipeline) the interactive one wins: in
+    // `ssh backup cat dump | ssh prod` the first must not force a local answer.
     let mut found = false;
     for (_, target) in top {
         found = true;
@@ -219,9 +228,9 @@ pub(crate) fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable)
     if found {
         return Probe::Local;
     }
-    // Hiçbir şey tanınmadı ama bir üye hâlâ kabuğun adını taşıyor:
-    // çatallanmış, henüz `exec` etmemiş çocuk — boru hattının öbür yanı
-    // (`ssh prod | tee log`'da `tee`) önce `exec` etmiş olabilir.
+    // Nothing was recognized but a member still carries the shell's name: a
+    // forked child that has not `exec`ed yet — the other side of the pipeline
+    // (`tee` in `ssh prod | tee log`) may have `exec`ed first.
     let shell_name = table.name(shell);
     if shell_name.is_some() && names.contains(&shell_name) {
         return Probe::Undecided;
@@ -229,26 +238,26 @@ pub(crate) fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable)
     Probe::Local
 }
 
-/// Argv'si okunmaya değer ad: ssh, mosh'un istemcisi ve mosh betiğini koşan
-/// Perl (`/usr/bin/perl` `perl5.NN`'e `exec` ediyor, yani ad önekle).
+/// A name whose argv is worth reading: ssh, mosh's client and the Perl running
+/// the mosh script (`/usr/bin/perl` `exec`s into `perl5.NN`, so match by prefix).
 fn is_candidate(name: &str) -> bool {
     name == "ssh" || name == "mosh-client" || name.starts_with("perl")
 }
 
-/// Tanınan bir sürecin hedefi: dıştaki `None` "tanınmadı", içteki `None`
-/// "tanındı ama etkileşimli bir uzak oturum değil".
+/// The target of a recognized process: the outer `None` means "not recognized",
+/// the inner `None` "recognized but not an interactive remote session".
 fn remote_target(name: &str, args: &[String]) -> Option<Option<Target>> {
     let rest = args.get(1..).unwrap_or_default();
     if name == "ssh" {
-        // argv[0] sürecin verdiği gibi (`ssh`, `/usr/bin/ssh`): takma adla
-        // (`alias s=ssh`) yazılan komut da süreçte `ssh`.
+        // argv[0] as the process gives it (`ssh`, `/usr/bin/ssh`): a command
+        // typed through an alias (`alias s=ssh`) is also `ssh` in the process.
         let program = args.first().map_or("ssh", String::as_str);
         return Some(ssh_target(program, rest));
     }
     if name == "mosh-client" {
         return Some(mosh_client_target(rest));
     }
-    // Yorumlayıcı: ilk seçenek-olmayan argüman betiğin yolu.
+    // Interpreter: the first non-option argument is the script's path.
     let script = rest.iter().position(|arg| !arg.starts_with('-'))?;
     let base = rest[script].rsplit('/').next().unwrap_or_default();
     let script_args = &rest[script + 1..];
@@ -261,8 +270,8 @@ fn remote_target(name: &str, args: &[String]) -> Option<Option<Target>> {
     })
 }
 
-/// mosh'un yeniden koşturma argv'si: `mosh` + betiğin argümanları, olduğu
-/// gibi (037 Karar 6). Yerel yönlendirme mosh'ta yok, ayıklanacak bir şey de.
+/// mosh's re-run argv: `mosh` + the script's arguments, as they are (037
+/// Karar 6). mosh has no local forwarding, so there is nothing to filter out.
 fn mosh_argv<S: AsRef<str>>(args: &[S]) -> Vec<String> {
     std::iter::once("mosh")
         .chain(args.iter().map(AsRef::as_ref))
@@ -270,36 +279,36 @@ fn mosh_argv<S: AsRef<str>>(args: &[S]) -> Vec<String> {
         .collect()
 }
 
-/// ssh'ın değer alan kısa seçenekleri (`ssh(1)`'in SYNOPSIS'i).
+/// ssh's short options that take a value (`ssh(1)`'s SYNOPSIS).
 pub(crate) const SSH_VALUED: &str = "BbcDEeFIiJLlmOoPpQRSWw";
-/// Varlığı oturumu etkileşimsiz yapan seçenekler: tünel (`-N`), yönlendirme
-/// (`-W`), denetim (`-O`), sorgu (`-Q`, `-G`, `-V`) ve pty'siz (`-T`).
+/// Options whose presence makes the session non-interactive: tunnel (`-N`),
+/// forwarding (`-W`), control (`-O`), query (`-Q`, `-G`, `-V`) and no pty (`-T`).
 const SSH_NON_INTERACTIVE: &str = "NWOQGVT";
-/// Yeniden koşturmada **düşen** seçenekler (037 Karar 6): yerel
-/// yönlendirmeler (`-L`, `-R`, `-D`, değerleriyle) ikinci oturumda aynı yerel
-/// portu bağlamaya çalışıp uyarı basar ya da `ExitOnForwardFailure`'da hiç
-/// bağlanmaz; `-M` ikinci bir ControlMaster açar; `-f` arka plana düşer.
-/// `-o LocalForward=…` biçimi ayıklanmıyor (bilinen sınır).
+/// Options **dropped** on re-run (037 Karar 6): local forwards (`-L`, `-R`,
+/// `-D`, with their values) would try to bind the same local port in the
+/// second session and print a warning, or with `ExitOnForwardFailure` not
+/// connect at all; `-M` opens a second ControlMaster; `-f` drops to the
+/// background. The `-o LocalForward=…` form is not filtered (a known limit).
 const SSH_NOT_REPEATED: &str = "LRDMf";
 
-/// ssh argv'si (argv[0] `program`, `args` sonrası) → etkileşimli oturumun
-/// hedefi (036 Karar 3) ve yeniden koşturma argv'si (037 Karar 6).
+/// ssh argv (argv[0] is `program`, `args` the rest) → the interactive
+/// session's target (036 Karar 3) and the re-run argv (037 Karar 6).
 ///
-/// Hedeften sonra bir komut varsa oturum `-t` olmadan etkileşimli değil:
-/// `ssh prod uptime` bir saniyelik komut ve dock'u kısıp açmak tam da
-/// kullanıcının reddettiği sıçrama olurdu.
+/// If there is a command after the target, the session is not interactive
+/// without `-t`: `ssh prod uptime` is a one-second command and collapsing and
+/// reopening the dock would be exactly the jump the user rejected.
 ///
-/// argv aynı yürüyüşten ([`SshSession::options`]'ın `kept`'i), ikinci bir
-/// ayrıştırıcıdan değil: [`SSH_NOT_REPEATED`] düşüyor, kalan her şey
-/// sırasıyla — hedef ve `-t`'li uzak komut dahil.
+/// The argv comes from the same walk ([`SshSession::options`]'s `kept`), not a
+/// second parser: [`SSH_NOT_REPEATED`] is dropped, everything else stays in
+/// order — including the target and a remote command with `-t`.
 fn ssh_target(program: &str, args: &[String]) -> Option<Target> {
     let mut session = SshSession::default();
     let mut argv = vec![program.to_owned()];
     let (index, terminated) = session.options(args, 0, &mut argv);
     let target = args.get(index)?;
     argv.push(target.clone());
-    // OpenSSH hedeften sonra seçenekleri **yeniden** ayrıştırıyor
-    // (`ssh prod -p 2222`); `--` ile bitmişse ayrıştırmıyor.
+    // OpenSSH parses options **again** after the target (`ssh prod -p 2222`);
+    // it does not if they ended with `--`.
     let rest = if terminated {
         index + 1
     } else {
@@ -317,24 +326,25 @@ fn ssh_target(program: &str, args: &[String]) -> Option<Target> {
     })
 }
 
-/// ssh seçeneklerinin etkileşim hakkında söyledikleri.
+/// What the ssh options say about interactivity.
 #[derive(Default)]
 struct SshSession {
-    /// `-t` ya da `RequestTTY=yes|force`.
+    /// `-t` or `RequestTTY=yes|force`.
     tty: bool,
-    /// Etkileşimsiz bir kip: [`SSH_NON_INTERACTIVE`], `RequestTTY=no` ya da
+    /// A non-interactive mode: [`SSH_NON_INTERACTIVE`], `RequestTTY=no` or
     /// `SessionType=none|subsystem`.
     quiet: bool,
 }
 
 impl SshSession {
-    /// `args[index..]`'teki seçenek kümesini okur; ilk seçenek-olmayan
-    /// argümanın indeksini ve `--` ile bitip bitmediğini döndürür.
+    /// Reads the option set in `args[index..]`; returns the index of the first
+    /// non-option argument and whether it ended with `--`.
     ///
-    /// Okuduğu seçenekleri yeniden koşturma için `kept`'e yazıyor (037
-    /// Karar 6): [`SSH_NOT_REPEATED`]'in bayrağı kümeden düşüyor, değer
-    /// alanın değeri de (bitişik ya da ayrı argüman); bayrağı kalmayan küme
-    /// bütünüyle düşüyor (`-fM` → yok, `-vL 1:x:1` → `-v`).
+    /// Writes the options it reads to `kept` for the re-run (037 Karar 6): a
+    /// [`SSH_NOT_REPEATED`] flag is dropped from its cluster, and so is the
+    /// value of one that takes a value (attached or a separate argument); a
+    /// cluster left with no flags is dropped entirely (`-fM` → nothing,
+    /// `-vL 1:x:1` → `-v`).
     fn options(
         &mut self,
         args: &[String],
@@ -364,7 +374,7 @@ impl SshSession {
                     flags.push(flag);
                 }
                 if SSH_VALUED.contains(flag) {
-                    // Değer ya kümenin kalanı (`-p22`) ya sonraki argüman.
+                    // The value is either the rest of the cluster (`-p22`) or the next argument.
                     let attached = &cluster[at + flag.len_utf8()..];
                     let value = if attached.is_empty() {
                         index += 1;
@@ -395,7 +405,7 @@ impl SshSession {
         (index, false)
     }
 
-    /// `-o Anahtar=değer` (ya da boşlukla): etkileşimi değiştiren iki anahtar.
+    /// `-o Key=value` (or with a space): the two keys that change interactivity.
     fn config(&mut self, option: &str) {
         let (key, value) = option
             .split_once(['=', ' ', '\t'])
@@ -414,7 +424,7 @@ impl SshSession {
     }
 }
 
-/// Hedef yazıldığı gibi; yalnız `ssh://` biçiminde şema ve port atılıyor.
+/// The target as written; only in the `ssh://` form are the scheme and port stripped.
 fn ssh_host(target: &str) -> String {
     let Some(rest) = target.strip_prefix("ssh://") else {
         return target.to_owned();
@@ -425,7 +435,7 @@ fn ssh_host(target: &str) -> String {
         None => (None, rest),
     };
     let host = match host.strip_prefix('[') {
-        // IPv6 köşeli parantezde; port kapanıştan sonra.
+        // IPv6 is in square brackets; the port comes after the closing one.
         Some(inner) => inner.split(']').next().unwrap_or_default(),
         None => host.split(':').next().unwrap_or_default(),
     };
@@ -435,8 +445,8 @@ fn ssh_host(target: &str) -> String {
     }
 }
 
-/// mosh betiğinin ayrı argümanla değer alan seçenekleri (`--ssh=…` gibi
-/// eşittirli biçim zaten tek argüman).
+/// The mosh script's options that take a value as a separate argument (the
+/// `=` form like `--ssh=…` is already a single argument).
 const MOSH_VALUED: [&str; 9] = [
     "-p",
     "--port",
@@ -449,9 +459,9 @@ const MOSH_VALUED: [&str; 9] = [
     "--experimental-remote-ip",
 ];
 
-/// mosh betiğinin argv'si (betiğin yolundan sonrası) → hedef: ilk
-/// seçenek-olmayan argüman. Uzak komut mosh'ta da etkileşimli bir
-/// terminalde koşuyor, yani onu elemiyor.
+/// The mosh script's argv (after the script's path) → the target: the first
+/// non-option argument. In mosh a remote command also runs in an interactive
+/// terminal, so it does not disqualify it.
 fn mosh_target<S: AsRef<str>>(args: &[S]) -> Option<String> {
     let mut words = args.iter().map(AsRef::as_ref);
     while let Some(word) = words.next() {
@@ -468,14 +478,14 @@ fn mosh_target<S: AsRef<str>>(args: &[S]) -> Option<String> {
     None
 }
 
-/// `mosh-client`'ın `-#`'i: betik ona kendi komut satırını tek argümanda
-/// veriyor (`"-# {argv} |"`), yani hedef o satırın mosh ayrıştırmasından.
+/// `mosh-client`'s `-#`: the script passes it its own command line in a single
+/// argument (`"-# {argv} |"`), so the target comes from parsing that line as
+/// mosh would.
 ///
-/// Yeniden koşturma argv'si de o satırdan: `mosh` + boşlukla bölünmüş
-/// sözcükleri (037 Karar 6). **Bilinen sınır:** betik satırı tırnaksız
-/// birleştiriyor, yani boşluklu bir değer (`--ssh="ssh -i k"`) geri
-/// kurulamıyor ve bölünmüş hâliyle yazılıyor — host'un 036'daki sınırıyla
-/// aynı kök.
+/// The re-run argv also comes from that line: `mosh` + its whitespace-split
+/// words (037 Karar 6). **Known limit:** the script joins the line without
+/// quoting, so a value with spaces (`--ssh="ssh -i k"`) cannot be rebuilt and
+/// is written in its split form — the same root as the host's limit in 036.
 fn mosh_client_target(args: &[String]) -> Option<Target> {
     let at = args.iter().position(|arg| arg.starts_with("-#"))?;
     let mut line = args[at].strip_prefix("-#").unwrap_or_default().trim();
@@ -483,9 +493,9 @@ fn mosh_client_target(args: &[String]) -> Option<Target> {
         line = args.get(at + 1)?.trim();
     }
     let line = line.strip_suffix('|').unwrap_or(line);
-    // Satır tırnaksız birleştirilmiş: `--ssh="ssh -i ~/.ssh/k"` sözcüklere
-    // bölünüyor ve değeri seçenek-olmayan bir sözcük bırakıyor. Host'ta
-    // olamayacak karakter taşıyan sözcük bu yüzden atlanıyor.
+    // The line was joined without quoting: `--ssh="ssh -i ~/.ssh/k"` is split
+    // into words and its value leaves a non-option word behind. A word carrying
+    // a character that cannot appear in a host is therefore skipped.
     let words: Vec<&str> = line
         .split_whitespace()
         .filter(|word| !word.contains(['/', '=', '~']))
@@ -499,9 +509,10 @@ fn mosh_client_target(args: &[String]) -> Option<Target> {
     })
 }
 
-/// Ön plan grubunun adları: yapraklar (grubun başka bir üyesinin ebeveyni
-/// olmayan üyeler) pid sırasıyla ve tekrarsız; yaprak yoksa liderin adı
-/// (liderin pid'i grubun kimliği), o da yoksa hiçbiri.
+/// The foreground group's names: the leaves (members that are not the parent of
+/// another member of the group) in pid order and without duplicates; if there
+/// are no leaves, the leader's name (the leader's pid is the group's id), and
+/// if not that either, none.
 fn names(group: u32, table: &impl ProcessTable) -> Vec<String> {
     let mut members = table.members(group);
     members.sort_unstable();
@@ -523,9 +534,9 @@ fn names(group: u32, table: &impl ProcessTable) -> Vec<String> {
     names
 }
 
-/// [`ProcessTable`]'ın macOS gövdesi: `libc`'nin Apple yarısı (`libproc`).
-/// Kare yolunda değil: kapanış anında ve komut başladığında (uzak oturum
-/// yoklaması), ana thread'de birkaç sistem çağrısı.
+/// [`ProcessTable`]'s macOS body: `libc`'s Apple half (`libproc`). Not on the
+/// frame path: a few system calls on the main thread at close time and when a
+/// command starts (the remote session probe).
 pub(crate) struct Libproc;
 
 impl ProcessTable for Libproc {
@@ -534,8 +545,8 @@ impl ProcessTable for Libproc {
     }
 
     fn groups(&self, shell: u32) -> Option<Groups> {
-        // SAFETY: `proc_bsdinfo` yalnız tamsayı ve `c_char` dizisi taşıyan düz
-        // bir C yapısı; sıfır bayt onun geçerli bir değeri.
+        // SAFETY: `proc_bsdinfo` is a plain C struct holding only integers and
+        // `c_char` arrays; all zero bytes is a valid value of it.
         let info: libc::proc_bsdinfo = unsafe { pid_info(shell, libc::PROC_PIDTBSDINFO)? };
         Some(Groups {
             own: info.pbi_pgid,
@@ -551,15 +562,15 @@ impl ProcessTable for Libproc {
         short_info(pid).map(|info| info.pbsi_ppid)
     }
 
-    /// Önce `proc_name` (uzun ad), olmazsa kısa bilginin `comm`'u: ilki root'a
-    /// ait süreçte başarısız (ölçüldü, `launchd`'de sıfır), ikincisi 16
-    /// karakterde kesik ama her süreçte okunuyor.
+    /// First `proc_name` (the long name), otherwise the short info's `comm`: the
+    /// former fails on root-owned processes (measured, zero on `launchd`), the
+    /// latter is truncated at 16 characters but readable on every process.
     fn name(&self, pid: u32) -> Option<String> {
         let c_pid = c_int::try_from(pid).ok()?;
-        // `pbi_name`'in boyu: `MAXCOMLEN`'in iki katı.
+        // The size of `pbi_name`: twice `MAXCOMLEN`.
         let mut buf = [0u8; 2 * libc::MAXCOMLEN];
-        // SAFETY: tampon bu çerçevenin ve boyu çağrıya olduğu gibi gidiyor;
-        // çekirdek en çok o kadar bayt yazar.
+        // SAFETY: the buffer belongs to this frame and its size goes to the call
+        // as is; the kernel writes at most that many bytes.
         let len = unsafe { libc::proc_name(c_pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
         match usize::try_from(len) {
             Ok(len) if len > 0 => {
@@ -583,20 +594,21 @@ impl ProcessTable for Libproc {
     }
 }
 
-/// `sysctl(KERN_PROCARGS2)`: düzen `argc` (4 bayt), exec yolu, NUL dolgusu,
-/// `argc` tane NUL sonlu argüman — ardından **ortam** geliyor, okunmuyor.
+/// `sysctl(KERN_PROCARGS2)`: the layout is `argc` (4 bytes), the exec path, NUL
+/// padding, `argc` NUL-terminated arguments — then the **environment**
+/// follows, which is not read.
 fn process_args(pid: u32) -> Option<Vec<String>> {
     let pid = c_int::try_from(pid).ok()?;
-    // Tampon `kern.argmax` boyunda: boş tamponlu sorgu gerçek boyu değil bu
-    // tavanı veriyor.
-    // Tavan süreç ömründe değişmiyor: bir kez soruluyor.
+    // The buffer is `kern.argmax` long: a query with an empty buffer gives this
+    // ceiling, not the real size.
+    // The ceiling does not change over the process lifetime: asked once.
     static ARGMAX: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     let capacity = (*ARGMAX.get_or_init(|| {
         let mut argmax: c_int = 0;
         let mut size = size_of::<c_int>();
         let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
-        // SAFETY: `mib` iki elemanlı ve çerçevenin; çıktı tek bir `c_int` ve
-        // boyu çağrıya olduğu gibi gidiyor.
+        // SAFETY: `mib` has two elements and belongs to the frame; the output is a
+        // single `c_int` and its size goes to the call as is.
         let status = unsafe {
             libc::sysctl(
                 mib.as_mut_ptr(),
@@ -612,8 +624,8 @@ fn process_args(pid: u32) -> Option<Vec<String>> {
     let mut buf = vec![0u8; capacity];
     let mut len = capacity;
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-    // SAFETY: tampon `capacity` bayt ve bu çerçevenin; çekirdek en çok
-    // `len` bayt yazar ve yazdığını `len`'e koyar.
+    // SAFETY: the buffer is `capacity` bytes and belongs to this frame; the
+    // kernel writes at most `len` bytes and stores what it wrote in `len`.
     let status = unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),
@@ -630,12 +642,12 @@ fn process_args(pid: u32) -> Option<Vec<String>> {
     parse_procargs(buf.get(..len)?)
 }
 
-/// [`process_args`]'ın saf yarısı.
+/// The pure half of [`process_args`].
 fn parse_procargs(buf: &[u8]) -> Option<Vec<String>> {
     let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
     let rest = &buf[4..];
-    // Exec yolu, sonra NUL dolgusu: argv[0] boş olamaz, yani ilk NUL olmayan
-    // bayt argv'nin başı.
+    // The exec path, then NUL padding: argv[0] cannot be empty, so the first
+    // non-NUL byte is the start of argv.
     let path_end = rest.iter().position(|&b| b == 0)?;
     let start = path_end + rest[path_end..].iter().position(|&b| b != 0)?;
     let mut args = Vec::with_capacity(argc);
@@ -646,22 +658,23 @@ fn parse_procargs(buf: &[u8]) -> Option<Vec<String>> {
     Some(args)
 }
 
-/// `proc_listchildpids` ve `proc_listpgrppids`'in ortak imzası.
+/// The common signature of `proc_listchildpids` and `proc_listpgrppids`.
 type PidLister = unsafe extern "C" fn(libc::pid_t, *mut c_void, c_int) -> c_int;
 
-/// Bir listeleme çağrısının pid'leri.
+/// The pids of a listing call.
 ///
-/// **Tamponun boyu çağrının kendi cevabından**: boş tamponla çağrı bir üst
-/// sınır veriyor ve o, ölçüldüğü üzere sistemdeki bütün süreçlerin sayısı —
-/// iki çağrı arasında doğan bir çocuğa da yer var. Sabit küçük bir tampon
-/// **sessizce** kırpılırdı (ölçüldü: bir pid'lik tampona `launchd`'nin
-/// çocukları için 1). Dönüş bayt değil **pid sayısı** (ölçüldü).
+/// **The buffer size comes from the call's own answer**: a call with an empty
+/// buffer gives an upper bound, which, as measured, is the number of all
+/// processes on the system — there is room even for a child born between the
+/// two calls. A fixed small buffer would be truncated **silently** (measured: 1
+/// for `launchd`'s children with a one-pid buffer). The return value is the
+/// **number of pids**, not bytes (measured).
 fn pid_list(list: PidLister, key: u32) -> Vec<u32> {
     let Ok(key) = libc::pid_t::try_from(key) else {
         return Vec::new();
     };
-    // SAFETY: boş tampon, sıfır boy: çağrı yalnız bir tahmin döndürüyor ve
-    // hiçbir şey yazmıyor.
+    // SAFETY: empty buffer, zero size: the call only returns an estimate and
+    // writes nothing.
     let estimate = unsafe { list(key, std::ptr::null_mut(), 0) };
     let capacity = usize::try_from(estimate).unwrap_or(0);
     let Ok(bytes) = c_int::try_from(capacity * size_of::<libc::pid_t>()) else {
@@ -671,8 +684,8 @@ fn pid_list(list: PidLister, key: u32) -> Vec<u32> {
         return Vec::new();
     }
     let mut pids: Vec<libc::pid_t> = vec![0; capacity];
-    // SAFETY: tampon `capacity` pid boyunda ve bu çerçevenin; çağrıya giden
-    // boy tam o kadar bayt.
+    // SAFETY: the buffer is `capacity` pids long and belongs to this frame; the
+    // size passed to the call is exactly that many bytes.
     let filled = unsafe { list(key, pids.as_mut_ptr().cast(), bytes) };
     pids.truncate(usize::try_from(filled).unwrap_or(0).min(capacity));
     pids.into_iter()
@@ -681,28 +694,28 @@ fn pid_list(list: PidLister, key: u32) -> Vec<u32> {
         .collect()
 }
 
-/// Kısa bilgi: ebeveyn ve `comm` — root'a ait süreçte de okunuyor.
+/// Short info: parent and `comm` — readable on root-owned processes too.
 fn short_info(pid: u32) -> Option<libc::proc_bsdshortinfo> {
-    // SAFETY: `proc_bsdshortinfo` yalnız tamsayı ve `c_char` dizisi taşıyan
-    // düz bir C yapısı; sıfır bayt onun geçerli bir değeri.
+    // SAFETY: `proc_bsdshortinfo` is a plain C struct holding only integers
+    // and `c_char` arrays; all zero bytes is a valid value of it.
     unsafe { pid_info(pid, libc::PROC_PIDT_SHORTBSDINFO) }
 }
 
-/// `proc_pidinfo`'nun tek yapılı çeşitleri. Yalnız **tam** doluluk başarı:
-/// root'a ait süreçte uzun bilgi sıfır bayt dönüyor ve yarım bir yapı
-/// sıfırlarıyla "grup 0" diye okunurdu.
+/// The single-struct flavors of `proc_pidinfo`. Only a **complete** fill is
+/// success: on a root-owned process the long info returns zero bytes, and a
+/// half-filled struct would read as "group 0" from its zeros.
 ///
 /// # Safety
 ///
-/// `T` bütün bitleri sıfır olan değeri geçerli olan düz bir C yapısı ve
-/// `flavor`'ın çekirdeğin o yapıyı yazdığı çeşit olmalı.
+/// `T` must be a plain C struct for which the all-zero-bits value is valid, and
+/// `flavor` must be the flavor for which the kernel writes that struct.
 unsafe fn pid_info<T>(pid: u32, flavor: c_int) -> Option<T> {
     let pid = c_int::try_from(pid).ok()?;
     let size = c_int::try_from(size_of::<T>()).ok()?;
-    // SAFETY: çağıranın sözü — sıfır `T` geçerli.
+    // SAFETY: the caller's promise — a zeroed `T` is valid.
     let mut info: T = unsafe { std::mem::zeroed() };
-    // SAFETY: tampon tam bir `T` ve boyu çağrıya olduğu gibi gidiyor; çekirdek
-    // en çok o kadar bayt yazar.
+    // SAFETY: the buffer is a whole `T` and its size goes to the call as is; the
+    // kernel writes at most that many bytes.
     let written = unsafe { libc::proc_pidinfo(pid, flavor, 0, (&raw mut info).cast(), size) };
     (written == size).then_some(info)
 }
@@ -719,7 +732,7 @@ mod tests {
     use super::*;
     use crate::child::{SilentWake, wait_until};
 
-    /// Sahte süreç: ebeveyn, grup, ad (`None` → adı okunamıyor).
+    /// Fake process: parent, group, name (`None` → the name is unreadable).
     struct Proc {
         parent: u32,
         group: u32,
@@ -727,8 +740,8 @@ mod tests {
         args: Option<Vec<&'static str>>,
     }
 
-    /// Sahte tablo. `terminal` kabuğun `e_tpgid`'i; `None` → kabuğun uzun
-    /// bilgisi okunamıyor.
+    /// Fake table. `terminal` is the shell's `e_tpgid`; `None` → the shell's long
+    /// info is unreadable.
     struct Table {
         procs: HashMap<u32, Proc>,
         terminal: Option<u32>,
@@ -757,9 +770,9 @@ mod tests {
             self
         }
 
-        /// Argv'li süreç; argv[0] adın kendisi.
+        /// A process with an argv; argv[0] is the name itself.
         fn run(mut self, pid: u32, parent: u32, group: u32, argv: &[&'static str]) -> Self {
-            let name = argv[0].rsplit('/').next().expect("ad");
+            let name = argv[0].rsplit('/').next().expect("name");
             let name: &'static str = Box::leak(name.to_owned().into_boxed_str());
             self.procs.insert(
                 pid,
@@ -797,7 +810,7 @@ mod tests {
             if !self.members_readable {
                 return Vec::new();
             }
-            // Sıra bilerek karışık: karar pid sırasını kendisi kurmalı.
+            // Order deliberately shuffled: the decision must establish pid order itself.
             let mut members: Vec<u32> = self
                 .procs
                 .iter()
@@ -826,7 +839,7 @@ mod tests {
         Foreground::Running(names.iter().map(|&name| name.to_owned()).collect())
     }
 
-    /// `login` 100 → `zsh` 101 (grup 101); ön plan grubu çağıranın.
+    /// `login` 100 → `zsh` 101 (group 101); the foreground group is the caller's.
     fn login_shell(terminal: u32) -> Table {
         Table::new(Some(terminal))
             .with(100, 1, 100, "login")
@@ -852,8 +865,8 @@ mod tests {
 
     #[test]
     fn a_wrapper_leader_yields_the_name_of_its_leaf() {
-        // context.md'deki üçüncü satır: lider `bash` bir sarmalayıcı, program
-        // onun torunu. Liderin adı yanlış cevap olurdu.
+        // The third row in context.md: the leader `bash` is a wrapper, the
+        // program is its grandchild. The leader's name would be the wrong answer.
         let table = login_shell(300)
             .with(300, 101, 300, "bash")
             .with(301, 300, 300, "Orca")
@@ -866,7 +879,7 @@ mod tests {
 
     #[test]
     fn a_pipeline_names_every_leaf_once_in_pid_order() {
-        // `cat | grep a | grep b`: üç yaprak, iki ad.
+        // `cat | grep a | grep b`: three leaves, two names.
         let table = login_shell(400)
             .with(400, 101, 400, "cat")
             .with(401, 101, 400, "grep")
@@ -879,7 +892,7 @@ mod tests {
 
     #[test]
     fn a_login_without_a_shell_yet_is_idle() {
-        // Sekme doğar doğmaz ⌘W: `login` kabuğu henüz çatallamadı.
+        // ⌘W right as the tab is born: `login` has not forked the shell yet.
         let table = Table::new(Some(100)).with(100, 1, 100, "login");
         assert_eq!(
             foreground(ShellParent::Login, 100, &table),
@@ -907,15 +920,15 @@ mod tests {
             foreground(ShellParent::Login, 100, &table),
             running(&["vim"])
         );
-        table.procs.get_mut(&200).expect("vim tabloda").name = None;
+        table.procs.get_mut(&200).expect("vim in the table").name = None;
         assert_eq!(foreground(ShellParent::Login, 100, &table), running(&[]));
     }
 
     #[test]
     fn a_direct_child_is_the_shell_itself() {
-        // Doğrudan yolda `sleep`'in ebeveyni çocuğun kendisi: "ön plan
-        // çocuğun çocuğuysa boşta" gibi bayraksız bir kural onu boşta
-        // sayardı (discussion.md → Reddedilenler).
+        // On the direct path `sleep`'s parent is the child itself: a flagless
+        // rule like "idle if the foreground is the child's child" would count it
+        // as idle (discussion.md → Reddedilenler).
         let idle = Table::new(Some(101)).with(101, 1, 101, "zsh");
         assert_eq!(
             foreground(ShellParent::Direct, 101, &idle),
@@ -930,7 +943,7 @@ mod tests {
         );
     }
 
-    /// `login` 100 → `zsh` 101; ön plan grubu 200 ve üyeleri `argv`'lerle.
+    /// `login` 100 → `zsh` 101; foreground group 200 and its members with `argv`s.
     fn probe_of(procs: &[(u32, u32, &[&'static str])]) -> Probe {
         let mut table = login_shell(200);
         for &(pid, parent, argv) in procs {
@@ -939,8 +952,8 @@ mod tests {
         remote(ShellParent::Login, 100, &table)
     }
 
-    /// [`probe_of`]'un **yalnız host'a** bakan hâli: 036'nın sınamaları
-    /// hedefin argv'sini ve türünü sormuyor (037'ninkiler [`target_of`]).
+    /// The variant of [`probe_of`] that looks **only at the host**: 036's tests
+    /// do not ask about the target's argv and kind (037's use [`target_of`]).
     fn remote_of(procs: &[(u32, u32, &[&'static str])]) -> Probe {
         match probe_of(procs) {
             Probe::Remote(target) => remote_host(&target.host),
@@ -956,11 +969,11 @@ mod tests {
         })
     }
 
-    /// Tek süreçli grubun bütün hedefi; uzak değilse sınama düşer.
+    /// The whole target of a single-process group; the test fails if not remote.
     fn target_of(argv: &[&'static str]) -> Target {
         match probe_of(&[(200, 101, argv)]) {
             Probe::Remote(target) => target,
-            other => panic!("uzak bir hedef beklendi: {argv:?} → {other:?}"),
+            other => panic!("expected a remote target: {argv:?} → {other:?}"),
         }
     }
 
@@ -970,8 +983,8 @@ mod tests {
 
     #[test]
     fn the_rerun_argv_drops_local_forwards_master_and_background() {
-        // 037 Karar 6: `-L -R -D` değerleriyle, `-M` ve `-f` düşüyor; kalan
-        // her şey sırasıyla.
+        // 037 Karar 6: `-L -R -D` with their values, `-M` and `-f` are dropped;
+        // everything else stays in order.
         let target = target_of(&["ssh", "-p", "2222", "-J", "jump", "-L", "8080:x:80", "prod"]);
         assert_eq!(target.host, "prod");
         assert_eq!(target.kind, RemoteKind::Ssh);
@@ -979,8 +992,8 @@ mod tests {
             target.argv,
             words(&["ssh", "-p", "2222", "-J", "jump", "prod"])
         );
-        // Birleşik kümeler 036'nın yürüyüşüyle bölünüyor: bitişik değer
-        // bayrağıyla gidiyor, bayrağı kalmayan küme bütünüyle düşüyor.
+        // Combined clusters are split by 036's walk: an attached value goes with
+        // its flag, a cluster left with no flags is dropped entirely.
         assert_eq!(
             target_of(&[
                 "ssh", "-vL", "1:x:1", "-p2222", "-MR9:y:9", "-D1080", "-4", "prod"
@@ -992,8 +1005,8 @@ mod tests {
             target_of(&["ssh", "-fM", "-o", "User=x", "--", "prod"]).argv,
             words(&["ssh", "-o", "User=x", "--", "prod"])
         );
-        // Hedeften sonraki seçenekler de süzülüyor (OpenSSH onları yeniden
-        // okuyor); argv[0] sürecin verdiği gibi.
+        // Options after the target are filtered too (OpenSSH reads them again);
+        // argv[0] as the process gives it.
         assert_eq!(
             target_of(&["/usr/bin/ssh", "prod", "-L", "1:x:1", "-v"]).argv,
             words(&["/usr/bin/ssh", "prod", "-v"])
@@ -1006,7 +1019,7 @@ mod tests {
             target_of(&["ssh", "-t", "prod", "tmux", "attach"]).argv,
             words(&["ssh", "-t", "prod", "tmux", "attach"])
         );
-        // `-f` etkileşimsiz kalıyor (036'nın cevabı değişmedi).
+        // `-f` stays non-interactive (036's answer did not change).
         assert_eq!(
             remote_of(&[(200, 101, &["ssh", "-fN", "prod"])]),
             Probe::Local
@@ -1015,7 +1028,7 @@ mod tests {
 
     #[test]
     fn mosh_reruns_as_mosh_with_the_script_arguments() {
-        // Betik görülüyorsa `mosh` + betiğin argümanları, olduğu gibi.
+        // If the script is visible, `mosh` + the script's arguments, as they are.
         let probe = probe_of(&[(
             200,
             101,
@@ -1028,12 +1041,12 @@ mod tests {
             ],
         )]);
         let Probe::Remote(target) = probe else {
-            panic!("mosh uzak: {probe:?}");
+            panic!("mosh is remote: {probe:?}");
         };
         assert_eq!(target.kind, RemoteKind::Mosh);
         assert_eq!(target.host, "prod");
         assert_eq!(target.argv, words(&["mosh", "--ssh=ssh -p 2", "prod"]));
-        // Yalnız `mosh-client` görüldüyse `-#` satırı, boşlukla bölünmüş.
+        // If only `mosh-client` is visible, the `-#` line, split on whitespace.
         let target = target_of(&[
             "mosh-client",
             "-# -p 60001 --ssh=ssh deploy@prod |",
@@ -1050,7 +1063,7 @@ mod tests {
 
     #[test]
     fn the_shell_in_the_foreground_is_undecided() {
-        // `C` fork'tan önce basılıyor: kabuk hâlâ ön planda.
+        // `C` is printed before the fork: the shell is still in the foreground.
         assert_eq!(
             remote(ShellParent::Login, 100, &login_shell(101)),
             Probe::Undecided
@@ -1059,7 +1072,7 @@ mod tests {
 
     #[test]
     fn a_forked_shell_child_is_undecided() {
-        // Çatallanmış ama henüz `exec` etmemiş çocuk kabuğun adını taşıyor.
+        // A forked child that has not `exec`ed yet carries the shell's name.
         let table = login_shell(200).with(200, 101, 200, "zsh");
         assert_eq!(remote(ShellParent::Login, 100, &table), Probe::Undecided);
     }
@@ -1086,8 +1099,8 @@ mod tests {
 
     #[test]
     fn a_jump_host_child_does_not_hide_the_target() {
-        // `ssh -J jump prod` aynı grupta `ssh -W prod:22 jump` doğuruyor;
-        // yaprak kuralı jump host'u verirdi.
+        // `ssh -J jump prod` spawns `ssh -W prod:22 jump` in the same group;
+        // the leaf rule would give the jump host.
         assert_eq!(
             remote_of(&[
                 (200, 101, &["ssh", "-J", "jump", "prod"]),
@@ -1120,7 +1133,7 @@ mod tests {
 
     #[test]
     fn options_after_the_target_are_options() {
-        // OpenSSH hedeften sonra seçenekleri yeniden ayrıştırıyor.
+        // OpenSSH parses options again after the target.
         assert_eq!(
             remote_of(&[(200, 101, &["ssh", "prod", "-p", "2222", "-v"])]),
             remote_host("prod")
@@ -1168,7 +1181,7 @@ mod tests {
 
     #[test]
     fn a_half_forked_pipeline_is_undecided() {
-        // `ssh prod | tee log`: `tee` `exec` etti, ssh yanı henüz değil.
+        // `ssh prod | tee log`: `tee` has `exec`ed, the ssh side not yet.
         let table = login_shell(200)
             .with(200, 101, 200, "zsh")
             .run(201, 101, 200, &["tee", "log"]);
@@ -1189,7 +1202,7 @@ mod tests {
 
     #[test]
     fn mosh_is_found_above_its_bootstrap_ssh() {
-        // Perl betiği; bootstrap ssh onun çocuğu ve uzak komut taşıyor.
+        // The Perl script; the bootstrap ssh is its child and carries a remote command.
         assert_eq!(
             remote_of(&[
                 (
@@ -1242,7 +1255,7 @@ mod tests {
             )]),
             remote_host("deploy@prod")
         );
-        // Tırnaklı `--ssh` değeri tırnaksız birleşmiş.
+        // The quoted `--ssh` value was joined without quotes.
         assert_eq!(
             remote_of(&[(
                 200,
@@ -1261,21 +1274,21 @@ mod tests {
     #[test]
     fn other_programs_and_unreadable_groups_are_local() {
         assert_eq!(remote_of(&[(200, 101, &["cat"])]), Probe::Local);
-        // Perl ama mosh değil.
+        // Perl, but not mosh.
         assert_eq!(
             remote_of(&[(200, 101, &["perl", "script.pl", "prod"])]),
             Probe::Local
         );
-        // Grup okunamıyor.
+        // The group is unreadable.
         let mut table = login_shell(200).run(200, 101, 200, &["ssh", "prod"]);
         table.members_readable = false;
         assert_eq!(remote(ShellParent::Login, 100, &table), Probe::Local);
-        // Kabuğun kendisi okunamıyor.
+        // The shell itself is unreadable.
         let table = Table::new(None)
             .with(100, 1, 100, "login")
             .with(101, 100, 101, "zsh");
         assert_eq!(remote(ShellParent::Login, 100, &table), Probe::Local);
-        // Argv okunamayan ssh tanınmıyor.
+        // An ssh whose argv is unreadable is not recognized.
         let table = login_shell(200).with(200, 101, 200, "ssh");
         assert_eq!(remote(ShellParent::Login, 100, &table), Probe::Local);
     }
@@ -1293,12 +1306,12 @@ mod tests {
 
     #[test]
     fn the_process_table_reads_a_real_argv() {
-        // `KERN_PROCARGS2` gövdesinin tanığı: aynı kullanıcının bilinen
-        // argv'li bir çocuğu.
+        // The witness for the `KERN_PROCARGS2` body: a child of the same user
+        // with a known argv.
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
-            .expect("sleep doğmadı");
+            .expect("sleep did not spawn");
         let args = Libproc.args(child.id());
         let _ = child.kill();
         let _ = child.wait();
@@ -1307,10 +1320,10 @@ mod tests {
 
     #[test]
     fn the_process_table_sees_a_real_foreground_job() {
-        // Okuyucunun tek tanığı: sahte tablo login'in root olduğunu da,
-        // `e_tpgid`'in hangi süreçte okunduğunu da göremez. Kontrol terminali
-        // olmayan bir ortamda `e_tpgid` sıfır gelirse sınama atlanmıyor,
-        // düşüyor — o durumda okuyucu yanlış.
+        // The reader's only witness: a fake table can see neither that login is
+        // root nor which process `e_tpgid` is read from. If `e_tpgid` comes back
+        // zero in an environment without a controlling terminal, the test is not
+        // skipped, it fails — in that case the reader is wrong.
         let session = Session::spawn(
             SessionOptions {
                 command: Some((
@@ -1338,22 +1351,22 @@ mod tests {
             },
             Arc::new(SilentWake),
         )
-        .expect("oturum açılamadı");
+        .expect("session did not open");
         let child = session.child_pid();
         let now = || foreground(ShellParent::Direct, child, &Libproc);
 
-        wait_until("kabuk ön planda görünmedi", || now() == Foreground::Idle);
-        // Süre sınamanın son tarihinden uzun: iş, iddia okunurken bitmemeli.
+        wait_until("shell not seen in foreground", || now() == Foreground::Idle);
+        // Longer than the test's deadline: the job must not end while the claim is read.
         session.write(b"sleep 30\n");
-        wait_until("ön plandaki `sleep` görülmedi", || {
+        wait_until("foreground `sleep` not seen", || {
             now() == running(&["sleep"])
         });
-        // Ctrl-C işi öldürüyor ve ön plan kabuğa dönüyor: geride süreç kalmaz.
+        // Ctrl-C kills the job and the foreground returns to the shell: no process is left.
         session.write(b"\x03");
-        wait_until("iş bitince kabuk ön plana dönmedi", || {
+        wait_until("shell did not regain foreground", || {
             now() == Foreground::Idle
         });
         session.shutdown();
-        assert!(!session.reader_alive(), "oturum kapanmadı");
+        assert!(!session.reader_alive(), "session did not close");
     }
 }

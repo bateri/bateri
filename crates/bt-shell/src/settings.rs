@@ -1,53 +1,53 @@
-//! Ayar ve tema dosyalarının yükleyicisi: kök dizindeki `settings.toml`'u ve
-//! `themes/{ad}.toml`'u okur, `bt-core`'un saf ayrıştırıcılarına verir; tema
-//! **adını** bir temaya çözen de burası ([`load_theme`]).
+//! Loader for the settings and theme files: reads `settings.toml` and `themes/{name}.toml` in
+//! the root directory and hands them to `bt-core`'s pure parsers; resolving a theme **name**
+//! to a theme also happens here ([`load_theme`]).
 //!
-//! Kök **parametre**: üretimde `$HOME/.config/bateri/` ([`config_root`]),
-//! sınamada geçici bir dizin — hiçbir sınama gerçek `HOME`'u okumaz. Süreli
-//! koşu yükleyiciyi hiç çağırmaz; o dalın tek yeri `app::Inputs`.
+//! The root is a **parameter**: `$HOME/.config/bateri/` in production ([`config_root`]), a
+//! temporary directory in tests — no test reads the real `HOME`. The timed run never calls the
+//! loader; the only place of that branch is `app::Inputs`.
 //!
-//! Sonuç dört ayrı hâl taşır ve [`Settings::default`]'a **çökertilmez**:
-//! "dosya yok" sessiz ve doğru bir hâl, "ayrıştırılamadı" ise canlı
-//! yenilemede hiçbir şey uygulamamayı ve açılışta OSC 52'yi kapatmayı
-//! (phase-8) gerektiriyor. Hangi hâlde ne yapılacağı çağıranın kuralı;
-//! açılışınki [`Loaded::at_launch`], kayıt anınınki [`Loaded::live`]. Tema
-//! adının iki kuralı da aynı ikilik: [`ThemeLoaded::or_embedded`],
-//! [`ThemeLoaded::or_current`]. İzlenen yollar da buradan
-//! ([`watched_paths`], [`theme_path`]): okunan yolla izlenen yol ayrışmasın.
+//! The result carries four distinct states and is **not collapsed** into
+//! [`Settings::default`]: "no file" is a silent and correct state, while "could not be parsed"
+//! requires applying nothing on a live reload and turning OSC 52 off at launch (phase-8). What
+//! to do in which state is the caller's rule; the launch rule is [`Loaded::at_launch`], the
+//! save-time rule [`Loaded::live`]. The two rules for a theme name are the same pair:
+//! [`ThemeLoaded::or_embedded`], [`ThemeLoaded::or_current`]. The watched paths also come from
+//! here ([`watched_paths`], [`theme_path`]): so that the path read and the path watched do not
+//! diverge.
 //!
-//! **Bilinen sınır — okuma ana thread'de ve sınırsız bekler.** Düz dosya
-//! olmayan yol (FIFO, `/dev/zero`'ya bağ, dizin) okunmadan elenir; ama iCloud
-//! Drive'dan tahliye edilmiş bir dosyaya bağ ya da takılmış bir ağ ev dizini
-//! açılışı durdurabilir. Ayar dosyası küçük ve yereldir; bunu ayrı bir
-//! thread'e taşımak açılış sırasını (ayar → geometri → oturum) eşzamansız
-//! yapardı ve bu sette bedeline değmedi.
+//! **Known limit — the read happens on the main thread and waits without a bound.** A path
+//! that is not a regular file (a FIFO, a link to `/dev/zero`, a directory) is filtered out
+//! before reading; but a link to a file evicted from iCloud Drive or a hung network home
+//! directory can stall the launch. The settings file is small and local; moving this to a
+//! separate thread would make the launch order (settings → geometry → session) asynchronous
+//! and was not worth the cost in this set.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use bt_core::{Diagnostic, Parsed, Settings, SettingsEdit, Theme};
 
-/// Ayar dosyasının adı; tanı metinleri de kullanıcıya bu adla söylüyor.
+/// The settings file's name; diagnostic texts also refer to it by this name for the user.
 pub(crate) const FILE_NAME: &str = "settings.toml";
 
-/// Kullanıcı temalarının dizini, kökün altında.
+/// The directory of user themes, under the root.
 const THEMES_DIR: &str = "themes";
 
-/// Üretimdeki kök: `{ev}/.config/bateri/`.
+/// The root in production: `{home}/.config/bateri/`.
 ///
-/// macOS'un `~/Library/Application Support`'u değil: dosya elle düzenleniyor
-/// ve `CLAUDE.md`'nin sözleşmesi bu yolu adıyla veriyor.
+/// Not macOS's `~/Library/Application Support`: the file is edited by hand and `CLAUDE.md`'s
+/// contract names this path explicitly.
 pub(crate) fn config_root(home: &Path) -> PathBuf {
     home.join(".config").join("bateri")
 }
 
-/// Kökün izlenen yolları (`watch`): kökün kendisi, `themes/` ve
-/// `settings.toml`. Etkin tema dosyası ayrı ([`theme_path`]): adı ayarlardan
-/// ve görünümden türüyor, ayrı kurulup ayrı yenileniyor.
+/// The root's watched paths (`watch`): the root itself, `themes/` and `settings.toml`. The
+/// active theme file is separate ([`theme_path`]): its name derives from the settings and the
+/// appearance, it is set up and refreshed separately.
 ///
-/// Kök ve `themes/` dizin olarak dosya doğumunu, silinmesini ve üstüne
-/// taşınmasını; `settings.toml` dosya olarak yerinde yazmayı ve bağın
-/// hedefindeki kaydı veriyor. Olmayan yol kaynak doğurmaz.
+/// The root and `themes/`, as directories, report a file being created, deleted or moved over;
+/// `settings.toml`, as a file, reports an in-place write and a save at the link's target. A
+/// path that does not exist creates no source.
 pub(crate) fn watched_paths(root: &Path) -> [PathBuf; 3] {
     [
         root.to_path_buf(),
@@ -56,27 +56,26 @@ pub(crate) fn watched_paths(root: &Path) -> [PathBuf; 3] {
     ]
 }
 
-/// Kullanıcı temasının kökten göreli yolu — tanı metni de dosyayı bu adla
-/// söylüyor.
+/// A user theme's path relative to the root — the diagnostic text also refers to the file by
+/// this name.
 fn theme_file(name: &str) -> String {
     format!("{THEMES_DIR}/{name}.toml")
 }
 
-/// `{root}/themes/{ad}.toml`: [`load_theme`]'in okuduğu ve izleyicinin
-/// etkin tema için kurduğu dosya. Gömülü tema seçiliyse dosya yoktur ve
-/// kaynak kurulmaz.
+/// `{root}/themes/{name}.toml`: the file [`load_theme`] reads and the watcher sets up for the
+/// active theme. If an embedded theme is selected there is no file and no source is set up.
 pub(crate) fn theme_path(root: &Path, name: &str) -> PathBuf {
     root.join(theme_file(name))
 }
 
-/// "Settings…"ın ilk yarısı: kök dizini ve `settings.toml`'u yoksa
-/// [`Settings::TEMPLATE`] ile yaratır, dosyanın yolunu döner.
+/// The first half of "Settings…": creates the root directory and `settings.toml` with
+/// [`Settings::TEMPLATE`] if they are missing, returns the file's path.
 ///
-/// **Var olanı asla ezmez** — bozuk dosya da, sembolik bağ da, hedefi olmayan
-/// bağ da (`create_new`, `O_EXCL`: bağı izlemiyor). Bozuk dosyanın içeriği
-/// kullanıcının yarım işi; hedefsiz bağın hedefini yaratmak dotfile deposunun
-/// taşındığı yerde başıboş bir dosya bırakırdı, ayar yuvası o bağı zaten
-/// söylüyor.
+/// **Never overwrites what exists** — not a broken file, not a symbolic link, not a link
+/// without a target (`create_new`, `O_EXCL`: does not follow the link). A broken file's
+/// content is the user's unfinished work; creating a dangling link's target would leave a
+/// stray file where the dotfile repository moved from, and the settings slot already reports
+/// that link.
 pub(crate) fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
     std::fs::create_dir_all(root)?;
     let path = root.join(FILE_NAME);
@@ -95,34 +94,31 @@ pub(crate) fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Tek anahtarın yazması — View ▸ Theme ▸ ve ayar penceresi:
-/// `{root}/settings.toml`'da `edit`'in anahtarını değiştirir
-/// ([`Settings::with_edit`]); hata yazma yuvasının iletisi. İleti neyin
-/// kaydedilmediğini söylüyor: tema seçimi menüdeki adıyla ("the theme"),
-/// öteki her anahtar "the setting".
+/// Writing a single key — View ▸ Theme ▸ and the settings window: changes `edit`'s key in
+/// `{root}/settings.toml` ([`Settings::with_edit`]); the error is the write slot's message.
+/// The message says what was not saved: the theme choice by its name in the menu ("the
+/// theme"), every other key "the setting".
 ///
-/// **Yalnız yazar, uygulamaz** — uygulayan dosyayı okuyan yol, izleyicinin
-/// yolu (`app`).
+/// **Only writes, does not apply** — what applies is the path that reads the file, the
+/// watcher's path (`app`).
 ///
-/// - Dosya **o anda** okunuyor: elde tutulan bir kopya editörde yapılmış
-///   kaydı ezerdi.
-/// - Dosya yoksa "Settings…"ın yolu ([`create_if_missing`]): şablon, üstüne
-///   anahtar. Hedefi olmayan bağın hedefi yaratılmıyor; okuma onu söylüyor.
-/// - **Yerinde** yazılıyor (`O_TRUNC`): sembolik bağ izleniyor, hedef
-///   güncelleniyor. Geçici dosya + yeniden adlandırma bağı düz dosyaya
-///   çevirirdi; korunduğu bir yarış da yok, okuma ve yazma aynı ana kuyrukta.
-///   Boşaltmayla yazma arasındaki boş dosyayı izleyici dosyasızlık sayıyor
-///   ([`load_keeping`]).
-/// - Okunamayan ya da ayrıştırılamayan dosyaya **yazılmaz**: içerik
-///   kullanıcının yarım işi.
+/// - The file is read **at that moment**: a copy held on hand would overwrite a save made in
+///   the editor.
+/// - If the file does not exist, the "Settings…" path ([`create_if_missing`]): the template,
+///   with the key on top. A dangling link's target is not created; the read reports it.
+/// - Written **in place** (`O_TRUNC`): the symbolic link is followed, the target is updated. A
+///   temporary file + rename would turn the link into a regular file; and there is no race it
+///   would guard against, reading and writing are on the same main queue. The watcher treats
+///   the empty file between truncation and write as no file ([`load_keeping`]).
+/// - A file that cannot be read or parsed is **not written**: its content is the user's
+///   unfinished work.
 ///
-/// **Bilinen sınır — boşaltmayla yazma arası.** `write` boşaltılmış dosyaya
-/// tek bir (1 KB'ın altında) yazma yapıyor; o yazma hata verirse ya da süreç
-/// tam o anda ölürse dosya boş ya da yarım kalır. Çözülmüş hedefin yanına
-/// geçici dosya + yeniden adlandırma bu pencereyi kapatırdı ama sabit bağı
-/// koparır, izinleri ve genişletilmiş öznitelikleri düşürür ve yazılamayan
-/// dizinde başarısız olur; yerinde yazma planın kararı (`/code-review` bulgusu,
-/// waive: `.tasks/007-ayarlar-ve-tema/phase-7.md`).
+/// **Known limit — between truncation and write.** `write` does a single (under 1 KB) write
+/// to the truncated file; if that write fails or the process dies at exactly that moment the
+/// file is left empty or half written. A temporary file + rename next to the resolved target
+/// would close this window, but it breaks hard links, drops permissions and extended
+/// attributes and fails in an unwritable directory; writing in place is the plan's decision
+/// (`/code-review` finding, waived: `.tasks/007-ayarlar-ve-tema/phase-7.md`).
 pub(crate) fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String> {
     let subject = match edit {
         SettingsEdit::Theme(_) => "theme",
@@ -136,24 +132,24 @@ pub(crate) fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String>
         Text::Unreadable(err) => {
             return Err(not_saved(format!("{FILE_NAME} could not be read: {err}")));
         }
-        // Yaratmayla okuma arasında silindi.
+        // Deleted between creation and reading.
         Text::Missing => return Err(not_saved(format!("{FILE_NAME} was removed"))),
     };
     let written = Settings::with_edit(&text, edit).map_err(|d| not_saved(notice(&d)))?;
     std::fs::write(&path, written).map_err(|err| format!("{FILE_NAME} could not be written: {err}"))
 }
 
-/// View ▸ Theme ▸'deki kullanıcı temaları: `{root}/themes/*.toml`'un adları,
-/// büyük/küçük harf duyarsız sırayla.
+/// The user themes in View ▸ Theme ▸: the names of `{root}/themes/*.toml`, in
+/// case-insensitive order.
 ///
-/// Seçilemeyecek olan listelenmez: düz dosya olmayan (dizin, hedefi olmayan
-/// bağ), UTF-8 olmayan ve nokta ile başlayan ad (gizli dosya, başka dosya
-/// sisteminden kopyalanan AppleDouble `._x.toml`), ayrılmış
-/// [`SYSTEM_THEME`](bt_core::SYSTEM_THEME) ve gömülü bir temanın adı — o
-/// dosya gömülüyü gölgeliyor ve seçimi gömülü adın öğesiyle aynı.
+/// What cannot be selected is not listed: anything that is not a regular file (a directory, a
+/// dangling link), a non-UTF-8 name and a name starting with a dot (a hidden file, an
+/// AppleDouble `._x.toml` copied from another file system), the reserved
+/// [`SYSTEM_THEME`](bt_core::SYSTEM_THEME) and the name of an embedded theme — that file
+/// shadows the embedded one and selecting it is the same as the embedded name's item.
 ///
-/// Dizin yoksa ya da okunamıyorsa liste boş: menünün hata gösterecek yeri yok
-/// ve tema dizini olmayan kullanıcı olağan hâl.
+/// If the directory does not exist or cannot be read the list is empty: the menu has no place
+/// to show an error, and a user without a themes directory is the ordinary case.
 pub(crate) fn user_theme_names(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root.join(THEMES_DIR)) else {
         return Vec::new();
@@ -163,11 +159,11 @@ pub(crate) fn user_theme_names(root: &Path) -> Vec<String> {
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
             let stem = name.strip_suffix(".toml")?;
-            // Ad sınanıyor, gövde değil: tam `.toml` adlı dosyanın gövdesi boş.
+            // The name is checked, not the stem: a file named exactly `.toml` has an empty stem.
             let selectable = !name.starts_with('.')
                 && stem != bt_core::SYSTEM_THEME
                 && Theme::embedded(stem).is_none()
-                // Bağı izliyor: bağlı tema dosyası da seçilebilir.
+                // Follows the link: a linked theme file is selectable too.
                 && std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_file());
             selectable.then(|| stem.to_owned())
         })
@@ -176,34 +172,34 @@ pub(crate) fn user_theme_names(root: &Path) -> Vec<String> {
     names
 }
 
-/// Bir okumanın sonucu.
+/// The result of a read.
 #[derive(Debug)]
 pub(crate) enum Loaded {
-    /// Dosya yok ya da boş: kullanıcı hiç ayar yazmamış. Tanı **yok**.
+    /// The file is missing or empty: the user never wrote any settings. **No** diagnostic.
     Missing,
-    /// Dosya var ama okunamadı: izin, düz dosya değil (dizin, FIFO), kırık
-    /// sembolik bağ, UTF-8 olmayan içerik.
+    /// The file exists but could not be read: permissions, not a regular file (a directory, a
+    /// FIFO), a broken symbolic link, non-UTF-8 content.
     Unreadable(io::Error),
-    /// Okundu, TOML olarak ayrıştırılamadı.
+    /// Read, but could not be parsed as TOML.
     Unparseable(Diagnostic),
-    /// Ayrıştırıldı; tanılar kabul edilmeyen anahtarlar.
+    /// Parsed; the diagnostics are the rejected keys.
     Parsed(Parsed),
 }
 
-/// Bir metin dosyasının okunuşu — ayar ve tema dosyasının ortak kapısı.
+/// The reading of a text file — the shared gate of the settings and theme files.
 enum Text {
     Missing,
     Unreadable(io::Error),
     Read(String),
 }
 
-/// `path`'i okur; "dosya yok" ile "okunamadı"yı ayırır.
+/// Reads `path`; tells "no file" apart from "could not be read".
 fn read_text(path: &Path) -> Text {
-    // `metadata` bağı izliyor: hedefin türü soruluyor, bağın değil.
+    // `metadata` follows the link: the target's type is asked, not the link's.
     match std::fs::metadata(path) {
-        // Kırık bağ da `NotFound` veriyor; ama dosya `ls`'te görünüyor ve
-        // "hiç ayar yok" diye susmak kullanıcıyı neden işlemediğini aramaya
-        // bırakırdı (dotfile yöneticisinin taşınmış deposu).
+        // A broken link also yields `NotFound`; but the file shows up in `ls`, and staying
+        // silent as "no settings at all" would leave the user searching for why it has no
+        // effect (a dotfile manager's moved repository).
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return match std::fs::symlink_metadata(path) {
                 Ok(_) => {
@@ -213,34 +209,34 @@ fn read_text(path: &Path) -> Text {
             };
         }
         Err(err) => return Text::Unreadable(err),
-        // FIFO okumayı sonsuza dek bekletir, `/dev/zero` belleği bitirir.
+        // A FIFO blocks the read forever, `/dev/zero` exhausts memory.
         Ok(meta) if !meta.is_file() => {
             return Text::Unreadable(io::Error::other("not a regular file"));
         }
         Ok(_) => {}
     }
     match std::fs::read_to_string(path) {
-        // Denetimle okuma arasında silindi: dosya yok hâli.
+        // Deleted between the check and the read: the no-file state.
         Err(err) if err.kind() == io::ErrorKind::NotFound => Text::Missing,
         Err(err) => Text::Unreadable(err),
         Ok(text) => Text::Read(text),
     }
 }
 
-/// `{root}/settings.toml`'u okur — açılışın okuması: kabul edilmeyen değer
-/// varsayılanını alır (`osc52` hariç, o kapalıya düşer).
+/// Reads `{root}/settings.toml` — the launch read: a rejected value takes its default
+/// (except `osc52`, which falls back to off).
 pub(crate) fn load(root: &Path) -> Loaded {
     load_keeping(root, &Settings::default())
 }
 
-/// Kayıt anının okuması: kabul edilmeyen değer `current`'inkini alır
-/// ([`Settings::parse_keeping`]; `osc52` hariç, o kapalıya düşer). Yanlış türde kaydedilmiş bir `scrollback`
-/// varsayılana düşseydi geçmişi geri dönülmez kırpardı.
+/// The save-time read: a rejected value takes `current`'s ([`Settings::parse_keeping`];
+/// except `osc52`, which falls back to off). If a `scrollback` saved with the wrong type fell
+/// back to the default, it would trim the history irreversibly.
 ///
-/// Boş dosya (yalnız boşluk) dosyasızlık sayılır. Yerinde kaydeden editör
-/// önce boşaltıyor (`O_TRUNC`) sonra yazıyor, boşaltma da olay veriyor: arada
-/// okunan boş dosya varsayılan `scrollback`'i uygulasaydı geçmiş geri dönülmez
-/// kırpılırdı. Açılışta ikisi zaten aynıydı (varsayılanlar, tanısız).
+/// An empty file (whitespace only) counts as no file. An editor that saves in place first
+/// truncates (`O_TRUNC`) and then writes, and the truncation also fires an event: if the empty
+/// file read in between applied the default `scrollback`, the history would be trimmed
+/// irreversibly. At launch the two were already the same (defaults, no diagnostics).
 pub(crate) fn load_keeping(root: &Path, current: &Settings) -> Loaded {
     match read_text(&root.join(FILE_NAME)) {
         Text::Missing => Loaded::Missing,
@@ -253,39 +249,39 @@ pub(crate) fn load_keeping(root: &Path, current: &Settings) -> Loaded {
     }
 }
 
-/// Bir tema adının çözümü.
+/// The resolution of a theme name.
 #[derive(Debug)]
 pub(crate) enum ThemeLoaded {
-    /// Kullanıcı dosyasından ya da gömülü temalardan bulundu; iletiler
-    /// dosyada kabul edilmeyen renkler (alt başlığa hazır biçimde).
+    /// Found in the user file or among the embedded themes; the messages are the colors rejected
+    /// in the file (formatted ready for the subtitle).
     Found(Theme, Vec<String>),
-    /// Kullanılamadı: dosya okunamadı ya da ayrıştırılamadı, ya da ad hiçbir
-    /// yerde yok. Tek ileti; hangi temanın geçerli kalacağı çağıranın kuralı.
+    /// Unusable: the file could not be read or parsed, or the name exists nowhere. A single
+    /// message; which theme remains in effect is the caller's rule.
     Failed(String),
 }
 
-/// Tema adını çözer: önce `{root}/themes/{ad}.toml`, sonra gömülü temalar.
+/// Resolves a theme name: first `{root}/themes/{name}.toml`, then the embedded themes.
 ///
-/// `root` `None` → ev dizini çözülemedi, yalnız gömülüler. Dosyanın eksik
-/// anahtarı **tabandan** gelir: gömülü bir temayı gölgeleyen dosyada o
-/// temanın kendisi, başka adda `Theme::BATERI` (`docs/AYARLAR.md` → Temalar).
-/// Gölgeleyen `themes/bateri-light.toml`'a yalnız `accent` yazan kullanıcı
-/// açık temayı kırmızı imleçle bekliyor; koyu tabandan okunsaydı açık modda
-/// koyu zemin alırdı (`/code-review` bulgusu).
+/// `root` `None` → the home directory could not be resolved, only the embedded ones. A key
+/// missing from the file comes from the **base**: in a file shadowing an embedded theme, that
+/// theme itself; under another name, `Theme::BATERI` (`docs/AYARLAR.md` → Temalar). A user who
+/// writes only `accent` into a shadowing `themes/bateri-light.toml` expects the light theme
+/// with a red cursor; read from the dark base, it would get a dark background in light mode
+/// (`/code-review` finding).
 ///
-/// **Dosya var ama kullanılamıyorsa gömülüye düşülmez**: bozuk bir
-/// `themes/bateri.toml` sessizce gömülü `bateri`'yi açsaydı kullanıcı
-/// dosyasının neden işlemediğini göremezdi. Dosya **yoksa** gömülü aranır —
-/// gölgelenmemiş ad budur.
+/// **If the file exists but is unusable, there is no fallback to the embedded one**: if a
+/// broken `themes/bateri.toml` silently opened the embedded `bateri`, the user could not see
+/// why their file has no effect. If the file **does not exist**, the embedded one is looked up
+/// — that is the unshadowed name.
 ///
-/// **Boş dosya kullanılamaz sayılır**, `settings.toml`'un kuralıyla
-/// ([`load_keeping`]): yerinde kaydeden editör dosyayı önce boşaltıyor ve
-/// kaydın ortasında okunan boş tema tabanın kendisi olurdu — canlı yenileme
-/// pencereyi o anda koyu tabana çakardı. Kayıt anında ekrandaki tema kalır
-/// ([`ThemeLoaded::or_current`]), açılışta görünüme uyan gömülü tema gelir.
+/// **An empty file counts as unusable**, by `settings.toml`'s rule ([`load_keeping`]): an
+/// editor that saves in place first truncates the file, and an empty theme read in the middle
+/// of the save would be the base itself — the live reload would slam the window to the dark
+/// base at that moment. At save time the theme on screen stays ([`ThemeLoaded::or_current`]);
+/// at launch the embedded theme matching the appearance comes.
 ///
-/// Adın biçimi (`/` yok, boş değil) `bt-core`'da zaten sınandı; burada yeniden
-/// sınanmıyor, `Settings`'ten gelmeyen bir ad bu fonksiyona hiç verilmiyor.
+/// The name's form (no `/`, not empty) was already checked in `bt-core`; it is not rechecked
+/// here, a name that does not come from `Settings` is never passed to this function.
 pub(crate) fn load_theme(root: Option<&Path>, name: &str) -> ThemeLoaded {
     if let Some(root) = root {
         let file = theme_file(name);
@@ -316,41 +312,39 @@ pub(crate) fn load_theme(root: Option<&Path>, name: &str) -> ThemeLoaded {
 }
 
 impl ThemeLoaded {
-    /// Temanın **bir görünüm için** seçildiği anın kuralı — açılış ve görünüm
-    /// değişimi: kullanılamayan temanın yerine görünüme uyan gömülü tema
-    /// (koyuda `bateri`, açıkta `bateri-light`) ve bunu söyleyen ileti.
+    /// The rule for the moment a theme is chosen **for an appearance** — launch and appearance
+    /// change: in place of an unusable theme, the embedded theme matching the appearance
+    /// (`bateri` in dark, `bateri-light` in light) and a message saying so.
     ///
-    /// Yedek, dosyasız bir kullanıcının o görünümde göreceği tema
-    /// (`Settings::default().theme_for(dark)`): açık modda `light_theme`'ini
-    /// yanlış yazan kullanıcıya koyu bir pencere açmak hatayı ikinci bir
-    /// sürprizle büyütürdü. Görünüm değişiminde "ekrandaki tema kalır"
-    /// denemez — ekrandaki tema öteki görünümün teması (`dark_theme` bozukken
-    /// açıktan koyuya dönen pencere açık kalırdı). "Ekrandaki tema kalır"
-    /// kuralı görünüm aynıyken dosyanın kaydedildiği canlı yenilemenin
-    /// ([`ThemeLoaded::or_current`]).
+    /// The fallback is the theme a user without a file would see in that appearance
+    /// (`Settings::default().theme_for(dark)`): opening a dark window for a user who mistyped
+    /// their `light_theme` in light mode would compound the error with a second surprise. On an
+    /// appearance change one cannot say "the theme on screen stays" — the theme on screen is
+    /// the other appearance's theme (with `dark_theme` broken, a window switching from light to
+    /// dark would stay light). The "theme on screen stays" rule belongs to the live reload,
+    /// where a file was saved while the appearance is unchanged ([`ThemeLoaded::or_current`]).
     pub(crate) fn or_embedded(self, dark: bool) -> (Theme, Vec<String>) {
         match self {
             ThemeLoaded::Found(theme, messages) => (theme, messages),
             ThemeLoaded::Failed(message) => {
                 let defaults = Settings::default();
                 let name = defaults.theme_for(dark);
-                // Varsayılan adların ikisi de gömülü (`Theme::embedded`'in
-                // sınaması); `BATERI` yalnız o tablo bozulursa.
+                // Both default names are embedded (`Theme::embedded`'s
+                // test); `BATERI` only if that table breaks.
                 let theme = Theme::embedded(name).unwrap_or(Theme::BATERI);
                 (theme, vec![format!("{message}; using {name}")])
             }
         }
     }
 
-    /// Canlı yenilemenin kuralı — görünüm aynı, bir dosya kaydedildi:
-    /// kullanılamayan tema **takas edilmez** (`None`), ekrandaki tema kalır ve
-    /// ileti bunu söyler.
+    /// The live reload's rule — the appearance is the same, a file was saved: an unusable
+    /// theme is **not swapped in** (`None`), the theme on screen stays and the message says so.
     ///
-    /// Görünüme uyan gömülü temaya düşmek ([`ThemeLoaded::or_embedded`])
-    /// burada düzenlemeyi cezalandırırdı: yarım kaydedilmiş bir tema dosyası
-    /// ya da yazılırken eksik kalan bir ad pencereyi her kayıtta gömülü temaya
-    /// çakıp geri döndürürdü. Kural adın ayar dosyasında değişmesinde de aynı
-    /// — ikisi de düzenleme anı. Yeniden açılışta görünümün kuralı geçerli.
+    /// Falling back to the embedded theme matching the appearance ([`ThemeLoaded::or_embedded`])
+    /// would punish editing here: a half-saved theme file, or a name still incomplete while
+    /// being typed, would slam the window to the embedded theme and back on every save. The
+    /// rule is the same when the name changes in the settings file — both are moments of
+    /// editing. On the next launch the appearance's rule applies.
     pub(crate) fn or_current(self) -> (Option<Theme>, Vec<String>) {
         match self {
             ThemeLoaded::Found(theme, messages) => (Some(theme), messages),
@@ -361,29 +355,29 @@ impl ThemeLoaded {
     }
 }
 
-/// Bir tanının alt başlıktaki ve stderr'deki biçimi; iki kolun ve canlı
-/// yenilemenin (phase-4) aynı biçimi kullanması için tek yerde.
+/// A diagnostic's form in the subtitle and on stderr; in one place so that both branches and
+/// the live reload (phase-4) use the same form.
 pub(crate) fn notice(diagnostic: &Diagnostic) -> String {
     format!("{FILE_NAME}: {diagnostic}")
 }
 
-/// Dosyanın, ayar penceresinin gördüğü hâli (029 Karar 7) — ve alt başlığın
-/// ayar yuvasındaki metnin **kaynağı** ([`FileState::notices`]): pencerenin
-/// şeridi ile alt başlık aynı cümleyi söylüyor, iki metin üretilmiyor.
+/// The file's state as the settings window sees it (029 Karar 7) — and the **source** of the
+/// text in the subtitle's settings slot ([`FileState::notices`]): the window's banner and the
+/// subtitle say the same sentence, two texts are not produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FileState {
-    /// Dosya yok ya da boş: kontroller açık, ilk değişiklik dosyayı yaratır.
+    /// The file is missing or empty: controls enabled, the first change creates the file.
     Missing,
-    /// Okunamadı ya da ayrıştırılamadı: yazma reddedilecek, pencere kilitli.
-    /// Metin alt başlığınkinin ta kendisi.
+    /// Could not be read or parsed: writing will be refused, the window is locked.
+    /// The text is exactly the subtitle's.
     Locked(String),
-    /// Ayrıştırıldı; tanılar kabul edilmeyen anahtarlar (anahtarlarıyla —
-    /// pencere onları kendi satırlarına eşliyor).
+    /// Parsed; the diagnostics are the rejected keys (with their keys — the
+    /// window maps them to their own rows).
     Usable(Vec<Diagnostic>),
 }
 
 impl FileState {
-    /// Alt başlığın ayar yuvasına gidecek iletiler.
+    /// The messages to go into the subtitle's settings slot.
     pub(crate) fn notices(&self) -> Vec<String> {
         match self {
             FileState::Missing => Vec::new(),
@@ -394,8 +388,8 @@ impl FileState {
 }
 
 impl Loaded {
-    /// Okumanın pencereye ve alt başlığa giden hâli; hangi ayarların
-    /// uygulanacağı ayrı soru ([`Loaded::at_launch`], [`Loaded::live`]).
+    /// The read's state as it goes to the window and the subtitle; which settings get applied
+    /// is a separate question ([`Loaded::at_launch`], [`Loaded::live`]).
     pub(crate) fn state(&self) -> FileState {
         match self {
             Loaded::Missing => FileState::Missing,
@@ -407,14 +401,13 @@ impl Loaded {
         }
     }
 
-    /// Açılışın kuralı: kullanılacak ayarlar ve alt başlığa gidecek tanılar.
+    /// The launch rule: the settings to use and the diagnostics to go to the subtitle.
     ///
-    /// Okunamayan ya da ayrıştırılamayan dosyada **varsayılanlar**, OSC 52
-    /// kapalı ([`Settings::for_unusable_file`]): pencere yine açılmalı, bozuk
-    /// bir dosya terminali kilitlememeli, ama dosyadaki `osc52 = "off"`
-    /// okunamadı diye pano açığa düşmemeli. Dosya yoksa düz varsayılanlar.
-    /// Ayrıştırılan dosyada her anahtar kendi değerini ya da varsayılanını
-    /// zaten aldı.
+    /// For a file that cannot be read or parsed, **the defaults** with OSC 52 off
+    /// ([`Settings::for_unusable_file`]): the window must still open, a broken file must not
+    /// lock up the terminal, but the clipboard must not fall open just because the file's
+    /// `osc52 = "off"` could not be read. If there is no file, the plain defaults. In a parsed
+    /// file every key already got its own value or its default.
     pub(crate) fn at_launch(self) -> (Settings, Vec<String>) {
         let notices = self.state().notices();
         let settings = match self {
@@ -425,18 +418,17 @@ impl Loaded {
         (settings, notices)
     }
 
-    /// Canlı yenilemenin kuralı: uygulanacak ayarlar (`None` → **hiçbir
-    /// şey** uygulanmaz, geçerli ayarlar kalır) ve ayar yuvasının tanıları.
+    /// The live reload's rule: the settings to apply (`None` → **nothing** is applied, the
+    /// current settings stay) and the settings slot's diagnostics.
     ///
-    /// - **Ayrıştırılamayan ya da okunamayan dosya** → `None` + tanı. Yarım
-    ///   kayıt (eksik tırnak) ekranı bozmaz; düzeltilen kayıt uygulanır.
-    ///   Açılıştan farkı bu: orada varsayılanlarla açmak zorunlu.
-    /// - **Dosya yok** → `None`, tanısız. Editörler kaydı çoğu zaman "eskiyi
-    ///   kenara taşı, yenisini yaz" diye yapıyor (vim'in yedeği) ve arada yol
-    ///   bir an yok; varsayılanları uygulamak her kayıtta pencereyi çakardı.
-    ///   Boş dosya da bu kol ([`load_keeping`]). Bedeli: dosyayı gerçekten
-    ///   silen ya da boşaltan kullanıcı varsayılanları yeniden açılışta görür
-    ///   (`docs/AYARLAR.md`).
+    /// - **A file that cannot be parsed or read** → `None` + diagnostic. A half-finished save
+    ///   (a missing quote) does not break the screen; the corrected save is applied. This is the
+    ///   difference from launch: there, opening with the defaults is mandatory.
+    /// - **No file** → `None`, no diagnostic. Editors often save by "move the old one aside,
+    ///   write the new one" (vim's backup) and the path is briefly absent in between; applying
+    ///   the defaults would slam the window on every save. An empty file is also this branch
+    ///   ([`load_keeping`]). The cost: a user who really deletes or empties the file sees the
+    ///   defaults on the next launch (`docs/AYARLAR.md`).
     pub(crate) fn live(self) -> (Option<Settings>, Vec<String>) {
         let notices = self.state().notices();
         let settings = match self {
@@ -447,9 +439,9 @@ impl Loaded {
     }
 }
 
-/// Sınamaya özel geçici kök; süreç kimliği paralel koşan iki `cargo test`'i
-/// ayırıyor. `tempfile` bir bağımlılık kararı olurdu. İzleme sınamaları
-/// (`watch`) da kullanıyor; ad önekleri çakışmasın.
+/// A test-only temporary root; the process id separates two `cargo test` runs going in
+/// parallel. `tempfile` would be a dependency decision. The watch tests (`watch`) use it too;
+/// the name prefixes must not collide.
 #[cfg(test)]
 pub(crate) struct TempRoot(pub(crate) PathBuf);
 
@@ -459,7 +451,7 @@ impl TempRoot {
         let path =
             std::env::temp_dir().join(format!("bateri-settings-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("geçici kök kurulamadı");
+        std::fs::create_dir_all(&path).expect("temp root setup failed");
         Self(path)
     }
 }
@@ -485,66 +477,67 @@ mod tests {
 
     #[test]
     fn settings_command_creates_the_template_once() {
-        // Dizin de dosya da yok: ikisi yaratılır, şablon açılışta tanısız
-        // varsayılanları verir — "Settings…" davranışı değiştirmez.
+        // Neither directory nor file exists: both are created, the template yields the defaults
+        // without diagnostics at launch — "Settings…" does not change behavior.
         let root = TempRoot::new("create");
         let config = root.0.join("nested").join("bateri");
-        let path = create_if_missing(&config).expect("şablon yaratılamadı");
+        let path = create_if_missing(&config).expect("template not created");
         assert_eq!(path, config.join(FILE_NAME));
         assert_eq!(
-            std::fs::read_to_string(&path).expect("okunamadı"),
+            std::fs::read_to_string(&path).expect("read failed"),
             Settings::TEMPLATE
         );
         assert_eq!(load(&config).at_launch(), (Settings::default(), Vec::new()));
 
-        // Var olan dosya ezilmez, bozuk olsa da: yarım kalmış bir düzenleme.
-        std::fs::write(&path, "[terminal\n").expect("yazılamadı");
-        assert_eq!(create_if_missing(&config).expect("ikinci çağrı"), path);
+        // An existing file is not overwritten, even a broken one: an unfinished edit.
+        std::fs::write(&path, "[terminal\n").expect("write failed");
+        assert_eq!(create_if_missing(&config).expect("second call"), path);
         assert_eq!(
-            std::fs::read_to_string(&path).expect("okunamadı"),
+            std::fs::read_to_string(&path).expect("read failed"),
             "[terminal\n"
         );
     }
 
     #[test]
     fn settings_command_does_not_write_through_a_dangling_link() {
-        // Taşınmış dotfile deposuna bakan bağ: hedef yaratılmaz, bağ kalır ve
-        // ayar yuvası onu söylemeye devam eder.
+        // A link pointing at a moved dotfile repository: the target is not created, the link
+        // stays and the settings slot keeps reporting it.
         let root = TempRoot::new("create-dangling");
         let target = root.0.join("moved-away.toml");
-        std::os::unix::fs::symlink(&target, root.0.join(FILE_NAME)).expect("bağ kurulamadı");
+        std::os::unix::fs::symlink(&target, root.0.join(FILE_NAME)).expect("symlink failed");
         assert!(create_if_missing(&root.0).is_ok());
-        assert!(!target.exists(), "bağın hedefi yaratıldı");
+        assert!(!target.exists(), "link target was created");
         assert!(matches!(load(&root.0), Loaded::Unreadable(_)));
     }
 
     #[test]
     fn settings_command_reports_an_uncreatable_root() {
-        // Kökün yerinde bir dosya: dizin yaratılamaz, hata çağırana döner.
+        // A file in the root's place: the directory cannot be created, the error goes back to the
+        // caller.
         let root = TempRoot::new("create-blocked");
         let config = root.0.join("bateri");
-        std::fs::write(&config, "").expect("yazılamadı");
+        std::fs::write(&config, "").expect("write failed");
         assert!(create_if_missing(&config).is_err());
     }
 
-    /// Menünün tema seçimi: sınamaların yazdığı düzenleme.
+    /// The menu's theme choice: the edit the tests write.
     fn paper() -> SettingsEdit {
         SettingsEdit::Theme("paper".to_owned())
     }
 
     #[test]
     fn a_setting_write_names_what_was_not_saved() {
-        // Pencerenin yazması aynı yoldan: yerinde, geri kalan satırlara
-        // dokunmadan; reddedilince ileti "setting" diyor, "theme" değil.
+        // The window's write takes the same path: in place, without touching the remaining
+        // lines; when refused the message says "setting", not "theme".
         let root = TempRoot::new("write-setting");
         std::fs::write(root.0.join(FILE_NAME), "[terminal]\nscrollback = 7 # few\n")
-            .expect("yazılamadı");
+            .expect("write failed");
         assert_eq!(write_edit(&root.0, &SettingsEdit::Scrollback(2500)), Ok(()));
         assert_eq!(
-            std::fs::read_to_string(root.0.join(FILE_NAME)).expect("okunamadı"),
+            std::fs::read_to_string(root.0.join(FILE_NAME)).expect("read failed"),
             "[terminal]\nscrollback = 2500 # few\n"
         );
-        std::fs::write(root.0.join(FILE_NAME), "terminal = 1\n").expect("yazılamadı");
+        std::fs::write(root.0.join(FILE_NAME), "terminal = 1\n").expect("write failed");
         assert_eq!(
             write_edit(&root.0, &SettingsEdit::Scrollback(2500)),
             Err("settings.toml: line 1: `terminal` must be a section, found an integer; the setting was not saved".to_owned())
@@ -553,15 +546,15 @@ mod tests {
 
     #[test]
     fn theme_write_updates_the_file_in_place() {
-        // Yorum ve tanınmayan anahtar kalır, çift yerinde; okuma yeni temayı
-        // görür.
+        // The comment and the unknown key stay, the pair is in place; the read sees the new
+        // theme.
         let root = TempRoot::new("write");
         let text =
             "# mine\n[appearance]\ntheme = \"system\" # os\ndark_theme = \"ink\"\n[x]\ny = 1\n";
-        std::fs::write(root.0.join(FILE_NAME), text).expect("yazılamadı");
+        std::fs::write(root.0.join(FILE_NAME), text).expect("write failed");
         assert_eq!(write_edit(&root.0, &paper()), Ok(()));
         assert_eq!(
-            std::fs::read_to_string(root.0.join(FILE_NAME)).expect("okunamadı"),
+            std::fs::read_to_string(root.0.join(FILE_NAME)).expect("read failed"),
             text.replace("\"system\"", "\"paper\"")
         );
         let (settings, notices) = load(&root.0).at_launch();
@@ -574,72 +567,72 @@ mod tests {
 
     #[test]
     fn theme_write_goes_through_a_symlink() {
-        // Dotfile deposu: hedef güncellenir, bağ bağ olarak kalır — geçici
-        // dosya + yeniden adlandırma onu düz dosyaya çevirirdi.
+        // A dotfile repository: the target is updated, the link stays a link — a temporary
+        // file + rename would turn it into a regular file.
         let root = TempRoot::new("write-symlink");
         let target = root.0.join("dotfiles.toml");
-        std::fs::write(&target, "[terminal]\nscrollback = 7\n").expect("yazılamadı");
+        std::fs::write(&target, "[terminal]\nscrollback = 7\n").expect("write failed");
         let link = root.0.join(FILE_NAME);
-        std::os::unix::fs::symlink(&target, &link).expect("bağ kurulamadı");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink failed");
         assert_eq!(write_edit(&root.0, &paper()), Ok(()));
         assert!(
             std::fs::symlink_metadata(&link)
-                .expect("bağ yok")
+                .expect("no link")
                 .file_type()
                 .is_symlink(),
-            "bağ düz dosyaya döndü"
+            "link became a regular file"
         );
         assert_eq!(
-            std::fs::read_to_string(&target).expect("okunamadı"),
+            std::fs::read_to_string(&target).expect("read failed"),
             "[terminal]\nscrollback = 7\n\n[appearance]\ntheme = \"paper\"\n"
         );
     }
 
     #[test]
     fn theme_write_refuses_a_file_it_cannot_parse() {
-        // Kullanıcının yarım işi ezilmez; ileti yazma yuvasına gider.
+        // The user's unfinished work is not overwritten; the message goes to the write slot.
         let root = TempRoot::new("write-unparseable");
         let text = "[appearance\ntheme = \"ink\"\n";
-        std::fs::write(root.0.join(FILE_NAME), text).expect("yazılamadı");
-        let err = write_edit(&root.0, &paper()).expect_err("yazılmamalı");
+        std::fs::write(root.0.join(FILE_NAME), text).expect("write failed");
+        let err = write_edit(&root.0, &paper()).expect_err("must not write");
         assert!(
             err.starts_with("settings.toml: line 1: invalid TOML: ")
                 && err.ends_with("; the theme was not saved"),
             "{err}"
         );
         assert_eq!(
-            std::fs::read_to_string(root.0.join(FILE_NAME)).expect("okunamadı"),
+            std::fs::read_to_string(root.0.join(FILE_NAME)).expect("read failed"),
             text
         );
 
-        // Bölüm olmayan `appearance` da ezilmez.
-        std::fs::write(root.0.join(FILE_NAME), "appearance = 1\n").expect("yazılamadı");
+        // An `appearance` that is not a section is not overwritten either.
+        std::fs::write(root.0.join(FILE_NAME), "appearance = 1\n").expect("write failed");
         assert_eq!(
             write_edit(&root.0, &paper()),
             Err("settings.toml: line 1: `appearance` must be a section, found an integer; the theme was not saved".to_owned())
         );
 
-        // Hedefi olmayan bağ: hedef yaratılmaz.
-        std::fs::remove_file(root.0.join(FILE_NAME)).expect("silinemedi");
+        // A dangling link: the target is not created.
+        std::fs::remove_file(root.0.join(FILE_NAME)).expect("remove failed");
         let moved = root.0.join("moved.toml");
-        std::os::unix::fs::symlink(&moved, root.0.join(FILE_NAME)).expect("bağ kurulamadı");
+        std::os::unix::fs::symlink(&moved, root.0.join(FILE_NAME)).expect("symlink failed");
         assert_eq!(
             write_edit(&root.0, &paper()),
             Err("settings.toml could not be read: symbolic link points to a missing file; the theme was not saved".to_owned())
         );
-        assert!(!moved.exists(), "bağın hedefi yaratıldı");
+        assert!(!moved.exists(), "link target was created");
     }
 
     #[test]
     fn theme_write_without_a_file_starts_from_the_template() {
-        // Dizin de dosya da yok: "Settings…"ın yolu, üstüne anahtar.
+        // Neither directory nor file: the "Settings…" path, with the key on top.
         let root = TempRoot::new("write-missing");
         let config = root.0.join("nested").join("bateri");
         assert_eq!(write_edit(&config, &paper()), Ok(()));
         assert_eq!(
-            std::fs::read_to_string(config.join(FILE_NAME)).expect("okunamadı"),
-            // Satır başıyla: şablonun yorumu da `theme = "system"` diyor ve
-            // yerinde kalıyor.
+            std::fs::read_to_string(config.join(FILE_NAME)).expect("read failed"),
+            // With the line start: the template's comment also says `theme = "system"` and
+            // stays in place.
             Settings::TEMPLATE.replace("\ntheme = \"system\"\n", "\ntheme = \"paper\"\n")
         );
         assert_eq!(
@@ -657,24 +650,24 @@ mod tests {
     #[test]
     fn user_theme_names_are_the_selectable_files() {
         let root = TempRoot::new("theme-names");
-        // Tema dizini yoksa liste boş, hata değil.
+        // Without a themes directory the list is empty, not an error.
         assert_eq!(user_theme_names(&root.0), Vec::<String>::new());
-        // `""`: adı tam `.toml` olan dosya — `/code-review` bulgusu, boş
-        // başlıklı bir öğe `theme = ""` yazardı.
+        // `""`: a file named exactly `.toml` — `/code-review` finding, an item with an empty
+        // title would write `theme = ""`.
         for name in ["paper", "Ink", "bateri", "system", ".hidden", "._paper", ""] {
             write_theme_file(&root, name, "");
         }
         let dir = root.0.join(THEMES_DIR);
-        std::fs::write(dir.join("notes.txt"), "").expect("yazılamadı");
-        std::fs::create_dir(dir.join("folder.toml")).expect("dizin kurulamadı");
+        std::fs::write(dir.join("notes.txt"), "").expect("write failed");
+        std::fs::create_dir(dir.join("folder.toml")).expect("mkdir failed");
         std::os::unix::fs::symlink(dir.join("paper.toml"), dir.join("linked.toml"))
-            .expect("bağ kurulamadı");
+            .expect("symlink failed");
         std::os::unix::fs::symlink(dir.join("gone.toml"), dir.join("dangling.toml"))
-            .expect("bağ kurulamadı");
-        // Gömülü adı gölgeleyen dosya (`bateri`) gömülü adın öğesiyle aynı
-        // seçim, ayrıca listelenmez; `system` bir tema adı değil; nokta ile
-        // başlayan (AppleDouble `._x`, gizli) ve düz dosya olmayan girdiler
-        // seçilemez. Sıra büyük/küçük harf duyarsız.
+            .expect("symlink failed");
+        // A file shadowing an embedded name (`bateri`) is the same choice as the embedded name's
+        // item and is not listed separately; `system` is not a theme name; entries starting
+        // with a dot (AppleDouble `._x`, hidden) and entries that are not regular files cannot
+        // be selected. The order is case-insensitive.
         assert_eq!(user_theme_names(&root.0), ["Ink", "linked", "paper"]);
     }
 
@@ -685,21 +678,21 @@ mod tests {
         assert!(matches!(loaded, Loaded::Missing), "{loaded:?}");
         assert_eq!(loaded.at_launch(), (Settings::default(), Vec::new()));
 
-        // Kökün kendisi de yoksa aynı hâl: kullanıcı dizini hiç kurmamış.
+        // Same state if the root itself is missing: the user never set up the directory.
         let loaded = load(&root.0.join("absent"));
         assert!(matches!(loaded, Loaded::Missing), "{loaded:?}");
     }
 
     #[test]
     fn unreadable_file_is_reported_and_defaults_at_launch() {
-        // İzinle değil dizinle: root olarak koşan bir sınama `chmod 000`'ı
-        // yine okurdu.
+        // With a directory, not with permissions: a test running as root would still read a
+        // `chmod 000` file.
         let root = TempRoot::new("unreadable");
-        std::fs::create_dir(root.0.join(FILE_NAME)).expect("dizin kurulamadı");
+        std::fs::create_dir(root.0.join(FILE_NAME)).expect("mkdir failed");
         let loaded = load(&root.0);
         assert!(matches!(loaded, Loaded::Unreadable(_)), "{loaded:?}");
         let (settings, notices) = loaded.at_launch();
-        // Okunamayan dosyanın `osc52 = "off"`'u olabilir: pano kapalıya düşer.
+        // The unreadable file may hold `osc52 = "off"`: the clipboard falls back to off.
         assert_eq!(settings, Settings::for_unusable_file());
         assert_eq!(notices.len(), 1);
         assert_eq!(
@@ -712,7 +705,7 @@ mod tests {
     fn dangling_symlink_is_not_missing() {
         let root = TempRoot::new("dangling");
         std::os::unix::fs::symlink(root.0.join("moved-away.toml"), root.0.join(FILE_NAME))
-            .expect("bağ kurulamadı");
+            .expect("symlink failed");
         let loaded = load(&root.0);
         assert!(matches!(loaded, Loaded::Unreadable(_)), "{loaded:?}");
         let (settings, notices) = loaded.at_launch();
@@ -725,23 +718,23 @@ mod tests {
 
     #[test]
     fn symlink_to_a_file_is_read() {
-        // Dotfile yöneticisinin olağan hâli: bağ, depodaki dosyaya.
+        // A dotfile manager's ordinary case: a link to the file in the repository.
         let root = TempRoot::new("symlink");
         std::fs::write(root.0.join("real.toml"), "[terminal]\nscrollback = 7\n")
-            .expect("yazılamadı");
+            .expect("write failed");
         std::os::unix::fs::symlink(root.0.join("real.toml"), root.0.join(FILE_NAME))
-            .expect("bağ kurulamadı");
+            .expect("symlink failed");
         assert_eq!(load(&root.0).at_launch().0.scrollback, 7);
     }
 
     #[test]
     fn unparseable_file_is_its_own_result() {
         let root = TempRoot::new("unparseable");
-        std::fs::write(root.0.join(FILE_NAME), "[terminal\n").expect("yazılamadı");
+        std::fs::write(root.0.join(FILE_NAME), "[terminal\n").expect("write failed");
         let loaded = load(&root.0);
         assert!(matches!(loaded, Loaded::Unparseable(_)), "{loaded:?}");
         let (settings, notices) = loaded.at_launch();
-        // Bütün ayarlar varsayılan, OSC 52 hariç: kapalıya düşer.
+        // All settings are defaults, except OSC 52: it falls back to off.
         assert_eq!(settings, Settings::for_unusable_file());
         assert_eq!(notices.len(), 1);
         assert!(
@@ -754,7 +747,7 @@ mod tests {
     fn valid_file_is_read_with_its_diagnostics() {
         let root = TempRoot::new("valid");
         std::fs::write(root.0.join(FILE_NAME), "[terminal]\nscrollback = 2500\n")
-            .expect("yazılamadı");
+            .expect("write failed");
         assert_eq!(
             load(&root.0).at_launch(),
             (
@@ -767,7 +760,7 @@ mod tests {
         );
 
         std::fs::write(root.0.join(FILE_NAME), "[terminal]\nscrollback = true\n")
-            .expect("yazılamadı");
+            .expect("write failed");
         let (settings, notices) = load(&root.0).at_launch();
         assert_eq!(settings, Settings::default());
         assert_eq!(notices.len(), 1);
@@ -777,15 +770,15 @@ mod tests {
         );
     }
 
-    /// Tema sınamalarının görünümü: koyu. Yedeği görünüme bağlı olan sınama
-    /// ikisini de açıkça veriyor.
+    /// The appearance of the theme tests: dark. A test whose fallback depends on the appearance
+    /// passes both explicitly.
     const DARK: bool = true;
 
-    /// Kökün altına `themes/{name}.toml` yazar.
+    /// Writes `themes/{name}.toml` under the root.
     fn write_theme_file(root: &TempRoot, name: &str, text: &str) {
         let dir = root.0.join(THEMES_DIR);
-        std::fs::create_dir_all(&dir).expect("tema dizini kurulamadı");
-        std::fs::write(dir.join(format!("{name}.toml")), text).expect("yazılamadı");
+        std::fs::create_dir_all(&dir).expect("themes dir setup failed");
+        std::fs::write(dir.join(format!("{name}.toml")), text).expect("write failed");
     }
 
     #[test]
@@ -793,7 +786,7 @@ mod tests {
         let root = TempRoot::new("theme-embedded");
         let (theme, notices) = load_theme(Some(&root.0), "bateri").or_embedded(DARK);
         assert_eq!((theme, notices), (Theme::BATERI, Vec::new()));
-        // Ev dizini yoksa da gömülüler çözülür.
+        // The embedded ones resolve even without a home directory.
         assert_eq!(
             load_theme(None, "bateri").or_embedded(DARK),
             (Theme::BATERI, Vec::new())
@@ -814,9 +807,9 @@ mod tests {
             }
         );
 
-        // Açık gömülü temayı gölgeleyen dosyanın tabanı açık tema
-        // (`/code-review` bulgusu): yalnız imleci değiştiren kullanıcı açık
-        // modda koyu zemin almamalı. Gölgelemeyen adın tabanı `bateri` kalır.
+        // The base of a file shadowing the light embedded theme is the light theme
+        // (`/code-review` finding): a user who changes only the cursor must not get a dark
+        // background in light mode. The base of a non-shadowing name stays `bateri`.
         write_theme_file(&root, "bateri-light", "accent = \"#ff0000\"\n");
         write_theme_file(&root, "paper", "accent = \"#ff0000\"\n");
         let light = load_theme(Some(&root.0), "bateri-light").or_embedded(false);
@@ -842,10 +835,9 @@ mod tests {
 
     #[test]
     fn empty_user_theme_is_unusable() {
-        // Yerinde kaydeden editör dosyayı önce boşaltıyor: kaydın ortasında
-        // okunan boş tema koyu tabanın kendisi olur ve canlı yenileme
-        // pencereyi ona çakardı (`/code-review` bulgusu). `settings.toml`'un
-        // kuralı: boş dosya kullanılamaz.
+        // An editor saving in place first truncates the file: an empty theme read in the middle
+        // of the save would be the dark base itself and the live reload would slam the window
+        // to it (`/code-review` finding). `settings.toml`'s rule: an empty file is unusable.
         let root = TempRoot::new("theme-empty");
         write_theme_file(&root, "paper", " \n");
         assert_eq!(
@@ -855,8 +847,8 @@ mod tests {
                 vec!["themes/paper.toml is empty; keeping the current theme".to_owned()]
             )
         );
-        // Açılışta görünüme uyan gömülü tema; gölgelenen adın gömülüsüne
-        // sessizce düşülmez (bozuk dosyanın kuralı).
+        // At launch the embedded theme matching the appearance; no silent fallback to the
+        // shadowed name's embedded theme (the broken file's rule).
         write_theme_file(&root, "bateri", "");
         let (theme, notices) = load_theme(Some(&root.0), "bateri").or_embedded(false);
         assert_eq!(theme, Theme::BATERI_LIGHT);
@@ -892,8 +884,8 @@ mod tests {
 
     #[test]
     fn fallback_follows_the_appearance() {
-        // Açık modda bulunamayan tema koyu bir pencere açmıyor: yedek,
-        // dosyasız kullanıcının o görünümde göreceği gömülü tema.
+        // A theme not found in light mode does not open a dark window: the fallback is the
+        // embedded theme a user without a file would see in that appearance.
         let root = TempRoot::new("theme-fallback-light");
         let (theme, notices) = load_theme(Some(&root.0), "paper").or_embedded(false);
         assert_eq!(theme, Theme::BATERI_LIGHT);
@@ -906,10 +898,10 @@ mod tests {
 
     #[test]
     fn appearance_switches_never_leave_the_other_appearances_theme() {
-        // `/code-review`'un senaryosu: `dark_theme` bulunamıyor, pencere
-        // koyu → açık → koyu gidip geliyor. Her geçiş temayı o görünüm için
-        // yeniden seçiyor; bozuk koyu tema açık temayı ekranda **bırakmıyor**,
-        // gömülü koyuya düşüyor. Açık geçiş tema yuvasını boşaltıyor.
+        // `/code-review`'s scenario: `dark_theme` is not found, the window goes back and forth
+        // dark → light → dark. Every switch chooses the theme again for that appearance; the
+        // broken dark theme does **not leave** the light theme on screen, it falls back to the
+        // embedded dark one. The light switch empties the theme slot.
         let root = TempRoot::new("theme-switches");
         let settings = Settings {
             dark_theme: "ink".to_owned(),
@@ -930,9 +922,9 @@ mod tests {
 
     #[test]
     fn broken_user_theme_does_not_fall_to_the_embedded_one() {
-        // Aynı adlı gömülü tema var, ama bozuk dosya onu açmıyor: sonuç yine
-        // `bateri` olsa da **ileti** dosyayı söylüyor. Gömülü adı olmayan bir
-        // temayla aynı kural (ikinci yarı).
+        // An embedded theme with the same name exists, but the broken file does not open it:
+        // even though the result is still `bateri`, the **message** names the file. The same
+        // rule as for a theme without an embedded name (second half).
         let root = TempRoot::new("theme-broken");
         write_theme_file(&root, "bateri", "background = \"#ffffff\n");
         let loaded = load_theme(Some(&root.0), "bateri");
@@ -947,7 +939,7 @@ mod tests {
         );
 
         std::fs::create_dir_all(root.0.join(THEMES_DIR).join("paper.toml"))
-            .expect("dizin kurulamadı");
+            .expect("theme dir not created");
         assert_eq!(
             load_theme(Some(&root.0), "paper").or_embedded(DARK).1,
             ["themes/paper.toml could not be read: not a regular file; using bateri"]
@@ -957,13 +949,13 @@ mod tests {
     #[test]
     fn live_reload_applies_nothing_from_a_broken_or_missing_file() {
         let root = TempRoot::new("live");
-        // Dosya yok (editörün kaydı arasında da): uygulanacak bir şey yok ve
-        // bu bir hata değil.
+        // No file (also in the middle of an editor's save): nothing to apply, and
+        // this is not an error.
         assert_eq!(load(&root.0).live(), (None, Vec::new()));
 
-        // Yarım kayıt: hiçbir şey uygulanmıyor, yuva satırı söylüyor.
+        // A half-finished save: nothing is applied, the slot reports the line.
         std::fs::write(root.0.join(FILE_NAME), "[appearance]\ntheme = \"paper\n")
-            .expect("yazılamadı");
+            .expect("write failed");
         let (settings, notices) = load(&root.0).live();
         assert_eq!(settings, None);
         assert_eq!(notices.len(), 1);
@@ -972,10 +964,10 @@ mod tests {
             "{notices:?}"
         );
 
-        // Okunamayan dosya da (bağın hedefi taşındı) hiçbir şey uygulamıyor.
-        std::fs::remove_file(root.0.join(FILE_NAME)).expect("silinemedi");
+        // An unreadable file (the link's target moved) applies nothing either.
+        std::fs::remove_file(root.0.join(FILE_NAME)).expect("remove failed");
         std::os::unix::fs::symlink(root.0.join("moved.toml"), root.0.join(FILE_NAME))
-            .expect("bağ kurulamadı");
+            .expect("symlink failed");
         assert_eq!(
             load(&root.0).live(),
             (
@@ -987,13 +979,13 @@ mod tests {
             )
         );
 
-        // Düzeltilen kayıt tanılarıyla uygulanıyor.
-        std::fs::remove_file(root.0.join(FILE_NAME)).expect("silinemedi");
+        // The corrected save is applied along with its diagnostics.
+        std::fs::remove_file(root.0.join(FILE_NAME)).expect("remove failed");
         std::fs::write(
             root.0.join(FILE_NAME),
             "[terminal]\nscrollback = 5\n[appearance]\ntheme = 3\n",
         )
-        .expect("yazılamadı");
+        .expect("write failed");
         let (settings, notices) = load(&root.0).live();
         assert_eq!(settings.map(|s| s.scrollback), Some(5));
         assert_eq!(notices.len(), 1);
@@ -1005,34 +997,34 @@ mod tests {
 
     #[test]
     fn file_state_is_what_the_subtitle_says() {
-        // Üç hâl ve dosyasızlık; alt başlığın metni hâlin kendisinden, yani
-        // pencerenin şeridi ile alt başlık aynı cümleyi söylüyor.
+        // Three states and no file; the subtitle's text comes from the state itself, so the
+        // window's banner and the subtitle say the same sentence.
         let root = TempRoot::new("state");
         let path = root.0.join(FILE_NAME);
         assert_eq!(load(&root.0).state(), FileState::Missing);
         assert_eq!(FileState::Missing.notices(), Vec::<String>::new());
 
-        std::fs::write(&path, "[terminal]\ncursor = \"bar\"\n").expect("yazılamadı");
+        std::fs::write(&path, "[terminal]\ncursor = \"bar\"\n").expect("write failed");
         let loaded = load(&root.0);
         let state = loaded.state();
         let FileState::Usable(diagnostics) = &state else {
-            panic!("ayrıştırılan dosya kullanılabilir: {state:?}");
+            panic!("parsed file is usable: {state:?}");
         };
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].key, Some("terminal.cursor"));
         assert_eq!(state.notices(), loaded.live().1);
 
-        std::fs::write(&path, "[terminal\n").expect("yazılamadı");
+        std::fs::write(&path, "[terminal\n").expect("write failed");
         let loaded = load(&root.0);
         let state = loaded.state();
         let FileState::Locked(reason) = &state else {
-            panic!("ayrıştırılamayan dosya kilitli: {state:?}");
+            panic!("unparseable file is locked: {state:?}");
         };
         assert!(reason.starts_with("settings.toml: line 1: "), "{reason}");
         assert_eq!(state.notices(), loaded.at_launch().1);
 
-        std::fs::remove_file(&path).expect("silinemedi");
-        std::os::unix::fs::symlink(root.0.join("moved.toml"), &path).expect("bağ kurulamadı");
+        std::fs::remove_file(&path).expect("remove failed");
+        std::os::unix::fs::symlink(root.0.join("moved.toml"), &path).expect("symlink failed");
         let loaded = load(&root.0);
         assert_eq!(
             loaded.state(),
@@ -1046,21 +1038,21 @@ mod tests {
 
     #[test]
     fn live_reload_keeps_current_values_for_rejected_keys() {
-        // Yüz binlik geçmiş açıkken `scrollback` yanlış türde kaydedildi:
-        // kayıt anında değer geçerli ayardan geliyor, fark boş kalıyor ve
-        // geçmiş kırpılmıyor. Açılıştaki okuma aynı dosyada varsayılana düşer.
+        // `scrollback` was saved with the wrong type while a hundred-thousand-line history is
+        // open: at save time the value comes from the current setting, the diff stays empty and
+        // the history is not trimmed. The launch read falls back to the default on the same file.
         let root = TempRoot::new("live-rejected");
         std::fs::write(
             root.0.join(FILE_NAME),
             "[terminal]\nscrollback = \"100000\"\n",
         )
-        .expect("yazılamadı");
+        .expect("write failed");
         let current = Settings {
             scrollback: 100_000,
             ..Settings::default()
         };
         let (settings, notices) = load_keeping(&root.0, &current).live();
-        let settings = settings.expect("ayrıştırılan dosya uygulanır");
+        let settings = settings.expect("parsed file is applied");
         assert_eq!(current.changes(&settings), bt_core::Changes::default());
         assert_eq!(
             notices,
@@ -1073,16 +1065,16 @@ mod tests {
 
     #[test]
     fn live_reload_applies_nothing_from_an_empty_file() {
-        // Yerinde kaydeden editör dosyayı önce boşaltıyor (`O_TRUNC`), sonra
-        // yazıyor; boşaltma olay veriyor. Arada okunan boş dosya varsayılan
-        // `scrollback`'i uygulasaydı geçmişin fazlası geri dönülmez silinirdi.
+        // An editor saving in place first truncates the file (`O_TRUNC`), then writes; the
+        // truncation fires an event. If the empty file read in between applied the default
+        // `scrollback`, the excess history would be deleted irreversibly.
         let root = TempRoot::new("live-empty");
         for text in ["", "\n  \n"] {
-            std::fs::write(root.0.join(FILE_NAME), text).expect("yazılamadı");
+            std::fs::write(root.0.join(FILE_NAME), text).expect("write failed");
             let loaded = load_keeping(&root.0, &Settings::default());
             assert!(matches!(loaded, Loaded::Missing), "{text:?}: {loaded:?}");
             assert_eq!(loaded.live(), (None, Vec::new()), "{text:?}");
-            // Açılışta boş dosya dosyasızlıkla zaten aynıydı.
+            // At launch an empty file was already the same as no file.
             assert_eq!(
                 load(&root.0).at_launch(),
                 (Settings::default(), Vec::new()),
@@ -1093,8 +1085,8 @@ mod tests {
 
     #[test]
     fn live_reload_keeps_the_current_theme_when_unusable() {
-        // Canlı yenilemede kullanılamayan tema takas edilmiyor: yarım
-        // kaydedilmiş tema dosyası gömülü temaya çakmıyor.
+        // On a live reload an unusable theme is not swapped in: a half-saved
+        // theme file does not slam the window to the embedded theme.
         let root = TempRoot::new("live-theme");
         write_theme_file(&root, "paper", "background = \"#ffffff\n");
         let (theme, notices) = load_theme(Some(&root.0), "paper").or_current();
@@ -1113,7 +1105,7 @@ mod tests {
             )
         );
 
-        // Düzeltilen dosya takas ediliyor, yuva boşalıyor.
+        // The corrected file is swapped in, the slot empties.
         write_theme_file(&root, "paper", "background = \"#ffffff\"\n");
         assert_eq!(
             load_theme(Some(&root.0), "paper").or_current(),
@@ -1129,9 +1121,8 @@ mod tests {
 
     #[test]
     fn watched_paths_follow_the_layout() {
-        // İzleyicinin yolları okuyucunun okuduğu yollarla aynı: biri
-        // değişip öteki kalırsa kaydı hiçbir kaynak görmez ve belirti
-        // sessizdir.
+        // The watcher's paths are the same as the paths the reader reads: if one changes and the
+        // other stays, no source sees the save and the symptom is silent.
         let root = Path::new("/r");
         assert_eq!(
             watched_paths(root),

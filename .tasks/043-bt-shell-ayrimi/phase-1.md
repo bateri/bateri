@@ -28,7 +28,25 @@ _Requirements: R1_
 
 ## Checklist
 
-- [ ] On bir modül çevrildi
-- [ ] Test: yorumsuz fark yalnız dizgi değişimi
-- [ ] Test: sınama adları listesi ebeveynle aynı
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] On bir modül çevrildi
+- [x] Test: yorumsuz fark yalnız dizgi değişimi
+- [x] Test: sınama adları listesi ebeveynle aynı
+- [x] Doğrulama geçti (`make hepsi`)
+
+## Uygulama Notları
+
+- Bir düzine kadar `assert!`/`expect` metni birebir çeviriden kısa tutuldu (ör.
+  `"sıralı, paralel değil"` → `"sequential only"`): uzun hâli rustfmt'nin
+  çağrı genişliğini aşıp kodu yeniden sarardı ve yorumsuz fark dizgi
+  dışına taşardı (042 phase-1 emsali).
+- Yorumsuz farkın ölçüsü: yorum soyulmuş kaynakta satır sayıları ebeveynle
+  aynı ve farklı satırların hepsi dizgi; `child.rs`'teki çok satırlı tek
+  `assert!` metni de dizginin devamı.
+- `settings.rs` sınamalarındaki `panic!`/`expect_event` metinleri de tanı
+  sayılıp çevrildi; `notices.rs`'in Türkçe sınama girdileri (`"bozuk"`,
+  `"ilk"`…) çıktıyla karşılaştırıldığı için veri olarak kaldı, `quote.rs`'in
+  `İki Kelime`/`ğüşİÖÇ` örnekleri ve `upload.rs`'in `ç….txt`'si de.
+- `upload.rs`'te `037 Karar 7 → Kullanıcı kararı` gibi başlık alıntıları,
+  `child.rs`'te `CLAUDE.md` başlık alıntıları işaretçi olarak Türkçe kaldı;
+  `split.rs`'te Karar 7'nin içeriğinden yapılan alıntı ("ayırıcı bir
+  piksel") başlık değil, çevrildi.

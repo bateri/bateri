@@ -1,37 +1,40 @@
-//! Dosya izleme: `dispatch2`'nin vnode kaynakları.
+//! File watching: `dispatch2`'s vnode sources.
 //!
-//! Değişiklik gelmedikçe hiçbir şey uyanmaz — yoklama yok, thread yok;
-//! çekirdek bir dosyaya dokunulunca kaynağın kuyruğuna iş atar. Kararın kaydı
-//! `.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 2.
+//! Nothing wakes until a change arrives — no polling, no thread; the kernel
+//! queues work on the source's queue when a file is touched. The decision is
+//! recorded in `.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 2.
 //!
-//! **Ayar bilmez:** hangi yolların izleneceği çağıranın (`settings`'in yol
-//! yardımcıları, `app`'in uygulayıcısı); burası bir yolun dizin mi dosya mı
-//! olduğuna bakıp kaynağını kurar. İki tür:
+//! **Knows nothing about settings:** which paths to watch is the caller's
+//! business (`settings`'s path helpers, `app`'s applier); this module looks at
+//! whether a path is a directory or a file and installs its source. Two kinds:
 //!
-//! - **Dizin** (`WRITE | DELETE | RENAME`): girdinin doğumu, silinmesi, üstüne
-//!   taşınması — editörün "geçici dosyaya yaz, üstüne taşı" kaydı. `DELETE` ve
-//!   `RENAME` dizinin **kendisi** gidince haber veriyor: bir sonraki kurulum
-//!   bayat tanıtıcıyı düşürsün.
-//! - **Dosya** (`WRITE | EXTEND | ATTRIB | DELETE | RENAME`): yerinde yazma
-//!   (`>>`, nano), yazmadan boşaltma (`: >`) ve sembolik bağın **hedefindeki**
-//!   kayıt dizine iz bırakmaz. Dosya `O_EVTONLY` ile açılır (yalnız olay
-//!   tanıtıcısı) ve açılış bağı izler; kaynak hedefe bağlanır.
+//! - **Directory** (`WRITE | DELETE | RENAME`): an entry being created, deleted
+//!   or renamed over — the editor's "write to a temp file, rename over" save.
+//!   `DELETE` and `RENAME` report when the directory **itself** goes away: the
+//!   next install should drop the stale descriptor.
+//! - **File** (`WRITE | EXTEND | ATTRIB | DELETE | RENAME`): an in-place write
+//!   (`>>`, nano), truncation without a write (`: >`) and a save to a
+//!   symlink's **target** leave no trace in the directory. The file is opened
+//!   with `O_EVTONLY` (an event-only descriptor) and the open follows the
+//!   link; the source attaches to the target.
 //!
-//! **Kurulum tek atımlık.** Kaynak olaydan sonra da yaşar ama baktığı inode
-//! artık yolda olmayabilir (üstüne taşınan dosya). Çağıran her olayda
-//! yeniden kurar ve sıra **önce kur, sonra oku**: tersinde okumayla kurulum
-//! arasına düşen kayıt hiçbir olay doğurmaz ve ekranda eski içerik kalır.
-//! Önce kurmanın bedeli en çok fazladan bir olay, o da boş fark.
+//! **Installation is one-shot.** The source outlives the event, but the inode
+//! it watches may no longer be at the path (a file renamed over). The caller
+//! reinstalls on every event and the order is **install first, then read**:
+//! the other way round, a save landing between the read and the install
+//! produces no event and stale content stays on screen. The cost of installing
+//! first is at most one extra event, and that is an empty diff.
 //!
-//! **Olmayan yol kaynak doğurmaz ve hata değildir.** Sonradan yaratılan bir
-//! dizini hiçbir şey görmez (üst dizin izlenmiyor); yeniden kurmayı dışarıdan
-//! tetiklemek çağıranın işi.
+//! **A missing path produces no source and is not an error.** Nothing sees a
+//! directory created later (the parent directory is not watched); triggering
+//! a reinstall from outside is the caller's job.
 //!
-//! İşleyici fonksiyon işaretçisiyle kurulur (`set_event_handler_f`):
-//! `bt-shell`'e `block2` kenarı yok. Kaynak başına bir `Box` context'i fd'yi
-//! ve bildirimi taşır; onu **iptal işleyicisi** düşürür, çünkü libdispatch
-//! tanıtıcıyı kapatmanın güvenli anını orada veriyor — iptal eşzamansız ve
-//! koşmakta olan işleyici o sırada context'i okuyor olabilir.
+//! The handler is installed via a function pointer (`set_event_handler_f`):
+//! `bt-shell` has no `block2` edge. Each source carries a `Box` context holding
+//! the fd and the notification; the **cancel handler** drops it, because that
+//! is where libdispatch gives the safe moment to close the descriptor —
+//! cancellation is asynchronous and a running handler may be reading the
+//! context at that time.
 
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -45,51 +48,52 @@ use dispatch2::{
     dispatch_source_vnode_flags_t as Vnode,
 };
 
-/// Bir olayın bildirimi; kaynağın kuyruğunda koşar.
+/// An event's notification; runs on the source's queue.
 ///
-/// `Send + Sync`, çünkü iptal işleyicisi onu kuyruğun thread'inde düşürüyor.
-/// Üretimdekinin yakaladığı hiçbir şey yok (`app`'in hedefsiz eylemi), yani
-/// ana kuyruğa bağlılığı tipte değil kuyruk seçiminde.
+/// `Send + Sync`, because the cancel handler drops it on the queue's thread.
+/// The production one captures nothing (`app`'s targetless action), so its
+/// tie to the main queue lives in the choice of queue, not in the type.
 pub(crate) type Notify = Arc<dyn Fn() + Send + Sync>;
 
-/// Dizinin olayları; gerekçesi modül başında.
+/// Directory events; the rationale is at the top of the module.
 const DIR_EVENTS: usize = (Vnode::DISPATCH_VNODE_WRITE.0
     | Vnode::DISPATCH_VNODE_DELETE.0
     | Vnode::DISPATCH_VNODE_RENAME.0) as usize;
 
-/// Dosyanın olayları; `EXTEND` eklemenin (`>>`) kendi bayrağı.
+/// File events; `EXTEND` is append's (`>>`) own flag.
 ///
-/// `ATTRIB` yazmadan boşaltma için (`: > dosya`, `truncate -s 0`): kqueue onu
-/// `WRITE` değil öznitelik olayı diye veriyor. Bedeli `touch` ve `chmod`'un da
-/// yeniden okutması, o da boş fark. Okumanın kendisi olay **doğurmuyor**
-/// (`reading_does_not_notify`); doğursaydı her olayda kaynağı kurup okuyan
-/// uygulayıcı kendi kendini sonsuza dek uyandırırdı.
+/// `ATTRIB` is for truncation without a write (`: > file`, `truncate -s 0`):
+/// kqueue reports it as an attribute event, not `WRITE`. The cost is that
+/// `touch` and `chmod` also trigger a reread, and that is an empty diff. Reading
+/// itself does **not** produce an event (`reading_does_not_notify`); if it did,
+/// the applier that installs the source and reads on every event would wake
+/// itself up forever.
 const FILE_EVENTS: usize = (Vnode::DISPATCH_VNODE_WRITE.0
     | Vnode::DISPATCH_VNODE_EXTEND.0
     | Vnode::DISPATCH_VNODE_ATTRIB.0
     | Vnode::DISPATCH_VNODE_DELETE.0
     | Vnode::DISPATCH_VNODE_RENAME.0) as usize;
 
-/// Bir yol listesinin kaynakları. Düşünce hepsi iptal edilir.
+/// The sources of a list of paths. All are cancelled on drop.
 pub(crate) struct Watch {
     sources: Vec<DispatchRetained<DispatchSource>>,
 }
 
-/// Kaynağın context'i: fd kaynak yaşadıkça açık kalmalı, bildirim de olay
-/// başına çağrılıyor.
+/// The source's context: the fd must stay open as long as the source lives, and
+/// the notification is called once per event.
 struct Context {
-    /// Okunmuyor; tutulması fd'yi açık tutuyor ve düşmesi kapatıyor.
+    /// Never read; holding it keeps the fd open and dropping it closes it.
     _file: File,
     notify: Notify,
 }
 
 impl Watch {
-    /// `paths`'in var olanlarına kaynak kurar; olaylar `queue`'da `notify`'ı
-    /// çağırır.
+    /// Installs sources on those of `paths` that exist; events call `notify` on
+    /// `queue`.
     ///
-    /// Yenisini kurup eskisini **sonra** düşürmek (`slot.replace(..)`) iki
-    /// kurulumun arasında boşluk bırakmaz; o anda iki kaynağın birden
-    /// haber vermesi zararsız.
+    /// Installing the new one and dropping the old one **afterwards**
+    /// (`slot.replace(..)`) leaves no gap between two installations; two
+    /// sources reporting at once during that moment is harmless.
     pub(crate) fn install(paths: &[PathBuf], queue: &DispatchQueue, notify: &Notify) -> Self {
         Self {
             sources: paths
@@ -102,20 +106,22 @@ impl Watch {
 
 impl Drop for Watch {
     fn drop(&mut self) {
-        // İptal eşzamansız: context'i ve fd'yi iptal işleyicisi bırakıyor.
-        // Kaynağın kendisi de o ana kadar libdispatch'in referansıyla yaşıyor.
+        // Cancellation is asynchronous: the cancel handler releases the context
+        // and the fd. The source itself lives on libdispatch's reference until
+        // then.
         for source in &self.sources {
             source.cancel();
         }
     }
 }
 
-/// Tek yolun kaynağı; yol yoksa, dizin ya da düz dosya değilse ya da
-/// açılamıyorsa `None`.
+/// The source for a single path; `None` if the path does not exist, is neither a
+/// directory nor a regular file, or cannot be opened.
 ///
-/// Tür `metadata` ile, açmadan **önce** soruluyor: FIFO'yu salt okunur açmak
-/// bir yazar gelene kadar ana thread'i bekletirdi (`settings::read_text`'in
-/// aynı eleği). `metadata` bağı izliyor, açılış da.
+/// The kind is asked via `metadata` **before** opening: opening a FIFO
+/// read-only would block the main thread until a writer arrives (the same
+/// filter as `settings::read_text`). `metadata` follows the link, and so does
+/// the open.
 fn arm(
     path: &Path,
     queue: &DispatchQueue,
@@ -129,13 +135,14 @@ fn arm(
     } else {
         return None;
     };
-    // Açılamayan yol (izin) sessizce izlenmez: okuyucu aynı yolu okurken
-    // hatayı zaten alt başlığa yazıyor.
+    // A path that cannot be opened (permissions) is silently not watched: the
+    // reader already writes the error to the subtitle when it reads the same
+    // path.
     //
-    // `O_EVTONLY`, salt okunur değil (`/code-review` bulgusu): tanıtıcı yalnız
-    // olay içindir. Okuma tanıtıcısı bağın hedefi harici bir diskteyse onu
-    // "kullanımda" tutup çıkarılmasını engeller ve iCloud'dan tahliye edilmiş
-    // bir dosyada her yeniden kurulumda indirmeyi tetikleyebilirdi.
+    // `O_EVTONLY`, not read-only (a `/code-review` finding): the descriptor is
+    // for events only. A read descriptor would keep an external disk holding
+    // the link's target "in use" and prevent its ejection, and on a file
+    // evicted to iCloud it could trigger a download on every reinstall.
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_EVTONLY)
@@ -146,10 +153,10 @@ fn arm(
         _file: file,
         notify: Arc::clone(notify),
     }));
-    // SAFETY: tür libdispatch'in vnode sabiti ve maske o türün bayrakları;
-    // tanıtıcı açık bir fd ve `context` onu iptal işleyicisine kadar tutuyor.
-    // Kuyruk canlı bir referanstan; kaynak onu kendisi de tutar. `new` NULL
-    // yalnız geçersiz argümanda döner.
+    // SAFETY: the type is libdispatch's vnode constant and the mask is that
+    // type's flags; the handle is an open fd and `context` holds it until the
+    // cancel handler. The queue comes from a live reference; the source retains
+    // it too. `new` returns NULL only on invalid arguments.
     let source = unsafe {
         DispatchSource::new(
             (&raw const _dispatch_source_type_vnode).cast_mut(),
@@ -158,15 +165,15 @@ fn arm(
             Some(queue),
         )
     };
-    // Sıra zorunlu: işleyiciye giden context, işleyicinin **kurulduğu andaki**
-    // context (`set_event_handler_f`'in doc'u) — önce context, sonra
-    // işleyiciler, en son etkinleştirme. Etkinleştirilmemiş kaynak da
-    // düşürülemez.
+    // The order is mandatory: the context passed to the handler is the context
+    // **at the moment the handler is installed** (`set_event_handler_f`'s doc)
+    // — first the context, then the handlers, activation last. An unactivated
+    // source cannot be dropped either.
     //
-    // SAFETY: `context` bir `Box<Context>`; olay işleyicisi yalnız okuyor,
-    // iptal işleyicisi bir kez geri alıyor ve libdispatch iptal işleyicisini
-    // koşan olay işleyicisi bittikten sonra, olay işleyicisini de iptalden
-    // sonra hiç çağırmıyor.
+    // SAFETY: `context` is a `Box<Context>`; the event handler only reads it,
+    // the cancel handler takes it back once, and libdispatch calls the cancel
+    // handler only after a running event handler finishes, and never calls the
+    // event handler after cancellation.
     unsafe { source.set_context(context.cast()) };
     source.set_event_handler_f(on_event);
     source.set_cancel_handler_f(on_cancel);
@@ -175,15 +182,15 @@ fn arm(
 }
 
 extern "C" fn on_event(context: *mut c_void) {
-    // SAFETY: `arm`'ın kurduğu `Box<Context>`; iptal işleyicisi henüz
-    // koşmadı (sözleşme `arm`'da).
+    // SAFETY: the `Box<Context>` installed by `arm`; the cancel handler has not
+    // run yet (the contract is in `arm`).
     let context = unsafe { &*context.cast::<Context>() };
     (context.notify)();
 }
 
 extern "C" fn on_cancel(context: *mut c_void) {
-    // SAFETY: `arm`'ın kurduğu `Box<Context>`; iptal işleyicisi kaynak başına
-    // bir kez koşar ve ondan sonra olay işleyicisi çağrılmaz.
+    // SAFETY: the `Box<Context>` installed by `arm`; the cancel handler runs
+    // once per source and the event handler is not called after it.
     drop(unsafe { Box::from_raw(context.cast::<Context>()) });
 }
 
@@ -196,11 +203,11 @@ mod tests {
     use super::*;
     use crate::settings::{self, TempRoot};
 
-    /// Olay beklemesinin tavanı. Olay normalde milisaniyeler içinde geliyor;
-    /// tavan yalnız düşen sınamanın ne kadar bekleyeceği.
+    /// The ceiling on waiting for an event. An event normally arrives within
+    /// milliseconds; the ceiling is only how long a failing test waits.
     const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
-    /// Sınamanın kuyruğu ve bildirimi: olay başına kanala bir `()`.
+    /// The test's queue and notification: one `()` on the channel per event.
     struct Probe {
         queue: DispatchRetained<DispatchQueue>,
         notify: Notify,
@@ -211,7 +218,7 @@ mod tests {
         fn new() -> Self {
             let (sender, events) = mpsc::channel();
             Self {
-                // Seri kuyruk: üretimdeki ana kuyruk gibi işleyiciler sırayla.
+                // Serial queue: handlers run in order, like the main queue in production.
                 queue: DispatchQueue::new("bateri.watch.test", None),
                 notify: Arc::new(move || {
                     let _ = sender.send(());
@@ -224,14 +231,15 @@ mod tests {
             Watch::install(&settings::watched_paths(&root.0), &self.queue, &self.notify)
         }
 
-        /// Bir olay gelmeli; gelmezse `what` ile düşer.
+        /// An event must arrive; if not, fails with `what`.
         fn expect_event(&self, what: &str) {
             assert!(self.events.recv_timeout(EVENT_TIMEOUT).is_ok(), "{what}");
         }
 
-        /// Kuyruğu boşaltır: iptal edilmiş kaynağın **koşmakta olan**
-        /// işleyicisi bitsin (bariyer), sonra kanalda biriken olaylar atılsın.
-        /// Bir kaydın birden çok olay doğurması olağan (dizin + dosya).
+        /// Drains the queue: let the cancelled source's **running** handler
+        /// finish (a barrier), then discard the events accumulated on the
+        /// channel. A single save producing several events is normal
+        /// (directory + file).
         fn drain(&self) {
             self.queue.exec_sync(|| {});
             while self.events.try_recv().is_ok() {}
@@ -242,60 +250,62 @@ mod tests {
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(path)
-            .expect("dosya açılamadı");
-        file.write_all(text.as_bytes()).expect("yazılamadı");
+            .expect("cannot open file");
+        file.write_all(text.as_bytes()).expect("write failed");
     }
 
-    /// Editörün kaydı: geçici dosyaya yaz, üstüne taşı.
+    /// The editor's save: write to a temp file, rename over.
     fn save_by_rename(root: &TempRoot, text: &str) {
         let tmp = root.0.join("settings.toml.tmp");
-        std::fs::write(&tmp, text).expect("yazılamadı");
-        std::fs::rename(&tmp, root.0.join(settings::FILE_NAME)).expect("taşınamadı");
+        std::fs::write(&tmp, text).expect("write failed");
+        std::fs::rename(&tmp, root.0.join(settings::FILE_NAME)).expect("rename failed");
     }
 
     #[test]
     fn append_in_place_is_seen() {
-        // Yerinde yazma (`>>`, nano) dizine iz bırakmaz: olayı dosyanın kendi
-        // kaynağı veriyor.
+        // An in-place write (`>>`, nano) leaves no trace in the directory: the
+        // event comes from the file's own source.
         let root = TempRoot::new("watch-append");
-        std::fs::write(root.0.join(settings::FILE_NAME), "").expect("yazılamadı");
+        std::fs::write(root.0.join(settings::FILE_NAME), "").expect("write failed");
         let probe = Probe::new();
         let watch = probe.install(&root);
-        // Kök + `settings.toml`; `themes/` yok.
+        // Root + `settings.toml`; no `themes/`.
         assert_eq!(watch.sources.len(), 2);
 
         append(&root.0.join(settings::FILE_NAME), "[terminal]\n");
-        probe.expect_event("yerinde yazma olay üretmedi");
+        probe.expect_event("in-place write produced no event");
     }
 
     #[test]
     fn truncation_without_write_is_seen() {
-        // `: > settings.toml` ve `truncate -s 0` dosyaya hiç yazmıyor: kqueue
-        // yalnız öznitelik olayı (`ATTRIB`) veriyor ve dizin de değişmiyor
-        // (`/code-review` bulgusu, bu makinede ölçüldü).
+        // `: > settings.toml` and `truncate -s 0` never write to the file:
+        // kqueue gives only an attribute event (`ATTRIB`) and the directory
+        // does not change either (a `/code-review` finding, measured on this
+        // machine).
         let root = TempRoot::new("watch-truncate");
-        std::fs::write(root.0.join(settings::FILE_NAME), "[terminal]\n").expect("yazılamadı");
+        std::fs::write(root.0.join(settings::FILE_NAME), "[terminal]\n").expect("write failed");
         let probe = Probe::new();
         let _watch = probe.install(&root);
 
         std::fs::OpenOptions::new()
             .write(true)
             .open(root.0.join(settings::FILE_NAME))
-            .expect("dosya açılamadı")
+            .expect("cannot open file")
             .set_len(0)
-            .expect("boşaltılamadı");
-        probe.expect_event("boşaltma olay üretmedi");
+            .expect("truncate failed");
+        probe.expect_event("truncation produced no event");
     }
 
     #[test]
     fn reading_does_not_notify() {
-        // `ATTRIB` izleniyor ve okuyucu her olayda kaynağı kurduktan **sonra**
-        // dosyayı okuyor: okuma bir öznitelik olayı (erişim zamanı) doğursaydı
-        // oku → olay → yeniden kur → oku döngüsü ana thread'i sonsuza dek
-        // döndürürdü. Olayın gelmediği bir süre bekleniyor; kısa ama
-        // olayların milisaniyeler içinde geldiği ölçeğin çok üstünde.
+        // `ATTRIB` is watched and the reader reads the file **after**
+        // installing the source on every event: if reading produced an
+        // attribute event (access time), the read → event → reinstall → read
+        // loop would spin the main thread forever. It waits for a period in
+        // which no event arrives; short, but far above the scale at which
+        // events arrive (milliseconds).
         let root = TempRoot::new("watch-read");
-        std::fs::write(root.0.join(settings::FILE_NAME), "[terminal]\n").expect("yazılamadı");
+        std::fs::write(root.0.join(settings::FILE_NAME), "[terminal]\n").expect("write failed");
         let probe = Probe::new();
         let _watch = probe.install(&root);
 
@@ -308,80 +318,82 @@ mod tests {
                 .events
                 .recv_timeout(Duration::from_millis(500))
                 .is_err(),
-            "okuma olay üretti: yeniden okuma döngüsü doğar"
+            "reading produced an event: a reread loop follows"
         );
     }
 
     #[test]
     fn rename_over_is_seen_again_after_reinstall() {
-        // Üstüne taşınan dosya yeni bir inode: eski dosya kaynağı artık
-        // silinmiş dosyaya bakıyor. Yeniden kurulumdan sonra hem ikinci
-        // taşıma hem **yeni** dosyaya yerinde yazma görülmeli — ikincisini
-        // yalnız yeni dosyaya kurulmuş kaynak görebilir.
+        // A file renamed over is a new inode: the old file source now looks at
+        // a deleted file. After reinstalling, both the second rename and an
+        // in-place write to the **new** file must be seen — only a source
+        // installed on the new file can see the latter.
         let root = TempRoot::new("watch-rename");
-        std::fs::write(root.0.join(settings::FILE_NAME), "").expect("yazılamadı");
+        std::fs::write(root.0.join(settings::FILE_NAME), "").expect("write failed");
         let probe = Probe::new();
         let mut watch = probe.install(&root);
         assert_eq!(watch.sources.len(), 2);
 
         save_by_rename(&root, "[terminal]\nscrollback = 1\n");
-        probe.expect_event("üstüne taşıma olay üretmedi");
+        probe.expect_event("rename-over produced no event");
         watch = probe.install(&root);
         assert_eq!(watch.sources.len(), 2);
         probe.drain();
 
         save_by_rename(&root, "[terminal]\nscrollback = 2\n");
-        probe.expect_event("yeniden kurulumdan sonra ikinci kayıt olay üretmedi");
+        probe.expect_event("second save after reinstall produced no event");
         watch = probe.install(&root);
         assert_eq!(watch.sources.len(), 2);
         probe.drain();
 
         append(&root.0.join(settings::FILE_NAME), "# son\n");
-        probe.expect_event("yeni dosyaya yerinde yazma olay üretmedi");
+        probe.expect_event("in-place write to the new file produced no event");
     }
 
     #[test]
     fn symlink_target_write_is_seen() {
-        // Dotfile deposu: `settings.toml` başka dizindeki dosyaya bağ. Hedefe
-        // yazmak kökün dizinine iz bırakmaz; kaynak açılışta bağı izleyip
-        // hedefe bağlanmış olmalı.
+        // Dotfile repo: `settings.toml` is a link to a file in another
+        // directory. Writing to the target leaves no trace in the root
+        // directory; the source must have followed the link on open and
+        // attached to the target.
         let root = TempRoot::new("watch-symlink");
         let repo = TempRoot::new("watch-symlink-repo");
         let target = repo.0.join("settings.toml");
-        std::fs::write(&target, "").expect("yazılamadı");
+        std::fs::write(&target, "").expect("write failed");
         std::os::unix::fs::symlink(&target, root.0.join(settings::FILE_NAME))
-            .expect("bağ kurulamadı");
+            .expect("symlink failed");
         let probe = Probe::new();
         let _watch = probe.install(&root);
 
         append(&target, "[terminal]\n");
-        probe.expect_event("bağın hedefine yazma olay üretmedi");
+        probe.expect_event("write to the link target produced no event");
     }
 
     #[test]
     fn recreated_directory_is_watched_after_reinstall() {
-        // Dizin silinince olay gelir ve yeniden kurulum hiçbir şey kurmaz:
-        // yol yok. Yeniden yaratılan dizini **kendiliğinden** hiçbir şey
-        // görmez (üst dizin izlenmiyor, Karar 2); dış tetikle yeniden kurulum
-        // kaynakları yeni dizine kurar ve sonraki yazma görülür.
+        // When the directory is deleted an event arrives and the reinstall
+        // installs nothing: the path is gone. Nothing sees the recreated
+        // directory **on its own** (the parent is not watched, Karar 2); a
+        // reinstall on an external trigger installs the sources on the new
+        // directory and the next write is seen.
         let root = TempRoot::new("watch-recreate");
-        std::fs::write(root.0.join(settings::FILE_NAME), "").expect("yazılamadı");
+        std::fs::write(root.0.join(settings::FILE_NAME), "").expect("write failed");
         let probe = Probe::new();
         let mut watch = probe.install(&root);
         assert_eq!(watch.sources.len(), 2);
 
-        std::fs::remove_dir_all(&root.0).expect("silinemedi");
-        probe.expect_event("dizinin silinmesi olay üretmedi");
+        std::fs::remove_dir_all(&root.0).expect("remove failed");
+        probe.expect_event("directory deletion produced no event");
         watch = probe.install(&root);
-        assert_eq!(watch.sources.len(), 0, "silinmiş dizine kaynak kuruldu");
+        assert_eq!(watch.sources.len(), 0, "source on a deleted directory");
         probe.drain();
 
-        std::fs::create_dir(&root.0).expect("dizin kurulamadı");
-        std::fs::write(root.0.join(settings::FILE_NAME), "").expect("yazılamadı");
+        std::fs::create_dir(&root.0).expect("create_dir failed");
+        std::fs::write(root.0.join(settings::FILE_NAME), "").expect("write failed");
         watch = probe.install(&root);
         assert_eq!(watch.sources.len(), 2);
         append(&root.0.join(settings::FILE_NAME), "[terminal]\n");
-        probe.expect_event("yeni dizindeki dosyaya yazma olay üretmedi");
+        probe.expect_event("write in the new directory produced no event");
     }
 
     #[test]
