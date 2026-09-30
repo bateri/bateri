@@ -38,8 +38,15 @@ fmt:
 #   dahil, `--depth 1`) ve kaynağında objc2/dispatch2/block2/metal yok. GPU'ya
 #   wgpu üzerinden ulaşılıyor; wgpu'nun Metal arka ucunun **dolaylı** çektikleri
 #   bu kontrolün konusu değil — sözleşme crate'in kendi kodu ve bildirimi,
-#   arka ucun iç bağımlılıkları wgpu'nun işi. Katman ve vsync ritmi bt-shell'den
-#   geliyor (`Surface::from_layer`, `Pacer`).
+#   arka ucun iç bağımlılıkları wgpu'nun işi. Katman ve vsync ritmi
+#   bt-shell-macos'tan geliyor (`Surface::from_layer`, `Pacer`). "bt-gpu yukarı
+#   bağlanmıyor" satırının `bt-shell` deseni üç kabuk crate'ini de yakalıyor.
+# - bt-shell-common platform kabuğu görmez (043 Karar 2): doğrudan normal
+#   bağımlılığında objc2 çekirdeği, AppKit, Quartz, Foundation, bildirim merkezi,
+#   block2 ve bir platform kabuğu (`bt-shell-macos`/`-linux`) yok — katman yönü
+#   `bt-shell-{macos,linux} → bt-shell-common`. macOS'a özgü tek bağımlılığı
+#   `dispatch2`, `cfg(macos)` altında; kaynakta `objc2`/`dispatch2`/`block2`
+#   yalnız `watch`'ın macOS gövdesinde (`watch/dispatch.rs`) görünür.
 # - Bağımlılık DÜŞÜRMEZ, uyarır: bilinçli bir bağımlılık kararı da Cargo.lock'u
 #   değiştirir; kararın kaydını `/audit` arar.
 denetim:
@@ -47,7 +54,9 @@ denetim:
 	if $(CARGO) tree -p bt-core -e normal | grep -E "objc2|core-text|core-graphics|metal"; then echo "denetim: bt-core platform kütüphanesine bağlanıyor"; fail=1; fi; \
 	if $(CARGO) tree -p bt-atlas -e normal | grep -E "(^|[ ─])objc2 v"; then echo "denetim: bt-atlas objc2 çekirdeğine bağlanıyor"; fail=1; fi; \
 	if grep -rnE "objc2_core_|\b(CT|CG|CF)[A-Z][A-Za-z]+" crates/bt-atlas/src --include='*.rs' | grep -v "^crates/bt-atlas/src/coretext.rs:" | grep -v ":[[:space:]]*//"; then echo "denetim: bt-atlas'ta CoreText/CoreGraphics adı macOS arka ucunun (coretext.rs) dışında"; fail=1; fi; \
-	if $(CARGO) tree -p bt-gpu -e normal | grep -E "bt-shell"; then echo "denetim: bt-gpu yukarı, bt-shell'e bağlanıyor"; fail=1; fi; \
+	if $(CARGO) tree -p bt-gpu -e normal | grep -E "bt-shell"; then echo "denetim: bt-gpu yukarı, kabuk katmanına (bt-shell-*) bağlanıyor"; fail=1; fi; \
+	if $(CARGO) tree -p bt-shell-common -e normal --depth 1 | grep -E "(^|[ ─])objc2 v|objc2-app-kit|objc2-quartz-core|objc2-foundation|objc2-user-notifications|block2|bt-shell-(macos|linux)"; then echo "denetim: bt-shell-common platform kabuğuna ya da AppKit ailesine bağlanıyor"; fail=1; fi; \
+	if grep -rnE "objc2|dispatch2|block2" crates/bt-shell-common/src | grep -v "^crates/bt-shell-common/src/watch/dispatch.rs:" | grep -v ":[[:space:]]*//"; then echo "denetim: bt-shell-common'da platform çağrısı watch'ın macOS gövdesinin (watch/dispatch.rs) dışında"; fail=1; fi; \
 	if grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"; then echo "denetim: bt-core kaynağında platform çağrısı var"; fail=1; fi; \
 	if $(CARGO) tree -p bt-gpu -e normal,dev --depth 1 | grep -E "objc2|dispatch2|block2|metal"; then echo "denetim: bt-gpu platform kütüphanesine doğrudan bağlanıyor"; fail=1; fi; \
 	if grep -rnE "objc2|dispatch2|block2|metal" crates/bt-gpu/src | grep -v ":[[:space:]]*//"; then echo "denetim: bt-gpu kaynağında platform çağrısı var"; fail=1; fi; \
@@ -224,7 +233,7 @@ TARGET_DIR = $(eval TARGET_DIR := $$(shell $(CARGO) metadata --format-version 1 
 APP = $(TARGET_DIR)/release/bateri.app
 STAGE = $(APP).partial
 ICONSET = $(TARGET_DIR)/release/bateri.iconset
-# Güncelleme: Sparkle 2 (`bt-shell::updater` onu çalışma zamanında yüklüyor).
+# Güncelleme: Sparkle 2 (`bt-shell-macos::updater` onu çalışma zamanında yüklüyor).
 # Framework depoya girmiyor; sürüm ve sha256 burada sabit, tarball ilk
 # `kur`'da `$(SPARKLE_DIR)`'e iniyor ve özeti tutmayan indirme düşüyor.
 # Yalnız `kur` yolunda: `make hepsi`, `duman` ve `cargo run` Sparkle'sız.

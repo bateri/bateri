@@ -87,7 +87,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "bateri"
 version = "0.1.1"
 dependencies = [
- "bt-shell",
+ "bt-shell-macos",
 ]
 
 [[package]]
@@ -154,7 +154,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "bt-shell"
+name = "bt-shell-common"
+version = "0.1.1"
+dependencies = [
+ "bt-core",
+ "bt-gpu",
+ "dispatch2",
+ "libc",
+]
+
+[[package]]
+name = "bt-shell-macos"
 version = "0.1.1"
 dependencies = [
  "block2",
@@ -168,16 +178,6 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "objc2-user-notifications",
-]
-
-[[package]]
-name = "bt-shell-common"
-version = "0.1.1"
-dependencies = [
- "bt-core",
- "bt-gpu",
- "dispatch2",
- "libc",
 ]
 
 [[package]]

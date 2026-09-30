@@ -1,5 +1,5 @@
 [package]
-name = "bt-shell"
+name = "bt-shell-macos"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -68,7 +68,7 @@ objc2-foundation = { workspace = true, features = [
 # yani ikisi `NSAlert`'in ön koşulu; `block2` bayrağı sayfanın
 # (`beginSheetModalForWindow:completionHandler:`) tamamlanma bloğunun imzasını
 # açıyor. Yeni crate değil ve sürüm oynamıyor; `Cargo.lock`'ta bu paketin ve
-# `bt-shell`'in listelerine birer `block2` satırı. Karar kaydı
+# `bt-shell-macos`'un listelerine birer `block2` satırı. Karar kaydı
 # .tasks/028-kapatma-onayi/discussion.md → Karar 2.
 #
 # Ayar penceresi (029 phase-2): kenar çubuğu (`NSSplitViewController`,

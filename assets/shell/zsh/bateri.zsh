@@ -13,7 +13,7 @@
 # parçaya ayrıldı: [`__bateri_begin`] hazırlar, dosya top-level `source`
 # yapar, [`__bateri_end`] toplar.
 #
-# SÖZLEŞME (kuran taraf `bt-shell`'in `app::shell_integration_env`'i):
+# SÖZLEŞME (kuran taraf `bt-shell-macos`'un `app::shell_integration_env`'i):
 #   ZDOTDIR         bu dizin
 #   BATERI_ZDOTDIR  kullanıcının özgün ZDOTDIR'ı. Ortamda yoksa kullanıcının
 #                   da yoktu; geri koyarken ZDOTDIR silinir, $HOME'a
@@ -32,7 +32,7 @@
 # sarmalayıcısı da aynı farkı kabul ediyor.
 #
 # HİÇBİR KOLDA ÖLÜMCÜL DEĞİL: `exit` yok, kullanıcının her dosyası korunarak
-# okunuyor. Gerekçe sert — çocuk ölünce uygulama kapanıyor (`bt-shell`'in
+# okunuyor. Gerekçe sert — çocuk ölünce uygulama kapanıyor (`bt-shell-macos`'un
 # `child_exit` → `terminate:` yolu), yani düşen bir sarmalayıcı kullanıcıyı
 # Settings…'e bile ulaşamaz bırakırdı.
 #

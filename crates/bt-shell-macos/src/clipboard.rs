@@ -1,6 +1,6 @@
 //! Pano köprüsü: `bt-core`'un bildiği metni AppKit panosuna taşır.
 //!
-//! Panoya dokunan yalnız `bt-shell` (AppKit); `bt-core` bayt görür, pano
+//! Panoya dokunan yalnız `bt-shell-macos` (AppKit); `bt-core` bayt görür, pano
 //! görmez (`CLAUDE.md` → katman düzeni). Kopyanın metni phase-1'in tek metin
 //! yolundan gelir (`Session::selection_text`); ikinci bir metin yolu, ikinci
 //! bir sarma hatası demek olurdu.

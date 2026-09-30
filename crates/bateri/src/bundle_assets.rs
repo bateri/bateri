@@ -16,7 +16,7 @@
 //! gerekirdi.
 //!
 //! `plutil` bir macOS aracı; bu crate de zaten yalnız macOS'ta derleniyor
-//! (`bt-shell` → AppKit).
+//! (`bt-shell-macos` → AppKit).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -130,7 +130,7 @@ fn info_plist_template_carries_the_updater_keys() {
 
 /// zsh sarmalayıcısının envanteri **tam olarak** bu beş dosya.
 ///
-/// "Eksiği yok" yarısını `bt-shell` de soruyor (`child::zsh_wrapper_dir`'in
+/// "Eksiği yok" yarısını `bt-shell-common` de soruyor (`child::zsh_wrapper_dir`'in
 /// sınaması); buranın tek başına gördüğü yarı **fazlası**. İki türü var ve
 /// ikisi de sessiz:
 ///

@@ -5,7 +5,7 @@ members = [
     "crates/bt-atlas",
     "crates/bt-gpu",
     "crates/bt-shell-common",
-    "crates/bt-shell",
+    "crates/bt-shell-macos",
     "crates/bateri",
 ]
 
@@ -62,7 +62,7 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std", "CFString", "CFCGTypes", "CFAttributedString", "CFDictionary", "CFArray",
 ] }
-# Yüklemenin macOS bildirimi (`bt-shell::uploader::notify`, 037 phase-7).
+# Yüklemenin macOS bildirimi (`bt-shell-macos::uploader::notify`, 037 phase-7).
 # Kullanıcı onaylı bağımlılık kararı (2026-09-27): kullanımdan kalkmış
 # `NSUserNotification` yerine Apple'ın desteklediği `UNUserNotificationCenter`
 # — kayıt .tasks/037-ssh-ikinci-tur/phase-7.md → Uygulama Notları. Aynı objc2
@@ -73,11 +73,11 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "std", "block2", "UNUserNotificationCenter", "UNNotificationContent",
     "UNNotificationRequest", "UNNotificationTrigger",
 ] }
-# The main queue (`bt-shell`) and vnode sources (`bt-shell-common`'s
+# The main queue (`bt-shell-macos`) and vnode sources (`bt-shell-common`'s
 # `watch`). User-approved dependency decision: .tasks/001 discussion.md →
 # Karar.
 dispatch2 = { version = "0.3", features = ["block2"] }
-# Objective-C blocks (`RcBlock`) for `bt-shell`'s completion handlers; already
+# Objective-C blocks (`RcBlock`) for `bt-shell-macos`'s completion handlers; already
 # in the graph through wgpu's Metal backend and `dispatch2`.
 block2 = "0.6"
 # VT ayrıştırma, grid, scrollback, hasar, PTY ve okuyucu thread. bt-core onu
@@ -111,9 +111,9 @@ toml_edit = { version = "0.25", default-features = false, features = ["parse", "
 # .tasks/035-grapheme-dizileri/discussion.md → Karar.
 cursor-icon = { version = "1.2", default-features = false }
 # Bekçi thread'in son çaresi: `write(2, …)` + `_exit(70)`, ikisi de
-# async-signal-safe (`bt-shell::bekci`). Yeni bir crate DEĞİL — grafta zaten
+# async-signal-safe (`bt-shell-macos::bekci`). Yeni bir crate DEĞİL — grafta zaten
 # vardı (alacritty PTY'yi onunla açıyor) ve sürüm oynamıyor; `Cargo.lock`'ta
-# yalnız `bt-shell`'in bağımlılık listesine bir kenar ekleniyor. Kararın kaydı:
+# yalnız `bt-shell-macos`'un bağımlılık listesine bir kenar ekleniyor. Kararın kaydı:
 # .tasks/002-vt-motoru/phase-4.md → Uygulama Notları.
 libc = "0.2"
 # `EventedReadWrite`'ı uygulayabilmek için (`bt-core::session`'ın `TappedPty`'si):
@@ -144,7 +144,7 @@ unicode-width = "0.2"
 # (on Linux we want Vulkan; a GL fallback would mean testing a second driver
 # path) and `webgpu` (the web is not a target) are off; `parking_lot` would
 # also come with the defaults, std's locks are enough. The Metal backend uses
-# `objc2` 0.6 / `objc2-metal` 0.3 / `block2` 0.6 — the generation `bt-shell`
+# `objc2` 0.6 / `objc2-metal` 0.3 / `block2` 0.6 — the generation `bt-shell-macos`
 # already pins, so no second binding stack enters the graph (context.md →
 # Kanıt).
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "metal", "vulkan"] }
@@ -179,4 +179,4 @@ bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
 bt-gpu = { path = "crates/bt-gpu" }
 bt-shell-common = { path = "crates/bt-shell-common" }
-bt-shell = { path = "crates/bt-shell" }
+bt-shell-macos = { path = "crates/bt-shell-macos" }

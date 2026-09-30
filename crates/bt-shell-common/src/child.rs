@@ -59,7 +59,7 @@ fn home_directory(home: Option<PathBuf>) -> Option<PathBuf> {
 /// setting when the environment has no locale.
 ///
 /// `system` is the system's `(language, region)` pair, read by the platform shell — on macOS
-/// from `NSLocale` (`bt-shell`'s `locale::system_locale`, where the rationale for which
+/// from `NSLocale` (`bt-shell-macos`'s `locale::system_locale`, where the rationale for which
 /// `NSLocale` answer is read lives); this crate sees no Foundation (043 Karar 2). The
 /// decision itself is [`decide_locale`].
 pub fn locale_env(system: Option<(String, String)>) -> Option<(String, String)> {
@@ -510,8 +510,6 @@ mod tests {
         let (program, args) = command.expect("login command did not resolve");
         assert_eq!(program, "/usr/bin/login");
         assert_eq!(args[0], "-qflp");
-        // Tests run in a debug build: the repo branch of the wrapper resolves.
-        assert!(zsh_wrapper_dir().is_some(), "wrapper not found in debug");
     }
 
     #[cfg(not(target_os = "macos"))]

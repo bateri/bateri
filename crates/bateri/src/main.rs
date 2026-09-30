@@ -63,16 +63,16 @@ fn main() -> ExitCode {
     }
     // Geriye uyum: `BT_RUN_SECONDS` tek başına eskisi gibi duman yükü
     // seçiyor, yani `make duman` hiç değişmeden çalışır.
-    let run = run_seconds.map(|seconds| bt_shell::Run {
+    let run = run_seconds.map(|seconds| bt_shell_macos::Run {
         seconds,
         workload: if scroll_test {
-            bt_shell::Workload::Load
+            bt_shell_macos::Workload::Load
         } else {
-            bt_shell::Workload::Smoke
+            bt_shell_macos::Workload::Smoke
         },
         stats_since,
     });
-    match bt_shell::run(bt_shell::Options { run }) {
+    match bt_shell_macos::run(bt_shell_macos::Options { run }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("bateri: {e}");

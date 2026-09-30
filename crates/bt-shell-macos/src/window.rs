@@ -870,7 +870,7 @@ impl TerminalWindow {
         // cursor rect'inden (`BateriView::upload_cursor_rects`), ve view
         // zaten first responder — pencere seviyesindeki `mouseMoved:` ona
         // geliyor. Kipe göre açıp kapamak kipi
-        // `bt-shell`'e yayınlamayı isterdi
+        // `bt-shell-macos`'a yayınlamayı isterdi
         // (`.tasks/020-fare-raporlama/discussion.md` → Karar 4).
         window.setAcceptsMouseMovedEvents(true);
         // Klavyenin PTY'ye varan yolu buradan başlıyor. View (pane'in
