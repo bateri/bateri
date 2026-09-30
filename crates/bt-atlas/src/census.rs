@@ -7,7 +7,7 @@
 //! point of the symbol and emoji blocks through the gate's own steps and puts
 //! it in one of four groups. Its result depends on the fonts installed on the
 //! machine, so it is not part of the gate — it is run by hand with
-//! `make tarama`.
+//! `make scan`.
 //!
 //! The module is compiled only for tests: the classification has no
 //! consumer in production. It does not copy the gate, it calls its steps;
@@ -550,7 +550,7 @@ mod tests {
     /// font. The base family comes from `BT_SCAN_FONT` (else the chain's
     /// default).
     #[test]
-    #[ignore = "an inventory that depends on the machine's fonts; `make tarama`"]
+    #[ignore = "an inventory that depends on the machine's fonts; `make scan`"]
     fn census() {
         let family = std::env::var("BT_SCAN_FONT").ok();
         let mut out = String::new();

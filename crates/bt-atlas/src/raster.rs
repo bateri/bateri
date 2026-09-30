@@ -151,14 +151,14 @@ pub(crate) fn draw_color_glyph(
     drawn
 }
 
-/// Kural çizgisi çeşidi — atlasta karakter gibi yuva tutar.
+/// Rule line kind — holds a slot in the atlas like a character.
 ///
-/// Yüzden bağımsız: kalın metnin altındaki çizgi kalın değildir. Çağıran
-/// bunları her zaman [`crate::Face::Regular`] ile sorar ve `Atlas::slot` bunu
-/// ayrıca normalize ediyor.
-// `repr(u8)`: türetilen `Hash` discriminant'ı varsayılan olarak `isize`
-// yazıyor — 8 bayt. Anahtar `slot()`'un sıcak yolunda ve hash'e giren her
-// bayt kare başına hücre başına ödeniyor.
+/// Independent of the face: the line under bold text is not bold. The caller
+/// always asks for these with [`crate::Face::Regular`] and `Atlas::slot`
+/// normalises that separately as well.
+// `repr(u8)`: the derived `Hash` writes the discriminant as `isize` by
+// default — 8 bytes. The key is on `slot()`'s hot path and every byte that
+// enters the hash is paid per cell per frame.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RuleKind {
@@ -168,87 +168,96 @@ pub enum RuleKind {
     Dotted,
     Dashed,
     Strike,
-    /// Prompt işareti: `>` yerine geçen chevron.
+    /// Prompt mark: the chevron that stands in for `>`.
     ///
-    /// **Bir kural çizgisi değil ama aynı aileden** ve burada olmasının sebebi
-    /// mekanizma: bu enum yordamsal çizilen sprite'ların **kendi kod noktası
-    /// olmayan** kümesi — fonttan gelmiyor, yüzden bağımsız
-    /// ([`crate::Face::Regular`]'a çivili) ve atlasta kendi payını tutuyor.
-    /// Beşi alt çizgi, biri üstü çizili, biri de bu.
+    /// **Not a rule line, but from the same family**, and the reason it is
+    /// here is mechanism: this enum is the set of procedurally drawn sprites
+    /// that **have no code point of their own** — they do not come from the
+    /// font, are independent of the face (pinned to [`crate::Face::Regular`])
+    /// and keep their own reserve in the atlas. Five are underlines, one is
+    /// strikeout, and one is this.
     ///
-    /// Yordamsal çizimin **ikinci** kümesi karakterler ([`is_procedural`]) ve
-    /// o küme buraya girmiyor: `Sprite::Char` olarak yaşıyor, yuva payı
-    /// ([`crate::RULE_RESERVE`]) almıyor ve `bt-gpu` onu sıradan bir harften
-    /// ayırt etmiyor. Ayıran şey "kim çiziyor" değil "adı var mı": kural
-    /// çizgisi bir SGR biçimi, blok bir karakter.
+    /// The **second** set of procedural drawing is characters
+    /// ([`is_procedural`]) and that set does not come in here: it lives as
+    /// `Sprite::Char`, takes no slot reserve ([`crate::RULE_RESERVE`]) and
+    /// `bt-gpu` does not tell it apart from an ordinary letter. What separates
+    /// them is not "who draws it" but "does it have a name": a rule line is an
+    /// SGR style, a block is a character.
     ///
-    /// İki küme aynı mürekkebi paylaşsa da **sınırları ayrı**: bu enum
-    /// kapalı ve yedi üyeli, öteki 413 karakter ve kod noktası aralıklarıyla
-    /// tanımlı. Bir çizgi çizim karakteri ([`Family::Line`]) buraya
-    /// eklenemez — `Single`'ın altı da bir `─` çiziyor ama o alt çizgi,
-    /// konumu fontun `underline` metriğinde; `─` hücrenin ortasında ve
-    /// komşusuyla döşemek zorunda.
+    /// Even though the two sets share the same ink, their **boundaries are
+    /// separate**: this enum is closed with seven members, the other is 413
+    /// characters defined by code point ranges. A box-drawing character
+    /// ([`Family::Line`]) cannot be added here — the underline of `Single`
+    /// also draws a `─`, but that is an underline whose position lives in the
+    /// font's `underline` metric; `─` sits in the middle of the cell and must
+    /// tile with its neighbour.
     ///
-    /// Fonttan bir `>` **almıyoruz** ve sebebi ürün kararı: işaret terminalin
-    /// kendi işareti, kullanıcının fontunun değil. Font değişince prompt'un
-    /// şekli değişmemeli (012 phase-9, kullanıcı: "bunu daha hoş kendin
-    /// çizebilir misin").
+    /// We do **not** take a `>` from the font, and the reason is a product
+    /// decision: the mark is the terminal's own, not the user's font's. The
+    /// prompt's shape must not change when the font does (012 phase-9, the
+    /// user: "could you draw this yourself, nicer").
     Chevron,
 }
 
-/// Bir hücreye sığan tam dalga sayısı.
+/// Whole number of waves that fit in one cell.
 ///
-/// Periyot `cell_px.0 / WAVE_COUNT` ve bu bölmenin **tam** olması şart:
-/// sprite tek hücre genişliğinde ve komşularıyla döşeniyor, yani periyot
-/// hücreyi tam bölmezse iki hücrenin sınırında faz kırılır ve çok hücreli bir
-/// alt çizgi kesintili görünür. `1` bu kısıtı inşaen sağlıyor (periyot =
-/// hücre genişliği) ve en yumuşak dalgayı veriyor; büyütülecekse `cell_px.0`'ı
-/// bölen bir değer seçilmeli.
+/// The period is `cell_px.0 / WAVE_COUNT` and this division **must be exact**:
+/// the sprite is one cell wide and tiled with its neighbours, so if the period
+/// does not divide the cell exactly the phase breaks at the boundary of two
+/// cells and a multi-cell underline looks interrupted. `1` satisfies this by
+/// construction (period = cell width) and gives the gentlest wave; if it is
+/// ever raised, a value that divides `cell_px.0` must be chosen.
 const WAVE_COUNT: f32 = 1.0;
 
-/// Kıvrımın dikey kaplamı, kalınlığın katı olarak.
+/// Vertical extent of the curl, as a multiple of the thickness.
 ///
-/// Dalganın göz tarafından dalga olarak görülmesi için gereken en küçük
-/// kaplam. Tabanı alt çizginin tabanına çakılı ve o zaten hücrenin içinde
-/// (`rules::rule_envelope`), yani kıvrım inşaen içeride.
+/// The smallest extent needed for the eye to read the wave as a wave. Its
+/// base is pinned to the underline's base, which is already inside the cell
+/// (`rules::rule_envelope`), so the curl is inside by construction.
 const CURL_FACTOR: f32 = 3.0;
 
-/// `target`e kural çizgisinin kapsama baytlarını çizer.
+/// Draws the coverage bytes of a rule line into `target`.
 ///
-/// [`draw`]'in kardeşi ama **CG kullanmıyor**: `tofu_buffer` gibi doğrudan
-/// bayt yazıyor. Üç kazanç — çizim deterministik (CG'nin antialias sürümüne
-/// bağlı değil, sınama tam yapı assert edebilir), başarısızlık dalı hiç
-/// doğmuyor (`NoContext` yok, dönüş `()`), ve font hiç sorulmuyor.
+/// A sibling of [`draw`] but **does not use CG**: like `tofu_buffer` it writes
+/// bytes directly. Three gains — the drawing is deterministic (it does not
+/// depend on CG's antialiasing version, tests can assert the exact structure),
+/// the failure branch never arises (no `NoContext`, the return is `()`), and
+/// the font is never asked.
 pub(crate) fn draw_rule(kind: RuleKind, m: Metrics, target: &mut [u8]) {
-    // audit: `draw`'inkiyle aynı ön koşul, aynı gerekçe. Tampon `m`'den
-    // boyutlandırılmış `self.buffer`, yani ayrışma yapısal olarak imkânsız;
-    // assert onu sınırda ve adıyla yakalıyor, `band`/`curl`'in döngüsünde
-    // anlamsız bir indeks paniği olarak değil.
-    assert_eq!(target.len(), m.slot_bytes(), "tampon tam bir yuva olmalı");
-    // Tampon paylaşılıyor ve içinde bir önceki glyph'in pikselleri var;
-    // sıfırlanmazsa kural çizgisinin altından o glyph görünür.
+    // audit: the same precondition as `draw`'s, the same reasoning. The buffer
+    // is `self.buffer`, sized from `m`, so a mismatch is structurally
+    // impossible; the assert catches it at the boundary and by name, not as a
+    // meaningless index panic inside `band`/`curl`'s loop.
+    assert_eq!(
+        target.len(),
+        m.slot_bytes(),
+        "the buffer must be exactly one slot"
+    );
+    // The buffer is shared and holds the previous glyph's pixels; if it were
+    // not zeroed, that glyph would show through under the rule line.
     target.fill(0);
 
     let (position, thickness) = match kind {
         RuleKind::Strike => m.strikeout_px,
         _ => m.underline_px,
     };
-    // Desen periyodu tam sayı aritmetiğinde kalıyor: `as usize` turu doğmuyor.
+    // The pattern period stays in integer arithmetic: no `as usize` round trip.
     let thick = usize::from(thickness);
     let (w, h) = m.cell_wh();
     let (position, thickness) = (f32::from(position), f32::from(thickness));
 
     match kind {
-        // Kesintisiz desen: periyot 1, dolu 1.
+        // Continuous pattern: period 1, filled 1.
         RuleKind::Single | RuleKind::Strike => band(target, m, position, thickness, 1, 1),
         RuleKind::Double => {
             band(target, m, position, thickness, 1, 1);
-            // İkinci çizgi **önce aşağıya**. Alt çizgi ile hücre tabanı
-            // arasındaki satırlar boş (13pt: çizgi 14, hücre 17 → 15-16 boş)
-            // ve orası glyph gövdesinden uzak. Yukarı taşımak `a e o` gibi
-            // harflerin son gövde satırına girer ve iki çizgi ayrı görünmek
-            // yerine harflerin dibine yapışık tek kalın çizgi gibi okunur.
-            // Aşağıda yer yoksa yukarı düşülür.
+            // The second line goes **down first**. The rows between the
+            // underline and the cell's base are empty (13pt: line 14, cell 17
+            // → 15-16 empty) and they are far from the glyph body. Moving it
+            // up would reach the last body row of letters like `a e o`, and
+            // the two lines would read as one thick line stuck to the letters'
+            // feet instead of looking separate. If there is no room below, it
+            // falls up.
             let below = position + 2.0 * thickness;
             let second = if below + thickness <= h as f32 {
                 below
@@ -257,9 +266,10 @@ pub(crate) fn draw_rule(kind: RuleKind, m: Metrics, target: &mut [u8]) {
             };
             band(target, m, second, thickness, 1, 1);
         }
-        // Nokta ve kesik: periyot kalınlığa bağlı, yani punto büyüdükçe desen
-        // de büyüyor ve @2x'te sıkışmış görünmüyor. Alt sınır gerekmiyor —
-        // `rules::rule_envelope` kalınlığı zaten `>= 1`'e bağlıyor.
+        // Dotted and dashed: the period depends on the thickness, so the
+        // pattern grows with the point size and does not look cramped at @2x.
+        // No lower bound is needed — `rules::rule_envelope` already ties the
+        // thickness to `>= 1`.
         RuleKind::Dotted => {
             let p = dividing_period(2 * thick, w);
             band(target, m, position, thickness, p, (p / 2).max(1));
@@ -273,41 +283,44 @@ pub(crate) fn draw_rule(kind: RuleKind, m: Metrics, target: &mut [u8]) {
     }
 }
 
-/// Prompt işareti: iki kolu ortada birleşen bir chevron.
+/// Prompt mark: a chevron whose two arms meet in the middle.
 ///
-/// **Dikey merkezi üstü çizili metriğinden.** Yeni bir sayı uydurmaya gerek
-/// yok: üstü çizili çizgisi tam da x-height'ın ortasında duruyor, yani
-/// küçük harflerin optik merkezi. İşaret oraya oturunca metinle aynı hizada
-/// okunuyor; hücrenin geometrik merkezi taban çizgisinin altına düşer ve
-/// işaret metne göre alçak görünürdü.
+/// **Its vertical centre comes from the strikeout metric.** No new number
+/// needs inventing: the strikeout line sits exactly at the middle of the
+/// x-height, i.e. the optical centre of lowercase letters. With the mark
+/// seated there it reads aligned with the text; the cell's geometric centre
+/// falls below the baseline and the mark would look low against the text.
 ///
-/// **Yüksekliği x-height, genişliği onun yarısı.** İlki de türetilmiş: üstü
-/// çizili merkezi ile taban çizgisi arasındaki mesafe x-height'ın yarısı, yani
-/// kolların dikey açıklığı doğrudan fontun kendi ölçüsünden geliyor. Oran
-/// 1:2 chevron'un olağan tipografik oranı ve tek bir sayı — ikinci bir
-/// tasarım sabiti doğmuyor.
+/// **Height is the x-height, width is half of it.** The first is derived too:
+/// the distance between the strikeout centre and the baseline is half the
+/// x-height, so the arms' vertical span comes straight from the font's own
+/// measure. The 1:2 ratio is a chevron's usual typographic proportion and is a
+/// single number — no second design constant arises.
 ///
-/// **Kalınlık alt çizginin kalınlığı.** İkinci bir kalınlık sayısı iki kaynak
-/// olurdu ve punto/ölçek değişiminde ayrışırdı.
+/// **Thickness is the underline's thickness.** A second thickness number would
+/// be a second source and would drift apart when the point size or scale
+/// changes.
 ///
-/// Ink yatayda hücrenin ortasına toplanıyor ve genişliği hücrenin yarısını
-/// aşmıyor: işaret ızgarada **sol payın içinde** çiziliyor
-/// (`bt_gpu::Frame::push_block`) ve pay bir hücreden dar olabilir. Taşsaydı
-/// komut metninin ilk harfine binerdi.
+/// The ink is gathered at the horizontal centre of the cell and its width does
+/// not exceed half the cell: the mark is drawn in the grid **inside the left
+/// gutter** (`bt_gpu::Frame::push_block`) and the gutter can be narrower than
+/// one cell. If it overflowed, it would land on the first letter of the
+/// command text.
 fn chevron(target: &mut [u8], m: Metrics) {
     let (w, _) = m.cell_wh();
     let (strike_top, strike_thick) = m.strikeout_px;
     let center_y = f32::from(strike_top) + f32::from(strike_thick) / 2.0;
-    // x-height'ın yarısı; taban çizgisi merkezin altında olmasaydı (dejenere
-    // metrik) kollar sıfıra iner ve işaret hiç çizilmez — panik değil, boşluk.
+    // Half the x-height; if the baseline were not below the centre (a
+    // degenerate metric) the arms shrink to zero and the mark is not drawn at
+    // all — a blank, not a panic.
     let half_h = (f32::from(m.baseline_px) - center_y).max(0.0);
     let half_w = half_h / 2.0;
     let center_x = w as f32 / 2.0;
-    // Yarı kalınlık: kapsama mesafeden hesaplanıyor, yani çizginin **ekseni**
-    // ile piksel merkezi arasındaki uzaklık.
+    // Half thickness: coverage is computed from distance, i.e. the distance
+    // between the line's **axis** and the pixel centre.
     let half_stroke = f32::from(m.underline_px.1).max(1.0) / 2.0;
 
-    // Kolların uçları ve tepe noktası. `>` sola açık: uçlar solda, tepe sağda.
+    // The arms' tips and the apex. `>` opens to the left: tips left, apex right.
     let apex = (center_x + half_w, center_y);
     let upper = (center_x - half_w, center_y - half_h);
     let lower = (center_x - half_w, center_y + half_h);
@@ -317,44 +330,44 @@ fn chevron(target: &mut [u8], m: Metrics) {
     });
 }
 
-/// Mesafe alanını kapsama baytlarına basar: `distance` sıfıra yakın piksel
-/// dolu, `half_stroke + 0.5`'ten uzak olan boş.
+/// Stamps the distance field into coverage bytes: pixels whose `distance` is
+/// near zero are full, those farther than `half_stroke + 0.5` are empty.
 ///
-/// **Kenar yumuşatma kuralının tek sahibi**, [`coverage`]'ın eksen hizalı
-/// çizimler için olduğu gibi. Gerekçe de aynı ve orada yazılı: iki çizici
-/// aynı kuralı iki kez yazarsa biri ayarlandığında öteki eski sertlikte
-/// kalır ve belirti sessizdir — "şekilleri farklı olsun" diyen bir sınama
-/// bunu göremez. Bugün iki tüketicisi var, [`chevron`] ile [`corner`], ve
-/// yarım piksellik geçiş bandı ikisinde de aynı: daha genişi şekli
-/// bulanıklaştırır, daha darı merdivenlendirir.
+/// **The single owner of the antialiasing rule**, as [`coverage`] is for
+/// axis-aligned drawing. The reasoning is the same and is written there: if two
+/// drawers write the same rule twice, when one is tuned the other stays at the
+/// old hardness and the symptom is silent — a test saying "their shapes should
+/// differ" cannot see it. Today it has two consumers, [`chevron`] and
+/// [`corner`], and the half-pixel transition band is the same in both: a wider
+/// one blurs the shape, a narrower one makes it staircase.
 ///
-/// `join` **yok**: iki tüketici de boş bir tampona çiziyor ve mesafe alanı
-/// bütün hücreyi kapsıyor, yani yazma doğrudan. Birleştirici isteyen bir
-/// üçüncü tüketici çıkarsa buraya girer, çağıranın içine değil.
+/// There is **no** `join`: both consumers draw into an empty buffer and the
+/// distance field covers the whole cell, so the write is direct. If a third
+/// consumer wants a combiner, it goes here, not inside the caller.
 fn stamp(target: &mut [u8], m: Metrics, half_stroke: f32, distance: impl Fn(f32, f32) -> f32) {
     let (w, h) = m.cell_wh();
     for y in 0..h {
         for x in 0..w {
             let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
             let value = (half_stroke + 0.5 - distance(px, py)).clamp(0.0, 1.0);
-            // audit: `y < h` ve `x < w`, yani indeks `w * h`'nin altında.
+            // audit: `y < h` and `x < w`, so the index is below `w * h`.
             target[y * w + x] = (value * 255.0).round() as u8;
         }
     }
 }
 
-/// Bir noktanın doğru parçasına uzaklığı; chevron'un kenar yumuşatması buna
-/// bakıyor.
+/// Distance from a point to a line segment; the chevron's antialiasing looks
+/// at this.
 ///
-/// CG **kullanmıyor**, `band` ve `curl` ile aynı gerekçe: çizim deterministik
-/// kalıyor (sınama tam yapı assert edebiliyor), başarısızlık dalı doğmuyor ve
-/// font hiç sorulmuyor.
+/// It does **not** use CG, for the same reason as `band` and `curl`: the
+/// drawing stays deterministic (tests can assert the exact structure), the
+/// failure branch does not arise and the font is never asked.
 fn distance_to_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
     let (abx, aby) = (b.0 - a.0, b.1 - a.1);
     let (apx, apy) = (px - a.0, py - a.1);
     let length = abx * abx + aby * aby;
-    // Dejenere parça (sıfır uzunluk) uç noktaya uzaklığa iniyor: `half_h`
-    // sıfır olduğunda bu dal koşuyor ve bölme hiç yapılmıyor.
+    // A degenerate segment (zero length) drops to the distance to the
+    // endpoint: this branch runs when `half_h` is zero and no division is done.
     let t = if length > 0.0 {
         ((apx * abx + apy * aby) / length).clamp(0.0, 1.0)
     } else {
@@ -364,22 +377,24 @@ fn distance_to_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-/// İstenen periyodu hücre genişliğini **tam bölen** en yakın değere yuvarlar.
+/// Rounds the wanted period to the nearest value that **divides the cell
+/// width exactly**.
 ///
-/// `WAVE_COUNT`'nın kıvrım için taşıdığı kısıtın nokta/kesik karşılığı ve
-/// aynı sebeple var: sprite tek hücre genişliğinde, komşularıyla döşeniyor ve
-/// `x % period` deseni hücre sınırında faz kırar. Ölçüldü (bu makine,
-/// Menlo 13pt@1x): `w = 8`, `Dashed`'in istediği periyot 6 → `8 % 6 = 2`,
-/// yani iki komşu hücrede tire uzunlukları farklı görünürdü. Kıvrımda kısıt
-/// uygulanıp burada uygulanmaması bir gözden kaçmaydı.
+/// The dotted/dashed counterpart of the constraint `WAVE_COUNT` carries for the
+/// curl, and it exists for the same reason: the sprite is one cell wide, tiled
+/// with its neighbours, and an `x % period` pattern breaks phase at the cell
+/// boundary. Measured (this machine, Menlo 13pt@1x): `w = 8`, `Dashed` wants
+/// period 6 → `8 % 6 = 2`, so the dash lengths would look different in two
+/// neighbouring cells. Applying the constraint to the curl but not here was an
+/// oversight.
 pub(crate) fn dividing_period(wanted: usize, w: usize) -> usize {
     let wanted = wanted.clamp(1, w.max(1));
     (wanted..=w).find(|p| w % p == 0).unwrap_or(w.max(1))
 }
 
-/// Yatay bant: `[top, top + thickness)` satırlarını `desen`in kabul ettiği
-/// sütunlarda boyar. Kısmi kaplanan satır **kısmi alfa** alıyor — kalınlık
-/// tam sayı olmak zorunda değil ve kenar yumuşatması bedava geliyor.
+/// Horizontal band: paints rows `[top, top + thickness)` in the columns the
+/// `pattern` accepts. A partially covered row gets **partial alpha** — the
+/// thickness need not be an integer and the antialiasing comes for free.
 fn band(target: &mut [u8], m: Metrics, top: f32, thickness: f32, period: usize, filled: usize) {
     let (w, h) = m.cell_wh();
     let (y0, y1) = (top, top + thickness);
@@ -390,161 +405,170 @@ fn band(target: &mut [u8], m: Metrics, top: f32, thickness: f32, period: usize, 
         }
         for x in 0..w {
             if x % period < filled {
-                // `max`: `Double`'ın iki bandı çakışırsa koyu olan kazanır.
-                // audit: `y < h` ve `x < w`, yani indeks `w * h`'nin altında.
+                // `max`: if the two bands of `Double` overlap, the darker wins.
+                // audit: `y < h` and `x < w`, so the index is below `w * h`.
                 target[y * w + x] = target[y * w + x].max(value);
             }
         }
     }
 }
 
-/// `[y, y+1)` pikselinin `[y0, y1)` bandıyla kesişimi → alfa baytı.
+/// Intersection of pixel `[y, y+1)` with band `[y0, y1)` → alpha byte.
 ///
-/// Tek sahip: `band` ve `curl` aynı kenar yumuşatma kuralını kullanmak
-/// zorunda, yoksa kıvrım ötekilerden farklı yumuşaklık alır ve belirti
-/// sessizdir — beş çeşidi karşılaştıran sınama "farklı olsunlar" dediği için
-/// bunu göremez.
+/// Single owner: `band` and `curl` must use the same antialiasing rule, or the
+/// curl gets a different softness from the others and the symptom is silent —
+/// a test comparing the five kinds cannot see it because it says "they should
+/// differ".
 fn coverage(y: usize, y0: f32, y1: f32) -> u8 {
     (overlap(y, y0, y1) * 255.0).round() as u8
 }
 
-/// `[i, i+1)` pikselinin `[a, b)` aralığıyla kesişimi — **oran olarak**.
+/// Intersection of pixel `[i, i+1)` with range `[a, b)` — **as a ratio**.
 ///
-/// [`coverage`]'ın içinden çıkarıldı çünkü dikdörtgen iki eksende birden
-/// örtüşüyor ve iki oranın **çarpımı** bir kez yuvarlanmak zorunda: iki
-/// `coverage` baytını çarpmak iki kez yuvarlar ve `▀` ile `▄`'ün doygun
-/// toplamı 255'te durmaz — ondan bir iki eksik kalır, yani alt alta iki
-/// yarım blok arasında bu setin kapatmaya geldiği şeridin sönük bir
-/// kopyası belirirdi.
+/// Extracted from [`coverage`] because a rectangle overlaps on two axes at
+/// once and the **product** of the two ratios must be rounded once: multiplying
+/// two `coverage` bytes rounds twice and the saturating sum of `▀` and `▄`
+/// would not stop at 255 — it would fall one or two short, so between two
+/// stacked half blocks a faint copy of the seam this set exists to close would
+/// appear.
 fn overlap(i: usize, a: f32, b: f32) -> f32 {
     (b.min(i as f32 + 1.0) - a.max(i as f32)).clamp(0.0, 1.0)
 }
 
-/// Kıvrımlı çizgi: bandın merkezi sütun boyunca sinüsle salınıyor.
+/// Curly line: the centre of the band oscillates along the columns with a sine.
 ///
-/// Dalga bandının **altı alt çizginin altına çakılı**: `position +
-/// CURL_FACTOR * thickness`, hücre tabanına kırpılarak. Kırpma burada
-/// **gerekli** — `rules::rule_envelope` yalnız `position + thickness`'ı
-/// hücrenin içine oturtuyor, kıvrım ise onun `CURL_FACTOR` katı kadar aşağı
-/// iniyor ve tabanı taşabiliyor.
+/// The wave band's **bottom is pinned below the underline**: `position +
+/// CURL_FACTOR * thickness`, clipped to the cell base. The clipping is
+/// **necessary** here — `rules::rule_envelope` only fits `position +
+/// thickness` inside the cell, while the curl descends `CURL_FACTOR` times
+/// that far and can overflow the base.
 fn curl(target: &mut [u8], m: Metrics, position: f32, thickness: f32) {
     let (w, h) = m.cell_wh();
-    // Dalga bandı alt çizgiden **aşağı** doğru büyüyor, yukarı değil: alt
-    // çizgi ile hücre tabanı arasındaki satırlar boş ve orası glyph
-    // gövdesinden uzak. Yukarı büyüseydi dalganın tepesi harf tabanlarıyla
-    // birleşirdi (13pt: tepe 12 = `a e o`'nun son gövde satırı).
-    // Genlik burada türüyor, `Metrics`'te değil: fonttan gelen bir ölçü değil,
-    // bu çizicinin tasarım sabiti. `Metrics` "fonttan türeyen hücre
-    // geometrisi" olarak kalıyor — tek tüketicisi olan bir sabiti `pub` bir
-    // alana koymak onu `bt-gpu`'ya da gösterirdi.
+    // The wave band grows **downward** from the underline, not upward: the
+    // rows between the underline and the cell base are empty and far from the
+    // glyph body. If it grew upward, the wave's crest would merge with the
+    // letters' bases (13pt: crest 12 = the last body row of `a e o`).
+    // The amplitude is derived here, not in `Metrics`: it is not a measure that
+    // comes from the font but a design constant of this drawer. `Metrics`
+    // stays "cell geometry derived from the font" — putting a constant with a
+    // single consumer into a `pub` field would expose it to `bt-gpu` as well.
     let top = position;
     let bottom = (position + CURL_FACTOR * thickness).min(h as f32);
-    // Merkez ekseni bandın içinde kalsın: yarım kalınlık pay bırakılıyor.
+    // Keep the centre axis inside the band: half the thickness is left as margin.
     let (y_bottom, y_top) = (bottom - thickness / 2.0, top + thickness / 2.0);
     let mid = (y_bottom + y_top) / 2.0;
     let amplitude = (y_bottom - y_top) / 2.0;
     for x in 0..w {
-        // Piksel **merkezinden** örnekleniyor ve bir hücreye tam
-        // `WAVE_COUNT` dalga sığıyor: sprite komşularıyla döşendiğinde faz
-        // kırılmıyor (bkz. `WAVE_COUNT`).
+        // Sampled at the pixel **centre**, and exactly `WAVE_COUNT` waves fit
+        // in one cell: when the sprite is tiled with its neighbours the phase
+        // does not break (see `WAVE_COUNT`).
         let phase = core::f32::consts::TAU * (x as f32 + 0.5) * WAVE_COUNT / w as f32;
         let center = mid + amplitude * phase.sin();
         let (y0, y1) = (center - thickness / 2.0, center + thickness / 2.0);
         for y in 0..h {
             let value = coverage(y, y0, y1);
             if value > 0 {
-                // audit: `y < h` ve `x < w`.
+                // audit: `y < h` and `x < w`.
                 target[y * w + x] = value;
             }
         }
     }
 }
 
-/// Yordamsal çizilen karakter aileleri.
+/// Procedurally drawn character families.
 ///
-/// [`RuleKind`]'ın ikinci kümesi: fonttan gelmiyorlar, hücre ölçüsünden
-/// hesaplanıyorlar ve yüzden bağımsızlar. Farkları bir **karakter** olmaları
-/// — atlasta [`crate::Sprite::Char`] olarak yaşıyorlar, yani `bt-gpu` onları
-/// sıradan harflerden ayırt etmiyor ve sınır hiç değişmiyor.
+/// The second set next to [`RuleKind`]: they do not come from the font, they
+/// are computed from the cell measure and are independent of the face. What
+/// differs is that they are **characters** — they live in the atlas as
+/// [`crate::Sprite::Char`], so `bt-gpu` does not tell them apart from
+/// ordinary letters and the boundary does not change at all.
 enum Family {
-    /// U+2580–U+259F — blok elemanları: yarımlar, sekizde bir merdivenleri,
-    /// çeyrekler ve üç gölge.
+    /// U+2580–U+259F — block elements: halves, eighth-steps, quadrants and
+    /// three shades.
     Block,
-    /// U+2800–U+28FF — Braille deseni; alt 8 bit doğrudan nokta maskesi.
+    /// U+2800–U+28FF — Braille pattern; the low 8 bits are directly the dot
+    /// mask.
     Braille,
-    /// U+2500–U+257F — çizgi çizim: dört kol × {yok, ince, kalın, çift},
-    /// kesikli aile ve yuvarlak köşeler. **Köşegenler hariç**, bkz.
+    /// U+2500–U+257F — box drawing: four arms × {none, light, heavy, double},
+    /// the dashed family and rounded corners. **Except the diagonals**, see
     /// [`family`].
     Line,
-    /// U+23B8–U+23BF — terminalin grafik kümesi: iki dikey kutu çizgisi, dört
-    /// tarama satırı ve iki köşe. [`Line`](Family::Line)'ın akrabası ama
-    /// eksenleri **kenarda**, merkezde değil; gerekçesi [`technical`]'de.
+    /// U+23B8–U+23BF — the terminal's graphics set: two vertical box lines,
+    /// four scan lines and two corners. A relative of [`Line`](Family::Line)
+    /// but its axes are **on the edge**, not the centre; the reasoning is in
+    /// [`technical`].
     Technical,
 }
 
-/// Karakterin yordamsal ailesi — **kapsamın tek sahibi**.
+/// The character's procedural family — **the single owner of coverage**.
 ///
-/// [`is_procedural`] ile [`draw_procedural`] aynı fonksiyonu çağırıyor,
-/// çünkü ikisi `Atlas::slot`'un **iki ayrı** kolundan okunuyor: biri
-/// normalizasyonda ("bu karakter yüze duyarsız mı"), öteki çizimde ("fonta
-/// mı soracağız"). İki kopya sessizce kayardı ve kaymanın tehlikeli yönü de
-/// sessiz olanı: kapıda var / normalizasyonda yok olsaydı aynı bitmap dört
-/// yüz için dört ayrı yuva tutardı (`Atlas::slot`'un kendi doc'u).
+/// [`is_procedural`] and [`draw_procedural`] call the same function, because
+/// they are read from **two separate** arms of `Atlas::slot`: one in
+/// normalisation ("is this character face-insensitive"), the other in drawing
+/// ("will we ask the font"). Two copies would drift silently, and the dangerous
+/// direction of the drift is the silent one: were it present at the gate and
+/// absent from normalisation, the same bitmap would hold four separate slots
+/// for four faces (`Atlas::slot`'s own doc).
 fn family(ch: char) -> Option<Family> {
     match ch {
         '\u{2580}'..='\u{259F}' => Some(Family::Block),
         '\u{2800}'..='\u{28FF}' => Some(Family::Braille),
-        // Köşegenler (`╱╲╳`) kapsamın içinde **bilerek bırakılmış bir delik**
-        // (`discussion.md` → Karar 3B): mesafe alanı onları da çizebilirdi,
-        // üçü de nadir ve setin ölçüsü kapsamı kapalı tutmaktan geçti. Kol
-        // aşağıdaki aralığın **üstünde** durmak zorunda, yoksa delik kapanır.
+        // The diagonals (`╱╲╳`) are a **deliberately left hole** inside the
+        // coverage (`discussion.md` → Karar 3B): the distance field could have
+        // drawn them too, but all three are rare and the set's measure was to
+        // keep the coverage closed. This arm must stand **above** the range
+        // below, otherwise the hole closes.
         //
-        // Deliğin ikinci bir işi var ve o da bilerek: bu üç karakter Menlo
-        // Regular'da olup Bold'da olmayan tek kalan blok, yani
-        // `face_fallback_is_cached_under_the_requested_face`'in fikstürü
-        // (019'un yüz merdiveni kolunun bu makinedeki tek bekçisi) burada
-        // yaşıyor.
+        // The hole has a second job and that is deliberate too: these three
+        // characters are the only remaining block in Menlo Regular that is
+        // absent from Bold, i.e. the fixture of
+        // `face_fallback_is_cached_under_the_requested_face` (the only guard on
+        // this machine for 019's face ladder arm) lives here.
         '\u{2571}'..='\u{2573}' => None,
         '\u{2500}'..='\u{257F}' => Some(Family::Line),
-        // U+23B7 (`⎷` RADICAL SYMBOL BOTTOM) aralığın **altında** duruyor ve
-        // bu da bilerek bırakılmış bir delik: kök işaretinin kuyruğu bir ray
-        // değil, yani [`technical`]'in geometrisi onu çizemez. Cascade'den
-        // geliyor ve kapıyı geçiyor (ölçüldü, bu makine, Menlo 16pt: Apple
-        // Symbols, mürekkebi hücrenin 0.88'i), yani kapsama almak bir kusuru
-        // değil çalışan bir glyph'i değiştirirdi.
+        // U+23B7 (`⎷` RADICAL SYMBOL BOTTOM) stands **below** the range and
+        // that too is a deliberately left hole: the radical sign's tail is not
+        // a rail, so [`technical`]'s geometry cannot draw it. It comes from the
+        // cascade and passes the gate (measured, this machine, Menlo 16pt:
+        // Apple Symbols, ink 0.88 of the cell), so taking it into the coverage
+        // would replace a working glyph, not fix a defect.
         '\u{23B8}'..='\u{23BF}' => Some(Family::Technical),
         _ => None,
     }
 }
 
-/// Karakter fonttan değil terminalden mi geliyor?
+/// Does the character come from the terminal rather than the font?
 ///
-/// **Yordamsal çizim fontu koşulsuz yener** ve bu bir karar: kullanıcı bu
-/// karakterleri taşıyan bir font seçse de yordamsal çizim kazanır. Gerekçe
-/// döşeme — fontun em kutusu hücre kutusu değil ve bir fontun onu vermesini
-/// garanti edecek hiçbir ölçüt yok. Ölçüldü (019 phase-2, kullanıcı ekran
-/// görüntüsüyle bildirdi): Menlo 13pt'de 8×18 hücrenin yalnız 3–16 satırları
-/// boyanıyor, yani alt alta iki `█` arasında ~5 piksel şerit kalıyor. 012
-/// phase-9'un prompt işareti kararının aynısı: *işaret terminalin kendi
-/// işareti, kullanıcının fontunun değil.*
+/// **Procedural drawing beats the font unconditionally** and this is a
+/// decision: even if the user picks a font that carries these characters,
+/// procedural drawing wins. The reason is tiling — the font's em box is not
+/// the cell box and there is no criterion that guarantees a font will provide
+/// it. Measured (019 phase-2, reported by the user with a screenshot): in
+/// Menlo 13pt only rows 3–16 of the 8×18 cell are painted, so ~5 pixels of
+/// stripe remain between two stacked `█`. The same as 012 phase-9's prompt
+/// mark decision: *the mark is the terminal's own, not the user's font's.*
 pub(crate) fn is_procedural(ch: char) -> bool {
     family(ch).is_some()
 }
 
-/// `target`e yordamsal karakterin kapsama baytlarını çizer.
+/// Draws the coverage bytes of a procedural character into `target`.
 ///
-/// [`draw_rule`]'un ikizi ve aynı iki açılış satırıyla başlıyor; gerekçeleri
-/// de aynı. Başarısız olamaz — font sorulmuyor, bağlam kurulmuyor — yani
-/// çağıranın `Drawn`'ı bir varsayım değil tipin kendisi.
+/// The twin of [`draw_rule`], starting with the same two opening lines; the
+/// reasons are the same too. It cannot fail — no font is asked, no context is
+/// set up — so the caller's `Drawn` is not an assumption but the type itself.
 ///
-/// Kapsam dışı karakter **boş yuva** bırakıyor, panik değil: çağıran
-/// ([`is_procedural`]) kapıyı zaten tutuyor, ama panik yolu bir çizicide
-/// karşılığı olmayan bir risk — boş hücre görünür ve teşhis edilebilir bir
-/// kayıp, panik ise pencerenin kendisi.
+/// An out-of-coverage character leaves an **empty slot**, not a panic: the
+/// caller ([`is_procedural`]) already holds the gate, but a panic path in a
+/// drawer has no counterpart of value — an empty cell is a visible and
+/// diagnosable loss, a panic is the window itself.
 pub(crate) fn draw_procedural(ch: char, m: Metrics, target: &mut [u8]) {
-    // audit: `draw`/`draw_rule` ile aynı ön koşul, aynı gerekçe.
-    assert_eq!(target.len(), m.slot_bytes(), "tampon tam bir yuva olmalı");
-    // Tampon paylaşılıyor ve içinde bir önceki glyph'in pikselleri var.
+    // audit: the same precondition as `draw`/`draw_rule`, the same reasoning.
+    assert_eq!(
+        target.len(),
+        m.slot_bytes(),
+        "the buffer must be exactly one slot"
+    );
+    // The buffer is shared and holds the previous glyph's pixels.
     target.fill(0);
 
     match family(ch) {
@@ -556,32 +580,34 @@ pub(crate) fn draw_procedural(ch: char, m: Metrics, target: &mut [u8]) {
     }
 }
 
-/// Kesirli dikdörtgen, kapsaması **toplanarak** — döşeyen parçalar için.
+/// Fractional rectangle, coverage **summed** — for tiling parts.
 ///
-/// Toplama ile [`max_rect`] arasındaki fark bir zevk değil bir ölçüt:
-/// birbirini döşeyen (ayrık) parçaların birleşimi **tam** kapsama vermek
-/// zorunda. `▀` ile `▄` 13pt@2x'in h = 33'ünde 16.5 satırında buluşuyor ve ikisi de o
-/// satıra 128 bırakıyor; `max` alsaydı hücrenin ortasında %50'lik bir şerit
-/// kalırdı — yani bu setin kapatmaya geldiği kusurun hücre içine taşınmış
-/// hâli. Doygun toplama onu 255'e kapatıyor.
+/// The difference between summing and [`max_rect`] is not a taste but a
+/// criterion: the union of parts that tile each other (disjoint) must give
+/// **full** coverage. `▀` and `▄` meet at row 16.5 of 13pt@2x's h = 33 and both
+/// leave 128 in that row; with `max` a 50% stripe would remain in the middle of
+/// the cell — the defect this set exists to close, moved inside the cell.
+/// Saturating addition closes it to 255.
 fn add_rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32) {
     rect(target, m, x0, x1, y0, y1, u8::saturating_add);
 }
 
-/// Kesirli dikdörtgen, kapsaması **piksel-max** ile — üst üste binen mürekkep.
+/// Fractional rectangle, coverage by **pixel-max** — overlapping ink.
 ///
-/// Braille'in noktaları ayrı mürekkep lekeleri; geometri dejenere olup iki
-/// nokta aynı piksele değdiğinde toplama onları sahte bir kalınlığa
-/// çıkarırdı. `max` lekeleri dürüst tutuyor ve "maskenin sprite'ı = set
-/// bitlerin sprite'larının piksel-max'i" değişmezi **yapısal** oluyor:
-/// noktaların ayrıklığından değil, birleştiricinin kendisinden.
+/// Braille's dots are separate blobs of ink; when the geometry degenerates and
+/// two dots touch the same pixel, summing would inflate them to a false
+/// thickness. `max` keeps the blobs honest and makes the invariant "the
+/// sprite of a mask = the pixel-max of the sprites of its set bits"
+/// **structural**: it comes from the combiner itself, not from the dots being
+/// disjoint.
 fn max_rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32) {
     rect(target, m, x0, x1, y0, y1, u8::max);
 }
 
-/// İki eksende kesirli dikdörtgen; kenar yumuşatması [`overlap`]'ten bedava.
+/// Fractional rectangle on two axes; antialiasing comes for free from
+/// [`overlap`].
 ///
-/// Oranlar **çarpılıp bir kez** yuvarlanıyor (bkz. [`overlap`]).
+/// The ratios are **multiplied and rounded once** (see [`overlap`]).
 fn rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32, join: fn(u8, u8) -> u8) {
     let (w, h) = m.cell_wh();
     for y in 0..h {
@@ -592,37 +618,40 @@ fn rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32, join:
         for x in 0..w {
             let value = (ry * overlap(x, x0, x1) * 255.0).round() as u8;
             if value > 0 {
-                // audit: `y < h` ve `x < w`, yani indeks `w * h`'nin altında.
+                // audit: `y < h` and `x < w`, so the index is below `w * h`.
                 target[y * w + x] = join(target[y * w + x], value);
             }
         }
     }
 }
 
-/// Üç gölgenin (`░▒▓`, U+2591–U+2593) kapsama oranları.
+/// Coverage ratios of the three shades (`░▒▓`, U+2591–U+2593).
 ///
-/// **Ölçüm değil tasarım sabiti** (`CURL_FACTOR` emsali) ve sayılar
-/// karakterlerin kendi tanımından: çeyrek, yarım, üç çeyrek yoğunluk.
+/// **A design constant, not a measurement** (like `CURL_FACTOR`), and the
+/// numbers come from the characters' own definitions: quarter, half,
+/// three-quarter density.
 ///
-/// Desen **yok, düz kapsama var** ve bu bilinçli: CP437'nin dama deseni tek
-/// bitlik ekranların yoğunluk hilesiydi, atlas ise sekiz bitlik. Dama
-/// yazılsaydı faz ancak adım hücrenin **iki** ölçüsünü de bölerse tutardı ve
-/// tutmuyor — bu makinede 13pt@2x hücresi 16×33 ve 33 tek, yani her satır
-/// sınırında desen kırılır, `░` ile dolu bir alanda yatay şeritler belirirdi.
-/// Döşeme bu setin varlık sebebi; düz kapsama onu inşaen veriyor.
+/// There is **no pattern, only flat coverage** and this is deliberate: CP437's
+/// checkerboard was a density trick for one-bit displays, while the atlas is
+/// eight-bit. Had a checkerboard been written, its phase would hold only if
+/// the step divided **both** measures of the cell, and it does not — on this
+/// machine 13pt@2x's cell is 16×33 and 33 is odd, so the pattern would break
+/// at every row boundary and horizontal stripes would appear in an area full
+/// of `░`. Tiling is this set's reason to exist; flat coverage gives it by
+/// construction.
 const SHADE_LEVELS: [f32; 3] = [0.25, 0.5, 0.75];
 
-/// Çeyrek maskesinin bitleri: sol üst, sağ üst, sol alt, sağ alt.
+/// Bits of the quadrant mask: upper left, upper right, lower left, lower right.
 const UL: u8 = 1;
 const UR: u8 = 2;
 const LL: u8 = 4;
 const LR: u8 = 8;
 
-/// U+2596–U+259F'in çeyrek maskeleri — **gerçek tablo**, formül yok.
+/// Quadrant masks of U+2596–U+259F — **a real table**, no formula.
 ///
-/// Sıralama Unicode'un kendi sırası ve bir örüntüsü yok (`▖▗▘▙▚▛▜▝▞▟`):
-/// tek çeyrekler üçe bölünmüş, üçlüler araya serpilmiş. Tablo karakter
-/// adlarından yazıldı, sayaçtan değil.
+/// The order is Unicode's own and has no pattern (`▖▗▘▙▚▛▜▝▞▟`): single
+/// quadrants are split into three, triples are sprinkled in between. The table
+/// was written from the characters' names, not from a counter.
 const QUADRANTS: [(char, u8); 10] = [
     ('\u{2596}', LL),           // ▖ QUADRANT LOWER LEFT
     ('\u{2597}', LR),           // ▗ QUADRANT LOWER RIGHT
@@ -636,58 +665,59 @@ const QUADRANTS: [(char, u8); 10] = [
     ('\u{259F}', UR | LL | LR), // ▟ UPPER RIGHT AND LOWER LEFT AND LOWER RIGHT
 ];
 
-/// Blok elemanları (U+2580–U+259F).
+/// Block elements (U+2580–U+259F).
 ///
-/// Ailenin üç yarısı var ve yalnız sonuncusu tablo istiyor: **iki aritmetik
-/// koşu** (alttan ve soldan sekizde bir merdivenleri, yarımlar onların
-/// dördüncü basamağı), **üç gölge** ve **on çeyrek**.
+/// The family has three parts and only the last wants a table: **two
+/// arithmetic runs** (eighth-steps from the bottom and from the left, halves
+/// being their fourth step), **three shades** and **ten quadrants**.
 ///
-/// Sekizde bir dilimleri hücrenin kendi ölçüsünden bölünüyor, sabit bir
-/// piksel sayısından değil: `h / 8` kesirli kalıyor ve kenar yumuşatması
-/// [`rect`]'ten geliyor, yani merdiven her puntoda monoton ve `█` her
-/// puntoda dolu.
+/// Eighth slices are divided from the cell's own measure, not from a fixed
+/// pixel count: `h / 8` stays fractional and the antialiasing comes from
+/// [`rect`], so the staircase is monotonic at every point size and `█` is full
+/// at every point size.
 fn block(ch: char, m: Metrics, target: &mut [u8]) {
     let (w, h) = m.cell_wh();
     let (w, h) = (w as f32, h as f32);
     let cp = u32::from(ch);
     match ch {
-        // ▀ üst yarım. Alt merdivenin aynası değil kendi karakteri: Unicode
-        // alt merdiveni 2581'den, sol merdiveni 258F'ten başlatıyor ve üst
-        // yarımı ikisinin de dışında, aralığın başına koymuş.
+        // ▀ upper half. Not the mirror of the lower staircase but its own
+        // character: Unicode starts the lower staircase at 2581 and the left
+        // staircase at 258F, and placed the upper half outside both, at the
+        // head of the range.
         '\u{2580}' => add_rect(target, m, 0.0, w, 0.0, h / 2.0),
-        // ▁▂▃▄▅▆▇█ — alttan n/8; sekizincisi dolu blok.
+        // ▁▂▃▄▅▆▇█ — n/8 from the bottom; the eighth is the full block.
         '\u{2581}'..='\u{2588}' => {
             let n = (cp - 0x2580) as f32;
             add_rect(target, m, 0.0, w, h - h * n / 8.0, h);
         }
-        // ▉▊▋▌▍▎▏ — soldan n/8, ama **azalarak**: 2589 yedi sekizde,
-        // 258F bir sekizde. Kod noktası büyüdükçe dilim inceliyor, yani
-        // sayaç 0x2590'tan geri sayıyor.
+        // ▉▊▋▌▍▎▏ — n/8 from the left, but **decreasing**: 2589 is seven
+        // eighths, 258F is one eighth. The slice thins as the code point grows,
+        // so the counter counts down from 0x2590.
         '\u{2589}'..='\u{258F}' => {
             let n = (0x2590 - cp) as f32;
             add_rect(target, m, 0.0, w * n / 8.0, 0.0, h);
         }
-        // ▐ sağ yarım.
+        // ▐ right half.
         '\u{2590}' => add_rect(target, m, w / 2.0, w, 0.0, h),
-        // ░▒▓ — düz kapsama (bkz. [`SHADE_LEVELS`]).
+        // ░▒▓ — flat coverage (see [`SHADE_LEVELS`]).
         '\u{2591}'..='\u{2593}' => {
             let level = SHADE_LEVELS[(cp - 0x2591) as usize];
             let value = (level * 255.0).round() as u8;
             target.fill(value);
         }
-        // ▔ üst sekizde bir.
+        // ▔ upper one eighth.
         '\u{2594}' => add_rect(target, m, 0.0, w, 0.0, h / 8.0),
-        // ▕ sağ sekizde bir.
+        // ▕ right one eighth.
         '\u{2595}' => add_rect(target, m, w - w / 8.0, w, 0.0, h),
-        // ▖▗▘▙▚▛▜▝▞▟ — çeyrekler, tablodan.
+        // ▖▗▘▙▚▛▜▝▞▟ — quadrants, from the table.
         _ => {
             let mask = QUADRANTS
                 .iter()
                 .find(|&&(c, _)| c == ch)
                 .map_or(0, |&(_, mask)| mask);
-            // Çeyrekler **ayrık döşüyor**: dördünün birleşimi `█`. Ortadaki
-            // kesirli satır/sütun iki çeyrekten birer pay alıyor ve
-            // [`add_rect`] onları 255'e kapatıyor.
+            // Quadrants **tile disjointly**: the union of all four is `█`. The
+            // fractional row/column in the middle takes one share from each of
+            // two quadrants and [`add_rect`] closes them to 255.
             for (bit, (x0, x1, y0, y1)) in [
                 (UL, (0.0, w / 2.0, 0.0, h / 2.0)),
                 (UR, (w / 2.0, w, 0.0, h / 2.0)),
@@ -702,26 +732,27 @@ fn block(ch: char, m: Metrics, target: &mut [u8]) {
     }
 }
 
-/// Braille noktasının kendi alt hücresini doldurma oranı.
+/// The fraction of its own sub-cell a Braille dot fills.
 ///
-/// **Ölçüm değil tasarım sabiti** (`CURL_FACTOR` emsali). İki şeyi birden
-/// tutuyor: nokta küçük puntoda görünecek kadar büyük, komşu noktalardan
-/// ayrılacak kadar küçük. Oran — mutlak piksel değil — yani punto ve ölçek
-/// büyüdükçe nokta da büyüyor; sabit bir piksel yarıçapı @2x'te iğne başına
-/// dönerdi.
+/// **A design constant, not a measurement** (like `CURL_FACTOR`). It holds two
+/// things at once: a dot big enough to be visible at small point sizes, small
+/// enough to be separated from its neighbours. A ratio — not an absolute pixel
+/// count — so the dot grows as the point size and scale grow; a fixed pixel
+/// radius would turn into a pinhead at @2x.
 ///
-/// Nokta bu phase'de bir **dikdörtgen**; yuvarlağın istediği mesafe alanı
-/// phase-2'nin primitifi ve yalnız bunun için getirilmesi karşılığı olmayan
-/// bir bedel olurdu — 13pt'de alt hücre 4×4.25 piksel, orada kare ile daire
-/// arasındaki fark bir pikselin altında.
+/// In this phase the dot is a **rectangle**; the distance field a round one
+/// wants is phase-2's primitive, and bringing it in just for this would be a
+/// cost with no return — at 13pt the sub-cell is 4×4.25 pixels, and the
+/// difference between a square and a circle there is under one pixel.
 const BRAILLE_DOT_FILL: f32 = 0.7;
 
-/// Braille deseni (U+2800–U+28FF).
+/// Braille pattern (U+2800–U+28FF).
 ///
-/// **Tablo yok:** kod noktasının alt 8 biti doğrudan nokta maskesi — Unicode
-/// bloğu tam olarak böyle tanımlıyor. Bitin hücresi de tanımdan geliyor:
-/// noktalar 2×4 ızgarada ve numaralandırma tarihsel olarak önce 2×3'lük
-/// hücreyi dolduruyor, dördüncü satır sonradan eklenmiş —
+/// **No table:** the low 8 bits of the code point are directly the dot mask —
+/// the Unicode block is defined exactly this way. The bit's cell comes from
+/// the definition too: the dots are on a 2×4 grid and the numbering
+/// historically fills the 2×3 cell first, the fourth row having been added
+/// later —
 ///
 /// ```text
 ///   bit0  bit3        1 4
@@ -730,8 +761,9 @@ const BRAILLE_DOT_FILL: f32 = 0.7;
 ///   bit6  bit7        7 8
 /// ```
 ///
-/// yani bit 0–2 sol sütunun ilk üç satırı, bit 3–5 sağ sütunun ilk üç
-/// satırı, bit 6 ve 7 de dördüncü satırın sol ve sağı.
+/// that is, bits 0–2 are the first three rows of the left column, bits 3–5 the
+/// first three rows of the right column, and bits 6 and 7 the left and right
+/// of the fourth row.
 fn braille(ch: char, m: Metrics, target: &mut [u8]) {
     let (w, h) = m.cell_wh();
     let (dot_w, dot_h) = (w as f32 / 2.0, h as f32 / 4.0);
@@ -762,37 +794,38 @@ fn braille(ch: char, m: Metrics, target: &mut [u8]) {
     }
 }
 
-/// Kalın çizginin ince çizgiye oranı.
+/// Ratio of the heavy line to the light line.
 ///
-/// **Ölçüm değil tasarım sabiti** ([`CURL_FACTOR`] emsali). Unicode ince ile
-/// kalını ayrı kod noktalarına koyuyor (`─` U+2500 ince, `━` U+2501 kalın)
-/// ama kalının *ne kadar* kalın olduğunu söylemiyor: ince
-/// [`Metrics::underline_px`]'ten geliyor (depoda "çizgi kalınlığı"nın zaten
-/// bir cevabı var), kalın için ikinci bir sayı gerekiyor. İki kat seçildi —
-/// bir buçuk kat 13pt'de tam sayıya yuvarlandığında inceden ayrılmıyor, üç
-/// kat hücre genişliğinin üçte birini yiyor.
+/// **A design constant, not a measurement** ([`CURL_FACTOR`]'s counterpart).
+/// Unicode puts light and heavy in separate code points (`─` U+2500 light, `━`
+/// U+2501 heavy) but does not say *how much* thicker the heavy is: the light
+/// comes from [`Metrics::underline_px`] (the repository already has an answer
+/// to "line thickness"), and the heavy needs a second number. Double was
+/// chosen — one and a half times is indistinguishable from light once rounded
+/// to an integer at 13pt, three times eats a third of the cell width.
 const HEAVY_FACTOR: f32 = 2.0;
 
-/// Bir kolun çizgi stili.
+/// Line style of an arm.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stroke {
     None,
     Light,
     Heavy,
-    /// İki ince ray; aralarında bir kalınlık boşluk.
+    /// Two light rails; a gap of one thickness between them.
     Double,
 }
 
-// Kol indeksleri. Karşıt kol `dir ^ 1`: çiftler bilerek yan yana.
+// Arm indices. The opposite arm is `dir ^ 1`: the pairs are deliberately adjacent.
 const UP: usize = 0;
 const DOWN: usize = 1;
 const LEFT: usize = 2;
 const RIGHT: usize = 3;
 
-/// Bir çizgi karakterinin geometri tarifi.
+/// Geometry recipe of a box-drawing character.
 ///
-/// Kolların sırası [`UP`], [`DOWN`], [`LEFT`], [`RIGHT`]; `dashes` sıfırsa
-/// çizgi düz, değilse hücre başına o kadar tire; `arc` köşeyi yuvarlatıyor.
+/// The arms are in the order [`UP`], [`DOWN`], [`LEFT`], [`RIGHT`]; if
+/// `dashes` is zero the line is solid, otherwise that many dashes per cell;
+/// `arc` rounds the corner.
 #[derive(Clone, Copy)]
 struct Recipe {
     arms: [Stroke; 4],
@@ -829,22 +862,23 @@ const fn arc(arms: [Stroke; 4]) -> Recipe {
     }
 }
 
-/// U+2500–U+257F'in kol tabloları — **gerçek tablo**, formül yok.
+/// Arm tables of U+2500–U+257F — **a real table**, no formula.
 ///
-/// Sıra kod noktasının sırası (indeks = `cp - 0x2500`) ve bir sayaç değil:
-/// `251C..2523`'ün (yukarı, aşağı, sağ) kalın maskeleri sırayla 000, 001,
-/// 100, 010, 110, 101, 011, 111, yani bir **permütasyon**; aynı ailenin
-/// `252C..2533` karşılığı (sol, sağ, aşağı) ise 000, 100, 010, 110, 001,
-/// 101, 011, 111 — başka bir permütasyon. Formül aramak yanlış bir örüntüyü
-/// sessizce kodlardı; tablo karakter **adlarından** yazıldı ve bekçisi
-/// adları Unicode veritabanından okuyan [`crate::tests`] tarafında
+/// The order is the code point order (index = `cp - 0x2500`) and not a
+/// counter: the heavy masks of `251C..2523` (up, down, right) are, in order,
+/// 000, 001, 100, 010, 110, 101, 011, 111, i.e. a **permutation**; the same
+/// family's `252C..2533` counterpart (left, right, down) is 000, 100, 010, 110,
+/// 001, 101, 011, 111 — another permutation. Looking for a formula would
+/// silently encode a wrong pattern; the table was written from the character
+/// **names** and its guard is on the [`crate::tests`] side, which reads the
+/// names from the Unicode database
 /// (`the_arm_table_matches_the_unicode_names`).
 ///
-/// Köşegenlerin (`╱╲╳`) satırları boş: [`family`] onları kapsamın dışında
-/// tutuyor, yani bu üç satır hiç okunmuyor. Tablo yine de 128 satır, çünkü
-/// indeks aritmetiği deliği atlayamaz.
-// `rustfmt::skip`: satır başına bir karakter ve hizalı ad yorumu, tablonun
-// gözle taranabilir olmasının tek sebebi; biçimlendirici sarmaları bozuyor.
+/// The rows of the diagonals (`╱╲╳`) are empty: [`family`] keeps them outside
+/// the coverage, so these three rows are never read. The table is still 128
+/// rows, because the index arithmetic cannot skip the hole.
+// `rustfmt::skip`: one character per row and aligned name comments are the
+// only reason the table can be scanned by eye; the formatter breaks the wraps.
 #[rustfmt::skip]
 const LINES: [Recipe; 128] = [
     plain([N, N, L, L]),      // ─ LIGHT HORIZONTAL
@@ -960,9 +994,9 @@ const LINES: [Recipe; 128] = [
     arc([N, L, L, N]),        // ╮ LIGHT ARC DOWN AND LEFT
     arc([L, N, L, N]),        // ╯ LIGHT ARC UP AND LEFT
     arc([L, N, N, L]),        // ╰ LIGHT ARC UP AND RIGHT
-    plain([N, N, N, N]),      // ╱ köşegen — kapsam dışı, bu satır okunmuyor
-    plain([N, N, N, N]),      // ╲ köşegen — kapsam dışı
-    plain([N, N, N, N]),      // ╳ köşegen — kapsam dışı
+    plain([N, N, N, N]),      // ╱ diagonal — out of coverage, this row is never read
+    plain([N, N, N, N]),      // ╲ diagonal — out of coverage
+    plain([N, N, N, N]),      // ╳ diagonal — out of coverage
     plain([N, N, L, N]),      // ╴ LIGHT LEFT
     plain([L, N, N, N]),      // ╵ LIGHT UP
     plain([N, N, N, L]),      // ╶ LIGHT RIGHT
@@ -977,27 +1011,27 @@ const LINES: [Recipe; 128] = [
     plain([H, L, N, N]),      // ╿ HEAVY UP AND LIGHT DOWN
 ];
 
-/// Bir rayın **piksel ızgarasına oturtulmuş** bandı: `[başlangıç, başlangıç +
-/// kalınlık)`.
+/// A rail's band **seated on the pixel grid**: `[start, start +
+/// thickness)`.
 ///
-/// Yuvarlama şart ve bedeli gözle görülür: bu makinede 13pt@1x hücresi 8×18,
-/// yani dikey çizginin ekseni x = 4.0 ve yuvarlanmamış bir ince bant
-/// `[3.5, 4.5)` iki sütuna %50'şer düşerdi — bütün dikey çizgiler gri,
-/// yataylar (eksen 9.0) net. Kural yeni değil: alt çizginin konumu da
-/// kalınlığı da zaten tam sayı ([`Metrics::underline_px`]) ve
-/// [`rules::rule_envelope`] kalınlığı `>= 1`'e bağlıyor, yani `start` tam
-/// sayıyken bant da tam sayı kenarlarda bitiyor ve [`overlap`] kesir
-/// üretmiyor.
+/// The rounding is mandatory and its cost is visible to the eye: on this
+/// machine 13pt@1x's cell is 8×18, so the vertical line's axis is x = 4.0 and
+/// an unrounded light band `[3.5, 4.5)` would fall 50% on each of two columns
+/// — every vertical line grey, horizontals (axis 9.0) crisp. The rule is not
+/// new: the underline's position and thickness are already integers
+/// ([`Metrics::underline_px`]) and [`rules::rule_envelope`] ties the thickness
+/// to `>= 1`, so with an integer `start` the band ends on integer edges and
+/// [`overlap`] produces no fractions.
 fn rail(center: f32, thickness: f32) -> (f32, f32) {
     let start = (center - thickness / 2.0).round();
     (start, start + thickness)
 }
 
-/// Bir kolun raylarının **dik eksendeki** bantları.
+/// The bands of an arm's rails on the **perpendicular axis**.
 ///
-/// Çift çizginin ray aralığı [`RuleKind::Double`]'ın bugünkü
-/// `position + 2.0 * thickness`'ından geliyor: iki ray arasında tam bir
-/// kalınlık boşluk kalıyor. Yeni bir tasarım sabiti doğmuyor.
+/// The double line's rail spacing comes from [`RuleKind::Double`]'s current
+/// `position + 2.0 * thickness`: exactly one thickness of gap is left between
+/// the two rails. No new design constant arises.
 fn rails(stroke: Stroke, center: f32, thin: f32) -> [Option<(f32, f32)>; 2] {
     match stroke {
         Stroke::None => [None, None],
@@ -1010,13 +1044,13 @@ fn rails(stroke: Stroke, center: f32, thin: f32) -> [Option<(f32, f32)>; 2] {
     }
 }
 
-/// Eksen çevirici: `along` kolun ilerleme ekseni, `across` rayın bandı.
+/// Axis switch: `along` is the arm's axis of travel, `across` the rail's band.
 ///
-/// [`max_rect`] üstünde duruyor ve birleştiricisi bilerek **piksel-max**:
-/// kollar aynı mürekkebi paylaşıyor (kesişimde üst üste biniyorlar), yani
-/// `add_rect`'in doygun toplamı kavşağı yapay olarak koyulaştırırdı. Yan
-/// kazanç yapısal: birleşim yasası (`┌ ∪ ┘ == ┼`) aynı kolun her karakterde
-/// **aynı dikdörtgeni** vermesinden çıkıyor.
+/// It stands on [`max_rect`] and its combiner is deliberately **pixel-max**:
+/// the arms share the same ink (they overlap at the crossing), so `add_rect`'s
+/// saturating sum would darken the junction artificially. A structural side
+/// benefit: the union law (`┌ ∪ ┘ == ┼`) follows from the same arm giving the
+/// **same rectangle** in every character.
 fn stroke_rect(
     target: &mut [u8],
     m: Metrics,
@@ -1031,28 +1065,31 @@ fn stroke_rect(
     }
 }
 
-/// Bir rayın kenardan içeri doğru nereye kadar gideceği.
+/// How far inward from the edge a rail goes.
 ///
-/// Üç hâl var ve üçü de çift çizgi kavşaklarının gerçek geometrisinden:
+/// There are three cases, and all three come from the real geometry of double
+/// line junctions:
 ///
-/// - **Dik kol yok** → ray merkezi geçer ([`f32::round`] ile ızgaraya
-///   oturarak) ve karşı kolun rayıyla tam orada buluşur. `─`'nin iki kolu
-///   böyle birleşiyor.
-/// - **Geçiyor** → ray bütün dik rayları kesip en uzağının uzak kenarında
-///   biter. Köşeyi kapatan şey bu: `╔`'in üst rayı sol dikey rayın **sol**
-///   kenarına kadar gidiyor, yoksa köşede bir çentik kalırdı.
-/// - **Dönüyor** → ray ilk rastladığı dik rayın uzak kenarında durur, yani
-///   o rayın içine dirsek yapar. `╬`'in dört dirseği ve ortasındaki boş
-///   kanal bundan doğuyor.
+/// - **No perpendicular arm** → the rail passes the centre (seated on the grid
+///   with [`f32::round`]) and meets the opposite arm's rail exactly there. The
+///   two arms of `─` join this way.
+/// - **Passing** → the rail cuts through all perpendicular rails and ends at
+///   the far edge of the farthest one. This is what closes the corner: `╔`'s
+///   upper rail goes up to the **left** edge of the left vertical rail,
+///   otherwise a notch would remain in the corner.
+/// - **Turning** → the rail stops at the far edge of the first perpendicular
+///   rail it meets, i.e. it makes an elbow into that rail. The four elbows of
+///   `╬` and the empty channel in its middle come from this.
 ///
-/// `turn` kararının kendisi [`arm`]'de; burası yalnız sonucu ölçüyor.
+/// The `turn` decision itself is in [`arm`]; this only measures the result.
 fn reach(bands: [Option<(f32, f32)>; 4], forward: bool, turn: bool, center: f32) -> f32 {
-    // Eksen **bir kez** çevriliyor: geri yönde ilerleyen kol için bütün
-    // koordinatlar negatifleniyor, yani "yakın" hep küçük ve "uzak" hep
-    // büyük oluyor. Çevirme girişte ve çıkışta birer kez; `forward`'ı
-    // yakın/uzak seçiminde, min/max'ta ve dönüşte ayrı ayrı sormak beş ayrı
-    // yerin birbiriyle tutarlı kalmasını isterdi ve biri ters yazıldığında
-    // belirti `╬` kavşağında tek piksellik bir çentik olurdu.
+    // The axis is flipped **once**: for an arm travelling in the backward
+    // direction all coordinates are negated, so "near" is always smaller and
+    // "far" always larger. One flip at entry and one at exit; asking `forward`
+    // separately in the near/far choice, in min/max and in the turn would
+    // require five separate places to stay consistent with each other, and
+    // when one was written backwards the symptom would be a one-pixel notch at
+    // the `╬` junction.
     let travel = |value: f32| if forward { value } else { -value };
     let mut nearest: Option<(f32, f32)> = None;
     let mut farthest: Option<f32> = None;
@@ -1069,25 +1106,27 @@ fn reach(bands: [Option<(f32, f32)>; 4], forward: bool, turn: bool, center: f32)
     let stop = match (turn, nearest, farthest) {
         (true, Some((_, far)), _) => far,
         (false, _, Some(far)) => far,
-        // Dik kol yok: merkezde buluşuyoruz.
+        // No perpendicular arm: we meet at the centre.
         _ => travel(center.round()),
     };
     travel(stop)
 }
 
-/// Tek bir kol: kenardan merkeze doğru bir ya da iki ray.
+/// A single arm: one or two rails from the edge toward the centre.
 ///
-/// **Dönme kuralı** ([`reach`]'in üçüncü hâli) iki cümlede yaşıyor ve ikisi
-/// de çift çizginin "kanal" olmasından çıkıyor — çift çizgi bir çizgi değil
-/// iki duvarlı bir kanal, kavşakta açılan duvar kanalı kapatmaz:
+/// The **turning rule** ([`reach`]'s third case) lives in two sentences and
+/// both follow from a double line being a "channel" — a double line is not a
+/// line but a channel with two walls, and a wall opening at a junction does not
+/// close the channel:
 ///
-/// - **Çift rayın** kendi tarafındaki dik kol da çiftse ray döner: `╠`'te
-///   sağ (iç) duvar kırılıp yatay raylara dirsek yapıyor, sol (dış) duvar
-///   kesintisiz geçiyor.
-/// - **Tek ray** (ince/kalın) yalnız dik kolların **ikisi de** çiftken **ve**
-///   karşı kolu yokken döner: `╤`'nin sapı alt rayda duruyor, `╪`'nin dikey
-///   çizgisi ise baştan sona geçiyor. Karşı kol koşulu olmasaydı `╪` ortadan
-///   ikiye bölünürdü.
+/// - If the perpendicular arm on the **double rail's** own side is also double,
+///   the rail turns: in `╠` the right (inner) wall breaks and makes an elbow
+///   into the horizontal rails, while the left (outer) wall passes
+///   uninterrupted.
+/// - A **single rail** (light/heavy) turns only when **both** perpendicular
+///   arms are double **and** it has no opposite arm: `╤`'s stem stops at the
+///   lower rail, while `╪`'s vertical line passes from end to end. Without the
+///   opposite-arm condition `╪` would be split in two at the middle.
 fn arm(spec: Recipe, dir: usize, m: Metrics, target: &mut [u8]) {
     let stroke = spec.arms[dir];
     if stroke == Stroke::None {
@@ -1097,13 +1136,14 @@ fn arm(spec: Recipe, dir: usize, m: Metrics, target: &mut [u8]) {
     let (w, h) = (w as f32, h as f32);
     let thin = f32::from(m.underline_px.1).max(1.0);
     let vertical = dir == UP || dir == DOWN;
-    // Kenardan merkeze: yukarı ve sol koller 0'dan artarak, aşağı ve sağ
-    // kollar hücrenin ucundan azalarak ilerliyor.
+    // Edge to centre: the up and left arms advance increasing from 0, the down
+    // and right arms decreasing from the cell's end.
     let forward = dir == UP || dir == LEFT;
     let (along_extent, across_center) = if vertical { (h, w / 2.0) } else { (w, h / 2.0) };
     let along_center = along_extent / 2.0;
-    // Dik kolların yönleri **ve** rayın kendi tarafı aynı çift: dikey bir
-    // kolun rayları solda/sağda, yatay bir kolunkiler üstte/altta.
+    // The directions of the perpendicular arms **and** the rail's own side are
+    // the same pair: a vertical arm's rails are on the left/right, a horizontal
+    // arm's on the top/bottom.
     let sides = if vertical { [LEFT, RIGHT] } else { [UP, DOWN] };
     let crossing = {
         let first = rails(spec.arms[sides[0]], along_center, thin);
@@ -1112,7 +1152,7 @@ fn arm(spec: Recipe, dir: usize, m: Metrics, target: &mut [u8]) {
     };
     let single_turns = spec.arms[sides[0]] == Stroke::Double
         && spec.arms[sides[1]] == Stroke::Double
-        // Karşıt kol: `dir ^ 1` (UP↔DOWN, LEFT↔RIGHT).
+        // The opposite arm: `dir ^ 1` (UP↔DOWN, LEFT↔RIGHT).
         && spec.arms[dir ^ 1] == Stroke::None;
 
     for (index, band) in rails(stroke, across_center, thin).into_iter().enumerate() {
@@ -1132,20 +1172,21 @@ fn arm(spec: Recipe, dir: usize, m: Metrics, target: &mut [u8]) {
     }
 }
 
-/// Kesikli çizgi ailesi (`┄┅┆┇┈┉┊┋╌╍╎╏`).
+/// The dashed line family (`┄┅┆┇┈┉┊┋╌╍╎╏`).
 ///
-/// Periyot [`dividing_period`]'dan, yani hücreyi **tam bölen** en yakın
-/// değere çekiliyor; döşeme bu setin varlık sebebi ve faz hücre sınırında
-/// kırılamaz. Bedeli görünür bir bilgi kaybı ve kabul edildi
-/// (`discussion.md` → Karar 4): bu makinede `w = 8`'de üçlü kesiğin istediği
-/// periyot 3 → **4**'e çekiliyor ve `┄` ile `╌` **aynı sprite'a** çöküyor;
-/// bölenleri seyrek bir ölçüde (144pt@1x'in `w = 87`'si: 1, 3, 29, 87) `╌`
-/// hücre başına **tek** tireye iniyor. Bekçisi çökmeyi listeye yazmıyor,
-/// **türetiyor**: aynı eksendeki iki yoğunluk ancak periyotları eşitse eşit
-/// (`dashed_densities_collapse_only_with_the_period`).
+/// The period comes from [`dividing_period`], i.e. it is pulled to the nearest
+/// value that **divides the cell exactly**; tiling is this set's reason to
+/// exist and the phase cannot break at the cell boundary. The cost is a visible
+/// loss of information and it was accepted (`discussion.md` → Karar 4): on
+/// this machine at `w = 8` the period the triple dash wants, 3, is pulled to
+/// **4** and `┄` and `╌` collapse into **the same sprite**; at a measure whose
+/// divisors are sparse (144pt@1x's `w = 87`: 1, 3, 29, 87) `╌` drops to **one**
+/// dash per cell. The guard does not write the collapse into a list, it
+/// **derives** it: two densities on the same axis are equal only if their
+/// periods are equal (`dashed_densities_collapse_only_with_the_period`).
 ///
-/// Dolu oranı [`RuleKind::Dashed`]'in oranı (üçte iki); ikinci bir tasarım
-/// sabiti doğmuyor.
+/// The fill ratio is [`RuleKind::Dashed`]'s ratio (two thirds); no second
+/// design constant arises.
 fn dashes(spec: Recipe, m: Metrics, target: &mut [u8]) {
     let (w, h) = m.cell_wh();
     let thin = f32::from(m.underline_px.1).max(1.0);
@@ -1156,7 +1197,7 @@ fn dashes(spec: Recipe, m: Metrics, target: &mut [u8]) {
         (w, h as f32 / 2.0)
     };
     let stroke = spec.arms[if vertical { UP } else { LEFT }];
-    // Kesikli ailede çift çizgi yok: tek ray.
+    // There is no double line in the dashed family: a single rail.
     let Some(band) = rails(stroke, across_center, thin)[0] else {
         return;
     };
@@ -1171,30 +1212,32 @@ fn dashes(spec: Recipe, m: Metrics, target: &mut [u8]) {
     }
 }
 
-/// Yuvarlak köşe (`╭╮╯╰`): iki sap ve onları birleştiren çeyrek yay.
+/// Rounded corner (`╭╮╯╰`): two stems and the quarter arc joining them.
 ///
-/// Yay [`chevron`]'un mesafe alanının ikizi ve aynı [`stamp`]'ten geçiyor —
-/// orada `distance_to_segment`, burada `|hypot(x - ox, y - oy) - r|`.
-/// [`curl`] emsal **değil**: sütun başına tek bir `y` örnekliyor ve çeyrek
-/// yayın dikey teğetinde bant kopardı.
+/// The arc is the twin of [`chevron`]'s distance field and goes through the
+/// same [`stamp`] — there `distance_to_segment`, here `|hypot(x - ox, y - oy) -
+/// r|`. [`curl`] is **not** a precedent: it samples a single `y` per column and
+/// would tear the band at the quarter arc's vertical tangent.
 ///
-/// Yarıçap dört köşede de aynı ve **oturtulmuş eksenlerden** türüyor:
-/// merkezin hücre kenarlarına uzaklıklarının en küçüğü, **bir piksel
-/// içeriden**. O bir piksel dikişin kendisi: yarıçap sınıra kadar gitseydi
-/// teğet noktası hücrenin kenarına düşer, kenar sütununu sap değil **yay**
-/// boyardı ve yayın kapsaması bandınkinden eksik kalırdı — ölçüldü
-/// (13pt@1x, `╭`'nin sağ kenarı): rayın satırında 255 yerine 246, altındaki
-/// satırda 0 yerine 13. Belirti bir kutunun iki köşesinin ayrışması olurdu,
-/// çünkü eksen oturtulduktan sonra hücrenin ortasında değil (13pt'de 4.5 ile
-/// 4.0) ve en küçük uzaklık hep **tek** bir kenardan geliyor: `╭` ile `╰`
-/// sapsız kalırken `╮` ile `╯` sapını koruyordu. İçerlek yarıçapla teğet
-/// noktası kenar pikselinin dışında kalıyor, çeyrek kısıtı o pikseli yaya
-/// hiç vermiyor ve dikiş `─` ile **bit bit** aynı oluyor
-/// (`arms_tile_across_the_cell_edge` artık yayları da sınıyor).
+/// The radius is the same at all four corners and is derived from the **seated
+/// axes**: the smallest of the centre's distances to the cell edges, **one
+/// pixel inward**. That one pixel is the seam itself: had the radius gone all
+/// the way to the boundary, the tangent point would fall on the cell's edge,
+/// the **arc** and not the stem would paint the edge column, and the arc's
+/// coverage would fall short of the band's — measured (13pt@1x, `╭`'s right
+/// edge): 246 instead of 255 in the rail's row, 13 instead of 0 in the row
+/// below. The symptom would be the two corners of a box diverging, because
+/// after the axis is seated it is not at the middle of the cell (4.5 versus
+/// 4.0 at 13pt) and the smallest distance always comes from a **single** edge:
+/// `╭` and `╰` would be left without a stem while `╮` and `╯` kept theirs. With
+/// the inset radius the tangent point stays outside the edge pixel, the
+/// quarter constraint never gives that pixel to the arc, and the seam is
+/// **bit for bit** the same as `─`'s (`arms_tile_across_the_cell_edge` now
+/// tests the arcs too).
 ///
-/// Tek yönden türetilseydi `╭──╮`'nin sol köşesi sağından dar olurdu; teğet
-/// noktaları oturtulmamış eksenden alınsaydı sapla yay arasında yarım
-/// piksellik bir kırık kalırdı.
+/// Had it been derived from a single direction, the left corner of `╭──╮`
+/// would be narrower than the right; had the tangent points been taken from the
+/// unseated axis, a half-pixel break would remain between stem and arc.
 fn corner(spec: Recipe, m: Metrics, target: &mut [u8]) {
     let (w, h) = m.cell_wh();
     let (w, h) = (w as f32, h as f32);
@@ -1203,9 +1246,9 @@ fn corner(spec: Recipe, m: Metrics, target: &mut [u8]) {
     let horizontal_band = rail(h / 2.0, thin);
     let axis_x = (vertical_band.0 + vertical_band.1) / 2.0;
     let axis_y = (horizontal_band.0 + horizontal_band.1) / 2.0;
-    // Bir piksel içeriden ve `max(0.0)`: dar hücrede yarıçap sıfıra iner,
-    // köşe keskinleşir ve sap hücreyi baştan sona doldurur — kayıp bir
-    // yuvarlaklık, kırık bir dikiş değil.
+    // One pixel inward and `max(0.0)`: in a narrow cell the radius drops to
+    // zero, the corner sharpens and the stem fills the cell from end to end —
+    // a lost roundness, not a broken seam.
     let radius = (axis_x.min(w - axis_x).min(axis_y).min(h - axis_y) - 1.0).max(0.0);
     let right = spec.arms[RIGHT] != Stroke::None;
     let down = spec.arms[DOWN] != Stroke::None;
@@ -1220,13 +1263,14 @@ fn corner(spec: Recipe, m: Metrics, target: &mut [u8]) {
         axis_y - radius
     };
 
-    // Yay **önce**: [`stamp`] bütün hücreye yazıyor (birleştiricisi yok) ve
-    // tampon bu noktada temiz ([`draw_procedural`] sıfırladı). Saplar sonra
-    // `max` ile üstüne biniyor; sıra tersine çevrilseydi yay sapları silerdi.
+    // The arc **first**: [`stamp`] writes the whole cell (it has no combiner)
+    // and the buffer is clean at this point ([`draw_procedural`] zeroed it).
+    // The stems then overlap on top with `max`; were the order reversed, the
+    // arc would erase the stems.
     stamp(target, m, thin / 2.0, |px, py| {
-        // Çeyrek kısıtı: yay merkezin **kolların tersi** tarafında. Dışarısı
-        // sonsuz uzaklık, yani sıfır kapsama — kesme tam teğet noktasında ve
-        // ötesini sap boyuyor.
+        // Quarter constraint: the arc is on the side of the centre **opposite
+        // the arms**. Outside is infinite distance, i.e. zero coverage — the
+        // cut is exactly at the tangent point and the stem paints beyond it.
         let inside =
             if right { px <= ox } else { px >= ox } && if down { py <= oy } else { py >= oy };
         if inside {
@@ -1236,24 +1280,25 @@ fn corner(spec: Recipe, m: Metrics, target: &mut [u8]) {
         }
     });
 
-    // Saplar: teğet noktasından hücre kenarına.
+    // Stems: from the tangent point to the cell edge.
     let (x0, x1) = if right { (ox, w) } else { (0.0, ox) };
     let (y0, y1) = if down { (oy, h) } else { (0.0, oy) };
     max_rect(target, m, x0, x1, horizontal_band.0, horizontal_band.1);
     max_rect(target, m, vertical_band.0, vertical_band.1, y0, y1);
 }
 
-/// Çizgi çizim karakteri (U+2500–U+257F).
+/// Box-drawing character (U+2500–U+257F).
 ///
-/// Tarif [`LINES`]'tan geliyor; çizim üç kola ayrılıyor ve üçü de aynı iki
-/// primitifi kullanıyor (dikdörtgen ve mesafe alanı). Kapsam dışı indeks
-/// **boş yuva** bırakıyor, panik değil: kapı ([`family`]) zaten tutuyor.
+/// The recipe comes from [`LINES`]; the drawing splits into three arms and all
+/// three use the same two primitives (rectangle and distance field). An
+/// out-of-coverage index leaves an **empty slot**, not a panic: the gate
+/// ([`family`]) already holds it.
 fn line(ch: char, m: Metrics, target: &mut [u8]) {
-    // Çıkarma **kontrollü**: `.get()` yalnız üst sınırı tutuyor, aralığın
-    // altındaki bir karakter `u32` çıkarmasını taşırır ve debug derlemede
-    // panik olurdu. Bugün erişilemez (kapı [`family`]'de) ama
-    // [`draw_procedural`]'in doc'u panik yolunun **olmadığını** söylüyor ve
-    // savunma sözün geçerli olduğu her iki yönde durmalı.
+    // The subtraction is **checked**: `.get()` holds only the upper bound, a
+    // character below the range would overflow the `u32` subtraction and panic
+    // in a debug build. It is unreachable today (the gate is in [`family`]) but
+    // [`draw_procedural`]'s doc says there is **no** panic path, and the
+    // defence must hold in both directions in which that promise applies.
     let Some(&spec) = u32::from(ch)
         .checked_sub(0x2500)
         .and_then(|index| LINES.get(index as usize))
@@ -1271,80 +1316,82 @@ fn line(ch: char, m: Metrics, target: &mut [u8]) {
     }
 }
 
-/// Tarama satırlarının (`⎺⎻⎼⎽`, U+23BA–U+23BD) numaraları.
+/// Numbers of the scan lines (`⎺⎻⎼⎽`, U+23BA–U+23BD).
 ///
-/// Adları söylüyor: "HORIZONTAL SCAN LINE-1/-3/-7/-9". Tablo sayaç değil —
-/// sıra 1, 3, 7, 9 ve aradaki 5 **yok**, çünkü Unicode onu `─` (U+2500) ile
-/// birleştirdi.
+/// The names say it: "HORIZONTAL SCAN LINE-1/-3/-7/-9". The table is not a
+/// counter — the order is 1, 3, 7, 9 and the 5 in between is **absent**,
+/// because Unicode merged it with `─` (U+2500).
 const SCAN_LINES: [f32; 4] = [1.0, 3.0, 7.0, 9.0];
 
-/// Tarama satırının hücredeki dikey merkezi.
+/// The scan line's vertical centre in the cell.
 ///
-/// Ad bir **satır** söylüyor: DEC'in karakter hücresi dokuz tarama satırı ve
-/// N'inci satır hücrenin N'inci dokuzda birlik bandı, yani merkezi
-/// `(N - 0.5) / 9`. Formülün ikinci bir sayı uydurmadığının tanığı beşinci
-/// satır: `(5 - 0.5) / 9` tam olarak `0.5`, yani Unicode'un `─` ile
-/// birleştirdiği satır [`arm`]'in yatay kolunu koyduğu yerin ta kendisine
-/// düşüyor. İki aile aynı ızgarayı paylaşıyor; ortak sabit yok, ortak
-/// **geometri** var.
+/// The name says a **line**: DEC's character cell has nine scan lines and the
+/// Nth line is the Nth ninth-wide band of the cell, so its centre is
+/// `(N - 0.5) / 9`. The witness that the formula invents no second number is
+/// the fifth line: `(5 - 0.5) / 9` is exactly `0.5`, i.e. the line Unicode
+/// merged with `─` lands on the very spot where [`arm`] puts the horizontal
+/// arm. The two families share the same grid; there is no shared constant, but
+/// shared **geometry**.
 fn scan_centre(line: f32, h: f32) -> f32 {
     (line - 0.5) / 9.0 * h
 }
 
-/// `target`e terminalin grafik kümesini (U+23B8–U+23BF) çizer.
+/// Draws the terminal's graphics set (U+23B8–U+23BF) into `target`.
 ///
-/// [`line`]'ın akrabası ve aynı rayları kullanıyor ([`rail`], [`max_rect`]),
-/// ayrıldığı tek yer **eksenin yeri**: U+2500 ailesinin kolları hücrenin
-/// ortasında buluşur, bu kümenin çizgileri ise tanımı gereği **kenarda** —
-/// "LEFT/RIGHT VERTICAL BOX LINE" hücrenin sol/sağ kenarı, tarama satırları
-/// hücreyi dokuza bölen bantlar, iki dentistry köşesi de kenarları izleyen
-/// bir "L". Bu yüzden [`Recipe`] tablosuna satır eklenmiyor: `LINES`'ın
-/// indeksi `cp - 0x2500` ve kolların ekseni `w / 2` / `h / 2` olarak yazılı.
+/// A relative of [`line`] using the same rails ([`rail`], [`max_rect`]); the
+/// one place it departs is **where the axis is**: the arms of the U+2500 family
+/// meet in the middle of the cell, while this set's lines are by definition
+/// **on the edge** — "LEFT/RIGHT VERTICAL BOX LINE" is the cell's left/right
+/// edge, the scan lines are bands that divide the cell into nine, and the two
+/// dentistry corners are an "L" following the edges. That is why no row is
+/// added to the [`Recipe`] table: `LINES`'s index is `cp - 0x2500` and the
+/// arms' axis is written as `w / 2` / `h / 2`.
 ///
-/// **Neden yordamsal.** Üçü de fonttan geliyordu ve üçünün de kusuru ayrı
-/// (ölçüldü, bu makine, Menlo 16pt@2x, hücre 20×39):
+/// **Why procedural.** All three came from the font and each had its own
+/// defect (measured, this machine, Menlo 16pt@2x, cell 20×39):
 ///
-/// - `⎾` `⎿` **kutu çıkıyordu** — cascade Hiragino Sans veriyor, ilerlemesi
-///   hücrenin 1.66 katı ve yarım genişlikli glyph o kutunun **sağ yarısına**
-///   yaslanmış (mürekkebi 15.36–32.00 px), yani mürekkep kapısı onu haklı
-///   olarak eliyordu. Belirti kullanıcıda görüldü: Claude Code araç
-///   sonuçlarını `⎿` ile başlatıyor.
-/// - `⎸` `⎹` **yanlış yerde** çiziliyordu — Apple Symbols'un ilerlemesi
-///   hücrenin 0.42'si, yani [`rules::centre_shift`] onları hücrenin ortasına
-///   kaydırıyor ve "sol kenar çizgisi" solda durmuyordu.
-/// - `⎺⎻⎼⎽` **döşemiyordu** — Monaco'nun mürekkebi 20 px hücrede 0.03–19.19,
-///   yani her hücrenin sağ ucunda 0.8 px boşluk kalıyor ve yan yana dizilen
-///   tarama satırı kesikli görünüyor. 021'in tezi burada da aynı: fontun em
-///   kutusunun hücre kutusu olacağının hiçbir garantisi yok.
+/// - `⎾` `⎿` **came out as a box** — the cascade gives Hiragino Sans, its
+///   advance is 1.66 times the cell and the half-width glyph leans on the
+///   **right half** of that box (ink 15.36–32.00 px), so the ink gate was
+///   rightly eliminating it. The symptom was seen by the user: Claude Code
+///   starts tool results with `⎿`.
+/// - `⎸` `⎹` were drawn **in the wrong place** — Apple Symbols' advance is 0.42
+///   of the cell, so [`rules::centre_shift`] shifted them to the middle of the
+///   cell and the "left edge line" did not stay on the left.
+/// - `⎺⎻⎼⎽` **did not tile** — Monaco's ink spans 0.03–19.19 in a 20 px cell,
+///   so a 0.8 px gap is left at the right end of every cell and scan lines
+///   laid side by side look dashed. 021's thesis holds here too: there is no
+///   guarantee that the font's em box will be the cell box.
 ///
-/// Dikey uzanım **tam hücre** ve bu da ölçümden: elenen adayın mürekkebi
-/// hücre yüksekliğinin 0.047'sinden 0.868'ine kadar uzanıyor, yani şekil
-/// hücreyi dolduruyor — `⎿`'yi `└` gibi (ekseni merkezde) çizmek onu
-/// yarı boyda bir köşeye indirirdi.
+/// The vertical extent is the **full cell** and this too is from measurement:
+/// the eliminated candidate's ink spans from 0.047 to 0.868 of the cell
+/// height, so the shape fills the cell — drawing `⎿` like `└` (axis at the
+/// centre) would reduce it to a half-height corner.
 fn technical(ch: char, m: Metrics, target: &mut [u8]) {
     let (w, h) = m.cell_wh();
     let (w, h) = (w as f32, h as f32);
     let thin = f32::from(m.underline_px.1).max(1.0);
-    // Hücrenin ilk ve son bandı. `rail` ızgaraya oturttuğu için ilki tam
-    // olarak `[0, thin)`, sonuncusu `[uzunluk - thin, uzunluk)`: kenar
-    // çizgisi kenarın **içinde** kalıyor, yarısı kırpılmıyor.
+    // The cell's first and last bands. Because `rail` seats on the grid, the
+    // first is exactly `[0, thin)` and the last `[length - thin, length)`: the
+    // edge line stays **inside** the edge, half of it is not clipped.
     let first = rail(thin / 2.0, thin);
     let last_col = rail(w - thin / 2.0, thin);
     let last_row = rail(h - thin / 2.0, thin);
     match ch {
-        // ⎸ ⎹ — sol / sağ kenarda tam boy dikey çizgi.
+        // ⎸ ⎹ — full-height vertical line on the left / right edge.
         '\u{23B8}' => max_rect(target, m, first.0, first.1, 0.0, h),
         '\u{23B9}' => max_rect(target, m, last_col.0, last_col.1, 0.0, h),
-        // ⎺ ⎻ ⎼ ⎽ — hücreyi boydan boya geçen tarama satırı.
+        // ⎺ ⎻ ⎼ ⎽ — a scan line running across the whole cell.
         '\u{23BA}'..='\u{23BD}' => {
-            // audit: aralık dört karakter, indeks tablonun içinde.
+            // audit: the range is four characters, the index is inside the table.
             let line = SCAN_LINES[u32::from(ch) as usize - 0x23BA];
             let band = rail(scan_centre(line, h), thin);
             max_rect(target, m, 0.0, w, band.0, band.1);
         }
-        // ⎾ ⎿ — sol kenarda tam boy dikey, üst / alt kenarda tam boy yatay.
-        // Kollar `max_rect` ile birleşiyor, köşedeki piksel iki kez
-        // boyanmıyor: gerekçesi [`stroke_rect`]'inkiyle aynı.
+        // ⎾ ⎿ — full-height vertical on the left edge, full-width horizontal on
+        // the top / bottom edge. The arms join with `max_rect`, so the corner
+        // pixel is not painted twice: the reasoning is the same as
+        // [`stroke_rect`]'s.
         '\u{23BE}' | '\u{23BF}' => {
             max_rect(target, m, first.0, first.1, 0.0, h);
             let band = if ch == '\u{23BE}' { first } else { last_row };

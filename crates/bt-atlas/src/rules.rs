@@ -732,7 +732,7 @@ fn shrink(candidate: &Font, glyph: u32, box_advance: f64) -> Option<Font> {
 
 /// The bisection steps of [`shrink`]'s second round: the interval is
 /// `size / fit` and half of it, and ten steps bring it under a thousandth of
-/// the point size (0.016 pt at 32 pt). Enough: in the census (`make tarama`,
+/// the point size (0.016 pt at 32 pt). Enough: in the census (`make scan`,
 /// four combinations) the number of candidates within the limit that are
 /// rejected on re-test is **zero**.
 const SHRINK_STEPS: usize = 10;
@@ -741,7 +741,7 @@ const SHRINK_STEPS: usize = 10;
 /// than this stays a box.
 ///
 /// A design constant (after `GUTTER_PT`), its value from the census
-/// distribution (`make tarama`, Menlo 13/16 pt × @1x/@2x,
+/// distribution (`make scan`, Menlo 13/16 pt × @1x/@2x,
 /// `.tasks/041-yedek-glyph-kucultme/` → phase-2 Uygulama Notları):
 ///
 /// - **The largest that must stay inside** is Apple Color Emoji's
