@@ -164,6 +164,14 @@ fontconfig = { version = "0.11", default-features = false }
 # walk). Not a new crate: `fontconfig` already pulls it and it resolves to the
 # same version (the `polling` precedent; approved with the list above).
 yeslogic-fontconfig-sys = { version = "6", default-features = false }
+# Grapheme-cluster shaping of the same backend (042 phase-5), approved in the
+# same decision. It reads the font file's bytes the FreeType face is opened
+# from, so the glyph number it gives is the drawing font's. `std` only (the
+# default): `icu` would pull ICU's normaliser for composition the atlas never
+# asks for (a cluster either becomes one glyph or falls back to its base
+# character). Transitive: read-fonts, font-types, bytemuck, smallvec (and
+# bitflags, once_cell, already in the graph).
+harfrust = { version = "0.13", default-features = false, features = ["std"] }
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
