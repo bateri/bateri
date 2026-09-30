@@ -4613,10 +4613,6 @@ mod tests {
     /// yani 023'ün iki hücrelik kapısından geçmeli. Sağ yarının boş olmaması
     /// şart — boş bir sağ yarı "iki yuva aldı" sınamasını yeşil bırakıp
     /// ekranda yarım bir emoji çizerdi.
-    #[cfg_attr(
-        target_os = "linux",
-        ignore = "phase-5: no shaping or colour font on Linux yet"
-    )]
     #[test]
     fn a_cluster_takes_two_colour_slots() {
         let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
@@ -4661,10 +4657,6 @@ mod tests {
     /// Kimlik anahtarın parçası, yani ikinci soruluşta yeni bir kimlik
     /// üretmek aynı glyph'i her karede yeniden şekillendirip yeni yuvaya
     /// koymak olurdu — atlas dolana kadar sessizce.
-    #[cfg_attr(
-        target_os = "linux",
-        ignore = "phase-5: no shaping or colour font on Linux yet"
-    )]
     #[test]
     fn the_same_cluster_is_interned_and_cached_once() {
         let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
@@ -4719,10 +4711,6 @@ mod tests {
     /// sınır bu kolu sınamanın en temiz yolu. Cevap bayt bayt `Char('👍')`'nin
     /// ki: ayrı bir atlasta sorulan tek karakterle karşılaştırılıyor, yani
     /// "taban karakter" bir benzetme değil aynı raster.
-    #[cfg_attr(
-        target_os = "linux",
-        ignore = "phase-5: no shaping or colour font on Linux yet"
-    )]
     #[test]
     fn an_unshaped_cluster_answers_with_its_base_char() {
         let mut reference = atlas(POINT_SIZE, CLUSTER_SCALE);
