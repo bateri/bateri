@@ -1,23 +1,23 @@
-//! Finder damlasının uzak dizine yüklenmesi (037 Karar 7 → Kullanıcı
-//! kararı): uzak oturumda bırakılan dosya ya da klasör onaydan sonra
-//! `tar c | ssh … tar x` akışıyla uzak kabuğun dizinine gidiyor. Hiçbir şey
-//! kendiliğinden yapıştırılmıyor (037 phase-7); sonuç satırı nereye
-//! gittiğini söylüyor.
+//! Uploading a Finder drop to the remote directory (037 Karar 7 → Kullanıcı
+//! kararı): a file or folder dropped in a remote session goes, after
+//! confirmation, to the remote shell's directory through a `tar c | ssh … tar x`
+//! stream. Nothing is pasted on its own (037 phase-7); the result line says
+//! where it went.
 //!
-//! Üç yarı:
+//! Three halves:
 //!
-//! - **Saf:** ssh argv'sinin çevirisi ([`ssh_argv`]), uzak betikler ve
-//!   tırnaklama, yoklamanın cevabı ([`parse_probe`]), tar akışının başlık
-//!   okuyucusu ([`TarWatcher`]), satırın ve sayfanın metni. Sınanan yarı.
-//! - **Süreç:** yerel ölçüm ([`measure`]), yoklama ([`probe`]) ve akış
-//!   ([`transfer`]) — hepsi arka plan thread'inde, sonuç ana kuyruğa.
-//! - **Kuyruk** ([`Uploads`]): ana thread'in durumu — sıra, ilerleme,
-//!   sonuç satırı. AppKit'siz; sayfayı ve dispatch'i `window` kuruyor.
+//! - **Pure:** translating the ssh argv ([`ssh_argv`]), the remote scripts and
+//!   quoting, the probe's reply ([`parse_probe`]), the tar stream's header
+//!   reader ([`TarWatcher`]), the text of the line and the sheet. The tested half.
+//! - **Process:** local measurement ([`measure`]), the probe ([`probe`]) and the
+//!   stream ([`transfer`]) — all on a background thread, results to the main queue.
+//! - **Queue** ([`Uploads`]): the main thread's state — order, progress, result
+//!   line. AppKit-free; `window` sets up the sheet and the dispatch.
 //!
-//! **Parola sorulamaz.** GUI'den doğan ssh'ın kontrol terminali yok;
-//! `BatchMode=yes` ile anahtar/agent yoksa anında ve açık bir hatayla düşüyor,
-//! asılı kalmıyor. Kullanıcının `ControlMaster`'ı varsa ona biniyor, yani
-//! parolalı bir host'ta bile açık bir ana bağlantı yetiyor.
+//! **No password can be asked.** An ssh born from the GUI has no controlling
+//! terminal; with `BatchMode=yes` and no key/agent it fails at once with a clear
+//! error instead of hanging. If the user has a `ControlMaster`, it rides on it,
+//! so even on a password host an open master connection is enough.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -35,47 +35,46 @@ use bt_core::{
 
 use crate::jobs::SSH_VALUED;
 
-/// İlerleme haberinin en sık aralığı — **tasarım sabiti**. Her haber bir
-/// içerik karesi (satır ve çubuk değişti); ekran hızında haber, gözün
-/// okuyamayacağı bir sayaç için kare yakmak olurdu. Beşte bir saniye çubuğu
-/// akıcı, sayıları okunur tutuyor.
+/// The shortest interval between progress reports — a **design constant**. Every
+/// report is a content frame (the line and the bar changed); reporting at display
+/// rate would burn frames on a counter the eye cannot read. A fifth of a second
+/// keeps the bar fluid and the numbers readable.
 pub(crate) const TICK: Duration = Duration::from_millis(200);
 
-/// Hızın ölçüldüğü pencere — **tasarım sabiti**: anlık hız paket paket
-/// zıplıyor, uzun ortalama ise yavaşlamayı geç söylüyor.
+/// The window over which speed is measured — a **design constant**: instantaneous
+/// speed jumps packet by packet, while a long average reports a slowdown late.
 const SPEED_WINDOW: Duration = Duration::from_secs(3);
 
-/// Sonuç satırının (`✓ 3 files uploaded`, `Cancelled — …`) dock'ta kaldığı
-/// süre — **tasarım sabiti**. Durma koşulu bu: süre dolunca satır kalkıyor
-/// ve bir daha kare istenmiyor.
+/// How long the result line (`✓ 3 files uploaded`, `Cancelled — …`) stays in the
+/// dock — a **design constant**. This is the stop condition: when it expires the
+/// line goes away and no further frame is requested.
 pub(crate) const LINGER: Duration = Duration::from_secs(4);
 
-// ─── ssh ve uzak betikler ────────────────────────────────────────────────
+// ─── ssh and remote scripts ──────────────────────────────────────────────
 
-/// Değer almadan **korunan** ssh bayrakları: adres ailesi, agent/X11
-/// yönlendirmesi, sıkıştırma, GSSAPI, sessizlik. Bağlantının kendisini
-/// değiştirenler; kalanı (`-t -n -N -W -s -O -v -f -M` …) akışı bozar ya da
-/// gürültü üretir ve düşüyor.
+/// ssh flags **kept** without a value: address family, agent/X11 forwarding,
+/// compression, GSSAPI, quiet. The ones that change the connection itself; the
+/// rest (`-t -n -N -W -s -O -v -f -M` …) break the stream or produce noise and
+/// are dropped.
 const KEPT_FLAGS: &str = "46AaCgKkqXxYy";
 
-/// Değeriyle **korunan** ssh seçenekleri: bind adresi, şifre, config, pkcs11,
-/// kimlik, sıçrama, kullanıcı, MAC, `-o`, etiket, port, denetim soketi.
-/// Hangisinin değer aldığını `jobs`'un tablosu söylüyor ([`SSH_VALUED`]);
-/// ikinci bir tablo yok.
+/// ssh options **kept** with their value: bind address, cipher, config, pkcs11,
+/// identity, jump, user, MAC, `-o`, tag, port, control socket. Which ones take a
+/// value is told by `jobs`'s table ([`SSH_VALUED`]); there is no second table.
 const KEPT_VALUED: &str = "BbcFIiJlmoPpS";
 
-/// Uzak oturumun hedefinden yüklemenin ssh argv'si (sonuna betik eklenecek).
+/// The upload's ssh argv from the remote session's target (the script is appended).
 ///
-/// **Bizim seçeneklerimiz başta**, çünkü ssh bir config anahtarının **ilk**
-/// değerini alıyor: kullanıcının `-o RequestTTY=force`'u arkada kalmalı.
-/// `-T` (tty yok: akış ikili), `BatchMode=yes` (parola sorulamaz, anında
-/// düş), `ControlMaster=no` (açık bir ana bağlantıyı **kullan** ama ana
-/// olma: arka plana düşen bir ana bağlantı akışın boru ucunu tutardı).
+/// **Our options come first**, because ssh takes the **first** value of a config
+/// key: the user's `-o RequestTTY=force` must stay behind. `-T` (no tty: the
+/// stream is binary), `BatchMode=yes` (no password can be asked, fail at once),
+/// `ControlMaster=no` (**use** an open master connection but do not become one: a
+/// master connection going to the background would hold the stream's pipe end).
 ///
-/// ssh'ta hedefin argv'si seçenek seçenek süzülüyor ([`KEPT_FLAGS`],
-/// [`KEPT_VALUED`]); hedeften sonra gelen seçenekler de okunuyor (OpenSSH
-/// onları yeniden ayrıştırıyor) ve uzak komut (`-t prod tmux`) düşüyor.
-/// mosh'ta ssh argv'si yok: yalnız host, varsayılan ssh ayarlarıyla.
+/// With ssh the target's argv is filtered option by option ([`KEPT_FLAGS`],
+/// [`KEPT_VALUED`]); options after the destination are read too (OpenSSH parses
+/// them again) and the remote command (`-t prod tmux`) is dropped. With mosh
+/// there is no ssh argv: only the host, with default ssh settings.
 pub(crate) fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
     let mut argv = vec![
         "-T".to_owned(),
@@ -104,7 +103,7 @@ pub(crate) fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
                 }
                 let Some(cluster) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
                     if destination.is_some() {
-                        // Hedeften sonraki ilk seçenek-olmayan: uzak komut.
+                        // The first non-option after the destination: the remote command.
                         break;
                     }
                     destination = Some(arg.clone());
@@ -140,12 +139,12 @@ pub(crate) fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
     argv
 }
 
-/// POSIX tek tırnağı; içteki `'` `'"'"'` olarak — **ters bölü üretmiyor**.
+/// POSIX single quoting; an inner `'` as `'"'"'` — **produces no backslash**.
 ///
-/// Uzak komutu önce kullanıcının **giriş kabuğu** okuyor (fish, csh da
-/// olabilir) ve fish tek tırnağın içinde `\'` ile `\\`'yi kaçış sayıyor;
-/// `'\''` biçimi iç içe tırnakta ters bölüyü dış katmana taşır ve fish'te
-/// komutu bozardı. `"'"` her kabukta aynı okunuyor.
+/// The remote command is first read by the user's **login shell** (it may be fish
+/// or csh too), and fish treats `\'` and `\\` as escapes inside single quotes; the
+/// `'\''` form would carry the backslash to the outer layer in nested quoting and
+/// break the command in fish. `"'"` reads the same in every shell.
 fn sq(text: &str) -> String {
     let mut quoted = String::with_capacity(text.len() + 2);
     quoted.push('\'');
@@ -160,33 +159,33 @@ fn sq(text: &str) -> String {
     quoted
 }
 
-/// Uzak komut: POSIX betiği `sh -c`'ye sarılmış hâli. Giriş kabuğu yalnız
-/// `sh -c '…'`'yi okuyor, yani betiğin sözdizimi kabuktan bağımsız.
+/// The remote command: the POSIX script wrapped in `sh -c`. The login shell only
+/// reads `sh -c '…'`, so the script's syntax is independent of the shell.
 fn remote_command(script: &str) -> String {
     format!("sh -c {}", sq(script))
 }
 
-/// Bu yolun uzak betiğe güvenle girip giremeyeceği: **ters bölü ve kontrol
-/// karakteri taşımamalı.** İkisi de iki katmanlı tırnağı (giriş kabuğu + `sh
-/// -c`) fish'te ya da csh'ta bozuyor; böyle bir ad sayfada açıkça
-/// reddediliyor (bilinen sınır), sessizce yanlış yere yazılmıyor.
+/// Whether this path can safely enter the remote script: **it must carry no
+/// backslash and no control character.** Both break the two-layer quoting (login
+/// shell + `sh -c`) in fish or csh; such a name is rejected openly on the sheet (a
+/// known limit) rather than silently written to the wrong place.
 fn is_safe(text: &str) -> bool {
     !text.chars().any(|c| c == '\\' || c.is_control())
 }
 
-/// Yoklamanın cevabının başladığını söyleyen işaret: giriş kabuğunun rc
-/// dosyası (`.bashrc`'nin `echo`'su) çıktıya karışabiliyor ve işaretten önce
-/// gelen her şey atlanıyor.
+/// The mark saying the probe's reply starts here: the login shell's rc file (an
+/// `echo` in `.bashrc`) can mix into the output, and everything before the mark is
+/// skipped.
 const PROBE_MARK: &str = "BT-UPLOAD";
 
-/// Hedef dizine geçilemediğinde betiğin çıkış kodu.
+/// The script's exit code when it cannot change into the target directory.
 const NO_DIRECTORY: i32 = 3;
 
-/// Sayfa açılmadan önce uzakta sorulanlar, **tek bağlantıda**: dizinin tam
-/// yolu (`dir` yoksa ev dizini), `df -Pk`'nın satırı, `tar`'ın varlığı ve
-/// her adın hedefte olup olmadığı (klasör mü). Adlar değil **indeksler**
-/// yazılıyor: satır sonu taşıyan bir ad (reddediliyor ama) ayrıştırmayı
-/// bozamasın.
+/// What is asked remotely before the sheet opens, **in a single connection**: the
+/// directory's full path (the home directory if there is no `dir`), `df -Pk`'s line,
+/// whether `tar` exists, and whether each name already exists at the target (and is a
+/// folder). **Indices**, not names, are printed: a name carrying a newline (rejected,
+/// but still) must not be able to break the parsing.
 pub(crate) fn probe_script(dir: Option<&str>, names: &[String]) -> String {
     let mut script = String::new();
     if let Some(dir) = dir {
@@ -209,22 +208,22 @@ pub(crate) fn probe_script(dir: Option<&str>, names: &[String]) -> String {
     script
 }
 
-/// Yoklamanın cevabı.
+/// The probe's reply.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ProbeReply {
-    /// Hedef dizinin uzaktaki tam yolu (`pwd`).
+    /// The target directory's full remote path (`pwd`).
     pub(crate) dir: String,
-    /// Boş alan, bayt; `df` okunamadıysa `None` (kontrol yapılamaz, engel
-    /// de olmaz).
+    /// Free space, bytes; `None` if `df` could not be read (no check can be made,
+    /// and nothing is blocked either).
     pub(crate) free: Option<u64>,
-    /// Uzakta `tar` var mı.
+    /// Whether `tar` exists remotely.
     pub(crate) tar: bool,
-    /// Hedefte zaten olan adlar: indeks ve klasör mü.
+    /// Names already present at the target: index and whether it is a folder.
     pub(crate) existing: Vec<(usize, bool)>,
 }
 
-/// Yoklamanın standart çıktısı → cevap; işaret yoksa `None` (betik hiç
-/// koşmadı).
+/// The probe's standard output → the reply; `None` if there is no mark (the script
+/// never ran).
 pub(crate) fn parse_probe(out: &str) -> Option<ProbeReply> {
     let mut lines = out.lines().skip_while(|line| line.trim() != PROBE_MARK);
     lines.next()?;
@@ -234,9 +233,9 @@ pub(crate) fn parse_probe(out: &str) -> Option<ProbeReply> {
         ..ProbeReply::default()
     };
     let mut existing: Vec<(usize, bool)> = Vec::new();
-    // Her satır kendi işaretini taşıyor: `df` hiçbir şey basmasa (yok, ya
-    // da bağlama noktasında desteklenmiyor) sıradaki satır onun yerine
-    // okunmasın.
+    // Every line carries its own mark: if `df` prints nothing (missing, or not
+    // supported on the mount point) the next line must not be read in its
+    // place.
     for line in lines {
         let line = line.trim();
         if let Some(df) = line.strip_prefix("BT-DF ") {
@@ -257,9 +256,9 @@ pub(crate) fn parse_probe(out: &str) -> Option<ProbeReply> {
     Some(reply)
 }
 
-/// `df -Pk`'nın veri satırından boş alan, bayt. Aygıt adında ya da bağlama
-/// noktasında boşluk olabilir: sütun, doluluk yüzdesinin (`NN%`) **hemen
-/// solu** diye bulunuyor, baştan sayılarak değil.
+/// Free space in bytes from `df -Pk`'s data line. The device name or the mount point
+/// may contain spaces: the column is found as the one **immediately left** of the
+/// capacity percentage (`NN%`), not by counting from the start.
 fn df_available(line: &str) -> Option<u64> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     let capacity = fields.iter().position(|field| {
@@ -269,64 +268,64 @@ fn df_available(line: &str) -> Option<u64> {
     kib.checked_mul(1024)
 }
 
-/// Uzakta akışı açan betik: hedef dizine geç ve standart girdiden çıkar.
-/// `-p` izinleri koruyor, `-o` sahipliği **korumuyor** — root olarak
-/// yüklenen dosya yerel kullanıcının uid'sine düşmesin.
+/// The script that unpacks the stream remotely: change into the target directory
+/// and extract from standard input. `-p` keeps permissions, `-o` does **not** keep
+/// ownership — a file uploaded as root must not end up with the local user's uid.
 fn extract_script(dir: &str) -> String {
     format!("cd {} && exec tar -x -p -o -f -", sq(dir))
 }
 
-/// İptalde (ya da disk dolunca) yarım kalan dosyayı silen betik; `rel`
-/// akıştaki yolu (`./static/app.js`), dizine göre.
+/// The script that deletes the half-written file on cancel (or when the disk fills);
+/// `rel` is its path in the stream (`./static/app.js`), relative to the directory.
 fn cleanup_script(dir: &str, rel: &str) -> String {
     format!("cd {} && rm -f -- {}", sq(dir), sq(rel))
 }
 
-// ─── tar akışının okuyucusu ──────────────────────────────────────────────
+// ─── tar stream reader ───────────────────────────────────────────────────
 
-/// Blok boyu.
+/// Block size.
 const BLOCK: usize = 512;
 
-/// pax başlığının biriktirilen en çok boyu — `path=` kaydı için fazlasıyla
-/// yeter; daha büyüğü (uzun bir öznitelik listesi) okunmadan geçiyor.
+/// The largest pax header size accumulated — more than enough for a `path=`
+/// record; anything larger (a long attribute list) is passed over unread.
 const PAX_LIMIT: usize = 64 * 1024;
 
-/// Kaydın türü.
+/// The record's type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Entry {
-    /// Sıradan dosya (`0`, `\0`, `7`) ya da sabit bağ (`1`): sayılan.
+    /// Regular file (`0`, `\0`, `7`) or hard link (`1`): counted.
     File,
-    /// pax genişletilmiş başlığı (`x`): sonraki kaydın yolu burada olabilir.
+    /// pax extended header (`x`): the next record's path may be here.
     Pax,
-    /// Kalan her şey (klasör, sembolik bağ, küresel pax).
+    /// Everything else (folder, symbolic link, global pax).
     Other,
 }
 
-/// Akıttığımız tar baytlarının **başlıklarını** okuyan durum makinesi:
-/// kaç dosya bitti, kaç içerik baytı geçti ve şu an hangi dosya yazılıyor.
+/// A state machine reading the **headers** of the tar bytes we stream: how many
+/// files finished, how many content bytes passed and which file is being written now.
 ///
-/// İlerleme bu yüzden kesin: baytları biz taşıyoruz ve her dosyanın sınırını
-/// görüyoruz. Yarım dosya ([`Self::current`]) iptalde silinecek olan.
+/// That is why progress is exact: we carry the bytes and see every file's boundary.
+/// The half-written file ([`Self::current`]) is the one deleted on cancel.
 ///
-/// bsdtar uzun, ASCII dışı ya da büyük dosyada kaydın önüne bir pax başlığı
-/// (`x`) koyuyor ve oradaki `path=` sonraki başlığın adını geçersiz kılıyor;
-/// boy alanı büyük dosyada 256 tabanlı olabiliyor. İkisi de okunuyor.
+/// bsdtar puts a pax header (`x`) before the record for long, non-ASCII or large
+/// files, and the `path=` there overrides the next header's name; for large files
+/// the size field can be base-256. Both are read.
 #[derive(Debug)]
 pub(crate) struct TarWatcher {
     header: Vec<u8>,
-    /// Kaydın kalan veri baytı (dolgu hariç).
+    /// The record's remaining data bytes (padding excluded).
     remaining: u64,
-    /// Verinin arkasındaki dolgu.
+    /// The padding after the data.
     padding: u64,
     entry: Entry,
     pax: Vec<u8>,
-    /// pax'ın söylediği, sonraki kaydın yolu.
+    /// The next record's path, as pax said.
     next_path: Option<String>,
-    /// Başlığı geçmiş ama verisi bitmemiş dosya.
+    /// A file whose header has passed but whose data has not finished.
     pub(crate) current: Option<String>,
-    /// Verisi bütünüyle geçmiş dosya sayısı.
+    /// The number of files whose data has passed completely.
     pub(crate) files: u64,
-    /// Geçen içerik baytı (yalnız dosyaların verisi).
+    /// Content bytes passed (file data only).
     pub(crate) bytes: u64,
 }
 
@@ -347,7 +346,7 @@ impl Default for TarWatcher {
 }
 
 impl TarWatcher {
-    /// Akışın bir sonraki parçası.
+    /// The next chunk of the stream.
     pub(crate) fn feed(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
             if self.remaining > 0 {
@@ -387,9 +386,9 @@ impl TarWatcher {
         }
     }
 
-    /// Bir başlık bloğu tamamlandı.
+    /// A header block is complete.
     fn begin(&mut self, header: &[u8]) {
-        // Sıfır blok arşivin sonu (ya da dolgusu).
+        // A zero block is the end of the archive (or its padding).
         if header.iter().all(|&byte| byte == 0) {
             return;
         }
@@ -413,7 +412,7 @@ impl TarWatcher {
         }
     }
 
-    /// Kaydın verisi bitti.
+    /// The record's data is finished.
     fn entry_done(&mut self) {
         match self.entry {
             Entry::File => {
@@ -427,8 +426,8 @@ impl TarWatcher {
     }
 }
 
-/// Başlığın boy alanı: sekizlik ASCII ya da (yüksek bit kuruluysa) 256
-/// tabanlı ikili.
+/// The header's size field: octal ASCII or (if the high bit is set) base-256
+/// binary.
 fn tar_size(field: &[u8]) -> u64 {
     if field.first().is_some_and(|&byte| byte & 0x80 != 0) {
         return field[1..]
@@ -444,7 +443,7 @@ fn tar_size(field: &[u8]) -> u64 {
         .fold(0, |acc, &byte| acc * 8 + u64::from(byte - b'0'))
 }
 
-/// ustar başlığının adı: `prefix/name` (prefix boşsa yalnız ad).
+/// The ustar header's name: `prefix/name` (just the name if prefix is empty).
 fn tar_name(header: &[u8]) -> String {
     let field = |range: std::ops::Range<usize>| {
         let raw = &header[range];
@@ -464,7 +463,7 @@ fn tar_name(header: &[u8]) -> String {
     }
 }
 
-/// pax kayıtlarından (`"{uzunluk} {anahtar}={değer}\n"`) `path`.
+/// `path` from the pax records (`"{length} {key}={value}\n"`).
 fn pax_path(data: &[u8]) -> Option<String> {
     let mut rest = data;
     let mut path = None;
@@ -484,9 +483,9 @@ fn pax_path(data: &[u8]) -> Option<String> {
     path
 }
 
-// ─── metin ───────────────────────────────────────────────────────────────
+// ─── text ────────────────────────────────────────────────────────────────
 
-/// Bayt sayısı, ondalık birimlerle (Finder'ın birimi): `512 B`, `18.2 MB`.
+/// A byte count in decimal units (Finder's units): `512 B`, `18.2 MB`.
 pub(crate) fn format_bytes(bytes: u64) -> String {
     let (value, unit) = scaled(bytes, bytes);
     if unit == "B" {
@@ -496,7 +495,7 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// `done / total`, ikisi de **toplamın** biriminde: `18.2 / 44.6 MB`.
+/// `done / total`, both in the **total's** unit: `18.2 / 44.6 MB`.
 fn format_pair(done: u64, total: u64) -> String {
     let (value, unit) = scaled(done, total);
     let (whole, _) = scaled(total, total);
@@ -507,7 +506,7 @@ fn format_pair(done: u64, total: u64) -> String {
     }
 }
 
-/// `bytes`'ı `reference`'ın birimine çevirir.
+/// Converts `bytes` into `reference`'s unit.
 fn scaled(bytes: u64, reference: u64) -> (f64, &'static str) {
     const UNITS: [(u64, &str); 3] = [(1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "KB")];
     for (size, unit) in UNITS {
@@ -518,9 +517,9 @@ fn scaled(bytes: u64, reference: u64) -> (f64, &'static str) {
     (bytes as f64, "B")
 }
 
-/// Saniyede bayt: `1.2 MB/s`.
+/// Bytes per second: `1.2 MB/s`.
 fn format_rate(per_second: f64) -> String {
-    // audit: yuvarlama yalnız birimi seçmek için; değer f64'ten basılıyor.
+    // audit: rounding only to pick the unit; the value is printed from the f64.
     let whole = per_second.max(0.0) as u64;
     let (value, unit) = scaled(whole, whole);
     if unit == "B" {
@@ -531,7 +530,7 @@ fn format_rate(per_second: f64) -> String {
     }
 }
 
-/// Kalan süre: `22s`, `1m 05s`, `1h 02m`.
+/// Remaining time: `22s`, `1m 05s`, `1h 02m`.
 fn format_duration(seconds: u64) -> String {
     match seconds {
         0..60 => format!("{seconds}s"),
@@ -545,29 +544,29 @@ fn files_word(count: u64) -> &'static str {
     if count == 1 { "file" } else { "files" }
 }
 
-/// `done of total`, ikisi de **toplamın** biriminde: `48.0 of 96.0 MB`
-/// (durdurma sorusu).
+/// `done of total`, both in the **total's** unit: `48.0 of 96.0 MB`
+/// (the stop question).
 fn format_of(done: u64, total: u64) -> String {
     format_pair(done, total).replacen(" / ", " of ", 1)
 }
 
-/// Kuyruğun nasıl bittiği.
+/// How the queue ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum End {
-    /// Hepsi yüklendi.
+    /// Everything uploaded.
     Done,
-    /// ⌘., satırın `Cancel`'ı ya da popover'ın iptali.
+    /// ⌘., the line's `Cancel` or the popover's cancel.
     Cancelled,
-    /// Uzakta disk doldu.
+    /// The remote disk filled up.
     DiskFull,
-    /// Uzak oturum (ssh) kapandı; bekleyenler iptal.
+    /// The remote session (ssh) closed; pending items cancelled.
     Closed,
-    /// Akış hata verdi; ssh'ın ya da tar'ın son satırı.
+    /// The stream failed; the last line from ssh or tar.
     Failed(String),
 }
 
-/// Kalemin listedeki ve sonuç satırındaki adı: klasörde sondaki `/`
-/// (`static/`), dosyada adın kendisi.
+/// The item's name in the list and in the result line: a trailing `/` for a folder
+/// (`static/`), the name itself for a file.
 fn label(local: &Local) -> String {
     if local.dir {
         format!("{}/", local.name)
@@ -576,14 +575,14 @@ fn label(local: &Local) -> String {
     }
 }
 
-/// Kuyruk bittiğinde kalemlerin özeti: kaç kalem, kaçı yüklendi, hepsinin
-/// ortak hedefi (varsa) ve tek kalemin adı.
+/// A summary of the items when the queue ends: how many items, how many uploaded,
+/// their common destination (if any) and the single item's name.
 struct Tally<'a> {
     items: usize,
     done: usize,
-    /// Bütün kalemler aynı dizine gittiyse o dizin.
+    /// That directory, if all items went to the same directory.
     dest: Option<&'a str>,
-    /// Tek kalemse adı ([`label`]).
+    /// Its name if there is a single item ([`label`]).
     single: Option<String>,
 }
 
@@ -607,16 +606,16 @@ impl<'a> Tally<'a> {
         }
     }
 
-    /// `backup.tar.gz`, `static/` ya da `3 files`.
+    /// `backup.tar.gz`, `static/` or `3 files`.
     fn what(&self) -> String {
         self.single.clone().unwrap_or_else(|| {
-            // audit: kalem sayısı damla başına; `u64`'e sığar.
+            // audit: the item count is per drop; it fits in a `u64`.
             format!("{} {}", self.items, files_word(self.items as u64))
         })
     }
 }
 
-/// Hatanın sebebi, satırın küçük harfli biçiminde (`disk full on prod`).
+/// The failure's reason, in the line's lowercase form (`disk full on prod`).
 fn failure_reason(end: &End, host: &str) -> Option<String> {
     match end {
         End::Done | End::Cancelled => None,
@@ -626,9 +625,9 @@ fn failure_reason(end: &End, host: &str) -> Option<String> {
     }
 }
 
-/// Sonuç satırının gövdesi, tonu ve tonda çizilen baştaki karakter sayısı
-/// (037 phase-7): başarı yeşil, iptal sönük, hata metni kırmızı ve
-/// arkasındaki sayım sönük.
+/// The result line's body, its tone and the number of leading characters drawn in
+/// that tone (037 phase-7): success green, cancel dim, the failure text red and the
+/// count after it dim.
 fn end_line(end: &End, host: &str, tally: &Tally<'_>) -> (String, TransferTone, usize) {
     if let Some(reason) = failure_reason(end, host) {
         let head = format!("Failed — {reason}");
@@ -641,7 +640,7 @@ fn end_line(end: &End, host: &str, tally: &Tally<'_>) -> (String, TransferTone, 
         (End::Done, None) => format!(
             "✓ {} {} uploaded",
             tally.items,
-            // audit: kalem sayısı damla başına; `u64`'e sığar.
+            // audit: the item count is per drop; it fits in a `u64`.
             files_word(tally.items as u64)
         ),
         _ if tally.items > 1 => format!(
@@ -659,8 +658,8 @@ fn end_line(end: &End, host: &str, tally: &Tally<'_>) -> (String, TransferTone, 
     (body, tone, lead)
 }
 
-/// bateri arkadayken gösterilecek bildirim (037 phase-7): başlık ve gövde.
-/// İptal kullanıcının kendi eylemi — bildirim yok.
+/// The notification shown while bateri is in the background (037 phase-7): title
+/// and body. Cancelling is the user's own action — no notification.
 fn end_notice(end: &End, host: &str, tally: &Tally<'_>) -> Option<(String, String)> {
     if let Some(reason) = failure_reason(end, host) {
         let mut chars = reason.trim_end_matches('.').chars();
@@ -683,11 +682,11 @@ fn end_notice(end: &End, host: &str, tally: &Tally<'_>) -> Option<(String, Strin
     Some((format!("{} uploaded", tally.what()), body))
 }
 
-// ─── yerel ölçüm ─────────────────────────────────────────────────────────
+// ─── local measurement ───────────────────────────────────────────────────
 
-/// Bırakılan bir öğe: yolu, adı, klasör mü, kaç dosya ve kaç bayt — ikisi
-/// de **yerelde, yükleme başlamadan** (sayfa onları söylüyor, ilerleme onlara
-/// göre).
+/// A dropped item: its path, name, whether it is a folder, how many files and how
+/// many bytes — both **locally, before the upload starts** (the sheet states them,
+/// and progress is measured against them).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Local {
     pub(crate) path: PathBuf,
@@ -697,9 +696,9 @@ pub(crate) struct Local {
     pub(crate) bytes: u64,
 }
 
-/// Bir yolu ölçer. Sembolik bağ **izlenmiyor** (tar da izlemiyor, bağı bağ
-/// olarak taşıyor); okunamayan alt klasör atlanıyor — tar onda zaten hata
-/// verecek ve satır onu söyleyecek.
+/// Measures a path. Symbolic links are **not followed** (tar does not follow them
+/// either, it carries the link as a link); an unreadable subfolder is skipped — tar
+/// will fail on it anyway and the line will say so.
 pub(crate) fn measure(path: &Path) -> std::io::Result<Local> {
     let meta = std::fs::symlink_metadata(path)?;
     let name = path
@@ -732,31 +731,32 @@ fn walk(path: &Path, meta: &std::fs::Metadata, into: &mut Local) {
     }
 }
 
-// ─── sayfa ───────────────────────────────────────────────────────────────
+// ─── sheet ───────────────────────────────────────────────────────────────
 
-/// Onay sayfasının metni ve düğmesi.
+/// The confirmation sheet's text and button.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Sheet {
     pub(crate) message: String,
     pub(crate) informative: String,
-    /// Onay düğmesinin adı: `Upload`, aynı adlı dosya varsa `Replace`,
-    /// aynı adlı klasör varsa `Merge`.
+    /// The confirm button's title: `Upload`, `Replace` if a same-named file exists,
+    /// `Merge` if a same-named folder exists.
     pub(crate) button: &'static str,
-    /// Onay düğmesi açık mı: yer yetmiyorsa, uzakta tar yoksa ya da ad
-    /// güvenle gönderilemiyorsa kapalı.
+    /// Whether the confirm button is enabled: disabled if there is not enough space,
+    /// if there is no remote tar, or if a name cannot be sent safely.
     pub(crate) enabled: bool,
 }
 
-/// Onay sayfası (Kullanıcı kararı 1; metni 037 phase-7): başlık neyi
-/// nereye, ilk satır boyutu ve hedefi söylüyor (`96.0 MB → /var/www/app`,
-/// klasörde dosya sayısıyla), birden çok kalemde adların listesi; aynı adlı
-/// öğe, boş alan ve tar bugünkü gibi. `reported`: hedef uzak kabuğun OSC 7
-/// dizini mi (değilse ev dizini ve sayfa bunu söylüyor). `busy`: bir
-/// yükleme sürüyor — sayfa onun durmadığını söylüyor.
+/// The confirmation sheet (Kullanıcı kararı 1; its text 037 phase-7): the title says
+/// what goes where, the first line states the size and destination
+/// (`96.0 MB → /var/www/app`, with the file count for a folder), a list of names for
+/// multiple items; same-named item, free space and tar as today. `reported`: whether
+/// the destination is the remote shell's OSC 7 directory (if not, it is the home
+/// directory and the sheet says so). `busy`: an upload is running — the sheet says it
+/// does not stop.
 ///
-/// **Boş alan yalnız bu damlayla karşılaştırılıyor**: kuyrukta bekleyen
-/// öğelerin henüz gitmemiş baytları düşülmüyor (bilinen sınır) — ikisini
-/// toplayan bir "yetmiyor" hangi öğenin yetmediğini söyleyemezdi.
+/// **Free space is compared only with this drop**: the not-yet-sent bytes of items
+/// waiting in the queue are not subtracted (known limit) — a "not enough" summing
+/// the two could not say which item does not fit.
 pub(crate) fn sheet(
     host: &str,
     reported: bool,
@@ -872,9 +872,9 @@ pub(crate) fn sheet(
     }
 }
 
-// ─── süreç ───────────────────────────────────────────────────────────────
+// ─── process ─────────────────────────────────────────────────────────────
 
-/// Yoklamanın hatası: sayfanın yerine açılan hata sayfasının metni.
+/// The probe's failure: the text of the error sheet opened in place of the sheet.
 pub(crate) fn probe_failure(host: &str, code: Option<i32>, stderr: &str) -> String {
     let last = last_line(stderr);
     match code {
@@ -890,7 +890,7 @@ pub(crate) fn probe_failure(host: &str, code: Option<i32>, stderr: &str) -> Stri
     }
 }
 
-/// Metnin son boş olmayan satırı.
+/// The text's last non-empty line.
 fn last_line(text: &str) -> &str {
     text.lines()
         .rev()
@@ -899,7 +899,7 @@ fn last_line(text: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// Uzak betiği ssh ile koşturur (girdisiz): çıkış kodu, stdout, stderr.
+/// Runs the remote script over ssh (without input): exit code, stdout, stderr.
 fn run_ssh(ssh: &[String], script: &str) -> std::io::Result<(Option<i32>, String, String)> {
     let output = Command::new(&ssh[0])
         .args(&ssh[1..])
@@ -913,8 +913,8 @@ fn run_ssh(ssh: &[String], script: &str) -> std::io::Result<(Option<i32>, String
     ))
 }
 
-/// Sayfadan önceki iş, arka plan thread'inde: yerel ölçüm ve uzak yoklama.
-/// `Err` → hata sayfasının metni.
+/// The work before the sheet, on a background thread: local measurement and the
+/// remote probe. `Err` → the error sheet's text.
 pub(crate) fn probe(
     ssh: &[String],
     host: &str,
@@ -943,25 +943,25 @@ pub(crate) fn probe(
     }
 }
 
-/// Bir öğenin akışının paylaşılan durumu: ana thread iptal ediyor ve
-/// ilerlemeyi okuyor, akış thread'i yazıyor.
+/// The shared state of one item's stream: the main thread cancels and reads the
+/// progress, the stream thread writes it.
 #[derive(Debug, Default)]
 pub(crate) struct Shared {
     cancel: AtomicBool,
     disk_full: AtomicBool,
     bytes: AtomicU64,
     files: AtomicU64,
-    /// Akıştaki iki sürecin (yerel tar, ssh) pid'i — iptal onları
-    /// **öldürüyor**: akış thread'i yavaş bir bağlantıda ssh'ın girdisine
-    /// yazarken bloklu kalıyor ve bayrağa hiç bakmıyor; süreç ölünce yazım
-    /// `EPIPE` ile dönüyor.
+    /// The pids of the two processes in the stream (local tar, ssh) — cancelling
+    /// **kills** them: on a slow connection the stream thread stays blocked writing
+    /// to ssh's input and never looks at the flag; once the process dies the write
+    /// returns with `EPIPE`.
     pids: Mutex<Vec<u32>>,
-    /// Ana kuyrukta bekleyen ilerleme haberi var mı (en çok bir).
+    /// Whether a progress report is waiting on the main queue (at most one).
     pub(crate) tick_pending: AtomicBool,
 }
 
 impl Shared {
-    /// Bütün süreçleri öldürür (iptal ve disk dolu).
+    /// Kills all processes (cancel and disk full).
     fn kill(&self) {
         for &pid in self
             .pids
@@ -969,24 +969,24 @@ impl Shared {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
         {
-            // SAFETY: `kill(2)` yalnız bir pid ve sinyal alıyor; pid bu
-            // akışın kendi çocuğu ve **toplanmadan önce**, bu kilidin
-            // altında listeden çıkıyor ([`wait_untracked`]) — toplanmış ve
-            // başka bir sürece verilmiş bir pid'e sinyal gidemez.
-            // audit: pid `u32`'den `pid_t`'ye; macOS'ta pid'ler pozitif `i32`.
+            // SAFETY: `kill(2)` takes only a pid and a signal; the pid is this
+            // stream's own child and leaves the list under this lock **before it
+            // is reaped** ([`wait_untracked`]) — no signal can reach a pid that
+            // was reaped and handed to another process.
+            // audit: pid from `u32` to `pid_t`; on macOS pids are positive `i32`.
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGTERM);
             }
         }
     }
 
-    /// İptal ister ve süreçleri öldürür.
+    /// Requests cancellation and kills the processes.
     pub(crate) fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
         self.kill();
     }
 
-    /// Geçen içerik baytı ve biten dosya sayısı.
+    /// Content bytes passed and the number of finished files.
     pub(crate) fn progress(&self) -> (u64, u64) {
         (
             self.bytes.load(Ordering::Acquire),
@@ -999,7 +999,7 @@ impl Shared {
         pids.clear();
         pids.extend(children.iter().map(|child| child.id()));
         drop(pids);
-        // Başlamadan iptal edildiyse (sıra geldiğinde ⌘.) hemen öldür.
+        // If cancelled before starting (⌘. when its turn came), kill at once.
         if self.cancel.load(Ordering::Acquire) {
             self.kill();
         }
@@ -1013,18 +1013,18 @@ impl Shared {
     }
 }
 
-/// Çocuğun çıkmasını bekler, pid'ini [`Shared`]'ın listesinden çıkarır ve
-/// **ancak ondan sonra** toplar (`wait`). Sıra şart: toplanan pid çekirdekte
-/// hemen başka bir sürece verilebilir ve listede kalsaydı araya düşen bir
-/// iptal ilgisiz bir süreci öldürürdü. `waitid(…, WNOWAIT)` çıkışı toplamadan
-/// bildiriyor.
+/// Waits for the child to exit, removes its pid from [`Shared`]'s list and **only
+/// then** reaps it (`wait`). The order is required: a reaped pid can be handed to
+/// another process by the kernel right away, and had it stayed on the list a cancel
+/// arriving in between would kill an unrelated process. `waitid(…, WNOWAIT)` reports
+/// the exit without reaping.
 fn wait_untracked(child: &mut Child, shared: &Shared) -> std::io::Result<std::process::ExitStatus> {
     let pid = child.id();
     loop {
-        // SAFETY: `siginfo_t` düz bir C yapısı, sıfır geçerli bir başlangıç;
-        // `waitid` yalnız ona yazıyor. pid bu thread'in kendi çocuğu.
+        // SAFETY: `siginfo_t` is a plain C struct, zero is a valid initial value;
+        // `waitid` only writes into it. The pid is this thread's own child.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        // SAFETY: yukarıdaki; `WNOWAIT` çocuğu toplamıyor, `wait` aşağıda.
+        // SAFETY: as above; `WNOWAIT` does not reap the child, `wait` is below.
         let result = unsafe {
             libc::waitid(
                 libc::P_PID,
@@ -1042,7 +1042,7 @@ fn wait_untracked(child: &mut Child, shared: &Shared) -> std::io::Result<std::pr
     child.wait()
 }
 
-/// Bir öğenin akışının sonucu.
+/// The result of one item's stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Done,
@@ -1051,17 +1051,17 @@ pub(crate) enum Outcome {
     Failed(String),
 }
 
-/// Uzakta diskin dolduğunu söyleyen satır (GNU tar, bsdtar ve busybox
-/// aynı `strerror`'ı basıyor).
+/// The line saying the remote disk is full (GNU tar, bsdtar and busybox print the
+/// same `strerror`).
 const DISK_FULL: &str = "No space left on device";
 
-/// Bir öğeyi yükler: yerelde `tar c`, uzakta `ssh … tar x`, aradaki baytlar
-/// bizden geçiyor ([`TarWatcher`]). **Arka plan thread'inde**; `tick`
-/// ilerlemenin haberini ana kuyruğa atıyor (en sık [`TICK`]'te bir).
+/// Uploads one item: `tar c` locally, `ssh … tar x` remotely, the bytes in between
+/// pass through us ([`TarWatcher`]). **On a background thread**; `tick` posts the
+/// progress report to the main queue (at most once per [`TICK`]).
 ///
-/// İptal ya da disk dolu: iki süreç öldürülüyor ve **yazılmakta olan** dosya
-/// uzakta siliniyor — tek dosyada dosyanın kendisi, klasörde yalnız o an
-/// yazılan; bitenler kalıyor (Kullanıcı kararı 5, 6).
+/// Cancel or disk full: both processes are killed and the file **being written** is
+/// deleted remotely — for a single file the file itself, for a folder only the one
+/// being written at that moment; finished ones stay (Kullanıcı kararı 5, 6).
 pub(crate) fn transfer(
     ssh: &[String],
     local: &Local,
@@ -1081,9 +1081,9 @@ pub(crate) fn transfer(
         Ok(child) => child,
         Err(error) => return Outcome::Failed(format!("ssh could not be started: {error}")),
     };
-    // `./ad`: `-` ile başlayan bir ad seçenek sanılmasın. macOS'un tar'ı
-    // `._ad` AppleDouble kayıtları ve öznitelik pax'ları üretmesin — uzakta
-    // çöp dosya ve GNU tar'da uyarı olurlardı.
+    // `./name`: a name starting with `-` must not be taken for an option. macOS's
+    // tar must not produce `._name` AppleDouble records and attribute paxes — they
+    // would become junk files remotely and warnings in GNU tar.
     let local_tar = Command::new("/usr/bin/tar")
         .args([
             "-c",
@@ -1133,7 +1133,7 @@ pub(crate) fn transfer(
                 tick();
             }
         }
-        // Girdi burada kapanıyor: uzak tar akışın sonunu görsün.
+        // The input closes here: the remote tar must see the end of the stream.
     }
     let remote_status = wait_untracked(&mut remote, shared);
     let local_status = wait_untracked(&mut local_tar, shared);
@@ -1175,10 +1175,10 @@ pub(crate) fn transfer(
     }
 }
 
-/// Bir sürecin hata çıktısını ayrı bir thread'de sonuna kadar okur (boru
-/// dolup süreç bloklanmasın); `disk` verildiyse "disk dolu" satırında
-/// akışı hemen durdurur — GNU tar hatadan sonra akışı yutmaya devam ediyor
-/// ve kalan gigabaytlar boşa giderdi.
+/// Reads a process's error output to the end on a separate thread (so the pipe does
+/// not fill up and block the process); if `disk` is given, stops the stream at once
+/// on a "disk full" line — GNU tar keeps swallowing the stream after the error and
+/// the remaining gigabytes would be wasted.
 fn collect_stderr(
     stream: Option<std::process::ChildStderr>,
     disk: Option<Arc<Shared>>,
@@ -1203,9 +1203,9 @@ fn collect_stderr(
     })
 }
 
-/// Pencere ve sekme başlığı (037 phase-7): yükleme akarken bugünkü başlığın
-/// önünde `↑ N% · ` — alternatif ekranda (vim) dock yok ve ilerlemeyi
-/// gösteren tek yer bu; akmıyorsa başlık olduğu gibi.
+/// The window and tab title (037 phase-7): while an upload streams, `↑ N% · ` in
+/// front of the current title — on the alternate screen (vim) there is no dock and
+/// this is the only place showing progress; otherwise the title as is.
 pub(crate) fn titled(percent: Option<u8>, title: &str) -> String {
     match percent {
         Some(percent) => format!("↑ {percent}% · {title}"),
@@ -1213,22 +1213,22 @@ pub(crate) fn titled(percent: Option<u8>, title: &str) -> String {
     }
 }
 
-// ─── kuyruk ──────────────────────────────────────────────────────────────
+// ─── queue ───────────────────────────────────────────────────────────────
 
-/// Akan kalemin durdurulması bu süreden uzun sürmüşse önce sorulur (037
-/// phase-7) — **tasarım sabiti, ölçüm değil**. Kısa bir yüklemeyi durdurmak
-/// ucuz (yeniden bırakmak saniyeler); yarım dakikayı geçen bir yüklemenin
-/// kaybı ise tek bir yanlış tıkla gitmemeli.
+/// Stopping the streaming item asks first if it has been running longer than this
+/// (037 phase-7) — a **design constant, not a measurement**. Stopping a short upload
+/// is cheap (dropping again takes seconds); losing an upload past half a minute must
+/// not happen with a single wrong click.
 pub(crate) const STOP_ASK_AFTER: Duration = Duration::from_secs(30);
 
-/// Kuyruktaki bir öğe: yerel öğe ve uzak hedef dizin.
+/// An item in the queue: the local item and the remote destination directory.
 #[derive(Clone, Debug)]
 pub(crate) struct Job {
     pub(crate) local: Local,
     pub(crate) dir: String,
 }
 
-/// Bir kalemin kuyruktaki hâli.
+/// An item's state in the queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryState {
     Waiting,
@@ -1236,29 +1236,29 @@ enum EntryState {
     Done,
 }
 
-/// Kuyruğun bir kalemi. Biten kalem listede **kalıyor** (037 phase-7):
-/// popover onu `✓ Uploaded` diye gösteriyor ve sonuç satırı onu sayıyor.
+/// An item of the queue. A finished item **stays** on the list (037 phase-7): the
+/// popover shows it as `✓ Uploaded` and the result line counts it.
 #[derive(Debug)]
 struct Item {
-    /// Kuyruklar boyunca tekil: popover'ın düğmesi kalemi bununla buluyor —
-    /// sıra, biten ve çıkarılan kalemlerle kayardı.
+    /// Unique across queues: the popover's button finds the item by this — the
+    /// position would shift as items finish and are removed.
     id: u64,
     job: Job,
     state: EntryState,
 }
 
-/// Akmakta olan kalem.
+/// The item currently streaming.
 #[derive(Debug)]
 struct Current {
     id: u64,
     shared: Arc<Shared>,
-    /// Akışın başladığı an: durdurma sorusunun ölçütü ([`STOP_ASK_AFTER`]).
+    /// When the stream started: the criterion of the stop question ([`STOP_ASK_AFTER`]).
     started: Instant,
 }
 
-/// Bir sekmenin yükleme kuyruğu — **o sekmenin ssh bağlantısının**
-/// (Kullanıcı kararı 7): nesli uzak oturumun komut nesli; nesil değişirse
-/// (ssh kapandı) bekleyenler iptal.
+/// A tab's upload queue — **bound to that tab's ssh connection** (Kullanıcı kararı 7):
+/// its generation is the remote session's command generation; if the generation
+/// changes (ssh closed) the pending items are cancelled.
 #[derive(Debug)]
 struct Queue {
     command: u64,
@@ -1267,19 +1267,19 @@ struct Queue {
     mark: HostMark,
     entries: Vec<Item>,
     current: Option<Current>,
-    /// Çubuğun paydası ve biten kalemlerin baytları: tek başına durdurulan
-    /// kalemin gitmeyen kısmı paydadan düşüyor, gideni biten sayılıyor —
-    /// çubuk geri gitmesin.
+    /// The bar's denominator and the bytes of finished items: the unsent part of an
+    /// individually stopped item is subtracted from the denominator and the sent part
+    /// counts as done — so the bar never goes backwards.
     bytes_total: u64,
     bytes_done: u64,
-    /// Hızın örnekleri: (an, kuyruğun geçen baytı).
+    /// Speed samples: (instant, the queue's bytes passed).
     samples: VecDeque<(Instant, u64)>,
-    /// Son ölçülen hız, bayt/sn (popover'ın satırı da onu gösteriyor).
+    /// The last measured speed, bytes/s (the popover's row shows it too).
     rate: Option<f64>,
-    /// Sıradaki öğe başlamayacak: kuyruk bu sonla bitiyor.
+    /// The next item will not start: the queue ends with this end.
     ending: Option<End>,
-    /// Akan öğe tek başına durduruldu: `Cancelled` sonucu kuyruğu
-    /// bitirmiyor, kalem listeden çıkıyor ve sıradaki başlıyor.
+    /// The streaming item was stopped on its own: the `Cancelled` result does not end
+    /// the queue, the item leaves the list and the next one starts.
     skip: bool,
 }
 
@@ -1307,32 +1307,32 @@ impl Queue {
     }
 }
 
-/// Bir sekmenin yükleme durumu (ana thread): sayfa sürüyor mu, kuyruk ve
-/// sonuç satırının nesli.
+/// A tab's upload state (main thread): whether a sheet is in progress, the queue and
+/// the result line's generation.
 #[derive(Debug, Default)]
 pub(crate) struct Uploads {
-    /// Yoklama ya da onay sayfası sürüyor: yeni damla reddediliyor (iki sayfa
-    /// üst üste açılamaz).
+    /// A probe or confirmation sheet is in progress: a new drop is rejected (two
+    /// sheets cannot be stacked).
     asking: bool,
     queue: Option<Queue>,
-    /// Kalemlerin kimlik sayacı ([`Item::id`]).
+    /// The items' id counter ([`Item::id`]).
     next_id: u64,
-    /// Sonuç satırının nesli: bekleme bitince yalnız hâlâ aynı sonuç
-    /// gösteriliyorsa satır kalkıyor.
+    /// The result line's generation: when the wait ends the line goes away only if the
+    /// same result is still shown.
     serial: u64,
-    /// Dock'a son yazılan satır ([`Self::shown`]).
+    /// The line last written to the dock ([`Self::shown`]).
     shown: Option<Transfer>,
-    /// Farenin altındaki düğme ve listenin açıklığı (037 phase-6): satır her
-    /// tazelemede yeniden doğuyor, bu ikisi her doğumda ona damgalanıyor —
-    /// yoksa 200 ms'lik tazeleme fare durumunu ezerdi.
+    /// The button under the mouse and whether the list is open (037 phase-6): the line
+    /// is reborn on every refresh and these two are stamped on it at each birth —
+    /// otherwise the 200 ms refresh would overwrite the mouse state.
     hover: Option<TransferAction>,
     list_open: bool,
-    /// Başlığa son yazılan yüzde ([`Self::title_percent_changed`]).
+    /// The percentage last written to the title ([`Self::title_percent_changed`]).
     titled: Option<u8>,
 }
 
-/// Kuyruk bitti: sonuç satırı, nesli ve bateri arkadaysa gösterilecek
-/// bildirim (başlık, gövde).
+/// The queue ended: the result line, its generation and the notification (title,
+/// body) to show if bateri is in the background.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Ended {
     pub(crate) line: Transfer,
@@ -1340,18 +1340,18 @@ pub(crate) struct Ended {
     pub(crate) notice: Option<(String, String)>,
 }
 
-/// Durdurma isteğinin cevabı ([`Uploads::stop_request`]).
+/// The answer to a stop request ([`Uploads::stop_request`]).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Stop {
-    /// Sormadan dur.
+    /// Stop without asking.
     Now { id: Option<u64>, all: bool },
-    /// Önce sor: `id`'li kalem otuz saniyeden uzun süredir akıyor.
+    /// Ask first: the item with `id` has been streaming for over thirty seconds.
     Ask(StopQuestion),
 }
 
-/// Durdurma sorusu (037 phase-7): sayfanın başlığı ve metni, hangi kalem
-/// için sorulduğu (bu arada biterse sayfa kendiliğinden kapanıyor) ve
-/// bütün kuyruk mu.
+/// The stop question (037 phase-7): the sheet's title and text, which item it was
+/// asked for (if it finishes meanwhile the sheet closes on its own) and whether it is
+/// the whole queue.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StopQuestion {
     pub(crate) id: u64,
@@ -1360,28 +1360,28 @@ pub(crate) struct StopQuestion {
     pub(crate) text: String,
 }
 
-/// Popover'ın bir satırının hâli ve sol sütunun ikinci satırı.
+/// The state of a popover row and the left column's second line.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RowStatus {
-    /// Akıyor: çubuğun oranı (`0..=1`) ve `18.2 / 96.0 MB · 1.2 MB/s`.
+    /// Streaming: the bar's fraction (`0..=1`) and `18.2 / 96.0 MB · 1.2 MB/s`.
     Running { fraction: f64, detail: String },
-    /// Sırada: `Waiting · 48.5 MB`.
+    /// Queued: `Waiting · 48.5 MB`.
     Waiting(String),
-    /// Bitti: `✓ Uploaded · 96.0 MB`.
+    /// Finished: `✓ Uploaded · 96.0 MB`.
     Done(String),
 }
 
-/// Popover satırının sağındaki düğme.
+/// The button on the right of a popover row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowAction {
-    /// Akan kalemi durdur (30 sn'yi geçtiyse önce sorar).
+    /// Stop the streaming item (asks first if past 30 s).
     Cancel,
-    /// Bekleyen kalemi kuyruktan çıkar (sormaz).
+    /// Remove the waiting item from the queue (does not ask).
     Remove,
 }
 
 impl RowStatus {
-    /// Satırın düğmesi: akanda `Cancel`, bekleyende `Remove`, bitende yok.
+    /// The row's button: `Cancel` when streaming, `Remove` when waiting, none when done.
     pub(crate) fn action(&self) -> Option<RowAction> {
         match self {
             Self::Running { .. } => Some(RowAction::Cancel),
@@ -1391,8 +1391,8 @@ impl RowStatus {
     }
 }
 
-/// Popover'ın bir satırı: ad (klasörde `static/ · 124 files`), hâl ve
-/// sönük hedef satırı (`→ /var/www/app`).
+/// A popover row: the name (`static/ · 124 files` for a folder), the state and the
+/// dim destination line (`→ /var/www/app`).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ListRow {
     pub(crate) id: u64,
@@ -1401,7 +1401,7 @@ pub(crate) struct ListRow {
     pub(crate) dest: String,
 }
 
-/// "Show files (N)"in popover'ı (037 phase-7): başlık ve satırlar.
+/// The "Show files (N)" popover (037 phase-7): title and rows.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct UploadList {
     pub(crate) title: String,
@@ -1409,11 +1409,11 @@ pub(crate) struct UploadList {
 }
 
 impl Uploads {
-    /// Yeni bir damla kabul edilebilir mi.
+    /// Whether a new drop can be accepted.
     ///
-    /// İptal edilmiş ama akan öğesi henüz bitmemiş (yarım dosyası
-    /// siliniyor) bir kuyruk da hayır: onay verilen damla ona eklenemez ve
-    /// sessizce düşerdi.
+    /// Not for a queue that was cancelled but whose streaming item has not finished
+    /// yet (its half-written file is being deleted) either: a confirmed drop could not
+    /// be added to it and would be silently dropped.
     pub(crate) fn can_accept(&self) -> bool {
         !self.asking
             && self
@@ -1422,38 +1422,38 @@ impl Uploads {
                 .is_none_or(|queue| queue.ending.is_none())
     }
 
-    /// Yoklama ya da sayfa başladı / bitti.
+    /// The probe or the sheet started / ended.
     pub(crate) fn set_asking(&mut self, asking: bool) {
         self.asking = asking;
     }
 
-    /// Bir damlanın yoklaması ya da onay sayfası sürüyor mu: durdurma
-    /// sorusu o arada açılmıyor (iki sayfa üst üste açılamaz).
+    /// Whether a drop's probe or confirmation sheet is in progress: the stop question
+    /// does not open meanwhile (two sheets cannot be stacked).
     pub(crate) fn asking(&self) -> bool {
         self.asking
     }
 
-    /// Kuyruk sürüyor mu (⌘.'nin kapısı).
+    /// Whether a queue is running (⌘.'s gate).
     pub(crate) fn active(&self) -> bool {
         self.queue.is_some()
     }
 
-    /// Kuyruk akıyor mu: onay sayfasının "kuyruğa eklendi" satırının kapısı.
+    /// Whether the queue is streaming: the gate of the sheet's "added to the queue" line.
     pub(crate) fn busy(&self) -> bool {
         self.queue
             .as_ref()
             .is_some_and(|queue| queue.ending.is_none())
     }
 
-    /// Uzak oturumun nesli (ssh'ın kapandığını anlamak için).
+    /// The remote session's generation (to tell that ssh closed).
     pub(crate) fn command(&self) -> Option<u64> {
         self.queue.as_ref().map(|queue| queue.command)
     }
 
-    /// Onaylanan öğeleri kuyruğun sonuna ekler; kuyruk yoksa kurar. Kuyruk
-    /// **başka** bir uzak oturumunsa (yeniden bağlanıldı, eskisi hâlâ
-    /// bitiyor) eski kuyruk kapanmış sayılıyor ve yenisi onun arkasından
-    /// değil yerine kurulamıyor — o hâlde `false` ve damla düşüyor.
+    /// Appends the confirmed items to the end of the queue; creates the queue if there
+    /// is none. If the queue belongs to **another** remote session (reconnected, the
+    /// old one still finishing) the old queue counts as closed and the new one cannot
+    /// be set up behind it or in its place — then `false` and the drop is dropped.
     pub(crate) fn enqueue(
         &mut self,
         command: u64,
@@ -1491,8 +1491,8 @@ impl Uploads {
         true
     }
 
-    /// Sıradaki öğeyi `now` anında başlatır: akış thread'inin girdileri. Bir
-    /// öğe zaten akıyorsa ya da kuyruk bitiyorsa `None`.
+    /// Starts the next item at `now`: the stream thread's inputs. `None` if an item is
+    /// already streaming or the queue is ending.
     pub(crate) fn start_next(&mut self, now: Instant) -> Option<(Vec<String>, Job, Arc<Shared>)> {
         let queue = self.queue.as_mut()?;
         if queue.current.is_some() || queue.ending.is_some() {
@@ -1512,7 +1512,7 @@ impl Uploads {
         Some((queue.ssh.clone(), entry.job.clone(), shared))
     }
 
-    /// Akan kalemin kimliği (durdurma sayfasının kapanış sorusu).
+    /// The streaming item's id (the stop sheet's closing question).
     pub(crate) fn running_id(&self) -> Option<u64> {
         self.queue
             .as_ref()?
@@ -1521,11 +1521,11 @@ impl Uploads {
             .map(|current| current.id)
     }
 
-    /// Durdurma isteği (037 phase-7), `now` anında: `all` bütün kuyruk (⌘.,
-    /// satırın `Cancel`/`Cancel all`'ı, popover'ın `Cancel all`'ı), değilse
-    /// akan kalem (popover satırının `Cancel`'ı). Tek kalemli kuyrukta ikisi
-    /// aynı şey. Akan kalem [`STOP_ASK_AFTER`]'dan uzun süredir akıyorsa
-    /// soru, değilse hemen; kuyruk yoksa `None`.
+    /// A stop request (037 phase-7) at `now`: `all` is the whole queue (⌘., the line's
+    /// `Cancel`/`Cancel all`, the popover's `Cancel all`), otherwise the streaming item
+    /// (the popover row's `Cancel`). In a single-item queue the two are the same. A
+    /// question if the streaming item has been running longer than
+    /// [`STOP_ASK_AFTER`], otherwise at once; `None` if there is no queue.
     pub(crate) fn stop_request(&self, all: bool, now: Instant) -> Option<Stop> {
         let queue = self.queue.as_ref()?;
         let all = all || queue.entries.len() <= 1;
@@ -1551,7 +1551,7 @@ impl Uploads {
         if all {
             let waiting = queue.waiting();
             if waiting > 0 {
-                // audit: kalem sayısı damla başına; `u64`'e sığar.
+                // audit: the item count is per drop; it fits in a `u64`.
                 let _ = write!(
                     text,
                     " {waiting} waiting {} won't be uploaded.",
@@ -1581,19 +1581,19 @@ impl Uploads {
         }))
     }
 
-    /// Durdurmayı uygular. `id` sorunun (ya da isteğin) kalemi: o kalem bu
-    /// arada bittiyse ve başkası akıyorsa hiçbir şey yapılmıyor — soru o
-    /// kalemin kaybını söylemişti. `all` değilse yalnız o kalem durur, kuyruk
-    /// sürüyor; sonucu kalem bitince ([`Self::finish`]).
+    /// Applies the stop. `id` is the question's (or the request's) item: if that item
+    /// finished meanwhile and another is streaming, nothing is done — the question
+    /// spoke of losing that item. Without `all` only that item stops and the queue
+    /// goes on; its result comes when the item finishes ([`Self::finish`]).
     pub(crate) fn stop(&mut self, id: Option<u64>, all: bool) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
         let running = queue.current.as_ref().map(|current| current.id);
         if id.is_some() && id != running {
             return None;
         }
-        // Sırada bekleyen yoksa akan kalemi durdurmak kuyruğun iptali:
-        // sonuç `Cancelled — 1 of 2 uploaded, …` demeli, bitenlerin `✓`'sü
-        // değil (`/code-review`).
+        // With nothing waiting, stopping the streaming item cancels the queue: the
+        // result must say `Cancelled — 1 of 2 uploaded, …`, not the finished items'
+        // `✓` (`/code-review`).
         if all || queue.entries.len() <= 1 || queue.waiting() == 0 {
             return self.cancel();
         }
@@ -1604,9 +1604,10 @@ impl Uploads {
         None
     }
 
-    /// Bütün kuyruğu iptal eder: bekleyenler başlamayacak, akan öğe
-    /// öldürülüyor ve yarım dosyası siliniyor; sonuç öğe bitince. Akan öğe
-    /// yoksa (akış thread'i doğamadı) sonuç hemen.
+    /// Cancels the whole queue: the waiting items will not start, the streaming item is
+    /// killed and its half-written file deleted; the result comes when the item
+    /// finishes. With no streaming item (the stream thread could not be born) the
+    /// result is immediate.
     fn cancel(&mut self) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
         if queue.ending.is_none() {
@@ -1621,8 +1622,9 @@ impl Uploads {
         }
     }
 
-    /// Kuyruğu iptal edip bırakır (sekme kapanıyor): akan öğe öldürülüyor ve
-    /// yarım dosyası akış thread'inde siliniyor, sonuç kimseye gösterilmiyor.
+    /// Cancels and abandons the queue (the tab is closing): the streaming item is
+    /// killed and its half-written file deleted on the stream thread; the result is
+    /// shown to no one.
     pub(crate) fn abandon(&mut self) {
         if let Some(queue) = self.queue.take()
             && let Some(current) = &queue.current
@@ -1631,8 +1633,8 @@ impl Uploads {
         }
     }
 
-    /// Uzak oturum kapandı: bekleyenler iptal; akan öğe kendi bağlantısıyla
-    /// bitiyor. Akan öğe yoksa sonuç hemen.
+    /// The remote session closed: waiting items are cancelled; the streaming item
+    /// finishes over its own connection. With no streaming item the result is immediate.
     pub(crate) fn close(&mut self) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
         if queue.ending.is_none() {
@@ -1644,10 +1646,10 @@ impl Uploads {
         None
     }
 
-    /// Akan öğe bitti; kuyruk da bittiyse sonuç. Hiçbir şey kendiliğinden
-    /// yapıştırılmıyor (037 phase-7): yükleme dakikalar sürebilir ve yol o
-    /// an açık olan vim'e ya da mysql'e yazılırdı — sonuç satırı nereye
-    /// gittiğini söylüyor.
+    /// The streaming item finished; the result if the queue finished too. Nothing is
+    /// pasted on its own (037 phase-7): an upload can take minutes and the path would be
+    /// typed into whatever vim or mysql is open at that moment — the result line says
+    /// where it went.
     pub(crate) fn finish(&mut self, outcome: Outcome) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
         let current = queue.current.take()?;
@@ -1662,14 +1664,14 @@ impl Uploads {
                 entry.state = EntryState::Done;
                 queue.bytes_done += entry.job.local.bytes;
             }
-            // Tek başına durdurulan kalem listeden çıkıyor; gideni biten
-            // sayılıyor, gitmeyeni paydadan düşüyor (çubuk geri gitmesin).
+            // An individually stopped item leaves the list; its sent part counts as
+            // done, its unsent part leaves the denominator (the bar never goes back).
             Outcome::Cancelled if std::mem::take(&mut queue.skip) && queue.ending.is_none() => {
                 let entry = queue.entries.remove(index);
                 let sent = bytes.min(entry.job.local.bytes);
                 queue.bytes_done += sent;
                 queue.bytes_total -= entry.job.local.bytes - sent;
-                // Bu arada bekleyenler çıkarıldıysa kuyruğun sonu bir iptal.
+                // If the waiting items were removed meanwhile, the queue ends as a cancel.
                 if queue.waiting() == 0 {
                     queue.ending = Some(End::Cancelled);
                 }
@@ -1697,12 +1699,12 @@ impl Uploads {
         }
     }
 
-    /// Kuyruğu kapatır ve sonuç satırını verir.
+    /// Closes the queue and returns the result line.
     fn end(&mut self) -> Option<Ended> {
         let queue = self.queue.take()?;
         self.serial += 1;
-        // ssh kapandı ama akan kalem kendi bağlantısıyla bitti ve bekleyen
-        // yoktu: her şey vardı, sonuç bir başarı (`/code-review`).
+        // ssh closed but the streaming item finished over its own connection and
+        // nothing was waiting: everything arrived, the result is a success (`/code-review`).
         let all_done = queue
             .entries
             .iter()
@@ -1729,14 +1731,14 @@ impl Uploads {
         })
     }
 
-    /// Dock'a son yazılan durum satırı — farenin düğme sorusunun girdisi
-    /// (`bt_core::transfer_button_at` çizimle aynı yerleşimi okuyor).
+    /// The status line last written to the dock — the input of the mouse's button
+    /// question (`bt_core::transfer_button_at` reads the same layout as drawing).
     pub(crate) fn shown(&self) -> Option<&Transfer> {
         self.shown.as_ref()
     }
 
-    /// [`Self::shown`]'ı yazar. Düğmesiz satır (sonuç ya da hiç) fare
-    /// durumunu da düşürüyor: altında düğme kalmadı.
+    /// Writes [`Self::shown`]. A line without buttons (a result, or none) drops the
+    /// mouse state too: there is no button left under it.
     pub(crate) fn set_shown(&mut self, transfer: Option<Transfer>) {
         if transfer.as_ref().is_none_or(|t| t.controls.items == 0) {
             self.hover = None;
@@ -1745,11 +1747,11 @@ impl Uploads {
         self.shown = transfer;
     }
 
-    /// Farenin altındaki düğme değişti mi; değiştiyse damgalı satır —
-    /// yazılacak olan (çağıran oturuma verir). Aynı düğmede kalan hareket
-    /// `None`: kare istenmiyor.
+    /// Whether the button under the mouse changed; if so, the stamped line — the one to
+    /// write (the caller hands it to the session). Movement staying on the same button
+    /// is `None`: no frame is requested.
     pub(crate) fn set_hover(&mut self, hover: Option<TransferAction>) -> Option<Transfer> {
-        // Düğmesiz satırda fare hiçbir düğmenin üstünde değil.
+        // On a line without buttons the mouse is over no button.
         let buttons = self.shown.as_ref().is_some_and(|t| t.controls.items > 0);
         let hover = hover.filter(|_| buttons);
         if self.hover == hover {
@@ -1759,14 +1761,14 @@ impl Uploads {
         self.restamp()
     }
 
-    /// Farenin altındaki düğme. Yalnız sınamalar soruyor: imleci AppKit'in
-    /// cursor rect'i kuruyor, hover yalnız dolgunun tonu.
+    /// The button under the mouse. Only tests ask: AppKit's cursor rect sets the
+    /// pointer, hover is only the fill's tone.
     #[cfg(test)]
     pub(crate) fn hover(&self) -> Option<TransferAction> {
         self.hover
     }
 
-    /// Liste açıldı/kapandı; değiştiyse damgalı satır.
+    /// The list opened/closed; if it changed, the stamped line.
     pub(crate) fn set_list_open(&mut self, open: bool) -> Option<Transfer> {
         if self.list_open == open {
             return None;
@@ -1775,7 +1777,7 @@ impl Uploads {
         self.restamp()
     }
 
-    /// Gösterilen satırın düğme durumunu yeniler; düğmesiz satırda `None`.
+    /// Refreshes the shown line's button state; `None` on a line without buttons.
     fn restamp(&self) -> Option<Transfer> {
         let mut shown = self.shown.clone()?;
         if shown.controls.items == 0 {
@@ -1786,8 +1788,8 @@ impl Uploads {
         Some(shown)
     }
 
-    /// Kuyruğun geçen ve toplam baytı (Dock simgesinin çubuğu); kuyruk yoksa
-    /// `None`.
+    /// The queue's passed and total bytes (the Dock icon's bar); `None` if there is no
+    /// queue.
     pub(crate) fn totals(&self) -> Option<(u64, u64)> {
         let queue = self.queue.as_ref()?;
         let running = queue
@@ -1797,10 +1799,10 @@ impl Uploads {
         Some((queue.bytes_done + running, queue.bytes_total))
     }
 
-    /// Başlığın öneki için yüzde (037 phase-7): bir kalem akarken bütün
-    /// kuyruğun baytlarına göre, aşağı yuvarlı; akmıyorsa ya da iptal
-    /// ediliyorsa `None`. ssh kapandıysa akan kalem kendi bağlantısıyla
-    /// bitiyor ve önek onunla kalıyor.
+    /// The percentage for the title prefix (037 phase-7): while an item streams, based
+    /// on the whole queue's bytes, rounded down; `None` if nothing streams or it is
+    /// being cancelled. If ssh closed, the streaming item finishes over its own
+    /// connection and the prefix stays with it.
     pub(crate) fn percent(&self) -> Option<u8> {
         let queue = self.queue.as_ref()?;
         if queue.ending == Some(End::Cancelled) || queue.current.is_none() {
@@ -1810,12 +1812,12 @@ impl Uploads {
         if total == 0 {
             return Some(0);
         }
-        // audit: `sent ≤ total` kırpılıyor; oran 0..=100, `u8`'e sığar.
+        // audit: clamped to `sent ≤ total`; the ratio is 0..=100, fits in a `u8`.
         Some((sent.min(total) as f64 / total as f64 * 100.0).floor() as u8)
     }
 
-    /// Başlığın yüzdesi son yazılandan farklı mı; farklıysa yenisini
-    /// saklar — başlık yüzde başına en çok bir kez yazılıyor.
+    /// Whether the title's percentage differs from the last one written; if so, stores
+    /// the new one — the title is written at most once per percent.
     pub(crate) fn title_percent_changed(&mut self) -> bool {
         let percent = self.percent();
         if self.titled == percent {
@@ -1825,20 +1827,20 @@ impl Uploads {
         true
     }
 
-    /// Başlığa en son yazılan yüzde ([`titled`]'ın girdisi).
+    /// The percentage last written to the title ([`titled`]'s input).
     pub(crate) fn title_percent(&self) -> Option<u8> {
         self.titled
     }
 
-    /// Bekleme bitti: sonuç satırı hâlâ bu nesilse ve yeni bir kuyruk
-    /// başlamadıysa satır kalkıyor.
+    /// The wait is over: the line goes away if the result line is still this generation
+    /// and no new queue has started.
     pub(crate) fn linger_over(&self, serial: u64) -> bool {
         self.queue.is_none() && self.serial == serial
     }
 
-    /// Popover'ın içeriği (037 phase-7): bütün kalemler — biten, akan ve
-    /// bekleyen —, sırayla. Kuyruk yoksa ya da bitiyorsa `None`: popover
-    /// kapanmalı.
+    /// The popover's content (037 phase-7): all items — finished, streaming and
+    /// waiting — in order. `None` if there is no queue or it is ending: the popover
+    /// must close.
     pub(crate) fn list(&self) -> Option<UploadList> {
         let queue = self.queue.as_ref()?;
         if queue.ending.is_some() {
@@ -1899,8 +1901,8 @@ impl Uploads {
         })
     }
 
-    /// Bekleyen `id`'li kalemi kuyruktan çıkarır (popover'ın `Remove`'u);
-    /// akan ya da biten kalemde no-op.
+    /// Removes the waiting item with `id` from the queue (the popover's `Remove`); a
+    /// no-op for a streaming or finished item.
     pub(crate) fn remove(&mut self, id: u64) {
         let Some(queue) = &mut self.queue else {
             return;
@@ -1915,7 +1917,7 @@ impl Uploads {
         }
     }
 
-    /// Dock'un durum satırı, `now` anında; kuyruk yoksa `None`.
+    /// The dock's status line at `now`; `None` if there is no queue.
     pub(crate) fn status(&mut self, now: Instant) -> Option<Transfer> {
         let queue = self.queue.as_mut()?;
         let current = queue.current.as_ref()?;
@@ -1949,8 +1951,8 @@ impl Uploads {
         if local.dir {
             body.push('/');
         }
-        // Klasörün dosya sayısı adın yanında: kalemin kendi bilgisi, baytlar
-        // ise kuyruğun (kullanıcının onayladığı demo, 037 phase-7 sonrası).
+        // The folder's file count next to the name: the item's own information, while
+        // the bytes are the queue's (the demo the user approved, after 037 phase-7).
         if local.dir {
             let _ = write!(
                 body,
@@ -1960,8 +1962,8 @@ impl Uploads {
                 files_word(local.files)
             );
         }
-        // Bayt, hız ve kalan süre **bütün kuyruğun**: çubuk da kuyruğa göre
-        // doluyor ve metin başka bir oranı söyleseydi ikisi çelişirdi.
+        // Bytes, speed and remaining time are **the whole queue's**: the bar fills by
+        // the queue too, and if the text stated another ratio the two would contradict.
         let total = queue.bytes_total;
         let shown = sent.min(total);
         body.push_str("  ");
@@ -1970,14 +1972,14 @@ impl Uploads {
             body.push_str(" · ");
             body.push_str(&format_rate(rate));
             let left = total.saturating_sub(shown) as f64 / rate;
-            // audit: kalan süre saniyeye yuvarlanıyor; sonsuz/NaN yok (`rate > 0`).
+            // audit: remaining time rounds to seconds; no infinity/NaN (`rate > 0`).
             body.push_str(" · ");
             body.push_str(&format_duration(left.ceil() as u64));
         }
         let progress = if queue.bytes_total == 0 {
             0
         } else {
-            // audit: `sent ≤ bytes_total` kırpılıyor; oran onbinde, u16'ya sığar.
+            // audit: clamped to `sent ≤ bytes_total`; ratio in ten-thousandths, fits u16.
             (sent.min(queue.bytes_total) as f64 / queue.bytes_total as f64 * 10_000.0) as u16
         };
         Some(Transfer {
@@ -1985,9 +1987,9 @@ impl Uploads {
             mark: queue.mark,
             body,
             controls: TransferControls {
-                // Popover'ın gösterdiği sayı ([`Self::list`]): biten, akan ve
-                // bekleyen kalemler.
-                // audit: kuyruk damla başına öğe; `u16`'ya kırpılıyor.
+                // The number the popover shows ([`Self::list`]): finished, streaming and
+                // waiting items.
+                // audit: queue items come per drop; clamped to `u16`.
                 items: u16::try_from(items).unwrap_or(u16::MAX),
                 list_open: self.list_open,
                 hover: self.hover,
@@ -2032,8 +2034,8 @@ mod tests {
                 "-p", "2222", "-l", "deploy", "-J", "jump", "-i", "k", "prod"
             ])
         );
-        // tty, gürültü ve uzak komut düşüyor; bizimkiler başta, çünkü ssh bir
-        // anahtarın ilk değerini alıyor.
+        // tty, noise and the remote command are dropped; ours come first, because ssh
+        // takes a key's first value.
         let target = ssh_target(&[
             "ssh",
             "-tv",
@@ -2047,12 +2049,12 @@ mod tests {
             ssh_argv(&target),
             with_ours(&["-o", "RequestTTY=force", "prod"])
         );
-        // Bitişik değer ve kümedeki korunan bayrak; hedeften sonraki seçenek.
+        // An attached value and a kept flag in a cluster; an option after the destination.
         let target = ssh_target(&["/opt/ssh", "-Ap2222", "prod", "-i", "k"]);
         let mut expected = with_ours(&["-A", "-p", "2222", "-i", "k", "prod"]);
         expected[0] = "/opt/ssh".to_owned();
         assert_eq!(ssh_argv(&target), expected);
-        // `--`'dan sonrası hedef.
+        // What follows `--` is the destination.
         let target = ssh_target(&["ssh", "-C", "--", "deploy@prod"]);
         assert_eq!(ssh_argv(&target), with_ours(&["-C", "deploy@prod"]));
     }
@@ -2075,15 +2077,15 @@ mod tests {
         assert!(!remote_command(&probe_script(Some("/a'b"), &["c'd".into()])).contains('\\'));
     }
 
-    /// Betiği **iki katmanda** koşturur: giriş kabuğu (`shell -c`) ve
-    /// onun açtığı `sh -c` — ssh'ın uzakta yaptığının yerel eşi.
+    /// Runs the script **in two layers**: the login shell (`shell -c`) and the `sh -c`
+    /// it opens — the local equivalent of what ssh does remotely.
     fn run_remote(shell: &str, script: &str, cwd: &Path) -> (Option<i32>, String) {
         let output = Command::new(shell)
             .arg("-c")
             .arg(remote_command(script))
             .current_dir(cwd)
             .output()
-            .expect("kabuk koşmadı");
+            .expect("shell did not run");
         (
             output.status.code(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -2093,7 +2095,7 @@ mod tests {
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("bt-upload-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("geçici dizin");
+        std::fs::create_dir_all(&dir).expect("temp directory");
         dir
     }
 
@@ -2112,7 +2114,7 @@ mod tests {
             let (code, out) = run_remote(shell, &format!("echo noise; {script}"), &dir);
             assert_eq!(code, Some(0), "{shell}: {out}");
             let reply = parse_probe(&out).unwrap_or_else(|| panic!("{shell}: {out}"));
-            // `pwd` sembolik bağı çözmüyor olabilir (`/var` → `/private/var`).
+            // `pwd` may not resolve the symbolic link (`/var` → `/private/var`).
             assert!(
                 reply.dir.ends_with("it's \"odd\" $HOME"),
                 "{shell}: {}",
@@ -2122,7 +2124,7 @@ mod tests {
             assert!(reply.free.is_some_and(|free| free > 0), "{shell}");
             assert_eq!(reply.existing, [(0, false), (1, true)], "{shell}");
         }
-        // Dizin yoksa betik ayrı bir kodla çıkıyor.
+        // If the directory is missing the script exits with a separate code.
         let script = probe_script(Some(dir.join("gone").to_str().unwrap()), &names);
         let (code, _) = run_remote("/bin/sh", &script, &dir);
         assert_eq!(code, Some(NO_DIRECTORY));
@@ -2142,7 +2144,7 @@ mod tests {
             })
         );
         assert_eq!(parse_probe("no mark\n"), None);
-        // `df` hiçbir şey basmadıysa sıradaki işaret yerinde okunuyor.
+        // If `df` printed nothing, the next mark is read in its own place.
         let reply = parse_probe("BT-UPLOAD\n/srv\nBT-TAR\nBT-E0\n").unwrap();
         assert_eq!((reply.free, reply.tar), (None, true));
         assert_eq!(reply.existing, [(0, false)]);
@@ -2171,7 +2173,7 @@ mod tests {
             .arg(format!("./{name}"))
             .env("COPYFILE_DISABLE", "1")
             .output()
-            .expect("tar koşmadı");
+            .expect("tar did not run");
         assert!(output.status.success());
         output.stdout
     }
@@ -2183,7 +2185,7 @@ mod tests {
         std::fs::create_dir_all(tree.join("css")).unwrap();
         std::fs::write(tree.join("app.js"), vec![b'a'; 1000]).unwrap();
         std::fs::write(tree.join("empty"), b"").unwrap();
-        // Uzun ve ASCII dışı ad: bsdtar önüne bir pax başlığı koyuyor.
+        // A long, non-ASCII name: bsdtar puts a pax header in front of it.
         let long = format!("ç{}.txt", "x".repeat(150));
         std::fs::write(tree.join("css").join(&long), vec![b'b'; 700]).unwrap();
         std::os::unix::fs::symlink("app.js", tree.join("link")).unwrap();
@@ -2191,17 +2193,17 @@ mod tests {
         let local = measure(&tree).unwrap();
         assert_eq!((local.files, local.bytes, local.dir), (3, 1700, true));
 
-        // Tek yudumda ve tek tek baytlarla aynı sonuç.
+        // The same result in one gulp and byte by byte.
         for chunk in [stream.len(), 1, 511, 513] {
             let mut watcher = TarWatcher::default();
             for part in stream.chunks(chunk) {
                 watcher.feed(part);
             }
-            assert_eq!((watcher.files, watcher.bytes), (3, 1700), "parça {chunk}");
+            assert_eq!((watcher.files, watcher.bytes), (3, 1700), "chunk {chunk}");
             assert_eq!(watcher.current, None);
         }
-        // Uzun adlı dosyanın ortasında kesilen akış: yarım dosya pax'ın
-        // yolunu taşıyor.
+        // A stream cut in the middle of the long-named file: the half-written file
+        // carries pax's path.
         let at = stream
             .windows(700)
             .position(|window| window.iter().all(|&b| b == b'b'))
@@ -2312,7 +2314,7 @@ mod tests {
         assert_eq!(
             body.chars().take(lead).collect::<String>(),
             "Failed — disk full on prod-web-1",
-            "yalnız hata metni kırmızı"
+            "only the error text is red"
         );
         assert_eq!(
             line(&End::Closed, &two).0,
@@ -2371,7 +2373,7 @@ mod tests {
             notice(&End::Closed, &none).map(|(_, body)| body).as_deref(),
             Some("Connection to prod-web-1 lost. 0 of 3 uploaded.")
         );
-        assert_eq!(notice(&End::Cancelled, &none), None, "iptal kullanıcının");
+        assert_eq!(notice(&End::Cancelled, &none), None, "cancel is the user's");
     }
 
     #[test]
@@ -2380,19 +2382,19 @@ mod tests {
         assert_eq!(titled(None, "⇄ prod-web-1"), "⇄ prod-web-1");
 
         let mut uploads = queue_of(vec![job("a", false, 1, 100), job("b", false, 1, 100)]);
-        assert_eq!(uploads.percent(), None, "henüz akmıyor");
+        assert_eq!(uploads.percent(), None, "not streaming yet");
         let (_, _, shared) = uploads.start_next(Instant::now()).unwrap();
-        assert!(uploads.title_percent_changed(), "0% ilk kez");
+        assert!(uploads.title_percent_changed(), "0% the first time");
         assert_eq!(uploads.title_percent(), Some(0));
         shared.bytes.store(1, Ordering::Release);
-        assert!(!uploads.title_percent_changed(), "yüzde başına bir kez");
+        assert!(!uploads.title_percent_changed(), "once per percent");
         shared.bytes.store(129, Ordering::Release);
         assert!(uploads.title_percent_changed());
         assert_eq!(uploads.title_percent(), Some(64));
         let _ = uploads.stop(None, true);
         assert!(
             uploads.title_percent_changed(),
-            "iptal ediliyor: önek kalkar"
+            "cancelling: prefix removed"
         );
         assert_eq!(uploads.title_percent(), None);
     }
@@ -2424,7 +2426,7 @@ mod tests {
         assert_eq!(fresh.informative, "96.0 MB → /var/www/app");
         assert_eq!((fresh.button, fresh.enabled), ("Upload", true));
 
-        // Yükleme sürerken gelen damla: yükleme durmuyor.
+        // A drop arriving while an upload runs: the upload does not stop.
         let busy = sheet("prod", true, &file, &reply(vec![], None), true);
         assert_eq!(
             busy.informative,
@@ -2449,7 +2451,7 @@ mod tests {
         );
         assert_eq!(merge.message, "Upload folder “static” to prod?");
         assert_eq!(merge.button, "Merge");
-        assert!(!merge.enabled, "yer yetmiyor");
+        assert!(!merge.enabled, "not enough space");
         assert_eq!(
             merge.informative,
             "124 files, 38.2 MB → /var/www/app\n\
@@ -2459,7 +2461,7 @@ mod tests {
              prod has 12.0 MB free, “static” needs 38.2 MB."
         );
 
-        // Tek damlada birden çok öğe tek sayfada: toplam, hedef ve adlar.
+        // Several items in one drop on a single sheet: total, destination and names.
         let three = [
             local("dump.sql", false, 1, 32_300_000),
             local("logs.tar", false, 1, 20_100_000),
@@ -2511,12 +2513,12 @@ mod tests {
             job("static", true, 124, 1_000_000),
         ]);
         let start = Instant::now();
-        let (_, first, shared) = uploads.start_next(start).expect("ilk öğe");
+        let (_, first, shared) = uploads.start_next(start).expect("first item");
         assert_eq!(first.local.name, "backup.tar.gz");
-        assert!(uploads.start_next(start).is_none(), "sıralı, paralel değil");
+        assert!(uploads.start_next(start).is_none(), "sequential only");
 
         shared.bytes.store(18_200_000, Ordering::Release);
-        let status = uploads.status(start).expect("satır");
+        let status = uploads.status(start).expect("line");
         assert_eq!(status.body, "↑ 1 of 2 · backup.tar.gz  18.2 / 45.6 MB");
         assert_eq!(
             status.controls,
@@ -2526,7 +2528,7 @@ mod tests {
             },
         );
         assert_eq!(status.mark, HostMark::Production);
-        // Çubuk bütün kuyruğun baytlarına göre: 18.2 / (44.6 + 1.0).
+        // The bar is by the whole queue's bytes: 18.2 / (44.6 + 1.0).
         assert_eq!(status.progress, Some(3_991));
         shared.bytes.store(19_400_000, Ordering::Release);
         let status = uploads.status(start + Duration::from_secs(1)).unwrap();
@@ -2535,10 +2537,10 @@ mod tests {
             "↑ 1 of 2 · backup.tar.gz  19.4 / 45.6 MB · 1.2 MB/s · 22s"
         );
 
-        // Biten kalem kuyruğu bitirmiyor ve hiçbir yol yapıştırılmıyor —
-        // `finish`'in cevabında yapıştırılacak bir şey yok, yalnız sonuç.
+        // A finished item does not end the queue and no path is pasted —
+        // `finish`'s answer has nothing to paste, only the result.
         assert_eq!(uploads.finish(Outcome::Done), None);
-        let (_, second, shared) = uploads.start_next(start).expect("ikinci öğe");
+        let (_, second, shared) = uploads.start_next(start).expect("second item");
         assert_eq!(second.local.name, "static");
         shared.files.store(57, Ordering::Release);
         let status = uploads.status(start + Duration::from_secs(2)).unwrap();
@@ -2550,16 +2552,16 @@ mod tests {
             status.body
         );
         assert!(status.body.contains(" / 45.6 MB"), "{}", status.body);
-        // Biten kalem sayıda kalıyor: "Show files (2)".
+        // A finished item stays in the count: "Show files (2)".
         assert_eq!(status.controls.items, 2);
 
-        let ended = uploads.finish(Outcome::Done).expect("kuyruk bitti");
+        let ended = uploads.finish(Outcome::Done).expect("queue ended");
         assert_eq!(ended.line.body, "✓ 2 files → /srv");
         assert_eq!(ended.line.tone, TransferTone::Success);
         assert_eq!(
             (ended.line.progress, ended.line.controls),
             (None, TransferControls::default()),
-            "sonuç satırı düğmesiz"
+            "result line has no buttons"
         );
         assert_eq!(
             ended.notice,
@@ -2573,14 +2575,14 @@ mod tests {
     fn cancelling_keeps_the_count_and_removes_the_partial_file() {
         let mut uploads = queue_of(vec![job("a", false, 1, 1_000), job("b", false, 1, 1)]);
         let (_, _, shared) = uploads.start_next(Instant::now()).unwrap();
-        assert_eq!(uploads.stop(None, true), None, "sonuç öğe bitince");
+        assert_eq!(uploads.stop(None, true), None, "result when item ends");
         assert!(shared.cancel.load(Ordering::Acquire));
-        let ended = uploads.finish(Outcome::Cancelled).expect("bitti");
+        let ended = uploads.finish(Outcome::Cancelled).expect("ended");
         assert_eq!(
             ended.line.body,
             "Cancelled — 0 of 2 uploaded, partial file removed"
         );
-        assert_eq!(ended.notice, None, "iptalde bildirim yok");
+        assert_eq!(ended.notice, None, "no notice on cancel");
     }
 
     #[test]
@@ -2590,25 +2592,25 @@ mod tests {
         assert_eq!(
             uploads.close(),
             None,
-            "akan öğe kendi bağlantısıyla bitiyor"
+            "streaming item ends over its own link"
         );
-        let ended = uploads.finish(Outcome::Done).expect("bitti");
+        let ended = uploads.finish(Outcome::Done).expect("ended");
         assert_eq!(
             ended.line.body,
             "Failed — connection to prod lost · 1 of 2 uploaded"
         );
         assert_eq!(ended.line.tone, TransferTone::Error);
-        // Bekleyen yoktu ve akan kalem kendi bağlantısıyla bitti: başarı.
+        // Nothing was waiting and the streaming item finished over its own connection: success.
         let mut uploads = queue_of(vec![job("a", false, 1, 1)]);
         let _ = uploads.start_next(Instant::now()).unwrap();
         assert_eq!(uploads.close(), None);
-        let ended = uploads.finish(Outcome::Done).expect("bitti");
+        let ended = uploads.finish(Outcome::Done).expect("ended");
         assert_eq!(ended.line.body, "✓ a → /srv");
         assert_eq!(ended.line.tone, TransferTone::Success);
-        // Akan öğe yoksa sonuç hemen.
+        // With no streaming item the result is immediate.
         let mut uploads = queue_of(vec![job("a", false, 1, 1)]);
         assert!(uploads.close().is_some());
-        // Kapanmış bir kuyruğa yeni damla girmiyor.
+        // A new drop does not enter a closed queue.
         let mut uploads = queue_of(vec![job("a", false, 1, 1)]);
         assert!(!uploads.enqueue(
             8,
@@ -2635,7 +2637,7 @@ mod tests {
         shared.bytes.store(19_400_000, Ordering::Release);
         let _ = uploads.status(start + Duration::from_secs(1));
 
-        let list = uploads.list().expect("liste");
+        let list = uploads.list().expect("list");
         assert_eq!(list.title, "Uploading to prod");
         let rows: Vec<(&str, &str)> = list
             .rows
@@ -2655,7 +2657,7 @@ mod tests {
             RowStatus::Done("✓ Uploaded · 96.0 MB".into())
         );
         let RowStatus::Running { fraction, detail } = &list.rows[1].status else {
-            panic!("akan kalem");
+            panic!("streaming item");
         };
         assert_eq!(detail, "19.4 / 38.2 MB · 1.2 MB/s");
         assert!((fraction - 19.4 / 38.2).abs() < 1e-9);
@@ -2667,14 +2669,14 @@ mod tests {
         assert_eq!(
             actions,
             [None, Some(RowAction::Cancel), Some(RowAction::Remove)],
-            "bitende düğme yok"
+            "no button when done"
         );
 
-        // `Remove` bekleyeni sormadan çıkarıyor ve sayı düşüyor.
+        // `Remove` takes the waiting item off without asking and the count drops.
         uploads.remove(list.rows[2].id);
         assert_eq!(uploads.list().unwrap().rows.len(), 2);
         assert_eq!(uploads.status(start).unwrap().controls.items, 2);
-        // Akan ya da biten kalemde `remove` no-op (akanı `stop` durduruyor).
+        // `remove` is a no-op on a streaming or finished item (`stop` stops the streaming one).
         uploads.remove(list.rows[0].id);
         uploads.remove(list.rows[1].id);
         assert_eq!(uploads.list().unwrap().rows.len(), 2);
@@ -2691,30 +2693,30 @@ mod tests {
         let _ = uploads.start_next(now).unwrap();
         let first = uploads.running_id();
         assert_eq!(uploads.stop(first, false), None);
-        assert_eq!(uploads.finish(Outcome::Cancelled), None, "kuyruk sürüyor");
-        let (_, next, _) = uploads.start_next(now).expect("sıradaki");
+        assert_eq!(uploads.finish(Outcome::Cancelled), None, "queue goes on");
+        let (_, next, _) = uploads.start_next(now).expect("next");
         assert_eq!(next.local.name, "b");
         assert_eq!(
             uploads.list().unwrap().rows.len(),
             2,
-            "durdurulan listeden çıktı"
+            "the stopped one left the list"
         );
         assert_eq!(uploads.finish(Outcome::Done), None);
         let _ = uploads.start_next(now).unwrap();
         let ended = uploads.finish(Outcome::Done).unwrap();
         assert_eq!(ended.line.body, "✓ 2 files → /srv");
 
-        // Soru bu arada biten kalem içindiyse durdurma başkasına dokunmuyor.
+        // If the question was for an item that finished meanwhile, the stop touches no other.
         let mut uploads = queue_of(vec![job("a", false, 1, 10), job("b", false, 1, 20)]);
         let _ = uploads.start_next(now).unwrap();
         let asked = uploads.running_id();
         assert_eq!(uploads.finish(Outcome::Done), None);
         let (_, _, shared) = uploads.start_next(now).unwrap();
         assert_eq!(uploads.stop(asked, true), None);
-        assert!(!shared.cancel.load(Ordering::Acquire), "yeni kalem sürüyor");
+        assert!(!shared.cancel.load(Ordering::Acquire), "new item goes on");
 
-        // Bekleyen kalmadıysa akan kalemi durdurmak kuyruğun iptali: biten
-        // kalem `✓` demiyor.
+        // With nothing left waiting, stopping the streaming item cancels the queue: the
+        // finished item does not say `✓`.
         let mut uploads = queue_of(vec![job("a", false, 1, 10), job("b", false, 1, 20)]);
         let _ = uploads.start_next(now).unwrap();
         assert_eq!(uploads.finish(Outcome::Done), None);
@@ -2728,7 +2730,7 @@ mod tests {
         );
         assert_eq!(ended.notice, None);
 
-        // Tek kalemde satırın durdurması kuyruğun iptali.
+        // With a single item, the line's stop cancels the queue.
         let mut uploads = queue_of(vec![job("a", false, 1, 10)]);
         let _ = uploads.start_next(now).unwrap();
         let only = uploads.running_id();
@@ -2753,7 +2755,7 @@ mod tests {
         let id = uploads.running_id();
         shared.bytes.store(48_000_000, Ordering::Release);
 
-        // Eşik tasarım sabiti; altında soru yok.
+        // The threshold is a design constant; below it there is no question.
         let short = start + STOP_ASK_AFTER;
         assert_eq!(
             uploads.stop_request(true, short),
@@ -2771,16 +2773,16 @@ mod tests {
                     .into(),
             }))
         );
-        // Popover satırının `Cancel`'ı yalnız o kalem: bekleyen ve biten
-        // sayılmıyor.
+        // The popover row's `Cancel` is only that item: waiting and finished items are
+        // not counted.
         let Some(Stop::Ask(one)) = uploads.stop_request(false, long) else {
-            panic!("soru");
+            panic!("question");
         };
         assert_eq!(one.title, "Stop uploading?");
         assert_eq!(one.text, "backup.tar.gz: 48.0 of 96.0 MB will be lost.");
         assert!(!one.all);
-        // Bekleyen kalemi çıkarmak hiç sormuyor (`remove`, `stop_request`
-        // değil) — `the_popover_lists_every_item…`.
+        // Removing a waiting item never asks (`remove`, not `stop_request`) —
+        // `the_popover_lists_every_item…`.
     }
 
     #[test]
@@ -2790,8 +2792,8 @@ mod tests {
         assert!(uploads.can_accept());
         assert!(uploads.busy());
         assert_eq!(uploads.stop(None, true), None);
-        assert!(!uploads.can_accept(), "yarım dosya siliniyor");
-        assert_eq!(uploads.list(), None, "popover kapanıyor");
+        assert!(!uploads.can_accept(), "deleting partial file");
+        assert_eq!(uploads.list(), None, "popover closes");
         uploads.abandon();
         assert!(!uploads.active());
         assert!(shared.cancel.load(Ordering::Acquire));
@@ -2810,12 +2812,12 @@ mod tests {
             HostMark::None,
             vec![job("b", false, 1, 1)]
         ));
-        assert!(!uploads.linger_over(first), "yeni kuyruk sürüyor");
+        assert!(!uploads.linger_over(first), "new queue running");
         let _ = uploads.start_next(Instant::now()).unwrap();
         let second = uploads.finish(Outcome::Done).unwrap().serial;
         assert!(
             !uploads.linger_over(first),
-            "eski bekleme yeni sonucu silmesin"
+            "old linger must not clear new result"
         );
         assert!(uploads.linger_over(second));
     }
@@ -2824,40 +2826,40 @@ mod tests {
     fn the_pointer_state_survives_the_refresh_and_changes_only_on_edges() {
         let mut uploads = queue_of(vec![job("a", false, 1, 10), job("b", false, 1, 10)]);
         let now = Instant::now();
-        let (_, _, _shared) = uploads.start_next(now).expect("ilk öğe");
-        let status = uploads.status(now).expect("satır");
+        let (_, _, _shared) = uploads.start_next(now).expect("first item");
+        let status = uploads.status(now).expect("line");
         uploads.set_shown(Some(status));
         let hovered = uploads
             .set_hover(Some(TransferAction::Cancel))
-            .expect("değişti");
+            .expect("changed");
         assert_eq!(hovered.controls.hover, Some(TransferAction::Cancel));
         uploads.set_shown(Some(hovered));
         assert_eq!(
             uploads.set_hover(Some(TransferAction::Cancel)),
             None,
-            "aynı düğmede kalan hareket kare istemiyor"
+            "moving on the same button requests no frame"
         );
-        // 200 ms'lik tazeleme fare durumunu ezmiyor.
-        let status = uploads.status(now).expect("satır");
+        // The 200 ms refresh does not overwrite the mouse state.
+        let status = uploads.status(now).expect("line");
         assert_eq!(status.controls.hover, Some(TransferAction::Cancel));
-        let open = uploads.set_list_open(true).expect("değişti");
+        let open = uploads.set_list_open(true).expect("changed");
         assert!(open.controls.list_open);
-        // Düğmesiz satır (sonuç) fare durumunu düşürüyor.
+        // A line without buttons (a result) drops the mouse state.
         uploads.set_shown(Some(Transfer::default()));
         assert_eq!(uploads.hover(), None);
         assert_eq!(
             uploads.set_hover(Some(TransferAction::List)),
             None,
-            "düğme yok"
+            "no button"
         );
         assert_eq!(uploads.hover(), None);
     }
 
     #[test]
     fn every_glyph_of_the_row_is_one_the_atlas_checks() {
-        // `bt-atlas` bu karakterleri küçük sınıfta soruyor
-        // (`the_upload_row_has_no_box_in_the_small_class`); satırın her
-        // dizgesi o sözlüğün içinde kalmalı.
+        // `bt-atlas` checks these characters in the small class
+        // (`the_upload_row_has_no_box_in_the_small_class`); every string of the line
+        // must stay within that vocabulary.
         use EntryState::{Done, Waiting};
         let two = entries(&[("a", false, "/srv", Done), ("b", true, "/x", Waiting)]);
         let same = entries(&[("a", false, "/srv", Done)]);
@@ -2880,8 +2882,8 @@ mod tests {
 
     #[test]
     fn a_folder_travels_through_the_stream_and_arrives_whole() {
-        // ssh'ın yerine yerel kabuk: `sh -c "<uzak komut>"` — uzakta koşacak
-        // betiğin ve akışın ta kendisi, bağlantısız.
+        // A local shell in place of ssh: `sh -c "<remote command>"` — the very script
+        // and stream that would run remotely, without a connection.
         let root = scratch("transfer");
         let source = root.join("src");
         let target = root.join("it's here");
@@ -2909,7 +2911,7 @@ mod tests {
             std::fs::read(target.join("static/app.js")).unwrap().len(),
             5000
         );
-        // Uzakta tar hata verirse satırı sonuç oluyor.
+        // If the remote tar fails, its line becomes the result.
         let outcome = transfer(
             &words(&["/bin/sh", "-c"]),
             &item,

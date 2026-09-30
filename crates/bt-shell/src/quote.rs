@@ -1,39 +1,38 @@
-//! Sürüklenen dosya yolları ve Edit ▸ Paste Escaped Text'in pano metni →
-//! kabuğa yazılabilir metin. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
+//! Dragged file paths and the clipboard text of Edit ▸ Paste Escaped Text → text that can be
+//! written to the shell. **Pure and AppKit-free**, and therefore testable.
 //!
-//! `keys.rs`'in içinde değil **kardeşi**: o modülün başlığı "tuş vuruşu →
-//! PTY baytları" diyor ve buradaki soru bir tuş değil bir damla ya da bir
-//! pano. İki tüketicisi `view::BateriView`'ın `performDragOperation:`'ı
-//! ([`shell_quote`]) ve `pasteEscaped:`'i ([`paste_quote`]); çıkış ikisinde de
-//! `Session::paste`'e gidiyor, yani bracketed paste sarması ve dock istisnası
-//! bu modülün konusu değil.
+//! Not inside `keys.rs` but its **sibling**: that module's header says "keystroke → PTY bytes",
+//! and the question here is not a key but a drop or a clipboard. Its two consumers are
+//! `view::BateriView`'s `performDragOperation:` ([`shell_quote`]) and `pasteEscaped:`
+//! ([`paste_quote`]); in both the output goes to `Session::paste`, so the bracketed paste
+//! wrapping and the dock exception are not this module's concern.
 
 use std::fmt::Write as _;
 
-/// Yolları ters bölüyle kaçırır ve **tek boşlukla** birleştirir — Terminal.app
-/// paritesi (`/Users/…/İki\ Kelime/a.txt`).
+/// Escapes the paths with backslashes and joins them with **a single space** — Terminal.app
+/// parity (`/Users/…/İki\ Kelime/a.txt`).
 ///
-/// **Kaçacak küme bir kara liste değil, bir beyaz listenin tümleyeni:** geçen
-/// şey ASCII harf/rakam ile `/ . _ -`, ve **ASCII olmayan her karakter**;
-/// kalan her ASCII kaçar. Ters karar (kabuğun metakarakterlerini tek tek
-/// saymak) `~`, `=`, `#`, `!`, `%`'in hangi kabukta kelimenin neresinde özel
-/// olduğunu tartışmaya açardı ve listeden düşen tek karakter sessiz bir
-/// hataya dönerdi. Fazladan kaçırmanın bedeli yok (`\+` kabukta `+`), yani
-/// yanlışın yönü güvenli.
+/// **The escaped set is not a blacklist but the complement of a whitelist:** what passes is
+/// ASCII letters/digits plus `/ . _ -`, and **every non-ASCII character**; every other ASCII
+/// character is escaped. The opposite decision (enumerating the shell's metacharacters one by
+/// one) would open up the debate of in which shell and where in a word `~`, `=`, `#`, `!`, `%`
+/// are special, and a single character missing from the list would turn into a silent bug.
+/// Escaping too much costs nothing (`\+` is `+` in the shell), so the error falls on the safe
+/// side.
 ///
-/// ASCII olmayan karakter **dokunulmadan** geçiyor: `İki Kelime`'nin boşluğu
-/// kaçar, `İ` kaçmaz — kabuk onu zaten düz harf sayıyor ve önüne ters bölü
-/// koymak yalnız çirkin olurdu.
+/// A non-ASCII character passes **untouched**: the space in `İki Kelime` is escaped, `İ` is
+/// not — the shell already treats it as a plain letter and putting a backslash before it would
+/// only be ugly.
 ///
-/// **Satır sonunun bilinen sınırı adıyla duruyor:** `\` + satır sonu zsh'te de
-/// bash'te de *satır devamıdır*, yani adında satır sonu taşıyan bir dosya
-/// (patolojik ama mümkün) iki parçası birleşmiş hâlde yazılır. Kaçmamak daha
-/// kötü olurdu — ham satır sonu tamponda bir komut sınırı olur ve kullanıcının
-/// yazmadığı bir satır koşardı. `$'\n'` doğru olurdu ama tek kuralı ikiye
-/// bölerdi (018 Karar 4: tek tip, tek kural).
+/// **The known limit of the newline is stated by name:** `\` + newline is a *line
+/// continuation* in both zsh and bash, so a file whose name carries a newline (pathological
+/// but possible) is written with its two parts joined. Not escaping would be worse — a raw
+/// newline becomes a command boundary in the buffer and would run a line the user did not
+/// type. `$'\n'` would be correct but would split the single rule in two (018 Karar 4: one
+/// type, one rule).
 ///
-/// Boş liste boş dizge verir: damlada okunabilen yol yoksa yazılacak bir şey
-/// de yok.
+/// An empty list gives an empty string: if the drop has no readable path, there is nothing to
+/// write either.
 pub(crate) fn shell_quote(paths: &[String]) -> String {
     let mut line = String::new();
     for path in paths {
@@ -50,24 +49,22 @@ pub(crate) fn shell_quote(paths: &[String]) -> String {
     line
 }
 
-/// Edit ▸ Paste Escaped Text'in (⌃⌘V) kuralı (034 Karar 3): satır sonu
-/// taşımayan metin Finder damlasının kaçırmasından ([`shell_quote`], görüntü
-/// aynı); satır sonu taşıyan metin **bütünüyle tek tırnakla** sarılır ve
-/// içindeki `'` `'\''` olur.
+/// The rule of Edit ▸ Paste Escaped Text (⌃⌘V) (034 Karar 3): text without a newline goes
+/// through the Finder drop's escaping ([`shell_quote`], same appearance); text with a newline
+/// is wrapped **entirely in single quotes** and any `'` inside becomes `'\''`.
 ///
-/// İki kol, çünkü [`shell_quote`]'un "patolojik" diye kabul ettiği sınır —
-/// `\` + satır sonu kabukta satır devamıdır, parçalar birleşir — pano
-/// metninde olağan. POSIX tek tırnağı satır sonunu harfi harfine taşır ve
-/// tırnak kapanmadan satır bitmediği için bracketed sarma olmadan da hiçbir
-/// satır kendiliğinden çalışmaz. Tek satırda ters bölü tercih ediliyor:
-/// damlayla aynı görüntü, ve tırnak kullanıcının sonradan düzenlediği
-/// satırda daha çok karakter demek.
+/// Two branches, because the limit [`shell_quote`] accepts as "pathological" — `\` + newline
+/// is a line continuation in the shell, the parts get joined — is ordinary in clipboard text.
+/// A POSIX single quote carries the newline literally, and since the line does not end until
+/// the quote closes, no line runs by itself even without bracketed wrapping. On a single line
+/// the backslash is preferred: the same appearance as the drop, and quotes mean more
+/// characters on a line the user edits afterwards.
 ///
-/// Satır sonu `\n` **ya da** `\r` (pano Windows'tan `\r\n` taşıyabilir):
-/// ikisi de kabukta komut sınırı. Tırnağın içinde `\r\n` ve tek `\r` `\n`'e
-/// iniyor, çünkü zsh'in bracketed okuyucusu her `\r`'yi `\n` yapıyor ve
-/// `\r\n` satır başına iki satır sonu olurdu — metin satır satır aynı
-/// kalsın. Boş metin boş dizge.
+/// A newline is `\n` **or** `\r` (the clipboard may carry `\r\n` from Windows): both are a
+/// command boundary in the shell. Inside the quote `\r\n` and a lone `\r` are reduced to
+/// `\n`, because zsh's bracketed reader turns every `\r` into `\n` and `\r\n` would become
+/// two newlines per line — let the text stay the same line by line. Empty text gives an empty
+/// string.
 pub(crate) fn paste_quote(text: &str) -> String {
     if !text.contains(['\n', '\r']) {
         return shell_quote(&[text.to_owned()]);
@@ -86,18 +83,17 @@ pub(crate) fn paste_quote(text: &str) -> String {
     quoted
 }
 
-/// Uzak oturumun **yeniden koşturma satırı** (037 Karar 1): argv → kabuğa
-/// yazılacak, okunur tek satır. ⌘T'nin ve yeniden bağlanmanın yazdığı satır
-/// kullanıcının gözünün önünde (yeni sekmenin dock'u, geçmiş), yani
-/// [`shell_quote`]'un damla için dar beyaz listesi burada `ssh deploy\@prod
-/// -o User\=x` okunurdu.
+/// The remote session's **re-run line** (037 Karar 1): argv → a single readable line to be
+/// written to the shell. The line written by ⌘T and by reconnecting is in front of the user's
+/// eyes (the new tab's dock, the history), so [`shell_quote`]'s narrow whitelist for drops
+/// would read `ssh deploy\@prod -o User\=x` here.
 ///
-/// Kural [`shell_quote`]'unki, üç genişlemeyle: `@ : , +` her yerde geçer
-/// (kabukta özel değiller), `=` **sözcüğün başı dışında** geçer — zsh'in
-/// `EQUALS`'ı `=cmd`'yi yalnız sözcük başında açıyor —, ve **boş argüman**
-/// `''` olur, yoksa satırda iz bırakmadan kaybolurdu. Kontrol karakteri
-/// taşıyan argüman `$'…'`'e giriyor. Argümanlar tek boşlukla
-/// birleşiyor. Damlanın kuralı değişmiyor: ayrı giriş noktası.
+/// The rule is [`shell_quote`]'s, with three extensions: `@ : , +` pass everywhere (they are
+/// not special in the shell), `=` passes **except at the start of a word** — zsh's `EQUALS`
+/// expands `=cmd` only at the start of a word —, and an **empty argument** becomes `''`,
+/// otherwise it would vanish from the line without a trace. An argument carrying a control
+/// character goes into `$'…'`. Arguments are joined with a single space. The drop's rule does
+/// not change: a separate entry point.
 pub(crate) fn command_line(argv: &[String]) -> String {
     let mut line = String::new();
     for arg in argv {
@@ -108,10 +104,10 @@ pub(crate) fn command_line(argv: &[String]) -> String {
             line.push_str("''");
             continue;
         }
-        // Kontrol karakteri (satır sonu en başta) ters bölüyle kaçamaz: `\` +
-        // satır sonu kabukta satır devamı ve argümanı birleştirirdi, ESC ham
-        // giderdi. O argüman bütünüyle ANSI-C tırnağında (`$'…'`, zsh ve
-        // bash) ve karakter okunur bir kaçışla yazılıyor.
+        // A control character (newline first of all) cannot be escaped with a backslash: `\` +
+        // newline is a line continuation in the shell and would join the argument, ESC would
+        // go raw. That argument goes entirely into ANSI-C quotes (`$'…'`, zsh and bash) and
+        // the character is written with a readable escape.
         if arg.chars().any(char::is_control) {
             line.push_str("$'");
             for c in arg.chars() {
@@ -141,13 +137,13 @@ pub(crate) fn command_line(argv: &[String]) -> String {
     line
 }
 
-/// Beyaz listenin kendisi: ASCII harf/rakam ve dört noktalama geçer, ASCII
-/// olmayan her şey geçer, kalan ASCII kaçar.
+/// The whitelist itself: ASCII letters/digits and four punctuation marks pass, everything
+/// non-ASCII passes, the remaining ASCII is escaped.
 ///
-/// Dördün gerekçesi yolun kendi sözlüğü: `/` ayraç, `.` uzantı ve `..`, `_`
-/// ile `-` dosya adlarının olağan noktalaması. Beşincisi eklenirken sorulacak
-/// soru "kabukta özel mi" değil, "kaçarsa bozulur mu" — kaçmak zararsız, yani
-/// liste kısa kalmalı.
+/// The reason for the four is the path's own vocabulary: `/` the separator, `.` the extension
+/// and `..`, `_` and `-` the ordinary punctuation of file names. The question to ask when
+/// adding a fifth is not "is it special in the shell" but "does it break if escaped" —
+/// escaping is harmless, so the list should stay short.
 fn needs_escape(c: char) -> bool {
     c.is_ascii() && !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
 }
@@ -162,16 +158,16 @@ mod tests {
 
     #[test]
     fn plain_paths_pass_through_untouched() {
-        // Kaçacak karakteri olmayan yol olduğu gibi gidiyor: beyaz liste
-        // harf/rakam ve yolun kendi noktalaması.
+        // A path with no character to escape goes as is: the whitelist is letters/digits and
+        // the path's own punctuation.
         assert_eq!(quote("/Users/kalaomer/a.txt"), "/Users/kalaomer/a.txt");
         assert_eq!(quote("/tmp/bir_iki-uc.tar.gz"), "/tmp/bir_iki-uc.tar.gz");
     }
 
     #[test]
     fn spaces_are_escaped_so_the_shell_sees_one_argument() {
-        // Setin manşet hâli (018 Karar 4, Terminal.app paritesi): adında
-        // boşluk olan dosya tek argüman olmalı, yoksa kabuk iki yol görür.
+        // The set's headline case (018 Karar 4, Terminal.app parity): a file with a space in
+        // its name must be a single argument, otherwise the shell sees two paths.
         assert_eq!(
             quote("/Users/a/İki Kelime/a.txt"),
             "/Users/a/İki\\ Kelime/a.txt"
@@ -180,16 +176,16 @@ mod tests {
 
     #[test]
     fn non_ascii_characters_are_not_escaped() {
-        // Türkçe harfler kabukta düz harf: önlerine ters bölü koymak yalnız
-        // çirkin olurdu. Kaçan tek şey aradaki boşluk (yukarıda).
+        // Turkish letters are plain letters in the shell: putting a backslash before them
+        // would only be ugly. The only thing escaped is the space in between (above).
         assert_eq!(quote("/tmp/ğüşİÖÇ.txt"), "/tmp/ğüşİÖÇ.txt");
         assert_eq!(quote("/tmp/日本語"), "/tmp/日本語");
     }
 
     #[test]
     fn shell_metacharacters_are_escaped() {
-        // Kara liste tartışmasının kapandığı yer: kabuğun metakarakterleri
-        // tek tek sayılmıyor, beyaz listenin dışında kaldıkları için kaçıyorlar.
+        // Where the blacklist debate is closed: the shell's metacharacters are not enumerated
+        // one by one, they are escaped because they fall outside the whitelist.
         assert_eq!(quote("/tmp/$HOME"), "/tmp/\\$HOME");
         assert_eq!(quote("/tmp/`x`"), "/tmp/\\`x\\`");
         assert_eq!(quote("/tmp/a;b"), "/tmp/a\\;b");
@@ -199,34 +195,33 @@ mod tests {
         assert_eq!(quote("/tmp/a\"b"), "/tmp/a\\\"b");
         assert_eq!(quote("/tmp/a\\b"), "/tmp/a\\\\b");
         assert_eq!(quote("/tmp/a*b?c[d]"), "/tmp/a\\*b\\?c\\[d\\]");
-        // Beyaz liste olmasaydı tartışmaya açılacak olanlar: `~` yalnız
-        // kelimenin başında, `=` yalnız zsh'te, `#` yalnız kelime başında,
-        // `!` yalnız etkileşimli kabukta özel. Hepsi kaçıyor ve kaçmaları
-        // zararsız.
+        // The ones that would be up for debate without a whitelist: `~` is special only at
+        // the start of a word, `=` only in zsh, `#` only at the start of a word, `!` only in
+        // an interactive shell. All of them are escaped and escaping them is harmless.
         assert_eq!(quote("/tmp/~=#!%"), "/tmp/\\~\\=\\#\\!\\%");
     }
 
     #[test]
     fn tab_and_newline_are_escaped_with_a_backslash() {
-        // Sekme kelime ayracı, satır sonu komut sınırı: ikisi de kaçmak
-        // zorunda. Satır sonunun **bilinen sınırı** sözleşme olarak çivili —
-        // `\` + satır sonu kabukta satır devamı, yani adın iki parçası
-        // birleşir. Kaçmamanın bedeli daha ağır (kullanıcının yazmadığı bir
-        // satır koşardı) ve `$'\n'` tek kuralı ikiye bölerdi.
+        // Tab is a word separator, newline a command boundary: both must be escaped. The
+        // **known limit** of the newline is nailed down as a contract — `\` + newline is a
+        // line continuation in the shell, so the two parts of the name get joined. The cost of
+        // not escaping is heavier (it would run a line the user did not type) and `$'\n'`
+        // would split the single rule in two.
         assert_eq!(quote("/tmp/a\tb"), "/tmp/a\\\tb");
         assert_eq!(quote("/tmp/a\nb"), "/tmp/a\\\nb");
     }
 
     #[test]
     fn several_paths_are_joined_by_a_single_space() {
-        // Çok dosyalı damla: her yol ayrı kaçıyor, aralarında **tek** boşluk
-        // ve sonda boşluk yok — kullanıcının yazdığı satıra fazladan bir
-        // karakter eklemiyoruz.
+        // A multi-file drop: each path is escaped separately, with a **single** space between
+        // them and no trailing space — we do not add an extra character to the line the user
+        // is typing.
         assert_eq!(
             shell_quote(&["/tmp/a b".to_owned(), "/tmp/c".to_owned()]),
             "/tmp/a\\ b /tmp/c"
         );
-        // Boş damla boş dizge: okunabilen yol yoksa yazılacak şey de yok.
+        // An empty drop gives an empty string: no readable path, nothing to write.
         assert_eq!(shell_quote(&[]), "");
     }
 
@@ -236,7 +231,7 @@ mod tests {
 
     #[test]
     fn a_command_line_stays_readable() {
-        // 037 Karar 1: `@ : , +` ve sözcük içindeki `=` kaçmıyor.
+        // 037 Karar 1: `@ : , +` and a `=` inside a word are not escaped.
         assert_eq!(
             line(&["ssh", "-o", "User=x", "deploy@prod"]),
             "ssh -o User=x deploy@prod"
@@ -249,9 +244,9 @@ mod tests {
 
     #[test]
     fn a_command_line_escapes_what_the_shell_would_read() {
-        // Sözcük başındaki `=` zsh'te `=cmd` açılımı; boşluklu argüman tek
-        // argüman kalmalı; boş argüman kaybolmamalı; kalan metakarakterler
-        // damlanın kuralıyla.
+        // A `=` at the start of a word is the `=cmd` expansion in zsh; an argument with spaces
+        // must stay a single argument; an empty argument must not vanish; the remaining
+        // metacharacters follow the drop's rule.
         assert_eq!(line(&["ssh", "=x"]), "ssh \\=x");
         assert_eq!(
             line(&["mosh", "--ssh=ssh -p 2", "prod"]),
@@ -267,8 +262,8 @@ mod tests {
 
     #[test]
     fn a_control_character_puts_its_argument_in_ansi_c_quotes() {
-        // `\` + satır sonu satır devamı olurdu (`/code-review`): argüman
-        // `$'…'`'e giriyor, içindeki `\` ve `'` kaçıyor.
+        // `\` + newline would be a line continuation (`/code-review`): the argument goes into
+        // `$'…'`, and the `\` and `'` inside it are escaped.
         assert_eq!(
             line(&["ssh", "-t", "prod", "echo a\necho 'b'\\"]),
             "ssh -t prod $'echo a\\necho \\'b\\'\\\\'"
@@ -281,7 +276,7 @@ mod tests {
 
     #[test]
     fn paste_quote_escapes_a_single_line_like_a_drop() {
-        // Satır sonu yoksa kural damlanınkinin ta kendisi: görüntü aynı.
+        // Without a newline the rule is exactly the drop's: same appearance.
         assert_eq!(
             paste_quote("/tmp/İki Kelime/a'b"),
             "/tmp/İki\\ Kelime/a\\'b"
@@ -295,15 +290,15 @@ mod tests {
 
     #[test]
     fn paste_quote_wraps_multiline_text_in_single_quotes() {
-        // Satır sonlu metin bütünüyle tek tırnakta: `\` + satır sonu satır
-        // devamı olurdu ve parçalar birleşirdi. İçteki `'` kapat-kaçır-aç.
+        // Text with a newline goes entirely into single quotes: `\` + newline would be a line
+        // continuation and the parts would be joined. An inner `'` is close-escape-reopen.
         assert_eq!(paste_quote("a b\nc"), "'a b\nc'");
         assert_eq!(paste_quote("it's\nok"), "'it'\\''s\nok'");
-        // Windows satır sonu ve tek `\r` tek `\n`'e iniyor: zsh bracketed
-        // okuyucusu `\r`'yi zaten `\n` yapıyor, `\r\n` iki satır olurdu.
+        // A Windows newline and a lone `\r` are reduced to a single `\n`: zsh's bracketed
+        // reader already turns `\r` into `\n`, so `\r\n` would become two lines.
         assert_eq!(paste_quote("x\r\ny"), "'x\ny'");
         assert_eq!(paste_quote("x\ry"), "'x\ny'");
-        // Tırnağın içinde hiçbir metakarakter kaçmıyor — harfi harfine.
+        // Inside the quote no metacharacter is escaped — literally.
         assert_eq!(paste_quote("$HOME\n`x`"), "'$HOME\n`x`'");
     }
 }

@@ -1,55 +1,53 @@
-//! View ▸ Bigger / Smaller / Actual Size (Cmd +/−/0): ayardaki puntonun
-//! üstüne tutulan **geçici** fark.
+//! View ▸ Bigger / Smaller / Actual Size (Cmd +/−/0): a **temporary** offset kept on top of
+//! the point size from the settings.
 //!
-//! Dosyaya yazılmıyor ve uygulama kapanınca gidiyor: ekranı bir an büyütmek
-//! bir ayar değişikliği değil. İki punto kaynağı yarışmasın diye dosyadaki
-//! `size` değişince fark sıfırlanıyor ([`Zoom::after_reload`]) — editörde
-//! `size` yazan kullanıcı yazdığını görür. Saf; tutan ve renderer'a veren
-//! `app`.
+//! It is not written to the file and is gone when the app quits: enlarging the screen for a
+//! moment is not a settings change. So that two point-size sources do not compete, the offset
+//! is reset when `size` in the file changes ([`Zoom::after_reload`]) — a user who writes `size`
+//! in the editor sees what they wrote. Pure; the one holding it and handing it to the renderer
+//! is `app`.
 
 use bt_core::FontOptions;
 
-/// Bir basışın puntosu. Seçilmiş bir sabit, ölçülmüş bir sayı değil.
+/// The point size of one press. A chosen constant, not a measured number.
 const STEP: f64 = 1.0;
 
-/// Basışların aralığı, punto. Uçları atlasın `punto × ölçek` kırpmasından
-/// (`bt-atlas`, 4–144 piksel; aralığın sahibi orası): 72 punto 2× ekranda
-/// tavan, 4 punto 1× ekranda taban. Aralığın içinde **her basış görünür**;
-/// dışında kalan basış kırpmaya çarpıp hiçbir şey değiştirmezdi ve tuşu
-/// basılı tutan kullanıcı geri dönmek için onları tek tek geri basardı.
+/// The range of the presses, in points. The ends come from the atlas's `point size × scale`
+/// clamp (`bt-atlas`, 4–144 pixels; that is the owner of the range): 72 points is the ceiling
+/// on a 2× display, 4 points the floor on a 1× display. Inside the range **every press is
+/// visible**; a press outside it would hit the clamp and change nothing, and a user holding the
+/// key down would have to press each of them back one by one to return.
 ///
-/// Ayardaki `size` bu aralığa bağlı değil (kırpma orada da sessiz): aralığın
-/// dışındaki bir puntodan içeri doğru basış çalışır, dışarı doğru olan
-/// çalışmaz.
+/// `size` in the settings is not bound to this range (the clamp is silent there too): from a
+/// point size outside the range a press inward works, one outward does not.
 ///
-/// İkinci tüketici ayar penceresinin Size satırı (`settings_window`): stepper
-/// ve alanın kabul ettiği aralık bu, ikinci bir sayı uydurulmadı (029 Karar
-/// 2). Dosyada aralığın dışında bir değer varsa alan onu olduğu gibi
-/// gösteriyor.
+/// The second consumer is the Size row of the settings window (`settings_window`): the range
+/// the stepper and the field accept is this one, no second number was invented (029 Karar 2).
+/// If the file holds a value outside the range, the field shows it as is.
 pub(crate) const MIN_SIZE: f64 = 4.0;
 pub(crate) const MAX_SIZE: f64 = 72.0;
 
-/// Ayardaki puntonun üstüne kaç adım çıkıldı (eksi: indi). Adım sayısı,
-/// punto değil: tekrarlanan toplama ondalık birikim bırakmasın.
+/// How many steps above the settings' point size we went (negative: below). A step count, not
+/// a point size: so that repeated addition does not leave decimal accumulation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Zoom {
     steps: i32,
 }
 
 impl Zoom {
-    /// Renderer'a gidecek font: ayarınki, puntosu farkla.
+    /// The font to hand to the renderer: the settings' one, its point size offset.
     pub(crate) fn apply(self, font: &FontOptions) -> FontOptions {
         FontOptions {
             family: font.family.clone(),
             size: self.size(font),
-            // Punto geçici, satır aralığı **değil**: Cmd +/− puntoyu
-            // oynatıyor ve çarpan zaten ona göre ölçekleniyor (hücre
-            // yüksekliği fontun metriğinden türüyor).
+            // The point size is temporary, the line height is **not**: Cmd +/− moves the
+            // point size and the multiplier already scales with it (the cell height derives
+            // from the font's metrics).
             line_height: font.line_height,
         }
     }
 
-    /// Bigger: bir adım büyük, tavanı geçmiyorsa.
+    /// Bigger: one step larger, if it does not exceed the ceiling.
     pub(crate) fn bigger(self, font: &FontOptions) -> Zoom {
         let next = Zoom {
             steps: self.steps.saturating_add(1),
@@ -61,9 +59,8 @@ impl Zoom {
         }
     }
 
-    /// Smaller: bir adım küçük, tabanın altına inmiyorsa. Taban sıfırın
-    /// üstünde, yani [`FontOptions::size`]'ın "sıfırdan büyük" kuralı da
-    /// buradan korunuyor.
+    /// Smaller: one step smaller, if it does not go below the floor. The floor is above zero,
+    /// so [`FontOptions::size`]'s "greater than zero" rule is also protected from here.
     pub(crate) fn smaller(self, font: &FontOptions) -> Zoom {
         let next = Zoom {
             steps: self.steps.saturating_sub(1),
@@ -75,8 +72,8 @@ impl Zoom {
         }
     }
 
-    /// Ayar dosyası yeniden okundu: `size` değiştiyse fark sıfırlanır, yoksa
-    /// kalır — ailesini değiştiren kullanıcı büyüttüğü puntoyu kaybetmez.
+    /// The settings file was reread: if `size` changed the offset is reset, otherwise it stays —
+    /// a user who changes the family does not lose the point size they enlarged.
     pub(crate) fn after_reload(self, old: &FontOptions, new: &FontOptions) -> Zoom {
         if old.size == new.size {
             self
@@ -108,7 +105,7 @@ mod tests {
         let zoom = Zoom::default().bigger(&base).bigger(&base);
         assert_eq!(zoom.apply(&base), font(15.0));
         assert_eq!(zoom.smaller(&base).apply(&base), font(14.0));
-        // Aile ayarınki kalır; Actual Size farkı sıfırlar.
+        // The family stays the settings' one; Actual Size resets the offset.
         assert_eq!(Zoom::default().apply(&base), base);
         assert_eq!(Zoom::default(), Zoom { steps: 0 });
     }
@@ -116,9 +113,9 @@ mod tests {
     #[test]
     fn size_change_in_the_file_resets_the_difference() {
         let zoom = Zoom::default().bigger(&font(13.0)).bigger(&font(13.0));
-        // Editörde `size` yazıldı: yazılan görünür, fark gider.
+        // `size` was written in the editor: what was written shows, the offset goes.
         assert_eq!(zoom.after_reload(&font(13.0), &font(16.0)), Zoom::default());
-        // Punto aynı kaldı (aile ya da başka bir anahtar değişti): fark kalır.
+        // The point size stayed the same (the family or another key changed): the offset stays.
         let other = FontOptions {
             family: None,
             size: 13.0,
@@ -130,17 +127,17 @@ mod tests {
 
     #[test]
     fn steps_stop_at_the_ends() {
-        // Tavan: 72'ye kadar çıkar, bir fazlası basışı yok sayar.
+        // Ceiling: goes up to 72, one more ignores the press.
         let base = font(70.0);
         let top = Zoom::default().bigger(&base).bigger(&base);
         assert_eq!(top.apply(&base).size, 72.0);
         assert_eq!(top.bigger(&base), top);
-        // Taban: 4'e kadar iner.
+        // Floor: goes down to 4.
         let base = font(5.0);
         let bottom = Zoom::default().smaller(&base);
         assert_eq!(bottom.apply(&base).size, 4.0);
         assert_eq!(bottom.smaller(&base), bottom);
-        // Uçtaki basış **hiç** sayılmaz: geri dönüş hemen görünür.
+        // A press at the end is **not** counted at all: the way back is visible immediately.
         assert_eq!(
             top.bigger(&font(70.0))
                 .smaller(&font(70.0))
@@ -148,8 +145,8 @@ mod tests {
                 .size,
             71.0
         );
-        // Aralığın dışındaki ayardan içeri doğru basış çalışır; dışarı doğru
-        // olan çalışmaz.
+        // From a setting outside the range a press inward works; one outward does
+        // not.
         assert_eq!(
             Zoom::default()
                 .smaller(&font(100.0))
