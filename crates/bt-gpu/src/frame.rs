@@ -139,6 +139,17 @@ const _: () = assert!(offset_of!(FxInstance, uv0) == 8);
 const _: () = assert!(offset_of!(FxInstance, rgba) == 16);
 const _: () = assert!(offset_of!(FxInstance, fx) == 32);
 
+/// `FxInstance`'s field offsets, for the wgpu vertex layout
+/// (`crate::wgpu_renderer`): fed from next to the asserts, like
+/// [`INSTANCE_OFFSETS`] (040 phase-4).
+#[cfg(test)]
+pub(crate) const FX_INSTANCE_OFFSETS: [u64; 4] = [
+    offset_of!(FxInstance, pos) as u64,
+    offset_of!(FxInstance, uv0) as u64,
+    offset_of!(FxInstance, rgba) as u64,
+    offset_of!(FxInstance, fx) as u64,
+];
+
 /// `shaders/cell.metal` → `CursorBlock` ile alan alan aynı: imlecin **piksel**
 /// dikdörtgeni ve bloğun altında kalan metnin rengi.
 ///

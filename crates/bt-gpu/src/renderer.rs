@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use block2::RcBlock;
-use bt_atlas::{Atlas, FontIssue, Half, Metrics, Plane, TOFU};
+use bt_atlas::{Atlas, FontIssue, Metrics, Plane, TOFU};
 use bt_core::{Clusters, FontOptions, LinearRgba};
 use dispatch2::DispatchData;
 use objc2::rc::{Retained, autoreleasepool};
@@ -1151,7 +1151,7 @@ impl Renderer {
         if atlas_tex.color_texture.is_none() {
             atlas_tex
                 .fx_instances
-                .retain(|instance| (instance.fx[1] as u32 >> 5) & 1 == 0);
+                .retain(|instance| !slots::fx_is_color(instance));
         }
         if atlas_tex.fx_instances.is_empty() {
             return Ok(());
@@ -1723,55 +1723,24 @@ impl AtlasTexture {
         self.ensure_texture(device)?;
         // audit: `ensure_texture` `Ok` döndüyse dokuyu kurmuştur.
         let texture = self.texture.as_ref().expect("doku hemen üstte kuruldu");
-        let metrics = self.atlas.metrics();
-        let (tw, th) = self.atlas.texture_px();
-        let inv = (1.0 / f32::from(tw), 1.0 / f32::from(th));
-        self.fx_instances.clear();
+        let edge = self.atlas.texture_px();
         let mut upload = MetalUpload {
             mask: texture,
             color: ColorPlane {
                 slot: &mut self.color_texture,
                 device,
-                edge: (tw, th),
+                edge,
             },
         };
-        for cell in cells {
-            for part in slots::fan(
-                &mut self.atlas,
-                &mut upload,
-                metrics,
-                inv,
-                &cell.glyph,
-                clusters,
-            )
-            .into_iter()
-            .flatten()
-            {
-                let plane = match part.plane {
-                    Plane::Mask => 0,
-                    Plane::Color => 1,
-                };
-                let half = match part.half {
-                    Half::Whole => 0,
-                    Half::Left => 1,
-                    Half::Right => 2,
-                };
-                self.fx_instances.push(FxInstance {
-                    pos: part.pos,
-                    uv0: part.uv0,
-                    rgba: cell.glyph.rgba,
-                    // Paket `shaders/glyph_fx.metal`'in çözdüğüyle aynı:
-                    // `kimlik | düzlem << 5 | yarı << 6`, küçük bir tam sayı
-                    // ve `f32`'de birebir (bkz. [`FxInstance`]).
-                    fx: [
-                        cell.t,
-                        (cell.effect | plane << 5 | half << 6) as f32,
-                        cell.seed,
-                        0.0,
-                    ],
-                });
-            }
-        }
+        // The instance building is shared with the wgpu renderer
+        // (`slots::fx_list`); only the upload target is Metal's.
+        slots::fx_list(
+            &mut self.atlas,
+            &mut upload,
+            cells,
+            clusters,
+            &mut self.fx_instances,
+        );
         Ok(())
     }
 }
@@ -1953,6 +1922,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::glyph_fx::{Effect, Fx, Kind};
     use crate::stats::Stats;
+    use crate::wgpu_renderer::WgpuRenderer;
     use bt_atlas::{Face, SizeClass};
     use bt_core::CaretStyle;
     use bt_core::{ButtonState, DockButton, Erase, Keypress};
@@ -2020,7 +1990,7 @@ pub(crate) mod tests {
         // Ölçek önbellek anahtarının parçası (`plan.md` → R1.2) ve metrik o
         // anahtarın gözle görülür ucu: @2x'te hücre büyümezse atlas ölçeği
         // yutuyor demektir ve glyph'ler hatasız bulanıklaşır.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         let one = r.cell_metrics(1.0);
         let two = r.cell_metrics(2.0);
         assert!(
@@ -2035,7 +2005,7 @@ pub(crate) mod tests {
 
     #[test]
     fn set_font_changes_the_metrics_on_the_next_ask() {
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         let base = r.cell_metrics(1.0);
         // Açılış değeri ayar modelinin varsayılanı: süreli koşunun hücresi
         // dosyasız kullanıcınınkiyle aynı.
@@ -2060,7 +2030,7 @@ pub(crate) mod tests {
 
     #[test]
     fn missing_family_becomes_a_notice_after_the_atlas_opens() {
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         assert_eq!(r.font_notice(), None, "atlas yokken söylenecek şey yok");
         r.cell_metrics(1.0);
         assert_eq!(r.font_notice(), None, "zincir sessiz");
@@ -2124,7 +2094,7 @@ pub(crate) mod tests {
         // `bt-atlas` veriyor (`font::round_up` 1'e kırpar) ve `CellMetrics`'in
         // private alanı onu sınırın bu tarafında yapısal kılıyor; bu sınama
         // kaynaktaki kırpmanın hâlâ yerinde olduğunu söylüyor.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         for scale in [1.0, 2.0, 3.0] {
             let (w, h) = r.cell_metrics(scale).cell_px();
             assert!(w >= 1 && h >= 1, "ölçek {scale}: {w}×{h}");
@@ -2136,7 +2106,7 @@ pub(crate) mod tests {
         // Device yoksa `ignored` değil açık hata: bu makinede Metal var,
         // yokluğu bir kusurdur. Pipeline'ın kurulması shader'ın derlendiğini
         // ve fonksiyon adlarının metallib'de bulunduğunu kanıtlar.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         assert_eq!(r.frames(), 0);
     }
 
@@ -2202,18 +2172,39 @@ pub(crate) mod tests {
     /// **rengin nereden geldiği**.
     pub(crate) const WHITE: LinearRgba = LinearRgba::from_srgb(0xff, 0xff, 0xff);
 
-    /// Kareyi offscreen bir dokuya çizer ve pikselleri CPU'ya okur.
+    /// The renderer every guard draws with — wgpu since 040 phase-4
+    /// (`crate::wgpu_renderer`). Metal draws only the oracle scenes
+    /// ([`metal_offscreen`]) and the measurement hook's half.
+    pub(crate) type TestRenderer = WgpuRenderer;
+
+    pub(crate) fn renderer() -> TestRenderer {
+        WgpuRenderer::new()
+    }
+
+    /// Draws the frame into an offscreen texture and reads the pixels back —
+    /// the body every offscreen guard shares (setup, encode, submit, wait and
+    /// the error check live in `WgpuRenderer::render_offscreen`; copied, the
+    /// error check would be forgotten in one of them and that guard would read
+    /// an empty texture).
     ///
-    /// Altı sınamanın ortak gövdesi: doku kurulumu, encode, `commit`, bekleme
-    /// ve durum kontrolü. Kopyalansaydı `MTLCommandBufferStatus::Error`
-    /// kontrolü birinde unutulur ve o sınama boş bir dokuyu okuyup "kural
-    /// çizilmedi" yerine anlamsız bir renk iddiası düşürürdü.
-    ///
-    /// `edge` ve `clear` parametre kalıyor: ikisi de yük taşıyor — kenar 16 ve
-    /// 64 olarak ayrışıyor, clear rengi ise `cell_bg_paints_pixels_on_the_gpu`
-    /// için bilerek ötekilerden **farklı** (hücre yolu ile clear yolu ayrık iki
-    /// renkle kanıtlanıyor).
+    /// `edge` and `clear` stay parameters: both carry weight — edges 16 and 64
+    /// differ, and `cell_bg_paints_pixels_on_the_gpu`'s clear colour is
+    /// deliberately **different** from the others' (the cell path and the
+    /// clear path are proven with two distinct colours).
     pub(crate) fn render_offscreen(
+        r: &TestRenderer,
+        edge: usize,
+        clear: LinearRgba,
+        frame: &Frame,
+    ) -> Vec<u8> {
+        r.render_offscreen(edge as u32, clear, frame)
+    }
+
+    /// The **oracle**: the same frame through Metal's `encode_pass`, read back
+    /// — used only by the wgpu scene comparison
+    /// (`wgpu_matches_the_metal_oracle_on_every_scene`) until Metal is removed
+    /// (040 phase-7).
+    pub(crate) fn metal_offscreen(
         r: &Renderer,
         edge: usize,
         clear: LinearRgba,
@@ -2327,7 +2318,7 @@ pub(crate) mod tests {
     /// `GpuError::NoAtlas` ile düşer. Sığma kontrolü ölü değil: büyük
     /// varsayılan puntolu bir makinede hücre dokuyu aşar ve `cell_rows`
     /// dokunun dışını okurdu.
-    fn fitting_cell_px(r: &Renderer, edge: usize, cols: usize) -> (u16, u16) {
+    fn fitting_cell_px(r: &TestRenderer, edge: usize, cols: usize) -> (u16, u16) {
         let (cw, ch) = r.cell_metrics(1.0).cell_px();
         assert!(
             usize::from(cw) * cols <= edge && usize::from(ch) <= edge,
@@ -2361,6 +2352,11 @@ pub(crate) mod tests {
             ..Default::default()
         }
     }
+
+    // **Metal's own guards, kept while Metal is the product renderer**
+    // (040 phase-4 `/code-review`): its completion block (`link.rs` wires it)
+    // and `encode_pass`'s `endEncoding` on the error path. They go with Metal
+    // in phase-7; their wgpu counterparts are in `crate::wgpu_renderer`.
 
     #[test]
     fn completion_block_counts_frame_and_reports_result() {
@@ -2450,6 +2446,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn metal_renderer_without_atlas_refuses_glyphs_and_still_ends_encoding() {
+        // "Önce metriği sor" sözleşmesinin sınanabilir hâli. `Renderer`
+        // atlası `None` doğuyor; ölçeği hiç söylemeden glyph çizen bir yol
+        // sessizce @1x çizmek yerine kareyi düşürmeli. Sessiz olsaydı belirti
+        // "retina makinede harfler yarım boy" olurdu ve hiçbir sınama görmezdi.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 32;
+        let texture = target_texture(&r, EDGE);
+
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.push(Cell {
+            col: 0,
+            row: 0,
+            ch: Some('x'),
+            fg: ACCENT,
+            bg: None,
+            ..Default::default()
+        });
+
+        let cmd = r.queue.commandBuffer().expect("komut tamponu");
+        let result = r.encode_pass(&cmd, &texture, BACKGROUND, &frame);
+        assert!(
+            matches!(result, Err(GpuError::NoAtlas)),
+            "atlassız kare sessizce geçti: {result:?}"
+        );
+        // Encoder yine de kapandı: hata `?` ile erken dönmüyor, yoksa Metal
+        // "released without endEncoding" ile süreci öldürürdü.
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+
+    #[test]
     fn cell_bg_paints_pixels_on_the_gpu() {
         // Bu sınama, phase-2'nin sildiği "çizim çağrısı pipeline'dan geçti"
         // kanıtının yerine geçiyor ve daha fazlasını söylüyor: buffer
@@ -2457,7 +2486,7 @@ pub(crate) mod tests {
         // GPU'nun `Instance` düzenini doğru okuması. İki taraftaki assert'ler
         // düzeni derleme zamanında bağlar ama hiçbir zaman ÇALIŞTIRMAZ;
         // burası çalıştırıyor. Pencere gerekmediği için başsız ortamda da koşar.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 16;
 
         // 8×8 hücre, viewport 16×16 → dört çeyrek. Sol üstte kırmızı, sağ
@@ -2534,7 +2563,7 @@ pub(crate) mod tests {
         // sabit noktaları lineerleştirmenin unutulmasını göremezdi. Clear
         // `ACCENT` — koşu ile clear ayrık iki renk, yoksa "boyandı" ile
         // "boyanmadı" ayırt edilemez.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 4);
         let mut frame = Frame::default();
@@ -2620,7 +2649,7 @@ pub(crate) mod tests {
     /// yakın olduğunu söyleyen okuyucu.
     fn render_selection(runs: &[SelectionRun]) -> impl Fn(usize, usize) -> &'static str {
         const EDGE: usize = 256;
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         let mut frame = Frame::default();
         frame.clear(grid(40, 80), CaretStyle::default());
         assert!(
@@ -2730,7 +2759,7 @@ pub(crate) mod tests {
         selection: &[SelectionRun],
     ) -> impl Fn(usize, usize) -> &'static str + use<> {
         const EDGE: usize = 256;
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         let mut frame = Frame::default();
         frame.clear(grid(40, 80), CaretStyle::default());
         if !fill_runs.is_empty() {
@@ -2837,7 +2866,7 @@ pub(crate) mod tests {
         // kare bugünküyle **bit bit** aynı; doldurmanın geri alma şeridiyle
         // aynı örüntü. Açıkken ayrışmak zorunda, yoksa eşitlik bir şey
         // söylemez.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let draw = |search: Option<&[SearchRun]>| {
             let mut frame = Frame::default();
@@ -2878,7 +2907,11 @@ pub(crate) mod tests {
     ///
     /// Dönüş `(üst bölge, alt bölge)`, satır satır: iddia hangi bölgenin hangi
     /// rengi taşıdığı.
-    fn origin_shifted_halves(r: &Renderer, frame: &mut Frame, clear: LinearRgba) -> (Band, Band) {
+    fn origin_shifted_halves(
+        r: &TestRenderer,
+        frame: &mut Frame,
+        clear: LinearRgba,
+    ) -> (Band, Band) {
         const EDGE: usize = 16;
         const CELL: usize = 8;
         // Bir satır öteleme: 0. satırın hücresi y ∈ [0, 8) yerine [8, 16)'ya
@@ -2907,7 +2940,7 @@ pub(crate) mod tests {
         // taşıyor (origin 8 + boy 16 = 24 > 16) ve Metal'in taşan fragment'i
         // kırpması şart. Kırpmasaydı ya doğrulama hatası düşerdi ya alt bölge
         // sarardı; ikisi de burada görünür.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
         let mut frame = Frame::default();
         frame.clear(grid(8, 8), CaretStyle::default());
@@ -2937,7 +2970,7 @@ pub(crate) mod tests {
         //
         // Glyph ölçüsü atlasın hücresine bağlı **değil**: sorulan şey dörtlünün
         // konumu ve 8 px hücreyle atlas yuvası esner, bozulmaz.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         // "Önce metriği sor": atlasın anahtarının ölçek yarısı pencereden
         // gelir, bu sınamanın penceresi yok ve söylenmezse kare
         // `GpuError::NoAtlas` ile düşer. Dönen ölçü **kullanılmıyor** — dörtlü
@@ -2991,7 +3024,7 @@ pub(crate) mod tests {
     /// geçer, 150 ms'lik kaymanın ortasında düşerdi (phase-0 → Kabul).
     #[test]
     fn a_negative_viewport_origin_draws_and_clips_from_the_top() {
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 16;
         const CELL: u16 = 8;
         // Doldurma **bir satır**: `fill_px` bir hücre, yani yerleşik karede
@@ -3086,7 +3119,7 @@ pub(crate) mod tests {
         // korunur, yalnız `origin_px` değişir — ızgarayla birlikte kayıyor.
         // Push anında pişmiş bir konum ikinci yarıyı düşürürdü: bant yerinde
         // donar, ızgara süzülür ve aradaki dikiş görünürdü.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 16;
         const CELL: u16 = 8;
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
@@ -3160,7 +3193,7 @@ pub(crate) mod tests {
         // aynı olmak zorunda ve bunu yalnız GPU söyleyebilir. Üçüncü viewport
         // koşulsuz kurulsaydı (ya da `clear` bandın boyunu unutsaydı) üçüncü
         // okuma birinciden ayrışırdı — sessiz kalabilecek tek kusur o.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 16;
         const CELL: u16 = 8;
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
@@ -3207,7 +3240,7 @@ pub(crate) mod tests {
         // aynı şekil (012 phase-9, kullanıcı: "sonuç renk kutuları da bu yeni
         // > olacak"). Şeklin kendi bekçisi `bt-atlas`'ta; buranın işi boru
         // hattı — doğru satır, doğru renk, payın içinde.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         // Hücre **atlasın kendi ölçüsünde**: sprite'ı dörtte bir ölçeğe
         // indirmek kapsamayı eritir ve sınama şekli değil ölçeklemeyi ölçerdi.
@@ -3311,7 +3344,7 @@ pub(crate) mod tests {
         // pencerenin altında kalıyor" diyor — dock gelince o parça dock'un
         // **üstüne** düşüyor ve onu örten tek şey opak zemin. Ötelenmiş kare
         // bu yüzden aynı bantta yine dock'un renklerini vermeli.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 16;
         const CELL: u16 = 8;
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
@@ -3380,7 +3413,7 @@ pub(crate) mod tests {
         // 48 px doku, 8 px hücre, paysız: yerleşim 32 px (16..48), PTY payı
         // iki satır (32..48). Satır 0 → 16..24, satır 2 → 32..40, bağlam
         // satırı → 40..48.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 48;
         const CELL: u16 = 8;
         let blue = LinearRgba::from_srgb(0x00, 0x00, 0xff);
@@ -3435,7 +3468,7 @@ pub(crate) mod tests {
         // caret'in altındaki harf **ızgarada**, dock'un üstünde bir satırda
         // zemin rengine boyanırdı: `make hepsi`'yi yeşil bırakan, gözle
         // "bir hücre görünmez oldu" diye fark edilen bir kusur.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
@@ -3502,7 +3535,7 @@ pub(crate) mod tests {
         // dock'un viewport'unda. Çekirdek pencere uzayında olmak zorunda:
         // dock-yerel kalsaydı SDF dörtlünün dışını ölçer ve hiçbir piksel
         // boyanmazdı — sayaçların göremediği sınıf.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 4);
         let black = LinearRgba::from_srgb(0, 0, 0);
@@ -3562,7 +3595,7 @@ pub(crate) mod tests {
         // yer burası — ve **tam bayt aranmıyor**: hücrenin içi arka planıyla
         // tekdüze DEĞİL, o kadar. Baytlar aransaydı kapı sistem fontunun
         // sürümüne rehin olurdu.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         // Ölçek açıkça söyleniyor: atlasın anahtarı pencereden gelir, bu
         // sınamanın penceresi yok ve `Renderer` atlası `None` doğuyor.
         // Söylenmeseydi kare `GpuError::NoAtlas` ile düşerdi — sessizce @1x
@@ -3641,7 +3674,7 @@ pub(crate) mod tests {
         // bir çift döndüren bir `atlas_occupancy` de onu geçerdi. İki farklı
         // glyph'in yuva sayısını **birer birer** artırması, değerin gerçekten
         // atlasın kendisinden geldiğini söylüyor.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         // Atlas ilk metrik sorusunda doğuyor; ondan önce doluluk (0, 0).
         assert_eq!(r.atlas_occupancy(), (0, 0), "atlas metrik sorulmadan yok");
@@ -3679,7 +3712,7 @@ pub(crate) mod tests {
         // **Tam bayt aranmıyor**: iddia "bandın satırı x boyunca tekdüze
         // değil". Baytlar aransaydı kapı fontun `underline_px`'ine ve
         // `CURL_FACTOR`'a rehin olurdu.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
@@ -3718,7 +3751,7 @@ pub(crate) mod tests {
         // SGR 58 `bt-core`'dan `Cell::underline_color` olarak geliyor ve
         // `Frame::push` onu `fg`'nin **yerine** koyuyor. Düşerse belirti
         // sessiz: çizgi çizilir, yalnız rengi yanlış olur ve sayaç oynamaz.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
@@ -3772,7 +3805,7 @@ pub(crate) mod tests {
         // Bu sınama fontun **kalın yüzü taşımasına** dayanıyor. Taşımıyorsa
         // `Faces::effective` düz yüze çöker, iki hücre birebir aynı çizilir ve
         // sınama kırmızı düşer — yanlış bir yeşil vermez.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
@@ -3860,7 +3893,7 @@ pub(crate) mod tests {
         //
         // C kolu negatif kontrol: imleçsiz, kendi ön planıyla çizilmiş aynı
         // harf. A == C olsaydı "eziliyor" iddiası boş olurdu.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 3);
 
@@ -3901,7 +3934,7 @@ pub(crate) mod tests {
         // bit aynı. Ancak GPU söyleyebilir — dejenere kolda fragment `step`,
         // açık kolda `smoothstep` kullanıyor ve ikisinin kenar pikselleri
         // ayrışır. `smoothstep` o kola sızarsa burası kızarır.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
@@ -3943,7 +3976,7 @@ pub(crate) mod tests {
         // hiçbir yarıçap değerinde düşemeyen bir totolojiydi. Ölçü de artık
         // "eşit/farklı" değil **boyanma oranı**: köşe merkezden belirgin
         // biçimde daha sönük olmalı.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
@@ -3983,7 +4016,7 @@ pub(crate) mod tests {
         // İkinci iş: `body -= inner` çıkarması kalın bir kenarda gövdeyi
         // tümden sıfırlayabilir. Kenar burada hücrenin dörtte biri, yani
         // ortası gerçekten boş kalmalı ama caret görünmez olmamalı.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
@@ -4007,7 +4040,7 @@ pub(crate) mod tests {
     fn the_caret_glow_spills_but_stops() {
         // **Hale dikdörtgenin DIŞINDA örnekleniyor** (R6): içeriden bakan bir
         // sınama haleyi göremez, çünkü orada gövde zaten opak.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         // Pay sınamada **üretimdekinden geniş** (varsayılan ~8): hale
         // söndükçe (0.35 → 0.10) 8 bitlik hedefte fark kuantalamaya
@@ -4051,7 +4084,7 @@ pub(crate) mod tests {
         // dikdörtgenin dışını zemine döndürmeli ve açmak parlatmalı.
         // `Settings` sınamaları değerin **okunduğunu** gösteriyor, boyandığını
         // yalnız burası gösterir.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         const GUTTER: u16 = 16;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
@@ -4087,7 +4120,7 @@ pub(crate) mod tests {
         // hale de sönüyor (R6). Bekçi yine **dışarıdan** örnekliyor:
         // `cursor_alpha_is_blended_on_the_gpu` yalnız caret'in kendi hücresine
         // bakıyor ve bu belirtiyi göremez.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         // Geniş pay: kardeş bekçiyle aynı gerekçe (kuantalama).
         const GUTTER: u16 = 16;
@@ -4134,7 +4167,7 @@ pub(crate) mod tests {
         //
         // Örnekleme hücrenin **içi**: kenar bandı (`rule_px`) caret'in
         // kendisi ve orada eşitlik beklenmiyor.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
@@ -4184,7 +4217,7 @@ pub(crate) mod tests {
         // kenarı açan şey odağın kendisi (`push_caret(.., focused=false)`).
         // İkisi bir arada olmasa "kol çalışıyor ama odak onu hiç açmıyor"
         // hâli sessiz kalırdı.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
@@ -4225,7 +4258,7 @@ pub(crate) mod tests {
         // hesaplamak lineer karışımı sRGB'ye kodlamak olurdu ve o tablo
         // burada yok. Uçlar zaten daha keskin bir iddia — alfa hiç
         // okunmasaydı üç kare de aynı çıkardı.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
@@ -4308,7 +4341,7 @@ pub(crate) mod tests {
         // bırakılan kol aslında hiç koşmuyordu — iki offscreen sınaması da
         // tam sayı konum veriyordu, yani kesirli dikdörtgeni yalnız CPU
         // birim sınamaları görüyordu.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
@@ -4365,7 +4398,7 @@ pub(crate) mod tests {
         // artık hücre rengini koruyor ve dikdörtgen onu piksel olarak eziyor.
         // Sonuç aynı: blok altındaki çizgi de metin rengine dönüyor, yani
         // aynı hücredeki alt çizgi ile üstü çizili aynı davranıyor.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
@@ -4416,7 +4449,7 @@ pub(crate) mod tests {
         // kurallar. İmleç bloğu opak ve altındaki her şeyi örter; kural ondan
         // sonra gelmezse imlecin üstündeki hücrede alt çizgi kaybolur ve
         // belirti yalnız imlecin durduğu tek hücrede görünür.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
@@ -4446,14 +4479,13 @@ pub(crate) mod tests {
 
     #[test]
     fn renderer_without_atlas_refuses_glyphs() {
-        // "Önce metriği sor" sözleşmesinin sınanabilir hâli. `Renderer`
-        // atlası `None` doğuyor; ölçeği hiç söylemeden glyph çizen bir yol
-        // sessizce @1x çizmek yerine kareyi düşürmeli. Sessiz olsaydı belirti
-        // "retina makinede harfler yarım boy" olurdu ve hiçbir sınama görmezdi.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
-        const EDGE: usize = 32;
-        let texture = target_texture(&r, EDGE);
-
+        // The "ask for the metrics first" contract, testable: the renderer's
+        // atlas is born `None`; a path drawing glyphs without ever saying the
+        // scale must drop the frame rather than draw silently @1x. Silent, the
+        // symptom would be "half-size letters on a retina Mac" and no test
+        // would see it.
+        let r = renderer();
+        const EDGE: u32 = 32;
         let mut frame = Frame::default();
         frame.clear(grid(8, 16), CaretStyle::default());
         frame.push(Cell {
@@ -4464,17 +4496,63 @@ pub(crate) mod tests {
             bg: None,
             ..Default::default()
         });
-
-        let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        let result = r.encode_pass(&cmd, &texture, BACKGROUND, &frame);
+        let result = r.try_submit_offscreen(EDGE, BACKGROUND, &frame);
         assert!(
             matches!(result, Err(GpuError::NoAtlas)),
-            "atlassız kare sessizce geçti: {result:?}"
+            "a frame without an atlas went through silently: {result:?}"
         );
-        // Encoder yine de kapandı: hata `?` ile erken dönmüyor, yoksa Metal
-        // "released without endEncoding" ile süreci öldürürdü.
-        cmd.commit();
-        cmd.waitUntilCompleted();
+    }
+
+    /// A [`SlotUpload`] that only records which planes were written: the
+    /// list-building guards below ask the shared `slots::glyph_lists` (040
+    /// phase-4 — the Metal `AtlasTexture` they used to build by hand goes
+    /// away with Metal), so no texture is involved.
+    #[derive(Default)]
+    struct RecordingUpload {
+        planes: Vec<Plane>,
+    }
+
+    impl SlotUpload for RecordingUpload {
+        fn upload(&mut self, plane: Plane, _: (u16, u16), metrics: Metrics, bytes: &[u8]) {
+            assert_eq!(
+                bytes.len(),
+                slots::slot_layout(metrics, plane).0,
+                "a full slot"
+            );
+            self.planes.push(plane);
+        }
+    }
+
+    /// An atlas and the two lists `slots::glyph_lists` fills — what the
+    /// renderers' `prepare` produce, minus the texture.
+    struct Lists {
+        atlas: Atlas,
+        upload: RecordingUpload,
+        mask: Vec<GlyphInstance>,
+        color: Vec<GlyphInstance>,
+    }
+
+    impl Lists {
+        fn new(scale: f64) -> Self {
+            Self {
+                atlas: Atlas::new(None, 13.0, scale, 1.0),
+                upload: RecordingUpload::default(),
+                mask: Vec::new(),
+                color: Vec::new(),
+            }
+        }
+
+        fn prepare(&mut self, glyphs: &[GlyphCell], clusters: &Clusters) {
+            slots::glyph_lists(
+                &mut self.atlas,
+                &mut self.upload,
+                glyphs,
+                clusters,
+                &[],
+                &mut self.mask,
+                &mut self.color,
+            );
+        }
     }
 
     /// Geniş hücre **iki dörtlü** üretiyor: sol yarı yerinde, sağ yarı bir
@@ -4486,15 +4564,7 @@ pub(crate) mod tests {
     /// döndüğünü gösteriyor.
     #[test]
     fn a_wide_cell_becomes_two_quads() {
-        let device = MTLCreateSystemDefaultDevice().expect("Metal device");
-        let mut tex = AtlasTexture {
-            atlas: Atlas::new(None, 13.0, 1.0, 1.0),
-            texture: None,
-            instances: Vec::new(),
-            color_texture: None,
-            color_instances: Vec::new(),
-            fx_instances: Vec::new(),
-        };
+        let mut tex = Lists::new(1.0);
         let cell_w = tex.atlas.metrics().cell_px.0;
         // `漢` mürekkebi iki hücre isteyen bir aday veriyor (cascade: PingFang
         // SC); tek hücrelik kapıdan dönüyor, iki hücrelik kapıdan geçiyor.
@@ -4507,26 +4577,21 @@ pub(crate) mod tests {
             wide: true,
             cluster: None,
         }];
-        tex.prepare(&device, &glyphs, &Clusters::default(), &[])
-            .expect("prepare");
+        tex.prepare(&glyphs, &Clusters::default());
         assert_eq!(
-            tex.instances.len(),
+            tex.mask.len(),
             2,
             "geniş hücre iki dörtlü üretmeli: {:?}",
-            tex.instances.len()
+            tex.mask.len()
         );
+        assert_eq!(tex.mask[0].pos, [0.0, 0.0], "sol yarı hücrenin yerinde");
         assert_eq!(
-            tex.instances[0].pos,
-            [0.0, 0.0],
-            "sol yarı hücrenin yerinde"
-        );
-        assert_eq!(
-            tex.instances[1].pos,
+            tex.mask[1].pos,
             [f32::from(cell_w), 0.0],
             "sağ yarı tam bir hücre sağda"
         );
         assert_ne!(
-            tex.instances[0].uv0, tex.instances[1].uv0,
+            tex.mask[0].uv0, tex.mask[1].uv0,
             "iki yarı iki ayrı yuvadan okunmalı"
         );
     }
@@ -4539,15 +4604,7 @@ pub(crate) mod tests {
     /// sahibi kapı, çağıran değil — bekçi de tam bunu gösteriyor.
     #[test]
     fn a_wide_cell_that_fits_one_cell_stays_one_quad() {
-        let device = MTLCreateSystemDefaultDevice().expect("Metal device");
-        let mut tex = AtlasTexture {
-            atlas: Atlas::new(None, 13.0, 1.0, 1.0),
-            texture: None,
-            instances: Vec::new(),
-            color_texture: None,
-            color_instances: Vec::new(),
-            fx_instances: Vec::new(),
-        };
+        let mut tex = Lists::new(1.0);
         // Menlo'nun kendi glyph'i, Unicode'a göre iki sütun: taban fontta
         // ilerleme hücrenin ilerlemesinin ta kendisi, yani tek hücre.
         let glyphs = [GlyphCell {
@@ -4559,10 +4616,9 @@ pub(crate) mod tests {
             wide: true,
             cluster: None,
         }];
-        tex.prepare(&device, &glyphs, &Clusters::default(), &[])
-            .expect("prepare");
+        tex.prepare(&glyphs, &Clusters::default());
         assert_eq!(
-            tex.instances.len(),
+            tex.mask.len(),
             1,
             "tek hücreye sığan geniş karakter ikinci dörtlü üretmemeli"
         );
@@ -4578,168 +4634,21 @@ pub(crate) mod tests {
     /// aynısı ve doğrudan sorulan tek yer burası.
     #[test]
     fn the_color_plane_is_an_srgb_texture() {
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
-        let texture = new_color_texture(&r.device, 64, 64).expect("renk dokusu");
+        use crate::wgpu_renderer::{COLOR_FORMAT, MASK_FORMAT, plane_format};
         assert_eq!(
-            texture.pixelFormat(),
-            MTLPixelFormat::RGBA8Unorm_sRGB,
-            "renk düzlemi sRGB olmalı"
+            plane_format(Plane::Color),
+            COLOR_FORMAT,
+            "the colour plane's texture is not the colour format"
         );
-        // Maske düzlemi **değişmedi**: tek kanal kapsama sözleşmesi ayakta.
-        let mask = new_atlas_texture(&r.device, 64, 64).expect("maske dokusu");
-        assert_eq!(mask.pixelFormat(), MTLPixelFormat::R8Unorm);
-    }
-
-    /// **Sentetik ara tonlu tanık:** renk düzlemine yazılan bayt ekrana
-    /// **aynı** bayt olarak çıkıyor.
-    ///
-    /// Tanığın sentetik olması **şart**: gerçek bir emojinin bitmap'i
-    /// CoreGraphics'ten geliyor ve macOS sürümleri arasında bit bit sabit
-    /// değil, yani ona bakan bir bekçi yanlış güven verir ("bileşimi sına,
-    /// bileşeni değil"). Ara ton da şart: `0.00` ve `0xff` sRGB transfer
-    /// fonksiyonunun **sabit noktaları**, yani doku formatı yanlış olsa da
-    /// aynı baytı verirler — `cell_bg_paints_pixels_on_the_gpu`'nun
-    /// `MIDTONE`'u ile birebir aynı gerekçe.
-    ///
-    /// Aynı sınama **ön çarpımın** da tanığı: alfa `0xff` (tam opak) ve
-    /// baytlar ön çarpımlı, yani blend'in RGB kaynak çarpanı `One` ile
-    /// `SourceAlpha` bu pikselde **aynı** sonucu verir; ayrıştıkları yer
-    /// yarı saydam kenar ve onun bekçisi aşağıda.
-    #[test]
-    fn a_midtone_color_slot_survives_the_round_trip() {
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
-        const EDGE: usize = 16;
-        // Ara ton: `cell_bg_paints_pixels_on_the_gpu`'nun `MIDTONE`'uyla aynı
-        // gerekçeden seçildi, değeri onunla aynı olmak zorunda değil.
-        const MID: (u8, u8, u8) = (0x80, 0x40, 0xc0);
-        let seen = emoji_round_trip(&r, EDGE, MID, 0xff);
-        // ±1: 8-bit sRGB kodlaması yuvarlama taşır
-        // (`cell_bg_paints_pixels_on_the_gpu` ile aynı sınır).
-        assert!(
-            seen.0.abs_diff(MID.0) <= 1
-                && seen.1.abs_diff(MID.1) <= 1
-                && seen.2.abs_diff(MID.2) <= 1,
-            "renk düzlemi round-trip: {seen:02x?} ≠ {MID:02x?}"
+        assert_eq!(
+            COLOR_FORMAT,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            "the colour plane must be sRGB"
         );
-    }
-
-    /// **Yarı saydam kenarın tanığı:** kompozisyon **lineer** uzayda oluyor.
-    ///
-    /// Düz alfalı yarı saydam beyaz siyah zeminde çizilince sonuç lineer
-    /// uzayda tam yarım, sRGB'ye kodlanınca **0xBC** olmak zorunda. Sayı
-    /// gevşek bir "kararmadı" eşiği değil: blend zincirindeki her hata onu
-    /// aşağı çekiyor ve en sinsi hâli **0x80** — ön çarpımı sRGB-kodlanmış
-    /// uzayda bırakmanın imzası (`raster::unpremultiply`'ın doc'u).
-    /// Eşiğin gevşek olduğu bir hâl bu ikisini ayırt edemezdi: set kapısı
-    /// (`/code-review`) tam bunu yakaladı — eski eşik `> 0x60` idi ve
-    /// karartılmış `0x80`'i geçiriyordu, yani sınamanın yazılı ölçütü ile
-    /// iddiası ayrışmıştı.
-    #[test]
-    fn a_translucent_edge_composites_in_linear_space() {
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
-        const EDGE: usize = 16;
-        // Düz alfa: tam beyaz, yarım alfa. `raster::draw_color` dokuya bunu
-        // yazıyor (ön çarpımı kendi geri alıyor), yani sentetik yuva da
-        // üretimdeki biçimde kuruluyor.
-        let seen = emoji_round_trip(&r, EDGE, (0xff, 0xff, 0xff), 0x80);
-        // encode(0.502) ≈ 0.7367 → 0xBC. ±2: sRGB kodlaması yuvarlama taşır
-        // ve `0x80` (yanlış uzay) bu payın **çok** ötesinde.
-        assert!(
-            seen.0.abs_diff(0xbc) <= 2,
-            "yarı saydam kenar lineer kompozit vermedi: {seen:02x?} ≠ ~0xbc \
-             (0x80 civarı ön çarpımın sRGB uzayında kaldığını söyler)"
-        );
-    }
-
-    /// Renk düzlemine tek bir yuva yazıp `emoji` pipeline'ıyla çizer ve
-    /// sonucun ilk pikselini verir.
-    ///
-    /// Yolun **tamamı** koşuyor: `RGBA8Unorm_sRGB` doku, `cell_vertex`,
-    /// `emoji_fragment` ve o pipeline'ın blend'i. `encode_pass`'ten
-    /// geçmiyor, çünkü aranan şey sentetik baytlar — gerçek bir font
-    /// karışırsa tanık bileşenin değil fontun tanığı olur.
-    fn emoji_round_trip(r: &Renderer, edge: usize, rgb: (u8, u8, u8), alpha: u8) -> (u8, u8, u8) {
-        let target = target_texture(r, edge);
-        let color = new_color_texture(&r.device, edge as u16, edge as u16).expect("renk dokusu");
-        // Tek hücrelik yuva: dokunun sol üst köşesine tekdüze bir renk.
-        let cell = 8u16;
-        let slot: Vec<u8> = (0..usize::from(cell) * usize::from(cell))
-            .flat_map(|_| [rgb.0, rgb.1, rgb.2, alpha])
-            .collect();
-        let region = MTLRegion {
-            origin: MTLOrigin { x: 0, y: 0, z: 0 },
-            size: MTLSize {
-                width: usize::from(cell),
-                height: usize::from(cell),
-                depth: 1,
-            },
-        };
-        // SAFETY: `slot` 4*cell*cell bayt ve çağrı boyunca canlı; bölge
-        // dokunun içinde, satır adımı tam genişlik × dört.
-        unsafe {
-            color.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                region,
-                0,
-                NonNull::from(&slot[..]).cast::<c_void>(),
-                usize::from(cell) * 4,
-            );
-        }
-
-        let instance = GlyphInstance {
-            pos: [0.0, 0.0],
-            uv0: [0.0, 0.0],
-            // `emoji_fragment` bunu **okumuyor**; yine de gerçekçi bir değer
-            // veriliyor ki bir gün okunmaya başlarsa sınama sessizce
-            // değişmesin.
-            rgba: [1.0, 1.0, 1.0, 1.0],
-        };
-        let uv_size = [f32::from(cell) / edge as f32, f32::from(cell) / edge as f32];
-        let cell_px = [f32::from(cell), f32::from(cell)];
-        let viewport = [edge as f32, edge as f32];
-        let buffer = r
-            .instance_buffer(std::slice::from_ref(&instance))
-            .expect("instance tamponu");
-
-        let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        let desc = MTLRenderPassDescriptor::new();
-        // SAFETY: indeks 0 her render pass'te vardır.
-        let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
-        att.setTexture(Some(&target));
-        att.setLoadAction(MTLLoadAction::Clear);
-        // Zemin **siyah ve opak**: ön çarpım tanığının karşılaştırma tabanı
-        // bu. Renkli bir zemin kararmayı maskelerdi.
-        att.setClearColor(MTLClearColor {
-            red: 0.0,
-            green: 0.0,
-            blue: 0.0,
-            alpha: 1.0,
-        });
-        att.setStoreAction(MTLStoreAction::Store);
-        let enc = cmd
-            .renderCommandEncoderWithDescriptor(&desc)
-            .expect("encoder");
-        enc.setRenderPipelineState(&r.emoji);
-        vertex_uniform(&enc, &viewport, 1);
-        vertex_uniform(&enc, &cell_px, 2);
-        vertex_uniform(&enc, &uv_size, 3);
-        // SAFETY: tampon ve doku bu blok boyunca yaşıyor; indeksler
-        // `cell.metal`'in bildirimleriyle aynı.
-        unsafe {
-            enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
-            enc.setFragmentTexture_atIndex(Some(color.as_ref()), 0);
-            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::TriangleStrip,
-                0,
-                4,
-                1,
-            );
-        }
-        enc.endEncoding();
-        cmd.commit();
-        cmd.waitUntilCompleted();
-        assert_ne!(cmd.status(), MTLCommandBufferStatus::Error);
-        let pixels = read_pixels(&target, edge);
-        pixel_at(&pixels, edge, 2, 2)
+        // The mask plane **did not change**: the one-channel coverage contract
+        // stands.
+        assert_eq!(plane_format(Plane::Mask), MASK_FORMAT);
+        assert_eq!(MASK_FORMAT, wgpu::TextureFormat::R8Unorm);
     }
 
     /// Kümenin (`🇹🇷`) üç yüzeyde de **tek** renkli glyph'e inmesi (035
@@ -4750,18 +4659,10 @@ pub(crate) mod tests {
     /// yuvaları veriyor: tablo listelerle birlikte yaşıyor.
     #[test]
     fn a_cluster_is_one_color_glyph_on_every_surface() {
-        let device = MTLCreateSystemDefaultDevice().expect("Metal device");
-        let mut tex = AtlasTexture {
-            // Retina: 13pt@1x'te bayrağın mürekkebi iki hücreyi aşıyor ve
-            // küme taban karaktere düşüyor (`bt-atlas`'ın küme sınamalarının
-            // ölçeği, 035 phase-1 → Uygulama Notları).
-            atlas: Atlas::new(None, 13.0, 2.0, 1.0),
-            texture: None,
-            instances: Vec::new(),
-            color_texture: None,
-            color_instances: Vec::new(),
-            fx_instances: Vec::new(),
-        };
+        // Retina: at 13pt@1x the flag's ink exceeds two cells and the
+        // cluster falls back to its base character (the scale of `bt-atlas`'s
+        // cluster tests, 035 phase-1 → Uygulama Notları).
+        let mut tex = Lists::new(2.0);
         let mut frame = Frame::default();
         frame.clear(grid(16, 32), CaretStyle::default());
         let mut clusters = frame.take_clusters();
@@ -4791,22 +4692,21 @@ pub(crate) mod tests {
         let mut first = None;
         for (name, glyphs, clusters) in surfaces {
             for pass in ["içerik", "hareket"] {
-                tex.prepare(&device, glyphs, clusters, &[])
-                    .expect("prepare");
+                tex.prepare(glyphs, clusters);
                 // Renkli bayrak fontu yoksa sınama konusuz; `🎉`'nin emsali.
-                if tex.color_instances.is_empty() && tex.instances.is_empty() {
+                if tex.color.is_empty() && tex.mask.is_empty() {
                     return;
                 }
                 assert_eq!(
-                    tex.color_instances.len(),
+                    tex.color.len(),
                     2,
                     "{name}/{pass}: bayrak renk düzleminden iki dörtlü olmalı"
                 );
                 assert!(
-                    tex.instances.is_empty(),
+                    tex.mask.is_empty(),
                     "{name}/{pass}: maske listesine düştü (kutu ya da tek RI)"
                 );
-                let uvs: Vec<[f32; 2]> = tex.color_instances.iter().map(|part| part.uv0).collect();
+                let uvs: Vec<[f32; 2]> = tex.color.iter().map(|part| part.uv0).collect();
                 assert_eq!(*first.get_or_insert(uvs.clone()), uvs, "{name}/{pass}");
             }
         }
@@ -4816,12 +4716,11 @@ pub(crate) mod tests {
             cluster: None,
             ..frame.glyphs()[0]
         }];
-        tex.prepare(&device, &lone, frame.clusters(), &[])
-            .expect("prepare");
+        tex.prepare(&lone, frame.clusters());
         let lone: Vec<[f32; 2]> = tex
-            .color_instances
+            .color
             .iter()
-            .chain(&tex.instances)
+            .chain(&tex.mask)
             .map(|part| part.uv0)
             .collect();
         assert_ne!(
@@ -4839,15 +4738,7 @@ pub(crate) mod tests {
     /// metnin ön plan rengiyle boyanırdı.
     #[test]
     fn a_color_glyph_goes_to_the_color_list() {
-        let device = MTLCreateSystemDefaultDevice().expect("Metal device");
-        let mut tex = AtlasTexture {
-            atlas: Atlas::new(None, 13.0, 1.0, 1.0),
-            texture: None,
-            instances: Vec::new(),
-            color_texture: None,
-            color_instances: Vec::new(),
-            fx_instances: Vec::new(),
-        };
+        let mut tex = Lists::new(1.0);
         // Emoji sunumu varsayılan olan bir kod noktası; ızgara ona iki sütun
         // ayırıyor, yani `wide` kurulu geliyor.
         let glyphs = [GlyphCell {
@@ -4859,14 +4750,13 @@ pub(crate) mod tests {
             wide: true,
             cluster: None,
         }];
-        tex.prepare(&device, &glyphs, &Clusters::default(), &[])
-            .expect("prepare");
+        tex.prepare(&glyphs, &Clusters::default());
         // Karakteri taşıyan renkli bir font kurulu değilse sınama konusuz —
         // ama kaçış dalı **regresyonu görmek zorunda**: `has_color_glyphs`
         // bozulursa `🎉` maske düzlemine düşer ve `color_instances` yine boş
         // kalır. O hâlde maske listesinin tofu'dan başka bir şey taşımaması
         // gerekiyor; taşıyorsa renkli bir glyph maske olarak çizilmiş demektir.
-        if tex.color_instances.is_empty() {
+        if tex.color.is_empty() {
             assert_eq!(
                 tex.atlas.occupancy().0,
                 1,
@@ -4874,19 +4764,17 @@ pub(crate) mod tests {
             );
             return;
         }
-        assert_eq!(
-            tex.color_instances.len(),
-            2,
-            "geniş emoji iki dörtlü üretmeli"
-        );
+        assert_eq!(tex.color.len(), 2, "geniş emoji iki dörtlü üretmeli");
         assert!(
-            tex.instances.is_empty(),
+            tex.mask.is_empty(),
             "renkli aday maske listesine girdi: {:?}",
-            tex.instances.len()
+            tex.mask.len()
         );
+        // The colour texture is created by the first colour upload
+        // (`SlotUpload`'s contract); here that upload is the witness.
         assert!(
-            tex.color_texture.is_some(),
-            "renk dokusu ilk renkli yuvayla kurulmalı"
+            tex.upload.planes.contains(&Plane::Color),
+            "the first colour slot was not uploaded to the colour plane"
         );
         assert_eq!(
             tex.atlas.color_occupancy().0,
@@ -4911,7 +4799,7 @@ pub(crate) mod tests {
     /// birlikte tutuyor.
     #[test]
     fn rebuilding_the_atlas_drops_both_textures() {
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 32;
         // Emojiyi gerçek kare yolundan geçir: doku ancak ilk renkli yuvayla
         // doğuyor.
@@ -4926,38 +4814,28 @@ pub(crate) mod tests {
             ..Default::default()
         });
         render_offscreen(&r, EDGE, BACKGROUND, &frame);
-        let color_before = r
-            .atlas
-            .borrow()
-            .as_ref()
-            .is_some_and(|tex| tex.color_texture.is_some());
-        // Renkli bir font kurulu değilse doku hiç doğmuyor ve sınama konusuz.
+        let (mask_before, color_before) = r.plane_textures();
+        // Without a colour font installed the texture is never born and the
+        // test has no subject.
         if !color_before {
             return;
         }
-        assert!(
-            r.atlas
-                .borrow()
-                .as_ref()
-                .is_some_and(|tex| tex.texture.is_some()),
-            "maske dokusu da kurulmuş olmalı"
-        );
-        // Punto değişimi atlasın anahtarını değiştiriyor, yani `ensure`
-        // yeniden kuruyor.
+        assert!(mask_before, "the mask texture must exist too");
+        // A size change changes the atlas key, so `ensure` rebuilds.
         assert!(
             r.set_font(&FontOptions {
                 size: 31.0,
                 ..FontOptions::default()
             }),
-            "punto değişti"
+            "size changed"
         );
         r.cell_metrics(1.0);
-        let atlas = r.atlas.borrow();
-        let tex = atlas.as_ref().expect("atlas duruyor");
-        assert!(tex.texture.is_none(), "maske dokusu düşmedi");
+        let (mask, color) = r.plane_textures();
+        assert!(!mask, "the mask texture was not dropped");
         assert!(
-            tex.color_texture.is_none(),
-            "renk dokusu düşmedi: eski kenarda kalan doku taşan bir replaceRegion alır"
+            !color,
+            "the colour texture was not dropped: one left at the old edge would take an \
+             out-of-bounds write"
         );
     }
 
@@ -5014,7 +4892,7 @@ pub(crate) mod tests {
         // dalı statik yolun aritmetiğine iniyor. Üç düzen: tek hücre, geniş
         // glyph'in iki yarısı ve renk düzlemi (emoji; renkli font kurulu
         // değilse tofu ve iddia maske düzleminde kalıyor).
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let cell_px = fitting_cell_px(&r, EDGE, 4);
         for &keypress in &Keypress::effects() {
@@ -5061,7 +4939,7 @@ pub(crate) mod tests {
         // Hayalet `t = 0`'da silinen glyph'in kendisi (silme anında harf
         // sıçramıyor), `t = 1`'de ise hiçbir şey: son efekt karesinden sonra
         // zemin düz.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let cell_px = fitting_cell_px(&r, EDGE, 4);
         let bare = render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[], &[]));
@@ -5105,8 +4983,8 @@ pub(crate) mod tests {
         // texel ağırlığı o farkın yuvarlamasıyla oynayabilir; bir sızıntı ise
         // komşunun mürekkebini, yani çok daha büyük bir farkı getirirdi.
         const EDGE: usize = 128;
-        let crowded = Renderer::system_default().expect("Metal device ve pipeline");
-        let alone = Renderer::system_default().expect("Metal device ve pipeline");
+        let crowded = renderer();
+        let alone = renderer();
         let cell_px = fitting_cell_px(&crowded, EDGE, 8);
         // Atlas ölçüyle kuruluyor: ikinci renderer'ın da aynı ölçüsü olmalı.
         assert_eq!(fitting_cell_px(&alone, EDGE, 8), cell_px);
@@ -5165,7 +5043,7 @@ pub(crate) mod tests {
         // doğardı ve `t = 1` eşitliği bunu göremezdi. Ön plan [`WHITE`]
         // (kırmızısı mavisine eşit), [`HEAT`] turuncu: en parlak pikselde
         // kırmızı maviyi açıkça geçmeli.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let cell_px = fitting_cell_px(&r, EDGE, 4);
         let cell = glyph_cell(2, 'M', None);
@@ -5194,7 +5072,7 @@ pub(crate) mod tests {
         // girdi iki karede aynı parçaları vermeli — yoksa hareket karesinde
         // parçalar titrer —, başka bir tohum ise başka bir kırılma. İkinci
         // iddia shader'ın tohumu gerçekten okuduğunun tek tanığı.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let cell_px = fitting_cell_px(&r, EDGE, 4);
         let cell = glyph_cell(2, 'M', None);
@@ -5220,7 +5098,7 @@ pub(crate) mod tests {
         // var; kutunun merkezi ölçeklerin sabit noktası, kaymalar ise dikişi
         // mürekkepli bir satırdan geçiriyor — yani her efektin ara karesinde
         // de orada mürekkep kalmalı.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = renderer();
         const EDGE: usize = 64;
         let cell_px = fitting_cell_px(&r, EDGE, 4);
         let (cw, ch) = (usize::from(cell_px.0), usize::from(cell_px.1));

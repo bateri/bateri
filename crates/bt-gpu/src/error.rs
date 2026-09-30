@@ -33,6 +33,11 @@ pub enum GpuError {
     /// kaybı); kare sunulmadı, sayaç artmaz. **Asenkron gelir:** `draw`
     /// çoktan `Ok` dönmüştür, bu hata tamamlanma kapanışına düşer.
     CommandFailed(Option<Retained<NSError>>),
+    /// wgpu reported an error (040): a validation or out-of-memory error
+    /// caught around a frame's submit (synchronous), or a device fault seen
+    /// when the frame's completion is polled (asynchronous). The text is
+    /// wgpu's own.
+    Wgpu(String),
 }
 
 impl fmt::Display for GpuError {
@@ -50,6 +55,7 @@ impl fmt::Display for GpuError {
             Self::NoRenderEncoder => write!(f, "render encoder kurulamadı"),
             Self::CommandFailed(Some(e)) => write!(f, "komut tamponu hatayla bitti: {e}"),
             Self::CommandFailed(None) => write!(f, "komut tamponu hatayla bitti"),
+            Self::Wgpu(message) => write!(f, "wgpu error: {message}"),
         }
     }
 }

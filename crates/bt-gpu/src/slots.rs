@@ -16,7 +16,7 @@
 use bt_atlas::{Atlas, Face, Half, Metrics, Placed, Plane, SizeClass, Sprite};
 use bt_core::Clusters;
 
-use crate::frame::{GlyphCell, GlyphInstance, RuleCell};
+use crate::frame::{FxCell, FxInstance, GlyphCell, GlyphInstance, RuleCell};
 
 /// Where a freshly allocated slot's bytes are written: the backend's two
 /// plane textures.
@@ -123,6 +123,62 @@ pub(crate) fn glyph_lists(
             rgba: rule.rgba,
         });
     }
+}
+
+/// Fills the typing effects' instance list (030): slot resolution and fan-out
+/// through [`fan`], the **same** body as [`glyph_lists`] — no second copy.
+///
+/// A wide glyph yields two instances and each carries **which half** it is:
+/// the shader takes the transform's centre from the two-cell box, otherwise
+/// `recede` would split an emoji down the middle. The plane is in the
+/// instance too: both textures are bound at once and the list is one. The
+/// packing is the one `shaders/glyph_fx.*` decode:
+/// `id | plane << 5 | half << 6`, a small integer that is exact in `f32`
+/// ([`FxInstance`]).
+pub(crate) fn fx_list(
+    atlas: &mut Atlas,
+    upload: &mut impl SlotUpload,
+    cells: &[FxCell],
+    clusters: &Clusters,
+    out: &mut Vec<FxInstance>,
+) {
+    let metrics = atlas.metrics();
+    let (tw, th) = atlas.texture_px();
+    let inv = (1.0 / f32::from(tw), 1.0 / f32::from(th));
+    out.clear();
+    for cell in cells {
+        for part in fan(atlas, upload, metrics, inv, &cell.glyph, clusters)
+            .into_iter()
+            .flatten()
+        {
+            let plane = match part.plane {
+                Plane::Mask => 0,
+                Plane::Color => 1,
+            };
+            let half = match part.half {
+                Half::Whole => 0,
+                Half::Left => 1,
+                Half::Right => 2,
+            };
+            out.push(FxInstance {
+                pos: part.pos,
+                uv0: part.uv0,
+                rgba: cell.glyph.rgba,
+                fx: [
+                    cell.t,
+                    (cell.effect | plane << 5 | half << 6) as f32,
+                    cell.seed,
+                    0.0,
+                ],
+            });
+        }
+    }
+}
+
+/// Whether an effect instance samples the colour plane (bit 5 of `fx[1]`, the
+/// packing [`fx_list`] writes).
+pub(crate) fn fx_is_color(instance: &FxInstance) -> bool {
+    (instance.fx[1] as u32 >> 5) & 1 == 1
 }
 
 /// Where a glyph lives in the texture: the quad's position, the slot's uv, its
