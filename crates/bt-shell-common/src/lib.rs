@@ -17,7 +17,7 @@
 //! in as arguments (`child::locale_env`).
 //!
 //! **Layer:** `bateri → bt-shell-{macos,linux} → bt-shell-common → bt-gpu →
-//! {bt-atlas, bt-core}`; nothing here depends upward (`make denetim` checks it). The rationale is in
+//! {bt-atlas, bt-core}`; nothing here depends upward (`make audit` checks it). The rationale is in
 //! `.tasks/043-bt-shell-ayrimi/discussion.md` → Karar 1–2.
 
 pub mod child;

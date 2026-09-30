@@ -1,21 +1,21 @@
-//! Paket girdilerinin içerik denetimi (006 phase-4).
+//! Content check of the bundle inputs (006 phase-4).
 //!
-//! Ayrı bir `tests/` sınaması değil, bin'in birim test demetinde: o demet
-//! `make hepsi`'de zaten bağlanıyor. `tests/` altında dursaydı cargo her
-//! koşuda uygulama binary'sini de ayrıca bağlardı (`CARGO_BIN_EXE_*`).
+//! Not a separate `tests/` test but part of the bin's unit-test bundle: that
+//! bundle is already wired into `make check`. Had it lived under `tests/`,
+//! cargo would link the application binary separately on every run
+//! (`CARGO_BIN_EXE_*`).
 //!
-//! Neden var: `alacritty_terminal` Apache-2.0 ve lisans metni `.app` ile
-//! birlikte gitmek zorunda. Metin ya da atıf silinirse hiçbir derleme,
-//! clippy ya da duman koşusu kızarmaz — ihlal **sessiz** olur. Bu sınama
-//! `make hepsi`'de koşar ve girdileri (`assets/bundle/`, `assets/shell/`)
-//! denetler.
+//! Why it exists: `alacritty_terminal` is Apache-2.0 and the license text must
+//! ship with the `.app`. If the text or the attribution is deleted no build,
+//! clippy or smoke run turns red — the violation is **silent**. This test runs
+//! in `make check` and checks the inputs (`assets/bundle/`, `assets/shell/`).
 //!
-//! Kapsamadığı: girdilerin pakete **kopyalanıp kopyalanmadığı**. Ürün yalnız
-//! `make kur`'da doğuyor ve onu `kur`'un kendi denetimi görüyor; burada
-//! tekrarlanmıyor, çünkü sınamanın ürünü kurması için release derlemesi
-//! gerekirdi.
+//! What it does not cover: whether the inputs are **copied into the package**.
+//! The product is born only in `make bundle` and `bundle`'s own check sees it;
+//! it is not repeated here, because for the test to build the product it would
+//! need a release build.
 //!
-//! `plutil` bir macOS aracı; bu crate de zaten yalnız macOS'ta derleniyor
+//! `plutil` is a macOS tool; this crate only compiles on macOS anyway
 //! (`bt-shell-macos` → AppKit).
 
 use std::path::{Path, PathBuf};
@@ -27,23 +27,24 @@ fn asset(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// zsh sarmalayıcısının girdi dizini (`assets/shell/zsh`).
+/// The input directory of the zsh wrapper (`assets/shell/zsh`).
 fn shell_asset_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell/zsh")
 }
 
 fn read_asset(name: &str) -> String {
     let path = asset(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} okunamadı: {e}", path.display()))
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} could not be read: {e}", path.display()))
 }
 
-/// Şablondan tek anahtarın ham değeri; anahtar yoksa `None`.
+/// The raw value of a single key from the template; `None` if the key is missing.
 fn plist_value(key: &str) -> Option<String> {
     let out = Command::new("plutil")
         .args(["-extract", key, "raw", "-o", "-"])
         .arg(asset("Info.plist.in"))
         .output()
-        .expect("plutil çalıştırılamadı");
+        .expect("plutil could not be run");
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
@@ -55,16 +56,16 @@ fn info_plist_template_launches_the_binary() {
         .arg("-lint")
         .arg(asset("Info.plist.in"))
         .output()
-        .expect("plutil çalıştırılamadı");
+        .expect("plutil could not be run");
     assert!(
         lint.status.success(),
-        "Info.plist.in geçerli bir plist değil: {}{}",
+        "Info.plist.in is not a valid plist: {}{}",
         String::from_utf8_lossy(&lint.stdout),
         String::from_utf8_lossy(&lint.stderr)
     );
-    // Çalıştırılabilir adı bin hedefinden okunuyor, elle yazılmıyor: ikisi
-    // ayrışırsa LaunchServices paketi açamaz ve belirti Finder'da "uygulama
-    // açılamıyor" iletisidir, derleme değil.
+    // The executable name is read from the bin target, not written by hand: if
+    // the two diverge LaunchServices cannot open the package and the symptom is
+    // Finder's "the application cannot be opened" message, not a build failure.
     assert_eq!(
         plist_value("CFBundleExecutable").as_deref(),
         Some(env!("CARGO_BIN_NAME"))
@@ -72,26 +73,27 @@ fn info_plist_template_launches_the_binary() {
     assert_eq!(plist_value("CFBundlePackageType").as_deref(), Some("APPL"));
     assert!(
         plist_value("CFBundleIdentifier").is_some_and(|id| !id.is_empty()),
-        "CFBundleIdentifier yok"
+        "CFBundleIdentifier is missing"
     );
-    // GPU'nun çizdiği bir terminal Retina'da bulanık açılmasın.
+    // A GPU-drawn terminal must not open blurry on Retina.
     assert_eq!(
         plist_value("NSHighResolutionCapable").as_deref(),
         Some("true")
     );
-    let icon = plist_value("CFBundleIconFile").expect("CFBundleIconFile yok");
+    let icon = plist_value("CFBundleIconFile").expect("CFBundleIconFile is missing");
     assert!(
         asset(&format!("{icon}.png")).is_file(),
-        "ikon kaynağı yok: assets/bundle/{icon}.png"
+        "icon source is missing: assets/bundle/{icon}.png"
     );
 }
 
-/// Sürüm ve taban macOS şablona **yazılmaz**: `make kur` sürümü `Cargo.toml`'dan,
-/// tabanı binary'nin `minos`'undan (o da `.cargo/config.toml`'dan) doldurur.
-/// Şablonda düz bir `14.0` görmek, taban yükseldiğinde paketin eski sayıyla
-/// kalacağı demek. Yer tutucuların şablon içinde bir açıklaması yok, çünkü
-/// `sed` açıklamayı da doldurup ürüne sızdırırdı; açıklama `Makefile`'ın
-/// `kur` yorumunda.
+/// The version and the macOS floor are **not written** into the template:
+/// `make bundle` fills the version from `Cargo.toml` and the floor from the
+/// binary's `minos` (which itself comes from `.cargo/config.toml`). Seeing a
+/// plain `14.0` in the template would mean the package keeps the old number
+/// when the floor is raised. The placeholders have no explanation inside the
+/// template, because `sed` would fill the explanation too and leak it into the
+/// product; the explanation is in the `Makefile`'s `bundle` comment.
 #[test]
 fn info_plist_template_derives_version_and_minimum_os() {
     assert_eq!(
@@ -105,12 +107,12 @@ fn info_plist_template_derives_version_and_minimum_os() {
     assert_eq!(plist_value("CFBundleVersion").as_deref(), Some("@VERSION@"));
 }
 
-/// Sparkle'ın üç anahtarı. Besleme bir yer tutucu, çünkü `make kur` onu
-/// `FEED_URL`'den dolduruyor (denemede başka bir adrese ezilebilsin); açık
-/// anahtar ise sabit — değişirse kurulu kopyalar yeni sürümlerin imzasını
-/// reddeder, yani onu değiştiren bir diff bu sınamayı da değiştirmek
-/// zorunda kalsın. Paket kimliği de Sparkle'ın ölçüsü: güncelleme ancak aynı
-/// `CFBundleIdentifier`'a kuruluyor.
+/// Sparkle's three keys. The feed is a placeholder, because `make bundle`
+/// fills it from `FEED_URL` (so it can be overridden to another address in a
+/// trial); the public key is fixed — if it changes, installed copies reject the
+/// signature of new versions, so a diff that changes it must be forced to
+/// change this test too. The bundle identifier is also Sparkle's yardstick: an
+/// update installs only onto the same `CFBundleIdentifier`.
 #[test]
 fn info_plist_template_carries_the_updater_keys() {
     assert_eq!(plist_value("SUFeedURL").as_deref(), Some("@FEED_URL@"));
@@ -128,30 +130,33 @@ fn info_plist_template_carries_the_updater_keys() {
     );
 }
 
-/// zsh sarmalayıcısının envanteri **tam olarak** bu beş dosya.
+/// The zsh wrapper's inventory is **exactly** these five files.
 ///
-/// "Eksiği yok" yarısını `bt-shell-common` de soruyor (`child::zsh_wrapper_dir`'in
-/// sınaması); buranın tek başına gördüğü yarı **fazlası**. İki türü var ve
-/// ikisi de sessiz:
+/// The "nothing missing" half is also asked by `bt-shell-common` (the test of
+/// `child::zsh_wrapper_dir`); the half this one alone sees is **the excess**.
+/// It comes in two kinds and both are silent:
 ///
-/// - `make kur` betikleri elle yazılmış iki listeden geçiriyor (kopya ve
-///   `cmp`). Listelere düşmemiş yeni bir girdi pakete hiç girmez, ürün
-///   denetimi de onu aramaz — kapı yeşil kalır, sarmalayıcı eksik kurulur.
-/// - Dizine **yazan** bir kol: ZDOTDIR oturum boyunca bir süre burayı
-///   gösteriyor ve 009 phase-3'te `/etc/zshrc` bir kez gerçekten
-///   `.zsh_history` doğurdu. Kullanıcının verisi ürüne girecek yoldu.
+/// - `make bundle` runs through two hand-written lists (copy and `cmp`). A new
+///   entry that did not make it into the lists never enters the package, and the
+///   product check does not look for it either — the gate stays green, the
+///   wrapper is installed incomplete.
+/// - An arm that **writes** into the directory: ZDOTDIR points here for a while
+///   during the session and in 009 phase-3 `/etc/zshrc` really did spawn a
+///   `.zsh_history` once. It was a path by which user data would enter the
+///   product.
 ///
-/// `.DS_Store` sayılmıyor: Finder üretiyor, depoya girmiyor (`.gitignore`) ve
-/// kopya satırı adları tek tek saydığı için pakete sızamıyor. Kapının kod
-/// doğruyken düşmesi, gördüğü kusurdan pahalı olurdu.
+/// `.DS_Store` is not counted: Finder produces it, it does not enter the repo
+/// (`.gitignore`) and since the copy lines count the names one by one it cannot
+/// leak into the package. A gate that fails while the code is right would cost
+/// more than the defect it sees.
 #[test]
 fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     let dir = shell_asset_dir();
     let mut found: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("{} okunamadı: {e}", dir.display()))
+        .unwrap_or_else(|e| panic!("{} could not be read: {e}", dir.display()))
         .map(|entry| {
             entry
-                .expect("dizin girdisi okunamadı")
+                .expect("directory entry could not be read")
                 .file_name()
                 .to_string_lossy()
                 .into_owned()
@@ -162,23 +167,24 @@ fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     assert_eq!(
         found,
         [".zlogin", ".zprofile", ".zshenv", ".zshrc", "bateri.zsh"],
-        "assets/shell/zsh envanteri değişti; `make kur`'un kopya ve cmp \
-         listeleri de güncellenmeli"
+        "the assets/shell/zsh inventory changed; `make bundle`'s copy and cmp \
+         lists must be updated too"
     );
 }
 
-/// GPL-3.0 §4: binary'yi alan herkese lisansın bir kopyası verilir. Metin
-/// depo kökündeki `LICENSE` (gnu.org'un metni, `make kur` onu pakete
-/// kopyalayıp `cmp`'liyor), About paneli (`Credits.html`) lisansı ve
-/// kaynağın yerini söylüyor ve manifestin SPDX'i aynı lisans — üçünden biri
-/// ayrışırsa hiçbir derleme kızarmaz, ihlal sessiz olur.
+/// GPL-3.0 §4: everyone who receives the binary is given a copy of the
+/// license. The text is `LICENSE` at the repo root (gnu.org's text, `make
+/// bundle` copies it into the package and `cmp`s it), the About panel
+/// (`Credits.html`) states the license and where the source is, and the
+/// manifest's SPDX is the same license — if any of the three diverges no build
+/// turns red, the violation is silent.
 #[test]
 fn own_license_ships_with_notice() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let license = std::fs::read_to_string(root.join("LICENSE")).expect("LICENSE okunamadı");
+    let license = std::fs::read_to_string(root.join("LICENSE")).expect("LICENSE could not be read");
     assert!(
         license.starts_with("                    GNU GENERAL PUBLIC LICENSE\n                       Version 3, 29 June 2007"),
-        "LICENSE GPL-3.0'ın gnu.org metni değil"
+        "LICENSE is not the gnu.org text of GPL-3.0"
     );
     let credits = read_asset("Credits.html");
     for needle in [
@@ -189,15 +195,15 @@ fn own_license_ships_with_notice() {
     ] {
         assert!(
             credits.contains(needle),
-            "Credits.html içinde {needle:?} yok"
+            "{needle:?} is not in Credits.html"
         );
     }
     assert_eq!(env!("CARGO_PKG_LICENSE"), "GPL-3.0-or-later");
 }
 
-/// Apache-2.0 §4(a) ve MIT: alıcıya lisansın bir kopyası verilir (dosya
-/// `tools/third_party_notices.py`'nin çıktısı). Atıf metni
-/// (`Credits.html`) AppKit'in standart About panelinin okuduğu dosya.
+/// Apache-2.0 §4(a) and MIT: the recipient is given a copy of the license (the
+/// file is the output of `tools/third_party_notices.py`). The attribution text
+/// (`Credits.html`) is the file AppKit's standard About panel reads.
 #[test]
 fn third_party_license_ships_with_attribution() {
     let licenses = read_asset("THIRD-PARTY-LICENSES.txt");
@@ -210,7 +216,7 @@ fn third_party_license_ships_with_attribution() {
     ] {
         assert!(
             licenses.contains(needle),
-            "THIRD-PARTY-LICENSES.txt içinde {needle:?} yok"
+            "{needle:?} is not in THIRD-PARTY-LICENSES.txt"
         );
     }
     let credits = read_asset("Credits.html");
@@ -223,7 +229,7 @@ fn third_party_license_ships_with_attribution() {
     ] {
         assert!(
             credits.contains(needle),
-            "Credits.html içinde {needle:?} yok"
+            "{needle:?} is not in Credits.html"
         );
     }
 }
