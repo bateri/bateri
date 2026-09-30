@@ -144,14 +144,8 @@ dependencies = [
 name = "bt-gpu"
 version = "0.1.0"
 dependencies = [
- "block2",
  "bt-atlas",
  "bt-core",
- "dispatch2",
- "objc2",
- "objc2-foundation",
- "objc2-metal",
- "objc2-quartz-core",
  "wgpu",
 ]
 
@@ -613,9 +607,7 @@ checksum = "a0125f776a10d00af4152d74616409f0d4a2053a6f57fa5b7d6aa2854ac04794"
 dependencies = [
  "bitflags",
  "block2",
- "dispatch2",
  "objc2",
- "objc2-core-foundation",
  "objc2-foundation",
 ]
 

@@ -955,8 +955,8 @@ impl TerminalPane {
     /// pane'i `contentView` yaptıktan sonra kuruyor
     /// ([`TerminalPane::observe_frame`]).
     ///
-    /// Renderer burada doğuyor ve hatası çağırana dönüyor: Metal device ya da
-    /// metallib yoksa pane'in çizebileceği bir şey de yok. Font renderer'a
+    /// Renderer burada doğuyor ve hatası çağırana dönüyor: GPU device'ı ya da
+    /// pipeline'lar kurulamıyorsa pane'in çizebileceği bir şey de yok. Font renderer'a
     /// burada **istek** olarak veriliyor, devralınan punto farkıyla
     /// ([`TerminalPane::request_font`]): ilk atlas `start`'ın geometrisinde
     /// büyütülmüş puntoyla açılıyor.

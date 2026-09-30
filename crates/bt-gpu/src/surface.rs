@@ -11,7 +11,7 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-use crate::wgpu_renderer::{FORMAT, Gpu, Target};
+use crate::renderer::{FORMAT, Gpu, Target};
 use crate::{GpuError, Renderer};
 
 /// A window's surface: the swap chain the frame path draws into.

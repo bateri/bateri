@@ -1865,6 +1865,11 @@ impl AppDelegate {
             Some(from) if opening != Opening::Window => window.show_as_tab_of(from),
             _ => window.show_after(from),
         }
+        // Timed run: the smoke gate must not depend on which app is in front
+        // (`TerminalWindow::float_for_timed_run`).
+        if self.ivars().run.is_some() {
+            window.float_for_timed_run();
+        }
         if let Err(e) = window.start(mtm) {
             window.close();
             return Err(format!("shell başlatılamadı: {e}"));
@@ -2582,7 +2587,7 @@ impl AppDelegate {
     /// atılıyor — toplanmıyor, çünkü okuyan yok.
     fn shutdown(&self) -> Option<Teardown> {
         // Bekçinin bütçesi **kapanıştan** başlıyor, süreç başından değil:
-        // açılış (Metal device, metallib yükleme, ilk pencere) soğuk bir
+        // açılış (GPU device'ı, pipeline kurulumu, ilk pencere) soğuk bir
         // makinede saniyeler sürebilir ve o süre bütçeden düşseydi sağlıklı
         // bir koşu `_exit(70)` ile kırmızı düşerdi.
         if self.ivars().run.is_some() {

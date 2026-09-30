@@ -1,8 +1,8 @@
 # bateri
 
 A GPU-rendered terminal for macOS. bateri is written in Rust and draws every
-frame with Metal, talking to AppKit and Metal directly — there is no Swift or
-web layer in between. It aims to feel calm: commands are grouped into blocks,
+frame on the GPU through wgpu (Metal on macOS), talking to AppKit directly —
+there is no Swift or web layer in between. It aims to feel calm: commands are grouped into blocks,
 the line you type lives in a dock at the bottom of the window, the cursor
 glides instead of jumping, and an idle window draws nothing at all.
 
@@ -121,8 +121,7 @@ mouse, such as vim.
 
 ## Building from source
 
-Requirements: macOS 14+, Xcode (for the Metal shader compiler) and a Rust
-toolchain (1.88 or later).
+Requirements: macOS 14+ and a Rust toolchain (1.88 or later).
 
 ```sh
 cargo run -p bateri   # run a debug build
@@ -140,7 +139,7 @@ documents; code, identifiers, UI strings and settings are in English.
 |---|---|
 | `bt-core` | Platform-independent terminal core: VT parsing (via `alacritty_terminal`), grid and scrollback, PTY, shell integration, command blocks, search, settings |
 | `bt-atlas` | Glyph rasterization with Core Text and the glyph atlas |
-| `bt-gpu` | Metal renderer, shaders, frame pacing and motion |
+| `bt-gpu` | wgpu renderer, WGSL shaders, frame pacing and motion |
 | `bt-shell` | The AppKit app: windows, tabs, splits, menus, input, settings window, updates |
 | `bateri` | The binary and app bundle |
 

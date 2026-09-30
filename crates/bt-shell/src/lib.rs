@@ -126,8 +126,8 @@ pub struct Run {
     /// en geç ilk pencerenin `Renderer::system_default()`'undan hemen önce ve
     /// sıranın doğruluğu bir yoruma kalırdı. İlk renderer artık ana döngü
     /// başladıktan sonra, ilk pencereyle doğuyor; damga yine de ondan
-    /// **önce**, açılışın en pahalı parçası (Metal device kurulumu, metallib
-    /// yüklemesi) ölçünün içinde.
+    /// **önce**, açılışın en pahalı parçası (GPU device'ı ve pipeline'ların
+    /// kurulumu) ölçünün içinde.
     pub stats_since: Option<Instant>,
 }
 

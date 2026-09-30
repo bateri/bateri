@@ -49,7 +49,7 @@ pub(crate) const ERASE_DURATION: f32 = 0.30;
 /// güvenli, efekt kısalır ama hiçbir glyph kaybolmaz.
 pub(crate) const FX_MAX: usize = 32;
 
-/// Bir efekt adının shader'daki kimliği (`shaders/glyph_fx.metal` → `FX_*`).
+/// Bir efekt adının shader'daki kimliği (`shaders/glyph_fx.wgsl` → `FX_*`).
 ///
 /// Adların sözlüğü `bt-core`'un ([`Keypress`], [`Erase`] — ayar modeli,
 /// `CursorMotion` emsali); kimlik çizimin bilgisi ve burada. Kapsamlı

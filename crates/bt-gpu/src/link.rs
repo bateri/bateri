@@ -97,8 +97,8 @@ use bt_core::{
 use crate::blink::Blink;
 use crate::frame::{DOCK_ROWS, Frame};
 use crate::glyph_fx::GlyphFx;
+use crate::metrics::CellMetrics;
 use crate::motion::Motion;
-use crate::renderer::CellMetrics;
 use crate::stats::Stats;
 use crate::surface::{self, Acquired};
 use crate::{GpuError, Renderer, Surface};
@@ -503,7 +503,7 @@ impl Retry {
     /// comes there from the flag not being planted; **on the motion path it
     /// must**, because the stop there is the animation settling, not damage.
     fn draw_failed(&self, e: &GpuError) -> bool {
-        eprintln!("bateri: kare çizilemedi: {e}");
+        eprintln!("bateri: frame could not be drawn: {e}");
         if self.streak.failed() {
             self.waker.wake();
             return false;
@@ -2540,53 +2540,56 @@ mod tests {
 
     #[test]
     fn the_dock_caret_target_lands_on_the_band_not_the_grid_row() {
-        // **Kesirli hedef bir kaçamak değil, doğru cevap.** Dock bandı iki
-        // yerden ızgaranın hücre ızgarasından kayıyor: nefes payı kadar
-        // aşağıdan başlıyor ve bandın kendisi de pencerenin yüksekliği hücre
-        // boyuna tam bölünmediğinde artan şeridin altında duruyor. Hedefi tam
-        // sayıya yuvarlasaydık caret bir hücreye kadar yukarıda dururdu.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
-        // 600 px pencere, iki satırlık dock: 2×18 satır + 2×8 dış pay +
-        // 1×16 satır arası = 68, yani band 532'de başlıyor.
+        // **The fractional target is not a dodge, it is the right answer.** The
+        // dock band slips off the grid's cell lattice in two ways: it starts
+        // lower by the breathing gutter, and when the window height is not
+        // exactly divisible by the cell height the band itself sits below the
+        // leftover stripe. Had we rounded the target to an integer, the caret
+        // would sit up to a cell too high.
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        // A 600 px window, a two-row dock: 2×18 rows + 2×8 outer gutter +
+        // 1×16 row gap = 68, so the band starts at 532.
         let dock_top = 600.0 - crate::frame::dock_px(2, cell);
         assert_eq!(dock_top, 532.0);
 
         let [col, row] = dock_caret_at(3, 0, 1, 600.0, cell);
-        assert_eq!(col, 3.0, "sütun ızgarayla aynı uzayda");
-        // Caret bandın **ilk satırında**, yani dış payın altında: (532+8)/18.
+        assert_eq!(col, 3.0, "the column is in the same space as the grid");
+        // The caret is on the band's **first row**, i.e. below the outer gutter: (532+8)/18.
         assert_eq!(row, 540.0 / 18.0);
-        // Ve o satır ızgaranın son satırının (548/18 = 30.4) **altında**:
-        // yuvarlansaydı ikisi çakışırdı.
-        assert!(row > dock_top / 18.0, "caret banda inmedi");
+        // And that row is **below** the grid's last row (548/18 = 30.4): had it
+        // been rounded, the two would collide.
+        assert!(row > dock_top / 18.0, "the caret did not land on the band");
 
-        // **Dibe yaslı** (032): üç giriş satırlık bantta bandın tepesi iki
-        // satır yukarıda (600 − 104 = 496), ilk satır (496+8)/18'de ve **son**
-        // satır tek satırlık bantın satırıyla aynı yerde — bant yukarı
-        // büyüyor, caret'in yazdığı satır yerinden oynamıyor.
+        // **Bottom-anchored** (032): in a three-input-row band the band's top is
+        // two rows higher (600 − 104 = 496), the first row is at (496+8)/18 and
+        // the **last** row is in the same place as the one-row band's row — the
+        // band grows upward, the row the caret types on does not move.
         assert_eq!(dock_caret_at(3, 0, 3, 600.0, cell)[1], 504.0 / 18.0);
         assert_eq!(dock_caret_at(3, 2, 3, 600.0, cell)[1], row);
     }
 
     #[test]
     fn the_grid_the_fill_band_and_the_dock_band_meet_in_every_frame() {
-        // **Bileşim bekçisi** (032 phase-2, `n = 3`): ızgaranın alt kenarı,
-        // doldurma bandı ve dock bandının üst kenarı **aynı karede**
-        // çakışıyor — animasyonun ortasında da. Bileşenleri ayrı ayrı sınamak
-        // yetmez: bant ve öteleme iki ayrı animatör, birleştikleri yer çizim
-        // (`compose`) ve iki ayrı yuvarlama bir piksel ayrışabilirdi.
+        // **Composition guard** (032 phase-2, `n = 3`): the grid's bottom edge,
+        // the fill band and the dock band's top edge coincide **in the same
+        // frame** — in the middle of the animation too. Testing the components
+        // separately is not enough: the band and the offset are two separate
+        // animators, the place they combine is drawing (`compose`), and two
+        // separate roundings could diverge by a pixel.
         //
-        // @1x, 9×18 hücre, pay 8, 600 px pencere: PTY payı `2·18 + 2·8 + 16 =
-        // 68`, ızgara `⌊532/18⌋ = 29` satır ve artık şerit 10 px. Şerit bant
-        // büyürken de 10 px kalmalı: ızgara bandla birlikte yukarı gidiyor.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
+        // @1x, 9×18 cell, gutter 8, 600 px window: the PTY gutter is `2·18 + 2·8
+        // + 16 = 68`, the grid is `⌊532/18⌋ = 29` rows and the leftover stripe
+        // is 10 px. The stripe must stay 10 px while the band grows too: the
+        // grid goes up together with the band.
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
         const BOTTOM: f32 = 600.0;
         const ROWS: f32 = 29.0;
         const FILL: u16 = 2;
         let strip = BOTTOM - crate::frame::dock_px(DOCK_ROWS, cell) - ROWS * 18.0;
         assert_eq!(strip, 10.0);
 
-        // İçerik tabana yaslı (öteleme 5), bant tek satırda; sonra dock üç
-        // giriş satırı istiyor: bandın fazlası 0 → 2.
+        // The content is bottom-anchored (offset 5), the band is one row; then
+        // the dock wants three input rows: the band's excess goes 0 → 2.
         let mut motion = Motion::default();
         motion.sync(Some([0.0, 30.0]), 5, 0.0, 0, false, false);
         motion.sync(Some([0.0, 30.0]), 5, 2.0, 0, false, false);
@@ -2604,19 +2607,19 @@ mod tests {
             );
             compose(&mut frame, motion, BOTTOM, true);
 
-            // İçeriğin alt kenarı: orijin + dolu satırlar (`29 − 5`).
+            // The content's bottom edge: origin + filled rows (`29 − 5`).
             let grid_bottom = frame.origin_px() + (ROWS - 5.0) * 18.0;
             let band_top = BOTTOM - frame.dock_band_px();
             assert_eq!(
                 band_top - grid_bottom,
                 strip,
-                "kare {frames}: ızgara ile bant ayrıştı (bant {})",
+                "frame {frames}: grid and band diverged (band {})",
                 motion.band()
             );
             assert_eq!(
                 frame.fill_origin_px() + f32::from(FILL) * 18.0,
                 frame.origin_px(),
-                "kare {frames}: doldurma bandı ızgaradan koptu"
+                "frame {frames}: the fill band came off the grid"
             );
             mid |= motion.band() > 0.0 && motion.band() < 2.0;
             if motion.settled() {
@@ -2624,10 +2627,10 @@ mod tests {
             }
             motion.advance(1.0 / 120.0);
             frames += 1;
-            assert!(frames < 1000, "bant yerleşmedi");
+            assert!(frames < 1000, "the band did not settle");
         }
-        assert!(mid, "animasyonun ortası hiç sınanmadı");
-        // Yerleşince bant yerleşimin boyunda ve ızgara iki satır yukarıda.
+        assert!(mid, "the middle of the animation was never tested");
+        // Once settled, the band is the layout's height and the grid is two rows higher.
         let mut frame = Frame::default();
         frame.clear(cell, CaretStyle::default());
         frame.set_dock_rows(4);
@@ -2643,29 +2646,30 @@ mod tests {
 
     #[test]
     fn the_band_target_is_one_fractional_signed_formula() {
-        // @1x, 9×18 hücre, pay 8: PTY payı 68 px, satır arası boşluk 16.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
-        // Bir ve fazla giriş satırında tam satır — tam sayılı pikseller,
-        // yani `f32`'de de bit bit: bugünkü kare değişmiyor.
+        // @1x, 9×18 cell, gutter 8: the PTY gutter is 68 px, the row gap 16.
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        // With one or more input rows, whole rows — integer pixels, so
+        // bit-for-bit in `f32` too: today's frame does not change.
         assert_eq!(band_target(1, DOCK_ROWS, cell), 0.0);
         assert_eq!(band_target(3, DOCK_ROWS, cell), 2.0);
-        // Sıfır giriş satırında (uzak oturum, 036) negatif: bir hücre artı
-        // satır arası boşluk, `(34 − 68) / 18`.
+        // With zero input rows (remote session, 036) it is negative: one cell
+        // plus the row gap, `(34 − 68) / 18`.
         let remote = band_target(0, DOCK_ROWS, cell);
         assert!(remote < -1.0, "{remote}");
         assert!((remote * 18.0 + (18.0 + 16.0)).abs() < 1e-4, "{remote}");
-        // Dock'suz karede bant yok.
+        // There is no band in a dock-less frame.
         assert_eq!(band_target(0, 0, cell), 0.0);
     }
 
     #[test]
     fn a_remote_band_drops_the_input_row_and_the_grid_moves_down() {
-        // **Bileşim bekçisi** (036 Karar 8): giriş satırı kalkınca bandın
-        // çizilen boyu `band_px(0)` (yalnız bağlam satırı), ızgaranın orijini
-        // o fark kadar aşağıda, doldurma bandı ızgaraya yapışık ve ızgara ile
-        // bant her karede çakışıyor — iki yönde de. Kurulum
-        // `the_grid_the_fill_band_and_the_dock_band_meet_in_every_frame`'inki.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
+        // **Composition guard** (036 Karar 8): once the input row goes away, the
+        // band's drawn height is `band_px(0)` (the context row only), the grid's
+        // origin is lower by that difference, the fill band is glued to the grid
+        // and the grid and band coincide in every frame — in both directions.
+        // The setup is that of
+        // `the_grid_the_fill_band_and_the_dock_band_meet_in_every_frame`.
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
         const BOTTOM: f32 = 600.0;
         const ROWS: f32 = 29.0;
         const FILL: u16 = 7;
@@ -2687,7 +2691,11 @@ mod tests {
         motion.sync(Some([0.0, 30.0]), 5, 0.0, 0, false, false);
         let local = frame_at(motion, 1);
         let local_origin = local.origin_px();
-        assert_eq!(local_origin, 5.0 * 18.0, "tek giriş satırında bugünkü kare");
+        assert_eq!(
+            local_origin,
+            5.0 * 18.0,
+            "today's frame with a single input row"
+        );
 
         let remote = band_target(0, DOCK_ROWS, cell);
         for (input_rows, target) in [(0, remote), (1, 0.0)] {
@@ -2701,13 +2709,13 @@ mod tests {
                 assert_eq!(
                     band_top - grid_bottom,
                     strip,
-                    "{input_rows}/{frames}: ızgara ile bant ayrıştı ({})",
+                    "{input_rows}/{frames}: grid and band diverged ({})",
                     motion.band()
                 );
                 assert_eq!(
                     frame.fill_origin_px() + f32::from(FILL) * 18.0,
                     frame.origin_px(),
-                    "{input_rows}/{frames}: doldurma bandı ızgaradan koptu"
+                    "{input_rows}/{frames}: the fill band came off the grid"
                 );
                 mid |= motion.band() < 0.0 && motion.band() > remote;
                 if motion.settled() {
@@ -2715,23 +2723,26 @@ mod tests {
                 }
                 motion.advance(1.0 / 120.0);
                 frames += 1;
-                assert!(frames < 1000, "bant yerleşmedi");
+                assert!(frames < 1000, "the band did not settle");
             }
-            assert!(mid, "{input_rows}: animasyonun ortası hiç sınanmadı");
+            assert!(
+                mid,
+                "{input_rows}: the middle of the animation was never tested"
+            );
         }
 
         motion.sync(Some([0.0, 30.0]), 5, remote, 0, true, false);
         let frame = frame_at(motion, 0);
         let band = crate::frame::band_px(0, cell);
-        assert_eq!(band, 18.0 + 2.0 * 8.0, "yalnız bağlam satırı");
+        assert_eq!(band, 18.0 + 2.0 * 8.0, "context row only");
         assert_eq!(frame.dock_band_px(), band);
         assert_eq!(frame.dock_band_px(), frame.dock_layout_px());
-        // Izgara bir hücre artı satır arası boşluk aşağıda.
+        // The grid is lower by one cell plus the row gap.
         assert_eq!(frame.origin_px(), local_origin + 18.0 + 16.0);
-        // Ayraçlar `frame::tests`'te (`Instance`'ın alanları o modülün).
-        // Fare: giriş bloğu yok, satır sayısı sıfır (`None` değil).
+        // The separators are in `frame::tests` (`Instance`'s fields belong to that module).
+        // Mouse: there is no input block, the row count is zero (not `None`).
         assert_eq!(frame.dock_hit().map(|(_, rows)| rows), Some(0));
-        // Tek giriş satırında kare yerleşik bugünküyle aynı.
+        // With a single input row the settled frame is the same as today's.
         motion.sync(Some([0.0, 30.0]), 5, 0.0, 0, true, false);
         let frame = frame_at(motion, 1);
         assert_eq!(frame.origin_px(), local_origin);
@@ -2741,12 +2752,12 @@ mod tests {
 
     #[test]
     fn a_full_grid_is_clipped_from_the_top_while_the_band_is_tall() {
-        // Dolu ızgarada (öteleme 0) bant büyüyünce orijin **negatife** iniyor
-        // ve ızgaranın tepesi pencerenin dışında kalıyor — geçici, giriş
-        // bitince döner. Fare aynı orijini okuyor (`Origin::px`), yani
-        // görünen satıra tıklanan nokta doğru satır (`point_to_cell`'in
-        // negatif orijin kolu).
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
+        // In a full grid (offset 0) when the band grows the origin goes
+        // **negative** and the grid's top ends up outside the window —
+        // temporary, it returns when the input ends. The mouse reads the same
+        // origin (`Origin::px`), so the point clicked on a visible row is the
+        // right row (`point_to_cell`'s negative-origin arm).
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
         let mut motion = Motion::default();
         motion.sync(None, 0, 2.0, 0, false, false);
         let mut frame = Frame::default();
@@ -2759,24 +2770,30 @@ mod tests {
         );
         compose(&mut frame, motion, 600.0, true);
         assert_eq!(frame.origin_px(), -36.0);
-        // Dock'suz pencerede bant hiç yazılmıyor: orijin yalnız öteleme.
+        // In a dock-less window the band is never written: the origin is the offset alone.
         let mut frame = Frame::default();
         frame.clear(cell, CaretStyle::default());
         compose(&mut frame, motion, 600.0, false);
         assert_eq!(frame.origin_px(), 0.0);
-        // Pencerenin payı var ama bu karenin yüzeyi kapalı (vim'den çıkışın
-        // arası): bant yazılmıyor, caret'in yuva sınırı sonsuzda kalıyor.
+        // The window has a gutter but this frame's surface is off (the gap when
+        // leaving vim): the band is not written, the caret's slot boundary stays
+        // at infinity.
         let mut frame = Frame::default();
         frame.clear(cell, CaretStyle::default());
         compose(&mut frame, motion, 600.0, true);
-        assert_eq!(frame.origin_px(), 0.0, "yüzeysiz karede bant yazıldı");
+        assert_eq!(
+            frame.origin_px(),
+            0.0,
+            "a band was written in a surface-less frame"
+        );
     }
 
     #[test]
     fn glyph_effects_keep_the_link_awake_and_draw_their_last_frame() {
-        // Yazım efektinin uyku terimi: uçuşta bir şey varken link uyumuyor,
-        // efektin bittiği adım yine de çiziliyor ve ancak ondan sonraki
-        // callback uyuyor. Hasar dikmiyor — `GlyphFx` `Waker`'ı hiç görmüyor.
+        // The typing effect's sleep term: the link does not sleep while
+        // something is in flight, the step where the effect ends is still drawn,
+        // and only the callback after that sleeps. It plants no damage — `GlyphFx`
+        // never sees the `Waker`.
         use crate::glyph_fx::{GlyphFx, KEYPRESS_DURATION};
         let mut fx = GlyphFx::default();
         let arrival = bt_core::DockEdit::Arrive {
@@ -2803,18 +2820,18 @@ mod tests {
             }
             drawn += 1;
             emptied_on_a_drawn_frame |= fx.is_empty();
-            assert!(drawn < 1000, "efekt hiç yerleşmedi");
+            assert!(drawn < 1000, "the effect never settled");
         }
         assert!(
             emptied_on_a_drawn_frame,
-            "efektin son hâli çizilmeden uyundu"
+            "went to sleep before the effect's last state was drawn"
         );
         let expected = (KEYPRESS_DURATION / dt).ceil() as usize;
         assert!(
             drawn.abs_diff(expected) <= 1,
-            "efekt {drawn} kare sürdü, süresi {expected} kare"
+            "the effect lasted {drawn} frames, its duration is {expected} frames"
         );
-        // Boş listede ilk soruda uyunuyor: efektsiz pencere boşta.
+        // With an empty list it sleeps on the first question: a window without effects is idle.
         assert!(at_rest(
             Motion::default(),
             false,
@@ -2824,48 +2841,60 @@ mod tests {
 
     #[test]
     fn stopped_gate_does_not_reopen_on_visibility() {
-        // Kapanışta pencere delegate'i sökülmüyor: `stop()`'tan sonra düşen
-        // bir `windowDidChangeOcclusionState:` kapıyı geri açsaydı, kapanışta
-        // `shutdown()`'ın `join`'inde bekleyen ana thread'e iş atılmaya devam
-        // ederdi. Mandal bunu koda bağlıyor, yorum cümlesine değil.
+        // The window delegate is not torn down at shutdown: had a
+        // `windowDidChangeOcclusionState:` falling after `stop()` reopened the
+        // gate, work would keep being thrown at the main thread waiting in
+        // `shutdown()`'s `join` at shutdown. The latch ties this to code, not to
+        // a comment sentence.
         let gate = Gate::new();
-        assert!(gate.is_open(), "link görünür pencereyle doğar");
+        assert!(gate.is_open(), "the link is born with a visible window");
 
         gate.set_open(false);
-        assert!(!gate.is_open(), "örtülen pencere kapıyı kapatır");
+        assert!(!gate.is_open(), "an occluded window closes the gate");
         gate.set_open(true);
-        assert!(gate.is_open(), "örtülme kalkınca kapı geri açılır");
+        assert!(gate.is_open(), "the gate reopens when the occlusion lifts");
 
         gate.stop();
         assert!(!gate.is_open());
         gate.set_open(true);
-        assert!(!gate.is_open(), "durdurulmuş kapı bildirimle geri açılmaz");
+        assert!(
+            !gate.is_open(),
+            "a stopped gate does not reopen on a notification"
+        );
     }
 
     #[test]
     fn stop_condition_kicks_in_on_second_failure() {
-        // Checklist'in "durma koşulu zorunlu" maddesi bu sınamayla bağlı:
-        // kalıcı bir çizim hatası kare talebini tazeleme hızında tekrarlarsa
-        // belirtisi yok, faturası pil. Politika burada, ObjC'siz.
+        // The checklist's "a stop condition is mandatory" item is tied to this
+        // test: if a persistent draw error repeats the frame request at the
+        // refresh rate, it has no symptom, its bill is the battery. The policy
+        // is here, without ObjC.
         let streak = FailureStreak::default();
-        assert!(streak.failed(), "ilk hata bir kez daha denenir");
-        assert!(!streak.failed(), "art arda ikinci hata kare talebini keser");
-        assert!(!streak.failed(), "sonrası da kesik kalır");
+        assert!(streak.failed(), "the first failure is tried once more");
+        assert!(
+            !streak.failed(),
+            "a second consecutive failure cuts the frame request"
+        );
+        assert!(!streak.failed(), "and it stays cut afterwards");
 
         streak.succeeded();
-        assert!(streak.failed(), "tamamlanan kare bütçeyi geri verir");
+        assert!(streak.failed(), "a completed frame gives the budget back");
     }
 
     #[test]
     fn the_clock_picks_the_nearer_deadline_and_its_flavour() {
-        // İçerik tiki hasar diker (ızgara gerçekten değişiyor), blink dikmez
-        // (yalnız caret'in alfası).
+        // A content tick plants damage (the grid really changes), a blink does
+        // not (only the caret's alpha).
         assert_eq!(due_clock(Some(1.0), Some(0.5), None), Some((0.5, false)));
         assert_eq!(due_clock(Some(1.0), None, None), Some((1.0, true)));
         assert_eq!(due_clock(None, Some(0.5), None), Some((0.5, false)));
-        assert_eq!(due_clock(None, None, None), None, "boşta saat kuruldu");
-        // Eşitlikte içerik kazanıyor: kare zaten çizilecek, hareket tadına
-        // ikinci bir uyandırma gerekmiyor.
+        assert_eq!(
+            due_clock(None, None, None),
+            None,
+            "a clock was set while idle"
+        );
+        // On a tie the content wins: the frame will be drawn anyway, the
+        // motion flavour needs no second wakeup.
         assert_eq!(due_clock(Some(1.0), Some(1.0), None), Some((1.0, true)));
         // The completion poll of a frame in flight (Karar 6) rides the motion
         // flavour: it draws nothing, so it plants no damage, and the nearest
@@ -2880,38 +2909,38 @@ mod tests {
 
     #[test]
     fn a_blinking_cursor_does_not_starve_the_duration_counter() {
-        // **013'ün regresyon bekçisi.** Koşan bir komutun sayacı t=1.0'da
-        // tiklemeli; blink 0.5'te bir uyanıyor. Her uyanışta saat yeniden
-        // kuruluyor ve eski (süre temelli) hâlde sayacın tiki her seferinde
-        // bir saniye ileri itilir, yani **hiç** ateşlemezdi.
+        // **013's regression guard.** A running command's counter must tick at
+        // t=1.0; the blink wakes every 0.5. The clock is re-set on every wakeup
+        // and in the old (duration-based) state the counter's tick would be
+        // pushed a second ahead each time, i.e. would **never** fire.
         //
-        // Son tarih mutlak olduğu için blink'in tikleri onu oynatmıyor.
+        // Because the deadline is absolute, the blink's ticks do not move it.
         let content = Some(1.0);
         let mut blink = Blink::default();
         blink.content_frame(0.0, true);
 
-        // t=0: blink daha yakın, hareket tadı kuruluyor.
+        // t=0: the blink is nearer, the motion flavour is set.
         assert_eq!(
             due_clock(content, blink.next_flip(), None),
             Some((0.5, false))
         );
 
-        // t=0.5: blink döndü ve kendi tikini ileri attı; sayacınki **yerinde**.
-        assert!(blink.advance(0.5), "blink dönmedi");
+        // t=0.5: the blink flipped and pushed its own tick ahead; the counter's is **in place**.
+        assert!(blink.advance(0.5), "the blink did not flip");
         assert_eq!(blink.next_flip(), Some(1.0));
         assert_eq!(
             due_clock(content, blink.next_flip(), None),
             Some((1.0, true)),
-            "sayacın tiki blink tarafından itildi"
+            "the counter's tick was pushed by the blink"
         );
     }
 
     #[test]
     fn a_finished_command_clears_the_clock() {
-        // **R7.3.** Koşan komutun tiki mutlak damgaya çevriliyor; komut
-        // bitince (`next_tick` `None`) saklanan son tarih **temizleniyor**.
-        // Eşleme `Some`'ı korusaydı ya da `None`'ı yoksaysaydı 013'ün
-        // kapısında düzeltilen kusur geri gelirdi.
+        // **R7.3.** The running command's tick is converted to an absolute
+        // stamp; when the command ends (`next_tick` is `None`) the stored
+        // deadline is **cleared**. Had the mapping kept the `Some` or ignored the
+        // `None`, the defect fixed at 013's gate would come back.
         assert_eq!(
             content_deadline(5.0, Some(Duration::from_millis(400))),
             Some(5.4)
@@ -2919,9 +2948,9 @@ mod tests {
         assert_eq!(
             content_deadline(5.0, None),
             None,
-            "biten komut saati bıraktı"
+            "a finished command left the clock behind"
         );
-        // Temizlenmiş son tarih ve sönmeyen bir imleç: saat hiç kurulmuyor.
+        // A cleared deadline and a non-blinking cursor: no clock is set at all.
         assert_eq!(due_clock(content_deadline(5.0, None), None, None), None);
     }
 }

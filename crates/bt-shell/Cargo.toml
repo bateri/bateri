@@ -135,14 +135,11 @@ objc2-quartz-core = { workspace = true, features = [
 # .tasks/037-ssh-ikinci-tur/phase-7.md → Uygulama Notları.
 objc2-user-notifications = { workspace = true }
 # Ana kuyruk: `Wake::child_exit` okuyucu thread'de gelir ve `terminate:` ana
-# thread'in işidir. Grafta bt-gpu üzerinden zaten vardı; bu iki satır yeni
-# crate çekmez, `Cargo.lock`'a yalnız kenar ekler. Vnode kaynakları da buradan
+# thread'in işidir. Vnode kaynakları da buradan
 # (ayar ve tema dosyasının izlenmesi, `watch`, 007 phase-4): fonksiyon
 # işaretçili işleyiciyle, blok değil.
 dispatch2 = { workspace = true }
-# Kapatma onayı sayfasının tamamlanma bloğu (`RcBlock`, 028 phase-2). Grafta
-# `bt-gpu` ve `dispatch2` üzerinden zaten vardı; bu satır yalnız kenar ekler,
-# sürüm oynamaz. Karar kaydı .tasks/028-kapatma-onayi/discussion.md → Karar 2.
+# Kapatma onayı sayfasının tamamlanma bloğu (`RcBlock`, 028 phase-2). Karar kaydı .tasks/028-kapatma-onayi/discussion.md → Karar 2.
 block2 = { workspace = true }
 # Bekçi thread'in `write` + `_exit`'i, izleme kaynaklarının `O_EVTONLY`'si
 # (`watch`, 007 kapı) ve kabuğun passwd kaydı (`child::passwd_shell`,
