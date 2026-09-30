@@ -133,6 +133,18 @@ başına en az on).
   hatasını görünmez kılardı. Sonucu, imleç kayan bir koşuda iki sütunun p95'i
   **doğrudan karşılaştırılamaz**; gerekçesi `bt-gpu/src/link.rs`'te hareket
   karesinin gövdesinde.
+- **Kapsam — wgpu pencere yolunda (040 phase-5'ten beri) drawable alımı CPU
+  aralıklarının dışında, `present` içinde.** Tik dokuyu wgpu yüzeyinden
+  `session.frame`'den **önce** alıyor (bekleme `cpu_kare`'ye girmiyor); Metal'in
+  aralıkları da `nextDrawable`'ı görmüyordu (display link drawable'ı callback'ten
+  önce veriyordu). `cpu_encode` plan + submit + `queue.present` — Metal'inki
+  `presentDrawable`'ı taşıyan tamponun `commit`'ine kadardı. Uyuyan tik drawable
+  **hiç** almıyor; bu, `CAMetalDisplayLink`'in her tikte drawable almasının
+  tersi ve aralıklarda görünmüyor.
+- **Kapsam — wgpu'nun GPU sütunu başka bir saat.** `gpu_*` 040 phase-5'ten beri
+  `TIMESTAMP_QUERY`'nin pass başı/sonu damgasından (desteklenmiyorsa
+  `unsupported`); Metal'in `GPUStartTime`/`GPUEndTime`'ı komut tamponunun
+  tamamını kapsıyordu. İki dönemin `gpu_p95`'i birebir karşılaştırılmaz.
 - **Açık kalem (jeton boşluğu) — CPU'nun elenen örneği sayılıyor ama
   basılmıyor.** `Stats::record_cpu` sıfır uzunluklu bir aralığı eliyor ve
   `bt_gpu::Samples::rejected`'a yazıyor; rapor bu sayacı yalnız GPU sütunu
@@ -859,6 +871,48 @@ içerik bu sayıyı ödemiyor.
 > "Atlas dolunca geri dönüşü yok").
 
 ## Kare süresi
+
+### 2026-09-30 — wgpu pencere yolu, (b) Pacer (040 phase-5): durak tetiklendi
+
+Metal renderer ürün yolundan çıktı; pencere yolu wgpu (`Surface` +
+`NSView.displayLink` zamanlayıcı olarak). Soru Karar 3/7'nin durağı: pencere
+yolunun CPU dağılımı Metal tabanıyla örtüşüyor mu?
+
+Reçete aşağıdaki bloklarla aynı: release, binary doğrudan, `BT_FRAME_STATS=1
+BT_SCROLL_TEST=1`, 10 saniye, 10 koşu. Ağaç `d004de3` + phase-5 (commit'lenmemiş
+hâli). MacBook Pro M1 Pro, macOS 26.4.1 (25E253), rustc 1.88.0, **prizde**
+(%35, şarjda). Ortam kullanıcının "teste hazır" dediği hâl: tarayıcı ve ağır
+uygulamalar kapalı; buna rağmen yük ortalaması **4,44** (1/5/15 dk: 4,44 /
+3,52 / 3,40 — tabanın gününde 1,66), `top`'ta WindowServer %42, syspolicyd
+%40 (yeni binary'nin imza denetimi), bir kullanıcı uygulaması %29.
+
+| # | cpu_kare p95 / max | cpu_encode p95 / max | gpu p95 / max | acilis | kare | istek | kapanis |
+|---|---|---|---|---|---|---|---|
+| 1 | 0,08 / 0,42 | 0,42 / 3,12 | 0,35 / 0,80 | 660,35 | 1193 | 319427 | abandoned |
+| 2 | 0,07 / 0,18 | 0,41 / 2,65 | 0,24 / 0,84 | 255,93 | 1193 | 307444 | abandoned |
+| 3 | 0,10 / 0,76 | 0,49 / 2,52 | 0,55 / 1,08 | 247,29 | 1192 | 296412 | abandoned |
+| 4 | 0,08 / 0,16 | 0,43 / 2,66 | 0,51 / 0,95 | 279,86 | 1193 | 283835 | clean |
+| 5 | 0,08 / 0,42 | 0,41 / 2,47 | 0,34 / 1,05 | 242,88 | 1194 | 306546 | clean |
+| 6 | 0,07 / 0,63 | 0,40 / 2,32 | 0,24 / 1,07 | 237,93 | 1194 | 307899 | clean |
+| 7 | 0,07 / 0,19 | 0,40 / 2,60 | 0,23 / 1,18 | 239,15 | 1194 | 311957 | abandoned |
+| 8 | 0,07 / 0,16 | 0,40 / 2,44 | 0,23 / 1,06 | 232,80 | 1194 | 311867 | abandoned |
+| 9 | 0,07 / 0,37 | 0,39 / 2,63 | 0,35 / 0,83 | 252,09 | 1192 | 334183 | abandoned |
+| 10 | 0,07 / 0,16 | 0,39 / 2,55 | 0,35 / 1,06 | 231,60 | 1194 | 328431 | clean |
+
+Sabit jetonlar: `hucre=0 glif=1785 kural=0 yuva=37/1984 yuva2=0/1984 yuk=load
+icerik=kare hareket=0 kayma=0 sessiz=0.00ms profil=release dusen=0
+gpu_elenen=0 taban=20 pipeline=ok`; `ornek`/`gpu_ornek` = `kare` (±1). Tam
+satırlar `target/olcum-kare/wgpu-pencere/run-*.out`.
+
+**Sonuç — durak kuralı tetiklendi.** `cpu_encode_p95` **0,39–0,49** (medyan
+0,405) — Metal tabanı (`3c7a46e` bloğu, aşağıda) **0,26–0,29**; dağılımlar
+örtüşmüyor ve wgpu kötü (medyanda +~0,13 ms, ~1,5×). Tanık sütun `cpu_kare_p95`
+**0,07–0,10** (taban 0,07–0,08; aynı kod, yük farkına rağmen aynı bant — fark
+encode'da). Offscreen denemede (phase-2, `## wgpu denemesi`) aynı sütunun farkı
+~0,08 ms idi; pencere yolunda fazlası `present`'in ve yüzey dokusunun kare başı
+view'ının aralığa girmesiyle tutarlı, ayrıştırılmadı. `gpu_p95` 0,23–0,55
+(başka saat, karar vermiyor); `acilis` 231–280 (1. koşu soğuk, 660), taban
+172–216. `kare` 1192–1194, taban 1197–1198.
 
 ### 2026-09-30 — patlama ile akışı süre ayırıyor: encode payı korunuyor
 

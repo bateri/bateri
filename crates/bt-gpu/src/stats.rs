@@ -318,6 +318,13 @@ impl Stats {
         self.gpu.push(nanos as u64);
     }
 
+    /// A frame measured without a usable GPU span (the timestamp readback
+    /// failed): counted as rejected, like `record_gpu`'s zero stamps, so an
+    /// empty GPU column is not mistaken for "no frame drawn".
+    pub(crate) fn reject_gpu(&self) {
+        self.gpu.reject();
+    }
+
     /// İlk tamamlanan kare: açılış süresi burada kapanır, sonrakiler dokunmaz.
     /// Kare başına bedel `OnceLock`'un hızlı yolu: bir atomik okuma.
     pub(crate) fn mark_startup(&self) {

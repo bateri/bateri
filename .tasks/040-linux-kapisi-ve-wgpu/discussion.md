@@ -252,6 +252,8 @@ taşıma doğurmuyor.
 **Durak (b) için de Karar 3'ün kuralı:** pencere yolunun dağılımı Metal
 tabanıyla örtüşmüyorsa ve kötüyse eskale edilir, (a) phase'i açılır.
 
+**Sonuç (phase-5, kullanıcı kararı 2026-09-30):** (b) durağı tetikledi (`cpu_encode_p95` 0,39–0,49 ms, Metal 0,26–0,29); mutlak ölçek kabul, (b) kaldı, (a) kolu açılmadı ve bilinen sınır olarak duruyor.
+
 Bedel kayıtlı: (b) kaybederse zamanlayıcı sağlayıcısı boşa yazılmış olur.
 Dikiş ve `tick` kalır.
 

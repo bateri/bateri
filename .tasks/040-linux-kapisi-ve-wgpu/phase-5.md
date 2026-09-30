@@ -115,15 +115,105 @@ dosyadan çıkıyor.
 
 ## Checklist
 
-- [ ] Yazılan/taşınan kodun yorumları ve tanı metinleri İngilizce
-- [ ] `Pacer` (dört görev, zaman tabanı sözleşmesi) + platformsuz `tick(damga, hedef)`
-- [ ] `Waker`, `arm_clock`, uykudan önceki kare poll'u `Pacer`'a bağlı
-- [ ] phase-4'ten devir: `WgpuRenderer::poll` tik başında (`on_complete` → `retry.streak.succeeded` / `draw_failed`, `mark_startup`, `GpuSpan` → `record_gpu`), `in_flight()` uykudan önce tek gecikmeli poll'u kuruyor; `draw` bugün `&Target` alıyor → yüzey dokusu; ölçüm kapısı açıkken `set_gpu_timing(true)`, `gpu_timing_supported() == false` → jeton değeri `unsupported`
-- [ ] wgpu `Surface` + `Renderer` ürün yolunda, Metal `cfg(test)` kâhini
-- [ ] `bt-shell`: `CAMetalLayer` + macOS `Pacer` ((b))
-- [ ] Jeton değerleri (`unsupported`), `CLAUDE.md` satırları
+- [x] Yazılan/taşınan kodun yorumları ve tanı metinleri İngilizce
+- [x] `Pacer` (dört görev, zaman tabanı sözleşmesi) + platformsuz `tick(damga, hedef)`
+- [x] `Waker`, `arm_clock`, uykudan önceki kare poll'u `Pacer`'a bağlı
+- [x] phase-4'ten devir: `WgpuRenderer::poll` tik başında (`on_complete` → `retry.streak.succeeded` / `draw_failed`, `mark_startup`, `GpuSpan` → `record_gpu`), `in_flight()` uykudan önce tek gecikmeli poll'u kuruyor; `draw` bugün `&Target` alıyor → yüzey dokusu; ölçüm kapısı açıkken `set_gpu_timing(true)`, `gpu_timing_supported() == false` → jeton değeri `unsupported`
+- [x] wgpu `Surface` + `Renderer` ürün yolunda, Metal `cfg(test)` kâhini
+- [x] `bt-shell`: `CAMetalLayer` + macOS `Pacer` ((b))
+- [x] Jeton değerleri (`unsupported`), `CLAUDE.md` satırları
 - [ ] Test: `make duman` yeşil, jetonlar aynı; gözle üç yüzey
-- [ ] `/measure` pencere yolu → `docs/OLCUMLER.md`; durak kuralı uygulandı
+- [x] `/measure` pencere yolu → `docs/OLCUMLER.md`; durak kuralı uygulandı (tetiklendi → eskale)
 - [ ] Metal pencere yolu tabanı `3c7a46e`'deki OLCUMLER bloğu (`cpu_encode_p95` 0,26–0,29 / `cpu_kare` 0,07–0,08 / gpu 0,25) — 28 Eylül tablosu değil (gürültülüydü, arada `123ae5d` ve `3c7a46e` regresyon düzeltmeleri girdi; kullanıcı notu, phase-3)
 - [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make shader` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+
+## Uygulama Notları
+
+- **Dosya adları phase-7'ye kadar yerinde:** ürün renderer'ı `wgpu_renderer.rs`'teki
+  `Renderer` (eski `WgpuRenderer`), Metal olanı `renderer.rs`'te `cfg(test)`
+  `MetalRenderer`; `CellMetrics`/`FontNotice`/`scissor_rect_below` ürün olarak
+  `renderer.rs`'te kaldı. Taşıma diff'i binlerce sınama satırını oynatırdı, Metal
+  sökülünce dosyalar yer değiştirir.
+- **Metal'in tamamlanma bloğu ve iki sınaması silindi** (phase-4 onları "Metal
+  ürün renderer'ı olduğu için" geri koymuştu); `draw`/`surface` ve sayaçları da
+  kâhinde kullanılmadığı için gitti. `endEncoding` bekçisi kâhinin `encode_pass`'ini
+  koruduğu için kaldı. `GpuError`'ın `NSError` taşıyan üç varyantı `cfg(test)`.
+- **`Pacer`'ın beşinci yöntemi `stop`** — birinci görevin sökümü (link'i
+  `invalidate` edip run loop'tan çıkarmak; hedefin tutulmasını kırmak). **Başlatma
+  her zaman asenkron** (tik'in kendi thread'inden de): `Retry`'nin tik içinden
+  istediği kare, aynı tik'in çıkışta yaptığı `set_running(false)`'a yutulmasın.
+  Durdurma tik thread'inde anında. `pending` birleştirmesi macOS pacer'ına taşındı;
+  kapının ana kuyrukta ikinci okuması kalktı (pacer kapıyı bilmiyor) — yarışta tik'in
+  ilk satırı kapıyı görüp duruyor, (b)'de o tik drawable ödemiyor.
+- **`TickTarget` tek varyantlı** (`Surface`): (a)'nın dokusu kendi sağlayıcısıyla
+  (phase-5b) eklenir, kullanılmayan varyant yazılmadı.
+- **`Ticker` zayıf** (`Weak<Core>`): `displayLinkWithTarget:selector:` hedefi
+  güçlü tutuyor, güçlü tutamak çember kurardı. `LinkDelegate` (ObjC sınıfı) düz
+  `Core`'a döndü.
+- **Drawable yalnız çizen tik'te**: içerik kolunda `take_damage`'dan sonra ve
+  CPU aralıklarından **önce** (Metal'in aralıkları da `nextDrawable`'ı görmüyordu),
+  hareket kolunda `set_origin`'den önce; uyuyan kol hiç almıyor. Sonuç üç sınıf:
+  `Skip` (örtülü/zaman aşımı → hasar geri dikilir, pacer durur, sessiz; geri
+  getiren görünürlük bildirimi ya da sonraki uyandırma),
+  `Failed` (kayıp/doğrulama → `draw_failed`, yüzey "bayat" işaretlenir ve
+  sonraki alım önce yeniden yapılandırır), `Outdated/Suboptimal` → bir kez
+  yeniden yapılandırma (suboptimal doku `configure`'dan önce bırakılıyor).
+  Hareket kolunda alım olmazsa animasyon hedefinde biter, `Frame`'in efekt
+  listeleri boşalır ve hasar dikilir. Yapılandırılmamış yüzey (boyut yok) tik'i hasarı
+  tüketmeden durduruyor.
+- **`cpu_encode` artık plan + submit + `present`**: Metal'in aralığı da
+  `presentDrawable`'ı içeren tamponun `commit`'ine kadardı.
+- **Uykudan önceki kare** (Karar 6): `due_clock` üçüncü son tarihi alıyor —
+  uçuşta kare varsa `POLL_DELAY` (120 Hz'in bir periyodu, tasarım sabiti) sonra
+  hareket tadında `resume`; tik açılışında poll ediyor, çizecek şey yoksa yine
+  uyuyor, kuyruk boşalınca kurulmuyor. Tek uyandırma kuralı korunuyor. Kapanışta
+  `DisplayLink::drain` (sınırlı bekleme + poll) raporun `kare=`'yi okumasından önce.
+- **GPU damgası**: ölçüm kapısı açıkken `set_gpu_timing(true)`; damgalı karede
+  okunamayan açıklık `Stats::reject_gpu` ile `gpu_elenen`'e; `TIMESTAMP_QUERY`
+  yoksa `gpu_p95=unsupported gpu_max=unsupported` (anahtarlar yerinde).
+- **Yüzey**: `alpha_mode = PostMultiplied` (katmanın `opaque`'ı eskisi gibi
+  `false`; her piksel zaten alfa 1), `Fifo`, gecikme 2 (→ 3 drawable, eski
+  varsayılan), renk uzayı `Auto` → sRGB (katmanın varsayılanı). `configure`
+  yalnız boyut değişince (wgpu-core kuyruğu bekliyor). wgpu-hal
+  `allowsNextDrawableTimeout`'u `false` yapıyor; örtülü pencerede alım `Occluded`
+  dönüyor, kapı da ondan önce.
+- `Cargo.lock` değişmedi (wgpu dev-dependency olarak zaten kayıtlıydı).
+- `/code-review` (medium) dört bulgu; üçü giderildi, biri waive: (1) `Suboptimal`
+  dokusu yaşarken `configure` (`PreviousOutputExists`, Metal'de erişilemez);
+  (2) `Lost`/`Validation`'dan sonra aynı boyda yeniden yapılandırma yoktu;
+  (4) hareket kolunda başarısız alım `Frame`'in efekt
+  listelerini donmuş bırakıyordu.
+- **Gözle kontrol koşamadı:** computer-use için macOS Erişilebilirlik ve Ekran
+  Kaydı izinleri verili değil; `bateri-dev.app` güncellendi (debug binary),
+  kullanıcıda.
+- **Üçüncü taraf bildirimleri (kullanıcı kararı 2026-09-30):** wgpu ürün grafına
+  MIT seçeneği olmayan üç crate getiriyor — `codespan-reporting` (Apache-2.0),
+  `foldhash` (Zlib), `libloading` (ISC); üçü de GPL-3 uyumlu, kabul edildi.
+  `tools/third_party_notices.py`'ye izin listesi (`OWN_LICENSES`: Apache-2.0 +
+  varsa NOTICE, Zlib, ISC) girdi; listede olmayan MIT'siz lisans yine betiği
+  durduruyor. `/` ayraçlı eski ifade (`Apache-2.0/MIT`, rustc-hash) MIT seçeneği
+  sayılıyor. `THIRD-PARTY-LICENSES.txt` yeniden üretildi (yalnız ekleme),
+  `Credits.html`'in "MIT" cümlesi dört lisansa genişledi.
+- **Waive — `/code-review` bulgu 3** ("`Skip` pacer'ı durdurup geri açtırmıyor"):
+  denendi (durmadan sonraki tik'te yeniden deneme) ve **ölçülünce geri alındı** —
+  hal'in doğumdan örtülü saydığı pencerede (bu oturumda ekran kapalıyken) link
+  3 sn'de 359 kez tikledi, çünkü örtülme *değişmediği* için bildirim gelmiyor ve
+  kapı açık kalıyor. Durmak doğru: görünür olmak bir değişim, bildirimi
+  `set_visible(true)` → kare istiyor. `Timeout` Metal'de erişilemez.
+- **Duman ile örtülme — davranış farkı:** wgpu-hal (#8309 çaresi) örtülü
+  pencerede drawable vermiyor; Metal yolu örtülü pencereye de çiziyordu. Aynı
+  ortamda (ekran uykuda/örtülü) `HEAD` duman yeşil, bu ağaç `kare=0` ile kırmızı;
+  ekran açıkken bu ağaç yeşildi (oturumun başında). Kullanıcının gördüğünde fark
+  yok (örtülü pencere zaten görünmüyor), ama `make duman` artık görünür bir
+  pencere istiyor.
+- **Ölçüm (2026-09-30, `docs/OLCUMLER.md` → `## Kare süresi`): durak
+  tetiklendi.** `cpu_encode_p95` wgpu 0,39–0,49 ms, Metal tabanı 0,26–0,29 —
+  örtüşmüyor, wgpu kötü; tanık `cpu_kare_p95` 0,07–0,10 (taban 0,07–0,08).
+  Karar 7'ye göre eskale edildi. **Kullanıcı kararı (2026-09-30): mutlak ölçek
+  kabul, (b) kaldı, `phase-5b` açılmadı** — hedef pil ve akıcılık; fark (~0,13 ms,
+  ~1,5×) 8,33 ms'lik kare bütçesinin çok altında ve daha önce kabul edilen ~1,7×
+  sınırının içinde. (a) kolu bilinen sınır olarak duruyor. Ortam tam sessiz
+  değildi (yük ortalaması 4,44; syspolicyd %40, WindowServer %42); tanık sütun
+  tabanın bandında.
+

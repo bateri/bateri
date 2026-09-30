@@ -1,34 +1,35 @@
-//! The wgpu renderer — 040's parallel renderer, today **test-only**.
+//! The renderer: wgpu, one device per process ([`Gpu`]) and one [`Renderer`]
+//! per pane (the atlas's key includes the pane's point size).
 //!
-//! The Metal renderer ([`crate::Renderer`]) stays in place as the oracle
-//! (`.tasks/040-linux-kapisi-ve-wgpu/discussion.md` → Karar 3 and 4). Since
-//! phase-4 every pipeline group is here: `cell_bg` + caret (background quads,
-//! the caret's SDF, the dock buttons), `cell` + `emoji` (glyphs and rules from
-//! the atlas's two planes), `selection` (the mouse selection and the search
-//! highlights) and `glyph_fx` (the dock's typing effects), on all three
-//! surfaces (grid, fill band, dock). `renderer.rs`'s guards draw with this
-//! renderer; Metal only draws the oracle scenes.
+//! Since 040 phase-5 this is the **product** renderer; the Metal renderer
+//! (`crate::renderer::MetalRenderer`) stays behind `cfg(test)` as the oracle
+//! (`.tasks/040-linux-kapisi-ve-wgpu/discussion.md` → Karar 3 and 4) until
+//! phase-7 removes it. Every pipeline group is here: `cell_bg` + caret
+//! (background quads, the caret's SDF, the dock buttons), `cell` + `emoji`
+//! (glyphs and rules from the atlas's two planes), `selection` (the mouse
+//! selection and the search highlights) and `glyph_fx` (the dock's typing
+//! effects), on all three surfaces (grid, fill band, dock).
 //!
-//! The module sits behind `cfg(test)` (wgpu is a dev-dependency): the product
-//! binary's graph does not change and backing out is a single `git revert`.
 //! Pipeline order, the viewport/scissor sequence and blending are **the same**
-//! as `renderer.rs`'s `encode_pass` / `encode_fill` / `encode_dock` /
-//! `encode_fx` / `encode_glyphs` / `pipeline`; the reasons live there and are
-//! not repeated here. Slot resolution, the wide glyph's fan-out, uv baking and
-//! the effects' instance packing are not repeated either: both renderers call
-//! [`crate::slots`], and only the upload target differs ([`WgpuUpload`]). The
-//! one difference is how commands are recorded: Metal builds a buffer per list
-//! per frame, here every quad of the frame goes into **one** instance buffer
-//! (every glyph into one glyph buffer, every effect into one effect buffer)
-//! and draws read ranges of them ([`Plan`]). Those buffers are not rebuilt per
-//! frame either: they live as long as the renderer, grow on demand and are
-//! filled with `write_buffer` — creating a buffer in wgpu is a validation and
-//! tracking round trip, and it was measured (phase-2 → Uygulama Notları): a
-//! per-frame buffer visibly inflated `cpu_encode`.
+//! as the oracle's `encode_pass` / `encode_fill` / `encode_dock` /
+//! `encode_fx` / `encode_glyphs` / `pipeline` in `renderer.rs`; the reasons
+//! live there and are not repeated here. Slot resolution, the wide glyph's
+//! fan-out, uv baking and the effects' instance packing are not repeated
+//! either: both renderers call [`crate::slots`], and only the upload target
+//! differs ([`WgpuUpload`]). The one difference is how commands are recorded:
+//! Metal builds a buffer per list per frame, here every quad of the frame goes
+//! into **one** instance buffer (every glyph into one glyph buffer, every
+//! effect into one effect buffer) and draws read ranges of them ([`Plan`]).
+//! Those buffers are not rebuilt per frame either: they live as long as the
+//! renderer, grow on demand and are filled with `write_buffer` — creating a
+//! buffer in wgpu is a validation and tracking round trip, and it was
+//! measured (phase-2 → Uygulama Notları): a per-frame buffer visibly inflated
+//! `cpu_encode`.
 //!
 //! **Completion** (Karar 6) is a submission index per frame and a
-//! non-blocking [`WgpuRenderer::poll`] at the start of a tick — no closure per
-//! frame. The four jobs of Metal's completion block are carried by name there.
+//! non-blocking [`Renderer::poll`] at the start of a tick — no closure per
+//! frame. The four jobs of Metal's completion block are carried by name there
+//! and in `crate::link`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -304,8 +305,8 @@ enum Op {
 }
 
 /// The frame's draw plan: three instance buffers and the steps reading ranges
-/// of them. [`WgpuRenderer::plan`] builds it from a `Frame`,
-/// [`WgpuRenderer::submit`] replays it into a pass.
+/// of them. [`Renderer::plan`] builds it from a `Frame`,
+/// [`Renderer::submit`] replays it into a pass.
 #[derive(Default)]
 struct Plan {
     instances: Vec<Instance>,
@@ -412,10 +413,19 @@ fn scissor_below(top_px: f32, viewport_px: [f32; 2]) -> [u32; 4] {
 }
 
 /// A render target: texture and view together, so the view is not rebuilt per
-/// frame.
+/// frame (offscreen) or is built once per frame (the window's texture, which
+/// changes every frame: [`Target::new`]).
 pub(crate) struct Target {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+}
+
+impl Target {
+    /// A target over `texture` — the window path's surface texture.
+    pub(crate) fn new(texture: wgpu::Texture) -> Self {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self { texture, view }
+    }
 }
 
 /// One atlas plane on the GPU: its texture, its view and the bind group that
@@ -429,7 +439,7 @@ struct PlaneTexture {
 
 /// The atlas and its two textures — **in one place**, like `renderer.rs`'s
 /// `AtlasTexture`: when [`Atlas::ensure`] rebuilds the atlas both textures
-/// are dropped in the same line ([`WgpuRenderer::cell_metrics`]).
+/// are dropped in the same line ([`Renderer::cell_metrics`]).
 struct WgpuAtlas {
     atlas: Atlas,
     /// `None` → not created yet, or `ensure` dropped it. Created by the first
@@ -509,8 +519,8 @@ struct State {
     glyphs: Option<wgpu::Buffer>,
     /// The frame's effect instances; grows, never shrinks.
     fx: Option<wgpu::Buffer>,
-    /// `None` until [`WgpuRenderer::cell_metrics`] is asked, like Metal's
-    /// `Renderer::atlas`: the atlas key's scale comes from the window, and a
+    /// `None` until [`Renderer::cell_metrics`] is asked, like Metal's
+    /// `MetalRenderer::atlas`: the atlas key's scale comes from the window, and a
     /// frame with glyphs but no atlas fails with [`GpuError::NoAtlas`] rather
     /// than drawing @1x.
     atlas: Option<WgpuAtlas>,
@@ -525,7 +535,7 @@ struct State {
 /// whichever thread wgpu calls them from).
 ///
 /// A generation, not a flag: each renderer records the generation when it
-/// submits a frame and [`WgpuRenderer::poll`] fails every frame submitted
+/// submits a frame and [`Renderer::poll`] fails every frame submitted
 /// before a newer fault — without consuming it, so one renderer's poll does
 /// not hide the fault from another sharing the device.
 #[derive(Default)]
@@ -563,12 +573,15 @@ impl Fault {
 /// What every renderer shares: the wgpu device, its queue, the six pipelines,
 /// the bind group layouts and the samplers.
 ///
-/// Split from [`WgpuRenderer`] because the atlas cannot be shared: `bt-atlas`
+/// Split from [`Renderer`] because the atlas cannot be shared: `bt-atlas`
 /// holds CoreText fonts, which are neither `Send` nor `Sync`, while a device
 /// is worth creating once per process. The split is also the product's shape
 /// (040 phase-5): one device, a renderer per pane — the atlas's key includes
 /// the pane's point size.
 pub(crate) struct Gpu {
+    /// Kept for the window surfaces ([`crate::Surface`]): a surface must come
+    /// from the instance its device's adapter came from.
+    instance: wgpu::Instance,
     device: wgpu::Device,
     queue: wgpu::Queue,
     cell_bg: wgpu::RenderPipeline,
@@ -587,26 +600,45 @@ pub(crate) struct Gpu {
     /// branches (texel-centre clamping keeps it inside the slot).
     linear: wgpu::Sampler,
     /// `TIMESTAMP_QUERY` was granted: the GPU delta can be measured
-    /// ([`WgpuRenderer::set_gpu_timing`]); otherwise its token is
+    /// ([`Renderer::set_gpu_timing`]); otherwise its token is
     /// `unsupported` (Karar 6).
     timestamps: bool,
     fault: Arc<Fault>,
 }
 
 impl Gpu {
-    /// The process-wide device: created once and shared by every renderer
-    /// (the Metal side builds a new device per `Renderer`; creating a wgpu
-    /// adapter and device is not a cost worth paying per test).
+    /// The process-wide device: created once and shared by every renderer —
+    /// every pane of every window (the Metal side built a new device per
+    /// renderer; an adapter, a device and six pipelines are not worth paying
+    /// per pane). A failure is kept too, so every pane reports the same error
+    /// instead of retrying the adapter request.
+    pub(crate) fn get() -> Result<&'static Self, GpuError> {
+        static SHARED: OnceLock<Result<Gpu, String>> = OnceLock::new();
+        SHARED
+            .get_or_init(Self::new)
+            .as_ref()
+            .map_err(|e| GpuError::Wgpu(e.clone()))
+    }
+
+    /// [`Gpu::get`] for tests: a missing device is a failed test.
+    #[cfg(test)]
     pub(crate) fn shared() -> &'static Self {
-        static SHARED: OnceLock<Gpu> = OnceLock::new();
-        SHARED.get_or_init(|| Self::new().expect("wgpu device and pipelines"))
+        Self::get().expect("wgpu device and pipelines")
+    }
+
+    pub(crate) fn instance(&self) -> &wgpu::Instance {
+        &self.instance
+    }
+
+    pub(crate) fn device(&self) -> &wgpu::Device {
+        &self.device
     }
 
     /// A device on the Metal backend and six pipelines.
     ///
-    /// The backend is **pinned to Metal**: the same hardware path as the
-    /// oracle is compared; the Vulkan branch is tested on Linux in the font
-    /// set (plan.md → Kapsam Dışı).
+    /// The backend is **pinned to Metal**: macOS is the only product target
+    /// today and the oracle compares the same hardware path; the Vulkan branch
+    /// is opened and tested on Linux in the font set (plan.md → Kapsam Dışı).
     pub(crate) fn new() -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::METAL,
@@ -764,6 +796,7 @@ impl Gpu {
             return Err(format!("pipeline creation failed: {error}"));
         }
         Ok(Self {
+            instance,
             device,
             queue,
             cell_bg,
@@ -913,6 +946,7 @@ impl Gpu {
     }
 
     /// An edge×edge offscreen target; renderable and copyable.
+    #[cfg(test)]
     pub(crate) fn target(&self, edge: u32) -> Target {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen"),
@@ -939,6 +973,7 @@ impl Gpu {
     /// `copy_texture_to_buffer` wants a row pitch that is a multiple of 256:
     /// edge 16 is 64 bytes per row, so the buffer is padded and rows are
     /// compacted while reading.
+    #[cfg(test)]
     fn read_back(&self, target: &wgpu::Texture) -> Vec<u8> {
         let (width, height) = (target.width(), target.height());
         let row = width * 4;
@@ -1005,11 +1040,11 @@ pub(crate) struct GpuSpan {
 
 /// One frame's timestamp queries and their readback: the pass writes its
 /// start and end, the frame's command buffer resolves and copies them, and
-/// [`WgpuRenderer::poll`] maps the copy once the frame is done.
+/// [`Renderer::poll`] maps the copy once the frame is done.
 ///
 /// Pooled, not built per frame; the mapping needs a closure per timed frame
 /// (wgpu reports a map only through its callback), which is why the whole
-/// path exists only while measuring ([`WgpuRenderer::set_gpu_timing`]).
+/// path exists only while measuring ([`Renderer::set_gpu_timing`]).
 struct Timing {
     queries: wgpu::QuerySet,
     resolve: wgpu::Buffer,
@@ -1104,7 +1139,7 @@ impl Timing {
     }
 }
 
-/// A submitted frame waiting for [`WgpuRenderer::poll`].
+/// A submitted frame waiting for [`Renderer::poll`].
 struct Pending {
     index: wgpu::SubmissionIndex,
     /// [`Fault`]'s generation at submit: a newer one fails this frame.
@@ -1112,17 +1147,17 @@ struct Pending {
     timing: Option<Timing>,
 }
 
-/// A wgpu renderer: the shared [`Gpu`] plus this renderer's atlas, instance
-/// buffers and in-flight frames — the twin of Metal's `Renderer`, which also
-/// owns its atlas. `RefCell`/`Cell`: Metal's reason — `&self` methods that
+/// A renderer: the shared [`Gpu`] plus this renderer's atlas, instance
+/// buffers and in-flight frames — one per pane, like the oracle
+/// (`MetalRenderer`), which also owns its atlas. `RefCell`/`Cell`: Metal's reason — `&self` methods that
 /// mutate the atlas, and a renderer that never leaves its thread (its frames
-/// are counted by [`WgpuRenderer::poll`] on that thread, not on a driver
+/// are counted by [`Renderer::poll`] on that thread, not on a driver
 /// thread as Metal's completion block does).
-pub(crate) struct WgpuRenderer {
+pub struct Renderer {
     gpu: &'static Gpu,
     state: RefCell<State>,
     /// The requested font: the family and size half of the atlas's key
-    /// (`Renderer::font`'s reason).
+    /// (`MetalRenderer::font`'s reason).
     font: RefCell<FontOptions>,
     /// Frames the GPU finished **without error**; `make duman`'s `kare=`.
     frames: Cell<u64>,
@@ -1141,15 +1176,22 @@ pub(crate) struct WgpuRenderer {
     poison: Cell<bool>,
 }
 
-impl WgpuRenderer {
-    /// A renderer on the shared device, with no atlas yet
-    /// ([`WgpuRenderer::cell_metrics`] opens it).
+impl Renderer {
+    /// A renderer on the process's shared device ([`Gpu::get`]), with no
+    /// atlas yet ([`Renderer::cell_metrics`] opens it). `bt-shell` calls only
+    /// this and never sees wgpu.
+    pub fn system_default() -> Result<Self, GpuError> {
+        Ok(Self::on(Gpu::get()?))
+    }
+
+    /// [`Renderer::system_default`] for tests.
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::on(Gpu::shared())
     }
 
-    /// A renderer on `gpu` — a test with a device of its own (a fault must
-    /// not leak into other tests' frames).
+    /// A renderer on `gpu` — also a test with a device of its own (a fault
+    /// must not leak into other tests' frames).
     pub(crate) fn on(gpu: &'static Gpu) -> Self {
         Self {
             gpu,
@@ -1165,20 +1207,27 @@ impl WgpuRenderer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn device(&self) -> &wgpu::Device {
         &self.gpu.device
     }
 
+    /// The shared device; the window surface is created and configured on it.
+    pub(crate) fn gpu(&self) -> &'static Gpu {
+        self.gpu
+    }
+
+    #[cfg(test)]
     pub(crate) fn target(&self, edge: u32) -> Target {
         self.gpu.target(edge)
     }
 
     /// Brings the atlas to the requested font at `scale` and returns the grid
-    /// geometry — twin of `Renderer::cell_metrics` (same arithmetic,
+    /// geometry — twin of `MetalRenderer::cell_metrics` (same arithmetic,
     /// `CellMetrics::from_atlas`). When the key changes, both textures are
-    /// dropped in the same line (`Renderer::sync_atlas`'s reason: a texture
+    /// dropped in the same line (`MetalRenderer::sync_atlas`'s reason: a texture
     /// of the old size written with the new metrics would silently corrupt).
-    pub(crate) fn cell_metrics(&self, scale: f64) -> CellMetrics {
+    pub fn cell_metrics(&self, scale: f64) -> CellMetrics {
         let font = self.font.borrow();
         let family = font.family.as_deref();
         let mut state = self.state.borrow_mut();
@@ -1200,9 +1249,9 @@ impl WgpuRenderer {
     }
 
     /// Changes the requested font; `true` when it differs — twin of
-    /// `Renderer::set_font`: the atlas opens with it on the next
-    /// [`WgpuRenderer::cell_metrics`].
-    pub(crate) fn set_font(&self, font: &FontOptions) -> bool {
+    /// `MetalRenderer::set_font`: the atlas opens with it on the next
+    /// [`Renderer::cell_metrics`].
+    pub fn set_font(&self, font: &FontOptions) -> bool {
         let mut current = self.font.borrow_mut();
         if *current == *font {
             return false;
@@ -1212,16 +1261,16 @@ impl WgpuRenderer {
     }
 
     /// What to tell the user about the open atlas's font — twin of
-    /// `Renderer::font_notice`.
-    pub(crate) fn font_notice(&self) -> Option<FontNotice> {
+    /// `MetalRenderer::font_notice`.
+    pub fn font_notice(&self) -> Option<FontNotice> {
         let state = self.state.borrow();
         let issue = state.atlas.as_ref()?.atlas.font_issue()?;
         Some(FontNotice::from(issue.clone()))
     }
 
     /// The mask plane's slot occupancy (used, total); `(0, 0)` without an
-    /// atlas — twin of `Renderer::atlas_occupancy`.
-    pub(crate) fn atlas_occupancy(&self) -> (usize, usize) {
+    /// atlas — twin of `MetalRenderer::atlas_occupancy`.
+    pub fn atlas_occupancy(&self) -> (usize, usize) {
         self.state
             .borrow()
             .atlas
@@ -1230,7 +1279,7 @@ impl WgpuRenderer {
     }
 
     /// The colour plane's slot occupancy; `yuva2=`'s source.
-    pub(crate) fn color_atlas_occupancy(&self) -> (usize, usize) {
+    pub fn color_atlas_occupancy(&self) -> (usize, usize) {
         self.state
             .borrow()
             .atlas
@@ -1239,20 +1288,20 @@ impl WgpuRenderer {
     }
 
     /// Frames the GPU finished without error, as counted by
-    /// [`WgpuRenderer::poll`].
-    pub(crate) fn frames(&self) -> u64 {
+    /// [`Renderer::poll`].
+    pub fn frames(&self) -> u64 {
         self.frames.get()
     }
 
-    pub(crate) fn last_bg_count(&self) -> usize {
+    pub fn last_bg_count(&self) -> usize {
         self.last_counts.get()[0]
     }
 
-    pub(crate) fn last_glyph_count(&self) -> usize {
+    pub fn last_glyph_count(&self) -> usize {
         self.last_counts.get()[1]
     }
 
-    pub(crate) fn last_rule_count(&self) -> usize {
+    pub fn last_rule_count(&self) -> usize {
         self.last_counts.get()[2]
     }
 
@@ -1274,22 +1323,37 @@ impl WgpuRenderer {
     }
 
     /// Opens or closes the GPU-delta measurement. Without `TIMESTAMP_QUERY`
-    /// it stays closed and [`WgpuRenderer::gpu_timing_supported`] says so.
+    /// it stays closed and [`Renderer::gpu_timing_supported`] says so.
     pub(crate) fn set_gpu_timing(&self, on: bool) {
         self.timing.set(on && self.gpu.timestamps);
     }
 
     /// `false` → the GPU delta's token value is `unsupported` (Karar 6).
-    pub(crate) fn gpu_timing_supported(&self) -> bool {
+    pub fn gpu_timing_supported(&self) -> bool {
         self.gpu.timestamps
     }
 
-    /// Whether a submitted frame is still waiting for [`WgpuRenderer::poll`]:
+    /// Whether a submitted frame is still waiting for [`Renderer::poll`]:
     /// a link going to sleep with one arms a single delayed poll (Karar 6,
     /// "the last frame before sleep is not lost"); an empty queue arms
     /// nothing — the stop condition.
     pub(crate) fn in_flight(&self) -> bool {
         !self.in_flight.borrow().is_empty()
+    }
+
+    /// Waits at most `timeout` for the newest submitted frame — the pending
+    /// poll at shutdown, which must come before the report reads `kare=`
+    /// (Karar 6). It only waits; counting is still [`Renderer::poll`]'s.
+    pub(crate) fn wait_in_flight(&self, timeout: Duration) {
+        let newest = self.in_flight.borrow().back().map(|p| p.index.clone());
+        if let Some(index) = newest {
+            // A timeout or a fault here is not this call's to report: the
+            // next `poll` sees the frame as unfinished or failed.
+            let _ = self.gpu.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(index),
+                timeout: Some(timeout),
+            });
+        }
     }
 
     /// The glyph and rule draws of one list — `encode_glyphs`' twin: emoji
@@ -1532,10 +1596,11 @@ impl WgpuRenderer {
     ///
     /// Does not wait and does not track completion (the offscreen tests and
     /// the measurement hook read or wait themselves); the frame path is
-    /// [`WgpuRenderer::draw`]. The measurement hook times this whole call as
+    /// [`Renderer::draw`]. The measurement hook times this whole call as
     /// `cpu_encode` — on the Metal side the span runs from creating the
     /// command buffer to `commit`, here from planning (slot resolution and
     /// uploads included, as in Metal's `encode_glyphs`) to `submit`.
+    #[cfg(test)]
     pub(crate) fn submit(
         &self,
         target: &Target,
@@ -1727,7 +1792,7 @@ impl WgpuRenderer {
     }
 
     /// The frame path (Karar 6): encode and submit inside an error scope,
-    /// then track the submission for [`WgpuRenderer::poll`].
+    /// then track the submission for [`Renderer::poll`].
     ///
     /// **Asynchronous**, like Metal's `draw`: `Ok` only says "submitted". A
     /// synchronous error (planning, validation, out of memory) returns `Err`
@@ -1779,10 +1844,16 @@ impl WgpuRenderer {
         Ok(())
     }
 
+    /// Queues a drawn window texture for presentation — after
+    /// [`Renderer::draw`] returned `Ok` for it.
+    pub(crate) fn present(&self, texture: wgpu::SurfaceTexture) {
+        self.gpu.queue.present(texture);
+    }
+
     /// The non-blocking poll at the start of a tick (Karar 6): hands every
     /// submitted frame the GPU has finished, oldest first, to `on_complete` —
     /// `Ok(span)` for a frame finished without error (counted in
-    /// [`WgpuRenderer::frames`]; `span` is the GPU delta when measured),
+    /// [`Renderer::frames`]; `span` is the GPU delta when measured),
     /// `Err` for one that failed on the GPU (not counted). Returns whether a
     /// frame is still in flight.
     ///
@@ -1846,6 +1917,7 @@ impl WgpuRenderer {
     /// **thread-local** with wgpu's `std` feature (`Device::push_error_scope`'s
     /// doc) and errors are raised on the calling thread, so on the shared
     /// device a parallel test's error cannot land in this scope's `pop`.
+    #[cfg(test)]
     pub(crate) fn render_offscreen(&self, edge: u32, clear: LinearRgba, frame: &Frame) -> Vec<u8> {
         let scope = self
             .gpu
@@ -1863,6 +1935,7 @@ impl WgpuRenderer {
 
     /// The same, returning the planning error instead of panicking — the
     /// "no atlas refuses glyphs" guard.
+    #[cfg(test)]
     pub(crate) fn try_submit_offscreen(
         &self,
         edge: u32,
@@ -1980,8 +2053,8 @@ mod tests {
     use objc2_metal::MTLCommandBuffer;
 
     use super::*;
-    use crate::Renderer;
     use crate::glyph_fx::{Effect, Fx, Kind};
+    use crate::renderer::MetalRenderer;
     use crate::renderer::tests::{
         ACCENT, BACKGROUND, MIDTONE, WHITE, bg_cell, cell_rows, commit_offscreen, grid,
         grid_with_gutter, metal_offscreen, pixel_at, target_texture,
@@ -2153,7 +2226,7 @@ mod tests {
         // (The instance count is shared CPU code now and has its guard in
         // `a_wide_cell_becomes_two_quads`.)
         const EDGE: u32 = 64;
-        let w = WgpuRenderer::new();
+        let w = Renderer::new();
         let m = flush_left(w.cell_metrics(SCALE));
         let (cw, ch) = m.cell_px();
         let (cw, ch) = (usize::from(cw), usize::from(ch));
@@ -2197,7 +2270,7 @@ mod tests {
         // the underline lies on it: drawn after the glyph it reads red, drawn
         // before it would vanish under the block's white.
         const EDGE: u32 = 64;
-        let w = WgpuRenderer::new();
+        let w = Renderer::new();
         let m = flush_left(w.cell_metrics(SCALE));
         let mut frame = Frame::default();
         frame.clear(m, CaretStyle::default());
@@ -2231,7 +2304,7 @@ mod tests {
 
     /// Blocks until the device is idle **without** touching the renderer's
     /// bookkeeping: only `poll` may count a frame.
-    fn wait_for_gpu(r: &WgpuRenderer) {
+    fn wait_for_gpu(r: &Renderer) {
         r.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("waiting for the GPU failed");
@@ -2245,7 +2318,7 @@ mod tests {
         // that single poll counts it, and an empty queue arms nothing (the
         // stop condition). `acilis=` closes at the first `Ok` the poll hands
         // over, not at submit.
-        let r = WgpuRenderer::new();
+        let r = Renderer::new();
         assert_eq!(r.frames(), 0);
         let target = r.target(16);
         let stats = Stats::new(Instant::now(), 1);
@@ -2290,7 +2363,7 @@ mod tests {
         // `Err` (the caller sends it to `Retry::draw_failed`) and the frame is
         // never tracked, so it can never be counted — otherwise `make duman`
         // would pass a black window.
-        let r = WgpuRenderer::new();
+        let r = Renderer::new();
         let target = r.target(16);
         r.poison_next_frame();
         let result = r.draw(&target, BACKGROUND, &one_cell_frame());
@@ -2315,7 +2388,7 @@ mod tests {
         // it, through the same callback as a success — one policy for both.
         // A device of its own, so the fault cannot leak into other tests.
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::new().expect("a second device")));
-        let r = WgpuRenderer::on(gpu);
+        let r = Renderer::on(gpu);
         let target = r.target(16);
         r.draw(&target, BACKGROUND, &one_cell_frame())
             .expect("the frame was submitted");
@@ -2338,7 +2411,7 @@ mod tests {
         // sample or rejected — what the hardware gives is its business, the
         // test pins the pipe, like the Metal guard it replaces). Absent: the
         // gate stays closed and the token's value is `unsupported`.
-        let r = WgpuRenderer::new();
+        let r = Renderer::new();
         r.set_gpu_timing(true);
         let target = r.target(16);
         let stats = Stats::new(Instant::now(), 1);
@@ -2991,8 +3064,8 @@ mod tests {
         // eight neighbours equal it is inside a region, where two compilations
         // of the same maths must not differ; a pixel with a differing
         // neighbour is an edge, where one LSB of rounding is allowed.
-        let metal = Renderer::system_default().expect("Metal device and pipelines");
-        let w = WgpuRenderer::new();
+        let metal = MetalRenderer::system_default().expect("Metal device and pipelines");
+        let w = Renderer::new();
         let m = metal.cell_metrics(SCALE);
         assert_eq!(
             m,
@@ -3133,9 +3206,9 @@ mod tests {
         let clear = BACKGROUND;
         let mut frame = Frame::default();
 
-        let metal = Renderer::system_default().expect("Metal device and pipelines");
+        let metal = MetalRenderer::system_default().expect("Metal device and pipelines");
         let texture = target_texture(&metal, usize::from(EDGE));
-        let w = WgpuRenderer::new();
+        let w = Renderer::new();
         w.set_gpu_timing(true);
         let target = w.target(u32::from(EDGE));
         let metal_stats = Stats::new(Instant::now(), 10);

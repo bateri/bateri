@@ -1,74 +1,89 @@
-//! Kareyi süren şey: `CAMetalDisplayLink` ve onu uzaktan açan `Waker`.
+//! What drives the frame: a platform [`Pacer`] (the vsync tick and its
+//! switch), the platform-free [`Ticker::tick`] it calls, and the [`Waker`]
+//! that switches it on from afar.
 //!
-//! Sözleşme tek cümlede: **link paused durur.** Yeni içerik geldiğinde
-//! (`Wake::wake` → [`Waker`]) açılır, hasar **ve hareket** tükenince callback
-//! onu geri kapatır. "Boşta sıfır kare" bu iki satırda yaşıyor; her
-//! `setPaused(false)` bir gerekçe ister ve her kare bir durma koşulu taşır.
+//! The contract in one sentence: **the pacer stays paused.** It starts when
+//! new content arrives (`Wake::wake` → [`Waker`]) and the tick pauses it
+//! again once damage **and motion** run out. "Zero frames at idle" lives in
+//! those two lines; every `set_running(true)` needs a reason and every frame
+//! carries a stop condition.
 //!
-//! **Kareyi isteyen üç şey var** (008, 013):
+//! **The platform's four jobs are behind [`Pacer`]** (040 → Karar 7): the
+//! vsync tick, `set_running` from any thread, one delayed wakeup, and the
+//! time base (`now()`). Everything else — the frame's decision, drawing,
+//! completion, the clock — is here and platform-free. The macOS pacer lives
+//! in `bt-shell` (`NSView.displayLink` as a timer, `dispatch2` for the
+//! delayed wakeup, `CACurrentMediaTime` for `now`); Linux's comes with the
+//! winit set.
 //!
-//! - **Hasar** — `Waker` üzerinden, başka bir thread'den, bayrak dikerek.
-//! - **Hareket** ([`crate::motion`]) — kimseyi uyandırmadan, çünkü zaten
-//!   uyanık olan callback'in kendisi karar veriyor: yerleşmemiş bir animasyon
-//!   varken `needs_update` uyumayı reddediyor. **Çentiğin süzülmesi de bu
-//!   yoldan, yalnız çizimi başka kolda** (027): talebi yine hareketin
-//!   (uyandırma yok, hasar yok), ama payı pencereyi `Session::frame`'in içinde
-//!   kaydırdığı için uçuştaki kare **içerik** karesi olarak çiziliyor ve
-//!   `icerik=`'e giriyor — gerekçe saatin içerik tadınınki: ızgaranın çizilen
-//!   çıktısı gerçekten değişiyor. Durma koşulu süzülmenin kendi yerleşmesi.
-//! - **Saat** ([`LinkDelegate::arm_clock`]) — link uyumaya giderken kurulan
-//!   tek bir gecikmeli uyandırma. **İki tadı var** ve tadını bekleyen işin
-//!   cinsi belirliyor: *içerik tadı* [`Waker::wake`] ile hasar diker (koşan
-//!   komutun süre sayacı; ızgara gerçekten değişiyor, `icerik=` sayması
-//!   doğru), *hareket tadı* [`Waker::resume`] ile dikmez (imlecin yanıp
-//!   sönmesi; değişen tek şey caret'in alfası). Kurulan uyandırma yine
-//!   **tek**: iki son tarihten yakın olanı seçiliyor
-//!   ([`due_clock`]), çünkü `after` iptal edilemiyor ve ikinci bir tik
-//!   birincinin kuşağını geçersiz kılardı.
+//! **Three things ask for a frame** (008, 013):
 //!
-//! **Hareket `Waker`'a dokunmamak zorunda:** [`Waker::wake`] hasar bayrağını
-//! koşulsuz dikiyor, yani oradan istenen bir hareket karesi kendini "içerik"
-//! diye saydırır, grid'i boşuna yeniden taratır ve boşta sıfır kare kapısının
-//! operandını (`icerik=`) şişirirdi. Yani: **animasyonun zamana bağlı kare
-//! talebi hareket saatinden geçer.** Yeni bir animasyon (blink, yumuşak
-//! kaydırma) oraya girer, [`Waker::wake`]'e değil.
+//! - **Damage** — through the `Waker`, from another thread, by planting a
+//!   flag.
+//! - **Motion** ([`crate::motion`]) — without waking anyone, because the tick
+//!   that is already running decides: while an animation has not settled,
+//!   the tick refuses to sleep. **The notch glide takes this road too, only
+//!   its drawing is on the other branch** (027): its request is motion's (no
+//!   wakeup, no damage), but its share scrolls the window inside
+//!   `Session::frame`, so a frame in flight is drawn as a **content** frame
+//!   and counted in `icerik=` — for the reason the clock's content flavour
+//!   has: what the grid draws really changes. Its stop condition is the
+//!   glide's own settling.
+//! - **The clock** (`Core::arm_clock`) — a single delayed wakeup armed as
+//!   the pacer goes to sleep. **It has two flavours**, chosen by the kind of
+//!   work that waits: the *content flavour* plants damage through
+//!   [`Waker::wake`] (a running command's duration counter; the grid really
+//!   changes, so counting it in `icerik=` is right), the *motion flavour*
+//!   does not, through [`Waker::resume`] (the cursor's blink; only the
+//!   caret's alpha changes — and the completion poll of a frame still in
+//!   flight, Karar 6). The armed wakeup is still **one**: the nearest
+//!   deadline wins ([`due_clock`]), because a delayed wakeup cannot be
+//!   cancelled and a second one would invalidate the first's generation.
 //!
-//! **Saatin içerik tadı yasağın istisnası değil, başka bir şey.** Animasyon
-//! aynı içeriği farklı çizer; saat **içeriğin kendisini** değiştirir (koşan
-//! komutun süre sayacı: ızgaranın çizilen çıktısı gerçekten başkalaşıyor). Bu
-//! yüzden `Waker::wake` üzerinden gitmesi ve `icerik=` sayması **doğrudur** —
-//! yasağın koruduğu şey bunun tersiydi. Ayıran ölçüt üç şart: içerik gerçekten
-//! değişecek, periyodu ekran hızından **çok** düşük olacak ve **adlandırılmış
-//! bir durma koşulu** taşıyacak. Üçünü sağlamayan zamana bağlı talep oraya
-//! giremez.
+//! **Motion must not touch the `Waker`:** [`Waker::wake`] plants the damage
+//! flag unconditionally, so a motion frame requested there would count
+//! itself as "content", rescan the grid for nothing and inflate the operand
+//! of the zero-frames-at-idle gate (`icerik=`). Hence: **an animation's
+//! time-driven frame request goes through the motion clock.** A new
+//! animation (blink, smooth scrolling) enters there, not [`Waker::wake`].
 //!
-//! **Blink üçünden birincisini geçemiyor ve hareket tadı bu yüzden var.**
-//! Izgara değişmiyor, yalnız caret'in alfası — yani blink bir hareket
-//! karesidir. Ama ekran hızına da bağlanamaz (2 Hz'lik bir değişim için
-//! tazeleme hızında kare), o yüzden `Motion`'ın içinde değil kendi tipinde
-//! yaşıyor ([`crate::blink`]) ve tetiği saat. [`Waker::resume`] hasar
-//! dikmediği için uyanan callback "hasar yok" dalına düşüyor ve orada bugünkü
-//! hareket karesi çiziliyor — ızgara taraması yok, `Term` kilidi yok,
-//! `bt-core` yolculuğu yok. **Uyku testi bu yüzden üç soru soruyor** (030'dan
-//! beri dört — yazım efektleri de `Motion`'ın dışında, aşağıda): blink
-//! `Motion`'ın dışında olduğu için `settled()` onu görmüyor ve bekleyen bir
-//! faz değişimi sorulmasaydı `resume` kare üretmeyen bir uyan/uyu fırdöndüsü
-//! yaratırdı.
+//! **The clock's content flavour is not an exception to that ban, it is
+//! something else.** An animation draws the same content differently; the
+//! clock changes **the content itself** (the running command's counter: what
+//! the grid draws really differs). So going through `Waker::wake` and
+//! counting in `icerik=` is **right** — the ban protected the opposite. The
+//! test has three conditions: the content really changes, its period is
+//! **much** longer than the refresh, and it carries a **named stop
+//! condition**. A time-driven request that fails any of them cannot go there.
 //!
-//! **Dock'un yazım efektleri de hareket yolundan** (030,
-//! [`crate::glyph_fx`]): `Motion`'ın dışında yaşıyorlar (blink emsali) ve
-//! uyku testine kendi adlı terimleriyle giriyorlar — uçuşta bir geliş ya da
-//! hayalet varken link uyumuyor, liste boşalınca uyuyor. Hasar dikmiyorlar:
-//! efektin sürdüğü kare `kare`'yi artırıyor, `icerik`'i değil.
+//! **Blink fails the first, and that is why the motion flavour exists.** The
+//! grid does not change, only the caret's alpha — so blink is a motion frame.
+//! But it cannot be tied to the refresh either (a frame per refresh for a
+//! 2 Hz change), so it lives in its own type ([`crate::blink`]), not inside
+//! `Motion`, and its trigger is the clock. [`Waker::resume`] plants no
+//! damage, so the woken tick lands on the "no damage" branch and draws the
+//! motion frame there — no grid scan, no `Term` lock, no trip into
+//! `bt-core`. **The sleep test therefore asks three questions** (four since
+//! 030 — the typing effects live outside `Motion` too, below): blink lives
+//! outside `Motion`, so `settled()` does not see it, and without asking
+//! about a pending phase change `resume` would create a wake/sleep spin that
+//! draws nothing.
 //!
-//! Sözleşmenin sonucu tek cümlede: koşan komutu **ya da sönen bir imleci**
-//! olan pencere **boşta değildir**; kalan her pencere boştadır ve sıfır kare
-//! çizer. İkisi de adlandırılmış bir durma koşulu taşıyor — komut biter, blink
-//! ise varsayılan kapalıdır ve açıkken bile klavye sessizliğinden sonra durur
-//! ([`crate::blink::Blink`]).
+//! **The dock's typing effects take the motion road too** (030,
+//! [`crate::glyph_fx`]): they live outside `Motion` (blink's precedent) and
+//! enter the sleep test under their own named term — while an arrival or a
+//! ghost is in flight the pacer does not sleep, when the list empties it
+//! does. They plant no damage: a frame an effect keeps alive raises `kare`,
+//! not `icerik`.
+//!
+//! The contract's consequence in one sentence: a window with a running
+//! command **or a blinking cursor** is **not idle**; every other window is
+//! idle and draws zero frames. Both carry a named stop condition — the
+//! command ends, and blink is off by default and even when on stops after
+//! keyboard silence ([`crate::blink::Blink`]).
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -78,308 +93,323 @@ use bt_core::{
     DockContext, DockState, Erase, Keypress, LinearRgba, SearchRuns, SelectionRun, SelectionRuns,
     Session, Theme,
 };
-use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
-// Yalnız tamamlanma bloğunun GPU damgaları için: `GPUStartTime`/`GPUEndTime`
-// `MTLCommandBuffer` protokolünde ve trait kapsamda olmadan çağrılamaz.
-use objc2_metal::{MTLCommandBuffer, MTLTexture};
-use objc2_quartz_core::CAMetalDrawable;
-use objc2_quartz_core::{
-    CACurrentMediaTime, CAMetalDisplayLink, CAMetalDisplayLinkDelegate, CAMetalDisplayLinkUpdate,
-};
 
 use crate::blink::Blink;
 use crate::frame::{DOCK_ROWS, Frame};
 use crate::glyph_fx::GlyphFx;
 use crate::motion::Motion;
-use crate::renderer::{CellMetrics, Completion};
+use crate::renderer::CellMetrics;
 use crate::stats::Stats;
+use crate::surface::{self, Acquired};
 use crate::{GpuError, Renderer, Surface};
 
-/// **Hasardan kare istemenin tek tanımı**: hasar bayrağını dik, link'i aç.
+/// The platform's side of the frame loop — **four jobs** (040 → Karar 7).
 ///
-/// Her thread'den çağrılabilir; `Clone`, `Send + Sync`.
+/// 1. **The vsync tick.** The pacer calls [`Ticker::tick`] once per display
+///    refresh while running, on the thread that created the
+///    [`DisplayLink`] (the `Ticker` is not `Send`, so the type holds it
+///    there). [`Pacer::stop`] is this job's teardown: the tick source is
+///    torn down for good (on macOS: invalidated and off the run loop).
+/// 2. **[`Pacer::set_running`] from any thread.** **Starting is
+///    asynchronous**: a start lands after the current tick has returned,
+///    even when asked from the tick's own thread. The frame policy relies on
+///    it — `Retry` asks for one more frame from inside a tick that may pause
+///    before returning, and a synchronous start would be swallowed by that
+///    pause. **Pausing is immediate** when asked from the tick's thread. A
+///    start may race with the visibility gate closing; the tick's first
+///    check (a closed gate pauses) settles it, and under the timer-only
+///    provider that stray tick costs no drawable (acquisition is the tick's,
+///    after the gate). After [`Pacer::stop`], starting does nothing.
+/// 3. **[`Pacer::after`] — one delayed wakeup.** `wake` runs once after
+///    `delay`, on any thread; it cannot be cancelled, which is why the
+///    clock keeps a generation ([`Core::arm_clock`]).
+/// 4. **[`Pacer::now`] — the time base.** Seconds on **the same base as the
+///    tick's stamp**. The stamp is the target presentation time when the
+///    provider knows it (macOS's `targetTimestamp`), otherwise `now()`.
+///    `dt`, the content deadline, blink, the clock's delay and `sessiz=` all
+///    read this one base; a second clock would create two times (the ban is
+///    `Core::last_update_at`'s).
+pub trait Pacer: Send + Sync {
+    /// Starts or pauses the tick (job 2).
+    fn set_running(&self, running: bool);
+    /// Runs `wake` once after `delay` (job 3).
+    fn after(&self, delay: Duration, wake: Box<dyn FnOnce() + Send>);
+    /// Now, on the tick stamps' base (job 4).
+    fn now(&self) -> f64;
+    /// Tears the tick down for good (job 1's end).
+    fn stop(&self);
+}
+
+/// Where this tick draws — the seam of Karar 7's two providers.
 ///
-/// **İkinci bir kapı var ve bilerek** ([`Waker::resume`]): o hasar dikmeden
-/// açıyor. Uzun süre "ikisini ayrı ayrı yapan yol bilerek yok" yazıyordu ve
-/// gerekçesi doğruydu — bayraksız açılan link "hasar yok" deyip anında geri
-/// uyar. 014 o gerekçeyi **karşıladı**: uyanan callback'in "hasar yok" dalında
-/// artık yapacak bir işi olabiliyor (blink'in faz değişimi), yani link boşuna
-/// uyanmıyor. Bayraksız açmanın tek meşru sebebi bu.
+/// Today only (b): the pacer is a timer and the frame takes its texture from
+/// the window's [`Surface`]. The (a) provider (a display link handing over a
+/// drawable, wrapped with `create_texture_from_hal`) would add a variant
+/// carrying that texture, if the window path's measurement asks for it
+/// (phase-5b); no variant is written ahead of its provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TickTarget {
+    /// Acquire this frame's texture from the window's surface.
+    Surface,
+}
+
+/// **The single definition of asking for a frame from damage**: plant the
+/// damage flag, start the pacer.
 ///
-/// **Animasyon [`Waker::wake`]'ten kare istemez** (modül başlığı): hareket,
-/// uyanık callback'in kendi kararı. Bu kapıya bağlanan bir animasyon her
-/// karesine hasar diker ve `icerik=` sayacını — yani boşta sıfır kare kapısını
-/// — kendi karelerinden doldururdu. Yasağın öznesi **bu fonksiyon**, tipin
-/// kendisi değil.
+/// Callable from any thread; `Clone`, `Send + Sync`.
 ///
-/// **Saat ise buradan geçer** ([`LinkDelegate::arm_clock`]) ve çelişki değil:
-/// sayacın tiki içeriği gerçekten değiştiriyor, yani `icerik=` sayması
-/// yerinde. Ayıran üç şart modül başlığında.
+/// **There is a second door, on purpose** ([`Waker::resume`]): it starts
+/// without planting damage. For a long time the text said "a path doing the
+/// two separately does not exist on purpose", and the reason was right — a
+/// pacer started without the flag says "no damage" and goes straight back to
+/// sleep. 014 **answered** that reason: the tick's "no damage" branch can now
+/// have work to do (blink's phase change), so the pacer does not wake for
+/// nothing. That is the only legitimate reason to start without the flag.
+///
+/// **An animation does not ask [`Waker::wake`] for frames** (module header):
+/// motion is the running tick's own decision. An animation wired to this
+/// door would plant damage on every frame and fill the `icerik=` counter —
+/// the zero-frames-at-idle gate — with its own frames. The ban's subject is
+/// **this function**, not the type.
+///
+/// **The clock does go through here** (`Core::arm_clock`) and it is not a
+/// contradiction: the counter's tick really changes the content, so counting
+/// it in `icerik=` is right. The three conditions are in the module header.
 #[derive(Clone)]
 pub struct Waker {
     inner: Arc<WakerInner>,
 }
 
 struct WakerInner {
-    /// Hasar bayrağı — oturumun kendisi **değil**.
+    /// The damage flag — **not** the session itself.
     ///
-    /// `Arc<Session>` (hatta `Weak`, çünkü `upgrade()` onu çağrı süresince
-    /// maddileştirir) burada olamaz: bu gövdeyi okuyucu thread de, Metal'in
-    /// tamamlanma thread'i de tutuyor ve son güçlü referans oralardan birinde
-    /// düşerse `Drop for Session` → `shutdown()` o thread'de koşar — `join`
-    /// artık ayrı bir thread'de ve sınırlı, yani panik değil ama yarım
-    /// saniyelik bir durma ve hiç bitmeyen bir kapanış.
-    /// `wake.rs`'in Sahiplik paragrafı bunu adıyla yasaklıyor.
+    /// `Arc<Session>` (even `Weak`, since `upgrade()` materialises it for the
+    /// call) cannot be here: the reader thread holds this body too, and if
+    /// the last strong reference dropped there, `Drop for Session` →
+    /// `shutdown()` would run on that thread — `join` is on a separate,
+    /// bounded thread now, so not a panic, but a half-second stall and a
+    /// shutdown that never finishes. `wake.rs`'s ownership paragraph bans it
+    /// by name.
     dirty: DirtyFlag,
-    /// `Retained<CAMetalDisplayLink>` kendiliğinden `Send` değil;
-    /// `MainThreadBound` erişimi `MainThreadMarker`'a bağlayarak taşımayı
-    /// güvenli kılıyor — ve kimin dokunabileceğini tipte yazıyor.
+    /// The platform's tick switch and clock ([`Pacer`]); every thread
+    /// reaches it through here.
     ///
-    /// **Ama `Drop`'u ana thread dışında bloklar:** ana kuyruğa `exec_sync`
-    /// ile iş atıp bekler. Bu gövdeyi Metal'in tamamlanma bloğu da tutuyor,
-    /// yani son referans orada düşerse ve ana thread o sırada kapanışta
-    /// bekliyorsa ikisi birbirini kilitler. Kapanış yolu bu yüzden önce
-    /// [`DisplayLink::stop`] çağırır ve **beklerken** `DisplayLink`'i
-    /// düşürmez: son referans ana thread'de kalır. Beklemeyen bir kapanış
-    /// (`bt-shell`'de tek sekmenin kapanışı) onu düşürebilir — ana thread
-    /// beklemede değilken tamamlanma bloğunun senkron işi yalnız bir tur
-    /// gecikir; okuyucu tarafındaki kopyayı ise `bt-shell` kapanışta söküyor.
-    link: MainThreadBound<Retained<CAMetalDisplayLink>>,
-    /// Kare çizilir mi, ritim döner mi.
+    /// **Its drop may block off the main thread** on macOS (the pacer holds
+    /// a main-thread-bound display link, whose drop synchronously hops to
+    /// the main queue). The shutdown path therefore stops the link first and
+    /// does not drop the `DisplayLink` **while waiting**: the last reference
+    /// stays on the main thread. A non-waiting shutdown (one pane closing in
+    /// `bt-shell`) may drop it; `bt-shell` removes the reader side's copy on
+    /// close.
+    pacer: Arc<dyn Pacer>,
+    /// Whether frames are drawn and the rhythm turns.
     gate: Gate,
-    /// Kare **talebi** sayacı — boşta sıfır karenin `kare`'den daha derin
-    /// ölçütü.
+    /// The frame **request** counter — a deeper measure of zero frames at
+    /// idle than `kare`.
     ///
-    /// `kare` GPU'nun hatasız bitirdiğini sayıyor: bizim tarafımızda doğup
-    /// [`Gate`]'te ölen ya da birleşen talepler ona hiç görünmez. Bu sayaç
-    /// kapıdan **önce** artıyor, yani talebin kendisini sayıyor — örtülü bir
-    /// pencerede kapı kareyi yutsa da talep burada iz bırakır.
+    /// `kare` counts what the GPU finished without error: requests born and
+    /// dying in the [`Gate`] or merged on our side are invisible to it. This
+    /// counter rises **before** the gate, so it counts the request itself —
+    /// on an occluded window the gate swallows the frame but the request
+    /// leaves a trace here.
     ///
-    /// **Ne sayıyor:** [`Waker::wake`]'e yapılan *her* çağrı. Yani yalnız
-    /// shell çıktısı değil; [`Retry::draw_failed`]'in yeniden denemesi,
-    /// [`DisplayLink::resize`]'ın koşulsuz talebi ve `stopped` mandalı
-    /// indikten sonra okuyucudan gelen son uyandırmalar da buraya yazılıyor.
-    /// Sayı bu yüzden "kare üretebilecek talep" değil "istenen kare"; kalıcı
-    /// bir çizim hatası onu şişirir ve okuyan taraf bunu `kare` ile
-    /// karşılaştırarak ayırt eder.
+    /// **What it counts:** *every* call to [`Waker::wake`]. So not only shell
+    /// output: [`Retry::draw_failed`]'s retry, [`DisplayLink::resize`]'s
+    /// unconditional request and the reader's last wakeups after the
+    /// `stopped` latch dropped are written here too. The number is "frames
+    /// asked for", not "requests that can produce a frame"; a permanent draw
+    /// error inflates it and the reader tells them apart by comparing with
+    /// `kare`.
     ///
-    /// **Ne saymıyor: hareket karesini** — ne uyanık callback'in kendi
-    /// kararıyla çizdiğini, ne de saatin hareket tadıyla ([`Waker::resume`])
-    /// uyandırdığını; `resume` bu sayaca bilerek dokunmuyor. Animasyon
-    /// [`Waker::wake`]'e hiç dokunmuyor
-    /// (modül başlığı), yani bu sayaç `icerik`'e yakın kalırken `kare`
-    /// animasyon boyunca ondan kopuyor. Aşağıdaki "duman yükü" ölçümünün
-    /// `istek ≈ kare + 2` ilişkisi tam bu yüzden **008'de geçersizleşti**;
-    /// sayıların kendisi (o günkü koşuların gözlemi) duruyor, yeni hâli
-    /// `icerik` üstünden **ölçüldü** (008 phase-6, otuz sağlıklı koşu):
-    /// `istek` otuzunda da `4` iken `icerik` `2`–`3`, `kare` ise 27–30. Sayaç
-    /// yine de **sabit değil** — sonraki bir koşu `3` verdi, muhtemelen bu
-    /// gövdenin birleştirmesi yüzünden; ölçülmedi.
+    /// **What it does not count: motion frames** — neither those the running
+    /// tick draws on its own decision nor those the clock's motion flavour
+    /// ([`Waker::resume`]) wakes; `resume` does not touch this counter on
+    /// purpose. An animation never touches [`Waker::wake`] (module header), so
+    /// this counter stays close to `icerik` while `kare` drifts away from it
+    /// during an animation. The `istek ≈ kare + 2` relation of the "smoke
+    /// load" measurement below **stopped holding in 008** for exactly that
+    /// reason; the numbers themselves (that day's observations) stay, the new
+    /// form was **measured** through `icerik` (008 phase-6, thirty healthy
+    /// runs): `istek` was `4` in all thirty while `icerik` was `2`–`3` and
+    /// `kare` 27–30. The counter is still **not constant** — a later run gave
+    /// `3`, probably because of the coalescing; not measured.
     ///
-    /// Bir **sayaç, kapı değil**: eşiği ölçülmedi ve ölçülmemiş sayı kapıya
-    /// yazılmaz (`yuva=` ile aynı kural). Ölçülen (2026-09-12, debug, bu
-    /// makine) iki ayrı rejim gösteriyor ve ikisi de sayacın niye ayrı bir
-    /// sayı olduğunu söylüyor:
+    /// A **counter, not a gate**: its threshold was not measured and an
+    /// unmeasured number is not written into a gate (the rule of `yuva=`).
+    /// What was measured (2026-09-12, debug, this machine) shows two separate
+    /// regimes, and both say why the counter is a separate number:
     ///
-    /// - **Duman yükü** — sağlıklı koşuda `kare=1–2` iken `istek=2–3`; boşta
-    ///   sıfır kare bilerek bozulduğunda `kare=82–354`, `istek=84–357`. İkisi
-    ///   bir arada gidiyor, yani burada `kare`'den daha ayırt edici değil.
-    /// - **Ölçüm yükü** — `kare=9` (2 sn) / `21` (5 sn) iken `istek`
-    ///   **25 000–72 000**. Kare akmıyor ama talep akıyor: aradaki üç
-    ///   mertebeyi `kare` hiç göremiyor.
+    /// - **Smoke load** — in a healthy run `kare=1–2` while `istek=2–3`; with
+    ///   zero frames at idle broken on purpose `kare=82–354`, `istek=84–357`.
+    ///   They move together, so here it is no more telling than `kare`.
+    /// - **Measurement load** — `kare=9` (2 s) / `21` (5 s) while `istek` is
+    ///   **25 000–72 000**. Frames do not flow but requests do: `kare` cannot
+    ///   see the three orders of magnitude in between.
     ///
-    /// İkinci rejimin **mekanizmasını ölçmedim** (kapı mı yutuyor, ana thread
-    /// mi doyuyor, sistem mi link'i kısıyor); dışarıdan gözlenen iki sayıyı
-    /// yazdım.
+    /// I **did not measure the mechanism** of the second regime (the gate
+    /// swallowing, the main thread saturating, the system throttling the
+    /// link); I wrote the two numbers seen from outside.
     ///
-    /// `Relaxed`, çünkü hiçbir şeyi sıralamıyor — kapanışta bir kez okunuyor.
+    /// `Relaxed`, because it orders nothing — it is read once at shutdown.
     ///
-    /// **Kapılı değil ve bedeli ölçüldü.** Sayacı okuyan tek yer süreli koşu
-    /// (`report_and_exit`), yani etkileşimli oturumda kimse bakmıyor; buna
-    /// rağmen kapı takılmadı, çünkü bedel kapının kendi bedelinden büyük
-    /// değil: ölçülen en yüksek uyandırma hızı **~15 000/sn**
-    /// (45 167 talep / 3 sn, ölçüm yükü) ve bu, `pending.swap`'in zaten
-    /// kirlettiği önbellek satırında saniyede bir kez daha `fetch_add` demek —
-    /// mertebe olarak **saniyede on mikrosaniye**. Bir `Option` dallanması
-    /// aynı mertebeyi ödetir, üstelik `DisplayLink::new`'e bir parametre
-    /// ekleyerek.
+    /// **Not gated, and the cost was measured.** The only reader is the timed
+    /// run (`report_and_exit`), so nobody looks in an interactive session; no
+    /// gate was fitted anyway, because the cost is not above the gate's own:
+    /// the highest wakeup rate measured is **~15 000/s** (45 167 requests /
+    /// 3 s, measurement load), which is one more `fetch_add` per wakeup on a
+    /// cache line the pacer's coalescing already dirties — **ten microseconds
+    /// a second** in order of magnitude. An `Option` branch costs the same
+    /// order, and adds a parameter to `DisplayLink::new`.
     requests: AtomicU64,
-    /// Ana kuyrukta bekleyen bir "aç" işi var mı.
-    ///
-    /// Kareler zaten birleşiyordu, **dispatch'ler birleşmiyordu**: alacritty
-    /// `Wakeup`'ı işlenen her ≤64 KiB için ve her okuma turunun sonunda
-    /// yolluyor, yani sürekli çıktıda saniyede binlerce kez. Her biri bir
-    /// kapanış kutulaması, bir kuyruk girişi ve **ana thread'in uyandırılması**
-    /// demekti — hepsi aynı idempotent `setPaused(false)` için. PTY yükü bu
-    /// yolla doğrudan çizim thread'inin ritmine giriyordu.
-    pending: AtomicBool,
 }
 
 impl Waker {
-    /// Herhangi bir thread'den çağrılabilir; işi ana kuyruğa atar ve **hemen
-    /// döner**. `Wake` sözleşmesi gereği bloklamaz, kilit almaz.
+    /// Callable from any thread; hands the start to the pacer and **returns
+    /// at once**. By the `Wake` contract it does not block or take a lock.
     ///
-    /// Uçuşta bir iş varken gelen uyandırmalar **dispatch** düzeyinde düşer ve
-    /// bu kayıpsızdır: bayrak her çağrıda dikilir, düşen uyandırma da bayrağı
-    /// henüz `setPaused(false)` yapmamış bir bloğun önüne düşer (blok sırayı
-    /// `pending` → `setPaused` diye kuruyor), yani link her hâlükârda açılır.
+    /// The pacer coalesces starts (the macOS one drops a start while one is
+    /// queued) and that is lossless: the flag is planted on every call, and
+    /// a queued start opens the tick, which reads the flag.
     pub fn wake(&self) {
-        // Sayaç kapıdan da bayraktan da **önce**: ölçmek istediğimiz şey
-        // talebin kendisi, kapının ondan sonra ne yaptığı değil.
+        // The counter comes **before** the gate and the flag: what we want
+        // to measure is the request itself, not what the gate does with it.
         self.inner.requests.fetch_add(1, Ordering::Relaxed);
-        // Hasar HER ZAMAN dikilir; görünmezken yalnız link açılmaz. Bayrak
-        // tüketilmediği için görünürlük dönünce birikmiş hasar çizilir.
+        // Damage is ALWAYS planted; while invisible only the pacer is not
+        // started. The flag is not consumed, so when visibility returns the
+        // accumulated damage is drawn.
         self.inner.dirty.mark();
         if !self.inner.gate.is_open() {
             return;
         }
-        if self.inner.pending.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let inner = Arc::clone(&self.inner);
-        DispatchQueue::main().exec_async(move || {
-            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            inner.pending.store(false, Ordering::Release);
-            // Kapı **burada da** okunuyor: bu blok kuyruğa girdikten sonra
-            // pencere örtülmüş ya da link durdurulmuş olabilir. Okumasaydı
-            // link bir kez açılır, bir vsync callback'i ve bir drawable
-            // ödenirdi — ve `stop()` sonrası bu, `invalidate`'in ardından
-            // gelen `setPaused(false)`'un etkisiz olduğu varsayımına
-            // dayanmak olurdu; kodun geri kalanı o varsayımı bilerek yapmıyor.
-            if !inner.gate.is_open() {
-                return;
-            }
-            inner.link.get(mtm).setPaused(false);
-        });
+        self.inner.pacer.set_running(true);
     }
 
-    /// Link'i **hasar dikmeden** açar — saatin ikinci tadı.
+    /// Starts the pacer **without planting damage** — the clock's second
+    /// flavour.
     ///
-    /// [`Waker::wake`]'in üç işinden ortadaki çıkarılmış hâli: kapı aynı,
-    /// `pending` birleştirmesi aynı, dispatch aynı; `dirty.mark()` **yok**.
-    /// Uyanan callback bu yüzden "hasar yok" dalına düşüyor ve orada bir
-    /// **hareket** karesi çiziliyor — ızgara yeniden taranmıyor, `Term`
-    /// kilidine girilmiyor, `icerik=` artmıyor.
+    /// [`Waker::wake`] with its middle job removed: the same gate, the same
+    /// start; no `dirty.mark()`. The woken tick therefore lands on the "no
+    /// damage" branch and draws a **motion** frame there — the grid is not
+    /// rescanned, the `Term` lock is not taken, `icerik=` does not rise.
     ///
-    /// `requests` de artmıyor: o sayacın sözleşmesi "istenen **içerik**
-    /// karesi" ve hareket karesini bilerek saymıyor (`requests`'in doc'u).
+    /// `requests` does not rise either: that counter's contract is "content
+    /// frames asked for" and it leaves motion frames out on purpose (its
+    /// doc).
     ///
-    /// **Birleştirmeyi `wake` ile paylaşması kayıpsız:** ikisi de aynı bloğa
-    /// çıkıyor ve blok sırayı `pending` → `setPaused(false)` diye kuruyor;
-    /// `wake` bayrağı kapıdan **önce** koşulsuz diktiği için ona birleşen bir
-    /// `resume`'un hasarı kaybolmaz, tersi de açılmayı kaybetmez.
+    /// **Sharing the pacer's coalescing with `wake` is lossless:** both end
+    /// in the same start; `wake` plants its flag **before** the gate,
+    /// unconditionally, so a `resume` merged into it loses no damage, and the
+    /// reverse loses no start.
     pub(crate) fn resume(&self) {
         if !self.inner.gate.is_open() {
             return;
         }
-        if self.inner.pending.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let inner = Arc::clone(&self.inner);
-        DispatchQueue::main().exec_async(move || {
-            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            inner.pending.store(false, Ordering::Release);
-            if !inner.gate.is_open() {
-                return;
-            }
-            inner.link.get(mtm).setPaused(false);
-        });
+        self.inner.pacer.set_running(true);
+    }
+
+    /// Plants the damage flag again without starting — a frame that could
+    /// not be drawn (no texture this tick) keeps its content for the next
+    /// request.
+    fn keep_damage(&self) {
+        self.inner.dirty.mark();
     }
 
     fn gate(&self) -> &Gate {
         &self.inner.gate
     }
 
-    /// Şimdiye kadarki kare talebi sayısı.
+    fn pacer(&self) -> &dyn Pacer {
+        &*self.inner.pacer
+    }
+
+    /// Frame requests so far.
     fn requests(&self) -> u64 {
         self.inner.requests.load(Ordering::Relaxed)
     }
 }
 
-/// Çizilen karenin dikey orijini, piksel — **kare yolu yazar, fare yolu
-/// okur**. Yanında doldurma bandının boyu (satır) taşınıyor.
+/// The drawn frame's vertical origin, in pixels — **the frame path writes,
+/// the mouse path reads**. The fill band's height (rows) travels with it.
 ///
-/// **Band orijinin geometrisinin parçası**, ikinci bir konu değil: bandın
-/// kendi viewport'u da buradan türüyor (`Frame::fill_origin_px`,
-/// `origin_px − fill_px`) ve fare eşlemesinin sorduğu şey de orijinin
-/// **üstünde** ne olduğu — boşluk mu, geçmiş mi. Ayrı bir gövdeye konsaydı
-/// iki değer iki ayrı karede yayınlanabilir ve orijini yeni, bandı eski bir
-/// fare çevirisi doğardı.
+/// **The band is part of the origin's geometry**, not a second subject: the
+/// band's own viewport derives from here (`Frame::fill_origin_px`,
+/// `origin_px − fill_px`), and what the mouse mapping asks is what lies
+/// **above** the origin — a gap or history. Kept in separate bodies, the
+/// two values could be published in two different frames and a mouse
+/// translation with a new origin and an old band would be born.
 ///
-/// Değerin **tek sahibi** [`DisplayLink`]: hesabı `Session::frame` yapıyor
-/// (`bt_core::Cursor::content_rows`, tek hesap) ama ötelemeye çeviren ve
-/// çizime sokan kare yolu, yani okuyan taraf da oradan okumak zorunda —
-/// ikinci bir hesap, "fare bir satır kayıyor" diye görünen bir ayrışma
-/// demekti.
+/// The value has **one owner**, [`DisplayLink`]: `Session::frame` computes it
+/// (`bt_core::Cursor::content_rows`, one computation), but the frame path is
+/// what turns it into an offset and draws it, so the reading side must read
+/// from there too — a second computation would be a drift that shows as "the
+/// mouse is one row off".
 ///
-/// **Atomik değil, `Cell`** ve bu bir kısayol değil ölçülü bir gerçek: link
-/// callback'i ana run loop'a eklendiği için ana thread'de koşuyor
-/// ([`LinkDelegate`] `MainThreadOnly`) ve `point_to_cell`'in çağıranı da
-/// (NSView fare olayı) ana thread'de. İki taraf aynı thread'de, yani yarış
-/// yok. `Arc<AtomicU32>`'ye kaçmak atomik gerekiyormuş gibi yazmak olurdu ve
-/// `make test-yaris`'in "paylaşılan durum" tetiğini gerekçesiz geri
-/// getirirdi (`.tasks/011-tabana-yapisik-icerik/discussion.md` → Karar 4 eki).
+/// **Not atomic, a `Cell`**, and that is not a shortcut but a fact: the tick
+/// runs on the thread that created the link — the main thread, where the
+/// macOS pacer's timer is on the main run loop — and `point_to_cell`'s
+/// caller (an `NSView` mouse event) is on the main thread too. Both sides are
+/// on one thread, so there is no race. Escaping to `Arc<AtomicU32>` would
+/// write as if atomics were needed and bring back `make test-yaris`'s "shared
+/// state" trigger without reason
+/// (`.tasks/011-tabana-yapisik-icerik/discussion.md` → Karar 4 eki).
 ///
-/// `Rc` bu yüzden `Send` değil ve olmamalı: tipin kendisi "ana thread"i
-/// söylüyor.
+/// So `Rc` is not `Send`, and must not be: the type itself says "main
+/// thread".
 ///
-/// Okunan değer **son encode edilen karenin** orijini. Bayatlık değil tasarım:
-/// tıklama ekrandaki piksele yapılıyor ve o piksel o karede çizildi. Yayın bu
-/// yüzden `draw`'ın `Ok` kolunda ([`LinkDelegate::publish_origin`]) —
-/// encode edilemeyen kare ekranda hiçbir şeyi değiştirmedi ve onun ötelemesini
-/// yayınlamak fareyi görünmeyen bir ızgaraya göre çevirirdi. "Çizilen" değil
-/// "encode edilen": `Ok` commit demek, sunum değil, ve asenkron tamamlanma
-/// yine düşebilir — kalan pencere tek kare, çünkü `draw_failed` hasar bayrağını
-/// geri dikiyor ve sıradaki kare aynı ötelemeyle yeniden çiziliyor.
+/// The value read is **the last encoded frame's** origin. Not staleness but
+/// design: a click lands on a pixel on screen and that pixel was drawn in
+/// that frame. The publication is therefore in `draw`'s `Ok` arm
+/// (`Core::publish_origin`) — a frame that could not be encoded changed
+/// nothing on screen, and publishing its offset would translate the mouse
+/// against an invisible grid. "Encoded", not "drawn": `Ok` means submitted,
+/// not presented, and asynchronous completion can still fail — the
+/// remaining window is one frame, because `draw_failed` plants the damage
+/// flag again and the next frame is drawn again with the same offset.
 #[derive(Clone, Default)]
 pub struct Origin(Rc<Cell<Drawn>>);
 
-/// [`Origin`]'in gövdesi: tek karenin geometrisi, birlikte yayınlanır.
+/// [`Origin`]'s body: one frame's geometry, published together.
 #[derive(Clone, Copy, Default)]
 struct Drawn {
     px: f32,
     fill_rows: u16,
-    /// Dock'un giriş bloğunun tepesi (fiziksel piksel, üstten) ve giriş
-    /// satırı sayısı (032); `None` → bu karede dock yok.
+    /// The top of the dock's input block (physical pixels, from the top) and
+    /// the number of input rows (032); `None` → no dock in this frame.
     dock: Option<(f32, u16)>,
 }
 
 impl Origin {
-    /// Çizilen karenin dikey orijini, **fiziksel piksel** — kaydırmanın
-    /// kesri dahil (`Frame::set_scroll_frac`), yani fare ızgarayı çizildiği
-    /// yerde okuyor.
+    /// The drawn frame's vertical origin, **physical pixels** — the scroll
+    /// fraction included (`Frame::set_scroll_frac`), so the mouse reads the
+    /// grid where it was drawn.
     pub fn px(&self) -> f32 {
         self.0.get().px
     }
 
-    /// Orijinin üstündeki doldurma kanalının boyu, **satır**: bant
-    /// (`bt_core::Cursor::fill`) artı kaydırma kesrinin tepe satırı
-    /// (`bt_core::Cursor::top_row`). Sıfırsa orada boşluk var, değilse geçmiş
-    /// — kesirli konumda tepedeki yarım satır da bandınki gibi seçilemiyor.
+    /// The height of the fill channel above the origin, **rows**: the band
+    /// (`bt_core::Cursor::fill`) plus the scroll fraction's top row
+    /// (`bt_core::Cursor::top_row`). Zero means a gap there, otherwise
+    /// history — in a fractional position the half row at the top cannot be
+    /// selected either, like the band's.
     pub fn fill_rows(&self) -> u16 {
         self.0.get().fill_rows
     }
 
-    /// Çizilen karenin dock geometrisi: giriş bloğunun tepesi (**fiziksel
-    /// piksel**, dokunun tepesinden) ve giriş satırı sayısı; `None` → dock
-    /// yok ya da henüz hiç çizilmedi.
+    /// The drawn frame's dock geometry: the top of the input block
+    /// (**physical pixels**, from the texture's top) and the number of input
+    /// rows; `None` → no dock, or never drawn yet.
     ///
-    /// Orijinle **aynı gövdede** ve aynı sebeple (032): bant büyürken ızgara
-    /// yukarı, giriş bloğu satır satır genişliyor ve ikisi ayrı karelerden
-    /// yayınlansaydı tıklama orijini yeni, bloğu eski bir kareye göre
-    /// çevirebilirdi. Değer **yerleşimin** (`Frame::dock_hit`): metin dibe
-    /// yaslı ve animasyon boyunca yerinde duruyor.
+    /// **In the same body as the origin** and for the same reason (032):
+    /// while the band grows the grid moves up and the input block widens row
+    /// by row, and published from separate frames a click could translate
+    /// against a new origin and an old block. The value is the **layout's**
+    /// (`Frame::dock_hit`): the text is bottom-aligned and stays in place
+    /// through the animation.
     pub fn dock(&self) -> Option<(f32, u16)> {
         self.0.get().dock
     }
 
-    /// Yalnız kare yolu yazar; `pub` değil ve olmamalı.
+    /// Only the frame path writes; not `pub`, and must not be.
     fn set(&self, px: f32, fill_rows: u16, dock: Option<(f32, u16)>) {
         self.0.set(Drawn {
             px,
@@ -389,27 +419,28 @@ impl Origin {
     }
 }
 
-/// Kare istemenin açık/kapalı kapısı — **durma politikasının tamamı**.
+/// The open/closed gate of asking for frames — **the whole stop policy**.
 ///
-/// `FailureStreak` gibi ayrı bir tip ve aynı sebeple: ObjC'siz, kilitsiz ve
-/// platformsuz olduğu için sınanabilir; `Waker`'a gömülü kalsaydı yalnız
-/// gerçek bir pencereyle denenebilirdi.
+/// A separate type, like `FailureStreak` and for the same reason: lock-free
+/// and platform-free, so it can be tested; embedded in the `Waker` it could
+/// only be tried with a real window.
 ///
-/// Kapı **her iki** tarafta da okunur: çizim tarafında (callback erken döner)
-/// ve uyandırma tarafında ([`Waker::wake`]). Yalnız çizim tarafında olsaydı
-/// örtülü pencerede konuşkan bir shell link'i tazeleme hızında kaldırıp
-/// yatırırdı — kare çizilmez ama her vsync'te bir ana thread callback'i ve
-/// `CAMetalDisplayLink`'in callback'ten önce aldığı bir drawable ödenir.
-/// Çizim durur, ritim durmaz; sözleşmenin harfi kalır, ruhu gider.
+/// The gate is read on **both** sides: on the drawing side (the tick returns
+/// early) and on the waking side ([`Waker::wake`]). Read only on the drawing
+/// side, a chatty shell in an occluded window would start and stop the tick
+/// at the refresh rate — no frame drawn, but a main-thread tick every vsync.
+/// Drawing stops, the rhythm does not; the letter of the contract stays, its
+/// spirit goes.
 struct Gate {
-    /// Pencere görünür mü. İki yönlü: `windowDidChangeOcclusionState:` hem
-    /// örtülmeyi hem geri dönmeyi bildirir.
+    /// Whether the window is visible. Both ways:
+    /// `windowDidChangeOcclusionState:` reports being occluded and coming
+    /// back.
     open: AtomicBool,
-    /// Kalıcı durdurma mandalı — bir kez iner, bir daha kalkmaz.
+    /// Permanent stop latch — drops once and never rises again.
     ///
-    /// `open = false` ile aynı şey **değil**: kapanışta pencere delegate'i
-    /// sökülmüyor, yani `shutdown()`'tan sonra düşen bir görünürlük bildirimi
-    /// kapıyı geri açar ve bekleyen ana thread'e iş atılmaya devam ederdi.
+    /// **Not** the same as `open = false`: the window delegate is not removed
+    /// at shutdown, so a visibility notice arriving after `shutdown()` would
+    /// reopen the gate and keep sending work to the waiting main thread.
     stopped: AtomicBool,
 }
 
@@ -421,10 +452,11 @@ impl Gate {
         }
     }
 
-    /// Mandal **okuma** tarafında sorgulanıyor, yazma tarafında değil: iki
-    /// bayrağı ayrı ayrı okuyup yazmak (`set_open` mandalı görmez → `stop`
-    /// koşar → `set_open` kapıyı açar) durdurulmuş bir kapıyı geri açardı ve o
-    /// yarış tam da mandalın var olma sebebini yok ederdi.
+    /// The latch is asked on the **reading** side, not the writing side:
+    /// reading and writing the two flags separately (`set_open` misses the
+    /// latch → `stop` runs → `set_open` opens the gate) would reopen a
+    /// stopped gate, and that race would destroy the very reason the latch
+    /// exists.
     fn is_open(&self) -> bool {
         !self.stopped.load(Ordering::Acquire) && self.open.load(Ordering::Acquire)
     }
@@ -433,41 +465,43 @@ impl Gate {
         self.stopped.load(Ordering::Acquire)
     }
 
-    /// Görünürlük bildirimi. Sıra önemli: `true`'ya geçerken bunu **önce**
-    /// yazan taraf, hemen ardından gelen `request_frame`'in kapıdan geçmesini
-    /// garanti eder.
+    /// A visibility notice. Order matters: writing this **first** when
+    /// switching to `true` guarantees that the `request_frame` right after it
+    /// passes the gate.
     fn set_open(&self, open: bool) {
         self.open.store(open, Ordering::Release);
     }
 
-    /// Mandalı indirir; bu andan sonra `set_open` ne yazarsa yazsın kapı kapalı.
+    /// Drops the latch; from then on the gate is closed whatever `set_open`
+    /// writes.
     fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
     }
 }
 
-/// Çizilemeyen karenin politikası: **tek** yer.
+/// The policy for a frame that could not be drawn: **one** place.
 ///
-/// Kare iki ayrı yerde düşebilir — encode edilemeden (senkron `Err`) ya da
-/// GPU'da (asenkron, Metal'in thread'inde) — ama ikisi de aynı sınıftır ve
-/// aynı cevabı ister. Politikayı iki kez yazmanın bedeli teorik değil: senkron
-/// kol kendi durağını (`setPaused(true)`) icat ettiğinde, bu arada okuyucunun
-/// diktiği bir hasar bayrağının üstüne link'i uyutup kareyi yutabiliyordu.
-/// Durak artık tek: `needs_update`'in "hasar yok → uyu" dalı.
+/// A frame can fail in two places — before it is encoded (synchronous `Err`)
+/// or on the GPU (asynchronous, seen by the completion poll) — but both are
+/// the same class and want the same answer. Writing the policy twice has a
+/// real cost: when the synchronous leg invented its own stop (a pause), it
+/// could put the tick to sleep on top of a damage flag the reader had just
+/// planted and swallow the frame. The stop is now single: the "no damage →
+/// sleep" branch.
 struct Retry {
     waker: Waker,
     streak: FailureStreak,
 }
 
 impl Retry {
-    /// Kare çizilemedi. İlk hatada bir kare daha istenir; art arda
-    /// ikincisinde **hiçbir şey yapılmaz** ve durak kendiliğinden devreye
-    /// girer (bkz. [`FailureStreak`]).
+    /// A frame could not be drawn. On the first error one more frame is
+    /// requested; on the second in a row **nothing** is done and the stop
+    /// kicks in by itself (see [`FailureStreak`]).
     ///
-    /// Dönüş: **bütçe bitti mi** (`false` → bir kare daha istendi). Hasar
-    /// yolunda çağıranın buna bakmasına gerek yok, durak orada bayrağın
-    /// dikilmemesiyle geliyor; **hareket yolunda gerekiyor**, çünkü oradaki
-    /// durak hasar değil animasyonun yerleşmesi (`needs_update`).
+    /// Returns **whether the budget is spent** (`false` → one more frame was
+    /// requested). On the damage path the caller need not look, the stop
+    /// comes there from the flag not being planted; **on the motion path it
+    /// must**, because the stop there is the animation settling, not damage.
     fn draw_failed(&self, e: &GpuError) -> bool {
         eprintln!("bateri: kare çizilemedi: {e}");
         if self.streak.failed() {
@@ -478,1198 +512,1348 @@ impl Retry {
     }
 }
 
-/// Art arda çizilemeyen kare sayacı — **durma koşulunun tamamı**.
+/// Frames that failed in a row — **the whole stop condition**.
 ///
-/// Ayrı bir tip çünkü sınanabilir olması gerekiyordu: politikanın kendisi
-/// ObjC'siz, kilitsiz ve platformsuz; `Waker`'a gömülü kalsaydı yalnız
-/// gerçek bir pencereyle denenebilirdi.
+/// A separate type because it had to be testable: the policy itself is
+/// lock-free and platform-free; embedded in the `Waker` it could only be
+/// tried with a real window.
 #[derive(Default)]
 struct FailureStreak(AtomicU32);
 
 impl FailureStreak {
-    /// Kare tamamlandı: bütçe geri verilir.
+    /// A frame completed: the budget is given back.
     fn succeeded(&self) {
         self.0.store(0, Ordering::Release);
     }
 
-    /// Hata bildirir. `true` → bir kare daha istenir. Art arda ikinci hatada
-    /// `false`: bayrak dikilmediği için sıradaki callback "hasar yok" bulur,
-    /// link'i uyutur ve sıradaki `Wakeup` beklenir. Bu olmadan kalıcı bir
-    /// hata "dik, dene, düş" döngüsünü tazeleme hızında sonsuza çevirirdi.
+    /// Reports an error. `true` → one more frame is requested. On the second
+    /// error in a row `false`: the flag is not planted, so the next tick
+    /// finds "no damage", pauses and waits for the next `Wakeup`. Without this
+    /// a permanent error would turn "plant, try, fail" into an endless loop at
+    /// the refresh rate.
     ///
-    /// **008'den beri bu tek başına yetmiyor:** "hasar yok" dalı artık
-    /// koşulsuz uyumuyor, yerleşmemiş bir animasyon varken hareket karesi
-    /// çiziyor. Bütçe bitince o dal da animasyonu bitiriyor
-    /// ([`crate::motion::Motion::finish`]) — yoksa kalıcı bir hata, kaymanın
-    /// süre tavanı dolana kadar tazeleme hızında hata satırı basardı. İki
-    /// durak birlikte: bayrak dikilmiyor **ve** bekleyen animasyon kalmıyor.
+    /// **Since 008 this alone is not enough:** the "no damage" branch no
+    /// longer sleeps unconditionally, it draws a motion frame while an
+    /// animation has not settled. When the budget is spent that branch also
+    /// finishes the animation ([`crate::motion::Motion::finish`]) — otherwise
+    /// a permanent error would print an error line at the refresh rate until
+    /// the slide's duration cap. Two stops together: the flag is not planted
+    /// **and** no animation is left pending.
     fn failed(&self) -> bool {
         self.0.fetch_add(1, Ordering::AcqRel) == 0
     }
 }
 
-/// Delegate'in durumu. Ana thread'e ait olanlar `Cell`/`RefCell`; `retry`
-/// paylaşılıyor çünkü onu Metal'in tamamlanma thread'i de çağırır.
-struct LinkIvars {
-    /// `Rc`, `Arc` değil: `Renderer` artık `Sync` değil. Kaldırılabilir sebep
-    /// glyph atlasının `CFRetained<CTFont>`'u (`Send` değil), **yapısal**
-    /// sebep atlası saran `RefCell` — tamamen thread-güvenli bir fontla bile
-    /// `Arc` "başka thread'e geçebilir" diye yanlış bir söz verirdi. `retry`
-    /// ile `session` gerçekten geçtikleri için `Arc` kalıyor.
+/// How long [`Core::arm_clock`] waits before polling a frame still in flight
+/// as the link goes to sleep (Karar 6: "the last frame before sleep is not
+/// lost").
+///
+/// A design constant, not a measurement: one refresh at 120 Hz, the fastest
+/// display the product runs on. A frame is submitted at most one refresh
+/// before the tick that goes to sleep, and the GPU's work for it is far
+/// shorter than a refresh on this renderer's load, so one period is the
+/// shortest wait that is not a busy poll. If the frame is still in flight,
+/// the poll re-arms; the stop condition is an empty queue.
+const POLL_DELAY: f64 = 1.0 / 120.0;
+
+/// How long [`DisplayLink::drain`] waits for the frames still in flight at
+/// shutdown before the report reads `kare=`.
+///
+/// A ceiling, not an expectation: the link is already stopped, so at most a
+/// frame or two are in flight and they finish within a refresh; the ceiling
+/// only bounds a GPU that hangs, well inside the smoke watchdog's budget.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// The frame loop's state — the old display-link delegate, now a plain type
+/// behind an `Rc` (040 phase-5). Main-thread state is in `Cell`/`RefCell`;
+/// nothing here crosses threads except through the [`Waker`].
+struct Core {
+    /// `Rc`, not `Arc`: `Renderer` is not `Sync`. The removable reason is the
+    /// glyph atlas's `CFRetained<CTFont>` (not `Send`), the **structural**
+    /// reason the `RefCell` around the atlas — even with a fully thread-safe
+    /// font, `Arc` would make a false promise of "may cross threads".
+    /// `session` really crosses, so it stays `Arc`.
     renderer: Rc<Renderer>,
+    /// The window's surface; `bt-shell` sizes it, the tick acquires from it.
+    surface: Rc<Surface>,
     session: Arc<Session>,
-    retry: Arc<Retry>,
-    /// Kapının çizim tarafı buradan okunuyor; gövdenin tek sahibi `Waker`
-    /// (uyandırma tarafı da aynı kapıya bakmak zorunda).
+    retry: Retry,
+    /// The drawing side of the gate is read from here; the body's only owner
+    /// is the `Waker` (the waking side must look at the same gate).
     waker: Waker,
-    /// Tamamlanma bloğu kurulumda bir kez ayrılır ve burada yaşar.
-    completion: Completion,
-    /// Ölçüm kapısı. `None` → kapı kapalı ve kare yolu bu phase'den **önceki**
-    /// hâliyle koşar: tek bir saat okuması bile yok (R4.1). Kapı açıkken de
-    /// aynı gövdeyi tamamlanma bloğu paylaşıyor (`Arc`), çünkü GPU deltası
-    /// Metal'in thread'inde doğuyor.
+    /// The measurement gate. `None` → the gate is closed and the frame path
+    /// runs as it did **before** measurement existed: not a single clock read
+    /// (R4.1). The GPU delta comes from the renderer's completion poll, on
+    /// this thread.
     stats: Option<Arc<Stats>>,
-    /// Kare listesi uzun ömürlü: her karede `clear` ile dolar, ayrılan yer
-    /// korunur (kare başına yeniden ayırma yok).
+    /// The frame list is long-lived: it is refilled with `clear` every frame
+    /// and the allocated space is kept (no reallocation per frame).
     frame: RefCell<Frame>,
-    /// Komut bloklarının tamponu; `frame` ile aynı gerekçeyle uzun ömürlü —
-    /// `Session::frame` onu her karede boşaltıp yeniden dolduruyor ve ayrılan
-    /// yer korunuyor.
+    /// The command blocks' buffer; long-lived for the same reason as `frame`
+    /// — `Session::frame` empties and refills it every frame and the
+    /// allocated space is kept.
     ///
-    /// `Frame`'in **içinde değil yanında**: aynı çağrıda `frame.push`
-    /// kapatması da tampon da ödünç alınıyor ve ikisi tek `RefCell`'de
-    /// olsaydı çalışma zamanında panik ederdi. Şeridi çizecek liste (piksel
-    /// dörtgenleri) `Frame`'in kendi `stripes` alanı; bu tampon ona **girdi**,
-    /// kendisi değil — `Frame::push_block` aralıkları buradan okuyup oraya
-    /// çeviriyor.
+    /// **Next to `Frame`, not inside it**: the same call borrows both the
+    /// `frame.push` closure and the buffer, and in one `RefCell` that would
+    /// panic at run time. The list that draws the stripe (pixel quads) is
+    /// `Frame`'s own `stripes`; this buffer is its **input**, not the list —
+    /// `Frame::push_block` reads the ranges here and turns them into quads.
     blocks: RefCell<Blocks>,
-    /// Seçimin satır koşuları ve iki rengi (031); `blocks` ile aynı ömür ve
-    /// aynı gerekçe — `Frame`'in içinde değil yanında, `Frame::push_selection`
-    /// onu dörtgenlere çeviriyor.
+    /// The selection's row runs and two colours (031); same lifetime and
+    /// reason as `blocks` — next to `Frame`, not inside it;
+    /// `Frame::push_selection` turns it into quads.
     selection: RefCell<SelectionRuns>,
-    /// Arama vurgusunun koşuları (033); `selection` ile aynı ömür ve aynı
-    /// gerekçe. Bu phase'de yalnız doluyor, çizimi phase-2.
+    /// The search highlight's runs (033); same lifetime and reason as
+    /// `selection`.
     search: RefCell<SearchRuns>,
-    /// Dock seçiminin görsel satır başına koşuları (032); `selection` ile aynı
-    /// gerekçe — `bt_core::Session::dock` her içerik karesinde boşaltıp
-    /// dolduruyor, kapasite korunuyor.
+    /// The dock selection's runs per visual row (032); same reason as
+    /// `selection` — `bt_core::Session::dock` empties and refills it every
+    /// content frame, the capacity is kept.
     dock_selection: RefCell<Vec<SelectionRun>>,
-    /// Doldurulan satırların tamponu; `blocks` ile aynı ömür ve **aynı
-    /// gerekçe**: `Frame`'in içinde değil yanında.
+    /// The filled rows' buffer; same lifetime and **same reason** as
+    /// `blocks`: next to `Frame`, not inside it.
     ///
-    /// Sebep borç kuralının ta kendisi: `Session::frame` iki sink alıyor ve
-    /// ikisi de `frame`'i ödünç alsaydı aynı çağrıda iki `&mut` doğardı.
-    /// Tampon o ikinci ucu tutuyor, çağrı dönünce hücreler `Frame::push_fill`
-    /// ile bandın kendi listelerine geçiyor. Boşaltılıp yeniden doluyor, yani
-    /// kare başına ayırma yok; doldurması olmayan pencerede (dock'suz kabuk,
-    /// süreli koşu) sınır sink'i hiç çağırmıyor ve tampon boş kalıyor.
+    /// The reason is the borrow rule itself: `Session::frame` takes two
+    /// sinks, and if both borrowed `frame` the same call would give birth to
+    /// two `&mut`. The buffer holds that second end; when the call returns
+    /// the cells move to the band's own lists through `Frame::push_fill`. It
+    /// is emptied and refilled, so no allocation per frame; in a window
+    /// without fill (a dockless shell, the timed run) the boundary never
+    /// calls the sink and the buffer stays empty.
     fill: RefCell<Vec<bt_core::Cell>>,
-    /// Aynanın tamponu; `blocks` ile aynı gerekçeyle uzun ömürlü —
-    /// [`Session::dock`] onu her karede yerinde tazeliyor ve kapasitesi
-    /// duruyor, yani kare başına ayırma yok.
+    /// The mirror's buffer; long-lived for the same reason as `blocks` —
+    /// [`Session::dock`] refreshes it in place every frame and its capacity
+    /// stays, so no allocation per frame.
     ///
-    /// Dock'u olmayan pencerede hiç dokunulmuyor: boş bir `DockState` üç boş
-    /// dizgi ve boş bir `Vec`, yani ayırmıyor da.
+    /// Untouched in a window without a dock: an empty `DockState` is three
+    /// empty strings and an empty `Vec`, so it does not allocate either.
     dock: RefCell<DockState>,
-    /// Bağlam satırının tamponu; `dock` ile aynı gerekçe ve aynı ömür.
+    /// The context row's buffer; same reason and lifetime as `dock`.
     ///
-    /// Ayrı tampon, çünkü ayrı ömür: ayna `line-finish`'te sıfırlanıyor,
-    /// dizin ile dal prompt'tan prompt'a duruyor (`bt_core::DockContext`).
+    /// A separate buffer because a separate lifetime: the mirror resets at
+    /// `line-finish`, the directory and the branch persist from prompt to
+    /// prompt (`bt_core::DockContext`).
     dock_context: RefCell<DockContext>,
-    /// Dock kaç satır; `0` → bu pencerede dock yok.
+    /// How many rows the dock has; `0` → no dock in this window.
     ///
-    /// **`Cell`, çünkü artık oynuyor:** dock alternatif ekranda kalkıyor ve
-    /// inince geri geliyor (R5.2), yani değer [`DisplayLink::resize`] ile
-    /// tazeleniyor. Oynamanın bedeli ızgara yüksekliği, yani bir
-    /// `TIOCSWINSZ` — ve o bedel **komut başına değil geçiş başına**
-    /// ödeniyor (R5.3): `git log` gibi alternatif ekrana girmeyen komutlar
-    /// hiç resize görmüyor.
+    /// **A `Cell`, because it moves now:** the dock goes away on the
+    /// alternate screen and comes back when leaving it (R5.2), so the value
+    /// is refreshed by [`DisplayLink::resize`]. The cost of moving is the
+    /// grid's height, i.e. a `TIOCSWINSZ` — paid **per transition, not per
+    /// command** (R5.3): commands that do not enter the alternate screen,
+    /// like `git log`, never see a resize.
     ///
-    /// Sıfır **iki ayrı şeyi** anlatıyor ve ikisi de "dock çizilmez" demek:
-    /// pencerede hiç dock yok (entegrasyonsuz oturum) ya da bu an alternatif
-    /// ekrandayız. Ayrımı burada tutmak gerekmiyor — doğum değerinin sahibi
-    /// `bt-shell` ve geri getirecek olan da o.
+    /// Zero means **two different things** and both mean "no dock drawn":
+    /// the window has no dock at all (a session without integration) or we
+    /// are on the alternate screen right now. Telling them apart is not
+    /// needed here — the birth value's owner is `bt-shell` and so is the one
+    /// who brings it back.
     dock_rows: Cell<u16>,
-    /// Alternatif ekranın **son görülen** hâli; nöbet bununla karşılaştırıyor.
+    /// The alternate screen's **last seen** state; the watch compares against
+    /// it.
     alt_screen: Cell<bool>,
-    /// Alternatif ekran değişince çağrılan haberci; `None` → bu pencerede yol
-    /// hiç çalışmıyor.
+    /// The notifier called when the alternate screen changes; `None` → the
+    /// path does not run in this window at all.
     ///
-    /// **Enjekte ediliyor, çağrı değil** (`bt_core::Wake` emsali): `bt-gpu`
-    /// `bt-shell`'i göremez, katman yönü tek. Kapanış `bt-shell`'de kuruluyor
-    /// ve aynı üç yasağı taşıyor: ana thread'de koşar, **bloklamaz** ve
-    /// pencere geometrisini **yerinde değiştirmez** — yalnız ana kuyruğa iş
-    /// atar. Sebep bu fonksiyonun çağrıldığı yer: kare tam da çizilmiş
-    /// durumda ve drawable ölçüsünü, ızgarayı, yerleşimi orada değiştirmek
-    /// çizilen karenin altını oymak olurdu.
+    /// **Injected, not called** (the `bt_core::Wake` precedent): `bt-gpu`
+    /// cannot see `bt-shell`, the layer direction is one-way. The closure is
+    /// built in `bt-shell` and carries the same three bans: it runs on the
+    /// main thread, it **does not block** and it **does not change** the
+    /// window geometry in place — it only sends work to the main queue. The
+    /// reason is where this is called: the frame has just been drawn, and
+    /// changing the texture size, the grid or the layout there would dig
+    /// under the drawn frame.
     ///
-    /// **Yük taşımıyor.** Haberci koştuğunda gerçeği yeniden okuyor, yani
-    /// birbirini kovalayan iki geçiş (vim aç-kapa) bayat bir değerle
-    /// davranamıyor.
+    /// **It carries no payload.** When the notifier runs it re-reads the
+    /// truth, so two transitions chasing each other (vim open–close) cannot
+    /// act on a stale value.
     ///
-    /// Dock'u olmayan pencerede `None` ve bu **yapısal**: yol o oturumda hiç
-    /// kurulmuyor, bir koşulla kapatılmıyor.
+    /// `None` in a window without a dock, and **structurally**: the path is
+    /// never set up in that session, not switched off by a condition.
     alt_screen_changed: Option<Box<dyn Fn()>>,
-    /// Izgaranın genişliği, sütun; dock'un taşan satırı sarması için
-    /// [`Session::dock`]'a giriyor.
+    /// The grid's width, columns; goes into [`Session::dock`] so the dock can
+    /// wrap its overflowing row.
     ///
-    /// `Cell`: [`DisplayLink::resize`] yazıyor, içerik karesi okuyor — ikisi
-    /// de ana thread. `cell` ile **ayrı** duruyor çünkü kaynakları ayrı:
-    /// hücre ölçüsü yalnız oturum boyutu kabul ederse tazeleniyor, sütun
-    /// sayısı ise pencerenin kendi cevabı.
+    /// `Cell`: [`DisplayLink::resize`] writes, the content frame reads — both
+    /// on the main thread. Kept **separately** from `cell` because their
+    /// sources differ: the cell size is refreshed only if the session accepts
+    /// the size, the column count is the window's own answer.
     cols: Cell<u16>,
-    /// Demet değil `CellMetrics`: ızgara geometrisi (hücre ölçüsü **ve** sol
-    /// pay) `Renderer::cell_metrics`'ten `bt-shell` üzerinden buraya tip
-    /// olarak geliyor, **saklanırken de** tip kalıyor ve `Frame::clear`'a da
-    /// tip olarak giriyor — çizim orijini payı oradan okuyor.
-    /// (`resize`'ın `Session::resize`'a geçirdiği demet başka bir değer:
-    /// oraya **gelen** ölçü gider, saklanan değil — kabul edilmeyen bir
-    /// boyut buraya hiç yazılmaz.)
+    /// `CellMetrics`, not a tuple: the grid geometry (cell size **and**
+    /// gutter) arrives here from `Renderer::cell_metrics` through `bt-shell`
+    /// as a type, **stays** a type while stored and enters `Frame::clear` as
+    /// a type — the draw origin reads the gutter there. (The tuple `resize`
+    /// passes to `Session::resize` is another value: the **incoming** size
+    /// goes there, not the stored one — a rejected size is never written
+    /// here.)
     cell: Cell<CellMetrics>,
-    /// Çizilen karenin dikey orijini; fare yolu bu gövdeyi paylaşıyor.
+    /// The drawn frame's vertical origin; the mouse path shares this body.
     ///
-    /// `Frame::origin_px`'in ikizi değil **yayını**: kare listesi bu crate'in
-    /// içinde (`pub(crate)`) ve `bt-shell`'in onu görmesi için bir sebep yok,
-    /// oysa fare eşlemesi çizilen orijini görmek **zorunda**. İkisini tek
-    /// çağrı yazıyor ([`LinkDelegate::set_origin`]), yani ayrışamazlar.
+    /// Not a twin of `Frame::origin_px` but its **publication**: the frame
+    /// list is internal to this crate (`pub(crate)`) and `bt-shell` has no
+    /// reason to see it, while the mouse mapping **must** see the drawn
+    /// origin. One call writes both (`Core::set_origin`), so they cannot
+    /// drift.
     origin: Origin,
-    /// **İçerik** karesi: `session.frame()` hasar buldu ve kare çizilmeye
-    /// karar verildi. Boşta sıfır kare kapısının operandı bu.
+    /// **Content** frame: `session.frame()` found damage and the frame was
+    /// decided to be drawn. This is the zero-frames-at-idle gate's operand.
     ///
-    /// `kare`'den (GPU'nun hatasız bitirdiği kare) ayrı bir sayı: **hareket**
-    /// ve **kayma** kareleri de çizilen karelerdir, yani `kare`'yi artırırlar,
-    /// ama grid kirli değildir — 200 ms'lik bir imleç kayması 120 Hz'de ~24
-    /// kare eder ve `kare ≤ IDLE_FRAME_LIMIT` kapısı kod doğruyken kırmızı
-    /// düşerdi. Kapı bu yüzden "boştaki **içerik** karesi"ne bağlanıyor;
-    /// sınırın sayısı değil **operandı** değişti.
+    /// A number separate from `kare` (frames the GPU finished without error):
+    /// **motion** and **slide** frames are drawn frames too, so they raise
+    /// `kare`, but the grid is not dirty — a 200 ms cursor glide is ~24 frames
+    /// at 120 Hz and a `kare ≤ IDLE_FRAME_LIMIT` gate would go red while the
+    /// code is right. So the gate is tied to "**content** frames at idle";
+    /// what changed is not the limit's number but its **operand**.
     ///
-    /// Çıkarma (`kare − hareket`) bilerek yok: `kare` Metal'in tamamlanma
-    /// thread'inde, bu sayaç ana thread'de artıyor, yani deadline animasyonun
-    /// ortasına düşerse fark `u64` sarmasına açık. İki sayaç aynı noktada
-    /// artıyor ve kapı yalnız birine bakıyor
+    /// No subtraction (`kare − motion`) on purpose: the two counters rise at
+    /// different moments (`kare` when the completion poll sees the frame
+    /// finished, this one when the frame is decided), so a deadline in the
+    /// middle of an animation would leave the difference open to `u64`
+    /// wrap-around. The gate looks at one of them only
     /// (`.tasks/008-hareket-ve-imlec/discussion.md` → Karar 2).
     ///
-    /// `Cell`, atomik değil: ikisini de yalnız `needs_update` yazıyor ve o
-    /// ana thread'e bağlı (`MainThreadOnly`); okuyan da ana thread
+    /// `Cell`, not atomic: only the tick writes it and the tick is on the
+    /// main thread; the reader is on the main thread too
     /// ([`DisplayLink::content_frames`]).
     content_frames: Cell<u64>,
-    /// **Hareket** karesi: hasar yok ama yerleşmemiş bir animasyon var.
+    /// **Motion** frame: no damage but an animation that has not settled.
     ///
-    /// `content_frames`'in kardeşi ve bilerek ondan ayrı: ikisi de çizilen
-    /// kare sayıyor ama yalnız biri boşta sıfır kare kapısının operandı.
-    /// Süreli koşu bunu `hareket=` diye basıyor ve duman kapısının
-    /// **gerekli** sayacı (reçetede bir imleç hareketi var, bkz.
+    /// `content_frames`' sibling and separate from it on purpose: both count
+    /// drawn frames but only one is the zero-frames-at-idle gate's operand.
+    /// The timed run prints this as `hareket=` and it is the smoke gate's
+    /// **required** counter (the recipe has a cursor move, see
     /// `bt_core::smoke_shell`).
     motion_frames: Cell<u64>,
-    /// **Kayma** karesi: hasar yok ama ötelemenin animasyonu yerleşmemiş.
+    /// **Slide** frame: no damage but the offset's animation has not
+    /// settled.
     ///
-    /// [`Self::motion_frames`]'in kardeşi ve ondan ayrı, çünkü iki animatör
-    /// var ve kırmızı bir koşuyu okuyan taraf hangisinin yerleşmediğini
-    /// satırdan görmeli. Aynı karede ikisi birden artabilir — sayılar toplanıp
-    /// çizilen kareyi vermiyor, her biri kendi animatörünün tanığı.
+    /// [`Self::motion_frames`]' sibling and separate from it, because there
+    /// are two animators and whoever reads a red run should see from the line
+    /// which one did not settle. Both can rise in the same frame — the
+    /// numbers do not add up to drawn frames, each is its own animator's
+    /// witness.
     ///
-    /// Kapıya **girmiyor**: duman reçetesi bir imleç hareketi içeriyor
-    /// (`bt_core::smoke_shell`) ama tabana yapışık içerikte tek satırlık bir
-    /// prompt kayma üretmeyebilir — ölçülmemiş bir eşiği kapıya yazmıyoruz.
+    /// **Not** in the gate: the smoke recipe has a cursor move
+    /// (`bt_core::smoke_shell`), but with bottom-aligned content a one-row
+    /// prompt may produce no slide — an unmeasured threshold is not written
+    /// into the gate.
     slide_frames: Cell<u64>,
-    /// İmlecin ve içeriğin kayması — kareyi zamana bağlayan tek şey.
+    /// The cursor's and the content's glide — the only thing tying the frame
+    /// to time.
     ///
-    /// `Cell`, `RefCell` değil: [`crate::motion::Motion`] `Copy` ve ona
-    /// dokunan tek yer bu callback (ana thread). `RefCell` çalışırdı ama
-    /// `frame` ödüncünün yanında ikinci bir çalışma-zamanı ödüncü demek
-    /// olurdu ve kazandırdığı hiçbir şey yok.
+    /// `Cell`, not `RefCell`: [`crate::motion::Motion`] is `Copy` and the
+    /// only place touching it is the tick (main thread). A `RefCell` would
+    /// work but would mean a second runtime borrow next to `frame`'s, and it
+    /// buys nothing.
     motion: Cell<Motion>,
-    /// Dock'un yazım efektleri (030): uçuştaki gelişler ve hayaletler.
+    /// The dock's typing effects (030): arrivals and ghosts in flight.
     ///
-    /// **`motion`'ın içinde değil yanında** ve `RefCell`: liste `Copy`
-    /// değil, `Motion`'ı `Copy`'den çıkarmak ya da her `get`/`set`'te
-    /// kopyalatmak bedeldi (`.tasks/030-dock-yazim-animasyonlari/discussion.md`
-    /// → Karar 4). Ödüncü yalnız bu callback ve `DisplayLink`'in ayar
-    /// yolları alıyor, ikisi de ana thread ve çağrı sınırında bırakıyor.
+    /// **Next to `motion`, not inside it**, and a `RefCell`: the list is not
+    /// `Copy`, and taking `Motion` out of `Copy` or copying on every
+    /// `get`/`set` was a cost (`.tasks/030-dock-yazim-animasyonlari/
+    /// discussion.md` → Karar 4). Only the tick and `DisplayLink`'s settings
+    /// paths borrow it, both on the main thread and both release it at the
+    /// call boundary.
     glyph_fx: RefCell<GlyphFx>,
-    /// Geometri (pencere, font, zoom) oynadı: sıradaki içerik karesi imleci
-    /// animasyonsuz taşısın.
+    /// The geometry (window, font, zoom) moved: the next content frame should
+    /// move the cursor without animation.
     ///
-    /// Bayrak, çünkü [`DisplayLink::resize`] callback değil — hücre ölçüsünü
-    /// değiştiren yol ile onu çizen yol ayrı anlarda koşuyor ve aradaki kareyi
-    /// yalnız bu bayrak bağlıyor. Sıradaki içerik karesi onu **tüketir**:
-    /// tüketilmeseydi geometriden sonraki her kare snap'lerdi.
+    /// A flag, because [`DisplayLink::resize`] is not the tick — the path
+    /// changing the cell size and the path drawing it run at different
+    /// moments and only this flag links the frame in between. The next
+    /// content frame **consumes** it: left unconsumed, every frame after a
+    /// geometry change would snap.
     geometry_changed: Cell<bool>,
-    /// Bir önceki callback'in damgası; `dt`'nin tabanı.
+    /// The previous tick's stamp; the base of `dt`.
     ///
-    /// Kaynağı `last_frame_at` ile **aynı** (`update.targetTimestamp()`) ve
-    /// bu şart: iki ayrı taban iki ayrı zaman yaratır ve `sessiz=` ile
-    /// animasyonun saati birbirini tutmazdı. Saat okuması yok, alan kopyası.
+    /// Its source is the **same** as `last_frame_at` (the tick's stamp) and
+    /// that is required: two bases create two times, and `sessiz=` and the
+    /// animation's clock would not agree. No clock read, a field copy.
     ///
-    /// `last_frame_at`'ten ayrı bir alan, çünkü o yalnız **yola çıkan**
-    /// karede tazeleniyor; `dt` ise encode edilemeyen karede de ilerlemeli,
-    /// yoksa bir hatadan sonra animasyon o kadar süreyi tek adımda atlardı.
+    /// A field separate from `last_frame_at`, because that one is only
+    /// refreshed on a frame that **leaves**; `dt` must advance on a frame
+    /// that could not be encoded too, or after an error the animation would
+    /// jump that much time in one step.
     last_update_at: Cell<Option<f64>>,
-    /// İçerik karesinde okunan temanın kopyası — hareket karesinin paleti.
+    /// A copy of the theme read in the content frame — the motion frame's
+    /// palette.
     ///
-    /// Hareket karesi `session.theme()`'i **çağırmıyor**: o yaprak bir kilit
-    /// alıyor ve hareket karesinin `Session`'a hiç dokunmaması tasarımın
-    /// kendisi (008 Karar 4). Tema takası zaten kare istiyor
-    /// (`Session::set_theme`), yani bir sonraki kare içerik karesi olur ve
-    /// kopya orada tazelenir.
+    /// The motion frame **does not call** `session.theme()`: that takes a
+    /// leaf lock, and the motion frame not touching `Session` at all is the
+    /// design itself (008 Karar 4). A theme swap asks for a frame anyway
+    /// (`Session::set_theme`), so the next frame is a content frame and the
+    /// copy is refreshed there.
     theme: Cell<Theme>,
-    /// `bt-core`'un istediği bir sonraki **içerik** tikinin mutlak zamanı.
+    /// The absolute time of the next **content** tick `bt-core` asked for.
     ///
-    /// İki kaynağı var ve `bt-core` yakın olanı seçip veriyor
-    /// (`bt_core::shell::sooner`): koşan komutun süre sayacı ve dock'lu bir
-    /// pencerede caret devrinin **tutması**. `bt-gpu` ikisini ayırt etmiyor —
-    /// ikisi de içeriği değiştiriyor, yani `icerik=` sayması doğru.
+    /// It has two sources and `bt-core` gives the nearer
+    /// (`bt_core::shell::sooner`): the running command's duration counter,
+    /// and in a docked window the caret handover's **hold**. `bt-gpu` does not
+    /// tell them apart — both change the content, so counting `icerik=` is
+    /// right.
     ///
-    /// `None` → beklenen bir şey yok: komut bitti, koşan bloğun çıpası
-    /// ekrandan çıktı, entegrasyon hiç yok ya da bekleyen bir devir tutması
-    /// kalmadı.
+    /// `None` → nothing is expected: the command ended, the running block's
+    /// anchor left the screen, there is no integration, or no handover hold
+    /// is pending.
     ///
-    /// **Son tarih, süre değil** ve bu blink'in getirdiği zorunluluk: eski
-    /// hâlde `arm_clock` her uyku noktasında `Cursor::next_tick`'i baştan
-    /// kuruyordu ve saniyede iki kez uyanan bir blink sayacın tikini her
-    /// seferinde bir saniye ileri iterdi — tik **hiç** ateşlemezdi. Mutlak
-    /// bir damga aradaki uyanmalardan etkilenmiyor.
+    /// **A deadline, not a duration**, and that is blink's requirement: in
+    /// the old form `arm_clock` rebuilt `Cursor::next_tick` at every sleep
+    /// point, and a blink waking twice a second would push the counter's tick
+    /// one second forward every time — the tick would **never** fire. An
+    /// absolute stamp is not affected by the wakeups in between.
     ///
-    /// Yan kazanç: `arm_clock`'ın doc'unda yazılı olan "hareket karesi
-    /// `Cursor`'ı tazelemiyor, yani uzun bir animasyondan sonra kurulan tik
-    /// bir animasyon boyu geç kalabilir" kusuru da kapanıyor.
+    /// A side gain: the defect written in `arm_clock`'s doc — "the motion
+    /// frame does not refresh `Cursor`, so a tick armed after a long animation
+    /// can be one animation late" — closes too.
     ///
-    /// `None` **temizliyor** (013 kapısının dersi): komut bitince bayat bir
-    /// son tarih kalsaydı bir kare fazla istenirdi.
+    /// `None` **clears** (013 gate's lesson): a stale deadline after the
+    /// command ended would ask for one frame too many.
     content_deadline: Cell<Option<f64>>,
-    /// İmlecin yanıp sönmesi; fazın sahibi boyayan taraf ([`crate::blink`]).
+    /// The cursor's blink; the phase's owner is the painting side
+    /// ([`crate::blink`]).
     blink: Cell<Blink>,
-    /// Pencere **odakta mı** — `bt-shell`'in cevabı.
+    /// Whether the window is **focused** — `bt-shell`'s answer.
     ///
-    /// `bt-core`'a hiç girmiyor (R7): odak bir pencere olgusu ve terminalin
-    /// durumuyla ilgisi yok. `bt-gpu` onu iki yerde okuyor — blink'in kapısı
-    /// ve caret'in içinin boşalması.
+    /// Never enters `bt-core` (R7): focus is a window fact and has nothing to
+    /// do with the terminal's state. `bt-gpu` reads it in two places — the
+    /// blink's gate and the caret's hollowing.
     ///
-    /// Varsayılan `true` ve **hermetik koşuda hiç yazılmıyor**: süreli koşu
-    /// (`BT_RUN_SECONDS`) odağı okumuyor, yani `make duman` bir makinede
-    /// yeşil bir makinede kırmızı düşmüyor. Kapı çağrı yerinde
-    /// (`bt-shell`'in delegate'i), varsayılanda değil — varsayılan tek başına
-    /// yetmezdi, çünkü koşu sırasında açılan bir Spotlight
-    /// `windowDidResignKey:` doğurup kare isterdi.
+    /// Default `true` and **never written in a hermetic run**: the timed run
+    /// (`BT_RUN_SECONDS`) does not read focus, so `make duman` does not go
+    /// green on one machine and red on another. The gate is at the call site
+    /// (`bt-shell`'s delegate), not in the default — a default alone would
+    /// not do, because a Spotlight opened during the run would produce
+    /// `windowDidResignKey:` and ask for a frame.
     focused: Cell<bool>,
-    /// Klavye **terminalde** mi — `bt-shell`'in cevabı (033 R7): arama
-    /// panelinin alanı first responder olunca `false`.
+    /// Whether the keyboard is **in the terminal** — `bt-shell`'s answer
+    /// (033 R7): `false` when the search panel's field becomes first
+    /// responder.
     ///
-    /// **Odak iki bit** (033 → Muhakeme) ve birleştirme burada, tek yerde
-    /// ([`LinkIvars::caret_focused`]): caret'in içinin boşalması ve blink'in
-    /// durması "pencere key **ve** klavye terminalde" sorusunun cevabı — caret
-    /// klavyenin nereye gittiğini söyleyen tek sinyal. Seçim ve arama
-    /// vurgusunun solması ise yalnız [`LinkIvars::focused`]'tan: alana
-    /// yazarken vurgular tam renkli kalmalı. Tek bit olsaydı ikisinden biri
-    /// yanlış olurdu.
+    /// **Focus is two bits** (033 → Muhakeme) and they combine here, in one
+    /// place ([`Core::caret_focused`]): the caret's hollowing and blink's
+    /// stopping answer "window key **and** keyboard in the terminal" — the
+    /// caret is the one signal saying where the keyboard goes. The selection
+    /// and search highlight fading come from [`Core::focused`] alone: while
+    /// typing in the field the highlights should stay at full colour. With a
+    /// single bit one of the two would be wrong.
     keyboard: Cell<bool>,
-    /// İmlecin **ayardan gelen** çizim sayıları.
+    /// The cursor's drawing numbers **from settings**.
     ///
-    /// `cell`/`motion`/`blink` ile aynı yuvada ve aynı gerekçeyle: kare yolu
-    /// bunu her içerik karesinde `Frame`'e veriyor (`clear`'ın ikinci
-    /// argümanı) ve hareket karesi `clear` çağırmadığı için değeri koruyor.
+    /// In the same slot as `cell`/`motion`/`blink` and for the same reason:
+    /// the frame path hands it to `Frame` on every content frame (`clear`'s
+    /// second argument), and the motion frame does not call `clear`, so it
+    /// keeps the value.
     ///
-    /// `bt-core`'a **uğramıyor** anlamında değil — değer `bt_core::Settings`'te
-    /// yaşıyor ve varsayılanının tek sahibi orası; uğramadığı yer
-    /// `TerminalOptions`/`Session`, yani terminalin durum makinesi.
+    /// Not in the sense of **skipping** `bt-core` — the value lives in
+    /// `bt_core::Settings` and the one owner of its default is there; what it
+    /// skips is `TerminalOptions`/`Session`, the terminal's state machine.
     caret_style: Cell<CaretStyle>,
-    /// Blink'in **istenen** yarım periyodu, saniye ([`DisplayLink::set_blink_interval`]).
+    /// Blink's **requested** half period, seconds
+    /// ([`DisplayLink::set_blink_interval`]).
     ///
-    /// Ayrı yuva, çünkü uygulanması bir **kare damgası** istiyor: `Blink`'in
-    /// tiki mutlak bir son tarih ve yeniden kurulurken `now` gerekiyor.
-    /// Değeri burada bekletip kare yolunda uygulamak tek zaman tabanını
-    /// koruyor.
+    /// A separate slot, because applying it needs a **frame stamp**:
+    /// `Blink`'s tick is an absolute deadline and rebuilding it needs `now`.
+    /// Keeping the value here and applying it on the frame path preserves the
+    /// single time base.
     blink_interval: Cell<f64>,
-    /// Kurulmuş tikin kuşağı — eskiyen tik kendini tanıyıp sussun diye.
+    /// The armed tick's generation — so a stale tick recognises itself and
+    /// stays quiet.
     ///
-    /// `DispatchQueue::after` iptal edilemiyor, yani araya bir içerik karesi
-    /// girip saati yeniden kurduğunda eski tik yine ateşlenir. Kuşak
-    /// eşleşmiyorsa o tik geçersizdir ve `Waker`'a dokunmaz; yoksa her
-    /// yeniden kurulum bir fazladan içerik karesi doğururdu.
+    /// [`Pacer::after`] cannot be cancelled, so when a content frame comes in
+    /// between and re-arms the clock, the old tick still fires. If the
+    /// generation does not match, that tick is void and does not touch the
+    /// `Waker`; otherwise every re-arming would produce one extra content
+    /// frame.
     ///
-    /// `Arc<AtomicU64>`, çünkü kapatma `Send` olmak zorunda — ateşleyen taraf
-    /// ana kuyruk olsa da `after`'ın imzası öyle istiyor.
+    /// `Arc<AtomicU64>`, because the closure must be `Send` — whichever
+    /// thread the pacer fires it on.
     clock_generation: Arc<AtomicU64>,
-    /// Caret bloğunun altında kalan metnin rengi, son içerik karesinden.
+    /// The colour of the text under the caret block, from the last content
+    /// frame.
     ///
-    /// Hareket karesi `bt-core`'a hiç gitmiyor ve bu değeri oradan alamaz.
-    /// **İki kaynaklı** — ızgaranın imleci ya da dock'un caret'i, hangisi o
-    /// karede caret'in evi ise; ortak yanları konuma bağlı olmamaları, o
-    /// yüzden ikisi de bu alana yazılıyor ve hareket karesi hangisinin
-    /// yazdığını sormuyor. `None` → o karede caret yok.
+    /// The motion frame never goes to `bt-core` and cannot take this value
+    /// from there. **Two sources** — the grid's cursor or the dock's caret,
+    /// whichever is the caret's home in that frame; what they share is not
+    /// depending on the position, so both write this field and the motion
+    /// frame does not ask which one wrote. `None` → no caret in that frame.
     last_caret_text: Cell<Option<LinearRgba>>,
-    /// Son içerik karesindeki caret'in **hedefi**; blink'in "yazıyor mu"
-    /// sorusunun tek kaynağı ([`Blink::wake`]).
+    /// The **target** of the caret in the last content frame; the single
+    /// source of blink's "is the user typing" question ([`Blink::wake`]).
     ///
-    /// Konum `Motion`'da da var ama orası **ara** konumu tutuyor (animasyon
-    /// sürerken her karede başka bir değer); burada duran hedefin kendisi ve
-    /// karşılaştırma ancak onunla anlamlı.
+    /// The position is in `Motion` too, but that holds the **intermediate**
+    /// position (a different value every frame while animating); the target
+    /// itself sits here and the comparison only makes sense against it.
     last_caret_at: Cell<Option<[f32; 2]>>,
-    /// Son **çizilen** karenin damgası (`CAMetalDisplayLinkUpdate`'in hedef
-    /// sunum anı), `sessiz=` jetonunun tabanı.
+    /// The stamp of the last **drawn** frame (the tick's target presentation
+    /// time), the base of the `sessiz=` token.
     ///
-    /// `update.targetTimestamp()` bir **alan kopyası**, saat okuması değil:
-    /// kare başına `CACurrentMediaTime()` çağırmak ölçüm kapısı kapalıyken de
-    /// saat okumak olurdu ve kare yolunun "kapı kapalıyken tek bir saat
-    /// okuması bile yok" sözleşmesini (`stats`'ın doc'u) kırardı. Tek okuma
-    /// deadline'da, [`DisplayLink::quiet_since`]'ta.
+    /// The tick's stamp is a **field copy**, not a clock read: reading the
+    /// clock every frame would read it even with the measurement gate closed
+    /// and break the frame path's "with the gate closed, not a single clock
+    /// read" contract (`stats`' doc). The one read is at the deadline, in
+    /// [`DisplayLink::quiet_since`].
     ///
-    /// Damga `Ok` dalında yazılıyor: encode edilemeyen kare sessizliği
-    /// bölmez, çünkü ekranda hiçbir şey olmadı.
+    /// Written in the `Ok` arm: a frame that could not be encoded does not
+    /// break the silence, because nothing happened on screen.
     ///
-    /// `None` → hiç kare çizilmedi; jeton o zaman `sessiz=none`.
+    /// `None` → no frame drawn yet; the token is then `sessiz=none`.
     last_frame_at: Cell<Option<f64>>,
 }
 
-impl LinkIvars {
-    /// Caret'in odağı: pencere key **ve** klavye terminalde (033 → Muhakeme,
-    /// "odak iki bit"). İçinin boşalması, blink'in kapısı ve hareket
-    /// karesindeki yeniden çizimi buradan; vurgu ve seçim rengi yalnız
-    /// `focused`'tan.
+impl Core {
+    /// The caret's focus: window key **and** keyboard in the terminal (033 →
+    /// Muhakeme, "focus is two bits"). Its hollowing, blink's gate and its
+    /// redraw in the motion frame come from here; highlights and selection
+    /// colour from `focused` alone.
     fn caret_focused(&self) -> bool {
         self.focused.get() && self.keyboard.get()
     }
-}
 
-define_class!(
-    // SAFETY: NSObject alt sınıflama şartı taşımaz; LinkDelegate Drop uygulamaz.
-    #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "BateriLinkDelegate"]
-    #[ivars = LinkIvars]
-    struct LinkDelegate;
-
-    unsafe impl NSObjectProtocol for LinkDelegate {}
-
-    unsafe impl CAMetalDisplayLinkDelegate for LinkDelegate {
-        /// Link ana run loop'a eklendiği için bu callback **ana thread'de**
-        /// koşar; `MainThreadOnly` sınıf o sözleşmeyi tipte tutuyor.
-        #[unsafe(method(metalDisplayLink:needsUpdate:))]
-        fn needs_update(&self, link: &CAMetalDisplayLink, update: &CAMetalDisplayLinkUpdate) {
-            let iv = self.ivars();
-            // Görünmeyen pencereye çizmek boşa iş değil, pil sözleşmesinin
-            // ihlali: örtülü pencerede konuşkan bir shell her tazelemede tam
-            // bir kare çizdirirdi.
-            if !iv.waker.gate().is_open() {
-                link.setPaused(true);
-                return;
-            }
-            // Zamanın tabanı: damga bir **alan kopyası**, saat okuması değil
-            // (bkz. `LinkIvars::last_frame_at`). `sessiz=` ile animasyonun
-            // saati aynı yerden okunuyor — iki taban iki ayrı zaman yaratırdı.
-            let now = update.targetTimestamp();
-            // İlk karede `dt` yok: `0.0` ile başlamak, bilinmeyen bir aralığı
-            // uydurmaktan iyi. Kırpmayı `Motion::advance` yapıyor ve orada
-            // olması şart (gerekçe `motion::DT_MAX`).
-            let dt = iv
-                .last_update_at
-                .replace(Some(now))
-                .map_or(0.0, |prev| (now - prev) as f32);
-            // audit: callback ana thread'e bağlı ve yeniden girilmez; sink
-            // `Session`'a geri girmiyor, yani ikinci bir ödünç doğmuyor.
-            let mut frame = iv.frame.borrow_mut();
-            let mut motion = iv.motion.get();
-            // **Hasar sorusu taramadan önce** (008 Karar 4): hareket karesi
-            // listeyi temizlemeden kullanıyor, yani "temizlensin mi" kararı
-            // `clear`'dan önce verilmek zorunda. `Session::frame`'in eski
-            // `Option`'ı tam bu sırayı imkânsız kılıyordu.
-            //
-            // **Süzülme uçuştayken hasarsız kare de içerik karesi** (027): payı
-            // pencereyi `Session::frame`'in içinde kaydırıyor ve hareket karesi
-            // `bt-core`'a hiç gitmiyor. Talep hareketin — kimse uyandırmıyor,
-            // `Waker::wake`'e dokunulmuyor — çizimi içeriğin (modül başlığı).
-            let damaged = iv.session.take_damage();
-            if !damaged && motion.glide_idle() {
-                // Hasar yok. İki ihtimal kaldı ve ikisi de burada bitiyor.
-                motion.advance(dt);
-                // **Uyku testinin üçüncü sorusu.** Blink `Motion`'ın dışında
-                // yaşıyor, yani `settled()` onu görmüyor; bu satır olmasaydı
-                // `Waker::resume` ile uyanan callback hiçbir şey çizmeden geri
-                // uyur ve saat yeniden kurulurdu — kare üretmeyen bir
-                // uyan/uyu fırdöndüsü. Terim tek atımlık ve `settled()`'ın
-                // erken dönüşünden **önce** tüketiliyor.
-                let mut blink = iv.blink.get();
-                let flipped = blink.advance(now);
-                iv.blink.set(blink);
-                // **Dördüncü soru: yazım efektleri** (030). Soru `advance`'ten
-                // **önce** soruluyor: bu adımda biten bir efektin son hâli
-                // (geliş statik glyph'ine oturdu, hayalet kalktı) henüz
-                // çizilmedi ve uyunsaydı ekranda yarı saydam bir harf asılı
-                // kalırdı. Liste bu karede boşaldıysa kare çiziliyor, sıradaki
-                // callback uyuyor.
-                let mut glyph_fx = iv.glyph_fx.borrow_mut();
-                let fx_idle = glyph_fx.is_empty();
-                glyph_fx.advance(dt);
-                if at_rest(motion, flipped, fx_idle) {
-                    // Boşta sıfır kare: yeni içerik de yerleşmemiş animasyon
-                    // da yok, link uyur. Sıradaki `Wakeup` onu `Waker`
-                    // üzerinden geri açar.
-                    //
-                    // Örnek de **yazılmıyor** ve bu bir dal değil, yolun
-                    // şekli: bu karede `draw` hiç koşmadı, "encode = 0 ns"
-                    // diye sahte bir örnek p95'i aşağı çekerdi.
-                    iv.motion.set(motion);
-                    link.setPaused(true);
-                    // **Saat yalnız burada kuruluyor** ve yeri zorunlu: link
-                    // ancak yapacak başka işi kalmayınca uyuyor, yani tik de
-                    // ancak o an gerekiyor. Uyanıkken kurulsaydı her içerik
-                    // karesi bir tik daha dikerdi.
-                    self.arm_clock(now);
-                    return;
-                }
-                // **Hareket karesi** (imleç ya da öteleme, ikisi de olabilir).
-                // `Waker`'a dokunulmuyor (modül başlığı):
-                // link zaten uyanık ve bu callback'in kendisi onu sürdürüyor.
-                iv.motion.set(motion);
-                // İki sayaç, iki animatör: `hareket=` yalnız imlecin,
-                // `kayma=` yalnız ötelemenin tanığı. Aynı karede ikisi birden
-                // artabilir; toplamları çizilen kare sayısı **değil**.
-                if !motion.cursor_settled() {
-                    iv.motion_frames.set(iv.motion_frames.get() + 1);
-                }
-                if !motion.origin_settled() {
-                    iv.slide_frames.set(iv.slide_frames.get() + 1);
-                }
-                let theme = iv.theme.get();
-                let bottom = update.drawable().texture().height() as f32;
-                // **Ötelemenin ikinci yazma noktası** (R2.5). Bu kolda
-                // `frame()` de `clear` de çağrılmıyor, yani öteleme
-                // **korunuyor** — ama animasyonun tanımı iki içerik karesi
-                // arasında *değişmek* ve korunan bir değer değişemez.
-                // `move_caret`'dan **önce**: imlecin dikdörtgeni bu ötelemeyi
-                // pişiriyor.
-                self.set_origin(&mut frame, motion, bottom);
-                // Liste korunuyor, yalnız imleç taşınıyor: grid kirli değil,
-                // yani glyph ve kural listeleri hâlâ geçerli. `Term` kilidine
-                // saniyede 120 kez girmek "render yolu bloklanmaz" ile tam
-                // burada kavga ederdi.
-                if let (Some(at), Some(text)) = (motion.position(), iv.last_caret_text.get()) {
-                    frame.move_caret(
-                        at,
-                        text,
-                        theme.cursor_linear(),
-                        motion.alpha() * iv.blink.get().alpha(),
-                        // **Odak her karede taze okunuyor**, `Frame`'de
-                        // saklanandan değil: bu bit `bt-gpu`'nun kendi kararı
-                        // ve hareket karesi de ona erişiyor.
-                        iv.caret_focused(),
-                    );
-                }
-                // Dock'un statik listeleri korunuyor, yalnız efektler
-                // yeniden basılıyor (`move_caret` emsali).
-                if !fx_idle {
-                    frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), theme.cursor_linear());
-                }
-                // CPU örneği **yazılmıyor** ve bu bir eksiklik değil:
-                // `cpu_kare` `session.frame`'in kilit beklemesini ölçüyor ve
-                // bu karede o iş hiç yok. Bir `truncate` + `push_caret`'un
-                // mikrosaniyesi aynı sütuna girseydi p95'i aşağı çekerdi —
-                // "sahte örnek" yasağının aynısı.
-                //
-                // **GPU sütunu buna uymuyor ve uyamaz:** tamamlanma bloğu
-                // komut tamponuna bağlı (`Renderer::draw`) ve hareket karesi
-                // de bir komut tamponu commit ediyor, yani `record_gpu` bu
-                // kareleri **görüyor**. Blok aynı zamanda `FailureStreak`'i
-                // besliyor; hareket karesini ondan muaf tutmak çizim hatasını
-                // görünmez kılardı, yani ayrılık kasıtlı değil **yapısal**.
-                // Sonucu bir ölçüm kapsamı kalemi: `ornek=` ile `gpu_ornek=`
-                // farklı kare popülasyonlarını sayıyor (GPU'nunki hareket
-                // karelerini de içeriyor) ve iki sütunun p95'i imleç kayan
-                // bir koşuda doğrudan karşılaştırılamaz. Kalem
-                // `docs/OLCUMLER.md` → `## Yöntem`'de yazılı.
-                match iv.renderer.draw(
-                    &update.drawable(),
-                    theme.background_linear(),
-                    &frame,
-                    &iv.completion,
-                ) {
-                    // Hareket karesi de **yola çıkan** bir kare: `sessiz=`
-                    // yerleşmeden sonraki kuyruğu ölçmeli, animasyonun
-                    // başladığı anı değil. Öteleme de burada yayınlanıyor —
-                    // kayma karelerinin fare eşlemesini tazeleyen tek yer bu
-                    // kol.
-                    Ok(()) => {
-                        self.publish_origin(&frame);
-                        iv.last_frame_at.set(Some(now));
-                    }
-                    // **Bu dalın kendi durağı** (`/code-review` bulgusu):
-                    // hasar yolunda durak bayrağın dikilmemesiydi, burada
-                    // öyle olamaz — "hasar yok" dalı yerleşmemiş animasyon
-                    // varken uyumuyor. Bütçe bitince animasyon hedefinde
-                    // bitiriliyor, yani sıradaki callback hem hasar hem
-                    // bekleyen hareket bulamayıp uyuyor. Olmasaydı kalıcı bir
-                    // çizim hatası, kaymanın süre tavanı (0,7 sn) dolana kadar
-                    // tazeleme hızında hata satırı basardı — `FailureStreak`
-                    // tam bunu önlemek için yazılmıştı.
-                    //
-                    // **Yalnız senkron hata** (`/code-review` bulgusu):
-                    // tamamlanma bloğundan gelen asenkron hata da
-                    // `draw_failed`'i çağırıyor ama dönüşünü kullanamıyor —
-                    // `iv.motion` ana thread'e bağlı bir `Cell` ve blok başka
-                    // bir thread'de koşuyor. O yolda animasyonun durağı
-                    // `finish()` değil **süre tavanı**, yani bütçe bitse de
-                    // hata satırı en çok 0,7 saniye sürer. Kapatmanın yolu
-                    // belli (bloktan dikilen, callback'in tükettiği atomik bir
-                    // "bitir" bayrağı) ve bedeli de belli: `Motion`'a ikinci
-                    // bir giriş noktası. Ölçülmüş bir ihtiyaç beklemeden
-                    // atılmadı.
-                    Err(e) => {
-                        if iv.retry.draw_failed(&e) {
-                            motion.finish();
-                            iv.motion.set(motion);
-                            glyph_fx.finish();
-                            // `Frame`'deki efekt listeleri de boşalıyor: link
-                            // uyuyor ve sıradaki hasarsız kare (blink'in tiki)
-                            // `set_dock_fx`'e uğramadan eski listeleri yarı
-                            // yolda donmuş olarak yeniden çizerdi
-                            // (`/code-review`).
-                            frame.set_dock_fx(
-                                std::iter::empty(),
-                                &Clusters::default(),
-                                theme.cursor_linear(),
-                            );
-                        }
+    /// Hands every frame the GPU has finished to the four jobs of Karar 6:
+    /// a frame finished without error gives the failure budget back, closes
+    /// `acilis=` (the first one) and records the GPU delta when measured; a
+    /// frame that failed on the GPU goes to the same policy as a synchronous
+    /// error. `kare=` itself is counted by the renderer ([`Renderer::poll`]).
+    ///
+    /// Returns whether a frame is still in flight.
+    fn complete(&self) -> bool {
+        let timed = self.renderer.gpu_timing_supported();
+        self.renderer.poll(|result| match result {
+            Ok(span) => {
+                self.retry.streak.succeeded();
+                // The measurement gate is **here**: closed, not a single
+                // extra call is made (R4.1). `acilis=` closes here, not in
+                // `draw` — what is measured is "main to the first **finished**
+                // frame" and submitting is not finishing.
+                if let Some(stats) = &self.stats {
+                    stats.mark_startup();
+                    match span {
+                        // The GPU's own clock; not correlated with a CPU
+                        // stamp, because the question is not "which frame"
+                        // but the **distribution**.
+                        Some(span) => stats.record_gpu(span.start, span.end),
+                        // Measured but no usable span (the readback failed):
+                        // counted as rejected, like Metal's zero stamps, so
+                        // an empty GPU column is not "no frame drawn". With
+                        // no timestamp support there is nothing to reject —
+                        // the token says `unsupported`.
+                        None if timed => stats.reject_gpu(),
+                        None => {}
                     }
                 }
-                // **Faz karesinden sonra hemen uyuyor.** Yerleşmiş bir
-                // animasyon yokken bu kare yalnız blink'in faz değişimi için
-                // çizildi; link açık bırakılsaydı bir sonraki vsync'e kadar
-                // bir callback ve `CAMetalDisplayLink`'in ondan önce aldığı
-                // bir drawable daha ödenirdi — saniyede iki **görünür** kare
-                // için dört tur. Hareket sürüyorsa dokunulmuyor: onun ritmi
-                // zaten vsync.
-                if motion.settled() && glyph_fx.is_empty() {
-                    link.setPaused(true);
-                    self.arm_clock(now);
-                }
-                return;
             }
-            frame.clear(iv.cell.get(), iv.caret_style.get());
-            // CPU **iki** aralık ölçülüyor, bir değil: kilit beklemesi
-            // `session.frame`'in içinde, encode ise `draw`'ın. Tek aralık
-            // ikisini toplar ve ayrımı yok eder (R3.1).
-            //
-            // Kapı kapalıyken saat **hiç** okunmuyor (R4.1): `then` de `map`
-            // de closure'ı yalnız dolu tarafta koşturuyor, yani kapalı kapının
-            // bedeli bir dallanma.
-            let t0 = iv.stats.is_some().then(Instant::now);
-            // Drawable'ı boştaki tasarruf kapsamaz: `CAMetalDisplayLink` onu
-            // callback'ten ÖNCE alıp `update`'in içine koyuyor, `drawable()`'ı
-            // çağırmamak alımı iptal etmiyor. (Bu yüzden `nextDrawable`'ın
-            // `Option`'ı ve onun `GpuError::NoDrawable`'ı da kalktı:
-            // `update.drawable()` başlıkta `nonnull` ve objc2 onu `Option`suz
-            // üretiyor.)
-            // **İkinci sink tampona akıyor, doğrudan `Frame`'e değil** ve
-            // sebep borç kuralı: iki sink de `frame`'i ödünç alsaydı aynı
-            // çağrıda iki `&mut` doğardı (`LinkIvars::fill`, `blocks`'un
-            // gerekçesinin ikizi). Hücreler çağrı dönünce banda geçiyor.
-            let mut fill = iv.fill.borrow_mut();
-            fill.clear();
-            // **Izgaranın çizildiği yer taramadan önce bildiriliyor**: kayma
-            // uçuştayken ızgara hedefinin altında ve tepesinde açılan şeridi
-            // doldurma bandı kapatıyor (`Session::set_grid_top`). Değer bu
-            // karenin `advance`'inden önceki konum — yerleşmeye giden kayma
-            // için gereğinden bir parça büyük, yani fazlası ekranın dışında.
-            //
-            // **Bandın fazlası düşülmüş** (032): ızgara çizimde bant kadar
-            // yukarıda ve açılan şerit o kadar yukarıda.
-            let grid_top = motion.origin() - motion.band();
-            // **Geçen süre taramadan önce işleniyor** ve sebebi süzülme: payı
-            // konumun bu karedeki değişimi ve `frame()`'in argümanı, yani
-            // `frame()`'den önce belli olmak zorunda. İmleç ve öteleme için
-            // sıra aynı kalıyor — `advance` yine `sync`'ten önce, ve arada
-            // `motion`'ı okuyan kimse yok.
-            motion.advance(dt);
-            // İstek `advance`'ten **sonra** (`Motion::request_glide`): uykudan
-            // uyanan link'in kırpılmış `dt`'si yeni çentiğe uygulanmasın.
-            motion.request_glide(iv.session.take_scroll_glide());
-            let glide = motion.take_glide();
-            // Bandın PTY payından kısalığı (uzak oturum, 036) ayrıca: ızgara
-            // o kadar kalıcı olarak aşağıda ve şerit kaydırılmış pencerede de
-            // kapatılmalı (`Session::slide_fill_rows`).
-            let lowered = (-motion.band()).max(0.0).ceil() as u16;
-            iv.session
-                .set_grid_top(grid_top.max(0.0).ceil() as u16, lowered);
-            // Küme tablosu çağrı boyunca `Frame`'in **dışında**: sink'ler
-            // `frame`'i ödünç alıyor (`Frame::take_clusters`). `clear`
-            // yukarıda onu boşalttı; iki sink aynı tabloya yazıyor.
-            let mut clusters = frame.take_clusters();
-            let cursor = iv.session.frame(
-                |cell| frame.push(cell),
-                |cell| fill.push(cell),
-                &mut iv.blocks.borrow_mut(),
-                &mut iv.selection.borrow_mut(),
-                &mut iv.search.borrow_mut(),
-                &mut clusters,
-                // Pay **uyandırmıyor**: kareyi zaten bu callback çiziyor
-                // (`Session::frame`). Nesli değiştiyse orada düşüyor.
-                glide,
-                // **Tavan bir oran** (`DOCK_MAX_SHARE`, 032 Karar 4): satır
-                // sayısını `frame()` `Term` kilidinin altında okuyor, bu katman
-                // onun bir kopyasını tutmuyor. Sarmanın genişliği ızgaranınki —
-                // dock aynı sütunları kullanıyor.
-                DockBudget {
-                    share: crate::frame::DOCK_MAX_SHARE,
-                    cols: iv.cols.get(),
-                },
-            );
-            // **Nesil ikinci kez, `frame()`'den sonra**: `frame()` kesri
-            // geçersiz bulunca (`CSI 3 J`, alternatif ekran, fare kipi) nesli
-            // kendisi artırıyor ve uçuştaki süzülme o karede bitmeli. Konum da
-            // soruluyor: pay konumu oynatmadıysa pencere geçmişin ucunda ve
-            // süzülme orada bitiyor (`Motion::observe_scroll`) — ikisinde de
-            // yoksa kırpmaya çarpan paylar için kare üstüne kare çizilirdi.
-            frame.put_clusters(clusters);
-            motion.observe_scroll(
-                cursor.scroll_generation,
-                (cursor.display_offset, cursor.scroll_frac),
-                glide.rows,
-            );
-            // Kesir orijinden **önce** (`Frame::set_origin_rows` onu yazıldığı
-            // anda topluyor) ve caret'ten önce (`Frame::push_caret` onu
-            // ızgaradaki caret'e ekliyor).
-            frame.set_scroll_frac(cursor.scroll_frac);
-            // **Kanalın boyu hücrelerden önce** (`Frame::set_fill_rows`):
-            // `push_fill`'in bekçisi satırı ona göre ölçüyor. Kanal bant artı
-            // kesrin tepe satırı; sıfırsa sınır ikinci sink'i hiç çağırmadı,
-            // yani döngü de boş dönüyor ve kare doldurmasız hâliyle bit bit
-            // aynı.
-            frame.set_fill_rows(cursor.top_row + cursor.fill);
-            for cell in fill.drain(..) {
-                frame.push_fill(cell);
+            Err(e) => {
+                self.retry.draw_failed(&e);
             }
-            // Bandın kendi blok işaretleri (`Blocks::fill_slice`): hücrelerden
-            // **sonra**, çünkü `push_fill_block`'un bekçisi bandın boyunu
-            // okuyor ve o, hücrelerle aynı karede yazılıyor. Izgaranınkiyle
-            // aynı `borrow` turundan geçmiyor — bandın listesi ayrı ve
-            // `fill_rules`'a düşüyor.
-            for block in iv.blocks.borrow().fill_slice() {
-                frame.push_fill_block(*block);
-            }
-            // Şeritler hücrelerle **aynı** karede ve aynı `frame()` çağrısından:
-            // ayrı bir sorgudan okunsalardı kaydırma karesinde bir kare geride
-            // kalırlardı (010 discussion.md → Karar 2). Sink içinde değil
-            // sonrasında, çünkü blok listesi hücre hücre değil kare başına
-            // çözülüyor — ve `borrow_mut` yukarıdaki ifadenin sonunda düştüğü
-            // için buradaki `borrow` çakışmıyor.
-            //
-            // **Animasyon yok** (Karar 5): şerit anında beliriyor, `motion`
-            // ikinci bir tüketici kazanmıyor ve bu yol hiçbir kare istemiyor —
-            // boşta sıfır kare sözleşmesi dokunulmadan kalıyor. Hareket
-            // karesinin yolu (yukarıda, `move_caret`) buraya hiç uğramıyor;
-            // ızgara değişmediği için şerit de değişmemeli ve `Frame` onu
-            // koruyor.
-            for block in iv.blocks.borrow().as_slice() {
-                frame.push_block(*block);
-            }
-            // **Seçimin rengi odaktan** (031 Karar 9): iki renk sınırdan hazır
-            // geliyor, hangisinin çizileceği burada. Kare kaynağı yeni değil —
-            // odağın değişimi zaten bir içerik karesi istiyor
-            // ([`DisplayLink::set_focused`]) ve renk o karede dönüyor; hareket
-            // karesi listeyi koruyor, rengi de.
-            let selection = iv.selection.borrow();
-            let rgba = selection.color(iv.focused.get());
-            // Dilim bir kerede: köşe kararı komşu satırın koşusuna bakıyor.
-            frame.push_selection(selection.as_slice(), rgba);
-            drop(selection);
-            // **Arama vurgusu da aynı kuralla** (033 Karar 7): iki rol, renk
-            // odaktan; ızgaranın ve bandın koşuları aynı `frame()`
-            // turundan. Bandınkiler `set_fill_rows`'tan sonra — bekçisi
-            // bandın boyunu okuyor — ve renkleri `push_search`'ün yazdığı
-            // uniform. Hareket karesi listeleri koruyor, taramaz (R2.2).
-            let search = iv.search.borrow();
-            let focused = iv.focused.get();
-            frame.push_search(
-                search.as_slice(),
-                search.match_color(focused),
-                search.current_color(focused),
-            );
-            frame.push_fill_search(search.fill_slice());
-            drop(search);
-            // Kapının operandı burada artıyor: hasar bulundu, kare çizilecek.
-            // `kare`'den önce ve ondan bağımsız — GPU'nun bitirmesini
-            // beklemiyor (bkz. `LinkIvars::content_frames`).
-            iv.content_frames.set(iv.content_frames.get() + 1);
-            // Clear ve imleç rengi oturumun temasından: `frame()`'in zemin
-            // atlaması ve renk sorusunun yanıtıyla aynı kaynak. Tema yalnız
-            // dolu karede okunuyor — boştaki callback yukarıda döndü — ve
-            // hareket karesi için saklanıyor.
-            let theme = iv.session.theme();
-            iv.theme.set(theme);
-            // Süre sayacının tiki **mutlak** damgaya çevriliyor; `None`
-            // bekleyen son tarihi temizliyor.
-            iv.content_deadline
-                .set(content_deadline(now, cursor.next_tick));
-            // **Dock artık imleçten ÖNCE** ve sıra zorunlu: caret'in hedefi
-            // dock'un caret'ini de sorabilmeli (`Dock::caret`), yani o cevap
-            // `motion.sync`'ten önce elde olmak zorunda. Listeye girme sırası
-            // çizim sırasını **belirlemiyor** — dock'un kendi listeleri ve
-            // kendi encode'u var (`Renderer::encode_pass`), yani sıra orada
-            // sabit ve buradaki sıra yalnız veri bağımlılığı.
-            //
-            // Ayna her tuş vuruşunda kare istiyor: yük ayrıştırıcıya da
-            // ulaşıyor ve alacritty işlenen her bayt için `Event::Wakeup`
-            // basıyor, yani `dirty` bu kola girmeden önce zaten dikilmiş
-            // oluyor. Dock bu yüzden kendi kare talebini taşımıyor — boşta
-            // sıfır kare sözleşmesi dokunulmadan kalıyor.
-            let dock_rows = iv.dock_rows.get();
-            // Pencerenin dibi, **pencere uzayında**: dock'un bandı da caret'in
-            // hedefi de ona yaslı. Yükseklik dokudan okunuyor, çünkü tek
-            // doğru kaynağı o — `rows * cell_h` artık şeridi (yüksekliğin
-            // hücre boyuna bölünmesinden artan piksel) görmezdi ve caret bir
-            // hücreye kadar yukarıda dururdu. `Renderer::encode_dock` viewport
-            // orijinini aynı çıkarmayla kuruyor, yani ikisi aynı satır.
-            let viewport_height = update.drawable().texture().height() as f32;
-            let mut dock_caret = None;
-            // Yazım efektlerinin saati içerik karesinde de ilerliyor: hızlı
-            // yazımda her callback hasar buluyor ve hareket kolu hiç koşmuyor.
-            let mut glyph_fx = iv.glyph_fx.borrow_mut();
-            glyph_fx.advance(dt);
-            if dock_rows > 0 {
-                // **Yerleşim hücrelerden önce** (`Frame::set_dock_input_rows`): giriş
-                // satırları + bağlam satırı, `frame()`'in bastırmayla aynı
-                // okumada verdiği sayıdan. Bandın tepesi burada yazılmıyor —
-                // bant animasyonun değeri ve `sync`'ten sonra
-                // (`LinkDelegate::set_origin`).
-                frame.set_dock_input_rows(cursor.input_rows);
-                let mut dock_state = iv.dock.borrow_mut();
-                let mut dock_context = iv.dock_context.borrow_mut();
-                // **İkinci sink yerel bir yuvaya akıyor**, doğrudan `Frame`'e
-                // değil: iki sink de `frame`'i ödünç alamaz (`fill`'in
-                // gerekçesi). Karede en çok bir düzenleme var, yani tampon bir
-                // `Option`.
-                let mut edit = None;
-                // Izgaranın tablosunun ikizi, aynı gerekçe.
-                let mut dock_clusters = frame.take_dock_clusters();
-                // Devrin cevabı `frame()`'den geliyor, dock yeniden
-                // hesaplamıyor: üç ön koşulu (dock'u olan pencere, alternatif
-                // ekran, aynanın tazeliği) yalnız o biliyor.
-                let dock = iv.session.dock(
-                    DockCols {
-                        grid: iv.cols.get(),
-                        // Bağlam satırının bütçesi: **aynı piksel genişliği,
-                        // küçük adım**. Dock sol payı ızgarayla paylaşıyor
-                        // (`Frame::dock_pos`), yani iki satırın kapladığı
-                        // şerit aynı; ayrışan tek şey bir harfin kaç piksel
-                        // ilerlettiği. Hesap burada, çünkü `bt-core` piksel
-                        // görmüyor.
-                        context: crate::frame::context_cols(iv.cols.get(), iv.cell.get()),
-                    },
-                    // Sayı hesaplandığı yerden geçiyor, dock yeniden
-                    // türetmiyor (`caret_in_dock`'un emsali).
-                    cursor.input_rows,
-                    &mut dock_state,
-                    &mut dock_context,
-                    cursor.caret_in_dock,
-                    &mut iv.dock_selection.borrow_mut(),
-                    &mut dock_clusters,
-                    |cell| frame.push_dock(cell),
-                    |dock_edit| edit = Some(dock_edit),
-                );
-                frame.put_dock_clusters(dock_clusters);
-                // Sıra zorunlu: düzenleme uçuştakileri kaydırıp bitirebiliyor,
-                // statik glyph'i bulunamayan geliş ancak dock basıldıktan
-                // **sonra** bilinebiliyor ve çizilecek liste en sonda.
-                if cursor.input_rows == 0 {
-                    // Giriş satırı yok (uzak oturum, 036): efektin yüzeyi de
-                    // yok. Koşulsuz bitiyor — `Reset` yalnız ayna değiştiyse
-                    // geliyor ve uçuşta kalan bir geliş 0. satıra, yani artık
-                    // bağlam satırının yerine yanlış boyda çizilirdi.
-                    glyph_fx.finish();
-                } else if let Some(edit) = edit {
-                    // Dikey pencerenin boyu `dock()`'a geçen sayının ta
-                    // kendisi: kaymanın pencereden taşırdığı efekt düşüyor.
-                    glyph_fx.apply(edit, motion, cursor.input_rows, frame.dock_clusters());
-                }
-                frame.suppress_dock(&mut glyph_fx);
-                frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), theme.cursor_linear());
-                dock_caret = dock.caret.map(|at| (at, dock.caret_text));
-                // Dock'un seçimi ızgaranınkiyle aynı şekil ve aynı renk
-                // uniform'u (031 R3.2); renk yukarıda `push_selection`'la
-                // yazıldı — pencerede tek seçim, tek renk.
-                frame.push_dock_selection(&iv.dock_selection.borrow());
-                // İşaret yoksa girişin ilk satırı dikey pencerenin dışında.
-                if let Some(sigil) = dock.sigil {
-                    frame.push_dock_sigil(sigil);
-                }
-                // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
-                // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
-                frame.open_dock(dock.ground, dock.edge, dock.separator);
-                frame.set_dock_progress(dock.progress, dock.track);
-                frame.set_dock_buttons(dock.buttons);
-            } else {
-                // Dock yok (alternatif ekran): efektin konusu da yok.
-                glyph_fx.finish();
-            }
-            drop(glyph_fx);
-            // **Caret'in tek hedefi.** İki ev var ve ikisi de aynı animatöre
-            // giriyor: dock devraldıysa oraya, almadıysa ızgaradaki imlece.
-            // Ayrı animatörler olsaydı dock'ta kayma hiç olmaz, devir de bir
-            // ışınlanma kalırdı — kullanıcının iki ayrı şikâyeti, tek sebep.
-            //
-            // Öncelik dock'ta ve ikisi aynı anda `Some` **olamıyor**: devrin
-            // cevabı tek yerde hesaplanıp (`Session::frame`) hem ızgaranın
-            // `visible`'ına hem dock'un caret'ine aynı değerden veriliyor
-            // (`Cursor::caret_in_dock`). Bu cümle bir zamanlar yanlıştı:
-            // `dock::render` yüklemi kendi çağırıyor, `frame()`'in üç ön
-            // koşulunu bilmiyordu ve bayat aynada ikisi birden doğuyordu —
-            // aşağıdaki `.or_else` dock'u seçince taze satır caret'siz
-            // kalıyordu (set kapısı, `/code-review`). Sıra yine de yazılı
-            // duruyor: caret'in iki yerde çizilmesindense yanlış yerde
-            // çizilmesi görünür bir kusurdur.
-            //
-            // **Bandın fazlası iki hedefte** (032): ızgaranın caret'i ızgarayla
-            // birlikte bandın **hedef** fazlası kadar yukarıda, dock'unki dibe
-            // yaslı giriş bloğunda, sarılan satırın kendi satırında.
-            let band_target = band_target(cursor.input_rows, dock_rows, iv.cell.get());
-            let caret = dock_caret
-                .map(|(at, text)| {
-                    let at = dock_caret_at(
-                        at.col,
-                        at.row,
-                        cursor.input_rows,
-                        viewport_height,
-                        iv.cell.get(),
-                    );
-                    (at, text)
-                })
-                .or_else(|| {
-                    cursor.visible.then(|| {
-                        (
-                            [
-                                f32::from(cursor.col),
-                                f32::from(cursor.row) + f32::from(origin_target(cursor))
-                                    - band_target,
-                            ],
-                            cursor.text,
-                        )
-                    })
-                });
-            iv.last_caret_text.set(caret.map(|(_, text)| text));
-            // **Blink caret'ten SONRA** ve sıra zorunlu: "yazıyor mu"
-            // sorusunun cevabı caret'in hedefinin kıpırdaması ve o hedef
-            // ancak burada belli oluyor.
-            //
-            // Ayarın ve uygulamanın birleşimi `bt-core`'dan geliyor
-            // (`Cursor::blink`); Hareketi Azalt onu **kapatıyor** —
-            // erişilebilirlik ayarı animasyon *eklemez* (`CLAUDE.md`) ve yan
-            // kazancı yapısal: `Mode::Fade` ile blink birbirini dışladığı için
-            // `alpha()` kanalına ikinci bir yazar doğmuyor.
-            let at = caret.map(|(at, _)| at);
-            let moved = iv.last_caret_at.replace(at) != at;
-            let mut blink = iv.blink.get();
-            // **Üçüncü terim odak** (R7.4): odakta olmayan pencerede blink
-            // duruyor ve imleç görünür kalıyor. Yeni bir mekanizma değil —
-            // "kapalı blink görünür kalır" değişmezi (`content_frame`,
-            // `enabled=false` → `lit=true`, `next_flip=None`) bugün gizli
-            // imleci koruyor; bu onun üçüncü tüketicisi. Yan kazancı boşta
-            // sıfır kare tarafında: odaksız boş pencere saat kurmuyor.
-            // Caret'in odağı iki bitin birleşimi ([`LinkIvars::caret_focused`]):
-            // alana yazarken de blink duruyor ve caret içi boş.
-            let focused = iv.caret_focused();
-            // **Ayarın periyodu burada uygulanıyor** ve `content_frame`'den
-            // önce: tik mutlak bir son tarih, yani yeniden kurulurken bu
-            // karenin damgası gerekiyor. Aynı değerde no-op.
-            blink.set_half_period(now, iv.blink_interval.get());
-            blink.content_frame(now, cursor.blink && !motion.reduce() && focused);
-            // Caret kıpırdadıysa faz açığa dönüyor: yazarken imleç sönmez.
-            if moved {
-                blink.wake(now);
-            }
-            // **Faz burada da ilerliyor** ve dönen değer atılıyor: kare zaten
-            // çiziliyor, ayrıca bir uyandırma gerekmiyor. Olmasaydı akan
-            // çıktıda (her callback hasar buluyor) faz **donardı** — üstelik
-            // sönük fazda donabilirdi ve caret çıktı boyunca görünmezdi.
-            blink.advance(now);
-            iv.blink.set(blink);
-            // `motion.advance` taramadan önce koştu ve sıra zorunlu: önce
-            // geçen süre eski hedefe işlenir, sonra yeni hedef kurulur. Ters
-            // sırada `dt` yeni hedefe uygulanır ve imleç bir kare boyunca
-            // gitmediği bir yöne doğru hızlanırdı.
-            //
-            // **Dolu ızgaranın kayması** (`Motion::scroll_in`): hedef sabitken
-            // satırlar geçmişe kaydıysa öteleme o kadar aşağıdan yeniden
-            // süzülüyor. `sync`'ten önce, ki tekerlek ve geometri snap'i bunu
-            // da silsin.
-            motion.scroll_in(cursor.scrolled, cursor.rows);
-            motion.sync(
-                caret.map(|(at, _)| at),
-                origin_target(cursor),
-                band_target,
-                cursor.display_offset,
-                // Geometri bayrağı burada **tüketiliyor**: tüketilmeseydi
-                // bir pencere sürüklemesinden sonraki her kare snap'lerdi.
-                iv.geometry_changed.replace(false),
-                // **Yön kuralının istisnası burada hesaplanıyor** (017 R4.1):
-                // üstteki boşluk geçmişle doluyorsa aşağı inen şey boşluk
-                // değil, gelen geçmiş — öteleme yükselirken de süzülüyor.
-                // `bt-gpu` "doldurma" diye bir terminal kavramı öğrenmiyor;
-                // aldığı şey `offset` ve `geometry` gibi tek bir bit.
-                cursor.fill > 0,
-            );
-            iv.motion.set(motion);
-            // **Öteleme `sync`'ten sonra** ve bu sıra zorunlu: çizilecek değer
-            // hedef değil animasyonun bu karedeki yeri. `push_caret`'ten
-            // **önce** olmak da zorunlu — caret'in dikdörtgeni bu ötelemeyi
-            // pişiriyor.
-            self.set_origin(&mut frame, motion, viewport_height);
-            if let (Some(at), Some((_, text))) = (motion.position(), caret) {
-                frame.push_caret(
-                    at,
-                    text,
-                    theme.cursor_linear(),
-                    motion.alpha() * blink.alpha(),
-                    cursor.shape,
-                    focused,
-                );
-            }
-            // Birinci aralık burada kapanıyor — `push_caret`'dan **sonra**:
-            // imleci listeye koymak sink işidir, encode değil. Damga bir satır
-            // yukarıda alınsaydı `cpu_encode` `draw`'ın yanında onu da ölçer
-            // ve jetonun adı yalan söylerdi. Çift tek bir `Option`'da taşınıyor
-            // ki "ikisi de var ya da hiçbiri" temsil edilebilir tek durum olsun.
-            let spans = t0.map(|t0| (t0, Instant::now()));
+        })
+    }
 
-            // `frame()` bayrağı çizim başlamadan tüketti; hata hâlinde geri
-            // dikilmezse bu içerik bir daha istenmez ve pencere bayat kalır.
-            // Senkron ve asenkron hata aynı kapıdan geçiyor.
-            let drawn = iv.renderer.draw(
-                &update.drawable(),
-                theme.background_linear(),
-                &frame,
-                &iv.completion,
-            );
-            // Encode aralığı `draw`'ın dönüşüyle kapanıyor: ikinci damga
-            // buraya, karar dallarından **önce** düşüyor.
-            let spans = spans.map(|(t0, t1)| (t1 - t0, Instant::now() - t1));
-            match drawn {
-                // Örnek yalnız **yola çıkan** karede yazılır: encode
-                // edilemeyen kare hiçbir şey ölçmedi.
-                Ok(()) => {
-                    // Öteleme de yalnız burada yayınlanıyor: fare eşlemesi
-                    // ekranda duran karenin ötelemesini okumalı.
-                    self.publish_origin(&frame);
-                    // Sessizliğin tabanı da yalnız **yola çıkan** karede
-                    // tazeleniyor ve aynı sebeple: encode edilemeyen kare
-                    // ekranda hiçbir şey değiştirmedi.
-                    // Damga callback'in başında alınan `now`; ikinci bir
-                    // `targetTimestamp()` çağrısı aynı değeri döndürür ama
-                    // `dt`'nin tabanıyla `sessiz=`'in tabanını iki ayrı
-                    // okumaya bağlardı — `last_update_at`'in doc'unun adıyla
-                    // yasakladığı şey (`/code-review` bulgusu).
-                    iv.last_frame_at.set(Some(now));
-                    if let Some((stats, (cpu_frame, cpu_encode))) = iv.stats.as_ref().zip(spans) {
-                        stats.record_cpu(cpu_frame, cpu_encode);
-                    }
-                }
-                // Dönüş burada okunmuyor: bu dalın durağı bayrağın
-                // dikilmemesi ve o `draw_failed`'in kendi içinde.
-                Err(e) => {
-                    iv.retry.draw_failed(&e);
-                }
+    /// Draws `frame` into this tick's texture and presents it.
+    ///
+    /// `Ok` means submitted and queued for presentation — asynchronous, like
+    /// Metal's `commit`; the frame's real fate reaches [`Core::complete`] at
+    /// a later tick. On `Err` the texture is dropped unpresented (wgpu
+    /// discards it) and the caller sends the error to the frame policy.
+    fn draw(
+        &self,
+        texture: wgpu::SurfaceTexture,
+        clear: LinearRgba,
+        frame: &Frame,
+    ) -> Result<(), GpuError> {
+        self.renderer
+            .draw(&surface::target(&texture), clear, frame)?;
+        self.renderer.present(texture);
+        Ok(())
+    }
+
+    /// This tick's texture, or the reason there is none. Nothing is acquired
+    /// on the paths that go to sleep: under the timer-only provider a
+    /// drawable is paid only by a frame that is drawn.
+    fn acquire(&self) -> Option<wgpu::SurfaceTexture> {
+        match self.surface.acquire() {
+            Acquired::Frame(texture) => Some(texture),
+            // Not an error: the window is occluded or no drawable came. The
+            // damage is kept and the pacer **pauses**. Retrying every vsync
+            // would tick at the refresh rate for as long as the window stays
+            // occluded (measured: a window the hal reports occluded from
+            // birth gets no occlusion *change* notice, so the gate never
+            // closes). What brings the frame back is the visibility notice —
+            // becoming visible is a change, `set_visible(true)` asks for a
+            // frame — or the next wake. `Timeout` cannot happen on Metal
+            // (wgpu-hal turns `allowsNextDrawableTimeout` off).
+            Acquired::Skip => {
+                self.waker.keep_damage();
+                self.waker.pacer().set_running(false);
+                None
             }
-            // **Alternatif ekran nöbeti, ölçüm damgalarından sonra.** Kapı
-            // bir karşılaştırma ve bir atomik okuma; haberci ancak geçişte
-            // (vim açılır/kapanır) koşuyor, yani olağan karede bedeli yok.
-            // Damgaların dışında, çünkü geçiş karesinde bir `dispatch` maliyeti
-            // `cpu_encode`'a binerdi ve o jeton çizimin süresini iddia ediyor.
-            self.notice_alt_screen();
+            Acquired::Failed(e) => {
+                self.retry.draw_failed(&e);
+                None
+            }
         }
     }
-);
 
-impl LinkDelegate {
-    /// Alternatif ekran değiştiyse haberciyi çağırır; değişmediyse hiçbir şey.
+    /// One vsync tick: the old display-link callback, now platform-free.
     ///
-    /// **Kapı burada, haberciye değil**: habercinin kendisi ana kuyruğa iş
-    /// atıyor ve her karede bir iş atmak boşta sıfır kare sözleşmesini
-    /// (`CLAUDE.md`) sessizce bozardı — kuyruğa düşen her iş ana thread'i
-    /// uyandırıyor. Karşılaştırma bir `Cell` okuması, yani olağan karede bu
-    /// fonksiyonun bedeli ölçülemez.
-    ///
-    /// Son görülen değer **haberci çağrılmadan önce** yazılıyor: haberci
-    /// senkron koşup (sınamada) buraya geri dönseydi ters sıra ikinci bir
-    /// bildirim doğururdu.
-    fn notice_alt_screen(&self) {
-        let iv = self.ivars();
-        let Some(notify) = iv.alt_screen_changed.as_ref() else {
+    /// Runs on the thread that created the link — on macOS the main thread,
+    /// where the pacer's timer is on the main run loop.
+    fn tick(&self, now: f64, target: TickTarget) {
+        // Only (b) exists today: the texture comes from the surface
+        // (`TickTarget`'s doc).
+        let TickTarget::Surface = target;
+        // **Completion first**, before the gate: a frame submitted before
+        // the window was occluded is still counted when the next tick comes.
+        self.complete();
+        // Drawing into an invisible window is not wasted work, it breaks the
+        // battery contract: a chatty shell in an occluded window would draw a
+        // full frame every refresh.
+        if !self.waker.gate().is_open() {
+            self.waker.pacer().set_running(false);
+            return;
+        }
+        // No size yet (the view has not been laid out, or it is minimised):
+        // nothing to draw into. The damage stays; the resize that configures
+        // the surface asks for a frame.
+        if !self.surface.is_configured() {
+            self.waker.pacer().set_running(false);
+            return;
+        }
+        // The first frame has no `dt`: starting at `0.0` beats inventing an
+        // unknown interval. `Motion::advance` does the clamping and it must be
+        // there (reason: `motion::DT_MAX`).
+        let dt = self
+            .last_update_at
+            .replace(Some(now))
+            .map_or(0.0, |prev| (now - prev) as f32);
+        // audit: the tick is on the main thread and not re-entered; the sink
+        // does not re-enter `Session`, so no second borrow is born.
+        let mut frame = self.frame.borrow_mut();
+        let mut motion = self.motion.get();
+        // **The damage question comes before the scan** (008 Karar 4): the
+        // motion frame uses the list without clearing it, so "clear or not" is
+        // decided before `clear`. `Session::frame`'s old `Option` made exactly
+        // this order impossible.
+        //
+        // **While the glide is in flight a frame without damage is a content
+        // frame too** (027): its share scrolls the window inside
+        // `Session::frame`, and the motion frame never goes to `bt-core`. The
+        // request is motion's — nobody wakes, `Waker::wake` is not touched —
+        // the drawing is content's (module header).
+        let damaged = self.session.take_damage();
+        if !damaged && motion.glide_idle() {
+            self.motion_tick(&mut frame, motion, now, dt);
+            return;
+        }
+        // The texture before the CPU spans: acquiring may wait for a free
+        // drawable, and Metal's spans never included `nextDrawable` either
+        // (the display link handed the drawable over before its callback).
+        let Some(texture) = self.acquire() else {
+            // The damage was taken above; `acquire` planted it again.
             return;
         };
-        let now = iv.session.alt_screen();
-        if iv.alt_screen.replace(now) == now {
+        frame.clear(self.cell.get(), self.caret_style.get());
+        // **Two** CPU spans, not one: the lock wait is inside
+        // `session.frame`, the encode inside `draw`. One span would add them
+        // and erase the split (R3.1).
+        //
+        // With the gate closed the clock is **never** read (R4.1): `then`
+        // runs its closure only on the full side, so a closed gate costs one
+        // branch.
+        let t0 = self.stats.is_some().then(Instant::now);
+        // **The second sink flows into a buffer, not straight into `Frame`**
+        // and the reason is the borrow rule: if both sinks borrowed `frame`
+        // the same call would give birth to two `&mut` (`Core::fill`, the
+        // twin of `blocks`' reason). The cells move to the band when the call
+        // returns.
+        let mut fill = self.fill.borrow_mut();
+        fill.clear();
+        // **Where the grid is drawn is reported before the scan**: while the
+        // slide is in flight the grid is below its target and the strip that
+        // opens at its top is covered by the fill band
+        // (`Session::set_grid_top`). The value is the position before this
+        // frame's `advance` — for a slide heading to settle a little larger
+        // than needed, so the excess is off screen.
+        //
+        // **The band's excess is subtracted** (032): the grid is drawn that
+        // much higher and the opening strip is that much higher.
+        let grid_top = motion.origin() - motion.band();
+        // **Elapsed time is processed before the scan**, because of the
+        // glide: its share is the position's change in this frame and an
+        // argument of `frame()`, so it must be known before `frame()`. For the
+        // cursor and the offset the order is unchanged — `advance` still
+        // before `sync`, and nobody reads `motion` in between.
+        motion.advance(dt);
+        // The request comes **after** `advance` (`Motion::request_glide`): a
+        // link waking from sleep must not apply its clamped `dt` to the new
+        // notch.
+        motion.request_glide(self.session.take_scroll_glide());
+        let glide = motion.take_glide();
+        // The band being shorter than the PTY share (remote session, 036) is
+        // separate: the grid is that much lower for good and the strip must be
+        // covered in a scrolled window too (`Session::slide_fill_rows`).
+        let lowered = (-motion.band()).max(0.0).ceil() as u16;
+        self.session
+            .set_grid_top(grid_top.max(0.0).ceil() as u16, lowered);
+        // The cluster table is **outside** `Frame` for the call: the sinks
+        // borrow `frame` (`Frame::take_clusters`). `clear` above emptied it;
+        // both sinks write to the same table.
+        let mut clusters = frame.take_clusters();
+        let cursor = self.session.frame(
+            |cell| frame.push(cell),
+            |cell| fill.push(cell),
+            &mut self.blocks.borrow_mut(),
+            &mut self.selection.borrow_mut(),
+            &mut self.search.borrow_mut(),
+            &mut clusters,
+            // The share **does not wake**: this tick draws the frame anyway
+            // (`Session::frame`). If its generation changed it drops there.
+            glide,
+            // **The cap is a ratio** (`DOCK_MAX_SHARE`, 032 Karar 4): `frame()`
+            // reads the row count under the `Term` lock, this layer keeps no
+            // copy of it. The wrapping width is the grid's — the dock uses the
+            // same columns.
+            DockBudget {
+                share: crate::frame::DOCK_MAX_SHARE,
+                cols: self.cols.get(),
+            },
+        );
+        // **The generation a second time, after `frame()`**: when `frame()`
+        // finds the fraction invalid (`CSI 3 J`, the alternate screen, mouse
+        // mode) it raises the generation itself and the glide in flight must
+        // end in that frame. The position is asked too: if the share did not
+        // move the position, the window is at the end of history and the
+        // glide ends there (`Motion::observe_scroll`) — without either, frame
+        // after frame would be drawn for shares hitting the clamp.
+        frame.put_clusters(clusters);
+        motion.observe_scroll(
+            cursor.scroll_generation,
+            (cursor.display_offset, cursor.scroll_frac),
+            glide.rows,
+        );
+        // The fraction **before** the origin (`Frame::set_origin_rows` adds it
+        // the moment it is written) and before the caret (`Frame::push_caret`
+        // adds it to the grid's caret).
+        frame.set_scroll_frac(cursor.scroll_frac);
+        // **The channel's height before the cells** (`Frame::set_fill_rows`):
+        // `push_fill`'s guard measures the row against it. The channel is the
+        // band plus the fraction's top row; if zero, the boundary never called
+        // the second sink, so the loop is empty too and the frame is
+        // bit-identical to its fill-less form.
+        frame.set_fill_rows(cursor.top_row + cursor.fill);
+        for cell in fill.drain(..) {
+            frame.push_fill(cell);
+        }
+        // The band's own block marks (`Blocks::fill_slice`): **after** the
+        // cells, because `push_fill_block`'s guard reads the band's height and
+        // that is written in the same frame as the cells. It does not go
+        // through the grid's `borrow` round — the band's list is separate and
+        // lands in `fill_rules`.
+        for block in self.blocks.borrow().fill_slice() {
+            frame.push_fill_block(*block);
+        }
+        // Stripes in the **same** frame as the cells and from the same
+        // `frame()` call: read from a separate query they would lag one frame
+        // behind on a scroll frame (010 discussion.md → Karar 2). After the
+        // sink rather than inside it, because the block list is resolved per
+        // frame, not per cell — and `borrow_mut` dropped at the end of the
+        // expression above, so this `borrow` does not clash.
+        //
+        // **No animation** (Karar 5): the stripe appears at once, `motion`
+        // gains no second consumer and this path asks for no frame — zero
+        // frames at idle stays untouched. The motion frame's path
+        // (`Core::motion_tick`, `move_caret`) never comes here; the grid did
+        // not change, so the stripe must not either and `Frame` keeps it.
+        for block in self.blocks.borrow().as_slice() {
+            frame.push_block(*block);
+        }
+        // **The selection's colour comes from focus** (031 Karar 9): both
+        // colours arrive ready from the boundary, which one is drawn is
+        // decided here. Not a new source of frames — a focus change asks for a
+        // content frame already ([`DisplayLink::set_focused`]) and the colour
+        // turns in that frame; the motion frame keeps the list, and the colour.
+        let selection = self.selection.borrow();
+        let rgba = selection.color(self.focused.get());
+        // The slice at once: the corner decision looks at the neighbouring
+        // row's run.
+        frame.push_selection(selection.as_slice(), rgba);
+        drop(selection);
+        // **The search highlight by the same rule** (033 Karar 7): two roles,
+        // colour from focus; the grid's and the band's runs from the same
+        // `frame()` round. The band's after `set_fill_rows` — its guard reads
+        // the band's height — and their colours are the uniform `push_search`
+        // wrote. The motion frame keeps the lists and does not scan (R2.2).
+        let search = self.search.borrow();
+        let focused = self.focused.get();
+        frame.push_search(
+            search.as_slice(),
+            search.match_color(focused),
+            search.current_color(focused),
+        );
+        frame.push_fill_search(search.fill_slice());
+        drop(search);
+        // The gate's operand rises here: damage was found, the frame will be
+        // drawn. Before `kare` and independent of it — it does not wait for
+        // the GPU to finish (see `Core::content_frames`).
+        self.content_frames.set(self.content_frames.get() + 1);
+        // Clear and cursor colour from the session's theme: the same source as
+        // `frame()`'s background skip and the colour query's answer. The
+        // theme is read only on a full frame — the idle tick returned above —
+        // and kept for the motion frame.
+        let theme = self.session.theme();
+        self.theme.set(theme);
+        // The duration counter's tick becomes an **absolute** stamp; `None`
+        // clears the pending deadline.
+        self.content_deadline
+            .set(content_deadline(now, cursor.next_tick));
+        // **The dock now comes BEFORE the cursor** and the order is required:
+        // the caret's target must be able to ask for the dock's caret
+        // (`Dock::caret`), so that answer has to be in hand before
+        // `motion.sync`. The order of entering the list does **not** decide
+        // the drawing order — the dock has its own lists and its own encode
+        // (the renderer's plan), so the order there is fixed and the order
+        // here is only data dependency.
+        //
+        // The mirror asks for a frame on every keystroke: the payload reaches
+        // the parser too and alacritty sends `Event::Wakeup` for every byte
+        // processed, so `dirty` is already planted before entering this arm.
+        // So the dock carries no frame request of its own — zero frames at
+        // idle stays untouched.
+        let dock_rows = self.dock_rows.get();
+        // The window's bottom, **in window space**: the dock's band and the
+        // caret's target both lean on it. The height is read from the
+        // texture, because that is its one correct source — `rows * cell_h`
+        // would not see the strip (the pixels left over when the height is
+        // divided by the cell height) and the caret would stand up to a cell
+        // too high. The renderer's dock viewport is built with the same
+        // subtraction, so both are the same line.
+        let viewport_height = texture.texture.height() as f32;
+        let mut dock_caret = None;
+        // The typing effects' clock advances on the content frame too: in fast
+        // typing every tick finds damage and the motion arm never runs.
+        let mut glyph_fx = self.glyph_fx.borrow_mut();
+        glyph_fx.advance(dt);
+        if dock_rows > 0 {
+            // **The layout before the cells** (`Frame::set_dock_input_rows`):
+            // input rows + the context row, from the number `frame()` gave in
+            // the same read as the suppression. The band's top is not written
+            // here — the band is the animation's value and comes after `sync`
+            // (`Core::set_origin`).
+            frame.set_dock_input_rows(cursor.input_rows);
+            let mut dock_state = self.dock.borrow_mut();
+            let mut dock_context = self.dock_context.borrow_mut();
+            // **The second sink flows into a local slot**, not straight into
+            // `Frame`: both sinks cannot borrow `frame` (`fill`'s reason). There
+            // is at most one edit per frame, so the buffer is an `Option`.
+            let mut edit = None;
+            // The twin of the grid's table, same reason.
+            let mut dock_clusters = frame.take_dock_clusters();
+            // The handover's answer comes from `frame()`, the dock does not
+            // recompute it: only `frame()` knows the three preconditions (a
+            // window with a dock, the alternate screen, the mirror's
+            // freshness).
+            let dock = self.session.dock(
+                DockCols {
+                    grid: self.cols.get(),
+                    // The context row's budget: **the same pixel width, a
+                    // smaller step**. The dock shares the gutter with the grid
+                    // (`Frame::dock_pos`), so the strip both rows occupy is the
+                    // same; the only thing that differs is how many pixels a
+                    // letter advances. The arithmetic is here, because
+                    // `bt-core` does not see pixels.
+                    context: crate::frame::context_cols(self.cols.get(), self.cell.get()),
+                },
+                // The number passes from where it was computed, the dock does
+                // not derive it again (`caret_in_dock`'s precedent).
+                cursor.input_rows,
+                &mut dock_state,
+                &mut dock_context,
+                cursor.caret_in_dock,
+                &mut self.dock_selection.borrow_mut(),
+                &mut dock_clusters,
+                |cell| frame.push_dock(cell),
+                |dock_edit| edit = Some(dock_edit),
+            );
+            frame.put_dock_clusters(dock_clusters);
+            // The order is required: an edit can shift and finish the ones in
+            // flight, an arrival whose static glyph cannot be found is only
+            // known **after** the dock is printed, and the list to draw comes
+            // last.
+            if cursor.input_rows == 0 {
+                // No input row (remote session, 036): no surface for the
+                // effect either. It ends unconditionally — `Reset` only comes
+                // when the mirror changed, and an arrival left in flight would
+                // be drawn on row 0, i.e. now in the context row's place, at
+                // the wrong size.
+                glyph_fx.finish();
+            } else if let Some(edit) = edit {
+                // The vertical window's height is the very number passed to
+                // `dock()`: an effect the scroll pushes out of the window drops.
+                glyph_fx.apply(edit, motion, cursor.input_rows, frame.dock_clusters());
+            }
+            frame.suppress_dock(&mut glyph_fx);
+            frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), theme.cursor_linear());
+            dock_caret = dock.caret.map(|at| (at, dock.caret_text));
+            // The dock's selection is the grid's shape and colour uniform (031
+            // R3.2); the colour was written above with `push_selection` — one
+            // selection per window, one colour.
+            frame.push_dock_selection(&self.dock_selection.borrow());
+            // No mark → the input's first row is outside the vertical window.
+            if let Some(sigil) = dock.sigil {
+                frame.push_dock_sigil(sigil);
+            }
+            // The surface opens **after** the cells: the call bringing the
+            // colours is the very call printing the cells (`Frame::open_dock`).
+            frame.open_dock(dock.ground, dock.edge, dock.separator);
+            frame.set_dock_progress(dock.progress, dock.track);
+            frame.set_dock_buttons(dock.buttons);
+        } else {
+            // No dock (alternate screen): the effect has no subject either.
+            glyph_fx.finish();
+        }
+        drop(glyph_fx);
+        // **The caret's single target.** There are two homes and both enter
+        // the same animator: the dock if it took over, otherwise the grid's
+        // cursor. With separate animators there would be no glide in the dock
+        // and the handover would stay a teleport — two separate user
+        // complaints, one cause.
+        //
+        // The dock has priority and the two **cannot** be `Some` at once: the
+        // handover's answer is computed in one place (`Session::frame`) and
+        // given from the same value to both the grid's `visible` and the
+        // dock's caret (`Cursor::caret_in_dock`). This sentence was once
+        // false: `dock::render` asked the predicate itself, did not know
+        // `frame()`'s three preconditions, and on a stale mirror both were
+        // born — the `.or_else` below picked the dock and the fresh row lost
+        // its caret (set gate, `/code-review`). The order still stays written:
+        // a caret drawn in the wrong place is a visible defect, rather than
+        // one drawn in two places.
+        //
+        // **The band's excess in both targets** (032): the grid's caret is
+        // that much higher together with the grid by the band's **target**
+        // excess, the dock's is in the bottom-aligned input block, on the
+        // wrapped row's own row.
+        let band_target = band_target(cursor.input_rows, dock_rows, self.cell.get());
+        let caret = dock_caret
+            .map(|(at, text)| {
+                let at = dock_caret_at(
+                    at.col,
+                    at.row,
+                    cursor.input_rows,
+                    viewport_height,
+                    self.cell.get(),
+                );
+                (at, text)
+            })
+            .or_else(|| {
+                cursor.visible.then(|| {
+                    (
+                        [
+                            f32::from(cursor.col),
+                            f32::from(cursor.row) + f32::from(origin_target(cursor)) - band_target,
+                        ],
+                        cursor.text,
+                    )
+                })
+            });
+        self.last_caret_text.set(caret.map(|(_, text)| text));
+        // **Blink AFTER the caret** and the order is required: "is the user
+        // typing" is answered by the caret's target moving, and that target
+        // is only known here.
+        //
+        // The setting and the application combine in `bt-core`
+        // (`Cursor::blink`); Reduce Motion **turns it off** — an accessibility
+        // setting does not *add* animation (`CLAUDE.md`), and the side gain is
+        // structural: `Mode::Fade` and blink exclude each other, so the
+        // `alpha()` channel gets no second writer.
+        let at = caret.map(|(at, _)| at);
+        let moved = self.last_caret_at.replace(at) != at;
+        let mut blink = self.blink.get();
+        // **The third term is focus** (R7.4): in an unfocused window blink
+        // stops and the cursor stays visible. Not a new mechanism — the
+        // "disabled blink stays visible" invariant (`content_frame`,
+        // `enabled=false` → `lit=true`, `next_flip=None`) protects the hidden
+        // cursor today; this is its third consumer. The side gain is on the
+        // zero-frames-at-idle side: an unfocused idle window arms no clock.
+        // The caret's focus is two bits combined ([`Core::caret_focused`]):
+        // while typing in the field blink stops too and the caret is hollow.
+        let focused = self.caret_focused();
+        // **The setting's period is applied here** and before
+        // `content_frame`: the tick is an absolute deadline, so rebuilding it
+        // needs this frame's stamp. A no-op on the same value.
+        blink.set_half_period(now, self.blink_interval.get());
+        blink.content_frame(now, cursor.blink && !motion.reduce() && focused);
+        // If the caret moved the phase goes back to lit: the cursor does not
+        // fade while typing.
+        if moved {
+            blink.wake(now);
+        }
+        // **The phase advances here too** and the return value is dropped:
+        // the frame is drawn anyway, no separate wakeup is needed. Without it
+        // the phase would **freeze** in flowing output (every tick finds
+        // damage) — and it could freeze in the faded phase, leaving the caret
+        // invisible for the whole output.
+        blink.advance(now);
+        self.blink.set(blink);
+        // `motion.advance` ran before the scan and the order is required:
+        // first the elapsed time is applied to the old target, then the new
+        // target is set. In the reverse order `dt` would be applied to the new
+        // target and the cursor would accelerate for one frame towards a
+        // direction it never went.
+        //
+        // **A full grid's slide** (`Motion::scroll_in`): if rows scrolled into
+        // history while the target stayed put, the offset glides again from
+        // that much lower. Before `sync`, so the wheel and geometry snap erase
+        // this too.
+        motion.scroll_in(cursor.scrolled, cursor.rows);
+        motion.sync(
+            caret.map(|(at, _)| at),
+            origin_target(cursor),
+            band_target,
+            cursor.display_offset,
+            // The geometry flag is **consumed** here: left unconsumed, every
+            // frame after a window drag would snap.
+            self.geometry_changed.replace(false),
+            // **The direction rule's exception is computed here** (017 R4.1):
+            // if the gap above is filling with history, what comes down is not
+            // the gap but the arriving history — the offset glides while
+            // rising too. `bt-gpu` does not learn a terminal concept called
+            // "fill"; what it gets is a single bit, like `offset` and
+            // `geometry`.
+            cursor.fill > 0,
+        );
+        self.motion.set(motion);
+        // **The offset after `sync`** and the order is required: the value to
+        // draw is not the target but the animation's place in this frame.
+        // Being **before** `push_caret` is required too — the caret's rectangle
+        // bakes this offset in.
+        self.set_origin(&mut frame, motion, viewport_height);
+        if let (Some(at), Some((_, text))) = (motion.position(), caret) {
+            frame.push_caret(
+                at,
+                text,
+                theme.cursor_linear(),
+                motion.alpha() * blink.alpha(),
+                cursor.shape,
+                focused,
+            );
+        }
+        // The first span closes here — **after** `push_caret`: putting the
+        // cursor in the list is sink work, not encode. Had the stamp been one
+        // line higher, `cpu_encode` would measure it next to `draw` and the
+        // token's name would lie. The pair travels in one `Option`, so "both
+        // or neither" is the only representable state.
+        let spans = t0.map(|t0| (t0, Instant::now()));
+
+        // `frame()` consumed the flag before drawing started; on an error it
+        // must be planted again or this content is never asked for again and
+        // the window stays stale. Synchronous and asynchronous errors go
+        // through the same door.
+        let drawn = self.draw(texture, theme.background_linear(), &frame);
+        // The encode span closes with `draw`'s return (planning, submit and
+        // present — Metal's span ran from the command buffer to `commit`,
+        // with `presentDrawable` encoded in it): the second stamp lands here,
+        // **before** the decision arms.
+        let spans = spans.map(|(t0, t1)| (t1 - t0, Instant::now() - t1));
+        match drawn {
+            // A sample is written only for a frame that **leaves**: a frame
+            // that could not be encoded measured nothing.
+            Ok(()) => {
+                // The offset is published only here too: the mouse mapping
+                // must read the offset of the frame standing on screen.
+                self.publish_origin(&frame);
+                // The silence's base is refreshed only on a frame that
+                // **leaves**, for the same reason: a frame that could not be
+                // encoded changed nothing on screen. The stamp is the tick's
+                // `now`; reading it twice would tie `dt`'s base and `sessiz=`'s
+                // base to two reads — what `last_update_at`'s doc bans by name
+                // (`/code-review` finding).
+                self.last_frame_at.set(Some(now));
+                if let Some((stats, (cpu_frame, cpu_encode))) = self.stats.as_ref().zip(spans) {
+                    stats.record_cpu(cpu_frame, cpu_encode);
+                }
+            }
+            // The return is not read here: this arm's stop is the flag not
+            // being planted, and that is inside `draw_failed`.
+            Err(e) => {
+                self.retry.draw_failed(&e);
+            }
+        }
+        // **The alternate screen watch, after the measurement stamps.** The
+        // gate is a comparison and an atomic read; the notifier only runs on a
+        // transition (vim opens/closes), so an ordinary frame pays nothing.
+        // Outside the stamps, because a `dispatch` cost on the transition
+        // frame would land in `cpu_encode`, and that token claims the
+        // drawing's duration.
+        self.notice_alt_screen();
+    }
+
+    /// The "no damage" branch of [`Core::tick`]: two possibilities left and
+    /// both end here — sleep, or draw a **motion** frame.
+    fn motion_tick(&self, frame: &mut Frame, mut motion: Motion, now: f64, dt: f32) {
+        motion.advance(dt);
+        // **The sleep test's third question.** Blink lives outside `Motion`,
+        // so `settled()` does not see it; without this line a tick woken by
+        // `Waker::resume` would go back to sleep without drawing anything and
+        // re-arm the clock — a wake/sleep spin that produces no frame. The
+        // term is one-shot and consumed **before** `settled()`'s early return.
+        let mut blink = self.blink.get();
+        let flipped = blink.advance(now);
+        self.blink.set(blink);
+        // **The fourth question: typing effects** (030). Asked **before**
+        // `advance`: the last state of an effect finishing in this step (an
+        // arrival settled on its static glyph, a ghost gone) is not drawn yet,
+        // and sleeping would leave a half-transparent letter hanging on
+        // screen. If the list emptied in this frame the frame is drawn, the
+        // next tick sleeps.
+        let mut glyph_fx = self.glyph_fx.borrow_mut();
+        let fx_idle = glyph_fx.is_empty();
+        glyph_fx.advance(dt);
+        if at_rest(motion, flipped, fx_idle) {
+            // Zero frames at idle: neither new content nor an unsettled
+            // animation, the pacer sleeps. The next `Wakeup` starts it again
+            // through the `Waker`.
+            //
+            // No sample is written either, and that is not a branch but the
+            // shape of the path: `draw` never ran in this frame, a fake
+            // "encode = 0 ns" sample would pull the p95 down.
+            self.motion.set(motion);
+            self.waker.pacer().set_running(false);
+            // **The clock is armed only here** and the place is required: the
+            // pacer only sleeps once it has nothing else to do, so the tick is
+            // only needed then. Armed while awake, every content frame would
+            // plant one more tick.
+            self.arm_clock(now);
+            return;
+        }
+        // **Motion frame** (the cursor or the offset, or both). The `Waker` is
+        // not touched (module header): the pacer is awake already and this
+        // tick itself keeps it going.
+        //
+        // The texture first: the offset below needs the window's bottom from
+        // it. Without one the animation is finished at its target, the frame
+        // is left to the next wake (the damage `acquire` planted brings a
+        // content frame drawing the settled state), and the stop holds.
+        let Some(texture) = self.acquire() else {
+            // No texture: the animation ends at its target and a content
+            // frame is asked for to draw that settled state. The effect lists
+            // in `Frame` empty too, or the next damage-free frame (blink's)
+            // would redraw them frozen halfway (the draw-error arm's reason
+            // below).
+            motion.finish();
+            self.motion.set(motion);
+            glyph_fx.finish();
+            frame.set_dock_fx(
+                std::iter::empty(),
+                &Clusters::default(),
+                self.theme.get().cursor_linear(),
+            );
+            self.waker.keep_damage();
+            return;
+        };
+        self.motion.set(motion);
+        // Two counters, two animators: `hareket=` witnesses only the cursor,
+        // `kayma=` only the offset. Both can rise in the same frame; their sum
+        // is **not** the number of drawn frames.
+        if !motion.cursor_settled() {
+            self.motion_frames.set(self.motion_frames.get() + 1);
+        }
+        if !motion.origin_settled() {
+            self.slide_frames.set(self.slide_frames.get() + 1);
+        }
+        let theme = self.theme.get();
+        let bottom = texture.texture.height() as f32;
+        // **The offset's second write point** (R2.5). On this arm neither
+        // `frame()` nor `clear` is called, so the offset is **kept** — but an
+        // animation is defined by *changing* between two content frames, and a
+        // kept value cannot change. **Before** `move_caret`: the cursor's
+        // rectangle bakes this offset in.
+        self.set_origin(frame, motion, bottom);
+        // The list is kept, only the cursor moves: the grid is not dirty, so
+        // the glyph and rule lists are still valid. Entering the `Term` lock
+        // 120 times a second would fight "the render path does not block"
+        // right here.
+        if let (Some(at), Some(text)) = (motion.position(), self.last_caret_text.get()) {
+            frame.move_caret(
+                at,
+                text,
+                theme.cursor_linear(),
+                motion.alpha() * self.blink.get().alpha(),
+                // **Focus is read fresh every frame**, not from what `Frame`
+                // kept: this bit is `bt-gpu`'s own decision and the motion
+                // frame reaches it too.
+                self.caret_focused(),
+            );
+        }
+        // The dock's static lists are kept, only the effects are printed
+        // again (`move_caret`'s precedent).
+        if !fx_idle {
+            frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), theme.cursor_linear());
+        }
+        // No CPU sample is **written**, and that is not a gap: `cpu_kare`
+        // measures `session.frame`'s lock wait and that work does not exist in
+        // this frame. The microseconds of a `truncate` + `push_caret` in the
+        // same column would pull the p95 down — the same ban as the "fake
+        // sample".
+        //
+        // **The GPU column does not follow this and cannot:** the completion
+        // poll sees every submitted frame and the motion frame submits one
+        // too, so `record_gpu` **sees** these frames. The poll also feeds
+        // `FailureStreak`; exempting motion frames from it would hide draw
+        // errors, so the split is not deliberate but **structural**. Its
+        // consequence is a measurement scope item: `ornek=` and `gpu_ornek=`
+        // count different frame populations (the GPU's includes motion
+        // frames) and the two columns' p95 cannot be compared directly in a
+        // run where the cursor glides. The item is written in
+        // `docs/OLCUMLER.md` → `## Yöntem`.
+        match self.draw(texture, theme.background_linear(), frame) {
+            // A motion frame is a frame that **leaves** too: `sessiz=` should
+            // measure the tail after settling, not the moment the animation
+            // started. The offset is published here too — this arm is the
+            // only place refreshing the mouse mapping during slide frames.
+            Ok(()) => {
+                self.publish_origin(frame);
+                self.last_frame_at.set(Some(now));
+            }
+            // **This arm's own stop** (`/code-review` finding): on the damage
+            // path the stop was the flag not being planted, here it cannot be
+            // — the "no damage" branch does not sleep while an animation has
+            // not settled. When the budget is spent the animation is finished
+            // at its target, so the next tick finds neither damage nor pending
+            // motion and sleeps. Without it, a permanent draw error would
+            // print an error line at the refresh rate until the slide's
+            // duration cap (0.7 s) — exactly what `FailureStreak` was written
+            // to prevent.
+            //
+            // **Asynchronous errors** (`/code-review` finding) reach
+            // `draw_failed` from the completion poll at the start of a tick,
+            // where the return is not used either: that path's stop for the
+            // animation is not `finish()` but the **duration cap**, so even
+            // with the budget spent the error line lasts at most 0.7 s. The
+            // way to close it is known (the poll could finish the animation on
+            // a spent budget) and so is the cost: a second entry point into
+            // `Motion`. Not done without a measured need.
+            Err(e) => {
+                if self.retry.draw_failed(&e) {
+                    motion.finish();
+                    self.motion.set(motion);
+                    glyph_fx.finish();
+                    // The effect lists in `Frame` empty too: the pacer sleeps
+                    // and the next damage-free frame (blink's tick) would
+                    // redraw the old lists frozen halfway without passing
+                    // through `set_dock_fx` (`/code-review`).
+                    frame.set_dock_fx(
+                        std::iter::empty(),
+                        &Clusters::default(),
+                        theme.cursor_linear(),
+                    );
+                }
+            }
+        }
+        // **It sleeps right after the phase frame.** Without a pending
+        // animation this frame was drawn only for blink's phase change; left
+        // running, one more tick would be paid until the next vsync — two
+        // ticks for two **visible** frames a second. If motion continues it
+        // is not touched: its rhythm is vsync anyway.
+        if motion.settled() && glyph_fx.is_empty() {
+            self.waker.pacer().set_running(false);
+            self.arm_clock(now);
+        }
+    }
+
+    /// Calls the notifier if the alternate screen changed; nothing otherwise.
+    ///
+    /// **The gate is here, not in the notifier**: the notifier itself sends
+    /// work to the main queue, and sending work every frame would silently
+    /// break zero frames at idle (`CLAUDE.md`) — every job landing in the
+    /// queue wakes the main thread. The comparison is a `Cell` read, so on an
+    /// ordinary frame this function's cost is not measurable.
+    ///
+    /// The last seen value is written **before** the notifier is called: if
+    /// the notifier ran synchronously (in a test) and came back here, the
+    /// reverse order would produce a second notice.
+    fn notice_alt_screen(&self) {
+        let Some(notify) = self.alt_screen_changed.as_ref() else {
+            return;
+        };
+        let now = self.session.alt_screen();
+        if self.alt_screen.replace(now) == now {
             return;
         }
         notify();
     }
 
-    /// Bu karede **çizilecek** dikey orijin: animasyonun bu andaki satırı →
-    /// piksel.
+    /// The vertical origin **to draw** in this frame: the animation's row at
+    /// this moment → pixels.
     ///
-    /// **İki yazma noktası, tek fonksiyon** (R2.5): içerik karesi `sync`'ten
-    /// sonra, hareket karesi `move_caret`'dan önce çağırıyor. İkinci bir
-    /// hesap "fare bir satır kayıyor" diye görünen bir ayrışma demekti.
+    /// **Two write points, one function** (R2.5): the content frame calls it
+    /// after `sync`, the motion frame before `move_caret`. A second
+    /// computation meant a drift that shows as "the mouse is one row off".
     ///
-    /// **İki tüketiciye tek yazma.** Piksel değeri `Frame`'den geri okunuyor,
-    /// yeniden hesaplanmıyor: viewport ile fare eşlemesinin aynı sayıyı
-    /// görmesi bu satırın işi — kayma boyunca da (R2.7).
+    /// **One write for two consumers.** The pixel value is read back from
+    /// `Frame`, not recomputed: this line is what makes the viewport and the
+    /// mouse mapping see the same number — through the slide too (R2.7).
     ///
-    /// **Dinlenen karede hiçbir içerik kırpılmıyor** ve bunu ötelemenin
-    /// *tanımı* veriyor, `setViewport`'un kırpması değil: içerik
-    /// `0..content_rows` aralığında, öteleme `rows - content_rows`, yani en
-    /// alt dolu satırın bittiği yer tam `rows` satır. Keyfi bir öteleme (ya
-    /// da `content_rows`'u büyüten bir kusur) alt satırları dokunun dışına
-    /// taşırdı ve belirti "son satır yok" olurdu. **Kayma boyunca öteleme
-    /// hedefinden büyük** — içerik yukarı akıyor — yani en alt satırın bir
-    /// kısmı o karelerde pencerenin altında kalıyor: yeni satır alt kenardan
-    /// yükselerek geliyor ve kayma bitince tam yerine oturuyor. Tek
-    /// `setViewport`'un (R1.1) doğrudan sonucu: dört liste birden kayıyor,
-    /// yani yeni satırın yerinde belirip ötekilerin kayması temsil edilebilir
-    /// bir şey değil.
+    /// **Nothing is clipped in a resting frame** and it is the offset's
+    /// *definition* that guarantees it, not `setViewport`'s clipping: the
+    /// content is in `0..content_rows`, the offset is `rows - content_rows`,
+    /// so the lowest filled row ends exactly at `rows` rows. An arbitrary
+    /// offset (or a defect inflating `content_rows`) would push the bottom
+    /// rows off the texture and the symptom would be "the last row is
+    /// missing". **During the slide the offset is larger than its target** —
+    /// the content flows up — so part of the lowest row is below the window
+    /// in those frames: the new row rises from the bottom edge and settles
+    /// into place when the slide ends. The direct consequence of the single
+    /// viewport (R1.1): all four lists move together, so a new row appearing
+    /// in place while the others slide is not a representable thing.
     ///
-    /// **Kaydırmanın kesri ikinci bilinçli istisna** (`Frame::set_scroll_frac`,
-    /// `Frame::set_origin_rows` onu topluyor): ızgara kesir kadar aşağıda,
-    /// alt satırın o kadarı pencerenin (dock'lu pencerede dock'un zemininin)
-    /// altında kalıyor, tepede açılan şeridi de doldurma kanalının tepe satırı
-    /// kapatıyor. Dinlenirken kesir yok — jest en yakın satıra oturuyor.
+    /// **The scroll fraction is the second deliberate exception**
+    /// (`Frame::set_scroll_frac`, added by `Frame::set_origin_rows`): the grid
+    /// is that much lower, that much of the bottom row is below the window
+    /// (in a docked window below the dock's ground), and the strip opening at
+    /// the top is covered by the fill channel's top row. At rest there is no
+    /// fraction — the gesture settles on the nearest row.
     ///
-    /// **Fare eşlemesine yayınlamıyor.** Öteleme kareye burada pişiyor ama
-    /// [`Origin`]'e ancak `draw` `Ok` dönünce yazılıyor
-    /// ([`Self::publish_origin`]): encode edilemeyen karede ekranda önceki
-    /// kare kalır ve tıklama onun ötelemesine göre çevrilmeli.
+    /// **It does not publish to the mouse mapping.** The offset is baked into
+    /// the frame here but is written to [`Origin`] only once `draw` returns
+    /// `Ok` ([`Self::publish_origin`]): in a frame that could not be encoded
+    /// the previous frame stays on screen and a click must be translated
+    /// against its offset.
     ///
-    /// **Bandın birleştiği yer de burası** (032): bandın o anki boyu da iki
-    /// kare yolundan buraya yazılıyor ve ızgaranın çizilen orijini
-    /// `origin − band` ([`compose`]). Öteleme `u16` hedefli kalıyor, işaretli
-    /// bir hedefe geçmiyor — birleştirme yalnız çizimde.
+    /// **This is also where the band joins** (032): the band's current height
+    /// is written here from both frame paths and the grid's drawn origin is
+    /// `origin − band` ([`compose`]). The offset keeps a `u16` target, it
+    /// does not switch to a signed one — the join happens only in drawing.
     fn set_origin(&self, frame: &mut Frame, motion: Motion, bottom_px: f32) {
-        compose(frame, motion, bottom_px, self.ivars().dock_rows.get() > 0);
+        compose(frame, motion, bottom_px, self.dock_rows.get() > 0);
     }
 
-    /// Çizilen ötelemeyi **ve doldurma bandının boyunu** fare eşlemesine
-    /// yayınla — yalnız `draw` `Ok` dönünce.
+    /// Publishes the drawn offset **and the fill band's height** to the mouse
+    /// mapping — only when `draw` returns `Ok`.
     ///
-    /// Ayrı bir adım, çünkü [`Origin`]'in sözleşmesi **encode edilen** kareyi
-    /// söylüyor: `Err` kolunda ekranda önceki kare kalıyor ve o kareyi
-    /// yayınlamak tıklamayı ekranda olmayan bir ötelemeye göre çevirirdi.
-    /// Aralığı daraltıyor, kapatmıyor — `Ok` "commit edildi" demek, "ekranda"
-    /// demek değil; asenkron tamamlanma yine düşebilir ve sözleşme bu yüzden
-    /// "çizilen" değil "encode edilen" diyor.
+    /// A separate step, because [`Origin`]'s contract speaks of the
+    /// **encoded** frame: in the `Err` arm the previous frame stays on screen
+    /// and publishing this one would translate a click against an offset not
+    /// on screen. It narrows the window, it does not close it — `Ok` means
+    /// "submitted", not "on screen"; asynchronous completion can still fail,
+    /// which is why the contract says "encoded" and not "drawn".
     ///
-    /// İki değer **tek** yazmada gidiyor: ikisi de aynı karenin geometrisi ve
-    /// ayrı yayınlansalardı fare, orijini yeni bandı eski bir kareye göre
-    /// çevirebilirdi. Hareket karesi de buraya uğruyor — band orada korunuyor
-    /// (`Frame` temizlenmiyor), yani kayma boyunca yayınlanan değer sabit.
+    /// Both values go in **one** write: they are the same frame's geometry,
+    /// and published separately the mouse could translate against a new
+    /// origin and an old band. The motion frame comes here too — the band is
+    /// kept there (`Frame` is not cleared), so the value published through
+    /// the slide is constant.
     fn publish_origin(&self, frame: &Frame) {
-        self.ivars()
-            .origin
+        self.origin
             .set(frame.origin_px(), frame.fill_rows(), frame.dock_hit());
     }
 
-    /// **Saat**: kare talebinin üçüncü sebebi (modül başlığı).
+    /// **The clock**: the third reason to ask for a frame (module header).
     ///
-    /// Link uyumaya giderken çağrılıyor ve **iki tadı** var
-    /// ([`due_clock`] hangisinin dolduğuna bakıyor):
+    /// Called as the pacer goes to sleep, and it has **two flavours**
+    /// ([`due_clock`] looks at which one is due):
     ///
-    /// - **İçerik tadı** — ilerletilecek bir süre sayacı varsa
-    ///   (`Cursor::next_tick`) [`Waker::wake`] ile isteniyor ve hasar bayrağını
-    ///   dikmesi **doğru**: ızgaranın çizilen çıktısı gerçekten değişiyor, yani
-    ///   `icerik=` sayması yerinde.
-    /// - **Hareket tadı** — blink'in faz değişimi [`Waker::resume`] ile, hasar
-    ///   **dikmeden**: ızgara değişmiyor, yalnız caret'in alfası. Hareketin
-    ///   yasağı bunun tersini korumak içindi (hareket karesinin kendini içerik
-    ///   diye saydırması), yani bu kol yasağa uyuyor.
+    /// - **Content flavour** — if there is a duration counter to advance
+    ///   (`Cursor::next_tick`) it is asked through [`Waker::wake`], and
+    ///   planting the damage flag is **right**: what the grid draws really
+    ///   changes, so counting `icerik=` is in place.
+    /// - **Motion flavour** — blink's phase change through [`Waker::resume`],
+    ///   **without** planting damage: the grid does not change, only the
+    ///   caret's alpha. The ban on motion protected the opposite (a motion
+    ///   frame counting itself as content), so this arm obeys it. **The
+    ///   completion poll of a frame still in flight rides this flavour too**
+    ///   (Karar 6: the woken tick polls first, then finds nothing to draw and
+    ///   sleeps again), `POLL_DELAY` after the sleep.
     ///
-    /// Durma koşulu **ikisinde de** `None`: sayaç tarafında komut bitti, çıpa
-    /// ekrandan çıktı ya da entegrasyon hiç yok; blink tarafında ayar kapalı,
-    /// caret çizilmiyor ya da hareketsizlik süresi doldu. İkisi birden `None`
-    /// ise tik kurulmuyor ve pencere boşta sıfır kareye dönüyor.
+    /// The stop condition is `None` **in each**: on the counter's side the
+    /// command ended, the anchor left the screen or there is no integration;
+    /// on blink's side the setting is off, the caret is not drawn or the
+    /// inactivity period ran out; on the poll's side the queue is empty. With
+    /// all three `None` no tick is armed and the window returns to zero
+    /// frames at idle.
     ///
-    /// **Kapı kapalıyken kurulmuyor:** örtülü pencerede zaten
-    /// `setPaused(true)` daha yukarıdan dönüyor, yani görünmeyen bir sayacı
-    /// güncellemek için kimse uyanmıyor. Görünürlük dönünce `Gate` bir kare
-    /// istiyor ve saat oradan yeniden kuruluyor.
+    /// **Not armed with the gate closed:** in an occluded window the tick
+    /// already pauses higher up, so nobody wakes to update an invisible
+    /// counter. When visibility returns, the `Gate` asks for a frame and the
+    /// clock is armed again from there.
     fn arm_clock(&self, now: f64) {
-        let iv = self.ivars();
-        // **Kuşak her uyku noktasında artıyor, tik kurulmasa da.** `after`
-        // iptal edilemiyor; iptalin tek yolu bekleyen tikin kendi kuşağını
-        // geçersiz bulması. Artış aşağıdaki erken dönüşlere takılsaydı durma
-        // koşulu bir periyot geç işlerdi (`/code-review`, 013 kapı).
-        let generation = iv.clock_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        // **İki son tarih, tek uyandırma.** Hangisi önce doluyorsa o kuruluyor
-        // ve tadını o belirliyor: içerik tiki hasar diker (`icerik=` sayması
-        // doğru, ızgara gerçekten değişiyor), blink dikmez (yalnız caret'in
-        // alfası değişiyor). İkisi ayrı ayrı kurulsaydı `after` iptal
-        // edilemediği için biri ötekinin kuşağını geçersiz kılardı.
-        let Some((due, damages)) = due_clock(iv.content_deadline.get(), iv.blink.get().next_flip())
-        else {
-            // Ne koşan bir sayaç ne sönen bir imleç: pencere boşta sıfır
-            // kareye dönüyor.
+        // **The generation rises at every sleep point, even without arming.**
+        // `after` cannot be cancelled; the only way to cancel is for the
+        // pending tick to find its own generation void. Had the increment been
+        // caught by the early returns below, the stop condition would take
+        // effect one period late (`/code-review`, 013 gate).
+        let generation = self.clock_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        // A frame still in flight: its completion is polled once more.
+        let poll = self.renderer.in_flight().then_some(now + POLL_DELAY);
+        // **Three deadlines, one wakeup.** Whichever is due first is armed and
+        // decides the flavour: the content tick plants damage (counting
+        // `icerik=` is right, the grid really changes), blink and the poll do
+        // not (only the caret's alpha changes / nothing is drawn). Armed
+        // separately, since `after` cannot be cancelled, one would void the
+        // other's generation.
+        let Some((due, damages)) = due_clock(
+            self.content_deadline.get(),
+            self.blink.get().next_flip(),
+            poll,
+        ) else {
+            // No running counter, no blinking cursor, no frame in flight: the
+            // window returns to zero frames at idle.
             return;
         };
-        // Geçmişte kalan son tarih **sıfıra doyuyor**: hemen ateşleyen bir tik
-        // bir kare fazla ister, biriken bir gecikme ise sonsuza kadar geç
-        // kalırdı. Sonsuz/NaN bir damga temsil edilemez ve saat kurulmuyor —
-        // panik yolu değil, pencere bir sonraki hasarda zaten uyanıyor.
+        // A deadline in the past **saturates to zero**: a tick firing at once
+        // asks for one frame more, an accumulated delay would be late forever.
+        // An infinite/NaN stamp cannot be represented and no clock is armed —
+        // not a panic path, the window wakes on the next damage anyway.
         let Ok(delay) = Duration::try_from_secs_f64((due - now).max(0.0)) else {
             return;
         };
-        let Ok(when) = DispatchTime::try_from(delay) else {
-            return;
-        };
-        let token = Arc::clone(&iv.clock_generation);
-        let waker = iv.waker.clone();
-        // Hata kolu bugün temsil edilmiyor (`dispatch2` koşulsuz `Ok` dönüyor)
-        // ama imza fallible ve sonucu yutmanın bedeli bilinir olmalı: düşen
-        // bir tik yalnız sayacı ya da blink'i durdurur — bir sonraki hasar
-        // karesi link'i uyandırır, uyku noktasında saat yeniden kurulur.
-        let _ = DispatchQueue::main().after(when, move || {
-            if token.load(Ordering::Relaxed) == generation {
-                if damages {
-                    waker.wake();
-                } else {
-                    waker.resume();
+        let token = Arc::clone(&self.clock_generation);
+        let waker = self.waker.clone();
+        self.waker.pacer().after(
+            delay,
+            Box::new(move || {
+                if token.load(Ordering::Relaxed) == generation {
+                    if damages {
+                        waker.wake();
+                    } else {
+                        waker.resume();
+                    }
                 }
-            }
-        });
-    }
-
-    fn new(mtm: MainThreadMarker, ivars: LinkIvars) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(ivars);
-        // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
-        unsafe { msg_send![super(this), init] }
+            }),
+        );
     }
 }
 
-/// Bu karenin öteleme **hedefi**, satır: içerik tabana yapışsın diye ızgaranın
-/// kaç satırı üstte boş kalacak.
+/// This frame's offset **target**, rows: how many of the grid's rows stay
+/// empty at the top so the content sticks to the bottom.
 ///
-/// **İçerik tabana yapışır** kararı burada, `bt-core`'da değil: o taraf yalnız
-/// kaç satırın dolu olduğunu söylüyor (`Cursor::content_rows`), nereye
-/// yapışacağı bir yerleşim kararı ve çizenin (`CLAUDE.md` → karar burada,
-/// boyama orada).
+/// **The content sticks to the bottom** is decided here, not in `bt-core`:
+/// that side only says how many rows are filled (`Cursor::content_rows`);
+/// where they stick is a layout decision and the drawer's (`CLAUDE.md` → the
+/// decision here, the painting there).
 ///
-/// `saturating_sub`: sözleşme `content_rows ≤ rows` (`bt-core`'da
-/// `debug_assert`) ve doyma sürüm derlemesinde ötelemeyi sıfıra, yani tavana
-/// yapışık yerleşime düşürüyor — sarma ızgarayı ekranın dışına atardı.
+/// `saturating_sub`: the contract is `content_rows ≤ rows` (a `debug_assert`
+/// in `bt-core`) and saturation drops the offset to zero in a release build,
+/// i.e. a ceiling-aligned layout — wrapping would throw the grid off screen.
 ///
-/// **Hedef, çizilen değer değil:** aradaki farkı `crate::motion` kapatıyor
-/// (kayma) ve çizen taraf ötelemeyi ondan okuyor ([`LinkDelegate::set_origin`]).
+/// **A target, not the drawn value:** `crate::motion` closes the gap (the
+/// slide) and the drawing side reads the offset from it
+/// (`Core::set_origin`).
 fn origin_target(cursor: Cursor) -> u16 {
     cursor.rows.saturating_sub(cursor.content_rows)
 }
 
-/// Bu karenin bant **fazlası** hedefi, satır: çizilecek bandın PTY payından
-/// farkı (032). Dock'u olmayan karede (alternatif ekran, entegrasyonsuz
-/// kabuk) sıfır — bant yok, ızgara ötelenmiyor.
+/// This frame's band **excess** target, rows: the drawn band's difference from
+/// the PTY share (032). Zero in a frame without a dock (the alternate screen,
+/// a shell without integration) — no band, the grid is not offset.
 ///
-/// **Kesirli ve işaretli, tek formül** (036 Karar 8): `(band_px − dock_px) /
-/// cell_h`. Bir ve fazla giriş satırında fark tam satır (`input_rows − 1`;
-/// ikisinin de satır arası boşluğu var), sıfır giriş satırında (uzak oturum)
-/// **negatif** ve bir hücre artı satır arası boşluk — bant yalnız bağlam
-/// satırına iniyor, ızgara o kadar aşağı çiziliyor ve tepede açılan şeridi
-/// doldurma bandı kapatıyor (`Session::set_grid_top`). Formülün tek
-/// kopyası piksellerden, yani bandın çizilen boyu ile ızgaranın ötelemesi
-/// aynı sayıdan.
+/// **Fractional and signed, one formula** (036 Karar 8): `(band_px − dock_px)
+/// / cell_h`. With one or more input rows the difference is whole rows
+/// (`input_rows − 1`; both have the inter-row gap), with zero input rows (a
+/// remote session) it is **negative** and one cell plus the inter-row gap —
+/// the band shrinks to the context row alone, the grid is drawn that much
+/// lower and the fill band covers the strip opening at the top
+/// (`Session::set_grid_top`). The formula's single copy is in pixels, so the
+/// band's drawn height and the grid's offset come from the same number.
 fn band_target(input_rows: u16, dock_rows: u16, cell: CellMetrics) -> f32 {
     if dock_rows == 0 {
         return 0.0;
@@ -1678,23 +1862,24 @@ fn band_target(input_rows: u16, dock_rows: u16, cell: CellMetrics) -> f32 {
     (crate::frame::band_px(input_rows, cell) - crate::frame::dock_px(DOCK_ROWS, cell)) / cell_h
 }
 
-/// Kareye bandın ve ötelemenin **o anki** değerini yazar — iki kare yolunun
-/// ortak noktası ([`LinkDelegate::set_origin`]).
+/// Writes the band's and the offset's **current** value into the frame — the
+/// two frame paths' common point (`Core::set_origin`).
 ///
-/// Sıra: önce bant, sonra öteleme; `Frame::origin_px` ikisini okuma anında
-/// birleştiriyor (`öteleme − bandın fazlası`), yani sıra sonucu
-/// değiştirmiyor ama bandın tepesi (`Frame::dock_top_px`) caret'ten
-/// **önce** yazılmak zorunda — caret'in yuvası ona bakıyor.
+/// Order: the band first, then the offset; `Frame::origin_px` joins the two
+/// when read (`offset − the band's excess`), so the order does not change the
+/// result, but the band's top (`Frame::dock_top_px`) must be written
+/// **before** the caret — the caret's slot looks at it.
 ///
-/// Dock yoksa bant hiç yazılmıyor: `clear`'ın bıraktığı "söylenmedi"
-/// ızgaraya sıfır fazla katıyor ve caret'in yuva sınırı sonsuzda kalıyor.
-/// Ayrı bir fonksiyon, çünkü bileşim bekçisi onu `LinkDelegate`'siz
-/// koşturuyor.
+/// Without a dock the band is not written at all: the "not said" `clear`
+/// left adds zero excess to the grid and the caret's slot limit stays at
+/// infinity. A separate function, because the composition guard runs it
+/// without a `Core`.
 ///
-/// Kapı pencerenin dock'u **ve** bu karenin açık yüzeyi: alternatif ekrandan
-/// çıkışta pencerenin payı geri gelmiş ama son içerik karesi dock'suz olabilir
-/// ve o arada koşan hareket karesi bandı yazsaydı ızgaranın alt satırındaki
-/// caret çizilmeyen dock yuvasına düşüp kaybolurdu (`/code-review`).
+/// The gate is the window's dock **and** this frame's open surface: leaving
+/// the alternate screen, the window's share is back but the last content
+/// frame may be dockless, and a motion frame running in between that wrote
+/// the band would drop the caret on the grid's bottom row into an undrawn
+/// dock slot and lose it (`/code-review`).
 fn compose(frame: &mut Frame, motion: Motion, bottom_px: f32, dock: bool) {
     if dock && frame.dock().is_some() {
         frame.set_dock_band(bottom_px, motion.band());
@@ -1702,21 +1887,23 @@ fn compose(frame: &mut Frame, motion: Motion, bottom_px: f32, dock: bool) {
     frame.set_origin_rows(motion.origin());
 }
 
-/// Dock caret'inin hedefi, **ekran hücresi** cinsinden — [`Motion`]'ın uzayı.
+/// The dock caret's target, in **screen cells** — [`Motion`]'s space.
 ///
-/// Dikey bileşen tam sayı **değil** ve olamaz: dock bandı nefes payı kadar
-/// aşağıdan başlıyor ve bandın kendisi de ızgaranın hücre ızgarasına oturmuyor
-/// (yükseklik hücre boyuna tam bölünmediğinde aradaki artık şerit dock ile
-/// içerik arasında kalıyor, `Renderer::encode_dock`). Kesirli hedef bu yüzden
-/// bir kaçamak değil doğru cevap.
+/// The vertical component is **not** an integer and cannot be: the dock band
+/// starts a breathing gap lower and the band itself does not sit on the
+/// grid's cell raster either (when the height is not a multiple of the cell,
+/// the leftover strip stays between the dock and the content). A fractional
+/// target is therefore not an evasion but the right answer.
 ///
-/// **Neden piksel değil de hücre:** `Motion`'ın yay sabitleri ve durma eşiği
-/// hücre biriminde ayarlı. Uzayı piksele çevirmek o eşiği sessizce değiştirir
-/// ve animasyonun hissi ölçülmemiş bir sayıya bağlanırdı.
+/// **Why cells and not pixels:** `Motion`'s spring constants and stop
+/// threshold are tuned in cells. Switching the space to pixels would change
+/// that threshold silently and tie the animation's feel to an unmeasured
+/// number.
 ///
-/// **Dibe yaslı** (032): `row`. giriş satırının tepesi, `input_rows` satırlık
-/// bir bandın dibe yaslı yerleşiminde — bandın o anki (animasyonlu) boyundan
-/// değil, çünkü hücreler yerleşimde duruyor ve caret onların üstünde.
+/// **Bottom-aligned** (032): the top of input row `row`, in the bottom-aligned
+/// layout of an `input_rows`-row band — not from the band's current
+/// (animated) height, because the cells stand in the layout and the caret is
+/// on them.
 fn dock_caret_at(
     col: u16,
     row: u16,
@@ -1730,340 +1917,356 @@ fn dock_caret_at(
     [f32::from(col), (top + pad) / cell_h + f32::from(row)]
 }
 
-/// Ekranın tazeleme ritmine bağlı kare sürücüsü.
+/// The pacer's way back into the frame loop: [`Ticker::tick`] once per
+/// refresh while running.
 ///
-/// Sahiplik zinciri: bu yapı link'i ve delegate'i tutar, delegate `Session`'ı
-/// ve `Renderer`'ı tutar. Link'in `delegate` özelliği **zayıftır**, yani
-/// çember kapanmaz: `Session` → `Wake` → [`Waker`] → link yolu geri delegate'e
-/// güçlü bir referansla dönmez.
+/// **Weak**: the platform's timer holds its target strongly (macOS's
+/// `displayLinkWithTarget:selector:` retains the target), and a strong handle
+/// here would close a cycle `timer → target → core → pacer → timer`. Once the
+/// [`DisplayLink`] is gone a late tick finds nothing and does nothing.
+///
+/// Not `Send` (the core is an `Rc`): the pacer must tick on the thread that
+/// created the link, and the type says so.
+#[derive(Clone)]
+pub struct Ticker(Weak<Core>);
+
+impl Ticker {
+    /// One refresh. `stamp` is on [`Pacer::now`]'s base: the target
+    /// presentation time when the provider knows it, `now()` otherwise.
+    pub fn tick(&self, stamp: f64, target: TickTarget) {
+        if let Some(core) = self.0.upgrade() {
+            core.tick(stamp, target);
+        }
+    }
+}
+
+/// The frame driver tied to the display's refresh.
+///
+/// Ownership chain: this type holds the core, the core holds `Session`,
+/// `Renderer` and the surface. The pacer's timer holds only a weak
+/// [`Ticker`], so the cycle does not close: `Session` → `Wake` → [`Waker`] →
+/// pacer does not come back to the core with a strong reference.
 pub struct DisplayLink {
-    link: Retained<CAMetalDisplayLink>,
-    /// Zayıf `delegate` özelliğinin gerçek sahibi; düşerse callback susar.
-    delegate: Retained<LinkDelegate>,
+    core: Rc<Core>,
     waker: Waker,
 }
 
-/// Kare yolunun **açılış geometrisi**: ızgaranın genişliği, dock payı ve
-/// hücre ölçüsü.
+/// The frame path's **opening geometry**: the grid's width, the dock share and
+/// the cell size.
 ///
-/// Üçü tek tip, çünkü üçü de aynı yerden (`bt-shell`'in `Grid`'i ve dock
-/// kararı) aynı anda doğuyor ve [`DisplayLink::new`]'a birlikte giriyor.
-/// Ayrı parametreler olsalardı imza yedi argümanı aşıyordu — ama asıl kazanç
-/// o değil: bir tip, "bu üçü birlikte değişir" cümlesini imzada söylüyor.
+/// The three are one type because they are born at the same moment from the
+/// same place (`bt-shell`'s `Grid` and the dock decision) and enter
+/// [`DisplayLink::new`] together. As separate parameters the signature went
+/// past seven arguments — but that is not the real gain: a type says "these
+/// three change together" in the signature.
 ///
-/// Satır sayısı **yok** ve bilerek: ızgaranın yüksekliği oturumun
-/// (`SessionOptions.rows`) ve kare yolu onu `Cursor::rows` ile **aynı
-/// okumadan** alıyor (`bt_core::Cursor::rows`'un doc'u). İkinci bir kopya tam
-/// olarak orada yasaklanmış.
+/// **No** row count, on purpose: the grid's height is the session's
+/// (`SessionOptions.rows`) and the frame path takes it from `Cursor::rows`
+/// **in the same read** (`bt_core::Cursor::rows`' doc). A second copy is
+/// banned exactly there.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
-    /// Izgaranın genişliği, sütun; dock'un taşan satırı sarması için
-    /// gerekiyor. [`DisplayLink::resize`] tazeliyor.
+    /// The grid's width, columns; needed for the dock to wrap its
+    /// overflowing row. [`DisplayLink::resize`] refreshes it.
     pub cols: u16,
-    /// Dock kaç satır; `0` → bu pencerede dock yok.
+    /// How many rows the dock has; `0` → no dock in this window.
     ///
-    /// **Doğum değeri oturumun sabiti** (R5.1: entegrasyon kuruldu mu) ama
-    /// bu alan onun *o andaki* hâli: alternatif ekranda dock kalkıyor ve
-    /// çıkışta iniyor (R5.2), yani [`DisplayLink::resize`] onu da taşıyor.
-    /// Sıfıra düşüren iki ayrı sebebi ayırt etmek `bt-shell`'in işi —
-    /// entegrasyonsuz bir oturumda alternatif ekrandan çıkmak dock
-    /// **doğurmamalı**.
+    /// **The birth value is the session's constant** (R5.1: is the
+    /// integration installed) but this field is its state *at the moment*:
+    /// the dock goes away on the alternate screen and comes back when leaving
+    /// (R5.2), so [`DisplayLink::resize`] carries it too. Telling apart the
+    /// two reasons that drop it to zero is `bt-shell`'s job — leaving the
+    /// alternate screen in a session without integration must **not** give
+    /// birth to a dock.
     pub dock_rows: u16,
-    /// Hücre ölçüsü ve sol pay; `Frame::clear`'ın taşıdığı değer.
+    /// The cell size and gutter; the value `Frame::clear` carries.
     pub cell: CellMetrics,
 }
 
 impl DisplayLink {
-    /// Ana thread'de kurulur: link ana run loop'a eklenir ve callback'in ana
-    /// thread'de koşacağı sözleşmesi böyle doğar.
+    /// Built on the thread that will tick it (the main thread on macOS). The
+    /// pacer is the platform's; `bt-shell` builds it, then hands it the
+    /// [`DisplayLink::ticker`].
+    ///
+    /// The link is born **paused**: the first frame needs someone to ask for
+    /// it too (`request_frame`).
     pub fn new(
-        mtm: MainThreadMarker,
-        surface: &Surface,
+        pacer: Arc<dyn Pacer>,
+        surface: Rc<Surface>,
         renderer: Rc<Renderer>,
         session: Arc<Session>,
         layout: Layout,
         stats: Option<Arc<Stats>>,
         alt_screen_changed: Option<Box<dyn Fn()>>,
     ) -> Self {
-        // Açılış teması: ilk içerik karesi onu zaten tazeleyecek, ama alanın
-        // `Option` olması için bir sebep yok — oturumun teması her an geçerli
-        // bir cevap. Alternatif ekranın açılış hâli de aynı sebeple okunuyor:
-        // nöbetin ilk karşılaştırması bir değere ihtiyaç duyuyor ve "henüz
-        // bilmiyorum" hâli, doğumda alternatif ekranda olmayan bir oturum için
-        // ilk karede sahte bir geçiş üretirdi.
+        // The opening theme: the first content frame will refresh it anyway,
+        // but there is no reason for the field to be an `Option` — the
+        // session's theme is a valid answer at any moment. The alternate
+        // screen's opening state is read for the same reason: the watch's
+        // first comparison needs a value, and an "I don't know yet" state
+        // would produce a fake transition on the first frame for a session not
+        // born on the alternate screen.
         let alt_screen = session.alt_screen();
         let theme = session.theme();
-        let link =
-            CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), surface.layer());
+        pacer.set_running(false);
         let waker = Waker {
             inner: Arc::new(WakerInner {
                 dirty: session.dirty_flag(),
-                link: MainThreadBound::new(link.clone(), mtm),
+                pacer,
                 gate: Gate::new(),
                 requests: AtomicU64::new(0),
-                pending: AtomicBool::new(false),
             }),
         };
-        let retry = Arc::new(Retry {
+        let retry = Retry {
             waker: waker.clone(),
             streak: FailureStreak::default(),
-        });
-        let completion = {
-            let retry = Arc::clone(&retry);
-            // Blok kare başına kurulmuyor (bkz. `Renderer::completion`), yani
-            // ölçüm gövdesi de kurulumda bir kez giriyor: `Arc` ile, tıpkı
-            // `retry` gibi (R3.2 — closure ile kare damgası yakalanamaz).
-            let stats = stats.clone();
-            renderer.completion(move |result| match result {
-                Ok(cmd) => {
-                    retry.streak.succeeded();
-                    // Ölçüm kapısı **burada**: kapalıyken tek bir ObjC çağrısı
-                    // bile yapılmıyor (R4.1). Açılış damgası da burada
-                    // kapanıyor, `draw`'da değil — ölçülen şey "main'den ilk
-                    // **tamamlanan** kareye" ve commit etmek bitirmek değildir.
-                    if let Some(stats) = &stats {
-                        stats.mark_startup();
-                        // `GPUEndTime - GPUStartTime` Metal'in kendi saati; CPU
-                        // damgasıyla ilişkilendirilmiyor, çünkü soru "hangi
-                        // kare" değil **dağılım**.
-                        stats.record_gpu(cmd.GPUStartTime(), cmd.GPUEndTime());
-                    }
-                }
-                Err(e) => {
-                    retry.draw_failed(&e);
-                }
-            })
         };
-        let delegate = LinkDelegate::new(
-            mtm,
-            LinkIvars {
-                renderer,
-                session,
-                retry,
-                waker: waker.clone(),
-                completion,
-                stats,
-                frame: RefCell::new(Frame::default()),
-                blocks: RefCell::new(Blocks::default()),
-                selection: RefCell::new(SelectionRuns::default()),
-                search: RefCell::new(SearchRuns::default()),
-                dock_selection: RefCell::new(Vec::new()),
-                fill: RefCell::new(Vec::new()),
-                dock: RefCell::new(DockState::default()),
-                dock_context: RefCell::new(DockContext::default()),
-                dock_rows: Cell::new(layout.dock_rows),
-                alt_screen: Cell::new(alt_screen),
-                alt_screen_changed,
-                cols: Cell::new(layout.cols),
-                cell: Cell::new(layout.cell),
-                // Sıfır: ilk içerik karesine kadar öteleme yok ve o kare
-                // değeri söylüyor. Fare yolu bu arada tavana yapışık
-                // ızgarayı okuyor, yani açılıştaki tek karelik pencerede de
-                // çizilenle aynı şeyi görüyor.
-                origin: Origin::default(),
-                content_frames: Cell::new(0),
-                motion_frames: Cell::new(0),
-                slide_frames: Cell::new(0),
-                motion: Cell::new(Motion::default()),
-                glyph_fx: RefCell::new(GlyphFx::default()),
-                geometry_changed: Cell::new(false),
-                last_frame_at: Cell::new(None),
-                last_update_at: Cell::new(None),
-                // İlk içerik karesine kadar kullanılmıyor: hareket karesi
-                // ancak `Motion`'da bir konum varsa çiziyor ve orayı dolduran
-                // tek yer içerik karesi — o da temayı tazeliyor.
-                theme: Cell::new(theme),
-                content_deadline: Cell::new(None),
-                blink: Cell::new(Blink::default()),
-                focused: Cell::new(true),
-                keyboard: Cell::new(true),
-                caret_style: Cell::new(CaretStyle::default()),
-                blink_interval: Cell::new(bt_core::CURSOR_BLINK_INTERVAL),
-                clock_generation: Arc::new(AtomicU64::new(0)),
-                last_caret_text: Cell::new(None),
-                last_caret_at: Cell::new(None),
-            },
-        );
-        link.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        // Paused doğar: ilk kareyi de isteyen olmalı (`request_frame`).
-        link.setPaused(true);
-        // SAFETY: ana run loop'a ana thread'den ekleniyor (`mtm`). Common
-        // modes: canlı boyutlandırma run loop'u tracking moduna sokar,
-        // varsayılan modda eklenen link orada susardı.
-        unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
-        Self {
-            link,
-            delegate,
-            waker,
-        }
+        // The GPU delta is measured only while the measurement gate is open
+        // (the timed path costs a readback and a closure per frame).
+        renderer.set_gpu_timing(stats.is_some());
+        let core = Rc::new(Core {
+            renderer,
+            surface,
+            session,
+            retry,
+            waker: waker.clone(),
+            stats,
+            frame: RefCell::new(Frame::default()),
+            blocks: RefCell::new(Blocks::default()),
+            selection: RefCell::new(SelectionRuns::default()),
+            search: RefCell::new(SearchRuns::default()),
+            dock_selection: RefCell::new(Vec::new()),
+            fill: RefCell::new(Vec::new()),
+            dock: RefCell::new(DockState::default()),
+            dock_context: RefCell::new(DockContext::default()),
+            dock_rows: Cell::new(layout.dock_rows),
+            alt_screen: Cell::new(alt_screen),
+            alt_screen_changed,
+            cols: Cell::new(layout.cols),
+            cell: Cell::new(layout.cell),
+            // Zero: no offset until the first content frame, and that frame
+            // says the value. The mouse path reads a ceiling-aligned grid in
+            // the meantime, so in the one-frame window at opening it sees
+            // what is drawn too.
+            origin: Origin::default(),
+            content_frames: Cell::new(0),
+            motion_frames: Cell::new(0),
+            slide_frames: Cell::new(0),
+            motion: Cell::new(Motion::default()),
+            glyph_fx: RefCell::new(GlyphFx::default()),
+            geometry_changed: Cell::new(false),
+            last_frame_at: Cell::new(None),
+            last_update_at: Cell::new(None),
+            // Unused until the first content frame: the motion frame only
+            // draws when `Motion` has a position, and the only place filling
+            // it is the content frame — which refreshes the theme too.
+            theme: Cell::new(theme),
+            content_deadline: Cell::new(None),
+            blink: Cell::new(Blink::default()),
+            focused: Cell::new(true),
+            keyboard: Cell::new(true),
+            caret_style: Cell::new(CaretStyle::default()),
+            blink_interval: Cell::new(bt_core::CURSOR_BLINK_INTERVAL),
+            clock_generation: Arc::new(AtomicU64::new(0)),
+            last_caret_text: Cell::new(None),
+            last_caret_at: Cell::new(None),
+        });
+        Self { core, waker }
     }
 
-    /// Başka thread'lerden kare istemenin yolu; `Wake` uygulaması bunu tutar.
+    /// The handle the pacer ticks through ([`Ticker`]).
+    pub fn ticker(&self) -> Ticker {
+        Ticker(Rc::downgrade(&self.core))
+    }
+
+    /// The way to ask for frames from other threads; the `Wake`
+    /// implementation holds this.
     pub fn waker(&self) -> Waker {
         self.waker.clone()
     }
 
-    /// Çizilen karenin dikey orijinini (ve üstündeki doldurma bandının boyunu)
-    /// okuyan uç; fare eşlemesi bunu tutar.
+    /// The end that reads the drawn frame's vertical origin (and the fill
+    /// band's height above it); the mouse mapping holds this.
     ///
-    /// [`Self::waker`] ile aynı örüntü — paylaşılan gövdenin kopyası — ama
-    /// yönü ters: `Waker` dışarıdan **yazılıyor**, bu dışarıdan **okunuyor**.
-    /// Yazma tarafı bilerek dışarı açılmıyor: orijinin tek sahibi kare yolu
-    /// ([`Origin`]).
+    /// The same pattern as [`Self::waker`] — a copy of the shared body — but
+    /// the other way round: the `Waker` is **written** from outside, this is
+    /// **read** from outside. The writing side is not opened on purpose: the
+    /// origin's one owner is the frame path ([`Origin`]).
     pub fn origin(&self) -> Origin {
-        self.delegate.ivars().origin.clone()
+        self.core.origin.clone()
     }
 
-    /// Koşu boyunca istenen kare sayısı — çizilen değil, **istenen**.
+    /// The number of frames asked for during the run — asked for, not drawn.
     ///
-    /// Rapor bunu `istek=` jetonuyla basıyor; `kare` ile arasındaki fark
-    /// birleşen ve kapıda ölen taleplerdir (bkz. [`WakerInner::requests`]).
+    /// The report prints this as the `istek=` token; its difference from
+    /// `kare` is the requests merged and dying at the gate (see
+    /// `WakerInner::requests`).
     pub fn requests(&self) -> u64 {
         self.waker.requests()
     }
 
-    /// Boşta sıfır kare kapısının operandı: çizilmeye **karar verilen** içerik
-    /// karesi. Rapor bunu `icerik=` jetonuyla basıyor.
+    /// The zero-frames-at-idle gate's operand: content frames **decided** to
+    /// be drawn. The report prints this as the `icerik=` token.
     ///
-    /// `kare` ile arasında **sıra ilişkisi yok** ve ikisini karıştırmak
-    /// kapıyı yanlış okumak demek: hareket karesi de bir komut tamponu
-    /// commit ediyor, yani `kare`'ye yazılıp buraya yazılmıyor
-    /// ([`Self::motion_frames`]). Ölçülen sağlıklı duman koşusu `kare` 27–30
-    /// iken `icerik` 2–3 (`docs/OLCUMLER.md` → `## Boşta kare`); farkın büyük
-    /// kısmı imleç kayması, kalanı encode edilemeyen ve uçuşta kalan kareler.
-    /// Kırmızı bir koşuyu okuyan taraf da bunu kullanıyor: üçü birden yüksekse
-    /// hasar akıyor, yalnız `kare` yüksekse animasyon yerleşmiyor.
+    /// **No order relation** to `kare`, and mixing them up means misreading
+    /// the gate: a motion frame submits a frame too, so it is written to
+    /// `kare` and not here ([`Self::motion_frames`]). The measured healthy
+    /// smoke run had `kare` 27–30 while `icerik` was 2–3 (`docs/OLCUMLER.md` →
+    /// `## Boşta kare`); most of the difference is the cursor glide, the rest
+    /// frames that could not be encoded and frames left in flight. The reader
+    /// of a red run uses this too: all three high means damage flowing, only
+    /// `kare` high means an animation not settling.
     pub fn content_frames(&self) -> u64 {
-        self.delegate.ivars().content_frames.get()
+        self.core.content_frames.get()
     }
 
-    /// Yerleşmemiş **imleç** animasyonu yüzünden çizilen kare — `hareket=`
-    /// jetonu. 011'den beri saf imleç tanığı: yalnız kayma yüzünden çizilen
-    /// kareyi `kayma=` sayıyor ve bu sayaç onları görmüyor.
+    /// Frames drawn because the **cursor** animation had not settled — the
+    /// `hareket=` token. A pure cursor witness since 011: frames drawn only
+    /// for the slide are counted by `kayma=` and this counter does not see
+    /// them.
     ///
-    /// Duman kapısının **gerekli** sayacı: reçetede bir imleç hareketi var
-    /// (`bt_core::smoke_shell`), yani sıfır "animasyon hiç koşmadı" demek.
-    /// `icerik=`'e girmiyor ve bu kapının kendisi (008 Karar 2).
+    /// The smoke gate's **required** counter: the recipe has a cursor move
+    /// (`bt_core::smoke_shell`), so zero means "the animation never ran". It
+    /// does not enter `icerik=`, and that is the gate itself (008 Karar 2).
     pub fn motion_frames(&self) -> u64 {
-        self.delegate.ivars().motion_frames.get()
+        self.core.motion_frames.get()
     }
 
-    /// Yerleşmemiş **kayma** yüzünden çizilen kare — `kayma=` jetonu.
+    /// Frames drawn because the **slide** had not settled — the `kayma=`
+    /// token.
     ///
-    /// [`Self::motion_frames`]'in kardeşi, toplananı değil: aynı karede ikisi
-    /// birden artabilir. Bir **sayaç, kapı değil** — eşiği ölçülmedi
-    /// ([`LinkIvars::slide_frames`]).
+    /// [`Self::motion_frames`]' sibling, not its summand: both can rise in
+    /// the same frame. A **counter, not a gate** — its threshold was not
+    /// measured (`Core::slide_frames`).
     pub fn slide_frames(&self) -> u64 {
-        self.delegate.ivars().slide_frames.get()
+        self.core.slide_frames.get()
     }
 
-    /// Animasyon durdu mu — kapının **ölçüm istemeyen** yarısı.
+    /// Whether the animation stopped — the half of the gate that **needs no
+    /// measurement**.
     ///
-    /// Süreli koşu bunu deadline'da bir kez soruyor: `false` ise koşu kırmızı
-    /// (`Verdict::MotionUnsettled`). Hızdan bağımsız olması bütün değeri —
-    /// `IDLE_FRAME_LIMIT` ancak yeterince hızlı bir sızıntıyı görüyor, bu
-    /// soru ise durma koşulu unutulmuş **her** animasyonu görüyor, ne kadar
-    /// yavaş olursa olsun.
+    /// The timed run asks this once at the deadline: `false` makes the run
+    /// red (`Verdict::MotionUnsettled`). Being independent of speed is its
+    /// whole value — `IDLE_FRAME_LIMIT` only sees a fast enough leak, this
+    /// question sees **every** animation whose stop condition was forgotten,
+    /// however slow.
     ///
-    /// Gördüğünün sınırı: yalnız [`crate::motion`]'dan ve dock'un yazım
-    /// efektlerinden ([`crate::glyph_fx`]) geçen animasyonlar.
-    /// Altyapıyı atlayıp kendi kendine kare isteyen bir yolu bu soru göremez;
-    /// onun kapısı [`Self::quiet_since`]'ın ölçülmüş eşiği.
+    /// The limit of what it sees: only animations going through
+    /// [`crate::motion`] and the dock's typing effects ([`crate::glyph_fx`]).
+    /// A path that skips the infrastructure and asks for frames on its own is
+    /// invisible to this question; its gate is [`Self::quiet_since`]'s
+    /// measured threshold.
     pub fn motion_settled(&self) -> bool {
-        let iv = self.delegate.ivars();
-        iv.motion.get().settled() && iv.glyph_fx.borrow().is_empty()
+        self.core.motion.get().settled() && self.core.glyph_fx.borrow().is_empty()
     }
 
-    /// Son çizilen kareden bu yana geçen süre — `sessiz=` jetonu.
-    /// `None` → hiç kare çizilmedi.
+    /// Time since the last drawn frame — the `sessiz=` token. `None` → no
+    /// frame drawn.
     ///
-    /// **Koşunun tek saat okuması.** Kare yolunda damga bir alan kopyası
-    /// (`LinkIvars::last_frame_at`); `CACurrentMediaTime()` yalnız burada,
-    /// yani deadline'da bir kez çağrılıyor. Ölçüm kapısı (`BT_FRAME_STATS`)
-    /// kapalıyken kare başına saat okunmaması sözleşmesi bu ayrımda duruyor.
+    /// **The run's one clock read.** On the frame path the stamp is a field
+    /// copy (`Core::last_frame_at`); [`Pacer::now`] is called only here, at
+    /// the deadline, once. The contract of no clock reads per frame with the
+    /// measurement gate (`BT_FRAME_STATS`) closed rests on this split.
     ///
-    /// **Neyin arasını ölçüyor:** damga karenin *hedef sunum* anı, yani
-    /// gelecekte bir nokta. Deadline son kareden bir tazeleme içinde düşerse
-    /// fark negatif çıkar; değer sıfıra doyuruluyor. Yorumlayan taraf
-    /// `sessiz=0.00ms`'i "deadline anında kare akıyordu" diye okumalı,
-    /// "tam o anda çizildi" diye değil.
+    /// **What it measures between:** the stamp is the frame's *target
+    /// presentation* time, i.e. a point in the future. If the deadline falls
+    /// within one refresh of the last frame the difference is negative; the
+    /// value saturates to zero. The reader should read `sessiz=0.00ms` as
+    /// "frames were flowing at the deadline", not "drawn exactly then".
     ///
-    /// **Kapının en duyarlı katı** ve `bt-gpu`'nun dışında değerlendiriliyor:
-    /// eşik ölçülmüş bir sözleşme (`bt-shell`'in `QUIET_FLOOR`'u, 008 phase-6)
-    /// ve duman yükünde altı kırmızı. Buradaki sorumluluk yalnız sayıyı
-    /// dürüstçe üretmek — `None` "hiç kare çizilmedi", `0.00ms` "deadline
-    /// anında kare akıyordu".
+    /// **The gate's most sensitive layer** and evaluated outside `bt-gpu`: the
+    /// threshold is a measured contract (`bt-shell`'s `QUIET_FLOOR`, 008
+    /// phase-6) and red below it on the smoke load. The responsibility here is
+    /// only producing the number honestly — `None` "no frame drawn",
+    /// `0.00ms` "frames were flowing at the deadline".
     ///
-    /// Gördüğünün sınırı [`Self::motion_settled`]'ınkinin tümleyeni: o,
-    /// altyapıdan geçen animasyonu hızından bağımsız görüyor; bu ise
-    /// altyapıyı atlayan **her** kare kaynağını görüyor, ama yalnız periyodu
-    /// eşikten kısaysa.
+    /// The limit of what it sees is [`Self::motion_settled`]'s complement:
+    /// that one sees an animation going through the infrastructure regardless
+    /// of speed; this one sees **every** frame source skipping the
+    /// infrastructure, but only if its period is shorter than the threshold.
     pub fn quiet_since(&self) -> Option<Duration> {
-        let last = self.delegate.ivars().last_frame_at.get()?;
-        Some(Duration::try_from_secs_f64(CACurrentMediaTime() - last).unwrap_or(Duration::ZERO))
+        let last = self.core.last_frame_at.get()?;
+        let now = self.waker.pacer().now();
+        Some(Duration::try_from_secs_f64(now - last).unwrap_or(Duration::ZERO))
     }
 
-    /// Bir kare iste.
+    /// Waits (bounded) for the frames still in flight and counts them — the
+    /// pending poll at shutdown, which comes **before** the report reads
+    /// `kare=` (Karar 6). The link is already stopped: no tick would count
+    /// them otherwise.
+    pub fn drain(&self) {
+        self.core.renderer.wait_in_flight(DRAIN_TIMEOUT);
+        self.core.complete();
+    }
+
+    /// Ask for a frame.
     ///
-    /// Çağıranını ilgilendiren, grid'in değiştiği değil, **çizilmiş olanın
-    /// artık geçerli olmadığıdır**: drawable boyutu oynadı, örtülme kalktı.
-    /// Bu yüzden hasar bayrağını da diker — ve bunu [`Waker`] ile yapar,
-    /// yani "kare iste"nin tek bir tanımı vardır. Bedeli tek karedir; durma
-    /// koşulu callback'in kendisi.
+    /// What matters to its caller is not that the grid changed but that
+    /// **what was drawn is no longer valid**: the texture size moved, the
+    /// occlusion lifted. So it plants the damage flag too — and does it with
+    /// the [`Waker`], so "ask for a frame" has one definition. Its cost is one
+    /// frame; the stop condition is the tick itself.
     pub fn request_frame(&self) {
         self.waker.wake();
     }
 
-    /// Pencerenin görünürlüğü değişti.
+    /// The window's visibility changed.
     ///
-    /// Görünmezken hem çizim hem **ritim** durur: link uyutulur, callback
-    /// erken döner ve `Waker` de link'i bir daha hiç açmaz (hasarı yine de
-    /// diker). Görünürlük dönünce bir kare istenir — compositor örtülüyken
-    /// layer içeriğini atmış olabilir, içerik aynı olsa da yeniden çizilmeli.
+    /// While invisible both drawing and the **rhythm** stop: the pacer is
+    /// paused, the tick returns early and the `Waker` never starts it again
+    /// (it still plants damage). When visibility returns a frame is asked for
+    /// — the compositor may have thrown away the layer's content while
+    /// occluded, so it must be redrawn even if the content is the same.
     pub fn set_visible(&self, visible: bool) {
         self.waker.gate().set_open(visible);
         if visible {
             self.request_frame();
         } else {
-            // Uçuştaki kayma **hedefinde bitiriliyor**: link duracağı için
-            // `advance` bir daha koşmaz ve animasyon sonsuza kadar
-            // "yerleşmemiş" kalırdı — süreli koşu deadline'da kod doğruyken
-            // `MotionUnsettled` derdi. Gerekçenin tamamı [`Motion::finish`]'te.
-            let iv = self.delegate.ivars();
-            let mut motion = iv.motion.get();
+            // The slide in flight is **finished at its target**: the pacer
+            // stops, so `advance` never runs again and the animation would
+            // stay "unsettled" forever — the timed run would say
+            // `MotionUnsettled` at the deadline while the code is right. The
+            // full reason is in [`Motion::finish`].
+            let core = &self.core;
+            let mut motion = core.motion.get();
             motion.finish();
-            iv.motion.set(motion);
-            // Yazım efektleri de: arka sekmede donan bir efekt geri gelince
-            // görülmemiş bir fazdan devam ederdi.
-            iv.glyph_fx.borrow_mut().finish();
-            self.link.setPaused(true);
+            core.motion.set(motion);
+            // The typing effects too: an effect frozen in a background tab
+            // would resume from a phase never seen when it comes back.
+            core.glyph_fx.borrow_mut().finish();
+            self.waker.pacer().set_running(false);
         }
     }
 
-    /// İmlecin kayma stili değişti: kullanıcı `settings.toml`'u kaydetti ya da
-    /// pencere açılıyor (`bt-shell` çözülmüş değeri veriyor,
-    /// `Renderer::set_font` emsali — `bt-gpu` ayar dosyası görmez).
+    /// The cursor's glide style changed: the user saved `settings.toml` or
+    /// the window is opening (`bt-shell` gives the resolved value, the
+    /// `Renderer::set_font` precedent — `bt-gpu` does not see the settings
+    /// file).
     ///
-    /// **Kare istemesinin sebebi "hasar yok" dalının şekli:** orada yerleşmiş
-    /// bir animasyon hiç çizmeden link'i uyutuyor. `snap`'e geçen kullanıcının
-    /// uçuştaki imleci hedefinde bitiriliyor ([`Motion::set_style`]) ama o
-    /// yeni konum ekrana ancak bir kare çizilirse düşer — istenmeseydi imleç
-    /// ara hücrede asılı kalır ve onu yerine koyan şey alakasız bir shell
-    /// çıktısı olurdu. İstek yalnız gerçekten bitirilen kaymada gidiyor:
-    /// aynı stili yeniden yazan kayıt ve yerleşmiş bir imleç no-op
-    /// (`Session::set_theme`'in aynı stili takas etmeme kuralı).
+    /// **The reason it asks for a frame is the shape of the "no damage"
+    /// branch:** there a settled animation puts the pacer to sleep without
+    /// drawing. A user switching to `snap` gets the cursor in flight finished
+    /// at its target ([`Motion::set_style`]), but that new position reaches
+    /// the screen only if a frame is drawn — without the request the cursor
+    /// would hang on an intermediate cell and the thing putting it in place
+    /// would be some unrelated shell output. The request goes only when a
+    /// glide is really finished: a save writing the same style again and a
+    /// settled cursor are no-ops (`Session::set_theme`'s rule of not swapping
+    /// the same theme).
     ///
-    /// Öteki iki stile geçiş kare istemiyor: uçuştaki kayma sürüyorsa link
-    /// zaten uyanık ve sıradaki hareket karesi yeni stili uyguluyor.
+    /// Switching to the other two styles asks for no frame: if the glide in
+    /// flight continues the pacer is awake anyway and the next motion frame
+    /// applies the new style.
     pub fn set_cursor_motion(&self, style: CursorMotion) {
-        let iv = self.delegate.ivars();
-        let mut motion = iv.motion.get();
+        let core = &self.core;
+        let mut motion = core.motion.get();
         let mut finished = motion.set_style(style);
-        iv.motion.set(motion);
-        // `snap` yazım efektlerini de kapatıyor (`Motion::glyph_fx`) ve
-        // uçuştakiler hedefinde bitiyor — aynı gerekçe, aynı kare talebi.
+        core.motion.set(motion);
+        // `snap` turns the typing effects off too (`Motion::glyph_fx`) and the
+        // ones in flight end at their target — same reason, same frame
+        // request.
         if style == CursorMotion::Snap {
-            let mut glyph_fx = iv.glyph_fx.borrow_mut();
+            let mut glyph_fx = core.glyph_fx.borrow_mut();
             finished |= !glyph_fx.is_empty();
             glyph_fx.finish();
         }
@@ -2072,256 +2275,261 @@ impl DisplayLink {
         }
     }
 
-    /// Dock'un yazım efektleri değişti (`[motion] keypress` / `erase`):
-    /// kullanıcı `settings.toml`'u kaydetti ya da pencere açılıyor.
+    /// The dock's typing effects changed (`[motion] keypress` / `erase`): the
+    /// user saved `settings.toml` or the window is opening.
     ///
-    /// Adlar **ham** geliyor — [`DisplayLink::set_cursor_motion`]'ın aksine
-    /// burada `bt-shell`'in çözeceği bir şey yok: `snap` ile Hareketi
-    /// Azalt'ın indirgemesi imlecin kipiyle aynı yerde, `bt-gpu`'da
-    /// (`Motion::glyph_fx`), ve ikisinin girdisi zaten link'te.
+    /// The names come **raw** — unlike [`DisplayLink::set_cursor_motion`],
+    /// there is nothing for `bt-shell` to resolve here: `snap`'s and Reduce
+    /// Motion's reduction is in the same place as the cursor's mode, in
+    /// `bt-gpu` (`Motion::glyph_fx`), and both inputs are already in the
+    /// link.
     ///
-    /// Değişim uçuştakileri bitiriyor ([`GlyphFx::set_effects`]) ve bitirilen
-    /// bir şey varsa kare istiyor — `set_cursor_motion`'ın gerekçesi: "hasar
-    /// yok" dalı yerleşmiş animasyonu çizmeden uyuyor, istenmeseydi yarı
-    /// saydam bir harf ekranda asılı kalırdı. Aynı seçim ve boş liste no-op.
+    /// The change finishes the ones in flight ([`GlyphFx::set_effects`]) and
+    /// asks for a frame if something was finished — `set_cursor_motion`'s
+    /// reason: the "no damage" branch sleeps without drawing a settled
+    /// animation, and without the request a half-transparent letter would
+    /// hang on screen. The same choice and an empty list are no-ops.
     pub fn set_glyph_fx(&self, keypress: Keypress, erase: Erase) {
-        let finished = self
-            .delegate
-            .ivars()
-            .glyph_fx
-            .borrow_mut()
-            .set_effects(keypress, erase);
+        let finished = self.core.glyph_fx.borrow_mut().set_effects(keypress, erase);
         if finished {
             self.request_frame();
         }
     }
 
-    /// Hareketi Azalt açıldı ya da kapandı — `bt-shell` **çözülmüş** değeri
-    /// veriyor: üç değerli `reduce_motion` ile sistemin cevabını o birleştiriyor
-    /// ve `bt-gpu` ne ayar dosyası ne `NSWorkspace` görüyor
-    /// ([`DisplayLink::set_cursor_motion`] ile aynı örüntü).
+    /// Reduce Motion was switched on or off — `bt-shell` gives the
+    /// **resolved** value: it combines the three-valued `reduce_motion` with
+    /// the system's answer, and `bt-gpu` sees neither the settings file nor
+    /// `NSWorkspace` (the same pattern as [`DisplayLink::set_cursor_motion`]).
     ///
-    /// **İki yön de kare isteyebilir** ve sebebi yine "hasar yok" dalının
-    /// şekli: uçuştaki animasyon her iki yönde de hedefinde bitiriliyor
-    /// ([`crate::motion::Motion::set_reduce`]) ve yerleşmiş bir animasyon o
-    /// dalda hiç çizilmeden uyuyor — istenmeseydi imleç ara hücrede ya da yarı
-    /// saydam asılı kalırdı. Yerleşmiş imleçte ve aynı değerde no-op.
+    /// **Both directions may ask for a frame** and the reason is again the
+    /// shape of the "no damage" branch: the animation in flight is finished
+    /// at its target in both directions ([`crate::motion::Motion::set_reduce`])
+    /// and a settled animation sleeps on that branch without drawing —
+    /// without the request the cursor would hang on an intermediate cell or
+    /// half-transparent. A no-op for a settled cursor and the same value.
     pub fn set_reduce_motion(&self, reduce: bool) {
-        let iv = self.delegate.ivars();
-        let mut motion = iv.motion.get();
+        let core = &self.core;
+        let mut motion = core.motion.get();
         let changed = motion.reduce() != reduce;
         let finished = motion.set_reduce(reduce);
-        iv.motion.set(motion);
-        // Yazım efektleri de iki yönde bitiyor (`Motion::set_reduce`'un
-        // gerekçesi); kare talebi aşağıdaki `changed`'den.
+        core.motion.set(motion);
+        // The typing effects end in both directions too (`Motion::set_reduce`'s
+        // reason); the frame request comes from `changed` below.
         if changed {
-            iv.glyph_fx.borrow_mut().finish();
+            core.glyph_fx.borrow_mut().finish();
         }
-        // **Değişimin kendisi kare istiyor, yalnız yarıda kalan animasyon
-        // değil.** Eski hâl `Motion` her animasyonun sahibiyken doğruydu;
-        // blink onun dışında yaşıyor ve kapısı yalnız **içerik** karesinde
-        // okunuyor (`Cursor::blink` ile birleşiyor). Boştaki bir pencerede
-        // Hareketi Azalt açılınca kare istenmezse blink sönmeye devam ederdi —
-        // `CLAUDE.md`'nin "açıkken blink hiç başlamaz" sözü yalan olurdu.
+        // **The change itself asks for a frame, not only a half-finished
+        // animation.** The old form was right while `Motion` owned every
+        // animation; blink lives outside it and its gate is read only on a
+        // **content** frame (combined with `Cursor::blink`). In an idle window
+        // switching Reduce Motion on without a frame request would leave the
+        // blink fading — `CLAUDE.md`'s "while on, blink never starts" would be
+        // a lie.
         if finished || changed {
             self.request_frame();
         }
     }
 
-    /// İmlecin çizim sayıları değişti — `bt-shell` ayar dosyasından veriyor.
+    /// The cursor's drawing numbers changed — `bt-shell` gives them from the
+    /// settings file.
     ///
-    /// **Aynı değerde no-op, değişimde kare** ve gerekçe kardeşlerininkiyle
-    /// aynı ([`DisplayLink::set_cursor_motion`], [`DisplayLink::set_focused`]):
-    /// boştaki bir pencerede kaydedilen yarıçap bir sonraki hasara kadar
-    /// ekrana hiç düşmezdi ve kullanıcı ayarın çalışmadığını sanırdı.
+    /// **A no-op on the same value, a frame on change**, and the reason is
+    /// its siblings' ([`DisplayLink::set_cursor_motion`],
+    /// [`DisplayLink::set_focused`]): a radius saved in an idle window would
+    /// never reach the screen until the next damage and the user would think
+    /// the setting does not work.
     pub fn set_caret_style(&self, style: CaretStyle) {
-        let iv = self.delegate.ivars();
-        if iv.caret_style.replace(style) == style {
+        if self.core.caret_style.replace(style) == style {
             return;
         }
         self.request_frame();
     }
 
-    /// Blink'in yarım periyodu değişti — `bt-shell` ayar dosyasından veriyor.
+    /// Blink's half period changed — `bt-shell` gives it from the settings
+    /// file.
     ///
-    /// **Bekleyen tik yeniden kuruluyor** ([`crate::blink::Blink::set_half_period`])
-    /// ve kare isteniyor; ikisi de zorunlu. Kurulmuş bir `after` **iptal
-    /// edilemiyor** (`arm_clock`), yani uyuyan bir pencerede yalnız alanı
-    /// yazmak yeni ritmi bir sonraki flip'e kadar geciktirirdi — kullanıcı
-    /// kaydeder, hiçbir şey olmaz.
+    /// **The pending tick is rebuilt** ([`crate::blink::Blink::set_half_period`])
+    /// and a frame is asked for; both are required. An armed wakeup **cannot
+    /// be cancelled** (`arm_clock`), so in a sleeping window writing only the
+    /// field would delay the new rhythm until the next flip — the user saves
+    /// and nothing happens.
     ///
-    /// **Değer yuvaya konuyor, tik burada kurulmuyor**: bu yol callback'in
-    /// dışında koşuyor ve elinde bir kare damgası yok. Deponun tek zaman
-    /// tabanı display link'in damgası (`update.targetTimestamp()`); burada bir
-    /// saat okumak ikinci bir zaman yaratırdı. Uygulama kare yolunda, istenen
-    /// kare geldiğinde.
+    /// **The value goes to a slot, the tick is not armed here**: this path
+    /// runs outside the tick and has no frame stamp in hand. The store's one
+    /// time base is the tick's stamp; reading a clock here would create a
+    /// second time. It is applied on the frame path, when the requested frame
+    /// arrives.
     pub fn set_blink_interval(&self, half_period: f64) {
-        let iv = self.delegate.ivars();
-        if iv.blink_interval.replace(half_period) == half_period {
+        if self.core.blink_interval.replace(half_period) == half_period {
             return;
         }
         self.request_frame();
     }
 
-    /// Klavye terminale geldi ya da gitti — `bt-shell`'in view'ı first
-    /// responder olunca/bırakınca veriyor (033 R7; arama panelinin alanı).
+    /// The keyboard came to the terminal or left — `bt-shell`'s view gives it
+    /// when it becomes/resigns first responder (033 R7; the search panel's
+    /// field).
     ///
-    /// [`DisplayLink::set_focused`]'ın kuralı: aynı değerde no-op, değişimde
-    /// kare — caret'in içi boşalacak ya da dolacak, blink duracak ya da
-    /// başlayacak.
+    /// [`DisplayLink::set_focused`]'s rule: a no-op on the same value, a frame
+    /// on change — the caret will hollow or fill, blink will stop or start.
     pub fn set_keyboard_in_terminal(&self, keyboard: bool) {
-        let iv = self.delegate.ivars();
-        if iv.keyboard.replace(keyboard) == keyboard {
+        if self.core.keyboard.replace(keyboard) == keyboard {
             return;
         }
         self.request_frame();
     }
 
-    /// Pencere odağı değişti — `bt-shell`'in `NSWindowDelegate`'i veriyor.
+    /// The window's focus changed — `bt-shell`'s `NSWindowDelegate` gives it.
     ///
-    /// **Aynı değerde no-op** (015 R7.2; emsal [`crate::Session::set_theme`]):
-    /// açılıştaki `windowDidBecomeKey:` tam bu yola düşüyor ve bedava bir
-    /// içerik karesi yazardı.
+    /// **A no-op on the same value** (015 R7.2; precedent
+    /// [`crate::Session::set_theme`]): the opening `windowDidBecomeKey:`
+    /// falls exactly on this path and would write a free content frame.
     ///
-    /// **Değişimin kendisi kare istiyor** ve gerekçesi `set_reduce_motion`'ın
-    /// aynısı: caret'in içi boşalacak ya da dolacak, blink duracak ya da
-    /// başlayacak — boştaki bir pencere bunların hiçbirini bir sonraki hasara
-    /// kadar göstermezdi.
+    /// **The change itself asks for a frame**, and the reason is
+    /// `set_reduce_motion`'s: the caret will hollow or fill, blink will stop
+    /// or start — an idle window would show none of it until the next damage.
     pub fn set_focused(&self, focused: bool) {
-        let iv = self.delegate.ivars();
-        if iv.focused.replace(focused) == focused {
+        if self.core.focused.replace(focused) == focused {
             return;
         }
         self.request_frame();
     }
 
-    /// Ritmi **kalıcı olarak** keser: uyandırma mandalı iner, link durur ve
-    /// run loop'tan çıkar. Geri dönüşü yok — `set_visible(true)` de artık
-    /// hiçbir şey yapmaz, ve bu bir söz değil `stopped` mandalının kendisi.
+    /// Cuts the rhythm **for good**: the wake latch drops and the pacer is
+    /// torn down. No way back — `set_visible(true)` does nothing any more
+    /// either, and that is not a promise but the `stopped` latch itself.
     ///
-    /// Kapanış yolu bunu `Drop` yerine çağırır çünkü `DisplayLink`'in kendisi
-    /// kapanış boyunca **yaşamak zorunda** (gerekçe `bt-shell`'in kapanış
-    /// sırasında). Uyandırma tarafı da kapanıyor: açık kalsaydı okuyucunun
-    /// son `Wakeup`'ları ana kuyruğa iş atmaya devam eder ve kapanışta bekleyen
-    /// ana thread'i meşgul ederdi.
+    /// The shutdown path calls this instead of `Drop` because the
+    /// `DisplayLink` itself **must live** through the shutdown (the reason is
+    /// in `bt-shell`'s shutdown order). The waking side closes too: left open,
+    /// the reader's last `Wakeup`s would keep sending work to the main queue
+    /// and keep the main thread busy during shutdown.
     pub fn stop(&self) {
-        // `invalidate` Apple'ın belgelerinde tek atımlık bir sökme; ikinci kez
-        // çağrılınca ne olduğu yazmıyor. İdempotentliği varsaymak yerine
-        // mandalın kendisiyle sağlıyoruz — `Drop` de buradan geçiyor.
+        // Idempotent through the latch, not by assuming the platform's
+        // teardown is — `Drop` comes here too.
         if self.waker.gate().is_stopped() {
             return;
         }
         self.waker.gate().stop();
-        self.link.setPaused(true);
-        self.link.invalidate();
+        self.waker.pacer().stop();
     }
 
-    /// Pencere geometrisi oynadı: grid'i ve hücre boyutunu güncelle, kare iste.
+    /// The window geometry moved: update the grid and the cell size, ask for
+    /// a frame.
     ///
-    /// `Session::resize` boyutun **hiçbir** bileşeni (sütun, satır, hücre
-    /// piksel boyutu) değişmediyse erken döner ve hiçbir şey işaretlemez,
-    /// oysa drawable boyutu değişmiş olabilir: hücre sınırını geçmeyen bir
-    /// sürükleme grid'i aynı bırakır, `windowDidChangeBackingProperties:`
-    /// ölçek oynamadan da atabilir. Kareyi bu yüzden `request_frame`
-    /// koşulsuz istiyor; yoksa layer eski drawable'ı gerdirir.
+    /// `Session::resize` returns early and marks nothing if **no** component
+    /// of the size (columns, rows, cell pixel size) changed, while the texture
+    /// size may have: a drag that does not cross a cell boundary leaves the
+    /// grid the same, `windowDidChangeBackingProperties:` may fire without the
+    /// scale moving. So `request_frame` asks for the frame unconditionally;
+    /// otherwise the layer would stretch the old texture.
     ///
-    /// Hücre piksel boyutu **yalnız oturum kabul ederse** uygulanır: dejenere
-    /// boyut yoksayılıyor (simge durumundaki pencere 0 sütun hesaplatır) ve
-    /// onu burada uygulamak grid'i eski ölçüde bırakıp çizimi yeni ölçüye
-    /// kaydırırdı — PTY'nin bildiği `TIOCSWINSZ` ile de ayrışırdı.
-    /// **Sol pay aynı kapıdan geçiyor.** Kapı ayrılsaydı reddedilen bir
-    /// boyutta pay yeni, ızgara eski kalır ve glyph'ler `cols` hesabından
-    /// kayardı. Payın hücre ölçüsüyle **birlikte** değişmesi ise bir kod
-    /// değişmezi değil, bugünkü ölçeklerin sonucu (`/audit`, 010 kapı): ikisi
-    /// de ölçeğin fonksiyonu (`Renderer::cell_metrics` tek çağrıda veriyor)
-    /// ama `round(8.0 * scale)` ile `round_up(cell_w * scale)` ayrı
-    /// fonksiyonlar. macOS'un tam sayılı backing ölçeklerinde (1.0, 2.0)
-    /// ayrışamıyorlar; kesirli bir ölçek gelirse yalnız payı değişen bir
-    /// metrik `Session::resize`'ın "zaten aynı" dalına takılıp düşerdi ve
-    /// `Frame::pos_at` ile `point_to_cell` bir kare boyunca ayrışırdı.
-    /// Kapanacağı yer o ölçeğin geldiği gün burasıdır.
-    /// **İmleç bu karede snap'ler.** Geometri değişiminde imleç hareket
-    /// etmedi, altındaki ızgara hareket etti (008 Karar 5) — animasyon onu
-    /// olmadığı bir yerden geliyormuş gibi gösterirdi. Bayrak koşulsuz
-    /// dikiliyor, `Session::resize`'ın kabulüne bağlı değil: hücre ölçüsü
-    /// değişmese de pencere oynamış olabilir.
+    /// The cell pixel size is applied **only if the session accepts it**: a
+    /// degenerate size is ignored (a minimised window computes 0 columns) and
+    /// applying it here would leave the grid at the old size and shift the
+    /// drawing to the new one — it would also drift from the `TIOCSWINSZ` the
+    /// PTY knows. **The gutter goes through the same gate.** With split gates,
+    /// on a rejected size the gutter would be new, the grid old, and the
+    /// glyphs would shift from the `cols` computation. The gutter changing
+    /// **together** with the cell size is not a code invariant but a result
+    /// of today's scales (`/audit`, 010 gate): both are functions of the scale
+    /// (`Renderer::cell_metrics` gives them in one call), but
+    /// `round(8.0 * scale)` and `round_up(cell_w * scale)` are separate
+    /// functions. On macOS's integer backing scales (1.0, 2.0) they cannot
+    /// drift; if a fractional scale arrives, a metric where only the gutter
+    /// changed would fall into `Session::resize`'s "already the same" arm, and
+    /// `Frame::pos_at` and `point_to_cell` would drift for one frame. The
+    /// place to close it is here, the day that scale arrives.
+    /// **The cursor snaps in this frame.** On a geometry change the cursor did
+    /// not move, the grid under it did (008 Karar 5) — an animation would show
+    /// it coming from where it never was. The flag is planted
+    /// unconditionally, not tied to `Session::resize`'s acceptance: the window
+    /// may have moved even if the cell size did not.
     pub fn resize(&self, cols: u16, rows: u16, cell: CellMetrics, dock_rows: u16) {
-        let iv = self.delegate.ivars();
-        if iv.session.resize(cols, rows, cell.cell_px()) {
-            iv.cell.set(cell);
+        let core = &self.core;
+        if core.session.resize(cols, rows, cell.cell_px()) {
+            core.cell.set(cell);
         }
-        // Dock payı **kapının dışında** ve `cols` ile aynı gerekçe: reddedilen
-        // bir boyutta (simge durumundaki pencere) dock zaten hiçbir şey
-        // çizmiyor, ama payı eski değerde bırakmak alternatif ekrandan
-        // çıkarken dock'u bir kare geç geri getirirdi.
-        iv.dock_rows.set(dock_rows);
-        // Sütun sayısı **kapının dışında**: dock'un sarması çizilen
-        // genişliği görmeli ve reddedilen bir boyutta (simge durumundaki
-        // pencere) `cols` zaten sıfır — dock o karede metin çizmiyor
-        // (`bt_core::dock::render`), yani ızgaranın eski ölçüde kalmasıyla
-        // çelişen bir şey yapmıyor.
-        iv.cols.set(cols);
-        iv.geometry_changed.set(true);
-        // Yazım efektleri de bitiyor (`Motion`'ın geometri snap'inin
-        // kardeşi): sütun sayısı ya da hücre değişince dock'un sarması
-        // yeni bir ayna gelmeden kayabiliyor ve uçuştakiler eski sütunlarında
-        // başka bir harfin üstünde kalırdı.
-        iv.glyph_fx.borrow_mut().finish();
+        // The dock share is **outside the gate** and for `cols`' reason: at a
+        // rejected size (a minimised window) the dock draws nothing anyway,
+        // but leaving the share at the old value would bring the dock back one
+        // frame late when leaving the alternate screen.
+        core.dock_rows.set(dock_rows);
+        // The column count is **outside the gate**: the dock's wrapping must
+        // see the drawn width, and at a rejected size (a minimised window)
+        // `cols` is zero anyway — the dock draws no text in that frame
+        // (`bt_core::dock::render`), so it does nothing contradicting the grid
+        // staying at the old size.
+        core.cols.set(cols);
+        core.geometry_changed.set(true);
+        // The typing effects end too (the sibling of `Motion`'s geometry
+        // snap): when the column count or the cell changes, the dock's
+        // wrapping may shift without a new mirror and the ones in flight
+        // would stay on their old columns over another letter.
+        core.glyph_fx.borrow_mut().finish();
         self.request_frame();
     }
 }
 
 impl Drop for DisplayLink {
     fn drop(&mut self) {
-        // Run loop link'i kendi tutar: `invalidate` çağrılmazsa callback ekran
-        // tazeleme hızında atmaya devam eder ve delegate zayıf olduğu için
-        // sessizce hiçbir şey çizmez — pil giden, belirtisi olmayan tam da o
-        // döngü. Ana thread: `DisplayLink` `Send` değil, doğduğu yerde düşer.
-        // `stop` mandalıyla korumalı: kapanış yolundan zaten çağrılmışsa
-        // burada hiçbir şey yapmaz.
+        // The platform's timer holds its target: without tearing it down the
+        // tick would keep firing (weakly, into nothing) — a battery drain with
+        // no symptom. On the creating thread: `DisplayLink` is not `Send`, it
+        // drops where it was born. Guarded by the `stop` latch: if the
+        // shutdown path already called it, this does nothing.
         self.stop();
     }
 }
 
-/// Süre sayacının tikini **mutlak** bir son tarihe çevirir; `None` bekleyen
-/// son tarihi **temizler**.
+/// Turns the duration counter's tick into an **absolute** deadline; `None`
+/// **clears** the pending deadline.
 ///
-/// Ayrı bir fonksiyon, `arm_clock`'ınki ile aynı gerekçeyle: kusurun kendisi
-/// burada yaşıyor ve `needs_update`'in gövdesinde sınanamıyordu. `None`'ın
-/// temizlemesi 013'ün kapısının dersi — biten komutun bayat son tarihi
-/// kalsaydı bir kare fazla istenirdi.
+/// A separate function, for `arm_clock`'s reason: the defect itself lived
+/// here and could not be tested inside the tick's body. `None` clearing is
+/// 013's gate's lesson — a finished command's stale deadline would ask for
+/// one frame too many.
 fn content_deadline(now: f64, tick: Option<Duration>) -> Option<f64> {
     tick.map(|tick| now + tick.as_secs_f64())
 }
 
-/// Saatin iki son tarihinden hangisi önce doluyor ve **hangi tadı** istiyor
-/// (`true` → hasar diken içerik tadı, `false` → hasar dikmeyen hareket tadı).
+/// Which of the clock's deadlines is due first and **which flavour** it wants
+/// (`true` → the damage-planting content flavour, `false` → the damage-free
+/// motion flavour). `poll` is the completion poll of a frame still in flight
+/// (Karar 6): motion flavour, it draws nothing.
 ///
-/// Ayrı bir fonksiyon, çünkü 013'ün kapısında düzeltilen kusurun yeni kılığı
-/// tam burada yaşıyor ve `arm_clock`'ın gövdesinde sınanamıyordu: o metot
-/// ObjC sınıfına bağlı ve gerçek bir pencere istiyor.
+/// A separate function, because the new guise of the defect fixed in 013's
+/// gate lives exactly here and could not be tested inside `arm_clock`'s
+/// body.
 ///
-/// **Sözleşme:** içerik son tarihi blink'in tiklerinden **etkilenmiyor**.
-/// Eski hâlde saat bir süre tutuyordu ve her uyku noktasında baştan
-/// kuruluyordu; saniyede iki kez uyanan bir blink, koşan komutun bir
-/// saniyelik tikini her seferinde bir saniye ileri iter ve tik hiç
-/// ateşlemezdi.
-fn due_clock(content: Option<f64>, flip: Option<f64>) -> Option<(f64, bool)> {
-    match (content, flip) {
-        (Some(content), Some(flip)) if flip < content => Some((flip, false)),
+/// **Contract:** the content deadline is **not affected** by blink's ticks
+/// or the poll. In the old form the clock held a duration and was rebuilt at
+/// every sleep point; a blink waking twice a second would push a running
+/// command's one-second tick one second forward every time and it would
+/// never fire. **On a tie the content wins**: the frame will be drawn anyway,
+/// the motion flavour needs no second wakeup.
+fn due_clock(content: Option<f64>, flip: Option<f64>, poll: Option<f64>) -> Option<(f64, bool)> {
+    let motion = match (flip, poll) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    match (content, motion) {
+        (Some(content), Some(motion)) if motion < content => Some((motion, false)),
         (Some(content), _) => Some((content, true)),
-        (None, Some(flip)) => Some((flip, false)),
+        (None, Some(motion)) => Some((motion, false)),
         (None, None) => None,
     }
 }
 
-/// "Hasar yok" dalının uyku sorusu: hareket yerleşmiş, blink'in fazı
-/// dönmemiş ve yazım efektlerinde **bu adımdan önce** uçuşta bir şey yok.
+/// The "no damage" branch's sleep question: motion settled, blink's phase
+/// did not turn and **before this step** nothing was in flight in the typing
+/// effects.
 ///
-/// Efektin sorusu `advance`'ten önceki hâle bakıyor ve bu şart: bu adımda
-/// biten bir efektin son hâli (geliş statik glyph'ine oturdu, hayalet kalktı)
-/// henüz çizilmedi; uyunsaydı ekranda yarı saydam bir harf asılı kalırdı.
-/// Liste boşaldığı karede çiziliyor, sıradaki callback uyuyor.
+/// The effect's question looks at the state before `advance` and that is
+/// required: the last state of an effect finishing in this step (an arrival
+/// settled on its static glyph, a ghost gone) has not been drawn yet; sleeping
+/// would leave a half-transparent letter hanging on screen. The frame the list
+/// empties in is drawn, the next tick sleeps.
 fn at_rest(motion: Motion, flipped: bool, fx_idle: bool) -> bool {
     motion.settled() && !flipped && fx_idle
 }
@@ -2652,13 +2860,22 @@ mod tests {
     fn the_clock_picks_the_nearer_deadline_and_its_flavour() {
         // İçerik tiki hasar diker (ızgara gerçekten değişiyor), blink dikmez
         // (yalnız caret'in alfası).
-        assert_eq!(due_clock(Some(1.0), Some(0.5)), Some((0.5, false)));
-        assert_eq!(due_clock(Some(1.0), None), Some((1.0, true)));
-        assert_eq!(due_clock(None, Some(0.5)), Some((0.5, false)));
-        assert_eq!(due_clock(None, None), None, "boşta saat kuruldu");
+        assert_eq!(due_clock(Some(1.0), Some(0.5), None), Some((0.5, false)));
+        assert_eq!(due_clock(Some(1.0), None, None), Some((1.0, true)));
+        assert_eq!(due_clock(None, Some(0.5), None), Some((0.5, false)));
+        assert_eq!(due_clock(None, None, None), None, "boşta saat kuruldu");
         // Eşitlikte içerik kazanıyor: kare zaten çizilecek, hareket tadına
         // ikinci bir uyandırma gerekmiyor.
-        assert_eq!(due_clock(Some(1.0), Some(1.0)), Some((1.0, true)));
+        assert_eq!(due_clock(Some(1.0), Some(1.0), None), Some((1.0, true)));
+        // The completion poll of a frame in flight (Karar 6) rides the motion
+        // flavour: it draws nothing, so it plants no damage, and the nearest
+        // of blink and the poll competes with the content tick.
+        assert_eq!(due_clock(None, None, Some(0.2)), Some((0.2, false)));
+        assert_eq!(
+            due_clock(Some(1.0), Some(0.5), Some(0.2)),
+            Some((0.2, false))
+        );
+        assert_eq!(due_clock(Some(0.1), None, Some(0.2)), Some((0.1, true)));
     }
 
     #[test]
@@ -2674,13 +2891,16 @@ mod tests {
         blink.content_frame(0.0, true);
 
         // t=0: blink daha yakın, hareket tadı kuruluyor.
-        assert_eq!(due_clock(content, blink.next_flip()), Some((0.5, false)));
+        assert_eq!(
+            due_clock(content, blink.next_flip(), None),
+            Some((0.5, false))
+        );
 
         // t=0.5: blink döndü ve kendi tikini ileri attı; sayacınki **yerinde**.
         assert!(blink.advance(0.5), "blink dönmedi");
         assert_eq!(blink.next_flip(), Some(1.0));
         assert_eq!(
-            due_clock(content, blink.next_flip()),
+            due_clock(content, blink.next_flip(), None),
             Some((1.0, true)),
             "sayacın tiki blink tarafından itildi"
         );
@@ -2702,6 +2922,6 @@ mod tests {
             "biten komut saati bıraktı"
         );
         // Temizlenmiş son tarih ve sönmeyen bir imleç: saat hiç kurulmuyor.
-        assert_eq!(due_clock(content_deadline(5.0, None), None), None);
+        assert_eq!(due_clock(content_deadline(5.0, None), None, None), None);
     }
 }

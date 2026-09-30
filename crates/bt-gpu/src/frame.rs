@@ -66,7 +66,6 @@ const _: () = assert!(offset_of!(Instance, rgba) == 16);
 /// (`crate::wgpu_renderer`): the fields are private and `offset_of!` only sees
 /// them here. The layout's second consumer is fed from next to the asserts,
 /// not from three hand-written numbers (040 phase-2 `/code-review`).
-#[cfg(test)]
 pub(crate) const INSTANCE_OFFSETS: [u64; 3] = [
     offset_of!(Instance, pos) as u64,
     offset_of!(Instance, size) as u64,
@@ -101,7 +100,6 @@ const _: () = assert!(offset_of!(GlyphInstance, rgba) == 16);
 /// `GlyphInstance`'s field offsets, for the wgpu vertex layout
 /// (`crate::wgpu_renderer`): fed from next to the asserts, like
 /// [`INSTANCE_OFFSETS`] (040 phase-3).
-#[cfg(test)]
 pub(crate) const GLYPH_INSTANCE_OFFSETS: [u64; 3] = [
     offset_of!(GlyphInstance, pos) as u64,
     offset_of!(GlyphInstance, uv0) as u64,
@@ -142,7 +140,6 @@ const _: () = assert!(offset_of!(FxInstance, fx) == 32);
 /// `FxInstance`'s field offsets, for the wgpu vertex layout
 /// (`crate::wgpu_renderer`): fed from next to the asserts, like
 /// [`INSTANCE_OFFSETS`] (040 phase-4).
-#[cfg(test)]
 pub(crate) const FX_INSTANCE_OFFSETS: [u64; 4] = [
     offset_of!(FxInstance, pos) as u64,
     offset_of!(FxInstance, uv0) as u64,
