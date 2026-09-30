@@ -1049,6 +1049,39 @@ pub enum Outcome {
 /// same `strerror`).
 const DISK_FULL: &str = "No space left on device";
 
+/// The local `tar c`'s flags up to `-C` (the directory and `./name` follow).
+///
+/// macOS's `/usr/bin/tar` is bsdtar: it must not produce `._name` AppleDouble
+/// records and attribute paxes — they would become junk files remotely and
+/// warnings in GNU tar (`COPYFILE_DISABLE` at the call site says the same to
+/// older releases). Its default format is pax-restricted, which [`TarWatcher`]
+/// reads.
+#[cfg(target_os = "macos")]
+const LOCAL_TAR_FLAGS: [&str; 7] = [
+    "-c",
+    "-f",
+    "-",
+    "--no-mac-metadata",
+    "--no-xattrs",
+    "--no-acls",
+    "-C",
+];
+
+/// The local `tar c`'s flags up to `-C` on Linux, where `/usr/bin/tar` is GNU
+/// tar: it has no `--no-mac-metadata` (there is no Mac metadata to drop) and its
+/// default `gnu` format writes `@LongLink` records, so the format is pinned to
+/// pax — the family [`TarWatcher`] reads. Found by `make linux` (043 phase-3).
+#[cfg(not(target_os = "macos"))]
+const LOCAL_TAR_FLAGS: [&str; 7] = [
+    "-c",
+    "-f",
+    "-",
+    "--format=pax",
+    "--no-xattrs",
+    "--no-acls",
+    "-C",
+];
+
 /// Uploads one item: `tar c` locally, `ssh … tar x` remotely, the bytes in between
 /// pass through us ([`TarWatcher`]). **On a background thread**; `tick` posts the
 /// progress report to the main queue (at most once per [`TICK`]).
@@ -1075,19 +1108,9 @@ pub fn transfer(
         Ok(child) => child,
         Err(error) => return Outcome::Failed(format!("ssh could not be started: {error}")),
     };
-    // `./name`: a name starting with `-` must not be taken for an option. macOS's
-    // tar must not produce `._name` AppleDouble records and attribute paxes — they
-    // would become junk files remotely and warnings in GNU tar.
+    // `./name`: a name starting with `-` must not be taken for an option.
     let local_tar = Command::new("/usr/bin/tar")
-        .args([
-            "-c",
-            "-f",
-            "-",
-            "--no-mac-metadata",
-            "--no-xattrs",
-            "--no-acls",
-            "-C",
-        ])
+        .args(LOCAL_TAR_FLAGS)
         .arg(parent)
         .arg(format!("./{}", local.name))
         .env("COPYFILE_DISABLE", "1")
@@ -2154,15 +2177,7 @@ mod tests {
 
     fn tar_of(dir: &Path, name: &str) -> Vec<u8> {
         let output = Command::new("/usr/bin/tar")
-            .args([
-                "-c",
-                "-f",
-                "-",
-                "--no-mac-metadata",
-                "--no-xattrs",
-                "--no-acls",
-                "-C",
-            ])
+            .args(LOCAL_TAR_FLAGS)
             .arg(dir)
             .arg(format!("./{name}"))
             .env("COPYFILE_DISABLE", "1")

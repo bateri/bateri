@@ -21,7 +21,8 @@
 //! `bash`, the program its grandchild `claude`; the third row in context.md).
 //!
 //! Two halves: the pure decision ([`foreground`], whose input is a
-//! [`ProcessTable`]) and the interface's `libc` body ([`Libproc`]). The
+//! [`ProcessTable`]) and the interface's system bodies ([`SystemTable`]:
+//! `libc`'s `libproc` on macOS, `/proc` on Linux). The
 //! decision is tested with a fake table, the body with a real PTY — a fake
 //! table could not see that login is root.
 //!
@@ -51,14 +52,18 @@ use bt_core::RemoteKind;
 
 /// The shell's position relative to the PTY child — the side that spawns the
 /// shell knows it and records it at spawn (`pane::TerminalPane::start_session`);
-/// it is not guessed by comparing names.
+/// it is not guessed by comparing names. An untimed session gets it from the
+/// same call as its command ([`crate::child::shell_command`]), so the two
+/// cannot disagree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellParent {
     /// The child is `login(1)` and the shell is its child: both paths of an
-    /// untimed session (`child::login_command` and alacritty's macOS path).
+    /// untimed session on macOS (`child::shell_command` and alacritty's macOS
+    /// path).
     Login,
-    /// The child is the shell itself: the timed run's fixed scripts and the
-    /// real PTY test (login needs root, so it cannot be spawned in a test).
+    /// The child is the shell itself: an untimed session on Linux (`$SHELL
+    /// -l`, and alacritty's own path there), the timed run's fixed scripts and
+    /// the real PTY test (login needs root, so it cannot be spawned in a test).
     Direct,
 }
 
@@ -535,6 +540,16 @@ fn names(group: u32, table: &impl ProcessTable) -> Vec<String> {
     names
 }
 
+/// The process table of the platform this build targets: `Libproc` on
+/// macOS, `Procfs` on Linux. Callers name this alias, not a body, so the
+/// platform shell reads the same line on both systems. A renaming re-export,
+/// not a `type` alias: the bodies are unit structs and callers use the value.
+#[cfg(target_os = "macos")]
+pub use self::Libproc as SystemTable;
+/// The process table of the platform this build targets (see the macOS alias).
+#[cfg(target_os = "linux")]
+pub use self::Procfs as SystemTable;
+
 /// [`ProcessTable`]'s macOS body: `libc`'s Apple half (`libproc`). Not on the
 /// frame path: a few system calls on the main thread at close time and when a
 /// command starts (the remote session probe).
@@ -727,6 +742,118 @@ unsafe fn pid_info<T>(pid: u32, flavor: c_int) -> Option<T> {
     // kernel writes at most that many bytes.
     let written = unsafe { libc::proc_pidinfo(pid, flavor, 0, (&raw mut info).cast(), size) };
     (written == size).then_some(info)
+}
+
+/// [`ProcessTable`]'s Linux body: `/proc`. Same contract as `Libproc` — an
+/// unreadable or vanished process is `None` (or an empty list), never a panic.
+///
+/// Listings (`children`, `members`) scan every `/proc/<pid>/stat` instead of
+/// reading `/proc/<pid>/task/<tid>/children`: the latter needs
+/// `CONFIG_PROC_CHILDREN` and lists only one thread's children. A scan is a
+/// few hundred small reads, and the table is asked only at close time and when
+/// a command starts — never on the frame path.
+///
+/// The foreground group is the shell's `tpgid` (field 8 of `stat`), the same
+/// quantity as macOS's `e_tpgid`; `-1` (no controlling terminal) becomes `0`,
+/// which [`foreground`] already reads as "unreadable".
+#[cfg(target_os = "linux")]
+pub struct Procfs;
+
+#[cfg(target_os = "linux")]
+impl ProcessTable for Procfs {
+    fn children(&self, pid: u32) -> Vec<u32> {
+        scan(|stat| stat.parent == pid)
+    }
+
+    fn groups(&self, shell: u32) -> Option<Groups> {
+        let stat = read_stat(shell)?;
+        Some(Groups {
+            own: stat.group,
+            foreground: stat.terminal_group,
+        })
+    }
+
+    fn members(&self, group: u32) -> Vec<u32> {
+        scan(|stat| stat.group == group)
+    }
+
+    fn parent(&self, pid: u32) -> Option<u32> {
+        read_stat(pid).map(|stat| stat.parent)
+    }
+
+    /// `/proc/<pid>/comm`: the kernel's name, truncated at 15 bytes (macOS's
+    /// short-info fallback is truncated the same way).
+    fn name(&self, pid: u32) -> Option<String> {
+        let comm = std::fs::read(format!("/proc/{pid}/comm")).ok()?;
+        let comm = comm.strip_suffix(b"\n").unwrap_or(&comm);
+        (!comm.is_empty()).then(|| String::from_utf8_lossy(comm).into_owned())
+    }
+
+    /// `/proc/<pid>/cmdline`: NUL-separated arguments. Empty for a zombie or a
+    /// kernel thread, which is `None` — there is no argv to read.
+    fn args(&self, pid: u32) -> Option<Vec<String>> {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let raw = raw.strip_suffix(b"\0").unwrap_or(&raw);
+        if raw.is_empty() {
+            return None;
+        }
+        Some(
+            raw.split(|&b| b == 0)
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect(),
+        )
+    }
+}
+
+/// The three fields of `/proc/<pid>/stat` the table asks for.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stat {
+    parent: u32,
+    group: u32,
+    /// `tpgid`; `0` when the process has no controlling terminal (`-1`).
+    terminal_group: u32,
+}
+
+/// One process's `stat`, `None` if it vanished or cannot be read.
+#[cfg(target_os = "linux")]
+fn read_stat(pid: u32) -> Option<Stat> {
+    parse_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// The pids in `/proc` whose `stat` matches `keep`, in ascending order. A
+/// process that exits mid-scan is skipped.
+#[cfg(target_os = "linux")]
+fn scan(keep: impl Fn(&Stat) -> bool) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids: Vec<u32> = entries
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|&pid| read_stat(pid).is_some_and(|stat| keep(&stat)))
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+/// The pure half of [`read_stat`]. The layout is `pid (comm) state ppid pgrp
+/// session tty_nr tpgid …`; `comm` may itself contain spaces and `)`, so the
+/// fields are counted from the **last** `)`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_stat(line: &str) -> Option<Stat> {
+    let rest = &line[line.rfind(')')? + 1..];
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    let parent = fields.next()?.parse().ok()?;
+    let group = fields.next()?.parse().ok()?;
+    let _session = fields.next()?;
+    let _tty = fields.next()?;
+    let terminal_group: i64 = fields.next()?.parse().ok()?;
+    Some(Stat {
+        parent,
+        group,
+        terminal_group: u32::try_from(terminal_group).unwrap_or(0),
+    })
 }
 
 #[cfg(test)]
@@ -1314,22 +1441,39 @@ mod tests {
         assert_eq!(parse_procargs(&buf[..3]), None);
     }
 
-    #[cfg(target_os = "macos")]
+    #[test]
+    fn stat_fields_are_counted_from_the_last_parenthesis() {
+        // A `comm` with a space and a `)` must not shift the fields.
+        let line = "4242 (tmux: se) rv) S 100 4242 4242 34816 5000 4194304 0 0";
+        assert_eq!(
+            parse_stat(line),
+            Some(Stat {
+                parent: 100,
+                group: 4242,
+                terminal_group: 5000,
+            })
+        );
+        // No controlling terminal: `tpgid` is -1, read as "no foreground".
+        let line = "7 (kworker/0:1) I 2 0 0 0 -1 69238880 0";
+        assert_eq!(parse_stat(line).map(|stat| stat.terminal_group), Some(0));
+        assert_eq!(parse_stat("7 (truncated"), None);
+        assert_eq!(parse_stat("7 (x) S 1"), None);
+    }
+
     #[test]
     fn the_process_table_reads_a_real_argv() {
-        // The witness for the `KERN_PROCARGS2` body: a child of the same user
-        // with a known argv.
+        // The witness for the argv body (`KERN_PROCARGS2` on macOS, `cmdline`
+        // on Linux): a child of the same user with a known argv.
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
             .expect("sleep did not spawn");
-        let args = Libproc.args(child.id());
+        let args = SystemTable.args(child.id());
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(args, Some(vec!["/bin/sleep".to_owned(), "30".to_owned()]));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn the_process_table_sees_a_real_foreground_job() {
         // The reader's only witness: a fake table can see neither that login is
@@ -1365,7 +1509,7 @@ mod tests {
         )
         .expect("session did not open");
         let child = session.child_pid();
-        let now = || foreground(ShellParent::Direct, child, &Libproc);
+        let now = || foreground(ShellParent::Direct, child, &SystemTable);
 
         wait_until("shell not seen in foreground", || now() == Foreground::Idle);
         // Longer than the test's deadline: the job must not end while the claim is read.

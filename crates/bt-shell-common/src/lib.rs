@@ -11,7 +11,7 @@
 //! **The boundary:** no AppKit, Foundation, Quartz or notification centre —
 //! whatever needs the toolkit stays in the platform shell (`bt-shell` on
 //! macOS). Where a module needs an operating system service, its body is
-//! behind `cfg(target_os = …)` and named as such (`jobs::Libproc`, `watch`);
+//! behind `cfg(target_os = …)` and named as such (`jobs::SystemTable`, `watch`);
 //! the only macOS-specific dependency is `dispatch2`, for `watch`'s vnode
 //! sources. Values the toolkit reads (the system's language and region) come
 //! in as arguments (`child::locale_env`).

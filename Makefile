@@ -550,7 +550,7 @@ yukle: kur
 terminfo:
 	$(call henuz_yok,assets/terminfo bir shell/TERM setiyle gelir)
 
-# bt-core'un, bt-atlas'ın ve bt-gpu'nun Linux kapısı: `clippy -D warnings` ve `test`, Docker'da,
+# bt-core'un, bt-atlas'ın, bt-gpu'nun ve bt-shell-common'ın Linux kapısı: `clippy -D warnings` ve `test`, Docker'da,
 # `tools/linux/Dockerfile`'ın imajında, `--locked` (Cargo.lock'u değiştiren
 # koşu kırmızı düşer, sessizce yeni sürüm çözmez). CLAUDE.md'nin "bt-core
 # platformsuz, kapı Linux hedefiyle derlemedir" sözü bu komuttur.
@@ -558,10 +558,11 @@ terminfo:
 # grafı Linux için derler; ne zaman koştuğu `.claude/is-akisi/proje.md` →
 # Doğrulama'da (Linux'ta derlenen bir crate değiştiyse).
 # Kapsam setlerle büyür — bugün bt-core, bt-atlas'ın FreeType/fontconfig/
-# harfrust arka ucu ve bt-gpu (Vulkan; `wgsl_pipelines_build` ve offscreen
-# piksel sınamaları lavapipe üstünde, 042); sıradaki bt-shell-common — sıra
-# `docs/YOL-HARITASI.md`'de. Büyürken `-p` listesi ve imaj tarifi birlikte
-# değişir.
+# harfrust arka ucu, bt-gpu (Vulkan; `wgsl_pipelines_build` ve offscreen
+# piksel sınamaları lavapipe üstünde, 042) ve bt-shell-common (`jobs`'un
+# `/proc` gövdesi ve gerçek PTY sınaması, `child`'ın `$SHELL -l` kolu ve
+# gerçek zsh sınamaları, 043); sıra `docs/YOL-HARITASI.md`'de. Büyürken `-p`
+# listesi ve imaj tarifi birlikte değişir.
 # Sıra:
 # 1. Sürüm: yerel `rustc`'nin major.minor'ü imaj etiketininkiyle aynı değilse
 #    KIRMIZI (exit 1) — iki derleyicinin clippy'si iki ayrı kapıdır. Bu bir
@@ -576,7 +577,7 @@ terminfo:
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
-LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu
+LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-shell-common
 
 linux:
 	@yerel=$$(rustc --version | sed -n 's/^rustc \([0-9]*\.[0-9]*\).*/\1/p'); \
