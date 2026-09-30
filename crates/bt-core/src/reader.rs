@@ -1,32 +1,36 @@
-//! PTY'nin okuyucu döngüsü: G/Ç, ayrıştırma ve yazma kuyruğu.
+//! The PTY reader loop: I/O, parsing and the write queue.
 //!
-//! **Bu dosya bir kopyadır.** Kaynak `alacritty_terminal` 0.26.0,
-//! `src/event_loop.rs` — Copyright Christian Duerr, Joe Wilm ve alacritty
-//! katkıcıları, Apache License 2.0 altında (metni pakette
-//! `THIRD-PARTY-LICENSES.txt`, atfı `Credits.html`). Apache-2.0 §4(b)
-//! gereği: dosya **değiştirildi** (035 phase-2), değişiklikler şunlar —
+//! **This file is a copy.** Source: `alacritty_terminal` 0.26.0,
+//! `src/event_loop.rs` — Copyright Christian Duerr, Joe Wilm and the
+//! alacritty contributors, under the Apache License 2.0 (text in the bundle
+//! as `THIRD-PARTY-LICENSES.txt`, attribution in `Credits.html`). Per
+//! Apache-2.0 §4(b): the file was **modified** (035 phase-2), the changes
+//! being —
 //!
-//! - ayrıştırıcı `Term`'i doğrudan değil [`ClusterHandler`] üzerinden
-//!   görüyor, `advance`'te de DEC 2026 zaman aşımının `stop_sync`'inde de;
-//! - `ref_test` kaydı ve `Notifier` çıkarıldı (ikisini de çağıran yok);
-//! - `log::error!` satırları `eprintln!` oldu (`log` bu crate'in bağımlılığı
-//!   değil, `CLAUDE.md` → loglama borcu);
-//! - kanalın ölümü panik değil boş okuma (`bt-core`'da gerekçesiz panik
-//!   yok; dal erişilemez); yeniden kaydın paniği gerekçesiyle korundu;
-//! - PTY token'ları alacritty'de `pub(crate)`, değerleri buraya kopyalandı;
-//! - yorumlar Türkçeye çevrildi.
+//! - the parser sees `Term` not directly but through [`ClusterHandler`], both
+//!   in `advance` and in `stop_sync` on the DEC 2026 timeout;
+//! - the `ref_test` recording and `Notifier` were removed (nothing calls
+//!   either);
+//! - `log::error!` lines became `eprintln!` (`log` is not a dependency of
+//!   this crate, `CLAUDE.md` → logging debt);
+//! - a dead channel is an empty read, not a panic (no unjustified panic in
+//!   `bt-core`; the branch is unreachable); the re-registration panic was
+//!   kept with its justification;
+//! - the PTY tokens are `pub(crate)` in alacritty, their values were copied
+//!   here;
+//! - comments were translated (first to Turkish, later to English).
 //!
-//! Neden kopya: kümeleme (035) ayrıştırıcının `Handler` çağrılarının
-//! **arasına** girmek zorunda ve alacritty'nin döngüsü `Term`'i sabit tip
-//! olarak veriyor (`.tasks/035-grapheme-dizileri/discussion.md` → Karar).
-//! Sürüm bu yüzden `=0.26.0` ile sabit (kök `Cargo.toml`).
+//! Why a copy: clustering (035) has to step **in between** the parser's
+//! `Handler` calls, and alacritty's loop hands `Term` over as a fixed type
+//! (`.tasks/035-grapheme-dizileri/discussion.md` → Karar). The version is
+//! pinned with `=0.26.0` for that reason (root `Cargo.toml`).
 //!
-//! Korunan sözleşmeler — `session.rs`'in kilit sırası ve kapanışı bunlara
-//! yaslanıyor: terminal lease'i `pty_read` boyunca tutuluyor (modül
-//! başlığındaki `term` → `shell` sırası), kilitli okuma [`MAX_LOCKED_READ`]
-//! ile sınırlı, `Wakeup` yalnız senkronize edilmemiş bayt işlendiyse
-//! gidiyor, ve [`EventLoop::spawn`] `(EventLoop, State)` çiftini
-//! döndürüyor — `Pty`'nin düşmesi, yani `SIGHUP`, o çiftin düşmesinde.
+//! Preserved contracts — `session.rs`'s lock order and shutdown lean on
+//! them: the terminal lease is held for the whole of `pty_read` (the `term`
+//! → `shell` order in the module header), the locked read is bounded by
+//! [`MAX_LOCKED_READ`], `Wakeup` is sent only if unsynchronized bytes were
+//! processed, and [`EventLoop::spawn`] returns the `(EventLoop, State)` pair
+//! — the `Pty` drops, hence `SIGHUP`, when that pair drops.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -46,35 +50,35 @@ use polling::{Event as PollingEvent, Events, PollMode, Poller};
 
 use crate::handler::ClusterHandler;
 
-/// Zorunlu senkronizasyondan önce PTY'den okunacak en çok bayt.
+/// The most bytes read from the PTY before a forced synchronization.
 const READ_BUFFER_SIZE: usize = 0x10_0000;
 
-/// Terminal kilitliyken PTY'den okunacak en çok bayt.
+/// The most bytes read from the PTY while the terminal is locked.
 const MAX_LOCKED_READ: usize = u16::MAX as usize;
 
-/// Okuma/yazma fd'sinin poller token'ı (alacritty 0.26.0,
-/// `tty/unix.rs`, `pub(crate)`). Kaydı `Pty::register` yapıyor, yani sayı
-/// orada verilenle aynı olmak zorunda — sürüm sabiti bunun bekçisi.
+/// Poller token of the read/write fd (alacritty 0.26.0, `tty/unix.rs`,
+/// `pub(crate)`). `Pty::register` does the registration, so the number must
+/// equal the one given there — the version pin is its guard.
 const PTY_READ_WRITE_TOKEN: usize = 0;
 
-/// Çocuk olayı borusunun poller token'ı (aynı kaynak, aynı gerekçe).
+/// Poller token of the child-event pipe (same source, same reason).
 const PTY_CHILD_EVENT_TOKEN: usize = 1;
 
-/// Döngüye gönderilen iletiler.
+/// Messages sent to the loop.
 #[derive(Debug)]
 pub(crate) enum Msg {
-    /// PTY'ye yazılacak baytlar.
+    /// Bytes to write to the PTY.
     Input(Cow<'static, [u8]>),
 
-    /// Döngü kapanmalı.
+    /// The loop must shut down.
     Shutdown,
 
-    /// PTY yeniden boyutlanmalı.
+    /// The PTY must be resized.
     Resize(WindowSize),
 }
 
-/// Döngünün kanalının gönderen ucu: iletiyi kuyruğa koyar ve poller'ı
-/// uyandırır.
+/// Sending end of the loop's channel: queues the message and wakes the
+/// poller.
 #[derive(Clone)]
 pub(crate) struct EventLoopSender {
     sender: Sender<Msg>,
@@ -82,15 +86,15 @@ pub(crate) struct EventLoopSender {
 }
 
 impl EventLoopSender {
-    /// Alıcı düştüyse ya da poller uyandırılamadıysa `Err`; çağıranın tek
-    /// sorusu "gitti mi", ayrıntı taşınmıyor.
+    /// `Err` if the receiver dropped or the poller could not be woken; the
+    /// caller's only question is "did it go through", no detail is carried.
     pub(crate) fn send(&self, msg: Msg) -> Result<(), ()> {
         self.sender.send(msg).map_err(|_| ())?;
         self.poller.notify().map_err(|_| ())
     }
 }
 
-/// Bir tamponun ne kadarının yazıldığını izler.
+/// Tracks how much of a buffer has been written.
 struct Writing {
     source: Cow<'static, [u8]>,
     written: usize,
@@ -121,16 +125,17 @@ impl Writing {
     }
 }
 
-/// Döngünün değişken durumunun tamamı: yazma kuyruğu, yazılmakta olan
-/// tampon ve ayrıştırıcı.
+/// All of the loop's mutable state: the write queue, the buffer being
+/// written and the parser.
 #[derive(Default)]
 pub(crate) struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
-    /// Son `Handler` çağrısı `input` mıydı — [`ClusterHandler`]'ın tek
-    /// durumu. Sarmalayıcı her `advance`'te yeniden doğduğu için burada:
-    /// iki `read` parçasına bölünen bir küme (`👍` · `🏽`) yine kapanmamış.
+    /// Whether the last `Handler` call was `input` — [`ClusterHandler`]'s
+    /// only state. It lives here because the wrapper is reborn on every
+    /// `advance`: a cluster split across two `read` chunks (`👍` · `🏽`) is
+    /// still unclosed.
     last_input: bool,
 }
 
@@ -163,8 +168,8 @@ impl State {
     }
 }
 
-/// Bir sonraki iletiye bakabilen alıcı: zaman aşımı kolu "kanalda ileti
-/// var mı"yı iletiyi tüketmeden soruyor.
+/// A receiver that can peek at the next message: the timeout arm asks "is
+/// there a message in the channel" without consuming it.
 struct PeekableReceiver<T> {
     rx: Receiver<T>,
     peeked: Option<T>,
@@ -184,15 +189,16 @@ impl<T> PeekableReceiver<T> {
     }
 
     fn recv(&mut self) -> Option<T> {
-        // alacritty kanalın ölümünde (`Disconnected`) panikliyor. Burada o
-        // dal erişilemez — gönderen uçlardan biri (`EventLoop::tx`) döngünün
-        // kendi alanı, döngü yaşadıkça kanal ölmez — ve panik yasağı onu boş
-        // okumaya indiriyor.
+        // alacritty panics when the channel dies (`Disconnected`). That
+        // branch is unreachable here — one of the sender ends
+        // (`EventLoop::tx`) is the loop's own field, so the channel does not
+        // die while the loop lives — and the no-panic rule reduces it to an
+        // empty read.
         self.peeked.take().or_else(|| self.rx.try_recv().ok())
     }
 }
 
-/// Okuyucu döngü: PTY G/Ç'si ve `Term`'i güncelleyen ayrıştırıcı.
+/// The reader loop: the PTY I/O and the parser that updates `Term`.
 pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     poll: Arc<Poller>,
     pty: T,
@@ -201,8 +207,8 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     terminal: Arc<FairMutex<Term<U>>>,
     event_proxy: U,
     drain_on_exit: bool,
-    /// Kümeleme açık mı (`SessionOptions::cluster`); sarmalayıcıya her
-    /// çağrıda geçiyor.
+    /// Whether clustering is on (`SessionOptions::cluster`); passed to the
+    /// wrapper on every call.
     cluster: bool,
 }
 
@@ -239,7 +245,7 @@ where
         }
     }
 
-    /// Kanalı boşaltır; `Shutdown` geldiyse `false`.
+    /// Drains the channel; `false` if `Shutdown` arrived.
     fn drain_recv_channel(&mut self, state: &mut State) -> bool {
         while let Some(msg) = self.rx.recv() {
             match msg {
@@ -257,21 +263,22 @@ where
         let mut unprocessed = 0;
         let mut processed = 0;
 
-        // Bir sonraki terminal kilidini PTY okumasına ayır. Lease okuma
-        // boyunca tutuluyor ve `TappedPty::read` onun altında koşuyor —
-        // `session.rs`'in `term` → `shell` kilit sırası buna dayanıyor.
+        // Reserve the next terminal lock for the PTY read. The lease is held
+        // for the whole read and `TappedPty::read` runs under it —
+        // `session.rs`'s `term` → `shell` lock order depends on this.
         let _terminal_lease = Some(self.terminal.lease());
         let mut terminal = None;
 
         loop {
-            // PTY'den oku.
+            // Read from the PTY.
             match self.pty.reader().read(&mut buf[unprocessed..]) {
-                // macOS'ta PTY'de okunacak bir şey kalmayınca gelen cevap.
+                // The answer on macOS when nothing is left to read on the PTY.
                 Ok(0) if unprocessed == 0 => break,
                 Ok(got) => unprocessed += got,
                 Err(err) => match err.kind() {
                     ErrorKind::Interrupted | ErrorKind::WouldBlock => {
-                        // Ayrıştırma yetiştiyse ve PTY bloklayacaksa poller'a dön.
+                        // If parsing has caught up and the PTY would block, go
+                        // back to the poller.
                         if unprocessed == 0 {
                             break;
                         }
@@ -280,18 +287,18 @@ where
                 },
             }
 
-            // Terminali kilitlemeyi dene.
+            // Try to lock the terminal.
             let terminal = match &mut terminal {
                 Some(terminal) => terminal,
                 None => terminal.insert(match self.terminal.try_lock_unfair() {
-                    // Tampon sınırındaysak kilidi bekleyerek al.
+                    // At the buffer limit, take the lock by waiting.
                     None if unprocessed >= READ_BUFFER_SIZE => self.terminal.lock_unfair(),
                     None => continue,
                     Some(terminal) => terminal,
                 }),
             };
 
-            // Gelen baytları ayrıştır — `Term`'e sarmalayıcının içinden.
+            // Parse the incoming bytes — into `Term` through the wrapper.
             state.parser.advance(
                 &mut ClusterHandler::new(&mut **terminal, self.cluster, &mut state.last_input),
                 &buf[..unprocessed],
@@ -300,13 +307,13 @@ where
             processed += unprocessed;
             unprocessed = 0;
 
-            // Terminali gereğinden uzun kilitli tutma.
+            // Do not hold the terminal locked longer than needed.
             if processed >= MAX_LOCKED_READ {
                 break;
             }
         }
 
-        // İşlenen baytların hepsi senkronize değilse yeniden çizim iste.
+        // Ask for a redraw unless all processed bytes were synchronized.
         if state.parser.sync_bytes_count() < processed && processed > 0 {
             self.event_proxy.send_event(Event::Wakeup);
         }
@@ -354,20 +361,21 @@ where
             let poll_opts = PollMode::Level;
             let mut interest = PollingEvent::readable(0);
 
-            // TTY'yi `EventedReadWrite` arayüzünden kaydet.
+            // Register the TTY through the `EventedReadWrite` interface.
             //
-            // SAFETY: kaydın koşulu kaynakların kaydı aşması; fd'lerin sahibi
-            // `self.pty` ve kayıt aşağıdaki `deregister`'la, `self` bu
-            // thread'den dönmeden önce kalkıyor (alacritty'nin aynı çağrısı).
+            // SAFETY: the registration's condition is that the sources
+            // outlive it; `self.pty` owns the fds and the registration is
+            // removed by the `deregister` below, before `self` leaves this
+            // thread (alacritty's same call).
             if let Err(err) = unsafe { self.pty.register(&self.poll, interest, poll_opts) } {
-                eprintln!("bateri: okuyucu döngü kaydı başarısız: {err}");
+                eprintln!("bateri: reader loop registration failed: {err}");
                 return (self, state);
             }
 
             let mut events = Events::with_capacity(EVENTS_CAPACITY);
 
             'event_loop: loop {
-                // Senkronize güncellemenin (DEC 2026) son tarihinde uyan.
+                // Wake at the deadline of a synchronized update (DEC 2026).
                 let handler = state.parser.sync_timeout();
                 let timeout = handler
                     .sync_timeout()
@@ -378,16 +386,16 @@ where
                     match err.kind() {
                         ErrorKind::Interrupted => continue,
                         _ => {
-                            eprintln!("bateri: okuyucu döngü yoklaması başarısız: {err}");
+                            eprintln!("bateri: reader loop poll failed: {err}");
                             break 'event_loop;
                         }
                     }
                 }
 
-                // Senkronize güncellemenin zaman aşımı: tamponlanan baytlar
-                // **sarmalayıcıya** gidiyor, `advance`'in gördüğü aynı yoldan
-                // — `Term`'e doğrudan verilseydi kümeleme (035) bu kolda
-                // atlanırdı.
+                // Timeout of a synchronized update: the buffered bytes go to
+                // the **wrapper**, by the same path `advance` sees — handed
+                // to `Term` directly, clustering (035) would be skipped in
+                // this arm.
                 if events.is_empty() && self.rx.peek().is_none() {
                     state.parser.stop_sync(&mut ClusterHandler::new(
                         &mut *self.terminal.lock(),
@@ -398,7 +406,7 @@ where
                     continue;
                 }
 
-                // Kanalda ileti varsa işle.
+                // Process any messages in the channel.
                 if !self.drain_recv_channel(&mut state) {
                     break;
                 }
@@ -423,31 +431,31 @@ where
 
                         PTY_READ_WRITE_TOKEN => {
                             if event.is_interrupt() {
-                                // Ölü bir PTY'de G/Ç deneme.
+                                // Do not attempt I/O on a dead PTY.
                                 continue;
                             }
 
                             if event.readable
                                 && let Err(err) = self.pty_read(&mut state, &mut buf)
                             {
-                                // Linux'ta istemci ucu kapanınca master'ın
-                                // `read`'i `EIO` verebilir; kaçınılmaz
-                                // `Exited` olayı için döngüye dön. `libc` bu
-                                // crate'in bağımlılığı değil: 5, Linux'un
-                                // `EIO`'su.
+                                // On Linux, when the client end closes, the
+                                // master's `read` may return `EIO`; go back to
+                                // the loop for the inevitable `Exited` event.
+                                // `libc` is not a dependency of this crate: 5
+                                // is Linux's `EIO`.
                                 #[cfg(target_os = "linux")]
                                 if err.raw_os_error() == Some(5) {
                                     continue;
                                 }
 
-                                eprintln!("bateri: PTY okunamadı: {err}");
+                                eprintln!("bateri: PTY read failed: {err}");
                                 break 'event_loop;
                             }
 
                             if event.writable
                                 && let Err(err) = self.pty_write(&mut state)
                             {
-                                eprintln!("bateri: PTY'ye yazılamadı: {err}");
+                                eprintln!("bateri: PTY write failed: {err}");
                                 break 'event_loop;
                             }
                         }
@@ -455,23 +463,25 @@ where
                     }
                 }
 
-                // Gerekiyorsa yazma ilgisini kaydet.
+                // Register write interest if needed.
                 let needs_write = state.needs_write();
                 if needs_write != interest.writable {
                     interest.writable = needs_write;
 
-                    // Yeni ilgiyle yeniden kaydet. Panik **kasıtlı** ve
-                    // alacritty'ninkiyle aynı: `Session::begin_shutdown`
-                    // okuyucunun çöküşünü `join`'in `Err`'inden tanıyor
-                    // (`kapanis=`); sessiz bir `break` çocuğu canlı, pencereyi
-                    // donmuş bırakıp kapanışı `temiz` gösterirdi.
+                    // Re-register with the new interest. The panic is
+                    // **deliberate** and the same as alacritty's:
+                    // `Session::begin_shutdown` recognizes the reader's crash
+                    // from `join`'s `Err` (`teardown=`); a silent `break`
+                    // would leave the child alive and the window frozen, and
+                    // report the shutdown as `clean`.
                     if let Err(err) = self.pty.reregister(&self.poll, interest, poll_opts) {
-                        panic!("okuyucu döngü yeniden kaydı başarısız: {err}"); // audit: alacritty paritesi, çöküş kapanış raporuna join'in Err'iyle ulaşıyor
+                        panic!("reader loop re-registration failed: {err}"); // audit: alacritty parity, the crash reaches the shutdown report through join's Err
                     }
                 }
             }
 
-            // Olay kaynakları burada düşmüyor, kayıt açıkça kaldırılıyor.
+            // The event sources are not dropped here, the registration is
+            // removed explicitly.
             let _ = self.pty.deregister(&self.poll);
 
             (self, state)
@@ -479,8 +489,8 @@ where
     }
 }
 
-/// Poller'ın tek turda döndürdüğü en çok olay (alacritty'nin sayısı).
+/// The most events the poller returns in one round (alacritty's number).
 const EVENTS_CAPACITY: NonZeroUsize = match NonZeroUsize::new(1024) {
     Some(capacity) => capacity,
-    None => panic!("olay kapasitesi sıfır olamaz"), // audit: const değerlendirmesi, sıfır derleme hatası olur
+    None => panic!("event capacity cannot be zero"), // audit: const evaluation, zero is a compile error
 };

@@ -1,23 +1,26 @@
-//! Tema dosyası: `themes/{ad}.toml`'un metninden [`Theme`]'e giden saf yol.
+//! The theme file: the pure path from the text of `themes/{name}.toml` to a
+//! [`Theme`].
 //!
-//! Dosya sistemi **görmez**: adı dosyaya ya da gömülü temaya çözen ve metni
-//! okuyan `bt-shell`. Biçimin kaydı `.tasks/007-ayarlar-ve-tema/discussion.md`
-//! → Karar 3, kullanıcıya anlatılışı `docs/AYARLAR.md` → Temalar.
+//! It does **not** see the file system: `bt-shell` resolves the name to a file
+//! or an embedded theme and reads the text. The format's record is
+//! `.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 3, its explanation to the
+//! user is `docs/AYARLAR.md` → Temalar.
 //!
-//! **Taban üstüne okunur:** her anahtar opsiyonel, eksik anahtar tabandan
-//! gelir — kullanıcı gömülü bir temayı kopyalayıp yalnız değiştirdiğini
-//! bırakabilir. Hata kuralı ayar dosyasınınkiyle aynı: ayrıştırılamayan metin
-//! ayrı sonuç (`Err`), ayrıştırılan metinde kabul edilmeyen renk tabandaki
-//! değeri alır ve tanı bırakır, bilinmeyen anahtar sessiz — 013'ün kalan durum
-//! rolü (uyarı) bugünkü sürümde hata sayılmamalı.
+//! **Read on top of a base:** every key is optional, a missing key comes from
+//! the base — a user can copy an embedded theme and leave only what they
+//! changed. The error rule is the same as the settings file's: text that
+//! cannot be parsed is a separate result (`Err`), a color that is not accepted
+//! in parsed text takes the base's value and leaves a diagnostic, an unknown
+//! key is silent — 013's remaining status role (warning) must not count as an
+//! error in today's version.
 
 use toml_edit::TableLike;
 
 use crate::color::Theme;
 use crate::settings::{Diagnostic, document, kind, line_of, section};
 
-/// `[ansi]` bölümünün anahtarları, [`Theme::ansi`] sırasıyla; ikincisi tanıdaki
-/// noktalı yol (`Diagnostic::key` `'static` ister).
+/// The keys of the `[ansi]` section, in [`Theme::ansi`] order; the second is
+/// the dotted path in the diagnostic (`Diagnostic::key` wants `'static`).
 const ANSI_KEYS: [(&str, &str); 16] = [
     ("black", "ansi.black"),
     ("red", "ansi.red"),
@@ -38,19 +41,20 @@ const ANSI_KEYS: [(&str, &str); 16] = [
 ];
 
 impl Theme {
-    /// Tema dosyasının metni → `base`'in üstüne okunmuş tema + tanılar, ya da
-    /// ayrıştırılamadı.
+    /// The theme file's text → the theme read on top of `base` + diagnostics,
+    /// or unparseable.
     ///
-    /// Roller (`background`, `foreground`, `dim`, `accent`, `cursor`,
+    /// Roles (`background`, `foreground`, `dim`, `accent`, `cursor`,
     /// `selection`, `search_match`, `search_current`, `success`, `error`,
-    /// `info`, `warning`) kökte, 16 renk
-    /// `[ansi]` bölümünde; renk `"#rrggbb"` (büyük harf de olur). `Err` yalnız
-    /// geçersiz TOML'da, ayar dosyasındaki anlamıyla.
+    /// `info`, `warning`) at the root, the 16 colors
+    /// in the `[ansi]` section; a color is `"#rrggbb"` (uppercase is fine too).
+    /// `Err` only on invalid TOML, in the same sense as in the settings file.
     ///
-    /// Taban parametre, sabit değil: üretimde hep `Theme::BATERI` (eksik
-    /// anahtarın nereden geleceği `bt-shell`'in kararı), ama belgedeki tema
-    /// bloğunun sınaması **her değeri ayrık** bir tabanla okuyor ki eksik bir
-    /// anahtar tabandan sessizce dolmasın.
+    /// The base is a parameter, not a constant: in production it is always
+    /// `Theme::BATERI` (where a missing key comes from is `bt-shell`'s
+    /// decision), but the test of the theme block in the document reads with a
+    /// base whose **every value is distinct**, so that a missing key is not
+    /// silently filled from the base.
     pub fn parse(text: &str, base: &Theme) -> Result<(Theme, Vec<Diagnostic>), Diagnostic> {
         let doc = document(text)?;
         let root = doc.as_table();
@@ -82,8 +86,8 @@ impl Theme {
     }
 }
 
-/// Bir renk anahtarını okur; yoksa yuvaya dokunmaz, kabul edilmezse tanı
-/// bırakır ve yuvadaki taban değeri kalır.
+/// Reads one color key; if absent it leaves the slot alone, if not accepted it
+/// leaves a diagnostic and the base value in the slot stays.
 fn read_color(
     text: &str,
     table: &dyn TableLike,
@@ -115,11 +119,11 @@ fn read_color(
     });
 }
 
-/// `"#rrggbb"` → `0xRRGGBB`. Kısa (`#rgb`) ve alfalı (`#rrggbbaa`) biçim yok:
-/// tek biçim, tek tanı.
+/// `"#rrggbb"` → `0xRRGGBB`. No short (`#rgb`) or alpha (`#rrggbbaa`) form:
+/// one form, one diagnostic.
 pub(crate) fn hex_color(value: &str) -> Option<u32> {
     let digits = value.strip_prefix('#')?;
-    // `from_str_radix` baştaki `+`'yı kabul ediyor; önce altı hane mi bak.
+    // `from_str_radix` accepts a leading `+`; check for six digits first.
     if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
@@ -130,9 +134,9 @@ pub(crate) fn hex_color(value: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
-    /// Her değeri `Theme::BATERI`'den ve birbirinden ayrık bir taban: eksik bir
-    /// anahtar okunduğunda tabandan gelen değer hiçbir gerçek renkle
-    /// karışmasın.
+    /// A base whose every value is distinct from `Theme::BATERI` and from each
+    /// other: when a missing key is read, the value that comes from the base
+    /// must not be confused with any real color.
     const SENTINEL: Theme = Theme {
         background: 0x000001,
         foreground: 0x000002,
@@ -153,8 +157,12 @@ mod tests {
     };
 
     fn clean(text: &str, base: &Theme) -> Theme {
-        let (theme, diagnostics) = Theme::parse(text, base).expect("ayrıştırılabilir metin");
-        assert_eq!(diagnostics, Vec::new(), "tanı beklenmiyordu: {text}");
+        let (theme, diagnostics) = Theme::parse(text, base).expect("parseable text");
+        assert_eq!(
+            diagnostics,
+            Vec::new(),
+            "no diagnostic was expected: {text}"
+        );
         theme
     }
 
@@ -166,20 +174,21 @@ mod tests {
 
     #[test]
     fn the_cursor_role_reads_like_every_other() {
-        // **Tek kural, istisnasız** (kullanıcı kararı, 2026-09-19). `cursor`
-        // bir dönem eksikte `accent`'e düşüyordu; gerekçesi "rolden önce
-        // yazılmış tema dosyaları değişmesin"di, ama uygulama yayınlanmadığı
-        // için koruduğu kimse yoktu ve 20+ anahtar içinde **tek** istisnaydı.
+        // **One rule, no exceptions** (user decision, 2026-09-19). `cursor`
+        // used to fall back to `accent` when missing; the reason was "theme
+        // files written before the role should not change", but since the app
+        // was not released there was no one it protected, and it was the
+        // **only** exception among 20+ keys.
         let theme = clean("accent = \"#ff0000\"\ncursor = \"#00ff00\"\n", &SENTINEL);
         assert_eq!((theme.accent, theme.cursor), (0xff0000, 0x00ff00));
-        // Yalnız `accent` yazmak imleci **etkilemiyor**: o tabandan geliyor.
+        // Writing only `accent` does **not** affect the cursor: it comes from the base.
         let theme = clean("accent = \"#ff0000\"\n", &SENTINEL);
         assert_eq!((theme.accent, theme.cursor), (0xff0000, SENTINEL.cursor));
-        // Kabul edilmeyen değer yuvayı tabanda bırakıyor ve tanı bırakıyor.
+        // A value that is not accepted leaves the slot at the base and leaves a diagnostic.
         let (theme, diagnostics) =
-            Theme::parse("cursor = \"yeşil\"\n", &SENTINEL).expect("ayrıştırılabilir metin");
+            Theme::parse("cursor = \"yeşil\"\n", &SENTINEL).expect("parseable text");
         assert_eq!(theme.cursor, SENTINEL.cursor);
-        assert_eq!(diagnostics.len(), 1, "tanı yok: {diagnostics:?}");
+        assert_eq!(diagnostics.len(), 1, "no diagnostic: {diagnostics:?}");
     }
 
     #[test]
@@ -213,7 +222,7 @@ mod tests {
         let theme = clean(&format!("[ansi]\n{text}"), &SENTINEL);
         let expected: Vec<u32> = (0..16).map(|i| 0xa0 + i).collect();
         assert_eq!(theme.ansi.to_vec(), expected);
-        // Adlar da sırayla: 1 kırmızı, 9 parlak kırmızı.
+        // The names are in order too: 1 red, 9 bright red.
         assert_eq!((ANSI_KEYS[1].0, ANSI_KEYS[9].0), ("red", "bright_red"));
     }
 
@@ -223,7 +232,7 @@ mod tests {
             "background = \"#12345\"\n[ansi]\nred = 16711680\ngreen = \"#+12345\"\n",
             &Theme::BATERI,
         )
-        .expect("ayrıştırılabilir metin");
+        .expect("parseable text");
         assert_eq!(theme, Theme::BATERI);
         let lines: Vec<_> = diagnostics.iter().map(ToString::to_string).collect();
         assert_eq!(
@@ -240,7 +249,7 @@ mod tests {
     #[test]
     fn ansi_of_wrong_type_is_diagnosed() {
         let (theme, diagnostics) =
-            Theme::parse("ansi = \"#ffffff\"\n", &Theme::BATERI).expect("ayrıştırılabilir metin");
+            Theme::parse("ansi = \"#ffffff\"\n", &Theme::BATERI).expect("parseable text");
         assert_eq!(theme, Theme::BATERI);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].key, Some("ansi"));
@@ -248,9 +257,9 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_silent() {
-        // 013'ün **kalan** durum rolü ve başka terminallerin ek anahtarları.
-        // Sentinel 010'da değişti: `success` artık bilinen bir anahtar ve
-        // sınama onu örnek olarak kullansaydı sessizce hiçbir şey sormaz olurdu.
+        // 013's **remaining** status role and other terminals' extra keys.
+        // The sentinel changed in 010: `success` is now a known key, and if the
+        // test used it as the example it would silently ask nothing.
         let theme = clean(
             "name = \"x\"\nwarning = \"#00ff00\"\n[ansi]\nred = \"#ff0000\"\norange = 1\n[meta]\n",
             &Theme::BATERI,
@@ -260,7 +269,7 @@ mod tests {
 
     #[test]
     fn status_roles_are_read_and_inherited() {
-        // Yazılan rol okunuyor…
+        // The written role is read…
         let theme = clean("success = \"#0a0b0c\"\n", &SENTINEL);
         assert_eq!(
             theme,
@@ -269,8 +278,9 @@ mod tests {
                 ..SENTINEL
             }
         );
-        // …yazılmayan rol tabandan geliyor. 010'un göç cümlesi bu: kendi
-        // temasını yazmış kullanıcı iki rolü gömülü `bateri`'den miras alır.
+        // …the unwritten role comes from the base. This is 010's migration
+        // sentence: a user who wrote their own theme inherits the two roles
+        // from the embedded `bateri`.
         let inherited = clean("background = \"#ffffff\"\n", &Theme::BATERI);
         assert_eq!(
             (inherited.success, inherited.error),
@@ -280,7 +290,7 @@ mod tests {
 
     #[test]
     fn the_info_role_is_read_and_inherited() {
-        // 036: kuralın istisnası yok — yazılan okunuyor, yazılmayan tabandan.
+        // 036: the rule has no exception — the written one is read, the unwritten one comes from the base.
         let theme = clean("info = \"#0a0b0c\"\n", &SENTINEL);
         assert_eq!(
             theme,
@@ -295,7 +305,7 @@ mod tests {
 
     #[test]
     fn the_warning_role_is_read_and_inherited() {
-        // 037 Karar 3: `info`'nun kuralı — opsiyonel, eksikse tabandan.
+        // 037 Karar 3: `info`'s rule — optional, from the base if missing.
         let theme = clean("warning = \"#0a0b0c\"\n", &SENTINEL);
         assert_eq!(
             theme,
@@ -310,8 +320,9 @@ mod tests {
 
     #[test]
     fn search_roles_are_read_and_inherited() {
-        // 033'ün iki rolü de kuralın istisnası değil: yazılan okunuyor,
-        // yazılmayan tabandan geliyor — biri yazılıp öteki yazılmasa da.
+        // Neither of 033's two roles is an exception to the rule: the written
+        // one is read, the unwritten one comes from the base — even if one is
+        // written and the other is not.
         let theme = clean("search_current = \"#0a0b0c\"\n", &SENTINEL);
         assert_eq!(
             theme,
@@ -335,34 +346,37 @@ mod tests {
     #[test]
     fn unparseable_theme_is_a_separate_result() {
         let err =
-            Theme::parse("background = \"#ffffff\n", &Theme::BATERI).expect_err("geçersiz TOML");
+            Theme::parse("background = \"#ffffff\n", &Theme::BATERI).expect_err("invalid TOML");
         assert_eq!(err.line, Some(1));
         assert!(err.message.starts_with("invalid TOML: "), "{err}");
     }
 
     #[test]
     fn documented_blocks_are_the_embedded_themes() {
-        // `docs/AYARLAR.md` "kopyala, değiştir" diye her gömülü tema için tam
-        // bir blok veriyor. Belge değer **kopyaladığı** için drift eder; bu
-        // sınama blokları gömülü temalara bağlıyor. Taban ayrık: bloktan düşen
-        // bir anahtar tabandan dolup eşitliği bozar, yani blok eksiksiz kalmak
-        // zorunda. Liste tablonun kendisinden: eklenen gömülü tema bloğuyla
-        // gelmek zorunda.
+        // `docs/AYARLAR.md` gives a full block for every embedded theme as
+        // "copy, change". Since the document **copies** values it drifts; this
+        // test ties the blocks to the embedded themes. The base is distinct: a
+        // key dropped from the block would be filled from the base and break
+        // equality, so the block has to stay complete. The list comes from the
+        // table itself: an added embedded theme has to come with its block.
         let doc = include_str!("../../../docs/AYARLAR.md");
         let names: Vec<_> = Theme::embedded_names().collect();
         assert_eq!(names, ["bateri", "bateri-light"]);
         for name in names {
             let theme = Theme::embedded(name);
-            // Başlık satır sonuyla aranıyor: "`bateri`" "`bateri-light`"in
-            // öneki ve sonsuz arama yanlış bloğu okurdu.
+            // The heading is searched with its line ending: "`bateri`" is a
+            // prefix of "`bateri-light`" and an unbounded search would read the
+            // wrong block.
             let heading = format!("### Gömülü `{name}`\n");
             let (_, after) = doc
                 .split_once(&heading)
-                .unwrap_or_else(|| panic!("AYARLAR.md'de {heading:?} yok"));
+                .unwrap_or_else(|| panic!("{heading:?} not found in AYARLAR.md"));
             let (_, block) = after
                 .split_once("```toml\n")
-                .expect("başlığın altında toml bloğu yok");
-            let (block, _) = block.split_once("```").expect("toml bloğu kapanmıyor");
+                .expect("no toml block under the heading");
+            let (block, _) = block
+                .split_once("```")
+                .expect("the toml block does not close");
             assert_eq!(Some(clean(block, &SENTINEL)), theme, "{name}");
         }
     }

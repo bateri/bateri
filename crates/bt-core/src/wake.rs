@@ -1,101 +1,114 @@
-//! Çekirdekten dış dünyaya tek yönlü sinyal.
+//! One-way signal from the core to the outside world.
 
-/// Okuyucu thread'in dış dünyaya haber verme yolu.
+/// The reader thread's way of notifying the outside world.
 ///
-/// Çağrılar **okuyucu thread'de** gelir ve alacritty'nin `Term` kilidi
-/// TUTULURKEN gelebilir (`pty_read` tamponu ayrıştırdıktan sonra kilidi hâlâ
-/// elinde tutarken `Wakeup` yollar). Uygulayan bu yüzden üç şey yapmaz:
-/// `Session`'a geri girmez, bloklamaz, kilit almaz — yalnız başka bir
-/// thread'e "bir şey oldu" der. `bt-gpu`'daki `Waker` bunun karşılığıdır:
-/// ana kuyruğa tek bir iş atar. Tek istisna **yaprak** kilit: alınıp hemen
-/// bırakılan, altında başka kilit alınmayan bir yuva (`Theme`'in yaprak
-/// kilidi emsali; üretimde `ShellWake`'in sökülebilir `Waker` yuvası).
+/// Calls arrive **on the reader thread** and may arrive WHILE alacritty's
+/// `Term` lock is HELD (`pty_read` sends `Wakeup` after parsing the buffer,
+/// while it still holds the lock). The implementor therefore does three things
+/// it must not do: re-enter `Session`, block, take a lock — it only tells
+/// another thread "something happened". `bt-gpu`'s `Waker` is the counterpart:
+/// it posts a single job to the main queue. The one exception is a **leaf**
+/// lock: a slot taken and released immediately, with no other lock taken under
+/// it (the precedent is `Theme`'s leaf lock; in production `ShellWake`'s
+/// detachable `Waker` slot).
 ///
-/// **Sahiplik:** `Session` bu nesneyi `Arc` ile tutar. Uygulayan da
-/// `Arc<Session>` tutarsa çember kapanır: `Drop for Session` hiç koşmaz,
-/// okuyucu thread hiç `join` edilmez ve sekme başına bir PTY ile bir thread
-/// sızar. `Session`'a bakmak gerekiyorsa `Weak` ile bakılır — ve `wake()`
-/// içinden `shutdown()`'a varan **senkron** bir yol açılmaz. Yasak duruyor,
-/// bedeli değişti: `shutdown()` artık `join`'i ayrı bir thread'e alıp
-/// sınırlı beklediği için son güçlü referans okuyucu thread'de düşse bile
-/// `EDEADLK` paniği olmaz — onun yerine o thread yarım saniye durur, bir
-/// satır "arkada bırakıldı" basılır ve kapanış hiç bitmez.
+/// **Ownership:** `Session` holds this object through an `Arc`. If the
+/// implementor also holds an `Arc<Session>` the cycle closes: `Drop for
+/// Session` never runs, the reader thread is never `join`ed, and one PTY and
+/// one thread leak per tab. If `Session` must be looked at, use a `Weak` — and
+/// do not open a **synchronous** path from inside `wake()` to `shutdown()`.
+/// The prohibition stands, but its cost changed: because `shutdown()` now moves
+/// the `join` to a separate thread and waits for a bounded time, even if the
+/// last strong reference drops on the reader thread there is no `EDEADLK`
+/// panic — instead that thread stalls for half a second, one "left behind"
+/// line is printed, and the shutdown never finishes.
 ///
-/// **`Drop`'un koştuğu thread sözleşmenin parçası.** Sınır dolduğunda
-/// `(EventLoop, State)` çifti `"PTY teardown"` thread'inde kalır ve o çift
-/// `Adapter` üzerinden bu nesnenin bir `Arc` kopyasını taşır: son kopya
-/// oraya düşerse **`Wake::drop` o thread'de koşar**. Dolayısıyla uygulayanın
-/// `Drop`'u da bloklamaz — özellikle ana kuyruğa senkron iş atmaz. Üretimdeki
-/// uygulayan `bt-shell`'in `ShellWake`'i ve taşıdığı `bt-gpu` `Waker`'ında tam
-/// böyle bir alan var (`MainThreadBound<Retained<CAMetalDisplayLink>>`); bu
-/// yüzden `Waker` pencere kapanırken ana thread'de **sökülüyor** ve
-/// `ShellWake` hangi thread'de düşerse düşsün onu taşımıyor.
+/// **The thread `Drop` runs on is part of the contract.** When the limit
+/// expires, the `(EventLoop, State)` pair stays on the `"PTY teardown"` thread,
+/// and that pair carries an `Arc` copy of this object through `Adapter`: if the
+/// last copy drops there, **`Wake::drop` runs on that thread**. So the
+/// implementor's `Drop` must not block either — in particular it must not post
+/// synchronous work to the main queue. The production implementor is
+/// `bt-shell`'s `ShellWake`, and the `bt-gpu` `Waker` it carries has exactly
+/// such a field (`MainThreadBound<Retained<CAMetalDisplayLink>>`); that is why
+/// the `Waker` is **detached** on the main thread when the window closes and
+/// `ShellWake` does not carry it, whichever thread it drops on.
 ///
-/// Çağrıların hiçbirinin varsayılan gövdesi yok: yeni bir çağrı eklendiğinde
-/// uygulayan onu unutamasın, derleme söylesin.
+/// None of the calls has a default body: when a new call is added, the
+/// implementor cannot forget it — the compiler says so.
 pub trait Wake: Send + Sync + 'static {
-    /// Grid değişti; bir kare gerekebilir.
+    /// The grid changed; a frame may be needed.
     fn wake(&self);
 
-    /// Shell çocuğu bitti. `code` yalnız normal çıkışta doludur; sinyalle
-    /// ölen çocukta `None`'dur.
+    /// The shell child ended. `code` is filled only on a normal exit; it is
+    /// `None` for a child killed by a signal.
     fn child_exit(&self, code: Option<i32>);
 
-    /// Terminaldeki uygulama OSC 52 ile panoya `text` yazmak istedi (ssh'taki
-    /// vim'in kopyası). Yalnız `Osc52::Copy` kipinde gelir; `text` boş
-    /// değildir. Dizinin hedefi (`c`, `p`, `s`) taşınmıyor: tek panolu bir
-    /// platformda ayrım yok (`Adapter`'ın kolu).
+    /// The application in the terminal asked, via OSC 52, to write `text` to
+    /// the clipboard (the copy of vim over ssh). It arrives only in
+    /// `Osc52::Copy` mode; `text` is not empty. The sequence's target (`c`,
+    /// `p`, `s`) is not carried: on a platform with a single clipboard there is
+    /// no distinction (the arm of `Adapter`).
     ///
-    /// Üstteki üç yasak burada da geçerli ve en çok burada sınanır: panoya
-    /// yazmak `Term` kilidi altında yapılamayacak kadar yavaş olabilir (metin
-    /// sınırsız), yani uygulayan metni kilitsiz bir yuvaya koyup yazmayı başka
-    /// bir thread'e bırakır. Durmadan OSC 52 basan bir uygulama bu çağrıyı
-    /// saniyede yüzlerce kez yapabilir; uygulayanın kuyruğa sınırsız iş
-    /// yığmaması onun işi.
+    /// The three prohibitions above apply here too, and this is where they are
+    /// tested hardest: writing to the clipboard can be too slow to do under the
+    /// `Term` lock (the text is unbounded), so the implementor puts the text
+    /// into a lock-free slot and leaves the writing to another thread. An
+    /// application that prints OSC 52 nonstop can make this call hundreds of
+    /// times per second; not piling unbounded work onto its queue is the
+    /// implementor's job.
     ///
-    /// Kapanış sırasında gelen yazmanın panoya ulaşmaması zararsızdır.
+    /// A write that arrives during shutdown failing to reach the clipboard is
+    /// harmless.
     fn copy_to_clipboard(&self, text: String);
 
-    /// Oturumun başlığı ([`crate::Session::title`]) değişmiş olabilir:
-    /// uygulamanın OSC 0/2 başlığı değişti ya da kabuğun OSC 7 dizini
-    /// **değişti** (aynı dizini basan `precmd` haber doğurmaz).
+    /// The session's title ([`crate::Session::title`]) may have changed: the
+    /// application's OSC 0/2 title changed, or the shell's OSC 7 directory
+    /// **changed** (a `precmd` printing the same directory produces no
+    /// notification).
     ///
-    /// İki kaynağın iki thread durumu var: OSC 0/2 `Term` kilidi **altında**
-    /// gelir (okuyucu thread'de ya da `Session::set_terminal_options`'ı
-    /// çağıran thread'de — `Term::set_options` başlık olayını yeniden
-    /// yolluyor, değişmediyse haber yok), OSC 7 okuyucu thread'de kilitsiz.
-    /// Üstteki üç yasak ikisinde de geçerli.
+    /// The two sources have two thread situations: OSC 0/2 arrives **under**
+    /// the `Term` lock (on the reader thread or on the thread calling
+    /// `Session::set_terminal_options` — `Term::set_options` re-sends the title
+    /// event, and there is no notification if nothing changed), OSC 7 arrives
+    /// on the reader thread without the lock. The three prohibitions above
+    /// apply to both.
     ///
-    /// **Yük taşımaz:** alıcı başlığı `Session::title`'dan kendisi okur, yani
-    /// birbirini kovalayan iki değişiklik bayat bir değerle davranamaz.
-    /// Uygulayan kuyruğa **en çok bir** iş atar — başlığını her komutta
-    /// basan bir kabuk ya da döngüdeki `printf` çağrıyı sık yapabilir ve
-    /// görülecek olan zaten son başlık.
+    /// **Carries no payload:** the receiver reads the title from
+    /// `Session::title` itself, so two changes chasing each other cannot act on
+    /// a stale value. The implementor posts **at most one** job to its queue —
+    /// a shell printing its title on every command, or a `printf` in a loop,
+    /// can make the call frequent, and the title to be seen is the latest one
+    /// anyway.
     fn title_changed(&self);
 
-    /// Geçmişte arama açıkken **defter değişti** (033): PTY çıktısı geldi
-    /// ya da pencere yeniden sarıldı. Alıcı sayım dizinini sürer
-    /// ([`crate::Session::search_step`]); dizin bir sonraki geçişini baştan
-    /// başlatıyor.
+    /// While search in scrollback is open, **the ledger changed** (033): PTY
+    /// output arrived or the window was re-wrapped. The receiver drives the
+    /// count index ([`crate::Session::search_step`]); the index restarts its
+    /// next pass from the beginning.
     ///
-    /// **Kenarda ve yüksüz** ([`Wake::title_changed`] emsali): bekleyen haber
-    /// dizin onu tüketene kadar ikincisini doğurmuyor, yani `yes` akarken de
-    /// çağrı sayısı geçiş sayısıyla sınırlı. Okuyucu thread'de `Term` kilidi
-    /// **tutulurken** ya da ana thread'de (`resize`) gelir; üstteki üç yasak
-    /// geçerli. Arama kapalıyken hiç gelmez.
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::title_changed`]): a pending notification does not produce a
+    /// second one until the index consumes it, so even while `yes` streams the
+    /// number of calls is bounded by the number of passes. It arrives on the
+    /// reader thread **while the `Term` lock is held** or on the main thread
+    /// (`resize`); the three prohibitions above apply. It never arrives while
+    /// search is closed.
     fn search_changed(&self);
 
-    /// Kabuğun safhası `Running`'e **geçti** (OSC 133 `C`; 036 Karar 2): bir
-    /// komut başladı. Alıcı ön plandaki programı yoklayıp
-    /// [`crate::Session::set_remote`] ile uzak oturumu bildirir.
+    /// The shell's phase **moved** to `Running` (OSC 133 `C`; 036 Karar 2): a
+    /// command started. The receiver probes the foreground program and reports
+    /// the remote session via [`crate::Session::set_remote`].
     ///
-    /// **Kenarda ve yüksüz** ([`Wake::title_changed`] emsali): aynı komutta
-    /// ikinci bir `C` (iTerm2 entegrasyonu) geçiş değil ve haber doğurmuyor.
-    /// Yük yok, çünkü alıcı komutun neslini kendisi okuyor
-    /// ([`crate::Session::running_command`]) ve yoklamanın cevabını onunla
-    /// geri veriyor — araya bir `D` girerse bayat cevap düşüyor. Okuyucu
-    /// thread'de gelir; defterin yaprak kilidi bırakıldıktan sonra, ama
-    /// sözleşme `Term` kilidinin tutulabileceğini varsayar ve üstteki üç yasak
-    /// geçerli. Uygulayan kuyruğa **en çok bir** iş atar.
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::title_changed`]): a second `C` in the same command (iTerm2
+    /// integration) is not a transition and produces no notification. No
+    /// payload, because the receiver reads the command's generation itself
+    /// ([`crate::Session::running_command`]) and hands the probe's answer back
+    /// with it — if a `D` intervenes, the stale answer is dropped. It arrives
+    /// on the reader thread; after the ledger's leaf lock has been released,
+    /// but the contract assumes the `Term` lock may be held and the three
+    /// prohibitions above apply. The implementor posts **at most one** job to
+    /// its queue.
     fn command_started(&self);
 }

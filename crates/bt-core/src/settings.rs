@@ -1,26 +1,28 @@
-//! Ayar modeli: `settings.toml`'un metninden [`Settings`]'e giden saf yol.
+//! The settings model: the pure path from `settings.toml`'s text to
+//! [`Settings`].
 //!
-//! Dosya sistemi **görmez**: metni okuyan, izleyen ve hatayı pencerede
-//! gösteren `bt-shell`. Burada yalnız karar var — `child.rs`'in "saf karar +
-//! ince sistem sarmalayıcısı" örüntüsü — ve varsayılanların tek sahibi
-//! burası. Kararın kaydı `.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1.
+//! It **doesn't see** the file system: `bt-shell` reads the text, watches it
+//! and shows the error in the window. Only the decision is here — the "pure
+//! decision + thin system wrapper" pattern of `child.rs` — and this is the
+//! defaults' only owner. The decision's record is
+//! `.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1.
 //!
-//! **Hata kuralı tek:** metin TOML olarak ayrıştırılamıyorsa sonuç ayrı bir
-//! değer ([`Settings::parse`]'ın `Err`'i) ve hiçbir alan uydurulmaz — ne
-//! yapılacağı çağıranın kararı (açılışta varsayılanlar, canlı yenilemede
-//! hiçbir şey). Ayrıştırılıyorsa her anahtar ya geçerli değerini ya
-//! varsayılanını alır; kabul edilmeyen değer bir [`Diagnostic`] bırakır.
-//! **Tek istisna `clipboard.osc52`:** kabul edilmeyen değeri varsayılanı
-//! (açık) değil kapalıyı alır ([`Settings::parse_keeping`]'in doc'u).
-//! **Bilinmeyen anahtar ve bölüm sessizce yoksayılır:** sonraki setlerin
-//! anahtarı (`[motion] intensity`) bugünkü sürümde tanı üretmemeli.
+//! **There is a single error rule:** if the text can't be parsed as TOML the
+//! result is a separate value (the `Err` of [`Settings::parse`]) and no field is
+//! invented — what to do is the caller's decision (defaults at startup, nothing
+//! on a live reload). If it parses, every key takes either its valid value or
+//! its default; a value that isn't accepted leaves a [`Diagnostic`].
+//! **The one exception is `clipboard.osc52`:** for a value that isn't accepted it
+//! takes not the default (on) but off (the doc of [`Settings::parse_keeping`]).
+//! **An unknown key and section are silently ignored:** a later set's key
+//! (`[motion] intensity`) mustn't produce a diagnostic in today's version.
 //!
-//! Ayrıştırıcı önceki ayarları yalnız kabul edilmeyen değerin yerine geçecek
-//! değer olarak görür ([`Settings::parse_keeping`], kayıt anı); fark almak
-//! çağıranın işi ([`Settings::changes`]).
+//! The parser sees the previous settings only as the value that stands in for a
+//! value that isn't accepted ([`Settings::parse_keeping`], save time); taking the
+//! difference is the caller's job ([`Settings::changes`]).
 //!
-//! Tanı tipi ve TOML yardımcıları tema dosyasının ayrıştırıcısıyla (`theme`)
-//! ortak: iki dosyanın hata dili aynı olsun.
+//! The diagnostic type and the TOML helpers are shared with the theme file's
+//! parser (`theme`): so that the two files speak the same error language.
 
 use std::fmt;
 
@@ -28,65 +30,66 @@ use toml_edit::{Document, Item, TableLike};
 
 use crate::session::{Osc52, TerminalOptions};
 
-/// Kaydırma geçmişinin tavanı: **alacritty uygulamasının** sınırı.
+/// The scrollback's ceiling: the limit of **the alacritty application**.
 ///
-/// Kaynak `alacritty/src/config/scrolling.rs` → `MAX_SCROLLBACK_LINES =
-/// 100_000`; aşan değeri ayar okurken reddediyor. Sınır uygulamada,
-/// `alacritty_terminal`'da **değil** — `Term` `scrolling_history`'yi
-/// kırpmadan alıyor, yani tavanı koymak bizim işimiz. İçe aktarılamaz (o
-/// crate bağımlılığımız değil), sayı kaynağıyla birlikte buraya kopyalandı;
-/// ölçülmüş bir bellek bütçesi değil.
+/// The source is `alacritty/src/config/scrolling.rs` → `MAX_SCROLLBACK_LINES =
+/// 100_000`; it rejects a value above it when reading the config. The limit is
+/// in the application, **not** in `alacritty_terminal` — `Term` takes
+/// `scrolling_history` without clamping, so setting the ceiling is our job. It
+/// can't be imported (that crate isn't our dependency), the number was copied
+/// here with its source; it is not a measured memory budget.
 ///
-/// Tavan kullanıcı girdisinin kuralı, `Session`'ın değişmezi değil —
-/// `SessionOptions.scrollback`'i kırpan başka bir kapı yok ve olması da
-/// gerekmiyor, oraya giden tek değer bu ayrıştırıcıdan geçiyor. `pub`, çünkü
-/// ayar penceresinin alanı da aynı tavanı soruyor: ikinci bir kopya pencereye
-/// ayrıştırıcının reddettiği bir sayı yazdırabilirdi (029).
+/// The ceiling is a rule for user input, not an invariant of `Session` — there
+/// is no other gate that clamps `SessionOptions.scrollback` and none is needed,
+/// the only value going there passes through this parser. `pub`, because the
+/// settings window's field asks for the same ceiling: a second copy could have
+/// made the window write a number the parser rejects (029).
 pub const SCROLLBACK_MAX: usize = 100_000;
 
-/// `[appearance] theme`'in ayrılmış değeri: temayı sistemin açık/koyu
-/// görünümü seçer ([`Settings::theme_for`]).
+/// The reserved value of `[appearance] theme`: the system's light/dark
+/// appearance picks the theme ([`Settings::theme_for`]).
 ///
-/// Bir tema adı **değil** — `themes/system.toml` bu yüzden seçilemez ve
-/// `light_theme`/`dark_theme` bu değeri kabul etmez (kendi kendine dönen bir
-/// seçim olurdu).
+/// **Not** a theme name — so `themes/system.toml` can't be selected and
+/// `light_theme`/`dark_theme` don't accept this value (it would be a choice
+/// that loops back on itself).
 ///
-/// `pub`: View ▸ Theme ▸ Match System bu değeri yazıyor
-/// ([`Settings::with_theme`]); okuyan taraf [`Settings::follows_system`]'e
-/// bakar, değeri karşılaştırmaz.
+/// `pub`: View ▸ Theme ▸ Match System writes this value
+/// ([`Settings::with_theme`]); the reading side looks at
+/// [`Settings::follows_system`], it doesn't compare the value.
 pub const SYSTEM_THEME: &str = "system";
 
-/// `[font]`: hücre ölçüsünü ve glyph'leri belirleyen iki değer.
+/// `[font]`: the two values that determine the cell size and the glyphs.
 ///
-/// Ayrı bir tip, çünkü renderer onu **bütün olarak** tutuyor ve açılış
-/// değerini buradan alıyor: varsayılan puntonun tek sahibi bu tipin
-/// `Default`'u. Renderer'ın kendi sabiti olsaydı süreli koşunun (ayar hiç
-/// okunmuyor) fontu ile dosyasız kullanıcınınki iki ayrı sayıya bağlanırdı.
+/// A separate type, because the renderer holds it **as a whole** and takes its
+/// startup value from here: the default point size's only owner is this type's
+/// `Default`. Had it been the renderer's own constant, a timed run's font (the
+/// settings are never read) and a file-less user's would be tied to two separate
+/// numbers.
 ///
-/// `Eq` yok: punto `f64`. Ayrıştırıcı yalnız sonlu ve pozitif değer
-/// bırakıyor, yani karşılaştırmaya NaN girmiyor.
+/// No `Eq`: the point size is `f64`. The parser leaves only finite and positive
+/// values, so NaN doesn't enter the comparison.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontOptions {
-    /// Aile adı; `None` → zincir (SF Mono, yoksa Menlo). Makinede olup
-    /// olmadığı `bt-atlas`'ın sorusu — burada yalnız metin.
+    /// Family name; `None` → the chain (SF Mono, else Menlo). Whether it exists
+    /// on the machine is `bt-atlas`'s question — only text here.
     pub family: Option<String>,
-    /// Mantıksal punto. Ölçekle çarpılmış hâlinin kırpması `bt-atlas`'ta ve
-    /// **sessiz**; buradaki kural yalnız "sonlu ve sıfırdan büyük".
+    /// Logical point size. Clamping its scale-multiplied form is in `bt-atlas`
+    /// and is **silent**; the rule here is only "finite and greater than zero".
     pub size: f64,
-    /// Satır yüksekliği çarpanı: hücre, fontun kendi
-    /// `ascent + descent + leading`'inin bu katı olur ve fazlalık glyph'in
-    /// **altına ve üstüne eşit** dağılır (taban çizgisi de o kadar iniyor).
+    /// Line-height multiplier: the cell becomes this multiple of the font's own
+    /// `ascent + descent + leading`, and the excess is distributed **equally
+    /// below and above** the glyph (the baseline drops by that much too).
     ///
-    /// Taban `1.0` ve **altına inilmiyor**: fontun istediğinden kısa bir hücre
-    /// `g j p q y` altındaki kapsamayı kırpardı ve bunun kendi bekçisi var
-    /// (`bt-atlas`'ta `descender_fits_in_the_cell`). Ayarın bir bekçiyi
-    /// delmesi, ayarın kendisinden önemli.
+    /// The floor is `1.0` and it **isn't gone below**: a cell shorter than the
+    /// font wants would clip the coverage under `g j p q y` and that has its own
+    /// guard (`descender_fits_in_the_cell` in `bt-atlas`). A setting punching
+    /// through a guard matters more than the setting itself.
     pub line_height: f64,
 }
 
 impl Default for FontOptions {
-    /// 13 punto 006'ya kadar `bt-gpu`'nun `POINT_SIZE` sabitiydi: seçilmiş
-    /// bir varsayılan, ölçülmüş bir sayı değil.
+    /// 13 points was `bt-gpu`'s `POINT_SIZE` constant until 006: a chosen
+    /// default, not a measured number.
     fn default() -> Self {
         Self {
             family: None,
@@ -96,83 +99,85 @@ impl Default for FontOptions {
     }
 }
 
-/// `[motion] cursor_motion`: imlecin hücreler arasında nasıl gittiği.
+/// `[motion] cursor_motion`: how the cursor travels between cells.
 ///
-/// Ayar modelinde yaşıyor ([`FontOptions`] ve `Osc52` emsali) ama tüketicisi
-/// `bt-gpu`: `bt-shell` çözülmüş değeri renderer'ın ritmine veriyor. Buradaki
-/// tek bilgi **hangi stil**; sürelerin ve yay katsayılarının sahibi
-/// `bt_gpu::motion` — sayıların ayar modelinde durması onları iki yerden
-/// değiştirilebilir kılardı.
+/// It lives in the settings model (the precedent of [`FontOptions`] and `Osc52`)
+/// but its consumer is `bt-gpu`: `bt-shell` hands the resolved value to the
+/// renderer's rhythm. The only information here is **which style**; the owner of
+/// the durations and spring coefficients is `bt_gpu::motion` — keeping the
+/// numbers in the settings model would make them changeable from two places.
 ///
-/// `Default` **`Spring`** (008 Karar 6): set'in ürün gerekçesi "Metalterm'i
-/// ekranda tanıtan üç şeyden biri" ve varsayılanı `Snap` yapmak özelliği
-/// kapalı sevk etmek olurdu. Varsayılanın tek sahibi burası olduğu için
-/// hermetik süreli koşu da (ayar dosyası okumuyor) bu değeri alıyor —
-/// `make duman`'ın `hareket > 0` gerekliliği tam buna yaslanıyor.
+/// `Default` is **`Spring`** (008 Karar 6): the set's product rationale is "one
+/// of the three things that introduce Metalterm on screen" and making the
+/// default `Snap` would have meant shipping the feature off. Because the default
+/// has a single owner here, the hermetic timed run (it doesn't read a settings
+/// file) gets this value too — `make smoke`'s `motion > 0` requirement leans
+/// exactly on this.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorMotion {
-    /// Anında: imleç hedef hücrede doğar, animasyon hiç başlamaz.
+    /// Instant: the cursor is born in the target cell, the animation never
+    /// starts.
     Snap,
-    /// Sabit süre, taşma yok — mesafeden bağımsız.
+    /// Fixed duration, no overshoot — independent of distance.
     Ease,
-    /// Kritik sönümlü yay; süre mesafeyle büyür.
+    /// Critically damped spring; the duration grows with distance.
     #[default]
     Spring,
 }
 
 impl CursorMotion {
-    /// Ayar dosyasındaki yazılışların **tek listesi**
-    /// ([`UnfocusedCaret::NAMES`]'in gerekçesi).
+    /// The **single list** of spellings in the settings file (the rationale of
+    /// [`UnfocusedCaret::NAMES`]).
     pub const NAMES: &'static [(&'static str, Self)] = &[
         ("snap", Self::Snap),
         ("ease", Self::Ease),
         ("spring", Self::Spring),
     ];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 }
 
-/// `[terminal] cursor_blink`: imleç yanıp söner mi.
+/// `[terminal] cursor_blink`: whether the cursor blinks.
 ///
-/// **Üç değerli, çünkü iki soru var:** uygulamanın isteği dinlensin mi
-/// ([`Self::Auto`]) yoksa kullanıcının dediği her şeyi ezsin mi
-/// ([`Self::On`]/[`Self::Off`]). İki değerli olsaydı `false` "uygulama da
-/// söndüremesin" mi yoksa "varsayılan kapalı" mı demek olduğu belirsiz kalırdı
-/// — ve vi modunda `\e[5 q` gönderen bir zsh kurulumu, kullanıcı kapalı
-/// yazmışken imleci yakardı.
+/// **Three-valued, because there are two questions:** should the application's
+/// request be heeded ([`Self::Auto`]) or should what the user said override
+/// everything ([`Self::On`]/[`Self::Off`]). Had it been two-valued, whether
+/// `false` means "the application can't turn it off either" or "default off"
+/// would have stayed ambiguous — and a zsh setup that sends `\e[5 q` in vi mode
+/// would have lit the cursor up while the user had written off.
 ///
-/// **Varsayılan [`Self::Off`]** ve bu bir ürün kararı: yanıp sönen imleç
-/// pencereyi **kalıcı olarak boşta-değil** yapıyor (saniyede iki kare) ve bu
-/// depo on üç set boyunca "boşta sıfır kare"yi savundu. Bedeli kullanıcının
-/// **seçtiği** bir şey olmalı, sessizce gelen bir varsayılan değil. Hermetik
-/// süreli koşu da (ayar dosyası okumuyor) bu değeri alıyor, yani `make
-/// duman`'ın sessizlik kapısı yapısal olarak bağışık.
+/// **The default is [`Self::Off`]** and that is a product decision: a blinking
+/// cursor makes the window **permanently non-idle** (two frames per second) and
+/// this repo defended "zero frames when idle" across thirteen sets. Its cost
+/// should be something the user **chose**, not a default that arrives silently.
+/// The hermetic timed run (it doesn't read a settings file) gets this value too,
+/// so `make smoke`'s quiet gate is structurally immune.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorBlink {
-    /// Uygulamanın dediği: DECSCUSR'ın tek sayıları ve DECSET 12 açar.
+    /// What the application says: DECSCUSR's odd numbers and DECSET 12 turn it on.
     Auto,
-    /// Her zaman söner; uygulamanın `\e[2 q`'su bile durduramaz.
+    /// Always blinks; even the application's `\e[2 q` can't stop it.
     On,
-    /// Hiç sönmez; uygulamanın `\e[5 q`'su bile başlatamaz.
+    /// Never blinks; even the application's `\e[5 q` can't start it.
     #[default]
     Off,
 }
 
 impl CursorBlink {
-    /// Ayar dosyasındaki yazılışların tek listesi.
+    /// The single list of spellings in the settings file.
     pub const NAMES: &'static [(&'static str, Self)] =
         &[("auto", Self::Auto), ("on", Self::On), ("off", Self::Off)];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 
-    /// Uygulamanın söylediğiyle kullanıcının dediğini birleştirir — **tek
-    /// yer**, `Session::frame` onu buradan soruyor.
+    /// Combines what the application says with what the user said — the **single
+    /// place**, `Session::frame` asks it from here.
     pub(crate) fn resolve(self, requested: bool) -> bool {
         match self {
             Self::Auto => requested,
@@ -182,188 +187,194 @@ impl CursorBlink {
     }
 }
 
-/// `[terminal] cursor`: imlecin **şekli** — DECSCUSR'ın üç biçimi.
+/// `[terminal] cursor`: the cursor's **shape** — DECSCUSR's three forms.
 ///
-/// Bölüm `[motion]` **değil**: şekil hareket değil, terminalin durum
-/// makinesinin bir parçası. `[terminal]`'da duruyor ve aynı bölümde değer
-/// [`TerminalOptions`] ile `Session`'a iniyor, orada alacritty'nin
-/// `default_cursor_style`'ı oluyor.
+/// The section is **not** `[motion]`: the shape isn't motion, it's a part of the
+/// terminal's state machine. It sits in `[terminal]` and in the same section the
+/// value lands in `Session` with [`TerminalOptions`], where it becomes
+/// alacritty's `default_cursor_style`.
 ///
-/// **O ayna betimleyici, buyurucu değil** (016): `[clipboard] osc52` de
-/// `TerminalOptions`'a giriyor, `[terminal] cursor_radius` ise girmiyor.
-/// Bölüm kullanıcının **neyi ayarladığını** adlandırıyor, hangi struct'ın
-/// taşıdığını değil. Referans anahtarı kendi
-/// `[typography]`'sinde tutuyor (`docs/ARASTIRMA.md` → İmleç); adını aldık,
-/// yerini değil.
+/// **That mirror is descriptive, not prescriptive** (016): `[clipboard] osc52`
+/// enters `TerminalOptions` too, while `[terminal] cursor_radius` doesn't. The
+/// section names **what the user is setting**, not which struct carries it. The
+/// reference keeps the key in its own `[typography]` (`docs/ARASTIRMA.md` →
+/// İmleç); we took the name, not the place.
 ///
-/// **Bu ayar yalnız varsayılanı söyler.** Uygulama DECSCUSR (`\e[5 q`) ya da
-/// OSC 50 ile şekli değiştirebilir ve o sözü dinleniyor: vim insert modda
-/// çubuk isterse çubuk olur. Kullanıcının burada yazdığı şey, kimse bir şey
-/// istemediğindeki hâl.
+/// **This setting only says the default.** An application can change the shape
+/// with DECSCUSR (`\e[5 q`) or OSC 50 and that word is heeded: if vim wants a bar
+/// in insert mode it becomes a bar. What the user writes here is the state when
+/// nobody asked for anything.
 ///
-/// `Hidden` ve `HollowBlock` **temsil edilmiyor**: ilki bir şekil değil
-/// görünürlük (`\e[?25l`) ve `Cursor::visible` onu zaten taşıyor; ikincisi
-/// odak kaybının hâli ve odak bugün sınırdan geçmiyor
+/// `Hidden` and `HollowBlock` are **not represented**: the first isn't a shape
+/// but visibility (`\e[?25l`) and `Cursor::visible` already carries it; the
+/// second is the state of lost focus and focus doesn't cross the boundary today
 /// (`.tasks/014-imlec-stilleri/plan.md` → Kapsam Dışı).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CaretShape {
-    /// Hücreyi dolduran blok — alacritty'nin de varsayılanı.
+    /// A block filling the cell — alacritty's default too.
     #[default]
     Block,
-    /// Hücrenin altında ince bir çizgi.
+    /// A thin line under the cell.
     Underline,
-    /// Hücrenin solunda ince bir dikey çubuk.
+    /// A thin vertical bar at the cell's left.
     Beam,
 }
 
-/// İmlecin **köşe yarıçapı** varsayılanı, hücre yüksekliğinin oranı.
+/// The cursor's **corner radius** default, a ratio of the cell height.
 ///
-/// **Varsayılanların tek sahibi burası** ve bu bir tesisat kararı: `bt-gpu`
-/// aynı sabiti **import ediyor** (`Frame::default()` ve piksel bekçileri).
-/// İki literal olsaydı bekçiler kendi tutarlılığını sınar, sevk edilen imleç
-/// başka ölçüde olsa da yeşil geçerdi — sessiz kırılmanın tarifi
-/// (`/plan-review`, 016). Emsal [`FontOptions`]'ın doc'u: *"renderer'ın kendi
-/// sabiti olsaydı süreli koşunun fontu ile dosyasız kullanıcınınki iki ayrı
-/// sayıya bağlanırdı"*.
+/// **This is the defaults' only owner** and that is a plumbing decision:
+/// `bt-gpu` **imports** the same constant (`Frame::default()` and the pixel
+/// guards). Had there been two literals the guards would test their own
+/// consistency and pass green even if the shipped cursor had a different size —
+/// the recipe for a silent breakage (`/plan-review`, 016). The precedent is
+/// [`FontOptions`]'s doc: *"had it been the renderer's own constant, a timed
+/// run's font and a file-less user's would be tied to two separate numbers"*.
 ///
-/// Değer **seçilmiş, ölçülmemiş** ve 015'te iki tur gözle indi (0.18 → 0.10):
-/// blok caret hücre genişliğinden kısa ve daha büyük bir yarıçap onu
-/// dikdörtgen olmaktan çıkarıp hapa çeviriyordu.
+/// The value is **chosen, not measured** and went down in two rounds of eyeballing
+/// in 015 (0.18 → 0.10): the block caret is shorter than the cell width and a
+/// larger radius turned it from a rectangle into a pill.
 pub const CURSOR_RADIUS: f64 = 0.10;
 
-/// İmlecin **gölge gücü** varsayılanı; `1.0` = tasarımın kendi ölçüsü.
+/// The cursor's **glow strength** default; `1.0` = the design's own measure.
 ///
-/// **Tek sayı, iki değil** (`/plan-review`, 016): hale payı ile alfası 015'te
-/// aynı iki göz turunda **aynı yönde** indi (pay 1.0 → 0.5 → 0.4, alfa
-/// 0.35 → 0.14 → 0.10), yani kullanıcı iki eksende değil tek histe gezindi.
-/// Ayrı anahtarlar ayrıca anlamsız hâl üretirdi: `pay = 2, alfa = 0` hiçbir
-/// şeyin halesini boyayan bir dörtlü demek.
+/// **One number, not two** (`/plan-review`, 016): the halo margin and its alpha
+/// went down in the same two eyeballing rounds in 015 **in the same direction**
+/// (margin 1.0 → 0.5 → 0.4, alpha 0.35 → 0.14 → 0.10), i.e. the user moved along
+/// a single feel, not two axes. Separate keys would also produce meaningless
+/// states: `margin = 2, alpha = 0` means a quad that paints the halo of nothing.
 ///
-/// `bt-gpu`'daki iki sabit **taban olarak yerinde kalıyor**; bu yalnız onların
-/// çarpanı, yani "ikinci bir tasarım sabiti yok" kuralı korunuyor.
+/// The two constants in `bt-gpu` **stay in place as the base**; this is only
+/// their multiplier, so the "no second design constant" rule is kept.
 pub const CURSOR_GLOW: f64 = 1.0;
 
-/// Blink'in **yarım periyodu** varsayılanı, saniye.
+/// The blink's **half period** default, in seconds.
 ///
-/// **Varsayılanın tek sahibi burası** ([`CURSOR_RADIUS`] ile aynı gerekçe):
-/// `bt-gpu` bunu import ediyor. Değer **seçilmiş, ölçülmemiş** — hedefi
-/// "yanıp söndüğü fark edilsin ama göz yormasın" ve bedeli doğrusal: 250 ms
-/// saniyede dört kare eder.
+/// **The default's only owner is here** (the same reasoning as
+/// [`CURSOR_RADIUS`]): `bt-gpu` imports this. The value is **chosen, not
+/// measured** — its goal is "noticeable that it blinks but not tiring to the
+/// eye" and its cost is linear: 250 ms makes four frames per second.
 pub const CURSOR_BLINK_INTERVAL: f64 = 0.5;
 
-/// Blink periyodunun kabul aralığı, saniye — **seçilmiş, ölçülmemiş**.
+/// The accepted range of the blink period, in seconds — **chosen, not measured**.
 ///
-/// Alt uç tavanı durduruyor: 50 ms'lik bir yarım periyot saniyede 20 kare
-/// eder ve altına inmek terminali stroboskopa çevirirdi. **Kapı bunu
-/// göremiyor** ve bu yazılı olsun: süreli koşu ayar dosyasını hiç okumuyor,
-/// blink varsayılanı da kapalı, yani bozuk bir periyot `make duman`'ın
-/// `sessiz=` katını **hiçbir koşulda** kızartmaz (014 `teslim.md`: "koruma
-/// bir jeton değil varsayılanın kendisi"). Tek koruma bu aralık.
+/// The lower end stops the ceiling: a 50 ms half period makes 20 frames per
+/// second and going below it would turn the terminal into a strobe. **The gate
+/// can't see this** and let that be written down: the timed run never reads the
+/// settings file and the blink default is off too, so a broken period will
+/// **under no condition** turn `make smoke`'s `quiet=` tier red (014
+/// `teslim.md`: "the protection is not a token but the default itself"). The
+/// only protection is this range.
 pub const CURSOR_BLINK_RANGE: std::ops::RangeInclusive<f64> = 0.05..=5.0;
 
-/// Yarıçabın kabul aralığı; yarım = hücrenin yarısı, ötesi anlamsız.
+/// The accepted range of the radius; half = half the cell, beyond is
+/// meaningless.
 ///
-/// Aralıklar `pub`: ayar penceresinin kontrolleri de bu uçlarla kuruluyor, yani
-/// ayrıştırıcının kabul ettiği ile pencerenin sunduğu tek yerden (029).
+/// The ranges are `pub`: the settings window's controls are built with these
+/// ends too, so what the parser accepts and what the window offers come from a
+/// single place (029).
 pub const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
 
-/// Gölge çarpanının kabul aralığı — **seçilmiş, ölçülmemiş**.
+/// The accepted range of the glow multiplier — **chosen, not measured**.
 ///
-/// Çarpan **iki ekseni birden** ölçekliyor ve tavanın gerekçesi ikisini de
-/// saymalı (`/code-review`): 3.0'da alfa 0.30 (015'te reddedilen 0.35'in
-/// altında) ama yayılma `1.2 × gutter_px`, yani `CARET_GLOW_RATIO`'nun
-/// doc'unda "gölge değil neon" diye kaydedilen "sol payın tamamı"nın **üstü**.
+/// The multiplier scales **both axes at once** and the ceiling's rationale must
+/// count both (`/code-review`): at 3.0 the alpha is 0.30 (below the 0.35
+/// rejected in 015) but the spread is `1.2 × gutter_px`, i.e. **above** the
+/// "the whole left margin" that `CARET_GLOW_RATIO`'s doc records as "neon, not a
+/// glow".
 ///
-/// Tavan yine de orada, çünkü **varsayılanın zevki ile tavanın işi ayrı**:
-/// reddedilen şey o görüntünün *varsayılan* olmasıydı. Tavan kullanıcının
-/// açıkça seçtiği uca yer bırakıyor ve tek görevi sınırsızlığı kesmek.
+/// The ceiling is still there, because **the default's taste and the ceiling's
+/// job are separate**: what was rejected was that image being the *default*. The
+/// ceiling leaves room for the end the user picks explicitly and its only job is
+/// to cut off unboundedness.
 pub const CURSOR_GLOW_RANGE: std::ops::RangeInclusive<f64> = 0.0..=3.0;
 
-/// `[terminal] cursor_unfocused`: odakta olmayan pencerede imleç ne olsun.
+/// `[terminal] cursor_unfocused`: what the cursor is in an unfocused window.
 ///
-/// 015 odak kaybında imlecin içini boşaltıyor; bu anahtar onu kapatıyor.
-/// **Blink'e dokunmuyor** — odakta blink'in durması ayrı bir sinyal ve ayrı
-/// bir karar (015 R7.4).
+/// 015 hollows out the cursor when focus is lost; this key turns that off. **It
+/// doesn't touch blink** — blink stopping when unfocused is a separate signal
+/// and a separate decision (015 R7.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UnfocusedCaret {
-    /// İçi boşalır: çerçeve kalır, dolgu gider. Bugünkü davranış.
+    /// Hollows out: the frame stays, the fill goes. Today's behavior.
     #[default]
     Hollow,
-    /// Hiç değişmez; odaksızlığın tek işareti blink'in durması.
+    /// Never changes; the only sign of being unfocused is blink stopping.
     Solid,
 }
 
 impl UnfocusedCaret {
-    /// Ayar dosyasındaki yazılışların **tek listesi**: ayrıştırıcı da
-    /// [`Self::name`] de ayar penceresinin seçenekleri de buradan okuyor.
+    /// The **single list** of spellings in the settings file: the parser,
+    /// [`Self::name`] and the settings window's options all read from here.
     ///
-    /// İki yerde yazılsaydı bir varyantın yazılışını değiştirmek, kullanıcıya
-    /// **ayrıştırıcının reddettiği** bir değer öneren bir tanı üretirdi. Sıra
-    /// tanı metninin sırası (`"hollow" or "solid"`).
+    /// Had it been written in two places, changing one variant's spelling would
+    /// produce a diagnostic suggesting the user a value **the parser rejects**.
+    /// The order is the diagnostic text's order (`"hollow" or "solid"`).
     pub const NAMES: &'static [(&'static str, Self)] =
         &[("hollow", Self::Hollow), ("solid", Self::Solid)];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 }
 
-/// `[terminal] confirm_close`: pencere, sekme ya da uygulama kapanırken ne
-/// zaman sorulsun (`.tasks/028-kapatma-onayi/discussion.md` → Karar 6).
+/// `[terminal] confirm_close`: when to ask as a window, tab or the application
+/// closes (`.tasks/028-kapatma-onayi/discussion.md` → Karar 6).
 ///
-/// "Koşan" kabuğun **dışında** ön planda bir program demek (vim, `ssh`,
-/// Claude Code); arka plan işi ve kabuğun kendi döngüsü sayılmıyor. Tespit
-/// `bt-shell`'de, süreç tablosundan — burada yalnız kullanıcının seçimi.
+/// "Running" means a program in the foreground **outside** the shell (vim,
+/// `ssh`, Claude Code); a background job and the shell's own loop aren't
+/// counted. Detection is in `bt-shell`, from the process table — only the user's
+/// choice here.
 ///
-/// `TerminalOptions`'a ve [`Changes`]'e **girmiyor** (emsal [`CaretStyle`]):
-/// değer kapanış anında güncel ayardan okunuyor, yani kayıt anında geçerli
-/// olması bedava ve oturumlara giden bir yol gerekmiyor.
+/// It **doesn't enter** `TerminalOptions` and [`Changes`] (precedent
+/// [`CaretStyle`]): the value is read from the current settings at close time,
+/// so being in effect at save time is free and no path to the sessions is needed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConfirmClose {
-    /// Hiç sorma.
+    /// Never ask.
     Never,
-    /// Ön planda kabuğun dışında bir program koşuyorsa sor.
+    /// Ask if a program outside the shell is running in the foreground.
     #[default]
     Running,
-    /// Kabuk boştayken de sor.
+    /// Ask even when the shell is idle.
     Always,
 }
 
 impl ConfirmClose {
-    /// Ayar dosyasındaki yazılışların tek listesi ([`UnfocusedCaret::NAMES`]
-    /// ile aynı gerekçe).
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
     pub const NAMES: &'static [(&'static str, Self)] = &[
         ("never", Self::Never),
         ("running", Self::Running),
         ("always", Self::Always),
     ];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 }
 
-/// `[terminal] cursor_radius` ve `cursor_glow`: imlecin **çizim** sayıları.
+/// `[terminal] cursor_radius` and `cursor_glow`: the cursor's **drawing**
+/// numbers.
 ///
-/// `TerminalOptions`'a **girmiyor** ve `Session` görmüyor: ikisi de terminalin
-/// durumu değil, saf boyama. Yol `cursor_motion` emsali —
-/// `Settings::changes` farkı buluyor, `bt-shell` `bt_gpu::DisplayLink`'e
-/// iletiyor, kayıt anında uygulanıyor.
+/// They **don't enter** `TerminalOptions` and `Session` doesn't see them: both
+/// are pure painting, not the terminal's state. The path is the precedent of
+/// `cursor_motion` — `Settings::changes` finds the difference, `bt-shell` passes
+/// it to `bt_gpu::DisplayLink`, it is applied at save time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaretStyle {
-    /// Köşe yarıçapı, hücre **yüksekliğinin** oranı.
+    /// Corner radius, a ratio of the cell **height**.
     ///
-    /// `f64`, `f32` değil ve sebebi **tanı metni**: `ranged_float` geri
-    /// düşülen değeri mesaja basıyor ve `f64::from(0.10f32)`
-    /// `0.10000000149011612` ediyor — kullanıcı yazdığı sayıyı değil float
-    /// gürültüsünü görürdü (`/code-review`). Daraltma `bt-gpu` sınırında,
-    /// kare başına değil bir kez.
+    /// `f64`, not `f32`, and the reason is the **diagnostic text**: `ranged_float`
+    /// prints the fallen-back value into the message and `f64::from(0.10f32)`
+    /// comes to `0.10000000149011612` — the user would see float noise rather
+    /// than the number they wrote (`/code-review`). The narrowing is at the
+    /// `bt-gpu` boundary, once rather than per frame.
     pub radius_ratio: f64,
-    /// Gölgenin gücü; `0.0` kapalı, `1.0` tasarımın kendi ölçüsü.
+    /// The glow's strength; `0.0` is off, `1.0` is the design's own measure.
     pub glow: f64,
-    /// Odakta olmayan pencerede imlecin hâli.
+    /// The cursor's state in an unfocused window.
     pub unfocused: UnfocusedCaret,
 }
 
@@ -378,129 +389,135 @@ impl Default for CaretStyle {
 }
 
 impl CaretShape {
-    /// Ayar dosyasındaki yazılışların tek listesi.
+    /// The single list of spellings in the settings file.
     pub const NAMES: &'static [(&'static str, Self)] = &[
         ("block", Self::Block),
         ("underline", Self::Underline),
         ("beam", Self::Beam),
     ];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 }
 
-/// `[motion] reduce_motion`: animasyonların kısılıp kısılmayacağı.
+/// `[motion] reduce_motion`: whether animations are reduced.
 ///
-/// **`bool` değil** ve sebebi bu dosyanın kendi kuralı: en olası seçim
-/// "sistemi izle" ve `bool`'da onu ifade etmenin tek yolu anahtarı **silmek**
-/// olurdu — burada anahtar silinmiyor, bilinmeyen anahtar bile korunuyor.
-/// Üç değerli dizgi üçünü de yazılı tutuyor.
+/// **Not a `bool`** and the reason is this file's own rule: the most likely
+/// choice is "follow the system" and in a `bool` the only way to express it
+/// would be to **delete** the key — keys aren't deleted here, even an unknown key
+/// is preserved. A three-valued string keeps all three written down.
 ///
-/// Sistemin cevabını okumak `bt-shell`'in işi (`NSWorkspace`); buradaki tek
-/// bilgi kullanıcının **hangisini** istediği. Üçünün tek `bool`'a indiği yer
-/// de orası, çünkü `bt-gpu` AppKit görmüyor (`CLAUDE.md` → katman tablosu).
+/// Reading the system's answer is `bt-shell`'s job (`NSWorkspace`); the only
+/// information here is **which one** the user wants. The place where the three
+/// collapse to a single `bool` is also there, because `bt-gpu` doesn't see
+/// AppKit (`CLAUDE.md` → the layer table).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReduceMotion {
-    /// macOS'un Hareketi Azalt ayarını izle.
+    /// Follow macOS's Reduce Motion setting.
     #[default]
     System,
-    /// Sistem ne derse desin kıs.
+    /// Reduce whatever the system says.
     On,
-    /// Sistem ne derse desin kısma.
+    /// Don't reduce whatever the system says.
     Off,
 }
 
 impl ReduceMotion {
-    /// Ayar dosyasındaki yazılışların tek listesi.
+    /// The single list of spellings in the settings file.
     pub const NAMES: &'static [(&'static str, Self)] = &[
         ("system", Self::System),
         ("on", Self::On),
         ("off", Self::Off),
     ];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 }
 
-/// `[motion] smooth_scroll`: geçmişte kaydırmak pürüzsüz mü, satır adımıyla
-/// mı.
+/// `[motion] smooth_scroll`: whether scrolling in scrollback is smooth or by
+/// line steps.
 ///
-/// **`bool` değil**, dosyanın dizge-enum geleneği ([`ReduceMotion`],
-/// `Osc52`): değer referansın anahtarının (`scroll.smooth`) anlamı, türü
-/// bizim.
+/// **Not a `bool`**, the file's string-enum convention ([`ReduceMotion`],
+/// `Osc52`): the value is the meaning of the reference's key (`scroll.smooth`),
+/// the type is ours.
 ///
-/// Tüketicisi `bt-shell` ([`CursorMotion`] emsali) ve orada Hareketi Azalt
-/// ile `cursor_motion = "snap"`'le **tek `bool`'a** iniyor: üçünden biri
-/// hareketi kapatıyorsa tekerlek bugünkü satır adımıyla gidiyor
-/// (`.tasks/027-yumusak-kaydirma/discussion.md` → Karar 5).
+/// Its consumer is `bt-shell` (the precedent of [`CursorMotion`]) and there it
+/// collapses **to a single `bool`** with Reduce Motion and `cursor_motion =
+/// "snap"`: if one of the three turns motion off, the wheel goes by today's line
+/// step (`.tasks/027-yumusak-kaydirma/discussion.md` → Karar 5).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SmoothScroll {
-    /// Trackpad parmağı izler, çentik süzülür, jest sonunda satıra oturur.
+    /// The trackpad follows the finger, the notch glides, at the gesture's end it
+    /// settles on a line.
     #[default]
     On,
-    /// Satır adımı — `"on"`'dan önceki davranışın ta kendisi.
+    /// Line step — the very behavior before `"on"`.
     Off,
 }
 
 impl SmoothScroll {
-    /// Ayar dosyasındaki yazılışların tek listesi.
+    /// The single list of spellings in the settings file.
     pub const NAMES: &'static [(&'static str, Self)] = &[("on", Self::On), ("off", Self::Off)];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 }
 
-/// `[motion] keypress`: dock'ta yazılan glyph'in nasıl geldiği (030).
+/// `[motion] keypress`: how a glyph typed in the dock arrives (030).
 ///
-/// **Yalnız çizilebilen adlar** ([`Self::NAMES`]) ve bugün referansın
-/// listesinin tamamı: adlar çizildikçe girdi — popup'ta ya da dosyada
-/// çizilmeyen bir ad kabul edilseydi seçmek hiçbir şey yapmazdı
-/// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 7).
-/// Görünüşlerin tanımı Karar 6'nın tablosu; genlikler `bt-gpu`'nun
-/// `shaders/glyph_fx.metal`'inde.
+/// **Only drawable names** ([`Self::NAMES`]) and today the reference list in
+/// full: names go in as they become drawable — had a name that isn't drawn been
+/// accepted in the popup or the file, selecting it would do nothing
+/// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 7). The
+/// definition of the looks is Karar 6's table; the amplitudes are in `bt-gpu`'s
+/// `shaders/glyph_fx.metal`.
 ///
-/// Tüketicisi `bt-gpu` ([`CursorMotion`] emsali) ve değer **ham** gidiyor:
-/// `cursor_motion = "snap"` ile Hareketi Azalt'ın indirgemesi orada, imlecin
-/// kipiyle aynı yerde. Sürelerin ve eğrinin sahibi de orası.
+/// Its consumer is `bt-gpu` (the precedent of [`CursorMotion`]) and the value
+/// goes **raw**: the reduction by `cursor_motion = "snap"` and Reduce Motion is
+/// there, in the same place as the cursor's mode. The owner of the durations and
+/// the curve is there too.
 ///
-/// Varsayılan **[`Self::Fade`]**: kullanıcı animasyonu açıkça istedi ve kutudan
-/// çıkınca görmeli; listenin en az yer değiştiren efekti — glyph yerinden
-/// oynamıyor, yalnız beliriyor.
+/// The default is **[`Self::Fade`]**: the user explicitly asked for animation
+/// and should see it out of the box; the effect that displaces least in the list
+/// — the glyph doesn't move from its place, it only appears.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Keypress {
-    /// Glyph anında belirir.
+    /// The glyph appears instantly.
     Off,
-    /// Glyph yerinde saydamdan tam renge belirir.
+    /// The glyph fades in place from transparent to full color.
     #[default]
     Fade,
-    /// Glyph hücrenin biraz altından yukarı kayarak yerine oturur, kayarken
-    /// belirir.
+    /// The glyph slides up from slightly below the cell and settles into place,
+    /// appearing as it slides.
     Rise,
-    /// Glyph küçük doğar, bir an yerinden biraz büyür ve yerine oturur.
+    /// The glyph is born small, for a moment grows a bit past its size and
+    /// settles into place.
     Pop,
-    /// Glyph sol kenarından sağa doğru uzayarak çıkar.
+    /// The glyph emerges extending from its left edge to the right.
     Extrude,
-    /// Glyph temanın `cursor` renginde doğar ve kendi rengine soğur.
+    /// The glyph is born in the theme's `cursor` color and cools to its own color.
     Heat,
-    /// Glyph yerinde belirir, üstünden büyüyerek sönen soluk bir kopyası
-    /// dağılır.
+    /// The glyph appears in place and a faint copy of it, growing and fading,
+    /// disperses over it.
     Echo,
-    /// Glyph hücrenin üstünden düşer, hafifçe sekip yerine oturur.
+    /// The glyph drops from above the cell, bounces slightly and settles into
+    /// place.
     Drop,
-    /// Önce çizgilerin çekirdeği görünür, mürekkep kenarlara yayılır.
+    /// First the strokes' core is visible, then the ink spreads to the edges.
     Ink,
-    /// Glyph yatayda sıkışmış ve dikeyde uzamış doğar, kendi oranına açılır.
+    /// The glyph is born squeezed horizontally and stretched vertically, and
+    /// opens to its own proportions.
     Squeeze,
 }
 
 impl Keypress {
-    /// Ayar dosyasındaki yazılışların tek listesi.
+    /// The single list of spellings in the settings file.
     pub const NAMES: &'static [(&'static str, Self)] = &[
         ("off", Self::Off),
         ("fade", Self::Fade),
@@ -514,43 +531,44 @@ impl Keypress {
         ("squeeze", Self::Squeeze),
     ];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 }
 
-/// `[motion] erase`: dock'ta silinen glyph'in nasıl gittiği (030).
+/// `[motion] erase`: how a glyph erased in the dock goes away (030).
 ///
-/// [`Keypress`]'in kardeşi, aynı kurallarla: yalnız çizilebilen adlar, ham
-/// değer `bt-gpu`'ya. Varsayılan **[`Self::Recede`]** — gidişlerin en az yer
-/// değiştireni, glyph yerinde küçülüp söner.
+/// [`Keypress`]'s sibling, with the same rules: only drawable names, the raw
+/// value to `bt-gpu`. The default is **[`Self::Recede`]** — the departure that
+/// displaces least, the glyph shrinks in place and fades.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Erase {
-    /// Glyph anında kaybolur.
+    /// The glyph disappears instantly.
     Off,
-    /// Glyph'in üstünde dairesel bir diyafram merkezine doğru kapanır.
+    /// A circular diaphragm over the glyph closes toward the center.
     Iris,
-    /// Glyph aşağı ve caret'e doğru çekilerek söner.
+    /// The glyph is pulled down and toward the caret and fades.
     Undertow,
-    /// Glyph büyüyerek dışa doğru bir halka gibi dağılır ve söner.
+    /// The glyph grows, disperses outward like a ring and fades.
     Echo,
-    /// Glyph'in mürekkebi dağılır: kenarlar yayılıp incelirken söner.
+    /// The glyph's ink disperses: it fades as the edges spread and thin out.
     Bleed,
-    /// Glyph yatay şeritlere ayrılır, şeritler sırayla yana kayıp çözülür.
+    /// The glyph splits into horizontal strips, the strips slide sideways in turn
+    /// and dissolve.
     Unravel,
-    /// Glyph merkezine doğru küçülerek geri çekilir ve söner.
+    /// The glyph shrinks toward its center, recedes and fades.
     #[default]
     Recede,
-    /// Glyph buharlaşır gibi yukarı süzülür, açılarak söner.
+    /// The glyph drifts upward as if evaporating, spreading out and fading.
     Sublime,
-    /// Glyph parçalara kırılır, parçalar hafif dönerek dağılıp düşer ve
-    /// söner.
+    /// The glyph breaks into pieces, the pieces rotate slightly, scatter and fall,
+    /// and fade.
     Shatter,
 }
 
 impl Erase {
-    /// Ayar dosyasındaki yazılışların tek listesi.
+    /// The single list of spellings in the settings file.
     pub const NAMES: &'static [(&'static str, Self)] = &[
         ("off", Self::Off),
         ("iris", Self::Iris),
@@ -563,104 +581,106 @@ impl Erase {
         ("shatter", Self::Shatter),
     ];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 }
 
-/// `[shell] integration`: kabuğa sarmalayıcımız kurulsun mu.
+/// `[shell] integration`: whether our wrapper is installed into the shell.
 ///
-/// Anahtarın anlamı dar ve bilerek öyle: **"sarmalayıcıyı kurma"**. İşaretleri
-/// ayrıştırmak her hâlde serbest kalıyor — başka bir aracın (ya da SSH'ın öte
-/// tarafındaki bir kurulumun) bastığı gerçek OSC 133'ü görmek zarar değil
-/// kazanç, ve kapatmanın gerekçesi de o değil.
+/// The key's meaning is narrow and deliberately so: **"don't install the
+/// wrapper"**. Parsing the marks stays free in every case — seeing a real OSC 133
+/// emitted by another tool (or an installation on the far side of SSH) is a gain,
+/// not a harm, and that isn't the reason for turning it off either.
 ///
-/// **Kayıt anında uygulanmayan tek ayar** ve bu, "ayar kayıt anında
-/// uygulanır" sözleşmesinin ilk istisnası: sarmalayıcı kabuğun **doğuşunda**
-/// kuruluyor, dosya kaydedildiğinde kabuk çoktan doğmuş oluyor. Bu yüzden
-/// [`Changes`]'e kol takılmıyor ve `docs/AYARLAR.md` anahtarın **sonraki
-/// oturumda** geçerli olduğunu kendi satırında söylüyor (009 Karar 5).
+/// **The only setting not applied at save time** and this is the first exception
+/// to the "settings apply at save time" contract: the wrapper is installed at the
+/// shell's **birth**, by the time the file is saved the shell is already born.
+/// That's why no arm is attached to [`Changes`] and `docs/AYARLAR.md` says in
+/// the key's own line that it takes effect **in the next session** (009 Karar 5).
 ///
-/// Tüketicisi `bt-shell` ([`CursorMotion`] emsali): kararı o veriyor, çünkü
-/// hangi kabuğun koştuğunu ve betiğin nerede olduğunu gören taraf o.
+/// Its consumer is `bt-shell` (the precedent of [`CursorMotion`]): it gives the
+/// decision, because it is the side that sees which shell is running and where
+/// the script is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ShellIntegration {
-    /// Tanıdığımız bir kabuksa sarmalayıcı kurulur; değilse hiçbir şey olmaz.
+    /// If it is a shell we recognize the wrapper is installed; otherwise nothing
+    /// happens.
     ///
-    /// Aynalayabilen kabukta (bugün zsh) dock da açılır ve prompt terminalin
-    /// olur.
+    /// In a shell that can mirror (zsh today) the dock opens too and the prompt
+    /// becomes the terminal's.
     #[default]
     Auto,
-    /// Sarmalayıcı kurulur ama **giriş satırı alınmaz**: komut blokları ve
-    /// işaretler çalışır, dock açılmaz, prompt kullanıcınındır.
+    /// The wrapper is installed but the **input line is not taken**: command
+    /// blocks and marks work, the dock doesn't open, the prompt is the user's.
     ///
-    /// **Uydurulmuş bir kademe değil, yapının kendisi.** Dock ZLE'nin aynasına
-    /// bağlı; bash (`--rcfile`) ve fish (`vendor_conf.d`) betikleri
-    /// doğduğunda o kabuklarda işaretler olacak ama dock olmayacak. Bu değer
-    /// yalnız zsh kullanıcısına aynı hâli **seçme** hakkı veriyor.
+    /// **Not an invented tier, the structure itself.** The dock is tied to ZLE's
+    /// mirror; when the bash (`--rcfile`) and fish (`vendor_conf.d`) scripts are
+    /// born, those shells will have marks but no dock. This value only gives the
+    /// zsh user the right to **choose** the same state.
     ///
-    /// 012 phase-10'da `[shell] prompt`'un yerine geldi: ayrı anahtar ekranda
-    /// **iki prompt** üretiyordu (kullanıcınınki ızgarada, dock'unki altta) ve
-    /// caret ikisi arasında sıçrıyordu. "Prompt kullanıcının" demek zaten
-    /// "satır ızgarada" demek.
+    /// It replaced `[shell] prompt` in 012 phase-10: a separate key produced
+    /// **two prompts** on screen (the user's in the grid, the dock's below) and
+    /// the caret jumped between the two. Saying "the prompt is the user's"
+    /// already means "the line is in the grid".
     Blocks,
-    /// Sarmalayıcı hiç kurulmaz.
+    /// The wrapper is never installed.
     Off,
 }
 
 impl ShellIntegration {
-    /// Ayar dosyasındaki yazılışların tek listesi.
+    /// The single list of spellings in the settings file.
     pub const NAMES: &'static [(&'static str, Self)] = &[
         ("auto", Self::Auto),
         ("blocks", Self::Blocks),
         ("off", Self::Off),
     ];
 
-    /// Ayar dosyasındaki yazılışı.
+    /// The spelling in the settings file.
     pub fn name(self) -> &'static str {
         name_in(Self::NAMES, self)
     }
 
-    /// Sarmalayıcı kurulacak mı — `auto` ve `blocks` için evet.
+    /// Whether the wrapper will be installed — yes for `auto` and `blocks`.
     pub fn installs_wrapper(self) -> bool {
         !matches!(self, Self::Off)
     }
 
-    /// Dock açılacak mı. Kabuğun aynalayıp aynalayamadığı **ayrı** bir soru ve
-    /// onu `bt-shell` yanıtlıyor; bu yalnız kullanıcının seçimi.
+    /// Whether the dock will open. Whether the shell can mirror is a **separate**
+    /// question and `bt-shell` answers it; this is only the user's choice.
     pub fn wants_dock(self) -> bool {
         matches!(self, Self::Auto)
     }
 }
 
-/// Bir uzak host'un işareti (037 Karar 2, 3): anlam, renk değil — rengi
-/// temanın rolünden ([`crate::Theme::mark_linear`]), yani açık/koyu geçişi
-/// işareti kendiliğinden taşıyor.
+/// A remote host's mark (037 Karar 2, 3): meaning, not color — its color comes
+/// from the theme's role ([`crate::Theme::mark_linear`]), so the light/dark
+/// switch carries the mark along by itself.
 ///
-/// `None` "işaretsiz" demek (uzak oturumun bugünkü `info`'su) ve desen
-/// listesinde eşleşmeyi **bitiriyor** ([`host_mark`]): bir globun yakaladığı
-/// tek bir host'u işaretsiz bırakmanın tek yolu o.
+/// `None` means "unmarked" (the remote session's `info` today) and **ends** the
+/// match in the pattern list ([`host_mark`]): it is the only way to leave a
+/// single host caught by a glob unmarked.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HostMark {
-    /// Temanın `error`'u.
+    /// The theme's `error`.
     Production,
-    /// Temanın `warning`'i.
+    /// The theme's `warning`.
     Staging,
-    /// Temanın `success`'i.
+    /// The theme's `success`.
     Development,
-    /// İşaretsiz: temanın `info`'su.
+    /// Unmarked: the theme's `info`.
     #[default]
     None,
-    /// Doğrudan renk, `0xRRGGBB` (`"#rrggbb"`). Temayla değişmiyor ve açık
-    /// temada okunur olacağını kimse denetlemiyor — bedeli Karar 2'de adıyla;
-    /// menü onu hiç yazmıyor.
+    /// A direct color, `0xRRGGBB` (`"#rrggbb"`). It doesn't change with the theme
+    /// and nobody checks that it will be legible on the light theme — the cost is
+    /// named in Karar 2; the menu never writes it.
     Rgb(u32),
 }
 
 impl HostMark {
-    /// Adlı işaretlerin ayar dosyasındaki yazılışları; `Rgb` bir ad değil,
-    /// `"#rrggbb"` biçimi.
+    /// The spellings of the named marks in the settings file; `Rgb` isn't a name,
+    /// it is the `"#rrggbb"` format.
     pub const NAMES: &'static [(&'static str, Self)] = &[
         ("production", Self::Production),
         ("staging", Self::Staging),
@@ -668,8 +688,8 @@ impl HostMark {
         ("none", Self::None),
     ];
 
-    /// Ayar dosyasındaki yazılışı: adlı işaretin adı ([`Self::NAMES`]),
-    /// doğrudan rengin `"#rrggbb"`'si — ayrıştırıcının okuduğunun tersi.
+    /// The spelling in the settings file: the named mark's name ([`Self::NAMES`]),
+    /// the direct color's `"#rrggbb"` — the inverse of what the parser reads.
     pub fn written(self) -> String {
         match self {
             Self::Rgb(hex) => format!("#{hex:06x}"),
@@ -681,28 +701,28 @@ impl HostMark {
     }
 }
 
-/// `[remote] hosts` dizisinin bir girdisi: desen ve işareti (037 Karar 2).
+/// One entry of the `[remote] hosts` array: a pattern and its mark (037 Karar 2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRule {
-    /// `*` (boş dahil herhangi bir dizi) ve `?` (tek karakter), harf
-    /// duyarsız; `@` taşıyorsa host'un tamamıyla, taşımıyorsa son `@`'ten
-    /// sonrasıyla eşleşiyor ([`host_mark`]).
+    /// `*` (any string, empty included) and `?` (a single character), case
+    /// insensitive; if it carries `@` it matches the whole host, if not the part
+    /// after the last `@` ([`host_mark`]).
     pub pattern: String,
     pub mark: HostMark,
 }
 
-/// Host'un işareti: `rules`'un **ilk** eşleşen girdisininki, eşleşme yoksa
-/// [`HostMark::None`] (037 Karar 2).
+/// The host's mark: that of `rules`'s **first** matching entry, or
+/// [`HostMark::None`] if none matches (037 Karar 2).
 ///
-/// Girdi uzak oturumun gösterdiği host (036: kullanıcının yazdığı gibi,
-/// şema ve port atılmış). Desende `@` yoksa girdinin son `@`'ten sonraki
-/// kısmı eşleşiyor — `deploy@prod` ile `prod` aynı makine; desende `@` varsa
-/// girdinin tamamı, yani `root@*` yazılabiliyor. Sıra dizide, çünkü TOML
-/// tablosunun anahtarları anlamca sırasız. `None` girdisi eşleşmeyi orada
-/// bitiriyor ve sonucu da `None`.
+/// The input is the host the remote session shows (036: as the user typed it,
+/// scheme and port dropped). If the pattern has no `@`, the part of the input
+/// after the last `@` is matched — `deploy@prod` and `prod` are the same machine;
+/// if the pattern has `@`, the whole input, so `root@*` can be written. The
+/// order is in the array, because a TOML table's keys are semantically
+/// unordered. A `None` entry ends the match there and the result is `None` too.
 ///
-/// Saf ve kare yolunda değil: `Session` onu yalnız uzak durumun ve listenin
-/// değiştiği iki kenarda çağırıyor.
+/// Pure and not on the frame path: `Session` calls it only at the two edges
+/// where the remote state and the list change.
 pub fn host_mark(rules: &[HostRule], host: &str) -> HostMark {
     let bare = bare_host(host);
     rules
@@ -718,18 +738,19 @@ pub fn host_mark(rules: &[HostRule], host: &str) -> HostMark {
         .map_or(HostMark::None, |rule| rule.mark)
 }
 
-/// `*` ve `?`'li desen, harf duyarsız; sınıf (`[a-z]`) ve küme (`{a,b}`)
-/// yok — onlar ayrı bir glob kütüphanesi demek (Karar 2).
+/// A pattern with `*` and `?`, case insensitive; no class (`[a-z]`) or set
+/// (`{a,b}`) — those would mean a separate glob library (Karar 2).
 ///
-/// İki taraf da **bir kez** küçük harfe iniyor ve karşılaştırma karakter
-/// dizileri üstünde: harf katlaması bir karakteri birden çoğuna açabiliyor
-/// (`İ`), yani karakter karakter katlamak `?`'in saydığını kaydırırdı.
-/// Geri izleme yalnız son `*`'a — klasik doğrusal eşleştirici.
+/// Both sides are lowered to lowercase **once** and the comparison is over
+/// character sequences: case folding can expand one character into several
+/// (`İ`), so folding character by character would shift what `?` counts.
+/// Backtracking goes only to the last `*` — the classic linear matcher.
 fn glob_matches(pattern: &str, text: &str) -> bool {
     let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
     let text: Vec<char> = text.to_lowercase().chars().collect();
     let (mut p, mut t) = (0, 0);
-    // Son `*`'ın desendeki yeri ve o an metinde nereye kadar yuttuğu.
+    // The last `*`'s position in the pattern and how far into the text it has
+    // swallowed at that moment.
     let mut star: Option<(usize, usize)> = None;
     while t < text.len() {
         match pattern.get(p) {
@@ -754,97 +775,101 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
     pattern[p..].iter().all(|&c| c == '*')
 }
 
-/// Emekli anahtarlar: dosyada durmaya devam eder, **okunmaz**, ve görülünce
-/// tanı bırakır.
+/// Retired keys: they stay in the file, are **not read**, and leave a
+/// diagnostic when seen.
 ///
-/// Deponun kuralı "bilinmeyen anahtar korunur, anahtar silinmez"; emeklilik o
-/// kuralın üçüncü hâli. Sessizce yok saymak yanlış olurdu — kullanıcı yazdığı
-/// satırın bir işe yaradığını sanır; silmek de yanlış, çünkü dosyaya
-/// dokunmuyoruz. Tanı ikisinin arası: satır yerinde kalıyor ve alt başlık
-/// nereye bakılacağını söylüyor.
+/// The repo's rule is "an unknown key is preserved, a key is not deleted";
+/// retirement is that rule's third state. Silently ignoring would be wrong — the
+/// user would think the line they wrote does something; deleting would be wrong
+/// too, because we don't touch the file. The diagnostic is between the two: the
+/// line stays in place and the subtitle says where to look.
 const RETIRED: &[(&str, &str)] = &[(
     "prompt",
-    // 012 phase-10: `[shell] prompt` ayrı anahtar olarak ekranda iki prompt
-    // üretiyordu; seçim `integration`'ın üçüncü değerine taşındı.
+    // 012 phase-10: `[shell] prompt` as a separate key produced two prompts on
+    // screen; the choice moved to `integration`'s third value.
     "`shell.prompt` is no longer read; use `shell.integration = \"blocks\"` \
      to keep your own prompt",
 )];
 
-/// Kullanıcının değiştirebildiği her şey — ayrıştırılmış ve doğrulanmış.
+/// Everything the user can change — parsed and validated.
 ///
-/// Alanlar `pub`: tip bir kayıt, davranış taşımıyor. Değerin geçerliliğini
-/// kuran yol [`Settings::parse`]; elle kurulan bir `Settings` bu kuralları
-/// atlayabilir ve bu bilerek serbest (sınamalar böyle kuruyor).
+/// The fields are `pub`: the type is a record, it carries no behavior. The path
+/// that establishes the value's validity is [`Settings::parse`]; a `Settings`
+/// built by hand can skip these rules and that is deliberately allowed (the
+/// tests build them that way).
 ///
-/// `Eq` yok: [`FontOptions::size`] `f64`.
+/// No `Eq`: [`FontOptions::size`] is `f64`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
-    /// `[terminal] scrollback`: geçmişte tutulan satır, `0..=SCROLLBACK_MAX`.
+    /// `[terminal] scrollback`: the rows kept in history, `0..=SCROLLBACK_MAX`.
     pub scrollback: usize,
-    /// `[terminal] cursor`: imlecin **varsayılan** şekli; uygulama DECSCUSR
-    /// ile üstüne yazabilir ([`CaretShape`]).
+    /// `[terminal] cursor`: the cursor's **default** shape; an application can
+    /// override it with DECSCUSR ([`CaretShape`]).
     pub cursor: CaretShape,
-    /// `[terminal] cursor_blink`: imleç yanıp söner mi ([`CursorBlink`]).
+    /// `[terminal] cursor_blink`: whether the cursor blinks ([`CursorBlink`]).
     pub cursor_blink: CursorBlink,
     /// `[terminal] cursor_radius` + `cursor_glow` + `cursor_unfocused`:
-    /// imlecin çizim sayıları ([`CaretStyle`]). `TerminalOptions`'a girmiyor.
+    /// the cursor's drawing numbers ([`CaretStyle`]). Doesn't enter
+    /// `TerminalOptions`.
     pub caret: CaretStyle,
-    /// `[terminal] cursor_blink_interval`: blink'in **yarım periyodu**, saniye.
+    /// `[terminal] cursor_blink_interval`: the blink's **half period**, in seconds.
     ///
-    /// [`Self::caret`]'ten ayrı alan, çünkü varış yeri ayrı: çizim sayıları
-    /// `Frame`'e, bu `bt_gpu::blink`'e gidiyor. `Changes::caret` ikisini
-    /// birden taşıyor — emsal `Changes::motion`'ın iki anahtarı.
+    /// A field separate from [`Self::caret`], because the destination is
+    /// separate: the drawing numbers go to `Frame`, this goes to `bt_gpu::blink`.
+    /// `Changes::caret` carries both — the precedent of `Changes::motion`'s two
+    /// keys.
     pub blink_interval: f64,
-    /// `[appearance] theme`: [`SYSTEM_THEME`] ya da tema **adı** —
-    /// `themes/{ad}.toml` ya da gömülü bir tema. Ad biçim olarak geçerli (boş
-    /// değil, `/` yok); var olup olmadığı dosya sistemi ister ve `bt-shell`'in
-    /// ad çözümünde.
+    /// `[appearance] theme`: [`SYSTEM_THEME`] or a theme **name** —
+    /// `themes/{name}.toml` or an embedded theme. The name is valid in form (not
+    /// empty, no `/`); whether it exists requires the file system and is in
+    /// `bt-shell`'s name resolution.
     pub theme: String,
-    /// `[appearance] light_theme`: `theme = "system"` iken açık görünümün
-    /// teması. `theme`'den **ayrı** anahtar: menüden sabit bir tema seçmek
-    /// yalnız `theme`'i yazar ([`Settings::with_theme`]) ve kullanıcının
-    /// açık/koyu çifti yerinde kalır.
+    /// `[appearance] light_theme`: the light appearance's theme when
+    /// `theme = "system"`. A **separate** key from `theme`: choosing a fixed
+    /// theme from the menu writes only `theme` ([`Settings::with_theme`]) and the
+    /// user's light/dark pair stays in place.
     pub light_theme: String,
-    /// `[appearance] dark_theme`: `theme = "system"` iken koyu görünümün
-    /// teması.
+    /// `[appearance] dark_theme`: the dark appearance's theme when
+    /// `theme = "system"`.
     pub dark_theme: String,
-    /// `[font] family` ve `size`.
+    /// `[font] family` and `size`.
     pub font: FontOptions,
-    /// `[clipboard] osc52`: `"copy"` ya da `"off"`.
+    /// `[clipboard] osc52`: `"copy"` or `"off"`.
     pub osc52: Osc52,
-    /// `[motion] cursor_motion`: imlecin kayma stili.
+    /// `[motion] cursor_motion`: the cursor's glide style.
     pub cursor_motion: CursorMotion,
-    /// `[motion] reduce_motion`: animasyonlar kısılsın mı.
+    /// `[motion] reduce_motion`: whether animations are reduced.
     pub reduce_motion: ReduceMotion,
-    /// `[motion] smooth_scroll`: geçmişte kaydırmak pürüzsüz mü.
+    /// `[motion] smooth_scroll`: whether scrolling in scrollback is smooth.
     pub smooth_scroll: SmoothScroll,
-    /// `[motion] keypress`: dock'ta yazılan glyph'in efekti.
+    /// `[motion] keypress`: the effect of a glyph typed in the dock.
     pub keypress: Keypress,
-    /// `[motion] erase`: dock'ta silinen glyph'in efekti.
+    /// `[motion] erase`: the effect of a glyph erased in the dock.
     pub erase: Erase,
-    /// `[shell] integration`: kabuk sarmalayıcısı kurulsun mu. **Sonraki
-    /// oturumda** geçerli ([`ShellIntegration`]).
+    /// `[shell] integration`: whether the shell wrapper is installed. Takes effect
+    /// **in the next session** ([`ShellIntegration`]).
     pub shell_integration: ShellIntegration,
-    /// `[terminal] confirm_close`: kapanışta ne zaman sorulsun
-    /// ([`ConfirmClose`]). `TerminalOptions`'a girmiyor.
+    /// `[terminal] confirm_close`: when to ask on close ([`ConfirmClose`]).
+    /// Doesn't enter `TerminalOptions`.
     pub confirm_close: ConfirmClose,
-    /// `[remote] hosts`: uzak host'ların işaret desenleri, dosyadaki
-    /// sırasıyla (037 Karar 2; eşleşme [`host_mark`]). Varsayılan boş.
+    /// `[remote] hosts`: the remote hosts' mark patterns, in the file's order
+    /// (037 Karar 2; matching is [`host_mark`]). Empty by default.
     pub remote_hosts: Vec<HostRule>,
 }
 
 impl Default for Settings {
-    /// Dosya yokken ve anahtar eksikken geçerli olan değerler.
+    /// The values in effect when there is no file and when a key is missing.
     ///
-    /// `scrollback` 006'ya kadar `bt-shell`'in `SCROLLBACK` sabitiydi; değer
-    /// aynı kaldı, sahibi buraya taşındı. Tema sistemin görünümünü izler:
-    /// açıkta gömülü `bateri-light`, koyuda gömülü `bateri`.
+    /// `scrollback` was `bt-shell`'s `SCROLLBACK` constant until 006; the value
+    /// stayed the same, its owner moved here. The theme follows the system's
+    /// appearance: the embedded `bateri-light` on light, the embedded `bateri` on
+    /// dark.
     ///
-    /// OSC 52 **açık** (`copy`): ssh'taki vim'in kopyasının yerel panoya
-    /// gelmesi terminalden beklenen davranış ve alacritty'nin de varsayılanı.
-    /// Bedeli: arka planda koşan uzak bir program da panoya yazabilir; okuyamaz.
-    /// Kullanılamayan bir dosyada açılıştaki değer bu değil
-    /// ([`Settings::for_unusable_file`]).
+    /// OSC 52 is **on** (`copy`): vim over ssh having its copy arrive in the
+    /// local clipboard is expected behavior from a terminal and alacritty's
+    /// default too. The cost: a remote program running in the background can
+    /// write to the clipboard too; it can't read. It is not the startup value in
+    /// an unusable file ([`Settings::for_unusable_file`]).
     fn default() -> Self {
         Self {
             scrollback: 10_000,
@@ -869,33 +894,33 @@ impl Default for Settings {
     }
 }
 
-/// Ayrıştırılabilen bir dosyanın sonucu: değerler ve kabul edilmeyenler.
+/// The result of a file that could be parsed: the values and the ones not
+/// accepted.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Parsed {
     pub settings: Settings,
-    /// Dosyadaki sırayla değil **anahtar okuma sırasıyla**; boşsa dosya
-    /// temiz.
+    /// Not in the file's order but **in key reading order**; if empty the file
+    /// is clean.
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Bir ayarın neden kabul edilmediği.
+/// Why a setting wasn't accepted.
 ///
-/// Metin **İngilizce**: pencerenin alt başlığında görünüyor, yani bir UI
-/// dizgisi (`CLAUDE.md` → Dil); stderr aynı metnin kopyasını basıyor.
+/// The text is **English**: it appears in the window's subtitle, so it is a UI
+/// string (`CLAUDE.md` → Dil); stderr prints a copy of the same text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
-    /// Noktalı anahtar yolu (`terminal.scrollback`); sözdizimi hatasında
-    /// `None`.
+    /// Dotted key path (`terminal.scrollback`); `None` on a syntax error.
     pub key: Option<&'static str>,
-    /// 1'den başlayan satır; ayrıştırıcı konum vermediyse `None`.
+    /// The 1-based line; `None` if the parser gave no position.
     pub line: Option<usize>,
     pub message: String,
 }
 
 impl fmt::Display for Diagnostic {
-    /// Tek satır: pencerenin alt başlığı başlıkla **aynı satırda** çiziliyor
-    /// (araç çubuksuz pencere, 007 phase-1 göz kontrolü), uzun ve çok
-    /// satırlı bir metin orada kesilirdi.
+    /// A single line: the window's subtitle is drawn **on the same line** as the
+    /// title (a window without a toolbar, 007 phase-1 eyeball check), a long and
+    /// multi-line text would be cut off there.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(line) = self.line {
             write!(f, "line {line}: ")?;
@@ -904,13 +929,14 @@ impl fmt::Display for Diagnostic {
     }
 }
 
-/// Tek bir anahtarın yeni değeri — ayar penceresinin dosyaya yazdığı şey
+/// The new value of a single key — what the settings window writes to the file
 /// ([`Settings::with_edit`]).
 ///
-/// Tipli, dizge değil: bölüm, anahtar ve TOML türü varyanttan türüyor, yani
-/// pencere yanlış bölüme ya da yanlış türde yazamaz. Değerin **aralığı**
-/// sınanmıyor — pencerenin kontrolleri aralıkları buradan alıyor
-/// ([`CURSOR_RADIUS_RANGE`] …); öyle olmasa da ayrıştırıcı okurken reddeder.
+/// Typed, not a string: the section, key and TOML type derive from the variant,
+/// so the window can't write to the wrong section or with the wrong type. The
+/// value's **range** isn't checked — the window's controls take the ranges from
+/// here ([`CURSOR_RADIUS_RANGE`] …); even if they didn't, the parser rejects
+/// when reading.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SettingsEdit {
     Scrollback(usize),
@@ -924,8 +950,8 @@ pub enum SettingsEdit {
     Theme(String),
     LightTheme(String),
     DarkTheme(String),
-    /// Boş dizge varsayılan aile (zincir): ayrıştırıcı `family = ""`'yi öyle
-    /// okuyor ve anahtar silinmiyor.
+    /// An empty string is the default family (the chain): the parser reads
+    /// `family = ""` that way and the key isn't deleted.
     FontFamily(String),
     FontSize(f64),
     LineHeight(f64),
@@ -936,11 +962,12 @@ pub enum SettingsEdit {
     Keypress(Keypress),
     Erase(Erase),
     ShellIntegration(ShellIntegration),
-    /// Shell ▸ Mark … as ▸ (037 Karar 5): `host`'un işaretini `mark` yapan
-    /// `[remote] hosts` düzenlemesi. Tek bir anahtarın değeri değil, dizinin
-    /// girdileri — kuralı [`Settings::with_edit`]'in bu kolunda. `host` uzak
-    /// oturumun gösterdiği hâli (`user@` dahil, eşleşmenin girdisi); yazılan
-    /// desen onun `user@`'siz kısmı. [`HostMark::None`] menünün "None"u.
+    /// Shell ▸ Mark … as ▸ (037 Karar 5): the `[remote] hosts` edit that makes
+    /// `host`'s mark `mark`. Not a single key's value but the array's entries —
+    /// the rule is in this arm of [`Settings::with_edit`]. `host` is the form the
+    /// remote session shows (`user@` included, the match's input); the pattern
+    /// written is its part without `user@`. [`HostMark::None`] is the menu's
+    /// "None".
     RemoteHostMark {
         host: String,
         mark: HostMark,
@@ -948,15 +975,15 @@ pub enum SettingsEdit {
 }
 
 impl SettingsEdit {
-    /// Düzenlenen anahtarın noktalı yolu (`terminal.cursor`) — ayrıştırıcının
-    /// tanısında geçen [`Diagnostic::key`]'in aynısı; ayar penceresi satırını
-    /// bununla buluyor.
+    /// The edited key's dotted path (`terminal.cursor`) — the same as
+    /// [`Diagnostic::key`] that appears in the parser's diagnostic; the settings
+    /// window finds its row with this.
     pub fn path(&self) -> &'static str {
         self.place().2
     }
 
-    /// Bölüm, anahtar ve tanının taşıdığı noktalı yol (`Diagnostic::key`
-    /// `'static` istiyor, o yüzden üçü de sabit).
+    /// The section, the key and the dotted path the diagnostic carries
+    /// (`Diagnostic::key` wants `'static`, so all three are constants).
     fn place(&self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::Scrollback(_) => ("terminal", "scrollback", "terminal.scrollback"),
@@ -990,13 +1017,13 @@ impl SettingsEdit {
         }
     }
 
-    /// Dosyaya yazılacak değer. Ondalık iki basamağa yuvarlanıyor: pencerenin
-    /// kaydırıcısı `0.30000000000000004` yazmasın, ve okunan değer yazılanın
-    /// ta kendisi olsun.
+    /// The value to be written to the file. Rounded to two decimals: so the
+    /// window's slider doesn't write `0.30000000000000004`, and so the value read
+    /// is the very value written.
     fn value(&self) -> toml_edit::Value {
         let decimal = |value: f64| toml_edit::Value::from((value * 100.0).round() / 100.0);
         match self {
-            // `i64`'e sığmayan satır sayısı zaten tavanın çok ötesinde.
+            // A row count that doesn't fit `i64` is far beyond the ceiling anyway.
             Self::Scrollback(lines) => i64::try_from(*lines).unwrap_or(i64::MAX).into(),
             Self::Cursor(shape) => shape.name().into(),
             Self::CursorBlink(blink) => blink.name().into(),
@@ -1009,7 +1036,7 @@ impl SettingsEdit {
             Self::Keypress(keypress) => keypress.name().into(),
             Self::Erase(erase) => erase.name().into(),
             Self::ShellIntegration(integration) => integration.name().into(),
-            // Dizinin kendisi değil, yazılan girdinin `mark`'ı.
+            // Not the array itself, but the written entry's `mark`.
             Self::RemoteHostMark { mark, .. } => mark.written().into(),
             Self::CursorRadius(value)
             | Self::CursorGlow(value)
@@ -1025,21 +1052,22 @@ impl SettingsEdit {
 }
 
 impl Settings {
-    /// "Settings…"ın dosya yokken yarattığı `settings.toml`: her anahtar
-    /// açıklamasıyla ve varsayılan değeriyle.
+    /// The `settings.toml` that "Settings…" creates when there is no file: every
+    /// key with its description and default value.
     ///
-    /// Sahibi varsayılanların sahibi, yani burası: ayrıştırılınca tanısız
-    /// [`Settings::default`] verdiği sınamayla bağlı. Anahtarlar **yazılı**,
-    /// yorumda değil — kullanıcı değeri yerinde değiştiriyor, menüden tema
-    /// seçimi de satırı yerinde yazıyor ([`Settings::with_theme`]). Bedeli:
-    /// varsayılan bir gün değişirse şablonu açmış kullanıcı eskisinde kalır.
-    /// Yalnız varsayılanı olmayan `family` yorumda bir örnek.
+    /// Its owner is the owner of the defaults, i.e. here: a test ties it so that,
+    /// once parsed, it gives [`Settings::default`] with no diagnostics. The keys
+    /// are **written**, not in a comment — the user changes the value in place,
+    /// and choosing a theme from the menu writes the line in place too
+    /// ([`Settings::with_theme`]). The cost: if a default changes one day, a user
+    /// who has opened the template stays on the old one. Only `family`, which has
+    /// no default, is an example in a comment.
     ///
-    /// Bölüm başlıkları yorumda değil: yorumu kaldırılan bir anahtar başlıksız
-    /// kalsaydı kök anahtar olur ve tanınmayan anahtar diye **sessizce**
-    /// yoksayılırdı.
+    /// The section headers aren't in a comment: if a key whose comment was
+    /// removed were left without a header it would become a root key and would be
+    /// **silently** ignored as an unrecognized key.
     ///
-    /// Metin İngilizce: kullanıcının açtığı dosya bir UI dizgisi
+    /// The text is English: the file the user opens is a UI string
     /// (`CLAUDE.md` → Dil).
     pub const TEMPLATE: &str = r##"# bateri settings. Changes apply as soon as you save this file.
 # A key you delete goes back to its default. Values are case-sensitive; one that
@@ -1169,18 +1197,19 @@ integration = "auto"
 hosts = []
 "##;
 
-    /// Dosya **var ama kullanılamıyor** (okunamıyor ya da geçersiz TOML)
-    /// iken açılışın ayarları: varsayılanlar, yalnız OSC 52 **kapalı**.
+    /// The startup settings when the file **exists but is unusable** (can't be
+    /// read or invalid TOML): the defaults, with only OSC 52 **off**.
     ///
-    /// Dosyada kullanıcının `osc52 = "off"`'u olabilir ve okunamayan bir
-    /// dosya bunu söyleyemiyor: pano uzaktaki bir programa kapalıya düşer,
-    /// açığa değil (`discussion.md` → Karar 5). Geri kalan her anahtarın
-    /// yanlış tahmini zararsız ve görünür (tema, punto); OSC 52'ninki sessiz.
-    /// Dosya düzelip kaydedilince canlı yenileme dosyadaki değeri uygular.
+    /// The file may hold the user's `osc52 = "off"` and an unreadable file can't
+    /// say so: the clipboard falls to off for a remote program, not to on
+    /// (`discussion.md` → Karar 5). A wrong guess on every other key is harmless
+    /// and visible (theme, point size); OSC 52's is silent. When the file is
+    /// fixed and saved, the live reload applies the value in the file.
     ///
-    /// Dosya **yoksa** bu değil, [`Settings::default`]: kullanıcı hiçbir şey
-    /// söylememiş. Kararı veren (`bt-shell`'in yükleyicisi) ikisini ayırıyor;
-    /// değerin sahibi burası, varsayılanların sahibi olduğu için.
+    /// When the file **doesn't exist** it isn't this but [`Settings::default`]:
+    /// the user said nothing. The one that decides (`bt-shell`'s loader)
+    /// separates the two; the value's owner is here, because it is the defaults'
+    /// owner.
     pub fn for_unusable_file() -> Self {
         Self {
             osc52: Osc52::Off,
@@ -1188,40 +1217,41 @@ hosts = []
         }
     }
 
-    /// `settings.toml`'un metni → değerler + tanılar, ya da ayrıştırılamadı.
+    /// `settings.toml`'s text → values + diagnostics, or it couldn't be parsed.
     ///
-    /// `Err` **yalnız** geçersiz TOML'da; anahtar düzeyindeki her sorun
-    /// `Ok`'un tanı listesine düşer ve o anahtar varsayılanını alır
-    /// (`osc52` kapalıyı, [`Settings::parse_keeping`]).
+    /// `Err` **only** on invalid TOML; every key-level problem falls into `Ok`'s
+    /// diagnostic list and that key takes its default (`osc52` takes off,
+    /// [`Settings::parse_keeping`]).
     ///
-    /// Geçersiz TOML sözdiziminden geniş: yinelenen anahtar ve TOML'un
-    /// tam sayı sınırını (`i64`) aşan sayı da belgenin tamamını düşürüyor —
-    /// `scrollback = 99999999999999999999` tavana kırpılamaz, çünkü değer
-    /// hiç okunamıyor. `docs/AYARLAR.md` bunu söylüyor.
+    /// Wider than invalid TOML syntax: a duplicate key and a number exceeding
+    /// TOML's integer limit (`i64`) also drop the whole document —
+    /// `scrollback = 99999999999999999999` can't be clamped to the ceiling,
+    /// because the value can't be read at all. `docs/AYARLAR.md` says this.
     pub fn parse(text: &str) -> Result<Parsed, Diagnostic> {
         Self::parse_keeping(text, &Settings::default())
     }
 
-    /// [`Settings::parse`], ama **kabul edilmeyen** değer varsayılanı değil
-    /// `fallback`'inkini alır — kayıt anının kuralı: çağıran geçerli ayarları
-    /// verir (`bt-shell`'in canlı yenilemesi).
+    /// [`Settings::parse`], but a value that is **not accepted** takes
+    /// `fallback`'s rather than the default — the save-time rule: the caller
+    /// supplies the current settings (`bt-shell`'s live reload).
     ///
-    /// Sebep geri alınamayan uygulama: `scrollback = 100000` iken yanlışlıkla
-    /// kaydedilen `scrollback = "100000"` varsayılana (on bin) düşseydi
-    /// geçmişin doksan bin satırı o anda silinir, dosyayı düzeltmek onları
-    /// geri getirmezdi. Tanı da düşülen değeri söylüyor ("using 100000").
+    /// The reason is the application that can't be undone: if a mistakenly saved
+    /// `scrollback = "100000"` fell to the default (ten thousand) while it was
+    /// `scrollback = 100000`, ninety thousand rows of history would be deleted at
+    /// that moment and fixing the file wouldn't bring them back. The diagnostic
+    /// also says the value fallen back to ("using 100000").
     ///
-    /// Yalnız kabul edilmeyen değer: dosyada **olmayan** anahtar varsayılanını
-    /// alır (dosya bir şey söylemiyor, anahtarı silen kullanıcı varsayılanı
-    /// istiyor) ve tavanı aşan değer tavana kırpılır (niyet belli). Bölüm
-    /// yanlış türdeyse (`terminal = 5`) bölümün bütün anahtarları kabul
-    /// edilmemiş sayılır.
+    /// Only a value that isn't accepted: a key that is **not in** the file takes
+    /// its default (the file says nothing, a user who deleted the key wants the
+    /// default) and a value above the ceiling is clamped to the ceiling (the
+    /// intent is clear). If a section has the wrong type (`terminal = 5`) all of
+    /// the section's keys count as not accepted.
     ///
-    /// **Tek istisna `clipboard.osc52`:** kabul edilmeyen değeri `fallback`'i
-    /// değil `"off"`'u alır, bölüm yanlış türdeyse de. Kuralın sebebi geri
-    /// alınamayan uygulamaydı ve OSC 52'yi kapatmak geri alınabilir; tersi,
-    /// `"of"` diye yanlış yazılmış bir kapatmanın panoyu sessizce açık
-    /// tutması, değil (`discussion.md` → Karar 5).
+    /// **The one exception is `clipboard.osc52`:** a value that isn't accepted
+    /// takes `"off"`, not `fallback`'s, even when the section has the wrong type.
+    /// The rule's reason was the application that can't be undone and turning
+    /// OSC 52 off is reversible; the opposite, a turn-off mistyped as `"of"`
+    /// silently keeping the clipboard on, is not (`discussion.md` → Karar 5).
     pub fn parse_keeping(text: &str, fallback: &Settings) -> Result<Parsed, Diagnostic> {
         let doc = document(text)?;
         let mut parsed = Parsed {
@@ -1316,9 +1346,9 @@ hosts = []
             }
             None => {}
         }
-        // İkincisi tanıdaki noktalı yol (`Diagnostic::key` `'static` ister),
-        // `theme.rs`'in `ANSI_KEYS`'iyle aynı deyiş; sonuncusu kabul
-        // edilmeyen değerin yerine geçen.
+        // The second is the dotted path in the diagnostic (`Diagnostic::key` wants
+        // `'static`), the same idiom as `theme.rs`'s `ANSI_KEYS`; the last is the
+        // one that stands in for a value that isn't accepted.
         let names = [
             (
                 "theme",
@@ -1378,8 +1408,8 @@ hosts = []
             }
             None => {}
         }
-        // `fallback` bilerek okunmuyor: kabul edilmeyen değer kapalıya düşüyor
-        // (yukarıdaki doc'un istisnası).
+        // `fallback` is deliberately not read: a value that isn't accepted falls
+        // to off (the exception in the doc above).
         match section(text, root, "clipboard", &mut parsed.diagnostics) {
             Some(clipboard) => {
                 if let Some(item) = clipboard.get("osc52") {
@@ -1472,7 +1502,7 @@ hosts = []
                         &mut parsed.diagnostics,
                     );
                 }
-                // Emekli anahtarlar: değeri okunmuyor, varlığı söyleniyor.
+                // Retired keys: the value isn't read, its presence is reported.
                 for (key, message) in RETIRED {
                     if let Some(item) = shell.get(key) {
                         parsed.diagnostics.push(Diagnostic {
@@ -1506,11 +1536,11 @@ hosts = []
         Ok(parsed)
     }
 
-    /// Kullanılacak temanın **adı**: `theme = "system"` ise görünüme göre
-    /// `light_theme` ya da `dark_theme`, değilse `theme`'in kendisi —
-    /// görünümden bağımsız.
+    /// The **name** of the theme to use: `light_theme` or `dark_theme` by
+    /// appearance if `theme = "system"`, otherwise `theme` itself — independent
+    /// of the appearance.
     ///
-    /// Saf: görünümü okuyan `bt-shell`, ad çözümü de orada.
+    /// Pure: `bt-shell` reads the appearance, and name resolution is there too.
     pub fn theme_for(&self, dark: bool) -> &str {
         match (self.follows_system(), dark) {
             (false, _) => &self.theme,
@@ -1519,14 +1549,15 @@ hosts = []
         }
     }
 
-    /// Tema sistemin görünümüne mi bağlı. Değilse görünüm değişimi temaya
-    /// dokunmaz ve çağıranın dosyayı yeniden okumasına gerek yok.
+    /// Whether the theme is tied to the system's appearance. If not, an
+    /// appearance change doesn't touch the theme and the caller needn't re-read
+    /// the file.
     pub fn follows_system(&self) -> bool {
         self.theme == SYSTEM_THEME
     }
 
-    /// Oturumun terminal seçenekleri — `Session`'a açılışta da canlı
-    /// değişimde de **tamamı** bununla gider ([`TerminalOptions`]'ın doc'u).
+    /// The session's terminal options — **all of them** go to `Session` with this,
+    /// both at startup and on a live change ([`TerminalOptions`]'s doc).
     pub fn terminal(&self) -> TerminalOptions {
         TerminalOptions {
             scrollback: self.scrollback,
@@ -1536,12 +1567,12 @@ hosts = []
         }
     }
 
-    /// `self`'ten (önceki) `new`'e neyin değiştiği — canlı yenilemenin
-    /// kapısı: değişmeyen parça uygulanmaz.
+    /// What changed from `self` (the previous) to `new` — the live reload's gate:
+    /// a part that didn't change isn't applied.
     ///
-    /// Saf; önceki değeri tutan çağıran (`bt-shell`). Ayrı bir birleştirme
-    /// mekanizması yok: bir kayıt birden çok olay doğurursa ikincisi boş fark
-    /// verir.
+    /// Pure; the caller (`bt-shell`) holds the previous value. There is no
+    /// separate merging mechanism: if one save causes several events the second
+    /// gives an empty difference.
     pub fn changes(&self, new: &Settings) -> Changes {
         Changes {
             terminal: self.terminal() != new.terminal(),
@@ -1556,35 +1587,38 @@ hosts = []
         }
     }
 
-    /// Menünün tema seçimi (View ▸ Theme ▸): `[appearance] theme`'i `name`
-    /// yapar — [`Settings::with_edit`]'in tema hâli.
+    /// The menu's theme choice (View ▸ Theme ▸): makes `[appearance] theme`
+    /// `name` — the theme form of [`Settings::with_edit`].
     ///
-    /// `light_theme` ve `dark_theme`'e dokunmaz: sabit bir tema seçen
-    /// kullanıcı `"system"`'e dönünce çiftini geri bulur. Adın biçimi
-    /// sınanmıyor: menü yalnız gömülü temaların ve `themes/`'teki dosyaların
-    /// adlarını veriyor; öyle olmasa da ayrıştırıcı adı okurken reddeder.
+    /// It doesn't touch `light_theme` and `dark_theme`: a user who chose a fixed
+    /// theme finds their pair again when they return to `"system"`. The name's
+    /// format isn't checked: the menu gives only the names of the embedded
+    /// themes and of the files in `themes/`; even if it didn't, the parser
+    /// rejects the name when reading.
     pub fn with_theme(text: &str, name: &str) -> Result<String, Diagnostic> {
         Self::with_edit(text, &SettingsEdit::Theme(name.to_owned()))
     }
 
-    /// `settings.toml`'un metninde tek bir anahtarı `edit`'in değeri yapar ve
-    /// **geri kalan her baytı** yerinde bırakır — yorumlar, boş satırlar,
-    /// anahtar sırası, tanımadığımız anahtarlar, değerin yanındaki yorum.
-    /// Dosyayı okuyup yazan `bt-shell`; yazanlar menü ve ayar penceresi.
+    /// Makes a single key in `settings.toml`'s text `edit`'s value and leaves
+    /// **every other byte** in place — comments, blank lines, key order, keys we
+    /// don't recognize, the comment next to the value. `bt-shell` reads and
+    /// writes the file; the writers are the menu and the settings window.
     ///
-    /// - Bölüm yoksa sona, anahtar yoksa bölümün içine eklenir; bölümün
-    ///   yazılışı (başlık, satır içi tablo, noktalı anahtar) korunur.
-    /// - **Ayrıştırılamayan metin `Err`**, yeni metin üretilmez: dosya
-    ///   kullanıcının yarım işi ve üstüne yazmak onu silerdi. Aynı sebeple
-    ///   bölüm olmayan bir bölüm (`appearance = 1`, `[[appearance]]`) ve bölüm
-    ///   olan bir anahtar (`[appearance.theme]`, `theme = { … }`) de `Err`:
-    ///   yerlerine yazmak içeriklerini silerdi. Kabul edilmeyen türdeki bir
-    ///   değer (`theme = 3`) ise değişir — kullanıcı bir değer seçti.
+    /// - If the section is missing it is appended at the end, if the key is
+    ///   missing it is added inside the section; the section's spelling (header,
+    ///   inline table, dotted key) is preserved.
+    /// - **Text that can't be parsed is `Err`**, no new text is produced: the
+    ///   file is the user's half-finished work and writing over it would erase
+    ///   it. For the same reason a section that isn't a section (`appearance = 1`,
+    ///   `[[appearance]]`) and a key that is a section (`[appearance.theme]`,
+    ///   `theme = { … }`) are `Err` too: writing in their place would erase
+    ///   their contents. A value of a type that isn't accepted (`theme = 3`)
+    ///   does change — the user chose a value.
     ///
-    /// [`SettingsEdit::RemoteHostMark`] tek bir değer değil dizinin
-    /// girdilerini yazıyor; kuralı [`with_host_mark`]'ta, aynı sözleşmeyle
-    /// (ayrıştırılamayan metin ve bozuk dizi `Err`, geri kalan her bayt
-    /// yerinde).
+    /// [`SettingsEdit::RemoteHostMark`] writes the array's entries, not a single
+    /// value; its rule is in [`with_host_mark`], with the same contract (text
+    /// that can't be parsed and a broken array are `Err`, every other byte stays
+    /// in place).
     pub fn with_edit(text: &str, edit: &SettingsEdit) -> Result<String, Diagnostic> {
         if let SettingsEdit::RemoteHostMark { host, mark } = edit {
             return with_host_mark(text, host, *mark);
@@ -1592,12 +1626,13 @@ hosts = []
         let (section_name, key, path) = edit.place();
         let value = edit.value();
         let parsed = document(text)?;
-        // Ret konumlu belgede: `into_mut` konumları düşürüyor, tanının satırı
-        // onlardan geliyor.
+        // On the document with positions for the rejection: `into_mut` drops the
+        // positions, the diagnostic's line comes from them.
         let mut refused = Vec::new();
-        // Satır içi tablo (`theme = { … }`) da bir bölüm: `is_value` onu
-        // geçirirdi ve yerine yazmak `[appearance.theme]`'in reddedildiği
-        // içeriği bu yazılışta sessizce silerdi (`/code-review` bulgusu).
+        // An inline table (`theme = { … }`) is a section too: `is_value` would let
+        // it through and writing in its place would in this spelling silently
+        // delete the content that `[appearance.theme]` is rejected for
+        // (a `/code-review` finding).
         if let Some(table) = section(text, parsed.as_table(), section_name, &mut refused)
             && let Some(item) = table
                 .get(key)
@@ -1619,12 +1654,13 @@ hosts = []
         }
         let mut doc = parsed.into_mut();
         ensure_section(&mut doc, section_name);
-        // `else` dalı yok: bölüm olmayan bir bölüm yukarıda reddedildi, eksik
-        // olan da az önce tablo olarak eklendi.
+        // There is no `else` arm: a section that isn't a section was rejected
+        // above, and a missing one was just added as a table.
         if let Some(table) = doc.get_mut(section_name).and_then(Item::as_table_like_mut) {
             match table.get_mut(key).and_then(Item::as_value_mut) {
-                // Süs (`=`'den sonraki boşluk, satır sonundaki yorum) değerin
-                // üstünde duruyor; yeni değer onu devralmazsa yorum düşerdi.
+                // The decor (the space after `=`, the comment at line end) sits on
+                // the value; if the new value doesn't inherit it the comment would
+                // be dropped.
                 Some(old) => {
                     let decor = old.decor().clone();
                     *old = value;
@@ -1639,13 +1675,14 @@ hosts = []
     }
 }
 
-/// Bölüm yoksa belgeye boş bir `[name]` ekler; varsa dokunmaz.
+/// Adds an empty `[name]` to the document if the section is missing; if present
+/// leaves it alone.
 ///
-/// Belge sonundaki yorum `toml_edit`'te belgenin kuyruğu ve yeni bölüm onun
-/// önüne yazılırdı: son bölümün altındaki `# family = "Menlo"`
-/// `[appearance]`'a geçer, yorumu kaldıran kullanıcının satırı sessizce
-/// yoksayılırdı. Kuyruk yeni başlığın önüne alınıyor, yani yazıldığı bölümde
-/// kalıyor.
+/// A comment at the end of the document is the document's tail in `toml_edit`
+/// and the new section would be written in front of it: the `# family = "Menlo"`
+/// under the last section would pass to `[appearance]`, and the line of a user
+/// who uncommented it would be silently ignored. The tail is taken in front of
+/// the new header, i.e. it stays in the section it was written in.
 fn ensure_section(doc: &mut toml_edit::DocumentMut, name: &str) {
     if doc.contains_key(name) {
         return;
@@ -1659,16 +1696,16 @@ fn ensure_section(doc: &mut toml_edit::DocumentMut, name: &str) {
     doc.insert(name, Item::Table(table));
 }
 
-/// Düzenlenmiş belgenin metni, `text`'in satır sonlarıyla.
+/// The edited document's text, with `text`'s line endings.
 ///
-/// `toml_edit` satır sonlarını LF yazıyor. İlk satırı CRLF olan dosya CRLF
-/// kalıyor; yoksa tek bir seçim dotfile deposunda bütün dosyayı değişmiş
-/// gösterirdi. Karışık satır sonlu dosya ilk satırınkini alır.
+/// `toml_edit` writes line endings as LF. A file whose first line is CRLF stays
+/// CRLF; otherwise a single selection would show the whole file as changed in a
+/// dotfile repository. A file with mixed line endings takes the first line's.
 ///
-/// Önce LF'ye indirilip sonra çevriliyor (`/code-review` bulgusu):
-/// `toml_edit` çok satırlı metnin **içindeki** `\r\n`'i olduğu gibi
-/// bırakıyor ve doğrudan çeviri onu `\r\r\n` yapardı — geçersiz TOML, yani
-/// dosyaya bir daha yazılamaz ve hiçbir kayıt uygulanmazdı.
+/// It is first lowered to LF and then converted (a `/code-review` finding):
+/// `toml_edit` leaves a `\r\n` **inside** a multi-line string as it is and a
+/// direct conversion would turn it into `\r\r\n` — invalid TOML, so the file
+/// couldn't be written again and no save would be applied.
 fn rendered(text: &str, doc: &toml_edit::DocumentMut) -> String {
     let crlf = text
         .find('\n')
@@ -1681,31 +1718,32 @@ fn rendered(text: &str, doc: &toml_edit::DocumentMut) -> String {
     }
 }
 
-/// [`with_host_mark`]'ın dizide yapacakları ([`host_mark_plan`]).
+/// What [`with_host_mark`] will do to the array ([`host_mark_plan`]).
 #[derive(Debug, PartialEq, Eq)]
 struct MarkPlan {
-    /// Bu indeksteki girdinin `mark`'ı yerinde değişiyor.
+    /// The entry at this index has its `mark` changed in place.
     in_place: Option<usize>,
-    /// Silinen girdiler, artan sırayla.
+    /// The deleted entries, in ascending order.
     remove: Vec<usize>,
-    /// Dizinin başına `{ host = <user@'siz host>, mark }` giriyor.
+    /// `{ host = <host without user@>, mark }` goes at the start of the array.
     prepend: bool,
 }
 
-/// Menünün yazım kuralı (037 Karar 5), saf: `rules`'u `host`'un çözümü
-/// `mark` olacak biçimde en az bozan düzenleme; çözüm zaten `mark`'sa `None`
-/// (no-op).
+/// The menu's writing rule (037 Karar 5), pure: the edit that disturbs `rules`
+/// the least so that `host`'s resolution becomes `mark`; `None` (a no-op) if the
+/// resolution is already `mark`.
 ///
-/// - Tam bu host'u yazan (desen, harf duyarsız, `user@`'siz ya da tam
-///   host'a eşit) ilk girdinin işareti **yerinde** değişiyor — kullanıcının
-///   koyduğu sıra bozulmuyor.
-/// - Yerinde değişim sonucu vermiyorsa (girdi yok ya da önünde başka bir
-///   işaret veren bir glob var) tam girdiler siliniyor ve yenisi **başa**
-///   yazılıyor: kullanıcı "bu makine prod" dedi, o cümle bir globun arkasında
-///   kalıp etkisiz görünmemeli. Karar "yoksa başa" diyor; önünde glob olan
-///   tam girdi aynı gerekçeyle başa taşınıyor.
-/// - **None** tam girdileri siliyor; ardından bir glob hâlâ işaret
-///   veriyorsa başa `mark = "none"` yazılıyor.
+/// - The first entry that writes exactly this host (the pattern equals, case
+///   insensitive, the host without `user@` or the full host) has its mark changed
+///   **in place** — the order the user set isn't disturbed.
+/// - If the in-place change doesn't give the result (there is no entry, or a
+///   glob that gives another mark stands in front of it) the exact entries are
+///   deleted and the new one is written **at the start**: the user said "this
+///   machine is prod", that sentence mustn't stay behind a glob and look
+///   ineffective. The decision says "at the start if there is none"; an exact
+///   entry with a glob in front of it is moved to the start for the same reason.
+/// - **None** deletes the exact entries; if a glob still gives a mark afterwards
+///   `mark = "none"` is written at the start.
 fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<MarkPlan> {
     if host_mark(rules, host) == mark {
         return None;
@@ -1747,18 +1785,18 @@ fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<Mark
     })
 }
 
-/// Host'un `user@`'siz kısmı: desende `@` yoksa eşleşmenin girdisi
-/// ([`host_mark`]) ve menünün başlığındaki ad.
+/// The host's part without `user@`: the match's input when the pattern has no
+/// `@` ([`host_mark`]) and the name in the menu's title.
 pub fn bare_host(host: &str) -> &str {
     host.rsplit('@').next().unwrap_or(host)
 }
 
-/// [`SettingsEdit::RemoteHostMark`]'ın yazımı: [`host_mark_plan`]'ı
-/// `[remote] hosts`'a uygular. İki yazılış da (satır içi dizi ve
-/// `[[remote.hosts]]`) kendi biçiminde kalıyor; bölüm ya da anahtar yoksa
-/// satır içi dizi olarak doğuyor. Ayrıştırılamayan metin ve bozuk dizi
-/// `Err` — bozuk bir girdiyi yerinde bırakıp önüne yazmak listenin anlamını
-/// tahmin etmek olurdu.
+/// The writing of [`SettingsEdit::RemoteHostMark`]: applies [`host_mark_plan`]
+/// to `[remote] hosts`. Both spellings (the inline array and `[[remote.hosts]]`)
+/// stay in their own form; if the section or key is missing it is born as an
+/// inline array. Text that can't be parsed and a broken array are `Err` —
+/// leaving a broken entry in place and writing in front of it would be guessing
+/// the list's meaning.
 fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diagnostic> {
     let parsed = document(text)?;
     let mut refused = Vec::new();
@@ -1778,8 +1816,8 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
     let written = mark.written();
     let mut doc = parsed.into_mut();
     ensure_section(&mut doc, "remote");
-    // `else` dalı yok: bölüm olmayan bir bölüm yukarıda reddedildi, eksik
-    // olan az önce eklendi.
+    // There is no `else` arm: a section that isn't a section was rejected above,
+    // and a missing one was just added.
     if let Some(remote) = doc.get_mut("remote").and_then(Item::as_table_like_mut) {
         match remote.get_mut("hosts") {
             Some(Item::ArrayOfTables(tables)) => {
@@ -1795,9 +1833,10 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
                     let mut table = toml_edit::Table::new();
                     table.insert("host", toml_edit::value(pattern));
                     table.insert("mark", toml_edit::value(written.as_str()));
-                    // Eski ilk bölümün yeri ve üstündeki yorum yeniye geçiyor
-                    // (yazılış sırası konumdan; eşit konumda dizinin sırası),
-                    // eskisi bir boş satırla ayrılıyor.
+                    // The old first section's place and the comment above it pass
+                    // to the new one (writing order is by position; at equal
+                    // position the array's order), the old one is separated by a
+                    // blank line.
                     if let Some(first) = tables.get_mut(0) {
                         table.set_position(first.position());
                         *table.decor_mut() = first.decor().clone();
@@ -1824,7 +1863,8 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
                     prepend_entry(array, pattern, &written);
                 }
             }
-            // Anahtar yok (dizi boşmuş gibi): yalnız başa yazma olabilir.
+            // No key (as if the array were empty): only writing at the start is
+            // possible.
             _ => {
                 let mut array = toml_edit::Array::new();
                 if plan.prepend {
@@ -1837,8 +1877,8 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
     Ok(rendered(text, &doc))
 }
 
-/// `item` bir değerse onu `written` yapar, süsünü (yanındaki yorum)
-/// koruyarak — `[[remote.hosts]]` girdisinin `mark = "…"` satırı.
+/// If `item` is a value, makes it `written`, preserving its decor (the comment
+/// next to it) — the `mark = "…"` line of a `[[remote.hosts]]` entry.
 fn set_keeping_decor(item: Option<&mut Item>, written: &str) {
     if let Some(old) = item.and_then(Item::as_value_mut) {
         let decor = old.decor().clone();
@@ -1847,10 +1887,10 @@ fn set_keeping_decor(item: Option<&mut Item>, written: &str) {
     }
 }
 
-/// Satır içi dizinin başına `{ host, mark }` yazar ve dizinin yazılışını
-/// sürdürür: yeni girdi eski ilk girdinin süsünü (çok satırlı dizide
-/// `\n  ` girintisi) alıyor; eski ilk girdi tek satırlı dizide virgülden
-/// sonra bir boşluk kazanıyor, yoksa `{…},{…}` yapışırdı.
+/// Writes `{ host, mark }` at the start of an inline array and keeps the array's
+/// spelling: the new entry takes the old first entry's decor (the `\n  `
+/// indentation in a multi-line array); the old first entry gains a space after
+/// the comma in a single-line array, otherwise `{…},{…}` would stick together.
 fn prepend_entry(array: &mut toml_edit::Array, pattern: &str, written: &str) {
     let mut entry = toml_edit::InlineTable::new();
     entry.insert("host", pattern.into());
@@ -1871,53 +1911,54 @@ fn prepend_entry(array: &mut toml_edit::Array, pattern: &str, written: &str) {
     array.insert_formatted(0, value);
 }
 
-/// İki [`Settings`] arasındaki fark ([`Settings::changes`]).
+/// The difference between two [`Settings`] ([`Settings::changes`]).
 ///
-/// **Tema burada yok**, bilerek: canlı yenilemede tema her olayda yeniden
-/// çözülüyor, çünkü etkin tema dosyasının kendisi de bir kaynak ve onun
-/// değişimi ayar metninin farkında görünmez. Tema adı için bir alan ikinci,
-/// yarım bir kapı olurdu; aynı temanın takası zaten no-op
-/// (`Session::set_theme`).
+/// **The theme isn't here**, deliberately: on a live reload the theme is
+/// re-resolved on every event, because the active theme file is itself a source
+/// and its change isn't visible in the settings text's difference. A field for
+/// the theme name would be a second, half gate; swapping the same theme is a
+/// no-op anyway (`Session::set_theme`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Changes {
-    /// [`Settings::terminal`] değişti: seçenekler `Session`'a **tamamıyla**
-    /// gider.
+    /// [`Settings::terminal`] changed: the options go to `Session` **in full**.
     pub terminal: bool,
-    /// [`Settings::font`] değişti: renderer'a gider, hücre ölçüsü ve grid
-    /// yeniden hesaplanır.
+    /// [`Settings::font`] changed: goes to the renderer, the cell size and grid
+    /// are recomputed.
     pub font: bool,
-    /// `[motion]` bölümü değişti: kareyi süren ritme gider
+    /// The `[motion]` section changed: goes to the rhythm that drives the frame
     /// (`bt_gpu::DisplayLink::set_cursor_motion`,
-    /// `bt_gpu::DisplayLink::set_reduce_motion`). Terminalden ve fonttan ayrı
-    /// bir alan, çünkü hareket ne oturumu ne hücre ölçüsünü ilgilendiriyor —
-    /// ikisine de bağlansaydı bir stil değişimi grid'i yeniden kurdururdu.
+    /// `bt_gpu::DisplayLink::set_reduce_motion`). A field separate from terminal
+    /// and font, because motion concerns neither the session nor the cell size —
+    /// had it been tied to either, a style change would have caused the grid to
+    /// be rebuilt.
     ///
-    /// Üç anahtar **tek** alanda: üçü de aynı çağrı yerinde çözülüyor ve ayrı
-    /// alanlar çağıranda tek bir `if` yerine üç tane yazdırırdı.
-    /// [`Settings::reduce_motion`] üç değerli olduğu için `bt-shell` onu yine
-    /// de çözmek zorunda, [`Settings::smooth_scroll`] de öteki ikisiyle tek
-    /// `bool`'a iniyor (view'ın tekerleğine); fark yalnız "bir şey değişti"
-    /// diyor.
+    /// Three keys in **one** field: all three are resolved at the same call site
+    /// and separate fields would make the caller write three `if`s instead of
+    /// one. Since [`Settings::reduce_motion`] is three-valued `bt-shell` has to
+    /// resolve it anyway, and [`Settings::smooth_scroll`] collapses with the
+    /// other two to a single `bool` (for the view's wheel); the difference only
+    /// says "something changed".
     pub motion: bool,
-    /// [`Settings::caret`] değişti: imlecin çizim sayıları `bt-gpu`'ya gider
+    /// [`Settings::caret`] changed: the cursor's drawing numbers go to `bt-gpu`
     /// (`bt_gpu::DisplayLink::set_caret_style`).
     ///
-    /// **`terminal`'dan ayrı alan** ve bu şart: `changes.terminal` bugün
-    /// `self.terminal() != new.terminal()`'in ta kendisi, yani
-    /// `TerminalOptions`'ın farkı. Bu iki anahtar oraya **girmiyor**; aynı
-    /// alana binselerdi bir yarıçap değişimi `TerminalOptions`'ı baştan
-    /// `Session`'a gönderirdi.
+    /// **A field separate from `terminal`** and this is a must: `changes.terminal`
+    /// today is exactly `self.terminal() != new.terminal()`, i.e. the difference
+    /// of `TerminalOptions`. These two keys **don't enter** there; had they
+    /// shared the field, a radius change would send `TerminalOptions` to
+    /// `Session` anew.
     pub caret: bool,
-    /// [`Settings::remote_hosts`] değişti: desen listesi her oturuma gider
-    /// (`Session::set_host_marks`) ve etkin uzak host'un işareti yeniden
-    /// çözülür (037 Karar 2).
+    /// [`Settings::remote_hosts`] changed: the pattern list goes to every session
+    /// (`Session::set_host_marks`) and the active remote host's mark is resolved
+    /// again (037 Karar 2).
     pub remote: bool,
 }
 
-/// Metni TOML belgesine ayrıştırır; ayrıştırılamıyorsa tek satırlık tanı.
+/// Parses the text into a TOML document; a one-line diagnostic if it can't be
+/// parsed.
 ///
-/// `Document` (değişmez belge) `DocumentMut` değil: konumlar yalnız
-/// ayrıştırılmış belgede duruyor ve tanının satırı onlardan geliyor.
+/// `Document` (the immutable document), not `DocumentMut`: positions live only
+/// in the parsed document and the diagnostic's line comes from them.
 pub(crate) fn document(text: &str) -> Result<Document<&str>, Diagnostic> {
     Document::parse(text).map_err(|err| Diagnostic {
         key: None,
@@ -1926,10 +1967,11 @@ pub(crate) fn document(text: &str) -> Result<Document<&str>, Diagnostic> {
     })
 }
 
-/// Bir bölümü okur; bölüm değilse (`terminal = 5`) tanı bırakır ve `None`.
+/// Reads a section; if it isn't a section (`terminal = 5`) leaves a diagnostic
+/// and `None`.
 ///
-/// `TableLike`: `[terminal]` başlığı da `terminal = { scrollback = 1 }`
-/// satır içi tablosu da aynı bölümdür.
+/// `TableLike`: the `[terminal]` header and the `terminal = { scrollback = 1 }`
+/// inline table are the same section.
 pub(crate) fn section<'a>(
     text: &str,
     root: &'a toml_edit::Table,
@@ -1948,16 +1990,18 @@ pub(crate) fn section<'a>(
     table
 }
 
-/// `terminal.scrollback`: tam sayı, negatif değil, tavanı aşarsa tavan.
+/// `terminal.scrollback`: an integer, non-negative, the ceiling if it exceeds it.
 ///
-/// İki kabul edilmeyen hâl iki ayrı sonuç veriyor ve ikisi de tanı bırakıyor:
+/// The two not-accepted states give two separate results and both leave a
+/// diagnostic:
 ///
-/// - **Tavanı aşan → tavan.** "Çok geçmiş" isteyen kullanıcının niyeti
-///   belli; `fallback`'e (açılışta on bin) düşürmek istediğinin tersini
-///   verirdi. Tanı sessiz değil: istediği sayı uygulanmadı ve bunu bilmeli.
-///   (Punto kırpması sessiz — orada sınır Cmd +/−'nin olağan ucu, bir hata
-///   değil.)
-/// - **Negatif ya da tam sayı değil → `fallback`.** Niyet okunamıyor.
+/// - **Above the ceiling → the ceiling.** The intent of a user who asks for
+///   "lots of history" is clear; dropping to `fallback` (ten thousand at
+///   startup) would give the opposite of what they want. The diagnostic isn't
+///   silent: the number they asked for wasn't applied and they should know.
+///   (Point-size clamping is silent — there the limit is the usual end of
+///   Cmd +/−, not an error.)
+/// - **Negative or not an integer → `fallback`.** The intent can't be read.
 fn scrollback(
     text: &str,
     item: &Item,
@@ -1993,13 +2037,14 @@ fn scrollback(
     value
 }
 
-/// `appearance.theme`, `.light_theme`, `.dark_theme`: bir tema adı
-/// (`theme` için [`SYSTEM_THEME`] de).
+/// `appearance.theme`, `.light_theme`, `.dark_theme`: a theme name (for `theme`
+/// [`SYSTEM_THEME`] too).
 ///
-/// Adın yalnız **biçimi** sınanıyor: boş ad ve `/` içeren ad varsayılana
-/// döner. `/` adı `themes/` dizininin dışına taşırdı — `"../settings"`
-/// ayar dosyasının kendisini tema diye okuturdu. NUL da dosya yolu olamaz.
-/// Adın bir temaya çözülüp çözülmediği `bt-shell`'in işi.
+/// Only the name's **format** is checked: an empty name and a name containing
+/// `/` return to the default. `/` would carry the name outside the `themes/`
+/// directory — `"../settings"` would make the settings file itself be read as a
+/// theme. NUL can't be a file path either. Whether the name resolves to a theme
+/// is `bt-shell`'s job.
 fn theme_name(
     text: &str,
     item: &Item,
@@ -2036,11 +2081,12 @@ fn theme_name(
     Some(name.to_owned())
 }
 
-/// `font.family`: metin; kırpılmış hâli boşsa `None` (zincir).
+/// `font.family`: text; `None` (the chain) if its trimmed form is empty.
 ///
-/// Boş ad bir hata değil: "aileyi sen seç" demenin yazılabilir yolu, anahtarı
-/// silmeden. Adın makinede olup olmadığı burada sorulmuyor — dosya sistemi
-/// değil CoreText ister, `bt-atlas` söylüyor.
+/// An empty name isn't an error: it is the writable way of saying "you pick the
+/// family", without deleting the key. Whether the name exists on the machine
+/// isn't asked here — it needs CoreText, not the file system, and `bt-atlas`
+/// says it.
 fn font_family(
     text: &str,
     item: &Item,
@@ -2067,19 +2113,20 @@ fn font_family(
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-/// `font.size`: tam sayı ya da ondalıklı, sonlu ve sıfırdan büyük.
+/// `font.size`: an integer or a decimal, finite and greater than zero.
 ///
-/// Üst sınır **yok**: kırpma `punto × ölçek`'e bağlı ve `bt-atlas`'ta sessiz
-/// (`discussion.md` → Karar 4). Burada bir tavan olsaydı iki sahibi olurdu
-/// ve pencere ekran değiştirdikçe tanı gelip giderdi.
-/// `font.line_height`: `1.0` ile [`MAX_LINE_HEIGHT`] arasında bir çarpan.
+/// There is **no** upper bound: clamping depends on `point size × scale` and is
+/// silent in `bt-atlas` (`discussion.md` → Karar 4). Had there been a ceiling
+/// here it would have had two owners and the diagnostic would come and go as the
+/// window changes screens.
+/// `font.line_height`: a multiplier between `1.0` and [`MAX_LINE_HEIGHT`].
 ///
-/// [`font_size`]'ın aksine **iki uçlu**. Alt uç fontun kendi metriğinin
-/// altına inmeyi yasaklıyor (bkz. [`FontOptions::line_height`]); üst uç keyfi
-/// değil bir bütçe: her yuva `cell_w × cell_h` bayt ve atlas sabit boyutlu,
-/// yani çarpan büyüdükçe atlasa sığan glyph sayısı düşüyor. Sınırsız bırakmak
-/// tofu'ya düşen bir terminal demekti ve belirti ancak uzun bir oturumdan
-/// sonra görünürdü.
+/// **Two-ended**, unlike [`font_size`]. The lower end forbids going below the
+/// font's own metrics (see [`FontOptions::line_height`]); the upper end isn't
+/// arbitrary but a budget: every slot is `cell_w × cell_h` bytes and the atlas is
+/// fixed-size, so as the multiplier grows the number of glyphs fitting the atlas
+/// falls. Leaving it unbounded would have meant a terminal that falls to tofu
+/// and the symptom would show only after a long session.
 fn line_height(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagnostic>) -> f64 {
     ranged_float(
         text,
@@ -2091,19 +2138,20 @@ fn line_height(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Dia
     )
 }
 
-/// Aralıklı ondalık anahtarın **ortak gövdesi**: sayı değilse ya da aralık
-/// dışındaysa anahtar kendi değerinde kalır ve tanı bırakılır.
+/// The **shared body** of a ranged decimal key: if it isn't a number or is out
+/// of range the key stays at its own value and a diagnostic is left.
 ///
-/// Ayrı fonksiyon, çünkü aynı ~35 satır depoda **iki kez elle** yazılmıştı
-/// (`line_height`, `font_size`) ve 016 üç anahtar daha getiriyordu — yardımcı
-/// adlandırılmasa üç kopya daha doğardı (`/plan-review`).
+/// A separate function, because the same ~35 lines had been written **twice by
+/// hand** in the repo (`line_height`, `font_size`) and 016 was bringing three
+/// more keys — had the helper not been named, three more copies would have been
+/// born (`/plan-review`).
 ///
-/// **Kırpma yok, red var:** aralık dışı değer sessizce uca çekilseydi
-/// kullanıcı yanlış yazdığını hiç görmezdi. Deponun kuralı bu
-/// ([`Settings::parse_keeping`]).
+/// **No clamping, rejection:** had an out-of-range value been silently pulled
+/// to the end, the user would never see they wrote it wrong. That is the repo's
+/// rule ([`Settings::parse_keeping`]).
 ///
-/// `font_size` **taşınmadı**: tek uçlu (`> 0`) ve tanı metni bu kalıba
-/// girmiyor; zorlamak mesajı bozardı.
+/// `font_size` was **not moved**: it is one-ended (`> 0`) and its diagnostic text
+/// doesn't fit this mold; forcing it would have spoiled the message.
 fn ranged_float(
     text: &str,
     item: &Item,
@@ -2140,11 +2188,11 @@ fn ranged_float(
     value
 }
 
-/// Satır yüksekliği çarpanının tavanı — atlas bütçesi (bkz. [`line_height`]).
+/// The line-height multiplier's ceiling — the atlas budget (see [`line_height`]).
 pub const MAX_LINE_HEIGHT: f64 = 2.0;
 
-/// Satır yüksekliği çarpanının kabul aralığı: alt ucu fontun kendi metriği
-/// ([`FontOptions::line_height`]), üst ucu [`MAX_LINE_HEIGHT`].
+/// The line-height multiplier's accepted range: its lower end is the font's own
+/// metrics ([`FontOptions::line_height`]), its upper end [`MAX_LINE_HEIGHT`].
 pub const LINE_HEIGHT_RANGE: std::ops::RangeInclusive<f64> = 1.0..=MAX_LINE_HEIGHT;
 
 fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagnostic>) -> f64 {
@@ -2155,8 +2203,9 @@ fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagn
         line,
         message,
     };
-    // `as f64` tam sayıda kayıpsız değil ama anlamlı her puntoda kayıpsız;
-    // kayıp başladığı büyüklük zaten kırpmanın çok ötesinde.
+    // `as f64` isn't lossless for every integer but is lossless at every
+    // meaningful point size; the magnitude where loss begins is far beyond
+    // clamping anyway.
     let value = match (item.as_float(), item.as_integer()) {
         (Some(value), _) => value,
         (None, Some(value)) => value as f64,
@@ -2177,19 +2226,21 @@ fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagn
     value
 }
 
-/// Adlandırılmış seçenek anahtarının **tek gövdesi**: listedeki adlardan
-/// biri değilse anahtar `fallback`'te kalır ve tanı bırakılır. Her dizge
-/// enum'u (`clipboard.osc52` dahil) buradan okunuyor, tanının "must be …"
-/// listesi ve "using …" değeri de tipin `NAMES` tablosundan — yazılış tek
-/// yerde, yani tanı ayrıştırıcının reddettiği bir değeri öneremez.
+/// The **single body** of a named-option key: if it isn't one of the names in the
+/// list the key stays at `fallback` and a diagnostic is left. Every string enum
+/// (`clipboard.osc52` included) is read from here, and the diagnostic's "must be
+/// …" list and "using …" value also come from the type's `NAMES` table — the
+/// spelling is in one place, so the diagnostic can't suggest a value the parser
+/// rejects.
 ///
-/// Kabul edilmeyen değerin `fallback`'e düşmesi ([`Settings::parse_keeping`])
-/// bu anahtarların hepsinde doğru, çünkü yanlış tahminin belirtisi görünür:
-/// imlecin şekli, kayması, kaydırmanın adımı. Tek istisna `osc52` ve çağıran
-/// onu `Osc52::Off` vererek kuruyor — orada yanlış tahmin sessiz.
+/// A value that isn't accepted falling to `fallback`
+/// ([`Settings::parse_keeping`]) is right for all of these keys, because the
+/// symptom of a wrong guess is visible: the cursor's shape, its glide, the
+/// scroll step. The one exception is `osc52` and the caller sets it up by
+/// passing `Osc52::Off` — there a wrong guess is silent.
 ///
-/// Büyük/küçük harf **duyarlı**: `"Hollow"` bir yazım hatası ve sessizce
-/// kabul edilmesi kullanıcıyı yanıltırdı.
+/// **Case-sensitive**: `"Hollow"` is a typo and silently accepting it would
+/// mislead the user.
 fn named_enum<T: Copy + PartialEq>(
     text: &str,
     item: &Item,
@@ -2229,17 +2280,17 @@ fn named_enum<T: Copy + PartialEq>(
     fallback
 }
 
-/// `remote.hosts`: `{ host, mark }` girdilerinin dizisi (037 Karar 2).
+/// `remote.hosts`: the array of `{ host, mark }` entries (037 Karar 2).
 ///
-/// **Bozuk tek bir girdi anahtarın tamamını reddediyor** ve `fallback`'in
-/// listesi kalıyor — `parse_keeping`'in kuralı, istisnasız: listeden yalnız
-/// bozuk girdiyi atmak sırayı değiştirir ve bir globun arkasındaki tam adı
-/// öne çıkarıp işareti sessizce değiştirebilirdi. Tanı ilk bozuk girdinin
-/// satırını söylüyor.
+/// **A single broken entry rejects the whole key** and `fallback`'s list stays —
+/// `parse_keeping`'s rule, without exception: dropping only the broken entry from
+/// the list would change the order and could silently change a mark by bringing
+/// an exact name behind a glob to the front. The diagnostic names the first
+/// broken entry's line.
 ///
-/// Satır içi dizi de (`hosts = [{ … }]`) bölüm dizisi de (`[[remote.hosts]]`)
-/// kabul: ikisi de aynı listeyi yazıyor ve TOML'u elle yazan kullanıcı
-/// ikincisini de seçebilir.
+/// Both an inline array (`hosts = [{ … }]`) and an array of tables
+/// (`[[remote.hosts]]`) are accepted: both write the same list and a user
+/// writing TOML by hand can choose the second too.
 fn host_rules(
     text: &str,
     item: &Item,
@@ -2311,9 +2362,9 @@ fn host_rules(
     rules
 }
 
-/// Değerin yazılışı `names` tablosunda. Tablolar her varyantı taşıyor
-/// (`every_name_reads_back_as_its_value` bekçi), boş dize yalnız eksik bir
-/// tablonun belirtisi olurdu.
+/// The value's spelling is in the `names` table. The tables carry every variant
+/// (guard `every_name_reads_back_as_its_value`), an empty string would only be
+/// the symptom of a missing table.
 pub(crate) fn name_in<T: PartialEq>(names: &'static [(&'static str, T)], value: T) -> &'static str {
     names
         .iter()
@@ -2321,35 +2372,35 @@ pub(crate) fn name_in<T: PartialEq>(names: &'static [(&'static str, T)], value: 
         .map_or("", |(name, _)| *name)
 }
 
-/// Bayt konumunun 1'den başlayan satırı.
+/// The 1-based line of a byte position.
 ///
-/// `toml_edit`'in kendi çevirisi (`translate_position`) crate'e özel;
-/// ayrıştırıcının verdiği konum her zaman metnin içinde ama `get` yine de
-/// sınırın dışını `None`'a çeviriyor, dilimleme paniği yok.
+/// `toml_edit`'s own translation (`translate_position`) is private to the crate;
+/// the position the parser gives is always inside the text but `get` still turns
+/// out-of-bounds into `None`, so there is no slicing panic.
 pub(crate) fn line_of(text: &str, offset: usize) -> Option<usize> {
     let before = text.as_bytes().get(..offset)?;
     Some(before.iter().filter(|&&byte| byte == b'\n').count() + 1)
 }
 
-/// Ayrıştırıcının iletisinden alt başlığa sığan kısmı: nedeni, "beklenen"
-/// listesi olmadan.
+/// The part of the parser's message that fits the subtitle: the reason, without
+/// the "expected" list.
 ///
-/// `toml_edit` iletiyi "neden, expected a, b, …" diye kuruyor ve liste on
-/// kaleme çıkabiliyor (`a = "\q"`); tek satırlık alt başlıkta kesilirdi ve
-/// kullanıcıya satırı göstermek zaten yetiyor.
+/// `toml_edit` builds the message as "reason, expected a, b, …" and the list can
+/// reach ten items (`a = "\q"`); it would be cut off in a one-line subtitle and
+/// showing the user the line is enough anyway.
 fn parser_reason(message: &str) -> &str {
     message
         .split_once(", expected")
         .map_or(message, |(reason, _)| reason)
 }
 
-/// Tanı metninde bulunan değerin türü.
+/// The type of the value found, for the diagnostic text.
 pub(crate) fn kind(item: &Item) -> &'static str {
     match item {
         Item::None => "nothing",
         Item::Table(_) => "a section",
-        // `[[terminal]]`: bölüm **dizisi**. "Bölüm olmalı, bölüm bulundu"
-        // demek kullanıcıya `[[…]]`'ı `[…]` yapmasını söylemezdi.
+        // `[[terminal]]`: an **array** of sections. Saying "must be a section,
+        // found a section" wouldn't tell the user to turn `[[…]]` into `[…]`.
         Item::ArrayOfTables(_) => "an array of sections (`[[…]]`)",
         Item::Value(value) => match value {
             toml_edit::Value::String(_) => "a string",
@@ -2368,15 +2419,19 @@ mod tests {
     use super::*;
 
     fn clean(text: &str) -> Settings {
-        let parsed = Settings::parse(text).expect("ayrıştırılabilir metin");
-        assert_eq!(parsed.diagnostics, Vec::new(), "tanı beklenmiyordu: {text}");
+        let parsed = Settings::parse(text).expect("parseable text");
+        assert_eq!(
+            parsed.diagnostics,
+            Vec::new(),
+            "no diagnostic expected: {text}"
+        );
         parsed.settings
     }
 
     fn rejected(text: &str) -> (Settings, Diagnostic) {
-        let parsed = Settings::parse(text).expect("ayrıştırılabilir metin");
+        let parsed = Settings::parse(text).expect("parseable text");
         let [diagnostic] = <[Diagnostic; 1]>::try_from(parsed.diagnostics)
-            .unwrap_or_else(|got| panic!("tek tanı beklendi: {got:?}"));
+            .unwrap_or_else(|got| panic!("a single diagnostic expected: {got:?}"));
         (parsed.settings, diagnostic)
     }
 
@@ -2388,15 +2443,15 @@ mod tests {
 
     #[test]
     fn template_is_the_defaults() {
-        // "Settings…"ın yarattığı dosya bugünkü davranışı değiştirmemeli:
-        // tanısız ve varsayılanların ta kendisi. Varsayılan değişip şablon
-        // değişmezse burada düşer.
+        // The file "Settings…" creates mustn't change today's behavior: no
+        // diagnostic and the defaults themselves. If a default changes and the
+        // template doesn't, this fails here.
         assert_eq!(clean(Settings::TEMPLATE), Settings::default());
 
-        // Varsayılanı olan her anahtar **yazılı**, yorumda değil: kullanıcı
-        // değeri yerinde değiştiriyor ve menüden tema seçimi satırı yerinde
-        // yazıyor. Boş bir şablon yukarıdaki eşitliği de geçerdi.
-        let doc = document(Settings::TEMPLATE).expect("şablon TOML");
+        // Every key that has a default is **written**, not in a comment: the user
+        // changes the value in place and choosing a theme from the menu writes the
+        // line in place. An empty template would pass the equality above too.
+        let doc = document(Settings::TEMPLATE).expect("template TOML");
         for (section, key) in [
             ("terminal", "scrollback"),
             ("terminal", "cursor"),
@@ -2422,39 +2477,41 @@ mod tests {
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
-                "şablonda {section}.{key} yok"
+                "{section}.{key} is missing from the template"
             );
         }
 
-        // Varsayılanı olmayan `family` yorumda bir örnek; yorumu kaldıran
-        // kullanıcı geçerli bir değer bulmalı.
+        // `family`, which has no default, is an example in a comment; a user who
+        // uncomments it must find a valid value.
         let uncommented = Settings::TEMPLATE.replace("# family = ", "family = ");
         assert_ne!(
             uncommented,
             Settings::TEMPLATE,
-            "şablonda family örneği yok"
+            "no family example in the template"
         );
         assert!(clean(&uncommented).font.family.is_some());
     }
 
     #[test]
     fn documented_template_is_the_template() {
-        // `docs/AYARLAR.md` şablonu olduğu gibi gösteriyor; kopya drift eder.
+        // `docs/AYARLAR.md` shows the template as it is; a copy would drift.
         let doc = include_str!("../../../docs/AYARLAR.md");
         let (_, after) = doc
             .split_once("### Şablon\n")
-            .expect("AYARLAR.md'de şablon başlığı yok");
+            .expect("no template heading in AYARLAR.md");
         let (_, block) = after
             .split_once("```toml\n")
-            .expect("başlığın altında toml bloğu yok");
-        let (block, _) = block.split_once("```").expect("toml bloğu kapanmıyor");
+            .expect("no toml block under the heading");
+        let (block, _) = block
+            .split_once("```")
+            .expect("the toml block doesn't close");
         assert_eq!(block, Settings::TEMPLATE);
     }
 
     #[test]
     fn scrollback_is_read() {
         assert_eq!(clean("[terminal]\nscrollback = 500\n").scrollback, 500);
-        // Satır içi tablo aynı bölüm.
+        // An inline table is the same section.
         assert_eq!(clean("terminal = { scrollback = 0 }").scrollback, 0);
         assert_eq!(
             clean(&format!("[terminal]\nscrollback = {SCROLLBACK_MAX}")).scrollback,
@@ -2493,7 +2550,7 @@ mod tests {
     #[test]
     fn theme_name_is_read() {
         assert_eq!(clean("[appearance]\ntheme = \"paper\"\n").theme, "paper");
-        // Varsayılan sistemi izlemek, çift gömülü temalar.
+        // The default is to follow the system, the pair is the embedded themes.
         let defaults = clean("");
         assert_eq!(
             (
@@ -2503,7 +2560,8 @@ mod tests {
             ),
             ("system", "bateri-light", "bateri")
         );
-        // Bölüm satır içi de yazılabilir; komşu bölüm okumayı bozmaz.
+        // The section can be written inline too; a neighboring section doesn't
+        // break reading.
         let settings = clean("appearance = { theme = \"a b.c\" }\n[terminal]\nscrollback = 3\n");
         assert_eq!((settings.theme.as_str(), settings.scrollback), ("a b.c", 3));
 
@@ -2528,7 +2586,8 @@ mod tests {
         assert_eq!(pair.theme_for(true), "ink");
         assert_eq!(pair.theme_for(false), "paper");
         assert!(pair.follows_system());
-        // Sabit ad görünümden bağımsız; çift yerinde kalsa da okunmaz.
+        // A fixed name is independent of the appearance; even if the pair stays in
+        // place it isn't read.
         let fixed = Settings {
             theme: "bateri".to_owned(),
             ..pair
@@ -2540,8 +2599,9 @@ mod tests {
 
     #[test]
     fn unchanged_settings_have_no_changes() {
-        // Her kayıtta dosyanın tamamı yeniden okunuyor; aynı metin boş fark
-        // vermeli, yoksa her kayıt geçmişi yeniden kurar ve kare ister.
+        // On every save the whole file is re-read; the same text must give an
+        // empty difference, otherwise every save would rebuild the history and
+        // request a frame.
         let text = "[terminal]\nscrollback = 500\n[appearance]\ntheme = \"paper\"\n";
         assert_eq!(clean(text).changes(&clean(text)), Changes::default());
         assert_eq!(
@@ -2573,18 +2633,19 @@ mod tests {
                 blink: CursorBlink::default(),
             }
         );
-        // Tema adları terminal seçeneği değil: tema her kayıtta yeniden
-        // çözülüyor (`bt-shell`), fark onu kapılamıyor.
+        // Theme names aren't a terminal option: the theme is re-resolved on every
+        // save (`bt-shell`), the difference can't gate it.
         let themed = clean("[terminal]\nscrollback = 500\n[appearance]\ntheme = \"paper\"\n");
         assert_eq!(before.changes(&themed), Changes::default());
     }
 
     #[test]
     fn rejected_values_keep_the_given_settings() {
-        // Kayıt anının kuralı (`/code-review` bulgusu): `scrollback`'in
-        // yanlış türde kaydı varsayılana (on bin) düşseydi yüz binlik geçmiş
-        // o anda geri dönülmez kırpılırdı. Kabul edilmeyen değer verilen
-        // ayarlarınkini alıyor ve tanı **onu** söylüyor.
+        // The save-time rule (a `/code-review` finding): had a wrong-typed save of
+        // `scrollback` fallen to the default (ten thousand), a hundred-thousand
+        // history would have been irreversibly truncated at that moment. A value
+        // that isn't accepted takes the given settings' and the diagnostic says
+        // **that**.
         let current = Settings {
             scrollback: 100_000,
             cursor: CaretShape::default(),
@@ -2609,7 +2670,7 @@ mod tests {
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
             &current,
         )
-        .expect("ayrıştırılabilir metin");
+        .expect("parseable text");
         assert_eq!(parsed.settings.scrollback, 100_000);
         assert_eq!(parsed.settings.theme, "paper");
         assert_eq!(
@@ -2623,26 +2684,28 @@ mod tests {
                 "`appearance.theme` must be a string, found an integer; using \"paper\"",
             ]
         );
-        // Dosyada **olmayan** anahtar yine varsayılan: dosya bir şey
-        // söylemiyor, kabul edilmeyen bir değer de yok.
+        // A key **not in** the file is still the default: the file says nothing,
+        // and there is no value that isn't accepted either.
         assert_eq!(parsed.settings.light_theme, "bateri-light");
         assert_eq!(parsed.settings.dark_theme, "bateri");
 
-        // Tavanı aşan değer tavana kırpılıyor, verilene değil: niyet belli.
+        // A value above the ceiling is clamped to the ceiling, not to the given
+        // one: the intent is clear.
         let parsed = Settings::parse_keeping("[terminal]\nscrollback = 1000000\n", &current)
-            .expect("ayrıştırılabilir metin");
+            .expect("parseable text");
         assert_eq!(parsed.settings.scrollback, SCROLLBACK_MAX);
 
-        // Bölüm yanlış türde: bölümün bütün anahtarları kabul edilmemiş sayılır.
+        // The section has the wrong type: all of the section's keys count as not
+        // accepted.
         let parsed = Settings::parse_keeping("terminal = 5\nappearance = 1\n", &current)
-            .expect("ayrıştırılabilir metin");
+            .expect("parseable text");
         assert_eq!(parsed.settings, current);
         assert_eq!(parsed.diagnostics.len(), 2);
 
-        // `parse` açılışın kuralı: aynı metin varsayılana düşüyor.
+        // `parse` is the startup rule: the same text falls to the default.
         assert_eq!(
             Settings::parse("terminal = 5\nappearance = 1\n")
-                .expect("ayrıştırılabilir metin")
+                .expect("parseable text")
                 .settings,
             Settings::default()
         );
@@ -2650,7 +2713,7 @@ mod tests {
 
     #[test]
     fn font_is_read() {
-        // Dosyada yoksa zincir ve 13 punto.
+        // If not in the file, the chain and 13 points.
         assert_eq!(
             clean("").font,
             FontOptions {
@@ -2667,9 +2730,11 @@ mod tests {
                 line_height: 1.0
             }
         );
-        // Tam sayı da punto: kullanıcının ilk yazacağı `size = 14`.
+        // An integer is a point size too: the first thing the user will write is
+        // `size = 14`.
         assert_eq!(clean("[font]\nsize = 14\n").font.size, 14.0);
-        // Boş aile (yalnız boşluk da) zincir demek, hata değil; ad kırpılıyor.
+        // An empty family (whitespace alone too) means the chain, not an error;
+        // the name is trimmed.
         assert_eq!(clean("[font]\nfamily = \"\"\n").font.family, None);
         assert_eq!(clean("[font]\nfamily = \"  \"\n").font.family, None);
         assert_eq!(
@@ -2680,8 +2745,8 @@ mod tests {
 
     #[test]
     fn broken_font_size_falls_back_with_diagnostic() {
-        // TOML `nan` ve `inf`'i sayı olarak kabul ediyor; tip denetimi onları
-        // geçirir, kural geçirmemeli. Negatif ve sıfır punto da.
+        // TOML accepts `nan` and `inf` as numbers; the type check lets them
+        // through, the rule mustn't. Negative and zero point sizes too.
         for (value, found) in [
             ("-1", "-1"),
             ("0", "0"),
@@ -2717,8 +2782,8 @@ mod tests {
 
     #[test]
     fn rejected_font_values_keep_the_given_settings() {
-        // Kayıt anının kuralı fontta da: yarım kaydedilmiş bir punto pencereyi
-        // varsayılana çakıp geri döndürmesin.
+        // The save-time rule applies to the font too: a half-saved point size
+        // mustn't slam the window to the default and bring it back.
         let current = Settings {
             font: FontOptions {
                 family: Some("Monaco".to_owned()),
@@ -2728,7 +2793,7 @@ mod tests {
             ..Settings::default()
         };
         let parsed = Settings::parse_keeping("[font]\nfamily = false\nsize = 0\n", &current)
-            .expect("ayrıştırılabilir metin");
+            .expect("parseable text");
         assert_eq!(parsed.settings.font, current.font);
         assert_eq!(
             parsed
@@ -2741,8 +2806,7 @@ mod tests {
                 "`font.size` must be a number greater than 0, found 0; using 18",
             ]
         );
-        let parsed =
-            Settings::parse_keeping("font = 5\n", &current).expect("ayrıştırılabilir metin");
+        let parsed = Settings::parse_keeping("font = 5\n", &current).expect("parseable text");
         assert_eq!(parsed.settings, current);
         assert_eq!(parsed.diagnostics.len(), 1);
     }
@@ -2762,15 +2826,14 @@ mod tests {
             before.changes(&clean("[font]\nfamily = \"Monaco\"\nsize = 13\n")),
             font_only
         );
-        // Açıkça yazılan varsayılan bir fark değil: kayıt atlası yeniden
-        // kurdurmaz.
+        // A default written explicitly isn't a difference: saving doesn't make the
+        // atlas be rebuilt.
         assert_eq!(Settings::default().changes(&before), Changes::default());
     }
 
     #[test]
     fn osc52_is_read() {
-        // Dosyada yoksa açık: ssh'taki vim'in kopyası kutudan çıktığı gibi
-        // çalışsın.
+        // On if not in the file: vim over ssh having its copy work out of the box.
         assert_eq!(clean("").osc52, Osc52::Copy);
         assert_eq!(clean("[clipboard]\nosc52 = \"copy\"\n").osc52, Osc52::Copy);
         assert_eq!(clean("[clipboard]\nosc52 = \"off\"\n").osc52, Osc52::Off);
@@ -2779,8 +2842,8 @@ mod tests {
 
     #[test]
     fn unrecognized_osc52_is_off_with_diagnostic() {
-        // Kapalıya düşer: okuma yönünün adı, büyük harfli yazım, `false`,
-        // sayı ve bölüm — hiçbiri varsayılana (açık) dönmüyor.
+        // Falls to off: the read direction's name, an uppercase spelling, `false`,
+        // a number and a section — none returns to the default (on).
         for (value, found) in [
             ("\"paste\"", "\"paste\""),
             ("\"Copy\"", "\"Copy\""),
@@ -2806,7 +2869,8 @@ mod tests {
                 )
             );
         }
-        // Bölüm yanlış türde: anahtarı kabul edilmemiş sayılıyor, yine kapalı.
+        // The section has the wrong type: its key counts as not accepted, off
+        // again.
         let (settings, diagnostic) = rejected("clipboard = \"copy\"\n");
         assert_eq!(settings.osc52, Osc52::Off);
         assert_eq!(diagnostic.key, Some("clipboard"));
@@ -2814,29 +2878,29 @@ mod tests {
 
     #[test]
     fn rejected_osc52_is_off_even_when_the_given_settings_copy() {
-        // Kayıt anının "geçerli değeri tut" kuralının tek istisnası:
-        // `"of"` diye yanlış yazılmış bir kapatma panoyu açık tutmamalı.
+        // The only exception to the save-time "keep the current value" rule: a
+        // turn-off mistyped as `"of"` mustn't keep the clipboard on.
         let current = Settings::default();
         assert_eq!(current.osc52, Osc52::Copy);
         for text in ["[clipboard]\nosc52 = \"of\"\n", "clipboard = 5\n"] {
-            let parsed = Settings::parse_keeping(text, &current).expect("ayrıştırılabilir metin");
+            let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
             assert_eq!(parsed.settings.osc52, Osc52::Off, "{text}");
             assert_eq!(parsed.diagnostics.len(), 1, "{text}");
         }
-        // Dosyadan silinen anahtar ise varsayılana döner: kabul edilmeyen
-        // bir değer yok, kullanıcı varsayılanı istiyor.
+        // A key deleted from the file returns to the default: there is no value
+        // that isn't accepted, the user wants the default.
         let off = Settings {
             osc52: Osc52::Off,
             ..Settings::default()
         };
-        let parsed = Settings::parse_keeping("", &off).expect("ayrıştırılabilir metin");
+        let parsed = Settings::parse_keeping("", &off).expect("parseable text");
         assert_eq!(parsed.settings.osc52, Osc52::Copy);
     }
 
     #[test]
     fn osc52_change_is_a_terminal_change() {
-        // Canlı değişim terminal seçeneklerinin **tamamıyla** gidiyor:
-        // `scrollback` yanında taşınıyor, onu varsayılana çekmiyor.
+        // A live change goes with **all** of the terminal options: `scrollback`
+        // is carried alongside, it doesn't pull it to the default.
         let before = clean("[terminal]\nscrollback = 500\n");
         let after = clean("[terminal]\nscrollback = 500\n[clipboard]\nosc52 = \"off\"\n");
         assert_eq!(
@@ -2862,20 +2926,20 @@ mod tests {
 
     #[test]
     fn cursor_shape_is_read() {
-        // Dosyada yoksa `block`: alacritty'nin varsayılanıyla aynı, yani
-        // ayar gelmeden önceki davranış birebir korunuyor.
+        // If not in the file, `block`: the same as alacritty's default, so the
+        // behavior before the setting arrived is preserved exactly.
         assert_eq!(clean("").cursor, CaretShape::Block);
         assert_eq!(
             clean("[terminal]\ncursor = \"underline\"\n").cursor,
             CaretShape::Underline
         );
-        // Satır içi tablo aynı bölüm.
+        // An inline table is the same section.
         assert_eq!(
             clean("terminal = { cursor = \"beam\" }").cursor,
             CaretShape::Beam
         );
-        // Tanınmayan değer anahtarı **değiştirmiyor** ve tanı bırakıyor;
-        // büyük/küçük harf duyarlı.
+        // An unrecognized value **doesn't change** the key and leaves a
+        // diagnostic; case-sensitive.
         for text in [
             "[terminal]\ncursor = \"bar\"\n",
             "[terminal]\ncursor = \"Block\"\n",
@@ -2884,9 +2948,9 @@ mod tests {
             assert_eq!(settings.cursor, CaretShape::Block, "{text}");
             assert_eq!(diagnostic.key, Some("terminal.cursor"), "{text}");
         }
-        // Bölüm **bölüm değilse** (ör. `terminal = 1`) anahtar fallback'e
-        // düşüyor — `scrollback`'in ikinci kolunun aynısı. Tanı bölümün
-        // kendisine ait, anahtara değil.
+        // If the section **isn't a section** (e.g. `terminal = 1`) the key falls
+        // to fallback — the same as `scrollback`'s second arm. The diagnostic
+        // belongs to the section itself, not the key.
         let (settings, diagnostic) = rejected("terminal = 1");
         assert_eq!(settings.cursor, CaretShape::Block);
         assert_eq!(diagnostic.key, Some("terminal"));
@@ -2894,8 +2958,8 @@ mod tests {
 
     #[test]
     fn cursor_blink_is_read() {
-        // Dosyada yoksa `off`: yanıp sönen imleç pencereyi kalıcı olarak
-        // meşgul tutuyor ve bu kullanıcının **seçtiği** bir şey olmalı.
+        // `off` if not in the file: a blinking cursor keeps the window
+        // permanently busy and that must be something the user **chose**.
         assert_eq!(clean("").cursor_blink, CursorBlink::Off);
         assert_eq!(
             clean("[terminal]\ncursor_blink = \"auto\"\n").cursor_blink,
@@ -2912,9 +2976,9 @@ mod tests {
 
     #[test]
     fn the_blink_setting_overrides_what_the_program_asks() {
-        // `auto` uygulamayı izliyor; ötekiler **eziyor** ve ezmenin iki yönü
-        // de şart: `\e[5 q` gönderen vim `off`'u delememeli, `\e[2 q`
-        // gönderen bir program da `on`'u susturmamalı.
+        // `auto` follows the application; the others **override** and both
+        // directions of overriding are a must: vim sending `\e[5 q` mustn't break
+        // through `off`, and a program sending `\e[2 q` mustn't silence `on`.
         assert!(CursorBlink::Auto.resolve(true));
         assert!(!CursorBlink::Auto.resolve(false));
         assert!(CursorBlink::On.resolve(false), "on ezmedi");
@@ -2923,8 +2987,8 @@ mod tests {
 
     #[test]
     fn cursor_motion_is_read() {
-        // Dosyada yoksa `spring`: özelliği kapalı sevk etmemek kararın kendisi
-        // (008 Karar 6).
+        // `spring` if not in the file: not shipping the feature off is the
+        // decision itself (008 Karar 6).
         assert_eq!(clean("").cursor_motion, CursorMotion::Spring);
         assert_eq!(
             clean("[motion]\ncursor_motion = \"snap\"\n").cursor_motion,
@@ -2942,10 +3006,10 @@ mod tests {
 
     #[test]
     fn unrecognized_cursor_motion_keeps_its_own_key() {
-        // `osc52`'nin "kabul edilmeyen değer kapalıya düşer" istisnası buraya
-        // **geçmiyor**: yanlış tahminin bedeli görünür bir animasyon, sessiz
-        // bir pano sızıntısı değil (008 Karar 6). Yani kural öteki
-        // anahtarlarınki — anahtar kendi değerinde kalır, yanında tanı.
+        // `osc52`'s "a value that isn't accepted falls to off" exception does
+        // **not** pass here: the cost of a wrong guess is a visible animation, not
+        // a silent clipboard leak (008 Karar 6). So the rule is the other keys':
+        // the key stays at its own value, with a diagnostic beside it.
         for (value, found) in [
             ("\"sprong\"", "\"sprong\""),
             ("\"Spring\"", "\"Spring\""),
@@ -2964,27 +3028,26 @@ found {found}; using \"spring\""
                 )
             );
         }
-        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar:
-        // ekrandaki stil bir yazım hatasıyla değişmemeli.
+        // The value that stands in at save time is the **current** setting, not
+        // the default: the style on screen mustn't change because of a typo.
         let current = Settings {
             cursor_motion: CursorMotion::Ease,
             ..Settings::default()
         };
         let parsed = Settings::parse_keeping("[motion]\ncursor_motion = \"sprong\"\n", &current)
-            .expect("ayrıştırılabilir metin");
+            .expect("parseable text");
         assert_eq!(parsed.settings.cursor_motion, CursorMotion::Ease);
         assert!(parsed.diagnostics[0].message.ends_with("using \"ease\""));
-        // Bölüm yanlış türde: anahtarı kabul edilmemiş sayılıyor.
-        let parsed =
-            Settings::parse_keeping("motion = 5\n", &current).expect("ayrıştırılabilir metin");
+        // The section has the wrong type: its key counts as not accepted.
+        let parsed = Settings::parse_keeping("motion = 5\n", &current).expect("parseable text");
         assert_eq!(parsed.settings.cursor_motion, CursorMotion::Ease);
         assert_eq!(parsed.diagnostics[0].key, Some("motion"));
     }
 
     #[test]
     fn cursor_motion_change_is_a_motion_change() {
-        // Kendi farkı: stil renderer'ın ritmine gidiyor, oturuma ya da fonta
-        // değil — ikisini de kıpırdatmamalı.
+        // Its own difference: the style goes to the renderer's rhythm, not to the
+        // session or the font — it mustn't move either.
         let before = clean("");
         let after = clean("[motion]\ncursor_motion = \"snap\"\n");
         assert_eq!(
@@ -3002,8 +3065,8 @@ found {found}; using \"spring\""
 
     #[test]
     fn reduce_motion_is_read() {
-        // Dosyada yoksa `system`: en olası seçim "sistemi izle" ve anahtarın
-        // üç değerli olmasının sebebi de bu (`ReduceMotion`).
+        // `system` if not in the file: the most likely choice is "follow the
+        // system" and that is the reason the key is three-valued (`ReduceMotion`).
         assert_eq!(clean("").reduce_motion, ReduceMotion::System);
         assert_eq!(
             clean("[motion]\nreduce_motion = \"on\"\n").reduce_motion,
@@ -3017,7 +3080,8 @@ found {found}; using \"spring\""
             clean("motion = { reduce_motion = \"system\" }\n").reduce_motion,
             ReduceMotion::System
         );
-        // İki anahtar birbirini ezmiyor: aynı bölümde ikisi de okunuyor.
+        // The two keys don't override each other: both are read in the same
+        // section.
         let both = clean("[motion]\ncursor_motion = \"ease\"\nreduce_motion = \"on\"\n");
         assert_eq!(both.cursor_motion, CursorMotion::Ease);
         assert_eq!(both.reduce_motion, ReduceMotion::On);
@@ -3025,8 +3089,8 @@ found {found}; using \"spring\""
 
     #[test]
     fn unrecognized_reduce_motion_keeps_its_own_key() {
-        // `cursor_motion` ile aynı kural: anahtar kendi değerinde kalır,
-        // yanında tanı — ve **yalnız kendi** anahtarı etkilenir.
+        // The same rule as `cursor_motion`: the key stays at its own value, with a
+        // diagnostic beside it — and **only its own** key is affected.
         for (value, found) in [
             ("\"yes\"", "\"yes\""),
             ("\"System\"", "\"System\""),
@@ -3052,25 +3116,25 @@ found {found}; using \"system\""
                 )
             );
         }
-        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
+        // The value that stands in at save time is the **current** setting, not
+        // the default.
         let current = Settings {
             reduce_motion: ReduceMotion::Off,
             ..Settings::default()
         };
         let parsed = Settings::parse_keeping("[motion]\nreduce_motion = \"yes\"\n", &current)
-            .expect("ayrıştırılabilir metin");
+            .expect("parseable text");
         assert_eq!(parsed.settings.reduce_motion, ReduceMotion::Off);
         assert!(parsed.diagnostics[0].message.ends_with("using \"off\""));
-        // Bölüm yanlış türde: iki anahtar da kabul edilmemiş sayılıyor.
-        let parsed =
-            Settings::parse_keeping("motion = 5\n", &current).expect("ayrıştırılabilir metin");
+        // The section has the wrong type: both keys count as not accepted.
+        let parsed = Settings::parse_keeping("motion = 5\n", &current).expect("parseable text");
         assert_eq!(parsed.settings.reduce_motion, ReduceMotion::Off);
     }
 
     #[test]
     fn reduce_motion_change_is_a_motion_change() {
-        // `cursor_motion` ile **aynı** farka düşüyor: ikisi de aynı yere,
-        // aynı çağrı yerinde gidiyor (`Changes::motion`).
+        // It lands in the **same** difference as `cursor_motion`: both go to the
+        // same place, at the same call site (`Changes::motion`).
         let before = clean("");
         let after = clean("[motion]\nreduce_motion = \"on\"\n");
         assert_eq!(
@@ -3105,8 +3169,9 @@ found {found}; using \"system\""
 
     #[test]
     fn unrecognized_shell_integration_keeps_its_own_key() {
-        // `cursor_motion` ile aynı kural: anahtar kendi değerinde kalır,
-        // yanında tanı. `osc52`'nin "kapalıya düş" istisnası buraya geçmiyor.
+        // The same rule as `cursor_motion`: the key stays at its own value, with a
+        // diagnostic beside it. `osc52`'s "fall to off" exception doesn't pass
+        // here.
         for (value, found) in [
             ("\"on\"", "\"on\""),
             ("\"Auto\"", "\"Auto\""),
@@ -3124,28 +3189,28 @@ found {found}; using \"auto\""
                 )
             );
         }
-        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
+        // The value that stands in at save time is the **current** setting, not
+        // the default.
         let current = Settings {
             shell_integration: ShellIntegration::Off,
             ..Settings::default()
         };
         let parsed = Settings::parse_keeping("[shell]\nintegration = \"on\"\n", &current)
-            .expect("ayrıştırılabilir metin");
+            .expect("parseable text");
         assert_eq!(parsed.settings.shell_integration, ShellIntegration::Off);
         assert!(parsed.diagnostics[0].message.ends_with("using \"off\""));
-        // Bölüm yanlış türde: anahtar da kabul edilmemiş sayılıyor.
-        let parsed =
-            Settings::parse_keeping("shell = 5\n", &current).expect("ayrıştırılabilir metin");
+        // The section has the wrong type: the key counts as not accepted too.
+        let parsed = Settings::parse_keeping("shell = 5\n", &current).expect("parseable text");
         assert_eq!(parsed.settings.shell_integration, ShellIntegration::Off);
     }
 
     #[test]
     fn shell_integration_is_not_a_live_change() {
-        // Sözleşmenin tek istisnası ve sınaması burada: anahtar değişse bile
-        // `Changes` boş kalıyor, çünkü kabuk çoktan doğmuş ve uygulanacak bir
-        // şey yok. Bir gün `Changes`'e kol takılırsa burası kızarır ve
-        // `docs/AYARLAR.md`'nin "sonraki oturumda geçerli" cümlesi de
-        // düzeltilmek zorunda kalır.
+        // The contract's only exception and its test is here: even if the key
+        // changes `Changes` stays empty, because the shell is already born and
+        // there is nothing to apply. If an arm is ever attached to `Changes` this
+        // will go red and `docs/AYARLAR.md`'s "takes effect in the next session"
+        // sentence will have to be corrected too.
         let before = clean("");
         let after = clean("[shell]\nintegration = \"off\"\n");
         assert_ne!(before.shell_integration, after.shell_integration);
@@ -3154,9 +3219,9 @@ found {found}; using \"auto\""
 
     #[test]
     fn caret_style_is_read_and_bounded() {
-        // **Varsayılan bugünkü görüntü:** dosyası olmayan kullanıcı 015'in
-        // sevk ettiği imleci görüyor ve `bt-gpu` aynı sabitleri import ediyor
-        // (016 R2) — iki literal olsaydı piksel bekçileri kör kalırdı.
+        // **The default is today's look:** a user with no file sees the cursor 015
+        // shipped and `bt-gpu` imports the same constants (016 R2) — had there been
+        // two literals the pixel guards would have stayed blind.
         assert_eq!(clean("").caret, CaretStyle::default());
         assert_eq!(
             (
@@ -3168,26 +3233,27 @@ found {found}; using \"auto\""
 
         let read = clean("[terminal]\ncursor_radius = 0.3\ncursor_glow = 0\n").caret;
         assert_eq!((read.radius_ratio, read.glow), (0.3, 0.0));
-        // Tam sayı da geçerli: kullanıcının yazacağı `cursor_glow = 2`.
+        // An integer is valid too: the `cursor_glow = 2` the user will write.
         assert_eq!(clean("[terminal]\ncursor_glow = 2\n").caret.glow, 2.0);
     }
 
     #[test]
     fn a_rejected_caret_number_keeps_its_own_key() {
-        // **Kırpma yok, red var** (016 R1.3): aralık dışı değer sessizce uca
-        // çekilseydi kullanıcı yanlış yazdığını hiç görmezdi. Reddedilen
-        // anahtar kendi varsayılanında kalıyor, **komşusu okunuyor**.
+        // **No clamping, rejection** (016 R1.3): had an out-of-range value been
+        // silently pulled to the end, the user would never see they wrote it
+        // wrong. The rejected key stays at its own default, **its neighbor is
+        // read**.
         for value in ["1.5", "-0.1", "\"big\""] {
             let (settings, diagnostic) = rejected(&format!(
                 "[terminal]\ncursor_radius = {value}\ncursor_glow = 2.0\n"
             ));
             assert_eq!(
                 settings.caret.radius_ratio, CURSOR_RADIUS,
-                "{value} kendi anahtarını değiştirdi"
+                "{value} changed its own key"
             );
             assert_eq!(
                 settings.caret.glow, 2.0,
-                "{value} komşu anahtarı da düşürdü"
+                "{value} dropped the neighboring key too"
             );
             assert_eq!(diagnostic.key, Some("terminal.cursor_radius"), "{value}");
         }
@@ -3203,27 +3269,27 @@ found {found}; using \"auto\""
             UnfocusedCaret::Solid
         );
 
-        // Büyük/küçük harf duyarlı ve kabul edilmeyen değer kendi anahtarını
-        // değiştirmiyor; beklenen liste **tanıda** yazılı olmalı, yoksa
-        // kullanıcı doğru yazılışı dosyadan aramak zorunda kalır.
+        // Case-sensitive, and a value that isn't accepted doesn't change its own
+        // key; the expected list must be written **in the diagnostic**, otherwise
+        // the user has to look up the right spelling in the file.
         let (settings, diagnostic) = rejected("[terminal]\ncursor_unfocused = \"Solid\"\n");
         assert_eq!(settings.caret.unfocused, UnfocusedCaret::Hollow);
         assert_eq!(diagnostic.key, Some("terminal.cursor_unfocused"));
         assert!(
             diagnostic.message.contains("\"hollow\" or \"solid\""),
-            "tanı beklenen listeyi saymıyor: {}",
+            "the diagnostic doesn't list the expected values: {}",
             diagnostic.message
         );
     }
 
     #[test]
     fn a_rejected_caret_number_names_the_value_the_user_kept() {
-        // **Tanı metni kullanıcının yazdığı sayıyı göstermeli**, float
-        // gürültüsünü değil (`/code-review`): `CaretStyle` `f32` iken
-        // `f64::from(0.10f32)` `0.10000000149011612` ediyordu ve mesaj
-        // "using 0.10000000149011612" diyordu. Kardeş sınamalar (font, tema)
-        // mesajın tamamını sınıyor; bu anahtar yalnız `key`'e bakıyordu ve
-        // kusur oradan sızdı.
+        // **The diagnostic text must show the number the user wrote**, not float
+        // noise (`/code-review`): when `CaretStyle` was `f32`, `f64::from(0.10f32)`
+        // came to `0.10000000149011612` and the message said
+        // "using 0.10000000149011612". The sibling tests (font, theme) check the
+        // whole message; this key looked only at `key` and the defect leaked from
+        // there.
         let (_, diagnostic) = rejected("[terminal]\ncursor_radius = 1.5\n");
         assert_eq!(
             diagnostic.message,
@@ -3239,17 +3305,18 @@ found 1.5; using 0.1"
 
     #[test]
     fn a_caret_change_is_its_own_field() {
-        // `changes.terminal` bugün `terminal() != terminal()`'in ta kendisi ve
-        // bu iki anahtar `TerminalOptions`'a **girmiyor**; aynı alana
-        // binselerdi bir yarıçap değişimi oturumu baştan kurdururdu.
+        // `changes.terminal` today is exactly `terminal() != terminal()` and these
+        // two keys **don't enter** `TerminalOptions`; had they shared the field, a
+        // radius change would have made the session be rebuilt from scratch.
         let before = clean("");
         let after = clean("[terminal]\ncursor_radius = 0.2\n");
         let changes = before.changes(&after);
-        assert!(changes.caret, "imleç farkı görülmedi");
-        assert!(!changes.terminal, "yarıçap oturumu yeniden kurduruyor");
+        assert!(changes.caret, "the cursor difference wasn't seen");
+        assert!(!changes.terminal, "the radius makes the session rebuild");
         assert!(!changes.font && !changes.motion);
 
-        // Ters yön: terminal anahtarı değişince imleç alanı kımıldamıyor.
+        // The reverse direction: when a terminal key changes the cursor field
+        // doesn't move.
         let scrolled = clean("[terminal]\nscrollback = 50\n");
         let changes = before.changes(&scrolled);
         assert!(changes.terminal && !changes.caret, "{changes:?}");
@@ -3257,16 +3324,21 @@ found 1.5; using 0.1"
 
     #[test]
     fn line_height_is_read_and_bounded() {
-        assert_eq!(clean("").font.line_height, 1.0, "varsayılan fontun kendi");
+        assert_eq!(
+            clean("").font.line_height,
+            1.0,
+            "the default is the font's own"
+        );
         assert_eq!(clean("[font]\nline_height = 1.4\n").font.line_height, 1.4);
-        // Tam sayı da çarpan: kullanıcının yazacağı `line_height = 2`.
+        // An integer is a multiplier too: the `line_height = 2` the user will write.
         assert_eq!(clean("[font]\nline_height = 2\n").font.line_height, 2.0);
 
-        // **İki uçlu ve iki ucun gerekçesi ayrı.** Alt uç bir bekçiyi
-        // koruyor: fontun istediğinden kısa hücre `g` ve `y` kuyruklarını
-        // kırpardı (`bt-atlas`'ta `descender_fits_in_the_cell`). Üst uç bir
-        // bütçe: yuva `cell_w × cell_h` bayt ve atlas sabit boyutlu, yani
-        // çarpan büyüdükçe sığan glyph sayısı düşüyor.
+        // **Two-ended, and the two ends have separate reasons.** The lower end
+        // protects a guard: a cell shorter than the font wants would clip the tails
+        // of `g` and `y` (`descender_fits_in_the_cell` in `bt-atlas`). The upper
+        // end is a budget: a slot is `cell_w × cell_h` bytes and the atlas is
+        // fixed-size, so as the multiplier grows the number of fitting glyphs
+        // falls.
         for value in ["0.9", "0", "-1", "2.5", "1e9"] {
             let (settings, diagnostic) = rejected(&format!("[font]\nline_height = {value}\n"));
             assert_eq!(settings, Settings::default(), "{value}");
@@ -3277,36 +3349,38 @@ found 1.5; using 0.1"
                 diagnostic.message
             );
         }
-        // Sayı olmayan değer de kendi anahtarında kalıyor.
+        // A non-numeric value stays at its own key too.
         let (_, diagnostic) = rejected("[font]\nline_height = \"big\"\n");
         assert!(diagnostic.message.contains("must be a number"));
 
-        // Komşu anahtar düşmüyor: reddedilen çarpan puntoyu etkilemez.
-        let parsed = Settings::parse("[font]\nline_height = 9\nsize = 18\n").expect("ayrıştırılır");
+        // The neighboring key isn't dropped: a rejected multiplier doesn't affect
+        // the point size.
+        let parsed = Settings::parse("[font]\nline_height = 9\nsize = 18\n").expect("parses");
         assert_eq!(parsed.settings.font.size, 18.0);
         assert_eq!(parsed.settings.font.line_height, 1.0);
     }
 
     #[test]
     fn the_retired_prompt_key_is_kept_but_not_read() {
-        // **012 phase-10: `shell.prompt` emekli.** Ayrı anahtar ekranda iki
-        // prompt üretiyordu (kullanıcınınki ızgarada, dock'unki altta) ve
-        // caret ikisi arasında sıçrıyordu; seçim `integration`'ın üçüncü
-        // değerine taşındı.
+        // **012 phase-10: `shell.prompt` is retired.** A separate key produced two
+        // prompts on screen (the user's in the grid, the dock's below) and the
+        // caret jumped between the two; the choice moved to `integration`'s third
+        // value.
         //
-        // Emeklilik "bilinmeyen anahtar korunur, anahtar silinmez" kuralının
-        // üçüncü hâli: satır dosyada duruyor, davranışa hiç karışmıyor, ama
-        // **sessiz de değil**. Sessiz olsaydı kullanıcı yazdığı satırın bir
-        // işe yaradığını sanırdı.
+        // Retirement is the third state of the rule "an unknown key is preserved,
+        // a key is not deleted": the line stays in the file, never interferes with
+        // behavior, but **isn't silent either**. Had it been silent the user would
+        // think the line they wrote does something.
         for text in [
             "[shell]\nprompt = \"shell\"\n",
             "[shell]\nprompt = \"terminal\"\n",
-            // Değeri hiç okunmadığı için tanınmayan değer de aynı yola düşüyor:
-            // artık "kabul edilmedi" diye bir şey yok, anahtarın kendisi yok.
+            // Because its value is never read, an unrecognized value falls the same
+            // way: there is no longer such a thing as "not accepted", the key
+            // itself doesn't exist.
             "[shell]\nprompt = false\n",
             "shell = { prompt = \"shell\" }\n",
         ] {
-            let parsed = Settings::parse(text).expect("ayrıştırılır");
+            let parsed = Settings::parse(text).expect("parses");
             assert_eq!(parsed.settings, Settings::default(), "{text:?}");
             assert_eq!(parsed.diagnostics.len(), 1, "{text:?}");
             assert_eq!(
@@ -3320,9 +3394,10 @@ found 1.5; using 0.1"
 
     #[test]
     fn the_retired_key_leaves_integration_alone() {
-        // Aynı bölümde iki anahtar: emeklinin varlığı ötekini düşürmemeli.
+        // Two keys in the same section: the retired one's presence mustn't drop the
+        // other.
         let parsed = Settings::parse("[shell]\nprompt = \"zsh\"\nintegration = \"blocks\"\n")
-            .expect("ayrıştırılır");
+            .expect("parses");
         assert_eq!(parsed.settings.shell_integration, ShellIntegration::Blocks);
         assert_eq!(parsed.diagnostics.len(), 1);
     }
@@ -3341,9 +3416,9 @@ found 1.5; using 0.1"
                 "{value}"
             );
         }
-        // İki türetilmiş soru ve **ayrı** cevaplar: `blocks` sarmalayıcıyı
-        // kuruyor (bloklar ve işaretler için) ama dock istemiyor. Birini
-        // ötekinden türetmek phase-10'un kapattığı hatayı geri getirirdi.
+        // Two derived questions and **separate** answers: `blocks` installs the
+        // wrapper (for blocks and marks) but doesn't want the dock. Deriving one
+        // from the other would bring back the bug phase-10 closed.
         assert!(ShellIntegration::Auto.installs_wrapper());
         assert!(ShellIntegration::Blocks.installs_wrapper());
         assert!(!ShellIntegration::Off.installs_wrapper());
@@ -3386,7 +3461,7 @@ found 1.5; using 0.1"
             "`appearance.theme` must be a string, found an integer; using \"system\""
         );
 
-        // Çiftin anahtarları da aynı kuraldan, kendi varsayılanlarına.
+        // The pair's keys too by the same rule, to their own defaults.
         let (settings, diagnostic) = rejected("[appearance]\ndark_theme = \"a/b\"\n");
         assert_eq!(settings.dark_theme, "bateri");
         assert_eq!(diagnostic.key, Some("appearance.dark_theme"));
@@ -3400,7 +3475,7 @@ found 1.5; using 0.1"
 
     #[test]
     fn system_is_not_a_name_for_the_pair() {
-        // `light_theme = "system"` kendi kendine dönen bir seçim olurdu.
+        // `light_theme = "system"` would be a choice that loops back on itself.
         let (settings, diagnostic) = rejected("[appearance]\nlight_theme = \"system\"\n");
         assert_eq!(settings, Settings::default());
         assert_eq!(diagnostic.key, Some("appearance.light_theme"));
@@ -3414,7 +3489,7 @@ found 1.5; using 0.1"
                 .dark_theme,
             "bateri"
         );
-        // `theme` için ayrılmış değer geçerli.
+        // The reserved value is valid for `theme`.
         assert!(clean("[appearance]\ntheme = \"system\"\n").follows_system());
     }
 
@@ -3425,8 +3500,8 @@ found 1.5; using 0.1"
         assert_eq!(diagnostic.key, Some("terminal"));
         assert_eq!(diagnostic.line, Some(1));
 
-        // Bölüm dizisi kendi adıyla söyleniyor: "section … found a section"
-        // kendiyle çelişirdi.
+        // An array of sections is called by its own name: "section … found a
+        // section" would contradict itself.
         let (_, diagnostic) = rejected("[[terminal]]\nscrollback = 5\n");
         assert_eq!(
             diagnostic.message,
@@ -3436,7 +3511,7 @@ found 1.5; using 0.1"
 
     #[test]
     fn smooth_scroll_is_read() {
-        // Dosyada yoksa `on`: özellik kapalı sevk edilmiyor (027 Karar 4).
+        // `on` if not in the file: the feature isn't shipped off (027 Karar 4).
         assert_eq!(clean("").smooth_scroll, SmoothScroll::On);
         assert_eq!(
             clean("[motion]\nsmooth_scroll = \"off\"\n").smooth_scroll,
@@ -3446,7 +3521,7 @@ found 1.5; using 0.1"
             clean("motion = { smooth_scroll = \"on\" }\n").smooth_scroll,
             SmoothScroll::On
         );
-        // Üç anahtar birbirini ezmiyor.
+        // The three keys don't override each other.
         let all = clean(
             "[motion]\ncursor_motion = \"ease\"\nreduce_motion = \"on\"\nsmooth_scroll = \"off\"\n",
         );
@@ -3457,8 +3532,8 @@ found 1.5; using 0.1"
 
     #[test]
     fn keypress_and_erase_are_read() {
-        // Dosyada yoksa `fade` / `recede`: animasyon kutudan çıkınca
-        // görünmeli (030 Karar 7).
+        // `fade` / `recede` if not in the file: the animation must be visible out
+        // of the box (030 Karar 7).
         let empty = clean("");
         assert_eq!(
             (empty.keypress, empty.erase),
@@ -3474,7 +3549,7 @@ found 1.5; using 0.1"
             assert_eq!(settings.erase, erase, "{name}");
             assert_eq!(erase.name(), name);
         }
-        // Komşular birbirini ezmiyor.
+        // Neighbors don't override each other.
         let all = clean(
             "[motion]\ncursor_motion = \"ease\"\nkeypress = \"off\"\nerase = \"off\"\n\
              smooth_scroll = \"off\"\n",
@@ -3486,8 +3561,8 @@ found 1.5; using 0.1"
 
     #[test]
     fn unrecognized_keypress_and_erase_keep_their_own_keys() {
-        // `bounce` hiçbir listede yok: tanınmıyor, yani seçmek hiçbir şey
-        // yapmayan bir ad kabul edilmiyor (030 Karar 7).
+        // `bounce` is in no list: it is unrecognized, i.e. a name that does nothing
+        // when selected isn't accepted (030 Karar 7).
         for (value, found) in [
             ("\"bounce\"", "\"bounce\""),
             ("\"Fade\"", "\"Fade\""),
@@ -3525,7 +3600,8 @@ found 1.5; using 0.1"
              \"unravel\", \"recede\", \"sublime\" or \"shatter\", found \"dissolve\"; \
              using \"recede\""
         );
-        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
+        // The value that stands in at save time is the **current** setting, not
+        // the default.
         let current = Settings {
             keypress: Keypress::Off,
             erase: Erase::Off,
@@ -3533,14 +3609,13 @@ found 1.5; using 0.1"
         };
         let parsed =
             Settings::parse_keeping("[motion]\nkeypress = \"x\"\nerase = \"y\"\n", &current)
-                .expect("ayrıştırılabilir metin");
+                .expect("parseable text");
         assert_eq!(
             (parsed.settings.keypress, parsed.settings.erase),
             (Keypress::Off, Erase::Off)
         );
         assert_eq!(parsed.diagnostics.len(), 2);
-        let parsed =
-            Settings::parse_keeping("motion = 5\n", &current).expect("ayrıştırılabilir metin");
+        let parsed = Settings::parse_keeping("motion = 5\n", &current).expect("parseable text");
         assert_eq!(
             (parsed.settings.keypress, parsed.settings.erase),
             (Keypress::Off, Erase::Off)
@@ -3549,8 +3624,8 @@ found 1.5; using 0.1"
 
     #[test]
     fn keypress_and_erase_changes_are_motion_changes() {
-        // İkisi de link'e gidiyor (`bt_gpu::DisplayLink::set_glyph_fx`), yani
-        // `motion` kolunda; oturumu ve fontu kıpırdatmamalı.
+        // Both go to the link (`bt_gpu::DisplayLink::set_glyph_fx`), so in the
+        // `motion` arm; they mustn't move the session or the font.
         let before = clean("");
         for text in [
             "[motion]\nkeypress = \"off\"\n",
@@ -3572,8 +3647,8 @@ found 1.5; using 0.1"
 
     #[test]
     fn unrecognized_smooth_scroll_keeps_its_own_key() {
-        // `cursor_motion` ile aynı kural: yalnız kendi anahtarı etkilenir,
-        // yanında tanı.
+        // The same rule as `cursor_motion`: only its own key is affected, with a
+        // diagnostic beside it.
         for (value, found) in [
             ("\"yes\"", "\"yes\""),
             ("\"On\"", "\"On\""),
@@ -3598,25 +3673,25 @@ found 1.5; using 0.1"
                 )
             );
         }
-        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
+        // The value that stands in at save time is the **current** setting, not
+        // the default.
         let current = Settings {
             smooth_scroll: SmoothScroll::Off,
             ..Settings::default()
         };
         let parsed = Settings::parse_keeping("[motion]\nsmooth_scroll = \"yes\"\n", &current)
-            .expect("ayrıştırılabilir metin");
+            .expect("parseable text");
         assert_eq!(parsed.settings.smooth_scroll, SmoothScroll::Off);
         assert!(parsed.diagnostics[0].message.ends_with("using \"off\""));
-        // Bölüm yanlış türde: anahtar kabul edilmemiş sayılıyor.
-        let parsed =
-            Settings::parse_keeping("motion = 5\n", &current).expect("ayrıştırılabilir metin");
+        // The section has the wrong type: the key counts as not accepted.
+        let parsed = Settings::parse_keeping("motion = 5\n", &current).expect("parseable text");
         assert_eq!(parsed.settings.smooth_scroll, SmoothScroll::Off);
     }
 
     #[test]
     fn smooth_scroll_change_is_a_motion_change() {
-        // `bt-shell` onu Hareketi Azalt'ın yolunda çözüyor, yani fark
-        // `motion`'da; oturumu ve fontu kıpırdatmamalı.
+        // `bt-shell` resolves it on Reduce Motion's path, so the difference is in
+        // `motion`; it mustn't move the session or the font.
         let before = clean("");
         let after = clean("[motion]\nsmooth_scroll = \"off\"\n");
         assert_eq!(
@@ -3634,10 +3709,10 @@ found 1.5; using 0.1"
 
     #[test]
     fn theme_write_keeps_smooth_scroll_and_unknown_keys() {
-        // Menünün yazma yolu yeni anahtarı ve tanımadığı komşusunu yerinde
-        // bırakıyor; yazılan metin aynı değeri geri okuyor.
+        // The menu's write path leaves the new key and its unrecognized neighbor
+        // in place; the written text reads back the same value.
         let text = "[motion]\nsmooth_scroll = \"off\" # satır satır\nglide = 3\n";
-        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        let written = Settings::with_theme(text, "paper").expect("writable text");
         assert!(written.starts_with(text), "{written}");
         let settings = clean(&written);
         assert_eq!(settings.smooth_scroll, SmoothScroll::Off);
@@ -3646,7 +3721,7 @@ found 1.5; using 0.1"
 
     #[test]
     fn confirm_close_is_read() {
-        // Dosyada yoksa `running`: soru yalnız koşan bir iş varken.
+        // `running` if not in the file: the question only when a job is running.
         assert_eq!(clean("").confirm_close, ConfirmClose::Running);
         for (value, expected) in [
             ("never", ConfirmClose::Never),
@@ -3656,7 +3731,7 @@ found 1.5; using 0.1"
             let text = format!("[terminal]\nconfirm_close = \"{value}\"\n");
             assert_eq!(clean(&text).confirm_close, expected, "{value}");
         }
-        // Komşu anahtarlar birbirini ezmiyor.
+        // Neighboring keys don't override each other.
         let both = clean("[terminal]\nscrollback = 42\nconfirm_close = \"never\"\n");
         assert_eq!(both.scrollback, 42);
         assert_eq!(both.confirm_close, ConfirmClose::Never);
@@ -3689,25 +3764,25 @@ found 1.5; using 0.1"
                 )
             );
         }
-        // Kayıt anında yerine geçen değer geçerli ayar; bölüm yanlış türdeyse
-        // de.
+        // The value that stands in at save time is the current setting; also when
+        // the section has the wrong type.
         let current = Settings {
             confirm_close: ConfirmClose::Always,
             ..Settings::default()
         };
         let parsed = Settings::parse_keeping("[terminal]\nconfirm_close = \"no\"\n", &current)
-            .expect("ayrıştırılabilir metin");
+            .expect("parseable text");
         assert_eq!(parsed.settings.confirm_close, ConfirmClose::Always);
         assert!(parsed.diagnostics[0].message.ends_with("using \"always\""));
-        let parsed =
-            Settings::parse_keeping("terminal = 5\n", &current).expect("ayrıştırılabilir metin");
+        let parsed = Settings::parse_keeping("terminal = 5\n", &current).expect("parseable text");
         assert_eq!(parsed.settings.confirm_close, ConfirmClose::Always);
     }
 
     #[test]
     fn confirm_close_change_reaches_no_session() {
-        // Kapanış anında güncel ayardan okunuyor: fark oturumlara, fonta ya da
-        // imlece hiçbir şey göndermemeli (028 → Karar 6, emsal `caret`).
+        // Read from the current settings at close time: the difference mustn't send
+        // anything to the sessions, the font or the cursor (028 → Karar 6,
+        // precedent `caret`).
         let before = clean("");
         let after = clean("[terminal]\nconfirm_close = \"always\"\n");
         assert_eq!(before.terminal(), after.terminal());
@@ -3717,7 +3792,7 @@ found 1.5; using 0.1"
     #[test]
     fn theme_write_keeps_confirm_close_and_unknown_keys() {
         let text = "[terminal]\nconfirm_close = \"never\" # sormadan\nask_twice = true\n";
-        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        let written = Settings::with_theme(text, "paper").expect("writable text");
         assert!(written.starts_with(text), "{written}");
         let settings = clean(&written);
         assert_eq!(settings.confirm_close, ConfirmClose::Never);
@@ -3733,7 +3808,7 @@ found 1.5; using 0.1"
 
     #[test]
     fn a_host_pattern_matches_with_star_and_question_ignoring_case() {
-        // 037 Karar 2: `*` boş dahil herhangi bir dizi, `?` tek karakter.
+        // 037 Karar 2: `*` is any string, empty included, `?` a single character.
         let prod = [host_rule("prod-*", HostMark::Production)];
         assert_eq!(host_mark(&prod, "prod-web-1"), HostMark::Production);
         assert_eq!(host_mark(&prod, "PROD-WEB-1"), HostMark::Production);
@@ -3743,14 +3818,14 @@ found 1.5; using 0.1"
         assert_eq!(host_mark(&one, "prod-1"), HostMark::Staging);
         assert_eq!(host_mark(&one, "prod-10"), HostMark::None);
         assert_eq!(host_mark(&one, "prod-"), HostMark::None);
-        // Nokta sıradan bir karakter; `*` onu da yutuyor.
+        // The dot is an ordinary character; `*` swallows it too.
         let domain = [host_rule("*.staging.example.com", HostMark::Staging)];
         assert_eq!(
             host_mark(&domain, "a.b.staging.example.com"),
             HostMark::Staging
         );
         assert_eq!(host_mark(&domain, "staging.example.com"), HostMark::None);
-        // Geri izleme: `*`'ın ilk denemesi yanlış yerde bitiyor.
+        // Backtracking: `*`'s first attempt ends in the wrong place.
         let tricky = [host_rule("*a*b?", HostMark::Development)];
         assert_eq!(host_mark(&tricky, "xaxbxbz"), HostMark::Development);
         assert_eq!(host_mark(&tricky, "xaxb"), HostMark::None);
@@ -3758,8 +3833,8 @@ found 1.5; using 0.1"
 
     #[test]
     fn a_pattern_without_at_matches_the_host_after_the_user() {
-        // `deploy@prod` ile `prod` aynı makine; `@`'li desen kullanıcıyı da
-        // soruyor.
+        // `deploy@prod` and `prod` are the same machine; a pattern with `@` asks
+        // about the user too.
         let bare = [host_rule("prod", HostMark::Production)];
         assert_eq!(host_mark(&bare, "deploy@prod"), HostMark::Production);
         assert_eq!(host_mark(&bare, "prod"), HostMark::Production);
@@ -3801,7 +3876,7 @@ found 1.5; using 0.1"
                 host_rule("x", HostMark::None),
             ]
         );
-        // Bölüm dizisi aynı listeyi yazıyor.
+        // An array of sections writes the same list.
         let tables = clean(
             "[[remote.hosts]]\nhost = \"prod-*\"\nmark = \"production\"\n\
              [[remote.hosts]]\nhost = \"vm\"\nmark = \"#c678dd\"\n",
@@ -3818,8 +3893,8 @@ found 1.5; using 0.1"
 
     #[test]
     fn a_broken_host_entry_rejects_the_whole_list() {
-        // Kayıt anının kuralı: bozuk tek girdi anahtarın tamamını reddediyor
-        // ve verilen liste kalıyor; tanı ilk bozuk girdinin satırını söylüyor.
+        // The save-time rule: a single broken entry rejects the whole key and the
+        // given list stays; the diagnostic names the first broken entry's line.
         let current = Settings {
             remote_hosts: vec![host_rule("old", HostMark::Staging)],
             ..Settings::default()
@@ -3852,22 +3927,22 @@ found 1.5; using 0.1"
             ),
             ("[remote]\n\nhosts = \"prod\"\n", "found a string"),
         ] {
-            let parsed = Settings::parse_keeping(text, &current).expect("ayrıştırılabilir metin");
+            let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
             assert_eq!(parsed.settings.remote_hosts, current.remote_hosts, "{text}");
             let [diagnostic] = <[Diagnostic; 1]>::try_from(parsed.diagnostics)
-                .unwrap_or_else(|got| panic!("tek tanı beklendi: {got:?}"));
+                .unwrap_or_else(|got| panic!("a single diagnostic expected: {got:?}"));
             assert_eq!(diagnostic.key, Some("remote.hosts"));
             assert!(diagnostic.message.contains(found), "{diagnostic}");
             assert!(diagnostic.message.ends_with("keeping the previous list"));
-            // Bozuk girdi dördüncü satırda; `hosts`'un kendisi üçüncüde.
+            // The broken entry is on the fourth line; `hosts` itself on the third.
             let line = if found == "found a string" { 3 } else { 4 };
             assert_eq!(diagnostic.line, Some(line), "{text}");
         }
-        // Açılışta aynı metin boş listeye düşüyor; yanlış türde bölüm de
-        // verilen listeyi tutuyor.
+        // At startup the same text falls to the empty list; a section of the wrong
+        // type keeps the given list too.
         let (settings, _) = rejected("[remote]\nhosts = [{ host = \"b\", mark = \"x\" }]\n");
         assert_eq!(settings.remote_hosts, []);
-        let parsed = Settings::parse_keeping("remote = 1\n", &current).expect("ayrıştırılabilir");
+        let parsed = Settings::parse_keeping("remote = 1\n", &current).expect("parseable");
         assert_eq!(parsed.settings.remote_hosts, current.remote_hosts);
     }
 
@@ -3887,10 +3962,10 @@ found 1.5; using 0.1"
 
     #[test]
     fn theme_write_keeps_remote_hosts_comments_and_unknown_keys() {
-        // R2.4: dosyaya yazan her yol `[remote]`'ı, yorumunu ve tanımadığımız
-        // anahtarı yerinde bırakıyor.
+        // R2.4: every path that writes to the file leaves `[remote]`, its comment
+        // and a key we don't recognize in place.
         let text = "[remote]\n# prod kırmızı\nhosts = [\n  { host = \"prod\", mark = \"production\" }, # canlı\n]\nfuture = 1\n";
-        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        let written = Settings::with_theme(text, "paper").expect("writable text");
         assert!(written.starts_with(text), "{written}");
         let settings = clean(&written);
         assert_eq!(
@@ -3902,9 +3977,9 @@ found 1.5; using 0.1"
 
     #[test]
     fn unknown_keys_and_sections_are_silent() {
-        // Sonraki setlerin anahtarları bugün tanı üretmemeli: `intensity`
-        // ve `speed` referansın `[motion]` bölümünde var, bizde yok
-        // (008 → Kapsam dışı; `keypress` 030'da tanındı ve tanık oldu).
+        // A later set's keys mustn't produce a diagnostic today: `intensity` and
+        // `speed` are in the reference's `[motion]` section, not ours (008 → Kapsam
+        // dışı; `keypress` was recognized in 030 and served as the witness).
         let text = "\
 future = true
 [terminal]
@@ -3923,26 +3998,27 @@ line_height = 1.2
 
     #[test]
     fn unparseable_text_is_a_separate_result() {
-        let err = Settings::parse("[terminal]\nscrollback = \n").expect_err("geçersiz TOML");
+        let err = Settings::parse("[terminal]\nscrollback = \n").expect_err("invalid TOML");
         assert_eq!(err.key, None);
         assert_eq!(err.line, Some(2));
         assert!(err.message.starts_with("invalid TOML: "), "{err}");
-        // Tanı tek satır ve "beklenen" listesi yok: alt başlık başlıkla aynı
-        // satırda çiziliyor.
+        // The diagnostic is a single line with no "expected" list: the subtitle is
+        // drawn on the same line as the title.
         assert!(!err.to_string().contains('\n'), "{err}");
         assert!(!err.message.contains("expected"), "{err}");
 
         assert!(Settings::parse("[terminal").is_err());
-        // TOML'un tam sayı sınırını aşan sayı tavana kırpılamaz: değer hiç
-        // okunamıyor ve belge düşüyor (`docs/AYARLAR.md`).
+        // A number exceeding TOML's integer limit can't be clamped to the ceiling:
+        // the value can't be read at all and the document drops
+        // (`docs/AYARLAR.md`).
         assert!(Settings::parse("[terminal]\nscrollback = 99999999999999999999\n").is_err());
     }
 
     #[test]
     fn theme_write_keeps_every_other_byte() {
-        // Kullanıcının dosyası: yorumlar, boş satırlar, anahtar sırası,
-        // tanımadığımız anahtar ve bölüm, değerin yanındaki yorum. Menüden
-        // tema seçmek yalnız değeri değiştirir.
+        // The user's file: comments, blank lines, key order, a key and section we
+        // don't recognize, the comment next to a value. Choosing a theme from the
+        // menu changes only the value.
         let text = "\
 # my settings
 
@@ -3960,12 +4036,12 @@ future = true
 [motion]
 cursor = \"spring\"
 ";
-        let written = Settings::with_theme(text, "bateri").expect("yazılabilir metin");
+        let written = Settings::with_theme(text, "bateri").expect("writable text");
         assert_eq!(
             written,
             text.replace("theme = \"system\"", "theme = \"bateri\"")
         );
-        // Çift yerinde: `"system"`'e dönmek onu geri getirir.
+        // The pair is in place: returning to `"system"` brings it back.
         let settings = clean(&written);
         assert_eq!(
             (
@@ -3977,31 +4053,31 @@ cursor = \"spring\"
             ("bateri", "paper", "ink", 500)
         );
         assert_eq!(
-            Settings::with_theme(&written, SYSTEM_THEME).expect("yazılabilir metin"),
+            Settings::with_theme(&written, SYSTEM_THEME).expect("writable text"),
             text
         );
     }
 
     #[test]
     fn theme_write_adds_what_is_missing() {
-        // Bölüm yok: sona eklenir, öncesi aynı kalır.
+        // No section: appended at the end, what comes before stays the same.
         let text = "[terminal]\nscrollback = 5\n";
-        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        let written = Settings::with_theme(text, "paper").expect("writable text");
         assert_eq!(
             written,
             format!("{text}\n[appearance]\ntheme = \"paper\"\n")
         );
         assert_eq!(clean(&written).theme, "paper");
 
-        // Boş metin.
+        // Empty text.
         assert_eq!(
-            Settings::with_theme("", "paper").expect("yazılabilir metin"),
+            Settings::with_theme("", "paper").expect("writable text"),
             "[appearance]\ntheme = \"paper\"\n"
         );
 
-        // Bölüm var, anahtar yok: bölümün içine, sonraki bölümden önce.
+        // Section present, key missing: inside the section, before the next section.
         let text = "[appearance]\ndark_theme = \"ink\"\n\n[font]\nsize = 14\n";
-        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        let written = Settings::with_theme(text, "paper").expect("writable text");
         assert_eq!(
             written,
             "[appearance]\ndark_theme = \"ink\"\ntheme = \"paper\"\n\n[font]\nsize = 14\n"
@@ -4010,12 +4086,12 @@ cursor = \"spring\"
 
     #[test]
     fn theme_write_leaves_trailing_comments_where_they_were() {
-        // `/code-review` bulgusu: belge sonundaki yorum `toml_edit`'te belgenin
-        // kuyruğu, yeni bölüm onun **önüne** ekleniyordu. Yorumu kaldıran
-        // kullanıcının satırı `appearance.family` olur ve sessizce
-        // yoksayılırdı.
+        // A `/code-review` finding: a comment at the end of the document is the
+        // document's tail in `toml_edit`, the new section was being added **in
+        // front of** it. The line of a user who uncommented it would become
+        // `appearance.family` and be silently ignored.
         let text = "[font]\nsize = 14\n# family = \"Menlo\"\n";
-        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        let written = Settings::with_theme(text, "paper").expect("writable text");
         assert_eq!(
             written,
             format!("{text}\n[appearance]\ntheme = \"paper\"\n")
@@ -4026,23 +4102,24 @@ cursor = \"spring\"
 
     #[test]
     fn theme_write_keeps_crlf_line_endings() {
-        // `/code-review` bulgusu: `toml_edit` satır sonlarını LF yazıyor; tek
-        // bir tema seçimi dotfile deposunda bütün dosyayı değişmiş gösterirdi.
+        // A `/code-review` finding: `toml_edit` writes line endings as LF; a single
+        // theme selection would show the whole file as changed in a dotfile
+        // repository.
         let text = "[appearance]\r\ntheme = \"a\"  # c\r\n\r\n[font]\r\nsize = 14\r\n";
         assert_eq!(
-            Settings::with_theme(text, "paper").expect("yazılabilir metin"),
+            Settings::with_theme(text, "paper").expect("writable text"),
             text.replace("\"a\"", "\"paper\"")
         );
-        // Eklenen bölüm de dosyanın satır sonuyla.
+        // The added section too with the file's line ending.
         assert_eq!(
-            Settings::with_theme("[font]\r\nsize = 14\r\n", "paper").expect("yazılabilir metin"),
+            Settings::with_theme("[font]\r\nsize = 14\r\n", "paper").expect("writable text"),
             "[font]\r\nsize = 14\r\n\r\n[appearance]\r\ntheme = \"paper\"\r\n"
         );
-        // `/code-review` bulgusu: çok satırlı metnin içindeki `\r\n`'i
-        // `toml_edit` ham bırakıyor; çeviri onu `\r\r\n` yapıp dosyayı
-        // geçersiz bırakıyordu. Sonuç ayrıştırılabilir ve metin aynı.
+        // A `/code-review` finding: `toml_edit` leaves the `\r\n` inside a
+        // multi-line string raw; the conversion turned it into `\r\r\n` and left the
+        // file invalid. The result is parseable and the text is the same.
         let text = "[appearance]\r\ntheme = \"a\"\r\n[notes]\r\nnote = \"\"\"x\r\ny\"\"\"\r\n";
-        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        let written = Settings::with_theme(text, "paper").expect("writable text");
         assert_eq!(written, text.replace("\"a\"", "\"paper\""));
         assert_eq!(clean(&written).theme, "paper");
     }
@@ -4050,61 +4127,65 @@ cursor = \"spring\"
     #[test]
     fn theme_write_keeps_the_way_the_section_is_written() {
         for (text, expected) in [
-            // Satır içi tablo satır içi kalır.
+            // An inline table stays inline.
             (
                 "appearance = { theme = \"a\", dark_theme = \"ink\" }\n",
                 "appearance = { theme = \"paper\", dark_theme = \"ink\" }\n",
             ),
-            // Noktalı anahtar noktalı kalır.
+            // A dotted key stays dotted.
             (
                 "appearance.theme = \"a\"\n",
                 "appearance.theme = \"paper\"\n",
             ),
-            // Kabul edilmeyen türdeki değerin yerine: kullanıcı bir tema seçti.
+            // In place of a value of a type that isn't accepted: the user chose a
+            // theme.
             (
                 "[appearance]\ntheme = 3 # oops\n",
                 "[appearance]\ntheme = \"paper\" # oops\n",
             ),
         ] {
-            let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+            let written = Settings::with_theme(text, "paper").expect("writable text");
             assert_eq!(written, expected);
             assert_eq!(clean(&written).theme, "paper", "{text}");
         }
-        // Yalnız alt bölümü yazılmış `[appearance]`: sonuç yine okunuyor.
-        let written = Settings::with_theme("[appearance.extra]\nx = 1\n", "paper")
-            .expect("yazılabilir metin");
+        // An `[appearance]` with only a subsection written: the result is still
+        // read.
+        let written =
+            Settings::with_theme("[appearance.extra]\nx = 1\n", "paper").expect("writable text");
         assert_eq!(clean(&written).theme, "paper", "{written}");
     }
 
     #[test]
     fn theme_write_refuses_what_it_would_destroy() {
-        // Ayrıştırılamayan metin: metin **üretilmez**, kullanıcının yarım işi
-        // ezilmez.
+        // Text that can't be parsed: no text is **produced**, the user's
+        // half-finished work isn't overwritten.
         let err =
-            Settings::with_theme("[appearance]\ntheme = \"a\n", "paper").expect_err("geçersiz");
+            Settings::with_theme("[appearance]\ntheme = \"a\n", "paper").expect_err("invalid");
         assert_eq!((err.key, err.line), (None, Some(2)));
         assert!(err.message.starts_with("invalid TOML: "), "{err}");
 
-        // Bölüm olmayan `appearance`: yerine tablo yazmak değeri silerdi.
+        // An `appearance` that isn't a section: writing a table in its place would
+        // delete the value.
         for text in ["appearance = 1\n", "[[appearance]]\ntheme = \"a\"\n"] {
-            let err = Settings::with_theme(text, "paper").expect_err("bölüm değil");
+            let err = Settings::with_theme(text, "paper").expect_err("not a section");
             assert_eq!(err.key, Some("appearance"), "{text}");
             assert!(err.message.contains("must be a section"), "{err}");
         }
-        // Tablo olan `theme`: yerine değer yazmak alt tabloyu silerdi — iki
-        // yazılışı da (`/code-review` bulgusu: satır içi hâl geçiyordu).
+        // A `theme` that is a table: writing a value in its place would delete the
+        // subtable — both spellings (a `/code-review` finding: the inline form was
+        // getting through).
         for text in [
             "[appearance.theme]\nx = 1\n",
             "[appearance]\ntheme = { light = \"paper\" }\n",
         ] {
-            let err = Settings::with_theme(text, "paper").expect_err("tema bir bölüm");
+            let err = Settings::with_theme(text, "paper").expect_err("theme is a section");
             assert_eq!(err.key, Some("appearance.theme"), "{text}");
             assert!(err.message.contains("found a section"), "{err}");
         }
     }
 
-    /// Sınamanın kâhini: düzenlemeyi `Settings`'e **elle** uygular, yazma
-    /// yolundan bağımsız. Ondalıklar iki basamakta (yazma yolunun sözü).
+    /// The test's oracle: applies the edit to `Settings` **by hand**, independent
+    /// of the write path. Decimals at two digits (the write path's promise).
     fn applied(mut settings: Settings, edit: &SettingsEdit) -> Settings {
         let two = |value: f64| (value * 100.0).round() / 100.0;
         match edit.clone() {
@@ -4133,8 +4214,8 @@ cursor = \"spring\"
             SettingsEdit::ShellIntegration(integration) => {
                 settings.shell_integration = integration;
             }
-            // Kâhin yalnız boş listeden doğru: `every_edit`'in iki metni de
-            // `hosts = []` taşıyor. Dolu listenin kuralı kendi sınamasında.
+            // The oracle is right only from an empty list: both of `every_edit`'s
+            // texts carry `hosts = []`. The filled list's rule is in its own test.
             SettingsEdit::RemoteHostMark { host, mark } => settings.remote_hosts.insert(
                 0,
                 HostRule {
@@ -4146,14 +4227,14 @@ cursor = \"spring\"
         settings
     }
 
-    /// Her anahtardan varsayılan olmayan bir değer — her varyant en az bir
-    /// kez; `FontFamily` iki kez, çünkü boş dizge "varsayılan aile" demek.
+    /// A non-default value from every key — every variant at least once;
+    /// `FontFamily` twice, because an empty string means "the default family".
     fn every_edit() -> Vec<SettingsEdit> {
         vec![
             SettingsEdit::Scrollback(2500),
             SettingsEdit::Cursor(CaretShape::Beam),
             SettingsEdit::CursorBlink(CursorBlink::Auto),
-            // İki basamağa yuvarlanıyor: 0.123 → 0.12.
+            // Rounded to two digits: 0.123 → 0.12.
             SettingsEdit::CursorRadius(0.123),
             SettingsEdit::CursorGlow(2.5),
             SettingsEdit::CursorUnfocused(UnfocusedCaret::Solid),
@@ -4185,22 +4266,22 @@ cursor = \"spring\"
             host: host.to_owned(),
             mark,
         };
-        Settings::with_edit(text, &edit).expect("yazılabilir metin")
+        Settings::with_edit(text, &edit).expect("writable text")
     }
 
     #[test]
     fn marking_a_host_creates_the_list() {
-        // Boş dosya: bölüm ve anahtar doğuyor; desen `user@`'siz.
+        // Empty file: the section and key are born; the pattern is without `user@`.
         assert_eq!(
             marked("", "deploy@prod", HostMark::Production),
             "[remote]\nhosts = [{ host = \"prod\", mark = \"production\" }]\n"
         );
-        // Bölüm var, anahtar yok.
+        // Section present, key missing.
         assert_eq!(
             marked("[remote]\nfuture = 1\n", "vm", HostMark::Staging),
             "[remote]\nfuture = 1\nhosts = [{ host = \"vm\", mark = \"staging\" }]\n"
         );
-        // Tek satırlı dizinin başına, virgülden sonra boşlukla.
+        // At the start of a single-line array, with a space after the comma.
         assert_eq!(
             marked(
                 "[remote]\nhosts = [{ host = \"a\", mark = \"staging\" }]\n",
@@ -4214,16 +4295,16 @@ cursor = \"spring\"
 
     #[test]
     fn marking_a_host_keeps_the_list_as_written() {
-        // Yorumlar, bilinmeyen anahtar ve kullanıcının sırası yerinde.
+        // Comments, the unknown key and the user's order are in place.
         let text = "# üst\n[remote]\n# prod kırmızı\nhosts = [\n  \
                     { host = \"db\", mark = \"staging\" }, # veri\n  \
                     { host = \"prod-*\", mark = \"production\" },\n]\nfuture = 1\n";
-        // Eşit desen (harf duyarsız) yerinde değişiyor, sıra korunuyor.
+        // An equal pattern (case insensitive) changes in place, the order is kept.
         assert_eq!(
             marked(text, "root@DB", HostMark::Development),
             text.replace("mark = \"staging\"", "mark = \"development\"")
         );
-        // Yeni host başa, dizinin girintisiyle.
+        // The new host at the start, with the array's indentation.
         assert_eq!(
             marked(text, "cache", HostMark::Production),
             text.replace(
@@ -4231,12 +4312,13 @@ cursor = \"spring\"
                 "hosts = [\n  { host = \"cache\", mark = \"production\" },\n"
             )
         );
-        // None tam girdiyi siliyor; glob eşleşmiyorsa başka bir şey yazılmıyor.
+        // None deletes the exact entry; if no glob matches nothing else is written.
         let removed = marked(text, "db", HostMark::None);
         assert_eq!(clean(&removed).remote_hosts.len(), 1, "{removed}");
         assert!(removed.contains("# prod kırmızı") && removed.contains("future = 1"));
         assert!(!removed.contains("\"db\""), "{removed}");
-        // Seçilen zaten geçerli çözüm (glob'dan gelse de): metin aynen.
+        // The chosen one is already the current resolution (even if it comes from a
+        // glob): the text is unchanged.
         assert_eq!(marked(text, "db", HostMark::Staging), text);
         assert_eq!(marked(text, "prod-web", HostMark::Production), text);
         assert_eq!(marked(text, "vm", HostMark::None), text);
@@ -4246,7 +4328,7 @@ cursor = \"spring\"
     fn marking_a_host_beats_the_globs_in_front() {
         let resolved = |text: &str, host: &str| host_mark(&clean(text).remote_hosts, host);
         let globs = "[remote]\nhosts = [\n  { host = \"prod-*\", mark = \"production\" },\n]\n";
-        // None bir globun yakaladığı host'u işaretsiz bırakıyor: başa `none`.
+        // None leaves a host caught by a glob unmarked: `none` at the start.
         let none = marked(globs, "prod-canary", HostMark::None);
         assert_eq!(
             none,
@@ -4255,8 +4337,8 @@ cursor = \"spring\"
         );
         assert_eq!(resolved(&none, "prod-canary"), HostMark::None);
         assert_eq!(resolved(&none, "prod-web"), HostMark::Production);
-        // Önünde glob olan tam girdi yerinde değişse etkisiz kalırdı: başa
-        // taşınıyor.
+        // An exact entry with a glob in front of it would be ineffective if changed
+        // in place: it is moved to the start.
         let behind = "[remote]\nhosts = [\n  { host = \"*\", mark = \"development\" },\n  \
                       { host = \"db\", mark = \"production\" },\n]\n";
         let moved = marked(behind, "db", HostMark::Staging);
@@ -4265,7 +4347,8 @@ cursor = \"spring\"
             "[remote]\nhosts = [\n  { host = \"db\", mark = \"staging\" },\n  \
              { host = \"*\", mark = \"development\" },\n]\n"
         );
-        // `user@`'li glob: None'ın yazdığı `user@`'siz desen onu geçiyor.
+        // A glob with `user@`: the pattern without `user@` that None writes gets
+        // past it.
         let user = "[remote]\nhosts = [{ host = \"root@*\", mark = \"staging\" }]\n";
         let none = marked(user, "root@db", HostMark::None);
         assert_eq!(resolved(&none, "root@db"), HostMark::None);
@@ -4301,7 +4384,8 @@ cursor = \"spring\"
             "{prepended}"
         );
         assert!(prepended.contains("# veri"), "{prepended}");
-        // Önde ve arkada başka bölümler: yeni girdi dizinin yerinde doğuyor.
+        // Other sections before and after: the new entry is born in the array's
+        // place.
         let around = format!("[font]\nsize = 13\n\n# liste\n{text}\n[notes]\nx = 1\n");
         assert_eq!(
             marked(&around, "cache", HostMark::Production),
@@ -4316,8 +4400,8 @@ cursor = \"spring\"
 
     #[test]
     fn marking_a_host_refuses_a_broken_list() {
-        // Ayrıştırılamayan metin ve bozuk dizi yazılmıyor: kullanıcının yarım
-        // işi.
+        // Text that can't be parsed and a broken array aren't written: the user's
+        // half-finished work.
         for text in [
             "[remote\n",
             "[remote]\nhosts = [{ host = \"a\", mark = \"prod\" }]\n",
@@ -4342,8 +4426,8 @@ cursor = \"spring\"
         assert_eq!(HostMark::Rgb(0x0a0b0c).written(), "#0a0b0c");
     }
 
-    /// `written`, `text`'ten tek satırın değişmesiyle ya da tek satırın
-    /// eklenmesiyle mi doğmuş — satır sonu `eol`.
+    /// Whether `written` was born from `text` by a single line changing or a
+    /// single line being added — the line ending is `eol`.
     fn one_line_apart(text: &str, written: &str, eol: &str) -> bool {
         let before: Vec<&str> = text.split(eol).collect();
         let after: Vec<&str> = written.split(eol).collect();
@@ -4360,8 +4444,8 @@ cursor = \"spring\"
 
     #[test]
     fn every_edit_reads_back_and_touches_one_line() {
-        // Kullanıcının dosyası: şablonun yorumları ve sırası, üstüne
-        // tanımadığımız bir anahtar ve bölüm, değerin yanında yorum.
+        // The user's file: the template's comments and order, plus a key and
+        // section we don't recognize, a comment next to a value.
         let rich = format!(
             "{}future = true\n\n[notes]\nx = 1\n",
             Settings::TEMPLATE.replace("scrollback = 10000", "scrollback = 10000  # plenty")
@@ -4369,7 +4453,7 @@ cursor = \"spring\"
         let crlf = rich.replace('\n', "\r\n");
         for edit in every_edit() {
             for (text, eol) in [(rich.as_str(), "\n"), (crlf.as_str(), "\r\n")] {
-                let written = Settings::with_edit(text, &edit).expect("yazılabilir metin");
+                let written = Settings::with_edit(text, &edit).expect("writable text");
                 assert!(one_line_apart(text, &written, eol), "{edit:?}\n{written}");
                 assert_eq!(
                     clean(&written),
@@ -4377,8 +4461,8 @@ cursor = \"spring\"
                     "{edit:?}\n{written}"
                 );
             }
-            // Boş metin: bölüm ve anahtar eklenir.
-            let written = Settings::with_edit("", &edit).expect("yazılabilir metin");
+            // Empty text: the section and key are added.
+            let written = Settings::with_edit("", &edit).expect("writable text");
             assert_eq!(
                 clean(&written),
                 applied(Settings::default(), &edit),
@@ -4389,9 +4473,9 @@ cursor = \"spring\"
 
     #[test]
     fn edits_keep_the_way_the_section_is_written() {
-        // `with_theme`'in sınaması her türden bir anahtar için: satır içi tablo
-        // ve noktalı anahtar yazılışlarını korur, kabul edilmeyen değerin
-        // yerine yazar (kullanıcı pencerede bir değer seçti).
+        // `with_theme`'s test for a key of every type: preserves the inline table
+        // and dotted key spellings, writes in place of a value that isn't accepted
+        // (the user chose a value in the window).
         for (text, edit, expected) in [
             (
                 "font = { size = 13, family = \"Menlo\" }\n",
@@ -4410,13 +4494,15 @@ cursor = \"spring\"
             ),
         ] {
             assert_eq!(
-                Settings::with_edit(text, &edit).expect("yazılabilir metin"),
+                Settings::with_edit(text, &edit).expect("writable text"),
                 expected
             );
         }
-        // Bölüm olan anahtar: yerine değer yazmak alt tabloyu silerdi.
+        // A key that is a section: writing a value in its place would delete the
+        // subtable.
         for text in ["[font.size]\nx = 1\n", "[font]\nsize = { x = 1 }\n"] {
-            let err = Settings::with_edit(text, &SettingsEdit::FontSize(14.0)).expect_err("bölüm");
+            let err =
+                Settings::with_edit(text, &SettingsEdit::FontSize(14.0)).expect_err("section");
             assert_eq!(err.key, Some("font.size"), "{text}");
             assert_eq!(err.message, "`font.size` must be a number, found a section");
         }
@@ -4424,14 +4510,14 @@ cursor = \"spring\"
             "motion = 1\n",
             &SettingsEdit::SmoothScroll(SmoothScroll::Off),
         )
-        .expect_err("bölüm değil");
+        .expect_err("not a section");
         assert_eq!(err.key, Some("motion"));
     }
 
     #[test]
     fn every_name_reads_back_as_its_value() {
-        // Tablo ↔ ayrıştırıcı bekçisi: her yazılış ayrıştırıcıdan kendi
-        // varyantını veriyor ve `name()` onu geri yazıyor.
+        // Table ↔ parser guard: every spelling gives its own variant from the
+        // parser and `name()` writes it back.
         fn check<T: Copy + PartialEq + std::fmt::Debug>(
             names: &[(&str, T)],
             name: fn(T) -> &'static str,

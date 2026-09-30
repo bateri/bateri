@@ -1,96 +1,103 @@
-//! Kabuğun bastığı OSC işaretleri, onların tuttuğu oturum durumu, **komut
-//! bloğu defteri** ve **ZLE'nin görüntü aynası**.
+//! The OSC marks the shell prints, the session state they hold, the **command
+//! block ledger** and **ZLE's display mirror**.
 //!
-//! Tarayıcının **üç OSC kolu** var ve üçü de aynı bayt akışından besleniyor:
-//! [`MARK_OSC`] oturumun safhasını ve blok kimliklerini taşır, [`DOCK_OSC`]
-//! satır düzenleyicinin (ZLE) o anki görüntüsünü, [`CWD_OSC`] de çalışma
-//! dizinini. Üçü tek durum makinesinde, çünkü akış tek: ayrı tarayıcılar aynı
-//! diziyi üç kez çerçevelerdi ve çerçeveleme kuralının (aşağıdaki üç madde)
-//! üç kopyası doğardı.
+//! The scanner has **three OSC arms** and all three are fed from the same byte
+//! stream: [`MARK_OSC`] carries the session's phase and block identities,
+//! [`DOCK_OSC`] the line editor's (ZLE's) current display, [`CWD_OSC`] the working
+//! directory. All three sit in one state machine, because the stream is one:
+//! separate scanners would frame the same sequence three times and the framing
+//! rule (the three points below) would exist in three copies.
 //!
-//! **Dördüncü kol OSC değil CSI** ve ötekilerden iki yanıyla ayrılıyor:
-//! tanıdığı tek dizi `CSI 2 J`, ve **yükü yok**. Tuttuğu şey bir yük değil bir
-//! sayı — kaç kez "ekranı kasten temizle" geçtiği ([`Scanner::take_screen_clears`]).
-//! Aynı durum makinesinde, çünkü çerçeveleme yine tek: bozuk bir CSI'da takılıp
-//! kalan bir tarayıcı peşinden gelen `ESC ] 133;…`'ü yutar ve bloklar,
-//! bastırma, dock **sessizce** ölürdü. `ESC [` bugüne kadar `Ground`'a
-//! düşüyordu; o kol ancak aranan diziyi görmediği için zararsızdı, yoksa
-//! bir CSI'nın içindeki `]` bizde yeni bir OSC açabilirdi.
+//! **The fourth arm is not OSC but CSI** and differs from the others in two
+//! ways: the only sequence it recognizes is `CSI 2 J`, and it **has no payload**.
+//! What it holds is not a payload but a count — how many times "clear the screen
+//! on purpose" went by ([`Scanner::take_screen_clears`]). It sits in the same
+//! state machine because the framing is still one: a scanner stuck in a
+//! malformed CSI would swallow the `ESC ] 133;…` that follows, and blocks,
+//! suppression and the dock would die **silently**. Until now `ESC [` fell to
+//! `Ground`; that arm was harmless only because it did not see the sequence it
+//! was looking for, otherwise a `]` inside a CSI could open a new OSC for us.
 //!
-//! Neden bu diziyi terminalin **kendisi** izliyor: alacritty
-//! `ClearMode::All`'ü birincil ekranda `clear_viewport()` ile karşılıyor
-//! (`term/mod.rs:1794`), yani görünen satırları **geçmişe itiyor**. Ekran
-//! boşalıyor ama `history_size()` büyüyor; "boşluğu geçmişle doldur" kuralı
-//! (017) onu ayırt edemezse Ctrl-L'i geri alırdı.
+//! Why the terminal **itself** watches this sequence: alacritty handles
+//! `ClearMode::All` on the primary screen with `clear_viewport()`
+//! (`term/mod.rs:1794`), that is, it **pushes the visible lines into
+//! scrollback**. The screen empties but `history_size()` grows; if the "fill the
+//! gap with scrollback" rule (017) cannot tell the two apart, it would undo
+//! Ctrl-L.
 //!
-//! Beş sorumluluk, tek modül: baytlardan işaret çıkarmak ([`parse_mark`]),
-//! işaretlerden oturum safhası tutmak ([`ShellState`]), blok kimliği başına
-//! akıbet tutup şeridin çizilip çizilmeyeceğine karar vermek ([`BlockLog`],
-//! [`ShellLog::stripe`]), aynanın beş değişkenini çözülmüş bir kayda
-//! indirmek ([`DockState`]) ve dock'un bağlam satırını — dizin ile dal —
-//! tutmak ([`DockContext`]). Beşi aynı yerde, çünkü beşini de **aynı** işaret
-//! akışı besliyor; ayrılsalardı `D`'nin çıkış kodu bir modülden ötekine elden
-//! ele geçerdi. Defterin tavanı `scrollback`'ten türüyor ve "bilinmeyen
-//! kimlik çizilmez" kararı da burada — renderer'ın göreceği tek şey çözülmüş
-//! renk.
+//! Five responsibilities, one module: extracting marks from bytes
+//! ([`parse_mark`]), keeping the session phase from the marks ([`ShellState`]),
+//! keeping a fate per block identity and deciding whether the stripe is drawn
+//! ([`BlockLog`], [`ShellLog::stripe`]), reducing the mirror's five variables to
+//! a decoded record ([`DockState`]) and keeping the dock's context line — the
+//! directory and the branch ([`DockContext`]). All five in one place, because the
+//! **same** mark stream feeds all five; if they were split, `D`'s exit code
+//! would be handed from one module to the other by hand. The ledger's ceiling
+//! derives from `scrollback` and the "an unknown identity is not drawn" decision
+//! is here too — the only thing the renderer will see is a decoded color.
 //!
-//! **Ayna ile bağlamın ömrü ayrı** ve bu ayrım tiplere yazılı: [`DockState`]
-//! tuş başına geliyor ve `line-finish`'te sıfırlanıyor, [`DockContext`]
-//! prompt başına geliyor ve komut koşarken de ekranda kalıyor.
+//! **The mirror's and the context's lifetimes are separate** and this distinction
+//! is written into the types: [`DockState`] arrives per keystroke and is reset at
+//! `line-finish`, [`DockContext`] arrives per prompt and stays on screen while a
+//! command runs.
 //!
-//! Bu modül **saf**: elinde ne `Session`, ne `Wake`, ne kilit var. Bayt
-//! dilimi girer, işaret çıkar. Tarayıcının hiçbir kare isteyememesi bir kural
-//! değil tipin şekli — beslediği yer (`read()`, okuyucu thread'i)
-//! `advance()`'ten **önce** koşuyor; kare isteyebilseydi eski ızgara ile yeni
-//! durumu aynı karede çizerdi.
+//! This module is **pure**: it holds no `Session`, no `Wake`, no lock. A byte
+//! slice goes in, a mark comes out. That the scanner can request no frame is not
+//! a rule but the shape of the type — the place that feeds it (`read()`, the
+//! reader thread) runs **before** `advance()`; if it could request a frame, it
+//! would draw the old grid and the new state in the same frame.
 //!
-//! **Neden kendi tarayıcımız var:** `vte` OSC 133'ü tanımıyor ve `Handler`
-//! trait'inde "bilinmeyen OSC" kancası yok, yani `Term`'ü saran bir tip bile
-//! bu diziyi göremiyor (`.tasks/009-shell-entegrasyonu/context.md` → Kanıt).
-//! Baytları ayrıştırıcıya giderken tarıyoruz. Aynı gerekçe [`DOCK_OSC`] ve
-//! [`CWD_OSC`] için de geçerli: `vte` ikisini de **tanımıyor**, yükü
-//! `osc_dispatch`'in `_` koluna düşürüp atıyor (`vte-0.15.0/src/ansi.rs`,
-//! `unhandled`; yorumladığı numaralar 0, 2, 4, 8, 10–12, 22, 50, 52, 104 ve
-//! 110–112). Yük bütünüyle oraya ulaşıyor — `osc_raw` `std` altında sınırsız
-//! bir `Vec` ve 1024'lük `MAX_OSC_RAW` yalnız `no_std` kolunda geçerli — ama
-//! ulaştığı yerde okunmuyor. Dizin için bu, alacritty'nin bir olayının
-//! **düşmesi** değil: OSC 7 hiçbir olay doğurmuyor, yani `Event::Title`'ın
-//! boş kolu bu kolun yerine geçemezdi.
+//! **Why we have our own scanner:** `vte` does not recognize OSC 133 and the
+//! `Handler` trait has no "unknown OSC" hook, so even a type wrapping `Term`
+//! cannot see this sequence (`.tasks/009-shell-entegrasyonu/context.md` → Kanıt).
+//! We scan the bytes on their way to the parser. The same reasoning holds for
+//! [`DOCK_OSC`] and [`CWD_OSC`]: `vte` does **not recognize** either, it drops
+//! the payload into the `_` arm of `osc_dispatch` and discards it
+//! (`vte-0.15.0/src/ansi.rs`, `unhandled`; the numbers it interprets are 0, 2, 4,
+//! 8, 10–12, 22, 50, 52, 104 and 110–112). The payload reaches there in full —
+//! `osc_raw` is an unbounded `Vec` under `std` and the 1024 `MAX_OSC_RAW` applies
+//! only in the `no_std` arm — but is not read where it arrives. For the
+//! directory this is not an alacritty event being **dropped**: OSC 7 produces no
+//! event, so the empty arm of `Event::Title` could not have stood in for this
+//! arm.
 //!
-//! **Bedeli adıyla:** o `_` kolu yükü düşürmeden önce bayt başına bir
-//! `write!` ile tanı dizgisi kuruyor ve dizgiyi `debug!`'tan **önce**
-//! kurduğu için log seviyesi bunu kısa devre yapmıyor. Yani aynanın her tuş
-//! vuruşu ayrıştırıcı tarafında yük uzunluğuyla orantılı bir ayırma daha
-//! doğuruyor.
+//! **The cost, by name:** before dropping the payload, that `_` arm builds a
+//! diagnostic string with one `write!` per byte, and because it builds the
+//! string **before** `debug!`, the log level does not short-circuit it. So each
+//! keystroke's mirror causes one more allocation on the parser side,
+//! proportional to the payload length.
 //!
-//! Bu bizim kusurumuz değil, alacritty'nin **tanımadığı her** OSC'ye
-//! davranışı; biz yalnız o yola sık uğrayan bir dizi soktuk. Kaçışı iki:
-//! diziyi akıştan **çıkarmak** (tarayıcının "baytlara dokunmaz" sözünü bozar
-//! ve dizi chunk sınırını aşabildiği için yerinde yapılamaz) ya da taşıyıcıyı
-//! **DCS**'e çevirmek (`put` yükü ne tamponluyor ne formatlıyor; `discussion.md`
-//! → Karar 5'te **değerlendirilmemiş** bir alternatif, 5b gibi elenmiş değil).
-//! İkisi de ölçüm sonrasının işi: maliyet **kare yolunda değil** okuyucu
-//! thread'inde ve aynı tuş vuruşunun kabuk tarafındaki base64 kodlaması zaten
-//! baskın terim. Bilinen sınır olarak duruyor; ölçümü R6.2'nin (tuş başına
-//! maliyet) borcunda.
+//! This is not our defect but alacritty's behavior toward **every** OSC it does
+//! not recognize; we only introduced a sequence that often hits that path. There
+//! are two escapes: **removing** the sequence from the stream (breaks the
+//! scanner's "does not touch the bytes" promise and cannot be done in place
+//! because a sequence can cross a chunk boundary) or **changing the carrier to
+//! DCS** (`put` neither buffers nor formats the payload; in `discussion.md` →
+//! Karar 5 an **unevaluated** alternative, not eliminated like 5b). Both are
+//! post-measurement work: the cost is **not on the frame path** but on the reader
+//! thread, and the shell-side base64 encoding of the same keystroke is already
+//! the dominant term. It stands as a known limit; its measurement is in the debt
+//! of R6.2 (per-keystroke cost).
 //!
-//! **Çerçeveleme `vte` ile paritelidir** ve bu zorunlu: tarayıcının gördüğü
-//! dizi sınırı ile ızgaranın gördüğü aynı olmalı, yoksa iki taraf aynı akıştan
-//! iki farklı hikâye okur. `vte-0.15.0/src/lib.rs`'in durum tablosundan
-//! çıkan üç kural:
+//! **Framing is at parity with `vte`** and this is mandatory: the sequence
+//! boundary the scanner sees must be the same as the grid sees, otherwise the
+//! two sides read two different stories from the same stream. Three rules from
+//! the state table of `vte-0.15.0/src/lib.rs`:
 //!
-//! - Dizi `ESC ]` ile başlar (`advance_esc`, `0x5D`) — ve `ESC` ile `]`
-//!   arasına bayt girebilir: `advance_esc` C0'ların 0x18/0x1A dışındakilerini
-//!   `execute` edip **durumu değiştirmiyor**, 0x7F'ten büyük baytları hiç
-//!   tanımıyor. Yani `ESC \r ] 133;A BEL` ızgarada geçerli bir işaret.
-//! - Diziyi **dört** bayt bitirir: `BEL` (0x07), `CAN` (0x18), `SUB` (0x1A) ve
-//!   **çıplak `ESC`** (0x1B). Sonuncusu sürprizdir: `advance_osc_string` ESC'i
-//!   görünce diziyi `ESC \`'in `\`'ini beklemeden **hemen** dağıtıyor. Yani
-//!   `ESC ] 133;A ESC [ 0 m` de geçerli bir işarettir ve `ESC` her durumdan
-//!   `Escape`'e götürdüğü için "bir sonraki ESC'e zıpla" taraması eksiksizdir.
-//! - Dizinin içindeki C0 kontrol baytları (0x00–0x06, 0x08–0x17, 0x19,
-//!   0x1C–0x1F) **yüke girmez**; `vte` onları sessizce atıyor. Biz de atıyoruz,
-//!   yoksa satır sonu yapıştırılmış bir `D;0\r` yükü bizde bozuk görünürdü.
+//! - A sequence begins with `ESC ]` (`advance_esc`, `0x5D`) — and bytes can
+//!   enter between `ESC` and `]`: `advance_esc` `execute`s C0s other than
+//!   0x18/0x1A and **does not change state**, and it does not recognize bytes
+//!   above 0x7F at all. So `ESC \r ] 133;A BEL` is a valid mark on the grid.
+//! - **Four** bytes end a sequence: `BEL` (0x07), `CAN` (0x18), `SUB` (0x1A) and
+//!   a **bare `ESC`** (0x1B). The last is a surprise: `advance_osc_string`, on
+//!   seeing ESC, dispatches the sequence **immediately** without waiting for the
+//!   `\` of `ESC \`. So `ESC ] 133;A ESC [ 0 m` is a valid mark too, and because
+//!   `ESC` takes every state to `Escape`, the "jump to the next ESC" scan is
+//!   complete.
+//! - C0 control bytes inside the sequence (0x00–0x06, 0x08–0x17, 0x19,
+//!   0x1C–0x1F) **do not enter the payload**; `vte` silently drops them. We drop
+//!   them too, otherwise a `D;0\r` payload with a pasted line ending would look
+//!   corrupt to us.
 
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
@@ -103,261 +110,268 @@ use crate::dock::{self, DockPoint};
 use crate::session::{CellHalf, SelectKind};
 use crate::settings::{HostMark, HostRule};
 
-/// Kabuğun akışa bastığı tek bir OSC 133 işareti.
+/// A single OSC 133 mark the shell writes into the stream.
 ///
-/// Dördü de kabuktan bağımsızdır: tipte ne zsh, ne bash, ne fish geçer
-/// (R2.4). Yeni bir kabuk eklemek yalnız bir betik yazmaktır.
+/// All four are independent of the shell: neither zsh, nor bash, nor fish
+/// appears in the type (R2.4). Adding a new shell is only writing a script.
 ///
-/// **Kimliği yalnız iki varyant taşır** (`A` ve `D`), çünkü bloğu açan ve
-/// kapatan onlar; `B` ile `C` bloğun *içinde* duruyor ve kimlikleri
-/// tekrarlamak akışa bayt eklemekten başka bir şey yapmazdı.
+/// **Only two variants carry the identity** (`A` and `D`), because they open
+/// and close the block; `B` and `C` sit *inside* the block and repeating the
+/// identity would do nothing but add bytes to the stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mark {
-    /// `A` — prompt burada başlıyor; blok da burada açılıyor.
+    /// `A` — the prompt starts here; the block opens here too.
     PromptStart { id: Option<u32> },
-    /// `B` — prompt bitti, bundan sonrası kullanıcının yazdığı komut.
+    /// `B` — the prompt is done, what follows is the command the user typed.
     PromptEnd,
-    /// `C` — komut koşmaya başladı, bundan sonrası çıktı.
+    /// `C` — the command started running, what follows is output.
     CommandStart,
-    /// `D` — komut bitti. Kod **opsiyoneldir**: kabuk `D`'yi çıplak da
-    /// basabilir ve okunamayan bir parametre komutun bittiği bilgisini
-    /// çürütmez — "bitti ama kodu bilmiyorum" doğru cevaptır. Kimlik de
-    /// opsiyonel ve aynı gerekçeyle: kimliksiz bir `D` durumu yine ilerletir,
-    /// yalnız deftere yazacak bir yeri yoktur.
+    /// `D` — the command ended. The code is **optional**: the shell may print `D`
+    /// bare, and an unreadable parameter does not refute the fact that the command
+    /// ended — "finished but I don't know the code" is the right answer. The
+    /// identity is optional too, for the same reason: an identity-less `D` still
+    /// advances the state, it just has nowhere to write into the ledger.
     CommandEnd { exit: Option<i32>, id: Option<u32> },
 }
 
-/// Oturumun kabuk hakkında bildiği her şey.
+/// Everything the session knows about the shell.
 ///
-/// `Copy` ve küçük: [`crate::Session::shell_state`] onu kilidin altından
-/// kopyalayarak veriyor ([`crate::Session::theme`] emsali).
+/// `Copy` and small: [`crate::Session::shell_state`] hands it out by copying
+/// from under the lock (the precedent is [`crate::Session::theme`]).
 ///
-/// **Seviye `enum`'u yok.** Ürün dilindeki "seviye 0" (entegrasyon yok)
-/// kodda bu tipin **yokluğudur** (`Option<ShellState>`); ayrı bir kayıt
-/// tutulsaydı SSH'ın öte tarafında ikisi çelişirdi — yerelde entegrasyon
-/// kurulu ama uzakta işaret gelmiyor (`discussion.md` → Karar 3).
+/// **There is no level `enum`.** The product-language "level 0" (no integration)
+/// is, in code, the **absence** of this type (`Option<ShellState>`); if a
+/// separate record were kept, the two would contradict each other on the far
+/// side of SSH — integration installed locally but no marks arriving from the
+/// remote (`discussion.md` → Karar 3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShellState {
-    /// Kabuk şu anda ne yapıyor.
+    /// What the shell is doing right now.
     pub phase: ShellPhase,
-    /// En son biten komutun çıkış kodu; hiç komut bitmediyse ya da kabuk kodu
-    /// okunamayacak şekilde bastıysa `None`.
+    /// The exit code of the most recently finished command; `None` if no command has
+    /// finished yet or if the shell printed the code in an unreadable form.
     pub last_exit: Option<i32>,
 }
 
-/// Kabuğun o anki safhası — dört işaretin her birine bir tane.
+/// The shell's current phase — one for each of the four marks.
 ///
-/// `A` ve `B` **birleştirilmedi**: "prompt çiziliyor" ile "kullanıcı yazıyor"
-/// arasındaki sınır, Input Dock'un (012) ilk sorusu. Ayrımı burada tutmak
-/// bedava, sonradan geri kazanmak değil.
+/// `A` and `B` are **not merged**: the boundary between "the prompt is being
+/// drawn" and "the user is typing" is the first question of the Input Dock (012).
+/// Keeping the distinction here is free, winning it back later is not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellPhase {
-    /// `A` — prompt çiziliyor.
+    /// `A` — the prompt is being drawn.
     Prompt,
-    /// `B` — prompt bitti, kullanıcı komutunu yazıyor.
+    /// `B` — the prompt is done, the user is typing their command.
     Input,
-    /// `C` — komut koşuyor, ekrana çıktısı akıyor.
+    /// `C` — the command is running, its output is flowing onto the screen.
     Running,
-    /// `D` — komut bitti, yeni prompt henüz gelmedi. Kodu `last_exit`'te.
+    /// `D` — the command finished, the new prompt has not arrived yet. The code is in `last_exit`.
     Finished,
 }
 
-/// Bir bloğun akıbeti — defterin tuttuğu ham kayıt.
+/// A block's fate — the raw record the ledger keeps.
 ///
-/// `Pending`, "koşuyor" **demek değil**: boş bir prompt'a basılan Enter da
-/// `A` doğurur ama hiç komut koşmadığı için `D` gelmez. İkisini ayırt eden
-/// bilgi [`ShellState::phase`]'te ve ayrımı yapan [`ShellLog::stripe`]; defter
-/// yalnız gördüğünü kaydeder.
+/// `Pending` does **not mean** "running": an Enter pressed on an empty prompt
+/// also produces `A`, but since no command ran, `D` never arrives. The information
+/// that tells the two apart is in [`ShellState::phase`] and the function that
+/// makes the distinction is [`ShellLog::stripe`]; the ledger only records what it
+/// sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// `A` geldi, `D` gelmedi.
+    /// `A` arrived, `D` did not.
     Pending,
-    /// `D` geldi; kabuk kodu okunamayacak şekilde bastıysa `exit` `None`.
+    /// `D` arrived; `exit` is `None` if the shell printed the code in an unreadable form.
     Finished {
         exit: Option<i32>,
-        /// `C` ile `D` arasında geçen süre, milisaniye.
+        /// The time between `C` and `D`, in milliseconds.
         ///
-        /// Bloğun **kendi içinde**, yan tabloda değil: akıbetle aynı ömre
-        /// sahip ve halkanın tahliyesi ikisini birlikte atıyor. `u32` tavanı
-        /// 49 gün; ondan uzun süren komutun sayacı doyuyor, sarmıyor.
+        /// **Inside** the block, not in a side table: it has the same lifetime as the
+        /// fate and the ring's eviction drops both together. The `u32` ceiling is
+        /// 49 days; the counter of a command that runs longer saturates, it does not
+        /// wrap.
         ///
-        /// Süreyi hiç görmemiş blokta sıfır: `C` gelmeden `D` gelirse
-        /// (kimliksiz `A`'dan sonra gelen `D`, ya da entegrasyonun yarısı)
-        /// uydurulmuş bir süre yazmak yerine eşiğin altına düşülüyor, yani
-        /// sayaç çizilmiyor.
+        /// Zero for a block that never saw the duration: if `D` arrives without `C`
+        /// (a `D` after an identity-less `A`, or half an integration), instead of
+        /// writing a made-up duration it falls below the threshold, that is, the
+        /// counter is not drawn.
         ///
-        /// **Bilinen sınır: ölçülen şey komutun kendisi değil, `C` ile `D`
-        /// arası.** İki işareti de basan kancalarımız `add-zsh-hook` ile
-        /// **sona** ekleniyor (gerekçeleri `bateri.zsh`'te: `preexec`'te
-        /// çıpanın kapanışı, `precmd`'de `psvar` yuvası), yani kullanıcının
-        /// kendi kancaları ikisinden de önce koşuyor. Sonuç iki yönlü ve
-        /// kısmen birbirini götürüyor: `C` geç basılıyor (süre kısalır), `D`
-        /// kullanıcının `precmd`'lerinden sonra basılıyor (süre uzar). Pay
-        /// kancaların süresi kadar — starship gibi prompt başına bir binary
-        /// koşturan kurulumda on milisaniyeler.
+        /// **Known limit: what is measured is not the command itself but the span
+        /// between `C` and `D`.** Our hooks that print the two marks are appended
+        /// **last** with `add-zsh-hook` (their reasons are in `bateri.zsh`: the anchor's
+        /// closing in `preexec`, the `psvar` slot in `precmd`), so the user's own hooks
+        /// run before both. The result goes both ways and partly cancels out: `C` is
+        /// printed late (the duration shrinks), `D` is printed after the user's
+        /// `precmd`s (the duration grows). The margin is the duration of the hooks —
+        /// tens of milliseconds in a setup like starship that runs a binary per prompt.
         ///
-        /// **Kendi işimiz payın içinde değil:** `D` `precmd`'in ilk işi —
-        /// dalın `git` fork'undan, OSC 7'den ve `psvar`'dan **önce**.
+        /// **Our own work is not inside the margin:** `D` is `precmd`'s first job —
+        /// **before** the branch's `git` fork, OSC 7 and `psvar`.
         elapsed_ms: u32,
     },
 }
 
-/// Defterin girdi başına bütçesi — [`BlockLog`]'un doc'undaki sayının
-/// **doğrulanmış** hâli.
+/// The ledger's per-entry budget — the **verified** form of the number in
+/// [`BlockLog`]'s doc.
 ///
-/// Rust `Option<i32>`'nin etiketindeki niche'i [`Outcome`]'ın ayrımı için
-/// kullanıyor, yani boyut elle toplanabilir bir sayı değil (elle 16 çıkıyor ve
-/// ilk yazımda öyle yazılmıştı): `Finished`'a bir alan eklemek 12'yi sessizce
-/// büyütür ve 10 000 satırlık scrollback'te sekme başına ödenen bellek de
-/// öyle. Assert kırılınca hem burası hem `BlockLog`'un bütçe cümlesi aynı
-/// commit'te güncellenir.
+/// Rust uses the niche in `Option<i32>`'s tag for [`Outcome`]'s discrimination,
+/// so the size is not a number that can be added up by hand (by hand it comes to
+/// 16 and that is how it was written the first time): adding a field to
+/// `Finished` silently grows 12, and with it the memory paid per tab in a
+/// 10,000-line scrollback. When the assert breaks, both this place and
+/// `BlockLog`'s budget sentence are updated in the same commit.
 const _: () = assert!(size_of::<Outcome>() == 12);
 
-/// Bir bloğun **çizilebilir** durumu; renge [`crate::Session::frame`]'de
-/// temadan iniyor.
+/// A block's **drawable** state; it descends to a color from the theme in
+/// [`crate::Session::frame`].
 ///
-/// Üç değer, çünkü bugün çizilen üç renk var. Çizilmeyen durumun adı bu enum'da
-/// değil, onu üreten fonksiyonun `None`'ı: "bilinmeyen hiçbir hâlde çizilmez"
-/// bir renk seçimi değil, çizim kararı.
+/// Three values, because three colors are drawn today. The name of the undrawn
+/// state is not in this enum but in the `None` of the function that produces it:
+/// "not drawn in any unknown state" is not a color choice, it is a drawing
+/// decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stripe {
-    /// Komut koşuyor — rengi temanın `accent`'ı.
+    /// The command is running — its color is the theme's `accent`.
     Running,
-    /// Sıfır çıkış koduyla bitti.
+    /// Finished with a zero exit code.
     Success,
-    /// Sıfırdan farklı çıkış koduyla bitti.
+    /// Finished with a nonzero exit code.
     Error,
 }
 
-/// ZLE'nin görüntü aynası — dock'un çizeceği her şey, **çözülmüş**.
+/// ZLE's display mirror — everything the dock will draw, **decoded**.
 ///
-/// Beş görüntü değişkeni taşınıyor ([`DOCK_OSC`]'un yükü; yanlarında
-/// `KEYMAP` ve 032'den beri `PREBUFFER`) ve burada dizgilere, bir sütuna ve
-/// bir aralık listesine iniyor. Yalnız `BUFFER` taşınsaydı bastırma
-/// bilgi kaybına dönerdi: `POSTDISPLAY` autosuggestions'ın önerisi,
-/// `region_highlight` de syntax highlighting'in rengi — ikisi de en yaygın iki
-/// eklenti ve dock onlarsız kullanıcının gördüğünden **eksik** olurdu
-/// (`discussion.md` → Karar 8b).
+/// Five display variables are carried ([`DOCK_OSC`]'s payload; alongside them
+/// `KEYMAP` and, since 032, `PREBUFFER`) and here they descend to strings, a
+/// column and a list of ranges. If only `BUFFER` were carried, suppression would
+/// turn into information loss: `POSTDISPLAY` is the autosuggestions suggestion,
+/// `region_highlight` is syntax highlighting's color — the two most common
+/// plugins, and without them the dock would show the user **less** than they
+/// see (`discussion.md` → Karar 8b).
 ///
-/// **Yeniden kullanılan tampondur, kayıt değil.** Tarayıcı her tuş vuruşunda
-/// kendi kopyasını yerinde tazeliyor, [`ShellLog`] onu [`Clone::clone_from`]
-/// ile kilidin altına alıyor ve [`crate::Session::dock_state`] yine
-/// `clone_from` ile dışarı veriyor; üç adımda da dizgiler `clear()` +
-/// `push_str` ile kapasitelerini koruyor. Sabit durumda tuş başına **sıfır**
-/// ayırma var — ölçüt `CLAUDE.md`'nin kare başına maliyet kuralı ve bu tip
-/// kare başına okunuyor.
+/// **It is a reused buffer, not a record.** The scanner refreshes its own copy in
+/// place on every keystroke, [`ShellLog`] takes it under the lock with
+/// [`Clone::clone_from`] and [`crate::Session::dock_state`] hands it out again
+/// with `clone_from`; in all three steps the strings keep their capacities with
+/// `clear()` + `push_str`. In steady state there are **zero** allocations per
+/// keystroke — the criterion is `CLAUDE.md`'s per-frame cost rule and this type
+/// is read every frame.
 ///
-/// `Clone` elle yazıldı: `derive` yalnız `clone`'u üretir ve varsayılan
-/// `clone_from` "`*self = source.clone()`"dır, yani bu tipin tek önemli
-/// özelliğini — kapasiteyi yeniden kullanmasını — sessizce kaybederdi.
+/// `Clone` is written by hand: `derive` produces only `clone` and the default
+/// `clone_from` is "`*self = source.clone()`", so it would silently lose this
+/// type's one important property — reusing capacity.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DockState {
-    /// Dock çizilebilir mi ve çizilemiyorsa neden.
+    /// Whether the dock is drawable and, if not, why.
     pub status: DockStatus,
-    /// `PREDISPLAY` — ZLE'nin satırın **önüne** koyduğu, düzenlenemeyen metin.
+    /// `PREDISPLAY` — the non-editable text ZLE puts **before** the line.
     pub predisplay: String,
-    /// `BUFFER` — kullanıcının yazdığı, düzenlenebilir metin.
+    /// `BUFFER` — the text the user typed, editable.
     pub buffer: String,
-    /// `POSTDISPLAY` — satırın **arkasına** eklenen, düzenlenemeyen metin;
-    /// bugünkü tek üreticisi zsh-autosuggestions'ın önerisi.
+    /// `POSTDISPLAY` — the non-editable text appended **after** the line;
+    /// today's only producer is zsh-autosuggestions' suggestion.
     pub postdisplay: String,
-    /// `PREBUFFER` — çok satırlı bir komutun ZLE'nin **kabul ettiği** önceki
-    /// satırları (`for`, heredoc, `\`-devam); her zaman `\n`'le bitiyor ve
-    /// artık düzenlenemiyor. Aynanın yedinci, **isteğe bağlı** gövdesi (032);
-    /// eski betikte boş.
+    /// `PREBUFFER` — the earlier lines of a multi-line command that ZLE has
+    /// **accepted** (`for`, heredoc, `\`-continuation); always ends with `\n` and
+    /// is no longer editable. The mirror's seventh, **optional** body (032); empty
+    /// with an old script.
     ///
-    /// **Görüntü uzayının dışında:** [`Self::cursor`], [`Self::display_chars`],
-    /// [`Self::last_ink`] ve `region_highlight` onu saymıyor — zsh'in
-    /// uzayları da saymıyor. Dock onu düzenlenebilir satırların **üstünde**
-    /// çiziyor, seçilebilir ve kopyalanabilir ama salt okunur
-    /// ([`crate::dock::dock_layout`]'un akışı `PREBUFFER ++ görüntü`); dolu
-    /// olması bastırmanın üst tabanını çıpanın satırına indiriyor
+    /// **Outside the display space:** [`Self::cursor`], [`Self::display_chars`],
+    /// [`Self::last_ink`] and `region_highlight` do not count it — zsh's
+    /// spaces do not count it either. The dock draws it **above** the editable
+    /// lines, selectable and copyable but read-only (the flow of
+    /// [`crate::dock::dock_layout`] is `PREBUFFER ++ display`); its being filled
+    /// lowers suppression's upper floor to the anchor's row
     /// ([`SuppressedInput::from_anchor`]).
     pub prebuffer: String,
-    /// Caret'in **karakter** ofseti, [`Highlight::start`] ile **aynı uzayda**:
-    /// `PREDISPLAY ++ BUFFER ++ POSTDISPLAY` dizgisinin başından sayılıyor.
+    /// The caret's **character** offset, **in the same space** as
+    /// [`Highlight::start`]: counted from the start of the string
+    /// `PREDISPLAY ++ BUFFER ++ POSTDISPLAY`.
     ///
-    /// zsh'in `$CURSOR`'ı `BUFFER`'ın başından sayar; kaydırma sınırın bu
-    /// tarafında yapılıyor ki iki ofset alanı tek uzayda kalsın. İkisi ayrı
-    /// uzaylarda dursaydı çizen taraf birini `PREDISPLAY` uzunluğuyla
-    /// kaydırmayı unuttuğu anda caret'i prompt boyu kadar kaydırırdı — ve
-    /// `PREDISPLAY` boş olmadığı için bu **her satırda** olurdu.
+    /// zsh's `$CURSOR` counts from the start of `BUFFER`; the shift is done on this
+    /// side of the boundary so that the two offset fields stay in one space. If they
+    /// stood in separate spaces, the moment the drawing side forgot to shift one by
+    /// the `PREDISPLAY` length it would shift the caret by the prompt's length — and
+    /// since `PREDISPLAY` is non-empty, this would happen on **every line**.
     ///
-    /// Bayt değil karakter: dock'un sorusu "kaçıncı hücreye çizeyim".
+    /// Characters, not bytes: the dock's question is "which cell do I draw at".
     pub cursor: usize,
-    /// `region_highlight` — görüntünün renklendirilmiş aralıkları,
-    /// [`Highlight::start`]'ın doc'undaki tek uzaya **normalize edilmiş**.
+    /// `region_highlight` — the display's colored ranges, **normalized** into the
+    /// single space in [`Highlight::start`]'s doc.
     pub highlights: Vec<Highlight>,
-    /// `PREDISPLAY ++ BUFFER ++ POSTDISPLAY`'in karakter sayısı —
-    /// [`Self::cursor`] ile aynı uzayın boyu.
+    /// The character count of `PREDISPLAY ++ BUFFER ++ POSTDISPLAY` — the length of
+    /// the same space as [`Self::cursor`].
     ///
-    /// **Saklanıyor, çünkü zaten sayılmış:** çözücü ofsetleri kırpmak için üç
-    /// uzunluğu da hesaplıyor. Tüketicisi [`ShellLog::suppressed_input`] ve
-    /// oradan `Session::frame` — bastırılan aralığın **alt** ucu bundan
-    /// türüyor. Kare başına yeniden saymak `frame()`'in `Term` kilidi
-    /// öncesine O(n) bir gezinti eklerdi.
+    /// **Stored because it was already counted:** the decoder computes all three
+    /// lengths to clamp the offsets. Its consumer is [`ShellLog::suppressed_input`]
+    /// and from there `Session::frame` — the suppressed range's **lower** end
+    /// derives from this. Recounting per frame would add an O(n) walk to `frame()`
+    /// before the `Term` lock.
     pub display_chars: usize,
-    /// Görüntünün **son satırının** son boşluk olmayan karakteri; o satır
-    /// boşsa (`echo a\n`'in ardı da) `None`.
+    /// The last non-blank character of the display's **last line**; `None` if that
+    /// line is blank (also after `echo a\n`).
     ///
-    /// Bastırmanın **tazelik kapısı** bunu kullanıyor: ızgaradaki giriş
-    /// satırının **son** satırının son mürekkepli hücresiyle karşılaştırılıyor ve uyuşmazsa
-    /// ayna bayat sayılıp bastırma bırakılıyor. Boşluk **dışlanıyor**, çünkü
-    /// boşluk hücresi sınırdan hiç geçmiyor (`frame()`'in atlama kapısı) ve
-    /// `ls ` yazan kullanıcıda her karede yanlış alarm verirdi.
+    /// Suppression's **freshness gate** uses this: it is compared with the last
+    /// inked cell of the **last** line of the grid's last input line, and on a
+    /// mismatch the mirror is considered stale and suppression is dropped. Blanks
+    /// are **excluded**, because a blank cell never crosses the boundary (`frame()`'s
+    /// skip gate) and for a user typing `ls ` it would give a false alarm every
+    /// frame.
     ///
-    /// Burada saklanıyor, çünkü çözücünün metni zaten elinde; kare başına
-    /// yeniden taramak `Term` kilidi öncesine O(n) eklerdi.
+    /// It is stored here because the decoder already has the text in hand;
+    /// rescanning per frame would add O(n) before the `Term` lock.
     pub last_ink: Option<char>,
-    /// ZLE **ekleme** keymap'inde mi: basılan basılabilir tuş metne dönüşüyor
-    /// mu ([`INSERT_KEYMAPS`]).
+    /// Whether ZLE is in the **insert** keymap: whether a pressed printable key
+    /// becomes text ([`INSERT_KEYMAPS`]).
     ///
-    /// Tek tüketicisi yapıştırmanın dar istisnası
-    /// ([`crate::Session::can_be_typed`]) ve orada zorunlu: istisnanın bütün
-    /// gerekçesi "bu metni kullanıcı elle yazsa aynı sonucu verirdi" ve o
-    /// cümle yalnız ekleme keymap'inde doğru. `vicmd`'de aynı baytlar komut —
-    /// panodaki `dd` satırı siler.
+    /// Its only consumer is the paste's narrow exception
+    /// ([`crate::Session::can_be_typed`]) and it is mandatory there: the whole
+    /// justification of the exception is "if the user typed this text by hand it
+    /// would give the same result" and that sentence is true only in the insert
+    /// keymap. In `vicmd` the same bytes are commands — `dd` on the clipboard
+    /// deletes a line.
     ///
-    /// **Ad değil `bool`:** sınırdan çözülmüş geçiyor (`DockState`'in geri
-    /// kalanıyla aynı kural) ve adı saklamak kare başına bir `String` daha
-    /// tutmak olurdu. Sınıflandırma çözme anında, tek yerde.
+    /// **A `bool`, not a name:** it crosses the boundary decoded (the same rule as
+    /// the rest of `DockState`) and storing the name would mean holding one more
+    /// `String` per frame. The classification is at decode time, in one place.
     ///
-    /// Varsayılanı `false` ve bu **güvenli yön**: alanı hiç göndermeyen eski
-    /// bir betikle koşan pencere (`plan.md` → Göç) istisnayı kaybeder, yani
-    /// sarılı yapıştırmaya — phase-5 öncesinin davranışına — döner.
+    /// The default is `false` and this is the **safe direction**: a window running
+    /// with an old script that never sends the field (`plan.md` → Göç) loses the
+    /// exception, that is, goes back to the wrapped paste — the behavior before
+    /// phase-5.
     pub insert_keymap: bool,
-    /// Bu aynanın **cevap verdiği** kullanıcı girdisi: ayna çözüldüğü anda
-    /// okunan girdi nesli (`Session`'ın `key_gen`'i).
+    /// The user input this mirror **answers**: the input generation read at the
+    /// moment the mirror was decoded (`Session`'s `key_gen`).
     ///
-    /// Tazelik kapısının zamansal yarısı: nesil o andan beri ilerlemediyse
-    /// kullanıcının son girdisinin aynası gelmiş demektir ve ızgaranın ne
-    /// dediğine bakmaya gerek yok. **İçeriğin yanında** duruyor, serbest bir
-    /// bayrakta değil: kare yolu onu metinle aynı yaprak kilit turunda
-    /// okuyor, yani bayat bir okuma bayat damgayı da beraberinde getiriyor ve
-    /// kapı içerik karşılaştırmasına düşüyor — yanlışın yönü güvenli
+    /// The freshness gate's temporal half: if the generation has not advanced since
+    /// then, the mirror of the user's last input has arrived and there is no need to
+    /// look at what the grid says. It sits **next to the content**, not in a free
+    /// flag: the frame path reads it in the same leaf-lock turn as the text, so a
+    /// stale read brings the stale stamp with it and the gate falls back to content
+    /// comparison — the wrong direction is safe
     /// (`.tasks/025-tazelik-zamansal/discussion.md` → Muhakeme).
     ///
-    /// Yazan tek yer [`ShellLog::apply_scan_answering`]; tarayıcının
-    /// sahnelediği kopyada anlamsız ve sıfır.
+    /// The only writer is [`ShellLog::apply_scan_answering`]; in the copy the
+    /// scanner stages it is meaningless and zero.
     ///
-    /// **`Idle` ayna da damgalı** (`End` kolu, 030): dock'un yazım
-    /// animasyonları ([`crate::DockEdit`]) canlanacak glyph sayısını bu
-    /// damganın farkıyla sınırlıyor ve Enter'dan sonraki ilk tuşun tabanı
-    /// `Idle` ayna. Sıfır damgalı bir taban o sınırı boşa düşürür, prompt'taki
-    /// ilk yapıştırma harf harf canlanırdı. Tazelik kapısı `Idle`'ı hiç
-    /// okumuyor ([`ShellLog::suppressed_input`] `Live` ister), yani ona etkisi
-    /// yok.
+    /// **The `Idle` mirror is stamped too** (`End` arm, 030): the dock's typing
+    /// animations ([`crate::DockEdit`]) bound the number of glyphs to animate by the
+    /// difference of this stamp, and the base of the first keystroke after Enter is
+    /// the `Idle` mirror. A base with a zero stamp would defeat that bound, and the
+    /// first paste at the prompt would animate letter by letter. The freshness gate
+    /// never reads `Idle` ([`ShellLog::suppressed_input`] requires `Live`), so it has
+    /// no effect on it.
     pub answers: u64,
-    /// Ayna kümeyle mi okunuyor (035, `SessionOptions::cluster`): dock'un
-    /// düzeni ([`crate::dock::layout_with`]) ve [`Self::last_ink`] emoji
-    /// dizisini tek küme sayıyor.
+    /// Whether the mirror is read by cluster (035, `SessionOptions::cluster`): the
+    /// dock's layout ([`crate::dock::layout_with`]) and [`Self::last_ink`] count an
+    /// emoji sequence as one cluster.
     ///
-    /// **Aynanın içeriği değil, okunuşu** ve oturum boyunca sabit: tarayıcı
-    /// kendi kopyasına açılışta yazıyor ([`Scanner::cluster`]), `clone_from`
-    /// taşıyor, [`Self::reset`] dokunmuyor. Burada durmasının sebebi
-    /// tüketicilerin hepsinin elinde zaten bu kayıt olması — dock'un çizimi,
-    /// isabet testi, satır sayısı ve tazelik kapısı; ayrı bir argüman o
-    /// imzaların hepsine bir parametre eklerdi.
+    /// **Not the mirror's content but its reading**, and constant for the session: the
+    /// scanner writes it into its own copy at startup ([`Scanner::cluster`]),
+    /// `clone_from` carries it, [`Self::reset`] does not touch it. The reason it sits
+    /// here is that all consumers already hold this record — the dock's drawing, hit
+    /// testing, line count and the freshness gate; a separate argument would add a
+    /// parameter to all of those signatures.
     pub cluster: bool,
 }
 
@@ -390,10 +404,10 @@ impl Clone for DockState {
 }
 
 impl DockState {
-    /// Metni ve aralıkları boşaltır; kapasiteler durur.
+    /// Empties the text and the ranges; the capacities stay.
     ///
-    /// Durumu **çağıran** yazar: bayat metni bırakmamak her iki çağıranın da
-    /// (`End`, `Unavailable`) ortak işi, hangi duruma geçileceği değil.
+    /// The state is written by the **caller**: not leaving stale text is the shared
+    /// job of both callers (`End`, `Unavailable`), which state to move to is not.
     fn reset(&mut self) {
         self.predisplay.clear();
         self.buffer.clear();
@@ -402,112 +416,117 @@ impl DockState {
         self.cursor = 0;
         self.display_chars = 0;
         self.last_ink = None;
-        // Güvenli yön: gösteremediğimiz bir satırın keymap'i de bilinmiyor ve
-        // "bilmiyorum" yapıştırmayı sarılı yola göndermeli.
+        // Safe direction: the keymap of a line we cannot show is unknown too, and
+        // "I don't know" must send the paste to the wrapped path.
         self.insert_keymap = false;
         self.answers = 0;
         self.highlights.clear();
     }
 }
 
-/// Dock'un **bağlam satırı**: çalışma dizini ve git dalı.
+/// The dock's **context line**: the working directory and the git branch.
 ///
-/// [`DockState`]'ten **ayrı bir tip** ve bu ayrım zorunlu, bir düzen tercihi
-/// değil: ayna tuş başına geliyor ve `line-finish`'te sıfırlanıyor
-/// ([`DockState::reset`]), bağlam ise **prompt başına** geliyor ve komut
-/// koşarken de ekranda kalmak zorunda. Tek tipte dursalardı aynanın her
-/// sıfırlaması bağlamı da silerdi — kullanıcı Enter'a bastığı anda dizin
-/// kaybolurdu. Ayrıca aynanın kaydı tarayıcıda `clone_from` ile toptan
-/// tazeleniyor ve dizin **başka bir koldan** (OSC 7) geliyor: tek tipte
-/// her ayna güncellemesi dizini üstüne yazardı.
+/// A **separate type** from [`DockState`] and this separation is mandatory, not a
+/// layout preference: the mirror arrives per keystroke and is reset at
+/// `line-finish` ([`DockState::reset`]), while the context arrives **per prompt**
+/// and has to stay on screen while a command runs. If they were in one type,
+/// every reset of the mirror would erase the context too — the directory would
+/// vanish the moment the user pressed Enter. Also, the mirror's record is
+/// refreshed wholesale in the scanner with `clone_from` and the directory comes
+/// from **another arm** (OSC 7): in one type every mirror update would overwrite
+/// the directory.
 ///
-/// [`DockState`] ile aynı tampon disiplini: `clone_from` kapasiteleri
-/// koruyor, yani kare başına ayırma yok.
+/// The same buffer discipline as [`DockState`]: `clone_from` keeps capacities,
+/// so there is no per-frame allocation.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DockContext {
-    /// Kabuğun çalışma dizini, **tam yol**; OSC 7'den geliyor ve hiç
-    /// gelmediyse boş.
+    /// The shell's working directory, the **full path**; it comes from OSC 7 and is
+    /// empty if it never arrived.
     pub cwd: String,
-    /// Git dalı; depo değilse ya da okunamadıysa **boş**. Detached HEAD'de
-    /// dal yerine kısa SHA — kabuk hangisi olduğunu söylemiyor, yalnız
-    /// gösterilecek adı gönderiyor.
+    /// The git branch; **empty** if not a repository or unreadable. On a detached
+    /// HEAD the short SHA instead of the branch — the shell does not say which it
+    /// is, it only sends the name to show.
     pub branch: String,
-    /// Uzak oturumun hedefi (037 Karar 1: host, tür, yeniden koşturulacak
-    /// argv ve satırı); uzak oturum yoksa `None` (036).
+    /// The remote session's target (037 Karar 1: host, kind, argv to re-run and its
+    /// line); `None` when there is no remote session (036).
     ///
-    /// Yazarı `bt-shell`'in süreç tablosu yoklaması
-    /// ([`crate::Session::set_remote`]); `C`, `D` ve `A`'da kendiliğinden
-    /// siliniyor ([`ShellLog::apply`]). Bağlamın içinde, çünkü kare yolu
-    /// bağlamı kilidin altında `clone_from` ile alıyor ve çizimi kilitten
-    /// sonra yapıyor: `ShellLog`'un kendi alanı olsaydı ya kare başına bir
-    /// `String` ayırmak ya da kilidi çizim boyunca tutmak gerekirdi.
+    /// Its writer is `bt-shell`'s process-table probe
+    /// ([`crate::Session::set_remote`]); it is cleared automatically on `C`, `D` and
+    /// `A` ([`ShellLog::apply`]). It is inside the context because the frame path
+    /// takes the context under the lock with `clone_from` and does the drawing
+    /// after the lock: if it were `ShellLog`'s own field, it would take either a
+    /// `String` allocation per frame or holding the lock through the drawing.
     pub remote: Option<RemoteTarget>,
-    /// Etkin uzak host'un **çözülmüş** işareti (037 Karar 2); yalnız
-    /// [`Self::remote`] doluyken anlamlı, yerelde [`HostMark::None`].
+    /// The **resolved** mark of the active remote host (037 Karar 2); meaningful only
+    /// while [`Self::remote`] is filled, [`HostMark::None`] locally.
     ///
-    /// Desen burada değil `ShellLog`'da ve çözüm iki kenarda (uzak durumun
-    /// ve listenin değişimi): kare yolu desen görmüyor, yalnız bunu okuyor.
+    /// The pattern is not here but in `ShellLog`, and resolution happens at two edges
+    /// (a change of the remote state and of the list): the frame path sees no
+    /// pattern, it only reads this.
     pub remote_mark: HostMark,
-    /// Uzak tarafın OSC 7 dizini (036 Karar 4); gelmediyse boş. **Yalnız
-    /// [`Self::remote`] doluyken okunuyor** — etkin değilken de yazılıyor
-    /// (yabancı yetkili OSC 7), yoklama OSC 7'den sonra sonuçlanabilsin diye.
+    /// The remote side's OSC 7 directory (036 Karar 4); empty if it did not arrive.
+    /// **Read only while [`Self::remote`] is filled** — it is also written while
+    /// inactive (an OSC 7 with a foreign authority), so that the probe can conclude
+    /// after OSC 7.
     pub remote_cwd: String,
-    /// Kopan ssh'ın yeniden bağlanma teklifi (037 Karar 8); yoksa `None`.
+    /// The reconnect offer of a dropped ssh (037 Karar 8); `None` otherwise.
     ///
-    /// Kuruluşu tek kolda: uzak oturum etkin, tür ssh ve **bizim** kimlikli
-    /// `D`'miz 255 taşıyor ([`ShellLog::apply`]) — uzak durumun silindiği
-    /// aynı yerde, hedef buraya geçiyor. Silen üç kenar: bir sonraki
-    /// `Running` geçişi, yeni bir uzak hedef ([`ShellLog::set_remote`]) ve
-    /// kullanıcının herhangi bir girdisi ([`crate::Session::send_input`]).
-    /// `A` silmiyor: teklif tam o prompt'ta doğuyor.
+    /// Set up in a single arm: the remote session is active, the kind is ssh and
+    /// **our** identified `D` carries 255 ([`ShellLog::apply`]) — the target moves
+    /// here in the same place where the remote state is deleted. Three edges clear
+    /// it: the next `Running` transition, a new remote target
+    /// ([`ShellLog::set_remote`]) and any user input
+    /// ([`crate::Session::send_input`]). `A` does not clear it: the offer is born
+    /// exactly at that prompt.
     ///
-    /// Bağlamın içinde, [`Self::remote`]'un gerekçesiyle: dock'un yer
-    /// tutucusu onu kare yolunda bağlamla aynı kilit turunda alıyor.
+    /// Inside the context, for the same reason as [`Self::remote`]: the dock's
+    /// placeholder takes it in the frame path in the same lock turn as the context.
     pub reconnect: Option<Reconnect>,
-    /// Uzak dizine yüklemenin durum satırı (037 Karar 7 → Kullanıcı kararı
-    /// 4); yükleme yoksa `None`.
+    /// The status line of an upload to a remote directory (037 Karar 7 → Kullanıcı
+    /// kararı 4); `None` if there is no upload.
     ///
-    /// Yazarı `bt-shell`'in yükleme kuyruğu ([`crate::Session::set_transfer`]);
-    /// ne `C`/`D`/`A` ne girdi siliyor — kuyruğun kendi ömrü var ve bitince
-    /// satır bir süre sonucu gösterip kalkıyor. Uzak durumdan **ayrı**, çünkü
-    /// ssh kapandığında da ("bağlantı kapandı") görünmek zorunda: host'u ve
-    /// işareti kendisi taşıyor.
+    /// Its writer is `bt-shell`'s upload queue ([`crate::Session::set_transfer`]);
+    /// neither `C`/`D`/`A` nor input clears it — the queue has its own lifetime and
+    /// when it finishes the line shows the result for a while and goes away. It is
+    /// **separate** from the remote state, because it has to be visible when ssh has
+    /// closed too ("connection closed"): it carries the host and the mark itself.
     pub transfer: Option<Transfer>,
 }
 
-/// Yükleme kuyruğunun dock'taki durum satırı (037 Karar 7 → Kullanıcı kararı
-/// 4): bağlam satırının yerine `⇄ {host}  {body}{controls}` ve üst saç
-/// çizgisinde ilerleme.
+/// The dock's status line for the upload queue (037 Karar 7 → Kullanıcı kararı
+/// 4): in place of the context line `⇄ {host}  {body}{controls}` and progress on
+/// the top hairline.
 ///
-/// Gövdenin metni `bt-shell`'de biçimleniyor (bayt, hız, süre, dosya sayısı);
-/// düğmelerin etiketi ise buradaki durumdan ([`TransferControls`]) bu crate'te
-/// doğuyor, çünkü etiketin boyu yerleşimin girdisi. Bu crate satırı çiziyor ve
-/// **kırpıyor** — `body` sığmazsa `…` ile kısalıyor, düğmeler kısalmıyor ve
-/// sığmazsa sırayla düşüyor (yarım bir düğme tıklanamaz). Hangi sütunun hangi
-/// düğme olduğunu [`crate::transfer_button_at`] söylüyor; çizim ve fare aynı
-/// yerleşimi okuyor (037 phase-6).
+/// The body's text is formatted in `bt-shell` (bytes, speed, time, file count);
+/// the buttons' labels, on the other hand, are born in this crate from the state
+/// here ([`TransferControls`]), because the label's length is an input to the
+/// layout. This crate draws the line and **clips** it — if `body` does not fit it
+/// is shortened with `…`, the buttons are not shortened and if they do not fit
+/// they drop in order (half a button cannot be clicked). Which column is which
+/// button is told by [`crate::transfer_button_at`]; drawing and the mouse read
+/// the same layout (037 phase-6).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Transfer {
-    /// Hedefin host'u, gösterildiği gibi ([`RemoteTarget::host`]).
+    /// The target's host, as shown ([`RemoteTarget::host`]).
     pub host: String,
-    /// Host'un çözülmüş işareti: `⇄ host`'un ve ilerleme çubuğunun rengi.
+    /// The host's resolved mark: the color of `⇄ host` and of the progress bar.
     pub mark: HostMark,
     /// Durum metni (`↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB · …`).
     pub body: String,
-    /// Gövdenin başındaki [`Self::lead`] karakterin tonu; kalanı sönük
-    /// (037 phase-7): sonuç satırı sonucun rengini taşıyor — başarı
-    /// `success`, hata metni `error`, iptal ve ilerleme sönük.
+    /// The tone of the [`Self::lead`] characters at the start of the body; the rest is
+    /// dim (037 phase-7): the result line carries the result's color — success
+    /// `success`, error text `error`, cancel and progress dim.
     pub tone: TransferTone,
-    /// [`Self::tone`]'da çizilen baştaki karakter sayısı: hata satırında
-    /// `Failed — {sebep}` kırmızı, arkasındaki ` · k of n uploaded` sönük.
+    /// The number of leading characters drawn in [`Self::tone`]: in a failure line
+    /// `Failed — {reason}` is red, the ` · k of n uploaded` after it is dim.
     pub lead: usize,
-    /// Satırın sağındaki düğmelerin durumu; öğe sayısı sıfırsa düğme yok
-    /// (sonuç satırı).
+    /// The state of the buttons at the right of the line; no buttons if the item
+    /// count is zero (result line).
     pub controls: TransferControls,
-    /// Bütün kuyruğun baytlarına göre ilerleme, **onbinde** (`0..=10_000`);
-    /// `None` → çubuk yok (sonuç satırı). Tamsayı, çünkü bağlam `Eq` ve kare
-    /// yolu onu karşılaştırıyor; onbinde 4K'lık bir pencerede yarım pikselin
-    /// altında.
+    /// Progress by the bytes of the whole queue, in **ten-thousandths**
+    /// (`0..=10_000`); `None` → no bar (result line). An integer, because the
+    /// context is `Eq` and the frame path compares it; at ten-thousandths it is under
+    /// half a pixel in a 4K window.
     pub progress: Option<u16>,
 }
 
@@ -518,8 +537,8 @@ impl Clone for Transfer {
         fresh
     }
 
-    /// [`RemoteTarget::clone_from`]'un gerekçesi: kare yolu bağlamı her
-    /// karede kopyalıyor, dizgilerin kapasitesi korunmalı.
+    /// The reason for [`RemoteTarget::clone_from`]: the frame path copies the context
+    /// every frame, so the strings' capacity must be kept.
     fn clone_from(&mut self, source: &Self) {
         self.host.clone_from(&source.host);
         self.mark = source.mark;
@@ -531,69 +550,69 @@ impl Clone for Transfer {
     }
 }
 
-/// Yükleme satırı gövdesinin baştaki tonu ([`Transfer::tone`]).
+/// The leading tone of the upload line's body ([`Transfer::tone`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TransferTone {
-    /// Sönük (`dim`): ilerleme ve iptal.
+    /// Dim (`dim`): progress and cancel.
     #[default]
     Quiet,
-    /// Temanın `success`'i: kuyruk bitti.
+    /// The theme's `success`: the queue finished.
     Success,
-    /// Temanın `error`'u: kuyruk hatayla bitti.
+    /// The theme's `error`: the queue finished with an error.
     Error,
 }
 
-/// Yükleme satırının düğmelerinin durumu (037 phase-6): etiketler ve
-/// düğmelerin sayısı bundan doğuyor ([`crate::dock`]'un yerleşimi).
+/// The state of the upload line's buttons (037 phase-6): the labels and the
+/// number of buttons are born from this ([`crate::dock`]'s layout).
 ///
-/// Farenin altındaki düğme ve listenin açıklığı **burada**, satırla birlikte:
-/// satır her tazelemede yeniden yazılıyor ve fare durumu ayrı bir yolda
-/// dursaydı ya o yol ya tazeleme öbürünü ezerdi. Değişimi
-/// [`crate::Session::set_transfer`]'ın eşitlik kapısından geçiyor, yani kare
-/// yalnız durum değişince isteniyor.
+/// The button under the mouse and the list's openness are **here**, with the
+/// line: the line is rewritten on every refresh and if the mouse state lived on a
+/// separate path, either that path or the refresh would overwrite the other.
+/// Its change goes through [`crate::Session::set_transfer`]'s equality gate, so a
+/// frame is requested only when the state changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransferControls {
-    /// Listede görünen kalem sayısı — biten, akan ve bekleyen (037
-    /// phase-7). `0` → düğme yok, `1` → yalnız `Cancel`, fazlası →
-    /// `Show files (N)` + `Cancel all`.
+    /// The number of items visible in the list — finished, flowing and waiting (037
+    /// phase-7). `0` → no buttons, `1` → only `Cancel`, more → `Show files (N)` +
+    /// `Cancel all`.
     pub items: u16,
-    /// Liste (popover) açık: liste düğmesi basılı tonda; etiketi değişmiyor.
+    /// The list (popover) is open: the list button is in the pressed tone; its label does not change.
     pub list_open: bool,
-    /// Farenin altındaki düğme.
+    /// The button under the mouse.
     pub hover: Option<TransferAction>,
 }
 
-/// Yükleme satırının bir düğmesinin işi.
+/// The job of one of the upload line's buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferAction {
-    /// Kuyruğun listesini aç.
+    /// Open the queue's list.
     List,
-    /// Bütün kuyruğu iptal et.
+    /// Cancel the whole queue.
     Cancel,
 }
 
-/// Bir düğmenin çizimdeki durumu: dolgunun ve çerçevenin tonu `bt-gpu`'nun
-/// kararı (alfa bir çizim durumu, paletin değil).
+/// A button's state in drawing: the tone of the fill and the border is `bt-gpu`'s
+/// decision (alpha is a drawing state, not the palette's).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ButtonState {
     #[default]
     Idle,
-    /// Fare üstünde.
+    /// Under the mouse.
     Hover,
-    /// Basılı — bugün yalnız açık listenin düğmesi.
+    /// Pressed — today only the open list's button.
     Pressed,
 }
 
-/// Yeniden bağlanma teklifi (037 Karar 8): yer tutucunun host'u ve işareti,
-/// ⏎'nin göndereceği satır.
+/// The reconnect offer (037 Karar 8): the placeholder's host and mark, the line
+/// ⏎ will send.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Reconnect {
-    /// Kopan hedefin host'u, gösterildiği gibi ([`RemoteTarget::host`]).
+    /// The dropped target's host, as shown ([`RemoteTarget::host`]).
     pub host: String,
-    /// Host'un **çözülmüş** işareti; liste değişince yeniden çözülüyor
+    /// The host's **resolved** mark; re-resolved when the list changes
     /// ([`ShellLog::set_host_rules`]).
     pub mark: HostMark,
-    /// Yeniden koşturulacak, kaçırılmış satır ([`RemoteTarget::line`]).
+    /// The escaped line to re-run ([`RemoteTarget::line`]).
     pub line: String,
 }
 
@@ -604,8 +623,8 @@ impl Clone for Reconnect {
         fresh
     }
 
-    /// [`RemoteTarget::clone_from`]'un gerekçesi: kare yolu bağlamı her
-    /// karede kopyalıyor, dizgilerin kapasitesi korunmalı.
+    /// The reason for [`RemoteTarget::clone_from`]: the frame path copies the context
+    /// every frame, so the strings' capacity must be kept.
     fn clone_from(&mut self, source: &Self) {
         self.host.clone_from(&source.host);
         self.mark = source.mark;
@@ -625,9 +644,8 @@ impl Clone for DockContext {
         self.cwd.push_str(&source.cwd);
         self.branch.clear();
         self.branch.push_str(&source.branch);
-        // Kapasite korunuyor: ayırma yalnız uzak oturumun **kenarında**
-        // (`Option::clone_from` `Some`/`Some`'da `RemoteTarget::clone_from`'a
-        // iniyor).
+        // Capacity is kept: allocation happens only at the **edge** of the remote session
+        // (`Option::clone_from` descends to `RemoteTarget::clone_from` on `Some`/`Some`).
         self.remote.clone_from(&source.remote);
         self.remote_mark = source.remote_mark;
         self.remote_cwd.clear();
@@ -643,8 +661,8 @@ impl DockContext {
         self.remote.as_ref().map(|target| target.host.as_str())
     }
 
-    /// Uzak durumu siler; **başlığın girdisi değiştiyse** (host vardı)
-    /// `true`. Uzak yuva da gidiyor: bir sonraki oturumun dizini değil.
+    /// Deletes the remote state; `true` **if the title's input changed** (there was a
+    /// host). The remote slot goes too: it is not the next session's directory.
     fn clear_remote(&mut self) -> bool {
         self.remote_cwd.clear();
         self.remote_mark = HostMark::None;
@@ -652,7 +670,7 @@ impl DockContext {
     }
 }
 
-/// Uzak oturumun türü (037 Karar 1).
+/// The remote session's kind (037 Karar 1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RemoteKind {
     #[default]
@@ -660,28 +678,28 @@ pub enum RemoteKind {
     Mosh,
 }
 
-/// Uzak oturumun hedefi — yoklamanın bulduğu, bütün olarak (037 Karar 1).
+/// The remote session's target — what the probe found, as a whole (037 Karar 1).
 ///
-/// ⌘T ve yeniden bağlanma aynı komutu **yeniden koşturuyor**: host tek
-/// başına yetmiyor (port, `-i`, `-J` olmadan ikinci bağlantı kurulamaz).
-/// `bt-core` pid ya da `libc` görmüyor, taşınan şey dizgi; kaçırma kuralı da
-/// `bt-shell`'in (`quote`), burada yalnız sonucu ([`Self::line`]) duruyor.
+/// ⌘T and reconnect **re-run** the same command: the host alone is not enough
+/// (without port, `-i`, `-J` a second connection cannot be made). `bt-core` sees
+/// no pid or `libc`, what is carried is a string; the escaping rule is
+/// `bt-shell`'s too (`quote`), only its result ([`Self::line`]) sits here.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RemoteTarget {
-    /// Kullanıcının yazdığı gibi (`prod`, `deploy@10.0.0.5`); `ssh://`
-    /// şeması ve port atılmış (036 Karar 3).
+    /// As the user typed it (`prod`, `deploy@10.0.0.5`); the `ssh://` scheme and the
+    /// port are dropped (036 Karar 3).
     pub host: String,
     pub kind: RemoteKind,
-    /// Yeniden koşturulacak argv — ssh'ta yerel yönlendirmeler (`-L -R -D`),
-    /// `-M` ve `-f` ayıklanmış; mosh'ta `mosh` + betiğin argümanları.
+    /// The argv to re-run — for ssh the local forwardings (`-L -R -D`), `-M` and `-f`
+    /// are stripped; for mosh `mosh` + the script's arguments.
     pub argv: Vec<String>,
-    /// [`Self::argv`]'nin kabuk için kaçırılmış, okunur satırı.
+    /// [`Self::argv`] as a readable line, escaped for the shell.
     pub line: String,
 }
 
 #[cfg(test)]
 impl RemoteTarget {
-    /// Sınamaların hedefi: `ssh {host}`.
+    /// The tests' target: `ssh {host}`.
     pub(crate) fn ssh(host: &str) -> Self {
         Self {
             host: host.to_owned(),
@@ -699,10 +717,9 @@ impl Clone for RemoteTarget {
         fresh
     }
 
-    /// Kare yolu bağlamı her karede `clone_from` ile alıyor: türetilmiş
-    /// `Clone`'un varsayılanı (`*self = source.clone()`) her karede argv'yi
-    /// ve iki dizgiyi yeniden ayırırdı. `Vec<String>::clone_from` öğelerin
-    /// kapasitesini koruyor.
+    /// The frame path takes the context every frame with `clone_from`: the default of
+    /// a derived `Clone` (`*self = source.clone()`) would reallocate the argv and two
+    /// strings every frame. `Vec<String>::clone_from` keeps the elements' capacity.
     fn clone_from(&mut self, source: &Self) {
         self.host.clone_from(&source.host);
         self.kind = source.kind;
@@ -711,27 +728,29 @@ impl Clone for RemoteTarget {
     }
 }
 
-/// Pencerenin (ve native sekmenin) başlığı — öncelik sırası
+/// The window's (and the native tab's) title — priority order
 /// `.tasks/026-sekmeler/discussion.md` → Karar 7.
 ///
-/// 1. **Uygulamanın OSC 0/2 başlığı** (vim, ssh, Claude Code, oh-my-zsh'in
-///    `termsupport`'u). Boş başlık yok sayılır: `\e]2;\a` bir başlık değil,
-///    sekmeyi adsız bırakırdı.
-/// 2. **Çalışma dizininin son bileşeni** (OSC 7); ev dizininin kendisi `~`,
-///    kök `/`. Alt dizin `~/proj` değil `proj` — sekme dar ve ayırt edici
-///    olan son bileşen.
+/// 1. **The application's OSC 0/2 title** (vim, ssh, Claude Code, oh-my-zsh's
+///    `termsupport`). An empty title is ignored: `\e]2;\a` is not a title, it
+///    would leave the tab nameless.
+/// 2. **The last component of the working directory** (OSC 7); the home
+///    directory itself is `~`, the root `/`. A subdirectory is `proj`, not
+///    `~/proj` — the tab is narrow and the last component is the distinguishing
+///    one.
 /// 3. `bateri`.
 ///
-/// **Uzak oturum etkinken** (036 Karar 5, `remote` = host) başlık
-/// [`crate::dock::REMOTE_MARK`] önekini taşıyor: `⇄ {OSC başlığı}`, başlık
-/// yoksa `⇄ {host}`; yerel dizin hiç sorulmuyor. Önek koşulsuz, çünkü uzak
-/// kabukların çoğu başlığa `user@host: dir` basıyor ve sekmeler arasında
-/// uzağı ayırt eden şey o; alternatif ekranda (uzakta vim) dock kalktığı için
-/// göstergeyi yalnız başlık taşıyor.
+/// **While a remote session is active** (036 Karar 5, `remote` = host) the title
+/// carries the [`crate::dock::REMOTE_MARK`] prefix: `⇄ {OSC title}`, `⇄ {host}` if
+/// there is no title; the local directory is never consulted. The prefix is
+/// unconditional, because most remote shells print `user@host: dir` into the
+/// title and what tells the remote apart among tabs is that; since the dock goes
+/// away on the alternate screen (vim on the remote), only the title carries the
+/// indicator.
 ///
-/// Saf ve üç yuvadan beslenir; okuyan [`crate::Session::title`]. Ev dizini
-/// argüman, çünkü bu crate ortam okumaz — değeri uygulama veriyor
-/// ([`crate::SessionOptions::home`]).
+/// Pure and fed from three slots; the reader is [`crate::Session::title`]. The
+/// home directory is an argument, because this crate reads no environment — the
+/// application supplies the value ([`crate::SessionOptions::home`]).
 pub(crate) fn title_of(
     osc_title: Option<&str>,
     cwd: Option<&str>,
@@ -755,154 +774,160 @@ pub(crate) fn title_of(
     }
     match path.file_name() {
         Some(name) => name.to_string_lossy().into_owned(),
-        // Son bileşeni olmayan mutlak yol yalnız kök: `file_name` `/` için
-        // `None` veriyor. Tarayıcı yalnız mutlak yol geçiriyor, yani göreli
-        // bir `..` buraya düşmez; düşse de yolun kendisi dürüst bir başlık.
+        // An absolute path with no last component is only the root: `file_name` gives
+        // `None` for `/`. The scanner passes only absolute paths, so a relative `..`
+        // does not land here; even if it did, the path itself is an honest title.
         None => cwd.to_owned(),
     }
 }
 
-/// Aynanın o anki hâli — dock'un çizilip çizilmeyeceğinin tek yanıtı.
+/// The mirror's current state — the single answer to whether the dock is drawn.
 ///
-/// `Unavailable` ayrı bir varyant, `Idle`'ın içinde **değil**: ikisi aynı
-/// şeyi göstermiyor. `Idle`'da çizilecek bir satır yok (ZLE düzenlemiyor),
-/// `Unavailable`'da **var ama gösteremiyoruz** — ve fark phase-4'ün bastırma
-/// kararını belirliyor: gösteremediğimiz satır ızgarada durmalı, yoksa
-/// kullanıcı yazdığını hiçbir yerde görmez. Bugünkü `Skip` kolunun çağırana
-/// sinyal vermemesi tam da bu belirtiyi doğuruyordu (R1.2).
+/// `Unavailable` is a separate variant, **not** inside `Idle`: the two do not
+/// show the same thing. In `Idle` there is no line to draw (ZLE is not editing),
+/// in `Unavailable` there **is one but we cannot show it** — and the difference
+/// decides phase-4's suppression decision: a line we cannot show must stay on
+/// the grid, otherwise the user sees what they typed nowhere. Today's `Skip` arm
+/// not signaling the caller is exactly what produced this symptom (R1.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DockStatus {
-    /// ZLE satır düzenlemiyor: hiç ayna gelmedi ya da `line-finish` geldi.
+    /// ZLE is not editing a line: no mirror ever arrived or `line-finish` arrived.
     #[default]
     Idle,
-    /// Alanlar taze ve geçerli.
+    /// The fields are fresh and valid.
     Live,
-    /// Ayna geldi ama okunamadı; alanlar **boş**.
+    /// A mirror arrived but could not be read; the fields are **empty**.
     Unavailable(DockFault),
-    /// Ayna **okundu ve geçerli**, ama görüntü dock'un **çizmediği** bir
-    /// kontrol karakteri taşıyor (`Ctrl-V Ctrl-A`'nın `\x01`'i): dock o
-    /// sütunu boş bırakırdı, ZLE ise ızgarada okunur bir `^A` basıyor.
+    /// The mirror was **read and is valid**, but the display carries a control
+    /// character the dock **does not draw** (the `\x01` of `Ctrl-V Ctrl-A`): the dock
+    /// would leave that column blank, while ZLE prints a readable `^A` on the grid.
     ///
-    /// Veri sağlam, **yüzey dar**; gösteremediğimiz satır da caret'i de
-    /// ızgarada kalır. (032'ye kadar bir kardeşi vardı, satır sonlu görüntü
-    /// `Multiline`; dock çok satırı çizmeyi öğrenince kalktı ve `\n` bu kolun
-    /// kontrol karakteri sayılmıyor.)
-    /// Bu kol gelmeden önce kontrol karakterinin akıbeti tazelik kapısının
-    /// **tesadüfüne** kalıyordu: `^A` satırın son karakteriyse iki taraf
-    /// uyuşmuyor ve satır ızgarada kalıyordu, ama ortadaysa (`\x01foo`) iki
-    /// taraf da `'o'` diyor, kapı geçiyor ve satır dock'a gidiyordu — `^A`'nın
-    /// sütunu boş, yani kullanıcı yazdığını **hiçbir yerde** görmüyordu. Kol
-    /// kararı konumdan bağımsız kılıyor (025, `discussion.md` → Karar 1).
+    /// The data is sound, the **surface is narrow**; a line we cannot show and its
+    /// caret stay on the grid. (Until 032 it had a sibling, a display with line
+    /// breaks, `Multiline`; it was removed when the dock learned to draw multiple
+    /// lines, and `\n` is not counted as a control character by this arm.)
+    /// Before this arm arrived, the fate of a control character was left to the
+    /// freshness gate's **coincidence**: if `^A` was the last character of the line
+    /// the two sides did not match and the line stayed on the grid, but if it was in
+    /// the middle (`\x01foo`) both sides said `'o'`, the gate passed and the line went
+    /// to the dock — `^A`'s column was blank, so the user saw what they typed
+    /// **nowhere**. The arm makes the decision independent of position (025,
+    /// `discussion.md` → Karar 1).
     ///
-    /// **Sekme bu kolun dışında** ve gerekçe bilgi: sekme bir şey söylemiyor,
-    /// dock'taki boş sütunu kayıp değil — ızgarada da boşluğa açılıyor.
-    /// İstisnasız Ctrl-V Tab satırı dock'tan ızgaraya düşerdi.
+    /// **Tab is outside this arm** and the reason is information: a tab says nothing,
+    /// the blank column in the dock is not a loss — it opens into blank on the grid
+    /// too. Without the exception a Ctrl-V Tab line would fall from the dock to the
+    /// grid.
     ///
-    /// **Dönüş kuralı kendiliğinden:** durum her ayna yükünde yeniden
-    /// hesaplanıyor, yani kontrol karakteri silinince bir sonraki aynada
-    /// `Live`. Tuş başına değil satırın şekline bağlı olması şart — "bir
-    /// sonraki tuşta dön" deseydi caret ızgara ile dock arasında gidip gelirdi. **Kolun ömrü bir yer tutucuya bağlı**: dock
-    /// kontrol karakterini zsh gibi `^X` diye çizdiği gün bu kol silinir
+    /// **The return rule is automatic:** the state is recomputed on every mirror
+    /// payload, so when the control character is deleted the next mirror is `Live`.
+    /// It has to depend on the line's shape, not on the keystroke — if it said
+    /// "return on the next key" the caret would go back and forth between the grid and
+    /// the dock. **The arm's lifetime is tied to a placeholder**: the day the dock
+    /// draws a control character as `^X`, like zsh, this arm is deleted
     /// (`docs/YOL-HARITASI.md`).
     Control,
 }
 
-/// Aynanın neden okunamadığı.
+/// Why the mirror could not be read.
 ///
-/// İkisi ayrı, çünkü ikisi ayrı şeyi söylüyor: `Overflow` sınırın dar
-/// olduğunu (ve sınır [`DOCK_PAYLOAD_LIMIT`]'in doc'unda türetilmiş bir
-/// tasarım sayısı), `Malformed` kanalın bozulduğunu. Tek varyanta
-/// indirilseydi "sınırı büyütmem mi gerek" sorusunun yanıtı kaybolurdu.
+/// The two are separate, because they say two different things: `Overflow` that
+/// the limit is narrow (and the limit is a design number derived in
+/// [`DOCK_PAYLOAD_LIMIT`]'s doc), `Malformed` that the channel is corrupt. If
+/// reduced to a single variant the answer to "do I need to raise the limit"
+/// would be lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockFault {
-    /// Yük [`DOCK_PAYLOAD_LIMIT`]'i aştı.
+    /// The payload exceeded [`DOCK_PAYLOAD_LIMIT`].
     Overflow,
-    /// Yük çözülemedi: alan sayısı, base64 ya da UTF-8.
+    /// The payload could not be decoded: field count, base64 or UTF-8.
     Malformed,
 }
 
-/// `region_highlight`'ın bir kaydı: görüntünün bir aralığı ve stili.
+/// One record of `region_highlight`: a range of the display and its style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Highlight {
-    /// Aralığın başı, **karakter** ofseti.
+    /// The start of the range, as a **character** offset.
     ///
-    /// Uzay tek ve normalize: ofsetler `PREDISPLAY ++ BUFFER ++ POSTDISPLAY`
-    /// dizgisinin başından sayılıyor. zsh iki uzay kullanıyor — kayıt `P` ile
-    /// başlıyorsa ofset `PREDISPLAY`'in, başlamıyorsa `BUFFER`'ın başından
-    /// (`zshzle(1)`, `region_highlight`) — ve ikisini sınırın **bu** tarafında
-    /// birleştirmek çizen tarafı `PREDISPLAY`'in uzunluğunu bilmekten
-    /// kurtarıyor. R1.3'ün "çözülmüş geçer"i budur.
+    /// The space is single and normalized: offsets are counted from the start of the
+    /// string `PREDISPLAY ++ BUFFER ++ POSTDISPLAY`. zsh uses two spaces — if the
+    /// record starts with `P` the offset is from the start of `PREDISPLAY`, otherwise
+    /// from the start of `BUFFER` (`zshzle(1)`, `region_highlight`) — and merging
+    /// them on **this** side of the boundary frees the drawing side from knowing
+    /// `PREDISPLAY`'s length. This is R1.3's "decoded crosses".
     pub start: usize,
-    /// Aralığın sonu, dışlamalı.
+    /// The end of the range, exclusive.
     pub end: usize,
     pub style: HighlightStyle,
 }
 
-/// Bir aralığın stili — zsh'in "character highlighting" spesifikasyonunun
-/// bizim tanıdığımız yarısı.
+/// A range's style — the half of zsh's "character highlighting" specification
+/// that we recognize.
 ///
-/// Tanınmayan bileşen (`blink`, `dim`, bilinmeyen bir ad) **sessizce düşer**,
-/// kaydı düşürmez: aynanın işi kullanıcının gördüğünü taşımak ve tanımadığımız
-/// bir niteliğe takılıp bütün aralığı renksiz bırakmak bilgiyi büsbütün
-/// kaybetmek olurdu.
+/// An unrecognized component (`blink`, `dim`, an unknown name) **drops silently**,
+/// it does not drop the record: the mirror's job is to carry what the user sees,
+/// and to stumble on an attribute we do not recognize and leave the whole range
+/// colorless would be to lose the information entirely.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HighlightStyle {
     pub fg: Option<HighlightColor>,
     pub bg: Option<HighlightColor>,
     pub bold: bool,
     pub underline: bool,
-    /// `standout` — zsh'in ters video'su; SGR 7'nin karşılığı.
+    /// `standout` — zsh's reverse video; the counterpart of SGR 7.
     pub standout: bool,
 }
 
-/// Bir stil bileşeninin rengi; temaya **burada** bağlanmıyor.
+/// The color of a style component; it is **not** bound to the theme here.
 ///
-/// Çözüm `frame()`'de, [`crate::Theme`] elde olduğunda: renk uzayı sınırı
-/// geçerken lineerleşiyor (`CLAUDE.md` → Renk uzayı) ve bu modülün teması yok.
+/// Resolution is in `frame()`, when the [`crate::Theme`] is in hand: the color
+/// space is linearized as it crosses the boundary (`CLAUDE.md` → Renk uzayı) and
+/// this module has no theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HighlightColor {
-    /// 0–255; ilk 16'sı temanın [`crate::Theme::ansi`]'si, üstü 256 renk küpü.
+    /// 0–255; the first 16 are the theme's [`crate::Theme::ansi`], above that the 256-color cube.
     Indexed(u8),
     /// `#rrggbb` → `0xRRGGBB`.
     Rgb(u32),
 }
 
-/// Defterin en az tutacağı blok sayısı.
+/// The minimum number of blocks the ledger will hold.
 ///
-/// Tavan `scrollback`'ten türüyor (aşağıda) ve o **sıfır olabilir**: geçmiş
-/// tutmayan bir oturumda bile ekrandaki blokların rengi gerekiyor. Taban bu
-/// yüzden var ve bir **tasarım sabiti**, ölçüm değil ([`PAYLOAD_LIMIT`]
-/// emsali): en büyük makul pencerede bile bir ekran dolusu prompt'un çok
-/// üstünde.
+/// The ceiling derives from `scrollback` (below) and that **can be zero**: even
+/// in a session that keeps no scrollback, the color of the blocks on screen is
+/// needed. That is why the floor exists, and it is a **design constant**, not a
+/// measurement (the precedent is [`PAYLOAD_LIMIT`]): far above a screenful of
+/// prompts even in the largest reasonable window.
 const BLOCK_LOG_FLOOR: usize = 256;
 
-/// `blok kimliği → akıbet` defteri; sabit halka.
+/// The `block identity → fate` ledger; a fixed ring.
 ///
-/// **Tahliye sinyali beklenmiyor** ve bu bir eksiklik değil, veri yokluğu:
-/// çıpa ızgaradan satır sıfırlanınca sessizce düşüyor ve alacritty bunu
-/// yayınlamıyor. Halka bu yüzden tahliyeyi **tasarımla** çözüyor — en eskiyi
-/// üstüne yazarak.
+/// **No eviction signal is awaited** and this is not a deficiency but an absence
+/// of data: when the anchor's row is reset on the grid it drops silently and
+/// alacritty does not publish that. The ring therefore solves eviction **by
+/// design** — by overwriting the oldest.
 ///
-/// Kimlikler kabuk tarafından **birer birer artırılıyor**, yani halka her an
-/// bitişik bir kimlik aralığı tutuyor ve arama indeks aritmetiğidir; doğrusal
-/// tarama kare başına görünür blok sayısıyla çarpılırdı.
+/// Identities are **incremented one by one** by the shell, so the ring always
+/// holds a contiguous range of identities and lookup is index arithmetic; a linear
+/// scan would be multiplied by the number of visible blocks per frame.
 ///
-/// **Tavan `scrollback`'ten türüyor** ve sabit bir sayı değil: blok başına en
-/// az bir satır (prompt) düştüğü için geçmişte görünebilecek blok sayısının
-/// üst sınırı odur. Sabit bir tavan seçilseydi ya scrollback'in altında kalıp
-/// hâlâ ekranda olan blokları renksiz bırakır ya da boşuna yer tutardı.
-/// Kayıt başına 12 bayt: varsayılan 10 000 satırda 120 KB. (013'e kadar 8
-/// bayttı; [`Outcome::Finished`] çıkış kodunun yanına geçen süreyi de aldı.
-/// Sayı [`Outcome`]'ın yanındaki `const` assert ile bağlı — yazılıp
-/// doğrulanmamış bir bütçe tam da bu satırda sessizce eskirdi.)
+/// **The ceiling derives from `scrollback`** and is not a fixed number: since at
+/// least one row (the prompt) falls to each block, that is the upper bound on the
+/// number of blocks that can be visible in scrollback. If a fixed ceiling were
+/// chosen it would either fall below scrollback and leave still-on-screen blocks
+/// colorless or hold space for nothing. 12 bytes per record: 120 KB at the
+/// default 10,000 rows. (Until 013 it was 8 bytes; [`Outcome::Finished`] took the
+/// elapsed time next to the exit code too. The number is tied to the `const`
+/// assert next to [`Outcome`] — a budget that was written but not verified would
+/// silently go stale exactly on this line.)
 ///
-/// **Bilinen sınır:** tavan oturum doğarken belirleniyor; `scrollback` canlı
-/// büyütülürse halka büyümüyor ve aradaki fark kadar eski blok rengini
-/// kaybediyor — şerit **çizilmez**, yanlış çizilmez.
+/// **Known limit:** the ceiling is set when the session is born; if `scrollback`
+/// is enlarged live the ring does not grow and as many old blocks as the
+/// difference lose their color — the stripe is **not drawn**, not drawn wrongly.
 pub(crate) struct BlockLog {
-    /// `entries[i]`, kimliği `first + i` olan bloğun akıbeti.
+    /// `entries[i]` is the fate of the block whose identity is `first + i`.
     entries: VecDeque<Outcome>,
-    /// `entries[0]`'ın kimliği; defter boşken anlamsız.
+    /// The identity of `entries[0]`; meaningless while the ledger is empty.
     first: u32,
     capacity: usize,
 }
@@ -916,22 +941,22 @@ impl BlockLog {
         }
     }
 
-    /// Tavanın `scrollback`'ten türemesi — [`BlockLog::new`] ile
-    /// [`BlockLog::set_capacity`]'nin **tek** kaynağı.
+    /// Deriving the ceiling from `scrollback` — the **single** source of
+    /// [`BlockLog::new`] and [`BlockLog::set_capacity`].
     ///
-    /// İki yerde ayrı ayrı yazılsaydı taban (`BLOCK_LOG_FLOOR`) birinde
-    /// unutulabilir ve canlı küçültülen bir `scrollback` defteri sıfıra
-    /// indirebilirdi.
+    /// If it were written separately in two places, the floor (`BLOCK_LOG_FLOOR`)
+    /// could be forgotten in one and a live-shrunk `scrollback` could bring the
+    /// ledger down to zero.
     fn capacity_for(scrollback: usize) -> usize {
         scrollback.max(BLOCK_LOG_FLOOR)
     }
 
-    /// `scrollback` kayıt anında değişince tavanı da taşır.
+    /// When `scrollback` changes at save time, it moves the ceiling too.
     ///
-    /// Tavan eskiden yalnız oturum doğarken belirleniyordu ve `scrollback`
-    /// **canlı uygulanan** bir ayar: büyütülen geçmişin fazlası renksiz
-    /// kalıyordu (`/code-review`, 010 kapı). Küçültmede fazlalık en eskiden
-    /// atılıyor — halkanın kendi tahliye kuralı, ikinci bir politika yok.
+    /// The ceiling used to be set only when the session was born and `scrollback` is
+    /// a **live-applied** setting: the excess of an enlarged history stayed colorless
+    /// (`/code-review`, 010 gate). On shrinking, the excess is dropped from the
+    /// oldest — the ring's own eviction rule, no second policy.
     fn set_capacity(&mut self, scrollback: usize) {
         self.capacity = Self::capacity_for(scrollback);
         while self.entries.len() > self.capacity {
@@ -940,25 +965,25 @@ impl BlockLog {
         }
     }
 
-    /// `A` ile açılan bloğu deftere yazar.
+    /// Writes the block opened with `A` into the ledger.
     fn start(&mut self, id: u32) {
-        // Aralıktaki bir kimliğin ikinci kez açılması: bloğu yeniden açıyoruz,
-        // defteri silmiyoruz. Ardındakiler artık geçersiz — o kimlikler bir
-        // önceki turdan kalma.
+        // An identity inside the range being opened a second time: we reopen the block,
+        // we do not delete the ledger. The ones after it are now invalid — those
+        // identities are left over from a previous round.
         if let Some(at) = self.index_of(id) {
             self.entries.truncate(at + 1);
             self.entries[at] = Outcome::Pending;
             return;
         }
-        // Bitişik değilse defter bu kimliği yorumlayamaz ve eskisini taşımak
-        // iki ayrı sayacın bloklarını tek aralıkta gösterirdi.
+        // If it is not contiguous the ledger cannot interpret this identity and carrying
+        // the old one would show the blocks of two separate counters in one range.
         //
-        // **İkisi de savunma kolu.** Sayacımız kabuk örneği boyunca monoton ve
-        // `exec zsh` onu "sıfırlamıyor": `.zshrc` ilk prompt'tan önce
-        // `__bateri_restore` çağırıyor, yani yeniden doğan kabuk kullanıcının
-        // `ZDOTDIR`'ını miras alıyor, sarmalayıcıyı hiç yüklemiyor ve tek bir
-        // işaret bile basmıyor. Buraya düşmenin yolu bizim basmadığımız bir
-        // `bt_block=` olurdu — alanın bize özel olmasının ikinci sebebi bu.
+        // **Both are defensive arms.** Our counter is monotonic across the shell
+        // instance and `exec zsh` does not "reset" it: `.zshrc` calls `__bateri_restore`
+        // before the first prompt, so the reborn shell inherits the user's `ZDOTDIR`,
+        // never loads the wrapper and prints not a single mark. The way to land here
+        // would be a `bt_block=` we did not print — that is the second reason the field
+        // is ours alone.
         if self.entries.is_empty() || id != self.first.wrapping_add(self.entries.len() as u32) {
             self.entries.clear();
             self.first = id;
@@ -970,68 +995,69 @@ impl BlockLog {
         self.entries.push_back(Outcome::Pending);
     }
 
-    /// `D` ile kapanan bloğun kodunu ve süresini işler; defterde olmayan
-    /// kimlik yoksayılır.
+    /// Processes the code and duration of the block closed with `D`; an identity not
+    /// in the ledger is ignored.
     fn finish(&mut self, id: u32, exit: Option<i32>, elapsed_ms: u32) {
         if let Some(at) = self.index_of(id) {
             self.entries[at] = Outcome::Finished { exit, elapsed_ms };
         }
     }
 
-    /// Bloğun akıbeti; defterde yoksa `None` ve o hâlde şerit çizilmez.
+    /// The block's fate; `None` if not in the ledger, and in that state the stripe is not drawn.
     fn get(&self, id: u32) -> Option<Outcome> {
         self.index_of(id).map(|at| self.entries[at])
     }
 
-    /// Defterin **en son açtığı** blok; defter boşken `None`.
+    /// The block the ledger **opened most recently**; `None` while the ledger is empty.
     ///
-    /// Kimlikler bitişik ve artan olduğu için son kayıt son `A`'dır — "koşan
-    /// blok hangisi" sorusunun tek yanıtı bu ([`ShellLog::running`]).
+    /// Since identities are contiguous and increasing, the last record is the last
+    /// `A` — the single answer to "which block is running" ([`ShellLog::running`]).
     fn last(&self) -> Option<(u32, Outcome)> {
         let at = self.entries.len().checked_sub(1)?;
         Some((self.first.wrapping_add(at as u32), self.entries[at]))
     }
 
-    /// Kimliğin halkadaki yeri; aralığın dışındaki kimlik `None`.
+    /// The identity's place in the ring; an identity outside the range is `None`.
     ///
-    /// `checked_sub`: tavanı aşıp düşmüş (kimlik `first`'ten küçük) bir blok
-    /// sarmayla halkanın sonuna düşmemeli.
+    /// `checked_sub`: a block that dropped past the ceiling (identity smaller than
+    /// `first`) must not wrap around to the end of the ring.
     fn index_of(&self, id: u32) -> Option<usize> {
         let at = id.checked_sub(self.first)? as usize;
         (at < self.entries.len()).then_some(at)
     }
 }
 
-/// Dock'un giriş satırındaki fareyle seçim (031 phase-4): iki uç, adım ve
-/// çözülmüş aralık — **`BUFFER`'ın karakter indeksleriyle**.
+/// Mouse selection in the dock's input line (031 phase-4): the two ends, the step
+/// and the resolved range — in **`BUFFER`'s character indices**.
 ///
-/// **Aynanın yanında yaşıyor, içinde değil** ([`ShellLog::dock_selection`]).
-/// [`DockState`]'in içinde dursaydı kare yolunun farkı (`dock::change` /
-/// `diff`) onu da karşılaştırır ve her sürükleme adımı 030'un yazım
-/// efektlerini `Reset`'lerdi; üstelik tarayıcı aynayı toptan `clone_from`
-/// ile tazeliyor ve seçimi her tuşta ezerdi. Seçim yine de aynaya **bağlı**:
-/// `BUFFER` değişince kalkıyor ([`ShellLog::apply_dock`]), çünkü indeksler
-/// artık başka bir metni gösterirdi.
+/// **It lives next to the mirror, not in it** ([`ShellLog::dock_selection`]). If
+/// it were inside [`DockState`], the frame path's diff (`dock::change` /
+/// `diff`) would compare it too and every drag step would `Reset` 030's typing
+/// effects; moreover the scanner refreshes the mirror wholesale with `clone_from`
+/// and would overwrite the selection on every keystroke. The selection is still
+/// **tied** to the mirror: it is dropped when `BUFFER` changes
+/// ([`ShellLog::apply_dock`]), because the indices would now point at another
+/// text.
 ///
-/// Aralık uçlar değiştiğinde bir kez çözülüyor (`dock::selection_range`) ve
-/// burada saklanıyor: kare yolu kelime aramıyor, yalnız iki sayı okuyor.
+/// The range is resolved once when the ends change (`dock::selection_range`) and
+/// stored here: the frame path searches no word, it only reads two numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DockSelection {
-    /// Basışın noktası; sürükleme ve Shift+tıklama onu taşımıyor.
+    /// The press point; drag and Shift+click do not move it.
     anchor: DockPoint,
-    /// Sürüklemenin ucu.
+    /// The drag's end.
     head: DockPoint,
     kind: SelectKind,
-    /// `[start, end)`; boş seçimde `start == end`.
+    /// `[start, end)`; `start == end` for an empty selection.
     range: (usize, usize),
-    /// Aynanın kümeleme bayrağı ([`DockState::cluster`]): uçlar ve ⇧←/⇧→
-    /// adımı küme sınırında (035 R4.2). Seçimle birlikte taşınıyor, yani
-    /// uzatma onu yeniden sormuyor.
+    /// The mirror's clustering flag ([`DockState::cluster`]): the ends and the
+    /// ⇧←/⇧→ step are on cluster boundaries (035 R4.2). It travels with the
+    /// selection, so extension does not ask for it again.
     cluster: bool,
 }
 
 impl DockSelection {
-    /// `buffer` seçimin ait olduğu `BUFFER`: aralık ona karşı çözülüyor.
+    /// `buffer` is the `BUFFER` the selection belongs to: the range is resolved against it.
     pub(crate) fn new(
         kind: SelectKind,
         anchor: DockPoint,
@@ -1048,37 +1074,39 @@ impl DockSelection {
         }
     }
 
-    /// Ucu `head`'e taşır; çapa ve adım yerinde (sürükleme, Shift+tıklama).
+    /// Moves the end to `head`; anchor and step stay (drag, Shift+click).
     pub(crate) fn extended(self, head: DockPoint, buffer: &str) -> Self {
         Self::new(self.kind, self.anchor, head, buffer, self.cluster)
     }
 
-    /// Seçili aralık; boşsa `None` — sürüklemesiz tık hiçbir şey seçmez.
+    /// The selected range; `None` if empty — a click without a drag selects nothing.
     pub(crate) fn range(&self) -> Option<(usize, usize)> {
         (self.range.0 < self.range.1).then_some(self.range)
     }
 
-    /// Sürüklemesiz **tek tıklamanın** düştüğü sınır — tıkla-caret'in hedefi
-    /// (031 R4.1). Yalnız boş `Simple` seçimde: çift ve üçlü tıklama caret'i
-    /// oynatmıyor. Sürüklenip başladığı yere geri getirilen fare de boş
-    /// `Simple` bırakıyor ve caret'i taşıyor — metin alanlarının davranışı.
+    /// The boundary a **single click** without a drag falls on — the click-to-caret
+    /// target (031 R4.1). Only for an empty `Simple` selection: double and triple
+    /// click do not move the caret. A mouse dragged and brought back to where it
+    /// started also leaves an empty `Simple` and moves the caret — the behavior of
+    /// text fields.
     pub(crate) fn click(&self) -> Option<usize> {
         (self.kind == SelectKind::Simple && self.range.0 == self.range.1).then_some(self.range.0)
     }
 
-    /// ⇧← / ⇧→ (031 Karar 8): seçimin **hareketli ucunu** bir karakter
-    /// oynatır; seçim yoksa `caret`'ten başlar. Sonuç her zaman `Simple` —
-    /// kelime ya da satır adımıyla başlamış seçim klavyede harf adımıyla
-    /// büyüyor (metin alanlarının davranışı).
+    /// ⇧← / ⇧→ (031 Karar 8): moves the selection's **moving end** by one character;
+    /// if there is no selection, it starts from `caret`. The result is always
+    /// `Simple` — a selection started with a word or line step grows with a letter
+    /// step on the keyboard (the behavior of text fields).
     ///
-    /// **Hareketli uç** başın çapaya göre yönünden: çapanın solundaysa
-    /// aralığın başı, değilse sonu. Boş aralıkta (klavyeyle daraltılmış seçim)
-    /// iki uç aynı nokta ve adım oradan.
+    /// The **moving end** is from the head's direction relative to the anchor: if it
+    /// is to the left of the anchor, the range's start, otherwise its end. In an
+    /// empty range (a selection narrowed by the keyboard) the two ends are the same
+    /// point and the step is from there.
     ///
-    /// Adım **karakter** ama birleştirici ile tabanı arasına düşmüyor:
-    /// `dock::selection_range`'ın `boundary` kuralının klavyedeki hâli, yoksa
-    /// `é`'nin aksanı tabanından ayrı seçilebilirdi. Kümeleme açıkken
-    /// (`cluster`, 035) adım **küme**: `🇹🇷`'nin yarısı seçilemiyor.
+    /// The step is a **character** but does not fall between a combining mark and its
+    /// base: the keyboard form of `dock::selection_range`'s `boundary` rule,
+    /// otherwise `é`'s accent could be selected apart from its base. With clustering
+    /// on (`cluster`, 035) the step is a **cluster**: half of `🇹🇷` cannot be selected.
     pub(crate) fn stepped(
         current: Option<Self>,
         caret: usize,
@@ -1091,16 +1119,16 @@ impl DockSelection {
         let (fixed, active) = match current {
             Some(selection) => {
                 let (start, end) = selection.range;
-                // Yarı sıralanmıyor (`CellHalf` `Ord` değil): sol < sağ.
+                // Halves are not ordered (`CellHalf` is not `Ord`): left < right.
                 let order = |point: DockPoint| (point.index, point.half == CellHalf::Right);
                 let backward = order(selection.head) < order(selection.anchor);
                 if backward { (end, start) } else { (start, end) }
             }
             None => {
                 let caret = caret.min(len);
-                // Caret bir kümenin **içindeyse** (ZLE oraya koyabiliyor) ⇧←'in
-                // sabit ucu kümenin arkası: yoksa `boundary` onu kümenin başına
-                // indirir ve ilk adım boş bir seçim verirdi (`/code-review`).
+                // If the caret is **inside** a cluster (ZLE can put it there) ⇧←'s fixed end is
+                // the back of the cluster: otherwise `boundary` would lower it to the start of
+                // the cluster and the first step would give an empty selection (`/code-review`).
                 let fixed = if cluster && !forward {
                     dock::cluster_span(chars.iter().copied(), caret, true)
                         .filter(|&(start, _)| start < caret)
@@ -1119,8 +1147,9 @@ impl DockSelection {
         let mut moved = active;
         let span = |index| dock::cluster_span(chars.iter().copied(), index, true);
         if cluster {
-            // Hareketli uç bir kümenin sınırında (aralık [`boundary`]'den);
-            // bir sonraki sınır kümenin arkası, bir önceki öncekinin başı.
+            // The moving end is on a cluster's boundary (range from [`boundary`]); the next
+            // boundary is the back of the cluster, the previous one is the start of the
+            // previous.
             moved = if forward {
                 span(moved).map_or(moved, |(_, end)| end)
             } else {
@@ -1156,197 +1185,205 @@ impl DockSelection {
     }
 }
 
-/// Okuyucu thread'in yazdığı, kare yolunun okuduğu kabuk defteri.
+/// The shell ledger the reader thread writes and the frame path reads.
 ///
-/// İki kayıt **tek** yaprak kilidin altında: ikisini de besleyen aynı işaret
-/// akışı ve ikisini de okuyan aynı kare. Ayrı kilitler, aynı kareyi bir
-/// işaretin iki yarısı arasında yakalayabilirdi.
-/// Düzenleme komutunun beklenen sonucu: `BUFFER` ve caret, komutun
-/// gönderildiği **nesille** damgalı.
+/// Two records under a **single** leaf lock: the same mark stream feeds both and
+/// the same frame reads both. Separate locks could catch the same frame between
+/// the two halves of a mark.
+/// The expected result of an editing command: `BUFFER` and the caret, stamped
+/// with the **generation** at which the command was sent.
 ///
-/// Basılı ⌫'nin tekrarı aynadan hızlı gelebiliyor; kapı bayat aynaya
-/// bakıp kapansaydı tekrar ZLE'ye kod noktası olarak gider ve `🇹🇷🇺🇸`'de
-/// ikinci ⌫ yalnız `🇷`'yi silerdi. Komutun etkisini biz tanımlıyoruz
-/// (`d;S;E;L`: `[S,E)` silinir, caret `S`), yani sonuç kesin; yanlış çıktığı
-/// tek yol widget'ın komutu reddetmesi ya da kabuğun dışından bir yazım ve
-/// ikisi de uzunluğu değiştiriyor — sonraki komutun `L`'si tutmuyor, widget
-/// hiçbir şey yapmıyor: tekrar kaybolur, küme bölünmez
+/// The repeat of a held ⌫ can arrive faster than the mirror; if the gate looked at
+/// the stale mirror and closed, the repeat would go to ZLE as a code point and
+/// in `🇹🇷🇺🇸` the second ⌫ would delete only the `🇷`. We define the command's
+/// effect ourselves (`d;S;E;L`: `[S,E)` is deleted, the caret is `S`), so the
+/// result is certain; the only ways it can come out wrong are the widget rejecting
+/// the command or a write from outside the shell, and both change the length —
+/// the next command's `L` does not match, the widget does nothing: a repeat is
+/// lost, a cluster is not split
 /// (`.tasks/035-grapheme-dizileri/phase-5.md` → Uygulama Notları).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DockPrediction {
-    /// Komutun gönderilmesiyle doğan nesil ([`crate::Session`]'ın
-    /// `key_gen`'i); başka bir nesilde tahmin geçersiz.
+    /// The generation born when the command was sent ([`crate::Session`]'s
+    /// `key_gen`); in any other generation the prediction is invalid.
     pub(crate) generation: u64,
     pub(crate) buffer: String,
-    /// `BUFFER`'da karakter indeksi.
+    /// Character index in `BUFFER`.
     pub(crate) caret: usize,
 }
 
 pub(crate) struct ShellLog {
-    /// Kabuğun o anki durumu; `None` = entegrasyon yok.
+    /// The shell's current state; `None` = no integration.
     pub(crate) state: Option<ShellState>,
     pub(crate) blocks: BlockLog,
-    /// ZLE'nin görüntü aynası. Aynı kilidin altında, çünkü aynı akıştan
-    /// besleniyor ve aynı kare okuyor: ayrı bir kilit, kareyi safha ile
-    /// aynanın çeliştiği bir anda yakalayabilirdi — `Input` safhasında
-    /// ızgarayı bastırıp dock'a bir önceki satırı çizmek gibi.
+    /// ZLE's display mirror. Under the same lock, because it is fed from the same
+    /// stream and read by the same frame: a separate lock could catch the frame at a
+    /// moment when the phase and the mirror contradict each other — like suppressing
+    /// the grid in the `Input` phase and drawing the previous line in the dock.
     pub(crate) dock: DockState,
-    /// Dock'un bağlam satırı: dizin ve dal. Aynanın **yanında**, içinde değil
-    /// ([`DockContext`]); aynı kilit, ayrı ömür.
+    /// The dock's context line: directory and branch. **Next to** the mirror, not in
+    /// it ([`DockContext`]); same lock, separate lifetime.
     pub(crate) context: DockContext,
-    /// `[remote] hosts`'un desen listesi (037 Karar 2); uzak host'un işareti
-    /// ([`DockContext::remote_mark`]) bundan, iki kenarda çözülüyor.
+    /// The pattern list of `[remote] hosts` (037 Karar 2); the remote host's mark
+    /// ([`DockContext::remote_mark`]) is resolved from it, at two edges.
     pub(crate) host_rules: Vec<HostRule>,
-    /// Dock'un fareyle seçimi; `None` → seçim yok. Aynanın **yanında**
-    /// ([`DockSelection`]'ın doc'u) ve aynı kilidin altında: `BUFFER`
-    /// değişince onu silen yazıcı (okuyucu thread) ile aralığı okuyan kare
-    /// aynı turda görüyor.
+    /// The dock's mouse selection; `None` → no selection. **Next to** the mirror (see
+    /// [`DockSelection`]'s doc) and under the same lock: the writer that deletes it
+    /// when `BUFFER` changes (the reader thread) and the frame that reads the range
+    /// see it in the same turn.
     pub(crate) dock_selection: Option<DockSelection>,
-    /// Dock'un dikey penceresinin **tekerlekle seçilmiş** tepesi (032 phase-4);
-    /// `None` → pencere caret'i izliyor ([`crate::dock::render_with`]).
+    /// The **wheel-selected** top of the dock's vertical window (032 phase-4); `None`
+    /// → the window follows the caret ([`crate::dock::render_with`]).
     ///
-    /// Tavanı aşan girişte pencere yalnız caret'i izleseydi üstteki
-    /// satırlara fare hiç ulaşamazdı. Aynanın **yanında**, seçimin gerekçesiyle
-    /// ([`Self::dock_selection`]): tarayıcı aynayı toptan tazeliyor. Ömrü
-    /// caret'in yerinde kalmasına bağlı — `BUFFER`, `PREBUFFER` ya da caret
-    /// değişince (yazmak, ok tuşu) kalkıyor ve pencere caret'e dönüyor; öneri
-    /// değişimi onu kaldırmıyor.
+    /// If in an input past the ceiling the window only followed the caret, the mouse
+    /// could never reach the rows above. **Next to** the mirror, with the selection's
+    /// reason ([`Self::dock_selection`]): the scanner refreshes the mirror wholesale.
+    /// Its lifetime is tied to the caret staying in place — it is dropped when
+    /// `BUFFER`, `PREBUFFER` or the caret changes (typing, an arrow key) and the
+    /// window returns to the caret; a change of suggestion does not drop it.
     pub(crate) dock_scroll: Option<usize>,
-    /// Kabuk **bu prompt'ta** düzenleme widget'ını bağladı mı (`8133;w`,
-    /// 031) — düzenleme kapısının dördüncü koşulu
+    /// Whether the shell bound the editing widget **at this prompt** (`8133;w`,
+    /// 031) — the editing gate's fourth condition
     /// ([`crate::Session::can_edit_dock`]).
     ///
-    /// Aynanın **yanında**, içinde değil: tarayıcı [`DockState`]'i her `u`
-    /// yükünde toptan `clone_from` ile tazeliyor ve yetenek prompt başına bir
-    /// kez geliyor, yani içinde dursaydı ilk tuşta silinirdi. Ömrü prompt'un:
-    /// `line-finish` (`e`) ve prompt'un başı (`A`) siliyor. `A` ikinci bir
-    /// kemer — `line-finish`'in koşmadığı bir çıkış (kesilen satır) yeteneği
-    /// sonraki prompt'un `w`'sine kadar taşımasın; yanlışın yönü "düzenleme
-    /// yok".
+    /// **Next to** the mirror, not in it: the scanner refreshes [`DockState`]
+    /// wholesale with `clone_from` on every `u` payload and the capability arrives
+    /// once per prompt, so if it were inside it would be erased at the first
+    /// keystroke. Its lifetime is the prompt's: `line-finish` (`e`) and the start of
+    /// the prompt (`A`) clear it. `A` is a second belt — so that an exit where
+    /// `line-finish` did not run (an interrupted line) does not carry the capability
+    /// to the next prompt's `w`; the wrong direction is "no editing".
     pub(crate) dock_editable: bool,
-    /// Son düzenleme komutunun **beklenen** sonucu (035 phase-5): ayna o
-    /// komuta cevap verene kadar düzenleme kapısı bu satıra bakıyor
-    /// ([`DockPrediction`]). Ömrü yalnız bir nesil — araya giren her girdi
-    /// onu geçersiz kılıyor; `e` ve `A` de siliyor.
+    /// The **expected** result of the last editing command (035 phase-5): until the
+    /// mirror answers that command, the editing gate looks at this line
+    /// ([`DockPrediction`]). Its lifetime is only one generation — any intervening
+    /// input invalidates it; `e` and `A` clear it too.
     pub(crate) dock_pending: Option<DockPrediction>,
-    /// Koşan komutun başlangıç anı; komut koşmuyorken `None`.
+    /// The start instant of the running command; `None` while no command is running.
     ///
-    /// **Tek alan, blok başına değil:** aynı anda tek komut koşar, çünkü
-    /// `C` ile `D` arasında kabuk bir sonraki prompt'u basmıyor. Defterin her
-    /// girdisine bir `Instant` koymak 10 000 satırlık scrollback'te sekme
-    /// başına ödenen ölü bir bedel olurdu.
+    /// **A single field, not per block:** only one command runs at a time, because
+    /// between `C` and `D` the shell does not print the next prompt. Putting an
+    /// `Instant` in every ledger entry would be a dead cost paid per tab in a
+    /// 10,000-line scrollback.
     ///
-    /// `Instant`, sistem saati değil: kullanıcı saati değiştirse ya da yaz
-    /// saati geçse bile süre geriye akmaz.
+    /// `Instant`, not system time: even if the user changes the clock or daylight
+    /// saving passes, the duration does not run backwards.
     pub(crate) running_since: Option<Instant>,
-    /// Komut nesli: safha `Running`'e her **geçişte** bir artıyor (036
-    /// Karar 2).
+    /// Command generation: incremented on every **transition** of the phase to
+    /// `Running` (036 Karar 2).
     ///
-    /// Uzak oturum yoklamasının bayat cevap kapısı: yoklama ana thread'de,
-    /// `D` okuyucu thread'de, ve arada biten komutun cevabı bir sonrakine
-    /// sızmamalı. Çağıran nesli yoklamadan önce alıyor
-    /// ([`crate::Session::running_command`]) ve cevapla geri veriyor
-    /// ([`crate::Session::set_remote`]); tutmazsa cevap düşüyor.
+    /// The stale-answer gate for the remote session probe: the probe is on the main
+    /// thread, `D` on the reader thread, and the answer of a command that finishes in
+    /// between must not leak into the next one. The caller takes the generation
+    /// before the probe ([`crate::Session::running_command`]) and hands it back with
+    /// the answer ([`crate::Session::set_remote`]); if it does not match the answer is
+    /// dropped.
     ///
-    /// **İkinci `C` geçiş değil** ve nesli oynatmıyor — saatin "ilk `C`
-    /// kazanır" kuralının ([`Self::running_since`]) aynı yeri: iTerm2'nin komut
-    /// ortasındaki `C`'si koşan bir ssh'ın cevabını geçersiz kılmamalı.
+    /// **A second `C` is not a transition** and does not move the generation — the
+    /// same place as the clock's "first `C` wins" rule ([`Self::running_since`]):
+    /// iTerm2's mid-command `C` must not invalidate the answer for a running ssh.
     pub(crate) command: u64,
-    /// Kabuk **bizim** kimliğimizi taşıyan bir işaret bastı mı
-    /// (`bt_block=`'lı `A` ya da `D`) — yapışkan; [`Self::apply`]'ın yabancı
-    /// işaret kapısının ön koşulu.
+    /// Whether the shell printed a mark carrying **our** identity (an `A` or `D` with
+    /// `bt_block=`) — sticky; the precondition of [`Self::apply`]'s foreign-mark gate.
     ///
-    /// Kapı bu bayrak olmadan kurulamaz: entegrasyonu kapalı ama kendi OSC
-    /// 133'ünü basan bir kabukta (iTerm2, kitty) **bütün** işaretler
-    /// kimliksiz ve uzak durum hiç silinmezdi.
+    /// The gate cannot be built without this flag: in a shell with integration off
+    /// but printing its own OSC 133 (iTerm2, kitty) **all** marks are identity-less
+    /// and the remote state would never be cleared.
     ours: bool,
-    /// Son `Running` geçişinin açtığı komut **bizim** `D`/`A`'mızla henüz
-    /// kapanmadı ([`Self::running_command`]'ın ikinci kolu).
+    /// The command opened by the last `Running` transition has not yet been closed
+    /// by **our** `D`/`A` ([`Self::running_command`]'s second arm).
     ///
-    /// Safha tek başına yetmiyor: ssh'ın öbür ucundaki entegrasyonun `A`'sı
-    /// yoklamadan **önce** aynı okumada gelebiliyor ve safhayı `Prompt`'a
-    /// çekiyor — komut hâlâ koşarken nesil `None` görünür, yoklama düşer ve
-    /// gösterge hiç çıkmazdı.
+    /// The phase alone is not enough: the `A` of the integration on the far end of
+    /// ssh can arrive in the same read **before** the probe and pull the phase to
+    /// `Prompt` — while the command is still running the generation looks like
+    /// `None`, the probe is dropped and the indicator would never appear.
     command_open: bool,
-    /// Devrin **ham** cevabı, en son gözlendiği hâliyle.
+    /// The **raw** answer of the handover, as last observed.
     ///
-    /// Damga [`Self::apply_scan`]'de tutuluyor — tek giriş noktası ve yaprak
-    /// kilidin altında, yani `Term`'e hiç dokunmadan. Kare yolunda tutulsaydı
-    /// iki kare arası hiç işaret gelmeyen bir pencerede damga hiç kıpırdamaz,
-    /// gelen bir işaret de iki kare arasında **iz bırakmadan** geçerdi.
+    /// The stamp is kept in [`Self::apply_scan`] — the single entry point and under the
+    /// leaf lock, so without touching `Term` at all. If it were kept in the frame path,
+    /// in a window where no mark arrives between two frames the stamp would never
+    /// move, and a mark that arrives between two frames would pass **without a
+    /// trace**.
     caret_raw: CaretHome,
-    /// [`Self::caret_raw`] en son ne zaman **değişti**.
+    /// When [`Self::caret_raw`] last **changed**.
     ///
-    /// Değişmeyen gözlem damgayı kıpırdatmıyor: her tuş vuruşu bir ayna olayı
-    /// doğuruyor ve damga onlarla tazelenseydi tutma hiç dolmazdı.
+    /// An unchanged observation does not move the stamp: every keystroke produces a
+    /// mirror event and if the stamp were refreshed with them the hold would never
+    /// expire.
     caret_since: Instant,
-    /// `line-finish` (`8133;e`) **tutuluyor**: ne zaman geldi (032 Karar 11).
+    /// `line-finish` (`8133;e`) is **held**: when it arrived (032 Karar 11).
     ///
-    /// zsh her `PS2` kabulünde `line-finish` koşuyor, arada `precmd` yok ve
-    /// safha `Input` kalıyor (ölçüldü, zpty); hemen ardından `line-init`'in
-    /// aynası (`u`, `PREBUFFER` dolu) geliyor. `e` aynayı anında sıfırlasaydı
-    /// çok satırlı dock'ta her ⏎ bandı bir kare küçültüp yeniden büyütür,
-    /// kabul edilen satır bir an ızgarada belirirdi. Tutulurken aynanın
-    /// görüntüsü, bandı ve bastırması **olduğu gibi** duruyor; `u` gelirse
-    /// yeni ayna geçiyor, bir OSC 133 işareti (`C`: komut koştu, `A`: yeni
-    /// prompt) ya da [`HANDOVER_HOLD`] dolarsa ([`Self::expire_end`]) bugünkü
-    /// sıfırlama. Süre caret tutmasının saati, ikinci bir sayı yok.
+    /// zsh runs `line-finish` on every `PS2` acceptance, with no `precmd` in between
+    /// and the phase stays `Input` (measured, zpty); right after it comes
+    /// `line-init`'s mirror (`u`, `PREBUFFER` filled). If `e` reset the mirror
+    /// instantly, in the multi-line dock every ⏎ would shrink the band for a frame and
+    /// grow it again, and the accepted line would appear on the grid for a moment.
+    /// While held, the mirror's display, band and suppression stay **as they are**;
+    /// if `u` arrives the new mirror passes, and if an OSC 133 mark (`C`: the command
+    /// ran, `A`: a new prompt) arrives or [`HANDOVER_HOLD`] expires
+    /// ([`Self::expire_end`]) today's reset happens. The duration is the caret hold's
+    /// clock, no second number.
     ///
-    /// **Aynanın yanında, içinde değil:** her tüketici `status == Live`
-    /// soruyor ve tutma boyunca `Live` görmeli; yeni bir durum varyantı
-    /// dokuz tüketicinin dokuzunu da değiştirirdi.
+    /// **Next to the mirror, not in it:** every consumer asks `status == Live` and has
+    /// to see `Live` throughout the hold; a new state variant would change all nine of
+    /// nine consumers.
     end_since: Option<Instant>,
 }
 
-/// Caret'in sahibi: ızgara mı, dock mu.
+/// The caret's owner: the grid or the dock.
 ///
-/// **Tek yüklem, iki tüketici.** [`crate::dock::render`] caret'i çizmek için,
-/// [`crate::Session::frame`] ızgaranın imlecini gizlemek için soruyor; ikisi
-/// ayrı ayrı yazılsaydı aynı karede iki caret (ya da hiç caret) doğardı —
-/// gözlenen kusur tam da buydu (012 phase-8).
+/// **One predicate, two consumers.** [`crate::dock::render`] asks it to draw the
+/// caret, [`crate::Session::frame`] to hide the grid's cursor; if they were written
+/// separately, the same frame would have two carets (or none) —
+/// the observed defect was exactly that (012 phase-8).
 ///
-/// **Bu, giriş satırının bastırılmasından ayrı bir sorudur.** Bastırma hangi
-/// **hücrelerin** atlanacağını soruyor ve cevabı çıpaya bağlı;
-/// burada sorulan şey caret'in **yeri** ve çıpayla ilgisi yok — sıfır
-/// genişlikli prompt hiçbir hücre yazmadığı için çıpa yokken de caret dock'un.
+/// **This is a separate question from the suppression of the input line.**
+/// Suppression asks which **cells** will be skipped and its answer depends on the
+/// anchor; what is asked here is the caret's **place** and it has nothing to do
+/// with the anchor — since a zero-width prompt writes no cell, the caret is the
+/// dock's even when there is no anchor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CaretHome {
-    /// Izgara çiziyor.
+    /// The grid draws.
     Grid,
-    /// Dock çiziyor.
+    /// The dock draws.
     Dock,
 }
 
-/// Dock→Grid devrinin **tutulma süresi** (histerezis).
+/// The **hold duration** of the Dock→Grid handover (hysteresis).
 ///
-/// **Seçilmiş, ölçülmemiş.** İki ucu da gerekçeli: alt sınır ölçülmüş
-/// (`context.md` → Kanıt: `ls` koşarken safha 44 ms sürüyor, yani 44 ms'nin
-/// altındaki her tutma `ls`'i hiç yakalamaz) ve buradaki değer onun üç katından
-/// fazla — `git status` sınıfı komutlar da kapsansın. Üst sınırın emsali 013:
-/// bir saniyeyi geçmeyen komutun sayacı **gösterilmiyor**, yani kullanıcının
-/// "koşuyor" saydığı eşik zaten bir saniye; tutma onun çok altında kalmalı ki
-/// gerçekten koşan komut caret'ini ızgarada göstersin.
+/// **Chosen, not measured.** Both ends have reasons: the lower bound is measured
+/// (`context.md` → Kanıt: while `ls` runs the phase lasts 44 ms, so any hold
+/// below 44 ms never catches `ls`) and the value here is more than three times
+/// that — so that `git status`-class commands are covered too. The upper bound's
+/// precedent is 013: the counter of a command that does not exceed one second is
+/// **not shown**, so the threshold at which the user counts it as "running" is one
+/// second already; the hold must stay well below it so that a genuinely running
+/// command shows its caret on the grid.
 ///
-/// **Üçüncü sayıyla ilişkisi yazılı olmalı:** imleç animasyonu ~230 ms'de
-/// yerleşiyor (`bt_gpu::motion`, `OMEGA`'nın doc'u) ve bu değer onun
-/// **altında**. Sonucu şu: dolan her tutma caret'i animatör hâlâ yoldayken
-/// serbest bırakıyor, yani tutmayı aşan komutlarda tek bir temiz hedefleme
-/// iki hedeflemeye bölünüyor. Bilinen bedel, `.tasks/015-imlec-cilasi/phase-1.md`
-/// → Bilinen sınırlar; değeri değiştiren bu ilişkiyi hesaba katmalı. Emsal
-/// `bt_gpu::motion`'ın `const _: () = assert!(EASE_DURATION < TIME_CEILING)`'ı
-/// — orada iki sayı aynı crate'te olduğu için şart derleyiciye yazılabiliyor,
-/// burada crate sınırı geçtiği için yalnız bu cümle var.
+/// **Its relation to the third number must be written:** the cursor animation
+/// settles in ~230 ms (`bt_gpu::motion`, `OMEGA`'s doc) and this value is
+/// **below** it. The consequence: every hold that expires releases the caret
+/// while the animator is still on its way, so in commands that exceed the hold a
+/// single clean targeting splits into two. A known cost, `.tasks/015-imlec-cilasi/phase-1.md`
+/// → Bilinen sınırlar; whoever changes the value must take this relation into
+/// account. The precedent is `bt_gpu::motion`'s
+/// `const _: () = assert!(EASE_DURATION < TIME_CEILING)` — there, since the two
+/// numbers are in the same crate, the condition can be written to the compiler;
+/// here, since it crosses the crate boundary, there is only this sentence.
 ///
-/// `docs/OLCUMLER.md`'nin konusu **değil**: bu bir his eşiği, ölçüm değil
-/// (emsal `FADE_DURATION`).
+/// **Not** the subject of `docs/OLCUMLER.md`: this is a feel threshold, not a
+/// measurement (the precedent is `FADE_DURATION`).
 pub(crate) const HANDOVER_HOLD: Duration = Duration::from_millis(150);
 
-/// İki son tarihten **yakın** olanı; ikisi de boşsa boş.
+/// The **nearer** of two deadlines; empty if both are empty.
 ///
-/// Serbest ve saf, **sınanabilirlik için**: `min`'in sessizce yazmaya (ezmeye)
-/// dönmesi iki yönde de görünmez bir kusur olurdu — ya koşan komutun sayacı
-/// donar ya devir hiç gerçekleşmez. Emsal `bt_gpu::link`'in `due_clock`'u,
-/// o da tam bu sebeple saf bir yardımcıya çıkarılmıştı.
+/// Free and pure, **for testability**: `min` quietly turning into a write
+/// (overwrite) would be an invisible defect in both directions — either the
+/// running command's counter freezes or the handover never happens. The precedent
+/// is `bt_gpu::link`'s `due_clock`, which was pulled out into a pure helper for
+/// exactly this reason.
 pub(crate) fn sooner(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -1354,24 +1391,26 @@ pub(crate) fn sooner(a: Option<Duration>, b: Option<Duration>) -> Option<Duratio
     }
 }
 
-/// Devrin bir andaki cevabı: caret'in sahibi ve tutmanın kalanı.
+/// The handover's answer at an instant: the caret's owner and the remainder of the
+/// hold.
 ///
-/// **Tek kayıt, çünkü tek `now`.** İkisi ayrı ayrı sorulsaydı iki farklı ana
-/// ait olurlardı; [`SuppressedInput`] ile aynı gerekçe.
+/// **One record, because one `now`.** If the two were asked separately they would
+/// belong to two different instants; the same reason as [`SuppressedInput`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CaretDecision {
-    /// Caret'i bu karede kim çiziyor.
+    /// Who draws the caret in this frame.
     pub(crate) home: CaretHome,
-    /// Tutma **cevabı çevirirken** kalan süre; saate yalnız bu giriyor.
-    /// `None` → tutma yok, yani istenecek bir kare de yok.
+    /// The time left while the hold is **flipping the answer**; only this enters the
+    /// clock. `None` → no hold, so no frame to request.
     pub(crate) hold_left: Option<Duration>,
 }
 
-/// Devrin **ham** cevabı: safha ile aynanın durumundan, tutma uygulanmadan.
+/// The handover's **raw** answer: from the phase and the mirror's state, without
+/// the hold applied.
 ///
-/// Ayrı fonksiyon, çünkü damganın izlediği şey budur ([`ShellLog::observe_caret`]):
-/// tutma damgadan türüyor ve damgaya geri beslenemez — beslenseydi tutma kendi
-/// kendini süresiz uzatırdı.
+/// A separate function, because this is what the stamp tracks
+/// ([`ShellLog::observe_caret`]): the hold derives from the stamp and cannot be
+/// fed back into it — if it were, the hold would extend itself indefinitely.
 fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
     match (shell.map(|state| state.phase), status) {
         (Some(ShellPhase::Running), _)
@@ -1381,68 +1420,77 @@ fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
     }
 }
 
-/// Caret'in sahibini safha, aynanın durumu ve **tutma** ile çözer.
+/// Resolves the caret's owner with the phase, the mirror's state and the **hold**.
 ///
-/// Serbest fonksiyon ve defteri görmüyor; üretimde tek çağıranı
-/// [`ShellLog::caret`], sınamalar yükleme kurmadan yüklemi sorabilsin diye
-/// serbest kaldı.
+/// A free function and does not see the ledger; in production its only caller is
+/// [`ShellLog::caret`], and it was left free so that tests can ask the predicate
+/// without building a load.
 ///
-/// `held` = Dock→Grid devri şu an **tutuluyor mu** (histerezis, R1.1). Tutmanın
-/// süresi ve damgası defterde ([`HANDOVER_HOLD`], [`ShellLog::caret`]); buraya
-/// yalnız kararı geliyor, çünkü bu fonksiyon saat görmüyor.
+/// `held` = whether the Dock→Grid handover is **being held** right now
+/// (hysteresis, R1.1). The hold's duration and stamp are in the ledger
+/// ([`HANDOVER_HOLD`], [`ShellLog::caret`]); only the decision comes here, because
+/// this function sees no clock.
 ///
-/// **Yalnız Dock→Grid yönü tutulur.** Ters yön geciktirilseydi komut bitince
-/// caret ızgarada asılı kalır, kullanıcı yazmaya başladığında dock'ta
-/// caret'siz bir satır görürdü — yanlışın yönü güvenli değil.
+/// **Only the Dock→Grid direction is held.** If the reverse direction were
+/// delayed, the caret would hang on the grid when the command finishes, and when
+/// the user starts typing they would see a line in the dock with no caret — the
+/// wrong direction is not safe.
 ///
-/// **`Unavailable` ile `Control` tutmanın dışında.** O iki kolun gerekçesi
-/// aşağıda yazılı ve koşulsuz: gösteremediğimiz satır ızgarada duruyor,
-/// caret'i de orada durmalı, *yoksa kullanıcı yazdığı yeri göremez*. Tutma
-/// onları da kapsasaydı `^A` taşıyan bir yapıştırmadan sonra caret 150 ms
-/// boyunca dock'un prompt işaretinin yanında durur, yani düzeltilen belirti
-/// kısalmış hâliyle geri gelirdi. Üstelik arıza bir sıçrama
-/// **üretmiyor** — kullanıcı geri silmeden ayna `Live`'a dönmüyor — yani
-/// tutmanın orada kazancı sıfır, bedeli caret'in 150 ms boş bir dock'ta
-/// durması olurdu. Carve-out yüklemin **içinde**, çünkü dışarıda olsaydı
-/// `caret_home(_, Unavailable, true)` `Dock` döner ve yüklem yalan söylerdi.
+/// **`Unavailable` and `Control` are outside the hold.** The reason for those two
+/// arms is written below and is unconditional: a line we cannot show stays on the
+/// grid, its caret must stay there too, *otherwise the user cannot see where they
+/// are typing*. If the hold covered them too, after a paste carrying `^A` the
+/// caret would stand beside the dock's prompt mark for 150 ms, that is, the fixed
+/// symptom would come back in shortened form. Moreover the failure **does not
+/// produce** a jump — the mirror does not return to `Live` until the user deletes
+/// back — so the hold's gain there is zero, and its cost would be the caret
+/// standing in an empty dock for 150 ms. The carve-out is **inside** the
+/// predicate, because if it were outside `caret_home(_, Unavailable, true)` would
+/// return `Dock` and the predicate would lie.
 ///
-/// **Kural tek cümle: caret satırın nerede çizildiğine uyar.** Giriş satırı
-/// ızgaradaysa caret de ızgarada, dock'taysa dock'ta. Dört hâl ızgaranın:
+/// **The rule is one sentence: the caret follows where the line is drawn.** If the
+/// input line is on the grid the caret is on the grid, if it is in the dock it is
+/// in the dock. Four states are the grid's:
 ///
-/// - `Running` — komut koşuyor. Satırın sahibi o: `cat`'in beklediği girdi,
-///   `ssh`'ın parola istemi ve vim'in kendi imleci ızgarada yaşıyor.
-/// - `Unavailable` — gösteremediğimiz bir satır var ve ızgarada duruyor
-///   (R1.2); caret'i de orada durmalı, yoksa kullanıcı yazdığı yeri göremez.
-/// - `Control` — görüntü dock'un çizmediği bir kontrol karakteri taşıyor
-///   ([`DockStatus::Control`]). Aynı cümlenin ikinci uygulaması: satır
-///   ızgarada kaldığı için caret de orada. (Satır sonu 032'den beri bu
-///   listede değil: dock çok satırı kendisi çiziyor.)
-/// - `Input` + `Idle` — kabuk "kullanıcı yazıyor" diyor ama ZLE satırı
-///   **bırakmış**. Bastırma da tam burada kalkıyor (R3.3): `CORRECT`'in
-///   `[nyae]` sorusu, `zle -M` mesajı, `line-finish` ile Enter arası. Satır
-///   ızgaraya döndüğü için caret de dönmek zorunda.
+/// - `Running` — a command is running. It owns the line: the input `cat` waits
+///   for, `ssh`'s password prompt and vim's own cursor live on the grid.
+/// - `Unavailable` — there is a line we cannot show and it stays on the grid
+///   (R1.2); its caret must stay there too, otherwise the user cannot see where
+///   they are typing.
+/// - `Control` — the display carries a control character the dock does not draw
+///   ([`DockStatus::Control`]). The second application of the same sentence: since
+///   the line stays on the grid, the caret is there too. (The line break has not
+///   been in this list since 032: the dock draws multiple lines itself.)
+/// - `Input` + `Idle` — the shell says "the user is typing" but ZLE has
+///   **released** the line. Suppression lifts exactly here too (R3.3): `CORRECT`'s
+///   `[nyae]` question, a `zle -M` message, between `line-finish` and Enter. Since
+///   the line returns to the grid, the caret has to return too.
 ///
-/// **Kalan her hâl dock'un ve `state == None` buna dahil.** Açılışta (zsh'in rc
-/// süresi), prompt çizilirken (`Prompt`) ve her komutun bitişiyle yeni prompt
-/// arasında (`Finished`; içinde `precmd`'in `git rev-parse` fork'u var) ortada
-/// bir giriş satırı **yok** — dock boş bir caret gösteriyor ve kullanıcının
-/// yazmaya başlayacağı yer orası. Kapıyı "kabuk en az bir kez konuştu mu"ya
-/// bağlamak caret'i o pencerelerde ızgarada bırakır ve prompt gelince
-/// **sıçratırdı** — düzeltilen kusur buydu.
+/// **Every remaining state is the dock's, and `state == None` is included.** At
+/// startup (zsh's rc time), while the prompt is being drawn (`Prompt`) and between
+/// the end of each command and the new prompt (`Finished`; it contains `precmd`'s
+/// `git rev-parse` fork) there is **no** input line in the middle — the dock shows
+/// an empty caret and that is where the user will start typing. Tying the gate to
+/// "has the shell spoken at least once" would leave the caret on the grid in
+/// those windows and would **make it jump** when the prompt arrived — that was the
+/// fixed defect.
 ///
-/// **Bilinen pencere:** `B` prompt'un içinde basılıyor, ayna ise ZLE'nin
-/// `line-init`'inde doğuyor; arada safha `Input` ama durum `Idle`, yani caret
-/// bir an ızgarada. Pencere zsh'in kendi açılışı kadar — fork yok, I/O yok — ve
-/// kapatmanın yolu "ayna hiç gelmedi" ile "ZLE bıraktı"yı ayıran yeni bir
-/// durum tutmak. Ölçülmüş bir belirti olmadan o durumu eklemiyoruz; giderilen
-/// pencere (`Finished`, bir `git` fork'u) bunun kat kat üstünde.
-/// *(015 phase-1: pencere artık **tutmanın içinde eriyor** — zsh'in `line-init`'i
-/// [`HANDOVER_HOLD`]'un çok altında, yani o an hiç raporlanmıyor. Yukarıdaki
-/// kayıt tarihli ve duruyor: pencerenin kendisi kapanmadı, görünmez oldu.)*
+/// **Known window:** `B` is printed inside the prompt while the mirror is born in
+/// ZLE's `line-init`; in between the phase is `Input` but the state is `Idle`, so
+/// the caret is on the grid for a moment. The window is as long as zsh's own
+/// startup — no fork, no I/O — and the way to close it is to keep a new state
+/// that separates "the mirror never arrived" from "ZLE released". We do not add
+/// that state without a measured symptom; the window that was removed (`Finished`,
+/// one `git` fork) is many times above this.
+/// *(015 phase-1: the window now **melts inside the hold** — zsh's `line-init` is
+/// far below [`HANDOVER_HOLD`], so it is not reported at that moment at all. The
+/// record above is dated and stays: the window itself did not close, it became
+/// invisible.)*
 ///
-/// **İkinci bilinen sınır:** entegrasyon kurulu ama betik sessizce ölürse caret
-/// dock'ta kalır ve yazdıkça kıpırdamaz. Yanıltıcı ama görünür (dock boş, blok
-/// şeridi yok), yani bu deponun yasakladığı "sessizce yanlış" sınıfına girmiyor.
+/// **Second known limit:** if the integration is installed but the script dies
+/// silently, the caret stays in the dock and does not move as you type.
+/// Misleading but visible (the dock is empty, no block stripe), so it does not
+/// fall into the "silently wrong" class this repo forbids.
 pub(crate) fn caret_home(shell: Option<ShellState>, status: DockStatus, held: bool) -> CaretHome {
     match caret_home_raw(shell, status) {
         CaretHome::Grid
@@ -1454,48 +1502,49 @@ pub(crate) fn caret_home(shell: Option<ShellState>, status: DockStatus, held: bo
     }
 }
 
-/// Bastırılacak giriş satırının iki ucu; `Copy`.
+/// The two ends of the input line to suppress; `Copy`.
 ///
-/// Aralığın **üstünü** kimlik verir (çıpası o satırda), **altını** imlecin
-/// arkasında kalan metin. İkisi tek kayıtta, çünkü ikisi de aynı yaprak kilit
-/// turundan çıkıyor; ayrı okunsalardı farklı anlara ait olabilirlerdi.
+/// The **top** of the range is given by the identity (its anchor is on that
+/// row), the **bottom** by the text left behind the cursor. The two are in one
+/// record, because both come out of the same leaf-lock turn; if read separately
+/// they could belong to different instants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SuppressedInput {
-    /// Yazılmakta olan bloğun kimliği; **satırı** [`crate::Session::frame`]
-    /// çıpadan bulur — kabuk hangi satırda olduğunu bilmiyor.
+    /// The identity of the block being written; [`crate::Session::frame`] finds its
+    /// **row** from the anchor — the shell does not know which row it is on.
     pub(crate) block: u32,
-    /// Aynanın **hiç karakteri yok**: ne görüntüde (`PREDISPLAY ++ BUFFER ++
-    /// POSTDISPLAY`) ne `PREBUFFER`'da — tazelik kapısının boş ayna sorusu
-    /// (`Session::frame`'in `blank_mirror`'ı, 025).
+    /// The mirror has **no characters at all**: neither in the display
+    /// (`PREDISPLAY ++ BUFFER ++ POSTDISPLAY`) nor in `PREBUFFER` — the freshness
+    /// gate's empty-mirror question (`Session::frame`'s `blank_mirror`, 025).
     ///
-    /// **Karakter, sütun değil** (032): 032'ye kadar ölçüt "caret'in iki
-    /// yanında sıfır sütun"du ve satır farkında değildi — tek başına bir
-    /// `\n` imleci bir satır aşağı itiyor, yani "imleç çıpanın satırında
-    /// olmak zorunda" öncülü artık yalnız gerçekten boş aynada doğru.
-    /// `PREBUFFER` doluysa (`for>` satırı) imleç meşru olarak çıpanın
-    /// aşağısında ve çıpa sorusu hiç sorulmuyor.
+    /// **Character, not column** (032): until 032 the criterion was "zero columns on
+    /// both sides of the caret" and it was not line-aware — a lone `\n` pushes the
+    /// cursor down a row, so the premise "the cursor must be on the anchor's row" is
+    /// now true only for a genuinely empty mirror. If `PREBUFFER` is filled (a `for>`
+    /// line) the cursor is legitimately below the anchor and the anchor question is
+    /// never asked.
     pub(crate) blank: bool,
-    /// Bastırmanın üst tabanı **çıpanın satırı** mı (032 Karar 7): `PREBUFFER`
-    /// dolu (ZLE önceki satırları kabul etti, `PS2`'leriyle birlikte hepsi
-    /// girişin parçası) ya da `line-finish` tutuluyor
-    /// ([`ShellLog::expire_end`]; kabul edilen satır `PREBUFFER`'a geçmek
-    /// üzere). İkisinde de düzen yürüyüşünün üst ucu ızgarayı bilmiyor —
-    /// `PS2`'nin genişliği aynada yok — ve çıpa kesin veri.
+    /// Whether suppression's upper floor is **the anchor's row** (032 Karar 7):
+    /// `PREBUFFER` is filled (ZLE accepted the earlier lines, all of them together
+    /// with their `PS2`s are part of the input) or `line-finish` is being held
+    /// ([`ShellLog::expire_end`]; the accepted line is about to move to `PREBUFFER`).
+    /// In both the layout walk's top end does not know the grid — `PS2`'s width is
+    /// not in the mirror — and the anchor is certain data.
     pub(crate) from_anchor: bool,
-    /// Görüntünün son mürekkebi ([`DockState::last_ink`]) — tazelik kapısının
-    /// aynadaki yarısı.
+    /// The display's last ink ([`DockState::last_ink`]) — the mirror-side half of the
+    /// freshness gate.
     pub(crate) last_ink: Option<char>,
-    /// ZLE ekleme keymap'inde mi ([`DockState::insert_keymap`]); yapıştırmanın
-    /// dar istisnasının üçüncü koşulu.
+    /// Whether ZLE is in the insert keymap ([`DockState::insert_keymap`]); the third
+    /// condition of the paste's narrow exception.
     ///
-    /// Aynı kayıtta, çünkü aynı yaprak kilit turundan çıkıyor: ayrı okunsaydı
-    /// keymap ile safha farklı anlara ait olabilir ve istisna, kullanıcının
-    /// çoktan `vicmd`'ye geçtiği bir satırda açık kalabilirdi.
+    /// In the same record, because it comes out of the same leaf-lock turn: if read
+    /// separately the keymap and the phase could belong to different instants and the
+    /// exception could stay open on a line the user has long since moved to `vicmd`.
     pub(crate) insert_keymap: bool,
-    /// Aynanın cevap verdiği girdi nesli ([`DockState::answers`]) — tazelik
-    /// kapısının zamansal yarısı. `last_ink` ile **aynı kayıtta**, çünkü ikisi
-    /// aynı aynaya ait olmak zorunda: ayrı okunsalardı yeni bir damga eski bir
-    /// içeriği "taze" ilan edebilirdi.
+    /// The input generation the mirror answers ([`DockState::answers`]) — the
+    /// freshness gate's temporal half. **In the same record** as `last_ink`, because
+    /// the two must belong to the same mirror: if read separately, a new stamp could
+    /// declare an old content "fresh".
     pub(crate) answers: u64,
 }
 
@@ -1515,40 +1564,42 @@ impl ShellLog {
             command: 0,
             ours: false,
             command_open: false,
-            // Açılışta caret dock'un (`caret_home_raw(None, Idle)`), yani ilk
-            // devir her zaman Dock→Grid yönünde ve tutma ona uygulanabilir.
+            // At startup the caret is the dock's (`caret_home_raw(None, Idle)`), so the first
+            // handover is always in the Dock→Grid direction and the hold can apply to it.
             caret_raw: CaretHome::Dock,
             caret_since: Instant::now(),
             end_since: None,
         }
     }
 
-    /// `scrollback` kayıt anında değiştiğinde defterin tavanını taşır;
-    /// oturum durumuna (`state`) dokunmaz.
+    /// Moves the ledger's ceiling when `scrollback` changes at save time; does not
+    /// touch the session state (`state`).
     pub(crate) fn set_scrollback(&mut self, scrollback: usize) {
         self.blocks.set_capacity(scrollback);
     }
 
-    /// İşareti hem duruma hem deftere uygular; ilk işaret durumu **doğurur**.
+    /// Applies the mark to both the state and the ledger; the first mark **creates**
+    /// the state.
     ///
-    /// Durum yuvası `Option` olduğu için "hiç işaret görmedik" ile
-    /// "prompt'tayız" karışmıyor: besleyen yokken yuva boş kalır ve dışarıya
-    /// "entegrasyon yok" der.
+    /// Since the state slot is an `Option`, "we never saw a mark" and "we are at the
+    /// prompt" do not get confused: while nothing feeds it the slot stays empty and
+    /// tells the outside "no integration".
     ///
-    /// Dönüş çağıranın vereceği haberler ([`ScanOutcome`]): `Running`'e
-    /// geçiş ve uzak durumun silinmesi (036).
+    /// The return value is the notifications the caller will give ([`ScanOutcome`]):
+    /// the transition to `Running` and the deletion of the remote state (036).
     pub(crate) fn apply(&mut self, mark: Mark) -> ScanOutcome {
-        // **Uzak oturumu yalnız BİZİM işaretimiz bitiriyor** (036 phase-3):
-        // kabuk kimliğimizi bir kez bastıysa ve uzak oturum etkinse,
-        // kimliksiz işaret (`A`/`D` kimliksiz, her `B` ve `C`) hiçbir şeye
-        // dokunmuyor. Kaynağı ssh'ın öbür ucu: fish 4 ya da kitty/iTerm2
-        // entegrasyonu aynı PTY'ye 133 basıyor ve uzak `A` göstergeyi
-        // silerdi, uzak `C` yeni bir komut nesli açardı. Yerel kabuk ssh'ın
-        // arkasında bloklu, yani o sırada gelen kimliksiz işaret bizim
-        // olamaz. Kapı **uzak oturumla sınırlı**, `Running`'le değil: `exec
-        // fish` gibi kimliğimizi bir daha basmayacak bir kabuğa geçişte
-        // `Running` hiç bitmez, saat durmaz ve sayaç boşta kare isterdi.
-        // Yoklamadan önceki yarış [`Self::command_open`]'da.
+        // **The remote session is ended only by OUR mark** (036 phase-3): if the shell
+        // has printed our identity once and the remote session is active, an
+        // identity-less mark (an identity-less `A`/`D`, every `B` and `C`) touches
+        // nothing. The source is the far end of ssh: fish 4 or the kitty/iTerm2
+        // integration prints 133 into the same PTY and the remote `A` would erase the
+        // indicator, the remote `C` would open a new command generation. The local shell
+        // is with blocks behind ssh, so an identity-less mark arriving then cannot be
+        // ours. The gate is **limited to the remote session**, not to `Running`: on a
+        // switch to a shell that will never print our identity again, like `exec fish`,
+        // `Running` would never end, the clock would not stop and the counter would
+        // request frames while idle. The race before the probe is in
+        // [`Self::command_open`].
         let identified = match mark {
             Mark::PromptStart { id } | Mark::CommandEnd { id, .. } => id.is_some(),
             Mark::PromptEnd | Mark::CommandStart => false,
@@ -1558,16 +1609,16 @@ impl ShellLog {
         } else if self.ours && self.context.remote.is_some() {
             return ScanOutcome::default();
         }
-        // Komutu kapatan: bizim kimlikli `A`/`D`'miz; kimliğimizi hiç
-        // görmemiş kabukta her `A`/`D`.
+        // What closes the command: our identified `A`/`D`; any `A`/`D` in a shell that
+        // has never shown our identity.
         if matches!(mark, Mark::PromptStart { .. } | Mark::CommandEnd { .. })
             && (identified || !self.ours)
         {
             self.command_open = false;
         }
-        // **Tutulan `line-finish` her işarette biter** (Karar 11): `C` komutun
-        // koştuğunu, `A` yeni prompt'u söylüyor — ikisinde de kabul edilen
-        // satır artık ızgaranın kalıcı içeriği.
+        // **A held `line-finish` ends on every mark** (Karar 11): `C` says the command
+        // ran, `A` says a new prompt — in both the accepted line is now the grid's
+        // permanent content.
         if self.end_since.take().is_some() {
             self.end_line();
         }
@@ -1579,22 +1630,20 @@ impl ShellLog {
         match mark {
             Mark::PromptStart { id } => {
                 state.phase = ShellPhase::Prompt;
-                // Uzak durum **kendiliğinden** gidiyor (036 Karar 2): bitiş
-                // için `bt-shell`'e gidiş-dönüş yok. `A` `D`'nin savunma kolu
-                // — saatinki gibi, kaybolan bir `D` uzak göstergeyi sonraki
-                // prompt'a taşımasın. Uzak kabuğun kimliksiz `A`'sı buraya
-                // hiç ulaşmıyor (yukarıdaki kapı).
+                // The remote state goes **by itself** (036 Karar 2): no round trip to `bt-shell`
+                // to end it. `A` is `D`'s defensive arm — like the clock's, so that a lost `D`
+                // does not carry the remote indicator into the next prompt. The remote shell's
+                // identity-less `A` never reaches here (the gate above).
                 outcome.title = self.context.clear_remote();
                 self.dock_editable = false;
                 self.dock_pending = None;
-                // **Saatin ikinci sıfırlama noktası ve bir savunma kolu.**
-                // Prompt basılıyorsa hiçbir komut koşmuyor, yani buradaki saat
-                // tanım gereği bayat. Yalnız `D` tüketseydi kaybolan bir `D`
-                // (yarıda kesilmiş OSC, kimliksiz kapanış) saati ayakta
-                // bırakır ve **sonraki** bloğun `D`'si onu tüketirdi: anlık
-                // bir komut "4m 12s" sürmüş görünürdü (`/code-review`, 013
-                // kapı). Sıfırlamanın yönü güvenli — en kötüsü sayacın hiç
-                // çıkmaması, uydurulmuş bir süre değil.
+                // **The clock's second reset point and a defensive arm.** If the prompt is being
+                // printed no command is running, so the clock here is stale by definition. If only
+                // `D` consumed it, a lost `D` (an OSC cut halfway, an identity-less close) would
+                // leave the clock standing and the **next** block's `D` would consume it: an
+                // instant command would look like it took "4m 12s" (`/code-review`, 013 gate).
+                // The reset's direction is safe — the worst case is the counter never appearing,
+                // not a made-up duration.
                 self.running_since = None;
                 if let Some(id) = id {
                     self.blocks.start(id);
@@ -1603,41 +1652,39 @@ impl ShellLog {
             }
             Mark::PromptEnd => state.phase = ShellPhase::Input,
             Mark::CommandStart => {
-                // **Geçiş** yalnız safha `Running` değilken: ikinci `C`
-                // (iTerm2 entegrasyonu) ne nesli ne uzak durumu oynatıyor
-                // ([`Self::command`]). Yoklama `D`'ye kadar kilitli, yani o
-                // `C` host'u silseydi gösterge geri gelmezdi.
+                // A **transition** only when the phase is not `Running`: a second `C` (iTerm2
+                // integration) moves neither the generation nor the remote state
+                // ([`Self::command`]). The probe is locked until `D`, so if that `C` deleted the
+                // host the indicator would not come back.
                 if state.phase != ShellPhase::Running {
                     self.command += 1;
                     self.command_open = true;
                     outcome.started = true;
                     outcome.title = self.context.clear_remote();
-                    // Teklifin ömrü bir sonraki komuta kadar (Karar 8).
+                    // The offer's lifetime is until the next command (Karar 8).
                     self.context.reconnect = None;
                 }
                 state.phase = ShellPhase::Running;
-                // Saatin dikildiği yer: `C` komutun **çalışmaya başladığını**
-                // söylüyor; prompt'un basılması ya da kullanıcının yazdığı
-                // süre sayaca girmemeli.
+                // Where the clock is planted: `C` says the command **started running**; the
+                // printing of the prompt or the time the user spent typing must not enter the
+                // counter.
                 //
-                // **İlk `C` kazanıyor, sonrakiler ezmiyor.** Kullanıcının
-                // kabuğunda ikinci bir OSC 133 kaynağı olabilir (iTerm2'nin
-                // `~/.iterm2_shell_integration.zsh`'ı, VS Code, Ghostty) ve o
-                // da `C` basar — ölçüldü, kullanıcının makinesinde komut
-                // başına **iki** `C` geliyor. Üzerine yazsaydık süre ikinci
-                // işaretten başlardı; daha kötüsü, komut ortasında gelen bir
-                // `C` (iTerm2 `precmd`'inin ^C kolu) saati sıfırlardı.
-                // Sıfırlamanın tek yeri prompt (`A`).
+                // **The first `C` wins, later ones do not overwrite.** The user's shell may have
+                // a second OSC 133 source (iTerm2's `~/.iterm2_shell_integration.zsh`, VS Code,
+                // Ghostty) and it prints `C` too — measured, on the user's machine **two** `C`s
+                // arrive per command. If we overwrote, the duration would start from the second
+                // mark; worse, a `C` arriving mid-command (the ^C arm of iTerm2's `precmd`)
+                // would reset the clock. The only place for resetting is the prompt (`A`).
                 self.running_since.get_or_insert_with(Instant::now);
             }
             Mark::CommandEnd { exit, id } => {
                 state.phase = ShellPhase::Finished;
-                // **Teklif uzak durum silinmeden önce** (037 Karar 8): hedef
-                // ve işaret `clear_remote`'la gidiyor. Kimlik şart — kimliğimizi
-                // hiç görmemiş kabukta kimliksiz `D` buraya ulaşıyor ve ssh'ın
-                // öbür ucundaki bir `D;255` teklif doğurmamalı. 255 ssh'ın
-                // kendi hatası (kopma ya da bağlanamama); mosh kopmada
-                // çıkmıyor, yani onun 255'i bu anlamı taşımıyor.
+                // **The offer comes before the remote state is deleted** (037 Karar 8): the
+                // target and mark go with `clear_remote`. The identity is required — in a shell
+                // that has never shown our identity an identity-less `D` reaches here, and a
+                // `D;255` from the far end of ssh must not produce an offer. 255 is ssh's own
+                // error (a drop or failure to connect); mosh does not exit on a drop, so its 255
+                // does not carry this meaning.
                 if id.is_some()
                     && exit == Some(255)
                     && let Some(target) = &self.context.remote
@@ -1652,25 +1699,24 @@ impl ShellLog {
                     offer.mark = self.context.remote_mark;
                 }
                 outcome.title = self.context.clear_remote();
-                // Kodu **her hâlde** tazeliyoruz: okunamayan bir kodu eskisiyle
-                // doldurmak, biten komutu başkasının koduyla etiketlemek olurdu.
+                // We refresh the code **in every state**: filling an unreadable code with the old
+                // one would be labeling the finished command with someone else's code.
                 state.last_exit = exit;
-                // **Saati yalnız BİZİM `D`'miz tüketiyor**, yani kimlik
-                // taşıyan kapanış. Kimliksiz bir `D` bizim defterimize
-                // yazamıyor (`blocks.finish` çağrılmıyor); saati yine de
-                // tüketseydi ölçtüğümüz süre **çöpe giderdi**.
+                // **The clock is consumed only by OUR `D`**, that is, the close carrying the
+                // identity. An identity-less `D` cannot write into our ledger (`blocks.finish` is
+                // not called); if it consumed the clock anyway the duration we measured would
+                // **go to waste**.
                 //
-                // Bu varsayımsal değil, kullanıcının makinesinde ölçüldü:
-                // iTerm2'nin shell entegrasyonu kuruluyken her komut iki `D`
-                // doğuruyor — önce onun kimliksizi, sonra bizimki. Kimliksiz
-                // olan saati alıyor, bizimki boş buluyor ve süre **sıfır**
-                // yazılıyordu; sayaç eşiğin altında kaldığı için hiç
-                // çizilmiyordu. Belirti tam da buydu: "bitince süre
-                // gözükmüyor".
+                // This is not hypothetical, it was measured on the user's machine: with iTerm2's
+                // shell integration installed every command produces two `D`s — first its
+                // identity-less one, then ours. The identity-less one takes the clock, ours finds
+                // it empty and the duration was written as **zero**; since the counter stayed
+                // below the threshold it was never drawn. The symptom was exactly this: "the
+                // duration does not show when it finishes".
                 //
-                // `take` yine zorunlu ama artık kimliğin içinde: kalsaydı iki
-                // komut arasında (`Finished` safhası, içinde bir `git`
-                // fork'u) bitmiş bir komut hâlâ koşuyormuş gibi sayılırdı.
+                // `take` is still mandatory but now inside the identity: if it remained, between
+                // two commands (the `Finished` phase, which contains a `git` fork) a finished
+                // command would still be counted as running.
                 if let Some(id) = id {
                     let elapsed = self
                         .running_since
@@ -1683,27 +1729,27 @@ impl ShellLog {
         outcome
     }
 
-    /// Tarayıcının çıkardığı olayı doğru kola uygular.
+    /// Applies the event the scanner extracted to the right arm.
     ///
-    /// Tek giriş noktası, çünkü okuyucu thread'i kilidi **olay başına** alıyor
-    /// ve iki ayrı çağrı iki ayrı kilit turu demek olurdu.
+    /// A single entry point, because the reader thread takes the lock **per event**
+    /// and two separate calls would mean two separate lock turns.
     #[cfg(test)]
     pub(crate) fn apply_scan(&mut self, event: ScanEvent<'_>) {
         self.apply_scan_answering(event, 0);
     }
 
-    /// [`Self::apply_scan`]'in üretimdeki hâli: ayna olayı `answers`'ı
-    /// [`DockState::answers`]'a **içerikle aynı turda** yazıyor.
+    /// [`Self::apply_scan`] as it is in production: the mirror event writes `answers`
+    /// into [`DockState::answers`] **in the same turn as the content**.
     ///
-    /// Damga argüman, çünkü defter `Session`'ı görmüyor ve görmemeli; okuyan
-    /// taraf (`session`'ın `TappedPty`'si) nesli olay başına bir atomik
-    /// okumayla getiriyor.
+    /// The stamp is an argument, because the ledger does not see `Session` and must
+    /// not; the reading side (`session`'s `TappedPty`) brings the generation with one
+    /// atomic read per event.
     ///
-    /// Dönüş çağıranın vereceği iki haber ([`ScanOutcome`]); ikisini de
-    /// kilidi bıraktıktan sonra verir. Başlığın haberi yalnız **farklı** bir
-    /// yerel OSC 7 dizininde ya da uzak durumun silinmesinde: aynı dizini
-    /// basan her `precmd` haber doğursaydı her prompt ana kuyruğa boşuna bir
-    /// iş atardı.
+    /// The return value is two notifications for the caller ([`ScanOutcome`]); it
+    /// gives both after releasing the lock. The title's notification only on a
+    /// **different** local OSC 7 directory or on the deletion of the remote state: if
+    /// every `precmd` printing the same directory produced a notification, every
+    /// prompt would post a needless job to the main queue.
     pub(crate) fn apply_scan_answering(
         &mut self,
         event: ScanEvent<'_>,
@@ -1713,18 +1759,17 @@ impl ShellLog {
         match event {
             ScanEvent::Mark(mark) => outcome = self.apply(mark),
             ScanEvent::Dock(event) => self.apply_dock(event, answers),
-            // Dizin **çözülmüş** geliyor: şemayı, yolu ve yüzde çözmeyi
-            // tarayıcı yaptı, buraya yalnız çizilebilir bir yol ve yetkinin
-            // yerel olup olmadığı ulaşıyor. Reddedilen bir OSC 7 hiç olay
-            // doğurmuyor, yani eski yol yerinde kalıyor — yanlış yol
-            // göstermektense bayat yol.
+            // The directory arrives **resolved**: the scanner did the scheme, the path and
+            // the percent-decoding, and only a drawable path and whether the authority is
+            // local reach here. A rejected OSC 7 produces no event at all, so the old path
+            // stays in place — a stale path rather than showing a wrong one.
             //
-            // **Hangi yuvaya** (036 Karar 4): uzak oturum etkinken **her**
-            // OSC 7 uzak tarafın — yerel kabuk ssh'ın arkasında bloklu, yani
-            // `file:///…` basan bir uzak kabuk yerel dizini ezmemeli. Etkin
-            // değilken yabancı yetki uzak yuvaya: OSC 7 yoklamadan önce
-            // gelebiliyor ve sonucu değiştirmemeli. Uzak yuva başlığa
-            // girmiyor, yani haber yok.
+            // **Which slot** (036 Karar 4): while a remote session is active **every** OSC 7
+            // goes to the remote side's — the local shell is behind ssh with blocks, so a
+            // remote shell printing `file:///…` must not overwrite the local directory. While
+            // inactive a foreign authority goes to the remote slot: OSC 7 can arrive before
+            // the probe and must not change the result. The remote slot does not enter the
+            // title, so there is no notification.
             ScanEvent::Cwd { path, local } => {
                 if self.context.remote.is_some() || !local {
                     self.context.remote_cwd.clear();
@@ -1740,14 +1785,13 @@ impl ShellLog {
         outcome
     }
 
-    /// Koşan komutun nesli ([`Self::command`]); komut koşmuyorsa
-    /// `None`. Bayat cevap kapısının iki yarısının ([`crate::Session::running_command`],
-    /// [`crate::Session::set_remote`]) **tek** tanımı: ayrışsalardı yoklama
-    /// `set_remote`'un reddedeceği bir nesil alabilirdi.
+    /// The running command's generation ([`Self::command`]); `None` if no command is
+    /// running. The **single** definition of the two halves of the stale-answer gate
+    /// ([`crate::Session::running_command`], [`crate::Session::set_remote`]): if they
+    /// diverged the probe could take a generation that `set_remote` would reject.
     ///
-    /// İkinci kol [`Self::command_open`]: kimliğimizi basan bir kabukta
-    /// komut, safhayı yabancı bir `A` oynatmış olsa da bizim `D`'mize kadar
-    /// koşuyor.
+    /// The second arm is [`Self::command_open`]: in a shell that prints our identity
+    /// the command runs until our `D`, even if a foreign `A` has moved the phase.
     pub(crate) fn running_command(&self) -> Option<u64> {
         let running = self
             .state
@@ -1755,20 +1799,21 @@ impl ShellLog {
         (running || (self.ours && self.command_open)).then_some(self.command)
     }
 
-    /// Uzak oturumun host'unu yazar (036); **başlığın girdisi değiştiyse**
-    /// `true`.
+    /// Writes the remote session's host (036); `true` **if the title's input
+    /// changed**.
     ///
-    /// Kapı çağıranda ([`crate::Session::set_remote`]: nesil ve safha); burada
-    /// yalnız yazma. Boş host "uzak değil" demek — gösterilecek bir ad yok.
+    /// The gate is in the caller ([`crate::Session::set_remote`]: generation and
+    /// phase); only the write is here. An empty host means "not remote" — there is no
+    /// name to show.
     ///
-    /// **Kontrol karakteri taşıyan host da yok sayılıyor**: ad süreç
-    /// tablosundan, yani kullanıcının yazdığı argv'den geliyor ve satır sonu
-    /// ya da ESC pencere başlığına ve bağlam satırına (kutu olarak) giderdi.
-    /// Yanlışın yönü güvenli: gösterge çıkmıyor, yanlış bir ad çizilmiyor.
+    /// **A host carrying a control character is also ignored**: the name comes from
+    /// the process table, that is, from the argv the user typed, and a line break or
+    /// ESC would go (as a box) into the window title and the context line. The wrong
+    /// direction is safe: the indicator does not appear, a wrong name is not drawn.
     ///
-    /// Hedef bütün olarak yazılıyor (037 Karar 1) ve işaret burada, desen
-    /// listesinden ([`Self::host_rules`]) çözülüyor; dönüş yine yalnız
-    /// **host**'un değişimi — başlığın girdisi o.
+    /// The target is written as a whole (037 Karar 1) and the mark is resolved here,
+    /// from the pattern list ([`Self::host_rules`]); the return is still only the
+    /// change of the **host** — that is the title's input.
     pub(crate) fn set_remote(&mut self, target: Option<&RemoteTarget>) -> bool {
         let target = target
             .filter(|target| !target.host.is_empty() && !target.host.chars().any(char::is_control));
@@ -1781,11 +1826,11 @@ impl ShellLog {
                 }
                 self.context.remote_mark =
                     crate::settings::host_mark(&self.host_rules, &target.host);
-                // Yeni bir uzak oturum eskisinin teklifini geçersiz kılıyor.
+                // A new remote session invalidates the old one's offer.
                 self.context.reconnect = None;
             }
-            // Uzak yuva kalıyor: yoklama "yerel" dediyse zaten okunmuyor ve
-            // `C`/`D`/`A` onu siliyor.
+            // The remote slot stays: if the probe said "local" it is not read anyway and
+            // `C`/`D`/`A` deletes it.
             None => {
                 self.context.remote = None;
                 self.context.remote_mark = HostMark::None;
@@ -1794,15 +1839,14 @@ impl ShellLog {
         changed
     }
 
-    /// Host işaretlerinin desen listesini yazar ve etkin uzak host'un
-    /// işaretini yeniden çözer (037 Karar 2); **işaret değiştiyse** `true`.
-    /// Aynı liste no-op.
+    /// Writes the host marks' pattern list and re-resolves the active remote host's
+    /// mark (037 Karar 2); `true` **if the mark changed**. The same list is a no-op.
     pub(crate) fn set_host_rules(&mut self, rules: &[HostRule]) -> bool {
         if self.host_rules == rules {
             return false;
         }
         self.host_rules = rules.to_vec();
-        // Teklifin rengi de işaretin: yer tutucunun host'u onunla boyanıyor.
+        // The offer's color is the mark's too: the placeholder's host is painted with it.
         let mut changed = false;
         if let Some(offer) = &mut self.context.reconnect {
             let mark = crate::settings::host_mark(&self.host_rules, &offer.host);
@@ -1818,33 +1862,31 @@ impl ShellLog {
         changed
     }
 
-    /// Devrin ham cevabını damgalar; **değişmediyse damga kıpırdamaz**.
+    /// Stamps the handover's raw answer; **if unchanged the stamp does not move**.
     fn observe_caret(&mut self) {
         let raw = caret_home(self.state, self.caret_status(), false);
         if raw != self.caret_raw {
             self.caret_raw = raw;
-            // **Saat yalnız değişimde okunuyor.** `apply_scan` okuyucu
-            // thread'in olay başına giriş noktası: her tuş vuruşu bir ayna
-            // olayı, her prompt bir OSC 7 ve bir dal olayı doğuruyor ve
-            // bunların ezici çoğunluğu ham cevabı değiştirmiyor. Okuma
-            // dışarıda kalsaydı hepsi bedelsiz sanılan bir `Instant::now()`
-            // öderdi.
+            // **The clock is read only on change.** `apply_scan` is the reader thread's
+            // per-event entry point: every keystroke produces a mirror event, every prompt an
+            // OSC 7 and a branch event, and the overwhelming majority of them do not change
+            // the raw answer. If the read were outside, all of them would pay an
+            // `Instant::now()` assumed to be free.
             self.caret_since = Instant::now();
         }
     }
 
-    /// Ayna olayını [`Self::dock`]'a uygular.
+    /// Applies the mirror event to [`Self::dock`].
     ///
-    /// Çizilemeyen iki hâlde (`End`, `Unavailable`) metin **boşaltılıyor**:
-    /// bayat bir satır bırakmak, phase-4'te ızgara bastırılırken dock'un bir
-    /// önceki komutu göstermesi demek olurdu — kullanıcının yazdığıyla
-    /// gördüğünün sessizce ayrılması, bu deponun yasakladığı belirti sınıfı.
+    /// In the two states that cannot be drawn (`End`, `Unavailable`) the text is
+    /// **emptied**: leaving a stale line would mean that in phase-4, while the grid is
+    /// suppressed, the dock shows the previous command — the user's typing and what
+    /// they see silently diverging, the symptom class this repo forbids.
     ///
-    /// **`BUFFER`'ı değişen ayna dock seçimini siler** (031 R3.4): indeksler
-    /// artık başka bir metnin karakterlerini gösterirdi. Yalnız `BUFFER` —
-    /// prompt'un yeniden çizilmesi (`PREDISPLAY`) ya da önerinin değişmesi
-    /// seçili metni oynatmıyor. `End` ile `Unavailable` metni boşaltıyor,
-    /// seçimi de.
+    /// **A mirror whose `BUFFER` changed deletes the dock selection** (031 R3.4): the
+    /// indices would now point at the characters of another text. Only `BUFFER` —
+    /// the prompt being redrawn (`PREDISPLAY`) or a change of suggestion does not move
+    /// the selected text. `End` and `Unavailable` empty the text, the selection too.
     fn apply_dock(&mut self, event: DockEvent<'_>, answers: u64) {
         match event {
             DockEvent::Update(staged) => {
@@ -1864,13 +1906,13 @@ impl ShellLog {
                 self.dock_scroll = None;
                 self.dock_editable = false;
                 self.dock_pending = None;
-                // Boş satır da bir cevap: bkz. [`DockState::answers`]. Tutulan
-                // satır da — `e` ⏎'in cevabı ve tazelik kapısı tutma boyunca
-                // onu soruyor (imleç `PS2`'nin satırına inmiş olabilir).
+                // An empty line is an answer too: see [`DockState::answers`]. A held line too —
+                // `e` is ⏎'s answer and the freshness gate asks it throughout the hold (the
+                // cursor may have descended to `PS2`'s line).
                 self.dock.answers = answers;
-                // **Safha `Input`'ta ve ayna canlıysa tutuluyor** (Karar 11,
-                // [`Self::end_since`]). Saat yalnız burada okunuyor, yani
-                // ⏎ başına bir kez — [`Self::observe_caret`]'in kuralı.
+                // **Held if the phase is `Input` and the mirror is live** (Karar 11,
+                // [`Self::end_since`]). The clock is read only here, that is, once per ⏎ —
+                // [`Self::observe_caret`]'s rule.
                 let typing = self
                     .state
                     .is_some_and(|state| state.phase == ShellPhase::Input);
@@ -1888,10 +1930,10 @@ impl ShellLog {
                 self.dock.reset();
                 self.dock.status = DockStatus::Unavailable(fault);
             }
-            // Dal aynanın **kanalından** geliyor ama aynanın durumu değil:
-            // `status`'a ve metne dokunmuyor. Boş gövde "depo değil" demek ve
-            // dalı **siliyor** — bir önceki deponun dalı yeni dizinde asılı
-            // kalsaydı kullanıcı yanlış dalda olduğunu sanırdı.
+            // The branch comes from the mirror's **channel** but is not the mirror's state:
+            // it does not touch `status` or the text. An empty body means "not a repository"
+            // and **deletes** the branch — if the previous repository's branch hung on in the
+            // new directory the user would think they were on the wrong branch.
             DockEvent::Branch(branch) => {
                 self.context.branch.clear();
                 self.context.branch.push_str(branch);
@@ -1900,9 +1942,9 @@ impl ShellLog {
         }
     }
 
-    /// `line-finish`'in sıfırlaması: metin boşalıyor, durum `Idle`; damga
-    /// (`answers`) `e`'nin yazdığı yerde kalıyor — [`DockState::answers`]'ın
-    /// "`Idle` ayna da damgalı" kuralı.
+    /// `line-finish`'s reset: the text empties, the state is `Idle`; the stamp
+    /// (`answers`) stays where `e` wrote it — [`DockState::answers`]'s "the `Idle`
+    /// mirror is stamped too" rule.
     fn end_line(&mut self) {
         let answers = self.dock.answers;
         self.dock.reset();
@@ -1910,16 +1952,16 @@ impl ShellLog {
         self.dock.answers = answers;
     }
 
-    /// Tutulan `line-finish`'i ([`Self::end_since`]) süresi dolduysa
-    /// sıfırlamaya çevirir; tutma sürüyorsa kalanı döndürür.
+    /// Turns a held `line-finish` ([`Self::end_since`]) into a reset if its time is
+    /// up; if the hold continues returns the remainder.
     ///
-    /// Tek çağıranı [`crate::Session::frame`], aynanın okunduğu kilit
-    /// turunun **başında** ve `caret`'in `now`'ıyla: tutmanın bittiği karede
-    /// bastırma, bant, caret ve dock aynı sıfırlanmış aynayı görüyor. Kalan
-    /// süre saate giriyor (`Cursor::next_tick`) — tek atımlık, durma koşulu
-    /// adlı (tutma doldu ya da bir `u`/işaret onu bitirdi), yani boşta
-    /// sıfır kare korunuyor. `Session::dock` çağırmıyor: aynı karede
-    /// `frame()`'in kararından ayrışmasın.
+    /// Its only caller is [`crate::Session::frame`], at the **start** of the lock turn
+    /// in which the mirror is read and with `caret`'s `now`: in the frame where the
+    /// hold ends, suppression, band, caret and dock see the same reset mirror. The
+    /// remaining time enters the clock (`Cursor::next_tick`) — one-shot, with a named
+    /// stop condition (the hold expired or a `u`/mark ended it), so zero frames while
+    /// idle is preserved. `Session::dock` does not call it: so that it does not
+    /// diverge from `frame()`'s decision in the same frame.
     pub(crate) fn expire_end(&mut self, now: Instant) -> Option<Duration> {
         let since = self.end_since?;
         let left = HANDOVER_HOLD
@@ -1932,21 +1974,22 @@ impl ShellLog {
         left
     }
 
-    /// `line-finish` tutuluyor mu ([`Self::end_since`]). Tutma yalnız kare
-    /// yolunda çözülüyor ([`Self::expire_end`]); kare çizmeyen bir pencerede
-    /// (örtülmüş sekme) süresi dolmuş bir tutma kalabilir ve karar veren öteki
-    /// yollar (yapıştırmanın sarma kararı) onu kapalı saymalı.
+    /// Whether a `line-finish` is being held ([`Self::end_since`]). The hold is
+    /// resolved only in the frame path ([`Self::expire_end`]); in a window that draws
+    /// no frames (a covered tab) an expired hold can remain, and the other paths that
+    /// decide (the paste's wrapping decision) must count it as closed.
     pub(crate) fn holding_end(&self) -> bool {
         self.end_since.is_some()
     }
 
-    /// Devrin sorduğu aynanın durumu: tutulan `line-finish` **zaten
-    /// gelmiş** sayılıyor (`Idle`).
+    /// The mirror's state the handover asks about: a held `line-finish` is counted as
+    /// **already arrived** (`Idle`).
     ///
-    /// Ham cevap tutmadan önceki gibi `e` anında `Grid`'e dönüyor ve caret
-    /// tutması ([`HANDOVER_HOLD`]) aynı andan sayıyor — iki tutma aynı saatte
-    /// bitiyor, `line-finish` zamanlaması 032 öncesiyle aynı. Aynanın kendisi
-    /// ise tutma boyunca `Live`: çizim, bant ve bastırma onu okuyor.
+    /// The raw answer returns to `Grid` at the instant of `e` as before the hold, and
+    /// the caret hold ([`HANDOVER_HOLD`]) counts from the same instant — the two holds
+    /// end at the same clock, `line-finish` timing is the same as before 032. The
+    /// mirror itself stays `Live` throughout the hold: drawing, band and suppression
+    /// read it.
     fn caret_status(&self) -> DockStatus {
         if self.end_since.is_some() {
             DockStatus::Idle
@@ -1955,12 +1998,13 @@ impl ShellLog {
         }
     }
 
-    /// **Koşan** bloğun kimliği; yoksa `None`.
+    /// The **running** block's identity; `None` otherwise.
     ///
-    /// İki koşul birlikte: safha `Running` **ve** defterin son kaydı hâlâ açık.
-    /// İkincisi olmasaydı kimliksiz bir `A`'dan sonra gelen `C` safhayı
-    /// `Running`'e alır, defterin son kaydı ise bir önceki (bitmiş) blok olur
-    /// ve o blok koşuyormuş gibi boyanırdı.
+    /// Two conditions together: the phase is `Running` **and** the ledger's last
+    /// record is still open. Without the second, a `C` arriving after an
+    /// identity-less `A` would put the phase in `Running`, while the ledger's last
+    /// record would be the previous (finished) block and that block would be painted
+    /// as if running.
     pub(crate) fn running(&self) -> Option<u32> {
         if self.state?.phase != ShellPhase::Running {
             return None;
@@ -1971,15 +2015,16 @@ impl ShellLog {
         }
     }
 
-    /// Safha `Input` iken yazılmakta olan bloğun kimliği — aynanın durumuna
-    /// **bakmadan** ([`Self::suppressed_input`]'ın ayna koşulsuz hâli).
+    /// The identity of the block being written while the phase is `Input` —
+    /// **without looking** at the mirror's state (the unconditional-mirror form of
+    /// [`Self::suppressed_input`]).
     ///
-    /// Tüketicisi ekranı temizlemenin korunan ilk satırı
-    /// ([`crate::Session::clear_to_start`]): imlecin satırı çıpasızsa (çok
-    /// satırlı girişin boş bir satırı) blok çıpadan bulunuyor, ve orada soru
-    /// "satır nerede çiziliyor" değil "hangi satırlar girişin" — aynanın
-    /// canlı olup olmaması cevabı değiştirmiyor. İkinci koşul
-    /// [`Self::running`]'inkiyle aynı gerekçeyle.
+    /// Its consumer is the first protected row when clearing the screen
+    /// ([`crate::Session::clear_to_start`]): if the cursor's row is anchorless (an
+    /// empty row of a multi-line input) the block is found from the anchor, and there
+    /// the question is not "where is the line drawn" but "which rows are the input's"
+    /// — whether the mirror is live does not change the answer. The second condition
+    /// has the same reason as [`Self::running`]'s.
     pub(crate) fn input_block(&self) -> Option<u32> {
         if self.state?.phase != ShellPhase::Input {
             return None;
@@ -1990,28 +2035,28 @@ impl ShellLog {
         }
     }
 
-    /// Kullanıcının **şu an yazdığı** bloğun kimliği — giriş satırı ızgaradan
-    /// bastırılacaksa `Some`, değilse `None`.
+    /// The identity of the block the user is **typing right now** — `Some` if the
+    /// input line will be suppressed from the grid, `None` otherwise.
     ///
-    /// [`crate::Session::frame`] bunu `Term` kilidinden **önce** okuyor
-    /// ([`crate::Theme`] ile aynı örüntü) ve dönen kimlikle çıpa satırını
-    /// buluyor: bastırılacak aralık o satırdan imlecin satırına.
+    /// [`crate::Session::frame`] reads this **before** the `Term` lock (the same
+    /// pattern as [`crate::Theme`]) and finds the anchor row with the returned
+    /// identity: the range to suppress is from that row to the cursor's row.
     ///
-    /// **Üç koşul birlikte ve üçü de zorunlu:**
+    /// **Three conditions together and all three are mandatory:**
     ///
-    /// - Safha `Input` — kullanıcı yazıyor. `Prompt`'ta ZLE henüz satırı
-    ///   almadı, `Running`/`Finished`'da yazdığı şey çoktan ızgaranın kalıcı
-    ///   içeriği oldu.
-    /// - Ayna `Live` — satırı **başka bir yerde** gösterebiliyoruz. `Idle` ve
-    ///   `Unavailable` ayrı ayrı doğru cevaplar: ilkinde ZLE satır
-    ///   düzenlemiyor (`line-finish` geldi), ikincisinde gösteremediğimiz bir
-    ///   satır var ve ızgarada kalması **şart**, yoksa kullanıcı yazdığını
-    ///   hiçbir yerde görmez (R1.2). Kapının bu katı [`DockStatus`]'ün varlık
-    ///   sebebi.
-    /// - Defterin son kaydı hâlâ açık — [`Self::running`]'in ikinci koşulunun
-    ///   aynısı ve aynı gerekçeyle: kimliksiz bir `A`'dan sonra gelen `B`
-    ///   safhayı `Input`'a alır, defterin son kaydı ise bir önceki (bitmiş)
-    ///   blok olur ve bastırma **yanlış** satırdan başlardı.
+    /// - The phase is `Input` — the user is typing. At `Prompt` ZLE has not yet taken
+    ///   the line, at `Running`/`Finished` what they typed has long since become the
+    ///   grid's permanent content.
+    /// - The mirror is `Live` — we can show the line **somewhere else**. `Idle` and
+    ///   `Unavailable` are separately correct answers: in the first ZLE is not editing
+    ///   a line (`line-finish` arrived), in the second there is a line we cannot show
+    ///   and it **has** to stay on the grid, otherwise the user sees what they typed
+    ///   nowhere (R1.2). This tier of the gate is the reason [`DockStatus`] exists.
+    /// - The ledger's last record is still open — the same as [`Self::running`]'s
+    ///   second condition and for the same reason: a `B` arriving after an
+    ///   identity-less `A` puts the phase in `Input`, while the ledger's last record
+    ///   is the previous (finished) block and suppression would start from the
+    ///   **wrong** row.
     pub(crate) fn suppressed_input(&self) -> Option<SuppressedInput> {
         if self.state?.phase != ShellPhase::Input || self.dock.status != DockStatus::Live {
             return None;
@@ -2029,14 +2074,15 @@ impl ShellLog {
         }
     }
 
-    /// Aynanın görüntüsünü (`PREDISPLAY ++ BUFFER ++ POSTDISPLAY`) `into`'ya
-    /// yazar, kapasitesini koruyarak; caret'in karakter indeksini döndürür
-    /// ([`DockState::cursor`], aynı uzay).
+    /// Writes the mirror's display (`PREDISPLAY ++ BUFFER ++ POSTDISPLAY`) into
+    /// `into`, keeping its capacity; returns the caret's character index
+    /// ([`DockState::cursor`], the same space).
     ///
-    /// Tüketicisi bastırmanın satır aritmetiği ([`crate::dock::grid_span`]) ve
-    /// [`Self::suppressed_input`] ile **aynı kilit turunda** çağrılıyor.
-    /// `PREBUFFER` girmiyor: ızgarada o satırlar zsh'in `PS2`'siyle çoktan
-    /// basılmış, düzeni yürüyen hesabın konusu değil (032 Karar 7).
+    /// Its consumer is suppression's row arithmetic ([`crate::dock::grid_span`]) and
+    /// it is called in the **same lock turn** as [`Self::suppressed_input`].
+    /// `PREBUFFER` does not enter: on the grid those rows have long been printed with
+    /// zsh's `PS2`, and they are not the subject of the layout-walking calculation
+    /// (032 Karar 7).
     pub(crate) fn display_into(&self, into: &mut String) -> usize {
         into.clear();
         into.push_str(&self.dock.predisplay);
@@ -2045,30 +2091,30 @@ impl ShellLog {
         self.dock.cursor
     }
 
-    /// Caret'in bu an kimin ve tutmanın kalanı — [`caret_home`]'un defter
-    /// üstündeki yüzü.
+    /// Who owns the caret at this moment and the remainder of the hold — the ledger-
+    /// side face of [`caret_home`].
     ///
-    /// [`crate::Session::frame`] bunu [`Self::suppressed_input`] ile **aynı
-    /// kilit turunda** okuyor: ayrı turlardan alınsalardı ikisi ayrı ana ait
-    /// olurdu. Aynı gerekçe `home` ile `hold_left`'i de tek kayda topluyor —
-    /// ikisi de tek bir `now`'dan çıkıyor.
+    /// [`crate::Session::frame`] reads this in the **same lock turn** as
+    /// [`Self::suppressed_input`]: if taken in separate turns the two would belong to
+    /// separate instants. The same reason gathers `home` and `hold_left` into one
+    /// record — both come out of a single `now`.
     ///
-    /// **Kalan süre yalnız tutma cevabı çevirirken doluyor.** Ham cevap zaten
-    /// `Dock` ise ortada beklenen bir şey yok ve boşta bir pencereye kare
-    /// istemek boşta sıfır kare sözleşmesini bozardı. Saatin üç şartı da
-    /// burada karşılanıyor: içerik gerçekten değişiyor (caret yer değiştiriyor
-    /// **ve** doluluk sayısı oynuyor), tek atımlık, ve durma koşulu
-    /// adlandırılmış — tutma doldu ya da yüklem `Dock`'a geri döndü.
+    /// **The remainder is filled only while the hold is flipping the answer.** If the
+    /// raw answer is already `Dock` there is nothing to wait for, and requesting a
+    /// frame for an idle window would break the zero-frames-while-idle contract. All
+    /// three of the clock's conditions are met here: the content genuinely changes
+    /// (the caret moves **and** the fill count moves), one-shot, and the stop
+    /// condition is named — the hold expired or the predicate returned to `Dock`.
     ///
-    /// **Uzak oturum tutmadan önce** (036 Karar 8): uzakta dock'un giriş
-    /// satırı yok (`Cursor::input_rows == 0`), yani devralacak bir yüzey de
-    /// yok — caret ızgarada, tutma yok. Tutma sonra uygulansaydı `C`'den
-    /// hemen sonra gelen `set_remote` caret'i 150 ms boyunca bağlam satırına
-    /// oturturdu; tutmanın gerekçesi (yarı yolda geri dönen caret) burada
-    /// konusuz, çünkü uzak durum yalnız `D`/`A`/yeni `C` ile kalkıyor. Kalan
-    /// süre de `None`: çevrilmeyen bir cevap için kare istenmez. Ham cevabın
-    /// damgası ([`Self::observe_caret`]) buna bakmıyor — uzak durum safhayı
-    /// değiştirmiyor.
+    /// **The remote session comes before the hold** (036 Karar 8): on the remote
+    /// there is no dock input line (`Cursor::input_rows == 0`), so there is no surface
+    /// to take over either — the caret is on the grid, no hold. If the hold were
+    /// applied afterward, a `set_remote` arriving right after `C` would seat the caret
+    /// on the context line for 150 ms; the hold's reason (a caret coming back
+    /// halfway) is moot here, because the remote state is lifted only by
+    /// `D`/`A`/a new `C`. The remainder is `None` too: no frame is requested for an
+    /// answer that is not flipped. The raw answer's stamp ([`Self::observe_caret`])
+    /// does not look at this — the remote state does not change the phase.
     pub(crate) fn caret(&self, now: Instant) -> CaretDecision {
         if self.context.remote.is_some() {
             return CaretDecision {
@@ -2081,43 +2127,46 @@ impl ShellLog {
             .filter(|left| !left.is_zero());
         let status = self.caret_status();
         let home = caret_home(self.state, status, held.is_some());
-        // Karşılaştırılan iki cevap da **aynı kapıdan** geçiyor ve yalnız
-        // `held`'de ayrılıyorlar: ham cevabı ikinci bir yoldan türetmek
-        // (`caret_home_raw`'u doğrudan çağırmak) ikisinin ayrışmasını mümkün
-        // kılardı. Ayrışsalardı `home != raw` tutmanın hiç uygulanmadığı bir
-        // kolda da doğru olur ve pencere 150 ms'de bir hiçbir şeyi
-        // değiştirmeyen kare isterdi — `sessiz=` jetonunun son savunma hattı
-        // olduğu sessiz sızıntı sınıfı.
+        // The two answers being compared pass through the **same gate** and differ only
+        // in `held`: deriving the raw answer through a second path (calling
+        // `caret_home_raw` directly) would make it possible for the two to diverge. If
+        // they diverged, `home != raw` would hold in an arm where the hold was never
+        // applied too, and the window would request a frame every 150 ms that changed
+        // nothing — the silent-leak class for which the `quiet=` token is the last line
+        // of defense.
         let unheld = caret_home(self.state, status, false);
         CaretDecision {
             home,
-            // Kalan süre **cevabın çevrilmiş olmasından** türüyor, ayrı bir
-            // koşuldan değil: ikisi ayrı yazılsaydı ayrışabilirlerdi ve
-            // tutmanın uygulanmadığı bir kolda (`Unavailable`) boşuna kare
-            // istenirdi. Tek cümle: tutma cevabı çevirdiyse kalanı vardır.
+            // The remainder derives from **the answer having been flipped**, not from a
+            // separate condition: if the two were written separately they could diverge and a
+            // frame would be requested for nothing in an arm where the hold did not apply
+            // (`Unavailable`). One sentence: if the hold flipped the answer, it has a
+            // remainder.
             hold_left: held.filter(|_| home != unheld),
         }
     }
 
-    /// Bir bloğun şeridi; `None` → **çizilmez**.
+    /// A block's stripe; `None` → **not drawn**.
     ///
-    /// Defter ile safhanın birleştiği tek yer ve ikisi zaten aynı yaprak
-    /// kilidin altında — ayrı dursalardı kare, bir işaretin iki yarısı
-    /// arasında tutarsız bir çift okuyabilirdi.
+    /// The one place where the ledger and the phase meet, and the two are already
+    /// under the same leaf lock — if they were separate, a frame could read an
+    /// inconsistent pair between the two halves of a mark.
     ///
-    /// Koşan bloğun rengi **defterden değil safhadan** gelir ([`Self::running`]
-    /// parametresi imzada bu yüzden var, kurallı tek istisna o): `D` henüz
-    /// gelmediği için defterdeki kaydı `Pending` ve `Pending`'in kendisi
-    /// "koşuyor" demek değil.
+    /// The running block's color comes **from the phase, not the ledger** (that is why
+    /// the [`Self::running`] parameter is in the signature, the one rule-bound
+    /// exception): since `D` has not arrived its record in the ledger is `Pending`
+    /// and `Pending` itself does not mean "running".
     ///
-    /// Çizilmeyen dört durum tek `match`'te, çünkü dördü de aynı tezin
-    /// parçası — bilinmeyeni yanlış çizmemek:
+    /// The four states not drawn are in a single `match`, because all four are part of
+    /// the same thesis — not drawing the unknown wrongly:
     ///
-    /// - kimlik defterde yok (halka dolaştı ya da hiç görülmedi),
-    /// - `Pending` ama koşmuyor (boş prompt'a basılan Enter, bekleyen prompt),
-    /// - `Finished(None)`: komut bitti ama kod okunamadı — "bitti" için
-    ///   nötr bir rol yok ve olmayan rolü `accent` ile taklit etmek koşmayan
-    ///   bloğu koşuyor göstermek olurdu.
+    /// - the identity is not in the ledger (the ring wrapped around or it was never
+    ///   seen),
+    /// - `Pending` but not running (an Enter pressed on an empty prompt, a pending
+    ///   prompt),
+    /// - `Finished(None)`: the command finished but the code could not be read —
+    ///   there is no neutral role for "finished" and imitating a nonexistent role
+    ///   with `accent` would be showing a non-running block as running.
     pub(crate) fn stripe(&self, id: u32, running: Option<u32>) -> Option<Stripe> {
         if running == Some(id) {
             return Some(Stripe::Running);
@@ -2129,22 +2178,23 @@ impl ShellLog {
         }
     }
 
-    /// Bloğun **çizilebilir** süresi; sayaç doğurmayan her hâlde `None`.
+    /// The block's **drawable** duration; `None` in every state that produces no
+    /// counter.
     ///
-    /// İki kaynak, tek soru: koşan blokta saatin yaşı, biten blokta defterin
-    /// kaydı. Ayrı ayrı sorulsaydı çağıran "bu blok koşuyor mu" sorusunu
-    /// ikinci kez sormak zorunda kalırdı ve [`Self::stripe`] ile ayrışabilirdi
-    /// — ikisi de `running`'i **dışarıdan** alıyor, yani aynı karede aynı
-    /// yanıta bakıyorlar.
+    /// Two sources, one question: the clock's age for a running block, the ledger's
+    /// record for a finished one. If asked separately the caller would have to ask the
+    /// "is this block running" question a second time and could diverge from
+    /// [`Self::stripe`] — both take `running` **from outside**, so in the same frame
+    /// they look at the same answer.
     ///
-    /// Eşik burada **uygulanmıyor**: "bir saniyeyi geçti mi" bir çizim kararı
-    /// ve çizen taraf ([`crate::Session::frame`]) veriyor. Burada uygulansaydı
-    /// saatin bir sonraki tikini hesaplayan yol da eşiği ikinci kez bilmek
-    /// zorunda kalırdı.
+    /// The threshold is **not applied** here: "did it exceed one second" is a drawing
+    /// decision and the drawing side ([`crate::Session::frame`]) supplies it. If it
+    /// were applied here the path computing the clock's next tick would have to know
+    /// the threshold a second time.
     pub(crate) fn duration(&self, id: u32, running: Option<u32>) -> Option<Duration> {
         if running == Some(id) {
-            // Koşan blok ama saat yok: entegrasyonun yarısı geldi (`A` var,
-            // `C` yok). Uydurulmuş bir süre yerine sayaç yok.
+            // A running block but no clock: half of the integration arrived (`A` is there,
+            // `C` is not). No counter instead of a made-up duration.
             return self.running_since.map(|since| since.elapsed());
         }
         match self.blocks.get(id)? {
@@ -2154,88 +2204,91 @@ impl ShellLog {
     }
 }
 
-/// [`Duration`]'ı milisaniyeye indirir, doyurarak.
+/// Reduces a [`Duration`] to milliseconds, saturating.
 ///
-/// `as` ile daraltma sarardı: 49 günden uzun süren bir komut (nohup'lanmış bir
-/// derleme, unutulmuş bir `tail -f`) sayacı sıfırdan başlatırdı. Doyma yanlış
-/// ama **monoton**; sarma yanlış ve şaşırtıcı.
+/// Narrowing with `as` would wrap: a command that runs longer than 49 days (a
+/// nohup'd build, a forgotten `tail -f`) would restart the counter from zero.
+/// Saturation is wrong but **monotonic**; wrapping is wrong and surprising.
 fn millis(duration: Duration) -> u32 {
     u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
 }
 
-/// Sayacın eşiği — bundan kısa süren komut hiç sayaç doğurmaz.
+/// The counter's threshold — a command shorter than this never produces a
+/// counter.
 ///
-/// **Tasarım sabiti, ölçüm değil** (`docs/OLCUMLER.md`'ye girmez): her `ls`'in
-/// yanında `0.01s` yazması gürültü olurdu, bir saniyeyi geçen komut ise iki
-/// soru doğuruyor — koşarken "asıldı mı", bitince "ne kadar sürdü" — ve
-/// ikisinin cevabı aynı sayı. Referans ürün aynı eşiği ayara açıyor
-/// (`docs/ARASTIRMA.md` → `command_duration_threshold`); bizde bugün sabit.
+/// **A design constant, not a measurement** (does not go into
+/// `docs/OLCUMLER.md`): `0.01s` next to every `ls` would be noise, while a command
+/// that exceeds one second raises two questions — while running "is it hung", when
+/// finished "how long did it take" — and the answer to both is the same number.
+/// The reference product makes the same threshold a setting
+/// (`docs/ARASTIRMA.md` → `command_duration_threshold`); ours is constant today.
 pub(crate) const COUNTER_FLOOR: Duration = Duration::from_secs(1);
 
-/// Sayacın çözünürlüğü — **koşan** ile **bitmiş** komutta ayrı, ve ayrımın
-/// sebebi hem okuma hem pil.
+/// The counter's resolution — separate for a **running** and a **finished**
+/// command, and the reason for the distinction is both reading and battery.
 ///
-/// Koşan sayaç her değişiminde bir kare istiyor (013 phase-2, saat). Onda bir
-/// gösterseydi **saniyede on kare** ederdi, oysa koşarken sorulan soru
-/// "asıldı mı" ve ondalık gürültüden ibaret. Bitmiş değer ise **donmuş**:
-/// hiçbir kareye mal olmuyor, yani orada ondalığın bedeli sıfır ve bilgisi
-/// gerçek — iki koşuyu karşılaştıran için `2.1s` ile `2.9s` fark eder.
+/// A running counter requests a frame at every change (013 phase-2, clock). If it
+/// showed tenths it would be **ten frames per second**, yet the question asked
+/// while running is "is it hung" and the decimal is just noise. A finished value
+/// is **frozen**: it costs no frames, so there the decimal's cost is zero and its
+/// information is real — for someone comparing two runs `2.1s` and `2.9s` differ.
 ///
-/// Görünen sonuç: sayaç `1s, 2s, 3s` diye ilerliyor ve komut bitince `3.4s`
-/// diye **oturuyor**. Sıçrama değil, kesinleşme.
+/// The visible result: the counter advances as `1s, 2s, 3s` and when the command
+/// ends it **settles** as `3.4s`. Not a jump, a firming up.
 ///
-/// **Ondalığın sınırı saniye kademesi, on saniye değil** (kullanıcı kararı):
-/// bitmiş `45s` de `45.3s` olarak oturuyor, çünkü "asıl sayı" sorusu on
-/// saniyeden sonra da geçerli ve bedeli yok. Dakika kademesinden itibaren
-/// ondalık düşüyor — `1m 05.3s` hem uzun hem okunmuyor; orada aranan şey
-/// zaten kaba büyüklük.
+/// **The decimal's boundary is the seconds tier, not ten seconds** (user
+/// decision): a finished `45s` also settles as `45.3s`, because the "real number"
+/// question holds after ten seconds too and costs nothing. From the minutes tier
+/// the decimal drops — `1m 05.3s` is both long and unreadable; what is sought
+/// there is already the rough magnitude.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Precision {
-    /// Koşan komut: tam saniye.
+    /// A running command: whole seconds.
     Whole,
-    /// Bitmiş komut: dakikanın altında onda bir.
+    /// A finished command: tenths below a minute.
     Tenths,
 }
 
-/// Koşan sayacın bir sonraki **görünür** değişimine kalan süre.
+/// The time remaining until the running counter's next **visible** change.
 ///
-/// Saatin tek girdisi (013 phase-2) ve biçimin doğrudan sonucu: koşan sayaç
-/// tam saniye gösterdiği için sınır bir sonraki tam saniye. Biçim değişirse
-/// burası da değişmek zorunda ve ikisi yan yana duruyor — `bt-gpu` "ne zaman"
-/// sorusunu hiç sormuyor, yalnız verilen süreyi bekliyor.
+/// The clock's only input (013 phase-2) and a direct consequence of the format:
+/// since a running counter shows whole seconds the boundary is the next whole
+/// second. If the format changes this place has to change too and the two sit side
+/// by side — `bt-gpu` never asks the "when" question, it only waits for the given
+/// duration.
 ///
-/// Eşiğin altında bir sonraki değişim sayacın **belirmesi**: `sleep 5`'in
-/// ilk karesi eşikten önce çizilirse saat 1 saniyeye kuruluyor, 16 ms'ye
-/// değil.
+/// Below the threshold the next change is the counter's **appearance**: if the
+/// first frame of `sleep 5` is drawn before the threshold the clock is set to 1
+/// second, not 16 ms.
 pub(crate) fn next_tick(elapsed: Duration) -> Duration {
     if elapsed < COUNTER_FLOOR {
         return COUNTER_FLOOR - elapsed;
     }
-    // **Kademe başına ayrı çözünürlük.** Saat kademesinde metin (`1h 07m`)
-    // dakikada bir değişiyor; saniyede bir uyandırmak bir saatte 3540
-    // **aynı** kareyi çizdirirdi (`/code-review`, 013 kapı) ve modül
-    // başlığına yeni yazdığımız "içerik gerçekten değişecek" şartını ilk
-    // ihlal eden biz olurduk.
+    // **A separate resolution per tier.** In the hour tier the text (`1h 07m`)
+    // changes once a minute; waking every second would have an hour draw 3540
+    // **identical** frames (`/code-review`, 013 gate) and we would be the first to
+    // violate the "content must genuinely change" condition we just wrote into the
+    // module header.
     let period = if elapsed.as_secs() < 3600 {
         Duration::from_secs(1)
     } else {
         Duration::from_secs(60)
     };
-    // Bir sonraki tam sınıra kalan süre. Kalan sıfırsa tam periyot dönüyor:
-    // sıfır süreli bir saat callback'i döngüye sokardı.
+    // The time remaining to the next whole boundary. If the remainder is zero the
+    // full period returns: a zero-duration clock would put the callback in a loop.
     let since =
         Duration::from_nanos(u64::try_from(elapsed.as_nanos() % period.as_nanos()).unwrap_or(0));
     period - since
 }
 
-/// Sayacın metni — **yığında**, kare başına ayırma yok.
+/// The counter's text — **on the stack**, no per-frame allocation.
 ///
-/// `String` olsaydı koşan her blok için her karede bir ayırma ederdi: metin
-/// saniyede bir değişiyor ama her karede yeniden üretiliyor.
+/// With `String` it would be one allocation per frame for every running block: the
+/// text changes once a second but is regenerated every frame.
 ///
-/// Tavan temsil edilebilir en uzun metinden geliyor ve sabit bir tahmin değil:
-/// süre `u32` milisaniye, yani en çok ~1193 saat, yani en uzun metin
-/// `"1193h 03m"` — dokuz bayt. Tampon bir sınama ile bağlı
+/// The ceiling comes from the longest representable text and is not a fixed
+/// guess: the duration is `u32` milliseconds, that is at most ~1193 hours, so the
+/// longest text is `"1193h 03m"` — nine bytes. The buffer is tied by a test
 /// ([`the_longest_counter_fits_the_buffer`]).
 pub(crate) struct Counter {
     text: [u8; Counter::CAPACITY],
@@ -2245,21 +2298,22 @@ pub(crate) struct Counter {
 impl Counter {
     const CAPACITY: usize = 12;
 
-    /// Süreyi metne çevirir.
+    /// Converts the duration to text.
     ///
-    /// Dört kademe ve hepsi okuma sorusundan: onda bir, saniye, dakika, saat.
-    /// Kırpma **yuvarlamanın yerine** bilinçli — `1.9s` yazarken 2.0 saniyeyi
-    /// geçmiş bir komut olmasın; sayaç ileri değil geri dürüst olur.
+    /// Four tiers and all from the reading question: tenths, seconds, minutes, hours.
+    /// Truncation is deliberate **in place of rounding**: while writing `1.9s` there
+    /// must not be a command that has passed 2.0 seconds; the counter is honest
+    /// backwards, not forwards.
     pub(crate) fn new(duration: Duration, precision: Precision) -> Self {
         let mut counter = Self {
             text: [0; Self::CAPACITY],
             len: 0,
         };
         let secs = duration.as_secs();
-        // `write!` bir `fmt::Result` döndürüyor ve tek hata kolu tamponun
-        // dolmasıdır — o da yukarıdaki tavanla temsil edilemez, bekçisi
-        // `the_longest_counter_fits_the_buffer`. Sonucu yutmak yerine
-        // `debug_assert` ile bağlanıyor: PTY yolunda panik yok.
+        // `write!` returns a `fmt::Result` and the only error arm is the buffer filling
+        // — which cannot be represented given the ceiling above, its guard is
+        // `the_longest_counter_fits_the_buffer`. Instead of swallowing the result it is
+        // tied with `debug_assert`: no panic on the PTY path.
         let written = if precision == Precision::Tenths && secs < 60 {
             let tenths = duration.as_millis() / 100;
             write!(counter, "{}.{}s", tenths / 10, tenths % 10)
@@ -2270,14 +2324,14 @@ impl Counter {
         } else {
             write!(counter, "{}h {:02}m", secs / 3600, (secs / 60) % 60)
         };
-        debug_assert!(written.is_ok(), "sayaç tamponu doldu: {duration:?}");
+        debug_assert!(written.is_ok(), "counter buffer is full: {duration:?}");
         counter
     }
 
     pub(crate) fn as_str(&self) -> &str {
-        // Yazan tek yol `write_str` ve o `&str` alıyor, yani tampon her zaman
-        // geçerli UTF-8. Bozuk kol boş dizgiye düşüyor: sayaç için panik
-        // etmek, PTY yolunda panik yasağının ihlali olurdu.
+        // The only writing path is `write_str` and it takes `&str`, so the buffer is
+        // always valid UTF-8. The corrupt arm falls to an empty string: panicking for a
+        // counter would violate the no-panic-on-the-PTY-path ban.
         std::str::from_utf8(&self.text[..self.len]).unwrap_or("")
     }
 }
@@ -2292,159 +2346,164 @@ impl fmt::Write for Counter {
     }
 }
 
-/// İşaret kolunun OSC numarası — FinalTerm'ün "semantic prompt"u.
+/// The mark arm's OSC number — FinalTerm's "semantic prompt".
 ///
-/// Bizim seçimimiz değil, uyduğumuz sözleşme: iTerm2, kitty, WezTerm, VS Code
-/// ve Ghostty aynı numarayı okuyor, yani betiğimiz onların altında da blok
-/// üretiyor.
+/// Not our choice but a contract we comply with: iTerm2, kitty, WezTerm, VS Code
+/// and Ghostty read the same number, so our script produces blocks under them too.
 const MARK_OSC: u32 = 133;
 
-/// Ayna kolunun OSC numarası — **bizim** dizimiz.
+/// The mirror arm's OSC number — **our** sequence.
 ///
-/// Sayının kendisi bir karar ve iki ölçütü var:
+/// The number itself is a decision and has two criteria:
 ///
-/// **Çakışmamalı.** Dışlama listesi elle hatırlanmadı, grep'lendi:
-/// ayrıştırıcımızın (`vte-0.15.0/src/ansi.rs`, `osc_dispatch`) yorumladığı
-/// numaralar 0, 2, 4, 8, 10–12, 22, 50, 52, 104 ve 110–112; geri kalan her
-/// şey `unhandled` koluna düşüyor. Üstüne yaygın entegrasyonların sahipli
-/// numaraları: 7 (cwd), 9 (ConEmu/Windows Terminal), 133, 633 (VS Code), 777
-/// (urxvt), 1337 (iTerm2/WezTerm), 9278 (Warp), 30001–30002 (kitty). 8133
-/// hiçbirinde yok.
+/// **It must not collide.** The exclusion list was not recalled by hand, it was
+/// grepped: the numbers our parser (`vte-0.15.0/src/ansi.rs`, `osc_dispatch`)
+/// interprets are 0, 2, 4, 8, 10–12, 22, 50, 52, 104 and 110–112; everything else
+/// falls to the `unhandled` arm. On top of that the owned numbers of common
+/// integrations: 7 (cwd), 9 (ConEmu/Windows Terminal), 133, 633 (VS Code), 777
+/// (urxvt), 1337 (iTerm2/WezTerm), 9278 (Warp), 30001–30002 (kitty). 8133 is in
+/// none of them.
 ///
-/// **Kısa olmalı.** Numara tuş **başına** akışa giriyor (R6.2); altı haneli
-/// bir sayı her vuruşta iki bayt fazla demek. Dört hane, `133`'ün ikinci kolu
-/// olduğunu söyleyen bir önekle: `8133`.
+/// **It must be short.** The number enters the stream **per** keystroke (R6.2); a
+/// six-digit number means two extra bytes on every stroke. Four digits, with a
+/// prefix saying it is `133`'s second arm: `8133`.
 ///
-/// **Başka terminalde ne olur:** pratikte hiçbir şey, çünkü sarmalayıcı
-/// yalnız bateri'nin `ZDOTDIR`'ı altında yükleniyor — yabancı bir terminal bu
-/// diziyi hiç görmüyor. Tek istisna bateri'nin **içinde** koşan `tmux`/`screen`
-/// ve ikisi de tanımadığı OSC'yi düşürüyor.
+/// **What happens in another terminal:** practically nothing, because the wrapper
+/// is loaded only under bateri's `ZDOTDIR` — a foreign terminal never sees this
+/// sequence. The only exception is `tmux`/`screen` running **inside** bateri, and
+/// both drop an OSC they do not recognize.
 const DOCK_OSC: u32 = 8133;
 
-/// `ESC ] 133 ;` yükünün üst sınırı, bayt.
+/// The upper bound of the `ESC ] 133 ;` payload, in bytes.
 ///
-/// **Tasarım sabiti, ölçüm değil.** Standart yükler tek harf ile birkaç
-/// anahtar-değerden ibaret (`A;aid=12345`, `D;0;aid=12345`); 256 bayt
-/// bunların bir mertebe üstünde. Sınırın işi bir performans eşiği tutturmak
-/// değil, bozuk ya da kötü niyetli bir akışın sonlandırıcı basmadan belleği
-/// büyütmesini engellemek — sınırı aşan dizi düşürülür ve tarayıcı boşa döner.
+/// **A design constant, not a measurement.** Standard payloads consist of a single
+/// letter and a few key-values (`A;aid=12345`, `D;0;aid=12345`); 256 bytes is an
+/// order of magnitude above them. The bound's job is not to hit a performance
+/// threshold but to keep a corrupt or malicious stream from growing memory
+/// without sending a terminator — a sequence exceeding the bound is dropped and
+/// the scanner returns to idle.
 const PAYLOAD_LIMIT: usize = 256;
 
-/// `ESC ] 8133 ;` yükünün üst sınırı, bayt.
+/// The upper bound of the `ESC ] 8133 ;` payload, in bytes.
 ///
-/// [`PAYLOAD_LIMIT`] (256) bu kol için **yanlış**: bir komut satırı onu tek
-/// başına aşar. Sayı türetildi, seçilmedi:
+/// [`PAYLOAD_LIMIT`] (256) is **wrong** for this arm: a command line alone exceeds
+/// it. The number was derived, not chosen:
 ///
-/// - 4096 karakterlik bir giriş — 200 sütunluk bir pencerede yirmi satır,
-///   elle yazılan bir komut satırının mertebelerce üstü.
-/// - En kötü hâlde karakter başına 4 bayt UTF-8 → 16 KiB.
-/// - base64'ün 4/3 şişmesi → ~21 KiB.
-/// - `region_highlight` aynı mertebede: sözdizimi vurgusu jeton başına bir
-///   kayıt bırakıyor ve kayıt başına ~30 bayt.
-/// - Yuvarlanmış tavan: **64 KiB**.
+/// - A 4096-character input — twenty lines in a 200-column window, orders of
+///   magnitude above a hand-typed command line.
+/// - At worst 4 bytes of UTF-8 per character → 16 KiB.
+/// - base64's 4/3 inflation → ~21 KiB.
+/// - `region_highlight` is of the same order: syntax highlighting leaves one
+///   record per token and ~30 bytes per record.
+/// - Rounded ceiling: **64 KiB**.
 ///
-/// **Neyi yönetiyor:** doğruluğu değil, dock'un *kullanılabilirliğini*. Aşan
-/// bir satır [`DockFault::Overflow`] ile görünür oluyor ve giriş ızgarada
-/// kalıyor — kullanıcı yazdığını yine görüyor, yalnız dock'ta değil.
+/// **What it governs:** not correctness but the dock's *usability*. A line that
+/// exceeds it becomes visible via [`DockFault::Overflow`] and the input stays on
+/// the grid — the user still sees what they type, just not in the dock.
 const DOCK_PAYLOAD_LIMIT: usize = 64 * 1024;
 
-/// Dizin kolunun OSC numarası — bizim seçimimiz değil, uyduğumuz sözleşme.
+/// The directory arm's OSC number — not our choice but a contract we comply with.
 ///
-/// `7` "çalışma dizini" için fiilî standart: iTerm2, kitty, WezTerm, GNOME
-/// Terminal ve VS Code aynı numarayı okuyor, oh-my-zsh'in `termsupport.zsh`'i
-/// de aynı numarayı basıyor. Kendi numaramızı seçseydik yalnız kendi
-/// betiğimizin bastığını görürdük.
+/// `7` is the de facto standard for "working directory": iTerm2, kitty, WezTerm,
+/// GNOME Terminal and VS Code read the same number, and oh-my-zsh's
+/// `termsupport.zsh` prints the same number. Had we chosen our own number we would
+/// see only what our own script prints.
 ///
-/// **`vte` onu tanımıyor** ve bu, [`DOCK_OSC`] ile aynı durum: yük
-/// `osc_dispatch`'in `unhandled` koluna düşüp atılıyor
-/// (`vte-0.15.0/src/ansi.rs`; yorumlanan numaralar 0, 2, 4, 8, 10–12, 22, 50,
-/// 52, 104 ve 110–112). Yani "alacritty'nin `Title` olayı sessizce düşüyor"
-/// değil — **hiçbir olay doğmuyor**; dizin ancak bu kolla görülebiliyor.
+/// **`vte` does not recognize it** and this is the same situation as
+/// [`DOCK_OSC`]: the payload falls into `osc_dispatch`'s `unhandled` arm and is
+/// discarded (`vte-0.15.0/src/ansi.rs`; the interpreted numbers are 0, 2, 4, 8,
+/// 10–12, 22, 50, 52, 104 and 110–112). So it is not "alacritty's `Title` event
+/// is silently dropped" — **no event is born at all**; the directory can be seen
+/// only through this arm.
 const CWD_OSC: u32 = 7;
 
-/// `ESC ] 7 ;` yükünün üst sınırı, bayt.
+/// The upper bound of the `ESC ] 7 ;` payload, in bytes.
 ///
-/// Sayı türetildi, seçilmedi ([`DOCK_PAYLOAD_LIMIT`] emsali):
+/// The number was derived, not chosen (the precedent is [`DOCK_PAYLOAD_LIMIT`]):
 ///
-/// - macOS'ta bir yolun tavanı `PATH_MAX`, yani 1024 bayt.
-/// - En kötü hâlde her bayt yüzde kodlu → 3072.
-/// - Üstüne `file://` şeması ile yetki bölümü.
-/// - Yuvarlanmış tavan: **4 KiB**.
+/// - On macOS a path's ceiling is `PATH_MAX`, that is 1024 bytes.
+/// - At worst every byte is percent-encoded → 3072.
+/// - On top of that the `file://` scheme and the authority section.
+/// - Rounded ceiling: **4 KiB**.
 ///
-/// **Aşımın sonucu sessiz** ve bu, aynanın görünür aşımından (`DockFault`)
-/// bilerek ayrı: gösteremediğimiz bir giriş satırı kullanıcının yazdığını
-/// kaybettirir, gösteremediğimiz bir dizin ise yalnız bir önceki değeri
-/// ekranda bırakır ve sonraki prompt onu tazeler.
+/// **The consequence of exceeding it is silent** and this is deliberately
+/// separate from the mirror's visible overflow (`DockFault`): an input line we
+/// cannot show makes the user lose what they typed, while a directory we cannot
+/// show only leaves the previous value on screen and the next prompt refreshes it.
 const CWD_PAYLOAD_LIMIT: usize = 4 * 1024;
 
-/// Numara önekinin makul üst sınırı; aşan dizi bizim değildir.
+/// The reasonable upper bound of the number prefix; a sequence exceeding it is not
+/// ours.
 ///
-/// `ESC ]` ardından rakam basıp sonlandırıcı basmayan bir akışta sayaç
-/// taşmasın diye var; `133`'ün altı hane uzağında bir OSC numarası yok.
+/// It exists so that the counter does not overflow in a stream that prints digits
+/// after `ESC ]` without a terminator; there is no OSC number six digits away from
+/// `133`.
 const MAX_OSC_NUMBER: u32 = 999_999;
 
-/// CSI parametresinin makul üst sınırı; aşan dizi bizim değildir.
+/// The reasonable upper bound of a CSI parameter; a sequence exceeding it is not
+/// ours.
 ///
-/// [`MAX_OSC_NUMBER`]'ın emsali ve aynı işi görüyor: sonlandırıcı basmayan bir
-/// akışta sayaç taşmasın. Aşımın cezası da aynı yönde — dizi **atılmıyor**,
-/// yalnız tanınmaz oluyor; `2`'nin altı hane uzağında bir ED parametresi yok.
+/// The precedent is [`MAX_OSC_NUMBER`] and it does the same job: so that the
+/// counter does not overflow in a stream with no terminator. The penalty for
+/// exceeding it goes the same way — the sequence is **not dropped**, it just goes
+/// unrecognized; there is no ED parameter six digits away from `2`.
 const MAX_CSI_PARAM: u32 = 999_999;
 
-/// ED'nin "bütün ekranı temizle" parametresi: `CSI 2 J`.
+/// ED's "clear the whole screen" parameter: `CSI 2 J`.
 ///
-/// `3J` (`ClearMode::Saved`) ve RIS için kol **yok** ve gerekçe ikisinde de
-/// aynı: ikisi de `clear_history()` çağırıyor (`term/mod.rs:1806`, RIS için
-/// `grid/mod.rs:341`), yani `history_size()` sıfıra iniyor ve "boşluğu
-/// geçmişle doldur" kuralı **kendiliğinden** kapanıyor. Üçüncü bir kol
-/// eklemek, bir bayrakla zaten kapalı olan bir yolu ikinci kez kapatmak
-/// olurdu.
+/// There is **no arm** for `3J` (`ClearMode::Saved`) and RIS and the reason is the
+/// same for both: both call `clear_history()` (`term/mod.rs:1806`, for RIS
+/// `grid/mod.rs:341`), so `history_size()` drops to zero and the "fill the gap with
+/// scrollback" rule closes **by itself**. Adding a third arm would be closing a
+/// path a second time that is already closed by a flag.
 const ERASE_ALL: u32 = 2;
 
-/// Tarayıcının nerede olduğu. Chunk sınırında hayatta kalması gereken şey
-/// yükün kendisi **değil**, bu durumun tamamı: "ESC gördüm" ve "rakamların
-/// ortasındayım" da iki `read()` arasında taşınır.
+/// Where the scanner is. What has to survive a chunk boundary is **not** the
+/// payload itself but this whole state: "I saw ESC" and "I'm in the middle of the
+/// digits" are also carried between two `read()`s.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScanState {
-    /// Dizinin dışındayız; bir sonraki `ESC` aranıyor.
+    /// Outside a sequence; searching for the next `ESC`.
     Ground,
-    /// `ESC` görüldü, `]` (OSC) ya da `[` (CSI) bekleniyor.
+    /// `ESC` seen, `]` (OSC) or `[` (CSI) expected.
     Escape,
-    /// `ESC ]` görüldü, OSC numarası toplanıyor.
+    /// `ESC ]` seen, the OSC number is being collected.
     Number,
-    /// Bizim bir numaramız ve `;` görüldü; yük o kolun tamponuna toplanıyor.
+    /// One of our numbers and `;` seen; the payload is being collected into that arm's buffer.
     Payload(Arm),
-    /// Bizim dizimiz değil (ya da sınırı aştı): sonlandırıcıya kadar atlanıyor.
+    /// Not our sequence (or it exceeded the bound): skipping until the terminator.
     Skip,
-    /// `ESC [` görüldü; CSI sonlandırıcısına kadar izleniyor.
+    /// `ESC [` seen; tracked until the CSI terminator.
     Csi(CsiScan),
 }
 
-/// CSI dizisinin bizi ilgilendiren kadarı.
+/// As much of a CSI sequence as concerns us.
 ///
-/// **Tampon yok ve olmayacak:** tanıdığımız tek dizinin parametresi tek bir
-/// sayı, yani toplanacak yük de yok. `vte`'nin dört CSI durumu
-/// (`advance_csi_entry`, `_param`, `_intermediate`, `_ignore`) bizde **tek**
-/// duruma iniyor, çünkü sorduğumuz soru tek: "bu dizi `CSI 2 J` mi". Ara
-/// baytı, özel işareti ya da ikinci parametresi olan her dizinin cevabı aynı —
-/// hayır — ve o cevabı [`Self::simple`] taşıyor.
+/// **There is no buffer and there will not be:** the only sequence we recognize
+/// has a single number as its parameter, so there is no payload to collect either.
+/// `vte`'s four CSI states (`advance_csi_entry`, `_param`, `_intermediate`,
+/// `_ignore`) descend to a **single** state for us, because the question we ask is
+/// single: "is this sequence `CSI 2 J`". The answer for any sequence with an
+/// intermediate byte, a private marker or a second parameter is the same — no —
+/// and [`Self::simple`] carries that answer.
 ///
-/// `Default` **türetilmiyor**: türetilseydi `simple: false` olurdu, yani
-/// "hiçbir dizi tanınmaz" — sessizce yanlış bir başlangıç. Tek doğru
-/// başlangıcın adı [`CsiScan::new`].
+/// `Default` is **not derived**: if it were derived it would be `simple: false`,
+/// that is "no sequence is recognized" — a silently wrong start. The one correct
+/// start is named [`CsiScan::new`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CsiScan {
-    /// Toplanan tek parametre.
+    /// The single collected parameter.
     param: u32,
-    /// Hiç rakam görüldü mü. Parametresiz `CSI J` **ED 0** demek (imleçten
-    /// aşağısı), yani bizim dizimiz değil; ayrı bayrak olmasaydı `param`'ın
-    /// sıfırı ile "hiç yazılmadı" karışırdı.
+    /// Whether any digit was seen. A parameterless `CSI J` means **ED 0** (from the
+    /// cursor down), that is, not our sequence; without a separate flag `param`'s zero
+    /// would be confused with "never written".
     has_digit: bool,
-    /// Dizi hâlâ "tek parametreli, işaretsiz, ara baytsız" mı.
+    /// Whether the sequence is still "single-parameter, unmarked, no intermediate bytes".
     simple: bool,
 }
 
 impl CsiScan {
-    /// `ESC [`'in hemen ardındaki hâl.
+    /// The state right after `ESC [`.
     fn new() -> Self {
         Self {
             param: 0,
@@ -2453,125 +2512,128 @@ impl CsiScan {
         }
     }
 
-    /// Dizi tanıdığımız tek dizi mi — sonlandırıcısı da dahil.
+    /// Whether the sequence is the one sequence we recognize — terminator included.
     fn is_erase_all(&self, final_byte: u8) -> bool {
         self.simple && self.has_digit && self.param == ERASE_ALL && final_byte == b'J'
     }
 }
 
-/// Tarayıcının iki kolu; yük hangi tampona ve hangi ayrıştırıcıya gidiyor.
+/// The scanner's two arms; which buffer and which parser the payload goes to.
 ///
-/// Durumun içinde taşınıyor, ayrı bir alanda değil: yük toplanırken kolun
-/// **her zaman** belli olması tipin şekliyle garanti — ayrı bir alan
-/// `Ground`'da da anlamlı görünür ve "hangi koldayız" sorusu iki yerden
-/// yanıtlanabilirdi.
+/// Carried inside the state, not in a separate field: that the arm is **always**
+/// known while the payload is being collected is guaranteed by the shape of the
+/// type — a separate field would look meaningful in `Ground` too and the "which
+/// arm are we in" question could be answered from two places.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
-    /// [`MARK_OSC`] — işaret kolu.
+    /// [`MARK_OSC`] — the mark arm.
     Mark,
-    /// [`DOCK_OSC`] — ayna kolu.
+    /// [`DOCK_OSC`] — the mirror arm.
     Dock,
     /// [`CWD_OSC`] — dizin kolu.
     Cwd,
 }
 
-/// [`ShellLog::apply_scan_answering`]'in cevabı: okuyucu thread'in kilidi
-/// bıraktıktan sonra vereceği haberler (036).
+/// The answer of [`ShellLog::apply_scan_answering`]: the notifications the reader
+/// thread will give after releasing the lock (036).
 ///
-/// Tek dönüş yolu, iki haber: ikinci bir yol açmak (defterde bayrak, ayrı
-/// sorgu) haberi kilidin ikinci bir turuna bağlardı.
+/// One return path, two notifications: opening a second path (a flag in the
+/// ledger, a separate query) would tie the notification to a second turn of the
+/// lock.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ScanOutcome {
-    /// Başlığın girdisi değişti — farklı bir yerel dizin ya da uzak durumun
-    /// silinmesi → [`crate::Wake::title_changed`].
+    /// The title's input changed — a different local directory or the deletion of the
+    /// remote state → [`crate::Wake::title_changed`].
     pub(crate) title: bool,
-    /// Safha `Running`'e **geçti** → [`crate::Wake::command_started`].
+    /// The phase **moved** to `Running` → [`crate::Wake::command_started`].
     pub(crate) started: bool,
-    /// **Bizim** kimlikli `A`'mız geldi: kabuk prompt'a vardı (037 Karar 6).
-    /// Tüketicisi oturumun ilk girdisi (`SessionOptions::initial_input`);
-    /// kimliksiz `A` saymıyor — ssh'ın öbür ucundaki ya da başka bir aracın
-    /// `A`'sı bizim kabuğun prompt'a vardığını söylemez.
+    /// Our identified `A` arrived: the shell reached the prompt (037 Karar 6). Its
+    /// consumer is the session's first input (`SessionOptions::initial_input`); an
+    /// identity-less `A` does not count — the `A` of the far end of ssh or of another
+    /// tool does not say our shell reached the prompt.
     pub(crate) prompt: bool,
 }
 
-/// Tarayıcının dışarıya verdiği olay.
+/// The event the scanner hands out.
 ///
-/// İki kol tek `enum`'da, çünkü tek çağrı: okuyucu thread'i kilidi olay
-/// başına alıyor ve iki ayrı callback iki ayrı kilit turu doğururdu.
+/// Two arms in a single `enum`, because one call: the reader thread takes the lock
+/// per event and two separate callbacks would produce two separate lock turns.
 ///
-/// `Update` **ödünç veriyor**, sahiplenmiyor: aynanın çözülmüş hâli
-/// tarayıcının kendi tamponunda duruyor ve tüketici onu kilidin altında
-/// `clone_from` ile alıyor. Sahiplenseydi tuş başına üç `String` ile bir
-/// `Vec` doğardı ([`DockState`]'in doc'u).
+/// `Update` **lends**, it does not take ownership: the mirror's decoded state sits
+/// in the scanner's own buffer and the consumer takes it under the lock with
+/// `clone_from`. If it took ownership it would produce three `String`s and a `Vec`
+/// per keystroke ([`DockState`]'s doc).
 pub(crate) enum ScanEvent<'a> {
     Mark(Mark),
     Dock(DockEvent<'a>),
-    /// Çalışma dizini, **çözülmüş** tam yol, ve yetkinin bu makine olup
-    /// olmadığı ([`LOCAL_AUTHORITIES`]). Reddedilen bir URI hiç olay
-    /// doğurmuyor: "dizin okunamadı" diye bir hâl yok, çünkü doğru cevap
-    /// eskisini bırakmak. Yabancı yetki 036'dan beri reddedilmiyor, uzak
-    /// yuvaya gidiyor ([`ShellLog::apply_scan_answering`]).
+    /// The working directory, the **resolved** full path, and whether the authority is
+    /// this machine ([`LOCAL_AUTHORITIES`]). A rejected URI produces no event at all:
+    /// there is no "directory could not be read" state, because the right answer is to
+    /// leave the old one. A foreign authority has not been rejected since 036, it goes
+    /// to the remote slot ([`ShellLog::apply_scan_answering`]).
     Cwd {
         path: &'a str,
         local: bool,
     },
 }
 
-/// Ayna kolunun olayları.
+/// The mirror arm's events.
 pub(crate) enum DockEvent<'a> {
-    /// Satır tazelendi; çözülmüş hâli ödünçte.
+    /// The line was refreshed; its decoded state is on loan.
     Update(&'a DockState),
-    /// `line-finish`: ZLE satırı bıraktı.
+    /// `line-finish`: ZLE released the line.
     End,
-    /// Ayna geldi ama okunamadı. **Sinyal burada**: bugünkü `Skip` kolu
-    /// çağırana hiçbir şey söylemiyordu (R1.2).
+    /// A mirror arrived but could not be read. **The signal is here**: today's `Skip`
+    /// arm told the caller nothing (R1.2).
     Unavailable(DockFault),
-    /// Git dalı; boş gövde "depo değil" demek. Aynanın kanalından geliyor
-    /// (`precmd` basıyor) ama aynanın **durumuna** dokunmuyor.
+    /// The git branch; an empty body means "not a repository". It comes from the
+    /// mirror's channel (`precmd` prints it) but does not touch the mirror's
+    /// **state**.
     Branch(&'a str),
-    /// Düzenleme widget'ı bu prompt'ta bağlı (`line-init`, 031); aynanın
-    /// durumuna dokunmuyor ([`ShellLog::dock_editable`]).
+    /// The editing widget is bound at this prompt (`line-init`, 031); does not touch
+    /// the mirror's state ([`ShellLog::dock_editable`]).
     Editable,
 }
 
-/// İki OSC numarasını akışın içinden çeken durum makinesi.
+/// The state machine that pulls two OSC numbers out of the stream.
 ///
-/// **Numara kararı erken veriliyor:** bizim olmayan her dizi tampona
-/// dokunmadan `Skip`'e düşer. Aksi hâlde her meşru OSC 52 kopyası (kilobayt,
-/// megabayt) "sınırı aşan dizi" yoluna girer ve sınırın ayırt ettiği şey
-/// kalmazdı.
+/// **The number decision is made early:** every sequence that is not ours falls to
+/// `Skip` without touching the buffer. Otherwise every legitimate OSC 52 copy
+/// (kilobytes, megabytes) would enter the "sequence exceeding the bound" path and
+/// what the bound distinguishes would be lost.
 ///
-/// **İki kolun tamponu ayrı.** Tek tampon paylaşılsaydı ya 133'ün dar sınırı
-/// aynayı keser ya da aynanın geniş sınırı 133'ün koruduğu şeyi (sonlandırıcı
-/// basmayan bir akışın belleği büyütmesi) bırakırdı — bir tampon iki sınıra
-/// birden uyamaz.
+/// **The buffers of the two arms are separate.** If a single buffer were shared,
+/// either 133's narrow bound would truncate the mirror or the mirror's wide bound
+/// would give up what 133 protects (a stream with no terminator growing memory) —
+/// one buffer cannot fit two bounds at once.
 pub(crate) struct Scanner {
     state: ScanState,
-    /// `133;` sonrası yük; yalnız bizim dizimiz için dolar ve her dizide
-    /// `clear()` ile yeniden kullanılır — dizi başına ayırma yok.
+    /// The payload after `133;`; filled only for our sequence and reused with
+    /// `clear()` on every sequence — no per-sequence allocation.
     payload: Vec<u8>,
-    /// `8133;` sonrası yük. Ayrı tampon, ayrı sınır (yukarıda).
+    /// The payload after `8133;`. A separate buffer, a separate bound (above).
     dock: Vec<u8>,
-    /// `7;` sonrası yük. Üçüncü tampon, üçüncü sınır — aynı gerekçe: bir
-    /// tampon üç sınıra birden uyamaz.
+    /// The payload after `7;`. A third buffer, a third bound — the same reason: one
+    /// buffer cannot fit three bounds at once.
     cwd: Vec<u8>,
-    /// base64 çıktısının indiği ara tampon; her alanda yeniden kullanılır.
+    /// The intermediate buffer base64 output lands in; reused for every field.
     decoded: Vec<u8>,
-    /// Aynanın çözülmüş hâli — [`DockEvent::Update`]'in ödünç verdiği tampon.
+    /// The mirror's decoded state — the buffer [`DockEvent::Update`] lends.
     line: DockState,
-    /// Çözülmüş dizin — [`ScanEvent::Cwd`]'in ödünç verdiği tampon.
+    /// The decoded directory — the buffer [`ScanEvent::Cwd`] lends.
     path: String,
-    /// Çözülmüş dal — [`DockEvent::Branch`]'in ödünç verdiği tampon.
+    /// The decoded branch — the buffer [`DockEvent::Branch`] lends.
     branch: String,
-    /// Toplanan OSC numarası ve hiç rakam görülüp görülmediği.
+    /// The collected OSC number and whether any digit was seen.
     number: u32,
     has_digit: bool,
-    /// Son boşaltmadan bu yana görülen `CSI 2 J` sayısı.
+    /// The number of `CSI 2 J` seen since the last drain.
     ///
-    /// **Olay değil sayaç**, ve ayrım kasıtlı: [`ScanEvent`] "olay başına tek
-    /// kilit turu" için var (kendi doc'u), CSI kolunun tüketicisi ise hiç
-    /// kilit istemiyor — artıracağı şey bir atomik. Enum'a kol eklemek her
-    /// olay yolunda bedelsiz ama anlamsız bir dal açardı.
+    /// **A counter, not an event**, and the distinction is deliberate: [`ScanEvent`]
+    /// exists for "a single lock turn per event" (its own doc), while the CSI arm's
+    /// consumer asks for no lock at all — what it will increment is an atomic.
+    /// Adding an arm to the enum would open a free but meaningless branch on every
+    /// event path.
     screen_clears: u32,
 }
 
@@ -2580,14 +2642,14 @@ impl Scanner {
         Self {
             state: ScanState::Ground,
             payload: Vec::with_capacity(PAYLOAD_LIMIT),
-            // Ayna tamponu **baştan** ayrılıyor, 133'ünki gibi: sabit durumda
-            // tuş başına ayırma olmamalı ve büyüyerek gelen bir tampon ilk
-            // satırlarda tam da onu yapardı. Oturum başına 64 KiB, grid'in
-            // yanında ölçülemeyecek kadar küçük.
+            // The mirror buffer is allocated **up front**, like 133's: in steady state there
+            // should be no per-keystroke allocation and a buffer that arrives by growing would
+            // do exactly that in the first lines. 64 KiB per session, too small to measure
+            // next to the grid.
             dock: Vec::with_capacity(DOCK_PAYLOAD_LIMIT),
-            // Dizin kolu prompt **başına** koşuyor, tuş başına değil; tampon
-            // yine de baştan ayrılıyor, çünkü ölçüsü 4 KiB ve büyüyerek gelen
-            // bir tampon ilk prompt'larda ayırma yapardı.
+            // The directory arm runs **per prompt**, not per keystroke; the buffer is still
+            // allocated up front, because its size is 4 KiB and a buffer that arrives by
+            // growing would allocate in the first prompts.
             cwd: Vec::with_capacity(CWD_PAYLOAD_LIMIT),
             decoded: Vec::new(),
             line: DockState::default(),
@@ -2599,33 +2661,33 @@ impl Scanner {
         }
     }
 
-    /// Aynayı kümeyle okuyan tarayıcı ([`DockState::cluster`]); açılışta
-    /// bir kez, `SessionOptions::cluster`'dan.
+    /// The scanner that reads the mirror by cluster ([`DockState::cluster`]); once at
+    /// startup, from `SessionOptions::cluster`.
     pub(crate) fn cluster(mut self, on: bool) -> Self {
         self.line.cluster = on;
         self
     }
 
-    /// Son çağrıdan bu yana görülen `CSI 2 J` sayısı; sayacı **boşaltır**.
+    /// The number of `CSI 2 J` seen since the last call; **drains** the counter.
     ///
-    /// Sayı, çünkü tüketicisi bir **nesil sayacına** ekliyor
-    /// (`Session::screen_clears`): kare yolunun sorduğu soru "ekran temizlendi
-    /// mi" değil, "bu temizlemeyi hesaba kattım mı". Bayrak olsaydı iki
-    /// temizlemenin arasına düşen bir kare ikincisini birincisi sanardı.
+    /// A number, because its consumer adds it to a **generation counter**
+    /// (`Session::screen_clears`): the question the frame path asks is not "was the
+    /// screen cleared" but "have I accounted for this clear". If it were a flag, a
+    /// frame falling between two clears would mistake the second for the first.
     pub(crate) fn take_screen_clears(&mut self) -> u32 {
         std::mem::take(&mut self.screen_clears)
     }
 
-    /// Dilimi tarar ve bulduğu her olayı `on_event`'e verir.
+    /// Scans the slice and hands every event it finds to `on_event`.
     ///
-    /// Baytlara **dokunmaz**: dilim `&[u8]`, dönüşte çağıran onu olduğu gibi
-    /// ayrıştırıcıya geçirir.
+    /// It **does not touch** the bytes: the slice is `&[u8]` and on return the caller
+    /// passes it to the parser as it is.
     pub(crate) fn feed(&mut self, bytes: &[u8], mut on_event: impl FnMut(ScanEvent<'_>)) {
         let mut rest = bytes;
         while !rest.is_empty() {
-            // Boşta hızlı yol: dizinin dışındayken tamponu bayt bayt
-            // gezmiyoruz, bir sonraki `ESC`'e zıplıyoruz. Olağan akışın
-            // neredeyse tamamı bu dal.
+            // The idle fast path: while outside a sequence we do not walk the buffer byte by
+            // byte, we jump to the next `ESC`. Almost all of the ordinary stream is this
+            // branch.
             if self.state == ScanState::Ground {
                 match rest.iter().position(|&b| b == 0x1b) {
                     Some(at) => {
@@ -2644,31 +2706,29 @@ impl Scanner {
 
     fn step(&mut self, byte: u8, on_event: &mut impl FnMut(ScanEvent<'_>)) {
         match self.state {
-            // `advance_ground` ile aynı: buraya yalnız hızlı yol düşerse gelinir.
+            // Same as `advance_ground`: only if the fast path falls through does it get here.
             ScanState::Ground => {
                 if byte == 0x1b {
                     self.state = ScanState::Escape;
                 }
             }
-            // `vte::advance_esc`: `]` OSC dizisini, `[` de CSI'yı açar; kalan
-            // her şey (DCS, tek harfli kaçışlar) bizi ilgilendirmiyor.
+            // `vte::advance_esc`: `]` opens an OSC sequence, `[` a CSI; everything else
+            // (DCS, single-letter escapes) does not concern us.
             ScanState::Escape => match byte {
                 b']' => {
                     self.state = ScanState::Number;
                     self.number = 0;
                     self.has_digit = false;
                 }
-                // **Dördüncü kol.** Bugüne kadar aşağıdaki `_ =>` ile
-                // `Ground`'a düşüyordu; artık izleniyor, çünkü `CSI 2 J`
-                // aranıyor ve çerçevelenmeyen bir CSI'nın içindeki `]` bizde
-                // sahte bir OSC açabilirdi.
+                // **The fourth arm.** Until now it fell to `Ground` through the `_ =>` below; it
+                // is now tracked, because `CSI 2 J` is being looked for and a `]` inside an
+                // unframed CSI could open a false OSC for us.
                 b'[' => self.state = ScanState::Csi(CsiScan::new()),
-                // `advance_esc`'in `Escape`'te **bırakan** baytları: `ESC`'in
-                // kendisi, C0'ların 0x18/0x1A dışındakileri (`execute`
-                // ediliyor, durum değişmiyor) ve 0x7F'ten büyük her şey (son
-                // `_ => ()` kolu). Ground'a düşseydik bunların ardından gelen
-                // `]` bizim için yeni bir dizi açmazdı ve ızgaranın geçerli
-                // saydığı `ESC \r ] 133;A BEL` işareti bizde kaybolurdu.
+                // The bytes that `advance_esc` **leaves** in `Escape`: `ESC` itself, C0s other
+                // than 0x18/0x1A (they are `execute`d, the state does not change) and everything
+                // above 0x7F (the last `_ => ()` arm). If we fell to Ground, a `]` arriving after
+                // these would not open a new sequence for us and the `ESC \r ] 133;A BEL` mark
+                // the grid counts as valid would be lost on our side.
                 0x00..=0x17 | 0x19 | 0x1b | 0x1c..=0x1f | 0x7f.. => {}
                 _ => self.state = ScanState::Ground,
             },
@@ -2701,7 +2761,7 @@ impl Scanner {
                     };
                 }
                 _ if is_terminator(byte) => self.close(byte),
-                // `vte` bu baytları yüke almadan atıyor; parite için biz de.
+                // `vte` drops these bytes without taking them into the payload; so do we, for parity.
                 _ if is_ignored(byte) => {}
                 _ => self.state = ScanState::Skip,
             },
@@ -2714,8 +2774,8 @@ impl Scanner {
                     }
                 } else if is_ignored(byte) {
                 } else if self.payload.len() == PAYLOAD_LIMIT {
-                    // Sınırı aşan dizi düşer; sonlandırıcıya kadar atlanır ki
-                    // arkasından gelen sağlam dizi yine görülsün.
+                    // A sequence exceeding the bound is dropped; it is skipped up to the terminator so
+                    // that a sound sequence following it is still seen.
                     self.state = ScanState::Skip;
                 } else {
                     self.payload.push(byte);
@@ -2723,7 +2783,7 @@ impl Scanner {
             }
             ScanState::Payload(Arm::Dock) => {
                 if is_terminator(byte) {
-                    // Çözme `close`'dan **önce**: `close` tamponu boşaltıyor.
+                    // Decoding happens **before** `close`: `close` empties the buffer.
                     let outcome = parse_dock(
                         &self.dock,
                         &mut self.decoded,
@@ -2740,9 +2800,9 @@ impl Scanner {
                     }));
                 } else if is_ignored(byte) {
                 } else if self.dock.len() == DOCK_PAYLOAD_LIMIT {
-                    // 133'ün sessiz düşüşünün aksine aşım **anında** bildirilir:
-                    // tüketici "gösteremiyorum" diyebilsin diye (R1.2). Dizinin
-                    // kalanı yine atlanır ki arkasından geleni görelim.
+                    // Unlike 133's silent drop, the overflow is reported **immediately**: so that the
+                    // consumer can say "I cannot show it" (R1.2). The rest of the sequence is still
+                    // skipped so that we see what follows it.
                     self.state = ScanState::Skip;
                     on_event(ScanEvent::Dock(DockEvent::Unavailable(DockFault::Overflow)));
                 } else {
@@ -2751,7 +2811,7 @@ impl Scanner {
             }
             ScanState::Payload(Arm::Cwd) => {
                 if is_terminator(byte) {
-                    // Çözme `close`'dan **önce**: `close` tamponu boşaltıyor.
+                    // Decoding happens **before** `close`: `close` empties the buffer.
                     let read = parse_cwd(&self.cwd, &mut self.decoded, &mut self.path);
                     self.close(byte);
                     if let Some(local) = read {
@@ -2762,9 +2822,9 @@ impl Scanner {
                     }
                 } else if is_ignored(byte) {
                 } else if self.cwd.len() == CWD_PAYLOAD_LIMIT {
-                    // Aşım **sessiz**, aynanın aksine: gösteremediğimiz bir
-                    // dizin eski değeri ekranda bırakıyor ve sonraki prompt
-                    // onu tazeliyor (`CWD_PAYLOAD_LIMIT`'in doc'u).
+                    // The overflow is **silent**, unlike the mirror's: a directory we cannot show
+                    // leaves the old value on screen and the next prompt refreshes it
+                    // (`CWD_PAYLOAD_LIMIT`'s doc).
                     self.state = ScanState::Skip;
                 } else {
                     self.cwd.push(byte);
@@ -2775,22 +2835,21 @@ impl Scanner {
                     self.close(byte);
                 }
             }
-            // **OSC'nin çerçeveleme kuralları burada geçerli değil ve bu tek
-            // başına bir kusur kaynağıydı:** `is_terminator` `BEL`'i (0x07)
-            // dizi sonu sayıyor, `vte`'nin CSI durumları ise onu yerinde
-            // `execute` edip durumu **değiştirmiyor** — yani `ESC [ 2 BEL J`
-            // hâlâ bir ED 2. İki kümeyi paylaştırmak, ızgaranın gördüğü dizi
-            // sınırı ile bizimkini ayırırdı; iki taraf aynı akıştan iki
-            // farklı hikâye okur (modül başlığı).
+            // **OSC's framing rules do not apply here and this alone was a source of
+            // defects:** `is_terminator` counts `BEL` (0x07) as the end of the sequence,
+            // while `vte`'s CSI states `execute` it in place and **do not change** the state —
+            // so `ESC [ 2 BEL J` is still an ED 2. Sharing the two sets would split the
+            // sequence boundary the grid sees from ours; the two sides would read two
+            // different stories from the same stream (module header).
             ScanState::Csi(mut csi) => match byte {
-                // **İptal kuralları `vte::anywhere`'den birebir** (R1.3).
-                // Taşınmasaydı bozuk bir CSI durumu takar ve peşinden gelen
-                // `ESC ] 133;…` yutulurdu — bloklar, bastırma ve dock
-                // **sessizce** ölürdü.
+                // **The cancel rules are verbatim from `vte::anywhere`** (R1.3). If they were not
+                // carried over, a corrupt CSI would get us stuck and the `ESC ] 133;…` that
+                // follows would be swallowed — blocks, suppression and the dock would die
+                // **silently**.
                 0x18 | 0x1a => self.state = ScanState::Ground,
                 0x1b => self.state = ScanState::Escape,
-                // Dizinin içindeki C0'lar yerinde `execute` ediliyor; durum
-                // duruyor, parametre etkilenmiyor.
+                // C0s inside the sequence are `execute`d in place; the state stays, the
+                // parameter is not affected.
                 0x00..=0x17 | 0x19 | 0x1c..=0x1f => {}
                 b'0'..=b'9' => {
                     csi.param = csi
@@ -2803,35 +2862,34 @@ impl Scanner {
                     }
                     self.state = ScanState::Csi(csi);
                 }
-                // Ara baytlar (0x20–0x2F), parametre ayraçları (`;`, `:`) ve
-                // özel işaretler (`<=>?`) — üçünün de cevabı aynı: dizi bizim
-                // değil, ama **çerçeveleme sürüyor**. `ESC [ ? 1049 h` ne
-                // bayrak kuruyor ne durumu takıyor.
+                // Intermediate bytes (0x20–0x2F), parameter separators (`;`, `:`) and private
+                // markers (`<=>?`) — the answer for all three is the same: the sequence is not
+                // ours, but **the framing continues**. `ESC [ ? 1049 h` neither sets a flag nor
+                // gets us stuck.
                 0x20..=0x3f => {
                     csi.simple = false;
                     self.state = ScanState::Csi(csi);
                 }
                 0x40..=0x7e => {
                     if csi.is_erase_all(byte) {
-                        // **Doyuran toplama, saran değil.** Tüketici sayacı
-                        // her okuma turunda boşaltıyor, yani tavana ancak tek
-                        // bir `read()` içinde dört milyar temizlemeyle
-                        // varılır; sarsaydı o okuma `0` döndürür ve "hiç
-                        // temizleme olmadı" derdi — kaybın yanlış yönü.
+                        // **Saturating collection, not wrapping.** The consumer drains the counter on
+                        // every read round, so the ceiling is reached only with four billion clears in a
+                        // single `read()`; if it wrapped that read would return `0` and say "no clear
+                        // happened" — the wrong direction of loss.
                         self.screen_clears = self.screen_clears.saturating_add(1);
                     }
                     self.state = ScanState::Ground;
                 }
-                // `0x7F` ve 0x7F'ten büyük her şey `anywhere`'in `_ => ()`
-                // kolu: yoksayılıyor, durum duruyor.
+                // `0x7F` and everything above 0x7F is `anywhere`'s `_ => ()` arm: ignored, the
+                // state stays.
                 _ => {}
             },
         }
     }
 
-    /// Diziyi kapatır ve sonlandırıcının kendisine göre bir sonraki duruma
-    /// geçer: çıplak `ESC` diziyi bitirir **ve** yeni bir kaçışı açar
-    /// (`vte::advance_osc_string`, `0x1B` kolu).
+    /// Closes the sequence and moves to the next state according to the terminator
+    /// itself: a bare `ESC` ends the sequence **and** opens a new escape
+    /// (`vte::advance_osc_string`, the `0x1B` arm).
     fn close(&mut self, terminator: u8) {
         self.payload.clear();
         self.dock.clear();
@@ -2849,16 +2907,17 @@ fn is_terminator(byte: u8) -> bool {
     matches!(byte, 0x07 | 0x18 | 0x1a | 0x1b)
 }
 
-/// Dizinin içinde yoksayılan C0 baytları (`vte::advance_osc_string`).
+/// C0 bytes ignored inside the sequence (`vte::advance_osc_string`).
 fn is_ignored(byte: u8) -> bool {
     matches!(byte, 0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f)
 }
 
-/// `133;` sonrasındaki yükü işarete çevirir; tanımadığını **yoksayar**.
+/// Converts the payload after `133;` into a mark; **ignores** what it does not
+/// recognize.
 ///
-/// İlk alan işaretin kendisidir ve **tam** eşleşmelidir: `A;aid=12` bir
-/// `PromptStart`, `AB` hiçbir şey. Kabuklar işaretin yanına anahtar-değer
-/// iliştirebiliyor ve onları bilmemek işareti kaybetmek anlamına gelmemeli.
+/// The first field is the mark itself and must match **exactly**: `A;aid=12` is a
+/// `PromptStart`, `AB` is nothing. Shells can attach key-values next to the mark
+/// and not knowing them must not mean losing the mark.
 fn parse_mark(payload: &[u8]) -> Option<Mark> {
     let mut fields = payload.split(|&b| b == b';');
     match fields.next()? {
@@ -2870,12 +2929,13 @@ fn parse_mark(payload: &[u8]) -> Option<Mark> {
         b"D" => {
             let mut exit = None;
             let mut id = None;
-            // Kod **konuma** bağlı (ilk alan), kimlik **ada** — ve o ad
-            // `BLOCK_ID_FIELD`, yani `bt_block=`; `aid=` **değil** (gerekçe
-            // aşağıda, `block_id`'nin doc'unda: yabancı bir `aid` bizim
-            // sayacımızla karışmamalı). Konum sorusu bu yüzden ada bakan koldan
-            // sonra sorulur: `D;bt_block=7` kodsuz ama kimlikli geçerli bir
-            // yüktür ve ilk alanı körlemesine koda saysaydık kimliği yutardı.
+            // The code depends on **position** (the first field), the identity on **name** —
+            // and that name is `BLOCK_ID_FIELD`, that is `bt_block=`; **not** `aid=` (the
+            // reason is below, in `block_id`'s doc: a foreign `aid` must not be confused with
+            // our counter). The position question is therefore asked after the arm that looks
+            // at the name: `D;bt_block=7` is a valid payload with an identity but no code, and
+            // if we blindly counted the first field as the code it would swallow the
+            // identity.
             for (index, field) in fields.enumerate() {
                 if let Some(value) = block_id(field) {
                     id = Some(value);
@@ -2889,48 +2949,50 @@ fn parse_mark(payload: &[u8]) -> Option<Mark> {
     }
 }
 
-/// Bu makineyi gösteren yetki (authority) değerleri — "yerel mi" sorusunun
-/// cevabı, **kabul listesi değil** (036): yabancı yetkili OSC 7 de olay
-/// doğuruyor ve uzak yuvaya gidiyor ([`ShellLog::apply_scan_answering`]),
-/// yalnız yerel dizine yazmıyor.
+/// The authority values that point to this machine — the answer to the "is it
+/// local" question, **not an accept list** (036): an OSC 7 with a foreign
+/// authority also produces an event and goes to the remote slot
+/// ([`ShellLog::apply_scan_answering`]), it just does not write to the local
+/// directory.
 ///
-/// **Adlı her host yabancı sayılıyor** ve bu, "kendi ad'ımızla karşılaştır"
-/// yerine bilinçli seçildi: karşılaştırma `gethostname` demek, o da `bt-core`'a
-/// yeni bir bağımlılık kenarı demek (`proje.md` → Yayın etkisi: yeni bağımlılık
-/// mimari karardır). Kendi betiğimiz bu yüzden **boş yetkiyle** basıyor
-/// (`file:///…`), yani kapı hiçbir zaman bir ad uyuşmasına bağlı değil —
-/// makine yeniden adlandırılınca sessizce kapanmıyor.
+/// **Every named host is counted as foreign** and this was chosen deliberately
+/// instead of "compare with our own name": comparison means `gethostname`, which
+/// means a new dependency edge for `bt-core` (`proje.md` → Yayın etkisi: a new
+/// dependency is an architectural decision). Our own script therefore prints with
+/// an **empty authority** (`file:///…`), so the gate is never tied to a name
+/// match — it does not silently close when the machine is renamed.
 ///
-/// **Bilinen sınır:** `file://$HOST$PWD` basan üçüncü taraf kancalar
-/// (oh-my-zsh'in `termsupport.zsh`'i gibi) yerel dizine yazmıyor — uzak
-/// yuvaya düşüyorlar, o da yalnız uzak oturum etkinken okunuyor ve `C`, `D`,
-/// `A`'da siliniyor, yani yerel davranış 036'dan önceki gibi. Kayıp yalnız komutun
-/// *ortasında* yapılan bir `cd`'nin canlı yansıması; dizin bir sonraki
-/// prompt'ta kendi `precmd`'imizden zaten geliyor. İstenirse çare yine
-/// bağımlılık değil politika: `bt-shell` (elinde `libc` var) adı okur ve
-/// `SessionOptions` ile geçirir — `decide_locale` emsali.
+/// **Known limit:** third-party hooks that print `file://$HOST$PWD` (like
+/// oh-my-zsh's `termsupport.zsh`) do not write to the local directory — they fall
+/// to the remote slot, which is read only while a remote session is active and
+/// deleted on `C`, `D`, `A`, so local behavior is as before 036. The loss is only
+/// the live reflection of a `cd` done in the *middle* of a command; the directory
+/// already comes from our own `precmd` at the next prompt. If wanted, the remedy
+/// is again a policy, not a dependency: `bt-shell` (which has `libc`) reads the
+/// name and passes it via `SessionOptions` — the precedent is `decide_locale`.
 const LOCAL_AUTHORITIES: [&str; 2] = ["", "localhost"];
 
-/// `7;` sonrasındaki URI'yi çizilebilir bir yola çevirir ve yetkinin yerel
-/// olup olmadığını döndürür; tanımadığını **yoksayar** (`None`).
+/// Converts the URI after `7;` into a drawable path and returns whether the
+/// authority is local; **ignores** what it does not recognize (`None`).
 ///
-/// **Yük alanlara bölünmüyor** ([`parse_mark`] ve [`parse_dock`]'un aksine):
-/// `;` bir dosya adında geçerli bir karakter ve yükü bölseydik `/tmp/a;b`
-/// yolunu `/tmp/a` diye okurduk.
+/// **The payload is not split into fields** (unlike [`parse_mark`] and
+/// [`parse_dock`]): `;` is a valid character in a file name and if we split the
+/// payload we would read the path `/tmp/a;b` as `/tmp/a`.
 ///
-/// Reddedilen her hâlin sonucu aynı ve **panik değil yoksayma**
-/// (`CLAUDE.md` → PTY yolunda panik yok): şema `file:` değil, yetki UTF-8
-/// değil, yol `/` ile başlamıyor, yüzde kaçışı bozuk ya da sonuç UTF-8 değil.
-/// Yabancı yetki bir ret değil (036): cevap `Some(false)`.
+/// The result of every rejected state is the same and **ignoring, not panicking**
+/// (`CLAUDE.md` → PTY yolunda panik yok): the scheme is not `file:`, the authority
+/// is not UTF-8, the path does not start with `/`, a percent escape is corrupt or
+/// the result is not UTF-8. A foreign authority is not a rejection (036): the
+/// answer is `Some(false)`.
 fn parse_cwd(payload: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option<bool> {
-    // Şema harf duyarsız (RFC 3986 §3.1); `file:` beş bayt.
+    // The scheme is case-insensitive (RFC 3986 §3.1); `file:` is five bytes.
     let rest = payload
         .get(..5)
         .filter(|head| head.eq_ignore_ascii_case(b"file:"))?;
     let rest = &payload[rest.len()..];
-    // Yetki bölümü **zorunlu**: `file:/tmp` biçimi geçerli bir URI ama onu da
-    // kabul etmek "yetki yok" ile "yetki boş"u tek kola indirirdi ve pratikte
-    // hiçbir kabuk basmıyor.
+    // The authority section is **mandatory**: the `file:/tmp` form is a valid URI but
+    // accepting it would collapse "no authority" and "empty authority" into one arm,
+    // and in practice no shell prints it.
     let rest = rest.strip_prefix(b"//".as_slice())?;
     let at = rest.iter().position(|&b| b == b'/')?;
     let (authority, path) = rest.split_at(at);
@@ -2947,11 +3009,11 @@ fn parse_cwd(payload: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option
     Some(local)
 }
 
-/// Yüzde kaçışlarını çözer; `%` iki onaltılık haneyle **gelmek zorunda**.
+/// Decodes percent escapes; `%` **must come with two hex digits**.
 ///
-/// Bozuk bir kaçışı olduğu gibi geçirmek de bir seçenekti ve reddedildi:
-/// `%zz` taşıyan bir yol ya kodlayıcının bozulduğunu ya da yükün bizim
-/// olmadığını söyler; ikisinde de doğru cevap yolu hiç göstermemek.
+/// Passing a corrupt escape through as it is was an option too and was rejected: a
+/// path carrying `%zz` says either the encoder is broken or the payload is not
+/// ours; in both the right answer is not to show the path at all.
 fn decode_percent(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
     let mut rest = input;
     while let Some((&byte, tail)) = rest.split_first() {
@@ -2963,27 +3025,28 @@ fn decode_percent(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
         let digits = tail.get(..2)?;
         let high = char::from(digits[0]).to_digit(16)?;
         let low = char::from(digits[1]).to_digit(16)?;
-        // audit: iki onaltılık hane en çok 0xff; `u8`'e sığar.
+        // audit: two hex digits are at most 0xff; fits in `u8`.
         out.push((high * 16 + low) as u8);
         rest = &tail[2..];
     }
     Some(())
 }
 
-/// Blok kimliğini taşıyan **bize özel** alan adı.
+/// The field name that carries the block identity, **ours alone**.
 ///
-/// **`aid` DEĞİL** ve bu ayrım kritik: `aid` semantic-prompts şartnamesinde
-/// tanımlı, "uygulama kimliği" anlamına gelen ve genellikle **pid** taşıyan
-/// bir alan — yani oturum boyunca *sabit*, bizimki gibi prompt başına artan
-/// bir sayaç değil. Onu kimlik diye okusaydık, şartnameye uyan herhangi bir
-/// entegrasyon (kullanıcının kendi rc'si, iç içe bir REPL, SSH'ın öte yakası)
-/// her prompt'ta aynı değeri basar, defter onu bitişiksiz görüp kendini
-/// **silerdi**; aralığa denk düşen bir `D;kod;aid=pid` ise bizim bloğumuzun
-/// rengini başkasının koduyla ezerdi — tam da A′'nın reddedilme sebebi olan
-/// "yanlış renk". Yabancı `aid` bu yüzden eskisi gibi **yoksayılıyor**.
+/// **NOT `aid`** and this distinction is critical: `aid` is defined in the
+/// semantic-prompts specification, means "application id" and generally carries a
+/// **pid** — that is, *constant* for the whole session, not a counter that
+/// increases per prompt like ours. If we read it as an identity, any
+/// specification-compliant integration (the user's own rc, a nested REPL, the far
+/// side of SSH) would print the same value at every prompt, the ledger would see it
+/// as non-contiguous and **delete itself**; and a `D;code;aid=pid` falling into the
+/// range would overwrite our block's color with someone else's code — exactly the
+/// "wrong color" that was the reason A′ was rejected. A foreign `aid` is therefore
+/// **ignored** as before.
 const BLOCK_ID_FIELD: &[u8] = b"bt_block=";
 
-/// `bt_block={sayı}` alanının değeri; başka her alan `None`.
+/// The value of the `bt_block={number}` field; any other field is `None`.
 fn block_id(field: &[u8]) -> Option<u32> {
     number(field.strip_prefix(BLOCK_ID_FIELD)?)
 }
@@ -2992,10 +3055,10 @@ fn number<T: std::str::FromStr>(field: &[u8]) -> Option<T> {
     std::str::from_utf8(field).ok()?.parse().ok()
 }
 
-/// [`parse_dock`]'un üç sonucu; olaya [`Scanner::step`] çeviriyor.
+/// [`parse_dock`]'s three results; [`Scanner::step`] converts them to an event.
 ///
-/// Ayrı bir tip, çünkü `parse_dock` `DockEvent`'i **üretemez**: `Update`
-/// varyantı `line`'ı ödünç alıyor ve fonksiyon onu `&mut` tutuyor.
+/// A separate type, because `parse_dock` **cannot produce** a `DockEvent`: the
+/// `Update` variant lends `line` and the function holds it `&mut`.
 enum DockOutcome {
     Update,
     End,
@@ -3004,43 +3067,43 @@ enum DockOutcome {
     Editable,
 }
 
-/// Ayna yükünü çözer ve `line`'a yazar.
+/// Decodes the mirror payload and writes into `line`.
 ///
-/// **Tel biçimi** (alanlar `;` ile, gövdeler base64):
+/// **Wire format** (fields separated by `;`, bodies base64):
 ///
 /// ```text
 /// ESC ] 8133 ; u ; {CURSOR} ; {PREDISPLAY} ; {BUFFER} ; {POSTDISPLAY} ; {region_highlight} BEL
 /// ESC ] 8133 ; e BEL
 /// ESC ] 8133 ; o BEL
-/// ESC ] 8133 ; b ; {dal} BEL
+/// ESC ] 8133 ; b ; {branch} BEL
 /// ESC ] 8133 ; w BEL
 /// ```
 ///
-/// `u` satırı tazeler, `e` (`line-finish`) kapatır, `o` kabuğun "bu görüntü
-/// aynaya sığmıyor" demesidir, `b` de dock'un bağlam satırındaki dalı taşır.
-/// `w` (031) "bu prompt'ta düzenleme widget'ı bağlı" der: terminalin
-/// kabuğa gönderdiği tek dizinin (`CSI 8133 ~`) ön koşulu; yükü yok ve
-/// aynanın durumuna dokunmuyor, `b` gibi.
+/// `u` refreshes the line, `e` (`line-finish`) closes it, `o` is the shell saying
+/// "this display does not fit the mirror", and `b` carries the branch in the dock's
+/// context line. `w` (031) says "the editing widget is bound at this prompt": the
+/// precondition of the only sequence the terminal sends to the shell
+/// (`CSI 8133 ~`); it has no payload and does not touch the mirror's state, like
+/// `b`.
 ///
-/// **`b` aynanın kanalında ama aynanın parçası değil:** tuş başına değil
-/// **prompt başına** geliyor (`precmd`) ve satırın durumuna dokunmuyor. Kendi
-/// OSC numarasını hak etmiyor — dizinin aksine (`CWD_OSC`) dal için bir
-/// sözleşme yok, yani yeni bir numara yalnız bizim betiğimizin bastığı ikinci
-/// bir kanal olurdu. **Fazladan alan
-/// yoksayılır** — [`parse_mark`]'ın bilinmeyen anahtar-değeri tolere etmesiyle
-/// aynı gerekçe: phase-4'ün özel kip sinyali bu ayrıştırıcıyı yeniden açmadan
-/// eklenebilmeli.
+/// **`b` is on the mirror's channel but is not part of the mirror:** it arrives
+/// **per prompt** (`precmd`), not per keystroke, and does not touch the line's
+/// state. It does not deserve its own OSC number — unlike the directory
+/// (`CWD_OSC`) there is no contract for the branch, so a new number would only be a
+/// second channel printed by our script alone. **Extra fields are ignored** — the
+/// same reason as [`parse_mark`] tolerating unknown key-values: phase-4's special
+/// mode signal should be addable without reopening this parser.
 ///
-/// **Neden base64:** gövdeler kullanıcının yazdığı metin, yani içlerinde `;`,
-/// `ESC` ve C0 baytları olabilir — üçü de dizinin çerçevesini bozar. base64'ün
-/// alfabesinde üçünden hiçbiri yok, yani çerçeveleme kuralları (yukarıdaki üç
-/// madde) gövdeye hiç dokunmuyor. Kodlayan taraf saf zsh; fork yok.
+/// **Why base64:** the bodies are text the user typed, so they can contain `;`,
+/// `ESC` and C0 bytes — all three break the sequence's framing. base64's alphabet
+/// has none of the three, so the framing rules (the three points above) never
+/// touch the body. The encoding side is pure zsh; no fork.
 ///
-/// `region_highlight` kayıtları gövdenin içinde satır sonuyla ayrılıyor.
+/// `region_highlight` records are separated by line breaks inside the body.
 ///
-/// Bozuk yükte `line` **boşaltılıyor**: yarım yazılmış bir kayıt hiçbir yere
-/// yayılmıyor (`Malformed` → [`ShellLog::apply_dock`] zaten sıfırlıyor) ama
-/// tamponu kirli bırakmak sonraki okumayı akıl yürütme borcuna çevirirdi.
+/// On a corrupt payload `line` is **emptied**: a half-written record is spread
+/// nowhere (`Malformed` → [`ShellLog::apply_dock`] already resets), but leaving the
+/// buffer dirty would turn the next read into reasoning debt.
 fn parse_dock(
     payload: &[u8],
     decoded: &mut Vec<u8>,
@@ -3053,16 +3116,15 @@ fn parse_dock(
     };
     match op {
         b"e" => DockOutcome::End,
-        // Dalın bozukluğu aynayı düşürmüyor: `Unavailable` "giriş satırını
-        // gösteremiyorum" demek ve ızgarayı devreye sokuyor, oysa okunamayan
-        // bir dal yalnız bağlam satırının bir yarısı. Bozuk gövde dalı
-        // **boşaltıyor** — yanlış dal göstermektense dalsız bir satır.
+        // The branch's corruption does not drop the mirror: `Unavailable` means "I cannot
+        // show the input line" and brings the grid into play, while an unreadable branch
+        // is just half of the context line. A corrupt body **empties** the branch — a line
+        // without a branch rather than showing a wrong branch.
         //
-        // **Alanın hiç olmaması da aynı kapıdan geçiyor** (`b` ile `b;`
-        // arasındaki fark bir kodlayıcı ayrıntısı ve ikisi de "dal yok"
-        // demek). Bir zamanlar bu kol `Malformed` döndürüyordu ve o, tam da
-        // üstteki cümlenin yasakladığı şeydi: kesilmiş bir `b` dizisi giriş
-        // satırını dock'tan düşürüp ızgaraya geri gönderiyordu
+        // **The field's absence goes through the same gate** (the difference between `b`
+        // and `b;` is an encoder detail and both mean "no branch"). This arm once returned
+        // `Malformed` and that was exactly what the sentence above forbids: a truncated
+        // `b` sequence dropped the input line from the dock and sent it back to the grid
         // (`/code-review`, 012 phase-6).
         b"b" => {
             branch.clear();
@@ -3076,40 +3138,40 @@ fn parse_dock(
             }
             DockOutcome::Branch
         }
-        // **Aşımın kabuk tarafındaki ucu.** [`DOCK_PAYLOAD_LIMIT`] yükü burada
-        // keserken kabuk onu **kodlamış** oluyor; `o` kodlamadan önce
-        // ölçtüğünü söylüyor. İkisi aynı bütçenin iki yakası ve ayrı ayrı
-        // gerekli: bu uç kabuğun tuş başına harcadığı zamanı, öteki uç bizim
-        // belleğimizi koruyor. Sonucu aynı olmak **zorunda**, yoksa sınırın
-        // hangi tarafta tutulduğu kullanıcıya farklı davranış olarak yansırdı.
+        // **The shell-side end of the overflow.** While [`DOCK_PAYLOAD_LIMIT`] cuts the
+        // payload here, the shell has already **encoded** it; `o` says it measured before
+        // encoding. The two are the two sides of the same budget and each is necessary
+        // separately: this end protects the time the shell spends per keystroke, the other
+        // end our memory. Their result **must** be the same, otherwise which side the
+        // bound is held on would show up to the user as different behavior.
         b"o" => unavailable(line, DockFault::Overflow),
         b"w" => DockOutcome::Editable,
         b"u" => match decode_line(&mut fields, decoded, line) {
             Some(()) => DockOutcome::Update,
-            // Durum da yazılıyor: `decode_line` daha ilk satırda `Live` diyor
-            // ve yarım kalan bir çözüm onu olduğu gibi bırakırsa tarayıcının
-            // tamponu "canlı" adı altında boş metin taşırdı.
+            // The state is written too: `decode_line` says `Live` on its very first line, and
+            // if a half-finished decode leaves it as is, the scanner's buffer would carry
+            // empty text under the name "live".
             None => unavailable(line, DockFault::Malformed),
         },
         _ => unavailable(line, DockFault::Malformed),
     }
 }
 
-/// Tamponu boşaltır, durumu yazar ve sonucu döndürür.
+/// Empties the buffer, writes the state and returns the result.
 ///
-/// Üç çağıran da aynı şeyi yapmak zorunda: gösteremediğimiz bir satırın metni
-/// tamponda kalırsa sonraki okuma "bu metin taze mi" sorusunu akıl yürütmeyle
-/// yanıtlamak zorunda kalır.
+/// All three callers have to do the same thing: if the text of a line we cannot
+/// show stays in the buffer, the next read has to answer the "is this text fresh"
+/// question by reasoning.
 fn unavailable(line: &mut DockState, fault: DockFault) -> DockOutcome {
     line.reset();
     line.status = DockStatus::Unavailable(fault);
     DockOutcome::Unavailable(fault)
 }
 
-/// [`DockState::last_ink`]'in kümeli hâli: görüntünün son satırının son
-/// mürekkepli **kümesinin** baş karakteri. Kümeler ancak ileri doğru
-/// yürünebiliyor ([`crate::cluster::Walk`]), yani son `\n`'den sonrası
-/// baştan taranıyor — satır sonunda cevap sıfırlanıyor.
+/// The clustered form of [`DockState::last_ink`]: the first character of the last
+/// inked **cluster** of the display's last line. Clusters can only be walked
+/// forward ([`crate::cluster::Walk`]), so what comes after the last `\n` is
+/// scanned from the start — the answer is reset at the line end.
 fn last_cluster_ink(line: &DockState) -> Option<char> {
     let display = line
         .predisplay
@@ -3127,57 +3189,59 @@ fn last_cluster_ink(line: &DockState) -> Option<char> {
     ink
 }
 
-/// `u` yükünün alanlarını `line`'a çözer; zorunlu beşinden biri eksik ya da
-/// herhangi bir metin gövdesi bozuksa `None`. Son ikisi (`KEYMAP`,
-/// `PREBUFFER`) isteğe bağlı.
+/// Decodes the fields of the `u` payload into `line`; `None` if one of the five
+/// mandatory ones is missing or any text body is corrupt. The last two (`KEYMAP`,
+/// `PREBUFFER`) are optional.
 fn decode_line<'a>(
     fields: &mut impl Iterator<Item = &'a [u8]>,
     decoded: &mut Vec<u8>,
     line: &mut DockState,
 ) -> Option<()> {
     line.status = DockStatus::Live;
-    // İmleç alanı tel sırasında önce geliyor ama normalize edilmesi
-    // `PREDISPLAY` çözülene kadar bekliyor.
+    // The cursor field comes first in wire order but its normalization waits until
+    // `PREDISPLAY` is decoded.
     let cursor_in_buffer: usize = number(fields.next()?)?;
     decode_text(fields.next()?, decoded, &mut line.predisplay)?;
     decode_text(fields.next()?, decoded, &mut line.buffer)?;
     decode_text(fields.next()?, decoded, &mut line.postdisplay)?;
 
-    // Üç uzunluk da burada: ofsetlerin tek uzaya inmesi ([`Highlight::start`])
-    // ve görüntünün dışına taşan bir ofsetin kırpılması bunları istiyor.
+    // All three lengths are here: folding the offsets into a single space
+    // ([`Highlight::start`]) and clamping an offset that overflows the display need
+    // them.
     let predisplay_chars = line.predisplay.chars().count();
     let text_chars = predisplay_chars + line.buffer.chars().count();
     let display_chars = text_chars + line.postdisplay.chars().count();
-    // `$CURSOR` en çok `$#BUFFER`'dır; kırpma kabuğun sözüne güvenmemek için.
+    // `$CURSOR` is at most `$#BUFFER`; the clamp is so as not to trust the shell's word.
     line.cursor = predisplay_chars
         .checked_add(cursor_in_buffer)?
         .min(text_chars);
     line.display_chars = display_chars;
-    // Görüntünün **son satırının** sondan ilk boşluk olmayan karakteri; üç
-    // gövde görüntü sırasında.
+    // The last non-blank character of the display's **last line**, from the end; the
+    // three bodies in display order.
     //
-    // **Son satır, son karakter değil** (032): kapının öteki yarısı
-    // ızgaranın **bir** satırını tarıyor — bastırmanın alt ucu, yani
-    // görüntünün son satırı. `echo a\necho b\n` yapıştırmasında zsh son satır
-    // sonunu tamponda tutuyor ve o satır **boş**; ayna `'b'` deseydi (ya da
-    // `'\n'` — genişliği `None` olduğu için eski süzgeçten geçiyordu) boş
-    // ızgara satırıyla hiç eşleşmez ve cevapsız her karede satır bayat
-    // sayılırdı. Son `\n`'den sonrası boşsa `None`, ızgaranın boş satırıyla
-    // aynı cevap. Sarma bunu bozmuyor: sarılan satırın son karakteri son
-    // görsel satırda.
+    // **The last line, not the last character** (032): the other half of the gate
+    // scans **one** row of the grid — suppression's lower end, that is the display's
+    // last line. In a paste of `echo a\necho b\n`, zsh keeps the final line break in
+    // the buffer and that line is **empty**; if the mirror said `'b'` (or `'\n'` —
+    // which used to pass the old filter because its width is `None`) it would never
+    // match the grid's empty line and in every unanswered frame the line would be
+    // counted stale. If what comes after the last `\n` is empty, `None`, the same
+    // answer as the grid's empty line. Wrapping does not break this: the last
+    // character of a wrapped line is on the last visual line.
     //
-    // **Bilinen sınır, yönü güvenli** (032 phase-4): `PS2` satırında ızgara
-    // kullanıcının `for> ` mürekkebini taşıyor, ayna taşımıyor (`PS2`'ye
-    // dokunulmuyor ve genişliği aynada yok). `BUFFER` boşken iki taraf
-    // ayrışıyor ve cevapsız karede içerik kapısı "bayat" diyor; zamansal
-    // kapı (`line-init`'in aynası ⏎'in cevabı) bugün olduğu gibi kurtarıyor,
-    // kurtaramadığı anda (redisplay'siz tuş) satır iki yerde görünür.
+    // **Known limit, safe direction** (032 phase-4): on a `PS2` line the grid carries
+    // the user's `for> ` ink, the mirror does not (`PS2` is not touched and its width
+    // is not in the mirror). When `BUFFER` is empty the two sides diverge and in an
+    // unanswered frame the content gate says "stale"; the temporal gate (`line-init`'s
+    // mirror is ⏎'s answer) rescues as it does today, and at the moment it cannot
+    // rescue (a key without redisplay) the line is visible in two places.
     //
-    // **Kümeleme açıkken (035) ölçüt kümenin baş karakteri**: ızgara
-    // `👍🏽`'yi tek hücrede tutuyor ve hücrenin `c`'si `👍`; ayna `🏽` deseydi
-    // kapı 024'ün belirtisini — satır her tuşta ızgaraya fırlar — geri
-    // getirirdi. Aşağıdaki üç ölçüt aynen: kümeye katılan birleştirici
-    // zaten ayrı sayılmıyor, başsız birleştirici (sütunu sıfır) atlanıyor.
+    // **With clustering on (035) the criterion is the cluster's first character**:
+    // the grid keeps `👍🏽` in a single cell and the cell's `c` is `👍`; if the mirror
+    // said `🏽` the gate would bring back 024's symptom — the line leaps to the grid on
+    // every keystroke. The three criteria below as they are: a combining mark joining
+    // a cluster is already not counted separately, a headless combining mark (column
+    // zero) is skipped.
     line.last_ink = if line.cluster {
         last_cluster_ink(line)
     } else {
@@ -3187,45 +3251,44 @@ fn decode_line<'a>(
             .chain(line.postdisplay.chars())
             .rev()
             .take_while(|&ch| ch != '\n')
-            // **Ölçüt `' '` ve `'\t'`; `is_whitespace()` değil** ve bu bilerek
-            // dar: kapının öteki yarısı ızgarayı tarıyor
-            // (`Session::last_ink_in_row`) ve o da `frame()`'in atlama kapısına
-            // çivili — orada mürekkepsizlik yalnız boşluk, spacer ve gizli hücre.
-            // `is_whitespace()` deseydik satır sonu NBSP (U+00A0, U+2007, U+3000)
-            // taşıyan bir tamponda ayna önceki harfi, ızgara NBSP'yi söyler,
-            // ikisi hiç eşleşmez ve satır kalıcı olarak **bayat** sayılırdı: hem
-            // ızgarada hem dock'ta çizilirdi.
+            // **The criterion is `' '` and `'\t'`; not `is_whitespace()`** and this is
+            // deliberately narrow: the other half of the gate scans the grid
+            // (`Session::last_ink_in_row`) and that is pinned to `frame()`'s skip gate —
+            // there inklessness is only blank, spacer and hidden cell. If we said
+            // `is_whitespace()`, in a buffer ending with NBSP (U+00A0, U+2007, U+3000) the
+            // mirror would say the previous letter and the grid the NBSP, the two would never
+            // match and the line would be counted permanently **stale**: drawn both on the
+            // grid and in the dock.
             //
-            // **Sekme ise tersi ve ölçüldü** (kullanıcı, 2026-09-18): ayna **ham**
-            // tamponu taşıyor, ızgara ise **çizilmiş** hâli tutuyor. Terminal
-            // sekmeyi boşluğa açtığı için o karakter hücreye hiç ulaşmıyor —
-            // gerçek zsh'te boş satırda Tab `BUFFER='\t'` yapıyor, yani ayna
-            // `Some('\t')`, ızgara `None` diyor ve kapı düşüyordu. Belirtisi
-            // görünürdü: bastırma kalkıyor, caret dock'tan ızgaraya sıçrıyordu.
-            // Sekmeyi de mürekkepsiz saymak iki yarıyı yeniden eşitliyor — `"ls\t"`
-            // ikisinde de `'s'`, `"\t"` ikisinde de `None`.
+            // **Tab is the reverse and was measured** (user, 2026-09-18): the mirror carries
+            // the **raw** buffer while the grid holds the **drawn** state. Since the terminal
+            // expands the tab into blanks, that character never reaches the cell — in a real
+            // zsh, Tab on an empty line makes `BUFFER='\t'`, so the mirror says `Some('\t')`,
+            // the grid says `None` and the gate dropped. The symptom was visible: suppression
+            // lifted and the caret leapt from the dock to the grid. Counting the tab as
+            // inkless as well equalizes the two halves again — `"ls\t"` is `'s'` in both,
+            // `"\t"` is `None` in both.
             //
-            // **Ham kontrol karakteri bu karşılaştırmaya hiç gelmiyor** (025):
-            // ZLE `\x01`'i ızgarada `^A` diye çiziyor ve dock onu hiç çizmiyor,
-            // yani o satır [`DockStatus::Control`] ile ızgarada kalıyor ve
-            // bastırılmıyor. Bir dönem burada "kalan sınır" diye yazılıydı ve
-            // yazıldığından kötüydü: `^A` yalnız **son** karakterken kapı
-            // düşüyordu, ortadayken satır dock'a gidip kayboluyordu.
+            // **A raw control character never comes to this comparison** (025): ZLE draws
+            // `\x01` as `^A` on the grid and the dock does not draw it at all, so that line
+            // stays on the grid with [`DockStatus::Control`] and is not suppressed. It was once
+            // written here as a "remaining limit" and was worse than written: only when `^A`
+            // was the **last** character did the gate drop, when it was in the middle the line
+            // went to the dock and vanished.
             //
-            // **Üçüncü ölçüt sıfır genişlik ve o 024'te geldi** (kullanıcı
-            // bildirdi, ölçüldü): birleştirici kod noktaları (VS16, ZWJ, ten
-            // rengi) ızgara hücresine **hiç girmiyor** — alacritty onları
-            // `CellExtra`'da tutuyor ve `cell.c` taban karakteri taşıyor. Yani
-            // `❤️` (U+2764 + U+FE0F) yazan bir tamponda ayna `U+FE0F`, ızgara
-            // `U+2764` diyor ve ikisi **hiçbir zaman** eşleşmiyor: kapı kalıcı
-            // olarak "bayat" der, bastırma her tuşta kalkar ve giriş satırı
-            // dock'tan ızgaraya fırlar. Sekmenin yukarıdaki gerekçesiyle aynı
-            // cümle — ayna **ham** tamponu, ızgara **çizilmiş** hâli taşıyor — ve
-            // çaresi de aynı: ızgaraya ulaşmayan karakteri ayna da saymıyor.
+            // **The third criterion is zero width and it came in 024** (the user reported,
+            // measured): combining code points (VS16, ZWJ, skin tone) **never enter** the grid
+            // cell — alacritty keeps them in `CellExtra` and `cell.c` carries the base
+            // character. So in a buffer with `❤️` (U+2764 + U+FE0F) the mirror says `U+FE0F`,
+            // the grid `U+2764` and the two **never** match: the gate says "stale" permanently,
+            // suppression lifts on every keystroke and the input line leaps from the dock to
+            // the grid. The same sentence as the tab's reason above — the mirror carries the
+            // **raw** buffer, the grid the **drawn** state — and the remedy is the same too:
+            // the mirror does not count a character that does not reach the grid either.
             //
-            // Ölçüt `unicode-width`'in `Some(0)`'ı, yani `dock::column_width`'in
-            // beslendiği kaynağın ta kendisi. Kontrol karakterleri `None` dönüyor
-            // ve bu süzgece **girmiyor**: taşıyan satır zaten `Control`.
+            // The criterion is `unicode-width`'s `Some(0)`, that is the very source
+            // `dock::column_width` is fed from. Control characters return `None` and **do not
+            // enter** this filter: the line carrying them is already `Control`.
             .find(|ch| *ch != ' ' && *ch != '\t' && UnicodeWidthChar::width(*ch) != Some(0))
     };
 
@@ -3239,33 +3302,35 @@ fn decode_line<'a>(
             .filter_map(|entry| parse_highlight(entry, predisplay_chars, display_chars)),
     );
 
-    // KEYMAP **opsiyonel alan** ve bu, telin "fazladan alan yoksayılır"
-    // kuralının ters yönü: alan phase-6'nın kapısında eklendi ve açık bir
-    // pencere hâlâ eski betikle koşuyor olabilir (`plan.md` → Göç). Yokluğu
-    // yükü bozmuyor, yalnız `false` bırakıyor — yani yapıştırma sarılı yola
-    // döner. Yön güvenli: eksik bilgi istisnayı **kapatıyor**, açmıyor.
+    // KEYMAP is an **optional field** and this is the reverse direction of the wire's
+    // "extra fields are ignored" rule: the field was added at phase-6's gate and an
+    // open window may still be running with the old script (`plan.md` → Göç). Its
+    // absence does not corrupt the payload, it just leaves `false` — that is, the
+    // paste returns to the wrapped path. The direction is safe: missing information
+    // **closes** the exception, it does not open it.
     line.insert_keymap = fields.next().is_some_and(|field| {
         decoded.clear();
         decode_base64(field, decoded).is_some()
             && std::str::from_utf8(decoded).is_ok_and(|name| INSERT_KEYMAPS.contains(&name))
     });
-    // PREBUFFER **yedinci, isteğe bağlı gövde** (032) ve `KEYMAP`'in
-    // arkasında, çünkü tel yalnız sona büyüyebiliyor: eski betikle koşan
-    // pencere onu hiç göndermiyor ve yokluğu yükü bozmuyor, boş bırakıyor.
-    // Bozuk bir gövde ise öteki metin gövdeleriyle aynı kuralda — yük bozuk.
+    // PREBUFFER is the **seventh, optional body** (032) and sits behind `KEYMAP`,
+    // because the wire can only grow at the end: a window running with an old script
+    // never sends it and its absence does not corrupt the payload, it leaves it empty.
+    // A corrupt body is under the same rule as the other text bodies — the payload is
+    // corrupt.
     //
-    // Görüntü uzayına **girmiyor**: yukarıdaki üç uzunluk ve son mürekkep onu
-    // görmüyor (zsh'in `CURSOR`'ı ve `region_highlight`'ı da görmüyor).
+    // It **does not enter** the display space: the three lengths above and the last
+    // ink do not see it (zsh's `CURSOR` and `region_highlight` do not see it either).
     line.prebuffer.clear();
     if let Some(field) = fields.next() {
         decode_text(field, decoded, &mut line.prebuffer)?;
     }
 
-    // **Dock'un çizmediği kontrol karakteri** ([`DockStatus::Control`]).
-    // Sekme istisna ve gerekçesi kolun doc'unda: bilgi taşımıyor. **Satır
-    // sonu da istisna** (032): dock satırı kırıyor, yani onu gösterebiliyor —
-    // 032'ye kadar satır sonlu görüntü kendi kolunda (`Multiline`) ızgarada
-    // kalıyordu. `PREBUFFER` de soruluyor, çünkü dock onu da çiziyor.
+    // **A control character the dock does not draw** ([`DockStatus::Control`]). Tab is
+    // an exception and its reason is in the arm's doc: it carries no information. **A
+    // line break is an exception too** (032): the dock breaks lines, so it can show it
+    // — until 032 a display with line breaks stayed on the grid in its own arm
+    // (`Multiline`). `PREBUFFER` is also asked, because the dock draws it too.
     if line
         .prebuffer
         .chars()
@@ -3279,21 +3344,21 @@ fn decode_line<'a>(
     Some(())
 }
 
-/// Basılan tuşun **metne dönüştüğü** zsh keymap'leri.
+/// The zsh keymaps in which a pressed key **turns into text**.
 ///
-/// Liste bir **izin listesi** ve öyle olmak zorunda: tanımadığımız bir keymap
-/// (`bindkey -N` ile kullanıcının yarattığı, ya da zsh'in ileride ekleyeceği
-/// biri) ekleme keymap'i **sayılmıyor** ve yapıştırma sarılı yoldan gidiyor.
-/// Yasak listesi olsaydı her yeni keymap adı sessizce istisnaya girerdi.
+/// The list is an **allow list** and has to be: a keymap we do not recognize (one
+/// the user created with `bindkey -N`, or one zsh adds in the future) is **not
+/// counted** as an insert keymap and the paste goes the wrapped way. If it were a
+/// deny list every new keymap name would silently enter the exception.
 ///
-/// Üçü de aynı şeyi söylüyor ama üç ayrı yoldan: `main` zsh'in etkin
-/// bağlamasının takma adı (emacs kipinde de vi'nin **ekleme** kipinde de
-/// rapor edilen değer bu), `emacs` ile `viins` de doğrudan adlandırılmış
-/// hâlleri. Dışarıda kalanlar: `vicmd` (tuşlar komut), `visual`, `viopp`,
-/// `isearch` ve `command` — hiçbirinde basılan bayt metne dönüşmüyor.
+/// All three say the same thing but by three different routes: `main` is an alias
+/// for zsh's active binding (the value reported both in emacs mode and in vi's
+/// **insert** mode), `emacs` and `viins` are the directly named states. The ones
+/// left out: `vicmd` (the keys are commands), `visual`, `viopp`, `isearch` and
+/// `command` — in none of them does a pressed byte turn into text.
 const INSERT_KEYMAPS: [&str; 3] = ["main", "emacs", "viins"];
 
-/// base64 alanını çözer ve `into`'ya **kapasitesini koruyarak** yazar.
+/// Decodes a base64 field and writes into `into`, **keeping its capacity**.
 fn decode_text(field: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option<()> {
     decoded.clear();
     decode_base64(field, decoded)?;
@@ -3303,16 +3368,15 @@ fn decode_text(field: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option
     Some(())
 }
 
-/// `region_highlight`'ın bir kaydı: `[P]{başlangıç} {bitiş} {spec} [memo=…]`.
+/// One record of `region_highlight`: `[P]{start} {end} {spec} [memo=…]`.
 ///
-/// `memo=` ve tanınmayan kuyruk alanları yoksayılıyor (`zshzle(1)` onları
-/// serbest bırakıyor).
+/// `memo=` and unrecognized tail fields are ignored (`zshzle(1)` leaves them free).
 ///
-/// **Aralık `display_chars`'a kırpılıyor ve boş kalan düşüyor.** Çizen tarafa
-/// metnin dışını gösteren bir ofset taşımak orada bir `panic` (ya da sessiz
-/// bir kırpma) borcu doğururdu ve taşan ofset varsayımsal değil: bayat bir
-/// `BUFFER` anlık görüntüsünden `region_highlight` kuran her eklenti üretir.
-/// Ters aralık da aynı kapıdan düşüyor.
+/// **The range is clamped to `display_chars` and what ends up empty is dropped.**
+/// Carrying an offset that points outside the text to the drawing side would create
+/// a `panic` (or silent clamping) debt there, and an overflowing offset is not
+/// hypothetical: any plugin that builds `region_highlight` from a stale `BUFFER`
+/// snapshot produces it. A reversed range drops through the same gate.
 fn parse_highlight(
     entry: &str,
     predisplay_chars: usize,
@@ -3320,7 +3384,7 @@ fn parse_highlight(
 ) -> Option<Highlight> {
     let mut parts = entry.split_whitespace();
     let first = parts.next()?;
-    // `P` öneki ofseti `PREDISPLAY`'in başına bağlıyor; öneksizi `BUFFER`'ın.
+    // The `P` prefix ties the offset to the start of `PREDISPLAY`; the unprefixed one to `BUFFER`'s.
     let (start_text, shift) = match first.strip_prefix('P') {
         Some(rest) => (rest, 0),
         None => (first, predisplay_chars),
@@ -3340,12 +3404,12 @@ fn parse_highlight(
     (start < end).then_some(Highlight { start, end, style })
 }
 
-/// zsh'in adlı renkleri, `HighlightColor::Indexed` sırasıyla.
+/// zsh's named colors, in `HighlightColor::Indexed` order.
 const HIGHLIGHT_COLOR_NAMES: [&str; 8] = [
     "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
 ];
 
-/// `fg=red,bold` gibi bir spec'i stile çevirir; tanınmayan bileşen düşer.
+/// Converts a spec like `fg=red,bold` into a style; an unrecognized component drops.
 fn parse_style(spec: &str) -> HighlightStyle {
     let mut style = HighlightStyle::default();
     for part in spec.split(',') {
@@ -3365,7 +3429,7 @@ fn parse_style(spec: &str) -> HighlightStyle {
     style
 }
 
-/// `#rrggbb`, `0`–`255` ya da adlı renk; `default` ve tanınmayan → `None`.
+/// `#rrggbb`, `0`–`255` or a named color; `default` and unrecognized → `None`.
 fn parse_highlight_color(value: &str) -> Option<HighlightColor> {
     if let Some(hex) = value.strip_prefix('#') {
         return (hex.len() == 6)
@@ -3382,10 +3446,10 @@ fn parse_highlight_color(value: &str) -> Option<HighlightColor> {
     Some(HighlightColor::Indexed(at as u8))
 }
 
-/// base64 alfabesinde olmayan baytın tablodaki karşılığı.
+/// The table's counterpart of a byte that is not in the base64 alphabet.
 const B64_INVALID: u8 = 0xff;
 
-/// `bayt → 6 bit` çözüm tablosu; alfabe dışı her bayt [`B64_INVALID`].
+/// The `byte → 6 bits` decode table; every byte outside the alphabet is [`B64_INVALID`].
 const B64_DECODE: [u8; 256] = {
     let mut table = [B64_INVALID; 256];
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -3397,16 +3461,18 @@ const B64_DECODE: [u8; 256] = {
     table
 };
 
-/// base64'ü `out`'a çözer; bozuk girdide `None` ve `out` yarım kalabilir
-/// (çağıran onu kullanmıyor).
+/// Decodes base64 into `out`; on corrupt input `None` and `out` may be left
+/// half-written (the caller does not use it).
 ///
-/// **Elle yazıldı:** bir base64 crate'i mimari karardır (`proje.md` → Yayın
-/// etkisi) ve bu phase onu açmıyor; tablo + `chunks_exact` otuz satır.
+/// **Written by hand:** a base64 crate is an architectural decision (`proje.md` →
+/// Yayın etkisi) and this phase does not open it; a table + `chunks_exact` is thirty
+/// lines.
 ///
-/// **Dolgu opsiyonel.** Kodlayan taraf saf zsh ve dolgu basmayan bir uygulama
-/// da geçerli base64 üretir; dolguyu şart koşmak kanalı kodlayıcının bir
-/// uygulama ayrıntısına bağlardı. Dolgudan sonra gövde uzunluğu 4'e bölünmeli
-/// ya da 2/3 artık bırakmalı — 1 artık base64 değildir.
+/// **Padding is optional.** The encoding side is pure zsh and an implementation that
+/// prints no padding also produces valid base64; to require padding would tie the
+/// channel to an implementation detail of the encoder. After padding the body
+/// length must be divisible by 4 or leave a remainder of 2/3 — a remainder of 1 is
+/// not base64.
 fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
     let body = match input {
         [rest @ .., b'=', b'='] => rest,
@@ -3419,9 +3485,9 @@ fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
         let b = b64_value(chunk[1])?;
         let c = b64_value(chunk[2])?;
         let d = b64_value(chunk[3])?;
-        // Maskeler **zorunlu**, süs değil: altı bitlik bir değeri maskesiz
-        // kaydırmak `u8`'i taşırır ve debug'da panik olur — `bt-core`'da
-        // gerekçesiz panik yok (`CLAUDE.md`).
+        // The masks are **mandatory**, not decoration: shifting a six-bit value without a
+        // mask overflows a `u8` and panics in debug — there is no unjustified panic in
+        // `bt-core` (`CLAUDE.md`).
         out.push((a << 2) | (b >> 4));
         out.push(((b & 0x0f) << 4) | (c >> 2));
         out.push(((c & 0x03) << 6) | d);
@@ -3439,7 +3505,7 @@ fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
             out.push(((b & 0x0f) << 4) | (c >> 2));
             Some(())
         }
-        // Tek artık base64 değildir: altı bit bir bayt etmiyor.
+        // A single leftover is not base64: six bits do not make a byte.
         _ => None,
     }
 }
@@ -3456,8 +3522,8 @@ mod tests {
     use super::*;
     use crate::session::CellHalf;
 
-    /// Diziyi verilen parçalar hâlinde besler; tarayıcı parçalar arasında
-    /// durumunu taşımak zorunda.
+    /// Feeds the sequence in the given chunks; the scanner has to carry its state
+    /// between chunks.
     fn marks_of_chunks(chunks: &[&[u8]]) -> Vec<Mark> {
         let mut scanner = Scanner::new();
         let mut seen = Vec::new();
@@ -3512,8 +3578,8 @@ mod tests {
 
     #[test]
     fn unreadable_exit_code_still_ends_the_command() {
-        // Komutun bittiği bilgisi kodundan değerli: yükün parametresi bozuk
-        // olsa da işaret düşmez, yalnız kod bilinmez.
+        // That the command ended is worth more than its code: even if the payload's
+        // parameter is corrupt the mark is not dropped, only the code is unknown.
         assert_eq!(
             marks(b"\x1b]133;D;abc\x07"),
             vec![Mark::CommandEnd {
@@ -3540,8 +3606,8 @@ mod tests {
 
     #[test]
     fn unknown_attributes_beside_the_mark_are_still_tolerated() {
-        // Kabuklar işaretin yanına tanımadığımız anahtar-değerler iliştirebiliyor;
-        // onları bilmemek ne işareti ne kimliği kaybettirmeli.
+        // Shells can attach key-values we do not recognize next to the mark; not knowing
+        // them must lose neither the mark nor the identity.
         assert_eq!(
             marks(b"\x1b]133;A;cl=m;bt_block=9\x07"),
             vec![Mark::PromptStart { id: Some(9) }]
@@ -3554,8 +3620,8 @@ mod tests {
 
     #[test]
     fn a_code_less_command_end_keeps_its_id() {
-        // İlk alan körlemesine koda sayılsaydı `bt_block=7`'yi yutardı ve blok
-        // defterde hiç kapanmazdı.
+        // If the first field were blindly counted as the code it would swallow
+        // `bt_block=7` and the block would never close in the ledger.
         assert_eq!(
             marks(b"\x1b]133;D;bt_block=7\x07"),
             vec![Mark::CommandEnd {
@@ -3579,13 +3645,13 @@ mod tests {
 
     #[test]
     fn bare_escape_dispatches_like_vte() {
-        // `vte` diziyi ESC'i görünce dağıtıyor, `\`'i beklemeden: peş peşe iki
-        // dizi araya sonlandırıcı girmeden de okunur.
+        // `vte` dispatches the sequence on seeing ESC, without waiting for `\`: two
+        // back-to-back sequences are read without a terminator between them.
         assert_eq!(
             marks(b"\x1b]133;A\x1b]133;B\x07"),
             vec![Mark::PromptStart { id: None }, Mark::PromptEnd]
         );
-        // Ve ESC'ten sonra gelen CSI diziyi bozmuyor.
+        // And a CSI following the ESC does not corrupt the sequence.
         assert_eq!(marks(b"\x1b]133;C\x1b[0m"), vec![Mark::CommandStart]);
     }
 
@@ -3600,16 +3666,16 @@ mod tests {
                     exit: Some(7),
                     id: None
                 }],
-                "bölünme noktası {at}"
+                "split point {at}"
             );
         }
     }
 
     #[test]
     fn escape_survives_the_bytes_vte_executes_in_place() {
-        // `advance_esc` bu baytlarda `Escape`'te kalıyor, yani ardından gelen
-        // `]` diziyi gerçekten açıyor. Ground'a düşen bir tarayıcı işareti
-        // sessizce kaybeder ve durum ızgaradan ayrılırdı.
+        // On these bytes `advance_esc` stays in `Escape`, so the `]` that follows really
+        // does open a sequence. A scanner that fell to Ground would silently lose the mark
+        // and the state would split from the grid.
         assert_eq!(
             marks(b"\x1b\r]133;A\x07"),
             vec![Mark::PromptStart { id: None }]
@@ -3617,15 +3683,15 @@ mod tests {
         assert_eq!(marks(b"\x1b\x07]133;B\x07"), vec![Mark::PromptEnd]);
         assert_eq!(marks(b"\x1b\x80]133;C\x07"), vec![Mark::CommandStart]);
 
-        // Ve `Escape`'i gerçekten **bitiren** iki C0'da (0x18, 0x1A) dizi
-        // açılmıyor — `advance_esc` onları Ground'a götürüyor.
+        // And on the two C0s that really **end** `Escape` (0x18, 0x1A) a sequence is not
+        // opened — `advance_esc` takes them to Ground.
         assert_eq!(marks(b"\x1b\x18]133;A\x07"), vec![]);
         assert_eq!(marks(b"\x1b\x1a]133;A\x07"), vec![]);
     }
 
-    /// Diziyi parçalar hâlinde besler; sayacı ve arkasından görülen işaretleri
-    /// birlikte döndürür — CSI kolunun iki iddiası da ("bayrağı kurdu mu",
-    /// "arkasındakini yuttu mu") tek çağrıda sorulabilsin diye.
+    /// Feeds the sequence in chunks; returns the counter and the marks seen after it
+    /// together — so that both claims of the CSI arm ("did it set the flag", "did it
+    /// swallow what comes after") can be asked in a single call.
     fn clears_and_marks_of_chunks(chunks: &[&[u8]]) -> (u32, Vec<Mark>) {
         let mut scanner = Scanner::new();
         let mut seen = Vec::new();
@@ -3647,36 +3713,40 @@ mod tests {
 
     #[test]
     fn only_erase_all_sets_the_screen_clear() {
-        // Tanınan **tek** dizi `CSI 2 J`. `CSI J` parametresiz ED, yani ED 0
-        // (imleçten aşağısı) ve `CSI 3 J` geçmişi siliyor — ikisi de ekranı
-        // kasten temizlemek değil.
+        // The **only** recognized sequence is `CSI 2 J`. `CSI J` is a parameterless ED,
+        // that is ED 0 (from the cursor down) and `CSI 3 J` deletes the history — neither
+        // is deliberately clearing the screen.
         assert_eq!(clears(b"\x1b[2J"), 1);
-        assert_eq!(clears(b"\x1b[02J"), 1, "başındaki sıfır diziyi bozmamalı");
+        assert_eq!(
+            clears(b"\x1b[02J"),
+            1,
+            "a leading zero must not break the sequence"
+        );
         assert_eq!(clears(b"\x1b[J"), 0);
         assert_eq!(clears(b"\x1b[0J"), 0);
         assert_eq!(clears(b"\x1b[1J"), 0);
         assert_eq!(clears(b"\x1b[3J"), 0);
         assert_eq!(clears(b"\x1b[22J"), 0);
-        assert_eq!(clears(b"\x1b[2K"), 0, "sonlandırıcı da eşleşmeli");
-        // Özel işaret (`?`, DECSED), ikinci parametre ve ara bayt: üçü de
-        // diziyi tanınmaz yapıyor.
+        assert_eq!(clears(b"\x1b[2K"), 0, "the terminator must match too");
+        // A private marker (`?`, DECSED), a second parameter and an intermediate byte:
+        // all three make the sequence unrecognized.
         assert_eq!(clears(b"\x1b[?2J"), 0);
         assert_eq!(clears(b"\x1b[2;2J"), 0);
         assert_eq!(clears(b"\x1b[2 J"), 0);
-        // Parametre tavanı: sayaç taşmadan dizi tanınmaz oluyor.
+        // The parameter ceiling: the sequence becomes unrecognized before the counter overflows.
         assert_eq!(clears(b"\x1b[99999999999999999999J"), 0);
-        // İki temizleme iki kez sayılıyor: tüketici nesil sayacı, bayrak değil.
+        // Two clears are counted twice: the consumer is a generation counter, not a flag.
         assert_eq!(clears(b"\x1b[2J\x1b[2J"), 2);
     }
 
     #[test]
     fn a_csi_never_swallows_the_mark_behind_it() {
-        // **Bu sınamanın kapattığı kusur sessiz:** bozuk bir CSI'da takılan
-        // tarayıcı peşinden gelen `ESC ] 133;…`'ü yutar ve bloklar, giriş
-        // satırının bastırılması, dock birlikte ölür.
+        // **The defect this test closes is silent:** a scanner stuck in a corrupt CSI
+        // swallows the `ESC ] 133;…` that follows, and blocks, suppression of the input
+        // line and the dock die together.
         let mark = vec![Mark::PromptStart { id: None }];
 
-        // (1) Tamamlanan CSI'lardan sonra: tanınan da tanınmayan da.
+        // (1) After completed CSIs: both recognized and unrecognized.
         assert_eq!(
             clears_and_marks_of_chunks(&[b"\x1b[2J\x1b]133;A\x07"]),
             (1, mark.clone())
@@ -3685,8 +3755,8 @@ mod tests {
             clears_and_marks_of_chunks(&[b"\x1b[?1049h\x1b]133;A\x07"]),
             (0, mark.clone())
         );
-        // (2) Yarım kalan CSI'yı `ESC` iptal ediyor (`vte::anywhere`), yani
-        // bizim dizimiz yine açılıyor.
+        // (2) `ESC` cancels a half-finished CSI (`vte::anywhere`), so our sequence opens
+        // again.
         assert_eq!(
             clears_and_marks_of_chunks(&[b"\x1b[2;3\x1b]133;A\x07"]),
             (0, mark.clone())
@@ -3695,8 +3765,8 @@ mod tests {
             clears_and_marks_of_chunks(&[b"\x1b[\x1b]133;A\x07"]),
             (0, mark.clone())
         );
-        // (3) `CAN`/`SUB` diziyi `Ground`'a götürüyor; oradan yeni bir dizi
-        // ancak `ESC` ile açılır.
+        // (3) `CAN`/`SUB` take the sequence to `Ground`; from there a new sequence can
+        // open only with `ESC`.
         assert_eq!(
             clears_and_marks_of_chunks(&[b"\x1b[2\x18", b"\x1b]133;A\x07"]),
             (0, mark.clone())
@@ -3705,8 +3775,8 @@ mod tests {
             clears_and_marks_of_chunks(&[b"\x1b[2\x18]133;A\x07"]),
             (0, vec![])
         );
-        // (4) Sonlandırıcısı hiç gelmeyen bir CSI'yı da `ESC` kurtarıyor:
-        // tavan yalnız parametreyi tanınmaz yapıyor, durumu bırakmıyor.
+        // (4) `ESC` also rescues a CSI whose terminator never arrives: the ceiling only
+        // makes the parameter unrecognized, it does not leave the state.
         let long = b"\x1b["
             .iter()
             .copied()
@@ -3717,29 +3787,29 @@ mod tests {
 
     #[test]
     fn a_bel_inside_a_csi_is_not_a_terminator() {
-        // OSC'nin sonlandırıcı kümesi CSI'da geçerli **değil**: `vte`'nin CSI
-        // durumları C0'ları yerinde `execute` edip durumu değiştirmiyor, yani
-        // `ESC [ 2 BEL J` hâlâ bir ED 2. İki kümeyi paylaştıran bir düzenleme
-        // ızgaranın gördüğü dizi sınırıyla bizimkini ayırırdı.
+        // OSC's terminator set is **not** valid in CSI: `vte`'s CSI states `execute` C0s
+        // in place and do not change the state, so `ESC [ 2 BEL J` is still an ED 2. An
+        // arrangement that shared the two sets would split the sequence boundary the grid
+        // sees from ours.
         assert_eq!(clears(b"\x1b[2\x07J"), 1);
         assert_eq!(clears(b"\x1b[\r2J"), 1);
-        // 0x7F ve 0x7F'ten büyük baytlar da yoksayılıyor (`anywhere`'in son
-        // kolu), durumu bırakmıyor.
+        // 0x7F and bytes above 0x7F are ignored too (`anywhere`'s last arm), they do not
+        // leave the state.
         assert_eq!(clears(b"\x1b[2\x7fJ"), 1);
         assert_eq!(clears(b"\x1b[2\x80J"), 1);
     }
 
     #[test]
     fn the_screen_clear_survives_a_split_at_every_byte() {
-        // Durumun tamamı chunk sınırında taşınmak zorunda: "CSI'dayım",
-        // "parametre 2" ve "dizi hâlâ sade" de iki `read()` arasında yaşıyor.
+        // The whole state has to be carried across a chunk boundary: "I'm in a CSI",
+        // "parameter 2" and "the sequence is still plain" live between two `read()`s too.
         let seq: &[u8] = b"\x1b[2J";
         for at in 0..=seq.len() {
             let (head, tail) = seq.split_at(at);
             assert_eq!(
                 clears_and_marks_of_chunks(&[head, tail]).0,
                 1,
-                "bölünme noktası {at}"
+                "split point {at}"
             );
         }
     }
@@ -3754,8 +3824,8 @@ mod tests {
 
     #[test]
     fn other_osc_numbers_never_touch_the_buffer() {
-        // OSC 52'nin yükü meşru olarak megabayt olabilir; sınırın ayırt ettiği
-        // şey kalsın diye o yol tampona hiç uğramaz.
+        // OSC 52's payload can legitimately be megabytes; so that what the bound
+        // distinguishes is preserved that path never touches the buffer.
         let mut stream = b"\x1b]52;c;".to_vec();
         stream.extend(std::iter::repeat_n(b'Z', 100_000));
         stream.push(0x07);
@@ -3794,8 +3864,8 @@ mod tests {
 
     #[test]
     fn control_bytes_inside_the_payload_are_dropped_like_vte() {
-        // `vte` yüke almıyor; almasaydık satır sonu yapışmış bir kod bozuk
-        // görünürdü.
+        // `vte` does not take it into the payload; if we had, a code with a line ending
+        // pasted on would look corrupt.
         assert_eq!(
             marks(b"\x1b]133;D;0\r\x07"),
             vec![Mark::CommandEnd {
@@ -3852,18 +3922,19 @@ mod tests {
         assert_eq!(log.state.and_then(|s| s.last_exit), None);
     }
 
-    /// Bir bloğu açıp kapatır; defterin olağan akışı.
+    /// Opens and closes a block; the ledger's ordinary flow.
     fn run_block(log: &mut ShellLog, id: u32, exit: Option<i32>) {
         log.apply(Mark::PromptStart { id: Some(id) });
         log.apply(Mark::CommandStart);
         log.apply(Mark::CommandEnd { exit, id: Some(id) });
     }
 
-    /// Bloğun kaydettiği çıkış kodu; defterde yoksa ya da hâlâ açıksa `None`.
+    /// The exit code the block recorded; `None` if it is not in the ledger or is
+    /// still open.
     ///
-    /// Aşağıdaki sınamalar **kodu** soruyor, süreyi değil: geçen süre gerçek
-    /// saatten geliyor ve eşitlenemez. `Outcome`'ın tamamıyla karşılaştırmak
-    /// onları saate bağımlı ve kırılgan yapardı.
+    /// The tests below ask for the **code**, not the duration: the elapsed time comes
+    /// from the real clock and cannot be made equal. Comparing with the whole
+    /// `Outcome` would make them clock-dependent and brittle.
     fn exit_of(log: &ShellLog, id: u32) -> Option<Option<i32>> {
         match log.blocks.get(id)? {
             Outcome::Finished { exit, .. } => Some(exit),
@@ -3880,7 +3951,7 @@ mod tests {
 
         assert_eq!(exit_of(&log, 1), Some(Some(0)));
         assert_eq!(exit_of(&log, 2), Some(Some(130)));
-        // Açık ama kapanmamış: koşuyor ya da boş prompt.
+        // Open but not closed: running or an empty prompt.
         assert_eq!(log.blocks.get(3), Some(Outcome::Pending));
         assert_eq!(log.blocks.get(4), None);
     }
@@ -3901,7 +3972,7 @@ mod tests {
         for id in 1..=(BLOCK_LOG_FLOOR as u32 + 2) {
             run_block(&mut log, id, Some(0));
         }
-        // Düşen bloğun rengi yok; kare yolu onu **çizmez**, yanlış çizmez.
+        // The dropped block has no color; the frame path **does not draw** it, does not draw it wrongly.
         assert_eq!(log.blocks.get(1), None);
         assert_eq!(log.blocks.get(2), None);
         assert_eq!(exit_of(&log, 3), Some(Some(0)));
@@ -3910,9 +3981,9 @@ mod tests {
 
     #[test]
     fn reopening_an_id_drops_only_what_followed_it() {
-        // Savunma kolu: sayacımız kabuk örneği boyunca monoton, yani bu
-        // yalnız bizim basmadığımız bir `bt_block=` ile olur. Olduğunda da
-        // defterin tamamı değil, o kimlikten SONRASI düşer.
+        // Defensive arm: our counter is monotonic across the shell instance, so this
+        // happens only with a `bt_block=` we did not print. When it does, not the whole
+        // ledger but what comes AFTER that identity is dropped.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         run_block(&mut log, 1, Some(0));
         run_block(&mut log, 2, Some(0));
@@ -3924,12 +3995,12 @@ mod tests {
 
     #[test]
     fn a_foreign_aid_is_ignored() {
-        // `aid` şartnamede "uygulama kimliği"dir ve genellikle pid taşır, yani
-        // oturum boyunca SABİTTİR. Kimlik diye okusaydık şartnameye uyan bir
-        // entegrasyon (kullanıcının rc'si, iç içe REPL, SSH'ın öte yakası) her
-        // prompt'ta aynı değeri basar ve defteri her seferinde bitişiksiz
-        // kılardı; aralığa denk düşen bir `D` ise bizim bloğumuzun rengini
-        // başkasının koduyla ezerdi.
+        // `aid` in the specification is the "application id" and generally carries a pid,
+        // that is, it is CONSTANT across the session. If we read it as an identity, an
+        // integration that complies with the specification (the user's rc, a nested REPL,
+        // the far side of SSH) would print the same value at every prompt and make the
+        // ledger non-contiguous every time; a `D` falling into the range would overwrite
+        // our block's color with someone else's code.
         assert_eq!(
             marks(b"\x1b]133;A;aid=4711\x07"),
             vec![Mark::PromptStart { id: None }]
@@ -3942,7 +4013,7 @@ mod tests {
             }]
         );
 
-        // Ve yabancı işaretler bizim defterimize dokunamaz.
+        // And foreign marks cannot touch our ledger.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         run_block(&mut log, 1, Some(0));
         log.apply(Mark::PromptStart { id: None });
@@ -3953,7 +4024,7 @@ mod tests {
         assert_eq!(exit_of(&log, 1), Some(Some(0)));
     }
 
-    /// Testlerin kodlayıcısı — üretimde karşılığı kabuğun saf zsh kolu.
+    /// The tests' encoder — in production its counterpart is the shell's pure-zsh arm.
     fn b64(bytes: &[u8]) -> String {
         const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::new();
@@ -3975,7 +4046,7 @@ mod tests {
         out
     }
 
-    /// Ayna dizisi; `highlights` satır sonuyla birleştirilip base64'lenir.
+    /// The mirror sequence; `highlights` is joined with line breaks and base64'd.
     fn dock_update(
         cursor: usize,
         pre: &str,
@@ -3993,7 +4064,7 @@ mod tests {
         .into_bytes()
     }
 
-    /// `DockEvent` ödünç verdiği için sınamalar sahiplenilmiş bir kopya tutar.
+    /// Since `DockEvent` lends, the tests keep an owned copy.
     #[derive(Debug, PartialEq, Eq)]
     enum DockSnapshot {
         Update(DockState),
@@ -4026,11 +4097,11 @@ mod tests {
         dock_events_of_chunks(&[bytes])
     }
 
-    /// Bir güncellemenin tek `DockState`'i; başka bir şey geldiyse düşer.
+    /// The single `DockState` of an update; if anything else came, it drops.
     fn dock_line(bytes: &[u8]) -> DockState {
         match dock_events(bytes).pop() {
             Some(DockSnapshot::Update(line)) => line,
-            other => panic!("güncelleme bekleniyordu, gelen: {other:?}"),
+            other => panic!("an update was expected, got: {other:?}"),
         }
     }
 
@@ -4047,12 +4118,12 @@ mod tests {
         assert_eq!(line.predisplay, "❯ ");
         assert_eq!(line.buffer, "git sta");
         assert_eq!(line.postdisplay, "tus");
-        // `$CURSOR` 3, `PREDISPLAY` iki karakter: görüntü uzayında 5.
+        // `$CURSOR` 3, `PREDISPLAY` two characters: 5 in the display space.
         assert_eq!(line.cursor, 5);
         assert_eq!(
             line.highlights,
             vec![Highlight {
-                // `PREDISPLAY` iki karakter: öneksiz ofset onun ardından sayılır.
+                // `PREDISPLAY` is two characters: the unprefixed offset is counted after it.
                 start: 2,
                 end: 5,
                 style: HighlightStyle {
@@ -4066,8 +4137,9 @@ mod tests {
 
     #[test]
     fn highlight_offsets_collapse_into_one_space() {
-        // `P` öneki ofseti PREDISPLAY'in başına bağlıyor, öneksizi BUFFER'ın:
-        // ikisi de görüntünün başından sayılan tek uzaya iniyor (R1.3).
+        // The `P` prefix ties the offset to the start of PREDISPLAY, the unprefixed one
+        // to BUFFER's: both descend into the single space counted from the start of the
+        // display (R1.3).
         let line = dock_line(&dock_update(
             0,
             "ab",
@@ -4091,8 +4163,8 @@ mod tests {
 
     #[test]
     fn a_highlight_keeps_what_it_understands_and_drops_the_rest() {
-        // `memo=` serbest bir kuyruk alanı, `blink` tanımadığımız bir nitelik;
-        // ikisi de kaydı düşürmemeli — düşseydi bütün aralık renksiz kalırdı.
+        // `memo=` is a free tail field, `blink` an attribute we do not recognize; neither
+        // must drop the record — if it did the whole range would be left colorless.
         let line = dock_line(&dock_update(
             0,
             "",
@@ -4113,16 +4185,16 @@ mod tests {
             }]
         );
 
-        // Ters aralık ve okunamayan ofset kaydı düşürüyor, diziyi değil.
+        // A reversed range and an unreadable offset drop the record, not the sequence.
         let line = dock_line(&dock_update(0, "", "xy", "", &["5 1 fg=red", "a b fg=red"]));
         assert_eq!(line.highlights, vec![]);
     }
 
     #[test]
     fn offsets_never_point_past_the_mirrored_text() {
-        // Bayat bir `BUFFER` anlık görüntüsünden kurulan `region_highlight`
-        // metnin dışını gösterebiliyor; çizen tarafa taşımak orada bir kırpma
-        // ya da panik borcu doğururdu.
+        // A `region_highlight` built from a stale `BUFFER` snapshot can point outside the
+        // text; carrying it to the drawing side would create a clamping or panic debt
+        // there.
         let line = dock_line(&dock_update(
             0,
             "ab",
@@ -4134,7 +4206,7 @@ mod tests {
         assert_eq!(line.highlights[0].start, 2);
         assert_eq!(line.highlights[0].end, 4);
 
-        // İmleç de kabuğun sözüne bırakılmıyor: en çok `BUFFER`'ın sonu.
+        // The cursor is not left to the shell's word either: at most the end of `BUFFER`.
         assert_eq!(dock_line(&dock_update(99, "ab", "cd", "ef", &[])).cursor, 4);
     }
 
@@ -4145,8 +4217,8 @@ mod tests {
 
     #[test]
     fn extra_trailing_fields_are_tolerated() {
-        // İleriye dönük alan: phase-4'ün özel kip sinyali bu ayrıştırıcıyı
-        // yeniden açmadan eklenebilmeli.
+        // A forward-looking field: phase-4's special mode signal should be addable
+        // without reopening this parser.
         let mut sequence = dock_update(1, "", "ab", "", &[]);
         sequence.pop();
         sequence.extend_from_slice(b";mode=isearch\x07");
@@ -4155,25 +4227,25 @@ mod tests {
 
     #[test]
     fn a_tab_in_the_buffer_carries_no_ink() {
-        // **Ölçülmüş kusur** (kullanıcı, 2026-09-18): dock boşken Tab'a
-        // basınca caret dock'tan ızgaraya sıçrıyordu. Zincir gerçek zsh'te
-        // ölçüldü — Tab `BUFFER='\t'` yapıyor, ayna `Some('\t')` diyordu,
-        // ızgara ise sekmeyi boşluğa açtığı için `None`; tazelik kapısı
-        // (`Session::frame`) eşleşmeyince bastırma kalkıyor ve caret'in sahibi
-        // değişiyordu.
+        // **A measured defect** (user, 2026-09-18): pressing Tab with an empty dock made
+        // the caret leap from the dock to the grid. The chain was measured in a real zsh —
+        // Tab makes `BUFFER='\t'`, the mirror said `Some('\t')`, the grid said `None`
+        // because it expands the tab into blanks; when the freshness gate
+        // (`Session::frame`) did not match, suppression lifted and the caret's owner
+        // changed.
         assert_eq!(dock_line(&dock_update(1, "", "\t", "", &[])).last_ink, None);
-        // Sekme **sondayken** de önceki harfi bırakmalı: ızgarada o satırın
-        // son mürekkebi yine `s`.
+        // It must drop the previous letter when the tab is **at the end** too: on the grid
+        // the line's last ink is still `s`.
         assert_eq!(
             dock_line(&dock_update(3, "", "ls\t", "", &[])).last_ink,
             Some('s')
         );
-        // Sekmenin önündeki metin etkilenmiyor.
+        // The text before the tab is not affected.
         assert_eq!(
             dock_line(&dock_update(3, "", "\tls", "", &[])).last_ink,
             Some('s')
         );
-        // Boşluğun kuralı değişmedi ve mürekkep hâlâ mürekkep.
+        // The blank's rule did not change and ink is still ink.
         assert_eq!(
             dock_line(&dock_update(3, "", "ls ", "", &[])).last_ink,
             Some('s')
@@ -4182,8 +4254,8 @@ mod tests {
 
     #[test]
     fn padding_is_optional() {
-        // Kodlayan taraf saf zsh; dolguyu şart koşmak kanalı onun bir uygulama
-        // ayrıntısına bağlardı.
+        // The encoding side is pure zsh; to require padding would tie the channel to an
+        // implementation detail of it.
         let padded = dock_line(&dock_update(0, "", "abcd", "", &[]));
         let bare = dock_line(b"\x1b]8133;u;0;;YWJjZA;;\x07");
         assert_eq!(padded.buffer, "abcd");
@@ -4192,14 +4264,14 @@ mod tests {
 
     #[test]
     fn a_broken_payload_is_reported_not_panicked() {
-        // Üç bozulma, tek yanıt: gösteremiyoruz.
+        // Three corruptions, one answer: we cannot show it.
         for sequence in [
-            &b"\x1b]8133;u;0;;!!!!;;\x07"[..], // base64 alfabesi dışı
+            &b"\x1b]8133;u;0;;!!!!;;\x07"[..], // not in the base64 alphabet
             &b"\x1b]8133;u;0;;YQ;\x07"[..],    // alan eksik
-            &b"\x1b]8133;u;abc;;;;\x07"[..],   // imleç sayı değil
-            &b"\x1b]8133;u;0;;gA;;\x07"[..],   // geçersiz UTF-8
-            &b"\x1b]8133;z\x07"[..],           // tanınmayan işlem
-            &b"\x1b]8133;\x07"[..],            // boş yük
+            &b"\x1b]8133;u;abc;;;;\x07"[..],   // the cursor is not a number
+            &b"\x1b]8133;u;0;;gA;;\x07"[..],   // invalid UTF-8
+            &b"\x1b]8133;z\x07"[..],           // unrecognized operation
+            &b"\x1b]8133;\x07"[..],            // empty payload
         ] {
             assert_eq!(
                 dock_events(sequence),
@@ -4212,8 +4284,8 @@ mod tests {
 
     #[test]
     fn an_oversized_dock_payload_is_visible_and_the_next_sequence_survives() {
-        // 133'ün sessiz düşüşünün aksine aşım çağırana **bir sonuç** döner
-        // (R1.2); ardından gelen sağlam dizi yine görülür.
+        // Unlike 133's silent drop, the overflow **returns a result** to the caller
+        // (R1.2); a sound sequence that follows is still seen.
         let mut stream = b"\x1b]8133;u;0;;".to_vec();
         stream.extend(std::iter::repeat_n(b'A', DOCK_PAYLOAD_LIMIT + 1));
         stream.push(0x07);
@@ -4225,13 +4297,13 @@ mod tests {
         assert!(matches!(&seen[1], DockSnapshot::Update(line) if line.buffer == "ok"));
     }
 
-    /// Dizin kolunun çözdüğü **yerel** yollar.
+    /// The **local** paths the directory arm decodes.
     fn cwd_events(bytes: &[u8]) -> Vec<String> {
         cwd_events_of(bytes, true)
     }
 
-    /// Dizin kolunun çözdüğü, yetkisi yerel olan (`local`) ya da olmayan
-    /// yollar.
+    /// The paths the directory arm decodes, whose authority is local (`local`) or
+    /// not.
     fn cwd_events_of(bytes: &[u8], local: bool) -> Vec<String> {
         let mut scanner = Scanner::new();
         let mut seen = Vec::new();
@@ -4247,42 +4319,42 @@ mod tests {
 
     #[test]
     fn the_cwd_arm_decodes_a_percent_encoded_path() {
-        // Yüzde çözme: boşluk ve çok baytlı karakter.
+        // Percent decoding: a blank and a multi-byte character.
         assert_eq!(
             cwd_events(b"\x1b]7;file:///Users/a%20b/%C3%A7\x07"),
             ["/Users/a b/ç"]
         );
-        // İki yetki de bu makine: boş ve `localhost`.
+        // Both authorities are this machine: empty and `localhost`.
         assert_eq!(cwd_events(b"\x1b]7;file://localhost/tmp\x07"), ["/tmp"]);
-        // Şema harf duyarsız (RFC 3986).
+        // The scheme is case-insensitive (RFC 3986).
         assert_eq!(cwd_events(b"\x1b]7;FILE:///tmp\x07"), ["/tmp"]);
-        // Yük alanlara **bölünmüyor**: `;` taşıyan bir yol geçerli.
+        // The payload is **not split** into fields: a path carrying `;` is valid.
         assert_eq!(cwd_events(b"\x1b]7;file:///tmp/a;b\x07"), ["/tmp/a;b"]);
-        // Kodlanmamış bir yol da okunuyor: yüzde kodlaması zorunlu değil.
+        // An unencoded path is read too: percent encoding is not mandatory.
         assert_eq!(cwd_events(b"\x1b]7;file:///tmp/plain\x07"), ["/tmp/plain"]);
     }
 
     #[test]
     fn a_named_host_is_foreign_and_a_broken_uri_is_ignored() {
-        // Adlı host **yabancı** (036): olay doğuruyor ama yerel değil, yani
-        // yerel dizine hiç yazmıyor — uzak yuvaya gidiyor.
+        // A named host is **foreign** (036): it produces an event but is not local, so it
+        // never writes to the local directory — it goes to the remote slot.
         let named = b"\x1b]7;file://remote.example/tmp\x07";
         assert_eq!(cwd_events(named), Vec::<String>::new());
         assert_eq!(cwd_events_of(named, false), ["/tmp"]);
-        // Kalanların tek yanıtı: hiçbir olay. Yön güvenli — eski yol ekranda
-        // kalıyor.
+        // The only answer for the rest: no event at all. The direction is safe — the old
+        // path stays on screen.
         for sequence in [
-            &b"\x1b]7;/tmp\x07"[..],          // şema yok
-            b"\x1b]7;http://host/tmp\x07",    // yabancı şema
-            b"\x1b]7;file:/tmp\x07",          // yetki bölümü yok
-            b"\x1b]7;file://localhost\x07",   // yol yok
-            b"\x1b]7;file:///tmp/%zz\x07",    // bozuk yüzde
-            b"\x1b]7;file:///tmp/%e0%80\x07", // UTF-8 değil
-            b"\x1b]7;\x07",                   // boş yük
+            &b"\x1b]7;/tmp\x07"[..],          // no scheme
+            b"\x1b]7;http://host/tmp\x07",    // foreign scheme
+            b"\x1b]7;file:/tmp\x07",          // no authority section
+            b"\x1b]7;file://localhost\x07",   // no path
+            b"\x1b]7;file:///tmp/%zz\x07",    // corrupt percent escape
+            b"\x1b]7;file:///tmp/%e0%80\x07", // not UTF-8
+            b"\x1b]7;\x07",                   // empty payload
         ] {
             assert!(
                 cwd_events(sequence).is_empty() && cwd_events_of(sequence, false).is_empty(),
-                "dizi geçti: {}",
+                "the sequence passed: {}",
                 String::from_utf8_lossy(sequence)
             );
         }
@@ -4290,8 +4362,8 @@ mod tests {
 
     #[test]
     fn an_oversized_cwd_payload_is_dropped_and_the_next_sequence_survives() {
-        // Aşım **sessiz** (ayna kolunun aksine): dizin görünmeyen bir ayrıntı
-        // değil, eski değeri ekranda duruyor ve sonraki prompt onu tazeliyor.
+        // The overflow is **silent** (unlike the mirror arm): the directory is not an
+        // invisible detail, its old value stays on screen and the next prompt refreshes it.
         let mut stream = b"\x1b]7;file:///".to_vec();
         stream.extend(std::iter::repeat_n(b'a', CWD_PAYLOAD_LIMIT + 1));
         stream.push(0x07);
@@ -4302,9 +4374,9 @@ mod tests {
 
     #[test]
     fn the_branch_op_touches_only_the_branch() {
-        // Dal aynanın kanalından geliyor ama aynanın **durumu** değil: `b`
-        // metni de `Live`/`Idle` ayrımını da olduğu gibi bırakmalı, yoksa
-        // prompt başına gelen dal her satırı bir kareliğine söndürürdü.
+        // The branch comes from the mirror's channel but is not the mirror's **state**:
+        // `b` must leave both the text and the `Live`/`Idle` distinction as they are,
+        // otherwise the per-prompt branch would darken every line for a frame.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut scanner = Scanner::new();
         scanner.feed(&dock_update(2, "% ", "ls", "", &[]), |event| {
@@ -4319,22 +4391,22 @@ mod tests {
         assert_eq!(log.dock.status, DockStatus::Live);
         assert_eq!(log.dock.buffer, "ls");
 
-        // Depo değilse gövde boş ve dal silinir — bir önceki deponun dalı
-        // yeni dizinde asılı kalmamalı.
+        // If it is not a repository the body is empty and the branch is deleted — the
+        // previous repository's branch must not hang on in the new directory.
         scanner.feed(b"\x1b]8133;b;\x07", |event| log.apply_scan(event));
         assert_eq!(log.context.branch, "");
         assert_eq!(log.dock.status, DockStatus::Live);
     }
 
-    /// **Hızlı komut devir doğurmuyor** — setin çekirdek iddiası.
+    /// **A fast command produces no handover** — the set's core claim.
     ///
-    /// Ölçülmüş belirti (`context.md` → Kanıt): `ls` koşarken safha 44 ms
-    /// sürüyor, imleç animasyonu 230 ms'de yerleşiyor; caret dock'tan çıkıp
-    /// yarı yolda geri dönüyor ve göz bunu bir zıplama olarak okuyor.
+    /// The measured symptom (`context.md` → Kanıt): while `ls` runs the phase lasts 44
+    /// ms, the cursor animation settles in 230 ms; the caret leaves the dock and comes
+    /// back halfway and the eye reads that as a jump.
     ///
-    /// Devrin **`line-finish`'te** başladığı da burada çivileniyor: `C`
-    /// gelmeden, ayna `Idle`'a düşer düşmez ham cevap `Grid` oluyor.
-    /// `running_since`'e bağlanan bir eşik bu ilk geçişi göremezdi.
+    /// That the handover starts **at `line-finish`** is pinned here too: without `C`
+    /// arriving, as soon as the mirror drops to `Idle` the raw answer becomes `Grid`.
+    /// A threshold tied to `running_since` would not see this first transition.
     #[test]
     fn a_fast_command_never_hands_the_caret_over() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -4346,36 +4418,48 @@ mod tests {
             log.apply_scan(event)
         });
 
-        // **`now` olaylardan sonra alınıyor.** Önce alınsaydı `caret_since`
-        // ondan ileride olur, `saturating_duration_since` sıfıra kırpar ve
-        // sınama `HANDOVER_HOLD > 0` olan her değerde yeşil kalırdı — 1 ms'lik
-        // bir tutma `ls`'in 44 ms'sini hiç yakalamadığı hâlde.
+        // **`now` is taken after the events.** If it were taken first `caret_since` would
+        // be ahead of it, `saturating_duration_since` would clamp to zero and the test
+        // would stay green at every value with `HANDOVER_HOLD > 0` — even though a 1 ms
+        // hold never catches `ls`'s 44 ms.
         let at_prompt = log.caret(Instant::now());
-        assert_eq!(at_prompt.home, CaretHome::Dock, "promptta caret dock'un");
+        assert_eq!(
+            at_prompt.home,
+            CaretHome::Dock,
+            "at the prompt the caret is the dock's"
+        );
         assert_eq!(
             at_prompt.hold_left, None,
-            "tutma yokken saat kurulmamalı: boşta sıfır kare"
+            "no clock must be set while not holding: zero frames while idle"
         );
 
-        // Enter → `line-finish`: ayna satırı bıraktı, safha hâlâ `Input`.
+        // Enter → `line-finish`: the mirror released the line, the phase is still `Input`.
         scanner.feed(b"\x1b]8133;e\x07", |event| log.apply_scan(event));
         let now = Instant::now();
-        // Ayna tutuluyor (032 Karar 11) ama devrin sorduğu durum `Idle`.
+        // The mirror is held (032 Karar 11) but the state the handover asks about is `Idle`.
         assert_eq!(
             caret_home(log.state, log.caret_status(), false),
             CaretHome::Grid,
-            "ham cevap `line-finish`'te çoktan `Grid`"
+            "the raw answer is already `Grid` at `line-finish`"
         );
         let handing_over = log.caret(now);
-        assert_eq!(handing_over.home, CaretHome::Dock, "tutma devri gizlemeli");
+        assert_eq!(
+            handing_over.home,
+            CaretHome::Dock,
+            "the hold must hide the handover"
+        );
         assert!(
             handing_over.hold_left.is_some(),
-            "tutmanın kalanı kare istemeli, yoksa devir bir sonraki hasarı beklerdi"
+            "the hold's remainder must request a frame, otherwise the handover would wait for the next damage"
         );
 
-        // Komut koştu ve bitti — hepsi tutmanın içinde.
+        // The command ran and finished — all inside the hold.
         scanner.feed(b"\x1b]133;C\x07", |event| log.apply_scan(event));
-        assert_eq!(log.caret(now).home, CaretHome::Dock, "koşarken de gizli");
+        assert_eq!(
+            log.caret(now).home,
+            CaretHome::Dock,
+            "hidden while running too"
+        );
         scanner.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07", |event| {
             log.apply_scan(event)
         });
@@ -4383,16 +4467,17 @@ mod tests {
         assert_eq!(after.home, CaretHome::Dock);
         assert_eq!(
             after.hold_left, None,
-            "ham cevap `Dock`'a döndü: saat sönmeli (adlandırılmış durma koşulu)"
+            "the raw answer returned to `Dock`: the clock must go out (named stop condition)"
         );
     }
 
-    /// **Yavaş komutun devri oluyor**, gecikmesi tutma süresi kadar; ve
-    /// **ters yön hiç tutulmuyor**.
+    /// **A slow command's handover does happen**, delayed by the hold duration; and
+    /// **the reverse direction is never held**.
     ///
-    /// İkisi tek sınamada, çünkü ikincisi birincisinin kabulü: tutma her iki
-    /// yöne uygulansaydı komut bitince caret ızgarada asılı kalır ve kullanıcı
-    /// yazmaya başladığında dock'ta caret'siz bir satır görürdü.
+    /// Both in a single test, because the second is the first's acceptance: if the
+    /// hold applied in both directions the caret would hang on the grid when the
+    /// command finishes, and when the user started typing they would see a line in the
+    /// dock with no caret.
     #[test]
     fn a_slow_command_hands_over_after_the_hold_but_comes_back_at_once() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -4408,24 +4493,29 @@ mod tests {
         });
 
         let now = Instant::now();
-        assert_eq!(log.caret(now).home, CaretHome::Dock, "tutma sürüyor");
-        // Tutmanın **tam** dolduğu an: kalan sıfır, yani devir görünür oluyor.
+        assert_eq!(log.caret(now).home, CaretHome::Dock, "the hold continues");
+        // The instant the hold **exactly** expires: the remainder is zero, so the handover becomes visible.
         let expired = now + HANDOVER_HOLD;
         let handed = log.caret(expired);
-        assert_eq!(handed.home, CaretHome::Grid, "yavaş komutta devir olmalı");
-        assert_eq!(handed.hold_left, None, "dolmuş tutma kare istemez");
+        assert_eq!(
+            handed.home,
+            CaretHome::Grid,
+            "a slow command must hand over"
+        );
+        assert_eq!(handed.hold_left, None, "an expired hold requests no frame");
 
-        // Komut bitti: ters yön **anında**, tutma yok.
+        // The command finished: the reverse direction is **instant**, no hold.
         scanner.feed(b"\x1b]133;D;0\x07", |event| log.apply_scan(event));
         let back = log.caret(expired);
-        assert_eq!(back.home, CaretHome::Dock, "Grid→Dock geciktirilmemeli");
+        assert_eq!(back.home, CaretHome::Dock, "Grid→Dock must not be delayed");
         assert_eq!(back.hold_left, None);
     }
 
-    /// **Uzak oturum tutmadan önce** (036 Karar 8): `C`'den hemen sonra,
-    /// tutma sürerken gelen `set_remote` caret'i ızgaraya alıyor ve saat
-    /// kurmuyor — giriş satırı olmayan bir bantta caret bağlam satırına
-    /// otururdu. `D` uzak durumu silince yüklem bugünkü cevabına dönüyor.
+    /// **The remote session comes before the hold** (036 Karar 8): a `set_remote`
+    /// arriving right after `C`, while the hold is still going, takes the caret to the
+    /// grid and sets no clock — on a band with no input line the caret would seat on
+    /// the context line. When `D` deletes the remote state the predicate returns to
+    /// today's answer.
     #[test]
     fn a_remote_session_takes_the_caret_before_the_hold() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -4440,22 +4530,30 @@ mod tests {
             log.apply_scan(event)
         });
         let now = Instant::now();
-        assert_eq!(log.caret(now).home, CaretHome::Dock, "tutma sürüyor");
+        assert_eq!(log.caret(now).home, CaretHome::Dock, "the hold continues");
 
         assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         let remote = log.caret(now);
-        assert_eq!(remote.home, CaretHome::Grid, "uzakta caret ızgarada");
-        assert_eq!(remote.hold_left, None, "çevrilmeyen cevap kare istemez");
+        assert_eq!(
+            remote.home,
+            CaretHome::Grid,
+            "on the remote the caret is on the grid"
+        );
+        assert_eq!(
+            remote.hold_left, None,
+            "an answer that is not flipped requests no frame"
+        );
 
         scanner.feed(b"\x1b]133;D;0\x07", |event| log.apply_scan(event));
         assert_eq!(log.context.remote, None);
         assert_eq!(log.caret(now + HANDOVER_HOLD).home, CaretHome::Dock);
     }
 
-    /// Damga **değişimde** kıpırdıyor, her olayda değil.
+    /// The stamp moves **on change**, not on every event.
     ///
-    /// Her tuş vuruşu bir ayna olayı doğuruyor; damga onlarla tazelenseydi
-    /// tutma hiç dolmaz ve yavaş komutta devir **hiç** gerçekleşmezdi.
+    /// Every keystroke produces a mirror event; if the stamp were refreshed with them
+    /// the hold would never expire and in a slow command the handover would **never**
+    /// happen.
     #[test]
     fn the_stamp_moves_on_change_not_on_every_event() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -4469,18 +4567,18 @@ mod tests {
         scanner.feed(b"\x1b]8133;e\x07", |event| log.apply_scan(event));
         let stamped = log.caret_since;
 
-        // Devirden sonra gelen olaylar ham cevabı değiştirmiyor (`Running` de
-        // `Grid`), yani damga yerinde kalmalı.
+        // Events arriving after the handover do not change the raw answer (`Running` is
+        // `Grid` too), so the stamp must stay in place.
         scanner.feed(b"\x1b]133;C\x07", |event| log.apply_scan(event));
         assert_eq!(
             log.caret_since, stamped,
-            "değişmeyen cevap damgayı taşımamalı"
+            "an unchanged answer must not move the stamp"
         );
     }
 
-    /// **Satır sonu taşıyan görüntü `Live`** (032): dock satırı kırıyor, yani
-    /// onu gösterebiliyor. 032'ye kadar bu ayna `Multiline`'dı ve satır da
-    /// caret'i de ızgarada kalıyordu.
+    /// **A display carrying a line break is `Live`** (032): the dock breaks lines, so
+    /// it can show it. Until 032 this mirror was `Multiline` and both the line and its
+    /// caret stayed on the grid.
     #[test]
     fn a_newline_anywhere_in_the_display_keeps_the_mirror_live() {
         for (pre, buffer, post) in [
@@ -4493,17 +4591,17 @@ mod tests {
             assert_eq!(
                 line.status,
                 DockStatus::Live,
-                "satır sonu taşıyan görüntü: {pre:?} {buffer:?} {post:?}"
+                "display carrying a line break: {pre:?} {buffer:?} {post:?}"
             );
             assert_eq!(line.buffer, buffer);
         }
     }
 
-    /// **Son mürekkep görüntünün son satırından** (032): kapının öteki
-    /// yarısı ızgaranın son giriş satırını tarıyor. `echo a\necho b\n`
-    /// yapıştırmasında zsh son satır sonunu tamponda tutuyor ve imleç boş bir
-    /// satırda — ayna da `None` demeli. `\n`'in kendisi mürekkep değil (eski
-    /// süzgeç genişliği `None` olduğu için onu geçiriyordu).
+    /// **The last ink is from the display's last line** (032): the other half of the
+    /// gate scans the grid's last input line. In a paste of `echo a\necho b\n` zsh
+    /// keeps the final line break in the buffer and the cursor is on an empty line —
+    /// the mirror must say `None` too. `\n` itself is not ink (the old filter passed it
+    /// because its width was `None`).
     #[test]
     fn the_last_ink_comes_from_the_last_row_of_the_display() {
         let ink = |buffer: &str| dock_line(&dock_update(0, "", buffer, "", &[])).last_ink;
@@ -4511,17 +4609,17 @@ mod tests {
         assert_eq!(ink("echo a\necho b"), Some('b'));
         assert_eq!(ink("echo a\n  "), None);
         assert_eq!(ink("\n"), None);
-        // Öneri de son satırda sayılıyor, satır sonu taşımıyorsa.
+        // The suggestion is counted on the last line too, if it carries no line break.
         assert_eq!(
             dock_line(&dock_update(0, "", "ls\ngi", "t", &[])).last_ink,
             Some('t')
         );
     }
 
-    /// **Kümeli okunuşta son mürekkep son kümenin başı** (035): ızgaranın
-    /// hücresi `👍🏽`'yi `c = 👍` ile tutuyor; ayna `🏽` deseydi kapı kalıcı
-    /// olarak "bayat" derdi (024'ün bekçisinin kümeli kardeşi). Kapalı
-    /// okunuş bugünkü gibi: ten rengi kendi başına bir mürekkep.
+    /// **With clustered reading the last ink is the last cluster's head** (035): the
+    /// grid's cell keeps `👍🏽` with `c = 👍`; if the mirror said `🏽` the gate would
+    /// permanently say "stale" (the clustered sibling of 024's guard). The closed
+    /// reading is as today: a skin tone is ink on its own.
     #[test]
     fn the_clustered_last_ink_is_the_head_of_the_last_cluster() {
         let ink = |cluster: bool, buffer: &str| {
@@ -4529,26 +4627,29 @@ mod tests {
             let mut seen = None;
             scanner.feed(&dock_update(0, "", buffer, "", &[]), |event| {
                 if let ScanEvent::Dock(DockEvent::Update(line)) = event {
-                    assert_eq!(line.cluster, cluster, "okunuş aynaya taşınmadı");
+                    assert_eq!(
+                        line.cluster, cluster,
+                        "the reading was not carried to the mirror"
+                    );
                     seen = Some(line.last_ink);
                 }
             });
-            seen.expect("güncelleme bekleniyordu")
+            seen.expect("an update was expected")
         };
         assert_eq!(ink(true, "ls 👍🏽"), Some('👍'));
         assert_eq!(ink(true, "🇹🇷"), Some('🇹'));
         assert_eq!(ink(true, "a 👨\u{200D}👩\u{200D}👧"), Some('👨'));
         assert_eq!(ink(true, "❤\u{FE0F} "), Some('❤'));
-        assert_eq!(ink(true, "a\n🇹🇷\n"), None, "son satır boş");
-        assert_eq!(ink(true, "ls\t"), Some('s'), "sekme mürekkep değil");
-        // Kapalı okunuş: kod noktası kod noktası, sıfır genişlik atlanıyor.
+        assert_eq!(ink(true, "a\n🇹🇷\n"), None, "the last line is empty");
+        assert_eq!(ink(true, "ls\t"), Some('s'), "a tab is not ink");
+        // The closed reading: code point by code point, zero width is skipped.
         assert_eq!(ink(false, "ls 👍🏽"), Some('🏽'));
         assert_eq!(ink(false, "🇹🇷"), Some('🇷'));
         assert_eq!(ink(false, "❤\u{FE0F}"), Some('❤'));
     }
 
-    /// **Dock'un çizmediği kontrol karakteri satırı `Control`'e indiriyor**
-    /// (025) — konumdan ve gövdeden bağımsız; sekme hariç.
+    /// **A control character the dock does not draw lowers the line to `Control`**
+    /// (025) — independent of position and body; tab excepted.
     #[test]
     fn a_control_char_anywhere_in_the_display_marks_the_mirror_control() {
         for (pre, buffer, post) in [
@@ -4562,21 +4663,21 @@ mod tests {
             assert_eq!(
                 line.status,
                 DockStatus::Control,
-                "kontrol karakteri taşıyan görüntü `Live` kaldı: {pre:?} {buffer:?} {post:?}"
+                "a display carrying a control character stayed `Live`: {pre:?} {buffer:?} {post:?}"
             );
-            assert_eq!(line.buffer, buffer, "alanlar duruyor");
+            assert_eq!(line.buffer, buffer, "the fields stay");
         }
-        // **Sekme istisna**: bilgi taşımıyor ve Ctrl-V Tab satırı dock'ta
-        // kalmalı. Emoji, boş satır ve düz metin de `Live`.
+        // **Tab is an exception**: it carries no information and a Ctrl-V Tab line must
+        // stay in the dock. Emoji, an empty line and plain text are `Live` too.
         for buffer in ["ls\t", "\t", "🥰", "", "echo a"] {
             let line = dock_line(&dock_update(0, "% ", buffer, "", &[]));
             assert_eq!(line.status, DockStatus::Live, "{buffer:?}");
         }
-        // Satır sonu kontrol karakteri sayılmıyor (032), öteki kontrol
-        // karakteri satır sonlu görüntüde de `Control`.
+        // A line break is not counted as a control character (032), another control
+        // character is `Control` in a display with line breaks too.
         let both = dock_line(&dock_update(0, "", "a\x01\nb", "", &[]));
         assert_eq!(both.status, DockStatus::Control);
-        // `PREBUFFER`'daki kontrol karakteri de: dock onu da çiziyor.
+        // A control character in `PREBUFFER` too: the dock draws that too.
         let prebuffer = format!(
             "\x1b]8133;u;0;;{};;;{};{}\x07",
             b64(b"b"),
@@ -4584,7 +4685,7 @@ mod tests {
             b64(b"a\x01\n")
         );
         assert_eq!(dock_line(prebuffer.as_bytes()).status, DockStatus::Control);
-        // Dönüş kendiliğinden: kontrol karakteri silinince bir sonraki ayna `Live`.
+        // The return is automatic: when the control character is deleted the next mirror is `Live`.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut scanner = Scanner::new();
         scanner.feed(&dock_update(4, "", "\x01foo", "", &[]), |event| {
@@ -4597,9 +4698,9 @@ mod tests {
         assert_eq!(log.dock.status, DockStatus::Live);
     }
 
-    /// **`Control` de tutulmuyor** — `Unavailable`'ın ikizi ve aynı gerekçe:
-    /// gösteremediğimiz satırın caret'i ızgarada, 150 ms bile olsa dock'ta
-    /// durmamalı.
+    /// **`Control` is not held either** — `Unavailable`'s twin and the same reason: the
+    /// caret of a line we cannot show is on the grid and must not stand in the dock,
+    /// even for 150 ms.
     #[test]
     fn a_control_mirror_is_never_held() {
         let typing = Some(ShellState {
@@ -4615,9 +4716,9 @@ mod tests {
         }
     }
 
-    /// **Ayna damgasını içerikle aynı turda alıyor** (025): `answers` ayna
-    /// olayında yazılıyor, başka olaylarda kıpırdamıyor ve `End` onu o anki
-    /// nesille yeniden damgalıyor (030).
+    /// **The mirror takes its stamp in the same turn as the content** (025):
+    /// `answers` is written at the mirror event, does not move on other events and
+    /// `End` re-stamps it with the current generation (030).
     #[test]
     fn the_mirror_carries_the_generation_it_answers() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -4626,7 +4727,7 @@ mod tests {
             log.apply_scan_answering(event, 7);
         });
         assert_eq!(log.dock.answers, 7);
-        // İşaret ya da dal olayı damgaya dokunmuyor.
+        // A mark or branch event does not touch the stamp.
         scanner.feed(b"\x1b]133;B\x07", |event| {
             log.apply_scan_answering(event, 9);
         });
@@ -4634,23 +4735,29 @@ mod tests {
         scanner.feed(b"\x1b]8133;e\x07", |event| {
             log.apply_scan_answering(event, 9);
         });
-        // `Input` safhasında `e` tutuluyor (032 Karar 11) ama damga hemen
-        // güncel: tutulan satır ⏎'in cevabı.
-        assert_eq!(log.dock.answers, 9, "tutulan ayna güncel damgayı taşımalı");
-        // Kapanmış ayna **eski** damgayı taşımıyor, güncelini taşıyor: `Idle`
-        // taban da dock'un yazım animasyonlarının girdi sınırına giriyor.
+        // In the `Input` phase `e` is held (032 Karar 11) but the stamp is current at
+        // once: the held line is ⏎'s answer.
+        assert_eq!(
+            log.dock.answers, 9,
+            "the held mirror must carry the current stamp"
+        );
+        // A closed mirror does not carry the **old** stamp, it carries the current one:
+        // the `Idle` base enters the dock's typing animations' input bound too.
         let _ = log.expire_end(Instant::now() + HANDOVER_HOLD);
         assert_eq!(log.dock.status, DockStatus::Idle);
-        assert_eq!(log.dock.answers, 9, "kapanmış ayna güncel damgayı taşımalı");
+        assert_eq!(
+            log.dock.answers, 9,
+            "the closed mirror must carry the current stamp"
+        );
     }
 
-    /// **`PS2` satırları arasındaki `line-finish` tutuluyor** (032 Karar 11).
+    /// **A `line-finish` between `PS2` lines is held** (032 Karar 11).
     ///
-    /// zsh her `PS2` kabulünde `e` basıyor ve hemen ardından yeni satırın
-    /// aynası (`u`, `PREBUFFER` dolu) geliyor; arada safha `Input`. Tutma
-    /// olmasaydı her ⏎ bandı bir kare küçültür, kabul edilen satır bir an
-    /// ızgarada belirirdi. Yerini `Multiline`'ın tutulmama bekçisi aldı: o
-    /// kol kalktı, tutmanın kuralı geldi.
+    /// zsh prints `e` at every `PS2` acceptance and right after it comes the new
+    /// line's mirror (`u`, `PREBUFFER` filled); in between the phase is `Input`.
+    /// Without the hold every ⏎ would shrink the band for a frame and the accepted
+    /// line would appear on the grid for a moment. `Multiline`'s no-hold guard was
+    /// replaced by this: that arm was removed, the hold's rule arrived.
     #[test]
     fn a_line_finish_while_typing_is_held_until_the_next_mirror() {
         let typing = |log: &mut ShellLog, scanner: &mut Scanner| {
@@ -4667,7 +4774,7 @@ mod tests {
             });
         };
 
-        // `e` → görüntü, bant ve bastırma yerinde; taban çıpanın satırı.
+        // `e` → display, band and suppression stay in place; the floor is the anchor's row.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut scanner = Scanner::new();
         typing(&mut log, &mut scanner);
@@ -4675,16 +4782,18 @@ mod tests {
         let now = Instant::now();
         assert_eq!(log.dock.status, DockStatus::Live);
         assert_eq!(log.dock.buffer, "for i in 1 2; do");
-        let input = log.suppressed_input().expect("tutulan satır bastırılmalı");
-        assert!(input.from_anchor, "tutulan satırın tabanı çıpa");
-        assert_eq!(input.answers, 4, "`e` ⏎'in cevabı");
-        // Caret dock'ta ve saat kurulu: tutma dolunca bir kare gerekiyor.
+        let input = log
+            .suppressed_input()
+            .expect("the held line must be suppressed");
+        assert!(input.from_anchor, "the held line's floor is the anchor");
+        assert_eq!(input.answers, 4, "`e` is ⏎'s answer");
+        // The caret is in the dock and the clock is set: a frame is needed when the hold expires.
         let caret = log.caret(now);
         assert_eq!(caret.home, CaretHome::Dock);
         assert!(caret.hold_left.is_some());
         assert!(log.expire_end(now).is_some());
 
-        // `u` gelirse yeni ayna geçiyor ve tutma bitiyor.
+        // If `u` arrives the new mirror passes and the hold ends.
         let next = format!(
             "\x1b]8133;u;0;;;;;{};{}\x07",
             b64(b"main"),
@@ -4701,7 +4810,7 @@ mod tests {
         );
         assert_eq!(log.caret(now).home, CaretHome::Dock);
 
-        // `C` (komut koştu) tutmayı anında bitiriyor.
+        // `C` (the command ran) ends the hold instantly.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut scanner = Scanner::new();
         typing(&mut log, &mut scanner);
@@ -4710,7 +4819,7 @@ mod tests {
         assert_eq!(log.dock.status, DockStatus::Idle);
         assert_eq!(log.expire_end(Instant::now()), None);
 
-        // Süre dolunca bugünkü sıfırlama; damga yerinde.
+        // When the time is up, today's reset; the stamp stays in place.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut scanner = Scanner::new();
         typing(&mut log, &mut scanner);
@@ -4722,8 +4831,8 @@ mod tests {
         assert_eq!(log.dock.answers, 4);
         assert_eq!(log.caret(later).home, CaretHome::Grid);
 
-        // Safha `Input` değilse tutma yok (`e` komut koşarken gelmez ama gelse
-        // de bugünkü gibi): anında `Idle`.
+        // If the phase is not `Input` there is no hold (`e` does not arrive while a
+        // command runs, but if it did it would be as today): instantly `Idle`.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut scanner = Scanner::new();
         typing(&mut log, &mut scanner);
@@ -4732,9 +4841,9 @@ mod tests {
         assert_eq!(log.dock.status, DockStatus::Idle);
     }
 
-    /// **Tekerleğin penceresi caret'in yerine bağlı** (032 phase-4): öneri
-    /// değişimi onu bırakıyor, caret'in ya da metnin değişimi kaldırıyor —
-    /// yazan ya da ok tuşuna basan kullanıcı caret'ini görmeli.
+    /// **The wheel's window is tied to the caret's place** (032 phase-4): a change of
+    /// suggestion leaves it, a change of the caret or the text removes it — a user
+    /// typing or pressing an arrow key must see their caret.
     #[test]
     fn the_dock_scroll_ends_when_the_caret_moves() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -4745,18 +4854,18 @@ mod tests {
         feed(&mut log, &dock_update(2, "", "ls", "", &[]));
         log.dock_scroll = Some(0);
         feed(&mut log, &dock_update(2, "", "ls", " -la", &[]));
-        assert_eq!(log.dock_scroll, Some(0), "öneri pencereyi bırakıyor");
+        assert_eq!(log.dock_scroll, Some(0), "a suggestion leaves the window");
         feed(&mut log, &dock_update(1, "", "ls", " -la", &[]));
-        assert_eq!(log.dock_scroll, None, "caret oynadı");
+        assert_eq!(log.dock_scroll, None, "the caret moved");
         log.dock_scroll = Some(0);
         feed(&mut log, &dock_update(1, "", "lxs", "", &[]));
-        assert_eq!(log.dock_scroll, None, "metin değişti");
+        assert_eq!(log.dock_scroll, None, "the text changed");
     }
 
-    /// **Boş ayna karakterle ölçülüyor** (032): tek başına bir `\n` imleci
-    /// aşağı itiyor, yani boş değil; `PREBUFFER` doluysa da boş değil
-    /// (`for>` satırında imleç meşru olarak çıpanın aşağısında) ve taban
-    /// çıpa.
+    /// **An empty mirror is measured by character** (032): a lone `\n` pushes the
+    /// cursor down, so it is not empty; if `PREBUFFER` is filled it is not empty either
+    /// (on a `for>` line the cursor is legitimately below the anchor) and the floor is
+    /// the anchor.
     #[test]
     fn a_blank_mirror_has_no_character_at_all() {
         let input = |update: &[u8]| {
@@ -4766,11 +4875,11 @@ mod tests {
                 log.apply_scan(event)
             });
             scanner.feed(update, |event| log.apply_scan(event));
-            log.suppressed_input().expect("bastırılan satır")
+            log.suppressed_input().expect("the suppressed line")
         };
         let empty = input(&dock_update(0, "", "", "", &[]));
         assert!(empty.blank && !empty.from_anchor);
-        // 025'in yapıştırma şekli: caret sondaki satır sonunun arkasında.
+        // The shape of 025's paste: the caret is behind the trailing line break.
         let pasted = input(&dock_update(14, "", "echo a\necho b\n", "", &[]));
         assert!(!pasted.blank);
         assert_eq!(pasted.last_ink, None);
@@ -4784,12 +4893,12 @@ mod tests {
         assert!(!ps2.blank && ps2.from_anchor);
     }
 
-    /// **Aynanın arızası tutulmuyor** — carve-out'un deterministik bekçisi.
+    /// **The mirror's failure is not held** — the carve-out's deterministic guard.
     ///
-    /// Entegrasyon sınaması (`the_grid_keeps_the_input_line_when_the_mirror_
-    /// cannot_show_it`) bunu ancak `frame()` 150 ms içinde koşarsa görüyor,
-    /// yani yüklü bir makinede carve-out silinse de yeşil kalabilirdi —
-    /// **açığa düşen** bir bekçi. Buradaki sorgu saatten bağımsız.
+    /// The integration test (`the_grid_keeps_the_input_line_when_the_mirror_
+    /// cannot_show_it`) sees this only if `frame()` runs within 150 ms, so on a loaded
+    /// machine it could stay green even if the carve-out were deleted — a guard that
+    /// **leaks**. The query here is independent of the clock.
     #[test]
     fn a_faulty_mirror_is_never_held() {
         let typing = Some(ShellState {
@@ -4800,41 +4909,50 @@ mod tests {
             assert_eq!(
                 caret_home(typing, DockStatus::Unavailable(fault), true),
                 CaretHome::Grid,
-                "gösteremediğimiz satırın caret'i tutulamaz: {fault:?}"
+                "the caret of a line we cannot show cannot be held: {fault:?}"
             );
         }
-        // Karşı uç, aynı `held` ile: tutmanın gerçekten uygulandığı kol.
-        // İkisi bir arada olmasa sınama "tutma hiç çalışmıyor" hâlinde de
-        // yeşil kalırdı.
+        // The opposite end, with the same `held`: the arm where the hold is really
+        // applied. Without the two together the test would stay green in the "the hold
+        // does not work at all" state too.
         assert_eq!(
             caret_home(typing, DockStatus::Idle, true),
             CaretHome::Dock,
-            "`Input`+`Idle` tutulabilen kol"
+            "`Input`+`Idle` is the arm that can be held"
         );
     }
 
-    /// İki son tarih **birleşiyor**, biri ötekini ezmiyor.
+    /// The two deadlines **combine**, neither overwrites the other.
     ///
-    /// Bugün `resolve_blocks` `next_tick`'i doğrudan yazıyor ve o yol koşan
-    /// bloğun çıpasının görünür olmasına bağlı; devir ona bağlanamaz. Ezme
-    /// iki yönde de sessiz: ya sayaç donar ya devir hiç gerçekleşmez.
+    /// Today `resolve_blocks` writes `next_tick` directly and that path depends on the
+    /// running block's anchor being visible; the handover cannot be tied to it.
+    /// Overwriting is silent in both directions: either the counter freezes or the
+    /// handover never happens.
     #[test]
     fn two_deadlines_merge_into_the_sooner_one() {
         let tick = Duration::from_millis(600);
         let hold = Duration::from_millis(150);
         assert_eq!(sooner(Some(tick), Some(hold)), Some(hold));
-        assert_eq!(sooner(Some(hold), Some(tick)), Some(hold), "sıra önemsiz");
-        // Tek taraflı hâller: olan kazanır, olmayan kaybettirmez.
+        assert_eq!(
+            sooner(Some(hold), Some(tick)),
+            Some(hold),
+            "order does not matter"
+        );
+        // One-sided states: the one that exists wins, the one that does not exist loses nothing.
         assert_eq!(sooner(Some(tick), None), Some(tick));
         assert_eq!(sooner(None, Some(hold)), Some(hold));
-        assert_eq!(sooner(None, None), None, "iki taraf da boşsa saat kurulmaz");
+        assert_eq!(
+            sooner(None, None),
+            None,
+            "if both sides are empty no clock is set"
+        );
     }
 
     #[test]
     fn the_keymap_field_opens_the_gate_only_for_insert_keymaps() {
-        // İzin listesi: tanıdığımız üç ad geçiyor, geri kalan **her şey**
-        // (komut keymap'i, kullanıcının `bindkey -N` ile yarattığı ad, hiç
-        // gelmemiş alan) kapalı. Yön güvenli — bilmemek istisnayı kapatıyor
+        // Allow list: the three names we recognize pass, **everything else** (a command
+        // keymap, a name the user created with `bindkey -N`, a field that never arrived)
+        // is closed. The direction is safe — not knowing closes the exception
         // (`Session::can_be_typed`).
         let with = |keymap: &str| {
             let sequence = format!(
@@ -4845,13 +4963,13 @@ mod tests {
             dock_line(sequence.as_bytes()).insert_keymap
         };
         for keymap in ["main", "emacs", "viins"] {
-            assert!(with(keymap), "{keymap} ekleme keymap'i sayılmadı");
+            assert!(with(keymap), "{keymap} was not counted as an insert keymap");
         }
         for keymap in ["vicmd", "visual", "viopp", "isearch", "command", "mine", ""] {
-            assert!(!with(keymap), "{keymap} ekleme keymap'i sayıldı");
+            assert!(!with(keymap), "{keymap} was counted as an insert keymap");
         }
-        // Alan hiç yoksa (eski betik) kapı kapalı, ama yük **bozuk değil**:
-        // satır yine çiziliyor.
+        // If the field is absent altogether (old script) the gate is closed, but the
+        // payload is **not corrupt**: the line is still drawn.
         let line = dock_line(&dock_update(0, "", "ls", "", &[]));
         assert_eq!(line.status, DockStatus::Live);
         assert_eq!(line.buffer, "ls");
@@ -4860,9 +4978,9 @@ mod tests {
 
     #[test]
     fn a_six_body_mirror_from_an_old_script_still_decodes() {
-        // **Eski betikle koşan pencere** (032 phase-1): yedinci gövde
-        // (`PREBUFFER`) hiç yok. Yokluğu yükü bozmuyor, `PREBUFFER` boş
-        // sayılıyor — `KEYMAP`'in emsali.
+        // **A window running with an old script** (032 phase-1): the seventh body
+        // (`PREBUFFER`) is absent altogether. Its absence does not corrupt the payload,
+        // `PREBUFFER` is counted as empty — `KEYMAP`'s precedent.
         let sequence = format!("\x1b]8133;u;2;;{};;;{}\x07", b64(b"ls"), b64(b"main"));
         let line = dock_line(sequence.as_bytes());
         assert_eq!(line.status, DockStatus::Live);
@@ -4873,11 +4991,10 @@ mod tests {
 
     #[test]
     fn the_seventh_body_carries_the_prebuffer_and_stays_out_of_the_line() {
-        // `for i in 1 2` + Enter: ZLE önceki satırı `PREBUFFER`'a alıyor ve
-        // `BUFFER` yeni satırla başlıyor. `PREBUFFER` **her zaman** `\n`'le
-        // bitiyor ve aynayı `Live`'dan düşürmüyor. Görüntü uzayına girmiyor:
-        // caret, uzunluk ve son mürekkep yalnız `PREDISPLAY ++ BUFFER ++
-        // POSTDISPLAY`'den.
+        // `for i in 1 2` + Enter: ZLE takes the previous line into `PREBUFFER` and
+        // `BUFFER` starts with the new line. `PREBUFFER` **always** ends with `\n` and
+        // does not drop the mirror from `Live`. It does not enter the display space: the
+        // caret, length and last ink come only from `PREDISPLAY ++ BUFFER ++ POSTDISPLAY`.
         let sequence = format!(
             "\x1b]8133;u;2;;{};;;{};{}\x07",
             b64(b"do"),
@@ -4892,8 +5009,8 @@ mod tests {
         assert_eq!(line.display_chars, 2);
         assert_eq!(line.last_ink, Some('o'));
 
-        // Bozuk yedinci gövde öteki metin gövdeleriyle aynı kuralda: yük
-        // bozuk, satır ızgarada.
+        // A corrupt seventh body is under the same rule as the other text bodies: the
+        // payload is corrupt, the line is on the grid.
         let broken = format!("\x1b]8133;u;0;;{};;;{};!!!!\x07", b64(b"ls"), b64(b"main"));
         assert_eq!(
             dock_events(broken.as_bytes()),
@@ -4903,14 +5020,14 @@ mod tests {
 
     #[test]
     fn a_broken_branch_never_drops_the_mirror() {
-        // Dalın iki bozulma biçimi de yalnız dalı düşürmeli: `Unavailable`
-        // "giriş satırını gösteremiyorum" demek ve ızgarayı devreye sokardı —
-        // yani kesilmiş bir dal dizisi yüzünden kullanıcı yazdığını dock'ta
-        // değil ızgarada görürdü (`/code-review`, 012 phase-6).
+        // Both corruption forms of the branch must drop only the branch: `Unavailable`
+        // means "I cannot show the input line" and would bring the grid into play — so
+        // because of a truncated branch sequence the user would see what they typed on the
+        // grid, not in the dock (`/code-review`, 012 phase-6).
         for sequence in [
-            &b"\x1b]8133;b\x07"[..], // alan hiç yok
-            b"\x1b]8133;b;!!!!\x07", // base64 alfabesi dışı
-            b"\x1b]8133;b;gA\x07",   // geçerli base64, geçersiz UTF-8
+            &b"\x1b]8133;b\x07"[..], // no field at all
+            b"\x1b]8133;b;!!!!\x07", // not in the base64 alphabet
+            b"\x1b]8133;b;gA\x07",   // valid base64, invalid UTF-8
         ] {
             let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
             let mut scanner = Scanner::new();
@@ -4922,7 +5039,7 @@ mod tests {
             assert_eq!(
                 log.dock.status,
                 DockStatus::Live,
-                "dizi aynayı düşürdü: {}",
+                "the sequence dropped the mirror: {}",
                 String::from_utf8_lossy(sequence)
             );
             assert_eq!(log.dock.buffer, "ls");
@@ -4932,8 +5049,8 @@ mod tests {
 
     #[test]
     fn the_cwd_survives_a_finished_line() {
-        // Bağlam satırı aynanın ömrüne bağlı değil: `line-finish` metni
-        // siliyor ama dizin ile dal bir sonraki prompt'a kadar duruyor.
+        // The context line is not tied to the mirror's lifetime: `line-finish` deletes the
+        // text but the directory and branch stay until the next prompt.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut scanner = Scanner::new();
         let mut stream = b"\x1b]7;file:///tmp\x07".to_vec();
@@ -4948,32 +5065,31 @@ mod tests {
         assert_eq!(log.context.branch, "main");
     }
 
-    /// Kabuk betiğinin (`assets/shell/zsh/bateri.zsh`) yolu.
+    /// The path of the shell script (`assets/shell/zsh/bateri.zsh`).
     ///
-    /// Sınama onu **kaynağından** koşturuyor, paketten değil: `make kur`
-    /// kopyayı `cmp` ile denetliyor, yani ikisinin aynılığının kapısı orada.
+    /// The test runs it from its **source**, not from the bundle: `make bundle` checks
+    /// the copy with `cmp`, so the gate for the two being identical is there.
     fn script_path() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell/zsh")
     }
 
-    /// Betiğin verilen ZLE durumu için bastığı baytlar.
+    /// The bytes the script prints for the given ZLE state.
     ///
-    /// **Kodlayan gerçekten zsh.** Bu sınamaların tuttuğu şey `parse_dock`'un
-    /// doğruluğu değil — onun kendi sınamaları var — telin **iki ucunun**
-    /// aynı biçimi konuşması: kodlayıcı kabukta, çözücü burada ve ikisi ayrı
-    /// dillerde yazılı.
+    /// **The encoder really is zsh.** What these tests hold is not `parse_dock`'s
+    /// correctness — it has its own tests — but that the **two ends** of the wire speak
+    /// the same format: the encoder is in the shell, the decoder here, and the two are
+    /// written in separate languages.
     ///
-    /// `zsh -f`: kullanıcının hiçbir başlangıç dosyası okunmuyor, yani sonuç
-    /// makinede kurulu eklentilerden bağımsız.
+    /// `zsh -f`: none of the user's startup files is read, so the result is independent
+    /// of the plugins installed on the machine.
     ///
-    /// **Değerler ortamdan geçiyor**, betiğe gömülü değil: taşınan şey tam da
-    /// `;`, `ESC`, ters bölü ve tırnak gibi baytlar ve onları bir zsh
-    /// dizgisine gömmek sınamayı alıntılama kurallarının sınamasına
-    /// çevirirdi.
+    /// **The values pass through the environment**, not embedded in the script: what is
+    /// carried is exactly bytes like `;`, `ESC`, backslash and quote, and embedding them
+    /// in a zsh string would turn the test into a test of quoting rules.
     ///
-    /// Betik koşamıyorsa (zsh yok) sınama **düşer**, atlanmaz: bt-core Linux
-    /// hedefiyle *derleniyor*, sınamaları macOS'ta koşuyor ve orada
-    /// `/bin/zsh` her zaman var.
+    /// If the script cannot run (no zsh) the test **fails**, it is not skipped: bt-core
+    /// is *compiled* for the Linux target, its tests run on macOS and `/bin/zsh` is
+    /// always there.
     fn script_output(
         cursor: usize,
         pre: &str,
@@ -5004,10 +5120,10 @@ mod tests {
                 ("T_BUF", buffer),
                 ("T_POST", post),
                 ("T_HL", &highlights.join("\n")),
-                // `$KEYMAP` ZLE'nin parametresi ve kanca dışında boş; sınama
-                // onu elle kuruyor ki telin altıncı gövdesi de koşsun.
+                // `$KEYMAP` is a ZLE parameter and is empty outside a hook; the test sets it by
+                // hand so that the wire's sixth body runs too.
                 ("T_KEYMAP", "main"),
-                // `$PREBUFFER` da öyle; yedinci gövde.
+                // `$PREBUFFER` likewise; the seventh body.
                 ("T_PREBUF", prebuffer),
             ],
         )
@@ -5021,10 +5137,10 @@ mod tests {
         for (key, value) in env {
             command.env(key, value);
         }
-        let output = command.output().expect("zsh koşmadı");
+        let output = command.output().expect("zsh did not run");
         assert!(
             output.status.success() && output.stderr.is_empty(),
-            "betik temiz koşmadı: {:?}",
+            "the script did not run cleanly: {:?}",
             String::from_utf8_lossy(&output.stderr)
         );
         output.stdout
@@ -5032,9 +5148,9 @@ mod tests {
 
     #[test]
     fn the_script_encodes_what_the_scanner_decodes() {
-        // Gövdeler base64 tam da bu baytlar için: `;` alanı, `ESC` diziyi
-        // bitirirdi. Ters bölü de burada — kodlayıcının ilk taslağı onu
-        // aritmetiğin `##` biçimiyle okuyor ve 92 yerine 32 görüyordu.
+        // The bodies are base64 exactly for these bytes: a `;` would be a field, `ESC`
+        // would end the sequence. Backslash is here too — the encoder's first draft read it
+        // with the arithmetic `##` form and saw 32 instead of 92.
         let buffer = "echo 'a;b' \\ \u{1b}[0m çığır";
         let line = dock_line(&script_output(
             5,
@@ -5047,15 +5163,15 @@ mod tests {
             ],
         ));
 
-        // Tel sağlam ama satır dock'un değil: `ESC` bir kontrol karakteri,
-        // dock onu çizmiyor ve zsh ızgarada `^[` basıyor
-        // ([`DockStatus::Control`], 025). Metin yine de eksiksiz çözülüyor —
-        // aşağıdaki iddialar telin kendisini sınıyor.
+        // The wire is sound but the line is not the dock's: `ESC` is a control character,
+        // the dock does not draw it and zsh prints `^[` on the grid
+        // ([`DockStatus::Control`], 025). The text is still decoded in full — the claims
+        // below test the wire itself.
         assert_eq!(line.status, DockStatus::Control);
         assert_eq!(line.predisplay, "❯ ");
         assert_eq!(line.buffer, buffer);
         assert_eq!(line.postdisplay, " --dry-run");
-        // `$CURSOR` 5, `PREDISPLAY` iki karakter: görüntü uzayında 7.
+        // `$CURSOR` 5, `PREDISPLAY` two characters: 7 in the display space.
         assert_eq!(line.cursor, 7);
         assert_eq!(line.highlights.len(), 2);
         assert_eq!(line.highlights[0].start, 0);
@@ -5063,21 +5179,21 @@ mod tests {
         assert_eq!(line.highlights[1].start, 2);
         assert_eq!(line.highlights[1].end, 6);
         assert!(line.highlights[1].style.bold);
-        // Altıncı gövde de telden geçiyor: kabuk `$KEYMAP`'i basıyor ve
-        // çözücü onu ekleme kapısına çeviriyor.
-        assert!(line.insert_keymap, "keymap gövdesi telde kayboldu");
+        // The sixth body passes through the wire too: the shell prints `$KEYMAP` and the
+        // decoder turns it into the insert gate.
+        assert!(line.insert_keymap, "the keymap body was lost on the wire");
     }
 
     #[test]
     fn the_script_sends_the_prebuffer_as_the_seventh_body() {
-        // `for` döngüsünün ikinci satırı: kabuk `PREBUFFER`'ı basıyor,
-        // çözücü onu ayrı tutuyor ve satır tek satırlık `BUFFER`'la `Live`.
+        // The `for` loop's second line: the shell prints `PREBUFFER`, the decoder keeps it
+        // separate and the line is `Live` with a single-line `BUFFER`.
         let line = dock_line(&script_output_after(2, "for i in 1 2\n", "", "do", "", &[]));
         assert_eq!(line.status, DockStatus::Live);
         assert_eq!(line.prebuffer, "for i in 1 2\n");
         assert_eq!(line.buffer, "do");
         assert_eq!(line.cursor, 2);
-        // Boş `PREBUFFER` (olağan tek satırlık komut) da bir alan: boş gövde.
+        // An empty `PREBUFFER` (the ordinary single-line command) is a field too: an empty body.
         let line = dock_line(&script_output(0, "", "ls", "", &[]));
         assert_eq!(line.prebuffer, "");
         assert_eq!(line.status, DockStatus::Live);
@@ -5085,14 +5201,14 @@ mod tests {
 
     #[test]
     fn the_script_encodes_every_padding_remainder() {
-        // base64 üçer bayt öğütüyor; artığı 0, 1 ve 2 olan üç uzunluk da
-        // sınanıyor. UTF-8 karakter başına birden çok bayt, yani "karakter
-        // sayısı" ile "bayt sayısı" burada ayrışıyor.
+        // base64 grinds three bytes at a time; the three lengths with remainders 0, 1 and 2
+        // are tested too. UTF-8 is multiple bytes per character, so "character count" and
+        // "byte count" diverge here.
         for text in ["abc", "abcd", "abcde", "ç", "çi", "çığ", "😀"] {
             let line = dock_line(&script_output(0, "", text, "", &[]));
             assert_eq!(line.buffer, text, "metin: {text}");
         }
-        // Boş görüntü de geçerli: prompt çizilir çizilmez gelen ilk ayna bu.
+        // An empty display is valid too: the first mirror arriving as soon as the prompt is drawn is this.
         let line = dock_line(&script_output(0, "", "", "", &[]));
         assert_eq!(line.buffer, "");
         assert_eq!(line.status, DockStatus::Live);
@@ -5106,37 +5222,35 @@ mod tests {
 
     #[test]
     fn a_line_too_long_to_mirror_is_refused_before_it_is_encoded() {
-        // Kabuk tarafındaki kapı: kodlama tuş başına koşuyor ve maliyeti
-        // uzunlukla doğrusal, yani terminalin zaten reddedeceği bir yükü
-        // kodlamak boşa harcanan zamandır. İki ucun sonucu **aynı** olmalı
-        // (`DockFault::Overflow`), yoksa sınırın hangi tarafta tutulduğu
-        // kullanıcıya farklı davranış olarak yansırdı.
+        // The shell-side gate: encoding runs per keystroke and its cost is linear in the
+        // length, so encoding a payload the terminal will reject anyway is wasted time. The
+        // result of the two ends **must** be the same (`DockFault::Overflow`), otherwise
+        // which side the bound is held on would show up to the user as different behavior.
         let long = "x".repeat(4097);
         assert_eq!(
             dock_events(&script_output(0, "", &long, "", &[])),
             vec![DockSnapshot::Unavailable(DockFault::Overflow)]
         );
 
-        // Sınırın altındaki satır aynada; kapı sessizce daralmıyor.
+        // A line below the bound is in the mirror; the gate does not quietly narrow.
         let fits = "x".repeat(4096);
         assert_eq!(
             dock_line(&script_output(0, "", &fits, "", &[])).buffer,
             fits
         );
 
-        // **`PREBUFFER` de toplama giriyor** (032): yapıştırılmış bir
-        // döngünün önceki satırları görüntünün parçası ve sınırı `BUFFER`
-        // ile birlikte aşabilir.
+        // **`PREBUFFER` enters the sum too** (032): the earlier lines of a pasted loop are
+        // part of the display and can exceed the bound together with `BUFFER`.
         let before = format!("{}\n", "x".repeat(4095));
         assert_eq!(
             dock_events(&script_output_after(0, &before, "", "ls", "", &[])),
             vec![DockSnapshot::Unavailable(DockFault::Overflow)]
         );
 
-        // **Dördüncü gövde de kapıya tabi.** Sözdizimi vurgusu jeton başına bir
-        // kayıt bırakıyor, yani kısa bir metnin yanında `region_highlight`
-        // kendi başına sınırı aşabilir; kapı yalnız metni ölçseydi yorumu
-        // gerçekten yaptığından fazlasını iddia ederdi.
+        // **The fourth body is subject to the gate too.** Syntax highlighting leaves one
+        // record per token, so next to a short text `region_highlight` alone can exceed the
+        // bound; if the gate measured only the text, the comment would claim more than it
+        // really does.
         let many: Vec<String> = (0..200)
             .map(|at| format!("{at} {at} fg=green memo=zsh-syntax-highlighting"))
             .collect();
@@ -5149,17 +5263,16 @@ mod tests {
 
     #[test]
     fn the_script_prints_a_cwd_the_scanner_decodes() {
-        // Kodlayan gerçekten zsh, çözen burası: yüzde kodlaması iki uçta ayrı
-        // dillerde yazılı ve taşıdığı baytlar tam da URI'yi bozabilecek olanlar
-        // (boşluk, `%`, `;`, çok baytlı karakter).
+        // The encoder is really zsh, the decoder is here: percent encoding is written in
+        // two separate languages at the two ends and the bytes it carries are exactly the
+        // ones that can break a URI (blank, `%`, `;`, multi-byte character).
         //
-        // Dizinler **gerçekten yaratılıyor**: `PWD`'yi elle atamak kabuğun
-        // kendi değerini sınamak olmaktan çıkarırdı — zsh onu başlangıçta
-        // kendisi kuruyor.
+        // The directories are **really created**: assigning `PWD` by hand would stop this
+        // from testing the shell's own value — zsh sets it itself at startup.
         let root = std::env::temp_dir().join(format!("bateri-cwd-{}", std::process::id()));
         let names = ["plain", "a b", "a%b", "a;b", "çığır", "😀"];
         for name in names {
-            std::fs::create_dir_all(root.join(name)).expect("dizin yaratılamadı");
+            std::fs::create_dir_all(root.join(name)).expect("the directory could not be created");
         }
 
         for name in names {
@@ -5172,18 +5285,18 @@ mod tests {
             assert_eq!(cwd_events(&bytes), [path.clone()], "yol: {path}");
         }
 
-        // Kök dizin: yolun tek karakter olduğu kenar.
+        // The root directory: the edge where the path is a single character.
         let bytes = run_script("source $ZDOTDIR/bateri.zsh; cd -q -- /; __bateri_cwd", &[]);
         assert_eq!(cwd_events(&bytes), ["/"]);
 
-        std::fs::remove_dir_all(&root).expect("geçici dizin silinemedi");
+        std::fs::remove_dir_all(&root).expect("the temporary directory could not be deleted");
     }
 
     #[test]
     fn the_script_prints_the_branch_from_the_repository() {
-        // Depo yokken dal boş; ayraç da onunla birlikte düşüyor
-        // (`dock::render`). Geçici dizin **depo değil**, yani bu kol deponun
-        // varlığına değil yokluğuna tanık.
+        // While there is no repository the branch is empty; the separator drops with it
+        // (`dock::render`). The temporary directory is **not a repository**, so this arm
+        // witnesses the repository's absence, not its presence.
         let outside = std::env::temp_dir();
         let bytes = run_script(
             "source $ZDOTDIR/bateri.zsh; cd -q -- $T_DIR; __bateri_branch_print",
@@ -5194,8 +5307,8 @@ mod tests {
         scanner.feed(&bytes, |event| log.apply_scan(event));
         assert_eq!(log.context.branch, "");
 
-        // Deponun içinde dal adı geliyor. Kendi depomuz: `git` yoksa sınama
-        // atlanmıyor, dal boş kalır ve iddia da onu söyler.
+        // Inside the repository the branch name arrives. Our own repository: if `git` is
+        // absent the test is not skipped, the branch stays empty and the claim says so.
         let inside = script_path();
         let bytes = run_script(
             "source $ZDOTDIR/bateri.zsh; cd -q -- $T_DIR; __bateri_branch_print",
@@ -5204,16 +5317,16 @@ mod tests {
         scanner.feed(&bytes, |event| log.apply_scan(event));
         assert!(
             !log.context.branch.is_empty(),
-            "depo içinde dal boş kaldı: {:?}",
+            "the branch stayed empty inside the repository: {:?}",
             log.context.branch
         );
     }
 
     #[test]
     fn the_three_arms_do_not_touch_each_others_buffers() {
-        // Aynanın geniş sınırı 133'ün dar sınırını gevşetmemeli; 133'ün dar
-        // sınırı da aynayı kesmemeli. Dizin kolunun sınırı da üçüncü bir
-        // bütçe. Tamponların ayrı olmasının kanıtı.
+        // The mirror's wide bound must not loosen 133's narrow bound; 133's narrow bound
+        // must not cut the mirror either. The directory arm's bound is a third budget too.
+        // The proof that the buffers are separate.
         let mut scanner = Scanner::new();
         let mut marks = Vec::new();
         let mut lines = Vec::new();
@@ -5247,15 +5360,15 @@ mod tests {
             assert_eq!(
                 seen,
                 vec![DockSnapshot::Update(expected.clone())],
-                "bölünme noktası {at}"
+                "split point {at}"
             );
         }
     }
 
     #[test]
     fn the_log_clears_the_mirror_when_it_cannot_be_drawn() {
-        // Bayat metin bırakmak, ızgara bastırılırken dock'un bir önceki
-        // komutu göstermesi demek olurdu.
+        // Leaving stale text would mean the dock showing the previous command while the
+        // grid is suppressed.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let staged = DockState {
             status: DockStatus::Live,
@@ -5282,9 +5395,9 @@ mod tests {
 
     #[test]
     fn a_new_buffer_clears_the_dock_selection_and_a_new_prompt_does_not() {
-        // 031 R3.4: seçimin indeksleri `BUFFER`'ın karakterleri; `BUFFER`
-        // değişince başka bir metni gösterirlerdi. Prompt'un yeniden
-        // çizilmesi ya da önerinin değişmesi seçili metni oynatmıyor.
+        // 031 R3.4: the selection's indices are `BUFFER`'s characters; when `BUFFER`
+        // changes they would point at another text. The prompt being redrawn or a change
+        // of suggestion does not move the selected text.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut staged = DockState {
             status: DockStatus::Live,
@@ -5313,11 +5426,17 @@ mod tests {
         staged.predisplay = "%% ".to_string();
         staged.postdisplay = " -s".to_string();
         log.apply_scan(ScanEvent::Dock(DockEvent::Update(&staged)));
-        assert!(log.dock_selection.is_some(), "prompt değişimi seçimi sildi");
+        assert!(
+            log.dock_selection.is_some(),
+            "a prompt change deleted the selection"
+        );
 
         staged.buffer = "git statu".to_string();
         log.apply_scan(ScanEvent::Dock(DockEvent::Update(&staged)));
-        assert_eq!(log.dock_selection, None, "yeni BUFFER seçimi silmedi");
+        assert_eq!(
+            log.dock_selection, None,
+            "a new BUFFER did not delete the selection"
+        );
 
         for (name, event) in [
             ("End", DockEvent::End),
@@ -5326,26 +5445,29 @@ mod tests {
             log.apply_scan(ScanEvent::Dock(DockEvent::Update(&staged)));
             select(&mut log);
             log.apply_scan(ScanEvent::Dock(event));
-            assert_eq!(log.dock_selection, None, "{name} seçimi silmedi");
+            assert_eq!(
+                log.dock_selection, None,
+                "{name} did not delete the selection"
+            );
         }
     }
 
     #[test]
     fn shift_arrows_step_the_moving_end_of_the_selection() {
         let range = |selection: DockSelection| selection.range;
-        // Seçim yoksa caret'ten başlıyor.
+        // If there is no selection it starts from the caret.
         let one = DockSelection::stepped(None, 2, true, "abcd", false);
         assert_eq!(range(one), (2, 3));
         let two = DockSelection::stepped(Some(one), 2, true, "abcd", false);
         assert_eq!(range(two), (2, 4));
-        // Satırın sonunda duruyor.
+        // It stays at the end of the line.
         assert_eq!(
             range(DockSelection::stepped(Some(two), 2, true, "abcd", false)),
             (2, 4)
         );
         let back = DockSelection::stepped(Some(two), 2, false, "abcd", false);
         assert_eq!(range(back), (2, 3));
-        // Boşa inen seçim ucunu kaybetmiyor: bir sonraki adım oradan.
+        // A selection that descends to empty does not lose its end: the next step is from there.
         let empty = DockSelection::stepped(Some(back), 2, false, "abcd", false);
         assert_eq!((empty.range(), range(empty)), (None, (2, 2)));
         assert_eq!(
@@ -5353,8 +5475,8 @@ mod tests {
             (1, 2)
         );
 
-        // Baş çapanın solundaysa hareketli uç aralığın başı (sola sürüklenmiş
-        // fare seçimi).
+        // If the head is to the left of the anchor the moving end is the range's start (a
+        // mouse selection dragged left).
         let point = |index| DockPoint {
             index,
             half: CellHalf::Left,
@@ -5381,7 +5503,7 @@ mod tests {
             (2, 3)
         );
 
-        // Kelime seçimi harf adımıyla büyüyor, sonu hareketli.
+        // A word selection grows with a letter step, its end is the moving one.
         let word = DockSelection::new(SelectKind::Word, point(1), point(1), "ab cd", false);
         assert_eq!(range(word), (0, 2));
         assert_eq!(
@@ -5389,7 +5511,7 @@ mod tests {
             (0, 3)
         );
 
-        // Birleştirici tabanından ayrılmıyor: `é` = `e` + U+0301.
+        // The combining mark does not separate from its base: `é` = `e` + U+0301.
         let text = "e\u{301}x";
         assert_eq!(
             range(DockSelection::stepped(None, 0, true, text, false)),
@@ -5407,13 +5529,13 @@ mod tests {
 
     #[test]
     fn shift_arrows_step_over_a_cluster_whole() {
-        // 035 R4.2: `a🇹🇷b`'de ⇧← sondan bayrağı bütün alıyor, ⇧→ baştan
-        // `a`'dan sonra bayrağı. Kapalı okunuşta adım kod noktası.
+        // 035 R4.2: in `a🇹🇷b`, ⇧← takes the flag whole from the end, ⇧→ takes the flag
+        // after `a` from the start. In the closed reading the step is a code point.
         let range = |selection: DockSelection| selection.range;
         let text = "a🇹🇷b";
         let back = DockSelection::stepped(None, 3, false, text, true);
         assert_eq!(range(back), (1, 3));
-        // Caret iki RI'nin arasında: iki yön de bayrağı bütün alıyor.
+        // The caret is between two RIs: both directions take the flag whole.
         assert_eq!(
             range(DockSelection::stepped(None, 2, false, text, true)),
             (1, 3)
@@ -5436,40 +5558,46 @@ mod tests {
 
     #[test]
     fn the_edit_capability_lives_for_one_prompt() {
-        // `w` düzenleme kapısının dördüncü koşulu (031 phase-5): yükü yok,
-        // aynanın durumuna dokunmuyor ve prompt'un ömrüyle gidiyor —
-        // `line-finish` (`e`) de prompt'un başı (`A`) da siliyor.
+        // `w` is the editing gate's fourth condition (031 phase-5): it has no payload,
+        // does not touch the mirror's state and goes with the prompt's lifetime —
+        // `line-finish` (`e`) and the start of the prompt (`A`) both delete it.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut scanner = Scanner::new();
         let mut stream = dock_update(0, "", "ls", "", &[]);
         stream.extend_from_slice(b"\x1b]8133;w\x07");
         scanner.feed(&stream, |event| log.apply_scan(event));
-        assert!(log.dock_editable, "w yeteneği kurmadı");
-        assert_eq!(log.dock.status, DockStatus::Live, "w aynayı oynattı");
+        assert!(log.dock_editable, "w did not set the capability");
+        assert_eq!(log.dock.status, DockStatus::Live, "w moved the mirror");
         assert_eq!(log.dock.buffer, "ls");
 
-        // Aynanın her tuşu yeteneği silmiyor: tarayıcının `clone_from`'u
-        // yalnız aynayı tazeliyor.
+        // Not every keystroke of the mirror deletes the capability: the scanner's
+        // `clone_from` only refreshes the mirror.
         scanner.feed(&dock_update(0, "", "ls -l", "", &[]), |event| {
             log.apply_scan(event)
         });
-        assert!(log.dock_editable, "ayna yeteneği sildi");
+        assert!(log.dock_editable, "the mirror deleted the capability");
 
         scanner.feed(b"\x1b]8133;e\x07", |event| log.apply_scan(event));
-        assert!(!log.dock_editable, "line-finish yeteneği silmedi");
+        assert!(
+            !log.dock_editable,
+            "line-finish did not delete the capability"
+        );
 
         scanner.feed(b"\x1b]8133;w\x07", |event| log.apply_scan(event));
         assert!(log.dock_editable);
         scanner.feed(b"\x1b]133;A;bt_block=3\x07", |event| log.apply_scan(event));
-        assert!(!log.dock_editable, "prompt'un başı yeteneği silmedi");
+        assert!(
+            !log.dock_editable,
+            "the start of the prompt did not delete the capability"
+        );
     }
 
     #[test]
     fn the_script_arms_the_widget_before_it_announces_it() {
-        // Betiğin `line-init` kancası: üç keymap'e bağlama, sonra `w`. ZLE
-        // olmadan koşuyor (`zsh -f -c`), yani sınanan şey telin iki ucunun
-        // aynı harfi konuşması; gerçek ZLE'deki bağlamayı `session.rs`'in
-        // uçtan uca sınamaları görüyor.
+        // The script's `line-init` hook: binding to three keymaps, then `w`. It runs
+        // without ZLE (`zsh -f -c`), so what is tested is the two ends of the wire
+        // speaking the same letter; the binding in a real ZLE is seen by `session.rs`'s
+        // end-to-end tests.
         let bytes = run_script(
             "source $ZDOTDIR/bateri.zsh
              zmodload zsh/zle
@@ -5480,20 +5608,20 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         assert!(
             text.starts_with("\x1b]8133;w\x07"),
-            "yetenek basılmadı: {text:?}"
+            "the capability was not printed: {text:?}"
         );
         assert_eq!(
             text.matches("__bateri_dock_edit").count(),
             3,
-            "widget üç keymap'e bağlanmadı: {text:?}"
+            "the widget was not bound to three keymaps: {text:?}"
         );
         assert_eq!(dock_events(&bytes[..9]), vec![DockSnapshot::Editable]);
     }
 
     #[test]
     fn the_mirror_reuses_its_buffers() {
-        // R1.3'ün ölçütü: sabit durumda tuş başına ayırma yok. Kapasitenin
-        // ikinci turda büyümemesi bunun gözlenebilir yüzü.
+        // R1.3's criterion: no per-keystroke allocation in steady state. The capacity not
+        // growing in the second round is the observable face of this.
         let mut scanner = Scanner::new();
         let long = "x".repeat(200);
         let sequence = dock_update(0, "", &long, "", &[]);
@@ -5511,15 +5639,15 @@ mod tests {
         for id in 1..=(BLOCK_LOG_FLOOR as u32 * 4) {
             run_block(&mut log, id, Some(0));
         }
-        // Taban olsaydı bu blok çoktan düşmüş olurdu.
+        // If it had been the floor this block would have long since dropped.
         assert_eq!(exit_of(&log, BLOCK_LOG_FLOOR as u32 + 1), Some(Some(0)));
     }
 
-    /// Sayacın dört kademesi; sınırların **iki yakası** da sınanıyor.
+    /// The counter's four tiers; **both sides** of the boundaries are tested.
     ///
-    /// Kademe sınırında bir `<` yerine `<=` yazmak belirtisi olmayan bir kusur
-    /// olurdu: `10s` yerine `10.0s` yazan bir sayaç yanlış değil, yalnız
-    /// tasarımın dışında — ve hiçbir derleyici onu görmez.
+    /// Writing a `<` instead of `<=` at a tier boundary would be a defect with no
+    /// symptom: a counter that writes `10.0s` instead of `10s` is not wrong, just
+    /// outside the design — and no compiler sees it.
     #[test]
     fn the_counter_reads_its_four_tiers() {
         let text = |ms| {
@@ -5528,23 +5656,23 @@ mod tests {
                 .to_owned()
         };
 
-        // **Bitmiş değerde ondalık, saniye kademesinin tamamında.** Eşiğin
-        // hemen üstünden dakikanın hemen altına: sınır on saniye **değil**
-        // (kullanıcı kararı) — donmuş bir değerde ondalığın bedeli yok ve
-        // "asıl sayı" sorusu on saniyeden sonra da geçerli.
+        // **The decimal in a finished value, across the whole seconds tier.** From just
+        // above the threshold to just below a minute: the boundary is **not** ten seconds
+        // (user decision) — a frozen value pays nothing for the decimal and the "real
+        // number" question holds after ten seconds too.
         assert_eq!(text(1_000), "1.0s");
         assert_eq!(text(1_449), "1.4s");
         assert_eq!(text(9_999), "9.9s");
         assert_eq!(text(10_000), "10.0s");
         assert_eq!(text(45_300), "45.3s");
         assert_eq!(text(59_999), "59.9s");
-        // Kırpma, yuvarlama değil: 1.49 saniye "1.4s", "1.5s" değil. Sayaç
-        // ileri değil geri dürüst olsun.
+        // Truncation, not rounding: 1.49 seconds is "1.4s", not "1.5s". The counter
+        // should be honest backwards, not forwards.
         assert_eq!(text(1_499), "1.4s");
 
-        // Dakikadan itibaren ondalık düşüyor: `1m 05.3s` hem uzun hem
-        // okunmuyor, orada aranan şey kaba büyüklük. Saniye iki hane, yoksa
-        // "1m 5s" ile "1m 50s" karışır.
+        // From the minute the decimal drops: `1m 05.3s` is both long and unreadable, what
+        // is sought there is the rough magnitude. The seconds are two digits, otherwise
+        // "1m 5s" and "1m 50s" get confused.
         assert_eq!(text(60_000), "1m 00s");
         assert_eq!(text(65_000), "1m 05s");
         assert_eq!(text(3_599_999), "59m 59s");
@@ -5554,91 +5682,92 @@ mod tests {
         assert_eq!(text(3_720_000), "1h 02m");
     }
 
-    /// **Koşan sayaç ondalık göstermiyor**, bitmiş olan gösteriyor.
+    /// **A running counter shows no decimal**, a finished one does.
     ///
-    /// Ayrımın sebebi hem okuma hem pil: koşan sayacın her değişimi bir kare
-    /// istiyor, yani onda bir **saniyede on kare** ederdi. Ayrım kaldırılırsa
-    /// burası kızarır ve saat sessizce 10 Hz'e çıkardı.
+    /// The reason for the distinction is both reading and battery: every change of a
+    /// running counter requests a frame, so tenths would be **ten frames per second**.
+    /// If the distinction is removed this goes red and the clock would quietly climb
+    /// to 10 Hz.
     ///
-    /// İki uçta da sınanıyor, çünkü ondalık artık dakikaya kadar uzanıyor:
-    /// koşan `45s` ile bitmiş `45.3s` aynı süreden doğuyor.
+    /// Tested at both ends, because the decimal now extends up to the minute: a
+    /// running `45s` and a finished `45.3s` are born from the same duration.
     #[test]
     fn a_running_counter_costs_one_frame_a_second() {
         let elapsed = Duration::from_millis(3_400);
         assert_eq!(
             Counter::new(elapsed, Precision::Whole).as_str(),
             "3s",
-            "koşan sayaç ondalık gösteriyor"
+            "the running counter shows a decimal"
         );
         assert_eq!(Counter::new(elapsed, Precision::Tenths).as_str(), "3.4s");
 
-        // Onda birin eski tavanının (10 sn) üstü: koşan hâlâ tam saniye.
+        // Above the old ceiling of tenths (10 s): a running one is still whole seconds.
         let long = Duration::from_millis(45_300);
         assert_eq!(
             Counter::new(long, Precision::Whole).as_str(),
             "45s",
-            "koşan sayaç on saniyeden sonra da tam saniye kalmalı"
+            "the running counter must stay whole seconds after ten seconds too"
         );
         assert_eq!(Counter::new(long, Precision::Tenths).as_str(), "45.3s");
 
-        // Tik tam saniyeye kuruluyor: 3.4 saniyede 600 ms kaldı.
+        // The tick is set to the whole second: at 3.4 seconds 600 ms remain.
         assert_eq!(next_tick(elapsed), Duration::from_millis(600));
-        // Tam saniyede sıfır değil **bir** saniye: sıfır süreli bir saat
-        // callback'i döngüye sokardı.
+        // On the whole second not zero but **one** second: a zero-duration clock would
+        // put the callback in a loop.
         assert_eq!(next_tick(Duration::from_secs(3)), Duration::from_secs(1));
-        // Eşiğin altında bir sonraki değişim sayacın **belirmesi**.
+        // Below the threshold the next change is the counter's **appearance**.
         assert_eq!(
             next_tick(Duration::from_millis(200)),
             Duration::from_millis(800)
         );
     }
 
-    /// Saat kademesinde tik **dakikada bir**, saniyede bir değil.
+    /// In the hour tier the tick is **once a minute**, not once a second.
     ///
-    /// Metin (`1h 07m`) dakikada bir değişiyor; saniyede bir uyandırmak bir
-    /// saatte 3540 **aynı** kareyi çizdirirdi ve modül başlığına yazdığımız
-    /// "içerik gerçekten değişecek" şartını ilk ihlal eden biz olurduk
-    /// (`/code-review`, 013 kapı).
+    /// The text (`1h 07m`) changes once a minute; waking every second would have an
+    /// hour draw 3540 **identical** frames and we would be the first to violate the
+    /// "content must genuinely change" condition we wrote into the module header
+    /// (`/code-review`, 013 gate).
     #[test]
     fn the_hour_tier_ticks_once_a_minute() {
-        // 1 saat 7 dakika 20 saniye: bir sonraki dakikaya 40 saniye.
+        // 1 hour 7 minutes 20 seconds: 40 seconds to the next minute.
         let elapsed = Duration::from_secs(3600 + 7 * 60 + 20);
         assert_eq!(Counter::new(elapsed, Precision::Whole).as_str(), "1h 07m");
         assert_eq!(next_tick(elapsed), Duration::from_secs(40));
 
-        // Tam dakikada sıfır değil **bir dakika**: sıfır süreli bir saat
-        // callback'i döngüye sokardı.
+        // On the whole minute not zero but **one minute**: a zero-duration clock would put
+        // the callback in a loop.
         assert_eq!(
             next_tick(Duration::from_secs(3600)),
             Duration::from_secs(60)
         );
 
-        // Sınırın altı hâlâ saniyede bir: `59m 59s` her saniye değişiyor.
+        // Below the boundary it is still once a second: `59m 59s` changes every second.
         assert_eq!(next_tick(Duration::from_secs(3599)), Duration::from_secs(1));
     }
 
-    /// Kaybolan bir `D` **sonraki** bloğa yazılmıyor.
+    /// A lost `D` is not written to the **next** block.
     ///
-    /// Saat yalnız `D`'de tüketilseydi yarıda kesilmiş bir OSC'den sonra
-    /// bayat `Instant` ayakta kalır ve bir sonraki bloğun `D`'si onu
-    /// tüketirdi: anlık bir komut dakikalarca sürmüş görünürdü
-    /// (`/code-review`, 013 kapı). `A` ikinci sıfırlama noktası.
+    /// If the clock were consumed only at `D`, after an OSC cut halfway a stale
+    /// `Instant` would stay standing and the next block's `D` would consume it: an
+    /// instant command would look like it took minutes (`/code-review`, 013 gate). `A`
+    /// is the second reset point.
     #[test]
     fn a_lost_command_end_does_not_charge_the_next_block() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
-        // 1. blok koşuyor ama `D`'si hiç gelmiyor.
+        // The 1st block is running but its `D` never arrives.
         log.apply(Mark::PromptStart { id: Some(1) });
         log.apply(Mark::CommandStart);
         assert!(log.running_since.is_some());
 
-        // 2. bloğun prompt'u: saat burada sıfırlanmalı.
+        // Block 2's prompt: the clock must be reset here.
         log.apply(Mark::PromptStart { id: Some(2) });
         assert!(
             log.running_since.is_none(),
-            "`A` bayat saati temizlemeliydi"
+            "`A` should have cleared the stale clock"
         );
 
-        // 2. blok `C` görmeden kapanıyor (kabuk yine de `D` basıyor).
+        // Block 2 closes without seeing `C` (the shell prints `D` anyway).
         log.apply(Mark::CommandEnd {
             exit: Some(0),
             id: Some(2),
@@ -5646,31 +5775,31 @@ mod tests {
         assert_eq!(
             log.duration(2, None),
             Some(Duration::ZERO),
-            "kaybolan `D` sonraki bloğa süre yazdı"
+            "a lost `D` wrote a duration to the next block"
         );
     }
 
-    /// **İkinci bir OSC 133 kaynağı saati çalmıyor.**
+    /// **A second OSC 133 source does not steal the clock.**
     ///
-    /// Kullanıcının kabuğunda iTerm2'nin entegrasyonu kuruluysa
-    /// (`~/.iterm2_shell_integration.zsh`) her komut **iki** `C` ve **iki**
-    /// `D` doğuruyor; onunki kimliksiz, bizimki `bt_block=` taşıyor. Dizi
-    /// gerçek bir makinede ölçüldü ve aynen budur.
+    /// If iTerm2's integration is installed in the user's shell
+    /// (`~/.iterm2_shell_integration.zsh`) every command produces **two** `C`s and
+    /// **two** `D`s; its own is identity-less, ours carries `bt_block=`. The sequence
+    /// was measured on a real machine and is exactly this.
     ///
-    /// Kimliksiz `D` saati tüketiyordu: bizimki boş buluyor, süre **sıfır**
-    /// yazılıyor ve sayaç eşiğin altında kalıp hiç çizilmiyordu. Kullanıcının
-    /// gördüğü kusur buydu ve hiçbir sınama göremiyordu, çünkü hepsi tek
-    /// kaynaklı bir akış varsayıyordu.
+    /// The identity-less `D` used to consume the clock: ours found it empty, the
+    /// duration was written as **zero** and the counter stayed below the threshold and
+    /// was never drawn. That was the defect the user saw and no test could see it,
+    /// because all of them assumed a single-source stream.
     #[test]
     fn a_foreign_integration_does_not_steal_the_clock() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         log.apply(Mark::PromptStart { id: Some(1) });
         log.apply(Mark::PromptEnd);
-        // İki `C`: yabancı + bizim. İlki kazanmalı.
+        // Two `C`s: foreign + ours. The first must win.
         log.apply(Mark::CommandStart);
         log.apply(Mark::CommandStart);
         std::thread::sleep(Duration::from_millis(60));
-        // İki `D`: önce yabancının kimliksizi, sonra bizimki.
+        // Two `D`s: first the foreign identity-less one, then ours.
         log.apply(Mark::CommandEnd {
             exit: Some(0),
             id: None,
@@ -5681,19 +5810,21 @@ mod tests {
         });
         log.apply(Mark::PromptStart { id: Some(2) });
 
-        let measured = log.duration(1, None).expect("biten blokta süre olmalı");
+        let measured = log
+            .duration(1, None)
+            .expect("a finished block must have a duration");
         assert!(
             measured >= Duration::from_millis(50),
-            "yabancı `D` saati çaldı, süre sıfıra düştü: {measured:?}"
+            "a foreign `D` stole the clock, the duration fell to zero: {measured:?}"
         );
     }
 
-    /// Tamponun tavanı temsil edilebilir en uzun metni alıyor.
+    /// The buffer's ceiling takes the longest representable text.
     ///
-    /// [`Counter::CAPACITY`] bir tahmin değil türetme: süre `u32` milisaniye,
-    /// yani en çok ~1193 saat. Tavan küçültülürse `Counter::new`'in
-    /// `debug_assert`'ü burada patlar — sürüm derlemesinde metin sessizce
-    /// kırpılırdı.
+    /// [`Counter::CAPACITY`] is a derivation, not a guess: the duration is `u32`
+    /// milliseconds, that is at most ~1193 hours. If the ceiling is reduced,
+    /// `Counter::new`'s `debug_assert` blows up here — in a release build the text
+    /// would be silently truncated.
     #[test]
     fn the_longest_counter_fits_the_buffer() {
         let longest = Counter::new(
@@ -5703,16 +5834,17 @@ mod tests {
         assert_eq!(longest.as_str(), "1193h 02m");
         assert!(
             longest.as_str().len() <= Counter::CAPACITY,
-            "sayaç tamponu en uzun metni almıyor: {}",
+            "the counter buffer does not take the longest text: {}",
             longest.as_str()
         );
     }
 
-    /// `C` görmeden `D` gelen blok **sıfır** süre kaydeder, uydurma değil.
+    /// A block whose `D` arrives without `C` records a **zero** duration, not a
+    /// made-up one.
     ///
-    /// Yol gerçek: kimliksiz bir `A`'dan sonra gelen `D`, ya da entegrasyonun
-    /// yarısını basan bir kabuk. Sıfır eşiğin altında kalıyor, yani sayaç
-    /// çizilmiyor — "bilinmeyen çizilmez" kuralının süre kolu.
+    /// The path is real: a `D` arriving after an identity-less `A`, or a shell that
+    /// prints half the integration. Zero stays below the threshold, so the counter is
+    /// not drawn — the duration arm of the "the unknown is not drawn" rule.
     #[test]
     fn a_command_that_never_started_records_no_time() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -5722,44 +5854,56 @@ mod tests {
             id: Some(1),
         });
 
-        let duration = log.duration(1, None).expect("biten blokta süre olmalı");
+        let duration = log
+            .duration(1, None)
+            .expect("a finished block must have a duration");
         assert_eq!(duration, Duration::ZERO);
-        assert!(duration < COUNTER_FLOOR, "sıfır süre eşiği geçmemeli");
+        assert!(
+            duration < COUNTER_FLOOR,
+            "a zero duration must not pass the threshold"
+        );
     }
 
-    /// Saat `D`'de **tükeniyor**: iki komut arası koşan bir komut yok.
+    /// The clock is **consumed** at `D`: between two commands there is no running
+    /// command.
     ///
-    /// `take` yerine okuma yapılsaydı `Finished` safhasında (içinde bir `git`
-    /// fork'u) bitmiş komut hâlâ sayıyormuş gibi görünürdü ve phase-2'de saat
-    /// hiç durmazdı.
+    /// If it were a read instead of `take`, in the `Finished` phase (which contains a
+    /// `git` fork) a finished command would still look like it was counting and in
+    /// phase-2 the clock would never stop.
     #[test]
     fn the_clock_is_spent_when_the_command_ends() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         log.apply(Mark::PromptStart { id: Some(1) });
         log.apply(Mark::CommandStart);
-        assert!(log.running_since.is_some(), "`C` saati dikmeliydi");
+        assert!(
+            log.running_since.is_some(),
+            "`C` should have planted the clock"
+        );
 
         log.apply(Mark::CommandEnd {
             exit: Some(0),
             id: Some(1),
         });
-        assert!(log.running_since.is_none(), "`D` saati tüketmeliydi");
+        assert!(
+            log.running_since.is_none(),
+            "`D` should have consumed the clock"
+        );
     }
 
     #[test]
     fn the_title_prefers_the_application_then_the_directory() {
         let home = Path::new("/Users/someone");
-        // OSC 0/2 kazanır, dizin ne olursa olsun.
+        // OSC 0/2 wins, whatever the directory.
         assert_eq!(title_of(Some("vim"), Some("/tmp"), Some(home), None), "vim");
-        // Boş (ya da yalnız boşluk) OSC başlığı yok sayılır, dizine düşer.
+        // An empty (or whitespace-only) OSC title is ignored and falls to the directory.
         assert_eq!(title_of(Some(""), Some("/tmp"), Some(home), None), "tmp");
         assert_eq!(title_of(Some("  "), Some("/tmp"), Some(home), None), "tmp");
-        // `ResetTitle` yuvayı siliyor: başlık dizine döner.
+        // `ResetTitle` deletes the slot: the title returns to the directory.
         assert_eq!(
             title_of(None, Some("/usr/local/bin"), Some(home), None),
             "bin"
         );
-        // Ev dizininin kendisi `~`, alt dizini son bileşen.
+        // The home directory itself is `~`, its subdirectory the last component.
         assert_eq!(
             title_of(None, Some("/Users/someone"), Some(home), None),
             "~"
@@ -5772,22 +5916,22 @@ mod tests {
             title_of(None, Some("/Users/someone/proj"), Some(home), None),
             "proj"
         );
-        // Ev dizini bilinmiyorsa ev de sıradan bir dizin.
+        // If the home directory is unknown, home is an ordinary directory too.
         assert_eq!(
             title_of(None, Some("/Users/someone"), None, None),
             "someone"
         );
-        // Kök.
+        // Root.
         assert_eq!(title_of(None, Some("/"), Some(home), None), "/");
-        // Hiçbiri: uygulamanın adı.
+        // None: the application's name.
         assert_eq!(title_of(None, None, Some(home), None), "bateri");
         assert_eq!(title_of(None, Some(""), Some(home), None), "bateri");
     }
 
     #[test]
     fn a_remote_session_marks_the_title() {
-        // 036 Karar 5: uzak etkinken dizin hiç sorulmuyor; OSC başlığı
-        // önekle, yoksa host.
+        // 036 Karar 5: while remote is active the directory is never consulted; the OSC
+        // title with the prefix, otherwise the host.
         let home = Path::new("/Users/someone");
         let remote = Some("prod");
         assert_eq!(
@@ -5795,12 +5939,12 @@ mod tests {
             "⇄ deploy@prod: ~"
         );
         assert_eq!(title_of(None, Some("/tmp"), Some(home), remote), "⇄ prod");
-        // Boş OSC başlığı yok sayılıyor: host'a düşer, dizine değil.
+        // An empty OSC title is ignored: it falls to the host, not to the directory.
         assert_eq!(
             title_of(Some(" "), Some("/tmp"), Some(home), remote),
             "⇄ prod"
         );
-        // Dizin hiç yokken de host.
+        // The host even when there is no directory.
         assert_eq!(title_of(None, None, None, remote), "⇄ prod");
     }
 
@@ -5809,13 +5953,13 @@ mod tests {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let title = |log: &mut ShellLog, event| log.apply_scan_answering(event, 0).title;
         assert!(title(&mut log, local_cwd("/tmp")));
-        // Aynı dizini basan ikinci `precmd` haber doğurmaz.
+        // A second `precmd` printing the same directory produces no notification.
         assert!(!title(&mut log, local_cwd("/tmp")));
         assert!(title(&mut log, local_cwd("/")));
-        // Dizin dışı olaylar başlığın girdisine hiç dokunmaz.
+        // Non-directory events never touch the title's input.
         assert!(!title(&mut log, ScanEvent::Mark(Mark::PromptEnd)));
         assert!(!title(&mut log, ScanEvent::Dock(DockEvent::End)));
-        // Uzak durum yokken `A` ile `D` de dokunmaz.
+        // While there is no remote state `A` and `D` do not touch it either.
         assert!(!title(
             &mut log,
             ScanEvent::Mark(Mark::PromptStart { id: None })
@@ -5831,7 +5975,7 @@ mod tests {
         ScanEvent::Cwd { path, local: false }
     }
 
-    /// Komut koşan (`C`) bir defter; nesli ve safhası hazır.
+    /// A ledger with a command running (`C`); its generation and phase are ready.
     fn running_log() -> ShellLog {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         log.apply(Mark::PromptStart { id: Some(1) });
@@ -5845,9 +5989,9 @@ mod tests {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         assert_eq!(log.command, 0);
         let first = log.apply(Mark::CommandStart);
-        assert!(first.started, "ilk `C` bir geçiş");
+        assert!(first.started, "the first `C` is a transition");
         assert_eq!(log.command, 1);
-        // İkinci `C` (iTerm2) geçiş değil: nesil oynamıyor, haber yok.
+        // A second `C` (iTerm2) is not a transition: the generation does not move, no notification.
         assert!(!log.apply(Mark::CommandStart).started);
         assert_eq!(log.command, 1);
         log.apply(Mark::CommandEnd {
@@ -5863,8 +6007,8 @@ mod tests {
     fn the_second_command_start_keeps_the_remote_host() {
         let mut log = running_log();
         assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
-        // Komut ortasındaki ikinci `C` uzak durumu silmiyor: yoklama `D`'ye
-        // kadar kilitli ve gösterge geri gelmezdi.
+        // A second `C` in the middle of a command does not delete the remote state: the
+        // probe is locked until `D` and the indicator would not come back.
         let outcome = log.apply(Mark::CommandStart);
         assert_eq!(outcome, ScanOutcome::default());
         assert_eq!(log.context.remote_host(), Some("prod"));
@@ -5884,19 +6028,19 @@ mod tests {
             log.apply_scan_answering(foreign_cwd("/srv"), 0);
             assert_eq!(log.context.remote_cwd, "/srv");
             let outcome = log.apply(mark);
-            assert!(outcome.title, "{mark:?}: silme başlığın girdisi");
+            assert!(outcome.title, "{mark:?}: deletion is the title's input");
             assert_eq!(log.context.remote, None, "{mark:?}");
             assert_eq!(log.context.remote_cwd, "", "{mark:?}");
-            // Silinmiş durumu ikinci kez silmek haber değil.
+            // Deleting an already deleted state is not a notification.
             assert!(!log.apply(mark).title, "{mark:?}");
         }
     }
 
     #[test]
     fn only_our_identified_prompt_announces_the_prompt() {
-        // Oturumun ilk girdisinin tetiği (037 Karar 6): yalnız kimlikli `A`.
-        // Kimliksiz `A` (başka bir aracın entegrasyonu) ve öteki işaretler
-        // kabuğumuzun prompt'a vardığını söylemiyor.
+        // The trigger of the session's first input (037 Karar 6): only an identified `A`.
+        // An identity-less `A` (another tool's integration) and the other marks do not say
+        // our shell reached the prompt.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         for mark in [
             Mark::PromptStart { id: None },
@@ -5910,7 +6054,7 @@ mod tests {
             assert!(!log.apply(mark).prompt, "{mark:?}");
         }
         assert!(log.apply(Mark::PromptStart { id: Some(2) }).prompt);
-        // Uzak oturum sürerken de: kimlikli `A` uzak durumu silip geçiyor.
+        // While a remote session is going too: an identified `A` passes, deleting the remote state.
         let mut log = running_log();
         assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         assert!(!log.apply(Mark::PromptStart { id: None }).prompt);
@@ -5919,9 +6063,9 @@ mod tests {
 
     #[test]
     fn foreign_marks_leave_a_remote_session_alone() {
-        // ssh'ın öbür ucundaki fish 4 / kitty entegrasyonu: uzak `A`, `B`,
-        // `C`, `D` bizim kimliğimizi taşımıyor ve ne uzak durumu siliyor ne
-        // nesli ilerletiyor ne de safhayı `Running`'den çıkarıyor.
+        // The fish 4 / kitty integration at the far end of ssh: the remote `A`, `B`, `C`,
+        // `D` do not carry our identity and neither delete the remote state, nor advance
+        // the generation, nor take the phase out of `Running`.
         let mut log = running_log();
         let command = log.running_command();
         assert!(command.is_some());
@@ -5939,7 +6083,7 @@ mod tests {
             assert_eq!(log.context.remote_host(), Some("prod"), "{mark:?}");
             assert_eq!(log.running_command(), command, "{mark:?}");
         }
-        // Bizim `D`'miz komutu bitiriyor ve uzak durumu siliyor.
+        // Our `D` ends the command and deletes the remote state.
         let outcome = log.apply(Mark::CommandEnd {
             exit: Some(0),
             id: Some(1),
@@ -5951,9 +6095,9 @@ mod tests {
 
     #[test]
     fn a_foreign_prompt_before_the_probe_keeps_the_command_running() {
-        // Uzak `A` yoklamadan önce aynı okumada geldi: safha `Prompt`'a
-        // döndü ama bizim `D`'miz gelmedi, yani komut koşuyor ve yoklamanın
-        // cevabı kabul ediliyor.
+        // The remote `A` arrived in the same read before the probe: the phase went back to
+        // `Prompt` but our `D` did not arrive, so the command is running and the probe's
+        // answer is accepted.
         let mut log = running_log();
         let command = log.running_command();
         log.apply(Mark::PromptStart { id: None });
@@ -5969,9 +6113,9 @@ mod tests {
 
     #[test]
     fn a_foreign_shell_without_a_remote_session_drives_the_phase() {
-        // `exec fish`: kimliğimiz bir daha gelmiyor. Uzak oturum yokken
-        // fish'in işaretleri safhayı sürüyor, yoksa `Running` hiç bitmez ve
-        // saat boşta kare isterdi.
+        // `exec fish`: our identity never arrives again. While there is no remote session
+        // fish's marks drive the phase, otherwise `Running` would never end and the clock
+        // would request frames while idle.
         let mut log = running_log();
         log.apply(Mark::CommandEnd {
             exit: Some(0),
@@ -5982,14 +6126,14 @@ mod tests {
             log.state.map(|state| state.phase),
             Some(ShellPhase::Running)
         );
-        assert_eq!(log.running_since, None, "saat durdu");
+        assert_eq!(log.running_since, None, "the clock stopped");
     }
 
     #[test]
     fn without_our_marks_foreign_marks_still_drive_the_phase() {
-        // Entegrasyonu kapalı kabuk + kendi 133'ü: kimliğimiz hiç gelmedi,
-        // yani kimliksiz `D` komutu bitirmek zorunda — yoksa `Running`
-        // sonsuza kadar sürer.
+        // A shell with integration off + its own 133: our identity never arrived, so an
+        // identity-less `D` has to end the command — otherwise `Running` would go on
+        // forever.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         log.apply(Mark::PromptStart { id: None });
         log.apply(Mark::CommandStart);
@@ -6003,8 +6147,8 @@ mod tests {
 
     #[test]
     fn a_new_command_clears_a_foreign_directory() {
-        // Yoklamadan önce gelen yabancı OSC 7 uzak yuvada bekliyor; ama bir
-        // önceki komutun kalıntısı bir sonrakine taşınmıyor.
+        // A foreign OSC 7 that arrives before the probe waits in the remote slot; but the
+        // leftover from the previous command is not carried over to the next.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         log.apply_scan_answering(foreign_cwd("/srv"), 0);
         assert_eq!(log.context.remote_cwd, "/srv");
@@ -6015,17 +6159,17 @@ mod tests {
     #[test]
     fn osc7_routes_by_authority_and_remote_state() {
         let mut log = running_log();
-        // Yerel yetki bugünkü gibi yerel dizine.
+        // A local authority goes to the local directory as today.
         assert!(log.apply_scan_answering(local_cwd("/Users/me"), 0).title);
-        // Yabancı yetki uzak yuvaya; yerel dizin ve başlık kıpırdamıyor.
+        // A foreign authority to the remote slot; the local directory and the title do not move.
         let outcome = log.apply_scan_answering(foreign_cwd("/var/www"), 0);
         assert!(!outcome.title);
         assert_eq!(
             (log.context.cwd.as_str(), log.context.remote_cwd.as_str()),
             ("/Users/me", "/var/www")
         );
-        // Uzak etkinken **boş yetki de** uzak yuvaya: ssh'ın arkasında yerel
-        // kabuk bloklu.
+        // While remote is active **an empty authority too** goes to the remote slot: the
+        // local shell is behind ssh with blocks.
         assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         let outcome = log.apply_scan_answering(local_cwd("/home/deploy"), 0);
         assert!(!outcome.title);
@@ -6038,14 +6182,14 @@ mod tests {
     #[test]
     fn set_remote_reports_only_a_change() {
         let mut log = running_log();
-        assert!(!log.set_remote(None), "yok → yok değişim değil");
+        assert!(!log.set_remote(None), "none → none is not a change");
         assert!(
             !log.set_remote(Some(&RemoteTarget::ssh(""))),
-            "boş host uzak değil"
+            "an empty host is not remote"
         );
         assert!(
             !log.set_remote(Some(&RemoteTarget::ssh("prod\n"))),
-            "kontrol karakteri"
+            "control character"
         );
         assert!(
             !log.set_remote(Some(&RemoteTarget::ssh("\u{1b}[31mprod"))),
@@ -6068,8 +6212,8 @@ mod tests {
 
     #[test]
     fn the_remote_target_is_kept_whole_and_its_mark_resolved() {
-        // 037 Karar 1, 2: hedef bütün olarak duruyor; işaret `set_remote`'ta
-        // ve listenin değişiminde çözülüyor, `C`/`D`/`A` onu da siliyor.
+        // 037 Karar 1, 2: the target stands as a whole; the mark is resolved in
+        // `set_remote` and at a change of the list, and `C`/`D`/`A` delete it too.
         let mut log = running_log();
         assert!(!log.set_host_rules(&[rule("prod-*", HostMark::Production)]));
         let target = RemoteTarget {
@@ -6084,7 +6228,7 @@ mod tests {
         assert_eq!(log.context.remote.as_ref(), Some(&target));
         assert_eq!(log.context.remote_mark, HostMark::Production);
 
-        // Aynı host, başka argv: hedef yazılıyor ama başlığın girdisi aynı.
+        // The same host, another argv: the target is written but the title's input is the same.
         let other = RemoteTarget {
             argv: ["ssh", "deploy@prod-web-1"].map(str::to_owned).to_vec(),
             line: "ssh deploy@prod-web-1".to_owned(),
@@ -6093,8 +6237,8 @@ mod tests {
         assert!(!log.set_remote(Some(&other)));
         assert_eq!(log.context.remote.as_ref(), Some(&other));
 
-        // Liste değişimi işareti yeniden çözüyor; aynı liste no-op, işareti
-        // oynatmayan liste `false`.
+        // A change of list re-resolves the mark; the same list is a no-op, a list that
+        // does not move the mark is `false`.
         let staging = [rule("*", HostMark::Staging)];
         assert!(log.set_host_rules(&staging));
         assert_eq!(log.context.remote_mark, HostMark::Staging);
@@ -6103,7 +6247,7 @@ mod tests {
         assert!(log.set_host_rules(&[]));
         assert_eq!(log.context.remote_mark, HostMark::None);
 
-        // Bizim `D`'miz uzak durumu işaretiyle birlikte siliyor.
+        // Our `D` deletes the remote state together with its mark.
         assert!(log.set_host_rules(&staging));
         log.apply(Mark::CommandEnd {
             exit: Some(0),
@@ -6113,7 +6257,7 @@ mod tests {
         assert_eq!(log.context.remote_mark, HostMark::None);
     }
 
-    /// `D;{exit}` bizim kimliğimizle.
+    /// `D;{exit}` with our identity.
     fn our_end(exit: i32) -> Mark {
         Mark::CommandEnd {
             exit: Some(exit),
@@ -6123,13 +6267,16 @@ mod tests {
 
     #[test]
     fn our_ssh_255_leaves_a_reconnect_offer() {
-        // 037 Karar 8: uzak ssh + bizim `D;255` → teklif (host, çözülmüş
-        // işaret, satır); `A` silmiyor, bir sonraki `C` siliyor.
+        // 037 Karar 8: remote ssh + our `D;255` → offer (host, resolved mark, line); `A`
+        // does not delete it, the next `C` does.
         let mut log = running_log();
         log.set_host_rules(&[rule("prod", HostMark::Production)]);
         assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         log.apply(our_end(255));
-        assert_eq!(log.context.remote, None, "uzak durum yine siliniyor");
+        assert_eq!(
+            log.context.remote, None,
+            "the remote state is deleted again"
+        );
         let offer = Reconnect {
             host: "prod".to_owned(),
             mark: HostMark::Production,
@@ -6143,7 +6290,7 @@ mod tests {
             Some(&offer),
             "`A`/`B` silmiyor"
         );
-        // İşaret değişimi teklifin rengini tazeliyor ve bunu haber veriyor.
+        // A change of mark refreshes the offer's color and reports it.
         assert!(log.set_host_rules(&[]));
         assert_eq!(
             log.context.reconnect.as_ref().map(|offer| offer.mark),
@@ -6164,7 +6311,7 @@ mod tests {
         for (target, end) in [
             (RemoteTarget::ssh("prod"), our_end(0)),
             (RemoteTarget::ssh("prod"), our_end(1)),
-            // mosh kopmada çıkmıyor; 255'i bu anlamı taşımıyor.
+            // mosh does not exit on a drop; its 255 does not carry this meaning.
             (mosh, our_end(255)),
         ] {
             let mut log = running_log();
@@ -6172,12 +6319,13 @@ mod tests {
             log.apply(end);
             assert_eq!(log.context.reconnect, None, "{end:?} {:?}", target.kind);
         }
-        // Uzak oturum yokken 255 bir yerel komutun kodu.
+        // While there is no remote session 255 is the code of a local command.
         let mut log = running_log();
         log.apply(our_end(255));
         assert_eq!(log.context.reconnect, None);
-        // Kimliksiz `D;255`: kimliğimizi görmüş oturumda uzak kabuğun işareti
-        // (hiçbir şeye dokunmuyor), görmemiş oturumda da teklif doğurmuyor.
+        // An identity-less `D;255`: in a session that has seen our identity it is the
+        // remote shell's mark (touches nothing), and in one that has not it does not
+        // produce an offer either.
         let foreign = Mark::CommandEnd {
             exit: Some(255),
             id: None,
@@ -6190,7 +6338,7 @@ mod tests {
         log.apply(Mark::CommandStart);
         assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         log.apply(foreign);
-        assert_eq!(log.context.remote, None, "yabancı kabukta `D` bitiriyor");
+        assert_eq!(log.context.remote, None, "in a foreign shell `D` ends it");
         assert_eq!(log.context.reconnect, None);
     }
 
@@ -6201,8 +6349,8 @@ mod tests {
         log.apply(our_end(255));
         assert!(log.context.reconnect.is_some());
         log.apply(Mark::PromptStart { id: Some(2) });
-        // Yeni bir uzak oturum (yoklama `C`'den sonra) eskisinin teklifini
-        // bırakmıyor — `C` zaten sildi, `set_remote` ikinci kemer.
+        // A new remote session (the probe after `C`) does not leave the old one's offer —
+        // `C` already deleted it, `set_remote` is the second belt.
         log.context.reconnect = Some(Reconnect::default());
         assert!(log.set_remote(Some(&RemoteTarget::ssh("staging"))));
         assert_eq!(log.context.reconnect, None);

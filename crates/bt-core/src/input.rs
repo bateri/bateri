@@ -1,20 +1,24 @@
-//! Girdi kodlaması: ok tuşu, fare düğmesi ve tekerlek raporu → PTY baytları.
+//! Input encoding: arrow key, mouse button and wheel report → PTY bytes.
 //!
-//! **Saf ve kilitsiz.** Kip sorusu (`TermMode`) çağıranın `Term` kilidinde
-//! cevaplanır, buraya yalnız cevabı gelir; kararın kendisi ve baytlar burada,
-//! PTY'siz sınanıyor. Klavyenin okları ile tekerleğin okları aynı [`arrow`]'dan
-//! geçer — ok baytı depoda tek yerde yazılı. Farenin iki olayı da tek
-//! gövdeden çıkıyor ([`mouse_report`]): tekerleğin basışı ile düğmenin
-//! bas/bırakması aynı kodlamayı, aynı sınırı ve aynı reddi paylaşıyor.
+//! **Pure and lock-free.** The mode question (`TermMode`) is answered under
+//! the caller's `Term` lock and only the answer arrives here; the decision
+//! itself and the bytes live here, tested without a PTY. The keyboard's
+//! arrows and the wheel's arrows go through the same [`arrow`] — the arrow
+//! byte is written in exactly one place in the repo. Both mouse events come
+//! out of one body ([`mouse_report`]): the wheel's press and the button's
+//! press/release share the same encoding, the same limit and the same
+//! rejection.
 
 use alacritty_terminal::term::TermMode;
 
-/// Ok tuşu: klavyenin dördü, tekerleğin ikisi.
+/// Arrow key: the keyboard's four, the wheel's two.
 ///
-/// `bt-shell` tuşu buna çevirir, baytı değil: biçim DECCKM'e bağlı ([`arrow`])
-/// ve kip `Term`'de yaşıyor ([`crate::Session::write_arrow`]). Baytı `bt-shell`
-/// yazsaydı kipi bilmesi, yani ya tutması ya da alacritty tipini görmesi
-/// gerekirdi. Tekerleğin okları da aynı yoldan: DECCKM sorusu depoda tek yerde.
+/// `bt-shell` translates the key into this, not into bytes: the format depends
+/// on DECCKM ([`arrow`]) and the mode lives in `Term`
+/// ([`crate::Session::write_arrow`]). If `bt-shell` wrote the byte it would
+/// have to know the mode, meaning it would either keep it or see the alacritty
+/// type. The wheel's arrows take the same path: the DECCKM question is
+/// answered in one place in the repo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arrow {
     Up,
@@ -23,13 +27,14 @@ pub enum Arrow {
     Left,
 }
 
-/// Okun baytları: DECCKM (`\e[?1h`, `APP_CURSOR`) açıkken SS3 (`\eOA`),
-/// kapalıyken CSI (`\e[A`).
+/// The arrow's bytes: SS3 (`\eOA`) when DECCKM (`\e[?1h`, `APP_CURSOR`) is
+/// on, CSI (`\e[A`) when off.
 ///
-/// İki biçimin sebebi `TERM`: `xterm-256color`'ın terminfo'su
-/// `smkx=\E[?1h\E=` ve `kcuu1=\EOA` diyor, yani terminfo okuyan uygulama
-/// (less, ncurses) açılışta DECCKM'i açar ve SS3 bekler; kipi açmayan
-/// uygulama CSI bekler. alacritty'nin klavye bağları aynı ikiliyi taşıyor.
+/// The two formats exist because of `TERM`: `xterm-256color`'s terminfo says
+/// `smkx=\E[?1h\E=` and `kcuu1=\EOA`, so an application that reads terminfo
+/// (less, ncurses) turns DECCKM on at startup and expects SS3; an application
+/// that doesn't turn the mode on expects CSI. alacritty's keyboard bindings
+/// carry the same pair.
 pub(crate) fn arrow(arrow: Arrow, mode: TermMode) -> [u8; 3] {
     let intro = if mode.contains(TermMode::APP_CURSOR) {
         b'O'
@@ -45,33 +50,36 @@ pub(crate) fn arrow(arrow: Arrow, mode: TermMode) -> [u8; 3] {
     [0x1b, intro, last]
 }
 
-/// Tekerleğin geriye (yukarı) düğmesi; ileriye (aşağı) [`WHEEL_DOWN`].
-/// Tekerleğin bırakma olayı yok, rapor yalnız basmadır.
+/// The wheel's backward (up) button; forward (down) is [`WHEEL_DOWN`].
+/// The wheel has no release event; the report is press only.
 pub(crate) const WHEEL_UP: u8 = 64;
 pub(crate) const WHEEL_DOWN: u8 = 65;
 
-/// Fare raporunun kodlaması — uygulamanın DECSET 1006/1005 ile seçtiği.
+/// Mouse report encoding — the one the application picked with DECSET
+/// 1006/1005.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MouseEncoding {
-    /// 1006: ondalık, sınırsız.
+    /// 1006: decimal, unbounded.
     Sgr,
-    /// 1005: koordinat UTF-8 karakteri, 2015'te kesilir.
+    /// 1005: coordinate is a UTF-8 character, cut off at 2015.
     Utf8,
-    /// X10/normal: koordinat tek bayt, 223'te kesilir.
+    /// X10/normal: coordinate is a single byte, cut off at 223.
     Normal,
 }
 
 impl MouseEncoding {
-    /// Koordinatın **sığmadığı** ilk değer; SGR ondalık olduğu için sınırsız.
+    /// The first value the coordinate does **not** fit; SGR is unbounded
+    /// because it is decimal.
     ///
-    /// Sayının tek yeri burası ve iki tüketicisi var: raporun reddi
-    /// ([`mouse_report`], `>= limit` → `None`) ve bırakmanın kırpması
-    /// ([`MouseEncoding::clamp`]). İki yerde yazılsaydı biri değişip öteki
-    /// kalabilirdi ve sapma sessiz olurdu — kırpılan koordinat yine
-    /// reddedilirdi.
+    /// This is the number's only home and it has two consumers: the report's
+    /// rejection ([`mouse_report`], `>= limit` → `None`) and the release's
+    /// clamping ([`MouseEncoding::clamp`]). Written in two places, one could
+    /// change while the other stayed, and the drift would be silent — the
+    /// clamped coordinate would be rejected anyway.
     ///
-    /// Değerler alacritty'ninki: düz kipte `32 + 1 + 222 = 255` son bayt,
-    /// UTF-8 kipinde `32 + 1 + 2014 = 2047` iki baytlık UTF-8'in son değeri.
+    /// The values are alacritty's: in plain mode `32 + 1 + 222 = 255` is the
+    /// last byte, in UTF-8 mode `32 + 1 + 2014 = 2047` is the last value of a
+    /// two-byte UTF-8.
     fn limit(self) -> Option<u16> {
         match self {
             MouseEncoding::Sgr => None,
@@ -80,20 +88,21 @@ impl MouseEncoding {
         }
     }
 
-    /// Koordinatı kodlamanın son sığan değerine indirir.
+    /// Lowers the coordinate to the last value the encoding fits.
     ///
-    /// **Yalnız bırakmanın yolu** ([`crate::Session::mouse_button`], R6):
-    /// basışta sığmayan koordinat reddedilir, bırakmada kırpılır. Sebep
-    /// asimetrik çünkü hâller asimetrik — reddedilen basış hiç başlamamış bir
-    /// jest, düşürülen bırakma ise uygulamada **takılı kalmış bir düğme**.
-    /// Hafifçe yanlış bir koordinat ondan iyidir.
+    /// **Only the release's path** ([`crate::Session::mouse_button`], R6): a
+    /// coordinate that doesn't fit is rejected on press and clamped on
+    /// release. The asymmetry is there because the cases are asymmetric — a
+    /// rejected press is a gesture that never started, while a dropped
+    /// release is **a button stuck down** in the application. A slightly
+    /// wrong coordinate is better than that.
     pub(crate) fn clamp(self, pos: u16) -> u16 {
         self.limit().map_or(pos, |limit| pos.min(limit - 1))
     }
 }
 
-/// Uygulamanın seçtiği kodlama. Tekerlek ([`wheel_route`]) ile düğme
-/// ([`button_route`]) aynı tablodan okuyor.
+/// The encoding the application picked. The wheel ([`wheel_route`]) and the
+/// button ([`button_route`]) read from the same table.
 fn mouse_encoding(mode: TermMode) -> MouseEncoding {
     if mode.contains(TermMode::SGR_MOUSE) {
         MouseEncoding::Sgr
@@ -104,13 +113,13 @@ fn mouse_encoding(mode: TermMode) -> MouseEncoding {
     }
 }
 
-/// Fare düğmesi — raporun alt iki biti.
+/// Mouse button — the report's low two bits.
 ///
-/// Tekerlek burada **yok**: onun düğmesi ([`WHEEL_UP`], [`WHEEL_DOWN`])
-/// `bt-shell`'in görmediği bir sayı, çünkü tekerleğin yönünü
-/// [`crate::Session::scroll_wheel`] satır işaretinden kendisi türetiyor.
-/// Üçüncü fiziksel düğmenin ötesi de yok: X10 iki bit taşıyor ve `3` bırakma
-/// için ayrılmış.
+/// The wheel is **not** here: its button ([`WHEEL_UP`], [`WHEEL_DOWN`]) is a
+/// number `bt-shell` never sees, because [`crate::Session::scroll_wheel`]
+/// derives the wheel's direction from the line sign itself. There is nothing
+/// beyond the third physical button either: X10 carries two bits and `3` is
+/// reserved for release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseButton {
     Left,
@@ -118,26 +127,28 @@ pub enum MouseButton {
     Right,
 }
 
-/// Fare olayının değiştiricileri: ikisi rapora girer, biri arbitrajı yapar.
+/// A mouse event's modifiers: two go into the report, one does the
+/// arbitration.
 ///
-/// **Shift rapora hiç girmiyor** ve bu bir eksik değil, [`button_route`]'un
-/// sonucu: Shift basılıyken olay uygulamaya değil seçime gidiyor, yani
-/// raporda görünebileceği bir kol yok. Bit (4) yine de kurulsaydı hiçbir
-/// uygulamanın okuyamayacağı bir değer yazardık. Alan bu yüzden burada, ayrı
-/// bir `shift` argümanı olarak değil: kuralın iki yarısı ("arbitraja girer",
-/// "rapora girmez") tek tipte yan yana duruyor.
+/// **Shift never goes into the report** and that is not an omission but the
+/// result of [`button_route`]: while Shift is held the event goes to the
+/// selection, not the application, so there is no branch where it could
+/// appear in the report. If bit (4) were set anyway we would write a value
+/// no application can read. The field is here for that reason, not as a
+/// separate `shift` argument: the two halves of the rule ("enters the
+/// arbitration", "doesn't enter the report") sit side by side in one type.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MouseModifiers {
-    /// Terminalin kaçış yolu — bkz. tipin doc'u.
+    /// The terminal's escape hatch — see the type's doc.
     pub shift: bool,
-    /// macOS'ta Option; xterm'in 8 biti.
+    /// Option on macOS; xterm's bit 8.
     pub meta: bool,
-    /// xterm'in 16 biti.
+    /// xterm's bit 16.
     pub control: bool,
 }
 
-/// Düğmenin alt iki biti. `3` burada **yok**: o kod bırakmaya
-/// ([`mouse_report`]) ve düğmesiz harekete ([`motion_byte`]) ayrılmış.
+/// The button's low two bits. `3` is **not** here: that code is reserved for
+/// release ([`mouse_report`]) and for motion with no button ([`motion_byte`]).
 fn button_base(button: MouseButton) -> u8 {
     match button {
         MouseButton::Left => 0,
@@ -146,59 +157,64 @@ fn button_base(button: MouseButton) -> u8 {
     }
 }
 
-/// xterm'in değiştirici bitleri: Meta 8, Control 16. Shift'in 4'ü **hiç
-/// kurulmuyor** — gerekçesi [`MouseModifiers`]'ın doc'unda.
+/// xterm's modifier bits: Meta 8, Control 16. Shift's 4 is **never set** —
+/// the reason is in [`MouseModifiers`]'s doc.
 fn modifier_bits(modifiers: MouseModifiers) -> u8 {
     let meta = if modifiers.meta { 8 } else { 0 };
     let control = if modifiers.control { 16 } else { 0 };
     meta | control
 }
 
-/// Basış/bırakma raporunun düğme baytı: düğmenin kodu artı değiştiriciler.
+/// The button byte of a press/release report: the button's code plus the
+/// modifiers.
 pub(crate) fn button_byte(button: MouseButton, modifiers: MouseModifiers) -> u8 {
     button_base(button) | modifier_bits(modifiers)
 }
 
-/// Hareket raporunun düğme baytı: **hareket biti** (32) artı basılı düğme,
-/// düğme yoksa `3`.
+/// The button byte of a motion report: the **motion bit** (32) plus the held
+/// button, or `3` when there is none.
 ///
-/// xterm'in kodlaması bu: aynı `3` hem "bırakma" hem "düğmesiz" demek ve
-/// ikisini ayıran şey 32 biti. Basılı düğmeli hareket (`\e[<32;..M`) ile
-/// düğmesiz hareket (`\e[<35;..M`) bu yüzden tek fonksiyondan çıkıyor.
+/// That is xterm's encoding: the same `3` means both "release" and "no
+/// button", and what tells them apart is bit 32. Motion with a held button
+/// (`\e[<32;..M`) and motion without one (`\e[<35;..M`) therefore come out of
+/// a single function.
 pub(crate) fn motion_byte(button: Option<MouseButton>, modifiers: MouseModifiers) -> u8 {
     const MOTION: u8 = 32;
     let base = button.map_or(3, button_base);
     MOTION | base | modifier_bits(modifiers)
 }
 
-/// Düğmenin karar tablosu — [`WheelRoute`]'un kardeşi, aynı örüntüde.
+/// The button's decision table — [`WheelRoute`]'s sibling, same pattern.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ButtonRoute {
-    /// Uygulama fare raporu istedi (1000/1002/1003) ve Shift basılı değil.
+    /// The application asked for mouse reports (1000/1002/1003) and Shift is
+    /// not held.
     Report(MouseEncoding),
-    /// Kip kapalı ya da Shift basılı: jest terminalin, seçim başlıyor.
+    /// Mode off or Shift held: the gesture is the terminal's, a selection
+    /// starts.
     ///
-    /// Kol Shift'i **taşımıyor** ve taşıması gerekmiyor: Shift'in ikinci
-    /// anlamı ("var olan seçimi uzat", `Session::extend_selection`) kipten
-    /// bağımsız ve onu `bt-shell`'in jest defteri okuyor. Fare kipinde
-    /// Shift+tıklamanın buraya düşmesi bu yüzden aynı zamanda uzatma — orada
-    /// seçimin tek yolu zaten Shift (031 Karar 6).
+    /// The arm does **not** carry Shift and doesn't need to: Shift's second
+    /// meaning ("extend the existing selection", `Session::extend_selection`)
+    /// is independent of the mode and `bt-shell`'s gesture ledger reads it.
+    /// Shift+click in mouse mode landing here is therefore also the extension
+    /// — there Shift is already the selection's only path (031 Karar 6).
     Select,
 }
 
-/// Kipten ve Shift'ten düğmenin yolu.
+/// The button's route, from the mode and Shift.
 ///
-/// **Tekerlekle asimetrik ve asimetri bilerek:** `wheel_route`'ta Shift fare
-/// kipini geçersiz kılmaz (`mouse_mode_comes_first_on_either_screen`), burada
-/// kılar. Sebep, iki kolda yarışan şeylerin farklı olması — tekerlekte
-/// Shift'in üstüne binecek ikinci bir tüketici yok (kaydırma zaten
-/// terminalin) ve macOS klasik farede Shift+tekerleği yatay deltaya çeviriyor,
-/// yani o koldaki Shift zaten güvenilmez; düğmede ise iki gerçek tüketici var
-/// (uygulamanın faresi ve kullanıcının seçimi) ve Shift **tek** kaçış yolu.
-/// xterm'in konvansiyonu; iTerm2, kitty, WezTerm ve ghostty aynısını yapıyor.
-/// Bekçisi `shift_overrides_the_button_but_not_the_wheel`.
+/// **Asymmetric with the wheel, and the asymmetry is deliberate:** in
+/// `wheel_route` Shift does not override mouse mode
+/// (`mouse_mode_comes_first_on_either_screen`), here it does. The reason is
+/// that the things competing in the two arms differ — on the wheel there is
+/// no second consumer to stack on Shift (scrolling is the terminal's anyway)
+/// and macOS turns Shift+wheel into a horizontal delta on a classic mouse, so
+/// Shift on that arm is unreliable already; on the button there are two real
+/// consumers (the application's mouse and the user's selection) and Shift is
+/// the **only** escape path. xterm's convention; iTerm2, kitty, WezTerm and
+/// ghostty do the same. Its guard is `shift_overrides_the_button_but_not_the_wheel`.
 pub(crate) fn button_route(mode: TermMode, shift: bool) -> ButtonRoute {
-    // `intersects`, `contains` değil — `wheel_route`'un yazılı gerekçesi.
+    // `intersects`, not `contains` — `wheel_route`'s written rationale.
     if mode.intersects(TermMode::MOUSE_MODE) && !shift {
         ButtonRoute::Report(mouse_encoding(mode))
     } else {
@@ -206,45 +222,46 @@ pub(crate) fn button_route(mode: TermMode, shift: bool) -> ButtonRoute {
     }
 }
 
-/// Kipten ve basılı düğmeden hareketin yolu. Cevap [`ButtonRoute`] **değil**
-/// `Option`: hareket bir jest başlatmıyor, yani "seçim" kolu yok — rapor
-/// istenmiyorsa olay düşüyor ve fare bugünkü işini (seçimi taşımak, ya da
-/// hiçbir şey) sürdürüyor.
+/// Motion's route, from the mode and the held button. The answer is **not**
+/// [`ButtonRoute`] but an `Option`: motion starts no gesture, so there is no
+/// "select" arm — if no report is wanted the event is dropped and the mouse
+/// carries on with its current job (moving the selection, or nothing).
 ///
-/// Üç kip burada **ayrışıyor** ve `MOUSE_MODE` birleşik sorulamaz: 1003
-/// (`MOUSE_MOTION`) her hareketi ister, 1002 (`MOUSE_DRAG`) yalnız basılı
-/// olanı, 1000 (`MOUSE_REPORT_CLICK`) hiçbirini. Düğme yolunda üçü aynı
-/// cevabı veriyordu ([`button_route`]'un tek `intersects`'i), burada
-/// vermiyorlar.
+/// The three modes **part ways** here and `MOUSE_MODE` can't be asked as a
+/// union: 1003 (`MOUSE_MOTION`) wants every motion, 1002 (`MOUSE_DRAG`) only
+/// the pressed ones, 1000 (`MOUSE_REPORT_CLICK`) none. On the button path the
+/// three gave the same answer ([`button_route`]'s single `intersects`), here
+/// they don't.
 ///
-/// **Shift sorulmuyor**: rota basışta kilitleniyor
-/// ([`crate::Session::mouse_button`]) ve jestin ortasında değişmiyor;
-/// düğmesiz harekette de zaten bir jest yok.
+/// **Shift is not asked**: the route is locked at press
+/// ([`crate::Session::mouse_button`]) and doesn't change mid-gesture; and
+/// motion with no button has no gesture anyway.
 pub(crate) fn motion_route(mode: TermMode, pressed: bool) -> Option<MouseEncoding> {
     let wanted =
         mode.contains(TermMode::MOUSE_MOTION) || (pressed && mode.contains(TermMode::MOUSE_DRAG));
     wanted.then(|| mouse_encoding(mode))
 }
 
-/// Tekerleğin karar tablosu (006 `phase-3b.md` §1) — sıra tablonun sırası
-/// ve alacritty'nin `scroll_terminal`'ınınkiyle aynı.
+/// The wheel's decision table (006 `phase-3b.md` §1) — the order is the
+/// table's order and the same as alacritty's `scroll_terminal`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WheelRoute {
-    /// Uygulama fare raporu istedi (1000/1002/1003), ekran fark etmez.
+    /// The application asked for mouse reports (1000/1002/1003), whichever
+    /// screen.
     Report(MouseEncoding),
-    /// Alternate screen + DECSET 1007, Shift basılı değil: ok tuşu (biçimi
-    /// [`arrow`] kipten okuyor).
+    /// Alternate screen + DECSET 1007, Shift not held: arrow key (the format
+    /// is read from the mode by [`arrow`]).
     Arrows,
-    /// Alternate screen, ama 1007 kapalı ya da Shift basılı.
+    /// Alternate screen, but 1007 is off or Shift is held.
     Ignore,
-    /// Birincil ekran: görünen pencere kayar.
+    /// Primary screen: the visible window scrolls.
     Scroll,
 }
 
-/// Kipten ve Shift'ten tekerleğin yolu.
+/// The wheel's route, from the mode and Shift.
 pub(crate) fn wheel_route(mode: TermMode, shift: bool) -> WheelRoute {
-    // `intersects`, `contains` değil: `MOUSE_MODE` üç bitin birleşimi ve
-    // uygulama çoğu zaman yalnız birini açar (`\e[?1000h`).
+    // `intersects`, not `contains`: `MOUSE_MODE` is the union of three bits
+    // and the application usually turns on only one (`\e[?1000h`).
     if mode.intersects(TermMode::MOUSE_MODE) {
         WheelRoute::Report(mouse_encoding(mode))
     } else if !mode.contains(TermMode::ALT_SCREEN) {
@@ -256,17 +273,18 @@ pub(crate) fn wheel_route(mode: TermMode, shift: bool) -> WheelRoute {
     }
 }
 
-/// Tek fare olayının raporu: tekerleğin basışı da düğmenin bas/bırakması da.
-/// `col`/`row` 0 tabanlı ve **uygulamanın** ekranında (grid satırı, görünen
-/// pencere değil). Kodlamaya sığmayan koordinatta `None` — rapor gönderilmez,
-/// kırpılmış bir hücreye de gitmez; bırakmanın kırpması çağıranın işi
-/// ([`MouseEncoding::clamp`]).
+/// The report of a single mouse event: the wheel's press as well as the
+/// button's press/release. `col`/`row` are 0-based and in the **application's**
+/// screen (grid row, not the visible window). `None` for a coordinate the
+/// encoding doesn't fit — no report is sent, and none goes to a clamped cell
+/// either; clamping on release is the caller's job ([`MouseEncoding::clamp`]).
 ///
-/// **Bırakmayı iki kodlama iki türlü söylüyor.** SGR'ın son baytı `M` yerine
-/// `m` ve düğme kodu korunur, yani uygulama hangi düğmenin bırakıldığını
-/// bilir. X10/UTF-8'de böyle bir yer yok: bırakma, düğme bitleri `3` yazılarak
-/// söyleniyor ve **hangi** düğme olduğu kaybolur. Bu bir eksiklik değil
-/// protokolün kendi sınırı; değiştirici bitleri korunuyor.
+/// **The two encodings say release in two ways.** SGR's final byte is `m`
+/// instead of `M` and the button code is kept, so the application knows
+/// which button was released. X10/UTF-8 has no such place: release is said by
+/// writing the button bits as `3` and **which** button it was is lost. That
+/// is not a deficiency but the protocol's own limit; the modifier bits are
+/// kept.
 pub(crate) fn mouse_report(
     encoding: MouseEncoding,
     button: u8,
@@ -275,7 +293,7 @@ pub(crate) fn mouse_report(
     row: u16,
 ) -> Option<Vec<u8>> {
     let Some(limit) = encoding.limit() else {
-        // `u32`: `u16::MAX + 1` taşmasın.
+        // `u32`: so that `u16::MAX + 1` doesn't overflow.
         let (col, row) = (u32::from(col) + 1, u32::from(row) + 1);
         let last = if pressed { 'M' } else { 'm' };
         return Some(format!("\x1b[<{button};{col};{row}{last}").into_bytes());
@@ -284,8 +302,8 @@ pub(crate) fn mouse_report(
         return None;
     }
     let utf8 = encoding == MouseEncoding::Utf8;
-    // Düğme bitleri (alt iki) `3` oluyor, değiştiriciler ve tekerlek biti
-    // olduğu gibi kalıyor.
+    // The button bits (low two) become `3`, the modifiers and the wheel bit
+    // stay as they are.
     let button = if pressed {
         button
     } else {
@@ -295,13 +313,14 @@ pub(crate) fn mouse_report(
     for pos in [col, row] {
         let value = 32 + 1 + u32::from(pos);
         if utf8 {
-            // `128`'in altında tek bayt, üstünde iki — UTF-8'in kendisi
-            // (alacritty `0xC0 + v/64`, `0x80 + v&63` diye elle yazıyor).
-            // Aralıkta vekil kod noktası yok, `from_u32` düşmez.
+            // A single byte below `128`, two above — UTF-8 itself
+            // (alacritty writes it by hand as `0xC0 + v/64`, `0x80 + v&63`).
+            // There are no surrogate code points in the range, `from_u32`
+            // doesn't drop.
             let mut buf = [0; 4];
             report.extend_from_slice(char::from_u32(value)?.encode_utf8(&mut buf).as_bytes());
         } else {
-            // `limit` yukarıda `value <= 255`'i garanti ediyor.
+            // `limit` above guarantees `value <= 255`.
             report.push(value as u8);
         }
     }
@@ -327,16 +346,16 @@ mod tests {
 
     #[test]
     fn mouse_mode_comes_first_on_either_screen() {
-        // `MOUSE_MODE` üç bitin **birleşimi**: `contains` üçünü birden ister ve
-        // yalnız `\e[?1000h` açan uygulamada yanlış dala düşerdi. Her bit tek
-        // başına sınanıyor.
+        // `MOUSE_MODE` is the **union** of three bits: `contains` wants all
+        // three at once and would take the wrong arm for an application that
+        // turns on only `\e[?1000h`. Each bit is tested on its own.
         for bit in [
             TermMode::MOUSE_REPORT_CLICK,
             TermMode::MOUSE_DRAG,
             TermMode::MOUSE_MOTION,
         ] {
             for screen in [TermMode::empty(), TermMode::ALT_SCREEN] {
-                // 1007 ve Shift fare kipini geçersiz kılmaz.
+                // 1007 and Shift do not override mouse mode.
                 let mode = bit | screen | TermMode::ALTERNATE_SCROLL;
                 for shift in [false, true] {
                     assert_eq!(
@@ -351,11 +370,12 @@ mod tests {
 
     #[test]
     fn shift_overrides_the_button_but_not_the_wheel() {
-        // Setin **asimetrisi** ve bekçisi bilerek tekerleğinkinin yanında:
-        // `mouse_mode_comes_first_on_either_screen` "Shift fare kipini
-        // geçersiz kılmaz" diyor ve o cümle **yalnız tekerleğe** ait.
-        // Kuralı düğmeye de uygulayan biri bu sınamayı kırar; kırmasaydı
-        // uygulama içinde fareyle metin seçme yeteneği sessizce ölürdü.
+        // The set's **asymmetry** and its guard deliberately sit next to the
+        // wheel's: `mouse_mode_comes_first_on_either_screen` says "Shift does
+        // not override mouse mode" and that sentence belongs **to the wheel
+        // only**. Whoever applies the rule to the button too breaks this test;
+        // if it didn't break, the ability to select text with the mouse inside
+        // an application would silently die.
         for bit in [
             TermMode::MOUSE_REPORT_CLICK,
             TermMode::MOUSE_DRAG,
@@ -368,9 +388,9 @@ mod tests {
                     ButtonRoute::Report(MouseEncoding::Normal),
                     "{mode:?}"
                 );
-                // Düğme: Shift terminali geri alıyor.
+                // Button: Shift gives the terminal back.
                 assert_eq!(button_route(mode, true), ButtonRoute::Select, "{mode:?}");
-                // Tekerlek: aynı kipte, aynı Shift'te rapor kalıyor.
+                // Wheel: in the same mode, with the same Shift, the report stays.
                 assert_eq!(
                     wheel_route(mode, true),
                     WheelRoute::Report(MouseEncoding::Normal),
@@ -382,9 +402,10 @@ mod tests {
 
     #[test]
     fn button_selects_whenever_no_mouse_mode_is_set() {
-        // Kip kapalıysa Shift'in bir hükmü yok: iki kolda da seçim. Alternate
-        // screen ve 1007 düğmeyi hiç ilgilendirmiyor — tekerleğin ok/ignore
-        // dalları burada **yok**, çünkü düğmenin gidecek üçüncü bir yeri yok.
+        // With the mode off Shift has no effect: selection on both arms.
+        // Alternate screen and 1007 don't concern the button at all — the
+        // wheel's arrows/ignore branches are **not** here, because the button
+        // has no third place to go.
         for mode in [
             TermMode::empty(),
             TermMode::ALT_SCREEN,
@@ -404,7 +425,7 @@ mod tests {
 
     #[test]
     fn button_and_wheel_share_the_encoding_table() {
-        // `mouse_encoding` tek yerde; iki yol da oradan okuyor.
+        // `mouse_encoding` lives in one place; both paths read from it.
         let click = TermMode::MOUSE_REPORT_CLICK;
         for (mode, encoding) in [
             (click, MouseEncoding::Normal),
@@ -443,37 +464,37 @@ mod tests {
                     shift: true,
                 }
             ),
-            // 2 | 8 | 16 — Shift'in 4'ü **yok**: o bit hiç kurulmuyor, çünkü
-            // Shift'li olay `button_route`'ta seçime ayrılıyor ve rapora
-            // gelmiyor.
+            // 2 | 8 | 16 — Shift's 4 is **absent**: that bit is never set,
+            // because a Shift event is sent to selection in `button_route` and
+            // never reaches the report.
             26
         );
     }
 
     #[test]
     fn motion_route_splits_the_three_mouse_modes() {
-        // Düğme yolunda üç bit aynı cevabı veriyor
-        // (`mouse_mode_comes_first_on_either_screen`); hareket yolunda
-        // ayrışıyorlar ve ayrım kipin **anlamı**: 1000 tıklama, 1002
-        // sürükleme, 1003 her hareket.
+        // On the button path the three bits give the same answer
+        // (`mouse_mode_comes_first_on_either_screen`); on the motion path they
+        // part ways and the difference is the mode's **meaning**: 1000 click,
+        // 1002 drag, 1003 every motion.
         let (click, drag, motion) = (
             TermMode::MOUSE_REPORT_CLICK,
             TermMode::MOUSE_DRAG,
             TermMode::MOUSE_MOTION,
         );
         let normal = Some(MouseEncoding::Normal);
-        // 1000: hiçbir hareket.
+        // 1000: no motion.
         assert_eq!(motion_route(click, false), None);
         assert_eq!(motion_route(click, true), None);
-        // 1002: yalnız basılıyken.
+        // 1002: only while pressed.
         assert_eq!(motion_route(drag, false), None);
         assert_eq!(motion_route(drag, true), normal);
-        // 1003: her zaman.
+        // 1003: always.
         assert_eq!(motion_route(motion, false), normal);
         assert_eq!(motion_route(motion, true), normal);
-        // Kip yokken de hiç.
+        // With no mode, none either.
         assert_eq!(motion_route(TermMode::empty(), true), None);
-        // Kodlama düğmeyle aynı tablodan.
+        // The encoding comes from the same table as the button's.
         assert_eq!(
             motion_route(motion | TermMode::SGR_MOUSE, false),
             Some(MouseEncoding::Sgr)
@@ -483,13 +504,13 @@ mod tests {
     #[test]
     fn motion_sets_bit_thirtytwo_and_three_without_a_button() {
         let none = MouseModifiers::default();
-        // Düğmesiz hareket: `32 | 3`.
+        // Motion with no button: `32 | 3`.
         assert_eq!(motion_byte(None, none), 35);
-        // Basılı düğme: `32` artı düğmenin kodu.
+        // Held button: `32` plus the button's code.
         assert_eq!(motion_byte(Some(MouseButton::Left), none), 32);
         assert_eq!(motion_byte(Some(MouseButton::Middle), none), 33);
         assert_eq!(motion_byte(Some(MouseButton::Right), none), 34);
-        // Değiştiriciler basış raporundaki bitlerin aynısı; Shift yine yok.
+        // The modifiers are the same bits as in the press report; still no Shift.
         assert_eq!(
             motion_byte(
                 Some(MouseButton::Left),
@@ -501,8 +522,8 @@ mod tests {
             ),
             32 | 8 | 16
         );
-        // Aynı bayt üç kodlamada da hareket olarak çıkıyor; `pressed = true`
-        // çünkü hareketin bırakma biçimi yok.
+        // The same byte comes out as motion in all three encodings; `pressed =
+        // true` because motion has no release form.
         assert_eq!(
             mouse_report(MouseEncoding::Sgr, 35, true, 4, 2).unwrap(),
             b"\x1b[<35;5;3M"
@@ -519,7 +540,7 @@ mod tests {
 
     #[test]
     fn release_says_m_in_sgr_and_button_three_elsewhere() {
-        // SGR: düğme kodu korunur, son bayt `m`.
+        // SGR: the button code is kept, the final byte is `m`.
         assert_eq!(
             mouse_report(MouseEncoding::Sgr, 2, false, 4, 2).unwrap(),
             b"\x1b[<2;5;3m"
@@ -528,8 +549,8 @@ mod tests {
             mouse_report(MouseEncoding::Sgr, 2, true, 4, 2).unwrap(),
             b"\x1b[<2;5;3M"
         );
-        // X10/UTF-8: düğme bitleri `3`, yani **hangi** düğme olduğu kaybolur;
-        // değiştiriciler kalıyor.
+        // X10/UTF-8: the button bits are `3`, so **which** button it was is
+        // lost; the modifiers stay.
         assert_eq!(
             mouse_report(MouseEncoding::Normal, 2, false, 4, 2).unwrap(),
             [0x1b, b'[', b'M', 32 + 3, 37, 35]
@@ -546,16 +567,16 @@ mod tests {
 
     #[test]
     fn clamp_lands_on_the_last_coordinate_the_encoding_accepts() {
-        // Kırpılan değer **kabul edilen** değer olmalı: aynı sayıyı
-        // `mouse_report` reddetmemeli, yoksa bırakma yine düşerdi (R6).
+        // The clamped value must be an **accepted** value: `mouse_report` must
+        // not reject the same number, or the release would be dropped again (R6).
         for encoding in [MouseEncoding::Normal, MouseEncoding::Utf8] {
             let far = encoding.clamp(u16::MAX);
             assert_eq!(far, encoding.limit().unwrap() - 1);
             assert!(mouse_report(encoding, 0, false, far, far).is_some());
-            // Sığan koordinat kırpmadan geçiyor.
+            // A coordinate that fits passes the clamp untouched.
             assert_eq!(encoding.clamp(7), 7);
         }
-        // SGR sınırsız: kırpma kimliktir.
+        // SGR is unbounded: clamping is the identity.
         assert_eq!(MouseEncoding::Sgr.clamp(u16::MAX), u16::MAX);
     }
 
@@ -570,8 +591,8 @@ mod tests {
             wheel_route(click | TermMode::UTF8_MOUSE, false),
             WheelRoute::Report(MouseEncoding::Utf8)
         );
-        // alacritty ikisini birbirini dışlayarak kuruyor; ikisi birden gelse
-        // SGR kazanır (alacritty'nin `mouse_report`'u da önce SGR'ı soruyor).
+        // alacritty sets the two as mutually exclusive; if both came at once
+        // SGR wins (alacritty's `mouse_report` asks for SGR first too).
         assert_eq!(
             wheel_route(click | TermMode::SGR_MOUSE | TermMode::UTF8_MOUSE, false),
             WheelRoute::Report(MouseEncoding::Sgr)
@@ -582,20 +603,21 @@ mod tests {
     fn alternate_screen_turns_the_wheel_into_arrows() {
         let alt = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
         assert_eq!(wheel_route(alt, false), WheelRoute::Arrows);
-        // DECCKM yolu değiştirmiyor, yalnız okun biçimini (`arrow`).
+        // DECCKM doesn't change the route, only the arrow's format (`arrow`).
         assert_eq!(
             wheel_route(alt | TermMode::APP_CURSOR, false),
             WheelRoute::Arrows
         );
-        // Shift ve `\e[?1007l` oku keser; birincil ekrana da düşmez.
+        // Shift and `\e[?1007l` cut the arrow; it doesn't fall to the primary
+        // screen either.
         assert_eq!(wheel_route(alt, true), WheelRoute::Ignore);
         assert_eq!(wheel_route(TermMode::ALT_SCREEN, false), WheelRoute::Ignore);
     }
 
     #[test]
     fn primary_screen_scrolls_whatever_else_is_set() {
-        // 1007 yalnız alternate screen'de anlamlı; Shift birincil ekranda
-        // kaydırmayı değiştirmiyor (alacritty de öyle).
+        // 1007 is meaningful only on the alternate screen; Shift doesn't change
+        // scrolling on the primary screen (alacritty is the same).
         for mode in [
             TermMode::empty(),
             TermMode::ALTERNATE_SCROLL,
@@ -617,7 +639,7 @@ mod tests {
             mouse_report(MouseEncoding::Sgr, WHEEL_DOWN, true, 0, 0).unwrap(),
             b"\x1b[<65;1;1M"
         );
-        // Sınır yok ve `u16`'nın tepesinde `+ 1` taşmıyor.
+        // There is no limit and `+ 1` doesn't overflow at the top of `u16`.
         assert_eq!(
             mouse_report(MouseEncoding::Sgr, WHEEL_UP, true, u16::MAX, 2015).unwrap(),
             b"\x1b[<64;65536;2016M"
@@ -626,17 +648,17 @@ mod tests {
 
     #[test]
     fn normal_report_is_one_byte_per_coordinate_up_to_222() {
-        // `32 + düğme`, `32 + 1 + konum`.
+        // `32 + button`, `32 + 1 + position`.
         assert_eq!(
             mouse_report(MouseEncoding::Normal, WHEEL_UP, true, 4, 2).unwrap(),
             [0x1b, b'[', b'M', 96, 37, 35]
         );
-        // 222 son sığan: `32 + 1 + 222 = 255`.
+        // 222 is the last that fits: `32 + 1 + 222 = 255`.
         assert_eq!(
             mouse_report(MouseEncoding::Normal, WHEEL_DOWN, true, 222, 222).unwrap(),
             [0x1b, b'[', b'M', 97, 255, 255]
         );
-        // 223 bayta sığmaz: rapor gitmez — sütunda da satırda da.
+        // 223 doesn't fit a byte: no report is sent — in the column or the row.
         assert_eq!(
             mouse_report(MouseEncoding::Normal, WHEEL_UP, true, 223, 0),
             None
@@ -649,7 +671,7 @@ mod tests {
 
     #[test]
     fn utf8_report_takes_two_bytes_from_95() {
-        // 94 → `32 + 1 + 94 = 127`, tek bayt; 95 → 128, iki bayt.
+        // 94 → `32 + 1 + 94 = 127`, one byte; 95 → 128, two bytes.
         assert_eq!(
             mouse_report(MouseEncoding::Utf8, WHEEL_UP, true, 94, 0).unwrap(),
             [0x1b, b'[', b'M', 96, 127, 33]
@@ -658,7 +680,8 @@ mod tests {
             mouse_report(MouseEncoding::Utf8, WHEEL_UP, true, 95, 95).unwrap(),
             [0x1b, b'[', b'M', 96, 0xc2, 0x80, 0xc2, 0x80]
         );
-        // 2014 son sığan: `32 + 1 + 2014 = 2047`, iki baytlık UTF-8'in tepesi.
+        // 2014 is the last that fits: `32 + 1 + 2014 = 2047`, the top of a
+        // two-byte UTF-8.
         assert_eq!(
             mouse_report(MouseEncoding::Utf8, WHEEL_DOWN, true, 2014, 0).unwrap(),
             [0x1b, b'[', b'M', 97, 0xdf, 0xbf, 33]
@@ -671,7 +694,7 @@ mod tests {
             mouse_report(MouseEncoding::Utf8, WHEEL_UP, true, 0, 2015),
             None
         );
-        // Düz kipin sınırı UTF-8'de geçerli değil.
+        // The plain mode's limit doesn't apply in UTF-8.
         assert!(mouse_report(MouseEncoding::Utf8, WHEEL_UP, true, 223, 0).is_some());
     }
 }
