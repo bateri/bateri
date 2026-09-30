@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-/// Errors of the GPU path. Each one names itself: `make duman`'s red line and
+/// Errors of the GPU path. Each one names itself: `make smoke`'s red line and
 /// `bateri` main's stderr line come from here, never a silent `None`.
 #[derive(Debug)]
 pub enum GpuError {

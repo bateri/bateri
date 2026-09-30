@@ -1,122 +1,129 @@
-//! İmlecin ve içeriğin kayması — **saf**, ObjC'siz, kilitsiz.
+//! The cursor's and the content's glide — **pure**, no ObjC, no locks.
 //!
-//! Emsali `Gate` ve `FailureStreak`: politikanın kendisi platformdan bağımsız
-//! olduğu için ayrı bir tipte yaşıyor ve gerçek bir pencere olmadan sınanıyor.
-//! `link.rs`'e gömülü kalsaydı yalnız ekranda denenebilirdi.
+//! Its precedent is `Gate` and `FailureStreak`: the policy itself is
+//! platform-independent, so it lives in a separate type and is tested without a
+//! real window. Buried in `link.rs` it could only be tried on screen.
 //!
-//! **Üç animatör, tek tip** ([`Motion`]): imleç ([`State`], iki eksen),
-//! ötelemenin kayması ve çentiğin süzülmesi (ikisi de [`Slide`], tek eksen).
-//! Ayrı tiplere çıkarılmadılar, çünkü link'in uyku kararı tek:
-//! `motion.settled()` (`link.rs`'in "hasar yok" dalı). Bir animatör o kapının
-//! **dışında** kalsaydı link kayma ortasında uyur ve içerik donardı —
-//! animasyonun görünen belirtisi "yarıda kaldı" olurdu.
+//! **Three animators, one type** ([`Motion`]): the cursor ([`State`], two axes),
+//! the offset's slide and the notch's glide (both [`Slide`], one axis).
+//! They were not split into separate types because the link's sleep decision is
+//! single: `motion.settled()` (the "no damage" branch of `link.rs`). An animator
+//! left **outside** that gate would let the link sleep mid-slide and the content
+//! would freeze — the visible symptom of the animation would be "stopped halfway".
 //!
-//! **Süzülme ötekilerden farklı bir şey çiziyor** ([`Motion::request_glide`]):
-//! konumu ekrana değil `Session`'a gidiyor. Birimi "teslim edilecek satır" ve
-//! kare başına **payı** (konumun değişimi) `Session::frame`'in argümanı; pencere
-//! o payla kayıyor, yani süzülme ötelemenin değil kaydırmanın animasyonu.
+//! **The glide draws something different from the others**
+//! ([`Motion::request_glide`]): its position goes not to the screen but to the
+//! `Session`. Its unit is "rows to deliver" and its per-frame **share** (the
+//! change in position) is `Session::frame`'s argument; the window scrolls by
+//! that share, so the glide is the animation of scrolling, not of the offset.
 //!
-//! **İkisi aynı fiziği paylaşıyor, aynı kipi değil.** Sabitler, kübik
-//! yavaşlama ve yayın kapalı formu ortak ([`ease_axis`], [`spring_axis`],
-//! [`axis_settled`]); Hareketi Azalt'ta imleç **belirirken** öteleme
-//! **snap**'liyor ([`Motion::origin_mode`]). Gerekçe indirgemenin kendisi: her
-//! yeni satırda bütün ekranın belirmesi, kaldırmaya çalıştığı hareketten beter
-//! olurdu.
+//! **The two share the physics, not the mode.** The constants, the cubic
+//! easing and the closed form of the spring are common ([`ease_axis`],
+//! [`spring_axis`], [`axis_settled`]); under Reduce Motion the cursor
+//! **fades in** while the offset **snaps** ([`Motion::origin_mode`]). The
+//! reason is the reduction itself: the whole screen fading in on every new
+//! line would be worse than the motion it tries to remove.
 //!
-//! **İmlecin hedefi ekran satırıdır**, grid satırı değil ([`Motion::sync`]):
-//! Enter'da grid satırı `r → r+1` olurken öteleme bir azalıyor, yani ekran
-//! satırı hiç değişmiyor. İki hedef aynı uzayda olmasaydı imleç bir satır
-//! düşüp geri binerdi.
+//! **The cursor's target is a screen row**, not a grid row ([`Motion::sync`]):
+//! on Enter the grid row goes `r → r+1` while the offset drops by one, so the
+//! screen row does not change at all. If the two targets were not in the same
+//! space, the cursor would drop a row and climb back.
 //!
-//! **Durum hücre birimindedir**, pikselde değil (008 Karar 5): font, zoom ya
-//! da ekran ölçeği değişince konumun piksel karşılığı oynar ama hücre
-//! koordinatı aynı kalır, yani ölçü değişimi kendiliğinden doğru yere düşer.
+//! **State is in cell units**, not pixels (008 Karar 5): when the font, zoom or
+//! screen scale changes, the pixel equivalent of the position moves but the cell
+//! coordinate stays the same, so a change of measure lands in the right place by
+//! itself.
 //!
-//! **Her animasyon bir durma koşulu taşır** (`CLAUDE.md`) ve buradaki iki
-//! katlı: konum+hız eşiği **ya da** süre tavanı. İkincisi kemer — birincisini
-//! hiç sağlamayan bir parametre seti (aşırı düşük sönümleme, sonsuz salınım)
-//! link'i sonsuza uyanık tutardı.
+//! **Every animation carries a stop condition** (`CLAUDE.md`) and here it is
+//! two-layered: a position+velocity threshold **or** a time ceiling. The second
+//! is a belt — a parameter set that never satisfies the first (extremely low
+//! damping, endless oscillation) would keep the link awake forever.
 //!
-//! **Üç stil, tek durum makinesi** ([`bt_core::CursorMotion`]): `Snap`
-//! animasyonu hiç başlatmaz (yani hareket karesi de doğmaz), `Ease` sabit
-//! süreli ve yapısal olarak taşmasız, `Spring` kritik sönümlü yay. Stil
-//! ayardan geliyor ve **çözülmüş** olarak: `bt-shell` dosyayı okuyor, burası
-//! yalnız fiziği biliyor. Süreler ve katsayılar **seçilmiş** sayılardır,
-//! ölçülmüş değil; hepsi bu dosyanın başında, doc'larıyla.
+//! **Three styles, one state machine** ([`bt_core::CursorMotion`]): `Snap`
+//! never starts the animation (so no motion frame is born either), `Ease` has a
+//! fixed duration and is structurally overshoot-free, `Spring` is a critically
+//! damped spring. The style comes from the settings, already **resolved**:
+//! `bt-shell-macos` reads the file, this module only knows the physics. The
+//! durations and coefficients are **chosen** numbers, not measured; all of them
+//! are at the top of this file, with their docs.
 //!
-//! **Hareketi Azalt dördüncü bir kip** ([`Mode::Fade`]), dördüncü bir stil
-//! değil: stil ile `reduce` bayrağı [`Motion::mode`]'da birleşiyor ve
-//! indirgeme **tek yerde** yaşıyor. Açıkken kayma yok — imleç yeni hücresinde
-//! [`FADE_DURATION`] boyunca **belirir**. Bayrak da çözülmüş geliyor: üç
-//! değerli `reduce_motion` ile sistemin cevabını `bt-shell` birleştiriyor,
-//! çünkü `bt-gpu` AppKit görmüyor.
+//! **Reduce Motion is a fourth mode** ([`Mode::Fade`]), not a fourth style: the
+//! style and the `reduce` flag are combined in [`Motion::mode`] and the
+//! reduction lives in **one place**. When on there is no slide — the cursor
+//! **fades in** in its new cell for [`FADE_DURATION`]. The flag also arrives
+//! resolved: `bt-shell-macos` combines the three-valued `reduce_motion` with the
+//! system's answer, because `bt-gpu` does not see AppKit.
 
 use bt_core::{CursorMotion, Erase, Keypress, ScrollGlide};
 
-/// Yay sertliği, rad/s. **Seçilmiş bir sayı, ölçülmüş değil.**
+/// Spring stiffness, rad/s. **A chosen number, not a measured one.**
 ///
-/// Kritik sönümlemede (ζ = 1) bir hücrelik kayma bu değerde ~230 ms'de
-/// yerleşiyor (bağlayan eşik [`VEL_EPSILON`], konum değil). Metalterm'in
-/// imleci gözle o mertebede; sayının kendisi bir ölçüme değil bu hedefe
-/// dayanıyor.
+/// In critical damping (ζ = 1) a one-cell slide settles in ~230 ms at this
+/// value (the binding threshold is [`VEL_EPSILON`], not the position).
+/// Metalterm's cursor is of that order by eye; the number itself rests on this
+/// target, not on a measurement.
 ///
-/// **Yerleşme süresi mesafeyle büyüyor** ve bu, eşiklerin **mutlak** olmasının
-/// doğrudan sonucu: `D` hücrelik bir sıçramada süre `ln(D)` ile artıyor —
-/// 1 hücre ~230 ms, 200 hücre ~430 ms, 400 hücre ~460 ms. Oran değil fark
-/// önemli: sabit bir "yerleşme süresi" yok ve [`TIME_CEILING`] payını buna
-/// göre taşımak zorunda. (Sayılar kapalı formdan **hesaplandı**, ölçülmedi;
-/// ölçüm gerçek pencere ister ve bu bir kapı değil.)
+/// **The settling time grows with distance**, and this is a direct consequence
+/// of the thresholds being **absolute**: in a jump of `D` cells the time grows
+/// with `ln(D)` — 1 cell ~230 ms, 200 cells ~430 ms, 400 cells ~460 ms. The
+/// difference matters, not the ratio: there is no fixed "settling time" and
+/// [`TIME_CEILING`]'s margin has to carry that. (The numbers were **computed**
+/// from the closed form, not measured; measuring needs a real window and this is
+/// not a gate.)
 const OMEGA: f32 = 30.0;
 
-/// Yerleşmiş sayılmak için konum eşiği, **hücre**. Yarım pikselin altında
-/// kalması yetiyor: tipik hücre 8–20 piksel, yani `0.02` hücre ≤ 0,4 piksel.
+/// Position threshold for counting as settled, **cells**. It is enough for it to
+/// stay under half a pixel: a typical cell is 8–20 pixels, so `0.02` cells ≤ 0.4
+/// pixels.
 const POS_EPSILON: f32 = 0.02;
 
-/// Yerleşmiş sayılmak için hız eşiği, **hücre/saniye**. Konumla **birlikte**
-/// sorulmak zorunda: hedefin tam üstünden geçerken konum farkı bir an sıfıra
-/// yaklaşır ve tek başına konuma bakan bir eşik animasyonu ortasında
-/// durdururdu.
+/// Velocity threshold for counting as settled, **cells/second**. It has to be
+/// asked **together with** the position: passing right over the target the
+/// position difference momentarily nears zero, and a threshold that looked at the
+/// position alone would stop the animation in the middle.
 const VEL_EPSILON: f32 = 0.2;
 
-/// Süre tavanı, saniye — **kemer, ölçülmüş bir süre değil**.
+/// Time ceiling, seconds — **a belt, not a measured duration**.
 ///
-/// Eşik yolunun tıkandığı her hâlde (parametre değişimi, `dt`'nin hiç
-/// ilerlemediği patolojik bir ritim) animasyonu sonlu tutan şey bu.
-/// Ateşlerse imleç hedefe atlar, yani belirti görünür bir sıçrama olur,
-/// sonsuz bir kare akışı değil.
+/// It is what keeps the animation finite in every case where the threshold path
+/// is blocked (a parameter change, a pathological rhythm where `dt` never
+/// advances). If it fires the cursor jumps to the target, so the symptom is a
+/// visible jump, not an endless stream of frames.
 ///
-/// **Payın operandı en uzun meşru sıçrama, "tipik" kayma değil.** İlk sayı
-/// `0.5` idi ve [`OMEGA`]'nın bir hücrelik ~230 ms'sinin iki katı diye
-/// gerekçelendirilmişti; oysa eşikler mutlak olduğu için 400 hücrelik bir
-/// sıçrama (geniş ekranda satır başına dönüş) ~460 ms'de yerleşiyor — yani
-/// eski tavan meşru bir kaymayı **kesmeye %10 kalmıştı** ve belirtisi
-/// kaymanın sonunda görünür bir snap olurdu. `0.7` o hesabın ~%50 üstünde.
-/// Sayılar kapalı formdan hesaplandı ([`OMEGA`]'nın doc'u), ölçülmedi.
+/// **The margin's operand is the longest legitimate jump, not the "typical"
+/// slide.** The first number was `0.5` and was justified as twice [`OMEGA`]'s
+/// ~230 ms for one cell; but since the thresholds are absolute, a 400-cell jump
+/// (a line-start return on a wide screen) settles in ~460 ms — so the old
+/// ceiling was **10% away from cutting** a legitimate slide and the symptom
+/// would be a visible snap at the end of the slide. `0.7` is ~50% above that
+/// computation. The numbers were computed from the closed form ([`OMEGA`]'s
+/// doc), not measured.
 const TIME_CEILING: f32 = 0.7;
 
-/// `dt`'nin üst sınırı, saniye.
+/// Upper bound of `dt`, seconds.
 ///
-/// Örtülme kalkınca (ya da sistem link'i kıstığında) iki damga arası
-/// sınırsız olabilir. Kırpılmazsa süre tavanı **vahşi kareyi önlemek yerine
-/// ondan sonra** ateşler: tek adımda `elapsed` tavanı aşar ve animasyon hiç
-/// görünmeden biter. Değer iki kare (~120 Hz'de 16 ms, 60 Hz'de 33 ms) ile
-/// bir göz kırpması arasında; yine seçilmiş.
+/// When occlusion lifts (or the system throttles the link) the gap between two
+/// stamps can be unbounded. Unclamped, the time ceiling fires **after the wild
+/// frame instead of preventing it**: `elapsed` exceeds the ceiling in a single
+/// step and the animation ends without ever being seen. The value sits between
+/// two frames (16 ms at 120 Hz, 33 ms at 60 Hz) and a blink of an eye; again
+/// chosen.
 pub(crate) const DT_MAX: f32 = 0.1;
 
-/// `ease` stilinin kayma süresi, saniye — **seçilmiş bir sayı, ölçülmüş
-/// değil.**
+/// Slide duration of the `ease` style, seconds — **a chosen number, not
+/// measured.**
 ///
-/// [`OMEGA`]'nın bir hücrelik ~230 ms'sinin biraz altında: `ease`'in ayırt
-/// edici yanı süresinin **mesafeden bağımsız** olması, yani uzak sıçramada
-/// yaydan hızlı, yakın sıçramada ona yakın. Değer [`TIME_CEILING`]'in altında
-/// kalmak zorunda, yoksa kemer meşru bir `ease` kaymasını keserdi
+/// A little under [`OMEGA`]'s ~230 ms for one cell: what sets `ease` apart is
+/// that its duration is **independent of distance**, i.e. faster than the spring
+/// on a far jump and close to it on a near one. The value has to stay under
+/// [`TIME_CEILING`], otherwise the belt would cut a legitimate `ease` slide
 /// (`ease_settles_well_inside_the_ceiling`).
 const EASE_DURATION: f32 = 0.18;
 
-// `ease`'in durma koşulu kendi saati, yani süre tavanının kemeri ona
-// **uygulanmıyor**; iki sayının sırası bu yüzden bir yorum cümlesi değil bir
-// şart. Tavanı `ease`'in altına düşüren bir gelecek değişiklik burada patlar,
-// ekranda kesilen bir kaymada değil.
+// `ease`'s stop condition is its own clock, so the time ceiling's belt is **not
+// applied** to it; the order of the two numbers is therefore a requirement, not
+// a comment sentence. A future change that lowers the ceiling below `ease`
+// blows up here, not in a slide cut on screen.
 const _: () = assert!(EASE_DURATION < TIME_CEILING);
 
 /// How long a run of screenful scrolls still counts as one burst, seconds
@@ -130,76 +137,78 @@ const _: () = assert!(EASE_DURATION < TIME_CEILING);
 /// the reads of one short burst arrive within a few frames of each other.
 const BURST_WINDOW: f32 = EASE_DURATION;
 
-// Belirmenin "duraksama" ölçütü `dt`'nin kırpılmasına **yaslanıyor**
-// (`Motion::sync`): link uyuduktan sonraki ilk kare `DT_MAX` kadar sayılıyor ve
-// bunun bir duraksama sayılması için kırpmanın belirmeden uzun olması şart.
-// Ters çevrilseydi uykudan uyanan imleç hiç belirmezdi ve belirti "bazen
-// belirmiyor" gibi sinsi olurdu.
+// The "pause" criterion of the fade-in **leans on** `dt`'s clamping
+// (`Motion::sync`): the first frame after the link sleeps is counted as
+// `DT_MAX`, and for that to count as a pause the clamp must be longer than the
+// fade. Were it reversed, a cursor waking from sleep would never fade in and the
+// symptom would be as insidious as "sometimes it doesn't appear".
 const _: () = assert!(FADE_DURATION < DT_MAX);
 
-/// Hareketi Azalt açıkken belirmenin süresi, saniye — **seçilmiş bir sayı,
-/// ölçülmüş değil.**
+/// Duration of the fade-in when Reduce Motion is on, seconds — **a chosen
+/// number, not measured.**
 ///
-/// Apple'ın Reduce Motion rehberi kaymanın yerine **solma** koyuyor; burada
-/// da indirgeme "animasyon yok" değil "yer değiştirmeyen kısa bir animasyon".
-/// 90 ms göz kırpmanın altında: değişimi bildirecek kadar var, hareket diye
-/// okunmayacak kadar kısa.
+/// Apple's Reduce Motion guidance puts a **fade** in place of the slide; here
+/// the reduction is not "no animation" but "a short animation that does not
+/// change place". 90 ms is under a blink of an eye: long enough to announce the
+/// change, short enough not to read as motion.
 ///
-/// **[`DT_MAX`]'ten (100 ms) küçük ve bu bilerek bırakıldı.** Tek bir vahşi
-/// kare (örtülme sonrası, sistem link'i kısınca) belirmeyi tek adımda
-/// bitirebilir, yani görünmeden geçer. Örtülmenin kendi yolu zaten bunu
-/// istiyor ([`Motion::finish`]); geri kalan hâlde bedel bir kez görünmeyen bir
-/// belirme, kazanç ise `dt` kırpmasının tek sayıda kalması. `DT_MAX`'i
-/// düşüren biri buradaki ilişkiyi değil, kendi gerekçesini tartmalı.
+/// **Smaller than [`DT_MAX`] (100 ms), and that was left so on purpose.** A
+/// single wild frame (after occlusion, when the system throttles the link) can
+/// finish the fade in one step, i.e. it passes unseen. Occlusion's own path
+/// already wants this ([`Motion::finish`]); in the remaining case the cost is a
+/// fade that goes unseen once, the gain is that `dt`'s clamp stays a single
+/// number. Whoever lowers `DT_MAX` should weigh their own reason, not the
+/// relation here.
 const FADE_DURATION: f32 = 0.09;
 
-/// Etkin hareket kipi: kullanıcının stili ile Hareketi Azalt'ın **birleştiği
-/// tek yer** ([`Motion::mode`]).
+/// The effective motion mode: the **one place** where the user's style and
+/// Reduce Motion combine ([`Motion::mode`]).
 ///
-/// [`bt_core::CursorMotion`]'ın kopyası değil, üstüne bir kol: ayar üç değerli
-/// kalıyor (kullanıcı "Hareketi Azalt açıkken hangi stil" diye bir şey
-/// seçmiyor), karar burada çıkıyor.
+/// Not a copy of [`bt_core::CursorMotion`], but a branch on top of it: the
+/// setting stays three-valued (the user does not pick "which style when Reduce
+/// Motion is on"), the decision is made here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Snap,
     Ease,
     Spring,
-    /// Hareketi Azalt: konum anında hedefte, değişen şey opaklık.
+    /// Reduce Motion: the position is at the target at once, what changes is the
+    /// opacity.
     Fade,
 }
 
-/// İmlecin kaymasının durumu.
+/// State of the cursor's slide.
 ///
-/// `Option`'ın içi "uçuşta bir imleç var" demek; `None` hem ilk kare hem de
-/// görünmez imleç. İkisini ayıran bir bayrak **bilerek yok**: ikisinde de
-/// yapılacak şey aynı (sıradaki hedefe anında otur) ve iki bayrak
-/// ayrışabilen iki gerçek olurdu.
+/// The inside of the `Option` means "there is an in-flight cursor"; `None` is
+/// both the first frame and an invisible cursor. A flag separating the two is
+/// **deliberately absent**: the thing to do is the same in both (sit at the
+/// next target at once) and two flags would be two truths that can drift apart.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Motion {
-    /// Kullanıcının seçtiği stil ([`Motion::set_style`]).
+    /// The style the user picked ([`Motion::set_style`]).
     ///
-    /// Varsayılanı **burada yok**: `Default` türetiliyor ve değeri
-    /// [`bt_core::CursorMotion`]'ın `Default`'undan alıyor. Buraya bir
-    /// `Spring` yazılsaydı varsayılanın ikinci bir sahibi doğardı ve ayar
-    /// modelininkiyle sessizce ayrışabilirdi — hermetik süreli koşu tam da o
-    /// değeri alıyor (`hareket > 0` kapısı ona yaslanıyor).
+    /// Its default is **not here**: `Default` is derived and takes its value from
+    /// [`bt_core::CursorMotion`]'s `Default`. Had a `Spring` been written here, the
+    /// default would have gained a second owner that could silently drift from the
+    /// settings model's — the hermetic timed run takes exactly that value (the
+    /// `motion > 0` gate leans on it).
     style: CursorMotion,
-    /// Hareketi Azalt açık mı — **çözülmüş** değer ([`Motion::set_reduce`]).
+    /// Whether Reduce Motion is on — the **resolved** value ([`Motion::set_reduce`]).
     ///
-    /// `bt_core::ReduceMotion`'ın üç değeri burada yok: "sistemi izle"nin
-    /// cevabını `NSWorkspace` veriyor ve o soruyu soran katman `bt-shell`.
-    /// Üçlüyü buraya taşımak `bt-gpu`'yu ayar dosyasının değil sistemin
-    /// erişilebilirlik ayarının müşterisi yapardı.
+    /// `bt_core::ReduceMotion`'s three values are not here: the answer to "follow the
+    /// system" comes from `NSWorkspace` and the layer asking that question is
+    /// `bt-shell-macos`. Moving the trio here would make `bt-gpu` a customer of the
+    /// system's accessibility setting, not of the settings file.
     ///
-    /// `Default` `false`: hermetik süreli koşu sistem ayarını okumuyor
-    /// (`bt-shell`'in `Inputs::Hermetic`'i) ve `make duman`'ın `hareket > 0`
-    /// gerekliliği ölçen makinenin erişilebilirlik ayarına bağlanamaz.
+    /// `Default` is `false`: the hermetic timed run does not read the system setting
+    /// (`bt-shell-macos`'s `Inputs::Hermetic`) and `make smoke`'s `motion > 0`
+    /// requirement cannot be tied to the measuring machine's accessibility setting.
     reduce: bool,
     state: Option<State>,
-    /// Ötelemenin kayması; `None` → henüz hiç içerik karesi yok.
+    /// The offset's slide; `None` → no content frame yet.
     ///
-    /// İmlecinkiyle aynı `Option` sözleşmesi ve aynı sebeple: yokluk da ilk
-    /// kare de "sıradaki hedefe anında otur" demek.
+    /// The same `Option` contract as the cursor's and for the same reason: absence
+    /// and the first frame both mean "sit at the next target at once".
     origin: Option<Slide>,
     /// Age, in seconds, of the current run of content frames that each
     /// scrolled a screen or more ([`Motion::scroll_in`]); `None` once a
@@ -212,111 +221,115 @@ pub(crate) struct Motion {
     /// the two apart either: the stream branch finishes the slide, so the next
     /// screenful frame finds it at rest.
     screenful_run: Option<f32>,
-    /// Son kareden görülen kaydırma ofseti; `None` → henüz hiç kare yok.
+    /// The scroll offset seen in the last frame; `None` → no frame yet.
     ///
-    /// Ayrı tutuluyor çünkü `state` boşalsa da (görünmez imleç) ofsetin
-    /// geçmişi kaybolmamalı: TUI imleci gizleyip pencereyi kaydırır, sonra
-    /// geri açar.
+    /// Kept separate because even when `state` empties (an invisible cursor) the
+    /// offset's history must not be lost: a TUI hides the cursor and scrolls the
+    /// window, then turns it back on.
     offset: Option<i32>,
-    /// Çentiğin süzülmesi: [`Slide`]'ın ikinci örneği, birimi **teslim
-    /// edilecek satır** ([`Motion::request_glide`]).
+    /// The notch's glide: [`Slide`]'s second instance, its unit **rows to deliver**
+    /// ([`Motion::request_glide`]).
     ///
-    /// `Option` değil: ötelemenin `None`'ı "ilk kare, hedefe otur" demek,
-    /// süzülmenin dinlenme hâli ise sıfırda duran bir konum — istek yoksa
-    /// gidecek yol da yok. Konum her teslimde sıfıra **yeniden dayanıyor**
-    /// ([`Motion::take_glide`]), yani dinlenirken `pos == target == 0` ve
-    /// sayılar bir oturum boyunca büyüyüp `f32`'nin hassasiyetini yemiyor.
+    /// Not an `Option`: the offset's `None` means "first frame, sit at the target",
+    /// while the glide's resting state is a position sitting at zero — with no
+    /// request there is no road to travel. The position is **re-anchored to zero**
+    /// at every delivery ([`Motion::take_glide`]), so at rest `pos == target == 0`
+    /// and the numbers do not grow over a session and eat `f32`'s precision.
     glide: Slide,
-    /// Süzülmenin ait olduğu kaydırma nesli (`bt_core::ScrollGlide`).
+    /// The scroll generation the glide belongs to (`bt_core::ScrollGlide`).
     ///
-    /// Pay `Session::frame`'e bu nesille gidiyor; konum dışarıdan
-    /// sıfırlanınca (girdide dibe dönüş, Shift+PgUp) nesil artıyor ve uçuştaki
-    /// süzülme **düşüyor** ([`Motion::observe_scroll_generation`]).
+    /// The share goes to `Session::frame` with this generation; when the position is
+    /// reset from outside (return to bottom on input, Shift+PgUp) the generation
+    /// rises and the in-flight glide is **dropped**
+    /// ([`Motion::observe_scroll_generation`]).
     glide_generation: u32,
-    /// Son içerik karesinin kaydırma konumu, `(display_offset, kesir)` —
-    /// süzülmenin uca çarptığını gören tek tanık ([`Motion::observe_scroll`]).
+    /// The scroll position of the last content frame, `(display_offset, fraction)` —
+    /// the only witness that sees the glide hit the end ([`Motion::observe_scroll`]).
     ///
-    /// Konum değil **kimlik**, [`Motion::offset`] gibi: karşılaştırılıyor,
-    /// sayı olarak kullanılmıyor.
+    /// An **identity**, not a position, like [`Motion::offset`]: it is compared, not
+    /// used as a number.
     glide_at: Option<(i32, f32)>,
-    /// Dock bandının **ek** satırı: çizilen bandın PTY'nin ayırdığı paydan
-    /// (`DOCK_ROWS`) fazlası, satır — [`Slide`]'ın dördüncü örneği (032).
+    /// The dock band's **extra** rows: how much more than the PTY's reserved share
+    /// (`DOCK_ROWS`) the drawn band is, in rows — [`Slide`]'s fourth instance (032).
     ///
-    /// Ayrı bir animatör ve ötelemeden türetilmiyor: ötelemenin girdisi
-    /// içeriğin doluluğu, bandınki dock'un satır sayısı ve ikisi aynı karede
-    /// ayrı yönlere gidebiliyor (`scroll_in` tek karede sıçrayan içerikte bandı
-    /// sahte küçültürdü). Birleştikleri yer çizim: ızgaranın çizilen orijini
-    /// `origin() − band()` (`link.rs`'in `set_origin`'i), yani ızgaranın alt
-    /// kenarı ile bandın üst kenarı **yapısal olarak** birlikte kayıyor.
+    /// A separate animator and not derived from the offset: the offset's input is
+    /// the content's fill and the band's is the dock's row count, and the two can go
+    /// in different directions in the same frame (`scroll_in` would have falsely
+    /// shrunk the band on content that jumps in a single frame). They meet in the
+    /// drawing: the grid's drawn origin is `origin() − band()` (`set_origin` in
+    /// `link.rs`), so the grid's bottom edge and the band's top edge slide together
+    /// **structurally**.
     ///
-    /// **İki yön de süzülüyor** ([`Motion::sync_band`]): bandın boyu bir panel
-    /// boyu, içerik değil — 011'in "daralan içerik snap'ler" gerekçesi (aşağı
-    /// iniş düşme gibi okunuyor) buraya uymuyor, satır silince bandın kaybolup
-    /// ızgaranın zıplaması tam da o kuralın önlemek istediği sıçrama olurdu.
+    /// **Both directions glide** ([`Motion::sync_band`]): the band's size is a
+    /// panel's size, not content — 011's "narrowing content snaps" reason (a descent
+    /// reads like falling) does not fit here, and the band vanishing while the grid
+    /// jumps when a line is deleted would be exactly the jump that rule wants to
+    /// prevent.
     ///
-    /// `Option`, ötelemeninkiyle aynı sözleşme: yokluk da ilk kare de
-    /// "sıradaki hedefe anında otur" demek.
+    /// An `Option`, the same contract as the offset's: absence and the first frame
+    /// both mean "sit at the next target at once".
     band: Option<Slide>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct State {
-    /// Hücre biriminde `(sütun, satır)`; tam sayı olmak zorunda değil.
+    /// In cell units `(column, row)`; it need not be an integer.
     pos: [f32; 2],
-    /// Hücre/saniye. `ease`'de **hep sıfır**: o stilin konumu zamanın
-    /// fonksiyonu, hızın entegrali değil.
+    /// Cells/second. **Always zero** in `ease`: that style's position is a function
+    /// of time, not the integral of a velocity.
     vel: [f32; 2],
-    /// Kaymanın başladığı yer — yalnız `ease`'in operandı.
+    /// Where the slide started — only `ease`'s operand.
     ///
-    /// Yay hızı taşıdığı için geçmişe ihtiyaç duymuyor; `ease` ise konumu
-    /// `from → target` arasında `elapsed`'e göre **yeniden hesaplıyor**, yani
-    /// çıkış noktasını unutamaz. Uçuşta hedef değişince (ya da stil
-    /// değişince) burası bulunulan konuma çekiliyor: yoksa imleç eski
-    /// başlangıçtan yeniden başlar, yani geri sıçrardı.
+    /// The spring carries velocity so it needs no history; `ease` **recomputes** the
+    /// position between `from → target` from `elapsed`, so it cannot forget its
+    /// starting point. When the target changes mid-flight (or the style changes)
+    /// this is pulled to the current position: otherwise the cursor would restart
+    /// from the old start, i.e. jump back.
     from: [f32; 2],
     target: [f32; 2],
-    /// Hedef kurulalı beri geçen süre; süre tavanının **ve** `ease`'in ilerleme
-    /// operandı.
+    /// Time since the target was set; the time ceiling's **and** `ease`'s progress
+    /// operand.
     elapsed: f32,
-    /// Son **hedef değişiminden** beri geçen süre — yalnız [`Mode::Fade`]'in
-    /// operandı ve `elapsed`'in kopyası değil: o, belirmenin kendi saati;
-    /// bu, iki hareket **arasındaki** boşluk.
+    /// Time since the last **target change** — only [`Mode::Fade`]'s operand, and
+    /// not a copy of `elapsed`: that one is the fade's own clock; this is the gap
+    /// **between** two movements.
     ///
-    /// Belirmenin "yeniden başlar mı" sorusu buna bakıyor (`Motion::sync`):
-    /// duraksamadan sonraki hareket yeni bir belirmedir, akan çıktının her
-    /// karede oynattığı imleç değil.
+    /// The fade's "does it restart" question looks at this (`Motion::sync`): a move
+    /// after a pause is a new fade, not the cursor that streaming output moves every
+    /// frame.
     since_move: f32,
 }
 
-/// Ötelemenin kaymasının — ve çentiğin süzülmesinin — durumu: [`State`]'in
-/// **tek eksenli** kardeşi.
+/// State of the offset's slide — and of the notch's glide: [`State`]'s
+/// **single-axis** sibling.
 ///
-/// Ayrı bir tip, `State`'in ikinci ekseni boş bırakılarak değil: kullanılmayan
-/// bir eksen tipin söylediği yalan olurdu ve `since_move` (belirmenin saati)
-/// buraya hiç girmiyor — öteleme belirmiyor ([`Motion::origin_mode`]).
-/// Paylaşılan şey **fizik**: [`ease_axis`], [`spring_axis`] ve
-/// [`axis_settled`] ikisinin de altında.
+/// A separate type, not `State` with its second axis left empty: an unused axis
+/// would be a lie told by the type, and `since_move` (the fade's clock) never
+/// enters here — the offset does not fade ([`Motion::origin_mode`]). What is
+/// shared is the **physics**: [`ease_axis`], [`spring_axis`] and
+/// [`axis_settled`] are under both.
 #[derive(Clone, Copy, Debug, Default)]
 struct Slide {
-    /// Satır cinsinden; tam sayı olmak zorunda değil. Piksele çeviren ve
-    /// **aygıt ızgarasına yuvarlayan** taraf `Frame::set_origin_rows`.
+    /// In rows; it need not be an integer. The side that converts to pixels and
+    /// **rounds to the device grid** is `Frame::set_origin_rows`.
     pos: f32,
-    /// Satır/saniye. `ease`'de hep sıfır ([`State::vel`] ile aynı gerekçe).
+    /// Rows/second. Always zero in `ease` (same reason as [`State::vel`]).
     vel: f32,
-    /// Kaymanın başladığı yer — `ease`'in operandı ve iki kipin "gidecek yol
-    /// yok" koşulu.
+    /// Where the slide started — `ease`'s operand and both modes' "no road to
+    /// travel" condition.
     from: f32,
     target: f32,
     elapsed: f32,
 }
 
 impl Motion {
-    /// Stil ile Hareketi Azalt'ın tek karara indiği yer.
+    /// Where the style and Reduce Motion come down to a single decision.
     ///
-    /// **`Snap` bayrağın üstünde** ve bu bir ürün kararı: `cursor_motion =
-    /// "snap"` diyen kullanıcı hareketi zaten kapatmış, Hareketi Azalt ona bir
-    /// belirme *eklememeli*. Erişilebilirlik ayarı animasyonu kısar, var
-    /// olmayanı doğurmaz (`docs/AYARLAR.md` → `[motion]`).
+    /// **`Snap` sits above the flag** and this is a product decision: a user who
+    /// says `cursor_motion = "snap"` has already turned motion off, and Reduce Motion
+    /// should not *add* a fade to them. The accessibility setting shortens the
+    /// animation, it does not create one that does not exist (`docs/AYARLAR.md` →
+    /// `[motion]`).
     fn mode(self) -> Mode {
         match (self.style, self.reduce) {
             (CursorMotion::Snap, _) => Mode::Snap,
@@ -326,15 +339,16 @@ impl Motion {
         }
     }
 
-    /// Dock'un yazım efektlerinin indirgemesi (030): kullanıcının seçtiği
-    /// iki efekt → bu kipte çizilecek olanlar.
+    /// Reduction of the dock's typing effects (030): the two effects the user picked
+    /// → the ones to be drawn in this mode.
     ///
-    /// **Yer burası**, çünkü kural [`Motion::mode`]'unkinin aynısı ve
-    /// indirgemenin tek yeri bu modül (`CLAUDE.md`): `snap` hareketi zaten
-    /// kapatmış olanın beyanı, ikisini de kapatıyor; Hareketi Azalt gelişi
-    /// imlecin kendi kipine — belirmeye — indiriyor ve hayaleti kapatıyor,
-    /// çünkü hayalet orada olmayan bir içerik. Erişilebilirlik ayarı
-    /// animasyon **eklemez**: kapalı geliş kapalı kalır
+    /// **It lives here** because the rule is the same as [`Motion::mode`]'s and the
+    /// reduction's one place is this module (`CLAUDE.md`): `snap` is the declaration
+    /// of one who has already turned motion off, and it turns both off; Reduce
+    /// Motion lowers the arrival to the cursor's own mode — a fade-in — and turns
+    /// the ghost off, because the ghost is content that is not there. The
+    /// accessibility setting **does not add** animation: an arrival that is off
+    /// stays off
     /// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 7).
     pub(crate) fn glyph_fx(self, keypress: Keypress, erase: Erase) -> (Keypress, Erase) {
         match (self.style, self.reduce) {
@@ -345,16 +359,16 @@ impl Motion {
         }
     }
 
-    /// Ötelemenin kipi: [`Motion::mode`] ile aynı, **belirme hariç**.
+    /// The offset's mode: the same as [`Motion::mode`], **except the fade**.
     ///
-    /// Hareketi Azalt'ta öteleme kaymaz ama **belirmez de**, snap'ler (R2.3).
-    /// [`Mode::Fade`] "konum anında hedefte, değişen şey opaklık" demek ve
-    /// opaklık burada kimsenin alanı değil: kayan şey bütün ızgara ve onu her
-    /// yeni satırda belirtmek, indirgemenin kaldırmaya çalıştığı hareketten
-    /// beter olurdu.
+    /// Under Reduce Motion the offset does not slide but **does not fade either**, it
+    /// snaps (R2.3). [`Mode::Fade`] means "the position is at the target at once,
+    /// what changes is the opacity" and opacity is nobody's field here: what slides
+    /// is the whole grid and fading it in on every new line would be worse than the
+    /// motion the reduction tries to remove.
     ///
-    /// "İndirgemenin tek yeri `bt-gpu::motion`" kuralı (`CLAUDE.md`) yerinde
-    /// kalıyor: **yer** aynı, **kip** iki.
+    /// The rule "the reduction's one place is `bt-gpu::motion`" (`CLAUDE.md`) stays
+    /// in place: the **place** is the same, the **mode** is two.
     fn origin_mode(self) -> Mode {
         match self.mode() {
             Mode::Fade => Mode::Snap,
@@ -362,60 +376,61 @@ impl Motion {
         }
     }
 
-    /// İçerik karesinin ucu: yeni imleç geldi.
+    /// The content frame's tip: a new cursor has arrived.
     ///
-    /// Dört snap hâlinin **tamamı** burada ve tek ifadede (008 Karar 5, R3.4):
+    /// All **four** snap cases are here, in a single expression (008 Karar 5,
+    /// R3.4):
     ///
-    /// - **ilk kare** — `state` yok,
-    /// - **görünmezken açılan imleç** — görünmezlik `state`'i boşalttı,
-    /// - **geçmişte kaydırma** — ofset oynadı,
-    /// - **geometri** (pencere, font, zoom) — çağıran `geometry` diyor.
+    /// - **first frame** — there is no `state`,
+    /// - **a cursor that opens while invisible** — invisibility emptied `state`,
+    /// - **scrolling in history** — the offset moved,
+    /// - **geometry** (window, font, zoom) — the caller says `geometry`.
     ///
-    /// Ortak gerekçe: bunların hiçbirinde imleç hareket etmedi, **altındaki
-    /// ızgara** hareket etti. Animasyon uydurmak imleci olmadığı bir yerden
-    /// geliyormuş gibi gösterirdi.
+    /// The common reason: in none of them did the cursor move, the **grid under it**
+    /// moved. Inventing an animation would show the cursor as coming from a place it
+    /// was not.
     ///
-    /// **Aynı hedefe yeniden hedeflemek no-op'tur** ve bu şart: imleci
-    /// oynatmayan içerik kareleri (renk değişimi, alt satıra yazı) saniyede
-    /// onlarca gelebiliyor ve her biri süre tavanını sıfırlasaydı tavan hiç
-    /// dolmazdı — kemerin kendisi kopardı.
+    /// **Retargeting to the same target is a no-op** and this is a requirement:
+    /// content frames that do not move the cursor (a colour change, text on a lower
+    /// line) can arrive dozens of times a second and had each of them reset the time
+    /// ceiling, the ceiling would never fill — the belt itself would snap.
     ///
-    /// **`CursorMotion::Snap` beşinci bir snap hâli değil, hepsinin üstü:**
-    /// o stilde her `sync` anında oturuyor, yani animasyon hiç başlamıyor ve
-    /// `settled()` hiç `false` olmuyor — hareket karesi de doğmuyor.
+    /// **`CursorMotion::Snap` is not a fifth snap case, it is above all of them:**
+    /// in that style every `sync` sits at once, so the animation never starts and
+    /// `settled()` is never `false` — no motion frame is born either.
     ///
-    /// **Belirme kipinde konum da anında oturuyor**, yalnız opaklık
-    /// animasyonlu: `pos` burada hedefe çekilmezse imleç ilk içerik karesinde
-    /// **eski** hücresinde alfa sıfırla çizilir ve yerine ancak belirme
-    /// bitince atlardı — hiçbir sayaç görmeyen bir kusur, çünkü hareket
-    /// karesi de kare de doğru sayıda.
+    /// **In the fade mode the position also sits at once**, only the opacity is
+    /// animated: if `pos` were not pulled to the target here, the cursor would be
+    /// drawn at alpha zero in its **old** cell in the first content frame and would
+    /// jump to its place only when the fade ended — a defect no counter sees,
+    /// because the motion frames and frames are in the right number.
     ///
-    /// **Hedef `at`, ekran hücresi cinsinden ve çağıran hesaplıyor.** Eskiden
-    /// imza `(col, row, origin_rows)` alıp toplamı burada yapıyordu; artık
-    /// caret'in **iki evi** var (ızgara ve dock) ve dock'un satırı bir tam
-    /// sayı değil — dock nefes payı kadar aşağıdan başlıyor, yani hedef
-    /// kesirli. Tek animatörün iki evi olması bu setin 9. phase'i: caret
-    /// ızgarada yazarken süzülüyorsa dock'ta da süzülmeli ve ikisi arasında
-    /// da — üç ayrı davranış değil, tek bir hareket.
+    /// **The target `at` is in screen cells and the caller computes it.** It used to
+    /// be that the signature took `(col, row, origin_rows)` and summed them here; now
+    /// the caret has **two homes** (the grid and the dock) and the dock's row is not
+    /// an integer — the dock starts lower by the breathing margin, so the target is
+    /// fractional. The single animator having two homes is this set's 9th phase: if
+    /// the caret glides while typing in the grid it must glide in the dock too and
+    /// between the two — not three separate behaviours but one movement.
     ///
-    /// `None` → hiçbir evde caret yok (imleci gizleyen program, dock'suz ve
-    /// görünmez imleç); durum düşüyor.
+    /// `None` → no caret in either home (a program hiding the cursor, no dock and an
+    /// invisible cursor); the state drops.
     ///
-    /// **Öteleme `visible`'dan önce ve koşulsuz kuruluyor.** İmleci gizleyen
-    /// bir program (vim değil, `tput civis` ile çalışan bir betik) çıktı
-    /// akıtmaya devam ediyor ve ötelemenin donması içeriği yanlış yerde
-    /// bırakırdı — imlecin görünürlüğü ızgaranın nerede durduğuna karar
-    /// veremez.
+    /// **The offset is set before `visible` and unconditionally.** A program hiding
+    /// the cursor (not vim, a script running with `tput civis`) keeps streaming
+    /// output and freezing the offset would leave the content in the wrong place —
+    /// the cursor's visibility cannot decide where the grid stands.
     ///
-    /// **`band_target` dock bandının ek satırının hedefi** ([`Motion::band`]):
-    /// kesirli ve işaretli — uzak oturumda bant PTY payından kısa ve hedef
-    /// negatif (036). Yön kuralı yok, iki yönde de süzülüyor.
-    /// Bandın hedefi bu karede değiştiyse ötelemenin yön kuralı da o kare için
-    /// gevşiyor — `filled`'in kardeşi, ama bit çağırandan gelmiyor, burada
-    /// doğuyor: bandın geçmişini bilen tek yer bu tip. Gerekçe çukur: bant
-    /// küçülürken içeriğin hedefi yükselirse (satırlar ızgaraya dönüyor)
-    /// ikisi birbirini götürmeli; yükselen hedef snap'leseydi ızgara bir
-    /// karede zıplar, bant ise süzülürdü.
+    /// **`band_target` is the dock band's extra-row target** ([`Motion::band`]):
+    /// fractional and signed — in a remote session the band is shorter than the PTY
+    /// share and the target is negative (036). There is no direction rule, it glides
+    /// in both directions. If the band's target changed in this frame the offset's
+    /// direction rule is relaxed for that frame too — `filled`'s sibling, but the
+    /// bit does not come from the caller, it is born here: this type is the only
+    /// place that knows the band's history. The reason is a pit: when the band
+    /// shrinks and the content's target rises (rows return to the grid) the two
+    /// must cancel each other; had the rising target snapped, the grid would jump in
+    /// a frame while the band glided.
     pub(crate) fn sync(
         &mut self,
         at: Option<[f32; 2]>,
@@ -429,16 +444,16 @@ impl Motion {
         self.offset = Some(offset);
         let band_changed = self.band.is_some_and(|band| band.target != band_target);
         self.sync_band(band_target, geometry);
-        // Ötelemenin snap tetiği imlecinkini **kapsıyor**: tekerlek (R2.6) ve
-        // geometri ikisini de snap'liyor, ötelemenin bir de kendi yön kapısı
-        // var ([`Motion::sync_origin`]). `docs/AYARLAR.md`'nin "Izgaranın başka
-        // sebeple yer değiştirmesi kaymaz" maddesi bu iki tetik.
+        // The offset's snap trigger **covers** the cursor's: the wheel (R2.6) and
+        // geometry snap both, and the offset also has its own direction gate
+        // ([`Motion::sync_origin`]). The item "the grid moving for another reason
+        // does not slide" in `docs/AYARLAR.md` is these two triggers.
         //
-        // **`filled` üçüncü bir tetik değil**, yön kapısının istisnası: snap'i
-        // kurmuyor, `snap` temizken yön kuralını gevşetiyor
-        // ([`Motion::sync_origin`]). Bit çağıranda hesaplanıyor
-        // (`link.rs`: `cursor.fill > 0`) — `bt-gpu` terminal semantiği
-        // öğrenmiyor, `offset` ve `geometry` ile aynı sınıf.
+        // **`filled` is not a third trigger**, it is the direction gate's exception: it
+        // does not set the snap, it relaxes the direction rule while `snap` is clear
+        // ([`Motion::sync_origin`]). The bit is computed in the caller (`link.rs`:
+        // `cursor.fill > 0`) — `bt-gpu` does not learn terminal semantics, it is the
+        // same class as `offset` and `geometry`.
         self.sync_origin(
             f32::from(origin_rows),
             scrolled || geometry,
@@ -448,33 +463,32 @@ impl Motion {
             self.state = None;
             return;
         };
-        // Guard'dan **önce** okunuyor: `self.state`'in ödüncü altında ikinci
-        // bir alanı okumak match guard'ında kabul edilmiyor.
+        // Read **before** the guard: reading a second field under the borrow of
+        // `self.state` is not accepted in a match guard.
         let mode = self.mode();
         let animated = mode != Mode::Snap;
         match &mut self.state {
             Some(state) if animated && !scrolled && !geometry => {
                 if state.target != target {
-                    // **Belirme duraksamadan sonra yeniden başlar, her
-                    // karede değil** (`/code-review` bulgusu). Kayan iki
-                    // stilde saati koşulsuz sıfırlamak doğru: yeni hedef yeni
-                    // bir yol demek. Belirmede ise saat yolu değil
-                    // **opaklığı** sürüyor ve koşulsuz sıfırlama Hareketi
-                    // Azalt'ı tersine çeviriyordu: akan çıktıda her içerik
-                    // karesi hedefi oynattığı için alfa sıfıra çakılıyor ve
-                    // imleç **hiç görünmüyordu**. "Yalnız yerleşmişken
-                    // sıfırla" da çare değil — o hâlde imleç 90 ms'de bir
-                    // yeniden belirir, yani ~11 Hz'de **yanıp söner**; titreme
-                    // kaldırmaya çalıştığımız hareketten beterdir, üstelik
-                    // erişilebilirlik ayarının içinde.
+                    // **The fade restarts after a pause, not on every
+                    // frame** (`/code-review` finding). In the two sliding
+                    // styles resetting the clock unconditionally is right: a new
+                    // target means a new road. In the fade the clock drives
+                    // the **opacity**, not the road, and an unconditional reset
+                    // turned Reduce Motion upside down: in streaming output every content
+                    // frame moved the target, so alpha was nailed to zero and the
+                    // cursor was **never visible**. "Reset only when settled"
+                    // is no cure either — in that case the cursor fades in again every
+                    // 90 ms, i.e. it **blinks** at ~11 Hz; a flicker is
+                    // worse than the motion we are trying to remove, and inside the
+                    // accessibility setting at that.
                     //
-                    // Ayıran ölçüt hareketler arasındaki boşluk: `FADE_DURATION`
-                    // kadar duraksamadan sonraki hareket **ayrı** bir
-                    // harekettir ve belirmeyi hak eder; daha sık gelen hedef
-                    // değişimi tek bir akışın parçasıdır ve opaklığı
-                    // tazelemez. Eşik olarak belirmenin kendi süresi
-                    // kullanılıyor — ikinci bir sabit, ikinci bir gerekçe
-                    // isterdi.
+                    // The discriminating criterion is the gap between movements: a movement
+                    // after a pause of `FADE_DURATION` is a **separate**
+                    // movement and deserves a fade; a target change that comes more
+                    // often is part of a single stream and does not
+                    // refresh the opacity. The fade's own duration is used as the
+                    // threshold — a second constant would have asked for a second reason.
                     let resumed = state.since_move >= FADE_DURATION;
                     state.since_move = 0.0;
                     state.from = state.pos;
@@ -487,7 +501,7 @@ impl Motion {
                     }
                 }
             }
-            // Snap: hem uçuştaki durum hem de yoklukta aynı yere iniyor.
+            // Snap: both the in-flight state and absence land in the same place.
             state => {
                 *state = Some(State {
                     pos: target,
@@ -501,65 +515,67 @@ impl Motion {
         }
     }
 
-    /// Ekranın tepesinden `rows` satır geçmişe kaydı: öteleme **bulunduğu
-    /// yerden** o kadar aşağı alınıyor ve hedefine yeniden süzülüyor.
+    /// Scrolled `rows` rows into history from the top of the screen: the offset is
+    /// taken down that much **from where it stands** and glides to its target again.
     ///
-    /// [`Motion::sync_origin`]'in göremediği hareket. Onun girdisi doluluk
-    /// (`rows - content_rows`) ve ızgara dolunca doluluk sabitleniyor: yeni
-    /// satırlar içeriği hücrelerin **içinde** kaydırıyor, hedef oynamıyor ve
-    /// animatör hiçbir şey görmüyor — kayma ızgara dolana kadar vardı, sonra
-    /// yoktu (kullanıcı bildirdi). Ekranın gördüğü şey ise aynı: içerik
-    /// yukarı aktı. Aynı hareketi aynı animatörle çizmek için ötelemenin
-    /// **konumu** kaydırma kadar geri alınıyor — içerik bir önceki karede
-    /// durduğu yerden başlıyor — ve hedef dokunulmadan kalıyor.
+    /// A movement that [`Motion::sync_origin`] cannot see. Its input is the fill
+    /// (`rows - content_rows`) and once the grid is full the fill is fixed: new
+    /// lines scroll the content **inside** the cells, the target does not move and
+    /// the animator sees nothing — the slide existed until the grid filled, then did
+    /// not (the user reported). What the screen sees is the same, though: the
+    /// content flowed upward. To draw the same movement with the same animator the
+    /// offset's **position** is taken back by the scrolled amount — the content
+    /// starts from where it stood in the previous frame — and the target is left
+    /// untouched.
     ///
-    /// Yön kuralına ([`Motion::sync_origin`]) uyuyor: kayma aşağıdan yukarı,
-    /// yani içeriğin *gelmesi*. Tepede açılan şeridi kaydırılan satırlar
-    /// kapatıyor (`bt_core::Cursor::fill`).
+    /// It obeys the direction rule ([`Motion::sync_origin`]): the slide goes from
+    /// bottom to top, i.e. content *arriving*. The scrolled lines close the strip
+    /// that opens at the top (`bt_core::Cursor::fill`).
     ///
-    /// **Sıra:** [`Motion::advance`]'ten sonra, [`Motion::sync`]'ten önce. Önce
-    /// değil, çünkü geçen süre eski yola işlenmeli; sonra değil, çünkü
-    /// `sync`'in snap tetikleri (tekerlek, geometri) bu karenin kaydırmasını
-    /// da silmeli — pencereyi küçültmek satırları geçmişe itiyor ve o bir
-    /// kaydırma değil. Aynı karede hedef de düşüyorsa (ızgara bu karede
-    /// doldu) `sync` kaymayı buradan kurulan konumdan devralıyor.
+    /// **Order:** after [`Motion::advance`], before [`Motion::sync`]. Not before,
+    /// because the elapsed time must be applied to the old path; not after, because
+    /// `sync`'s snap triggers (wheel, geometry) must erase this frame's scroll too —
+    /// shrinking the window pushes lines into history and that is not a scroll. If
+    /// the target is also dropping in the same frame (the grid filled in this
+    /// frame) `sync` takes the slide over from the position set up here.
     ///
-    /// **Tavan `limit` satır** (çağıran ızgaranın boyunu veriyor): akan
-    /// çıktıda kaymalar üst üste biniyor ve `ease` her yeni başlangıçta yolun
-    /// yalnız bir kesrini alıyor, yani tavansız öteleme ekranlarca geride
-    /// kalırdı. Tavan konumu **aşağı çekmiyor**, yalnız daha fazla itmiyor.
+    /// **The ceiling is `limit` rows** (the caller gives the grid's height): in
+    /// streaming output the scrolls pile on top of each other and `ease` takes only
+    /// a fraction of the road at each new start, so an offset without a ceiling
+    /// would fall screens behind. The ceiling does not pull the position **down**,
+    /// it only stops pushing further.
     ///
-    /// **Tek karede `limit` ya da daha fazla satır kaydıysa iki kol var ve
-    /// ayıran şey süre** ([`Motion::screenful_run`], [`BURST_WINDOW`]).
-    /// Kısa bir patlama (dolu ekranda `seq 1 200`, `ls -la`) PTY'den bir,
-    /// iki ya da üç okumada, yani o kadar içerik karesinde geliyor ve sayı
-    /// koşudan koşuya değişiyor: pencerenin içindeki ekran boyu kareler
-    /// sıradan kola düşüyor — konum tavana kırpılıyor, kayma bitmiyor ve son
-    /// ekran tam bir ekran aşağıdan süzülüyor. Ekran boyu kareler pencereyi
-    /// aşarak sürerse çıktı **akıyor** ve kayma bitiriliyor — tavanın ikinci
-    /// yarısı. Ölçüldü (`BT_SCROLL_TEST`, kare başına 45–467 satır): bu kol
-    /// olmadan öteleme tavanda asılı kalıyor ve pencere akış boyunca en yeni
-    /// çıktıyı **bir ekran geriden** gösteriyordu. Ayrımı kare sayısına
-    /// bağlamak ("ikinci büyük kare akıştır" ya da "kayma uçuştayken gelen
-    /// ekran boyu kare akıştır") parçalı gelen patlamayı rastgele kesiyordu:
-    /// ilk `ls -la` süzülüyor, peşindekiler süzülmüyordu (kullanıcı bildirdi,
-    /// 2026-09-30). Bedeli: akışın ilk [`BURST_WINDOW`]'u patlama gibi
-    /// tavanda süzülüyor.
+    /// **If a single frame scrolled `limit` rows or more there are two branches and
+    /// what tells them apart is time** ([`Motion::screenful_run`],
+    /// [`BURST_WINDOW`]). A short burst (`seq 1 200` on a full screen, `ls -la`)
+    /// arrives from the PTY in one, two or three reads, i.e. in that many content
+    /// frames, and the number varies from run to run: screenful frames inside the
+    /// window fall to the ordinary branch — the position is clamped to the ceiling,
+    /// the slide does not end and the last screen glides from a full screen below.
+    /// If screenful frames continue past the window the output is **streaming** and
+    /// the slide is ended — the second half of the ceiling. Measured
+    /// (`BT_SCROLL_TEST`, 45–467 rows per frame): without this branch the offset
+    /// hung at the ceiling and the window showed the newest output **a screen
+    /// behind** throughout the stream. Tying the distinction to the frame count
+    /// ("the second big frame is a stream" or "a screenful frame that arrives while
+    /// the slide is in flight is a stream") cut a burst that arrives in pieces at
+    /// random: the first `ls -la` glided, the ones after it did not (the user
+    /// reported, 2026-09-30). Its cost: the first [`BURST_WINDOW`] of a stream glides
+    /// at the ceiling like a burst.
     ///
-    /// Akış **hatırlanıyor**, kaymadan yeniden türetilmiyor: bitirme kolu
-    /// kaymayı yerleşik bırakıyor ve sürekli akışta her ikinci ekran boyu
-    /// kare patlamayı yeniden kuruyordu — ızgara bir ekran aşağıda çiziliyor,
-    /// doldurma bandı bir ekran uzuyordu (ölçüldü 2026-09-30,
-    /// `docs/OLCUMLER.md`: release `cpu_encode` p95 0,23 → 0,33). Koşuyu
-    /// ekrandan az kaydıran bir içerik karesi (sıfır dahil) bitiriyor, yani
-    /// sonraki patlama yine süzülüyor. **Bilinen sınır:** aralarında böyle
-    /// bir kare olmayan, boşlukla ayrılmış ekran boyu kareler
-    /// (`while sleep 1; do seq 200; done`) bir kez süzülüp sonra akış
-    /// sayılıyor — önceki kuralda da öyleydi.
+    /// The stream is **remembered**, not re-derived from the slide: the ending
+    /// branch leaves the slide settled and in a continuous stream every second
+    /// screenful frame rebuilt the burst — the grid was drawn a screen lower, the
+    /// fill band grew by a screen (measured 2026-09-30, `docs/OLCUMLER.md`: release
+    /// `cpu_encode` p95 0.23 → 0.33). A content frame that scrolls less than a
+    /// screen (zero included) ends the run, so the next burst glides again. **Known
+    /// limit:** screenful frames separated by a gap with no such frame between them
+    /// (`while sleep 1; do seq 200; done`) glide once and are then counted as a
+    /// stream — it was so under the previous rule too.
     ///
-    /// Belirme ve `Snap` kiplerinde hiçbir şey: öteleme o kiplerde zaten
-    /// kaymıyor ([`Motion::origin_mode`]). İlk karede de hiçbir şey — kayacak
-    /// bir konum yok.
+    /// In the fade and `Snap` modes nothing: the offset does not slide in those
+    /// modes anyway ([`Motion::origin_mode`]). Nothing in the first frame either —
+    /// there is no position to slide.
     pub(crate) fn scroll_in(&mut self, rows: u16, limit: u16) {
         // Recorded before any early return: only content frames reach this
         // call, so a frame that scrolls less than a screen (including zero
@@ -591,85 +607,83 @@ impl Motion {
         }
     }
 
-    /// Ötelemenin hedefi: [`Motion::sync`]'in tek eksenli yarısı.
+    /// The offset's target: the single-axis half of [`Motion::sync`].
     ///
-    /// Snap hâlleri imlecinkilerle **aynı sınıf** ve aynı gerekçe: ilk kare,
-    /// tekerlek ve geometri. Üçünde de içerik kendi büyümesiyle yükselmedi —
-    /// ızgara başka bir sebeple yer değiştirdi ve animasyon uydurmak onu
-    /// gelmediği bir yerden geliyormuş gibi gösterirdi.
+    /// The snap cases are **the same class** as the cursor's and for the same
+    /// reason: the first frame, the wheel and geometry. In all three the content did
+    /// not rise by its own growth — the grid moved for another reason and inventing
+    /// an animation would show it as coming from a place it did not come from.
     ///
-    /// **Dördüncüsü ötelemenin kendine ait: yön.** Yalnız **düşen** hedef
-    /// kayar, yükselen snap'ler. Öteleme `rows - content_rows`, yani hedefin
-    /// düşmesi içeriğin **büyümesi** (grid yukarı akar), yükselmesi
-    /// **daralması** (grid aşağı iner). Yukarı akış içeriğin *gelmesi* gibi
-    /// okunuyor ve hoşa gidiyor; aşağı iniş *düşmesi* gibi okunuyor ve
-    /// tuhaf — kabuğun vim'den çıkarken aşağı süzülmesi, dolu bir ekranda
-    /// `clear`'ın prompt'u tepeden dibe indirmesi. Kural bu yüzden mesafeye
-    /// değil **işarete** bakıyor: eşik ölçülmemiş bir sayı olurdu, yön
-    /// bedava (gözle kontrol, 011 kapı sonrası).
+    /// **The fourth is the offset's own: direction.** Only a **falling** target
+    /// slides, a rising one snaps. The offset is `rows - content_rows`, so the
+    /// target falling is the content **growing** (the grid flows up), rising is it
+    /// **shrinking** (the grid comes down). Flowing up reads as content *arriving*
+    /// and is pleasant; coming down reads as *falling* and is odd — the shell
+    /// gliding down as it leaves vim, `clear` on a full screen dropping the prompt
+    /// from top to bottom. The rule therefore looks at the **sign**, not the
+    /// distance: a threshold would be an unmeasured number, direction is free (an
+    /// eye check, 011 after the gate).
     ///
-    /// Bunun bir bedeli var ve adı konmuş: art arda satır yazıp silen bir
-    /// program (spinner) büyürken kayıp daralırken zıplar. Simetrik bir
-    /// salınım yerine testere; gözle kontrolde kabul edildi, çünkü tek
-    /// alternatifi o ölçülmemiş eşikti.
+    /// This has a cost and it is named: a program that writes and deletes lines one
+    /// after another (a spinner) glides as it grows and jumps as it shrinks. A
+    /// sawtooth instead of a symmetric oscillation; it was accepted in the eye
+    /// check, because the only alternative was that unmeasured threshold.
     ///
-    /// **Yön kuralının adlandırılmış istisnası `filled`** (017 R4.1): üstteki
-    /// boşluk defterin en yeni satırlarıyla doluyorsa aşağı inen şey boşluk
-    /// değil, üstten **gelen geçmiştir** — 011'in "düşme gibi okunuyor"
-    /// gerekçesi o kolda konusuz kalıyor. Kural bu yüzden kalkmıyor,
-    /// **daralıyor**: `fill == 0` iken daralan içerik hâlâ snap'liyor —
-    /// dock'u olmayan pencere, kasten temizlenmiş ekran (Ctrl-L, dolu ekranda
-    /// `clear`) ve geçmişe kaydırılmış pencere.
+    /// **The direction rule's named exception is `filled`** (017 R4.1): if the gap
+    /// above fills with the ledger's newest rows, what comes down is not a gap but
+    /// **history arriving** from above — 011's "reads as falling" reason is moot in
+    /// that branch. So the rule is not lifted, it is **narrowed**: with `fill == 0`
+    /// shrinking content still snaps — a window with no dock, a deliberately cleared
+    /// screen (Ctrl-L, `clear` on a full screen) and a window scrolled into history.
     ///
-    /// **Alternatif ekrandan çıkış bu listede değil ve bir dönem yazılıydı**
-    /// (017 kapı, ölçüldü 2026-09-20): `vim`'in giriş `2J`'si bayrağı
-    /// kurmadığı için (phase-1b) çıkış karesinde dört kapı da açık ve `fill`
-    /// sıfırdan büyük geliyor — yani öteleme o karede **süzülmeye
-    /// başlıyor**. Snap'i getiren şey `fill` değil, dock'u geri getiren
-    /// resize'ın **bir sonraki** ana kuyruk turunda dikeceği `geometry`
-    /// bayrağı; kayma bu yüzden pratikte bir kare sürüyor. Yönü de savunulur
-    /// — üstteki boşluğa gerçekten geçmiş giriyor — ama **tasarlanmış
-    /// değil**, bu yüzden adıyla yazılıyor: ya `bt-core` çıkış karesinde bir
-    /// kapı kurmalı ya da bu cümle kararı onaylamalı. Aşağıdaki sınamanın
-    /// `filled = false`'ı o kolu değil, **kolun kendisini** (`fill == 0`)
-    /// ölçüyor.
+    /// **Leaving the alternate screen is not in this list and once was written in**
+    /// (017 gate, measured 2026-09-20): because `vim`'s entry `2J` does not set the
+    /// flag (phase-1b) all four gates are open in the exit frame and `fill` comes
+    /// greater than zero — i.e. the offset **starts gliding** in that frame. What
+    /// brings the snap is not `fill`, it is the `geometry` flag that the resize
+    /// which restores the dock will plant in the **next** main-queue turn; the slide
+    /// therefore lasts a frame in practice. Its direction is also defensible —
+    /// history really does pass into the gap above — but it is **not designed**, so
+    /// it is written by name: either `bt-core` should set a gate in the exit frame or
+    /// this sentence should endorse the decision. The `filled = false` in the test
+    /// below measures not that branch but **the branch itself** (`fill == 0`).
     ///
-    /// **Terim `!snap`'in içinde** ve bu bir yerleşim zevki değil: dışına
-    /// yazılsaydı Rust'ın önceliği ifadeyi `(animated && !snap && …) || filled`
-    /// yapardı, yani doldurma varken tekerlek ve geometri de kayardı (R4.2) —
-    /// `bt-core`'un `display_offset == 0` kapısı tekerleği kesiyor ama
-    /// **geometri** kolunu kesmiyor. Aynı yanlış `animated`'ı da atlar ve
-    /// `cursor_motion = "snap"` ile Hareketi Azalt'ı doldurmada delerdi.
-    /// Bekçileri `scrolling_and_geometry_snap_the_origin` ve
+    /// **The term is inside `!snap`** and this is not a placement taste: written
+    /// outside it Rust's precedence would make the expression
+    /// `(animated && !snap && …) || filled`, i.e. with a fill the wheel and geometry
+    /// would slide too (R4.2) — `bt-core`'s `display_offset == 0` gate cuts the
+    /// wheel but does **not** cut the **geometry** branch. The same mistake would
+    /// also skip `animated` and puncture `cursor_motion = "snap"` and Reduce Motion
+    /// in the fill. Its guards are `scrolling_and_geometry_snap_the_origin` and
     /// `snap_style_never_slides_the_origin`.
     ///
-    /// **Bilinen sınır:** `snap` bugün `scrolled || geometry` ve `fill`
-    /// `display_offset != 0` iken zaten sıfır, yani `filled` ile `scrolled`
-    /// normalde aynı karede doğru olamaz — tek istisna tekerleğin `fill`'in
-    /// hesaplandığı kareye denk gelmesi. Guard'ın `!snap`'i onu yutuyor (o
-    /// kare snap'liyor) ve yanlışın yönü güvenli.
+    /// **Known limit:** `snap` today is `scrolled || geometry` and `fill` is already
+    /// zero while `display_offset != 0`, so `filled` and `scrolled` normally cannot
+    /// both be true in the same frame — the one exception is the wheel landing on
+    /// the frame in which `fill` is computed. The guard's `!snap` swallows it (that
+    /// frame snaps) and the error's direction is safe.
     ///
-    /// **Aynı hedefe yeniden hedeflemek no-op** ([`Motion::sync`] ile aynı
-    /// şart): içeriği büyütmeyen kareler (renk değişimi, satır içi yazı)
-    /// saniyede onlarca geliyor ve her biri `elapsed`'i sıfırlasaydı süre
-    /// tavanı hiç dolmazdı.
+    /// **Retargeting to the same target is a no-op** (the same requirement as
+    /// [`Motion::sync`]): frames that do not grow the content (a colour change,
+    /// in-line typing) arrive dozens of times a second and had each of them reset
+    /// `elapsed`, the time ceiling would never fill.
     ///
-    /// **Girdisi monoton değil** (`bt_core::Cursor::content_rows`): imleci
-    /// yukarı taşıyıp alt satırı `\e[K` ile silen bir program hedefi daraltıp
-    /// genişletebilir. Durma koşulu bunu kaldırıyor, çünkü hedefe değil
-    /// **hedefe olan mesafeye** bakıyor: her yeni hedef kaymayı bulunduğu
-    /// yerden yeniden başlatıyor ve her biri tek başına sonlu
-    /// ([`Slide::settled`]). Salınımın kendisi sonsuz sürerse link uyanık
-    /// kalır — ama o kareleri isteyen şey animasyon değil, salınımı üreten
-    /// **çıktının hasarı** olur.
+    /// **Its input is not monotonic** (`bt_core::Cursor::content_rows`): a program
+    /// that moves the cursor up and erases the bottom line with `\e[K` can narrow and
+    /// widen the target. The stop condition copes with this, because it looks not at
+    /// the target but at the **distance to the target**: every new target restarts
+    /// the slide from where it stands and each is finite on its own
+    /// ([`Slide::settled`]). If the oscillation itself goes on forever the link stays
+    /// awake — but what asks for those frames is not the animation but the
+    /// **damage of the output** producing the oscillation.
     fn sync_origin(&mut self, target: f32, snap: bool, filled: bool) {
         let mode = self.origin_mode();
         let animated = mode != Mode::Snap;
         match &mut self.origin {
-            // `<=`, `<` değil: **eşit** hedef hiçbir yöne gitmiyor ve içerideki
-            // no-op'a düşmeli. `<` yazılsaydı hedefi değişmeyen her kare snap
-            // koluna girer, uçuştaki kaymayı her karede yeniden kurar ve
-            // animasyonu büsbütün öldürürdü.
+            // `<=`, not `<`: an **equal** target goes in no direction and must fall into
+            // the no-op inside. Written `<`, every frame whose target does not change would
+            // enter the snap branch, rebuild the in-flight slide on every frame and kill the
+            // animation altogether.
             Some(slide) if animated && !snap && (target <= slide.target || filled) => {
                 if slide.target != target {
                     slide.from = slide.pos;
@@ -689,18 +703,18 @@ impl Motion {
         }
     }
 
-    /// Bandın ek satırının hedefi: [`Motion::sync_origin`]'in kardeşi, **yön
-    /// kuralı olmadan**.
+    /// The band's extra-row target: [`Motion::sync_origin`]'s sibling, **without the
+    /// direction rule**.
     ///
-    /// Snap hâlleri: ilk kare, geometri (pencere, font, punto — bandın piksel
-    /// boyu zaten değişti ve eski boydan süzülmek olmayan bir hareket
-    /// uydururdu) ve öteleme kipinin snap'i (`cursor_motion = "snap"`,
-    /// Hareketi Azalt: [`Motion::origin_mode`]). Tekerlek **snap'lemiyor**:
-    /// geçmişe kaydırmak dock'un satır sayısını değiştirmiyor, yani o karede
-    /// bandın hedefi zaten oynamıyor.
+    /// Snap cases: the first frame, geometry (window, font, point size — the band's
+    /// pixel size has already changed and gliding from the old size would invent a
+    /// movement that is not there) and the offset mode's snap (`cursor_motion =
+    /// "snap"`, Reduce Motion: [`Motion::origin_mode`]). The wheel **does not
+    /// snap**: scrolling into history does not change the dock's row count, so the
+    /// band's target does not move in that frame anyway.
     ///
-    /// Aynı hedefe yeniden hedeflemek no-op (ötelemeyle aynı şart): her tuş
-    /// bir içerik karesi ve süre tavanını sıfırlamamalı.
+    /// Retargeting to the same target is a no-op (the same requirement as the
+    /// offset): every key is a content frame and must not reset the time ceiling.
     fn sync_band(&mut self, target: f32, snap: bool) {
         let animated = self.origin_mode() != Mode::Snap;
         match &mut self.band {
@@ -723,35 +737,35 @@ impl Motion {
         }
     }
 
-    /// Kullanıcı stili değiştirdi (ayar dosyası kaydedildi).
+    /// The user changed the style (the settings file was saved).
     ///
-    /// Dönüş: **uçuştaki bir kayma bu çağrıda bitirildi mi**. Çağıran bunu
-    /// bilmek zorunda, çünkü link'in "hasar yok" dalı yerleşmiş bir
-    /// animasyonda hiç çizmeden uyuyor — `Snap`'e geçen kullanıcının imleci
-    /// aksi hâlde ara hücrede asılı kalır ve ancak alakasız bir içerik karesi
-    /// onu yerine koyardı (`Renderer::set_font`'un "değişti mi" dönüşüyle aynı
-    /// örüntü; aynı stili yeniden yazan kayıt no-op).
+    /// Return: **whether an in-flight slide was ended in this call**. The caller has
+    /// to know this, because the link's "no damage" branch sleeps without drawing on
+    /// a settled animation — otherwise the cursor of a user who switched to `Snap`
+    /// would hang in an intermediate cell and only an unrelated content frame would
+    /// put it in place (the same pattern as `Renderer::set_font`'s "did it change"
+    /// return; a save rewriting the same style is a no-op).
     ///
-    /// **Işınlama yok.** `Snap` uçuştaki kaymayı **hedefinde** bitiriyor
-    /// ([`Motion::finish`]); öteki iki stil kaymayı bulunduğu yerden
-    /// devralıyor — `from` bulunulan konuma, `elapsed` sıfıra çekiliyor.
-    /// Devralmasaydı `ease` eski çıkış noktasından yeniden başlar, yani imleç
-    /// geri sıçrardı; yay ise hızı koruduğu için zaten sorunsuz, ama iki stil
-    /// için iki ayrı kural yazmanın kazandırdığı bir şey yok.
+    /// **No teleport.** `Snap` ends the in-flight slide **at its target**
+    /// ([`Motion::finish`]); the other two styles take the slide over from where it
+    /// stands — `from` is pulled to the current position and `elapsed` to zero.
+    /// Without taking over, `ease` would restart from the old start point, i.e. the
+    /// cursor would jump back; the spring keeps its velocity so it is fine anyway,
+    /// but writing two separate rules for two styles gains nothing.
     ///
-    /// **"Uçuşta mı" sorusu eski stille sorulmak zorunda** ve bu bir sıra
-    /// inceliği değil, ışınlamanın kendisi: durma koşulu stile göre
-    /// değişiyor ([`State::settled`]), yani stil önce yazılırsa 180 ms'den
-    /// uzun uçmuş bir yay `ease`'in saatine göre "yerleşmiş" görünür, devir
-    /// atlanır ve sıradaki `advance` `t = 1` ile imleci hedefe atar — hem de
-    /// **çizmeden**, çünkü link o kareyi yerleşmiş sayıp uyuyor. `snap`'te
-    /// giderilen kusurun bu yoldan geri gelmiş hâli
+    /// **The "in flight?" question must be asked with the old style** and this is
+    /// not an ordering subtlety, it is the teleport itself: the stop condition
+    /// depends on the style ([`State::settled`]), so if the style is written first a
+    /// spring that has flown longer than 180 ms looks "settled" by `ease`'s clock,
+    /// the handover is skipped and the next `advance` throws the cursor to the target
+    /// with `t = 1` — **without drawing**, because the link counts that frame as
+    /// settled and sleeps. The defect fixed in `snap` returned by this road
     /// (`a_long_spring_flight_does_not_teleport_when_the_style_changes`).
-    /// **Belirme kipinde `ease` ↔ `spring` hiçbir şeydir.** Kayma zaten yok,
-    /// devralınacak bir konum da yok; devralma kolunu yine de koşturmak
-    /// `from`'u bulunulan konuma çekerdi ve `from == target` belirmeyi
-    /// **yerleşmiş** gösterirdi — link o kareyi hiç çizmeden uyur, imleç yarı
-    /// saydam asılı kalırdı (`style_change_during_a_fade_keeps_fading`).
+    /// **In the fade mode `ease` ↔ `spring` is nothing.** There is no slide anyway
+    /// and no position to take over; running the takeover branch regardless would
+    /// pull `from` to the current position and `from == target` would show the fade
+    /// as **settled** — the link would sleep without drawing that frame and the
+    /// cursor would hang half transparent (`style_change_during_a_fade_keeps_fading`).
     pub(crate) fn set_style(&mut self, style: CursorMotion) -> bool {
         if self.style == style {
             return false;
@@ -773,13 +787,14 @@ impl Motion {
             state.from = state.pos;
             state.elapsed = 0.0;
         }
-        // Öteleme de devralıyor ve aynı sebeple: `ease` çıkış noktasını
-        // hatırlıyor, tazelenmezse ızgara eski başlangıcına geri sıçrardı.
+        // The offset takes over as well, for the same reason: `ease` remembers its
+        // start point and if it were not refreshed the grid would jump back to its old
+        // start.
         if let Some(slide) = &mut self.origin {
             slide.from = slide.pos;
             slide.elapsed = 0.0;
         }
-        // Bant da, aynı sebeple.
+        // The band too, for the same reason.
         if let Some(slide) = &mut self.band {
             slide.from = slide.pos;
             slide.elapsed = 0.0;
@@ -789,24 +804,25 @@ impl Motion {
         false
     }
 
-    /// Hareketi Azalt açıldı ya da kapandı (sistem ayarı ya da
+    /// Reduce Motion was turned on or off (system setting or
     /// `[motion] reduce_motion`).
     ///
-    /// Dönüşü [`Motion::set_style`] ile aynı sözleşme: **bu çağrı yerleşmemiş
-    /// bir durumu yerleşmiş hâle getirdi mi**. Çağıran bunu bilmek zorunda,
-    /// çünkü link'in "hasar yok" dalı yerleşmiş bir animasyonda hiç çizmeden
-    /// uyuyor.
+    /// The return has the same contract as [`Motion::set_style`]: **did this call
+    /// turn an unsettled state into a settled one**. The caller has to know this,
+    /// because the link's "no damage" branch sleeps without drawing on a settled
+    /// animation.
     ///
-    /// **İki yön de uçuştakini bitiriyor** ve bu, stil değişiminden daha sert
-    /// bir kural olmak zorunda — devralmanın iki yönde de anlamı yok:
+    /// **Both directions end the in-flight one** and this has to be a harsher rule
+    /// than the style change — taking over has no meaning in either direction:
     ///
-    /// - **Açılırken** devralınacak şey bir kayma ve kip artık kaymıyor.
-    /// - **Kapanırken** devralınacak şey bir belirme ve `ease` onu konum
-    ///   animasyonu sanardı: `from` bir önceki hücrede duruyor, yani imleç
-    ///   geldiği hücreye geri dönüp yeniden kayardı
-    ///   (`reduce_off_mid_fade_does_not_slide_backwards`). `spring` de
-    ///   hedefinde ve hızsız olduğu için anında yerleşir, yani yarı saydam
-    ///   imleci ekranda bırakırdı.
+    /// - **On turning on** what would be taken over is a slide and the mode no
+    ///   longer slides.
+    /// - **On turning off** what would be taken over is a fade and `ease` would
+    ///   take it for a position animation: `from` stands in the previous cell, so
+    ///   the cursor would return to the cell it came to and slide again
+    ///   (`reduce_off_mid_fade_does_not_slide_backwards`). The `spring` also settles
+    ///   at once because it is at its target with no velocity, so it would leave a
+    ///   half-transparent cursor on screen.
     pub(crate) fn set_reduce(&mut self, reduce: bool) -> bool {
         if self.reduce == reduce {
             return false;
@@ -820,14 +836,14 @@ impl Motion {
         true
     }
 
-    /// Fiziği `dt` saniye ilerletir. `dt` **burada** kırpılıyor, çağıranda
-    /// değil: kırpma bu modülün durma koşulunun parçası ve çağıranın onu
-    /// hatırlamasına bırakılamaz.
+    /// Advances the physics by `dt` seconds. `dt` is clamped **here**, not in the
+    /// caller: the clamp is part of this module's stop condition and cannot be left
+    /// to the caller to remember.
     ///
-    /// Yerleşmeye karar verildiği anda konum **tam hedefe** oturtuluyor.
-    /// Eşiğe bırakılsaydı imleç `POS_EPSILON` kadar hücre dışında dinlenir ve
-    /// bloğun dikdörtgeni altındaki glyph'le sub-piksel ayrışırdı — hiçbir
-    /// sayaç görmez, göz görür.
+    /// At the moment settling is decided the position is set **exactly to the
+    /// target**. Left to the threshold, the cursor would rest `POS_EPSILON` cells
+    /// off and the block's rectangle would part sub-pixel from the glyph under it —
+    /// no counter sees it, the eye does.
     pub(crate) fn advance(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, DT_MAX);
         if let Some(age) = &mut self.screenful_run {
@@ -835,8 +851,8 @@ impl Motion {
         }
         self.advance_origin(dt);
         self.advance_glide(dt);
-        // Bant ötelemeyle **aynı fizik ve aynı kip**: ikisi de ızgaranın yer
-        // değiştirmesi ve Hareketi Azalt ikisini de snap'liyor.
+        // The band has **the same physics and the same mode** as the offset: both are
+        // the grid's displacement and Reduce Motion snaps both.
         let mode = self.origin_mode();
         if let Some(band) = &mut self.band {
             band.advance(mode, dt);
@@ -848,9 +864,9 @@ impl Motion {
         state.elapsed += dt;
         state.since_move += dt;
         match mode {
-            // İkisinde de `sync` zaten hedefe oturttu; ilerletilecek konum
-            // yok. `Fade`'de ilerleyen şey `elapsed`'in kendisi, çünkü
-            // opaklık onun fonksiyonu ([`Motion::alpha`]).
+            // In both, `sync` already sat at the target; there is no position to advance.
+            // In `Fade` what advances is `elapsed` itself, because the opacity is its
+            // function ([`Motion::alpha`]).
             Mode::Snap | Mode::Fade => {}
             Mode::Ease => state.ease(),
             Mode::Spring => state.spring(dt),
@@ -858,19 +874,18 @@ impl Motion {
         if state.settled(mode) {
             state.pos = state.target;
             state.vel = [0.0; 2];
-            // `from` da hedefe çekiliyor, yani yerleşme kolu [`Motion::finish`]
-            // ile **aynı** durumu bırakıyor. Bırakmasaydı (`/code-review`
-            // bulgusu) yayın eşiğiyle erkenden oturan bir kayma `ease` ve
-            // `fade`'in "gidecek yol yok" koşulunu (`from == target`)
-            // sağlamaz, yani kip değişince yerleşmemiş görünürdü — üstelik
-            // link o kareyi zaten yerleşmiş sayıp **uyumuş** olur ve
-            // `advance` bir daha koşmazdı.
+            // `from` is also pulled to the target, so the settling branch leaves **the same**
+            // state as [`Motion::finish`]. Had it not (`/code-review` finding) a slide that
+            // settled early by the spring's threshold would not satisfy `ease`'s and
+            // `fade`'s "no road to travel" condition (`from == target`), i.e. it would look
+            // unsettled when the mode changed — and the link would already have counted that
+            // frame as settled and **gone to sleep**, so `advance` would never run again.
             state.from = state.target;
         }
     }
 
-    /// [`Motion::advance`]'ın öteleme yarısı; `dt` çağıranda **kırpılmış**
-    /// geliyor (tek kırpma, tek kural).
+    /// The offset half of [`Motion::advance`]; `dt` arrives **clamped** in the caller
+    /// (one clamp, one rule).
     fn advance_origin(&mut self, dt: f32) {
         let mode = self.origin_mode();
         if let Some(slide) = &mut self.origin {
@@ -878,9 +893,9 @@ impl Motion {
         }
     }
 
-    /// [`Motion::advance`]'ın süzülme yarısı; öteleme ile **aynı fizik ve aynı
-    /// kip** ([`Motion::origin_mode`]): ikisi de ızgaranın yer değiştirmesi ve
-    /// Hareketi Azalt ikisini de snap'liyor.
+    /// The glide half of [`Motion::advance`]; **the same physics and the same mode**
+    /// as the offset ([`Motion::origin_mode`]): both are the grid's displacement and
+    /// Reduce Motion snaps both.
     fn advance_glide(&mut self, dt: f32) {
         let mode = self.origin_mode();
         let glide = &mut self.glide;
@@ -888,43 +903,44 @@ impl Motion {
         match mode {
             Mode::Ease => glide.ease(),
             Mode::Spring => glide.spring(dt),
-            // `Snap`'te istek zaten anında teslim edildi
-            // ([`Motion::request_glide`]); `Fade` [`Motion::origin_mode`]'dan
-            // hiç gelmiyor.
+            // In `Snap` the request was already delivered at once
+            // ([`Motion::request_glide`]); `Fade` never comes from
+            // [`Motion::origin_mode`].
             Mode::Snap | Mode::Fade => {}
         }
         if glide.settled(mode) {
-            // Öteki iki animatörle aynı üçlü: konum **tam** hedefe. Burada
-            // üstelik bir sözleşme — hedefte kalan artık teslim edilmeseydi
-            // payların toplamı istekten `POS_EPSILON` kadar eksik kalır ve her
-            // çentik pencereyi bir satırın kesrinde bırakırdı.
+            // The same triple as the other two animators: the position **exactly** at the
+            // target. Here it is also a contract — had the remainder at the target not been
+            // delivered, the sum of the shares would fall short of the request by
+            // `POS_EPSILON` and every notch would leave the window at a fraction of a row.
             glide.pos = glide.target;
             glide.vel = 0.0;
             glide.from = glide.target;
         }
     }
 
-    /// Kaydırmanın **süzülme isteği** geldi (`Session::take_scroll_glide`):
-    /// `request.rows` satır daha teslim edilecek.
+    /// The scroll's **glide request** arrived (`Session::take_scroll_glide`):
+    /// `request.rows` more rows are to be delivered.
     ///
-    /// Önce nesil soruluyor ([`Motion::observe_scroll_generation`]): istek
-    /// yeni bir nesle aitse uçuştaki süzülme eski konumun payını taşıyor ve
-    /// düşüyor, istek sıfırdan başlıyor.
+    /// The generation is asked first ([`Motion::observe_scroll_generation`]): if the
+    /// request belongs to a new generation the in-flight glide carries the old
+    /// position's share and is dropped, the request starts from zero.
     ///
-    /// **Uçuştaki süzülmeye ekleniyor**, baştan başlamıyor: hedef büyüyor,
-    /// kayma bulunduğu yerden yeniden kuruluyor (`from`, `elapsed`) ve yay
-    /// hızını koruyor — art arda gelen çentikler tek bir akış. Öteleme gibi
-    /// yeniden hedeflemenin kuralı ([`Motion::sync_origin`]).
+    /// **It is added to the in-flight glide**, not started afresh: the target grows,
+    /// the slide is re-set from where it stands (`from`, `elapsed`) and the spring
+    /// keeps its velocity — notches arriving one after another are a single stream.
+    /// The rule of retargeting like the offset's ([`Motion::sync_origin`]).
     ///
-    /// **Link bunu `advance`'ten sonra çağırıyor** ve sıra zorunlu: uykudan
-    /// uyanan link'in ilk `dt`'si [`DT_MAX`]'e kırpılmış bir uydurma ve
-    /// yeni isteğe uygulansaydı `ease`'de çentiğin yarısı tek karede
-    /// giderdi. İlk pay bu yüzden sıfır, süzülme sıradaki karede başlıyor —
-    /// imleç ve ötelemenin "önce geçen süre, sonra yeni hedef" kuralı.
+    /// **The link calls this after `advance`** and the order is a requirement: the
+    /// first `dt` of a link waking from sleep is a fabrication clamped to
+    /// [`DT_MAX`] and if applied to the new request half the notch would go in a
+    /// single frame in `ease`. The first share is therefore zero, the glide starts in
+    /// the next frame — the cursor's and the offset's "elapsed time first, then the
+    /// new target" rule.
     ///
-    /// `Snap` kipinde (`cursor_motion = "snap"`, Hareketi Azalt) istek
-    /// **anında** teslim ediliyor: hareketi kapatmış kullanıcıya çentik
-    /// animasyon eklemez.
+    /// In the `Snap` mode (`cursor_motion = "snap"`, Reduce Motion) the request is
+    /// delivered **at once**: a notch does not add animation for a user who has
+    /// turned motion off.
     pub(crate) fn request_glide(&mut self, request: ScrollGlide) {
         self.observe_scroll_generation(request.generation);
         if request.rows == 0.0 {
@@ -942,14 +958,15 @@ impl Motion {
         }
     }
 
-    /// Bu karenin **payı**: son teslimden beri süzülmenin aldığı yol, satır —
-    /// `Session::frame`'in argümanı, ait olduğu nesille.
+    /// This frame's **share**: the road the glide has covered since the last
+    /// delivery, in rows — `Session::frame`'s argument, with the generation it
+    /// belongs to.
     ///
-    /// Konum burada sıfıra yeniden dayanıyor (`from`, `target` ve `pos` aynı
-    /// miktar kaydırılıyor): kübik yavaşlama da yayın kapalı formu da öteleme
-    /// altında değişmez, yani kayma kıpırdamıyor, yalnız sayılar küçük
-    /// kalıyor. Yan kazancı yerleşmenin tanımı: dinlenen süzülmede üçü de
-    /// tam sıfır ([`Motion::glide_idle`]).
+    /// The position is re-anchored to zero here (`from`, `target` and `pos` are
+    /// shifted by the same amount): both the cubic easing and the spring's closed
+    /// form are invariant under translation, so the slide does not move, only the
+    /// numbers stay small. A side gain is the definition of settling: in a resting
+    /// glide all three are exactly zero ([`Motion::glide_idle`]).
     pub(crate) fn take_glide(&mut self) -> ScrollGlide {
         let glide = &mut self.glide;
         let rows = glide.pos;
@@ -962,18 +979,19 @@ impl Motion {
         }
     }
 
-    /// Kaydırmanın bu anki nesli; süzülme başka bir nesle aitse **düşer**.
+    /// The scroll's current generation; if the glide belongs to another generation
+    /// it is **dropped**.
     ///
-    /// Kalan pay teslim edilmiyor ve bu bitirmenin ([`Motion::finish`])
-    /// tersi, bilerek: nesli artıran şey konumu dışarıdan sıfırlayan bir girdi
-    /// (dibe dönüş, Shift+PgUp, satır adımı) ya da kaydırmanın artık
-    /// geçersiz olması (`CSI 3 J`, alternatif ekran) — gidilmek istenen yer
-    /// orası, kalan pay pencereyi oradan geri çekerdi. Link onu iki kez
-    /// soruyor: isteği alırken ve `frame()`'den sonra, çünkü `frame()` de
-    /// nesli artırabiliyor.
+    /// The remaining share is not delivered, and this is the opposite of finishing
+    /// ([`Motion::finish`]), on purpose: what raises the generation is an input that
+    /// resets the position from outside (return to bottom, Shift+PgUp, a line step)
+    /// or the scroll becoming invalid (`CSI 3 J`, the alternate screen) — that place
+    /// is where it wants to go, and the remaining share would pull the window back
+    /// from there. The link asks it twice: when taking the request and after
+    /// `frame()`, because `frame()` too can raise the generation.
     ///
-    /// Link'in `frame()`'den sonraki tek çağrısı [`Motion::observe_scroll`];
-    /// bu, onun ve [`Motion::request_glide`]'ın ortak yarısı.
+    /// The link's only call after `frame()` is [`Motion::observe_scroll`]; this is
+    /// the half common to it and to [`Motion::request_glide`].
     pub(crate) fn observe_scroll_generation(&mut self, generation: u32) {
         if generation != self.glide_generation {
             self.glide = Slide::default();
@@ -981,20 +999,22 @@ impl Motion {
         }
     }
 
-    /// `frame()`'in cevabı: kaydırmanın nesli ve payın bıraktığı konum.
+    /// `frame()`'s answer: the scroll's generation and the position the share left.
     ///
-    /// Nesil [`Motion::observe_scroll_generation`]'a gidiyor — `frame()` kesri
-    /// geçersiz bulunca nesli kendisi artırıyor. **Konum ikinci soru**: pay
-    /// sıfırdan farklıyken konum kıpırdamadıysa pencere geçmişin ucuna
-    /// çarpmış demek (`bt-core` kırpıyor) ve süzülme **bitiyor**. Bitmeseydi
-    /// ucun ötesine istenmiş kalan pay yerleşene kadar hiçbir şeyi
-    /// değiştirmeyen içerik kareleri çizdirir, üstelik ters yöne gelen ilk
-    /// çentiği yerdi — dipte aşağı fırlatılan tekerlekten sonra yukarı
-    /// çentik hiçbir şey yapmıyordu (`/code-review`). Ters yöndeki çentik
-    /// zaten ayrı bir istek, yani bitmek yalnız ulaşılamayan kalanı düşürüyor.
+    /// The generation goes to [`Motion::observe_scroll_generation`] — `frame()`
+    /// raises the generation itself when it finds the fraction invalid. **The
+    /// position is the second question**: if the share is non-zero and the position
+    /// did not move, the window has hit the end of history (`bt-core` clamps) and
+    /// the glide **ends**. If it did not end, the remaining share asked for beyond the
+    /// end would have frames that change nothing drawn until it settled, and it would
+    /// also swallow the first notch coming in the opposite direction — after a wheel
+    /// flung down at the bottom an upward notch did nothing (`/code-review`). A
+    /// notch in the opposite direction is a separate request anyway, so ending only
+    /// drops the unreachable remainder.
     ///
-    /// Tam satırın ucu **kısmen** aşılırsa (pay `0,3`, uca `0,1` kalmış) o
-    /// kare konumu oynatıyor ve süzülme sıradaki karede bitiyor.
+    /// If the end of a whole row is overshot **partially** (share `0.3`, `0.1` left
+    /// to the end) that frame moves the position and the glide ends in the next
+    /// frame.
     pub(crate) fn observe_scroll(&mut self, generation: u32, at: (i32, f32), share: f32) {
         self.observe_scroll_generation(generation);
         let before = self.glide_at.replace(at);
@@ -1003,31 +1023,30 @@ impl Motion {
         }
     }
 
-    /// Süzülme dinleniyor mu: yol da yok, **teslim edilmemiş pay da**.
+    /// Is the glide resting: no road, **and no undelivered share either**.
     ///
-    /// İki soru birlikte, çünkü bitirilen bir süzülme ([`Motion::finish`])
-    /// hedefinde yerleşmiş ama payını henüz vermemiş olabilir ve o pay ancak
-    /// bir **içerik** karesinde teslim edilebilir. Link bu yüzden ona bakarak
-    /// "hasar yok" dalını atlıyor; `false` iken hareket karesi değil içerik
-    /// karesi çiziliyor.
+    /// The two questions together, because a glide that was finished
+    /// ([`Motion::finish`]) may have settled at its target but not yet given its
+    /// share, and that share can only be delivered in a **content** frame. The link
+    /// therefore skips the "no damage" branch by looking at it; while it is `false` a
+    /// content frame is drawn, not a motion frame.
     pub(crate) fn glide_idle(&self) -> bool {
         self.glide.settled(self.origin_mode()) && self.glide.pos == 0.0
     }
 
-    /// Uçuştaki kaymayı **hedefinde bitirir** — animasyonun ilerleyemeyeceği
-    /// anlar için.
+    /// **Ends** the in-flight slide **at its target** — for the moments the
+    /// animation cannot advance.
     ///
-    /// Bugünkü çağıranları örtülen pencere ve `snap`'e geçen ayar. Örtülmede
-    /// link duruyor, yani `advance` bir daha koşmuyor ve durum sonsuza kadar
-    /// "yerleşmemiş" kalırdı. Bedeli iki katlı olurdu — süreli koşu
-    /// deadline'da `MotionUnsettled` deyip **kod doğruyken** kırmızı düşer ve
-    /// tanı "bir durma koşulu bozuk" diye yanlış yeri gösterirdi; örtülme
-    /// kalkınca da imleç, kullanıcının hiç görmediği bir noktadan kayarak
-    /// gelirdi.
+    /// Today's callers are an occluded window and the setting switching to `snap`.
+    /// When occluded the link stops, so `advance` would never run again and the
+    /// state would stay "unsettled" forever. The cost would be twofold — the timed
+    /// run would say `MotionUnsettled` at the deadline and go red **while the code is
+    /// right**, and the diagnosis would point at the wrong place as "a stop
+    /// condition is broken"; and when occlusion lifted the cursor would come sliding
+    /// from a point the user never saw.
     ///
-    /// Snap politikasının zaten söylediği şey (008 Karar 5): görünürlük
-    /// dönüşü animasyonsuz. Burada yalnız aynı kural bir kare erken
-    /// uygulanıyor.
+    /// What the snap policy already says (008 Karar 5): visibility return is without
+    /// animation. Here only the same rule is applied a frame early.
     pub(crate) fn finish(&mut self) {
         if let Some(state) = &mut self.state {
             state.pos = state.target;
@@ -1035,22 +1054,22 @@ impl Motion {
             state.vel = [0.0; 2];
             state.elapsed = 0.0;
         }
-        // **İkisi birlikte bitiyor.** Yarısı bırakılsaydı link "yerleşmedi"
-        // deyip uyanık kalır ve örtülen pencerede [`Motion::finish`]'in
-        // kapatmak istediği delik açık kalırdı.
-        // Bant da: yarısı bırakılsaydı aynı delik.
+        // **Both end together.** Had half been left, the link would say "unsettled" and
+        // stay awake, and in an occluded window the hole [`Motion::finish`] wants to
+        // close would stay open.
+        // The band too: had half been left, the same hole.
         for slide in [&mut self.origin, &mut self.band].into_iter().flatten() {
             slide.pos = slide.target;
             slide.from = slide.target;
             slide.vel = 0.0;
             slide.elapsed = 0.0;
         }
-        // **Süzülme de hedefinde bitiyor ve payını teslim ediyor**, düşürmüyor:
-        // düşseydi pencere bir satırın ortasında dinlenirdi. Pay sıradaki
-        // içerik karesinde gidiyor ve bitiren her yol zaten bir kare istiyor
-        // (`DisplayLink::set_visible`, `set_cursor_motion`,
-        // `set_reduce_motion`); o güne kadar [`Motion::glide_idle`] `false`.
-        // Nesil değişiminin kuralı bunun tersi
+        // **The glide also ends at its target and delivers its share**, it is not
+        // dropped: had it been dropped the window would rest in the middle of a row. The
+        // share goes in the next content frame and every path that ends it already asks
+        // for a frame (`DisplayLink::set_visible`, `set_cursor_motion`,
+        // `set_reduce_motion`); until then [`Motion::glide_idle`] is `false`. The
+        // rule for a generation change is the opposite of this
         // ([`Motion::observe_scroll_generation`]).
         let glide = &mut self.glide;
         glide.pos = glide.target;
@@ -1059,23 +1078,23 @@ impl Motion {
         glide.elapsed = 0.0;
     }
 
-    /// Bu karede imlecin çizileceği yer, **ekran hücresi** — grid hücresi
-    /// değil ([`Motion::sync`]). Durum yoksa hedef de yok: çağıran görünmez
-    /// imleci zaten çizmiyor.
+    /// Where the cursor will be drawn this frame, in **screen cells** — not grid
+    /// cells ([`Motion::sync`]). With no state there is no target: the caller does
+    /// not draw an invisible cursor anyway.
     pub(crate) fn position(&self) -> Option<[f32; 2]> {
         self.state.map(|state| state.pos)
     }
 
-    /// İmlecin bu karedeki opaklığı; belirme dışında **her zaman `1.0`**.
+    /// The cursor's opacity in this frame; **always `1.0`** outside the fade.
     ///
-    /// Blok da altındaki metnin rengi de bununla çarpılıyor
-    /// (`Frame::push_caret`): ikisi ayrılsaydı harf, henüz görünmeyen bir
-    /// bloğun rengine boyanırdı — zeminin üstünde zemin renginde bir harf,
-    /// yani okunmayan bir hücre.
+    /// Both the block and the text colour under it are multiplied by this
+    /// (`Frame::push_caret`): had the two been separated the letter would be painted
+    /// in the colour of a block that is not yet visible — a letter in the ground's
+    /// colour on the ground, i.e. an unreadable cell.
     ///
-    /// Yerleşmiş belirme `1.0` veriyor, `elapsed / FADE_DURATION` değil:
-    /// gidecek yolu olmayan hâller ([`Motion::finish`], snap halleri) `elapsed`
-    /// sıfırken yerleşik ve oran onları görünmez kılardı.
+    /// A settled fade gives `1.0`, not `elapsed / FADE_DURATION`: the cases with no
+    /// road to travel ([`Motion::finish`], the snap cases) are settled while
+    /// `elapsed` is zero and the ratio would make them invisible.
     pub(crate) fn alpha(&self) -> f32 {
         if self.mode() != Mode::Fade {
             return 1.0;
@@ -1089,59 +1108,62 @@ impl Motion {
         })
     }
 
-    /// Bu karede içeriğin duracağı öteleme, **satır**. Durum yoksa `0.0`:
-    /// tavana yapışık yerleşim, yani `Frame::clear`'ın bıraktığı değer.
+    /// The offset at which the content will stand in this frame, in **rows**. With no
+    /// state `0.0`: a placement stuck to the ceiling, i.e. the value `Frame::clear`
+    /// leaves.
     pub(crate) fn origin(&self) -> f32 {
         self.origin.map_or(0.0, |slide| slide.pos)
     }
 
-    /// Bu karede dock bandının **ek** satırı ([`Motion::band`]); durum yoksa
-    /// `0.0` — PTY'nin ayırdığı pay kadar bir bant.
+    /// The dock band's **extra** rows in this frame ([`Motion::band`]); with no
+    /// state `0.0` — a band as big as the PTY's reserved share.
     pub(crate) fn band(&self) -> f32 {
         self.band.map_or(0.0, |slide| slide.pos)
     }
 
-    /// **Dört** animasyon da durdu mu — link'in "uyuyabilir miyim" sorusu.
+    /// Have **all four** animations stopped — the link's "may I sleep" question.
     ///
-    /// Öteleme bu kapının **içinde** olmak zorunda (R2.5): dışında kalsaydı
-    /// link "hasar yok" dalında kayma ortasında uyur ve içerik yarı yolda
-    /// donardı. Süzülme de aynı sebeple ve teslim edilmemiş payıyla birlikte
-    /// ([`Motion::glide_idle`]). Bant da (032): dışında kalsaydı link bandın
-    /// büyümesinin ortasında uyur, ızgara ile bant yarı yolda donardı. Süreli
-    /// koşunun kapısı (`Verdict::MotionUnsettled`) da bunu okuyor.
+    /// The offset has to be **inside** this gate (R2.5): left outside, the link would
+    /// sleep mid-slide in the "no damage" branch and the content would freeze halfway.
+    /// The glide is here for the same reason, together with its undelivered share
+    /// ([`Motion::glide_idle`]). The band too (032): left outside, the link would
+    /// sleep in the middle of the band's growth and the grid and the band would freeze
+    /// halfway. The timed run's gate (`Verdict::MotionUnsettled`) reads this too.
     pub(crate) fn settled(&self) -> bool {
         self.cursor_settled() && self.origin_settled() && self.glide_idle() && self.band_settled()
     }
 
-    /// Yalnız bandın süzülmesi durdu mu. Jetonu yok (`kayma=` ötelemenin
-    /// tanığı ve anlamı değişmiyor); `settled()`'in dördüncü terimi.
+    /// Only whether the band's glide has stopped. It has no token (`slide=` is the
+    /// offset's witness and its meaning does not change); `settled()`'s fourth term.
     fn band_settled(&self) -> bool {
         let mode = self.origin_mode();
         self.band.is_none_or(|slide| slide.settled(mode))
     }
 
-    /// Hareketi Azalt açık mı — blink'in kapısı ([`crate::blink`]).
+    /// Is Reduce Motion on — the blink's gate ([`crate::blink`]).
     ///
-    /// [`Motion::mode`] değil **ham bayrak**: `Snap` stilinde `mode()` `Fade`
-    /// dönmüyor ama indirgeme yine açık ve blink yine kapanmalı.
-    /// Erişilebilirlik ayarı animasyon **eklemez** (`CLAUDE.md`).
+    /// The **raw flag**, not [`Motion::mode`]: in the `Snap` style `mode()` does not
+    /// return `Fade` but the reduction is still on and blink must still be off. The
+    /// accessibility setting **does not add** animation (`CLAUDE.md`).
     pub(crate) fn reduce(&self) -> bool {
         self.reduce
     }
 
-    /// Yalnız imlecin animasyonu durdu mu — `hareket=` jetonunun tanığı.
+    /// Only whether the cursor's animation has stopped — the witness of the
+    /// `motion=` token.
     ///
-    /// Durum yokken `true`: çizilecek bir imleç yoksa bekleyecek bir şey de
-    /// yok.
+    /// `true` when there is no state: with no cursor to draw there is nothing to
+    /// wait for.
     pub(crate) fn cursor_settled(&self) -> bool {
         let mode = self.mode();
         self.state.is_none_or(|state| state.settled(mode))
     }
 
-    /// Yalnız ötelemenin kayması durdu mu — `kayma=` jetonunun tanığı.
+    /// Only whether the offset's slide has stopped — the witness of the `slide=`
+    /// token.
     ///
-    /// İkisi ayrı sorulabiliyor, çünkü jeton ikisini ayrı sayıyor: kırmızı bir
-    /// koşuyu okuyan taraf hangi animatörün yerleşmediğini satırdan görmeli.
+    /// The two can be asked separately, because the token counts them separately: the
+    /// one reading a red run must see from the line which animator did not settle.
     pub(crate) fn origin_settled(&self) -> bool {
         let mode = self.origin_mode();
         self.origin.is_none_or(|slide| slide.settled(mode))
@@ -1149,13 +1171,13 @@ impl Motion {
 }
 
 impl State {
-    /// `ease`: konum **zamanın fonksiyonu** — `from`'dan `target`'a kübik
-    /// yavaşlama (`1 − (1−t)³`).
+    /// `ease`: the position is a **function of time** — a cubic easing from `from` to
+    /// `target` (`1 − (1−t)³`).
     ///
-    /// Taşmanın yapısal olarak imkânsız olduğu yer burası: ifade `t ∈ [0,1]`
-    /// için monoton ve `1`'i geçmiyor, yani yayın gerektirdiği taşma kırpması
-    /// bu stilde hiç gerekmiyor. Hız da entegre edilmiyor (`vel` sıfır kalır);
-    /// ödediği bedel `from`'u hatırlamak.
+    /// This is where overshoot is structurally impossible: the expression is
+    /// monotonic for `t ∈ [0,1]` and does not exceed `1`, so the overshoot clamp the
+    /// spring requires is never needed in this style. The velocity is not integrated
+    /// either (`vel` stays zero); the price paid is remembering `from`.
     fn ease(&mut self) {
         let t = (self.elapsed / EASE_DURATION).clamp(0.0, 1.0);
         for axis in 0..2 {
@@ -1163,7 +1185,7 @@ impl State {
         }
     }
 
-    /// `spring`: kritik sönümlü yayın bir adımı.
+    /// `spring`: one step of a critically damped spring.
     fn spring(&mut self, dt: f32) {
         for axis in 0..2 {
             let (pos, vel) = spring_axis(self.pos[axis], self.vel[axis], self.target[axis], dt);
@@ -1172,21 +1194,21 @@ impl State {
         }
     }
 
-    /// Durma koşulu; stile göre **iki ayrı soru**.
+    /// The stop condition; **two separate questions** depending on the style.
     ///
-    /// `ease`'inki saattir ve bu onun tanımı: kayma [`EASE_DURATION`] sürer,
-    /// mesafe ne olursa olsun. Eşiğe bağlansaydı süre sessizce mesafeye
-    /// bağlanırdı (kübik yavaşlamada kalan mesafe eşiğin altına kısa
-    /// sıçramada erken, uzun sıçramada geç iniyor), yani stilin adı yalan
-    /// söylerdi.
+    /// `ease`'s is the clock and this is its definition: the slide lasts
+    /// [`EASE_DURATION`] whatever the distance. Had it been tied to the threshold the
+    /// duration would be silently tied to the distance (in cubic easing the remaining
+    /// distance drops under the threshold early on a short jump and late on a long
+    /// one), so the style's name would lie.
     ///
-    /// Belirmeninki de bir saat ve `ease` ile **aynı biçim**: süre dolmuşsa
-    /// ya da gidecek yol yoksa yerleşmiş. İkisi tek kolda çünkü soru da tek —
-    /// yalnız sabit değişiyor.
+    /// The fade's is also a clock and of **the same shape** as `ease`'s: settled if
+    /// the time is up or there is no road to travel. They are in one branch because
+    /// the question is one — only the constant changes.
     ///
-    /// Yayınki iki katlı: konum+hız eşiği **veya** süre tavanı. `snap`
-    /// eşikten geçiyor — `sync` onu zaten hedefe oturttuğu için ilk soruda
-    /// `true`.
+    /// The spring's is two-layered: position+velocity threshold **or** time ceiling.
+    /// `snap` goes through the threshold — because `sync` already sat it at the
+    /// target, `true` at the first question.
     fn settled(&self, mode: Mode) -> bool {
         if let Mode::Ease | Mode::Fade = mode {
             let duration = if let Mode::Fade = mode {
@@ -1194,38 +1216,38 @@ impl State {
             } else {
                 EASE_DURATION
             };
-            // "Saat doldu" **ya da** gidecek yol yok. İkinci koşul şart:
-            // anında oturan imleç (snap hâlleri, [`Motion::finish`]) `from`'u
-            // da hedefe koyuyor ve tek başına saate bakan bir kural onu
-            // [`EASE_DURATION`] boyunca "yerleşmemiş" sayardı — link hiçbir
-            // şeyi değiştirmeyen kareler çizerdi, üstelik her `sync`'te
-            // yeniden.
+            // "The clock is up" **or** there is no road to travel. The second condition is
+            // a requirement: an instantly seated cursor (the snap cases,
+            // [`Motion::finish`]) puts `from` at the target too and a rule looking at the
+            // clock alone would count it as "unsettled" for [`EASE_DURATION`] — the link
+            // would draw frames that change nothing, and at every `sync` afresh.
             return self.elapsed >= duration || self.from == self.target;
         }
-        // Süre tavanı **veya** eşik; ikisi de tek başına yeterli.
+        // Time ceiling **or** threshold; either is enough on its own.
         self.elapsed >= TIME_CEILING
             || (0..2).all(|axis| axis_settled(self.pos[axis], self.vel[axis], self.target[axis]))
     }
 }
 
 impl Slide {
-    /// Fiziği `dt` (kırpılmış) saniye ilerletir — öteleme ile bandın ortak
-    /// adımı.
+    /// Advances the physics by `dt` (clamped) seconds — the step common to the
+    /// offset and the band.
     fn advance(&mut self, mode: Mode, dt: f32) {
         self.elapsed += dt;
         match mode {
             Mode::Ease => self.ease(),
             Mode::Spring => self.spring(dt),
-            // `Snap`'te hedefe `sync` zaten oturttu. `Fade` buraya **hiç
-            // gelmiyor**: [`Motion::origin_mode`] onu `Snap`'e çeviriyor ve
-            // öteleme de bant da belirmiyor (R2.3).
+            // In `Snap` `sync` already sat at the target. `Fade` **never comes** here:
+            // [`Motion::origin_mode`] turns it into `Snap` and neither the offset nor the
+            // band fades (R2.3).
             Mode::Snap | Mode::Fade => {}
         }
         if self.settled(mode) {
-            // İmleçtekiyle **aynı üçlü** ve aynı gerekçe ([`Motion::advance`]):
-            // konum tam hedefe, hız sıfıra, `from` da hedefe — yoksa erkenden
-            // oturan bir kayma `ease`'in "gidecek yol yok" koşulunu
-            // sağlamaz ve kip değişince yerleşmemiş görünürdü.
+            // **The same triple** as the cursor's and for the same reason
+            // ([`Motion::advance`]): position exactly at the target, velocity to zero, `from`
+            // also at the target — otherwise a slide that settled early would not satisfy
+            // `ease`'s "no road to travel" condition and would look unsettled when the
+            // mode changed.
             self.pos = self.target;
             self.vel = 0.0;
             self.from = self.target;
@@ -1245,12 +1267,13 @@ impl Slide {
         self.vel = vel;
     }
 
-    /// [`State::settled`] ile **aynı iki soru**, belirme kolu olmadan:
-    /// [`Motion::origin_mode`] `Fade` üretmiyor.
+    /// **The same two questions** as [`State::settled`], without the fade branch:
+    /// [`Motion::origin_mode`] does not produce `Fade`.
     ///
-    /// Girdisi monoton olmadığı için ([`Motion::sync_origin`]) durma koşulu
-    /// hedefe değil **mesafeye** bakıyor: hedef her oynadığında kayma
-    /// bulunduğu yerden yeniden başlıyor ve her biri tek başına sonlu.
+    /// Because its input is not monotonic ([`Motion::sync_origin`]) the stop
+    /// condition looks not at the target but at the **distance**: every time the
+    /// target moves the slide restarts from where it stands and each is finite on
+    /// its own.
     fn settled(&self, mode: Mode) -> bool {
         if let Mode::Ease = mode {
             return self.elapsed >= EASE_DURATION || self.from == self.target;
@@ -1259,32 +1282,34 @@ impl Slide {
     }
 }
 
-/// Kübik yavaşlamanın tek ekseni: `from → target` arasında `t ∈ [0,1]`.
+/// The single axis of the cubic easing: `t ∈ [0,1]` between `from → target`.
 ///
-/// Taşmanın **yapısal** olarak imkânsız olduğu yer: `1 − (1−t)³` monoton ve
-/// `1`'i geçmiyor, yani yayın gerektirdiği kırpma bu stilde hiç gerekmiyor.
+/// Where overshoot is **structurally** impossible: `1 − (1−t)³` is monotonic and
+/// does not exceed `1`, so the clamp the spring requires is never needed in this
+/// style.
 fn ease_axis(from: f32, target: f32, t: f32) -> f32 {
     let eased = 1.0 - (1.0 - t).powi(3);
     from + (target - from) * eased
 }
 
-/// Kritik sönümlü yayın bir adımı, tek eksen — **taşma kırpması dahil**.
+/// One step of the critically damped spring, single axis — **overshoot clamp
+/// included**.
 ///
-/// ζ = 1 "durgun hâlden taşma yok" demek; [`Motion::sync`] ise uçuşta hızı
-/// **bilerek** koruyor (momentum) ve o hız hedefin ötesine taşıyabiliyor:
-/// `(d + c·t)e^{-ωt}` ifadesi `|v| > OMEGA × kalan mesafe` olduğunda sıfırı
-/// geçiyor. Ölçülen en kötü hâl, uzun bir sıçramanın ortasında yapılan küçük
-/// bir hedef düzeltmesinde **0,87 hücre** — neredeyse tam bir hücre, yani
-/// gözle görülür bir geri tepme. 008 Karar 6 bunu adıyla yasaklıyor ("kritik
-/// sönümlemeye yakın, **taşma yok**"), o yüzden hedefi geçen eksen hedefte
-/// durduruluyor.
+/// ζ = 1 means "no overshoot from rest"; [`Motion::sync`] however **deliberately**
+/// keeps the velocity in flight (momentum) and that velocity can carry past the
+/// target: the expression `(d + c·t)e^{-ωt}` crosses zero when
+/// `|v| > OMEGA × remaining distance`. The worst case measured was a small target
+/// correction made in the middle of a long jump, **0.87 cells** — almost a full
+/// cell, i.e. a visible recoil. 008 Karar 6 forbids this by name ("near critical
+/// damping, **no overshoot**"), so the axis that crosses the target is stopped at
+/// the target.
 ///
-/// Sert bir duruş değil: kırpmanın ateşlediği an imleç zaten tam hedefin
-/// üstünde, yani görünen şey "vardı ve durdu".
+/// It is not a hard stop: at the moment the clamp fires the cursor is already
+/// exactly over the target, so what is seen is "arrived and stopped".
 ///
-/// **Tek yer, iki animatör:** öteleme de aynı kırpmayı ödüyor
-/// ([`Slide::spring`]). İkinci bir kopya, hedefi aşan bir ızgaranın geri
-/// tepmesini sessizce geri getirirdi.
+/// **One place, two animators:** the offset pays the same clamp
+/// ([`Slide::spring`]). A second copy would silently bring back the recoil of a
+/// grid that overshoots its target.
 fn spring_axis(pos: f32, vel: f32, target: f32, dt: f32) -> (f32, f32) {
     let before = pos - target;
     let (after, vel) = critically_damped(before, vel, dt);
@@ -1295,26 +1320,27 @@ fn spring_axis(pos: f32, vel: f32, target: f32, dt: f32) -> (f32, f32) {
     }
 }
 
-/// Eşik yolu, tek eksen: konum **ve** hız birlikte.
+/// The threshold path, single axis: position **and** velocity together.
 ///
-/// Birlikte sorulmak zorunda — hedefin tam üstünden geçerken konum farkı bir
-/// an sıfıra yaklaşır ve tek başına konuma bakan bir eşik animasyonu ortasında
-/// durdururdu ([`VEL_EPSILON`]).
+/// They have to be asked together — passing right over the target the position
+/// difference momentarily nears zero and a threshold looking at the position
+/// alone would stop the animation in the middle ([`VEL_EPSILON`]).
 fn axis_settled(pos: f32, vel: f32, target: f32) -> bool {
     (pos - target).abs() <= POS_EPSILON && vel.abs() <= VEL_EPSILON
 }
 
-/// Kritik sönümlü yayın **kapalı formu**: hedefe göre göreli konum `d` ve hız
-/// `v`, `dt` saniye sonra ne olur.
+/// The **closed form** of the critically damped spring: given the position `d`
+/// relative to the target and the velocity `v`, what they are after `dt` seconds.
 ///
-/// Euler adımı değil, çünkü kararlılığı `dt`'ye bağlı olurdu: `OMEGA * dt > 2`
-/// olan tek bir vahşi kare (örtülme sonrası) ıraksardı ve `DT_MAX` o zaman
-/// bir kemer değil bir **şart** olurdu. Kapalı form her `dt` için doğru; `dt`
-/// yine de kırpılıyor ama başka bir sebeple (süre tavanı, bkz. [`DT_MAX`]).
+/// Not an Euler step, because its stability would depend on `dt`: a single wild
+/// frame with `OMEGA * dt > 2` (after occlusion) would diverge and `DT_MAX` would
+/// then be not a belt but a **requirement**. The closed form is right for any
+/// `dt`; `dt` is clamped anyway but for another reason (the time ceiling, see
+/// [`DT_MAX`]).
 ///
-/// ζ = 1 seçildi: **taşma yok**. Altındaki her değer imleci hedefin ötesine
-/// atıp geri getirirdi ve 008 bunu açıkça istemiyor ("kritik sönümlemeye
-/// yakın, taşma yok").
+/// ζ = 1 was chosen: **no overshoot**. Any value below it would throw the cursor
+/// past the target and bring it back, and 008 explicitly does not want that
+/// ("near critical damping, no overshoot").
 fn critically_damped(d: f32, v: f32, dt: f32) -> (f32, f32) {
     let c = v + OMEGA * d;
     let decay = (-OMEGA * dt).exp();
@@ -1327,28 +1353,28 @@ fn critically_damped(d: f32, v: f32, dt: f32) -> (f32, f32) {
 mod tests {
     use super::*;
 
-    /// 120 Hz'lik bir kare; sınamaların ortak adımı.
+    /// A 120 Hz frame; the tests' common step.
     const TICK: f32 = 1.0 / 120.0;
 
-    /// `(0,0)`'dan `(10,4)`'e uçuşta bir imleç, **verilen stille**.
+    /// A cursor in flight from `(0,0)` to `(10,4)`, **with the given style**.
     fn moving_with(style: CursorMotion) -> Motion {
         let mut motion = Motion::default();
         motion.set_style(style);
-        // İlk `sync` snap: durum yok.
+        // The first `sync` snaps: there is no state.
         motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, false, false);
-        assert!(motion.settled(), "ilk kare animasyon başlattı");
+        assert!(motion.settled(), "the first frame started an animation");
         motion.sync(Some([10.0, 4.0]), 0, 0.0, 0, false, false);
         motion
     }
 
-    /// Yayın fiziğini sınayanların ortak kurulumu; varsayılan zaten `Spring`
-    /// ama sınamanın neyi ölçtüğü çağrı yerinde yazılı olmalı.
+    /// The common setup of those testing the spring's physics; the default is
+    /// already `Spring` but what the test measures must be written at the call site.
     fn moving() -> Motion {
         moving_with(CursorMotion::Spring)
     }
 
-    /// `settled` olana kadar ilerletir; kaç kare sürdüğünü döndürür.
-    /// Tavan sonsuz döngüyü kesiyor — sınama asılmasın diye.
+    /// Advances until `settled`; returns how many frames it took. The ceiling cuts
+    /// an infinite loop — so the test does not hang.
     fn run_to_rest(motion: &mut Motion, dt: f32) -> u32 {
         for frames in 1..=10_000 {
             motion.advance(dt);
@@ -1356,50 +1382,67 @@ mod tests {
                 return frames;
             }
         }
-        panic!("animasyon yerleşmedi");
+        panic!("the animation did not settle");
     }
 
     #[test]
     fn the_handover_to_the_dock_is_one_animation_not_two() {
-        // **Kullanıcının iki şikâyeti, tek sebep** (012 phase-9): `sleep 5`
-        // bitince caret dock'a *ışınlanıyordu* ve dock'ta yazarken sağa sola
-        // hiç kaymıyordu. İkisi de dock caret'inin animatöre hiç uğramamasından
-        // geliyordu; artık iki ev de aynı hedefin iki değeri.
+        // **The user's two complaints, one cause** (012 phase-9): when `sleep 5` ended
+        // the caret *teleported* to the dock and while typing in the dock it never
+        // slid left or right. Both came from the dock's caret never visiting the
+        // animator; now the two homes are two values of the same target.
         let mut motion = moving();
         motion.finish();
-        assert!(motion.settled(), "kurulum yerleşmedi");
+        assert!(motion.settled(), "the setup did not settle");
 
-        // Dock ızgaranın **altında** ve hedefi kesirli: nefes payı hücre
-        // ızgarasına oturmuyor.
+        // The dock is **below** the grid and its target is fractional: the breathing
+        // margin does not sit on the cell grid.
         motion.sync(Some([2.0, 12.4]), 0, 0.0, 0, false, false);
-        assert!(!motion.settled(), "devir animasyon başlatmadı: ışınlanma");
+        assert!(
+            !motion.settled(),
+            "the handover did not start an animation: teleport"
+        );
         let steps = run_to_rest(&mut motion, TICK);
-        assert!(steps > 1, "devir tek karede bitti: {steps}");
-        assert_eq!(motion.position(), Some([2.0, 12.4]), "devir hedefe varmadı");
+        assert!(
+            steps > 1,
+            "the handover finished in a single frame: {steps}"
+        );
+        assert_eq!(
+            motion.position(),
+            Some([2.0, 12.4]),
+            "the handover did not reach the target"
+        );
 
-        // Dock'un **içinde** yazmak da aynı animasyon: sütun değişiyor, satır
-        // değişmiyor. Eskiden bu hiç hareket üretmiyordu.
+        // Typing **inside** the dock is the same animation: the column changes, the
+        // row does not. It used to produce no motion at all.
         motion.sync(Some([3.0, 12.4]), 0, 0.0, 0, false, false);
-        assert!(!motion.settled(), "dock'ta yazarken caret kaymadı");
+        assert!(
+            !motion.settled(),
+            "the caret did not slide while typing in the dock"
+        );
         run_to_rest(&mut motion, TICK);
         assert_eq!(motion.position(), Some([3.0, 12.4]));
     }
 
     #[test]
     fn the_handover_snaps_when_motion_is_off() {
-        // Devir üçüncü bir kip doğurmuyor: `snap` onu da anında oturtuyor,
-        // yoksa hareketi kapatmış kullanıcıya animasyon **eklemiş** olurduk.
+        // The handover does not give birth to a third mode: `snap` seats it at once
+        // too, otherwise we would have **added** animation for a user who turned motion
+        // off.
         let mut motion = moving_with(CursorMotion::Snap);
         motion.sync(Some([2.0, 12.4]), 0, 0.0, 0, false, false);
-        assert!(motion.settled(), "snap stilinde devir animasyon başlattı");
+        assert!(
+            motion.settled(),
+            "the handover started an animation in the snap style"
+        );
         assert_eq!(motion.position(), Some([2.0, 12.4]));
     }
 
     #[test]
     fn a_caretless_frame_drops_the_state_wherever_it_was() {
-        // `None` "hiçbir evde caret yok" demek: imleci gizleyen program ya da
-        // ayna gösterilemiyorken dock'suz pencere. Durum düşmeli, yoksa
-        // caret'siz bir karede eski blok ekranda asılı kalırdı.
+        // `None` means "no caret in either home": a program hiding the cursor or a
+        // window without a dock while the mirror cannot be shown. The state must drop,
+        // otherwise in a frame without a caret the old block would hang on screen.
         let mut motion = moving();
         motion.sync(None, 0, 0.0, 0, false, false);
         assert!(motion.settled());
@@ -1408,34 +1451,38 @@ mod tests {
 
     #[test]
     fn every_start_settles_in_finite_steps() {
-        // Durma koşulunun kendisi: hangi mesafeden başlarsa başlasın sonlu
-        // adımda duruyor. Bu sınama olmadan "boşta sıfır kare" sözleşmesi
-        // yalnız bir yorum cümlesi olurdu.
+        // The stop condition itself: from whatever distance it starts it stops in a
+        // finite number of steps. Without this test the "zero frames at idle" contract
+        // would be just a comment sentence.
         for (col, row) in [(1, 0), (0, 1), (200, 60), (10, 4)] {
             let mut motion = Motion::default();
             motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, false, false);
             motion.sync(Some([col as f32, row as f32]), 0, 0.0, 0, false, false);
-            assert!(!motion.settled(), "hedef değişimi animasyon başlatmadı");
+            assert!(
+                !motion.settled(),
+                "the target change did not start an animation"
+            );
             let frames = run_to_rest(&mut motion, TICK);
             assert!(
                 frames < u32::try_from((TIME_CEILING / TICK).ceil() as i64 + 2).unwrap(),
-                "({col},{row}) süre tavanını aştı: {frames} kare"
+                "({col},{row}) exceeded the time ceiling: {frames} frames"
             );
             assert_eq!(
                 motion.position(),
                 Some([col as f32, row as f32]),
-                "yerleşen imleç tam hücreye oturmadı"
+                "the settled cursor did not sit on the exact cell"
             );
         }
     }
 
     #[test]
     fn the_time_ceiling_settles_a_run_the_epsilon_never_would() {
-        // **Kemerin kendisi, eşikten bağımsız.** Normal bir kaymada eşik çok
-        // daha erken geliyor, yani tavanı gerçek bir animasyonla sınamak
-        // imkânsız: ölçtüğü şey hep eşik olurdu. Durum bu yüzden doğrudan
-        // kuruluyor — hedeften 200 hücre uzakta ve **duruyor**, yani konum
-        // eşiği de hız eşiği de asla sağlanmaz. Duran tek şey tavan olabilir.
+        // **The belt itself, independent of the threshold.** In a normal slide the
+        // threshold comes much earlier, so testing the ceiling with a real animation is
+        // impossible: what it measured would always be the threshold. The state is
+        // therefore set directly — 200 cells away from the target and **standing still**,
+        // so neither the position threshold nor the velocity threshold is ever met. The
+        // only thing that can stop it is the ceiling.
         let far = State {
             pos: [0.0; 2],
             vel: [0.0; 2],
@@ -1446,7 +1493,7 @@ mod tests {
         };
         assert!(
             far.settled(Mode::Spring),
-            "süre tavanı dolmuş koşuyu durdurmadı"
+            "the time ceiling did not stop the run that had filled it"
         );
         assert!(
             !State {
@@ -1454,55 +1501,57 @@ mod tests {
                 ..far
             }
             .settled(Mode::Spring),
-            "tavan dolmadan durdu: kemer erken ateşliyor"
+            "stopped before the ceiling filled: the belt fires early"
         );
     }
 
     #[test]
     fn retarget_in_flight_keeps_velocity() {
-        // Uçuşta hedef değişince hız korunmalı: sıfırlansaydı yazarken her
-        // tuş imleci durdurup yeniden hızlandırır, hareket tırtıklı olurdu.
+        // When the target changes in flight the velocity must be kept: if it were reset,
+        // every key while typing would stop the cursor and accelerate it again and the
+        // motion would be jagged.
         let mut motion = moving();
         for _ in 0..6 {
             motion.advance(TICK);
         }
-        let before = motion.state.expect("uçuşta").vel;
-        assert!(before[0] > 0.0, "hiç hızlanmadı: {before:?}");
+        let before = motion.state.expect("in flight").vel;
+        assert!(before[0] > 0.0, "never accelerated: {before:?}");
 
         motion.sync(Some([20.0, 4.0]), 0, 0.0, 0, false, false);
-        let after = motion.state.expect("uçuşta").vel;
-        assert_eq!(after, before, "retarget hızı sıfırladı");
+        let after = motion.state.expect("in flight").vel;
+        assert_eq!(after, before, "the retarget reset the velocity");
         assert_eq!(
-            motion.state.expect("uçuşta").elapsed,
+            motion.state.expect("in flight").elapsed,
             0.0,
-            "yeni hedef süre tavanını sıfırlamadı"
+            "the new target did not reset the time ceiling"
         );
     }
 
     #[test]
     fn a_retarget_in_flight_does_not_overshoot() {
-        // 008 Karar 6: "kritik sönümlemeye yakın, **taşma yok**". ζ = 1 bunu
-        // yalnız durgun hâlden veriyor; `sync` hızı bilerek koruduğu için
-        // uzun bir sıçramanın ortasındaki küçük bir düzeltme hedefin ötesine
-        // taşırdı — kırpma olmadan ölçülen en kötü hâl 0,87 hücreydi.
+        // 008 Karar 6: "near critical damping, **no overshoot**". ζ = 1 gives this only
+        // from rest; since `sync` deliberately keeps the velocity, a small correction in
+        // the middle of a long jump would overshoot the target — the worst case
+        // measured without the clamp was 0.87 cells.
         let mut motion = Motion::default();
         motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, false, false);
         motion.sync(Some([10.0, 0.0]), 0, 0.0, 0, false, false);
         for _ in 0..6 {
             motion.advance(TICK);
         }
-        let pos = motion.position().expect("uçuşta")[0];
-        let vel = motion.state.expect("uçuşta").vel[0];
-        // Taşmanın şartı: hız, kalan mesafenin OMEGA katından büyük.
+        let pos = motion.position().expect("in flight")[0];
+        let vel = motion.state.expect("in flight").vel[0];
+        // The condition for overshoot: the velocity is greater than OMEGA times the
+        // remaining distance.
         let target = pos + 0.5;
         assert!(
             vel > OMEGA * 0.5,
-            "senaryo taşma üretmiyor: hız {vel}, eşik {}",
+            "the scenario does not produce overshoot: velocity {vel}, threshold {}",
             OMEGA * 0.5
         );
 
-        // Hedefi kesirli kuramıyoruz (`sync` hücre alıyor), o yüzden durumu
-        // doğrudan kuruyoruz: sorulan şey `advance`'ın kırpması.
+        // We cannot set the target fractionally (`sync` takes cells), so we set the
+        // state directly: what is being asked is `advance`'s clamp.
         motion.state = Some(State {
             pos: [pos, 0.0],
             vel: [vel, 0.0],
@@ -1514,8 +1563,8 @@ mod tests {
         for _ in 0..60 {
             motion.advance(TICK);
             assert!(
-                motion.position().expect("uçuşta")[0] <= target + POS_EPSILON,
-                "imleç hedefi {target} aştı: {:?}",
+                motion.position().expect("in flight")[0] <= target + POS_EPSILON,
+                "the cursor overshot the target {target}: {:?}",
                 motion.position()
             );
         }
@@ -1523,41 +1572,41 @@ mod tests {
 
     #[test]
     fn even_the_longest_jump_settles_before_the_ceiling() {
-        // Tavan bir **kemer**: meşru bir kaymayı kesmemeli. Eşikler mutlak
-        // olduğu için yerleşme süresi mesafeyle büyüyor ve geniş bir ekranda
-        // satır başına dönüş 400 hücre olabiliyor. Kesseydi belirti kaymanın
-        // sonunda görünür bir snap olurdu — ve hiçbir sayaç görmezdi.
+        // The ceiling is a **belt**: it must not cut a legitimate slide. Since the
+        // thresholds are absolute the settling time grows with distance and on a wide
+        // screen a line-start return can be 400 cells. Had it cut, the symptom would be a
+        // visible snap at the end of the slide — and no counter would see it.
         for distance in [200u16, 400] {
             let mut motion = Motion::default();
             motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, false, false);
             motion.sync(Some([distance as f32, 0.0]), 0, 0.0, 0, false, false);
             let frames = run_to_rest(&mut motion, TICK);
-            let elapsed = motion.state.expect("yerleşti").elapsed;
+            let elapsed = motion.state.expect("settled").elapsed;
             assert!(
                 elapsed < TIME_CEILING,
-                "{distance} hücrelik sıçramayı tavan kesti: {elapsed}s ({frames} kare)"
+                "the ceiling cut the {distance}-cell jump: {elapsed}s ({frames} frames)"
             );
         }
     }
 
     #[test]
     fn retarget_to_the_same_cell_does_not_reset_the_ceiling() {
-        // İmleci oynatmayan içerik kareleri (renk değişimi, alt satıra yazı)
-        // tavanı sıfırlasaydı kemer hiç dolmazdı.
+        // Had content frames that do not move the cursor (a colour change, text on a
+        // lower line) reset the ceiling, the belt would never fill.
         let mut motion = moving();
         for _ in 0..6 {
             motion.advance(TICK);
         }
-        let elapsed = motion.state.expect("uçuşta").elapsed;
+        let elapsed = motion.state.expect("in flight").elapsed;
         motion.sync(Some([10.0, 4.0]), 0, 0.0, 0, false, false);
-        assert_eq!(motion.state.expect("uçuşta").elapsed, elapsed);
+        assert_eq!(motion.state.expect("in flight").elapsed, elapsed);
     }
 
     #[test]
     fn a_clipped_dt_does_not_teleport() {
-        // Örtülme kalkınca gelen vahşi damga: kırpılmazsa tek adımda hedefe
-        // ışınlar ve animasyon hiç görünmez. `DT_MAX` bir adımın en çok ne
-        // kadar ilerleyebileceğini bağlıyor.
+        // The wild stamp that arrives when occlusion lifts: unclamped, it teleports to
+        // the target in a single step and the animation is never seen. `DT_MAX` bounds
+        // how far one step can advance.
         let mut clipped = moving();
         clipped.advance(30.0);
         let mut stepped = moving();
@@ -1565,161 +1614,183 @@ mod tests {
         assert_eq!(
             clipped.position(),
             stepped.position(),
-            "`dt` kırpılmadı: vahşi damga fazladan ilerletti"
+            "`dt` was not clamped: the wild stamp advanced it extra"
         );
     }
 
     #[test]
     fn scrolling_snaps_instead_of_animating() {
-        // Geçmişe kaydırmak imleci ekranda taşır ama imleç hareket etmedi;
-        // `row`'dan ayırt edilemeyen tek şey bu ve ofset onu ayırıyor.
+        // Scrolling into history moves the cursor on screen but the cursor did not
+        // move; this is the only thing indistinguishable from `row` and the offset
+        // distinguishes it.
         let mut motion = moving();
         run_to_rest(&mut motion, TICK);
 
         motion.sync(Some([10.0, 7.0]), 0, 0.0, 3, false, false);
-        assert!(motion.settled(), "kaydırma animasyon başlattı");
+        assert!(motion.settled(), "scrolling started an animation");
         assert_eq!(motion.position(), Some([10.0, 7.0]));
 
-        // Aynı satır değişimi ofset **sabitken** animasyonlu.
+        // The same row change is animated while the offset is **constant**.
         motion.sync(Some([10.0, 4.0]), 0, 0.0, 3, false, false);
-        assert!(!motion.settled(), "imlecin kendi hareketi snap'ledi");
+        assert!(!motion.settled(), "the cursor's own movement was snapped");
     }
 
     #[test]
     fn finishing_a_flight_settles_it_at_the_target() {
-        // Örtülen pencerenin kolu: link duruyor, yani `advance` bir daha
-        // koşmayacak. Bitirilmeseydi durum sonsuza kadar "yerleşmemiş"
-        // kalır ve süreli koşu kod doğruyken `MotionUnsettled` derdi.
+        // The occluded window's branch: the link stops, so `advance` will not run
+        // again. Had it not been finished, the state would stay "unsettled" forever and
+        // the timed run would say `MotionUnsettled` while the code is right.
         let mut motion = moving();
         motion.advance(TICK);
         assert!(!motion.settled());
 
         motion.finish();
-        assert!(motion.settled(), "bitirilen kayma yerleşmedi");
+        assert!(motion.settled(), "the finished slide did not settle");
         assert_eq!(motion.position(), Some([10.0, 4.0]));
 
-        // Örtülme kalkınca gelen içerik karesi aynı hedefi bildiriyor:
-        // animasyon yeniden başlamamalı.
+        // The content frame that arrives when occlusion lifts reports the same target:
+        // the animation must not restart.
         motion.sync(Some([10.0, 4.0]), 0, 0.0, 0, false, false);
-        assert!(motion.settled(), "görünürlük dönüşü animasyon başlattı");
+        assert!(
+            motion.settled(),
+            "the visibility return started an animation"
+        );
     }
 
     #[test]
     fn geometry_and_visibility_snap() {
-        // Geometri: pencere/font/zoom oynadı, ızgara kaydı.
+        // Geometry: the window/font/zoom moved, the grid shifted.
         let mut motion = moving();
         motion.sync(Some([3.0, 1.0]), 0, 0.0, 0, true, false);
-        assert!(motion.settled(), "geometri animasyon başlattı");
+        assert!(motion.settled(), "geometry started an animation");
         assert_eq!(motion.position(), Some([3.0, 1.0]));
 
-        // Görünmezlik durumu boşaltır; geri açılan imleç yeni yerinde doğar.
-        // TUI'ler tam bunu yapıyor: çizerken imleci gizleyip taşıyorlar.
+        // Invisibility empties the state; a cursor that turns back on is born in its new
+        // place. TUIs do exactly this: while drawing they hide the cursor and move it.
         motion.sync(None, 0, 0.0, 0, false, false);
         assert!(motion.settled());
-        assert_eq!(motion.position(), None, "görünmez imleç konum verdi");
+        assert_eq!(
+            motion.position(),
+            None,
+            "the invisible cursor gave a position"
+        );
         motion.sync(Some([40.0, 20.0]), 0, 0.0, 0, false, false);
-        assert!(motion.settled(), "görünürlük dönüşü animasyon başlattı");
+        assert!(
+            motion.settled(),
+            "the visibility return started an animation"
+        );
         assert_eq!(motion.position(), Some([40.0, 20.0]));
     }
 
     #[test]
     fn snap_never_starts_an_animation() {
-        // Stilin tanımı: kayma yok. Sonucu yalnız görsel değil muhasebe de —
-        // `settled()` hiç `false` olmadığı için link "hasar yok" dalında
-        // uyuyor, yani `hareket=0`.
+        // The definition of the style: no slide. Its consequence is not only visual but
+        // also in the bookkeeping — because `settled()` is never `false` the link sleeps
+        // in the "no damage" branch, i.e. `motion=0`.
         let mut motion = moving_with(CursorMotion::Snap);
-        assert!(motion.settled(), "snap animasyon başlattı");
+        assert!(motion.settled(), "snap started an animation");
         assert_eq!(motion.position(), Some([10.0, 4.0]));
 
-        // Uçuşun her ihtimali: uzak sıçrama, tek hücre, aynı hücre.
+        // Every possibility of a flight: a far jump, a single cell, the same cell.
         for (col, row) in [(400, 0), (11, 4), (11, 4), (0, 0)] {
             motion.sync(Some([col as f32, row as f32]), 0, 0.0, 0, false, false);
-            assert!(motion.settled(), "({col},{row}) snap'te animasyon başlattı");
+            assert!(
+                motion.settled(),
+                "({col},{row}) started an animation under snap"
+            );
             assert_eq!(motion.position(), Some([col as f32, row as f32]));
         }
     }
 
     #[test]
     fn ease_takes_the_same_time_at_every_distance() {
-        // `ease`'in yaydan ayrıldığı tek yer bu: süre mesafeden bağımsız.
-        // Yay 1 hücrede ~230 ms, 400 hücrede ~460 ms harcıyor (`OMEGA`).
+        // This is the one place where `ease` parts from the spring: the duration is
+        // independent of distance. The spring spends ~230 ms on 1 cell, ~460 ms on 400
+        // cells (`OMEGA`).
         for (col, row) in [(1, 0), (200, 60), (10, 4)] {
             let mut motion = moving_with(CursorMotion::Ease);
             motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, true, false);
             motion.sync(Some([col as f32, row as f32]), 0, 0.0, 0, false, false);
-            assert!(!motion.settled(), "hedef değişimi animasyon başlatmadı");
+            assert!(
+                !motion.settled(),
+                "the target change did not start an animation"
+            );
             let frames = run_to_rest(&mut motion, TICK);
             let expected = (EASE_DURATION / TICK).ceil() as u32;
             assert_eq!(
                 frames, expected,
-                "({col},{row}) sabit sürede yerleşmedi: {frames} kare"
+                "({col},{row}) did not settle in the fixed time: {frames} frames"
             );
             assert_eq!(
                 motion.position(),
                 Some([col as f32, row as f32]),
-                "yerleşen imleç tam hücreye oturmadı"
+                "the settled cursor did not sit on the exact cell"
             );
         }
     }
 
     #[test]
     fn ease_approaches_the_target_without_overshooting() {
-        // Taşmanın **yapısal** olarak imkânsız olduğu stil: konum
-        // `from → target` arasında monoton ilerliyor, hız entegre edilmiyor.
-        // Yaydaki kırpmanın karşılığı burada bir sınama, bir dal değil.
+        // The style where overshoot is **structurally** impossible: the position moves
+        // monotonically between `from → target` and the velocity is not integrated. The
+        // counterpart of the spring's clamp here is a test, not a branch.
         let mut motion = moving_with(CursorMotion::Ease);
         let mut last = 0.0;
         for _ in 0..40 {
             motion.advance(TICK);
-            let pos = motion.position().expect("uçuşta")[0];
-            assert!(pos >= last, "ease geri gitti: {last} → {pos}");
-            assert!(pos <= 10.0, "ease hedefi aştı: {pos}");
+            let pos = motion.position().expect("in flight")[0];
+            assert!(pos >= last, "ease went backwards: {last} → {pos}");
+            assert!(pos <= 10.0, "ease overshot the target: {pos}");
             last = pos;
         }
     }
 
     #[test]
     fn ease_settles_well_inside_the_ceiling() {
-        // `ease`'in durma koşulu kendi saati, yani süre tavanı ona
-        // uygulanmıyor; sıra bozulursa kemer meşru bir kaymayı keserdi.
-        // Sabitlerin yanındaki `const` assert bunu derlemeye, bu sınama da
-        // gerçek bir koşuya bağlıyor.
+        // `ease`'s stop condition is its own clock, so the time ceiling is not applied
+        // to it; if the order broke, the belt would cut a legitimate slide. The `const`
+        // assert next to the constants ties this to compilation and this test ties it to
+        // a real run.
         let mut motion = moving_with(CursorMotion::Ease);
         run_to_rest(&mut motion, TICK);
-        let elapsed = motion.state.expect("yerleşti").elapsed;
-        assert!(elapsed < TIME_CEILING, "tavan ease'i kesti: {elapsed}s");
+        let elapsed = motion.state.expect("settled").elapsed;
+        assert!(elapsed < TIME_CEILING, "the ceiling cut ease: {elapsed}s");
     }
 
     #[test]
     fn switching_to_snap_finishes_the_flight_and_asks_for_a_frame() {
-        // Kayma ortasında `snap`'e geçen kullanıcı: imleç ara hücrede asılı
-        // kalamaz. Dönüş `true`, çünkü link'in "hasar yok" dalı yerleşmiş
-        // animasyonda hiç çizmeden uyuyor — kareyi isteyen o dönüş.
+        // A user who switches to `snap` mid-slide: the cursor cannot hang in an
+        // intermediate cell. The return is `true` because the link's "no damage" branch
+        // sleeps without drawing on a settled animation — what asks for the frame is
+        // that return.
         let mut motion = moving();
         motion.advance(TICK);
         assert!(!motion.settled());
 
-        assert!(motion.set_style(CursorMotion::Snap), "kare istenmedi");
-        assert!(motion.settled(), "snap'e geçiş kaymayı bitirmedi");
+        assert!(
+            motion.set_style(CursorMotion::Snap),
+            "no frame was asked for"
+        );
+        assert!(motion.settled(), "the switch to snap did not end the slide");
         assert_eq!(motion.position(), Some([10.0, 4.0]));
 
-        // Yerleşmiş bir imleçte ve aynı stilde no-op: kare istemek boşa bir
-        // uyandırma olurdu.
+        // On a settled cursor and with the same style it is a no-op: asking for a frame
+        // would be a wasted wakeup.
         assert!(
             !motion.set_style(CursorMotion::Snap),
-            "aynı stil kare istedi"
+            "the same style asked for a frame"
         );
         assert!(
             !motion.set_style(CursorMotion::Spring),
-            "yerleşmiş imleç kare istedi"
+            "the settled cursor asked for a frame"
         );
     }
 
     #[test]
     fn switching_style_in_flight_does_not_teleport() {
-        // Stil değişimi bir hedef değişimi değil: imleç bulunduğu yerden
-        // devam etmeli. `ease` çıkış noktasını hatırladığı için asıl risk
-        // orada — `from` tazelenmeseydi imleç eski başlangıca geri sıçrardı.
+        // A style change is not a target change: the cursor must continue from where it
+        // stands. The real risk is in `ease` because it remembers its start point — had
+        // `from` not been refreshed the cursor would jump back to the old start.
         for style in [CursorMotion::Ease, CursorMotion::Spring] {
             let mut motion = moving_with(match style {
                 CursorMotion::Ease => CursorMotion::Spring,
@@ -1728,12 +1799,19 @@ mod tests {
             for _ in 0..8 {
                 motion.advance(TICK);
             }
-            let before = motion.position().expect("uçuşta");
-            assert!(before[0] > 0.0, "hiç ilerlemedi: {before:?}");
+            let before = motion.position().expect("in flight");
+            assert!(before[0] > 0.0, "never advanced: {before:?}");
 
-            assert!(!motion.set_style(style), "stil değişimi kare istedi");
-            assert_eq!(motion.position(), Some(before), "stil değişimi ışınladı");
-            // Ve kayma yeni stille sonlanıyor, takılmıyor.
+            assert!(
+                !motion.set_style(style),
+                "the style change asked for a frame"
+            );
+            assert_eq!(
+                motion.position(),
+                Some(before),
+                "the style change teleported"
+            );
+            // And the slide ends with the new style, it does not get stuck.
             run_to_rest(&mut motion, TICK);
             assert_eq!(motion.position(), Some([10.0, 4.0]));
         }
@@ -1741,76 +1819,87 @@ mod tests {
 
     #[test]
     fn a_long_spring_flight_does_not_teleport_when_the_style_changes() {
-        // Stil değişiminin en sinsi hâli: yay `EASE_DURATION`'dan uzun
-        // uçmuşken `ease`'e geçmek. Durma koşulu stile göre değiştiği için
-        // "uçuşta mı" sorusu **eski** stille sorulmazsa kayma yerleşmiş
-        // görünür, devir atlanır ve sıradaki kare imleci hedefe atar — üstelik
-        // link o kareyi çizmeden uyuduğu için imleç ara hücrede kalır.
+        // The most insidious form of a style change: switching to `ease` when the spring
+        // has flown longer than `EASE_DURATION`. Since the stop condition changes with
+        // the style, if the "in flight?" question is not asked with the **old** style
+        // the slide looks settled, the handover is skipped and the next frame throws the
+        // cursor to the target — and since the link sleeps without drawing that frame
+        // the cursor stays in an intermediate cell.
         let mut motion = moving();
         for _ in 0..25 {
             motion.advance(TICK);
         }
-        let elapsed = motion.state.expect("uçuşta").elapsed;
+        let elapsed = motion.state.expect("in flight").elapsed;
         assert!(
             elapsed > EASE_DURATION,
-            "senaryo kurulmadı: yay {elapsed}s uçtu, eşik {EASE_DURATION}s"
+            "the scenario was not set up: the spring flew {elapsed}s, threshold {EASE_DURATION}s"
         );
-        let before = motion.position().expect("uçuşta");
-        assert!(!motion.settled(), "yay bu noktada yerleşmiş olmamalı");
-
-        assert!(!motion.set_style(CursorMotion::Ease), "stil kare istedi");
+        let before = motion.position().expect("in flight");
         assert!(
             !motion.settled(),
-            "stil değişimi kaymayı yerleşmiş gösterdi: ışınlama bir kare sonra"
+            "the spring must not have settled at this point"
+        );
+
+        assert!(
+            !motion.set_style(CursorMotion::Ease),
+            "the style asked for a frame"
+        );
+        assert!(
+            !motion.settled(),
+            "the style change showed the slide as settled: teleport a frame later"
         );
         motion.advance(TICK);
-        let after = motion.position().expect("uçuşta");
+        let after = motion.position().expect("in flight");
         let remaining = 10.0 - before[0];
         assert!(
             after[0] - before[0] < remaining,
-            "tek adımda hedefe atladı: {before:?} → {after:?}"
+            "jumped to the target in a single step: {before:?} → {after:?}"
         );
         run_to_rest(&mut motion, TICK);
         assert_eq!(motion.position(), Some([10.0, 4.0]));
     }
 
-    /// Hareketi Azalt açık, uçuşta bir belirme: `(0,0)` → `(10,4)`.
+    /// Reduce Motion on, a fade in flight: `(0,0)` → `(10,4)`.
     fn fading() -> Motion {
         let mut motion = Motion::default();
         motion.set_reduce(true);
         motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, false, false);
-        assert!(motion.settled(), "ilk kare belirme başlattı");
+        assert!(motion.settled(), "the first frame started a fade");
         motion.sync(Some([10.0, 4.0]), 0, 0.0, 0, false, false);
         motion
     }
 
     #[test]
     fn reduce_motion_fades_in_place_instead_of_sliding() {
-        // İndirgemenin tanımı: imleç **yeni hücresinde** belirir, yola
-        // çıkmaz. Konumun `sync`'te oturması şart — bir kare sonra oturursa
-        // imleç ilk içerik karesinde eski hücresinde alfa sıfırla çizilir ve
-        // hiçbir sayaç bunu görmez.
+        // The definition of the reduction: the cursor fades in **in its new cell**, it
+        // does not set out on a road. The position must be set in `sync` — if it is set
+        // one frame later the cursor is drawn at alpha zero in its old cell in the first
+        // content frame and no counter sees it.
         let mut motion = fading();
-        assert_eq!(motion.position(), Some([10.0, 4.0]), "belirme kaydı");
-        assert_eq!(motion.alpha(), 0.0, "belirme opak başladı");
-        assert!(!motion.settled(), "belirme hiç başlamadı");
+        assert_eq!(motion.position(), Some([10.0, 4.0]), "the fade slid");
+        assert_eq!(motion.alpha(), 0.0, "the fade started opaque");
+        assert!(!motion.settled(), "the fade never started");
 
-        // Opaklık monoton artıyor ve konum hiç oynamıyor.
+        // The opacity rises monotonically and the position never moves.
         let mut last = 0.0;
         while !motion.settled() {
             motion.advance(TICK);
             let alpha = motion.alpha();
-            assert!(alpha >= last, "belirme geri gitti: {last} → {alpha}");
-            assert!(alpha <= 1.0, "opaklık 1'i aştı: {alpha}");
-            assert_eq!(motion.position(), Some([10.0, 4.0]), "belirme kaydırdı");
+            assert!(alpha >= last, "the fade went backwards: {last} → {alpha}");
+            assert!(alpha <= 1.0, "the opacity exceeded 1: {alpha}");
+            assert_eq!(
+                motion.position(),
+                Some([10.0, 4.0]),
+                "the fade slid the position"
+            );
             last = alpha;
         }
-        assert_eq!(motion.alpha(), 1.0, "yerleşen belirme opak değil");
+        assert_eq!(motion.alpha(), 1.0, "the settled fade is not opaque");
 
-        // Süre **mesafeden bağımsız** ve `FADE_DURATION` kadar: `ease`'in
-        // saatiyle aynı biçim, yalnız sabit ayrı. `run_to_rest` aradaki
-        // duraksamayı da veriyor, yani bu hareket "ayrı bir hareket" sayılıp
-        // yeniden beliriyor (`Motion::sync`'in duraksama ölçütü).
+        // The duration is **independent of distance** and equals `FADE_DURATION`: the
+        // same shape as `ease`'s clock, only the constant differs. `run_to_rest` also
+        // gives the pause in between, so this movement counts as "a separate movement"
+        // and fades in again (the pause criterion of `Motion::sync`).
         for (col, row) in [(1u16, 0u16), (200, 60)] {
             let mut motion = fading();
             run_to_rest(&mut motion, TICK);
@@ -1826,73 +1915,83 @@ mod tests {
 
     #[test]
     fn reduce_motion_does_not_fade_what_did_not_move() {
-        // Snap hâlleri belirmiyor: imleç hareket etmedi, **altındaki ızgara**
-        // hareket etti (008 Karar 5). Tek başına saate bakan bir kural onları
-        // `FADE_DURATION` boyunca yerleşmemiş sayar ve link hiçbir şeyi
-        // değiştirmeyen kareler çizerdi — `ease`'in ikinci koşuluyla aynı
-        // gerekçe, aynı kol.
+        // The snap cases do not fade: the cursor did not move, the **grid under it**
+        // moved (008 Karar 5). A rule looking at the clock alone would count them as
+        // unsettled for `FADE_DURATION` and the link would draw frames that change
+        // nothing — the same reason as `ease`'s second condition, the same branch.
         let mut motion = fading();
         run_to_rest(&mut motion, TICK);
 
-        // Kaydırma, geometri ve görünürlük dönüşü: üçü de anında ve opak.
+        // Scrolling, geometry and visibility return: all three are instant and opaque.
         motion.sync(Some([10.0, 7.0]), 0, 0.0, 3, false, false);
-        assert!(motion.settled(), "kaydırma belirme başlattı");
+        assert!(motion.settled(), "scrolling started a fade");
         assert_eq!(motion.alpha(), 1.0);
         motion.sync(Some([3.0, 1.0]), 0, 0.0, 3, true, false);
-        assert!(motion.settled(), "geometri belirme başlattı");
+        assert!(motion.settled(), "geometry started a fade");
         assert_eq!(motion.alpha(), 1.0);
         motion.sync(None, 0, 0.0, 3, false, false);
         motion.sync(Some([40.0, 20.0]), 0, 0.0, 3, false, false);
-        assert!(motion.settled(), "görünürlük dönüşü belirme başlattı");
+        assert!(motion.settled(), "the visibility return started a fade");
         assert_eq!(motion.alpha(), 1.0);
 
-        // Aynı hücreye yeniden hedefleme de belirme değil.
+        // Retargeting to the same cell is not a fade either.
         motion.sync(Some([40.0, 20.0]), 0, 0.0, 3, false, false);
-        assert!(motion.settled(), "yerinde duran imleç belirdi");
+        assert!(motion.settled(), "a cursor standing in place faded in");
     }
 
     #[test]
     fn snap_outranks_reduce_motion() {
-        // Ürün kararı: hareketi zaten kapatmış kullanıcıya erişilebilirlik
-        // ayarı bir animasyon **eklemez**. Kip de bunu söylüyor: `Snap`
-        // bayrağın üstünde.
+        // A product decision: the accessibility setting does not **add** an animation
+        // for a user who has already turned motion off. The mode says so too: `Snap`
+        // is above the flag.
         let mut motion = Motion::default();
         motion.set_style(CursorMotion::Snap);
         motion.set_reduce(true);
         motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, false, false);
         motion.sync(Some([10.0, 4.0]), 0, 0.0, 0, false, false);
-        assert!(motion.settled(), "snap + reduce animasyon başlattı");
+        assert!(motion.settled(), "snap + reduce started an animation");
         assert_eq!(motion.position(), Some([10.0, 4.0]));
-        assert_eq!(motion.alpha(), 1.0, "snap imleci yarı saydam çizildi");
+        assert_eq!(
+            motion.alpha(),
+            1.0,
+            "the snap cursor was drawn half transparent"
+        );
     }
 
     #[test]
     fn turning_reduce_motion_on_finishes_the_flight() {
-        // Uçuşta bir kayma varken ayarın açılması: kip artık kaymıyor, yani
-        // devralınacak bir şey yok. Dönüş `true`, çünkü link'in "hasar yok"
-        // dalı yerleşmiş animasyonda hiç çizmeden uyuyor.
+        // Turning the setting on while a slide is in flight: the mode no longer slides,
+        // so there is nothing to take over. The return is `true` because the link's "no
+        // damage" branch sleeps without drawing on a settled animation.
         let mut motion = moving();
         motion.advance(TICK);
         assert!(!motion.settled());
 
-        assert!(motion.set_reduce(true), "kare istenmedi");
-        assert!(motion.settled(), "açılış kaymayı bitirmedi");
+        assert!(motion.set_reduce(true), "no frame was asked for");
+        assert!(motion.settled(), "turning on did not end the slide");
         assert_eq!(motion.position(), Some([10.0, 4.0]));
-        assert_eq!(motion.alpha(), 1.0, "bitirilen kayma yarı saydam kaldı");
+        assert_eq!(
+            motion.alpha(),
+            1.0,
+            "the finished slide stayed half transparent"
+        );
 
-        // Aynı değeri yeniden yazmak ve yerleşmiş imleç no-op.
-        assert!(!motion.set_reduce(true), "aynı değer kare istedi");
-        assert!(!motion.set_reduce(false), "yerleşmiş imleç kare istedi");
+        // Writing the same value again, and a settled cursor, are no-ops.
+        assert!(!motion.set_reduce(true), "the same value asked for a frame");
+        assert!(
+            !motion.set_reduce(false),
+            "the settled cursor asked for a frame"
+        );
     }
 
     #[test]
     fn a_cursor_that_keeps_moving_still_becomes_visible_while_fading() {
-        // `/code-review` bulgusu ve indirgemenin **tersine döndüğü** yer:
-        // her hedef değişimi saati sıfırlasaydı hızla oynayan bir imleç
-        // 90 ms'yi hiç dolduramaz, yani Hareketi Azalt imleci yanıp söner
-        // (yazarken) ya da tamamen kaybederdi (akan çıktıda).
+        // A `/code-review` finding and the place where the reduction **turned upside
+        // down**: had every target change reset the clock, a cursor moving fast could
+        // never fill 90 ms, i.e. the Reduce Motion cursor would blink (while typing) or
+        // vanish entirely (in streaming output).
         //
-        // Senaryo akan çıktı: her karede bir hücre ilerleyen imleç.
+        // The scenario is streaming output: a cursor that advances a cell every frame.
         let mut motion = fading();
         let mut col = 10;
         for _ in 0..30 {
@@ -1903,46 +2002,49 @@ mod tests {
         assert_eq!(
             motion.alpha(),
             1.0,
-            "akan çıktıda imleç saydam kaldı: opaklık {}",
+            "the cursor stayed transparent in streaming output: opacity {}",
             motion.alpha()
         );
-        // Konum her zaman hedefte: belirme kaymıyor.
+        // The position is always at the target: the fade does not slide.
         assert_eq!(motion.position(), Some([col as f32, 4.0]));
-        // Ve yerleşiyor — link bu imleç için sonsuza uyanık kalmıyor.
-        assert!(motion.settled(), "belirme yerleşmedi");
+        // And it settles — the link does not stay awake forever for this cursor.
+        assert!(motion.settled(), "the fade did not settle");
 
-        // Akışın içindeki bir sonraki hareket de belirmeyi tazelemiyor:
-        // 90 ms'de bir yeniden belirmek ~11 Hz'de bir titreme demekti.
+        // The next movement inside the stream does not refresh the fade either: fading
+        // in again every 90 ms would be a flicker at ~11 Hz.
         motion.advance(TICK);
         motion.sync(Some([(col + 1) as f32, 4.0]), 0, 0.0, 0, false, false);
         assert_eq!(
             motion.alpha(),
             1.0,
-            "akıştaki hareket yeniden belirdi (titreme)"
+            "the movement inside the stream faded in again (flicker)"
         );
-        assert!(motion.settled(), "akıştaki hareket link'i uyandırdı");
+        assert!(
+            motion.settled(),
+            "the movement inside the stream woke the link"
+        );
 
-        // **Duraksamadan sonraki** hareket ayrı bir harekettir ve beliriyor:
-        // indirgemenin sözü burada duruyor. Uykudan uyanan link'in ilk karesi
-        // de buraya düşüyor — `dt` `DT_MAX`'e kırpılıyor ve kırpma belirmeden
-        // uzun (dosya başındaki `const _`).
+        // A movement **after a pause** is a separate movement and fades in: the
+        // reduction's promise stands here. The first frame of a link waking from sleep
+        // falls here too — `dt` is clamped to `DT_MAX` and the clamp is longer than the
+        // fade (the `const _` at the top of the file).
         motion.advance(DT_MAX);
         motion.sync(Some([(col + 2) as f32, 4.0]), 0, 0.0, 0, false, false);
         assert_eq!(
             motion.alpha(),
             0.0,
-            "duraksamadan sonraki hareket belirmedi"
+            "the movement after a pause did not fade in"
         );
-        assert!(!motion.settled(), "belirme hiç başlamadı");
+        assert!(!motion.settled(), "the fade never started");
     }
 
     #[test]
     fn reduce_off_mid_fade_does_not_slide_backwards() {
-        // Kapanışın devralma kolu olsaydı en sinsi kusur burada olurdu:
-        // `from` bir önceki hücrede duruyor ve `ease` konumu ondan yeniden
-        // hesaplıyor — imleç geldiği hücreye dönüp yeniden kayardı. `spring`
-        // ise hedefinde ve hızsız olduğu için anında yerleşir, yani yarı
-        // saydam imleci ekranda bırakırdı.
+        // Had the closing had a takeover branch, the most insidious defect would be
+        // here: `from` stands in the previous cell and `ease` recomputes the position
+        // from it — the cursor would return to the cell it came to and slide again. The
+        // `spring` settles at once because it is at its target with no velocity, so it
+        // would leave a half-transparent cursor on screen.
         for style in [CursorMotion::Ease, CursorMotion::Spring] {
             let mut motion = fading();
             motion.set_style(style);
@@ -1950,40 +2052,53 @@ mod tests {
                 motion.advance(TICK);
             }
             let alpha = motion.alpha();
-            assert!(alpha > 0.0 && alpha < 1.0, "senaryo kurulmadı: {alpha}");
+            assert!(
+                alpha > 0.0 && alpha < 1.0,
+                "the scenario was not set up: {alpha}"
+            );
 
-            assert!(motion.set_reduce(false), "{style:?}: kare istenmedi");
-            assert!(motion.settled(), "{style:?}: belirme bitmedi");
-            assert_eq!(motion.position(), Some([10.0, 4.0]), "{style:?}: ışınlandı");
-            assert_eq!(motion.alpha(), 1.0, "{style:?}: yarı saydam kaldı");
+            assert!(
+                motion.set_reduce(false),
+                "{style:?}: no frame was asked for"
+            );
+            assert!(motion.settled(), "{style:?}: the fade did not end");
+            assert_eq!(
+                motion.position(),
+                Some([10.0, 4.0]),
+                "{style:?}: teleported"
+            );
+            assert_eq!(motion.alpha(), 1.0, "{style:?}: stayed half transparent");
         }
     }
 
     #[test]
     fn style_change_during_a_fade_keeps_fading() {
-        // Belirme kipinde `ease` ↔ `spring` hiçbir şey: devralma kolu
-        // koşsaydı `from` bulunulan konuma çekilir, `from == target` olur ve
-        // belirme **yerleşmiş** görünürdü — link o kareyi çizmeden uyar,
-        // imleç yarı saydam asılı kalırdı.
+        // In the fade mode `ease` ↔ `spring` is nothing: had the takeover branch run,
+        // `from` would be pulled to the current position, `from == target` would hold and
+        // the fade would look **settled** — the link would sleep without drawing that
+        // frame and the cursor would hang half transparent.
         for style in [CursorMotion::Ease, CursorMotion::Snap] {
             let mut motion = fading();
             for _ in 0..3 {
                 motion.advance(TICK);
             }
             let before = motion.alpha();
-            assert!(before > 0.0 && before < 1.0, "senaryo kurulmadı: {before}");
+            assert!(
+                before > 0.0 && before < 1.0,
+                "the scenario was not set up: {before}"
+            );
 
             let asked = motion.set_style(style);
             if style == CursorMotion::Snap {
-                // `snap` belirmeyi de bitirir ve kareyi ister: stil "animasyon
-                // yok" diyor ve yarım kalmış bir opaklık da animasyondur.
-                assert!(asked, "snap'e geçiş kare istemedi");
+                // `snap` ends the fade too and asks for the frame: the style says "no
+                // animation" and a half-finished opacity is an animation as well.
+                assert!(asked, "the switch to snap did not ask for a frame");
                 assert!(motion.settled());
                 assert_eq!(motion.alpha(), 1.0);
             } else {
-                assert!(!asked, "{style:?}: belirme kare istedi");
-                assert!(!motion.settled(), "{style:?}: belirme yerleşmiş göründü");
-                assert_eq!(motion.alpha(), before, "{style:?}: opaklık sıçradı");
+                assert!(!asked, "{style:?}: the fade asked for a frame");
+                assert!(!motion.settled(), "{style:?}: the fade looked settled");
+                assert_eq!(motion.alpha(), before, "{style:?}: the opacity jumped");
                 run_to_rest(&mut motion, TICK);
                 assert_eq!(motion.alpha(), 1.0);
             }
@@ -1992,24 +2107,25 @@ mod tests {
 
     #[test]
     fn a_flight_that_settles_early_stays_settled_in_every_mode() {
-        // `/code-review` bulgusu. `advance`'ın yerleşme kolu `pos` ve `vel`'i
-        // hedefe çekiyordu ama `from`'u **bıraktığı yerde** — oysa `ease` ile
-        // `fade`'in durma koşulu tam olarak `from == target`'a ("gidecek yol
-        // yok") bakıyor. Yayın eşiğiyle erkenden oturan bir kayma bu yüzden
-        // başka bir kipte yerleşmemiş görünürdü ve asıl bedel şu: link o
-        // kareyi zaten "yerleşti" diye **uyumuş** oluyor, yani `advance` bir
-        // daha koşmuyor. Sonuç, süreli koşuda var olmayan bir animasyon
-        // yüzünden `MotionUnsettled`, belirmede de sebepsiz yarı saydam bir
-        // imleç.
+        // A `/code-review` finding. `advance`'s settling branch pulled `pos` and `vel`
+        // to the target but left `from` **where it was** — yet `ease`'s and `fade`'s
+        // stop condition looks exactly at `from == target` ("no road to travel"). A
+        // slide that settled early by the spring's threshold would therefore look
+        // unsettled in another mode, and the real cost is this: the link has already
+        // **gone to sleep** counting that frame as "settled", so `advance` never runs
+        // again. The result is `MotionUnsettled` in the timed run because of an
+        // animation that does not exist, and a half-transparent cursor for no reason in
+        // the fade.
         //
-        // Senaryo taşma kırpması: hedefi hızın hemen önüne koymak yayı **ilk
-        // adımda** oturtuyor, yani `elapsed` iki sürenin de çok altında.
+        // The scenario is the overshoot clamp: putting the target right in front of the
+        // velocity settles the spring **in the first step**, so `elapsed` is far below
+        // both durations.
         let mut motion = moving();
         for _ in 0..6 {
             motion.advance(TICK);
         }
-        let pos = motion.position().expect("uçuşta")[0];
-        let vel = motion.state.expect("uçuşta").vel[0];
+        let pos = motion.position().expect("in flight")[0];
+        let vel = motion.state.expect("in flight").vel[0];
         motion.state = Some(State {
             pos: [pos, 0.0],
             vel: [vel, 0.0],
@@ -2019,222 +2135,255 @@ mod tests {
             since_move: 0.0,
         });
         motion.advance(TICK);
-        assert!(motion.settled(), "yay taşma kırpmasıyla oturmadı");
-        let elapsed = motion.state.expect("yerleşti").elapsed;
-        // İki süreden **küçüğü**: hangisinin küçük olduğu bu sınamanın
-        // iddiası değil ve `min` onu sabitlerin sırasına bağlamadan yazıyor.
+        assert!(
+            motion.settled(),
+            "the spring did not settle by the overshoot clamp"
+        );
+        let elapsed = motion.state.expect("settled").elapsed;
+        // The **smaller** of the two durations: which one is smaller is not this test's
+        // claim and `min` writes it without tying it to the order of the constants.
         assert!(
             elapsed < FADE_DURATION.min(EASE_DURATION),
-            "senaryo kurulmadı: {elapsed}s iki sürenin altında değil"
+            "the scenario was not set up: {elapsed}s is not below both durations"
         );
 
-        // Yerleşmiş bir kayma hiçbir kipte "uçuşta" görünmemeli — ve bu iki
-        // setter'in kare istememesinin de şartı: istemedikleri kareyi
-        // çizecek kimse yok.
+        // A settled slide must not look "in flight" in any mode — and this is also the
+        // requirement for those two setters not to ask for a frame: there is nobody to
+        // draw the frame they do not ask for.
         let mut eased = motion;
-        assert!(!eased.set_style(CursorMotion::Ease), "kare istendi");
-        assert!(eased.settled(), "yerleşmiş kayma `ease`'de uçuşta göründü");
+        assert!(
+            !eased.set_style(CursorMotion::Ease),
+            "a frame was asked for"
+        );
+        assert!(
+            eased.settled(),
+            "a settled slide looked in flight in `ease`"
+        );
 
         let mut faded = motion;
-        assert!(!faded.set_reduce(true), "kare istendi");
-        assert!(faded.settled(), "yerleşmiş kayma belirmede uçuşta göründü");
-        assert_eq!(faded.alpha(), 1.0, "yerleşmiş imleç yarı saydam çizildi");
+        assert!(!faded.set_reduce(true), "a frame was asked for");
+        assert!(
+            faded.settled(),
+            "a settled slide looked in flight in the fade"
+        );
+        assert_eq!(
+            faded.alpha(),
+            1.0,
+            "a settled cursor was drawn half transparent"
+        );
     }
 
-    /// Bir Enter'ın kare çifti: 30 satırlık ızgarada imleç 2. satırda ve
-    /// içerik üç satır (öteleme 27), sonra imleç 3. satıra iniyor ve içerik
-    /// dört satır oluyor (öteleme 26). İmlecin **ekran** satırı ikisinde de
-    /// 29 — dipteki satır.
+    /// The frame pair of an Enter: in a 30-row grid the cursor is on row 2 and the
+    /// content is three rows (offset 27), then the cursor goes down to row 3 and the
+    /// content becomes four rows (offset 26). The cursor's **screen** row is 29 in
+    /// both — the bottom row.
     fn after_enter() -> Motion {
         let mut motion = Motion::default();
         motion.sync(Some([0.0, 29.0]), 27, 0.0, 0, false, false);
-        assert!(motion.settled(), "ilk kare animasyon başlattı");
+        assert!(motion.settled(), "the first frame started an animation");
         motion.sync(Some([0.0, 29.0]), 26, 0.0, 0, false, false);
         motion
     }
 
     #[test]
     fn the_cursor_does_not_move_while_the_origin_slides() {
-        // **R2.1, setin can alıcı yeri.** Enter'da grid satırı `r → r+1`
-        // olurken öteleme bir azalıyor; iki hedef aynı uzayda olmasaydı imleç
-        // bir satır düşüp yay onu geri bindirirdi (phase-1'in bilinen ara
-        // durumu). Ekran uzayında hedef **hiç** değişmiyor.
+        // **R2.1, the set's crux.** On Enter the grid row goes `r → r+1` while the
+        // offset drops by one; had the two targets not been in the same space the cursor
+        // would drop a row and the spring would bring it back (phase-1's known
+        // intermediate state). In screen space the target does **not** change at all.
         let mut motion = after_enter();
-        assert!(motion.cursor_settled(), "imleç Enter'da yola çıktı");
-        assert_eq!(motion.position(), Some([0.0, 29.0]), "imleç dipte değil");
-        assert!(!motion.origin_settled(), "öteleme kaymaya başlamadı");
+        assert!(motion.cursor_settled(), "the cursor set out on Enter");
+        assert_eq!(
+            motion.position(),
+            Some([0.0, 29.0]),
+            "the cursor is not at the bottom"
+        );
+        assert!(!motion.origin_settled(), "the offset did not start sliding");
 
-        // Öteleme kayarken imleç ekranda **hiç** oynamıyor: iki animatör tek
-        // `settled()` kapısında ama tek başlarına.
+        // While the offset slides the cursor does **not** move on screen at all: two
+        // animators under the single `settled()` gate but on their own.
         while !motion.settled() {
             motion.advance(TICK);
-            assert_eq!(motion.position(), Some([0.0, 29.0]), "imleç kaydı");
+            assert_eq!(motion.position(), Some([0.0, 29.0]), "the cursor slid");
         }
-        assert_eq!(motion.origin(), 26.0, "öteleme hedefine oturmadı");
+        assert_eq!(
+            motion.origin(),
+            26.0,
+            "the offset did not sit at its target"
+        );
     }
 
     #[test]
     fn the_origin_settles_and_then_lets_the_link_sleep() {
-        // Checklist: "kayma yerleştikten sonra kare istenmiyor". Link'in uyku
-        // kararı tek ifade (`link.rs`'in "hasar yok" dalı): `motion.settled()`.
-        // Öteleme o kapının **içinde** (R2.5), yani kayma bitince kare de
-        // bitiyor — boşta sıfır kare sözleşmesi ayakta.
+        // The checklist: "no frames are asked for after the slide settles". The link's
+        // sleep decision is a single expression (the "no damage" branch of `link.rs`):
+        // `motion.settled()`. The offset is **inside** that gate (R2.5), so when the
+        // slide ends the frames end too — the "zero frames at idle" contract stands.
         let mut motion = after_enter();
-        assert!(!motion.settled(), "kayma link'i uyandırmadı");
+        assert!(!motion.settled(), "the slide did not wake the link");
 
-        // Kayma **ilerliyor**: iki uç arasında bir yerde. Sınama bunu sormasa
-        // hiç kaymayan bir kod da geçerdi.
+        // The slide is **progressing**: somewhere between the two ends. If the test did
+        // not ask this, code that never slides at all would pass too.
         motion.advance(TICK);
         let mid = motion.origin();
-        assert!(mid < 27.0 && mid > 26.0, "öteleme kaymadı: {mid}");
+        assert!(mid < 27.0 && mid > 26.0, "the offset did not slide: {mid}");
 
         let frames = run_to_rest(&mut motion, TICK);
         assert!(
             frames < u32::try_from((TIME_CEILING / TICK).ceil() as i64 + 2).unwrap(),
-            "kayma süre tavanını aştı: {frames} kare"
+            "the slide exceeded the time ceiling: {frames} frames"
         );
         assert_eq!(motion.origin(), 26.0);
-        // Ve yerleşen kayma bir daha uyanmıyor: aynı hedefi bildiren içerik
-        // kareleri (renk değişimi, imleç yanıp sönmesi) kaymayı yeniden
-        // başlatmamalı.
+        // And a settled slide does not wake again: content frames reporting the same
+        // target (a colour change, the cursor blinking) must not restart the slide.
         motion.sync(Some([0.0, 29.0]), 26, 0.0, 0, false, false);
-        assert!(motion.settled(), "aynı hedef kaymayı yeniden başlattı");
+        assert!(motion.settled(), "the same target restarted the slide");
     }
 
     #[test]
     fn a_shrinking_origin_snaps_unless_history_fills_the_gap() {
-        // **Yön kuralı** (011 kapı sonrası, gözle kontrol): öteleme
-        // `rows - content_rows`, yani hedefin **düşmesi** içeriğin büyümesi
-        // (grid yukarı akar) ve **yükselmesi** daralması (grid aşağı iner).
-        // Yukarı akış içeriğin gelmesi gibi okunuyor, aşağı iniş düşmesi gibi.
+        // **The direction rule** (011 after the gate, eye check): the offset is
+        // `rows - content_rows`, so the target **falling** is the content growing (the
+        // grid flows up) and **rising** is it shrinking (the grid comes down). Flowing
+        // up reads as content arriving, coming down as falling.
         //
-        // **017 R4.1 kuralı daralttı**, kaldırmadı: üstteki boşluk defterin
-        // satırlarıyla doluyorsa aşağı inen şey boşluk değil gelen geçmiş, ve
-        // 011'in gerekçesi o kolda konusuz kalıyor. Sınamanın adı da o yüzden
-        // değişti — eski adı (`a_growing_origin_slides_and_a_shrinking_one_snaps`)
-        // artık yalan olurdu.
+        // **017 R4.1 narrowed the rule**, it did not remove it: if the gap above fills
+        // with the ledger's rows what comes down is not a gap but history arriving, and
+        // 011's reason is moot in that branch. The test's name changed for that reason
+        // too — the old name (`a_growing_origin_slides_and_a_shrinking_one_snaps`) would
+        // now lie.
         let mut motion = after_enter();
         run_to_rest(&mut motion, TICK);
 
-        // vim'e giriş: doluluk bir hamlede `rows`'a fırlıyor, öteleme 0'a
-        // **düşüyor** — arayüz süzülerek geliyor ve bu isteniyor.
+        // Entering vim: the fill jumps to `rows` in one move and the offset **drops** to
+        // 0 — the interface arrives by gliding and this is wanted.
         motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, false, false);
-        assert!(!motion.origin_settled(), "büyüyen içerik snap'lendi");
+        assert!(!motion.origin_settled(), "growing content was snapped");
         run_to_rest(&mut motion, TICK);
         assert_eq!(motion.origin(), 0.0);
 
-        // Daralan içerik, `fill == 0`: öteleme **yükseliyor** ama kabuk aşağı
-        // süzülmüyor, anında yerine oturuyor.
+        // Shrinking content, `fill == 0`: the offset **rises** but the shell does not
+        // glide down, it sits in place at once.
         //
-        // **Sahnenin adı `vim`'den çıkış değil** ve bu 017 kapısında
-        // düzeltildi: orada `fill` sıfır **değil** (giriş `2J`'si bayrağı
-        // kurmuyor, dört kapı da açık) ve snap'i getiren şey bir sonraki
-        // turdaki `geometry`. Buradaki sıfır dock'u olmayan pencerenin,
-        // kasten temizlenmiş ekranın ve geçmişe kaydırılmış pencerenin ortak
-        // hâli; gerekçesi [`Motion::sync_origin`]'in doc'unda.
+        // **The scene's name is not "leaving `vim`"** and this was corrected at the 017
+        // gate: there `fill` is **not** zero (the entry `2J` does not set the flag, all
+        // four gates are open) and what brings the snap is the next turn's `geometry`.
+        // The zero here is the common state of a window with no dock, a deliberately
+        // cleared screen and a window scrolled into history; the reason is in
+        // [`Motion::sync_origin`]'s doc.
         motion.sync(Some([0.0, 29.0]), 26, 0.0, 0, false, false);
-        assert!(motion.origin_settled(), "daralan içerik kaydı");
+        assert!(motion.origin_settled(), "shrinking content slid");
         assert_eq!(motion.origin(), 26.0);
 
-        // Dolu ekranda `clear` aynı sınıf: öteleme tepeden dibe yükseliyor.
-        // Kasten temizleme bayrağı `fill`'i zaten sıfırlıyor (`bt-core`),
-        // yani buraya `filled = false` geliyor.
+        // `clear` on a full screen is the same class: the offset rises from top to
+        // bottom. The deliberate-clear flag already zeroes `fill` (`bt-core`), so
+        // `filled = false` comes here.
         motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, false, false);
         run_to_rest(&mut motion, TICK);
         motion.sync(Some([0.0, 29.0]), 29, 0.0, 0, false, false);
-        assert!(motion.origin_settled(), "clear kayarak indi");
+        assert!(motion.origin_settled(), "clear came down sliding");
         assert_eq!(motion.origin(), 29.0);
     }
 
     #[test]
     fn a_filled_gap_slides_the_origin_down_and_settles() {
-        // **017 R4.1'in can alıcı kolu:** Tab listesi kapanıyor, doluluk
-        // daralıyor ve öteleme **yükseliyor** — ama boşluğa defterin en yeni
-        // satırları giriyor, yani ekran aşağı inmiyor, üstten geçmiş geliyor.
-        // Süzülmesi gereken tam bu.
+        // **The crux branch of 017 R4.1:** the Tab list closes, the fill narrows and the
+        // offset **rises** — but the ledger's newest rows enter the gap, so the screen
+        // does not come down, history arrives from above. This is exactly what should
+        // glide.
         let mut motion = after_enter();
         run_to_rest(&mut motion, TICK);
         motion.sync(Some([0.0, 0.0]), 0, 0.0, 0, false, false);
         run_to_rest(&mut motion, TICK);
-        assert_eq!(motion.origin(), 0.0, "senaryo kurulmadı");
+        assert_eq!(motion.origin(), 0.0, "the scenario was not set up");
 
         motion.sync(Some([0.0, 8.0]), 8, 0.0, 0, false, true);
-        assert!(!motion.origin_settled(), "doldurma varken snap'ledi");
-        // Ara karede gerçekten yolda: hedefe ışınlanan bir kod da
-        // `origin_settled()` sınamasını geçerdi.
+        assert!(!motion.origin_settled(), "snapped while there was a fill");
+        // Really on the road in the middle frame: code that teleports to the target
+        // would pass the `origin_settled()` test too.
         motion.advance(TICK);
         let mid = motion.origin();
-        assert!(mid > 0.0 && mid < 8.0, "kayma ara konumda değil: {mid}");
+        assert!(
+            mid > 0.0 && mid < 8.0,
+            "the slide is not at an intermediate position: {mid}"
+        );
 
-        // **Sonlu** (R4.3): yeni animatör yok, `Slide::settled()` aynen
-        // geçerli ve süre tavanı kaymayı bitiriyor.
+        // **Finite** (R4.3): no new animator, `Slide::settled()` applies as is and the
+        // time ceiling ends the slide.
         let frames = run_to_rest(&mut motion, TICK);
-        assert!(frames > 0, "kayma hiç kare koşmadı");
+        assert!(frames > 0, "the slide never ran a frame");
         assert!(
             frames < u32::try_from((TIME_CEILING / TICK).ceil() as i64 + 2).unwrap(),
-            "kayma süre tavanını aştı: {frames} kare"
+            "the slide exceeded the time ceiling: {frames} frames"
         );
         assert_eq!(motion.origin(), 8.0);
 
-        // Ve yerleşen kayma bir daha uyanmıyor: doldurma sürerken gelen içerik
-        // kareleri (blink, tuş) aynı hedefi bildiriyor ve `filled` no-op'a
-        // dokunmuyor — dokunsaydı doldurmalı her kare bir hareket karesi
-        // isterdi ve boşta sıfır kare sözleşmesi düşerdi.
+        // And a settled slide does not wake again: content frames arriving while the fill
+        // goes on (blink, keys) report the same target and `filled` does not touch the
+        // no-op — had it, every frame with a fill would ask for a motion frame and the
+        // "zero frames at idle" contract would fall.
         motion.sync(Some([0.0, 8.0]), 8, 0.0, 0, false, true);
-        assert!(motion.settled(), "aynı hedef doldurmada kaymayı başlattı");
+        assert!(
+            motion.settled(),
+            "the same target started the slide in the fill"
+        );
     }
 
     #[test]
     fn scrolling_and_geometry_snap_the_origin() {
-        // R2.6 ve `docs/AYARLAR.md`'nin "Izgaranın başka sebeple yer
-        // değiştirmesi kaymaz" maddesi: tekerlek parmağı takip eder (008
-        // Karar 5), pencere/font/punto değişimi de ızgarayı animasyonsuz
-        // taşır. İkisinde de içerik kendi büyümesiyle yükselmedi.
+        // R2.6 and the item "the grid moving for another reason does not slide" of
+        // `docs/AYARLAR.md`: the wheel follows the finger (008 Karar 5), and a
+        // window/font/point size change moves the grid without animation too. In both
+        // the content did not rise by its own growth.
         let mut motion = after_enter();
         run_to_rest(&mut motion, TICK);
 
         motion.sync(Some([0.0, 23.0]), 20, 0.0, 1, false, false);
-        assert!(motion.settled(), "kaydırma kayma başlattı");
+        assert!(motion.settled(), "scrolling started a slide");
         assert_eq!(motion.origin(), 20.0);
 
         motion.sync(Some([0.0, 13.0]), 10, 0.0, 1, true, false);
-        assert!(motion.settled(), "geometri kayma başlattı");
+        assert!(motion.settled(), "geometry started a slide");
         assert_eq!(motion.origin(), 10.0);
 
-        // Ama ofset **sabitken** aynı değişim kayıyor: snap'i doğuran şey
-        // hedefin kendisi değil, ızgaranın başka bir sebeple oynaması.
+        // But the same change slides while the offset is **constant**: what produces the
+        // snap is not the target itself but the grid moving for another reason.
         motion.sync(Some([0.0, 12.0]), 9, 0.0, 1, false, false);
-        assert!(!motion.origin_settled(), "içerik büyümesi snap'ledi");
+        assert!(!motion.origin_settled(), "content growth was snapped");
 
-        // **Doldurma bu iki tetiği delmiyor** (017 R4.2) ve bu sınamanın
-        // ikinci işi: `filled` terimi guard'da `!snap`'in **dışına**
-        // yazılsaydı Rust'ın önceliği ifadeyi `(… && !snap && …) || filled`
-        // yapar, doldurmalı bir pencerede tekerlek ve pencere boyutlandırma
-        // animasyona başlardı. `bt-core`'un `display_offset == 0` kapısı
-        // tekerleği kesiyor ama **geometri** kolunu kesmiyor.
+        // **The fill does not puncture these two triggers** (017 R4.2) and this is the
+        // test's second job: had the `filled` term been written **outside** `!snap` in
+        // the guard, Rust's precedence would make the expression
+        // `(… && !snap && …) || filled` and in a window with a fill the wheel and window
+        // resizing would start to animate. `bt-core`'s `display_offset == 0` gate cuts
+        // the wheel but does not cut the **geometry** branch.
         run_to_rest(&mut motion, TICK);
         motion.sync(Some([0.0, 15.0]), 12, 0.0, 1, true, true);
-        assert!(motion.settled(), "doldurmada geometri kayma başlattı");
+        assert!(motion.settled(), "geometry started a slide in the fill");
         assert_eq!(motion.origin(), 12.0);
 
         motion.sync(Some([0.0, 18.0]), 15, 0.0, 2, false, true);
-        assert!(motion.settled(), "doldurmada kaydırma kayma başlattı");
+        assert!(motion.settled(), "scrolling started a slide in the fill");
         assert_eq!(motion.origin(), 15.0);
     }
 
     #[test]
     fn a_hidden_cursor_does_not_freeze_the_origin() {
-        // `sync`'in `!visible` erken dönüşü ötelemeyi de atlasaydı, imleci
-        // gizleyip çıktı akıtan bir betikte içerik yanlış yerde donardı.
-        // İmlecin görünürlüğü ızgaranın nerede durduğuna karar veremez.
+        // Had `sync`'s `!visible` early return skipped the offset too, in a script that
+        // hides the cursor and streams output the content would freeze in the wrong
+        // place. The cursor's visibility cannot decide where the grid stands.
         let mut motion = after_enter();
         run_to_rest(&mut motion, TICK);
 
         motion.sync(None, 25, 0.0, 0, false, false);
-        assert_eq!(motion.position(), None, "görünmez imleç konum verdi");
+        assert_eq!(
+            motion.position(),
+            None,
+            "the invisible cursor gave a position"
+        );
         assert!(
             !motion.origin_settled(),
-            "görünmez imleç ötelemeyi dondurdu"
+            "the invisible cursor froze the offset"
         );
         run_to_rest(&mut motion, TICK);
         assert_eq!(motion.origin(), 25.0);
@@ -2242,11 +2391,11 @@ mod tests {
 
     #[test]
     fn a_shrinking_content_settles_too() {
-        // **R2.4:** girdisi monoton değil — imleci yukarı taşıyıp alt satırı
-        // `\e[K` ile silen bir program ötelemeyi büyütüp küçültebilir. Durma
-        // koşulu hedefe değil mesafeye baktığı için her yeni hedef tek başına
-        // sonlu; salınımın kendisi sürerse o kareleri isteyen şey animasyon
-        // değil, salınımı üreten çıktının hasarı olur.
+        // **R2.4:** its input is not monotonic — a program that moves the cursor up and
+        // erases the bottom line with `\e[K` can grow and shrink the offset. Because the
+        // stop condition looks at the distance not the target, every new target is finite
+        // on its own; if the oscillation itself continues, what asks for those frames is
+        // not the animation but the damage of the output producing the oscillation.
         let mut motion = after_enter();
         let mut previous = 26u16;
         for origin in [26u16, 27, 25, 27, 26] {
@@ -2259,18 +2408,21 @@ mod tests {
                 false,
                 false,
             );
-            // İddia **yerleşmektir**, kaç kare koştuğu değil: yön kuralından
-            // beri salınımın iki yarısı iki yoldan geçiyor — daralan yön
-            // (hedef yükseliyor) hiç kare koşmadan oturuyor, büyüyen yön
-            // kayarak. R2.4'ün istediği ikisinin de **sonlu** olması.
+            // The claim is **settling**, not how many frames it ran: since the direction rule
+            // the two halves of the oscillation go through two roads — the shrinking
+            // direction (the target rises) sits without running a frame, the growing one by
+            // sliding. What R2.4 wants is for both to be **finite**.
             if origin > previous {
                 assert!(
                     motion.origin_settled(),
-                    "daralan içerik ({previous} → {origin}) kaydı"
+                    "shrinking content ({previous} → {origin}) slid"
                 );
             }
             run_to_rest(&mut motion, TICK);
-            assert!(motion.origin_settled(), "öteleme {origin} yerleşmedi");
+            assert!(
+                motion.origin_settled(),
+                "the offset {origin} did not settle"
+            );
             assert_eq!(motion.origin(), f32::from(origin));
             previous = origin;
         }
@@ -2278,73 +2430,73 @@ mod tests {
 
     #[test]
     fn reduce_motion_snaps_the_origin_instead_of_fading_it() {
-        // **R2.3.** İmleç belirirken öteleme snap'liyor: her yeni satırda
-        // bütün ekranın belirmesi, indirgemenin kaldırmaya çalıştığı
-        // hareketten beter olurdu. "İndirgemenin tek yeri `bt-gpu::motion`"
-        // kuralı yerinde — **yer** aynı, **kip** iki.
+        // **R2.3.** While the cursor fades in the offset snaps: the whole screen fading
+        // in on every new line would be worse than the motion the reduction tries to
+        // remove. The rule "the reduction's one place is `bt-gpu::motion`" stands — the
+        // **place** is the same, the **mode** is two.
         let mut motion = Motion::default();
         motion.set_reduce(true);
         motion.sync(Some([0.0, 29.0]), 27, 0.0, 0, false, false);
-        // İmleç **sütun da** değiştiriyor: Enter'da ekran satırı hiç
-        // oynamadığı için (R2.1) tek başına bir satır ilerlemesi belirme de
-        // doğurmaz — sınamanın iki kipi ayırt edebilmesi için imlecin
-        // gerçekten yer değiştirmesi gerek.
+        // The cursor changes **column too**: since the screen row does not move on Enter
+        // (R2.1), a one-row advance alone would not give birth to a fade either — for
+        // the test to tell the two modes apart the cursor has to really move.
         motion.sync(Some([5.0, 29.0]), 26, 0.0, 0, false, false);
-        assert_eq!(motion.origin(), 26.0, "öteleme belirmeye kalktı");
-        assert!(motion.origin_settled(), "öteleme kaydı");
-        // İmleç ise belirmenin içinde: aynı karede iki ayrı kip.
-        assert_eq!(motion.alpha(), 0.0, "imleç belirmedi");
+        assert_eq!(motion.origin(), 26.0, "the offset went into a fade");
+        assert!(motion.origin_settled(), "the offset slid");
+        // The cursor, meanwhile, is inside the fade: two separate modes in the same
+        // frame.
+        assert_eq!(motion.alpha(), 0.0, "the cursor did not fade in");
         assert!(!motion.cursor_settled());
 
-        // Uçuştaki bir kayma varken ayarın açılması onu **hedefinde**
-        // bitiriyor: kip artık kaymıyor, devralınacak bir şey yok.
+        // Turning the setting on while a slide is in flight ends it **at its target**:
+        // the mode no longer slides, there is nothing to take over.
         let mut motion = after_enter();
         motion.advance(TICK);
         assert!(!motion.origin_settled());
-        assert!(motion.set_reduce(true), "kare istenmedi");
-        assert_eq!(motion.origin(), 26.0, "açılış kaymayı bitirmedi");
+        assert!(motion.set_reduce(true), "no frame was asked for");
+        assert_eq!(motion.origin(), 26.0, "turning on did not end the slide");
 
-        // **Doldurma da bir istisna değil** (017): erişilebilirlik ayarı
-        // animasyon *eklemez*. `origin_mode()` `Fade`'i `Snap`'e çeviriyor ve
-        // `filled` terimi `animated`'ın **içinde** duruyor.
+        // **The fill is no exception either** (017): the accessibility setting does not
+        // *add* animation. `origin_mode()` turns `Fade` into `Snap` and the `filled`
+        // term stands **inside** `animated`.
         let mut motion = Motion::default();
         motion.set_reduce(true);
         motion.sync(Some([0.0, 29.0]), 27, 0.0, 0, false, false);
         motion.sync(Some([0.0, 29.0]), 20, 0.0, 0, false, false);
         run_to_rest(&mut motion, TICK);
         motion.sync(Some([0.0, 29.0]), 25, 0.0, 0, false, true);
-        assert!(motion.origin_settled(), "Hareketi Azalt'ta doldurma kaydı");
+        assert!(motion.origin_settled(), "the fill slid under Reduce Motion");
         assert_eq!(motion.origin(), 25.0);
     }
 
-    /// Dolu ızgara: öteleme sıfırda yerleşmiş, hedef bir daha oynamayacak.
+    /// Full grid: the offset settled at zero, the target will not move again.
     fn full_grid() -> Motion {
         let mut motion = Motion::default();
         motion.sync(Some([0.0, 29.0]), 0, 0.0, 0, false, false);
-        assert!(motion.settled(), "ilk kare animasyon başlattı");
+        assert!(motion.settled(), "the first frame started an animation");
         motion
     }
 
     #[test]
     fn a_full_grid_still_slides_when_rows_scroll_off() {
-        // **Kullanıcının bildirdiği kusurun bekçisi** (2026-09-23): ızgara
-        // dolunca hedef sabitleniyor ve `sync` hiçbir şey görmüyordu — kayma
-        // ızgara dolana kadar vardı, sonra yoktu. Aynı kare, iki satır kaydı.
+        // **The guard of the defect the user reported** (2026-09-23): once the grid
+        // filled the target was fixed and `sync` saw nothing — the slide existed until
+        // the grid filled, then did not. The same frame, two rows scrolled.
         let mut motion = full_grid();
         motion.sync(Some([0.0, 29.0]), 0, 0.0, 0, false, false);
-        assert!(motion.settled(), "kaydırmasız kare kayma başlattı");
+        assert!(motion.settled(), "a frame without a scroll started a slide");
 
         motion.advance(TICK);
         motion.scroll_in(2, 30);
         motion.sync(Some([0.0, 29.0]), 0, 0.0, 0, false, false);
-        // İçerik bir önceki karede durduğu yerden başlıyor: iki satır aşağıda.
+        // The content starts from where it stood in the previous frame: two rows below.
         assert_eq!(motion.origin(), 2.0);
-        assert!(!motion.origin_settled(), "kaydırma kayma başlatmadı");
-        // Ve yukarı doğru süzülüp yerine oturuyor.
+        assert!(!motion.origin_settled(), "scrolling did not start a slide");
+        // And it glides upward and settles in place.
         let mut last = motion.origin();
         for _ in 0..3 {
             motion.advance(TICK);
-            assert!(motion.origin() < last, "öteleme yukarı akmıyor");
+            assert!(motion.origin() < last, "the offset does not flow upward");
             last = motion.origin();
         }
         run_to_rest(&mut motion, TICK);
@@ -2353,9 +2505,9 @@ mod tests {
 
     #[test]
     fn a_scroll_while_sliding_continues_from_where_the_grid_is() {
-        // Akan çıktı: her kare yeni satır getiriyor. Kayma baştan
-        // başlamıyor, **bulunduğu yere** ekleniyor — yoksa ızgara her
-        // satırda geri sıçrardı.
+        // Streaming output: every frame brings new lines. The slide does not restart
+        // from the beginning, it is added to **where it stands** — otherwise the grid
+        // would jump back on every line.
         let mut motion = full_grid();
         motion.scroll_in(1, 30);
         motion.advance(TICK);
@@ -2367,9 +2519,9 @@ mod tests {
 
     #[test]
     fn the_scroll_slide_is_capped_at_the_limit() {
-        // Hızlı akan çıktı kare başına onlarca satır kaydırabilir; öteleme
-        // ekranlarca geride kalmasın. Tavan konumu aşağı çekmiyor, yalnız
-        // daha fazla itmiyor.
+        // Fast streaming output can scroll dozens of rows per frame; the offset must not
+        // fall screens behind. The ceiling does not pull the position down, it only stops
+        // pushing further.
         let mut motion = full_grid();
         for _ in 0..20 {
             motion.scroll_in(5, 30);
@@ -2387,22 +2539,22 @@ mod tests {
 
     #[test]
     fn a_burst_on_a_resting_grid_slides_in_one_screen() {
-        // **Kullanıcının bildirdiği kusurun bekçisi** (2026-09-23): dolu
-        // ızgarada `seq 1 200` tek karede ekrandan fazlasını kaydırıyor ve
-        // kayma hiç başlamıyordu — boş ızgarada aynı komut süzülürken. Durgun
-        // ızgarada patlama son ekranı tam bir ekran aşağıdan getiriyor.
+        // **The guard of the defect the user reported** (2026-09-23): on a full grid
+        // `seq 1 200` scrolls more than a screen in one frame and the slide never
+        // started — while the same command glided on an empty grid. On a steady grid the
+        // burst brings the last screen from a full screen below.
         let mut motion = full_grid();
         motion.scroll_in(200, 30);
         assert_eq!(
             motion.origin(),
             30.0,
-            "patlama bir ekran aşağıdan başlamadı"
+            "the burst did not start from a screen below"
         );
-        assert!(!motion.origin_settled(), "patlama kayma başlatmadı");
+        assert!(!motion.origin_settled(), "the burst did not start a slide");
         let mut last = motion.origin();
         for _ in 0..3 {
             motion.advance(TICK);
-            assert!(motion.origin() < last, "öteleme yukarı akmıyor");
+            assert!(motion.origin() < last, "the offset does not flow upward");
             last = motion.origin();
         }
 
@@ -2562,24 +2714,24 @@ mod tests {
 
     #[test]
     fn geometry_and_the_wheel_cancel_the_scroll_slide() {
-        // Pencereyi küçültmek satırları geçmişe itiyor ve bu bir kaydırma
-        // değil; `sync`'in snap'i aynı karenin `scroll_in`'ini de silmeli.
+        // Shrinking the window pushes lines into history and that is not a scroll;
+        // `sync`'s snap must erase the same frame's `scroll_in` too.
         let mut motion = full_grid();
         motion.scroll_in(3, 30);
         motion.sync(Some([0.0, 20.0]), 0, 0.0, 0, true, false);
-        assert!(motion.settled(), "geometri kaymayı silmedi");
+        assert!(motion.settled(), "geometry did not erase the slide");
         assert_eq!(motion.origin(), 0.0);
 
         motion.scroll_in(3, 30);
         motion.sync(Some([0.0, 20.0]), 0, 0.0, 4, false, false);
-        assert!(motion.settled(), "tekerlek kaymayı silmedi");
+        assert!(motion.settled(), "the wheel did not erase the slide");
         assert_eq!(motion.origin(), 0.0);
     }
 
     #[test]
     fn snap_and_reduce_motion_never_slide_on_scroll() {
-        // Hareketi kapatmış kullanıcıya kaydırma animasyon eklemez; Hareketi
-        // Azalt ötelemeyi zaten snap'liyor ([`Motion::origin_mode`]).
+        // Scrolling does not add animation for a user who has turned motion off; Reduce
+        // Motion already snaps the offset ([`Motion::origin_mode`]).
         let mut motion = full_grid();
         motion.set_style(CursorMotion::Snap);
         motion.scroll_in(3, 30);
@@ -2595,39 +2747,41 @@ mod tests {
 
     #[test]
     fn snap_style_never_slides_the_origin() {
-        // **R2.2:** kayma `cursor_motion`'ı izliyor, yeni anahtar yok.
-        // `"snap"`ın "hareketi tamamen kapatmanın yolu bu" sözü bu satırda
-        // duruyor — `docs/AYARLAR.md` onu yazıyor.
+        // **R2.2:** the slide follows `cursor_motion`, there is no new key. `"snap"`'s
+        // promise "this is how to turn motion off completely" stands on this line —
+        // `docs/AYARLAR.md` writes it.
         let mut motion = Motion::default();
         motion.set_style(CursorMotion::Snap);
         motion.sync(Some([0.0, 29.0]), 27, 0.0, 0, false, false);
         motion.sync(Some([0.0, 29.0]), 26, 0.0, 0, false, false);
-        assert!(motion.settled(), "snap kayma başlattı");
+        assert!(motion.settled(), "snap started a slide");
         assert_eq!(motion.origin(), 26.0);
 
-        // **Doldurma `"snap"`i de delmiyor** (017): yön kuralının istisnası
-        // `animated`'ın içinde, üstünde değil — hareketi kapatmış kullanıcıya
-        // doldurma bir animasyon *eklemiyor*.
+        // **The fill does not puncture `"snap"` either** (017): the direction rule's
+        // exception is inside `animated`, not above it — for a user who has turned
+        // motion off the fill does not *add* an animation.
         motion.sync(Some([0.0, 29.0]), 28, 0.0, 0, false, true);
-        assert!(motion.settled(), "snap'te doldurma kayma başlattı");
+        assert!(motion.settled(), "the fill started a slide under snap");
         assert_eq!(motion.origin(), 28.0);
 
-        // Kayma ortasında `"snap"`e geçmek de onu hedefinde bitiriyor ve kare
-        // istiyor: link yerleşmiş animasyonda hiç çizmeden uyuyor.
+        // Switching to `"snap"` mid-slide ends it at its target and asks for a frame
+        // too: the link sleeps without drawing on a settled animation.
         let mut motion = after_enter();
         motion.advance(TICK);
-        assert!(motion.set_style(CursorMotion::Snap), "kare istenmedi");
+        assert!(
+            motion.set_style(CursorMotion::Snap),
+            "no frame was asked for"
+        );
         assert!(motion.settled());
         assert_eq!(motion.origin(), 26.0);
     }
 
     #[test]
     fn switching_style_mid_slide_does_not_teleport_the_origin() {
-        // İmlecinkiyle aynı kural (`switching_style_in_flight_does_not_teleport`):
-        // stil değişimi bir hedef değişimi değil, ızgara bulunduğu yerden
-        // devam etmeli. `ease` çıkış noktasını hatırladığı için asıl risk
-        // orada — `from` tazelenmeseydi içerik eski başlangıcına geri
-        // sıçrardı.
+        // The same rule as the cursor's (`switching_style_in_flight_does_not_teleport`):
+        // a style change is not a target change, the grid must continue from where it
+        // stands. The real risk is in `ease` because it remembers its start point — had
+        // `from` not been refreshed the content would jump back to the old start.
         let mut motion = after_enter();
         for _ in 0..8 {
             motion.advance(TICK);
@@ -2635,44 +2789,44 @@ mod tests {
         let before = motion.origin();
         assert!(
             before < 27.0 && before > 26.0,
-            "senaryo kurulmadı: {before}"
+            "the scenario was not set up: {before}"
         );
 
         motion.set_style(CursorMotion::Ease);
-        assert_eq!(motion.origin(), before, "stil değişimi ışınladı");
+        assert_eq!(motion.origin(), before, "the style change teleported");
         run_to_rest(&mut motion, TICK);
         assert_eq!(motion.origin(), 26.0);
     }
 
     #[test]
     fn covering_the_window_settles_the_slide_too() {
-        // `Motion::finish`'in öteleme yarısı. Örtülmede link duruyor, yani
-        // `advance` bir daha koşmuyor; yarısı bitirilseydi `settled()` sonsuza
-        // kadar `false` kalır ve süreli koşu **kod doğruyken**
-        // `MotionUnsettled` derdi.
+        // The offset half of `Motion::finish`. When occluded the link stops, so
+        // `advance` will not run again; had half been finished `settled()` would stay
+        // `false` forever and the timed run would say `MotionUnsettled` **while the code
+        // is right**.
         let mut motion = after_enter();
         motion.advance(TICK);
         assert!(!motion.settled());
 
         motion.finish();
-        assert!(motion.settled(), "bitirilen kayma yerleşmedi");
+        assert!(motion.settled(), "the finished slide did not settle");
         assert_eq!(motion.origin(), 26.0);
     }
 
-    /// `rows` satırlık bir çentik isteği, `generation` neslinde.
+    /// A notch request of `rows` rows, in generation `generation`.
     fn notch(rows: f32, generation: u32) -> ScrollGlide {
         ScrollGlide { rows, generation }
     }
 
-    /// Link'in kare başı sırası (`link.rs`): önce geçen süre, sonra payın
-    /// alınması. Dönüş bu karenin payı.
+    /// The link's per-frame order (`link.rs`): first the elapsed time, then taking the
+    /// share. The return is this frame's share.
     fn glide_frame(motion: &mut Motion) -> f32 {
         motion.advance(TICK);
         motion.take_glide().rows
     }
 
-    /// Süzülme bitene kadar kare kare teslim eder; payların toplamını ve
-    /// en büyük tek payı döndürür.
+    /// Delivers frame by frame until the glide ends; returns the sum of the shares and
+    /// the biggest single share.
     fn deliver_to_rest(motion: &mut Motion) -> (f32, f32) {
         let (mut sum, mut largest) = (0.0_f32, 0.0_f32);
         for _ in 0..10_000 {
@@ -2683,91 +2837,99 @@ mod tests {
                 return (sum, largest);
             }
         }
-        panic!("süzülme yerleşmedi");
+        panic!("the glide did not settle");
     }
 
     #[test]
     fn a_glide_delivers_exactly_the_rows_it_was_asked_for() {
-        // **R2.3'ün sözleşmesi:** çentik kaç satır istediyse pencere o kadar
-        // gidiyor — paylar kare kare `Session::frame`'e giriyor ve toplamları
-        // eksik ya da fazla olsaydı her çentik pencereyi bir kesir kadar
-        // kaydırıp orada bırakırdı. İki kayan stilde de, taşmasız.
+        // **The contract of R2.3:** the window goes exactly as many rows as the notch
+        // asked — the shares enter `Session::frame` frame by frame and had their sum
+        // been short or over, every notch would shift the window by a fraction and leave
+        // it there. In both sliding styles, overshoot-free.
         for style in [CursorMotion::Spring, CursorMotion::Ease] {
             let mut motion = Motion::default();
             motion.set_style(style);
             motion.request_glide(notch(3.0, 0));
-            assert!(!motion.settled(), "{style:?}: istek link'i uyandırmadı");
-            // İstek **bu** karenin `advance`'inden sonra geliyor: ilk pay
-            // sıfır, yani uykudan uyanan link'in kırpılmış `dt`'si isteğin
-            // yarısını tek karede teslim etmiyor.
-            assert_eq!(motion.take_glide().rows, 0.0, "{style:?}: ilk kare sıçradı");
+            assert!(
+                !motion.settled(),
+                "{style:?}: the request did not wake the link"
+            );
+            // The request comes **after** this frame's `advance`: the first share is zero,
+            // so the clamped `dt` of a link waking from sleep does not deliver half the
+            // request in a single frame.
+            assert_eq!(
+                motion.take_glide().rows,
+                0.0,
+                "{style:?}: the first frame jumped"
+            );
 
             let mut shares = Vec::new();
             while !motion.glide_idle() {
                 shares.push(glide_frame(&mut motion));
-                assert!(shares.len() < 10_000, "{style:?}: süzülme yerleşmedi");
+                assert!(shares.len() < 10_000, "{style:?}: the glide did not settle");
             }
             let sum: f32 = shares.iter().sum();
-            assert!((sum - 3.0).abs() < 1e-5, "{style:?}: toplam {sum}");
+            assert!((sum - 3.0).abs() < 1e-5, "{style:?}: total {sum}");
             assert!(
                 shares.iter().all(|&share| share >= 0.0),
-                "{style:?}: süzülme geri tepti: {shares:?}"
+                "{style:?}: the glide recoiled: {shares:?}"
             );
-            // Süzülme **süzülüyor**: tek kare isteğin büyük kısmını
-            // taşısaydı çentik yine bir sıçrama olurdu.
-            assert!(shares.len() > 5, "{style:?}: {} kare", shares.len());
+            // The glide **glides**: had a single frame carried most of the request the notch
+            // would be a jump again.
+            assert!(shares.len() > 5, "{style:?}: {} frames", shares.len());
             assert!(
                 motion.settled(),
-                "{style:?}: yerleşen süzülme uyku vermiyor"
+                "{style:?}: the settled glide does not let it sleep"
             );
             assert_eq!(
                 motion.take_glide().rows,
                 0.0,
-                "{style:?}: yerleşince pay kaldı"
+                "{style:?}: a share was left after settling"
             );
         }
     }
 
     #[test]
     fn a_second_notch_joins_the_glide_in_flight() {
-        // Tekerleğin çentikleri üst üste geliyor: ikincisi birincinin
-        // **kalanına** ekleniyor, baştan başlamıyor — yoksa ilk çentiğin
-        // teslim edilmemiş payı kaybolurdu.
+        // The wheel's notches pile up: the second is added to the first's **remainder**,
+        // it does not start afresh — otherwise the first notch's undelivered share would
+        // be lost.
         let mut motion = Motion::default();
         motion.request_glide(notch(1.0, 0));
         let mut sum = 0.0;
         for _ in 0..4 {
             sum += glide_frame(&mut motion);
         }
-        assert!(sum > 0.0 && sum < 1.0, "senaryo kurulmadı: {sum}");
+        assert!(sum > 0.0 && sum < 1.0, "the scenario was not set up: {sum}");
         motion.request_glide(notch(1.0, 0));
         let (rest, _) = deliver_to_rest(&mut motion);
-        assert!((sum + rest - 2.0).abs() < 1e-5, "toplam {}", sum + rest);
+        assert!((sum + rest - 2.0).abs() < 1e-5, "total {}", sum + rest);
     }
 
     #[test]
     fn snap_and_reduce_motion_deliver_the_glide_at_once() {
-        // Hareketi kapatmış kullanıcıya çentik animasyon eklemez; Hareketi
-        // Azalt'ta da öteleme gibi snap ([`Motion::origin_mode`]). İstek
-        // **aynı karede** tamamen teslim ediliyor ve link uyanık kalmıyor.
+        // A notch does not add animation for a user who has turned motion off; under
+        // Reduce Motion it snaps like the offset ([`Motion::origin_mode`]). The request
+        // is delivered in full **in the same frame** and the link does not stay awake.
         let mut motion = Motion::default();
         motion.set_style(CursorMotion::Snap);
         motion.request_glide(notch(3.0, 0));
         assert_eq!(motion.take_glide().rows, 3.0);
-        assert!(motion.settled(), "snap'te süzülme kaldı");
+        assert!(motion.settled(), "a glide was left under snap");
 
         let mut motion = Motion::default();
         motion.set_reduce(true);
         motion.request_glide(notch(-2.0, 0));
         assert_eq!(motion.take_glide().rows, -2.0);
-        assert!(motion.settled(), "Hareketi Azalt'ta süzülme kaldı");
+        assert!(motion.settled(), "a glide was left under Reduce Motion");
     }
 
     #[test]
     fn a_new_generation_drops_the_glide_in_flight() {
-        // Konum dışarıdan sıfırlandı (girdide dibe dönüş, Shift+PgUp): kalan
-        // pay dibe dönen pencereyi geri çekmemeli. **Düşürülüyor**, teslim
-        // edilmiyor — dibe dönüş zaten gidilmek istenen yer.
+        // The position was reset from outside (return to bottom on input, Shift+PgUp):
+        // the remaining share must not pull the window back that has returned to the
+        // bottom. It is **dropped**, not delivered — the return to bottom is already
+        // where it wants to go.
         let mut motion = Motion::default();
         motion.request_glide(notch(5.0, 0));
         glide_frame(&mut motion);
@@ -2775,65 +2937,76 @@ mod tests {
         assert!(!motion.glide_idle());
 
         motion.observe_scroll_generation(1);
-        assert!(motion.glide_idle(), "yeni nesil süzülmeyi bitirmedi");
+        assert!(
+            motion.glide_idle(),
+            "the new generation did not end the glide"
+        );
         assert!(motion.settled());
         assert_eq!(
             motion.take_glide(),
             notch(0.0, 1),
-            "düşen pay teslim edildi"
+            "the dropped share was delivered"
         );
 
-        // Aynı nesil no-op: her içerik karesi nesli bildiriyor.
+        // The same generation is a no-op: every content frame reports the generation.
         motion.request_glide(notch(1.0, 1));
         motion.observe_scroll_generation(1);
-        assert!(!motion.glide_idle(), "aynı nesil süzülmeyi bitirdi");
+        assert!(!motion.glide_idle(), "the same generation ended the glide");
 
-        // Yeni nesilden gelen istek eskisinin kalanını taşımıyor: yalnız
-        // kendisi teslim ediliyor.
+        // A request from a new generation does not carry the old one's remainder: only
+        // itself is delivered.
         motion.request_glide(notch(2.0, 2));
         let (sum, _) = deliver_to_rest(&mut motion);
-        assert!((sum - 2.0).abs() < 1e-5, "eski neslin payı taşındı: {sum}");
+        assert!(
+            (sum - 2.0).abs() < 1e-5,
+            "the old generation's share was carried over: {sum}"
+        );
         assert_eq!(motion.take_glide().generation, 2);
     }
 
     #[test]
     fn a_glide_that_hits_the_edge_ends() {
-        // Dipte aşağı fırlatılan tekerlek: kalan pay kırpmaya çarpıyor ve
-        // konum kıpırdamıyor. Süzülme orada bitmeli — yoksa yerleşene kadar
-        // boş içerik kareleri çizer ve sonraki yukarı çentiği yerdi.
+        // A wheel flung down at the bottom: the remaining share hits the clamp and the
+        // position does not move. The glide must end there — otherwise it draws empty
+        // content frames until it settles and swallows the next upward notch.
         let mut motion = Motion::default();
         motion.observe_scroll(0, (0, 0.0), 0.0);
         motion.request_glide(notch(-30.0, 0));
         let share = glide_frame(&mut motion);
         assert!(share < 0.0);
-        // `bt-core` iki satır kaydırdı: konum değişti, süzülme sürüyor.
+        // `bt-core` scrolled two rows: the position changed, the glide continues.
         motion.observe_scroll(0, (2, 0.0), share);
-        assert!(!motion.glide_idle(), "hareket eden süzülme bitti");
+        assert!(!motion.glide_idle(), "a glide that moved ended");
         let share = glide_frame(&mut motion);
         motion.observe_scroll(0, (2, 0.0), share);
-        assert!(motion.glide_idle(), "uca çarpan süzülme sürdü");
+        assert!(motion.glide_idle(), "a glide that hit the end continued");
         assert!(motion.settled());
 
-        // Ters yöndeki çentik tam teslim ediliyor: uçtaki kalan onu yemiyor.
+        // A notch in the opposite direction is delivered in full: the remainder at the
+        // end does not eat it.
         motion.request_glide(notch(3.0, 0));
         let (sum, _) = deliver_to_rest(&mut motion);
-        assert!((sum - 3.0).abs() < 1e-5, "yukarı çentik yendi: {sum}");
+        assert!(
+            (sum - 3.0).abs() < 1e-5,
+            "the upward notch was eaten: {sum}"
+        );
 
-        // Payı sıfır olan kare (isteğin ilk karesi, yerleşmiş pencere) konumu
-        // oynatmıyor ama bir şeyi de bitirmiyor.
+        // A frame whose share is zero (the request's first frame, a settled window) does
+        // not move the position but does not end anything either.
         motion.request_glide(notch(1.0, 0));
         motion.observe_scroll(0, (2, 0.0), 0.0);
         motion.observe_scroll(0, (2, 0.0), 0.0);
-        assert!(!motion.glide_idle(), "sıfır pay süzülmeyi bitirdi");
+        assert!(!motion.glide_idle(), "a zero share ended the glide");
     }
 
     #[test]
     fn finishing_a_glide_delivers_what_is_left() {
-        // Örtülme, `snap`'e geçiş ve Hareketi Azalt süzülmeyi **hedefinde**
-        // bitiriyor: kalan pay düşseydi pencere bir satırın ortasında dinlenirdi
-        // — jestin sonu "en yakın satıra oturur" sözünü tutmazdı. Kalan pay
-        // sıradaki içerik karesinde teslim ediliyor; o güne kadar `settled()`
-        // `false`, çünkü teslim edilmemiş bir pay link'in uyuyamayacağı bir iş.
+        // Occlusion, the switch to `snap` and Reduce Motion end the glide **at its
+        // target**: had the remaining share been dropped the window would rest in the
+        // middle of a row — the end of the gesture would not keep the "settles on the
+        // nearest row" promise. The remaining share is delivered in the next content
+        // frame; until then `settled()` is `false`, because an undelivered share is work
+        // the link cannot sleep through.
         type Finisher = fn(&mut Motion) -> bool;
         let finishers: [(&str, Finisher); 3] = [
             ("finish", |motion| {
@@ -2847,21 +3020,27 @@ mod tests {
             let mut motion = Motion::default();
             motion.request_glide(notch(4.0, 0));
             let mut sum = glide_frame(&mut motion) + glide_frame(&mut motion);
-            assert!(sum > 0.0 && sum < 4.0, "{name}: senaryo kurulmadı: {sum}");
+            assert!(
+                sum > 0.0 && sum < 4.0,
+                "{name}: the scenario was not set up: {sum}"
+            );
 
-            assert!(finisher(&mut motion), "{name}: kare istenmedi");
-            assert!(!motion.settled(), "{name}: bekleyen pay link'i uyuttu");
+            assert!(finisher(&mut motion), "{name}: no frame was asked for");
+            assert!(
+                !motion.settled(),
+                "{name}: the pending share put the link to sleep"
+            );
             sum += motion.take_glide().rows;
-            assert!((sum - 4.0).abs() < 1e-5, "{name}: toplam {sum}");
-            assert!(motion.settled(), "{name}: teslimden sonra yerleşmedi");
+            assert!((sum - 4.0).abs() < 1e-5, "{name}: total {sum}");
+            assert!(motion.settled(), "{name}: did not settle after delivery");
         }
     }
 
     #[test]
     fn scrolling_does_not_end_the_glide() {
-        // **R2.4:** süzülme her satır sınırında ofseti oynatıyor ve `sync`'in
-        // ofset snap'i imleç ile ötelemeye ait. Süzülmeye dokunsaydı ilk
-        // satırı geçen çentik orada kesilirdi.
+        // **R2.4:** the glide moves the offset at every row boundary and `sync`'s offset
+        // snap belongs to the cursor and the offset. Had it touched the glide, a notch
+        // that passed the first row would be cut there.
         let mut motion = Motion::default();
         motion.sync(Some([0.0, 29.0]), 0, 0.0, 0, false, false);
         motion.request_glide(notch(3.0, 0));
@@ -2869,17 +3048,17 @@ mod tests {
         for offset in 1..4 {
             sum += glide_frame(&mut motion);
             motion.sync(Some([0.0, 29.0]), 0, 0.0, offset, false, false);
-            assert!(!motion.glide_idle(), "ofset değişimi süzülmeyi bitirdi");
+            assert!(!motion.glide_idle(), "the offset change ended the glide");
         }
         let (rest, _) = deliver_to_rest(&mut motion);
-        assert!((sum + rest - 3.0).abs() < 1e-5, "toplam {}", sum + rest);
+        assert!((sum + rest - 3.0).abs() < 1e-5, "total {}", sum + rest);
     }
 
     #[test]
     fn switching_style_mid_glide_does_not_jump() {
-        // Öteleme ve imleçle aynı kural: `ease` çıkış noktasını hatırlıyor ve
-        // tazelenmezse eski başlangıçtan yeniden başlardı — teslim edilmiş
-        // payın üstüne bir daha eklenirdi.
+        // The same rule as the offset and the cursor: `ease` remembers its start point
+        // and unless it is refreshed it would restart from the old start — it would be
+        // added once more on top of the share already delivered.
         let mut motion = Motion::default();
         motion.request_glide(notch(3.0, 0));
         let mut sum = 0.0;
@@ -2888,58 +3067,60 @@ mod tests {
         }
         assert!(
             !motion.set_style(CursorMotion::Ease),
-            "devralma kare istedi"
+            "the takeover asked for a frame"
         );
         let (rest, largest) = deliver_to_rest(&mut motion);
-        assert!((sum + rest - 3.0).abs() < 1e-5, "toplam {}", sum + rest);
-        assert!(largest < 1.0, "stil değişimi sıçrattı: {largest}");
+        assert!((sum + rest - 3.0).abs() < 1e-5, "total {}", sum + rest);
+        assert!(largest < 1.0, "the style change caused a jump: {largest}");
     }
 
     #[test]
     fn a_hidden_cursor_keeps_the_scroll_history() {
-        // Ofset `state`'ten ayrı yaşamalı: TUI imleci gizler, pencereyi
-        // kaydırır, sonra geri açar. Ofset boşalsaydı geri açılan imleç
-        // "kaydırma olmadı" der ve kaydırmayı animasyon sanırdı — burada
-        // zaten snap olduğu için belirti yok, ama ters yönde (gizliyken
-        // kaydırma **olmadığında**) yanlış snap üretirdi.
+        // The offset must live apart from `state`: a TUI hides the cursor, scrolls the
+        // window, then turns it back on. Had the offset emptied, the cursor turning back
+        // on would say "there was no scroll" and take the scroll for an animation — here
+        // it is a snap anyway so there is no symptom, but in the opposite direction
+        // (when there was **no** scroll while hidden) it would produce a wrong snap.
         let mut motion = Motion::default();
         motion.sync(None, 0, 0.0, 5, false, false);
         motion.sync(Some([0.0, 0.0]), 0, 0.0, 5, false, false);
         assert_eq!(motion.offset, Some(5));
     }
 
-    // ---- Dock bandının ek satırı (032 phase-2) ----
+    // ---- The dock band's extra rows (032 phase-2) ----
 
-    /// Bandı bir satırdan (fazla `0`) başlatan kare: imleç ve öteleme de
-    /// yerleşik. `style` kipi belirliyor, `reduce` Hareketi Azalt.
+    /// The frame that starts the band from one row (extra `0`): the cursor and offset
+    /// are also settled. `style` decides the mode, `reduce` is Reduce Motion.
     fn band_at_rest(style: CursorMotion, reduce: bool) -> Motion {
         let mut motion = Motion::default();
         motion.set_style(style);
         motion.set_reduce(reduce);
         motion.sync(Some([0.0, 29.0]), 26, 0.0, 0, false, false);
-        assert!(motion.settled(), "ilk kare animasyon başlattı");
+        assert!(motion.settled(), "the first frame started an animation");
         motion
     }
 
     #[test]
     fn the_band_slides_both_ways_and_keeps_the_link_awake() {
-        // Bandın ek satırı kendi `Slide`'ında ve **iki yönde** süzülüyor —
-        // panelin boyu içerik değil, yön kuralı (011) ona uymuyor. Yerleşmeden
-        // `settled()` yanlış: dışında kalsaydı link büyümenin ortasında uyur ve
-        // ızgara ile bant yarı yolda donardı.
+        // The band's extra rows are in their own `Slide` and glide in **both
+        // directions** — the panel's size is not content, the direction rule (011) does
+        // not fit it. `settled()` is wrong before it settles: left outside, the link
+        // would sleep in the middle of the growth and the grid and the band would
+        // freeze halfway.
         let mut motion = band_at_rest(CursorMotion::Spring, false);
         motion.sync(Some([0.0, 29.0]), 26, 2.0, 0, false, false);
-        assert!(!motion.settled(), "büyüyen bant yerleşmiş sayıldı");
-        assert_eq!(motion.band(), 0.0, "bant sync'te sıçradı");
+        assert!(!motion.settled(), "the growing band was counted as settled");
+        assert_eq!(motion.band(), 0.0, "the band jumped in sync");
         motion.advance(TICK);
         let mid = motion.band();
-        assert!(mid > 0.0 && mid < 2.0, "bant süzülmüyor: {mid}");
+        assert!(mid > 0.0 && mid < 2.0, "the band does not glide: {mid}");
         run_to_rest(&mut motion, TICK);
         assert_eq!(motion.band(), 2.0);
 
-        // Küçülme de süzülüyor: satır silince bant kaybolup ızgara zıplamamalı.
+        // Shrinking glides too: when a line is deleted the band must not vanish with the
+        // grid jumping.
         motion.sync(Some([0.0, 29.0]), 26, 0.0, 0, false, false);
-        assert!(!motion.settled(), "küçülen bant snap'lendi");
+        assert!(!motion.settled(), "the shrinking band was snapped");
         motion.advance(TICK);
         assert!(motion.band() < 2.0 && motion.band() > 0.0);
         run_to_rest(&mut motion, TICK);
@@ -2948,22 +3129,25 @@ mod tests {
 
     #[test]
     fn a_negative_band_slides_both_ways_and_snaps_when_asked() {
-        // **Uzak oturum** (036 Karar 8): giriş satırı kalkınca bandın fazlası
-        // negatif ve kesirli (bir hücre artı satır arası boşluk). Yön kuralı
-        // yok: bant 1 → 0 → 1 giriş satırında iki yönde süzülüyor ve
-        // yerleşiyor; `snap` ile Hareketi Azalt'ta anında.
+        // **Remote session** (036 Karar 8): when the input line goes away the band's
+        // extra is negative and fractional (a cell plus the line gap). There is no
+        // direction rule: the band glides in two directions with an input line of 1 → 0
+        // → 1 and settles; instantly under `snap` and Reduce Motion.
         const REMOTE: f32 = -34.0 / 18.0;
         let mut motion = band_at_rest(CursorMotion::Spring, false);
         motion.sync(Some([0.0, 29.0]), 26, REMOTE, 0, false, false);
-        assert!(!motion.settled(), "kısalan bant yerleşmiş sayıldı");
+        assert!(
+            !motion.settled(),
+            "the shortening band was counted as settled"
+        );
         motion.advance(TICK);
         let mid = motion.band();
-        assert!(mid < 0.0 && mid > REMOTE, "bant süzülmüyor: {mid}");
+        assert!(mid < 0.0 && mid > REMOTE, "the band does not glide: {mid}");
         run_to_rest(&mut motion, TICK);
         assert_eq!(motion.band(), REMOTE);
 
         motion.sync(Some([0.0, 29.0]), 26, 0.0, 0, false, false);
-        assert!(!motion.settled(), "geri gelen satır snap'lendi");
+        assert!(!motion.settled(), "the returning row was snapped");
         motion.advance(TICK);
         assert!(motion.band() > REMOTE && motion.band() < 0.0);
         run_to_rest(&mut motion, TICK);
@@ -2973,51 +3157,62 @@ mod tests {
             let mut motion = band_at_rest(style, reduce);
             motion.sync(Some([0.0, 29.0]), 26, REMOTE, 0, false, false);
             assert_eq!(motion.band(), REMOTE, "{style:?}/{reduce}");
-            assert!(motion.settled(), "{style:?}/{reduce}: kare istendi");
+            assert!(
+                motion.settled(),
+                "{style:?}/{reduce}: a frame was asked for"
+            );
         }
     }
 
     #[test]
     fn snap_reduce_motion_and_geometry_snap_the_band() {
-        // Hareketi Azalt ve `cursor_motion = "snap"` bandı tek karede oturtuyor
-        // (öteleme gibi — bant belirmiyor da); geometri değişimi her kipte.
+        // Reduce Motion and `cursor_motion = "snap"` seat the band in one frame (like the
+        // offset — the band does not fade either); a geometry change does in every mode.
         for (style, reduce) in [(CursorMotion::Snap, false), (CursorMotion::Spring, true)] {
             let mut motion = band_at_rest(style, reduce);
             motion.sync(Some([0.0, 29.0]), 26, 3.0, 0, false, false);
-            assert_eq!(motion.band(), 3.0, "{style:?}/{reduce}: bant kaydı");
-            assert!(motion.settled(), "{style:?}/{reduce}: kare istendi");
+            assert_eq!(motion.band(), 3.0, "{style:?}/{reduce}: the band slid");
+            assert!(
+                motion.settled(),
+                "{style:?}/{reduce}: a frame was asked for"
+            );
         }
         let mut motion = band_at_rest(CursorMotion::Spring, false);
         motion.sync(Some([0.0, 29.0]), 26, 3.0, 0, true, false);
-        assert_eq!(motion.band(), 3.0, "geometri bandı süzdü");
+        assert_eq!(motion.band(), 3.0, "geometry glided the band");
         assert!(motion.settled());
-        // Tekerlek bandı snap'lemiyor: kaydırma dock'un satırını değiştirmiyor.
+        // The wheel does not snap the band: scrolling does not change the dock's row
+        // count.
         let mut motion = band_at_rest(CursorMotion::Spring, false);
         motion.sync(Some([0.0, 29.0]), 26, 3.0, 4, false, false);
-        assert!(!motion.settled(), "tekerlek bandı snap'ledi");
+        assert!(!motion.settled(), "the wheel snapped the band");
     }
 
     #[test]
     fn a_band_change_lets_the_rising_content_target_glide() {
-        // **Yön kuralının ikinci istisnası** (032): bandın hedefi değişen karede
-        // yükselen içerik hedefi de süzülüyor. Satırlar ızgaradan dock'a
-        // geçerken bastırılan satırlar doluluktan düşüyor (hedef yükseliyor)
-        // ve bant o kadar büyüyor; ikisinden biri snap'leseydi ızgara bir
-        // karede zıplar, öteki süzülürdü.
+        // **The direction rule's second exception** (032): in the frame where the band's
+        // target changes, the rising content target glides too. As rows pass from the
+        // grid to the dock the suppressed rows drop out of the fill (the target rises)
+        // and the band grows by that much; had either of them snapped the grid would
+        // jump in one frame while the other glided.
         let mut motion = band_at_rest(CursorMotion::Spring, false);
-        // Bant 0 → 2 ve aynı karede öteleme 26 → 28 (yükseliyor).
+        // Band 0 → 2 and in the same frame the offset 26 → 28 (rising).
         motion.sync(Some([0.0, 29.0]), 28, 2.0, 0, false, false);
-        assert!(!motion.origin_settled(), "yükselen hedef snap'lendi");
-        // Çizilen orijin `origin − band` — iki eğri aynı fizikle ve aynı
-        // mesafeyle, yani birbirini götürüyor: ızgara yerinde duruyor.
+        assert!(!motion.origin_settled(), "the rising target was snapped");
+        // The drawn origin is `origin − band` — the two curves have the same physics and
+        // the same distance, so they cancel each other: the grid stands still.
         for _ in 0..8 {
             motion.advance(TICK);
             let drawn = motion.origin() - motion.band();
-            assert!((drawn - 26.0).abs() < 1e-4, "ızgara oynadı: {drawn}");
+            assert!((drawn - 26.0).abs() < 1e-4, "the grid moved: {drawn}");
         }
-        // Bant değişmeyen karede kural yerinde: yükselen hedef snap'liyor.
+        // In a frame where the band does not change the rule stands: the rising target
+        // snaps.
         run_to_rest(&mut motion, TICK);
         motion.sync(Some([0.0, 29.0]), 29, 2.0, 0, false, false);
-        assert!(motion.origin_settled(), "bant değişmedi ama hedef süzüldü");
+        assert!(
+            motion.origin_settled(),
+            "the band did not change but the target glided"
+        );
     }
 }

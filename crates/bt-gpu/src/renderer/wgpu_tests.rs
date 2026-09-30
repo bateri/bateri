@@ -244,8 +244,8 @@ fn a_rule_is_drawn_over_its_glyph() {
 }
 
 // **Completion model** (Karar 6): four jobs carried by the submission index
-// and `poll` — `kare=` counts only finished frames, a failed frame goes to
-// `Retry`, `acilis=` closes on the first finished frame, and a frame in
+// and `poll` — `frames=` counts only finished frames, a failed frame goes to
+// `Retry`, `startup=` closes on the first finished frame, and a frame in
 // flight is polled before the link sleeps.
 
 /// A small frame with one coloured cell.
@@ -266,11 +266,11 @@ fn wait_for_gpu(r: &Renderer) {
 
 #[test]
 fn a_finished_frame_is_counted_by_one_poll() {
-    // `kare=` counts frames the GPU finished without error — not
+    // `frames=` counts frames the GPU finished without error — not
     // submitted ones — and the last frame before the link sleeps is not
     // lost: while it is in flight `in_flight` asks for one delayed poll,
     // that single poll counts it, and an empty queue arms nothing (the
-    // stop condition). `acilis=` closes at the first `Ok` the poll hands
+    // stop condition). `startup=` closes at the first `Ok` the poll hands
     // over, not at submit.
     let r = Renderer::new();
     assert_eq!(r.frames(), 0);
@@ -281,7 +281,7 @@ fn a_finished_frame_is_counted_by_one_poll() {
     assert_eq!(r.frames(), 0, "a submitted frame is not a finished one");
     assert!(r.in_flight(), "the submitted frame is not tracked");
     assert_eq!(stats.startup(), None);
-    assert_eq!(r.last_bg_count(), 1, "`hucre=` of the submitted frame");
+    assert_eq!(r.last_bg_count(), 1, "`cells=` of the submitted frame");
     assert_eq!((r.last_glyph_count(), r.last_rule_count()), (0, 0));
     // No atlas was asked for: an unopened atlas has no slots (`(0, 0)`).
     assert_eq!(
@@ -314,7 +314,7 @@ fn a_finished_frame_is_counted_by_one_poll() {
 fn a_frame_failing_validation_is_not_counted() {
     // The synchronous leg: an error caught around the submit returns
     // `Err` (the caller sends it to `Retry::draw_failed`) and the frame is
-    // never tracked, so it can never be counted — otherwise `make duman`
+    // never tracked, so it can never be counted — otherwise `make smoke`
     // would pass a black window.
     let r = Renderer::new();
     let target = r.target(16);
@@ -325,7 +325,7 @@ fn a_frame_failing_validation_is_not_counted() {
         "an invalid frame was submitted silently: {result:?}"
     );
     assert!(!r.in_flight(), "a failed frame is tracked");
-    assert_eq!(r.last_bg_count(), 0, "a failed frame pollutes `hucre=`");
+    assert_eq!(r.last_bg_count(), 0, "a failed frame pollutes `cells=`");
     wait_for_gpu(&r);
     assert!(!r.poll(|_| panic!("nothing to report")));
     assert_eq!(r.frames(), 0);
@@ -1027,10 +1027,10 @@ fn every_scene_draws_all_its_pipelines_together() {
     }
 }
 
-// **Measurement hook** (R2.4). Not part of `make hepsi`; `/measure` runs it
+// **Measurement hook** (R2.4). Not part of `make check`; `/measure` runs it
 // and reads the line (`.claude/is-akisi/olcum.md` → Türler). The line's keys
-// (`arka_uc=`, `kare=`, …) are the project's token contract and stay as
-// they are.
+// (`backend=`, `frames=`, …) follow the project's token contract: never
+// delete a key, only add. They were renamed once from Turkish (2026-10-01).
 
 /// The hook's frame: a full grid (a ground in every cell), a caret and a
 /// two-row dock — `cell_bg` and the caret only, so the numbers stay
@@ -1079,9 +1079,9 @@ fn report(frames: usize, stats: &Stats, supported: bool) -> String {
         span("gpu", gpu)
     };
     format!(
-        "arka_uc=wgpu profil={profile} kare={frames} ornek={}{}{}{gpu_line}",
+        "backend=wgpu profile={profile} frames={frames} samples={}{}{}{gpu_line}",
         cpu.nanos.len(),
-        span("cpu_kare", cpu),
+        span("cpu_frame", cpu),
         span("cpu_encode", stats.cpu_encode()),
     )
 }
@@ -1090,7 +1090,7 @@ fn report(frames: usize, stats: &Stats, supported: bool) -> String {
 #[ignore = "measurement hook: run by /measure (olcum.md → Türler)"]
 fn offscreen_frame_loop() {
     // The same frame, `FRAMES` times; the two CPU spans of `Stats`:
-    // `cpu_kare` builds the frame (the run's noise witness), `cpu_encode` is
+    // `cpu_frame` builds the frame (the run's noise witness), `cpu_encode` is
     // encode + submit. The GPU is waited for, but **outside** the spans, so
     // frames do not queue behind each other. The first `WARMUP` frames are
     // not recorded (warm-up, clock state).

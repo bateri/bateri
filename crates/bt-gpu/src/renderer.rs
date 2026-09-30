@@ -1277,10 +1277,10 @@ pub struct Renderer {
     /// without a settings file see the same font, and the default size has no
     /// second owner.
     font: RefCell<FontOptions>,
-    /// Frames the GPU finished **without error**; `make duman`'s `kare=`.
+    /// Frames the GPU finished **without error**; `make smoke`'s `frames=`.
     frames: Cell<u64>,
     /// The last **submitted** frame's background, glyph and rule counts
-    /// (`hucre=`, `glif=`, `kural=`); CPU counters.
+    /// (`cells=`, `glyphs=`, `rules=`); CPU counters.
     last_counts: Cell<[usize; 3]>,
     /// Submitted frames, oldest first.
     in_flight: RefCell<VecDeque<Pending>>,
@@ -1407,7 +1407,7 @@ impl Renderer {
     }
 
     /// The mask plane's slot occupancy (used, total); `(0, 0)` without an
-    /// atlas. `yuva=`'s source.
+    /// atlas. `slots=`'s source.
     pub fn atlas_occupancy(&self) -> (usize, usize) {
         self.state
             .borrow()
@@ -1416,7 +1416,7 @@ impl Renderer {
             .map_or((0, 0), |a| a.atlas.occupancy())
     }
 
-    /// The colour plane's slot occupancy; `yuva2=`'s source.
+    /// The colour plane's slot occupancy; `slots2=`'s source.
     pub fn color_atlas_occupancy(&self) -> (usize, usize) {
         self.state
             .borrow()
@@ -1480,7 +1480,7 @@ impl Renderer {
     }
 
     /// Waits at most `timeout` for the newest submitted frame — the pending
-    /// poll at shutdown, which must come before the report reads `kare=`
+    /// poll at shutdown, which must come before the report reads `frames=`
     /// (Karar 6). It only waits; counting is still [`Renderer::poll`]'s.
     pub(crate) fn wait_in_flight(&self, timeout: Duration) {
         let newest = self.in_flight.borrow().back().map(|p| p.index.clone());
@@ -2128,7 +2128,7 @@ impl Renderer {
             return Err(GpuError::Wgpu(error.to_string()));
         }
         // The frame is on its way: the counters change here, so a frame that
-        // could not be submitted does not pollute `hucre=`.
+        // could not be submitted does not pollute `cells=`.
         self.last_counts
             .set([frame.bg_count(), frame.glyph_count(), frame.rule_count()]);
         self.in_flight.borrow_mut().push_back(Pending {
@@ -2156,7 +2156,7 @@ impl Renderer {
     /// `Poll` only says "queue empty or not", and the device may be shared.
     /// `on_complete` must not call back into this renderer.
     ///
-    /// **`acilis=`** is closed by the caller at the first `Ok` — the moment
+    /// **`startup=`** is closed by the caller at the first `Ok` — the moment
     /// this poll **observes** the finish, which trails the finish itself by at
     /// most one tick (or one delayed poll); native wgpu has no earlier
     /// observable moment without a thread of its own.
