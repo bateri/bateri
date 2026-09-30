@@ -1,4 +1,4 @@
-//! bt-atlas — glyph rasterizasyonu ve atlas paketleme.
+//! bt-atlas — glyph rasterization and atlas packing.
 //!
 //! Rasterization, the fixed slot grid and the cell metric live here. The
 //! font stack sits behind the `FontSystem` trait (`system`): the rules
@@ -10,36 +10,39 @@
 //! leaves here is a slot number and CPU bitmaps, which `bt-gpu` uploads into
 //! its own two textures (mask `R8Unorm`, colour `RGBA8Unorm_sRGB`).
 //!
-//! Dört font yüzü (`Face`) ve kural çizgileri (`RuleKind`) burada: kural
-//! sprite'ları fonttan glyph almıyor, yordamsal çiziliyor. Aile ayardan
-//! gelir (007 phase-5) ve makinede yoksa zincire düşülür; bunu söyleyen
-//! [`FontIssue`] çağırana döner, bu crate kimseye bir şey basmaz.
+//! The four font faces (`Face`) and the rule lines (`RuleKind`) live here: the
+//! rule sprites take no glyph from the font, they are drawn procedurally. The
+//! family comes from the settings (007 phase-5) and falls back to the chain if
+//! it is missing on the machine; [`FontIssue`], which reports that, goes back
+//! to the caller — this crate prints nothing to anyone.
 //!
-//! **Yordamsal çizilen ikinci küme karakterlerdir** ve fonta hiç sorulmadan
-//! kazanırlar (`raster::is_procedural`): blok elemanları (U+2580–U+259F),
-//! Braille (U+2800–U+28FF), çizgi çizim (U+2500–U+257F, **köşegenler
-//! `╱╲╳` hariç**) ve terminalin grafik kümesi (U+23B8–U+23BF: iki dikey
-//! kenar çizgisi, dört tarama satırı, iki köşe — `⎷` U+23B7 dışarıda).
-//! Gerekçe döşeme — fontun em kutusu hücre kutusu değil ve
-//! Menlo'nun `█`'i hücreyi doldurmuyor, alt alta iki blok arasında şerit
-//! kalıyor. Son aile bir kusuru da kapatıyor: `⎿` (Claude Code araç
-//! sonuçlarının işareti) cascade'den **hücreye sığmayan** bir glyph'le
-//! geliyordu ve kutu çıkıyordu. Yüzden bağımsızlar (dört yüz tek yuva; ince/kalın ayrımı zaten
-//! karakterin kendisinde), ama **yalnız büyük sınıfta**: dock'un bağlam
-//! satırında sütun adımı küçük yüzün ilerlemesi ve büyük hücre genişliğinde
-//! bir sprite orada komşusunun üstüne binerdi.
+//! **Procedurally drawn characters are the second set** and they win without
+//! the font ever being asked (`raster::is_procedural`): block elements
+//! (U+2580–U+259F), Braille (U+2800–U+28FF), box drawing (U+2500–U+257F,
+//! **except the diagonals `╱╲╳`**) and the terminal's graphics set
+//! (U+23B8–U+23BF: two vertical edge lines, four scan lines, two corners —
+//! `⎷` U+23B7 is left out). The reason is tiling — the font's em box is not
+//! the cell box and Menlo's `█` does not fill the cell, leaving a stripe
+//! between two stacked blocks. The last family closes another defect too: `⎿`
+//! (the marker of Claude Code's tool results) used to arrive from the cascade
+//! as a glyph that **does not fit the cell** and came out as a box. They are
+//! face-independent (the four faces share one slot; the thin/heavy distinction
+//! is already in the character itself), but **only in the large class**: in
+//! the dock's context line the column step is the small face's advance, and a
+//! sprite at the large cell width would overlap its neighbour there.
 //!
-//! Seçili fontta olmayan **tek hücrelik** karakter sistemin cascade'inden
-//! geliyor (`rules::fallback_font`) ve kapı **geometrik**: adayın
-//! **boyayacağı piksel** hücrenin dışına taşıyorsa reddediliyor. Ölçülen şey
-//! ilerleme değil mürekkep, çünkü sembol fontlarının glyph'leri
-//! ilerlemelerinden dar boyuyor (`⏺` U+23FA) ve ilerlemeyi ölçen bir kapı
-//! onları hücreye sığdıkları hâlde eliyordu. Sığmayan aday iki sütunluysa iki
-//! hücreye (023), sığmıyorsa ve taşması sınırın içindeyse küçük puntolu
-//! kopyasıyla çiziliyor (041, `rules::SHRINK_LIMIT`); kalanı [`TOFU`].
+//! A **single-cell** character missing from the selected font comes from the
+//! system's cascade (`rules::fallback_font`) and the gate is **geometric**: a
+//! candidate is rejected if the **pixels it will paint** spill outside the
+//! cell. What is measured is ink, not advance, because the glyphs of symbol
+//! fonts paint narrower than they advance (`⏺` U+23FA) and a gate that
+//! measured the advance rejected them although they fit the cell. A candidate
+//! that does not fit is drawn into two cells if it is two columns wide (023),
+//! and as a smaller-point copy if it does not fit and its overflow is within
+//! the limit (041, `rules::SHRINK_LIMIT`); the rest is [`TOFU`].
 
-// Yedek kapısının taraması ve araç karakterlerinin bekçisi; üretimde
-// tüketicisi yok (041 phase-1).
+// The fallback gate's scan and the guard of the tool characters; it has no
+// consumer in production (041 phase-1).
 #[cfg(all(test, target_os = "macos"))]
 mod census;
 #[cfg(target_os = "macos")]
@@ -67,26 +70,26 @@ use system::{Backend, Font, FontSystem};
 #[doc(hidden)]
 pub use system::fixture;
 
-/// Atlasta yuva tutan şey: bir karakter, bir kural çizgisi ya da bir grapheme
-/// dizisi.
+/// What holds a slot in the atlas: a character, a rule line or a grapheme
+/// sequence.
 ///
-/// Üçü aynı ızgarada yaşıyor çünkü üçü de **hücre boyunda** yuvalara
-/// rasterize oluyor: emoji ve geniş glyph 023'ten beri iki yarıya ([`Half`])
-/// ve renk düzlemine ([`Plane`]) bölünerek aynı birliğe girdi, yani ayrı bir
-/// doku ya da ayrı bir paketleyici doğmadı.
+/// The three live in the same grid because all three are rasterized into
+/// slots **one cell in size**: since 023 emoji and wide glyphs have joined the
+/// same union by being split into two halves ([`Half`]) and into the colour
+/// plane ([`Plane`]), i.e. no separate texture or separate packer was born.
 ///
-/// [`Sprite::Cluster`] bir dizginin (bayrak `🇹🇷`, ZWJ `👨‍👩‍👧`, ten rengi
-/// `👍🏽`, VS16 `❤️`) **atlasın kendi** interner'ındaki kimliği
-/// ([`Atlas::intern`]); `Sprite` o sayede `Copy + Hash` kalıyor ve yuva
-/// anahtarı bir dizgi taşımıyor. Dizi tek glyph'e şekillenmezse cevabı taban
-/// karakterinki ([`Atlas::slot`]).
+/// [`Sprite::Cluster`] is the identity, in the **atlas's own** interner
+/// ([`Atlas::intern`]), of a string (flag `🇹🇷`, ZWJ `👨‍👩‍👧`, skin tone
+/// `👍🏽`, VS16 `❤️`); that is how `Sprite` stays `Copy + Hash` and the slot
+/// key carries no string. If the sequence does not shape into a single glyph
+/// the answer is the base character's ([`Atlas::slot`]).
 ///
-/// Yordamsal çizilen karakterler (blok, Braille) **üçüncü bir varyant
-/// almadı**: bir karakterdirler ve `Char` olarak yaşıyorlar. `Sprite::Box`
-/// açmak `bt-gpu`'nun bugünkü tek satırını "bu karakter hangi sprite"
-/// sorusuna çevirir, yani renderer'a terminal semantiği sızdırırdı; kapı
-/// bu yüzden [`Atlas::slot`]'un içinde.
-// `repr(u8)`: bkz. `RuleKind`.
+/// Procedurally drawn characters (block, Braille) **did not get a third
+/// variant**: they are characters and live as `Char`. Opening a `Sprite::Box`
+/// would turn `bt-gpu`'s one-line today into the question "which sprite is
+/// this character", i.e. it would leak terminal semantics into the renderer;
+/// that is why the gate is inside [`Atlas::slot`].
+// `repr(u8)`: see `RuleKind`.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sprite {
@@ -95,26 +98,26 @@ pub enum Sprite {
     Cluster(u32),
 }
 
-/// Bir glyph'in hücre ızgarasındaki **yarısı** — yuva anahtarının dördüncü
-/// ekseni ve [`SizeClass`]'ın kardeşi.
+/// The **half** of a glyph in the cell grid — the fourth axis of the slot key
+/// and the sibling of [`SizeClass`].
 ///
-/// Geniş karakter iki hücre boyunda bir kutuya ortalanıp **iki** yuvaya
-/// rasterize ediliyor; her yuva yine tam bir hücre, yani doku düzeni,
-/// `slot_bytes` ve ızgara aritmetiği hiç değişmiyor. Dörtlü de tek hücre
-/// kalıyor: `bt-gpu` iki instance basıyor ve `GlyphInstance`'ın 32 baytlık
-/// stride'ı ile `cell_px` uniform'u el değmiyor.
+/// A wide character is centred in a box two cells wide and rasterized into
+/// **two** slots; each slot is still exactly one cell, i.e. the texture
+/// layout, `slot_bytes` and the grid arithmetic do not change at all. The quad
+/// also stays one cell: `bt-gpu` emits two instances and `GlyphInstance`'s
+/// 32-byte stride and the `cell_px` uniform are left untouched.
 ///
-/// Eksen [`Sprite`]'a **varyant olarak eklenmedi** ve gerekçe o tipin
-/// doc'unda yazılı: `Sprite`'a eklenen bir kol renderer'a "bu karakter hangi
-/// sprite" sorusunu sızdırır. Buradaki eksen ise çağıranın **taşıdığı** bir
-/// istek — `Face` ile `SizeClass` gibi — ve `Atlas::slot` onu normalize
-/// ediyor.
+/// The axis was **not added as a variant** to [`Sprite`] and the reason is
+/// written in that type's doc: a variant added to `Sprite` leaks the question
+/// "which sprite is this character" to the renderer. The axis here, on the
+/// other hand, is a request the caller **carries** — like `Face` and
+/// `SizeClass` — and `Atlas::slot` normalizes it.
 ///
-/// [`Half::Whole`] "tek hücre" demek ve **geniş karakterlerde de doğabiliyor**:
-/// mürekkebi bir hücreye sığan geniş ilan edilmiş karakter (`☕`, fullwidth
-/// `！`) tek yuvadan çiziliyor. Kararı kapı veriyor ([`rules::fallback_font`]),
-/// çağıran değil.
-// `repr(u8)`: bkz. `RuleKind`.
+/// [`Half::Whole`] means "single cell" and **can also be born for wide
+/// characters**: a character declared wide whose ink fits one cell (`☕`,
+/// fullwidth `！`) is drawn from a single slot. The gate decides
+/// ([`rules::fallback_font`]), not the caller.
+// `repr(u8)`: see `RuleKind`.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Half {
@@ -123,23 +126,23 @@ pub enum Half {
     Right,
 }
 
-/// Atlasın **hangi düzlemi** — maske mi renk mi.
+/// **Which plane** of the atlas — mask or colour.
 ///
-/// İki düzlem tek [`Atlas`]'ın içinde ve bu bilinçli: ikinci bir `Atlas`
-/// beş CoreText türetmesini (dört yüz + küçük yüz) ve aynı anahtardan
-/// **ikinci bir [`Metrics`]**'i doğururdu. `bt-gpu`'nun `sync_atlas`'ı tam
-/// bunu önlemek için var ("ikinci bir çağrıda alınsaydı araya düşen bir
-/// `ensure` ikisini ayrı atlaslardan verirdi") ve [`Atlas::context_cell_w`]'in
-/// doc'u aynı kokuyu adıyla yazıyor.
+/// The two planes live inside a single [`Atlas`] and this is deliberate: a
+/// second `Atlas` would bring five CoreText derivations (four faces + the
+/// small face) and a **second [`Metrics`]** from the same key. `bt-gpu`'s
+/// `sync_atlas` exists precisely to prevent this ("an `ensure` slipping in
+/// between would serve the two from separate atlases if taken in a second
+/// call") and the doc of [`Atlas::context_cell_w`] names the same smell.
 ///
-/// Yuvalar **iki düzlemde de hücre boyunda**, yani [`Half`] mekanizması geniş
-/// emojinin geometrisini de çözüyor ve ızgara aritmetiği
-/// ([`Atlas::slot_origin`], [`Atlas::capacity`]) ikisi için ortak. Ayrışan tek
-/// şey piksel formatı: maske `R8`, renk `RGBA8` — ve her düzlemin **kendi
-/// monoton sayacı** var, çünkü uv `bt-gpu`'nun `prepare`'inde çözüm anında
-/// pişiyor ve kare ortasında anlamı değişen paylaşımlı bir sayaç önceki
-/// geçişlerin uv'lerini geçersizleştirirdi.
-// `repr(u8)`: bkz. `RuleKind`.
+/// Slots are **one cell in both planes**, i.e. the [`Half`] mechanism solves
+/// the geometry of the wide emoji too and the grid arithmetic
+/// ([`Atlas::slot_origin`], [`Atlas::capacity`]) is shared by both. The only
+/// thing that differs is the pixel format: mask `R8`, colour `RGBA8` — and
+/// each plane has its **own monotonic counter**, because the uv is baked in
+/// `bt-gpu`'s `prepare` at resolve time and a shared counter whose meaning
+/// changed mid-frame would invalidate the uvs of earlier passes.
+// `repr(u8)`: see `RuleKind`.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Plane {
@@ -147,245 +150,267 @@ pub enum Plane {
     Color,
 }
 
-/// [`Atlas::slot`]'un cevabı: yuva **ve** hangi yarının kullanıldığı.
+/// The answer of [`Atlas::slot`]: the slot **and** which half was used.
 ///
-/// İkinci alan bir kolaylık değil zorunluluk: "bir yuva mı iki mi" kararını
-/// mürekkep kapısı veriyor, yani ancak burada biliniyor — çağıran (`bt-gpu`)
-/// ise ikinci instance'ı basıp basmayacağına karar vermek zorunda. Alan
-/// olmasaydı `☕`'nin sağına boş bir dörtlü düşerdi.
+/// The second field is a necessity, not a convenience: the decision "one slot
+/// or two" is made by the ink gate, i.e. it is only known here — while the
+/// caller (`bt-gpu`) has to decide whether to emit a second instance. Without
+/// the field an empty quad would land to the right of `☕`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placed {
     pub slot: u16,
-    /// Yuvanın yaşadığı düzlem; çağıran dokuyu ve pipeline'ı buna göre
-    /// seçiyor. Tofu **her zaman** [`Plane::Mask`]: kutu bir maske.
+    /// The plane the slot lives in; the caller picks the texture and the
+    /// pipeline accordingly. Tofu is **always** [`Plane::Mask`]: the box is a
+    /// mask.
     pub plane: Plane,
-    /// Kapının kabul ettiği kutu: [`Half::Whole`] tek hücre, [`Half::Left`]
-    /// iki hücrenin solu. [`Half::Right`] yalnız `Left` dönmüş bir karakter
-    /// için sorulur.
+    /// The box the gate accepted: [`Half::Whole`] one cell, [`Half::Left`] the
+    /// left of two cells. [`Half::Right`] is only asked for a character that
+    /// returned `Left`.
     pub half: Half,
 }
 
-/// Yuva 0 **rezident tofu**: dolu atlasta ve `.notdef`'te buraya düşülür.
+/// Slot 0 is the **resident tofu**: a full atlas and `.notdef` fall back here.
 ///
-/// Sessiz kayıp (glyph hiç çizilmez) yerine görünür kayıp (kutu çizilir):
-/// eksik font ekranda kendini gösterir, log'da beklemez. İçeriğini `bt-gpu`
-/// doku kurulumunda bir kez yazar ([`Atlas::tofu_bitmap`]) ve bir daha
-/// dokunmaz — "rezident" tam olarak bu demek.
+/// A visible loss (a box is drawn) instead of a silent one (the glyph is never
+/// drawn): a missing font shows itself on screen instead of waiting in a log.
+/// `bt-gpu` writes its content once at texture setup ([`Atlas::tofu_bitmap`])
+/// and never touches it again — "resident" means exactly this.
 pub const TOFU: u16 = 0;
 
-/// Kural sprite'larına ayrılan yuva payı — [`RuleKind`]'ın varyant sayısı.
+/// The slot share set aside for rule sprites — the number of [`RuleKind`]
+/// variants.
 ///
-/// Kapasitenin bu kadarı karakterlere kapalı. Bkz. [`Atlas::slot`].
+/// This much of the capacity is closed to characters. See [`Atlas::slot`].
 const RULE_RESERVE: u16 = 7;
 
-/// Atlasın hedeflediği yuva sayısı — dokunun kenarı **bundan** türüyor.
+/// The slot count the atlas aims for — the texture edge is derived from
+/// **this**.
 ///
-/// **Ölçüm iddiası değil, bir tasarım sabiti** (`GUTTER_PT` ve
-/// [`CONTEXT_SCALE`] emsali) ama türetmesi ölçülmüş bir sayıdan: yordamsal
-/// aile **421** karakter (`docs/OLCUMLER.md` → Atlas yuva ayak izi) ve
-/// atlastan istediği yuva **429** — tofu (1) ile karakterlere kapalı kural
-/// payı ([`RULE_RESERVE`], 7) üstüne biniyor, çünkü [`Atlas::slot`]
-/// karakterlere `capacity() - RULE_RESERVE` veriyor ve `next` 1'den
-/// başlıyor. Kural "ailenin payı atlasın yarısını geçmesin", yani
-/// `2 × 429 = 858`, yukarı yuvarlanmış **1024**.
+/// **Not a measurement claim but a design constant** (like `GUTTER_PT` and
+/// [`CONTEXT_SCALE`]), though its derivation comes from a measured number:
+/// the procedural family is **421** characters (`docs/OLCUMLER.md` → Atlas
+/// yuva ayak izi) and the slots it demands of the atlas are **429** — tofu (1)
+/// and the rule share closed to characters ([`RULE_RESERVE`], 7) pile on top,
+/// because [`Atlas::slot`] gives characters `capacity() - RULE_RESERVE` and
+/// `next` starts at 1. The rule is "the family's share should not exceed half
+/// the atlas", i.e. `2 × 429 = 858`, rounded up to **1024**.
 ///
-/// Sabit **düşük riskli** ve bu onu dürüstçe bir tasarım sabiti yapıyor:
-/// `(450, 1624]` aralığındaki *her* değer 13pt, 28pt ve 29pt@2x'te aynı
-/// davranışı veriyor — 13pt zaten 1984 yuvayla tabanda kalıyor, 28 ile 29pt
-/// ise ikisi de bir kez katlanıyor.
+/// The constant is **low-risk** and that honestly makes it a design constant:
+/// *every* value in `(450, 1624]` gives the same behaviour at 13pt, 28pt and
+/// 29pt@2x — 13pt stays at the floor anyway with 1984 slots, and 28 and 29pt
+/// both fold once.
 ///
-/// Bu sayı bir **taban**, bir tavan değil: hücre küçükse kapasite hedefi
-/// katbekat aşar (13pt@2x → 1984) ve kimse kırpmaz.
+/// This number is a **floor**, not a ceiling: if the cell is small the
+/// capacity overshoots the target many times over (13pt@2x → 1984) and nobody
+/// clips it.
 const SLOT_TARGET: u32 = 1024;
 
-/// Doku kenarının tabanı, piksel — **bugünkü davranışın koruma sözü**.
+/// The floor of the texture edge, in pixels — **the promise to keep today's
+/// behaviour**.
 ///
-/// Varsayılan punto bu kenarda kalıyor ([`SLOT_TARGET`]'ı zaten aşıyor), yani
-/// ızgara, `texture_px()` ve raster bit bit değişmiyor. Düşürülürse o söz
-/// bozulur: varsayılan puntonun dokusu küçülür ve yuva sayısı düşer.
+/// The default point size stays at this edge (it already exceeds
+/// [`SLOT_TARGET`]), i.e. the grid, `texture_px()` and the raster do not
+/// change bit for bit. If it is lowered the promise is broken: the default
+/// point size's texture shrinks and the slot count drops.
 const MIN_EDGE: u16 = 1024;
 
-/// Doku kenarının tavanı, piksel.
+/// The ceiling of the texture edge, in pixels.
 ///
-/// Tavan olmadan büyüme [`MAX_POINT_SIZE`] × `MAX_LINE_HEIGHT` köşesinde
-/// sınırsız sürerdi. 4096 Metal'in doku sınırının (16384) katbekat altında ve
-/// o köşede bile kapasiteyi ailenin üstünde tutuyor — sayısı
-/// `capacity_clears_the_family_at_every_accepted_size`'da **hesaplanıyor**,
-/// buraya yazılmıyor.
+/// Without a ceiling, growth would go on unbounded at the corner of
+/// [`MAX_POINT_SIZE`] × `MAX_LINE_HEIGHT`. 4096 is many times below Metal's
+/// texture limit (16384) and even at that corner it keeps the capacity above
+/// the family — its number is **computed** in
+/// `capacity_clears_the_family_at_every_accepted_size`, not written here.
 const MAX_EDGE: u16 = 4096;
 
-/// `point_size * scale` çarpımının kabul aralığı.
+/// The accepted range of the `point_size * scale` product.
 ///
-/// Üst sınır keyfi değil: `u16` metriğin sonuna kadar giden bir punto yuva
-/// başına gigabaytlık tampon ister ve `texture_px()` Metal'in doku sınırını
-/// katbekat aşar. Alt sınır okunmayan puntoları keser. Ayar ayrıştırıcısı
-/// (`bt-core`) yalnız "sonlu ve sıfırdan büyük" diyor, aralığın **tek sahibi
-/// burası**: `Atlas` kendi değişmezini çağıranın disiplinine bırakmıyor, ve
-/// ölçüt `punto × ölçek` olduğu için ayar tarafında bir tavan pencere ekran
-/// değiştirdikçe anlamını değiştirirdi. Kırpma **sessiz**
-/// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 4).
-/// Bağlam satırının gösterim fontuna oranı.
+/// The upper bound is not arbitrary: a point size running up to the end of the
+/// `u16` metric demands a gigabyte-sized buffer per slot and `texture_px()`
+/// exceeds Metal's texture limit many times over. The lower bound cuts
+/// unreadable point sizes. The settings parser (`bt-core`) only says "finite
+/// and greater than zero"; the range's **sole owner is here**: `Atlas` does
+/// not leave its own invariant to the caller's discipline, and since the
+/// criterion is `point size × scale`, a ceiling on the settings side would
+/// change meaning every time the window moved to another screen. The clamp is
+/// **silent** (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 4).
+/// The ratio of the context line to the display font.
 ///
-/// **Ölçülmüş bir sayı değil, bir tasarım sabiti** (`CellMetrics::GUTTER_PT`
-/// emsali): kullanıcının seçimi, belirgin bir hiyerarşi versin diye. Oran,
-/// mutlak punto değil — Cmd +/− ile gösterim fontu büyüyünce bağlam satırı da
-/// büyür ve iki satırın ilişkisi sabit kalır.
+/// **Not a measured number, a design constant** (like `CellMetrics::GUTTER_PT`):
+/// the user's choice, to give a distinct hierarchy. The ratio, not an absolute
+/// point size — when the display font grows with Cmd +/− the context line
+/// grows too and the relation of the two lines stays constant.
 ///
-/// Çarpım [`effective_point_size`]'ın aralığına giriyor, yani çok küçük
-/// gösterim fontunda taban puntoya oturuyor: 5pt'nin %80'i 4.0, tam sınır.
+/// The product enters the range of [`effective_point_size`], i.e. with a very
+/// small display font it settles on the floor point size: 80% of 5pt is 4.0,
+/// exactly the bound.
 pub(crate) const CONTEXT_SCALE: f64 = 0.8;
 
 const MIN_POINT_SIZE: f64 = 4.0;
 const MAX_POINT_SIZE: f64 = 144.0;
 
-/// Dokuya yazılacak tek yuva: **nereye** ve **ne**.
+/// A single slot to be written into the texture: **where** and **what**.
 ///
-/// İkisi aynı dönüşte geliyor çünkü `replaceRegion` ikisine birden ihtiyaç
-/// duyuyor. Ayrı olsalardı (`slot` + ayrıca `slot_origin`) çağıran `&mut`
-/// ödüncü elindeyken `&self` istemek zorunda kalır ve yükleme döngüsü
-/// derlenmezdi — sınır ödünç kuralının yanlış tarafından geçerdi.
+/// The two come in the same return because `replaceRegion` needs both. Had
+/// they been separate (`slot` + a separate `slot_origin`) the caller would
+/// have to ask for `&self` while holding the `&mut` borrow and the upload loop
+/// would not compile — the boundary would fall on the wrong side of the borrow
+/// rule.
 pub struct Upload<'a> {
-    /// Yuvanın doku içindeki sol üst köşesi, piksel.
+    /// The slot's top-left corner inside the texture, in pixels.
     pub origin: (u16, u16),
-    /// Tam bir yuva dolusu `R8` kapsama verisi ([`Metrics::slot_bytes`]).
+    /// A full slot's worth of `R8` coverage data ([`Metrics::slot_bytes`]).
     pub bytes: &'a [u8],
-    /// Geniş glyph'in **sağ** yarısı — aynı dönüşte, aynı `&mut` ödüncünden.
+    /// The **right** half of a wide glyph — in the same return, from the same
+    /// `&mut` borrow.
     ///
-    /// İki yarı **atomik**: aynı çağrıda iki yuva ayrılıyor, ikisi de bu
-    /// dönüşle yükleniyor ve sağ yarı için ikinci bir `slot()` turu
-    /// beklenmiyor. Ayrı turlara bölünseydi kapasite sınırı ikisinin
-    /// **arasına** düşebilirdi — sol yuva açılır, sağ tofu'ya düşer ve ekranda
-    /// yarım glyph + yarım kutu belirirdi. Bu tipin tek dönüşü o hâli
-    /// **temsil edemiyor**: ya iki yarı birden gelir ya hiçbiri.
+    /// The two halves are **atomic**: two slots are allocated in the same
+    /// call, both are uploaded with this return and no second `slot()` round
+    /// is expected for the right half. Had they been split into separate
+    /// rounds the capacity limit could fall **between** the two — the left slot
+    /// opens, the right falls to tofu and half a glyph + half a box appears on
+    /// screen. This type's single return **cannot represent** that state:
+    /// either both halves come or neither.
     pub right: Option<(u16, u16)>,
-    /// Sağ yarının baytları; [`Upload::right`] `Some` ise anlamlı.
+    /// The right half's bytes; meaningful if [`Upload::right`] is `Some`.
     pub right_bytes: &'a [u8],
-    /// Baytların hangi düzleme yazılacağı — formatı ve satır adımını o
-    /// belirliyor. `bt-gpu` `bytesPerRow`'u buradan türetmek zorunda:
-    /// ayrışırsa Metal kısa tamponun ötesini okur ve belirti sessizdir.
+    /// Which plane the bytes are to be written to — it determines the format
+    /// and the row stride. `bt-gpu` has to derive `bytesPerRow` from here: if
+    /// they diverge Metal reads past the short buffer and the symptom is
+    /// silent.
     pub plane: Plane,
 }
 
-/// Sabit yuva ızgarasında yaşayan glyph atlası.
+/// The glyph atlas living in a fixed slot grid.
 ///
-/// Paketleyici yok: bu sette **tüm sprite'lar hücre boyutunda** (emoji ve
-/// geniş glyph kapsam dışı), yani `yuva_no → piksel köşe` dönüşümü
-/// aritmetiktir. Yordamsal karakterler (blok, Braille, çizgi) o kısıtı
-/// bozmuyor — tanımları gereği tam bir hücre; üstelik kısıtı asıl talep eden
-/// onlar, çünkü döşemeleri hücrenin kenarında sürüyor.
+/// There is no packer: in this set **all sprites are cell-sized** (emoji and
+/// wide glyphs are out of scope), i.e. the `slot_no → pixel corner`
+/// conversion is arithmetic. Procedural characters (block, Braille, line) do
+/// not break that constraint — by definition they are exactly one cell; what's
+/// more they are what demands the constraint, because their tiling runs to the
+/// edge of the cell.
 pub struct Atlas {
     faces: Faces,
-    /// Bağlam satırının düz yüzü: aynı aile, [`CONTEXT_SCALE`] katı punto.
+    /// The context line's regular face: the same family, at [`CONTEXT_SCALE`]
+    /// times the point size.
     ///
-    /// Dört yüzü değil **tek** yüzü tutuyor, çünkü küçük sınıfın tek
-    /// tüketicisi dock'un bağlam satırı ve orada kalın/eğik yok
-    /// ([`SizeClass`]). Dört yüz kurmak üç CoreText türetmesi ve ikinci bir
-    /// "yüz edinilemedi" uyarısı demekti — ikisi de karşılığı olmayan bedel.
+    /// It holds **one** face, not four, because the small class's only
+    /// consumer is the dock's context line and there is no bold/italic there
+    /// ([`SizeClass`]). Building four faces would have meant three CoreText
+    /// derivations and a second "face could not be obtained" warning — both
+    /// costs with no return.
     small: Font,
     metrics: Metrics,
-    /// Hücrenin **kesirli** ilerlemesi, fiziksel piksel — büyük sınıf.
+    /// The cell's **fractional** advance, physical pixels — large class.
     ///
-    /// [`Metrics::cell_px`]'in genişliği bunun yukarı yuvarlanmışı ve
-    /// ızgaranın adımı o; kesirli hâli burada duruyor çünkü iki tüketici
-    /// yuvarlanmışla çalışamıyor — yedek adayın mürekkep kapısı
-    /// (`rules::fallback_font`) ile glyph'in hücrede ortalanması
-    /// (`raster::draw`). Gerekçenin tamamı `rules::space_advance`'in doc'unda;
-    /// iki sayının aynı ölçüyü verdiğinin bekçisi
-    /// `the_cell_is_the_rounded_advance`.
+    /// [`Metrics::cell_px`]'s width is this rounded up and the grid's step is
+    /// that; the fractional form stays here because two consumers cannot work
+    /// with the rounded one — the fallback candidate's ink gate
+    /// (`rules::fallback_font`) and the centring of the glyph in the cell
+    /// (`raster::draw`). The whole rationale is in the doc of
+    /// `rules::space_advance`; the guard that the two numbers give the same
+    /// measure is `the_cell_is_the_rounded_advance`.
     cell_advance: f64,
-    /// Küçük yüzün kesirli ilerlemesi: [`Atlas::cell_advance`]'in küçük sınıf
-    /// ikizi. Yedek kapısı ve ortalama **sınıf başına** ayrı, çünkü ikisinin
-    /// de sınırı o sınıfın kendi hücresi.
+    /// The small face's fractional advance: the small-class twin of
+    /// [`Atlas::cell_advance`]. The fallback gate and the centring are
+    /// **per class**, because both are bounded by that class's own cell.
     context_advance: f64,
-    /// Küçük yüzün ilerleme genişliği, piksel: bağlam satırının sütun adımı.
+    /// The small face's advance width, in pixels: the context line's column
+    /// step.
     ///
-    /// **Yalnız genişlik**, çünkü küçük glyph de büyük yuvaya, büyük hücrenin
-    /// taban çizgisine rasterize ediliyor ([`Atlas::slot`]): yükseklik ve
-    /// taban ortak, ayrışan tek şey harflerin arasındaki mesafe.
+    /// **Width only**, because the small glyph too is rasterized into the large
+    /// slot, on the large cell's baseline ([`Atlas::slot`]): height and
+    /// baseline are shared, the only thing that differs is the distance
+    /// between letters.
     ///
-    /// [`Atlas::context_advance`]'in yuvarlanmışı ve **ondan türüyor**: iki
-    /// ayrı yoldan hesaplanırsa (biri `rules::metrics`, öteki `space_advance`)
-    /// aynı ölçünün iki kaynağı olur.
+    /// It is the rounded form of [`Atlas::context_advance`] and **derives from
+    /// it**: if computed by two separate routes (one `rules::metrics`, the
+    /// other `space_advance`) the same measure would have two sources.
     context_cell_w: u16,
-    /// Kurulduğu (aile, punto, ölçek). [`Atlas::ensure`]'nin ölçütü.
+    /// The (family, point size, scale) it was built with. The criterion of
+    /// [`Atlas::ensure`].
     key: Key,
-    /// Zincirin istenen aile için söylediği; `None` → istenen açıldı ya da
-    /// aile istenmedi.
+    /// What the chain said about the requested family; `None` → the requested
+    /// one opened or no family was requested.
     font_issue: Option<FontIssue>,
-    /// Izgaranın (sütun, satır) yuva sayısı.
+    /// The grid's (column, row) slot count.
     grid: (u16, u16),
-    /// Karakterin **çözümlendiği** yuva — yalnız yüklenenler değil: fontun
-    /// tanımadığı karakter de burada [`TOFU`] olarak yaşıyor, yoksa aynı
-    /// karakter her karede CoreText'e yeniden sorulurdu.
+    /// The slot a character was **resolved** to — not only the loaded ones: a
+    /// character the font does not know also lives here as [`TOFU`], otherwise
+    /// the same character would be asked of CoreText again every frame.
     slots: HashMap<(Sprite, Face, SizeClass, Half), (u16, Plane)>,
-    /// Tek hücrelik kaydı **küçültülerek** kabul edilmiş anahtarlar (041).
+    /// Keys whose single-cell entry was accepted **shrunk** (041).
     ///
-    /// `Left` isteğinin `Whole` kısayolu yalnız "tek hücreye tam boyuyla
-    /// sığıyor" kaydına güvenebilir: küçültülmüş bir `Whole` iki hücrelik
-    /// isteğe cevap olsaydı glyph geniş hücrenin solunda küçük durur, sağ
-    /// yarısı boş kalırdı — ve hangi isteğin önce geldiğine bağlı olarak.
-    /// Ayrı bir küme, çünkü `slots`'un değeri yirmiden fazla yerde okunuyor
-    /// ve bit yalnız bu kısayolun sorusu; takma adlar (yüz merdiveni,
-    /// `cluster_as_base`) biti kaynaklarından taşıyor.
+    /// The `Whole` shortcut of a `Left` request may only trust the entry "fits
+    /// one cell at full size": had a shrunk `Whole` answered a two-cell
+    /// request, the glyph would sit small at the left of the wide cell, its
+    /// right half empty — and depending on which request came first. A
+    /// separate set, because `slots`' value is read in more than twenty places
+    /// and the bit is only this shortcut's question; aliases (the face ladder,
+    /// `cluster_as_base`) carry the bit over from their sources.
     shrunk: HashSet<(Sprite, Face, SizeClass)>,
-    /// Bir sonraki boş yuva; [`TOFU`] ayrılmış olduğu için 1'den başlar.
-    /// `slots.len()`'den türetilemez: tofu'ya çözümlenen kayıtlar yuva
-    /// harcamıyor, yani iki sayı bilerek ayrışıyor.
+    /// The next free slot; starts at 1 because [`TOFU`] is reserved. It cannot
+    /// be derived from `slots.len()`: entries resolved to tofu spend no slot,
+    /// i.e. the two numbers deliberately diverge.
     next: u16,
-    /// Tek yuvalık çizim tamponu. Alan olması kare başına yeniden ayırmayı
-    /// önlüyor; içeriği her yeni glyph'te üzerine yazılır.
+    /// The single-slot drawing buffer. Being a field prevents reallocating
+    /// every frame; its content is overwritten with every new glyph.
     buffer: Vec<u8>,
-    /// Geniş glyph'in sağ yarısının tamponu — [`Atlas::buffer`]'ın ikizi.
+    /// The buffer of the wide glyph's right half — the twin of [`Atlas::buffer`].
     ///
-    /// İkinci bir tampon, tek tamponu iki kez kullanmaktan **ucuz ve
-    /// doğru**: iki yarı aynı `Upload`'la dönüyor (atomiklik), yani ikisinin
-    /// baytları aynı anda canlı olmak zorunda. Boyu tam bir yuva, yani
-    /// varsayılan hücrede yüzlerce bayt.
+    /// A second buffer is **cheaper and more correct** than using the single
+    /// buffer twice: the two halves return with the same `Upload` (atomicity),
+    /// i.e. the bytes of both have to be live at the same time. Its size is
+    /// exactly one slot, i.e. hundreds of bytes at the default cell.
     buffer_right: Vec<u8>,
-    /// Renk düzleminin yuva sayacı — maskenin [`Atlas::next`]'inden **ayrı**.
+    /// The colour plane's slot counter — **separate** from the mask's
+    /// [`Atlas::next`].
     ///
-    /// Ayrı olmasının gerekçesi [`Plane`]'in doc'unda: uv çözüm anında
-    /// pişiyor. Yan kazanç **kapasite**: emoji yuvaları maskelerin havuzuna
-    /// binmiyor ve tersi, yani emoji-ağır bir oturum harflerin yuvasını
-    /// yemiyor.
+    /// The reason for being separate is in [`Plane`]'s doc: the uv is baked at
+    /// resolve time. A side gain is **capacity**: emoji slots do not pile onto
+    /// the masks' pool and vice versa, i.e. an emoji-heavy session does not eat
+    /// the letters' slots.
     ///
-    /// **Ayıran şey kapasite, kapı değil.** Çizimden önceki kapasite kapısı
-    /// maskenin sayacına bakıyor (gerekçesi [`Atlas::slot`]'ta, üç seçenek
-    /// tartışılarak), yani **dolu bir maske atlası emojiyi de reddediyor**.
-    /// Tersi olmuyor: dolu bir renk düzlemi harfleri etkilemiyor.
+    /// **What separates is capacity, not the gate.** The capacity gate before
+    /// drawing looks at the mask's counter (the reason is in [`Atlas::slot`],
+    /// with three options weighed), i.e. **a full mask atlas rejects emoji too**.
+    /// The reverse does not happen: a full colour plane does not affect
+    /// letters.
     ///
-    /// **Tofu payı yok**: renk düzleminde tofu doğmuyor (kutu bir maske), yani
-    /// sayaç 0'dan başlıyor ve `capacity()`'nin tamamı emojiye açık.
+    /// **No tofu share**: no tofu is born in the colour plane (the box is a
+    /// mask), i.e. the counter starts at 0 and all of `capacity()` is open to
+    /// emoji.
     color_next: u16,
-    /// Renkli yuvanın tamponu ve ikizi; [`Metrics::slot_bytes_rgba`] boyunda.
+    /// The colour slot's buffer and its twin; [`Metrics::slot_bytes_rgba`] long.
     ///
-    /// Maskenin tamponundan **ayrı**: paylaşılan bir tampon iki formatı aynı
-    /// diziye sığdırmayı, yani `raster::draw`'un ön koşul assert'ini
-    /// gevşetmeyi isterdi — o assert `unsafe` bloğun ön koşulu ve yanlış
-    /// düzlemin tamponunu yakalayan tek şey.
+    /// **Separate** from the mask's buffer: a shared buffer would want to fit
+    /// two formats into the same array, i.e. loosen `raster::draw`'s
+    /// precondition assert — that assert is the precondition of the `unsafe`
+    /// block and the only thing that catches the wrong plane's buffer.
     color_buffer: Vec<u8>,
     color_buffer_right: Vec<u8>,
-    /// Rezident tofu kutusu; ömür boyu değişmez.
+    /// The resident tofu box; never changes for the lifetime.
     tofu: Vec<u8>,
-    /// Interner'ın dizgileri: [`Sprite::Cluster`]'ın kimliği bu listenin
-    /// indeksi.
+    /// The interner's strings: the identity of [`Sprite::Cluster`] is the index
+    /// into this list.
     ///
-    /// Tahliye yok ve politika **yuvalarınkiyle aynı**: kayıt atlasın ömrü
-    /// boyunca yaşıyor, [`Atlas::ensure`] atlası yeniden kurunca yuvalarla
-    /// birlikte düşüyor. Ayrı ömürlü olsaydı yeniden kurulmuş bir atlasta
-    /// kimliği canlı ama yuvası ölü diziler kalırdı; yuvalarla aynı anda
-    /// düşünce çağıranın elindeki eski kimlik ya yeniden sorulur ya da
-    /// [`Atlas::slot`]'ta tofu'ya düşer.
+    /// There is no eviction and the policy is **the same as the slots'**: the
+    /// entry lives for the atlas's lifetime and drops together with the slots
+    /// when [`Atlas::ensure`] rebuilds the atlas. Had it had a separate
+    /// lifetime, a rebuilt atlas would be left with sequences whose identity is
+    /// alive but whose slot is dead; dropping at the same moment as the slots,
+    /// the old identity in the caller's hands is either asked again or falls to
+    /// tofu in [`Atlas::slot`].
     clusters: Vec<Box<str>>,
-    /// Dizgi → kimlik; [`Atlas::clusters`]'ın ters yönü.
+    /// String → identity; the reverse direction of [`Atlas::clusters`].
     cluster_ids: HashMap<Box<str>, u32>,
 }
 
-/// Atlasın anahtarı: bu dördünden biri değişirse metrik, raster ve yuva
-/// eşlemesi geçersizdir.
+/// The atlas's key: if any one of these four changes, the metric, the raster
+/// and the slot mapping are invalid.
 ///
-/// `line_height` de anahtarın parçası, çünkü hücre yüksekliğini o da
-/// belirliyor: yuva boyu değişince bütün raster geçersiz.
+/// `line_height` is part of the key too, because it also determines the cell
+/// height: when the slot size changes the whole raster is invalid.
 #[derive(Debug, PartialEq)]
 struct Key {
     family: Option<String>,
@@ -395,10 +420,10 @@ struct Key {
 }
 
 impl Key {
-    /// Karşılaştırma **tam eşitlik**: punto ve ölçek ayrık değerler arasında
-    /// sıçrıyor, aralarında yorumlanacak bir yakınlık yok. Aile adı olduğu gibi
-    /// — `"menlo"` ile `"Menlo"` aynı fontu açsa da ayrı anahtar; bedeli tek
-    /// bir yeniden kurulum.
+    /// The comparison is **exact equality**: point size and scale jump between
+    /// discrete values, there is no closeness between them to interpret. The
+    /// family name as is — even if `"menlo"` and `"Menlo"` open the same font
+    /// they are separate keys; the cost is a single rebuild.
     fn is(&self, family: Option<&str>, point_size: f64, scale: f64, line_height: f64) -> bool {
         self.family.as_deref() == family
             && self.point_size == point_size
@@ -408,57 +433,62 @@ impl Key {
 }
 
 impl Atlas {
-    /// `family` ayarın aile adı (`None` → zincir), `point_size` mantıksal
-    /// punto, `scale` ekranın backing ölçeği, `line_height` satır aralığı
-    /// çarpanı (`1.0` → fontun kendi aralığı).
+    /// `family` is the settings' family name (`None` → the chain), `point_size`
+    /// the logical point size, `scale` the screen's backing scale,
+    /// `line_height` the line spacing multiplier (`1.0` → the font's own
+    /// spacing).
     ///
-    /// Punto ile ölçek **çarpılıp** fonta girer: metrik ve raster aynı fiziksel
-    /// piksel uzayında doğar, yani ölçek önbellek anahtarının parçasıdır. Aile
-    /// de öyle: başka fontun metriği başka hücre demek. Anahtarın değişmesi
-    /// hâlinde yapılacak şeyi [`Atlas::ensure`] biliyor.
+    /// Point size and scale are **multiplied** and fed to the font: the metric
+    /// and the raster are born in the same physical pixel space, i.e. the scale
+    /// is part of the cache key. The family likewise: another font's metric
+    /// means another cell. What to do when the key changes is known to
+    /// [`Atlas::ensure`].
     ///
-    /// Bulunamayan aile **hata değil**: zincirdeki font açılır ve
-    /// [`Atlas::font_issue`] bunu söyler. Terminal fontsuz açılamaz; yanlış
-    /// yazılmış bir ad pencereyi kapatmamalı.
+    /// A family not found is **not an error**: the chain's font opens and
+    /// [`Atlas::font_issue`] reports it. A terminal cannot open without a
+    /// font; a misspelled name should not close the window.
     pub fn new(family: Option<&str>, point_size: f64, scale: f64, line_height: f64) -> Self {
         let (faces, font_issue) =
             Faces::from_chain(family, effective_point_size(point_size, scale));
-        // Metrik **yalnız düz yüzden**: hücre ızgarası yüze göre oynayamaz.
-        // Kalın glyph aynı yuvaya rasterize olur ve bir piksel kırpılabilir —
-        // her terminal bunu böyle yapıyor.
+        // The metric comes **only from the regular face**: the cell grid cannot
+        // vary with the face. A bold glyph is rasterized into the same slot and
+        // may be clipped by a pixel — every terminal does it this way.
         let metrics = rules::metrics(faces.get(Face::Regular), line_height);
         let cell_advance = rules::space_advance(faces.get(Face::Regular));
-        // Küçük yüz **aynı zincirden**: `font_issue` ikinci kez sorulmuyor ve
-        // yok sayılıyor, çünkü aynı aileye aynı cevap gelir — ikinci bir kayıt
-        // kullanıcıya aynı uyarıyı iki kez söyletirdi.
+        // The small face comes from the **same chain**: `font_issue` is not
+        // asked a second time and is ignored, because the same family gets the
+        // same answer — a second record would make the user hear the same
+        // warning twice.
         let (small, _) = rules::open_chain(
             family,
             effective_point_size(point_size * CONTEXT_SCALE, scale),
         );
-        // `line_height` **sorulmuyor**: satır aralığı yalnız hücrenin boyunu
-        // büyütüyor ve o boy iki sınıfta ortak, genişlik ise fontun kendi
-        // ilerlemesi. Bütün bir `Metrics` kurup içinden genişliği almak aynı
-        // sayıyı ikinci bir yoldan türetmek olurdu.
+        // `line_height` is **not asked**: the line spacing only grows the cell's
+        // height and that height is shared by both classes, while the width is
+        // the font's own advance. Building a whole `Metrics` and taking the
+        // width from it would be deriving the same number by a second route.
         let context_advance = rules::space_advance(&small);
         let context_cell_w = rules::round_up(context_advance);
         let (w, h) = metrics.cell_px;
-        // Kenar **yuva hedefinden** türüyor: hücre büyüdükçe kapasite düşüyor
-        // ve bir yerde yordamsal ailenin (422 yuva) altına iniyor — ölçülen
-        // kırılma Retina'da 29pt (`docs/OLCUMLER.md`). Taban [`MIN_EDGE`],
-        // yani varsayılan punto bugünkü dokusunda kalıyor.
+        // The edge is derived from the **slot target**: as the cell grows the
+        // capacity drops and somewhere it falls below the procedural family
+        // (422 slots) — the measured break is 29pt on Retina
+        // (`docs/OLCUMLER.md`). The floor is [`MIN_EDGE`], i.e. the default
+        // point size stays at today's texture.
         //
-        // `u32`'de sayılıyor: bölümlerin çarpımı küçük hücrede `u16`'yı aşar
-        // (13pt@1x, 4096 kenar → 116 224). `grid` yine `u16`.
+        // Counted in `u32`: the product of the quotients overflows `u16` at a
+        // small cell (13pt@1x, 4096 edge → 116 224). `grid` is still `u16`.
         //
-        // **`capacity()`'nin `u16::MAX` kırpmasına giden yol yok** ve sebebi
-        // döngünün kendisi: katlama yalnız kapasite hedefin **altındayken**
-        // koşuyor ve her katlama kapasiteyi dörtle çarpıyor, yani büyümenin
-        // ürettiği kapasite her zaman `4 × SLOT_TARGET`in (4096) altında.
-        // Kırpma ancak hiç katlanmamış bir tabanda görülebilir ve orası
-        // zaten bugünkü davranış.
+        // **There is no path to `capacity()`'s `u16::MAX` clamp** and the reason
+        // is the loop itself: folding runs only while the capacity is **below**
+        // the target and each fold multiplies the capacity by four, i.e. the
+        // capacity growth produces is always below `4 × SLOT_TARGET` (4096).
+        // The clamp can only be seen at a never-folded floor and that is
+        // already today's behaviour.
         //
-        // `w`/`h` en az 1 (`rules::round_up`), yani bölme güvenli; `max(1)` de
-        // hücrenin dokudan büyük olduğu uç için.
+        // `w`/`h` are at least 1 (`rules::round_up`), i.e. the division is
+        // safe; `max(1)` is also for the extreme where the cell is larger than
+        // the texture.
         let grid = grid_for(w, h);
         Self {
             faces,
@@ -489,16 +519,16 @@ impl Atlas {
         }
     }
 
-    /// Anahtar ([`Atlas::new`]'in dörtlüsü) değiştiyse atlası
-    /// yeniden kurar ve `true` döner.
+    /// Rebuilds the atlas if the key ([`Atlas::new`]'s four values) changed
+    /// and returns `true`.
     ///
-    /// `true` aynı zamanda **"dokuyu yeniden ayır"** demektir: metrik ve
-    /// dolayısıyla [`Atlas::texture_px`] değişmiş olabilir, eski boyutlu
-    /// dokuya yeni metrikle yazmak sessizce bozar. Ölçek değişimini AppKit
-    /// haber veriyor (`windowDidChangeBackingProperties:`), aile ve puntoyu
-    /// ayar dosyası; bu metot iki kancanın da karşılığı ve yeniden kurma
-    /// kararını çağıranın hatırlamasına bırakmıyor.
-    #[must_use = "true ise atlas yeniden kuruldu: yuva eşlemesi ve doku boyutu değişmiş olabilir, doku da yeniden ayrılmalı"]
+    /// `true` also means **"reallocate the texture"**: the metric and hence
+    /// [`Atlas::texture_px`] may have changed, and writing into the old-sized
+    /// texture with the new metric silently corrupts. AppKit reports a scale
+    /// change (`windowDidChangeBackingProperties:`), the settings file the
+    /// family and point size; this method is the counterpart of both hooks and
+    /// does not leave the rebuild decision to the caller's memory.
+    #[must_use = "if true the atlas was rebuilt: the slot mapping and texture size may have changed and the texture must be reallocated too"]
     pub fn ensure(
         &mut self,
         family: Option<&str>,
@@ -517,51 +547,55 @@ impl Atlas {
         self.metrics
     }
 
-    /// Bağlam satırının sütun adımı, piksel; bkz. [`Atlas::context_cell_w`].
+    /// The context line's column step, in pixels; see [`Atlas::context_cell_w`].
     ///
-    /// En az 1: `rules::round_up` küçük yüzün ilerlemesini de 1'e kırpıyor,
-    /// yani bölen olarak kullanmak güvenli.
+    /// At least 1: `rules::round_up` clamps the small face's advance to 1 too,
+    /// i.e. it is safe to use as a divisor.
     pub fn context_cell_w(&self) -> u16 {
         self.context_cell_w
     }
 
-    /// İstenen ailenin sonucu: bulunamadı ya da eşaralıklı değil. Aile
-    /// istenmediyse ya da istenen eşaralıklı bir aile açıldıysa `None`.
+    /// The outcome for the requested family: not found or not monospaced.
+    /// `None` if no family was requested or a monospaced family was opened as
+    /// requested.
     ///
-    /// Atlasla birlikte doğuyor ve yeniden kurulumda yeniden hesaplanıyor;
-    /// ölçek değişimi aynı cevabı verir, yani pencereyi başka ekrana taşımak
-    /// cevabı oynatmaz.
+    /// Born with the atlas and recomputed on rebuild; a scale change gives the
+    /// same answer, i.e. moving the window to another screen does not move the
+    /// answer.
     pub fn font_issue(&self) -> Option<&FontIssue> {
         self.font_issue.as_ref()
     }
 
-    /// Atlas dokusunun piksel boyutu; `bt-gpu` dokuyu buna göre ayırır.
+    /// The atlas texture's size in pixels; `bt-gpu` allocates the texture
+    /// accordingly.
     ///
-    /// Türetilmiş kenar değil **tam ızgara**: kenardaki artık şerit hiçbir
-    /// yuvaya düşmez, ayırmanın da anlamı yok.
+    /// The **full grid**, not the derived edge: the leftover strip on the edge
+    /// falls into no slot, and there is no point allocating it.
     pub fn texture_px(&self) -> (u16, u16) {
         let (w, h) = self.metrics.cell_px;
         (self.grid.0 * w, self.grid.1 * h)
     }
 
-    /// Yuvanın doku içindeki sol üst köşesi, piksel. uv aritmetiği çağıranın.
+    /// The slot's top-left corner inside the texture, in pixels. The uv
+    /// arithmetic is the caller's.
     pub fn slot_origin(&self, slot: u16) -> (u16, u16) {
-        // Izgara dışı yuva [`TOFU`]'ya düşer. Bu bir savunma refleksi değil,
-        // gerçek bir yol: `ensure()` ızgarayı küçültebiliyor ve çağıranın
-        // elinde bir önceki ölçekten kalma yuva numarası olabilir. `debug_assert`
-        // yetmezdi — release'de dokunun dışını gösteren bir köşe döner,
-        // `replaceRegion` sınır dışına yazar ve belirti sessizdir.
+        // An out-of-grid slot falls to [`TOFU`]. This is not a defensive reflex,
+        // it is a real path: `ensure()` can shrink the grid and the caller may
+        // hold a slot number left over from a previous scale. A `debug_assert`
+        // would not suffice — in release a corner pointing outside the texture
+        // is returned, `replaceRegion` writes out of bounds and the symptom is
+        // silent.
         let slot = if slot < self.capacity() { slot } else { TOFU };
         let (w, h) = self.metrics.cell_px;
         ((slot % self.grid.0) * w, (slot / self.grid.0) * h)
     }
 
-    /// Dizginin sprite'ı: aynı dizgi her zaman aynı kimliği alır.
+    /// The string's sprite: the same string always gets the same identity.
     ///
-    /// **Tek kod noktalı dizgi `Char`'a iniyor** — kümenin yolu yalnız birden
-    /// çok kod noktasına açık ve tek karakteri `Cluster` olarak tutmak aynı
-    /// glyph'i iki anahtarda, iki yuvada rasterize ederdi. Boş dizgi
-    /// çizilecek bir şey taşımıyor; boşluğa iniyor.
+    /// **A single-code-point string lands on `Char`** — the cluster path is
+    /// open only to more than one code point, and holding a lone character as
+    /// a `Cluster` would rasterize the same glyph under two keys, in two
+    /// slots. An empty string carries nothing to draw; it lands on a space.
     pub fn intern(&mut self, text: &str) -> Sprite {
         let mut chars = text.chars();
         let base = match (chars.next(), chars.next()) {
@@ -572,13 +606,14 @@ impl Atlas {
         if let Some(&id) = self.cluster_ids.get(text) {
             return Sprite::Cluster(id);
         }
-        // Tablo **tavanlı** ve tavanı negatif önbelleğinki: tahliye yok ve
-        // her farklı dizgi atlasın ömrü boyunca yaşıyor, yani tavansız bir
-        // interner rastgele çıktının (`cat` edilmiş ikili veri, birleştirici
-        // taşıyan geniş hücreler) belleğini hiç geri vermezdi. Tavanın
-        // ötesindeki yeni dizi **taban karakterine** iniyor — şekillenmeyen
-        // kümenin cevabı da o, yani görüntü 035 öncesinden kötü olmuyor; o
-        // kadar farklı diziyi zaten atlasın yuvaları da tutamazdı.
+        // The table has a **ceiling** and the ceiling is the negative cache's:
+        // there is no eviction and every distinct string lives for the atlas's
+        // lifetime, i.e. an interner without a ceiling would never give back the
+        // memory of random output (`cat`ed binary data, wide cells carrying
+        // combining marks). A new sequence beyond the ceiling lands on its
+        // **base character** — that is also the answer for a sequence that does
+        // not shape, i.e. the image is no worse than before 035; the atlas's
+        // slots could not hold that many distinct sequences anyway.
         if self.clusters.len() >= self.negative_cache_cap() {
             return Sprite::Char(base);
         }
@@ -590,17 +625,19 @@ impl Atlas {
         Sprite::Cluster(id)
     }
 
-    /// Yuva [`TOFU`]'nun kalıcı içeriği; `bt-gpu` doku kurulumunda bir kez
-    /// yazar. [`Atlas::slot`] tofu'ya düştüğünde bitmap **vermez**: veri
-    /// zaten dokuda ve her düşüşte yeniden yüklemek boşa yazma olurdu.
+    /// The permanent content of slot [`TOFU`]; `bt-gpu` writes it once at
+    /// texture setup. When [`Atlas::slot`] falls to tofu it does **not** give
+    /// the bitmap: the data is already in the texture and re-uploading on
+    /// every fall would be a wasted write.
     pub fn tofu_bitmap(&self) -> &[u8] {
         &self.tofu
     }
 
-    /// Karakterin yuvası.
+    /// The character's slot.
     ///
-    /// İkinci değer yuva **yeni açıldıysa** dolu gelir; yüklü yuvada ve tofu
-    /// düşüşünde `None`'dır ve doku el değmeden kalır.
+    /// The second value is filled if the slot was **newly opened**; for a
+    /// loaded slot and on a fall to tofu it is `None` and the texture is left
+    /// untouched.
     pub fn slot(
         &mut self,
         sprite: Sprite,
@@ -608,26 +645,30 @@ impl Atlas {
         size: SizeClass,
         want: Half,
     ) -> (Placed, Option<Upload<'_>>) {
-        // Anahtar **istenen** yüzü değil **çizilen** yüzü taşır. Üç ayrı
-        // sebeple ayrışabiliyorlar ve üçü de aynı cümlenin yüzü:
-        //   - kural çizgileri yüzden bağımsız (kalın metnin altındaki çizgi
-        //     kalın değildir) ve ölçüden de: dock'un bağlam satırında kural
-        //     yok, yani küçük bir kural sprite'ı hiç doğmaz,
-        //   - fontta olmayan yüz düz yüze çökmüştür (`Faces::effective`),
-        //   - küçük sınıfta yalnız düz yüz var ([`Atlas::small`]),
-        //   - yordamsal çizilen karakter de kural gibi yüzden bağımsız
+        // The key carries the **drawn** face, not the **requested** one. They
+        // can diverge for three separate reasons and all three are faces of the
+        // same sentence:
+        //   - rule lines are face-independent (the line under bold text is not
+        //     bold) and size-independent too: the dock's context line has no
+        //     rules, i.e. a small rule sprite is never born,
+        //   - a face missing from the font has collapsed to the regular face
+        //     (`Faces::effective`),
+        //   - in the small class only the regular face exists
+        //     ([`Atlas::small`]),
+        //   - a procedurally drawn character is, like a rule, face-independent
         //     ([`raster::is_procedural`]).
-        // Normalizasyon **burada**, çağıranın disiplininde değil: ayrışan bir
-        // anahtar bayt bayt aynı bitmap'i ayrı yuvalarda tutar, atlas kat kat
-        // hızlı dolar ve belirti sessizdir.
-        // `want` de normalize ediliyor ve iki yerde zorla `Whole`'a iniyor:
-        // kural sprite'ları (yüzden ve ölçüden bağımsız, hep tek hücre) ve
-        // **küçük sınıf**. İkincisinin gerekçesi 021'in yordamsal kapısıyla
-        // aynı: dock'un bağlam satırının sütun adımı küçük yüzün ilerlemesi,
-        // oysa kutu büyük hücreden türüyor — iki hücrelik bir glyph orada
-        // komşusunun üstüne binerdi. Dock'un giriş satırı `Normal` ama oraya
-        // `wide` hiç gelmiyor (`bt_core::dock`'un değişmezi), yani bu kol
-        // yalnız bağlam satırını kapatıyor.
+        // The normalization is **here**, not in the caller's discipline: a
+        // diverging key keeps a byte-for-byte identical bitmap in separate
+        // slots, the atlas fills up many times faster and the symptom is
+        // silent.
+        // `want` is normalized too and is forced down to `Whole` in two places:
+        // rule sprites (independent of face and size, always one cell) and the
+        // **small class**. The reason for the second is the same as 021's
+        // procedural gate: the column step of the dock's context line is the
+        // small face's advance, yet the box derives from the large cell — a
+        // two-cell glyph would overlap its neighbour there. The dock's input
+        // line is `Normal` but `wide` never arrives there (an invariant of
+        // `bt_core::dock`), i.e. this arm only closes the context line.
         let want = match (sprite, size) {
             (Sprite::Rule(_), _) | (_, SizeClass::Small) => Half::Whole,
             _ => want,
@@ -635,36 +676,38 @@ impl Atlas {
         let (face, size) = match (sprite, size) {
             (Sprite::Rule(_), _) => (Face::Regular, SizeClass::Normal),
             (Sprite::Char(_), SizeClass::Small) => (Face::Regular, SizeClass::Small),
-            // Unicode ince/kalın ayrımını **karakterin kendisinde** taşıyor
-            // (`─` U+2500 ince, `━` U+2501 kalın), yani SGR bold'un çizgiyi
-            // kalınlaştırması bilginin iki kez kodlanması olurdu. Yan kazanç:
-            // dört yüz tek yuvayı paylaşıyor ve kalın bir TUI çerçevesi
-            // atlasa dört kat değil bir kat biniyor.
+            // Unicode carries the thin/heavy distinction **in the character
+            // itself** (`─` U+2500 thin, `━` U+2501 heavy), i.e. SGR bold
+            // thickening the line would encode the information twice. A side
+            // gain: the four faces share one slot and a bold TUI frame
+            // loads the atlas once, not four times.
             //
-            // Desen `SizeClass::Normal`, `_` **değil**: `_` yazılsaydı küçük
-            // istek de `Normal`'e zorlanır ve aşağıdaki `size == Normal`
-            // guard'ı tam da kapatılmak istenen yerde açılırdı. Küçük sınıfta
-            // kapının kapalı olmasının gerekçesi döşeme değil **ölçü
-            // ayrışması**: `Metrics` büyük hücrenin, yani yordamsal sprite
-            // büyük hücre genişliğinde çizilir, dock'un bağlam satırının
-            // sütun adımı ise küçük yüzün ilerlemesi (`Frame::column_px`) —
-            // hücreyi tam dolduran bir sprite orada komşusunun üstüne binerdi.
+            // The pattern is `SizeClass::Normal`, **not** `_`: had `_` been
+            // written, a small request would be forced to `Normal` too and the
+            // `size == Normal` guard below would open exactly where it was meant
+            // to be closed. The reason the gate is closed in the small class is
+            // not tiling but **measure divergence**: `Metrics` is the large
+            // cell's, i.e. a procedural sprite is drawn at the large cell width,
+            // while the dock's context line's column step is the small face's
+            // advance (`Frame::column_px`) — a sprite filling the cell exactly
+            // would overlap its neighbour there.
             (Sprite::Char(ch), SizeClass::Normal) if raster::is_procedural(ch) => {
                 (Face::Regular, SizeClass::Normal)
             }
             (Sprite::Char(_), SizeClass::Normal) => (self.faces.effective(face), SizeClass::Normal),
-            // Dizinin yüzü **düz**: şekillenen glyph renkli emoji fontundan
-            // geliyor ve orada kalın/eğik yok, yani dört yüz dört ayrı yuvada
-            // bayt bayt aynı bitmap'i tutardı. Şekillenmeyen dizinin taban
-            // karakteri de düz yüzden soruluyor (aynı anahtarın takma adı).
-            // Boy sınıfı korunuyor: küçük satırın glyph'i küçük fontun.
+            // The cluster's face is **regular**: the shaped glyph comes from the
+            // colour emoji font and there is no bold/italic there, i.e. four
+            // faces would hold a byte-for-byte identical bitmap in four separate
+            // slots. The base character of a sequence that does not shape is
+            // also asked from the regular face (an alias of the same key). The
+            // size class is kept: the small row's glyph is the small font's.
             (Sprite::Cluster(_), size) => (Face::Regular, size),
         };
-        // Anahtar **istenen** yarıyı taşıyor ama cevabın yarısı istenenle
-        // aynı olmak zorunda değil: `Left` istenip tek hücreye sığan bir
-        // karakter `Whole` anahtarına yazılıyor, yani ikinci soruluşunda da
-        // aynı yuvayı ve aynı cevabı veriyor. Kapı bu yüzden anahtar başına
-        // atlasın ömründe bir kez koşuyor.
+        // The key carries the **requested** half but the answer's half need not
+        // be the same as requested: a character that was asked as `Left` but
+        // fits one cell is written under the `Whole` key, i.e. the second time
+        // it is asked it gives the same slot and the same answer. That is why
+        // the gate runs once per key in the atlas's lifetime.
         let key = (sprite, face, size, want);
         if let Some(&(slot, plane)) = self.slots.get(&key) {
             // A cached **rejection** answers `Whole`, like the fresh one: the
@@ -679,31 +722,34 @@ impl Atlas {
             };
             return (Placed { slot, half, plane }, None);
         }
-        // `Left` istendi ama karakter daha önce **tek hücrelik kabul**
-        // edilmişse cevabı o veriyor. Bu dal olmasaydı `☕` iki kez rasterize
-        // edilir, iki yuva harcar ve sağ yarısı boş kalırdı.
+        // `Left` was asked but if the character was previously **accepted as
+        // single-cell**, that gives the answer. Without this branch `☕` would
+        // be rasterized twice, spend two slots and its right half would stay
+        // empty.
         //
-        // **`TOFU` bu daldan geçmiyor ve kapı zorunlu.** Tek hücrelik bir
-        // **ret** iki hücrelik isteğin cevabı **değil**: `Whole` isteği
-        // `cols = 1` ile eleniyor ve o ölçüt iki hücrelikten kesin olarak
-        // daha sıkı, yani çıkarım tek yönlü — `Left` reddedildiyse `Whole` da
-        // reddedilir, tersi değil. Kapı olmadan yol şöyle ölüyordu (dock 024'e
-        // kadar giriş satırını **her zaman** `wide: false` ile soruyordu ve
-        // satırı `SizeClass::Normal`): prompt'a yazılan bir CJK karakteri
-        // önce `Whole` olarak sorulup negatif önbelleğe giriyor; Enter'dan sonra aynı karakter
-        // ızgaraya `wide: true` ile geliyor, `Left` anahtarını bulamıyor,
-        // buradan `TOFU` alıyor ve setin tamamı o karakter için atlasın ömrü
-        // boyunca **ölü** kalıyordu.
+        // **`TOFU` does not pass through this branch and the gate is
+        // mandatory.** A single-cell **rejection** is **not** the answer of a
+        // two-cell request: the `Whole` request is eliminated with `cols = 1`
+        // and that criterion is strictly tighter than the two-cell one, i.e.
+        // the inference is one-way — if `Left` was rejected `Whole` is rejected
+        // too, not the reverse. Without the gate the path died like this (until
+        // dock 024 the input line **always** asked with `wide: false` and the
+        // line was `SizeClass::Normal`): a CJK character typed at the prompt
+        // was first asked as `Whole` and entered the negative cache; after
+        // Enter the same character arrives in the grid with `wide: true`, does
+        // not find the `Left` key, gets `TOFU` from here and the whole set stayed
+        // **dead** for that character for the atlas's lifetime.
         //
-        // Ret **kaydın tamamıyla** tanınıyor, yuva numarasıyla değil: renk
-        // düzleminin 0. yuvası ilk emojinin gerçek yuvası ve numaraya bakan
-        // bir kapı onun tek hücrelik kabulünü ret sanıp ikinci kez
-        // rasterize ederdi (`cluster_as_base`'in ve negatif önbellek
-        // süzgecinin ikizi).
+        // A rejection is recognized by **the whole entry**, not by the slot
+        // number: the colour plane's slot 0 is the first emoji's real slot and
+        // a gate looking at the number would mistake its single-cell acceptance
+        // for a rejection and rasterize it a second time (the twin of
+        // `cluster_as_base` and of the negative-cache filter).
         //
-        // **Küçültülmüş kabul de bu daldan geçmiyor** (041, [`Atlas::shrunk`]):
-        // tek hücreye küçültülen `漢` iki hücrelik istekte tam boyuyla çift
-        // olmalı, tek hücrelik küçük kopyası değil.
+        // **A shrunk acceptance does not pass through this branch either**
+        // (041, [`Atlas::shrunk`]): a `漢` shrunk to one cell should be a
+        // full-size double in a two-cell request, not its small single-cell
+        // copy.
         if want == Half::Left && !self.shrunk.contains(&(sprite, face, size)) {
             let whole = (sprite, face, size, Half::Whole);
             if let Some(&(slot, plane)) = self.slots.get(&whole)
@@ -719,29 +765,30 @@ impl Atlas {
                 );
             }
         }
-        // Kural sprite'larına **pay ayrılıyor**: altısı da yordamsal,
-        // deterministik ve ömür boyu gerekli. Pay olmasaydı, birkaç bin farklı
-        // glyph gördükten sonra (CJK metin, simge-ağır TUI) ızgara dolar ve o
-        // andan itibaren altı çizili **her** hücrenin altında çizgi yerine
-        // tofu kutusu belirirdi. Karakterler son `RULE_RESERVE` yuvayı yiyemez;
-        // kurallar tembel kalır ama yerleri garantidir.
+        // A **share is set aside** for rule sprites: all six are procedural,
+        // deterministic and needed for the lifetime. Without the share, after
+        // seeing a few thousand distinct glyphs (CJK text, icon-heavy TUI) the
+        // grid fills up and from then on a tofu box, instead of the line, would
+        // appear under **every** underlined cell. Characters cannot eat the
+        // last `RULE_RESERVE` slots; rules stay lazy but their places are
+        // guaranteed.
         let cap = match sprite {
             Sprite::Rule(_) => self.capacity(),
             Sprite::Char(_) | Sprite::Cluster(_) => self.capacity().saturating_sub(RULE_RESERVE),
         };
-        // **Geniş istek iki yuva ister ve ikisini birden ister.** Sayı
-        // `want`'tan geliyor, kapıdan değil: kapı ancak çizim sırasında
-        // koşuyor ve o zamana kadar tahsis kararı verilmiş olmak zorunda.
-        // Fazladan istemek güvenli yönde yanlış — tek hücreye sığan bir geniş
-        // karakter bir yuva harcıyor, sınırın bir yuva berisinde de reddedilse
-        // bir sonraki `ensure`'da yeri var. Ters yönde yanlış olsaydı sol yarı
-        // açılır sağ yarı tofu'ya düşerdi.
+        // **A wide request wants two slots and wants both at once.** The number
+        // comes from `want`, not from the gate: the gate only runs during
+        // drawing and by then the allocation decision has to have been made.
+        // Asking for extra errs on the safe side — a wide character that fits
+        // one cell spends one slot, and even if it is rejected one slot short
+        // of the limit it has room at the next `ensure`. Erring in the opposite
+        // direction would open the left half and drop the right to tofu.
         //
-        // `Half::Right` buraya **hiç ulaşmıyor**: çifti kabul eden çağrı iki
-        // anahtarı birden yazıyor, yani sağ yarı yukarıdaki önbellek
-        // turundan dönüyor. Dolu atlasta ise önbelleğe yazılmadığı için
-        // buraya düşer ve tofu alır — sol yarısı da aynı sayıdan tofu
-        // aldığı için cevap tutarlı kalıyor.
+        // `Half::Right` **never reaches** here: the call that accepts the pair
+        // writes both keys at once, i.e. the right half returns from the cache
+        // round above. On a full atlas, since it is not written to the cache, it
+        // falls here and gets tofu — its left half got tofu from the same
+        // number too, so the answer stays consistent.
         // `Right` counts **two** as well: it is one half of the same pair, and
         // only the same count makes "the left half got tofu from the same
         // number" true. Counted as one, a full atlas with a single free slot
@@ -749,37 +796,40 @@ impl Atlas {
         // half — hidden on macOS, where the fixture's wide character is
         // `.LastResort` and never shrinks (042 phase-4, seen on Linux).
         let need = u32::from(if want == Half::Whole { 1u16 } else { 2 });
-        // Ölçüt **maskenin** sayacı ve bu bilinçli bir daraltma. Düzlem ancak
-        // çizim sırasında biliniyor, yani düzleme duyarlı bir ön kapı yok.
-        // Üç seçenek tartıldı (ölçülmedi — hiçbirinin sayısı alınmadı, ayıran
-        // şey ilk ikisinin **yapısal** kusuru):
+        // The criterion is **the mask's** counter and this is a deliberate
+        // narrowing. The plane is only known during drawing, i.e. there is no
+        // plane-aware pre-gate. Three options were weighed (not measured — none
+        // of them had a number taken; what separates them is the **structural**
+        // defect of the first two):
         //
-        //   - `min(next, color_next)`: kapı **hiç kapanmıyor**, çünkü
-        //     `color_next` emoji görmeyen bir oturumda ömür boyu 0 —
-        //     yani dolu atlasta her önbelleklenmemiş glyph kare başına bir
-        //     `CGBitmapContext` + `draw_glyphs`, taban fontta olmayan
-        //     karakterde üstüne bir cascade yürüyüşü ödüyordu. Ana thread'de.
-        //   - `max(..)`: dolu renk düzlemi **harfleri** tofu'ya düşürürdü.
-        //   - maskenin sayacı (bu): dolu maske atlası emojiyi de reddediyor.
+        //   - `min(next, color_next)`: the gate **never closes**, because
+        //     `color_next` stays 0 for life in a session that sees no emoji —
+        //     i.e. on a full atlas every uncached glyph paid one
+        //     `CGBitmapContext` + `draw_glyphs` per frame, and for a character
+        //     missing from the base font a cascade walk on top. On the main
+        //     thread.
+        //   - `max(..)`: a full colour plane would drop **letters** to tofu.
+        //   - the mask's counter (this one): a full mask atlas rejects emoji too.
         //
-        // Üçüncüsü seçildi ve bedeli [`Atlas::color_next`]'in sözünü
-        // **daraltıyor**: ayrı sayaç *kapasiteyi* ayırıyor (emoji maskenin
-        // yuvalarını yemiyor, maske de emojininkileri) ama *kapıyı*
-        // ayırmıyor. Kesin ölçüt tahsisten hemen önce, düzlem bilindiğinde
-        // soruluyor.
+        // The third was chosen and its cost **narrows** the promise of
+        // [`Atlas::color_next`]: the separate counter separates *capacity*
+        // (emoji do not eat the mask's slots, nor the mask the emoji's) but
+        // does not separate the *gate*. The exact criterion is asked right
+        // before allocation, once the plane is known.
         if u32::from(self.next) + need > u32::from(cap) {
-            // Dolu atlas **önbelleklenmez**: bu, fontun kalıcı bir gerçeği
-            // değil atlasın geçici hâli. Kapasite hücre ölçüsünden türüyor
-            // ([`SLOT_TARGET`]), yani aynı karakter başka bir puntoda yuva
-            // bulabilir ve buraya yazılacak kayıt onu tofu'ya çivilerdi.
+            // A full atlas is **not cached**: this is the atlas's temporary
+            // state, not a permanent fact of the font. The capacity derives
+            // from the cell size ([`SLOT_TARGET`]), i.e. the same character may
+            // find a slot at another point size and a record written here would
+            // pin it to tofu.
             //
-            // Buraya düşmek **tek karede hedeften fazla farklı glyph**
-            // demek ve o senaryo **ölçülmedi** (022). Ölçülürse çaresi LRU
-            // değil `encode_pass` sınırında geri dönüşüm: yuva numarası kare
-            // verisinde saklanmıyor, `slot_uv` uv'yi çözüm anında pişiriyor
-            // ve `prepare` kare başına dört kez koşuyor, yani kare
-            // **ortasında** yapılan her yeniden kullanım önceki geçişlerin
-            // uv'lerini geçersizleştirir.
+            // Falling here means **more distinct glyphs than the target in a
+            // single frame** and that scenario is **not measured** (022). If
+            // measured, its remedy is not LRU but recycling at the
+            // `encode_pass` boundary: the slot number is not stored in frame
+            // data, `slot_uv` bakes the uv at resolve time and `prepare` runs
+            // four times per frame, i.e. any reuse done **mid**-frame
+            // invalidates the uvs of earlier passes.
             return (
                 Placed {
                     slot: TOFU,
@@ -789,78 +839,83 @@ impl Atlas {
                 None,
             );
         }
-        // Ödünç match'in scrutinee'sinde bırakılmıyor: `&mut self.buffer`
-        // orada kalsaydı kolların içinde `&self.buffer` alınamazdı.
-        // Kutunun ilerlemesi: `Whole` bir hücre, `Left` iki. `Right` buraya
-        // ulaşmıyor (yukarıda).
-        // Kabul edilen aday küçültme kolundan mı geldi: `Whole` kaydının
-        // yanına [`Atlas::shrunk`]'a yazılıyor.
+        // Not left in the borrow match's scrutinee: had `&mut self.buffer`
+        // stayed there, `&self.buffer` could not be taken inside the arms.
+        // The box's advance: `Whole` one cell, `Left` two. `Right` does not
+        // reach here (above).
+        // Whether the accepted candidate came from the shrink arm: written to
+        // [`Atlas::shrunk`] next to the `Whole` entry.
         let mut shrunk = false;
         let result = match sprite {
-            // **Yordamsal çizim fonttan önce.** Sıra zorunlu ve "fontta
-            // yoksa yordamsal çiz" yanlış kol olurdu: `█` Menlo'da *var* ama
-            // hücreyi doldurmuyor, yani o karakter yedeğe hiç gitmeden
-            // bozuk geliyor. `⠋` ise Menlo'da yok ve yedek koşarsa Apple
-            // Braille gelip genişlik kapısından döner. İkisini de kapatan
-            // tek yer burası — ve kol aşağıdaki font kolunun **üstünde**
-            // olduğu için `raster::draw` font yolu olarak saf kalıyor,
-            // `DrawResult`'ın doc'u ("fontun cevabı") gerilime girmiyor.
+            // **Procedural drawing comes before the font.** The order is
+            // mandatory and "if it is not in the font
+            // is not in the font, draw procedurally" would be the wrong arm:
+            // `█` *is* in Menlo but does not fill the cell, i.e. that
+            // character arrives broken without ever going to the fallback. `⠋`
+            // is not in Menlo and if the fallback runs Apple Braille would come
+            // and be rejected by the width gate. This is the one place that
+            // closes both — and because the arm sits **above** the font arm
+            // below, `raster::draw` stays pure as a font path and the doc of
+            // `DrawResult` ("the font's answer") is not strained.
             //
-            // `size` **normalize edilmiş** olan: küçük sınıf yukarıdaki
-            // kolda `Small` kalıyor, yani guard onu eliyor ve bağlam satırı
-            // kutu karakterini fonttan almaya devam ediyor.
-            // Yordamsal aile **tanımı gereği tek hücre**: blok elemanları,
-            // Braille, çizgi çizim ve teknik küme baştan sona tek sütunlu
-            // (ölçüldü, 023 envanteri). `Whole` bu yüzden bir varsayım değil,
-            // ailenin kendi özelliği.
+            // `size` is the **normalized** one: the small class stays `Small`
+            // in the arm above, i.e. the guard eliminates it and the context
+            // line keeps taking box characters from the font.
+            // The procedural family is **single-cell by definition**: block
+            // elements, Braille, box drawing and the technical set are
+            // single-column from start to finish (measured, the 023
+            // inventory). So `Whole` is not an assumption but the family's own
+            // property.
             Sprite::Char(ch) if size == SizeClass::Normal && raster::is_procedural(ch) => {
                 raster::draw_procedural(ch, self.metrics, &mut self.buffer);
                 (DrawResult::Drawn, Half::Whole, Plane::Mask)
             }
             Sprite::Char(ch) => {
-                // **Metrik her iki sınıfta da büyük hücrenin**: küçük glyph
-                // büyük yuvaya, büyük hücrenin taban çizgisine çiziliyor
-                // (`raster::draw` glyph'i `(0, baseline)`'a koyuyor). Yuva
-                // boyu ortak kaldığı için ızgara, doku ve `slot_bytes`
-                // değişmiyor — ayrışan tek şey harfin kendi boyu, o da
-                // fonttan geliyor.
-                // Yedek kapısının sınırı da sınıf başına: küçük glyph küçük
-                // hücrenin ilerlemesine sığmak zorunda, büyüğün değil.
+                // **The metric is the large cell's in both classes**: the small
+                // glyph is drawn into the large slot, on the large cell's
+                // baseline (`raster::draw` puts the glyph at `(0, baseline)`).
+                // Since the slot size stays shared the grid, the texture and
+                // `slot_bytes` do not change — the only thing that differs is
+                // the letter's own size, and that comes from the font.
+                // The fallback gate's limit is per class too: the small glyph
+                // has to fit the small cell's advance, not the large one's.
                 let (font, cell_advance) = match size {
                     SizeClass::Normal => (self.faces.get(face), self.cell_advance),
                     SizeClass::Small => (&self.small, self.context_advance),
                 };
-                // **Taban font her zaman tek hücre.** Eşaralıklı taban fontta
-                // her glyph'in ilerlemesi hücrenin ilerlemesinin ta kendisi
-                // (bekçisi `every_base_glyph_advance_is_the_cell_advance`),
-                // yani geniş ilan edilmiş bir karakter taban fontta varsa
-                // orada tek hücreye çizilir ve çizimi **bit bit** eskisiyle
-                // aynı kalır. Menlo'nun `☕ ⚡ ♈` ailesi tam bu kol: ölçülen
-                // 65'in 21'i.
+                // **The base font is always single-cell.** In a monospaced base
+                // font every glyph's advance is the cell's advance itself (its
+                // guard is `every_base_glyph_advance_is_the_cell_advance`), i.e.
+                // if a character declared wide exists in the base font it is
+                // drawn into one cell there and its drawing stays **bit for
+                // bit** the same as before. Menlo's `☕ ⚡ ♈` family is exactly
+                // this arm: 21 of the measured 65.
                 let drawn =
                     raster::draw(font, ch, self.metrics, cell_advance, 0.0, &mut self.buffer);
-                // **Yedek font.** Kol `NoGlyph` yaprağının içinde ve yalnız
-                // düz yüzde koşuyor, yani sıra şu: önce yüz merdiveni
-                // (aşağıdaki `face != Regular` kolu düz yüze iniyor), sonra
-                // burası, en sonda negatif önbellek. Merdiven tüketilmeden
-                // yedeğe gidilseydi kalın bir `─` sistem fontundan gelir ve
-                // ailenin kendi düz yüzü hiç sorulmazdı.
+                // **Fallback font.** The arm runs inside the `NoGlyph` leaf and
+                // only on the regular face, i.e. the order is: first the face
+                // ladder (the `face != Regular` arm below falls to the regular
+                // face), then here, the negative cache last. Had the fallback
+                // been reached before the ladder was exhausted, a bold `─` would
+                // come from a system font and the family's own regular face
+                // would never be asked.
                 //
-                // Kol `match drawn` içinde değil **çizim adımının içinde**,
-                // iki mecburi sebeple: `match`'in kolları negatif önbellek
-                // koluna düşemiyor (yedek reddedilirse oraya inmek gerekiyor)
-                // ve `ch` yalnız burada kapsamda. Semantik sıra değişmiyor.
+                // The arm is not in `match drawn` but **inside the drawing
+                // step**, for two mandatory reasons: the `match` arms cannot fall
+                // into the negative cache arm (if the fallback is rejected we
+                // have to land there) and `ch` is in scope only here. The
+                // semantic order does not change.
                 //
-                // Kabul edilen aday aşağıdaki `Drawn` kolundan geçiyor: aynı
-                // anahtar, aynı `Upload`, aynı yuva aritmetiği. Yani arama
-                // anahtar başına atlasın ömründe **bir kez** koşuyor — ret de
-                // negatif önbelleğe giriyor.
+                // The accepted candidate passes through the `Drawn` arm below:
+                // the same key, the same `Upload`, the same slot arithmetic. So
+                // the search runs **once** per key in the atlas's lifetime — the
+                // rejection enters the negative cache too.
                 if drawn == DrawResult::NoGlyph && face == Face::Regular {
-                    // Kapıya **sütun sayısı** gidiyor ve tek kaynağı çağıran:
-                    // `bt-atlas` `unicode-width` görmüyor (yeni bir bağımlılık
-                    // *ve* ızgaranınkiyle ayrışabilen ikinci bir genişlik
-                    // yetkilisi olurdu). Sıra kapının içinde: önce tek hücre,
-                    // sonra iki.
+                    // The gate is passed the **column count** and its only source
+                    // is the caller: `bt-atlas` does not see `unicode-width` (it
+                    // would be a new dependency *and* a second width authority
+                    // that could diverge from the grid's). The order is inside
+                    // the gate: first one cell, then two.
                     let cols = if want == Half::Left { 2 } else { 1 };
                     match rules::fallback_font(font, ch, cell_advance, cols) {
                         Some(alt) => {
@@ -873,18 +928,18 @@ impl Atlas {
                     (drawn, Half::Whole, Plane::Mask)
                 }
             }
-            // **Dizi** `Char`'ın font kolunun kardeşi: yordamsal kapı ona
-            // uygulanmıyor (bir dizi blok ya da çizgi karakteri değil) ve
-            // aday yine sınıfın kendi fontundan cascade'e gidiyor.
+            // The **cluster** is the sibling of `Char`'s font arm: the
+            // procedural gate is not applied to it (a sequence is not a block or
+            // line character) and the candidate again goes to the cascade from
+            // the class's own font.
             Sprite::Cluster(id) => {
                 let Some(text) = self.clusters.get(id as usize) else {
-                    // Kimlik bu atlasın interner'ında yok: çağıran yeniden
-                    // kurulmadan önceki bir atlastan kalma bir kimlik
-                    // taşıyor ([`Atlas::clusters`]). **Önbelleklenmiyor** —
-                    // dolu atlasın gerekçesiyle: kimlik kalıcı bir gerçek
-                    // değil, yeniden sorulduğunda başka bir dizgiye
-                    // bağlanabilir. Panik değil, çünkü `slot()` display
-                    // link'in callback'inde.
+                    // The identity is not in this atlas's interner: the caller
+                    // carries an identity left over from an atlas before it was
+                    // rebuilt ([`Atlas::clusters`]). **Not cached** — for the
+                    // full atlas's reason: the identity is not a permanent fact,
+                    // when asked again it may be bound to a different string. Not
+                    // a panic, because `slot()` is in the display link's callback.
                     return (
                         Placed {
                             slot: TOFU,
@@ -894,48 +949,51 @@ impl Atlas {
                         None,
                     );
                 };
-                // Taban `intern`'ün ayırdığı gibi en az iki kod noktası
-                // taşıyan dizginin ilk karakteri; boş olamaz ama `slot()`
-                // çizim yolunda, yani varsayım bir panik değil boşluk.
+                // The base is the first character of a string carrying at least
+                // two code points, as `intern` separates them; it cannot be
+                // empty but `slot()` is on the drawing path, i.e. the assumption
+                // is a space, not a panic.
                 let base = text.chars().next().unwrap_or(' ');
                 let (font, cell_advance) = match size {
                     SizeClass::Normal => (self.faces.get(face), self.cell_advance),
                     SizeClass::Small => (&self.small, self.context_advance),
                 };
-                // Sütun sayısı `Char`'ınkiyle aynı kaynaktan (çağıranın
-                // istediği yarı) ve kapının sırası aynı: önce tek, sonra iki.
+                // The column count is from the same source as `Char`'s (the half
+                // the caller asked for) and the gate's order is the same: first
+                // one, then two.
                 let cols = if want == Half::Left { 2 } else { 1 };
                 match rules::shape_cluster(font, text, cell_advance, cols) {
                     Some(alt) => {
                         shrunk = alt.shrunk;
                         self.draw_accepted(&alt, cell_advance)
                     }
-                    // Tek glyph'e şekillenmedi ya da kapıdan döndü: cevap
-                    // **taban karakterin** (035 R1.1). Kutu değil, çünkü
-                    // taban karakteri çoğu zaman çizilebiliyor (`👍👍`'nin
-                    // `👍`'si); yarım glyph değil, çünkü taban karakter kendi
-                    // kapısından geçiyor.
+                    // It did not shape into a single glyph or was rejected by the
+                    // gate: the answer is the **base character's** (035 R1.1).
+                    // Not a box, because the base character can often be drawn
+                    // (the `👍` of `👍👍`); not half a glyph, because the base
+                    // character passes through its own gate.
                     None => return self.cluster_as_base(sprite, base, size, want),
                 }
             }
-            // Yordamsal çizim başarısız olamaz: font sorulmuyor, bağlam
-            // kurulmuyor. `Drawn` bir varsayım değil, tipin kendisi.
+            // Procedural drawing cannot fail: the font is not asked, no context
+            // is built. `Drawn` is not an assumption, it is the type itself.
             Sprite::Rule(kind) => {
                 raster::draw_rule(kind, self.metrics, &mut self.buffer);
                 (DrawResult::Drawn, Half::Whole, Plane::Mask)
             }
         };
         let (result, half, plane) = result;
-        // Anahtar **çözülen** yarıyı taşıyor: `Left` istenip tek hücreye sığan
-        // karakter `Whole`'a yazılıyor, yani ikinci soruluşunda önbellekten
-        // aynı cevap dönüyor ve kapı bir daha koşmuyor.
+        // The key carries the **resolved** half: a character asked as `Left`
+        // that fits one cell is written under `Whole`, i.e. the second time it
+        // is asked the same answer returns from the cache and the gate does not
+        // run again.
         let key = (sprite, face, size, half);
         match result {
-            // **Kararı veren kapı burası.** Yukarıdaki `need` kapısı iki
-            // düzlemin boşta olanına bakıyor ve yalnız ikisi de doluyken
-            // kapanıyor, yani buraya bir düzlemi dolu bir atlasla
-            // gelinebiliyor. Düzlem artık biliniyor (aday fontun trait biti),
-            // yani ölçüt kesin: o düzlemin kendi sayacı.
+            // **This is the gate that decides.** The `need` gate above looks at
+            // whichever of the two planes is free and closes only when both are
+            // full, i.e. one can get here with an atlas whose one plane is full.
+            // The plane is now known (the candidate font's trait bit), i.e. the
+            // criterion is exact: that plane's own counter.
             DrawResult::Drawn
                 if u32::from(match plane {
                     Plane::Mask => self.next,
@@ -953,18 +1011,19 @@ impl Atlas {
                 )
             }
             DrawResult::Drawn => {
-                // Sayaç **düzlemin kendi sayacı**: iki düzlem aynı ızgara
-                // aritmetiğini paylaşıyor ama yuva numaraları ayrı uzaylarda
-                // (gerekçe [`Plane`]).
+                // The counter is **the plane's own counter**: the two planes
+                // share the same grid arithmetic but the slot numbers are in
+                // separate spaces (reason: [`Plane`]).
                 let slot = match plane {
                     Plane::Mask => self.next,
                     Plane::Color => self.color_next,
                 };
-                // **Çift atomik.** İki yuva aynı ifadede ayrılıyor, iki
-                // anahtar aynı ifadede yazılıyor ve iki bayt dizisi aynı
-                // `Upload`'la dönüyor: sağ yarı için ikinci bir `slot()` turu
-                // yok, yani kapasite sınırı ikisinin arasına düşemiyor.
-                // Yukarıdaki `need` bu ifadenin ön koşulu.
+                // **The pair is atomic.** Two slots are allocated in the same
+                // expression, two keys are written in the same expression and
+                // two byte arrays return with the same `Upload`: there is no
+                // second `slot()` round for the right half, i.e. the capacity
+                // limit cannot fall between the two. The `need` above is this
+                // expression's precondition.
                 let pair = half == Half::Left;
                 let step = if pair { 2 } else { 1 };
                 match plane {
@@ -997,42 +1056,45 @@ impl Atlas {
                     }),
                 )
             }
-            // İkisi de **kalıcı**: fontun o karakteri yoktur, ya da bağlam
-            // kurulumu (argümanları atlas ömrü boyunca sabit) hep başarısızdır.
-            // Önbelleğe girmeselerdi aynı karakter ekranda durduğu sürece her
-            // karede yeniden CoreText'e sorulurdu.
-            // Yüzler arası **kapsam farkı** gerçek: birçok ailede düz yüz
-            // geniş bir Unicode bloğu taşırken kalın/eğik yalnız Latin
-            // taşıyor. `Faces::effective`'in yüz düzeyinde yaptığı geri düşüşün
-            // glyph düzeyindeki karşılığı bu — olmasaydı kalın bir satırdaki
-            // '→' tofu kutusu olur, aynı karakter düz satırda düzgün çizilirdi.
-            // Özyineleme tek adım: düz yüzde `face == Regular` ve bu kol
-            // yeniden ateşlenmiyor.
+            // Both are **permanent**: the font does not have that character, or
+            // the context setup (its arguments constant for the atlas's
+            // lifetime) always fails. Had they not entered the cache, the same
+            // character would be asked of CoreText again every frame as long as
+            // it stayed on screen.
+            // The **coverage difference between faces** is real: in many
+            // families the regular face carries a wide Unicode block while
+            // bold/italic carry only Latin. This is the glyph-level counterpart
+            // of the fallback `Faces::effective` does at the face level — without
+            // it the '→' in a bold line would be a tofu box, while the same
+            // character would be drawn properly in a regular line. The recursion
+            // is a single step: in the regular face `face == Regular` and this
+            // arm does not fire again.
             //
-            // **İstenen anahtar da yazılıyor.** Yazılmasaydı geri düşüş her
-            // karede yeniden yaşanırdı: `(Char('→'), Bold)` haritada hiç
-            // görünmez, `raster::draw` kalın fontu her kare CoreText'e sorar
-            // (`FontSystem::glyph`), `NoGlyph` alır ve düz yüze düşerdi — ve
-            // bu, `slot()` çizim yolunda olduğu için ana thread'de, kare
-            // bütçesinin ortasında. Tam olarak hemen yukarıdaki yorumun
-            // "önbelleğe girmeselerdi her karede yeniden sorulurdu"
-            // gerekçesi; o gerekçe bu kol için de geçerli. Düz yüz de
-            // `NoGlyph` verirse takma ad `TOFU`'ya bağlanır ve negatif
-            // önbelleğin tavanı onu da süpürür.
-            // Boyut sınıfı **korunuyor**: bugün bu kol küçük sınıfta hiç
-            // çalışmıyor (orada yüz zaten `Regular`, koşul kapalı), ama
-            // `Normal` yazmak geri düşüşü sessizce büyük yüze bağlardı —
-            // küçük satırın eksik glyph'i büyük harf olarak belirirdi.
+            // **The requested key is written too.** Had it not been, the
+            // fallback would be relived every frame: `(Char('→'), Bold)` never
+            // appears in the map, `raster::draw` asks CoreText for the bold font
+            // every frame (`FontSystem::glyph`), gets `NoGlyph` and falls to the
+            // regular face — and this, because `slot()` is on the drawing path,
+            // on the main thread, in the middle of the frame budget. Exactly the
+            // reason in the comment right above, "had they not entered the cache
+            // it would be asked again every frame"; that reason holds for this
+            // arm too. If the regular face also gives `NoGlyph` the alias is
+            // bound to `TOFU` and the negative cache's ceiling sweeps it as well.
+            // The size class is **kept**: today this arm never runs in the small
+            // class (the face is already `Regular` there, the condition is
+            // closed), but writing `Normal` would silently bind the fallback to
+            // the large face — the small row's missing glyph would appear as a
+            // large letter.
             DrawResult::NoGlyph if face != Face::Regular => {
                 let (placed, upload) = self.slot(sprite, Face::Regular, size, want);
-                // `map` `upload`'ı tüketiyor ve `self.buffer` ödüncü burada
-                // bitiyor; `insert` ancak ondan sonra mümkün. Tampon özyineli
-                // çağrının çizdiği baytları hâlâ taşıyor, yani `Upload` aynı
-                // içerikle yeniden kurulabiliyor.
-                // Düz yüzün **çözdüğü** yarı yazılıyor, istenen değil:
-                // merdivenden dönen cevap `Whole` olabilir (`☕`'nin kalın
-                // yüzü) ve takma adı `Left` diye yazmak çağırana ikinci bir
-                // instance bastırırdı.
+                // `map` consumes `upload` and the `self.buffer` borrow ends here;
+                // `insert` is possible only after that. The buffer still carries
+                // the bytes the recursive call drew, i.e. the `Upload` can be
+                // rebuilt with the same content.
+                // The half the regular face **resolved** is written, not the
+                // requested one: the answer coming back from the ladder may be
+                // `Whole` (the bold face of `☕`) and writing the alias as `Left`
+                // would make the caller emit a second instance.
                 let origin = upload.as_ref().map(|upload| upload.origin);
                 let right = upload.as_ref().and_then(|upload| upload.right);
                 self.slots.insert(
@@ -1045,8 +1107,9 @@ impl Atlas {
                     self.shrunk.insert((sprite, face, size));
                 }
                 if right.is_some() {
-                    // Sağ yarının takma adı da yazılıyor, yoksa kalın yüzde
-                    // sorulan sağ yarı düz yüzü yeniden rasterize ederdi.
+                    // The right half's alias is written too, otherwise the right
+                    // half asked in the bold face would rasterize the regular
+                    // face again.
                     self.slots.insert(
                         (sprite, face, size, Half::Right),
                         (placed.slot.saturating_add(1), placed.plane),
@@ -1066,52 +1129,56 @@ impl Atlas {
                 (placed, upload)
             }
             DrawResult::NoGlyph | DrawResult::NoContext => {
-                // Tavan: negatif önbellek yuva harcamıyor, yani `next` onu
-                // sınırlamıyor. Bir ikili dosyayı `cat`'lemek milyonlarca ayrı
-                // codepoint üretebilir ve harita sessizce büyürdü — crate'in
-                // tavanı olmayan tek sayısı burasıydı.
+                // The ceiling: the negative cache spends no slot, i.e. `next`
+                // does not bound it. `cat`ing a binary file can produce millions
+                // of distinct codepoints and the map would silently grow — this
+                // was the crate's only number without a ceiling.
                 //
-                // Tavan dolunca **negatif kayıtlar toptan atılıyor**, "artık
-                // hiç önbellekleme" değil. Fark bu sette ortaya çıktı:
-                // `slot()` artık çizim yolunda (`bt-gpu` onu display link
-                // callback'inde çağırıyor), yani önbelleklenmeyen bir
-                // karakter ekranda durduğu sürece **her kare** CoreText'e
-                // geri sorulurdu — ana thread'de, kare bütçesinin ortasında.
-                // Tahliye bedeli amortize: iki tahliye arasına en az
-                // `capacity()` yeni kayıt sığıyor. Pozitif kayıtlar (gerçek
-                // yuvalar) korunuyor: onları toptan atmak dokuyu da
-                // düşürmeyi gerektirir ve o karar 022'de kapsam dışı
-                // bırakıldı — kapasite hücre ölçüsünden türüyor, yani
-                // pozitif tarafın dolması artık çok daha zor.
+                // When the ceiling is reached the **negative entries are thrown
+                // out wholesale**, not "stop caching from now on". The difference
+                // emerged in this set: `slot()` is now on the drawing path
+                // (`bt-gpu` calls it in the display link callback), i.e. an
+                // uncached character would be asked back of CoreText **every
+                // frame** as long as it stayed on screen — on the main thread, in
+                // the middle of the frame budget. The eviction cost is amortized:
+                // at least `capacity()` new entries fit between two evictions.
+                // Positive entries (real slots) are kept: throwing them out
+                // wholesale would require dropping the texture too and that
+                // decision was left out of scope in 022 — the capacity derives
+                // from the cell size, i.e. the positive side filling up is now
+                // much harder.
                 //
-                // **Bedel yedekle birlikte büyüdü** ve bu bilerek kabul
-                // edildi: tahliyeden sonra geri sorulan karakter artık yalnız
-                // `CTFontGetGlyphsForCharacters` değil bir cascade yürüyüşü de
-                // ödüyor. Sıcak yürüyüş ölçüldü ve ucuz (setin `phase-1.md`'si
-                // → Uygulama Notları); pahalı olan bir **ailenin ilk
-                // açılışı** ve o tahliyeden etkilenmiyor — font CoreText'te
-                // açık kalıyor, yeniden yüklenmiyor. Yani tahliyenin geri
-                // getirdiği maliyet sıcak yürüyüş, soğuk açılış değil.
+                // **The cost grew with the fallback** and this was accepted
+                // deliberately: a character asked back after the eviction now
+                // pays not only `CTFontGetGlyphsForCharacters` but a cascade walk
+                // too. The hot walk was measured and is cheap (the set's
+                // `phase-1.md` → Uygulama Notları); what is expensive is a
+                // **family's first open** and that is not affected by the
+                // eviction — the font stays open in CoreText, it is not reloaded.
+                // So the cost the eviction brings back is the hot walk, not the
+                // cold open.
                 if self.slots.len() >= self.negative_cache_cap() {
-                    // Ölçüt **kaydın tamamı**, yuva numarası değil: renk
-                    // düzleminin sayacı 0'dan başlıyor ve `TOFU` da 0, yani
-                    // numaraya bakan bir süzgeç ilk emojinin **pozitif**
-                    // kaydını da atardı. Belirti sessiz ve iki katlı: emoji
-                    // bir sonraki görülüşünde yeniden rasterize olur, eski
-                    // yuvası öksüz kalır ve `yuva2=` şişer.
+                    // The criterion is **the whole entry**, not the slot number:
+                    // the colour plane's counter starts at 0 and `TOFU` is 0 too,
+                    // i.e. a filter looking at the number would throw out the
+                    // first emoji's **positive** entry as well. The symptom is
+                    // silent and two-tiered: the next time the emoji is seen it
+                    // is rasterized again, its old slot is left orphaned and
+                    // `slots2=` swells.
                     self.slots
                         .retain(|_, &mut entry| entry != (TOFU, Plane::Mask));
                 }
                 self.slots.insert(key, (TOFU, Plane::Mask));
-                // **Ret `want` anahtarına da yazılıyor** ve bu şart:
-                // yukarıdaki `key` **çözülen** yarıyı taşıyor ve ret kolunda
-                // o her zaman `Whole`, yani `Left` isteğinin kendi anahtarı
-                // hiç yazılmazdı. Takma ad artık `TOFU`'yu geçirmediğine göre
-                // o istek her karede yeniden bir cascade yürüyüşü öderdi —
-                // ana thread'de, kare bütçesinin ortasında. Üç yarının üçü de
-                // yazılıyor ve üçü de doğru: `cols = 1` ölçütü iki
-                // hücrelikten kesin olarak daha sıkı, yani `Left`
-                // reddedildiyse `Whole` da reddedilmiştir.
+                // **The rejection is written to the `want` key too** and this is
+                // mandatory: the `key` above carries the **resolved** half and in
+                // the rejection arm that is always `Whole`, i.e. the `Left`
+                // request's own key would never be written. Since the alias no
+                // longer lets `TOFU` through, that request would pay a cascade
+                // walk every frame — on the main thread, in the middle of the
+                // frame budget. All three halves are written and all three are
+                // right: the `cols = 1` criterion is strictly tighter than the
+                // two-cell one, i.e. if `Left` was rejected `Whole` was rejected
+                // too.
                 if want == Half::Left {
                     self.slots
                         .insert((sprite, face, size, Half::Left), (TOFU, Plane::Mask));
@@ -1130,36 +1197,38 @@ impl Atlas {
         }
     }
 
-    /// Kapıdan geçmiş adayı çizer: düzlem, bir ya da iki yarı ve ikisinin
-    /// birlikte başarısı.
+    /// Draws a candidate that passed the gate: the plane, one or two halves
+    /// and the joint success of both.
     ///
-    /// Yedek karakter ile grapheme dizisinin **ortak** çizimi; ayrı
-    /// yazılsalardı iki yarının aynı kutuya ortalanması ve çiftin atomik
-    /// kabulü iki kopyada yaşar, biri ayrıştığında öteki fark etmezdi.
+    /// The **shared** drawing of the fallback character and the grapheme
+    /// sequence; had they been written separately, centring the two halves in
+    /// the same box and accepting the pair atomically would live in two copies
+    /// and when one diverged the other would not notice.
     fn draw_accepted(
         &mut self,
         alt: &rules::Accepted,
         cell_advance: f64,
     ) -> (DrawResult, Half, Plane) {
-        // **Düzlem adayın kendi özelliğinden**: renkli glyph taşıyan bir font
-        // `RGBA8` düzlemine, ötekiler maskeye. Ölçüt trait biti, aile adı
-        // değil (gerekçe [`FontSystem::has_color_glyphs`]).
+        // **The plane comes from the candidate's own property**: a font
+        // carrying colour glyphs goes to the `RGBA8` plane, the others to the
+        // mask. The criterion is the trait bit, not the family name (reason:
+        // [`FontSystem::has_color_glyphs`]).
         let plane = if Backend::has_color_glyphs(&alt.font) {
             Plane::Color
         } else {
             Plane::Mask
         };
-        // İki yarı **aynı kutuya** ortalanıyor ve ikisi de aynı çağrıda
-        // çiziliyor: sağ yarının ofseti tam sayı piksel, yani AA fazı ikisinde
-        // birebir aynı.
+        // The two halves are centred in the **same box** and both are drawn in
+        // the same call: the right half's offset is a whole number of pixels,
+        // i.e. the AA phase is exactly the same in both.
         let pair = alt.cols >= 2;
         let box_advance = cell_advance * f64::from(alt.cols);
         let shift = f64::from(self.metrics.cell_px.0);
         let half = if pair { Half::Left } else { Half::Whole };
         let rise = alt.rise(self.metrics);
-        // Tek çizici, iki reçete: `Plane` hangisi olacağını söylüyor ve tampon
-        // da onunla eşleşiyor. Eşleşmezse `raster`'ın ön koşul assert'i düşer
-        // — o assert yanlış düzlemi yakalayan tek şey.
+        // One drawer, two recipes: `Plane` says which it will be and the buffer
+        // matches it. If they do not match, `raster`'s precondition assert
+        // fires — that assert is the only thing that catches the wrong plane.
         let left = match plane {
             Plane::Mask => raster::draw_glyph(
                 &alt.font,
@@ -1203,10 +1272,10 @@ impl Atlas {
                 &mut self.color_buffer_right,
             ),
         };
-        // İki çağrı aynı fontun aynı glyph'ini soruyor, yani ikisi birden
-        // başarılı ya da ikisi birden değil. Yine de **ikisi de** sınanıyor:
-        // biri düşerse çift kabul edilmemeli, yoksa yarısı boş bir glyph
-        // çizilirdi.
+        // The two calls ask for the same glyph of the same font, i.e. both
+        // succeed or neither does. Still **both** are tested: if one fails the
+        // pair must not be accepted, otherwise a glyph with an empty half would
+        // be drawn.
         let both = left == DrawResult::Drawn && right == DrawResult::Drawn;
         let worst = if both {
             DrawResult::Drawn
@@ -1216,15 +1285,15 @@ impl Atlas {
         (worst, half, plane)
     }
 
-    /// Şekillenmeyen dizinin cevabı: **taban karakterin** yuvası, dizinin
-    /// anahtarına takma adla.
+    /// The answer for a sequence that does not shape: the **base character's**
+    /// slot, aliased to the sequence's key.
     ///
-    /// Yüz merdiveninin takma adıyla (`DrawResult::NoGlyph if face !=
-    /// Regular` kolu) aynı örüntü ve aynı gerekçe: takma ad yazılmasaydı dizi
-    /// her karede yeniden `CTLine` kurar, şekillendirir ve kapıdan döner —
-    /// ana thread'de, kare bütçesinin ortasında. Taban karakterin kendi
-    /// kaydı ayrı yaşıyor, yani ızgarada tek başına duran aynı karakter
-    /// ikinci bir yuva açmıyor.
+    /// The same pattern and the same reason as the face ladder's alias (the
+    /// `DrawResult::NoGlyph if face != Regular` arm): had the alias not been
+    /// written, the sequence would build a `CTLine`, shape and be rejected by
+    /// the gate again every frame — on the main thread, in the middle of the
+    /// frame budget. The base character's own entry lives separately, i.e. the
+    /// same character standing alone in the grid does not open a second slot.
     fn cluster_as_base(
         &mut self,
         sprite: Sprite,
@@ -1233,14 +1302,14 @@ impl Atlas {
         want: Half,
     ) -> (Placed, Option<Upload<'_>>) {
         let (placed, upload) = self.slot(Sprite::Char(base), Face::Regular, size, want);
-        // `upload` burada tüketiliyor ki `self.buffer` ödüncü bitsin; tampon
-        // özyineli çağrının çizdiği baytları hâlâ taşıyor.
+        // `upload` is consumed here so that the `self.buffer` borrow ends; the
+        // buffer still carries the bytes the recursive call drew.
         let origin = upload.as_ref().map(|upload| upload.origin);
         let right = upload.as_ref().and_then(|upload| upload.right);
         let key = |half| (sprite, Face::Regular, size, half);
-        // Taban karakterin **çözdüğü** yarı yazılıyor, istenen değil: `❤️`'nin
-        // `❤`'si tek hücreye sığabiliyor ve takma adı `Left` diye yazmak
-        // çağırana ikinci bir instance bastırırdı.
+        // The half the base character **resolved** is written, not the
+        // requested one: the `❤` of `❤️` may fit one cell and writing the alias
+        // as `Left` would make the caller emit a second instance.
         self.slots
             .insert(key(placed.half), (placed.slot, placed.plane));
         if placed.half == Half::Whole
@@ -1250,20 +1319,20 @@ impl Atlas {
         {
             self.shrunk.insert((sprite, Face::Regular, size));
         }
-        // Sağ yarının takma adı çözülen yarıdan, yüklemeden değil: taban
-        // karakter önbellekten döndüyse yükleme yok ama çift yine de iki
-        // komşu yuva.
+        // The right half's alias comes from the resolved half, not from the
+        // upload: if the base character returned from the cache there is no
+        // upload but the pair is still two neighbouring slots.
         if placed.half == Half::Left {
             self.slots.insert(
                 key(Half::Right),
                 (placed.slot.saturating_add(1), placed.plane),
             );
         }
-        // Ret de **istenen** anahtara yazılıyor (negatif önbelleğin kuralı):
-        // ret her zaman `Whole` çözüyor, yani `Left` isteği yazılmasaydı her
-        // karede yeniden şekillendirilirdi. Düzlem de sorulmak zorunda:
-        // `TOFU` maske düzleminin 0. yuvası, renk düzleminin 0. yuvası ise
-        // ilk emojinin gerçek yuvası.
+        // The rejection is written to the **requested** key too (the negative
+        // cache's rule): the rejection always resolves `Whole`, i.e. had the
+        // `Left` request not been written it would be reshaped every frame. The
+        // plane has to be asked as well: `TOFU` is slot 0 of the mask plane,
+        // while slot 0 of the colour plane is the first emoji's real slot.
         if placed.slot == TOFU && placed.plane == Plane::Mask {
             self.slots.insert(key(want), (TOFU, Plane::Mask));
             if want == Half::Left {
@@ -1284,95 +1353,98 @@ impl Atlas {
         (placed, upload)
     }
 
-    /// (kullanılan, toplam) yuva.
+    /// (used, total) slots.
     ///
-    /// Tofu kullanılan sayılır: doku o yuvayı da tutuyor ve doluluk oranı
-    /// `/measure`'da bu iki sayıdan okunacak.
+    /// Tofu counts as used: the texture holds that slot too and the occupancy
+    /// ratio will be read from these two numbers in `/measure`.
     pub fn occupancy(&self) -> (usize, usize) {
         (usize::from(self.next), usize::from(self.capacity()))
     }
 
-    /// Renk düzleminin (kullanılan, toplam) yuvası.
+    /// The colour plane's (used, total) slots.
     ///
-    /// Maskeden **ayrı** yayımlanıyor ve gerekçesi jeton sözleşmesi: duman
-    /// kapısının `yuva=` sayacı yalnız maske düzlemini sayıyor ve ikinci bir
-    /// düzlemi ona toplamak "hangi düzlem doldu" sorusunu cevapsız bırakırdı.
-    /// Göremediği bir düzlem tam olarak 021'in Braille şekli olurdu: sıfır
-    /// yuva harcayan, sessiz.
+    /// Published **separately** from the mask and the reason is the token
+    /// contract: the smoke gate's `slots=` counter counts only the mask plane
+    /// and adding a second plane into it would leave the question "which plane
+    /// filled up" unanswered. A plane it cannot see would be exactly 021's
+    /// Braille shape: spending zero slots, silent.
     ///
-    /// Toplam ikisinde de aynı ([`Atlas::capacity`]): iki düzlem aynı yuva
-    /// ızgarasını paylaşıyor, ayrışan yalnız piksel formatı ve sayaç.
+    /// The total is the same in both ([`Atlas::capacity`]): the two planes
+    /// share the same slot grid, only the pixel format and the counter differ.
     pub fn color_occupancy(&self) -> (usize, usize) {
         (usize::from(self.color_next), usize::from(self.capacity()))
     }
 
-    /// Haritanın kabul ettiği en çok kayıt sayısı — pozitif ve negatif
-    /// birlikte. Kapasitenin **iki katı**: bir katı pozitif kayıtların
-    /// olabildiği en büyük değer, ikincisi negatif önbelleğe bırakılan pay.
+    /// The most entries the map accepts — positive and negative together.
+    /// **Twice** the capacity: one share is the largest value the positive
+    /// entries can reach, the second is the share left to the negative cache.
     ///
-    /// Kastedilen kapasite [`Atlas::capacity`], yani **türetilmiş** kenardan
-    /// çıkan sayı ([`SLOT_TARGET`]) — sabit bir tavan değil. Kenar
-    /// katlandığında bu pay da onunla büyüyor ve büyümesi doğru: pozitif
-    /// tarafta daha çok yuva varsa negatif tarafta da daha çok karakter
-    /// denenmiş demektir.
+    /// The capacity meant is [`Atlas::capacity`], i.e. the number from the
+    /// **derived** edge ([`SLOT_TARGET`]) — not a fixed ceiling. When the edge
+    /// folds this share grows with it and its growth is right: if there are
+    /// more slots on the positive side, more characters have been tried on the
+    /// negative side too.
     fn negative_cache_cap(&self) -> usize {
         usize::from(self.capacity()).saturating_mul(2)
     }
 
-    /// Toplam yuva sayısı.
+    /// The total slot count.
     ///
-    /// `u16`'ya kırpılıyor: yuva numarası dışarıya `u16` olarak veriliyor ve
-    /// çok küçük hücrelerde ızgara o sınırı aşabilir. Kırpma kapasiteyi
-    /// daraltır, taşma ise yuvaları sessizce birbirine bindirirdi.
+    /// Clamped to `u16`: the slot number is handed outside as `u16` and at very
+    /// small cells the grid may exceed that limit. Clamping narrows the
+    /// capacity, while overflow would silently overlap slots.
     fn capacity(&self) -> u16 {
         let total = u32::from(self.grid.0) * u32::from(self.grid.1);
         u16::try_from(total).unwrap_or(u16::MAX)
     }
 }
 
-/// Hücre ölçüsüne düşen doku kenarı, piksel — kararın **tek** kaynağı.
+/// The texture edge that falls to the cell size, in pixels — the **sole**
+/// source of the decision.
 ///
-/// Taban [`MIN_EDGE`]; kapasite [`SLOT_TARGET`]'ın altında kaldıkça ve tavana
-/// ([`MAX_EDGE`]) varmadıkça ikiye katlanıyor. Sınamalar bu fonksiyonu
-/// **çağırıyor**, ikinci bir kopyasını yazmıyor: aynalanmış bir türetme
-/// kendi hatasını göremez.
+/// The floor is [`MIN_EDGE`]; it doubles as long as the capacity stays below
+/// [`SLOT_TARGET`] and the ceiling ([`MAX_EDGE`]) has not been reached. Tests
+/// **call** this function, they do not write a second copy: a mirrored
+/// derivation cannot see its own error.
 fn edge_for(w: u16, h: u16) -> u16 {
     let mut edge = MIN_EDGE;
     while slots_at(grid_at(edge, w, h)) < SLOT_TARGET && edge < MAX_EDGE {
-        // `min` bir savunma refleksi değil, [`MAX_EDGE`]'in doc'unu **doğru**
-        // kılan şey: guard katlamadan **önce** bakıyor, yani tavan
-        // `MIN_EDGE * 2^k` değilse çarpım onu aşardı ve sabit adının
-        // söylediği şeyi söylemez olurdu. Taşma da aynı satırda kapanıyor.
+        // `min` is not a defensive reflex, it is what makes [`MAX_EDGE`]'s doc
+        // **true**: the guard looks **before** folding, i.e. if the ceiling is
+        // not `MIN_EDGE * 2^k` the product would exceed it and the constant
+        // would no longer say what its name says. Overflow is closed on the
+        // same line too.
         edge = edge.saturating_mul(2).min(MAX_EDGE);
     }
     edge
 }
 
-/// Verilen kenarda ızgaranın satır/sütun sayısı — **tek ifade, iki okuyucu**
-/// ([`edge_for`]'un kararı ile [`grid_for`]'un kurduğu ızgara).
+/// The grid's row/column count at the given edge — **one expression, two
+/// readers** (the decision of [`edge_for`] and the grid [`grid_for`] builds).
 ///
-/// İki kopya olsaydı sessizce ayrışabilirlerdi: büyüme döngüsü bir sayıya
-/// göre "hedef tutturuldu" derken kurulan ızgara başka bir sayı verirdi.
+/// Had there been two copies they could silently diverge: the growth loop
+/// would say "target met" by one number while the built grid gave another.
 fn grid_at(edge: u16, w: u16, h: u16) -> (u16, u16) {
     ((edge / w).max(1), (edge / h).max(1))
 }
 
-/// Izgaranın yuva sayısı. `u32`: çarpım küçük hücrede `u16`'yı aşıyor
-/// (13pt@1x, 4096 kenar → 116 224).
+/// The grid's slot count. `u32`: the product exceeds `u16` at a small cell
+/// (13pt@1x, 4096 edge → 116 224).
 fn slots_at((cols, rows): (u16, u16)) -> u32 {
     u32::from(cols) * u32::from(rows)
 }
 
-/// [`edge_for`]'un ızgaraya çevrilmiş hâli.
+/// [`edge_for`] converted to a grid.
 fn grid_for(w: u16, h: u16) -> (u16, u16) {
     grid_at(edge_for(w, h), w, h)
 }
 
-/// Fonta girecek punto: ölçek çarpılmış ve aralığa oturtulmuş.
+/// The point size that will enter the font: multiplied by the scale and
+/// clamped into the range.
 ///
-/// NaN ayrıca ele alınıyor çünkü `clamp` onu **geçirir**; taban puntoya düşmek
-/// hem çökmekten hem sessizce bozulmaktan iyi — sonuç görünür şekilde yanlış
-/// olur ve fark edilir.
+/// NaN is handled separately because `clamp` **lets it through**; falling to
+/// the floor point size is better than both crashing and silently corrupting —
+/// the result is visibly wrong and gets noticed.
 fn effective_point_size(point_size: f64, scale: f64) -> f64 {
     let v = point_size * scale;
     if v.is_finite() {
@@ -1382,23 +1454,23 @@ fn effective_point_size(point_size: f64, scale: f64) -> f64 {
     }
 }
 
-/// Tofu kutusunu çizer: hücre kenarından bir piksel içeride, 1 px çerçeve.
+/// Draws the tofu box: a 1 px frame, one pixel inside the cell edge.
 ///
-/// Fontun `.notdef` glyph'i **kullanılmıyor**: bazı fontlarda boş, bazılarında
-/// kutu ve hangisi olduğu font sürümüne bağlı. Çerçeveyi kendimiz çizmek
-/// tofu'yu fonttan bağımsız kılıyor — "görünür kayıp" iddiası ancak böyle
-/// tutuyor.
+/// The font's `.notdef` glyph is **not used**: in some fonts it is empty, in
+/// others a box and which one depends on the font version. Drawing the frame
+/// ourselves makes tofu font-independent — the "visible loss" claim holds only
+/// this way.
 fn tofu_buffer(m: Metrics) -> Vec<u8> {
     let (w, h) = m.cell_wh();
     let mut target = vec![0u8; m.slot_bytes()];
     let (x0, x1) = (1usize, w.saturating_sub(2));
     let (y0, y1) = (1usize, h.saturating_sub(2));
     if x1 <= x0 || y1 <= y0 {
-        // Hücre çerçeveye dar; boş yuva kutudan iyidir.
+        // The cell is too narrow for a frame; an empty slot beats a box.
         return target;
     }
-    // audit: `x1 < w` ve `y1 < h` (ikisi de `saturating_sub(2)`), yani en
-    // büyük indeks `y1 * w + x1 < w * h` — dilim sınırı içinde.
+    // audit: `x1 < w` and `y1 < h` (both `saturating_sub(2)`), i.e. the largest
+    // index `y1 * w + x1 < w * h` — within the slice bounds.
     for x in x0..=x1 {
         target[y0 * w + x] = 0xff;
         target[y1 * w + x] = 0xff;
@@ -1420,49 +1492,55 @@ mod tests {
         WIDE_CHAR,
     };
 
-    /// Sınama puntosu bilerek büyük: ızgara hücre ölçüsünden türüyor, yani
-    /// büyük punto = az yuva. "Dolu atlas" sınaması böylece binlerce glyph
-    /// rasterize etmeden koşuyor. **Havuz 022'de büyüdü** (yordamsal aile +
-    /// ASCII × dört yüz ≈ 800 istek) çünkü kenar türetildikten sonra en
-    /// küçük kapasite 564'e çıktı ve 95 karakterlik ASCII onu dolduramıyor;
-    /// yani "onlarca" artık doğru değil, ama binlerce de değil ve seçimin
-    /// gerekçesi aynı kalıyor. Değer [`MAX_POINT_SIZE`]'tur:
-    /// üstünü istemek sessizce kırpılır ve sınama kapasiteyi yanlış sanırdı.
+    /// The test point size is deliberately large: the grid derives from the
+    /// cell size, i.e. large point size = few slots. That way the "full atlas"
+    /// test runs without rasterizing thousands of glyphs. **The pool grew in
+    /// 022** (procedural family + ASCII × four faces ≈ 800 requests) because
+    /// once the edge was derived the smallest capacity rose to 564 and the
+    /// 95-character ASCII cannot fill it; i.e. "dozens" is no longer right, but
+    /// it is not thousands either and the reason for the choice stays the same.
+    /// The value is [`MAX_POINT_SIZE`]: asking for more is silently clamped and
+    /// the test would misjudge the capacity.
     const LARGE_POINT_SIZE: f64 = MAX_POINT_SIZE;
-    /// Ayar ayrıştırıcısının kabul ettiği en büyük satır aralığı.
+    /// The largest line spacing the settings parser accepts.
     ///
-    /// Kaynağı `bt_core::settings::MAX_LINE_HEIGHT` ama **oradan
-    /// okunamıyor**: katman yönü `bt-atlas`'ın `bt-core`'u görmesini
-    /// yasaklıyor. Kopya bilinçli ve dar — yalnız en kötü köşeyi kurmak
-    /// için; ikisi ayrışırsa bu sınama köşeyi kaçırır, yanlış çizim üretmez.
+    /// Its source is `bt_core::settings::MAX_LINE_HEIGHT` but it **cannot be
+    /// read from there**: the layer direction forbids `bt-atlas` from seeing
+    /// `bt-core`. The copy is deliberate and narrow — only to build the worst
+    /// corner; if the two diverge this test misses the corner, it does not
+    /// produce a wrong drawing.
     const LARGEST_LINE_HEIGHT: f64 = 2.0;
     const POINT_SIZE: f64 = 13.0;
-    /// Hiçbir makinede olmayan aile; CoreText yerine başka bir font verir.
+    /// A family that is on no machine; CoreText gives another font instead.
     const MISSING_FAMILY: &str = "Bu Aile Yok 12345";
 
-    /// Zincirle kurulan atlas — ayarda aile yokken üretimin kurduğu.
+    /// An atlas built through the chain — the one production builds when the
+    /// settings name no family.
     fn atlas(point_size: f64, scale: f64) -> Atlas {
         Atlas::new(None, point_size, scale, 1.0)
     }
 
-    /// Bir boy sınıfının (ad, taban font, **kesirli** hücre ilerlemesi)
-    /// üçlüsü. Yedekle ilgili her bekçi iki sınıfı da ayrı ayrı dolaşmak
-    /// zorunda: taban font ve sınır sınıf başına ayrı, tek bir tanesinden
-    /// geçen sınama ötekini hiç sınamamış olur.
+    /// The (name, base font, **fractional** cell advance) triple of a size
+    /// class. Every guard about the fallback has to walk both classes
+    /// separately: the base font and the limit are per class, a test that
+    /// passes through only one would never have tested the other.
     fn size_classes(a: &Atlas) -> [(&'static str, &Font, f64); 2] {
         [
-            ("düz yüz", a.faces.get(Face::Regular), a.cell_advance),
-            ("küçük yüz", &a.small, a.context_advance),
+            ("regular face", a.faces.get(Face::Regular), a.cell_advance),
+            ("small face", &a.small, a.context_advance),
         ]
     }
 
     #[test]
     fn metrics_are_in_a_sane_range() {
         let m = atlas(POINT_SIZE, 1.0).metrics();
-        assert!(m.cell_px.0 > 0, "genişlik sıfır: {m:?}");
-        assert!(m.cell_px.1 > m.cell_px.0, "monospace hücre uzundur: {m:?}");
-        assert!(m.baseline_px > 0, "taban çizgisi sıfır: {m:?}");
-        assert!(m.baseline_px <= m.cell_px.1, "taban hücrenin içinde: {m:?}");
+        assert!(m.cell_px.0 > 0, "width is zero: {m:?}");
+        assert!(m.cell_px.1 > m.cell_px.0, "a monospace cell is tall: {m:?}");
+        assert!(m.baseline_px > 0, "baseline is zero: {m:?}");
+        assert!(
+            m.baseline_px <= m.cell_px.1,
+            "baseline is inside the cell: {m:?}"
+        );
         assert_eq!(
             m.slot_bytes(),
             usize::from(m.cell_px.0) * usize::from(m.cell_px.1)
@@ -1471,13 +1549,14 @@ mod tests {
 
     #[test]
     fn the_cell_is_the_rounded_advance() {
-        // Hücre genişliği iki temsilde yaşıyor: kesirli ([`Atlas::cell_advance`],
-        // yedek kapısı ile ortalamanın girdisi) ve yukarı yuvarlanmış
-        // ([`Metrics::cell_px`], ızgaranın adımı). İkisi **aynı ölçü** olmak
-        // zorunda; ayrışsalar kapı bir hücreye, ortalama başka bir hücreye
-        // bakar ve belirti sessiz olur. Küçük sınıfta ayrıca bir tarihçe var:
-        // `context_cell_w` bir dönem `rules::metrics(&small, ..)` üzerinden
-        // türüyordu, yani aynı sayının iki kaynağı vardı.
+        // The cell width lives in two representations: fractional
+        // ([`Atlas::cell_advance`], the input of the fallback gate and of
+        // centring) and rounded up ([`Metrics::cell_px`], the grid's step). The
+        // two have to be **the same measure**; if they diverge the gate looks at
+        // one cell and the centring at another and the symptom is silent. In the
+        // small class there is also a history: `context_cell_w` was once derived
+        // via `rules::metrics(&small, ..)`, i.e. the same number had two
+        // sources.
         for (point_size, scale) in [
             (POINT_SIZE, 1.0),
             (POINT_SIZE, 2.0),
@@ -1487,13 +1566,13 @@ mod tests {
             assert_eq!(
                 rules::round_up(a.cell_advance),
                 a.metrics.cell_px.0,
-                "{point_size}×{scale}: büyük sınıfın iki temsili ayrıştı ({})",
+                "{point_size}×{scale}: the two representations of the large class diverged ({})",
                 a.cell_advance
             );
             assert_eq!(
                 rules::round_up(a.context_advance),
                 a.context_cell_w,
-                "{point_size}×{scale}: küçük sınıfın iki temsili ayrıştı ({})",
+                "{point_size}×{scale}: the two representations of the small class diverged ({})",
                 a.context_advance
             );
         }
@@ -1501,38 +1580,40 @@ mod tests {
 
     #[test]
     fn every_base_glyph_advance_is_the_cell_advance() {
-        // Ortalama **evrensel** ve taban fontta tam olarak sıfır olmak
-        // zorunda: `(cell - advance) / 2` kesirli bir sonuç verse CG'nin kenar
-        // yumuşatması değişir ve depodaki bütün piksel bekçilerinin
-        // (`glyph_sits_on_the_baseline`, `descender_fits_in_the_cell`, …)
-        // altı sessizce oyulur. Bu sınama o sıfırın **sebebini** tutuyor.
+        // Centring is **universal** and in the base font it has to be exactly
+        // zero: if `(cell - advance) / 2` gave a fractional result CG's edge
+        // smoothing would change and the ground under all of the repo's pixel
+        // guards (`glyph_sits_on_the_baseline`, `descender_fits_in_the_cell`, …)
+        // would be silently hollowed out. This test holds the **reason** for
+        // that zero.
         //
-        // İddia "font eşaralıklı" değil, ondan daha güçlü: her glyph'in
-        // ilerlemesi hücrenin ilerlemesine **bit bit** eşit. Eşaralıklı
-        // olmayan bir aile bunu düşürmez (zincirin tabanı Menlo) ama orada
-        // ortalama gerçekten kaydırır — `raster::draw`'in `max(0.0)`'ı o yolu
-        // adıyla anlatıyor.
+        // The claim is not "the font is monospaced", it is stronger than that:
+        // every glyph's advance is equal to the cell's advance **bit for bit**.
+        // A non-monospaced family would not fail this (the chain's base is
+        // Menlo) but there the centring really shifts — `raster::draw`'s
+        // `max(0.0)` explains that path by name.
         let a = atlas(POINT_SIZE, 1.0);
-        // **Beş fontun beşi de**, iki değil: `cell_advance` düz yüzün ölçüsü
-        // (`Metrics` yalnız ondan türüyor) ama atlas kalın, eğik ve kalın-eğik
-        // yüzleri de **aynı** sayıyla ortalıyor. Kalın yüzü düz yüzünden dar
-        // bir ailede her kalın glyph sağa kayardı ve kayma yalnız bir yönde
-        // görünürdü — `max(0.0)` ötekini yutuyor. Bekçi düz yüzle küçük yüzle
-        // sınırlı kalsaydı o kolu hiç görmezdi.
+        // **All five fonts**, not two: `cell_advance` is the regular face's
+        // measure (`Metrics` derives only from it) but the atlas centres the
+        // bold, italic and bold-italic faces with the **same** number too. In a
+        // family whose bold face is narrower than its regular face every bold
+        // glyph would shift right and the shift would show in one direction only
+        // — `max(0.0)` swallows the other. Had the guard been limited to the
+        // regular and small faces it would never have seen that arm.
         let fonts = [
-            ("düz yüz", a.faces.get(Face::Regular), a.cell_advance),
-            ("kalın yüz", a.faces.get(Face::Bold), a.cell_advance),
-            ("eğik yüz", a.faces.get(Face::Italic), a.cell_advance),
-            ("kalın eğik", a.faces.get(Face::BoldItalic), a.cell_advance),
-            ("küçük yüz", &a.small, a.context_advance),
+            ("regular face", a.faces.get(Face::Regular), a.cell_advance),
+            ("bold face", a.faces.get(Face::Bold), a.cell_advance),
+            ("italic face", a.faces.get(Face::Italic), a.cell_advance),
+            ("bold italic", a.faces.get(Face::BoldItalic), a.cell_advance),
+            ("small face", &a.small, a.context_advance),
         ];
         for (label, face_font, cell) in fonts {
-            // Yazdırılabilir ASCII, kutu çizim ve Menlo'nun kendi simgeleri:
-            // hücreden farklı ilerleyen bir glyph varsa buradan görünür.
-            // Birleştirici işaretler de listede: ilerlemesi sıfır olan bir
-            // glyph hücrenin **ortasına** rasterize olurdu ve belirti ancak
-            // ekranda görünürdü (Menlo'da U+0301 tam hücre ilerliyor, yani bu
-            // kol bugün kapalı — ölçüldü).
+            // Printable ASCII, box drawing and Menlo's own symbols: if any glyph
+            // advances differently from the cell it shows up here. Combining
+            // marks are in the list too: a glyph with zero advance would be
+            // rasterized into the **middle** of the cell and the symptom would
+            // only be visible on screen (in Menlo U+0301 advances a full cell,
+            // i.e. this arm is closed today — measured).
             for ch in (' '..='~').chain(fixture::BASE_SYMBOLS.chars()) {
                 let Some(glyph) = Backend::glyph(face_font, ch) else {
                     continue;
@@ -1540,17 +1621,18 @@ mod tests {
                 assert_eq!(
                     Backend::advance(face_font, glyph),
                     cell,
-                    "{label}: '{ch}' hücreden farklı ilerliyor, ortalama artık no-op değil"
+                    "{label}: '{ch}' advances differently from the cell, centring is no longer a no-op"
                 );
             }
         }
 
-        // İkinci yarı: `raster::draw` bu sayıyı **gerçekten** tüketiyor.
-        // Yalnız yukarıdaki eşitlik sınansaydı iddia girdinin doğruluğundan
-        // ibaret kalırdı; `draw`'in girdiyi yok sayıp yuvarlanmış hücreye
-        // (`cell_px.0`) bakması — yani taban fontun her glyph'ini 0.09 piksel
-        // kaydırıp bütün rasteri sessizce değiştirmesi — buradan geçerdi.
-        // Ölçüt: daha geniş bir hücre ilerlemesi bitmap'i sağa itmeli.
+        // The second half: `raster::draw` **really** consumes this number. Had
+        // only the equality above been tested, the claim would amount to the
+        // input being correct; `draw` ignoring the input and looking at the
+        // rounded cell (`cell_px.0`) — i.e. shifting every glyph of the base
+        // font by 0.09 pixels and silently changing the whole raster — would
+        // pass from here. The criterion: a wider cell advance should push the
+        // bitmap to the right.
         let m = a.metrics();
         let font = a.faces.get(Face::Regular);
         let mut own = vec![0u8; m.slot_bytes()];
@@ -1559,14 +1641,14 @@ mod tests {
             raster::draw(font, 'W', m, a.cell_advance, 0.0, &mut own),
             DrawResult::Drawn
         );
-        // Dört piksel geniş bir hücre glyph'i iki piksel sağa iter.
+        // A cell four pixels wider pushes the glyph two pixels to the right.
         assert_eq!(
             raster::draw(font, 'W', m, a.cell_advance + 4.0, 0.0, &mut wider),
             DrawResult::Drawn
         );
         assert_ne!(
             own, wider,
-            "`draw` hücre ilerlemesini yok sayıyor: ortalama girdiye bağlı değil"
+            "`draw` ignores the cell advance: centring does not depend on the input"
         );
     }
 
@@ -1574,14 +1656,14 @@ mod tests {
     fn fallback_glyph_is_drawn_in_both_size_classes() {
         let mut a = atlas(POINT_SIZE, 1.0);
         let (w, h) = a.metrics().cell_wh();
-        // Kapsamanın en sağdaki sütunu; `the_small_class_is_narrower_…`'in
-        // ölçütüyle aynı ve aynı sebeple: tek tek piksel değeri font sürümüne
-        // bağlı, sınır değil.
+        // The rightmost column of the coverage; the same as the criterion of
+        // `the_small_class_is_narrower_…` and for the same reason: a single
+        // pixel value depends on the font version, the bound does not.
         let ink_right = |bytes: &[u8]| {
             (0..w)
                 .rev()
                 .find(|&x| (0..h).any(|y| bytes[y * w + x] > 0))
-                .expect("yedek glyph hiç piksel boyamadı")
+                .expect("the fallback glyph painted no pixels at all")
         };
 
         let mut edge = Vec::new();
@@ -1595,26 +1677,27 @@ mod tests {
             let slot = placed.slot;
             assert_ne!(
                 slot, TOFU,
-                "{size:?}: '{FALLBACK_CHAR}' yedekten gelmeli, kutu değil"
+                "{size:?}: '{FALLBACK_CHAR}' should come from the fallback, not a box"
             );
-            edge.push(ink_right(upload.expect("yeni yuva").bytes));
+            edge.push(ink_right(upload.expect("new slot").bytes));
         }
 
-        // İki sınıf **ayrı ayrı** değerlendiriliyor ve ayrı yuva tutuyor:
-        // anahtar boy sınıfı taşımasaydı tek yuva çıkardı.
+        // The two classes are evaluated **separately** and each holds its own
+        // slot: if the key carried no size class, there would be one slot.
         assert_eq!(
             a.occupancy().0,
             3,
-            "iki boy sınıfı ayrı yuva almalı (tofu dahil üç)"
+            "the two size classes must get separate slots (three with tofu)"
         );
-        // Ve yedeğin **tabanı** o sınıfın kendi fontu: küçük sınıfta aynı
-        // yuvaya daha dar bir iz düşmeli. Bu olmadan "iki sınıf da çalışıyor"
-        // iddiası, küçük satıra büyük punto glyph çizen bir uygulamadan
-        // ayırt edilemezdi — ve belirti sessiz olurdu, çünkü bir şey yine
-        // görünürdü.
+        // And the fallback's **base** is that class's own font: in the small
+        // class a narrower trace must land in the same slot. Without this, the
+        // claim "both classes work" could not be told apart from an
+        // implementation that draws a large-point glyph on a small row — and
+        // the symptom would be silent, because something would still be
+        // visible.
         assert!(
             edge[1] < edge[0],
-            "küçük sınıfın yedeği daralmadı: sağ kenar büyükte {}, küçükte {}",
+            "the small class's fallback did not narrow: right edge {} in large, {} in small",
             edge[0],
             edge[1]
         );
@@ -1622,52 +1705,59 @@ mod tests {
 
     #[test]
     fn fallback_glyph_fits_the_cell() {
-        // `slot != TOFU` kırpmayı **göremez**: CG hücrenin dışına taşan
-        // mürekkebi sessizce kesiyor ve bitmap yine dolu görünür. Kapı
-        // yatayda artık mürekkebi ölçüyor, ama **dikeyde ölçmüyor** (gerekçe
-        // `rules::ink_fits_box`'in doc'unda: dikeyi eleyen tek küme emoji ve
-        // o tam boyuyla yatayda dönüyor, küçültülünce hücrede ortalanıyor) —
-        // ascent'i yüksek bir aday kapıyı geçip
-        // yine kırpılabilir. Ölçüt bu yüzden fontun kendi sınır dikdörtgeni
-        // ve **dört kenar birden**: yatayda kapının tanığı, dikeyde tek
-        // bekçi.
+        // `slot != TOFU` **cannot see** clipping: CG silently cuts ink that
+        // spills out of the cell and the bitmap still looks full. The gate now
+        // measures ink horizontally, but **does not measure vertically**
+        // (rationale in the doc of `rules::ink_fits_box`: the only cluster
+        // vertical would reject is emoji, and it returns at full size
+        // horizontally, then is centred in the cell once shrunk) — a
+        // candidate with a tall ascent can pass the gate and still get
+        // clipped. The criterion is therefore the font's own bounding
+        // rectangle and **all four edges at once**: the gate's witness
+        // horizontally, the only guard vertically.
         let a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
-        // CG'nin başlangıcı sol alt: taban çizgisi yuvanın dibinden bu kadar
-        // yukarıda (`raster::draw` ile aynı aritmetik).
+        // CG's origin is bottom-left: the baseline sits this far above the
+        // slot's bottom (same arithmetic as `raster::draw`).
         let baseline = f64::from(m.cell_px.1 - m.baseline_px);
         for (label, base, cell) in size_classes(&a) {
             let alt = rules::fallback_font(base, FALLBACK_CHAR, cell, 1)
                 .map(|accepted| accepted.font)
-                .unwrap_or_else(|| panic!("{label}: '{FALLBACK_CHAR}' kapıdan geçmeli"));
-            let glyph = Backend::glyph(&alt, FALLBACK_CHAR).expect("kapıyı geçen aday çizebiliyor");
+                .unwrap_or_else(|| panic!("{label}: '{FALLBACK_CHAR}' must pass the gate"));
+            let glyph = Backend::glyph(&alt, FALLBACK_CHAR)
+                .expect("the candidate that passed the gate can draw");
             let rect = Backend::ink(&alt, glyph);
             let x = rules::centre_shift(cell, Backend::advance(&alt, glyph));
             let (left, right) = (x + rect.x, x + rect.x + rect.width);
-            assert!(left >= 0.0, "{label}: mürekkep soldan taştı ({left})");
+            assert!(left >= 0.0, "{label}: ink spilled over the left ({left})");
             assert!(
                 right <= cell,
-                "{label}: mürekkep sağdan taştı ({right} > {cell})"
+                "{label}: ink spilled over the right ({right} > {cell})"
             );
             let (bottom, top) = (baseline + rect.y, baseline + rect.y + rect.height);
-            assert!(bottom >= 0.0, "{label}: mürekkep alttan taştı ({bottom})");
+            assert!(
+                bottom >= 0.0,
+                "{label}: ink spilled over the bottom ({bottom})"
+            );
             let cell_h = f64::from(m.cell_px.1);
             assert!(
                 top <= cell_h,
-                "{label}: mürekkep üstten taştı ({top} > {cell_h})"
+                "{label}: ink spilled over the top ({top} > {cell_h})"
             );
 
-            // Ve ortalama yedek yolunda **gerçekten** koşuyor: aynı adayı
-            // kaydırmasız çizmek (sınırı tam glyph'in ilerlemesi yaparak,
-            // yani kaydırmayı inşaen sıfırlayarak) başka bir bitmap veriyor.
+            // And centring **really** runs on the fallback path: drawing the
+            // same candidate without the shift (making the bound exactly the
+            // glyph's advance, i.e. zeroing the shift by construction) gives a
+            // different bitmap.
             //
-            // Ölçüt "mürekkebin ağırlık merkezi hücrenin ortasına yaklaştı"
-            // **değil**: ortalanan şey glyph'in **ilerleme kutusu**, mürekkebi
-            // değil, ve `⏵`'nin yan yatakları asimetrik (ölçüldü: solda 1.04,
-            // sağda 0.13). Merkez ölçütü bu glyph'te yanlış yöne işaret eder
-            // ve doğru uygulamayı kırmızıya düşürürdü. İddia bu yüzden daha
-            // mütevazı ama yine gözlenebilir: kaydırma uygulanıyor ve taban
-            // fontun tersine sıfır değil.
+            // The criterion is **not** "the ink's centre of mass moved closer
+            // to the cell's middle": what gets centred is the glyph's
+            // **advance box**, not its ink, and `⏵`'s side bearings are
+            // asymmetric (measured: 1.04 on the left, 0.13 on the right). A
+            // centre criterion would point the wrong way on this glyph and
+            // fail a correct implementation. The claim is therefore more
+            // modest but still observable: the shift is applied and, unlike
+            // the base font's, is not zero.
             let advance = Backend::advance(&alt, glyph);
             let mut centred = vec![0u8; m.slot_bytes()];
             let mut flush = vec![0u8; m.slot_bytes()];
@@ -1681,30 +1771,31 @@ mod tests {
             );
             assert_ne!(
                 centred, flush,
-                "{label}: yedek glyph kaydırılmadı (kapı {cell}, ilerleme {advance})"
+                "{label}: the fallback glyph was not shifted (gate {cell}, advance {advance})"
             );
         }
     }
 
     #[test]
     fn the_gate_decides_by_ink_alone() {
-        // Bekçinin sınadığı şey "bu karakter kutu mu" **değil**: o, makinede
-        // hangi fontların kurulu olduğuna bağlı bir olgu ve kodun özelliği
-        // değil. `U+E0B0` bu makinede `.LastResort`'a düşüyor ve reddediliyor,
-        // ama Nerd Font kurulu bir makinede gerçek bir glyph'e düşer ve
-        // **çizilmesi doğru olur**; beklentiyi sabite yazmak `make hepsi`'yi
-        // doğru kodda kırmızıya düşürürdü.
+        // What the guard tests is **not** "is this character a box": that is
+        // a fact that depends on which fonts are installed on the machine and
+        // is not a property of the code. `U+E0B0` falls to `.LastResort` on
+        // this machine and is rejected, but on a machine with a Nerd Font it
+        // falls to a real glyph and **drawing it is correct**; writing the
+        // expectation as a constant would fail `make check` on correct code.
         //
-        // Sınanan şey **kapının kuralı**: adayın boyayacağı piksel hücrenin
-        // içinde kalıyorsa çiziliyor, taşıyorsa kutu. Beklenti adayın kendi
-        // mürekkep kutusundan türetiliyor, yani ölçüt her makinede aynı — ve
-        // gözlem ile beklenti iki ayrı çağrıdan geliyor (biri `fallback_font`,
-        // öteki `slot`), yani totoloji değil: kapı `slot`'un yolunda
-        // koşmuyorsa bu sınama düşer.
+        // What is tested is **the gate's rule**: if the pixels the candidate
+        // will paint stay inside the cell it is drawn, if they spill over it
+        // is a box. The expectation is derived from the candidate's own ink
+        // box, so the criterion is the same on every machine — and the
+        // observation and the expectation come from two separate calls (one
+        // `fallback_font`, the other `slot`), so it is not a tautology: if
+        // the gate does not run on `slot`'s path, this test fails.
         //
-        // Beklenti **ilerlemeden** türetilseydi bu sınama iki karakterde
-        // kırmızı düşerdi ([`INK_CHAR`] ile `⠋`); listede kalmalarının sebebi
-        // o — ölçütün geri alınması sessiz kalmamalı.
+        // If the expectation were derived from the **advance**, this test
+        // would fail on two characters ([`INK_CHAR`] and `⠋`); that is why
+        // they stay in the list — reverting the criterion must not be silent.
         let mut a = atlas(POINT_SIZE, 1.0);
         let classes = size_classes(&a);
         let mut plan: Vec<(char, SizeClass, bool, String)> = Vec::new();
@@ -1714,35 +1805,38 @@ mod tests {
                 .enumerate()
             {
                 let (label, base, cell) = classes[i];
-                // Taban fontta varsa yedek yolu hiç koşmuyor: deneyin konusu değil.
+                // If the base font has it, the fallback path never runs: not the experiment's subject.
                 if Backend::glyph(base, ch).is_some() {
                     continue;
                 }
-                // Yordamsal çizilen karakter de deneyin konusu değil: kapı
-                // ondan **önce** duruyor ve font hiç sorulmuyor. Kapının
-                // yüklemi burada birebir tekrarlanıyor, `is_procedural(ch)`
-                // tek başına değil — `⠋` küçük sınıfta hâlâ yedek yolundan
-                // geçiyor ve bu sınamada kapalı kapının tek tanığı o.
+                // A procedurally drawn character is not the experiment's
+                // subject either: the gate stands **before** it and the font
+                // is never asked. The gate's predicate is repeated exactly
+                // here, not `is_procedural(ch)` alone — `⠋` still goes through
+                // the fallback path in the small class and is the only witness
+                // of the closed gate in this test.
                 if size == SizeClass::Normal && raster::is_procedural(ch) {
                     continue;
                 }
-                // Aday hiç yoksa da kapının konusu değil — reddi kapı vermiyor.
+                // If there is no candidate at all it is not the gate's subject either — the gate does not issue the rejection.
                 let Some(open) = rules::fallback_font(base, ch, f64::INFINITY, 1).map(|a| a.font)
                 else {
                     continue;
                 };
-                let glyph = Backend::glyph(&open, ch).expect("aday çizebiliyor");
+                let glyph = Backend::glyph(&open, ch).expect("the candidate can draw");
                 let advance = Backend::advance(&open, glyph);
-                // Adayın **çizileceği yerdeki** mürekkebi: kaydırma
-                // `raster::draw`'in uyguladığının ta kendisi
-                // (`rules::centre_shift`), yoksa sınama çizilmeyecek bir
-                // yerleşimi ölçerdi.
+                // The candidate's ink **at the place it will be drawn**: the
+                // shift is exactly what `raster::draw` applies
+                // (`rules::centre_shift`), otherwise the test would measure a
+                // placement that is never drawn.
                 let ink = Backend::ink(&open, glyph);
                 let left = ink.x + rules::centre_shift(cell, advance);
                 let right = left + ink.width;
-                // Sığmayan aday sınırın içindeyse ve `.LastResort` değilse
-                // küçültülerek çiziliyor (041); beklenti yine adayın kendi
-                // ölçüsünden, küçültmenin katsayısıyla aynı fonksiyondan.
+                // A candidate that does not fit is drawn shrunk if it is
+                // within the limit and is not `.LastResort` (041); the
+                // expectation again comes from the candidate's own
+                // measurements, from the same function as the shrink
+                // coefficient.
                 let fit = rules::fit_ratio(cell, advance, ink);
                 let shrinks = fit <= rules::SHRINK_LIMIT && !Backend::is_last_resort(&open);
                 let family = fixture::family_name(&open);
@@ -1751,8 +1845,8 @@ mod tests {
                     size,
                     (left >= 0.0 && right <= cell) || shrinks,
                     format!(
-                        "{label}, {family}, mürekkep {left}..{right} / hücre {cell} \
-                         (ilerleme {advance}, fit {fit:.3})"
+                        "{label}, {family}, ink {left}..{right} / cell {cell} \
+                         (advance {advance}, fit {fit:.3})"
                     ),
                 ));
             }
@@ -1761,8 +1855,9 @@ mod tests {
         let (mut fits, mut wide) = (0usize, 0usize);
         for (ch, size, should_fit, why) in plan {
             let placed = a.slot(Sprite::Char(ch), Face::Regular, size, Half::Whole).0;
-            // Renk düzleminin 0. yuvası gerçek bir yuva, `TOFU` ile aynı
-            // numarayı taşısa da ([`color_slot_zero_answers_the_left_request`]).
+            // Slot 0 of the colour plane is a real slot, even though it
+            // carries the same number as `TOFU`
+            // ([`color_slot_zero_answers_the_left_request`]).
             let slot = if placed.plane == Plane::Color {
                 TOFU + 1
             } else {
@@ -1771,28 +1866,32 @@ mod tests {
             if should_fit {
                 assert_ne!(
                     slot, TOFU,
-                    "hücreye sığan ya da küçülen aday çizilmedi: '{ch}' ({why})"
+                    "a candidate that fits the cell or shrinks was not drawn: '{ch}' ({why})"
                 );
                 fits += 1;
             } else {
-                assert_eq!(slot, TOFU, "hücreye sığmayan aday çizildi: '{ch}' ({why})");
+                assert_eq!(
+                    slot, TOFU,
+                    "a candidate that does not fit the cell was drawn: '{ch}' ({why})"
+                );
                 wide += 1;
             }
         }
-        // Deney **boşalamaz**: kapı iki yönde de gözlenmiş olmalı. Bu satır
-        // olmasaydı bütün adayların elenmesi (ya da hepsinin geçmesi) sınamayı
-        // sessizce anlamsızlaştırır ve yine yeşil kalırdı.
+        // The experiment **cannot be empty**: the gate must have been
+        // observed in both directions. Without this line, rejecting every
+        // candidate (or passing every one) would silently make the test
+        // meaningless and it would still be green.
         assert!(
             fits > 0 && wide > 0,
-            "kapı tek yönde sınandı: sığan {fits}, sığmayan {wide}"
+            "the gate was tested in only one direction: fitting {fits}, non-fitting {wide}"
         );
-        // Reddedilen aday **yuva harcamıyor**; olmasaydı bir CJK dosyası
-        // atlası tüketirdi. `fits` kadar yuva + tofu bekleniyor, iki düzlemin
-        // toplamında: küçültülen emoji renk düzlemine gidiyor.
+        // A rejected candidate **spends no slot**; otherwise one CJK file
+        // would exhaust the atlas. `fits` slots + tofu are expected, in the
+        // sum of the two planes: a shrunk emoji goes to the colour plane.
         assert_eq!(
             a.occupancy().0 + a.color_occupancy().0,
             fits + 1,
-            "reddedilen aday yuva harcadı (çizilen {fits})"
+            "a rejected candidate spent a slot (drawn {fits})"
         );
     }
 
@@ -1806,8 +1905,8 @@ mod tests {
             Half::Whole,
         );
         let first = placed_first.slot;
-        assert_ne!(first, TOFU, "tanınan karakter tofu'ya düşmemeli");
-        assert!(upload.is_some(), "ilk soruluşta yükleme gelmeli");
+        assert_ne!(first, TOFU, "a recognised character must not fall to tofu");
+        assert!(upload.is_some(), "an upload must come on the first ask");
         let (placed_second, again) = a.slot(
             Sprite::Char('A'),
             Face::Regular,
@@ -1818,7 +1917,7 @@ mod tests {
         assert_eq!(first, second);
         assert!(
             again.is_none(),
-            "yuva zaten yüklü: doku el değmeden kalmalı"
+            "the slot is already uploaded: the texture must stay untouched"
         );
     }
 
@@ -1854,15 +1953,16 @@ mod tests {
 
     #[test]
     fn upload_carries_slot_origin() {
-        // Bu bekçinin asıl işi derlenmek: köşe ile baytlar ayrı çağrılardan
-        // gelseydi `bt-gpu`'nun yükleme döngüsü `&mut` ödüncü elindeyken
-        // `&self` istemek zorunda kalır ve derlenmezdi.
+        // This guard's real job is to compile: if the corner and the bytes
+        // came from separate calls, `bt-gpu`'s upload loop would have to ask
+        // for `&self` while holding the `&mut` borrow, and it would not
+        // compile.
         let mut a = atlas(POINT_SIZE, 1.0);
         let slot_len = a.metrics().slot_bytes();
-        // `bt-gpu`'nun yükleme döngüsünün şekli: yükleme kendi bloğunda
-        // tüketilir, sonra aynı atlas uv için yeniden okunur. Köşe
-        // `Upload`'nin içinde olmasaydı o blokta `&self` istemek gerekirdi
-        // ve `slot`'un `&mut` ödüncü yüzünden derlenmezdi.
+        // The shape of `bt-gpu`'s upload loop: the upload is consumed in its
+        // own block, then the same atlas is read again for the uv. If the
+        // corner were not inside `Upload`, that block would need `&self` and
+        // would not compile because of `slot`'s `&mut` borrow.
         let (placed_slot, upload) = a.slot(
             Sprite::Char('A'),
             Face::Regular,
@@ -1880,8 +1980,9 @@ mod tests {
 
     #[test]
     fn rasterized_glyph_is_not_empty() {
-        // Bu bekçi olmadan "her şey çalışıyor ama atlas bomboş" durumu sessiz
-        // kalır: yuva numaraları doğru, doku doğru boyutta, ekran boş.
+        // Without this guard, the state "everything works but the atlas is
+        // completely empty" would go unnoticed: slot numbers right, texture
+        // the right size, screen blank.
         let mut a = atlas(POINT_SIZE, 1.0);
         let (placed__, upload) = a.slot(
             Sprite::Char('W'),
@@ -1890,10 +1991,10 @@ mod tests {
             Half::Whole,
         );
         let _ = placed__.slot;
-        let bytes = upload.expect("ilk soruluşta yükleme gelmeli").bytes;
-        assert!(bytes.iter().any(|&b| b > 0), "'W' hiç piksel boyamadı");
-        // Boşluk da tanınan bir glyph'tir ama hiçbir şey boyamaz: ölçüt
-        // "bitmap doldu mu" değil, "raster çalıştı mı".
+        let bytes = upload.expect("an upload must come on the first ask").bytes;
+        assert!(bytes.iter().any(|&b| b > 0), "'W' painted no pixels at all");
+        // A space is also a recognised glyph but paints nothing: the
+        // criterion is "did the raster run", not "is the bitmap filled".
         let (placed_slot, blank) = a.slot(
             Sprite::Char(' '),
             Face::Regular,
@@ -1903,8 +2004,8 @@ mod tests {
         let slot = placed_slot.slot;
         assert_ne!(slot, TOFU);
         assert!(
-            blank.expect("yeni yuva").bytes.iter().all(|&b| b == 0),
-            "boşluk boyamamalı"
+            blank.expect("new slot").bytes.iter().all(|&b| b == 0),
+            "a space must not paint"
         );
     }
 
@@ -1914,14 +2015,16 @@ mod tests {
         assert_eq!(a.tofu_bitmap().len(), a.metrics().slot_bytes());
         assert!(
             a.tofu_bitmap().iter().any(|&b| b > 0),
-            "tofu boş kutu olamaz"
+            "tofu cannot be an empty box"
         );
-        // Tofu'ya düşen çağrı yükleme **vermez**: veri dokuda zaten. Yedek
-        // aramanın gelişiyle bu iddianın kapsamı büyüdü: kabul edilmeyen aday
-        // tampona hiç çizilmediği için yol yine buraya iniyor, yani "rezident"
-        // sözü yedek reddinde de tutuyor. Kabul edilen aday `Drawn` kolundan
-        // geçer ve orada yükleme **gelir** — ikisini karıştıran bir uygulama
-        // dokuya boş tampon yazardı.
+        // A call that falls to tofu **gives no upload**: the data is already
+        // in the texture. With the arrival of the fallback search the scope
+        // of this claim grew: a rejected candidate is never drawn into the
+        // buffer, so the path still lands here, meaning the word "resident"
+        // also holds for a fallback rejection. An accepted candidate goes
+        // through the `Drawn` arm and an upload **does** come there — an
+        // implementation that confused the two would write an empty buffer
+        // into the texture.
         assert!(
             a.slot(
                 Sprite::Char(UNKNOWN_CHAR),
@@ -1931,14 +2034,15 @@ mod tests {
             )
             .1
             .is_none(),
-            "rezident yuva yeniden yüklenmez"
+            "a resident slot is not uploaded again"
         );
     }
 
-    /// Renk düzleminin 0. yuvasındaki tek hücrelik kabul `Left` isteğine de
-    /// cevap: numara `TOFU` ile aynı ama kayıt ret değil. Bekçi iç tabloyu
-    /// kuruyor, çünkü tek hücreye sığan renkli bir glyph bugünkü fontlarda
-    /// yok — kural yine de yolun kendisi.
+    /// The single-cell acceptance in slot 0 of the colour plane also
+    /// answers a `Left` request: the number is the same as `TOFU` but the
+    /// record is not a rejection. The guard builds the internal table,
+    /// because a colour glyph that fits a single cell does not exist in
+    /// today's fonts — the rule is still the path itself.
     #[test]
     fn color_slot_zero_answers_the_left_request() {
         let mut a = atlas(POINT_SIZE, 1.0);
@@ -1950,12 +2054,9 @@ mod tests {
         assert_eq!(
             (placed.slot, placed.half, placed.plane),
             (TOFU, Half::Whole, Plane::Color),
-            "renk düzleminin 0. yuvası ret sanıldı"
+            "slot 0 of the colour plane was mistaken for a rejection"
         );
-        assert!(
-            upload.is_none(),
-            "kabul edilmiş glyph yeniden rasterize edildi"
-        );
+        assert!(upload.is_none(), "an accepted glyph was rasterized again");
         assert_eq!((a.occupancy(), a.color_occupancy()), before);
     }
 
@@ -1973,20 +2074,20 @@ mod tests {
             .slot,
             TOFU
         );
-        // Reddin kalıcılığı: ikinci soruluşta CoreText'e gidilmemeli. Bekçi iç
-        // tabloya bakıyor çünkü FFI çağrısının olup olmadığı dışarıdan
-        // gözlenemiyor.
+        // Persistence of the rejection: CoreText must not be visited on the
+        // second ask. The guard looks at the internal table because whether
+        // an FFI call happened cannot be observed from outside.
         //
-        // Yedek aramanın gelişiyle bu iddia **daha pahalı** bir şeyi koruyor.
-        // Eskiden önbelleklenmeyen kayıt kare başına tek bir
-        // `CTFontGetGlyphsForCharacters` demekti; artık ona bir
-        // `CTFontCreateForString` de ekleniyor ve o cascade'i yürüyor. Soğuk
-        // ilk çağrının bedeli kare bütçesiyle karşılaştırılabilir ölçüde;
-        // sayısı ve ortamı `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama
-        // Notları'nda emanette (ilk `/measure` onu `docs/OLCUMLER.md`'ye
-        // taşır). Kaydın **ana thread'de** doğduğu yer `slot()`'un çizim
-        // yolu, yani tavansız bir sızıntı değil kare başına ödenen bir
-        // gecikme olurdu.
+        // With the arrival of the fallback search this claim protects
+        // something **more expensive**. The uncached record used to mean one
+        // `CTFontGetGlyphsForCharacters` per frame; now a
+        // `CTFontCreateForString` is added to it and that walks the cascade.
+        // The cost of the cold first call is comparable to the frame budget;
+        // its number and environment are held in escrow in
+        // `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama Notları (the first
+        // `/measure` moves it to `docs/OLCUMLER.md`). The place where the
+        // record is born **on the main thread** is `slot()`'s draw path, so
+        // this would be not an uncapped leak but a latency paid every frame.
         assert_eq!(
             a.slots.get(&(
                 Sprite::Char(UNKNOWN_CHAR),
@@ -1995,33 +2096,36 @@ mod tests {
                 Half::Whole,
             )),
             Some(&(TOFU, Plane::Mask)),
-            "tofu çözümü önbelleğe girmeli"
+            "the tofu resolution must enter the cache"
         );
-        assert_eq!(a.occupancy().0, 1, "tofu düşüşü yuva harcamamalı");
+        assert_eq!(a.occupancy().0, 1, "a tofu fall must not spend a slot");
     }
 
     // Calibration: names a font or a measured number (042 Karar 7).
     #[cfg(target_os = "macos")]
     #[test]
     fn face_fallback_is_cached_under_the_requested_face() {
-        // `╱` (U+2571) **ölçüldü** (bu makine, macOS 26.4.1, Menlo 13pt):
-        // düz yüzde var, kalın yüzde yok. Yani glyph düzeyindeki geri düşüş
-        // gerçek bir fontla ateşlenebiliyor.
+        // `╱` (U+2571) was **measured** (this machine, macOS 26.4.1, Menlo
+        // 13pt): present in the regular face, absent in bold. So the
+        // glyph-level fallback can be fired with a real font.
         //
-        // Fikstür **köşegen olmak zorunda** ve bu bir tesadüf değil: aynı
-        // ölçüm Menlo Bold'da eksik olan kod noktalarını da saydı ve BMP ile
-        // SMP'nin tamamında **tek** bir blok çıktı — U+2500–U+257F, tam 128
-        // karakter. O bloğun tamamı 021'in kapsamında, yalnız üç köşegeni
-        // (`╱╲╳`, Karar 3B) bilerek dışarıda. Yani bu sınamanın taşıyıcı
-        // iddiasını ayakta tutan şey kapsamın o deliği: delik kapansaydı
-        // `DrawResult::NoGlyph if face != Face::Regular` kolunun bu makinede
-        // **hiç** bekçisi kalmazdı ve kol sessizce ölürdü.
+        // The fixture **has to be a diagonal** and that is no coincidence:
+        // the same measurement also counted the code points missing from
+        // Menlo Bold and found **one** block across the whole BMP and SMP —
+        // U+2500–U+257F, exactly 128 characters. The whole of that block is
+        // within 021's scope, only its three diagonals (`╱╲╳`, Karar 3B) are
+        // deliberately left out. So what keeps this test's load-bearing
+        // claim standing is that hole in the coverage: if the hole were
+        // closed, the `DrawResult::NoGlyph if face != Face::Regular` arm
+        // would have **no** guard on this machine and the arm would die
+        // silently.
         //
-        // Bir dönem fikstür `─` (U+2500) idi ve doc'u "kalın bir TUI
-        // çerçevesi bu koldan geçiyor" diyordu; artık geçmiyor, çerçeve
-        // yordamsal çiziliyor ve `(Char('─'), Bold)` anahtarı hiç oluşmuyor.
-        // Değiştirilmeseydi `bold == regular` ile `occupancy == 2` yeşil
-        // kalır, sınama hiçbir şey sınamadan yaşardı.
+        // At one point the fixture was `─` (U+2500) and its doc said "a bold
+        // TUI frame goes through this arm"; it no longer does, the frame is
+        // drawn procedurally and the `(Char('─'), Bold)` key is never
+        // created. Had it not been changed, `bold == regular` and
+        // `occupancy == 2` would have stayed green and the test would have
+        // lived on testing nothing.
         const FACE_LADDER_PROBE: char = '╱';
         let mut a = atlas(POINT_SIZE, 1.0);
         let regular = a
@@ -2043,16 +2147,25 @@ mod tests {
             .0
             .slot;
 
-        // Geri düşüşün kendisi: kalın istek tofu'ya değil düz yüzün yuvasına
-        // çözülmeli, yoksa kalın bir satırdaki çerçeve kutu kutu görünürdü.
-        assert_ne!(bold, TOFU, "kalın yüzde olmayan glyph tofu'ya düştü");
-        assert_eq!(bold, regular, "geri düşüş düz yüzün yuvasını vermeli");
+        // The fallback itself: the bold request must resolve to the regular
+        // face's slot, not to tofu, otherwise a frame on a bold line would
+        // look like box after box.
+        assert_ne!(
+            bold, TOFU,
+            "a glyph missing from the bold face fell to tofu"
+        );
+        assert_eq!(
+            bold, regular,
+            "the fallback must give the regular face's slot"
+        );
 
-        // Asıl bekçi: **istenen** yüzün anahtarı da haritada. Olmasaydı bu
-        // çözüm hiç önbelleğe girmez, `slot()` çizim yolunda olduğu için de
-        // ekranda duran her kalın çerçeve hücresi **her karede** CoreText'e
-        // yeniden sorulurdu — ana thread'de. Dışarıdan gözlenemediği için
-        // bekçi iç tabloya bakıyor; `unknown_char_is_cached` ile aynı gerekçe.
+        // The real guard: the key of the **requested** face is in the map
+        // too. Without it this resolution would never enter the cache, and
+        // because it is on `slot()`'s draw path, every bold frame cell on
+        // screen would be asked of CoreText again **every frame** — on the
+        // main thread. Since it cannot be observed from outside, the guard
+        // looks at the internal table; same rationale as
+        // `unknown_char_is_cached`.
         assert_eq!(
             a.slots.get(&(
                 Sprite::Char(FACE_LADDER_PROBE),
@@ -2061,41 +2174,41 @@ mod tests {
                 Half::Whole
             )),
             Some(&(regular, Plane::Mask)),
-            "geri düşüş istenen yüzün anahtarıyla önbelleğe girmeli"
+            "the fallback must enter the cache under the requested face's key"
         );
-        assert_eq!(a.occupancy().0, 2, "geri düşüş ikinci bir yuva harcadı");
+        assert_eq!(a.occupancy().0, 2, "the fallback spent a second slot");
     }
 
-    /// Yordamsal ailenin karakterleri — **tek kaynak**, tarama BMP'nin
-    /// tamamı ve süzgeç `raster::is_procedural`.
+    /// The procedural family's characters — **single source**, the scan is
+    /// the whole BMP and the filter is `raster::is_procedural`.
     ///
-    /// Dar bir aralık yazmak implementasyonun tablosunu aynalamak olurdu;
-    /// aynalanmış tablo kendi eksiğini göremez (021'in kol tablosu dersi).
+    /// Writing a narrow range would mirror the implementation's table; a
+    /// mirrored table cannot see its own gap (the lesson of 021's arm table).
     fn procedural_chars() -> impl Iterator<Item = char> {
         (0u32..=0xFFFF)
             .filter_map(char::from_u32)
             .filter(|&ch| raster::is_procedural(ch))
     }
 
-    /// Ailenin atlastan istediği yuva sayısı — **kapasiteyle doğrudan
-    /// karşılaştırılabilir** hâli.
+    /// The number of slots the family asks of the atlas — in a form
+    /// **directly comparable to the capacity**.
     ///
-    /// Karakterlerin eline geçen yuva `capacity()` değil: `Atlas::slot`
-    /// onlara `capacity() - RULE_RESERVE` veriyor ve `next` tofu ayrıldığı
-    /// için **1'den** başlıyor. Yani aile sığsın diye kapasitenin ailenin
-    /// boyundan `1 + RULE_RESERVE` fazla olması gerekiyor. Bu yedi yuvayı
-    /// saymamak değişmezi sessizce gevşetirdi ve son birkaç Braille
-    /// karakteri kutu kalırken bekçi yeşil geçerdi.
+    /// The slots the characters get are not `capacity()`: `Atlas::slot`
+    /// gives them `capacity() - RULE_RESERVE` and `next` starts from **1**
+    /// because tofu is reserved. So for the family to fit, the capacity has
+    /// to exceed the family's size by `1 + RULE_RESERVE`. Not counting these
+    /// seven slots would silently loosen the invariant and the guard would
+    /// pass green while the last few Braille characters stayed boxes.
     fn procedural_family_size() -> usize {
         procedural_chars().count() + 1 + usize::from(RULE_RESERVE)
     }
 
-    /// Varsayılan yol **bit bit aynı** kalmalı (022 R2).
+    /// The default path must stay **bit for bit the same** (022 R2).
     ///
-    /// Kenarın türetilmesi ancak hücre büyüdüğünde devreye giriyor; varsayılan
-    /// punto zaten [`SLOT_TARGET`]'ın katbekat üstünde. Bu bekçi olmasaydı
-    /// [`MIN_EDGE`] ya da [`SLOT_TARGET`] oynayınca varsayılan kullanıcının
-    /// ızgarası, dokusu ve **rasteri** sessizce değişirdi.
+    /// Deriving the edge only kicks in when the cell grows; the default
+    /// point size is already many times above [`SLOT_TARGET`]. Without this
+    /// guard, when [`MIN_EDGE`] or [`SLOT_TARGET`] moved, the default user's
+    /// grid, texture and **raster** would silently change.
     // Calibration: names a font or a measured number (042 Karar 7).
     #[cfg(target_os = "macos")]
     #[test]
@@ -2104,37 +2217,38 @@ mod tests {
         assert_eq!(
             edge_for(a.metrics.cell_px.0, a.metrics.cell_px.1),
             MIN_EDGE,
-            "varsayılan punto tabanda kalmalı"
+            "the default point size must stay at the floor"
         );
-        // Ölçülmüş sayı: `docs/OLCUMLER.md` → Atlas yuva ayak izi, 13pt@2x.
-        assert_eq!(a.occupancy().1, 1984, "13pt@2x kapasitesi değişti");
+        // Measured number: `docs/OLCUMLER.md` → Atlas yuva ayak izi, 13pt@2x.
+        assert_eq!(a.occupancy().1, 1984, "the 13pt@2x capacity changed");
     }
 
-    /// Değişmez: **kabul edilen her ölçüde** kapasite yordamsal ailenin
-    /// üstünde (022 R3).
+    /// Invariant: at **every accepted size** the capacity is above the
+    /// procedural family (022 R3).
     ///
-    /// Bu bekçi 021'in doyma tablosunun yerine geçiyor: tablo bir gözlemdi,
-    /// bu bir sözleşme. Aile + tofu = 422 yuva (`docs/OLCUMLER.md`); sayı
-    /// burada **sabit olarak değil** `raster::is_procedural`'dan sayılarak
-    /// türetiliyor, yani aileye karakter eklenirse bekçi kendiliğinden
-    /// sıkılaşıyor.
+    /// This guard replaces 021's saturation table: the table was an
+    /// observation, this is a contract. Family + tofu = 422 slots
+    /// (`docs/OLCUMLER.md`); the number is derived here **not as a constant**
+    /// but by counting from `raster::is_procedural`, so if a character is
+    /// added to the family the guard tightens by itself.
     #[test]
     fn capacity_clears_the_family_at_every_accepted_size() {
-        // **Aralık aynalanmıyor:** tarama BMP'nin tamamı ve süzgeç
-        // `raster::is_procedural`'ın kendisi. Dar bir tarama aralığı
-        // implementasyonun tablosunun ikinci kopyası olurdu ve aileye yeni
-        // bir blok eklenince (Legacy Computing, U+1FB00–1FBFF — yol
-        // haritasının sıradaki adayı) bekçi yeşil kalırdı: tam da 021'in
-        // uyardığı sessiz ayrışma.
+        // **The range is not mirrored:** the scan is the whole BMP and the
+        // filter is `raster::is_procedural` itself. A narrow scan range would
+        // be a second copy of the implementation's table and when a new
+        // block is added to the family (Legacy Computing, U+1FB00–1FBFF — the
+        // roadmap's next candidate) the guard would stay green: exactly the
+        // silent divergence 021 warned about.
         let family = procedural_family_size();
-        // Punto × ölçek çarpımı [`MIN_POINT_SIZE`]..[`MAX_POINT_SIZE`]
-        // aralığına oturuyor, yani köşeyi kuran şey çarpımın tavanı ve
-        // satır aralığının tavanı.
-        // **İki eksen.** Hücre ölçüsü yalnız punto/ölçek/satır aralığından
-        // değil **aileden** de geliyor ve kullanıcının ailesi reddedilmiyor,
-        // yalnız uyarı alıyor (`proportional_family_opens_with_a_warning`).
-        // Tek eksenli bir bekçi, tam da bu setin sözleşmeye çevirdiği kusuru
-        // ikinci eksenden kaçırırdı.
+        // The point × scale product sits in the
+        // [`MIN_POINT_SIZE`]..[`MAX_POINT_SIZE`] range, so what sets the
+        // corner is the product's ceiling and the line spacing's ceiling.
+        // **Two axes.** The cell size comes not only from point/scale/line
+        // spacing but also from the **family**, and the user's family is not
+        // rejected, only warned about
+        // (`proportional_family_opens_with_a_warning`). A single-axis guard
+        // would miss, through the second axis, exactly the defect this set
+        // turned into a contract.
         for family_name in [None, Some(fixture::PROPORTIONAL_FAMILY)] {
             for point_size in [MIN_POINT_SIZE, 13.0, 29.0, 56.0, MAX_POINT_SIZE] {
                 for scale in [1.0, 2.0] {
@@ -2144,7 +2258,7 @@ mod tests {
                         assert!(
                             total >= family,
                             "{family_name:?} {point_size}pt@{scale}x \
-                             lh={line_height}: kapasite {total} < aile {family}"
+                             lh={line_height}: capacity {total} < family {family}"
                         );
                     }
                 }
@@ -2154,21 +2268,23 @@ mod tests {
 
     #[test]
     fn full_atlas_returns_tofu_without_caching() {
-        // En küçük kapasiteyi veren köşe: en büyük punto **ve** en büyük
-        // satır aralığı. Kenar tavana ([`MAX_EDGE`]) çarpıp orada duruyor,
-        // yani kapasite burada dibini buluyor.
+        // The corner that gives the smallest capacity: the largest point size
+        // **and** the largest line spacing. The edge hits the ceiling
+        // ([`MAX_EDGE`]) and stops there, so the capacity bottoms out here.
         let mut a = Atlas::new(None, LARGE_POINT_SIZE, 1.0, LARGEST_LINE_HEIGHT);
         let (used, total) = a.occupancy();
-        assert_eq!(used, 1, "yeni atlasta yalnız tofu ayrılmış olmalı");
-        // Havuz iki kümeden: yordamsal aile (fonta sorulmadan çizildiği için
-        // **her zaman** yuva harcıyor) ve yazdırılabilir ASCII. Kapasite
-        // artık hücre ölçüsünden türüdüğü için tek başına ASCII yetmiyor —
-        // ve tofu'ya düşen karakter yuva **harcamıyor** (negatif önbellek),
-        // yani havuz gerçekten çizilebilen karakterlerden kurulmak zorunda.
-        // Aralık tablosu **aynalanmıyor**, süzgeç `raster::is_procedural`'ın
-        // kendisi: ikinci bir kopya sessizce kayardı.
-        // ASCII dört yüzde de ayrı yuva tutuyor; yordamsal aile `Regular`'a
-        // normalize olduğu için **tek** kez sayılıyor (`Atlas::slot`).
+        assert_eq!(used, 1, "only tofu must be reserved in a new atlas");
+        // The pool is made of two sets: the procedural family (it **always**
+        // spends a slot because it is drawn without asking the font) and
+        // printable ASCII. Since the capacity is now derived from the cell
+        // size, ASCII alone is not enough — and a character that falls to
+        // tofu **spends no slot** (negative cache), so the pool has to be
+        // built from characters that can really be drawn. The range table is
+        // **not mirrored**, the filter is `raster::is_procedural` itself: a
+        // second copy would silently drift.
+        // ASCII holds a separate slot in all four faces; the procedural
+        // family is normalized to `Regular`, so it is counted **once**
+        // (`Atlas::slot`).
         let pool: Vec<(char, Face)> = procedural_chars()
             .map(|ch| (ch, Face::Regular))
             .chain(
@@ -2179,7 +2295,7 @@ mod tests {
             .collect();
         assert!(
             pool.len() > total,
-            "sınama havuzu kapasiteyi aşmalı: havuz={} kapasite={total}",
+            "the test pool must exceed the capacity: pool={} capacity={total}",
             pool.len()
         );
         let dropped: Vec<(char, Face)> = pool
@@ -2192,16 +2308,20 @@ mod tests {
                     == TOFU
             })
             .collect();
-        assert!(!dropped.is_empty(), "kapasite aşılınca tofu beklenir");
+        assert!(
+            !dropped.is_empty(),
+            "tofu is expected once the capacity is exceeded"
+        );
         assert_eq!(
             a.occupancy(),
             (total - usize::from(RULE_RESERVE), total),
-            "karakterler ızgarayı kural payı hariç doldurmalı"
+            "the characters must fill the grid except for the rule reserve"
         );
-        // **Payın kendisi.** Karakterler tavana dayandıktan sonra bile kural
-        // sprite'ı gerçek bir yuva alıyor. Pay olmasaydı bu noktadan itibaren
-        // altı çizili her hücrenin altında çizgi yerine tofu kutusu belirirdi
-        // ve belirti ancak uzun bir oturumdan sonra ortaya çıkardı.
+        // **The reserve itself.** Even after the characters hit the ceiling,
+        // a rule sprite still gets a real slot. Without the reserve, from
+        // this point on a tofu box would appear instead of a line under every
+        // underlined cell, and the symptom would only surface after a long
+        // session.
         let rule = a
             .slot(
                 Sprite::Rule(RuleKind::Single),
@@ -2211,26 +2331,27 @@ mod tests {
             )
             .0
             .slot;
-        assert_ne!(rule, TOFU, "dolu atlasta kural sprite'ı tofu'ya düştü");
-        // Dolu atlas geçici bir hâl: aynı karakter başka bir puntoda yuva
-        // bulabilir, yani tofu'ya bağlı kalmamaları gerekiyor.
+        assert_ne!(rule, TOFU, "the rule sprite fell to tofu in a full atlas");
+        // A full atlas is a transient state: the same character may find a
+        // slot at another point size, so they must not stay tied to tofu.
         for (ch, face) in dropped {
             assert!(
                 !a.slots
                     .contains_key(&(Sprite::Char(ch), face, SizeClass::Normal, Half::Whole)),
-                "'{ch}' ({face:?}) kalıcı olarak tofu'ya yazılmış"
+                "'{ch}' ({face:?}) was permanently written to tofu"
             );
         }
     }
 
     #[test]
     fn glyph_sits_on_the_baseline() {
-        // Bu bekçi olmadan y ekseni ters çevrilse (CG'nin başlangıcı sol
-        // **alt**) ya da taban yanlış hesaplansa bütün sınamalar yeşil kalır:
-        // `rasterized_glyph_is_not_empty` yalnız "bir yerde piksel var"
-        // diyor. `bt-gpu`'nun offscreen kapısı da göremezdi: o da "hücrenin
-        // içi arka planla tekdüze değil" diyor, harfin doğru yerde olduğunu
-        // değil. Ters bir taban ancak gözle görülürdü.
+        // Without this guard, if the y axis were flipped (CG's origin is
+        // bottom-**left**) or the baseline miscomputed, every test would stay
+        // green: `rasterized_glyph_is_not_empty` only says "there are pixels
+        // somewhere". `bt-gpu`'s offscreen gate could not see it either: it
+        // says "the inside of the cell is not uniform with the background",
+        // not that the letter is in the right place. An inverted baseline
+        // would only be seen by eye.
         let mut a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
         let (placed__, upload) = a.slot(
@@ -2240,88 +2361,92 @@ mod tests {
             Half::Whole,
         );
         let _ = placed__.slot;
-        let bytes = upload.expect("yeni yuva").bytes;
+        let bytes = upload.expect("new slot").bytes;
         let w = usize::from(m.cell_px.0);
         let has_ink = |row: usize| bytes[row * w..(row + 1) * w].iter().any(|&b| b > 0);
         let baseline = usize::from(m.baseline_px);
-        // 'W' ne descender taşır ne aksan: kapsamanın tamamı tabanın üstünde.
+        // 'W' carries neither a descender nor an accent: all of the coverage is above the baseline.
         assert!(
             (0..baseline).any(has_ink),
-            "taban çizgisinin üstü boş: {m:?}"
+            "the area above the baseline is empty: {m:?}"
         );
         assert!(
             !(baseline..usize::from(m.cell_px.1)).any(has_ink),
-            "'W' taban çizgisinin altına taşmamalı: {m:?}"
+            "'W' must not spill below the baseline: {m:?}"
         );
     }
 
     #[test]
     fn line_height_grows_the_cell_and_keeps_the_glyph_centred() {
-        // `[font] line_height` (kullanıcı: "satır aralarını biraz daha
-        // açabilir miyiz? hatta bu bir değişken olabiliyor mu?").
+        // `[font] line_height` (user: "could we open the line spacing up a
+        // bit? could it even be a variable?").
         //
-        // Üç iddia ve üçü de sessizce bozulabilir:
+        // Three claims and all three can break silently:
         let tight = atlas(POINT_SIZE, 1.0).metrics();
         let airy = Atlas::new(None, POINT_SIZE, 1.0, 1.5).metrics();
 
-        // (1) **Yalnız yükseklik büyüyor.** Genişlik fontun advance'ından
-        //     geliyor ve satır aralığıyla hiç ilgisi yok; büyüseydi eşaralıklı
-        //     ızgara bozulur, metin seyrekleşirdi.
-        assert_eq!(airy.cell_px.0, tight.cell_px.0, "genişlik de büyüdü");
+        // (1) **Only the height grows.** The width comes from the font's
+        //     advance and has nothing to do with line spacing; if it grew,
+        //     the monospaced grid would break and the text would spread out.
+        assert_eq!(airy.cell_px.0, tight.cell_px.0, "the width grew too");
         assert!(
             airy.cell_px.1 > tight.cell_px.1,
-            "yükseklik büyümedi: {tight:?} → {airy:?}"
+            "the height did not grow: {tight:?} → {airy:?}"
         );
 
-        // (2) **Fazlalık altta ve üstte eşit.** Taban çizgisinin indiği kadar
-        //     altta da yer açılmalı; tek yana eklenseydi metin hücrenin içinde
-        //     kayar ve çarpan büyüdükçe kayma büyürdü. `±1`: fazlalık tek
-        //     sayıysa yarısı aşağı yuvarlanıyor.
+        // (2) **The excess is equal above and below.** As much room as the
+        //     baseline drops must open below as well; if it were added to one
+        //     side, the text would drift inside the cell and the drift would
+        //     grow with the multiplier. `±1`: if the excess is odd, half of
+        //     it rounds down.
         let extra = airy.cell_px.1 - tight.cell_px.1;
         let above = airy.baseline_px - tight.baseline_px;
         let below = extra - above;
         assert!(
             above.abs_diff(below) <= 1,
-            "fazlalık eşit dağılmadı: üstte {above}, altta {below}"
+            "the excess was not split evenly: {above} above, {below} below"
         );
 
-        // (3) **Kurallar tabanla birlikte iniyor.** İkisi de tabandan
-        //     ölçülüyor; ayrı bir düzeltme eklenseydi çarpan büyüdükçe alt
-        //     çizgi harften kopardı.
+        // (3) **The rules drop together with the baseline.** Both are
+        //     measured from the baseline; if a separate correction were
+        //     added, the underline would detach from the letter as the
+        //     multiplier grew.
         assert_eq!(
             airy.underline_px.0 - tight.underline_px.0,
             above,
-            "alt çizgi tabanla inmedi"
+            "the underline did not drop with the baseline"
         );
         assert_eq!(
             airy.strikeout_px.0 - tight.strikeout_px.0,
             above,
-            "üstü çizili tabanla inmedi"
+            "the strikeout did not drop with the baseline"
         );
 
-        // (4) **`1.0` yeniden üretilebilir.** Aynı dörtlü aynı metriği
-        //     veriyor; `metrics()` saf, gizli bir duruma bağlı değil.
+        // (4) **`1.0` is reproducible.** The same quadruple gives the same
+        //     metrics; `metrics()` is pure, not tied to hidden state.
         //
-        //     Bu satır bir dönem "`1.0` no-op" diye okunuyordu ve o iddia
-        //     **yanlıştı**: `tight` da `1.0` ile kuruluyor, yani karşılaştırma
-        //     totolojiydi. 019'un kapısında ölçüldü — `1.0`'da
-        //     `extra = round_up(natural * 0.0)` ve `round_up`'ın tabanı 1,
-        //     yani varsayılan yol hücreye **bir piksel ekliyor** (Menlo 13pt:
-        //     font 17 istiyor, hücre 18 oluyor). Fazlalık alta düşüyor, taban
-        //     çizgisi oynamıyor; belirti bir piksel fazla satır aralığı.
-        //     Düzeltmesi bu setin dışında ve `docs/YOL-HARITASI.md`'de borç:
-        //     her kullanıcının ızgarasını oynatır, yani ürün kararı.
+        //     This line used to be read as "`1.0` is a no-op" and that claim
+        //     was **wrong**: `tight` is also built with `1.0`, so the
+        //     comparison was a tautology. Measured at 019's gate — at `1.0`,
+        //     `extra = round_up(natural * 0.0)` and `round_up`'s floor is 1,
+        //     so the default path **adds one pixel** to the cell (Menlo 13pt:
+        //     the font wants 17, the cell becomes 18). The excess falls to
+        //     the bottom, the baseline does not move; the symptom is one
+        //     pixel too much line spacing. The fix is outside this set and is
+        //     a debt in `docs/YOL-HARITASI.md`: it would move every user's
+        //     grid, so it is a product decision.
         assert_eq!(Atlas::new(None, POINT_SIZE, 1.0, 1.0).metrics(), tight);
     }
 
     #[test]
     fn a_taller_line_still_fits_the_descender() {
-        // [`descender_fits_in_the_cell`]'in çarpanlı hâli: satır aralığı
-        // açılınca 'g' alta doğru kaymamalı. Taban çizgisi fazlalığın yarısı
-        // kadar iniyor, yani altta kalan boşluk da **büyüyor** — kırpma
-        // ihtimali azalıyor, artmıyor. Yine de sınanıyor: aritmetik ters
-        // kurulsaydı (fazlalığın tamamı üste) alt boşluk aynı kalır ve
-        // yuvarlama bir pikseli yiyebilirdi.
+        // The multiplier version of [`descender_fits_in_the_cell`]: when line
+        // spacing opens up, 'g' must not slide toward the bottom. The
+        // baseline drops by half the excess, so the room left below also
+        // **grows** — the chance of clipping shrinks, not grows. It is still
+        // tested: if the arithmetic were built backwards (the whole excess
+        // going on top), the bottom room would stay the same and rounding
+        // could eat a pixel.
         let mut a = Atlas::new(None, POINT_SIZE, 1.0, 1.5);
         let m = a.metrics();
         let (placed__, upload) = a.slot(
@@ -2331,25 +2456,29 @@ mod tests {
             Half::Whole,
         );
         let _ = placed__.slot;
-        let bytes = upload.expect("yeni yuva").bytes;
+        let bytes = upload.expect("new slot").bytes;
         let w = usize::from(m.cell_px.0);
         let has_ink = |row: usize| bytes[row * w..(row + 1) * w].iter().any(|&b| b > 0);
         assert!(
             !has_ink(usize::from(m.cell_px.1) - 1),
-            "açık satır aralığında 'g' hücrenin dibine dayandı"
+            "with open line spacing 'g' leaned against the bottom of the cell"
         );
-        // Ve üstte de boşluk var: fazlalık tek yana gitmedi.
-        assert!(!has_ink(0), "açık satır aralığında glyph tepeye dayandı");
+        // And there is room on top too: the excess did not all go to one side.
+        assert!(
+            !has_ink(0),
+            "with open line spacing the glyph leaned against the top"
+        );
     }
 
     #[test]
     fn descender_fits_in_the_cell() {
-        // Taban çizgisi ile yükseklik **ayrı ayrı** yuvarlanmasaydı
-        // (`round_up(ascent + descent + leading)` tek seferde) alta fontun
-        // descent'inden az yer kalırdı ve 'g' gibi harflerin son kapsama
-        // satırı kırpılırdı. Kırpılan glyph hücrenin son satırını doldurur;
-        // sığan glyph orayı boş bırakır — ölçüt bu. 'W' ile sınamak yetmez:
-        // descender'ı olmayan harf iki yuvarlamada da aynı görünür.
+        // If the baseline and the height were not rounded **separately**
+        // (`round_up(ascent + descent + leading)` in one go), less room than
+        // the font's descent would be left at the bottom and the last
+        // coverage row of letters like 'g' would be clipped. A clipped glyph
+        // fills the cell's last row; a fitting glyph leaves it empty — that
+        // is the criterion. Testing with 'W' is not enough: a letter with no
+        // descender looks the same under both roundings.
         let mut a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
         let (placed__, upload) = a.slot(
@@ -2359,17 +2488,17 @@ mod tests {
             Half::Whole,
         );
         let _ = placed__.slot;
-        let bytes = upload.expect("yeni yuva").bytes;
+        let bytes = upload.expect("new slot").bytes;
         let w = usize::from(m.cell_px.0);
         let has_ink = |row: usize| bytes[row * w..(row + 1) * w].iter().any(|&b| b > 0);
         let baseline = usize::from(m.baseline_px);
         assert!(
             has_ink(baseline),
-            "'g' taban çizgisinin altına inmeli: {m:?}"
+            "'g' must descend below the baseline: {m:?}"
         );
         assert!(
             !has_ink(usize::from(m.cell_px.1) - 1),
-            "descender hücrenin son satırında kırpılmış: {m:?}"
+            "the descender is clipped on the cell's last row: {m:?}"
         );
     }
 
@@ -2377,8 +2506,9 @@ mod tests {
     fn negative_cache_is_capped_and_evicted() {
         let mut a = atlas(LARGE_POINT_SIZE, 1.0);
         let cap = a.negative_cache_cap();
-        // Tanınan bir karakter önce yuvasını alsın: tahliyenin **yalnız**
-        // negatif kayıtları attığını sınamak için bir pozitif kayıt gerek.
+        // Let a recognised character take its slot first: a positive record
+        // is needed to test that eviction throws away **only** the negative
+        // records.
         let (placed_letter, _) = a.slot(
             Sprite::Char('A'),
             Face::Regular,
@@ -2386,26 +2516,29 @@ mod tests {
             Half::Whole,
         );
         let letter = placed_letter.slot;
-        assert_ne!(letter, TOFU, "'A' Menlo'da var");
+        assert_ne!(letter, TOFU, "'A' exists in Menlo");
 
-        // Tanınmayan karakter yuva harcamıyor, yani `next` onu
-        // sınırlamıyor. Tavan olmasaydı harita gördüğü ayrı codepoint sayısı
-        // kadar büyürdü ve bir ikili dosyayı `cat`'lemek bunu gerçek bir yola
-        // çevirir. Crate'in tavanı olmayan tek sayısı burasıydı.
+        // An unrecognised character spends no slot, so `next` does not limit
+        // it. Without a cap, the map would grow as large as the number of
+        // distinct codepoints it sees, and `cat`ing a binary file would turn
+        // that into a real path. This was the crate's only number without a
+        // cap.
         //
-        // **Havuz yedek aramadan sonra da çalışıyor**, ama artık her kayıt
-        // bir `CTFontCreateForString` ödüyor; havuzun bedeli ölçüldü ve
-        // daraltmak gerekmedi, sayısı ve ortamı
-        // `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama Notları'nda emanette.
+        // **The pool still works after the fallback search**, but each record
+        // now pays a `CTFontCreateForString`; the pool's cost was measured
+        // and narrowing it was not needed, its number and environment are
+        // held in escrow in `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama
+        // Notları.
         //
-        // Havuz **filtreli** ve bu bir kolaylık değil zorunluluk: kapının
-        // cevabı karakterin hangi fonta düştüğüne bağlı. Havuz 041'e kadar
-        // CJK'ydı; küçültme onu tek hücreye sığdırınca havuz on altıncı
-        // düzlemin özel kullanım alanına taşındı ([`UNKNOWN_CHAR`]'ın
-        // gerekçesi: `.LastResort`, küçültülmüyor). Deneyin konusu negatif
-        // önbellek, yani havuza yalnız gerçekten reddedilenler giriyor;
-        // kapının kendi bekçisi [`the_gate_decides_by_ink_alone`] ve filtre
-        // onun cevabını sormaktan ibaret.
+        // The pool is **filtered** and this is not a convenience but a
+        // necessity: the gate's answer depends on which font the character
+        // falls to. The pool was CJK until 041; when shrinking made that fit
+        // a single cell, the pool moved to the sixteenth plane's private-use
+        // area (rationale of [`UNKNOWN_CHAR`]: `.LastResort`, not shrunk). The
+        // experiment's subject is the negative cache, so only the truly
+        // rejected enter the pool; the gate's own guard is
+        // [`the_gate_decides_by_ink_alone`] and the filter amounts to asking
+        // for its answer.
         let pool: Vec<char> = {
             let (_, base, cell) = size_classes(&a)[0];
             ('\u{100000}'..'\u{10FFFD}')
@@ -2413,7 +2546,7 @@ mod tests {
                 .take(cap * 3)
                 .collect()
         };
-        assert!(pool.len() > cap, "havuz tavanı aşmalı");
+        assert!(pool.len() > cap, "the pool must exceed the cap");
         for &ch in &pool {
             assert_eq!(
                 a.slot(
@@ -2425,22 +2558,23 @@ mod tests {
                 .0
                 .slot,
                 TOFU,
-                "'{ch}' Menlo/SF Mono'da yok ve yedeği hücreye sığmıyor"
+                "'{ch}' is not in Menlo/SF Mono and its fallback does not fit the cell"
             );
             assert!(
                 a.slots.len() <= cap,
-                "negatif önbellek tavanı aşıldı: {} > {cap}",
+                "the negative cache cap was exceeded: {} > {cap}",
                 a.slots.len()
             );
         }
-        assert_eq!(a.occupancy().0, 2, "tofu düşüşleri yuva harcamamalı");
+        assert_eq!(a.occupancy().0, 2, "tofu falls must not spend slots");
 
-        // Tavan dolunca önbellekleme **durmuyor**, tahliye oluyor: tahliyeden
-        // sonra gelen kayıt haritaya giriyor. Eski davranışta ("tavan dolu →
-        // hiç yazma") burası boş dönerdi ve ekranda duran her desteklenmeyen
-        // karakter her karede CoreText'e geri sorulurdu — `slot()` bu sette
-        // çizim yoluna girdiği için bedeli ana thread'de ödenirdi.
-        let last = *pool.last().expect("havuz boş değil");
+        // When the cap fills up, caching **does not stop**, eviction happens:
+        // a record arriving after the eviction enters the map. Under the old
+        // behaviour ("cap full → never write") this would come back empty
+        // and every unsupported character on screen would be asked of
+        // CoreText again every frame — since `slot()` entered the draw path
+        // in this set, the cost would be paid on the main thread.
+        let last = *pool.last().expect("the pool is not empty");
         assert_eq!(
             a.slots.get(&(
                 Sprite::Char(last),
@@ -2449,9 +2583,9 @@ mod tests {
                 Half::Whole
             )),
             Some(&(TOFU, Plane::Mask)),
-            "tahliyeden sonraki kayıt önbelleğe girmeli"
+            "the record after the eviction must enter the cache"
         );
-        // Pozitif kayıt tahliyeye girmiyor: yuvası duruyor.
+        // A positive record does not take part in eviction: its slot stays.
         assert_eq!(
             a.slot(
                 Sprite::Char('A'),
@@ -2462,7 +2596,7 @@ mod tests {
             .0
             .slot,
             letter,
-            "pozitif kayıt tahliyede kayboldu"
+            "the positive record was lost in the eviction"
         );
     }
 
@@ -2470,18 +2604,19 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn non_bmp_char_path_works() {
-        // Surrogate çifti: `encode_utf16` iki birim üretiyor, CoreText ikinci
-        // birime de dokunuyor ve glyph üretmeyip `false` dönüyor.
-        // `FontSystem::glyph` (CoreText) o dönüşü bilerek yok sayıyor ve işaretçilerini
-        // dilimden türetiyor; ikisinin gerekçesi de ancak bu yol koşarsa
-        // sınanmış olur.
+        // Surrogate pair: `encode_utf16` produces two units, CoreText
+        // touches the second unit too and returns `false` without producing
+        // a glyph. `FontSystem::glyph` (CoreText) deliberately ignores that
+        // return and derives its pointers from the slice; the rationale for
+        // both is tested only if this path runs.
         //
-        // Yedek aramanın gelişiyle BMP dışı yol **iki yerden** geçiyor ve
-        // ikincisi yeni: `rules::fallback_font`'un `CFRange`'i de UTF-16 birimi
-        // sayıyor, yani `len_utf16` yerine `1` yazılsaydı vekil çiftinin
-        // yarısı istenir ve cascade yanlış karakteri arardı. Bu sınama artık
-        // o aralığın da bekçisi. Aday (STIX Two Math) bulunuyor, mürekkep
-        // kapısından dönüyor (1.07×) ve 041'den beri küçültülerek çiziliyor.
+        // With the arrival of the fallback search the non-BMP path goes
+        // through **two places** and the second is new: `rules::fallback_font`'s
+        // `CFRange` also counts UTF-16 units, so if `1` were written instead
+        // of `len_utf16`, half of the surrogate pair would be requested and
+        // the cascade would look up the wrong character. This test is now
+        // that range's guard too. The candidate (STIX Two Math) is found,
+        // returns from the ink gate (1.07×) and since 041 is drawn shrunk.
         let mut a = atlas(POINT_SIZE, 1.0);
         assert_ne!(
             a.slot(
@@ -2493,24 +2628,25 @@ mod tests {
             .0
             .slot,
             TOFU,
-            "Menlo/SF Mono matematik alfabesi içermez; yedeği küçültülerek çizilmeli"
+            "Menlo/SF Mono contain no mathematical alphabet; its fallback must be drawn shrunk"
         );
-        // BMP dışı bir karakter kapıyı **geçebilse** aynı aralık çizim yolunda
-        // da doğru olmak zorunda; `\u{10FFFD}` (.LastResort, 1.83×) ile `𝔸`
-        // aynı kolun iki ucu ve ikisi de aday **buluyor** — aralık bozuk
-        // olsaydı aday hiç bulunmazdı ve bu sınama yine yeşil kalırdı.
+        // If a non-BMP character **can** pass the gate, the same range must
+        // also be right on the draw path; `\u{10FFFD}` (.LastResort, 1.83×)
+        // and `𝔸` are the two ends of the same arm and both **find** a
+        // candidate — if the range were broken no candidate would be found
+        // and this test would still stay green.
         let (label, base, _) = size_classes(&a)[0];
         assert!(
             rules::fallback_font(base, '𝔸', f64::INFINITY, 1).is_some(),
-            "{label}: BMP dışı karakter için aday bulunamadı — cascade'in UTF-16 aralığı şüpheli"
+            "{label}: no candidate was found for the non-BMP character — the cascade's UTF-16 range is suspect"
         );
     }
 
     #[test]
     fn broken_point_size_does_not_break_atlas() {
-        // `NaN as u16` sıfırdır ve `clamp` NaN'ı geçirir: sınır konmasaydı
-        // ızgara sıfıra bölerdi. Devasa punto ise yuva başına gigabaytlık
-        // tampon isterdi.
+        // `NaN as u16` is zero and `clamp` lets NaN through: without a bound
+        // the grid would divide by zero. A huge point size, meanwhile, would
+        // ask for a gigabyte-sized buffer per slot.
         for (point_size, scale) in [(f64::NAN, 1.0), (13.0, f64::INFINITY), (1e9, 1.0)] {
             let a = atlas(point_size, scale);
             let m = a.metrics();
@@ -2519,9 +2655,10 @@ mod tests {
                 "{point_size}×{scale}: {m:?}"
             );
             let (tw, th) = a.texture_px();
-            // Tavan artık [`MAX_EDGE`]: kenar hedefe göre katlanabiliyor ama
-            // orada duruyor. Uç girdiler (NaN, sonsuz, 1e9) puntoyu
-            // aralığa oturttuğu için buraya da sonlu bir doku düşmeli.
+            // The ceiling is now [`MAX_EDGE`]: the edge can double toward the
+            // target but stops there. Since extreme inputs (NaN, infinity,
+            // 1e9) fit the point size into the range, a finite texture must
+            // land here too.
             assert!(
                 tw <= MAX_EDGE && th <= MAX_EDGE,
                 "{point_size}×{scale}: {tw}×{th}"
@@ -2533,11 +2670,14 @@ mod tests {
     fn scale_is_part_of_the_key() {
         let one = atlas(POINT_SIZE, 1.0).metrics();
         let two = atlas(POINT_SIZE, 2.0).metrics();
-        assert_ne!(one.cell_px, two.cell_px, "@2x hücre @1x ile aynı olamaz");
-        // Tam iki kat beklenmiyor: her ölçü ayrı ayrı yukarı yuvarlanıyor.
+        assert_ne!(
+            one.cell_px, two.cell_px,
+            "an @2x cell cannot equal an @1x one"
+        );
+        // Exactly double is not expected: each measure is rounded up separately.
         assert!(
             two.cell_px.0 + 2 >= one.cell_px.0 * 2 && two.cell_px.0 <= one.cell_px.0 * 2 + 2,
-            "@2x genişlik iki katına yakın olmalı: {one:?} → {two:?}"
+            "the @2x width must be close to double: {one:?} → {two:?}"
         );
     }
 
@@ -2552,22 +2692,23 @@ mod tests {
         );
         assert!(
             !a.ensure(None, POINT_SIZE, 1.0, 1.0),
-            "aynı anahtar yeniden kurmamalı"
+            "the same key must not rebuild"
         );
-        assert_eq!(a.occupancy().0, 2, "yuvalar korunmalı");
+        assert_eq!(a.occupancy().0, 2, "slots must be kept");
         assert!(
             a.ensure(None, POINT_SIZE, 2.0, 1.0),
-            "ölçek değişti: yeniden kurulmalı"
+            "the scale changed: it must rebuild"
         );
-        assert_eq!(a.occupancy().0, 1, "yeni atlasta yalnız tofu");
+        assert_eq!(a.occupancy().0, 1, "only tofu in a new atlas");
         assert_eq!(a.metrics(), atlas(POINT_SIZE, 2.0).metrics());
     }
 
     #[test]
     fn ensure_rebuilds_when_family_changes() {
-        // Monaco ile Menlo 13pt'de aynı hücreyi verebilir; ölçüt metrik değil
-        // yuvaların sıfırlanması. Anahtarda aile olmasaydı eski fontun
-        // glyph'leri yeni fontun atlasında kalırdı ve belirti sessizdi.
+        // Monaco and Menlo can give the same cell at 13pt; the criterion is
+        // not the metrics but the slots being reset. If the family were not
+        // in the key, the old font's glyphs would stay in the new font's
+        // atlas and the symptom would be silent.
         let mut a = atlas(POINT_SIZE, 1.0);
         a.slot(
             Sprite::Char('A'),
@@ -2577,13 +2718,13 @@ mod tests {
         );
         assert!(
             !a.ensure(None, POINT_SIZE, 1.0, 1.0),
-            "aynı anahtar yeniden kurmamalı"
+            "the same key must not rebuild"
         );
         assert!(
             a.ensure(Some(fixture::SECOND_FAMILY), POINT_SIZE, 1.0, 1.0),
-            "aile değişti: yeniden kurulmalı"
+            "the family changed: it must rebuild"
         );
-        assert_eq!(a.occupancy().0, 1, "yeni atlasta yalnız tofu");
+        assert_eq!(a.occupancy().0, 1, "only tofu in a new atlas");
         a.slot(
             Sprite::Char('A'),
             Face::Regular,
@@ -2592,12 +2733,12 @@ mod tests {
         );
         assert!(
             !a.ensure(Some(fixture::SECOND_FAMILY), POINT_SIZE, 1.0, 1.0),
-            "aynı aile yeniden kurmamalı"
+            "the same family must not rebuild"
         );
-        assert_eq!(a.occupancy().0, 2, "yuvalar korunmalı");
+        assert_eq!(a.occupancy().0, 2, "slots must be kept");
         assert!(
             a.ensure(None, POINT_SIZE, 1.0, 1.0),
-            "zincire dönüş de bir değişim"
+            "going back to the chain is also a change"
         );
     }
 
@@ -2612,16 +2753,20 @@ mod tests {
                 using: chain,
             })
         );
-        // CoreText'in ikamesi (bu makinede Helvetica) değil, zincir açıldı.
+        // The chain was opened, not CoreText's substitute (Helvetica on this machine).
         assert_eq!(a.metrics(), atlas(POINT_SIZE, 1.0).metrics());
-        assert_eq!(atlas(POINT_SIZE, 1.0).font_issue(), None, "zincir sessiz");
+        assert_eq!(
+            atlas(POINT_SIZE, 1.0).font_issue(),
+            None,
+            "the chain is silent"
+        );
     }
 
     #[test]
     fn family_name_is_matched_regardless_of_case() {
-        // CoreText `"menlo"`'yu buluyor ve adı `"Menlo"` diye bildiriyor
-        // (ölçüldü); birebir karşılaştırma bulunan fontu "yok" sayar ve
-        // zincire düşerdi.
+        // CoreText finds `"menlo"` and reports the name as `"Menlo"`
+        // (measured); an exact comparison would count the font it found as
+        // "missing" and fall to the chain.
         let family = fixture::DEFAULT_FAMILY;
         for name in [
             family.to_owned(),
@@ -2635,7 +2780,7 @@ mod tests {
 
     #[test]
     fn proportional_family_opens_with_a_warning() {
-        // Helvetica her macOS'ta var ve eşaralıklı değil.
+        // Helvetica exists on every macOS and is not monospaced.
         let mut a = Atlas::new(Some(fixture::PROPORTIONAL_FAMILY), POINT_SIZE, 1.0, 1.0);
         assert_eq!(
             a.font_issue(),
@@ -2643,18 +2788,19 @@ mod tests {
                 family: fixture::PROPORTIONAL_FAMILY.to_owned()
             })
         );
-        // Reddedilmiyor, çiziliyor: hücre boşluktan dar olan 'W' yuvaya
-        // kırpılarak rasterize olur, tampon taşmaz.
+        // It is not rejected, it is drawn: a 'W' wider than the cell is
+        // rasterized into the slot clipped, the buffer does not overflow.
         let slot_len = a.metrics().slot_bytes();
         let bytes = slot_bytes_of(&mut a, Sprite::Char('W'), Face::Regular);
         assert_eq!(bytes.len(), slot_len);
-        assert!(bytes.iter().any(|&b| b > 0), "'W' hiç piksel boyamadı");
+        assert!(bytes.iter().any(|&b| b > 0), "'W' painted no pixels at all");
     }
 
     #[test]
     fn monospaced_families_are_the_ones_the_chain_accepts() {
-        // Ayar penceresinin Font listesi: seçilebilen her aile zincirden
-        // uyarısız açılır — ölçüt `open_chain`'inkiyle aynı.
+        // The settings window's Font list: every selectable family opens
+        // from the chain without a warning — the criterion is the same as
+        // `open_chain`'s.
         let families = monospaced_families();
         assert!(
             families.iter().any(|f| f == fixture::DEFAULT_FAMILY),
@@ -2679,11 +2825,15 @@ mod tests {
 
     #[test]
     fn missing_family_is_substituted() {
-        // CoreText hata vermez, en yakın fontu verir: "font açıldı" bir kanıt
-        // değildir ve zincir bu yüzden dönen adı karşılaştırıyor.
+        // CoreText does not error, it hands back the nearest font: "the font
+        // opened" is not proof, which is why the chain compares the name
+        // that comes back.
         const MISSING: &str = "Bu Aile Yok 12345";
         let (_, returned) = Backend::open(MISSING, POINT_SIZE);
-        assert_ne!(returned, MISSING, "var olmayan aile için ikame beklenir");
+        assert_ne!(
+            returned, MISSING,
+            "a substitute is expected for a nonexistent family"
+        );
     }
 
     #[test]
@@ -2693,32 +2843,41 @@ mod tests {
         let cols = a.grid.0;
         assert_eq!(a.slot_origin(TOFU), (0, 0));
         assert_eq!(a.slot_origin(1), (w, 0));
-        assert_eq!(a.slot_origin(cols), (0, h), "ilk yuva bir alt satıra düşer");
-        // Doku ızgarayı sarmalı ve kenarda bir hücreden fazlası boşa
-        // gitmemeli. Kenar artık türetilmiş, yani sabite değil **ızgaranın
-        // kendi kenarına** bakılıyor: satır/sütun sayısı ile hücre ölçüsünün
-        // çarpımı dokuyu vermeli ve bir hücre daha eklenince kenarı aşmalı.
-        // Eski sınama dokuyu sabit `TEXTURE_EDGE`'e bağlıyordu; kenar
-        // türetildiğine göre bağlanacak yer `edge_for`. **Asıl sınır bu**:
-        // doku türetilen kenarı aşarsa `slot_origin` son sütunun ötesini
-        // gösterir ve `replaceRegion` satırın dışına yazar — belirti sessiz.
+        assert_eq!(
+            a.slot_origin(cols),
+            (0, h),
+            "the first slot drops one row down"
+        );
+        // The texture must wrap the grid and no more than one cell may be
+        // wasted at the edge. The edge is now derived, so what is checked is
+        // **the grid's own edge**, not a constant: the product of the
+        // row/column count and the cell size must give the texture, and
+        // adding one more cell must exceed the edge. The old test tied the
+        // texture to the constant `TEXTURE_EDGE`; now that the edge is
+        // derived, the place to tie it to is `edge_for`. **This is the real
+        // bound**: if the texture exceeded the derived edge, `slot_origin`
+        // would point past the last column and `replaceRegion` would write
+        // outside the row — the symptom is silent.
         let (tw, th) = a.texture_px();
         let edge = edge_for(w, h);
         assert!(
             tw <= edge && th <= edge,
-            "doku kenarı aşıyor: {tw}×{th} > {edge}"
+            "the texture exceeds the edge: {tw}×{th} > {edge}"
         );
-        // Ve bir hücreden fazlası boşa gitmiyor.
+        // And no more than one cell is wasted.
         assert!(
             tw + w > edge && th + h > edge,
-            "artık şerit bir hücreden büyük: {tw}×{th}, kenar {edge}"
+            "the leftover strip is bigger than one cell: {tw}×{th}, edge {edge}"
         );
     }
 
-    /// Yuvanın baytlarını kopyalar — `Upload` ödüncü atlası kilitliyor.
+    /// Copies a slot's bytes — the `Upload` borrow locks the atlas.
     fn slot_bytes_of(a: &mut Atlas, sprite: Sprite, face: Face) -> Vec<u8> {
         let (_, upload) = a.slot(sprite, face, SizeClass::Normal, Half::Whole);
-        upload.expect("yeni yuva yükleme vermeli").bytes.to_vec()
+        upload
+            .expect("a new slot must give an upload")
+            .bytes
+            .to_vec()
     }
 
     #[test]
@@ -2742,24 +2901,25 @@ mod tests {
                 .slot(Sprite::Char('M'), face, SizeClass::Normal, Half::Whole)
                 .0
                 .slot;
-            assert_ne!(slot, TOFU, "{face:?} tofu'ya düştü");
-            // Anahtar yüzü taşımasaydı dördü aynı yuvayı paylaşır ve kalın 'M'
-            // düz 'M' olarak çizilirdi — sessiz, çünkü bir şey yine görünürdü.
+            assert_ne!(slot, TOFU, "{face:?} fell to tofu");
+            // If the key did not carry the face, all four would share the
+            // same slot and a bold 'M' would be drawn as a regular 'M' —
+            // silent, because something would still be visible.
             assert!(
                 !slots.contains(&slot),
-                "{face:?} başka bir yüzün yuvasını paylaştı"
+                "{face:?} shared another face's slot"
             );
             slots.push(slot);
         }
         assert_eq!(slots.len(), faces.len());
     }
 
-    /// Uzak oturumun işareti (`bt_core::dock::REMOTE_MARK`, 036 Karar 7).
+    /// The remote session's mark (`bt_core::dock::REMOTE_MARK`, 036 Karar 7).
     ///
-    /// **İkinci kopya ve bilerek**: bu crate `bt-core`'u görmüyor (katman
-    /// yönü), yani karakter burada elle yazılı. Bağ `bt-core`'daki
-    /// `the_remote_mark_is_the_one_the_atlas_checks` sınamasında: işaret
-    /// değişirse o düşer ve bu sabite gönderir.
+    /// **A second copy, deliberately**: this crate does not see `bt-core`
+    /// (layer direction), so the character is written by hand here. The
+    /// link is in `bt-core`'s `the_remote_mark_is_the_one_the_atlas_checks`
+    /// test: if the mark changes, that one fails and points to this constant.
     #[cfg(target_os = "macos")]
     const REMOTE_MARK: char = '⇄';
 
@@ -2767,10 +2927,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_remote_mark_is_a_glyph_in_the_small_class() {
-        // İşaret bağlam satırının sıradan bir hücresi ve bağlam satırı küçük
-        // boy sınıfında (yordamsal kapı orada kapalı, yedek açık). Kapı
-        // **Menlo, adıyla**: varsayılan zincir makineden makineye değişiyor
-        // (SF Mono kuruluysa o açılır), ölçülen font Menlo.
+        // The mark is an ordinary cell of the context line and the context
+        // line is in the small size class (the procedural gate is closed
+        // there, the fallback is open). The gate is **Menlo, by name**: the
+        // default chain varies from machine to machine (if SF Mono is
+        // installed it opens), the measured font is Menlo.
         let slot_of = |a: &mut Atlas| {
             a.slot(
                 Sprite::Char(REMOTE_MARK),
@@ -2782,22 +2943,22 @@ mod tests {
             .slot
         };
         let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
-        assert_eq!(menlo.font_issue(), None, "Menlo açılmadı");
+        assert_eq!(menlo.font_issue(), None, "Menlo did not open");
         assert_ne!(
             slot_of(&mut menlo),
             TOFU,
-            "'{REMOTE_MARK}' Menlo'nun küçük sınıfında kutu"
+            "'{REMOTE_MARK}' is a box in Menlo's small class"
         );
 
-        // SF Mono **kapı değil**: kurulu değilse sorgu atlanıyor ve bunu
-        // söylüyor; kuruluysa sonucu gözle kontrolün konusu, burada yalnız
-        // basılıyor.
+        // SF Mono is **not a gate**: if it is not installed the query is
+        // skipped and says so; if it is installed, the result is the
+        // subject of the visual check, here it is only printed.
         let mut sf = Atlas::new(Some("SF Mono"), POINT_SIZE, 1.0, 1.0);
         if sf.font_issue().is_some() {
-            eprintln!("SF Mono kurulu değil; '{REMOTE_MARK}' sorgusu atlandı");
+            eprintln!("SF Mono is not installed; the '{REMOTE_MARK}' query was skipped");
         } else {
             let tofu = slot_of(&mut sf) == TOFU;
-            eprintln!("SF Mono küçük sınıfta '{REMOTE_MARK}': kutu = {tofu}");
+            eprintln!("SF Mono '{REMOTE_MARK}' in the small class: box = {tofu}");
         }
     }
 
@@ -2805,13 +2966,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_reconnect_placeholder_has_no_box_in_the_normal_class() {
-        // 037 Karar 8: yeniden bağlanma teklifinin yer tutucusu **giriş
-        // satırında**, yani büyük sınıfta — 036'nın sınaması yalnız küçük
-        // sınıfı (bağlam satırı) sordu ve yüz merdiveni orada başka. ASCII
-        // dışı üç karakteri de: işaret, ayraç ve ⏎. Kutu çıkarsa dizge
-        // `bt-core`'da (`dock::RECONNECT_HINT`) değişmeli. Menlo, adıyla.
+        // 037 Karar 8: the reconnect offer's placeholder is **in the input
+        // line**, i.e. in the large class — 036's test only asked the small
+        // class (the context line) and the face ladder is different there.
+        // The three non-ASCII characters too: the mark, the separator and ⏎.
+        // If a box appears, the string must change in `bt-core`
+        // (`dock::RECONNECT_HINT`). Menlo, by name.
         let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
-        assert_eq!(menlo.font_issue(), None, "Menlo açılmadı");
+        assert_eq!(menlo.font_issue(), None, "Menlo did not open");
         for ch in [REMOTE_MARK, '·', '⏎'] {
             let slot = menlo
                 .slot(
@@ -2822,7 +2984,7 @@ mod tests {
                 )
                 .0
                 .slot;
-            assert_ne!(slot, TOFU, "'{ch}' Menlo'nun büyük sınıfında kutu");
+            assert_ne!(slot, TOFU, "'{ch}' is a box in Menlo's large class");
         }
     }
 
@@ -2830,12 +2992,13 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_upload_row_has_no_box_in_the_small_class() {
-        // 037 Karar 7: yüklemenin durum satırı bağlam satırında, yani küçük
-        // sınıfta. Karakterler `bt-core`'un `UPLOAD_GLYPHS`'inin elle kopyası
-        // (bu crate onu göremiyor; `the_upload_row_is_the_one_the_atlas_checks`
-        // bağlıyor). Kutu çıkarsa dizge `bt-shell`'de değişmeli. Menlo, adıyla.
+        // 037 Karar 7: the upload's status line is in the context line, i.e.
+        // in the small class. The characters are a hand copy of `bt-core`'s
+        // `UPLOAD_GLYPHS` (this crate cannot see it;
+        // `the_upload_row_is_the_one_the_atlas_checks` links them). If a box
+        // appears, the string must change in `bt-shell`. Menlo, by name.
         let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
-        assert_eq!(menlo.font_issue(), None, "Menlo açılmadı");
+        assert_eq!(menlo.font_issue(), None, "Menlo did not open");
         for ch in ['↑', '⌘', '✓', '—', '·', '…', '→'] {
             let slot = menlo
                 .slot(
@@ -2846,7 +3009,7 @@ mod tests {
                 )
                 .0
                 .slot;
-            assert_ne!(slot, TOFU, "'{ch}' Menlo'nun küçük sınıfında kutu");
+            assert_ne!(slot, TOFU, "'{ch}' is a box in Menlo's small class");
         }
     }
 
@@ -2854,9 +3017,10 @@ mod tests {
     fn the_small_class_is_narrower_and_keeps_its_own_slot() {
         let mut a = atlas(POINT_SIZE, 1.0);
 
-        // **Yuva ızgarası ortak**: küçük glyph büyük yuvaya, büyük hücrenin
-        // taban çizgisine çiziliyor. Doku boyu, `slot_bytes` ve ızgara bu
-        // yüzden hiç değişmiyor — bütün ucuzluk buradan geliyor.
+        // **The slot grid is shared**: the small glyph is drawn into the
+        // large slot, on the large cell's baseline. The texture size,
+        // `slot_bytes` and the grid therefore never change — all of the
+        // cheapness comes from here.
         let big = slot_bytes_of(&mut a, Sprite::Char('M'), Face::Regular);
         let (placed_small_slot, small_upload) = a.slot(
             Sprite::Char('M'),
@@ -2866,14 +3030,19 @@ mod tests {
         );
         let small_slot = placed_small_slot.slot;
         let small = small_upload
-            .expect("yeni yuva yükleme vermeli")
+            .expect("a new slot must give an upload")
             .bytes
             .to_vec();
-        assert_eq!(big.len(), small.len(), "küçük sınıf yuva boyunu oynattı");
+        assert_eq!(
+            big.len(),
+            small.len(),
+            "the small class moved the slot size"
+        );
 
-        // Ayrı yuva: anahtar boyutu taşımasaydı küçük 'M' büyük 'M' olarak
-        // çizilirdi — sessiz, çünkü bir şey yine görünürdü.
-        assert_ne!(small_slot, TOFU, "küçük sınıf tofu'ya düştü");
+        // A separate slot: if the key did not carry the size, the small 'M'
+        // would be drawn as the large 'M' — silent, because something would
+        // still be visible.
+        assert_ne!(small_slot, TOFU, "the small class fell to tofu");
         assert_ne!(
             small_slot,
             a.slot(
@@ -2884,12 +3053,13 @@ mod tests {
             )
             .0
             .slot,
-            "küçük sınıf düz yüzün yuvasını paylaştı"
+            "the small class shared the regular face's slot"
         );
 
-        // **Harf gerçekten küçük.** Ölçüt kapsamanın en sağdaki sütunu: küçük
-        // yüz aynı yuvada daha dar bir iz bırakmalı. Tek tek piksel değeri
-        // değil sınır sınanıyor — kapsama font sürümüne bağlı, iddia değil.
+        // **The letter really is small.** The criterion is the coverage's
+        // rightmost column: the small face must leave a narrower trace in
+        // the same slot. The bound is tested, not individual pixel values —
+        // the coverage depends on the font version, so it is not a claim.
         let ink_right = |bytes: &[u8]| {
             let (w, h) = a.metrics().cell_wh();
             (0..w)
@@ -2900,13 +3070,13 @@ mod tests {
         };
         assert!(
             ink_right(&small) < ink_right(&big),
-            "küçük sınıf dar değil: küçük {}, büyük {}",
+            "the small class is not narrow: small {}, large {}",
             ink_right(&small),
             ink_right(&big)
         );
 
-        // Kural sprite'ları **ölçüden bağımsız**: bağlam satırında kural yok
-        // ve `slot` bunu yüzle birlikte normalize ediyor.
+        // Rule sprites are **independent of size**: there is no rule in the
+        // context line and `slot` normalizes this together with the face.
         assert_eq!(
             a.slot(
                 Sprite::Rule(RuleKind::Single),
@@ -2929,15 +3099,16 @@ mod tests {
 
     #[test]
     fn bold_glyph_fits_regular_face_slot() {
-        // Metrik yalnız düz yüzden geliyor (R1.3); kalın glyph aynı yuvaya
-        // rasterize oluyor. Kırpma kabul edilmiş bir bedel, ama yuvanın
-        // **taşmaması** sözleşme: `raster::draw` tamponun boyunu assert ediyor.
+        // The metrics come only from the regular face (R1.3); the bold glyph
+        // is rasterized into the same slot. Clipping is an accepted cost,
+        // but the slot **not overflowing** is the contract: `raster::draw`
+        // asserts the buffer's length.
         let mut a = atlas(POINT_SIZE, 1.0);
         let bytes = slot_bytes_of(&mut a, Sprite::Char('M'), Face::Bold);
         assert_eq!(bytes.len(), a.metrics().slot_bytes());
         assert!(
             bytes.iter().any(|&b| b > 0),
-            "kalın 'M' hiç mürekkep vermedi"
+            "the bold 'M' gave no ink at all"
         );
     }
 
@@ -2955,13 +3126,17 @@ mod tests {
             RuleKind::Chevron,
         ] {
             let bytes = slot_bytes_of(&mut a, Sprite::Rule(kind), Face::Regular);
-            assert!(bytes.iter().any(|&b| b > 0), "{kind:?} hiç piksel boyamadı");
+            assert!(
+                bytes.iter().any(|&b| b > 0),
+                "{kind:?} painted no pixels at all"
+            );
             for (prev_kind, prev_bytes) in &seen {
-                // Beş stilin **ayırt edildiği** buranın işi. Hepsini düz
-                // çizgiye düşüren bir kod `kural=R` jetonundan geçerdi.
+                // **Telling the five styles apart** is this test's job. Code
+                // that collapsed them all to a plain line would pass the
+                // `rules=R` token.
                 assert_ne!(
                     prev_bytes, &bytes,
-                    "{kind:?} ile {prev_kind:?} aynı çizildi"
+                    "{kind:?} and {prev_kind:?} were drawn the same"
                 );
             }
             seen.push((kind, bytes));
@@ -2980,8 +3155,9 @@ mod tests {
             )
             .0
             .slot;
-        // Çağıran yanılıp yüz verse bile normalizasyon aynı yuvaya götürür;
-        // yoksa altı çeşit dört yüzle yirmi dört yuva harcardı.
+        // Even if the caller errs and passes a face, normalization leads to
+        // the same slot; otherwise six kinds with four faces would spend
+        // twenty-four slots.
         let bold = a
             .slot(
                 Sprite::Rule(RuleKind::Single),
@@ -2991,21 +3167,22 @@ mod tests {
             )
             .0
             .slot;
-        assert_eq!(regular, bold, "kural yüze göre ayrı yuva tuttu");
+        assert_eq!(regular, bold, "the rule held a separate slot per face");
     }
 
     #[test]
     fn the_chevron_points_right_and_sits_on_the_x_height() {
-        // **İşaret terminalin kendisi, fontun değil** (012 phase-9): `>`
-        // karakteri yerine yordamsal bir chevron. Üç iddia, üçü de sessizce
-        // bozulabilir.
+        // **The mark is the terminal's own, not the font's** (012 phase-9): a
+        // procedural chevron instead of the `>` character. Three claims, and
+        // all three can break silently.
         let mut a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
         let (w, h) = (usize::from(m.cell_px.0), usize::from(m.cell_px.1));
         let bytes = slot_bytes_of(&mut a, Sprite::Rule(RuleKind::Chevron), Face::Regular);
 
-        // Her satırın en sağdaki boyalı sütunu: chevron sağa açıldığı için bu
-        // dizi ortaya doğru artıp sonra azalmalı — tepe noktası ortada.
+        // The rightmost painted column of each row: since the chevron opens
+        // to the right, this series must rise toward the middle and then
+        // fall — the apex is in the middle.
         let rights: Vec<Option<usize>> = (0..h)
             .map(|y| (0..w).rev().find(|&x| bytes[y * w + x] > 0))
             .collect();
@@ -3014,34 +3191,38 @@ mod tests {
             .enumerate()
             .filter_map(|(y, right)| right.map(|x| (x, y)))
             .max()
-            .expect("chevron hiç piksel boyamadı")
+            .expect("the chevron painted no pixels")
             .1;
 
-        // **Dikey merkez üstü çizilinin merkezi**, yani x-height'ın ortası:
-        // hücrenin geometrik merkezi taban çizgisinin altına düşer ve işaret
-        // metne göre alçak görünürdü.
+        // **The vertical centre is the strikeout's centre**, i.e. the middle
+        // of the x-height: the cell's geometric centre falls below the
+        // baseline and the mark would look low relative to the text.
         let center = usize::from(m.strikeout_px.0) + usize::from(m.strikeout_px.1) / 2;
         assert!(
             apex_row.abs_diff(center) <= 1,
-            "tepe x-height merkezinde değil: {apex_row} / {center}"
+            "the apex is not at the x-height centre: {apex_row} / {center}"
         );
 
-        // **Ink hücrenin ortasına toplanıyor.** Izgarada işaret sol payın
-        // içinde çiziliyor ve pay bir hücreden dar olabilir; taşsaydı komut
-        // metninin ilk harfine binerdi.
+        // **The ink gathers in the middle of the cell.** In the grid the mark
+        // is drawn inside the left gutter and the gutter can be narrower than
+        // a cell; if it spilled over, it would land on the first letter of
+        // the command text.
         let painted: Vec<usize> = (0..w)
             .filter(|&x| (0..h).any(|y| bytes[y * w + x] > 0))
             .collect();
         let (left, right) = (painted[0], painted[painted.len() - 1]);
-        assert!(left > 0, "chevron sol kenara yapıştı: {left}");
-        assert!(right < w - 1, "chevron sağ kenara yapıştı: {right}");
+        assert!(left > 0, "the chevron stuck to the left edge: {left}");
+        assert!(
+            right < w - 1,
+            "the chevron stuck to the right edge: {right}"
+        );
 
-        // Ve simetrik: `>` işaretinin iki kolu aynı.
+        // And symmetric: the two arms of the `>` mark are the same.
         let above = (0..center).filter(|&y| rights[y].is_some()).count();
         let below = (center + 1..h).filter(|&y| rights[y].is_some()).count();
         assert!(
             above.abs_diff(below) <= 1,
-            "kollar simetrik değil: {above} / {below}"
+            "the arms are not symmetric: {above} / {below}"
         );
     }
 
@@ -3051,20 +3232,21 @@ mod tests {
         let m = a.metrics();
         let (w, h) = (usize::from(m.cell_px.0), usize::from(m.cell_px.1));
         let bytes = slot_bytes_of(&mut a, Sprite::Rule(RuleKind::Curl), Face::Regular);
-        // Her sütunun en üstteki boyalı satırı; dalga bunları oynatmalı.
+        // The topmost painted row of each column; the wave must move these.
         let tops: Vec<usize> = (0..w)
             .filter_map(|x| (0..h).find(|&y| bytes[y * w + x] > 0))
             .collect();
-        assert_eq!(tops.len(), w, "kıvrım bazı sütunları hiç boyamadı");
+        assert_eq!(tops.len(), w, "the curl did not paint some columns at all");
         let (min_top, max_top) = (
-            *tops.iter().min().expect("sütun var"),
-            *tops.iter().max().expect("sütun var"),
+            *tops.iter().min().expect("there is a column"),
+            *tops.iter().max().expect("there is a column"),
         );
-        // Düz bir çizgide bu fark **sıfırdır**. Kıvrımı düz çizgiye düşüren
-        // bir kod tam burada kırmızı düşer — ve `kural=R` jetonu onu göremez.
+        // On a plain line this difference is **zero**. Code that collapsed
+        // the curl to a plain line fails right here — and the `rules=R`
+        // token cannot see it.
         assert!(
             max_top - min_top >= 1,
-            "kıvrım salınmıyor: tepe satırı {min_top}..{max_top} arasında sabit"
+            "the curl does not oscillate: the top row is constant between {min_top}..{max_top}"
         );
     }
 
@@ -3077,38 +3259,41 @@ mod tests {
         let tops: Vec<usize> = (0..w)
             .filter_map(|x| (0..h).find(|&y| bytes[y * w + x] > 0))
             .collect();
-        // Hücreye **tam** sayıda dalga sığıyorsa (R2.4) sinüs orta eksene göre
-        // ayna simetriktir: `center(x) + center(w-1-x)` sabittir. Sığmıyorsa
-        // faz hücre sınırında kırılır ve çok hücreli bir alt çizgi kesintili
-        // görünür — sprite tek hücre genişliğinde ve komşularıyla döşeniyor.
+        // If a **whole** number of waves fits in the cell (R2.4), the sine is
+        // mirror-symmetric about the middle axis: `center(x) + center(w-1-x)`
+        // is constant. If it does not fit, the phase breaks at the cell
+        // boundary and a multi-cell underline looks interrupted — the sprite
+        // is one cell wide and is tiled with its neighbours.
         //
-        // Kenar sütunlarının **eşit** olmasını beklemek yanlış olurdu: bir tam
-        // periyotta ilk ve son sütun eşit değil, orta eksene göre AYNADIR.
+        // Expecting the edge columns to be **equal** would be wrong: over one
+        // full period the first and last columns are not equal, they are
+        // MIRRORS about the middle axis.
         let total = tops[0] + tops[w - 1];
         for x in 0..w {
             let pair = tops[x] + tops[w - 1 - x];
             assert!(
                 pair.abs_diff(total) <= 1,
-                "dalga periyodu hücreyi tam bölmüyor: x={x} çifti {pair}, kenar çifti {total}"
+                "the wave period does not divide the cell exactly: x={x} pair {pair}, edge pair {total}"
             );
         }
     }
 
     #[test]
     fn envelope_stays_inside_cell() {
-        // **Sentetik girdi bilerek**: bu makinedeki Menlo alt çizgiyi 14+1'e
-        // koyuyor, hücre 17 — yani gerçek fontla kırpma dalı hiç ateşlenmiyor
-        // ve oradan yazılan bir sınama mutasyonu yakalayamazdı.
-        // `rules::rule_envelope`'nın sözleşmesi burada, saf aritmetik olarak sınanıyor.
+        // **Synthetic input, deliberately**: Menlo on this machine puts the
+        // underline at 14+1 with a cell of 17 — so the clipping branch never
+        // fires with a real font and a test written from there could not
+        // catch a mutation. `rules::rule_envelope`'s contract is tested here
+        // as pure arithmetic.
         for (top, thick, h) in [(100u16, 3u16, 17u16), (16, 4, 17), (0, 99, 17)] {
             let (position, thickness) = rules::rule_envelope(top, thick, h);
             assert!(
                 position + thickness <= h,
-                "zarf hücreyi aştı: girdi ({top},{thick},{h}) → ({position},{thickness})"
+                "the envelope exceeded the cell: input ({top},{thick},{h}) → ({position},{thickness})"
             );
             assert!(
                 thickness >= 1,
-                "kalınlık sıfıra indi: çizilmeyen çizgi kural değildir"
+                "the thickness dropped to zero: a line that is not drawn is not a rule"
             );
         }
     }
@@ -3120,11 +3305,11 @@ mod tests {
             let h = m.cell_px.1;
             assert!(
                 m.underline_px.0 + m.underline_px.1 <= h,
-                "alt çizgi {point_size}pt'de taştı"
+                "the underline spilled over at {point_size}pt"
             );
             assert!(
                 m.strikeout_px.0 + m.strikeout_px.1 <= h,
-                "üstü çizili {point_size}pt'de taştı"
+                "the strikeout spilled over at {point_size}pt"
             );
         }
     }
@@ -3132,56 +3317,58 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn missing_face_falls_back_to_regular() {
-        // Monaco **tek yüzlü**: bu makinede Bold/Italic/BoldItalic üçü de
-        // türetilemiyor. Zincirin tabanı (Menlo) dördünü de taşıdığı için geri
-        // düşüş dalı ancak böyle bir aileyle ateşlenebiliyor — `Faces::derive`
-        // ayrı bir kurucu olarak tam bunun için var.
+        // Monaco is **single-faced**: on this machine Bold/Italic/BoldItalic
+        // cannot all three be derived. Since the chain's base (Menlo) carries
+        // all four, the fallback branch can be fired only with such a family
+        // — `Faces::derive` exists as a separate constructor for exactly this.
         let (monaco, name) = Backend::open("Monaco", POINT_SIZE);
         assert_eq!(
             name, "Monaco",
-            "Monaco makinede yok; sınamanın öncülü düştü"
+            "Monaco is not on the machine; the test's premise fell"
         );
         let faces = rules::Faces::derive(monaco);
         for face in [Face::Bold, Face::Italic, Face::BoldItalic] {
-            // Yüz düz yüze çöküyor VE anahtar da çöküyor: yoksa aynı bitmap
-            // dört yuva harcardı.
+            // The face collapses to the regular face AND the key collapses
+            // too: otherwise the same bitmap would spend four slots.
             assert_eq!(
                 faces.effective(face),
                 Face::Regular,
-                "{face:?} anahtarı çökmedi"
+                "the {face:?} key did not collapse"
             );
         }
-        // Menlo'da çökme yok — sınamanın kendisi de ayrımı görebiliyor olmalı.
+        // There is no collapse in Menlo — the test itself must also be able to see the difference.
         let menlo = rules::Faces::derive(Backend::open("Menlo", POINT_SIZE).0);
         assert_eq!(
             menlo.effective(Face::Bold),
             Face::Bold,
-            "Menlo'nun kalın yüzü çöktü"
+            "Menlo's bold face collapsed"
         );
     }
 
-    /// Yordamsal değişmezlerin koştuğu (punto, ölçek) çiftleri.
+    /// The (point size, scale) pairs the procedural invariants run at.
     ///
-    /// Üçü de gerekli ve her biri başka bir aritmetiği açıyor (ölçüler bu
-    /// makinede, Menlo): 13pt@1x hücresi 8×18 — sekizde bir dilimleri
-    /// kesirli düşüyor (18/8 = 2.25) ve kenar yumuşatması gerçekten koşuyor;
-    /// 13pt@2x 16×33, yani **tek** yükseklik, yarım da kesire iniyor;
-    /// 144pt@1x ise 87×169, dilimlerin çoğunun tam bölündüğü büyük hücre. Tek çiftte koşan bir
-    /// değişmez ötekini hiç sınamamış olur — `envelope_stays_inside_cell`'in
-    /// doc'undaki ders ("gerçek fontla kırpma dalı hiç ateşlenmiyor").
+    /// All three are needed and each opens a different arithmetic (the
+    /// measures are on this machine, Menlo): the 13pt@1x cell is 8×18 —
+    /// eighth slices land fractional (18/8 = 2.25) and anti-aliasing really
+    /// runs; 13pt@2x is 16×33, i.e. an **odd** height, and halves fall to a
+    /// fraction too; 144pt@1x is 87×169, a large cell where most slices
+    /// divide evenly. An invariant that runs at only one pair has never
+    /// tested the others — the lesson in `envelope_stays_inside_cell`'s doc
+    /// ("the clipping branch never fires with a real font").
     const PROCEDURAL_SIZES: [(f64, f64); 3] = [
         (POINT_SIZE, 1.0),
         (POINT_SIZE, 2.0),
         (LARGE_POINT_SIZE, 1.0),
     ];
 
-    /// Yordamsal sprite'ın baytları — `Atlas::slot`'tan **değil**, doğrudan.
+    /// The bytes of a procedural sprite — **not** from `Atlas::slot`, but directly.
     ///
-    /// `LARGE_POINT_SIZE`'ta kapasite birkaç düzine yuva ve tek başına 256
-    /// Braille deseni oraya sığmıyor: `slot()` üzerinden koşan bir değişmez
-    /// sınaması tofu'ya düşer, `Upload` hiç gelmez ve bekçi geometriyi değil
-    /// kapasiteyi sınamış olurdu. Kapının `slot()` yolunda gerçekten
-    /// koştuğunu gösteren bekçiler ayrı ve 13pt'de
+    /// At `LARGE_POINT_SIZE` the capacity is a few dozen slots and the 256
+    /// Braille patterns alone do not fit there: an invariant test running
+    /// through `slot()` would fall to tofu, no `Upload` would ever arrive
+    /// and the guard would have tested the capacity, not the geometry. The
+    /// guards that show the gate really running on `slot()`'s path are
+    /// separate and at 13pt
     /// ([`procedural_chars_share_one_slot_across_faces`],
     /// [`the_small_class_still_asks_the_font`]).
     fn procedural(m: Metrics, ch: char) -> Vec<u8> {
@@ -3190,23 +3377,23 @@ mod tests {
         bytes
     }
 
-    /// İki sprite'ın piksel-piksel doygun toplamı.
+    /// The pixel-by-pixel saturating sum of two sprites.
     fn saturating_sum(a: &[u8], b: &[u8]) -> Vec<u8> {
         a.iter().zip(b).map(|(x, y)| x.saturating_add(*y)).collect()
     }
 
-    /// İki sprite'ın piksel-max'i.
+    /// The pixel-max of two sprites.
     fn pixel_max(a: &[u8], b: &[u8]) -> Vec<u8> {
         a.iter().zip(b).map(|(x, y)| *x.max(y)).collect()
     }
 
     #[test]
     fn the_full_block_fills_the_cell() {
-        // **Bildirilen kusurun tam tersi**, `> 0` değil eşitlik: Menlo'nun
-        // `█`'i 8×18 hücrenin yalnız 3–16 satırlarını boyuyor ve alt alta iki
-        // blok arasında ~5 piksel şerit kalıyordu (019 phase-2, kullanıcı
-        // ekran görüntüsüyle bildirdi). Tek bir eksik bayt o şeridin sönük
-        // kopyasıdır, yani ölçüt "hiç mürekkep var mı" olamaz.
+        // **The exact opposite of the reported defect**, equality and not `> 0`:
+        // Menlo's `█` paints only rows 3-16 of an 8×18 cell, which left a ~5 pixel
+        // strip between two stacked blocks (019 phase-2, reported by the user with
+        // a screenshot). A single missing byte is a faint copy of that strip, so
+        // the criterion cannot be "is there any ink at all".
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let bytes = procedural(m, '\u{2588}');
@@ -3214,7 +3401,7 @@ mod tests {
             let gap = bytes.iter().position(|&b| b != 255);
             assert!(
                 gap.is_none(),
-                "{point_size}pt@{scale}x: `█` hücreyi doldurmadı, ilk eksik piksel \
+                "{point_size}pt@{scale}x: `█` did not fill the cell, first missing pixel \
                  ({}, {}) = {}",
                 gap.unwrap_or(0) % w,
                 gap.unwrap_or(0) / w,
@@ -3225,94 +3412,96 @@ mod tests {
 
     #[test]
     fn disjoint_blocks_tile_the_cell() {
-        // Ayrık parçaların birleşimi **tam** kapsama vermek zorunda ve ölçüt
-        // doygun toplam: 13pt@2x'in h = 33'ünde yarım 16.5'e düşüyor, iki
-        // komşu parça o satıra 128'er bırakıyor. `max` alsaydı hücrenin **ortasında**
-        // %50'lik bir şerit kalırdı — bu setin kapatmaya geldiği kusurun
-        // hücre içine taşınmış hâli, ve `> 0` sınayan bir bekçi onu görmezdi.
+        // The union of the disjoint parts must give **full** coverage, and the
+        // criterion is the saturating sum: at h = 33 of 13pt@2x the half falls on
+        // 16.5, and the two neighbouring parts leave 128 each on that row. `max`
+        // would have left a 50% strip in the **middle** of the cell — the defect
+        // this set came to close, moved inside the cell, and a guard testing `> 0`
+        // would not have seen it.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let full = procedural(m, '\u{2588}');
             for (a, b, name) in [
-                ('\u{2580}', '\u{2584}', "üst/alt yarım"),
-                ('\u{258C}', '\u{2590}', "sol/sağ yarım"),
+                ('\u{2580}', '\u{2584}', "upper/lower half"),
+                ('\u{258C}', '\u{2590}', "left/right half"),
             ] {
                 assert_eq!(
                     saturating_sum(&procedural(m, a), &procedural(m, b)),
                     full,
-                    "{point_size}pt@{scale}x: {name} `█`'i vermedi"
+                    "{point_size}pt@{scale}x: {name} did not give `█`"
                 );
             }
-            // Dört çeyrek de aynı yasayı taşıyor ve ayrıca **orta dikişi**
-            // görüyor: yatay ile dikey kesirli satır/sütun aynı karede.
+            // The four quadrants carry the same law and also see the **middle
+            // seam**: fractional horizontal and vertical row/column in one frame.
             let quarters = ['\u{2598}', '\u{259D}', '\u{2596}', '\u{2597}'];
             let union = quarters.iter().fold(vec![0u8; m.slot_bytes()], |acc, &ch| {
                 saturating_sum(&acc, &procedural(m, ch))
             });
             assert_eq!(
                 union, full,
-                "{point_size}pt@{scale}x: dört çeyrek `█`'i vermedi"
+                "{point_size}pt@{scale}x: the four quadrants did not give `█`"
             );
         }
     }
 
     #[test]
     fn the_eighth_ladders_are_nested() {
-        // İki merdiven, iki yön: alttan `▁..█` kod noktası **artarken**
-        // büyüyor, soldan `▏..▉` kod noktası **azalırken**. İkinci yön
-        // Unicode'un kendi sıralaması ve tam da orada bir işaret hatası
-        // sessiz kalırdı — merdiven yine merdiven görünür, yalnız ters.
+        // Two ladders, two directions: from the bottom `▁..█` grows **as** the
+        // code point **increases**, from the left `▉..▏` grows as the code point
+        // **decreases**. The second direction is Unicode's own ordering and a sign
+        // error there would stay silent — the ladder still looks like a ladder,
+        // only reversed.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let full = procedural(m, '\u{2588}');
             for (name, steps) in [
-                ("alt", (0x2581..=0x2588).collect::<Vec<u32>>()),
-                ("sol", (0x2589..=0x258F).rev().collect::<Vec<u32>>()),
+                ("bottom", (0x2581..=0x2588).collect::<Vec<u32>>()),
+                ("left", (0x2589..=0x258F).rev().collect::<Vec<u32>>()),
             ] {
                 let mut previous = vec![0u8; m.slot_bytes()];
                 let mut previous_ink = 0u64;
                 for cp in steps {
-                    let ch = char::from_u32(cp).expect("blok kod noktası");
+                    let ch = char::from_u32(cp).expect("block code point");
                     let bytes = procedural(m, ch);
-                    // **İç içe**: her basamak bir öncekini kapsıyor.
+                    // **Nested**: each step covers the one before it.
                     assert!(
                         bytes.iter().zip(&previous).all(|(b, p)| b >= p),
-                        "{point_size}pt@{scale}x: {name} merdiveni U+{cp:04X}'te geri gitti"
+                        "{point_size}pt@{scale}x: the {name} ladder went backwards at U+{cp:04X}"
                     );
-                    // Ve gerçekten **büyüyor**: hepsini aynı çizen bir kod
-                    // iç içelik sınamasından geçerdi.
+                    // And it really **grows**: a code drawing all of them the
+                    // same would pass the nesting test.
                     let ink: u64 = bytes.iter().map(|&b| u64::from(b)).sum();
                     assert!(
                         ink > previous_ink,
-                        "{point_size}pt@{scale}x: {name} merdiveni U+{cp:04X}'te büyümedi \
+                        "{point_size}pt@{scale}x: the {name} ladder did not grow at U+{cp:04X} \
                          ({previous_ink} → {ink})"
                     );
                     previous = bytes;
                     previous_ink = ink;
                 }
-                // Merdivenin son basamağı dolu blok: `▉` sol yedi sekizde
-                // değil, `2589..=258F` tersten yürüdüğü için son adım
-                // yedi sekizde kalıyor — o yüzden yalnız alt merdiven
-                // karşılaştırılıyor.
-                if name == "alt" {
+                // The ladder's last step is the full block: the left ladder's
+                // last step is `▉` at seven eighths, not full, because
+                // `2589..=258F` is walked in reverse — so only the bottom
+                // ladder is compared.
+                if name == "bottom" {
                     assert_eq!(
                         previous, full,
-                        "{point_size}pt@{scale}x: alt merdiven `█`'e varmadı"
+                        "{point_size}pt@{scale}x: the bottom ladder did not reach `█`"
                     );
                 }
             }
         }
     }
 
-    /// Çeyrek ve sekizde bir bloklarının Unicode adları
-    /// (`unicodedata`, UCD 16.0), `raster::QUADRANTS`'ın oracle'ı.
+    /// Unicode names of the quadrant and one-eighth blocks
+    /// (`unicodedata`, UCD 16.0), the oracle for `raster::QUADRANTS`.
     ///
-    /// Çizgi ailesiyle aynı gerekçe ([`LINE_NAMES`]): bu da el yazması bir
-    /// tablo ve geometriye bakan hiçbir değişmez "doğru geometri, yanlış
-    /// karakter"i göremez — `▙` ile `▟`'nin maskeleri yer değiştirse dört
-    /// çeyreğin birleşimi hâlâ `█` olurdu.
-    // `rustfmt::skip`: hizalı ad yorumları tablonun gözle taranabilir
-    // olmasının tek sebebi.
+    /// Same reason as the line family ([`LINE_NAMES`]): this too is a
+    /// hand-written table and no invariant looking at geometry can see "right
+    /// geometry, wrong character" — if the masks of `▙` and `▟` were swapped
+    /// the union of the four quadrants would still be `█`.
+    // `rustfmt::skip`: the aligned name comments are the only reason the
+    // table can be scanned by eye.
     #[rustfmt::skip]
     const QUARTER_NAMES: [(char, &str); 12] = [
         ('▔', "UPPER ONE EIGHTH BLOCK"),
@@ -3331,13 +3520,13 @@ mod tests {
 
     #[test]
     fn the_quadrants_come_from_the_unicode_names() {
-        // İki iddia, ikisi de addan: **tek** çeyrekler adlarının söylediği
-        // çeyrekte duruyor (mürekkep orada, başka yerde değil) ve
-        // **bileşik** olanlar adlarında sayılan tek çeyreklerin doygun
-        // toplamı. Birincisi aynalamayı, ikincisi maske hatasını görüyor;
-        // yalnız ikincisi yazılsaydı `▘` ile `▝` takası her iki sınamadan
-        // da geçerdi, çünkü bileşikler de aynı takas edilmiş tekleri
-        // kullanırdı.
+        // Two claims, both from the name: the **single** quadrants sit in the
+        // quadrant their name says (ink is there and nowhere else), and the
+        // **composite** ones are the saturating sum of the single quadrants
+        // counted in their names. The first sees mirroring, the second sees mask
+        // errors; had only the second been written, swapping `▘` and `▝` would
+        // pass both tests, since the composites would use the same swapped
+        // singles.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let (w, h) = m.cell_wh();
@@ -3349,7 +3538,7 @@ mod tests {
                         "UPPER RIGHT" => '▝',
                         "LOWER LEFT" => '▖',
                         "LOWER RIGHT" => '▗',
-                        other => panic!("tanınmayan çeyrek: {other}"),
+                        other => panic!("unrecognised quadrant: {other}"),
                     })
                     .collect()
             };
@@ -3357,10 +3546,10 @@ mod tests {
                 let bytes = procedural(m, ch);
                 assert!(
                     bytes.iter().any(|&b| b > 0),
-                    "{point_size}pt@{scale}x: '{ch}' ({name}) hiç piksel boyamadı"
+                    "{point_size}pt@{scale}x: '{ch}' ({name}) painted no pixel at all"
                 );
-                // Adın çizdiği kutu: sekizde birler kendi şeritleri,
-                // çeyrekler kendi çeyrekleri, bileşikler bütün hücre.
+                // The box the name draws: one-eighths their own strips,
+                // quadrants their own quadrants, composites the whole cell.
                 let (x0, x1, y0, y1) = match name {
                     "UPPER ONE EIGHTH BLOCK" => (0, w, 0, h.div_ceil(8)),
                     "RIGHT ONE EIGHTH BLOCK" => (w - w.div_ceil(8), w, 0, h),
@@ -3381,8 +3570,8 @@ mod tests {
                         let outside = x < x0 || x >= x1 || y < y0 || y >= y1;
                         assert!(
                             !outside || bytes[y * w + x] == 0,
-                            "{point_size}pt@{scale}x: '{ch}' ({name}) ({x}, {y}) \
-                             pikselini boyadı — adının kutusunun dışında"
+                            "{point_size}pt@{scale}x: '{ch}' ({name}) painted pixel \
+                             ({x}, {y}) — outside the box of its name"
                         );
                     }
                 }
@@ -3394,8 +3583,8 @@ mod tests {
                         });
                     assert_eq!(
                         bytes, expected,
-                        "{point_size}pt@{scale}x: '{ch}' ({name}) adındaki \
-                         çeyreklerin toplamı değil"
+                        "{point_size}pt@{scale}x: '{ch}' ({name}) is not the sum \
+                         of the quadrants in its name"
                     );
                 }
             }
@@ -3404,72 +3593,76 @@ mod tests {
 
     #[test]
     fn the_shades_are_flat_and_ordered() {
-        // Gölgeler **desensiz** (bkz. `raster`'ın `SHADE_LEVELS` doc'u):
-        // dama deseni ancak adım hücrenin iki ölçüsünü de bölerse döşer ve
-        // bölmüyor: bu makinede 13pt@2x hücresi 16×33 ve 33 tek. Düz kapsama döşemeyi
-        // inşaen veriyor ve bekçisi bu: her gölge tek değerli.
+        // The shades are **patternless** (see the `SHADE_LEVELS` doc of `raster`):
+        // a checkerboard tiles only if the step divides both dimensions of the
+        // cell, and it does not: on this machine the 13pt@2x cell is 16×33 and 33
+        // is odd. Flat coverage tiles by construction and this is its guard: every
+        // shade is single-valued.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let mut previous = 0u8;
             for cp in 0x2591..=0x2593u32 {
-                let ch = char::from_u32(cp).expect("gölge kod noktası");
+                let ch = char::from_u32(cp).expect("shade code point");
                 let bytes = procedural(m, ch);
                 let first = bytes[0];
                 assert!(
                     bytes.iter().all(|&b| b == first),
-                    "{point_size}pt@{scale}x: U+{cp:04X} düz değil, desen döşemede kırılır"
+                    "{point_size}pt@{scale}x: U+{cp:04X} is not flat, the pattern breaks when tiled"
                 );
                 assert!(
                     first > previous,
-                    "{point_size}pt@{scale}x: U+{cp:04X} bir öncekinden koyu değil \
+                    "{point_size}pt@{scale}x: U+{cp:04X} is not darker than the previous one \
                      ({previous} → {first})"
                 );
                 previous = first;
             }
-            assert!(previous < 255, "en koyu gölge dolu bloğa eşit olmamalı");
+            assert!(
+                previous < 255,
+                "the darkest shade must not equal the full block"
+            );
         }
     }
 
     #[test]
     fn braille_dots_come_from_the_code_point_bits() {
-        // **Tablo yok**: alt 8 bit doğrudan nokta maskesi. Bekçi de tablosuz
-        // — beklentiyi 256 desen için tek tek yazmak yerine sekiz **tek
-        // noktanın** sprite'larından türetiyor, yani uygulamanın kendi
-        // eşlemesini okumuyor.
+        // **No table**: the low 8 bits are directly the dot mask. The guard is
+        // tableless too — instead of writing the expectation out for 256
+        // patterns it derives it from the sprites of eight **single dots**, so it
+        // does not read the implementation's own mapping.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let blank = procedural(m, '\u{2800}');
             assert!(
                 blank.iter().all(|&b| b == 0),
-                "{point_size}pt@{scale}x: boş Braille deseni mürekkep bıraktı"
+                "{point_size}pt@{scale}x: the blank Braille pattern left ink"
             );
 
             let dots: Vec<Vec<u8>> = (0..8)
                 .map(|bit| {
-                    let ch = char::from_u32(0x2800 | (1u32 << bit)).expect("Braille kod noktası");
+                    let ch = char::from_u32(0x2800 | (1u32 << bit)).expect("Braille code point");
                     procedural(m, ch)
                 })
                 .collect();
             for (bit, dot) in dots.iter().enumerate() {
                 assert!(
                     dot.iter().any(|&b| b > 0),
-                    "{point_size}pt@{scale}x: bit {bit} hiç piksel boyamadı"
+                    "{point_size}pt@{scale}x: bit {bit} painted no pixel at all"
                 );
             }
-            // **Destekler ayrık**: iki nokta aynı piksele değseydi 2×4
-            // ızgarası birbirine akar ve desen okunamazdı.
+            // **The supports are disjoint**: if two dots touched the same pixel
+            // the 2×4 grid would flow together and the pattern be unreadable.
             for i in 0..8 {
                 for j in i + 1..8 {
                     let touching = dots[i].iter().zip(&dots[j]).any(|(a, b)| *a > 0 && *b > 0);
                     assert!(
                         !touching,
-                        "{point_size}pt@{scale}x: bit {i} ile bit {j} aynı piksele değdi"
+                        "{point_size}pt@{scale}x: bit {i} and bit {j} touched the same pixel"
                     );
                 }
             }
-            // Birleşim yasası, 256 desenin **hepsinde**.
+            // The union law, on **all** 256 patterns.
             for mask in 0u32..=0xFF {
-                let ch = char::from_u32(0x2800 | mask).expect("Braille kod noktası");
+                let ch = char::from_u32(0x2800 | mask).expect("Braille code point");
                 let expected = (0..8)
                     .filter(|bit| mask & (1 << bit) != 0)
                     .fold(vec![0u8; m.slot_bytes()], |acc, bit| {
@@ -3478,7 +3671,7 @@ mod tests {
                 assert_eq!(
                     procedural(m, ch),
                     expected,
-                    "{point_size}pt@{scale}x: U+{:04X} bitlerinin birleşimi değil",
+                    "{point_size}pt@{scale}x: U+{:04X} is not the union of its bits",
                     0x2800 | mask
                 );
             }
@@ -3487,9 +3680,9 @@ mod tests {
 
     #[test]
     fn procedural_chars_share_one_slot_across_faces() {
-        // Unicode ince/kalın ayrımını karakterin kendisinde taşıyor, yani SGR
-        // bold'un bloğu kalınlaştırması bilginin iki kez kodlanması olurdu.
-        // Yan kazanç ölçülebilir: dört yüz tek yuva.
+        // Unicode carries the light/heavy distinction in the character itself,
+        // so SGR bold thickening the block would encode the information twice.
+        // The side benefit is measurable: four faces, one slot.
         let mut a = atlas(POINT_SIZE, 1.0);
         let regular = a
             .slot(
@@ -3500,7 +3693,7 @@ mod tests {
             )
             .0
             .slot;
-        assert_ne!(regular, TOFU, "yordamsal karakter tofu'ya düştü");
+        assert_ne!(regular, TOFU, "the procedural character fell to tofu");
         for face in [Face::Bold, Face::Italic, Face::BoldItalic] {
             assert_eq!(
                 a.slot(
@@ -3512,20 +3705,21 @@ mod tests {
                 .0
                 .slot,
                 regular,
-                "{face:?} ayrı yuva tuttu"
+                "{face:?} took a separate slot"
             );
         }
-        assert_eq!(a.occupancy().0, 2, "tofu + tek yuva bekleniyordu");
+        assert_eq!(a.occupancy().0, 2, "expected tofu + a single slot");
     }
 
     #[test]
     fn the_small_class_still_asks_the_font() {
-        // Kapı küçük sınıfta **kapalı** ve gerekçe döşeme değil ölçü
-        // ayrışması: `Metrics` büyük hücrenin, yani yordamsal sprite büyük
-        // hücre genişliğinde çizilir; dock'un bağlam satırının sütun adımı
-        // ise küçük yüzün ilerlemesi (`Frame::column_px`). Hücreyi tam
-        // dolduran bir sprite orada komşusunun üstüne binerdi — ve bağlam
-        // satırı yol ile dal taşıyor, ikisi de kullanıcı verisi.
+        // The gate is **closed** in the small class, and the reason is not
+        // tiling but a measure mismatch: `Metrics` is the large cell's, so the
+        // procedural sprite is drawn at the large cell width, while the column
+        // step of the dock's context line is the small face's advance
+        // (`Frame::column_px`). A sprite filling the cell exactly would overlap
+        // its neighbour there — and the context line carries the path and the
+        // branch, both user data.
         let mut a = atlas(POINT_SIZE, 1.0);
         let (placed_normal, normal) = a.slot(
             Sprite::Char('\u{2588}'),
@@ -3536,11 +3730,11 @@ mod tests {
         let normal_slot = placed_normal.slot;
         assert!(
             normal
-                .expect("yeni yuva yükleme vermeli")
+                .expect("a new slot must yield an upload")
                 .bytes
                 .iter()
                 .all(|&b| b == 255),
-            "büyük sınıfta kapı açılmadı"
+            "the gate did not open in the large class"
         );
         let (placed_small_slot, small) = a.slot(
             Sprite::Char('\u{2588}'),
@@ -3549,43 +3743,47 @@ mod tests {
             Half::Whole,
         );
         let small_slot = placed_small_slot.slot;
-        let small = small.expect("yeni yuva yükleme vermeli").bytes.to_vec();
+        let small = small
+            .expect("a new slot must yield an upload")
+            .bytes
+            .to_vec();
         assert_ne!(
             small_slot, normal_slot,
-            "küçük sınıf büyüğün yuvasını paylaştı"
+            "the small class shared the large one's slot"
         );
-        // Menlo'nun `█`'i hücreyi doldurmuyor — setin varlık sebebi tam bu.
-        // Yani "tamamı 255 değil" burada fontun imzası.
+        // Menlo's `█` does not fill the cell — the reason this set exists is
+        // exactly this. So "not all 255" is the font's signature here.
         assert!(
             small.iter().any(|&b| b != 255),
-            "küçük sınıfta kapı açıldı: sprite yordamsal çizilmiş"
+            "the gate opened in the small class: the sprite was drawn procedurally"
         );
     }
 
     #[test]
     fn pattern_period_divides_cell_evenly() {
-        // Nokta/kesik deseni `x % period` ile döşeniyor ve sprite tek hücre
-        // genişliğinde: periyot hücreyi tam bölmezse iki komşu hücrede tire
-        // uzunlukları farklı görünür. Kıvrımda bu kısıt `WAVE_COUNT` ile
-        // inşaen sağlanıyordu, `band`'ta sağlanmıyordu — gözden kaçmıştı.
+        // The dot/dash pattern is tiled with `x % period` and the sprite is one
+        // cell wide: if the period does not divide the cell evenly, dash lengths
+        // look different in two neighbouring cells. In the wave this constraint
+        // held by construction through `WAVE_COUNT`, in `band` it did not — it
+        // had been overlooked.
         for w in 1..=40usize {
             for wanted in 1..=40usize {
                 let p = raster::dividing_period(wanted, w);
-                assert!(p >= 1, "periyot sıfır olamaz (w={w}, istenen={wanted})");
-                assert_eq!(w % p, 0, "periyot {p} hücreyi ({w}) bölmüyor");
+                assert!(p >= 1, "the period cannot be zero (w={w}, wanted={wanted})");
+                assert_eq!(w % p, 0, "period {p} does not divide the cell ({w})");
             }
         }
     }
 
-    /// Çizgi ailesinin kol tablosunun **ikinci kopyası** ve kaynağı ayrı:
-    /// bu liste karakterlerin Unicode adları (`unicodedata`, UCD 16.0;
-    /// `BOX DRAWINGS ` öneki atılmış), `raster::LINES` ise geometriden
-    /// yazılmış kol kümeleri. Uygulamanın tablosunu okuyan bir sınama hiçbir
-    /// şey kanıtlamazdı ve kaçırdığı şeyin adı var: **doğru geometri, yanlış
-    /// karakter** — aynalanmış ya da kaydırılmış bir tabloda her sprite
-    /// kusursuz görünür, yalnız yanlış kod noktasında durur.
-    // `rustfmt::skip`: hizalı ad yorumları tablonun gözle taranabilir
-    // olmasının tek sebebi.
+    /// The **second copy** of the line family's arm table, from a separate
+    /// source: this list is the Unicode names of the characters (`unicodedata`,
+    /// UCD 16.0; the `BOX DRAWINGS ` prefix dropped), while `raster::LINES` is
+    /// arm sets written from geometry. A test reading the implementation's table
+    /// would prove nothing, and what it would miss has a name: **right geometry,
+    /// wrong character** — in a mirrored or shifted table every sprite looks
+    /// flawless, it just sits at the wrong code point.
+    // `rustfmt::skip`: the aligned name comments are the only reason the
+    // table can be scanned by eye.
     #[rustfmt::skip]
     const LINE_NAMES: [&str; 128] = [
         "LIGHT HORIZONTAL",                            // ─
@@ -3718,16 +3916,16 @@ mod tests {
         "HEAVY UP AND LIGHT DOWN",                     // ╿
     ];
 
-    // Kol indeksleri — **sınamanın kendi sırası**, `raster`'ınkinden ayrı:
-    // ikisi aynı sabiti paylaşsaydı oracle uygulamanın bir parçasını okumuş
-    // olurdu.
+    // Arm indices — **the test's own order**, separate from `raster`'s: had
+    // the two shared one constant the oracle would have read a part of the
+    // implementation.
     const NAMED_UP: usize = 0;
     const NAMED_DOWN: usize = 1;
     const NAMED_LEFT: usize = 2;
     const NAMED_RIGHT: usize = 3;
 
-    /// Adın söylediği kol stili. `SINGLE` ile `LIGHT` aynı şey: çift çizgi
-    /// ailesinde Unicode ince kolu "single" diye adlandırıyor.
+    /// The arm style the name says. `SINGLE` and `LIGHT` are the same thing:
+    /// in the double-line family Unicode calls the thin arm "single".
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum Named {
         Light,
@@ -3735,25 +3933,25 @@ mod tests {
         Double,
     }
 
-    /// Bir çizgi karakterinin **adından** okunan tarifi.
+    /// The description read from the **name** of a line character.
     struct NamedLine {
         arms: [Option<Named>; 4],
         dashes: u8,
         arc: bool,
     }
 
-    /// Unicode adını kol kümesine çevirir.
+    /// Turns a Unicode name into an arm set.
     ///
-    /// Ad ` AND ` ile öbeklere ayrılıyor; her öbek bir yön kümesi ve —
-    /// varsa — bir stil taşıyor. Stilsiz öbek adın **ilk** stilini miras
-    /// alıyor (`LIGHT DOWN AND RIGHT` → ikisi de ince, `HEAVY VERTICAL AND
-    /// RIGHT` → üçü de kalın). İki tuzak var ve ikisi de adlandırmanın
-    /// kendisinden: `DOUBLE` bir stil ama `DOUBLE DASH`'te yoğunluk sayısı,
-    /// ve `SINGLE` stil sözlüğünde yok — `LIGHT`'ın çift çizgi ailesindeki
-    /// adı.
+    /// The name is split into groups at ` AND `; each group carries a set of
+    /// directions and — if present — a style. A styleless group inherits the
+    /// **first** style of the name (`LIGHT DOWN AND RIGHT` → both light, `HEAVY
+    /// VERTICAL AND RIGHT` → all three heavy). There are two traps and both come
+    /// from the naming itself: `DOUBLE` is a style but in `DOUBLE DASH` it is
+    /// the density count, and `SINGLE` is absent from the style vocabulary — it
+    /// is `LIGHT`'s name in the double-line family.
     ///
-    /// Tanınmayan sözcük ya da yönsüz öbek **panik**: sessizce atlamak
-    /// oracle'ı kendi kendine boşaltırdı.
+    /// An unrecognised word or a directionless group **panics**: skipping it
+    /// silently would drain the oracle of meaning.
     fn parse_line_name(name: &str) -> NamedLine {
         let words: Vec<&str> = name.split_whitespace().collect();
         let dashes = words
@@ -3763,9 +3961,9 @@ mod tests {
                 "DOUBLE" => 2,
                 "TRIPLE" => 3,
                 "QUADRUPLE" => 4,
-                other => panic!("bilinmeyen yoğunluk: {other} ({name})"),
+                other => panic!("unknown density: {other} ({name})"),
             });
-        // Adın ilk stil sözcüğü: stilsiz öbeklerin mirası.
+        // The first style word of the name: the inheritance of styleless groups.
         let mut inherited = None;
         for (at, &word) in words.iter().enumerate() {
             let style = match word {
@@ -3797,18 +3995,21 @@ mod tests {
                     "RIGHT" => directions.push(NAMED_RIGHT),
                     "VERTICAL" => directions.extend([NAMED_UP, NAMED_DOWN]),
                     "HORIZONTAL" => directions.extend([NAMED_LEFT, NAMED_RIGHT]),
-                    other => panic!("adda tanınmayan sözcük: {other} ({name})"),
+                    other => panic!("unrecognised word in name: {other} ({name})"),
                 }
             }
-            assert!(!directions.is_empty(), "yönsüz öbek: {group} ({name})");
+            assert!(
+                !directions.is_empty(),
+                "directionless group: {group} ({name})"
+            );
             let style = style
                 .or(inherited)
-                .unwrap_or_else(|| panic!("stilsiz ad: {name}"));
+                .unwrap_or_else(|| panic!("styleless name: {name}"));
             for direction in directions {
                 arms[direction] = Some(style);
             }
         }
-        assert!(arms.iter().any(Option::is_some), "kolsuz ad: {name}");
+        assert!(arms.iter().any(Option::is_some), "armless name: {name}");
         NamedLine {
             arms,
             dashes,
@@ -3816,18 +4017,18 @@ mod tests {
         }
     }
 
-    /// Kapsamdaki çizgi karakterleri: U+2500–U+257F, **köşegenler hariç**.
+    /// The line characters in scope: U+2500–U+257F, **diagonals excluded**.
     fn line_chars() -> impl Iterator<Item = (char, NamedLine)> {
         (0x2500..=0x257Fu32)
             .filter(|cp| !(0x2571..=0x2573).contains(cp))
             .map(|cp| {
-                let ch = char::from_u32(cp).expect("çizgi kod noktası");
+                let ch = char::from_u32(cp).expect("line code point");
                 (ch, parse_line_name(LINE_NAMES[(cp - 0x2500) as usize]))
             })
     }
 
-    /// Sprite'ın bir kenarındaki piksel profili — üst/alt kenarda satır,
-    /// sol/sağ kenarda sütun.
+    /// The pixel profile on one edge of the sprite — a row on the top/bottom
+    /// edge, a column on the left/right edge.
     fn edge(bytes: &[u8], m: Metrics, side: usize) -> Vec<u8> {
         let (w, h) = m.cell_wh();
         match side {
@@ -3838,8 +4039,8 @@ mod tests {
         }
     }
 
-    /// Kolu tek başına taşıyan karakterin aynı kenardaki profili — dikişin
-    /// ölçütü.
+    /// The profile on the same edge of the character carrying the arm alone —
+    /// the seam's criterion.
     fn reference_edge(m: Metrics, style: Named, vertical: bool) -> Vec<u8> {
         let ch = match (vertical, style) {
             (true, Named::Light) => '│',
@@ -3853,7 +4054,7 @@ mod tests {
         edge(&procedural(m, ch), m, side)
     }
 
-    /// Profildeki kesintisiz mürekkep kuşaklarının sayısı.
+    /// The number of unbroken ink bands in the profile.
     fn runs(profile: &[u8]) -> usize {
         profile
             .iter()
@@ -3864,10 +4065,10 @@ mod tests {
 
     #[test]
     fn the_name_parser_reads_the_grammar() {
-        // Oracle'ın kendi bekçisi: her adı aynı kola çeviren bozuk bir
-        // ayrıştırıcı bütün sınamaları yeşil bırakırdı. Dört ad dilbilgisinin
-        // dört tuzağını taşıyor — miras alınan stil, `DOUBLE DASH`'in stil
-        // olmaması, `SINGLE`'ın ince demesi ve `ARC`.
+        // The oracle's own guard: a broken parser turning every name into the
+        // same arms would leave all the tests green. Four names carry the
+        // grammar's four traps — the inherited style, `DOUBLE DASH` not being a
+        // style, `SINGLE` meaning thin, and `ARC`.
         let probe = parse_line_name("UP HEAVY AND RIGHT DOWN LIGHT"); // ┞
         assert_eq!(
             probe.arms,
@@ -3900,19 +4101,19 @@ mod tests {
             [None, Some(Named::Light), None, Some(Named::Light)]
         );
         assert!(probe.arc && probe.dashes == 0);
-        // Ve ayrıştırıcı 125 adın **hepsini** okuyabiliyor: tanınmayan
-        // sözcük ya da yönsüz öbek panik, yani bu tur sessiz kalmaz.
+        // And the parser can read **all** 125 names: an unrecognised word or a
+        // directionless group panics, so this round does not stay silent.
         assert_eq!(line_chars().count(), 125);
     }
 
     #[test]
     fn the_arms_come_from_the_unicode_names() {
-        // Oracle **bağımsız**: beklenti karakterin Unicode adından
-        // ayrıştırılıyor (bkz. [`LINE_NAMES`]), uygulamanın tablosundan
-        // değil. Gördüğü şey aynalanmış ya da bir kaydırmış tablo: `├` ile
-        // `┤` yer değiştirseydi ikisi de kusursuz çizilir, yalnız yanlış
-        // kod noktasında dururdu ve geometriye bakan hiçbir değişmez bunu
-        // göremezdi.
+        // The oracle is **independent**: the expectation is parsed from the
+        // character's Unicode name (see [`LINE_NAMES`]), not from the
+        // implementation's table. What it sees is a mirrored or shifted table:
+        // had `├` and `┤` swapped places both would be drawn flawlessly, only at
+        // the wrong code point, and no invariant looking at geometry could have
+        // seen it.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             for (ch, named) in line_chars() {
@@ -3920,23 +4121,23 @@ mod tests {
                 for side in [NAMED_UP, NAMED_DOWN, NAMED_LEFT, NAMED_RIGHT] {
                     let profile = edge(&bytes, m, side);
                     let inked = profile.iter().any(|&b| b > 0);
-                    // Kesikli çizginin **kapanış** kenarı boş: desen dolu
-                    // başlıyor ve boşlukla bitiyor (`band`'in bugünkü
-                    // davranışı da bu). Kol orada yok değil, tire orada yok.
+                    // The **closing** edge of a dashed line is empty: the pattern
+                    // starts full and ends with a gap (today's behaviour of `band`
+                    // too). The arm is not missing there, the dash is.
                     let trailing = named.dashes > 0 && (side == NAMED_DOWN || side == NAMED_RIGHT);
                     if named.arms[side].is_some() && !trailing {
                         assert!(
                             inked,
-                            "{point_size}pt@{scale}x: '{ch}' ({}) {side}. kolu \
-                             kenara ulaşmadı",
+                            "{point_size}pt@{scale}x: '{ch}' ({}) arm {side} \
+                             did not reach the edge",
                             LINE_NAMES[(u32::from(ch) - 0x2500) as usize]
                         );
                     }
                     if named.arms[side].is_none() {
                         assert!(
                             !inked,
-                            "{point_size}pt@{scale}x: '{ch}' ({}) olmayan {side}. \
-                             kolun kenarına mürekkep bıraktı",
+                            "{point_size}pt@{scale}x: '{ch}' ({}) left ink on the edge \
+                             of the absent arm {side}",
                             LINE_NAMES[(u32::from(ch) - 0x2500) as usize]
                         );
                     }
@@ -3944,7 +4145,7 @@ mod tests {
                 assert_eq!(
                     named.arc,
                     matches!(ch, '╭' | '╮' | '╯' | '╰'),
-                    "yay bayrağı adla uyuşmuyor: '{ch}'"
+                    "arc flag does not match the name: '{ch}'"
                 );
             }
         }
@@ -3952,21 +4153,21 @@ mod tests {
 
     #[test]
     fn arms_tile_across_the_cell_edge() {
-        // **Dikiş sürekliliği**: kenardaki profil yalnız kolun *stiline*
-        // bağlı olmak zorunda, karakterin geri kalanına değil. Yan yana iki
-        // `─`, `├`'nin sağına konan `─`, `┼`'ın altına konan `│` — hepsi
-        // aynı iddia, ve iddia bu tek eşitlikte: her karakterin kenar
-        // profili o stilin tek kollu referansının profiline **eşit**.
-        // Ölçüt eşitlik, "mürekkep var mı" değil: bir baytlık fark komşu
-        // hücreler arasında sönük bir dikiş demek.
+        // **Seam continuity**: the profile on the edge must depend only on the
+        // arm's *style*, not on the rest of the character. Two `─` side by side,
+        // a `─` placed to the right of `├`, a `│` placed under `┼` — all the same
+        // claim, and the claim is in this one equality: each character's edge
+        // profile is **equal** to the profile of that style's single-arm
+        // reference. The criterion is equality, not "is there ink": a one-byte
+        // difference means a faint seam between neighbouring cells.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
-            // Referanslar **punto başına bir kez**: altısı da her kenarda
-            // yeniden rasterize edilseydi üç boyda 1500 tam hücre çizimi
-            // eder ve `make hepsi` her phase kapısında onu öderdi.
-            // Dış indeks eksen (`vertical`), iç indeks `Named`'ın kendi
-            // sırası — `style as usize` onu okuyor, yani iki liste birlikte
-            // değişmek zorunda.
+            // References **once per point size**: had all six been rasterized
+            // again on every edge it would cost 1500 full cell drawings over
+            // three sizes and `make check` would pay it at every phase gate.
+            // The outer index is the axis (`vertical`), the inner index is
+            // `Named`'s own order — `style as usize` reads it, so the two lists
+            // must change together.
             let references: [[Vec<u8>; 3]; 2] = [
                 [
                     reference_edge(m, Named::Light, false),
@@ -3985,16 +4186,16 @@ mod tests {
                     let Some(style) = named.arms[side] else {
                         continue;
                     };
-                    // Tek muafiyet ve adıyla: kesikli çizginin **kapanış**
-                    // kenarı, çünkü desen dolu başlayıp boşlukla bitiyor.
-                    // **Yay muaf değil** — bir dönem öyleydi ve muafiyet
-                    // gerçek bir kusuru örtüyordu: yarıçap hücre kenarına
-                    // kadar gidince teğet noktası oraya düşüyor ve kenar
-                    // sütununu sap yerine yay boyuyordu (rayın satırında 255
-                    // yerine 246, altındakinde 0 yerine 13), üstelik dört
-                    // köşenin yalnız ikisinde. `corner`'ın bir piksel
-                    // içerlek yarıçapı onu kapattı; muafiyet kalkınca bu
-                    // satır o düzeltmenin bekçisi oldu.
+                    // The single exemption, named: the **closing** edge of a
+                    // dashed line, since the pattern starts full and ends with a
+                    // gap. **The arc is not exempt** — it once was and the
+                    // exemption covered a real defect: when the radius reached
+                    // the cell edge the tangent point fell there and the arc, not
+                    // the stem, painted the edge column (255 → 246 on the rail's
+                    // row, 0 → 13 on the one below it), and in only two of the
+                    // four corners. `corner`'s radius, one pixel further in,
+                    // closed it; with the exemption gone this row became the
+                    // guard of that fix.
                     if named.dashes > 0 && (side == NAMED_DOWN || side == NAMED_RIGHT) {
                         continue;
                     }
@@ -4002,8 +4203,8 @@ mod tests {
                     assert_eq!(
                         edge(&bytes, m, side),
                         references[usize::from(vertical)][style as usize],
-                        "{point_size}pt@{scale}x: '{ch}' {side}. kenarında \
-                         dikiş kırıldı"
+                        "{point_size}pt@{scale}x: '{ch}' seam broke on \
+                         edge {side}"
                     );
                 }
             }
@@ -4012,17 +4213,17 @@ mod tests {
 
     #[test]
     fn disjoint_arms_unite_into_the_joint() {
-        // Birleşim yasası: ayrık kol kümeli iki karakterin piksel-max'i
-        // birleşim kümesinin karakteri. Yapısal olarak doğru olmak zorunda
-        // — aynı kol her karakterde aynı dikdörtgeni veriyor — ve tam da bu
-        // yüzden kırılması bir kaza değil, kolun uzantısının karaktere göre
-        // değiştiğinin kanıtı olurdu.
+        // The union law: the pixel-max of two characters with disjoint arm sets
+        // is the character of the union set. It must hold structurally — the
+        // same arm gives the same rectangle in every character — and that is
+        // exactly why a break would be no accident but proof that the arm's
+        // extent varies with the character.
         //
-        // **Çift çizgi bu listede yok** ve sebebi geometri: `╔`'in üst rayı
-        // köşeyi kapatmak için kavşağı geçiyor, `╬`'te ise aynı ray dirsek
-        // yapıp duruyor (kanal açık kalmalı). Yani `╔ ∪ ╝ ≠ ╬` ve olması da
-        // gerekmiyor; çift çizginin bekçisi
-        // [`double_junctions_keep_the_channel_open`].
+        // **Double lines are not in this list** and the reason is geometry: the
+        // top rail of `╔` runs past the junction to close the corner, while in
+        // `╬` the same rail turns into an elbow and stops (the channel must stay
+        // open). So `╔ ∪ ╝ ≠ ╬` and it need not be; the guard of the double line
+        // is [`double_junctions_keep_the_channel_open`].
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             for (a, b, joint) in [
@@ -4039,7 +4240,7 @@ mod tests {
                 assert_eq!(
                     pixel_max(&procedural(m, a), &procedural(m, b)),
                     procedural(m, joint),
-                    "{point_size}pt@{scale}x: '{a}' ∪ '{b}' '{joint}' vermedi"
+                    "{point_size}pt@{scale}x: '{a}' ∪ '{b}' did not give '{joint}'"
                 );
             }
         }
@@ -4047,17 +4248,18 @@ mod tests {
 
     #[test]
     fn double_junctions_keep_the_channel_open() {
-        // Çift çizgi bir çizgi değil **iki duvarlı bir kanal**, ve
-        // kavşaktaki bütün kararlar tek cümleden çıkıyor: kanal kapanmaz.
-        // Bu bekçi rayın "dönmesi" ile "geçmesi" arasındaki farkın tek
-        // tanığı — birleşim yasası da dikiş de o farkı göremez, ikisi de
-        // kenarlara ve toplama bakıyor.
+        // A double line is not a line but a **channel with two walls**, and
+        // every decision at a junction follows from one sentence: the channel
+        // does not close. This guard is the only witness of the difference
+        // between a rail "turning" and "passing" — neither the union law nor the
+        // seam can see it, both look at the edges and the sum.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let (w, h) = m.cell_wh();
-            // **İç** boşluk: mürekkebin arasında kalan boş satır. Ölçüt
-            // "boş satır var mı" olamazdı — `╒`'nin üstünde kolu olmayan
-            // sekiz boş satır var ve onlar kanal değil, karakterin dışı.
+            // The **inner** gap: the empty row left between ink. The criterion
+            // could not be "is there an empty row" — above `╒` there are eight
+            // empty rows with no arm, and they are not the channel but the
+            // outside of the character.
             let gap_row = |ch: char| {
                 let bytes = procedural(m, ch);
                 let inked = |y: usize| bytes[y * w..(y + 1) * w].iter().any(|&b| b > 0);
@@ -4078,38 +4280,55 @@ mod tests {
             };
             let at = format!("{point_size}pt@{scale}x");
 
-            // `╬` dört dirsek: ortasından hem boş bir satır hem boş bir
-            // sütun geçiyor. `╋` aynı kollara sahip ve hiçbiri yok — ölçüt
-            // "çizgi var mı" değil, kanalın açıklığı.
-            assert!(gap_row('╬') && gap_column('╬'), "{at}: `╬` kanalı kapandı");
+            // `╬` is four elbows: both an empty row and an empty column pass
+            // through its middle. `╋` has the same arms and has neither — the
+            // criterion is not "is there a line" but the openness of the channel.
+            assert!(
+                gap_row('╬') && gap_column('╬'),
+                "{at}: the channel of `╬` closed"
+            );
             assert!(
                 !gap_row('╋') && !gap_column('╋'),
-                "{at}: `╋` ortasında boşluk açtı"
+                "{at}: `╋` opened a gap in its middle"
             );
-            // `╠`: dış duvar kesintisiz, iç duvar kırık. Kesintisiz duvar
-            // yüzünden boş satır **yok**; olsaydı çerçevenin sol kenarı
-            // T-kavşağında kopardı.
-            assert!(full_column('╠'), "{at}: `╠`'in dış duvarı kesintisiz değil");
-            assert!(!gap_row('╠'), "{at}: `╠` sol kenarı kopardı");
-            assert!(full_row('╦'), "{at}: `╦`'in dış duvarı kesintisiz değil");
-            assert!(!gap_column('╦'), "{at}: `╦` üst kenarı kopardı");
-            // Tek ray çift raylı kavşağı **geçiyor** — karşı kolu varsa.
-            // `╪`'nin dikey çizgisi baştan sona, `╫`'ün yatayı öyle.
-            assert!(!gap_row('╪'), "{at}: `╪`'in dikey çizgisi ortadan koptu");
-            assert!(!gap_column('╫'), "{at}: `╫`'ün yatay çizgisi ortadan koptu");
-            // Karşı kolu yoksa **duruyor**: `╤`'nin sapı alt rayda başlıyor
-            // ve iki ray arasındaki satır boş kalıyor.
-            assert!(gap_row('╤'), "{at}: `╤`'nin sapı kanalı kapattı");
-            // Ama köşede aynı sap **uzak** raya kadar gidiyor, yoksa `╒`
-            // köşesiz kalırdı.
-            assert!(!gap_row('╒'), "{at}: `╒`'nin sapı üst raya ulaşmadı");
+            // `╠`: the outer wall is unbroken, the inner wall is broken. Because
+            // of the unbroken wall there is **no** empty row; if there were, the
+            // left edge of the frame would be torn at the T-junction.
+            assert!(
+                full_column('╠'),
+                "{at}: the outer wall of `╠` is not unbroken"
+            );
+            assert!(!gap_row('╠'), "{at}: `╠` tore the left edge");
+            assert!(full_row('╦'), "{at}: the outer wall of `╦` is not unbroken");
+            assert!(!gap_column('╦'), "{at}: `╦` tore the top edge");
+            // A single rail **passes** through a double-rail junction — if it
+            // has the opposite arm. The vertical line of `╪` end to end, the
+            // horizontal of `╫` likewise.
+            assert!(
+                !gap_row('╪'),
+                "{at}: the vertical line of `╪` broke in the middle"
+            );
+            assert!(
+                !gap_column('╫'),
+                "{at}: the horizontal line of `╫` broke in the middle"
+            );
+            // Without the opposite arm it **stops**: the stem of `╤` starts at
+            // the lower rail and the row between the two rails stays empty.
+            assert!(gap_row('╤'), "{at}: the stem of `╤` closed the channel");
+            // But at a corner the same stem goes all the way to the **far** rail,
+            // otherwise `╒` would be left without a corner.
+            assert!(
+                !gap_row('╒'),
+                "{at}: the stem of `╒` did not reach the top rail"
+            );
         }
     }
 
     #[test]
     fn heavy_is_thicker_and_double_is_two_rails() {
-        // Üç stil üç ayrı iddia taşıyor ve üçü de kenar profilinden
-        // okunabiliyor: kalın inceden **kalın**, çift **iki ayrı** banttan.
+        // Three styles carry three separate claims and all three can be read
+        // from the edge profile: heavy is **thicker** than light, double is **two
+        // separate** bands.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             for vertical in [false, true] {
@@ -4119,15 +4338,15 @@ mod tests {
                 let ink = |profile: &[u8]| profile.iter().map(|&b| u32::from(b)).sum::<u32>();
                 assert!(
                     ink(&heavy) > ink(&light),
-                    "{point_size}pt@{scale}x (dikey={vertical}): kalın inceden kalın değil"
+                    "{point_size}pt@{scale}x (vertical={vertical}): heavy is not thicker than light"
                 );
-                assert_eq!(runs(&light), 1, "ince çizgi tek bant olmalı");
-                assert_eq!(runs(&heavy), 1, "kalın çizgi tek bant olmalı");
+                assert_eq!(runs(&light), 1, "a light line must be a single band");
+                assert_eq!(runs(&heavy), 1, "a heavy line must be a single band");
                 assert_eq!(
                     runs(&double),
                     2,
-                    "{point_size}pt@{scale}x (dikey={vertical}): çift çizgi iki \
-                     ayrı bant olmalı"
+                    "{point_size}pt@{scale}x (vertical={vertical}): a double line must be \
+                     two separate bands"
                 );
             }
         }
@@ -4135,19 +4354,21 @@ mod tests {
 
     #[test]
     fn dashed_densities_collapse_only_with_the_period() {
-        // `dividing_period` korunuyor (`discussion.md` → Karar 4): periyot
-        // hücreyi tam bölmek zorunda, yoksa desen hücre sınırında faz kırar
-        // ve döşeme bu setin varlık sebebi. Bedeli görünür bir bilgi kaybı
-        // — bu makinede `w = 8`'de `┄` ile `╌` **aynı sprite'a** çöküyor —
-        // ve bekçi onu listeye yazmıyor, **türetiyor**: iki yoğunluk ancak
-        // periyotları eşitse eşit. Sayı listeye yazılsaydı başka bir
-        // puntoda yanlış olurdu.
+        // `dividing_period` is kept (`discussion.md` → Karar 4): the period
+        // must divide the cell evenly, otherwise the pattern breaks phase at the
+        // cell boundary and tiling is the reason this set exists. The cost is a
+        // visible loss of information — on this machine at `w = 8` `┄` and `╌`
+        // collapse into **the same sprite** — and the guard does not write it
+        // into a list, it **derives** it: two densities are equal only if their
+        // periods are equal. Had the number been written into a list it would
+        // be wrong at another point size.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let (w, h) = m.cell_wh();
-            for (axis, extent, family) in
-                [("yatay", w, ['╌', '┄', '┈']), ("dikey", h, ['╎', '┆', '┊'])]
-            {
+            for (axis, extent, family) in [
+                ("horizontal", w, ['╌', '┄', '┈']),
+                ("vertical", h, ['╎', '┆', '┊']),
+            ] {
                 for (i, first) in family.into_iter().enumerate() {
                     for second in family.into_iter().skip(i + 1) {
                         let period = |ch: char| {
@@ -4161,8 +4382,8 @@ mod tests {
                         assert_eq!(
                             procedural(m, first) == procedural(m, second),
                             period(first) == period(second),
-                            "{point_size}pt@{scale}x {axis}: '{first}' ile '{second}' \
-                             periyotları {} ve {}",
+                            "{point_size}pt@{scale}x {axis}: '{first}' and '{second}' \
+                             have periods {} and {}",
                             period(first),
                             period(second)
                         );
@@ -4174,17 +4395,17 @@ mod tests {
 
     #[test]
     fn the_arcs_round_the_corner() {
-        // Yay ayrı bir teknik değil ama ayrı bir **şekil**: `╭` ile `┌`
-        // aynı kolları taşıyor, aynı kenarlara dokunuyor ve farklı
-        // çiziliyor. Bekçi ikisinin arasındaki farkı istiyor, yoksa yay
-        // bayrağı sessizce yok sayılabilirdi.
+        // The arc is not a separate technique but a separate **shape**: `╭`
+        // and `┌` carry the same arms, touch the same edges and are drawn
+        // differently. The guard demands the difference between the two,
+        // otherwise the arc flag could be silently ignored.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             for (arc, sharp) in [('╭', '┌'), ('╮', '┐'), ('╯', '┘'), ('╰', '└')] {
                 assert_ne!(
                     procedural(m, arc),
                     procedural(m, sharp),
-                    "{point_size}pt@{scale}x: '{arc}' keskin köşeyle aynı çizildi"
+                    "{point_size}pt@{scale}x: '{arc}' was drawn the same as the sharp corner"
                 );
             }
         }
@@ -4192,11 +4413,11 @@ mod tests {
 
     #[test]
     fn the_technical_set_hugs_the_cell_edges() {
-        // Bu kümenin U+2500 ailesinden ayrıldığı **tek** yer eksenin yeri:
-        // orada kollar hücrenin ortasında buluşur, burada çizgiler kenarı
-        // izler. Ölçüt piksel piksel eşitlik, "mürekkep var mı" değil —
-        // ortada buluşan bir `⎿` de mürekkepli olurdu ama yarı boyda bir
-        // köşe çizerdi.
+        // The **only** place this set departs from the U+2500 family is the
+        // position of the axis: there the arms meet in the middle of the cell,
+        // here the lines follow the edge. The criterion is pixel-by-pixel
+        // equality, not "is there ink" — a `⎿` meeting in the middle would have
+        // ink too but would draw a half-height corner.
         type Mask = fn(usize, usize, usize, usize, usize) -> bool;
         let cases: [(char, Mask); 4] = [
             ('\u{23B8}', |x, _y, _w, _h, thin| x < thin),
@@ -4216,8 +4437,8 @@ mod tests {
                         assert_eq!(
                             bytes[y * w + x],
                             want,
-                            "{point_size}pt@{scale}x: '{ch}' ({x}, {y}) pikselinde \
-                             kenar profili bozuk"
+                            "{point_size}pt@{scale}x: '{ch}' edge profile is \
+                             broken at pixel ({x}, {y})"
                         );
                     }
                 }
@@ -4227,10 +4448,11 @@ mod tests {
 
     #[test]
     fn the_technical_pairs_are_mirrors() {
-        // Aynalama **yapısal**: ilk bant `[0, thin)`, son bant
-        // `[uzunluk - thin, uzunluk)` ve ikisi birbirinin tam yansıması,
-        // yani bu eşitlik yuvarlamadan bağımsız her ölçüde tutmak zorunda.
-        // Kırılması "kenar çizgisi kenarda değil" demenin ikinci yolu.
+        // The mirroring is **structural**: the first band is `[0, thin)`, the
+        // last band `[length - thin, length)` and the two are exact reflections
+        // of each other, so this equality must hold at every size regardless of
+        // rounding. A break is the second way of saying "the edge line is not on
+        // the edge".
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let (w, h) = m.cell_wh();
@@ -4241,7 +4463,7 @@ mod tests {
             assert_eq!(
                 flip_h,
                 procedural(m, '\u{23B9}'),
-                "{point_size}pt@{scale}x: '⎸' ile '⎹' birbirinin aynası değil"
+                "{point_size}pt@{scale}x: '⎸' and '⎹' are not mirrors of each other"
             );
             let top = procedural(m, '\u{23BE}');
             let flip_v: Vec<u8> = (0..h)
@@ -4253,23 +4475,23 @@ mod tests {
             assert_eq!(
                 flip_v,
                 procedural(m, '\u{23BF}'),
-                "{point_size}pt@{scale}x: '⎾' ile '⎿' birbirinin aynası değil"
+                "{point_size}pt@{scale}x: '⎾' and '⎿' are not mirrors of each other"
             );
         }
     }
 
     #[test]
     fn the_scan_lines_step_down_the_cell() {
-        // İki iddia, ikisi de adın kendisinden: "HORIZONTAL SCAN LINE-N"
+        // Two claims, both from the name itself: "HORIZONTAL SCAN LINE-N"
         //
-        // 1. Satır **hücreyi boydan boya** geçiyor. Fonttan gelen hâli
-        //    geçmiyordu: Monaco'nun mürekkebi 20 px hücrede 0.03–19.19,
-        //    yani yan yana dizilen tarama satırları kesikli görünüyordu.
-        // 2. Dokuz bandın 1, 3, 5, 7, 9'uncusu — ve **beşincisi `─`**,
-        //    çünkü Unicode onu U+2500 ile birleştirdi. Beş bandın eşit
-        //    aralıklı çıkması formülün ikinci bir sabit uydurmadığının
-        //    tanığı; ±1 piksel payı `rail`'in ızgaraya oturtmasından
-        //    (13pt@1x'te beş bant tam bölünüyor, 16pt@2x'te 9/9/8/9).
+        // 1. The line passes **across the whole cell**. The font's version did
+        //    not: Monaco's ink is 0.03–19.19 in a 20 px cell, so scan lines laid
+        //    side by side looked dashed.
+        // 2. The 1st, 3rd, 5th, 7th and 9th of nine bands — and **the fifth is
+        //    `─`**, because Unicode joined it with U+2500. The five bands coming
+        //    out evenly spaced is the witness that the formula invents no second
+        //    constant; the ±1 pixel allowance comes from `rail` snapping to the
+        //    grid (at 13pt@1x the five bands divide exactly, at 16pt@2x 9/9/8/9).
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
             let (w, h) = m.cell_wh();
@@ -4280,95 +4502,95 @@ mod tests {
                     .filter(|&y| bytes[y * w..y * w + w].iter().any(|&b| b > 0))
                     .collect();
                 let (&first, &last) = (
-                    rows.first().expect("tarama satırı boş çizildi"),
-                    rows.last().expect("tarama satırı boş çizildi"),
+                    rows.first().expect("scan line was drawn empty"),
+                    rows.last().expect("scan line was drawn empty"),
                 );
                 assert_eq!(
                     rows.len(),
                     last - first + 1,
-                    "{point_size}pt@{scale}x: '{ch}' tek bant değil"
+                    "{point_size}pt@{scale}x: '{ch}' is not a single band"
                 );
                 for y in first..=last {
                     assert!(
                         bytes[y * w..y * w + w].iter().all(|&b| b == 255),
-                        "{point_size}pt@{scale}x: '{ch}' {y}. satırda hücreyi \
-                         boydan boya geçmiyor"
+                        "{point_size}pt@{scale}x: '{ch}' does not span the cell \
+                         on row {y}"
                     );
                 }
                 starts.push(first);
             }
             assert!(
                 starts.windows(2).all(|pair| pair[0] < pair[1]),
-                "{point_size}pt@{scale}x: tarama satırları yukarıdan aşağıya \
-                 sıralı değil: {starts:?}"
+                "{point_size}pt@{scale}x: scan lines are not ordered \
+                 top to bottom: {starts:?}"
             );
             let steps: Vec<usize> = starts.windows(2).map(|pair| pair[1] - pair[0]).collect();
             let (low, high) = (
-                *steps.iter().min().expect("dört adım"),
-                *steps.iter().max().expect("dört adım"),
+                *steps.iter().min().expect("four steps"),
+                *steps.iter().max().expect("four steps"),
             );
             assert!(
                 high - low <= 1,
-                "{point_size}pt@{scale}x: bantlar eşit aralıklı değil: {steps:?}"
+                "{point_size}pt@{scale}x: bands are not evenly spaced: {steps:?}"
             );
         }
     }
 
     #[test]
     fn the_diagonals_stay_out_of_scope() {
-        // Köşegenler kapsamın içinde **bilerek bırakılmış bir delik**
-        // (Karar 3B) ve deliğin ikinci bir işi var:
-        // `face_fallback_is_cached_under_the_requested_face`'in fikstürü
-        // (`╱`) orada yaşıyor — bu makinede Menlo Regular'da olup Bold'da
-        // olmayan tek blok U+2500–U+257F ve gerisi artık yordamsal.
+        // The diagonals are **a hole deliberately left** inside the scope
+        // (Karar 3B) and the hole has a second job: the fixture (`╱`) of
+        // `face_fallback_is_cached_under_the_requested_face` lives there — on
+        // this machine the only block in U+2500–U+257F that is in Menlo Regular
+        // but not in Bold, and the rest is now procedural.
         for ch in ['╱', '╲', '╳'] {
             assert!(
                 !raster::is_procedural(ch),
-                "'{ch}' kapsama girdi: yüz merdiveninin fikstürü kalmıyor"
+                "'{ch}' entered the scope: the face ladder's fixture is gone"
             );
         }
-        // Üç ailenin de iki ucu ve dışarıdaki komşuları. Taşan bir aralık
-        // **sessiz**: `braille` maskeyi `& 0xFF` ile alıyor, `block`'un
-        // çeyrek kolu tanımadığı karaktere sıfır maske veriyor, yani
-        // aralığı bir karakter geniş yazmak boş sprite üretir ve geometriye
-        // bakan hiçbir değişmez bunu göremez.
+        // Both ends of the three families and their neighbours outside. An
+        // overflowing range is **silent**: `braille` takes the mask with `& 0xFF`,
+        // `block`'s quadrant arm gives a zero mask to a character it does not
+        // recognise, so writing the range one character too wide produces an
+        // empty sprite and no invariant looking at geometry can see it.
         for (ch, inside, family) in [
-            ('\u{24FF}', false, "çizginin altı"),
-            ('\u{2500}', true, "çizginin başı"), // ─
-            ('\u{257F}', true, "çizginin sonu"), // ╿
-            ('\u{2580}', true, "bloğun başı"),   // ▀
-            ('\u{259F}', true, "bloğun sonu"),   // ▟
-            ('\u{25A0}', false, "bloğun üstü"),  // ■, geometrik şekiller
-            ('\u{27FF}', false, "Braille'in altı"),
-            ('\u{2800}', true, "Braille'in başı"),
-            ('\u{28FF}', true, "Braille'in sonu"),
-            ('\u{2900}', false, "Braille'in üstü"),
-            // Dördüncü aile ve **iki** komşusu anlamlı: U+23B7 (`⎷`) de
-            // bilerek dışarıda (kök kuyruğu bir ray değil, cascade'den
-            // gelen hâli kapıyı geçiyor), yani alt sınır bir sınır değil
-            // bir **karar**.
-            ('\u{23B7}', false, "teknik kümenin altı"), // ⎷
-            ('\u{23B8}', true, "teknik kümenin başı"),  // ⎸
-            ('\u{23BF}', true, "teknik kümenin sonu"),  // ⎿
-            ('\u{23C0}', false, "teknik kümenin üstü"), // ⏀
+            ('\u{24FF}', false, "below the line family"),
+            ('\u{2500}', true, "start of the line family"), // ─
+            ('\u{257F}', true, "end of the line family"),   // ╿
+            ('\u{2580}', true, "start of the blocks"),      // ▀
+            ('\u{259F}', true, "end of the blocks"),        // ▟
+            ('\u{25A0}', false, "above the blocks"),        // ■, geometric shapes
+            ('\u{27FF}', false, "below Braille"),
+            ('\u{2800}', true, "start of Braille"),
+            ('\u{28FF}', true, "end of Braille"),
+            ('\u{2900}', false, "above Braille"),
+            // The fourth family and its **two** neighbours are meaningful:
+            // U+23B7 (`⎷`) is deliberately outside too (the root's tail is not
+            // a rail, and its cascade version passes the gate), so the lower
+            // bound is not a boundary but a **decision**.
+            ('\u{23B7}', false, "below the technical set"), // ⎷
+            ('\u{23B8}', true, "start of the technical set"), // ⎸
+            ('\u{23BF}', true, "end of the technical set"), // ⎿
+            ('\u{23C0}', false, "above the technical set"), // ⏀
         ] {
             assert_eq!(
                 raster::is_procedural(ch),
                 inside,
-                "{family} (U+{:04X}) yanlış tarafta",
+                "{family} (U+{:04X}) is on the wrong side",
                 u32::from(ch)
             );
         }
     }
 
-    /// Geniş karakter **iki yuvadan** çiziliyor ve ikisi **aynı dönüşte**
-    /// geliyor.
+    /// A wide character is drawn from **two slots** and both arrive **in the
+    /// same answer**.
     ///
-    /// Atomiklik bir kolaylık değil: iki yarı ayrı turlara bölünseydi kapasite
-    /// sınırı ikisinin arasına düşebilir, sol yuva açılır, sağ tofu'ya düşer
-    /// ve ekranda yarım glyph + yarım kutu belirirdi. `CLAUDE.md`'nin kuralı
-    /// bunu adıyla yasaklıyor: "kutu görünür bir eksiklik, kırpılmış glyph
-    /// sessiz bir bozulma".
+    /// Atomicity is no convenience: had the two halves been split across
+    /// rounds, the capacity limit could fall between them, the left slot would
+    /// be granted and the right fall to tofu, and half a glyph + half a box
+    /// would appear on screen. `CLAUDE.md`'s rule forbids this by name: "a box
+    /// is a visible omission, a clipped glyph a silent corruption".
     #[test]
     fn a_wide_char_takes_two_slots_in_one_answer() {
         let mut a = atlas(POINT_SIZE, 1.0);
@@ -4382,58 +4604,69 @@ mod tests {
         assert_eq!(
             placed.half,
             Half::Left,
-            "'{WIDE_CHAR}' mürekkebi iki hücreye sığıyor: çift beklenir"
+            "'{WIDE_CHAR}' ink fits two cells: a pair is expected"
         );
-        assert_ne!(placed.slot, TOFU, "kabul edilen çift tofu'ya düşmemeli");
-        let upload = upload.expect("yeni çift yükleme vermeli");
-        let right = upload.right.expect("sağ yarı aynı dönüşte gelmeli");
+        assert_ne!(placed.slot, TOFU, "the accepted pair must not fall to tofu");
+        let upload = upload.expect("a new pair must yield an upload");
+        let right = upload
+            .right
+            .expect("the right half must arrive in the same answer");
         assert_ne!(
             upload.origin, right,
-            "iki yarı aynı yuvaya yazılıyor: köşeler ayrı olmalı"
+            "both halves are written to the same slot: the corners must differ"
         );
         assert_eq!(
             upload.bytes.len(),
             upload.right_bytes.len(),
-            "iki yarı da tam bir yuva"
+            "both halves are a full slot"
         );
         assert_eq!(
             a.occupancy().0 - before,
             2,
-            "geniş karakter tam iki yuva harcamalı"
+            "a wide character must spend exactly two slots"
         );
-        // Sağ yarı **ikinci bir kapı turu istemiyor**: çifti kabul eden çağrı
-        // iki anahtarı birden yazdı, yani bu soru önbellekten dönüyor ve
-        // cascade yürüyüşü kare bütçesinin ortasında bir daha koşmuyor.
+        // The right half **does not ask for a second gate round**: the call
+        // that accepted the pair wrote both keys, so this question is answered
+        // from the cache and the cascade walk does not run again in the middle
+        // of the frame budget.
         let (right_placed, right_upload) = a.slot(
             Sprite::Char(WIDE_CHAR),
             Face::Regular,
             SizeClass::Normal,
             Half::Right,
         );
-        assert_eq!(right_placed.slot, placed.slot + 1, "sağ yarı solun komşusu");
+        assert_eq!(
+            right_placed.slot,
+            placed.slot + 1,
+            "right half is the left's neighbour"
+        );
         assert!(
             right_upload.is_none(),
-            "sağ yarı zaten yüklendi: doku el değmeden kalmalı"
+            "the right half was already uploaded: the texture must stay untouched"
         );
-        assert_eq!(a.occupancy().0 - before, 2, "sağ yarı üçüncü yuva açmamalı");
+        assert_eq!(
+            a.occupancy().0 - before,
+            2,
+            "the right half must not open a third slot"
+        );
     }
 
-    /// **Kapı sırası: tek hücre önce.** Geniş ilan edilmiş ama mürekkebi bir
-    /// hücreye sığan karakter tek yuvadan çiziliyor ve rasteri `Half::Whole`
-    /// isteğiyle **bit bit** aynı.
+    /// **Gate order: single cell first.** A character declared wide whose ink
+    /// fits one cell is drawn from a single slot and its raster is **bit for
+    /// bit** the same as with the `Half::Whole` request.
     ///
-    /// Ölçülen 65 karakterin ("geniş ilan edilmiş, tek hücreye sığıyor")
-    /// sözleşmesi bu: 021'den beri çalışan çizimleri bu set oynatmıyor. Sıra
-    /// ters olsaydı `centre_shift` onları iki hücrelik kutuya göre ortalar ve
-    /// hepsi yerinden kayardı.
+    /// This is the contract of the 65 measured characters ("declared wide, fits
+    /// a single cell"): this set does not move the drawings that have worked
+    /// since 021. Had the order been reversed, `centre_shift` would centre them
+    /// against the two-cell box and they would all move from their places.
     // Calibration: names a font or a measured number (042 Karar 7).
     #[cfg(target_os = "macos")]
     #[test]
     fn a_wide_char_that_fits_one_cell_keeps_the_single_slot_raster() {
-        // Taban fontun kendi glyph'i: eşaralıklı yüzde ilerleme hücrenin
-        // ilerlemesinin ta kendisi, yani tanım gereği tek hücre. `☕` bu
-        // makinede Menlo'da var ve Unicode onu iki sütun ilan ediyor —
-        // ölçülen 21'in içinde.
+        // The base font's own glyph: in a monospaced face the advance is the
+        // cell's advance itself, so by definition a single cell. `☕` is in
+        // Menlo on this machine and Unicode declares it two columns wide —
+        // among the measured 21.
         const NARROW_WIDE: char = '☕';
         let mut a = atlas(POINT_SIZE, 1.0);
         let whole = {
@@ -4446,10 +4679,10 @@ mod tests {
             (placed, upload.map(|u| u.bytes.to_vec()))
         };
         let Some(whole_bytes) = whole.1 else {
-            // Karakteri taşıyan bir font kurulu değilse sınama konusuz.
+            // If no font carrying the character is installed the test is moot.
             return;
         };
-        assert_ne!(whole.0.slot, TOFU, "'{NARROW_WIDE}' çizilebilir olmalı");
+        assert_ne!(whole.0.slot, TOFU, "'{NARROW_WIDE}' must be drawable");
 
         let mut b = atlas(POINT_SIZE, 1.0);
         let (placed, upload) = b.slot(
@@ -4461,38 +4694,38 @@ mod tests {
         assert_eq!(
             placed.half,
             Half::Whole,
-            "tek hücreye sığan geniş karakter çifte dönüşmemeli"
+            "a wide character fitting a single cell must not turn into a pair"
         );
-        let upload = upload.expect("yeni yuva yükleme vermeli");
+        let upload = upload.expect("a new slot must yield an upload");
         assert!(
             upload.right.is_none(),
-            "tek hücrelik cevap sağ yarı vermemeli: çağıran boş dörtlü basardı"
+            "a single-cell answer must not give a right half: the caller would emit an empty quad"
         );
         assert_eq!(
             upload.bytes,
             &whole_bytes[..],
-            "raster `Half::Whole` isteğiyle bit bit aynı kalmalı"
+            "the raster must stay bit for bit the same as with the `Half::Whole` request"
         );
-        assert_eq!(b.occupancy().0, 2, "tek yuva + tofu");
+        assert_eq!(b.occupancy().0, 2, "single slot + tofu");
     }
 
-    /// Kapasite sınırı çiftin **arasına düşmüyor**: tam bir boş yuva varken
-    /// istenen geniş karakterin iki yarısı da tofu dönüyor ve `next`
-    /// kıpırdamıyor.
+    /// The capacity limit **does not fall between the pair**: with exactly one
+    /// free slot, both halves of the requested wide character return tofu and
+    /// `next` does not move.
     ///
-    /// Aranan şey "yarım glyph + yarım kutu"nun **yokluğu** ve o hâl
-    /// atomiklik yüzünden yapısal olarak doğmuyor — yani bu bekçi kapıyı
-    /// değil kapının **sınırını** sınıyor. Doluluğu arayan bir sınama boşa
-    /// yeşil kalırdı.
+    /// What is sought is the **absence** of "half a glyph + half a box", and
+    /// that state does not arise structurally because of atomicity — so this
+    /// guard tests not the gate but the gate's **boundary**. A test looking for
+    /// occupancy would stay green for nothing.
     #[test]
     fn a_wide_char_is_rejected_whole_when_only_one_slot_is_left() {
         let mut a = Atlas::new(None, LARGE_POINT_SIZE, 1.0, LARGEST_LINE_HEIGHT);
         let cap = a.capacity().saturating_sub(RULE_RESERVE);
-        // Havuz `full_atlas_returns_tofu_without_caching`'inkiyle **aynı
-        // gerekçeyle** kuruluyor: tofu'ya düşen karakter yuva harcamıyor, yani
-        // doldurma gerçekten çizilebilen karakterlerden olmak zorunda.
-        // Yordamsal aile `Regular`'a normalize olduğu için bir kez, ASCII dört
-        // yüzde de ayrı yuva tutuyor.
+        // The pool is built **for the same reason** as that of
+        // `full_atlas_returns_tofu_without_caching`: a character falling to tofu
+        // spends no slot, so the fill must be of characters that can really be
+        // drawn. The procedural family is normalised to `Regular` so it takes
+        // one slot, ASCII takes a separate slot in each of the four faces.
         let pool: Vec<(char, Face)> = procedural_chars()
             .map(|ch| (ch, Face::Regular))
             .chain(
@@ -4501,7 +4734,7 @@ mod tests {
                     .flat_map(|f| (' '..='~').map(move |ch| (ch, f))),
             )
             .collect();
-        // Tam **bir** yuva boş kalana kadar doldur.
+        // Fill until exactly **one** slot is left free.
         for &(ch, face) in &pool {
             if a.next + 1 >= cap {
                 break;
@@ -4511,7 +4744,7 @@ mod tests {
         assert_eq!(
             a.next + 1,
             cap,
-            "havuz kapasiteyi doldurmalı: tam bir yuva boş kalacak"
+            "the pool must fill the capacity: exactly one slot will be left free"
         );
         let next_before = a.next;
         let (placed, upload) = a.slot(
@@ -4522,31 +4755,34 @@ mod tests {
         );
         assert_eq!(
             placed.slot, TOFU,
-            "bir yuva iki yarıya yetmez: çift tümden reddedilmeli"
+            "one slot is not enough for two halves: the pair must be rejected whole"
         );
-        assert!(upload.is_none(), "reddedilen çift yükleme vermemeli");
-        assert_eq!(a.next, next_before, "reddedilen çift yuva harcamamalı");
-        // Sağ yarı da aynı cevabı veriyor: ekranda yarım glyph doğmuyor.
+        assert!(upload.is_none(), "a rejected pair must not yield an upload");
+        assert_eq!(a.next, next_before, "a rejected pair must not spend a slot");
+        // The right half gives the same answer: no half glyph arises on screen.
         let (right, _) = a.slot(
             Sprite::Char(WIDE_CHAR),
             Face::Regular,
             SizeClass::Normal,
             Half::Right,
         );
-        assert_eq!(right.slot, TOFU, "sağ yarı da tofu olmalı");
-        assert_eq!(a.next, next_before, "sağ yarı da yuva harcamamalı");
+        assert_eq!(right.slot, TOFU, "the right half must be tofu too");
+        assert_eq!(
+            a.next, next_before,
+            "the right half must not spend a slot either"
+        );
     }
 
-    /// **Tek hücrelik ret, iki hücrelik isteğin cevabı değil.**
+    /// **A single-cell rejection is not the answer to a two-cell request.**
     ///
-    /// Üretimdeki sıra tam bu: dock giriş satırını **her zaman**
-    /// `wide: false` ile soruyor (`bt_core::dock`'un değişmezi) ve dock'un
-    /// satırı `SizeClass::Normal`, yani prompt'a yazılan bir CJK karakteri
-    /// önce `Half::Whole` olarak sorulup **negatif önbelleğe** giriyor.
-    /// Enter'dan sonra aynı karakter ızgaraya `wide: true` ile geliyor. Takma
-    /// ad o tofu kaydını geçirirse setin tamamı o karakter için atlasın ömrü
-    /// boyunca ölü kalır — ve belirti sessiz: kutu çizilir, hiçbir sayaç
-    /// kıpırdamaz.
+    /// This is exactly the order in production: the dock **always** asks for
+    /// the input line with `wide: false` (an invariant of `bt_core::dock`) and
+    /// the dock's line is `SizeClass::Normal`, so a CJK character typed at the
+    /// prompt is first asked as `Half::Whole` and enters the **negative cache**.
+    /// After Enter the same character arrives in the grid with `wide: true`. If
+    /// the alias lets that tofu record through, the whole set stays dead for
+    /// that character for the life of the atlas — and the symptom is silent: a
+    /// box is drawn and no counter moves.
     // Calibration: the single-cell rejection comes from CoreText's
     // `.LastResort`, which the shrink arm keeps out by name. A backend
     // without a last-resort font cannot produce it — a glyph that fits two
@@ -4556,7 +4792,7 @@ mod tests {
     #[test]
     fn a_single_cell_rejection_does_not_answer_the_wide_request() {
         let mut a = atlas(POINT_SIZE, 1.0);
-        // 1. Dock'un sorusu: tek hücre, ve karakter oraya sığmıyor.
+        // 1. The dock's question: a single cell, and the character does not fit there.
         let (whole, _) = a.slot(
             Sprite::Char(WIDE_CHAR),
             Face::Regular,
@@ -4565,9 +4801,9 @@ mod tests {
         );
         assert_eq!(
             whole.slot, TOFU,
-            "'{WIDE_CHAR}' tek hücreye sığmıyor: negatif önbelleğe girmeli"
+            "'{WIDE_CHAR}' does not fit a single cell: it must enter the negative cache"
         );
-        // 2. Izgaranın sorusu: iki hücre. Aynı karakter artık çizilmeli.
+        // 2. The grid's question: two cells. The same character must now be drawn.
         let (left, upload) = a.slot(
             Sprite::Char(WIDE_CHAR),
             Face::Regular,
@@ -4576,15 +4812,16 @@ mod tests {
         );
         assert_ne!(
             left.slot, TOFU,
-            "tek hücrelik ret iki hücrelik isteği zehirledi"
+            "the single-cell rejection poisoned the two-cell request"
         );
-        assert_eq!(left.half, Half::Left, "çift beklenir");
-        assert!(upload.is_some(), "yeni çift yükleme vermeli");
+        assert_eq!(left.half, Half::Left, "a pair is expected");
+        assert!(upload.is_some(), "a new pair must yield an upload");
 
-        // 3. **İki anahtar bir arada ve cevapları ayrı.** `Whole` hâlâ tofu
-        // (tek hücreye gerçekten sığmıyor), `Left` gerçek yuva. İkisinin de
-        // önbellekte olması şart: biri eksik olsaydı o istek her karede
-        // yeniden cascade yürürdü — ana thread'de, kare bütçesinin ortasında.
+        // 3. **Two keys together and their answers separate.** `Whole` is still
+        // tofu (it really does not fit a single cell), `Left` is a real slot.
+        // Both must be in the cache: were one missing, that request would walk
+        // the cascade again on every frame — on the main thread, in the middle
+        // of the frame budget.
         let key = |half| {
             (
                 Sprite::Char(WIDE_CHAR),
@@ -4596,34 +4833,35 @@ mod tests {
         assert_eq!(
             a.slots.get(&key(Half::Whole)),
             Some(&(TOFU, Plane::Mask)),
-            "tek hücrelik ret önbellekte kalmalı"
+            "the single-cell rejection must stay in the cache"
         );
         assert_eq!(
             a.slots.get(&key(Half::Left)).map(|&(slot, _)| slot),
             Some(left.slot),
-            "iki hücrelik kabul de önbellekte olmalı"
+            "the two-cell acceptance must be in the cache too"
         );
         assert_eq!(
             a.slots.get(&key(Half::Right)).map(|&(slot, _)| slot),
             Some(left.slot + 1),
-            "sağ yarı da önbellekte: ikinci bir kapı turu koşmamalı"
+            "the right half is in the cache too: a second gate round must not run"
         );
     }
 
-    /// İki hücreye de sığmayan bir istek **kendi anahtarına** yazılıyor.
+    /// A request that fits neither cell is written to **its own key**.
     ///
-    /// Yazılmasaydı reddedilen bir [`Half::Left`] isteği her karede yeniden
-    /// cascade yürürdü: ret kolu anahtarı **çözülen** yarıyla kuruyor ve o
-    /// kolda çözülen yarı her zaman [`Half::Whole`], yani istenen yarının
-    /// anahtarı hiç yazılmazdı. Takma ad artık tofu'yu geçirmediğine göre
-    /// boşluk doğrudan bir kare bedeline dönüşürdü.
+    /// Had it not been, a rejected [`Half::Left`] request would walk the
+    /// cascade again on every frame: the rejection arm builds the key with the
+    /// **resolved** half, and in that arm the resolved half is always
+    /// [`Half::Whole`], so the key of the requested half would never be
+    /// written. Now that the alias no longer lets tofu through, the gap would
+    /// turn directly into a per-frame cost.
     #[test]
     fn a_rejected_wide_request_caches_its_own_key() {
         let mut a = atlas(POINT_SIZE, 1.0);
-        // Hiçbir fontta olmayan bir kod noktası: cascade glyph veremiyorsa
-        // `NoGlyph`, veriyorsa mürekkep kapısı karar veriyor — ikisinde de
-        // sonuç tofu ve bu sınamanın sorduğu şey **anahtar**, hangi koldan
-        // geldiği değil.
+        // A code point that is in no font: if the cascade cannot give a glyph
+        // it is `NoGlyph`, if it does the ink gate decides — either way the
+        // result is tofu and what this test asks is the **key**, not which arm
+        // it came from.
         const NOBODY: char = '\u{10FFFD}';
         let (placed, _) = a.slot(
             Sprite::Char(NOBODY),
@@ -4631,8 +4869,8 @@ mod tests {
             SizeClass::Normal,
             Half::Left,
         );
-        // Kabul edilirse sınama konusuz: bu makinede o karakteri iki hücreye
-        // sığdıran bir font var demektir.
+        // If it is accepted the test is moot: it would mean a font on this
+        // machine fits that character into two cells.
         if placed.slot != TOFU {
             return;
         }
@@ -4641,19 +4879,19 @@ mod tests {
                 a.slots
                     .get(&(Sprite::Char(NOBODY), Face::Regular, SizeClass::Normal, half)),
                 Some(&(TOFU, Plane::Mask)),
-                "{half:?} anahtarı yazılmadı: o istek her karede cascade yürür"
+                "{half:?} key was not written: that request walks the cascade on every frame"
             );
         }
     }
 
-    /// Dizi **tek glyph**'e şekilleniyor ve renk düzleminde iki yarıyla
-    /// geliyor.
+    /// The sequence is shaped into **a single glyph** and arrives in the
+    /// colour plane with two halves.
     ///
-    /// Ölçüt ızgaranın ayırdığı iki sütun: dizi glyph'inin geometrisi tek kod
-    /// noktalı emojinin aynısı (035 `context.md` → Ölçülen: şekillendirme),
-    /// yani 023'ün iki hücrelik kapısından geçmeli. Sağ yarının boş olmaması
-    /// şart — boş bir sağ yarı "iki yuva aldı" sınamasını yeşil bırakıp
-    /// ekranda yarım bir emoji çizerdi.
+    /// The criterion is the two columns the grid reserves: the sequence
+    /// glyph's geometry is the same as the single-code-point emoji's (035
+    /// `context.md` → Ölçülen: şekillendirme), so it must pass 023's two-cell
+    /// gate. The right half must not be empty — an empty right half would leave
+    /// the "took two slots" test green and draw half an emoji on screen.
     #[test]
     fn a_cluster_takes_two_colour_slots() {
         let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
@@ -4661,82 +4899,93 @@ mod tests {
             let sprite = a.intern(text);
             assert!(
                 matches!(sprite, Sprite::Cluster(_)),
-                "'{text}' birden çok kod noktası: küme olmalı"
+                "'{text}' is several code points: it must be a cluster"
             );
             let before = a.color_occupancy().0;
             let (placed, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
             assert_eq!(
                 placed.plane,
                 Plane::Color,
-                "'{text}' renk düzleminde olmalı"
+                "'{text}' must be in the colour plane"
             );
-            assert_eq!(placed.half, Half::Left, "'{text}' iki yarıyla gelmeli");
-            let upload = upload.expect("yeni çift yükleme vermeli");
+            assert_eq!(
+                placed.half,
+                Half::Left,
+                "'{text}' must arrive with two halves"
+            );
+            let upload = upload.expect("a new pair must yield an upload");
             assert!(
                 upload.right.is_some(),
-                "'{text}' sağ yarısı aynı dönüşte gelmeli"
+                "'{text}' right half must arrive in the same answer"
             );
             assert!(
                 upload.bytes.iter().any(|&b| b > 0),
-                "'{text}' sol yarısı boş"
+                "'{text}' left half is empty"
             );
             assert!(
                 upload.right_bytes.iter().any(|&b| b > 0),
-                "'{text}' sağ yarısı boş"
+                "'{text}' right half is empty"
             );
             assert_eq!(
                 a.color_occupancy().0 - before,
                 2,
-                "'{text}' tam iki renk yuvası harcamalı"
+                "'{text}' must spend exactly two colour slots"
             );
         }
     }
 
-    /// Aynı dizgi aynı kimliği ve aynı yuvayı alıyor; farklı dizgiler farklı
-    /// kimlik.
+    /// The same string gets the same id and the same slot; different strings
+    /// get different ids.
     ///
-    /// Kimlik anahtarın parçası, yani ikinci soruluşta yeni bir kimlik
-    /// üretmek aynı glyph'i her karede yeniden şekillendirip yeni yuvaya
-    /// koymak olurdu — atlas dolana kadar sessizce.
+    /// The id is part of the key, so producing a new id on the second ask would
+    /// mean reshaping the same glyph every frame and putting it in a new slot —
+    /// silently, until the atlas fills.
     #[test]
     fn the_same_cluster_is_interned_and_cached_once() {
         let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
         let first = a.intern(CLUSTERS[0]);
-        assert_eq!(a.intern(CLUSTERS[0]), first, "aynı dizgi aynı kimlik");
+        assert_eq!(
+            a.intern(CLUSTERS[0]),
+            first,
+            "the same string must get the same id"
+        );
         let ids: Vec<Sprite> = CLUSTERS.iter().map(|text| a.intern(text)).collect();
         for (i, x) in ids.iter().enumerate() {
             for y in &ids[i + 1..] {
-                assert_ne!(x, y, "farklı dizgiler aynı kimliği aldı");
+                assert_ne!(x, y, "different strings got the same id");
             }
         }
         let (placed, upload) = a.slot(first, Face::Regular, SizeClass::Normal, Half::Left);
-        assert!(upload.is_some(), "ilk soruluş yükleme vermeli");
+        assert!(upload.is_some(), "the first ask must yield an upload");
         let occupied = a.color_occupancy().0;
-        // Yüz **düz yüze iniyor**: kalın bir satırdaki bayrak ayrı yuva açmamalı.
+        // The face **falls to the plain face**: a flag on a bold line must not open a separate slot.
         for face in [Face::Regular, Face::Bold] {
             let sprite = a.intern(CLUSTERS[0]);
             let (again, upload) = a.slot(sprite, face, SizeClass::Normal, Half::Left);
-            assert_eq!(again, placed, "{face:?}: ikinci soruluş aynı cevap");
+            assert_eq!(
+                again, placed,
+                "{face:?}: the second ask must give the same answer"
+            );
             assert!(
                 upload.is_none(),
-                "{face:?}: yüklü yuva yeniden yüklenmemeli"
+                "{face:?}: an uploaded slot must not be uploaded again"
             );
         }
         assert_eq!(
             a.color_occupancy().0,
             occupied,
-            "ikinci soruluş yuva açmamalı"
+            "the second ask must not open a slot"
         );
-        // Tek kod noktası küme değil: aynı glyph iki anahtarda tutulmamalı.
+        // A single code point is not a cluster: the same glyph must not be held under two keys.
         assert_eq!(a.intern("A"), Sprite::Char('A'));
-        // Tavan: tablo dolunca yeni dizi taban karakterine iniyor, bilinen
-        // dizi kimliğini koruyor.
+        // The ceiling: when the table is full a new sequence falls to its base
+        // character, a known sequence keeps its id.
         let known = a.intern("\u{1F44D}\u{1F3FD}");
         let cap = a.negative_cache_cap();
         for n in 0..cap {
             let _ = a.intern(&format!("\u{1F44D}{n}"));
         }
-        assert!(a.clusters.len() <= cap, "tablo tavanı aştı");
+        assert!(a.clusters.len() <= cap, "the table exceeded its ceiling");
         assert_eq!(a.intern("\u{1F44D}\u{1F3FD}"), known);
         assert_eq!(
             a.intern("\u{1F4A9}\u{200D}\u{1F525}"),
@@ -4745,13 +4994,14 @@ mod tests {
         assert_eq!(a.intern(""), Sprite::Char(' '));
     }
 
-    /// Tek glyph'e şekillenmeyen dizgi **taban karakterin** cevabını alıyor —
-    /// kutu değil, yarım glyph değil (R1.1).
+    /// A string that does not shape into a single glyph gets the **base
+    /// character's** answer — not a box, not half a glyph (R1.1).
     ///
-    /// `👍👍` iki ayrı glyph'e şekilleniyor; ızgara onu hiç kümelemez ama
-    /// sınır bu kolu sınamanın en temiz yolu. Cevap bayt bayt `Char('👍')`'nin
-    /// ki: ayrı bir atlasta sorulan tek karakterle karşılaştırılıyor, yani
-    /// "taban karakter" bir benzetme değil aynı raster.
+    /// `👍👍` shapes into two separate glyphs; the grid would never cluster it
+    /// but the boundary is the cleanest way to test this arm. The answer is
+    /// byte for byte that of `Char('👍')`: it is compared with the single
+    /// character asked in a separate atlas, so "base character" is not a
+    /// figure of speech but the same raster.
     #[test]
     fn an_unshaped_cluster_answers_with_its_base_char() {
         let mut reference = atlas(POINT_SIZE, CLUSTER_SCALE);
@@ -4761,8 +5011,12 @@ mod tests {
             SizeClass::Normal,
             Half::Left,
         );
-        assert_eq!(base.plane, Plane::Color, "taban karakter çizilebilmeli");
-        let base_upload = base_upload.expect("ilk soruluş yükleme vermeli");
+        assert_eq!(
+            base.plane,
+            Plane::Color,
+            "the base character must be drawable"
+        );
+        let base_upload = base_upload.expect("the first ask must yield an upload");
         let base_bytes = (base_upload.bytes.to_vec(), base_upload.right_bytes.to_vec());
 
         let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
@@ -4770,46 +5024,43 @@ mod tests {
         let (placed, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
         assert_eq!(
             placed, base,
-            "şekillenmeyen dizi taban karakterin cevabını almalı"
+            "an unshaped sequence must get the base character's answer"
         );
-        let upload = upload.expect("ilk soruluş yükleme vermeli");
+        let upload = upload.expect("the first ask must yield an upload");
         assert_eq!(
             (upload.bytes.to_vec(), upload.right_bytes.to_vec()),
             base_bytes,
-            "raster taban karakterinkiyle bit bit aynı olmalı"
+            "the raster must be bit for bit the same as the base character's"
         );
-        // Takma ad yazıldı: ikinci soruluş şekillendirmeyi yeniden koşmuyor.
+        // The alias is written: the second ask does not run shaping again.
         let (again, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
         assert_eq!(again, placed);
-        assert!(upload.is_none(), "takma ad önbellekte olmalı");
+        assert!(upload.is_none(), "the alias must be in the cache");
         let (right, _) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Right);
         assert_eq!(
             right.slot,
             placed.slot + 1,
-            "sağ yarının takma adı da yazılmalı"
+            "the right half's alias must be written too"
         );
     }
 
-    /// Yeniden kurulan atlasta eski kimlik **tofu**, panik değil.
+    /// In a rebuilt atlas an old id is **tofu**, not a panic.
     ///
-    /// Interner yuvalarla birlikte düşüyor ([`Atlas::clusters`]); çağıranın
-    /// elinde kalmış bir kimlik `slot()`'a — display link'in callback'ine —
-    /// gelebilir ve orada bir panik kareyi düşürürdü.
+    /// The interner falls together with the slots ([`Atlas::clusters`]); an id
+    /// left in the caller's hands may reach `slot()` — the display link's
+    /// callback — and a panic there would drop the frame.
     #[test]
     fn a_stale_cluster_id_is_tofu() {
         let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
         let sprite = a.intern(CLUSTERS[0]);
-        assert!(
-            a.ensure(None, POINT_SIZE + 1.0, 1.0, 1.0),
-            "anahtar değişti"
-        );
+        assert!(a.ensure(None, POINT_SIZE + 1.0, 1.0, 1.0), "key changed");
         let (placed, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
         assert_eq!(placed.slot, TOFU);
         assert!(upload.is_none());
         assert_eq!(
             a.intern(CLUSTERS[0]),
             sprite,
-            "yeniden sorulan dizi yeniden kimlik alır"
+            "a cluster asked for again gets its identity again"
         );
     }
 }

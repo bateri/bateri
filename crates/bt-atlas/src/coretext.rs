@@ -411,7 +411,7 @@ impl FontSystem for CoreText {
         // Not `debug_assert`: this line is the precondition of the `unsafe`
         // block below. CG gets `width`/`height` from `m` and the pointer from
         // `target`; if the two diverge, CG writes past the short buffer and
-        // nothing notices in a release build — the `make hepsi` tests run in
+        // nothing notices in a release build — the `make check` tests run in
         // debug.
         assert_eq!(target.len(), m.slot_bytes(), "buffer must be a full slot");
 
@@ -563,7 +563,7 @@ pub mod fixture {
 
     /// A character the **one-cell** gate rejects: on the sixteenth plane's
     /// private use area, no installed font covers it and the cascade gives
-    /// `.LastResort`, whose ink is 1.494 cells (measured, `make tarama`, the
+    /// `.LastResort`, whose ink is 1.494 cells (measured, `make scan`, the
     /// same in all four combinations) and which the shrink arm keeps out by
     /// name. Tests reading "tofu" from it assume the gate works; the gate's
     /// own guard is `the_gate_decides_by_ink_alone`.
