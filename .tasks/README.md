@@ -43,6 +43,7 @@
 | 039 | [terminal-pane-bolmeler](039-terminal-pane-bolmeler/) | 🟢 | 4 phase + kapı tamam — sekme `TerminalPane`'lere bölünüyor: ⌘D/⇧⌘D, ⌘[/⌘] ve ⌥⌘ ok ile gezinme, ⌃⌘ ok ve sürüklemeyle boyutlama, ⌃⌘= eşitleme, ⇧⌘↩ büyütme, odaksız pane soluk (gözle kontrol bekliyor) |
 | 040 | [linux-kapisi-ve-wgpu](040-linux-kapisi-ve-wgpu/) | 🟢 | 7 phase + kapı tamam |
 | 041 | [yedek-glyph-kucultme](041-yedek-glyph-kucultme/) | 🟢 | 2 phase + kapı tamam — hücreyi aşan yedek glyph (`⧉`, tek sütunlu emoji) sınırın içindeyse küçük puntoyla ve hücrede ortalanarak çiziliyor; `make tarama` envanteri ve araç karakterlerinin bekçisi (gözle kontrol bekliyor) |
+| 042 | [font-sistemi-linux](042-font-sistemi-linux/) | 📐 | `bt-atlas`'ın CoreText yarısı `FontSystem` trait'inin arkasına, Linux'ta FreeType + fontconfig + harfrust; macOS raster bit bit aynı, `make linux` `bt-atlas`'ı ve lavapipe üstünde `bt-gpu`'yu koşar |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
