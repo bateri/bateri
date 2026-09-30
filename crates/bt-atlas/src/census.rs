@@ -17,7 +17,7 @@
 use objc2_core_foundation::CGFloat;
 use objc2_core_text::CTFont;
 
-use crate::{Atlas, Face, font, raster};
+use crate::{Atlas, Face, font, raster, rules};
 
 /// Where a character lands in the fallback gate.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,12 +48,12 @@ pub(crate) enum Class {
 ///   `⧉` is ~1.11 in Menlo 16pt. Independent of placement, i.e. the shrink
 ///   that would be needed if the candidate's ink were centred in the box.
 /// - `fit` — **by how much** the candidate must be shrunk for the gate to
-///   pass with today's placement ([`font::centre_shift`], including the
+///   pass with today's placement ([`rules::centre_shift`], including the
 ///   stick-to-the-left rule); it carries the larger of the left and right
 ///   overflow. It can be larger than `ratio` because shrinking also shrinks
 ///   the advance and a glyph whose advance still exceeds the box sticks to
 ///   the left: a candidate with no right bearing does not move to the centre
-///   when shrunk. It is computed by [`font::fit_ratio`], the same function as
+///   when shrunk. It is computed by [`rules::fit_ratio`], the same function as
 ///   the shrink branch's factor.
 ///
 /// `Fallback` does not carry `fit`: a passing candidate raises no shrink
@@ -78,8 +78,8 @@ pub(crate) fn classify(base: &CTFont, ch: char, cell_advance: CGFloat, cols: u8)
     let advance = font::glyph_advance(&candidate, glyph);
     let ink = font::glyph_ink(&candidate, glyph);
     let box_advance = cell_advance * CGFloat::from(cols);
-    let ratio = ink.size.width / box_advance;
-    let fit = font::fit_ratio(box_advance, advance, ink);
+    let ratio = ink.width / box_advance;
+    let fit = rules::fit_ratio(box_advance, advance, ink);
     match font::accept(candidate, glyph, cell_advance, cols) {
         Some(a) if a.shrunk => Class::Shrunk {
             font: family,
@@ -232,7 +232,7 @@ mod tests {
         };
         let box_advance = cell * CGFloat::from(alt.cols);
         let offset = -CGFloat::from(m.cell_px.0);
-        let rise = alt.rise(m);
+        let rise = alt.rise(m, |font, glyph| font::glyph_ink(font, glyph));
         if font::has_color_glyphs(&alt.font) {
             let mut rgba = vec![0u8; wide.slot_bytes_rgba()];
             raster::draw_color_glyph(
@@ -264,7 +264,7 @@ mod tests {
     /// the single-column emoji `🌡` (Apple Color Emoji, colour plane) are
     /// accepted at two scales, come from the shrink branch and have not a
     /// single coverage pixel outside the middle cell — not left, right, above
-    /// or below (vertical centring, `font::Accepted::rise`, brings the emoji
+    /// or below (vertical centring, `rules::Accepted::rise`, brings the emoji
     /// inside the cell too). The colour copy keeps its trait, so the plane and
     /// the drawing recipe are the same.
     #[test]
@@ -368,7 +368,7 @@ mod tests {
         let base = a.faces.get(Face::Regular);
         match classify(base, '🝇', a.cell_advance, 1) {
             Class::Rejected { fit, .. } => assert!(
-                fit > font::SHRINK_LIMIT && fit < font::SHRINK_LIMIT * 1.05,
+                fit > rules::SHRINK_LIMIT && fit < rules::SHRINK_LIMIT * 1.05,
                 "🝇 fit {fit:.3}: should be just above the limit"
             ),
             other => panic!("🝇 should stay a box: {other:?}"),
@@ -389,13 +389,13 @@ mod tests {
             "U+E0A0 came from another font"
         );
         let glyph = font::glyph_index(&candidate, ch).expect(".LastResort gave no glyph");
-        let fit = font::fit_ratio(
+        let fit = rules::fit_ratio(
             a.cell_advance,
             font::glyph_advance(&candidate, glyph),
             font::glyph_ink(&candidate, glyph),
         );
         assert!(
-            fit <= font::SHRINK_LIMIT,
+            fit <= rules::SHRINK_LIMIT,
             "fit {fit:.3} must be within the limit"
         );
         assert!(font::accept(candidate, glyph, a.cell_advance, 1).is_none());
@@ -424,14 +424,18 @@ mod tests {
                 };
                 let advance = font::glyph_advance(&candidate, glyph);
                 let ink = font::glyph_ink(&candidate, glyph);
-                if !font::ink_fits_placed(cell, advance, ink) {
+                if !rules::ink_fits_placed(cell, advance, ink) {
                     continue;
                 }
                 let ptr = std::ptr::from_ref::<CTFont>(&candidate);
                 let alt = font::accept(candidate, glyph, cell, 1).expect("gate-passing rejected");
                 assert!(!alt.shrunk, "{ch}: a gate-passing candidate was shrunk");
                 assert!(std::ptr::eq(ptr, &*alt.font), "{ch}: font changed");
-                assert_eq!(alt.rise(m), 0.0, "{ch}: vertical shift");
+                assert_eq!(
+                    alt.rise(m, |font, glyph| font::glyph_ink(font, glyph)),
+                    0.0,
+                    "{ch}: vertical shift"
+                );
                 passed += 1;
             }
         }
@@ -441,7 +445,15 @@ mod tests {
         let mut before = vec![0u8; m.slot_bytes()];
         let mut after = vec![0u8; m.slot_bytes()];
         raster::draw(&alt.font, '⏺', m, cell, 0.0, &mut before);
-        raster::draw_glyph(&alt.font, alt.glyph, m, cell, 0.0, alt.rise(m), &mut after);
+        raster::draw_glyph(
+            &alt.font,
+            alt.glyph,
+            m,
+            cell,
+            0.0,
+            alt.rise(m, |font, glyph| font::glyph_ink(font, glyph)),
+            &mut after,
+        );
         assert_eq!(before, after, "⏺ raster changed");
     }
 
@@ -545,7 +557,7 @@ mod tests {
     ///
     /// Two witnesses are printed for shrinking: the `fit` distribution of the
     /// shrunk ones, and those within the limit whose small copy failed the
-    /// re-test (must be zero; otherwise [`font::SHRINK_LIMIT`]'s derivation is
+    /// re-test (must be zero; otherwise [`rules::SHRINK_LIMIT`]'s derivation is
     /// stale).
     ///
     /// The procedural ranges are skipped: they are drawn without asking a
@@ -619,7 +631,7 @@ mod tests {
                             if wide {
                                 row[5] += 1;
                             }
-                            if font != LAST_RESORT && fit <= font::SHRINK_LIMIT {
+                            if font != LAST_RESORT && fit <= rules::SHRINK_LIMIT {
                                 shrink_failed.push(format!("{}({fit:.3})", show(ch)));
                             }
                             if font == LAST_RESORT {
