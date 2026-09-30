@@ -1,35 +1,36 @@
-//! Ayrıştırıcı ile `Term` arasındaki sarmalayıcı.
+//! The wrapper between the parser and `Term`.
 //!
-//! Okuyucu döngü ([`crate::reader`]) `Term`'i ayrıştırıcıya doğrudan değil
-//! bu tipin içinden veriyor: kümeleme (035) `input`'lar **arasına** girmek
-//! ve araya giren her başka çağrıda kümeyi kapatmak zorunda, yani
-//! ayrıştırıcının `Handler` çağrılarının hepsini görmeli. Kümeleme kapalıyken
-//! (`SessionOptions::cluster`) her çağrı olduğu gibi `Term`'e gidiyor —
-//! davranış bayt bayt alacritty'ninki.
+//! The reader loop ([`crate::reader`]) hands `Term` to the parser not
+//! directly but through this type: clustering (035) has to step **in
+//! between** `input`s and close the cluster on every other intervening call,
+//! so it must see all of the parser's `Handler` calls. With clustering off
+//! (`SessionOptions::cluster`) every call goes to `Term` as is — the
+//! behavior is alacritty's, byte for byte.
 //!
-//! **Kümeleme `input`'ta ve yalnız orada.** Gelen kod noktası açık kümeyi
-//! uzatmıyorsa `Term::input`'a gidiyor; uzatıyor ve kümenin sütunu
-//! değişmiyorsa baş hücrenin `zerowidth`'ine iniyor; kümeyi bir sütundan
-//! ikiye çıkarıyorsa baş hücre alacritty'nin **kendi** geniş yolundan
-//! yeniden yazılıyor (bkz. [`ClusterHandler::widen`]). Kural
-//! [`crate::cluster`]'da.
+//! **Clustering happens in `input` and only there.** If the incoming code
+//! point does not extend the open cluster it goes to `Term::input`; if it
+//! extends it and the cluster's column count does not change it lands in the
+//! head cell's `zerowidth`; if it grows the cluster from one column to two
+//! the head cell is rewritten through alacritty's **own** wide path (see
+//! [`ClusterHandler::widen`]). The rule is in [`crate::cluster`].
 //!
-//! **Açık kümenin konumu saklanmıyor, ızgaradan türetiliyor** — alacritty'nin
-//! `zerowidth` dalının yöntemiyle (imleç − 1, bekleyen sarmada imlecin
-//! kendisi, spacer'dan geri). Okumalar parça parça geliyor ve arada ana
-//! thread `Term`'i değiştirebiliyor (resize, ⌘K); saklanan bir konum o
-//! aralıkta bayatlardı, türetilen konum alacritty'nin bugünkü `zerowidth`
-//! yolunun açıklığıyla aynı açıklıkta. Tek durum "son `Handler` çağrısı
-//! `input` mıydı" biti ve döngünün `State`'inde yaşıyor, çünkü bu tip her
-//! `advance`'te yeniden doğuyor; öteki bütün aktarımlar biti düşürüyor —
-//! araya giren bir `CUP` ya da SGR kümeyi kapatıyor.
+//! **The open cluster's position is not stored, it is derived from the
+//! grid** — by the method of alacritty's `zerowidth` branch (cursor − 1, the
+//! cursor itself on a pending wrap, back off a spacer). Reads arrive in
+//! chunks and in between the main thread may change `Term` (resize, ⌘K); a
+//! stored position would go stale in that gap, while the derived position
+//! has the same openness as alacritty's present `zerowidth` path. The one
+//! state is the "was the last `Handler` call `input`" bit, which lives in
+//! the loop's `State` because this type is reborn on every `advance`; every
+//! other forwarding clears the bit — an intervening `CUP` or SGR closes the
+//! cluster.
 //!
-//! **Aktarım listesi tek makroda ve bekçili.** `Handler`'ın her metodunun
-//! boş bir varsayılanı var; listeden düşen bir metot derlenir ama
-//! `Term`'in uygulamasına hiç ulaşmaz ve belirtisi sessizdir (ör. bir
-//! kaçış dizisi yok sayılır). `impl`'in üstündeki
-//! `clippy::missing_trait_methods` o düşüşü `make clippy`'de kırmızıya
-//! çeviriyor; vte'ye yeni bir metot gelirse de aynı yerden.
+//! **The forwarding list is in one macro and guarded.** Every `Handler`
+//! method has an empty default; a method dropped from the list still
+//! compiles but never reaches `Term`'s implementation, and the symptom is
+//! silent (e.g. an escape sequence is ignored). The
+//! `clippy::missing_trait_methods` above the `impl` turns that omission red
+//! in `make clippy`; the same place catches a new method arriving in vte.
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
@@ -41,19 +42,20 @@ use alacritty_terminal::vte::ansi::{
     KeyboardModesApplyBehavior, LineClearMode, Mode, ModifyOtherKeys, PrivateMode, Rgb,
     ScpCharPath, ScpUpdateMode, StandardCharset, TabulationClearMode,
 };
-// vte bu tipi yeniden ihraç etmiyor; kenarın gerekçesi kök `Cargo.toml`'da.
+// vte does not re-export this type; the reason for the edge is in the root
+// `Cargo.toml`.
 use cursor_icon::CursorIcon;
 
-/// Ayrıştırıcının gördüğü `Handler`: `Term`'i ödünç alıyor ve çağrıları
-/// ona aktarıyor. **Her `advance` ve `stop_sync` çağrısında** yeniden
-/// doğuyor — bir kilit turunda birden çok `advance` olabilir (`pty_read`'in
-/// okuma döngüsü) — yani kendi durumu yok: iki `read` parçasına bölünen bir
-/// kümenin tek biti (`last_input`) döngünün `State`'inde yaşıyor.
+/// The `Handler` the parser sees: it borrows `Term` and forwards calls to
+/// it. It is reborn **on every `advance` and `stop_sync` call** — one lock
+/// round can hold several `advance`s (`pty_read`'s read loop) — so it has no
+/// state of its own: the one bit of a cluster split across two `read`
+/// chunks (`last_input`) lives in the loop's `State`.
 pub(crate) struct ClusterHandler<'a, U: EventListener> {
     term: &'a mut Term<U>,
-    /// Kümeleme açık mı — `SessionOptions::cluster`'ın değeri.
+    /// Whether clustering is on — the value of `SessionOptions::cluster`.
     cluster: bool,
-    /// Son `Handler` çağrısı `input` mıydı: açık bir küme var mı.
+    /// Whether the last `Handler` call was `input`: is there an open cluster.
     last_input: &'a mut bool,
 }
 
@@ -66,12 +68,13 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         }
     }
 
-    /// Açık kümenin baş hücresi — alacritty'nin `zerowidth` dalının
-    /// (`Term::input`) yöntemi: bekleyen sarmada imlecin kendi hücresi,
-    /// değilse bir solundaki; spacer'a düşerse geniş hücreye geri.
+    /// The open cluster's head cell — by the method of alacritty's
+    /// `zerowidth` branch (`Term::input`): the cursor's own cell on a pending
+    /// wrap, otherwise the one to its left; back to the wide cell if it lands
+    /// on a spacer.
     ///
-    /// Sütun ayrıca kırpılıyor: imleç alacritty'nin sözleşmesiyle ızgaranın
-    /// içinde, ama `bt-core`'da indeksleme paniği de yasak.
+    /// The column is also clamped: by alacritty's contract the cursor is
+    /// inside the grid, but indexing panics are forbidden in `bt-core` too.
     fn head(&self) -> Point {
         let grid = self.term.grid();
         let cursor = &grid.cursor;
@@ -87,7 +90,7 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         Point::new(line, column)
     }
 
-    /// Baş hücrenin kümesi: taban karakter + `zerowidth`.
+    /// The head cell's cluster: base character + `zerowidth`.
     fn open(&self, at: Point) -> String {
         let cell = &self.term.grid()[at.line][at.column];
         let mut open = String::new();
@@ -96,20 +99,22 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         open
     }
 
-    /// Dar baş hücreyi geniş hücreye çevirir ve kümeyi (`open`, uzamış hâli)
-    /// ona yazar.
+    /// Turns the narrow head cell into a wide cell and writes the cluster
+    /// (`open`, its extended form) into it.
     ///
-    /// **Genişleme alacritty'nin kendi geniş yolundan**: imleç baş hücreye
-    /// geri alınıyor ve `Term::input` bir yer tutucu geniş karakterle
-    /// çağrılıyor — satır sonunun `LEADING_WIDE_CHAR_SPACER`'ı, kaydırma
-    /// bölgesinin dibi ve DECAWM alacritty'de kalıyor, özel yolları
-    /// (`write_at_cursor`, `wrapline`) yeniden yazılmıyor. Yazılan hücrenin
-    /// şablonu (renk, bayrak, bağlantı) imlecin şablonu: baş hücreyi yazan
-    /// da oydu, çünkü aradaki bir SGR kümeyi kapatırdı.
+    /// **Widening goes through alacritty's own wide path**: the cursor is
+    /// moved back to the head cell and `Term::input` is called with a
+    /// placeholder wide character — the end-of-line
+    /// `LEADING_WIDE_CHAR_SPACER`, the bottom of the scroll region and DECAWM
+    /// stay in alacritty, its special paths (`write_at_cursor`, `wrapline`)
+    /// are not rewritten. The template of the written cell (color, flags,
+    /// link) is the cursor's template: it was what wrote the head cell too,
+    /// because an intervening SGR would have closed the cluster.
     ///
-    /// **IRM'de baş hücrenin girişi önce geri alınıyor** (`delete_chars`):
-    /// dar baş hücre yazılırken satır bir sütun kaydı, yer tutucu iki sütun
-    /// daha kaydırırdı — iki sütunlu küme komşularını üç sütun iterdi.
+    /// **Under IRM the head cell's insertion is undone first**
+    /// (`delete_chars`): writing the narrow head cell shifted the line by one
+    /// column, the placeholder would shift it two more — a two-column cluster
+    /// would push its neighbors three columns.
     fn widen(&mut self, at: Point, open: &str) {
         let cursor = &mut self.term.grid_mut().cursor;
         cursor.point = at;
@@ -118,18 +123,19 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
             self.term.delete_chars(1);
         }
         self.term.input(WIDE_PLACEHOLDER);
-        // Yazılan hücre yine aynı yöntemle: satır sonunda alt satıra inmiş
-        // olabilir. DECAWM kapalıyken son sütunda alacritty hiçbir şey
-        // yazmadan dönüyor; o hâlde bulunan hücre dar kalıyor ve küme onun
-        // üstüne iniyor — sütun eksik ama glyph kaybolmuyor.
+        // The written cell by the same method again: at the end of a line it
+        // may have dropped to the next line. With DECAWM off, alacritty
+        // returns without writing anything in the last column; then the cell
+        // found stays narrow and the cluster lands on top of it — a column
+        // short but the glyph is not lost.
         let at = self.head();
         let cell = &mut self.term.grid_mut()[at.line][at.column];
         let mut chars = open.chars();
         let head = chars.next().unwrap_or(' ');
-        // Yazılmayan hücre (DECAWM kapalı, son sütun) kümenin eski
-        // kalanını hâlâ taşıyor: yeniden basılsaydı `❤‍🔥`'nin ZWJ'i iki kez
-        // girer ve küme şekillenmezdi. Yazılan hücrenin `c`'si yer tutucu,
-        // yani orada taşınan kalan yok.
+        // An unwritten cell (DECAWM off, last column) still carries the
+        // cluster's old remainder: printed again, the ZWJ of `❤‍🔥` would
+        // enter twice and the cluster would not shape. A written cell's `c`
+        // is the placeholder, so no remainder is carried there.
         let kept = if cell.c == head {
             cell.zerowidth().map_or(0, <[char]>::len)
         } else {
@@ -140,20 +146,20 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
     }
 }
 
-/// Genişlemenin yer tutucusu: `Term::input`'a iki sütunluk bir kod noktası
-/// lazım ve hücrenin `c`'si hemen ardından taban karaktere dönüyor. Değeri
-/// önemsiz; alacritty'nin charset eşlemesinin (DEC özel grafikleri)
-/// dokunmadığı bir geniş karakter.
+/// The placeholder for widening: `Term::input` needs a two-column code point
+/// and the cell's `c` turns back into the base character right after. Its
+/// value is immaterial; a wide character that alacritty's charset mapping
+/// (DEC special graphics) does not touch.
 const WIDE_PLACEHOLDER: char = '\u{3000}';
 
-/// `input` **dışındaki** bütün `Handler` metotlarını `Term`'e aktarır.
-/// `input` elle yazılı, çünkü kümelemenin girdiği tek kapı o.
+/// Forwards all `Handler` methods **other than** `input` to `Term`. `input`
+/// is hand-written because it is the one door clustering enters through.
 macro_rules! forward {
     ($( fn $name:ident(&mut self $(, $arg:ident: $ty:ty)*); )*) => {
         $(
             #[inline]
             fn $name(&mut self $(, $arg: $ty)*) {
-                // Araya giren her çağrı açık kümeyi kapatıyor.
+                // Every intervening call closes the open cluster.
                 *self.last_input = false;
                 self.term.$name($($arg),*)
             }
@@ -180,8 +186,8 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
             .flags
             .contains(Flags::WIDE_CHAR);
         open.push(c);
-        // Genişlik **her** uzamadan sonra soruluyor, sıfır genişlikli koldan
-        // gelenler dahil: `1` + VS16 + `U+20E3` genişlemeyi VS16'da yapıyor.
+        // Width is asked after **every** extension, including those from the
+        // zero-width arm: `1` + VS16 + `U+20E3` widens at the VS16.
         if narrow && crate::cluster::width(&open) >= 2 {
             self.widen(at, &open);
         } else {
@@ -276,7 +282,7 @@ mod tests {
         Term::new(Config::default(), &TermSize::new(cols, rows), VoidListener)
     }
 
-    /// `bytes`'ı tek `advance`'le sarmalayıcıdan geçirir.
+    /// Runs `bytes` through the wrapper in a single `advance`.
     fn feed(term: &mut Term<VoidListener>, cluster: bool, bytes: &str) {
         let mut parser: Processor = Processor::new();
         let mut last_input = false;
@@ -286,9 +292,9 @@ mod tests {
         );
     }
 
-    /// Izgaranın satırları, hücre hücre: geniş hücre `[…]`, spacer `·`,
-    /// satır sonu spacer'ı `↵`; hücrenin metni `c` + `zerowidth`. Sondaki
-    /// boş hücreler atılıyor.
+    /// The grid's rows, cell by cell: a wide cell `[…]`, a spacer `·`, an
+    /// end-of-line spacer `↵`; a cell's text is `c` + `zerowidth`. Trailing
+    /// empty cells are dropped.
     fn rows(term: &Term<VoidListener>) -> Vec<String> {
         let grid = term.grid();
         (0..grid.screen_lines())
@@ -317,7 +323,7 @@ mod tests {
             .collect()
     }
 
-    /// Aynı baytlar, kümeleme kapalı ve açık.
+    /// The same bytes, clustering off and on.
     fn both(cols: usize, rows_: usize, bytes: &str) -> (Vec<String>, Vec<String>) {
         let mut off = term(cols, rows_);
         feed(&mut off, false, bytes);
@@ -342,8 +348,8 @@ mod tests {
         assert_eq!(t.grid().cursor.point.column, Column(14));
     }
 
-    /// Emoji dışı küme, VS15, dar kümenin arkasındaki ten rengi ve tek RI
-    /// bugünkü hücrelerini veriyor.
+    /// A non-emoji cluster, VS15, a skin tone behind a narrow cluster and a
+    /// lone RI give today's cells.
     #[test]
     fn non_clusters_keep_todays_cells() {
         for text in ["لا", "⌚\u{FE0E}", "a🏽", "🇹", "e\u{301}x", "a\u{200D}b"] {
@@ -352,7 +358,7 @@ mod tests {
         }
     }
 
-    /// Kapalı bayrak alacritty'nin kendisi: dizi bugünkü gibi parçalı.
+    /// The flag off is alacritty itself: the sequence is fragmented as today.
     #[test]
     fn the_flag_off_is_alacritty() {
         let mut t = term(10, 2);
@@ -360,9 +366,9 @@ mod tests {
         assert_eq!(rows(&t)[0], "🇹|🇷|[👍]|·|[🏽]|·");
     }
 
-    /// Genişlemenin sonucu alacritty'nin **kendi** geniş karakterinin
-    /// sonucuyla aynı — son sütun, IRM ve kaydırma bölgesinin dibi. Kıyas
-    /// kümeleme kapalıyken aynı yere basılan `👍`.
+    /// The result of widening equals the result of alacritty's **own** wide
+    /// character — last column, IRM and the bottom of the scroll region. The
+    /// comparison is a `👍` printed at the same place with clustering off.
     fn widening_matches_a_native_wide_char(cols: usize, rows_: usize, before: &str) {
         let mut native = term(cols, rows_);
         feed(&mut native, false, &format!("{before}👍"));
@@ -391,7 +397,7 @@ mod tests {
 
     #[test]
     fn widening_under_irm_shifts_the_neighbours_by_two() {
-        // `abcdef`, imleç 1. sütuna, IRM açık.
+        // `abcdef`, cursor at column 1, IRM on.
         widening_matches_a_native_wide_char(10, 2, "abcdef\r\x1b[C\x1b[4h");
         let mut t = term(10, 2);
         feed(&mut t, true, "abcdef\r\x1b[C\x1b[4h❤\u{FE0F}");
@@ -400,8 +406,8 @@ mod tests {
 
     #[test]
     fn widening_at_the_bottom_of_the_scroll_region_scrolls_the_region() {
-        // Bölge 1–3. satırlar, imleç 3. satırın son sütununda; 4. satır
-        // bölgenin dışında ve yerinde kalmalı.
+        // The region is rows 1–3, the cursor in the last column of row 3;
+        // row 4 is outside the region and must stay in place.
         let before = "top\x1b[4;1Hout\x1b[1;3r\x1b[3;10H";
         widening_matches_a_native_wide_char(10, 4, before);
         let mut t = term(10, 4);
@@ -409,19 +415,20 @@ mod tests {
         assert_eq!(
             rows(&t),
             ["", " | | | | | | | | |↵", "[❤\u{FE0F}]|·", "o|u|t"],
-            "bölge bir satır kaydı, `top` gitti, `out` yerinde"
+            "the region scrolled one row, `top` is gone, `out` stayed in place"
         );
     }
 
-    /// DECAWM kapalıyken son sütunda alacritty geniş karakteri yazmıyor;
-    /// genişleme panik yerine kümeyi dar hücrede bırakıyor.
+    /// With DECAWM off, alacritty does not write a wide character in the last
+    /// column; widening leaves the cluster in the narrow cell instead of
+    /// panicking.
     #[test]
     fn widening_without_autowrap_keeps_the_cluster_narrow() {
         let mut t = term(10, 2);
         feed(&mut t, true, "\x1b[?7l123456789❤\u{FE0F}");
         assert_eq!(rows(&t)[0], "1|2|3|4|5|6|7|8|9|❤\u{FE0F}");
-        // Kalanı zaten hücrede olan küme (`❤` + ZWJ, sonra `🔥`): eski
-        // kalan ikinci kez basılmıyor.
+        // A cluster whose remainder is already in the cell (`❤` + ZWJ, then
+        // `🔥`): the old remainder is not printed a second time.
         let mut t = term(10, 2);
         feed(&mut t, true, "\x1b[?7l123456789❤\u{200D}🔥");
         assert_eq!(rows(&t)[0], "1|2|3|4|5|6|7|8|9|❤\u{200D}🔥");
@@ -430,16 +437,16 @@ mod tests {
     #[test]
     fn an_intervening_call_closes_the_cluster() {
         let mut t = term(10, 2);
-        // `CUP` imleci tam `👍`'nin arkasına koyuyor; yine de iki küme.
+        // `CUP` puts the cursor right behind the `👍`; still two clusters.
         feed(&mut t, true, "👍\x1b[1;3H🏽");
         assert_eq!(rows(&t)[0], "[👍]|·|[🏽]|·");
     }
 
-    /// Küme ızgarada bir geniş karakterin yerini tutuyor — her genişlikte,
-    /// satır sonuna düşen küme dahil (`👍🏽` son iki sütunda ya da sığmayıp
-    /// alt satırda). `dock::tests`'in `grid_span` eşdeğerliğinin ızgara
-    /// yarısı: ikisi birlikte bastırmanın aralığı ile ızgaranın
-    /// ayrışmadığını söylüyor.
+    /// A cluster takes the place of one wide character in the grid — at every
+    /// width, including a cluster landing at the end of a line (`👍🏽` in the
+    /// last two columns, or not fitting and dropping to the next line). The
+    /// grid half of `dock::tests`'s `grid_span` equivalence: together the two
+    /// say that the suppression's span and the grid do not diverge.
     #[test]
     fn a_cluster_takes_the_cells_of_one_wide_char_at_every_width() {
         let parts = [
@@ -486,7 +493,8 @@ mod tests {
         }
     }
 
-    /// İki `advance`'e bölünen küme kapanmıyor: bit döngünün `State`'inde.
+    /// A cluster split across two `advance`s does not close: the bit is in
+    /// the loop's `State`.
     #[test]
     fn a_cluster_split_across_reads_stays_open() {
         let mut t = term(10, 2);

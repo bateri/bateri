@@ -1,43 +1,46 @@
-//! bt-core — terminal modelinin platformsuz çekirdeği.
+//! bt-core — the platformless core of the terminal model.
 //!
-//! VT durum makinesi, grid, scrollback, PTY ve okuyucu thread burada yaşar;
-//! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
-//! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`, `Block`,
+//! The VT state machine, grid, scrollback, PTY and reader thread live here;
+//! `alacritty_terminal` is **encapsulated**: no alacritty type appears in the
+//! `pub` API, the outside sees only `Session`, `Cell`, `UnderlineStyle`, `Cursor`, `Block`,
 //! `Blocks`,
 //! `SelectionPoint`, `SelectKind`, `CellHalf`, `Arrow`, `Wheel`, `ScrollIntent`,
-//! aramanın `SearchQuery`, `SearchStatus`, `SearchRun`, `SearchRuns`'u,
+//! search's `SearchQuery`, `SearchStatus`, `SearchRun`, `SearchRuns`,
 //! `ScrollGlide`, `LinearRgba`, `Theme`,
-//! `ShellState`, `ShellPhase`, aynanın `DockState`, `DockStatus`, `DockFault`,
-//! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, bağlam satırının
-//! `DockContext`'ini, dock yüzeyinin `Dock`'unu, yazım animasyonlarının
-//! `DockEdit`'ini, `EditCells`'ini ve metnin sütununu (`DOCK_TEXT_COL`),
-//! `Wake` ve ayar modelinin `Settings`, `SettingsEdit`, `Parsed`, `Diagnostic`,
-//! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose`'u ve geçerli
-//! değerlerin tablolarını (`NAMES`, `*_RANGE`) görür (tam
-//! liste aşağıdaki `pub use` bloğu). `Osc52` alacritty'nin aynı adlı tipinin
-//! karşılığı, kendisi değil. Kendi grid'imize geçiş (00X) bu sınırın
-//! arkasında yapılır ve renderer'ı bilmez. `toml_edit` de aynı biçimde içeride
-//! kalır: ayar modelinin ve tema dosyasının `pub` yüzünde TOML tipi yok;
-//! temanın renkleri `0xRRGGBB`, alacritty'nin `Rgb`'si değil.
+//! `ShellState`, `ShellPhase`, the mirror's `DockState`, `DockStatus`, `DockFault`,
+//! `Highlight`, `HighlightStyle`, `HighlightColor`, the context line's
+//! `DockContext`, the dock surface's `Dock`, the typing animations'
+//! `DockEdit`, `EditCells` and the text's column (`DOCK_TEXT_COL`),
+//! `Wake` and the settings model's `Settings`, `SettingsEdit`, `Parsed`, `Diagnostic`,
+//! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose` and the tables
+//! of valid values (`NAMES`, `*_RANGE`) (the full
+//! list is the `pub use` block below). `Osc52` is the counterpart of
+//! alacritty's type of the same name, not that type itself. The move to our
+//! own grid (00X) is done behind this boundary and does not know the renderer.
+//! `toml_edit` likewise stays inside: there is no TOML type on the `pub`
+//! surface of the settings model and the theme file; the theme's colors are
+//! `0xRRGGBB`, not alacritty's `Rgb`.
 //!
-//! Sınırın taşıdığı şey **karar**, piksel değil: `Cursor` imlecin yerini ve
-//! bloğunun altında kalan metnin rengini veriyor ("imleç altındaki metin
-//! okunur kalmalı" bir terminal semantiğidir), o rengi hangi piksellerin
-//! alacağını çizen biliyor — **karar burada, boyama orada**. Ayrımın ölçütü
-//! hücrenin bölünebilirliği: imleç bloğu iki hücre arasındayken sınır hücrenin
-//! ortasından geçer ve burada verilecek bir hücre kararı onu göremez.
-//! Komut bloğu (`Block`) aynı kuralın ikinci örneği: sınırdan satır aralığı ve
-//! renk geçer, çıkış kodu geçmez — renderer'da escape dizisi ya da çıkış kodu
-//! tanıyan bir dal yanlış yerdedir.
+//! What the boundary carries is a **decision**, not pixels: `Cursor` gives the
+//! cursor's position and the color of the text left under its block ("the text
+//! under the cursor must stay readable" is a terminal semantic), and the
+//! drawing side knows which pixels will take that color — **the decision is
+//! here, the painting is there**. The criterion for the split is the cell's
+//! divisibility: when the cursor block is between two cells the boundary
+//! passes through the middle of a cell and a cell decision made here cannot
+//! see it. The command block (`Block`) is the second example of the same rule:
+//! line spacing and color cross the boundary, the exit code does not — a
+//! branch in the renderer that recognizes escape sequences or exit codes is in
+//! the wrong place.
 //!
-//! Sözleşme: bu crate macOS'a özgü hiçbir kütüphane görmez — `objc2*`,
-//! `core-text`, `metal` yok — ve Linux'ta derlenebilir kalır; Vulkan kapısı
-//! bu ayrımın üstüne kurulur. Unix PTY (`libc`, `rustix`) serbesttir, o kapıyı
-//! kapatmaz.
+//! Contract: this crate sees no macOS-specific library — no `objc2*`,
+//! `core-text`, `metal` — and stays buildable on Linux; the Vulkan gate is
+//! built on top of this separation. The Unix PTY (`libc`, `rustix`) is allowed
+//! and does not close that gate.
 //!
-//! Denetim `make denetim`'dedir (`Makefile`, her `make hepsi`'de koşar) ve
-//! bağımlılık düzeyinde bir vekildir; gerçek kapı
-//! `--target x86_64-unknown-linux-gnu` ile derlemedir, `rustup` gelene kadar kapalı.
+//! The audit is `make audit` (`Makefile`, runs in every `make check`) and is a
+//! proxy at the dependency level; the real gate is building with
+//! `--target x86_64-unknown-linux-gnu`, closed until `rustup` arrives.
 
 mod cluster;
 mod color;
@@ -85,17 +88,17 @@ pub use shell::{
 };
 pub use wake::Wake;
 
-/// Hücre sabit boyuttadır ve sabit burada bağlanır: **alacritty'nin** hücresi
-/// (bizim [`Cell`]'imiz değil — o bir kare çıktısı, bu bir grid kaydı) =
-/// `c` 4 + `fg` 4 + `bg` 4 + `flags` 2 + dolgu + `Option<Arc<CellExtra>>` 8
-/// = 24 bayt.
-/// Seyrek veri (grapheme kümesi, alt çizgi rengi, hyperlink) zaten yan
-/// tabloda — `CellExtra`. Bu sayı değişirse `CLAUDE.md`'nin hücre maddesi
-/// aynı commit'te değişir: 10 000 satırlık scrollback'i sekme başına
-/// büyüten şey budur.
+/// The cell is fixed-size and the size is pinned here: **alacritty's** cell
+/// (not our [`Cell`] — that one is a frame output, this one is a grid record) =
+/// `c` 4 + `fg` 4 + `bg` 4 + `flags` 2 + padding + `Option<Arc<CellExtra>>` 8
+/// = 24 bytes.
+/// Sparse data (grapheme cluster, underline color, hyperlink) is already in a
+/// side table — `CellExtra`. If this number changes, the cell item of
+/// `CLAUDE.md` changes in the same commit: it is what grows a 10,000-line
+/// scrollback per tab.
 ///
-/// Kapsamı dürüstçe: ölçülen tip bizim değil, bu assert bu depodaki
-/// hiçbir hareketi engellemez — bir **sürüm kanaryasıdır**, `cargo update`
-/// hücre başına belleği sessizce değiştirirse derlemeyi kırıp kararı insana
-/// verir. Kendi hücremiz geldiğinde (00X) assert ona taşınır.
+/// Honestly on scope: the measured type is not ours, and this assert blocks no
+/// move in this repo — it is a **version canary**: if `cargo update` silently
+/// changes the per-cell memory, it breaks the build and hands the decision to a
+/// human. When our own cell arrives (00X) the assert moves to it.
 const _: () = assert!(size_of::<alacritty_terminal::term::cell::Cell>() == 24);

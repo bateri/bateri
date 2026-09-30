@@ -1,68 +1,73 @@
-//! Emoji dizilerinin kümelenmesi (035): bir kod noktası açık kümeyi uzatır
-//! mı, ve küme kaç sütun tutar.
+//! Clustering of emoji sequences (035): does a code point extend the open
+//! cluster, and how many columns does the cluster take.
 //!
-//! **Tek yetkili.** Izgaranın sarmalayıcısı ([`crate::handler`]), dock'un
-//! düzeni (`dock::layout_with`), bastırmanın ızgara yürüyüşü
-//! (`dock::grid_span`) ve tazelik kapısının ayna yarısı (`last_ink`) yalnız
-//! buradaki iki fonksiyonu soruyor. İki kural ayrıştığı gün dock bir sütun
-//! kayar ya da tazelik kapısı kalıcı olarak "bayat" der ve belirti sessizdir
-//! (024 Karar 1'in yürüyüşteki karşılığı).
+//! **The single authority.** The grid's wrapper ([`crate::handler`]), the
+//! dock's layout (`dock::layout_with`), the suppression's grid walk
+//! (`dock::grid_span`) and the mirror half of the freshness gate
+//! (`last_ink`) ask only the two functions here. The day the two rules
+//! diverge, the dock shifts by a column or the freshness gate says "stale"
+//! permanently, and the symptom is silent (the walk's counterpart of 024
+//! Karar 1).
 //!
-//! **Kural yalnız emoji kollarından**, UAX #29'un tamamı değil
-//! (`.tasks/035-grapheme-dizileri/discussion.md` → Muhakeme, ilk madde):
-//! genel bir "tablo diziyi yuttu" kolu Arapça `لا`'yı ve `⌚︎`'yi de tek
-//! kümeye indiriyordu, yani wcwidth sayan kabukla ayrışan ve geniş hücreyi
-//! daraltmayı isteyen iki yan etki doğuruyordu. Emoji dışı kümeler bugünkü
-//! gibi kod noktası kod noktası kalıyor.
+//! **The rule comes from the emoji arms only**, not all of UAX #29
+//! (`.tasks/035-grapheme-dizileri/discussion.md` → Muhakeme, first item): a
+//! general "the table swallowed the sequence" arm also collapsed Arabic `لا`
+//! and `⌚︎` into one cluster, which produced two side effects that diverge
+//! from a wcwidth-counting shell and want to narrow a wide cell. Non-emoji
+//! clusters stay code point by code point as today.
 //!
-//! **Genişlik yalnız büyür.** Izgara hücreyi 1'den 2'ye çıkarabiliyor ama
-//! hiçbir ara adımda daraltmıyor ([`width`]): daraltma geniş hücreyi geri
-//! almak, yani alacritty'nin özel yollarını yeniden yazmak olurdu. Dock aynı
-//! sayıyı buradan okuduğu için ızgarayla bit bit aynı sütunu tutuyor.
+//! **Width only grows.** The grid can take a cell from 1 to 2 but never
+//! narrows at any intermediate step ([`width`]): narrowing would mean
+//! taking a wide cell back, i.e. rewriting alacritty's special paths. The
+//! dock reads the same number from here, so it keeps bit-for-bit the same
+//! column as the grid.
 
 use std::num::NonZeroU32;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Sıfır genişlikli birleştirici (U+200D). Arkasındaki emoji sunumlu kod
-/// noktası kümeye katılıyor — UAX #29 GB11'in karşılığı.
+/// Zero-width joiner (U+200D). The emoji-presentation code point behind it
+/// joins the cluster — the counterpart of UAX #29 GB11.
 const ZWJ: char = '\u{200D}';
 
-/// Emoji sunumu seçicisi (VS16). [`emoji_capable`]'ın sorusu "bu kod noktası
-/// VS16'yla iki sütunlu bir emojiye dönüşür mü".
+/// Emoji presentation selector (VS16). [`emoji_capable`]'s question is "does
+/// this code point become a two-column emoji with VS16".
 const VS16: char = '\u{FE0F}';
 
-/// Bölgesel gösterge (RI) — bayrak çiftinin iki yarısı.
+/// Regional indicator (RI) — the two halves of a flag pair.
 fn is_regional_indicator(c: char) -> bool {
     ('\u{1F1E6}'..='\u{1F1FF}').contains(&c)
 }
 
-/// Fitzpatrick ten rengi değiştiricisi.
+/// Fitzpatrick skin tone modifier.
 fn is_skin_tone(c: char) -> bool {
     ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
 }
 
-/// `c` emoji sunumu alabiliyor mu: `c ++ VS16` iki sütun. ZWJ'nin arkasındaki
-/// `❤` VS16'sız **metin** sunumlu ve ara dizgi (`…‍❤`) tabloda yok; ölçüt
-/// kod noktasının kendi genişliği olsaydı on kod noktalı öpücük ikiye
-/// bölünürdü (`discussion.md` → Karar 3, dördüncü kol).
+/// Can `c` take emoji presentation: `c ++ VS16` is two columns. The `❤`
+/// behind a ZWJ is **text** presentation without VS16 and the intermediate
+/// string (`…‍❤`) is not in the table; had the criterion been the code
+/// point's own width, the ten-code-point kiss would split in two
+/// (`discussion.md` → Karar 3, fourth arm).
 fn emoji_capable(c: char) -> bool {
     let mut buf = [0u8; 8];
     let len = c.encode_utf8(&mut buf).len();
     let vs16 = VS16.encode_utf8(&mut buf[len..]).len();
-    // Tampon iki kod noktası için yeter (4 + 3 bayt); `get` panik yasağı için.
+    // The buffer is enough for two code points (4 + 3 bytes); `get` is for the
+    // no-panic rule.
     buf.get(..len + vs16)
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
         .is_some_and(|pair| pair.width() == 2)
 }
 
-/// `c` **herhangi bir** kümeyi uzatabilir mi — [`extends`]'in kümeye
-/// bakmayan ön elemesi. Izgaranın sarmalayıcısı bunu her kod noktasında
-/// soruyor ve cevap `false`'sa baş hücreyi hiç okumuyor: akan düz metinde
-/// kod noktası başına bir tablo sorusundan fazlası ödenmiyor.
+/// Can `c` extend **any** cluster — the prefilter of [`extends`] that does
+/// not look at the cluster. The grid's wrapper asks this for every code
+/// point and, if the answer is `false`, never reads the head cell: in
+/// flowing plain text no more than one table question per code point is
+/// paid.
 pub(crate) fn may_extend(c: char) -> bool {
-    // ASCII'de yalnız rakam, `#` ve `*` emoji sunumu alabiliyor (tuş
-    // başlığı `1️⃣`); geri kalanı hiçbir kola girmiyor.
+    // In ASCII only digits, `#` and `*` can take emoji presentation (keycap
+    // `1️⃣`); the rest enter no arm.
     if c.is_ascii() {
         return c.is_ascii_digit() || c == '#' || c == '*';
     }
@@ -72,21 +77,23 @@ pub(crate) fn may_extend(c: char) -> bool {
         || emoji_capable(c)
 }
 
-/// Açık küme `open` (boş değil) `c` ile uzar mı. Dört kol, başka kol yok:
+/// Does the open cluster `open` (non-empty) extend with `c`. Four arms, no
+/// others:
 ///
-/// 1. **Sıfır genişlik** — alacritty'nin bugünkü `zerowidth` dalı (VS16,
-///    ZWJ, ten rengi dışındaki birleştiriciler, etiket karakterleri).
-/// 2. **Eşlenmemiş RI'nin arkasındaki RI** — bayrak çifti. Küme tek RI'den
-///    oluşuyorsa; üçüncü RI yeni bir bayrağın başı.
-/// 3. **Ten rengi, iki sütunlu kümenin arkasında** — `a🏽` iki küme kalıyor.
-/// 4. **ZWJ'nin arkasında emoji sunumu alabilen kod noktası** —
-///    [`emoji_capable`]. `a‍b`'de `b` ayrı küme.
+/// 1. **Zero width** — alacritty's present `zerowidth` branch (VS16, ZWJ,
+///    combiners other than skin tones, tag characters).
+/// 2. **An RI behind an unpaired RI** — a flag pair. If the cluster consists
+///    of a single RI; a third RI starts a new flag.
+/// 3. **A skin tone behind a two-column cluster** — `a🏽` stays two clusters.
+/// 4. **A code point that can take emoji presentation behind a ZWJ** —
+///    [`emoji_capable`]. In `a‍b`, `b` is a separate cluster.
 ///
-/// Kontrol karakteri (genişliği `None`) hiçbir kola girmiyor: satır sonu
-/// kümeyi hep kapatır. Başı sütunsuz küme (akışın başındaki ya da satır
-/// sonundan sonraki birleştirici) de uzamıyor: ızgarada öyle bir baş hücre
-/// yok — birleştirici önceki hücreye iniyor — ve `‍👍`'nin ZWJ'si iki
-/// sütunlu bir kümenin başı olurdu.
+/// A control character (width `None`) enters no arm: a line break always
+/// closes the cluster. A cluster with a columnless head (a combiner at the
+/// start of the stream or after a line break) does not extend either: there
+/// is no such head cell in the grid — the combiner lands on the previous
+/// cell — and the ZWJ of `‍👍` would become the head of a two-column
+/// cluster.
 pub(crate) fn extends(open: &str, c: char) -> bool {
     if open
         .chars()
@@ -108,16 +115,17 @@ pub(crate) fn extends(open: &str, c: char) -> bool {
     open.ends_with(ZWJ) && emoji_capable(c)
 }
 
-/// Kümenin ızgarada tuttuğu sütun: taban karakterin genişliği, kümenin
-/// herhangi bir ön eki iki sütuna çıktıysa 2; hiç daralmıyor.
+/// The columns a cluster takes in the grid: the base character's width, 2 if
+/// any prefix of the cluster reached two columns; it never narrows.
 ///
-/// **Her ön ek soruluyor, yalnız sonuç değil:** ızgara genişlemeyi her
-/// uzamadan sonra soruyor ve `1` + VS16 + `U+20E3` genişlemeyi VS16'da
-/// yapıyor — son dizgiye bakan bir kural o adımı kaçırırdı.
+/// **Every prefix is asked, not just the result:** the grid asks about
+/// widening after every extension, and `1` + VS16 + `U+20E3` widens at the
+/// VS16 — a rule looking at the final string would miss that step.
 ///
-/// **Tek kod noktalı küme [`crate::dock::column_width`]'in tablosuyla**
-/// (kontrol karakteri 1, sekme dahil): `UnicodeWidthStr` sekmeye `0` diyor ve
-/// dock'un kümesiz aritmetiği bit bit korunmalı.
+/// **A single-code-point cluster uses [`crate::dock::column_width`]'s
+/// table** (a control character is 1, tab included): `UnicodeWidthStr` says
+/// `0` for a tab and the dock's clusterless arithmetic must be preserved bit
+/// for bit.
 pub(crate) fn width(cluster: &str) -> usize {
     let mut chars = cluster.char_indices();
     let Some((_, head)) = chars.next() else {
@@ -135,23 +143,24 @@ pub(crate) fn width(cluster: &str) -> usize {
     if widened { 2 } else { base }
 }
 
-/// Bir akışı kümelere bölen yürüyüş: her küme için akıştaki karakter
-/// aralığı (`start..end`, yarı açık), baş karakteri ve sütunu ([`width`]).
+/// The walk that splits a stream into clusters: for each cluster the
+/// character range in the stream (`start..end`, half-open), its head
+/// character and its column count ([`width`]).
 ///
-/// Bastırmanın ızgara yürüyüşü ve tazelik kapısı bunu kullanıyor; dock'un
-/// düzeni aynı döngüyü etiketli akışta kendisi koşuyor
-/// (`dock::layout_with`), ızgara kümeyi hücreden türetiyor — üçü de aynı iki
-/// fonksiyonu ([`extends`], [`width`]) okuyor.
+/// The suppression's grid walk and the freshness gate use it; the dock's
+/// layout runs the same loop itself over a tagged stream
+/// (`dock::layout_with`), and the grid derives the cluster from the cell —
+/// all three read the same two functions ([`extends`], [`width`]).
 ///
-/// **Kümenin metni tembel**: yalnız sıradaki kod noktası [`may_extend`]'den
-/// geçerse kuruluyor. Düz metinde (kare başına koşan yürüyüşler, tuş başına
-/// koşan ayna çözücüsü) tek bir ayırma bile yok; emojili satırda tampon bir
-/// kez büyüyor.
+/// **The cluster's text is lazy**: it is built only if the next code point
+/// passes [`may_extend`]. In plain text (the walks running per frame, the
+/// mirror decoder running per key) there is not even one allocation; on a
+/// line with emoji the buffer grows once.
 pub(crate) struct Walk {
     open: String,
 }
 
-/// [`Walk`]'un küme başına çıktısı.
+/// [`Walk`]'s per-cluster output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Cluster {
     pub(crate) start: usize,
@@ -167,7 +176,7 @@ impl Walk {
         }
     }
 
-    /// `chars`'ı kümelere böler ve her birini `each`'e verir.
+    /// Splits `chars` into clusters and hands each to `each`.
     pub(crate) fn run(
         &mut self,
         chars: impl IntoIterator<Item = char>,
@@ -196,29 +205,30 @@ impl Walk {
     }
 }
 
-/// Karede bir kümenin kimliği — [`Clusters`]'taki sırası.
+/// A cluster's identity in a frame — its index in [`Clusters`].
 ///
-/// `NonZeroU32` (sıra + 1): `Option<ClusterId>` niche ile 4 bayt, yani
-/// sınır [`crate::Cell`]'i kümesiz hücrede de aynı kalıbı taşıyor ve kümesiz
-/// hücre bir dal fazlasını bile ödemiyor.
+/// `NonZeroU32` (index + 1): `Option<ClusterId>` is 4 bytes via the niche, so
+/// the boundary [`crate::Cell`] carries the same pattern in a clusterless
+/// cell too and a clusterless cell does not even pay for one extra branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ClusterId(NonZeroU32);
 
-/// Kare başına küme tablosu (035 Karar 4B): sınır hücresinin
-/// [`crate::Cell::cluster`]'ı buradaki bir dizgiyi gösteriyor.
+/// The per-frame cluster table (035 Karar 4B): the boundary cell's
+/// [`crate::Cell::cluster`] points at a string here.
 ///
-/// **Sahibi çizen taraf, dolduran [`crate::Session`]** — [`crate::SelectionRuns`]
-/// emsali: tablo `frame()`'in ve `dock()`'un `&mut` argümanı, çağıran onu
-/// listeleriyle birlikte tutup temizliyor. Hücreye dizgi koymak (4A) her
-/// çizilen hücreyi ~40 bayt büyütürdü; oturum ömürlü bir interner (4C)
-/// sonsuz büyür ve kilit isterdi.
+/// **The owner is the drawing side, the filler is [`crate::Session`]** — the
+/// [`crate::SelectionRuns`] precedent: the table is the `&mut` argument of
+/// `frame()` and `dock()`, and the caller keeps and clears it together with
+/// its lists. Putting a string in the cell (4A) would grow every drawn cell
+/// by ~40 bytes; a session-lifetime interner (4C) grows without bound and
+/// would need a lock.
 ///
-/// Dizgiler tek tamponda, uçlarıyla: kare başına küme başına ayırma yok,
-/// `clear` kapasiteyi koruyor.
+/// The strings are in one buffer, with their ends: no per-cluster allocation
+/// per frame, `clear` keeps the capacity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Clusters {
     text: String,
-    /// Her kümenin `text`'teki **bitişi**; başı bir öncekinin bitişi.
+    /// Each cluster's **end** in `text`; its start is the previous one's end.
     ends: Vec<u32>,
 }
 
@@ -232,16 +242,18 @@ impl Clusters {
         self.ends.is_empty()
     }
 
-    /// Dizgiyi ekler ve kimliğini verir. Kimlik ya da bayt uzayı tükendiyse
-    /// `None` — hücre o zaman kümesiz, yani **taban karakteriyle** çiziliyor
-    /// (şekillenmeyen kümenin cevabıyla aynı, 035 R1.1).
+    /// Appends the string and returns its identity. `None` if the identity or
+    /// byte space ran out — the cell is then clusterless, i.e. drawn with its
+    /// **base character** (the same answer as for a cluster that does not
+    /// shape, 035 R1.1).
     pub fn push(&mut self, cluster: &str) -> Option<ClusterId> {
         self.push_chars(cluster.chars())
     }
 
-    /// [`Clusters::push`]'un kod noktası kod noktası hâli: ızgaranın hücresi
-    /// kümeyi taban + `zerowidth` olarak, dock'un düzeni akışın bir aralığı
-    /// olarak taşıyor — ikisi de ara bir `String` kurmadan doğrudan tampona.
+    /// [`Clusters::push`] code point by code point: the grid's cell carries
+    /// the cluster as base + `zerowidth`, the dock's layout as a range of the
+    /// stream — both go straight into the buffer without building an
+    /// intermediate `String`.
     pub(crate) fn push_chars(
         &mut self,
         chars: impl IntoIterator<Item = char>,
@@ -263,8 +275,9 @@ impl Clusters {
         }
     }
 
-    /// Kimliğin dizgisi; başka bir tablonun (ya da temizlenmiş bir karenin)
-    /// kimliği `None` — çizim yolunda, yani panik değil taban karakter.
+    /// The identity's string; the identity of another table (or of a cleared
+    /// frame) gives `None` — on the draw path, i.e. the base character, not a
+    /// panic.
     pub fn get(&self, id: ClusterId) -> Option<&str> {
         let index = id.0.get() as usize - 1;
         let end = *self.ends.get(index)? as usize;
@@ -283,17 +296,17 @@ mod tests {
     #[test]
     fn a_cluster_table_returns_what_was_pushed() {
         let mut table = Clusters::default();
-        let flag = table.push("🇹🇷").expect("kimlik");
-        let family = table.push("👨\u{200D}👩\u{200D}👧").expect("kimlik");
+        let flag = table.push("🇹🇷").expect("id");
+        let family = table.push("👨\u{200D}👩\u{200D}👧").expect("id");
         assert_eq!(table.get(flag), Some("🇹🇷"));
         assert_eq!(table.get(family), Some("👨\u{200D}👩\u{200D}👧"));
         assert_eq!(std::mem::size_of::<Option<ClusterId>>(), 4);
         table.clear();
         assert!(table.is_empty());
-        assert_eq!(table.get(flag), None, "temizlenmiş tablonun kimliği");
+        assert_eq!(table.get(flag), None, "an identity of the cleared table");
     }
 
-    /// Dizgiyi kümelere böler: her kümenin metni ve sütunu.
+    /// Splits a string into clusters: each cluster's text and columns.
     fn split(text: &str) -> Vec<(String, usize)> {
         let chars: Vec<char> = text.chars().collect();
         let mut out = Vec::new();
@@ -312,8 +325,9 @@ mod tests {
         vec![(text.to_owned(), 2)]
     }
 
-    /// Scratchpad ölçümünün (`discussion.md` → Karar 3) on yedi örneği:
-    /// her biri tek küme ve iki sütun ya da ölçülen bölünme.
+    /// The seventeen samples of the scratchpad measurement (`discussion.md` →
+    /// Karar 3): each is a single cluster of two columns, or the measured
+    /// split.
     #[test]
     fn the_measured_sequences_are_single_two_column_clusters() {
         for sequence in [
@@ -326,9 +340,10 @@ mod tests {
             "🏳\u{FE0F}\u{200D}🌈",
             "1\u{FE0F}\u{20E3}",
             "🌡\u{FE0F}",
-            // İskoç bayrağı: etiket dizisi.
+            // The Scottish flag: a tag sequence.
             "🏴\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
-            // On kod noktalı öpücük: ZWJ'nin arkasındaki `❤` metin sunumlu.
+            // The ten-code-point kiss: the `❤` behind a ZWJ has text
+            // presentation.
             "🧑🏻\u{200D}❤\u{FE0F}\u{200D}💋\u{200D}🧑🏼",
         ] {
             assert_eq!(split(sequence), one(sequence), "{sequence:?}");
@@ -336,56 +351,61 @@ mod tests {
         assert_eq!(
             split("🇹🇷🇬"),
             vec![("🇹🇷".to_owned(), 2), ("🇬".to_owned(), 1)],
-            "çift + eşlenmemiş RI"
+            "pair + unpaired RI"
         );
         assert_eq!(
             split("a🏽"),
             vec![("a".to_owned(), 1), ("🏽".to_owned(), 2)],
-            "ten rengi dar kümeye katılmaz"
+            "a skin tone does not join a narrow cluster"
         );
         assert_eq!(
             split("👨\u{200D}a"),
             vec![("👨\u{200D}".to_owned(), 2), ("a".to_owned(), 1)],
-            "ZWJ'nin arkasındaki harf yeni küme"
+            "a letter behind a ZWJ is a new cluster"
         );
         assert_eq!(
             split("a\u{200D}b"),
             vec![("a\u{200D}".to_owned(), 1), ("b".to_owned(), 1)]
         );
-        assert_eq!(split("e\u{301}"), vec![("e\u{301}".to_owned(), 1)], "aksan");
+        assert_eq!(
+            split("e\u{301}"),
+            vec![("e\u{301}".to_owned(), 1)],
+            "accent"
+        );
     }
 
-    /// Emoji dışı küme ve VS15 bugünkü gibi: `لا` iki küme, `⌚︎` geniş kalıyor
-    /// (daralmıyor) — genel "tablo yuttu" kolunun iki yan etkisi.
+    /// A non-emoji cluster and VS15 as today: `لا` is two clusters, `⌚︎` stays
+    /// wide (does not narrow) — the two side effects of the general "the table
+    /// swallowed it" arm.
     #[test]
     fn non_emoji_clusters_keep_todays_cells() {
         assert_eq!(split("لا"), vec![("ل".to_owned(), 1), ("ا".to_owned(), 1)]);
         assert_eq!(
             split("⌚\u{FE0E}"),
             vec![("⌚\u{FE0E}".to_owned(), 2)],
-            "VS15 zerowidth'e iner, hücre daralmaz"
+            "VS15 goes to zerowidth, the cell does not narrow"
         );
     }
 
     #[test]
     fn regional_indicators_pair_up() {
-        assert_eq!(split("🇹"), vec![("🇹".to_owned(), 1)], "tek RI");
-        assert_eq!(split("🇹🇷"), one("🇹🇷"), "çift");
+        assert_eq!(split("🇹"), vec![("🇹".to_owned(), 1)], "single RI");
+        assert_eq!(split("🇹🇷"), one("🇹🇷"), "pair");
         assert_eq!(
             split("🇹🇷🇬🇧"),
             vec![("🇹🇷".to_owned(), 2), ("🇬🇧".to_owned(), 2)],
-            "iki bayrak"
+            "two flags"
         );
         assert_eq!(
             split("🇹🇷🇬"),
             vec![("🇹🇷".to_owned(), 2), ("🇬".to_owned(), 1)],
-            "üçlü"
+            "triple"
         );
     }
 
-    /// Ön eleme hiçbir uzamayı kaçırmıyor: `extends` evet diyorsa
-    /// `may_extend` da diyor. Sarmalayıcı ön elemeden dönerse küme sessizce
-    /// bölünürdü.
+    /// The prefilter misses no extension: if `extends` says yes, `may_extend`
+    /// does too. If the wrapper turned back at the prefilter the cluster would
+    /// silently split.
     #[test]
     fn the_prefilter_never_drops_an_extension() {
         let opens = ["a", "1", "👍", "🇹", "👨\u{200D}", "❤", "日", "a\u{200D}"];
@@ -403,8 +423,8 @@ mod tests {
         }
     }
 
-    /// Tek kod noktalı küme dock'un tablosuyla: sekme ve kontrol karakteri
-    /// 1, satır sonu kümeyi kapatıyor.
+    /// A single-code-point cluster by the dock's table: a tab and a control
+    /// character are 1, a line break closes the cluster.
     #[test]
     fn single_code_points_keep_the_column_width_table() {
         assert_eq!(width("\t"), 1);
@@ -419,7 +439,7 @@ mod tests {
                 ("\u{301}".to_owned(), 0),
                 ("a".to_owned(), 1)
             ],
-            "başsız birleştirici sütunsuz ve kendi başına"
+            "a headless combiner is columnless and on its own"
         );
         assert_eq!(
             split("\u{200D}👍"),

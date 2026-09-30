@@ -1,51 +1,57 @@
-//! Renk çözümü: bir hücrenin `Color`'ı ile ekrandaki RGBA arasındaki tek yol.
+//! Color resolution: the single path between a cell's `Color` and the RGBA on
+//! screen.
 //!
-//! Paletin sahibi [`Theme`]: zemin, ön plan, sönük ön plan, vurgu (imleç ve
-//! koşan komut bloğu), iki durum rengi (başarı, hata) ve 16 ANSI rengi tek
-//! değerde — sekiz rollü modelin bugün tüketilen altısı. Renderer palet
-//! bilmez: `frame()` çözülmüş RGBA verir, clear, imleç ve blok şeridinin
-//! rengini de aynı temadan alır. Tema dosyasının ayrıştırıcısı `theme`
-//! modülünde.
+//! [`Theme`] owns the palette: background, foreground, dim foreground, accent
+//! (cursor and the running command block), two status colors (success, error)
+//! and the 16 ANSI colors in a single value — the six of the eight-role model
+//! consumed today. The renderer knows no palette: `frame()` hands out
+//! resolved RGBA and the clear, cursor and block stripe colors come from the
+//! same theme too. The theme file's parser is in the `theme` module.
 //!
-//! Renkler `0xRRGGBB` olarak yazılır — palet her yerde böyle yazılır ve
-//! `Rgb { r, g, b }` üçlüsü onaltı satırlık bir tabloyu okunmaz eder.
+//! Colors are written as `0xRRGGBB` — a palette is written that way
+//! everywhere and the `Rgb { r, g, b }` triple would make a sixteen-line
+//! table unreadable.
 
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
 use crate::settings::HostMark;
 
-/// Çizim hedefinin uzayındaki renk: **lineer** RGBA.
+/// Color in the draw target's space: **linear** RGBA.
 ///
-/// Newtype, çünkü simetrik hatanın yalnız yarısı temsil edilemezdi: `bt-gpu`
-/// tarafında "sRGB olmayan hedef" bir `const`la (`Renderer::PIXEL_FORMAT`)
-/// kapatıldı, ama sınırın bu tarafında renk çıplak bir `[f32; 4]`'tü ve uzayı
-/// yalnız bir yorum söylüyordu. Oraya sRGB-kodlu bir float (`c / 255.0`)
-/// yazan renk açılır — ara ton `0x1a1c21` `0x5a5d65` griye — ve belirti sessizdir.
-/// Alan private ve tek kurucusu [`LinearRgba::from_srgb`], yani dönüşüm
-/// tipin içinde: uzayı artık bir yorum değil tip taşıyor.
+/// A newtype, because only half of the symmetric error couldn't be
+/// represented: on the `bt-gpu` side "a non-sRGB target" was closed off with a
+/// `const` (`Renderer::PIXEL_FORMAT`), but on this side of the boundary the
+/// color was a bare `[f32; 4]` and only a comment stated its space. A color
+/// that writes an sRGB-encoded float (`c / 255.0`) there opens up — the
+/// midtone `0x1a1c21` turns into the gray `0x5a5d65` — and the symptom is
+/// silent. The field is private and its only constructor is
+/// [`LinearRgba::from_srgb`], so the conversion is inside the type: the type
+/// now carries the space, not a comment.
 ///
-/// `Eq` yok, `PartialEq` var: bileşenler `f32` ve karşılaştırılan şey hep
-/// aynı tablodan çıkmış iki değer, hesaplanmış iki değer değil.
+/// No `Eq`, but `PartialEq`: the components are `f32` and what gets compared
+/// is always two values that came out of the same table, not two computed
+/// values.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LinearRgba([f32; 4]);
 
 impl LinearRgba {
-    /// sRGB kodlu 8-bit üçlüden — **tek kurucu**.
+    /// From an sRGB-encoded 8-bit triple — the **only constructor**.
     ///
-    /// Girdi kasten `u8`: renkler her yerde `0xRRGGBB` yazılır ve
-    /// lineerleştirme crate'in içinde kalır. Lineer float alan bir kurucu
-    /// olsaydı newtype yalnız bir ad olurdu; kapattığı hata "sRGB float'ı
-    /// lineer yuvaya koymak" ve o hata ancak dönüşüm **burada** olduğunda
-    /// temsil edilemez hâle geliyor.
+    /// The input is deliberately `u8`: colors are written as `0xRRGGBB`
+    /// everywhere and the linearization stays inside the crate. If a
+    /// constructor took linear floats the newtype would be just a name; the
+    /// error it closes is "putting an sRGB float into the linear slot" and
+    /// that error becomes unrepresentable only when the conversion is **here**.
     ///
-    /// Paletin tek sahibi olmasını bu kurucu vermiyor, o ayrı bir kural
-    /// (bu modülün başı): rengi buradan üretebilmek onu palete yazmak
-    /// değildir.
+    /// This constructor doesn't make the palette's sole ownership, that is a
+    /// separate rule (the head of this module): being able to produce a color
+    /// here is not the same as writing it into the palette.
     pub const fn from_srgb(r: u8, g: u8, b: u8) -> Self {
         Self([
-            // audit: `u8 as usize` 0..=255, tablo 256 girdilik — indeks tipin
-            // kendisiyle sınırlı, sınır kontrolü kodgen'de de eleniyor.
+            // audit: `u8 as usize` is 0..=255, the table has 256 entries — the
+            // index is bounded by the type itself, the bounds check is
+            // eliminated in codegen too.
             SRGB_LINEAR[r as usize],
             SRGB_LINEAR[g as usize],
             SRGB_LINEAR[b as usize],
@@ -53,233 +59,251 @@ impl LinearRgba {
         ])
     }
 
-    /// GPU'ya giden dört bileşen.
+    /// The four components that go to the GPU.
     ///
-    /// `const`: `Theme::BATERI.background_linear()` gibi sabitlerin derleme
-    /// zamanında da açılması gerekiyor (`bt-gpu`'nun sınamaları).
+    /// `const`: constants like `Theme::BATERI.background_linear()` must be
+    /// unfoldable at compile time too (`bt-gpu`'s tests).
     pub const fn to_array(self) -> [f32; 4] {
         self.0
     }
 }
 
-/// Bir renk teması: **tek kaynak**.
+/// A color theme: the **single source**.
 ///
-/// Pencerenin clear rengi ([`Theme::background_linear`]), `frame()`'in "bu
-/// hücre varsayılan, çizilmesin" kararı, imleç bloğu
-/// ([`Theme::cursor_linear`]) ve uygulamanın renk sorusuna (OSC 10/11) verilen
-/// yanıt hep aynı değerden okunur. İki yerde dursalardı biri değişince
-/// pencere ile hücreler ayrı renk olurdu.
+/// The window's clear color ([`Theme::background_linear`]), `frame()`'s "this
+/// cell is default, don't draw it" decision, the cursor block
+/// ([`Theme::cursor_linear`]) and the answer to the application's color query
+/// (OSC 10/11) are all read from the same value. Had they lived in two places,
+/// when one changed the window and the cells would be different colors.
 ///
-/// **Dokuz rollü** modelin yedisi burada: 007'nin dördü, 010'un iki durum rolü
-/// (`success`, `error`) ve 014'ün `cursor`'ı; yanlarında 031'in `selection`'ı
-/// ile 033'ün iki arama vurgusu (`search_match`, `search_current`) —
-/// dokuzun dışında: model the reference'in, seçim ve arama rengi terminalin kendi
-/// yüzeyi. Kalan iki durum rolü (uyarı, bilgi) sonraki setlere kalıyor —
-/// **çizilmeyen rol eklenmiyor**, çünkü tüketicisi olmayan bir anahtar tema
-/// dosyasına girdiği gün biçim sözü verir ve sözün karşılığı yoktur.
-/// Alanlar `0xRRGGBB` (üst bayt okunmaz) ve `pub`: tip bir
-/// kayıt, `Settings` gibi; geçerliliğini kuran yol tema ayrıştırıcısı
-/// ([`Theme::parse`]). Alacritty'nin `Rgb`'si `pub` yüzde görünmez.
+/// Seven of the **nine-role** model are here: 007's four, 010's two status
+/// roles (`success`, `error`) and 014's `cursor`; beside them 031's
+/// `selection` and 033's two search highlights (`search_match`,
+/// `search_current`) — outside the nine: the model is the reference's, the
+/// selection and search colors are the terminal's own surface. The remaining
+/// two status roles (warning, info) are left to later sets — **a role that
+/// isn't drawn isn't added**, because the day a key with no consumer enters
+/// the theme file it promises a format, and the promise has nothing behind it.
+/// The fields are `0xRRGGBB` (the top byte is not read) and `pub`: the type is
+/// a record, like `Settings`; the path that establishes validity is the theme
+/// parser ([`Theme::parse`]). Alacritty's `Rgb` is not visible in the `pub`
+/// surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
-    /// Varsayılan arka plan; pencerenin zemini.
+    /// Default background; the window's ground.
     pub background: u32,
-    /// Varsayılan ön plan.
+    /// Default foreground.
     pub foreground: u32,
-    /// Sönük (SGR 2) varsayılan ön plan. Adlı ve dolaylı renklerin sönüğü
-    /// bir kuraldan, zemine karıştırarak gelir ([`dim_toward`]); bu rol
-    /// yalnız varsayılan ön planın.
+    /// Dim (SGR 2) default foreground. The dim of named and indirect colors
+    /// comes from a rule, by blending toward the background ([`dim_toward`]);
+    /// this role is only for the default foreground.
     pub dim: u32,
-    /// Vurgu; bugün **koşan komut bloğunun şeridi**.
+    /// Accent; today the **running command block's stripe**.
     ///
-    /// İmleç artık burada değil ([`Theme::cursor`]): ikisi tek değerden
-    /// beslenirken "imleci altın yap" isteği şeridi de altın yapıyordu.
+    /// The cursor is no longer here ([`Theme::cursor`]): while the two were fed
+    /// from a single value, a "make the cursor gold" request made the stripe
+    /// gold too.
     pub accent: u32,
-    /// İmleç bloğunun rengi — ANSI 258'in ("imleç rengi") karşılığı.
+    /// The cursor block's color — the counterpart of ANSI 258 ("cursor color").
     ///
-    /// Ayrı bir rol, çünkü ayrı bir sorunun cevabı: `accent` "hangi şey öne
-    /// çıksın", bu "caret nerede". 258 yuvası bugüne kadar `accent`'e takma
-    /// addı ve o bir kalıntıydı — terminfo'da `Cs` ilan ediyoruz, yani
-    /// uygulamanın imleç rengini değiştirebilmesi (OSC 12) de bu rolün
-    /// üstüne kurulacak.
+    /// A separate role, because it answers a separate question: `accent` is
+    /// "which thing stands out", this is "where is the caret". Slot 258 has
+    /// been an alias to `accent` until now and that was a leftover — we
+    /// declare `Cs` in terminfo, so an application's ability to change the
+    /// cursor color (OSC 12) will be built on this role too.
     ///
-    /// **Blok opak ve altındaki harf zemin rengiyle çiziliyor**
-    /// (`Session::frame`), yani bu rengin zemine karşı **ve** kendi üstündeki
-    /// zemin renkli harfe karşı okunur olması gerekiyor: koyu temada açık,
-    /// açık temada koyu bir altın.
+    /// **The block is opaque and the letter under it is drawn in the
+    /// background color** (`Session::frame`), so this color has to be legible
+    /// against the background **and** against the background-colored letter on
+    /// top of itself: a light gold on a dark theme, a dark one on a light
+    /// theme.
     pub cursor: u32,
-    /// Fareyle seçimin vurgusu — satır koşularının zemini.
+    /// The mouse selection's highlight — the ground of the line runs.
     ///
-    /// **Metnin rengi değişmiyor** (031 Karar 3): seçili hücre kendi ön
-    /// planıyla çiziliyor, yani bu rengin varsayılan ön planla **ve** paletin
-    /// renkli sekizlisiyle okunur olması, zeminden de ayrışması gerekiyor.
-    /// Odaksız pencerede zemine doğru soluklaşıyor
-    /// ([`Theme::selection_unfocused_linear`]).
+    /// **The text's color doesn't change** (031 Karar 3): the selected cell is
+    /// drawn with its own foreground, so this color has to be legible with the
+    /// default foreground **and** with the palette's colored eight, and also
+    /// distinct from the background. In an unfocused window it fades toward the
+    /// background ([`Theme::selection_unfocused_linear`]).
     pub selection: u32,
-    /// Geçmişte aramanın (⌘F) bütün eşleşmelerinin vurgusu — geri planda
-    /// kalan, "burada da var" diyen ton (033 Karar 7).
+    /// The highlight of all matches of the scrollback search (⌘F) — the tone
+    /// that stays in the background and says "it's here too" (033 Karar 7).
     ///
-    /// Seçimle aynı sözleşme: metin kendi ön planıyla çiziliyor, yani ölçüt
-    /// `selection`'ınki (zeminde okunan metin vurgunun üstünde de okunur) ve
-    /// odaksız pencerede zemine doğru soluklaşıyor
-    /// ([`Theme::search_match_unfocused_linear`]). Seçimden **ton** olarak
-    /// ayrık olmalı: seçim aramanın üstünde çiziliyor ve ikisi yan yana
-    /// durabiliyor.
+    /// The same contract as the selection: the text is drawn with its own
+    /// foreground, so the criterion is the selection's (text legible on the
+    /// background is legible on the highlight too) and in an unfocused window
+    /// it fades toward the background
+    /// ([`Theme::search_match_unfocused_linear`]). It must be separate from the
+    /// selection in **hue**: the selection is drawn on top of the search and
+    /// the two can sit side by side.
     pub search_match: u32,
-    /// Geçerli eşleşmenin vurgusu — ⏎/⌘G'nin gösterdiği tek eşleşme;
-    /// `search_match`'ten **belirgin** ama aynı sözleşmeyle.
+    /// The current match's highlight — the single match ⏎/⌘G points at;
+    /// **more distinct** than `search_match` but under the same contract.
     pub search_current: u32,
-    /// Durum: başarı. Bugün sıfır çıkış koduyla biten komut bloğunun şeridi.
+    /// Status: success. Today the stripe of a command block that ended with
+    /// exit code zero.
     pub success: u32,
-    /// Durum: hata. Bugün sıfırdan farklı çıkış koduyla biten komut bloğunun
-    /// şeridi.
+    /// Status: error. Today the stripe of a command block that ended with a
+    /// nonzero exit code.
     pub error: u32,
-    /// Durum: bilgi. Bugün **uzak oturum** (036): bağlam satırında `⇄` ile
-    /// host ve dock'un üst saç çizgisi.
+    /// Status: info. Today the **remote session** (036): the `⇄` with the host
+    /// in the context line and the dock's top hairline.
     ///
-    /// `accent` değil, çünkü o koşan komutun şeridi ve ssh da koşan bir komut
-    /// — aynı renk iki anlam taşırdı ("bir şey koşuyor" / "uzaktasın").
-    /// Zeminde okunur olmalı (3:1, `color::tests`): host bağlam satırında
-    /// metin.
+    /// Not `accent`, because that is the running command's stripe and ssh is a
+    /// running command too — the same color would carry two meanings
+    /// ("something is running" / "you are remote"). It must be legible on the
+    /// background (3:1, `color::tests`): the host is text in the context line.
     pub info: u32,
-    /// Durum: uyarı. Bugün **staging** işaretli uzak host (037 Karar 3):
-    /// `⇄ host`, dock'un üst saç çizgisi ve sekmenin noktası.
+    /// Status: warning. Today the remote host marked **staging** (037 Karar 3):
+    /// `⇄ host`, the dock's top hairline and the tab's dot.
     ///
-    /// Değeri temanın kendi ANSI sarısı (`info`'nun camgöbeği emsali).
-    /// [`Self::cursor`] altın ve paletin sarısından bilerek ayrık, yani bu rol
-    /// imleçle karışmıyor. Zeminde okunur olmalı (3:1, `color::tests`):
-    /// host bağlam satırında metin.
+    /// Its value is the theme's own ANSI yellow (the precedent of `info`'s
+    /// cyan). [`Self::cursor`] is gold and deliberately distinct from the
+    /// palette's yellow, so this role doesn't get confused with the cursor. It
+    /// must be legible on the background (3:1, `color::tests`): the host is
+    /// text in the context line.
     pub warning: u32,
-    /// 16 ANSI rengi: siyah, kırmızı, yeşil, sarı, mavi, macenta, camgöbeği,
-    /// beyaz, sonra aynı sırada parlak sekizlisi.
+    /// The 16 ANSI colors: black, red, green, yellow, blue, magenta, cyan,
+    /// white, then the bright eight in the same order.
     pub ansi: [u32; 16],
 }
 
 impl Theme {
-    /// Gömülü koyu tema — ayar dosyası yokken ve süreli koşuda geçerli olan.
+    /// The embedded dark theme — the one in effect when there is no settings
+    /// file and in a timed run.
     ///
-    /// ANSI tonları nötr gri taban üstünde doygunluğu kırılmış renkler.
-    /// Siyah bilerek arka plandan ayrıdır — `\e[40m` çizilmeyen bir hücre
-    /// değil, görünür bir blok olmalı. `dim`, `foreground × 2/3`'ün vte
-    /// çarpımıyla (`f32`, kesme) sonucu: 006'ya kadar sönük ön plan böyle
-    /// hesaplanıyordu. Rol bir değer, kural değil — 007 phase-3'te adlı
-    /// renklerin sönüğü zemine karışmaya başladığında bu değer yerinde kaldı.
+    /// The ANSI tones are colors with broken saturation on a neutral gray base.
+    /// Black is deliberately distinct from the background — `\e[40m` must be a
+    /// visible block, not an undrawn cell. `dim` is the result of vte's
+    /// multiplication of `foreground × 2/3` (`f32`, truncation): until 006 the
+    /// dim foreground was computed that way. The role is a value, not a rule —
+    /// when the dim of named colors started blending toward the background in
+    /// 007 phase-3 this value stayed in place.
     ///
-    /// `success` ve `error` paletin yeşili ile kırmızısının **kendisi**:
-    /// `accent`'ın maviye eşit olmasıyla aynı emsal. Rolün ayrı bir alan olma
-    /// sebebi değerin farklı olması değil, kullanıcının şeridi metin renklerine
-    /// dokunmadan değiştirebilmesi.
+    /// `success` and `error` are the palette's green and red **themselves**:
+    /// the same precedent as `accent` being equal to blue. The reason the role
+    /// is a separate field is not that the value differs, but that the user can
+    /// change the stripe without touching the text colors.
     ///
-    /// `const`: `bt-gpu`'nun sınamaları clear ve imleç rengini `const`
-    /// bağlamda buradan alıyor. sRGB tablosunun `const` olmasının gerekçesi
-    /// de bu.
-    // Satır başına dörtlü düzen ve sağdaki ad yorumları taşıyıcı bilgidir:
-    // rengin hangi ANSI adına düştüğü ancak bu hizadan okunuyor. rustfmt
-    // tabloyu tek sütuna açıp hizayı yok ediyor.
+    /// `const`: `bt-gpu`'s tests take the clear and cursor colors from here in
+    /// a `const` context. That is the reason the sRGB table is `const` too.
+    // The four-per-line layout and the name comments on the right are
+    // load-bearing information: which ANSI name a color falls on can be read
+    // only from this alignment. rustfmt opens the table into a single column
+    // and destroys the alignment.
     #[rustfmt::skip]
     pub const BATERI: Theme = Theme {
         background: 0x000000,
         foreground: 0xd8d9dd,
         dim: 0x909093,
         accent: 0x7a9cc6,
-        // Altın; paletin kendi sarı ailesinden (`0xd6b16a`/`0xe8c988`) ama
-        // ondan ayrık, yoksa imleç "sarı metin" gibi okunurdu. **Zevk kararı,
-        // ölçüm değil.** Siyah zeminde açık olmak zorunda: altındaki harf
-        // zemin rengiyle, yani siyahla çiziliyor.
+        // Gold; from the palette's own yellow family (`0xd6b16a`/`0xe8c988`) but
+        // distinct from it, or the cursor would read as "yellow text". **A taste
+        // decision, not a measurement.** It has to be light on the black
+        // background: the letter under it is drawn in the background color, that
+        // is black.
         cursor: 0xd9b063,
-        // Soğuk, koyu ve **az doygun** bir arduvaz; `accent`'in ailesinden ama
-        // ondan çok koyu, çünkü üstünde metin okunacak. Ölçüt: zeminde 3:1'i
-        // geçen her metin rengi seçimde de 3:1'i geçiyor (en zayıfı `red`,
-        // 3.84; hesap 031 phase-3 → Uygulama Notları). Doygunluk bilerek
-        // düşük: daha mavi bir ton (`0x2b3a50`) ANSI mavisiyle aynı renk
-        // ailesinde kalıp o metni oranın söylediğinden zor okutuyordu. Paletin
-        // griye yakın iki siyahından (`0x22252b`, `0x4a4e57`) ton olarak
-        // ayrık — seçim bir `\e[40m` bloğu gibi okunmamalı.
+        // A cool, dark and **low-saturation** slate; from `accent`'s family but
+        // much darker than it, because text will be read on it. Criterion: every
+        // text color that exceeds 3:1 on the background also exceeds 3:1 on the
+        // selection (the weakest is `red`, 3.84; the calculation is in 031
+        // phase-3 → Uygulama Notları). The saturation is deliberately low: a
+        // bluer tone (`0x2b3a50`) stayed in the same color family as ANSI blue
+        // and made that text harder to read than the ratio says. Distinct in
+        // tone from the palette's two near-gray blacks (`0x22252b`, `0x4a4e57`)
+        // — a selection must not read as a `\e[40m` block.
         selection: 0x283042,
-        // Arama sıcak bir aile, seçimin soğuk arduvazından **ton** olarak
-        // ayrık: eşleşmeler koyu, doygun bir zeytin-kahve (zemine karşı 1.64,
-        // geri planda; 1.50'lik ilk değer siyah zeminde gerçek pencerede
-        // seçilmiyordu), geçerli eşleşme doygun bir kehribar (1.95). Tavanı seçimin
-        // ölçütü koyuyor — zeminde 3:1'i geçen her metin iki vurguda da
-        // geçiyor; en zayıfı geçerli eşleşmede `red`, 3.13
-        // (`search_highlights_keep_every_readable_text_readable`). **Zevk
-        // kararı**, offscreen dökümle seçildi (033 phase-2 → Uygulama Notları).
+        // Search is a warm family, distinct in **tone** from the selection's cool
+        // slate: matches are a dark, saturated olive-brown (1.64 against the
+        // background, in the background; the first value of 1.50 wasn't
+        // distinguishable in a real window on the black background), the current
+        // match a saturated amber (1.95). The ceiling is set by the selection's
+        // criterion — every text color that exceeds 3:1 on the background
+        // exceeds it on both highlights; the weakest is `red` on the current
+        // match, 3.13 (`search_highlights_keep_every_readable_text_readable`).
+        // **A taste decision**, chosen with an offscreen dump (033 phase-2 →
+        // Uygulama Notları).
         search_match: 0x3a3212,
         search_current: 0x503a0c,
         success: 0x8bb58b,
         error: 0xd16d6a,
-        // Kendi temasının ANSI camgöbeği (036 Karar 6), `success`/`error`'ın
-        // paletin kendi renkleri olmasıyla aynı emsal.
+        // The theme's own ANSI cyan (036 Karar 6), the same precedent as
+        // `success`/`error` being the palette's own colors.
         info: 0x79b3b3,
-        // Kendi temasının ANSI sarısı (037 Karar 3).
+        // The theme's own ANSI yellow (037 Karar 3).
         warning: 0xd6b16a,
         ansi: [
-            0x22252b, 0xd16d6a, 0x8bb58b, 0xd6b16a, // siyah   kırmızı  yeşil    sarı
-            0x7a9cc6, 0xb08ec0, 0x79b3b3, 0xc8c9cc, // mavi    macenta  camgöbeği beyaz
-            0x4a4e57, 0xe58b88, 0xa4cba4, 0xe8c988, // parlak sekizlisi, aynı sırada
+            0x22252b, 0xd16d6a, 0x8bb58b, 0xd6b16a, // black   red      green    yellow
+            0x7a9cc6, 0xb08ec0, 0x79b3b3, 0xc8c9cc, // blue    magenta  cyan     white
+            0x4a4e57, 0xe58b88, 0xa4cba4, 0xe8c988, // the bright eight, same order
             0x9bb8dc, 0xc9aad8, 0x96caca, 0xe6e7ea,
         ],
     };
 
-    /// Gömülü açık tema — `[appearance] theme = "system"` açık görünümde bunu
-    /// seçer (`light_theme`'in varsayılanı).
+    /// The embedded light theme — `[appearance] theme = "system"` picks this in
+    /// the light appearance (the default of `light_theme`).
     ///
-    /// Değerler göz kontrolüyle kabul edildi; ölçütleri:
+    /// The values were accepted by eye; their criteria:
     ///
-    /// - **ANSI adlarının anlamı korunur.** 0 (siyah) koyu uç, 7 ve 15 (beyaz)
-    ///   açık uç. Açık zeminde beyaz metin zayıf okunur ama adı "beyaz" olan
-    ///   rengi koyulaştırmak onu zemin bloğu olarak kullanan uygulamayı
-    ///   (`\e[47m`, tmux çubuğu) bozardı. Parlak beyaz yine zeminden ayrık:
-    ///   `\e[107m` görünür bir blok kalmalı, `BATERI`'nin siyahıyla aynı
-    ///   gerekçe.
-    /// - **Renkli sekizli açık zeminde okunur.** Koyu temanın pastelleri beyaz
-    ///   üstünde kaybolurdu; sarı ve camgöbeği bu yüzden koyu, doygun tonlarda
-    ///   (hardal, petrol). Parlak sekizli normalden biraz açık ama metin rengi
-    ///   olarak kullanılabilir kalır — `ls --color`'ın dizini, `git diff`'in
-    ///   eklenen satırı.
-    /// - **İmleç zeminden ve ön plandan ayrışır:** koyu mavi blok; altındaki
-    ///   harf zemin rengiyle çizildiği için (`Session::frame`) bloğun zemin
-    ///   rengine karşı da okunur olması gerekiyor.
-    /// - `dim`, ön planın zemine karışmış hâli ([`dim_toward`]) — adlı
-    ///   renklerin sönüğüyle aynı kural, ayrı bir zevk değil.
+    /// - **The meaning of the ANSI names is preserved.** 0 (black) is the dark
+    ///   end, 7 and 15 (white) the light end. White text on a light background
+    ///   reads poorly, but darkening the color named "white" would break an
+    ///   application that uses it as a background block (`\e[47m`, the tmux
+    ///   bar). Bright white is still distinct from the background: `\e[107m`
+    ///   must remain a visible block, the same reasoning as `BATERI`'s black.
+    /// - **The colored eight is legible on a light background.** The dark
+    ///   theme's pastels would vanish on white; yellow and cyan are therefore
+    ///   in dark, saturated tones (mustard, petrol). The bright eight is a bit
+    ///   lighter than the normal but stays usable as a text color — the
+    ///   directory in `ls --color`, the added line in `git diff`.
+    /// - **The cursor is distinct from the background and the foreground:** a
+    ///   dark blue block; because the letter under it is drawn in the background
+    ///   color (`Session::frame`), the block must be legible against the
+    ///   background color too.
+    /// - `dim` is the foreground blended into the background ([`dim_toward`]) —
+    ///   the same rule as the dim of named colors, not a separate taste.
     #[rustfmt::skip]
     pub const BATERI_LIGHT: Theme = Theme {
         background: 0xf5f6f8,
         foreground: 0x24262c,
         dim: 0x696b70,
         accent: 0x3d6aa8,
-        // Açık temada altın **koyu**: blok opak ve altındaki harf zeminle
-        // (neredeyse beyaz) çiziliyor, yani açık bir altında harf kaybolurdu.
-        // Koyu temanın tonu doğrudan taşınamaz; aynı ailenin bronzu.
+        // On the light theme the gold is **dark**: the block is opaque and the
+        // letter under it is drawn with the background (almost white), so the
+        // letter would vanish under a light gold. The dark theme's tone can't be
+        // carried over directly; the bronze of the same family.
         cursor: 0x8a6512,
-        // Açık bir buz mavisi: metin koyu, yani seçim zeminin bir adım
-        // koyusu. Koyu temanınkiyle aynı ölçüt — zeminde 3:1'i geçen her
-        // metin rengi seçimde de geçiyor (en zayıfı `bright_yellow`, 3.03);
-        // bir önceki değer (`0xc9d8ee`) parlak sarı, yeşil ve camgöbeğini 3:1'in
-        // altına indiriyordu. Parlak beyazdan (`0xdcdee3`) ton olarak ayrık.
+        // A light ice blue: the text is dark, so the selection is a step darker
+        // than the background. The same criterion as the dark theme's — every
+        // text color that exceeds 3:1 on the background exceeds it on the
+        // selection too (the weakest is `bright_yellow`, 3.03); the previous
+        // value (`0xc9d8ee`) pushed bright yellow, green and cyan below 3:1.
+        // Distinct in tone from bright white (`0xdcdee3`).
         selection: 0xdde6f3,
-        // Açık temada aynı aile zeminin bir adım koyusu: eşleşmeler soluk bir
-        // krem (1.05 — ayrımı parlaklık değil ton taşıyor), geçerli eşleşme
-        // doygun bir bal (1.17). Ölçütün en zayıfı yine `bright_yellow`,
-        // geçerli eşleşmede 3.01; seçimin buz mavisinden ton olarak ayrık.
+        // On the light theme the same family is a step darker than the
+        // background: matches are a pale cream (1.05 — the distinction is
+        // carried by hue, not brightness), the current match a saturated honey
+        // (1.17). The weakest of the criterion is again `bright_yellow`, 3.01 on
+        // the current match; distinct in tone from the selection's ice blue.
         search_match: 0xf9f1d2,
         search_current: 0xfee29a,
         success: 0x3b7a3b,
         error: 0xb5423d,
-        // Kendi temasının ANSI camgöbeği (036 Karar 6).
+        // The theme's own ANSI cyan (036 Karar 6).
         info: 0x23787f,
-        // Kendi temasının ANSI sarısı (037 Karar 3).
+        // The theme's own ANSI yellow (037 Karar 3).
         warning: 0x8f6a00,
         ansi: [
-            0x2b2e35, 0xb5423d, 0x3b7a3b, 0x8f6a00, // siyah   kırmızı  yeşil    sarı
-            0x3a66a6, 0x8a4c9c, 0x23787f, 0xb9bbc1, // mavi    macenta  camgöbeği beyaz
-            0x70737b, 0xc9504a, 0x4a8f4a, 0xa67c00, // parlak sekizlisi, aynı sırada
+            0x2b2e35, 0xb5423d, 0x3b7a3b, 0x8f6a00, // black   red      green    yellow
+            0x3a66a6, 0x8a4c9c, 0x23787f, 0xb9bbc1, // blue    magenta  cyan     white
+            0x70737b, 0xc9504a, 0x4a8f4a, 0xa67c00, // the bright eight, same order
             0x4a78ba, 0x9d5db0, 0x2f8a92, 0xdcdee3,
         ],
     };
 
-    /// Uygulamaya gömülü temalar, adıyla. Kullanıcının `themes/{ad}.toml`'u
-    /// aynı adı gölgeler; o karar `bt-shell`'in ad çözümünde.
+    /// The themes embedded in the application, by name. The user's
+    /// `themes/{name}.toml` shadows the same name; that decision is in
+    /// `bt-shell`'s name resolution.
     pub fn embedded(name: &str) -> Option<Theme> {
         EMBEDDED
             .iter()
@@ -287,130 +311,136 @@ impl Theme {
             .map(|(_, theme)| *theme)
     }
 
-    /// Gömülü temaların adları, tablonun sırasıyla — View ▸ Theme ▸ bu sırayla
-    /// listeliyor.
+    /// The embedded themes' names, in the table's order — View ▸ Theme ▸ lists
+    /// them in this order.
     pub fn embedded_names() -> impl Iterator<Item = &'static str> {
         EMBEDDED.iter().map(|(name, _)| *name)
     }
 
-    /// Varsayılan arka planın **sRGB** baytları (`[r, g, b]`) — pencere
-    /// kromunun zemini (`bt-shell`, `NSColor` sRGB). GPU'ya giden yol
-    /// [`Theme::background_linear`]; ikisi aynı değerden ve baytları açan
-    /// kural tek ([`rgb`]), yani başlık çubuğu ile clear rengi ayrışamaz.
+    /// The default background's **sRGB** bytes (`[r, g, b]`) — the window
+    /// chrome's ground (`bt-shell`, `NSColor` sRGB). The path to the GPU is
+    /// [`Theme::background_linear`]; both come from the same value and the rule
+    /// that unpacks the bytes is single ([`rgb`]), so the title bar and the
+    /// clear color can't drift apart.
     pub const fn background_srgb(&self) -> [u8; 3] {
         let Rgb { r, g, b } = rgb(self.background);
         [r, g, b]
     }
 
-    /// Pencerenin clear rengi, **lineer** RGBA.
+    /// The window's clear color, **linear** RGBA.
     pub const fn background_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.background))
     }
 
-    /// İmleç bloğunun rengi, **lineer** RGBA. Renderer'da sabit durmasın diye
-    /// burada: renk kararı temanın, çizim kararı renderer'ın.
+    /// The cursor block's color, **linear** RGBA. Here so it doesn't sit as a
+    /// constant in the renderer: the color decision is the theme's, the draw
+    /// decision the renderer's.
     pub const fn cursor_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.cursor))
     }
 
-    /// Vurgu rengi, **lineer** RGBA — bugün **yalnız koşan komut bloğunun
-    /// şeridi**. İmleç 014'te kendi rolüne ayrıldı
-    /// ([`Theme::cursor_linear`]); ikisi tek değerden beslenirken "imleci
-    /// altın yap" isteği şeridi de altın yapıyordu.
+    /// The accent color, **linear** RGBA — today **only the running command
+    /// block's stripe**. The cursor was split into its own role in 014
+    /// ([`Theme::cursor_linear`]); while the two were fed from a single value,
+    /// a "make the cursor gold" request made the stripe gold too.
     pub const fn accent_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.accent))
     }
 
-    /// Seçim vurgusunun rengi, **lineer** RGBA — odaktaki pencerede.
+    /// The selection highlight's color, **linear** RGBA — in a focused window.
     pub const fn selection_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.selection))
     }
 
-    /// Odaksız penceredeki seçim: zemine doğru **üçte bir** ([`dim_toward`]).
+    /// The selection in an unfocused window: **one third** toward the
+    /// background ([`dim_toward`]).
     ///
-    /// Yeni bir rol değil, türetilmiş değer ([`Theme::quiet_linear`] emsali):
-    /// seçim silinmiyor, geri çekiliyor — odak dönünce aynı seçim aynı yerde.
-    /// Hangisinin çizileceği `bt-gpu`'nun kararı, çünkü odak `bt-core`'a
-    /// girmiyor (031 Karar 9).
+    /// Not a new role but a derived value (the precedent of
+    /// [`Theme::quiet_linear`]): the selection isn't erased, it's pulled back —
+    /// when focus returns the same selection is in the same place. Which one
+    /// gets drawn is `bt-gpu`'s decision, because focus doesn't enter `bt-core`
+    /// (031 Karar 9).
     pub const fn selection_unfocused_linear(&self) -> LinearRgba {
         linear_rgba(dim_toward(rgb(self.selection), self.background_rgb()))
     }
 
-    /// Arama eşleşmelerinin vurgusu, **lineer** RGBA — odaktaki pencerede.
+    /// The search matches' highlight, **linear** RGBA — in a focused window.
     pub const fn search_match_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.search_match))
     }
 
-    /// Odaksız penceredeki eşleşme vurgusu: seçimin kuralı
-    /// ([`Theme::selection_unfocused_linear`]), aynı üçte bir.
+    /// The match highlight in an unfocused window: the selection's rule
+    /// ([`Theme::selection_unfocused_linear`]), the same one third.
     pub const fn search_match_unfocused_linear(&self) -> LinearRgba {
         linear_rgba(dim_toward(rgb(self.search_match), self.background_rgb()))
     }
 
-    /// Geçerli eşleşmenin vurgusu, **lineer** RGBA — odaktaki pencerede.
+    /// The current match's highlight, **linear** RGBA — in a focused window.
     pub const fn search_current_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.search_current))
     }
 
-    /// Odaksız penceredeki geçerli eşleşme vurgusu; seçimin kuralı.
+    /// The current match's highlight in an unfocused window; the selection's rule.
     pub const fn search_current_unfocused_linear(&self) -> LinearRgba {
         linear_rgba(dim_toward(rgb(self.search_current), self.background_rgb()))
     }
 
-    /// Varsayılan ön plan, **lineer** RGBA; dock'un yazdığı metnin rengi.
+    /// The default foreground, **linear** RGBA; the color of the text the dock
+    /// writes.
     ///
-    /// Izgara bu yoldan geçmiyor — orada renk hücrenin `Color`'ından
-    /// [`resolve_fg`] ile çözülüyor. Dock'un hücresinin `Color`'ı yok: ayna
-    /// düz metin taşıyor ve varsayılanı rolün kendisi.
+    /// The grid doesn't go through this path — there the color is resolved from
+    /// the cell's `Color` with [`resolve_fg`]. The dock's cell has no `Color`:
+    /// the mirror carries plain text and the default is the role itself.
     pub const fn foreground_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.foreground))
     }
 
-    /// Sönük ön plan, **lineer** RGBA; dock'ta öneri kuyruğunun
-    /// (`POSTDISPLAY`) rengi.
+    /// The dim foreground, **linear** RGBA; the color of the suggestion tail
+    /// (`POSTDISPLAY`) in the dock.
     ///
-    /// Rol yeni değil, okuyucusu yeni: SGR 2'li varsayılan ön plan da
-    /// ([`resolve_fg`]) buradan geliyor. Öneri "henüz yazılmamış metin" ve
-    /// sönüklüğün tanımı — zeminle arasındaki farkı azalt — tam olarak onu
-    /// anlatıyor.
+    /// The role isn't new, its reader is: the default foreground with SGR 2
+    /// ([`resolve_fg`]) comes from here too. A suggestion is "text not yet
+    /// written" and the definition of dimness — reduce the difference from the
+    /// background — describes exactly that.
     pub const fn dim_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.dim))
     }
 
-    /// Sönüğün sönüğü — **okunması gereken ama öne çıkmayan** metin.
+    /// The dim of the dim — text that **must be read but doesn't stand out**.
     ///
-    /// **Yeni bir rol değil, türetilmiş bir değer** (`CLAUDE.md` → çizilmeyen
-    /// rol eklenmiyor): sönük ön planın zemine bir kez daha karışmış hâli,
-    /// kural yine [`dim_toward`].
+    /// **Not a new role but a derived value** (`CLAUDE.md` → a role that isn't
+    /// drawn isn't added): the dim foreground blended into the background once
+    /// more, the rule again [`dim_toward`].
     ///
-    /// Tek tüketicisi dock'un bağlam satırındaki **üst dizinler**: aktif
-    /// klasör ile dal `dim`'de kalırken onları taşıyan yol geri çekiliyor.
-    /// Hâlâ mürekkep, yani okunabilir olmak zorunda — [`separator_linear`]
-    /// bir adım daha sönük ve o artık mürekkep değil.
+    /// Its only consumer is the **parent directories** in the dock's context
+    /// line: while the active folder and the branch stay at `dim`, the path
+    /// carrying them is pulled back. It's still ink, so it has to be legible —
+    /// [`separator_linear`] is one step dimmer and that is no longer ink.
     pub const fn quiet_linear(&self) -> LinearRgba {
         linear_rgba(dim_toward(rgb(self.dim), self.background_rgb()))
     }
 
-    /// Saç çizgilerinin rengi, **lineer** RGBA.
+    /// The hairlines' color, **linear** RGBA.
     ///
-    /// Aynı kuralın **üçüncü** uygulaması ([`dim_linear`] → [`quiet_linear`] →
-    /// burası): üç kademe de tek bir `dim_toward` zincirinden doğuyor, ayrı
-    /// bir zevk sabiti girmiyor.
+    /// The **third** application of the same rule ([`dim_linear`] →
+    /// [`quiet_linear`] → this): all three steps are born from a single
+    /// `dim_toward` chain, no separate taste constant enters.
     ///
-    /// Bir adım fazlası bilinçli ve ölçütü şu: ayraç **mürekkep değil**.
-    /// `quiet_linear`'da durulsaydı çizgiler yanlarındaki en sessiz metinle
-    /// aynı ağırlıkta olurdu ve göz onları da okunacak bir şey sanırdı
-    /// (kullanıcı, 012: "çizgilerin renklerini daha da koyult, bu kadar belli
-    /// olmasın"). Görülmeli ama okunacak bir şey olmamalı.
+    /// The extra step is deliberate and the criterion is this: the separator is
+    /// **not ink**. Had it stopped at `quiet_linear`, the lines would have the
+    /// same weight as the quietest text next to them and the eye would take them
+    /// for something to read too (the user, 012: "darken the lines' colors
+    /// further, don't make them so noticeable"). It must be seen but must not be
+    /// something to read.
     pub const fn separator_linear(&self) -> LinearRgba {
         linear_rgba(self.separator_rgb())
     }
 
-    /// Saç çizgilerinin rengi, **sRGB** baytları (`[r, g, b]`) — bölmeler
-    /// arasındaki ayırıcı (`bt-shell`, `NSColor` sRGB; 039 Karar 7). GPU'ya
-    /// giden yol [`Theme::separator_linear`]; ikisi aynı zincirden
-    /// ([`Theme::background_srgb`] ile `background_linear`'ın emsali), yani
-    /// ayırıcı ile dock'un çizgileri ayrışamaz.
+    /// The hairlines' color, as **sRGB** bytes (`[r, g, b]`) — the separator
+    /// between splits (`bt-shell`, `NSColor` sRGB; 039 Karar 7). The path to the
+    /// GPU is [`Theme::separator_linear`]; both come from the same chain (the
+    /// precedent of [`Theme::background_srgb`] and `background_linear`), so the
+    /// separator and the dock's lines can't drift apart.
     pub const fn separator_srgb(&self) -> [u8; 3] {
         let Rgb { r, g, b } = self.separator_rgb();
         [r, g, b]
@@ -423,52 +453,54 @@ impl Theme {
         )
     }
 
-    /// Paletin `index` numaralı renginin **lineer** RGBA'sı.
+    /// The **linear** RGBA of the palette's color number `index`.
     ///
-    /// [`resolve`]'un `Colors` tablosuz kardeşi ve tek çağıranı dock: aynanın
-    /// `region_highlight`'ı numara taşıyor, uygulamanın OSC 4 ile değiştirdiği
-    /// tablo ise `Term` kilidinin arkasında (`Event::ColorRequest`'in bilinen
-    /// sınırıyla aynı kök). **Bilinen sınır:** OSC 4 ile değiştirilmiş bir
-    /// paleti dock görmez, temanınkini çizer.
+    /// The sibling of [`resolve`] without the `Colors` table and its only
+    /// caller is the dock: the mirror's `region_highlight` carries a number,
+    /// while the table an application changes with OSC 4 is behind the `Term`
+    /// lock (the same root as `Event::ColorRequest`'s known limit). **Known
+    /// limit:** the dock doesn't see a palette changed with OSC 4, it draws the
+    /// theme's.
     pub(crate) fn indexed_linear(&self, index: u8) -> LinearRgba {
         linear_rgba(self.default(index as usize))
     }
 
-    /// Başarıyla biten bloğun şerit rengi, **lineer** RGBA.
+    /// The stripe color of a block that ended successfully, **linear** RGBA.
     pub const fn success_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.success))
     }
 
-    /// Hatayla biten bloğun şerit rengi, **lineer** RGBA.
+    /// The stripe color of a block that ended with an error, **linear** RGBA.
     pub const fn error_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.error))
     }
 
-    /// Bilgi rolü, **lineer** RGBA — uzak oturumun host'u ve dock'un üst saç
-    /// çizgisi (036).
+    /// The info role, **linear** RGBA — the remote session's host and the
+    /// dock's top hairline (036).
     pub const fn info_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.info))
     }
 
-    /// Uyarı rolü, **lineer** RGBA — staging işaretli uzak host (037).
+    /// The warning role, **linear** RGBA — the remote host marked staging (037).
     pub const fn warning_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.warning))
     }
 
-    /// Uzak host'un işaretinden renge **tek** yol (037 Karar 3), **lineer**:
-    /// production `error`, staging `warning`, development `success`,
-    /// işaretsiz `info`; doğrudan renk kendisi, sRGB'den lineerleşerek.
+    /// The **single** path from a remote host's mark to a color (037 Karar 3),
+    /// **linear**: production is `error`, staging `warning`, development
+    /// `success`, unmarked `info`; a direct color is itself, linearized from
+    /// sRGB.
     ///
-    /// Anlam ile renk burada birleşiyor, yani tema değişimi işareti
-    /// kendiliğinden taşıyor: `Session` yalnız işareti tutuyor, rengi kare
-    /// o karenin temasından çözüyor.
+    /// Meaning and color meet here, so a theme change carries the mark along by
+    /// itself: `Session` holds only the mark, the frame resolves the color from
+    /// that frame's theme.
     pub const fn mark_linear(&self, mark: HostMark) -> LinearRgba {
         linear_rgba(rgb(self.mark_rgb(mark)))
     }
 
-    /// İşaretin rengi, **sRGB** `0xRRGGBB` — eşlemenin kendisi
-    /// ([`Theme::mark_linear`] onu lineerleştiriyor). sRGB'yi isteyen
-    /// sekmenin noktası (`NSColor`, 037 Karar 4); lineer değer yalnız GPU'nun.
+    /// The mark's color, **sRGB** `0xRRGGBB` — the mapping itself
+    /// ([`Theme::mark_linear`] linearizes it). For the tab's dot, which wants
+    /// sRGB (`NSColor`, 037 Karar 4); the linear value is only the GPU's.
     pub const fn mark_rgb(&self, mark: HostMark) -> u32 {
         match mark {
             HostMark::Production => self.error,
@@ -479,16 +511,16 @@ impl Theme {
         }
     }
 
-    /// Paletin `index` numaralı rengi. Numaralandırma alacritty'nin
-    /// `term::color` tablosudur: 0..16 ANSI, 16..232 küp, 232..256 gri rampa,
-    /// 256+ rol renkleri.
+    /// The palette's color number `index`. The numbering is alacritty's
+    /// `term::color` table: 0..16 ANSI, 16..232 cube, 232..256 gray ramp, 256+
+    /// role colors.
     ///
-    /// Soğuk değil: taze bir oturumda `Colors` tablosu boştur (yalnız OSC
-    /// 4/10/11 doldurur), yani `resolve` her hücrede buraya düşer.
+    /// Not cold: in a fresh session the `Colors` table is empty (only OSC
+    /// 4/10/11 fill it), so `resolve` falls here for every cell.
     #[inline]
     pub(crate) fn default(&self, index: usize) -> Rgb {
         match index {
-            0..=15 => rgb(self.ansi[index]), // audit: kol indeksi 0..16'ya bağlar
+            0..=15 => rgb(self.ansi[index]), // audit: the arm bounds the index to 0..16
             16..=231 => {
                 let n = index - 16;
                 Rgb {
@@ -498,60 +530,65 @@ impl Theme {
                 }
             }
             232..=255 => {
-                let v = 8 + 10 * (index - 232) as u8; // audit: kol bağlar, en çok 238
+                let v = 8 + 10 * (index - 232) as u8; // audit: the arm bounds it, 238 at most
                 Rgb { r: v, g: v, b: v }
             }
             256 => rgb(self.foreground),
             257 => rgb(self.background),
-            // İmleç rengi: kendi rolünden. Bugüne kadar `accent`'e takma
-            // addı ve iki ayrı soru tek değerden cevaplanıyordu.
+            // Cursor color: from its own role. Until now it was an alias to
+            // `accent` and two separate questions were answered from one value.
             258 => rgb(self.cursor),
-            // 259..=266 sönük ANSI sekizlisi, 267 parlak ön plan, 268 sönük ön
-            // plan.
+            // 259..=266 the dim ANSI eight, 267 bright foreground, 268 dim
+            // foreground.
             259..=266 => dim_toward(rgb(self.ansi[index - 259]), self.background_rgb()),
             267 => rgb(self.foreground),
             268 => rgb(self.dim),
-            // Tablo 269 girdilik; buraya düşen bir indeks alacritty'nin
-            // değişmesi demektir. Renk yerine arka plan verip sessiz kalırız,
-            // panik etmeyiz.
+            // The table has 269 entries; an index that falls here means
+            // alacritty changed. We stay silent by returning the background
+            // instead of a color, we don't panic.
             _ => rgb(self.background),
         }
     }
 
-    /// Varsayılan arka planın `Rgb` hâli; `frame()` karşılaştırmayı bununla
-    /// yapar, f32 eşitliği aramaz.
+    /// The default background as `Rgb`; `frame()` does the comparison with this
+    /// and doesn't look for f32 equality.
     pub(crate) const fn background_rgb(&self) -> Rgb {
         rgb(self.background)
     }
 }
 
-/// Gömülü temaların tablosu; [`Theme::embedded`] okur.
+/// The table of embedded themes; [`Theme::embedded`] reads it.
 const EMBEDDED: [(&str, Theme); 2] = [
     ("bateri", Theme::BATERI),
     ("bateri-light", Theme::BATERI_LIGHT),
 ];
 
-/// Sönük (SGR 2) rengin **tek kuralı**: renk, zemine doğru üçte bir yol alır.
+/// The **single rule** for a dim (SGR 2) color: the color moves one third of
+/// the way toward the background.
 ///
-/// Neden zemine: sönüklük "zeminle arasındaki farkı azalt" demek. 006'ya
-/// kadarki kural vte'nin `× 2/3`'üydü (`impl Mul<f32> for Rgb`, yorumu birebir
-/// "the default dim is just *2/3") ve o siyaha doğru karıştırmanın ta
-/// kendisi — açık zeminde sönük metni **koyulaştırıp** öne çıkarıyordu.
+/// Why toward the background: dimness means "reduce the difference from the
+/// background". Until 006 the rule was vte's `× 2/3` (`impl Mul<f32> for Rgb`,
+/// its comment literally "the default dim is just *2/3") and that is blending
+/// toward black itself — on a light background it **darkened** dim text and
+/// made it stand out.
 ///
-/// Oran bir tasarım sabiti, ölçüm değil. Üçte bir seçildi çünkü siyah zeminde
-/// vte'nin çarpımıyla bit bit aynı sonucu veriyor (`dim_on_black_is_vte`):
-/// alışılmış sönüklük koyu temada en az kayar, `BATERI`'nin zemini siyaha
-/// yakın olduğu için değerler birkaç basamak açılır.
+/// The ratio is a design constant, not a measurement. One third was chosen
+/// because on a black background it gives a result bit-for-bit identical to
+/// vte's multiplication (`dim_on_black_is_vte`): the familiar dimness shifts
+/// least on the dark theme, and since `BATERI`'s background is close to black
+/// the values open up by a few steps.
 ///
-/// Uzay sRGB 8-bit, vte'ninkiyle aynı; lineerleştirme sınırda kalır
-/// (`linear_rgba`). Lineer uzayda karıştırmak koyu zeminde algıda çok daha
-/// az söndürürdü. Tam sayı bölmesi keser — vte'nin `as u8`'i de kesiyor.
+/// The space is sRGB 8-bit, the same as vte's; linearization stays at the
+/// boundary (`linear_rgba`). Blending in linear space would dim far less
+/// perceptually on a dark background. Integer division truncates — vte's
+/// `as u8` truncates too.
 ///
-/// Hedef **temanın** zemini, uygulamanın OSC 11 ile değiştirdiği değil: clear
-/// rengi ve `frame()`'in atlama kararı da temadan okuyor.
+/// The target is the **theme's** background, not the one the application
+/// changes with OSC 11: the clear color and `frame()`'s skip decision read from
+/// the theme too.
 ///
-/// `const`: `Theme::default` gibi palet yolunda ve tek bir tamsayı
-/// aritmetiği.
+/// `const`: on the palette path like `Theme::default` and a single integer
+/// arithmetic.
 const fn dim_toward(color: Rgb, background: Rgb) -> Rgb {
     Rgb {
         r: dim_channel(color.r, background.r),
@@ -561,21 +598,22 @@ const fn dim_toward(color: Rgb, background: Rgb) -> Rgb {
 }
 
 const fn dim_channel(color: u8, background: u8) -> u8 {
-    // audit: en çok (2·255 + 255) / 3 = 255, `u8`'e sığar.
+    // audit: at most (2·255 + 255) / 3 = 255, fits in `u8`.
     ((2 * color as u16 + background as u16) / 3) as u8
 }
 
-/// 6×6×6 renk küpünün kanal basamakları (xterm sözleşmesi).
+/// The channel steps of the 6×6×6 color cube (the xterm convention).
 const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
 
-/// Hücrenin rengini ekranın rengine çevirir.
+/// Converts a cell's color to the screen's color.
 ///
-/// `colors` uygulamanın OSC 4/10/11 ile değiştirdiği tablodur ve girdileri
-/// `None` olabilir; boş girdide temanın paletine düşülür.
+/// `colors` is the table the application changes with OSC 4/10/11 and its
+/// entries can be `None`; on an empty entry we fall back to the theme's
+/// palette.
 ///
-/// `#[inline]`: `linear_rgba` ile aynı sıcak yol ve aynı gerekçe.
-/// `Theme::default` ile **birlikte** işaretlenir; yalnız biri alınırsa çağrı
-/// ötekine kayar.
+/// `#[inline]`: the same hot path as `linear_rgba` and the same reasoning.
+/// It is marked **together with** `Theme::default`; if only one were taken the
+/// call would shift onto the other.
 #[inline]
 pub(crate) fn resolve(color: Color, colors: &Colors, theme: &Theme) -> Rgb {
     let index = match color {
@@ -583,22 +621,25 @@ pub(crate) fn resolve(color: Color, colors: &Colors, theme: &Theme) -> Rgb {
         Color::Named(named) => named as usize,
         Color::Indexed(index) => index as usize,
     };
-    // Tablo 269 girdilik; `NamedColor` en çok 268, `Indexed` en çok 255.
-    colors[index].unwrap_or_else(|| theme.default(index)) // audit: indeks sınırlı
+    // The table has 269 entries; `NamedColor` is 268 at most, `Indexed` 255 at
+    // most.
+    colors[index].unwrap_or_else(|| theme.default(index)) // audit: the index is bounded
 }
 
-/// Hücrenin **`fg`'sinden doğan** rengi, sönüklük dahil çözer.
+/// Resolves the color **born from the cell's `fg`**, dimness included.
 ///
-/// Sönüklüğün tek kuralı burada, çünkü iki yerde uygulanıyor: normal hücrede
-/// ön plana, ters videoda arka plana (`Session::frame`). İki dala ayrı ayrı
-/// yazılsaydı biri değişip öteki eski kalabilirdi.
+/// The single rule of dimness is here, because it is applied in two places:
+/// to the foreground in a normal cell, to the background in reverse video
+/// (`Session::frame`). Written separately in the two arms, one could change
+/// while the other stayed old.
 ///
-/// Varsayılan ön plan sönükse çözümden **önce** temanın `dim` rolü alınır —
-/// alacritty uygulamasının `DimForeground`'ı. Sonucu: OSC 10 ile değişmiş bir
-/// ön plan sönük hücrede o rengin sönüğü değil, rolün kendisi olur (alacritty
-/// de öyle). Öteki renkler çözülür ve zemine karışır ([`dim_toward`]).
+/// If the default foreground is dim, the theme's `dim` role is taken **before**
+/// resolution — the alacritty application's `DimForeground`. Its consequence: a
+/// foreground changed with OSC 10 becomes, in a dim cell, the role itself, not
+/// that color's dim (alacritty does the same). Other colors are resolved and
+/// blended into the background ([`dim_toward`]).
 ///
-/// `#[inline]`: `resolve` ile aynı sıcak yol.
+/// `#[inline]`: the same hot path as `resolve`.
 #[inline]
 pub(crate) fn resolve_fg(color: Color, dim: bool, colors: &Colors, theme: &Theme) -> Rgb {
     match color {
@@ -616,16 +657,17 @@ const fn rgb(hex: u32) -> Rgb {
     }
 }
 
-/// sRGB kodlu 8-bit kanal → lineer f32. Kaynağı IEC 61966-2-1'in transfer
-/// fonksiyonu (`c/12.92`, kırılmadan sonra `((c+0.055)/1.055)^2.4`).
+/// sRGB-encoded 8-bit channel → linear f32. Its source is the transfer
+/// function of IEC 61966-2-1 (`c/12.92`, after the knee `((c+0.055)/1.055)^2.4`).
 ///
-/// Tablo, elle bakılan bir sabit listesi **değil**, türetilmiş bir veridir:
-/// `srgb_table_follows_transfer_function` her girdiyi formüle bağlar.
-/// Tablo olmasının sebebi `const`luk — `powf` stable'da `const` değil, oysa
-/// [`Theme::background_linear`] ve [`Theme::accent_linear`] `const fn`.
-// rustfmt tabloyu girdi başına bir satıra açıyor: 64 satır 256 olur ve
-// dosyanın geri kalanı okunmaz hâle gelir. `Theme::BATERI`'nin ANSI
-// tablosuyla aynı gerekçe.
+/// The table is **not** a hand-inspected list of constants but derived data:
+/// `srgb_table_follows_transfer_function` ties every entry to the formula.
+/// The reason for a table is `const`ness — `powf` isn't `const` on stable,
+/// whereas [`Theme::background_linear`] and [`Theme::accent_linear`] are
+/// `const fn`.
+// rustfmt opens the table into one line per entry: 64 lines become 256 and
+// the rest of the file becomes unreadable. The same reasoning as the ANSI
+// table of `Theme::BATERI`.
 #[rustfmt::skip]
 const SRGB_LINEAR: [f32; 256] = [
     0.0, 0.000303527, 0.000607054, 0.000910581,
@@ -694,34 +736,35 @@ const SRGB_LINEAR: [f32; 256] = [
     0.9734453, 0.9822506, 0.9911021, 1.0,
 ];
 
-/// Rengi renderer'ın beklediği **lineer** RGBA'ya çevirir.
+/// Converts a color to the **linear** RGBA the renderer expects.
 ///
-/// Ad uzayı taşıyor çünkü bu depoda sessizce yanlış olabilecek tek şey bir
-/// float'ın hangi uzayda olduğu: çizim hedefi `BGRA8Unorm_sRGB` ve donanım
-/// fragment çıktısını lineer sayıp yazarken kodluyor. Burada `c / 255.0`
-/// dönseydi palet açılırdı (ara ton `0x1a1c21` → `0x5a5d65` gri); bunu gören tek
-/// bekçi `bt-gpu`'nun `cell_bg_paints_pixels_on_the_gpu` sınamasıdır ve
-/// ancak **ara ton** bir renkle görüyor.
+/// The name carries the space because the one thing that can be silently wrong
+/// in this repo is which space a float is in: the draw target is
+/// `BGRA8Unorm_sRGB` and the hardware treats the fragment output as linear and
+/// encodes on write. If `c / 255.0` were returned here the palette would open
+/// up (the midtone `0x1a1c21` → the gray `0x5a5d65`); the only guard that sees
+/// this is `bt-gpu`'s `cell_bg_paints_pixels_on_the_gpu` test and it sees it
+/// only with a **midtone** color.
 ///
-/// Aynı floatlar `MTLClearColor`'a da gidiyor — Metal sRGB hedefte clear
-/// rengini de lineer okur, yani pencere zemini ile hücreler tek kaynaktan
-/// düzeliyor.
+/// The same floats go to `MTLClearColor` too — Metal reads the clear color as
+/// linear on an sRGB target as well, so the window ground and the cells are
+/// corrected from a single source.
 ///
-/// `#[inline]`: hücre başına, kare başına çağrılıyor (`Session::frame`) ve
-/// LTO kapalı (`[profile.release]` yok); işaret olmadan gövde crate sınırını
-/// geçmiyordu — `nm -u` release rlib'inde tanımsız sembol gösteriyordu, yani
-/// bir tablo aramasının etrafında gerçek bir çağrı kalıyordu.
+/// `#[inline]`: called per cell, per frame (`Session::frame`) and LTO is off
+/// (there is no `[profile.release]`); without the mark the body didn't cross
+/// the crate boundary — `nm -u` showed an undefined symbol in the release
+/// rlib, i.e. a real call remained around a table lookup.
 #[inline]
 pub(crate) const fn linear_rgba(color: Rgb) -> LinearRgba {
     LinearRgba::from_srgb(color.r, color.g, color.b)
 }
 
-/// `0xRRGGBB` → **lineer** RGBA.
+/// `0xRRGGBB` → **linear** RGBA.
 ///
-/// Tek çağıranı aynanın `#rrggbb` yazan `region_highlight` kaydı
-/// ([`crate::shell::HighlightColor::Rgb`]): o renk palete hiç uğramıyor,
-/// kabuk onu doğrudan söylüyor. Paletin yazıldığı biçimle (`0xRRGGBB`) aynı
-/// olması tesadüf değil — temanın alanları da öyle.
+/// Its only caller is the mirror's `#rrggbb`-writing `region_highlight` record
+/// ([`crate::shell::HighlightColor::Rgb`]): that color never goes through the
+/// palette, the shell says it directly. That it is the same format the palette
+/// is written in (`0xRRGGBB`) is no coincidence — the theme's fields are too.
 pub(crate) const fn linear_hex(hex: u32) -> LinearRgba {
     linear_rgba(rgb(hex))
 }
@@ -734,15 +777,16 @@ mod tests {
 
     #[test]
     fn default_background_has_one_source() {
-        // Hücrenin `Named(Background)`'ı, `frame()`'in atlama kararı ve
-        // pencerenin clear rengi temanın **aynı** alanından gelmeli;
-        // ayrılırlarsa boş hücreler pencereden farklı boyanır.
+        // The cell's `Named(Background)`, `frame()`'s skip decision and the
+        // window's clear color must come from the **same** field of the theme;
+        // if they part ways, empty cells are painted differently from the window.
         let background = rgb(THEME.background);
         assert_eq!(THEME.default(NamedColor::Background as usize), background);
         assert_eq!(THEME.background_rgb(), background);
         assert_eq!(THEME.background_linear(), linear_rgba(background));
-        // İmleç de **kendi** rolünden: renk sorusunun yanıtı ile çizilen blok
-        // ayrışmasın. 258 bugüne kadar `accent`'e takma addı (014 phase-3).
+        // The cursor too from its **own** role: so the answer to the color
+        // question and the drawn block don't drift apart. 258 was an alias to
+        // `accent` until now (014 phase-3).
         assert_eq!(
             THEME.default(NamedColor::Cursor as usize),
             rgb(THEME.cursor)
@@ -752,9 +796,9 @@ mod tests {
 
     #[test]
     fn separator_has_one_source() {
-        // Bölmelerin ayırıcısı (sRGB, `NSColor`) ile dock'un saç çizgileri
-        // (lineer, GPU) aynı değerden: ikisi ayrışırsa bölme çizgisi dock'un
-        // çizgisinden başka bir tonda durur (039 Karar 7).
+        // The splits' separator (sRGB, `NSColor`) and the dock's hairlines
+        // (linear, GPU) come from the same value: if they part ways, the split
+        // line sits in a different tone than the dock's line (039 Karar 7).
         for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
             let [r, g, b] = theme.separator_srgb();
             let hex = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
@@ -764,18 +808,19 @@ mod tests {
 
     #[test]
     fn bateri_palette_is_pinned() {
-        // Paletin 19 değeri **elle yazılmış** bir listeye bağlı: tablodan
-        // hesaplanan bir beklenti, tabloya düşen yazım hatasını kendisi de
-        // taşırdı. Değerleri bilerek değiştiren bu listeyi de değiştirir.
+        // The palette's 19 values are tied to a **hand-written** list: an
+        // expectation computed from the table would itself carry a typo that
+        // slipped into the table. Whoever changes the values on purpose changes
+        // this list too.
         #[rustfmt::skip]
         const EXPECTED: [(usize, u32); 19] = [
             (0, 0x22252b), (1, 0xd16d6a), (2, 0x8bb58b), (3, 0xd6b16a),
             (4, 0x7a9cc6), (5, 0xb08ec0), (6, 0x79b3b3), (7, 0xc8c9cc),
             (8, 0x4a4e57), (9, 0xe58b88), (10, 0xa4cba4), (11, 0xe8c988),
             (12, 0x9bb8dc), (13, 0xc9aad8), (14, 0x96caca), (15, 0xe6e7ea),
-            (256, 0xd8d9dd), // ön plan
-            (257, 0x000000), // arka plan
-            (258, 0xd9b063), // imleç
+            (256, 0xd8d9dd), // foreground
+            (257, 0x000000), // background
+            (258, 0xd9b063), // cursor
         ];
         for (index, hex) in EXPECTED {
             assert_eq!(THEME.default(index), rgb(hex), "{index}");
@@ -784,26 +829,29 @@ mod tests {
 
     #[test]
     fn bateri_light_palette_is_pinned() {
-        // `bateri_palette_is_pinned`'in açık tema karşılığı, aynı gerekçe;
-        // sönük ön plan rolü de listede (268), çünkü o da elle seçildi.
+        // The light-theme counterpart of `bateri_palette_is_pinned`, same
+        // reasoning; the dim foreground role is in the list too (268), because
+        // it was hand-picked as well.
         #[rustfmt::skip]
         const EXPECTED: [(usize, u32); 20] = [
             (0, 0x2b2e35), (1, 0xb5423d), (2, 0x3b7a3b), (3, 0x8f6a00),
             (4, 0x3a66a6), (5, 0x8a4c9c), (6, 0x23787f), (7, 0xb9bbc1),
             (8, 0x70737b), (9, 0xc9504a), (10, 0x4a8f4a), (11, 0xa67c00),
             (12, 0x4a78ba), (13, 0x9d5db0), (14, 0x2f8a92), (15, 0xdcdee3),
-            (256, 0x24262c), // ön plan
-            (257, 0xf5f6f8), // arka plan
-            (258, 0x8a6512), // imleç
-            (268, 0x696b70), // sönük ön plan
+            (256, 0x24262c), // foreground
+            (257, 0xf5f6f8), // background
+            (258, 0x8a6512), // cursor
+            (268, 0x696b70), // dim foreground
         ];
         let light = Theme::BATERI_LIGHT;
         for (index, hex) in EXPECTED {
             assert_eq!(light.default(index), rgb(hex), "{index}");
         }
-        // Parlak beyaz zeminden ayrık: `\e[107m` görünür bir blok.
+        // Bright white is distinct from the background: `\e[107m` is a visible
+        // block.
         assert_ne!(light.ansi[15], light.background);
-        // `dim` rolü kuralın kendisinden: ön planın zemine karışmış hâli.
+        // The `dim` role comes from the rule itself: the foreground blended
+        // into the background.
         assert_eq!(
             rgb(light.dim),
             dim_toward(rgb(light.foreground), light.background_rgb())
@@ -817,18 +865,18 @@ mod tests {
         assert_eq!(
             Theme::embedded("Bateri"),
             None,
-            "ad büyük-küçük harfe duyarlı"
+            "the name is case-sensitive"
         );
         assert_eq!(Theme::embedded(""), None);
     }
 
     #[test]
     fn srgb_table_follows_transfer_function() {
-        // Tablo elle yazılmış 256 sayı değil, formülün donmuş hâli. Referans
-        // f64'te hesaplanır; tablo f32 olduğu için epsilon yalnız f32
-        // yuvarlamasını karşılar (mutlak hata ≤ ~6e-8).
+        // The table is not 256 hand-written numbers but the formula frozen. The
+        // reference is computed in f64; since the table is f32 the epsilon only
+        // covers f32 rounding (absolute error ≤ ~6e-8).
         assert_eq!(SRGB_LINEAR[0], 0.0);
-        assert_eq!(SRGB_LINEAR[255], 1.0, "beyaz lineerde de 1.0 kalmalı");
+        assert_eq!(SRGB_LINEAR[255], 1.0, "white must stay 1.0 in linear too");
         for (i, &linear) in SRGB_LINEAR.iter().enumerate() {
             let c = i as f64 / 255.0;
             let expected = if c <= 0.04045 {
@@ -840,11 +888,12 @@ mod tests {
                 (f64::from(linear) - expected).abs() < 1e-7,
                 "{i}: {linear} != {expected}"
             );
-            // Tablonun gerçekten **lineerleştirdiğinin** kanıtı, GPU
-            // istemeden: lineer değer sRGB-kodlu hâlinden (`i/255`) kesin
-            // olarak küçüktür. Tablo yerine `c / 255.0` konsaydı bu satır
-            // düşerdi. Uçlar (0 ve 255) transfer fonksiyonunun sabit
-            // noktaları, eşitlik oradan gelir ve aralığın dışında bırakılır.
+            // Proof that the table really **linearizes**, without the GPU: a
+            // linear value is strictly smaller than its sRGB-encoded form
+            // (`i/255`). Had `c / 255.0` been put in place of the table, this
+            // line would fail. The ends (0 and 255) are the transfer function's
+            // fixed points, equality comes from there and they are left outside
+            // the range.
             if (1..255).contains(&i) {
                 assert!(f64::from(linear) < c, "{i}: {linear} !< {c}");
             }
@@ -854,20 +903,20 @@ mod tests {
     #[test]
     fn palette_indices_follow_xterm() {
         assert_eq!(THEME.default(1), rgb(THEME.ansi[1]));
-        // 16 = küpün başı (0,0,0), 231 = sonu (255,255,255).
+        // 16 = the cube's start (0,0,0), 231 = its end (255,255,255).
         assert_eq!(THEME.default(16), rgb(0x000000));
         assert_eq!(THEME.default(231), rgb(0xffffff));
-        // Gri rampa 8'den başlar, 10'ar artar.
+        // The gray ramp starts at 8 and goes up by 10.
         assert_eq!(THEME.default(232), rgb(0x080808));
         assert_eq!(THEME.default(255), rgb(0xeeeeee));
     }
 
     #[test]
     fn dim_colors_move_toward_the_background() {
-        // Kuralın asıl değişmezi: sönük renk, kaynağı ile zemin arasında
-        // durur — kanal kanal. Koyu temada bu "koyulaşır", açıkta "açılır"
-        // demek; iki zemin de sınanıyor ki kural yeniden siyaha doğru
-        // çarpmaya dönerse açık tema düşsün.
+        // The rule's real invariant: a dim color sits between its source and the
+        // background — channel by channel. On the dark theme that means "darkens",
+        // on the light one "lightens"; both backgrounds are tested so that the
+        // light theme fails if the rule goes back to multiplying toward black.
         for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
             let bg = theme.background_rgb();
             for index in 259..=266 {
@@ -885,35 +934,37 @@ mod tests {
             }
         }
         let sum = |c: Rgb| u32::from(c.r) + u32::from(c.g) + u32::from(c.b);
-        // Koyu temada kırmızının sönüğü kararır, açık temada açılır.
+        // On the dark theme red's dim darkens, on the light theme it lightens.
         assert!(sum(Theme::BATERI.default(260)) < sum(Theme::BATERI.default(1)));
         assert!(sum(Theme::BATERI_LIGHT.default(260)) > sum(Theme::BATERI_LIGHT.default(1)));
-        // Elle yazılı: `(2·0xd1 + 0) / 3`, `(2·0x6d + 0) / 3`, `(2·0x6a + 0) / 3`,
-        // tam sayı bölmesiyle. Zemin **saf siyah** olduğu için karışım terimi
-        // düşüyor ve sönükleştirme vte'nin `× 2/3`'üne indirgeniyor — aynı
-        // özdeşliği [`dim_on_black_is_vte`] bütün kanal değerleri için bağlıyor.
+        // Hand-written: `(2·0xd1 + 0) / 3`, `(2·0x6d + 0) / 3`, `(2·0x6a + 0) / 3`,
+        // with integer division. Because the background is **pure black** the
+        // blend term drops out and dimming reduces to vte's `× 2/3` — the same
+        // identity is tied for all channel values by [`dim_on_black_is_vte`].
         assert_eq!(THEME.default(260), rgb(0x8b4846));
     }
 
     #[test]
     fn dim_on_black_is_vte() {
-        // Oranın gerekçesi (`dim_toward`'ın doc'u): siyah zeminde kural vte'nin
-        // `× 2/3`'üyle bit bit aynı. Her kanal değeri sınanıyor; `f32`'nin
-        // `2/3`'ü tam değerin biraz üstünde olduğu için kesme aynı yere düşüyor.
+        // The ratio's rationale (`dim_toward`'s doc): on a black background the
+        // rule is bit-for-bit identical to vte's `× 2/3`. Every channel value is
+        // tested; since `f32`'s `2/3` is slightly above the exact value the
+        // truncation lands in the same place.
         let black = rgb(0x000000);
         for c in 0..=255u8 {
             let color = Rgb { r: c, g: c, b: c };
             assert_eq!(dim_toward(color, black), color * (2.0 / 3.0), "{c}");
         }
-        // `BATERI`'nin `dim` rolü 006'nın hesabının donmuş hâli.
+        // `BATERI`'s `dim` role is 006's calculation frozen.
         assert_eq!(rgb(THEME.dim), dim_toward(rgb(THEME.foreground), black));
     }
 
     #[test]
     fn dim_default_foreground_takes_the_role() {
-        // Rol çözümden **önce**: tabloda (OSC 10) ön plan değişmiş olsa da
-        // sönük varsayılan ön plan temanın `dim`'i. Rol bilerek ön planın
-        // `× 2/3`'ünden ayrık seçildi ki iki yol karışınca sınama görsün.
+        // The role comes **before** resolution: even if the foreground was
+        // changed in the table (OSC 10), the dim default foreground is the
+        // theme's `dim`. The role was deliberately chosen distinct from the
+        // foreground's `× 2/3` so that the test notices if the two paths get mixed.
         let theme = Theme {
             dim: 0x123456,
             ..THEME
@@ -922,12 +973,13 @@ mod tests {
         colors[NamedColor::Foreground] = Some(rgb(0xffffff));
         let foreground = Color::Named(NamedColor::Foreground);
         assert_eq!(resolve_fg(foreground, true, &colors, &theme), rgb(0x123456));
-        // Sönük olmayan ön plan tabloyu okur.
+        // A non-dim foreground reads the table.
         assert_eq!(
             resolve_fg(foreground, false, &colors, &theme),
             rgb(0xffffff)
         );
-        // Adlı renk çözülüp zemine karışır; rol ona dokunmaz.
+        // A named color is resolved and blended into the background; the role
+        // doesn't touch it.
         let red = Color::Named(NamedColor::Red);
         assert_eq!(
             resolve_fg(red, true, &colors, &theme),
@@ -943,15 +995,15 @@ mod tests {
         let red = Color::Named(NamedColor::Red);
         assert_eq!(resolve(red, &colors, &THEME), custom);
         assert_eq!(resolve(Color::Indexed(1), &colors, &THEME), custom);
-        // Doğrudan verilen renk tabloya hiç sormaz.
+        // A color given directly never asks the table.
         let green = rgb(THEME.ansi[2]);
         assert_eq!(resolve(Color::Spec(green), &colors, &THEME), green);
-        // Tabloda olmayan girdi temadan gelir.
+        // An entry not in the table comes from the theme.
         assert_eq!(resolve(Color::Indexed(2), &colors, &THEME), green);
     }
 
-    /// WCAG kontrast oranı, iki `0xRRGGBB` arasında — 031 phase-3'ün seçim
-    /// renginde kullandığı ölçünün kendisi.
+    /// WCAG contrast ratio between two `0xRRGGBB` — the very measure 031
+    /// phase-3 used for the selection color.
     fn contrast(a: u32, b: u32) -> f64 {
         let luminance = |hex: u32| {
             let channel = |shift: u32| {
@@ -970,20 +1022,20 @@ mod tests {
 
     #[test]
     fn the_info_role_reads_on_the_ground() {
-        // 036 Karar 6: host bağlam satırında **metin**, yani ölçüt metnin
-        // ölçütü — zeminde 3:1. 037'nin `warning`'i aynı yerde (staging
-        // işaretli host) ve aynı ölçütle.
+        // 036 Karar 6: the host is **text** in the context line, so the
+        // criterion is text's — 3:1 on the background. 037's `warning` is in the
+        // same place (the host marked staging) with the same criterion.
         for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
             for role in [theme.info, theme.warning] {
                 let ratio = contrast(role, theme.background);
-                assert!(ratio >= 3.0, "#{role:06x} zeminde {ratio:.2}");
+                assert!(ratio >= 3.0, "#{role:06x} on the background {ratio:.2}");
             }
         }
     }
 
     #[test]
     fn a_host_mark_takes_its_role_color() {
-        // 037 Karar 3: anlam → rol; doğrudan renk sRGB'den lineerleşiyor.
+        // 037 Karar 3: meaning → role; a direct color is linearized from sRGB.
         let theme = Theme::BATERI;
         assert_eq!(
             theme.mark_linear(HostMark::Production),
@@ -999,19 +1051,20 @@ mod tests {
             theme.mark_linear(HostMark::Rgb(0xc678dd)),
             LinearRgba::from_srgb(0xc6, 0x78, 0xdd)
         );
-        // Sekmenin noktası sRGB'yi aynı eşlemeden alıyor.
+        // The tab's dot takes sRGB from the same mapping.
         assert_eq!(theme.mark_rgb(HostMark::Production), theme.error);
         assert_eq!(theme.mark_rgb(HostMark::Rgb(0xc678dd)), 0xc678dd);
     }
 
     #[test]
     fn search_highlights_keep_every_readable_text_readable() {
-        // 033'ün iki vurgusu seçimin ölçütünü taşıyor (Karar 7: metin kendi
-        // ön planında): gömülü temanın zemininde 3:1'i geçen her metin rengi
-        // (ön plan, `dim`, 16 ANSI) vurgunun üstünde de 3:1'i geçiyor.
-        // Geçerli eşleşme ötekinden **belirgin** olmalı ve rol değerleri
-        // bunu parlaklıkla da söylemeli — yalnız tona bırakılan ayrım
-        // odaksız pencerede soluklaşınca kaybolurdu.
+        // 033's two highlights carry the selection's criterion (Karar 7: the
+        // text in its own foreground): every text color (foreground, `dim`, 16
+        // ANSI) that exceeds 3:1 on the embedded theme's background also
+        // exceeds 3:1 on the highlight. The current match must be **more
+        // distinct** than the other and the role values must say so in
+        // brightness too — a distinction left to hue alone would vanish when it
+        // fades in an unfocused window.
         for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
             let texts = [theme.foreground, theme.dim]
                 .into_iter()
@@ -1022,7 +1075,7 @@ mod tests {
                     let ratio = contrast(text, highlight);
                     assert!(
                         ratio >= 3.0,
-                        "#{text:06x} metin #{highlight:06x} vurguda {ratio:.2}"
+                        "#{text:06x} text on #{highlight:06x} highlight {ratio:.2}"
                     );
                 }
             }
@@ -1032,7 +1085,7 @@ mod tests {
             );
             assert!(
                 matched > 1.0 && current > matched,
-                "geçerli eşleşme ötekinden belirgin değil: {matched:.2} / {current:.2}"
+                "the current match isn't more distinct than the other: {matched:.2} / {current:.2}"
             );
         }
     }

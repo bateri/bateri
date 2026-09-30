@@ -1,19 +1,20 @@
-//! Geçmişte arama (⌘F, 033): sorgunun derlenmesi ve görünür satırların
-//! eşleşmeleri.
+//! Scrollback search (⌘F, 033): compiling the query and the matches of the
+//! visible rows.
 //!
-//! **İki bütçe var ve bu modül ilkinin** (`.tasks/033-gecmiste-arama/
-//! discussion.md` → Karar 2, Muhakeme): vurgu her içerik karesinde
-//! [`crate::Session::frame`]'in zaten aldığı `Term` kilidi turunda, yalnız
-//! **çizilen** satırlar üzerinde koşuyor — maliyeti ekranın boyuyla sınırlı.
-//! Bütün defterin sayımı ayrı bir yol: çıpasız, dipten yukarı parça parça
-//! bir dizin ([`SearchIndex`], [`crate::Session::search_step`]).
+//! **There are two budgets and this module is the first's** (`.tasks/033-gecmiste-arama/
+//! discussion.md` → Karar 2, Muhakeme): the highlight runs on every content
+//! frame, within the `Term` lock turn that [`crate::Session::frame`] already
+//! takes, over only the **drawn** rows — its cost is bounded by the screen's
+//! height. Counting the whole scrollback is a separate path: an anchorless
+//! index built bottom-up piece by piece ([`SearchIndex`],
+//! [`crate::Session::search_step`]).
 //!
-//! Eşleştiricinin kendisi alacritty'nin (`RegexSearch`, `RegexIter`) ve o tip
-//! `pub` API'de görünmüyor (`lib.rs` → kapsül sözleşmesi): dışarısı yalnız
-//! [`SearchQuery`], [`SearchStatus`] ve sonuç koşularını ([`SearchRuns`])
-//! görüyor. Sert satır sonunu aşan eşleşme yok — alacritty'nin tarayıcısı
-//! sarılmamış satır sonunda durumunu sıfırlıyor — ve boş eşleşmeyi (`^`,
-//! `a*`) kendisi atlıyor.
+//! The matcher itself is alacritty's (`RegexSearch`, `RegexIter`) and that type
+//! is not visible in the `pub` API (`lib.rs` → the encapsulation contract): the
+//! outside sees only [`SearchQuery`], [`SearchStatus`] and the result runs
+//! ([`SearchRuns`]). There is no match across a hard line end — alacritty's
+//! scanner resets its state at an unwrapped line end — and it skips the empty
+//! match (`^`, `a*`) itself.
 
 use std::ops::RangeInclusive;
 
@@ -25,52 +26,52 @@ use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 
 use crate::color::{LinearRgba, Theme};
 
-/// Kullanıcının sorgusu: metin ve paneldeki iki anahtar.
+/// The user's query: the text and the two switches in the panel.
 ///
-/// Sekme başına tutulması ve ayar dosyasına yazılmaması çağıranın işi (Karar
-/// 6); bu crate yalnız derliyor.
+/// Keeping it per tab and not writing it to the settings file is the caller's
+/// job (Karar 6); this crate only compiles.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchQuery {
-    /// Aranan metin; `regex` kapalıyken **düz** metin ([`escape`]).
+    /// The text searched for; **plain** text when `regex` is off ([`escape`]).
     pub text: String,
-    /// `.*` anahtarı: metin bir düzenli ifade.
+    /// The `.*` switch: the text is a regular expression.
     pub regex: bool,
-    /// `Aa` anahtarı: açıkken her zaman büyük/küçük harf duyarlı, kapalıyken
-    /// **akıllı** — metinde büyük harf varsa duyarlı, yoksa değil
-    /// (alacritty'nin kendi kuralı, Karar 11).
+    /// The `Aa` switch: when on, always case-sensitive; when off, **smart** —
+    /// sensitive if the text has an uppercase letter, insensitive otherwise
+    /// (alacritty's own rule, Karar 11).
     pub case_sensitive: bool,
 }
 
-/// Sorgunun derlenmiş hâli — panelin etiketinin girdisi (Karar 3).
+/// The compiled state of the query — the input of the panel's label (Karar 3).
 ///
-/// Geçersiz desen **panik değil durum** (R1): kullanıcı `(` yazdığı anda
-/// ekran bozulmamalı, etiket "Invalid pattern" demeli.
+/// An invalid pattern is **a state, not a panic** (R1): the moment the user
+/// types `(` the screen must not break, the label must say "Invalid pattern".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchStatus {
-    /// Boş sorgu: tarama yok, vurgu yok.
+    /// Empty query: no scan, no highlight.
     Empty,
-    /// Derlenemeyen desen (sözdizimi ya da alacritty'nin karmaşıklık
-    /// sınırı); tarama yok.
+    /// A pattern that didn't compile (syntax, or alacritty's complexity
+    /// limit); no scan.
     Invalid,
-    /// Desen derlendi, görünür satırlar her içerik karesinde taranıyor.
+    /// The pattern compiled, the visible rows are scanned on every content frame.
     Ready,
 }
 
-/// `regex-syntax`'ın meta karakterleri — `regex_syntax::is_meta_character`'ın
-/// kümesinin aynısı.
+/// `regex-syntax`'s meta characters — the same set as
+/// `regex_syntax::is_meta_character`'s.
 ///
-/// Küme burada **kopya** ve bilerek: `regex-syntax`'ı doğrudan bağımlılık
-/// yapmak `Cargo.lock`'a kenar eklerdi (Karar 11). Kopyanın bekçisi sınama:
-/// her karakter kaçırılınca kendisini düz olarak eşleştirmek zorunda.
+/// The set is a **copy** here and deliberately: making `regex-syntax` a direct
+/// dependency would add an edge to `Cargo.lock` (Karar 11). The copy's guard is
+/// a test: every character, once escaped, must match itself literally.
 const META: &[char] = &[
     '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$', '#', '&', '-', '~',
 ];
 
-/// Düz metni desen olarak **kendisini** eşleştiren bir düzenli ifadeye
-/// çevirir: her meta karakterin önüne ters bölü.
+/// Turns plain text into a regular expression that matches **itself** as a
+/// pattern: a backslash before every meta character.
 ///
-/// `pub`, çünkü ikinci tüketicisi ⌘E: regex kipindeyken seçilen metin
-/// kaçırılarak girer (Karar 6).
+/// `pub`, because its second consumer is ⌘E: in regex mode the selected text is
+/// entered escaped (Karar 6).
 pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -82,12 +83,13 @@ pub fn escape(text: &str) -> String {
     out
 }
 
-/// Sorguyu derler: boşsa `Empty`, derlenemezse `Invalid`, yoksa desen.
+/// Compiles the query: `Empty` if empty, `Invalid` if it doesn't compile,
+/// otherwise the pattern.
 ///
-/// Düz metin önce kaçırılıyor, sonra — `Aa` açıksa — `(?-i)` öneki geliyor:
-/// sıra ters olsaydı önekin kendisi kaçırılırdı. Akıllı kip ayrı bir kod değil
-/// alacritty'nin varsayılanı (`RegexSearch::new` desende büyük harf arıyor);
-/// önek yalnız duyarlılığı **zorluyor**.
+/// Plain text is escaped first, then — if `Aa` is on — the `(?-i)` prefix comes:
+/// in the reverse order the prefix itself would be escaped. The smart mode is
+/// not separate code but alacritty's default (`RegexSearch::new` looks for an
+/// uppercase letter in the pattern); the prefix only **forces** sensitivity.
 pub(crate) fn compile(query: &SearchQuery) -> (SearchStatus, Option<RegexSearch>) {
     if query.text.is_empty() {
         return (SearchStatus::Empty, None);
@@ -108,36 +110,36 @@ pub(crate) fn compile(query: &SearchQuery) -> (SearchStatus, Option<RegexSearch>
     }
 }
 
-/// Görünür pencerenin üstünde ve altında sarılmış bir satırın devamı için en
-/// çok kaç satıra bakılacağı.
+/// The most rows to look at, above and below the visible window, for the
+/// continuation of a wrapped line.
 ///
-/// **Neden var:** görünür tepenin satırı yukarıdan sarılarak geliyorsa
-/// eşleşme orada değil satırın mantıksal başında başlıyor; tarama tepeden
-/// başlasaydı yarım bir eşleşme bulur (`o+`'nın kuyruğu) ya da tam bir
-/// eşleşmeyi hiç bulmazdı. Tavan ise satır sonu basmayan bir akışın (`cat`
-/// ile tek satırlık bir dosya) taramayı defterin tamamına yaymasını
-/// engelliyor.
+/// **Why it exists:** if the visible top's row comes wrapped from above, the
+/// match doesn't start there but at the line's logical start; had the scan
+/// started at the top it would find a half match (the tail of `o+`) or miss a
+/// whole match. The ceiling keeps a stream that emits no line ends (a
+/// single-line file through `cat`) from spreading the scan over the whole
+/// scrollback.
 ///
-/// **Ölçülmedi**, tasarım sabiti: alacritty'nin kendi görünür arama sınırıyla
-/// (`MAX_SEARCH_LINES`) aynı sayı. Tavanda kesilen satırın ortasından başlayan
-/// eşleşme yüz satır yukarıda ve görünür bir koşu üretmiyor.
+/// **Not measured**, a design constant: the same number as alacritty's own
+/// visible search limit (`MAX_SEARCH_LINES`). A match starting in the middle of
+/// a line cut at the ceiling is a hundred rows up and produces no visible run.
 const WRAP_REACH: i32 = 100;
 
-/// Satırın son hücresi sarma bayrağını taşıyor mu — yani bir sonraki satır
-/// bunun devamı mı.
+/// Whether the row's last cell carries the wrap flag — that is, whether the next
+/// row is its continuation.
 fn wraps<T>(term: &Term<T>, line: Line) -> bool {
     term.grid()[line]
         .last()
         .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE))
 }
 
-/// `top..=bottom` satırlarına değen eşleşmeleri soldan sağa, yukarıdan aşağı
-/// verir; aralık sarılmış satırların mantıksal uçlarına genişletiliyor
+/// Yields the matches touching rows `top..=bottom`, left to right, top to
+/// bottom; the range is extended to the logical ends of wrapped rows
 /// ([`WRAP_REACH`]).
 ///
-/// **`Term` kilidi tutulurken** çağrılır ([`crate::Session::frame`]). İki uç
-/// da defterin içinde olmalı (`topmost_line..screen_lines`); çağıran onları
-/// kendi kanalının satırlarından kuruyor, yani öyleler.
+/// Called **while the `Term` lock is held** ([`crate::Session::frame`]). Both
+/// ends must be inside the scrollback (`topmost_line..screen_lines`); the caller
+/// builds them from its own channel's rows, so they are.
 pub(crate) fn scan<T>(
     term: &Term<T>,
     regex: &mut RegexSearch,
@@ -162,8 +164,8 @@ pub(crate) fn scan<T>(
     }
 }
 
-/// Hücrenin **mürekkebi** var mı: gizli olmayan, spacer olmayan, boşluk
-/// olmayan bir karakter.
+/// Whether the cell has **ink**: a character that is not hidden, not a spacer,
+/// not a blank.
 fn inked(cell: &TermCell) -> bool {
     const BLANK: Flags = Flags::HIDDEN
         .union(Flags::WIDE_CHAR_SPACER)
@@ -171,13 +173,13 @@ fn inked(cell: &TermCell) -> bool {
     !cell.flags.intersects(BLANK) && cell.c != ' '
 }
 
-/// Eşleşme en az bir **mürekkepli** hücreye değiyor mu.
+/// Whether the match touches at least one **inked** cell.
 ///
-/// **Vurgu içerik yaratmaz** (031'in seçim kuralı, arama için): yalnız
-/// boşluktan oluşan bir eşleşme (` ` sorgusu, `\s+`) ızgaranın boş
-/// satırlarını ve satır sonlarının görünmez kuyruğunu boyardı — ekranda
-/// "burada bir şey var" diyen ama hiçbir şey göstermeyen bloklar. Gizli metin
-/// (`\e[8m`) de sayılmıyor: çizilmeyen bir metnin yeri vurgulanmamalı.
+/// **A highlight creates no content** (the selection's rule from 031, for
+/// search): a match made only of blanks (the query ` `, `\s+`) would paint the
+/// grid's empty rows and the invisible tail of line ends — blocks that say
+/// "there is something here" on screen but show nothing. Hidden text (`\e[8m`)
+/// isn't counted either: the place of undrawn text shouldn't be highlighted.
 pub(crate) fn has_ink<T>(term: &Term<T>, found: &Match) -> bool {
     let (start, end) = (*found.start(), *found.end());
     (start.line.0..=end.line.0).any(|line| {
@@ -200,42 +202,45 @@ pub(crate) fn has_ink<T>(term: &Term<T>, found: &Match) -> bool {
     })
 }
 
-/// Arama vurgusunun bir satırlık parçası: `row` satırında `first..=last`
-/// sütunları ([`crate::SelectionRun`]'ın uzayı).
+/// One row's piece of the search highlight: columns `first..=last` on row `row`
+/// (the space of [`crate::SelectionRun`]).
 ///
-/// Seçim koşusundan iki bit fazlası var ve ikisi de çizimin (phase-2)
-/// girdisi:
+/// It has two bits more than a selection run and both are inputs of the
+/// drawing (phase-2):
 ///
-/// - `current` — geçerli eşleşmenin koşusu; `search_current` rengiyle
-///   çiziliyor, ötekiler `search_match` ile.
-/// - `continues` — koşu bir önceki satırdaki koşunun **aynı eşleşmedeki**
-///   devamı. Köşeler eşleşme başına hesaplanıyor (Karar 7): ardışık
-///   satırlardaki iki ayrı eşleşme tek şekle kaynamamalı, sarılan tek eşleşme
-///   kaynamalı — ayıran tek şey bu bit.
+/// - `current` — the current match's run; drawn with the `search_current`
+///   color, the others with `search_match`.
+/// - `continues` — the run is the continuation **of the same match** of the run
+///   on the previous row. Corners are computed per match (Karar 7): two
+///   separate matches on consecutive rows mustn't fuse into one shape, a single
+///   wrapped match must — this bit is the only thing that tells them apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchRun {
     pub row: u16,
     pub first: u16,
-    /// Dahil. Geniş karakterde spacer'ın sütunu — iki yarı da vurgulu.
+    /// Inclusive. For a wide character the spacer's column — both halves are
+    /// highlighted.
     pub last: u16,
     pub current: bool,
     pub continues: bool,
 }
 
-/// [`crate::Session::frame`]'in arama koşuları — [`crate::SelectionRuns`]
-/// emsali, çağıranın karelere yaydığı tampon (kare başına ayırma yok).
+/// [`crate::Session::frame`]'s search runs — the precedent of
+/// [`crate::SelectionRuns`], a buffer the caller spreads across frames (no
+/// per-frame allocation).
 ///
-/// **İki liste, iki koordinat uzayı** ([`crate::Blocks`]'un `fill_slice`
-/// emsali): ızgaranın ekran satırları ve doldurma kanalının fill-yerel
-/// satırları (`0..top_row + fill`, kesrin tepe satırı dahil,
-/// [`crate::Cursor::top_row`]). İkisi ayrı `setViewport`'ta çiziliyor.
+/// **Two lists, two coordinate spaces** (the precedent of [`crate::Blocks`]'s
+/// `fill_slice`): the grid's screen rows and the fill channel's fill-local rows
+/// (`0..top_row + fill`, the fraction's top row included,
+/// [`crate::Cursor::top_row`]). The two are drawn in separate `setViewport`s.
 ///
-/// Arama kapalıyken, sorgu boş ya da geçersizken iki liste de **boş** ve
-/// tarama hiç koşmuyor (R2.2'nin durma koşulu).
+/// When search is off, or the query is empty or invalid, both lists are
+/// **empty** and the scan never runs (R2.2's stopping condition).
 ///
-/// **Renkler de sınırdan hazır** ([`crate::SelectionRuns`] emsali, 031 Karar
-/// 9): iki rol ve odaksız eşleri `frame()`'in zaten aldığı tema kopyasından
-/// yazılıyor; hangisinin çizileceği odağı bilen `bt-gpu`'nun kararı.
+/// **The colors are ready from the boundary too** (the precedent of
+/// [`crate::SelectionRuns`], 031 Karar 9): the two roles and their unfocused
+/// counterparts are written from the theme copy `frame()` already takes; which
+/// one gets drawn is the decision of `bt-gpu`, which knows the focus.
 #[derive(Debug)]
 pub struct SearchRuns {
     pub(crate) runs: Vec<SearchRun>,
@@ -243,7 +248,7 @@ pub struct SearchRuns {
     pub(crate) colors: SearchColors,
 }
 
-/// [`SearchRuns`]'ın dört rengi, lineer: iki rol × odak.
+/// [`SearchRuns`]'s four colors, linear: two roles × focus.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SearchColors {
     pub(crate) matched: LinearRgba,
@@ -263,9 +268,9 @@ impl SearchColors {
     }
 }
 
-/// Koşusuz boş tampon; renkler gömülü temadan, ilk kare üstüne yazıyor
-/// ([`crate::SelectionRuns`]'ın `Default`'u ile aynı gerekçe: `LinearRgba`'nın
-/// `Default`'u yok, renk uydurulmuyor).
+/// An empty buffer with no runs; the colors are from the embedded theme, the
+/// first frame writes over them (the same reasoning as [`crate::SelectionRuns`]'s
+/// `Default`: `LinearRgba` has no `Default`, no color is invented).
 impl Default for SearchRuns {
     fn default() -> Self {
         Self {
@@ -277,8 +282,8 @@ impl Default for SearchRuns {
 }
 
 impl SearchRuns {
-    /// Eşleşmelerin vurgusu: odaktaki pencerede `search_match`, değilse
-    /// zemine doğru soluklaşmış eşi.
+    /// The matches' highlight: `search_match` in a focused window, otherwise its
+    /// counterpart faded toward the background.
     pub fn match_color(&self, focused: bool) -> LinearRgba {
         if focused {
             self.colors.matched
@@ -287,7 +292,7 @@ impl SearchRuns {
         }
     }
 
-    /// Geçerli eşleşmenin vurgusu; [`SearchRuns::match_color`]'ın kuralı.
+    /// The current match's highlight; [`SearchRuns::match_color`]'s rule.
     pub fn current_color(&self, focused: bool) -> LinearRgba {
         if focused {
             self.colors.current
@@ -296,12 +301,12 @@ impl SearchRuns {
         }
     }
 
-    /// Izgaranın koşuları, satır sırasıyla; bastırılan giriş satırı hariç.
+    /// The grid's runs, in row order; excluding the suppressed input row.
     pub fn as_slice(&self) -> &[SearchRun] {
         &self.runs
     }
 
-    /// Doldurma kanalının koşuları; satırlar fill-yerel.
+    /// The fill channel's runs; rows are fill-local.
     pub fn fill_slice(&self) -> &[SearchRun] {
         &self.fill_runs
     }
@@ -312,28 +317,28 @@ impl SearchRuns {
     }
 }
 
-/// Gezinmenin yönü (Karar 3): terminal en yenisi altta okunur, ⏎ ve ⌘G
-/// **yukarı**, daha eskiye gider; ⇧⏎ ve ⇧⌘G aşağıya.
+/// The direction of navigation (Karar 3): a terminal reads with the newest at
+/// the bottom, ⏎ and ⌘G go **up**, to the older; ⇧⏎ and ⇧⌘G go down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchDirection {
-    /// Yukarı, daha eski eşleşmeye (⏎, ⌘G).
+    /// Up, to the older match (⏎, ⌘G).
     Older,
-    /// Aşağı, daha yeni eşleşmeye (⇧⏎, ⇧⌘G).
+    /// Down, to the newer match (⇧⏎, ⇧⌘G).
     Newer,
 }
 
-/// Arama panelinin ızgaranın üstünde örttüğü alan, **satır ve sütun**
-/// cinsinden — `bt-core` piksel görmüyor, çeviriyi paneli yerleştiren
-/// `bt-shell` yapıyor.
+/// The area the search panel covers over the grid, in **rows and columns** —
+/// `bt-core` sees no pixels, the conversion is done by `bt-shell`, which places
+/// the panel.
 ///
-/// `first_row` ızgaranın 0. ekran satırına göre panelin altındaki **ilk tam
-/// görünür** satır: `0` hiçbir satırı örtmüyor, negatif değer doldurma
-/// bandının o kadar satırının da açıkta olduğunu söylüyor. Örtülen satırların
-/// yalnız `from_col` ve sağı panelin altında; solundaki eşleşme görünür
-/// (Karar 4: "panelin altında değilse pencere oynamaz").
+/// `first_row` is the **first fully visible** row below the panel, relative to
+/// the grid's screen row 0: `0` covers no row, a negative value says that that
+/// many rows of the fill band are exposed too. Of the covered rows only
+/// `from_col` and to its right are under the panel; a match to its left is
+/// visible (Karar 4: "the window doesn't move if it isn't under the panel").
 ///
-/// Varsayılanı **hiçbir şeyi örtmüyor** (`first_row` en küçük değer): `0`
-/// bandın satırlarını örtülmüş sayardı.
+/// Its default **covers nothing** (`first_row` is the smallest value): `0`
+/// would count the band's rows as covered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchCover {
     pub first_row: i32,
@@ -349,33 +354,36 @@ impl Default for SearchCover {
     }
 }
 
-/// Aramanın panele cevabı — etiketin ("3 of 17", "3 of 17…") girdisi
-/// (Karar 3).
+/// The search's answer to the panel — the input of the label ("3 of 17",
+/// "3 of 17…") (Karar 3).
 ///
-/// Sayı ve sıra **bütün defterin dizininden** ([`SearchIndex`]): dizin
-/// parça parça kurulurken `complete` yanlış ve sayı o ana kadar sayılanlar.
-/// Vurgunun kümesiyle aynı küme (bastırılan satıra değen ve mürekkepsiz
-/// eşleşme sayılmıyor, [`eligible`]).
+/// The count and order are **from the whole scrollback's index**
+/// ([`SearchIndex`]): while the index is being built piece by piece `complete`
+/// is false and the count is what has been counted so far. The same set as the
+/// highlight's (a match touching the suppressed row and an inkless one isn't
+/// counted, [`eligible`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SearchReport {
-    /// Geçerli bir eşleşme var mı — ya da defterin kayması onu kaybettirdi
-    /// ve dizinin sonunda yeniden seçilecek ([`Relocate`]).
+    /// Whether there is a current match — or the scrollback's shift lost it and
+    /// it will be reselected at the end of the index ([`Relocate`]).
     pub found: bool,
-    /// Sayılan eşleşme sayısı; `complete` değilse şimdiye kadarki.
+    /// The number of matches counted; so far, if not `complete`.
     pub total: usize,
-    /// Geçerli eşleşmenin sırası, en yeni (en alttaki) = 1; dizin ona henüz
-    /// varmadıysa `None`.
+    /// The current match's ordinal, newest (bottommost) = 1; `None` if the index
+    /// hasn't reached it yet.
     pub ordinal: Option<usize>,
-    /// Dizin bütün defteri saydı ve bekleyen bir defter değişimi yok.
+    /// The index has counted the whole scrollback and no scrollback change is
+    /// pending.
     pub complete: bool,
 }
 
-/// Eşleşme **vurgunun kümesinde** mi (phase-1'in iki dışlaması): bastırılan
-/// giriş satırına değmiyor ve mürekkebi var. Gezinme ve sayım aynı kümeden
-/// sorulur, yoksa ⏎ pencereyi görünmeyen bir satıra götürürdü.
+/// Whether the match is **in the highlight's set** (phase-1's two exclusions):
+/// it doesn't touch the suppressed input row and it has ink. Navigation and
+/// counting are asked from the same set, or ⏎ would take the window to an
+/// invisible row.
 ///
-/// `hidden` bastırılan satırların **mutlak** aralığı (`Line`), son içerik
-/// karesinin ([`SearchSlot::hidden`]).
+/// `hidden` is the **absolute** range (`Line`) of the suppressed rows, from the
+/// last content frame ([`SearchSlot::hidden`]).
 pub(crate) fn eligible<T>(
     term: &Term<T>,
     found: &Match,
@@ -387,14 +395,14 @@ pub(crate) fn eligible<T>(
     !touches && has_ink(term, found)
 }
 
-/// `origin`'den `direction` yönünde **vurgunun kümesindeki** ilk eşleşme;
-/// defterin ucunda sarar (alacritty'nin `search_next`'i `max_lines = None`
-/// ile bütün defteri dolaşıyor).
+/// The first match **in the highlight's set** from `origin` in `direction`;
+/// wraps at the scrollback's end (alacritty's `search_next` walks the whole
+/// scrollback with `max_lines = None`).
 ///
-/// Kümenin dışında kalan eşleşme atlanıyor ve atlama bir döngü: sıra ilk
-/// bulunana geri döndüyse kümede hiç eşleşme yok demektir. Tavan
-/// ([`SKIP_LIMIT`]) ikinci bir emniyet — dışlanan eşleşmeler bastırılan tek
-/// satırın ve mürekkepsiz eşleşmelerin sayısı kadar, yani pratikte birkaç.
+/// A match outside the set is skipped and the skip is a loop: if the turn comes
+/// back to the first found, there is no match in the set at all. The ceiling
+/// ([`SKIP_LIMIT`]) is a second safety — the excluded matches are as many as
+/// the single suppressed row and the inkless matches, i.e. a few in practice.
 pub(crate) fn next_eligible<T>(
     term: &Term<T>,
     regex: &mut RegexSearch,
@@ -422,14 +430,14 @@ pub(crate) fn next_eligible<T>(
     None
 }
 
-/// [`next_eligible`]'ın atlama tavanı. **Ölçülmedi**, emniyet sabiti: her
-/// adım bir `search_next`, yani defter başına bir tarama; sayı kümenin dışında
-/// kalan eşleşmelerin gerçekçi sayısının çok üstünde.
+/// [`next_eligible`]'s skip ceiling. **Not measured**, a safety constant: every
+/// step is one `search_next`, i.e. one scan per scrollback; the number is far
+/// above the realistic count of matches that fall outside the set.
 const SKIP_LIMIT: usize = 64;
 
-/// `found`'un `direction` yönündeki bir sonraki hücresi — gezinmenin yeni
-/// başlangıcı (alacritty'nin kendi `advance_search_origin`'i): eski
-/// eşleşmenin kendisi bir daha bulunmuyor. Defterin ucunda sarar.
+/// The cell after `found` in `direction` — the new start of navigation
+/// (alacritty's own `advance_search_origin`): the old match itself isn't found
+/// again. Wraps at the scrollback's end.
 pub(crate) fn step_past<T>(term: &Term<T>, found: &Match, direction: Direction) -> Point {
     match direction {
         Direction::Right => found.end().add(term, Boundary::None, 1),
@@ -437,59 +445,68 @@ pub(crate) fn step_past<T>(term: &Term<T>, found: &Match, direction: Direction) 
     }
 }
 
-/// İki eşleşme aynı yer mi — geçerli eşleşmenin karede işaretlenmesi.
+/// Whether two matches are the same place — marking the current match in the
+/// frame.
 ///
-/// Uçlardan biri tutması yetiyor: kare eşleşmeyi soldan sağa taramayla
-/// (`RegexIter`), gezinme iki yönde (`search_next`) buluyor ve açgözlü bir
-/// desende iki yol aynı yerin farklı bir ucunda durabilir. Farklı iki
-/// eşleşme aynı hücrede başlayıp bitemez.
+/// One end matching is enough: the frame finds the match by a left-to-right scan
+/// (`RegexIter`), navigation in two directions (`search_next`), and with a greedy
+/// pattern the two paths can stop at different ends of the same place. Two
+/// different matches can't start and end in the same cell.
 pub(crate) fn same_place(a: &Match, b: &Match) -> bool {
     a.start() == b.start() || a.end() == b.end()
 }
 
-/// Dizinin bir parçasının satır sayısı (Karar 2-B): [`crate::Session::search_step`]
-/// `Term` kilidini bu kadar satırı tarayacak kadar tutuyor, sonra ana kuyruğa
-/// dönüyor ve tuş olayları parçaların arasına giriyor.
+/// The number of rows in one piece of the index (Karar 2-B):
+/// [`crate::Session::search_step`] holds the `Term` lock long enough to scan
+/// that many rows, then returns to the main queue and key events slip in
+/// between the pieces.
 ///
-/// **Ölçülmedi**, tasarım sabiti (`GUTTER_PT` emsali); türetmesi yok. Kilit
-/// altında tarama süresini ölçen bir kanca yok ve iddia ("parça boyu tuş
-/// gecikmesi hissettirmiyor") `docs/OLCUMLER.md` → Bekleyen iddialar'da.
-/// Güvenliği sayıdan değil parçanın sınırlı ve iptal edilebilir olmasından:
-/// sarılmış bir satır parçayı en çok [`WRAP_REACH`] kadar uzatıyor.
+/// **Not measured**, a design constant (the precedent of `GUTTER_PT`); it has no
+/// derivation. There is no hook that measures the scan time under the lock and
+/// the claim ("the piece size doesn't feel like key latency") is in
+/// `docs/OLCUMLER.md` → Bekleyen iddialar. Its safety comes not from the number
+/// but from the piece being bounded and cancellable: a wrapped row extends a
+/// piece by at most [`WRAP_REACH`].
 pub(crate) const CHUNK_LINES: i32 = 500;
 
-/// Bütün defterin sayımı (phase-5): **çıpasız** ve dipten yukarı parça parça
-/// (`discussion.md` → Muhakeme: `row_identity` uzun tutulan bir çıpa olamaz).
+/// Counting the whole scrollback (phase-5): **anchorless** and bottom-up piece
+/// by piece (`discussion.md` → Muhakeme: `row_identity` can't be a long-held
+/// anchor).
 ///
-/// Eşleşmeler **saklanmıyor**, sayılıyor: etiketin istediği sayı ve geçerli
-/// eşleşmenin sırası, ve `.` gibi bir desen on bin satırda milyonlarca
-/// eşleşme demek. Gezinme dizini kullanmıyor (`Term::search_next`, phase-4);
-/// sıra gezinmede ±1 taşınıyor ([`crate::Session::search_next`]).
+/// Matches are **not stored**, they are counted: what the label wants is the
+/// count and the current match's ordinal, and a pattern like `.` means millions
+/// of matches in ten thousand rows. Navigation doesn't use the index
+/// (`Term::search_next`, phase-4); the ordinal is carried ±1 on navigation
+/// ([`crate::Session::search_next`]).
 ///
-/// Sorgu değişince ([`SearchSlot::generation`]) ve defter değişince (bekleyen
-/// haber, [`crate::Session::search_step`]) **baştan** kuruluyor.
+/// It is rebuilt **from scratch** when the query changes
+/// ([`SearchSlot::generation`]) and when the scrollback changes (the pending
+/// notice, [`crate::Session::search_step`]).
 #[derive(Debug, Default)]
 pub(crate) struct SearchIndex {
-    /// Dizinin **kendi** desen kopyası (Muhakeme: kare yolunun ödünç aldığı
-    /// desenle yarışmasın); parça sürerken `None`.
+    /// The index's **own** copy of the pattern (Muhakeme: so it doesn't race
+    /// with the pattern the frame path borrows); `None` while a piece is in
+    /// flight.
     pub(crate) pattern: Option<RegexSearch>,
-    /// Sıradaki parçanın **dip** satırı (mutlak); `None` → geçiş bitti.
-    /// [`INDEX_START`] "defterin dibinden".
+    /// The **bottom** row of the next piece (absolute); `None` → the pass is
+    /// done. [`INDEX_START`] is "from the scrollback's bottom".
     pub(crate) next: Option<i32>,
-    /// Şimdiye kadar sayılan eşleşmeler.
+    /// The matches counted so far.
     pub(crate) total: usize,
-    /// Geçerli eşleşmenin sırası (en yeni = 1).
+    /// The current match's ordinal (newest = 1).
     pub(crate) ordinal: Option<usize>,
-    /// Kaybedilen geçerli eşleşmenin adayı ([`Relocate`]): eşleşme ve sırası.
+    /// The candidate for the lost current match ([`Relocate`]): the match and its
+    /// ordinal.
     pub(crate) candidate: Option<(Match, usize, i32)>,
 }
 
-/// [`SearchIndex::next`]'in "baştan" değeri: ilk parça defterin dibinden.
+/// [`SearchIndex::next`]'s "from scratch" value: the first piece from the
+/// scrollback's bottom.
 pub(crate) const INDEX_START: i32 = i32::MAX;
 
 impl SearchIndex {
-    /// Dizini baştan kurar: `pattern` dizinin yeni kopyası (`None` →
-    /// yuvadaki kalıyor).
+    /// Rebuilds the index from scratch: `pattern` is the index's new copy (`None`
+    /// → the one in the slot stays).
     pub(crate) fn restart(&mut self, pattern: Option<RegexSearch>) {
         if pattern.is_some() {
             self.pattern = pattern;
@@ -501,58 +518,61 @@ impl SearchIndex {
     }
 }
 
-/// Defterin bir gözlemdeki hâli — geçerli eşleşmenin kaymasının girdisi
-/// ([`ledger_shift`]). Her gözlemde `Term` kilidi altında okunuyor.
+/// The scrollback's state at one observation — the input of the current match's
+/// shift ([`ledger_shift`]). Read under the `Term` lock at every observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LedgerMark {
     /// `history_size()`.
     pub(crate) history: usize,
     /// `display_offset()`.
     pub(crate) offset: usize,
-    /// Kullanıcının kaydırmasının birikmiş ofset farkı
-    /// ([`crate::Session::scroll_user`]): ofsetin çıktıdan gelen payı ondan
-    /// ayrılıyor.
+    /// The accumulated offset difference of the user's scrolling
+    /// ([`crate::Session::scroll_user`]): the share of the offset that comes
+    /// from output is separated from it.
     pub(crate) user: i64,
-    /// PTY çıktısının nesli (`Wakeup` başına bir): arada çıktı var mı.
+    /// The PTY output's generation (one per `Wakeup`): whether there was output
+    /// in between.
     pub(crate) epoch: u64,
-    /// Ekranı temizlemenin nesli ([`crate::Session::clear_to_start`],
-    /// [`crate::Session::clear_scrollback`]): arada terminal tarafı bir
-    /// temizlik var mı. `epoch`'tan ayrı, çünkü doymamış defterde `epoch`
-    /// okunmuyor ve geçmişi boş bir oturumda temizlik `history` farkını
-    /// sıfır bırakıp satırları yine de kaydırıyor (0 → 0).
+    /// The generation of clearing the screen ([`crate::Session::clear_to_start`],
+    /// [`crate::Session::clear_scrollback`]): whether there was a terminal-side
+    /// clear in between. Separate from `epoch`, because on an unsaturated
+    /// scrollback `epoch` isn't read and in a session with empty scrollback a
+    /// clear leaves the `history` difference at zero while still shifting the
+    /// rows (0 → 0).
     pub(crate) wipes: u64,
     pub(crate) columns: usize,
     pub(crate) lines: usize,
     pub(crate) alt: bool,
 }
 
-/// İki gözlem arasında defterin satırları ne kadar kaydı.
+/// How far the scrollback's rows shifted between two observations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Shift {
-    /// Hiç kaymadı.
+    /// Didn't shift at all.
     Still,
-    /// Her satır `n` satır yukarı (daha eski) kaydı.
+    /// Every row shifted up (older) by `n` rows.
     By(i32),
-    /// Kayma bilinemiyor: geçerli eşleşme kayboldu.
+    /// The shift is unknowable: the current match is lost.
     Lost,
 }
 
-/// Geçerli eşleşmenin kayması (Karar 9, Muhakeme) — **yalnız kesin
-/// kaynaklardan**:
+/// The current match's shift (Karar 9, Muhakeme) — **only from definite
+/// sources**:
 ///
-/// - Defter doymamışken `history_size` farkı: geçmişi büyüten tek şey
-///   çıktının kaydırması, pencere kaydırılmış olsun olmasın.
-/// - Doymuş defterde pencere kaydırılmışsa `display_offset` farkı —
-///   kullanıcının kendi kaydırması düşülerek: alacritty pencereyi yeni
-///   çıktıya karşı tam kayan satır kadar ötelliyor (tavana kadar); fark
-///   negatifse kayıp.
-/// - Kalan her şey (doymuş defterin dibi, tavandaki ofset, boyut değişimi,
-///   alternatif ekran geçişi, silinen geçmiş) **kayıp**: yanlış satırı
-///   geçerli göstermektense hiçbirini göstermemek.
-/// - Terminal tarafı temizlik (`wipes`, ⌘K/⌥⌘K) her kolda **kayıp** —
-///   geçmiş 0 → 0 kaldığında da (`history` farkı onu göremiyor) ve hiçbir
-///   satır kaymadığında da (⌥⌘K'nin boş geçmişi): temizlik kaymayı
-///   söylemiyor, yalnız olduğunu söylüyor, ve bilinmeyen kayma kayıptır.
+/// - While the scrollback is unsaturated, the `history_size` difference: the
+///   only thing that grows history is the output's scrolling, whether or not
+///   the window is scrolled.
+/// - On a saturated scrollback, if the window is scrolled, the `display_offset`
+///   difference — minus the user's own scrolling: alacritty offsets the window
+///   by exactly the number of rows the new output scrolls (up to the ceiling);
+///   if the difference is negative, lost.
+/// - Everything else (the bottom of a saturated scrollback, an offset at the
+///   ceiling, a size change, an alternate-screen switch, deleted history) is
+///   **lost**: better to show none than to show the wrong row as current.
+/// - A terminal-side clear (`wipes`, ⌘K/⌥⌘K) is **lost** in every arm — both
+///   when history stays 0 → 0 (the `history` difference can't see it) and when
+///   no row shifted (⌥⌘K's empty history): a clear doesn't say the shift, it
+///   only says it happened, and an unknown shift is lost.
 pub(crate) fn ledger_shift(prev: LedgerMark, now: LedgerMark, limit: usize) -> Shift {
     if prev.columns != now.columns
         || prev.lines != now.lines
@@ -569,10 +589,11 @@ pub(crate) fn ledger_shift(prev: LedgerMark, now: LedgerMark, limit: usize) -> S
             grown => Shift::By(grown),
         };
     }
-    // Doymuş ve kaydırılmış: ofset farkı **nesle bakmadan** — alacritty'nin
-    // senkron güncelleme zaman aşımı `Wakeup`'ı kilidi bıraktıktan sonra
-    // yolluyor, yani nesil içerikten bir gözlem geç kalabilir; ofsetin
-    // kullanıcı dışındaki tek yazarı çıktının kaydırması.
+    // Saturated and scrolled: the offset difference **without looking at the
+    // generation** — alacritty's synchronized-update timeout sends `Wakeup`
+    // after releasing the lock, so the generation can lag the content by one
+    // observation; the offset's only writer other than the user is the output's
+    // scrolling.
     if prev.offset > 0 && now.offset > 0 && now.offset < limit {
         let moved = now.offset as i64 - prev.offset as i64 - (now.user - prev.user);
         return match i32::try_from(moved) {
@@ -581,8 +602,9 @@ pub(crate) fn ledger_shift(prev: LedgerMark, now: LedgerMark, limit: usize) -> S
             _ => Shift::Lost,
         };
     }
-    // Doymuş dip: kayma görünmüyor. Çıktı yoksa kaymadı; varsa bilinemiyor.
-    // Nesil geç kaldıysa kayıp bir sonraki gözlemde yakalanıyor.
+    // Saturated bottom: the shift isn't visible. No output means it didn't
+    // shift; with output it is unknowable. If the generation lagged, the loss is
+    // caught at the next observation.
     if now.epoch == prev.epoch {
         Shift::Still
     } else {
@@ -590,19 +612,19 @@ pub(crate) fn ledger_shift(prev: LedgerMark, now: LedgerMark, limit: usize) -> S
     }
 }
 
-/// Kaybedilen geçerli eşleşmenin dizinin sonunda nereye geçeceği.
+/// Where the lost current match will move at the end of the index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Relocate {
-    /// Pencereye en yakın eşleşmeye (kayma bilinemedi).
+    /// To the match nearest the window (the shift couldn't be known).
     Nearest,
-    /// Kalan en eski eşleşmeye: geçerli eşleşme doymuş defterin tepesinden
-    /// düştü (Karar 9).
+    /// To the oldest remaining match: the current match fell off the top of the
+    /// saturated scrollback (Karar 9).
     Oldest,
 }
 
-/// Geçerli eşleşmenin izlenen durumu — yuvadan kopyalanıp `Term` kilidi
-/// altında [`track`] ile kaydırılıyor, sonra (izi değişmediyse) geri
-/// yazılıyor.
+/// The tracked state of the current match — copied from the slot, shifted under
+/// the `Term` lock with [`track`], then written back (if its trace didn't
+/// change).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Tracking {
     pub(crate) current: Option<Match>,
@@ -611,14 +633,15 @@ pub(crate) struct Tracking {
     pub(crate) relocate: Option<Relocate>,
 }
 
-/// Noktayı `by` satır yukarı taşır.
+/// Moves the point up `by` rows.
 fn lift(point: Point, by: i32) -> Point {
     Point::new(Line(point.line.0 - by), point.column)
 }
 
-/// Defterin `now` hâline göre geçerli eşleşmeyi ve başlangıcı kaydırır
-/// ([`ledger_shift`]); tepeden düşen eşleşme en eskiye, kaybolan en yakına
-/// geçmek üzere işaretleniyor ([`Relocate`]). `Term` kilidi tutulurken.
+/// Shifts the current match and the origin according to the scrollback's `now`
+/// state ([`ledger_shift`]); a match that fell off the top is marked to move to
+/// the oldest, one that got lost to the nearest ([`Relocate`]). While the `Term`
+/// lock is held.
 pub(crate) fn track<T>(term: &Term<T>, tracking: &mut Tracking, now: LedgerMark, limit: usize) {
     let Some(prev) = tracking.mark.replace(now) else {
         return;
@@ -645,17 +668,17 @@ pub(crate) fn track<T>(term: &Term<T>, tracking: &mut Tracking, now: LedgerMark,
     }
 }
 
-/// Dizinin bir parçası: `index.next`'ten yukarı `chunk` satırı sayar
-/// (üretimde [`CHUNK_LINES`]; sınamalar dikişi sık görmek için küçültüyor).
+/// One piece of the index: counts `chunk` rows upward from `index.next` (in
+/// production [`CHUNK_LINES`]; tests shrink it to see the seam often).
 ///
-/// **Parça sınırında kayıp ya da çift sayım yok:** tarama sarılmış satırın
-/// mantıksal başına genişliyor ([`scan`]), ama eşleşme yalnız **son
-/// satırı** parçanın içindeyse sayılıyor — iki parçaya değen eşleşme
-/// alttakinde. Sayım dipten yukarı: parçanın eşleşmeleri ters sırayla.
+/// **No loss or double counting at a piece boundary:** the scan extends to a
+/// wrapped row's logical start ([`scan`]), but a match is counted only if its
+/// **last row** is inside the piece — a match touching two pieces goes to the
+/// lower one. Counting is bottom-up: the piece's matches in reverse order.
 ///
-/// `tracking`'in geçerli eşleşmesinin sırası bulunursa yazılıyor, kaybolduysa
-/// adayı onun kuralıyla ([`Relocate`]); `window` pencerenin çizilen satırları
-/// (en yakının ölçüsü). `Term` kilidi tutulurken.
+/// If the ordinal of `tracking`'s current match is found it is written, if it
+/// got lost the candidate by its rule ([`Relocate`]); `window` is the window's
+/// drawn rows (the measure of the nearest). While the `Term` lock is held.
 pub(crate) fn index_chunk<T>(
     term: &Term<T>,
     regex: &mut RegexSearch,
@@ -714,54 +737,56 @@ pub(crate) fn index_chunk<T>(
     index.next = (low > top).then_some(low - 1);
 }
 
-/// Oturumun arama yuvası — **yaprak kilit** (`theme` emsali).
+/// The session's search slot — a **leaf lock** (the precedent of `theme`).
 ///
-/// Derlenmiş desen `Term` kilidinin altında `&mut` istiyor (`RegexIter`) ve
-/// "arama kilidi → `Term`" sırası modülün sözleşmesini çiğnerdi. Kare yolu
-/// deseni `Term` kilidinden **önce** yuvadan alıp sahipleniyor, turdan sonra
-/// nesil hâlâ aynıysa geri koyuyor; `Term` altında hiçbir kilit alınmıyor
-/// (`discussion.md` → Muhakeme). Kopyalanmıyor, **ödünç veriliyor**: desen
-/// dört tembel DFA'nın önbelleğini taşıyor ve kare başına klonlamak hem
-/// ayırma hem soğuk önbellek olurdu.
+/// The compiled pattern wants `&mut` under the `Term` lock (`RegexIter`) and a
+/// "search lock → `Term`" order would break the module's contract. The frame
+/// path takes the pattern from the slot **before** the `Term` lock and owns it,
+/// and after the turn puts it back if the generation is still the same; no lock
+/// is taken under `Term` (`discussion.md` → Muhakeme). It is not copied, it is
+/// **lent**: the pattern carries the cache of four lazy DFAs and cloning it per
+/// frame would be both an allocation and a cold cache.
 #[derive(Debug, Default)]
 pub(crate) struct SearchSlot {
-    /// Her `set_search`/`clear_search`'te artar; ödünç alınan desen yalnız
-    /// nesil değişmediyse geri konur — araya giren yeni sorgu kazanır.
+    /// Increases on every `set_search`/`clear_search`; the borrowed pattern is
+    /// put back only if the generation didn't change — a new query that came in
+    /// between wins.
     pub(crate) generation: u64,
-    /// Yuvada duran desen; kare onu ödünç almışken `None`.
+    /// The pattern sitting in the slot; `None` while a frame has borrowed it.
     pub(crate) pattern: Option<RegexSearch>,
-    /// Bir desen var mı (ödünçte olsa bile) — kare isteğinin kapısı.
+    /// Whether there is a pattern (even if lent) — the gate of the frame request.
     pub(crate) active: bool,
-    /// **Geçerli eşleşme** (Karar 3), defterin mutlak koordinatında. Sorgu
-    /// değişince yeniden seçiliyor, gezinme onu taşıyor, kare onu
-    /// `search_current` rengiyle işaretliyor ([`same_place`]).
+    /// The **current match** (Karar 3), in the scrollback's absolute coordinates.
+    /// It is reselected when the query changes, navigation moves it, and the
+    /// frame marks it with the `search_current` color ([`same_place`]).
     ///
-    /// Mutlak satır çıktıyla kayıyor; her gözlemde defterin kaymasıyla
-    /// içeriğine yapıştırılıyor ([`track`]).
+    /// An absolute row slides with output; at every observation it is stuck to
+    /// its content by the scrollback's shift ([`track`]).
     pub(crate) current: Option<Match>,
-    /// Aramanın başladığı pencerenin dibi: yazarken geçerli eşleşme,
-    /// pencerede görünür eşleşme yoksa buradan yukarı ilk eşleşme. İlk
-    /// sorguda kuruluyor, aramanın kapanışında (`clear_search`) düşüyor;
-    /// gezinme onu geçerli eşleşmeye çekiyor ki sorguyu daraltmak bulunan
-    /// yerin yakınında kalsın.
+    /// The bottom of the window where the search started: while typing, the
+    /// current match, if there is no visible match in the window, is the first
+    /// match upward from here. It is set on the first query and dropped when the
+    /// search closes (`clear_search`); navigation pulls it to the current match
+    /// so that narrowing the query stays near where it was found.
     pub(crate) origin: Option<Point>,
-    /// Son içerik karesinde bastırılan giriş satırları, **mutlak** `Line`
-    /// aralığı — gezinme ve sayım vurgunun dışladığını dışlasın diye karenin
-    /// kendi cevabı ([`eligible`]); ikinci kez türetilmiyor (015'in dersi).
+    /// The input rows suppressed in the last content frame, as an **absolute**
+    /// `Line` range — the frame's own answer, so that navigation and counting
+    /// exclude what the highlight excludes; it isn't derived a second time
+    /// (015's lesson).
     pub(crate) hidden: Option<RangeInclusive<i32>>,
-    /// Defterin son gözlemi — [`current`](SearchSlot::current) ile
-    /// [`origin`](SearchSlot::origin) bu hâle göre ([`track`]). Arama
-    /// kapalıyken `None`.
+    /// The scrollback's last observation — [`current`](SearchSlot::current) and
+    /// [`origin`](SearchSlot::origin) are according to this state ([`track`]).
+    /// `None` when search is off.
     pub(crate) mark: Option<LedgerMark>,
-    /// Geçerli eşleşme defterin kaymasıyla kaybedildi: dizinin sonunda
-    /// yeniden seçilecek.
+    /// The current match was lost by the scrollback's shift: it will be
+    /// reselected at the end of the index.
     pub(crate) relocate: Option<Relocate>,
-    /// Bütün defterin sayımı (phase-5).
+    /// The count of the whole scrollback (phase-5).
     pub(crate) index: SearchIndex,
 }
 
 impl SearchSlot {
-    /// İzlenen durumun kopyası ([`Tracking`]).
+    /// A copy of the tracked state ([`Tracking`]).
     pub(crate) fn tracking(&self) -> Tracking {
         Tracking {
             current: self.current.clone(),
@@ -771,9 +796,10 @@ impl SearchSlot {
         }
     }
 
-    /// `tracking`'i geri yazar — **yalnız** yuvanın izi kopyanın alındığı
-    /// izse (`taken`): arada başka bir gözlem yuvayı ilerlettiyse onunki
-    /// yenidir ve bu kopya bayat bir kaymayı ikinci kez uygulardı.
+    /// Writes `tracking` back — **only** if the slot's trace is the one the copy
+    /// was taken at (`taken`): if another observation advanced the slot in the
+    /// meantime, its state is newer and this copy would apply a stale shift a
+    /// second time.
     pub(crate) fn settle(&mut self, taken: Option<LedgerMark>, tracking: Tracking) -> bool {
         if self.mark != taken {
             return false;
