@@ -167,6 +167,9 @@ use crate::{child, settings};
 ///
 /// [`Workload::Load`] yükünde üst sınır **yok** — orada kare akışı işin
 /// kendisi.
+///
+/// Re-observed after the 040 move to the wgpu window path (2026-09-30,
+/// healthy and broken distributions in `docs/OLCUMLER.md`): unchanged.
 const IDLE_FRAME_LIMIT: u64 = 8;
 
 /// Duman koşusunun sonunda beklenen **en az** sessizlik: son çizilen kareyle
@@ -214,6 +217,10 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// Yalnız [`Workload::Smoke`]'ta soruluyor: ölçüm yükü deadline'a kadar çıktı
 /// akıtıyor, yani orada sessizlik sıfıra yakın olmak **zorunda**
 /// ([`Verdict::MotionUnsettled`]'ın aynı kolda muaf olmasının gerekçesiyle).
+///
+/// Re-observed after the 040 move to the wgpu window path (2026-09-30): the
+/// lowest healthy run was `1746.88 ms` (half: `873.44`), the highest broken
+/// one `155.21 ms` — `868` is still inside the rule, unchanged.
 const QUIET_FLOOR: Duration = Duration::from_millis(868);
 
 /// Kullanıcının dünyasına açılan girişlerin **tek** dalı.
