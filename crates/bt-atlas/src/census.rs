@@ -11,13 +11,12 @@
 //!
 //! The module is compiled only for tests: the classification has no
 //! consumer in production. It does not copy the gate, it calls its steps;
-//! since phase-2 it also sees the shrink branch (`font::accept`) the same
+//! since phase-2 it also sees the shrink branch (`rules::accept`) the same
 //! way.
 
-use objc2_core_foundation::CGFloat;
-use objc2_core_text::CTFont;
-
-use crate::{Atlas, Face, font, raster, rules};
+use crate::coretext::LAST_RESORT;
+use crate::system::{Backend, Font, FontSystem};
+use crate::{Atlas, Face, raster, rules};
 
 /// Where a character lands in the fallback gate.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,9 +36,9 @@ pub(crate) enum Class {
     Rejected { font: String, ratio: f64, fit: f64 },
 }
 
-/// Passes `ch` through the gate's steps **verbatim**: [`font::glyph_index`]
-/// (base) → [`font::cascade_candidate`] → [`font::glyph_index`] (candidate) →
-/// [`font::accept`]. There is no second gate; the classification only names
+/// Passes `ch` through the gate's steps **verbatim**: [`FontSystem::glyph`]
+/// (base) → [`FontSystem::cascade`] → [`FontSystem::glyph`] (candidate) →
+/// [`rules::accept`]. There is no second gate; the classification only names
 /// the steps' answers separately.
 ///
 /// Two ratios, both divided by the **box** (`cell_advance × cols`):
@@ -58,29 +57,30 @@ pub(crate) enum Class {
 ///
 /// `Fallback` does not carry `fit`: a passing candidate raises no shrink
 /// question.
-pub(crate) fn classify(base: &CTFont, ch: char, cell_advance: CGFloat, cols: u8) -> Class {
-    if font::glyph_index(base, ch).is_some() {
+pub(crate) fn classify(base: &Font, ch: char, cell_advance: f64, cols: u8) -> Class {
+    if Backend::glyph(base, ch).is_some() {
         return Class::InBase;
     }
-    let candidate = font::cascade_candidate(base, ch);
-    let Some(glyph) = font::glyph_index(&candidate, ch) else {
+    let Some(candidate) = Backend::cascade(base, ch.encode_utf8(&mut [0u8; 4])) else {
+        return Class::NoFont;
+    };
+    let Some(glyph) = Backend::glyph(&candidate, ch) else {
         return Class::NoFont;
     };
     // `.LastResort` is named in the report by the gate's own criterion
-    // ([`font::is_last_resort`]), so the report and the gate single out the
+    // ([`FontSystem::is_last_resort`]), so the report and the gate single out the
     // same font.
-    let family = if font::is_last_resort(&candidate) {
-        font::LAST_RESORT.to_string()
+    let family = if Backend::is_last_resort(&candidate) {
+        LAST_RESORT.to_string()
     } else {
-        // SAFETY: `candidate` is alive in this scope; a pure read.
-        unsafe { candidate.family_name() }.to_string()
+        crate::coretext::fixture::family_name(&candidate)
     };
-    let advance = font::glyph_advance(&candidate, glyph);
-    let ink = font::glyph_ink(&candidate, glyph);
-    let box_advance = cell_advance * CGFloat::from(cols);
+    let advance = Backend::advance(&candidate, glyph);
+    let ink = Backend::ink(&candidate, glyph);
+    let box_advance = cell_advance * f64::from(cols);
     let ratio = ink.width / box_advance;
     let fit = rules::fit_ratio(box_advance, advance, ink);
-    match font::accept(candidate, glyph, cell_advance, cols) {
+    match rules::accept(candidate, glyph, cell_advance, cols) {
         Some(a) if a.shrunk => Class::Shrunk {
             font: family,
             ratio,
@@ -121,7 +121,7 @@ const TOOL_CHARS: [char; 26] = [
 /// reverted the guard sees it again.
 ///
 /// `U+E0A0`/`U+E0B0` are in no installed font, the cascade gives
-/// `.LastResort`. R3.2 forbids shrinking it ([`font::is_last_resort`]), so
+/// `.LastResort`. R3.2 forbids shrinking it ([`FontSystem::is_last_resort`]), so
 /// shrinking does not empty this list; what empties it is a machine with a
 /// Nerd Font installed. `⧉` left the list in 041 phase-2: it is drawn shrunk.
 const EXPECTED_TOFU: [char; 2] = ['\u{E0A0}', '\u{E0B0}'];
@@ -224,16 +224,16 @@ mod tests {
     /// `x_offset = -w` and to the middle row by moving the baseline down one
     /// cell height; the box, centring and `rise` are the same as the atlas's
     /// drawing (`rise` from the real cell's metrics).
-    fn draw_wide(alt: &font::Accepted, m: crate::Metrics, cell: CGFloat) -> Vec<u8> {
+    fn draw_wide(alt: &rules::Accepted, m: crate::Metrics, cell: f64) -> Vec<u8> {
         let wide = crate::Metrics {
             cell_px: (m.cell_px.0 * 3, m.cell_px.1 * 3),
             baseline_px: m.baseline_px + m.cell_px.1,
             ..m
         };
-        let box_advance = cell * CGFloat::from(alt.cols);
-        let offset = -CGFloat::from(m.cell_px.0);
-        let rise = alt.rise(m, |font, glyph| font::glyph_ink(font, glyph));
-        if font::has_color_glyphs(&alt.font) {
+        let box_advance = cell * f64::from(alt.cols);
+        let offset = -f64::from(m.cell_px.0);
+        let rise = alt.rise(m);
+        if Backend::has_color_glyphs(&alt.font) {
             let mut rgba = vec![0u8; wide.slot_bytes_rgba()];
             raster::draw_color_glyph(
                 &alt.font,
@@ -274,14 +274,14 @@ mod tests {
             let base = a.faces.get(Face::Regular);
             let m = a.metrics;
             for (ch, color) in [('⧉', false), ('🌡', true)] {
-                let alt = font::fallback_font(base, ch, a.cell_advance, 1)
+                let alt = rules::fallback_font(base, ch, a.cell_advance, 1)
                     .unwrap_or_else(|| panic!("{ch} {pt}pt@{scale}x: came out as a box"));
                 assert!(
                     alt.shrunk,
                     "{ch} {pt}pt@{scale}x was accepted without shrinking"
                 );
                 assert_eq!(alt.cols, 1);
-                assert_eq!(font::has_color_glyphs(&alt.font), color, "{ch}: plane");
+                assert_eq!(Backend::has_color_glyphs(&alt.font), color, "{ch}: plane");
                 let cov = draw_wide(&alt, m, a.cell_advance);
                 let (w, h) = m.cell_wh();
                 let mut ink = 0usize;
@@ -352,7 +352,7 @@ mod tests {
     fn wide_emoji_shrinks_into_two_cells_at_1x() {
         let a = Atlas::new(None, 13.0, 1.0, 1.0);
         let base = a.faces.get(Face::Regular);
-        let alt = font::fallback_font(base, '😀', a.cell_advance, 2).expect("😀 @1x: tofu");
+        let alt = rules::fallback_font(base, '😀', a.cell_advance, 2).expect("😀 @1x: tofu");
         assert!(alt.shrunk, "did not fit two cells at @1x; should be shrunk");
         assert_eq!(alt.cols, 2, "the shrink must target the two-cell box");
     }
@@ -383,22 +383,23 @@ mod tests {
         let a = Atlas::new(None, 16.0, 2.0, 1.0);
         let base = a.faces.get(Face::Regular);
         let ch = '\u{E0A0}';
-        let candidate = font::cascade_candidate(base, ch);
+        let candidate = Backend::cascade(base, ch.encode_utf8(&mut [0u8; 4]))
+            .expect("CoreText's cascade always answers");
         assert!(
-            font::is_last_resort(&candidate),
+            Backend::is_last_resort(&candidate),
             "U+E0A0 came from another font"
         );
-        let glyph = font::glyph_index(&candidate, ch).expect(".LastResort gave no glyph");
+        let glyph = Backend::glyph(&candidate, ch).expect(".LastResort gave no glyph");
         let fit = rules::fit_ratio(
             a.cell_advance,
-            font::glyph_advance(&candidate, glyph),
-            font::glyph_ink(&candidate, glyph),
+            Backend::advance(&candidate, glyph),
+            Backend::ink(&candidate, glyph),
         );
         assert!(
             fit <= rules::SHRINK_LIMIT,
             "fit {fit:.3} must be within the limit"
         );
-        assert!(font::accept(candidate, glyph, a.cell_advance, 1).is_none());
+        assert!(rules::accept(candidate, glyph, a.cell_advance, 1).is_none());
     }
 
     /// Every candidate that passes the gate today is drawn **bit-for-bit the
@@ -415,45 +416,34 @@ mod tests {
         let mut passed = 0usize;
         for (_, first, last) in BLOCKS {
             for ch in (first..=last).filter_map(char::from_u32) {
-                if raster::is_procedural(ch) || font::glyph_index(base, ch).is_some() {
+                if raster::is_procedural(ch) || Backend::glyph(base, ch).is_some() {
                     continue;
                 }
-                let candidate = font::cascade_candidate(base, ch);
-                let Some(glyph) = font::glyph_index(&candidate, ch) else {
+                let candidate = Backend::cascade(base, ch.encode_utf8(&mut [0u8; 4]))
+                    .expect("CoreText's cascade always answers");
+                let Some(glyph) = Backend::glyph(&candidate, ch) else {
                     continue;
                 };
-                let advance = font::glyph_advance(&candidate, glyph);
-                let ink = font::glyph_ink(&candidate, glyph);
+                let advance = Backend::advance(&candidate, glyph);
+                let ink = Backend::ink(&candidate, glyph);
                 if !rules::ink_fits_placed(cell, advance, ink) {
                     continue;
                 }
-                let ptr = std::ptr::from_ref::<CTFont>(&candidate);
-                let alt = font::accept(candidate, glyph, cell, 1).expect("gate-passing rejected");
+                let ptr: *const _ = &*candidate;
+                let alt = rules::accept(candidate, glyph, cell, 1).expect("gate-passing rejected");
                 assert!(!alt.shrunk, "{ch}: a gate-passing candidate was shrunk");
                 assert!(std::ptr::eq(ptr, &*alt.font), "{ch}: font changed");
-                assert_eq!(
-                    alt.rise(m, |font, glyph| font::glyph_ink(font, glyph)),
-                    0.0,
-                    "{ch}: vertical shift"
-                );
+                assert_eq!(alt.rise(m), 0.0, "{ch}: vertical shift");
                 passed += 1;
             }
         }
         assert!(passed > 300, "too few gate-passing candidates: {passed}");
 
-        let alt = font::fallback_font(base, '⏺', cell, 1).expect("⏺ came out as a box");
+        let alt = rules::fallback_font(base, '⏺', cell, 1).expect("⏺ came out as a box");
         let mut before = vec![0u8; m.slot_bytes()];
         let mut after = vec![0u8; m.slot_bytes()];
         raster::draw(&alt.font, '⏺', m, cell, 0.0, &mut before);
-        raster::draw_glyph(
-            &alt.font,
-            alt.glyph,
-            m,
-            cell,
-            0.0,
-            alt.rise(m, |font, glyph| font::glyph_ink(font, glyph)),
-            &mut after,
-        );
+        raster::draw_glyph(&alt.font, alt.glyph, m, cell, 0.0, alt.rise(m), &mut after);
         assert_eq!(before, after, "⏺ raster changed");
     }
 
@@ -480,10 +470,6 @@ mod tests {
     /// on the left, or sticks to the left and overflows on the right, is
     /// turned back even if its ink is narrower than the cell.
     const EDGES: [f64; 3] = [1.2, 1.5, 1.7];
-    /// The cascade's "nobody can draw it" answer; [`classify`] labels it with
-    /// this name by the gate's criterion.
-    const LAST_RESORT: &str = font::LAST_RESORT;
-
     fn bucket(v: f64) -> usize {
         EDGES.iter().take_while(|&&e| v >= e).count()
     }
@@ -572,8 +558,7 @@ mod tests {
             let a = Atlas::new(family.as_deref(), pt, scale, 1.0);
             let base = a.faces.get(Face::Regular);
             let cell = a.cell_advance;
-            // SAFETY: `base` is kept alive by the atlas.
-            let base_name = unsafe { base.family_name() }.to_string();
+            let base_name = crate::coretext::fixture::family_name(base);
             let _ = writeln!(
                 out,
                 "\n=== {pt}pt @{scale}x — base {base_name}, cell {cell:.3} px ==="

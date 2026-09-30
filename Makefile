@@ -22,6 +22,10 @@ fmt:
 #   çağrıyı görür (`cfg` arkasındaki kullanım ağaçta görünmeyebilir). Kaynak
 #   grep'i yorum satırlarını düşürür: bt-core'un başlık yorumu "objc2 yok" der.
 #   bt-atlas'ta `objc2-core-*` serbest, yalnız `objc2` çekirdeği yasak.
+# - bt-atlas'ın font sistemi bir trait'in arkasında (042): CoreText/CoreGraphics
+#   adları (`objc2_core_*`, `CT…`/`CG…`/`CF…`) yalnız macOS arka ucunda
+#   (`coretext.rs`) görünür; kural yarısı platformsuz kalır ve Linux arka ucu
+#   aynı çağrıları trait'ten alır.
 # - Panik: bt-core'un sınama dışı kodunda unwrap/expect/panic!/unreachable!
 #   yok; bilinçli olanın satırında `// audit: {neden}` durur. Tarama satır
 #   başındaki ilk `#[cfg(test)]`'te durur, çünkü sınama modülü dosyanın sonunda.
@@ -42,6 +46,7 @@ denetim:
 	@fail=0; \
 	if $(CARGO) tree -p bt-core -e normal | grep -E "objc2|core-text|core-graphics|metal"; then echo "denetim: bt-core platform kütüphanesine bağlanıyor"; fail=1; fi; \
 	if $(CARGO) tree -p bt-atlas -e normal | grep -E "(^|[ ─])objc2 v"; then echo "denetim: bt-atlas objc2 çekirdeğine bağlanıyor"; fail=1; fi; \
+	if grep -rnE "objc2_core_|\b(CT|CG|CF)[A-Z][A-Za-z]+" crates/bt-atlas/src --include='*.rs' | grep -v "^crates/bt-atlas/src/coretext.rs:" | grep -v ":[[:space:]]*//"; then echo "denetim: bt-atlas'ta CoreText/CoreGraphics adı macOS arka ucunun (coretext.rs) dışında"; fail=1; fi; \
 	if $(CARGO) tree -p bt-gpu -e normal | grep -E "bt-shell"; then echo "denetim: bt-gpu yukarı, bt-shell'e bağlanıyor"; fail=1; fi; \
 	if grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"; then echo "denetim: bt-core kaynağında platform çağrısı var"; fail=1; fi; \
 	if $(CARGO) tree -p bt-gpu -e normal,dev --depth 1 | grep -E "objc2|dispatch2|block2|metal"; then echo "denetim: bt-gpu platform kütüphanesine doğrudan bağlanıyor"; fail=1; fi; \

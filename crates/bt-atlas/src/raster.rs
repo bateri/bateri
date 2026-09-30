@@ -1,128 +1,74 @@
-//! Draws a single glyph into alpha bytes.
+//! Draws a single sprite into slot bytes: a font glyph (through the
+//! platform's [`FontSystem`], positioned here), a rule line or a procedural
+//! character (block elements, Braille, box drawing — no font asked).
 
-use std::ffi::c_void;
-use std::ptr::NonNull;
-
-use objc2_core_foundation::{CGFloat, CGPoint};
-use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, kCGColorSpaceSRGB,
-};
-use objc2_core_text::CTFont;
-
-use crate::font;
 use crate::rules::{self, Metrics, unpremultiply};
+use crate::system::{Backend, Font, FontSystem};
 
 /// The result of [`draw`].
 ///
 /// The two failures are separate variants because their **diagnoses** differ,
 /// not their behaviour: both fall back to tofu and both are cached. Caching
-/// `NoContext` looks wrong at first sight ("a transient error"), but
-/// `CGBitmapContextCreate` has no argument that depends on the character —
-/// all of them are fixed for the atlas's lifetime, so if it fails once it
-/// always fails. If it were **not** cached, every cell would pay for a failed
+/// `NoContext` looks wrong at first sight ("a transient error"), but the
+/// drawing context has no argument that depends on the character — all of
+/// them are fixed for the atlas's lifetime, so if it fails once it always
+/// fails. If it were **not** cached, every cell would pay for a failed
 /// context setup on every frame and not a single glyph would be drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DrawResult {
     Drawn,
     /// The font has no glyph for this character (`.notdef`).
     NoGlyph,
-    /// The `CGBitmapContext` could not be created.
+    /// The backend could not set up its drawing target (CoreText: the
+    /// `CGBitmapContext`); a backend's load or render failure falls in the
+    /// same diagnostic bucket.
     NoContext,
 }
 
 /// Draws the coverage (alpha) bytes of `ch` into `target`.
 ///
 /// `box_advance` is the fractional advance of the **box** the glyph is
-/// centred in ([`font::space_advance`], twice that for a wide character);
+/// centred in ([`rules::space_advance`], twice that for a wide character);
 /// `m.cell_px.0` is it rounded up and does not enter here (the reason is in
-/// the doc of [`font::space_advance`]). `x_offset` is a **whole** pixel shift
+/// the doc of [`rules::space_advance`]). `x_offset` is a **whole** pixel shift
 /// applied after drawing — non-zero only for the right half of a wide glyph.
 ///
 /// The buffer is cleared only if drawing actually happens.
 pub(crate) fn draw(
-    font: &CTFont,
+    font: &Font,
     ch: char,
     m: Metrics,
-    box_advance: CGFloat,
-    x_offset: CGFloat,
+    box_advance: f64,
+    x_offset: f64,
     target: &mut [u8],
 ) -> DrawResult {
-    let Some(glyph) = font::glyph_index(font, ch) else {
+    let Some(glyph) = Backend::glyph(font, ch) else {
         return DrawResult::NoGlyph;
     };
     draw_glyph(font, glyph, m, box_advance, x_offset, 0.0, target)
 }
 
-/// The body of [`draw`], called with a glyph number.
-///
-/// It is separate because of grapheme sequences (035): a sequence's glyph
-/// comes not from a code point but from `CTLine`'s shaping
-/// ([`font::shape_cluster`]), so the `glyph_index(ch)` question cannot be
-/// asked there. Placement, centring and the context stay **in one place**;
-/// [`draw`] only finds the number, so today's raster is bit-for-bit the same.
+/// Where a glyph goes in its slot — **one formula** for both drawing recipes
+/// ([`draw_glyph`], [`draw_color_glyph`]): `(x, baseline)`, `x` from the
+/// slot's left edge and `baseline` above the slot's **bottom** edge, the
+/// convention [`FontSystem::draw_mask`] takes.
 ///
 /// `rise` is the vertical shift from the baseline (px, positive is up); it is
 /// non-zero only for a shrunk fallback and its formula lives in one place
 /// ([`rules::Accepted::rise`]).
-pub(crate) fn draw_glyph(
-    font: &CTFont,
+fn position(
+    font: &Font,
     glyph: u32,
     m: Metrics,
-    box_advance: CGFloat,
-    x_offset: CGFloat,
-    rise: CGFloat,
-    target: &mut [u8],
-) -> DrawResult {
-    // Not `debug_assert`: this line is the precondition of the `unsafe` block
-    // below. CG gets `width`/`height` from `m` and the pointer from `target`;
-    // if the two diverge, CG writes past the short buffer and nothing notices
-    // in a release build — the `make hepsi` tests run in debug.
-    assert_eq!(target.len(), m.slot_bytes(), "buffer must be a full slot");
-
-    let (w, h) = m.cell_wh();
-    // Alpha-only context: **no** colour space (`space: None`), 8 bits per
-    // component, row stride the full cell width. The coverage of a glyph
-    // drawn in white becomes the alpha byte directly; no separate channel
-    // extraction step arises and the buffer is already in the atlas's
-    // `R8Unorm` layout.
-    // SAFETY: `target` is w*h bytes and alive while the context lives (until
-    // the end of this function); the dimensions match the buffer. After the
-    // context is dropped `target` is accessed only from Rust.
-    let ctx = unsafe {
-        CGBitmapContextCreate(
-            target.as_mut_ptr().cast::<c_void>(),
-            w,
-            h,
-            8,
-            w,
-            None,
-            CGImageAlphaInfo::Only.0,
-        )
-    };
-    let Some(ctx) = ctx else {
-        return DrawResult::NoContext;
-    };
-    // Clearing comes **after** the context is created: on both failing
-    // branches the caller never looks at the buffer (tofu is resident and in
-    // the texture), so a memset there would be pure waste.
-    target.fill(0);
-
-    CGContext::set_should_antialias(Some(&ctx), true);
-    // Subpixel AA is off: the atlas is single-channel and the system itself
-    // dropped subpixel AA in macOS 10.14 (discussion.md → karar 3a). Both
-    // calls are needed separately: `allows_font_smoothing` turns off the
-    // context's permission, `should` the preference for this drawing.
-    CGContext::set_allows_font_smoothing(Some(&ctx), false);
-    CGContext::set_should_smooth_fonts(Some(&ctx), false);
-    // In an alpha-only context the grey component is ignored; alpha is what
-    // matters.
-    CGContext::set_gray_fill_color(Some(&ctx), 1.0, 1.0);
-
-    // CG's origin is bottom **left**, our grid's is top left: the baseline
-    // sits `cell_h - baseline_px` above the bottom of the cell. The
-    // subtraction cannot overflow: `rules::cell_metrics` builds the height as
-    // baseline + (descent+leading) and the second part is at least 1.
-    let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px) + rise;
+    box_advance: f64,
+    x_offset: f64,
+    rise: f64,
+) -> (f64, f64) {
+    // The baseline sits `cell_h - baseline_px` above the bottom of the slot.
+    // The subtraction cannot overflow: `rules::cell_metrics` builds the
+    // height as baseline + (descent+leading) and the second part is at least
+    // 1.
+    let baseline = f64::from(m.cell_px.1 - m.baseline_px) + rise;
     // The glyph is **centred horizontally** in the cell: a fallback font's
     // advance can be narrower than the cell's and a mark stuck to the left
     // looks misaligned between its neighbours. The rule is **universal**, not
@@ -139,120 +85,70 @@ pub(crate) fn draw_glyph(
     // rule — the width gate runs only for the **fallback**, the base font may
     // not be monospaced ([`rules::FontIssue::NotMonospaced`]) and a wide glyph
     // may exceed the cell. Spilling into the neighbouring cell is **not
-    // possible** — the context is exactly one slot wide and CG clips there —
-    // so the issue is not spilling but the **direction** of clipping: a
-    // negative shift cuts off the glyph's left side, whereas clipping must
-    // happen on the right. Latin script is recognised from the left; a 'W'
-    // with its left edge cut off cannot be told from a 'V'.
+    // possible** — the target is exactly one slot wide and clips there — so
+    // the issue is not spilling but the **direction** of clipping: a negative
+    // shift cuts off the glyph's left side, whereas clipping must happen on
+    // the right. Latin script is recognised from the left; a 'W' with its
+    // left edge cut off cannot be told from a 'V'.
     // `x_offset` is for the **right half** of a wide glyph: the same glyph is
     // centred in the same two-cell box, then shifted one cell to the left and
-    // CG clips the overflowing left half. The offset is a **whole** pixel
+    // the overflowing left half is clipped. The offset is a **whole** pixel
     // count (`m.cell_px.0`), so the AA phase of the two calls is identical and
     // the two halves come out bit-for-bit the same as a single 2w-wide raster
     // split in two — no split buffer, no second `slot_bytes` and no risk of a
     // seam at half a pixel. In a single-cell drawing it is zero, and then
     // this line is the same as it was in 022.
-    let x = rules::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
-    let position = CGPoint::new(x, baseline);
-    let glyph = font::cg_glyph(glyph);
-    // SAFETY: one glyph, one position, the count matches both; context alive.
-    unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
-    DrawResult::Drawn
+    let x = rules::centre_shift(box_advance, Backend::advance(font, glyph)) - x_offset;
+    (x, baseline)
 }
 
-/// Draws the **colour** pixels of `ch` into `target` (`RGBA8`, premultiplied).
+/// The body of [`draw`], called with a glyph number.
 ///
-/// A sibling of [`draw_glyph`] and a **separate** function, not a
-/// parameterised branch of it: the only thing the two recipes share is the
-/// position arithmetic, and what differs is the context itself — this one has
-/// a colour space (`sRGB`), four components per pixel and premultiplied
-/// alpha; [`draw`]'s is alpha-only and **cannot produce** colour
-/// (`space: None`, [`CGImageAlphaInfo::Only`]).
+/// It is separate because of grapheme sequences (035): a sequence's glyph
+/// comes not from a code point but from shaping ([`rules::shape_cluster`]),
+/// so the `glyph(ch)` question cannot be asked there. Placement and centring
+/// stay **in one place** ([`position`]); [`draw`] only finds the number.
+pub(crate) fn draw_glyph(
+    font: &Font,
+    glyph: u32,
+    m: Metrics,
+    box_advance: f64,
+    x_offset: f64,
+    rise: f64,
+    target: &mut [u8],
+) -> DrawResult {
+    let (x, baseline) = position(font, glyph, m, box_advance, x_offset, rise);
+    Backend::draw_mask(font, glyph, m, x, baseline, target)
+}
+
+/// Draws the **colour** pixels of a glyph into `target` (`RGBA8`, sRGB,
+/// **straight** alpha).
 ///
-/// **The colour space must be sRGB** and so must the texture side
-/// (`RGBA8Unorm_sRGB`): the target is `BGRA8Unorm_sRGB`, the hardware treats
-/// fragment output as linear, and an emoji sampled from a non-sRGB texture
-/// **washes out** the palette. The symptom is the same silent defect as in
-/// `CLAUDE.md` → "Renk uzayı sınırı geçer", so its witness is of the same
-/// kind: a mid-tone pixel (`0.0` and `1.0` are fixed points of the transfer
-/// function).
-///
-/// **Premultiplication is CG's decision**, not ours: we ask for
-/// `PremultipliedLast` because CoreGraphics delivers colour glyphs that way,
-/// and undoing it means a loss of precision at low alpha plus one CPU pass
-/// per slot. The price is paid on the blend side: that pipeline's RGB source
-/// factor is `One`.
+/// A sibling of [`draw_glyph`] with the **same** position ([`position`]):
+/// wide emoji also goes through the `Half` mechanism, so its right half is
+/// obtained with the same whole-pixel offset; `rise` is the same too. The
+/// backend paints premultiplied and the premultiplication is undone here,
+/// once, for every backend ([`rules::unpremultiply`] says why it is needed).
 ///
 /// It is called with a glyph **number**, not a character: both sources of a
 /// colour glyph (a fallback candidate and a grapheme sequence) have already
 /// found the number while passing the gate ([`rules::Accepted`]), so a
 /// character-taking wrapper would have no caller.
 pub(crate) fn draw_color_glyph(
-    font: &CTFont,
+    font: &Font,
     glyph: u32,
     m: Metrics,
-    box_advance: CGFloat,
-    x_offset: CGFloat,
-    rise: CGFloat,
+    box_advance: f64,
+    x_offset: f64,
+    rise: f64,
     target: &mut [u8],
 ) -> DrawResult {
-    // Not `debug_assert`: it is the precondition of the `unsafe` block below
-    // and the thing that **catches a mask buffer**. If the wrong plane's
-    // buffer is passed, CG writes past the short buffer and the symptom is
-    // silent.
-    assert_eq!(
-        target.len(),
-        m.slot_bytes_rgba(),
-        "buffer must be a full RGBA slot"
-    );
-
-    let (w, h) = m.cell_wh();
-    // SAFETY: a named system constant; the return is non-null.
-    let space = unsafe { CGColorSpace::with_name(Some(kCGColorSpaceSRGB)) };
-    let Some(space) = space else {
-        return DrawResult::NoContext;
-    };
-    // SAFETY: `target` is 4*w*h bytes and alive while the context lives; the
-    // dimensions match the buffer. After the context is dropped `target` is
-    // accessed only from Rust.
-    let ctx = unsafe {
-        CGBitmapContextCreate(
-            target.as_mut_ptr().cast::<c_void>(),
-            w,
-            h,
-            8,
-            w * 4,
-            Some(&space),
-            CGImageAlphaInfo::PremultipliedLast.0,
-        )
-    };
-    let Some(ctx) = ctx else {
-        return DrawResult::NoContext;
-    };
-    target.fill(0);
-    CGContext::set_should_antialias(Some(&ctx), true);
-    // Subpixel still off: the same reason as in [`draw`] (the system dropped
-    // it too), and it is moot for a colour glyph anyway.
-    CGContext::set_allows_font_smoothing(Some(&ctx), false);
-    CGContext::set_should_smooth_fonts(Some(&ctx), false);
-
-    // The position arithmetic is **identical** to [`draw_glyph`]'s and has to
-    // be: wide emoji also goes through the `Half` mechanism, so its right half
-    // is obtained with the same whole-pixel offset; `rise` is the same too
-    // ([`rules::Accepted::rise`]).
-    let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px) + rise;
-    let x = rules::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
-    let position = CGPoint::new(x, baseline);
-    let glyph = font::cg_glyph(glyph);
-    // SAFETY: one glyph, one position, the count matches both; context alive.
-    // For a colour font `draw_glyphs` draws the `sbix`/`CBDT` table itself;
-    // the separate "is it colour" branch is inside CoreText.
-    unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
-    // The context is dropped so that accessing `target` from Rust is safe:
-    // the pass below must not touch a buffer CG could still write to.
-    drop(ctx);
-    unpremultiply(target);
-    DrawResult::Drawn
+    let (x, baseline) = position(font, glyph, m, box_advance, x_offset, rise);
+    let drawn = Backend::draw_color(font, glyph, m, x, baseline, target);
+    if drawn == DrawResult::Drawn {
+        unpremultiply(target);
+    }
+    drawn
 }
 
 /// Kural çizgisi çeşidi — atlasta karakter gibi yuva tutar.

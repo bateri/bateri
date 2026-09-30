@@ -1,18 +1,20 @@
-//! The font-free half of the font chain: the ink gate, the cell formula, the
-//! face ladder and the colour plane's alpha conversion.
+//! The platformless half of the font chain: the ink gate, the shrink arm, the
+//! cell formula, the requested-family check, the face ladder and the colour
+//! plane's alpha conversion.
 //!
-//! Nothing here asks a font. A rule that needs a measurement gets it as a
-//! value (`advance`, [`InkRect`], [`RawMetrics`]); a rule that has to call
-//! back into the font mid-computation (opening a family, deriving a face,
-//! making a copy at another point size) gets a closure. The closures are the
-//! seam before the `FontSystem` trait: `font.rs` passes CoreText calls
-//! through them today, so the arithmetic and its order live in one place
-//! (`.tasks/042-font-sistemi-linux/discussion.md` → Karar 2).
+//! The font is asked **only** through the [`FontSystem`] trait of the
+//! platform's [`Backend`]; the arithmetic and its order live here once for
+//! every backend (`.tasks/042-font-sistemi-linux/discussion.md` → Karar 2,
+//! 3). The pure kernels ([`centre_shift`], [`ink_fits_placed`],
+//! [`fit_ratio`], [`cell_metrics`]) take measurements as values, so the
+//! census and the tests can call them without a font.
 //!
 //! Types are neutral: `f64` where CoreText says `CGFloat` (on macOS the latter
 //! is an alias of the former, so the same operations in the same order give
 //! the same bits) and [`InkRect`] where it says `CGRect` (a copy of four
 //! `f64`s, no rounding).
+
+use crate::system::{Backend, Font, FontSystem};
 
 /// Font face — a **typographic concept**, not an SGR flag.
 ///
@@ -67,8 +69,8 @@ impl Face {
 
 /// Four faces, in `Face` order. The regular face comes from the chain, the
 /// others are derived from it.
-pub(crate) struct Faces<F> {
-    fonts: [F; 4],
+pub(crate) struct Faces {
+    fonts: [Font; 4],
     /// The faces actually **acquired**; one that could not be acquired has
     /// collapsed onto the regular face.
     ///
@@ -99,22 +101,25 @@ pub enum FontIssue {
     NotMonospaced { family: String },
 }
 
-impl<F: Clone> Faces<F> {
-    /// Derives from the given regular face; `derive_face` answers one face,
-    /// `None` if it cannot be acquired.
+impl Faces {
+    /// Opens from the chain ([`open_chain`]) and derives the three faces.
+    pub(crate) fn from_chain(family: Option<&str>, size: f64) -> (Self, Option<FontIssue>) {
+        let (regular, issue) = open_chain(family, size);
+        (Self::derive(regular), issue)
+    }
+
+    /// Derives from the given regular face; [`FontSystem::derive`] answers
+    /// one face, `None` if it cannot be acquired.
     ///
-    /// A separate constructor, for testing: the base of the chain (Menlo)
-    /// carries all four faces, so the fallback branch can only be fired with
-    /// a real font by passing a **single-face** family.
-    pub(crate) fn derive_with(
-        regular: F,
-        mut derive_face: impl FnMut(&F, Face) -> Option<F>,
-    ) -> Self {
+    /// A separate constructor, for testing: the base of the chain carries all
+    /// four faces, so the fallback branch can only be fired with a real font
+    /// by passing a **single-face** family.
+    pub(crate) fn derive(regular: Font) -> Self {
         let mut fonts = [regular.clone(), regular.clone(), regular.clone(), regular];
         let mut acquired = [true, false, false, false];
         let mut missing: Vec<&str> = Vec::new();
         for face in [Face::Bold, Face::Italic, Face::BoldItalic] {
-            match derive_face(&fonts[Face::Regular as usize], face) {
+            match Backend::derive(&fonts[Face::Regular as usize], face) {
                 Some(font) => {
                     fonts[face as usize] = font;
                     acquired[face as usize] = true;
@@ -138,10 +143,8 @@ impl<F: Clone> Faces<F> {
         }
         Self { fonts, acquired }
     }
-}
 
-impl<F> Faces<F> {
-    pub(crate) fn get(&self, face: Face) -> &F {
+    pub(crate) fn get(&self, face: Face) -> &Font {
         &self.fonts[face as usize]
     }
 
@@ -273,8 +276,9 @@ pub(crate) fn same_family(returned: &str, requested: &str) -> bool {
     returned.to_lowercase() == requested.to_lowercase()
 }
 
-/// Walks the chain: the requested family (if any), otherwise the default
-/// chain (`open_default`). Anything to tell the user is in the second value.
+/// Walks the chain: the requested family (if any), otherwise the backend's
+/// default chain ([`FontSystem::open_default`]). Anything to tell the user is
+/// in the second value.
 ///
 /// The requested family is checked **by the returned name** like the other
 /// links ([`same_family`]): for a name that does not exist CoreText gives
@@ -282,36 +286,93 @@ pub(crate) fn same_family(returned: &str, requested: &str) -> bool {
 /// with a proportional font and the symptom would be a "not monospaced"
 /// warning — one that names a side effect, not the actual error.
 ///
-/// `open` gives the font **together** with the family name it actually
-/// opened; `open_default` is the default chain itself, which belongs to the
-/// font side.
-pub(crate) fn open_chain<F>(
-    family: Option<&str>,
-    point_size: f64,
-    open: impl FnOnce(&str, f64) -> (F, String),
-    open_default: impl FnOnce(f64) -> (F, String),
-    is_monospaced: impl FnOnce(&F) -> bool,
-) -> (F, Option<FontIssue>) {
+/// [`FontSystem::open`] gives the font **together** with the family name it
+/// actually opened; the default chain itself belongs to the backend.
+pub(crate) fn open_chain(family: Option<&str>, point_size: f64) -> (Font, Option<FontIssue>) {
     let Some(requested) = family else {
-        return (open_default(point_size).0, None);
+        return (Backend::open_default(point_size).0, None);
     };
-    let (font, returned) = open(requested, point_size);
+    let (font, returned) = Backend::open(requested, point_size);
     if !same_family(&returned, requested) {
-        let (font, using) = open_default(point_size);
+        let (font, using) = Backend::open_default(point_size);
         let issue = FontIssue::FamilyNotFound {
             requested: requested.to_owned(),
             using,
         };
         return (font, Some(issue));
     }
-    let issue = (!is_monospaced(&font)).then_some(FontIssue::NotMonospaced { family: returned });
+    let issue =
+        (!Backend::is_monospaced(&font)).then_some(FontIssue::NotMonospaced { family: returned });
     (font, issue)
+}
+
+/// Names of the monospaced families on this machine, in case-insensitive
+/// order — the settings window's Font list.
+///
+/// A family enters the list only if the chain would open it **without a
+/// warning**: the font system resolves the name to its own family
+/// ([`same_family`]) and the font it opens is monospaced
+/// ([`FontSystem::is_monospaced`]). The backend's candidates
+/// ([`FontSystem::families`]) are only a pre-filter — the last word belongs
+/// to these two criteria, so no family they reject can get into the list.
+pub fn monospaced_families() -> Vec<String> {
+    let mut names = Backend::families();
+    names.sort_by_cached_key(|name| name.to_lowercase());
+    names.dedup();
+    // The point size does not matter: family and monospacing are independent
+    // of it.
+    const PROBE_SIZE: f64 = 12.0;
+    names.retain(|name| {
+        let (font, returned) = Backend::open(name, PROBE_SIZE);
+        same_family(&returned, name) && Backend::is_monospaced(&font)
+    });
+    names
+}
+
+/// What the chain would say while opening `family` — the state of a family
+/// **not** in the settings window's Font list (`— not found` / `— not
+/// monospaced`, 029 Karar 3). The question is [`open_chain`] itself, so what
+/// the window says and what the subtitle says cannot diverge.
+pub fn family_issue(family: &str) -> Option<FontIssue> {
+    // The point size does not matter: family and monospacing are independent
+    // of it.
+    const PROBE_SIZE: f64 = 12.0;
+    open_chain(Some(family), PROBE_SIZE).1
+}
+
+/// Derives the cell size from the font's own metrics ([`cell_metrics`] with
+/// the font's raw measurements).
+pub(crate) fn metrics(font: &Font, line_height: f64) -> Metrics {
+    cell_metrics(Backend::raw_metrics(font), space_advance(font), line_height)
+}
+
+/// The space's horizontal advance — the cell width, **fractional**.
+///
+/// The monospace assumption is in the chain itself; if the setting's family
+/// is not monospaced the cell still derives from the space, wide letters get
+/// clipped and [`FontIssue::NotMonospaced`] says so. The measured character
+/// is the space because every font has one; the choice is fixed in the body,
+/// because calling it with another character would tie the cell width to
+/// that letter of the font.
+///
+/// The return is **unrounded**: the grid's pitch is the rounded one
+/// ([`Metrics::cell_px`]) but two consumers want the fractional one —
+/// [`fallback_font`]'s ink gate and `raster::draw`'s centring. Had both
+/// worked with the rounded value, the base font's **own** glyph would look
+/// narrower than the cell (7.827 < 8) and the centring would shift every
+/// glyph by under half a pixel: the output would no longer be bit-for-bit
+/// the same. Its guard is `the_cell_is_the_rounded_advance`.
+pub(crate) fn space_advance(font: &Font) -> f64 {
+    let Some(glyph) = Backend::glyph(font, ' ') else {
+        return 0.0;
+    };
+    Backend::advance(font, glyph)
 }
 
 /// Derives the cell size from the font's own metrics.
 ///
 /// `space_advance` is the space's fractional advance (the cell width,
-/// `font::space_advance`). `line_height` is the user's line-spacing
+/// [`space_advance`]). `line_height` is the user's line-spacing
 /// multiplier (`[font] line_height`, base `1.0`). The surplus is distributed
 /// **equally below and above** the glyph: half pushes the baseline down, the
 /// rest stays at the bottom. Added to one side only, the text would shift up
@@ -408,7 +469,7 @@ pub(crate) fn rule_envelope(top: u16, thickness: u16, cell_h: u16) -> (u16, u16)
 /// consumers**.
 ///
 /// Drawing (`raster::draw`) puts the glyph here, the gate
-/// (`font::fallback_font`) measures the ink from here. Written separately,
+/// ([`fallback_font`]) measures the ink from here. Written separately,
 /// the gate would test a placement that will not be drawn and the two would
 /// silently diverge: an accepted candidate could paint outside the cell, or a
 /// fitting candidate would be rejected.
@@ -429,7 +490,7 @@ pub(crate) fn centre_shift(box_advance: f64, advance: f64) -> f64 {
     ((box_advance - advance) / 2.0).max(0.0)
 }
 
-/// The font-free body of `font::ink_fits_box`: does a glyph with advance
+/// The font-free body of [`ink_fits_box`]: does a glyph with advance
 /// `advance` and ink `ink` fit in the box at the place [`centre_shift`] puts
 /// it.
 ///
@@ -446,27 +507,125 @@ pub(crate) fn ink_fits_placed(box_advance: f64, advance: f64, ink: InkRect) -> b
     left >= 0.0 && left + ink.width <= box_advance
 }
 
+/// Do the pixels the candidate paints stay inside the **box**.
+///
+/// The box is one cell or two cells (`box_advance`): a character declared
+/// wide occupies two columns, so if its ink fits in two cells it should be
+/// accepted. The order itself is in [`accept`].
+///
+/// The criterion is horizontal and only horizontal. Testing the vertical too
+/// **rejects no candidate** today (measured: every candidate that passes the
+/// horizontal gate also fits the cell's baseline window; the only set that
+/// overflows vertically is emoji, which at full size is rejected
+/// horizontally in a single cell and whose shrunk copy is vertically centred
+/// in the cell and fits inside — [`Accepted::rise`]), so a second criterion
+/// would be a rule written down without a witness. The limit is written by
+/// name: a candidate that overflows vertically today falls to **clipping**,
+/// not to the box.
+fn ink_fits_box(font: &Font, glyph: u32, box_advance: f64) -> bool {
+    ink_fits_placed(
+        box_advance,
+        Backend::advance(font, glyph),
+        Backend::ink(font, glyph),
+    )
+}
+
+/// A system font that can draw `ch` — **if it fits the cell**.
+///
+/// Three steps in one function, because all three answer one question: "can
+/// we draw this character with an acceptable font". `None` does not mean "no
+/// candidate found" but **"not accepted"**, and the caller does not have to
+/// tell them apart — the answer to both is [`crate::TOFU`].
+///
+/// 1. **Candidate** ([`FontSystem::cascade`]): the system's cascade, which
+///    the base font's own glyph lookup ([`FontSystem::glyph`]) does not walk
+///    — this difference is 019's reason to exist.
+/// 2. **Glyph.** Can the candidate really draw it. The candidate may be
+///    `base` itself, and then this step gives `None` — we only land here
+///    after `base` gave `.notdef`, so no separate "is it the same font"
+///    comparison is needed.
+/// 3. **Ink gate** ([`accept`]). Does the candidate paint outside the cell at
+///    the place it will be drawn — a candidate that does not fit is shrunk
+///    if within the limit ([`SHRINK_LIMIT`]), otherwise box. The criterion
+///    is geometric: no family name and no trait bit, the only exception is
+///    the shrink arm's last resort ([`FontSystem::is_last_resort`]; geometry
+///    cannot tell it apart from emoji). The measured numbers are in
+///    `.tasks/019-glyph-yedegi/phase-1.md` and
+///    `.tasks/041-yedek-glyph-kucultme/`. The bound is the **fractional**
+///    cell advance ([`space_advance`]), not the rounded cell width: the same
+///    number also feeds `raster::draw`'s centring, and keeping two numbers
+///    for two jobs would make them diverge.
+///
+/// The criterion was once the **advance** (`advance <= cell_advance`) and
+/// its symptom was seen by the user: Claude Code's tool marker `⏺` (U+23FA)
+/// came out as a box. The cause was measured — the candidate from STIX Two
+/// Math **advances** 4.6% wider than the cell but **paints** 8.6% narrower,
+/// so the gate measuring the advance rejected a glyph that fit comfortably
+/// in the cell. 019's calibration samples (2.17× / 1.83× / 1.66×) had no
+/// candidate near 1.0, and the gate had never been tested against symbol
+/// fonts.
+///
+/// Changing the criterion also closes the gap in the other direction: a
+/// candidate advancing narrow but painting wide is now a **box**, where it
+/// used to be silently clipped from the right. "Box or full glyph" is for the
+/// first time a contract, not a wish; since 041 "box, full glyph or a glyph
+/// shrunk just enough to fit".
+///
+/// A candidate with no ink **passes** the gate (zero width fits any cell);
+/// what gets drawn is an invisible glyph, not a box. Today this path does not
+/// arise because combining marks never reach a grid cell as a separate
+/// sprite.
+///
+/// **No log:** the function is on [`crate::Atlas::slot`]'s drawing path and a
+/// line printed per glyph would land in the middle of the frame budget
+/// ([`Faces::derive`]'s written rule).
+pub(crate) fn fallback_font(
+    base: &Font,
+    ch: char,
+    cell_advance: f64,
+    cols: u8,
+) -> Option<Accepted> {
+    let mut utf8 = [0u8; 4];
+    let candidate = Backend::cascade(base, ch.encode_utf8(&mut utf8))?;
+    let glyph = Backend::glyph(&candidate, ch)?;
+    accept(candidate, glyph, cell_advance, cols)
+}
+
+/// Shapes a grapheme cluster (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) into a **single
+/// glyph** ([`FontSystem::shape`]) and passes it through [`fallback_font`]'s
+/// gate; `None` means "not a single glyph, or rejected by the gate" and the
+/// caller falls back to the base character (035 R1.1).
+///
+/// The gate measures and the atlas draws **the font the shaper returns** —
+/// the one that actually produces the glyph, not the cascade's candidate:
+/// drawing another font's glyph number would draw an entirely different
+/// letter.
+///
+/// **No log**, same rationale as [`fallback_font`]: on the drawing path.
+pub(crate) fn shape_cluster(
+    base: &Font,
+    text: &str,
+    cell_advance: f64,
+    cols: u8,
+) -> Option<Accepted> {
+    let (font, glyph) = Backend::shape(base, text)?;
+    accept(font, glyph, cell_advance, cols)
+}
+
 /// The ink gate: does the candidate's glyph fit first in one cell, then (if
 /// declared two columns) in two cells — and if not, does it fit **shrunk**.
 ///
-/// The **shared** gate of the single-glyph fallback (`font::fallback_font`)
-/// and the grapheme cluster (`font::shape_cluster`) — the "box, full glyph or
-/// a glyph shrunk just enough to fit" contract goes through the same order in
-/// both, so a cluster's glyph cannot be accepted by a criterion different
-/// from a single-code-point emoji's. It is also the census's (`census`) gate.
+/// The **shared** gate of the single-glyph fallback ([`fallback_font`]) and
+/// the grapheme cluster ([`shape_cluster`]) — the "box, full glyph or a glyph
+/// shrunk just enough to fit" contract goes through the same order in both,
+/// so a cluster's glyph cannot be accepted by a criterion different from a
+/// single-code-point emoji's. It is also the census's (`census`) gate.
 ///
-/// `advance` and `ink` are the candidate glyph's own measurements; both gates
-/// test the **same** pair. `shrink` is the third arm ([`shrink`] with the
-/// font's calls), given the candidate and the box.
-pub(crate) fn accept<F>(
-    candidate: F,
-    glyph: u32,
-    cell_advance: f64,
-    cols: u8,
-    advance: f64,
-    ink: InkRect,
-    shrink: impl FnOnce(&F, f64) -> Option<F>,
-) -> Option<Accepted<F>> {
+/// The candidate glyph's own measurements are read **once** and both gates
+/// test the **same** `(advance, ink)` pair; [`shrink`] is the third arm.
+pub(crate) fn accept(candidate: Font, glyph: u32, cell_advance: f64, cols: u8) -> Option<Accepted> {
+    let advance = Backend::advance(&candidate, glyph);
+    let ink = Backend::ink(&candidate, glyph);
     // **The order is mandatory: one cell first.** A candidate that fits in
     // one cell fits today too and is drawn from a single slot; asked directly
     // with the two-cell box, `centre_shift` would move it to the middle of
@@ -499,7 +658,7 @@ pub(crate) fn accept<F>(
     // **Third arm: shrinking** (041). The last arm, so a candidate that
     // passes either gate never gets here and its raster is bit-for-bit
     // today's (R3.3).
-    shrink(&candidate, box_advance).map(|font| Accepted {
+    shrink(&candidate, glyph, box_advance).map(|font| Accepted {
         font,
         glyph,
         cols: cols.max(1),
@@ -523,25 +682,22 @@ pub(crate) fn accept<F>(
 /// re-test, 1.22 is needed (`.tasks/041-yedek-glyph-kucultme/phase-1.md` →
 /// Uygulama Notları).
 ///
-/// The copy (`at`) is **the same font** at another point size: the glyph
-/// number, the colour trait and hence the plane do not change, the drawing
-/// and the centring ([`centre_shift`]) stay untouched. The copy is tested
-/// **again** with `fits` (the gate at the copy's own measurements) — the rule
-/// that the gate measures the ink where the candidate will be drawn holds for
-/// the small copy too; if it fails, box.
+/// The copy ([`FontSystem::at_size`]) is **the same font** at another point
+/// size: the glyph number, the colour trait and hence the plane do not
+/// change, the drawing and the centring ([`centre_shift`]) stay untouched.
+/// The copy is tested **again** with [`ink_fits_box`] (the gate at the copy's
+/// own measurements) — the rule that the gate measures the ink where the
+/// candidate will be drawn holds for the small copy too; if it fails, box.
 ///
-/// `advance`, `ink` and `size` are the candidate's own measurements.
-/// `last_resort` keeps the cascade's last resort out of this arm (R3.2):
-/// rationale in `font::is_last_resort`.
-pub(crate) fn shrink<F>(
-    box_advance: f64,
-    advance: f64,
-    ink: InkRect,
-    size: f64,
-    last_resort: bool,
-    at: impl Fn(f64) -> F,
-    fits: impl Fn(&F) -> bool,
-) -> Option<F> {
+/// The backend's last resort is kept out of this arm (R3.2): rationale in
+/// [`FontSystem::is_last_resort`].
+fn shrink(candidate: &Font, glyph: u32, box_advance: f64) -> Option<Font> {
+    let size = Backend::size(candidate);
+    let advance = Backend::advance(candidate, glyph);
+    let ink = Backend::ink(candidate, glyph);
+    let last_resort = Backend::is_last_resort(candidate);
+    let at = |s: f64| Backend::at_size(candidate, s);
+    let fits = |f: &Font| ink_fits_box(f, glyph, box_advance);
     let fit = fit_ratio(box_advance, advance, ink);
     if !(fit.is_finite() && fit <= SHRINK_LIMIT) || last_resort {
         return None;
@@ -600,7 +756,7 @@ const SHRINK_STEPS: usize = 10;
 ///
 /// 2.2 lies between the two: 3.6% above emoji, 2.2% below the outside one.
 /// `.LastResort` (1.660) is **below** the limit and cannot be told apart by
-/// geometry — what keeps it outside is `font::is_last_resort`.
+/// geometry — what keeps it outside is [`FontSystem::is_last_resort`].
 pub(crate) const SHRINK_LIMIT: f64 = 2.2;
 
 /// The smallest `fit` the gate passes when the glyph is shrunk by a `1 / fit`
@@ -643,10 +799,10 @@ pub(crate) fn fit_ratio(box_advance: f64, advance: f64, ink: InkRect) -> f64 {
 /// `cols` is not the number of columns the grid reserves but the box the gate
 /// accepted: if a character declared two columns fits in one cell, this is
 /// `1` and it is drawn from a single slot.
-pub(crate) struct Accepted<F> {
-    pub(crate) font: F,
+pub(crate) struct Accepted {
+    pub(crate) font: Font,
     /// The glyph the gate measured — also the one drawn. For a single code
-    /// point it is `font::glyph_index`'s answer, for a cluster the one the
+    /// point it is [`FontSystem::glyph`]'s answer, for a cluster the one the
     /// shaper produced.
     pub(crate) glyph: u32,
     pub(crate) cols: u8,
@@ -656,7 +812,7 @@ pub(crate) struct Accepted<F> {
     pub(crate) shrunk: bool,
 }
 
-impl<F> Accepted<F> {
+impl Accepted {
     /// The glyph's vertical shift from the baseline (px, up is positive) —
     /// **one formula**, both drawing recipes (`raster::draw_glyph`,
     /// `raster::draw_color_glyph`) read it from here.
@@ -674,17 +830,17 @@ impl<F> Accepted<F> {
     /// integer and a fractional shift would change the AA phase and blur the
     /// edge.
     ///
-    /// `ink` measures the glyph in the font and is asked only for a shrunk
-    /// candidate, so the unshrunk path costs no font call.
+    /// The ink is asked only for a shrunk candidate, so the unshrunk path
+    /// costs no font call.
     ///
     /// The horizontal gate is unaffected by this (its criterion is horizontal
-    /// only, `font::ink_fits_box`); the cell's middle also reduces vertical
+    /// only, [`ink_fits_box`]); the cell's middle also reduces vertical
     /// overflow.
-    pub(crate) fn rise(&self, m: Metrics, ink: impl FnOnce(&F, u32) -> InkRect) -> f64 {
+    pub(crate) fn rise(&self, m: Metrics) -> f64 {
         if !self.shrunk {
             return 0.0;
         }
-        let ink = ink(&self.font, self.glyph);
+        let ink = Backend::ink(&self.font, self.glyph);
         let baseline = f64::from(m.cell_px.1 - m.baseline_px);
         (f64::from(m.cell_px.1) / 2.0 - baseline - (ink.y + ink.height / 2.0)).round()
     }
