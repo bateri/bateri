@@ -31,7 +31,34 @@ _Requirements: R2, R1.1, R1.2_
 
 ## Checklist
 
-- [ ] Kural yarısı platformsuz modülde, CoreText tipi görmüyor
-- [ ] `InkRect` ve `f64` imzaları; `u32` glyph
-- [ ] Test: tanık ebeveynle aynı
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] Kural yarısı platformsuz modülde, CoreText tipi görmüyor
+- [x] `InkRect` ve `f64` imzaları; `u32` glyph
+- [x] Test: tanık ebeveynle aynı
+- [x] Doğrulama geçti (`make hepsi`)
+
+## Uygulama Notları
+
+- Platformsuz modül tek dosya: `crates/bt-atlas/src/rules.rs`. `Face`,
+  `SizeClass`, `FontIssue`, `Metrics` de oraya indi (fontsuz tipler;
+  `lib.rs`'in `pub use` adları aynı). `Face::traits` `font.rs`'te serbest
+  `face_traits` oldu, `unreachable!` ve gerekçesi aynen.
+- Trait yok (phase-3'ün işi): kural yarısı ölçüyü **değer** olarak alıyor,
+  fonta ortada dönmesi gereken yerde **closure** (`open_chain`'in üç
+  çağrısı, `Faces::derive_with`, `accept`'in küçültme kolu, `shrink`'in
+  `at`/`fits`'i, `Accepted::rise`'ın tembel `ink`'i). `font.rs` bugünkü
+  imzalarla ince sarmalayıcılar tutuyor (`accept`, `shrink`, `metrics`,
+  `open_chain`, `Faces::from_chain`/`derive`); phase-3 closure'ları trait
+  çağrısına çeviriyor.
+- `accept`'in iki kapısı adayın ölçüsünü bir kez alıp aynı `(advance,
+  ink)` çiftini iki kez sınıyor (önce iki kez aynı ölçü okunuyordu — saf
+  okuma); `shrink`'te `is_last_resort` artık kısa devresiz okunuyor, yalnız
+  reddedilen adayda koşan saf bir okuma.
+- `u32` glyph'in `CGGlyph`'e daralması tek yerde (`font::cg_glyph`).
+- `unpremultiply`'ın iki sınaması `raster.rs`'ten `rules.rs`'e taşındı;
+  sınama sayısı aynı (87).
+- `CLAUDE.md`'deki taşınan yollar `rules::` oldu; var olmayan
+  `font::ink_fits_cell` yanındaki cümleyle birlikte `font::ink_fits_box`'a
+  düzeltildi.
+- Tanık: ebeveyn (`c1db50d`) ile 38 682 satır, fark yalnız süre satırı.
+  `make tarama` koşulmadı (yardımcı sinyal, tanık değil).
+

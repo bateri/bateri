@@ -33,7 +33,7 @@
 //! ilerlemelerinden dar boyuyor (`⏺` U+23FA) ve ilerlemeyi ölçen bir kapı
 //! onları hücreye sığdıkları hâlde eliyordu. Sığmayan aday iki sütunluysa iki
 //! hücreye (023), sığmıyorsa ve taşması sınırın içindeyse küçük puntolu
-//! kopyasıyla çiziliyor (041, `font::SHRINK_LIMIT`); kalanı [`TOFU`].
+//! kopyasıyla çiziliyor (041, `rules::SHRINK_LIMIT`); kalanı [`TOFU`].
 
 // Yedek kapısının taraması ve araç karakterlerinin bekçisi; üretimde
 // tüketicisi yok (041 phase-1).
@@ -41,15 +41,17 @@
 mod census;
 mod font;
 mod raster;
+mod rules;
 
 use std::collections::{HashMap, HashSet};
 
 use font::Faces;
-pub use font::{Face, FontIssue, Metrics, SizeClass, family_issue, monospaced_families};
+pub use font::{family_issue, monospaced_families};
 use objc2_core_foundation::{CFRetained, CGFloat};
 use objc2_core_text::CTFont;
 use raster::DrawResult;
 pub use raster::RuleKind;
+pub use rules::{Face, FontIssue, Metrics, SizeClass};
 
 /// Atlasta yuva tutan şey: bir karakter, bir kural çizgisi ya da bir grapheme
 /// dizisi.
@@ -424,7 +426,7 @@ impl Atlas {
         // ilerlemesi. Bütün bir `Metrics` kurup içinden genişliği almak aynı
         // sayıyı ikinci bir yoldan türetmek olurdu.
         let context_advance = font::space_advance(&small);
-        let context_cell_w = font::round_up(context_advance);
+        let context_cell_w = rules::round_up(context_advance);
         let (w, h) = metrics.cell_px;
         // Kenar **yuva hedefinden** türüyor: hücre büyüdükçe kapasite düşüyor
         // ve bir yerde yordamsal ailenin (422 yuva) altına iniyor — ölçülen
@@ -441,7 +443,7 @@ impl Atlas {
         // Kırpma ancak hiç katlanmamış bir tabanda görülebilir ve orası
         // zaten bugünkü davranış.
         //
-        // `w`/`h` en az 1 (`font::round_up`), yani bölme güvenli; `max(1)` de
+        // `w`/`h` en az 1 (`rules::round_up`), yani bölme güvenli; `max(1)` de
         // hücrenin dokudan büyük olduğu uç için.
         let grid = grid_for(w, h);
         Self {
@@ -503,7 +505,7 @@ impl Atlas {
 
     /// Bağlam satırının sütun adımı, piksel; bkz. [`Atlas::context_cell_w`].
     ///
-    /// En az 1: `font::round_up` küçük yüzün ilerlemesini de 1'e kırpıyor,
+    /// En az 1: `rules::round_up` küçük yüzün ilerlemesini de 1'e kırpıyor,
     /// yani bölen olarak kullanmak güvenli.
     pub fn context_cell_w(&self) -> u16 {
         self.context_cell_w
@@ -803,7 +805,7 @@ impl Atlas {
                 // hücrenin ilerlemesine sığmak zorunda, büyüğün değil.
                 let (font, cell_advance) = match size {
                     SizeClass::Normal => (self.faces.get(face), self.cell_advance),
-                    SizeClass::Small => (&*self.small, self.context_advance),
+                    SizeClass::Small => (&self.small, self.context_advance),
                 };
                 // **Taban font her zaman tek hücre.** Eşaralıklı taban fontta
                 // her glyph'in ilerlemesi hücrenin ilerlemesinin ta kendisi
@@ -875,7 +877,7 @@ impl Atlas {
                 let base = text.chars().next().unwrap_or(' ');
                 let (font, cell_advance) = match size {
                     SizeClass::Normal => (self.faces.get(face), self.cell_advance),
-                    SizeClass::Small => (&*self.small, self.context_advance),
+                    SizeClass::Small => (&self.small, self.context_advance),
                 };
                 // Sütun sayısı `Char`'ınkiyle aynı kaynaktan (çağıranın
                 // istediği yarı) ve kapının sırası aynı: önce tek, sonra iki.
@@ -1131,7 +1133,7 @@ impl Atlas {
         let box_advance = cell_advance * f64::from(alt.cols);
         let shift = f64::from(self.metrics.cell_px.0);
         let half = if pair { Half::Left } else { Half::Whole };
-        let rise = alt.rise(self.metrics);
+        let rise = alt.rise(self.metrics, |font, glyph| font::glyph_ink(font, glyph));
         // Tek çizici, iki reçete: `Plane` hangisi olacağını söylüyor ve tampon
         // da onunla eşleşiyor. Eşleşmezse `raster`'ın ön koşul assert'i düşer
         // — o assert yanlış düzlemi yakalayan tek şey.
@@ -1520,13 +1522,13 @@ mod tests {
         ] {
             let a = atlas(point_size, scale);
             assert_eq!(
-                font::round_up(a.cell_advance),
+                rules::round_up(a.cell_advance),
                 a.metrics.cell_px.0,
                 "{point_size}×{scale}: büyük sınıfın iki temsili ayrıştı ({})",
                 a.cell_advance
             );
             assert_eq!(
-                font::round_up(a.context_advance),
+                rules::round_up(a.context_advance),
                 a.context_cell_w,
                 "{point_size}×{scale}: küçük sınıfın iki temsili ayrıştı ({})",
                 a.context_advance
@@ -1679,17 +1681,14 @@ mod tests {
             let glyph =
                 font::glyph_index(&alt, FALLBACK_CHAR).expect("kapıyı geçen aday çizebiliyor");
             let rect = font::glyph_ink(&alt, glyph);
-            let x = font::centre_shift(cell, font::glyph_advance(&alt, glyph));
-            let (left, right) = (x + rect.origin.x, x + rect.origin.x + rect.size.width);
+            let x = rules::centre_shift(cell, font::glyph_advance(&alt, glyph));
+            let (left, right) = (x + rect.x, x + rect.x + rect.width);
             assert!(left >= 0.0, "{label}: mürekkep soldan taştı ({left})");
             assert!(
                 right <= cell,
                 "{label}: mürekkep sağdan taştı ({right} > {cell})"
             );
-            let (bottom, top) = (
-                baseline + rect.origin.y,
-                baseline + rect.origin.y + rect.size.height,
-            );
+            let (bottom, top) = (baseline + rect.y, baseline + rect.y + rect.height);
             assert!(bottom >= 0.0, "{label}: mürekkep alttan taştı ({bottom})");
             let cell_h = f64::from(m.cell_px.1);
             assert!(
@@ -1776,16 +1775,16 @@ mod tests {
                 let advance = font::glyph_advance(&open, glyph);
                 // Adayın **çizileceği yerdeki** mürekkebi: kaydırma
                 // `raster::draw`'in uyguladığının ta kendisi
-                // (`font::centre_shift`), yoksa sınama çizilmeyecek bir
+                // (`rules::centre_shift`), yoksa sınama çizilmeyecek bir
                 // yerleşimi ölçerdi.
                 let ink = font::glyph_ink(&open, glyph);
-                let left = ink.origin.x + font::centre_shift(cell, advance);
-                let right = left + ink.size.width;
+                let left = ink.x + rules::centre_shift(cell, advance);
+                let right = left + ink.width;
                 // Sığmayan aday sınırın içindeyse ve `.LastResort` değilse
                 // küçültülerek çiziliyor (041); beklenti yine adayın kendi
                 // ölçüsünden, küçültmenin katsayısıyla aynı fonksiyondan.
-                let fit = font::fit_ratio(cell, advance, ink);
-                let shrinks = fit <= font::SHRINK_LIMIT && !font::is_last_resort(&open);
+                let fit = rules::fit_ratio(cell, advance, ink);
+                let shrinks = fit <= rules::SHRINK_LIMIT && !font::is_last_resort(&open);
                 let family = unsafe { open.family_name() }.to_string();
                 plan.push((
                     ch,
@@ -3074,9 +3073,9 @@ mod tests {
         // **Sentetik girdi bilerek**: bu makinedeki Menlo alt çizgiyi 14+1'e
         // koyuyor, hücre 17 — yani gerçek fontla kırpma dalı hiç ateşlenmiyor
         // ve oradan yazılan bir sınama mutasyonu yakalayamazdı.
-        // `font::rule_envelope`'nın sözleşmesi burada, saf aritmetik olarak sınanıyor.
+        // `rules::rule_envelope`'nın sözleşmesi burada, saf aritmetik olarak sınanıyor.
         for (top, thick, h) in [(100u16, 3u16, 17u16), (16, 4, 17), (0, 99, 17)] {
-            let (position, thickness) = font::rule_envelope(top, thick, h);
+            let (position, thickness) = rules::rule_envelope(top, thick, h);
             assert!(
                 position + thickness <= h,
                 "zarf hücreyi aştı: girdi ({top},{thick},{h}) → ({position},{thickness})"

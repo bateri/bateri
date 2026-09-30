@@ -173,7 +173,7 @@ fn zero_component_metrics_cannot_be_built() {
 #[test]
 fn cell_metrics_are_never_zero() {
     // `bt-shell` uses these two numbers as **divisors**. `bt-atlas` gives the guarantee
-    // (`font::round_up` clamps to 1) and `CellMetrics`'s private field makes it structural on
+    // (`rules::round_up` clamps to 1) and `CellMetrics`'s private field makes it structural on
     // this side of the boundary; this test says the clamp at the source is still in place.
     let r = renderer();
     for scale in [1.0, 2.0, 3.0] {

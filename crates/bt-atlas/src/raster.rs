@@ -5,11 +5,12 @@ use std::ptr::NonNull;
 
 use objc2_core_foundation::{CGFloat, CGPoint};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, kCGColorSpaceSRGB,
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, kCGColorSpaceSRGB,
 };
 use objc2_core_text::CTFont;
 
-use crate::font::{self, Metrics};
+use crate::font;
+use crate::rules::{self, Metrics, unpremultiply};
 
 /// The result of [`draw`].
 ///
@@ -62,10 +63,10 @@ pub(crate) fn draw(
 ///
 /// `rise` is the vertical shift from the baseline (px, positive is up); it is
 /// non-zero only for a shrunk fallback and its formula lives in one place
-/// ([`font::Accepted::rise`]).
+/// ([`rules::Accepted::rise`]).
 pub(crate) fn draw_glyph(
     font: &CTFont,
-    glyph: CGGlyph,
+    glyph: u32,
     m: Metrics,
     box_advance: CGFloat,
     x_offset: CGFloat,
@@ -119,7 +120,7 @@ pub(crate) fn draw_glyph(
 
     // CG's origin is bottom **left**, our grid's is top left: the baseline
     // sits `cell_h - baseline_px` above the bottom of the cell. The
-    // subtraction cannot overflow: `font::metrics` builds the height as
+    // subtraction cannot overflow: `rules::cell_metrics` builds the height as
     // baseline + (descent+leading) and the second part is at least 1.
     let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px) + rise;
     // The glyph is **centred horizontally** in the cell: a fallback font's
@@ -132,11 +133,11 @@ pub(crate) fn draw_glyph(
     // the "is it a fallback" question would add a second branch to the
     // drawing path and a second code path to the tests.
     //
-    // The shift's formula lives in [`font::centre_shift`] because its second
+    // The shift's formula lives in [`rules::centre_shift`] because its second
     // consumer is the fallback's ink gate: the gate must measure where the
     // candidate will stand **here**. The `max(0.0)` inside is this drawing's
     // rule — the width gate runs only for the **fallback**, the base font may
-    // not be monospaced ([`font::FontIssue::NotMonospaced`]) and a wide glyph
+    // not be monospaced ([`rules::FontIssue::NotMonospaced`]) and a wide glyph
     // may exceed the cell. Spilling into the neighbouring cell is **not
     // possible** — the context is exactly one slot wide and CG clips there —
     // so the issue is not spilling but the **direction** of clipping: a
@@ -151,8 +152,9 @@ pub(crate) fn draw_glyph(
     // split in two — no split buffer, no second `slot_bytes` and no risk of a
     // seam at half a pixel. In a single-cell drawing it is zero, and then
     // this line is the same as it was in 022.
-    let x = font::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
+    let x = rules::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
     let position = CGPoint::new(x, baseline);
+    let glyph = font::cg_glyph(glyph);
     // SAFETY: one glyph, one position, the count matches both; context alive.
     unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
     DrawResult::Drawn
@@ -183,11 +185,11 @@ pub(crate) fn draw_glyph(
 ///
 /// It is called with a glyph **number**, not a character: both sources of a
 /// colour glyph (a fallback candidate and a grapheme sequence) have already
-/// found the number while passing the gate ([`font::Accepted`]), so a
+/// found the number while passing the gate ([`rules::Accepted`]), so a
 /// character-taking wrapper would have no caller.
 pub(crate) fn draw_color_glyph(
     font: &CTFont,
-    glyph: CGGlyph,
+    glyph: u32,
     m: Metrics,
     box_advance: CGFloat,
     x_offset: CGFloat,
@@ -237,10 +239,11 @@ pub(crate) fn draw_color_glyph(
     // The position arithmetic is **identical** to [`draw_glyph`]'s and has to
     // be: wide emoji also goes through the `Half` mechanism, so its right half
     // is obtained with the same whole-pixel offset; `rise` is the same too
-    // ([`font::Accepted::rise`]).
+    // ([`rules::Accepted::rise`]).
     let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px) + rise;
-    let x = font::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
+    let x = rules::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
     let position = CGPoint::new(x, baseline);
+    let glyph = font::cg_glyph(glyph);
     // SAFETY: one glyph, one position, the count matches both; context alive.
     // For a colour font `draw_glyphs` draws the `sbix`/`CBDT` table itself;
     // the separate "is it colour" branch is inside CoreText.
@@ -250,52 +253,6 @@ pub(crate) fn draw_color_glyph(
     drop(ctx);
     unpremultiply(target);
     DrawResult::Drawn
-}
-
-/// Undoes premultiplication: `encode(c)·a` → `encode(c)`.
-///
-/// **Required, because the premultiplication happens in the wrong space.**
-/// The CG context is sRGB and `PremultipliedLast`, so the value it stores is
-/// `encode(c)·a` — the *encoded* component multiplied by alpha. Metal's
-/// `RGBA8Unorm_sRGB` texture, however, decodes each RGB channel
-/// **independently of alpha**, and the sRGB decode is convex:
-/// `decode(encode(c)·a) < decode(encode(c))·a`. The result drifts dark at
-/// every edge pixel — half-transparent white on a black background comes out
-/// `0x80` instead of `0xBC`, i.e. **a visible dark ring on every antialiased
-/// edge**.
-///
-/// The right place would be a linear context, but CG does not offer one at 8
-/// bits: among the alpha formats `CGBitmapContext` supports there is **no
-/// straight alpha** (`NoneSkip*` or `Premultiplied*`). The two remaining
-/// ways are undoing the premultiplication or a 16-bit linear texture; the
-/// latter doubles the colour plane and splits `slot_bytes_rgba` three ways
-/// per format.
-///
-/// **The price is precision at low alpha:** at `a = 1` the division
-/// multiplies the quantisation error by 255. It is not visible — that pixel's
-/// contribution to the screen is also only `a/255`, so the error's weight
-/// fades with it. The price is paid **once** per slot (the raster is cached),
-/// not per frame.
-///
-/// The output is **straight alpha**, so the emoji pipeline's blend stays the
-/// **same** as the mask path's: RGB source factor `SourceAlpha`. That is why
-/// 008 phase-5's "blend is not a parameter" decision was not reverted.
-fn unpremultiply(target: &mut [u8]) {
-    for px in target.chunks_exact_mut(4) {
-        let a = u32::from(px[3]);
-        if a == 0 {
-            // A fully transparent pixel has **no** colour; the division is
-            // undefined as well. Leaving it at zero is right under `nearest`
-            // sampling too: that pixel never carries weight.
-            continue;
-        }
-        for c in &mut px[..3] {
-            // `min(255)`: since the product with `a` was rounded, the
-            // division can exceed 255 by one unit (half-transparent white is
-            // exactly this corner).
-            *c = u8::try_from((u32::from(*c) * 255 / a).min(255)).unwrap_or(u8::MAX);
-        }
-    }
 }
 
 /// Kural çizgisi çeşidi — atlasta karakter gibi yuva tutar.
@@ -357,7 +314,7 @@ const WAVE_COUNT: f32 = 1.0;
 ///
 /// Dalganın göz tarafından dalga olarak görülmesi için gereken en küçük
 /// kaplam. Tabanı alt çizginin tabanına çakılı ve o zaten hücrenin içinde
-/// (`font::rule_envelope`), yani kıvrım inşaen içeride.
+/// (`rules::rule_envelope`), yani kıvrım inşaen içeride.
 const CURL_FACTOR: f32 = 3.0;
 
 /// `target`e kural çizgisinin kapsama baytlarını çizer.
@@ -406,7 +363,7 @@ pub(crate) fn draw_rule(kind: RuleKind, m: Metrics, target: &mut [u8]) {
         }
         // Nokta ve kesik: periyot kalınlığa bağlı, yani punto büyüdükçe desen
         // de büyüyor ve @2x'te sıkışmış görünmüyor. Alt sınır gerekmiyor —
-        // `font::rule_envelope` kalınlığı zaten `>= 1`'e bağlıyor.
+        // `rules::rule_envelope` kalınlığı zaten `>= 1`'e bağlıyor.
         RuleKind::Dotted => {
             let p = dividing_period(2 * thick, w);
             band(target, m, position, thickness, p, (p / 2).max(1));
@@ -571,7 +528,7 @@ fn overlap(i: usize, a: f32, b: f32) -> f32 {
 ///
 /// Dalga bandının **altı alt çizginin altına çakılı**: `position +
 /// CURL_FACTOR * thickness`, hücre tabanına kırpılarak. Kırpma burada
-/// **gerekli** — `font::rule_envelope` yalnız `position + thickness`'ı
+/// **gerekli** — `rules::rule_envelope` yalnız `position + thickness`'ı
 /// hücrenin içine oturtuyor, kıvrım ise onun `CURL_FACTOR` katı kadar aşağı
 /// iniyor ve tabanı taşabiliyor.
 fn curl(target: &mut [u8], m: Metrics, position: f32, thickness: f32) {
@@ -1132,7 +1089,7 @@ const LINES: [Recipe; 128] = [
 /// `[3.5, 4.5)` iki sütuna %50'şer düşerdi — bütün dikey çizgiler gri,
 /// yataylar (eksen 9.0) net. Kural yeni değil: alt çizginin konumu da
 /// kalınlığı da zaten tam sayı ([`Metrics::underline_px`]) ve
-/// [`font::rule_envelope`] kalınlığı `>= 1`'e bağlıyor, yani `start` tam
+/// [`rules::rule_envelope`] kalınlığı `>= 1`'e bağlıyor, yani `start` tam
 /// sayıyken bant da tam sayı kenarlarda bitiyor ve [`overlap`] kesir
 /// üretmiyor.
 fn rail(center: f32, thickness: f32) -> (f32, f32) {
@@ -1457,7 +1414,7 @@ fn scan_centre(line: f32, h: f32) -> f32 {
 ///   olarak eliyordu. Belirti kullanıcıda görüldü: Claude Code araç
 ///   sonuçlarını `⎿` ile başlatıyor.
 /// - `⎸` `⎹` **yanlış yerde** çiziliyordu — Apple Symbols'un ilerlemesi
-///   hücrenin 0.42'si, yani [`font::centre_shift`] onları hücrenin ortasına
+///   hücrenin 0.42'si, yani [`rules::centre_shift`] onları hücrenin ortasına
 ///   kaydırıyor ve "sol kenar çizgisi" solda durmuyordu.
 /// - `⎺⎻⎼⎽` **döşemiyordu** — Monaco'nun mürekkebi 20 px hücrede 0.03–19.19,
 ///   yani her hücrenin sağ ucunda 0.8 px boşluk kalıyor ve yan yana dizilen
@@ -1498,90 +1455,5 @@ fn technical(ch: char, m: Metrics, target: &mut [u8]) {
             max_rect(target, m, 0.0, w, band.0, band.1);
         }
         _ => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Undoing premultiplication: `encode(c)·a` → `encode(c)`.
-    ///
-    /// The numbers are what CG actually writes: half-transparent white
-    /// (`a = 0x80`) is stored premultiplied as `0x80` and must become `0xff`
-    /// when turned back into straight alpha. Without the conversion `0x80` is
-    /// read from the texture, and because the channel decode is independent
-    /// of alpha the result drops to a quarter in linear space and every
-    /// antialiased edge gets a dark ring — its witness on the GPU side is
-    /// `bt_gpu::renderer::tests::a_translucent_edge_composites_in_linear_space`.
-    #[test]
-    fn unpremultiply_recovers_straight_alpha() {
-        // Order: half-transparent white, fully transparent (no colour),
-        // opaque red, and the smallest alpha, which is **the hardest corner**.
-        let mut px = vec![
-            0x80, 0x80, 0x80, 0x80, // premultiplied white, a = 0.5
-            0x00, 0x00, 0x00, 0x00, // fully transparent
-            0xff, 0x00, 0x00, 0xff, // opaque red: must be left untouched
-            0x01, 0x00, 0x00, 0x01, // a = 1/255: the division must give 0xff
-        ];
-        unpremultiply(&mut px);
-        assert_eq!(&px[0..4], &[0xff, 0xff, 0xff, 0x80], "translucent white");
-        assert_eq!(
-            &px[4..8],
-            &[0x00, 0x00, 0x00, 0x00],
-            "a fully transparent pixel has no colour: the division is undefined, it must stay zero"
-        );
-        assert_eq!(
-            &px[8..12],
-            &[0xff, 0x00, 0x00, 0xff],
-            "an opaque pixel does not change"
-        );
-        assert_eq!(
-            &px[12..16],
-            &[0xff, 0x00, 0x00, 0x01],
-            "smallest alpha: must clamp to 255, not overflow"
-        );
-    }
-
-    /// The conversion is **invertible**: multiplying back gives the original
-    /// byte.
-    ///
-    /// What is sought is not a copy of the formula but an **invariant**, i.e.
-    /// "whatever we wrote, the GPU multiplying it by alpha must return the
-    /// premultiplied byte we had". The sweep walks every (component, alpha)
-    /// pair — not a hand-picked corner — and it is also what shows the reason
-    /// for `min(255)`: for half-transparent white the division exceeds 255 by
-    /// one unit.
-    ///
-    /// The slack is **±1** and comes from two roundings: one in CG's
-    /// premultiplication, one in our division. A larger deviation at low alpha
-    /// is legitimate and the criterion carries it (when `a` is small one byte
-    /// corresponds to a ratio far above its linear contribution) — hence the
-    /// slack scales with alpha.
-    #[test]
-    fn unpremultiply_round_trips_through_the_gpu_multiply() {
-        for a in 1u32..=255 {
-            for c in 0u32..=a {
-                // A premultiplied component **cannot exceed** alpha; an input
-                // that does never comes from CG and is not in the sweep.
-                let mut px = [
-                    u8::try_from(c).expect("c ≤ 255"),
-                    0,
-                    0,
-                    u8::try_from(a).expect("a ≤ 255"),
-                ];
-                unpremultiply(&mut px);
-                // What the GPU does: multiply the straight component by alpha.
-                let back = u32::from(px[0]) * a / 255;
-                // The division's quantisation slack: a one-byte straight error
-                // shrinks to `a/255` of premultiplied error, plus two roundings.
-                let slack = a.div_ceil(255) + 1;
-                assert!(
-                    back.abs_diff(c) <= slack,
-                    "multiplying back did not give the original byte: c={c} a={a} → {} → {back}",
-                    px[0]
-                );
-            }
-        }
     }
 }

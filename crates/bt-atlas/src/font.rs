@@ -29,111 +29,34 @@ const PREFERRED: [&str; 1] = ["SF Mono"];
 /// an `Option`/`expect` path never arises.
 const FALLBACK: &str = "Menlo";
 
-/// Font face — a **typographic concept**, not an SGR flag.
-///
-/// Its four variants match `bt-core`'s `bold`/`italic` flags, but **for
-/// different reasons**: there it is terminal semantics (SGR 1 / SGR 3), here
-/// it is a CoreText trait. Merging the two into one type because "they look
-/// the same" would add a `bt-core` edge to `bt-atlas`, and that edge would
-/// pull `alacritty_terminal` into a pure-CoreText crate. The translation
-/// lives in `bt-gpu`, the one layer that sees both.
-// `repr(u8)`: see `RuleKind` — the key is on `slot()`'s hot path.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum Face {
-    #[default]
-    Regular = 0,
-    Bold = 1,
-    Italic = 2,
-    BoldItalic = 3,
-}
+use crate::rules::{self, InkRect, Metrics, RawMetrics, same_family};
+use crate::rules::{Face, FontIssue};
 
-/// Which **point-size class** a sprite is rasterized in.
-///
-/// An axis **orthogonal** to [`Face`] and deliberately separate: the face is
-/// the text's style (the counterpart of SGR 1 / SGR 3), this is its size. Had
-/// it been added to `Face` as a fifth variant, "bold small" would be
-/// unrepresentable and [`Faces::effective`]'s ladder would line two separate
-/// questions up in a single order.
-///
-/// The small class has **one** consumer, the dock's context line; that line
-/// is the terminal's own footer and the shell's styling never reaches it, so
-/// only the regular face is rasterized on the small side (`Atlas::slot`).
-// `repr(u8)`: see `RuleKind` — the key is on `slot()`'s hot path.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum SizeClass {
-    #[default]
-    Normal = 0,
-    Small = 1,
-}
+/// The four faces over CoreText fonts.
+pub(crate) type Faces = rules::Faces<CFRetained<CTFont>>;
 
-impl Face {
-    /// The name used in the warning text.
-    fn name(self) -> &'static str {
-        match self {
-            Face::Regular => "Regular",
-            Face::Bold => "Bold",
-            Face::Italic => "Italic",
-            Face::BoldItalic => "BoldItalic",
-        }
+/// A gate-accepted candidate over a CoreText font.
+pub(crate) type Accepted = rules::Accepted<CFRetained<CTFont>>;
+
+/// The face's CoreText trait mask.
+///
+/// `Regular` is **never called**: the regular face is not derived, it comes
+/// from the chain. Had it returned an empty mask, `derive_face` would have to
+/// read that as a "not a real face" sentinel and `None` would carry two
+/// meanings.
+fn face_traits(face: Face) -> CTFontSymbolicTraits {
+    match face {
+        // audit: unreachable, and what guards it is the **module boundary**,
+        // not caller discipline: `derive_face` is private to font.rs and its
+        // only caller iterates over `[Bold, Italic, BoldItalic]`. Were it
+        // `pub(crate)`, someone in the crate calling it with `Face::Regular`
+        // would land here without a compiler warning, and the panic would
+        // take the frame down on the main thread via `slot()`.
+        Face::Regular => unreachable!("regular face is not derived, it comes from the chain"),
+        Face::Bold => CTFontSymbolicTraits::TraitBold,
+        Face::Italic => CTFontSymbolicTraits::TraitItalic,
+        Face::BoldItalic => CTFontSymbolicTraits::TraitBold | CTFontSymbolicTraits::TraitItalic,
     }
-
-    /// The face's CoreText trait mask.
-    ///
-    /// `Regular` is **never called**: the regular face is not derived, it
-    /// comes from the chain. Had it returned an empty mask, `derive_face`
-    /// would have to read that as a "not a real face" sentinel and `None`
-    /// would carry two meanings.
-    fn traits(self) -> CTFontSymbolicTraits {
-        match self {
-            // audit: unreachable, and what guards it is the **module
-            // boundary**, not caller discipline: `derive_face` is private to
-            // font.rs and its only caller iterates over
-            // `[Bold, Italic, BoldItalic]`. Were it `pub(crate)`, someone in
-            // the crate calling it with `Face::Regular` would land here
-            // without a compiler warning, and the panic would take the frame
-            // down on the main thread via `slot()`.
-            Face::Regular => unreachable!("regular face is not derived, it comes from the chain"),
-            Face::Bold => CTFontSymbolicTraits::TraitBold,
-            Face::Italic => CTFontSymbolicTraits::TraitItalic,
-            Face::BoldItalic => CTFontSymbolicTraits::TraitBold | CTFontSymbolicTraits::TraitItalic,
-        }
-    }
-}
-
-/// Four faces, in `Face` order. The regular face comes from the chain, the
-/// others are derived from it.
-pub(crate) struct Faces {
-    fonts: [CFRetained<CTFont>; 4],
-    /// The faces actually **acquired**; one that could not be acquired has
-    /// collapsed onto the regular face.
-    ///
-    /// Without keeping this, the caller could not know which face it got and
-    /// the slot waste that [`Faces::effective`] closes would silently stay
-    /// open.
-    acquired: [bool; 4],
-}
-
-/// The outcome of the requested family that has to be told to the user.
-///
-/// **Both cannot happen at once:** a family that is not found is replaced by
-/// the chain, and both fonts of the chain are monospaced. That is why the
-/// type is not a list.
-///
-/// No text: this crate builds no UI strings, it only reports the fact. The
-/// type does not leave `bt-atlas` — `bt-gpu` translates it into its own
-/// notice type (`bt-shell` does not see this crate, 003 R5).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FontIssue {
-    /// The family is not on this machine; `using` is the name of the family
-    /// the chain actually opened.
-    FamilyNotFound { requested: String, using: String },
-    /// The family opened but CoreText does not consider it monospaced. **Not
-    /// rejected**: the cell derives from the space's width and letters are
-    /// drawn clipped to the cell, i.e. a broken but working screen. `family`
-    /// is the name CoreText reports.
-    NotMonospaced { family: String },
 }
 
 impl Faces {
@@ -146,71 +69,10 @@ impl Faces {
         (Self::derive(regular), issue)
     }
 
-    /// Derives from the given regular face.
-    ///
-    /// A separate constructor, for testing: the base of the chain (Menlo)
-    /// carries all four faces, so the fallback branch can only be fired with
-    /// a real font by passing a **single-face** family.
+    /// Derives from the given regular face ([`rules::Faces::derive_with`]
+    /// with CoreText's [`derive_face`]).
     pub(crate) fn derive(regular: CFRetained<CTFont>) -> Self {
-        let mut fonts = [regular.clone(), regular.clone(), regular.clone(), regular];
-        let mut acquired = [true, false, false, false];
-        let mut missing: Vec<&str> = Vec::new();
-        for face in [Face::Bold, Face::Italic, Face::BoldItalic] {
-            match derive_face(&fonts[Face::Regular as usize], face) {
-                Some(font) => {
-                    fonts[face as usize] = font;
-                    acquired[face as usize] = true;
-                }
-                None => missing.push(face.name()),
-            }
-        }
-        if !missing.is_empty() {
-            // Once per atlas construction — `slot()` is on the drawing path
-            // and a line printed there would repeat every frame. **Not "once
-            // per lifetime":** `Atlas::ensure` rebuilds the atlas (and this)
-            // when the family/size/scale changes, so the line shows up again
-            // if the window moves between a Retina and an external display.
-            // An accepted cost; silencing it would need persistent state
-            // outside `Faces`. The prefix is the same as `open_chain`'s
-            // (`bateri:`), for the same reason.
-            eprintln!(
-                "bateri: the font family has no {} face, using the regular face",
-                missing.join(", ")
-            );
-        }
-        Self { fonts, acquired }
-    }
-
-    pub(crate) fn get(&self, face: Face) -> &CTFont {
-        &self.fonts[face as usize]
-    }
-
-    /// The face that goes into the slot key: **a face that could not be
-    /// acquired collapses to `Regular`**.
-    ///
-    /// The key must carry the **drawn** face, not the requested one. In a
-    /// single-face family (`Monaco`), `(Char, Bold)` and `(Char, Regular)`
-    /// would hold byte-for-byte the same bitmap in two separate slots; with
-    /// four faces the atlas fills four times as fast, surplus glyphs fall to
-    /// tofu and the symptom is silent. The second face of the same fact as
-    /// `Sprite::Rule` being lowered to `Regular`: the requested face and the
-    /// drawn face need not be the same.
-    pub(crate) fn effective(&self, face: Face) -> Face {
-        // A ladder, not a straight drop: lowering `BoldItalic` directly to
-        // `Regular` would drop the **weight** too. Families with no real
-        // `Bold Italic` face but with a `Bold` one are common; there SGR 1;3
-        // text would come out regular although the bold face is at hand.
-        let ladder: &[Face] = match face {
-            Face::BoldItalic => &[Face::BoldItalic, Face::Bold, Face::Italic],
-            Face::Bold => &[Face::Bold],
-            Face::Italic => &[Face::Italic],
-            Face::Regular => &[],
-        };
-        ladder
-            .iter()
-            .copied()
-            .find(|&f| self.acquired[f as usize])
-            .unwrap_or(Face::Regular)
+        Self::derive_with(regular, |regular, face| derive_face(regular, face))
     }
 }
 
@@ -228,7 +90,7 @@ impl Faces {
 ///    through with `CTFontCreateWithName`. The only difference: there the
 ///    family name is checked, here the trait mask.
 fn derive_face(regular: &CTFont, face: Face) -> Option<CFRetained<CTFont>> {
-    let wanted = face.traits();
+    let wanted = face_traits(face);
     // SAFETY: `regular` is alive; a null `matrix` is valid. **Careful:** in
     // the copy family null does not mean "identity matrix", it means **the
     // source font's matrix is kept** — not to be confused with the
@@ -241,65 +103,6 @@ fn derive_face(regular: &CTFont, face: Face) -> Option<CFRetained<CTFont>> {
     // SAFETY: `font` was just created and is alive in this scope.
     let returned = unsafe { font.symbolic_traits() };
     returned.contains(wanted).then_some(font)
-}
-
-/// Cell measurements, in **physical pixels**.
-///
-/// `Atlas::new`'s `scale` parameter is multiplied with the point size and
-/// goes into the font, so the display scale is inside these numbers. The
-/// scale must be part of the key: a glyph rasterized at @1x blurs **without
-/// error** at @2x and the symptom shows only on a two-display machine
-/// (discussion.md → Muhakeme).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Metrics {
-    /// (width, height).
-    pub cell_px: (u16, u16),
-    /// Pixels from the **top** of the cell to the baseline; the glyph sits
-    /// there. Does not exceed the height of [`Metrics::cell_px`] —
-    /// `metrics()` bounds it.
-    pub baseline_px: u16,
-    /// Underline: (position from the top of the cell, thickness).
-    ///
-    /// `position + thickness` **never** exceeds `cell_px.1` — [`rule_envelope`]
-    /// bounds it. If it did, the line would appear at the top of the next row
-    /// and the symptom would be silent.
-    pub underline_px: (u16, u16),
-    /// Strikeout: (position, thickness). The same guarantee.
-    pub strikeout_px: (u16, u16),
-}
-
-impl Metrics {
-    /// Byte count of a single slot (`R8`: one byte per pixel).
-    ///
-    /// This is the **single owner** of slot geometry: the atlas's buffer, the
-    /// tofu drawing and the raster target all three read it. If the geometry
-    /// changes (edge padding, alignment filler) there is one arithmetic point
-    /// to fix; spread over three, forgetting one would make the buffers
-    /// silently diverge.
-    pub fn slot_bytes(self) -> usize {
-        let (w, h) = self.cell_wh();
-        w * h
-    }
-
-    /// A single slot of the colour plane (`RGBA8`: **four** bytes per pixel).
-    ///
-    /// Same slot geometry, different format — and the single-owner rule is
-    /// not broken: both derive from [`Metrics::cell_wh`], so if edge padding
-    /// or alignment filler ever comes in there is still one place to fix.
-    /// The number could have been written as `slot_bytes() * 4`; a separate
-    /// name forces whoever builds the buffer to **state** which plane it is
-    /// for, and `raster::draw`'s assert catches the wrong plane.
-    pub fn slot_bytes_rgba(self) -> usize {
-        self.slot_bytes() * 4
-    }
-
-    /// Cell size as `usize` — for indexing and loop bounds.
-    ///
-    /// The same rationale as [`Metrics::slot_bytes`]: it keeps the widening
-    /// with a single owner instead of spreading it over four places.
-    pub(crate) fn cell_wh(self) -> (usize, usize) {
-        (usize::from(self.cell_px.0), usize::from(self.cell_px.1))
-    }
 }
 
 /// Opens the named family and returns it **together** with the family name
@@ -316,31 +119,15 @@ pub(crate) fn open(name: &str, point_size: CGFloat) -> (CFRetained<CTFont>, Stri
 }
 
 /// Walks the chain: the requested family (if any), then [`PREFERRED`], then
-/// [`FALLBACK`]. Anything to tell the user is in the second value.
-///
-/// The requested family is checked **by the returned name** like the other
-/// links ([`same_family`]): for a name that does not exist CoreText gives
-/// Helvetica on this machine, so unchecked, every misspelled name would open
-/// with a proportional font and the symptom would be a "not monospaced"
-/// warning — one that names a side effect, not the actual error.
+/// [`FALLBACK`] — [`rules::open_chain`] with CoreText's calls. Anything to
+/// tell the user is in the second value.
 pub(crate) fn open_chain(
     family: Option<&str>,
     point_size: CGFloat,
 ) -> (CFRetained<CTFont>, Option<FontIssue>) {
-    let Some(requested) = family else {
-        return (open_default(point_size).0, None);
-    };
-    let (font, returned) = open(requested, point_size);
-    if !same_family(&returned, requested) {
-        let (font, using) = open_default(point_size);
-        let issue = FontIssue::FamilyNotFound {
-            requested: requested.to_owned(),
-            using,
-        };
-        return (font, Some(issue));
-    }
-    let issue = (!is_monospaced(&font)).then_some(FontIssue::NotMonospaced { family: returned });
-    (font, issue)
+    rules::open_chain(family, point_size, open, open_default, |font| {
+        is_monospaced(font)
+    })
 }
 
 /// Does CoreText consider the font monospaced — the **single place** of the
@@ -418,19 +205,6 @@ pub fn family_issue(family: &str) -> Option<FontIssue> {
     open_chain(Some(family), PROBE_SIZE).1
 }
 
-/// Is the family name CoreText reports the requested name —
-/// **case-insensitively**.
-///
-/// CoreText finds the name case-insensitively (`"menlo"` → `Menlo`,
-/// measured) but reports it in its own spelling; an exact comparison would
-/// ignore the font it found. A PostScript name (`Menlo-Regular`) **does not
-/// match**: CoreText opens that too, but the family name differs, and that
-/// name names a single face of the family — the setting asks for a family
-/// (`docs/AYARLAR.md`).
-fn same_family(returned: &str, requested: &str) -> bool {
-    returned.to_lowercase() == requested.to_lowercase()
-}
-
 /// The font opened when the setting asks for no family, and the name CoreText
 /// reports for it.
 pub(crate) fn open_default(point_size: CGFloat) -> (CFRetained<CTFont>, String) {
@@ -455,7 +229,7 @@ pub(crate) fn open_default(point_size: CGFloat) -> (CFRetained<CTFont>, String) 
 
 /// The character's glyph number; `None` if the font does not know the
 /// character.
-pub(crate) fn glyph_index(font: &CTFont, ch: char) -> Option<CGGlyph> {
+pub(crate) fn glyph_index(font: &CTFont, ch: char) -> Option<u32> {
     let mut utf16 = [0u16; 2];
     let unit_count = ch.encode_utf16(&mut utf16).len();
     let mut glyphs = [0 as CGGlyph; 2];
@@ -478,105 +252,39 @@ pub(crate) fn glyph_index(font: &CTFont, ch: char) -> Option<CGGlyph> {
     // glyph is produced for the second UTF-16 unit and the function returns
     // `false`, although the glyph is in the first unit and valid. The only
     // criterion is whether it is `.notdef` (0).
-    (glyphs[0] != 0).then_some(glyphs[0])
+    (glyphs[0] != 0).then_some(u32::from(glyphs[0]))
 }
 
-/// Derives the cell size from the font's own metrics.
+/// Narrows the crate's glyph number back to CoreText's `CGGlyph` — the
+/// **single** place of the narrowing.
 ///
-/// `line_height` is the user's line-spacing multiplier (`[font]
-/// line_height`, base `1.0`). The surplus is distributed **equally below and
-/// above** the glyph: half pushes the baseline down, the rest stays at the
-/// bottom. Added to one side only, the text would shift up or down inside its
-/// cell, and the shift would grow as the line spacing opens up.
-///
-/// Underline and strikeout follow **by themselves**: both are measured from
-/// the baseline and the baseline has already moved. A separate correction
-/// would tear the lines away from the letters as the multiplier grows.
+/// Lossless by construction: every `u32` glyph in this crate originated as
+/// a CoreText `CGGlyph` (`u16`) widened by [`glyph_index`] or
+/// [`shape_cluster`]. The saturation is the type system's due, not a path
+/// that is taken.
+pub(crate) fn cg_glyph(glyph: u32) -> CGGlyph {
+    CGGlyph::try_from(glyph).unwrap_or(CGGlyph::MAX)
+}
+
+/// Derives the cell size from the font's own metrics
+/// ([`rules::cell_metrics`] with the font's raw measurements).
 pub(crate) fn metrics(font: &CTFont, line_height: f64) -> Metrics {
-    // SAFETY: `font` is alive; all three are pure reads.
-    let (ascent, descent, leading) = unsafe { (font.ascent(), font.descent(), font.leading()) };
-    // The height is found by rounding the two parts **separately** and adding
-    // them, not by `round_up(ascent + descent + leading)`. The difference was
-    // a measurable clip: on this machine Menlo 13pt gives ascent 12.067,
-    // descent 3.066, and rounding the sum up gives 16 — with the baseline at
-    // 13 that leaves 3 pixels below, while the font asks for 3.066. What is
-    // lost is the last coverage row under `g j p q y ,`; the symptom would be
-    // "the text looks a bit off". The numbers depend on the font version and
-    // may go stale, **the claim does not**: its guard is
-    // `descender_fits_in_the_cell`, which reads that metric from the font
-    // itself.
-    let natural = round_up(ascent).saturating_add(round_up(descent + leading));
-    // The multiplier is applied to the **cell**, not to the ascent: the
-    // criterion is the distance between lines, and the font's definition of
-    // that distance is `ascent + descent + leading`. At `1.0` the surplus is
-    // zero, so by default this path is a no-op.
-    let extra = round_up(f64::from(natural) * (line_height - 1.0));
-    let above = extra / 2;
-    let baseline = round_up(ascent).saturating_add(above);
-    let cell_px = (
-        round_up(space_advance(font)),
-        // `saturating_add`: both parts can go up to `u16::MAX`.
-        natural.saturating_add(extra),
-    );
-    // SAFETY: `font` is alive; all three are pure reads.
-    let (u_pos, u_thick, x_h) = unsafe {
-        (
-            font.underline_position(),
-            font.underline_thickness(),
-            font.x_height(),
-        )
-    };
-    // CoreText's `underline_position` is **negative**: it points below the
-    // baseline. The sign is flipped when converting to a position measured
-    // from the top of the cell.
-    let thickness = round_up(u_thick);
-    let underline_px = rule_envelope(
-        baseline.saturating_add(round_up(-u_pos)),
-        thickness,
-        cell_px.1,
-    );
-    // Strikeout has **no** CoreText counterpart; half the x-height above the
-    // baseline, the usual place in typography. `saturating_sub`: at small
-    // point sizes the x-height can exceed the baseline.
-    let strikeout_px = rule_envelope(
-        baseline.saturating_sub(round_up(x_h / 2.0)),
-        thickness,
-        cell_px.1,
-    );
-    Metrics {
-        cell_px,
-        // The baseline stays inside the cell, and that is now a consequence,
-        // not a wish: the bottom part is at least 1 because of `round_up`, so
-        // `baseline_px < cell_px.1`. That is why `raster`'s
-        // `cell_h - baseline` subtraction does not overflow.
-        baseline_px: baseline,
-        underline_px,
-        strikeout_px,
-    }
+    rules::cell_metrics(raw_metrics(font), space_advance(font), line_height)
 }
 
-/// Fits a rule line **inside** the cell: (position from the top, thickness).
-///
-/// The return's invariant is `position + thickness <= cell_h`. In this
-/// repository the bound is never stressed with today's font (Menlo) — at
-/// 13pt the underline is 14+1, the cell 18 — but the clamp is a contract, not
-/// a wish: `underline_position` is the font's own data and a font with a
-/// narrow descent can push the line out of the cell. The symptom is silent:
-/// one row's underline appears at the top of the row below. Its guard is
-/// `envelope_stays_inside_cell`, and it tests with **synthetic** input,
-/// because a real font never fires this branch.
-pub(crate) fn rule_envelope(top: u16, thickness: u16, cell_h: u16) -> (u16, u16) {
-    // No rule fits in zero height. It cannot be reached through `metrics()`
-    // (`round_up` pins every measurement to >= 1), but the function's only
-    // reason to exist is carrying the invariant: it should not both state it
-    // and break it.
-    if cell_h == 0 {
-        return (0, 0);
+/// The font's raw vertical measurements, as CoreText reports them.
+fn raw_metrics(font: &CTFont) -> RawMetrics {
+    // SAFETY: `font` is alive; all six are pure reads.
+    unsafe {
+        RawMetrics {
+            ascent: font.ascent(),
+            descent: font.descent(),
+            leading: font.leading(),
+            underline_position: font.underline_position(),
+            underline_thickness: font.underline_thickness(),
+            x_height: font.x_height(),
+        }
     }
-    // The thickness cannot exceed the cell; at least 1 — a line that is not
-    // drawn is not a rule.
-    let thickness = thickness.clamp(1, cell_h);
-    (top.min(cell_h - thickness), thickness)
 }
 
 /// The space's horizontal advance — the cell width, **fractional**.
@@ -608,7 +316,8 @@ pub(crate) fn space_advance(font: &CTFont) -> CGFloat {
 /// It is separate from [`space_advance`] because of the second caller: the
 /// fallback candidate's ink gate and `raster::draw`'s centring measure the
 /// character's **own** glyph, not the space.
-pub(crate) fn glyph_advance(font: &CTFont, glyph: CGGlyph) -> CGFloat {
+pub(crate) fn glyph_advance(font: &CTFont, glyph: u32) -> CGFloat {
+    let glyph = cg_glyph(glyph);
     let mut advance = [CGSize::ZERO; 1];
     // SAFETY: one glyph, one measurement cell; the count is consistent with
     // both.
@@ -631,7 +340,8 @@ pub(crate) fn glyph_advance(font: &CTFont, glyph: CGGlyph) -> CGFloat {
 /// its advance (`⏺` U+23FA, in STIX Two Math the advance is 1.046 times the
 /// cell but the ink 0.914 — measured, this machine, Menlo 16pt). A gate
 /// measuring the advance rejects it and the user sees a box in its place.
-pub(crate) fn glyph_ink(font: &CTFont, glyph: CGGlyph) -> CGRect {
+pub(crate) fn glyph_ink(font: &CTFont, glyph: u32) -> InkRect {
+    let glyph = cg_glyph(glyph);
     let mut rect = [CGRect::ZERO; 1];
     // SAFETY: one glyph, one measurement cell; the count is consistent with
     // both.
@@ -643,32 +353,14 @@ pub(crate) fn glyph_ink(font: &CTFont, glyph: CGGlyph) -> CGRect {
             1,
         );
     }
-    rect[0]
-}
-
-/// The glyph's horizontal shift inside the cell — **one formula, two
-/// consumers**.
-///
-/// Drawing ([`crate::raster::draw`]) puts the glyph here, the gate
-/// ([`fallback_font`]) measures the ink from here. Written separately, the
-/// gate would test a placement that will not be drawn and the two would
-/// silently diverge: an accepted candidate could paint outside the cell, or a
-/// fitting candidate would be rejected.
-///
-/// The argument is the **box's** advance, not the cell's: for a single-cell
-/// glyph the two are the same number, for a two-column character the box is
-/// two cells ([`crate::Half`]). The rename from `cell_advance` to
-/// `box_advance` in 023 was not a one-line rename: the same number goes to
-/// both the gate and the drawing, so were it multiplied by the columns in
-/// only one of them, the gate would test a placement that will not be drawn.
-///
-/// `max(0.0)` is the drawing's own rule: a glyph whose advance exceeds the
-/// box sticks to the left, because clipping should happen on the right — the
-/// rationale is in the body of [`crate::raster::draw`]. The gate must share
-/// it **exactly**, otherwise it would assume a negative shift and believe the
-/// candidate's left side to be inside the cell.
-pub(crate) fn centre_shift(box_advance: CGFloat, advance: CGFloat) -> CGFloat {
-    ((box_advance - advance) / 2.0).max(0.0)
+    // A copy of four `f64`s, no rounding: `CGFloat` is `f64` on macOS.
+    let [rect] = rect;
+    InkRect {
+        x: rect.origin.x,
+        y: rect.origin.y,
+        width: rect.size.width,
+        height: rect.size.height,
+    }
 }
 
 /// Do the pixels the candidate paints stay inside the **box**.
@@ -682,33 +374,16 @@ pub(crate) fn centre_shift(box_advance: CGFloat, advance: CGFloat) -> CGFloat {
 /// horizontal gate also fits the cell's baseline window; the only set that
 /// overflows vertically is emoji, which at full size is rejected
 /// horizontally in a single cell and whose shrunk copy is vertically centred
-/// in the cell and fits inside — [`Accepted::rise`]), so a second criterion
+/// in the cell and fits inside — [`rules::Accepted::rise`]), so a second criterion
 /// would be a rule written down without a witness.
 /// The limit is written by name: a candidate that overflows vertically today
 /// falls to **clipping**, not to the box.
-fn ink_fits_box(font: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> bool {
-    ink_fits_placed(
+fn ink_fits_box(font: &CTFont, glyph: u32, box_advance: CGFloat) -> bool {
+    rules::ink_fits_placed(
         box_advance,
         glyph_advance(font, glyph),
         glyph_ink(font, glyph),
     )
-}
-
-/// The font-free body of [`ink_fits_box`]: does a glyph with advance
-/// `advance` and ink `ink` fit in the box at the place [`centre_shift`] puts
-/// it.
-///
-/// It is separate because of the census (`census`): it asks **how much** a
-/// candidate would have to shrink to fit, and gives the scaled measurements
-/// without a font. The rule stays in one place, so what the census says
-/// "fits" and what the gate accepts cannot diverge.
-pub(crate) fn ink_fits_placed(box_advance: CGFloat, advance: CGFloat, ink: CGRect) -> bool {
-    let left = ink.origin.x + centre_shift(box_advance, advance);
-    // The left edge is tested too: a candidate carrying a negative `origin.x`
-    // overflows the cell on the left and CG clips it **from the left**. In
-    // Latin script a letter is recognised from its left side, so that clip
-    // would be a silent corruption — the box is honest.
-    left >= 0.0 && left + ink.size.width <= box_advance
 }
 
 /// A system font that can draw `ch` — **if it fits the cell**.
@@ -729,7 +404,7 @@ pub(crate) fn ink_fits_placed(box_advance: CGFloat, advance: CGFloat, ink: CGRec
 ///    comparison is needed.
 /// 3. **Ink gate** ([`accept`]). Does the candidate paint outside the cell at
 ///    the place it will be drawn — a candidate that does not fit is shrunk
-///    if within the limit ([`SHRINK_LIMIT`]), otherwise box. The criterion
+///    if within the limit ([`rules::SHRINK_LIMIT`]), otherwise box. The criterion
 ///    is geometric: no family name and no trait bit, the only exception is
 ///    the shrink arm's `.LastResort` ([`is_last_resort`]; geometry cannot
 ///    tell it apart from emoji). The measured numbers are in
@@ -761,7 +436,7 @@ pub(crate) fn ink_fits_placed(box_advance: CGFloat, advance: CGFloat, ink: CGRec
 ///
 /// **No log:** the function is on [`crate::Atlas::slot`]'s drawing path and a
 /// line printed per glyph would land in the middle of the frame budget
-/// ([`Faces::derive`]'s written rule).
+/// ([`rules::Faces::derive_with`]'s written rule).
 pub(crate) fn fallback_font(
     base: &CTFont,
     ch: char,
@@ -798,159 +473,53 @@ pub(crate) fn cascade_candidate(base: &CTFont, ch: char) -> CFRetained<CTFont> {
     unsafe { base.for_string(&text, range) }
 }
 
-/// The ink gate: does the candidate's glyph fit first in one cell, then (if
-/// declared two columns) in two cells — and if not, does it fit **shrunk**.
+/// The ink gate ([`rules::accept`]) with the candidate's own measurements
+/// and CoreText's shrink arm ([`shrink`]).
 ///
 /// The **shared** gate of the single-glyph fallback ([`fallback_font`]) and
-/// the grapheme cluster ([`shape_cluster`]) — the "box, full glyph or a glyph
-/// shrunk just enough to fit" contract goes through the same order in both,
-/// so a cluster's glyph cannot be accepted by a criterion different from a
-/// single-code-point emoji's. It is also the census's (`census`) gate, hence
-/// `pub(crate)`.
+/// the grapheme cluster ([`shape_cluster`]), and the census's (`census`),
+/// hence `pub(crate)`.
 pub(crate) fn accept(
     candidate: CFRetained<CTFont>,
-    glyph: CGGlyph,
+    glyph: u32,
     cell_advance: CGFloat,
     cols: u8,
 ) -> Option<Accepted> {
-    // **The order is mandatory: one cell first.** A candidate that fits in
-    // one cell fits today too and is drawn from a single slot; asked directly
-    // with the two-cell box, `centre_shift` would move it to the middle of
-    // two cells and a drawing *that works today* would move. Measured (023
-    // `context.md`): 65 characters are declared wide but their ink fits in
-    // one cell — 21 are Menlo's own glyphs, 44 are CJK punctuation and
-    // fullwidth forms with slender ink from the cascade (`、 。 》 ！`). A side
-    // benefit is capacity: those 65 do not spend a second slot.
-    if ink_fits_box(&candidate, glyph, cell_advance) {
-        return Some(Accepted {
-            font: candidate,
-            glyph,
-            cols: 1,
-            shrunk: false,
-        });
-    }
-    // The second gate opens only for a character **declared two columns**.
-    // Giving two cells to a single-column character would paint over its
-    // neighbour: the grid reserves no spacer for it and that cell has its own
-    // ink. That is why the criterion is `min(columns, ink)`.
-    let box_advance = cell_advance * CGFloat::from(cols.max(1));
-    if cols >= 2 && ink_fits_box(&candidate, glyph, box_advance) {
-        return Some(Accepted {
-            font: candidate,
-            glyph,
-            cols,
-            shrunk: false,
-        });
-    }
-    // **Third arm: shrinking** (041). The last arm, so a candidate that
-    // passes either gate never gets here and its raster is bit-for-bit
-    // today's (R3.3).
-    shrink(&candidate, glyph, box_advance).map(|font| Accepted {
-        font,
+    let advance = glyph_advance(&candidate, glyph);
+    let ink = glyph_ink(&candidate, glyph);
+    rules::accept(
+        candidate,
         glyph,
-        cols: cols.max(1),
-        shrunk: true,
-    })
+        cell_advance,
+        cols,
+        advance,
+        ink,
+        |candidate, box_advance| shrink(candidate, glyph, box_advance),
+    )
 }
 
-/// A copy of a candidate rejected by the gate, at the point size that fits
-/// the box — if within the limit.
-///
-/// The box is the area the grid reserves for the character: one cell for a
-/// single-column one, two cells for a two-column one. For a two-column
-/// character the one-cell box is not tried separately: a narrower box needs
-/// more shrinking, so a candidate that does not fit two cells within the
-/// limit never fits one.
-///
-/// The factor comes from [`fit_ratio`], not from the ink/box ratio:
-/// shrinking shrinks the advance too, and a glyph whose advance still
-/// exceeds the box sticks to the left by [`centre_shift`]'s rule. `⧉` is the
-/// example — the copy shrunk by the ratio (1.11) is rejected again on
-/// re-test, 1.22 is needed (`.tasks/041-yedek-glyph-kucultme/phase-1.md` →
-/// Uygulama Notları).
-///
-/// The copy is **the same font** at another point size
-/// (`CTFontCreateCopyWithAttributes`): the glyph number, the colour trait
-/// and hence the plane do not change, the drawing (`raster::draw_glyph` /
-/// `draw_color_glyph`) and the centring ([`centre_shift`]) stay untouched.
-/// The copy is tested **again** with [`ink_fits_box`] — the rule that the
-/// gate measures the ink where the candidate will be drawn holds for the
-/// small copy too; if it fails, box.
+/// The shrink arm ([`rules::shrink`]) with CoreText's calls: the copy at
+/// another point size is `CTFontCreateCopyWithAttributes` and is re-tested
+/// with [`ink_fits_box`] at its own measurements.
 ///
 /// `.LastResort` is not accepted in this arm (R3.2): rationale in
 /// [`is_last_resort`].
-fn shrink(candidate: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> Option<CFRetained<CTFont>> {
-    let fit = fit_ratio(
+fn shrink(candidate: &CTFont, glyph: u32, box_advance: CGFloat) -> Option<CFRetained<CTFont>> {
+    // SAFETY: `candidate` is alive; a pure read.
+    let size = unsafe { candidate.size() };
+    rules::shrink(
         box_advance,
         glyph_advance(candidate, glyph),
         glyph_ink(candidate, glyph),
-    );
-    if !(fit.is_finite() && fit <= SHRINK_LIMIT) || is_last_resort(candidate) {
-        return None;
-    }
-    // SAFETY: `candidate` is alive; a pure read.
-    let size = unsafe { candidate.size() };
-    // SAFETY: `candidate` is alive; the matrix is `NULL` (the font's own
-    // matrix) and there are no attributes, so the only thing that changes is
-    // the point size.
-    let at = |s: CGFloat| unsafe { candidate.copy_with_attributes(s, ptr::null(), None) };
-    let fits = |f: &CTFont| ink_fits_box(f, glyph, box_advance);
-    let first = at(size / fit);
-    if fits(&first) {
-        return Some(first);
-    }
-    // The factor misses on a font that does not scale linearly with the point
-    // size: Apple Color Emoji's advance is rounded to an integer and at small
-    // sizes wider than its proportion (at 16pt @2x the copy shrunk by 1.661
-    // advances 23 px, the cell is 19.27). The copy's **own** measurement
-    // finds the remaining margin: the largest point size that fits, by
-    // bisection between `size / fit` and half of it.
-    let (mut hi, mut lo) = (size / fit, size / fit / 2.0);
-    let mut best = at(lo);
-    if !fits(&best) {
-        return None;
-    }
-    for _ in 0..SHRINK_STEPS {
-        let mid = (lo + hi) / 2.0;
-        let copy = at(mid);
-        if fits(&copy) {
-            lo = mid;
-            best = copy;
-        } else {
-            hi = mid;
-        }
-    }
-    Some(best)
+        size,
+        is_last_resort(candidate),
+        // SAFETY: `candidate` is alive; the matrix is `NULL` (the font's own
+        // matrix) and there are no attributes, so the only thing that changes
+        // is the point size.
+        |s: CGFloat| unsafe { candidate.copy_with_attributes(s, ptr::null(), None) },
+        |f: &CFRetained<CTFont>| ink_fits_box(f, glyph, box_advance),
+    )
 }
-
-/// The bisection steps of [`shrink`]'s second round: the interval is
-/// `size / fit` and half of it, and ten steps bring it under a thousandth of
-/// the point size (0.016 pt at 32 pt). Enough: in the census (`make tarama`,
-/// four combinations) the number of candidates within the limit that are
-/// rejected on re-test is **zero**.
-const SHRINK_STEPS: usize = 10;
-
-/// The upper bound of shrinking: a candidate whose [`fit_ratio`] is larger
-/// than this stays a box.
-///
-/// A design constant (after `GUTTER_PT`), its value from the census
-/// distribution (`make tarama`, Menlo 13/16 pt × @1x/@2x,
-/// `.tasks/041-yedek-glyph-kucultme/` → phase-2 Uygulama Notları):
-///
-/// - **The largest that must stay inside** is Apple Color Emoji's
-///   single-column `fit`: 1.661–1.681 at @2x, **2.124** at @1x (Karar 2, the
-///   user preferred a small emoji to a box; a non-Retina display is a user
-///   too). A two-column emoji fits in neither one nor two cells at @1x, and
-///   its `fit` in the two-cell box is 1.062 — the same arm covers it too.
-/// - **The smallest that stays outside** is 2.250 (a single glyph of Apple
-///   Symbols); then STIX Two Math 2.307 / 2.583, Symbol 2.803, the user font
-///   Inter Display 4.2. These would shrink by more than half and become a dot
-///   in the cell.
-///
-/// 2.2 lies between the two: 3.6% above emoji, 2.2% below the outside one.
-/// `.LastResort` (1.660) is **below** the limit and cannot be told apart by
-/// geometry — what keeps it outside is [`is_last_resort`].
-pub(crate) const SHRINK_LIMIT: f64 = 2.2;
 
 /// The PostScript name of `.LastResort`, the last link of CoreText's cascade.
 pub(crate) const LAST_RESORT: &str = "LastResort";
@@ -977,41 +546,6 @@ pub(crate) const LAST_RESORT: &str = "LastResort";
 pub(crate) fn is_last_resort(font: &CTFont) -> bool {
     // SAFETY: `font` is alive; a pure read.
     unsafe { font.post_script_name() }.to_string() == LAST_RESORT
-}
-
-/// The smallest `fit` the gate passes when the glyph is shrunk by a `1 / fit`
-/// scale.
-///
-/// Bisection, not a closed form: the rule is [`ink_fits_placed`] itself and a
-/// closed form would write it (including the stick-to-the-left arm) a second
-/// time. As the scale goes to zero every glyph shrinks to the middle of the
-/// box and fits, so the lower end always passes; `1` for a candidate that
-/// passes the gate. Two consumers: the shrink factor ([`shrink`]) and the
-/// census (`census`) — written separately, what the census calls "within the
-/// limit" and what the gate shrinks could diverge.
-///
-/// The assumption that ink and advance scale **linearly** with the point
-/// size is covered by the copy's re-test ([`shrink`]).
-pub(crate) fn fit_ratio(box_advance: CGFloat, advance: CGFloat, ink: CGRect) -> f64 {
-    let fits = |s: CGFloat| {
-        let mut scaled = ink;
-        scaled.origin.x *= s;
-        scaled.size.width *= s;
-        ink_fits_placed(box_advance, advance * s, scaled)
-    };
-    if fits(1.0) {
-        return 1.0;
-    }
-    let (mut lo, mut hi) = (0.0, 1.0);
-    for _ in 0..60 {
-        let mid = (lo + hi) / 2.0;
-        if fits(mid) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    1.0 / lo
 }
 
 /// Shapes a grapheme cluster (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) into a **single
@@ -1101,7 +635,7 @@ pub(crate) fn shape_cluster(
         .get(font_key)
         .and_then(|font| font.downcast::<CTFont>().ok())
         .unwrap_or(candidate);
-    accept(font, glyph, cell_advance, cols)
+    accept(font, u32::from(glyph), cell_advance, cols)
 }
 
 /// Are the font's glyphs **coloured**.
@@ -1118,70 +652,4 @@ pub(crate) fn has_color_glyphs(font: &CTFont) -> bool {
     // SAFETY: `font` is alive for the call; the return is a bit set.
     let traits = unsafe { font.symbolic_traits() };
     traits.contains(CTFontSymbolicTraits::TraitColorGlyphs)
-}
-
-/// The accepted candidate and **how many cells** it fits in.
-///
-/// `cols` is not the number of columns the grid reserves but the box the gate
-/// accepted: if a character declared two columns fits in one cell, this is
-/// `1` and it is drawn from a single slot.
-pub(crate) struct Accepted {
-    pub(crate) font: CFRetained<CTFont>,
-    /// The glyph the gate measured — also the one drawn. For a single code
-    /// point it is [`glyph_index`]'s answer, for a cluster the one `CTLine`
-    /// shaped.
-    pub(crate) glyph: CGGlyph,
-    pub(crate) cols: u8,
-    /// Did the candidate come from the shrink arm ([`shrink`]). `false` for a
-    /// candidate that passed either gate, and then the drawing is
-    /// bit-for-bit today's (R3.3).
-    pub(crate) shrunk: bool,
-}
-
-impl Accepted {
-    /// The glyph's vertical shift from the baseline (px, up is positive) —
-    /// **one formula**, both drawing recipes (`raster::draw_glyph`,
-    /// `raster::draw_color_glyph`) read it from here.
-    ///
-    /// Zero for an unshrunk candidate: every glyph accepted today stays on
-    /// its baseline. For a shrunk one the vertical middle of the ink comes to
-    /// the middle of the **cell**, because the point size shrinks relative to
-    /// the origin above the baseline and the glyph collapses towards the
-    /// baseline — an emoji shrunk to half sat low next to the letters, its
-    /// bottom at the level of `y`'s tail. The choice was made by eye: the
-    /// baseline, the cell's middle and the middle of the x-height were drawn
-    /// side by side, and emoji and `⧉` read together with the text in the
-    /// second (`.tasks/041-yedek-glyph-kucultme/phase-2.md` → Uygulama
-    /// Notları). It is rounded to an integer pixel: the baseline is already an
-    /// integer and a fractional shift would change the AA phase and blur the
-    /// edge.
-    ///
-    /// The horizontal gate is unaffected by this (its criterion is horizontal
-    /// only, [`ink_fits_box`]); the cell's middle also reduces vertical
-    /// overflow.
-    pub(crate) fn rise(&self, m: Metrics) -> CGFloat {
-        if !self.shrunk {
-            return 0.0;
-        }
-        let ink = glyph_ink(&self.font, self.glyph);
-        let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px);
-        (CGFloat::from(m.cell_px.1) / 2.0 - baseline - (ink.origin.y + ink.size.height / 2.0))
-            .round()
-    }
-}
-
-/// Rounds up and squeezes into a `u16`.
-///
-/// Lower bound 1: for a broken or missing font a metric can come back zero,
-/// and a zero-width cell divides the grid by zero. The upper bound is the
-/// type itself.
-///
-/// NaN is handled separately because `clamp` **lets it through** and
-/// `NaN as u16` is 0: the lower bound is silently breached and the error
-/// blows up at the division, not at its source.
-pub(crate) fn round_up(v: CGFloat) -> u16 {
-    if !v.is_finite() {
-        return 1;
-    }
-    v.ceil().clamp(1.0, f64::from(u16::MAX)) as u16
 }

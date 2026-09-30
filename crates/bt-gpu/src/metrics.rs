@@ -103,7 +103,7 @@ impl CellMetrics {
         // one-pixel wobble moves the gutter, not the grid.
         let gutter = (Self::GUTTER_PT * scale).round() as u16;
         // audit: `bt_atlas::Metrics.cell_px` is a bare `pub` field, so the
-        // ≥ 1 guarantee lives one crate away (`font::round_up` clamps to 1)
+        // ≥ 1 guarantee lives one crate away (`rules::round_up` clamps to 1)
         // and the type does not carry it. Building with a struct literal
         // would leave that gap silent; `expect` turns it into a programming
         // error. Not a panic path: PTY reading and parsing never pass here,
@@ -160,7 +160,7 @@ impl CellMetrics {
     /// are small and dense.
     ///
     /// Like `cell_px` it is ≥ 1, with the same structural reason: its source is
-    /// `font::round_up`, and on this side of the boundary the field is private.
+    /// `rules::round_up`, and on this side of the boundary the field is private.
     pub fn context_cell_px(self) -> u16 {
         self.context_cell_px
     }

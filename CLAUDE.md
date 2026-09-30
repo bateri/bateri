@@ -39,17 +39,17 @@ kutu — yani "kutu ya da tam glyph" ilk kez bir dilek değil sözleşme.
 Alternatifi yarım çizilmiş bir glyph'ti: kutu görünür bir eksiklik, kırpılmış
 glyph sessiz bir bozulma. **041'den beri sözleşme "kutu, tam glyph ya da
 sığacak kadar küçültülmüş glyph"**: iki kapıdan da dönen aday, bugünkü
-yerleşimle sığması için gereken küçültme (`font::fit_ratio`) sınırın
-içindeyse (`font::SHRINK_LIMIT`, taramanın dağılımından; tek sütunlu emojiyi
+yerleşimle sığması için gereken küçültme (`rules::fit_ratio`) sınırın
+içindeyse (`rules::SHRINK_LIMIT`, taramanın dağılımından; tek sütunlu emojiyi
 @1x'te de kapsıyor — kullanıcı küçük emojiyi kutuya tercih etti) küçük
 puntolu kopyasıyla kabul ediliyor, kopya kapıdan **yeniden** geçiyor ve
-mürekkebi hücrede dikey ortalanıyor (`font::Accepted::rise`); iki kapıdan
+mürekkebi hücrede dikey ortalanıyor (`rules::Accepted::rise`); iki kapıdan
 geçen aday bit bit aynı. Gerekçeler `.tasks/041-yedek-glyph-kucultme/`.
 Ölçüt **yatay ve yalnız yatay**; dikeyi de sınamak
 bugün hiçbir adayı elemiyor (ölçüldü: dikeyde taşan tek küme emoji; tam
 boyuyla yatayda dönüyor, küçültülünce hücrede ortalanıp içine giriyor), o yüzden dikey taşma kutuya değil kırpmaya düşüyor ve sınır
-adıyla yazılı (`font::ink_fits_cell`). Kaydırmanın formülü **tek yerde**
-(`font::centre_shift`, iki tüketici): kapı adayın **çizileceği** yerdeki
+adıyla yazılı (`font::ink_fits_box`). Kaydırmanın formülü **tek yerde**
+(`rules::centre_shift`, iki tüketici): kapı adayın **çizileceği** yerdeki
 mürekkebini ölçmek zorunda, yoksa çizilmeyen bir yerleşimi sınardı. Boy sınıfının ikisi
 de **ayrı ayrı** değerlendiriliyor; yedeğin tabanı ile sınırı o sınıfın kendi
 fontu, yoksa küçük satıra büyük punto glyph düşerdi. Glyph hücrede
