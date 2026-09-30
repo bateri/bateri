@@ -4,6 +4,7 @@ members = [
     "crates/bt-core",
     "crates/bt-atlas",
     "crates/bt-gpu",
+    "crates/bt-shell-common",
     "crates/bt-shell",
     "crates/bateri",
 ]
@@ -72,8 +73,9 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "std", "block2", "UNUserNotificationCenter", "UNNotificationContent",
     "UNNotificationRequest", "UNNotificationTrigger",
 ] }
-# The main queue and vnode sources (`bt-shell`). User-approved dependency
-# decision: .tasks/001 discussion.md → Karar.
+# The main queue (`bt-shell`) and vnode sources (`bt-shell-common`'s
+# `watch`). User-approved dependency decision: .tasks/001 discussion.md →
+# Karar.
 dispatch2 = { version = "0.3", features = ["block2"] }
 # Objective-C blocks (`RcBlock`) for `bt-shell`'s completion handlers; already
 # in the graph through wgpu's Metal backend and `dispatch2`.
@@ -176,4 +178,5 @@ harfrust = { version = "0.13", default-features = false, features = ["std"] }
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
 bt-gpu = { path = "crates/bt-gpu" }
+bt-shell-common = { path = "crates/bt-shell-common" }
 bt-shell = { path = "crates/bt-shell" }

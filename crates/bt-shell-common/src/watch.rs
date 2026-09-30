@@ -30,7 +30,7 @@
 //! a reinstall from outside is the caller's job.
 //!
 //! The handler is installed via a function pointer (`set_event_handler_f`):
-//! `bt-shell` has no `block2` edge. Each source carries a `Box` context holding
+//! this crate has no `block2` edge. Each source carries a `Box` context holding
 //! the fd and the notification; the **cancel handler** drops it, because that
 //! is where libdispatch gives the safe moment to close the descriptor —
 //! cancellation is asynchronous and a running handler may be reading the
@@ -53,7 +53,7 @@ use dispatch2::{
 /// `Send + Sync`, because the cancel handler drops it on the queue's thread.
 /// The production one captures nothing (`app`'s targetless action), so its
 /// tie to the main queue lives in the choice of queue, not in the type.
-pub(crate) type Notify = Arc<dyn Fn() + Send + Sync>;
+pub type Notify = Arc<dyn Fn() + Send + Sync>;
 
 /// Directory events; the rationale is at the top of the module.
 const DIR_EVENTS: usize = (Vnode::DISPATCH_VNODE_WRITE.0
@@ -75,7 +75,7 @@ const FILE_EVENTS: usize = (Vnode::DISPATCH_VNODE_WRITE.0
     | Vnode::DISPATCH_VNODE_RENAME.0) as usize;
 
 /// The sources of a list of paths. All are cancelled on drop.
-pub(crate) struct Watch {
+pub struct Watch {
     sources: Vec<DispatchRetained<DispatchSource>>,
 }
 
@@ -94,7 +94,7 @@ impl Watch {
     /// Installing the new one and dropping the old one **afterwards**
     /// (`slot.replace(..)`) leaves no gap between two installations; two
     /// sources reporting at once during that moment is harmless.
-    pub(crate) fn install(paths: &[PathBuf], queue: &DispatchQueue, notify: &Notify) -> Self {
+    pub fn install(paths: &[PathBuf], queue: &DispatchQueue, notify: &Notify) -> Self {
         Self {
             sources: paths
                 .iter()

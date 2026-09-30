@@ -19,7 +19,7 @@ use bt_core::{Click, MouseButton, SelectKind, SelectionPoint};
 /// The gesture's state. `Copy`: the view keeps it in a `Cell` and does take-modify-put on every
 /// event — so that `RefCell`'s borrow panic is not put at risk in the middle of a `Session` call.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Gesture {
+pub struct Gesture {
     /// Whether the left button is down and the selection started with this press.
     ///
     /// The anchor **itself** is not here: it is in `bt-core`, in absolute grid coordinates
@@ -54,7 +54,7 @@ pub(crate) struct Gesture {
 
 /// The work the terminal does from a press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Press {
+pub enum Press {
     /// A new selection, with the click count's step (a single click without a drag is an empty
     /// selection and removes the old highlight).
     Select(SelectKind),
@@ -64,7 +64,7 @@ pub(crate) enum Press {
 
 /// The path of a held drag — from the route locked at the press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Drag {
+pub enum Drag {
     /// The press was reported: motion is a report too.
     Report,
     /// The press started a selection in the grid: the selection's end is moved.
@@ -78,7 +78,7 @@ pub(crate) enum Drag {
 
 /// The path of a release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Release {
+pub enum Release {
     /// The press was reported: the release is reported too (so no button is left stuck).
     Report,
     /// The end of a selection gesture in the grid, or a release without a gesture: nothing to
@@ -99,7 +99,7 @@ impl Gesture {
     /// would become a selection and the release would find the stale bit and take the report path
     /// — or, next to a newly reported press, a stale `dragging` would extend the old selection on
     /// every following scroll.
-    pub(crate) fn begin_press(&mut self, button: MouseButton) {
+    pub fn begin_press(&mut self, button: MouseButton) {
         self.sent &= !button_bit(button);
         if button == MouseButton::Left {
             self.dragging = false;
@@ -111,7 +111,7 @@ impl Gesture {
     /// never applies to the dock — the band is not the application's screen) and the click count
     /// and Shift are read with the grid's rule ([`Gesture::pressed`]). The caller must have called
     /// [`Gesture::begin_press`] first.
-    pub(crate) fn pressed_dock(&mut self, clicks: isize, shift: bool) -> Press {
+    pub fn pressed_dock(&mut self, clicks: isize, shift: bool) -> Press {
         self.dragging = true;
         self.dock = true;
         if shift {
@@ -133,7 +133,7 @@ impl Gesture {
     /// Only the **left** button starts a selection: a right or middle click would produce an
     /// unexpected highlight. If a report was sent, `dragging` is not set, otherwise
     /// `mouseDragged:` would grow the old selection's end.
-    pub(crate) fn pressed(
+    pub fn pressed(
         &mut self,
         button: MouseButton,
         answer: Click,
@@ -160,7 +160,7 @@ impl Gesture {
     /// A held drag: the route was locked at the press and is not asked again here. Both halves of
     /// the lock are read and the report comes first — both can be set at the same time (pressing
     /// the right button while a left selection is in progress), but the bit is **per button**.
-    pub(crate) fn dragged(&self, button: MouseButton) -> Drag {
+    pub fn dragged(&self, button: MouseButton) -> Drag {
         if self.sent & button_bit(button) != 0 {
             Drag::Report
         } else if button == MouseButton::Left && self.dragging && self.dock {
@@ -174,7 +174,7 @@ impl Gesture {
 
     /// Release: if the press was reported, the bit comes down and the report goes; otherwise the
     /// left button's selection gesture ends (the selection stays on screen, Cmd-C copies it).
-    pub(crate) fn released(&mut self, button: MouseButton) -> Release {
+    pub fn released(&mut self, button: MouseButton) -> Release {
         let bit = button_bit(button);
         if self.sent & bit == 0 {
             if button == MouseButton::Left {
@@ -196,7 +196,7 @@ impl Gesture {
     ///
     /// The evidence is the caller's selector: AppKit sends `mouseMoved:` only while no button is
     /// down, so a bit set there means exactly one thing — the release never reached this view.
-    pub(crate) fn take_lost_releases(&mut self) -> impl Iterator<Item = MouseButton> {
+    pub fn take_lost_releases(&mut self) -> impl Iterator<Item = MouseButton> {
         let lost = std::mem::take(&mut self.sent);
         [MouseButton::Left, MouseButton::Middle, MouseButton::Right]
             .into_iter()
@@ -206,27 +206,27 @@ impl Gesture {
     /// The left button is **not down** in the system but `dragging` is set: the release never
     /// reached this view. The stale flag comes down; otherwise every button-less scroll would
     /// silently extend the old selection, and the next Cmd-C would copy it.
-    pub(crate) fn lost_drag(&mut self) {
+    pub fn lost_drag(&mut self) {
         self.dragging = false;
     }
 
     /// Whether a selection drag is in progress **in the grid** — scrolling's question of whether
     /// to move the end to the mouse. A dock drag is `false` here: the dock does not scroll, so
     /// there is no end to move when the window scrolls.
-    pub(crate) fn dragging(&self) -> bool {
+    pub fn dragging(&self) -> bool {
         self.dragging && !self.dock
     }
 
     /// Moves the notch to the fresh cell and tells whether the cell **changed** — `true` on first
     /// sight, `false` on repeat. The half is not read.
-    pub(crate) fn moved_to(&mut self, cell: SelectionPoint) -> bool {
+    pub fn moved_to(&mut self, cell: SelectionPoint) -> bool {
         let now = (cell.col, cell.row);
         self.notch.replace(now) != Some(now)
     }
 
     /// Stamps the cell of a reported press or release onto the notch: so the first motion to come
     /// in the same cell does not produce a second report.
-    pub(crate) fn stamp(&mut self, cell: SelectionPoint) {
+    pub fn stamp(&mut self, cell: SelectionPoint) {
         self.moved_to(cell);
     }
 }

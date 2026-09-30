@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use bt_core::{Diagnostic, Parsed, Settings, SettingsEdit, Theme};
 
 /// The settings file's name; diagnostic texts also refer to it by this name for the user.
-pub(crate) const FILE_NAME: &str = "settings.toml";
+pub const FILE_NAME: &str = "settings.toml";
 
 /// The directory of user themes, under the root.
 const THEMES_DIR: &str = "themes";
@@ -37,7 +37,7 @@ const THEMES_DIR: &str = "themes";
 ///
 /// Not macOS's `~/Library/Application Support`: the file is edited by hand and `CLAUDE.md`'s
 /// contract names this path explicitly.
-pub(crate) fn config_root(home: &Path) -> PathBuf {
+pub fn config_root(home: &Path) -> PathBuf {
     home.join(".config").join("bateri")
 }
 
@@ -48,7 +48,7 @@ pub(crate) fn config_root(home: &Path) -> PathBuf {
 /// The root and `themes/`, as directories, report a file being created, deleted or moved over;
 /// `settings.toml`, as a file, reports an in-place write and a save at the link's target. A
 /// path that does not exist creates no source.
-pub(crate) fn watched_paths(root: &Path) -> [PathBuf; 3] {
+pub fn watched_paths(root: &Path) -> [PathBuf; 3] {
     [
         root.to_path_buf(),
         root.join(THEMES_DIR),
@@ -64,7 +64,7 @@ fn theme_file(name: &str) -> String {
 
 /// `{root}/themes/{name}.toml`: the file [`load_theme`] reads and the watcher sets up for the
 /// active theme. If an embedded theme is selected there is no file and no source is set up.
-pub(crate) fn theme_path(root: &Path, name: &str) -> PathBuf {
+pub fn theme_path(root: &Path, name: &str) -> PathBuf {
     root.join(theme_file(name))
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn theme_path(root: &Path, name: &str) -> PathBuf {
 /// content is the user's unfinished work; creating a dangling link's target would leave a
 /// stray file where the dotfile repository moved from, and the settings slot already reports
 /// that link.
-pub(crate) fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
+pub fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
     std::fs::create_dir_all(root)?;
     let path = root.join(FILE_NAME);
     let created = std::fs::OpenOptions::new()
@@ -119,7 +119,7 @@ pub(crate) fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
 /// would close this window, but it breaks hard links, drops permissions and extended
 /// attributes and fails in an unwritable directory; writing in place is the plan's decision
 /// (`/code-review` finding, waived: `.tasks/007-ayarlar-ve-tema/phase-7.md`).
-pub(crate) fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String> {
+pub fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String> {
     let subject = match edit {
         SettingsEdit::Theme(_) => "theme",
         _ => "setting",
@@ -150,7 +150,7 @@ pub(crate) fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String>
 ///
 /// If the directory does not exist or cannot be read the list is empty: the menu has no place
 /// to show an error, and a user without a themes directory is the ordinary case.
-pub(crate) fn user_theme_names(root: &Path) -> Vec<String> {
+pub fn user_theme_names(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root.join(THEMES_DIR)) else {
         return Vec::new();
     };
@@ -174,7 +174,7 @@ pub(crate) fn user_theme_names(root: &Path) -> Vec<String> {
 
 /// The result of a read.
 #[derive(Debug)]
-pub(crate) enum Loaded {
+pub enum Loaded {
     /// The file is missing or empty: the user never wrote any settings. **No** diagnostic.
     Missing,
     /// The file exists but could not be read: permissions, not a regular file (a directory, a
@@ -225,7 +225,7 @@ fn read_text(path: &Path) -> Text {
 
 /// Reads `{root}/settings.toml` — the launch read: a rejected value takes its default
 /// (except `osc52`, which falls back to off).
-pub(crate) fn load(root: &Path) -> Loaded {
+pub fn load(root: &Path) -> Loaded {
     load_keeping(root, &Settings::default())
 }
 
@@ -237,7 +237,7 @@ pub(crate) fn load(root: &Path) -> Loaded {
 /// truncates (`O_TRUNC`) and then writes, and the truncation also fires an event: if the empty
 /// file read in between applied the default `scrollback`, the history would be trimmed
 /// irreversibly. At launch the two were already the same (defaults, no diagnostics).
-pub(crate) fn load_keeping(root: &Path, current: &Settings) -> Loaded {
+pub fn load_keeping(root: &Path, current: &Settings) -> Loaded {
     match read_text(&root.join(FILE_NAME)) {
         Text::Missing => Loaded::Missing,
         Text::Read(text) if text.trim().is_empty() => Loaded::Missing,
@@ -251,7 +251,7 @@ pub(crate) fn load_keeping(root: &Path, current: &Settings) -> Loaded {
 
 /// The resolution of a theme name.
 #[derive(Debug)]
-pub(crate) enum ThemeLoaded {
+pub enum ThemeLoaded {
     /// Found in the user file or among the embedded themes; the messages are the colors rejected
     /// in the file (formatted ready for the subtitle).
     Found(Theme, Vec<String>),
@@ -282,7 +282,7 @@ pub(crate) enum ThemeLoaded {
 ///
 /// The name's form (no `/`, not empty) was already checked in `bt-core`; it is not rechecked
 /// here, a name that does not come from `Settings` is never passed to this function.
-pub(crate) fn load_theme(root: Option<&Path>, name: &str) -> ThemeLoaded {
+pub fn load_theme(root: Option<&Path>, name: &str) -> ThemeLoaded {
     if let Some(root) = root {
         let file = theme_file(name);
         match read_text(&root.join(&file)) {
@@ -323,7 +323,7 @@ impl ThemeLoaded {
     /// the other appearance's theme (with `dark_theme` broken, a window switching from light to
     /// dark would stay light). The "theme on screen stays" rule belongs to the live reload,
     /// where a file was saved while the appearance is unchanged ([`ThemeLoaded::or_current`]).
-    pub(crate) fn or_embedded(self, dark: bool) -> (Theme, Vec<String>) {
+    pub fn or_embedded(self, dark: bool) -> (Theme, Vec<String>) {
         match self {
             ThemeLoaded::Found(theme, messages) => (theme, messages),
             ThemeLoaded::Failed(message) => {
@@ -345,7 +345,7 @@ impl ThemeLoaded {
     /// being typed, would slam the window to the embedded theme and back on every save. The
     /// rule is the same when the name changes in the settings file — both are moments of
     /// editing. On the next launch the appearance's rule applies.
-    pub(crate) fn or_current(self) -> (Option<Theme>, Vec<String>) {
+    pub fn or_current(self) -> (Option<Theme>, Vec<String>) {
         match self {
             ThemeLoaded::Found(theme, messages) => (Some(theme), messages),
             ThemeLoaded::Failed(message) => {
@@ -357,7 +357,7 @@ impl ThemeLoaded {
 
 /// A diagnostic's form in the subtitle and on stderr; in one place so that both branches and
 /// the live reload (phase-4) use the same form.
-pub(crate) fn notice(diagnostic: &Diagnostic) -> String {
+pub fn notice(diagnostic: &Diagnostic) -> String {
     format!("{FILE_NAME}: {diagnostic}")
 }
 
@@ -365,7 +365,7 @@ pub(crate) fn notice(diagnostic: &Diagnostic) -> String {
 /// text in the subtitle's settings slot ([`FileState::notices`]): the window's banner and the
 /// subtitle say the same sentence, two texts are not produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum FileState {
+pub enum FileState {
     /// The file is missing or empty: controls enabled, the first change creates the file.
     Missing,
     /// Could not be read or parsed: writing will be refused, the window is locked.
@@ -378,7 +378,7 @@ pub(crate) enum FileState {
 
 impl FileState {
     /// The messages to go into the subtitle's settings slot.
-    pub(crate) fn notices(&self) -> Vec<String> {
+    pub fn notices(&self) -> Vec<String> {
         match self {
             FileState::Missing => Vec::new(),
             FileState::Locked(reason) => vec![reason.clone()],
@@ -390,7 +390,7 @@ impl FileState {
 impl Loaded {
     /// The read's state as it goes to the window and the subtitle; which settings get applied
     /// is a separate question ([`Loaded::at_launch`], [`Loaded::live`]).
-    pub(crate) fn state(&self) -> FileState {
+    pub fn state(&self) -> FileState {
         match self {
             Loaded::Missing => FileState::Missing,
             Loaded::Unreadable(err) => {
@@ -408,7 +408,7 @@ impl Loaded {
     /// lock up the terminal, but the clipboard must not fall open just because the file's
     /// `osc52 = "off"` could not be read. If there is no file, the plain defaults. In a parsed
     /// file every key already got its own value or its default.
-    pub(crate) fn at_launch(self) -> (Settings, Vec<String>) {
+    pub fn at_launch(self) -> (Settings, Vec<String>) {
         let notices = self.state().notices();
         let settings = match self {
             Loaded::Missing => Settings::default(),
@@ -429,7 +429,7 @@ impl Loaded {
     ///   the defaults would slam the window on every save. An empty file is also this branch
     ///   ([`load_keeping`]). The cost: a user who really deletes or empties the file sees the
     ///   defaults on the next launch (`docs/AYARLAR.md`).
-    pub(crate) fn live(self) -> (Option<Settings>, Vec<String>) {
+    pub fn live(self) -> (Option<Settings>, Vec<String>) {
         let notices = self.state().notices();
         let settings = match self {
             Loaded::Missing | Loaded::Unreadable(_) | Loaded::Unparseable(_) => None,
@@ -439,15 +439,15 @@ impl Loaded {
     }
 }
 
-/// A test-only temporary root; the process id separates two `cargo test` runs going in
+/// A test-only temporary root (behind `test-support` for other crates' tests); the process id separates two `cargo test` runs going in
 /// parallel. `tempfile` would be a dependency decision. The watch tests (`watch`) use it too;
 /// the name prefixes must not collide.
-#[cfg(test)]
-pub(crate) struct TempRoot(pub(crate) PathBuf);
+#[cfg(any(test, feature = "test-support"))]
+pub struct TempRoot(pub PathBuf);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TempRoot {
-    pub(crate) fn new(name: &str) -> Self {
+    pub fn new(name: &str) -> Self {
         let path =
             std::env::temp_dir().join(format!("bateri-settings-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
@@ -456,7 +456,7 @@ impl TempRoot {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TempRoot {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);

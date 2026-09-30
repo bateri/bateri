@@ -14,7 +14,7 @@ use bt_gpu::FontNotice;
 
 /// Where the diagnostic came from. The order is which slot shows first in the subtitle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Source {
+pub enum Source {
     /// View ▸ Theme ▸ writing to the file: the file could not be read, parsed or written.
     /// **First in order**, because it answers something the user just did; the settings file's
     /// diagnostic must not push it into "(+1 more)".
@@ -34,7 +34,7 @@ pub(crate) enum Source {
 ///
 /// The text lives here, not in `bt-gpu`: the subtitle's other strings are also built in this
 /// crate and the language rule (UI strings in English) is applied in one place.
-pub(crate) fn font_messages(notice: Option<FontNotice>) -> Vec<String> {
+pub fn font_messages(notice: Option<FontNotice>) -> Vec<String> {
     match notice {
         None => Vec::new(),
         Some(FontNotice::FamilyNotFound { requested, using }) => {
@@ -50,19 +50,19 @@ pub(crate) fn font_messages(notice: Option<FontNotice>) -> Vec<String> {
 
 /// The filled slots; an empty slot does not stay in the map.
 #[derive(Debug, Default)]
-pub(crate) struct Notices {
+pub struct Notices {
     slots: BTreeMap<Source, Vec<String>>,
 }
 
 impl Notices {
     /// The messages in the source's slot; an empty slot is an empty slice.
-    pub(crate) fn get(&self, source: Source) -> &[String] {
+    pub fn get(&self, source: Source) -> &[String] {
         self.slots.get(&source).map_or(&[], Vec::as_slice)
     }
 
     /// Rewrites the source's slot **entirely**; an empty list empties the slot.
     /// Does not touch another source's slot.
-    pub(crate) fn replace(&mut self, source: Source, messages: Vec<String>) {
+    pub fn replace(&mut self, source: Source, messages: Vec<String>) {
         if messages.is_empty() {
             self.slots.remove(&source);
         } else {
@@ -75,7 +75,7 @@ impl Notices {
     ///
     /// They are not all written side by side: it would be cut off on a single line. The full
     /// set is on stderr.
-    pub(crate) fn subtitle(&self) -> String {
+    pub fn subtitle(&self) -> String {
         let mut messages = self.slots.values().flatten();
         let Some(first) = messages.next() else {
             return String::new();

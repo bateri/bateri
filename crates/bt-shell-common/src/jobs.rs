@@ -44,6 +44,7 @@
 //! looks idle; `exec vim` inherits the shell's pid and group, so it is idle
 //! too.
 
+#[cfg(target_os = "macos")]
 use std::ffi::{c_int, c_void};
 
 use bt_core::RemoteKind;
@@ -52,7 +53,7 @@ use bt_core::RemoteKind;
 /// shell knows it and records it at spawn (`pane::TerminalPane::start_session`);
 /// it is not guessed by comparing names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ShellParent {
+pub enum ShellParent {
     /// The child is `login(1)` and the shell is its child: both paths of an
     /// untimed session (`child::login_command` and alacritty's macOS path).
     Login,
@@ -63,7 +64,7 @@ pub(crate) enum ShellParent {
 
 /// What is in the foreground.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Foreground {
+pub enum Foreground {
     /// The shell is in the foreground — or there is no shell left to ask.
     Idle,
     /// A job outside the shell is in the foreground; its names in pid order,
@@ -74,14 +75,14 @@ pub(crate) enum Foreground {
 
 /// The shell's own group and its terminal's foreground group — both from one call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Groups {
+pub struct Groups {
     pub(crate) own: u32,
     pub(crate) foreground: u32,
 }
 
 /// The answer of the remote session probe ([`remote`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Probe {
+pub enum Probe {
     /// The shell is still in the foreground or the child it forked has not
     /// `exec`ed yet: asked again on the next output edge.
     Undecided,
@@ -96,12 +97,12 @@ pub(crate) enum Probe {
 /// produced by `window::probe_remote` (`quote::command_line`), so there is
 /// neither a shell nor escaping here.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Target {
+pub struct Target {
     /// As the user typed it; the `ssh://` scheme and the port are stripped.
-    pub(crate) host: String,
-    pub(crate) kind: RemoteKind,
+    pub host: String,
+    pub kind: RemoteKind,
     /// The argv to re-run ([`ssh_target`], [`mosh_argv`]).
-    pub(crate) argv: Vec<String>,
+    pub argv: Vec<String>,
 }
 
 /// The six things the decision asks of the process table.
@@ -110,7 +111,7 @@ pub(crate) struct Target {
 /// such process" from "no children" (measured: zero for a nonexistent pid), so
 /// there is no information for `None` to carry. The only witness to the
 /// shell being alive is therefore the reader thread (`Session::reader_alive`).
-pub(crate) trait ProcessTable {
+pub trait ProcessTable {
     fn children(&self, pid: u32) -> Vec<u32>;
     /// Asked only of the shell (same user): long info is unreadable for root.
     fn groups(&self, shell: u32) -> Option<Groups>;
@@ -129,7 +130,7 @@ pub(crate) trait ProcessTable {
 /// close; if the shell's group cannot be read it is **running without a
 /// name**, because a systematic breakage should be a visible "always asks",
 /// not a silent "never asks".
-pub(crate) fn foreground(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Foreground {
+pub fn foreground(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Foreground {
     // `login` forks a single shell; if there is none yet, there is no job to close.
     let Some(shell) = shell_pid(parent, child, table) else {
         return Foreground::Idle;
@@ -169,7 +170,7 @@ fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Opti
 /// The cost is named in Karar 2: a loop running inside the shell itself, or
 /// `zsh script`, stays undecided for the whole command and produces a probe per
 /// output edge (at most one per main queue turn).
-pub(crate) fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Probe {
+pub fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Probe {
     let Some(shell) = shell_pid(parent, child, table) else {
         return Probe::Local;
     };
@@ -537,8 +538,10 @@ fn names(group: u32, table: &impl ProcessTable) -> Vec<String> {
 /// [`ProcessTable`]'s macOS body: `libc`'s Apple half (`libproc`). Not on the
 /// frame path: a few system calls on the main thread at close time and when a
 /// command starts (the remote session probe).
-pub(crate) struct Libproc;
+#[cfg(target_os = "macos")]
+pub struct Libproc;
 
+#[cfg(target_os = "macos")]
 impl ProcessTable for Libproc {
     fn children(&self, pid: u32) -> Vec<u32> {
         pid_list(libc::proc_listchildpids, pid)
@@ -597,6 +600,7 @@ impl ProcessTable for Libproc {
 /// `sysctl(KERN_PROCARGS2)`: the layout is `argc` (4 bytes), the exec path, NUL
 /// padding, `argc` NUL-terminated arguments — then the **environment**
 /// follows, which is not read.
+#[cfg(target_os = "macos")]
 fn process_args(pid: u32) -> Option<Vec<String>> {
     let pid = c_int::try_from(pid).ok()?;
     // The buffer is `kern.argmax` long: a query with an empty buffer gives this
@@ -643,6 +647,7 @@ fn process_args(pid: u32) -> Option<Vec<String>> {
 }
 
 /// The pure half of [`process_args`].
+#[cfg(target_os = "macos")]
 fn parse_procargs(buf: &[u8]) -> Option<Vec<String>> {
     let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
     let rest = &buf[4..];
@@ -659,6 +664,7 @@ fn parse_procargs(buf: &[u8]) -> Option<Vec<String>> {
 }
 
 /// The common signature of `proc_listchildpids` and `proc_listpgrppids`.
+#[cfg(target_os = "macos")]
 type PidLister = unsafe extern "C" fn(libc::pid_t, *mut c_void, c_int) -> c_int;
 
 /// The pids of a listing call.
@@ -669,6 +675,7 @@ type PidLister = unsafe extern "C" fn(libc::pid_t, *mut c_void, c_int) -> c_int;
 /// two calls. A fixed small buffer would be truncated **silently** (measured: 1
 /// for `launchd`'s children with a one-pid buffer). The return value is the
 /// **number of pids**, not bytes (measured).
+#[cfg(target_os = "macos")]
 fn pid_list(list: PidLister, key: u32) -> Vec<u32> {
     let Ok(key) = libc::pid_t::try_from(key) else {
         return Vec::new();
@@ -695,6 +702,7 @@ fn pid_list(list: PidLister, key: u32) -> Vec<u32> {
 }
 
 /// Short info: parent and `comm` — readable on root-owned processes too.
+#[cfg(target_os = "macos")]
 fn short_info(pid: u32) -> Option<libc::proc_bsdshortinfo> {
     // SAFETY: `proc_bsdshortinfo` is a plain C struct holding only integers
     // and `c_char` arrays; all zero bytes is a valid value of it.
@@ -709,6 +717,7 @@ fn short_info(pid: u32) -> Option<libc::proc_bsdshortinfo> {
 ///
 /// `T` must be a plain C struct for which the all-zero-bits value is valid, and
 /// `flavor` must be the flavor for which the kernel writes that struct.
+#[cfg(target_os = "macos")]
 unsafe fn pid_info<T>(pid: u32, flavor: c_int) -> Option<T> {
     let pid = c_int::try_from(pid).ok()?;
     let size = c_int::try_from(size_of::<T>()).ok()?;
@@ -1293,6 +1302,7 @@ mod tests {
         assert_eq!(remote(ShellParent::Login, 100, &table), Probe::Local);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn procargs_layout_yields_argv_without_the_environment() {
         let mut buf = 2i32.to_ne_bytes().to_vec();
@@ -1304,6 +1314,7 @@ mod tests {
         assert_eq!(parse_procargs(&buf[..3]), None);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_process_table_reads_a_real_argv() {
         // The witness for the `KERN_PROCARGS2` body: a child of the same user
@@ -1318,6 +1329,7 @@ mod tests {
         assert_eq!(args, Some(vec!["/bin/sleep".to_owned(), "30".to_owned()]));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_process_table_sees_a_real_foreground_job() {
         // The reader's only witness: a fake table can see neither that login is

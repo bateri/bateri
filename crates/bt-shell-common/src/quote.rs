@@ -33,7 +33,7 @@ use std::fmt::Write as _;
 ///
 /// An empty list gives an empty string: if the drop has no readable path, there is nothing to
 /// write either.
-pub(crate) fn shell_quote(paths: &[String]) -> String {
+pub fn shell_quote(paths: &[String]) -> String {
     let mut line = String::new();
     for path in paths {
         if !line.is_empty() {
@@ -65,7 +65,7 @@ pub(crate) fn shell_quote(paths: &[String]) -> String {
 /// `\n`, because zsh's bracketed reader turns every `\r` into `\n` and `\r\n` would become
 /// two newlines per line — let the text stay the same line by line. Empty text gives an empty
 /// string.
-pub(crate) fn paste_quote(text: &str) -> String {
+pub fn paste_quote(text: &str) -> String {
     if !text.contains(['\n', '\r']) {
         return shell_quote(&[text.to_owned()]);
     }
@@ -94,7 +94,7 @@ pub(crate) fn paste_quote(text: &str) -> String {
 /// otherwise it would vanish from the line without a trace. An argument carrying a control
 /// character goes into `$'…'`. Arguments are joined with a single space. The drop's rule does
 /// not change: a separate entry point.
-pub(crate) fn command_line(argv: &[String]) -> String {
+pub fn command_line(argv: &[String]) -> String {
     let mut line = String::new();
     for arg in argv {
         if !line.is_empty() {
