@@ -227,3 +227,23 @@ fn third_party_license_ships_with_attribution() {
         );
     }
 }
+
+/// AppKit's About panel imports `Credits.html` without a declared charset
+/// and decodes it as Latin-1, so any raw non-ASCII byte in the rendered
+/// markup shows up as mojibake (`©` → `Â©`, `Ö` → `Ã–`; seen by the user
+/// 2026-09-30). Non-ASCII text must be written as HTML entities; only the
+/// leading comment, which is never rendered, may carry raw UTF-8.
+#[test]
+fn credits_markup_is_ascii() {
+    let credits = read_asset("Credits.html");
+    let body = credits
+        .split_once("-->")
+        .map_or(credits.as_str(), |(_, rest)| rest);
+    for (i, line) in body.lines().enumerate() {
+        assert!(
+            line.is_ascii(),
+            "Credits.html markup line {} has raw non-ASCII; use an HTML entity: {line:?}",
+            i + 1
+        );
+    }
+}
