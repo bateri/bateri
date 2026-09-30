@@ -119,6 +119,10 @@ pub(crate) trait FontSystem {
 #[cfg(target_os = "macos")]
 pub(crate) type Backend = crate::coretext::CoreText;
 
+/// The font system of the platform being built.
+#[cfg(target_os = "linux")]
+pub(crate) type Backend = crate::freetype::FreeType;
+
 /// An opened font of [`Backend`].
 pub(crate) type Font = <Backend as FontSystem>::Font;
 
@@ -126,3 +130,8 @@ pub(crate) type Font = <Backend as FontSystem>::Font;
 /// platformless tests (Karar 7).
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use crate::coretext::fixture;
+
+/// Backend-specific sample characters and family names for the
+/// platformless tests (Karar 7).
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use crate::freetype::fixture;

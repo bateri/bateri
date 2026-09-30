@@ -147,6 +147,24 @@ unicode-width = "0.2"
 # Kanıt).
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "metal", "vulkan"] }
 
+# The Linux backend of `bt-atlas`'s font system (042). User-approved
+# dependency decision (2026-09-30): .tasks/042-font-sistemi-linux/discussion.md
+# → Karar 5, the approval recorded in phase-4.md. Linux only — `bt-atlas`
+# declares them under `cfg(target_os = "linux")`, so the macOS build and
+# product graph never see them; `Cargo.lock` is target-independent and lists
+# them anyway. Linked dynamically through pkg-config: `bundled` (freetype-rs)
+# and `dlopen` (fontconfig) stay off — no C build on every clean build, no
+# silent absence at run time. The transitive crates (freetype-sys, libz-sys,
+# cc, pkg-config, yeslogic-fontconfig-sys, dlib, and the build-time vcpkg,
+# shlex, find-msvc-tools) are named in the same approval.
+freetype-rs = { version = "0.38", default-features = false }
+fontconfig = { version = "0.11", default-features = false }
+# The raw binding under `fontconfig`, for the calls the wrapper does not open
+# — reading a pattern's charset and asking it for a code point (the cascade
+# walk). Not a new crate: `fontconfig` already pulls it and it resolves to the
+# same version (the `polling` precedent; approved with the list above).
+yeslogic-fontconfig-sys = { version = "6", default-features = false }
+
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
 bt-gpu = { path = "crates/bt-gpu" }
