@@ -56,7 +56,7 @@ use alacritty_terminal::term::TermMode;
 // The grid cell comes in **under an alias**: this module's `Cell` is the
 // frame record crossing the boundary, and had both come under the same name
 // it could not be read which budget applies (`CLAUDE.md` → the cell is fixed size).
-use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
+use alacritty_terminal::term::cell::{Cell as TermCell, Flags, Hyperlink};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search as search_engine;
 use alacritty_terminal::term::{Config, Osc52 as TermOsc52, RenderableContent, Term};
@@ -77,6 +77,7 @@ use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
 };
+use crate::link;
 use crate::reader::{EventLoop, EventLoopSender, Msg, State};
 use crate::search::{
     self, SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns,
@@ -816,6 +817,12 @@ pub struct SessionOptions {
     /// use; the application supplies it in every window (`bt-shell` `window`,
     /// from `NSUUID`).
     pub tab_id: Option<TabId>,
+    /// This machine's name (044): a `file://` authority equal to it counts as
+    /// local — in OSC 7 and in the link hit test ([`Session::link_at`]) alike
+    /// (`crate::shell::is_local_authority`). `bt-core` reads no name itself (no
+    /// platform edge); the application supplies it. `None` → only the empty
+    /// authority and `localhost` are local.
+    pub hostname: Option<String>,
 }
 
 /// The terminal options that can change while the session lives — the
@@ -2539,6 +2546,215 @@ fn visible_range<T>(selection: Option<&Selection>, term: &Term<T>) -> Option<Sel
     (range.end.line >= top && range.start.line <= bottom).then_some(range)
 }
 
+/// The point the link hit test asks about (044, [`Session::link_at`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkPoint {
+    /// A screen row: `0..rows` is the grid, a negative row the fill band above
+    /// it (`-1` is the band's bottom row — the arithmetic of `bt-shell`'s
+    /// `cover_of`). The row is gated by the window's **drawn** rows, so a band
+    /// row only hits while the band stands on screen. The same space as
+    /// [`LinkSpan::row`].
+    Screen { row: i32, col: u16 },
+    /// The dock's input line (`dock_select`'s point). Filled in phase-5 of 044;
+    /// no hit today.
+    Dock(SelectionPoint),
+}
+
+/// One screen row's part of a link: columns `first..=last` of `row`
+/// ([`LinkPoint::Screen`]'s space). A wrapped link has one span per row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkSpan {
+    pub row: i32,
+    pub first: u16,
+    pub last: u16,
+}
+
+/// What a link is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+    /// A plain-text URL (`http`, `https`, `ftp`, `mailto`, `file`).
+    Url,
+    /// A plain-text path **candidate** — whether it exists is the shell
+    /// layer's question; the `:line(:col)`/`(line,col)` suffix is split off the
+    /// target (recognized, not jumped to — `plan.md` → Kapsam Dışı).
+    Path { line: Option<u32>, col: Option<u32> },
+    /// An OSC 8 hyperlink: the target is the link's URI, not the visible text.
+    Osc8,
+}
+
+/// The stamp a link carries from the hit test (044 Karar 3, Muhakeme): the
+/// scrollback's state ([`search::LedgerMark`]) and, for OSC 8, the hyperlink
+/// itself. If the stamp no longer matches, the link is stale — output came, the
+/// window scrolled, the screen was cleared — and must not be drawn. Opaque: no
+/// alacritty type shows in the `pub` API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkStamp {
+    mark: search::LedgerMark,
+    /// The OSC 8 link's `(id, uri)`.
+    hyperlink: Option<(String, String)>,
+}
+
+/// The link under a point ([`Session::link_at`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkHit {
+    /// The cells it covers, top to bottom.
+    pub spans: Vec<LinkSpan>,
+    /// The raw target: the URL, the path without its suffix, or the OSC 8 URI.
+    pub target: String,
+    pub kind: LinkKind,
+    pub stamp: LinkStamp,
+}
+
+/// The two wide-char spacer flags: cells that carry no char of their own.
+const SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
+
+/// The cell's OSC 8 link, unless it is ours: `bateri://` (the block anchor) is
+/// not a link (044 Karar 2) and the text under it is scanned as plain text.
+fn live_hyperlink(cell: &TermCell) -> Option<Hyperlink> {
+    cell.hyperlink().filter(|link| {
+        !link
+            .uri()
+            .get(..9)
+            .is_some_and(|head| head.eq_ignore_ascii_case("bateri://"))
+    })
+}
+
+/// The next cell of the **logical** line to the right: across a wrap, not below
+/// `lowest`.
+fn step_right<T>(term: &Term<T>, point: Point, lowest: Line) -> Option<Point> {
+    if point.column < term.last_column() {
+        Some(Point::new(point.line, point.column + 1))
+    } else if point.line < lowest && search::wraps(term, point.line) {
+        Some(Point::new(point.line + 1, Column(0)))
+    } else {
+        None
+    }
+}
+
+/// The previous cell of the logical line to the left: across a wrap, not above
+/// `highest`.
+fn step_left<T>(term: &Term<T>, point: Point, highest: Line) -> Option<Point> {
+    if point.column.0 > 0 {
+        Some(Point::new(point.line, point.column - 1))
+    } else if point.line > highest && search::wraps(term, point.line - 1) {
+        Some(Point::new(point.line - 1, term.last_column()))
+    } else {
+        None
+    }
+}
+
+/// How far the walk along a wrapped line may go from `at` ([`search::WRAP_REACH`]).
+fn wrap_reach<T>(term: &Term<T>, at: Line) -> (Line, Line) {
+    let highest = Line((at.0 - search::WRAP_REACH).max(term.topmost_line().0));
+    let lowest = Line((at.0 + search::WRAP_REACH).min(term.bottommost_line().0));
+    (highest, lowest)
+}
+
+/// The OSC 8 link under `at`: the contiguous run of cells carrying the **same**
+/// hyperlink (id + uri) along the logical line (044 Karar 2). A spacer never
+/// breaks the run; it is counted only between linked cells (or as the right
+/// half of a linked wide char).
+fn hyperlink_run<T>(term: &Term<T>, at: Point) -> Option<(Point, Point, Hyperlink)> {
+    let link = live_hyperlink(&term.grid()[at])?;
+    let (highest, lowest) = wrap_reach(term, at.line);
+    let linked = |point: Point| {
+        let cell = &term.grid()[point];
+        if cell.flags.intersects(SPACERS) {
+            None
+        } else {
+            Some(live_hyperlink(cell).as_ref() == Some(&link))
+        }
+    };
+    let (mut first, mut cursor) = (at, at);
+    while let Some(point) = step_left(term, cursor, highest) {
+        match linked(point) {
+            Some(false) => break,
+            Some(true) => first = point,
+            None => {}
+        }
+        cursor = point;
+    }
+    let (mut last, mut cursor) = (at, at);
+    while let Some(point) = step_right(term, cursor, lowest) {
+        match linked(point) {
+            Some(false) => break,
+            Some(true) => last = point,
+            None if cursor == last
+                && term.grid()[point].flags.contains(Flags::WIDE_CHAR_SPACER) =>
+            {
+                last = point;
+            }
+            None => {}
+        }
+        cursor = point;
+    }
+    Some((first, last, link))
+}
+
+/// The plain-text link under `at`: the logical line's string goes to
+/// [`link::scan`] (044 Karar 1) and the candidate covering `at`'s char wins.
+///
+/// Cell ↔ char: spacers carry no char and are skipped, a cluster's zero-width
+/// chars map to their base cell — so a wide char or `🇹🇷` before the link does
+/// not shift it. The range's ends are cells; a wide last char takes its spacer.
+fn text_link<T>(term: &Term<T>, at: Point) -> Option<(Point, Point, link::Found)> {
+    let (highest, lowest) = wrap_reach(term, at.line);
+    let mut start = at.line;
+    while start > highest && search::wraps(term, start - 1) {
+        start -= 1;
+    }
+    let mut end = at.line;
+    while end < lowest && search::wraps(term, end) {
+        end += 1;
+    }
+    let mut text = String::new();
+    let mut cells = Vec::new();
+    for line in start.0..=end.0 {
+        for (col, cell) in (&term.grid()[Line(line)]).into_iter().enumerate() {
+            if cell.flags.intersects(SPACERS) {
+                continue;
+            }
+            let point = Point::new(Line(line), Column(col));
+            text.push(cell.c);
+            cells.push(point);
+            for &c in cell.zerowidth().unwrap_or_default() {
+                text.push(c);
+                cells.push(point);
+            }
+        }
+    }
+    let index = cells.iter().position(|&point| point == at)?;
+    let found = link::scan(&text)
+        .into_iter()
+        .find(|found| found.range.contains(&index))?;
+    let first = *cells.get(found.range.start)?;
+    let mut last = *cells.get(found.range.end.checked_sub(1)?)?;
+    if term.grid()[last].flags.contains(Flags::WIDE_CHAR) && last.column < term.last_column() {
+        last.column += 1;
+    }
+    Some((first, last, found))
+}
+
+/// The cells `first..=last` of the logical line as per-row spans, in screen rows.
+fn link_spans<T>(term: &Term<T>, first: Point, last: Point, offset: i32) -> Vec<LinkSpan> {
+    let as_col = |col: Column| u16::try_from(col.0).unwrap_or(u16::MAX);
+    (first.line.0..=last.line.0)
+        .map(|line| LinkSpan {
+            row: line + offset,
+            first: if line == first.line.0 {
+                as_col(first.column)
+            } else {
+                0
+            },
+            last: if line == last.line.0 {
+                as_col(last.column)
+            } else {
+                as_col(term.last_column())
+            },
+        })
+        .collect()
+}
+
 /// Whether a cell of row `line` carries block `id`'s anchor — the anchored row
 /// below that row is the command's **continuation**, not its start.
 ///
@@ -2958,6 +3174,9 @@ pub struct Session {
     ///
     /// Only frames with `display_offset == 0` write it; the rationale is where it writes.
     fill_shown: AtomicU16,
+    /// This machine's name ([`SessionOptions::hostname`]): the link hit test's
+    /// `file://` authority question ([`crate::shell::is_local_authority`]).
+    hostname: Option<String>,
     /// The **identity of the row at the screen's top** in the previous
     /// bottom-anchored frame ([`row_identity`]); `0` means "no frame to compare".
     ///
@@ -3139,7 +3358,9 @@ impl Session {
         let held_input: HeldInput = Arc::new(Mutex::new(at_prompt.is_some().then(Vec::new)));
         let pty = TappedPty {
             pty,
-            scanner: Scanner::new().cluster(options.cluster),
+            scanner: Scanner::new()
+                .cluster(options.cluster)
+                .hostname(options.hostname.clone()),
             shell: Arc::clone(&shell),
             screen_clears: Arc::clone(&screen_clears),
             key_gen: Arc::clone(&key_gen),
@@ -3191,6 +3412,7 @@ impl Session {
             clear_boundary: AtomicUsize::new(0),
             // No band either: the first frame will compute and write the fill.
             fill_shown: AtomicU16::new(0),
+            hostname: options.hostname,
             // No frame to compare: the first frame writes the identity and returns zero.
             scroll_probe: AtomicUsize::new(0),
             scroll_probe_size: AtomicU32::new(0),
@@ -6459,6 +6681,72 @@ impl Session {
         (!log.context.cwd.is_empty()).then(|| PathBuf::from(&log.context.cwd))
     }
 
+    /// The link under a point (044): its cells, raw target, kind and stamp;
+    /// `None` if there is none. Pure — no file I/O: a [`LinkKind::Path`] is a
+    /// candidate the shell layer still has to resolve.
+    ///
+    /// One `Term` lock round. The remote flag is read **before** it (a leaf lock
+    /// never goes under `Term`): in a remote session paths and every `file://`
+    /// are not links (the local disk has no remote path). A `file://` with a
+    /// foreign authority is not a link either ([`crate::shell::is_local_authority`],
+    /// the machine's name from [`SessionOptions::hostname`]).
+    ///
+    /// The cell's OSC 8 link beats the text under it (Karar 2); `bateri://` is
+    /// not a link. A point on a wide char's right half asks its base cell.
+    pub fn link_at(&self, point: LinkPoint) -> Option<LinkHit> {
+        let LinkPoint::Screen { row, col } = point else {
+            return None;
+        };
+        let remote = lock(&self.shell).context.remote.is_some();
+        let term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let line = row - offset;
+        if !drawn_lines(&term, offset, self.search_band(&term)).contains(&line) {
+            return None;
+        }
+        let mut at = Point::new(Line(line), Column(usize::from(col)));
+        if !in_grid(&term, at) {
+            return None;
+        }
+        if term.grid()[at].flags.contains(Flags::WIDE_CHAR_SPACER) && at.column.0 > 0 {
+            at.column -= 1;
+        }
+        let (first, last, target, kind, hyperlink) =
+            if let Some((first, last, link)) = hyperlink_run(&term, at) {
+                let pair = (link.id().to_owned(), link.uri().to_owned());
+                (first, last, pair.1.clone(), LinkKind::Osc8, Some(pair))
+            } else {
+                let (first, last, found) = text_link(&term, at)?;
+                let kind = match found.kind {
+                    link::FoundKind::Url => LinkKind::Url,
+                    link::FoundKind::Path { line, col } => LinkKind::Path { line, col },
+                };
+                (first, last, found.target, kind, None)
+            };
+        let allowed = match kind {
+            LinkKind::Path { .. } => !remote,
+            LinkKind::Url | LinkKind::Osc8 if link::is_file_url(&target) => {
+                !remote
+                    && link::file_authority(&target).is_some_and(|authority| {
+                        crate::shell::is_local_authority(authority, self.hostname.as_deref())
+                    })
+            }
+            LinkKind::Url | LinkKind::Osc8 => true,
+        };
+        if !allowed {
+            return None;
+        }
+        Some(LinkHit {
+            spans: link_spans(&term, first, last, offset),
+            target,
+            kind,
+            stamp: LinkStamp {
+                mark: self.ledger_now(&term),
+                hyperlink,
+            },
+        })
+    }
+
     /// The window's title: the application's OSC 0/2 title → the directory's last
     /// component (home `~`) → `bateri`; in a remote session `⇄ {OSC title}`,
     /// otherwise `⇄ {host}` (rule `shell::title_of`).
@@ -8407,6 +8695,7 @@ mod tests {
             initial_input: None,
             shell_marks: false,
             tab_id: None,
+            hostname: None,
         }
     }
 
@@ -19197,6 +19486,183 @@ e\\314\\201.'; sleep 5";
         assert!(clearer.join().unwrap() > 0, "nothing was ever cleared");
         assert!(frames > 0, "no frame was produced during the race");
         assert!(session.reader_alive(), "the reader thread died in the race");
+        session.shutdown();
+    }
+
+    // --- 044: the link hit test (`Session::link_at`) ---
+
+    fn screen(row: i32, col: u16) -> LinkPoint {
+        LinkPoint::Screen { row, col }
+    }
+
+    fn span(row: i32, first: u16, last: u16) -> LinkSpan {
+        LinkSpan { row, first, last }
+    }
+
+    #[test]
+    fn a_url_split_by_a_wrap_is_one_link() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh("printf 'see https://example.dev/a/b/c/d/e end'; sleep 5"),
+            20,
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "end");
+        let url = "https://example.dev/a/b/c/d/e";
+        for point in [screen(0, 4), screen(0, 19), screen(1, 0), screen(1, 12)] {
+            let hit = session.link_at(point).expect("the wrapped URL is a link");
+            assert_eq!(hit.target, url);
+            assert_eq!(hit.kind, LinkKind::Url);
+            assert_eq!(hit.spans, [span(0, 4, 19), span(1, 0, 12)]);
+        }
+        assert_eq!(session.link_at(screen(0, 3)), None, "the blank before it");
+        assert_eq!(session.link_at(screen(1, 14)), None, "the word after it");
+        session.shutdown();
+    }
+
+    #[test]
+    fn wide_chars_and_a_cluster_before_a_link_do_not_shift_it() {
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(sh("printf '界🇹🇷 https://a.dev/界 x'; sleep 5"), 40);
+        options.cluster = true;
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_ink(&session, &wake, "x");
+        // 界 0–1, 🇹🇷 2–3 (one clustered wide cell), blank 4, the URL 5–20 with
+        // the trailing 界 in 19–20 — the right half (a spacer) asks its base.
+        for col in [5, 12, 19, 20] {
+            let hit = session.link_at(screen(0, col)).expect("a link");
+            assert_eq!(hit.target, "https://a.dev/界");
+            assert_eq!(hit.spans, [span(0, 5, 20)], "col {col}");
+        }
+        assert_eq!(session.link_at(screen(0, 4)), None);
+        assert_eq!(session.link_at(screen(0, 2)), None);
+        session.shutdown();
+    }
+
+    #[test]
+    fn an_osc8_link_wins_over_its_text_and_ours_is_not_a_link() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh(
+                "printf '\\033]8;;https://a.dev\\033\\\\tıkla\\033]8;;\\033\\\\ \
+                \\033]8;;https://a.dev\\033\\\\https://b.dev\\033]8;;\\033\\\\\\r\\n\
+                \\033]8;;bateri://block/3\\033\\\\echo hi https://x.dev\\033]8;;\\033\\\\ END'; \
+                sleep 5",
+            ),
+            60,
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "END");
+        let hit = session.link_at(screen(0, 2)).expect("the OSC 8 link");
+        assert_eq!(hit.target, "https://a.dev");
+        assert_eq!(hit.kind, LinkKind::Osc8);
+        assert_eq!(hit.spans, [span(0, 0, 4)]);
+        // The visible text is a URL too, but the hyperlink is the target.
+        let hit = session
+            .link_at(screen(0, 8))
+            .expect("the second OSC 8 link");
+        assert_eq!(hit.target, "https://a.dev");
+        assert_eq!(hit.spans, [span(0, 6, 18)]);
+        assert_eq!(
+            session.link_at(screen(0, 5)),
+            None,
+            "the blank between them"
+        );
+        // `bateri://` is never a link; the text under it is still scanned.
+        for col in [0, 1, 6] {
+            assert_eq!(session.link_at(screen(1, col)), None, "col {col}");
+        }
+        let hit = session
+            .link_at(screen(1, 10))
+            .expect("the URL under our anchor");
+        assert_eq!(
+            (hit.target.as_str(), hit.kind),
+            ("https://x.dev", LinkKind::Url)
+        );
+        assert_eq!(hit.spans, [span(1, 8, 20)]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_fill_band_row_hits_only_while_the_band_is_drawn() {
+        let wake = Arc::new(TestWake::default());
+        // Ten line ends push the URL's row (the first) into history: `Line(-1)`.
+        let session = spawn_session(
+            "printf 'https://band.dev\\r\\n\\r\\n\\r\\n\\r\\n\\r\\n\\r\\n\\r\\n\\r\\n\\r\\n\\r\\nEND'; \
+             sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "END");
+        assert_eq!(session.link_at(screen(-1, 3)), None, "no band, no row");
+        // A frame may rewrite the band's height; it is set after the waits.
+        session.fill_shown.store(2, Ordering::Relaxed);
+        let hit = session
+            .link_at(screen(-1, 3))
+            .expect("the band's bottom row");
+        assert_eq!(hit.target, "https://band.dev");
+        assert_eq!(hit.spans, [span(-1, 0, 15)]);
+        assert_eq!(session.link_at(screen(-3, 3)), None, "above the band");
+        assert_eq!(session.link_at(screen(10, 3)), None, "below the grid");
+        session.fill_shown.store(0, Ordering::Relaxed);
+        assert_eq!(session.link_at(screen(-1, 3)), None);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_remote_session_has_no_path_or_file_links() {
+        let wake = Arc::new(TestWake::default());
+        let options = test_options(
+            sh(&format!(
+                "stty -echo; printf '{}'; read _; \
+                 printf '\\033]133;C\\007https://r.dev ~/x.txt file:///tmp/a \
+                 file://elsewhere/tmp/a END'; sleep 5",
+                anchored_prompt(1),
+            )),
+            80,
+        );
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        // The prompt first: a line end sent before `stty -echo` would be echoed and
+        // move the output to the next row.
+        wait_ink(&session, &wake, "$");
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        wait_ink(&session, &wake, "END");
+        // `$ ` 0–1, the URL 2–14, the path 16–22, `file:///tmp/a` 24–36, the
+        // foreign `file://` 38–60.
+        let kind = |col| session.link_at(screen(0, col)).map(|hit| hit.kind);
+        assert_eq!(kind(5), Some(LinkKind::Url));
+        assert_eq!(
+            kind(18),
+            Some(LinkKind::Path {
+                line: None,
+                col: None
+            })
+        );
+        assert_eq!(kind(30), Some(LinkKind::Url), "a local `file://`");
+        assert_eq!(kind(45), None, "a foreign authority is not a link");
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert_eq!(kind(5), Some(LinkKind::Url), "a URL stays a link");
+        assert_eq!(kind(18), None, "no local path behind a remote one");
+        assert_eq!(kind(30), None, "no `file://` in a remote session");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_machines_name_makes_a_file_authority_local() {
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("printf 'file://mymac/tmp/a file://other/tmp/b END'; sleep 5"),
+            60,
+        );
+        options.hostname = Some("MyMac".to_owned());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_ink(&session, &wake, "END");
+        let hit = session
+            .link_at(screen(0, 3))
+            .expect("our own name is local");
+        assert_eq!(hit.target, "file://mymac/tmp/a");
+        assert_eq!(session.link_at(screen(0, 22)), None);
         session.shutdown();
     }
 }

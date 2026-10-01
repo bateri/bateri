@@ -2635,6 +2635,10 @@ pub(crate) struct Scanner {
     /// Adding an arm to the enum would open a free but meaningless branch on every
     /// event path.
     screen_clears: u32,
+    /// This machine's name, if the application supplied it
+    /// (`SessionOptions::hostname`): an OSC 7 authority equal to it counts as
+    /// local ([`is_local_authority`]).
+    hostname: Option<String>,
 }
 
 impl Scanner {
@@ -2658,7 +2662,16 @@ impl Scanner {
             number: 0,
             has_digit: false,
             screen_clears: 0,
+            hostname: None,
         }
+    }
+
+    /// The scanner that counts an OSC 7 authority equal to this machine's name as
+    /// local ([`is_local_authority`]); once at startup, from
+    /// `SessionOptions::hostname`.
+    pub(crate) fn hostname(mut self, name: Option<String>) -> Self {
+        self.hostname = name;
+        self
     }
 
     /// The scanner that reads the mirror by cluster ([`DockState::cluster`]); once at
@@ -2812,7 +2825,12 @@ impl Scanner {
             ScanState::Payload(Arm::Cwd) => {
                 if is_terminator(byte) {
                     // Decoding happens **before** `close`: `close` empties the buffer.
-                    let read = parse_cwd(&self.cwd, &mut self.decoded, &mut self.path);
+                    let read = parse_cwd(
+                        &self.cwd,
+                        self.hostname.as_deref(),
+                        &mut self.decoded,
+                        &mut self.path,
+                    );
                     self.close(byte);
                     if let Some(local) = read {
                         on_event(ScanEvent::Cwd {
@@ -2962,15 +2980,24 @@ fn parse_mark(payload: &[u8]) -> Option<Mark> {
 /// an **empty authority** (`file:///…`), so the gate is never tied to a name
 /// match — it does not silently close when the machine is renamed.
 ///
-/// **Known limit:** third-party hooks that print `file://$HOST$PWD` (like
-/// oh-my-zsh's `termsupport.zsh`) do not write to the local directory — they fall
-/// to the remote slot, which is read only while a remote session is active and
-/// deleted on `C`, `D`, `A`, so local behavior is as before 036. The loss is only
-/// the live reflection of a `cd` done in the *middle* of a command; the directory
-/// already comes from our own `precmd` at the next prompt. If wanted, the remedy
-/// is again a policy, not a dependency: `bt-shell` (which has `libc`) reads the
-/// name and passes it via `SessionOptions` — the precedent is `decide_locale`.
+/// **The machine's name is the second arm** (044): `bt-shell` (which has `libc`)
+/// reads the name and passes it via `SessionOptions::hostname` — the precedent is
+/// `decide_locale` — so third-party hooks that print `file://$HOST$PWD` (like
+/// oh-my-zsh's `termsupport.zsh`) and GNU `ls --hyperlink`'s `file://$HOSTNAME/…`
+/// links count as local. Without a name (`None`) every named host is foreign as
+/// before. The single answer is [`is_local_authority`]; OSC 7 and the link hit
+/// test (`Session::link_at`) both ask it.
 const LOCAL_AUTHORITIES: [&str; 2] = ["", "localhost"];
+
+/// Whether a `file://` authority points to this machine: empty, `localhost`
+/// ([`LOCAL_AUTHORITIES`]) or — if the application supplied it — the machine's
+/// name, case-insensitively. An empty name counts as no name.
+pub(crate) fn is_local_authority(authority: &str, hostname: Option<&str>) -> bool {
+    LOCAL_AUTHORITIES
+        .iter()
+        .any(|local| authority.eq_ignore_ascii_case(local))
+        || hostname.is_some_and(|name| !name.is_empty() && authority.eq_ignore_ascii_case(name))
+}
 
 /// Converts the URI after `7;` into a drawable path and returns whether the
 /// authority is local; **ignores** what it does not recognize (`None`).
@@ -2984,7 +3011,12 @@ const LOCAL_AUTHORITIES: [&str; 2] = ["", "localhost"];
 /// is not UTF-8, the path does not start with `/`, a percent escape is corrupt or
 /// the result is not UTF-8. A foreign authority is not a rejection (036): the
 /// answer is `Some(false)`.
-fn parse_cwd(payload: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option<bool> {
+fn parse_cwd(
+    payload: &[u8],
+    hostname: Option<&str>,
+    decoded: &mut Vec<u8>,
+    into: &mut String,
+) -> Option<bool> {
     // The scheme is case-insensitive (RFC 3986 §3.1); `file:` is five bytes.
     let rest = payload
         .get(..5)
@@ -2997,9 +3029,7 @@ fn parse_cwd(payload: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option
     let at = rest.iter().position(|&b| b == b'/')?;
     let (authority, path) = rest.split_at(at);
     let authority = std::str::from_utf8(authority).ok()?;
-    let local = LOCAL_AUTHORITIES
-        .iter()
-        .any(|local| authority.eq_ignore_ascii_case(local));
+    let local = is_local_authority(authority, hostname);
 
     decoded.clear();
     decode_percent(path, decoded)?;
@@ -4358,6 +4388,27 @@ mod tests {
                 String::from_utf8_lossy(sequence)
             );
         }
+    }
+
+    #[test]
+    fn the_machines_own_name_is_local_when_supplied() {
+        // 044: with the name supplied (`SessionOptions::hostname`) `file://$HOST/…`
+        // writes the local directory; without it the same bytes stay foreign.
+        let named = b"\x1b]7;file://MyMac/tmp\x07";
+        let mut scanner = Scanner::new().hostname(Some("mymac".to_owned()));
+        let mut seen = Vec::new();
+        scanner.feed(named, |event| {
+            if let ScanEvent::Cwd { path, local } = event {
+                seen.push((path.to_owned(), local));
+            }
+        });
+        assert_eq!(seen, [("/tmp".to_owned(), true)]);
+        assert_eq!(cwd_events_of(named, false), ["/tmp"]);
+        assert!(is_local_authority("", None));
+        assert!(is_local_authority("LOCALHOST", None));
+        assert!(!is_local_authority("mymac", None));
+        assert!(!is_local_authority("other", Some("mymac")));
+        assert!(!is_local_authority("x", Some("")));
     }
 
     #[test]

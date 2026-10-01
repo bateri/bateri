@@ -123,11 +123,11 @@ pub(crate) fn compile(query: &SearchQuery) -> (SearchStatus, Option<RegexSearch>
 /// **Not measured**, a design constant: the same number as alacritty's own
 /// visible search limit (`MAX_SEARCH_LINES`). A match starting in the middle of
 /// a line cut at the ceiling is a hundred rows up and produces no visible run.
-const WRAP_REACH: i32 = 100;
+pub(crate) const WRAP_REACH: i32 = 100;
 
 /// Whether the row's last cell carries the wrap flag — that is, whether the next
 /// row is its continuation.
-fn wraps<T>(term: &Term<T>, line: Line) -> bool {
+pub(crate) fn wraps<T>(term: &Term<T>, line: Line) -> bool {
     term.grid()[line]
         .last()
         .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE))
