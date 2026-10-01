@@ -1003,6 +1003,125 @@ pub(crate) fn hit(
     })
 }
 
+/// The vertical window's first row and the input's ceiling-free row count for
+/// a `Live` mirror drawn with `input_rows ≥ 1` rows at width `cols`: the
+/// wheel's chosen top (clamped) or the caret-following one. The single
+/// formula of [`render_with`] and of the dock link stamp's check
+/// (`Session::dock`, 044 phase-5: a window that moved left the view's cells
+/// stale).
+pub(crate) fn window_of(
+    state: &DockState,
+    cols: u16,
+    input_rows: u16,
+    scroll: Option<usize>,
+) -> (usize, usize) {
+    let (caret_row, rows) = measure(state, cols);
+    let shown = usize::from(input_rows);
+    let top = scroll.map_or_else(
+        || window_top(caret_row, shown),
+        |top| top.min(rows.saturating_sub(shown)),
+    );
+    (top, rows)
+}
+
+/// A stream index ([`stream`]) → its index in the **selectable** text
+/// ([`selectable`]): `PREBUFFER` is in the same place, `BUFFER` is ahead by
+/// `PREDISPLAY` in the stream; `PREDISPLAY` and the suggestion fall on no
+/// index. `shift`, `pre` and `buffer` are the three parts' character counts.
+///
+/// One mapping, three readers: the selection's and the link's drawing
+/// ([`render_with`]) and the link hit test ([`link_at`]).
+fn selectable_index(index: usize, shift: usize, pre: usize, buffer: usize) -> Option<usize> {
+    if index < shift {
+        Some(index)
+    } else {
+        let offset = (index - shift).checked_sub(pre)?;
+        (offset < buffer).then_some(shift + offset)
+    }
+}
+
+/// The link under row `row`, column `col` of the dock's drawn vertical window
+/// (044 phase-5, R8): the found candidate in the **selectable** text
+/// ([`selectable`], its char range) and its cells as window-local spans — the
+/// rows of the input block inside the window, screen columns (`dock_select`'s
+/// point space). `None` if the mirror is not `Live`, the point is outside the
+/// window, on no character, on `PREDISPLAY` or the suggestion, or on no link.
+///
+/// **Not [`hit`]**: that one lands the padding, the blank and the suggestion
+/// on the nearest character (a click there must go somewhere), while a link is
+/// lit only under the character it is drawn on. The walk is the same
+/// ([`dock_layout`]), twice — once to find the character, once for the cells
+/// of the found range (a wrapped link is one link, one span per row; a wide
+/// character takes its spacer column).
+pub(crate) fn link_at(
+    state: &DockState,
+    top: usize,
+    shown: u16,
+    cols: u16,
+    row: u16,
+    col: u16,
+) -> Option<(crate::link::Found, Vec<crate::session::LinkSpan>)> {
+    if state.status != DockStatus::Live || cols <= TEXT_COL || row >= shown {
+        return None;
+    }
+    let shift = prebuffer_chars(state);
+    let pre = state.predisplay.chars().count();
+    let buffer = state.buffer.chars().count();
+    let caret = shift + state.cursor;
+    let target = top + usize::from(row);
+    let col = usize::from(col);
+    let mut index = None;
+    let mut seen = false;
+    dock_layout(
+        stream(state).map(|ch| (ch, ())),
+        caret,
+        cols,
+        state.cluster,
+        |_| {},
+        |placed| {
+            if seen || placed.row != target || !placed.fits(cols) {
+                return;
+            }
+            if (placed.col..placed.col + placed.width).contains(&col) {
+                seen = true;
+                index = selectable_index(placed.index, shift, pre, buffer);
+            }
+        },
+    );
+    let index = index?;
+    let text = selectable(state);
+    let found = crate::link::scan(&text)
+        .into_iter()
+        .find(|found| found.range.contains(&index))?;
+    let window = top..top + usize::from(shown);
+    let mut spans: Vec<crate::session::LinkSpan> = Vec::new();
+    dock_layout(
+        stream(state).map(|ch| (ch, ())),
+        caret,
+        cols,
+        state.cluster,
+        |_| {},
+        |placed| {
+            if !window.contains(&placed.row) || !placed.fits(cols) {
+                return;
+            }
+            let inside = selectable_index(placed.index, shift, pre, buffer)
+                .is_some_and(|at| found.range.contains(&at));
+            if !inside {
+                return;
+            }
+            // audit: `row - top < shown` and `fits` → `col + width ≤ cols`; all `u16`.
+            let row = (placed.row - top) as i32;
+            let (first, last) = (placed.col as u16, (placed.col + placed.width - 1) as u16);
+            match spans.last_mut() {
+                Some(span) if span.row == row => span.last = last,
+                _ => spans.push(crate::session::LinkSpan { row, first, last }),
+            }
+        },
+    );
+    Some((found, spans))
+}
+
 /// The character range of the dock selection in `BUFFER`, `[start, end)` —
 /// from the two ends and the step. `start == end` for an empty selection.
 ///
@@ -1255,6 +1374,7 @@ pub(crate) fn render_with(
     scroll: Option<usize>,
     owned: bool,
     selection: Option<(usize, usize)>,
+    link: Option<(std::ops::Range<usize>, UnderlineStyle)>,
     change: Option<&Change>,
     runs: &mut Vec<SelectionRun>,
     clusters: &mut Clusters,
@@ -1372,13 +1492,9 @@ pub(crate) fn render_with(
     // row ([`layout`]'s caret rule): the same as zsh's grid, i.e. a row typed
     // at full width grows the dock by a row too (032 phase-1 → Uygulama
     // Notları).
-    let (caret_row, rows) = measure(state, cols.grid);
     // The arm above took zero: here `input_rows ≥ 1`.
     let shown = usize::from(input_rows);
-    let top = scroll.map_or_else(
-        || window_top(caret_row, shown),
-        |top| top.min(rows.saturating_sub(shown)),
-    );
+    let (top, rows) = window_of(state, cols.grid, input_rows, scroll);
     let window = top..top + shown;
     // If the first row is outside the window so is the mark: the prompt's place is not on screen.
     if top > 0 {
@@ -1395,13 +1511,15 @@ pub(crate) fn render_with(
     // `PREDISPLAY`. The stream index is turned into a selectable index,
     // `PREDISPLAY` and the suggestion fall on no index.
     let selected = selection.map_or(0..0, |(start, end)| start..end);
-    let selectable_at = |index: usize| {
-        if index < shift {
-            Some(index)
-        } else {
-            let offset = (index - shift).checked_sub(pre)?;
-            (offset < buffer).then_some(shift + offset)
-        }
+    let selectable_at = |index: usize| selectable_index(index, shift, pre, buffer);
+    // The ⌘-hovered link (044 phase-5) is in the same space: its line goes on
+    // the cells whose selectable index is inside the range.
+    let linked = |index: usize| {
+        link.as_ref().and_then(|(range, style)| {
+            selectable_at(index)
+                .is_some_and(|at| range.contains(&at))
+                .then_some(*style)
+        })
     };
     let mut run: Option<SelectionRun> = None;
 
@@ -1436,7 +1554,7 @@ pub(crate) fn render_with(
                 .checked_sub(shift)
                 .map_or_else(HighlightStyle::default, |shown| style_at(state, shown));
             let is_selected = selectable_at(index).is_some_and(|at| selected.contains(&at));
-            let lead = Cell {
+            let mut lead = Cell {
                 row,
                 // The cluster's text from the stream: clusters are rare and
                 // the stream short, so the walk has no second buffer
@@ -1473,6 +1591,11 @@ pub(crate) fn render_with(
                     }
                 }
             }
+            // **The link's line after the selection's drawability** (044
+            // phase-5): the hover creates no selection content — the grid's
+            // rule that keeps the hover out of `ruled`. The single override
+            // helper, the grid's and the band's.
+            crate::session::underline_link(&mut lead, linked(index));
             // Arriving glyphs from the **same** loop and the same cell: the
             // wrap, wide-character and edge rules are not written a second time.
             if arriving.contains(&index) {
@@ -1686,6 +1809,7 @@ pub(crate) fn render(
         CONTEXT_ROW,
         None,
         owned,
+        None,
         None,
         change,
         &mut Vec::new(),
@@ -2985,6 +3109,7 @@ mod tests {
             true,
             selection,
             None,
+            None,
             &mut runs,
             &mut Clusters::default(),
             |cell| cells.push(cell),
@@ -3279,6 +3404,7 @@ mod tests {
             3,
             None,
             true,
+            None,
             None,
             None,
             &mut Vec::new(),
@@ -5094,6 +5220,7 @@ mod tests {
             None,
             owned,
             None,
+            None,
             change.as_ref(),
             &mut Vec::new(),
             &mut Clusters::default(),
@@ -5634,6 +5761,7 @@ mod tests {
             CONTEXT_ROW,
             None,
             true,
+            None,
             None,
             change.as_ref(),
             &mut Vec::new(),
