@@ -70,8 +70,8 @@ pub use search::{
     escape as escape_search,
 };
 pub use session::{
-    Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, LinkHit, LinkKind, LinkPoint,
-    LinkSpan, LinkStamp, Osc52, SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, SelectKind,
+    Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, LinkHit, LinkHover, LinkKind,
+    LinkPoint, LinkSpan, LinkStamp, Osc52, SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, SelectKind,
     SelectionPoint, SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Teardown,
     TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };

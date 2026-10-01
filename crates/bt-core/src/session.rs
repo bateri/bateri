@@ -2605,6 +2605,63 @@ pub struct LinkHit {
     pub stamp: LinkStamp,
 }
 
+impl LinkHit {
+    /// The hover this hit draws with `style` ([`Session::set_link_hover`]):
+    /// ⌘ → [`UnderlineStyle::Single`], ⌘-less OSC 8 → [`UnderlineStyle::Dashed`]
+    /// (044 Karar 3).
+    pub fn hover(&self, style: UnderlineStyle) -> LinkHover {
+        LinkHover {
+            spans: self.spans.clone(),
+            stamp: self.stamp.clone(),
+            style,
+        }
+    }
+}
+
+/// The highlighted link (044 R4): its cells, the stamp they were found under and
+/// the underline that overrides theirs while the stamp holds
+/// ([`Session::set_link_hover`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkHover {
+    pub spans: Vec<LinkSpan>,
+    pub stamp: LinkStamp,
+    pub style: UnderlineStyle,
+}
+
+impl LinkHover {
+    /// The override at screen row `row` ([`LinkPoint::Screen`]'s space), column
+    /// `col`; `None` outside the link.
+    fn style_at(&self, row: i32, col: u16) -> Option<UnderlineStyle> {
+        self.spans
+            .iter()
+            .any(|span| span.row == row && (span.first..=span.last).contains(&col))
+            .then_some(self.style)
+    }
+}
+
+/// The hover's style at a cell of the grid or the band — the frame path's single
+/// question. `None` hover is the **single branch** the frame pays per cell while
+/// nothing is highlighted (R4.2); a `HIDDEN` cell takes no line (its single `let`).
+fn hover_style(
+    hover: Option<&LinkHover>,
+    hidden: bool,
+    row: i32,
+    col: u16,
+) -> Option<UnderlineStyle> {
+    hover.and_then(|hover| (!hidden).then(|| hover.style_at(row, col)).flatten())
+}
+
+/// **The single underline override** (044 Karar 3): a highlighted cell takes the
+/// hover's line in the text's own colour, whatever SGR gave it. The grid and the
+/// fill band call it today (the dock joins in 044 phase-5) — so the surfaces
+/// cannot draw a link differently.
+fn underline_link(cell: &mut Cell, style: Option<UnderlineStyle>) {
+    if let Some(style) = style {
+        cell.underline = style;
+        cell.underline_color = None;
+    }
+}
+
 /// The two wide-char spacer flags: cells that carry no char of their own.
 const SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
 
@@ -3177,6 +3234,16 @@ pub struct Session {
     /// This machine's name ([`SessionOptions::hostname`]): the link hit test's
     /// `file://` authority question ([`crate::shell::is_local_authority`]).
     hostname: Option<String>,
+    /// The highlighted link (044 R4, [`Session::set_link_hover`]); `None` → no
+    /// highlight.
+    ///
+    /// **Leaf lock**, the `Theme` pattern: `frame()` copies it **before** the
+    /// `Term` lock — an `Arc`, so the copy is a reference count, not the spans —
+    /// and checks the stamp under `Term`. A stale hover is dropped **after** the
+    /// lock is released and only if the slot still holds the copy the frame
+    /// checked (`Arc::ptr_eq`): a hover the view set while the frame ran is not
+    /// the stale one.
+    link_hover: Mutex<Option<Arc<LinkHover>>>,
     /// The **identity of the row at the screen's top** in the previous
     /// bottom-anchored frame ([`row_identity`]); `0` means "no frame to compare".
     ///
@@ -3413,6 +3480,7 @@ impl Session {
             // No band either: the first frame will compute and write the fill.
             fill_shown: AtomicU16::new(0),
             hostname: options.hostname,
+            link_hover: Mutex::new(None),
             // No frame to compare: the first frame writes the identity and returns zero.
             scroll_probe: AtomicUsize::new(0),
             scroll_probe_size: AtomicU32::new(0),
@@ -3618,6 +3686,9 @@ impl Session {
             (slot.generation, slot.pattern.take(), slot.tracking())
         };
         let search_taken = search_tracking.mark;
+        // **The link hover too, before the `Term` lock** (044 R4): the theme's
+        // pattern, a reference count. Its stamp is checked under the lock, below.
+        let hover_taken = lock(&self.link_hover).clone();
         let mut term = self.term.lock();
         // **The glide amount before the scan**: everything below (the offset, the
         // flag's lifetime, the fill, the slide count) must see the window the amount
@@ -3629,6 +3700,13 @@ impl Session {
             let frac = f64::from_bits(self.scroll_frac.load(Ordering::Relaxed));
             let _ = self.scroll_fraction(&mut term, frac, f64::from(glide.rows), self.band_shown());
         }
+        // **The hover's stamp after the glide** (044 R4.1): the glide can move the
+        // offset and the stamp carries it. A stale hover is not drawn — better no
+        // line than a line under the wrong text — and is dropped after the lock.
+        let hover = hover_taken
+            .as_deref()
+            .filter(|hover| self.link_hover_holds(&term, hover));
+        let hover_lost = hover_taken.is_some() && hover.is_none();
 
         let rows = term.screen_lines() as i32;
         // On the alternate screen there are **no** blocks: in vim's buffer there is
@@ -4102,11 +4180,21 @@ impl Session {
             // scan would change with the selection — just as the selection does not
             // create content, it does not delete content either.
             let plain_bg = (plain_back != background).then(|| color::linear_rgba(plain_back));
+            // **The link hover's line** (044 R4): a highlighted blank (a space inside
+            // an OSC 8 link's text) passes the gate too, or the line would have gaps.
+            // It is **not** folded into `ruled`: `drawable` reads that and the
+            // selection must not move with the mouse.
+            let hovered = hover_style(hover, hidden, i32::from(row), col);
+            // A cell that passes the gate **only** for the hover's line occupies
+            // nothing: it must not move the fullness (`drawn_rows`), the anchors or
+            // the duration counter's `last_col` — pressing ⌘ would shift the grid or
+            // hide the counter.
+            let hover_only = plain_bg.is_none() && ch.is_none() && !ruled;
 
             // The skip condition: no background to paint, no ink to draw and no rule
             // line. On an empty grid this condition fits every cell and `sink` is
             // never called — `frame()`'s cost when idle is the iteration itself.
-            if plain_bg.is_none() && ch.is_none() && !ruled {
+            if hover_only && hovered.is_none() {
                 continue;
             }
             // The selected cell's background is **not drawn**: it stays under the
@@ -4149,7 +4237,9 @@ impl Session {
             //
             // The prefix match eliminates foreign links too: `ls --hyperlink` or a
             // `man` page's `file://` does not land here.
-            if !alt_screen && let Some(id) = cell.hyperlink().and_then(|link| block_id(link.uri()))
+            if !alt_screen
+                && !hover_only
+                && let Some(id) = cell.hyperlink().and_then(|link| block_id(link.uri()))
             {
                 // The anchor is on **all** of the prompt's cells; the side that wants
                 // the first row records only the change. The same id appearing a
@@ -4206,7 +4296,9 @@ impl Session {
             {
                 continue;
             }
-            drawn_rows = drawn_rows.max(row.saturating_add(1));
+            if !hover_only {
+                drawn_rows = drawn_rows.max(row.saturating_add(1));
+            }
             // The ink half is resolved **only here** — after the skip gate. Had it
             // been before the gate it would be paid for every cell not drawn too
             // while the `Term` lock is held (colour resolution, descent to the side
@@ -4241,7 +4333,8 @@ impl Session {
             //   counter would eat the one-cell margin it promised. Not visible today
             //   (wide glyphs are not drawn yet) but the arithmetic would be wrong
             //   **now** and 015 would make it visible.
-            if let Some((_, anchor_row, last_col)) = blocks.anchors.last_mut()
+            if !hover_only
+                && let Some((_, anchor_row, last_col)) = blocks.anchors.last_mut()
                 && *anchor_row == row
             {
                 let end = if flags.contains(Flags::WIDE_CHAR) {
@@ -4258,7 +4351,7 @@ impl Session {
             // `underline_color` dropped; since the cell is indivisible **all** of a
             // half-covered cell was drawn inverted — the target cell of the cursor
             // 008 slid would have become invisible before it was even covered.
-            sink(Cell {
+            let mut drawn = Cell {
                 col,
                 row,
                 ch,
@@ -4276,7 +4369,9 @@ impl Session {
                 // diverged the counter's margin and the drawing's width would come apart.
                 wide: flags.contains(Flags::WIDE_CHAR),
                 cluster: cell_cluster(self.cluster, cell, ch, clusters),
-            });
+            };
+            underline_link(&mut drawn, hovered);
+            sink(drawn);
         }
         selection.runs.extend(open_run);
         // **The suppressed input row gives no run either**: it is not drawn in the
@@ -4529,14 +4624,18 @@ impl Session {
                 let bg = (back != background).then(|| color::linear_rgba(back));
                 let ch = (!hidden && !flags.intersects(SPACERS) && cell.c != ' ').then_some(cell.c);
                 let ruled = !hidden && flags.intersects(RULES);
+                // The hover in the band's screen row (negative: `-channel..0`, the
+                // space of [`LinkPoint::Screen`]) — the grid's rule, the same helper.
+                let hovered =
+                    hover_style(hover, hidden, i32::from(fill_row) - i32::from(channel), col);
                 // The skip gate must be **the same** as the grid's: had the two
                 // sides looked at the same cell and answered differently the filled
                 // row would look different from how it looks when it reaches the screen.
-                if bg.is_none() && ch.is_none() && !ruled {
+                if bg.is_none() && ch.is_none() && !ruled && hovered.is_none() {
                     continue;
                 }
                 let style = cell_style(cell, inverse, dim, ruled, colors, &theme);
-                fill_sink(Cell {
+                let mut drawn = Cell {
                     col,
                     row: fill_row,
                     ch,
@@ -4552,7 +4651,9 @@ impl Session {
                     // the screen.
                     wide: flags.contains(Flags::WIDE_CHAR),
                     cluster: cell_cluster(self.cluster, cell, ch, clusters),
-                });
+                };
+                underline_link(&mut drawn, hovered);
+                fill_sink(drawn);
             }
         }
 
@@ -4670,6 +4771,23 @@ impl Session {
             next_tick: None,
         };
         drop(term);
+        // **The stale hover drops here**, after the `Term` lock (a leaf lock does
+        // not go under it), and only if the slot still holds the copy this frame
+        // checked: a hover set in between is the view's newer answer. The news is
+        // edge-triggered — once per dropped hover (R4.1).
+        if hover_lost && let Some(taken) = &hover_taken {
+            let dropped = {
+                let mut slot = lock(&self.link_hover);
+                let same = slot.as_ref().is_some_and(|now| Arc::ptr_eq(now, taken));
+                if same {
+                    *slot = None;
+                }
+                same
+            };
+            if dropped {
+                self.adapter.0.wake.link_hover_lost();
+            }
+        }
         // The pattern goes back to the slot, **only if the generation is the
         // same**: if a new query came in while the round was going (or search
         // closed) what is in the slot is its.
@@ -6747,6 +6865,55 @@ impl Session {
         })
     }
 
+    /// Highlights a link (044 R4): while `hover`'s stamp holds, the next frames
+    /// draw its cells with the hover's underline (grid and fill band; the dock's
+    /// from phase-5). `None` removes the highlight.
+    ///
+    /// The `set_theme` pattern: the same value is a **no-op and does not wake**
+    /// (moving inside a link produces no frame, R4.2), a change requests a frame.
+    /// A stale stamp is not drawn: the frame drops the slot and says so with
+    /// [`Wake::link_hover_lost`] (R4.1).
+    pub fn set_link_hover(&self, hover: Option<LinkHover>) {
+        let changed = {
+            let mut slot = lock(&self.link_hover);
+            if slot.as_deref() == hover.as_ref() {
+                false
+            } else {
+                *slot = hover.map(Arc::new);
+                true
+            }
+        };
+        if changed {
+            self.request_frame();
+        }
+    }
+
+    /// Whether `hover`'s stamp still holds under the `Term` lock (044 R4.1): the
+    /// scrollback's state is the one the hit test saw ([`search::LedgerMark`] —
+    /// output, scrolling, a clear, a resize, the alternate screen all move it) and,
+    /// for an OSC 8 link, every drawn cell of its spans still carries the same
+    /// hyperlink. A cell that left the scrollback fails it.
+    fn link_hover_holds<T>(&self, term: &Term<T>, hover: &LinkHover) -> bool {
+        if hover.stamp.mark != self.ledger_now(term) {
+            return false;
+        }
+        let Some((id, uri)) = &hover.stamp.hyperlink else {
+            return true;
+        };
+        let offset = term.grid().display_offset() as i32;
+        hover.spans.iter().all(|span| {
+            (span.first..=span.last).all(|col| {
+                let point = Point::new(Line(span.row - offset), Column(usize::from(col)));
+                if !in_grid(term, point) {
+                    return false;
+                }
+                let cell = &term.grid()[point];
+                cell.flags.intersects(SPACERS)
+                    || live_hyperlink(cell).is_some_and(|link| link.id() == id && link.uri() == uri)
+            })
+        })
+    }
+
     /// The window's title: the application's OSC 0/2 title → the directory's last
     /// component (home `~`) → `bateri`; in a remote session `⇄ {OSC title}`,
     /// otherwise `⇄ {host}` (rule `shell::title_of`).
@@ -8529,6 +8696,8 @@ mod tests {
         searches: u32,
         /// How many times [`Wake::command_started`] came.
         commands: u32,
+        /// How many times [`Wake::link_hover_lost`] came.
+        hovers_lost: u32,
     }
 
     impl TestWake {
@@ -8614,6 +8783,11 @@ mod tests {
 
         fn command_started(&self) {
             self.state.lock().unwrap().commands += 1;
+            self.cond.notify_all();
+        }
+
+        fn link_hover_lost(&self) {
+            self.state.lock().unwrap().hovers_lost += 1;
             self.cond.notify_all();
         }
     }
@@ -19663,6 +19837,307 @@ e\\314\\201.'; sleep 5";
             .expect("our own name is local");
         assert_eq!(hit.target, "file://mymac/tmp/a");
         assert_eq!(session.link_at(screen(0, 22)), None);
+        session.shutdown();
+    }
+
+    // --- 044: the link hover (`Session::set_link_hover`) ---
+
+    /// One frame's grid cells.
+    fn grid_now(session: &Session) -> Vec<Cell> {
+        let mut cells = Vec::new();
+        session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        cells
+    }
+
+    /// The underline of the cell at `(row, col)`; `None` if the frame did not
+    /// give that cell.
+    fn underline_at(cells: &[Cell], row: u16, col: u16) -> Option<UnderlineStyle> {
+        cells
+            .iter()
+            .find(|cell| cell.row == row && cell.col == col)
+            .map(|cell| cell.underline)
+    }
+
+    /// How many times the hover was dropped as stale.
+    fn hovers_lost(wake: &TestWake) -> u32 {
+        wake.state.lock().unwrap().hovers_lost
+    }
+
+    #[test]
+    fn a_hovered_link_is_underlined_and_nothing_else() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh(
+                "printf '\\033[4:3msee\\033[0m https://a.dev/x \\033[58;5;1;4mend\\033[0m'; \
+                sleep 5",
+            ),
+            40,
+            Arc::clone(&wake),
+        );
+        let plain = wait_ink(&session, &wake, "end");
+        let hit = session.link_at(screen(0, 6)).expect("the URL");
+        assert_eq!(hit.spans, [span(0, 4, 18)]);
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Single)));
+        let cells = grid_now(&session);
+        for col in 4..=18 {
+            let cell = cells
+                .iter()
+                .find(|cell| cell.row == 0 && cell.col == col)
+                .expect("a link cell");
+            assert_eq!(cell.underline, UnderlineStyle::Single, "col {col}");
+            assert_eq!(cell.underline_color, None, "col {col}: the text's colour");
+        }
+        // Outside the span every cell is exactly the hover-less frame's.
+        let outside = |cells: &[Cell]| -> Vec<Cell> {
+            cells
+                .iter()
+                .filter(|cell| !(cell.row == 0 && (4..=18).contains(&cell.col)))
+                .copied()
+                .collect()
+        };
+        assert_eq!(outside(&cells), outside(&plain));
+        assert_eq!(underline_at(&cells, 0, 0), Some(UnderlineStyle::Curl));
+        assert_eq!(underline_at(&cells, 0, 20), Some(UnderlineStyle::Single));
+        // `Dashed` is the ⌘-less OSC 8 style; the override takes whichever it is
+        // given, and `None` takes it away.
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Dashed)));
+        assert_eq!(
+            underline_at(&grid_now(&session), 0, 6),
+            Some(UnderlineStyle::Dashed)
+        );
+        session.set_link_hover(None);
+        assert_eq!(grid_now(&session), plain);
+        assert_eq!(hovers_lost(&wake), 0, "nothing went stale");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_blank_inside_an_osc8_link_takes_the_line() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh(
+                "printf '\\033]8;;https://a.dev\\033\\\\click here\\033]8;;\\033\\\\ END'; \
+                sleep 5",
+            ),
+            40,
+            Arc::clone(&wake),
+        );
+        let plain = wait_ink(&session, &wake, "END");
+        assert_eq!(underline_at(&plain, 0, 5), None, "a plain blank is skipped");
+        let hit = session.link_at(screen(0, 1)).expect("the OSC 8 link");
+        assert_eq!(hit.spans, [span(0, 0, 9)]);
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Dashed)));
+        let cells = grid_now(&session);
+        assert_eq!(underline_at(&cells, 0, 5), Some(UnderlineStyle::Dashed));
+        assert_eq!(
+            underline_at(&cells, 0, 10),
+            None,
+            "the blank after the link"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_hover_only_blank_row_does_not_count_as_filled() {
+        // The link wraps onto a row of linked blanks alone and the cursor goes
+        // home: without the hover that row is empty, and the hover's line must not
+        // make it count — ⌘ would shift the grid down a row.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh(
+                "printf '\\033]8;;https://a.dev\\033\\\\abcdefghijklmnopqrst\
+                %20s\\033]8;;\\033\\\\\\033[H' ''; sleep 5",
+            ),
+            20,
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "abcdefghijklmnopqrst");
+        let plain = cursor_now(&session).content_rows;
+        let hit = session.link_at(screen(0, 1)).expect("the OSC 8 link");
+        assert_eq!(hit.spans, [span(0, 0, 19), span(1, 0, 19)]);
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Single)));
+        let mut cells = Vec::new();
+        let cursor = session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        assert_eq!(underline_at(&cells, 1, 4), Some(UnderlineStyle::Single));
+        assert_eq!(cursor.content_rows, plain, "the hover moved the fullness");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_rewritten_row_drops_the_hover_once() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh("stty -echo; printf 'https://a.dev/x'; read _; \
+                printf '\\rplain text here'; sleep 5"),
+            40,
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "https://a.dev/x");
+        let hit = session.link_at(screen(0, 3)).expect("the URL");
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Single)));
+        assert_eq!(
+            underline_at(&grid_now(&session), 0, 3),
+            Some(UnderlineStyle::Single)
+        );
+        session.write(b"\n");
+        // The same row, rewritten in place: no row moved, only the text changed.
+        let cells = wait_ink(&session, &wake, "plaintexthere");
+        assert!(
+            cells
+                .iter()
+                .all(|cell| cell.underline == UnderlineStyle::None),
+            "the line stayed under the new text: {cells:?}"
+        );
+        assert_eq!(hovers_lost(&wake), 1);
+        assert!(lock(&session.link_hover).is_none(), "the slot was dropped");
+        grid_now(&session);
+        assert_eq!(hovers_lost(&wake), 1, "the news is an edge");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_changed_hyperlink_under_the_same_ledger_is_stale() {
+        // Output moves the ledger's mark first, so from the PTY the hyperlink
+        // comparison is never the one that decides; the stamp is edited by hand
+        // to reach it — the same mark, another link.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh("printf '\\033]8;;https://a.dev\\033\\\\link\\033]8;;\\033\\\\ END'; sleep 5"),
+            40,
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "END");
+        let hit = session.link_at(screen(0, 1)).expect("the OSC 8 link");
+        let held = hit.hover(UnderlineStyle::Single);
+        {
+            let term = session.term.lock();
+            assert!(session.link_hover_holds(&term, &held));
+        }
+        let mut other = held.clone();
+        other.stamp.hyperlink = Some((String::from("other"), String::from("https://a.dev")));
+        session.set_link_hover(Some(other));
+        let cells = grid_now(&session);
+        assert_eq!(underline_at(&cells, 0, 1), Some(UnderlineStyle::None));
+        assert_eq!(hovers_lost(&wake), 1);
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_fill_band_draws_the_hover_too() {
+        // `gapped_session`'s scene with a URL in the history: the band shows
+        // `18`, `19`, `20`, the URL and `21`, i.e. the URL is the band's fourth row
+        // — screen row `-2`.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 20; echo https://band.dev; seq 21 30; read _; \
+             printf '\\033[4A\\033[J'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+        session.write(b"\n");
+        wait_until(
+            "the content did not shorten from the top",
+            Duration::from_secs(5),
+            || cursor_now(&session).content_rows <= 6,
+        );
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.fill, 5, "{cursor:?}");
+        assert_eq!(row_text(&cells, 3), "https://band.dev");
+        let hit = session.link_at(screen(-2, 3)).expect("the band's URL");
+        assert_eq!(hit.spans, [span(-2, 0, 15)]);
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Single)));
+        let (_, cells) = fill_now(&session);
+        for cell in &cells {
+            let expected = if cell.row == 3 {
+                UnderlineStyle::Single
+            } else {
+                UnderlineStyle::None
+            };
+            assert_eq!(cell.underline, expected, "{cell:?}");
+        }
+        assert_eq!(cells.iter().filter(|cell| cell.row == 3).count(), 16);
+        assert_eq!(hovers_lost(&wake), 0);
+        session.shutdown();
+    }
+
+    #[test]
+    fn setting_the_same_hover_twice_does_not_wake() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh("printf 'https://a.dev END'; sleep 5"),
+            40,
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "END");
+        let hit = session.link_at(screen(0, 3)).expect("the URL");
+        let before = wakes(&wake);
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Single)));
+        assert_eq!(wakes(&wake), before + 1, "a change requests a frame");
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Single)));
+        assert_eq!(wakes(&wake), before + 1, "the same hover is a no-op");
+        session.set_link_hover(None);
+        session.set_link_hover(None);
+        assert_eq!(wakes(&wake), before + 2);
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "runs with make test-race"]
+    fn race_link_hover_and_frame() {
+        // The hover's leaf lock has two writers — `set_link_hover` and the frame
+        // dropping a stale hover — while output on the reader thread stales the
+        // stamp (the ledger), and the frame reads the slot before `Term`. Output never stops, so most hovers go
+        // stale; the setter keeps setting. A broken lock order hangs the test.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "while :; do printf 'https://a.dev/x\\r'; sleep 0.01; done",
+            Arc::clone(&wake),
+        ));
+        wait_ink(&session, &wake, "https://a.dev/x");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let setter = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut sets = 0u64;
+                while Instant::now() < deadline {
+                    let hover = session
+                        .link_at(screen(0, 3))
+                        .map(|hit| hit.hover(UnderlineStyle::Single));
+                    session.set_link_hover(hover);
+                    sets += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                sets
+            })
+        };
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            if frame_if_damaged(&session, |_| ()).is_some() {
+                frames += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(setter.join().unwrap() > 0, "no hover was ever set");
+        assert!(frames > 0, "no frame was produced during the race");
+        assert!(session.reader_alive(), "the reader thread died in the race");
         session.shutdown();
     }
 }
