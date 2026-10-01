@@ -117,6 +117,11 @@ objc2-foundation = { workspace = true, features = [
 # `NSSavePanel`/`NSPanel` chain) picks the destination folder as a sheet. Only
 # header flags over `objc2-foundation` headers; `Cargo.lock` did not move.
 # Decision record .tasks/045-uzak-dosya-indirme/discussion.md → Karar 15.
+# ⌘-dragging a remote link to Finder (045 phase-5): `NSFilePromiseProvider`
+# (and its delegate protocol), `NSDraggingItem` and `NSDraggingSession` for
+# `beginDraggingSessionWithItems:event:source:`. Only header flags over
+# `objc2-foundation` headers already in its default set; `Cargo.lock` did not
+# move. Same decision record, Karar 15.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -129,6 +134,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSSearchFieldCell",
     "NSShadow", "NSTextFieldCell", "NSWindowTab", "block2", "NSDockTile", "NSProgressIndicator",
     "NSCursor", "NSPopover", "NSParagraphStyle", "NSOpenPanel", "NSPanel", "NSSavePanel",
+    "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer table (CLAUDE.md) recorded this as "only attaching a CALayer".

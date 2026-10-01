@@ -69,6 +69,7 @@ use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::preview::PreviewTicket;
+use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
 use crate::search_bar::{SearchBar, selection_query};
@@ -827,6 +828,9 @@ pub(crate) struct PaneIvars {
     /// The previews this pane downloaded, by landing path (045 phase-4): how each
     /// opens and where its index is ([`crate::preview::PreviewTicket`]).
     previews: RefCell<HashMap<PathBuf, PreviewTicket>>,
+    /// The file promises of ⌘-dragged remote links (045 phase-5): the delegates
+    /// kept alive and the Finder downloads that fulfil them.
+    finder: RefCell<FinderDrops>,
 }
 
 define_class!(
@@ -1177,6 +1181,7 @@ impl TerminalPane {
             remote_helper: RefCell::new(RemoteHelper::default()),
             remote_files: RefCell::new(remote_files),
             previews: RefCell::new(HashMap::new()),
+            finder: RefCell::new(FinderDrops::default()),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -1939,6 +1944,8 @@ impl TerminalPane {
     /// never born — there is nothing to close.
     pub(crate) fn begin_close(&self) -> Option<Closing> {
         self.abandon_uploads();
+        // Finder's pending promises fail now (cancelled), not with the last reference.
+        self.finder_abandon();
         // The helper's ssh goes now, not when the last reference drops.
         self.remote_helper().borrow_mut().close();
         self.ivars().closed.set(true);
@@ -2360,6 +2367,11 @@ impl TerminalPane {
     /// The previews this pane downloaded, by landing path.
     pub(crate) fn previews(&self) -> &RefCell<HashMap<PathBuf, PreviewTicket>> {
         &self.ivars().previews
+    }
+
+    /// The file promises of ⌘-dragged remote links ([`crate::promise`]).
+    pub(crate) fn finder_drops(&self) -> &RefCell<FinderDrops> {
+        &self.ivars().finder
     }
 
     /// The open upload sheet's slot.

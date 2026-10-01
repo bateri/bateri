@@ -44,9 +44,9 @@ use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSCursor, NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent,
-    NSEventModifierFlags, NSEventPhase, NSMenuItem, NSPasteboard, NSPasteboardTypeFileURL,
-    NSTextInputClient, NSView,
+    NSCursor, NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo,
+    NSDraggingSession, NSDraggingSource, NSEvent, NSEventModifierFlags, NSEventPhase, NSMenuItem,
+    NSPasteboard, NSPasteboardTypeFileURL, NSTextInputClient, NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint,
@@ -1393,6 +1393,34 @@ define_class!(
             }
         }
     }
+
+    /// **The view is also a drag source** (045 R7): a ⌘-drag of a remote link
+    /// is a file promise to Finder ([`crate::promise::begin_drag`]).
+    unsafe impl NSDraggingSource for BateriView {
+        /// Copy only, inside and outside the application: the remote item
+        /// stays where it is, a copy lands where it is dropped.
+        #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+        fn source_operation_mask(
+            &self,
+            _session: &NSDraggingSession,
+            _context: NSDraggingContext,
+        ) -> NSDragOperation {
+            NSDragOperation::Copy
+        }
+
+        /// The drag ended: with no drop its promise's delegate is let go.
+        #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+        fn session_ended(
+            &self,
+            session: &NSDraggingSession,
+            _at: NSPoint,
+            operation: NSDragOperation,
+        ) {
+            if let Some(pane) = self.pane() {
+                pane.finder_drag_ended(session, operation);
+            }
+        }
+    }
 );
 
 /// The file-system paths of the file URLs on the pasteboard.
@@ -1720,8 +1748,16 @@ impl BateriView {
         // neither a report (vim, htop, Claude Code see nothing) nor a selection,
         // Shift or not. Only a **verified** hover counts — the press before the
         // path's `stat` returned takes today's route.
-        if button == MouseButton::Left && self.link_press(event) {
-            self.with_gesture(Gesture::pressed_link);
+        //
+        // A **remote** link can also be dragged out to Finder (045 R7): the
+        // ledger keeps the press point and the first motion past the threshold
+        // starts the file promise drag ([`Drag::Link`]).
+        if button == MouseButton::Left
+            && let Some(draggable) = self.link_press(event)
+        {
+            let at = event.locationInWindow();
+            let from = draggable.then_some((at.x, at.y));
+            self.with_gesture(|g| g.pressed_link(from));
             return;
         }
         // **The dock's input line before the grid** and without asking the
@@ -1787,7 +1823,11 @@ impl BateriView {
     /// ([`Gesture::dragged`]): releasing Shift or the application turning the
     /// mode off in the middle of the same gesture must not change the path.
     fn drag_event(&self, event: &NSEvent, button: MouseButton) {
-        match self.ivars().gesture.get().dragged(button) {
+        let at = event.locationInWindow();
+        match self.with_gesture(|g| g.dragged(button, (at.x, at.y))) {
+            // A ⌘-press on a remote link moved past the threshold: the file
+            // promise drag to Finder (045 R7). AppKit owns the mouse from here.
+            Drag::Link => self.link_drag(event),
             Drag::Report => self.motion_event(event, Some(button)),
             Drag::Select => {
                 if let Some((session, cell)) = self.session_cell(event) {
