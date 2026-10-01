@@ -100,8 +100,23 @@ impl HelperSession {
         thread::Builder::new()
             .name("remote helper output".into())
             .spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
+                // Bytes, not `lines()`: a remote rc file's non-UTF-8 banner must
+                // not end the session before the greeting (`/code-review`, 045).
+                let mut reader = BufReader::new(stdout);
+                let mut bytes = Vec::new();
+                loop {
+                    bytes.clear();
+                    match reader.read_until(b'\n', &mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    if bytes.last() == Some(&b'\n') {
+                        bytes.pop();
+                        if bytes.last() == Some(&b'\r') {
+                            bytes.pop();
+                        }
+                    }
+                    let line = String::from_utf8_lossy(&bytes).into_owned();
                     if tx.send(line).is_err() {
                         break;
                     }

@@ -1,4 +1,4 @@
-//! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar with four
+//! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar with five
 //! categories on the left, a label–control grid on the right. The decisions
 //! on the skeleton and behaviour are in
 //! `.tasks/029-ayarlar-penceresi/discussion.md` → Karar 2–6, 9; they are not
@@ -17,14 +17,23 @@
 //! ([`Choice`]), the order of the items is the order of `bt-core`'s `NAMES`
 //! table: a new variant is a compile error, it does not silently go missing
 //! from the popup.
+//!
+//! Remote Files (045 phase-6) adds three row kinds that are not a single
+//! control: a size popup (presets, [`size_items`]), a folder row (the path as
+//! the file writes it, Change… → `NSOpenPanel`) and the preview folder's usage
+//! with Clear Now. The usage is not a setting: it is measured off the main
+//! thread by `AppDelegate` and only shown here ([`SettingsWindow::show_usage`]);
+//! Clear Now and Show in Finder write nothing, so the lock does not disable them.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::path::Path;
 
+use block2::RcBlock;
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
-    CursorBlink, CursorMotion, Erase, Keypress, LINE_HEIGHT_RANGE, Osc52, ReduceMotion,
-    SCROLLBACK_MAX, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
-    UnfocusedCaret,
+    CursorBlink, CursorMotion, DownloadConflict, Erase, Keypress, LINE_HEIGHT_RANGE, Osc52,
+    PreviewKeep, ReduceMotion, SCROLLBACK_MAX, SYSTEM_THEME, Settings, SettingsEdit,
+    ShellIntegration, SmoothScroll, UnfocusedCaret,
 };
 use bt_gpu::FontNotice;
 use objc2::rc::Retained;
@@ -36,27 +45,31 @@ use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControl,
     NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType,
     NSFont, NSGridCell, NSGridCellPlacement, NSGridRow, NSGridRowAlignment, NSGridView, NSImage,
-    NSImageView, NSLayoutAttribute, NSLayoutConstraint, NSMenuItem, NSPopUpButton, NSScrollView,
-    NSSlider, NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper, NSSwitch,
-    NSTableCellView, NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
-    NSTableViewStyle, NSTextField, NSTitlePosition, NSUserInterfaceLayoutOrientation, NSView,
-    NSViewController, NSWindow, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
+    NSImageView, NSLayoutAttribute, NSLayoutConstraint, NSLineBreakMode, NSMenuItem,
+    NSModalResponse, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSScrollView, NSSlider,
+    NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper, NSSwitch, NSTableCellView,
+    NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle,
+    NSTextField, NSTitlePosition, NSUserInterfaceLayoutOrientation, NSView, NSViewController,
+    NSWindow, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString, ns_string,
+    NSSize, NSString, NSURL, ns_string,
 };
 
 use crate::app;
+use crate::child;
+use crate::remote_files::Sweep;
 use crate::settings::{self, FileState};
+use crate::upload::format_bytes;
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
 
 /// The window's content size, in points. Fixed — the window cannot be
-/// resized. The longest pane (Cursor: six rows, four notes) does not touch
-/// the button even with a two-line banner above and one line of diagnostics;
-/// at 500 the Cursor pane with a banner stuck to the button (phase-3 eyeball
-/// check). A design constant, not a measured number.
-const WINDOW_SIZE: NSSize = NSSize::new(680.0, 560.0);
+/// resized. The height is the longest pane's: Remote Files (045 phase-6, nine
+/// rows, two of them two lines tall) — the Cursor pane's 560 would put it on
+/// the button; at 500 the Cursor pane with a banner stuck to the button (029
+/// phase-3 eyeball check). A design constant, not a measured number.
+const WINDOW_SIZE: NSSize = NSSize::new(680.0, 680.0);
 /// The sidebar's width: close to System Settings', roomy for four short
 /// titles. A design constant.
 const SIDEBAR_WIDTH: f64 = 180.0;
@@ -78,6 +91,28 @@ const BANNER_TEXT_WIDTH: f64 =
 /// The note text's wrap width: the popup's width — the note must not exceed
 /// the right edge of the control above it (it did in the first screenshot).
 const NOTE_WIDTH: f64 = POPUP_WIDTH;
+/// A folder row's path label: as wide as the popups' column allows, the
+/// middle truncated beyond it (the end of a path is what tells folders apart).
+const PATH_WIDTH: f64 = 280.0;
+/// The size popups' presets, bytes (045 Karar 8's starting values among
+/// them). A design constant; a value the file holds that is not here is
+/// still shown ([`size_items`]).
+const PREVIEW_SIZE_PRESETS: &[u64] = &[
+    10_000_000,
+    50_000_000,
+    100_000_000,
+    500_000_000,
+    1_000_000_000,
+    5_000_000_000,
+];
+const PREVIEW_LIMIT_PRESETS: &[u64] = &[
+    500_000_000,
+    1_000_000_000,
+    2_000_000_000,
+    5_000_000_000,
+    10_000_000_000,
+    20_000_000_000,
+];
 
 /// The sidebar's rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,14 +121,16 @@ enum Category {
     Appearance,
     Cursor,
     Motion,
+    RemoteFiles,
 }
 
 impl Category {
-    const ALL: [Category; 4] = [
+    const ALL: [Category; 5] = [
         Category::General,
         Category::Appearance,
         Category::Cursor,
         Category::Motion,
+        Category::RemoteFiles,
     ];
 
     fn title(self) -> &'static str {
@@ -102,6 +139,7 @@ impl Category {
             Category::Appearance => "Appearance",
             Category::Cursor => "Cursor",
             Category::Motion => "Motion",
+            Category::RemoteFiles => "Remote Files",
         }
     }
 
@@ -112,6 +150,7 @@ impl Category {
             Category::Appearance => "paintpalette",
             Category::Cursor => "character.cursor.ibeam",
             Category::Motion => "wind",
+            Category::RemoteFiles => "network",
         }
     }
 }
@@ -140,11 +179,19 @@ enum Key {
     ReduceMotion,
     Keypress,
     Erase,
+    PreviewMaxSize,
+    PreviewReadOnly,
+    PreviewDir,
+    PreviewKeep,
+    PreviewLimit,
+    DownloadDir,
+    DownloadConflict,
+    DownloadNotify,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 21] = [
+    const ALL: [Key; 29] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -166,6 +213,14 @@ impl Key {
         Key::ReduceMotion,
         Key::Keypress,
         Key::Erase,
+        Key::PreviewMaxSize,
+        Key::PreviewReadOnly,
+        Key::PreviewDir,
+        Key::PreviewKeep,
+        Key::PreviewLimit,
+        Key::DownloadDir,
+        Key::DownloadConflict,
+        Key::DownloadNotify,
     ];
 
     fn tag(self) -> NSInteger {
@@ -202,6 +257,14 @@ impl Key {
             Key::ReduceMotion => "motion.reduce_motion",
             Key::Keypress => "motion.keypress",
             Key::Erase => "motion.erase",
+            Key::PreviewMaxSize => "remote.preview_max_size",
+            Key::PreviewReadOnly => "remote.preview_read_only",
+            Key::PreviewDir => "remote.preview_dir",
+            Key::PreviewKeep => "remote.preview_keep",
+            Key::PreviewLimit => "remote.preview_limit",
+            Key::DownloadDir => "remote.download_dir",
+            Key::DownloadConflict => "remote.download_conflict",
+            Key::DownloadNotify => "remote.download_notify",
         }
     }
 }
@@ -404,6 +467,33 @@ impl Choice for Erase {
             Erase::Recede => "Recede",
             Erase::Sublime => "Sublime",
             Erase::Shatter => "Shatter",
+        }
+    }
+}
+
+impl Choice for PreviewKeep {
+    fn names() -> &'static [(&'static str, Self)] {
+        PreviewKeep::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            PreviewKeep::UntilLaunch => "Until next launch",
+            PreviewKeep::Day => "1 day",
+            PreviewKeep::Week => "7 days",
+            PreviewKeep::Month => "30 days",
+        }
+    }
+}
+
+impl Choice for DownloadConflict {
+    fn names() -> &'static [(&'static str, Self)] {
+        DownloadConflict::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            DownloadConflict::Ask => "Ask",
+            DownloadConflict::KeepBoth => "Keep both",
+            DownloadConflict::Replace => "Replace",
         }
     }
 }
@@ -626,6 +716,79 @@ fn missing_font_title(name: &str, notice: Option<FontNotice>) -> String {
     }
 }
 
+/// An item of a size popup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SizeItem {
+    Preset(u64),
+    Separator,
+    /// The file's value that is not a preset; choosing it writes nothing (it already is).
+    Current(u64),
+}
+
+/// A size popup's items and the selected one's index: the presets, and the
+/// file's value appended after a separator when it is not one of them — the
+/// popup does not hide what the user wrote (Karar 3's Font rule).
+fn size_items(current: u64, presets: &[u64]) -> (Vec<SizeItem>, usize) {
+    let mut items: Vec<SizeItem> = presets.iter().copied().map(SizeItem::Preset).collect();
+    if let Some(index) = presets.iter().position(|&bytes| bytes == current) {
+        return (items, index);
+    }
+    items.push(SizeItem::Separator);
+    items.push(SizeItem::Current(current));
+    let index = items.len() - 1;
+    (items, index)
+}
+
+/// The action's size item → the bytes to write.
+fn size_edit(items: &[SizeItem], index: NSInteger) -> Option<u64> {
+    match items.get(usize::try_from(index).ok()?)? {
+        SizeItem::Preset(bytes) => Some(*bytes),
+        SizeItem::Separator | SizeItem::Current(_) => None,
+    }
+}
+
+/// A size as the popup shows it: the file's spelling (`bt_core::format_size`,
+/// so the title is the value written) with a space before the unit — `100 MB`.
+fn size_title(bytes: u64) -> String {
+    let text = bt_core::format_size(bytes);
+    match text.find(|c: char| !c.is_ascii_digit()) {
+        Some(at) => format!("{} {}", &text[..at], &text[at..]),
+        None => text,
+    }
+}
+
+/// A folder the panel chose → the file's spelling: under the home directory
+/// as `~/…` (the template's convention, and the file stays valid on another
+/// account), anywhere else absolute.
+fn folder_text(path: &Path, home: Option<&Path>) -> String {
+    if let Some(rest) = home.and_then(|home| path.strip_prefix(home).ok()) {
+        let rest = rest.to_string_lossy();
+        return if rest.is_empty() {
+            "~".to_owned()
+        } else {
+            format!("~/{rest}")
+        };
+    }
+    path.to_string_lossy().into_owned()
+}
+
+/// The "In use" row: the preview copies' total and count; `None` until the
+/// first measurement arrives (or the folder cannot be resolved).
+fn usage_label(usage: Option<(u64, usize)>) -> String {
+    match usage {
+        None => "—".to_owned(),
+        Some((_, 0)) => "Empty".to_owned(),
+        Some((bytes, 1)) => format!("{} · 1 file", format_bytes(bytes)),
+        Some((bytes, files)) => format!("{} · {files} files", format_bytes(bytes)),
+    }
+}
+
+/// A folder row: the path as written in the file and its Change… button.
+struct Folder {
+    path: Retained<NSTextField>,
+    change: Retained<NSButton>,
+}
+
 /// A number field and its stepper.
 struct Number {
     field: Retained<NSTextField>,
@@ -678,7 +841,17 @@ struct Controls {
     reduce_motion: Retained<NSPopUpButton>,
     keypress: Retained<NSPopUpButton>,
     erase: Retained<NSPopUpButton>,
-    /// The four panes' rows: the lock, the dependent row and the row's
+    preview_max_size: Retained<NSPopUpButton>,
+    preview_read_only: Retained<NSSwitch>,
+    preview_dir: Folder,
+    preview_keep: Retained<NSPopUpButton>,
+    preview_limit: Retained<NSPopUpButton>,
+    /// The preview folder's usage; not a setting, so no row of its own.
+    usage: Retained<NSTextField>,
+    download_dir: Folder,
+    download_conflict: Retained<NSPopUpButton>,
+    download_notify: Retained<NSSwitch>,
+    /// The panes' rows: the lock, the dependent row and the row's
     /// diagnostic come from here.
     rows: Vec<Row>,
 }
@@ -753,6 +926,14 @@ pub(crate) struct Ivars {
     light_themes: RefCell<Vec<ThemeItem>>,
     dark_themes: RefCell<Vec<ThemeItem>>,
     fonts: RefCell<Vec<FontItem>>,
+    max_sizes: RefCell<Vec<SizeItem>>,
+    limits: RefCell<Vec<SizeItem>>,
+    /// `preview_dir` and `download_dir` as the file writes them — what Change…
+    /// starts the panel in and Show in Finder opens. From the last refresh.
+    folders: RefCell<(String, String)>,
+    /// The last usage measurement asked for; an older answer arriving later is
+    /// dropped ([`SettingsWindow::show_usage`]).
+    usage_generation: Cell<u64>,
     /// The monospaced families on the machine — **once** when the window is
     /// born: the list opens every candidate with CoreText and is not worth rebuilding on every save.
     families: Vec<String>,
@@ -825,6 +1006,12 @@ define_class!(
                     .map(SettingsEdit::DarkTheme),
                 Key::Font => font_edit(&self.ivars().fonts.borrow(), index)
                     .map(SettingsEdit::FontFamily),
+                Key::PreviewMaxSize => size_edit(&self.ivars().max_sizes.borrow(), index)
+                    .map(SettingsEdit::PreviewMaxSize),
+                Key::PreviewLimit => size_edit(&self.ivars().limits.borrow(), index)
+                    .map(SettingsEdit::PreviewLimit),
+                Key::PreviewKeep => choice_at(index).map(SettingsEdit::PreviewKeep),
+                Key::DownloadConflict => choice_at(index).map(SettingsEdit::DownloadConflict),
                 _ => None,
             };
             self.save(edit);
@@ -847,6 +1034,8 @@ define_class!(
                 } else {
                     SmoothScroll::Off
                 })),
+                Some(Key::PreviewReadOnly) => Some(SettingsEdit::PreviewReadOnly(on)),
+                Some(Key::DownloadNotify) => Some(SettingsEdit::DownloadNotify(on)),
                 _ => None,
             };
             self.save(edit);
@@ -976,6 +1165,46 @@ define_class!(
                 delegate.edit_settings();
             }
         }
+
+        /// A folder row's Change…: a folder panel as a sheet, started in the
+        /// folder the file names; the chosen one is written as one edit.
+        #[unsafe(method(chooseFolder:))]
+        fn choose_folder(&self, sender: Option<&AnyObject>) {
+            let Some(button) = sender.and_then(|s| s.downcast_ref::<NSButton>()) else {
+                return;
+            };
+            let Some(key) = Key::from_tag(button.tag()) else {
+                return;
+            };
+            self.choose_folder_for(key);
+        }
+
+        /// The preview folder's Show in Finder.
+        #[unsafe(method(showPreviewFolder:))]
+        fn show_preview_folder(&self, _sender: Option<&AnyObject>) {
+            let text = self.ivars().folders.borrow().0.clone();
+            let folder = bt_core::expand_home(&text, child::home().as_deref());
+            match folder.filter(|folder| folder.is_dir()) {
+                Some(folder) => {
+                    let url = NSURL::fileURLWithPath(&NSString::from_str(
+                        &folder.to_string_lossy(),
+                    ));
+                    NSWorkspace::sharedWorkspace().openURL(&url);
+                }
+                // Nothing is created to be shown (045 phase-4: no folder
+                // before a preview lands); the folder appears with the first one.
+                None => crate::preview::beep(),
+            }
+        }
+
+        /// Clear Now: the preview cache's single sweep method (045 phase-4);
+        /// it measures the usage again when it ends.
+        #[unsafe(method(clearPreviews:))]
+        fn clear_previews(&self, _sender: Option<&AnyObject>) {
+            if let Some(delegate) = app::delegate(self.mtm()) {
+                delegate.sweep_previews(Sweep::ClearNow);
+            }
+        }
     }
 );
 
@@ -1020,6 +1249,10 @@ impl SettingsWindow {
             light_themes: RefCell::new(Vec::new()),
             dark_themes: RefCell::new(Vec::new()),
             fonts: RefCell::new(Vec::new()),
+            max_sizes: RefCell::new(Vec::new()),
+            limits: RefCell::new(Vec::new()),
+            folders: RefCell::new((String::new(), String::new())),
+            usage_generation: Cell::new(0),
             families: bt_gpu::monospaced_families(),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars are set.
@@ -1134,6 +1367,27 @@ impl SettingsWindow {
         select_choice(&c.keypress, settings.keypress);
         select_choice(&c.erase, settings.erase);
 
+        let files = &settings.remote_files;
+        let (items, index) = size_items(files.preview_max_size, PREVIEW_SIZE_PRESETS);
+        fill_sizes(&c.preview_max_size, &items, index);
+        self.ivars().max_sizes.replace(items);
+        set_switch(&c.preview_read_only, files.preview_read_only);
+        c.preview_dir
+            .path
+            .setStringValue(&NSString::from_str(&files.preview_dir));
+        select_choice(&c.preview_keep, files.preview_keep);
+        let (items, index) = size_items(files.preview_limit, PREVIEW_LIMIT_PRESETS);
+        fill_sizes(&c.preview_limit, &items, index);
+        self.ivars().limits.replace(items);
+        c.download_dir
+            .path
+            .setStringValue(&NSString::from_str(&files.download_dir));
+        select_choice(&c.download_conflict, files.download_conflict);
+        set_switch(&c.download_notify, files.download_notify);
+        self.ivars()
+            .folders
+            .replace((files.preview_dir.clone(), files.download_dir.clone()));
+
         let status = status(state, write);
         for row in &c.rows {
             let forced = motion_override(row.key, settings, reduce);
@@ -1178,6 +1432,84 @@ impl SettingsWindow {
                 ns_string!("")
             });
         }
+    }
+
+    /// A new usage measurement starts: its generation, which
+    /// [`SettingsWindow::show_usage`] compares with the answer's.
+    pub(crate) fn next_usage_generation(&self) -> u64 {
+        let generation = self.ivars().usage_generation.get().wrapping_add(1);
+        self.ivars().usage_generation.set(generation);
+        generation
+    }
+
+    /// Shows a usage measurement (`AppDelegate::measure_preview_usage`) unless
+    /// a newer one was asked for meanwhile — measurements run on their own
+    /// threads and can arrive out of order.
+    pub(crate) fn show_usage(&self, generation: u64, usage: Option<(u64, usize)>) {
+        if generation != self.ivars().usage_generation.get() {
+            return;
+        }
+        if let Some(controls) = self.ivars().controls.get() {
+            controls
+                .usage
+                .setStringValue(&NSString::from_str(&usage_label(usage)));
+        }
+    }
+
+    /// Change… for `key`'s folder: an `NSOpenPanel` sheet on this window
+    /// (dropped if a sheet is already open), started in the current folder.
+    fn choose_folder_for(&self, key: Key) {
+        let Some(window) = self
+            .ivars()
+            .window
+            .get()
+            .filter(|window| window.attachedSheet().is_none())
+        else {
+            return;
+        };
+        let current = match key {
+            Key::PreviewDir => self.ivars().folders.borrow().0.clone(),
+            Key::DownloadDir => self.ivars().folders.borrow().1.clone(),
+            _ => return,
+        };
+        let mtm = self.mtm();
+        let panel = NSOpenPanel::openPanel(mtm);
+        panel.setCanChooseDirectories(true);
+        panel.setCanChooseFiles(false);
+        panel.setAllowsMultipleSelection(false);
+        panel.setCanCreateDirectories(true);
+        panel.setPrompt(Some(ns_string!("Choose")));
+        let home = child::home();
+        if let Some(folder) = bt_core::expand_home(&current, home.as_deref()) {
+            panel.setDirectoryURL(Some(&NSURL::fileURLWithPath(&NSString::from_str(
+                &folder.to_string_lossy(),
+            ))));
+        }
+        let chosen = panel.clone();
+        let answered = RcBlock::new(move |response: NSModalResponse| {
+            if response != NSModalResponseOK {
+                return;
+            }
+            let Some(folder) = chosen
+                .URLs()
+                .firstObject()
+                .and_then(|url| url.path())
+                .map(|path| std::path::PathBuf::from(path.to_string()))
+            else {
+                return;
+            };
+            let text = folder_text(&folder, home.as_deref());
+            let edit = match key {
+                Key::PreviewDir => SettingsEdit::PreviewDir(text),
+                _ => SettingsEdit::DownloadDir(text),
+            };
+            // audit: the panel's completion block runs on AppKit's main thread.
+            let mtm = MainThreadMarker::new().expect("the panel block is on the main thread");
+            if let Some(delegate) = app::delegate(mtm) {
+                delegate.save_edit(&edit);
+            }
+        });
+        panel.beginSheetModalForWindow_completionHandler(window, &answered);
     }
 
     fn save(&self, edit: Option<SettingsEdit>) {
@@ -1258,6 +1590,37 @@ impl SettingsWindow {
         let popup = new_popup(self.mtm());
         self.wire(&popup, key, sel!(popupChanged:));
         popup
+    }
+
+    /// A push button with this object's `action`; `key` only when the button
+    /// belongs to a row (its tag names the row).
+    fn button(&self, title: &str, key: Option<Key>, action: Sel) -> Retained<NSButton> {
+        // SAFETY: the target is a weak reference and lives for the whole
+        // process; the selector is one of this class's actions.
+        let button = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str(title),
+                Some(self.target()),
+                Some(action),
+                self.mtm(),
+            )
+        };
+        if let Some(key) = key {
+            button.setTag(key.tag());
+        }
+        button
+    }
+
+    /// A folder row's path label and Change… button.
+    fn folder(&self, key: Key) -> Folder {
+        let path = NSTextField::labelWithString(ns_string!(""), self.mtm());
+        path.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        path.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+        path.widthAnchor()
+            .constraintLessThanOrEqualToConstant(PATH_WIDTH)
+            .setActive(true);
+        let change = self.button("Change…", Some(key), sel!(chooseFolder:));
+        Folder { path, change }
     }
 
     fn switch(&self, key: Key) -> Retained<NSSwitch> {
@@ -1659,11 +2022,114 @@ impl SettingsWindow {
             Some("On turns animations into fades and instant jumps."),
         );
 
-        let rows = [general.rows, appearance.rows, cursor.rows, motion.rows]
-            .into_iter()
-            .flatten()
-            .collect();
-        let panes = vec![general.grid, appearance.grid, cursor.grid, motion.grid];
+        // Remote Files (045 Karar 8): preview, cleanup, downloads.
+        let preview_max_size = self.string_popup(Key::PreviewMaxSize);
+        let preview_read_only = self.switch(Key::PreviewReadOnly);
+        let preview_dir = self.folder(Key::PreviewDir);
+        let show_previews = self.button("Show in Finder", None, sel!(showPreviewFolder:));
+        let preview_keep = self.popup::<PreviewKeep>(Key::PreviewKeep);
+        let preview_limit = self.string_popup(Key::PreviewLimit);
+        let usage = NSTextField::labelWithString(&NSString::from_str(&usage_label(None)), mtm);
+        usage.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
+            NSFont::systemFontSize(),
+            0.0,
+        )));
+        let clear = self.button("Clear Now", None, sel!(clearPreviews:));
+        let download_dir = self.folder(Key::DownloadDir);
+        let download_conflict = self.popup::<DownloadConflict>(Key::DownloadConflict);
+        let download_notify = self.switch(Key::DownloadNotify);
+        let mut remote = Form::new(mtm);
+        remote.row(
+            Key::PreviewMaxSize,
+            "Preview without asking:",
+            &preview_max_size,
+            &[&preview_max_size],
+            Some("Cmd-click a remote file name. Larger files ask first."),
+        );
+        remote.row(
+            Key::PreviewReadOnly,
+            "Open read-only:",
+            &preview_read_only,
+            &[&preview_read_only],
+            Some("A hint: a preview you change is kept, never cleaned up."),
+        );
+        remote.row(
+            Key::PreviewDir,
+            "Preview folder:",
+            &preview_dir.path,
+            &[&preview_dir.change],
+            None,
+        );
+        remote.actions(&hstack(
+            mtm,
+            &[
+                preview_dir.change.as_super().as_super(),
+                show_previews.as_super().as_super(),
+            ],
+            8.0,
+        ));
+        remote.row(
+            Key::PreviewKeep,
+            "Keep previews:",
+            &preview_keep,
+            &[&preview_keep],
+            Some("Checked when bateri starts and once a day."),
+        );
+        remote.row(
+            Key::PreviewLimit,
+            "Size limit:",
+            &preview_limit,
+            &[&preview_limit],
+            Some("Applied when bateri starts, oldest first."),
+        );
+        remote.plain_row(
+            "In use:",
+            &hstack(
+                mtm,
+                &[usage.as_super().as_super(), clear.as_super().as_super()],
+                10.0,
+            ),
+        );
+        remote.row(
+            Key::DownloadDir,
+            "Download folder:",
+            &download_dir.path,
+            &[&download_dir.change],
+            None,
+        );
+        remote.actions(&download_dir.change);
+        remote.row(
+            Key::DownloadConflict,
+            "If the name exists:",
+            &download_conflict,
+            &[&download_conflict],
+            None,
+        );
+        remote.row(
+            Key::DownloadNotify,
+            "Notify when done:",
+            &download_notify,
+            &[&download_notify],
+            Some("Only while bateri is in the background."),
+        );
+
+        let rows = [
+            general.rows,
+            appearance.rows,
+            cursor.rows,
+            motion.rows,
+            remote.rows,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let panes = vec![
+            general.grid,
+            appearance.grid,
+            cursor.grid,
+            motion.grid,
+            remote.grid,
+        ];
         let controls = Controls {
             confirm_close,
             clipboard,
@@ -1686,6 +2152,15 @@ impl SettingsWindow {
             reduce_motion,
             keypress,
             erase,
+            preview_max_size,
+            preview_read_only,
+            preview_dir,
+            preview_keep,
+            preview_limit,
+            usage,
+            download_dir,
+            download_conflict,
+            download_notify,
             rows,
         };
         (panes, controls)
@@ -1853,6 +2328,27 @@ impl Form {
         row.set_note(None, None, true);
         self.rows.push(row);
     }
+
+    /// A row below the last one with only a right-hand view: a folder row's
+    /// buttons under its path. Its label column is empty.
+    fn actions(&mut self, view: &NSView) {
+        let empty = NSGridCell::emptyContentView(self.mtm);
+        let row = self
+            .grid
+            .addRowWithViews(&NSArray::from_slice(&[&*empty, view]));
+        row.setTopPadding(2.0);
+    }
+
+    /// A row that is not a settings key (the preview folder's usage): label
+    /// and view, no note and no [`Row`] — the lock and the diagnostics do not
+    /// reach it, because it writes nothing.
+    fn plain_row(&mut self, label: &str, view: &NSView) {
+        let text = NSTextField::labelWithString(&NSString::from_str(label), self.mtm);
+        let row = self
+            .grid
+            .addRowWithViews(&NSArray::from_slice(&[text.as_super().as_super(), view]));
+        row.setTopPadding(10.0);
+    }
 }
 
 /// Field + stepper side by side.
@@ -2000,6 +2496,14 @@ fn fill_themes(popup: &NSPopUpButton, items: &[ThemeItem], selected: usize) {
     fill_popup(popup, titles, selected);
 }
 
+fn fill_sizes(popup: &NSPopUpButton, items: &[SizeItem], selected: usize) {
+    let titles = items.iter().map(|item| match item {
+        SizeItem::Preset(bytes) | SizeItem::Current(bytes) => Some(size_title(*bytes)),
+        SizeItem::Separator => None,
+    });
+    fill_popup(popup, titles, selected);
+}
+
 fn fill_fonts(popup: &NSPopUpButton, items: &[FontItem], selected: usize) {
     let titles = items.iter().map(|item| match item {
         FontItem::Default => Some("Default (SF Mono, or Menlo)".to_owned()),
@@ -2081,7 +2585,10 @@ mod tests {
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
                     keypress = []\nerase = []\n\
-                    [shell]\nintegration = []\n";
+                    [shell]\nintegration = []\n\
+                    [remote]\npreview_max_size = []\npreview_read_only = []\n\
+                    preview_dir = []\npreview_keep = []\npreview_limit = []\n\
+                    download_dir = []\ndownload_conflict = []\ndownload_notify = []\n";
         let parsed = Settings::parse_keeping(text, &Settings::default()).expect("it parses");
         let seen = status(&FileState::Usable(parsed.diagnostics), &[]);
         assert_eq!(seen.banner, Banner::default(), "no unmatched diagnostic");
@@ -2113,6 +2620,14 @@ mod tests {
                 Key::ReduceMotion => SettingsEdit::ReduceMotion(ReduceMotion::On),
                 Key::Keypress => SettingsEdit::Keypress(Keypress::Off),
                 Key::Erase => SettingsEdit::Erase(Erase::Off),
+                Key::PreviewMaxSize => SettingsEdit::PreviewMaxSize(1),
+                Key::PreviewReadOnly => SettingsEdit::PreviewReadOnly(false),
+                Key::PreviewDir => SettingsEdit::PreviewDir("~".to_owned()),
+                Key::PreviewKeep => SettingsEdit::PreviewKeep(PreviewKeep::Day),
+                Key::PreviewLimit => SettingsEdit::PreviewLimit(1),
+                Key::DownloadDir => SettingsEdit::DownloadDir("~".to_owned()),
+                Key::DownloadConflict => SettingsEdit::DownloadConflict(DownloadConflict::Ask),
+                Key::DownloadNotify => SettingsEdit::DownloadNotify(false),
             };
             assert_eq!(edit.path(), key.path(), "{key:?}");
         }
@@ -2180,6 +2695,69 @@ mod tests {
         check::<ReduceMotion>();
         check::<Keypress>();
         check::<Erase>();
+        check::<PreviewKeep>();
+        check::<DownloadConflict>();
+    }
+
+    /// The size popups show the file's value even when it is not a preset,
+    /// and only a preset writes; the defaults are presets, and every title is
+    /// the spelling written with a space before the unit.
+    #[test]
+    fn size_popups_keep_the_file_value_visible() {
+        let defaults = bt_core::RemoteFiles::default();
+        for (current, presets) in [
+            (defaults.preview_max_size, PREVIEW_SIZE_PRESETS),
+            (defaults.preview_limit, PREVIEW_LIMIT_PRESETS),
+        ] {
+            let (items, index) = size_items(current, presets);
+            assert_eq!(items.len(), presets.len(), "the default is a preset");
+            assert_eq!(size_edit(&items, index as NSInteger), Some(current));
+        }
+        let (items, index) = size_items(1_500_000, PREVIEW_SIZE_PRESETS);
+        assert_eq!(index, items.len() - 1);
+        assert_eq!(items[index], SizeItem::Current(1_500_000));
+        assert_eq!(items[index - 1], SizeItem::Separator);
+        assert_eq!(size_edit(&items, index as NSInteger), None);
+        assert_eq!(size_edit(&items, (index - 1) as NSInteger), None);
+        assert_eq!(size_edit(&items, -1), None);
+        assert_eq!(size_edit(&items, 0), Some(PREVIEW_SIZE_PRESETS[0]));
+        assert_eq!(size_title(100_000_000), "100 MB");
+        assert_eq!(size_title(1_500_000), "1500 KB");
+        assert_eq!(size_title(2_000_000_000), "2 GB");
+        for &bytes in PREVIEW_SIZE_PRESETS.iter().chain(PREVIEW_LIMIT_PRESETS) {
+            let written = bt_core::format_size(bytes);
+            assert_eq!(size_title(bytes).replace(' ', ""), written);
+            assert_eq!(bt_core::parse_size(&written), Some(bytes));
+        }
+    }
+
+    /// A chosen folder is written the way the parser accepts it: under the
+    /// home directory as `~/…`, elsewhere absolute.
+    #[test]
+    fn chosen_folders_are_written_relative_to_home() {
+        let home = Path::new("/Users/me");
+        assert_eq!(
+            folder_text(Path::new("/Users/me/Downloads/remote"), Some(home)),
+            "~/Downloads/remote"
+        );
+        assert_eq!(folder_text(home, Some(home)), "~");
+        // A sibling whose name starts like the home is not under it.
+        assert_eq!(
+            folder_text(Path::new("/Users/meg/x"), Some(home)),
+            "/Users/meg/x"
+        );
+        assert_eq!(
+            folder_text(Path::new("/Volumes/Disk/x"), None),
+            "/Volumes/Disk/x"
+        );
+    }
+
+    #[test]
+    fn usage_says_how_much_and_how_many() {
+        assert_eq!(usage_label(None), "—");
+        assert_eq!(usage_label(Some((0, 0))), "Empty");
+        assert_eq!(usage_label(Some((512, 1))), "512 B · 1 file");
+        assert_eq!(usage_label(Some((340_000_000, 12))), "340.0 MB · 12 files");
     }
 
     /// The two inputs that turn motion off (030 Karar 7): the overridden row

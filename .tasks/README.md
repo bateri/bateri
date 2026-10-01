@@ -46,7 +46,7 @@
 | 042 | [font-sistemi-linux](042-font-sistemi-linux/) | 🟢 | 7 phase + kapı tamam: `FontSystem` arkasında macOS CoreText (raster bit bit aynı), Linux FreeType + fontconfig + harfrust; `make linux` `bt-gpu`'yu lavapipe'ta koşar |
 | 043 | [bt-shell-ayrimi](043-bt-shell-ayrimi/) | 🟢 | 5 phase + kapı tamam — kabuk katmanı `bt-shell-common` (AppKit'siz, Linux gövdeleriyle `make linux`'ta) ve `bt-shell-macos` olarak ayrıldı, macOS'ta fark yok (3 bulgu giderildi, 6 waive) |
 | 044 | [tiklanabilir-baglantilar](044-tiklanabilir-baglantilar/) | 🟢 | 6 phase + kapı tamam — ⌘-hover/⌘-tık ile URL, var olan yol ve OSC 8 açılıyor (ızgara, bant, dock), ⌘'siz OSC 8 kesikli, hedef etiketi ve sağ tık menüsü |
-| 045 | [uzak-dosya-indirme](045-uzak-dosya-indirme/) | 🔨 | ssh'ta `ls` çıktısındaki dosyaya ⌘-tık önizler, ⌘-sürükle/sağ tık indirir; upload kuyruğu iki yönlü |
+| 045 | [uzak-dosya-indirme](045-uzak-dosya-indirme/) | 🟢 | 6 phase + kapı tamam — ssh'ta `ls` çıktısındaki dosyaya ⌘-tık salt okunur önizleme, ⌘-sürükle Finder'a, sağ tık Downloads'a indiriyor; aktarım kuyruğu iki yönlü, önizleme klasörü kendiliğinden temizleniyor ve ayar penceresinde Remote Files kategorisi var; gerçek ssh sunucusunda henüz gözle görülmedi |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

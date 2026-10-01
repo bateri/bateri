@@ -258,10 +258,14 @@ pub fn download_script(path: &str) -> Option<String> {
     if !is_safe(path) {
         return None;
     }
+    // A symlink is followed (`-h`) only when it is the item itself: the helper
+    // answered for its target (`stat -L`), and an archived link would land
+    // dangling. Links **inside** a folder stay links (`/code-review`, 045).
+    let item = sq(&format!("./{name}"));
     Some(format!(
-        "cd {} || exit {NO_DIRECTORY}; exec tar -c -f - {}",
+        "cd {} || exit {NO_DIRECTORY}; if [ -L {item} ]; then exec tar -c -h -f - {item}; \
+         else exec tar -c -f - {item}; fi",
         sq(dir),
-        sq(&format!("./{name}"))
     ))
 }
 
@@ -418,12 +422,12 @@ fn bracketed(destination: &str) -> String {
     }
 }
 
-/// `word` as is when every character reads literally in a POSIX shell,
-/// single-quoted otherwise.
+/// `word` as is when every character reads literally in a POSIX shell **and**
+/// zsh, single-quoted otherwise — `[`/`]` are a glob in zsh (an IPv6 host's
+/// `[::1]`, `app[1].log`).
 fn quoted(word: &str) -> String {
     let plain = word.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '/' | '.' | '_' | '-' | ':' | '@' | '+' | ',' | '[' | ']')
+        c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '@' | '+' | ',')
     });
     if plain { word.to_owned() } else { sq(word) }
 }
@@ -1011,13 +1015,13 @@ mod tests {
         assert_eq!(
             download_script("/var/log/app.log"),
             Some(format!(
-                "cd '/var/log' || exit {NO_DIRECTORY}; exec tar -c -f - './app.log'"
+                "cd '/var/log' || exit {NO_DIRECTORY}; if [ -L './app.log' ]; then exec tar -c -h -f - './app.log'; else exec tar -c -f - './app.log'; fi"
             ))
         );
         assert_eq!(
             download_script("/-rf"),
             Some(format!(
-                "cd '/' || exit {NO_DIRECTORY}; exec tar -c -f - './-rf'"
+                "cd '/' || exit {NO_DIRECTORY}; if [ -L './-rf' ]; then exec tar -c -h -f - './-rf'; else exec tar -c -f - './-rf'; fi"
             ))
         );
         assert_eq!(split_remote("/srv/www/"), Some(("/srv", "www")));
@@ -1082,10 +1086,10 @@ mod tests {
             scp_path(&ssh(&["ssh", "prod"]), "/srv/My Drive/it's"),
             "'prod:/srv/My Drive/it'\"'\"'s'"
         );
-        assert_eq!(scp_path(&ssh(&["ssh", "::1"]), "/x"), "[::1]:/x");
+        assert_eq!(scp_path(&ssh(&["ssh", "::1"]), "/x"), "'[::1]:/x'");
         assert_eq!(
             scp_path(&ssh(&["ssh", "ssh://u@[::1]:2222"]), "/x"),
-            "-P 2222 u@[::1]:/x"
+            "-P 2222 'u@[::1]:/x'"
         );
     }
 

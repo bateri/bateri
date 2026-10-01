@@ -278,6 +278,10 @@ impl TerminalPane {
             self.preview_failed(&host, &format!("{remote} can't be previewed."));
             return;
         };
+        // Already streaming: that copy opens when it lands.
+        if self.uploads().borrow().previewing(&local) {
+            return;
+        }
         let ssh = upload::ssh_argv(&target);
         let (id, lookup) = (self.id(), self.lookup());
         let request = Request {
@@ -408,6 +412,10 @@ impl TerminalPane {
             size,
             ticket,
         } = fetch;
+        // A second ⌘-click answered while the first one's stream started.
+        if self.uploads().borrow().previewing(&local) {
+            return;
+        }
         let Some(job) = Job::download(
             &remote,
             local.clone(),

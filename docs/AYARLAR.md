@@ -60,8 +60,13 @@ Kısayol ABD düzenli klavyede Cmd `,`. macOS menü kısayolunu klavye düzenine
 göre yerleştirir; Türkçe Q klavyede aynı tuş **Cmd `ö`**, menüde de öyle
 görünür. View ▸ Bigger da bu düzende `⌘:` görünür.
 
-bateri ▸ Settings… (Cmd ,) ayar penceresini açar: solda dört kategori
-(General, Appearance, Cursor, Motion), sağda ayarlar. Pencere yalnız
+bateri ▸ Settings… (Cmd ,) ayar penceresini açar: solda beş kategori
+(General, Appearance, Cursor, Motion, Remote Files), sağda ayarlar. Remote
+Files `[remote]`'un sekiz önizleme/indirme anahtarını gösterir; klasör
+satırlarında Change… klasör seçicisini açar (seçilen ev dizininin altındaysa
+`~/…` diye yazılır), önizleme klasöründe Show in Finder onu açar ve "In use"
+satırı klasördeki kopyaların toplamını gösterir — Clear Now önizlemeleri
+hemen siler (değiştirdiğiniz kopya silinmez, indirme klasörüne taşınır). Pencere yalnız
 `settings.toml`'a yazar; ekrana uygulayan, dosyayı kaydettiğinizde de koşan
 yol, yani pencereden yapılan değişiklik de anında geçerlidir.
 

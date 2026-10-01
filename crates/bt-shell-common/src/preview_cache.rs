@@ -227,25 +227,32 @@ fn scan(dir: &Path) -> Vec<(PathBuf, (u64, u64))> {
     found
 }
 
-/// Removes the empty folders under `dir` (not `dir` itself), deepest first.
-fn prune(dir: &Path) {
-    fn walk(folder: &Path, root: bool) -> bool {
-        let Ok(entries) = fs::read_dir(folder) else {
-            return false;
-        };
-        let mut empty = true;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-            let name = entry.file_name();
-            if is_dir && !name.to_string_lossy().starts_with(TEMP_PREFIX) && walk(&path, false) {
-                continue;
+/// What the preview folder holds: the copies' total size in bytes and their
+/// count — the settings window's "In use" row (045 phase-6). The sweep's own
+/// walk ([`scan`]), so the index and a stream in flight are not counted. A
+/// folder that does not exist holds nothing. Blocks on the disk (the module's
+/// header): the caller measures on its own thread.
+pub fn usage(dir: &Path) -> (u64, usize) {
+    let found = scan(dir);
+    let bytes = found.iter().map(|(_, (size, _))| size).sum();
+    (bytes, found.len())
+}
+
+/// Removes the folders the removed `paths` left empty, walking up from each
+/// one's folder and stopping below `dir` or at the first folder that still holds
+/// something. Only those: the preview folder can be one the user chose
+/// (`~/Downloads`), and the user's own empty folders there are not the sweep's
+/// to remove (`/code-review`, 045).
+fn prune(dir: &Path, paths: &[PathBuf]) {
+    for path in paths {
+        let mut folder = path.parent();
+        while let Some(current) = folder {
+            if current == dir || !current.starts_with(dir) || fs::remove_dir(current).is_err() {
+                break;
             }
-            empty = false;
+            folder = current.parent();
         }
-        empty && !root && fs::remove_dir(folder).is_ok()
     }
-    walk(dir, true);
 }
 
 /// Carries out `sweep` on the preview folder `dir` (Karar 9): [`plan_sweep`]'s
@@ -326,7 +333,8 @@ pub fn sweep(
             .push(format!("the preview index can't be written: {error}"));
     }
     drop(guard);
-    prune(dir);
+    prune(dir, &plan.delete);
+    prune(dir, &plan.rescue);
     report
 }
 
@@ -365,6 +373,22 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
         fs::write(path, b"my edit").unwrap();
+    }
+
+    #[test]
+    fn usage_counts_the_copies_and_nothing_else() {
+        let root = scratch("usage");
+        let dir = root.join("Previews");
+        assert_eq!(usage(&dir), (0, 0), "a missing folder holds nothing");
+        land(&dir, "prod/var/log/app.log", 120, 7);
+        land(&dir, "prod/home/u/.bashrc", 30, 7);
+        // A stream in flight is not a copy yet.
+        let partial = dir.join("prod").join(format!("{TEMP_PREFIX}1"));
+        fs::create_dir_all(&partial).unwrap();
+        fs::write(partial.join("half"), vec![b'x'; 500]).unwrap();
+        assert!(dir.join(INDEX_NAME).is_file());
+        assert_eq!(usage(&dir), (150, 2));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -414,6 +438,8 @@ mod tests {
         let old = land(&dir, "prod/old.log", 10, now - 9 * DAY);
         let mid = land(&dir, "prod/a/mid.log", 50, now - 3 * DAY);
         let new = land(&dir, "prod/new.log", 50, now - DAY);
+        // An empty folder the sweep did not empty is not its to remove.
+        fs::create_dir_all(dir.join("mine/empty")).unwrap();
         let report = sweep(
             &dir,
             &root.join("Downloads"),
@@ -428,6 +454,10 @@ mod tests {
         assert!(!mid.exists(), "oldest over the limit");
         assert!(new.exists());
         assert!(!dir.join("prod/a").exists(), "emptied folder pruned");
+        assert!(
+            dir.join("mine/empty").is_dir(),
+            "the user's empty folder stays"
+        );
         assert_eq!(
             load(&dir).unwrap().records.keys().collect::<Vec<_>>(),
             ["prod/new.log"]
