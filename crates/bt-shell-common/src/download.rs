@@ -243,17 +243,21 @@ fn land(
         }),
         Conflict::Replace => {
             // A file over a file: `rename` replaces it atomically. Anything else
-            // (a folder on either side) cannot be renamed over and goes first.
+            // (a folder on either side) cannot be renamed over: the old item is
+            // moved aside first and removed only once the new one is in place.
             if let Ok(old) = fs::symlink_metadata(landing)
                 && (old.is_dir() || meta.is_dir())
             {
-                let removed = if old.is_dir() {
-                    fs::remove_dir_all(landing)
-                } else {
-                    fs::remove_file(landing)
-                };
-                removed
-                    .map_err(|error| format!("{} can't be replaced: {error}", landing.display()))?;
+                // A file never replaces a folder: "Replace" was asked about a
+                // name, and a whole folder of the user's must not go silently
+                // under `download_conflict = "replace"` (`/code-review`, 045).
+                if old.is_dir() && !meta.is_dir() {
+                    return Err(format!(
+                        "{} is a folder; a file does not replace it",
+                        landing.display()
+                    ));
+                }
+                return replace_aside(item, landing, old.is_dir());
             }
             landing.to_owned()
         }
@@ -261,6 +265,28 @@ fn land(
     fs::rename(item, &target)
         .map_err(|error| format!("{} can't be written: {error}", target.display()))?;
     Ok(target)
+}
+
+/// Replaces `landing` with `item` when a `rename` cannot do it in one step: the
+/// old item goes to a hidden sibling (the download's temporary prefix, so the
+/// preview sweep skips it), the new one takes its name, then the old one is
+/// removed. If the new one cannot take the name the old one comes back — a
+/// failure never leaves the user with neither.
+fn replace_aside(item: &Path, landing: &Path, old_dir: bool) -> Result<PathBuf, String> {
+    let parent = landing.parent().unwrap_or(Path::new("."));
+    let aside = parent.join(format!("{TEMP_PREFIX}replaced-{}", std::process::id()));
+    fs::rename(landing, &aside)
+        .map_err(|error| format!("{} can't be replaced: {error}", landing.display()))?;
+    if let Err(error) = fs::rename(item, landing) {
+        let _ = fs::rename(&aside, landing);
+        return Err(format!("{} can't be written: {error}", landing.display()));
+    }
+    let _ = if old_dir {
+        fs::remove_dir_all(&aside)
+    } else {
+        fs::remove_file(&aside)
+    };
+    Ok(landing.to_owned())
 }
 
 /// "Keep both" (045 R4): `path` if it is free, otherwise the first free `name 2`,
@@ -398,6 +424,32 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_item_lands_as_its_target() {
+        // `/code-review` (045): the helper answered for the target (`stat -L`).
+        let root = scratch("link");
+        let remote = root.join("remote");
+        let downloads = root.join("Downloads");
+        fs::create_dir_all(remote.join("available")).unwrap();
+        fs::create_dir_all(&downloads).unwrap();
+        fs::write(remote.join("available/default"), b"server {}").unwrap();
+        std::os::unix::fs::symlink("available/default", remote.join("default")).unwrap();
+        let (outcome, landed) = transfer(
+            &local_ssh(),
+            remote.join("default").to_str().unwrap(),
+            &downloads.join("default"),
+            Conflict::KeepBoth,
+            &Arc::new(Shared::default()),
+            || {},
+            |_| {},
+        );
+        assert_eq!(outcome, Outcome::Done);
+        let landed = landed.expect("landed");
+        assert!(fs::symlink_metadata(&landed).unwrap().is_file());
+        assert_eq!(fs::read(&landed).unwrap(), b"server {}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_taken_name_is_kept_beside_or_replaced() {
         let root = scratch("conflict");
         let remote = root.join("remote");
@@ -447,6 +499,15 @@ mod tests {
             ["report 2.txt", "report.txt", "static", "static 2"],
             "no temporary left"
         );
+
+        // A file never replaces a folder of the same name: the folder stays whole.
+        fs::write(remote.join("notes"), b"remote").unwrap();
+        fs::create_dir_all(downloads.join("notes")).unwrap();
+        fs::write(downloads.join("notes/mine.txt"), b"keep").unwrap();
+        let (outcome, landed) = get("notes", Conflict::Replace);
+        assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
+        assert_eq!(landed, None);
+        assert_eq!(fs::read(downloads.join("notes/mine.txt")).unwrap(), b"keep");
         let _ = fs::remove_dir_all(&root);
     }
 

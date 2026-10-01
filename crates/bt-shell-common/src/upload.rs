@@ -1512,6 +1512,11 @@ struct Queue {
     rate: Option<f64>,
     /// No further item will start: the queue ends with this end once nothing streams.
     ending: Option<End>,
+    /// A preview or Finder lane item failed: those lanes are independent of the
+    /// queue lane, so the failure does not stop the waiting items — it is the
+    /// queue's end once everything else finished, unless that end is already
+    /// something else (`/code-review`, 045 set gate).
+    side_failure: Option<End>,
 }
 
 impl Queue {
@@ -1752,6 +1757,7 @@ impl Transfers {
             samples: VecDeque::new(),
             rate: None,
             ending: None,
+            side_failure: None,
         });
         if queue.command != command || queue.ending.is_some() {
             return false;
@@ -2063,6 +2069,10 @@ impl Transfers {
         let (bytes, _) = current.shared.progress();
         let index = queue.entries.iter().position(|entry| entry.id == id)?;
         let direction = queue.entries[index].job.way.direction();
+        // Queue lane items still to finish: a side lane's failure must not stop them.
+        let queue_pending = queue.entries.iter().any(|entry| {
+            entry.id != id && entry.job.way.lane() == Lane::Queue && entry.state != EntryState::Done
+        });
         match outcome {
             Outcome::Done => {
                 let entry = &mut queue.entries[index];
@@ -2086,6 +2096,20 @@ impl Transfers {
                 queue.entries[index].state = EntryState::Waiting;
                 queue.bytes_done += bytes;
                 queue.ending.get_or_insert(End::Cancelled);
+            }
+            Outcome::DiskFull | Outcome::Failed(_)
+                if current.lane != Lane::Queue && queue_pending =>
+            {
+                let end = match outcome {
+                    Outcome::Failed(reason) => End::Failed(reason),
+                    _ => End::Failed(LOCAL_DISK_FULL.to_owned()),
+                };
+                // The item leaves the list the way an individually stopped one does.
+                let entry = queue.entries.remove(index);
+                let sent = bytes.min(entry.job.local.bytes);
+                queue.bytes_done += sent;
+                queue.bytes_total -= entry.job.local.bytes - sent;
+                queue.side_failure.get_or_insert(end);
             }
             Outcome::DiskFull => {
                 queue.entries[index].state = EntryState::Waiting;
@@ -2111,6 +2135,20 @@ impl Transfers {
         }
     }
 
+    /// Whether a preview to `landing` is already on its way: a second ⌘-click on
+    /// the same file waits for it instead of streaming the copy twice
+    /// (`/code-review`, 045 — the second stream's cache question could see the
+    /// first one's renamed but not yet recorded copy as edited).
+    pub fn previewing(&self, landing: &Path) -> bool {
+        self.queue.as_ref().is_some_and(|queue| {
+            queue.entries.iter().any(|entry| {
+                entry.state != EntryState::Done
+                    && entry.job.way.lane() == Lane::Preview
+                    && entry.job.landing() == landing
+            })
+        })
+    }
+
     /// Where the finished download with `id` landed (the popover's "Show in Finder"
     /// and "Open").
     pub fn landed(&self, id: u64) -> Option<PathBuf> {
@@ -2129,8 +2167,8 @@ impl Transfers {
             .iter()
             .all(|entry| entry.state == EntryState::Done);
         let end = match queue.ending {
-            Some(End::Closed) if all_done => End::Done,
-            ending => ending.unwrap_or(End::Done),
+            Some(End::Closed) if all_done && queue.side_failure.is_none() => End::Done,
+            ending => ending.or(queue.side_failure).unwrap_or(End::Done),
         };
         let tally = Tally::of(&queue.entries);
         let (body, tone, lead) = end_line(&end, &queue.host, &tally);
@@ -3513,9 +3551,13 @@ mod tests {
         let now = Instant::now();
         let mut transfers = queue_of(vec![download("app.log", Lane::Preview, 10)]);
         let started = transfers.start(now);
+        let landing = PathBuf::from("/Users/me/Downloads/app.log");
+        assert!(transfers.previewing(&landing), "on its way");
+        assert!(!transfers.previewing(Path::new("/Users/me/Downloads/b.log")));
         let ended = transfers
             .finish_item(started[0].id, Outcome::Done, None)
             .expect("ended");
+        assert!(!transfers.previewing(&landing), "landed");
         assert_eq!(ended.line.body, "✓ app.log → /Users/me/Downloads");
         assert_eq!(ended.notice, None, "the opened file is the news");
         let mut transfers = queue_of(vec![download("app.log", Lane::Preview, 10)]);
@@ -3539,6 +3581,45 @@ mod tests {
             .finish_item(started[1].id, Outcome::Done, None)
             .expect("ended");
         assert!(ended.notice.is_some());
+    }
+
+    #[test]
+    fn a_failed_preview_does_not_stop_the_waiting_queue() {
+        // `/code-review` (045 set gate): the lanes are independent.
+        let now = Instant::now();
+        let mut transfers = queue_of(vec![
+            download("a.log", Lane::Queue, 10),
+            download("b.log", Lane::Queue, 10),
+            download("app.log", Lane::Preview, 10),
+        ]);
+        let started = transfers.start(now);
+        let preview = started
+            .iter()
+            .find(|started| started.job.local.name == "app.log")
+            .expect("the preview starts at once")
+            .id;
+        let first = started
+            .iter()
+            .find(|started| started.job.local.name == "a.log")
+            .expect("the queue starts")
+            .id;
+        assert!(
+            transfers
+                .finish_item(preview, Outcome::Failed("denied".into()), None)
+                .is_none()
+        );
+        assert!(transfers.finish_item(first, Outcome::Done, None).is_none());
+        let next = transfers.start(now);
+        assert_eq!(next.len(), 1, "the waiting item still starts");
+        let ended = transfers
+            .finish_item(next[0].id, Outcome::Done, None)
+            .expect("ended");
+        assert_eq!(
+            ended.line.tone,
+            TransferTone::Error,
+            "the failure is still told"
+        );
+        assert!(ended.line.body.contains("denied"), "{}", ended.line.body);
     }
 
     #[test]

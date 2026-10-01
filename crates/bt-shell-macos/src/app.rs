@@ -2068,7 +2068,8 @@ impl AppDelegate {
     /// [`AppDelegate::schedule_daily_sweep`] and `ClearNow` — the single method
     /// the settings window's Clear Now calls (phase-6). Edited copies it moved to
     /// the download folder are reported on the main thread
-    /// ([`crate::preview::report_rescued`]). Nothing in a timed run.
+    /// ([`crate::preview::report_rescued`]) and the settings window's usage is
+    /// measured again ([`AppDelegate::measure_preview_usage`]). Nothing in a timed run.
     pub(crate) fn sweep_previews(&self, sweep: Sweep) {
         if !matches!(self.inputs(), Inputs::User { .. }) {
             return;
@@ -2092,14 +2093,56 @@ impl AppDelegate {
                     files.preview_limit,
                     preview_cache::now(),
                 );
-                if report.rescued.is_empty() {
-                    return;
-                }
                 DispatchQueue::main().exec_async(move || {
                     // audit: a block running on the main queue is by definition on the main thread.
                     let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                    if let Some(app) = delegate(mtm) {
+                        app.measure_preview_usage();
+                    }
+                    if report.rescued.is_empty() {
+                        return;
+                    }
                     let window = NSApplication::sharedApplication(mtm).keyWindow();
                     crate::preview::report_rescued(mtm, window.as_deref(), &report.rescued, || {});
+                });
+            });
+    }
+
+    /// Measures the preview folder for the settings window's "In use" row on a
+    /// background thread (the scan blocks on the disk) and shows the answer on
+    /// the main thread — only while the window is open; a closed window is
+    /// measured again when it opens ([`AppDelegate::refresh_settings_window`]).
+    fn measure_preview_usage(&self) {
+        let Some(window) = self.ivars().settings_window.borrow().clone() else {
+            return;
+        };
+        if !window.is_open() {
+            return;
+        }
+        let generation = window.next_usage_generation();
+        let text = self
+            .ivars()
+            .settings
+            .borrow()
+            .remote_files
+            .preview_dir
+            .clone();
+        let Some(dir) = bt_core::expand_home(&text, child::home().as_deref()) else {
+            window.show_usage(generation, None);
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("preview usage".into())
+            .spawn(move || {
+                let usage = preview_cache::usage(&dir);
+                DispatchQueue::main().exec_async(move || {
+                    // audit: a block running on the main queue is by definition on the main thread.
+                    let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                    let window =
+                        delegate(mtm).and_then(|app| app.ivars().settings_window.borrow().clone());
+                    if let Some(window) = window.filter(|window| window.is_open()) {
+                        window.show_usage(generation, Some(usage));
+                    }
                 });
             });
     }
@@ -2424,6 +2467,9 @@ impl AppDelegate {
         let user = settings::user_theme_names(&root);
         let reduce = self.reduce_motion();
         window.refresh(&settings, reduce, &state, &write, &embedded, &user);
+        // On every refresh, not only on open: a changed `preview_dir` is
+        // another folder. The scan is off the main thread.
+        self.measure_preview_usage();
     }
 
     /// Re-sets up the settings directory's sources. The new one is set up before the old one is dropped
