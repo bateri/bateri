@@ -10,6 +10,8 @@
 //! - [`resolve`] — that text → an existing [`Resolved`] (`~` to the home directory, a relative
 //!   path to the pane's OSC 7 directory); the `stat` is **injected**, so the tests use a fake
 //!   and the shell passes [`stat`]. **A path that does not exist is not a link.**
+//! - [`resolve_first`] — a path query's candidates (`My Drive`'s `Drive`, …, `My Drive`) →
+//!   the first that exists, iTerm2's semantic history (044 set sonrası).
 //! - [`action`] — the policy table (`plan.md` → R5.1): a **white list**, the
 //!   [`quote::shell_quote`](crate::quote::shell_quote) precedent — a document of a known
 //!   content type without the `x` bit opens in its default application, a directory opens in
@@ -182,6 +184,28 @@ pub fn resolve(
     Some(Resolved { path, entry })
 }
 
+/// A path query's answer (044 set sonrası, iTerm2's semantic history): the
+/// **first** candidate that [`resolve`]s, with its index — the candidates come
+/// from `bt-core` in the order they are to be tried
+/// ([`bt_core::LinkHit::candidates`], shortest first), so `My Drive` wins only
+/// when neither `Drive` nor `Drive ` exists. `None` if none does: no link.
+///
+/// Every candidate is one `stat` (at most 100 per query, `bt-core`'s bound); the
+/// platform shell runs this on its background queue.
+pub fn resolve_first<'a>(
+    candidates: impl IntoIterator<Item = &'a Path>,
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+    stat: impl Fn(&Path) -> Option<Entry>,
+) -> Option<(usize, Resolved)> {
+    candidates
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, candidate)| {
+            resolve(candidate, cwd, home, &stat).map(|resolved| (index, resolved))
+        })
+}
+
 /// The production `stat`: `std::fs::metadata` (symlinks followed — a link to a script is a
 /// script). Blocking: on a network disk it can hang, which is why the platform shell calls it
 /// on a background queue, never on the main thread or in the frame path.
@@ -337,6 +361,66 @@ mod tests {
             res("/Applications/Foo.app").map(|r| r.entry),
             Some(Entry::Dir)
         );
+    }
+
+    #[test]
+    fn the_first_existing_candidate_wins() {
+        let disk = |path: &Path| match path.to_str()? {
+            "/work/proj/My Drive" | "/work/proj/Screen Studio Projects" => Some(Entry::Dir),
+            "/work/proj/Drive" | "/work/proj/foo.txt" => Some(Entry::File { executable: false }),
+            _ => None,
+        };
+        let first = |candidates: &[&str]| {
+            resolve_first(
+                candidates.iter().map(Path::new),
+                Some(Path::new(CWD)),
+                Some(Path::new(HOME)),
+                disk,
+            )
+            .map(|(index, resolved)| (index, resolved.path))
+        };
+        // `bt-core`'s order for `Screen Studio Projects` hovered on `Studio`.
+        assert_eq!(
+            first(&[
+                "Studio",
+                "Studio ",
+                "Studio Projects",
+                " Studio",
+                "Screen Studio",
+                "Screen Studio Projects",
+                "My Drive    Screen Studio Projects",
+            ]),
+            Some((5, "/work/proj/Screen Studio Projects".into()))
+        );
+        // The shortest one that exists wins, even if a longer one exists too.
+        assert_eq!(
+            first(&["Drive", "My Drive"]),
+            Some((0, "/work/proj/Drive".into()))
+        );
+        assert_eq!(
+            first(&["My", "My ", "My Drive"]),
+            Some((2, "/work/proj/My Drive".into()))
+        );
+        assert_eq!(
+            first(&["foo.txt.", "foo.txt"]),
+            Some((1, "/work/proj/foo.txt".into()))
+        );
+        assert_eq!(first(&["nope", "also nope"]), None);
+        assert_eq!(first(&[]), None);
+        // Each candidate is asked once, in order, and asking stops at the winner.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let counting = |path: &Path| {
+            asked.borrow_mut().push(path.to_path_buf());
+            disk(path)
+        };
+        let found = resolve_first(
+            ["a", "Drive", "b"].iter().map(Path::new),
+            Some(Path::new(CWD)),
+            None,
+            counting,
+        );
+        assert_eq!(found.map(|(index, _)| index), Some(1));
+        assert_eq!(asked.borrow().len(), 2);
     }
 
     #[test]

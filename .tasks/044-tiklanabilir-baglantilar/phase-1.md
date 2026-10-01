@@ -78,6 +78,45 @@ _Requirements: R1, R1.1, R1.2, R2, R3_
   her çıplak kelime aday (`ls`'in `src` klasörü, `Makefile`), karar
   varlıkta; iTerm2'nin semantic history kuralı. Belirti kullanıcıda
   görüldü: `ls` çıktısında dosyalar tıklanıyor, klasörler tıklanmıyordu.
+- **Set sonrası (kullanıcı kararı, 2026-10-01): boşluklu ad, iTerm2'nin
+  yol arama algoritması.** Belirti kullanıcıda görüldü: `ls` çıktısında
+  `4.04.2022 06.29.36.pklg`, `My Drive`, `Screen Studio Projects` ⌘-hover'da
+  vurgulanmıyordu, çünkü tarayıcı boşluktan bölüp yalnız farenin altındaki
+  belirteci aday yapıyordu. Artık yol bir **aday sorgusu**
+  (`link::path_candidates`, iTerm2'nin `iTermPathFinder.searchSynchronously`
+  ve `splitString`'i kaynaktan): noktanın çevresindeki dosya adı karakteri
+  koşusu (boşluk dahil, satır sonu hariç; her yana en çok 2000 karakter)
+  `\t ():",`'den parçalanıyor, ayırıcı da ayrı parça; sol boş başlayıp tur
+  başına bir parça büyüyor, her turda sağ en çok 10 parça büyüyor, aynı aday
+  ikinci kez denenmiyor, 100 farklı denemede bırakılıyor. `\ \( \[ \] \\ \)`
+  kaçışları çözülüyor, kuşkulu sonekler (`! ? . , ; : ... …`) sonekli
+  hâlden sonra soneksiz deneniyor, adayın arkasındaki parçalardan iTerm2'nin
+  sekiz satır/sütun kalıbı (`:12:5`, `:12`, `[12, 5]`, Python'un `", line 12,
+  column 5` / `", line 12, in`, `(12, 5)`, `(12)`, ` line 12:`) ayrılıyor ve
+  aralığa giriyor; fare sonekin üstündeyse (`src/main.rs:12`'nin `12`'si)
+  her birleşim soneki taşıdığı için adayın kendi sonundaki sonek de ayrılıyor
+  (iTerm2'nin `iTermPathCleaner`'ının işi), `[src/x.rs:12]`'nin köşeli
+  temizlemesi de soneki koruyor (`/code-review` bulgusu). Karar `bt-shell-common`'da: `links::resolve_first` ilk var
+  olanı seçiyor (sahte diskle sınanıyor), `hyperlink` bütün adayları **tek**
+  arka plan işinde `stat`'lıyor ve kazananın aralığı hover'ın aralığı
+  (`LinkHit::choose`; dock'ta damganın karakter aralığı da onun). URL tek
+  belirteç kalıyor ve noktanın altındaysa yolları yeniyor; OSC 8 metni yine
+  yeniyor; uzak oturumda yol yine kapalı. Parantez çifti artık ayırıcıdan
+  düşüyor (`(src/x.rs)`), `[]` için bugünkü temizleme son varyant olarak
+  kaldı; eski `(satır,sütun)` ve `:satır:sütun` ayrımı iTerm2'nin kalıplarına
+  katıldı. **iTerm2'den bilerek sapılanlar:** (1) kesim noktası farenin
+  karakteri değil **altındaki parçanın başı** — iTerm2 kelimenin yarısını
+  (`Drive`'ın `rive`'ı) da dener ve kelimenin her hücresi başka bir liste,
+  yani başka bir `stat` turu ve titreyen vurgu verirdi; (2) aday farenin
+  karakterini **kapsamak** ve boşluktan ibaret olmamak zorunda — vurgu
+  farenin altındakini çiziyor, tık o hücrelerle eşleşiyor; (3) aday bir
+  URL'ye taşmıyor; (4) bütçe deneme değil **`stat`** sayısı: varyantlar dahil
+  en çok 100 aday, aynı hedef ikinci kez yok (iTerm2 deneme başına birkaç
+  varyant stat'lar); (5) farenin `My`'dan `Drive`'a geçmesi gibi yeni sorgu
+  uçuştayken hâlâ farenin altındaki gösterilen ad kalıyor, cevap onu
+  değiştiriyor ya da kaldırıyor. iTerm2'nin "çalışma dizini ağ diskindeyse
+  göreli aday denenmez / ağ diskindeki dosya yok sayılır" kuralı yok (bugün
+  de yoktu; `resolve` yalnız mutlak OSC 7 dizini istiyor).
 - **OSC 8 koşusunda spacer** koşuyu bölmüyor ama yalnız bağlantılı iki hücre
   arasında ya da bağlantılı geniş karakterin sağ yarısı olarak sayılıyor.
   Bitişik iki id'siz bağlantının alacritty'nin ürettiği id'leri ayrı, yani

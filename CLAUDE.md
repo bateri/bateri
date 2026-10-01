@@ -172,7 +172,15 @@ ekran dahil): URL
 (`http`/`https`/`ftp`/`mailto`/`file`), **var olan** dosya ya da dizin
 (`~`, göreli yol pane'in OSC 7 dizinine; `:satır:sütun` tanınır, atlanmaz;
 çıplak kelime de aday — `ls`'in `src`'si, `Makefile` — çünkü kararı şekil
-değil varlık veriyor, iTerm2'nin semantic history kuralı) ve OSC 8
+değil varlık veriyor, iTerm2'nin semantic history kuralı; **boşluklu ad da**
+— `My Drive`, `4.04.2022 06.29.36.pklg` — çünkü yol tek belirteç değil bir
+**aday sorgusu**: noktanın çevresi `\t ():",`'den parçalanıyor ve önce sağa,
+sonra sola bir parça büyüyen birleşimler en kısadan denenip **ilk var olan**
+kazanıyor, yani komşu `ls` sütununu yutmuyor — `link::path_candidates` saf ve
+en çok 100 aday, `LinkHit::candidates`/`choose`, karar
+`links::resolve_first`; gerekçe ve iTerm2'den sapmalar
+`.tasks/044-tiklanabilir-baglantilar/phase-1.md` → Uygulama Notları; URL tek
+belirteç kalıyor) ve OSC 8
 bağlantısı (metin taramasını yener). Algılama ve hit test `bt-core`'da
 (`link`, `Session::link_at`; uzak oturumda yol ve `file://` bağlantı değil),
 vurgu hover yuvasından ve damgalı (`Session::set_link_hover`; damga tutmazsa
