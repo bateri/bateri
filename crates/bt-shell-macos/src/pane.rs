@@ -314,6 +314,9 @@ struct ShellWake {
     /// The remote-session probe's arm and pending job (036); `Arc`, because
     /// the main queue's job holds it.
     remote_probe: Arc<RemoteProbe>,
+    /// Whether the stale-link news is waiting on the main queue (044 R4.1) —
+    /// `search_pending`'s twin: at most one job.
+    link_pending: Arc<AtomicBool>,
 }
 
 /// The two bits of the remote-session probe (036 Karar 2): the **arm** (no
@@ -543,8 +546,23 @@ impl Wake for ShellWake {
     }
 
     fn link_hover_lost(&self) {
-        // No hover is set yet: the view's ⌘-hover path (044 phase-4) sets it
-        // and this is where its re-find goes.
+        // The frame path (main thread, after the `Term` lock): the hover's stamp
+        // went stale and the slot was dropped. The view re-finds the link if ⌘
+        // is still down (`BateriView::link_lost`) — on the next main-queue turn,
+        // not inside the frame; at most one job (`search_changed`'s pattern).
+        if self.link_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.link_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.swap(false, Ordering::AcqRel);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.view().link_lost();
+            }
+        });
     }
 }
 
@@ -1044,6 +1062,7 @@ impl TerminalPane {
                 title_pending: Arc::default(),
                 search_pending: Arc::default(),
                 remote_probe: Arc::default(),
+                link_pending: Arc::default(),
             }),
             zoom: Cell::new(zoom),
             // No dock at launch: `start` decides and computes the geometry
@@ -1334,8 +1353,10 @@ impl TerminalPane {
                 // The identity is in every window, timed run included (038
                 // Karar 8): the variables read no file and do not move the tokens.
                 tab_id: Some(self.ivars().tab_id.clone()),
-                // The machine's name is read in phase-4 (044); `None` keeps today's rule.
-                hostname: None,
+                // The machine's name (044): `file://$HOST/…` (GNU `ls --hyperlink`)
+                // and OSC 7's named authority count as local. One `gethostname`
+                // per pane; the timed run's tokens do not depend on it.
+                hostname: crate::links::hostname(),
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );

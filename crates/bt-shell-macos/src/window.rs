@@ -591,9 +591,13 @@ define_class!(
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _n: &NSNotification) {
+            // The ⌘-hovered link clears too (044 R7): ⌘'s release may go to
+            // another application. The key window also resigns key when the
+            // application deactivates, so this one hook covers both.
             for pane in self.panes() {
                 pane.apply_focus(false);
                 pane.unhover_upload();
+                pane.view().clear_link();
             }
         }
 
@@ -891,7 +895,7 @@ impl TerminalWindow {
         // pointer without them. No `NSTrackingArea` is needed:
         // `mouseEntered:`/`mouseExited:` are not wanted, the upload buttons'
         // hand cursor comes from `NSView`'s own cursor rect
-        // (`BateriView::upload_cursor_rects`), and the view is already first
+        // (`BateriView::hand_cursor_rects`), and the view is already first
         // responder — the window-level `mouseMoved:` reaches it. Turning them
         // on and off by mode would want broadcasting the mode to
         // `bt-shell-macos`

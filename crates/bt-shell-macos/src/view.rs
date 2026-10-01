@@ -55,6 +55,7 @@ use objc2_foundation::{
 
 use crate::clipboard;
 use crate::gesture::{Drag, Gesture, Press, Release};
+use crate::hyperlink::LinkState;
 use crate::keys::{
     ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, dock_key, encode_key, only_char,
     page_scroll,
@@ -520,8 +521,11 @@ pub(crate) struct ViewIvars {
     /// grid is resized too, so the two are two halves of the same geometry.
     dock_rows: Cell<u16>,
     /// The hand-cursor rectangles the last `resetCursorRects` set up (what
-    /// [`BateriView::sync_cursor_rects`] compares).
+    /// [`BateriView::sync_cursor_rects`] compares): the upload buttons' and the
+    /// ⌘-hovered link's, one list (044 Muhakeme).
     cursor_rects: RefCell<Vec<NSRect>>,
+    /// The ⌘-hover and ⌘-click state (044 phase-4, [`crate::hyperlink`]).
+    link: RefCell<LinkState>,
     /// The drawn frame's vertical origin - the read end of the body the frame
     /// path writes ([`bt_gpu::Origin`]).
     ///
@@ -750,7 +754,18 @@ define_class!(
         /// buttons' place changes ([`BateriView::sync_cursor_rects`]).
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
-            self.upload_cursor_rects();
+            self.hand_cursor_rects();
+        }
+
+        /// A modifier key went down or up (044 R7): ⌘ shows or clears the link
+        /// under the pointer without the pointer moving
+        /// ([`BateriView::link_flags`]). Then `NSResponder`'s default, which
+        /// passes the event along the chain.
+        #[unsafe(method(flagsChanged:))]
+        fn flags_changed(&self, event: &NSEvent) {
+            self.link_flags(event);
+            // SAFETY: `NSResponder`'s `flagsChanged:` takes an `NSEvent`, returns nothing.
+            let _: () = unsafe { msg_send![super(self), flagsChanged: event] };
         }
 
         /// A buttonless motion. Since the window is opened with
@@ -764,10 +779,13 @@ define_class!(
         ///
         /// The upload line's button ([`BateriView::upload_hover`]) is asked
         /// **before** the motion report and independently of it: the context
-        /// line is outside the grid and the report path rejects that area.
+        /// line is outside the grid and the report path rejects that area. The
+        /// ⌘-hovered link ([`BateriView::link_motion`], 044) likewise: its hit
+        /// test also covers the fill band, which the report keeps rejecting.
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             self.upload_hover(event);
+            self.link_motion(event);
             self.motion_event(event, None);
         }
 
@@ -1413,6 +1431,7 @@ impl BateriView {
             metrics: Cell::new(None),
             dock_rows: Cell::new(0),
             cursor_rects: RefCell::new(Vec::new()),
+            link: RefCell::new(LinkState::default()),
             origin: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
@@ -1576,6 +1595,26 @@ impl BateriView {
         )
     }
 
+    /// The mouse translation's measure and grid ([`ViewIvars::metrics`]).
+    pub(crate) fn metrics(&self) -> Option<(CellMetrics, (u16, u16))> {
+        self.ivars().metrics.get()
+    }
+
+    /// The drawn frame's origin body ([`ViewIvars::origin`]); `None` before the link.
+    pub(crate) fn origin(&self) -> Option<&Origin> {
+        self.ivars().origin.get()
+    }
+
+    /// The session; `None` before it is born.
+    pub(crate) fn session(&self) -> Option<&Arc<Session>> {
+        self.ivars().session.get()
+    }
+
+    /// The ⌘-hover and ⌘-click state ([`crate::hyperlink`]).
+    pub(crate) fn link_state(&self) -> &RefCell<LinkState> {
+        &self.ivars().link
+    }
+
     /// Binds the mouse translation's vertical origin; once, right after the
     /// link is born.
     ///
@@ -1623,9 +1662,10 @@ impl BateriView {
                 }
                 // The gesture in the dock ended: if it was a click without a drag the caret goes there.
                 Release::Dock => session.dock_click(),
-                // Nothing presses a link yet: `Gesture::pressed_link` is wired in 044
-                // phase-4, which opens the link here.
-                Release::Link | Release::Done => {}
+                // A ⌘-click on a link: opened if the pointer is still over the
+                // range locked at the press and this is the first click (044 R6).
+                Release::Link => self.link_release(event),
+                Release::Done => {}
             }
             return;
         }
@@ -1635,6 +1675,14 @@ impl BateriView {
             return;
         }
         self.with_gesture(|g| g.begin_press(button));
+        // **A ⌘-press on the shown link is the link's in every mode** (044 R6):
+        // neither a report (vim, htop, Claude Code see nothing) nor a selection,
+        // Shift or not. Only a **verified** hover counts — the press before the
+        // path's `stat` returned takes today's route.
+        if button == MouseButton::Left && self.link_press(event) {
+            self.with_gesture(Gesture::pressed_link);
+            return;
+        }
         // **The dock's input line before the grid** and without asking the
         // mouse mode at all: the band is not the application's screen but the
         // terminal's own surface (031 phase-4). Only the left button; the
@@ -1870,7 +1918,7 @@ impl BateriView {
     /// `None` if the view is not yet attached to a pane. There is no linear
     /// search in a window list or reaching for the application delegate: the
     /// owner is in the view tree.
-    fn pane(&self) -> Option<Retained<TerminalPane>> {
+    pub(crate) fn pane(&self) -> Option<Retained<TerminalPane>> {
         // SAFETY: reading the superview; the returned `Retained` keeps it alive
         // for the caller and we are on the main thread (`MainThreadOnly`).
         let parent = unsafe { self.superview() }?;
@@ -1898,7 +1946,7 @@ impl BateriView {
     /// range on the context line - the inverse of [`Self::context_column`],
     /// from the same geometry ([`context_span_px`]): the anchor of the "Show
     /// files (N)" popover (037 phase-7) and the buttons' hand cursor
-    /// ([`Self::upload_cursor_rects`]).
+    /// ([`Self::hand_cursor_rects`]).
     pub(crate) fn context_span_rect(&self, start: u16, end: u16) -> Option<NSRect> {
         let (metrics, _) = self.ivars().metrics.get()?;
         let (top, rows) = self.ivars().origin.get().and_then(Origin::dock)?;
@@ -1924,13 +1972,23 @@ impl BateriView {
     /// at every percentage change and came back at the next refresh. The cursor
     /// rect is that evaluation's **input**: inside the rectangle AppKit sets the
     /// hand itself, outside the arrow, in a non-key window none at all.
-    fn upload_cursor_rects(&self) {
-        let rects = self.upload_button_rects();
+    ///
+    /// The ⌘-hovered link's cells join the **same** list (044 Muhakeme): one
+    /// `resetCursorRects`, one comparison in [`Self::sync_cursor_rects`].
+    fn hand_cursor_rects(&self) {
+        let rects = self.hand_rects();
         let hand = NSCursor::pointingHandCursor();
         for rect in &rects {
             self.addCursorRect_cursor(*rect, &hand);
         }
         self.ivars().cursor_rects.replace(rects);
+    }
+
+    /// Every hand-cursor rectangle: the upload buttons and the shown link.
+    fn hand_rects(&self) -> Vec<NSRect> {
+        let mut rects = self.upload_button_rects();
+        rects.extend(self.link_rects());
+        rects
     }
 
     /// The buttons' current rectangles, in view points - from click and hover's
@@ -1954,7 +2012,7 @@ impl BateriView {
     /// refresh (`TerminalPane::upload_hover`, `show_transfer`); on the same
     /// rectangle it is a no-op, i.e. the cursor is not re-evaluated.
     pub(crate) fn sync_cursor_rects(&self) {
-        let fresh = self.upload_button_rects();
+        let fresh = self.hand_rects();
         if *self.ivars().cursor_rects.borrow() == fresh {
             return;
         }
