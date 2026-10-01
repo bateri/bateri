@@ -23,8 +23,9 @@
 //!   the Clear Now sweeps delete and what they move to the download folder
 //!   instead (Karar 9).
 //!
-//! The processes, the queue and the AppKit half come with 045 phase-2…5; the
-//! rationale is in `.tasks/045-uzak-dosya-indirme/discussion.md`.
+//! The stream and the two-way queue are `download` and `upload::Transfers`
+//! (045 phase-2); the helper session, the preview and the drag come with
+//! phase-3…5. The rationale is in `.tasks/045-uzak-dosya-indirme/discussion.md`.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

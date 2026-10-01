@@ -5,8 +5,9 @@
 //! `notices`), the split layout tree (`split`), temporary font size (`zoom`),
 //! the mouse gesture ledger (`gesture`), shell quoting (`quote`), key
 //! encoding (`keys`), what a ⌘-clicked link resolves to and what opening it
-//! does (`links`), the remote upload rules and processes (`upload`), the
-//! rules of previewing and downloading a remote file (`remote_files`), the
+//! does (`links`), the remote upload rules, processes and the two-way transfer
+//! queue (`upload`), the download's stream (`download`), the rules of
+//! previewing and downloading a remote file (`remote_files`), the
 //! process table (`jobs`), the shell's birth (`child`) and file watching
 //! (`watch`).
 //!
@@ -23,6 +24,7 @@
 //! `.tasks/043-bt-shell-ayrimi/discussion.md` → Karar 1–2.
 
 pub mod child;
+pub mod download;
 pub mod gesture;
 pub mod jobs;
 pub mod keys;

@@ -68,7 +68,7 @@ use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::quote;
 use crate::search_bar::{SearchBar, selection_query};
-use crate::upload::Uploads;
+use crate::upload::Transfers;
 use crate::uploader::{StopSheet, UploadPopover};
 use crate::view::BateriView;
 use crate::window::{Closing, Launch, is_dark_background};
@@ -801,9 +801,9 @@ pub(crate) struct PaneIvars {
     /// ([`TerminalPane::kick_search`]): so that a second driver is not set up.
     search_driving: Cell<bool>,
     /// Upload of a Finder drop to the remote directory (037 Karar 7): queue,
-    /// progress and result line ([`crate::upload::Uploads`]). The queue is
+    /// progress and result line ([`crate::upload::Transfers`]). The queue is
     /// **this pane's ssh connection's** — switching to another tab does not stop it.
-    uploads: RefCell<Uploads>,
+    uploads: RefCell<Transfers>,
     /// The open upload sheet (confirmation or error): lives for the sheet's duration.
     upload_alert: RefCell<Option<Retained<NSAlert>>>,
     /// The open stop question (037 phase-7, [`crate::uploader`]).
@@ -1154,7 +1154,7 @@ impl TerminalPane {
             search: OnceCell::new(),
             search_status: Cell::new(SearchStatus::Empty),
             search_driving: Cell::new(false),
-            uploads: RefCell::new(Uploads::default()),
+            uploads: RefCell::new(Transfers::default()),
             upload_alert: RefCell::new(None),
             upload_stop: RefCell::new(None),
             upload_list: RefCell::new(None),
@@ -2312,7 +2312,7 @@ impl TerminalPane {
     }
 
     /// The upload queue (half of `uploader`).
-    pub(crate) fn uploads(&self) -> &RefCell<Uploads> {
+    pub(crate) fn uploads(&self) -> &RefCell<Transfers> {
         &self.ivars().uploads
     }
 
@@ -2326,7 +2326,7 @@ impl TerminalPane {
         &self.ivars().upload_stop
     }
 
-    /// The open "Show files (N)" popover's slot.
+    /// The open "Show transfers (N)" popover's slot.
     pub(crate) fn upload_list(&self) -> &RefCell<Option<UploadPopover>> {
         &self.ivars().upload_list
     }
@@ -2347,10 +2347,10 @@ impl TerminalPane {
         self.ivars().uploads.borrow().active()
     }
 
-    /// The percentage of the title's `↑ N% · ` prefix; `None` if no upload is
-    /// flowing (`upload::titled`).
-    pub(crate) fn upload_title_percent(&self) -> Option<u8> {
-        self.ivars().uploads.borrow().title_percent()
+    /// The arrow and percentage of the title's `↑ N% · ` prefix (`↓` while
+    /// only downloads flow); `None` if nothing is flowing (`upload::titled_as`).
+    pub(crate) fn upload_title_prefix(&self) -> Option<(&'static str, u8)> {
+        self.ivars().uploads.borrow().title_prefix()
     }
 }
 
