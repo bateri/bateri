@@ -183,7 +183,13 @@ en çok 100 aday, `LinkHit::candidates`/`choose`, karar
 belirteç kalıyor) ve OSC 8
 bağlantısı (metin taramasını yener). Algılama ve hit test `bt-core`'da
 (`link`, `Session::link_at`; uzak oturumda `file://` bağlantı değil, düz metin
-yol **uzak işaretli** hit — `LinkHit::remote`, bugün kabuk katmanı düşürüyor, 045),
+yol **uzak işaretli** hit — `LinkHit::remote` — ve varlığını pane başına tembel
+açılan **yardımcı ssh oturumu** söylüyor (`remote_helper`, 045 Karar 10:
+`BatchMode`, cevap uzak nesil başına önbellekte, nesil değişince ya da boşta
+kapanır); göreli ad uzak OSC 7 dizini yoksa bağlantı değil ve nedeni de
+açılamayan oturumun nedeni de pane'in etiketinde; sağ tık menüsü indirir —
+klasörde, `ask` altında çakışmada ya da yer yokken onay sayfası, tek dosya
+sorusuz, 037'nin kuyruğunda),
 vurgu hover yuvasından ve damgalı (`Session::set_link_hover`; damga tutmazsa
 çizilmez, düşer ve `Wake::link_hover_lost` ile pencere key'se yeniden
 bulunur — akan çıktıda çıktı başına iki kare, boşta sıfır; **dock'ta damga

@@ -14,6 +14,8 @@
 //!   `tar c` stream of one item out of its folder (Karar 11).
 //! - **The scp path** ([`scp_path`]): "Copy as scp Path" from the session's
 //!   ssh argv (R3).
+//! - **The download sheet** ([`download_sheet`]): whether a download asks
+//!   first (a folder, a clash, no space) and with which buttons (R4).
 //! - **The open policy** ([`preview_open`]): a file previews, in its default
 //!   application if it is a known document, as plain text otherwise; a folder
 //!   does not preview (Karar 3, 4).
@@ -30,11 +32,12 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use bt_core::{PreviewKeep, RemoteKind, RemoteTarget};
+use bt_core::{DownloadConflict, PreviewKeep, RemoteKind, RemoteTarget};
 
+use crate::download::Conflict;
 use crate::jobs::SSH_VALUED;
 use crate::links::Content;
-use crate::upload::{NO_DIRECTORY, is_safe, sq};
+use crate::upload::{NO_DIRECTORY, format_bytes, is_safe, sq};
 
 // ─── helper session protocol ─────────────────────────────────────────────
 
@@ -257,6 +260,111 @@ pub fn download_script(path: &str) -> Option<String> {
         sq(dir),
         sq(&format!("./{name}"))
     ))
+}
+
+/// The download's confirmation sheet (R4): the text and the confirm buttons, each
+/// with the conflict rule it starts the download under; the caller adds
+/// "Cancel" last.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadSheet {
+    pub message: String,
+    pub informative: String,
+    /// `Download`, or `Keep Both` + `Replace` when the sheet asks about a clash.
+    pub buttons: Vec<(&'static str, Conflict)>,
+    /// `false` when this Mac has not enough free space: every confirm button is
+    /// disabled and the text says why.
+    pub enabled: bool,
+}
+
+/// Whether a download asks first (Karar 5, R4) and how: `Ok(conflict)` starts
+/// it without a sheet, `Err(sheet)` asks. A sheet only when it is needed — a
+/// **folder** (its file count and size), a **clash** at the destination while
+/// `download_conflict` is `ask` (Keep Both / Replace), or **not enough space** on
+/// this Mac (disabled, with the reason). A single file with none of those goes
+/// at once: downloading to this Mac is not as risky as writing to a server.
+///
+/// `dest` is the destination folder as the sheet names it; `free` its free
+/// bytes (`None` — unknown, never a reason to refuse); `clash` whether the
+/// remote name is already taken there.
+pub fn download_sheet(
+    host: &str,
+    name: &str,
+    entry: &RemoteEntry,
+    dest: &str,
+    free: Option<u64>,
+    clash: bool,
+    setting: DownloadConflict,
+) -> Result<Conflict, DownloadSheet> {
+    let (folder, bytes) = match entry {
+        RemoteEntry::File { size, .. } => (None, *size),
+        RemoteEntry::Dir(size) => (Some(size), size.map(|size| size.bytes)),
+    };
+    let short = free.zip(bytes).filter(|(free, bytes)| bytes > free);
+    let ask = clash && setting == DownloadConflict::Ask;
+    let conflict = match setting {
+        DownloadConflict::Replace => Conflict::Replace,
+        DownloadConflict::Ask | DownloadConflict::KeepBoth => Conflict::KeepBoth,
+    };
+    if folder.is_none() && !ask && short.is_none() {
+        return Ok(conflict);
+    }
+    let quoted = format!("“{name}”");
+    let (message, summary) = match folder {
+        Some(size) => (
+            format!("Download folder {quoted} from {host}?"),
+            match size {
+                Some(size) => format!(
+                    "{} {}, {} → {dest}",
+                    size.files,
+                    if size.files == 1 { "file" } else { "files" },
+                    format_bytes(size.bytes)
+                ),
+                None => format!("→ {dest}"),
+            },
+        ),
+        None => (
+            format!("Download {quoted} from {host}?"),
+            match bytes {
+                Some(bytes) => format!("{} → {dest}", format_bytes(bytes)),
+                None => format!("→ {dest}"),
+            },
+        ),
+    };
+    let mut lines = vec![summary];
+    if clash {
+        lines.push(match setting {
+            DownloadConflict::Ask => {
+                format!("An item named {quoted} already exists there. Keep both, or replace it?")
+            }
+            DownloadConflict::KeepBoth => {
+                format!("An item named {quoted} already exists there: the new one gets a number.")
+            }
+            DownloadConflict::Replace => {
+                format!("An item named {quoted} already exists there: it will be replaced.")
+            }
+        });
+    }
+    if let Some((free, bytes)) = short {
+        lines.push(format!(
+            "This Mac has {} free, {quoted} needs {}.",
+            format_bytes(free),
+            format_bytes(bytes)
+        ));
+    }
+    let buttons = if ask {
+        vec![
+            ("Keep Both", Conflict::KeepBoth),
+            ("Replace", Conflict::Replace),
+        ]
+    } else {
+        vec![("Download", conflict)]
+    };
+    Err(DownloadSheet {
+        message,
+        informative: lines.join("\n"),
+        buttons,
+        enabled: short.is_none(),
+    })
 }
 
 // ─── scp path ────────────────────────────────────────────────────────────
@@ -996,5 +1104,95 @@ mod tests {
         let plan = plan_sweep(&previews, Sweep::Launch, PreviewKeep::Month, 400, NOW);
         assert_eq!(plan.delete, paths(&["plain"]));
         assert_eq!(plan.rescue, paths(&["edited", "resized"]));
+    }
+
+    fn file(size: u64) -> RemoteEntry {
+        RemoteEntry::File {
+            size: Some(size),
+            mtime: None,
+            executable: false,
+        }
+    }
+
+    #[test]
+    fn a_single_file_downloads_without_asking_unless_it_clashes_or_does_not_fit() {
+        let sheet = |entry: &RemoteEntry, free, clash, setting| {
+            download_sheet(
+                "prod",
+                "report.pdf",
+                entry,
+                "~/Downloads",
+                free,
+                clash,
+                setting,
+            )
+        };
+        // Nothing to ask: the setting's conflict rule rides along.
+        assert_eq!(
+            sheet(&file(10), Some(100), false, DownloadConflict::Ask),
+            Ok(Conflict::KeepBoth)
+        );
+        assert_eq!(
+            sheet(&file(10), None, true, DownloadConflict::Replace),
+            Ok(Conflict::Replace)
+        );
+        assert_eq!(
+            sheet(&file(10), None, true, DownloadConflict::KeepBoth),
+            Ok(Conflict::KeepBoth)
+        );
+        // A clash under `ask`: Keep Both / Replace.
+        let asked =
+            sheet(&file(2_000_000), Some(1 << 40), true, DownloadConflict::Ask).expect_err("asks");
+        assert_eq!(asked.message, "Download “report.pdf” from prod?");
+        assert_eq!(
+            asked.buttons,
+            vec![
+                ("Keep Both", Conflict::KeepBoth),
+                ("Replace", Conflict::Replace)
+            ]
+        );
+        assert!(asked.enabled);
+        assert!(
+            asked.informative.starts_with("2.0 MB → ~/Downloads\n"),
+            "{}",
+            asked.informative
+        );
+        assert!(asked.informative.contains("Keep both, or replace it?"));
+        // Not enough space: disabled, with the reason.
+        let full = sheet(&file(500), Some(100), false, DownloadConflict::Ask).expect_err("asks");
+        assert!(!full.enabled);
+        assert_eq!(full.buttons, vec![("Download", Conflict::KeepBoth)]);
+        assert!(
+            full.informative
+                .contains("This Mac has 100 B free, “report.pdf” needs 500 B."),
+            "{}",
+            full.informative
+        );
+    }
+
+    #[test]
+    fn a_folder_always_asks_with_its_count() {
+        let folder = RemoteEntry::Dir(Some(FolderSize {
+            files: 3,
+            bytes: 1_500_000,
+        }));
+        let sheet = download_sheet(
+            "prod",
+            "logs",
+            &folder,
+            "/Users/me/Downloads",
+            Some(1 << 40),
+            true,
+            DownloadConflict::Replace,
+        )
+        .expect_err("a folder asks");
+        assert_eq!(sheet.message, "Download folder “logs” from prod?");
+        assert_eq!(
+            sheet.informative,
+            "3 files, 1.5 MB → /Users/me/Downloads\n\
+             An item named “logs” already exists there: it will be replaced."
+        );
+        assert_eq!(sheet.buttons, vec![("Download", Conflict::Replace)]);
+        assert!(sheet.enabled);
     }
 }

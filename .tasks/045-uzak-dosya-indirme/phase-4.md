@@ -41,6 +41,7 @@ _Requirements: R5, R5.1, R5.2, R5.3, R5.4, R6_
 ## Checklist
 
 - [ ] ⌘-tık → önizleme akışı, sınır sayfası, önbellekten açma
+- [ ] (phase-3'ten) Uzak bağlantı `hyperlink::Verified::remote`'ta `(uzak mutlak yol, RemoteEntry)` taşıyor; menünün gri "Open Preview"ı `openLinkFromMenu:` → `open_link`'e gidiyor: uzak kolda önizlemeye bağlanıp öğe etkinleştirilir. Hover'ın cevabı yardımcının önbelleğinden gelebilir — R5.4'ün boyut+mtime karşılaştırması yardımcıya taze sorulmalı (`remote_helper::Query::Count`)
 - [ ] Popover'ın "Open"ı (phase-2) bugün düz `openURL`: `remote_files::preview_open` (R5.3) üstünden geçsin; tek başına biten önizlemenin sonuç satırı (`✓ x → …/Previews/…`) ve arka plan bildirimi istenip istenmediği karara bağlansın
 - [ ] Salt okunur + düz metin kolu
 - [ ] İndeks; açılış ve günlük temizlik; farklılaşmış kopyanın taşınması

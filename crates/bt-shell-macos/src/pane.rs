@@ -40,8 +40,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bt_core::{
-    FontOptions, RemoteTarget, SearchCover, SearchDirection, SearchReport, SearchStatus, Session,
-    SessionOptions, Settings, TabId, Theme, Wake,
+    FontOptions, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
+    SearchStatus, Session, SessionOptions, Settings, TabId, Theme, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Pacer, Renderer, Stats, Surface, Waker};
@@ -67,6 +67,7 @@ use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::quote;
+use crate::remote_helper::RemoteHelper;
 use crate::search_bar::{SearchBar, selection_query};
 use crate::upload::Transfers;
 use crate::uploader::{StopSheet, UploadPopover};
@@ -813,6 +814,13 @@ pub(crate) struct PaneIvars {
     /// Time of the event that closed the popover (`popoverWillClose:`): so that
     /// pressing the button again does not reopen the popover.
     list_closed_at: Cell<Option<f64>>,
+    /// The helper ssh session that verifies remote links and counts a download
+    /// (045 Karar 10): its worker is born at the first question, its session
+    /// closes on another generation, when idle and with the pane.
+    remote_helper: RefCell<RemoteHelper>,
+    /// `[remote]`'s preview and download keys (045 R8): from the birth package,
+    /// refreshed live with the host marks ([`TerminalPane::set_host_marks`]).
+    remote_files: RefCell<RemoteFiles>,
 }
 
 define_class!(
@@ -1105,6 +1113,7 @@ impl TerminalPane {
         view.setLayer(Some(&layer));
         view.setWantsLayer(true);
         let font = settings.font.clone();
+        let remote_files = settings.remote_files.clone();
         let dim = DimOverlay::new(mtm);
         dim.paint(&theme);
         let link_label = LinkLabel::new(mtm);
@@ -1159,6 +1168,8 @@ impl TerminalPane {
             upload_stop: RefCell::new(None),
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
+            remote_helper: RefCell::new(RemoteHelper::default()),
+            remote_files: RefCell::new(remote_files),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -1611,13 +1622,17 @@ impl TerminalPane {
         }
     }
 
-    /// `[remote] hosts` changed — the pattern list goes to the session; the
+    /// `[remote]` changed — the `hosts` pattern list goes to the session; the
     /// active remote host's mark is re-resolved there (037 Karar 2). The tab's
-    /// dot is the window's job (`TerminalWindow::set_host_marks`).
+    /// dot is the window's job (`TerminalWindow::set_host_marks`). The preview
+    /// and download keys (045 R8) are kept here for the next download.
     pub(crate) fn set_host_marks(&self, settings: &Settings) {
         if let Some(session) = self.ivars().session.get() {
             session.set_host_marks(&settings.remote_hosts);
         }
+        self.ivars()
+            .remote_files
+            .replace(settings.remote_files.clone());
     }
 
     /// Terminal options changed — to the session, **in full**.
@@ -1917,6 +1932,8 @@ impl TerminalPane {
     /// never born — there is nothing to close.
     pub(crate) fn begin_close(&self) -> Option<Closing> {
         self.abandon_uploads();
+        // The helper's ssh goes now, not when the last reference drops.
+        self.remote_helper().borrow_mut().close();
         self.ivars().closed.set(true);
         // SAFETY: the observer is this object, registered in `observe_frame`;
         // a no-op if it is not registered.
@@ -2020,6 +2037,13 @@ impl TerminalPane {
     /// re-reads the title and the tab's dot ([`PaneHost::title_changed`]).
     pub(crate) fn remote_or_title_changed(&self) {
         self.check_upload_connection();
+        // The remote session ended: its helper ssh is not held open until idle.
+        if self
+            .session()
+            .is_some_and(|session| session.remote_target().is_none())
+        {
+            self.remote_helper().borrow_mut().close();
+        }
         self.host().title_changed(self.ivars().id);
     }
 
@@ -2314,6 +2338,16 @@ impl TerminalPane {
     /// The upload queue (half of `uploader`).
     pub(crate) fn uploads(&self) -> &RefCell<Transfers> {
         &self.ivars().uploads
+    }
+
+    /// The helper ssh session's handle (045 Karar 10).
+    pub(crate) fn remote_helper(&self) -> &RefCell<RemoteHelper> {
+        &self.ivars().remote_helper
+    }
+
+    /// `[remote]`'s preview and download keys as last read.
+    pub(crate) fn remote_files(&self) -> &RefCell<RemoteFiles> {
+        &self.ivars().remote_files
     }
 
     /// The open upload sheet's slot.

@@ -52,11 +52,14 @@ use objc2_user_notifications::{
     UNUserNotificationCenter,
 };
 
-use crate::download;
+use crate::child;
+use crate::download::{self, Conflict};
 use crate::pane::{PaneLookup, TerminalPane};
+use crate::remote_files::{self, RemoteEntry};
+use crate::remote_helper::{Answer, Query, Request};
 use crate::upload::{
-    self, Direction, Ended, Job, Local, Outcome, ProbeReply, RowAction, RowStatus, Shared, Started,
-    Stop, StopQuestion, TransferList, Way,
+    self, Direction, Ended, Job, Lane, Local, Outcome, ProbeReply, RowAction, RowStatus, Shared,
+    Started, Stop, StopQuestion, TransferList, Way,
 };
 
 /// Everything that returns to the main thread from the background probe.
@@ -76,6 +79,31 @@ struct Confirmed {
     host: String,
     mark: HostMark,
     jobs: Vec<Job>,
+}
+
+/// A download's question answered (045 R4): what the remote item is and what
+/// its destination holds — everything the sheet decides on, gathered on the
+/// helper's thread (the remote count, then the local folder: a network volume
+/// must not stall the main thread).
+struct Prepared {
+    command: u64,
+    ssh: Vec<String>,
+    host: String,
+    mark: HostMark,
+    /// The remote absolute path.
+    remote: String,
+    /// `Err` → the error sheet's text.
+    result: Result<Landing, String>,
+}
+
+/// Where a download lands and what is there.
+struct Landing {
+    entry: RemoteEntry,
+    /// The destination folder (created if it was missing).
+    folder: std::path::PathBuf,
+    free: Option<u64>,
+    /// Whether the remote name is already taken in `folder`.
+    clash: bool,
 }
 
 /// Finds the pane with `id` on the main thread and applies `work` to it.
@@ -213,7 +241,8 @@ impl TerminalPane {
         alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
     }
 
-    /// Confirmation: the items go to the end of the queue, the first starts if the queue is idle.
+    /// Confirmation (an upload's or a download's): the items go to the end of
+    /// the queue, the first starts if the queue is idle.
     fn upload_confirmed(&self, confirmed: Confirmed) {
         let alive = self
             .session()
@@ -234,6 +263,193 @@ impl TerminalPane {
             // If the queue was already flowing, the new items are in the list and the count.
             self.upload_refresh();
         }
+    }
+
+    /// A remote link's "Download to Downloads" (`folder` `None`: `[remote]
+    /// download_dir`) or "Download To…" (045 R3, R4): the helper counts the item
+    /// and the destination is looked at on its thread, then
+    /// [`TerminalPane::download_prepared`] asks or starts. Dropped while another
+    /// sheet is in progress (two sheets cannot open on top of each other) or the
+    /// remote session ended.
+    pub(crate) fn download_remote(&self, remote: String, folder: Option<std::path::PathBuf>) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        let Some((command, target, _)) = session.remote_target() else {
+            return;
+        };
+        if !self.accepts_drop() {
+            return;
+        }
+        let mark = session
+            .remote_mark()
+            .map_or(HostMark::None, |(_, mark)| mark);
+        let ssh = upload::ssh_argv(&target);
+        let host = target.host;
+        let download_dir = self.remote_files().borrow().download_dir.clone();
+        let (id, lookup) = (self.id(), self.lookup());
+        self.uploads().borrow_mut().set_asking(true);
+        let request = Request {
+            command,
+            ssh: ssh.clone(),
+            host: host.clone(),
+            query: Query::Count(remote.clone()),
+            reply: Box::new(move |answer| {
+                let result = match answer {
+                    Ok(Answer::Counted(Some(entry))) => {
+                        landing(entry, &remote, folder, &download_dir)
+                    }
+                    Ok(_) => Err(format!("{remote} no longer exists on {host}.")),
+                    Err(text) => Err(text),
+                };
+                let prepared = Prepared {
+                    command,
+                    ssh,
+                    host,
+                    mark,
+                    remote,
+                    result,
+                };
+                on_pane(lookup, id, move |pane| pane.download_prepared(prepared));
+            }),
+        };
+        self.remote_helper().borrow_mut().ask(request);
+    }
+
+    /// The download's question came back: straight into the queue, or the
+    /// confirmation sheet first ([`remote_files::download_sheet`]), or the error
+    /// sheet.
+    fn download_prepared(&self, prepared: Prepared) {
+        let alive = self
+            .session()
+            .and_then(|session| session.remote_target())
+            .is_some_and(|(command, ..)| command == prepared.command);
+        let Some(window) = self.window().filter(|_| alive) else {
+            self.uploads().borrow_mut().set_asking(false);
+            return;
+        };
+        let Prepared {
+            command,
+            ssh,
+            host,
+            mark,
+            remote,
+            result,
+        } = prepared;
+        let name = remote_files::split_remote(&remote)
+            .map_or_else(String::new, |(_, name)| name.to_owned());
+        let mtm = self.mtm();
+        let alert = NSAlert::new(mtm);
+        // The confirm buttons' conflict rules, in order; empty for the error sheet.
+        let (buttons, landing) = match result {
+            Err(text) => {
+                alert.setMessageText(&NSString::from_str(&format!("Can't download from {host}")));
+                alert.setInformativeText(&NSString::from_str(&text));
+                alert.addButtonWithTitle(ns_string!("OK"));
+                (Vec::new(), None)
+            }
+            Ok(landing) => {
+                let setting = self.remote_files().borrow().download_conflict;
+                let dest = landing.folder.display().to_string();
+                match remote_files::download_sheet(
+                    &host,
+                    &name,
+                    &landing.entry,
+                    &dest,
+                    landing.free,
+                    landing.clash,
+                    setting,
+                ) {
+                    Ok(conflict) => {
+                        self.uploads().borrow_mut().set_asking(false);
+                        self.download_confirmed(
+                            command, ssh, host, mark, &remote, &landing, conflict,
+                        );
+                        return;
+                    }
+                    Err(sheet) => {
+                        alert.setMessageText(&NSString::from_str(&sheet.message));
+                        alert.setInformativeText(&NSString::from_str(&sheet.informative));
+                        for (title, _) in &sheet.buttons {
+                            let button = alert.addButtonWithTitle(&NSString::from_str(title));
+                            button.setEnabled(sheet.enabled);
+                        }
+                        let cancel = alert.addButtonWithTitle(ns_string!("Cancel"));
+                        // Esc by hand (the rationale of `window::alert`).
+                        cancel.setKeyEquivalent(ns_string!("\u{1b}"));
+                        let rules: Vec<Conflict> =
+                            sheet.buttons.iter().map(|(_, rule)| *rule).collect();
+                        (rules, Some(landing))
+                    }
+                }
+            }
+        };
+        let (id, lookup) = (self.id(), self.lookup());
+        // The block is `Fn`: the payload is taken once.
+        let payload = RefCell::new(landing.map(|landing| (ssh, host, mark, remote, landing)));
+        let answered = RcBlock::new(move |response: NSModalResponse| {
+            // audit: the sheet's completion block runs on AppKit's main thread.
+            let mtm = MainThreadMarker::new().expect("the sheet block is on the main thread");
+            let Some(pane) = lookup(mtm, id) else {
+                return;
+            };
+            drop(pane.upload_alert().take());
+            pane.uploads().borrow_mut().set_asking(false);
+            let chosen = if response == NSAlertFirstButtonReturn {
+                buttons.first()
+            } else if response == NSAlertSecondButtonReturn {
+                buttons.get(1)
+            } else {
+                None
+            };
+            if let (Some(&conflict), Some((ssh, host, mark, remote, landing))) =
+                (chosen, payload.borrow_mut().take())
+            {
+                pane.download_confirmed(command, ssh, host, mark, &remote, &landing, conflict);
+            }
+        });
+        self.upload_alert().replace(Some(alert.clone()));
+        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
+    }
+
+    /// The download goes to the queue's end under `conflict` (045 R2.1: a
+    /// right-click download waits its turn like an upload).
+    #[allow(clippy::too_many_arguments)]
+    fn download_confirmed(
+        &self,
+        command: u64,
+        ssh: Vec<String>,
+        host: String,
+        mark: HostMark,
+        remote: &str,
+        landing: &Landing,
+        conflict: Conflict,
+    ) {
+        let (files, bytes) = match landing.entry {
+            RemoteEntry::File { size, .. } => (1, size.unwrap_or(0)),
+            RemoteEntry::Dir(size) => size.map_or((0, 0), |size| (size.files, size.bytes)),
+        };
+        let Some((_, name)) = remote_files::split_remote(remote) else {
+            return;
+        };
+        let Some(job) = Job::download(
+            remote,
+            landing.folder.join(name),
+            matches!(landing.entry, RemoteEntry::Dir(_)),
+            files,
+            bytes,
+            Lane::Queue,
+            conflict,
+        ) else {
+            return;
+        };
+        self.upload_confirmed(Confirmed {
+            command,
+            ssh,
+            host,
+            mark,
+            jobs: vec![job],
+        });
     }
 
     /// Starts every item that may start on its own background thread: the
@@ -337,7 +553,11 @@ impl TerminalPane {
         self.dismiss_stale_stop();
         self.show_transfer(Some(ended.line));
         self.refresh_upload_title();
-        if let Some((title, body)) = ended.notice {
+        // `[remote] download_notify` (045 R8): a transfer ending in the
+        // background notifies only if the user wants it — either direction.
+        if let Some((title, body)) = ended.notice
+            && self.remote_files().borrow().download_notify
+        {
             self.host().notify(self.id(), &title, &body);
         }
         let (id, lookup) = (self.id(), self.lookup());
@@ -1199,6 +1419,31 @@ fn quarantine(path: &Path) {
             pending.extend(entries.flatten().map(|entry| entry.path()));
         }
     }
+}
+
+/// The download's destination on the helper's thread: `folder` or the expanded
+/// `download_dir` (created if missing — `~/Downloads` normally exists), its free
+/// space and whether the remote name is already taken there.
+fn landing(
+    entry: RemoteEntry,
+    remote: &str,
+    folder: Option<std::path::PathBuf>,
+    download_dir: &str,
+) -> Result<Landing, String> {
+    let folder = folder
+        .or_else(|| bt_core::expand_home(download_dir, child::home().as_deref()))
+        .ok_or_else(|| format!("The download folder {download_dir} can't be found."))?;
+    std::fs::create_dir_all(&folder)
+        .map_err(|error| format!("{} can't be written: {error}", folder.display()))?;
+    let Some((_, name)) = remote_files::split_remote(remote) else {
+        return Err(format!("{remote} can't be downloaded."));
+    };
+    Ok(Landing {
+        entry,
+        clash: folder.join(name).symlink_metadata().is_ok(),
+        free: download::free_space(&folder),
+        folder,
+    })
 }
 
 /// The stream thread's progress report: at most one on the main queue.

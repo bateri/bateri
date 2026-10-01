@@ -29,10 +29,13 @@
 //!   only if the pointer is still on the same candidate. Until it is back the
 //!   path is not underlined and a ⌘-press takes today's route (report or
 //!   selection) — the known limit `discussion.md` → Muhakeme names.
-//! - **A remote path is not a link yet** (`LinkHit::remote`, 045 phase-1): its
-//!   candidates name the remote disk and a local `stat` could find a same-named
-//!   local file, so the hit is dropped as if there were none — the helper ssh
-//!   session that verifies it remotely comes in 045 phase-3.
+//! - **A remote path is verified remotely** (`LinkHit::remote`, 045 Karar 1,
+//!   13): its candidates name the remote disk, so instead of a local `stat` the
+//!   pane's helper ssh session is asked ([`crate::remote_helper`], one round
+//!   trip on an open connection, its answers cached per remote generation). A
+//!   relative name needs the remote OSC 7 folder: without it there is no link
+//!   and the pane's label says why (R1.2); a helper that cannot connect says
+//!   its reason there too (R1.3). The right-click menu downloads it (R3).
 //! - **A stale stamp re-finds**: when output, a scroll or a clear moves the
 //!   scrollback the frame drops the hover and says so (`Wake::link_hover_lost`);
 //!   while the window is key the same point is asked again and, if the link is the
@@ -68,13 +71,16 @@ use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{MainThreadMarker, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertSecondButtonReturn, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem,
-    NSModalResponse, NSPasteboard, NSWorkspace,
+    NSModalResponse, NSModalResponseOK, NSOpenPanel, NSPasteboard, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL, ns_string};
 
 use crate::child;
 use crate::clipboard;
 use crate::links::{self, Content, LinkAction, Resolved};
+use crate::remote_files::{self, RemoteEntry};
+use crate::remote_helper::{self, Answer, Query, Request};
+use crate::upload;
 use crate::uploader::{ESCAPE, add_key_monitor, remove_monitor};
 use crate::view::{BateriView, OutOfGrid};
 
@@ -87,6 +93,9 @@ pub(crate) struct Verified {
     hit: LinkHit,
     /// What the path is on disk; `None` for a link that names no local path.
     resolved: Option<Resolved>,
+    /// A remote path's absolute path and what it is on the remote disk (045);
+    /// `None` for every local link.
+    remote: Option<(String, RemoteEntry)>,
     /// The hit as the hit test gave it — a re-found link is matched against
     /// this, not against the narrowed one ([`Verified::refresh`]).
     query: LinkHit,
@@ -101,6 +110,7 @@ impl Verified {
             query: hit.clone(),
             hit,
             resolved: None,
+            remote: None,
             index: 0,
         }
     }
@@ -110,6 +120,19 @@ impl Verified {
         Verified {
             hit: narrowed(&query, index),
             resolved: Some(resolved),
+            remote: None,
+            query,
+            index,
+        }
+    }
+
+    /// The helper's answer for the remote `query`: the winning candidate, its
+    /// remote absolute path and what it is.
+    fn found_remote(query: LinkHit, index: usize, path: String, entry: RemoteEntry) -> Self {
+        Verified {
+            hit: narrowed(&query, index),
+            resolved: None,
+            remote: Some((path, entry)),
             query,
             index,
         }
@@ -122,6 +145,7 @@ impl Verified {
         Verified {
             hit: narrowed(&query, self.index),
             resolved: self.resolved.clone(),
+            remote: self.remote.clone(),
             query,
             index: self.index,
         }
@@ -147,6 +171,30 @@ fn local_paths(hit: &LinkHit) -> Option<Vec<std::path::PathBuf>> {
                 .collect(),
         )
     }
+}
+
+/// A remote hit's candidate names, in the order they are tried.
+fn remote_candidates(hit: &LinkHit) -> Vec<String> {
+    if hit.candidates.is_empty() {
+        vec![hit.target.clone()]
+    } else {
+        hit.candidates.iter().map(|c| c.target.clone()).collect()
+    }
+}
+
+/// How a hit is verified before it is a link.
+enum Check {
+    /// Nothing to verify: a URL, a non-file OSC 8 link.
+    None,
+    /// The local `stat`s of these paths, in order.
+    Local(Vec<std::path::PathBuf>),
+    /// The helper session's answer for these remote candidates (045).
+    Remote(Vec<String>),
+    /// A remote hit that cannot be one: only relative names while the remote
+    /// folder is unknown (R1.2) — the label says why.
+    CwdUnknown,
+    /// A remote hit while no remote session runs any more: no link.
+    Gone,
 }
 
 /// A cell the link hit test can be asked about: a **signed** screen row
@@ -200,6 +248,9 @@ pub(crate) struct LinkState {
     menu: Option<Verified>,
     /// The serial queue of the path verifications, born at the first one.
     queue: Option<DispatchRetained<DispatchQueue>>,
+    /// Whether the pane's label shows a note in place of a link — why a remote
+    /// name is no link (R1.2, R1.3); cleared with the hover.
+    note: bool,
 }
 
 /// Whether two hits are the same link — the same cells, target, kind and path
@@ -476,7 +527,7 @@ impl BateriView {
             state.pending = None;
             state.missing = None;
             state.menu_pending = None;
-            state.hover.take().is_some()
+            state.hover.take().is_some() || state.note
         };
         if shown {
             self.hide_hover();
@@ -491,13 +542,12 @@ impl BateriView {
         };
         let hit = at
             .and_then(|cell| session.link_at(cell.point()))
-            .filter(|hit| !hit.remote)
             .filter(|hit| hover_style(hit, command).is_some());
         let Some(hit) = hit else {
             let shown = {
                 let mut state = self.link_state().borrow_mut();
                 state.pending = None;
-                state.hover.take().is_some()
+                state.hover.take().is_some() || state.note
             };
             if shown {
                 self.hide_hover();
@@ -519,9 +569,28 @@ impl BateriView {
             self.show_link(link, command);
             return;
         }
-        let Some(paths) = local_paths(&hit) else {
-            self.show_link(Verified::plain(hit), command);
-            return;
+        let check = match self.check(&hit) {
+            Check::None => {
+                self.show_link(Verified::plain(hit), command);
+                return;
+            }
+            Check::CwdUnknown => {
+                self.link_state().borrow_mut().pending = None;
+                self.show_note(remote_helper::REMOTE_CWD_UNKNOWN);
+                return;
+            }
+            Check::Gone => {
+                let shown = {
+                    let mut state = self.link_state().borrow_mut();
+                    state.pending = None;
+                    state.hover.take().is_some() || state.note
+                };
+                if shown {
+                    self.hide_hover();
+                }
+                return;
+            }
+            check @ (Check::Local(_) | Check::Remote(_)) => check,
         };
         let (in_flight, missing, shown) = {
             let mut state = self.link_state().borrow_mut();
@@ -550,14 +619,104 @@ impl BateriView {
         if in_flight || missing {
             return;
         }
-        self.verify_paths(paths, hit, Then::Hover);
+        self.verify(check, hit, Then::Hover);
+    }
+
+    /// How `hit` is verified ([`Check`]): a remote hit by the helper session,
+    /// relative names only if the remote folder is known.
+    fn check(&self, hit: &LinkHit) -> Check {
+        if hit.remote {
+            let candidates = remote_candidates(hit);
+            match self.session().and_then(|session| session.remote_target()) {
+                None => Check::Gone,
+                Some((_, _, cwd)) if remote_helper::cwd_unknown(&candidates, &cwd) => {
+                    Check::CwdUnknown
+                }
+                Some(_) => Check::Remote(candidates),
+            }
+        } else {
+            local_paths(hit).map_or(Check::None, Check::Local)
+        }
+    }
+
+    /// Sends a [`Check::Local`] or [`Check::Remote`] on its way; the others
+    /// need no answer.
+    fn verify(&self, check: Check, hit: LinkHit, then: Then) {
+        match check {
+            Check::Local(paths) => self.verify_paths(paths, hit, then),
+            Check::Remote(candidates) => self.verify_remote(candidates, hit, then),
+            Check::None | Check::CwdUnknown | Check::Gone => {}
+        }
+    }
+
+    /// Asks the pane's helper session which remote candidate exists (045
+    /// Karar 1-B, 10); the answer returns to the main queue by pane id with the
+    /// generation it was asked under — a reply from an ended ssh session is
+    /// dropped ([`BateriView::link_remote_verified`]).
+    fn verify_remote(&self, candidates: Vec<String>, hit: LinkHit, then: Then) {
+        let (Some(pane), Some(session)) = (self.pane(), self.session()) else {
+            return;
+        };
+        let Some((command, target, cwd)) = session.remote_target() else {
+            return;
+        };
+        let (id, lookup) = (pane.id(), pane.lookup());
+        let request = Request {
+            command,
+            ssh: upload::ssh_argv(&target),
+            host: target.host,
+            query: Query::Verify { candidates, cwd },
+            reply: Box::new(move |answer| {
+                let found = match answer {
+                    Ok(Answer::Verified(found)) => Ok(found),
+                    Ok(Answer::Counted(_)) => Ok(None),
+                    Err(text) => Err(text),
+                };
+                DispatchQueue::main().exec_async(move || {
+                    // audit: a block running on the main queue is on the main thread by definition.
+                    let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                    if let Some(pane) = lookup(mtm, id) {
+                        pane.view().link_remote_verified(&hit, command, found, then);
+                    }
+                });
+            }),
+        };
+        pane.remote_helper().borrow_mut().ask(request);
+    }
+
+    /// The helper's answer: the hover's or the menu's, as [`Then`] says — only if
+    /// the remote session it was asked under still runs. An error is no link and
+    /// its reason goes to the label while ⌘ is down (R1.3).
+    fn link_remote_verified(
+        &self,
+        hit: &LinkHit,
+        command: u64,
+        found: Result<Option<(usize, String, RemoteEntry)>, String>,
+        then: Then,
+    ) {
+        let current = self
+            .session()
+            .and_then(|session| session.remote_target())
+            .is_some_and(|(now, ..)| now == command);
+        let (found, note) = match found {
+            Ok(found) if current => (found, None),
+            Ok(_) => (None, None),
+            Err(text) => (None, current.then_some(text)),
+        };
+        let found = found.map(|(index, path, entry)| {
+            move |query| Verified::found_remote(query, index, path, entry)
+        });
+        match then {
+            Then::Hover => self.settle_hover(hit, found, note),
+            Then::Menu(at) => self.settle_menu(hit, found, at),
+        }
     }
 
     /// Throws the `stat`s to the view's serial queue — every candidate of a
     /// path query in one job, the first that exists wins
     /// ([`links::resolve_first`]); the answer returns to the main queue by pane
-    /// id — to the hover ([`BateriView::link_verified`]) or to the context menu
-    /// ([`BateriView::link_menu_verified`]).
+    /// id — to the hover ([`BateriView::settle_hover`]) or to the context menu
+    /// ([`BateriView::settle_menu`]).
     fn verify_paths(&self, paths: Vec<std::path::PathBuf>, hit: LinkHit, then: Then) {
         let (Some(pane), Some(session)) = (self.pane(), self.session()) else {
             return;
@@ -581,20 +740,32 @@ impl BateriView {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                 if let Some(pane) = lookup(mtm, id) {
+                    let found = found.map(|(index, resolved)| {
+                        move |query| Verified::found(query, index, resolved)
+                    });
                     match then {
-                        Then::Hover => pane.view().link_verified(&hit, found),
-                        Then::Menu(at) => pane.view().link_menu_verified(&hit, found, at),
+                        Then::Hover => pane.view().settle_hover(&hit, found, None),
+                        Then::Menu(at) => pane.view().settle_menu(&hit, found, at),
                     }
                 }
             });
         });
     }
 
-    /// The `stat`s' answer: taken only if the pointer is still on the same
-    /// query (the view's pending one) and the window is key; drawn with ⌘'s
-    /// state **now** ([`hover_style`]). Nothing found removes a name kept
-    /// shown while the query was in flight.
-    pub(crate) fn link_verified(&self, hit: &LinkHit, found: Option<(usize, Resolved)>) {
+    /// A verification's answer (`found` builds the link from the pending
+    /// query): taken only if the pointer is still on the same query (the view's
+    /// pending one) and the window is key; drawn with ⌘'s state **now**
+    /// ([`hover_style`]). Nothing found removes a name kept shown while the
+    /// query was in flight; `note` (a remote helper's failure) then goes to the
+    /// label while ⌘ is down.
+    fn settle_hover(
+        &self,
+        hit: &LinkHit,
+        found: Option<impl FnOnce(LinkHit) -> Verified>,
+        note: Option<String>,
+    ) {
+        let key = self.window().is_some_and(|window| window.isKeyWindow());
+        let command = command_down();
         let pending = {
             let mut state = self.link_state().borrow_mut();
             if !state.pending.as_ref().is_some_and(|p| same_link(p, hit)) {
@@ -603,24 +774,42 @@ impl BateriView {
             let pending = state.pending.take();
             if found.is_none() {
                 state.missing = pending;
-                let shown = state.hover.take().is_some();
+                let shown = state.hover.take().is_some() || state.note;
                 drop(state);
                 if shown {
                     self.hide_hover();
+                }
+                if let Some(note) = note.filter(|_| key && command) {
+                    self.show_note(&note);
                 }
                 return;
             }
             pending
         };
-        let key = self.window().is_some_and(|window| window.isKeyWindow());
-        let command = command_down();
         match (pending, found) {
-            (Some(query), Some((index, resolved)))
-                if key && hover_style(&query, command).is_some() =>
-            {
-                self.show_link(Verified::found(query, index, resolved), command);
+            (Some(query), Some(make)) if key && hover_style(&query, command).is_some() => {
+                self.show_link(make(query), command);
             }
             _ => self.clear_link(),
+        }
+    }
+
+    /// Writes a note in the pane's label in place of a link (R1.2, R1.3); a
+    /// shown hover goes.
+    fn show_note(&self, text: &str) {
+        let shown = {
+            let mut state = self.link_state().borrow_mut();
+            state.note = true;
+            state.hover.take().is_some()
+        };
+        if shown && let Some(session) = self.session() {
+            session.set_link_hover(None);
+        }
+        if let Some(pane) = self.pane() {
+            pane.set_link_target(Some(text));
+        }
+        if shown {
+            self.sync_cursor_rects();
         }
     }
 
@@ -638,6 +827,7 @@ impl BateriView {
             state.pending = None;
             state.hover = Some(link);
             state.command_hover = command;
+            state.note = false;
         }
         if let Some(pane) = self.pane() {
             pane.set_link_target(label.as_deref());
@@ -646,6 +836,7 @@ impl BateriView {
     }
 
     fn hide_hover(&self) {
+        self.link_state().borrow_mut().note = false;
         if let Some(session) = self.session() {
             session.set_link_hover(None);
         }
@@ -758,14 +949,14 @@ impl BateriView {
     /// application's screen): the context menu if a link is under it (Karar 7).
     /// No ⌘ needed. A link the hover already verified pops at once; a path
     /// candidate is `stat`ed on the background queue first and pops on its
-    /// return ([`BateriView::link_menu_verified`]) — a missing path is no link and
+    /// return ([`BateriView::settle_menu`]) — a missing path is no link and
     /// gets no menu. Without a link nothing happens, as before.
     pub(crate) fn link_menu(&self, event: &NSEvent) {
         let in_window = event.locationInWindow();
         let (Some(at), Some(session)) = (self.link_cell(in_window), self.session()) else {
             return;
         };
-        let Some(hit) = session.link_at(at.point()).filter(|hit| !hit.remote) else {
+        let Some(hit) = session.link_at(at.point()) else {
             return;
         };
         let point = self.convertPoint_fromView(in_window, None);
@@ -781,12 +972,13 @@ impl BateriView {
             self.pop_link_menu(link, point);
             return;
         }
-        match local_paths(&hit) {
-            None => self.pop_link_menu(Verified::plain(hit), point),
-            Some(paths) => {
+        match self.check(&hit) {
+            Check::None => self.pop_link_menu(Verified::plain(hit), point),
+            check @ (Check::Local(_) | Check::Remote(_)) => {
                 self.link_state().borrow_mut().menu_pending = Some(hit.clone());
-                self.verify_paths(paths, hit, Then::Menu(point));
+                self.verify(check, hit, Then::Menu(point));
             }
+            Check::CwdUnknown | Check::Gone => {}
         }
     }
 
@@ -796,13 +988,13 @@ impl BateriView {
         self.link_state().borrow_mut().menu_pending = None;
     }
 
-    /// The right click's `stat` came back: the menu pops at the click's point
-    /// if this is still the waited-for candidate, the path exists and the
+    /// The right click's verification came back: the menu pops at the click's
+    /// point if this is still the waited-for candidate, the path exists and the
     /// window is still key.
-    pub(crate) fn link_menu_verified(
+    fn settle_menu(
         &self,
         hit: &LinkHit,
-        found: Option<(usize, Resolved)>,
+        found: Option<impl FnOnce(LinkHit) -> Verified>,
         at: NSPoint,
     ) {
         let pending = {
@@ -817,8 +1009,8 @@ impl BateriView {
             state.menu_pending.take()
         };
         let key = self.window().is_some_and(|window| window.isKeyWindow());
-        if let (Some(query), Some((index, resolved)), true) = (pending, found, key) {
-            self.pop_link_menu(Verified::found(query, index, resolved), at);
+        if let (Some(query), Some(make), true) = (pending, found, key) {
+            self.pop_link_menu(make(query), at);
         }
     }
 
@@ -826,6 +1018,34 @@ impl BateriView {
     /// "Reveal in Finder", "Copy Path", on any other link "Open Link", "Copy
     /// Link". A link the policy has nothing for (`bateri://`) gets no menu.
     fn pop_link_menu(&self, link: Verified, at: NSPoint) {
+        if let Some((_, entry)) = &link.remote {
+            let file = matches!(entry, RemoteEntry::File { .. });
+            let mut items: Vec<(&NSString, objc2::runtime::Sel, bool)> = Vec::new();
+            if file {
+                // The preview comes with 045 phase-4; until then it is shown, gray.
+                items.push((ns_string!("Open Preview"), sel!(openLinkFromMenu:), false));
+            }
+            items.extend([
+                (
+                    ns_string!("Download to Downloads"),
+                    sel!(downloadLinkFromMenu:),
+                    true,
+                ),
+                (
+                    ns_string!("Download To…"),
+                    sel!(downloadLinkToFromMenu:),
+                    true,
+                ),
+                (ns_string!("Copy Path"), sel!(copyLinkFromMenu:), true),
+                (
+                    ns_string!("Copy as scp Path"),
+                    sel!(copyScpPathFromMenu:),
+                    true,
+                ),
+            ]);
+            self.pop_menu(link, &items, at);
+            return;
+        }
         let action = links::action(
             &link.hit.target,
             &link.hit.kind,
@@ -835,21 +1055,38 @@ impl BateriView {
         if matches!(action, None | Some(LinkAction::Swallow)) {
             return;
         }
-        let mtm = self.mtm();
-        let items: &[(&NSString, objc2::runtime::Sel)] = if link.resolved.is_some() {
+        let items: &[(&NSString, objc2::runtime::Sel, bool)] = if link.resolved.is_some() {
             &[
-                (ns_string!("Open"), sel!(openLinkFromMenu:)),
-                (ns_string!("Reveal in Finder"), sel!(revealLinkFromMenu:)),
-                (ns_string!("Copy Path"), sel!(copyLinkFromMenu:)),
+                (ns_string!("Open"), sel!(openLinkFromMenu:), true),
+                (
+                    ns_string!("Reveal in Finder"),
+                    sel!(revealLinkFromMenu:),
+                    true,
+                ),
+                (ns_string!("Copy Path"), sel!(copyLinkFromMenu:), true),
             ]
         } else {
             &[
-                (ns_string!("Open Link"), sel!(openLinkFromMenu:)),
-                (ns_string!("Copy Link"), sel!(copyLinkFromMenu:)),
+                (ns_string!("Open Link"), sel!(openLinkFromMenu:), true),
+                (ns_string!("Copy Link"), sel!(copyLinkFromMenu:), true),
             ]
         };
+        self.pop_menu(link, items, at);
+    }
+
+    /// Pops a menu of `(title, action, enabled)` items acting on `link` at
+    /// `at` (view points). Items are enabled by hand (`autoenablesItems` off):
+    /// a targeted item would otherwise always be enabled.
+    fn pop_menu(
+        &self,
+        link: Verified,
+        items: &[(&NSString, objc2::runtime::Sel, bool)],
+        at: NSPoint,
+    ) {
+        let mtm = self.mtm();
         let menu = NSMenu::new(mtm);
-        for &(title, action) in items {
+        menu.setAutoenablesItems(false);
+        for &(title, action, enabled) in items {
             // SAFETY: `initWithTitle:action:keyEquivalent:` takes two `NSString`s
             // and a selector the target implements (`BateriView`'s link menu
             // selectors); `setTarget:` keeps the target weakly and the view
@@ -864,6 +1101,7 @@ impl BateriView {
                 item.setTarget(Some(self));
                 item
             };
+            item.setEnabled(enabled);
             menu.addItem(&item);
         }
         self.link_state().borrow_mut().menu = Some(link);
@@ -888,14 +1126,78 @@ impl BateriView {
         }
     }
 
-    /// "Copy Path" (the resolved absolute path) / "Copy Link" (the target).
+    /// "Copy Path" (the resolved absolute path, a remote one's on the remote
+    /// disk) / "Copy Link" (the target).
     pub(crate) fn menu_copy_link(&self) {
         let link = self.link_state().borrow_mut().menu.take();
-        let text = link.map(|link| match link.resolved {
-            Some(Resolved { path, .. }) => path.to_string_lossy().into_owned(),
-            None => link.hit.target,
+        let text = link.map(|link| match (link.resolved, link.remote) {
+            (Some(Resolved { path, .. }), _) => path.to_string_lossy().into_owned(),
+            (None, Some((path, _))) => path,
+            (None, None) => link.hit.target,
         });
         clipboard::copy(&NSPasteboard::generalPasteboard(), text);
+    }
+
+    /// "Copy as scp Path" (R3): `-P 2222 deploy@prod:/var/log/x` from the
+    /// remote session's argv ([`remote_files::scp_path`]).
+    pub(crate) fn menu_copy_scp_path(&self) {
+        let link = self.link_state().borrow_mut().menu.take();
+        let target = self
+            .session()
+            .and_then(|session| session.remote_target())
+            .map(|(_, target, _)| target);
+        let text = match (link.and_then(|link| link.remote), target) {
+            (Some((path, _)), Some(target)) => Some(remote_files::scp_path(&target, &path)),
+            _ => None,
+        };
+        if text.is_some() {
+            clipboard::copy(&NSPasteboard::generalPasteboard(), text);
+        }
+    }
+
+    /// "Download to Downloads" (`choose` false: `[remote] download_dir`) and
+    /// "Download To…" (`choose`: a folder picked in an open panel sheet) — the
+    /// pane's download takes it from there ([`crate::pane::TerminalPane::download_remote`]).
+    pub(crate) fn menu_download(&self, choose: bool) {
+        let link = self.link_state().borrow_mut().menu.take();
+        let (Some((path, _)), Some(pane)) = (link.and_then(|link| link.remote), self.pane()) else {
+            return;
+        };
+        if !choose {
+            pane.download_remote(path, None);
+            return;
+        }
+        let Some(window) = self
+            .window()
+            .filter(|window| window.attachedSheet().is_none())
+        else {
+            return;
+        };
+        let panel = NSOpenPanel::openPanel(self.mtm());
+        panel.setCanChooseDirectories(true);
+        panel.setCanChooseFiles(false);
+        panel.setAllowsMultipleSelection(false);
+        panel.setCanCreateDirectories(true);
+        panel.setPrompt(Some(ns_string!("Download")));
+        // The pane by id: the panel's block must not pin the pane.
+        let (id, lookup) = (pane.id(), pane.lookup());
+        let chosen = panel.clone();
+        let answered = RcBlock::new(move |response: NSModalResponse| {
+            if response != NSModalResponseOK {
+                return;
+            }
+            let folder = chosen
+                .URLs()
+                .firstObject()
+                .and_then(|url| url.path())
+                .map(|path| std::path::PathBuf::from(path.to_string()));
+            // audit: the panel's completion block runs on AppKit's main thread.
+            let mtm = MainThreadMarker::new().expect("the panel block is on the main thread");
+            if let (Some(folder), Some(pane)) = (folder, lookup(mtm, id)) {
+                pane.download_remote(path.clone(), Some(folder));
+            }
+        });
+        panel.beginSheetModalForWindow_completionHandler(&window, &answered);
     }
 
     /// The sheet for an OSC 8 link with an uncommon scheme: the whole target,
