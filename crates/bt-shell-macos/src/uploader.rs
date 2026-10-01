@@ -55,6 +55,8 @@ use objc2_user_notifications::{
 use crate::child;
 use crate::download::{self, Conflict};
 use crate::pane::{PaneLookup, TerminalPane};
+use crate::preview::beep;
+use crate::preview_cache;
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{Answer, Query, Request};
 use crate::upload::{
@@ -72,13 +74,14 @@ struct Asked {
     result: Result<(Vec<Local>, ProbeReply), String>,
 }
 
-/// The confirmed drop: the items that will enter the queue.
-struct Confirmed {
-    command: u64,
-    ssh: Vec<String>,
-    host: String,
-    mark: HostMark,
-    jobs: Vec<Job>,
+/// The confirmed drop (or download, or preview): the items that will enter the
+/// queue.
+pub(crate) struct Confirmed {
+    pub(crate) command: u64,
+    pub(crate) ssh: Vec<String>,
+    pub(crate) host: String,
+    pub(crate) mark: HostMark,
+    pub(crate) jobs: Vec<Job>,
 }
 
 /// A download's question answered (045 R4): what the remote item is and what
@@ -99,7 +102,7 @@ struct Prepared {
 /// Where a download lands and what is there.
 struct Landing {
     entry: RemoteEntry,
-    /// The destination folder (created if it was missing).
+    /// The destination folder (it may not exist yet).
     folder: std::path::PathBuf,
     free: Option<u64>,
     /// Whether the remote name is already taken in `folder`.
@@ -107,7 +110,11 @@ struct Landing {
 }
 
 /// Finds the pane with `id` on the main thread and applies `work` to it.
-fn on_pane(lookup: PaneLookup, id: u64, work: impl FnOnce(&TerminalPane) + Send + 'static) {
+pub(crate) fn on_pane(
+    lookup: PaneLookup,
+    id: u64,
+    work: impl FnOnce(&TerminalPane) + Send + 'static,
+) {
     DispatchQueue::main().exec_async(move || {
         // audit: a block running on the main queue is by definition on the main thread.
         let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
@@ -233,23 +240,29 @@ impl TerminalPane {
             if response != NSAlertFirstButtonReturn {
                 return;
             }
-            if let Some(confirmed) = confirmed.borrow_mut().take() {
-                pane.upload_confirmed(confirmed);
+            if let Some(confirmed) = confirmed.borrow_mut().take()
+                && !pane.upload_confirmed(confirmed)
+            {
+                beep();
             }
         });
         self.upload_alert().replace(Some(alert.clone()));
         alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
     }
 
-    /// Confirmation (an upload's or a download's): the items go to the end of
-    /// the queue, the first starts if the queue is idle.
-    fn upload_confirmed(&self, confirmed: Confirmed) {
+    /// Confirmation (an upload's, a download's or a preview's): the items go to
+    /// the end of the queue, the first starts if the queue is idle — a lingering
+    /// result line ends with it (045 phase-4). `false` if they could not enter:
+    /// the remote session ended, or the queue is still stopping (its half-written
+    /// file is being deleted); the caller beeps, an action is never dropped in
+    /// silence.
+    pub(crate) fn upload_confirmed(&self, confirmed: Confirmed) -> bool {
         let alive = self
             .session()
             .and_then(|session| session.remote_target())
             .is_some_and(|(command, ..)| command == confirmed.command);
         if !alive {
-            return;
+            return false;
         }
         let queued = self.uploads().borrow_mut().enqueue(
             confirmed.command,
@@ -263,22 +276,28 @@ impl TerminalPane {
             // If the queue was already flowing, the new items are in the list and the count.
             self.upload_refresh();
         }
+        queued
     }
 
     /// A remote link's "Download to Downloads" (`folder` `None`: `[remote]
     /// download_dir`) or "Download To…" (045 R3, R4): the helper counts the item
     /// and the destination is looked at on its thread, then
-    /// [`TerminalPane::download_prepared`] asks or starts. Dropped while another
-    /// sheet is in progress (two sheets cannot open on top of each other) or the
-    /// remote session ended.
+    /// [`TerminalPane::download_prepared`] asks or starts. Refused with a beep
+    /// while another sheet is in progress (two sheets cannot open on top of each
+    /// other) or the remote session ended.
     pub(crate) fn download_remote(&self, remote: String, folder: Option<std::path::PathBuf>) {
         let Some(session) = self.session() else {
+            beep();
             return;
         };
         let Some((command, target, _)) = session.remote_target() else {
+            beep();
             return;
         };
         if !self.accepts_drop() {
+            // Another sheet is open (two cannot stack) or the queue is still
+            // stopping: refused, but audibly (045 phase-4).
+            beep();
             return;
         }
         let mark = session
@@ -326,6 +345,7 @@ impl TerminalPane {
             .is_some_and(|(command, ..)| command == prepared.command);
         let Some(window) = self.window().filter(|_| alive) else {
             self.uploads().borrow_mut().set_asking(false);
+            beep();
             return;
         };
         let Prepared {
@@ -429,27 +449,29 @@ impl TerminalPane {
             RemoteEntry::File { size, .. } => (1, size.unwrap_or(0)),
             RemoteEntry::Dir(size) => size.map_or((0, 0), |size| (size.files, size.bytes)),
         };
-        let Some((_, name)) = remote_files::split_remote(remote) else {
-            return;
-        };
-        let Some(job) = Job::download(
-            remote,
-            landing.folder.join(name),
-            matches!(landing.entry, RemoteEntry::Dir(_)),
-            files,
-            bytes,
-            Lane::Queue,
-            conflict,
-        ) else {
-            return;
-        };
-        self.upload_confirmed(Confirmed {
-            command,
-            ssh,
-            host,
-            mark,
-            jobs: vec![job],
+        let job = remote_files::split_remote(remote).and_then(|(_, name)| {
+            Job::download(
+                remote,
+                landing.folder.join(name),
+                matches!(landing.entry, RemoteEntry::Dir(_)),
+                files,
+                bytes,
+                Lane::Queue,
+                conflict,
+            )
         });
+        let queued = job.is_some_and(|job| {
+            self.upload_confirmed(Confirmed {
+                command,
+                ssh,
+                host,
+                mark,
+                jobs: vec![job],
+            })
+        });
+        if !queued {
+            beep();
+        }
     }
 
     /// Starts every item that may start on its own background thread: the
@@ -478,6 +500,15 @@ impl TerminalPane {
             job,
             shared,
         } = started;
+        // A preview's ticket (045 phase-4): sealed on this thread when it lands,
+        // opened on the main thread after its row is updated.
+        let ticket = match job.way {
+            Way::Down {
+                lane: Lane::Preview,
+                ..
+            } => self.previews().borrow().get(job.landing()).cloned(),
+            _ => None,
+        };
         let (id, lookup) = (self.id(), self.lookup());
         let spawned = thread::Builder::new().name("transfer".into()).spawn({
             let shared = Arc::clone(&shared);
@@ -498,8 +529,23 @@ impl TerminalPane {
                         quarantine,
                     ),
                 };
+                let open = match (&outcome, &landed, ticket) {
+                    (Outcome::Done, Some(landed), Some(ticket)) => {
+                        preview_cache::seal(
+                            &ticket.dir,
+                            landed,
+                            ticket.read_only,
+                            preview_cache::now(),
+                        );
+                        Some(landed.clone())
+                    }
+                    _ => None,
+                };
                 on_pane(lookup, id, move |pane| {
                     pane.upload_finished(item, outcome, landed);
+                    if let Some(path) = open {
+                        pane.open_preview(&path);
+                    }
                 });
             }
         });
@@ -818,9 +864,10 @@ impl TerminalPane {
                     );
                 }
             }
+            // Through the preview's open policy (R5.3): a script opens as text.
             Some(RowAction::Open) => {
                 if let Some(path) = landed() {
-                    NSWorkspace::sharedWorkspace().openURL(&file_url(&path));
+                    self.open_preview(&path);
                 }
             }
             None => {}
@@ -1351,6 +1398,13 @@ pub(crate) fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
     if NSApplication::sharedApplication(mtm).isActive() {
         return;
     }
+    deliver_notification(title, body);
+}
+
+/// [`notify`] without the background gate: the caller decided a notification is
+/// the right channel (045: an edited preview kept while no window can show a
+/// sheet). Never in an unbundled process.
+pub(crate) fn deliver_notification(title: &str, body: &str) {
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
         return;
     }
@@ -1422,8 +1476,9 @@ fn quarantine(path: &Path) {
 }
 
 /// The download's destination on the helper's thread: `folder` or the expanded
-/// `download_dir` (created if missing — `~/Downloads` normally exists), its free
-/// space and whether the remote name is already taken there.
+/// `download_dir`, its free space and whether the remote name is already taken
+/// there. Nothing is created here — a missing folder is made when the stream
+/// starts (`download::transfer`), after the user confirmed (045 phase-4).
 fn landing(
     entry: RemoteEntry,
     remote: &str,
@@ -1433,8 +1488,6 @@ fn landing(
     let folder = folder
         .or_else(|| bt_core::expand_home(download_dir, child::home().as_deref()))
         .ok_or_else(|| format!("The download folder {download_dir} can't be found."))?;
-    std::fs::create_dir_all(&folder)
-        .map_err(|error| format!("{} can't be written: {error}", folder.display()))?;
     let Some((_, name)) = remote_files::split_remote(remote) else {
         return Err(format!("{remote} can't be downloaded."));
     };

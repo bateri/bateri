@@ -372,7 +372,7 @@ const NEVER_DOCUMENT: [&str; 2] = ["public.script", "public.executable"];
 /// The content class of a file name's extension, from UTType (044 R5.1).
 /// `Other` without an extension, for an unknown one and if the runtime has no
 /// `UTType` class — the white list's safe side (the file is revealed).
-fn extension_content(ext: &str) -> Content {
+pub(crate) fn extension_content(ext: &str) -> Content {
     let Some(class) = AnyClass::get(c"UTType") else {
         return Content::Other;
     };
@@ -920,8 +920,18 @@ impl BateriView {
         }
     }
 
-    /// The click's action (`links::action`, the white list).
+    /// The click's action (`links::action`, the white list). A remote path has
+    /// its own policy (045 Karar 3, 13): a file previews
+    /// ([`crate::pane::TerminalPane::preview_remote`]), a folder does nothing.
     fn open_link(&self, link: &Verified) {
+        if let Some((path, entry)) = &link.remote {
+            if matches!(entry, RemoteEntry::File { .. })
+                && let Some(pane) = self.pane()
+            {
+                pane.preview_remote(path.clone());
+            }
+            return;
+        }
         let action = links::action(
             &link.hit.target,
             &link.hit.kind,
@@ -1022,8 +1032,7 @@ impl BateriView {
             let file = matches!(entry, RemoteEntry::File { .. });
             let mut items: Vec<(&NSString, objc2::runtime::Sel, bool)> = Vec::new();
             if file {
-                // The preview comes with 045 phase-4; until then it is shown, gray.
-                items.push((ns_string!("Open Preview"), sel!(openLinkFromMenu:), false));
+                items.push((ns_string!("Open Preview"), sel!(openLinkFromMenu:), true));
             }
             items.extend([
                 (

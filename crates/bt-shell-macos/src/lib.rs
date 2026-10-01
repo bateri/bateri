@@ -43,6 +43,7 @@ mod locale;
 mod menu;
 mod pacer;
 mod pane;
+mod preview;
 mod search_bar;
 mod settings_window;
 mod split_view;
@@ -54,8 +55,8 @@ mod window;
 // The platform-independent half lives in `bt-shell-common` (043); imported
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
-    child, download, gesture, jobs, keys, links, notices, quote, remote_files, remote_helper,
-    settings, split, upload, watch, zoom,
+    child, download, gesture, jobs, keys, links, notices, preview_cache, quote, remote_files,
+    remote_helper, settings, split, upload, watch, zoom,
 };
 
 use std::time::{Duration, Instant};

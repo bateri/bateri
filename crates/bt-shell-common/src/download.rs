@@ -41,11 +41,14 @@ pub enum Conflict {
 /// unique across processes.
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-/// The prefix of the hidden temporary folder an item unpacks into.
-const TEMP_PREFIX: &str = ".bateri-download-";
+/// The prefix of the hidden temporary folder an item unpacks into (the preview
+/// cache's sweep skips such folders: they are a stream in flight).
+pub const TEMP_PREFIX: &str = ".bateri-download-";
 
 /// Downloads the remote absolute path `remote` to `landing`: `ssh … tar c` remotely,
-/// `tar x` locally into a temporary folder next to `landing`, then `seal` (the
+/// `tar x` locally into a temporary folder next to `landing` (its folder is
+/// created here, when the stream starts — nothing is made on disk before the
+/// user confirmed, 045 phase-4), then `seal` (the
 /// caller's last word on the finished item — the quarantine mark, while it is still
 /// hidden) and one `rename` to `landing`, or by `conflict` to its next free name.
 /// **On a background thread**; `tick` posts the progress report to the main queue (at
@@ -73,6 +76,12 @@ pub fn transfer(
             None,
         );
     };
+    if let Err(error) = fs::create_dir_all(parent) {
+        return (
+            Outcome::Failed(format!("{} can't be written: {error}", parent.display())),
+            None,
+        );
+    }
     let temp = match make_temp(parent) {
         Ok(temp) => temp,
         Err(error) => {
@@ -282,10 +291,12 @@ pub fn keep_both_name(path: &Path, dir: bool, taken: impl Fn(&Path) -> bool) -> 
 
 /// Free bytes on the volume that holds `dir` (`statvfs`: the blocks an
 /// unprivileged process may use) — the download sheet's "not enough space"
-/// (045 R4). `None` if it cannot be asked; blocking (a network volume), so off the
-/// main thread.
+/// (045 R4). A folder that does not exist yet (it is created when the stream
+/// starts) is asked through its nearest existing ancestor. `None` if it cannot be
+/// asked; blocking (a network volume), so off the main thread.
 pub fn free_space(dir: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
+    let dir = dir.ancestors().find(|at| at.exists())?;
     let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: `path` is a NUL-terminated string that outlives the call and
@@ -525,10 +536,42 @@ mod tests {
     }
 
     #[test]
-    fn free_space_answers_for_a_folder_and_not_for_a_missing_one() {
+    fn free_space_answers_for_a_folder_and_for_one_not_made_yet() {
         let root = scratch("free");
         assert!(free_space(&root).is_some_and(|free| free > 0));
-        assert_eq!(free_space(&root.join("missing")), None);
+        // The download's folder is created when the stream starts: before that
+        // its nearest existing ancestor's volume answers.
+        assert!(free_space(&root.join("missing/deeper")).is_some_and(|free| free > 0));
+        assert!(!root.join("missing").exists(), "asking makes nothing");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_landing_folder_is_made_when_the_stream_starts() {
+        let root = scratch("deep");
+        let remote = root.join("remote");
+        fs::create_dir_all(&remote).unwrap();
+        let source = remote.join("app.log");
+        fs::write(&source, b"line\n").unwrap();
+        // The preview's `{dir}/{host}/{remote path}`: none of it exists yet.
+        let landing = root.join("Previews/prod/var/log/app.log");
+        let (outcome, landed) = transfer(
+            &local_ssh(),
+            source.to_str().unwrap(),
+            &landing,
+            Conflict::Replace,
+            &Arc::new(Shared::default()),
+            || {},
+            |_| {},
+        );
+        assert_eq!(outcome, Outcome::Done);
+        assert_eq!(landed, Some(landing.clone()));
+        assert_eq!(fs::read(&landing).unwrap(), b"line\n");
+        assert_eq!(
+            names(landing.parent().unwrap()),
+            ["app.log"],
+            "no temporary left"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

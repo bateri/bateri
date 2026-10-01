@@ -7,8 +7,9 @@
 //! encoding (`keys`), what a ⌘-clicked link resolves to and what opening it
 //! does (`links`), the remote upload rules, processes and the two-way transfer
 //! queue (`upload`), the download's stream (`download`), the rules of
-//! previewing and downloading a remote file (`remote_files`) and its helper
-//! ssh session (`remote_helper`), the
+//! previewing and downloading a remote file (`remote_files`), its helper
+//! ssh session (`remote_helper`) and the preview cache on disk
+//! (`preview_cache`), the
 //! process table (`jobs`), the shell's birth (`child`) and file watching
 //! (`watch`).
 //!
@@ -31,6 +32,7 @@ pub mod jobs;
 pub mod keys;
 pub mod links;
 pub mod notices;
+pub mod preview_cache;
 pub mod quote;
 pub mod remote_files;
 pub mod remote_helper;

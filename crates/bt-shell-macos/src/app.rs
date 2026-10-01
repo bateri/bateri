@@ -19,7 +19,7 @@ use bt_core::{
     ShellIntegration, SmoothScroll, TabId, Teardown, Theme,
 };
 use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Stats};
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
@@ -37,6 +37,8 @@ use objc2_foundation::{
 use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
 use crate::pane::{PaneLaunch, TerminalPane};
+use crate::preview_cache;
+use crate::remote_files::Sweep;
 use crate::settings_window::SettingsWindow;
 use crate::split::Axis;
 use crate::watch::{Notify, Watch};
@@ -522,6 +524,10 @@ pub(crate) fn split_into_grid(
     }
 }
 
+/// The daily preview sweep's period (045 Karar 9) — "once a day", a design
+/// constant.
+const DAILY_SWEEP: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// The application's delegate — the way back from a window to the app level.
 ///
 /// A window does **not** hold a reference to the app delegate: the delegate
@@ -818,6 +824,11 @@ define_class!(
             // first for the diagnostics to reach the subtitle: the new window takes
             // its subtitle over from the slots (`open_window`).
             self.load_settings();
+            // The preview cache's launch sweep and the daily one (045 Karar 9):
+            // on their own thread and the main queue's timer, never the frame
+            // path; a timed run never touches the user's cache.
+            self.sweep_previews(Sweep::Launch);
+            self.schedule_daily_sweep();
             NSApplication::sharedApplication(mtm).activate();
             // The renderer is born with the window (026 → Karar 2a) and its error
             // lands here. `didFinishLaunching` cannot return an error; a terminal
@@ -2050,6 +2061,69 @@ impl AppDelegate {
         };
         self.post_notices(Source::Settings, messages);
         self.ivars().settings.replace(settings);
+    }
+
+    /// Sweeps the preview cache (045 Karar 9, R6) on a background thread with
+    /// the settings as they are now: `Launch` at startup, `Daily` from
+    /// [`AppDelegate::schedule_daily_sweep`] and `ClearNow` — the single method
+    /// the settings window's Clear Now calls (phase-6). Edited copies it moved to
+    /// the download folder are reported on the main thread
+    /// ([`crate::preview::report_rescued`]). Nothing in a timed run.
+    pub(crate) fn sweep_previews(&self, sweep: Sweep) {
+        if !matches!(self.inputs(), Inputs::User { .. }) {
+            return;
+        }
+        let files = self.ivars().settings.borrow().remote_files.clone();
+        let home = child::home();
+        let (Some(dir), Some(downloads)) = (
+            bt_core::expand_home(&files.preview_dir, home.as_deref()),
+            bt_core::expand_home(&files.download_dir, home.as_deref()),
+        ) else {
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("preview sweep".into())
+            .spawn(move || {
+                let report = preview_cache::sweep(
+                    &dir,
+                    &downloads,
+                    sweep,
+                    files.preview_keep,
+                    files.preview_limit,
+                    preview_cache::now(),
+                );
+                if report.rescued.is_empty() {
+                    return;
+                }
+                DispatchQueue::main().exec_async(move || {
+                    // audit: a block running on the main queue is by definition on the main thread.
+                    let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                    let window = NSApplication::sharedApplication(mtm).keyWindow();
+                    crate::preview::report_rescued(mtm, window.as_deref(), &report.rescued, || {});
+                });
+            });
+    }
+
+    /// The daily sweep (Karar 9: once a day, only what outlived `preview_keep`):
+    /// one delayed block on the main queue that sweeps and sets up the next —
+    /// a timer, not a frame; idle frames stay at zero. Nothing in a timed run.
+    fn schedule_daily_sweep(&self) {
+        if !matches!(self.inputs(), Inputs::User { .. }) {
+            return;
+        }
+        let Ok(when) = DispatchTime::try_from(DAILY_SWEEP) else {
+            return;
+        };
+        // The error arm is not represented today (the link clock's rationale): if
+        // it drops, the next launch sweeps.
+        let _ = DispatchQueue::main().after(when, || {
+            // audit: a block running on the main queue is by definition on the main thread.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = delegate(mtm) {
+                app.sweep_previews(Sweep::Daily);
+                app.schedule_daily_sweep();
+            }
+        });
     }
 
     /// The theme of a window born while no window exists: the theme the settings select,
