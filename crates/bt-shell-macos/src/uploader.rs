@@ -328,7 +328,7 @@ impl TerminalPane {
 
     /// Writes the status line to the session and stores it for the mouse's
     /// button question. The hand cursor is set up by AppKit's cursor rect
-    /// (`BateriView::upload_cursor_rects`); if buttons appeared or went away
+    /// (`BateriView::hand_cursor_rects`); if buttons appeared or went away
     /// the rects are refreshed here, so when a button goes the hand does not
     /// hang under the mouse.
     fn show_transfer(&self, transfer: Option<Transfer>) {
@@ -918,7 +918,7 @@ impl TerminalPane {
 }
 
 /// Esc's key code (independent of the ANSI layout, a hardware code).
-const ESCAPE: u16 = 53;
+pub(crate) const ESCAPE: u16 = 53;
 
 /// The popover's width, inner padding, the gap between rows and the row
 /// button's minimum width - **design constants**, the measures of the
@@ -983,7 +983,9 @@ fn label(mtm: MainThreadMarker, text: &str, size: f64, color: &NSColor) -> Retai
 
 /// Installs a local key monitor: if `swallow` returns `true` the event is
 /// swallowed. It runs on the main thread, before `NSApp.sendEvent:`.
-fn add_key_monitor(swallow: impl Fn(&NSEvent) -> bool + 'static) -> Option<Retained<AnyObject>> {
+pub(crate) fn add_key_monitor(
+    swallow: impl Fn(&NSEvent) -> bool + 'static,
+) -> Option<Retained<AnyObject>> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit gives the monitor a valid event.
         let event_ref = unsafe { event.as_ref() };
@@ -998,7 +1000,7 @@ fn add_key_monitor(swallow: impl Fn(&NSEvent) -> bool + 'static) -> Option<Retai
 }
 
 /// Removes [`add_key_monitor`]'s monitor.
-fn remove_monitor(monitor: Option<Retained<AnyObject>>) {
+pub(crate) fn remove_monitor(monitor: Option<Retained<AnyObject>>) {
     if let Some(monitor) = monitor {
         // SAFETY: the object is the monitor `addLocalMonitor…` returned and it
         // is removed once (its owner is taken from the slot).
