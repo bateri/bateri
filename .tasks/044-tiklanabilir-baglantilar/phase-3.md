@@ -38,7 +38,46 @@ _Requirements: R5, R5.1, R6_
 
 ## Checklist
 
-- [ ] `links.rs`: `resolve`, `action`, makine adı
-- [ ] `gesture.rs`: `pressed_link`, `Release::Link`
-- [ ] Test: çözüm, politika tablosu, jest ön-rotası
-- [ ] Doğrulama geçti (`make check` + `make linux`)
+- [x] `links.rs`: `resolve`, `action`, makine adı
+- [x] `gesture.rs`: `pressed_link`, `Release::Link`
+- [x] Test: çözüm, politika tablosu, jest ön-rotası
+- [x] Doğrulama geçti (`make check` + `make linux`)
+
+## Uygulama Notları
+
+- **API'nin biçimi.** `links::local_path(hedef, &LinkKind) -> Option<PathBuf>`
+  (yol adayı olduğu gibi; düz metin ya da OSC 8 `file://` URL'sinin yüzde
+  çözülmüş yolu — yetki denetimi phase-1'in hit testinde, burada tekrar
+  edilmiyor), `resolve(aday, cwd, home, stat) -> Option<Resolved { path,
+  entry: Entry::{Dir, File { executable }} }>`, üretim `stat`'ı
+  (`std::fs::metadata`, symlink izlenir), `action(hedef, &LinkKind,
+  Option<&Resolved>, content) -> Option<LinkAction>` (`None` = bağlantı değil:
+  var olmayan yol ya da `file://`) ve `hostname()` (`libc::gethostname`).
+  phase-4'ün akışı: `local_path` `Some` ise arka planda `resolve(.., stat)`,
+  tıkta `action`.
+- **SAPMA — "bilinen içerik tipi" `bool` değil üç değerli `Content`**
+  (`Document`/`Package`/`Other`, AppKit cevaplıyor). Gerekçe: `.app`, `.pkg`,
+  `.workflow` **dizin** ve `OpenDir` `openURL` ile açılırsa paket
+  **çalışır/kurulur** — beyaz listenin korumak istediği şey. Paket dizini
+  `Reveal`; bunu ayırmak `NSWorkspace::isFilePackageAtPath` / UTType
+  `com.apple.package` sorusu, yani phase-4'ün `Content` cevabı bunu da
+  vermeli (phase-4 checklist'ine yazıldı).
+- **SAPMA — sonek `resolve`'da yeniden atılmıyor.** phase-1 `:satır:sütun`'u
+  hedeften ayırıp `LinkKind::Path { line, col }`'a koyuyor; ikinci kez atmak
+  adı gerçekten `:12` ile biten bir dosyayı bozardı. Kabul'ün "sonek
+  atılması" maddesi bu sözleşmeyle sınanıyor
+  (`the_suffix_is_bt_cores_and_is_not_stripped_again`).
+- **SAPMA — `pressed_link()` aralık almıyor, `Release::Link` yüksüz.** Defter
+  `Copy` (view `Cell`'de take-modify-put yapıyor); `Vec<LinkSpan>` onu
+  bozardı. Kilitli aralık view'ın tuttuğu doğrulanmış hover'ın kendisi —
+  bırakmada onunla karşılaştırılıyor (Muhakeme: hit test yeniden koşmuyor).
+  Shift'in girdisi yok, yani "Shift basılı olsa da aynı" yapısal; sınama
+  iki koşuyu da aynı çağrıyla geçiyor.
+- **Küçük kararlar.** `~user/…` genişletilmiyor (bağlantı değil); göreli yol
+  yalnız mutlak bir OSC 7 dizinine çözülüyor; `./src`'nin `.`'sı
+  `components` ile atılıyor, `..` kalıyor (symlink'te sözcüksel `..`
+  yanlış). `file://` yolunda `?`/`#` sonrası yol değil. Şemasız OSC 8 URI'si
+  ve listedeki olmayan düz metin URL (tarayıcıdan gelemez) `Confirm` —
+  güvenli yön. `bateri:` her türde ilk satır.
+- `view.rs`'teki `Release` eşlemesine `Release::Link` kolu eklendi (no-op,
+  phase-4'ü işaret ediyor); başka platform kabuğu kodu değişmedi.

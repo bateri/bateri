@@ -50,6 +50,13 @@ pub struct Gesture {
     /// Press and release refresh the notch only **when they are reported** ([`Gesture::stamp`]):
     /// the criterion is "this was reported to the application".
     notch: Option<(u16, u16)>,
+    /// Whether the left button's press was a ⌘-click on a **verified** link (044 R6,
+    /// [`Gesture::pressed_link`]).
+    ///
+    /// Only the route is here, not the link's range: the ledger stays `Copy` and the view
+    /// already holds the verified hover the press was matched against, so the release compares
+    /// with that (`discussion.md` → Muhakeme, İşletme: the hit test does not run again).
+    link: bool,
 }
 
 /// The work the terminal does from a press.
@@ -89,6 +96,10 @@ pub enum Release {
     /// had no drag is told by `bt-core`'s selection, not the ledger
     /// — a `Simple` selection that stayed empty.
     Dock,
+    /// The end of a ⌘-click on a link (044 R6): nothing is reported and no selection ends;
+    /// the view opens the link if the pointer is still over the range locked at the press and
+    /// the click count is one.
+    Link,
 }
 
 impl Gesture {
@@ -104,7 +115,30 @@ impl Gesture {
         if button == MouseButton::Left {
             self.dragging = false;
             self.dock = false;
+            self.link = false;
         }
+    }
+
+    /// A left-button press with ⌘ inside the **verified** link hover's range: the gesture is
+    /// the link's in **every** mode (044 R6). The caller must have called
+    /// [`Gesture::begin_press`] first and must **not** call `Session::mouse_button` — so no
+    /// report goes to the application (vim, htop, Claude Code) and no selection starts, Shift
+    /// or not.
+    ///
+    /// The route is locked here like the report's: a drag does nothing ([`Drag::Ignore`]) and
+    /// the release is [`Release::Link`]. No `sent` bit is set, so the lost-release path
+    /// ([`Gesture::take_lost_releases`]) never reports a release the application never saw a
+    /// press for.
+    ///
+    /// **Why here and not in `bt-core`'s `button_route`** (the road map's "fourth arm"
+    /// sketch): the link bit can only come from the view's verified hover — whether a path
+    /// exists is unknown to `bt-core` — so a `bt-core` arm would only reflect the decision
+    /// back (`.tasks/044-tiklanabilir-baglantilar/discussion.md` → Muhakeme, Sadelik 1). The
+    /// dock press is the precedent ([`Gesture::pressed_dock`]).
+    pub fn pressed_link(&mut self) {
+        self.dragging = false;
+        self.dock = false;
+        self.link = true;
     }
 
     /// A left-button press on the dock's input line: the gesture is the **terminal's** (mouse mode
@@ -176,6 +210,9 @@ impl Gesture {
     /// left button's selection gesture ends (the selection stays on screen, Cmd-C copies it).
     pub fn released(&mut self, button: MouseButton) -> Release {
         let bit = button_bit(button);
+        if button == MouseButton::Left && std::mem::take(&mut self.link) {
+            return Release::Link;
+        }
         if self.sent & bit == 0 {
             if button == MouseButton::Left {
                 let dock = self.dragging && self.dock;
@@ -409,6 +446,54 @@ mod tests {
         press(&mut gesture, Click::Select, 1, false);
         assert_eq!(gesture.dragged(LEFT), Drag::Select);
         assert!(gesture.dragging());
+    }
+
+    #[test]
+    fn a_link_press_beats_the_report_and_the_selection() {
+        // Mouse mode on (vim `:set mouse=a`): the view sees ⌘ over a verified link and takes
+        // the ledger's pre-route — `mouse_button` is never called, so there is no `Click` to
+        // write. Shift held or not, the call is the same: the route has no Shift input.
+        for _shift in [false, true] {
+            let mut gesture = Gesture::default();
+            gesture.begin_press(LEFT);
+            gesture.pressed_link();
+            // A drag neither selects nor reports.
+            assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
+            assert!(!gesture.dragging(), "a link press is not a selection drag");
+            // The release is the link's, once, and no report follows.
+            assert_eq!(gesture.released(LEFT), Release::Link);
+            assert_eq!(gesture.released(LEFT), Release::Done);
+            // No `sent` bit: the lost-release path reports nothing.
+            assert_eq!(gesture.take_lost_releases().count(), 0);
+        }
+    }
+
+    #[test]
+    fn a_link_press_leaves_other_buttons_and_the_next_press_alone() {
+        let mut gesture = Gesture::default();
+        // A reported right-button press stays reported across a link click.
+        gesture.begin_press(RIGHT);
+        gesture.pressed(RIGHT, Click::Sent, 1, false);
+        gesture.begin_press(LEFT);
+        gesture.pressed_link();
+        assert_eq!(gesture.dragged(RIGHT), Drag::Report);
+        assert_eq!(gesture.released(RIGHT), Release::Report);
+        assert_eq!(gesture.released(LEFT), Release::Link);
+        // A link press clears a stale selection drag.
+        press(&mut gesture, Click::Select, 1, false);
+        gesture.begin_press(LEFT);
+        gesture.pressed_link();
+        assert!(!gesture.dragging());
+        // A lost link release does not leak into the next press: a new selection releases as
+        // a selection.
+        press(&mut gesture, Click::Select, 1, false);
+        assert_eq!(gesture.dragged(LEFT), Drag::Select);
+        assert_eq!(gesture.released(LEFT), Release::Done);
+        // Nor into a reported one.
+        gesture.begin_press(LEFT);
+        gesture.pressed_link();
+        press(&mut gesture, Click::Sent, 1, false);
+        assert_eq!(gesture.released(LEFT), Release::Report);
     }
 
     #[test]

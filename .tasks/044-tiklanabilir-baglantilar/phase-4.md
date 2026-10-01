@@ -53,5 +53,8 @@ _Requirements: R3, R5.1, R6, R7_
 - [ ] Ön-rota bağlama, bırakmada açma
 - [ ] Tek cursor-rect listesi
 - [ ] Açma, onay sayfası, UTType sınıfı, makine adı
+- [ ] `links::Content`'in cevabı paket dizinini de ayırıyor (`Package` →
+  `Reveal`; `.app`'i `openURL` ile açmak onu çalıştırır — phase-3 Uygulama
+  Notları)
 - [ ] `CLAUDE.md` güncellendi
 - [ ] Doğrulama geçti (`make check` + `make smoke`)
