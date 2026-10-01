@@ -182,7 +182,8 @@ en çok 100 aday, `LinkHit::candidates`/`choose`, karar
 `.tasks/044-tiklanabilir-baglantilar/phase-1.md` → Uygulama Notları; URL tek
 belirteç kalıyor) ve OSC 8
 bağlantısı (metin taramasını yener). Algılama ve hit test `bt-core`'da
-(`link`, `Session::link_at`; uzak oturumda yol ve `file://` bağlantı değil),
+(`link`, `Session::link_at`; uzak oturumda `file://` bağlantı değil, düz metin
+yol **uzak işaretli** hit — `LinkHit::remote`, bugün kabuk katmanı düşürüyor, 045),
 vurgu hover yuvasından ve damgalı (`Session::set_link_hover`; damga tutmazsa
 çizilmez, düşer ve `Wake::link_hover_lost` ile pencere key'se yeniden
 bulunur — akan çıktıda çıktı başına iki kare, boşta sıfır; **dock'ta damga

@@ -182,8 +182,10 @@ pub enum Loaded {
     Unreadable(io::Error),
     /// Read, but could not be parsed as TOML.
     Unparseable(Diagnostic),
-    /// Parsed; the diagnostics are the rejected keys.
-    Parsed(Parsed),
+    /// Parsed; the diagnostics are the rejected keys. Boxed: the settings
+    /// record dwarfs the other variants (045's remote file keys tipped
+    /// `clippy::large_enum_variant`).
+    Parsed(Box<Parsed>),
 }
 
 /// The reading of a text file — the shared gate of the settings and theme files.
@@ -243,7 +245,7 @@ pub fn load_keeping(root: &Path, current: &Settings) -> Loaded {
         Text::Read(text) if text.trim().is_empty() => Loaded::Missing,
         Text::Unreadable(err) => Loaded::Unreadable(err),
         Text::Read(text) => match Settings::parse_keeping(&text, current) {
-            Ok(parsed) => Loaded::Parsed(parsed),
+            Ok(parsed) => Loaded::Parsed(Box::new(parsed)),
             Err(diagnostic) => Loaded::Unparseable(diagnostic),
         },
     }

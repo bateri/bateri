@@ -145,7 +145,7 @@ pub fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
 /// or csh too), and fish treats `\'` and `\\` as escapes inside single quotes; the
 /// `'\''` form would carry the backslash to the outer layer in nested quoting and
 /// break the command in fish. `"'"` reads the same in every shell.
-fn sq(text: &str) -> String {
+pub(crate) fn sq(text: &str) -> String {
     let mut quoted = String::with_capacity(text.len() + 2);
     quoted.push('\'');
     for c in text.chars() {
@@ -161,7 +161,7 @@ fn sq(text: &str) -> String {
 
 /// The remote command: the POSIX script wrapped in `sh -c`. The login shell only
 /// reads `sh -c '…'`, so the script's syntax is independent of the shell.
-fn remote_command(script: &str) -> String {
+pub(crate) fn remote_command(script: &str) -> String {
     format!("sh -c {}", sq(script))
 }
 
@@ -169,7 +169,7 @@ fn remote_command(script: &str) -> String {
 /// backslash and no control character.** Both break the two-layer quoting (login
 /// shell + `sh -c`) in fish or csh; such a name is rejected openly on the sheet (a
 /// known limit) rather than silently written to the wrong place.
-fn is_safe(text: &str) -> bool {
+pub(crate) fn is_safe(text: &str) -> bool {
     !text.chars().any(|c| c == '\\' || c.is_control())
 }
 
@@ -179,7 +179,7 @@ fn is_safe(text: &str) -> bool {
 const PROBE_MARK: &str = "BT-UPLOAD";
 
 /// The script's exit code when it cannot change into the target directory.
-const NO_DIRECTORY: i32 = 3;
+pub(crate) const NO_DIRECTORY: i32 = 3;
 
 /// What is asked remotely before the sheet opens, **in a single connection**: the
 /// directory's full path (the home directory if there is no `dir`), `df -Pk`'s line,

@@ -2636,6 +2636,11 @@ pub struct LinkHit {
     /// A path query's candidates (`link::path_candidates`, at most 100); empty
     /// for a URL, an OSC 8 link and a hit already narrowed by [`LinkHit::choose`].
     pub candidates: Vec<PathCandidate>,
+    /// A plain-text path found in a remote session (045 Karar 13): its
+    /// candidates name the **remote** disk, so the shell layer must verify them
+    /// there, never with a local `stat`. Always `false` for a URL and an OSC 8
+    /// link.
+    pub remote: bool,
 }
 
 /// One name a plain-text path query may resolve to ([`LinkHit::candidates`]).
@@ -2679,6 +2684,7 @@ impl LinkHit {
             },
             stamp: LinkStamp(stamp),
             candidates: Vec::new(),
+            remote: self.remote,
         })
     }
 
@@ -2935,6 +2941,12 @@ fn path_candidates(
 }
 
 /// The scanner's kind → the boundary's.
+/// [`LinkHit::remote`]: a plain-text path of a remote session; a URL and an
+/// OSC 8 link never are.
+fn remote_path(kind: &LinkKind, remote: bool) -> bool {
+    remote && matches!(kind, LinkKind::Path { .. })
+}
+
 fn link_kind(kind: link::FoundKind) -> LinkKind {
     match kind {
         link::FoundKind::Url => LinkKind::Url,
@@ -6946,8 +6958,8 @@ impl Session {
     /// candidate the shell layer still has to resolve.
     ///
     /// One `Term` lock round. The remote flag is read **before** it (a leaf lock
-    /// never goes under `Term`): in a remote session paths and every `file://`
-    /// are not links (the local disk has no remote path). A `file://` with a
+    /// never goes under `Term`): in a remote session every `file://` is not a
+    /// link and a path is marked remote ([`LinkHit::remote`], 045). A `file://` with a
     /// foreign authority is not a link either ([`crate::shell::is_local_authority`],
     /// the machine's name from [`SessionOptions::hostname`]).
     ///
@@ -6991,6 +7003,7 @@ impl Session {
                     .then(|| LinkHit {
                         spans: link_spans(&term, first, last, offset),
                         target: head.target,
+                        remote: remote_path(&kind, remote),
                         kind,
                         stamp: LinkStamp(Stamped::Screen {
                             mark: self.ledger_now(&term),
@@ -7005,6 +7018,7 @@ impl Session {
         Some(LinkHit {
             spans: link_spans(&term, first, last, offset),
             target,
+            remote: remote_path(&kind, remote),
             kind,
             stamp: LinkStamp(Stamped::Screen {
                 mark: self.ledger_now(&term),
@@ -7055,6 +7069,7 @@ impl Session {
         Some(LinkHit {
             spans,
             target: head.target,
+            remote: remote_path(&kind, remote),
             kind,
             stamp: LinkStamp(Stamped::Dock {
                 text,
@@ -7066,12 +7081,14 @@ impl Session {
         })
     }
 
-    /// Whether a found link is one here: in a remote session paths and every
-    /// `file://` are not (the local disk has no remote path); a `file://` with a
-    /// foreign authority is not either ([`crate::shell::is_local_authority`]).
+    /// Whether a found link is one here: a plain-text path always is — in a
+    /// remote session it is marked remote ([`LinkHit::remote`]) and resolved on
+    /// the remote disk (045 Karar 13); every `file://` of a remote session is
+    /// not (which disk it names is unclear), nor is a `file://` with a foreign
+    /// authority ([`crate::shell::is_local_authority`]).
     fn link_allowed(&self, kind: &LinkKind, target: &str, remote: bool) -> bool {
         match kind {
-            LinkKind::Path { .. } => !remote,
+            LinkKind::Path { .. } => true,
             LinkKind::Url | LinkKind::Osc8 if link::is_file_url(target) => {
                 !remote
                     && link::file_authority(target).is_some_and(|authority| {
@@ -20119,7 +20136,7 @@ e\\314\\201.'; sleep 5";
     }
 
     #[test]
-    fn a_remote_session_has_no_path_or_file_links() {
+    fn a_remote_session_marks_its_paths_remote_and_has_no_file_links() {
         let wake = Arc::new(TestWake::default());
         let options = test_options(
             sh(&format!(
@@ -20150,10 +20167,18 @@ e\\314\\201.'; sleep 5";
         );
         assert_eq!(kind(30), Some(LinkKind::Url), "a local `file://`");
         assert_eq!(kind(45), None, "a foreign authority is not a link");
+        let remote = |col| session.link_at(screen(0, col)).map(|hit| hit.remote);
+        assert_eq!(remote(18), Some(false), "a local session's path");
         let command = session.running_command().expect("running after `C`");
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
         assert_eq!(kind(5), Some(LinkKind::Url), "a URL stays a link");
-        assert_eq!(kind(18), None, "no local path behind a remote one");
+        assert_eq!(remote(5), Some(false), "a URL is never remote-marked");
+        // 045 Karar 13: the path is a candidate of the remote disk.
+        let hit = session.link_at(screen(0, 18)).expect("a remote path hit");
+        assert!(hit.remote);
+        assert_eq!(hit.target, "~/x.txt");
+        let narrowed = hit.choose(0).expect("the first candidate");
+        assert!(narrowed.remote, "narrowing keeps the mark");
         assert_eq!(kind(30), None, "no `file://` in a remote session");
         session.shutdown();
     }

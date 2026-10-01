@@ -6,6 +6,7 @@
 //! the mouse gesture ledger (`gesture`), shell quoting (`quote`), key
 //! encoding (`keys`), what a ⌘-clicked link resolves to and what opening it
 //! does (`links`), the remote upload rules and processes (`upload`), the
+//! rules of previewing and downloading a remote file (`remote_files`), the
 //! process table (`jobs`), the shell's birth (`child`) and file watching
 //! (`watch`).
 //!
@@ -28,6 +29,7 @@ pub mod keys;
 pub mod links;
 pub mod notices;
 pub mod quote;
+pub mod remote_files;
 pub mod settings;
 pub mod split;
 pub mod upload;

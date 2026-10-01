@@ -232,6 +232,29 @@ integration = "auto"
 #   { host = "*.staging.example.com", mark = "staging" },
 # ]
 hosts = []
+# Sizes are written like "100MB" or "2GB" (B, KB, MB, GB, TB); folders start
+# with / or ~/.
+# A file larger than this asks before its preview downloads (cmd-click on a
+# remote file name).
+preview_max_size = "100MB"
+# true | false. Previews open read-only. It is a hint: an app can unlock one,
+# and a preview you changed is moved to the download folder, never deleted.
+preview_read_only = true
+# Where previews are kept.
+preview_dir = "~/Library/Caches/bateri/Previews"
+# "launch" | "1d" | "7d" | "30d". How long a preview stays after you last
+# opened it; checked when bateri starts and once a day. launch keeps previews
+# until bateri starts again.
+preview_keep = "7d"
+# The preview folder's size limit, applied when bateri starts, oldest first.
+preview_limit = "2GB"
+# Where "Download to Downloads" puts a remote file or folder.
+download_dir = "~/Downloads"
+# "ask" | "keep_both" | "replace". What a download does when the name already
+# exists: ask, keep both (the new one gets a number), or replace the old one.
+download_conflict = "ask"
+# true | false. Notify when a transfer ends while bateri is in the background.
+download_notify = true
 ```
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
@@ -904,6 +927,14 @@ hosts = [
 | anahtar | tür | varsayılan | anlamı |
 |---|---|---|---|
 | `hosts` | `{ host, mark }` dizisi | `[]` | uzak host'ların işareti: ssh ya da mosh o host'tayken dock'un renkleri |
+| `preview_max_size` | boyut | `"100MB"` | uzak dosyanın önizlemesi (⌘-tık) bundan büyükse inmeden önce sorar |
+| `preview_read_only` | `true` \| `false` | `true` | önizleme kopyası salt okunur (`0444`) açılır — bir ipucu, uygulama kilidi açabilir |
+| `preview_dir` | klasör | `"~/Library/Caches/bateri/Previews"` | önizleme kopyalarının klasörü |
+| `preview_keep` | `"launch"` \| `"1d"` \| `"7d"` \| `"30d"` | `"7d"` | önizleme son açılışından sonra ne kadar kalır; `launch` bir sonraki açılışa kadar |
+| `preview_limit` | boyut | `"2GB"` | önizleme klasörünün boyut sınırı; yalnız açılışta, en eskiden başlayarak |
+| `download_dir` | klasör | `"~/Downloads"` | "Download to Downloads"'un hedefi |
+| `download_conflict` | `"ask"` \| `"keep_both"` \| `"replace"` | `"ask"` | hedefte aynı ad varsa: sor, ikisini de tut (yenisi numara alır) ya da üstüne yaz |
+| `download_notify` | `true` \| `false` | `true` | bateri arkadayken biten aktarım bildirim gönderir |
 
 ssh ya da mosh ile uzak bir makinedeyken dock'un bağlam satırı `⇄ host`
 gösterir ve üst çizgisi renklenir. `hosts` o rengi host'a göre seçer, yani
@@ -942,6 +973,38 @@ prod'da olduğunuzu renkten bilirsiniz.
   öğe) listenin **tamamını** reddeder: açılışta liste boş, kayıt anında
   ekrandaki liste kalır ve uyarı görünür. Yalnız bozuk girdiyi atmak sırayı
   değiştirip bir host'un işaretini sessizce değiştirebilirdi.
+
+#### Uzak dosyalar: önizleme ve indirme
+
+Kalan sekiz anahtar ssh ya da mosh oturumundaki dosya adlarının ayarı:
+⌘-tık dosyayı geçici, salt okunur bir kopyayla **önizler**, indirme kalıcı
+kopyayı `download_dir`'e koyar.
+
+- **Boyut** `"100MB"` gibi yazılır: tam sayı ve `B`, `KB`, `MB`, `GB`, `TB`
+  birimlerinden biri (ondalık, Finder'ın birimleri; arada bir boşluk olabilir).
+  Büyük/küçük harf duyarlı: `"100mb"` reddedilir. Birimsiz sayı da reddedilir,
+  çünkü birimi tahmine bırakırdı.
+- **Klasör** `/` ya da `~/` ile başlar; göreli yol ve `~kullanıcı` reddedilir.
+- **Temizlik** açılışta (saklama süresini aşanlar ve `preview_limit`'i aşan
+  kısım, en eskiden) ve günde bir kez (yalnız saklama süresi) çalışır; çıkışta
+  hiçbir şey silinmez ve bateri açıkken boyut yüzünden silme yoktur. Siz
+  değiştirdiğiniz için bateri'nin yazdığı hâlden ayrılan bir önizleme hiçbir
+  temizlikte silinmez: `download_dir`'e taşınır ve bildirilir.
+- Kabul edilmeyen değer o anahtarı açılışta varsayılanda, kayıt anında
+  ekrandaki değerde bırakır ve uyarı görünür.
+
+**Göreli adlar sunucunun OSC 7'sini ister.** `ls` çıktısındaki `backups` adı
+göreli; hangi dizinde olduğunu yalnız uzak kabuğun bastığı OSC 7 söyler ve çoğu
+sunucu onu varsayılan olarak basmaz. Basmıyorsa mutlak (`/var/log/x`) ve `~/…`
+yollar yine çalışır, göreli adın üstünde ⌘ basılıyken etiket nedeni söyler.
+bateri sunucudaki rc dosyasına yazmaz; açmak için sunucuda tek satır yeter:
+
+```sh
+# ~/.bashrc
+PROMPT_COMMAND='printf "\033]7;file://%s%s\007" "$HOSTNAME" "$PWD"'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+# ~/.zshrc
+_bt_osc7() { printf '\033]7;file://%s%s\007' "$HOST" "$PWD"; }; precmd_functions+=(_bt_osc7)
+```
 
 ## Temalar
 

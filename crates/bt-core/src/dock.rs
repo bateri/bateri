@@ -2022,7 +2022,9 @@ enum ButtonLabel {
     Cancel,
     CancelAll,
     /// With the number of items in the list; the same label while the list is
-    /// open (037 phase-7: `Hide files` was dropped, the button is in the pressed tone).
+    /// open (037 phase-7: `Hide files` was dropped, the button is in the pressed
+    /// tone). "Transfers", not "files": the list carries both directions (045
+    /// Karar 6).
     ShowFiles(u16),
 }
 
@@ -2032,7 +2034,7 @@ impl ButtonLabel {
         let (head, count, tail) = match self {
             Self::Cancel => ("Cancel", None, ""),
             Self::CancelAll => ("Cancel all", None, ""),
-            Self::ShowFiles(items) => ("Show files (", Some(items), ")"),
+            Self::ShowFiles(items) => ("Show transfers (", Some(items), ")"),
         };
         head.chars()
             .chain(count.into_iter().flat_map(decimal))
@@ -3844,46 +3846,46 @@ mod tests {
     fn a_queue_gets_a_list_button_and_the_pointer_state() {
         let state = live("", "", "", 0);
         let context = uploading("↑ 1 of 2 · a.tar", 2, None);
-        let (cells, dock) = draw_with(&state, &context, 60);
+        let (cells, dock) = draw_with(&state, &context, 64);
         assert_eq!(
             row_text(&cells, 1),
             format!(
-                "{:<29}{:<17}Cancel all ⌘.",
-                "⇄ prod  ↑ 1 of 2 · a.tar", "Show files (2)"
+                "{:<29}{:<21}Cancel all ⌘.",
+                "⇄ prod  ↑ 1 of 2 · a.tar", "Show transfers (2)"
             )
         );
         assert_eq!(
             dock.buttons.map(|b| b.map(|b| (b.start, b.end))),
-            [Some((28, 44)), Some((45, 60))]
+            [Some((28, 48)), Some((49, 64))]
         );
         let transfer = context.transfer.as_ref().unwrap();
         assert_eq!(
-            transfer_button_at(transfer, 60, 28),
+            transfer_button_at(transfer, 64, 28),
             Some(TransferAction::List)
         );
         assert_eq!(
-            transfer_button_at(transfer, 60, 43),
+            transfer_button_at(transfer, 64, 47),
             Some(TransferAction::List)
         );
         assert_eq!(
-            transfer_button_at(transfer, 60, 44),
+            transfer_button_at(transfer, 64, 48),
             None,
             "the gap between the two buttons"
         );
         assert_eq!(
-            transfer_button_at(transfer, 60, 45),
+            transfer_button_at(transfer, 64, 49),
             Some(TransferAction::Cancel)
         );
 
         // Mouse over cancel: state and hint in the foreground; the list is unaffected.
         let hovered = with_controls(context.clone(), |c| c.hover = Some(TransferAction::Cancel));
-        let (cells, dock) = draw_with(&state, &hovered, 60);
+        let (cells, dock) = draw_with(&state, &hovered, 64);
         assert_eq!(
             dock.buttons.map(|b| b.map(|b| b.state)),
             [Some(ButtonState::Idle), Some(ButtonState::Hover)]
         );
         assert_eq!(
-            color_at(&cells, 1, 57),
+            color_at(&cells, 1, 61),
             Some(THEME.foreground_linear()),
             "hint"
         );
@@ -3891,18 +3893,18 @@ mod tests {
         // List open: the label does not change (no `Hide files`, phase-7), the
         // button in the pressed tone; the popover's anchor is the button's exact range.
         let open = with_controls(context, |c| c.list_open = true);
-        let (cells, dock) = draw_with(&state, &open, 60);
-        assert!(row_text(&cells, 1).contains("Show files (2)"));
+        let (cells, dock) = draw_with(&state, &open, 64);
+        assert!(row_text(&cells, 1).contains("Show transfers (2)"));
         assert!(!row_text(&cells, 1).contains("Hide"));
         assert_eq!(dock.buttons[0].map(|b| b.state), Some(ButtonState::Pressed));
         let transfer = open.transfer.as_ref().unwrap();
         assert_eq!(
-            transfer_button_span(transfer, 60, TransferAction::List),
-            Some((28, 44))
+            transfer_button_span(transfer, 64, TransferAction::List),
+            Some((28, 48))
         );
         assert_eq!(
-            transfer_button_span(transfer, 60, TransferAction::Cancel),
-            Some((45, 60))
+            transfer_button_span(transfer, 64, TransferAction::Cancel),
+            Some((49, 64))
         );
     }
 
@@ -3956,9 +3958,9 @@ mod tests {
         };
         // `⇄ prod  ` is eight columns; the remaining budget is `cols - 8`.
         let queue = uploading("↑ a", 2, None);
-        assert!(labels(&queue, 40).ends_with("Show files (2)   Cancel all ⌘."));
-        assert!(labels(&queue, 39).ends_with("Show files (2)   Cancel all"));
-        let cancel_only = labels(&queue, 36);
+        assert!(labels(&queue, 44).ends_with("Show transfers (2)   Cancel all ⌘."));
+        assert!(labels(&queue, 43).ends_with("Show transfers (2)   Cancel all"));
+        let cancel_only = labels(&queue, 40);
         assert!(cancel_only.ends_with("Cancel all"));
         assert!(!cancel_only.contains("Show"));
         assert!(
