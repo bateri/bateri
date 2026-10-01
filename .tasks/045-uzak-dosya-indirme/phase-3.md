@@ -46,5 +46,6 @@ _Requirements: R1.1, R1.2, R1.3, R3, R4_
 - [ ] hyperlink: uzak doğrulama, etiket metinleri, menü öğeleri
 - [ ] `hyperlink.rs`'in iki `link_at` çağrısındaki `!hit.remote` süzgecini kaldır (phase-1'in geçici düşürmesi)
 - [ ] Onay sayfası (klasör, çakışma, yer)
+- [ ] `TerminalPane`'e indirme giriş noktası (phase-2'den): `Job::download(…, Lane::Queue, conflict)` + `Transfers::enqueue` + `start_transfers`; sayfanın Keep both / Replace cevabı `Conflict` olarak işe girer; `download_notify` ayarı bildirime bağlanır (bugün her biten kuyruk arkadayken bildiriyor)
 - [ ] Test: Kabul listesi
 - [ ] Doğrulama geçti (`make check`)

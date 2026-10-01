@@ -254,14 +254,15 @@ const RECONNECT_HINT: &str = "  Connection lost · ⏎ reconnect";
 /// the same thing (the remote location).
 const REMOTE_GAP: &str = "  ";
 
-/// The non-ASCII characters of the upload row (037 Karar 7 → Kullanıcı
-/// kararı 4) — the **vocabulary** of the text `bt-shell` formats. The text
+/// The non-ASCII characters of the transfer row (037 Karar 7 → Kullanıcı
+/// kararı 4; `↓` the download, 045 Karar 6) — the **vocabulary** of the text
+/// `bt-shell` formats. The text
 /// is born there, but the gate checking that no box appears in the small
 /// class is in `bt-atlas` and that crate cannot see either side; the copies
 /// are tied to this list (`the_upload_row_is_the_one_the_atlas_checks`). The
 /// buttons' `⌘` is here too: this crate writes the label but its glyph is
 /// again in the small class.
-pub const UPLOAD_GLYPHS: [char; 7] = ['↑', '⌘', '✓', '—', '·', '…', '→'];
+pub const UPLOAD_GLYPHS: [char; 8] = ['↑', '↓', '⌘', '✓', '—', '·', '…', '→'];
 
 /// The most glyphs an edit can carry — a **design constant**.
 ///
@@ -4043,7 +4044,7 @@ mod tests {
         // `bt-atlas` asks by hand about the status row's non-ASCII characters
         // in the small class (`the_upload_row_has_no_box_in_the_small_class`);
         // the string is in `bt-shell` (`upload`) but the character set is pinned here.
-        assert_eq!(UPLOAD_GLYPHS, ['↑', '⌘', '✓', '—', '·', '…', '→']);
+        assert_eq!(UPLOAD_GLYPHS, ['↑', '↓', '⌘', '✓', '—', '·', '…', '→']);
         assert!(
             CANCEL_HINT
                 .chars()

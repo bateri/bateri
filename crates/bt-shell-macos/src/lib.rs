@@ -54,7 +54,8 @@ mod window;
 // The platform-independent half lives in `bt-shell-common` (043); imported
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
-    child, gesture, jobs, keys, links, notices, quote, settings, split, upload, watch, zoom,
+    child, download, gesture, jobs, keys, links, notices, quote, settings, split, upload, watch,
+    zoom,
 };
 
 use std::time::{Duration, Instant};

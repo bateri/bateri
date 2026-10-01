@@ -1,7 +1,9 @@
-//! The **AppKit half** of the upload queue (037 Karar 7 → Kullanıcı kararı):
-//! the AppKit and dispatch work that goes from the drop to the confirmation
-//! sheet, from the sheet to the stream, from the stream to the dock's status
-//! line, to the "Show files (N)" popover and to the stop question. The queue
+//! The **AppKit half** of the transfer queue (037 Karar 7 → Kullanıcı kararı;
+//! both directions since 045 Karar 6, 12): the AppKit and dispatch work that
+//! goes from the drop to the confirmation sheet, from the sheet to the stream
+//! (an upload's or a download's — the latter quarantined before it lands), from
+//! the stream to the dock's status line, to the "Show transfers (N)" popover
+//! and to the stop question. The queue
 //! is **the pane's** (039 phase-2): sheets attach to the pane view's window,
 //! the popover to the pane's `BateriView`; the title's `↑ N%` prefix, the
 //! notification and the Dock tile come from the pane's owner
@@ -21,6 +23,7 @@
 //! with `None`, and no further frame is requested - that is the stopping condition.
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -38,20 +41,22 @@ use objc2_app_kit::{
     NSButton, NSColor, NSControlSize, NSEvent, NSEventMask, NSFont, NSFontWeightRegular,
     NSImageScaling, NSImageView, NSLineBreakMode, NSModalResponse, NSModalResponseAbort, NSPopover,
     NSPopoverBehavior, NSProgressIndicator, NSProgressIndicatorStyle, NSTextField, NSView,
-    NSViewController,
+    NSViewController, NSWorkspace,
 };
 use objc2_foundation::{
-    NSBundle, NSError, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSUUID, ns_string,
+    NSArray, NSBundle, NSDictionary, NSError, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSURL,
+    NSURLQuarantinePropertiesKey, NSUUID, ns_string,
 };
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
     UNUserNotificationCenter,
 };
 
+use crate::download;
 use crate::pane::{PaneLookup, TerminalPane};
 use crate::upload::{
-    self, Ended, Job, Local, Outcome, ProbeReply, RowAction, RowStatus, Shared, Stop, StopQuestion,
-    UploadList,
+    self, Direction, Ended, Job, Local, Outcome, ProbeReply, RowAction, RowStatus, Shared, Started,
+    Stop, StopQuestion, TransferList, Way,
 };
 
 /// Everything that returns to the main thread from the background probe.
@@ -180,6 +185,7 @@ impl TerminalPane {
                         .map(|local| Job {
                             local,
                             dir: reply.dir.clone(),
+                            way: Way::Up,
                         })
                         .collect(),
                 })
@@ -224,31 +230,65 @@ impl TerminalPane {
             confirmed.jobs,
         );
         if queued {
-            self.upload_next();
+            let _ = self.start_transfers();
             // If the queue was already flowing, the new items are in the list and the count.
             self.upload_refresh();
         }
     }
 
-    /// Starts the next item on a background thread (no-op while an item flows).
-    fn upload_next(&self) {
-        let Some((ssh, job, shared)) = self.uploads().borrow_mut().start_next(Instant::now())
-        else {
-            return;
-        };
+    /// Starts every item that may start on its own background thread: the
+    /// queue's next item (no-op while one flows) and every preview and Finder
+    /// item, which never wait (045 Karar 6, 7).
+    /// Whether anything started (the line was refreshed then).
+    fn start_transfers(&self) -> bool {
+        let started = self.uploads().borrow_mut().start(Instant::now());
+        if started.is_empty() {
+            return false;
+        }
         self.upload_refresh();
+        for started in started {
+            self.spawn_transfer(started);
+        }
+        true
+    }
+
+    /// One item's stream on a background thread: an upload's, or a download's
+    /// that is quarantined while still hidden and then lands
+    /// ([`download::transfer`]).
+    fn spawn_transfer(&self, started: Started) {
+        let Started {
+            id: item,
+            ssh,
+            job,
+            shared,
+        } = started;
         let (id, lookup) = (self.id(), self.lookup());
-        let spawned = thread::Builder::new().name("upload".into()).spawn({
+        let spawned = thread::Builder::new().name("transfer".into()).spawn({
             let shared = Arc::clone(&shared);
             move || {
-                let outcome = upload::transfer(&ssh, &job.local, &job.dir, &shared, || {
-                    tick(lookup, id, &shared);
+                let progress = || tick(lookup, id, &shared);
+                let (outcome, landed) = match job.way {
+                    Way::Up => (
+                        upload::transfer(&ssh, &job.local, &job.dir, &shared, progress),
+                        None,
+                    ),
+                    Way::Down { conflict, .. } => download::transfer(
+                        &ssh,
+                        &job.remote_path(),
+                        job.landing(),
+                        conflict,
+                        &shared,
+                        progress,
+                        quarantine,
+                    ),
+                };
+                on_pane(lookup, id, move |pane| {
+                    pane.upload_finished(item, outcome, landed);
                 });
-                on_pane(lookup, id, move |pane| pane.upload_finished(outcome));
             }
         });
         if let Err(error) = spawned {
-            self.upload_finished(Outcome::Failed(error.to_string()));
+            self.upload_finished(item, Outcome::Failed(error.to_string()), None);
         }
     }
 
@@ -270,15 +310,21 @@ impl TerminalPane {
         self.host().uploads_changed(self.id());
     }
 
-    /// The flowing item ended: move on to the next or show the result. No path
-    /// is pasted (037 phase-7): the result line says where it went.
-    fn upload_finished(&self, outcome: Outcome) {
-        let ended = self.uploads().borrow_mut().finish(outcome);
+    /// The flowing item `item` ended (`landed`: where a download landed): move
+    /// on to the next or show the result. No path is pasted (037 phase-7): the
+    /// result line says where it went.
+    fn upload_finished(&self, item: u64, outcome: Outcome, landed: Option<std::path::PathBuf>) {
+        let ended = self
+            .uploads()
+            .borrow_mut()
+            .finish_item(item, outcome, landed);
         // If the stop question was about the ended item, the sheet closes by itself.
         self.dismiss_stale_stop();
         match ended {
             Some(ended) => self.show_end(ended),
-            None => self.upload_next(),
+            // A lane item ended while others flow: its row and the line change.
+            None if !self.start_transfers() => self.upload_refresh(),
+            None => {}
         }
         self.uploads_changed();
     }
@@ -400,13 +446,22 @@ impl TerminalPane {
     /// (confirmation or question) the request is dropped - two sheets cannot
     /// open on top of each other.
     pub(crate) fn request_stop(&self, all: bool) {
+        self.request_stop_item(None, all);
+    }
+
+    /// [`Self::request_stop`] for the flowing item `id` (a popover row's
+    /// `Cancel`; `None` → the queue's item).
+    fn request_stop_item(&self, id: Option<u64>, all: bool) {
         if self.uploads().borrow().asking()
             || self.upload_alert().borrow().is_some()
             || self.upload_stop().borrow().is_some()
         {
             return;
         }
-        let request = self.uploads().borrow().stop_request(all, Instant::now());
+        let request = self
+            .uploads()
+            .borrow()
+            .stop_request_item(id, all, Instant::now());
         match request {
             None => {}
             Some(Stop::Now { id, all }) => self.apply_stop(id, all),
@@ -427,8 +482,9 @@ impl TerminalPane {
         self.uploads_changed();
     }
 
-    /// The "Stop uploading?" sheet: `Keep uploading` is the default (Return)
-    /// and Esc, `Stop` is destructive. The upload keeps running while the sheet
+    /// The "Stop uploading?" sheet (or "Stop downloading?" and their kin, in
+    /// the question's direction): `Keep uploading` is the default (Return) and
+    /// Esc, `Stop` is destructive. The upload keeps running while the sheet
     /// is open; if the item ends meanwhile the sheet closes by itself
     /// ([`Self::dismiss_stale_stop`]).
     ///
@@ -441,7 +497,8 @@ impl TerminalPane {
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(&question.title));
         alert.setInformativeText(&NSString::from_str(&question.text));
-        alert.addButtonWithTitle(ns_string!("Keep uploading"));
+        let keep = self.uploads().borrow().keep_label(&question);
+        alert.addButtonWithTitle(&NSString::from_str(keep));
         let stop = alert.addButtonWithTitle(ns_string!("Stop"));
         stop.setHasDestructiveAction(true);
         let Some(window) = self.window() else {
@@ -494,12 +551,11 @@ impl TerminalPane {
     /// If the stop question was about an item that no longer flows, closes the
     /// sheet (the answer counts as "never mind"): the question had named that item's loss.
     fn dismiss_stale_stop(&self) {
-        let running = self.uploads().borrow().running_id();
         let stale = self
             .upload_stop()
             .borrow()
             .as_ref()
-            .filter(|sheet| running != Some(sheet.id))
+            .filter(|sheet| !self.uploads().borrow().is_running(sheet.id))
             .map(|sheet| sheet.alert.window());
         if let (Some(sheet_window), Some(window)) = (stale, self.window()) {
             window.endSheet_returnCode(&sheet_window, NSModalResponseAbort);
@@ -517,20 +573,35 @@ impl TerminalPane {
         self.uploads_changed();
     }
 
-    /// A popover row's button (`tag` is the item's id): `Cancel` on the
-    /// flowing item (asks first if past 30 s), `Remove` on a waiting one (does not ask).
+    /// A popover row's button (`tag` is the item's id): `Cancel` on a flowing
+    /// item (asks first if past 30 s), `Remove` on a waiting one (does not
+    /// ask), `Show in Finder` on a finished download, `Open` on a finished
+    /// preview (045 Karar 6).
     pub(crate) fn upload_row_action(&self, id: u64) {
         let action = self.uploads().borrow().list().and_then(|list| {
             list.rows
                 .into_iter()
                 .find(|row| row.id == id)
-                .and_then(|row| row.status.action())
+                .and_then(|row| row.action)
         });
+        let landed = || self.uploads().borrow().landed(id);
         match action {
-            Some(RowAction::Cancel) => self.request_stop(false),
+            Some(RowAction::Cancel) => self.request_stop_item(Some(id), false),
             Some(RowAction::Remove) => {
                 self.uploads().borrow_mut().remove(id);
                 self.upload_refresh();
+            }
+            Some(RowAction::ShowInFinder) => {
+                if let Some(path) = landed() {
+                    NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(
+                        &NSArray::from_retained_slice(&[file_url(&path)]),
+                    );
+                }
+            }
+            Some(RowAction::Open) => {
+                if let Some(path) = landed() {
+                    NSWorkspace::sharedWorkspace().openURL(&file_url(&path));
+                }
             }
             None => {}
         }
@@ -581,7 +652,7 @@ impl TerminalPane {
         true
     }
 
-    /// "Show files (N)": the queue's popover (037 phase-7) - attached to the
+    /// "Show transfers (N)": the queue's popover (037 phase-7) - attached to the
     /// button, `transient`: a click outside, Esc or pressing the button again closes it.
     ///
     /// **Pressing the button again**: a `transient` popover closes itself on a
@@ -754,10 +825,45 @@ impl TerminalPane {
     /// The layout is by hand and top-down (the view is not flipped; y is
     /// computed from the bottom at the end): the row count is small and the
     /// height is known from the state.
-    fn fill_list_view(&self, content: &NSView, list: &UploadList) -> (NSSize, Vec<Live>) {
+    fn fill_list_view(&self, content: &NSView, list: &TransferList) -> (NSSize, Vec<Live>) {
         let mtm = self.mtm();
         let target: &AnyObject = self.as_ref();
-        let left = LIST_WIDTH - 2.0 * LIST_PAD - ROW_BUTTON_WIDTH - LIST_PAD;
+        // The buttons first: the widest one ("Show in Finder") sets the text column.
+        let buttons: Vec<Option<Retained<NSButton>>> = list
+            .rows
+            .iter()
+            .map(|row| {
+                let action = row.action?;
+                let title = match action {
+                    RowAction::Cancel => ns_string!("Cancel"),
+                    RowAction::Remove => ns_string!("Remove"),
+                    RowAction::ShowInFinder => ns_string!("Show in Finder"),
+                    RowAction::Open => ns_string!("Open"),
+                };
+                // SAFETY: the selector is this class's `uploadRowAction:` and
+                // takes a single `Option<&AnyObject>`; the target is this pane
+                // and the pane keeps the popover alive (the target is weak).
+                let button = unsafe {
+                    NSButton::buttonWithTitle_target_action(
+                        title,
+                        Some(target),
+                        Some(sel!(uploadRowAction:)),
+                        mtm,
+                    )
+                };
+                button.setControlSize(NSControlSize::Small);
+                // audit: the id is a counter; it fits in `isize` (the item count is small).
+                button.setTag(row.id as isize);
+                button.sizeToFit();
+                Some(button)
+            })
+            .collect();
+        let button_width = buttons
+            .iter()
+            .flatten()
+            .map(|button| button.frame().size.width)
+            .fold(ROW_BUTTON_WIDTH, f64::max);
+        let left = LIST_WIDTH - 2.0 * LIST_PAD - button_width - LIST_PAD;
         let mut placed: Vec<(Retained<NSView>, NSRect)> = Vec::new();
         let mut live = Vec::new();
         let mut top = LIST_PAD;
@@ -776,9 +882,19 @@ impl TerminalPane {
         );
         top += LINE_HEIGHT + ROW_GAP;
 
-        for row in &list.rows {
+        for (row, button) in list.rows.iter().zip(buttons) {
             let row_top = top;
-            let name = label(mtm, &row.name, 13.0, &NSColor::labelColor());
+            // The row's arrow: ↑ to the server, ↓ to this Mac (045 Karar 6).
+            let arrow = match row.direction {
+                Direction::Up => "↑",
+                Direction::Down => "↓",
+            };
+            let name = label(
+                mtm,
+                &format!("{arrow} {}", row.name),
+                13.0,
+                &NSColor::labelColor(),
+            );
             name.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
             place(
                 Retained::into_super(Retained::into_super(name)),
@@ -835,26 +951,7 @@ impl TerminalPane {
                 LINE_HEIGHT,
             );
             top += LINE_HEIGHT;
-            if let Some(action) = row.status.action() {
-                let title = match action {
-                    RowAction::Cancel => ns_string!("Cancel"),
-                    RowAction::Remove => ns_string!("Remove"),
-                };
-                // SAFETY: the selector is this class's `uploadRowAction:` and
-                // takes a single `Option<&AnyObject>`; the target is this pane
-                // and the pane keeps the popover alive (the target is weak).
-                let button = unsafe {
-                    NSButton::buttonWithTitle_target_action(
-                        title,
-                        Some(target),
-                        Some(sel!(uploadRowAction:)),
-                        mtm,
-                    )
-                };
-                button.setControlSize(NSControlSize::Small);
-                // audit: the id is a counter; it fits in `isize` (the item count is small).
-                button.setTag(row.id as isize);
-                button.sizeToFit();
+            if let Some(button) = button {
                 let size = button.frame().size;
                 let width = size.width.max(ROW_BUTTON_WIDTH);
                 // Vertically centred in the row.
@@ -935,7 +1032,7 @@ const BAR_HEIGHT: f64 = 10.0;
 /// The refreshed views of a flowing row: the bar and the detail.
 type Live = (Retained<NSProgressIndicator>, Retained<NSTextField>);
 
-/// The open "Show files (N)" popover and what it holds for refreshing.
+/// The open "Show transfers (N)" popover and what it holds for refreshing.
 pub(crate) struct UploadPopover {
     popover: Retained<NSPopover>,
     /// The items' ids and states: if they change the content is rebuilt.
@@ -955,7 +1052,7 @@ pub(crate) struct StopSheet {
 }
 
 /// The list's shape: the items' ids and states (flowing 0, waiting 1, finished 2).
-fn shape_of(list: &UploadList) -> Vec<(u64, u8)> {
+fn shape_of(list: &TransferList) -> Vec<(u64, u8)> {
     list.rows
         .iter()
         .map(|row| {
@@ -1059,6 +1156,49 @@ pub(crate) fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert, &deliver);
+}
+
+/// A file URL for a local path.
+fn file_url(path: &Path) -> Retained<NSURL> {
+    NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
+}
+
+/// The quarantine mark of a downloaded item (045 Karar 5, 15): Gatekeeper asks
+/// before a downloaded program first runs, as for a browser's download. A
+/// folder's every entry is marked too (a browser's unpacked archive is). The
+/// download's `seal` hook: it runs on the stream thread while the item is still
+/// in its hidden temporary folder, so the item never has its name unmarked.
+/// Foundation's resource values are thread-safe. A failure leaves the item
+/// unmarked and is not an error: the bytes arrived.
+fn quarantine(path: &Path) {
+    let properties = NSDictionary::<NSString, NSString>::from_slices(
+        &[
+            ns_string!("LSQuarantineType"),
+            ns_string!("LSQuarantineAgentName"),
+        ],
+        &[
+            ns_string!("LSQuarantineTypeOtherDownload"),
+            ns_string!("bateri"),
+        ],
+    );
+    let mark = |path: &Path| {
+        // SAFETY: `NSURLQuarantinePropertiesKey` is a Foundation constant; its
+        // value is a dictionary of LaunchServices' quarantine keys with string
+        // values — the type the key documents.
+        let _ = unsafe {
+            file_url(path)
+                .setResourceValue_forKey_error(Some(&properties), NSURLQuarantinePropertiesKey)
+        };
+    };
+    let mut pending = vec![path.to_owned()];
+    while let Some(path) = pending.pop() {
+        mark(&path);
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir())
+            && let Ok(entries) = std::fs::read_dir(&path)
+        {
+            pending.extend(entries.flatten().map(|entry| entry.path()));
+        }
+    }
 }
 
 /// The stream thread's progress report: at most one on the main queue.

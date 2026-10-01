@@ -1579,16 +1579,17 @@ impl TerminalWindow {
     }
 
     /// Writes the window's (and tab's) title from the session; while an upload
-    /// flows `↑ N% · ` in front (037 phase-7, `upload::titled`; the percentage
-    /// from the pane's queue).
+    /// flows `↑ N% · ` in front (037 phase-7, `upload::titled_as`; `↓` while
+    /// only downloads flow, 045 Karar 6; the arrow and percentage from the
+    /// pane's queue).
     fn apply_title(&self) {
         let pane = self.focused_pane();
         if let Some(session) = pane.session() {
-            let percent = pane.upload_title_percent();
+            let prefix = pane.upload_title_prefix();
             self.ivars()
                 .window
-                .setTitle(&NSString::from_str(&upload::titled(
-                    percent,
+                .setTitle(&NSString::from_str(&upload::titled_as(
+                    prefix,
                     &session.title(),
                 )));
         }

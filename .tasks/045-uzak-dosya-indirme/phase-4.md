@@ -41,6 +41,7 @@ _Requirements: R5, R5.1, R5.2, R5.3, R5.4, R6_
 ## Checklist
 
 - [ ] ⌘-tık → önizleme akışı, sınır sayfası, önbellekten açma
+- [ ] Popover'ın "Open"ı (phase-2) bugün düz `openURL`: `remote_files::preview_open` (R5.3) üstünden geçsin; tek başına biten önizlemenin sonuç satırı (`✓ x → …/Previews/…`) ve arka plan bildirimi istenip istenmediği karara bağlansın
 - [ ] Salt okunur + düz metin kolu
 - [ ] İndeks; açılış ve günlük temizlik; farklılaşmış kopyanın taşınması
 - [ ] Test: Kabul listesi

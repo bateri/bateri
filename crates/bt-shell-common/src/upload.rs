@@ -11,8 +11,11 @@
 //!   reader ([`TarWatcher`]), the text of the line and the sheet. The tested half.
 //! - **Process:** local measurement ([`measure`]), the probe ([`probe`]) and the
 //!   stream ([`transfer`]) — all on a background thread, results to the main queue.
-//! - **Queue** ([`Uploads`]): the main thread's state — order, progress, result
-//!   line. AppKit-free; `window` sets up the sheet and the dispatch.
+//! - **Queue** ([`Transfers`]): the main thread's state — order, progress, result
+//!   line — for **both directions** (045 Karar 12): an item carries its way
+//!   ([`Way`]) and lane ([`Lane`]), the stream of a download is
+//!   [`crate::download`]'s. AppKit-free; `uploader` sets up the sheet and the
+//!   dispatch.
 //!
 //! **No password can be asked.** An ssh born from the GUI has no controlling
 //! terminal; with `BatchMode=yes` and no key/agent it fails at once with a clear
@@ -33,6 +36,7 @@ use bt_core::{
     HostMark, RemoteKind, RemoteTarget, Transfer, TransferAction, TransferControls, TransferTone,
 };
 
+use crate::download::Conflict;
 use crate::jobs::SSH_VALUED;
 
 /// The shortest interval between progress reports — a **design constant**. Every
@@ -575,23 +579,77 @@ fn label(local: &Local) -> String {
     }
 }
 
-/// A summary of the items when the queue ends: how many items, how many uploaded,
-/// their common destination (if any) and the single item's name.
-struct Tally<'a> {
+/// [`label`] by the name the item **landed** under: "Keep both" may have renamed
+/// a download (`report 2.txt`), and the result line must name what is there.
+fn landed_label(entry: &Item) -> String {
+    match entry.landed.as_ref().and_then(|landed| landed.file_name()) {
+        Some(name) if entry.job.local.dir => format!("{}/", name.to_string_lossy()),
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => label(&entry.job.local),
+    }
+}
+
+/// Which way a set of items goes (045 Karar 6): every text that names the
+/// direction reads it from here, so an upload-only queue keeps its words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ways {
+    Up,
+    Down,
+    Both,
+}
+
+impl Ways {
+    /// The directions of `ways`; an empty set reads as `Up` (the upload's words).
+    fn of(ways: impl IntoIterator<Item = Direction>) -> Self {
+        let (mut up, mut down) = (false, false);
+        for way in ways {
+            match way {
+                Direction::Up => up = true,
+                Direction::Down => down = true,
+            }
+        }
+        match (up, down) {
+            (true, true) => Self::Both,
+            (false, true) => Self::Down,
+            _ => Self::Up,
+        }
+    }
+
+    /// The past participle: `uploaded`, `downloaded`, `transferred`.
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Up => "uploaded",
+            Self::Down => "downloaded",
+            Self::Both => "transferred",
+        }
+    }
+
+    /// The arrow: `↑` to the server, `↓` to this Mac, both when mixed.
+    fn arrow(self) -> &'static str {
+        match self {
+            Self::Up => "↑",
+            Self::Down => "↓",
+            Self::Both => "↑↓",
+        }
+    }
+}
+
+/// A summary of the items when the queue ends: how many items, how many arrived,
+/// their common destination (if any), the single item's name and which way they went.
+struct Tally {
     items: usize,
     done: usize,
     /// That directory, if all items went to the same directory.
-    dest: Option<&'a str>,
+    dest: Option<String>,
     /// Its name if there is a single item ([`label`]).
     single: Option<String>,
+    ways: Ways,
 }
 
-impl<'a> Tally<'a> {
-    fn of(entries: &'a [Item]) -> Self {
-        let dest = entries.first().map(|entry| entry.job.dir.as_str());
-        let same = entries
-            .iter()
-            .all(|entry| Some(entry.job.dir.as_str()) == dest);
+impl Tally {
+    fn of(entries: &[Item]) -> Self {
+        let dest = entries.first().map(|entry| entry.job.dest());
+        let same = entries.iter().all(|entry| Some(entry.job.dest()) == dest);
         Self {
             items: entries.len(),
             done: entries
@@ -600,9 +658,10 @@ impl<'a> Tally<'a> {
                 .count(),
             dest: dest.filter(|_| same),
             single: match entries {
-                [entry] => Some(label(&entry.job.local)),
+                [entry] => Some(landed_label(entry)),
                 _ => None,
             },
+            ways: Ways::of(entries.iter().map(|entry| entry.job.way.direction())),
         }
     }
 
@@ -625,26 +684,31 @@ fn failure_reason(end: &End, host: &str) -> Option<String> {
     }
 }
 
+/// A download's full disk is this Mac's, not the server's: the reason the
+/// queue ends with ([`Transfers::finish_item`]).
+const LOCAL_DISK_FULL: &str = "disk full on this Mac";
+
 /// The result line's body, its tone and the number of leading characters drawn in
 /// that tone (037 phase-7): success green, cancel dim, the failure text red and the
 /// count after it dim.
-fn end_line(end: &End, host: &str, tally: &Tally<'_>) -> (String, TransferTone, usize) {
+fn end_line(end: &End, host: &str, tally: &Tally) -> (String, TransferTone, usize) {
+    let verb = tally.ways.verb();
     if let Some(reason) = failure_reason(end, host) {
         let head = format!("Failed — {reason}");
         let lead = head.chars().count();
-        let body = format!("{head} · {} of {} uploaded", tally.done, tally.items);
+        let body = format!("{head} · {} of {} {verb}", tally.done, tally.items);
         return (body, TransferTone::Error, lead);
     }
-    let body = match (end, tally.dest) {
+    let body = match (end, &tally.dest) {
         (End::Done, Some(dest)) => format!("✓ {} → {dest}", tally.what()),
         (End::Done, None) => format!(
-            "✓ {} {} uploaded",
+            "✓ {} {} {verb}",
             tally.items,
             // audit: the item count is per drop; it fits in a `u64`.
             files_word(tally.items as u64)
         ),
         _ if tally.items > 1 => format!(
-            "Cancelled — {} of {} uploaded, partial file removed",
+            "Cancelled — {} of {} {verb}, partial file removed",
             tally.done, tally.items
         ),
         _ => "Cancelled — partial file removed".to_owned(),
@@ -660,26 +724,39 @@ fn end_line(end: &End, host: &str, tally: &Tally<'_>) -> (String, TransferTone, 
 
 /// The notification shown while bateri is in the background (037 phase-7): title
 /// and body. Cancelling is the user's own action — no notification.
-fn end_notice(end: &End, host: &str, tally: &Tally<'_>) -> Option<(String, String)> {
+fn end_notice(end: &End, host: &str, tally: &Tally) -> Option<(String, String)> {
     if let Some(reason) = failure_reason(end, host) {
         let mut chars = reason.trim_end_matches('.').chars();
         let reason = chars
             .next()
             .map(|first| first.to_uppercase().chain(chars).collect::<String>())
             .unwrap_or_default();
+        let title = match tally.ways {
+            Ways::Up => "Upload failed",
+            Ways::Down => "Download failed",
+            Ways::Both => "Transfer failed",
+        };
         return Some((
-            "Upload failed".to_owned(),
-            format!("{reason}. {} of {} uploaded.", tally.done, tally.items),
+            title.to_owned(),
+            format!(
+                "{reason}. {} of {} {}.",
+                tally.done,
+                tally.items,
+                tally.ways.verb()
+            ),
         ));
     }
     if *end != End::Done {
         return None;
     }
-    let body = match tally.dest {
-        Some(dest) => format!("to {host}:{dest}"),
-        None => format!("to {host}"),
+    let body = match (tally.ways, &tally.dest) {
+        (Ways::Up, Some(dest)) => format!("to {host}:{dest}"),
+        (Ways::Up, None) => format!("to {host}"),
+        (Ways::Down, Some(dest)) => format!("from {host} to {dest}"),
+        (Ways::Down, None) => format!("from {host}"),
+        (Ways::Both, _) => format!("with {host}"),
     };
-    Some((format!("{} uploaded", tally.what()), body))
+    Some((format!("{} {}", tally.what(), tally.ways.verb()), body))
 }
 
 // ─── local measurement ───────────────────────────────────────────────────
@@ -885,7 +962,7 @@ pub(crate) fn probe_failure(host: &str, code: Option<i32>, stderr: &str) -> Stri
 }
 
 /// The text's last non-empty line.
-fn last_line(text: &str) -> &str {
+pub(crate) fn last_line(text: &str) -> &str {
     text.lines()
         .rev()
         .map(str::trim)
@@ -941,10 +1018,10 @@ pub fn probe(
 /// progress, the stream thread writes it.
 #[derive(Debug, Default)]
 pub struct Shared {
-    cancel: AtomicBool,
-    disk_full: AtomicBool,
-    bytes: AtomicU64,
-    files: AtomicU64,
+    pub(crate) cancel: AtomicBool,
+    pub(crate) disk_full: AtomicBool,
+    pub(crate) bytes: AtomicU64,
+    pub(crate) files: AtomicU64,
     /// The pids of the two processes in the stream (local tar, ssh) — cancelling
     /// **kills** them: on a slow connection the stream thread stays blocked writing
     /// to ssh's input and never looks at the flag; once the process dies the write
@@ -988,7 +1065,7 @@ impl Shared {
         )
     }
 
-    fn track(&self, children: &[&Child]) {
+    pub(crate) fn track(&self, children: &[&Child]) {
         let mut pids = self.pids.lock().unwrap_or_else(PoisonError::into_inner);
         pids.clear();
         pids.extend(children.iter().map(|child| child.id()));
@@ -1012,7 +1089,10 @@ impl Shared {
 /// another process by the kernel right away, and had it stayed on the list a cancel
 /// arriving in between would kill an unrelated process. `waitid(…, WNOWAIT)` reports
 /// the exit without reaping.
-fn wait_untracked(child: &mut Child, shared: &Shared) -> std::io::Result<std::process::ExitStatus> {
+pub(crate) fn wait_untracked(
+    child: &mut Child,
+    shared: &Shared,
+) -> std::io::Result<std::process::ExitStatus> {
     let pid = child.id();
     loop {
         // SAFETY: `siginfo_t` is a plain C struct, zero is a valid initial value;
@@ -1047,7 +1127,7 @@ pub enum Outcome {
 
 /// The line saying the remote disk is full (GNU tar, bsdtar and busybox print the
 /// same `strerror`).
-const DISK_FULL: &str = "No space left on device";
+pub(crate) const DISK_FULL: &str = "No space left on device";
 
 /// The local `tar c`'s flags up to `-C` (the directory and `./name` follow).
 ///
@@ -1196,7 +1276,7 @@ pub fn transfer(
 /// not fill up and block the process); if `disk` is given, stops the stream at once
 /// on a "disk full" line — GNU tar keeps swallowing the stream after the error and
 /// the remaining gigabytes would be wasted.
-fn collect_stderr(
+pub(crate) fn collect_stderr(
     stream: Option<std::process::ChildStderr>,
     disk: Option<Arc<Shared>>,
 ) -> thread::JoinHandle<String> {
@@ -1224,8 +1304,14 @@ fn collect_stderr(
 /// front of the current title — on the alternate screen (vim) there is no dock and
 /// this is the only place showing progress; otherwise the title as is.
 pub fn titled(percent: Option<u8>, title: &str) -> String {
-    match percent {
-        Some(percent) => format!("↑ {percent}% · {title}"),
+    titled_as(percent.map(|percent| ("↑", percent)), title)
+}
+
+/// [`titled`] with the direction's arrow (045 Karar 6): `↓ N% · ` while only
+/// downloads stream, `↑↓ N% · ` while both do ([`Transfers::title_prefix`]).
+pub fn titled_as(prefix: Option<(&str, u8)>, title: &str) -> String {
+    match prefix {
+        Some((arrow, percent)) => format!("{arrow} {percent}% · {title}"),
         None => title.to_owned(),
     }
 }
@@ -1238,11 +1324,124 @@ pub fn titled(percent: Option<u8>, title: &str) -> String {
 /// not happen with a single wrong click.
 pub const STOP_ASK_AFTER: Duration = Duration::from_secs(30);
 
-/// An item in the queue: the local item and the remote destination directory.
+/// Which way an item goes (045 Karar 12): `Up` to the server, `Down` to this Mac.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Direction {
+    #[default]
+    Up,
+    Down,
+}
+
+/// Where an item waits (045 Karar 6, 7): the **queue** runs one item at a time
+/// (uploads and right-click downloads); a **preview** and a **Finder** drop start
+/// at once — the user is looking at the screen, or Finder holds a placeholder.
+/// Every lane is counted alike by the line, the totals, the list, the stop question
+/// and ⌘..
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lane {
+    #[default]
+    Queue,
+    Preview,
+    Finder,
+}
+
+/// How an item travels: an upload always waits in the queue; a download carries
+/// its lane and what happens when its landing name is taken (045 R4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Way {
+    #[default]
+    Up,
+    Down {
+        lane: Lane,
+        conflict: Conflict,
+    },
+}
+
+impl Way {
+    pub fn direction(self) -> Direction {
+        match self {
+            Self::Up => Direction::Up,
+            Self::Down { .. } => Direction::Down,
+        }
+    }
+
+    pub fn lane(self) -> Lane {
+        match self {
+            Self::Up => Lane::Queue,
+            Self::Down { lane, .. } => lane,
+        }
+    }
+}
+
+/// An item in the queue: the local item, the remote folder and the way.
+///
+/// One shape serves both directions. Upload: `local` is the item on this Mac and
+/// `dir` the remote destination. Download: `dir` is the remote **source** folder,
+/// `local.name` the remote name, `local.path` where it lands (the conflict rule may
+/// still pick another name, [`crate::download::transfer`]) and `local.files`/`bytes`
+/// the remote count.
 #[derive(Clone, Debug)]
 pub struct Job {
     pub local: Local,
     pub dir: String,
+    pub way: Way,
+}
+
+impl Job {
+    /// A download of the remote absolute path `remote` to `landing` (the local
+    /// path it should take), `files`/`bytes` from the remote count. `None` for a
+    /// path that names no single item ([`crate::remote_files::split_remote`]).
+    pub fn download(
+        remote: &str,
+        landing: PathBuf,
+        dir: bool,
+        files: u64,
+        bytes: u64,
+        lane: Lane,
+        conflict: Conflict,
+    ) -> Option<Self> {
+        let (folder, name) = crate::remote_files::split_remote(remote)?;
+        Some(Self {
+            local: Local {
+                path: landing,
+                name: name.to_owned(),
+                dir,
+                files,
+                bytes,
+            },
+            dir: folder.to_owned(),
+            way: Way::Down { lane, conflict },
+        })
+    }
+
+    /// The remote item's absolute path (a download's source).
+    pub fn remote_path(&self) -> String {
+        if self.dir.ends_with('/') {
+            format!("{}{}", self.dir, self.local.name)
+        } else {
+            format!("{}/{}", self.dir, self.local.name)
+        }
+    }
+
+    /// Where a download should land (its conflict rule may still pick another
+    /// name).
+    pub fn landing(&self) -> &Path {
+        &self.local.path
+    }
+
+    /// Where the item goes, as the result line and the list name it: the remote
+    /// folder of an upload, the local folder of a download.
+    fn dest(&self) -> String {
+        match self.way {
+            Way::Up => self.dir.clone(),
+            Way::Down { .. } => self
+                .local
+                .path
+                .parent()
+                .map(|parent| parent.display().to_string())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// An item's state in the queue.
@@ -1262,18 +1461,34 @@ struct Item {
     id: u64,
     job: Job,
     state: EntryState,
+    /// Where a finished download landed (the conflict rule may have renamed it):
+    /// the target of the popover's "Show in Finder" and "Open".
+    landed: Option<PathBuf>,
 }
 
-/// The item currently streaming.
+/// An item that is streaming.
 #[derive(Debug)]
 struct Current {
     id: u64,
     shared: Arc<Shared>,
     /// When the stream started: the criterion of the stop question ([`STOP_ASK_AFTER`]).
     started: Instant,
+    lane: Lane,
+    /// The item was stopped on its own: the `Cancelled` result does not end the
+    /// queue, the item leaves the list and the next one starts.
+    skip: bool,
 }
 
-/// A tab's upload queue — **bound to that tab's ssh connection** (Kullanıcı kararı 7):
+/// An item that started ([`Transfers::start`]): the stream thread's inputs.
+#[derive(Debug)]
+pub struct Started {
+    pub id: u64,
+    pub ssh: Vec<String>,
+    pub job: Job,
+    pub shared: Arc<Shared>,
+}
+
+/// A tab's transfer queue — **bound to that tab's ssh connection** (Kullanıcı kararı 7):
 /// its generation is the remote session's command generation; if the generation
 /// changes (ssh closed) the pending items are cancelled.
 #[derive(Debug)]
@@ -1283,7 +1498,9 @@ struct Queue {
     host: String,
     mark: HostMark,
     entries: Vec<Item>,
-    current: Option<Current>,
+    /// The streaming items: at most one from the queue lane, any number from the
+    /// preview and Finder lanes.
+    running: Vec<Current>,
     /// The bar's denominator and the bytes of finished items: the unsent part of an
     /// individually stopped item is subtracted from the denominator and the sent part
     /// counts as done — so the bar never goes backwards.
@@ -1293,16 +1510,34 @@ struct Queue {
     samples: VecDeque<(Instant, u64)>,
     /// The last measured speed, bytes/s (the popover's row shows it too).
     rate: Option<f64>,
-    /// The next item will not start: the queue ends with this end.
+    /// No further item will start: the queue ends with this end once nothing streams.
     ending: Option<End>,
-    /// The streaming item was stopped on its own: the `Cancelled` result does not end
-    /// the queue, the item leaves the list and the next one starts.
-    skip: bool,
 }
 
 impl Queue {
-    fn running_entry(&self) -> Option<(usize, &Item)> {
-        let id = self.current.as_ref()?.id;
+    fn current(&self, id: u64) -> Option<&Current> {
+        self.running.iter().find(|current| current.id == id)
+    }
+
+    /// The queue lane's streaming item.
+    fn queued(&self) -> Option<&Current> {
+        self.running
+            .iter()
+            .find(|current| current.lane == Lane::Queue)
+    }
+
+    /// The item the line and a stop without an id speak of: the queue lane's,
+    /// otherwise the longest-streaming one.
+    fn subject(&self) -> Option<&Current> {
+        self.queued().or_else(|| self.longest())
+    }
+
+    /// The streaming item that started first.
+    fn longest(&self) -> Option<&Current> {
+        self.running.iter().min_by_key(|current| current.started)
+    }
+
+    fn entry(&self, id: u64) -> Option<(usize, &Item)> {
         self.entries
             .iter()
             .enumerate()
@@ -1322,12 +1557,30 @@ impl Queue {
             .filter(|entry| entry.state == EntryState::Done)
             .count()
     }
+
+    /// Which way the entries in `state` go (every entry with `None`).
+    fn ways(&self, state: Option<EntryState>) -> Ways {
+        Ways::of(
+            self.entries
+                .iter()
+                .filter(|entry| state.is_none_or(|state| entry.state == state))
+                .map(|entry| entry.job.way.direction()),
+        )
+    }
+
+    /// The streaming items' bytes passed.
+    fn running_bytes(&self) -> u64 {
+        self.running
+            .iter()
+            .map(|current| current.shared.progress().0)
+            .sum()
+    }
 }
 
-/// A tab's upload state (main thread): whether a sheet is in progress, the queue and
-/// the result line's generation.
+/// A tab's transfer state (main thread): whether a sheet is in progress, the queue
+/// and the result line's generation.
 #[derive(Debug, Default)]
-pub struct Uploads {
+pub struct Transfers {
     /// A probe or confirmation sheet is in progress: a new drop is rejected (two
     /// sheets cannot be stacked).
     asking: bool,
@@ -1344,8 +1597,8 @@ pub struct Uploads {
     /// otherwise the 200 ms refresh would overwrite the mouse state.
     hover: Option<TransferAction>,
     list_open: bool,
-    /// The percentage last written to the title ([`Self::title_percent_changed`]).
-    titled: Option<u8>,
+    /// The arrow and percentage last written to the title ([`Self::title_percent_changed`]).
+    titled: Option<(&'static str, u8)>,
 }
 
 /// The queue ended: the result line, its generation and the notification (title,
@@ -1357,7 +1610,7 @@ pub struct Ended {
     pub notice: Option<(String, String)>,
 }
 
-/// The answer to a stop request ([`Uploads::stop_request`]).
+/// The answer to a stop request ([`Transfers::stop_request`]).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stop {
     /// Stop without asking.
@@ -1395,10 +1648,15 @@ pub enum RowAction {
     Cancel,
     /// Remove the waiting item from the queue (does not ask).
     Remove,
+    /// A finished download: reveal it in Finder (045 Karar 6).
+    ShowInFinder,
+    /// A finished preview: open it (045 Karar 6).
+    Open,
 }
 
 impl RowStatus {
-    /// The row's button: `Cancel` when streaming, `Remove` when waiting, none when done.
+    /// The row's button by its state alone: `Cancel` when streaming, `Remove` when
+    /// waiting, none when done — a finished download's button is [`ListRow::action`]'s.
     pub fn action(&self) -> Option<RowAction> {
         match self {
             Self::Running { .. } => Some(RowAction::Cancel),
@@ -1408,24 +1666,27 @@ impl RowStatus {
     }
 }
 
-/// A popover row: the name (`static/ · 124 files` for a folder), the state and the
-/// dim destination line (`→ /var/www/app`).
+/// A popover row: the name (`static/ · 124 files` for a folder), the state, the
+/// dim destination line (`→ /var/www/app`), the direction (the row's arrow) and the
+/// button.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListRow {
     pub id: u64,
     pub name: String,
     pub status: RowStatus,
     pub dest: String,
+    pub direction: Direction,
+    pub action: Option<RowAction>,
 }
 
-/// The "Show files (N)" popover (037 phase-7): title and rows.
+/// The "Show transfers (N)" popover (037 phase-7, 045 Karar 6): title and rows.
 #[derive(Clone, Debug, PartialEq)]
-pub struct UploadList {
+pub struct TransferList {
     pub title: String,
     pub rows: Vec<ListRow>,
 }
 
-impl Uploads {
+impl Transfers {
     /// Whether a new drop can be accepted.
     ///
     /// Not for a queue that was cancelled but whose streaming item has not finished
@@ -1485,13 +1746,12 @@ impl Uploads {
             host,
             mark,
             entries: Vec::new(),
-            current: None,
+            running: Vec::new(),
             bytes_total: 0,
             bytes_done: 0,
             samples: VecDeque::new(),
             rate: None,
             ending: None,
-            skip: false,
         });
         if queue.command != command || queue.ending.is_some() {
             return false;
@@ -1503,50 +1763,115 @@ impl Uploads {
                 id: self.next_id,
                 job,
                 state: EntryState::Waiting,
+                landed: None,
             });
         }
         true
     }
 
-    /// Starts the next item at `now`: the stream thread's inputs. `None` if an item is
-    /// already streaming or the queue is ending.
+    /// Starts at `now` every item that may start: each waiting preview and Finder
+    /// item, and the queue lane's next item if none of its own streams (045 Karar 6,
+    /// 7). Empty if the queue is ending.
+    pub fn start(&mut self, now: Instant) -> Vec<Started> {
+        let Some(queue) = self.queue.as_mut() else {
+            return Vec::new();
+        };
+        if queue.ending.is_some() {
+            return Vec::new();
+        }
+        let mut queue_busy = queue
+            .running
+            .iter()
+            .any(|current| current.lane == Lane::Queue);
+        let mut started = Vec::new();
+        for entry in &mut queue.entries {
+            if entry.state != EntryState::Waiting {
+                continue;
+            }
+            let lane = entry.job.way.lane();
+            if lane == Lane::Queue {
+                if queue_busy {
+                    continue;
+                }
+                queue_busy = true;
+            }
+            entry.state = EntryState::Running;
+            let shared = Arc::new(Shared::default());
+            queue.running.push(Current {
+                id: entry.id,
+                shared: Arc::clone(&shared),
+                started: now,
+                lane,
+                skip: false,
+            });
+            started.push(Started {
+                id: entry.id,
+                ssh: queue.ssh.clone(),
+                job: entry.job.clone(),
+                shared,
+            });
+        }
+        started
+    }
+
+    /// Starts the queue lane's next item at `now`: the stream thread's inputs. `None`
+    /// if a queue lane item is already streaming or the queue is ending.
     pub fn start_next(&mut self, now: Instant) -> Option<(Vec<String>, Job, Arc<Shared>)> {
         let queue = self.queue.as_mut()?;
-        if queue.current.is_some() || queue.ending.is_some() {
+        if queue.queued().is_some() || queue.ending.is_some() {
             return None;
         }
-        let entry = queue
-            .entries
-            .iter_mut()
-            .find(|entry| entry.state == EntryState::Waiting)?;
+        let entry = queue.entries.iter_mut().find(|entry| {
+            entry.state == EntryState::Waiting && entry.job.way.lane() == Lane::Queue
+        })?;
         entry.state = EntryState::Running;
         let shared = Arc::new(Shared::default());
-        queue.current = Some(Current {
+        queue.running.push(Current {
             id: entry.id,
             shared: Arc::clone(&shared),
             started: now,
+            lane: Lane::Queue,
+            skip: false,
         });
         Some((queue.ssh.clone(), entry.job.clone(), shared))
     }
 
-    /// The streaming item's id (the stop sheet's closing question).
+    /// The queue lane's streaming item's id.
     pub fn running_id(&self) -> Option<u64> {
+        self.queue.as_ref()?.queued().map(|current| current.id)
+    }
+
+    /// Whether the item with `id` is streaming (the stop sheet's closing question).
+    pub fn is_running(&self, id: u64) -> bool {
         self.queue
-            .as_ref()?
-            .current
             .as_ref()
-            .map(|current| current.id)
+            .is_some_and(|queue| queue.current(id).is_some())
     }
 
     /// A stop request (037 phase-7) at `now`: `all` is the whole queue (⌘., the line's
-    /// `Cancel`/`Cancel all`, the popover's `Cancel all`), otherwise the streaming item
-    /// (the popover row's `Cancel`). In a single-item queue the two are the same. A
-    /// question if the streaming item has been running longer than
-    /// [`STOP_ASK_AFTER`], otherwise at once; `None` if there is no queue.
+    /// `Cancel`/`Cancel all`, the popover's `Cancel all`), otherwise the queue lane's
+    /// streaming item. [`Self::stop_request_item`] with no id.
     pub fn stop_request(&self, all: bool, now: Instant) -> Option<Stop> {
+        self.stop_request_item(None, all, now)
+    }
+
+    /// A stop request for the streaming item `id` (the popover row's `Cancel`), or
+    /// without an id for the queue lane's item — with `all`, the longest-streaming
+    /// one, so the question comes if any item has streamed past [`STOP_ASK_AFTER`].
+    /// In a single-item queue `all` and the item are the same. A question if the item
+    /// has been running longer than the threshold, otherwise at once; `None` if there
+    /// is no queue.
+    pub fn stop_request_item(&self, id: Option<u64>, all: bool, now: Instant) -> Option<Stop> {
         let queue = self.queue.as_ref()?;
         let all = all || queue.entries.len() <= 1;
-        let Some(current) = &queue.current else {
+        let subject = match id {
+            // The item asked about no longer streams: nothing to stop — a late row
+            // `Cancel` must not land on whatever streams now.
+            Some(id) => Some(queue.current(id)?),
+            None if all => queue.longest(),
+            None => queue.subject(),
+        };
+        let Some(current) = subject else {
             return Some(Stop::Now { id: None, all });
         };
         if now.saturating_duration_since(current.started) <= STOP_ASK_AFTER {
@@ -1555,7 +1880,7 @@ impl Uploads {
                 all,
             });
         }
-        let Some((_, entry)) = queue.running_entry() else {
+        let Some((_, entry)) = queue.entry(current.id) else {
             return Some(Stop::Now { id: None, all });
         };
         let local = &entry.job.local;
@@ -1571,9 +1896,19 @@ impl Uploads {
                 // audit: the item count is per drop; it fits in a `u64`.
                 let _ = write!(
                     text,
-                    " {waiting} waiting {} won't be uploaded.",
-                    files_word(waiting as u64)
+                    " {waiting} waiting {} won't be {}.",
+                    files_word(waiting as u64),
+                    queue.ways(Some(EntryState::Waiting)).verb()
                 );
+            }
+            let others = queue.running.len() - 1;
+            if others > 0 {
+                let (noun, verb) = if others == 1 {
+                    ("transfer", "stops")
+                } else {
+                    ("transfers", "stop")
+                };
+                let _ = write!(text, " {others} other {noun} {verb}.");
             }
             let done = queue.done();
             if done > 0 {
@@ -1582,13 +1917,24 @@ impl Uploads {
                 } else {
                     ("files", "stay")
                 };
-                let _ = write!(text, " {done} finished {noun} {verb} on {}.", queue.host);
+                let _ = match queue.ways(Some(EntryState::Done)) {
+                    Ways::Up => write!(text, " {done} finished {noun} {verb} on {}.", queue.host),
+                    Ways::Down => write!(text, " {done} finished {noun} {verb} on this Mac."),
+                    Ways::Both => write!(text, " {done} finished {noun} {verb}."),
+                };
             }
         }
-        let title = if all && queue.entries.len() > 1 {
-            "Stop all uploads?"
+        let ways = if all && queue.entries.len() > 1 {
+            queue.ways(None)
         } else {
-            "Stop uploading?"
+            Ways::of([entry.job.way.direction()])
+        };
+        let title = match (all && queue.entries.len() > 1, ways) {
+            (true, Ways::Up) => "Stop all uploads?",
+            (true, Ways::Down) => "Stop all downloads?",
+            (true, Ways::Both) => "Stop all transfers?",
+            (false, Ways::Down) => "Stop downloading?",
+            (false, _) => "Stop uploading?",
         };
         Some(Stop::Ask(StopQuestion {
             id: current.id,
@@ -1598,98 +1944,141 @@ impl Uploads {
         }))
     }
 
+    /// The stop question's default button, in the question's direction:
+    /// `Keep uploading`, `Keep downloading` or `Keep transferring`.
+    pub fn keep_label(&self, question: &StopQuestion) -> &'static str {
+        let Some(queue) = &self.queue else {
+            return "Keep uploading";
+        };
+        let ways = if question.all && queue.entries.len() > 1 {
+            queue.ways(None)
+        } else {
+            Ways::of(
+                queue
+                    .entry(question.id)
+                    .map(|(_, entry)| entry.job.way.direction()),
+            )
+        };
+        match ways {
+            Ways::Up => "Keep uploading",
+            Ways::Down => "Keep downloading",
+            Ways::Both => "Keep transferring",
+        }
+    }
+
     /// Applies the stop. `id` is the question's (or the request's) item: if that item
-    /// finished meanwhile and another is streaming, nothing is done — the question
-    /// spoke of losing that item. Without `all` only that item stops and the queue
-    /// goes on; its result comes when the item finishes ([`Self::finish`]).
+    /// finished meanwhile, nothing is done — the question spoke of losing that item.
+    /// Without `all` only that item stops (without an id, the queue lane's) and the
+    /// queue goes on; its result comes when the item finishes ([`Self::finish_item`]).
+    /// With nothing else waiting or streaming, stopping the item cancels the queue.
     pub fn stop(&mut self, id: Option<u64>, all: bool) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
-        let running = queue.current.as_ref().map(|current| current.id);
-        if id.is_some() && id != running {
+        if let Some(id) = id
+            && queue.current(id).is_none()
+        {
             return None;
         }
-        // With nothing waiting, stopping the streaming item cancels the queue: the
-        // result must say `Cancelled — 1 of 2 uploaded, …`, not the finished items'
-        // `✓` (`/code-review`).
-        if all || queue.entries.len() <= 1 || queue.waiting() == 0 {
+        // With nothing else waiting or streaming, stopping the streaming item cancels
+        // the queue: the result must say `Cancelled — 1 of 2 uploaded, …`, not the
+        // finished items' `✓` (`/code-review`).
+        let alone = queue.waiting() + queue.running.len().saturating_sub(1) == 0;
+        if all || queue.entries.len() <= 1 || alone {
             return self.cancel();
         }
-        if let Some(current) = &queue.current {
-            queue.skip = true;
+        let target = id.or_else(|| queue.subject().map(|current| current.id));
+        if let Some(current) = queue
+            .running
+            .iter_mut()
+            .find(|current| Some(current.id) == target)
+        {
+            current.skip = true;
             current.shared.cancel();
         }
         None
     }
 
-    /// Cancels the whole queue: the waiting items will not start, the streaming item is
-    /// killed and its half-written file deleted; the result comes when the item
-    /// finishes. With no streaming item (the stream thread could not be born) the
-    /// result is immediate.
+    /// Cancels the whole queue: the waiting items will not start, the streaming items
+    /// are killed and their half-written files deleted; the result comes when the last
+    /// of them finishes. With no streaming item (the stream thread could not be born)
+    /// the result is immediate.
     fn cancel(&mut self) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
         if queue.ending.is_none() {
             queue.ending = Some(End::Cancelled);
         }
-        match &queue.current {
-            Some(current) => {
-                current.shared.cancel();
-                None
-            }
-            None => self.end(),
+        if queue.running.is_empty() {
+            return self.end();
         }
-    }
-
-    /// Cancels and abandons the queue (the tab is closing): the streaming item is
-    /// killed and its half-written file deleted on the stream thread; the result is
-    /// shown to no one.
-    pub fn abandon(&mut self) {
-        if let Some(queue) = self.queue.take()
-            && let Some(current) = &queue.current
-        {
+        for current in &queue.running {
             current.shared.cancel();
         }
+        None
     }
 
-    /// The remote session closed: waiting items are cancelled; the streaming item
-    /// finishes over its own connection. With no streaming item the result is immediate.
+    /// Cancels and abandons the queue (the tab is closing): the streaming items are
+    /// killed and their half-written files deleted on the stream threads; the result
+    /// is shown to no one.
+    pub fn abandon(&mut self) {
+        if let Some(queue) = self.queue.take() {
+            for current in &queue.running {
+                current.shared.cancel();
+            }
+        }
+    }
+
+    /// The remote session closed: waiting items are cancelled; the streaming items
+    /// finish over their own connections. With no streaming item the result is
+    /// immediate.
     pub fn close(&mut self) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
         if queue.ending.is_none() {
             queue.ending = Some(End::Closed);
         }
-        if queue.current.is_none() {
+        if queue.running.is_empty() {
             return self.end();
         }
         None
     }
 
-    /// The streaming item finished; the result if the queue finished too. Nothing is
-    /// pasted on its own (037 phase-7): an upload can take minutes and the path would be
-    /// typed into whatever vim or mysql is open at that moment — the result line says
-    /// where it went.
+    /// The queue lane's streaming item finished ([`Self::finish_item`]).
     pub fn finish(&mut self, outcome: Outcome) -> Option<Ended> {
+        let id = self.queue.as_ref()?.queued()?.id;
+        self.finish_item(id, outcome, None)
+    }
+
+    /// The streaming item `id` finished (`landed`: where a download landed); the
+    /// result if the queue finished too — once **nothing** streams any more, so a
+    /// preview's report is never lost behind a failed upload. Nothing is pasted on its
+    /// own (037 phase-7): an upload can take minutes and the path would be typed into
+    /// whatever vim or mysql is open at that moment — the result line says where it went.
+    pub fn finish_item(
+        &mut self,
+        id: u64,
+        outcome: Outcome,
+        landed: Option<PathBuf>,
+    ) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
-        let current = queue.current.take()?;
+        let at = queue.running.iter().position(|current| current.id == id)?;
+        let current = queue.running.remove(at);
         let (bytes, _) = current.shared.progress();
-        let index = queue
-            .entries
-            .iter()
-            .position(|entry| entry.id == current.id)?;
+        let index = queue.entries.iter().position(|entry| entry.id == id)?;
+        let direction = queue.entries[index].job.way.direction();
         match outcome {
             Outcome::Done => {
                 let entry = &mut queue.entries[index];
                 entry.state = EntryState::Done;
+                entry.landed = landed;
                 queue.bytes_done += entry.job.local.bytes;
             }
             // An individually stopped item leaves the list; its sent part counts as
             // done, its unsent part leaves the denominator (the bar never goes back).
-            Outcome::Cancelled if std::mem::take(&mut queue.skip) && queue.ending.is_none() => {
+            Outcome::Cancelled if current.skip && queue.ending.is_none() => {
                 let entry = queue.entries.remove(index);
                 let sent = bytes.min(entry.job.local.bytes);
                 queue.bytes_done += sent;
                 queue.bytes_total -= entry.job.local.bytes - sent;
                 // If the waiting items were removed meanwhile, the queue ends as a cancel.
-                if queue.waiting() == 0 {
+                if queue.waiting() == 0 && queue.running.is_empty() {
                     queue.ending = Some(End::Cancelled);
                 }
             }
@@ -1701,7 +2090,10 @@ impl Uploads {
             Outcome::DiskFull => {
                 queue.entries[index].state = EntryState::Waiting;
                 queue.bytes_done += bytes;
-                queue.ending = Some(End::DiskFull);
+                queue.ending = Some(match direction {
+                    Direction::Up => End::DiskFull,
+                    Direction::Down => End::Failed(LOCAL_DISK_FULL.to_owned()),
+                });
             }
             Outcome::Failed(reason) => {
                 queue.entries[index].state = EntryState::Waiting;
@@ -1709,11 +2101,21 @@ impl Uploads {
                 queue.ending = Some(End::Failed(reason));
             }
         }
+        if !queue.running.is_empty() {
+            return None;
+        }
         if queue.waiting() == 0 || queue.ending.is_some() {
             self.end()
         } else {
             None
         }
+    }
+
+    /// Where the finished download with `id` landed (the popover's "Show in Finder"
+    /// and "Open").
+    pub fn landed(&self, id: u64) -> Option<PathBuf> {
+        let (_, entry) = self.queue.as_ref()?.entry(id)?;
+        entry.landed.clone()
     }
 
     /// Closes the queue and returns the result line.
@@ -1809,20 +2211,16 @@ impl Uploads {
     /// queue.
     pub fn totals(&self) -> Option<(u64, u64)> {
         let queue = self.queue.as_ref()?;
-        let running = queue
-            .current
-            .as_ref()
-            .map_or(0, |current| current.shared.progress().0);
-        Some((queue.bytes_done + running, queue.bytes_total))
+        Some((queue.bytes_done + queue.running_bytes(), queue.bytes_total))
     }
 
     /// The percentage for the title prefix (037 phase-7): while an item streams, based
     /// on the whole queue's bytes, rounded down; `None` if nothing streams or it is
-    /// being cancelled. If ssh closed, the streaming item finishes over its own
-    /// connection and the prefix stays with it.
+    /// being cancelled. If ssh closed, the streaming items finish over their own
+    /// connections and the prefix stays with them.
     pub fn percent(&self) -> Option<u8> {
         let queue = self.queue.as_ref()?;
-        if queue.ending == Some(End::Cancelled) || queue.current.is_none() {
+        if queue.ending == Some(End::Cancelled) || queue.running.is_empty() {
             return None;
         }
         let (sent, total) = self.totals()?;
@@ -1833,19 +2231,37 @@ impl Uploads {
         Some((sent.min(total) as f64 / total as f64 * 100.0).floor() as u8)
     }
 
-    /// Whether the title's percentage differs from the last one written; if so, stores
-    /// the new one — the title is written at most once per percent.
+    /// The title prefix now: the streaming items' arrow and [`Self::percent`].
+    fn prefix(&self) -> Option<(&'static str, u8)> {
+        let percent = self.percent()?;
+        let queue = self.queue.as_ref()?;
+        let ways = Ways::of(queue.running.iter().filter_map(|current| {
+            queue
+                .entry(current.id)
+                .map(|(_, entry)| entry.job.way.direction())
+        }));
+        Some((ways.arrow(), percent))
+    }
+
+    /// Whether the title's prefix differs from the last one written; if so, stores
+    /// the new one — the title is written at most once per percent (and once per
+    /// change of direction: the arrow can flip at the same percent).
     pub fn title_percent_changed(&mut self) -> bool {
-        let percent = self.percent();
-        if self.titled == percent {
+        let prefix = self.prefix();
+        if self.titled == prefix {
             return false;
         }
-        self.titled = percent;
+        self.titled = prefix;
         true
     }
 
-    /// The percentage last written to the title ([`titled`]'s input).
+    /// The percentage last written to the title.
     pub fn title_percent(&self) -> Option<u8> {
+        self.titled.map(|(_, percent)| percent)
+    }
+
+    /// The arrow and percentage last written to the title ([`titled_as`]'s input).
+    pub fn title_prefix(&self) -> Option<(&'static str, u8)> {
         self.titled
     }
 
@@ -1858,7 +2274,7 @@ impl Uploads {
     /// The popover's content (037 phase-7): all items — finished, streaming and
     /// waiting — in order. `None` if there is no queue or it is ending: the popover
     /// must close.
-    pub fn list(&self) -> Option<UploadList> {
+    pub fn list(&self) -> Option<TransferList> {
         let queue = self.queue.as_ref()?;
         if queue.ending.is_some() {
             return None;
@@ -1868,6 +2284,7 @@ impl Uploads {
             .iter()
             .map(|entry| {
                 let local = &entry.job.local;
+                let direction = entry.job.way.direction();
                 let name = if local.dir {
                     format!(
                         "{}/ · {} {}",
@@ -1880,15 +2297,18 @@ impl Uploads {
                 };
                 let status = match entry.state {
                     EntryState::Done => {
-                        RowStatus::Done(format!("✓ Uploaded · {}", format_bytes(local.bytes)))
+                        let verb = match direction {
+                            Direction::Up => "Uploaded",
+                            Direction::Down => "Downloaded",
+                        };
+                        RowStatus::Done(format!("✓ {verb} · {}", format_bytes(local.bytes)))
                     }
                     EntryState::Waiting => {
                         RowStatus::Waiting(format!("Waiting · {}", format_bytes(local.bytes)))
                     }
                     EntryState::Running => {
                         let sent = queue
-                            .current
-                            .as_ref()
+                            .current(entry.id)
                             .map_or(0, |current| current.shared.progress().0)
                             .min(local.bytes);
                         let mut detail = format_pair(sent, local.bytes);
@@ -1904,18 +2324,39 @@ impl Uploads {
                         RowStatus::Running { fraction, detail }
                     }
                 };
+                let action = match (&status, entry.job.way, &entry.landed) {
+                    (RowStatus::Done(_), Way::Down { lane, .. }, Some(_)) => {
+                        Some(if lane == Lane::Preview {
+                            RowAction::Open
+                        } else {
+                            RowAction::ShowInFinder
+                        })
+                    }
+                    _ => status.action(),
+                };
+                let dest = match &entry.landed {
+                    Some(landed) => landed
+                        .parent()
+                        .map(|parent| parent.display().to_string())
+                        .unwrap_or_default(),
+                    None => entry.job.dest(),
+                };
                 ListRow {
                     id: entry.id,
                     name,
                     status,
-                    dest: format!("→ {}", entry.job.dir),
+                    dest: format!("→ {dest}"),
+                    direction,
+                    action,
                 }
             })
             .collect();
-        Some(UploadList {
-            title: format!("Uploading to {}", queue.host),
-            rows,
-        })
+        let title = match queue.ways(None) {
+            Ways::Up => format!("Uploading to {}", queue.host),
+            Ways::Down => format!("Downloading from {}", queue.host),
+            Ways::Both => format!("Transfers with {}", queue.host),
+        };
+        Some(TransferList { title, rows })
     }
 
     /// Removes the waiting item with `id` from the queue (the popover's `Remove`); a
@@ -1934,12 +2375,15 @@ impl Uploads {
         }
     }
 
-    /// The dock's status line at `now`; `None` if there is no queue.
+    /// The dock's status line at `now`; `None` if nothing streams. The line names the
+    /// queue lane's item (otherwise the longest-streaming one); a queue going one way
+    /// leads with its arrow and `k of n`, a mixed one with the summary `↑1 ↓2`
+    /// (045 Karar 6).
     pub fn status(&mut self, now: Instant) -> Option<Transfer> {
         let queue = self.queue.as_mut()?;
-        let current = queue.current.as_ref()?;
-        let (bytes, files) = current.shared.progress();
-        let sent = queue.bytes_done + bytes;
+        let current = queue.subject()?;
+        let (id, (_, files)) = (current.id, current.shared.progress());
+        let sent = queue.bytes_done + queue.running_bytes();
         queue.samples.push_back((now, sent));
         while queue
             .samples
@@ -1957,12 +2401,25 @@ impl Uploads {
             _ => None,
         };
         queue.rate = rate;
-        let (index, entry) = queue.running_entry()?;
+        let (index, entry) = queue.entry(id)?;
         let local = &entry.job.local;
         let items = queue.entries.len();
-        let mut body = String::from("↑ ");
-        if items > 1 {
-            let _ = write!(body, "{} of {} · ", index + 1, items);
+        let mut body = String::new();
+        match queue.ways(None) {
+            Ways::Both => {
+                let down = queue
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.job.way.direction() == Direction::Down)
+                    .count();
+                let _ = write!(body, "↑{} ↓{down} · ", items - down);
+            }
+            ways => {
+                let _ = write!(body, "{} ", ways.arrow());
+                if items > 1 {
+                    let _ = write!(body, "{} of {} · ", index + 1, items);
+                }
+            }
         }
         body.push_str(&local.name);
         if local.dir {
@@ -2266,8 +2723,10 @@ mod tests {
                 job: Job {
                     local: local(name, dir, 1, 1),
                     dir: at.into(),
+                    way: Way::Up,
                 },
                 state,
+                landed: None,
             })
             .collect()
     }
@@ -2500,11 +2959,12 @@ mod tests {
         Job {
             local: local(name, dir, files, bytes),
             dir: "/srv".into(),
+            way: Way::Up,
         }
     }
 
-    fn queue_of(jobs: Vec<Job>) -> Uploads {
-        let mut uploads = Uploads::default();
+    fn queue_of(jobs: Vec<Job>) -> Transfers {
+        let mut uploads = Transfers::default();
         assert!(uploads.enqueue(
             7,
             words(&["ssh", "prod"]),
@@ -2882,6 +3342,319 @@ mod tests {
             })
             .collect();
         texts.push("↑ 1 of 2 · a/ · 1 of 2 files  1.0 / 2.0 MB · 1.0 MB/s · 1s".to_owned());
+        for text in texts {
+            for ch in text.chars().filter(|ch| !ch.is_ascii()) {
+                assert!(bt_core::UPLOAD_GLYPHS.contains(&ch), "'{ch}' in {text:?}");
+            }
+        }
+    }
+
+    fn download(name: &str, lane: Lane, bytes: u64) -> Job {
+        Job::download(
+            &format!("/var/log/{name}"),
+            PathBuf::from("/Users/me/Downloads").join(name),
+            false,
+            1,
+            bytes,
+            lane,
+            Conflict::KeepBoth,
+        )
+        .expect("an absolute path")
+    }
+
+    fn started_names(started: &[Started]) -> Vec<&str> {
+        started
+            .iter()
+            .map(|started| started.job.local.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn previews_and_finder_drops_start_at_once_while_the_queue_runs_one_by_one() {
+        let mut transfers = queue_of(vec![
+            job("a", false, 1, 100),
+            download("b", Lane::Queue, 100),
+            download("c", Lane::Preview, 100),
+            download("d", Lane::Finder, 100),
+        ]);
+        let now = Instant::now();
+        let started = transfers.start(now);
+        assert_eq!(started_names(&started), ["a", "c", "d"]);
+        assert_eq!(started[1].job.remote_path(), "/var/log/c");
+        assert!(transfers.start(now).is_empty(), "the queue waits for `a`");
+        let id = |name: &str| {
+            started
+                .iter()
+                .find(|s| s.job.local.name == name)
+                .unwrap()
+                .id
+        };
+
+        // The line names the queue's item and leads with the summary.
+        let status = transfers.status(now).expect("line");
+        assert!(status.body.starts_with("↑1 ↓3 · a  "), "{}", status.body);
+        assert_eq!(status.controls.items, 4);
+
+        // A preview finishing does not end the queue; it lands and offers `Open`.
+        let preview = PathBuf::from("/Users/me/Previews/prod/var/log/c");
+        assert_eq!(
+            transfers.finish_item(id("c"), Outcome::Done, Some(preview.clone())),
+            None
+        );
+        assert_eq!(transfers.landed(id("c")), Some(preview));
+        assert_eq!(transfers.finish_item(id("a"), Outcome::Done, None), None);
+        let next = transfers.start(now);
+        assert_eq!(started_names(&next), ["b"], "the queue's next item");
+        assert!(
+            transfers
+                .status(now)
+                .unwrap()
+                .body
+                .starts_with("↑1 ↓3 · b  ")
+        );
+
+        let list = transfers.list().expect("list");
+        assert_eq!(list.title, "Transfers with prod");
+        let rows: Vec<_> = list
+            .rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.direction, row.action))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("a", Direction::Up, None),
+                ("b", Direction::Down, Some(RowAction::Cancel)),
+                ("c", Direction::Down, Some(RowAction::Open)),
+                ("d", Direction::Down, Some(RowAction::Cancel)),
+            ]
+        );
+        assert_eq!(list.rows[2].dest, "→ /Users/me/Previews/prod/var/log");
+        assert_eq!(
+            list.rows[2].status,
+            RowStatus::Done("✓ Downloaded · 100 B".into())
+        );
+
+        let landed = PathBuf::from("/Users/me/Downloads/d 2");
+        assert_eq!(
+            transfers.finish_item(id("d"), Outcome::Done, Some(landed)),
+            None
+        );
+        assert_eq!(
+            transfers.list().unwrap().rows[3].action,
+            Some(RowAction::ShowInFinder)
+        );
+        let ended = transfers
+            .finish_item(next[0].id, Outcome::Done, None)
+            .unwrap();
+        assert_eq!(ended.line.body, "✓ 4 files transferred");
+        assert_eq!(
+            ended.notice,
+            Some(("4 files transferred".into(), "with prod".into()))
+        );
+    }
+
+    #[test]
+    fn a_download_queue_reads_down_in_the_line_the_title_and_the_result() {
+        let mut transfers = queue_of(vec![
+            download("syslog", Lane::Queue, 100),
+            download("auth.log", Lane::Queue, 100),
+        ]);
+        let now = Instant::now();
+        let started = transfers.start(now);
+        started[0].shared.bytes.store(50, Ordering::Release);
+        let status = transfers.status(now).unwrap();
+        assert_eq!(status.body, "↓ 1 of 2 · syslog  50 / 200 B");
+        assert!(transfers.title_percent_changed());
+        assert_eq!(transfers.title_prefix(), Some(("↓", 25)));
+        assert_eq!(
+            titled_as(transfers.title_prefix(), "⇄ prod"),
+            "↓ 25% · ⇄ prod"
+        );
+        assert_eq!(transfers.list().unwrap().title, "Downloading from prod");
+
+        assert_eq!(transfers.finish(Outcome::Done), None);
+        let second = transfers.start(now);
+        let ended = transfers
+            .finish_item(second[0].id, Outcome::Done, None)
+            .unwrap();
+        assert_eq!(ended.line.body, "✓ 2 files → /Users/me/Downloads");
+        assert_eq!(
+            ended.notice,
+            Some((
+                "2 files downloaded".into(),
+                "from prod to /Users/me/Downloads".into()
+            ))
+        );
+
+        // The arrow follows what streams: an upload joining a preview flips it to both.
+        let mut transfers = queue_of(vec![
+            job("a", false, 1, 100),
+            download("p", Lane::Preview, 100),
+        ]);
+        let _ = transfers.start(now);
+        assert!(transfers.title_percent_changed());
+        assert_eq!(transfers.title_prefix(), Some(("↑↓", 0)));
+    }
+
+    #[test]
+    fn the_stop_question_speaks_of_the_direction() {
+        let start = Instant::now();
+        let long = start + STOP_ASK_AFTER + Duration::from_secs(1);
+        let mut transfers = queue_of(vec![download("syslog", Lane::Queue, 96_000_000)]);
+        let started = transfers.start(start);
+        started[0].shared.bytes.store(48_000_000, Ordering::Release);
+        let Some(Stop::Ask(question)) = transfers.stop_request(true, long) else {
+            panic!("question");
+        };
+        assert_eq!(question.title, "Stop downloading?");
+        assert_eq!(question.text, "syslog: 48.0 of 96.0 MB will be lost.");
+        assert_eq!(transfers.keep_label(&question), "Keep downloading");
+
+        // Both ways: the whole queue; the other streaming item is counted.
+        let mut transfers = queue_of(vec![
+            job("done.txt", false, 1, 10),
+            job("backup.tar.gz", false, 1, 96_000_000),
+            download("p", Lane::Preview, 100),
+            download("w", Lane::Queue, 100),
+        ]);
+        let first = transfers.start(start);
+        assert_eq!(started_names(&first), ["done.txt", "p"]);
+        assert_eq!(transfers.finish(Outcome::Done), None);
+        let second = transfers.start(start);
+        second[0].shared.bytes.store(48_000_000, Ordering::Release);
+        let Some(Stop::Ask(question)) = transfers.stop_request(true, long) else {
+            panic!("question");
+        };
+        assert_eq!(question.title, "Stop all transfers?");
+        assert_eq!(question.id, first[1].id, "the longest-streaming item");
+        assert_eq!(
+            question.text,
+            "p: 0 of 100 B will be lost. 1 waiting file won't be downloaded. 1 other \
+             transfer stops. 1 finished file stays on prod."
+        );
+        assert_eq!(transfers.keep_label(&question), "Keep transferring");
+        // A row's `Cancel` names its own item.
+        let Some(Stop::Ask(one)) = transfers.stop_request_item(Some(second[0].id), false, long)
+        else {
+            panic!("question");
+        };
+        assert_eq!(one.title, "Stop uploading?");
+        assert_eq!(one.id, second[0].id);
+        // Stopping the preview alone leaves the upload streaming.
+        assert_eq!(transfers.stop(Some(first[1].id), false), None);
+        assert!(first[1].shared.cancel.load(Ordering::Acquire));
+        assert!(!second[0].shared.cancel.load(Ordering::Acquire));
+        assert_eq!(
+            transfers.finish_item(first[1].id, Outcome::Cancelled, None),
+            None
+        );
+        assert!(transfers.is_running(second[0].id));
+        assert!(!transfers.is_running(first[1].id));
+        // A late `Cancel` on the finished row stops nothing else.
+        assert_eq!(
+            transfers.stop_request_item(Some(first[1].id), false, long),
+            None
+        );
+        assert!(!second[0].shared.cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn the_queue_ends_only_when_nothing_streams() {
+        let now = Instant::now();
+        let mut transfers = queue_of(vec![
+            job("a", false, 1, 10),
+            download("p", Lane::Preview, 10),
+        ]);
+        let started = transfers.start(now);
+        assert_eq!(
+            transfers.finish_item(started[0].id, Outcome::Failed("tar: denied".into()), None),
+            None,
+            "the preview still streams"
+        );
+        assert!(transfers.start(now).is_empty(), "the queue is ending");
+        // The preview alone still has a line and a title percent.
+        assert!(
+            transfers
+                .status(now)
+                .unwrap()
+                .body
+                .starts_with("↑1 ↓1 · p  ")
+        );
+        assert_eq!(transfers.percent(), Some(0));
+        let ended = transfers
+            .finish_item(started[1].id, Outcome::Done, Some("/x/p".into()))
+            .unwrap();
+        assert_eq!(ended.line.body, "Failed — tar: denied · 1 of 2 transferred");
+        assert_eq!(
+            ended.notice.map(|(title, _)| title).as_deref(),
+            Some("Transfer failed")
+        );
+
+        // A single download kept beside its namesake is named as it landed.
+        let mut transfers = queue_of(vec![download("report.txt", Lane::Queue, 10)]);
+        let started = transfers.start(now);
+        let ended = transfers
+            .finish_item(
+                started[0].id,
+                Outcome::Done,
+                Some("/Users/me/Downloads/report 2.txt".into()),
+            )
+            .unwrap();
+        assert_eq!(ended.line.body, "✓ report 2.txt → /Users/me/Downloads");
+        assert_eq!(
+            ended.notice.map(|(title, _)| title).as_deref(),
+            Some("report 2.txt downloaded")
+        );
+
+        // A download's full disk is this Mac's.
+        let mut transfers = queue_of(vec![download("big", Lane::Queue, 10)]);
+        let _ = transfers.start(now);
+        let ended = transfers.finish(Outcome::DiskFull).unwrap();
+        assert_eq!(
+            ended.line.body,
+            "Failed — disk full on this Mac · 0 of 1 downloaded"
+        );
+        // Cancelling the whole queue kills every streaming item.
+        let mut transfers = queue_of(vec![
+            job("a", false, 1, 10),
+            download("f", Lane::Finder, 10),
+        ]);
+        let started = transfers.start(now);
+        assert_eq!(transfers.stop(None, true), None);
+        assert!(
+            started
+                .iter()
+                .all(|s| s.shared.cancel.load(Ordering::Acquire))
+        );
+        assert_eq!(
+            transfers.finish_item(started[1].id, Outcome::Cancelled, None),
+            None
+        );
+        let ended = transfers
+            .finish_item(started[0].id, Outcome::Cancelled, None)
+            .unwrap();
+        assert_eq!(
+            ended.line.body,
+            "Cancelled — 0 of 2 transferred, partial file removed"
+        );
+    }
+
+    #[test]
+    fn every_glyph_of_a_download_row_is_one_the_atlas_checks() {
+        // `every_glyph_of_the_row_is_one_the_atlas_checks`' vocabulary, both ways.
+        let mut transfers = queue_of(vec![
+            job("a", false, 1, 100),
+            download("b", Lane::Queue, 100),
+            download("c", Lane::Preview, 100),
+        ]);
+        let now = Instant::now();
+        let _ = transfers.start(now);
+        let mut texts = vec![transfers.status(now).unwrap().body];
+        let mut down = queue_of(vec![download("b", Lane::Queue, 100)]);
+        let _ = down.start(now);
+        texts.push(down.status(now).unwrap().body);
+        texts.push(down.finish(Outcome::DiskFull).unwrap().line.body);
         for text in texts {
             for ch in text.chars().filter(|ch| !ch.is_ascii()) {
                 assert!(bt_core::UPLOAD_GLYPHS.contains(&ch), "'{ch}' in {text:?}");
