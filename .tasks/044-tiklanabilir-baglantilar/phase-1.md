@@ -52,8 +52,40 @@ _Requirements: R1, R1.1, R1.2, R2, R3_
 
 ## Checklist
 
-- [ ] `link.rs` tarayıcısı ve sınamaları
-- [ ] `LinkPoint`/`LinkHit`/`Session::link_at`, OSC 8 koşusu, `bateri://` elemesi
-- [ ] Yerel yetki fonksiyonu (OSC 7 ile ortak), `SessionOptions::hostname`
-- [ ] Test: sarma, geniş karakter/küme, OSC 8, bant, uzak oturum
-- [ ] Doğrulama geçti (`make check` + `make linux`)
+- [x] `link.rs` tarayıcısı ve sınamaları
+- [x] `LinkPoint`/`LinkHit`/`Session::link_at`, OSC 8 koşusu, `bateri://` elemesi
+- [x] Yerel yetki fonksiyonu (OSC 7 ile ortak), `SessionOptions::hostname`
+- [x] Test: sarma, geniş karakter/küme, OSC 8, bant, uzak oturum
+- [x] Doğrulama geçti (`make check` + `make linux`)
+
+## Uygulama Notları
+
+- **Sınırın biçimi.** `LinkHit { spans: Vec<LinkSpan>, target, kind, stamp }`;
+  `LinkSpan { row: i32, first, last }` `LinkPoint::Screen` ile aynı uzayda
+  (ekran satırı, negatif = bant), yani phase-2 hücreyi doğrudan karşılaştırır.
+  `LinkStamp` opak (`LedgerMark` + OSC 8'de `(id, uri)` dizgileri; alacritty
+  tipi `pub` API'ye çıkmıyor) ve `PartialEq` taşıyor — phase-2'nin
+  karşılaştırması bu eşitlik. `LinkPoint::Dock` kolunun yükü `SelectionPoint`
+  (`dock_select`'in noktası); bugün `None`.
+- **Tarayıcının küçük kararları** (`link.rs`): belirteç sınırı boşluk +
+  `"'`` ` ``<>` (kaçırılmış boşluk izlenmiyor — `~/a\ b` iki belirteç);
+  şema belirtecin başında ya da harf/rakam olmayan bir karakterden sonra
+  (`url=https://…`); yolun çevreleyen parantez çifti atılıyor
+  (`(src/x.rs)`); `(satır)` soneki de `(satır,sütun)`'un yanında tanınıyor;
+  uzantılı çıplak adın uzantısı bir harf taşımalı (`1.5` aday değil) ve
+  `://` taşıyan belirteç yol değil. `file_authority`/`is_file_url` de orada.
+- **OSC 8 koşusunda spacer** koşuyu bölmüyor ama yalnız bağlantılı iki hücre
+  arasında ya da bağlantılı geniş karakterin sağ yarısı olarak sayılıyor.
+  Bitişik iki id'siz bağlantının alacritty'nin ürettiği id'leri ayrı, yani
+  aynı URI'li iki ayrı OSC 8 iki koşu (Karar 2 ile uyumlu).
+- **`file://`'nin kapısı** düz metin URL'de de OSC 8'de de aynı: uzak
+  oturumda hiçbiri; yerelde yetki `shell::is_local_authority`'den (boş,
+  `localhost`, verilmişse makine adı; büyük/küçük harf duyarsız, boş ad
+  "ad yok"). OSC 7 aynı fonksiyonu `Scanner::hostname`'den çağırıyor.
+  Bu phase'de bütün çağıranlar `hostname: None` geçiyor (davranış aynı;
+  `pane.rs`'teki satır phase-4'ü işaret ediyor).
+- `search::wraps` ve `WRAP_REACH` `pub(crate)` oldu (kopya değil).
+- `make test-race` gerekmedi: paylaşılan değişken durum yok — `hostname`
+  açılışta yazılan sabit bir alan, `link_at` yalnız okuyor (uzak bit
+  yaprak kilitte `Term`'den önce, damga mevcut atomiklerden).
+

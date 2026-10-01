@@ -45,7 +45,7 @@
 | 041 | [yedek-glyph-kucultme](041-yedek-glyph-kucultme/) | 🟢 | 2 phase + kapı tamam — hücreyi aşan yedek glyph (`⧉`, tek sütunlu emoji) sınırın içindeyse küçük puntoyla ve hücrede ortalanarak çiziliyor; `make tarama` envanteri ve araç karakterlerinin bekçisi (gözle kontrol bekliyor) |
 | 042 | [font-sistemi-linux](042-font-sistemi-linux/) | 🟢 | 7 phase + kapı tamam: `FontSystem` arkasında macOS CoreText (raster bit bit aynı), Linux FreeType + fontconfig + harfrust; `make linux` `bt-gpu`'yu lavapipe'ta koşar |
 | 043 | [bt-shell-ayrimi](043-bt-shell-ayrimi/) | 🟢 | 5 phase + kapı tamam — kabuk katmanı `bt-shell-common` (AppKit'siz, Linux gövdeleriyle `make linux`'ta) ve `bt-shell-macos` olarak ayrıldı, macOS'ta fark yok (3 bulgu giderildi, 6 waive) |
-| 044 | [tiklanabilir-baglantilar](044-tiklanabilir-baglantilar/) | 📐 | ⌘-tık ile URL, dosya yolu ve OSC 8 bağlantısı açma; ⌘-hover'da alt çizgi + el imleci, fare kipinde ⌘ bağlantıyı alır, `bateri://` yutulur |
+| 044 | [tiklanabilir-baglantilar](044-tiklanabilir-baglantilar/) | 🔨 | ⌘-tık ile URL, dosya yolu ve OSC 8 bağlantısı açma; ⌘-hover'da alt çizgi + el imleci, fare kipinde ⌘ bağlantıyı alır, `bateri://` yutulur |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

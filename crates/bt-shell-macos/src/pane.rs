@@ -1329,6 +1329,8 @@ impl TerminalPane {
                 // The identity is in every window, timed run included (038
                 // Karar 8): the variables read no file and do not move the tokens.
                 tab_id: Some(self.ivars().tab_id.clone()),
+                // The machine's name is read in phase-4 (044); `None` keeps today's rule.
+                hostname: None,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );

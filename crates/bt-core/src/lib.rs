@@ -48,6 +48,7 @@ mod dock;
 mod handler;
 mod identity;
 mod input;
+mod link;
 mod reader;
 mod search;
 mod session;
@@ -69,10 +70,10 @@ pub use search::{
     escape as escape_search,
 };
 pub use session::{
-    Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, Osc52, SHUTDOWN_GRACE,
-    ScrollGlide, ScrollIntent, SelectKind, SelectionPoint, SelectionRun, SelectionRuns, Session,
-    SessionOptions, ShutdownHandle, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell,
-    smoke_shell,
+    Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, LinkHit, LinkKind, LinkPoint,
+    LinkSpan, LinkStamp, Osc52, SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, SelectKind,
+    SelectionPoint, SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Teardown,
+    TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,
