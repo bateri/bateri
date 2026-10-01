@@ -490,7 +490,7 @@ fn pax_path(data: &[u8]) -> Option<String> {
 // ─── text ────────────────────────────────────────────────────────────────
 
 /// A byte count in decimal units (Finder's units): `512 B`, `18.2 MB`.
-pub(crate) fn format_bytes(bytes: u64) -> String {
+pub fn format_bytes(bytes: u64) -> String {
     let (value, unit) = scaled(bytes, bytes);
     if unit == "B" {
         format!("{bytes} B")
@@ -2134,7 +2134,18 @@ impl Transfers {
         };
         let tally = Tally::of(&queue.entries);
         let (body, tone, lead) = end_line(&end, &queue.host, &tally);
-        let notice = end_notice(&end, &queue.host, &tally);
+        // A queue of previews only that succeeded opens its files: the opened
+        // window is the news, a notification would repeat it (045 phase-4). The
+        // result line stays — it says where the copy is. A failure still notifies.
+        let previews_only = queue
+            .entries
+            .iter()
+            .all(|entry| entry.job.way.lane() == Lane::Preview);
+        let notice = if previews_only && end == End::Done {
+            None
+        } else {
+            end_notice(&end, &queue.host, &tally)
+        };
         Some(Ended {
             line: Transfer {
                 host: queue.host,
@@ -3495,6 +3506,76 @@ mod tests {
         let _ = transfers.start(now);
         assert!(transfers.title_percent_changed());
         assert_eq!(transfers.title_prefix(), Some(("↑↓", 0)));
+    }
+
+    #[test]
+    fn a_finished_preview_does_not_notify_but_a_failed_one_does() {
+        let now = Instant::now();
+        let mut transfers = queue_of(vec![download("app.log", Lane::Preview, 10)]);
+        let started = transfers.start(now);
+        let ended = transfers
+            .finish_item(started[0].id, Outcome::Done, None)
+            .expect("ended");
+        assert_eq!(ended.line.body, "✓ app.log → /Users/me/Downloads");
+        assert_eq!(ended.notice, None, "the opened file is the news");
+        let mut transfers = queue_of(vec![download("app.log", Lane::Preview, 10)]);
+        let started = transfers.start(now);
+        let ended = transfers
+            .finish_item(started[0].id, Outcome::Failed("gone".into()), None)
+            .expect("ended");
+        assert!(ended.notice.is_some());
+        // A preview beside a download keeps the download's notification.
+        let mut transfers = queue_of(vec![
+            download("app.log", Lane::Preview, 10),
+            download("db.sql", Lane::Queue, 10),
+        ]);
+        let started = transfers.start(now);
+        assert!(
+            transfers
+                .finish_item(started[0].id, Outcome::Done, None)
+                .is_none()
+        );
+        let ended = transfers
+            .finish_item(started[1].id, Outcome::Done, None)
+            .expect("ended");
+        assert!(ended.notice.is_some());
+    }
+
+    #[test]
+    fn a_download_during_the_result_line_starts_at_once() {
+        // 045 phase-4 (f): the right-click download while the last result lingers.
+        let now = Instant::now();
+        let mut transfers = queue_of(vec![download("a.log", Lane::Queue, 10)]);
+        let started = transfers.start(now);
+        let first = transfers
+            .finish_item(started[0].id, Outcome::Done, None)
+            .expect("ended")
+            .serial;
+        assert!(transfers.can_accept(), "the lingering line refuses nothing");
+        assert!(transfers.enqueue(
+            7,
+            words(&["ssh", "prod"]),
+            "prod".into(),
+            HostMark::Production,
+            vec![download("b.log", Lane::Queue, 10)],
+        ));
+        assert_eq!(started_names(&transfers.start(now)), ["b.log"]);
+        assert!(
+            !transfers.linger_over(first),
+            "the new line replaces the result"
+        );
+        // So does a preview.
+        let mut transfers = queue_of(vec![download("a.log", Lane::Queue, 10)]);
+        let started = transfers.start(now);
+        let _ = transfers.finish_item(started[0].id, Outcome::Done, None);
+        assert!(transfers.enqueue(
+            7,
+            words(&["ssh", "prod"]),
+            "prod".into(),
+            HostMark::Production,
+            vec![download("p.log", Lane::Preview, 10)],
+        ));
+        assert_eq!(started_names(&transfers.start(now)), ["p.log"]);
     }
 
     #[test]

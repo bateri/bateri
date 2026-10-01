@@ -24,11 +24,14 @@
 //! - **The cleanup planner** ([`plan_sweep`]): what the launch, the daily and
 //!   the Clear Now sweeps delete and what they move to the download folder
 //!   instead (Karar 9).
+//! - **The preview index's text** ([`PreviewIndex`]): what bateri wrote and
+//!   when it last opened each copy, `{preview_dir}/.index` (phase-4).
 //!
 //! The stream and the two-way queue are `download` and `upload::Transfers`
-//! (045 phase-2); the helper session, the preview and the drag come with
-//! phase-3…5. The rationale is in `.tasks/045-uzak-dosya-indirme/discussion.md`.
+//! (045 phase-2), the helper session `remote_helper` (phase-3), the cache's
+//! disk half `preview_cache` (phase-4); the drag comes with phase-5. The rationale is in `.tasks/045-uzak-dosya-indirme/discussion.md`.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -653,7 +656,10 @@ pub struct SweepPlan {
 ///   nothing under `UntilLaunch` (those are this session's). [`Sweep::ClearNow`]
 ///   every one.
 /// - A copy whose size or mtime differs from what bateri wrote is never
-///   deleted: it goes to [`SweepPlan::rescue`] on every trigger.
+///   deleted: it goes to [`SweepPlan::rescue`] on every trigger that would take
+///   it — and [`Sweep::Launch`] and [`Sweep::ClearNow`] rescue **every** changed
+///   copy, due or not: the user's edits must not wait a week in a cache folder
+///   (the daily sweep, while the copy may be open, only takes the due ones).
 /// - A copy the index has no record of is **left alone** on every trigger: it
 ///   is not known to be bateri's (a damaged index must delete nothing), but it
 ///   still counts toward the size.
@@ -677,7 +683,12 @@ pub fn plan_sweep(
     };
     let mut due: Vec<&CachedPreview> = match sweep {
         Sweep::ClearNow => known.clone(),
-        Sweep::Launch | Sweep::Daily => known
+        Sweep::Launch => known
+            .iter()
+            .copied()
+            .filter(|preview| expired(preview) || preview.diverged())
+            .collect(),
+        Sweep::Daily => known
             .iter()
             .copied()
             .filter(|preview| expired(preview))
@@ -709,6 +720,129 @@ pub fn plan_sweep(
         }
     }
     plan
+}
+
+// ─── preview index ───────────────────────────────────────────────────────
+
+/// The preview index's first line: a file without it is not ours (or another
+/// version's) and reads as damaged.
+const INDEX_HEADER: &str = "bateri-previews 1";
+
+/// One copy's record: what bateri wrote and when it last opened it. Times are
+/// Unix seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexRecord {
+    /// The size and mtime the copy had when bateri finished writing it (tar
+    /// keeps the remote mtime, so it is also the remote's).
+    pub written: (u64, u64),
+    pub last_open: u64,
+}
+
+/// The preview folder's index, `{preview_dir}/.index` (045 Karar 9): a record
+/// per copy, by its path **relative** to the folder. It is what tells bateri's
+/// copy from the user's edit (R6) and an unchanged remote file from a changed
+/// one (R5.4).
+///
+/// The text is a header line and one line per copy, `{last_open} {size}
+/// {mtime} {path}` — the path last, so it may hold spaces. A path with a
+/// newline is never written (the helper refuses such names, [`is_safe`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreviewIndex {
+    pub records: BTreeMap<String, IndexRecord>,
+}
+
+/// Why an index could not be read: the sweep then deletes nothing (Karar 9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexDamaged(pub String);
+
+impl PreviewIndex {
+    /// The index's text → its records. Any line that is not the header's or a
+    /// record's damages the whole index: a half-read index would make the
+    /// copies it lost look unknown, which is safe, but the copies it misread
+    /// could be deleted.
+    pub fn parse(text: &str) -> Result<Self, IndexDamaged> {
+        let mut lines = text.lines();
+        if lines.next() != Some(INDEX_HEADER) {
+            return Err(IndexDamaged("no header".to_owned()));
+        }
+        let mut records = BTreeMap::new();
+        for line in lines {
+            let damaged = || IndexDamaged(line.to_owned());
+            let mut fields = line.splitn(4, ' ');
+            let mut number = || -> Result<u64, IndexDamaged> {
+                fields
+                    .next()
+                    .and_then(|field| field.parse().ok())
+                    .ok_or_else(damaged)
+            };
+            let (last_open, size, mtime) = (number()?, number()?, number()?);
+            let path = fields
+                .next()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(damaged)?;
+            records.insert(
+                path.to_owned(),
+                IndexRecord {
+                    written: (size, mtime),
+                    last_open,
+                },
+            );
+        }
+        Ok(Self { records })
+    }
+
+    /// The index's text ([`PreviewIndex::parse`]'s inverse); a path with a
+    /// newline or a carriage return is left out.
+    pub fn render(&self) -> String {
+        let mut text = format!("{INDEX_HEADER}\n");
+        for (path, record) in &self.records {
+            if path.contains(['\n', '\r']) || path.is_empty() {
+                continue;
+            }
+            let (size, mtime) = record.written;
+            let _ = writeln!(text, "{} {size} {mtime} {path}", record.last_open);
+        }
+        text
+    }
+}
+
+/// Whether a cached copy can open as it is (R5.4): the remote file's size and
+/// mtime are what bateri wrote, and the local copy is still what bateri wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheState {
+    /// Open the copy; nothing downloads.
+    Fresh,
+    /// No copy, or the remote file changed: download it.
+    Stale,
+    /// The local copy changed since bateri wrote it (the user unlocked and
+    /// edited it) or the index has no record of it: it is moved to the download
+    /// folder before a new copy takes its place — a re-download must not destroy
+    /// what may be the user's edits (Karar 9; the unknown copy's side is the
+    /// sweep's, which never deletes one).
+    Diverged,
+}
+
+/// [`CacheState`] from the record, the local copy's size and mtime now (`None`:
+/// no copy) and the remote's (`None` fields: the server's `stat` gave none —
+/// then nothing can be compared and it downloads).
+pub fn cache_state(
+    record: Option<&IndexRecord>,
+    local: Option<(u64, u64)>,
+    remote: (Option<u64>, Option<u64>),
+) -> CacheState {
+    let Some(local) = local else {
+        return CacheState::Stale;
+    };
+    let Some(record) = record else {
+        return CacheState::Diverged;
+    };
+    if local != record.written {
+        return CacheState::Diverged;
+    }
+    match remote {
+        (Some(size), Some(mtime)) if (size, mtime) == record.written => CacheState::Fresh,
+        _ => CacheState::Stale,
+    }
 }
 
 #[cfg(test)]
@@ -1194,5 +1328,102 @@ mod tests {
         );
         assert_eq!(sheet.buttons, vec![("Download", Conflict::Replace)]);
         assert!(sheet.enabled);
+    }
+
+    #[test]
+    fn the_index_round_trips_and_a_damaged_one_is_refused() {
+        let mut index = PreviewIndex::default();
+        index.records.insert(
+            "prod/var/log/app.log".to_owned(),
+            IndexRecord {
+                written: (120, 1_700_000_000),
+                last_open: 1_700_000_500,
+            },
+        );
+        index.records.insert(
+            "prod/home/me/My Notes.txt".to_owned(),
+            IndexRecord {
+                written: (0, 5),
+                last_open: 9,
+            },
+        );
+        let text = index.render();
+        assert!(text.starts_with("bateri-previews 1\n"), "{text}");
+        assert_eq!(PreviewIndex::parse(&text), Ok(index.clone()));
+        assert_eq!(
+            PreviewIndex::parse("bateri-previews 1\n"),
+            Ok(PreviewIndex::default())
+        );
+        // A path that would split a line is never written.
+        index.records.insert(
+            "prod/a\nb".to_owned(),
+            IndexRecord {
+                written: (1, 1),
+                last_open: 1,
+            },
+        );
+        assert_eq!(
+            PreviewIndex::parse(&index.render()).unwrap().records.len(),
+            2
+        );
+        for damaged in [
+            "",
+            "garbage",
+            "bateri-previews 2\n",
+            "bateri-previews 1\n1 2 3\n",
+            "bateri-previews 1\nx 2 3 a\n",
+            "bateri-previews 1\n1 2 3 a\n1 2\n",
+        ] {
+            assert!(PreviewIndex::parse(damaged).is_err(), "{damaged:?}");
+        }
+    }
+
+    #[test]
+    fn an_unchanged_copy_opens_and_an_edited_one_is_never_overwritten() {
+        let record = IndexRecord {
+            written: (10, 500),
+            last_open: 0,
+        };
+        let some = (Some(10), Some(500));
+        assert_eq!(
+            cache_state(Some(&record), Some((10, 500)), some),
+            CacheState::Fresh
+        );
+        // The remote file changed, or its `stat` said nothing: download.
+        for remote in [
+            (Some(11), Some(500)),
+            (Some(10), Some(501)),
+            (None, Some(500)),
+            (Some(10), None),
+        ] {
+            assert_eq!(
+                cache_state(Some(&record), Some((10, 500)), remote),
+                CacheState::Stale,
+                "{remote:?}"
+            );
+        }
+        assert_eq!(cache_state(Some(&record), None, some), CacheState::Stale);
+        assert_eq!(cache_state(None, None, some), CacheState::Stale);
+        // The user edited the copy, or nothing says it is bateri's: keep it.
+        assert_eq!(
+            cache_state(Some(&record), Some((10, 900)), some),
+            CacheState::Diverged
+        );
+        assert_eq!(
+            cache_state(None, Some((10, 500)), some),
+            CacheState::Diverged
+        );
+    }
+
+    #[test]
+    fn the_launch_rescues_every_changed_copy_the_daily_only_the_due() {
+        let mut edited = preview("edited", 12, 1);
+        edited.mtime = 2_000;
+        let previews = [edited, preview("fresh", 1, 1)];
+        let launch = plan_sweep(&previews, Sweep::Launch, PreviewKeep::Week, 1_000, NOW);
+        assert_eq!(launch.rescue, paths(&["edited"]));
+        assert!(launch.delete.is_empty());
+        let daily = plan_sweep(&previews, Sweep::Daily, PreviewKeep::Week, 1_000, NOW);
+        assert_eq!(daily, SweepPlan::default());
     }
 }

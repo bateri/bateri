@@ -32,5 +32,6 @@ _Requirements: R8_
 
 - [ ] Kategori ve popup/switch satırları
 - [ ] Klasör satırı (NSOpenPanel) ve kullanım satırı (Clear Now)
+- [ ] (phase-4'ten) Clear Now `AppDelegate::sweep_previews(Sweep::ClearNow)`'u çağırır (arka plan thread'i, kurtarılanları kendisi bildirir); bitince kullanımı tazelemek için bugün tamamlanma kancası yok — gerekirse yönteme eklenir. Kullanım ölçümü `preview_cache`'e (taramanın `scan`'i, `.index` ve `.bateri-download-*` hariç) eklenebilir
 - [ ] `docs/AYARLAR.md`
 - [ ] Doğrulama geçti (`make check`)

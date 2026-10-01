@@ -33,7 +33,9 @@
 //! includes scale and point size, and the point-size delta belongs to the pane.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,6 +68,7 @@ use crate::clipboard::{self, PendingCopy};
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
+use crate::preview::PreviewTicket;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
 use crate::search_bar::{SearchBar, selection_query};
@@ -821,6 +824,9 @@ pub(crate) struct PaneIvars {
     /// `[remote]`'s preview and download keys (045 R8): from the birth package,
     /// refreshed live with the host marks ([`TerminalPane::set_host_marks`]).
     remote_files: RefCell<RemoteFiles>,
+    /// The previews this pane downloaded, by landing path (045 phase-4): how each
+    /// opens and where its index is ([`crate::preview::PreviewTicket`]).
+    previews: RefCell<HashMap<PathBuf, PreviewTicket>>,
 }
 
 define_class!(
@@ -1170,6 +1176,7 @@ impl TerminalPane {
             list_closed_at: Cell::new(None),
             remote_helper: RefCell::new(RemoteHelper::default()),
             remote_files: RefCell::new(remote_files),
+            previews: RefCell::new(HashMap::new()),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -2348,6 +2355,11 @@ impl TerminalPane {
     /// `[remote]`'s preview and download keys as last read.
     pub(crate) fn remote_files(&self) -> &RefCell<RemoteFiles> {
         &self.ivars().remote_files
+    }
+
+    /// The previews this pane downloaded, by landing path.
+    pub(crate) fn previews(&self) -> &RefCell<HashMap<PathBuf, PreviewTicket>> {
+        &self.ivars().previews
     }
 
     /// The open upload sheet's slot.
