@@ -232,7 +232,14 @@ impl LinkLabel {
         )));
         text.setTextColor(Some(&NSColor::secondaryLabelColor()));
         text.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-        this.addSubview(&text);
+        // The text is the box's **content view**, not a plain subview: `NSBox`
+        // forwards `addSubview:` into its content view, which sits inset by the
+        // default margins and the border, so frames set in the box's own space
+        // landed shifted right and up and the text overflowed the frame. The
+        // padding is the margins; [`TerminalPane::set_link_target`] sizes the box
+        // around the content with `setFrameFromContentFrame:`.
+        this.setContentViewMargins(NSSize::new(LINK_LABEL_PAD_X, LINK_LABEL_PAD_Y));
+        this.setContentView(Some(&text));
         (this, text)
     }
 
@@ -1690,19 +1697,14 @@ impl TerminalPane {
         };
         text.setStringValue(&NSString::from_str(target));
         let fit = text.fittingSize();
-        let room = self.bounds().size.width - 2.0 * (LINK_LABEL_MARGIN + LINK_LABEL_PAD_X);
+        let border = label.borderWidth();
+        let room = self.bounds().size.width - 2.0 * (LINK_LABEL_MARGIN + LINK_LABEL_PAD_X + border);
         let width = fit.width.min(room).max(0.0);
-        text.setFrame(NSRect::new(
-            NSPoint::new(LINK_LABEL_PAD_X, LINK_LABEL_PAD_Y),
+        label.setFrameFromContentFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
             NSSize::new(width, fit.height),
         ));
-        label.setFrame(NSRect::new(
-            NSPoint::new(LINK_LABEL_MARGIN, LINK_LABEL_MARGIN),
-            NSSize::new(
-                width + 2.0 * LINK_LABEL_PAD_X,
-                fit.height + 2.0 * LINK_LABEL_PAD_Y,
-            ),
-        ));
+        label.setFrameOrigin(NSPoint::new(LINK_LABEL_MARGIN, LINK_LABEL_MARGIN));
         label.setHidden(false);
     }
 

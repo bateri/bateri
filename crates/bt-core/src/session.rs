@@ -7301,6 +7301,23 @@ impl Session {
         Some((command, target, log.context.remote_cwd.clone()))
     }
 
+    /// The directory a remote link's relative candidate resolves under: OSC 7's
+    /// remote directory, or — when the server sends none — the one the title
+    /// names in the `user@host: dir` shape (`shell::title_directory`; may be
+    /// `~`-rooted, the helper expands it). Empty if neither says. The two leaf
+    /// locks are taken in sequence, not nested; `Term` is not touched.
+    pub fn remote_link_directory(&self) -> String {
+        let cwd = lock(&self.shell).context.remote_cwd.clone();
+        if !cwd.is_empty() {
+            return cwd;
+        }
+        lock(&self.adapter.0.title)
+            .as_deref()
+            .and_then(crate::shell::title_directory)
+            .map(str::to_owned)
+            .unwrap_or_default()
+    }
+
     /// Writes the upload queue's status row (`None` = remove; 037 Karar 7).
     /// Requests a frame **if it changed** ([`Session::set_remote`]'s pattern: the
     /// row is not in alacritty's damage) and returns `true`.

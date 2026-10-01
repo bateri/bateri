@@ -186,7 +186,9 @@ bağlantısı (metin taramasını yener). Algılama ve hit test `bt-core`'da
 yol **uzak işaretli** hit — `LinkHit::remote` — ve varlığını pane başına tembel
 açılan **yardımcı ssh oturumu** söylüyor (`remote_helper`, 045 Karar 10:
 `BatchMode`, cevap uzak nesil başına önbellekte, nesil değişince ya da boşta
-kapanır); göreli ad uzak OSC 7 dizini yoksa bağlantı değil ve nedeni de
+kapanır); göreli adın tabanı uzak OSC 7 dizini, o yoksa başlığın `kullanıcı@host: dizin`
+biçimi (Debian/Ubuntu'nun hazır `.bashrc`'si; `Session::remote_link_directory`),
+ikisi de yoksa göreli ad bağlantı değil ve nedeni de
 açılamayan oturumun nedeni de pane'in etiketinde; sağ tık menüsü (Open
 Preview, Download to Downloads/To…, Copy Path, Copy as scp Path) indirir —
 klasörde, `ask` altında çakışmada ya da yer yokken onay sayfası, tek dosya

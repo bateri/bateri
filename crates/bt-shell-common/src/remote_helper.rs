@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -256,8 +256,18 @@ pub fn cwd_unknown(candidates: &[String], cwd: &str) -> bool {
 /// `None` also for a path that cannot safely enter the helper's script
 /// (`upload::is_safe`): such a name is not a link, never a mangled one.
 pub fn remote_paths(candidates: &[String], cwd: &str, home: Option<&str>) -> Vec<Option<String>> {
-    let cwd = (!cwd.is_empty()).then(|| Path::new(cwd));
     let home = home.map(Path::new);
+    // The title's directory may be `~`-rooted (`Session::remote_link_directory`);
+    // without the remote home it does not resolve and relative names stay unlinked.
+    let cwd: Option<PathBuf> = match cwd {
+        "" => None,
+        "~" => home.map(Path::to_path_buf),
+        _ => match cwd.strip_prefix("~/") {
+            Some(rest) => home.map(|home| home.join(rest)),
+            None => Some(PathBuf::from(cwd)),
+        },
+    };
+    let cwd = cwd.as_deref();
     candidates
         .iter()
         .map(|candidate| {
@@ -686,6 +696,16 @@ mod tests {
         assert_eq!(remote_paths(&["~/x".to_owned()], "/srv", None), vec![None]);
         // A name the script cannot carry.
         assert_eq!(remote_paths(&["a\\b".to_owned()], "/srv", None), vec![None]);
+        // The title's `~`-rooted directory expands under the remote home.
+        assert_eq!(
+            remote_paths(&["backups".to_owned()], "~", Some("/root")),
+            vec![Some("/root/backups".to_owned())]
+        );
+        assert_eq!(
+            remote_paths(&["x".to_owned()], "~/app", Some("/home/d")),
+            vec![Some("/home/d/app/x".to_owned())]
+        );
+        assert_eq!(remote_paths(&["x".to_owned()], "~", None), vec![None]);
         // The label's question: only relative names and no folder.
         assert!(cwd_unknown(
             &["backups".to_owned(), "My Drive".to_owned()],

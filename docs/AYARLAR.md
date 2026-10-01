@@ -999,9 +999,11 @@ kopyayı `download_dir`'e koyar.
   ekrandaki değerde bırakır ve uyarı görünür.
 
 **Göreli adlar sunucunun OSC 7'sini ister.** `ls` çıktısındaki `backups` adı
-göreli; hangi dizinde olduğunu yalnız uzak kabuğun bastığı OSC 7 söyler ve çoğu
-sunucu onu varsayılan olarak basmaz. Basmıyorsa mutlak (`/var/log/x`) ve `~/…`
-yollar yine çalışır, göreli adın üstünde ⌘ basılıyken etiket nedeni söyler.
+göreli; hangi dizinde olduğunu uzak kabuğun bastığı OSC 7 söyler. Basmıyorsa
+bateri pencere başlığına bakar: Debian ve Ubuntu'nun hazır `.bashrc`'si her
+prompt'ta başlığı `kullanıcı@host: dizin` yapar ve o biçimdeki dizin kullanılır.
+İkisi de yoksa mutlak (`/var/log/x`) ve `~/…` yollar yine çalışır, göreli adın
+üstünde ⌘ basılıyken etiket nedeni söyler.
 bateri sunucudaki rc dosyasına yazmaz; açmak için sunucuda tek satır yeter:
 
 ```sh

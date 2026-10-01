@@ -627,12 +627,15 @@ impl BateriView {
     fn check(&self, hit: &LinkHit) -> Check {
         if hit.remote {
             let candidates = remote_candidates(hit);
-            match self.session().and_then(|session| session.remote_target()) {
-                None => Check::Gone,
-                Some((_, _, cwd)) if remote_helper::cwd_unknown(&candidates, &cwd) => {
-                    Check::CwdUnknown
-                }
-                Some(_) => Check::Remote(candidates),
+            let Some(session) = self.session() else {
+                return Check::Gone;
+            };
+            if session.remote_target().is_none() {
+                Check::Gone
+            } else if remote_helper::cwd_unknown(&candidates, &session.remote_link_directory()) {
+                Check::CwdUnknown
+            } else {
+                Check::Remote(candidates)
             }
         } else {
             local_paths(hit).map_or(Check::None, Check::Local)
@@ -657,9 +660,10 @@ impl BateriView {
         let (Some(pane), Some(session)) = (self.pane(), self.session()) else {
             return;
         };
-        let Some((command, target, cwd)) = session.remote_target() else {
+        let Some((command, target, _)) = session.remote_target() else {
             return;
         };
+        let cwd = session.remote_link_directory();
         let (id, lookup) = (pane.id(), pane.lookup());
         let request = Request {
             command,

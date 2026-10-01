@@ -36,6 +36,12 @@ söylüyor ve çoğu sunucu onu varsayılan olarak basmıyor.
   kabuğun dizinini `/proc` üstünden arar (yalnız Linux sunucu; ControlMaster
   çoklamasında ve `sudo -i`/tmux'ta belirsiz). Kod açar ama güvenilmez.
 
+**Ek (kullanıcı, 2026-10-02):** gerçek sunucuda (Ubuntu, OSC 7 yok) etiket
+çıktı; başlık `root@host: ~` biçimindeydi. OSC 7 yokken başlığın
+`kullanıcı@host: dizin` biçimi dizin sayılır (`shell::title_directory`,
+`Session::remote_link_directory`; `~` yardımcının bildiği uzak eve açılır);
+biçime uymayan başlık yok sayılır ve A'nın etiketi kalır.
+
 ## Karar 3: ⌘-tık uzakta "önizle" demek → ✅ kullanıcı
 
 Dosyaya ⌘-tık geçici, salt okunur bir kopyayı önizleme klasörüne indirir ve
