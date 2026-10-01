@@ -78,9 +78,10 @@ pub use session::{
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,
     CURSOR_RADIUS_RANGE, CaretShape, CaretStyle, Changes, ConfirmClose, CursorBlink, CursorMotion,
-    Diagnostic, Erase, FontOptions, HostMark, HostRule, Keypress, LINE_HEIGHT_RANGE,
-    MAX_LINE_HEIGHT, Parsed, ReduceMotion, SCROLLBACK_MAX, SYSTEM_THEME, Settings, SettingsEdit,
-    ShellIntegration, SmoothScroll, UnfocusedCaret, bare_host,
+    Diagnostic, DownloadConflict, Erase, FontOptions, HostMark, HostRule, Keypress,
+    LINE_HEIGHT_RANGE, MAX_LINE_HEIGHT, Parsed, PreviewKeep, ReduceMotion, RemoteFiles,
+    SCROLLBACK_MAX, SIZE_UNITS, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration,
+    SmoothScroll, UnfocusedCaret, bare_host, expand_home, format_size, parse_size,
 };
 pub use shell::{
     ButtonState, DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor,

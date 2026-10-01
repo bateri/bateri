@@ -573,7 +573,7 @@ pub enum TransferTone {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransferControls {
     /// The number of items visible in the list — finished, flowing and waiting (037
-    /// phase-7). `0` → no buttons, `1` → only `Cancel`, more → `Show files (N)` +
+    /// phase-7). `0` → no buttons, `1` → only `Cancel`, more → `Show transfers (N)` +
     /// `Cancel all`.
     pub items: u16,
     /// The list (popover) is open: the list button is in the pressed tone; its label does not change.

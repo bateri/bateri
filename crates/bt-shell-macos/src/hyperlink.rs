@@ -29,6 +29,10 @@
 //!   only if the pointer is still on the same candidate. Until it is back the
 //!   path is not underlined and a ⌘-press takes today's route (report or
 //!   selection) — the known limit `discussion.md` → Muhakeme names.
+//! - **A remote path is not a link yet** (`LinkHit::remote`, 045 phase-1): its
+//!   candidates name the remote disk and a local `stat` could find a same-named
+//!   local file, so the hit is dropped as if there were none — the helper ssh
+//!   session that verifies it remotely comes in 045 phase-3.
 //! - **A stale stamp re-finds**: when output, a scroll or a clear moves the
 //!   scrollback the frame drops the hover and says so (`Wake::link_hover_lost`);
 //!   while the window is key the same point is asked again and, if the link is the
@@ -202,7 +206,11 @@ pub(crate) struct LinkState {
 /// candidates; the stamp is left out (it moves with every output round while
 /// the link stays).
 fn same_link(a: &LinkHit, b: &LinkHit) -> bool {
-    a.spans == b.spans && a.target == b.target && a.kind == b.kind && a.candidates == b.candidates
+    a.spans == b.spans
+        && a.target == b.target
+        && a.kind == b.kind
+        && a.candidates == b.candidates
+        && a.remote == b.remote
 }
 
 /// Whether `cell` is one of the link's cells — on the surface the link was
@@ -483,6 +491,7 @@ impl BateriView {
         };
         let hit = at
             .and_then(|cell| session.link_at(cell.point()))
+            .filter(|hit| !hit.remote)
             .filter(|hit| hover_style(hit, command).is_some());
         let Some(hit) = hit else {
             let shown = {
@@ -756,7 +765,7 @@ impl BateriView {
         let (Some(at), Some(session)) = (self.link_cell(in_window), self.session()) else {
             return;
         };
-        let Some(hit) = session.link_at(at.point()) else {
+        let Some(hit) = session.link_at(at.point()).filter(|hit| !hit.remote) else {
             return;
         };
         let point = self.convertPoint_fromView(in_window, None);
