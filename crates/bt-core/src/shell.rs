@@ -728,6 +728,26 @@ impl Clone for RemoteTarget {
     }
 }
 
+/// The remote shell's directory as its **title** says it, the fallback when it
+/// sends no OSC 7 (045, user decision 2026-10-02): Debian's and Ubuntu's stock
+/// `.bashrc` sets the title to `user@host: dir` at every prompt, so the title
+/// follows `cd`. Only that exact shape counts and the directory must be absolute
+/// or `~`-rooted; anything else (vim's title, a free-form one) is `None` and the
+/// remote folder stays unknown.
+pub(crate) fn title_directory(title: &str) -> Option<&str> {
+    let (who, dir) = title.split_once(": ")?;
+    let (user, host) = who.split_once('@')?;
+    let plain = |part: &str| {
+        !part.is_empty()
+            && !part
+                .chars()
+                .any(|c| c.is_whitespace() || c == ':' || c == '@')
+    };
+    let dir = dir.trim_end();
+    (plain(user) && plain(host) && (dir.starts_with('/') || dir == "~" || dir.starts_with("~/")))
+        .then_some(dir)
+}
+
 /// The window's (and the native tab's) title — priority order
 /// `.tasks/026-sekmeler/discussion.md` → Karar 7.
 ///
@@ -6405,5 +6425,22 @@ mod tests {
         log.context.reconnect = Some(Reconnect::default());
         assert!(log.set_remote(Some(&RemoteTarget::ssh("staging"))));
         assert_eq!(log.context.reconnect, None);
+    }
+
+    #[test]
+    fn the_title_gives_the_directory_only_in_the_user_at_host_shape() {
+        assert_eq!(title_directory("root@kararla-production: ~"), Some("~"));
+        assert_eq!(
+            title_directory("deploy@web-01: /var/www/app"),
+            Some("/var/www/app")
+        );
+        assert_eq!(
+            title_directory("deploy@web-01: ~/My Drive"),
+            Some("~/My Drive")
+        );
+        assert_eq!(title_directory("vim - notes.txt"), None);
+        assert_eq!(title_directory("deploy@web-01: relative"), None);
+        assert_eq!(title_directory("a b@host: /x"), None);
+        assert_eq!(title_directory("deploy@: /x"), None);
     }
 }
