@@ -2619,6 +2619,12 @@ enum Stamped {
 }
 
 /// The link under a point ([`Session::link_at`]).
+///
+/// A plain-text path is a **query**, not one candidate (044 set sonrası,
+/// iTerm2's semantic history): [`LinkHit::candidates`] lists every name the
+/// point may belong to (`Drive`, …, `My Drive`), in the order they are to be
+/// tried, and the shell layer takes the first that exists
+/// ([`LinkHit::choose`]). The top-level fields are then the first candidate's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkHit {
     /// The cells it covers, top to bottom.
@@ -2627,9 +2633,55 @@ pub struct LinkHit {
     pub target: String,
     pub kind: LinkKind,
     pub stamp: LinkStamp,
+    /// A path query's candidates (`link::path_candidates`, at most 100); empty
+    /// for a URL, an OSC 8 link and a hit already narrowed by [`LinkHit::choose`].
+    pub candidates: Vec<PathCandidate>,
+}
+
+/// One name a plain-text path query may resolve to ([`LinkHit::candidates`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathCandidate {
+    /// The path without its line/column suffix, escapes undone (`My\ Drive` →
+    /// `My Drive`).
+    pub target: String,
+    pub line: Option<u32>,
+    pub col: Option<u32>,
+    /// The cells it covers (the suffix included), in the hit's space.
+    pub spans: Vec<LinkSpan>,
+    /// Its char range in the scanned text — a dock hover's stamp
+    /// ([`Stamped::Dock`]).
+    range: std::ops::Range<usize>,
 }
 
 impl LinkHit {
+    /// The hit narrowed to candidate `index` — the one that exists: its cells,
+    /// target and suffix; a dock stamp takes its char range. `None` if there is
+    /// no such candidate.
+    pub fn choose(&self, index: usize) -> Option<LinkHit> {
+        let candidate = self.candidates.get(index)?;
+        let stamp = match &self.stamp.0 {
+            Stamped::Dock {
+                text, top, cols, ..
+            } => Stamped::Dock {
+                text: text.clone(),
+                range: candidate.range.clone(),
+                top: *top,
+                cols: *cols,
+            },
+            screen @ Stamped::Screen { .. } => screen.clone(),
+        };
+        Some(LinkHit {
+            spans: candidate.spans.clone(),
+            target: candidate.target.clone(),
+            kind: LinkKind::Path {
+                line: candidate.line,
+                col: candidate.col,
+            },
+            stamp: LinkStamp(stamp),
+            candidates: Vec::new(),
+        })
+    }
+
     /// Whether the link was found on the dock's input line: its spans are in
     /// [`LinkPoint::Dock`]'s space, not the screen's.
     pub fn in_dock(&self) -> bool {
@@ -2812,13 +2864,14 @@ fn hyperlink_run<T>(term: &Term<T>, at: Point) -> Option<(Point, Point, Hyperlin
     Some((first, last, link))
 }
 
-/// The plain-text link under `at`: the logical line's string goes to
-/// [`link::scan`] (044 Karar 1) and the candidate covering `at`'s char wins.
+/// The plain-text links under `at`: the logical line's string goes to
+/// [`link::links_at`] (044 Karar 1) — a URL alone, or the path candidates in
+/// the order they are to be tried (set sonrası, iTerm2's search).
 ///
 /// Cell ↔ char: spacers carry no char and are skipped, a cluster's zero-width
 /// chars map to their base cell — so a wide char or `🇹🇷` before the link does
 /// not shift it. The range's ends are cells; a wide last char takes its spacer.
-fn text_link<T>(term: &Term<T>, at: Point) -> Option<(Point, Point, link::Found)> {
+fn text_links<T>(term: &Term<T>, at: Point) -> Vec<(Point, Point, link::Found)> {
     let (highest, lowest) = wrap_reach(term, at.line);
     let mut start = at.line;
     while start > highest && search::wraps(term, start - 1) {
@@ -2844,16 +2897,41 @@ fn text_link<T>(term: &Term<T>, at: Point) -> Option<(Point, Point, link::Found)
             }
         }
     }
-    let index = cells.iter().position(|&point| point == at)?;
-    let found = link::scan(&text)
+    let Some(index) = cells.iter().position(|&point| point == at) else {
+        return Vec::new();
+    };
+    link::links_at(&text, index)
         .into_iter()
-        .find(|found| found.range.contains(&index))?;
-    let first = *cells.get(found.range.start)?;
-    let mut last = *cells.get(found.range.end.checked_sub(1)?)?;
-    if term.grid()[last].flags.contains(Flags::WIDE_CHAR) && last.column < term.last_column() {
-        last.column += 1;
-    }
-    Some((first, last, found))
+        .filter_map(|found| {
+            let first = *cells.get(found.range.start)?;
+            let mut last = *cells.get(found.range.end.checked_sub(1)?)?;
+            if term.grid()[last].flags.contains(Flags::WIDE_CHAR)
+                && last.column < term.last_column()
+            {
+                last.column += 1;
+            }
+            Some((first, last, found))
+        })
+        .collect()
+}
+
+/// A path query's candidates at the boundary: each found range with its spans.
+fn path_candidates(
+    found: impl IntoIterator<Item = (link::Found, Vec<LinkSpan>)>,
+) -> Vec<PathCandidate> {
+    found
+        .into_iter()
+        .filter_map(|(found, spans)| match found.kind {
+            link::FoundKind::Path { line, col } => Some(PathCandidate {
+                target: found.target,
+                line,
+                col,
+                spans,
+                range: found.range,
+            }),
+            link::FoundKind::Url => None,
+        })
+        .collect()
 }
 
 /// The scanner's kind → the boundary's.
@@ -6901,8 +6979,25 @@ impl Session {
                 let pair = (link.id().to_owned(), link.uri().to_owned());
                 (first, last, pair.1.clone(), LinkKind::Osc8, Some(pair))
             } else {
-                let (first, last, found) = text_link(&term, at)?;
-                (first, last, found.target, link_kind(found.kind), None)
+                let links = text_links(&term, at);
+                let (first, last, head) = links.first()?.clone();
+                let candidates =
+                    path_candidates(links.into_iter().map(|(first, last, found)| {
+                        (found, link_spans(&term, first, last, offset))
+                    }));
+                let kind = link_kind(head.kind);
+                return self
+                    .link_allowed(&kind, &head.target, remote)
+                    .then(|| LinkHit {
+                        spans: link_spans(&term, first, last, offset),
+                        target: head.target,
+                        kind,
+                        stamp: LinkStamp(Stamped::Screen {
+                            mark: self.ledger_now(&term),
+                            hyperlink: None,
+                        }),
+                        candidates,
+                    });
             };
         if !self.link_allowed(&kind, &target, remote) {
             return None;
@@ -6915,12 +7010,14 @@ impl Session {
                 mark: self.ledger_now(&term),
                 hyperlink,
             }),
+            candidates: Vec::new(),
         })
     }
 
     /// The dock arm of [`Session::link_at`] (044 phase-5, R8): the link under a
-    /// point of the dock's input line, from the same scanner ([`link::scan`]
-    /// over the selectable text, `PREBUFFER ++ BUFFER`) and the dock's single
+    /// point of the dock's input line, from the same scanner ([`link::links_at`]
+    /// over the selectable text, `PREBUFFER ++ BUFFER`; a path is a query of
+    /// candidates, [`LinkHit::candidates`]) and the dock's single
     /// layout walk ([`dock::link_at`]).
     ///
     /// The point is resolved against the **last drawn** window
@@ -6934,36 +7031,38 @@ impl Session {
     /// `PREBUFFER` stay as they were ([`Session::dock`] checks it).
     fn dock_link_at(&self, point: SelectionPoint) -> Option<LinkHit> {
         let window = (*lock(&self.dock_window))?;
-        let (found, spans, text, remote) = {
+        let (links, text, remote) = {
             let log = lock(&self.shell);
             if log.dock.prebuffer.len() + log.dock.buffer.len() != window.buffer_bytes {
                 return None;
             }
-            let (found, spans) = dock::link_at(
+            let links = dock::link_at(
                 &log.dock,
                 window.top,
                 window.shown,
                 window.cols,
                 point.row,
                 point.col,
-            )?;
+            );
             let text = dock::selectable(&log.dock).into_owned();
-            (found, spans, text, log.context.remote.is_some())
+            (links, text, log.context.remote.is_some())
         };
-        let kind = link_kind(found.kind);
-        if !self.link_allowed(&kind, &found.target, remote) {
+        let (head, spans) = links.first()?.clone();
+        let kind = link_kind(head.kind);
+        if !self.link_allowed(&kind, &head.target, remote) {
             return None;
         }
         Some(LinkHit {
             spans,
-            target: found.target,
+            target: head.target,
             kind,
             stamp: LinkStamp(Stamped::Dock {
                 text,
-                range: found.range,
+                range: head.range,
                 top: window.top,
                 cols: window.cols,
             }),
+            candidates: path_candidates(links),
         })
     }
 
@@ -19850,7 +19949,17 @@ e\\314\\201.'; sleep 5";
             assert_eq!(hit.kind, LinkKind::Url);
             assert_eq!(hit.spans, [span(0, 4, 19), span(1, 0, 12)]);
         }
-        assert_eq!(session.link_at(screen(0, 3)), None, "the blank before it");
+        let blank = session
+            .link_at(screen(0, 3))
+            .expect("the blank is part of the names `see `");
+        assert!(
+            blank
+                .candidates
+                .iter()
+                .all(|c| c.spans.iter().all(|s| s.row == 0 && s.last < 4)),
+            "no name runs into the URL: {:?}",
+            blank.candidates
+        );
         let after = session
             .link_at(screen(1, 14))
             .expect("a bare word is a candidate");
@@ -19859,6 +19968,34 @@ e\\314\\201.'; sleep 5";
             ("end", [span(1, 14, 16)].as_slice()),
             "the word after it is its own candidate, not the URL"
         );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_name_with_spaces_split_by_a_wrap_is_one_candidate() {
+        let wake = Arc::new(TestWake::default());
+        // 16 `a`, a blank, `My`, a blank fill row 0; `Drive x` is row 1.
+        let session = spawn_with_cols(
+            sh("printf 'aaaaaaaaaaaaaaaa My Drive x'; sleep 5"),
+            20,
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "x");
+        let hit = session.link_at(screen(1, 2)).expect("a path query");
+        assert_eq!(hit.target, "Drive", "the shortest candidate first");
+        assert_eq!(hit.spans, [span(1, 0, 4)]);
+        let index = hit
+            .candidates
+            .iter()
+            .position(|c| c.target == "My Drive")
+            .expect("the name across the wrap is a candidate");
+        assert!(index > 0);
+        let chosen = hit.choose(index).expect("the existing one");
+        assert_eq!(chosen.target, "My Drive");
+        assert_eq!(chosen.spans, [span(0, 17, 19), span(1, 0, 4)]);
+        assert!(chosen.candidates.is_empty(), "a narrowed hit is one link");
+        assert_eq!(chosen.stamp, hit.stamp);
+        assert_eq!(hit.choose(hit.candidates.len()), None);
         session.shutdown();
     }
 
@@ -19876,7 +20013,14 @@ e\\314\\201.'; sleep 5";
             assert_eq!(hit.target, "https://a.dev/界");
             assert_eq!(hit.spans, [span(0, 5, 20)], "col {col}");
         }
-        assert_eq!(session.link_at(screen(0, 4)), None);
+        let blank = session.link_at(screen(0, 4)).expect("`界🇹🇷 `");
+        assert!(
+            blank
+                .candidates
+                .iter()
+                .all(|c| c.spans.iter().all(|s| s.last < 5)),
+            "no name runs into the URL"
+        );
         let word = session
             .link_at(screen(0, 2))
             .expect("a bare word is a candidate");
@@ -19911,10 +20055,16 @@ e\\314\\201.'; sleep 5";
             .expect("the second OSC 8 link");
         assert_eq!(hit.target, "https://a.dev");
         assert_eq!(hit.spans, [span(0, 6, 18)]);
-        assert_eq!(
-            session.link_at(screen(0, 5)),
-            None,
-            "the blank between them"
+        // The blank between them is the plain text's: a name never runs into
+        // the URL under the second link.
+        let blank = session
+            .link_at(screen(0, 5))
+            .expect("the blank of `tıkla `");
+        assert!(
+            blank
+                .candidates
+                .iter()
+                .all(|c| c.spans.iter().all(|s| s.last < 6))
         );
         // `bateri://` is never a link; the text under it is still scanned (its
         // bare words are path candidates, not the anchor).
@@ -20394,6 +20544,31 @@ e\\314\\201.'; sleep 5";
             ..dock_point(8, CellHalf::Left)
         };
         assert!(session.link_at(LinkPoint::Dock(below)).is_none());
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_dock_name_with_spaces_narrows_to_its_own_range() {
+        // `cd My Drive`: chars 3..11 are `My Drive`, columns 5..=12.
+        let (session, _) = dock_link_session("sleep 5", "Y2QgTXkgRHJpdmU=", 11);
+        let hit = session
+            .link_at(LinkPoint::Dock(dock_point(9, CellHalf::Left)))
+            .expect("a path query in the dock");
+        assert!(hit.in_dock());
+        assert_eq!(hit.target, "Drive");
+        assert_eq!(hit.spans, [span(0, 8, 12)]);
+        let index = hit
+            .candidates
+            .iter()
+            .position(|c| c.target == "My Drive")
+            .expect("the spaced name is a candidate");
+        let chosen = hit.choose(index).expect("the existing one");
+        assert_eq!(chosen.spans, [span(0, 5, 12)]);
+        assert!(chosen.in_dock());
+        match &chosen.stamp.0 {
+            Stamped::Dock { range, .. } => assert_eq!(*range, 3..11),
+            Stamped::Screen { .. } => panic!("a dock hit keeps a dock stamp"),
+        }
         session.shutdown();
     }
 

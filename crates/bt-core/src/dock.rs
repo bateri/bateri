@@ -1040,19 +1040,21 @@ fn selectable_index(index: usize, shift: usize, pre: usize, buffer: usize) -> Op
     }
 }
 
-/// The link under row `row`, column `col` of the dock's drawn vertical window
-/// (044 phase-5, R8): the found candidate in the **selectable** text
-/// ([`selectable`], its char range) and its cells as window-local spans — the
-/// rows of the input block inside the window, screen columns (`dock_select`'s
-/// point space). `None` if the mirror is not `Live`, the point is outside the
-/// window, on no character, on `PREDISPLAY` or the suggestion, or on no link.
+/// The links under row `row`, column `col` of the dock's drawn vertical window
+/// (044 phase-5, R8): the found candidates in the **selectable** text
+/// ([`selectable`], their char ranges; a URL alone or the path candidates in
+/// the order they are to be tried — [`crate::link::links_at`]) and each one's
+/// cells as window-local spans — the rows of the input block inside the
+/// window, screen columns (`dock_select`'s point space). Empty if the mirror
+/// is not `Live`, the point is outside the window, on no character, on
+/// `PREDISPLAY` or the suggestion, or on no link.
 ///
 /// **Not [`hit`]**: that one lands the padding, the blank and the suggestion
 /// on the nearest character (a click there must go somewhere), while a link is
 /// lit only under the character it is drawn on. The walk is the same
 /// ([`dock_layout`]), twice — once to find the character, once for the cells
-/// of the found range (a wrapped link is one link, one span per row; a wide
-/// character takes its spacer column).
+/// of the window, from which every candidate's spans are cut (a wrapped link
+/// is one link, one span per row; a wide character takes its spacer column).
 pub(crate) fn link_at(
     state: &DockState,
     top: usize,
@@ -1060,9 +1062,9 @@ pub(crate) fn link_at(
     cols: u16,
     row: u16,
     col: u16,
-) -> Option<(crate::link::Found, Vec<crate::session::LinkSpan>)> {
+) -> Vec<(crate::link::Found, Vec<crate::session::LinkSpan>)> {
     if state.status != DockStatus::Live || cols <= TEXT_COL || row >= shown {
-        return None;
+        return Vec::new();
     }
     let shift = prebuffer_chars(state);
     let pre = state.predisplay.chars().count();
@@ -1088,13 +1090,17 @@ pub(crate) fn link_at(
             }
         },
     );
-    let index = index?;
+    let Some(index) = index else {
+        return Vec::new();
+    };
     let text = selectable(state);
-    let found = crate::link::scan(&text)
-        .into_iter()
-        .find(|found| found.range.contains(&index))?;
+    let found = crate::link::links_at(&text, index);
+    if found.is_empty() {
+        return Vec::new();
+    }
+    // The window's cells: (selectable index, row, first, last), in reading order.
     let window = top..top + usize::from(shown);
-    let mut spans: Vec<crate::session::LinkSpan> = Vec::new();
+    let mut placed_cells: Vec<(usize, i32, u16, u16)> = Vec::new();
     dock_layout(
         stream(state).map(|ch| (ch, ())),
         caret,
@@ -1105,21 +1111,31 @@ pub(crate) fn link_at(
             if !window.contains(&placed.row) || !placed.fits(cols) {
                 return;
             }
-            let inside = selectable_index(placed.index, shift, pre, buffer)
-                .is_some_and(|at| found.range.contains(&at));
-            if !inside {
+            let Some(at) = selectable_index(placed.index, shift, pre, buffer) else {
                 return;
-            }
+            };
             // audit: `row - top < shown` and `fits` → `col + width ≤ cols`; all `u16`.
             let row = (placed.row - top) as i32;
             let (first, last) = (placed.col as u16, (placed.col + placed.width - 1) as u16);
-            match spans.last_mut() {
-                Some(span) if span.row == row => span.last = last,
-                _ => spans.push(crate::session::LinkSpan { row, first, last }),
-            }
+            placed_cells.push((at, row, first, last));
         },
     );
-    Some((found, spans))
+    found
+        .into_iter()
+        .map(|found| {
+            let mut spans: Vec<crate::session::LinkSpan> = Vec::new();
+            for &(at, row, first, last) in &placed_cells {
+                if !found.range.contains(&at) {
+                    continue;
+                }
+                match spans.last_mut() {
+                    Some(span) if span.row == row => span.last = last,
+                    _ => spans.push(crate::session::LinkSpan { row, first, last }),
+                }
+            }
+            (found, spans)
+        })
+        .collect()
 }
 
 /// The character range of the dock selection in `BUFFER`, `[start, end)` —

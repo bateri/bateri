@@ -78,9 +78,71 @@ use crate::view::{BateriView, OutOfGrid};
 /// after the background `stat` found it.
 #[derive(Clone, Debug)]
 pub(crate) struct Verified {
+    /// The link drawn and opened: for a path query the candidate that exists
+    /// ([`LinkHit::choose`]), otherwise the hit itself.
     hit: LinkHit,
     /// What the path is on disk; `None` for a link that names no local path.
     resolved: Option<Resolved>,
+    /// The hit as the hit test gave it — a re-found link is matched against
+    /// this, not against the narrowed one ([`Verified::refresh`]).
+    query: LinkHit,
+    /// Which of the query's candidates won (`0` for a non-path link).
+    index: usize,
+}
+
+impl Verified {
+    /// A link that needs no `stat` (a URL, a non-file OSC 8 link).
+    fn plain(hit: LinkHit) -> Self {
+        Verified {
+            query: hit.clone(),
+            hit,
+            resolved: None,
+            index: 0,
+        }
+    }
+
+    /// The background answer for `query`: the winning candidate and what it is.
+    fn found(query: LinkHit, index: usize, resolved: Resolved) -> Self {
+        Verified {
+            hit: narrowed(&query, index),
+            resolved: Some(resolved),
+            query,
+            index,
+        }
+    }
+
+    /// The same link re-found as `query` (fresh stamp, `same_link` with
+    /// [`Verified::query`]): the verification stands, the narrowed hit takes the
+    /// new stamp.
+    fn refresh(&self, query: LinkHit) -> Self {
+        Verified {
+            hit: narrowed(&query, self.index),
+            resolved: self.resolved.clone(),
+            query,
+            index: self.index,
+        }
+    }
+}
+
+/// A path query narrowed to candidate `index`; any other hit as it is.
+fn narrowed(query: &LinkHit, index: usize) -> LinkHit {
+    query.choose(index).unwrap_or_else(|| query.clone())
+}
+
+/// The file-system paths a hit asks about, in order: a path query's
+/// candidates (044 set sonrası, iTerm2's search), a `file://` link's path —
+/// `None` for a link that names no local path.
+fn local_paths(hit: &LinkHit) -> Option<Vec<std::path::PathBuf>> {
+    if hit.candidates.is_empty() {
+        links::local_path(&hit.target, &hit.kind).map(|path| vec![path])
+    } else {
+        Some(
+            hit.candidates
+                .iter()
+                .map(|c| c.target.clone().into())
+                .collect(),
+        )
+    }
 }
 
 /// A cell the link hit test can be asked about: a **signed** screen row
@@ -136,10 +198,11 @@ pub(crate) struct LinkState {
     queue: Option<DispatchRetained<DispatchQueue>>,
 }
 
-/// Whether two hits are the same link — the same cells, target and kind; the
-/// stamp is left out (it moves with every output round while the link stays).
+/// Whether two hits are the same link — the same cells, target, kind and path
+/// candidates; the stamp is left out (it moves with every output round while
+/// the link stays).
 fn same_link(a: &LinkHit, b: &LinkHit) -> bool {
-    a.spans == b.spans && a.target == b.target && a.kind == b.kind
+    a.spans == b.spans && a.target == b.target && a.kind == b.kind && a.candidates == b.candidates
 }
 
 /// Whether `cell` is one of the link's cells — on the surface the link was
@@ -440,29 +503,33 @@ impl BateriView {
             state
                 .hover
                 .as_ref()
-                .filter(|shown| same_link(&shown.hit, &hit))
-                .map(|shown| shown.resolved.clone())
+                .filter(|shown| same_link(&shown.query, &hit))
+                .map(|shown| shown.refresh(hit.clone()))
         };
-        if let Some(resolved) = reuse {
-            self.show_link(Verified { hit, resolved }, command);
+        if let Some(link) = reuse {
+            self.show_link(link, command);
             return;
         }
-        let Some(path) = links::local_path(&hit.target, &hit.kind) else {
-            self.show_link(
-                Verified {
-                    hit,
-                    resolved: None,
-                },
-                command,
-            );
+        let Some(paths) = local_paths(&hit) else {
+            self.show_link(Verified::plain(hit), command);
             return;
         };
         let (in_flight, missing, shown) = {
             let mut state = self.link_state().borrow_mut();
             let in_flight = state.pending.as_ref().is_some_and(|p| same_link(p, &hit));
             let missing = state.missing.as_ref().is_some_and(|m| same_link(m, &hit));
-            // Whatever is shown is another link (the same one returned above).
-            let shown = state.hover.take().is_some();
+            // Whatever is shown is another query (the same one returned above).
+            // While the new one is in flight a shown name still under the
+            // pointer stays (moving from `My` to `Drive` of `My Drive` must not
+            // flicker); the answer replaces or removes it.
+            let keep = !missing
+                && at.is_some_and(|cell| {
+                    state
+                        .hover
+                        .as_ref()
+                        .is_some_and(|shown| on_link(&shown.hit, cell))
+                });
+            let shown = !keep && state.hover.take().is_some();
             // A new candidate, or the in-flight one with a fresher stamp; a
             // candidate known to be missing waits for nothing.
             state.pending = (!missing).then(|| hit.clone());
@@ -474,13 +541,15 @@ impl BateriView {
         if in_flight || missing {
             return;
         }
-        self.verify_path(path, hit, Then::Hover);
+        self.verify_paths(paths, hit, Then::Hover);
     }
 
-    /// Throws the `stat` to the view's serial queue; the answer returns to the
-    /// main queue by pane id — to the hover ([`BateriView::link_verified`]) or to
-    /// the context menu ([`BateriView::link_menu_verified`]).
-    fn verify_path(&self, path: std::path::PathBuf, hit: LinkHit, then: Then) {
+    /// Throws the `stat`s to the view's serial queue — every candidate of a
+    /// path query in one job, the first that exists wins
+    /// ([`links::resolve_first`]); the answer returns to the main queue by pane
+    /// id — to the hover ([`BateriView::link_verified`]) or to the context menu
+    /// ([`BateriView::link_menu_verified`]).
+    fn verify_paths(&self, paths: Vec<std::path::PathBuf>, hit: LinkHit, then: Then) {
         let (Some(pane), Some(session)) = (self.pane(), self.session()) else {
             return;
         };
@@ -493,41 +562,54 @@ impl BateriView {
         queue.exec_async(move || {
             // `home` may read the passwd entry: here, off the main thread.
             let home = child::home();
-            let resolved = links::resolve(&path, cwd.as_deref(), home.as_deref(), links::stat);
+            let found = links::resolve_first(
+                paths.iter().map(std::path::PathBuf::as_path),
+                cwd.as_deref(),
+                home.as_deref(),
+                links::stat,
+            );
             DispatchQueue::main().exec_async(move || {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                 if let Some(pane) = lookup(mtm, id) {
                     match then {
-                        Then::Hover => pane.view().link_verified(&hit, resolved),
-                        Then::Menu(at) => pane.view().link_menu_verified(&hit, resolved, at),
+                        Then::Hover => pane.view().link_verified(&hit, found),
+                        Then::Menu(at) => pane.view().link_menu_verified(&hit, found, at),
                     }
                 }
             });
         });
     }
 
-    /// The `stat`'s answer: taken only if the pointer is still on the same
-    /// candidate (the view's pending one) and the window is key; drawn with ⌘'s
-    /// state **now** ([`hover_style`]).
-    pub(crate) fn link_verified(&self, hit: &LinkHit, resolved: Option<Resolved>) {
+    /// The `stat`s' answer: taken only if the pointer is still on the same
+    /// query (the view's pending one) and the window is key; drawn with ⌘'s
+    /// state **now** ([`hover_style`]). Nothing found removes a name kept
+    /// shown while the query was in flight.
+    pub(crate) fn link_verified(&self, hit: &LinkHit, found: Option<(usize, Resolved)>) {
         let pending = {
             let mut state = self.link_state().borrow_mut();
             if !state.pending.as_ref().is_some_and(|p| same_link(p, hit)) {
                 return;
             }
             let pending = state.pending.take();
-            if resolved.is_none() {
+            if found.is_none() {
                 state.missing = pending;
+                let shown = state.hover.take().is_some();
+                drop(state);
+                if shown {
+                    self.hide_hover();
+                }
                 return;
             }
             pending
         };
         let key = self.window().is_some_and(|window| window.isKeyWindow());
         let command = command_down();
-        match pending {
-            Some(hit) if key && hover_style(&hit, command).is_some() => {
-                self.show_link(Verified { hit, resolved }, command);
+        match (pending, found) {
+            (Some(query), Some((index, resolved)))
+                if key && hover_style(&query, command).is_some() =>
+            {
+                self.show_link(Verified::found(query, index, resolved), command);
             }
             _ => self.clear_link(),
         }
@@ -683,24 +765,18 @@ impl BateriView {
             state
                 .hover
                 .as_ref()
-                .filter(|shown| same_link(&shown.hit, &hit))
-                .map(|shown| shown.resolved.clone())
+                .filter(|shown| same_link(&shown.query, &hit))
+                .map(|shown| shown.refresh(hit.clone()))
         };
-        if let Some(resolved) = reuse {
-            self.pop_link_menu(Verified { hit, resolved }, point);
+        if let Some(link) = reuse {
+            self.pop_link_menu(link, point);
             return;
         }
-        match links::local_path(&hit.target, &hit.kind) {
-            None => self.pop_link_menu(
-                Verified {
-                    hit,
-                    resolved: None,
-                },
-                point,
-            ),
-            Some(path) => {
+        match local_paths(&hit) {
+            None => self.pop_link_menu(Verified::plain(hit), point),
+            Some(paths) => {
                 self.link_state().borrow_mut().menu_pending = Some(hit.clone());
-                self.verify_path(path, hit, Then::Menu(point));
+                self.verify_paths(paths, hit, Then::Menu(point));
             }
         }
     }
@@ -717,7 +793,7 @@ impl BateriView {
     pub(crate) fn link_menu_verified(
         &self,
         hit: &LinkHit,
-        resolved: Option<Resolved>,
+        found: Option<(usize, Resolved)>,
         at: NSPoint,
     ) {
         let pending = {
@@ -732,8 +808,8 @@ impl BateriView {
             state.menu_pending.take()
         };
         let key = self.window().is_some_and(|window| window.isKeyWindow());
-        if let (Some(hit), true, true) = (pending, resolved.is_some(), key) {
-            self.pop_link_menu(Verified { hit, resolved }, at);
+        if let (Some(query), Some((index, resolved)), true) = (pending, found, key) {
+            self.pop_link_menu(Verified::found(query, index, resolved), at);
         }
     }
 
