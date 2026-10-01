@@ -193,7 +193,17 @@ pub(crate) const NO_DIRECTORY: i32 = 3;
 pub(crate) fn probe_script(dir: Option<&str>, names: &[String]) -> String {
     let mut script = String::new();
     if let Some(dir) = dir {
-        let _ = write!(script, "cd {} || exit {NO_DIRECTORY}; ", sq(dir));
+        // A directory read from the title may be `~`-rooted
+        // (`Session::remote_link_directory`); quoting would keep the tilde
+        // literal, so the home part goes through `$HOME`.
+        let target = match dir {
+            "~" => "\"$HOME\"".to_owned(),
+            _ => match dir.strip_prefix("~/") {
+                Some(rest) => format!("\"$HOME\"/{}", sq(rest)),
+                None => sq(dir),
+            },
+        };
+        let _ = write!(script, "cd {target} || exit {NO_DIRECTORY}; ");
     }
     let _ = write!(
         script,
@@ -2652,6 +2662,29 @@ mod tests {
         let (code, _) = run_remote("/bin/sh", &script, &dir);
         assert_eq!(code, Some(NO_DIRECTORY));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tilde_directory_from_the_title_resolves_under_the_remote_home() {
+        let home = scratch("tilde");
+        std::fs::create_dir_all(home.join("my foo")).unwrap();
+        for (dir, tail) in [("~", None), ("~/my foo", Some("my foo"))] {
+            let output = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(remote_command(&probe_script(Some(dir), &[])))
+                .env("HOME", &home)
+                .output()
+                .expect("shell did not run");
+            let out = String::from_utf8_lossy(&output.stdout);
+            let reply = parse_probe(&out).unwrap_or_else(|| panic!("{dir}: {out}"));
+            let want = home.file_name().unwrap().to_str().unwrap();
+            assert!(
+                reply.dir.ends_with(tail.unwrap_or(want)),
+                "{dir}: {}",
+                reply.dir
+            );
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

@@ -133,9 +133,11 @@ impl TerminalPane {
         let Some(session) = self.session() else {
             return false;
         };
-        let Some((command, target, cwd)) = session.remote_target() else {
+        let Some((command, target, _)) = session.remote_target() else {
             return false;
         };
+        // OSC 7's directory, or the title's when the server sends none (045).
+        let cwd = session.remote_link_directory();
         if !self.accepts_drop() {
             return false;
         }
