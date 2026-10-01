@@ -4,7 +4,8 @@
 //! touching a UI toolkit: the settings file and its diagnostics (`settings`,
 //! `notices`), the split layout tree (`split`), temporary font size (`zoom`),
 //! the mouse gesture ledger (`gesture`), shell quoting (`quote`), key
-//! encoding (`keys`), the remote upload rules and processes (`upload`), the
+//! encoding (`keys`), what a ⌘-clicked link resolves to and what opening it
+//! does (`links`), the remote upload rules and processes (`upload`), the
 //! process table (`jobs`), the shell's birth (`child`) and file watching
 //! (`watch`).
 //!
@@ -24,6 +25,7 @@ pub mod child;
 pub mod gesture;
 pub mod jobs;
 pub mod keys;
+pub mod links;
 pub mod notices;
 pub mod quote;
 pub mod settings;

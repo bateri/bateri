@@ -1623,7 +1623,9 @@ impl BateriView {
                 }
                 // The gesture in the dock ended: if it was a click without a drag the caret goes there.
                 Release::Dock => session.dock_click(),
-                Release::Done => {}
+                // Nothing presses a link yet: `Gesture::pressed_link` is wired in 044
+                // phase-4, which opens the link here.
+                Release::Link | Release::Done => {}
             }
             return;
         }
