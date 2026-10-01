@@ -541,6 +541,11 @@ impl Wake for ShellWake {
             self.dispatch_remote_probe();
         }
     }
+
+    fn link_hover_lost(&self) {
+        // No hover is set yet: the view's ⌘-hover path (044 phase-4) sets it
+        // and this is where its re-find goes.
+    }
 }
 
 /// `bt-gpu`'s alternate-screen notifier: throws the work **to the main queue**.

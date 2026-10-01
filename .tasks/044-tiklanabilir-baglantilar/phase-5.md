@@ -31,6 +31,7 @@ _Requirements: R8_
 ## Checklist
 
 - [ ] `LinkPoint::Dock` hit testi ve damgası
+- [ ] (phase-2'den devralındı) `Session::dock`'un sink'ine ezme yardımcısını bağla: `hover_style`/`underline_link` (`session.rs`) dock hover'ıyla; `LinkHover`'ın yüzeyi (ekran mı dock mu) ve dock damgası (aynanın nesli / `BUFFER`) burada doğuyor, `frame()`'in damga denetimi dock hover'ını bayat saymamalı
 - [ ] View'da dock bağlama
 - [ ] Test: dock hit, sarma, bayatlık
 - [ ] Doğrulama geçti (`make check` + `make linux` + `make smoke`)

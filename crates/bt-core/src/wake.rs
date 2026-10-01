@@ -111,4 +111,18 @@ pub trait Wake: Send + Sync + 'static {
     /// prohibitions above apply. The implementor posts **at most one** job to
     /// its queue.
     fn command_started(&self);
+
+    /// The link hover ([`crate::Session::set_link_hover`]) went **stale** and
+    /// was dropped (044 R4.1): its stamp no longer held — output came, the window
+    /// scrolled, the screen was cleared, the link's cell changed — so the frame
+    /// did not draw it. The receiver re-runs the hit test if ⌘ is still held, so
+    /// the highlight lands on the right text again.
+    ///
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::title_changed`]): once per dropped hover; a hover the receiver set
+    /// in between is not dropped. It arrives on the **frame path's** thread,
+    /// after the `Term` lock is released and the hover's leaf lock too; the three
+    /// prohibitions above apply. The implementor posts **at most one** job to its
+    /// queue.
+    fn link_hover_lost(&self);
 }
