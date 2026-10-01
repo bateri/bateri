@@ -19851,7 +19851,14 @@ e\\314\\201.'; sleep 5";
             assert_eq!(hit.spans, [span(0, 4, 19), span(1, 0, 12)]);
         }
         assert_eq!(session.link_at(screen(0, 3)), None, "the blank before it");
-        assert_eq!(session.link_at(screen(1, 14)), None, "the word after it");
+        let after = session
+            .link_at(screen(1, 14))
+            .expect("a bare word is a candidate");
+        assert_eq!(
+            (after.target.as_str(), after.spans.as_slice()),
+            ("end", [span(1, 14, 16)].as_slice()),
+            "the word after it is its own candidate, not the URL"
+        );
         session.shutdown();
     }
 
@@ -19870,7 +19877,13 @@ e\\314\\201.'; sleep 5";
             assert_eq!(hit.spans, [span(0, 5, 20)], "col {col}");
         }
         assert_eq!(session.link_at(screen(0, 4)), None);
-        assert_eq!(session.link_at(screen(0, 2)), None);
+        let word = session
+            .link_at(screen(0, 2))
+            .expect("a bare word is a candidate");
+        assert_eq!(
+            (word.target.as_str(), word.spans.as_slice()),
+            ("界🇹🇷", [span(0, 0, 3)].as_slice())
+        );
         session.shutdown();
     }
 
@@ -19903,9 +19916,21 @@ e\\314\\201.'; sleep 5";
             None,
             "the blank between them"
         );
-        // `bateri://` is never a link; the text under it is still scanned.
-        for col in [0, 1, 6] {
-            assert_eq!(session.link_at(screen(1, col)), None, "col {col}");
+        // `bateri://` is never a link; the text under it is still scanned (its
+        // bare words are path candidates, not the anchor).
+        for (col, word) in [(0, "echo"), (1, "echo"), (6, "hi")] {
+            let hit = session.link_at(screen(1, col)).expect("a bare word");
+            assert_eq!(
+                (hit.target.as_str(), hit.kind),
+                (
+                    word,
+                    LinkKind::Path {
+                        line: None,
+                        col: None
+                    }
+                ),
+                "col {col}"
+            );
         }
         let hit = session
             .link_at(screen(1, 10))
@@ -20335,8 +20360,9 @@ e\\314\\201.'; sleep 5";
         assert_eq!(hit.kind, LinkKind::Url);
         assert!(hit.in_dock());
         assert_eq!(hit.spans, [span(0, 7, 21)]);
-        // The URL's two ends hit, the word before it and the blank after it do
-        // not, nor does the prompt mark's column (`hit` would land those on a char).
+        // The URL's two ends hit; the word before it is its own (bare word)
+        // candidate, and the blank after it and the prompt mark's column are
+        // nothing (`hit` would land those on a char).
         assert!(
             session
                 .link_at(LinkPoint::Dock(dock_point(5, CellHalf::Left)))
@@ -20347,11 +20373,10 @@ e\\314\\201.'; sleep 5";
                 .link_at(LinkPoint::Dock(dock_point(19, CellHalf::Right)))
                 .is_some()
         );
-        assert!(
-            session
-                .link_at(LinkPoint::Dock(dock_point(1, CellHalf::Left)))
-                .is_none()
-        );
+        let word = session
+            .link_at(LinkPoint::Dock(dock_point(1, CellHalf::Left)))
+            .expect("a bare word is a candidate");
+        assert_eq!(word.target, "open");
         assert!(
             session
                 .link_at(LinkPoint::Dock(dock_point(21, CellHalf::Left)))
