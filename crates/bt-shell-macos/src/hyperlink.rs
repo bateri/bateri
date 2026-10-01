@@ -1,5 +1,6 @@
 //! ⌘-hover and ⌘-click on a link in the grid, the fill band (044 phase-4) and
-//! the dock's input line (phase-5).
+//! the dock's input line (phase-5); the ⌘-less OSC 8 hover, the target label
+//! and the right-click menu (phase-6).
 //!
 //! `bt-core` finds the link (`Session::link_at`) and draws its underline from the
 //! hover slot (`Session::set_link_hover`); `bt-shell-common::links` says what a
@@ -12,9 +13,15 @@
 //!   a ⌘ released in another application cannot leave the underline hanging —
 //!   the window resigning key clears it too (`windowDidResignKey:`, which also
 //!   fires when the application deactivates).
-//! - **The hit test runs once per link cell** while ⌘ is held: motion inside the
-//!   same cell does not touch the `Term` lock, motion inside the same link is a
-//!   no-op `set_link_hover` (no frame).
+//! - **The hit test runs once per cell and ⌘ state**: motion inside the same
+//!   cell does not touch the `Term` lock, motion inside the same link is a
+//!   no-op `set_link_hover` (no frame). With ⌘ any link counts (solid
+//!   underline, hand cursor); without it only an OSC 8 link does (a **dashed**
+//!   underline, no hand — the text does not name its target, a plain-text link
+//!   is its own target and every `ls` word would light up; Karar 3).
+//! - **⌘ over an OSC 8 link shows its target** in the pane's bottom-left label
+//!   ([`crate::pane::TerminalPane::set_link_target`], Karar 7): AppKit's, outside
+//!   the frame path.
 //! - **A path is verified on a background queue** — a serial queue per view, so
 //!   a `stat` hanging on a network disk stalls only this pane's next
 //!   verifications, never the main thread or the frame. The answer comes back
@@ -24,7 +31,7 @@
 //!   selection) — the known limit `discussion.md` → Muhakeme names.
 //! - **A stale stamp re-finds**: when output, a scroll or a clear moves the
 //!   scrollback the frame drops the hover and says so (`Wake::link_hover_lost`);
-//!   if ⌘ is still down the same point is asked again and, if the link is the
+//!   while the window is key the same point is asked again and, if the link is the
 //!   same one, its earlier verification is reused (no second `stat` per output
 //!   round). In the dock the stamp is the input line's text: a key that changes
 //!   `BUFFER` drops it the same way (`Session::dock`).
@@ -32,7 +39,13 @@
 //!   verified hover is locked at the press and the release opens it if the
 //!   pointer is still over the locked range and the click count is one.
 //!
-//! Opening follows `links::action`'s white list: a URL and a document go to
+//! - **A right click on a link opens a menu** (mouse mode off; the band and the
+//!   dock are never the application's): "Open Link"/"Copy Link", on a path
+//!   "Open"/"Reveal in Finder"/"Copy Path". The path is verified on the same
+//!   background queue first — a missing one is no link and gets no menu.
+//!
+//! Opening — a click and the menu's "Open" alike — follows `links::action`'s
+//! white list: a URL and a document go to
 //! their default application, a directory opens in Finder, everything else is
 //! revealed in Finder, an uncommon OSC 8 scheme asks first and `bateri://` is
 //! swallowed. "Is this a known document" is UTType's answer, read through the
@@ -43,18 +56,20 @@ use std::path::Path;
 use std::rc::Rc;
 
 use block2::RcBlock;
-use bt_core::{CellHalf, LinkHit, LinkPoint, LinkSpan, SelectionPoint, UnderlineStyle};
+use bt_core::{CellHalf, LinkHit, LinkKind, LinkPoint, LinkSpan, SelectionPoint, UnderlineStyle};
 use bt_gpu::{CellMetrics, Origin};
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{MainThreadMarker, MainThreadOnly, msg_send};
+use objc2::{MainThreadMarker, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertSecondButtonReturn, NSEvent, NSEventModifierFlags, NSModalResponse, NSWorkspace,
+    NSAlert, NSAlertSecondButtonReturn, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem,
+    NSModalResponse, NSPasteboard, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL, ns_string};
 
 use crate::child;
+use crate::clipboard;
 use crate::links::{self, Content, LinkAction, Resolved};
 use crate::uploader::{ESCAPE, add_key_monitor, remove_monitor};
 use crate::view::{BateriView, OutOfGrid};
@@ -94,16 +109,29 @@ impl LinkCell {
 /// The view's link state ([`BateriView::link_state`]); main thread only.
 #[derive(Default)]
 pub(crate) struct LinkState {
-    /// The link cell the last ⌘-motion asked about — the hit test's notch.
+    /// The link cell the last motion asked about — the hit test's notch, with
+    /// [`LinkState::command`].
     cell: Option<LinkCell>,
+    /// Whether ⌘ was down when [`LinkState::cell`] was asked: pressing or
+    /// releasing ⌘ over the same cell asks again, another modifier does not.
+    command: bool,
     /// The drawn (verified) hover: a ⌘-press is matched against it.
     hover: Option<Verified>,
+    /// Whether [`LinkState::hover`] is drawn the ⌘ way (solid, hand cursor) —
+    /// `false` for the ⌘-less OSC 8 hover (dashed, no hand).
+    command_hover: bool,
     /// A path candidate whose `stat` is in flight.
     pending: Option<LinkHit>,
     /// The last candidate the `stat` did not find: moving inside it does not ask again.
     missing: Option<LinkHit>,
     /// The hover locked at a ⌘-press (044 R6); the release compares with it.
     pressed: Option<Verified>,
+    /// A right click's path candidate whose `stat` is in flight: the menu pops
+    /// only if it is still this one (a later press or a cleared hover forgets it,
+    /// so a `stat` hanging on a network disk cannot pop a menu much later).
+    menu_pending: Option<LinkHit>,
+    /// The link the open context menu acts on; its items take it.
+    menu: Option<Verified>,
     /// The serial queue of the path verifications, born at the first one.
     queue: Option<DispatchRetained<DispatchQueue>>,
 }
@@ -118,6 +146,27 @@ fn same_link(a: &LinkHit, b: &LinkHit) -> bool {
 /// found on ([`LinkHit::in_dock`]).
 fn on_link(hit: &LinkHit, cell: LinkCell) -> bool {
     spans_contain(&hit.spans, hit.in_dock(), cell)
+}
+
+/// How a hit is drawn with ⌘ down or up (Karar 3): with ⌘ every link solid;
+/// without it only an OSC 8 link, dashed — the plain-text link is not
+/// highlighted at all. `None` → nothing to show.
+fn hover_style(hit: &LinkHit, command: bool) -> Option<UnderlineStyle> {
+    if command {
+        Some(UnderlineStyle::Single)
+    } else if hit.kind == LinkKind::Osc8 {
+        Some(UnderlineStyle::Dashed)
+    } else {
+        None
+    }
+}
+
+/// What a verification is for: the hover, or the context menu popping at a
+/// point of the view.
+#[derive(Clone, Copy)]
+enum Then {
+    Hover,
+    Menu(NSPoint),
 }
 
 /// Whether `cell` is one of `spans`' cells, `in_dock` saying which surface's.
@@ -289,62 +338,73 @@ impl BateriView {
         self.link_cell(self.window()?.mouseLocationOutsideOfEventStream())
     }
 
-    /// `mouseMoved:`: with ⌘ down, asks for the link under a **new** cell; without
-    /// ⌘, clears whatever is shown. ⌘-less motion costs one flag test and one
-    /// borrow — no `Term` lock.
+    /// `mouseMoved:`: asks for the link under a **new** cell or a new ⌘ state
+    /// ([`hover_style`] — any link with ⌘, an OSC 8 link without). Motion inside
+    /// the same cell costs one flag test and one borrow — no `Term` lock.
     pub(crate) fn link_motion(&self, event: &NSEvent) {
-        if !event
+        let command = event
             .modifierFlags()
-            .contains(NSEventModifierFlags::Command)
-        {
-            self.clear_link();
-            return;
-        }
+            .contains(NSEventModifierFlags::Command);
         let at = self.link_cell(event.locationInWindow());
-        if self.link_state().borrow().cell == at {
-            return;
-        }
-        self.link_state().borrow_mut().cell = at;
-        self.find_link(at);
+        self.ask_link(at, command);
     }
 
-    /// `flagsChanged:`: ⌘ went down → the link under the pointer, ⌘ went up → clear.
+    /// `flagsChanged:`: ⌘ went down or up → the link under the pointer asked
+    /// again with the new state (solid ↔ dashed, or cleared). A path candidate
+    /// the `stat` did not find is forgotten when ⌘ goes up (it is asked again
+    /// at the next ⌘ — a file created meanwhile is found).
     pub(crate) fn link_flags(&self, event: &NSEvent) {
-        if event
+        let command = event
             .modifierFlags()
-            .contains(NSEventModifierFlags::Command)
-        {
-            let at = self.pointer_link_cell();
-            self.link_state().borrow_mut().cell = at;
-            self.find_link(at);
-        } else {
-            self.clear_link();
+            .contains(NSEventModifierFlags::Command);
+        if !command {
+            self.link_state().borrow_mut().missing = None;
         }
+        self.ask_link(self.pointer_link_cell(), command);
     }
 
-    /// The frame dropped a stale hover (`Wake::link_hover_lost`): if ⌘ is still
-    /// down in the key window the same point is asked again, otherwise everything
-    /// clears — the only thing that stops the drop → re-find cycle when nobody
-    /// holds ⌘.
+    /// The notch: the hit test runs only if the cell or the ⌘ state changed.
+    fn ask_link(&self, at: Option<LinkCell>, command: bool) {
+        {
+            let mut state = self.link_state().borrow_mut();
+            if state.cell == at && state.command == command {
+                return;
+            }
+            state.cell = at;
+            state.command = command;
+        }
+        self.find_link(at, command);
+    }
+
+    /// The frame dropped a stale hover (`Wake::link_hover_lost`): if the window
+    /// is key the same point is asked again with ⌘'s state now, otherwise
+    /// everything clears — the only thing that stops the drop → re-find cycle
+    /// when the window is not the user's.
     pub(crate) fn link_lost(&self) {
         let key = self.window().is_some_and(|window| window.isKeyWindow());
-        if key && command_down() {
-            let at = self.pointer_link_cell();
-            self.link_state().borrow_mut().cell = at;
-            self.find_link(at);
+        if key {
+            let (at, command) = (self.pointer_link_cell(), command_down());
+            {
+                let mut state = self.link_state().borrow_mut();
+                state.cell = at;
+                state.command = command;
+            }
+            self.find_link(at, command);
         } else {
             self.clear_link();
         }
     }
 
-    /// Removes the hover and forgets the in-flight candidate; a press already
+    /// Removes the hover and forgets the in-flight candidates; a press already
     /// locked stays (⌘ is read at the press). Idempotent and cheap when nothing is shown.
     pub(crate) fn clear_link(&self) {
         let shown = {
             let mut state = self.link_state().borrow_mut();
             state.cell = None;
+            state.command = false;
             state.pending = None;
             state.missing = None;
+            state.menu_pending = None;
             state.hover.take().is_some()
         };
         if shown {
@@ -352,12 +412,15 @@ impl BateriView {
         }
     }
 
-    /// The hit test at `at` and what follows from it.
-    fn find_link(&self, at: Option<LinkCell>) {
+    /// The hit test at `at` and what follows from it, `command` saying which
+    /// links count and how they are drawn ([`hover_style`]).
+    fn find_link(&self, at: Option<LinkCell>, command: bool) {
         let Some(session) = self.session() else {
             return;
         };
-        let hit = at.and_then(|cell| session.link_at(cell.point()));
+        let hit = at
+            .and_then(|cell| session.link_at(cell.point()))
+            .filter(|hit| hover_style(hit, command).is_some());
         let Some(hit) = hit else {
             let shown = {
                 let mut state = self.link_state().borrow_mut();
@@ -369,8 +432,9 @@ impl BateriView {
             }
             return;
         };
-        // The same link as the shown one (re-found after output, or the pointer
-        // moved inside it): only the stamp may be new, the verification stands.
+        // The same link as the shown one (re-found after output, the pointer
+        // moved inside it or ⌘ changed its style): only the stamp may be new, the
+        // verification stands.
         let reuse = {
             let state = self.link_state().borrow();
             state
@@ -380,14 +444,17 @@ impl BateriView {
                 .map(|shown| shown.resolved.clone())
         };
         if let Some(resolved) = reuse {
-            self.show_link(Verified { hit, resolved });
+            self.show_link(Verified { hit, resolved }, command);
             return;
         }
         let Some(path) = links::local_path(&hit.target, &hit.kind) else {
-            self.show_link(Verified {
-                hit,
-                resolved: None,
-            });
+            self.show_link(
+                Verified {
+                    hit,
+                    resolved: None,
+                },
+                command,
+            );
             return;
         };
         let (in_flight, missing, shown) = {
@@ -407,12 +474,13 @@ impl BateriView {
         if in_flight || missing {
             return;
         }
-        self.verify_path(path, hit);
+        self.verify_path(path, hit, Then::Hover);
     }
 
     /// Throws the `stat` to the view's serial queue; the answer returns to the
-    /// main queue by pane id ([`BateriView::link_verified`]).
-    fn verify_path(&self, path: std::path::PathBuf, hit: LinkHit) {
+    /// main queue by pane id — to the hover ([`BateriView::link_verified`]) or to
+    /// the context menu ([`BateriView::link_menu_verified`]).
+    fn verify_path(&self, path: std::path::PathBuf, hit: LinkHit, then: Then) {
         let (Some(pane), Some(session)) = (self.pane(), self.session()) else {
             return;
         };
@@ -430,14 +498,18 @@ impl BateriView {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                 if let Some(pane) = lookup(mtm, id) {
-                    pane.view().link_verified(&hit, resolved);
+                    match then {
+                        Then::Hover => pane.view().link_verified(&hit, resolved),
+                        Then::Menu(at) => pane.view().link_menu_verified(&hit, resolved, at),
+                    }
                 }
             });
         });
     }
 
     /// The `stat`'s answer: taken only if the pointer is still on the same
-    /// candidate (the view's pending one) and ⌘ is still down in the key window.
+    /// candidate (the view's pending one) and the window is key; drawn with ⌘'s
+    /// state **now** ([`hover_style`]).
     pub(crate) fn link_verified(&self, hit: &LinkHit, resolved: Option<Resolved>) {
         let pending = {
             let mut state = self.link_state().borrow_mut();
@@ -452,22 +524,32 @@ impl BateriView {
             pending
         };
         let key = self.window().is_some_and(|window| window.isKeyWindow());
+        let command = command_down();
         match pending {
-            Some(hit) if key && command_down() => self.show_link(Verified { hit, resolved }),
+            Some(hit) if key && hover_style(&hit, command).is_some() => {
+                self.show_link(Verified { hit, resolved }, command);
+            }
             _ => self.clear_link(),
         }
     }
 
-    /// Draws `link` underlined and makes its cells the hand cursor's.
-    fn show_link(&self, link: Verified) {
-        let Some(session) = self.session() else {
+    /// Draws `link` underlined in `command`'s style ([`hover_style`]); with ⌘
+    /// its cells are the hand cursor's and an OSC 8 target shows in the pane's
+    /// label.
+    fn show_link(&self, link: Verified, command: bool) {
+        let (Some(session), Some(style)) = (self.session(), hover_style(&link.hit, command)) else {
             return;
         };
-        session.set_link_hover(Some(link.hit.hover(UnderlineStyle::Single)));
+        session.set_link_hover(Some(link.hit.hover(style)));
+        let label = (command && link.hit.kind == LinkKind::Osc8).then(|| link.hit.target.clone());
         {
             let mut state = self.link_state().borrow_mut();
             state.pending = None;
             state.hover = Some(link);
+            state.command_hover = command;
+        }
+        if let Some(pane) = self.pane() {
+            pane.set_link_target(label.as_deref());
         }
         self.sync_cursor_rects();
     }
@@ -476,13 +558,17 @@ impl BateriView {
         if let Some(session) = self.session() {
             session.set_link_hover(None);
         }
+        if let Some(pane) = self.pane() {
+            pane.set_link_target(None);
+        }
         self.sync_cursor_rects();
     }
 
-    /// The hand cursor's rectangles over the shown link, in view points.
+    /// The hand cursor's rectangles over the shown link, in view points — only
+    /// with ⌘ (the dashed ⌘-less hover is a hint, a click there selects).
     pub(crate) fn link_rects(&self) -> Vec<NSRect> {
         let state = self.link_state().borrow();
-        let Some(shown) = state.hover.as_ref() else {
+        let Some(shown) = state.hover.as_ref().filter(|_| state.command_hover) else {
             return Vec::new();
         };
         let (Some((metrics, _)), Some(window)) = (self.metrics(), self.window()) else {
@@ -574,6 +660,157 @@ impl BateriView {
             Some(LinkAction::Confirm(target)) => self.confirm_open(target),
             Some(LinkAction::Swallow) | None => {}
         }
+    }
+
+    /// A right press the terminal owns — mouse mode off (or Shift, its escape)
+    /// in the grid, always on the fill band and the dock's input line (never the
+    /// application's screen): the context menu if a link is under it (Karar 7).
+    /// No ⌘ needed. A link the hover already verified pops at once; a path
+    /// candidate is `stat`ed on the background queue first and pops on its
+    /// return ([`BateriView::link_menu_verified`]) — a missing path is no link and
+    /// gets no menu. Without a link nothing happens, as before.
+    pub(crate) fn link_menu(&self, event: &NSEvent) {
+        let in_window = event.locationInWindow();
+        let (Some(at), Some(session)) = (self.link_cell(in_window), self.session()) else {
+            return;
+        };
+        let Some(hit) = session.link_at(at.point()) else {
+            return;
+        };
+        let point = self.convertPoint_fromView(in_window, None);
+        let reuse = {
+            let state = self.link_state().borrow();
+            state
+                .hover
+                .as_ref()
+                .filter(|shown| same_link(&shown.hit, &hit))
+                .map(|shown| shown.resolved.clone())
+        };
+        if let Some(resolved) = reuse {
+            self.pop_link_menu(Verified { hit, resolved }, point);
+            return;
+        }
+        match links::local_path(&hit.target, &hit.kind) {
+            None => self.pop_link_menu(
+                Verified {
+                    hit,
+                    resolved: None,
+                },
+                point,
+            ),
+            Some(path) => {
+                self.link_state().borrow_mut().menu_pending = Some(hit.clone());
+                self.verify_path(path, hit, Then::Menu(point));
+            }
+        }
+    }
+
+    /// A press forgets the menu still waiting for its `stat` — it would pop
+    /// after the user moved on.
+    pub(crate) fn forget_link_menu(&self) {
+        self.link_state().borrow_mut().menu_pending = None;
+    }
+
+    /// The right click's `stat` came back: the menu pops at the click's point
+    /// if this is still the waited-for candidate, the path exists and the
+    /// window is still key.
+    pub(crate) fn link_menu_verified(
+        &self,
+        hit: &LinkHit,
+        resolved: Option<Resolved>,
+        at: NSPoint,
+    ) {
+        let pending = {
+            let mut state = self.link_state().borrow_mut();
+            if !state
+                .menu_pending
+                .as_ref()
+                .is_some_and(|p| same_link(p, hit))
+            {
+                return;
+            }
+            state.menu_pending.take()
+        };
+        let key = self.window().is_some_and(|window| window.isKeyWindow());
+        if let (Some(hit), true, true) = (pending, resolved.is_some(), key) {
+            self.pop_link_menu(Verified { hit, resolved }, at);
+        }
+    }
+
+    /// The context menu at `at` (view points): on a path that exists "Open",
+    /// "Reveal in Finder", "Copy Path", on any other link "Open Link", "Copy
+    /// Link". A link the policy has nothing for (`bateri://`) gets no menu.
+    fn pop_link_menu(&self, link: Verified, at: NSPoint) {
+        let action = links::action(
+            &link.hit.target,
+            &link.hit.kind,
+            link.resolved.as_ref(),
+            |_| Content::Other,
+        );
+        if matches!(action, None | Some(LinkAction::Swallow)) {
+            return;
+        }
+        let mtm = self.mtm();
+        let items: &[(&NSString, objc2::runtime::Sel)] = if link.resolved.is_some() {
+            &[
+                (ns_string!("Open"), sel!(openLinkFromMenu:)),
+                (ns_string!("Reveal in Finder"), sel!(revealLinkFromMenu:)),
+                (ns_string!("Copy Path"), sel!(copyLinkFromMenu:)),
+            ]
+        } else {
+            &[
+                (ns_string!("Open Link"), sel!(openLinkFromMenu:)),
+                (ns_string!("Copy Link"), sel!(copyLinkFromMenu:)),
+            ]
+        };
+        let menu = NSMenu::new(mtm);
+        for &(title, action) in items {
+            // SAFETY: `initWithTitle:action:keyEquivalent:` takes two `NSString`s
+            // and a selector the target implements (`BateriView`'s link menu
+            // selectors); `setTarget:` keeps the target weakly and the view
+            // outlives the menu's modal tracking.
+            let item = unsafe {
+                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    title,
+                    Some(action),
+                    ns_string!(""),
+                );
+                item.setTarget(Some(self));
+                item
+            };
+            menu.addItem(&item);
+        }
+        self.link_state().borrow_mut().menu = Some(link);
+        menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));
+    }
+
+    /// "Open" / "Open Link": the click's own path ([`BateriView::open_link`]) —
+    /// the menu does not skip the policy, an uncommon scheme asks here too.
+    pub(crate) fn menu_open_link(&self) {
+        let link = self.link_state().borrow_mut().menu.take();
+        if let Some(link) = link {
+            self.open_link(&link);
+        }
+    }
+
+    /// "Reveal in Finder": always safe, whatever the file is.
+    pub(crate) fn menu_reveal_link(&self) {
+        let link = self.link_state().borrow_mut().menu.take();
+        if let Some(Resolved { path, .. }) = link.and_then(|link| link.resolved) {
+            NSWorkspace::sharedWorkspace()
+                .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[file_url(&path)]));
+        }
+    }
+
+    /// "Copy Path" (the resolved absolute path) / "Copy Link" (the target).
+    pub(crate) fn menu_copy_link(&self) {
+        let link = self.link_state().borrow_mut().menu.take();
+        let text = link.map(|link| match link.resolved {
+            Some(Resolved { path, .. }) => path.to_string_lossy().into_owned(),
+            None => link.hit.target,
+        });
+        clipboard::copy(&NSPasteboard::generalPasteboard(), text);
     }
 
     /// The sheet for an OSC 8 link with an uncommon scheme: the whole target,

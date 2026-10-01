@@ -174,7 +174,7 @@ yol pane'in OSC 7 dizinine; `:satır:sütun` tanınır, atlanmaz) ve OSC 8
 bağlantısı (metin taramasını yener). Algılama ve hit test `bt-core`'da
 (`link`, `Session::link_at`; uzak oturumda yol ve `file://` bağlantı değil),
 vurgu hover yuvasından ve damgalı (`Session::set_link_hover`; damga tutmazsa
-çizilmez, düşer ve `Wake::link_hover_lost` ile ⌘ hâlâ basılıysa yeniden
+çizilmez, düşer ve `Wake::link_hover_lost` ile pencere key'se yeniden
 bulunur — akan çıktıda çıktı başına iki kare, boşta sıfır; **dock'ta damga
 seçilebilir metin** (`PREBUFFER ++ BUFFER`), denetleyeni `Session::dock` ve
 çizimi seçimin karakter aralığı yolundan (`dock::render_with`, ezme yardımcısı
@@ -197,7 +197,18 @@ varsayılan uygulamada, dizin Finder'da, kalan her şey — paket dizini dahil �
 Finder'da **gösteriliyor**, OSC 8'in yaygın olmayan şeması onay sayfası
 istiyor; **`bateri://` hiçbir yoldan `NSWorkspace`'e verilmiyor**, yutuluyor
 (038 Karar 7: kendimize yollamanın anlamı yok). El imleci yükleme
-düğmeleriyle tek cursor-rect listesinde. Gerekçeler
+düğmeleriyle tek cursor-rect listesinde. **⌘'siz yalnız OSC 8 bağlantısı
+vurgulanıyor, kesikli** (`hyperlink::hover_style`; el imleci yok, tık seçim):
+metni hedefini söylemiyor, düz metin bağlantı ise kendi hedefi ve ⌘'siz
+vurgulansaydı her `ls` kelimesi yanardı. **⌘ ile OSC 8'in üstündeyken hedef
+pane'in sol altındaki etikette** (`TerminalPane::set_link_target`;
+`hitTest → nil`, kare yolunun dışında, uzunsa ortadan `…`), çünkü tıklamadan
+önce görmek güvenlik. **Bağlantı üstünde sağ tık bir menü açıyor** (URL'de
+Open Link / Copy Link, var olan yolda Open / Reveal in Finder / Copy Path;
+ızgarada fare kipi kapalıyken ya da Shift'le, bantta ve dock'ta her zaman —
+oralar uygulamanın ekranı değil): "Open" tıkın politikasından geçiyor, yol
+yine arka planda doğrulanıyor ve bağlantısız yerde sağ tık bugünkü gibi
+hiçbir şey. Gerekçeler
 `.tasks/044-tiklanabilir-baglantilar/discussion.md` → Karar ve Muhakeme. Fareyle
 seçim, pano, geçmişte
 kaydırma, ana menü (About, Settings…, Quit; Shell'de New Window/Tab, New

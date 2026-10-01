@@ -33,8 +33,58 @@ _Requirements: R9_
 
 ## Checklist
 
-- [ ] ⌘'siz OSC 8 kesikli hover
-- [ ] Hedef etiketi
-- [ ] Sağ tık menüsü (politikadan geçerek)
-- [ ] `CLAUDE.md` güncellendi
-- [ ] Doğrulama geçti (`make check` + `make smoke`)
+- [x] ⌘'siz OSC 8 kesikli hover
+- [x] Hedef etiketi
+- [x] Sağ tık menüsü (politikadan geçerek)
+- [x] `CLAUDE.md` güncellendi
+- [x] Doğrulama geçti (`make check` + `make smoke`)
+
+## Uygulama Notları
+
+- **SAPMA — kod `view.rs`'te değil `hyperlink.rs`'te.** phase-4'ün emsali:
+  `view.rs` yalnız kancaları taşıyor (sağ basışta `link_menu`, menünün üç
+  seçicisi, her basışta `forget_link_menu`). Çentik artık **(hücre, ⌘)**:
+  ⌘'ye basmak/bırakmak aynı hücrede yeniden soruyor, Shift/Option'un
+  `flagsChanged:`'i sormuyor. Stil tek fonksiyondan (`hover_style`): ⌘'de her
+  bağlantı `Single`, ⌘'siz yalnız OSC 8 `Dashed`; ⌘'nin bırakılması artık
+  topyekûn temizlik değil, aynı noktayı ⌘'siz yeniden soruyor (OSC 8 kesikliye
+  iner, düz metin kalkar). phase-4'ün bilinen sınırı (4) korunuyor:
+  bulunamayan aday ⌘ bırakılınca unutuluyor (`link_flags`).
+- **⌘'siz hover'ın bedeli.** ⌘'siz hareket hücre değiştirince bir `link_at`
+  (Term kilidi) — eskiden hiç yoktu; hücre başına bir kez (`motion_event`'in
+  emsali). Akan çıktıda `link_hover_lost` artık pencere key'se ⌘'siz de
+  yeniden buluyor: fare bir OSC 8 bağlantısının üstünde dururken phase-2'nin
+  "çıktı başına iki kare"si ⌘'siz de geçerli — çıktıyla sınırlı, boşta sıfır.
+- **Doğrulama dönüşte stilini o anki ⌘'den alıyor** (`link_verified`): ⌘
+  arada bırakıldıysa OSC 8 `file://` kesikli çizilir, düz yol hiç çizilmez.
+- **El imleci yalnız ⌘ vurgusunda** (`LinkState::command_hover`); kesikli
+  hover bir ipucu, tık seçim.
+- **Hedef etiketi** `pane::LinkLabel` (`NSBox`, `hitTest → nil`) + içinde
+  `NSTextField` (`ByTruncatingMiddle`); temanın zemini ve ayraç tonu, metin
+  `secondaryLabelColor` (görünüm temadan). Sol altta, `dim` örtüsünün altında.
+  Bağlantı en alt satırda ve etiketin altındaysa etiket onu örtüyor (Ghostty
+  da öyle) — adıyla bilinen sınır.
+- **Sağ tık menüsünün kapsamı.** Izgarada rapor önce soruluyor: `Click::Select`
+  (kip kapalı **ya da Shift**) → menü; Shift'li sağ tık fare kipinde de menü
+  açıyor — Shift'in "terminalin kaçış yolu" kuralının okuması. Bant ve
+  dock'ta fare kipi hiç uygulanmadığı için her zaman. Yol adayı arka planda
+  doğrulanıyor (ana thread'de senkron `stat` yok, R7), menü dönüşte açılıyor;
+  geç dönüşü bir sonraki basış ya da `clear_link` iptal ediyor
+  (`menu_pending`). Menü `NSMenu::popUpMenuPositioningItem` ile, öğelerin
+  hedefi view; "Open" tıkın `open_link`'i (onay sayfası ve `bateri://` yutma
+  aynen), "Reveal in Finder" her zaman güvenli, "Copy Path" çözülmüş mutlak
+  yol. Politikanın bir şey yapmadığı bağlantıya (`Swallow`) menü yok.
+- **Dock'ta OSC 8 yok** (dock ZLE'nin `BUFFER`'ı): kesikli hover ve hedef
+  etiketi orada yapısal olarak konusuz; sağ tık menüsü dock'un URL'sinde ve
+  var olan yolunda çalışıyor.
+- **Set kapısı `/code-review` — iki bulgu, ikisi de giderildi.** (1) Odak
+  pencere key'liğini kaybetmeden view'dan giderse (⌘F'nin arama alanı, ⌘D /
+  ⌘] ile başka pane) `flagsChanged:`/`mouseMoved:` artık başka yere gidiyor ve
+  vurgu, el imleci, hedef etiketi asılı kalıyordu → `resignFirstResponder`
+  `clear_link` çağırıyor. (2) `//`'siz `file:` URL'si (`file:/x.command`)
+  `local_path`'ten geçmiyor, `Confirm` ile `NSWorkspace`'e URL olarak gidip
+  betiği koşturabiliyordu ve `bt-core`'un uzak/yetki kapısı onu görmüyor →
+  `links::action` her okunamayan `file:`'ı yutuyor (tablo satırı + bekçi).
+  `/audit`: mekanik temiz, mercekler temiz (1, 2, 6 ilgisiz).
+- `make linux` (links.rs) ve `make smoke` yeşil; `make test-race`/`make
+  shader` gerekmedi: `bt-core` ve `.wgsl`'e dokunulmadı.
