@@ -113,6 +113,10 @@ objc2-foundation = { workspace = true, features = [
 # and shortening a long name in the middle (`NSParagraphStyle`:
 # `NSLineBreakMode`). Only header flags; `Cargo.lock` did not move. Decision
 # record .tasks/037-ssh-ikinci-tur/phase-7.md.
+# "Download To…" of a remote link (045 phase-3): `NSOpenPanel` (and its
+# `NSSavePanel`/`NSPanel` chain) picks the destination folder as a sheet. Only
+# header flags over `objc2-foundation` headers; `Cargo.lock` did not move.
+# Decision record .tasks/045-uzak-dosya-indirme/discussion.md → Karar 15.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -124,7 +128,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSActionCell", "NSAnimation", "NSAnimationContext", "NSButtonCell", "NSSearchField",
     "NSSearchFieldCell",
     "NSShadow", "NSTextFieldCell", "NSWindowTab", "block2", "NSDockTile", "NSProgressIndicator",
-    "NSCursor", "NSPopover", "NSParagraphStyle",
+    "NSCursor", "NSPopover", "NSParagraphStyle", "NSOpenPanel", "NSPanel", "NSSavePanel",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer table (CLAUDE.md) recorded this as "only attaching a CALayer".

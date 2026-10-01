@@ -280,6 +280,28 @@ pub fn keep_both_name(path: &Path, dir: bool, taken: impl Fn(&Path) -> bool) -> 
     }
 }
 
+/// Free bytes on the volume that holds `dir` (`statvfs`: the blocks an
+/// unprivileged process may use) — the download sheet's "not enough space"
+/// (045 R4). `None` if it cannot be asked; blocking (a network volume), so off the
+/// main thread.
+pub fn free_space(dir: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is a NUL-terminated string that outlives the call and
+    // `stat` is a writable `statvfs` the call fills on success.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: `statvfs` returned 0, so it filled `stat`.
+    let stat = unsafe { stat.assume_init() };
+    // `fsblkcnt_t` is `u32` on macOS and `u64` on Linux, `c_ulong` is `u64` on
+    // both: a conversion is the identity on some target.
+    #[allow(clippy::useless_conversion)]
+    let (blocks, size) = (u64::from(stat.f_bavail), u64::from(stat.f_frsize));
+    blocks.checked_mul(size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +522,13 @@ mod tests {
             keep_both_name(Path::new("/d/static"), true, names),
             Path::new("/d/static 2")
         );
+    }
+
+    #[test]
+    fn free_space_answers_for_a_folder_and_not_for_a_missing_one() {
+        let root = scratch("free");
+        assert!(free_space(&root).is_some_and(|free| free > 0));
+        assert_eq!(free_space(&root.join("missing")), None);
+        let _ = fs::remove_dir_all(&root);
     }
 }

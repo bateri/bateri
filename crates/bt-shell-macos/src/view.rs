@@ -838,6 +838,23 @@ define_class!(
             self.menu_copy_link();
         }
 
+        /// A remote link's items (045 R3): download to the download folder, to
+        /// a chosen folder, and its scp path.
+        #[unsafe(method(downloadLinkFromMenu:))]
+        fn download_link_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.menu_download(false);
+        }
+
+        #[unsafe(method(downloadLinkToFromMenu:))]
+        fn download_link_to_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.menu_download(true);
+        }
+
+        #[unsafe(method(copyScpPathFromMenu:))]
+        fn copy_scp_path_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.menu_copy_scp_path();
+        }
+
         /// Middle button and **beyond**: AppKit sends everything past the
         /// fourth button to this selector too, while X10's two bits carry only
         /// three buttons and `3` is reserved for release. If the number is not
