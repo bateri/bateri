@@ -878,28 +878,39 @@ impl BateriView {
             .collect()
     }
 
-    /// A left press: `true` if it is a ⌘-press on the shown link's cells — the
+    /// A left press: `Some` if it is a ⌘-press on the shown link's cells — the
     /// hover is locked for the release and the caller routes the gesture to the
-    /// link (`Gesture::pressed_link`), calling neither the report nor the selection.
-    pub(crate) fn link_press(&self, event: &NSEvent) -> bool {
+    /// link (`Gesture::pressed_link`), calling neither the report nor the
+    /// selection. The answer says whether the link can be dragged out to Finder:
+    /// only a remote one (045 Karar 14 — a local file is already in Finder).
+    pub(crate) fn link_press(&self, event: &NSEvent) -> Option<bool> {
         if !event
             .modifierFlags()
             .contains(NSEventModifierFlags::Command)
         {
-            return false;
+            return None;
         }
-        let Some(at) = self.link_cell(event.locationInWindow()) else {
-            return false;
-        };
+        let at = self.link_cell(event.locationInWindow())?;
         let mut state = self.link_state().borrow_mut();
-        let Some(shown) = state.hover.clone() else {
-            return false;
-        };
+        let shown = state.hover.clone()?;
         if !on_link(&shown.hit, at) {
-            return false;
+            return None;
         }
+        let draggable = shown.remote.is_some();
         state.pressed = Some(shown);
-        true
+        Some(draggable)
+    }
+
+    /// `Drag::Link`: the locked remote link becomes a file promise drag to Finder
+    /// ([`crate::promise::begin_drag`]); the lock is taken — AppKit swallows the
+    /// release once the drag session starts.
+    pub(crate) fn link_drag(&self, event: &NSEvent) {
+        let Some(pressed) = self.link_state().borrow_mut().pressed.take() else {
+            return;
+        };
+        if let Some((path, entry)) = pressed.remote {
+            crate::promise::begin_drag(self, event, path, &entry);
+        }
     }
 
     /// `Release::Link`: opens the locked link if the pointer is still over its

@@ -509,6 +509,13 @@ impl TerminalPane {
             } => self.previews().borrow().get(job.landing()).cloned(),
             _ => None,
         };
+        // A Finder drop's promise (045 phase-5) follows this item from now on.
+        if let Way::Down {
+            lane: Lane::Finder, ..
+        } = job.way
+        {
+            self.finder_started(job.landing(), item, &shared);
+        }
         let (id, lookup) = (self.id(), self.lookup());
         let spawned = thread::Builder::new().name("transfer".into()).spawn({
             let shared = Arc::clone(&shared);
@@ -557,6 +564,7 @@ impl TerminalPane {
     /// Progress report: refreshes the status line, the popover, the title and
     /// the Dock tile.
     fn upload_refresh(&self) {
+        self.finder_tick();
         let status = self.uploads().borrow_mut().status(Instant::now());
         if let Some(status) = status {
             self.show_transfer(Some(status));
@@ -576,6 +584,9 @@ impl TerminalPane {
     /// on to the next or show the result. No path is pasted (037 phase-7): the
     /// result line says where it went.
     fn upload_finished(&self, item: u64, outcome: Outcome, landed: Option<std::path::PathBuf>) {
+        // A Finder drop's promise is kept or failed first: when a stop already
+        // ended the queue, `finish_item` knows nothing of the item any more.
+        self.finder_finished(item, &outcome);
         let ended = self
             .uploads()
             .borrow_mut()
@@ -739,7 +750,7 @@ impl TerminalPane {
     }
 
     /// Applies the stop ([`Uploads::stop`]); shows the result if it is known immediately.
-    fn apply_stop(&self, id: Option<u64>, all: bool) {
+    pub(crate) fn apply_stop(&self, id: Option<u64>, all: bool) {
         let ended = self.uploads().borrow_mut().stop(id, all);
         match ended {
             Some(ended) => self.show_end(ended),

@@ -18,7 +18,7 @@ use bt_core::{Click, MouseButton, SelectKind, SelectionPoint};
 
 /// The gesture's state. `Copy`: the view keeps it in a `Cell` and does take-modify-put on every
 /// event — so that `RefCell`'s borrow panic is not put at risk in the middle of a `Session` call.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Gesture {
     /// Whether the left button is down and the selection started with this press.
     ///
@@ -57,7 +57,19 @@ pub struct Gesture {
     /// already holds the verified hover the press was matched against, so the release compares
     /// with that (`discussion.md` → Muhakeme, İşletme: the hit test does not run again).
     link: bool,
+    /// Where a ⌘-press on a **draggable** link went down (window points) — `None`
+    /// for a link that cannot be dragged (045 Karar 14: only a remote one) and
+    /// for every other press. The first held motion farther than
+    /// [`LINK_DRAG_THRESHOLD`] from it turns the gesture into a drag
+    /// ([`Drag::Link`]) and takes the press point and `link` down with it.
+    link_from: Option<(f64, f64)>,
 }
+
+/// How far (window points) a ⌘-press on a draggable link must move before the
+/// gesture is a drag, not a click (045 Karar 14). A design constant, not a
+/// measurement and not AppKit's own drag threshold: a hand that trembles while
+/// clicking must still open the link, a deliberate pull must not wait.
+pub const LINK_DRAG_THRESHOLD: f64 = 4.0;
 
 /// The work the terminal does from a press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +90,10 @@ pub enum Drag {
     Select,
     /// The press started a selection in the dock: the dock selection's end is moved.
     SelectDock,
+    /// A ⌘-press on a draggable (remote) link moved past [`LINK_DRAG_THRESHOLD`]: the view
+    /// starts the file promise drag (045 R7). Returned **once**; the gesture is then over in the
+    /// ledger — AppKit owns the mouse for the drag session and the release does not open the link.
+    Link,
     /// Neither (the right/middle button has no gesture in the terminal, a press-less drag): the
     /// event is dropped.
     Ignore,
@@ -116,6 +132,7 @@ impl Gesture {
             self.dragging = false;
             self.dock = false;
             self.link = false;
+            self.link_from = None;
         }
     }
 
@@ -135,10 +152,14 @@ impl Gesture {
     /// exists is unknown to `bt-core` — so a `bt-core` arm would only reflect the decision
     /// back (`.tasks/044-tiklanabilir-baglantilar/discussion.md` → Muhakeme, Sadelik 1). The
     /// dock press is the precedent ([`Gesture::pressed_dock`]).
-    pub fn pressed_link(&mut self) {
+    ///
+    /// `drag_from` is the press point (window points) when the link can be dragged out — a
+    /// remote one (045 Karar 14); `None` keeps today's click-only route at any distance.
+    pub fn pressed_link(&mut self, drag_from: Option<(f64, f64)>) {
         self.dragging = false;
         self.dock = false;
         self.link = true;
+        self.link_from = drag_from;
     }
 
     /// A left-button press on the dock's input line: the gesture is the **terminal's** (mouse mode
@@ -191,10 +212,26 @@ impl Gesture {
         }
     }
 
-    /// A held drag: the route was locked at the press and is not asked again here. Both halves of
-    /// the lock are read and the report comes first — both can be set at the same time (pressing
-    /// the right button while a left selection is in progress), but the bit is **per button**.
-    pub fn dragged(&self, button: MouseButton) -> Drag {
+    /// A held drag at `at` (window points): the route was locked at the press and is not asked
+    /// again here. Both halves of the lock are read and the report comes first — both can be set
+    /// at the same time (pressing the right button while a left selection is in progress), but the
+    /// bit is **per button**.
+    ///
+    /// A ⌘-press on a draggable link answers [`Drag::Link`] at the first motion past
+    /// [`LINK_DRAG_THRESHOLD`] and forgets the link — so it answers it once, and the release
+    /// after it is [`Release::Done`].
+    pub fn dragged(&mut self, button: MouseButton, at: (f64, f64)) -> Drag {
+        if button == MouseButton::Left
+            && self.link
+            && let Some((x, y)) = self.link_from
+        {
+            let (dx, dy) = (at.0 - x, at.1 - y);
+            if dx.hypot(dy) >= LINK_DRAG_THRESHOLD {
+                self.link = false;
+                self.link_from = None;
+                return Drag::Link;
+            }
+        }
         if self.sent & button_bit(button) != 0 {
             Drag::Report
         } else if button == MouseButton::Left && self.dragging && self.dock {
@@ -211,6 +248,7 @@ impl Gesture {
     pub fn released(&mut self, button: MouseButton) -> Release {
         let bit = button_bit(button);
         if button == MouseButton::Left && std::mem::take(&mut self.link) {
+            self.link_from = None;
             return Release::Link;
         }
         if self.sent & bit == 0 {
@@ -299,6 +337,8 @@ mod tests {
 
     const LEFT: MouseButton = MouseButton::Left;
     const RIGHT: MouseButton = MouseButton::Right;
+    /// Where the pointer is when the route does not depend on the distance.
+    const HERE: (f64, f64) = (100.0, 50.0);
 
     /// A left-button press: first the stale trace comes down, then `bt-core`'s answer is written.
     fn press(gesture: &mut Gesture, answer: Click, clicks: isize, shift: bool) -> Option<Press> {
@@ -310,15 +350,15 @@ mod tests {
     fn a_selecting_press_drags_the_selection_until_release() {
         let mut gesture = Gesture::default();
         // No press before the drag: the event is dropped.
-        assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Ignore);
         assert_eq!(
             press(&mut gesture, Click::Select, 1, false),
             Some(Press::Select(SelectKind::Simple))
         );
-        assert_eq!(gesture.dragged(LEFT), Drag::Select);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Select);
         assert_eq!(gesture.released(LEFT), Release::Done);
         // No drag after the release.
-        assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Ignore);
         assert!(!gesture.dragging());
     }
 
@@ -326,7 +366,7 @@ mod tests {
     fn a_reported_press_is_reported_to_its_release() {
         let mut gesture = Gesture::default();
         assert_eq!(press(&mut gesture, Click::Sent, 1, false), None);
-        assert_eq!(gesture.dragged(LEFT), Drag::Report);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Report);
         assert!(!gesture.dragging(), "a report is not a selection drag");
         assert_eq!(gesture.released(LEFT), Release::Report);
         // The bit came down: a second release is not reported.
@@ -364,7 +404,7 @@ mod tests {
                 Some(Press::Extend)
             );
             // An extension drags too: Shift+click and drag moves the end.
-            assert_eq!(gesture.dragged(LEFT), Drag::Select);
+            assert_eq!(gesture.dragged(LEFT, HERE), Drag::Select);
         }
     }
 
@@ -373,11 +413,11 @@ mod tests {
         let mut gesture = Gesture::default();
         gesture.begin_press(RIGHT);
         assert_eq!(gesture.pressed(RIGHT, Click::Select, 2, false), None);
-        assert_eq!(gesture.dragged(RIGHT), Drag::Ignore);
+        assert_eq!(gesture.dragged(RIGHT, HERE), Drag::Ignore);
         assert!(!gesture.dragging());
         // A press that sent no report leaves no trace.
         assert_eq!(press(&mut gesture, Click::Ignored, 1, false), None);
-        assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Ignore);
     }
 
     #[test]
@@ -390,7 +430,7 @@ mod tests {
         let lost: Vec<_> = gesture.take_lost_releases().collect();
         assert_eq!(lost, [LEFT, RIGHT]);
         assert_eq!(gesture.take_lost_releases().count(), 0);
-        assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Ignore);
     }
 
     #[test]
@@ -399,7 +439,7 @@ mod tests {
         press(&mut gesture, Click::Sent, 1, false);
         // The release was lost, the app closed the mode meanwhile: the new press selects.
         press(&mut gesture, Click::Select, 1, false);
-        assert_eq!(gesture.dragged(LEFT), Drag::Select);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Select);
         // The release does not find the stale bit and take the report path.
         assert_eq!(gesture.released(LEFT), Release::Done);
         assert!(!gesture.dragging());
@@ -412,7 +452,7 @@ mod tests {
         press(&mut gesture, Click::Select, 1, false);
         // Scrolling learns from the system that the button is not down.
         gesture.lost_drag();
-        assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Ignore);
         // A newly reported press also brings down the stale `dragging`.
         press(&mut gesture, Click::Select, 1, false);
         press(&mut gesture, Click::Sent, 1, false);
@@ -420,7 +460,7 @@ mod tests {
             !gesture.dragging(),
             "stale selection next to a reported press"
         );
-        assert_eq!(gesture.dragged(LEFT), Drag::Report);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Report);
     }
 
     #[test]
@@ -431,20 +471,20 @@ mod tests {
             gesture.pressed_dock(2, false),
             Press::Select(SelectKind::Word)
         );
-        assert_eq!(gesture.dragged(LEFT), Drag::SelectDock);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::SelectDock);
         // Scrolling must not move the grid's end.
         assert!(!gesture.dragging(), "dock drag counted as a grid drag");
         // The release is the dock's: the click-to-caret gate (031 phase-5). Once —
         // a second release has no gesture.
         assert_eq!(gesture.released(LEFT), Release::Dock);
         assert_eq!(gesture.released(LEFT), Release::Done);
-        assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Ignore);
         // Shift extends by the same rule.
         gesture.begin_press(LEFT);
         assert_eq!(gesture.pressed_dock(1, true), Press::Extend);
         // A new press in the grid takes the target back.
         press(&mut gesture, Click::Select, 1, false);
-        assert_eq!(gesture.dragged(LEFT), Drag::Select);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Select);
         assert!(gesture.dragging());
     }
 
@@ -456,9 +496,9 @@ mod tests {
         for _shift in [false, true] {
             let mut gesture = Gesture::default();
             gesture.begin_press(LEFT);
-            gesture.pressed_link();
+            gesture.pressed_link(None);
             // A drag neither selects nor reports.
-            assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
+            assert_eq!(gesture.dragged(LEFT, HERE), Drag::Ignore);
             assert!(!gesture.dragging(), "a link press is not a selection drag");
             // The release is the link's, once, and no report follows.
             assert_eq!(gesture.released(LEFT), Release::Link);
@@ -475,25 +515,99 @@ mod tests {
         gesture.begin_press(RIGHT);
         gesture.pressed(RIGHT, Click::Sent, 1, false);
         gesture.begin_press(LEFT);
-        gesture.pressed_link();
-        assert_eq!(gesture.dragged(RIGHT), Drag::Report);
+        gesture.pressed_link(None);
+        assert_eq!(gesture.dragged(RIGHT, HERE), Drag::Report);
         assert_eq!(gesture.released(RIGHT), Release::Report);
         assert_eq!(gesture.released(LEFT), Release::Link);
         // A link press clears a stale selection drag.
         press(&mut gesture, Click::Select, 1, false);
         gesture.begin_press(LEFT);
-        gesture.pressed_link();
+        gesture.pressed_link(None);
         assert!(!gesture.dragging());
         // A lost link release does not leak into the next press: a new selection releases as
         // a selection.
         press(&mut gesture, Click::Select, 1, false);
-        assert_eq!(gesture.dragged(LEFT), Drag::Select);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Select);
         assert_eq!(gesture.released(LEFT), Release::Done);
         // Nor into a reported one.
         gesture.begin_press(LEFT);
-        gesture.pressed_link();
+        gesture.pressed_link(None);
         press(&mut gesture, Click::Sent, 1, false);
         assert_eq!(gesture.released(LEFT), Release::Report);
+    }
+
+    #[test]
+    fn a_remote_link_press_drags_once_past_the_threshold() {
+        // 045 R7, Karar 14: a ⌘-press on a remote link that moves past the threshold is a file
+        // promise drag — once.
+        let mut gesture = Gesture::default();
+        gesture.begin_press(LEFT);
+        gesture.pressed_link(Some(HERE));
+        let (x, y) = HERE;
+        // Inside the threshold (a trembling click): nothing yet.
+        let near = LINK_DRAG_THRESHOLD - 0.5;
+        assert_eq!(gesture.dragged(LEFT, (x + near, y)), Drag::Ignore);
+        assert_eq!(gesture.dragged(LEFT, (x, y - near)), Drag::Ignore);
+        // Past it, in any direction: the drag starts.
+        let far = (x - LINK_DRAG_THRESHOLD * 0.8, y + LINK_DRAG_THRESHOLD * 0.8);
+        assert_eq!(gesture.dragged(LEFT, far), Drag::Link);
+        // Exactly once: the next motions are dropped, even farther away.
+        assert_eq!(gesture.dragged(LEFT, (x + 40.0, y)), Drag::Ignore);
+        assert_eq!(gesture.dragged(LEFT, far), Drag::Ignore);
+        assert!(!gesture.dragging(), "a link drag is not a selection drag");
+        // The release does not open the link (AppKit swallows it anyway).
+        assert_eq!(gesture.released(LEFT), Release::Done);
+        assert_eq!(gesture.take_lost_releases().count(), 0);
+    }
+
+    #[test]
+    fn a_remote_link_click_below_the_threshold_still_opens() {
+        let mut gesture = Gesture::default();
+        gesture.begin_press(LEFT);
+        gesture.pressed_link(Some(HERE));
+        let (x, y) = HERE;
+        assert_eq!(gesture.dragged(LEFT, (x + 1.0, y + 1.0)), Drag::Ignore);
+        // The release is the link's: the view opens (previews) it.
+        assert_eq!(gesture.released(LEFT), Release::Link);
+        assert_eq!(gesture.released(LEFT), Release::Done);
+    }
+
+    #[test]
+    fn a_local_link_never_drags() {
+        // Karar 14: local links are not dragged in this set — any distance stays a click.
+        let mut gesture = Gesture::default();
+        gesture.begin_press(LEFT);
+        gesture.pressed_link(None);
+        for distance in [0.0, LINK_DRAG_THRESHOLD, 10.0, 500.0] {
+            assert_eq!(
+                gesture.dragged(LEFT, (HERE.0 + distance, HERE.1)),
+                Drag::Ignore,
+                "{distance}"
+            );
+        }
+        assert_eq!(gesture.released(LEFT), Release::Link);
+    }
+
+    #[test]
+    fn a_new_press_forgets_the_link_drag() {
+        let mut gesture = Gesture::default();
+        gesture.begin_press(LEFT);
+        gesture.pressed_link(Some(HERE));
+        // The release was lost; the next press is a selection: its drag selects, never `Link`.
+        press(&mut gesture, Click::Select, 1, false);
+        assert_eq!(gesture.dragged(LEFT, (HERE.0 + 50.0, HERE.1)), Drag::Select);
+        // Nor does a later local link press inherit the old press point.
+        gesture.begin_press(LEFT);
+        gesture.pressed_link(None);
+        assert_eq!(gesture.dragged(LEFT, (HERE.0 + 50.0, HERE.1)), Drag::Ignore);
+        // Only the left button drags a link.
+        gesture.begin_press(LEFT);
+        gesture.pressed_link(Some(HERE));
+        assert_eq!(
+            gesture.dragged(RIGHT, (HERE.0 + 50.0, HERE.1)),
+            Drag::Ignore
+        );
+        assert_eq!(gesture.dragged(LEFT, (HERE.0 + 50.0, HERE.1)), Drag::Link);
     }
 
     #[test]

@@ -44,6 +44,7 @@ mod menu;
 mod pacer;
 mod pane;
 mod preview;
+mod promise;
 mod search_bar;
 mod settings_window;
 mod split_view;

@@ -1058,7 +1058,7 @@ impl Shared {
     }
 
     /// Content bytes passed and the number of finished files.
-    pub(crate) fn progress(&self) -> (u64, u64) {
+    pub fn progress(&self) -> (u64, u64) {
         (
             self.bytes.load(Ordering::Acquire),
             self.files.load(Ordering::Acquire),
