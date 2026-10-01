@@ -1896,7 +1896,11 @@ impl BateriView {
     /// PTY pad's single-row block ([`dock_input_top_px`]); the height in that
     /// arm is from the view's bounds - the drawable's size is set in the same
     /// call as that (`TerminalPane::sync_geometry`).
-    fn window_point_dock(&self, in_window: NSPoint, outside: OutOfGrid) -> Option<SelectionPoint> {
+    pub(crate) fn window_point_dock(
+        &self,
+        in_window: NSPoint,
+        outside: OutOfGrid,
+    ) -> Option<SelectionPoint> {
         let (metrics, (cols, _)) = self.ivars().metrics.get()?;
         let dock_rows = self.ivars().dock_rows.get();
         if dock_rows == 0 {

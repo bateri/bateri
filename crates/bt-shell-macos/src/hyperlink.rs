@@ -1,4 +1,5 @@
-//! ⌘-hover and ⌘-click on a link in the grid and the fill band (044 phase-4).
+//! ⌘-hover and ⌘-click on a link in the grid, the fill band (044 phase-4) and
+//! the dock's input line (phase-5).
 //!
 //! `bt-core` finds the link (`Session::link_at`) and draws its underline from the
 //! hover slot (`Session::set_link_hover`); `bt-shell-common::links` says what a
@@ -25,7 +26,8 @@
 //!   scrollback the frame drops the hover and says so (`Wake::link_hover_lost`);
 //!   if ⌘ is still down the same point is asked again and, if the link is the
 //!   same one, its earlier verification is reused (no second `stat` per output
-//!   round).
+//!   round). In the dock the stamp is the input line's text: a key that changes
+//!   `BUFFER` drops it the same way (`Session::dock`).
 //! - **The press is the link's in every mode** (`Gesture::pressed_link`): the
 //!   verified hover is locked at the press and the release opens it if the
 //!   pointer is still over the locked range and the click count is one.
@@ -41,7 +43,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use block2::RcBlock;
-use bt_core::{LinkHit, LinkPoint, LinkSpan, UnderlineStyle};
+use bt_core::{CellHalf, LinkHit, LinkPoint, LinkSpan, SelectionPoint, UnderlineStyle};
 use bt_gpu::{CellMetrics, Origin};
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
@@ -55,7 +57,7 @@ use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL, ns_str
 use crate::child;
 use crate::links::{self, Content, LinkAction, Resolved};
 use crate::uploader::{ESCAPE, add_key_monitor, remove_monitor};
-use crate::view::BateriView;
+use crate::view::{BateriView, OutOfGrid};
 
 /// A link whose target is known to be one: a URL or OSC 8 link as found, a path
 /// after the background `stat` found it.
@@ -66,11 +68,34 @@ pub(crate) struct Verified {
     resolved: Option<Resolved>,
 }
 
+/// A cell the link hit test can be asked about: a **signed** screen row
+/// (negative is the fill band, [`link_cell_at`]) or a row of the dock's input
+/// block inside its drawn vertical window (`window_point_dock`). Two variants,
+/// so a dock row `0` and a screen row `0` never compare equal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkCell {
+    Screen(i32, u16),
+    Dock(u16, u16),
+}
+
+impl LinkCell {
+    fn point(self) -> LinkPoint {
+        match self {
+            LinkCell::Screen(row, col) => LinkPoint::Screen { row, col },
+            LinkCell::Dock(row, col) => LinkPoint::Dock(SelectionPoint {
+                col,
+                row,
+                half: CellHalf::Left,
+            }),
+        }
+    }
+}
+
 /// The view's link state ([`BateriView::link_state`]); main thread only.
 #[derive(Default)]
 pub(crate) struct LinkState {
     /// The link cell the last ⌘-motion asked about — the hit test's notch.
-    cell: Option<(i32, u16)>,
+    cell: Option<LinkCell>,
     /// The drawn (verified) hover: a ⌘-press is matched against it.
     hover: Option<Verified>,
     /// A path candidate whose `stat` is in flight.
@@ -89,8 +114,19 @@ fn same_link(a: &LinkHit, b: &LinkHit) -> bool {
     a.spans == b.spans && a.target == b.target && a.kind == b.kind
 }
 
-/// Whether `(row, col)` is one of the link's cells.
-fn spans_contain(spans: &[LinkSpan], (row, col): (i32, u16)) -> bool {
+/// Whether `cell` is one of the link's cells — on the surface the link was
+/// found on ([`LinkHit::in_dock`]).
+fn on_link(hit: &LinkHit, cell: LinkCell) -> bool {
+    spans_contain(&hit.spans, hit.in_dock(), cell)
+}
+
+/// Whether `cell` is one of `spans`' cells, `in_dock` saying which surface's.
+fn spans_contain(spans: &[LinkSpan], in_dock: bool, cell: LinkCell) -> bool {
+    let (row, col) = match cell {
+        LinkCell::Screen(row, col) if !in_dock => (row, col),
+        LinkCell::Dock(row, col) if in_dock => (i32::from(row), col),
+        _ => return false,
+    };
     spans
         .iter()
         .any(|span| span.row == row && (span.first..=span.last).contains(&col))
@@ -224,8 +260,11 @@ fn command_down() -> bool {
 }
 
 impl BateriView {
-    /// The pointer's link cell ([`link_cell_at`]) at a window point.
-    fn link_cell(&self, in_window: NSPoint) -> Option<(i32, u16)> {
+    /// The pointer's link cell at a window point: the grid and the band
+    /// ([`link_cell_at`]), below them the dock's input block (the dock
+    /// selection's geometry, `window_point_dock`; the context line, the band's
+    /// padding and the mark's columns are `bt-core`'s rejection).
+    fn link_cell(&self, in_window: NSPoint) -> Option<LinkCell> {
         let (metrics, (cols, rows)) = self.metrics()?;
         let point = self.convertPoint_fromView(in_window, None);
         let scale = self.window()?.backingScaleFactor();
@@ -238,10 +277,15 @@ impl BateriView {
             cols,
             rows,
         )
+        .map(|(row, col)| LinkCell::Screen(row, col))
+        .or_else(|| {
+            self.window_point_dock(in_window, OutOfGrid::Reject)
+                .map(|point| LinkCell::Dock(point.row, point.col))
+        })
     }
 
     /// The pointer's link cell now, without an event.
-    fn pointer_link_cell(&self) -> Option<(i32, u16)> {
+    fn pointer_link_cell(&self) -> Option<LinkCell> {
         self.link_cell(self.window()?.mouseLocationOutsideOfEventStream())
     }
 
@@ -309,11 +353,11 @@ impl BateriView {
     }
 
     /// The hit test at `at` and what follows from it.
-    fn find_link(&self, at: Option<(i32, u16)>) {
+    fn find_link(&self, at: Option<LinkCell>) {
         let Some(session) = self.session() else {
             return;
         };
-        let hit = at.and_then(|(row, col)| session.link_at(LinkPoint::Screen { row, col }));
+        let hit = at.and_then(|cell| session.link_at(cell.point()));
         let Some(hit) = hit else {
             let shown = {
                 let mut state = self.link_state().borrow_mut();
@@ -445,7 +489,16 @@ impl BateriView {
             return Vec::new();
         };
         let scale = window.backingScaleFactor();
-        let origin = self.origin().map_or(0.0, Origin::px);
+        // A dock link's rows are the input block's, from its drawn top
+        // (`Origin::dock`, the geometry `window_point_dock` reads).
+        let origin = if shown.hit.in_dock() {
+            match self.origin().and_then(Origin::dock) {
+                Some((top, _)) => top,
+                None => return Vec::new(),
+            }
+        } else {
+            self.origin().map_or(0.0, Origin::px)
+        };
         span_rects_px(&shown.hit.spans, metrics, f64::from(origin))
             .into_iter()
             .map(|[x, y, width, height]| {
@@ -474,7 +527,7 @@ impl BateriView {
         let Some(shown) = state.hover.clone() else {
             return false;
         };
-        if !spans_contain(&shown.hit.spans, at) {
+        if !on_link(&shown.hit, at) {
             return false;
         }
         state.pressed = Some(shown);
@@ -493,7 +546,7 @@ impl BateriView {
         }
         let over = self
             .link_cell(event.locationInWindow())
-            .is_some_and(|at| spans_contain(&pressed.hit.spans, at));
+            .is_some_and(|at| on_link(&pressed.hit, at));
         if over {
             self.open_link(&pressed);
         }
@@ -630,9 +683,13 @@ mod tests {
             assert_eq!(first, Some((span.row, span.first)));
             assert_eq!(last, Some((span.row, span.last)));
         }
-        assert!(spans_contain(&spans, (0, 4)));
-        assert!(!spans_contain(&spans, (0, 5)));
-        assert!(!spans_contain(&spans, (-1, 2)));
+        assert!(spans_contain(&spans, false, LinkCell::Screen(0, 4)));
+        assert!(!spans_contain(&spans, false, LinkCell::Screen(0, 5)));
+        assert!(!spans_contain(&spans, false, LinkCell::Screen(-1, 2)));
+        // A dock row 0 is not the screen's row 0, and the reverse.
+        assert!(!spans_contain(&spans, false, LinkCell::Dock(0, 4)));
+        assert!(spans_contain(&spans, true, LinkCell::Dock(0, 4)));
+        assert!(!spans_contain(&spans, true, LinkCell::Screen(0, 4)));
     }
 
     /// Reads this Mac's Launch Services database (an application declaring an

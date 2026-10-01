@@ -103,6 +103,6 @@ mouseUp → Release::Link → kilitli aralığın üstünde ve clickCount == 1
 | phase-2 | ✅ |
 | phase-3 | ✅ |
 | phase-4 | ✅ |
-| phase-5 | |
+| phase-5 | ✅ |
 | phase-6 | |
 | kapı | |

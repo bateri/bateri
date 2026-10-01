@@ -167,14 +167,21 @@ tıklama sarılmış mantıksal satır (`SelectKind`, alacritty'nin
 koruyarak (`Session::extend_selection`; seçim yoksa oradan başlar) ve bu iki
 kipte de aynı kural — fare kipinde Shift zaten seçimin tek yolu.
 **⌘ basılıyken bağlantı alt çizgi ve el imleci alıyor, ⌘-tık onu açıyor**
-(044; ızgarada ve doldurma bandında, alternatif ekran dahil): URL
+(044; ızgarada, doldurma bandında ve dock'un giriş satırında, alternatif
+ekran dahil): URL
 (`http`/`https`/`ftp`/`mailto`/`file`), **var olan** dosya yolu (`~`, göreli
 yol pane'in OSC 7 dizinine; `:satır:sütun` tanınır, atlanmaz) ve OSC 8
 bağlantısı (metin taramasını yener). Algılama ve hit test `bt-core`'da
 (`link`, `Session::link_at`; uzak oturumda yol ve `file://` bağlantı değil),
 vurgu hover yuvasından ve damgalı (`Session::set_link_hover`; damga tutmazsa
 çizilmez, düşer ve `Wake::link_hover_lost` ile ⌘ hâlâ basılıysa yeniden
-bulunur — akan çıktıda çıktı başına iki kare, boşta sıfır), yolun varlığı
+bulunur — akan çıktıda çıktı başına iki kare, boşta sıfır; **dock'ta damga
+seçilebilir metin** (`PREBUFFER ++ BUFFER`), denetleyeni `Session::dock` ve
+çizimi seçimin karakter aralığı yolundan (`dock::render_with`, ezme yardımcısı
+aynı) — `BUFFER` ya da çizilen pencere (tekerlek, caret takibi, genişlik)
+değişince düşer, çıktı onu bayatlatmaz; isabet son çizilen
+pencereden ve dock'un tek düzen yürüyüşünden, `dock_select`'inkinden ayrı:
+pay, prompt işareti ve öneri bağlantı değil), yolun varlığı
 **arka planda** pane başına seri bir kuyrukta (`hyperlink`; ağ diskinde
 takılan `stat` ana thread'i ve kareyi kilitlemesin) ve doğrulanmamış yol
 vurgulanmıyor. ⌘ her olayda yeniden okunuyor; `flagsChanged:` ve pencerenin

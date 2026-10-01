@@ -2555,13 +2555,16 @@ pub enum LinkPoint {
     /// row only hits while the band stands on screen. The same space as
     /// [`LinkSpan::row`].
     Screen { row: i32, col: u16 },
-    /// The dock's input line (`dock_select`'s point). Filled in phase-5 of 044;
-    /// no hit today.
+    /// The dock's input line (`dock_select`'s point: the row inside the drawn
+    /// vertical window, the screen column; the half is not read). The same space
+    /// as a dock hit's [`LinkSpan::row`] (044 phase-5).
     Dock(SelectionPoint),
 }
 
-/// One screen row's part of a link: columns `first..=last` of `row`
-/// ([`LinkPoint::Screen`]'s space). A wrapped link has one span per row.
+/// One row's part of a link: columns `first..=last` of `row` — in the space of
+/// the point that found it ([`LinkPoint::Screen`]'s screen rows, or
+/// [`LinkPoint::Dock`]'s window-local rows; [`LinkHit::in_dock`] says which). A
+/// wrapped link has one span per row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinkSpan {
     pub row: i32,
@@ -2588,10 +2591,31 @@ pub enum LinkKind {
 /// window scrolled, the screen was cleared — and must not be drawn. Opaque: no
 /// alacritty type shows in the `pub` API.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LinkStamp {
-    mark: search::LedgerMark,
-    /// The OSC 8 link's `(id, uri)`.
-    hyperlink: Option<(String, String)>,
+pub struct LinkStamp(Stamped);
+
+/// What a [`LinkStamp`] was taken from — the surface the link was found on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Stamped {
+    /// The grid or the fill band: checked by [`Session::frame`].
+    Screen {
+        mark: search::LedgerMark,
+        /// The OSC 8 link's `(id, uri)`.
+        hyperlink: Option<(String, String)>,
+    },
+    /// The dock's input line (044 phase-5): the selectable text
+    /// (`PREBUFFER ++ BUFFER`) the hit test saw, the link's char range in it
+    /// and the drawn window its cells were measured in (top row, width).
+    /// Checked by [`Session::dock`]: the scrollback does not move the dock's
+    /// text, so output never makes a dock hover stale — a new `BUFFER` (a key,
+    /// `line-finish`) does, and so does a window that moved (the wheel, the
+    /// caret following ⌘←, a resize re-wrapping): the underline would still
+    /// land right, but the view's cells (the hand cursor, the click) would not.
+    Dock {
+        text: String,
+        range: std::ops::Range<usize>,
+        top: usize,
+        cols: u16,
+    },
 }
 
 /// The link under a point ([`Session::link_at`]).
@@ -2606,6 +2630,12 @@ pub struct LinkHit {
 }
 
 impl LinkHit {
+    /// Whether the link was found on the dock's input line: its spans are in
+    /// [`LinkPoint::Dock`]'s space, not the screen's.
+    pub fn in_dock(&self) -> bool {
+        matches!(self.stamp.0, Stamped::Dock { .. })
+    }
+
     /// The hover this hit draws with `style` ([`Session::set_link_hover`]):
     /// ⌘ → [`UnderlineStyle::Single`], ⌘-less OSC 8 → [`UnderlineStyle::Dashed`]
     /// (044 Karar 3).
@@ -2629,6 +2659,40 @@ pub struct LinkHover {
 }
 
 impl LinkHover {
+    /// Whether the hover is on the dock's input line ([`LinkHit::in_dock`]).
+    pub fn in_dock(&self) -> bool {
+        matches!(self.stamp.0, Stamped::Dock { .. })
+    }
+
+    /// The dock link's char range in the selectable text and the line, if the
+    /// stamp holds against the live mirror `state` drawn with `input_rows` rows
+    /// of width `cols`, wheel top `scroll` (044 phase-5): `Live`, the same
+    /// selectable text and the same window ([`dock::window_of`], the drawing's
+    /// own formula). `None` for a screen hover.
+    fn dock_link(
+        &self,
+        state: &DockState,
+        cols: u16,
+        input_rows: u16,
+        scroll: Option<usize>,
+    ) -> Option<(std::ops::Range<usize>, UnderlineStyle)> {
+        let Stamped::Dock {
+            text,
+            range,
+            top,
+            cols: width,
+        } = &self.stamp.0
+        else {
+            return None;
+        };
+        let holds = state.status == DockStatus::Live
+            && input_rows > 0
+            && *width == cols
+            && *dock::selectable(state) == **text
+            && dock::window_of(state, cols, input_rows, scroll).0 == *top;
+        holds.then(|| (range.clone(), self.style))
+    }
+
     /// The override at screen row `row` ([`LinkPoint::Screen`]'s space), column
     /// `col`; `None` outside the link.
     fn style_at(&self, row: i32, col: u16) -> Option<UnderlineStyle> {
@@ -2652,10 +2716,10 @@ fn hover_style(
 }
 
 /// **The single underline override** (044 Karar 3): a highlighted cell takes the
-/// hover's line in the text's own colour, whatever SGR gave it. The grid and the
-/// fill band call it today (the dock joins in 044 phase-5) — so the surfaces
+/// hover's line in the text's own colour, whatever SGR gave it. The grid, the
+/// fill band and the dock (`dock::render_with`) call it — so the surfaces
 /// cannot draw a link differently.
-fn underline_link(cell: &mut Cell, style: Option<UnderlineStyle>) {
+pub(crate) fn underline_link(cell: &mut Cell, style: Option<UnderlineStyle>) {
     if let Some(style) = style {
         cell.underline = style;
         cell.underline_color = None;
@@ -2790,6 +2854,14 @@ fn text_link<T>(term: &Term<T>, at: Point) -> Option<(Point, Point, link::Found)
         last.column += 1;
     }
     Some((first, last, found))
+}
+
+/// The scanner's kind → the boundary's.
+fn link_kind(kind: link::FoundKind) -> LinkKind {
+    match kind {
+        link::FoundKind::Url => LinkKind::Url,
+        link::FoundKind::Path { line, col } => LinkKind::Path { line, col },
+    }
 }
 
 /// The cells `first..=last` of the logical line as per-row spans, in screen rows.
@@ -3703,10 +3775,12 @@ impl Session {
         // **The hover's stamp after the glide** (044 R4.1): the glide can move the
         // offset and the stamp carries it. A stale hover is not drawn — better no
         // line than a line under the wrong text — and is dropped after the lock.
-        let hover = hover_taken
-            .as_deref()
-            .filter(|hover| self.link_hover_holds(&term, hover));
-        let hover_lost = hover_taken.is_some() && hover.is_none();
+        // A dock hover is not the frame's: neither drawn nor dropped here
+        // ([`Session::dock`] checks it against the mirror) — output moves the
+        // scrollback, not the dock's text.
+        let screen_hover = hover_taken.as_deref().filter(|hover| !hover.in_dock());
+        let hover = screen_hover.filter(|hover| self.link_hover_holds(&term, hover));
+        let hover_lost = screen_hover.is_some() && hover.is_none();
 
         let rows = term.screen_lines() as i32;
         // On the alternate screen there are **no** blocks: in vim's buffer there is
@@ -4776,17 +4850,7 @@ impl Session {
         // checked: a hover set in between is the view's newer answer. The news is
         // edge-triggered — once per dropped hover (R4.1).
         if hover_lost && let Some(taken) = &hover_taken {
-            let dropped = {
-                let mut slot = lock(&self.link_hover);
-                let same = slot.as_ref().is_some_and(|now| Arc::ptr_eq(now, taken));
-                if same {
-                    *slot = None;
-                }
-                same
-            };
-            if dropped {
-                self.adapter.0.wake.link_hover_lost();
-            }
+            self.drop_link_hover(taken);
         }
         // The pattern goes back to the slot, **only if the generation is the
         // same**: if a new query came in while the round was going (or search
@@ -6811,9 +6875,12 @@ impl Session {
     ///
     /// The cell's OSC 8 link beats the text under it (Karar 2); `bateri://` is
     /// not a link. A point on a wide char's right half asks its base cell.
+    ///
+    /// A [`LinkPoint::Dock`] asks the dock's input line ([`Session::dock_link_at`]).
     pub fn link_at(&self, point: LinkPoint) -> Option<LinkHit> {
-        let LinkPoint::Screen { row, col } = point else {
-            return None;
+        let (row, col) = match point {
+            LinkPoint::Screen { row, col } => (row, col),
+            LinkPoint::Dock(point) => return self.dock_link_at(point),
         };
         let remote = lock(&self.shell).context.remote.is_some();
         let term = self.term.lock();
@@ -6835,39 +6902,91 @@ impl Session {
                 (first, last, pair.1.clone(), LinkKind::Osc8, Some(pair))
             } else {
                 let (first, last, found) = text_link(&term, at)?;
-                let kind = match found.kind {
-                    link::FoundKind::Url => LinkKind::Url,
-                    link::FoundKind::Path { line, col } => LinkKind::Path { line, col },
-                };
-                (first, last, found.target, kind, None)
+                (first, last, found.target, link_kind(found.kind), None)
             };
-        let allowed = match kind {
-            LinkKind::Path { .. } => !remote,
-            LinkKind::Url | LinkKind::Osc8 if link::is_file_url(&target) => {
-                !remote
-                    && link::file_authority(&target).is_some_and(|authority| {
-                        crate::shell::is_local_authority(authority, self.hostname.as_deref())
-                    })
-            }
-            LinkKind::Url | LinkKind::Osc8 => true,
-        };
-        if !allowed {
+        if !self.link_allowed(&kind, &target, remote) {
             return None;
         }
         Some(LinkHit {
             spans: link_spans(&term, first, last, offset),
             target,
             kind,
-            stamp: LinkStamp {
+            stamp: LinkStamp(Stamped::Screen {
                 mark: self.ledger_now(&term),
                 hyperlink,
-            },
+            }),
         })
     }
 
+    /// The dock arm of [`Session::link_at`] (044 phase-5, R8): the link under a
+    /// point of the dock's input line, from the same scanner ([`link::scan`]
+    /// over the selectable text, `PREBUFFER ++ BUFFER`) and the dock's single
+    /// layout walk ([`dock::link_at`]).
+    ///
+    /// The point is resolved against the **last drawn** window
+    /// ([`DockWindow`], `dock_select`'s rule): a mirror whose text changed since
+    /// that frame gives no hit — a frame later the right row is on screen. The
+    /// locks in sequence, the trace first, then `shell` (never nested). In a
+    /// remote session there is no input line (036): the trace shows zero rows
+    /// and every point is rejected. The context line is not a link.
+    ///
+    /// The stamp is the selectable text: the hover holds while `BUFFER` and
+    /// `PREBUFFER` stay as they were ([`Session::dock`] checks it).
+    fn dock_link_at(&self, point: SelectionPoint) -> Option<LinkHit> {
+        let window = (*lock(&self.dock_window))?;
+        let (found, spans, text, remote) = {
+            let log = lock(&self.shell);
+            if log.dock.prebuffer.len() + log.dock.buffer.len() != window.buffer_bytes {
+                return None;
+            }
+            let (found, spans) = dock::link_at(
+                &log.dock,
+                window.top,
+                window.shown,
+                window.cols,
+                point.row,
+                point.col,
+            )?;
+            let text = dock::selectable(&log.dock).into_owned();
+            (found, spans, text, log.context.remote.is_some())
+        };
+        let kind = link_kind(found.kind);
+        if !self.link_allowed(&kind, &found.target, remote) {
+            return None;
+        }
+        Some(LinkHit {
+            spans,
+            target: found.target,
+            kind,
+            stamp: LinkStamp(Stamped::Dock {
+                text,
+                range: found.range,
+                top: window.top,
+                cols: window.cols,
+            }),
+        })
+    }
+
+    /// Whether a found link is one here: in a remote session paths and every
+    /// `file://` are not (the local disk has no remote path); a `file://` with a
+    /// foreign authority is not either ([`crate::shell::is_local_authority`]).
+    fn link_allowed(&self, kind: &LinkKind, target: &str, remote: bool) -> bool {
+        match kind {
+            LinkKind::Path { .. } => !remote,
+            LinkKind::Url | LinkKind::Osc8 if link::is_file_url(target) => {
+                !remote
+                    && link::file_authority(target).is_some_and(|authority| {
+                        crate::shell::is_local_authority(authority, self.hostname.as_deref())
+                    })
+            }
+            LinkKind::Url | LinkKind::Osc8 => true,
+        }
+    }
+
     /// Highlights a link (044 R4): while `hover`'s stamp holds, the next frames
-    /// draw its cells with the hover's underline (grid and fill band; the dock's
-    /// from phase-5). `None` removes the highlight.
+    /// draw its cells with the hover's underline — a screen hover in the grid and
+    /// the fill band ([`Session::frame`] checks it), a dock hover on the dock's
+    /// input line ([`Session::dock`] checks it). `None` removes the highlight.
     ///
     /// The `set_theme` pattern: the same value is a **no-op and does not wake**
     /// (moving inside a link produces no frame, R4.2), a change requests a frame.
@@ -6888,16 +7007,41 @@ impl Session {
         }
     }
 
+    /// Drops a stale hover — only if the slot still holds `taken`, the copy the
+    /// caller checked (a hover set in between is the view's newer answer) — and
+    /// says so once ([`Wake::link_hover_lost`], R4.1). The two checkers' single
+    /// drop: [`Session::frame`] (screen) and [`Session::dock`] (dock). Called
+    /// with no lock held.
+    fn drop_link_hover(&self, taken: &Arc<LinkHover>) {
+        let dropped = {
+            let mut slot = lock(&self.link_hover);
+            let same = slot.as_ref().is_some_and(|now| Arc::ptr_eq(now, taken));
+            if same {
+                *slot = None;
+            }
+            same
+        };
+        if dropped {
+            self.adapter.0.wake.link_hover_lost();
+        }
+    }
+
     /// Whether `hover`'s stamp still holds under the `Term` lock (044 R4.1): the
     /// scrollback's state is the one the hit test saw ([`search::LedgerMark`] —
     /// output, scrolling, a clear, a resize, the alternate screen all move it) and,
     /// for an OSC 8 link, every drawn cell of its spans still carries the same
     /// hyperlink. A cell that left the scrollback fails it.
+    ///
+    /// A dock hover is not this question's (`false`): the frame neither draws
+    /// nor drops it — [`Session::dock`] does.
     fn link_hover_holds<T>(&self, term: &Term<T>, hover: &LinkHover) -> bool {
-        if hover.stamp.mark != self.ledger_now(term) {
+        let Stamped::Screen { mark, hyperlink } = &hover.stamp.0 else {
+            return false;
+        };
+        if *mark != self.ledger_now(term) {
             return false;
         }
-        let Some((id, uri)) = &hover.stamp.hyperlink else {
+        let Some((id, uri)) = hyperlink else {
             return true;
         };
         let offset = term.grid().display_offset() as i32;
@@ -7167,7 +7311,13 @@ impl Session {
         edits: impl FnMut(DockEdit),
     ) -> Dock {
         let theme = *lock(&self.adapter.0.theme);
-        let (shell, change, selection, scroll) = {
+        // **The link hover before `shell`** (044 phase-5; leaf locks in
+        // sequence): only a dock hover is this surface's, checked against the
+        // mirror in the same round as the copy.
+        let hover_taken = lock(&self.link_hover)
+            .clone()
+            .filter(|hover| hover.in_dock());
+        let (shell, change, selection, scroll, link) = {
             let shell = lock(&self.shell);
             // The diff **before the copy**: `into` is currently the last drawn
             // mirror and a line later it is overwritten with the new one.
@@ -7180,8 +7330,18 @@ impl Session {
             // The selection too: when `BUFFER` changes the writer that erases it
             // holds the same lock, i.e. the range belongs to this mirror's text.
             let range = shell.dock_selection.and_then(|selection| selection.range());
-            (shell.state, change, range, shell.dock_scroll)
+            let link = hover_taken.as_deref().and_then(|hover| {
+                hover.dock_link(&shell.dock, cols.grid, input_rows, shell.dock_scroll)
+            });
+            (shell.state, change, range, shell.dock_scroll, link)
         };
+        // A stale dock hover (a new `BUFFER`, `line-finish`, a moved window) is
+        // not drawn and drops.
+        if link.is_none()
+            && let Some(taken) = &hover_taken
+        {
+            self.drop_link_hover(taken);
+        }
         let mut edit = None;
         let (dock, top, rows) = dock::render_with(
             into,
@@ -7193,6 +7353,7 @@ impl Session {
             scroll,
             caret_in_dock,
             selection,
+            link,
             change.as_ref(),
             runs,
             clusters,
@@ -20032,7 +20193,9 @@ e\\314\\201.'; sleep 5";
             assert!(session.link_hover_holds(&term, &held));
         }
         let mut other = held.clone();
-        other.stamp.hyperlink = Some((String::from("other"), String::from("https://a.dev")));
+        if let Stamped::Screen { hyperlink, .. } = &mut other.stamp.0 {
+            *hyperlink = Some((String::from("other"), String::from("https://a.dev")));
+        }
         session.set_link_hover(Some(other));
         let cells = grid_now(&session);
         assert_eq!(underline_at(&cells, 0, 1), Some(UnderlineStyle::None));
@@ -20099,6 +20262,237 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
+    // --- 044 phase-5: the dock's input line ---
+
+    /// A docked session whose mirror is `buffer_b64` (`cursor` its `CURSOR`),
+    /// drawn once — the dock's hit test looks at the drawn window.
+    fn dock_link_session(
+        script_tail: &str,
+        buffer_b64: &str,
+        cursor: usize,
+    ) -> (Session, Arc<TestWake>) {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}{}'; {script_tail}",
+                anchored_prompt(1),
+                mirror(buffer_b64, cursor),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        draw_dock(&session);
+        (session, wake)
+    }
+
+    /// The dock's cells of one frame (`draw_dock` with a collecting sink).
+    fn dock_cells(session: &Session) -> Vec<Cell> {
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        let mut cells = Vec::new();
+        session.dock(
+            DockCols {
+                grid: 40,
+                context: 40,
+            },
+            cursor.input_rows,
+            &mut DockState::default(),
+            &mut DockContext::default(),
+            cursor.caret_in_dock,
+            &mut Vec::new(),
+            &mut Clusters::default(),
+            |cell| cells.push(cell),
+            |_| (),
+        );
+        cells
+    }
+
+    /// The input rows' cells only (the context row is below them).
+    fn input_cells(cells: &[Cell], input_rows: u16) -> Vec<Cell> {
+        cells
+            .iter()
+            .filter(|cell| cell.row < input_rows)
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn a_dock_link_is_found_under_its_own_cells() {
+        // `open https://a.dev/x`: the URL is chars 5..20, columns 7..=21.
+        let (session, _) = dock_link_session("sleep 5", "b3BlbiBodHRwczovL2EuZGV2L3g=", 20);
+        let hit = session
+            .link_at(LinkPoint::Dock(dock_point(8, CellHalf::Left)))
+            .expect("the URL in the dock");
+        assert_eq!(hit.target, "https://a.dev/x");
+        assert_eq!(hit.kind, LinkKind::Url);
+        assert!(hit.in_dock());
+        assert_eq!(hit.spans, [span(0, 7, 21)]);
+        // The URL's two ends hit, the word before it and the blank after it do
+        // not, nor does the prompt mark's column (`hit` would land those on a char).
+        assert!(
+            session
+                .link_at(LinkPoint::Dock(dock_point(5, CellHalf::Left)))
+                .is_some()
+        );
+        assert!(
+            session
+                .link_at(LinkPoint::Dock(dock_point(19, CellHalf::Right)))
+                .is_some()
+        );
+        assert!(
+            session
+                .link_at(LinkPoint::Dock(dock_point(1, CellHalf::Left)))
+                .is_none()
+        );
+        assert!(
+            session
+                .link_at(LinkPoint::Dock(dock_point(21, CellHalf::Left)))
+                .is_none()
+        );
+        let mark = SelectionPoint {
+            col: 0,
+            row: 0,
+            half: CellHalf::Left,
+        };
+        assert!(session.link_at(LinkPoint::Dock(mark)).is_none());
+        // A row below the input block is the context row: not a link.
+        let below = SelectionPoint {
+            row: 1,
+            ..dock_point(8, CellHalf::Left)
+        };
+        assert!(session.link_at(LinkPoint::Dock(below)).is_none());
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_dock_link_split_by_the_wrap_is_one_link() {
+        // 66 chars in a 40-column dock: 38 per row from column 2. The URL is
+        // chars 5..66 — row 0 columns 7..=39, row 1 columns 2..=29.
+        let (session, _) = dock_link_session(
+            "sleep 5",
+            "ZWNobyBodHRwczovL2EuZGV2L2FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh",
+            66,
+        );
+        let at = |row, col| {
+            session.link_at(LinkPoint::Dock(SelectionPoint {
+                col,
+                row,
+                half: CellHalf::Left,
+            }))
+        };
+        let top = at(0, 10).expect("the URL's first row");
+        let bottom = at(1, 20).expect("the URL's second row");
+        assert_eq!(top, bottom, "one link, wherever it is asked");
+        assert_eq!(top.spans, [span(0, 7, 39), span(1, 2, 29)]);
+        assert_eq!(top.target.chars().count(), 61);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_dock_hover_is_underlined_until_buffer_changes() {
+        let (session, wake) = dock_link_session(
+            "stty -echo; read _; printf '\\033]8133;u;20;;b3BlbiBodHRwczovL2IuZGV2L3k=;;;bWFpbg==\\007'; sleep 5",
+            "b3BlbiBodHRwczovL2EuZGV2L3g=",
+            20,
+        );
+        let plain = dock_cells(&session);
+        let hit = session
+            .link_at(LinkPoint::Dock(dock_point(8, CellHalf::Left)))
+            .expect("the URL");
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Single)));
+        // Twice: the frame (output, the ledger) never drops a dock hover.
+        let _ = dock_cells(&session);
+        let hovered = dock_cells(&session);
+        assert_eq!(hovers_lost(&wake), 0);
+        let rows = cursor_now(&session).input_rows;
+        let (plain, hovered) = (input_cells(&plain, rows), input_cells(&hovered, rows));
+        assert_eq!(plain.len(), hovered.len(), "the hover creates no cells");
+        for (before, after) in plain.iter().zip(&hovered) {
+            if (7..=21).contains(&after.col) && after.row == 0 {
+                assert_eq!(after.underline, UnderlineStyle::Single, "{after:?}");
+                assert_eq!(
+                    Cell {
+                        underline: before.underline,
+                        ..*after
+                    },
+                    *before
+                );
+            } else {
+                assert_eq!(after, before, "outside the link the cell is untouched");
+            }
+        }
+        // A new `BUFFER` (`open https://b.dev/y`, same length): the stamp no
+        // longer holds — not drawn, dropped once.
+        session.write(b"\n");
+        wait_until(
+            "the new mirror did not arrive",
+            Duration::from_secs(5),
+            || {
+                let mut state = DockState::default();
+                session.dock_state(&mut state);
+                state.buffer == "open https://b.dev/y"
+            },
+        );
+        let after = dock_cells(&session);
+        assert!(
+            after
+                .iter()
+                .all(|cell| cell.underline == UnderlineStyle::None),
+            "a stale dock hover is not drawn"
+        );
+        assert_eq!(hovers_lost(&wake), 1);
+        assert!(lock(&session.link_hover).is_none(), "the slot was dropped");
+        let _ = dock_cells(&session);
+        assert_eq!(hovers_lost(&wake), 1, "the news is an edge");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_dock_hover_drops_when_the_window_moves() {
+        // An input past the ceiling (7 rows): the window follows the caret at
+        // the end, the URL is on its last row at columns 20..=34. The wheel
+        // moves the window without changing `BUFFER` — the view's cells are
+        // stale, so the stamp no longer holds.
+        let (session, wake) = dock_link_session(
+            "sleep 5",
+            "ZWNobyBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEgaHR0cHM6Ly9hLmRldi94",
+            261,
+        );
+        let shown = cursor_now(&session).input_rows;
+        assert!(shown < 7, "the input must exceed the ceiling: {shown}");
+        let point = SelectionPoint {
+            col: 20,
+            row: shown - 1,
+            half: CellHalf::Left,
+        };
+        let hit = session.link_at(LinkPoint::Dock(point)).expect("the URL");
+        assert_eq!(hit.spans, [span(i32::from(shown) - 1, 20, 34)]);
+        session.set_link_hover(Some(hit.hover(UnderlineStyle::Single)));
+        let held = dock_cells(&session);
+        assert!(
+            held.iter()
+                .any(|cell| cell.underline == UnderlineStyle::Single)
+        );
+        assert_eq!(hovers_lost(&wake), 0);
+        assert!(session.dock_scroll(1), "the dock overflows");
+        let moved = dock_cells(&session);
+        assert!(
+            moved
+                .iter()
+                .all(|cell| cell.underline == UnderlineStyle::None)
+        );
+        assert_eq!(hovers_lost(&wake), 1);
+        session.shutdown();
+    }
+
     #[test]
     #[ignore = "runs with make test-race"]
     fn race_link_hover_and_frame() {
@@ -20137,6 +20531,62 @@ e\\314\\201.'; sleep 5";
         }
         assert!(setter.join().unwrap() > 0, "no hover was ever set");
         assert!(frames > 0, "no frame was produced during the race");
+        assert!(session.reader_alive(), "the reader thread died in the race");
+        session.shutdown();
+    }
+    #[test]
+    #[ignore = "runs with make test-race"]
+    fn race_dock_link_hover_and_dock() {
+        // The dock's twin (044 phase-5): `Session::dock` reads the hover slot
+        // before `shell`, drops a stale one after it, and `link_at(Dock)` takes
+        // the trace then `shell` — while the reader keeps changing `BUFFER`
+        // (two mirrors in turn), so most dock hovers go stale. A broken lock
+        // order hangs the test.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_docked_session(
+            &format!(
+                "printf '{}'; while :; do printf '{}'; sleep 0.01; printf '{}'; sleep 0.01; done",
+                anchored_prompt(1),
+                mirror("b3BlbiBodHRwczovL2EuZGV2L3g=", 20),
+                mirror("b3BlbiBodHRwczovL2IuZGV2L3k=", 20),
+            ),
+            Arc::clone(&wake),
+        ));
+        // Not `wait_mirror`: the output never settles.
+        wait_until(
+            "the mirror did not come alive",
+            Duration::from_secs(5),
+            || {
+                let mut state = DockState::default();
+                session.dock_state(&mut state);
+                state.status == DockStatus::Live
+            },
+        );
+        draw_dock(&session);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let setter = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut sets = 0u64;
+                while Instant::now() < deadline {
+                    let hover = session
+                        .link_at(LinkPoint::Dock(dock_point(8, CellHalf::Left)))
+                        .map(|hit| hit.hover(UnderlineStyle::Single));
+                    session.set_link_hover(hover);
+                    sets += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                sets
+            })
+        };
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            draw_dock(&session);
+            frames += 1;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(setter.join().unwrap() > 0, "no hover was ever set");
+        assert!(frames > 0, "no dock was drawn during the race");
         assert!(session.reader_alive(), "the reader thread died in the race");
         session.shutdown();
     }
