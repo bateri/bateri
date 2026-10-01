@@ -169,8 +169,10 @@ kipte de aynı kural — fare kipinde Shift zaten seçimin tek yolu.
 **⌘ basılıyken bağlantı alt çizgi ve el imleci alıyor, ⌘-tık onu açıyor**
 (044; ızgarada, doldurma bandında ve dock'un giriş satırında, alternatif
 ekran dahil): URL
-(`http`/`https`/`ftp`/`mailto`/`file`), **var olan** dosya yolu (`~`, göreli
-yol pane'in OSC 7 dizinine; `:satır:sütun` tanınır, atlanmaz) ve OSC 8
+(`http`/`https`/`ftp`/`mailto`/`file`), **var olan** dosya ya da dizin
+(`~`, göreli yol pane'in OSC 7 dizinine; `:satır:sütun` tanınır, atlanmaz;
+çıplak kelime de aday — `ls`'in `src`'si, `Makefile` — çünkü kararı şekil
+değil varlık veriyor, iTerm2'nin semantic history kuralı) ve OSC 8
 bağlantısı (metin taramasını yener). Algılama ve hit test `bt-core`'da
 (`link`, `Session::link_at`; uzak oturumda yol ve `file://` bağlantı değil),
 vurgu hover yuvasından ve damgalı (`Session::set_link_hover`; damga tutmazsa

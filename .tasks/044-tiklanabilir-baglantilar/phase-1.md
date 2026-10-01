@@ -74,6 +74,10 @@ _Requirements: R1, R1.1, R1.2, R2, R3_
   (`(src/x.rs)`); `(satır)` soneki de `(satır,sütun)`'un yanında tanınıyor;
   uzantılı çıplak adın uzantısı bir harf taşımalı (`1.5` aday değil) ve
   `://` taşıyan belirteç yol değil. `file_authority`/`is_file_url` de orada.
+- **Set sonrası (kullanıcı kararı, 2026-10-01):** uzantı şartı kalktı —
+  her çıplak kelime aday (`ls`'in `src` klasörü, `Makefile`), karar
+  varlıkta; iTerm2'nin semantic history kuralı. Belirti kullanıcıda
+  görüldü: `ls` çıktısında dosyalar tıklanıyor, klasörler tıklanmıyordu.
 - **OSC 8 koşusunda spacer** koşuyu bölmüyor ama yalnız bağlantılı iki hücre
   arasında ya da bağlantılı geniş karakterin sağ yarısı olarak sayılıyor.
   Bitişik iki id'siz bağlantının alacritty'nin ürettiği id'leri ayrı, yani

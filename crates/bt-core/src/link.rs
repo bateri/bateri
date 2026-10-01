@@ -238,30 +238,14 @@ fn split_suffix(chars: &[char], range: Range<usize>) -> (Range<usize>, Option<u3
     }
 }
 
-/// Whether the text has the shape of a path: rooted (`/`, `~/`, `./`, `../`),
-/// containing a `/`, or a bare name with an extension carrying a letter
-/// (`main.rs`, not `1.5`). A URL-looking token with an unknown scheme
-/// (`vscode://…`) is not a path.
+/// Whether the text can be a path at all. Any bare word is a candidate
+/// (`src`, `Makefile`, `main.rs`) — iTerm2's semantic history rule: the shape
+/// doesn't decide, the existence check does (`bt-shell-common::links::resolve`,
+/// nothing unverified is underlined). What's left out can never name a file
+/// worth opening: only separators (`/`, `..`) and a URL-looking token with an
+/// unknown scheme (`vscode://…`).
 fn looks_like_path(text: &str) -> bool {
-    if text.is_empty() || text.contains("://") || text.chars().all(|c| matches!(c, '/' | '.')) {
-        return false;
-    }
-    if ["/", "~/", "./", "../"]
-        .iter()
-        .any(|root| text.starts_with(root))
-        || text.contains('/')
-    {
-        return true;
-    }
-    match text.rsplit_once('.') {
-        Some((name, ext)) => {
-            !name.is_empty()
-                && !ext.is_empty()
-                && ext.chars().all(char::is_alphanumeric)
-                && ext.chars().any(char::is_alphabetic)
-        }
-        None => false,
-    }
+    !text.is_empty() && !text.contains("://") && !text.chars().all(|c| matches!(c, '/' | '.'))
 }
 
 /// The authority of a `file://` URL (`file://AUTH/path` → `AUTH`); `None` if
@@ -300,14 +284,14 @@ mod tests {
 
     #[test]
     fn trailing_punctuation_and_an_unbalanced_paren_are_trimmed() {
-        assert_eq!(found("see (https://x.dev)."), vec![url_of("https://x.dev")]);
-        assert_eq!(found("https://x.dev, then"), vec![url_of("https://x.dev")]);
+        assert_eq!(found("(https://x.dev)."), vec![url_of("https://x.dev")]);
+        assert_eq!(found("https://x.dev,"), vec![url_of("https://x.dev")]);
     }
 
     #[test]
     fn balanced_parens_stay_in_the_url() {
         let wiki = "https://tr.wikipedia.org/wiki/X_(Y)";
-        assert_eq!(found(&format!("(bkz. {wiki})")), vec![url_of(wiki)]);
+        assert_eq!(found(&format!("({wiki})")), vec![url_of(wiki)]);
         assert_eq!(found(&format!("[{wiki}]")), vec![url_of(wiki)]);
     }
 
@@ -342,7 +326,7 @@ mod tests {
     #[test]
     fn compiler_suffixes_are_split_off_the_target() {
         assert_eq!(
-            found("src/main.rs:12:5: error"),
+            found("src/main.rs:12:5:"),
             vec![(
                 "src/main.rs:12:5".to_owned(),
                 "src/main.rs".to_owned(),
@@ -353,7 +337,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            found("at src/main.rs:12"),
+            found("src/main.rs:12"),
             vec![(
                 "src/main.rs:12".to_owned(),
                 "src/main.rs".to_owned(),
@@ -368,7 +352,7 @@ mod tests {
     #[test]
     fn the_parenthesized_suffix_is_split_off_the_target() {
         assert_eq!(
-            found("Program.cs(12,5): warning"),
+            found("Program.cs(12,5):"),
             vec![(
                 "Program.cs(12,5)".to_owned(),
                 "Program.cs".to_owned(),
@@ -404,9 +388,23 @@ mod tests {
             )
         };
         assert_eq!(found("~/x"), vec![path("~/x")]);
-        assert_eq!(found("cat /etc/hosts"), vec![path("/etc/hosts")]);
+        assert_eq!(
+            found("cat /etc/hosts"),
+            vec![path("cat"), path("/etc/hosts")]
+        );
         assert_eq!(found("./run ../up"), vec![path("./run"), path("../up")]);
-        assert_eq!(found("ls foo.txt"), vec![path("foo.txt")]);
+        assert_eq!(found("ls foo.txt"), vec![path("ls"), path("foo.txt")]);
+        // A bare word is a candidate too (a directory from `ls`, `Makefile`):
+        // the existence check, not the shape, decides (iTerm2's rule).
+        assert_eq!(
+            found("src Makefile 1.5"),
+            vec![path("src"), path("Makefile"), path("1.5")]
+        );
+        assert_eq!(
+            found("e."),
+            vec![path("e")],
+            "sentence punctuation is trimmed"
+        );
         assert_eq!(found("(src/x.rs)"), vec![path("src/x.rs")]);
         assert_eq!(
             found("~/Belgeler/çalışma ağacı.txt"),
@@ -421,18 +419,18 @@ mod tests {
 
     #[test]
     fn non_paths_are_not_candidates() {
-        for text in ["ls", "1.5", "/", "..", ".", "e.", "vscode://x/y", "foo."] {
+        for text in ["/", "..", ".", "./", "vscode://x/y", ""] {
             assert_eq!(found(text), vec![], "{text:?}");
         }
     }
 
     #[test]
     fn the_chars_index_turkish_text_not_bytes() {
-        let text = "ğüş https://a.dev/ç";
+        let text = "ğüş, https://a.dev/ç";
         let hits = scan(text);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].range, 4..19);
-        assert_eq!(hits[0].target, "https://a.dev/ç");
+        assert_eq!(hits.len(), 2, "the bare word is a candidate too");
+        assert_eq!(hits[1].range, 5..20);
+        assert_eq!(hits[1].target, "https://a.dev/ç");
     }
 
     #[test]
