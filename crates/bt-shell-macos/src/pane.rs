@@ -51,12 +51,13 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSAutoresizingMaskOptions, NSBox, NSBoxType, NSButton, NSColor,
-    NSControlTextEditingDelegate, NSEventModifierFlags, NSMenuItem, NSPasteboard,
-    NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextFieldDelegate,
-    NSTitlePosition, NSView, NSViewFrameDidChangeNotification,
+    NSControlTextEditingDelegate, NSEventModifierFlags, NSFont, NSLineBreakMode, NSMenuItem,
+    NSPasteboard, NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextField,
+    NSTextFieldDelegate, NSTitlePosition, NSView, NSViewFrameDidChangeNotification,
 };
 use objc2_foundation::{
-    NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSUUID,
+    NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSUUID, ns_string,
 };
 use objc2_quartz_core::CAMetalLayer;
 
@@ -171,6 +172,78 @@ impl DimOverlay {
         self.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
             r, g, b, DIM_ALPHA,
         ));
+    }
+}
+
+/// The target label's distance from the pane's bottom-left corner and the
+/// text's inset inside it, in points. Design constants (not measured) — a
+/// browser's status bubble.
+const LINK_LABEL_MARGIN: f64 = 6.0;
+const LINK_LABEL_PAD_X: f64 = 6.0;
+const LINK_LABEL_PAD_Y: f64 = 2.0;
+
+define_class!(
+    // SAFETY: NSBox is designed for subclassing; LinkLabel implements no
+    // `Drop`, has no ivar and is born with NSBox's constructor (`new`).
+    #[unsafe(super(NSBox))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriLinkLabel"]
+    pub(crate) struct LinkLabel;
+
+    unsafe impl NSObjectProtocol for LinkLabel {}
+
+    impl LinkLabel {
+        /// Never takes part in hit testing ([`DimOverlay`]'s rule): the label
+        /// sits over the dock's context line and a click there must reach the
+        /// `BateriView` underneath.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+    }
+);
+
+impl LinkLabel {
+    /// The ⌘-hovered OSC 8 link's target (044 Karar 7): a small box in the
+    /// pane's bottom-left corner, born hidden, its single child the text. The
+    /// text is the whole target, cut in the **middle** when it does not fit —
+    /// the scheme and host on the left and the file name on the right are what
+    /// tells a link apart.
+    fn new(mtm: MainThreadMarker) -> (Retained<Self>, Retained<NSTextField>) {
+        // SAFETY: `NSBox`'s `init`; the subclass has no ivar.
+        let this = Self::alloc(mtm).set_ivars(());
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        this.setBoxType(NSBoxType::Custom);
+        this.setTitlePosition(NSTitlePosition::NoTitle);
+        this.setBorderWidth(1.0);
+        this.setCornerRadius(4.0);
+        this.setHidden(true);
+        this.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewMaxXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        );
+        let text = NSTextField::labelWithString(ns_string!(""), mtm);
+        text.setFont(Some(&NSFont::systemFontOfSize(
+            NSFont::smallSystemFontSize(),
+        )));
+        text.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        text.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+        this.addSubview(&text);
+        (this, text)
+    }
+
+    /// The theme's background and separator tone (sRGB, `DimOverlay::paint`'s
+    /// rule): the label reads as the terminal's own surface.
+    fn paint(&self, theme: &Theme) {
+        let srgb = |[r, g, b]: [u8; 3]| {
+            NSColor::colorWithSRGBRed_green_blue_alpha(
+                f64::from(r) / 255.0,
+                f64::from(g) / 255.0,
+                f64::from(b) / 255.0,
+                1.0,
+            )
+        };
+        self.setFillColor(&srgb(theme.background_srgb()));
+        self.setBorderColor(&srgb(theme.separator_srgb()));
     }
 }
 
@@ -660,6 +733,10 @@ pub(crate) struct PaneIvars {
     /// a sibling of the Metal layer — it is not in the frame path, its
     /// composition is CoreAnimation's. The owner determines its visibility.
     dim: Retained<DimOverlay>,
+    /// The ⌘-hovered OSC 8 link's target (044 Karar 7) and its text: above the
+    /// terminal and the search panel, below the dim veil. AppKit's, outside the
+    /// frame path; shown by [`TerminalPane::set_link_target`].
+    link_label: (Retained<LinkLabel>, Retained<NSTextField>),
     link: OnceCell<DisplayLink>,
     /// The second step of the closing sequence is called from here; `DisplayLink`
     /// holds a copy too but reaching there after `stop()` would be wrong.
@@ -1030,6 +1107,8 @@ impl TerminalPane {
         let font = settings.font.clone();
         let dim = DimOverlay::new(mtm);
         dim.paint(&theme);
+        let link_label = LinkLabel::new(mtm);
+        link_label.0.paint(&theme);
         let this = Self::alloc(mtm).set_ivars(PaneIvars {
             id,
             run,
@@ -1050,6 +1129,7 @@ impl TerminalPane {
             surface,
             view: view.clone(),
             dim: dim.clone(),
+            link_label: link_label.clone(),
             link: OnceCell::new(),
             session: OnceCell::new(),
             shell_parent: OnceCell::new(),
@@ -1100,6 +1180,8 @@ impl TerminalPane {
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         this.addSubview(&view);
+        // The link label under the veil (an unfocused pane gets no hover anyway).
+        this.addSubview(&link_label.0);
         // The veil is on top: the search panel goes right above `view`
         // (`SearchBar::new`), so it too stays under the veil and the dimmed
         // pane's panel is dimmed too.
@@ -1558,6 +1640,7 @@ impl TerminalPane {
             bar.paint(&theme, is_dark_background(&theme));
         }
         self.ivars().dim.paint(&theme);
+        self.ivars().link_label.0.paint(&theme);
     }
 
     /// Shows or hides the dim veil (039 Karar 7, R4.4). The decision is the
@@ -1565,6 +1648,35 @@ impl TerminalPane {
     /// `TerminalWindow::refresh_dim`); it asks for no frame — the veil is AppKit's.
     pub(crate) fn set_dimmed(&self, dimmed: bool) {
         self.ivars().dim.setHidden(!dimmed);
+    }
+
+    /// Shows the ⌘-hovered OSC 8 link's target in the bottom-left label, or
+    /// hides it (`None`; 044 Karar 7). The caller is `hyperlink`'s hover: only
+    /// with ⌘ and only for an OSC 8 link — a plain-text link is its own target.
+    /// The width is the text's, at most the pane's minus the margins; asks for
+    /// no frame.
+    pub(crate) fn set_link_target(&self, target: Option<&str>) {
+        let (label, text) = &self.ivars().link_label;
+        let Some(target) = target else {
+            label.setHidden(true);
+            return;
+        };
+        text.setStringValue(&NSString::from_str(target));
+        let fit = text.fittingSize();
+        let room = self.bounds().size.width - 2.0 * (LINK_LABEL_MARGIN + LINK_LABEL_PAD_X);
+        let width = fit.width.min(room).max(0.0);
+        text.setFrame(NSRect::new(
+            NSPoint::new(LINK_LABEL_PAD_X, LINK_LABEL_PAD_Y),
+            NSSize::new(width, fit.height),
+        ));
+        label.setFrame(NSRect::new(
+            NSPoint::new(LINK_LABEL_MARGIN, LINK_LABEL_MARGIN),
+            NSSize::new(
+                width + 2.0 * LINK_LABEL_PAD_X,
+                fit.height + 2.0 * LINK_LABEL_PAD_Y,
+            ),
+        ));
+        label.setHidden(false);
     }
 
     /// The cursor's style and the dock's typing effects go to the link, not to

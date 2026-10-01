@@ -203,6 +203,7 @@ pub fn stat(path: &Path) -> Option<Entry> {
 /// |---|---|
 /// | `bateri:` anything | [`LinkAction::Swallow`] |
 /// | local path / `file://`, not found | `None` — not a link |
+/// | `file:` without a `//` authority | [`LinkAction::Swallow`] |
 /// | directory, not a package | [`LinkAction::OpenDir`] |
 /// | package | [`LinkAction::Reveal`] |
 /// | file without `x`, known document | [`LinkAction::OpenFile`] |
@@ -212,6 +213,10 @@ pub fn stat(path: &Path) -> Option<Entry> {
 ///
 /// The swallow row comes **first** and reads the target whatever the kind: the hit test does
 /// not hand `bateri://` out today, the row is the one-line defence 038 Karar 7 asks for.
+///
+/// A `file:` URL [`local_path`] cannot read (`file:/x`, no authority) is swallowed too:
+/// handed to `NSWorkspace` as a URL it would **run** a `.command` or launch an `.app` — the
+/// very thing the file rows refuse — and the hit test's remote/authority gate does not see it.
 pub fn action(
     target: &str,
     kind: &LinkKind,
@@ -230,6 +235,9 @@ pub fn action(
             (Entry::File { executable: false }, Content::Document) => LinkAction::OpenFile(path),
             (Entry::File { .. }, _) => LinkAction::Reveal(path),
         });
+    }
+    if has_scheme(target, "file") {
+        return Some(LinkAction::Swallow);
     }
     let common = OPEN_SCHEMES.iter().any(|name| has_scheme(target, name));
     Some(match kind {
@@ -462,6 +470,16 @@ mod tests {
                 Some(LinkAction::Swallow)
             );
             assert_eq!(act("BATERI://block/3", kind), Some(LinkAction::Swallow));
+        }
+        // A `file:` URL without an authority names no path we read: never a URL to open.
+        for kind in [LinkKind::Osc8, LinkKind::Url] {
+            for uri in [
+                "file:/tmp/x.command",
+                "FILE:/Applications/Foo.app",
+                "file:x",
+            ] {
+                assert_eq!(act(uri, kind.clone()), Some(LinkAction::Swallow), "{uri}");
+            }
         }
     }
 

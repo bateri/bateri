@@ -583,6 +583,10 @@ define_class!(
             let resigned: bool = unsafe { msg_send![super(self), resignFirstResponder] };
             if resigned {
                 self.keyboard_moved(false);
+                // ⌘F or another pane took the keyboard: `flagsChanged:` and
+                // `mouseMoved:` now go elsewhere and could never clear this
+                // view's link hover (underline, hand, target label).
+                self.clear_link();
             }
             resigned
         }
@@ -802,9 +806,11 @@ define_class!(
             self.button_event(event, MouseButton::Left, false);
         }
 
-        /// Right button - today only the report path: with mouse mode off a
-        /// right click does nothing (there is no context menu and it does not
-        /// start a selection either: it would produce an unexpected highlight).
+        /// Right button: the report path, and where the terminal owns the press
+        /// (mouse mode off, the fill band, the dock) the link's context menu
+        /// ([`BateriView::link_menu`], 044 Karar 7). Off a link a right click does
+        /// nothing - no general context menu, and no selection either: it would
+        /// produce an unexpected highlight.
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
             self.button_event(event, MouseButton::Right, true);
@@ -813,6 +819,23 @@ define_class!(
         #[unsafe(method(rightMouseUp:))]
         fn right_mouse_up(&self, event: &NSEvent) {
             self.button_event(event, MouseButton::Right, false);
+        }
+
+        /// The link context menu's items ([`BateriView::link_menu`]): the menu's
+        /// link is parked in the link state and taken by the item.
+        #[unsafe(method(openLinkFromMenu:))]
+        fn open_link_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.menu_open_link();
+        }
+
+        #[unsafe(method(revealLinkFromMenu:))]
+        fn reveal_link_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.menu_reveal_link();
+        }
+
+        #[unsafe(method(copyLinkFromMenu:))]
+        fn copy_link_from_menu(&self, _sender: Option<&AnyObject>) {
+            self.menu_copy_link();
         }
 
         /// Middle button and **beyond**: AppKit sends everything past the
@@ -1674,6 +1697,7 @@ impl BateriView {
         if button == MouseButton::Left && self.upload_control(event) {
             return;
         }
+        self.forget_link_menu();
         self.with_gesture(|g| g.begin_press(button));
         // **A ⌘-press on the shown link is the link's in every mode** (044 R6):
         // neither a report (vim, htop, Claude Code see nothing) nor a selection,
@@ -1699,9 +1723,20 @@ impl BateriView {
             return;
         }
         let Some(cell) = self.window_point_cell(event.locationInWindow(), OutOfGrid::Reject) else {
+            // The fill band and the dock are never the application's screen: a
+            // right click there is the terminal's, the link menu's (044 Karar 7).
+            if button == MouseButton::Right {
+                self.link_menu(event);
+            }
             return;
         };
         let answer = self.report_button(session, button, true, cell, event);
+        // Mouse mode off (or Shift, the mode's escape): the right click is the
+        // terminal's — the link menu. `pressed` sets no bit for a right
+        // `Select`, so the menu swallowing `rightMouseUp:` leaves nothing stale.
+        if button == MouseButton::Right && answer == Click::Select {
+            self.link_menu(event);
+        }
         let shift = modifiers(event).shift;
         let clicks = event.clickCount();
         match self.with_gesture(|g| g.pressed(button, answer, clicks, shift)) {
