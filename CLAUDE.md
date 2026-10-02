@@ -755,11 +755,20 @@ etiketi nedeni söylüyor. Yükün (çözücü hatasında tek satırın) **ilk
 `bt-core` onu komut koşarken nesliyle tutuyor (`ShellLog::remote_up`, 8133
 kapısının `f`'den sonraki ikinci dar istisnası), pane nonce'u probun bulduğu
 sarılmış argv'ninkiyle (`jobs::Target::nonce`) eşleyince host'u `posix`
-kaydediyor. Host ancak **öğrenildiyse** sarılıyor: o işaret ya da yardımcı
-oturumun selamı (sunucuda `sh`) `ssh_wrap::learn` ile `remote-hosts`'a
-`posix` yazıyor, uzak nesil başına bir kez; `bateri ssh-fell-back` düşme
-kararını (`ssh_wrap::fell_back`, `plain` olgusu) veriyor ama henüz çağıranı
-yok (049 phase-2). **Uzakta komut blokları da
+kaydediyor (`ssh_wrap::record_posix`; `posix`'in tek yazarı). **Her zaman
+sarılıyor, kabuksuz uçta sessizce düşülüyor** (049): bilinmeyen host da
+sarılıyor, yalnız `plain` kayıtlı olan sarılmıyor; sarılmış ssh 255 dışında
+bir kodla bitince zsh `ssh` fonksiyonu `bateri ssh-fell-back`'e sarılmış
+argv'yi veriyor ve o, denemenin nonce'u görülmediyse (pane `up` gelir gelmez,
+`ssh -G`'yi beklemeden `remote-hosts.up/{nonce}`'u yaratıyor —
+`ssh_wrap::mark_up`) host'u `plain` kaydedip aynı `u-<key>` paylaşımıyla düz
+yeniden koşuyu basıyor. Yanlışın yönü "düşme yok": nonce'u bilinmeyen,
+görülen ya da `posix` olan her durumda yeniden bağlantı yok, yani `exit`'ten
+sonra bağlantı asla yeniden açılmıyor; yerel tmux/screen içinde (`$TMUX`,
+`$STY`) hiç sarılmıyor, çünkü pane `up`'ı göremez. Shell ▸ Shell Integration
+on “{host}” host'un `plain` kaydını siliyor (`ssh_wrap::forget_plain`, yanlış
+kaydın tek geri dönüşü). Gerekçeler
+`.tasks/049-uzak-entegrasyon-ilk-baglanti/discussion.md` → Karar. **Uzakta komut blokları da
 çiziliyor** (phase-3): uzak betikler `A`/`C`/`D`'yi `bt_remote=<P>.<S>.<n>`
 (`P` yerel `ssh` bloğu, `--block` ile; `S` uzak kabuğun pid'i) ve çıpayı
 `bateri://rblock/…` olarak basıyor, `bt-core` onları ayrı bir izde tutuyor —

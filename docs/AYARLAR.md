@@ -1026,13 +1026,18 @@ küçük dosya yazar; sunucunun rc dosyalarına dokunmaz.
   kalan her durumda bu anahtar.
   Yani prod işaretli bir host'ta açmak için girdisine `integration = true`
   yazılır.
-- **İlk bağlantı düz açılır**: bateri bir sunucuda POSIX kabuğu olduğunu bir
-  kez gördükten sonra (ilk uzak oturumda, kendiliğinden) sonraki bağlantılar
-  entegrasyonlu açılır. Router, Windows ya da `git@github.com` hiç
-  öğrenilmez, yani hiç sarılmaz. Öğrenilen sunucular ve bateri'nin dosya
-  yazdığı sunucular bateri'nin kendi dosyasında durur
+- **İlk bağlantıdan itibaren**: dizin ve komut blokları ilk `ssh`'ta gelir.
+  Sunucuda komut çalıştırmayan bir giriş kabuğu varsa (router, Windows) ilk
+  bağlantıda sunucunun kendi hata satırı görünür ve bağlantı kendiliğinden
+  düz açılır; bateri o sunucuyu "kabuksuz" diye hatırlar ve sonraki
+  bağlantılar baştan düz açılır. Kabuklu bir sunucudan `exit` ile çıkmak
+  bağlantıyı yeniden açmaz. Yerel tmux ya da screen içinden açılan `ssh`
+  sarılmaz. Hatırlanan sunucular ve bateri'nin dosya yazdığı sunucular
+  bateri'nin kendi dosyasında durur
   (`~/Library/Application Support/bateri/remote-hosts`), `settings.toml`'da
   değil; sunucu `~/.ssh/config`'in çözdüğü `kullanıcı@host:port` ile tanınır.
+  Yanlışlıkla "kabuksuz" hatırlanan bir sunucu Shell ▸ Shell Integration on
+  “{host}” öğesiyle unutturulur (öğe her tıklamada bu kaydı siler).
 - **Hiç sarılmayanlar**: uzak komutlu ya da etkileşimsiz ssh (`ssh host
   komut`, `-N`, `-T`, `-W`, pipe), `scp`/`rsync`/`git`, `~/.ssh/config`'te
   `RemoteCommand`, `RequestTTY no` ya da `SessionType` taşıyan host. Bunlar

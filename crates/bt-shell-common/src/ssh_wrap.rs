@@ -8,9 +8,12 @@
 //! the remote probe's, `jobs::ssh_call`), stdin and stdout are terminals (the
 //! caller's bit — under `$(…)` our stdout is a pipe), the setting allows it
 //! for the host as typed ([`Settings::integration_for`]), `ssh -G` does not
-//! say the session runs something else ([`Session`]) and the server was
-//! **learned** to have a POSIX shell ([`HostState`]; 048 Karar → "ilk
-//! bağlantıda öğren").
+//! say the session runs something else ([`Session`]) and the server is not
+//! recorded as one without a shell ([`Fact::Plain`]; 049 Karar → "her zaman
+//! sar"). A server bateri knows nothing about **is** wrapped: the bootstrap's
+//! nonce'd `up` proves the wrap ran ([`Fact::Posix`], the pane's), and a
+//! wrapped connection that ends without it falls back to a plain rerun
+//! ([`ssh_fell_back_main`]).
 //!
 //! **The wrapped form is positional** (discussion → Muhakeme): `-t` first,
 //! the user's arguments unchanged, the bootstrap command last — one argument
@@ -360,10 +363,17 @@ impl HostState {
             None => self.rows.push((fact, key.to_owned(), at)),
         }
     }
+
+    /// Removes `fact`'s row for `key`, if any.
+    pub fn forget(&mut self, fact: Fact, key: &str) {
+        self.rows.retain(|(f, k, _)| !(*f == fact && k == key));
+    }
 }
 
-/// Reads the state file; a missing or unreadable file knows nothing, so no
-/// server counts as learned (the safe direction: nothing is wrapped).
+/// Reads the state file; a missing or unreadable file knows nothing: every
+/// server is wrapped and none counts as `posix` — and [`ssh_argv_main`]
+/// prints nothing when the `touched` row cannot be written, so an unwritable
+/// file still means plain `ssh`.
 pub fn load(path: &Path) -> HostState {
     fs::read_to_string(path)
         .map(|text| HostState::parse(&text))
@@ -414,6 +424,12 @@ fn lock(path: &Path, patience: Duration) -> io::Result<File> {
 /// a temporary name, rename. The directory is created (owner only). The lock
 /// is released when the lock file closes.
 pub fn record(path: &Path, fact: Fact, key: &str, at: u64, patience: Duration) -> io::Result<()> {
+    rewrite(path, patience, |state| state.note(fact, key, at))
+}
+
+/// [`record`]'s body for any change of the rows: under the lock (waiting at
+/// most `patience`), read, `change`, write a temporary name, rename.
+fn rewrite(path: &Path, patience: Duration, change: impl FnOnce(&mut HostState)) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::DirBuilder::new()
             .recursive(true)
@@ -422,7 +438,7 @@ pub fn record(path: &Path, fact: Fact, key: &str, at: u64, patience: Duration) -
     }
     let _lock = lock(path, patience)?;
     let mut state = load(path);
-    state.note(fact, key, at);
+    change(&mut state);
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".tmp.{}", std::process::id()));
     let temporary = path.with_file_name(name);
@@ -458,7 +474,8 @@ pub struct Wrapped {
 /// config's `Match exec`) is asked only for a call that would be wrapped:
 /// a usable bootstrap and nonce, terminals on both ends, an interactive call without a
 /// remote command, the setting for the host as typed; then `ssh -G` and the
-/// learned state of the server it resolves to. `sockets` are this bateri's
+/// state of the server it resolves to — only a [`Fact::Plain`] server is not
+/// wrapped (049 R1), an unknown one is. `sockets` are this bateri's
 /// instance directories ([`crate::ssh_route::instance_dirs`]): with one, the
 /// session also becomes a master there ([`Control`]).
 #[allow(clippy::too_many_arguments)] // R1's inputs, each a different source; a struct would only rename them
@@ -485,7 +502,7 @@ pub fn decide(
         return None;
     }
     let key = host_key(&out)?;
-    if !state.knows(Fact::Posix, &key) {
+    if state.knows(Fact::Plain, &key) {
         return None;
     }
     let control = control(&out, sockets).filter(|_| !names_sharing(args));
@@ -667,36 +684,94 @@ pub fn boot() -> &'static str {
     BOOT.get_or_init(|| one_liner(&payload()))
 }
 
-// ─── learning ────────────────────────────────────────────────────────────
+// ─── the bootstrap's proof ───────────────────────────────────────────────
+
+/// [`host_key`] of `ssh -G` for `ssh` (the program first); `None` if it
+/// fails.
+fn key_of(runner: &dyn SshRunner, ssh: &[String]) -> Option<String> {
+    let (program, args) = ssh.split_first()?;
+    let mut argv = vec![program.clone(), "-G".to_owned()];
+    argv.extend(args.iter().cloned());
+    runner
+        .run(&argv)
+        .ok()
+        .filter(|(code, _, _)| *code == Some(0))
+        .and_then(|(_, out, _)| host_key(&out))
+}
 
 /// Records that the server behind `ssh` runs a POSIX `sh`: `ssh` is an argv
 /// to the server (the program, its options, the target, no remote command)
 /// and the caller calls this once the server proved it — the wrapped call's
 /// bootstrap said `up` with the attempt's nonce (049 R2.3, the pane's
-/// `check_remote_up`, with the user's argv), or, until 049 phase-2, the
-/// helper session's greeting arrived (048; the greeting comes from `sh`). The key is
+/// `check_remote_up`, with the user's argv); nothing else writes `posix`
+/// (049 R4). The key is
 /// [`host_key`] of `ssh -G` for the same argv (the route's own options do not
 /// change user, host or port). `Ok(true)` if a row was written; a server
-/// already learned writes nothing (`Ok(false)`), and so does an argv `ssh -G`
+/// already recorded writes nothing (`Ok(false)`), and so does an argv `ssh -G`
 /// cannot read.
-pub fn learn(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<bool> {
-    let Some((program, args)) = ssh.split_first() else {
-        return Ok(false);
-    };
-    let mut argv = vec![program.clone(), "-G".to_owned()];
-    argv.extend(args.iter().cloned());
-    let Some(key) = runner
-        .run(&argv)
-        .ok()
-        .filter(|(code, _, _)| *code == Some(0))
-        .and_then(|(_, out, _)| host_key(&out))
-    else {
+pub fn record_posix(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<bool> {
+    let Some(key) = key_of(runner, ssh) else {
         return Ok(false);
     };
     if load(path).knows(Fact::Posix, &key) {
         return Ok(false);
     }
     record(path, Fact::Posix, &key, unix_now(), LOCK_PATIENCE).map(|()| true)
+}
+
+/// The directory of the seen nonces beside the state file (049 phase-2):
+/// `{state file}.up/`, one empty file per nonce.
+pub fn up_dir(state_path: &Path) -> PathBuf {
+    let mut name = state_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".up");
+    state_path.with_file_name(name)
+}
+
+/// How long a seen nonce's file is kept when nobody consumed it (an `ssh`
+/// that ended with [`SSH_FAILURE`], a shell killed before its `ssh`
+/// returned): every [`mark_up`] sweeps older ones. A session that outlives it
+/// loses only this proof — its server is `posix` by then, which
+/// [`fell_back`] asks as well. A design constant.
+pub const UP_KEEP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Records that the bootstrap of the attempt `nonce` said `up` (049 phase-2,
+/// the fallback's first question): an empty file in [`up_dir`], created
+/// without the state file's lock and **before** `ssh -G` — the pane calls it
+/// as soon as `up` arrives, so a session that ends at once (a login file that
+/// exits) or a slow `ssh -G` (`Match exec`) cannot outrun the proof and have
+/// its server branded `plain`. Only a nonce of [`new_nonce`]'s form makes a
+/// file name (no path can be smuggled in); older unconsumed files are swept
+/// ([`UP_KEEP`]).
+pub fn mark_up(state_path: &Path, nonce: &str) -> io::Result<()> {
+    if !is_nonce(nonce) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a nonce"));
+    }
+    let dir = up_dir(state_path);
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
+    File::create(dir.join(nonce))?;
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|age| age > UP_KEEP);
+            if stale {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether [`mark_up`] recorded `nonce`; the file is consumed (removed) when
+/// it is there — one wrapped attempt, one question.
+fn take_up(state_path: &Path, nonce: &str) -> bool {
+    is_nonce(nonce) && fs::remove_file(up_dir(state_path).join(nonce)).is_ok()
 }
 
 /// `bateri ssh-argv [--tty] [--block N] [--instance I] -- <ssh arguments…>`: the subcommand's body
@@ -784,6 +859,15 @@ pub fn ssh_argv_main(
 /// never the remote shell's, so it says nothing about the server's shell.
 pub const SSH_FAILURE: i32 = 255;
 
+/// Whether a wrapped `ssh`'s code says nothing about the server's shell:
+/// [`SSH_FAILURE`], or a signal's (`128 + N`, the shell's spelling — a Ctrl-C
+/// at the password or host-key prompt is 130, before our command could run).
+/// A cancelled connection must neither brand the server `plain` nor open
+/// again (049 phase-2 `/code-review`).
+fn says_nothing(rc: i32) -> bool {
+    rc == SSH_FAILURE || rc > 128
+}
+
 /// A wrapped connection that fell back (049 R3.2): the arguments to run again,
 /// plain, and the server's key (the caller records [`Fact::Plain`] for it).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -796,8 +880,9 @@ pub struct FellBack {
 /// R3.3) — pure: `config` is `ssh -G`'s output for the user's `args` and
 /// `state` the state file as read now.
 ///
-/// - `rc` is [`SSH_FAILURE`]: `None` — a refused password or an unreachable
-///   host says nothing about the shell, nothing is recorded or rerun.
+/// - `rc` is [`SSH_FAILURE`] or a signal's (`> 128`, [`says_nothing`]):
+///   `None` — a refused password, an unreachable host or a Ctrl-C at the
+///   prompt says nothing about the shell, nothing is recorded or rerun.
 /// - The server is [`Fact::Posix`]: `None` — the bootstrap's `up` arrived, the
 ///   session was the user's and its code is theirs.
 /// - The server is [`Fact::Touched`] and not `posix`: the plain rerun — the
@@ -812,7 +897,7 @@ pub fn fell_back(
     state: &HostState,
     sockets: &[PathBuf],
 ) -> Option<FellBack> {
-    if rc == SSH_FAILURE {
+    if says_nothing(rc) {
         return None;
     }
     let key = host_key(config)?;
@@ -842,19 +927,29 @@ pub const FELL_BACK_PATIENCE: Duration = Duration::from_millis(500);
 /// The re-read interval within [`FELL_BACK_PATIENCE`].
 const FELL_BACK_POLL: Duration = Duration::from_millis(25);
 
-/// `bateri ssh-fell-back --rc N [--instance I] -- <ssh arguments…>` (049
-/// R3.2): the subcommand's body (`argv` is what follows `ssh-fell-back`),
-/// asked by the local zsh's `ssh` function after a wrapped `ssh` ended with
-/// `N`. Writes the plain rerun's arguments to `out` ([`fell_back`]), each
-/// followed by a NUL, or nothing — `ssh-argv`'s wire; the exit code is always
-/// zero. `--instance` is `ssh-argv`'s, so the rerun's sharing options are the
+/// `bateri ssh-fell-back --rc N [--instance I] -- <wrapped ssh arguments…>`
+/// (049 R3.2): the subcommand's body (`argv` is what follows
+/// `ssh-fell-back`), asked by the local zsh's `ssh` function after a wrapped
+/// `ssh` ended with `N`. The arguments are the **wrapped** ones, as
+/// `ssh-argv` printed them: [`unwrap`] gives back the user's and [`nonce`]
+/// the attempt's — one parser, the shell does not take our command apart.
+/// Writes the plain rerun's arguments to `out` ([`fell_back`]), each followed
+/// by a NUL, or nothing — `ssh-argv`'s wire; the exit code is always zero.
+/// `--instance` is `ssh-argv`'s, so the rerun's sharing options are the
 /// wrapped call's.
 ///
-/// `ssh -G` runs once (not for [`SSH_FAILURE`]); the state file is re-read
-/// until the answer is not a fallback or [`FELL_BACK_PATIENCE`] is spent. The
-/// [`Fact::Plain`] row is written before printing, but a failed write still
-/// prints: the reconnection is the user's, the row only saves the next one's
-/// detour.
+/// **The wrong direction is a rerun** (049 phase-2 → Uygulama Notları): a
+/// server with a shell branded `plain` loses its integration, and a user who
+/// typed `exit` would be connected again. So the first question is the
+/// attempt's own proof ([`mark_up`], written by the pane the moment `up`
+/// arrives, before any `ssh -G`): seen → nothing. Then [`fell_back`] (`posix`
+/// also says nothing). Every unknown says nothing: arguments that are not
+/// ours, no nonce, a malformed call, [`SSH_FAILURE`] or a signal's code, an unreadable
+/// configuration. Only a wrapped attempt whose proof did not arrive within
+/// `patience` ([`FELL_BACK_PATIENCE`]; the proof and the state file are
+/// re-read meanwhile) falls back. The [`Fact::Plain`] row is written before
+/// printing, but a failed write still prints: the reconnection is the user's,
+/// the row only saves the next one's detour.
 pub fn ssh_fell_back_main(
     argv: &[String],
     runner: &dyn SshRunner,
@@ -875,10 +970,14 @@ pub fn ssh_fell_back_main(
         }
         rest => (Vec::new(), rest),
     };
-    let Some(("--", args)) = rest.split_first().map(|(head, tail)| (head.as_str(), tail)) else {
+    let Some(("--", wrapped)) = rest.split_first().map(|(head, tail)| (head.as_str(), tail)) else {
         return 0;
     };
-    if rc == SSH_FAILURE {
+    let Some(attempt) = nonce(wrapped) else {
+        return 0;
+    };
+    let args = unwrap(wrapped);
+    if says_nothing(rc) || take_up(state_path, attempt) {
         return 0;
     }
     let Some(resolved) = config(runner, args) else {
@@ -889,6 +988,9 @@ pub fn ssh_fell_back_main(
         let Some(plain) = fell_back(args, rc, &resolved, &load(state_path), &sockets) else {
             return 0;
         };
+        if take_up(state_path, attempt) {
+            return 0;
+        }
         if Instant::now() >= deadline {
             break plain;
         }
@@ -908,6 +1010,19 @@ pub fn ssh_fell_back_main(
     }
     let _ = out.write_all(&bytes).and_then(|()| out.flush());
     0
+}
+
+/// Forgets that the server behind `ssh` (an argv like [`record_posix`]'s) has
+/// no shell (049 R4): the Shell menu's integration toggle — the one way back
+/// from a `plain` row learned wrongly. `Ok(true)` if a row was removed.
+pub fn forget_plain(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<bool> {
+    let Some(key) = key_of(runner, ssh) else {
+        return Ok(false);
+    };
+    if !load(path).knows(Fact::Plain, &key) {
+        return Ok(false);
+    }
+    rewrite(path, LOCK_PATIENCE, |state| state.forget(Fact::Plain, &key)).map(|()| true)
 }
 
 #[cfg(test)]
@@ -1274,22 +1389,30 @@ mod tests {
                 "{out}"
             );
         }
-        // R1.4: an unlearned server.
+        // 049 R1: an unknown server is wrapped, one recorded `plain` is not
+        // — `posix` or not.
         let runner = Gconfig::new(PLAIN);
-        assert_eq!(
+        let with = |state: &HostState| {
             decide(
                 &args,
                 true,
                 &on,
                 &runner,
-                &HostState::default(),
+                state,
                 BOOT_STUB,
                 None,
                 NONCE,
                 &[],
-            ),
-            None
-        );
+            )
+            .map(|wrapped| wrapped.key)
+        };
+        assert_eq!(with(&HostState::default()), Some("u@h:22".to_owned()));
+        let mut plain = learned();
+        plain.note(Fact::Plain, "u@h:22", 2);
+        assert_eq!(with(&plain), None);
+        let mut other = HostState::default();
+        other.note(Fact::Plain, "v@h:22", 2);
+        assert_eq!(with(&other), Some("u@h:22".to_owned()));
         // R1.3: the setting is asked before `ssh -G`.
         let off = Settings {
             remote_integration: false,
@@ -1512,7 +1635,7 @@ mod tests {
             args: args.clone(),
             key: "u@h:22".to_owned(),
         });
-        for rc in [0, 1, 127, 130] {
+        for rc in [0, 1, 127, 128] {
             assert_eq!(
                 fell_back(&args, rc, PLAIN, &touched(false), &[]),
                 plain,
@@ -1524,11 +1647,13 @@ mod tests {
                 "{rc}"
             );
         }
-        assert_eq!(
-            fell_back(&args, SSH_FAILURE, PLAIN, &touched(false), &[]),
-            None,
-            "ssh's own error"
-        );
+        for rc in [SSH_FAILURE, 129, 130, 143] {
+            assert_eq!(
+                fell_back(&args, rc, PLAIN, &touched(false), &[]),
+                None,
+                "{rc}: ssh's own error or a signal"
+            );
+        }
         assert_eq!(
             fell_back(&args, 1, PLAIN, &HostState::default(), &[]),
             None,
@@ -1570,14 +1695,22 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// The subcommand (049 R3.2, phase-2): it is given the **wrapped**
+    /// arguments and its first question is the attempt's own proof.
     #[test]
     fn the_fallback_subcommand_records_plain_and_prints_the_rerun() {
         let dir = scratch("fell");
         let path = dir.join("remote-hosts");
         let runner = Gconfig::new(PLAIN);
-        let run = |argv: &[&str], patience: Duration| {
+        let wrapped = wrap(&words(&["prod"]), BOOT_STUB, None, NONCE, None);
+        let call = |head: &[&str]| -> Vec<String> {
+            let mut argv = words(head);
+            argv.extend(wrapped.iter().cloned());
+            argv
+        };
+        let run = |argv: &[String], patience: Duration| {
             let mut out = Vec::new();
-            let code = ssh_fell_back_main(&words(argv), &runner, &path, &[], patience, &mut out);
+            let code = ssh_fell_back_main(argv, &runner, &path, &[], patience, &mut out);
             assert_eq!(code, 0);
             out
         };
@@ -1585,53 +1718,80 @@ mod tests {
             args.iter().flat_map(|arg| arg.bytes().chain([0])).collect()
         };
         // Never wrapped: nothing, and no row.
-        assert!(run(&["--rc", "1", "--", "prod"], Duration::ZERO).is_empty());
+        assert!(run(&call(&["--rc", "1", "--"]), Duration::ZERO).is_empty());
         record(&path, Fact::Touched, "u@h:22", 1, LOCK_PATIENCE).unwrap();
-        // ssh's own error: nothing, and not even `ssh -G`.
+        // ssh's own error or a signal (Ctrl-C at the prompt): nothing, and
+        // not even `ssh -G`.
         let calls = runner.calls.borrow().len();
-        assert!(run(&["--rc", "255", "--", "prod"], Duration::ZERO).is_empty());
+        assert!(run(&call(&["--rc", "255", "--"]), Duration::ZERO).is_empty());
+        assert!(run(&call(&["--rc", "130", "--"]), Duration::ZERO).is_empty());
         assert_eq!(runner.calls.borrow().len(), calls);
         assert!(!load(&path).knows(Fact::Plain, "u@h:22"));
-        // Malformed calls: nothing.
+        // Malformed calls, and arguments that are not ours (no nonce — the
+        // user's own, an older build's wrap): nothing.
+        let old = {
+            let mut old = wrapped.clone();
+            let last = old.last_mut().unwrap();
+            *last = last.replace(&format!(" {NO_PARENT} {NONCE}"), "");
+            old
+        };
         for argv in [
-            &["--", "prod"][..],
-            &["--rc", "x", "--", "prod"],
-            &["--rc", "1", "prod"],
+            call(&["--"]),
+            call(&["--rc", "x", "--"]),
+            call(&["--rc", "1"]),
+            words(&["--rc", "1", "--", "prod"]),
+            [words(&["--rc", "1", "--"]), old].concat(),
         ] {
-            assert!(run(argv, Duration::ZERO).is_empty(), "{argv:?}");
+            assert!(run(&argv, Duration::ZERO).is_empty(), "{argv:?}");
         }
-        // Touched, not posix: `plain` is recorded and the rerun printed.
+        assert!(!load(&path).knows(Fact::Plain, "u@h:22"));
+        // The attempt's `up` was seen: nothing — whatever the state file says
+        // (`touched`, no `posix`) — and the mark is consumed.
+        mark_up(&path, NONCE).unwrap();
+        assert!(run(&call(&["--rc", "0", "--"]), Duration::ZERO).is_empty());
+        assert!(!up_dir(&path).join(NONCE).exists());
+        assert!(!load(&path).knows(Fact::Plain, "u@h:22"));
+        // Another attempt's `up` proves nothing about this one.
+        mark_up(&path, "ffffffffffffffff").unwrap();
+        // Touched, not posix, no proof: `plain` is recorded and the rerun printed.
         assert_eq!(
-            run(&["--rc", "1", "--", "prod"], Duration::ZERO),
+            run(&call(&["--rc", "1", "--"]), Duration::ZERO),
             nul(&["prod"])
         );
         assert!(load(&path).knows(Fact::Plain, "u@h:22"));
 
-        // A `posix` row that lands while the subcommand waits wins: nothing.
-        let dir2 = scratch("fell-race");
-        let path2 = dir2.join("remote-hosts");
-        record(&path2, Fact::Touched, "u@h:22", 1, LOCK_PATIENCE).unwrap();
-        let writer = {
-            let path2 = path2.clone();
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(100));
-                record(&path2, Fact::Posix, "u@h:22", 2, LOCK_PATIENCE).unwrap();
-            })
-        };
-        let mut out = Vec::new();
-        ssh_fell_back_main(
-            &words(&["--rc", "0", "--", "prod"]),
-            &runner,
-            &path2,
-            &[],
-            Duration::from_secs(5),
-            &mut out,
-        );
-        writer.join().unwrap();
-        assert!(out.is_empty(), "the late `posix` row is seen");
-        assert!(!load(&path2).knows(Fact::Plain, "u@h:22"));
+        // A proof — or a `posix` row — that lands while the subcommand waits
+        // wins: nothing.
+        for late in ["up", "posix"] {
+            let dir2 = scratch(&format!("fell-race-{late}"));
+            let path2 = dir2.join("remote-hosts");
+            record(&path2, Fact::Touched, "u@h:22", 1, LOCK_PATIENCE).unwrap();
+            let writer = {
+                let path2 = path2.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(100));
+                    if late == "up" {
+                        mark_up(&path2, NONCE).unwrap();
+                    } else {
+                        record(&path2, Fact::Posix, "u@h:22", 2, LOCK_PATIENCE).unwrap();
+                    }
+                })
+            };
+            let mut out = Vec::new();
+            ssh_fell_back_main(
+                &call(&["--rc", "0", "--"]),
+                &runner,
+                &path2,
+                &[],
+                Duration::from_secs(5),
+                &mut out,
+            );
+            writer.join().unwrap();
+            assert!(out.is_empty(), "the late {late} is seen");
+            assert!(!load(&path2).knows(Fact::Plain, "u@h:22"));
+            fs::remove_dir_all(&dir2).unwrap();
+        }
         fs::remove_dir_all(&dir).unwrap();
-        fs::remove_dir_all(&dir2).unwrap();
     }
 
     #[test]
@@ -1699,16 +1859,16 @@ mod tests {
         assert_eq!(String::from_utf8(out.stdout).unwrap(), tricky);
     }
 
-    /// The greeting's learning (phase-2): one `posix` row per server, the
-    /// second greeting writes nothing, an argv `ssh -G` cannot read learns
-    /// nothing — and an unreadable state file wraps nothing.
+    /// The bootstrap's proof (049 R2.3): one `posix` row per server, a
+    /// second proof writes nothing, an argv `ssh -G` cannot read records
+    /// nothing. The menu's toggle forgets a `plain` row the same way (R4).
     #[test]
-    fn a_greeting_teaches_the_server_once() {
+    fn the_proof_records_the_server_once_and_the_toggle_forgets_plain() {
         let dir = scratch("learn");
         let path = dir.join("remote-hosts");
         let ssh = words(&["/usr/bin/ssh", "-o", "ControlPath=/s/%C", "prod"]);
         let runner = Gconfig::new(PLAIN);
-        assert!(learn(&runner, &ssh, &path).unwrap());
+        assert!(record_posix(&runner, &ssh, &path).unwrap());
         assert_eq!(
             runner.calls.borrow().last().cloned(),
             Some(words(&[
@@ -1721,28 +1881,55 @@ mod tests {
         );
         assert!(load(&path).knows(Fact::Posix, "u@h:22"));
         let written = fs::read_to_string(&path).unwrap();
-        assert!(!learn(&runner, &ssh, &path).unwrap(), "learned already");
-        assert_eq!(fs::read_to_string(&path).unwrap(), written);
-        assert!(!learn(&Gconfig::new("garbage"), &ssh, &path).unwrap());
-        assert!(!learn(&runner, &[], &path).unwrap());
-        // A state file that cannot be read knows no server: nothing is wrapped.
-        let unreadable = dir.join("a-directory");
-        fs::create_dir_all(&unreadable).unwrap();
-        let args = words(&["prod"]);
-        assert_eq!(
-            decide(
-                &args,
-                true,
-                &Settings::default(),
-                &runner,
-                &load(&unreadable),
-                boot(),
-                None,
-                NONCE,
-                &[],
-            ),
-            None
+        assert!(
+            !record_posix(&runner, &ssh, &path).unwrap(),
+            "recorded already"
         );
+        assert_eq!(fs::read_to_string(&path).unwrap(), written);
+        assert!(!record_posix(&Gconfig::new("garbage"), &ssh, &path).unwrap());
+        assert!(!record_posix(&runner, &[], &path).unwrap());
+
+        // Forgetting: only the `plain` row of that server goes.
+        assert!(
+            !forget_plain(&runner, &ssh, &path).unwrap(),
+            "nothing to forget"
+        );
+        record(&path, Fact::Plain, "u@h:22", 2, LOCK_PATIENCE).unwrap();
+        record(&path, Fact::Plain, "v@h:22", 2, LOCK_PATIENCE).unwrap();
+        assert!(forget_plain(&runner, &ssh, &path).unwrap());
+        let state = load(&path);
+        assert!(!state.knows(Fact::Plain, "u@h:22"));
+        assert!(state.knows(Fact::Plain, "v@h:22"));
+        assert!(state.knows(Fact::Posix, "u@h:22"));
+        assert!(!forget_plain(&Gconfig::new("garbage"), &ssh, &path).unwrap());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The seen nonces (049 phase-2): a file per nonce beside the state file,
+    /// consumed by the one question; only a nonce of our form names a file;
+    /// an old unconsumed one is swept by the next mark.
+    #[test]
+    fn a_seen_nonce_is_marked_once_and_consumed() {
+        let dir = scratch("up");
+        let path = dir.join("remote-hosts");
+        assert!(!take_up(&path, NONCE));
+        mark_up(&path, NONCE).unwrap();
+        assert!(up_dir(&path).join(NONCE).is_file());
+        assert!(take_up(&path, NONCE));
+        assert!(!take_up(&path, NONCE), "consumed");
+        for bad in ["", "../../x", "0123456789ABCDEF", "abc"] {
+            assert!(mark_up(&path, bad).is_err(), "{bad:?}");
+            assert!(!take_up(&path, bad), "{bad:?}");
+        }
+        // A stale file (older than `UP_KEEP`) is swept by the next mark.
+        let stale = up_dir(&path).join("ffffffffffffffff");
+        let file = File::create(&stale).unwrap();
+        file.set_modified(SystemTime::now() - UP_KEEP - Duration::from_secs(60))
+            .unwrap();
+        drop(file);
+        mark_up(&path, NONCE).unwrap();
+        assert!(!stale.exists());
+        assert!(up_dir(&path).join(NONCE).exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

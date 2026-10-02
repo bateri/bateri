@@ -1233,11 +1233,24 @@ define_class!(
         /// (`SettingsEdit::RemoteHostIntegration`) — the Mark … as ▸ path: the
         /// menu only writes, nothing is written to an unparseable file, and the
         /// next `ssh` reads the file. A no-op if the tab became local.
+        ///
+        /// It also forgets the server's `plain` row (049 R4,
+        /// `ssh_wrap::forget_plain`), the one way back for a server branded
+        /// shell-less by mistake — which the check mark cannot show (it is the
+        /// setting's; the row's key is `ssh -G`'s, too slow for validation).
+        /// So a click on a **checked** item asks first: when a `plain` row was
+        /// there, forgetting it is the click's whole effect and the setting
+        /// stays on (the next `ssh` is wrapped); only without one is the
+        /// integration turned off. Turning it on writes at once and forgets.
         #[unsafe(method(toggleHostIntegration:))]
         fn toggle_host_integration(&self, _sender: Option<&AnyObject>) {
             if let Some((host, _)) = self.key_remote_mark() {
-                let on = !self.settings().integration_for(&host);
-                self.save_edit(&SettingsEdit::RemoteHostIntegration { host, on });
+                if self.settings().integration_for(&host) {
+                    self.forget_plain(Some(host));
+                } else {
+                    self.save_edit(&SettingsEdit::RemoteHostIntegration { host, on: true });
+                    self.forget_plain(None);
+                }
             }
         }
 
@@ -1896,6 +1909,57 @@ impl AppDelegate {
     /// girdisi (037 Karar 5).
     pub(crate) fn key_remote_mark(&self) -> Option<(String, HostMark)> {
         self.key_window()?.remote_mark()
+    }
+
+    /// [`Self::toggle_host_integration`]'s `plain` forgetting: the key tab's
+    /// remote ssh argv, `ssh -G` and the state file on a thread of its own.
+    /// `turn_off` is the host to turn the integration off for when **no**
+    /// row was forgotten — back on the main queue; it is turned off at once
+    /// when there is nothing to ask (a timed run, no remote target, no
+    /// thread).
+    fn forget_plain(&self, turn_off: Option<String>) {
+        let off = |delegate: &Self, host: String| {
+            delegate.save_edit(&SettingsEdit::RemoteHostIntegration { host, on: false });
+        };
+        let target = self.key_window().and_then(|window| {
+            window
+                .focused_pane()
+                .session()
+                .and_then(|session| session.remote_target())
+        });
+        let (Some((_, target, _)), None) = (target, self.ivars().run.as_ref()) else {
+            if let Some(host) = turn_off {
+                off(self, host);
+            }
+            return;
+        };
+        let argv = target.argv;
+        let host = turn_off.clone();
+        let spawned = std::thread::Builder::new()
+            .name("remote plain".into())
+            .spawn(move || {
+                let forgot = crate::child::home().is_some_and(|home| {
+                    bt_shell_common::ssh_wrap::forget_plain(
+                        &crate::ssh_route::SystemSsh,
+                        &argv,
+                        &crate::remote_hosts_path(&home),
+                    )
+                    .unwrap_or(false)
+                });
+                if let (false, Some(host)) = (forgot, host) {
+                    DispatchQueue::main().exec_async(move || {
+                        // audit: a block running on the main queue is on the main thread by definition.
+                        let mtm =
+                            MainThreadMarker::new().expect("the main queue is the main thread");
+                        if let Some(delegate) = delegate(mtm) {
+                            off(&delegate, host);
+                        }
+                    });
+                }
+            });
+        if let (Err(_), Some(host)) = (spawned, turn_off) {
+            off(self, host);
+        }
     }
 
     /// The terminal window whose `NSWindow` is `window`; `None` if not in the list

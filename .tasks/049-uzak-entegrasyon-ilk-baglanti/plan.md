@@ -104,5 +104,5 @@ ssh host ──► __bateri_ssh ──► bateri ssh-argv
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | kapı | |
