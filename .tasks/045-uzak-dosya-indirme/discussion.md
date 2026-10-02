@@ -50,8 +50,14 @@ Hetzner Ubuntu, `ssh kararla_hetzner`, başlık `root@kararla-production: ~`,
 bağlam satırı ve göstergenin yerleşimi `remote_cwd`'yi ham okuyordu
 (sınama: `the_status_bar_reads_the_remote_folder_from_the_title`). Tek
 yerden (`Session::title_folder_into`) üç tüketiciye; başlığın host'u ssh
-hedefiyle eşlenmiyor — hedef çoğu zaman bir takma ad ve uzak oturum
-sürerken başlık zaten uzak kabuğun.
+hedefiyle eşlenmiyor — hedef çoğu zaman bir takma ad. Onun yerine
+yalnız **koşan komut (ssh) başladıktan sonra** yazılan başlık okunuyor
+(`title_epoch`/`title_at_command`; `/code-review`): yuva bir başlığı
+sonraki OSC 0/2'ye kadar tutuyor, yani başlık basmayan ikinci bir sunucuda
+önceki host'un ya da yerel prompt'un dizini uzak dizin sanılır, bağlantı
+tabanı ve Finder damlasının hedefi de olurdu (045'ten beri bağlantıda
+gizli duran aynı kusur; sınama
+`a_title_from_before_the_remote_command_is_not_its_folder`).
 
 ## Karar 3: ⌘-tık uzakta "önizle" demek → ✅ kullanıcı
 

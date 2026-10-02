@@ -615,7 +615,9 @@ satır uzak kabuğun, ızgarada), bant yalnız bağlam satırı ve o satır
 `⇄ host  /uzak/yol` — `⇄` (fonttan, sıradan hücre) ile host **işaretinin**
 renginde, yol bugünkü iki kademede (OSC 7 yoksa bağlantıların tabanıyla aynı
 başlık yedeğinden — `Session::title_folder_into`; başlığın host'u ssh
-hedefiyle eşlenmiyor, hedef çoğu zaman bir `~/.ssh/config` takma adı), dal yok; host kısalmaz, sığmazsa yalnız
+hedefiyle eşlenmiyor, hedef çoğu zaman bir `~/.ssh/config` takma adı; yalnız
+ssh başladıktan sonra yazılan başlık okunuyor, önceki host'unki ya da yerel
+prompt'unki değil), dal yok; host kısalmaz, sığmazsa yalnız
 `⇄` kalır. Dock'un üst saç çizgisi de işaretin renginde (`Dock::edge`;
 yükleme sürerken çubuğun boş izi, aşağıda).
 **İşaret** (037 Karar 2–5): `[remote] hosts` sıralı `{ host, mark }` dizisi
