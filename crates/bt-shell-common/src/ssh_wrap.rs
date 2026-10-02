@@ -57,15 +57,47 @@ pub const BOOT_NAME: &str = "bateri-boot";
 /// upload rule).
 const COMMAND_HEAD: &str = "exec sh -c '";
 
-/// The remote command for a bootstrap script: `exec sh -c '<boot>' bateri-boot`,
-/// and with the local block of the `ssh` command (048 phase-3) one more word,
-/// its number: `sh`'s `$1`, the `P` of the remote blocks' `bt_remote=<P>.<S>.<n>`.
+/// The remote command for a bootstrap script:
+/// `exec sh -c '<boot>' bateri-boot <P> <nonce>` — `sh`'s `$1` is the local
+/// block of the `ssh` command (048 phase-3), the `P` of the remote blocks'
+/// `bt_remote=<P>.<S>.<n>`, or [`NO_PARENT`] without one; `$2` is the
+/// attempt's [`NONCE_LEN`]-digit nonce (049 R2.1), the bootstrap's first
+/// output (`8133;i;up;{nonce}`) proves the command ran. The placeholder keeps
+/// the nonce at `$2`: without it a nonce of digits would read as a parent.
 /// `boot` must not contain `'` ([`decide`] refuses one that does).
-pub fn remote_command(boot: &str, parent: Option<u32>) -> String {
+pub fn remote_command(boot: &str, parent: Option<u32>, nonce: &str) -> String {
     match parent {
-        Some(parent) => format!("{COMMAND_HEAD}{boot}' {BOOT_NAME} {parent}"),
-        None => format!("{COMMAND_HEAD}{boot}' {BOOT_NAME}"),
+        Some(parent) => format!("{COMMAND_HEAD}{boot}' {BOOT_NAME} {parent} {nonce}"),
+        None => format!("{COMMAND_HEAD}{boot}' {BOOT_NAME} {NO_PARENT} {nonce}"),
     }
+}
+
+/// The parent's placeholder in [`remote_command`]: not digits, so the
+/// bootstrap reads it as "no blocks" (`assets/shell/remote/boot.sh`).
+const NO_PARENT: &str = "-";
+
+/// The nonce's length in lowercase hex digits (64 bits): [`new_nonce`]'s
+/// form, the only one [`unwrap`] and [`nonce`] accept. `bt-core`'s scanner
+/// checks only the alphabet and a bound, not this number.
+pub const NONCE_LEN: usize = 16;
+
+/// Whether `word` is a nonce of [`new_nonce`]'s form.
+fn is_nonce(word: &str) -> bool {
+    word.len() == NONCE_LEN && word.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A fresh nonce for one wrapped attempt (049 R2.1): [`NONCE_LEN`] hex digits
+/// from `/dev/urandom` (no crate; both platforms have it). `None` if it cannot
+/// be read — the caller then does not wrap: a wrap without a nonce could never
+/// prove it ran, and phase-2's fallback would take the server for one without
+/// a shell.
+pub fn new_nonce() -> Option<String> {
+    use std::io::Read as _;
+    let mut bytes = [0u8; NONCE_LEN / 2];
+    File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut bytes))
+        .ok()?;
+    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The connection sharing a wrapped session gets (phase-5): the session is a
@@ -110,6 +142,7 @@ pub fn wrap(
     args: &[String],
     boot: &str,
     parent: Option<u32>,
+    nonce: &str,
     control: Option<&Control>,
 ) -> Vec<String> {
     let mut wrapped = Vec::with_capacity(args.len() + 8);
@@ -118,15 +151,38 @@ pub fn wrap(
         wrapped.extend(control.options());
     }
     wrapped.extend(args.iter().cloned());
-    wrapped.push(remote_command(boot, parent));
+    wrapped.push(remote_command(boot, parent, nonce));
     wrapped
+}
+
+/// The bootstrap command's tail → its nonce, if `last` is a bootstrap
+/// command at all (the outer `None`). The accepted tails after the name:
+/// nothing, a parent's digits, or a parent (digits or [`NO_PARENT`]) and a
+/// nonce — the first two are 048's forms, read for a session an older build
+/// wrapped, and they carry no nonce. The script must not contain `'`.
+fn boot_tail(last: &str) -> Option<Option<&str>> {
+    // The script has no `'`, so the first one closes it.
+    let (_, tail) = last.strip_prefix(COMMAND_HEAD)?.split_once('\'')?;
+    let tail = tail.strip_prefix(' ')?.strip_prefix(BOOT_NAME)?;
+    let digits = |word: &str| !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit());
+    if tail.is_empty() {
+        return Some(None);
+    }
+    let words: Vec<&str> = tail.strip_prefix(' ')?.split(' ').collect();
+    match words[..] {
+        [parent] if digits(parent) => Some(None),
+        [parent, nonce] if (digits(parent) || parent == NO_PARENT) && is_nonce(nonce) => {
+            Some(Some(nonce))
+        }
+        _ => None,
+    }
 }
 
 /// The inverse of [`wrap`]: the user's arguments if `args` has the wrapped
 /// shape, otherwise `args` itself. The shape is positional: `-t` first, then
 /// [`Control`]'s six words if they are there, a bootstrap command last (with
-/// or without the parent's number), and in between an interactive call with
-/// no remote command of its own.
+/// or without the parent's number and the nonce, [`boot_tail`]), and in
+/// between an interactive call with no remote command of its own.
 pub fn unwrap(args: &[String]) -> &[String] {
     let [first, inner @ .., last] = args else {
         return args;
@@ -135,22 +191,20 @@ pub fn unwrap(args: &[String]) -> &[String] {
         Some((control, rest)) if Control::matches(control) => rest,
         _ => inner,
     };
-    let boot = last.strip_prefix(COMMAND_HEAD).and_then(|rest| {
-        // The parent's number, if any: ` <digits>` after the name.
-        let rest = match rest.rsplit_once(' ') {
-            Some((head, number))
-                if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) =>
-            {
-                head
-            }
-            _ => rest,
-        };
-        rest.strip_suffix(BOOT_NAME)?.strip_suffix("' ")
-    });
     let wrapped = first == "-t"
-        && boot.is_some_and(|boot| !boot.contains('\''))
+        && boot_tail(last).is_some()
         && ssh_call("ssh", inner).is_some_and(|call| !call.command);
     if wrapped { inner } else { args }
+}
+
+/// The nonce a wrapped argv carries (049 R2.3): `Some` only when [`unwrap`]
+/// takes `args` for ours and its bootstrap command has a nonce. The pane
+/// matches it against the one the bootstrap printed.
+pub fn nonce(args: &[String]) -> Option<&str> {
+    if unwrap(args).len() == args.len() {
+        return None;
+    }
+    boot_tail(args.last()?)?
 }
 
 // ─── ssh -G ──────────────────────────────────────────────────────────────
@@ -228,12 +282,17 @@ fn config(runner: &dyn SshRunner, args: &[String]) -> Option<String> {
 /// What bateri knows about a server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fact {
-    /// The server runs a POSIX `sh` (learned from the helper session's
-    /// greeting, phase-2): a wrapped connection can start there.
+    /// The server runs a POSIX `sh`: a wrapped connection started there — the
+    /// bootstrap's nonce'd `8133;i;up` arrived (049 R2.3; until phase-2 also
+    /// the helper session's greeting, 048 phase-2).
     Posix,
     /// bateri's bootstrap ran there — the list of servers with bateri's files
     /// (048 Karar: the remove button comes later).
     Touched,
+    /// A wrapped connection ended without the bootstrap's `up` and not with
+    /// ssh's own error (049 R3.2, [`fell_back`]): the login shell does not run
+    /// our command (a router, Windows) — the server is not wrapped again.
+    Plain,
 }
 
 impl Fact {
@@ -241,6 +300,7 @@ impl Fact {
         match self {
             Self::Posix => "posix",
             Self::Touched => "touched",
+            Self::Plain => "plain",
         }
     }
 
@@ -248,6 +308,7 @@ impl Fact {
         match name {
             "posix" => Some(Self::Posix),
             "touched" => Some(Self::Touched),
+            "plain" => Some(Self::Plain),
             _ => None,
         }
     }
@@ -395,7 +456,7 @@ pub struct Wrapped {
 ///
 /// The cheap questions come first, so `ssh -G` (a process, and it runs the
 /// config's `Match exec`) is asked only for a call that would be wrapped:
-/// a usable bootstrap, terminals on both ends, an interactive call without a
+/// a usable bootstrap and nonce, terminals on both ends, an interactive call without a
 /// remote command, the setting for the host as typed; then `ssh -G` and the
 /// learned state of the server it resolves to. `sockets` are this bateri's
 /// instance directories ([`crate::ssh_route::instance_dirs`]): with one, the
@@ -409,9 +470,10 @@ pub fn decide(
     state: &HostState,
     boot: &str,
     parent: Option<u32>,
+    nonce: &str,
     sockets: &[PathBuf],
 ) -> Option<Wrapped> {
-    if boot.is_empty() || !is_inline(boot) || !tty {
+    if boot.is_empty() || !is_inline(boot) || !is_nonce(nonce) || !tty {
         return None;
     }
     let call = ssh_call("ssh", args).filter(|call| !call.command)?;
@@ -428,7 +490,7 @@ pub fn decide(
     }
     let control = control(&out, sockets).filter(|_| !names_sharing(args));
     Some(Wrapped {
-        args: wrap(args, boot, parent, control.as_ref()),
+        args: wrap(args, boot, parent, nonce, control.as_ref()),
         key,
     })
 }
@@ -576,7 +638,12 @@ fn base64(bytes: &[u8]) -> String {
 /// It finds a decoder among `base64 -d` (GNU, BusyBox, macOS 13+),
 /// `base64 -D` (older macOS), `b64decode -r` (BSD) and `openssl base64 -d -A`,
 /// keeps the first answer that starts with [`MAGIC`] and `eval`s it; without
-/// one it reports `decode` (`8133;f`). Both arms end in the plain login shell:
+/// one it reports `decode` (`8133;f`) — after the attempt's `8133;i;up` (049
+/// R2.1), which the payload would have printed first: our `sh -c` ran, so the
+/// server has a shell, it only lacks a decoder, and the user gets a working
+/// plain login shell (phase-2's fallback must not take it for a shell-less
+/// endpoint and reconnect the user after their `exit`). The nonce is `$2`,
+/// checked by `awk`'s regex (no `[!…]` here: [`is_inline`]). Both arms end in the plain login shell:
 /// the payload `exec`s its own, and a payload that returned (a parse error on
 /// an unusual `sh`) must not close the connection. The
 /// escape bytes come from `awk`'s `%c`: a `\033` is not [`is_inline`].
@@ -585,8 +652,10 @@ fn one_liner(payload: &str) -> String {
         "b={b64}; s=; for d in \"base64 -d\" \"base64 -D\" \"b64decode -r\" \
          \"openssl base64 -d -A\"; do s=$(printf %s \"$b\" | $d 2>/dev/null); \
          case $s in {MAGIC}*) break;; esac; s=; done; unset b d; \
-         case $s in {MAGIC}*) eval \"$s\";; *) awk -v f=%c%s%c -v m=\"]8133;f;decode\" \
-         \"BEGIN{{printf(f,27,m,7)}}\" 2>/dev/null;; esac; exec \"${{SHELL:-/bin/sh}}\" -l",
+         case $s in {MAGIC}*) eval \"$s\";; *) awk -v f=%c%s%c -v u=\"$2\" \
+         -v p=\"]8133;i;up;\" -v m=\"]8133;f;decode\" \
+         \"BEGIN{{if(u~/^[0-9a-f]+$/)printf(f,27,p u,7);printf(f,27,m,7)}}\" 2>/dev/null;; \
+         esac; exec \"${{SHELL:-/bin/sh}}\" -l",
         b64 = base64(payload.as_bytes()),
     )
 }
@@ -600,10 +669,12 @@ pub fn boot() -> &'static str {
 
 // ─── learning ────────────────────────────────────────────────────────────
 
-/// Records that the server behind `ssh` runs a POSIX `sh` (048 discussion →
-/// Karar: learn on the first connection): `ssh` is the helper session's argv (the program, its
-/// options, the target, no remote command) and the caller calls this once its
-/// greeting arrived — the greeting comes from `sh` on the server. The key is
+/// Records that the server behind `ssh` runs a POSIX `sh`: `ssh` is an argv
+/// to the server (the program, its options, the target, no remote command)
+/// and the caller calls this once the server proved it — the wrapped call's
+/// bootstrap said `up` with the attempt's nonce (049 R2.3, the pane's
+/// `check_remote_up`, with the user's argv), or, until 049 phase-2, the
+/// helper session's greeting arrived (048; the greeting comes from `sh`). The key is
 /// [`host_key`] of `ssh -G` for the same argv (the route's own options do not
 /// change user, host or port). `Ok(true)` if a row was written; a server
 /// already learned writes nothing (`Ok(false)`), and so does an argv `ssh -G`
@@ -645,7 +716,9 @@ pub fn learn(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<
 /// platform's state file. A wrapped connection is recorded as
 /// [`Fact::Touched`] **before** it is printed: if the record fails nothing is
 /// printed, because the touched list is the user's account of where bateri
-/// wrote.
+/// wrote. `nonce` is this attempt's ([`new_nonce`]); without one nothing is
+/// printed either.
+#[allow(clippy::too_many_arguments)] // the platform's inputs, each a different source
 pub fn ssh_argv_main(
     argv: &[String],
     settings: &Settings,
@@ -653,8 +726,12 @@ pub fn ssh_argv_main(
     state_path: &Path,
     roots: &[PathBuf],
     boot: &str,
+    nonce: Option<&str>,
     out: &mut impl Write,
 ) -> i32 {
+    let Some(nonce) = nonce else {
+        return 0;
+    };
     let (tty, rest) = match argv {
         [flag, rest @ ..] if flag == "--tty" => (true, rest),
         rest => (false, rest),
@@ -676,7 +753,9 @@ pub fn ssh_argv_main(
         return 0;
     };
     let state = load(state_path);
-    let Some(wrapped) = decide(args, tty, settings, runner, &state, boot, parent, &sockets) else {
+    let Some(wrapped) = decide(
+        args, tty, settings, runner, &state, boot, parent, nonce, &sockets,
+    ) else {
         return 0;
     };
     if record(
@@ -699,6 +778,138 @@ pub fn ssh_argv_main(
     0
 }
 
+// ─── the fallback ────────────────────────────────────────────────────────
+
+/// ssh's own exit code for a connection or authentication error (`ssh(1)`):
+/// never the remote shell's, so it says nothing about the server's shell.
+pub const SSH_FAILURE: i32 = 255;
+
+/// A wrapped connection that fell back (049 R3.2): the arguments to run again,
+/// plain, and the server's key (the caller records [`Fact::Plain`] for it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FellBack {
+    pub args: Vec<String>,
+    pub key: String,
+}
+
+/// The fallback's decision once the wrapped `ssh` ended with `rc` (049 R3.2,
+/// R3.3) — pure: `config` is `ssh -G`'s output for the user's `args` and
+/// `state` the state file as read now.
+///
+/// - `rc` is [`SSH_FAILURE`]: `None` — a refused password or an unreachable
+///   host says nothing about the shell, nothing is recorded or rerun.
+/// - The server is [`Fact::Posix`]: `None` — the bootstrap's `up` arrived, the
+///   session was the user's and its code is theirs.
+/// - The server is [`Fact::Touched`] and not `posix`: the plain rerun — the
+///   user's `args` with the **same** [`Control`] options [`decide`] gave the
+///   wrapped call (one producer), so the rerun rides the wrapped session's
+///   master while its [`SESSION_PERSIST`] lasts and asks no second password.
+/// - Anything else (never wrapped, an unreadable configuration): `None`.
+pub fn fell_back(
+    args: &[String],
+    rc: i32,
+    config: &str,
+    state: &HostState,
+    sockets: &[PathBuf],
+) -> Option<FellBack> {
+    if rc == SSH_FAILURE {
+        return None;
+    }
+    let key = host_key(config)?;
+    if state.knows(Fact::Posix, &key) || !state.knows(Fact::Touched, &key) {
+        return None;
+    }
+    let control = control(config, sockets).filter(|_| !names_sharing(args));
+    let mut plain = Vec::with_capacity(args.len() + 6);
+    if let Some(control) = control {
+        plain.extend(control.options());
+    }
+    plain.extend(args.iter().cloned());
+    Some(FellBack { args: plain, key })
+}
+
+/// How long [`ssh_fell_back_main`] waits for the `posix` row before it calls a
+/// server shell-less (049 phase-1 → Uygulama Notları): the row is the pane's,
+/// written when the bootstrap's `up` arrives — a main-queue turn, then `ssh -G`
+/// and the state file's lock on a thread of its own — and a session that ends
+/// within that chain (a login file that exits at once) would otherwise find
+/// no row yet and brand a server with a shell `plain`, which is the wrong
+/// direction and lasting. Only the "touched, not posix" answer waits: the
+/// shell-less endpoint pays it once (its next connection is plain from the
+/// start). A design constant, not a measurement.
+pub const FELL_BACK_PATIENCE: Duration = Duration::from_millis(500);
+
+/// The re-read interval within [`FELL_BACK_PATIENCE`].
+const FELL_BACK_POLL: Duration = Duration::from_millis(25);
+
+/// `bateri ssh-fell-back --rc N [--instance I] -- <ssh arguments…>` (049
+/// R3.2): the subcommand's body (`argv` is what follows `ssh-fell-back`),
+/// asked by the local zsh's `ssh` function after a wrapped `ssh` ended with
+/// `N`. Writes the plain rerun's arguments to `out` ([`fell_back`]), each
+/// followed by a NUL, or nothing — `ssh-argv`'s wire; the exit code is always
+/// zero. `--instance` is `ssh-argv`'s, so the rerun's sharing options are the
+/// wrapped call's.
+///
+/// `ssh -G` runs once (not for [`SSH_FAILURE`]); the state file is re-read
+/// until the answer is not a fallback or [`FELL_BACK_PATIENCE`] is spent. The
+/// [`Fact::Plain`] row is written before printing, but a failed write still
+/// prints: the reconnection is the user's, the row only saves the next one's
+/// detour.
+pub fn ssh_fell_back_main(
+    argv: &[String],
+    runner: &dyn SshRunner,
+    state_path: &Path,
+    roots: &[PathBuf],
+    patience: Duration,
+    out: &mut impl Write,
+) -> i32 {
+    let Some((rc, rest)) = (match argv {
+        [flag, code, rest @ ..] if flag == "--rc" => code.parse::<i32>().ok().map(|rc| (rc, rest)),
+        _ => None,
+    }) else {
+        return 0;
+    };
+    let (sockets, rest) = match rest {
+        [flag, instance, rest @ ..] if flag == "--instance" => {
+            (crate::ssh_route::instance_dirs(roots, instance), rest)
+        }
+        rest => (Vec::new(), rest),
+    };
+    let Some(("--", args)) = rest.split_first().map(|(head, tail)| (head.as_str(), tail)) else {
+        return 0;
+    };
+    if rc == SSH_FAILURE {
+        return 0;
+    }
+    let Some(resolved) = config(runner, args) else {
+        return 0;
+    };
+    let deadline = Instant::now() + patience;
+    let plain = loop {
+        let Some(plain) = fell_back(args, rc, &resolved, &load(state_path), &sockets) else {
+            return 0;
+        };
+        if Instant::now() >= deadline {
+            break plain;
+        }
+        thread::sleep(FELL_BACK_POLL);
+    };
+    let _ = record(
+        state_path,
+        Fact::Plain,
+        &plain.key,
+        unix_now(),
+        LOCK_PATIENCE,
+    );
+    let mut bytes = Vec::new();
+    for arg in &plain.args {
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
+    }
+    let _ = out.write_all(&bytes).and_then(|()| out.flush());
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,6 +922,7 @@ mod tests {
     }
 
     const BOOT_STUB: &str = "echo hi";
+    const NONCE: &str = "0123456789abcdef";
 
     #[test]
     fn unwrap_inverts_wrap() {
@@ -730,20 +942,22 @@ mod tests {
             };
             for parent in [None, Some(7), Some(u32::MAX)] {
                 for control in [None, Some(&control)] {
-                    let wrapped = wrap(&args, BOOT_STUB, parent, control);
+                    let wrapped = wrap(&args, BOOT_STUB, parent, NONCE, control);
                     assert_eq!(wrapped.first().map(String::as_str), Some("-t"));
                     assert_eq!(unwrap(&wrapped), &args[..], "{wrapped:?}");
+                    assert_eq!(nonce(&wrapped), Some(NONCE), "{wrapped:?}");
                 }
             }
-            // An argv that was never wrapped is itself.
+            // An argv that was never wrapped is itself, without a nonce.
             assert_eq!(unwrap(&args), &args[..]);
+            assert_eq!(nonce(&args), None);
         }
     }
 
     #[test]
     fn unwrap_reads_positions_not_contents() {
         // The command somewhere other than last, or no leading `-t`: not ours.
-        let command = remote_command(BOOT_STUB, None);
+        let command = remote_command(BOOT_STUB, None, NONCE);
         for args in [
             vec!["prod".to_owned(), command.clone()],
             vec!["-v".to_owned(), "prod".to_owned(), command.clone()],
@@ -759,6 +973,23 @@ mod tests {
             words(&["-t", "prod", "exec sh -c 'x' other"]),
             words(&["-t", "prod", "exec sh -c 'x' bateri-boot 7x"]),
             words(&["-t", "prod", "exec sh -c 'x' bateri-boot 7 8"]),
+            // A nonce of another form, or a third word.
+            words(&[
+                "-t",
+                "prod",
+                "exec sh -c 'x' bateri-boot - 0123456789ABCDEF",
+            ]),
+            words(&["-t", "prod", "exec sh -c 'x' bateri-boot - 0123"]),
+            words(&[
+                "-t",
+                "prod",
+                "exec sh -c 'x' bateri-boot x 0123456789abcdef",
+            ]),
+            words(&[
+                "-t",
+                "prod",
+                "exec sh -c 'x' bateri-boot 7 0123456789abcdef 9",
+            ]),
             // The sharing options before `-t`: not the wrapped shape.
             words(&[
                 "-o",
@@ -773,7 +1004,24 @@ mod tests {
             ]),
         ] {
             assert_eq!(unwrap(&args), &args[..], "{args:?}");
+            assert_eq!(nonce(&args), None, "{args:?}");
         }
+        // 048's forms (an older build's session) still unwrap, without a nonce.
+        for last in ["exec sh -c 'x' bateri-boot", "exec sh -c 'x' bateri-boot 7"] {
+            let args = words(&["-t", "prod", last]);
+            assert_eq!(unwrap(&args), &words(&["prod"])[..], "{last}");
+            assert_eq!(nonce(&args), None, "{last}");
+        }
+    }
+
+    #[test]
+    fn a_nonce_is_fresh_hex() {
+        let first = new_nonce().expect("/dev/urandom");
+        assert!(is_nonce(&first), "{first}");
+        assert_ne!(new_nonce().as_deref(), Some(first.as_str()));
+        // Without a parent the placeholder keeps the nonce at `$2`.
+        assert!(remote_command("x", None, NONCE).ends_with(" bateri-boot - 0123456789abcdef"));
+        assert!(remote_command("x", Some(7), NONCE).ends_with(" bateri-boot 7 0123456789abcdef"));
     }
 
     #[test]
@@ -783,6 +1031,7 @@ mod tests {
             &words(&["-o", "User=x", "--", "prod"]),
             BOOT_STUB,
             None,
+            NONCE,
             None,
         );
         let call = ssh_call("ssh", &wrapped).expect("interactive with -t");
@@ -822,12 +1071,17 @@ mod tests {
     #[test]
     fn state_rows_round_trip_and_skip_malformed_lines() {
         let text = "posix\ta@h:22\t100\nbogus\tx\t1\nposix\t\t3\ntouched\ta@h:22\tnot\n\
-                    touched\tb@h:22\t5\textra\ntouched\tb@h:22\t7\n";
+                    touched\tb@h:22\t5\textra\ntouched\tb@h:22\t7\nplain\tr@h:22\t8\n";
         let state = HostState::parse(text);
         assert!(state.knows(Fact::Posix, "a@h:22"));
         assert!(!state.knows(Fact::Touched, "a@h:22"));
         assert!(state.knows(Fact::Touched, "b@h:22"));
-        assert_eq!(state.render(), "posix\ta@h:22\t100\ntouched\tb@h:22\t7\n");
+        assert!(state.knows(Fact::Plain, "r@h:22"));
+        assert!(!state.knows(Fact::Plain, "b@h:22"));
+        assert_eq!(
+            state.render(),
+            "posix\ta@h:22\t100\ntouched\tb@h:22\t7\nplain\tr@h:22\t8\n"
+        );
         let mut state = state;
         state.note(Fact::Touched, "b@h:22", 9);
         state.note(Fact::Posix, "c@h:22", 10);
@@ -836,7 +1090,7 @@ mod tests {
             state,
             "one row per fact and key"
         );
-        assert_eq!(state.rows.len(), 3);
+        assert_eq!(state.rows.len(), 4);
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -929,10 +1183,11 @@ mod tests {
                 &learned(),
                 BOOT_STUB,
                 None,
+                NONCE,
                 &[]
             ),
             Some(Wrapped {
-                args: wrap(&args, BOOT_STUB, None, None),
+                args: wrap(&args, BOOT_STUB, None, NONCE, None),
                 key: "u@h:22".to_owned(),
             })
         );
@@ -953,6 +1208,7 @@ mod tests {
                 &learned(),
                 BOOT_STUB,
                 None,
+                NONCE,
                 &[],
             );
             (wrapped, runner.calls.borrow().len())
@@ -974,7 +1230,17 @@ mod tests {
         // quoting is never sent.
         for boot in ["", "it's", "a\\b", "hi!", "two\nlines"] {
             assert_eq!(
-                decide(&args, true, &settings, &runner, &learned(), boot, None, &[]),
+                decide(
+                    &args,
+                    true,
+                    &settings,
+                    &runner,
+                    &learned(),
+                    boot,
+                    None,
+                    NONCE,
+                    &[]
+                ),
                 None,
                 "{boot:?}"
             );
@@ -993,7 +1259,17 @@ mod tests {
         ] {
             let runner = Gconfig::new(out);
             assert_eq!(
-                decide(&args, true, &on, &runner, &learned(), BOOT_STUB, None, &[]),
+                decide(
+                    &args,
+                    true,
+                    &on,
+                    &runner,
+                    &learned(),
+                    BOOT_STUB,
+                    None,
+                    NONCE,
+                    &[]
+                ),
                 None,
                 "{out}"
             );
@@ -1009,6 +1285,7 @@ mod tests {
                 &HostState::default(),
                 BOOT_STUB,
                 None,
+                NONCE,
                 &[],
             ),
             None
@@ -1020,7 +1297,17 @@ mod tests {
         };
         let runner = Gconfig::new(PLAIN);
         assert_eq!(
-            decide(&args, true, &off, &runner, &learned(), BOOT_STUB, None, &[]),
+            decide(
+                &args,
+                true,
+                &off,
+                &runner,
+                &learned(),
+                BOOT_STUB,
+                None,
+                NONCE,
+                &[]
+            ),
             None
         );
         assert!(runner.calls.borrow().is_empty());
@@ -1041,6 +1328,7 @@ mod tests {
                 &learned(),
                 BOOT_STUB,
                 None,
+                NONCE,
                 &[],
             ),
             None
@@ -1062,6 +1350,7 @@ mod tests {
                 &path,
                 &[],
                 boot,
+                Some(NONCE),
                 &mut out,
             );
             assert_eq!(code, 0);
@@ -1071,7 +1360,7 @@ mod tests {
         for (block, parent) in [("7", Some(7)), ("", None), ("x", None)] {
             assert_eq!(
                 run(&["--tty", "--block", block, "--", "prod"], BOOT_STUB),
-                wrap(&words(&["prod"]), BOOT_STUB, parent, None)
+                wrap(&words(&["prod"]), BOOT_STUB, parent, NONCE, None)
                     .iter()
                     .flat_map(|arg| arg.bytes().chain([0]))
                     .collect::<Vec<u8>>(),
@@ -1079,7 +1368,7 @@ mod tests {
             );
         }
         let printed = run(&["--tty", "--", "-p", "2", "prod"], BOOT_STUB);
-        let expected: Vec<u8> = wrap(&words(&["-p", "2", "prod"]), BOOT_STUB, None, None)
+        let expected: Vec<u8> = wrap(&words(&["-p", "2", "prod"]), BOOT_STUB, None, NONCE, None)
             .iter()
             .flat_map(|arg| arg.bytes().chain([0]))
             .collect();
@@ -1117,6 +1406,7 @@ mod tests {
                 &path,
                 &roots,
                 BOOT_STUB,
+                Some(NONCE),
                 &mut out,
             );
             let mut args: Vec<String> = out
@@ -1133,7 +1423,7 @@ mod tests {
         let wrapped = run(PLAIN, &["--tty", "--instance", "0a1b2c3d", "--", "prod"]);
         assert_eq!(
             wrapped,
-            wrap(&words(&["prod"]), BOOT_STUB, None, Some(&control))
+            wrap(&words(&["prod"]), BOOT_STUB, None, NONCE, Some(&control))
         );
         assert_eq!(
             wrapped[1..7],
@@ -1161,11 +1451,11 @@ mod tests {
                     "prod"
                 ]
             ),
-            wrap(&words(&["prod"]), BOOT_STUB, Some(4), Some(&control))
+            wrap(&words(&["prod"]), BOOT_STUB, Some(4), NONCE, Some(&control))
         );
         // The user's own sharing, an unknown or a missing instance: no sharing,
         // still wrapped.
-        let plain = wrap(&words(&["prod"]), BOOT_STUB, None, None);
+        let plain = wrap(&words(&["prod"]), BOOT_STUB, None, NONCE, None);
         for config in [
             "user u\nhostname h\nport 22\ncontrolmaster auto\n",
             "user u\nhostname h\nport 22\ncontrolpath /u/cm-%C\n",
@@ -1197,11 +1487,151 @@ mod tests {
             argv.extend_from_slice(typed);
             assert_eq!(
                 run(PLAIN, &argv),
-                wrap(&words(typed), BOOT_STUB, None, None),
+                wrap(&words(typed), BOOT_STUB, None, NONCE, None),
                 "{typed:?}"
             );
         }
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 049 R3.2/R3.3: the fallback's table — 255 says nothing about the shell,
+    /// a `posix` server's session was the user's, a touched server without
+    /// `posix` reruns plain with the wrapped call's sharing options.
+    #[test]
+    fn the_fallback_reruns_only_a_touched_server_without_posix() {
+        let args = words(&["-p", "2222", "prod"]);
+        let touched = |posix: bool| {
+            let mut state = HostState::default();
+            state.note(Fact::Touched, "u@h:22", 1);
+            if posix {
+                state.note(Fact::Posix, "u@h:22", 2);
+            }
+            state
+        };
+        let plain = Some(FellBack {
+            args: args.clone(),
+            key: "u@h:22".to_owned(),
+        });
+        for rc in [0, 1, 127, 130] {
+            assert_eq!(
+                fell_back(&args, rc, PLAIN, &touched(false), &[]),
+                plain,
+                "{rc}"
+            );
+            assert_eq!(
+                fell_back(&args, rc, PLAIN, &touched(true), &[]),
+                None,
+                "{rc}"
+            );
+        }
+        assert_eq!(
+            fell_back(&args, SSH_FAILURE, PLAIN, &touched(false), &[]),
+            None,
+            "ssh's own error"
+        );
+        assert_eq!(
+            fell_back(&args, 1, PLAIN, &HostState::default(), &[]),
+            None,
+            "never wrapped"
+        );
+        assert_eq!(fell_back(&args, 1, "garbage", &touched(false), &[]), None);
+
+        // With the instance directory: the same `Control` the wrapped call got.
+        let root = PathBuf::from(format!("/tmp/bt-wrap-fb-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = crate::ssh_route::prepare_instance(&root, "0a1b2c3d").unwrap();
+        let sockets = vec![dir.clone()];
+        let wrapped = decide(
+            &args,
+            true,
+            &Settings::default(),
+            &Gconfig::new(PLAIN),
+            &learned(),
+            BOOT_STUB,
+            None,
+            NONCE,
+            &sockets,
+        )
+        .expect("wrapped");
+        let rerun = fell_back(&args, 1, PLAIN, &touched(false), &sockets).expect("rerun");
+        assert_eq!(
+            rerun.args[..6],
+            wrapped.args[1..7],
+            "the wrapped call's options"
+        );
+        assert_eq!(rerun.args[6..], args[..]);
+        assert_eq!(unwrap(&rerun.args), &rerun.args[..], "not wrapped");
+        // The user's own sharing choice: none of ours, as in `decide`.
+        let typed = words(&["-S", "none", "prod"]);
+        assert_eq!(
+            fell_back(&typed, 1, PLAIN, &touched(false), &sockets).map(|fb| fb.args),
+            Some(typed.clone())
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_fallback_subcommand_records_plain_and_prints_the_rerun() {
+        let dir = scratch("fell");
+        let path = dir.join("remote-hosts");
+        let runner = Gconfig::new(PLAIN);
+        let run = |argv: &[&str], patience: Duration| {
+            let mut out = Vec::new();
+            let code = ssh_fell_back_main(&words(argv), &runner, &path, &[], patience, &mut out);
+            assert_eq!(code, 0);
+            out
+        };
+        let nul = |args: &[&str]| -> Vec<u8> {
+            args.iter().flat_map(|arg| arg.bytes().chain([0])).collect()
+        };
+        // Never wrapped: nothing, and no row.
+        assert!(run(&["--rc", "1", "--", "prod"], Duration::ZERO).is_empty());
+        record(&path, Fact::Touched, "u@h:22", 1, LOCK_PATIENCE).unwrap();
+        // ssh's own error: nothing, and not even `ssh -G`.
+        let calls = runner.calls.borrow().len();
+        assert!(run(&["--rc", "255", "--", "prod"], Duration::ZERO).is_empty());
+        assert_eq!(runner.calls.borrow().len(), calls);
+        assert!(!load(&path).knows(Fact::Plain, "u@h:22"));
+        // Malformed calls: nothing.
+        for argv in [
+            &["--", "prod"][..],
+            &["--rc", "x", "--", "prod"],
+            &["--rc", "1", "prod"],
+        ] {
+            assert!(run(argv, Duration::ZERO).is_empty(), "{argv:?}");
+        }
+        // Touched, not posix: `plain` is recorded and the rerun printed.
+        assert_eq!(
+            run(&["--rc", "1", "--", "prod"], Duration::ZERO),
+            nul(&["prod"])
+        );
+        assert!(load(&path).knows(Fact::Plain, "u@h:22"));
+
+        // A `posix` row that lands while the subcommand waits wins: nothing.
+        let dir2 = scratch("fell-race");
+        let path2 = dir2.join("remote-hosts");
+        record(&path2, Fact::Touched, "u@h:22", 1, LOCK_PATIENCE).unwrap();
+        let writer = {
+            let path2 = path2.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                record(&path2, Fact::Posix, "u@h:22", 2, LOCK_PATIENCE).unwrap();
+            })
+        };
+        let mut out = Vec::new();
+        ssh_fell_back_main(
+            &words(&["--rc", "0", "--", "prod"]),
+            &runner,
+            &path2,
+            &[],
+            Duration::from_secs(5),
+            &mut out,
+        );
+        writer.join().unwrap();
+        assert!(out.is_empty(), "the late `posix` row is seen");
+        assert!(!load(&path2).knows(Fact::Plain, "u@h:22"));
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&dir2).unwrap();
     }
 
     #[test]
@@ -1231,7 +1661,7 @@ mod tests {
             "the one-liner breaks a login shell's quoting"
         );
         assert!(payload().starts_with(&format!("{MAGIC}\n")));
-        let command = remote_command(boot, Some(u32::MAX));
+        let command = remote_command(boot, Some(u32::MAX), NONCE);
         assert!(command.len() < 64 * 1024, "{} bytes", command.len());
         let args = words(&["-p", "2222", "prod"]);
         let runner = Gconfig::new(PLAIN);
@@ -1243,6 +1673,7 @@ mod tests {
             &learned(),
             boot,
             None,
+            NONCE,
             &[],
         )
         .expect("the real bootstrap wraps");
@@ -1307,6 +1738,7 @@ mod tests {
                 &load(&unreadable),
                 boot(),
                 None,
+                NONCE,
                 &[],
             ),
             None
@@ -1345,6 +1777,8 @@ mod remote_shells {
     /// The local `ssh` block the harness's remote shells run under: the `P`
     /// of their `bt_remote=<P>.<S>.<n>` and `bateri://rblock/<P>.<S>.<n>`.
     const PARENT: u32 = 41;
+    /// The attempt's nonce the simulated sshd passes (049 R2.1).
+    const NONCE: &str = "00c0ffee00c0ffee";
 
     /// The remote blocks end to end (048 phase-3): the server's `true`,
     /// `false` and `sleep` get their stripes and the counter from our remote
@@ -1397,7 +1831,7 @@ mod remote_shells {
             SessionOptions {
                 command: Some((
                     shell.display().to_string(),
-                    vec!["-c".to_owned(), remote_command(boot(), Some(PARENT))],
+                    vec!["-c".to_owned(), remote_command(boot(), Some(PARENT), NONCE)],
                 )),
                 working_directory: Some(home.to_path_buf()),
                 home: Some(home.to_path_buf()),
@@ -1697,5 +2131,113 @@ mod remote_shells {
             session.write(b"exit\n");
             session.shutdown();
         }
+    }
+
+    /// sshd's call without a terminal and with stdin at its end: the login
+    /// shell the bootstrap `exec`s exits at once, and the bytes it printed are
+    /// the raw stream — the PTY harness above sees only the screen and the
+    /// ledger, and a mark of a session with no running command is not kept.
+    fn raw_output(shell: &Path, home: &Path, extra: &[(&str, String)]) -> Vec<u8> {
+        use std::io::Read as _;
+        let mut child = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(remote_command(boot(), Some(PARENT), NONCE))
+            .env_clear()
+            .env("HOME", home)
+            .env("SHELL", shell)
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .envs(extra.iter().map(|(key, value)| (*key, value.as_str())))
+            .current_dir(home)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the login shell");
+        let mut stdout = child.stdout.take().expect("stdout");
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout.read_to_end(&mut bytes);
+            bytes
+        });
+        let child = std::cell::RefCell::new(child);
+        wait_until("the login shell did not exit", || {
+            child.borrow_mut().try_wait().ok().flatten().is_some()
+        });
+        reader.join().expect("reader")
+    }
+
+    /// 049 R2.1: the attempt's `up` is the bootstrap's **first** output —
+    /// before the motd and before every fault, the decode arm's included
+    /// (the one-liner prints it there itself, then `decode`).
+    #[test]
+    fn the_bootstrap_says_up_before_anything_else() {
+        let up = format!("\x1b]8133;i;up;{NONCE}\x07");
+        let zsh = which("zsh").expect("zsh");
+        let sh = which("sh").expect("sh");
+        for arm in ["zsh", "shell", "write", "decode"] {
+            let root = TempRoot::new(&format!("remote-up-{arm}"));
+            let home = root.0.join("home");
+            std::fs::create_dir_all(home.join(".local/share")).expect("home");
+            let mut extra = Vec::new();
+            let shell = if arm == "shell" { &sh } else { &zsh };
+            if arm == "write" {
+                std::fs::write(home.join(".local/share/bateri"), "").expect("blocker");
+            }
+            if arm == "decode" {
+                let bin = root.0.join("bin");
+                std::fs::create_dir_all(&bin).expect("bin");
+                for tool in ["sh", "awk"] {
+                    let path = which(tool).expect(tool);
+                    std::os::unix::fs::symlink(path, bin.join(tool)).expect("tool");
+                }
+                extra.push(("PATH", bin.display().to_string()));
+            }
+            let out = raw_output(shell, &home, &extra);
+            assert!(
+                out.starts_with(up.as_bytes()),
+                "{arm}: {:?}",
+                String::from_utf8_lossy(&out[..out.len().min(200)])
+            );
+            let fault = match arm {
+                "zsh" => None,
+                "decode" => Some("decode"),
+                "write" => Some("write"),
+                _ => Some("shell"),
+            };
+            if let Some(fault) = fault {
+                let after = format!("\x1b]8133;f;{fault}\x07");
+                assert!(
+                    out[up.len()..]
+                        .windows(after.len())
+                        .any(|window| window == after.as_bytes()),
+                    "{arm}: the fault follows"
+                );
+            }
+            assert_eq!(
+                out.windows(up.len())
+                    .filter(|w| *w == up.as_bytes())
+                    .count(),
+                1,
+                "{arm}: once"
+            );
+        }
+        // A nonce that is not lowercase hex is not printed.
+        let root = TempRoot::new("remote-up-bad");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let out = std::process::Command::new(&sh)
+            .arg("-c")
+            .arg(format!("exec sh -c '{}' bateri-boot - 'a;b'", boot()))
+            .env("HOME", &home)
+            .env("SHELL", &sh)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("sh");
+        assert!(
+            !out.stdout.windows(9).any(|w| w == b"8133;i;up"),
+            "{:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
 }

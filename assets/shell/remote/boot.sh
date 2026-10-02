@@ -16,6 +16,14 @@
 # literal, so no here-document — bash as `sh` would put one in `/tmp`).
 #
 # WHAT IT DOES, IN ORDER:
+#   0. says it runs (049 R2.1): `ESC ] 8133 ; i ; up ; {nonce} BEL`, the
+#      attempt's nonce from `$2` (`ssh_wrap::remote_command`), before the motd
+#      and before every fault — the proof that the server's login shell ran
+#      our command, so bateri learns the server as `posix` (the pane matches
+#      the nonce against the wrapped argv's). A nonce that is not lowercase
+#      hex is not printed (the one-liner's quoting rule: nothing from the
+#      command line goes into a sequence unchecked). The one-liner's decode
+#      fallback, which never reaches this file, prints the same mark itself.
 #   1. prints the motd — sshd does not when it runs a command (`do_login` is
 #      the interactive login's path). A known limit both ways: a server that
 #      turned the motd off for ssh (`PrintMotd no`, no pam_motd) shows it now,
@@ -43,6 +51,12 @@
 # THE LOGIN SHELL'S `$0` IS ITS PATH, not `-zsh`: `exec -a` is not POSIX, so
 # the shell is started with `-l` (and bash with `--posix -l`). A login file
 # that tests `$0` for a leading `-` sees a difference — a known and narrow one.
+
+# 0. The proof of the attempt, before anything else can fail.
+case ${2-} in
+  '' | *[!0-9a-f]*) ;;
+  *) printf '\033]8133;i;up;%s\007' "$2" ;;
+esac
 
 bt_fault() {
   printf '\033]8133;f;%s\007' "$1"

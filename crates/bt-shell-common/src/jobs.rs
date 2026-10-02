@@ -110,6 +110,11 @@ pub struct Target {
     pub kind: RemoteKind,
     /// The argv to re-run ([`ssh_target`], [`mosh_argv`]).
     pub argv: Vec<String>,
+    /// The nonce of a call bateri wrapped (049 R2.3, [`ssh_wrap::nonce`]):
+    /// taken from the process's argv **before** it is unwrapped, since
+    /// [`Self::argv`] is the user's. The pane matches it against the
+    /// bootstrap's `up`. `None` for a call bateri did not wrap and for mosh.
+    pub nonce: Option<String>,
 }
 
 /// The six things the decision asks of the process table.
@@ -304,6 +309,7 @@ fn remote_target(name: &str, args: &[String]) -> Option<Option<Target>> {
             host,
             kind: RemoteKind::Mosh,
             argv: mosh_argv(script_args),
+            nonce: None,
         })
     })
 }
@@ -350,6 +356,7 @@ fn ssh_target(program: &str, args: &[String]) -> Option<Target> {
         host: call.host,
         kind: RemoteKind::Ssh,
         argv: call.argv,
+        nonce: ssh_wrap::nonce(args).map(str::to_owned),
     })
 }
 
@@ -572,6 +579,7 @@ fn mosh_client_target(args: &[String]) -> Option<Target> {
         host,
         kind: RemoteKind::Mosh,
         argv: mosh_argv(&all),
+        nonce: None,
     })
 }
 
@@ -1162,6 +1170,7 @@ mod tests {
             host: host.to_owned(),
             kind: RemoteKind::Ssh,
             argv: Vec::new(),
+            nonce: None,
         })
     }
 
@@ -1220,7 +1229,13 @@ mod tests {
             socket: std::path::PathBuf::from("/tmp/bateri-501/0a1b2c3d/u-0123456789abcdef"),
         };
         for control in [None, Some(&control)] {
-            let wrapped = crate::ssh_wrap::wrap(&words(&typed), "echo hi", Some(3), control);
+            let wrapped = crate::ssh_wrap::wrap(
+                &words(&typed),
+                "echo hi",
+                Some(3),
+                "0123456789abcdef",
+                control,
+            );
             let mut argv = vec!["ssh".to_owned()];
             argv.extend(wrapped);
             let leaked: Vec<&'static str> = argv
@@ -1229,12 +1244,19 @@ mod tests {
                 .collect();
             let target = target_of(&leaked);
             assert_eq!(target.host, "prod");
+            assert_eq!(
+                target.nonce.as_deref(),
+                Some("0123456789abcdef"),
+                "the nonce is read before unwrapping"
+            );
             assert_eq!(target.argv, words(&["ssh", "-o", "User=x", "--", "prod"]));
             assert_eq!(
                 crate::quote::command_line(&target.argv),
                 "ssh -o User=x -- prod"
             );
         }
+        // A call bateri did not wrap carries no nonce.
+        assert_eq!(target_of(&["ssh", "prod"]).nonce, None);
     }
 
     #[test]

@@ -408,6 +408,7 @@ impl bt_core::Wake for SilentWake {
     // The tests do not probe for a remote session (036); the timed run's `ShellWake` does not
     // probe either (the `timed` branch).
     fn command_started(&self) {}
+    fn remote_up(&self) {}
     fn link_hover_lost(&self) {}
 }
 
