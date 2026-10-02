@@ -29,7 +29,8 @@
 #      The same fixed path every time: a shell reads its files when it starts,
 #      so rewriting them under a running shell is harmless and nothing piles
 #      up.
-#   4. `exec`s the login shell with the integration: zsh through the
+#   4. `exec`s the login shell with the integration (with the blocks'
+#      parent, `$1`, in `BATERI_RBLOCK`): zsh through the
 #      `ZDOTDIR` swap, bash in POSIX mode with `ENV`, fish through
 #      `XDG_DATA_DIRS` → `vendor_conf.d`. Each one reads the user's own login
 #      files, unchanged; no rc file on the server is written (R3.1).
@@ -102,6 +103,18 @@ if ! (umask 077 && mkdir -p "$bt_dir/zsh" "$bt_dir/bash" "$bt_dir/fish/vendor_co
   bt_fault write
   bt_login
 fi
+
+# The remote blocks' parent (048 phase-3): the local block of the `ssh`
+# command, `sh -c`'s `$1` (`ssh_wrap::remote_command`), handed to the login
+# shell's script, which takes it out of the environment again. Digits only;
+# without it the scripts print no block marks.
+case ${1-} in
+  '' | *[!0-9]*) unset BATERI_RBLOCK ;;
+  *)
+    BATERI_RBLOCK=$1
+    export BATERI_RBLOCK
+    ;;
+esac
 
 # 4. The login shell with the integration.
 case $bt_shell in

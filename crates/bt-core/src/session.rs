@@ -85,9 +85,9 @@ use crate::search::{
 };
 use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule};
 use crate::shell::{
-    COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection, DockState,
-    DockStatus, Precision, RemoteStats, RemoteTarget, Scanner, ShellLog, ShellState, Stripe,
-    Transfer, TtyModes,
+    BlockKey, COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection,
+    DockState, DockStatus, Precision, RemoteStats, RemoteTarget, Scanner, ShellLog, ShellState,
+    Stripe, Transfer, TtyModes,
 };
 use crate::wake::Wake;
 
@@ -581,7 +581,7 @@ pub struct Blocks {
     /// is not drawn. The reason it is collected in phase 1 is the lock regime
     /// — the column is grid knowledge and phase 2 has already released
     /// `Term`; a second scan would mean taking the lock again.
-    anchors: Vec<(u32, u16, u16)>,
+    anchors: Vec<(BlockKey, u16, u16)>,
     /// The list phase 2 produced; the drawing side sees only this.
     resolved: Vec<Block>,
     /// **The fill band's own anchors**: `(block id, fill-local row)`.
@@ -595,7 +595,7 @@ pub struct Blocks {
     /// There is **no** third field: the duration counter is not drawn in the
     /// band and `last_col` was its only consumer (rationale in
     /// [`Blocks::fill_slice`]).
-    fill_anchors: Vec<(u32, u16)>,
+    fill_anchors: Vec<(BlockKey, u16)>,
     /// The band's resolved list; rows are **fill-local**.
     fill_resolved: Vec<Block>,
     /// The suppressed input row's display (`PREDISPLAY ++ BUFFER ++
@@ -2124,13 +2124,15 @@ enum ClearKind {
     Scrollback,
 }
 
-/// The block id carried by screen row `line` — the row form of [`block_id`],
-/// the reading idiom of [`block_row_continues`]. The first found wins: two
-/// blocks' anchors cannot be on one row (the link closes at `preexec`).
-fn row_block<T>(term: &Term<T>, line: Line) -> Option<u32> {
+/// The block key carried by screen row `line` — the row form of
+/// [`block_key`], the reading idiom of [`block_row_continues`]. The first
+/// found wins: two blocks' anchors cannot be on one row (the link closes at
+/// `preexec`). Both namespaces: inside ssh the remote prompt's anchor is what
+/// tells ⌘K which rows are the input's (048 phase-3).
+fn row_block<T>(term: &Term<T>, line: Line) -> Option<BlockKey> {
     term.grid()[line]
         .into_iter()
-        .find_map(|cell| cell.hyperlink().and_then(|link| block_id(link.uri())))
+        .find_map(|cell| cell.hyperlink().and_then(|link| block_key(link.uri())))
 }
 
 /// ⌘K's **first kept row** (034 R1.1): everything above that row is discarded
@@ -2162,7 +2164,7 @@ fn row_block<T>(term: &Term<T>, line: Line) -> Option<u32> {
 fn protected_top<T>(term: &Term<T>, input_block: Option<u32>) -> usize {
     let row = term.grid().cursor.point.line.0.max(0);
     let top = row_block(term, Line(row))
-        .or(input_block)
+        .or(input_block.map(BlockKey::Local))
         .and_then(|id| (0..=row).find(|&probe| row_block(term, Line(probe)) == Some(id)))
         .unwrap_or(row);
     usize::try_from(top).unwrap_or(0)
@@ -3016,7 +3018,7 @@ fn link_spans<T>(term: &Term<T>, first: Point, last: Point, offset: i32) -> Vec<
 /// [`Session::clear_boundary`]) is `false` too: the prompt Ctrl-L reprints
 /// carries the same id and must not lose its marker. The scan stops at the
 /// first match, once per row.
-fn block_row_continues<T>(term: &Term<T>, line: Line, id: u32, boundary: usize) -> bool {
+fn block_row_continues<T>(term: &Term<T>, line: Line, id: BlockKey, boundary: usize) -> bool {
     if line < term.topmost_line() || line > term.bottommost_line() {
         return false;
     }
@@ -3030,7 +3032,7 @@ fn block_row_continues<T>(term: &Term<T>, line: Line, id: u32, boundary: usize) 
         .line;
     term.grid()[line]
         .into_iter()
-        .any(|cell| cell.hyperlink().and_then(|link| block_id(link.uri())) == Some(id))
+        .any(|cell| cell.hyperlink().and_then(|link| block_key(link.uri())) == Some(id))
 }
 
 /// The block id from the OSC 8 link attached to a prompt cell; `None` for a
@@ -3045,7 +3047,24 @@ fn block_row_continues<T>(term: &Term<T>, line: Line, id: u32, boundary: usize) 
 /// i.e. text. The scheme's other path (`bateri://tab/`, the tab's external
 /// name) is in `crate::identity`.
 fn block_id(uri: &str) -> Option<u32> {
-    uri.strip_prefix("bateri://block/")?.parse().ok()
+    match block_key(uri)? {
+        BlockKey::Local(id) => Some(id),
+        BlockKey::Remote { .. } => None,
+    }
+}
+
+/// The block key from a prompt cell's link: [`block_id`]'s namespace, or our
+/// remote shell's `bateri://rblock/<P>.<S>.<n>` (048 phase-3,
+/// [`crate::shell::RemoteShell`]). The drawing loops, [`block_row_continues`]
+/// and ⌘K's kept row ([`row_block`]) read both; suppression's anchor
+/// ([`anchor_row_at_or_above`]) asks [`block_id`] — the local input line is
+/// the only one suppressed.
+fn block_key(uri: &str) -> Option<BlockKey> {
+    if let Some(id) = uri.strip_prefix("bateri://block/") {
+        return id.parse().ok().map(BlockKey::Local);
+    }
+    let (shell, id) = crate::shell::remote_key(uri.strip_prefix("bateri://rblock/")?)?;
+    Some(BlockKey::Remote { shell, id })
 }
 
 /// [`Session::scroll_wheel`]'s answer: where the wheel went.
@@ -4238,7 +4257,7 @@ impl Session {
         let mut open_run: Option<SelectionRun> = None;
         // The last `(row, id)` found to be a continuation row: the anchor is on all
         // of a row's cells, the scan of the row above once per row.
-        let mut continued: Option<(u16, u32)> = None;
+        let mut continued: Option<(u16, BlockKey)> = None;
         // A clear not yet consumed: the history's newest row is its remnant
         // ([`Session::clear_boundary`]). The place that consumes the generation is
         // below (`observe_screen_clear`), this only reads. **Once more on an
@@ -4438,7 +4457,7 @@ impl Session {
             // `man` page's `file://` does not land here.
             if !alt_screen
                 && !hover_only
-                && let Some(id) = cell.hyperlink().and_then(|link| block_id(link.uri()))
+                && let Some(id) = cell.hyperlink().and_then(|link| block_key(link.uri()))
             {
                 // The anchor is on **all** of the prompt's cells; the side that wants
                 // the first row records only the change. The same id appearing a
@@ -4470,7 +4489,7 @@ impl Session {
                 // The suppression's upper end from the same read: the **first**
                 // anchor row of the block being written. `get_or_insert` does not
                 // write the second row — in a multi-line prompt the range must start from the top.
-                if suppressed_block.is_some_and(|input| input.block == id) {
+                if suppressed_block.is_some_and(|input| BlockKey::Local(input.block) == id) {
                     suppress_from.get_or_insert(row);
                 }
             }
@@ -4763,7 +4782,7 @@ impl Session {
         // scrollback (band `fill <= history_size`, the top row the gate above), but
         // indexing in `bt-core` is under the panic ban (R2.5) and what carries the
         // ban is the **call site**, not the type.
-        let mut fill_continued: Option<(u16, u32)> = None;
+        let mut fill_continued: Option<(u16, BlockKey)> = None;
         for fill_row in 0..channel {
             // **The offset term is for the top row**: the band runs only in a
             // bottom-anchored window ([`Session::fill_rows`]) and there the term is
@@ -4793,7 +4812,7 @@ impl Session {
                 // The continuation-row rule is the same as the grid's too: if the
                 // middle of a multi-line command stands at the top of the band the
                 // marker is not there.
-                if let Some(id) = cell.hyperlink().and_then(|link| block_id(link.uri()))
+                if let Some(id) = cell.hyperlink().and_then(|link| block_key(link.uri()))
                     && blocks.fill_anchors.last().map(|&(last, _)| last) != Some(id)
                     && fill_continued != Some((fill_row, id))
                 {
@@ -5441,7 +5460,7 @@ impl Session {
             ..
         } = blocks;
         let shell = lock(&self.shell);
-        let running = shell.running();
+        let running = shell.running_blocks();
         let counter_fg = theme.dim_linear();
         // **The clock's stopping condition is born here** (013 phase-2): if the
         // running block's anchor is not visible in this frame (slid up, alternate
@@ -5456,7 +5475,7 @@ impl Session {
             // stripe ("unknown is not drawn") but its duration is known; hiding it
             // too would be hiding something known.
             if let Some(duration) = shell.duration(id, running) {
-                let live = running == Some(id);
+                let live = running.is(id);
                 // A second anchor on the same row: the counter is drawn **once**.
                 // `last_col` is processed only for the last anchor (the loop's
                 // `last_mut`), i.e. the earlier ones would pass with zero ink and
@@ -5530,8 +5549,13 @@ impl Session {
                 // number nobody sees — and since the text only grows, it is not
                 // expected to fit later either (if the window widens damage is born
                 // anyway and the decision is made again).
+                // **The sooner one** ([`crate::shell::sooner`]): the local `ssh` block and
+                // the remote block under it can both be live (048 phase-3), on different
+                // sub-second phases; the later one's deadline would make the other's
+                // counter step late.
                 if live && (drawn || duration < COUNTER_FLOOR) {
-                    next_tick = Some(crate::shell::next_tick(duration));
+                    next_tick =
+                        crate::shell::sooner(next_tick, Some(crate::shell::next_tick(duration)));
                 }
             }
             // An id the ledger does not know (the ring wrapped, the counter reset)
@@ -6979,7 +7003,7 @@ impl Session {
     /// `frame()` takes the same leaf lock too (010, phase 2) but **after** it
     /// releases the `Term` lock; the two never nest anywhere.
     pub fn shell_state(&self) -> Option<ShellState> {
-        lock(&self.shell).state
+        lock(&self.shell).local.state
     }
 
     /// The shell's last OSC 7 directory; `None` if none ever came.
@@ -7640,7 +7664,7 @@ impl Session {
             let link = hover_taken.as_deref().and_then(|hover| {
                 hover.dock_link(&shell.dock, cols.grid, input_rows, shell.dock_scroll)
             });
-            (shell.state, change, range, shell.dock_scroll, link)
+            (shell.local.state, change, range, shell.dock_scroll, link)
         };
         // The remote folder's title fallback (no OSC 7), after the `shell`
         // round: the status bar shows what the links resolve under.
@@ -11802,6 +11826,99 @@ mod tests {
         );
         let rows: Vec<u16> = blocks.as_slice().iter().map(|block| block.row).collect();
         assert_eq!(rows, [0], "{:?}", blocks.as_slice());
+        session.shutdown();
+    }
+
+    /// One frame's resolved block list.
+    fn blocks_now(session: &Session) -> Vec<Block> {
+        let mut blocks = Blocks::default();
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        blocks.as_slice().to_vec()
+    }
+
+    #[test]
+    fn remote_blocks_are_drawn_from_their_own_ledger_and_stay_after_ssh() {
+        // 048 phase-3: the local `ssh` (block 1) runs; under it our remote shell's
+        // blocks are anchored with `rblock/1.n` and marked with `bt_remote=1.n` — a
+        // finished one, a failed two-row one (its continuation row takes no mark)
+        // and a running one. When our local `D` ends ssh the finished rows keep
+        // their stripes and the running one goes ("unknown is not drawn").
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033]133;A;bt_block=1\\007\\033]8;;bateri://block/1\\007$ ssh\
+             \\033]8;;\\007\\033]133;C\\007\\r\\n\
+             \\033]133;A;bt_remote=1.9.1\\007\\033]8;;bateri://rblock/1.9.1\\007r$ true\
+             \\033]8;;\\007\\033]133;C;bt_remote=1.9.1\\007\\r\\n\\033]133;D;0;bt_remote=1.9.1\\007\
+             \\033]133;A;bt_remote=1.9.2\\007\\033]8;;bateri://rblock/1.9.2\\007r$ a\\r\\nb\
+             \\033]8;;\\007\\033]133;C;bt_remote=1.9.2\\007\\r\\n\\033]133;D;1;bt_remote=1.9.2\\007\
+             \\033]133;A;bt_remote=1.9.3\\007\\033]8;;bateri://rblock/1.9.3\\007r$ sleep\
+             \\033]8;;\\007\\033]133;C;bt_remote=1.9.3\\007'; read _; \
+             printf '\\r\\n\\033]133;D;255;bt_block=1\\007'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| row_text(cells, 4) == "r$sleep");
+        let stripes = |blocks: &[Block]| -> Vec<(u16, LinearRgba)> {
+            blocks
+                .iter()
+                .map(|block| (block.row, block.stripe))
+                .collect()
+        };
+        assert_eq!(
+            stripes(&blocks_now(&session)),
+            [
+                (0, THEME.accent_linear()),
+                (1, THEME.success_linear()),
+                (2, THEME.error_linear()),
+                (4, THEME.accent_linear()),
+            ]
+        );
+        session.write(b"\n");
+        wait_until("our D did not arrive", Duration::from_secs(5), || {
+            session.shell_state().map(|state| state.phase) == Some(crate::ShellPhase::Finished)
+        });
+        assert_eq!(
+            stripes(&blocks_now(&session)),
+            [
+                (0, THEME.error_linear()),
+                (1, THEME.success_linear()),
+                (2, THEME.error_linear()),
+            ],
+            "the remote stripes stay in the history, the running one goes"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn clear_to_start_keeps_every_row_of_a_wrapped_remote_input() {
+        // Inside ssh (048 phase-3) the input's rows carry the remote prompt's
+        // `rblock/` anchor, not a local id; ⌘K keeps them all (034 R1.1), since it
+        // sends no byte and the remote shell would never redraw a lost upper row.
+        let wake = Arc::new(TestWake::default());
+        let typed = "a".repeat(60);
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; seq 1 30; printf '\\033]133;A;bt_remote=1.9.1\\007\
+                 \\033]8;;bateri://rblock/1.9.1\\007$ {typed}'; sleep 5"
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until("the input did not wrap", Duration::from_secs(5), || {
+            line_text(&session, 9) == "a".repeat(22)
+        });
+        assert!(session.clear_to_start());
+        let lines = screen_lines(&session);
+        assert_eq!(lines[0], format!("$ {}", "a".repeat(38)), "{lines:?}");
+        assert_eq!(lines[1], "a".repeat(22), "{lines:?}");
+        assert!(lines[2..].iter().all(String::is_empty), "{lines:?}");
         session.shutdown();
     }
 

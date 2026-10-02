@@ -137,6 +137,80 @@ pub(crate) enum Mark {
     CommandEnd { exit: Option<i32>, id: Option<u32> },
 }
 
+/// Which remote shell a remote mark comes from: `P`, the local block of the
+/// `ssh` command that opened the connection, and `S`, the remote shell's own
+/// process id (048 phase-3).
+///
+/// **`P` alone is not enough**: one command line can open two connections
+/// (`ssh a; ssh b`, a `for` loop) and both servers count from one — under one
+/// `P` the second session's `rblock/P.1` would reopen the first's and repaint
+/// its rows. The pid tells the two shells apart; `P` stays the gate of the
+/// remote clock ([`ShellLog::running_blocks`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteShell {
+    pub(crate) parent: u32,
+    pub(crate) pid: u32,
+}
+
+/// A mark of **our remote shell** (048 phase-3): any of the four letters
+/// carrying `bt_remote=<P>.<S>.<n>` — [`RemoteShell`] and `n`, the remote
+/// shell's own counter.
+///
+/// **A separate type, not a [`Mark`] with one more field**: the local gates
+/// (`ours`, `command_open`, the held `line-finish`, the remote state, the
+/// three [`ScanOutcome`] bits) must never see it, and a value the local
+/// [`ShellLog::apply`] cannot receive is the guarantee — no condition in it to
+/// forget. Its ledger is [`ShellLog::remote`].
+///
+/// **The field is on all four letters**, unlike `bt_block=` (only `A`/`D`): an
+/// identity-less `B`/`C` from the server would drive the local phase in the
+/// window before the remote probe has set the remote state (the local gate
+/// fires only while it is set).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteMark {
+    pub(crate) shell: RemoteShell,
+    /// `n`: the remote block.
+    pub(crate) id: u32,
+    /// The letter and, on `D`, the code; its own identities are `None`.
+    pub(crate) mark: Mark,
+}
+
+/// Which ledger a block anchor points to: `bateri://block/<n>` (the local
+/// shell, [`ShellLog::local`]) or `bateri://rblock/<P>.<S>.<n>` (our remote
+/// shell, [`ShellLog::remote`]).
+///
+/// The namespaces are **separate** because the two counters are: the remote
+/// shell counts from one like the local one, and `rblock/1` read as `block/1`
+/// would paint a remote row with a local command's colour. The shell is part
+/// of the key for the same reason one level up: two ssh sessions' `rblock/1`s
+/// are two blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockKey {
+    Local(u32),
+    Remote { shell: RemoteShell, id: u32 },
+}
+
+/// The running block of each ledger — the frame path's `running` argument
+/// ([`ShellLog::running_blocks`]), read once per frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RunningBlocks {
+    pub(crate) local: Option<u32>,
+    /// The remote block running under the open local `ssh` block.
+    pub(crate) remote: Option<(RemoteShell, u32)>,
+}
+
+impl RunningBlocks {
+    /// Whether `key` is the running block of its ledger — the **single**
+    /// answer [`ShellLog::stripe`], [`ShellLog::duration`] and the frame's
+    /// clock read.
+    pub(crate) fn is(self, key: BlockKey) -> bool {
+        match key {
+            BlockKey::Local(id) => self.local == Some(id),
+            BlockKey::Remote { shell, id } => self.remote == Some((shell, id)),
+        }
+    }
+}
+
 /// Everything the session knows about the shell.
 ///
 /// `Copy` and small: [`crate::Session::shell_state`] hands it out by copying
@@ -1156,6 +1230,12 @@ impl BlockLog {
         }
     }
 
+    /// Empties the ledger; the ceiling stays.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.first = 0;
+    }
+
     /// Writes the block opened with `A` into the ledger.
     fn start(&mut self, id: u32) {
         // An identity inside the range being opened a second time: we reopen the block,
@@ -1202,7 +1282,7 @@ impl BlockLog {
     /// The block the ledger **opened most recently**; `None` while the ledger is empty.
     ///
     /// Since identities are contiguous and increasing, the last record is the last
-    /// `A` — the single answer to "which block is running" ([`ShellLog::running`]).
+    /// `A` — the single answer to "which block is running" ([`BlockTrack::running`]).
     fn last(&self) -> Option<(u32, Outcome)> {
         let at = self.entries.len().checked_sub(1)?;
         Some((self.first.wrapping_add(at as u32), self.entries[at]))
@@ -1215,6 +1295,162 @@ impl BlockLog {
     fn index_of(&self, id: u32) -> Option<usize> {
         let at = id.checked_sub(self.first)? as usize;
         (at < self.entries.len()).then_some(at)
+    }
+}
+
+/// One shell's block trail: the phase, the running command's clock and the
+/// ledger — the triple a stripe, a counter and "which block is running" are
+/// read from (048 phase-3).
+///
+/// **Two instances** ([`ShellLog::local`], [`ShellLog::remote`]): our remote
+/// shell's marks drive the same rules on their own trail, so the remote rows
+/// get stripes and counters while the local phase (the dock's caret, the
+/// clock, the remote session) stays the `ssh` command's. The rules are the
+/// local ones, written once: the first `C` plants the clock, `A` resets it,
+/// only an identified `D` consumes it.
+pub(crate) struct BlockTrack {
+    /// The shell's current state; `None` = no mark yet.
+    pub(crate) state: Option<ShellState>,
+    /// The start instant of the running command; `None` while no command is running.
+    ///
+    /// **A single field, not per block:** only one command runs at a time, because
+    /// between `C` and `D` the shell does not print the next prompt. Putting an
+    /// `Instant` in every ledger entry would be a dead cost paid per tab in a
+    /// 10,000-line scrollback.
+    ///
+    /// `Instant`, not system time: even if the user changes the clock or daylight
+    /// saving passes, the duration does not run backwards.
+    pub(crate) running_since: Option<Instant>,
+    pub(crate) blocks: BlockLog,
+}
+
+impl BlockTrack {
+    fn new(scrollback: usize) -> Self {
+        Self {
+            state: None,
+            running_since: None,
+            blocks: BlockLog::new(scrollback),
+        }
+    }
+
+    /// Forgets the trail (a new remote shell); the ledger keeps its ceiling.
+    fn clear(&mut self) {
+        self.state = None;
+        self.running_since = None;
+        self.blocks.clear();
+    }
+
+    /// The first mark **creates** the state.
+    fn state(&mut self) -> &mut ShellState {
+        self.state.get_or_insert(ShellState {
+            phase: ShellPhase::Prompt,
+            last_exit: None,
+        })
+    }
+
+    /// `A`: the prompt; an identified one opens the block.
+    ///
+    /// **The clock's second reset point and a defensive arm.** If the prompt is
+    /// being printed no command is running, so the clock here is stale by
+    /// definition. If only `D` consumed it, a lost `D` (an OSC cut halfway, an
+    /// identity-less close) would leave the clock standing and the **next**
+    /// block's `D` would consume it: an instant command would look like it took
+    /// "4m 12s" (`/code-review`, 013 gate). The reset's direction is safe — the
+    /// worst case is the counter never appearing, not a made-up duration.
+    fn prompt(&mut self, id: Option<u32>) {
+        self.state().phase = ShellPhase::Prompt;
+        self.running_since = None;
+        if let Some(id) = id {
+            self.blocks.start(id);
+        }
+    }
+
+    /// `C`: the command runs. Where the clock is planted: `C` says the command
+    /// **started running**; the printing of the prompt or the time the user
+    /// spent typing must not enter the counter.
+    ///
+    /// **The first `C` wins, later ones do not overwrite.** The user's shell may
+    /// have a second OSC 133 source (iTerm2's `~/.iterm2_shell_integration.zsh`,
+    /// VS Code, Ghostty) and it prints `C` too — measured, on the user's machine
+    /// **two** `C`s arrive per command. If we overwrote, the duration would start
+    /// from the second mark; worse, a `C` arriving mid-command (the ^C arm of
+    /// iTerm2's `precmd`) would reset the clock. The only place for resetting is
+    /// the prompt (`A`).
+    fn command(&mut self) {
+        self.state().phase = ShellPhase::Running;
+        self.running_since.get_or_insert_with(Instant::now);
+    }
+
+    /// `D`: the command ended.
+    ///
+    /// We refresh the code **in every state**: filling an unreadable code with
+    /// the old one would be labeling the finished command with someone else's
+    /// code.
+    ///
+    /// **The clock is consumed only by an identified `D`**: an identity-less `D`
+    /// cannot write into the ledger, and if it consumed the clock anyway the
+    /// duration we measured would **go to waste**. This is not hypothetical, it
+    /// was measured on the user's machine: with iTerm2's shell integration
+    /// installed every command produces two `D`s — first its identity-less one,
+    /// then ours; the identity-less one took the clock, ours found it empty and
+    /// the duration was written as **zero** ("the duration does not show when it
+    /// finishes"). `take` is still mandatory but inside the identity: if it
+    /// remained, between two commands (the `Finished` phase, which contains a
+    /// `git` fork) a finished command would still be counted as running.
+    fn end(&mut self, exit: Option<i32>, id: Option<u32>) {
+        let state = self.state();
+        state.phase = ShellPhase::Finished;
+        state.last_exit = exit;
+        if let Some(id) = id {
+            let elapsed = self
+                .running_since
+                .take()
+                .map_or(0, |since| millis(since.elapsed()));
+            self.blocks.finish(id, exit, elapsed);
+        }
+    }
+
+    /// The identity of the **running** block; `None` if no command is running.
+    ///
+    /// Two conditions together: the phase is `Running` **and** the ledger's last
+    /// record is still open. Without the second, a `C` arriving after an
+    /// identity-less `A` would put the phase in `Running`, while the ledger's last
+    /// record would be the previous (finished) block and that block would be
+    /// painted as if running.
+    fn running(&self) -> Option<u32> {
+        if self.state?.phase != ShellPhase::Running {
+            return None;
+        }
+        match self.blocks.last()? {
+            (id, Outcome::Pending) => Some(id),
+            (_, Outcome::Finished { .. }) => None,
+        }
+    }
+
+    /// [`ShellLog::stripe`] on this trail; `running`: `id` is this trail's
+    /// running block.
+    fn stripe(&self, id: u32, running: bool) -> Option<Stripe> {
+        if running {
+            return Some(Stripe::Running);
+        }
+        match self.blocks.get(id)? {
+            Outcome::Finished { exit: Some(0), .. } => Some(Stripe::Success),
+            Outcome::Finished { exit: Some(_), .. } => Some(Stripe::Error),
+            Outcome::Finished { exit: None, .. } | Outcome::Pending => None,
+        }
+    }
+
+    /// [`ShellLog::duration`] on this trail; `running` as in [`Self::stripe`].
+    fn duration(&self, id: u32, running: bool) -> Option<Duration> {
+        if running {
+            // A running block but no clock: half of the integration arrived (`A` is
+            // there, `C` is not). No counter instead of a made-up duration.
+            return self.running_since.map(|since| since.elapsed());
+        }
+        match self.blocks.get(id)? {
+            Outcome::Finished { elapsed_ms, .. } => Some(Duration::from_millis(elapsed_ms.into())),
+            Outcome::Pending => None,
+        }
     }
 }
 
@@ -1404,9 +1640,24 @@ pub(crate) struct DockPrediction {
 }
 
 pub(crate) struct ShellLog {
-    /// The shell's current state; `None` = no integration.
-    pub(crate) state: Option<ShellState>,
-    pub(crate) blocks: BlockLog,
+    /// The local shell's trail: its phase (`None` = no integration), the
+    /// running command's clock and the block ledger ([`BlockTrack`]).
+    pub(crate) local: BlockTrack,
+    /// Our **remote** shell's trail (048 phase-3, [`RemoteMark`]): the stripes
+    /// and counters of the rows the server's prompt anchored with
+    /// `bateri://rblock/<P>.<S>.<n>`.
+    ///
+    /// **Not tied to the remote state** ([`DockContext::remote`]): a remote `A`
+    /// can arrive before the probe has set it, and the stripes stay in the
+    /// history after ssh ends, like local ones (048 discussion → Karar). It is
+    /// cleared when the remote shell changes ([`Self::remote_shell`]) — an old
+    /// session's rows are then not drawn, rather than drawn with the new
+    /// session's codes. Its clock is read only while the parent is the open
+    /// local command ([`Self::running_blocks`]): a dropped connection leaves no
+    /// remote `D`, and a running remote block must not tick an idle window.
+    pub(crate) remote: BlockTrack,
+    /// Whose the remote trail is; `None` before the first remote mark.
+    pub(crate) remote_shell: Option<RemoteShell>,
     /// ZLE's display mirror. Under the same lock, because it is fed from the same
     /// stream and read by the same frame: a separate lock could catch the frame at a
     /// moment when the phase and the mirror contradict each other — like suppressing
@@ -1450,16 +1701,6 @@ pub(crate) struct ShellLog {
     /// ([`DockPrediction`]). Its lifetime is only one generation — any intervening
     /// input invalidates it; `e` and `A` clear it too.
     pub(crate) dock_pending: Option<DockPrediction>,
-    /// The start instant of the running command; `None` while no command is running.
-    ///
-    /// **A single field, not per block:** only one command runs at a time, because
-    /// between `C` and `D` the shell does not print the next prompt. Putting an
-    /// `Instant` in every ledger entry would be a dead cost paid per tab in a
-    /// 10,000-line scrollback.
-    ///
-    /// `Instant`, not system time: even if the user changes the clock or daylight
-    /// saving passes, the duration does not run backwards.
-    pub(crate) running_since: Option<Instant>,
     /// Command generation: incremented on every **transition** of the phase to
     /// `Running` (036 Karar 2).
     ///
@@ -1754,8 +1995,9 @@ pub(crate) struct SuppressedInput {
 impl ShellLog {
     pub(crate) fn new(scrollback: usize) -> Self {
         Self {
-            state: None,
-            blocks: BlockLog::new(scrollback),
+            local: BlockTrack::new(scrollback),
+            remote: BlockTrack::new(scrollback),
+            remote_shell: None,
             dock: DockState::default(),
             context: DockContext::default(),
             host_rules: Vec::new(),
@@ -1763,7 +2005,6 @@ impl ShellLog {
             dock_scroll: None,
             dock_editable: false,
             dock_pending: None,
-            running_since: None,
             command: 0,
             paste_since_remote: false,
             login: None,
@@ -1780,7 +2021,8 @@ impl ShellLog {
     /// Moves the ledger's ceiling when `scrollback` changes at save time; does not
     /// touch the session state (`state`).
     pub(crate) fn set_scrollback(&mut self, scrollback: usize) {
-        self.blocks.set_capacity(scrollback);
+        self.local.blocks.set_capacity(scrollback);
+        self.remote.blocks.set_capacity(scrollback);
     }
 
     /// Applies the mark to both the state and the ledger; the first mark **creates**
@@ -1828,13 +2070,8 @@ impl ShellLog {
             self.end_line();
         }
         let mut outcome = ScanOutcome::default();
-        let state = self.state.get_or_insert(ShellState {
-            phase: ShellPhase::Prompt,
-            last_exit: None,
-        });
         match mark {
             Mark::PromptStart { id } => {
-                state.phase = ShellPhase::Prompt;
                 // The remote state goes **by itself** (036 Karar 2): no round trip to `bt-shell`
                 // to end it. `A` is `D`'s defensive arm — like the clock's, so that a lost `D`
                 // does not carry the remote indicator into the next prompt. The remote shell's
@@ -1842,26 +2079,17 @@ impl ShellLog {
                 outcome.title = self.context.clear_remote();
                 self.dock_editable = false;
                 self.dock_pending = None;
-                // **The clock's second reset point and a defensive arm.** If the prompt is being
-                // printed no command is running, so the clock here is stale by definition. If only
-                // `D` consumed it, a lost `D` (an OSC cut halfway, an identity-less close) would
-                // leave the clock standing and the **next** block's `D` would consume it: an
-                // instant command would look like it took "4m 12s" (`/code-review`, 013 gate).
-                // The reset's direction is safe — the worst case is the counter never appearing,
-                // not a made-up duration.
-                self.running_since = None;
-                if let Some(id) = id {
-                    self.blocks.start(id);
-                    outcome.prompt = true;
-                }
+                // The phase, the clock's reset and the block ([`BlockTrack::prompt`]).
+                self.local.prompt(id);
+                outcome.prompt = id.is_some();
             }
-            Mark::PromptEnd => state.phase = ShellPhase::Input,
+            Mark::PromptEnd => self.local.state().phase = ShellPhase::Input,
             Mark::CommandStart => {
                 // A **transition** only when the phase is not `Running`: a second `C` (iTerm2
                 // integration) moves neither the generation nor the remote state
                 // ([`Self::command`]). The probe is locked until `D`, so if that `C` deleted the
                 // host the indicator would not come back.
-                if state.phase != ShellPhase::Running {
+                if self.local.state().phase != ShellPhase::Running {
                     self.command += 1;
                     self.command_open = true;
                     self.paste_since_remote = false;
@@ -1870,21 +2098,10 @@ impl ShellLog {
                     // The offer's lifetime is until the next command (Karar 8).
                     self.context.reconnect = None;
                 }
-                state.phase = ShellPhase::Running;
-                // Where the clock is planted: `C` says the command **started running**; the
-                // printing of the prompt or the time the user spent typing must not enter the
-                // counter.
-                //
-                // **The first `C` wins, later ones do not overwrite.** The user's shell may have
-                // a second OSC 133 source (iTerm2's `~/.iterm2_shell_integration.zsh`, VS Code,
-                // Ghostty) and it prints `C` too — measured, on the user's machine **two** `C`s
-                // arrive per command. If we overwrote, the duration would start from the second
-                // mark; worse, a `C` arriving mid-command (the ^C arm of iTerm2's `precmd`)
-                // would reset the clock. The only place for resetting is the prompt (`A`).
-                self.running_since.get_or_insert_with(Instant::now);
+                // The phase and the clock: the first `C` wins ([`BlockTrack::command`]).
+                self.local.command();
             }
             Mark::CommandEnd { exit, id } => {
-                state.phase = ShellPhase::Finished;
                 // **The offer comes before the remote state is deleted** (037 Karar 8): the
                 // target and mark go with `clear_remote`. The identity is required — in a shell
                 // that has never shown our identity an identity-less `D` reaches here, and a
@@ -1905,34 +2122,30 @@ impl ShellLog {
                     offer.mark = self.context.remote_mark;
                 }
                 outcome.title = self.context.clear_remote();
-                // We refresh the code **in every state**: filling an unreadable code with the old
-                // one would be labeling the finished command with someone else's code.
-                state.last_exit = exit;
-                // **The clock is consumed only by OUR `D`**, that is, the close carrying the
-                // identity. An identity-less `D` cannot write into our ledger (`blocks.finish` is
-                // not called); if it consumed the clock anyway the duration we measured would
-                // **go to waste**.
-                //
-                // This is not hypothetical, it was measured on the user's machine: with iTerm2's
-                // shell integration installed every command produces two `D`s — first its
-                // identity-less one, then ours. The identity-less one takes the clock, ours finds
-                // it empty and the duration was written as **zero**; since the counter stayed
-                // below the threshold it was never drawn. The symptom was exactly this: "the
-                // duration does not show when it finishes".
-                //
-                // `take` is still mandatory but now inside the identity: if it remained, between
-                // two commands (the `Finished` phase, which contains a `git` fork) a finished
-                // command would still be counted as running.
-                if let Some(id) = id {
-                    let elapsed = self
-                        .running_since
-                        .take()
-                        .map_or(0, |since| millis(since.elapsed()));
-                    self.blocks.finish(id, exit, elapsed);
-                }
+                // The code, and the clock consumed **only by OUR `D`** — the one carrying the
+                // identity ([`BlockTrack::end`]).
+                self.local.end(exit, id);
             }
         }
         outcome
+    }
+
+    /// Applies our remote shell's mark to the remote trail (048 phase-3) — and
+    /// **only** there: no local field, no notification ([`RemoteMark`]'s doc).
+    ///
+    /// A new remote shell starts a new trail: the old session's ledger cannot
+    /// be read under the new one's numbers (two sessions' `rblock/1`s).
+    fn apply_remote(&mut self, remote: RemoteMark) {
+        if self.remote_shell != Some(remote.shell) {
+            self.remote.clear();
+            self.remote_shell = Some(remote.shell);
+        }
+        match remote.mark {
+            Mark::PromptStart { .. } => self.remote.prompt(Some(remote.id)),
+            Mark::PromptEnd => self.remote.state().phase = ShellPhase::Input,
+            Mark::CommandStart => self.remote.command(),
+            Mark::CommandEnd { exit, .. } => self.remote.end(exit, Some(remote.id)),
+        }
     }
 
     /// Applies the event the scanner extracted to the right arm.
@@ -1964,6 +2177,12 @@ impl ShellLog {
         let mut outcome = ScanOutcome::default();
         match event {
             ScanEvent::Mark(mark) => outcome = self.apply(mark),
+            // **Our remote shell's mark is separated before anything local**
+            // (048 phase-3): `apply`'s identity, the held `line-finish`, the
+            // command's closing and the three notifications never see it — the
+            // remote `A` must not hand ⌘T's first input to the remote shell
+            // (`outcome.prompt`) nor end the remote session.
+            ScanEvent::RemoteMark(remote) => self.apply_remote(remote),
             // **While a remote session is active OSC 8133 is ignored** (048 R4): the
             // local shell is behind ssh and the only 8133 that can arrive is a remote
             // one — a remote mirror would draw a foreign line in the local dock, and
@@ -2013,6 +2232,7 @@ impl ShellLog {
     /// the command runs until our `D`, even if a foreign `A` has moved the phase.
     pub(crate) fn running_command(&self) -> Option<u64> {
         let running = self
+            .local
             .state
             .is_some_and(|state| state.phase == ShellPhase::Running);
         (running || (self.ours && self.command_open)).then_some(self.command)
@@ -2110,7 +2330,7 @@ impl ShellLog {
 
     /// Stamps the handover's raw answer; **if unchanged the stamp does not move**.
     fn observe_caret(&mut self) {
-        let raw = caret_home(self.state, self.caret_status(), false);
+        let raw = caret_home(self.local.state, self.caret_status(), false);
         if raw != self.caret_raw {
             self.caret_raw = raw;
             // **The clock is read only on change.** `apply_scan` is the reader thread's
@@ -2160,6 +2380,7 @@ impl ShellLog {
                 // [`Self::end_since`]). The clock is read only here, that is, once per ⏎ —
                 // [`Self::observe_caret`]'s rule.
                 let typing = self
+                    .local
                     .state
                     .is_some_and(|state| state.phase == ShellPhase::Input);
                 if typing && self.dock.status == DockStatus::Live {
@@ -2244,20 +2465,40 @@ impl ShellLog {
         }
     }
 
-    /// The **running** block's identity; `None` otherwise.
+    /// The running block of each trail — the frame's single reading for
+    /// [`Self::stripe`] and [`Self::duration`].
     ///
-    /// Two conditions together: the phase is `Running` **and** the ledger's last
-    /// record is still open. Without the second, a `C` arriving after an
-    /// identity-less `A` would put the phase in `Running`, while the ledger's last
-    /// record would be the previous (finished) block and that block would be painted
-    /// as if running.
-    pub(crate) fn running(&self) -> Option<u32> {
-        if self.state?.phase != ShellPhase::Running {
-            return None;
+    /// **The remote one only while its parent is the open local command**:
+    /// the `ssh` block `P` is the local ledger's last, still open record and
+    /// the command runs ([`Self::running_command`], so a foreign `A` from the
+    /// server before the probe does not cut it). A connection that drops
+    /// leaves no remote `D` and the remote trail would say "running" forever —
+    /// the stripe accent and the counter ticking an idle window. Our local `D`
+    /// closing `P` ends it with no second path; the block stays `Pending`, i.e.
+    /// not drawn (the local `exit` command's fate).
+    pub(crate) fn running_blocks(&self) -> RunningBlocks {
+        let remote = self.remote_shell.and_then(|shell| {
+            let open = self.running_command().is_some()
+                && self.local.blocks.last() == Some((shell.parent, Outcome::Pending));
+            if !open {
+                return None;
+            }
+            self.remote.running().map(|id| (shell, id))
+        });
+        RunningBlocks {
+            local: self.local.running(),
+            remote,
         }
-        match self.blocks.last()? {
-            (id, Outcome::Pending) => Some(id),
-            (_, Outcome::Finished { .. }) => None,
+    }
+
+    /// The trail and the identity a key points to; `None` for a remote key
+    /// of a shell the remote trail no longer holds.
+    fn track(&self, key: BlockKey) -> Option<(&BlockTrack, u32)> {
+        match key {
+            BlockKey::Local(id) => Some((&self.local, id)),
+            BlockKey::Remote { shell, id } => {
+                (self.remote_shell == Some(shell)).then_some((&self.remote, id))
+            }
         }
     }
 
@@ -2270,12 +2511,12 @@ impl ShellLog {
     /// empty row of a multi-line input) the block is found from the anchor, and there
     /// the question is not "where is the line drawn" but "which rows are the input's"
     /// — whether the mirror is live does not change the answer. The second condition
-    /// has the same reason as [`Self::running`]'s.
+    /// has the same reason as [`BlockTrack::running`]'s.
     pub(crate) fn input_block(&self) -> Option<u32> {
-        if self.state?.phase != ShellPhase::Input {
+        if self.local.state?.phase != ShellPhase::Input {
             return None;
         }
-        match self.blocks.last()? {
+        match self.local.blocks.last()? {
             (id, Outcome::Pending) => Some(id),
             (_, Outcome::Finished { .. }) => None,
         }
@@ -2298,16 +2539,16 @@ impl ShellLog {
     ///   a line (`line-finish` arrived), in the second there is a line we cannot show
     ///   and it **has** to stay on the grid, otherwise the user sees what they typed
     ///   nowhere (R1.2). This tier of the gate is the reason [`DockStatus`] exists.
-    /// - The ledger's last record is still open — the same as [`Self::running`]'s
+    /// - The ledger's last record is still open — the same as [`BlockTrack::running`]'s
     ///   second condition and for the same reason: a `B` arriving after an
     ///   identity-less `A` puts the phase in `Input`, while the ledger's last record
     ///   is the previous (finished) block and suppression would start from the
     ///   **wrong** row.
     pub(crate) fn suppressed_input(&self) -> Option<SuppressedInput> {
-        if self.state?.phase != ShellPhase::Input || self.dock.status != DockStatus::Live {
+        if self.local.state?.phase != ShellPhase::Input || self.dock.status != DockStatus::Live {
             return None;
         }
-        match self.blocks.last()? {
+        match self.local.blocks.last()? {
             (block, Outcome::Pending) => Some(SuppressedInput {
                 block,
                 blank: self.dock.display_chars == 0 && self.dock.prebuffer.is_empty(),
@@ -2372,7 +2613,7 @@ impl ShellLog {
             .checked_sub(now.saturating_duration_since(self.caret_since))
             .filter(|left| !left.is_zero());
         let status = self.caret_status();
-        let home = caret_home(self.state, status, held.is_some());
+        let home = caret_home(self.local.state, status, held.is_some());
         // The two answers being compared pass through the **same gate** and differ only
         // in `held`: deriving the raw answer through a second path (calling
         // `caret_home_raw` directly) would make it possible for the two to diverge. If
@@ -2380,7 +2621,7 @@ impl ShellLog {
         // applied too, and the window would request a frame every 150 ms that changed
         // nothing — the silent-leak class for which the `quiet=` token is the last line
         // of defense.
-        let unheld = caret_home(self.state, status, false);
+        let unheld = caret_home(self.local.state, status, false);
         CaretDecision {
             home,
             // The remainder derives from **the answer having been flipped**, not from a
@@ -2399,7 +2640,7 @@ impl ShellLog {
     /// inconsistent pair between the two halves of a mark.
     ///
     /// The running block's color comes **from the phase, not the ledger** (that is why
-    /// the [`Self::running`] parameter is in the signature, the one rule-bound
+    /// the [`Self::running_blocks`] parameter is in the signature, the one rule-bound
     /// exception): since `D` has not arrived its record in the ledger is `Pending`
     /// and `Pending` itself does not mean "running".
     ///
@@ -2413,15 +2654,9 @@ impl ShellLog {
     /// - `Finished(None)`: the command finished but the code could not be read —
     ///   there is no neutral role for "finished" and imitating a nonexistent role
     ///   with `accent` would be showing a non-running block as running.
-    pub(crate) fn stripe(&self, id: u32, running: Option<u32>) -> Option<Stripe> {
-        if running == Some(id) {
-            return Some(Stripe::Running);
-        }
-        match self.blocks.get(id)? {
-            Outcome::Finished { exit: Some(0), .. } => Some(Stripe::Success),
-            Outcome::Finished { exit: Some(_), .. } => Some(Stripe::Error),
-            Outcome::Finished { exit: None, .. } | Outcome::Pending => None,
-        }
+    pub(crate) fn stripe(&self, key: BlockKey, running: RunningBlocks) -> Option<Stripe> {
+        let (track, id) = self.track(key)?;
+        track.stripe(id, running.is(key))
     }
 
     /// The block's **drawable** duration; `None` in every state that produces no
@@ -2437,16 +2672,9 @@ impl ShellLog {
     /// decision and the drawing side ([`crate::Session::frame`]) supplies it. If it
     /// were applied here the path computing the clock's next tick would have to know
     /// the threshold a second time.
-    pub(crate) fn duration(&self, id: u32, running: Option<u32>) -> Option<Duration> {
-        if running == Some(id) {
-            // A running block but no clock: half of the integration arrived (`A` is there,
-            // `C` is not). No counter instead of a made-up duration.
-            return self.running_since.map(|since| since.elapsed());
-        }
-        match self.blocks.get(id)? {
-            Outcome::Finished { elapsed_ms, .. } => Some(Duration::from_millis(elapsed_ms.into())),
-            Outcome::Pending => None,
-        }
+    pub(crate) fn duration(&self, key: BlockKey, running: RunningBlocks) -> Option<Duration> {
+        let (track, id) = self.track(key)?;
+        track.duration(id, running.is(key))
     }
 }
 
@@ -2839,6 +3067,9 @@ pub(crate) struct ScanOutcome {
 /// per keystroke ([`DockState`]'s doc).
 pub(crate) enum ScanEvent<'a> {
     Mark(Mark),
+    /// A mark carrying `bt_remote=` ([`RemoteMark`]): its own arm, so the local
+    /// [`ShellLog::apply`] cannot receive it.
+    RemoteMark(RemoteMark),
     Dock(DockEvent<'a>),
     /// The working directory, the **resolved** full path, and whether the authority is
     /// this machine ([`LOCAL_AUTHORITIES`]). A rejected URI produces no event at all:
@@ -3067,8 +3298,8 @@ impl Scanner {
                 if is_terminator(byte) {
                     let mark = parse_mark(&self.payload);
                     self.close(byte);
-                    if let Some(mark) = mark {
-                        on_event(ScanEvent::Mark(mark));
+                    if let Some(event) = mark {
+                        on_event(event);
                     }
                 } else if is_ignored(byte) {
                 } else if self.payload.len() == PAYLOAD_LIMIT {
@@ -3234,35 +3465,46 @@ fn is_ignored(byte: u8) -> bool {
 /// The first field is the mark itself and must match **exactly**: `A;aid=12` is a
 /// `PromptStart`, `AB` is nothing. Shells can attach key-values next to the mark
 /// and not knowing them must not mean losing the mark.
-fn parse_mark(payload: &[u8]) -> Option<Mark> {
+fn parse_mark(payload: &[u8]) -> Option<ScanEvent<'static>> {
     let mut fields = payload.split(|&b| b == b';');
-    match fields.next()? {
-        b"A" => Some(Mark::PromptStart {
-            id: fields.find_map(block_id),
-        }),
-        b"B" => Some(Mark::PromptEnd),
-        b"C" => Some(Mark::CommandStart),
-        b"D" => {
-            let mut exit = None;
-            let mut id = None;
-            // The code depends on **position** (the first field), the identity on **name** —
-            // and that name is `BLOCK_ID_FIELD`, that is `bt_block=`; **not** `aid=` (the
-            // reason is below, in `block_id`'s doc: a foreign `aid` must not be confused with
-            // our counter). The position question is therefore asked after the arm that looks
-            // at the name: `D;bt_block=7` is a valid payload with an identity but no code, and
-            // if we blindly counted the first field as the code it would swallow the
-            // identity.
-            for (index, field) in fields.enumerate() {
-                if let Some(value) = block_id(field) {
-                    id = Some(value);
-                } else if index == 0 {
-                    exit = number(field);
-                }
-            }
-            Some(Mark::CommandEnd { exit, id })
-        }
-        _ => None,
+    let letter = fields.next()?;
+    if !matches!(letter, b"A" | b"B" | b"C" | b"D") {
+        return None;
     }
+    let mut exit = None;
+    let mut id = None;
+    let mut remote = None;
+    // The code depends on **position** (the first field), the identities on **name** —
+    // `BLOCK_ID_FIELD` (`bt_block=`) and `REMOTE_ID_FIELD` (`bt_remote=`); **not** `aid=`
+    // (the reason is below, in `block_id`'s doc: a foreign `aid` must not be confused with
+    // our counter). The position question is therefore asked after the arms that look at
+    // the name: `D;bt_block=7` is a valid payload with an identity but no code, and if we
+    // blindly counted the first field as the code it would swallow the identity.
+    for (index, field) in fields.enumerate() {
+        if let Some(value) = block_id(field) {
+            id = Some(value);
+        } else if let Some(value) = remote_id(field) {
+            remote = Some(value);
+        } else if index == 0 && letter == b"D" {
+            exit = number(field);
+        }
+    }
+    // **The remote field wins** over a `bt_block=` beside it: such a payload is not
+    // our local shell's (it never prints `bt_remote=`), and the remote trail is the
+    // side where a wrong mark touches nothing local.
+    if remote.is_some() {
+        id = None;
+    }
+    let mark = match letter {
+        b"A" => Mark::PromptStart { id },
+        b"B" => Mark::PromptEnd,
+        b"C" => Mark::CommandStart,
+        _ => Mark::CommandEnd { exit, id },
+    };
+    Some(match remote {
+        Some((shell, id)) => ScanEvent::RemoteMark(RemoteMark { shell, id, mark }),
+        None => ScanEvent::Mark(mark),
+    })
 }
 
 /// The authority values that point to this machine — the answer to the "is it
@@ -3377,6 +3619,32 @@ const BLOCK_ID_FIELD: &[u8] = b"bt_block=";
 /// The value of the `bt_block={number}` field; any other field is `None`.
 fn block_id(field: &[u8]) -> Option<u32> {
     number(field.strip_prefix(BLOCK_ID_FIELD)?)
+}
+
+/// Our remote shell's identity field (048 phase-3): `bt_remote=<P>.<S>.<n>`
+/// ([`RemoteShell`] and the remote counter). A separate name, not `bt_block=`:
+/// the local gates read that one as the local shell's.
+const REMOTE_ID_FIELD: &[u8] = b"bt_remote=";
+
+/// The shell and block of a `bt_remote=<P>.<S>.<n>` field; any other field is
+/// `None`. The same three numbers as the anchor's path ([`remote_key`]).
+fn remote_id(field: &[u8]) -> Option<(RemoteShell, u32)> {
+    let value = std::str::from_utf8(field.strip_prefix(REMOTE_ID_FIELD)?).ok()?;
+    remote_key(value)
+}
+
+/// `<P>.<S>.<n>` → the remote shell and its block: the one reading of the mark's
+/// field and of the anchor's path (`bateri://rblock/<P>.<S>.<n>`, the session's
+/// `block_key`) — if the two diverged no anchor would find its mark.
+pub(crate) fn remote_key(value: &str) -> Option<(RemoteShell, u32)> {
+    let mut parts = value.split('.');
+    let parent = parts.next()?.parse().ok()?;
+    let pid = parts.next()?.parse().ok()?;
+    let id = parts.next()?.parse().ok()?;
+    parts
+        .next()
+        .is_none()
+        .then_some((RemoteShell { parent, pid }, id))
 }
 
 fn number<T: std::str::FromStr>(field: &[u8]) -> Option<T> {
@@ -4262,20 +4530,20 @@ mod tests {
     fn marks_walk_the_state_through_a_whole_command() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         log.apply(Mark::PromptStart { id: None });
-        assert_eq!(log.state.map(|s| s.phase), Some(ShellPhase::Prompt));
+        assert_eq!(log.local.state.map(|s| s.phase), Some(ShellPhase::Prompt));
 
         log.apply(Mark::PromptEnd);
-        assert_eq!(log.state.map(|s| s.phase), Some(ShellPhase::Input));
+        assert_eq!(log.local.state.map(|s| s.phase), Some(ShellPhase::Input));
 
         log.apply(Mark::CommandStart);
-        assert_eq!(log.state.map(|s| s.phase), Some(ShellPhase::Running));
+        assert_eq!(log.local.state.map(|s| s.phase), Some(ShellPhase::Running));
 
         log.apply(Mark::CommandEnd {
             exit: Some(2),
             id: None,
         });
         assert_eq!(
-            log.state,
+            log.local.state,
             Some(ShellState {
                 phase: ShellPhase::Finished,
                 last_exit: Some(2),
@@ -4294,7 +4562,7 @@ mod tests {
             exit: None,
             id: None,
         });
-        assert_eq!(log.state.and_then(|s| s.last_exit), None);
+        assert_eq!(log.local.state.and_then(|s| s.last_exit), None);
     }
 
     /// Opens and closes a block; the ledger's ordinary flow.
@@ -4311,7 +4579,7 @@ mod tests {
     /// from the real clock and cannot be made equal. Comparing with the whole
     /// `Outcome` would make them clock-dependent and brittle.
     fn exit_of(log: &ShellLog, id: u32) -> Option<Option<i32>> {
-        match log.blocks.get(id)? {
+        match log.local.blocks.get(id)? {
             Outcome::Finished { exit, .. } => Some(exit),
             Outcome::Pending => None,
         }
@@ -4327,8 +4595,8 @@ mod tests {
         assert_eq!(exit_of(&log, 1), Some(Some(0)));
         assert_eq!(exit_of(&log, 2), Some(Some(130)));
         // Open but not closed: running or an empty prompt.
-        assert_eq!(log.blocks.get(3), Some(Outcome::Pending));
-        assert_eq!(log.blocks.get(4), None);
+        assert_eq!(log.local.blocks.get(3), Some(Outcome::Pending));
+        assert_eq!(log.local.blocks.get(4), None);
     }
 
     #[test]
@@ -4338,7 +4606,7 @@ mod tests {
             exit: Some(1),
             id: Some(77),
         });
-        assert_eq!(log.blocks.get(77), None);
+        assert_eq!(log.local.blocks.get(77), None);
     }
 
     #[test]
@@ -4348,8 +4616,8 @@ mod tests {
             run_block(&mut log, id, Some(0));
         }
         // The dropped block has no color; the frame path **does not draw** it, does not draw it wrongly.
-        assert_eq!(log.blocks.get(1), None);
-        assert_eq!(log.blocks.get(2), None);
+        assert_eq!(log.local.blocks.get(1), None);
+        assert_eq!(log.local.blocks.get(2), None);
         assert_eq!(exit_of(&log, 3), Some(Some(0)));
         assert_eq!(exit_of(&log, BLOCK_LOG_FLOOR as u32 + 2), Some(Some(0)));
     }
@@ -4365,7 +4633,7 @@ mod tests {
         run_block(&mut log, 1, Some(3));
 
         assert_eq!(exit_of(&log, 1), Some(Some(3)));
-        assert_eq!(log.blocks.get(2), None);
+        assert_eq!(log.local.blocks.get(2), None);
     }
 
     #[test]
@@ -4834,7 +5102,7 @@ mod tests {
         let now = Instant::now();
         // The mirror is held (032 Karar 11) but the state the handover asks about is `Idle`.
         assert_eq!(
-            caret_home(log.state, log.caret_status(), false),
+            caret_home(log.local.state, log.caret_status(), false),
             CaretHome::Grid,
             "the raw answer is already `Grid` at `line-finish`"
         );
@@ -5819,7 +6087,7 @@ mod tests {
             ScanEvent::Dock(DockEvent::Update(line)) => lines.push(line.buffer.clone()),
             ScanEvent::Dock(_) => {}
             ScanEvent::Cwd { path, .. } => paths.push(path.to_owned()),
-            ScanEvent::PasteOn | ScanEvent::RemoteSetup(_) => {}
+            ScanEvent::PasteOn | ScanEvent::RemoteSetup(_) | ScanEvent::RemoteMark(_) => {}
         });
 
         assert_eq!(marks, vec![Mark::PromptEnd]);
@@ -6238,12 +6506,12 @@ mod tests {
         // The 1st block is running but its `D` never arrives.
         log.apply(Mark::PromptStart { id: Some(1) });
         log.apply(Mark::CommandStart);
-        assert!(log.running_since.is_some());
+        assert!(log.local.running_since.is_some());
 
         // Block 2's prompt: the clock must be reset here.
         log.apply(Mark::PromptStart { id: Some(2) });
         assert!(
-            log.running_since.is_none(),
+            log.local.running_since.is_none(),
             "`A` should have cleared the stale clock"
         );
 
@@ -6253,7 +6521,7 @@ mod tests {
             id: Some(2),
         });
         assert_eq!(
-            log.duration(2, None),
+            log.duration(BlockKey::Local(2), RunningBlocks::default()),
             Some(Duration::ZERO),
             "a lost `D` wrote a duration to the next block"
         );
@@ -6291,7 +6559,7 @@ mod tests {
         log.apply(Mark::PromptStart { id: Some(2) });
 
         let measured = log
-            .duration(1, None)
+            .duration(BlockKey::Local(1), RunningBlocks::default())
             .expect("a finished block must have a duration");
         assert!(
             measured >= Duration::from_millis(50),
@@ -6335,7 +6603,7 @@ mod tests {
         });
 
         let duration = log
-            .duration(1, None)
+            .duration(BlockKey::Local(1), RunningBlocks::default())
             .expect("a finished block must have a duration");
         assert_eq!(duration, Duration::ZERO);
         assert!(
@@ -6356,7 +6624,7 @@ mod tests {
         log.apply(Mark::PromptStart { id: Some(1) });
         log.apply(Mark::CommandStart);
         assert!(
-            log.running_since.is_some(),
+            log.local.running_since.is_some(),
             "`C` should have planted the clock"
         );
 
@@ -6365,7 +6633,7 @@ mod tests {
             id: Some(1),
         });
         assert!(
-            log.running_since.is_none(),
+            log.local.running_since.is_none(),
             "`D` should have consumed the clock"
         );
     }
@@ -6603,10 +6871,10 @@ mod tests {
         });
         log.apply(Mark::PromptStart { id: None });
         assert_ne!(
-            log.state.map(|state| state.phase),
+            log.local.state.map(|state| state.phase),
             Some(ShellPhase::Running)
         );
-        assert_eq!(log.running_since, None, "the clock stopped");
+        assert_eq!(log.local.running_since, None, "the clock stopped");
     }
 
     #[test]
@@ -7000,5 +7268,291 @@ mod tests {
         assert_eq!(title_directory("host:/x"), None);
         assert_eq!(title_directory("a b@host: /x"), None);
         assert_eq!(title_directory("deploy@: /x"), None);
+    }
+
+    // ─── our remote shell's blocks (048 phase-3) ─────────────────────────
+
+    fn events(bytes: &[u8]) -> Vec<RemoteMark> {
+        let mut scanner = Scanner::new();
+        let mut out = Vec::new();
+        scanner.feed(bytes, |event| {
+            if let ScanEvent::RemoteMark(mark) = event {
+                out.push(mark);
+            }
+        });
+        out
+    }
+
+    /// The remote shell `9` under the local block `parent`.
+    fn shell(parent: u32) -> RemoteShell {
+        RemoteShell { parent, pid: 9 }
+    }
+
+    fn remote(parent: u32, id: u32, mark: Mark) -> RemoteMark {
+        RemoteMark {
+            shell: shell(parent),
+            id,
+            mark,
+        }
+    }
+
+    #[test]
+    fn the_remote_field_routes_all_four_letters_to_their_own_arm() {
+        assert_eq!(
+            events(
+                b"\x1b]133;A;bt_remote=7.9.1\x07\x1b]133;B;bt_remote=7.9.1\x07\
+                  \x1b]133;C;bt_remote=7.9.1\x07\x1b]133;D;2;bt_remote=7.9.1\x07"
+            ),
+            vec![
+                remote(7, 1, Mark::PromptStart { id: None }),
+                remote(7, 1, Mark::PromptEnd),
+                remote(7, 1, Mark::CommandStart),
+                remote(
+                    7,
+                    1,
+                    Mark::CommandEnd {
+                        exit: Some(2),
+                        id: None
+                    }
+                ),
+            ]
+        );
+        // None of them is a local mark.
+        assert!(
+            marks(b"\x1b]133;A;bt_remote=7.9.1\x07\x1b]133;D;0;bt_remote=7.9.1\x07").is_empty()
+        );
+        // The field wins over a `bt_block=` beside it, and a code-less `D` keeps its identity.
+        assert_eq!(
+            events(b"\x1b]133;D;bt_block=3;bt_remote=7.9.2\x07"),
+            vec![remote(
+                7,
+                2,
+                Mark::CommandEnd {
+                    exit: None,
+                    id: None
+                }
+            )]
+        );
+        // A broken field is not ours: the letter stays a local, identity-less mark.
+        for broken in [&b"7"[..], b"7.1", b"7.9.", b".9.1", b"x.9.1", b"7.9.1.2"] {
+            let mut payload = b"\x1b]133;A;bt_remote=".to_vec();
+            payload.extend_from_slice(broken);
+            payload.push(0x07);
+            assert!(events(&payload).is_empty(), "{broken:?}");
+            assert_eq!(marks(&payload), vec![Mark::PromptStart { id: None }]);
+        }
+    }
+
+    /// The local ssh command `P = 1` running under a remote session.
+    fn ssh_log() -> ShellLog {
+        let mut log = running_log();
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        log
+    }
+
+    fn feed(log: &mut ShellLog, bytes: &[u8]) -> ScanOutcome {
+        let mut scanner = Scanner::new();
+        let mut outcome = ScanOutcome::default();
+        scanner.feed(bytes, |event| {
+            let one = log.apply_scan_answering(event, 0);
+            outcome.title |= one.title;
+            outcome.started |= one.started;
+            outcome.prompt |= one.prompt;
+        });
+        outcome
+    }
+
+    #[test]
+    fn remote_marks_touch_nothing_local() {
+        let mut log = ssh_log();
+        log.end_since = Some(Instant::now());
+        let since = log.local.running_since;
+        let (command, open, ours) = (log.command, log.command_open, log.ours);
+        let outcome = feed(
+            &mut log,
+            b"\x1b]133;D;0;bt_remote=1.9.1\x07\x1b]133;A;bt_remote=1.9.2\x07\
+              \x1b]133;B;bt_remote=1.9.2\x07\x1b]133;C;bt_remote=1.9.2\x07",
+        );
+        assert_eq!(
+            outcome,
+            ScanOutcome::default(),
+            "no title, no command start, no prompt (⌘T's first input)"
+        );
+        assert_eq!(log.context.remote_host(), Some("prod"), "the session stays");
+        assert_eq!(
+            log.local.state.map(|state| state.phase),
+            Some(ShellPhase::Running)
+        );
+        assert_eq!(log.local.running_since, since, "the local clock stays");
+        assert_eq!(
+            (log.command, log.command_open, log.ours),
+            (command, open, ours)
+        );
+        assert!(log.end_since.is_some(), "a held line-finish is not ended");
+        assert_eq!(log.local.blocks.last(), Some((1, Outcome::Pending)));
+        assert_eq!(
+            log.running_blocks(),
+            RunningBlocks {
+                local: Some(1),
+                remote: Some((shell(1), 2)),
+            }
+        );
+    }
+
+    #[test]
+    fn remote_blocks_get_stripes_and_counters_of_their_own() {
+        let mut log = ssh_log();
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;C;bt_remote=1.9.1\x07\
+              \x1b]133;D;0;bt_remote=1.9.1\x07\x1b]133;A;bt_remote=1.9.2\x07\
+              \x1b]133;C;bt_remote=1.9.2\x07\x1b]133;D;1;bt_remote=1.9.2\x07\
+              \x1b]133;A;bt_remote=1.9.3\x07\x1b]133;C;bt_remote=1.9.3\x07",
+        );
+        let running = log.running_blocks();
+        let key = |id| BlockKey::Remote {
+            shell: shell(1),
+            id,
+        };
+        assert_eq!(log.stripe(key(1), running), Some(Stripe::Success));
+        assert_eq!(log.stripe(key(2), running), Some(Stripe::Error));
+        assert_eq!(log.stripe(key(3), running), Some(Stripe::Running));
+        assert!(log.duration(key(1), running).is_some());
+        assert!(log.duration(key(3), running).is_some(), "the remote clock");
+        // The local `rblock/1` and `block/1` are two blocks.
+        assert_eq!(
+            log.stripe(BlockKey::Local(1), running),
+            Some(Stripe::Running),
+            "the ssh command itself"
+        );
+    }
+
+    #[test]
+    fn our_local_d_ends_the_remote_clock_and_keeps_the_stripes() {
+        let mut log = ssh_log();
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;C;bt_remote=1.9.1\x07\
+              \x1b]133;D;0;bt_remote=1.9.1\x07\x1b]133;A;bt_remote=1.9.2\x07\
+              \x1b]133;C;bt_remote=1.9.2\x07",
+        );
+        // The connection dropped: no remote `D`, ours closes `P`.
+        log.apply(our_end(255));
+        assert_eq!(log.context.remote, None);
+        let running = log.running_blocks();
+        assert_eq!(running.remote, None, "no remote block runs any more");
+        let key = |id| BlockKey::Remote {
+            shell: shell(1),
+            id,
+        };
+        assert_eq!(log.stripe(key(2), running), None, "unknown is not drawn");
+        assert_eq!(log.duration(key(2), running), None, "no counter ticks");
+        assert_eq!(
+            log.stripe(key(1), running),
+            Some(Stripe::Success),
+            "the history keeps its stripes"
+        );
+        // The next local prompt does not erase them either.
+        log.apply(Mark::PromptStart { id: Some(2) });
+        assert_eq!(
+            log.stripe(key(1), log.running_blocks()),
+            Some(Stripe::Success)
+        );
+    }
+
+    #[test]
+    fn two_ssh_sessions_never_share_a_remote_block() {
+        let mut log = ssh_log();
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;C;bt_remote=1.9.1\x07\
+              \x1b]133;D;0;bt_remote=1.9.1\x07",
+        );
+        log.apply(our_end(0));
+        // The second ssh is local block 2; its server counts from 1 again.
+        log.apply(Mark::PromptStart { id: Some(2) });
+        log.apply(Mark::CommandStart);
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=2.9.1\x07\x1b]133;C;bt_remote=2.9.1\x07\
+              \x1b]133;D;1;bt_remote=2.9.1\x07",
+        );
+        let running = log.running_blocks();
+        assert_eq!(
+            log.stripe(
+                BlockKey::Remote {
+                    shell: shell(2),
+                    id: 1
+                },
+                running
+            ),
+            Some(Stripe::Error)
+        );
+        assert_eq!(
+            log.stripe(
+                BlockKey::Remote {
+                    shell: shell(1),
+                    id: 1
+                },
+                running
+            ),
+            None,
+            "the old session's row is not painted with the new one's code"
+        );
+    }
+
+    #[test]
+    fn two_shells_under_one_ssh_command_are_two_trails() {
+        // `ssh a; ssh b`: one local block, two servers counting from one. The
+        // second shell's `rblock/1.9.1` must not reopen the first's `1.8.1`.
+        let mut log = ssh_log();
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.8.1\x07\x1b]133;C;bt_remote=1.8.1\x07\
+              \x1b]133;D;0;bt_remote=1.8.1\x07\x1b]133;A;bt_remote=1.9.1\x07\
+              \x1b]133;C;bt_remote=1.9.1\x07\x1b]133;D;1;bt_remote=1.9.1\x07",
+        );
+        let running = log.running_blocks();
+        let first = BlockKey::Remote {
+            shell: RemoteShell { parent: 1, pid: 8 },
+            id: 1,
+        };
+        assert_eq!(log.stripe(first, running), None, "not repainted");
+        assert_eq!(
+            log.stripe(
+                BlockKey::Remote {
+                    shell: shell(1),
+                    id: 1
+                },
+                running
+            ),
+            Some(Stripe::Error)
+        );
+    }
+
+    #[test]
+    fn a_remote_trail_runs_only_under_its_open_parent() {
+        // A remote mark whose parent is not the open local command (a stale or
+        // foreign `P`) never runs: no accent, no clock.
+        let mut log = ssh_log();
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=9.9.1\x07\x1b]133;C;bt_remote=9.9.1\x07",
+        );
+        let running = log.running_blocks();
+        assert_eq!(running.remote, None);
+        let key = BlockKey::Remote {
+            shell: shell(9),
+            id: 1,
+        };
+        assert_eq!(log.stripe(key, running), None);
+        assert_eq!(log.duration(key, running), None);
+    }
+
+    #[test]
+    fn the_remote_trail_follows_the_scrollback() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.set_scrollback(BLOCK_LOG_FLOOR * 2);
+        assert_eq!(log.remote.blocks.capacity, BLOCK_LOG_FLOOR * 2);
     }
 }
