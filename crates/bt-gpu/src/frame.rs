@@ -968,6 +968,11 @@ pub(crate) struct Frame {
     /// **both** frame paths write it: a motion frame does not call `clear`
     /// but the band advances in its frame too.
     dock_band: Option<f32>,
+    /// The PTY share the band's excess is measured from, rows; `None` is
+    /// [`DOCK_ROWS`]. One on a remote session's alternate screen, where the
+    /// dock is the context row alone and reserves exactly that
+    /// ([`Frame::set_dock_share`]).
+    dock_share: Option<u16>,
     /// The bottom of the window, in pixels — the base of the band's
     /// bottom-anchored top and of the dock geometry published to the mouse
     /// ([`Frame::set_dock_band`]).
@@ -2157,6 +2162,13 @@ impl Frame {
     /// The excess's pixels are **rounded to the device grid** (the rationale
     /// of `set_origin_rows`): the grid's origin subtracts the same rounded
     /// number too.
+    /// The window's current PTY share (rows) the band's excess is added to —
+    /// the same number `band_target` subtracted, so the band's drawn height is
+    /// `band_px(input_rows)` whatever the share.
+    pub(crate) fn set_dock_share(&mut self, rows: u16) {
+        self.dock_share = Some(rows);
+    }
+
     pub(crate) fn set_dock_band(&mut self, bottom_px: f32, extra_rows: f32) {
         debug_assert!(self.cell_px.1 > 0.0, "clear(metrics) was not called");
         self.dock_band = Some((extra_rows * self.cell_px.1).round());
@@ -2296,7 +2308,13 @@ impl Frame {
     /// told, the PTY share plus the excess, otherwise the layout's height.
     fn band_height(&self) -> f32 {
         match self.dock_band {
-            Some(extra) => dock_height(DOCK_ROWS, self.cell_px.1, self.gutter_px) + extra,
+            Some(extra) => {
+                dock_height(
+                    self.dock_share.unwrap_or(DOCK_ROWS),
+                    self.cell_px.1,
+                    self.gutter_px,
+                ) + extra
+            }
             None => dock_height(self.dock_rows, self.cell_px.1, self.gutter_px),
         }
     }

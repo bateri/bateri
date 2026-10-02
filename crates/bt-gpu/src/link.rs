@@ -1724,7 +1724,7 @@ impl Core {
     /// `origin − band` ([`compose`]). The offset keeps a `u16` target, it
     /// does not switch to a signed one — the join happens only in drawing.
     fn set_origin(&self, frame: &mut Frame, motion: Motion, bottom_px: f32) {
-        compose(frame, motion, bottom_px, self.dock_rows.get() > 0);
+        compose(frame, motion, bottom_px, self.dock_rows.get());
     }
 
     /// Publishes the drawn offset **and the fill band's height** to the mouse
@@ -1883,8 +1883,9 @@ fn band_target(input_rows: u16, dock_rows: u16, cell: CellMetrics) -> f32 {
 /// frame may be dockless, and a motion frame running in between that wrote
 /// the band would drop the caret on the grid's bottom row into an undrawn
 /// dock slot and lose it (`/code-review`).
-fn compose(frame: &mut Frame, motion: Motion, bottom_px: f32, dock: bool) {
-    if dock && frame.dock().is_some() {
+fn compose(frame: &mut Frame, motion: Motion, bottom_px: f32, dock_rows: u16) {
+    if dock_rows > 0 && frame.dock().is_some() {
+        frame.set_dock_share(dock_rows);
         frame.set_dock_band(bottom_px, motion.band());
     }
     frame.set_origin_rows(motion.origin());
@@ -2609,7 +2610,7 @@ mod tests {
                 Theme::BATERI.accent_linear(),
                 Theme::BATERI.accent_linear(),
             );
-            compose(&mut frame, motion, BOTTOM, true);
+            compose(&mut frame, motion, BOTTOM, DOCK_ROWS);
 
             // The content's bottom edge: origin + filled rows (`29 − 5`).
             let grid_bottom = frame.origin_px() + (ROWS - 5.0) * 18.0;
@@ -2643,7 +2644,7 @@ mod tests {
             Theme::BATERI.accent_linear(),
             Theme::BATERI.accent_linear(),
         );
-        compose(&mut frame, motion, BOTTOM, true);
+        compose(&mut frame, motion, BOTTOM, DOCK_ROWS);
         assert_eq!(frame.dock_band_px(), frame.dock_layout_px());
         assert_eq!(frame.origin_px(), (5.0 - 2.0) * 18.0);
     }
@@ -2688,7 +2689,7 @@ mod tests {
                 Theme::BATERI.info_linear(),
                 Theme::BATERI.accent_linear(),
             );
-            compose(&mut frame, motion, BOTTOM, true);
+            compose(&mut frame, motion, BOTTOM, DOCK_ROWS);
             frame
         };
         let mut motion = Motion::default();
@@ -2755,6 +2756,27 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_alternate_screen_keeps_a_one_row_band_without_offsetting_the_grid() {
+        // vim over ssh: the share is one row and the band is the context row
+        // alone — the band is exactly the share and the grid stays put.
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        let mut motion = Motion::default();
+        motion.sync(None, 0, band_target(0, 1, cell), 0, true, false);
+        let mut frame = Frame::default();
+        frame.clear(cell, CaretStyle::default());
+        frame.set_dock_input_rows(0);
+        frame.open_dock(
+            Theme::BATERI.background_linear(),
+            Theme::BATERI.accent_linear(),
+            Theme::BATERI.accent_linear(),
+        );
+        compose(&mut frame, motion, 600.0, 1);
+        assert_eq!(frame.dock_band_px(), crate::frame::dock_px(1, cell));
+        assert_eq!(frame.dock_band_px(), crate::frame::band_px(0, cell));
+        assert_eq!(frame.origin_px(), 0.0, "the remote app's grid moved");
+    }
+
+    #[test]
     fn a_full_grid_is_clipped_from_the_top_while_the_band_is_tall() {
         // In a full grid (offset 0) when the band grows the origin goes
         // **negative** and the grid's top ends up outside the window —
@@ -2772,19 +2794,19 @@ mod tests {
             Theme::BATERI.accent_linear(),
             Theme::BATERI.accent_linear(),
         );
-        compose(&mut frame, motion, 600.0, true);
+        compose(&mut frame, motion, 600.0, DOCK_ROWS);
         assert_eq!(frame.origin_px(), -36.0);
         // In a dock-less window the band is never written: the origin is the offset alone.
         let mut frame = Frame::default();
         frame.clear(cell, CaretStyle::default());
-        compose(&mut frame, motion, 600.0, false);
+        compose(&mut frame, motion, 600.0, 0);
         assert_eq!(frame.origin_px(), 0.0);
         // The window has a gutter but this frame's surface is off (the gap when
         // leaving vim): the band is not written, the caret's slot boundary stays
         // at infinity.
         let mut frame = Frame::default();
         frame.clear(cell, CaretStyle::default());
-        compose(&mut frame, motion, 600.0, true);
+        compose(&mut frame, motion, 600.0, DOCK_ROWS);
         assert_eq!(
             frame.origin_px(),
             0.0,
