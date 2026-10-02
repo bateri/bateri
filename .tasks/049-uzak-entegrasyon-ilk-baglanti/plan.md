@@ -49,6 +49,19 @@ açılsın; hiçbir yeni arayüz yazılmasın. Karar ve gerekçe `discussion.md`
     "her zaman sar, sessiz düşme"), `docs/AYARLAR.md`'nin `integration`
     satırı gerekiyorsa.
 
+- **R6 — ssh'ın öbür ucuna terminal kimliği** (kullanıcı isteği
+  2026-10-03). Pane'in kabuğunda `LC_TERMINAL=bateri`,
+  `LC_TERMINAL_VERSION`, `LC_BATERI_TAB_URL`; miras kalan `LC_TERMINAL`
+  ezilir; sarılmış oturumda uzak betik de dışa aktarır.
+  - **R6.1** Düz ssh'ta `SendEnv`/`AcceptEnv LC_*` ile taşınır; `AcceptEnv`
+    kısıtlı sunucuda yalnız sarılmış oturumda (bilinen sınır).
+  - **R6.2** Değer hiçbir zaman başka bir terminalin taklidi değildir.
+- **R7 — Kullanılmış oturum düşmez.** Girişten sonra kullanıcı bir şey
+  yazdıysa (047'nin termios giriş kenarından sonra girdi nesli ilerlediyse)
+  sarılmış oturumun bitişi düz yeniden bağlanma doğurmaz ve host `plain`
+  olmaz — komutu yok sayan etkileşimli CLI'da (`ForceCommand`) çıkıştan sonra
+  yeniden bağlanma kalmasın (phase-2'de ölçüldü).
+
 ## Yaklaşım
 
 1. `ssh_wrap`: nonce üretimi `wrap`'ta, `unwrap` onu geri verir; `decide`
@@ -105,4 +118,5 @@ ssh host ──► __bateri_ssh ──► bateri ssh-argv
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
+| phase-3 | |
 | kapı | |
