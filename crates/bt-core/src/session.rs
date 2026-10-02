@@ -1253,6 +1253,17 @@ struct AdapterInner {
     /// reverse is nowhere. [`Session::title`] takes it on its own without
     /// touching `Term`.
     title: Mutex<Option<String>>,
+    /// How many times the title slot changed — written with it, under `Term`.
+    /// With [`AdapterInner::title_at_command`], whether the title was written
+    /// **since the running command started**: the remote folder's title
+    /// fallback ([`Session::title_folder_into`]) reads only such a title — the
+    /// slot keeps a title until the next OSC 0/2, so another host's or the
+    /// local prompt's would otherwise pass for this host's (`/code-review`).
+    title_epoch: AtomicU64,
+    /// [`AdapterInner::title_epoch`] at the last transition to `Running`; the
+    /// reader writes it when the scanner sees the `C`, before the read's bytes
+    /// reach `Term`.
+    title_at_command: AtomicU64,
     /// The **generation** of PTY output: each alacritty `Wakeup` (a parsed
     /// read round) increments it, under the `Term` lock. Clearing the screen
     /// changes the scrollback but does not increment this — its generation is
@@ -1287,6 +1298,8 @@ impl Adapter {
             theme: Mutex::new(theme),
             blink: Mutex::new(blink),
             title: Mutex::new(None),
+            title_epoch: AtomicU64::new(0),
+            title_at_command: AtomicU64::new(0),
             ledger: AtomicU64::new(0),
             wipes: AtomicU64::new(0),
             search_active: AtomicBool::new(false),
@@ -1345,6 +1358,7 @@ impl Adapter {
                 false
             } else {
                 *slot = title;
+                self.0.title_epoch.fetch_add(1, Ordering::AcqRel);
                 true
             }
         };
@@ -1561,6 +1575,10 @@ impl io::Read for TappedPty {
                 wake.title_changed();
             }
             if outcome.started {
+                adapter.0.title_at_command.store(
+                    adapter.0.title_epoch.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
                 wake.command_started();
             }
             if outcome.prompt
@@ -7323,11 +7341,16 @@ impl Session {
     /// (`shell::title_directory`) is written into it — in place, so the frame
     /// path does not allocate. The title's host is **not** matched against the
     /// ssh target: the target is usually an `~/.ssh/config` alias
-    /// (`kararla_hetzner` vs `kararla-production`), and while the remote session
-    /// runs the title is the remote shell's. Takes the title's leaf lock; the
-    /// caller must not hold `shell`.
+    /// (`kararla_hetzner` vs `kararla-production`), and a title written **since
+    /// the running command (the ssh) started** is the remote shell's — an older
+    /// one (the previous host's, the local prompt's) is not read. Takes the
+    /// title's leaf lock; the caller must not hold `shell`.
     fn title_folder_into(&self, remote_cwd: &mut String) {
-        if !remote_cwd.is_empty() {
+        let inner = &self.adapter.0;
+        if !remote_cwd.is_empty()
+            || inner.title_epoch.load(Ordering::Acquire)
+                == inner.title_at_command.load(Ordering::Acquire)
+        {
             return;
         }
         if let Some(dir) = lock(&self.adapter.0.title)
@@ -13655,6 +13678,30 @@ mod tests {
         assert_eq!(session.remote_link_directory(), "/srv/app", "OSC 7 wins");
         let shown = dock_chars(&session);
         assert!(shown.ends_with("kararla_hetzner/srv/app"), "{shown:?}");
+    }
+
+    /// A title from before the ssh started (the previous host's, the local
+    /// prompt's `user@mac: ~/proj`) is not this host's folder: the slot keeps
+    /// a title until the next OSC 0/2 and this server sends none.
+    #[test]
+    fn a_title_from_before_the_remote_command_is_not_its_folder() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '\\033]0;root@other-host: /srv/app\\007{}'; read _; \
+                 printf '\\033]133;C\\007'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        assert!(wake.wait_titles(1, Duration::from_secs(5)) >= 1);
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("quiet"))));
+        assert_eq!(session.remote_link_directory(), "", "a stale title");
+        let shown = dock_chars(&session);
+        assert!(shown.ends_with("quiet"), "{shown:?}");
     }
 
     #[test]
