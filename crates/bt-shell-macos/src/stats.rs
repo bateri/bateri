@@ -122,14 +122,17 @@ fn outcome(reply: &Result<Answer, String>) -> Outcome {
 
 /// The sampling half of the pane (046 phase-4).
 impl TerminalPane {
-    /// The remote edge: the session's remote generation (or none) goes to the
-    /// schedule. A new generation takes its first sample at once; an ended one
+    /// The remote edge and the user's login (047 R9.1): the session's remote
+    /// generation goes to the schedule **once the user's ssh has logged in**
+    /// (or none). A new generation takes its first sample at once; an ended one
     /// stops arming (the value itself `Session` already dropped on `C`/`D`/`A`).
+    /// Before the login the indicator does not connect — the login probe calls
+    /// this again ([`TerminalPane::login_check`]).
     pub(crate) fn sync_stats_generation(&self) {
-        let generation = self
-            .session()
-            .and_then(|session| session.remote_target())
-            .map(|(command, ..)| command);
+        let generation = self.session().and_then(|session| {
+            let (command, ..) = session.remote_target()?;
+            (crate::jobs::remote_login(session) == Some(command)).then_some(command)
+        });
         let actions = {
             let mut driver = self.stats_driver().borrow_mut();
             if driver.schedule.generation() != generation {

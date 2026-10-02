@@ -161,6 +161,36 @@ fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Opti
     }
 }
 
+/// The PTY's two terminal modes that say whether a remote session is past its
+/// login (047 R9.1, [`bt_core::TtyModes`]): `tcgetattr` on the master's copy
+/// (`bt_core::Session::with_pty_fd`). On macOS and Linux the master's
+/// `tcgetattr` answers with the slave's flags — the program's (measured on
+/// macOS; Linux's `tty_mode_ioctl` reads the linked tty; the test below runs
+/// on both). `None` if the call fails.
+pub fn tty_modes(fd: std::os::fd::BorrowedFd<'_>) -> Option<bt_core::TtyModes> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: an all-zero `termios` is a valid value of a plain C struct; the call
+    // only writes it.
+    let mut modes: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` is a borrowed, open descriptor for the call's duration and
+    // `modes` a valid out pointer.
+    if unsafe { libc::tcgetattr(fd.as_raw_fd(), &mut modes) } != 0 {
+        return None;
+    }
+    Some(bt_core::TtyModes {
+        canonical: modes.c_lflag & libc::ICANON != 0,
+        echo: modes.c_lflag & libc::ECHO != 0,
+    })
+}
+
+/// Whether `session`'s remote session is past its login ([`bt_core::Session::remote_login`]
+/// with the PTY's modes from [`tty_modes`]): `Some(the remote generation)`.
+/// The gate of the remote files' background jobs (047 R9.1) — they do not
+/// connect while ssh still asks.
+pub fn remote_login(session: &bt_core::Session) -> Option<u64> {
+    session.remote_login(tty_modes)
+}
+
 /// Whether a remote session is in the foreground (036 Karar 2, 3).
 ///
 /// The failure semantics are the **opposite** of [`foreground`]'s: an
@@ -862,7 +892,7 @@ mod tests {
     use std::sync::Arc;
 
     use bt_core::{
-        CaretShape, CursorBlink, Osc52, Session, SessionOptions, TerminalOptions, Theme,
+        CaretShape, CursorBlink, Osc52, Session, SessionOptions, TerminalOptions, Theme, TtyModes,
     };
 
     use super::*;
@@ -1472,6 +1502,70 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(args, Some(vec!["/bin/sleep".to_owned(), "30".to_owned()]));
+    }
+
+    /// A real PTY whose program sets `stty`'s modes and then sleeps.
+    fn stty_session(modes: &str) -> Session {
+        Session::spawn(
+            SessionOptions {
+                command: Some((
+                    "/bin/sh".to_owned(),
+                    vec!["-c".to_owned(), format!("stty {modes}; sleep 30")],
+                )),
+                working_directory: None,
+                home: None,
+                env: HashMap::new(),
+                cols: 40,
+                rows: 10,
+                cell_px: (9, 18),
+                terminal: TerminalOptions {
+                    scrollback: 100,
+                    osc52: Osc52::Off,
+                    cursor: CaretShape::default(),
+                    blink: CursorBlink::default(),
+                },
+                theme: Theme::BATERI,
+                dock: false,
+                cluster: false,
+                initial_input: None,
+                shell_marks: false,
+                tab_id: None,
+                hostname: None,
+            },
+            Arc::new(SilentWake),
+        )
+        .expect("session did not open")
+    }
+
+    /// 047 phase-4: the master's `tcgetattr` gives the program's modes — on
+    /// macOS and on Linux (`make linux`): a password prompt's (canonical, no
+    /// echo) and a logged-in session's (neither).
+    #[test]
+    fn the_master_reads_the_programs_terminal_modes() {
+        for (stty, expected) in [
+            (
+                "icanon -echo",
+                TtyModes {
+                    canonical: true,
+                    echo: false,
+                },
+            ),
+            (
+                "-icanon -echo",
+                TtyModes {
+                    canonical: false,
+                    echo: false,
+                },
+            ),
+        ] {
+            let session = stty_session(stty);
+            let modes = || session.with_pty_fd(tty_modes);
+            wait_until(&format!("`stty {stty}` not seen"), || {
+                modes() == Some(expected)
+            });
+            assert_eq!(modes().map(TtyModes::logged_in), Some(!expected.canonical));
+            session.shutdown();
+        }
     }
 
     #[test]

@@ -9,9 +9,12 @@
 //! rule (the three points below) would exist in three copies.
 //!
 //! **The fourth arm is not OSC but CSI** and differs from the others in two
-//! ways: the only sequence it recognizes is `CSI 2 J`, and it **has no payload**.
-//! What it holds is not a payload but a count — how many times "clear the screen
-//! on purpose" went by ([`Scanner::take_screen_clears`]). It sits in the same
+//! ways: the only sequences it recognizes are `CSI 2 J` and `CSI ? 2004 h`, and
+//! it **has no payload**. What it gives is not a payload but how many times
+//! "clear the screen on purpose" went by ([`Scanner::take_screen_clears`]) and
+//! each time a line editor switched
+//! bracketed paste on — the remote shell's login signal, an event in stream
+//! order rather than a count (047 phase-4, [`ScanEvent::PasteOn`]). It sits in the same
 //! state machine because the framing is still one: a scanner stuck in a
 //! malformed CSI would swallow the `ESC ] 133;…` that follows, and blocks,
 //! suppression and the dock would die **silently**. Until now `ESC [` fell to
@@ -776,6 +779,30 @@ impl DockContext {
     }
 }
 
+/// The two terminal modes of the PTY that say whether the remote session is
+/// past its login (047 R9.1): read from the master with `tcgetattr` by the
+/// platform shell (`bt-shell-common::jobs::tty_modes`; `bt-core` has no
+/// `libc`), decided here.
+///
+/// Measured (macOS, the master's `tcgetattr` gives the slave's flags): ssh's
+/// host key question is canonical with echo, its password prompt canonical
+/// without echo, the logged-in session neither (ssh's raw mode).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TtyModes {
+    /// `ICANON`.
+    pub canonical: bool,
+    /// `ECHO`.
+    pub echo: bool,
+}
+
+impl TtyModes {
+    /// Whether these modes are a logged-in session's: neither canonical nor
+    /// echoing. A question (host key, password, a passphrase) is canonical.
+    pub fn logged_in(self) -> bool {
+        !self.canonical && !self.echo
+    }
+}
+
 /// The remote session's kind (037 Karar 1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RemoteKind {
@@ -1411,6 +1438,18 @@ pub(crate) struct ShellLog {
     /// same place as the clock's "first `C` wins" rule ([`Self::running_since`]):
     /// iTerm2's mid-command `C` must not invalidate the answer for a running ssh.
     pub(crate) command: u64,
+    /// Whether a line editor switched bracketed paste on **since the remote
+    /// state was set** (`CSI ? 2004 h`, in stream order; 047 phase-4) — the
+    /// remote shell's prompt. Not since `C`: what the same command line ran
+    /// before ssh (`ssh $(fzf)`) switches it on too. The `C` transition and a
+    /// new remote target clear it; a remote prompt that came before the
+    /// probe is the terminal modes' to see.
+    pub(crate) paste_since_remote: bool,
+    /// The command generation whose remote session is known to be logged in
+    /// (047 R9.1, [`crate::Session::remote_login`]) — a cache: the answer does
+    /// not change within a generation and a later question needs no syscall.
+    /// Bound to the generation, so `C` invalidates it by itself.
+    pub(crate) login: Option<u64>,
     /// Whether the shell printed a mark carrying **our** identity (an `A` or `D` with
     /// `bt_block=`) — sticky; the precondition of [`Self::apply`]'s foreign-mark gate.
     ///
@@ -1690,6 +1729,8 @@ impl ShellLog {
             dock_pending: None,
             running_since: None,
             command: 0,
+            paste_since_remote: false,
+            login: None,
             ours: false,
             command_open: false,
             // At startup the caret is the dock's (`caret_home_raw(None, Idle)`), so the first
@@ -1787,6 +1828,7 @@ impl ShellLog {
                 if state.phase != ShellPhase::Running {
                     self.command += 1;
                     self.command_open = true;
+                    self.paste_since_remote = false;
                     outcome.started = true;
                     outcome.title = self.context.clear_remote();
                     // The offer's lifetime is until the next command (Karar 8).
@@ -1898,6 +1940,7 @@ impl ShellLog {
             // inactive a foreign authority goes to the remote slot: OSC 7 can arrive before
             // the probe and must not change the result. The remote slot does not enter the
             // title, so there is no notification.
+            ScanEvent::PasteOn => self.note_paste_on(),
             ScanEvent::Cwd { path, local } => {
                 if self.context.remote.is_some() || !local {
                     self.context.remote_cwd.clear();
@@ -1927,6 +1970,25 @@ impl ShellLog {
         (running || (self.ours && self.command_open)).then_some(self.command)
     }
 
+    /// The scanner saw `CSI ? 2004 h` ([`ScanEvent::PasteOn`], in stream
+    /// order): recorded only while the remote state is set — the local
+    /// prompt's and anything before ssh are not the remote shell's (047 phase-4).
+    pub(crate) fn note_paste_on(&mut self) {
+        if self.context.remote.is_some() && self.running_command().is_some() {
+            self.paste_since_remote = true;
+        }
+    }
+
+    /// The remote session's login signals that arrive with the output (047
+    /// R9.1): a remote OSC 7, bracketed paste switched on since the remote
+    /// state was set, or a title of the `user@host: dir` shape written since
+    /// then (`titled`, the caller's — the title is another leaf lock). `false`
+    /// without a remote session.
+    pub(crate) fn login_signalled(&self, titled: bool) -> bool {
+        self.context.remote.is_some()
+            && (!self.context.remote_cwd.is_empty() || self.paste_since_remote || titled)
+    }
+
     /// Writes the remote session's host (036); `true` **if the title's input
     /// changed**.
     ///
@@ -1951,6 +2013,8 @@ impl ShellLog {
         if changed {
             self.context.stats = None;
             self.context.sign_in = None;
+            // Another host's prompt is not this one's login.
+            self.paste_since_remote = false;
         }
         match target {
             Some(target) => {
@@ -2592,6 +2656,13 @@ const MAX_CSI_PARAM: u32 = 999_999;
 /// path a second time that is already closed by a flag.
 const ERASE_ALL: u32 = 2;
 
+/// DEC private mode 2004, bracketed paste: `CSI ? 2004 h` switches it on. A
+/// line editor turns it on at its prompt (zsh's ZLE, bash's readline, fish) —
+/// after the running command's `C`, i.e. inside an ssh, the remote shell's
+/// prompt: the user is logged in (047 phase-4). The local zsh turns it off
+/// before `C` (`zle_bracketed_paste`), so its own never counts.
+const BRACKETED_PASTE: u32 = 2004;
+
 /// Where the scanner is. What has to survive a chunk boundary is **not** the
 /// payload itself but this whole state: "I saw ESC" and "I'm in the middle of the
 /// digits" are also carried between two `read()`s.
@@ -2613,13 +2684,14 @@ enum ScanState {
 
 /// As much of a CSI sequence as concerns us.
 ///
-/// **There is no buffer and there will not be:** the only sequence we recognize
-/// has a single number as its parameter, so there is no payload to collect either.
-/// `vte`'s four CSI states (`advance_csi_entry`, `_param`, `_intermediate`,
-/// `_ignore`) descend to a **single** state for us, because the question we ask is
-/// single: "is this sequence `CSI 2 J`". The answer for any sequence with an
-/// intermediate byte, a private marker or a second parameter is the same — no —
-/// and [`Self::simple`] carries that answer.
+/// **There is no buffer and there will not be:** the two sequences we recognize
+/// have a single number as their parameter, so there is no payload to collect
+/// either. `vte`'s four CSI states (`advance_csi_entry`, `_param`,
+/// `_intermediate`, `_ignore`) descend to a **single** state for us, because the
+/// question we ask is narrow: "is this sequence `CSI 2 J` or `CSI ? 2004 h`".
+/// The answer for any sequence with an intermediate byte, a marker other than a
+/// leading `?` or a second parameter is the same — no — and [`Self::simple`]
+/// carries that answer.
 ///
 /// `Default` is **not derived**: if it were derived it would be `simple: false`,
 /// that is "no sequence is recognized" — a silently wrong start. The one correct
@@ -2632,8 +2704,13 @@ struct CsiScan {
     /// cursor down), that is, not our sequence; without a separate flag `param`'s zero
     /// would be confused with "never written".
     has_digit: bool,
-    /// Whether the sequence is still "single-parameter, unmarked, no intermediate bytes".
+    /// Whether the sequence is still "single-parameter, no intermediate bytes, at
+    /// most a leading `?`".
     simple: bool,
+    /// Whether the sequence opened with the private marker `?` (DEC private mode,
+    /// 047 phase-4: `CSI ? 2004 h`). Only a **leading** `?` counts; any other
+    /// marker or a `?` after a digit clears [`Self::simple`].
+    private: bool,
 }
 
 impl CsiScan {
@@ -2643,12 +2720,27 @@ impl CsiScan {
             param: 0,
             has_digit: false,
             simple: true,
+            private: false,
         }
     }
 
-    /// Whether the sequence is the one sequence we recognize — terminator included.
+    /// Whether the sequence is `CSI 2 J` — terminator included.
     fn is_erase_all(&self, final_byte: u8) -> bool {
-        self.simple && self.has_digit && self.param == ERASE_ALL && final_byte == b'J'
+        self.simple
+            && !self.private
+            && self.has_digit
+            && self.param == ERASE_ALL
+            && final_byte == b'J'
+    }
+
+    /// Whether the sequence is `CSI ? 2004 h` — bracketed paste switched on, the
+    /// remote shell's prompt (047 phase-4, a login signal).
+    fn is_paste_on(&self, final_byte: u8) -> bool {
+        self.simple
+            && self.private
+            && self.has_digit
+            && self.param == BRACKETED_PASTE
+            && final_byte == b'h'
     }
 }
 
@@ -2709,6 +2801,12 @@ pub(crate) enum ScanEvent<'a> {
         path: &'a str,
         local: bool,
     },
+    /// `CSI ? 2004 h`: a line editor switched bracketed paste on (047 phase-4).
+    /// An **event**, not a counter like `CSI 2 J`'s: its meaning depends on
+    /// where it falls between the marks of the same read (a local prompt's
+    /// before `C`, the remote shell's after the remote state is set), so it
+    /// is applied in stream order ([`ShellLog::note_paste_on`]).
+    PasteOn,
 }
 
 /// The mirror arm's events.
@@ -3019,10 +3117,17 @@ impl Scanner {
                 // ours, but **the framing continues**. `ESC [ ? 1049 h` neither sets a flag nor
                 // gets us stuck.
                 0x20..=0x3f => {
-                    csi.simple = false;
+                    if byte == b'?' && csi.simple && !csi.has_digit && !csi.private {
+                        csi.private = true;
+                    } else {
+                        csi.simple = false;
+                    }
                     self.state = ScanState::Csi(csi);
                 }
                 0x40..=0x7e => {
+                    if csi.is_paste_on(byte) {
+                        on_event(ScanEvent::PasteOn);
+                    }
                     if csi.is_erase_all(byte) {
                         // **Saturating collection, not wrapping.** The consumer drains the counter on
                         // every read round, so the ceiling is reached only with four billion clears in a
@@ -3873,6 +3978,46 @@ mod tests {
 
     fn clears(bytes: &[u8]) -> u32 {
         clears_and_marks_of_chunks(&[bytes]).0
+    }
+
+    fn paste_ons_of_chunks(chunks: &[&[u8]]) -> u32 {
+        let mut scanner = Scanner::new();
+        let mut seen = 0;
+        for chunk in chunks {
+            scanner.feed(chunk, |event| {
+                seen += u32::from(matches!(event, ScanEvent::PasteOn))
+            });
+            assert_eq!(scanner.take_screen_clears(), 0, "{chunk:?} is not a clear");
+        }
+        seen
+    }
+
+    fn paste_ons(bytes: &[u8]) -> u32 {
+        paste_ons_of_chunks(&[bytes])
+    }
+
+    #[test]
+    fn only_bracketed_paste_on_is_the_login_signal() {
+        // 047 phase-4: `CSI ? 2004 h` — the leading `?` only, the one parameter,
+        // the `h`.
+        assert_eq!(paste_ons(b"\x1b[?2004h"), 1);
+        assert_eq!(paste_ons(b"a\x1b[?2004hb\x1b[?2004h"), 2);
+        for other in [
+            &b"\x1b[?2004l"[..],
+            b"\x1b[2004h",
+            b"\x1b[?2004;1h",
+            b"\x1b[?1049h",
+            b"\x1b[??2004h",
+            b"\x1b[2?004h",
+            b"\x1b[>2004h",
+        ] {
+            assert_eq!(paste_ons(other), 0, "{other:?}");
+        }
+        // Split across two reads, like any CSI.
+        assert_eq!(paste_ons_of_chunks(&[b"\x1b[?20", b"04h"]), 1);
+        // A private marker does not make an erase: `CSI ? 2 J` is DECSED.
+        assert_eq!(clears(b"\x1b[?2J"), 0);
+        assert_eq!(clears(b"\x1b[2J"), 1);
     }
 
     #[test]
@@ -5525,6 +5670,7 @@ mod tests {
             ScanEvent::Dock(DockEvent::Update(line)) => lines.push(line.buffer.clone()),
             ScanEvent::Dock(_) => {}
             ScanEvent::Cwd { path, .. } => paths.push(path.to_owned()),
+            ScanEvent::PasteOn => {}
         });
 
         assert_eq!(marks, vec![Mark::PromptEnd]);
@@ -6386,6 +6532,76 @@ mod tests {
         assert_eq!(log.context.remote_host(), Some("deploy@10.0.0.5"));
         assert!(log.set_remote(None));
         assert_eq!(log.context.remote, None);
+    }
+
+    #[test]
+    fn the_login_signals_belong_to_the_running_command() {
+        // 047 R9.1: termios decides the modes, the output's signals only while
+        // remote and only since `C`.
+        assert!(
+            !TtyModes {
+                canonical: true,
+                echo: true
+            }
+            .logged_in(),
+            "host key question"
+        );
+        assert!(
+            !TtyModes {
+                canonical: true,
+                echo: false
+            }
+            .logged_in(),
+            "password prompt"
+        );
+        assert!(
+            !TtyModes {
+                canonical: false,
+                echo: true
+            }
+            .logged_in()
+        );
+        assert!(
+            TtyModes {
+                canonical: false,
+                echo: false
+            }
+            .logged_in(),
+            "logged in"
+        );
+
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        // The local prompt's own `?2004h`, and one from the command line before
+        // ssh (`ssh $(fzf)`), are not recorded — in stream order, as the scanner
+        // hands them over within one read.
+        let mut scanner = Scanner::new();
+        scanner.feed(
+            b"\x1b]133;A;bt_block=1\x07\x1b[?2004h\x1b]133;B\x07\x1b[?2004l\x1b]133;C\x07\x1b[?2004h",
+            |event| {
+                log.apply_scan_answering(event, 0);
+            },
+        );
+        assert_eq!(log.running_command(), Some(1));
+        assert!(!log.paste_since_remote);
+        assert!(!log.login_signalled(false), "not remote");
+        log.set_remote(Some(&RemoteTarget::ssh("prod")));
+        assert!(!log.paste_since_remote, "before the remote state");
+        assert!(!log.login_signalled(false), "nothing came yet");
+        assert!(log.login_signalled(true), "a title of the shell's shape");
+        log.note_paste_on();
+        assert!(log.login_signalled(false));
+        // A new command clears it, and the remote state with it.
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        log.apply(Mark::PromptStart { id: Some(2) });
+        log.apply(Mark::PromptEnd);
+        log.apply(Mark::CommandStart);
+        log.set_remote(Some(&RemoteTarget::ssh("prod")));
+        assert!(!log.login_signalled(false));
+        log.context.remote_cwd.push_str("/srv");
+        assert!(log.login_signalled(false), "a remote OSC 7");
     }
 
     /// A load sample for the clearing tests: the value itself is not asked.

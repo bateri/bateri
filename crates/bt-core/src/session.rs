@@ -87,7 +87,7 @@ use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule};
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection, DockState,
     DockStatus, Precision, RemoteStats, RemoteTarget, Scanner, ShellLog, ShellState, Stripe,
-    Transfer,
+    Transfer, TtyModes,
 };
 use crate::wake::Wake;
 
@@ -1264,6 +1264,12 @@ struct AdapterInner {
     /// reader writes it when the scanner sees the `C`, before the read's bytes
     /// reach `Term`.
     title_at_command: AtomicU64,
+    /// [`AdapterInner::title_epoch`] when the remote state was last set (047
+    /// phase-4): a title written since is the remote shell's — the login
+    /// signal ([`Session::remote_login`]). Read under the `Term` lock
+    /// ([`Session::set_remote`]), so a local title still being parsed in the
+    /// same read as `C` is already counted.
+    title_at_remote: AtomicU64,
     /// The **generation** of PTY output: each alacritty `Wakeup` (a parsed
     /// read round) increments it, under the `Term` lock. Clearing the screen
     /// changes the scrollback but does not increment this — its generation is
@@ -1300,6 +1306,7 @@ impl Adapter {
             title: Mutex::new(None),
             title_epoch: AtomicU64::new(0),
             title_at_command: AtomicU64::new(0),
+            title_at_remote: AtomicU64::new(0),
             ledger: AtomicU64::new(0),
             wipes: AtomicU64::new(0),
             search_active: AtomicBool::new(false),
@@ -3514,6 +3521,13 @@ pub struct Session {
     /// because once the `Pty` is wrapped into [`TappedPty`] it goes to the
     /// reader thread and is no longer seen from this side.
     child_pid: u32,
+    /// A copy of the PTY's master (`pty.file().try_clone()`, taken at birth for
+    /// `child_pid`'s reason): its terminal modes are the slave's
+    /// ([`Session::with_pty_fd`], 047 phase-4). `None` if the copy failed —
+    /// the login signal then comes from the output alone — and after
+    /// [`Session::begin_shutdown`], which closes it **before** the `Pty`'s
+    /// own `Drop`: the slave's hangup comes when it always did. Read-only use.
+    master: Mutex<Option<File>>,
 }
 
 impl Session {
@@ -3566,6 +3580,7 @@ impl Session {
         let home = options.home;
         let pty = tty::new(&pty_options, size, 0)?;
         let child_pid = pty.child().id();
+        let master = Mutex::new(pty.file().try_clone().ok());
         // The slot is born **before** the `EventLoop`: one end goes to the
         // wrapper and the reader thread, the other stays in `Session`.
         // The scrollback's ceiling is from `scrollback`: since at least one row
@@ -3675,6 +3690,7 @@ impl Session {
             cluster: options.cluster,
             home,
             child_pid,
+            master,
         };
         // The session-without-wrapper's first input: the shell's typeahead, by
         // the **same** path as user input (generation included). In a fresh
@@ -7250,11 +7266,23 @@ impl Session {
     /// context row and the dock's top line changed, alacritty's damage does not
     /// know this). The leaf lock drops before `request_frame`; `Term` is not touched.
     pub fn set_remote(&self, command: u64, target: Option<&RemoteTarget>) -> bool {
+        // The title's epoch under `Term`: a read in flight (the `C` and a local
+        // title in one chunk) is parsed by then (047 phase-4).
+        let titles = {
+            let _term = self.term.lock();
+            self.adapter.0.title_epoch.load(Ordering::Acquire)
+        };
         let (changed, repaint) = {
             let mut log = lock(&self.shell);
             if log.running_command() == Some(command) {
                 let mark = log.context.remote_mark;
                 let changed = log.set_remote(target);
+                if changed {
+                    self.adapter
+                        .0
+                        .title_at_remote
+                        .store(titles, Ordering::Release);
+                }
                 (changed, changed || mark != log.context.remote_mark)
             } else {
                 (false, false)
@@ -8645,8 +8673,10 @@ impl Session {
     /// master while `wait` blocks; from this crate the way passes through taking
     /// a copy of the master with `pty.file().try_clone()` in `Session::spawn`
     /// (`EventLoop` does **not give** the `Pty` back after `join`, i.e. the copy
-    /// must be taken at the start). It was not done and is recorded as debt: the
-    /// limit is needed in any case, (1) is not solved by draining.
+    /// must be taken at the start). The copy is taken today ([`Session::with_pty_fd`],
+    /// 047) but only read for the terminal modes; the draining is not done and
+    /// is recorded as debt: the limit is needed in any case, (1) is not solved
+    /// by draining.
     ///
     /// **It does not promise two things.** That `SIGHUP` went when the time ran
     /// out is not guaranteed: if the slow step is `join` (if the reader thread is
@@ -8679,6 +8709,9 @@ impl Session {
     /// stderr lines (the state of `Drop for Session`).
     pub fn begin_shutdown(&self) -> Option<ShutdownHandle> {
         let reader = lock(&self.reader).take()?;
+        // The modes' copy goes first: the `Pty`'s `Drop` closes the last master
+        // fd, as before 047.
+        drop(lock(&self.master).take());
         self.send(Msg::Shutdown);
 
         // Neither `join` nor the drop may block (the two reasons are in
@@ -8735,6 +8768,78 @@ impl Session {
     /// sees the child's exit.
     pub fn child_pid(&self) -> u32 {
         self.child_pid
+    }
+
+    /// Runs `read` on the PTY master's copy ([`Session::master`]); `None` if
+    /// there is none (the copy failed, the session is shutting down). Its one
+    /// use is reading the terminal modes (047 phase-4, [`Session::remote_login`])
+    /// — nothing is written to or read from it. The copy's leaf lock is held
+    /// for the call: `read` must be a syscall, not a wait.
+    pub fn with_pty_fd<T>(
+        &self,
+        read: impl FnOnce(std::os::fd::BorrowedFd<'_>) -> Option<T>,
+    ) -> Option<T> {
+        use std::os::fd::AsFd;
+        lock(&self.master)
+            .as_ref()
+            .and_then(|file| read(file.as_fd()))
+    }
+
+    /// Whether the remote session is past its login (047 R9.1): `Some(the
+    /// remote generation)` if so, `None` while ssh still asks (a host key, a
+    /// password) or without a remote session. A background job of the remote
+    /// files does not connect before it (`discussion.md` → Karar — ek).
+    ///
+    /// The signals: the output's since the remote state was set — a remote
+    /// OSC 7, bracketed paste switched on, a `user@host: dir` title — and the
+    /// PTY's terminal modes ([`TtyModes::logged_in`]), which `modes` reads from
+    /// the master's copy only when the output has not said it (the platform
+    /// shell's `tcgetattr`; `bt-core` has no `libc`). A yes is kept for the
+    /// generation: later questions take one leaf lock.
+    ///
+    /// The leaf locks in sequence, never nested; `Term` is not touched. Not on
+    /// the frame path: its callers are the remote edge, the login probe and a
+    /// remote link's check.
+    pub fn remote_login(
+        &self,
+        modes: impl FnOnce(std::os::fd::BorrowedFd<'_>) -> Option<TtyModes>,
+    ) -> Option<u64> {
+        let command = {
+            let log = lock(&self.shell);
+            let command = log.running_command()?;
+            log.context.remote.as_ref()?;
+            if log.login == Some(command) {
+                return Some(command);
+            }
+            command
+        };
+        let titled = self.title_since_remote_names_a_shell();
+        let signalled = {
+            let log = lock(&self.shell);
+            log.running_command() == Some(command) && log.login_signalled(titled)
+        };
+        // Off the shell lock: a syscall.
+        if !signalled && !self.with_pty_fd(modes).is_some_and(TtyModes::logged_in) {
+            return None;
+        }
+        let mut log = lock(&self.shell);
+        // The same generation still remote: a `D` in between ended it.
+        (log.running_command() == Some(command) && log.context.remote.is_some()).then(|| {
+            log.login = Some(command);
+            command
+        })
+    }
+
+    /// Whether the title was written since the remote state was set and has
+    /// the `user@host: dir` shape (`shell::title_directory`) — a remote shell's
+    /// prompt title. Takes the title's leaf lock only when it was written.
+    fn title_since_remote_names_a_shell(&self) -> bool {
+        let inner = &self.adapter.0;
+        inner.title_epoch.load(Ordering::Acquire) != inner.title_at_remote.load(Ordering::Acquire)
+            && lock(&inner.title)
+                .as_deref()
+                .and_then(crate::shell::title_directory)
+                .is_some()
     }
 
     /// Whether the reader thread is still running. `false` means either we
@@ -13760,6 +13865,93 @@ mod tests {
         assert_eq!(session.remote_link_directory(), "/srv/app", "OSC 7 wins");
         let shown = dock_chars(&session);
         assert!(shown.ends_with("kararla_hetzner/srv/app"), "{shown:?}");
+    }
+
+    /// 047 R9.1: the remote session's login — the PTY's modes (read through
+    /// the caller's closure, only when the output has not said it), kept for
+    /// the generation; the output's bracketed paste after `C` says it too.
+    #[test]
+    fn the_remote_login_comes_from_the_modes_or_the_output() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; read _; \
+                 printf '\\033[?2004h'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        assert!(
+            session.with_pty_fd(|_| Some(())).is_some(),
+            "the master's copy"
+        );
+        let asking = |_: std::os::fd::BorrowedFd<'_>| {
+            Some(TtyModes {
+                canonical: true,
+                echo: false,
+            })
+        };
+        let raw = |_: std::os::fd::BorrowedFd<'_>| {
+            Some(TtyModes {
+                canonical: false,
+                echo: false,
+            })
+        };
+        assert_eq!(session.remote_login(raw), None, "no command, no remote");
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert_eq!(session.remote_login(raw), None, "not remote yet");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert_eq!(session.remote_login(asking), None, "the password prompt");
+        assert_eq!(session.remote_login(|_| None), None, "unreadable modes");
+        // The output: bracketed paste after `C` — no modes asked.
+        session.write(b"\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut login = None;
+        while login.is_none() && Instant::now() < deadline {
+            login = session.remote_login(|_| None);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(login, Some(command), "`?2004h` since `C`");
+        assert_eq!(
+            session.remote_login(|_| panic!("kept for the generation")),
+            Some(command)
+        );
+    }
+
+    /// The modes alone say it (a remote shell without bracketed paste). A
+    /// local title and `?2004h` in the same read as `C` — before the remote
+    /// state — say nothing.
+    #[test]
+    fn raw_modes_are_a_login() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; \
+                 printf '\\033]0;me@mac: ~\\007\\033[?2004h\\033]133;C\\007\\033[?2004h'; \
+                 sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert_eq!(
+            session.remote_login(|_| None),
+            None,
+            "a title and a paste-on from before the remote state"
+        );
+        assert_eq!(
+            session.remote_login(|_| Some(TtyModes {
+                canonical: false,
+                echo: false,
+            })),
+            Some(command)
+        );
+        assert_eq!(session.remote_login(|_| None), Some(command), "kept");
     }
 
     /// A title from before the ssh started (the previous host's, the local
