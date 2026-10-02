@@ -596,7 +596,11 @@ duruyor. Taşmada yol **soldan** kısalır (`…` önekiyle), dal asla kısalmaz
 karar `bt-core`'da, çizen taraf yalnız hücreleri alır. Dock payı ızgaranın satırlarından
 düşülüyor ve **yalnız entegrasyonlu zsh oturumunda** ayrılıyor — ayrım oturum
 doğarken kararlaşıyor, yani `/bin/sh` koşan duman reçetesi dock almıyor.
-**Alternatif ekranda dock kalkıyor** (vim, htop, `less`): `frame()` bayrağı
+**Alternatif ekranda dock kalkıyor** (vim, htop, `less`) — **uzak oturumda
+hariç**: orada tek satırlık durum çubuğu (`⇄ host`, aktarım satırı) kalıyor,
+payı bir satır ve `band_px(0) == dock_px(1)` olduğu için uygulamanın ızgarası
+ötelenmiyor (`dock_rows_for`; uzakta vim'in nerede koştuğu görünür kalsın).
+`frame()` bayrağı
 `Term` kilidi altındayken yayınlıyor (`Session::alt_screen`), kare yolu onu her
 karede karşılaştırıyor ve değişince `bt-shell-macos`'a enjekte edilmiş haberciyi
 çağırıyor; resize **çizilen karenin içinde değil**, `dispatch2` ana kuyruğunun
