@@ -38,6 +38,7 @@ use bt_core::{
 
 use crate::download::Conflict;
 use crate::jobs::SSH_VALUED;
+use crate::ssh_route::Route;
 
 /// The shortest interval between progress reports — a **design constant**. Every
 /// report is a content frame (the line and the bar changed); reporting at display
@@ -80,18 +81,52 @@ const KEPT_VALUED: &str = "BbcFIiJlmoPpS";
 /// them again) and the remote command (`-t prod tmux`) is dropped. With mosh
 /// there is no ssh argv: only the host, with default ssh settings.
 pub fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
+    ssh_argv_for(target, &Route::Direct)
+}
+
+/// [`ssh_argv`] on a route ([`crate::ssh_route`], 047): on [`Route::Direct`]
+/// byte for byte today's argv; on [`Route::Ours`] `-o ControlPath=<socket>` goes
+/// **behind** the user's options, right before the destination — ssh takes a
+/// key's first value, so a `-S`/`-o ControlPath` the user typed is never
+/// overridden, while the config file's value (read after the command line) is.
+pub fn ssh_argv_for(target: &RemoteTarget, route: &Route) -> Vec<String> {
+    let connection = connection(target);
     let mut argv = vec![
+        connection.program,
         "-T".to_owned(),
         "-o".to_owned(),
         "BatchMode=yes".to_owned(),
         "-o".to_owned(),
         "ControlMaster=no".to_owned(),
     ];
-    let program = match target.kind {
-        RemoteKind::Mosh => {
-            argv.push(target.host.clone());
-            "ssh".to_owned()
-        }
+    argv.extend(connection.options);
+    if let Route::Ours(socket) = route {
+        argv.push("-o".to_owned());
+        argv.push(format!("ControlPath={}", socket.display()));
+    }
+    argv.push(connection.destination);
+    argv
+}
+
+/// The target's connection, split into its three parts: the ssh program, the
+/// options kept from the user's argv ([`KEPT_FLAGS`], [`KEPT_VALUED`]) and the
+/// destination. The **one** parser of the target's argv: the stream's argv
+/// ([`ssh_argv_for`]) and the master connection's ([`crate::ssh_route`]) are
+/// both assembled from it.
+pub(crate) struct Connection {
+    pub(crate) program: String,
+    pub(crate) options: Vec<String>,
+    pub(crate) destination: String,
+}
+
+pub(crate) fn connection(target: &RemoteTarget) -> Connection {
+    let mut options = Vec::new();
+    match target.kind {
+        RemoteKind::Mosh => Connection {
+            program: "ssh".to_owned(),
+            options,
+            destination: target.host.clone(),
+        },
         RemoteKind::Ssh => {
             let program = target.argv.first().cloned().unwrap_or_else(|| "ssh".into());
             let args = target.argv.get(1..).unwrap_or_default();
@@ -125,22 +160,23 @@ pub fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
                         if KEPT_VALUED.contains(flag)
                             && let Some(value) = value
                         {
-                            argv.push(format!("-{flag}"));
-                            argv.push(value);
+                            options.push(format!("-{flag}"));
+                            options.push(value);
                         }
                         break;
                     }
                     if KEPT_FLAGS.contains(flag) {
-                        argv.push(format!("-{flag}"));
+                        options.push(format!("-{flag}"));
                     }
                 }
             }
-            argv.extend(destination.or_else(|| Some(target.host.clone())));
-            program
+            Connection {
+                program,
+                options,
+                destination: destination.unwrap_or_else(|| target.host.clone()),
+            }
         }
-    };
-    argv.insert(0, program);
-    argv
+    }
 }
 
 /// POSIX single quoting; an inner `'` as `'"'"'` — **produces no backslash**.

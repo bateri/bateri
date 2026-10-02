@@ -9,7 +9,8 @@
 //! queue (`upload`), the download's stream (`download`), the rules of
 //! previewing and downloading a remote file (`remote_files`), its helper
 //! ssh session (`remote_helper`), the preview cache on disk
-//! (`preview_cache`), the remote host's load sampling (`remote_stats`), the
+//! (`preview_cache`), the remote host's load sampling (`remote_stats`), which
+//! ssh connection a remote job rides on and the askpass wire (`ssh_route`), the
 //! process table (`jobs`), the shell's birth (`child`) and file watching
 //! (`watch`).
 //!
@@ -39,6 +40,7 @@ pub mod remote_helper;
 pub mod remote_stats;
 pub mod settings;
 pub mod split;
+pub mod ssh_route;
 pub mod upload;
 // Bodies exist for macOS and Linux only; elsewhere the module is absent
 // rather than half-present (a `Notify` without a `Watch`).
