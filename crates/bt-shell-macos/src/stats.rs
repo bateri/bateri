@@ -30,7 +30,6 @@ use objc2::MainThreadMarker;
 
 use crate::pane::TerminalPane;
 use crate::remote_helper::{Answer, LoadReply, Query, Request};
-use crate::upload;
 
 /// The pane's sampling state: the schedule, the sampler and the form.
 #[derive(Debug)]
@@ -275,7 +274,7 @@ impl TerminalPane {
             return;
         };
         let (id, lookup) = (self.id(), self.lookup());
-        let reply = Box::new(move |answer: Result<Answer, String>| {
+        let reply = Box::new(move |answer: Result<Answer, String>, _: &[String]| {
             DispatchQueue::main().exec_async(move || {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
@@ -289,13 +288,14 @@ impl TerminalPane {
             .and_then(|session| session.remote_target())
             .filter(|(command, ..)| *command == generation);
         let Some((command, target, _)) = target else {
-            reply(Err("The remote session ended".to_owned()));
+            reply(Err("The remote session ended".to_owned()), &[]);
             return;
         };
         self.remote_helper().borrow_mut().ask(Request {
             command,
-            ssh: upload::ssh_argv(&target),
-            host: target.host,
+            host: target.host.clone(),
+            // A background job: rides a live master or today's argv, never asks.
+            dial: self.dial(target, None),
             query: Query::Load { detail },
             reply,
         });

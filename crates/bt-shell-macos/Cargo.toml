@@ -122,6 +122,9 @@ objc2-foundation = { workspace = true, features = [
 # `beginDraggingSessionWithItems:event:source:`. Only header flags over
 # `objc2-foundation` headers already in its default set; `Cargo.lock` did not
 # move. Same decision record, Karar 15.
+# The ssh master's password sheet (047 phase-2): `NSSecureTextField` as the
+# alert's accessory. Only a header flag; `Cargo.lock` did not move. Decision
+# record .tasks/047-ssh-parola-ve-keychain/discussion.md → Karar.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -134,7 +137,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSSearchFieldCell",
     "NSShadow", "NSTextFieldCell", "NSWindowTab", "block2", "NSDockTile", "NSProgressIndicator",
     "NSCursor", "NSPopover", "NSParagraphStyle", "NSOpenPanel", "NSPanel", "NSSavePanel",
-    "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider",
+    "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSSecureTextField",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer table (CLAUDE.md) recorded this as "only attaching a CALayer".

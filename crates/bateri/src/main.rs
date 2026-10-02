@@ -7,7 +7,14 @@ use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 fn main() -> ExitCode {
-    // **First line.** The earlier the startup stamp is taken the more honest
+    // ssh's askpass (047): the same binary, started by our own master
+    // connection with `BATERI_ASKPASS` in its environment. Before everything
+    // else — the stamp, `launchctl`, AppKit — because only the answer may
+    // reach standard output and a window-server session is not needed.
+    if let Some(code) = bt_shell_macos::askpass() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
+    // **First line of the application.** The earlier the startup stamp is taken the more honest
     // it is: `has_aqua_session()` right below spawns a child process and that
     // is today a part of bateri's startup path. Had the stamp been taken after
     // it, `startup=` would silently have dropped that time.

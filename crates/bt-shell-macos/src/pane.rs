@@ -68,11 +68,13 @@ use crate::clipboard::{self, PendingCopy};
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
+use crate::password_sheet::PasswordSheet;
 use crate::preview::PreviewTicket;
 use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
 use crate::search_bar::{SearchBar, selection_query};
+use crate::ssh_route::Masters;
 use crate::stats::StatsDriver;
 use crate::stats_popover::StatsPopover;
 use crate::upload::Transfers;
@@ -297,6 +299,10 @@ pub(crate) struct PaneLaunch {
     pub(crate) smooth_scroll: bool,
     /// Inherited temporary point-size delta (026 → Karar 3).
     pub(crate) zoom: Zoom,
+    /// bateri's ssh masters (047): the application's registry, shared by every
+    /// pane — one opening per host. `None` in a timed run: the remote jobs
+    /// take today's argv.
+    pub(crate) masters: Option<Arc<Masters>>,
 }
 
 /// The half of the birth package that only [`TerminalPane::start`] consumes.
@@ -822,6 +828,11 @@ pub(crate) struct PaneIvars {
     upload_alert: RefCell<Option<Retained<NSAlert>>>,
     /// The open stop question (037 phase-7, [`crate::uploader`]).
     upload_stop: RefCell<Option<StopSheet>>,
+    /// The open password sheet (047, [`crate::password_sheet`]): its sender is
+    /// what the waiting job's thread blocks on — dropping it answers "nobody".
+    password: RefCell<Option<PasswordSheet>>,
+    /// The application's ssh masters ([`PaneLaunch::masters`]).
+    masters: Option<Arc<Masters>>,
     /// The open "Show files (N)" popover (037 phase-7).
     upload_list: RefCell<Option<UploadPopover>>,
     /// Time of the event that closed the popover (`popoverWillClose:`): so that
@@ -1136,6 +1147,7 @@ impl TerminalPane {
             reduce_motion,
             smooth_scroll,
             zoom,
+            masters,
         } = launch;
         let renderer = Rc::new(Renderer::system_default()?);
         // The layer is ours (040 → Karar 8): wgpu configures its device,
@@ -1205,6 +1217,8 @@ impl TerminalPane {
             uploads: RefCell::new(Transfers::default()),
             upload_alert: RefCell::new(None),
             upload_stop: RefCell::new(None),
+            password: RefCell::new(None),
+            masters,
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
             stats_popover: RefCell::new(None),
@@ -1973,6 +1987,9 @@ impl TerminalPane {
     /// the observer is a no-op if unregistered). `None` if the session was
     /// never born — there is nothing to close.
     pub(crate) fn begin_close(&self) -> Option<Closing> {
+        // First: a job's thread waiting at the password sheet holds the helper's
+        // worker too — dropping the sender answers it, then `close` is served.
+        self.close_password();
         self.abandon_uploads();
         // Finder's pending promises fail now (cancelled), not with the last reference.
         self.finder_abandon();
@@ -2433,6 +2450,16 @@ impl TerminalPane {
     /// The open stop question's slot.
     pub(crate) fn upload_stop(&self) -> &RefCell<Option<StopSheet>> {
         &self.ivars().upload_stop
+    }
+
+    /// The open password sheet's slot.
+    pub(crate) fn password(&self) -> &RefCell<Option<PasswordSheet>> {
+        &self.ivars().password
+    }
+
+    /// The application's ssh masters; `None` in a timed run.
+    pub(crate) fn masters(&self) -> Option<Arc<Masters>> {
+        self.ivars().masters.clone()
     }
 
     /// The open "Show transfers (N)" popover's slot.
