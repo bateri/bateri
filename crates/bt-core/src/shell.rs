@@ -819,11 +819,13 @@ impl Clone for RemoteTarget {
 /// The remote shell's directory as its **title** says it, the fallback when it
 /// sends no OSC 7 (045, user decision 2026-10-02): Debian's and Ubuntu's stock
 /// `.bashrc` sets the title to `user@host: dir` at every prompt, so the title
-/// follows `cd`. Only that exact shape counts and the directory must be absolute
-/// or `~`-rooted; anything else (vim's title, a free-form one) is `None` and the
-/// remote folder stays unknown.
+/// follows `cd`; oh-my-zsh's `termsupport` sets `user@host:dir` (`%n@%m:%~`, no
+/// space), so the space after the colon is optional. Only that shape counts and
+/// the directory must be absolute or `~`-rooted; anything else (vim's title, a
+/// free-form one) is `None` and the remote folder stays unknown.
 pub(crate) fn title_directory(title: &str) -> Option<&str> {
-    let (who, dir) = title.split_once(": ")?;
+    let (who, dir) = title.split_once(':')?;
+    let dir = dir.strip_prefix(' ').unwrap_or(dir);
     let (user, host) = who.split_once('@')?;
     let plain = |part: &str| {
         !part.is_empty()
@@ -6601,8 +6603,16 @@ mod tests {
             title_directory("deploy@web-01: ~/My Drive"),
             Some("~/My Drive")
         );
+        // oh-my-zsh's `termsupport`: `%n@%m:%~`, no space after the colon.
+        assert_eq!(title_directory("tdgunes@tdg-fw13:~"), Some("~"));
+        assert_eq!(
+            title_directory("tdgunes@tdg-fw13:~/Projects"),
+            Some("~/Projects")
+        );
         assert_eq!(title_directory("vim - notes.txt"), None);
         assert_eq!(title_directory("deploy@web-01: relative"), None);
+        assert_eq!(title_directory("deploy@web-01:relative"), None);
+        assert_eq!(title_directory("host:/x"), None);
         assert_eq!(title_directory("a b@host: /x"), None);
         assert_eq!(title_directory("deploy@: /x"), None);
     }
