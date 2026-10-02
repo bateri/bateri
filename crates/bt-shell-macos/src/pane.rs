@@ -298,6 +298,25 @@ fn remote_helper_for(learning: bool) -> RemoteHelper {
     }))
 }
 
+/// How many times the `posix` row's write is tried ([`TerminalPane::check_remote_up`]);
+/// each attempt waits up to the state file's lock patience. A design constant.
+const POSIX_ATTEMPTS: usize = 3;
+
+/// The pane's half of the bootstrap's proof (049 R2.3): the bootstrap's
+/// `8133;i;up;{nonce}` (in the session, [`bt_core::Session::remote_up`]) and
+/// the wrapped `ssh` the remote probe found arrive in either order — `up` is
+/// the bootstrap's first byte and routinely beats the probe — so whichever
+/// comes second does the check.
+#[derive(Debug, Default)]
+struct WrapProof {
+    /// The probe's command generation, the wrapped argv's nonce
+    /// (`jobs::Target::nonce`) and the user's argv (`ssh -G`'s input for the
+    /// server's key). Only a call bateri wrapped has one.
+    wrapped: Option<(u64, String, Vec<String>)>,
+    /// The generation whose server was recorded: once per remote generation.
+    recorded: Option<u64>,
+}
+
 /// The pane's birth package (039 Karar 3): all inputs in a single struct,
 /// from the owner. Live changes go a separate way, through the pane's `set_*`
 /// methods.
@@ -443,6 +462,9 @@ struct ShellWake {
     /// Whether the stale-link news is waiting on the main queue (044 R4.1) —
     /// `search_pending`'s twin: at most one job.
     link_pending: Arc<AtomicBool>,
+    /// Whether the bootstrap's `up` check is waiting on the main queue (049
+    /// R2.3, [`TerminalPane::check_remote_up`]) — at most one job.
+    up_pending: Arc<AtomicBool>,
 }
 
 /// The two bits of the remote-session probe (036 Karar 2) — and of the login
@@ -696,6 +718,24 @@ impl Wake for ShellWake {
         }
     }
 
+    fn remote_up(&self) {
+        // Reader thread, lock-free: `command_started`'s gate (a timed run
+        // learns nothing) and `title_changed`'s at-most-one job.
+        if self.timed || self.up_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.up_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.store(false, Ordering::Release);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.check_remote_up();
+            }
+        });
+    }
+
     fn link_hover_lost(&self) {
         // The frame path (main thread, after the `Term` lock): the hover's stamp
         // went stale and the slot was dropped. The view re-finds the link if ⌘
@@ -894,6 +934,9 @@ pub(crate) struct PaneIvars {
     /// The remote generation this pane reported to the masters' registry
     /// ([`Masters::session_started`], 047 R9.3); `None` locally.
     ssh_session: Cell<Option<u64>>,
+    /// The wrapped `ssh` the probe found and whether its server was learned
+    /// (049 R2.3, [`TerminalPane::check_remote_up`]).
+    wrap_proof: RefCell<WrapProof>,
     /// The open "Show files (N)" popover (037 phase-7).
     upload_list: RefCell<Option<UploadPopover>>,
     /// Time of the event that closed the popover (`popoverWillClose:`): so that
@@ -1276,6 +1319,7 @@ impl TerminalPane {
                 remote_probe: Arc::default(),
                 login_probe: Arc::default(),
                 link_pending: Arc::default(),
+                up_pending: Arc::default(),
             }),
             zoom: Cell::new(zoom),
             // No dock at launch: `start` decides and computes the geometry
@@ -1293,6 +1337,7 @@ impl TerminalPane {
             password: RefCell::new(None),
             masters,
             ssh_session: Cell::new(None),
+            wrap_proof: RefCell::new(WrapProof::default()),
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
             stats_popover: RefCell::new(None),
@@ -1981,6 +2026,13 @@ impl TerminalPane {
             },
             Probe::Local => settled,
             Probe::Remote(target) => {
+                // A call bateri wrapped carries its nonce (049 R2.3): kept for
+                // the bootstrap's `up`, which may already be here.
+                if let Some(nonce) = &target.nonce {
+                    self.ivars().wrap_proof.borrow_mut().wrapped =
+                        Some((command, nonce.clone(), target.argv.clone()));
+                }
+                let wrapped = target.nonce.is_some();
                 // The line is per argument, with readable quoting (037 Karar 1);
                 // `bt-core` does not write the rule a second time, it stores the string.
                 let line = quote::command_line(&target.argv);
@@ -1990,11 +2042,68 @@ impl TerminalPane {
                     argv: target.argv,
                     line,
                 };
+                let changed = session.set_remote(command, Some(&target));
+                if wrapped {
+                    self.check_remote_up();
+                }
                 RemoteProbeOutcome {
                     undecided: false,
-                    changed: session.set_remote(command, Some(&target)),
+                    changed,
                 }
             }
+        }
+    }
+
+    /// The bootstrap's proof (049 R2.3): when the session's last `up`
+    /// ([`bt_core::Session::remote_up`]) and the wrapped `ssh` the probe found
+    /// ([`WrapProof`]) are of the same command generation and carry the same
+    /// nonce, the server is recorded as `posix` — once per generation, on a
+    /// thread of its own: `ssh -G` (the server's key, `ssh_wrap::learn`) and
+    /// the state file's lock must not hold the main thread. Called from both
+    /// ends ([`Wake::remote_up`], [`Self::probe_remote`]); a mismatch, a call
+    /// bateri did not wrap or a timed run records nothing.
+    pub(crate) fn check_remote_up(&self) {
+        if self.ivars().run.is_some() {
+            return;
+        }
+        let Some((generation, seen)) = self.session().and_then(|session| session.remote_up())
+        else {
+            return;
+        };
+        let argv = {
+            let mut proof = self.ivars().wrap_proof.borrow_mut();
+            let Some((command, nonce, argv)) = proof.wrapped.as_ref() else {
+                return;
+            };
+            if *command != generation || *nonce != seen || proof.recorded == Some(generation) {
+                return;
+            }
+            let argv = argv.clone();
+            proof.recorded = Some(generation);
+            argv
+        };
+        // A write that fails (the state file's lock past its patience, a
+        // full disk) is tried again a few times on the thread: nothing else
+        // asks again for this generation, and a missing `posix` row is the
+        // wrong direction for phase-2's fallback.
+        let spawned = std::thread::Builder::new()
+            .name("remote posix".into())
+            .spawn(move || {
+                let Some(home) = crate::child::home() else {
+                    return;
+                };
+                let path = crate::remote_hosts_path(&home);
+                for _ in 0..POSIX_ATTEMPTS {
+                    if bt_shell_common::ssh_wrap::learn(&crate::ssh_route::SystemSsh, &argv, &path)
+                        .is_ok()
+                    {
+                        return;
+                    }
+                }
+            });
+        // No thread, no write: the next `up` or probe of this generation may try.
+        if spawned.is_err() {
+            self.ivars().wrap_proof.borrow_mut().recorded = None;
         }
     }
 

@@ -112,6 +112,19 @@ pub trait Wake: Send + Sync + 'static {
     /// its queue.
     fn command_started(&self);
 
+    /// The remote bootstrap said it runs (`8133;i;up;{nonce}`, 049 R2.2)
+    /// while a command ran: the receiver reads it with
+    /// [`crate::Session::remote_up`] and, if the nonce is the wrapped `ssh`'s,
+    /// learns the server as one with a shell.
+    ///
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::command_started`]): once per mark, which the bootstrap prints
+    /// once per connection. It arrives on the reader thread after the ledger's
+    /// leaf lock has been released; the contract assumes the `Term` lock may be
+    /// held and the three prohibitions above apply. The implementor posts **at
+    /// most one** job to its queue.
+    fn remote_up(&self);
+
     /// The link hover ([`crate::Session::set_link_hover`]) went **stale** and
     /// was dropped (044 R4.1): its stamp no longer held — output came, the window
     /// scrolled, the screen was cleared, the link's cell changed — so the frame

@@ -1727,6 +1727,13 @@ pub(crate) struct ShellLog {
     /// not change within a generation and a later question needs no syscall.
     /// Bound to the generation, so `C` invalidates it by itself.
     pub(crate) login: Option<u64>,
+    /// The remote bootstrap's last `8133;i;up;{nonce}` (049 R2.2) and the
+    /// command generation it arrived in ([`crate::Session::remote_up`]). Bound
+    /// to the generation like [`Self::login`], so `C` invalidates it by itself
+    /// — and neither `set_remote` nor `D` clears it: `up` is the bootstrap's
+    /// first byte and routinely beats the probe, and the pane's main-queue
+    /// check may run after `D`. Written only while a command runs.
+    pub(crate) remote_up: Option<(u64, String)>,
     /// Whether the shell printed a mark carrying **our** identity (an `A` or `D` with
     /// `bt_block=`) — sticky; the precondition of [`Self::apply`]'s foreign-mark gate.
     ///
@@ -2008,6 +2015,7 @@ impl ShellLog {
             command: 0,
             paste_since_remote: false,
             login: None,
+            remote_up: None,
             ours: false,
             command_open: false,
             // At startup the caret is the dock's (`caret_home_raw(None, Idle)`), so the first
@@ -2208,6 +2216,20 @@ impl ShellLog {
             // before the probe has set the remote state — the same lifecycle as
             // the remote slot below (cleared on `C`/`D`/`A`).
             ScanEvent::RemoteSetup(fault) => self.context.remote_setup = Some(fault),
+            // **The remote 8133 defense's second narrow exception** (049 R2.2,
+            // `f`'s precedent): the bootstrap's proof that the wrapped command
+            // ran. Not gated by the remote state — it is the bootstrap's first
+            // byte and beats the probe — but by a running command: at a local
+            // prompt there is no wrapped ssh to vouch for. Its content is a
+            // nonce and the pane matches it against the wrapped argv's; a
+            // foreign `up` (a `cat`ed file, a server that prints one) carries
+            // no nonce of ours and teaches nothing.
+            ScanEvent::RemoteUp(nonce) => {
+                if self.running_command().is_some() {
+                    self.remote_up = Some((self.command, nonce));
+                    outcome.up = true;
+                }
+            }
             ScanEvent::Cwd { path, local } => {
                 if self.context.remote.is_some() || !local {
                     self.context.remote_cwd.clear();
@@ -3054,6 +3076,9 @@ pub(crate) struct ScanOutcome {
     /// identity-less `A` does not count — the `A` of the far end of ssh or of another
     /// tool does not say our shell reached the prompt.
     pub(crate) prompt: bool,
+    /// The remote bootstrap's `up` was recorded (049, [`ShellLog::remote_up`])
+    /// → [`crate::Wake::remote_up`].
+    pub(crate) up: bool,
 }
 
 /// The event the scanner hands out.
@@ -3091,6 +3116,10 @@ pub(crate) enum ScanEvent<'a> {
     /// a [`DockEvent`]: the remote session's gate on the dock (048 R4) must not
     /// swallow it, and it never touches the mirror's state.
     RemoteSetup(RemoteSetupFault),
+    /// `8133;i;up;{nonce}`: the remote bootstrap started (049 R2.2,
+    /// [`ShellLog::remote_up`]). `f`'s twin: on the mirror's number, not a
+    /// [`DockEvent`]. Owned: it arrives once per connection.
+    RemoteUp(String),
 }
 
 /// The mirror arm's events.
@@ -3329,8 +3358,9 @@ impl Scanner {
                         DockOutcome::Branch => ScanEvent::Dock(DockEvent::Branch(&self.branch)),
                         DockOutcome::Editable => ScanEvent::Dock(DockEvent::Editable),
                         DockOutcome::Setup(Some(fault)) => ScanEvent::RemoteSetup(fault),
+                        DockOutcome::Info(Some(nonce)) => ScanEvent::RemoteUp(nonce),
                         // An unknown code is a newer bootstrap's: nothing to say.
-                        DockOutcome::Setup(None) => return,
+                        DockOutcome::Setup(None) | DockOutcome::Info(None) => return,
                     };
                     on_event(event);
                 } else if is_ignored(byte) {
@@ -3663,6 +3693,10 @@ enum DockOutcome {
     Editable,
     /// `f`: the remote bootstrap's fault code (048); `None` for an unknown code.
     Setup(Option<RemoteSetupFault>),
+    /// `i`: the remote bootstrap's information (049); `Some(nonce)` for a
+    /// well-formed `up`, `None` for anything else (a newer bootstrap's word, a
+    /// malformed nonce) — nothing to say, and no fault of the mirror's.
+    Info(Option<String>),
 }
 
 /// Decodes the mirror payload and writes into `line`.
@@ -3676,6 +3710,7 @@ enum DockOutcome {
 /// ESC ] 8133 ; b ; {branch} BEL
 /// ESC ] 8133 ; w BEL
 /// ESC ] 8133 ; f ; {code} BEL
+/// ESC ] 8133 ; i ; up ; {nonce} BEL
 /// ```
 ///
 /// `u` refreshes the line, `e` (`line-finish`) closes it, `o` is the shell saying
@@ -3686,7 +3721,10 @@ enum DockOutcome {
 /// `b`. `f` (048) is printed by the **remote** bootstrap, not the local wrapper:
 /// the integration did not start on the server and `{code}` (plain ASCII, one of
 /// [`RemoteSetupFault::from_code`]'s) says why. It touches neither the mirror nor
-/// the dock — and an unknown code is no fault of the mirror's either.
+/// the dock — and an unknown code is no fault of the mirror's either. `i`
+/// (049) is the remote bootstrap too: `up` is its first output and `{nonce}`
+/// the attempt's (lowercase hex, at most [`NONCE_LIMIT`] digits — the form is
+/// checked, the content is the pane's to match); any other `i` is silent.
 ///
 /// **`b` is on the mirror's channel but is not part of the mirror:** it arrives
 /// **per prompt** (`precmd`), not per keystroke, and does not touch the line's
@@ -3749,6 +3787,10 @@ fn parse_dock(
         b"o" => unavailable(line, DockFault::Overflow),
         b"w" => DockOutcome::Editable,
         b"f" => DockOutcome::Setup(fields.next().and_then(RemoteSetupFault::from_code)),
+        b"i" => DockOutcome::Info(match (fields.next(), fields.next(), fields.next()) {
+            (Some(b"up"), Some(nonce), None) => remote_nonce(nonce),
+            _ => None,
+        }),
         b"u" => match decode_line(&mut fields, decoded, line) {
             Some(()) => DockOutcome::Update,
             // The state is written too: `decode_line` says `Live` on its very first line, and
@@ -3758,6 +3800,20 @@ fn parse_dock(
         },
         _ => unavailable(line, DockFault::Malformed),
     }
+}
+
+/// The longest nonce `8133;i;up` carries (049): the bootstrap's is 16 hex
+/// digits (`bt-shell-common::ssh_wrap::NONCE_LEN`); the bound only keeps a
+/// foreign sequence from making a long string.
+pub(crate) const NONCE_LIMIT: usize = 64;
+
+/// `up`'s nonce field → the nonce: lowercase hex, `1..=`[`NONCE_LIMIT`]
+/// digits; anything else is `None`.
+fn remote_nonce(field: &[u8]) -> Option<String> {
+    (!field.is_empty()
+        && field.len() <= NONCE_LIMIT
+        && field.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    .then(|| String::from_utf8_lossy(field).into_owned())
 }
 
 /// Empties the buffer, writes the state and returns the result.
@@ -5258,6 +5314,87 @@ mod tests {
         assert!(log.dock_editable);
     }
 
+    /// The remote bootstrap's `up` (049 R2.2, `8133;i;up;{nonce}`): recorded
+    /// with the command's generation while a command runs — before the probe
+    /// and under a remote session alike, past `set_remote` and `D` — and
+    /// ignored at a local prompt; a malformed nonce or another `i` word says
+    /// nothing; neither touches the mirror or the dock.
+    #[test]
+    fn the_bootstraps_up_is_kept_with_its_generation_only_while_a_command_runs() {
+        let mut scanner = Scanner::new();
+        let mut feed = |log: &mut ShellLog, bytes: &[u8]| {
+            let mut up = false;
+            scanner.feed(bytes, |event| up |= log.apply_scan_answering(event, 0).up);
+            up
+        };
+        // At a local prompt: no command, nothing recorded.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        feed(&mut log, b"\x1b]133;A\x07\x1b]133;B\x07");
+        let dock = log.dock.clone();
+        assert!(!feed(&mut log, b"\x1b]8133;i;up;00c0ffee00c0ffee\x07"));
+        assert_eq!(log.remote_up, None, "a local prompt vouches for nothing");
+        assert_eq!(log.dock, dock, "the mirror is untouched");
+
+        // A command runs, the probe has not landed: kept with the generation.
+        feed(&mut log, b"\x1b]133;C\x07");
+        let generation = log.command;
+        assert!(feed(&mut log, b"\x1b]8133;i;up;00c0ffee00c0ffee\x07"));
+        assert_eq!(
+            log.remote_up,
+            Some((generation, "00c0ffee00c0ffee".to_owned()))
+        );
+        assert_eq!(log.dock, dock, "the mirror is untouched");
+        // The probe's answer and the remote 8133 defense keep it; a second `up`
+        // replaces it.
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        assert!(feed(&mut log, b"\x1b]8133;i;up;0123456789abcdef\x07"));
+        assert_eq!(
+            log.remote_up,
+            Some((generation, "0123456789abcdef".to_owned())),
+            "under the remote session too"
+        );
+        // Malformed or foreign: nothing, the last one stays.
+        for bytes in [
+            &b"\x1b]8133;i;up\x07"[..],
+            b"\x1b]8133;i;up;\x07",
+            b"\x1b]8133;i;up;00C0FFEE\x07",
+            b"\x1b]8133;i;up;00c0ffee;x\x07",
+            b"\x1b]8133;i;up;0x12\x07",
+            b"\x1b]8133;i;ready;00c0ffee\x07",
+            b"\x1b]8133;i\x07",
+        ] {
+            assert!(!feed(&mut log, bytes), "{bytes:?}");
+            assert_eq!(
+                log.remote_up,
+                Some((generation, "0123456789abcdef".to_owned()))
+            );
+        }
+        let long = format!("\x1b]8133;i;up;{}\x07", "a".repeat(NONCE_LIMIT + 1));
+        assert!(!feed(&mut log, long.as_bytes()), "past the bound");
+        // Our `D` ends the remote session, not the record: the pane's check may
+        // come after it. The next `C` is a new generation.
+        feed(&mut log, b"\x1b]133;D;0\x07");
+        assert_eq!(log.context.remote, None);
+        assert_eq!(
+            log.remote_up.as_ref().map(|(generation, _)| *generation),
+            Some(generation)
+        );
+        feed(&mut log, b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+        assert_ne!(
+            log.command, generation,
+            "a stale record is the caller's to see"
+        );
+
+        // Locally, without the remote defense, an `i` never makes the dock
+        // unavailable (an unknown op would).
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        feed(&mut log, b"\x1b]133;A\x07\x1b]133;B\x07");
+        feed(&mut log, &dock_update(2, "% ", "ls", "", &[]));
+        feed(&mut log, b"\x1b]8133;i;whatever\x07");
+        assert_eq!(log.dock.buffer, "ls");
+        assert_eq!(log.dock.status, DockStatus::Live);
+    }
+
     /// The remote bootstrap's fault (048, `8133;f`) reaches the remote state
     /// whether or not the probe has landed, never touches the mirror, and goes
     /// with the remote state; an unknown code says nothing.
@@ -6087,7 +6224,10 @@ mod tests {
             ScanEvent::Dock(DockEvent::Update(line)) => lines.push(line.buffer.clone()),
             ScanEvent::Dock(_) => {}
             ScanEvent::Cwd { path, .. } => paths.push(path.to_owned()),
-            ScanEvent::PasteOn | ScanEvent::RemoteSetup(_) | ScanEvent::RemoteMark(_) => {}
+            ScanEvent::PasteOn
+            | ScanEvent::RemoteSetup(_)
+            | ScanEvent::RemoteUp(_)
+            | ScanEvent::RemoteMark(_) => {}
         });
 
         assert_eq!(marks, vec![Mark::PromptEnd]);
@@ -7358,6 +7498,7 @@ mod tests {
             outcome.title |= one.title;
             outcome.started |= one.started;
             outcome.prompt |= one.prompt;
+            outcome.up |= one.up;
         });
         outcome
     }

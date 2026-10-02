@@ -50,7 +50,7 @@
 | 046 | [uzak-yuk-gostergesi](046-uzak-yuk-gostergesi/) | 🟢 | 5 phase + kapı tamam — ssh durum çubuğunda uzak Linux makinenin yük göstergesi ve ayrıntı popover'ı; gerçek sunucuda gözle kontrol bekliyor |
 | 047 | [ssh-parola-ve-keychain](047-ssh-parola-ve-keychain/) | 🟢 | 4 phase + kapı tamam — parolalı sunucuda dosya işleri bateri'nin kendi master'ıyla, parola Keychain'de; arka plan kullanıcının ssh girişini bekliyor ve master oturumla kapanıyor
 | 048 | [uzak-kabuk-entegrasyonu](048-uzak-kabuk-entegrasyonu/) | 🟢 | 5 phase + kapı tamam — düz `ssh` uzakta dizin ve komut bloklarını rc dosyasına dokunmadan kuruyor, ayarla ve host başına kapanıyor; dosya işleri terminalde açılan oturumun bağlantısına biniyor |
-| 049 | [uzak-entegrasyon-ilk-baglanti](049-uzak-entegrasyon-ilk-baglanti/) | 📐 | her `ssh` ilk bağlantıdan itibaren sarılıyor, kabuksuz uçta sessizce düz yeniden bağlanıyor; arayüz yok, 048'in "ilk bağlantıda öğren"i geri alındı |
+| 049 | [uzak-entegrasyon-ilk-baglanti](049-uzak-entegrasyon-ilk-baglanti/) | 🔨 | her `ssh` ilk bağlantıdan itibaren sarılıyor, kabuksuz uçta sessizce düz yeniden bağlanıyor; arayüz yok, 048'in "ilk bağlantıda öğren"i geri alındı |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

@@ -119,6 +119,40 @@ pub fn ssh_argv() -> Option<i32> {
         &remote_hosts_path(&home),
         &ssh_route::socket_bases(Some(&home), uid),
         bt_shell_common::ssh_wrap::boot(),
+        bt_shell_common::ssh_wrap::new_nonce().as_deref(),
+        &mut std::io::stdout().lock(),
+    ))
+}
+
+/// `bateri ssh-fell-back --rc N [--instance I] -- <ssh arguments…>` (049
+/// R3.2): [`ssh_argv`]'s sibling, asked by the local zsh's `ssh` function
+/// after a wrapped `ssh` ended with `N` — `Some(exit code)` when the process
+/// was started as the subcommand. The body is
+/// [`bt_shell_common::ssh_wrap::ssh_fell_back_main`]; here only the platform's
+/// inputs: the state file's path and the socket roots. Every failure prints
+/// nothing, and nothing means "no rerun".
+pub fn ssh_fell_back() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != "ssh-fell-back" {
+        return None;
+    }
+    let Some(argv) = args
+        .map(|arg| arg.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        return Some(0);
+    };
+    let Some(home) = child::home() else {
+        return Some(0);
+    };
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    Some(bt_shell_common::ssh_wrap::ssh_fell_back_main(
+        &argv,
+        &ssh_route::SystemSsh,
+        &remote_hosts_path(&home),
+        &ssh_route::socket_bases(Some(&home), uid),
+        bt_shell_common::ssh_wrap::FELL_BACK_PATIENCE,
         &mut std::io::stdout().lock(),
     ))
 }

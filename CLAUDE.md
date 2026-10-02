@@ -738,7 +738,7 @@ bateri ona `-O exit` göndermiyor (ne oturum sonu ne ⌘Q kullanıcının
 terminalini kesmesin), kısa persist ise `exit`'in üstündeki işleri
 beklemeden dönmesini ve bağlantının oturum + işlerle bitmesini sağlıyor
 (ölçüldü: persist'siz master `exit`'i binen akış kadar tutuyor). Sarılmış çağrı `ssh -t <kullanıcının argümanları> "exec sh -c
-'<tek satır>' bateri-boot <P>"`; tek satır her giriş kabuğunun tırnağından sağ
+'<tek satır>' bateri-boot <P|-> <nonce>"`; tek satır her giriş kabuğunun tırnağından sağ
 çıkmak zorunda (`'`, `\`, `!`, satır sonu yok — `ssh_wrap::is_inline`) ve
 base64'lü yükü (`assets/shell/remote/boot.sh` + yazacağı dosyalar,
 derlemede gömülü, pakete kopyalanmıyor) açıp `eval` ediyor. Yük motd'u
@@ -750,9 +750,16 @@ dosya), bash 4+ `--posix -l` + `ENV` ile (öncesinde `--rcfile`), fish
 yani yoklamadan önce de uzak yuvaya gidiyor. Başka kabuk, yazma ya da
 çözücü hatası düz giriş kabuğu ve `8133;f;{kod}` (`RemoteSetupFault`;
 uzak oturumun 8133 kapısının dışında, uzak durumla silinir) — pane'in
-etiketi nedeni söylüyor. Host ancak **öğrenildiyse** sarılıyor: yardımcı
+etiketi nedeni söylüyor. Yükün (çözücü hatasında tek satırın) **ilk
+çıktısı** `8133;i;up;{nonce}` (049; nonce deneme başına, sarılmış argv'de):
+`bt-core` onu komut koşarken nesliyle tutuyor (`ShellLog::remote_up`, 8133
+kapısının `f`'den sonraki ikinci dar istisnası), pane nonce'u probun bulduğu
+sarılmış argv'ninkiyle (`jobs::Target::nonce`) eşleyince host'u `posix`
+kaydediyor. Host ancak **öğrenildiyse** sarılıyor: o işaret ya da yardımcı
 oturumun selamı (sunucuda `sh`) `ssh_wrap::learn` ile `remote-hosts`'a
-`posix` yazıyor, uzak nesil başına bir kez. **Uzakta komut blokları da
+`posix` yazıyor, uzak nesil başına bir kez; `bateri ssh-fell-back` düşme
+kararını (`ssh_wrap::fell_back`, `plain` olgusu) veriyor ama henüz çağıranı
+yok (049 phase-2). **Uzakta komut blokları da
 çiziliyor** (phase-3): uzak betikler `A`/`C`/`D`'yi `bt_remote=<P>.<S>.<n>`
 (`P` yerel `ssh` bloğu, `--block` ile; `S` uzak kabuğun pid'i) ve çıpayı
 `bateri://rblock/…` olarak basıyor, `bt-core` onları ayrı bir izde tutuyor —

@@ -3410,6 +3410,7 @@ exit $code
         fn title_changed(&self) {}
         fn search_changed(&self) {}
         fn command_started(&self) {}
+        fn remote_up(&self) {}
         fn link_hover_lost(&self) {}
     }
 
@@ -3470,7 +3471,13 @@ exit $code
         let mut user_args = argv[1..].to_vec();
         user_args.insert(0, "StrictHostKeyChecking=accept-new".to_owned());
         user_args.insert(0, "-o".to_owned());
-        let wrapped = crate::ssh_wrap::wrap(&user_args, "exec /bin/sh -i", None, Some(&control));
+        let wrapped = crate::ssh_wrap::wrap(
+            &user_args,
+            "exec /bin/sh -i",
+            None,
+            "0123456789abcdef",
+            Some(&control),
+        );
         let wake = Arc::new(ExitWake::default());
         let session = Session::spawn(
             SessionOptions {

@@ -1588,6 +1588,9 @@ impl io::Read for TappedPty {
                 );
                 wake.command_started();
             }
+            if outcome.up {
+                wake.remote_up();
+            }
             if outcome.prompt
                 && let Some(mut line) = initial_input.take()
             {
@@ -7384,6 +7387,16 @@ impl Session {
         lock(&self.shell).context.remote_setup
     }
 
+    /// The remote bootstrap's last `8133;i;up;{nonce}` (049 R2.2) and the
+    /// command generation ([`Self::running_command`]'s) it arrived in; `None`
+    /// if none arrived while a command ran. Not cleared by `D` or the probe's
+    /// answer — the caller compares the generation with its own probe's, and
+    /// the nonce with the wrapped argv's (`ssh_wrap::nonce`). One leaf-lock
+    /// round; `Term` is not touched.
+    pub fn remote_up(&self) -> Option<(u64, String)> {
+        lock(&self.shell).remote_up.clone()
+    }
+
     /// The directory a remote link's relative candidate resolves under: OSC 7's
     /// remote directory, or — when the server sends none — the one the title
     /// names in the `user@host: dir` / `user@host:dir` shape (`shell::title_directory`; may be
@@ -9272,6 +9285,8 @@ mod tests {
         commands: u32,
         /// How many times [`Wake::link_hover_lost`] came.
         hovers_lost: u32,
+        /// How many times [`Wake::remote_up`] came.
+        ups: u32,
     }
 
     impl TestWake {
@@ -9357,6 +9372,11 @@ mod tests {
 
         fn command_started(&self) {
             self.state.lock().unwrap().commands += 1;
+            self.cond.notify_all();
+        }
+
+        fn remote_up(&self) {
+            self.state.lock().unwrap().ups += 1;
             self.cond.notify_all();
         }
 
@@ -18419,6 +18439,42 @@ e\\314\\201.'; sleep 5";
         // The second `C` produced no news: the count stays at two.
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(wake.state.lock().unwrap().commands, 2);
+    }
+
+    #[test]
+    fn the_bootstraps_up_reaches_the_wake_and_the_session() {
+        // 049 R2.2: the reader's path — the mark at a local prompt is silent,
+        // while a command runs it is one news and the session keeps it with the
+        // command's generation (no probe has landed).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf '\\033]8133;i;up;00c0ffee00c0ffee\\007'; read _; \
+             printf '\\033]133;C\\007\\033]8133;i;up;0123456789abcdef\\007'; sleep 5",
+            Arc::clone(&wake),
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        // The news comes after the ledger's lock: once it is counted, the
+        // record is there.
+        drop(
+            wake.cond
+                .wait_timeout_while(
+                    wake.state.lock().unwrap(),
+                    Duration::from_secs(5),
+                    |state| state.ups < 1,
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            session.remote_up(),
+            Some((command, "0123456789abcdef".to_owned()))
+        );
+        assert_eq!(
+            wake.state.lock().unwrap().ups,
+            1,
+            "the prompt's mark was silent"
+        );
     }
 
     #[test]

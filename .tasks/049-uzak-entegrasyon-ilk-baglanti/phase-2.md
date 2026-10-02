@@ -50,8 +50,9 @@ _Requirements: R1, R3, R3.1, R4, R5, R5.2, R5.3_
 ## Checklist
 
 - [ ] `decide` bilinmeyen host'u sarıyor, `plain`'i sarmıyor
-- [ ] zsh fonksiyonunun düşme yolu
+- [ ] zsh fonksiyonunun düşme yolu (`ssh-fell-back --rc $rc [--instance I] -- "$@"`: `--instance` `ssh-argv`'ye verilenle aynı, yoksa düz yeniden koşu sarılmış oturumun `u-<key>` master'ına binemez — phase-1 → Uygulama Notları)
 - [ ] Selamdan öğrenme söküldü
+- [ ] `posix`'i pane'in görmediği sarılmış oturum (bateri pane'inde tmux/screen içindeki ssh; `FELL_BACK_PATIENCE`'ı aşan yavaş `ssh -G`) düşmede `plain` olmamalı — çözüm ya da adıyla bilinen sınır (phase-1 `/code-review` bulgusu 1)
 - [ ] Menünün "aç"ı `plain`'i siliyor
 - [ ] Test: Docker sshd (a) ilk bağlantıda entegrasyon, (b) kabuksuzda düz yeniden bağlanma, 255 kolu
 - [ ] CLAUDE.md ve gerekiyorsa docs/AYARLAR.md
