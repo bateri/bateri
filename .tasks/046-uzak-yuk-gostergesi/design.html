@@ -1,0 +1,415 @@
+<title>Uzak Yük Göstergesi</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&family=Bricolage+Grotesque:opsz,wght@12..96,600&display=swap">
+<style>
+/* Layout: tek sütun belge; terminal taslakları sayfanın içinde gerçek ölçekli "ekran görüntüsü" gibi duruyor. */
+:root{
+  --bg:#f3f4f6; --surface:#ffffff; --fg:#1d2026; --muted:#5d6270; --rule:#d9dce3; --accent:#3d6aa8;
+  --display:"Bricolage Grotesque", "IBM Plex Sans", system-ui, sans-serif;
+  --body:"IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --mono:"JetBrains Mono", Menlo, ui-monospace, monospace;
+  /* terminal: bateri gömülü teması (color.rs) */
+  --t-bg:#000000; --t-fg:#d8d9dd; --t-dim:#909093; --t-quiet:#606062; --t-sep:#36373a;
+  --t-info:#79b3b3; --t-warn:#d6b16a; --t-err:#d16d6a; --t-ok:#8bb58b; --t-sel:#283042; --t-cursor:#d9b063;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#111317; --surface:#1a1d23; --fg:#e3e5ea; --muted:#9a9fab; --rule:#2c3038; --accent:#86a6d2; color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#111317; --surface:#1a1d23; --fg:#e3e5ea; --muted:#9a9fab; --rule:#2c3038; --accent:#86a6d2; color-scheme:dark}
+.term.light{--t-bg:#f5f6f8; --t-fg:#24262c; --t-dim:#696b70; --t-quiet:#9a9ca1; --t-sep:#cfd1d6;
+  --t-info:#23787f; --t-warn:#8f6a00; --t-err:#b5423d; --t-ok:#3b7a3b; --t-sel:#dde6f3; --t-cursor:#8a6512}
+
+*{box-sizing:border-box}
+body{background:var(--bg); color:var(--fg); font:15px/1.6 var(--body); margin:0}
+main{max-width:980px; margin:0 auto; padding-inline:20px; padding-block:40px 80px; display:grid; gap:56px}
+h1{font:600 clamp(28px,4.4vw,40px)/1.1 var(--display); margin:0 0 10px; text-wrap:balance; letter-spacing:-.01em}
+h2{font:600 22px/1.25 var(--display); margin:0 0 12px; text-wrap:balance}
+h3{font:600 15px/1.3 var(--body); margin:0}
+p{margin:0; max-width:68ch}
+.lede{color:var(--muted); font-size:16.5px}
+.eyebrow{font:500 12px/1 var(--mono); letter-spacing:.08em; text-transform:uppercase; color:var(--accent); margin-bottom:12px}
+section>p+p{margin-top:10px}
+code,kbd{font-family:var(--mono); font-size:.88em}
+kbd{border:1px solid var(--rule); border-bottom-width:2px; border-radius:4px; padding:0 5px; background:var(--surface)}
+
+/* ---------- terminal ---------- */
+.term{background:var(--t-bg); color:var(--t-fg); font:13px/1.55 var(--mono); border-radius:10px; overflow:hidden;
+  box-shadow:0 1px 0 rgba(0,0,0,.04), 0 12px 32px -14px rgba(0,0,0,.45); border:1px solid #00000022}
+.chrome{height:30px; display:flex; align-items:center; gap:7px; padding-inline:12px; position:relative}
+.chrome i{width:11px; height:11px; border-radius:50%; background:var(--t-sep)}
+.chrome span{position:absolute; inset:0; display:grid; place-items:center; color:var(--t-dim); font:12px var(--body)}
+.chrome .dot{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; vertical-align:1px}
+.grid{padding:10px 14px 14px; white-space:pre; overflow:hidden}
+.grid .p{color:var(--t-info)}
+.caret{background:var(--t-cursor); color:var(--t-bg); border-radius:2px}
+.dock{border-top:1px solid var(--t-info); padding:9px 14px 10px}
+.row{display:flex; justify-content:space-between; gap:2ch; font-size:10.4px; line-height:1.4; white-space:pre; overflow:hidden}
+.row .l{min-width:0; overflow:hidden}
+.row .r{flex:none}
+.host{font-weight:600}
+.cur{color:var(--t-fg)} .q{color:var(--t-quiet)} .d{color:var(--t-dim)} .f{color:var(--t-fg)}
+.warn{color:var(--t-warn)} .err{color:var(--t-err)} .ok{color:var(--t-ok)} .info{color:var(--t-info)}
+.measure{position:absolute; visibility:hidden; white-space:pre; font:10.4px var(--mono)}
+
+/* ---------- controls ---------- */
+.controls{display:flex; flex-wrap:wrap; gap:14px 22px; align-items:center; margin-bottom:14px; font-size:13.5px}
+.seg{display:inline-flex; border:1px solid var(--rule); border-radius:8px; overflow:hidden; background:var(--surface)}
+.seg button{all:unset; cursor:pointer; padding:5px 11px; color:var(--muted)}
+.seg button+button{border-left:1px solid var(--rule)}
+.seg button[aria-pressed="true"]{background:var(--accent); color:#fff}
+.seg button:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
+.ctl{display:flex; align-items:center; gap:8px; color:var(--muted)}
+input[type=range]{accent-color:var(--accent); width:150px}
+.cols{font:500 12.5px var(--mono); color:var(--fg); min-width:5ch; font-variant-numeric:tabular-nums}
+.note{font-size:12.5px; color:var(--muted); margin-top:8px}
+
+/* ---------- variants ---------- */
+.variants{display:grid; gap:18px}
+.variant{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,15rem); gap:18px; align-items:center}
+.variant .term .dock{border-top-color:var(--t-sep)}
+.variant .meta{display:grid; gap:4px}
+.variant .meta p{font-size:13.5px; color:var(--muted)}
+.tag{font:600 11px/1 var(--mono); letter-spacing:.06em; color:var(--accent)}
+.pick{outline:2px solid var(--accent); outline-offset:4px; border-radius:12px}
+@media (max-width:720px){.variant{grid-template-columns:1fr}}
+
+/* ---------- popover ---------- */
+.popwrap{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,18rem); gap:24px; align-items:start}
+@media (max-width:720px){.popwrap{grid-template-columns:1fr}}
+.pop{background:#1c1d21; color:#d8d9dd; border:1px solid #2e3035; border-radius:10px; padding:12px 14px; font:12px/1.5 var(--mono);
+  box-shadow:0 18px 40px -16px rgba(0,0,0,.6); position:relative; margin-top:10px}
+.pop::after{content:""; position:absolute; right:42px; bottom:-6px; width:10px; height:10px; background:#1c1d21;
+  border-right:1px solid #2e3035; border-bottom:1px solid #2e3035; transform:rotate(45deg)}
+.pop h4{margin:0 0 8px; font:600 12px var(--body); color:#909093; letter-spacing:.04em; text-transform:uppercase}
+.pop table{border-collapse:collapse; width:100%}
+.pop td{padding:2px 0; white-space:nowrap}
+.pop td:nth-child(2){text-align:right; font-variant-numeric:tabular-nums}
+.pop .bar{display:inline-block; width:64px; height:5px; border-radius:3px; background:#2e3035; margin-left:10px; vertical-align:2px; overflow:hidden}
+.pop .bar b{display:block; height:100%; background:#79b3b3}
+.pop hr{border:0; border-top:1px solid #2e3035; margin:8px 0}
+.pop .procs td:first-child{color:#909093}
+
+/* ---------- prose blocks ---------- */
+.ladder{counter-reset:s; list-style:none; padding:0; margin:14px 0 0; display:grid; gap:8px}
+.ladder li{display:grid; grid-template-columns:2.2rem minmax(0,1fr); gap:10px; align-items:baseline}
+.ladder li::before{counter-increment:s; content:counter(s); font:600 12px var(--mono); color:var(--accent);
+  border:1px solid var(--rule); border-radius:6px; text-align:center; padding:2px 0; background:var(--surface)}
+.ladder code{white-space:pre}
+.two{display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr)); gap:16px; margin-top:14px}
+.box{background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:16px 18px; display:grid; gap:6px; align-content:start}
+.box p, .box li{font-size:14px}
+.box ul{margin:0; padding-left:18px; display:grid; gap:4px}
+pre.src{background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:14px 16px; overflow-x:auto;
+  font:12.5px/1.6 var(--mono); margin:14px 0 0}
+.q-list{display:grid; gap:14px; margin-top:14px}
+.qa{border-left:2px solid var(--accent); padding-left:14px; display:grid; gap:4px}
+.qa p{font-size:14.5px}
+.qa .rec{color:var(--muted)}
+.rec b{color:var(--fg); font-weight:600}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<main>
+<header>
+  <div class="eyebrow">bateri · tasarım taslağı · ssh durum çubuğu</div>
+  <h1>Uzak sunucunun yükü, durum çubuğunun sağında</h1>
+  <p class="lede">ssh'ta dock tek satırlık bir durum çubuğuna iniyor: solda <code>⇄ host  /uzak/yol</code>, sağ taraf boş. Bu sayfa o boşluğa bağlandığın makinenin CPU, bellek ve disk durumunu koymanın dört yolunu gösteriyor. Aşağıdaki pane canlı: veriler örnek, yük düğmeleriyle değişiyor.</p>
+</header>
+
+<!-- ============ LIVE ============ -->
+<section aria-labelledby="live-h">
+  <h2 id="live-h">Önerilen hâl, canlı</h2>
+  <div class="controls">
+    <div class="ctl">Yük
+      <span class="seg" id="load-seg">
+        <button aria-pressed="true" data-v="calm">Sakin</button><button aria-pressed="false" data-v="busy">Yoğun</button><button aria-pressed="false" data-v="crit">Kritik</button>
+      </span></div>
+    <div class="ctl">Host işareti
+      <span class="seg" id="mark-seg">
+        <button aria-pressed="true" data-v="none">İşaretsiz</button><button aria-pressed="false" data-v="production">Production</button>
+      </span></div>
+    <div class="ctl">Tema
+      <span class="seg" id="theme-seg">
+        <button aria-pressed="true" data-v="dark">bateri</button><button aria-pressed="false" data-v="light">bateri-light</button>
+      </span></div>
+    <label class="ctl" for="cols">Pencere genişliği <input id="cols" type="range" min="34" max="120" value="104"> <span class="cols" id="cols-out">104 sütun</span></label>
+  </div>
+
+  <div class="term" id="live">
+    <div class="chrome"><i></i><i></i><i></i><span id="live-title"><b class="dot" id="tabdot" hidden></b>⇄ deploy@web-01</span></div>
+<div class="grid" id="live-grid"><span class="p">deploy@web-01:/var/www/app$</span> uptime
+ 14:02:11 up 41 days,  2 users,  load average: 0.42, 0.51, 0.48
+<span class="p">deploy@web-01:/var/www/app$</span> git pull --ff-only
+Already up to date.
+<span class="p">deploy@web-01:/var/www/app$</span> <span class="caret"> </span></div>
+    <div class="dock" id="live-dock"><div class="row" id="live-row"></div></div>
+  </div>
+  <p class="note">Ayraç çizgisi işaretin renginde (bugünkü davranış). Sağdaki grup bağlam satırıyla aynı küçük puntoda, sönük; yalnız eşiği aşan değer renk alıyor. Genişliği daraltınca neyin önce düştüğünü görürsün.</p>
+</section>
+
+<!-- ============ VARIANTS ============ -->
+<section aria-labelledby="var-h">
+  <h2 id="var-h">Dört seçenek</h2>
+  <p>Hepsi aynı veriden, aynı satırda. Yük düğmeleri bunları da etkiliyor.</p>
+  <div class="variants" id="variants" style="margin-top:18px"></div>
+</section>
+
+<!-- ============ POPOVER ============ -->
+<section aria-labelledby="pop-h">
+  <h2 id="pop-h">Üstüne gelince ayrıntı</h2>
+  <div class="popwrap">
+    <div>
+      <p>Satır kısa kalıyor, ayrıntı tek tıkla açılıyor. Göstergeye tıklayınca <code>Show transfers</code>'ın kullandığı türden bir <code>NSPopover</code> açılıyor: çekirdek sayısı, 1/5/15 dakikalık load, bellek ve swap, diskler, uptime ve en çok CPU yiyen üç süreç. Değerler açıkken de tazeleniyor.</p>
+      <p style="margin-top:10px">Göstergenin üstünde el imleci var, yani tıklanabildiği belli. Kapanış <kbd>Esc</kbd> ya da dışarı tık.</p>
+    </div>
+    <div class="pop" aria-label="Ayrıntı popover taslağı">
+      <h4>deploy@web-01 · Ubuntu 24.04</h4>
+      <table>
+        <tr><td>CPU · 8 çekirdek</td><td><span id="p-cpu">23%</span><span class="bar"><b id="p-cpu-b" style="width:23%"></b></span></td></tr>
+        <tr><td>Load 1/5/15</td><td id="p-load">0.42 · 0.51 · 0.48</td></tr>
+        <tr><td>Bellek</td><td><span id="p-mem">9.8 / 16 GB</span><span class="bar"><b id="p-mem-b" style="width:61%"></b></span></td></tr>
+        <tr><td>Swap</td><td>0.1 / 2 GB</td></tr>
+        <tr><td>Disk /</td><td><span id="p-disk">54%</span><span class="bar"><b id="p-disk-b" style="width:54%"></b></span></td></tr>
+        <tr><td>Uptime</td><td>41 gün</td></tr>
+      </table>
+      <hr>
+      <table class="procs" id="p-procs">
+        <tr><td>node</td><td>11.2%</td></tr><tr><td>postgres</td><td>6.0%</td></tr><tr><td>nginx</td><td>1.4%</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LADDER ============ -->
+<section aria-labelledby="lad-h">
+  <h2 id="lad-h">Pencere daralınca düşme sırası</h2>
+  <p>Bugünkü kural "host asla kısalmaz, yol soldan kısalır". Yük göstergesi yoldan daha az önemli, çünkü bu çubuğun asıl cevabı "neredeyim". O yüzden yol kısalmaya başlamadan önce gösterge küçülüyor:</p>
+  <ol class="ladder">
+    <li><span>Tam hâl: <code>cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%</code></span></li>
+    <li><span>Grafik düşer, sayılar kalır: <code>cpu 23%  mem 61%</code></span></li>
+    <li><span>Yalnız en kötü değer kalır: <code>mem 61%</code> (eşiği aşan varsa o)</span></li>
+    <li><span>Gösterge tamamen düşer. Ancak eşiği aşan bir değer varsa yolun önüne geçer, çünkü o an "disk %96" yoldan daha önemli bir bilgi.</span></li>
+    <li><span>Bundan sonra yol bugünkü gibi soldan <code>…</code> ile kısalır.</span></li>
+  </ol>
+  <p style="margin-top:12px">Yükleme ya da indirme sürerken bağlam satırının yerini aktarım satırı alıyor; gösterge o sürede gizli, bittiğinde geri geliyor.</p>
+</section>
+
+<!-- ============ DATA ============ -->
+<section aria-labelledby="data-h">
+  <h2 id="data-h">Veri nereden gelir</h2>
+  <p>Yeni bir bağlantı açmıyoruz. 045'te pane başına kurulan <b>yardımcı ssh oturumu</b> (<code>remote_helper</code>, <code>BatchMode</code>, ControlMaster'ı varsa kullanıyor) zaten açık. Ona tek bir akış komutu veriliyor ve uzak taraf her birkaç saniyede bir satır basıyor:</p>
+<pre class="src">while :; do
+  cat /proc/loadavg; head -1 /proc/stat          # CPU: iki örnek arası fark
+  grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo
+  df -P / | tail -1
+  sleep 3
+done</pre>
+  <div class="two">
+    <div class="box">
+      <h3>Boşta sıfır kare ile uyumu</h3>
+      <ul>
+        <li>Kare yalnız gösterilen değer değişince çiziliyor. Sayılar yuvarlandığı için çoğu örnek kare istemiyor; grafik varsa 3 saniyede en çok bir kare.</li>
+        <li>Örnekleme duruyor: uzak oturum bitince, sekme arkadayken ya da pane örtülüyken, pencere 2 dakika etkileşimsiz kaldığında. Geri gelince ilk örnek hemen.</li>
+        <li>Alternatif ekranda (vim, htop) dock zaten tek satıra iniyor; gösterge orada da duruyor.</li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3>Bilinen sınırlar</h3>
+      <ul>
+        <li>Parola isteyen sunucuda yardımcı oturum açılamıyor, gösterge hiç çıkmıyor. Anahtar, agent ya da açık ControlMaster gerekiyor (045'in sınırının aynısı).</li>
+        <li><code>/proc</code> yoksa (macOS ya da BSD sunucu) ikinci bir betik kolu gerekiyor: <code>sysctl</code> + <code>vm_stat</code>. İlk sürümde yalnız Linux, ötekinde gösterge yok.</li>
+        <li>İç içe ssh'ta (A'ya bağlanıp oradan B'ye) ölçülen makine A, çünkü algılanan hedef o. Başlıktaki host ile göstergenin hostu aynı olduğu için yanıltmıyor.</li>
+      </ul>
+    </div>
+  </div>
+  <p style="margin-top:14px">Ayar: <code>[remote] stats = "sparkline" | "numbers" | "alerts" | "off"</code> ve <code>stats_interval</code>. Ayar penceresinde Remote Files'ın yanında.</p>
+</section>
+
+<!-- ============ QUESTIONS ============ -->
+<section aria-labelledby="q-h">
+  <h2 id="q-h">Senin kararın olan üç şey</h2>
+  <div class="q-list">
+    <div class="qa"><h3>Hangi seçenek varsayılan olsun?</h3>
+      <p class="rec"><b>Önerim C, sparkline.</b> Sayı tek başına anı gösterir; 8 örneklik grafik "yükseliyor mu, tepe miydi" sorusunu cevaplıyor ve yordamsal blok karakterleriyle (U+2581–2588) çiziliyor, yani yeni bir çizim yolu gerekmiyor.</p></div>
+    <div class="qa"><h3>Production host'ta kırmızı ile karışır mı?</h3>
+      <p class="rec"><b>Önerim:</b> eşik rengi yalnız sayıya uygulanıyor ve kritikte başına <code>▲</code> geliyor. İşaretin kırmızısı host adında ve çizgide, uyarının kırmızısı sayıda. Yukarıda Production'ı açıp Kritik'e basarak kendin bak.</p></div>
+    <div class="qa"><h3>Disk sürekli mi görünsün, yalnız dolunca mı?</h3>
+      <p class="rec"><b>Önerim:</b> yalnız %85'i geçince. CPU ve bellek sürekli değişen değerler, disk günlerce aynı kalıyor ve sürekli göstermek yer yiyor.</p></div>
+  </div>
+</section>
+</main>
+
+<span class="measure" id="measure"></span>
+
+<script>
+(() => {
+  const SPARK = "▁▂▃▄▅▆▇█";
+  const PROFILES = {
+    calm: {cpu:[18,24,31,22,27,19,23,23], mem:61, disk:54, load:[0.42,0.51,0.48], memAbs:"9.8 / 16 GB",
+           procs:[["node","11.2%"],["postgres","6.0%"],["nginx","1.4%"]]},
+    busy: {cpu:[48,62,71,77,69,74,79,76], mem:83, disk:88, load:[6.10,4.80,3.20], memAbs:"13.3 / 16 GB",
+           procs:[["node","312%"],["postgres","96%"],["webpack","88%"]]},
+    crit: {cpu:[82,90,95,97,99,98,97,98], mem:94, disk:96, load:[11.9,9.4,6.1], memAbs:"15.0 / 16 GB",
+           procs:[["ffmpeg","640%"],["node","88%"],["postgres","40%"]]},
+  };
+  const TH = {cpu:[70,90], mem:[80,92], disk:[85,95]};
+  const state = {load:"calm", mark:"none", theme:"dark", cols:104, hist:[...PROFILES.calm.cpu], mem:61, disk:54};
+
+  const lvl = (k,v) => v>=TH[k][1] ? "err" : v>=TH[k][0] ? "warn" : "";
+  const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+  // A "piece" is [text, class]; width = text length in columns.
+  const W = parts => parts.reduce((n,[t]) => n + [...t].length, 0);
+  const html = parts => parts.map(([t,c]) => c ? `<span class="${c}">${esc(t)}</span>` : esc(t)).join("");
+  const spark = h => h.map(v => SPARK[Math.min(7, Math.floor(v/12.5))]).join("");
+  const cur = () => state.hist[state.hist.length-1];
+
+  function num(k, v, label=true){
+    const c = lvl(k,v); const crit = c==="err";
+    return [...(label?[[k+" ","d"]]:[]), [(crit?"▲":"")+v+"%", c || "f"]];
+  }
+  function bar(v){
+    const cells=5, eighths=Math.round(v/100*cells*8), full=Math.floor(eighths/8), rem=eighths%8;
+    const part=" ▏▎▍▌▋▊▉"[rem];
+    let s="█".repeat(full)+(full<cells? part:"" ); s=s.padEnd(cells," ");
+    return s;
+  }
+  const gap = [["  ",""]];
+
+  // Each variant is a ladder of renderings, widest first. Returns array of parts arrays.
+  const VARIANTS = {
+    A: () => [
+      [...num("cpu",cur()), ...gap, ...num("mem",state.mem), ...gap, ["load ","d"], [PROFILES[state.load].load[0].toFixed(2),"f"]],
+      [...num("cpu",cur()), ...gap, ...num("mem",state.mem)],
+    ],
+    B: () => [
+      [["cpu ","d"], ["▕","q"], [bar(cur()), lvl("cpu",cur())||"d"], ["▏ ","q"], ...num("cpu",cur(),false), ...gap,
+       ["mem ","d"], ["▕","q"], [bar(state.mem), lvl("mem",state.mem)||"d"], ["▏ ","q"], ...num("mem",state.mem,false)],
+      [...num("cpu",cur()), ...gap, ...num("mem",state.mem)],
+    ],
+    C: () => [
+      [["cpu ","d"], [spark(state.hist), lvl("cpu",cur())||"d"], [" ",""], ...num("cpu",cur(),false), ...gap, ...num("mem",state.mem)],
+      [...num("cpu",cur()), ...gap, ...num("mem",state.mem)],
+    ],
+    D: () => {
+      const alerts = [];
+      if (lvl("cpu",cur())) alerts.push(num("cpu",cur()));
+      if (lvl("mem",state.mem)) alerts.push(num("mem",state.mem));
+      if (lvl("disk",state.disk)) alerts.push(num("disk",state.disk));
+      if (!alerts.length) return [[["●","ok"]]];
+      return [alerts.flatMap((a,i)=> i? [...gap,...a]:a)];
+    },
+  };
+  function withDisk(ladder){
+    // Disk joins any variant only past its threshold.
+    if (!lvl("disk",state.disk)) return ladder;
+    return ladder.map(p => [...p, ...gap, ...num("disk",state.disk)]);
+  }
+  function worst(){
+    const c=[["cpu",cur()],["mem",state.mem],["disk",state.disk]].map(([k,v])=>({k,v,s:(lvl(k,v)==="err"?2:lvl(k,v)?1:0)*1000+v}));
+    c.sort((a,b)=>b.s-a.s); const w=c[0]; return {parts:num(w.k,w.v), alert: !!lvl(w.k,w.v)};
+  }
+
+  function leftParts(path){
+    const markCls = state.mark==="production" ? "err" : "info";
+    return [["⇄ ", markCls], ["deploy@web-01", markCls+" host"], ["  ",""], ...path];
+  }
+  function pathParts(maxCols){
+    const dirs = "/var/www/", leaf = "app";
+    let full = dirs+leaf;
+    if (maxCols >= full.length) return [[dirs,"q"],[leaf,"f"]];
+    if (maxCols <= 1) return [];
+    const keep = full.slice(full.length-(maxCols-1));
+    const leafPart = keep.endsWith(leaf) && keep.length>leaf.length ? [[ "…"+keep.slice(0,keep.length-leaf.length),"q"],[leaf,"f"]] : [["…"+keep,"f"]];
+    return leafPart;
+  }
+
+  // Lay out one row at `cols` columns following the ladder in the page.
+  function layout(variant, cols){
+    const hostW = W(leftParts([]));
+    const fullPath = W(pathParts(999));
+    let ladder = variant==="D" ? withDisk(VARIANTS.D()).slice(0,1) : withDisk(VARIANTS[variant]());
+    if (variant==="D" && !lvl("cpu",cur()) && !lvl("mem",state.mem) && !lvl("disk",state.disk)) ladder=[[["●","ok"]]];
+    const w = worst();
+    const steps = [...ladder, w.parts];
+    for (const r of steps){
+      if (hostW + fullPath + 2 + W(r) <= cols) return {l:leftParts(pathParts(999)), r};
+    }
+    // Gauge would be dropped; an alert keeps its place ahead of the path.
+    if (w.alert && hostW + 2 + W(w.parts) <= cols){
+      const room = cols - hostW - 2 - W(w.parts);
+      return {l:leftParts(pathParts(room)), r:w.parts};
+    }
+    const room = cols - hostW;
+    return {l:leftParts(pathParts(room)), r:[]};
+  }
+
+  function rowHTML(variant, cols){
+    const {l,r} = layout(variant, cols);
+    return `<span class="l">${html(l)}</span><span class="r">${html(r)}</span>`;
+  }
+
+  // ----- variants section -----
+  const META = {
+    C:["C · Sparkline","Son 8 örnek, yordamsal bloklarla. Trendi gösteriyor: anlık tepe mi, sürekli yük mü.","pick"],
+    A:["A · Yalnız sayı","En sade ve en dar. Sayı her örnekte zıplayabilir, eğilim görünmüyor.",""],
+    B:["B · Mikro çubuk","Bir bakışta okunur, sekizde bir hücre çözünürlüğü. Sparkline'dan geniş, geçmişi yok.",""],
+    D:["D · Yalnız alarm","Her şey yolundaysa küçük yeşil nokta. Eşik aşılınca konuşur. Sessiz ama 'ne kadar boşta' bilgisini vermez.",""],
+  };
+  const vWrap = document.getElementById("variants");
+  for (const k of ["C","A","B","D"]){
+    const [t,d,cls] = META[k];
+    const el = document.createElement("div"); el.className="variant";
+    el.innerHTML = `<div class="term ${cls}" data-v="${k}"><div class="dock"><div class="row"></div></div></div>
+      <div class="meta"><span class="tag">${t}${cls?" · önerilen":""}</span><p>${d}</p></div>`;
+    vWrap.appendChild(el);
+  }
+
+  // ----- render -----
+  function render(){
+    document.getElementById("live-row").innerHTML = rowHTML("C", state.cols);
+    const live = document.getElementById("live");
+    live.querySelector(".dock").style.borderTopColor = state.mark==="production" ? "var(--t-err)" : "var(--t-info)";
+    const dot = document.getElementById("tabdot");
+    dot.hidden = state.mark!=="production"; dot.style.background = "var(--t-err)";
+    live.style.maxWidth = `calc(${state.cols}ch * 0.8 + 28px + 2ch)`;
+    document.querySelectorAll(".term").forEach(t => t.classList.toggle("light", state.theme==="light"));
+    vWrap.querySelectorAll(".term").forEach(t => {
+      t.querySelector(".row").innerHTML = rowHTML(t.dataset.v, 96);
+      t.querySelector(".dock").style.borderTopColor = state.mark==="production" ? "var(--t-err)" : "var(--t-info)";
+    });
+    const p = PROFILES[state.load];
+    document.getElementById("p-cpu").textContent = cur()+"%";
+    document.getElementById("p-cpu-b").style.width = cur()+"%";
+    document.getElementById("p-load").textContent = p.load.map(x=>x.toFixed(2)).join(" · ");
+    document.getElementById("p-mem").textContent = p.memAbs;
+    document.getElementById("p-mem-b").style.width = state.mem+"%";
+    document.getElementById("p-disk").textContent = state.disk+"%";
+    document.getElementById("p-disk-b").style.width = state.disk+"%";
+    for (const [id,v,k] of [["p-cpu-b",cur(),"cpu"],["p-mem-b",state.mem,"mem"],["p-disk-b",state.disk,"disk"]]){
+      const c=lvl(k,v); document.getElementById(id).style.background = c==="err"?"#d16d6a":c==="warn"?"#d6b16a":"#79b3b3";
+    }
+    document.getElementById("p-procs").innerHTML = p.procs.map(([n,v])=>`<tr><td>${n}</td><td>${v}</td></tr>`).join("");
+    document.getElementById("cols-out").textContent = state.cols+" sütun";
+  }
+
+  function seg(id, key, after){
+    document.getElementById(id).addEventListener("click", e => {
+      const b = e.target.closest("button"); if(!b) return;
+      e.currentTarget.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x===b));
+      state[key] = b.dataset.v; after && after(); render();
+    });
+  }
+  seg("load-seg","load",() => { const p=PROFILES[state.load]; state.hist=[...p.cpu]; state.mem=p.mem; state.disk=p.disk; });
+  seg("mark-seg","mark"); seg("theme-seg","theme");
+  document.getElementById("cols").addEventListener("input", e => { state.cols=+e.target.value; render(); });
+
+  // Example data ticks every 3 s, like the proposed sample interval.
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!reduce) setInterval(() => {
+    const base = PROFILES[state.load].cpu; const mean = base.reduce((a,b)=>a+b)/base.length;
+    const next = Math.max(1, Math.min(99, Math.round(mean + (Math.random()-.5)*(state.load==="crit"?6:16))));
+    state.hist = [...state.hist.slice(1), next];
+    render();
+  }, 3000);
+  render();
+})();
+</script>
