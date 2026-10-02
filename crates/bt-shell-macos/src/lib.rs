@@ -79,6 +79,46 @@ pub use bt_gpu::GpuError;
 /// work. Re-exported here so the binary gains no new crate edge.
 pub use bt_shell_common::ssh_route::askpass_main as askpass;
 
+/// The remote shell integration's state file on macOS (048):
+/// `~/Library/Application Support/bateri/remote-hosts` — bateri's own file,
+/// not the user's `settings.toml` (discussion → Karar).
+pub(crate) fn remote_hosts_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("Library/Application Support/bateri/remote-hosts")
+}
+
+/// `bateri ssh-argv [--tty] -- <ssh arguments…>` (048): `Some(exit code)` when
+/// the process was started as the subcommand, `None` otherwise. `main` calls
+/// it before the window-server check — the local zsh's `ssh` function calls
+/// it on every `ssh`, in any session. The body is
+/// [`bt_shell_common::ssh_wrap::ssh_argv_main`]; here only the platform's
+/// inputs: the settings file's launch reading (an unusable file, or no home,
+/// turns the integration off) and the state file's path. Every failure prints
+/// nothing, and nothing means plain `ssh`.
+pub fn ssh_argv() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != "ssh-argv" {
+        return None;
+    }
+    let Some(argv) = args
+        .map(|arg| arg.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        return Some(0);
+    };
+    let Some(home) = child::home() else {
+        return Some(0);
+    };
+    let settings = settings::load(&settings::config_root(&home)).at_launch().0;
+    Some(bt_shell_common::ssh_wrap::ssh_argv_main(
+        &argv,
+        &settings,
+        &ssh_route::SystemSsh,
+        &remote_hosts_path(&home),
+        bt_shell_common::ssh_wrap::BOOT,
+        &mut std::io::stdout().lock(),
+    ))
+}
+
 /// The shell of the smoke and measurement runs. **Not** the user's `$SHELL`:
 /// the result must not depend on the rc files.
 ///

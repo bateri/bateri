@@ -1928,6 +1928,13 @@ impl ShellLog {
         let mut outcome = ScanOutcome::default();
         match event {
             ScanEvent::Mark(mark) => outcome = self.apply(mark),
+            // **While a remote session is active OSC 8133 is ignored** (048 R4): the
+            // local shell is behind ssh and the only 8133 that can arrive is a remote
+            // one — a remote mirror would draw a foreign line in the local dock, and
+            // a remote `8133;w` would make the local dock send `CSI 8133 ~` editing
+            // commands to the remote shell. The defense is here, not in a script's
+            // care. Our `D` clears the remote state, so the next local 8133 applies.
+            ScanEvent::Dock(_) if self.context.remote.is_some() => {}
             ScanEvent::Dock(event) => self.apply_dock(event, answers),
             // The directory arrives **resolved**: the scanner did the scheme, the path and
             // the percent-decoding, and only a drawable path and whether the authority is
@@ -4879,6 +4886,51 @@ mod tests {
         assert_eq!(log.caret(now + HANDOVER_HOLD).home, CaretHome::Dock);
     }
 
+    /// **A remote session's OSC 8133 does not reach the local dock** (048 R4): the
+    /// mirror, the branch and the editing widget's capability stay as the local shell
+    /// left them; our `D` ends the remote session and the next local 8133 applies.
+    #[test]
+    fn a_remote_sessions_8133_is_ignored_until_the_local_d() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        let mut feed = |log: &mut ShellLog, bytes: &[u8]| {
+            scanner.feed(bytes, |event| log.apply_scan(event));
+        };
+        feed(&mut log, b"\x1b]133;A\x07\x1b]133;B\x07");
+        feed(
+            &mut log,
+            format!("\x1b]8133;b;{}\x07", b64(b"main")).as_bytes(),
+        );
+        feed(&mut log, &dock_update(8, "% ", "ssh prod", "", &[]));
+        feed(&mut log, b"\x1b]8133;e\x07\x1b]133;C\x07");
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        let dock = log.dock.clone();
+        let editable = log.dock_editable;
+
+        feed(&mut log, &dock_update(2, "$ ", "rm", "", &[]));
+        feed(
+            &mut log,
+            format!("\x1b]8133;b;{}\x07", b64(b"remote")).as_bytes(),
+        );
+        feed(&mut log, b"\x1b]8133;w\x07\x1b]8133;e\x07");
+        assert_eq!(log.dock, dock, "the remote mirror is ignored");
+        assert_eq!(log.context.branch, "main", "the remote branch is ignored");
+        assert_eq!(log.dock_editable, editable, "the remote `w` is ignored");
+
+        feed(&mut log, b"\x1b]133;D;0\x07");
+        assert_eq!(log.context.remote, None);
+        feed(&mut log, b"\x1b]133;A\x07\x1b]133;B\x07");
+        feed(&mut log, &dock_update(2, "% ", "ls", "", &[]));
+        feed(
+            &mut log,
+            format!("\x1b]8133;b;{}\x07", b64(b"dev")).as_bytes(),
+        );
+        feed(&mut log, b"\x1b]8133;w\x07");
+        assert_eq!(log.dock.buffer, "ls", "the local mirror applies again");
+        assert_eq!(log.context.branch, "dev");
+        assert!(log.dock_editable);
+    }
+
     /// The stamp moves **on change**, not on every event.
     ///
     /// Every keystroke produces a mirror event; if the stamp were refreshed with them
@@ -6677,7 +6729,8 @@ mod tests {
     fn rule(pattern: &str, mark: HostMark) -> HostRule {
         HostRule {
             pattern: pattern.to_owned(),
-            mark,
+            mark: Some(mark),
+            integration: None,
         }
     }
 

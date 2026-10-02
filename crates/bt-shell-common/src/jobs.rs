@@ -50,6 +50,8 @@ use std::ffi::{c_int, c_void};
 
 use bt_core::RemoteKind;
 
+use crate::ssh_wrap;
+
 /// The shell's position relative to the PTY child — the side that spawns the
 /// shell knows it and records it at spawn (`pane::TerminalPane::start_session`);
 /// it is not guessed by comparing names. An untimed session gets it from the
@@ -337,7 +339,35 @@ const SSH_NOT_REPEATED: &str = "LRDMf";
 /// The argv comes from the same walk ([`SshSession::options`]'s `kept`), not a
 /// second parser: [`SSH_NOT_REPEATED`] is dropped, everything else stays in
 /// order — including the target and a remote command with `-t`.
+///
+/// **A wrapped argv is unwrapped first** (048 R2, [`ssh_wrap::unwrap`]): the
+/// `-t` and the bootstrap command bateri added are not what the user typed,
+/// so the target's line, `⏎ reconnect`, ⌘T and the file jobs see the user's
+/// own argv.
 fn ssh_target(program: &str, args: &[String]) -> Option<Target> {
+    let call = ssh_call(program, ssh_wrap::unwrap(args))?;
+    Some(Target {
+        host: call.host,
+        kind: RemoteKind::Ssh,
+        argv: call.argv,
+    })
+}
+
+/// What one walk of an interactive ssh argv says ([`ssh_call`]).
+pub(crate) struct SshCall {
+    /// As typed; only the `ssh://` form drops its scheme and port ([`ssh_host`]).
+    pub(crate) host: String,
+    /// The re-run argv ([`ssh_target`]'s doc).
+    pub(crate) argv: Vec<String>,
+    /// A remote command follows the target (only with a forced tty, or the
+    /// call would not be interactive).
+    pub(crate) command: bool,
+}
+
+/// The walk behind [`ssh_target`], without unwrapping: `None` unless the
+/// session is interactive. The wrapping decision (048, `ssh_wrap::decide`) asks
+/// the same walk, so "interactive" has one definition.
+pub(crate) fn ssh_call(program: &str, args: &[String]) -> Option<SshCall> {
     let mut session = SshSession::default();
     let mut argv = vec![program.to_owned()];
     let (index, terminated) = session.options(args, 0, &mut argv);
@@ -355,10 +385,10 @@ fn ssh_target(program: &str, args: &[String]) -> Option<Target> {
         return None;
     }
     argv.extend(args[rest..].iter().cloned());
-    Some(Target {
+    Some(SshCall {
         host: ssh_host(target),
-        kind: RemoteKind::Ssh,
         argv,
+        command,
     })
 }
 
@@ -1176,6 +1206,27 @@ mod tests {
         assert_eq!(
             target_of(&["/usr/bin/ssh", "prod", "-L", "1:x:1", "-v"]).argv,
             words(&["/usr/bin/ssh", "prod", "-v"])
+        );
+    }
+
+    #[test]
+    fn a_wrapped_ssh_reads_as_the_line_the_user_typed() {
+        // 048 R2: the process runs bateri's `-t` and bootstrap; the target, the
+        // re-run argv (⏎ reconnect, ⌘T) and the line are the user's.
+        let typed = ["-o", "User=x", "-L", "1:x:1", "--", "prod"];
+        let wrapped = crate::ssh_wrap::wrap(&words(&typed), "echo hi");
+        let mut argv = vec!["ssh".to_owned()];
+        argv.extend(wrapped);
+        let leaked: Vec<&'static str> = argv
+            .into_iter()
+            .map(|arg| &*Box::leak(arg.into_boxed_str()))
+            .collect();
+        let target = target_of(&leaked);
+        assert_eq!(target.host, "prod");
+        assert_eq!(target.argv, words(&["ssh", "-o", "User=x", "--", "prod"]));
+        assert_eq!(
+            crate::quote::command_line(&target.argv),
+            "ssh -o User=x -- prod"
         );
     }
 

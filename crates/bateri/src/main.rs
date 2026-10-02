@@ -14,6 +14,13 @@ fn main() -> ExitCode {
     if let Some(code) = bt_shell_macos::askpass() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
+    // The remote shell integration's decision (048): `bateri ssh-argv -- …`,
+    // asked by the local zsh's `ssh` function. Before the window-server check
+    // for the same reason as askpass: only the wrapped argv may reach standard
+    // output, and the caller may be any session.
+    if let Some(code) = bt_shell_macos::ssh_argv() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     // **First line of the application.** The earlier the startup stamp is taken the more honest
     // it is: `has_aqua_session()` right below spawns a child process and that
     // is today a part of bateri's startup path. Had the stamp been taken after

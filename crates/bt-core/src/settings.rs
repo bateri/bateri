@@ -708,7 +708,15 @@ pub struct HostRule {
     /// insensitive; if it carries `@` it matches the whole host, if not the part
     /// after the last `@` ([`host_mark`]).
     pub pattern: String,
-    pub mark: HostMark,
+    /// `None` when the entry writes only `integration` (048): it then takes
+    /// no part in the mark's match ([`host_mark`]).
+    pub mark: Option<HostMark>,
+    /// `integration`: the remote shell integration for this host (048 R1.3);
+    /// `None` leaves it to the mark and the `[remote] integration` key
+    /// ([`Settings::integration_for`]). Resolved separately from the mark,
+    /// each by its own first matching entry: turning a host's integration off
+    /// must not take its color away.
+    pub integration: Option<bool>,
 }
 
 /// The host's mark: that of `rules`'s **first** matching entry, or
@@ -724,18 +732,32 @@ pub struct HostRule {
 /// Pure and not on the frame path: `Session` calls it only at the two edges
 /// where the remote state and the list change.
 pub fn host_mark(rules: &[HostRule], host: &str) -> HostMark {
+    matching(rules, host)
+        .find_map(|(_, rule)| rule.mark)
+        .unwrap_or(HostMark::None)
+}
+
+/// The first entry matching `host` that writes `integration` (048), and its
+/// index — [`Settings::integration_for`]'s match and the menu's carry.
+fn integration_rule(rules: &[HostRule], host: &str) -> Option<(usize, bool)> {
+    matching(rules, host).find_map(|(index, rule)| rule.integration.map(|on| (index, on)))
+}
+
+/// The entries of `rules` matching `host`, in order, with their indices — the
+/// one match of [`host_mark`] and [`integration_rule`].
+fn matching<'a>(
+    rules: &'a [HostRule],
+    host: &'a str,
+) -> impl Iterator<Item = (usize, &'a HostRule)> + 'a {
     let bare = bare_host(host);
-    rules
-        .iter()
-        .find(|rule| {
-            let subject = if rule.pattern.contains('@') {
-                host
-            } else {
-                bare
-            };
-            glob_matches(&rule.pattern, subject)
-        })
-        .map_or(HostMark::None, |rule| rule.mark)
+    rules.iter().enumerate().filter(move |(_, rule)| {
+        let subject = if rule.pattern.contains('@') {
+            host
+        } else {
+            bare
+        };
+        glob_matches(&rule.pattern, subject)
+    })
 }
 
 /// A pattern with `*` and `?`, case insensitive; no class (`[a-z]`) or set
@@ -1079,6 +1101,12 @@ pub struct Settings {
     pub remote_files: RemoteFiles,
     /// `[remote] stats` and `stats_interval` (046, [`RemoteStatsSettings`]).
     pub remote_stats: RemoteStatsSettings,
+    /// `[remote] integration`: whether a plain `ssh` sets up the shell
+    /// integration on the server (048 R1.3). The host's own entry and the
+    /// production mark come first ([`Self::integration_for`]). Like `osc52`, a
+    /// value that is not accepted and an unusable file turn it **off**: a wrong
+    /// guess here writes to servers silently.
+    pub remote_integration: bool,
 }
 
 impl Default for Settings {
@@ -1116,6 +1144,7 @@ impl Default for Settings {
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
+            remote_integration: true,
         }
     }
 }
@@ -1456,6 +1485,13 @@ integration = "auto"
 #   { host = "*.staging.example.com", mark = "staging" },
 # ]
 hosts = []
+# true | false. Lets a plain ssh set up shell integration on the server, so
+# the folder (and later command blocks) follow you there too. bateri writes a
+# few small files to ~/.local/share/bateri/shell on the server and never
+# touches its rc files. A host is set up only after bateri has seen a shell
+# there once. A host marked "production" stays plain unless its entry says
+# integration = true; integration = false in an entry turns one host off.
+integration = true
 # Sizes are written like "100MB" or "2GB" (B, KB, MB, GB, TB); folders start
 # with / or ~/.
 # A file larger than this asks before its preview downloads (cmd-click on a
@@ -1504,6 +1540,9 @@ stats_interval = 3
     pub fn for_unusable_file() -> Self {
         Self {
             osc52: Osc52::Off,
+            // 048 R1.3: the file may hold `integration = false`; writing to a
+            // server is the unsafe direction of the guess, as the clipboard is.
+            remote_integration: false,
             ..Self::default()
         }
     }
@@ -1811,10 +1850,15 @@ stats_interval = 3
         }
         match section(text, root, "remote", &mut parsed.diagnostics) {
             Some(remote) => {
+                let before = parsed.diagnostics.len();
                 if let Some(item) = remote.get("hosts") {
                     parsed.settings.remote_hosts =
                         host_rules(text, item, &fallback.remote_hosts, &mut parsed.diagnostics);
                 }
+                // A rejected list keeps the previous one, and at launch that is
+                // empty: the production marks and every `integration = false`
+                // would be gone. The integration turns off instead (048 R1.3).
+                let hosts_rejected = parsed.diagnostics.len() > before;
                 parsed.settings.remote_files = remote_files(
                     text,
                     remote,
@@ -1827,6 +1871,20 @@ stats_interval = 3
                     &fallback.remote_stats,
                     &mut parsed.diagnostics,
                 );
+                // `fallback` is deliberately not read, as for `osc52`: a value
+                // that isn't accepted turns the integration off.
+                if let Some(item) = remote.get("integration") {
+                    parsed.settings.remote_integration = boolean(
+                        text,
+                        item,
+                        "remote.integration",
+                        false,
+                        &mut parsed.diagnostics,
+                    );
+                }
+                if hosts_rejected {
+                    parsed.settings.remote_integration = false;
+                }
             }
             None if root.contains_key("remote") => {
                 parsed
@@ -1838,10 +1896,23 @@ stats_interval = 3
                     .remote_files
                     .clone_from(&fallback.remote_files);
                 parsed.settings.remote_stats = fallback.remote_stats;
+                parsed.settings.remote_integration = false;
             }
             None => {}
         }
         Ok(parsed)
+    }
+
+    /// Whether a plain `ssh` to `host` (as typed, like [`host_mark`]'s input)
+    /// sets up the remote shell integration (048 R1.3): the first matching
+    /// `[remote] hosts` entry that writes `integration`; if none does and the
+    /// host's mark is `production`, off; otherwise the `[remote] integration`
+    /// key. "The first match wins" as for the mark, per key.
+    pub fn integration_for(&self, host: &str) -> bool {
+        if let Some((_, on)) = integration_rule(&self.remote_hosts, host) {
+            return on;
+        }
+        host_mark(&self.remote_hosts, host) != HostMark::Production && self.remote_integration
     }
 
     /// The **name** of the theme to use: `light_theme` or `dark_theme` by
@@ -2036,6 +2107,13 @@ struct MarkPlan {
     remove: Vec<usize>,
     /// `{ host = <host without user@>, mark }` goes at the start of the array.
     prepend: bool,
+    /// The prepended entry also writes `mark` (an entry that only carries
+    /// `integration` has none).
+    prepend_mark: bool,
+    /// The prepended entry carries this `integration` (048): the removed exact
+    /// entry was the one deciding the host's integration, and the new first
+    /// entry keeps that answer.
+    integration: Option<bool>,
 }
 
 /// The menu's writing rule (037 Karar 5), pure: the edit that disturbs `rules`
@@ -2053,6 +2131,11 @@ struct MarkPlan {
 ///   entry with a glob in front of it is moved to the start for the same reason.
 /// - **None** deletes the exact entries; if a glob still gives a mark afterwards
 ///   `mark = "none"` is written at the start.
+/// - **`integration` is not lost** (048): a deleted exact entry that decided
+///   the host's integration hands its value to the entry written at the start
+///   (an `integration`-only one when no mark is needed), so the host's answer
+///   stays what it was. An exact entry is changed in place even if it carries
+///   only `integration` — it gets a `mark`.
 fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<MarkPlan> {
     if host_mark(rules, host) == mark {
         return None;
@@ -2072,12 +2155,14 @@ fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<Mark
         && let Some(&first) = exact.first()
     {
         let mut edited = rules.to_vec();
-        edited[first].mark = mark;
+        edited[first].mark = Some(mark);
         if host_mark(&edited, host) == mark {
             return Some(MarkPlan {
                 in_place: Some(first),
                 remove: Vec::new(),
                 prepend: false,
+                prepend_mark: false,
+                integration: None,
             });
         }
     }
@@ -2087,9 +2172,15 @@ fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<Mark
         .filter(|(index, _)| !exact.contains(index))
         .map(|(_, rule)| rule.clone())
         .collect();
+    let integration = integration_rule(rules, host)
+        .filter(|(index, _)| exact.contains(index))
+        .map(|(_, on)| on);
+    let prepend_mark = host_mark(&kept, host) != mark;
     Some(MarkPlan {
         in_place: None,
-        prepend: host_mark(&kept, host) != mark,
+        prepend: prepend_mark || integration.is_some(),
+        prepend_mark,
+        integration,
         remove: exact,
     })
 }
@@ -2133,7 +2224,13 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
                 if let Some(index) = plan.in_place
                     && let Some(table) = tables.get_mut(index)
                 {
-                    set_keeping_decor(table.get_mut("mark"), &written);
+                    // An entry that writes only `integration` (048) has no
+                    // `mark` line to change: it gets one.
+                    if table.contains_key("mark") {
+                        set_keeping_decor(table.get_mut("mark"), &written);
+                    } else {
+                        table.insert("mark", toml_edit::value(written.as_str()));
+                    }
                 }
                 for &index in plan.remove.iter().rev() {
                     tables.remove(index);
@@ -2141,7 +2238,12 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
                 if plan.prepend {
                     let mut table = toml_edit::Table::new();
                     table.insert("host", toml_edit::value(pattern));
-                    table.insert("mark", toml_edit::value(written.as_str()));
+                    if plan.prepend_mark {
+                        table.insert("mark", toml_edit::value(written.as_str()));
+                    }
+                    if let Some(on) = plan.integration {
+                        table.insert("integration", toml_edit::value(on));
+                    }
                     // The old first section's place and the comment above it pass
                     // to the new one (writing order is by position; at equal
                     // position the array's order), the old one is separated by a
@@ -2159,17 +2261,24 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
                     && let Some(entry) = array
                         .get_mut(index)
                         .and_then(toml_edit::Value::as_inline_table_mut)
-                    && let Some(old) = entry.get_mut("mark")
                 {
-                    let decor = old.decor().clone();
-                    *old = written.as_str().into();
-                    *old.decor_mut() = decor;
+                    match entry.get_mut("mark") {
+                        Some(old) => {
+                            let decor = old.decor().clone();
+                            *old = written.as_str().into();
+                            *old.decor_mut() = decor;
+                        }
+                        // An `integration`-only entry (048) gets a mark.
+                        None => {
+                            entry.insert("mark", written.as_str().into());
+                        }
+                    }
                 }
                 for &index in plan.remove.iter().rev() {
                     array.remove(index);
                 }
                 if plan.prepend {
-                    prepend_entry(array, pattern, &written);
+                    prepend_entry(array, pattern, &plan, &written);
                 }
             }
             // No key (as if the array were empty): only writing at the start is
@@ -2177,7 +2286,7 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
             _ => {
                 let mut array = toml_edit::Array::new();
                 if plan.prepend {
-                    prepend_entry(&mut array, pattern, &written);
+                    prepend_entry(&mut array, pattern, &plan, &written);
                 }
                 remote.insert("hosts", Item::Value(array.into()));
             }
@@ -2200,10 +2309,15 @@ fn set_keeping_decor(item: Option<&mut Item>, written: &str) {
 /// spelling: the new entry takes the old first entry's decor (the `\n  `
 /// indentation in a multi-line array); the old first entry gains a space after
 /// the comma in a single-line array, otherwise `{…},{…}` would stick together.
-fn prepend_entry(array: &mut toml_edit::Array, pattern: &str, written: &str) {
+fn prepend_entry(array: &mut toml_edit::Array, pattern: &str, plan: &MarkPlan, written: &str) {
     let mut entry = toml_edit::InlineTable::new();
     entry.insert("host", pattern.into());
-    entry.insert("mark", written.into());
+    if plan.prepend_mark {
+        entry.insert("mark", written.into());
+    }
+    if let Some(on) = plan.integration {
+        entry.insert("integration", on.into());
+    }
     entry.fmt();
     let mut value = toml_edit::Value::InlineTable(entry);
     if let Some(first) = array.get_mut(0) {
@@ -2853,8 +2967,9 @@ fn host_rules(
         line: span.and_then(|span| line_of(text, span.start)),
         message: format!(
             "`{KEY}` must be a list of {{ host = \"pattern\", mark = \"production\", \
-             \"staging\", \"development\", \"none\" or \"#rrggbb\" }}, found {found}; \
-             keeping the previous list"
+             \"staging\", \"development\", \"none\" or \"#rrggbb\", integration = true \
+             or false }} with a mark, an integration or both, found {found}; keeping the \
+             previous list"
         ),
     };
     let mut entries: Vec<(&dyn TableLike, Option<std::ops::Range<usize>>)> = Vec::new();
@@ -2890,10 +3005,33 @@ fn host_rules(
                 .map(|(_, named)| *named)
                 .or_else(|| crate::theme::hex_color(mark).map(HostMark::Rgb))
         });
+        // `integration` (048): a boolean; an entry may carry it alone, and then
+        // it has no mark. A value of another type rejects the list like a bad mark.
+        let integration = match table.get("integration") {
+            None => None,
+            Some(item) => match item.as_bool() {
+                Some(on) => Some(on),
+                None => {
+                    let found = format!(
+                        "integration {} for {:?}",
+                        kind(item),
+                        pattern.unwrap_or_default()
+                    );
+                    diagnostics.push(reject(span, found));
+                    return fallback.to_vec();
+                }
+            },
+        };
+        // `Some(None)`: an `integration`-only entry, without a mark.
+        let mark = match (mark, table.get("mark"), integration) {
+            (None, None, Some(_)) => Some(None),
+            (mark, _, _) => mark.map(Some),
+        };
         match (pattern, mark) {
             (Some(pattern), Some(mark)) => rules.push(HostRule {
                 pattern: pattern.to_owned(),
                 mark,
+                integration,
             }),
             (None, _) => {
                 diagnostics.push(reject(span, "an entry without a host".to_owned()));
@@ -3034,6 +3172,7 @@ mod tests {
             ("remote", "download_notify"),
             ("remote", "stats"),
             ("remote", "stats_interval"),
+            ("remote", "integration"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -3228,6 +3367,7 @@ mod tests {
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
+            remote_integration: true,
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -3995,14 +4135,176 @@ found 1.5; using 0.1"
     }
 
     #[test]
-    fn unusable_file_closes_osc52_only() {
+    fn unusable_file_closes_osc52_and_the_remote_integration_only() {
         assert_eq!(
             Settings::for_unusable_file(),
             Settings {
                 osc52: Osc52::Off,
+                remote_integration: false,
                 ..Settings::default()
             }
         );
+    }
+
+    #[test]
+    fn remote_integration_is_read_and_a_rejected_value_is_off() {
+        assert!(clean("").remote_integration);
+        assert!(!clean("[remote]\nintegration = false\n").remote_integration);
+        assert!(clean("[remote]\nintegration = true\n").remote_integration);
+        // The osc52 exception (048 R1.3): neither the default nor the given value.
+        let current = Settings::default();
+        for text in ["[remote]\nintegration = \"no\"\n", "remote = 5\n"] {
+            let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
+            assert!(!parsed.settings.remote_integration, "{text}");
+        }
+        let (_, diagnostic) = rejected("[remote]\nintegration = \"no\"\n");
+        assert_eq!(diagnostic.key, Some("remote.integration"));
+    }
+
+    #[test]
+    fn host_entries_carry_integration_with_or_without_a_mark() {
+        let rules = clean(
+            "[remote]\nhosts = [\n  { host = \"router*\", integration = false },\n  \
+             { host = \"prod\", mark = \"production\", integration = true },\n  \
+             { host = \"db\", mark = \"staging\" },\n]\n",
+        )
+        .remote_hosts;
+        assert_eq!(
+            rules,
+            vec![
+                HostRule {
+                    pattern: "router*".to_owned(),
+                    mark: None,
+                    integration: Some(false),
+                },
+                HostRule {
+                    pattern: "prod".to_owned(),
+                    mark: Some(HostMark::Production),
+                    integration: Some(true),
+                },
+                HostRule {
+                    pattern: "db".to_owned(),
+                    mark: Some(HostMark::Staging),
+                    integration: None,
+                },
+            ]
+        );
+        // An `integration`-only entry does not shadow a later mark.
+        let rules = clean(
+            "[remote]\nhosts = [\n  { host = \"db1.staging\", integration = false },\n  \
+             { host = \"*.staging\", mark = \"staging\" },\n]\n",
+        )
+        .remote_hosts;
+        assert_eq!(host_mark(&rules, "db1.staging"), HostMark::Staging);
+        // A non-boolean integration and an entry with neither key reject the list.
+        for entry in [
+            "{ host = \"a\", integration = \"no\" }",
+            "{ host = \"a\", mark = \"loud\", integration = true }",
+            "{ host = \"a\" }",
+        ] {
+            let (settings, diagnostic) = rejected(&format!("[remote]\nhosts = [{entry}]\n"));
+            assert_eq!(settings.remote_hosts, [], "{entry}");
+            assert_eq!(diagnostic.key, Some("remote.hosts"), "{entry}");
+            // The previous list is gone with it (empty at launch), so the
+            // integration turns off rather than falling open on production.
+            assert!(!settings.remote_integration, "{entry}");
+        }
+    }
+
+    #[test]
+    fn integration_resolves_entry_then_production_then_the_key() {
+        let rule = |pattern: &str, mark: HostMark, integration: Option<bool>| HostRule {
+            pattern: pattern.to_owned(),
+            mark: Some(mark),
+            integration,
+        };
+        let settings = Settings {
+            remote_hosts: vec![
+                rule("prod-web", HostMark::Production, Some(true)),
+                rule("prod-*", HostMark::Production, None),
+                rule("lab", HostMark::Development, Some(false)),
+                rule("*.staging", HostMark::Staging, None),
+            ],
+            ..Settings::default()
+        };
+        // The entry's own value, even over the production mark.
+        assert!(settings.integration_for("deploy@prod-web"));
+        assert!(!settings.integration_for("lab"));
+        // A production entry without a value: off.
+        assert!(!settings.integration_for("prod-db"));
+        // Another mark, or no entry: the key.
+        assert!(settings.integration_for("api.staging"));
+        assert!(settings.integration_for("elsewhere"));
+        let off = Settings {
+            remote_integration: false,
+            ..settings.clone()
+        };
+        assert!(!off.integration_for("api.staging"));
+        assert!(!off.integration_for("elsewhere"));
+        assert!(off.integration_for("prod-web"), "the entry beats the key");
+    }
+
+    #[test]
+    fn the_menu_mark_never_drops_a_hosts_integration() {
+        let integration = |text: &str| {
+            Settings {
+                remote_integration: true,
+                ..clean(text)
+            }
+            .integration_for("router")
+        };
+        for (text, mark) in [
+            // None deletes the exact entry.
+            (
+                "[remote]\nhosts = [{ host = \"router\", mark = \"staging\", integration = false }]\n",
+                HostMark::None,
+            ),
+            // A glob in front moves the exact entry to the start.
+            (
+                "[remote]\nhosts = [{ host = \"rout*\", mark = \"staging\" }, \
+                 { host = \"router\", mark = \"development\", integration = false }]\n",
+                HostMark::Production,
+            ),
+            (
+                "[[remote.hosts]]\nhost = \"rout*\"\nmark = \"staging\"\n\n\
+                 [[remote.hosts]]\nhost = \"router\"\nintegration = false\n",
+                HostMark::Production,
+            ),
+        ] {
+            assert!(!integration(text), "{text}");
+            let edited = with_host_mark(text, "router", mark).expect("edit");
+            assert_eq!(
+                host_mark(&clean(&edited).remote_hosts, "router"),
+                mark,
+                "{edited}"
+            );
+            assert!(!integration(&edited), "the integration stays off: {edited}");
+        }
+    }
+
+    #[test]
+    fn the_menu_mark_keeps_an_integration_only_entry() {
+        // Marking a host whose only entry writes `integration` gives that
+        // entry a mark in place; the integration stays.
+        for text in [
+            "[remote]\nintegration = false\nhosts = [{ host = \"prod\", integration = false }]\n",
+            "[remote]\nintegration = false\n\n[[remote.hosts]]\nhost = \"prod\"\nintegration = false\n",
+        ] {
+            let edited = with_host_mark(text, "prod", HostMark::Production).expect("edit");
+            assert!(
+                !clean(&edited).remote_integration,
+                "the section's own key stays: {edited}"
+            );
+            assert_eq!(
+                clean(&edited).remote_hosts,
+                vec![HostRule {
+                    pattern: "prod".to_owned(),
+                    mark: Some(HostMark::Production),
+                    integration: Some(false),
+                }],
+                "{edited}"
+            );
+        }
     }
 
     #[test]
@@ -4371,7 +4673,8 @@ found 1.5; using 0.1"
     fn host_rule(pattern: &str, mark: HostMark) -> HostRule {
         HostRule {
             pattern: pattern.to_owned(),
-            mark,
+            mark: Some(mark),
+            integration: None,
         }
     }
 
@@ -4789,7 +5092,8 @@ cursor = \"spring\"
                 0,
                 HostRule {
                     pattern: bare_host(&host).to_owned(),
-                    mark,
+                    mark: Some(mark),
+                    integration: None,
                 },
             ),
             SettingsEdit::PreviewMaxSize(bytes) => settings.remote_files.preview_max_size = bytes,
@@ -4962,15 +5266,18 @@ cursor = \"spring\"
             [
                 HostRule {
                     pattern: "cache".to_owned(),
-                    mark: HostMark::Production
+                    mark: Some(HostMark::Production),
+                    integration: None,
                 },
                 HostRule {
                     pattern: "db".to_owned(),
-                    mark: HostMark::Staging
+                    mark: Some(HostMark::Staging),
+                    integration: None,
                 },
                 HostRule {
                     pattern: "prod-*".to_owned(),
-                    mark: HostMark::Production
+                    mark: Some(HostMark::Production),
+                    integration: None,
                 },
             ],
             "{prepended}"

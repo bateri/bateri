@@ -14060,7 +14060,8 @@ mod tests {
         assert!(
             !session.set_host_marks(&[HostRule {
                 pattern: "prod-*".to_owned(),
-                mark: HostMark::Staging,
+                mark: Some(HostMark::Staging),
+                integration: None,
             }]),
             "nothing visible changes locally"
         );
@@ -14080,7 +14081,8 @@ mod tests {
         let wakes = wake.state.lock().unwrap().wakes;
         let production = [HostRule {
             pattern: "prod-web".to_owned(),
-            mark: HostMark::Production,
+            mark: Some(HostMark::Production),
+            integration: None,
         }];
         assert!(session.set_host_marks(&production));
         assert!(
