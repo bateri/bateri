@@ -3411,6 +3411,7 @@ exit $code
         fn search_changed(&self) {}
         fn command_started(&self) {}
         fn remote_up(&self) {}
+        fn remote_typed(&self) {}
         fn link_hover_lost(&self) {}
     }
 
@@ -3476,6 +3477,7 @@ exit $code
             "exec /bin/sh -i",
             None,
             "0123456789abcdef",
+            None,
             Some(&control),
         );
         let wake = Arc::new(ExitWake::default());

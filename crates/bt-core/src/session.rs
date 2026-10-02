@@ -72,7 +72,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::cluster::{ClusterId, Clusters};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
-use crate::identity::{TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
+use crate::identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
 use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
@@ -742,7 +742,7 @@ pub struct SessionOptions {
     ///
     /// Precedence, strongest to weakest: `TERM`, `COLORTERM` and the identity
     /// family (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `TERM_SESSION_ID`,
-    /// `BATERI_TAB_URL`; what this crate writes, cannot be overridden — `TERM`
+    /// `BATERI_TAB_URL` and the `LC_` trio of 049 R6; what this crate writes, cannot be overridden — `TERM`
     /// is a contract, see `CLAUDE.md`) > this map > what alacritty writes
     /// unconditionally (`USER`, `HOME`, `ALACRITTY_WINDOW_ID`, `WINDOWID`) >
     /// inherited. The only exception is the two keys alacritty **removes** at
@@ -3587,9 +3587,19 @@ impl Session {
             "TERM_PROGRAM_VERSION".to_owned(),
             TERM_PROGRAM_VERSION.to_owned(),
         );
+        // The `LC_` family is the same identity across ssh (049 R6): ssh's stock
+        // `SendEnv LC_*` carries it, a wrapped session's bootstrap exports it
+        // too. An inherited `LC_TERMINAL=iTerm2` is overridden like
+        // `TERM_PROGRAM=Apple_Terminal`.
+        env.insert("LC_TERMINAL".to_owned(), LC_TERMINAL.to_owned());
+        env.insert(
+            "LC_TERMINAL_VERSION".to_owned(),
+            TERM_PROGRAM_VERSION.to_owned(),
+        );
         if let Some(id) = &options.tab_id {
             env.insert("TERM_SESSION_ID".to_owned(), id.as_str().to_owned());
             env.insert("BATERI_TAB_URL".to_owned(), id.url());
+            env.insert("LC_BATERI_TAB_URL".to_owned(), id.url());
         }
         let pty_options = tty::Options {
             shell: options
@@ -7397,6 +7407,17 @@ impl Session {
         lock(&self.shell).remote_up.clone()
     }
 
+    /// The command generation whose remote session the user typed into after
+    /// its login ([`Self::remote_login`]) was seen (049 R7); `None` if not.
+    /// The pane marks the wrapped attempt "used" with it, and the local `ssh`
+    /// function's fallback then reruns nothing. One leaf-lock round; `Term`
+    /// is not touched.
+    pub fn remote_typed(&self) -> Option<u64> {
+        let log = lock(&self.shell);
+        log.typed
+            .filter(|command| log.running_command() == Some(*command))
+    }
+
     /// The directory a remote link's relative candidate resolves under: OSC 7's
     /// remote directory, or — when the server sends none — the one the title
     /// names in the `user@host: dir` / `user@host:dir` shape (`shell::title_directory`; may be
@@ -8419,7 +8440,17 @@ impl Session {
         // The reconnect offer too (037 Karar 8): it goes away at the **first key**
         // — if the user started typing something else the intent is not to
         // reconnect. The placeholder is not in alacritty's damage, i.e. the frame is requested here.
-        let redraw = lock(&self.shell).context.reconnect.take().is_some() || redraw;
+        //
+        // The same lock round notes the first input after a remote login (049
+        // R7): the edge goes out after the lock is released.
+        let (reconnect, typed) = {
+            let mut log = lock(&self.shell);
+            (log.context.reconnect.take().is_some(), log.note_typed())
+        };
+        let redraw = reconnect || redraw;
+        if typed {
+            self.adapter.0.wake.remote_typed();
+        }
         // A single request: the clear, the fraction and the return all ask for the
         // same frame, let there not be two wakes per keystroke. The "did it slide"
         // rule stays in `wake_if_moved`.
@@ -9287,6 +9318,8 @@ mod tests {
         hovers_lost: u32,
         /// How many times [`Wake::remote_up`] came.
         ups: u32,
+        /// How many times [`Wake::remote_typed`] came.
+        typed: u32,
     }
 
     impl TestWake {
@@ -9377,6 +9410,11 @@ mod tests {
 
         fn remote_up(&self) {
             self.state.lock().unwrap().ups += 1;
+            self.cond.notify_all();
+        }
+
+        fn remote_typed(&self) {
+            self.state.lock().unwrap().typed += 1;
             self.cond.notify_all();
         }
 
@@ -12562,6 +12600,30 @@ mod tests {
     }
 
     #[test]
+    fn lc_identity_env_overrides_an_inherited_one() {
+        // The `LC_` family (049 R6) is in the same layer: an inherited
+        // `LC_TERMINAL=iTerm2` (the additional environment plays the
+        // inheritance) becomes `bateri`, never another terminal's value.
+        let script = "printf 'lc=%s|%s|%s;' \"$LC_TERMINAL\" \
+                      \"$LC_TERMINAL_VERSION\" \"$LC_BATERI_TAB_URL\"; sleep 5";
+        let id = TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
+        let options = SessionOptions {
+            env: HashMap::from([
+                ("LC_TERMINAL".into(), "iTerm2".into()),
+                ("LC_TERMINAL_VERSION".into(), "3.5.0".into()),
+                ("LC_BATERI_TAB_URL".into(), "bateri://tab/foreign".into()),
+            ]),
+            tab_id: Some(id.clone()),
+            ..test_options(sh(script), 200)
+        };
+
+        assert_eq!(
+            child_output(options),
+            format!("lc=bateri|{TERM_PROGRAM_VERSION}|{};", id.url())
+        );
+    }
+
+    #[test]
     fn identity_env_without_tab_id_leaves_session_keys_to_the_map() {
         // With `tab_id: None` there is no constant to override: the map's value
         // passes to the child as is; `TERM_PROGRAM` is still unconditional.
@@ -14097,6 +14159,39 @@ mod tests {
             Some(command)
         );
         assert_eq!(session.remote_login(|_| None), Some(command), "kept");
+    }
+
+    /// 049 R7: the input before the login (the password) says nothing; the
+    /// first input after it is one `Wake::remote_typed` and
+    /// `Session::remote_typed` names the generation; later input adds no edge.
+    #[test]
+    fn input_after_the_remote_login_is_one_typed_edge() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        session.write(b"secret\r");
+        assert_eq!(session.remote_typed(), None, "the password: no login yet");
+        assert_eq!(wake.state.lock().unwrap().typed, 0);
+        let raw = |_: std::os::fd::BorrowedFd<'_>| {
+            Some(TtyModes {
+                canonical: false,
+                echo: false,
+            })
+        };
+        assert_eq!(session.remote_login(raw), Some(command));
+        session.write(b"show\r");
+        session.write(b"exit\r");
+        assert_eq!(session.remote_typed(), Some(command));
+        assert_eq!(wake.state.lock().unwrap().typed, 1, "once per generation");
     }
 
     /// A title from before the ssh started (the previous host's, the local

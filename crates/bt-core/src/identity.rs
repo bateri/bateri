@@ -21,6 +21,14 @@ pub const TERM_PROGRAM: &str = "bateri";
 /// (`.tasks/038-terminal-kimligi/discussion.md` → Karar 3).
 pub const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The value of `LC_TERMINAL` (049 R6): the identity that crosses ssh. The
+/// `LC_` prefix is the carrier — the stock `SendEnv LANG LC_*` /
+/// `AcceptEnv LANG LC_*` pair passes it without any configuration — and the
+/// name is iTerm2's precedent, so tools that already read it find us. Never
+/// another terminal's value (R6.2). With it go `LC_TERMINAL_VERSION`
+/// ([`TERM_PROGRAM_VERSION`]) and `LC_BATERI_TAB_URL` ([`TabId::url`]).
+pub const LC_TERMINAL: &str = TERM_PROGRAM;
+
 /// The URL's scheme + host prefix; written in a single place ([`TabId::url`]).
 const TAB_URL_PREFIX: &str = "bateri://tab/";
 

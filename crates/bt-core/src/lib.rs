@@ -64,7 +64,7 @@ pub use dock::{
     STATS_THRESHOLDS, StatsLevel, StatsMetric, StatsThreshold, TEXT_COL as DOCK_TEXT_COL,
     UPLOAD_GLYPHS, sign_in_span, stats_at, stats_span, transfer_button_at, transfer_button_span,
 };
-pub use identity::{TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
+pub use identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,
