@@ -52,11 +52,14 @@ const PROCESSES: usize = 3;
 
 /// What an unknown value shows: an empty row would read as "nothing", not "not yet".
 const UNKNOWN: &str = "—";
+/// The swap row of a server without swap (`SwapTotal` 0).
+const NO_SWAP: &str = "none";
 
 /// A metric row's bar: the full-width track and the fill whose width and
 /// colour change.
 struct Meter {
     value: Retained<NSTextField>,
+    track: Retained<NSBox>,
     fill: Retained<NSBox>,
 }
 
@@ -291,24 +294,21 @@ fn build(mtm: MainThreadMarker, content: &NSView) -> (NSSize, Rows) {
         let fill = meter.then(|| {
             *top += 2.0;
             let track = bar(mtm, &NSColor::quaternaryLabelColor());
-            place(Retained::into_super(track), PAD, *top, inner, BAR);
+            place(Retained::into_super(track.clone()), PAD, *top, inner, BAR);
             let fill = bar(mtm, &NSColor::clearColor());
             place(Retained::into_super(fill.clone()), PAD, *top, 0.0, BAR);
             *top += BAR;
-            fill
+            (track, fill)
         });
         *top += ROW_GAP;
         (name, value, fill)
     };
-    let meter = |(_, value, fill): (Retained<NSTextField>, _, Option<_>)| Meter {
-        value,
-        fill: fill.expect("a meter line has a bar"),
+    let meter = |(_, value, bar): (Retained<NSTextField>, _, Option<_>)| {
+        let (track, fill) = bar.expect("a meter line has a bar");
+        Meter { value, track, fill }
     };
-    let (cpu_label, cpu_value, cpu_fill) = line("CPU", true, &mut top);
-    let cpu = Meter {
-        value: cpu_value,
-        fill: cpu_fill.expect("a meter line has a bar"),
-    };
+    let (cpu_label, cpu_value, cpu_bar) = line("CPU", true, &mut top);
+    let cpu = meter((cpu_label.clone(), cpu_value, cpu_bar));
     let (_, load, _) = line("Load 1/5/15", false, &mut top);
     let mem = meter(line("Memory", true, &mut top));
     let swap = meter(line("Swap", true, &mut top));
@@ -383,6 +383,7 @@ fn bar(mtm: MainThreadMarker, color: &NSColor) -> Retained<NSBox> {
 /// Writes one sample into the rows; `None` values show [`UNKNOWN`].
 fn fill(rows: &Rows, host: Option<&str>, detail: Option<&Detail>, theme: &Theme) {
     let empty = Detail::default();
+    let sampled = detail.is_some();
     let detail = detail.unwrap_or(&empty);
     set_text(
         &rows.title,
@@ -426,10 +427,13 @@ fn fill(rows: &Rows, host: Option<&str>, detail: Option<&Detail>, theme: &Theme)
         }),
         theme,
     );
-    // Swap has no threshold (046 Karar 4): its bar stays `info`.
+    // Swap has no threshold (046 Karar 4): its bar stays `info`. A server
+    // without swap says so and draws no bar — an empty track read as "0 of
+    // something"; before the first sample the row is unknown, not "none".
+    let (swap, no_swap) = swap_value(sampled, detail.swap_used, detail.swap_total);
     set_meter(
         &rows.swap,
-        &used_of(detail.swap_used, detail.swap_total),
+        &swap,
         percent(detail.swap_used, detail.swap_total).map(|_| {
             (
                 fraction(detail.swap_used, detail.swap_total),
@@ -438,6 +442,7 @@ fn fill(rows: &Rows, host: Option<&str>, detail: Option<&Detail>, theme: &Theme)
         }),
         theme,
     );
+    rows.swap.set_bar_hidden(no_swap);
     set_meter(
         &rows.disk,
         &detail
@@ -461,6 +466,16 @@ fn fill(rows: &Rows, host: Option<&str>, detail: Option<&Detail>, theme: &Theme)
         };
         set_text(name, &left);
         set_text(value, &right);
+    }
+}
+
+impl Meter {
+    /// Hides or shows the bar (track and fill) under the value.
+    fn set_bar_hidden(&self, hidden: bool) {
+        if self.track.isHidden() != hidden {
+            self.track.setHidden(hidden);
+            self.fill.setHidden(hidden);
+        }
     }
 }
 
@@ -512,6 +527,17 @@ fn used_of(used: u64, total: u64) -> String {
     }
     let (unit, name) = unit_of(total);
     format!("{} / {} {name}", scaled(used, unit), scaled(total, unit))
+}
+
+/// The swap row's value and whether its bar is hidden: `none` without a bar
+/// on a sampled server without swap, [`used_of`] otherwise (unknown before the
+/// first sample).
+fn swap_value(sampled: bool, used: u64, total: u64) -> (String, bool) {
+    if sampled && total == 0 {
+        (NO_SWAP.to_owned(), true)
+    } else {
+        (used_of(used, total), false)
+    }
 }
 
 /// The unit a size is shown in: GB from one GiB up, MB below.
@@ -592,6 +618,20 @@ mod tests {
         assert_eq!(used_of(0, 2 * GIB), "0.0 / 2.0 GB");
         assert_eq!(used_of(100 << 20, 512 << 20), "100 / 512 MB");
         assert_eq!(used_of(0, 0), UNKNOWN, "no swap");
+    }
+
+    #[test]
+    fn a_server_without_swap_says_none_and_draws_no_bar() {
+        assert_eq!(swap_value(true, 0, 0), (NO_SWAP.to_owned(), true));
+        assert_eq!(
+            swap_value(false, 0, 0),
+            (UNKNOWN.to_owned(), false),
+            "before the first sample it is unknown, not none"
+        );
+        assert_eq!(
+            swap_value(true, 0, 2 << 30),
+            ("0.0 / 2.0 GB".to_owned(), false)
+        );
     }
 
     #[test]
