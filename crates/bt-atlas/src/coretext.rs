@@ -593,7 +593,7 @@ pub mod fixture {
     /// whether a character becomes a box depends on the installed fonts
     /// (`U+E0B0` falls to `.LastResort` here but draws with a Nerd Font) — it
     /// is derived from the candidate's own ink by the test.
-    pub const GATE_PROBES: [char; 9] = [
+    pub const GATE_PROBES: [char; 8] = [
         FALLBACK_CHAR,
         INK_CHAR,
         '𝔸',
@@ -602,12 +602,6 @@ pub mod fixture {
         '\u{10FFFD}',
         '🎉',
         '\u{F8FF}',
-        // Braille comes from Apple Braille. The large class never reaches
-        // the gate (it is drawn procedurally); it stays for the small class,
-        // where the procedural gate is closed. Its answer changes with the
-        // criterion: advance 1.135 cells, ink 2.62..8.34 inside a 9.633 cell
-        // (measured, Menlo 16pt).
-        '⠋',
     ];
 
     /// Symbols beyond printable ASCII whose advance must equal the cell's in

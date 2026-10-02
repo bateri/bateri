@@ -553,6 +553,10 @@ pub(crate) fn is_procedural(ch: char) -> bool {
 
 /// Draws the coverage bytes of a procedural character into `target`.
 ///
+/// `m` is the cell the sprite *is*: the large cell, or in the small class the
+/// small face's own cell (`Atlas::small_metrics`, 046) — `target` is then that
+/// cell's buffer, not a slot, and the atlas places it.
+///
 /// The twin of [`draw_rule`], starting with the same two opening lines; the
 /// reasons are the same too. It cannot fail — no font is asked, no context is
 /// set up — so the caller's `Drawn` is not an assumption but the type itself.
