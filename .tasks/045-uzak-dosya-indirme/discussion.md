@@ -40,7 +40,10 @@ söylüyor ve çoğu sunucu onu varsayılan olarak basmıyor.
 çıktı; başlık `root@host: ~` biçimindeydi. OSC 7 yokken başlığın
 `kullanıcı@host: dizin` biçimi dizin sayılır (`shell::title_directory`,
 `Session::remote_link_directory`; `~` yardımcının bildiği uzak eve açılır);
-biçime uymayan başlık yok sayılır ve A'nın etiketi kalır.
+biçime uymayan başlık yok sayılır ve A'nın etiketi kalır. İki noktadan
+sonraki boşluk isteğe bağlı (kullanıcı, 2026-10-02: Fedora + oh-my-zsh,
+`termsupport` başlığı `%n@%m:%~` — `tdgunes@tdg-fw13:~` — kuruyor ve
+etiket çıkıyordu).
 
 ## Karar 3: ⌘-tık uzakta "önizle" demek → ✅ kullanıcı
 

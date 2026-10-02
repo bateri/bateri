@@ -7308,7 +7308,7 @@ impl Session {
 
     /// The directory a remote link's relative candidate resolves under: OSC 7's
     /// remote directory, or — when the server sends none — the one the title
-    /// names in the `user@host: dir` shape (`shell::title_directory`; may be
+    /// names in the `user@host: dir` / `user@host:dir` shape (`shell::title_directory`; may be
     /// `~`-rooted, the helper expands it). Empty if neither says. The two leaf
     /// locks are taken in sequence, not nested; `Term` is not touched.
     pub fn remote_link_directory(&self) -> String {
