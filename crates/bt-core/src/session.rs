@@ -4887,11 +4887,15 @@ impl Session {
             // **Zero in a remote session** (036 Karar 8): while ssh runs the shell has
             // no input row, the dock drops to the context row alone and the grid is
             // drawn down (`bt-gpu`'s band surplus). The rule does not change on the
-            // alternate screen — the dock is lifted there anyway.
-            input_rows: if !self.dock || alt_screen {
+            // alternate screen: there the remote dock **stays** as the status bar
+            // (its share is one row, `bt-shell`'s `dock_rows_for`), the local one
+            // is lifted.
+            input_rows: if !self.dock {
                 1
             } else if remote {
                 0
+            } else if alt_screen {
+                1
             } else {
                 budget.fit(needed_rows, grid_rows)
             },
@@ -13509,8 +13513,8 @@ mod tests {
             cursor.content_rows == cursor.rows
         });
         assert_eq!(
-            cursor.input_rows, 1,
-            "today's value on the alternate screen"
+            cursor.input_rows, 0,
+            "a remote alternate screen keeps the dock as the context row alone"
         );
     }
 

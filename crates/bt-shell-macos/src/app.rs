@@ -618,7 +618,11 @@ fn dock_rows_at_birth(integration: &[(String, String)], setting: ShellIntegratio
     }
 }
 
-/// This moment's dock share: **zero** on the alternate screen, otherwise the birth value.
+/// This moment's dock share: **zero** on the alternate screen, otherwise the birth value
+/// — except a **remote** session's alternate screen, where the dock stays as the
+/// one-row status bar (`⇄ host`, the transfer line): vim on the server still
+/// shows where it runs. One row is exactly the context band (`band_px(0) ==
+/// dock_px(1)`), so the remote app's grid is not offset.
 ///
 /// The birth value is a separate input and this is mandatory: in a session
 /// without integration (`birth == 0`) leaving the alternate screen must not
@@ -626,8 +630,13 @@ fn dock_rows_at_birth(integration: &[(String, String)], setting: ShellIntegratio
 /// one would have to rebuild from the `DOCK_ROWS` constant, and that is exactly the way to conjure a dock that does not exist.
 ///
 /// Pure: this is `bt-shell-macos`'s only half testable without AppKit.
-pub(crate) fn dock_rows_for(alt_screen: bool, birth: u16) -> u16 {
-    if alt_screen { 0 } else { birth }
+pub(crate) fn dock_rows_for(alt_screen: bool, remote: bool, birth: u16) -> u16 {
+    match (alt_screen, remote) {
+        _ if birth == 0 => 0,
+        (true, true) => 1,
+        (true, false) => 0,
+        (false, _) => birth,
+    }
 }
 
 /// The first item that holds the key and is **not closed** — the single rule
@@ -3207,15 +3216,20 @@ mod tests {
     #[test]
     fn the_alternate_screen_takes_the_dock_and_gives_it_back() {
         // On the alternate screen the gutter is zero, on exit the **birth value** comes back.
-        assert_eq!(dock_rows_for(true, DOCK_ROWS), 0);
-        assert_eq!(dock_rows_for(false, DOCK_ROWS), DOCK_ROWS);
+        assert_eq!(dock_rows_for(true, false, DOCK_ROWS), 0);
+        assert_eq!(dock_rows_for(false, false, DOCK_ROWS), DOCK_ROWS);
         // **This line is why the birth value is a separate input:**
         // leaving the alternate screen in a window that never had a dock (an unintegrated shell, the smoke
         // recipe) must **not** give birth to a dock. Were it written over a single
         // field, the value to restore would be built from the `DOCK_ROWS`
         // constant and exactly this window would gain a dock.
-        assert_eq!(dock_rows_for(true, NO_DOCK), 0);
-        assert_eq!(dock_rows_for(false, NO_DOCK), 0);
+        assert_eq!(dock_rows_for(true, false, NO_DOCK), 0);
+        assert_eq!(dock_rows_for(false, false, NO_DOCK), 0);
+        // A remote session's alternate screen keeps the one-row status bar;
+        // a window without a dock never gets one.
+        assert_eq!(dock_rows_for(true, true, DOCK_ROWS), 1);
+        assert_eq!(dock_rows_for(false, true, DOCK_ROWS), DOCK_ROWS);
+        assert_eq!(dock_rows_for(true, true, NO_DOCK), 0);
     }
 
     #[test]

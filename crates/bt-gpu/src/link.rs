@@ -95,7 +95,7 @@ use bt_core::{
 };
 
 use crate::blink::Blink;
-use crate::frame::{DOCK_ROWS, Frame};
+use crate::frame::Frame;
 use crate::glyph_fx::GlyphFx;
 use crate::metrics::CellMetrics;
 use crate::motion::Motion;
@@ -1859,7 +1859,10 @@ fn band_target(input_rows: u16, dock_rows: u16, cell: CellMetrics) -> f32 {
         return 0.0;
     }
     let cell_h = f32::from(cell.cell_px().1);
-    (crate::frame::band_px(input_rows, cell) - crate::frame::dock_px(DOCK_ROWS, cell)) / cell_h
+    // Against the share actually reserved: `DOCK_ROWS` normally, one row for a
+    // remote session's status bar on the alternate screen — `band_px(0)` is
+    // `dock_px(1)`, so there the excess is zero and vim's grid is not offset.
+    (crate::frame::band_px(input_rows, cell) - crate::frame::dock_px(dock_rows, cell)) / cell_h
 }
 
 /// Writes the band's and the offset's **current** value into the frame — the
@@ -2537,6 +2540,7 @@ fn at_rest(motion: Motion, flipped: bool, fx_idle: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::DOCK_ROWS;
 
     #[test]
     fn the_dock_caret_target_lands_on_the_band_not_the_grid_row() {

@@ -1584,8 +1584,11 @@ impl TerminalPane {
         let Some(session) = self.ivars().session.get() else {
             return;
         };
-        let wanted =
-            app::dock_rows_for(session.alt_screen(), self.ivars().dock_rows_at_birth.get());
+        let wanted = app::dock_rows_for(
+            session.alt_screen(),
+            session.remote_mark().is_some(),
+            self.ivars().dock_rows_at_birth.get(),
+        );
         if self.ivars().dock_rows.replace(wanted) == wanted {
             return;
         }
@@ -2060,6 +2063,9 @@ impl TerminalPane {
         {
             self.remote_helper().borrow_mut().close();
         }
+        // The remote edge moves the alternate screen's share too (a remote vim
+        // keeps the status bar); a no-op unless the answer changed.
+        self.alt_screen_did_change();
         self.host().title_changed(self.ivars().id);
     }
 
