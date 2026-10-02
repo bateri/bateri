@@ -3,14 +3,24 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check quick fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check quick prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
 # arrives after a `brew upgrade` can be told apart from a code failure.
 check:
 	@rustc --version
-	@$(MAKE) --no-print-directory fmt audit clippy test
+	@$(MAKE) --no-print-directory prune fmt audit clippy test
+
+# Debug builds leave each codegen unit's object file in target/debug/deps
+# (macOS's unpacked debug info) and cargo never removes a stale one; they piled
+# up by the hundred thousand, and every test binary that touches
+# CoreFoundation lists its own directory when it starts (`CFBundleGetMainBundle`)
+# — that listing became most of the test step (seen with `sample`).
+# Objects older than two days belong to builds that have since been replaced;
+# losing one only drops the debugger's line info for a crate not rebuilt since.
+prune:
+	@if [ -d target/debug/deps ]; then find target/debug/deps -name '*.o' -mtime +2 -delete; fi
 
 fmt:
 	$(CARGO) fmt --all -- --check
@@ -90,6 +100,7 @@ test:
 # `check`, which also runs the dependents' tests.
 quick:
 	@rustc --version
+	@$(MAKE) --no-print-directory prune
 	$(CARGO) fmt --all -- --check
 	@$(MAKE) --no-print-directory audit
 	@out=$$(python3 tools/changed_crates.py) || exit 1; \
