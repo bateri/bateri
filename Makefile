@@ -76,8 +76,12 @@ audit:
 clippy:
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 
+# `--all-targets`, not the bare form: the bare form also runs doc-tests, and the
+# workspace has none — yet rustdoc still compiles every crate once more to find
+# that out, and that pass was most of the test step's time. A doc-test added
+# later must not stay silent: put `--doc` back here in the same commit.
 test:
-	$(CARGO) test --workspace
+	$(CARGO) test --workspace --all-targets
 
 # Opens the window, and when BT_RUN_SECONDS expires looks at the number of
 # frames, cells, glyphs, rule lines and atlas slots:
@@ -633,4 +637,4 @@ linux:
 	docker run --rm -v "$(CURDIR)":/w -v bateri-linux-cargo:/usr/local/cargo/registry \
 		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) sh -c '\
 		cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
-		cargo test $(LINUX_CRATES) --locked'
+		cargo test $(LINUX_CRATES) --all-targets --locked'

@@ -1286,7 +1286,7 @@ make check        # rustc sürümü + fmt --check + audit + clippy -D warnings +
 make fmt          # cargo fmt --all -- --check
 make audit        # kuralların mekanik yarısı: katman yönü, bt-core'da gerekçesiz panik, rc dosyasına yazma; Cargo.lock değiştiyse uyarır
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
-make test         # cargo test --workspace
+make test         # cargo test --workspace --all-targets (doc-test yok, rustdoc'un boş turu koşmaz)
 make shader       # WGSL kanaryası: cargo test -p bt-gpu wgsl_pipelines_build (naga doğrulaması + bütün pipeline'ların kurulumu)
 make smoke        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
                   # frames=N cells=K glyphs=G rules=R slots=U/T slots2=U/T load=smoke requests=I content=C motion=M slide=S quiet=Sms teardown=clean profile=debug samples=off pipeline=ok
