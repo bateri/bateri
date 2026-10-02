@@ -12,6 +12,46 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-02
+
+### Added
+
+- **Clickable links.** Hold ⌘ and URLs, existing files and folders, and OSC 8
+  hyperlinks get an underline and a hand cursor; ⌘-click opens them. Works in
+  the scrollback, in full-screen apps and in the input line. Paths with
+  spaces and bare names from `ls` (`src`, `Makefile`) are found too.
+  Right-click a link for Open, Reveal in Finder and Copy. OSC 8 links show a
+  dashed underline without ⌘ and their target in the bottom-left corner.
+- **Remote files over ssh.** In an ssh session, ⌘-hover a name in `ls` output
+  and bateri asks the server whether it exists:
+  - ⌘-click previews a file: a temporary, read-only copy downloads and opens
+    (scripts open as plain text). Larger files (100 MB by default) ask first.
+  - ⌘-drag a file or folder to Finder or the Desktop to download it there.
+  - Right-click for Download to Downloads, Download To…, Copy Path and Copy as
+    scp Path.
+  - Downloads and uploads share one transfer list (“Show transfers”), with
+    progress, cancel (⌘.) and a notification when bateri is in the background.
+    Downloaded files carry the usual “downloaded from the internet” mark.
+- **Settings › Remote Files**: preview size limit, preview and download
+  folders, how long previews are kept, a size limit and Clear Now. Previews
+  are cleaned up when bateri starts and once a day, never while you might be
+  reading one, and a preview you edited is moved to Downloads instead of
+  deleted.
+
+### Changed
+
+- The ssh status bar (`⇄ host`) stays at the bottom while vim, htop or less
+  runs on the server.
+- When a server doesn't report its folder (OSC 7) but sets the usual
+  `user@host: folder` window title (Debian and Ubuntu do), bateri uses that
+  folder for links and for uploads dropped from Finder, instead of the home
+  folder.
+
+### Fixed
+
+- A wide character missing from the font could draw as two boxes instead of
+  one.
+
 ## [0.1.1] - 2026-09-30
 
 ### Changed
