@@ -613,7 +613,9 @@ alternatif ekrandan çıkış orada dock doğurmuyor.
 ssh ya da mosh varken giriş satırı yok (`Cursor::input_rows == 0` — yazılan
 satır uzak kabuğun, ızgarada), bant yalnız bağlam satırı ve o satır
 `⇄ host  /uzak/yol` — `⇄` (fonttan, sıradan hücre) ile host **işaretinin**
-renginde, yol bugünkü iki kademede, dal yok; host kısalmaz, sığmazsa yalnız
+renginde, yol bugünkü iki kademede (OSC 7 yoksa bağlantıların tabanıyla aynı
+başlık yedeğinden — `Session::title_folder_into`; başlığın host'u ssh
+hedefiyle eşlenmiyor, hedef çoğu zaman bir `~/.ssh/config` takma adı), dal yok; host kısalmaz, sığmazsa yalnız
 `⇄` kalır. Dock'un üst saç çizgisi de işaretin renginde (`Dock::edge`;
 yükleme sürerken çubuğun boş izi, aşağıda).
 **İşaret** (037 Karar 2–5): `[remote] hosts` sıralı `{ host, mark }` dizisi

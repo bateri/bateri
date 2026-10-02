@@ -7312,15 +7312,30 @@ impl Session {
     /// `~`-rooted, the helper expands it). Empty if neither says. The two leaf
     /// locks are taken in sequence, not nested; `Term` is not touched.
     pub fn remote_link_directory(&self) -> String {
-        let cwd = lock(&self.shell).context.remote_cwd.clone();
-        if !cwd.is_empty() {
-            return cwd;
+        let mut cwd = lock(&self.shell).context.remote_cwd.clone();
+        self.title_folder_into(&mut cwd);
+        cwd
+    }
+
+    /// The remote folder's fallback, shared by the status bar ([`Session::dock`],
+    /// [`Session::stats_span`]) and the links' base ([`Session::remote_link_directory`]):
+    /// if `remote_cwd` is empty (no OSC 7), the folder the title names
+    /// (`shell::title_directory`) is written into it — in place, so the frame
+    /// path does not allocate. The title's host is **not** matched against the
+    /// ssh target: the target is usually an `~/.ssh/config` alias
+    /// (`kararla_hetzner` vs `kararla-production`), and while the remote session
+    /// runs the title is the remote shell's. Takes the title's leaf lock; the
+    /// caller must not hold `shell`.
+    fn title_folder_into(&self, remote_cwd: &mut String) {
+        if !remote_cwd.is_empty() {
+            return;
         }
-        lock(&self.adapter.0.title)
+        if let Some(dir) = lock(&self.adapter.0.title)
             .as_deref()
             .and_then(crate::shell::title_directory)
-            .map(str::to_owned)
-            .unwrap_or_default()
+        {
+            remote_cwd.push_str(dir);
+        }
     }
 
     /// Writes the upload queue's status row (`None` = remove; 037 Karar 7).
@@ -7388,7 +7403,11 @@ impl Session {
     /// cursor read this one range, from the drawing's layout (046 R3.4). Takes
     /// only the leaf lock.
     pub fn stats_span(&self, budget: u16) -> Option<(u16, u16)> {
-        crate::dock::stats_span(&lock(&self.shell).context, budget)
+        let mut context = lock(&self.shell).context.clone();
+        if context.remote.is_some() {
+            self.title_folder_into(&mut context.remote_cwd);
+        }
+        crate::dock::stats_span(&context, budget)
     }
 
     /// Whether the application is on the alternate screen — the state **in the
@@ -7513,6 +7532,11 @@ impl Session {
             });
             (shell.state, change, range, shell.dock_scroll, link)
         };
+        // The remote folder's title fallback (no OSC 7), after the `shell`
+        // round: the status bar shows what the links resolve under.
+        if context.remote.is_some() {
+            self.title_folder_into(&mut context.remote_cwd);
+        }
         // A stale dock hover (a new `BUFFER`, `line-finish`, a moved window) is
         // not drawn and drops.
         if link.is_none()
@@ -13559,6 +13583,78 @@ mod tests {
         assert!(session.set_remote_stats(command, Some(&stats)));
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
         assert_eq!(shown(), None);
+    }
+
+    /// The dock's characters as one string (every row, in sink order).
+    fn dock_chars(session: &Session) -> String {
+        let mut chars = String::new();
+        session.dock(
+            DockCols {
+                grid: 60,
+                context: 60,
+            },
+            0,
+            &mut DockState::default(),
+            &mut DockContext::default(),
+            false,
+            &mut Vec::new(),
+            &mut Clusters::default(),
+            |cell| chars.extend(cell.ch),
+            |_| (),
+        );
+        chars
+    }
+
+    /// A server without OSC 7 (Ubuntu's stock `.bashrc`, the user's Hetzner
+    /// host): the status bar's path comes from the `user@host: dir` title, the
+    /// same source the links' base uses — even though the title's host
+    /// (`kararla-production`) is not the ssh target (`kararla_hetzner`, an
+    /// alias): while the remote session runs the title is the remote shell's.
+    /// OSC 7 wins over the title; the indicator's layout reads the same path.
+    #[test]
+    fn the_status_bar_reads_the_remote_folder_from_the_title() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; \
+                 printf '\\033]0;root@kararla-production: ~\\007'; read _; \
+                 printf '\\033]7;file://kararla-production/srv/app\\007'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        assert!(wake.wait_titles(1, Duration::from_secs(5)) >= 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("kararla_hetzner"))));
+        assert_eq!(session.remote_link_directory(), "~");
+        let shown = dock_chars(&session);
+        assert!(shown.ends_with("kararla_hetzner~"), "{shown:?}");
+
+        // The indicator's range is laid out after the same path.
+        let stats = RemoteStats {
+            cpu: Some(23),
+            mem: 61,
+            ..RemoteStats::default()
+        };
+        assert!(session.set_remote_stats(command, Some(&stats)));
+        let mut context = lock(&session.shell).context.clone();
+        context.remote_cwd = "~".to_owned();
+        assert_eq!(
+            session.stats_span(30),
+            crate::dock::stats_span(&context, 30)
+        );
+        assert!(session.set_remote_stats(command, None));
+
+        session.write(b"\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.remote_link_directory() != "/srv/app" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(session.remote_link_directory(), "/srv/app", "OSC 7 wins");
+        let shown = dock_chars(&session);
+        assert!(shown.ends_with("kararla_hetzner/srv/app"), "{shown:?}");
     }
 
     #[test]

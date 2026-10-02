@@ -44,6 +44,14 @@ biçime uymayan başlık yok sayılır ve A'nın etiketi kalır. İki noktadan
 sonraki boşluk isteğe bağlı (kullanıcı, 2026-10-02: Fedora + oh-my-zsh,
 `termsupport` başlığı `%n@%m:%~` — `tdgunes@tdg-fw13:~` — kuruyor ve
 etiket çıkıyordu).
+Durum çubuğunun yolu da aynı yedekten (046 sonrası, kullanıcı bildirdi:
+Hetzner Ubuntu, `ssh kararla_hetzner`, başlık `root@kararla-production: ~`,
+çubukta yalnız `⇄ kararla_hetzner`): yedek yalnız bağlantı tabanındaydı,
+bağlam satırı ve göstergenin yerleşimi `remote_cwd`'yi ham okuyordu
+(sınama: `the_status_bar_reads_the_remote_folder_from_the_title`). Tek
+yerden (`Session::title_folder_into`) üç tüketiciye; başlığın host'u ssh
+hedefiyle eşlenmiyor — hedef çoğu zaman bir takma ad ve uzak oturum
+sürerken başlık zaten uzak kabuğun.
 
 ## Karar 3: ⌘-tık uzakta "önizle" demek → ✅ kullanıcı
 
