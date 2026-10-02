@@ -586,6 +586,9 @@ define_class!(
             for pane in self.panes() {
                 pane.apply_focus(true);
                 pane.rehover_upload();
+                // Coming back to the window is an interaction: the remote load
+                // indicator samples again at once (046 Karar 6).
+                pane.note_interaction();
             }
         }
 

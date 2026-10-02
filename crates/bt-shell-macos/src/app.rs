@@ -2276,6 +2276,13 @@ impl AppDelegate {
                     window.set_host_marks(&new);
                 }
             }
+            // The load indicator's form and interval (046 Karar 8): `off`
+            // hides it at once, another form redraws the last value.
+            if changes.stats {
+                for pane in &panes {
+                    pane.set_stats_settings(&new.remote_stats);
+                }
+            }
             // The style and the dock's typing effects go to the link, not the session:
             // they change not which frame we draw but **how** we draw it.
             // The link is born inside `start_session` and this path runs after

@@ -73,6 +73,7 @@ use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
 use crate::search_bar::{SearchBar, selection_query};
+use crate::stats::StatsDriver;
 use crate::upload::Transfers;
 use crate::uploader::{StopSheet, UploadPopover};
 use crate::view::BateriView;
@@ -592,7 +593,7 @@ impl Wake for ShellWake {
             if let Some(pane) = lookup(mtm, id) {
                 // The remote state's edge (`D`/`A`'s deletion) is also the
                 // upload queue's edge — it first, then the owner reads the title.
-                announce_title(&pending, || pane.check_upload_connection(), pane.host(), id);
+                announce_title(&pending, || pane.remote_edge(), pane.host(), id);
             }
         });
     }
@@ -827,8 +828,13 @@ pub(crate) struct PaneIvars {
     list_closed_at: Cell<Option<f64>>,
     /// The helper ssh session that verifies remote links and counts a download
     /// (045 Karar 10): its worker is born at the first question, its session
-    /// closes on another generation, when idle and with the pane.
+    /// closes on another generation, when idle and with the pane — while the
+    /// load indicator samples (046 Karar 1) it is never idle.
     remote_helper: RefCell<RemoteHelper>,
+    /// The remote load indicator's sampling (046 phase-4, [`crate::stats`]):
+    /// its schedule and sampler; the settings' value from the birth package,
+    /// refreshed live ([`TerminalPane::set_stats_settings`]).
+    stats: RefCell<StatsDriver>,
     /// `[remote]`'s preview and download keys (045 R8): from the birth package,
     /// refreshed live with the host marks ([`TerminalPane::set_host_marks`]).
     remote_files: RefCell<RemoteFiles>,
@@ -1131,6 +1137,7 @@ impl TerminalPane {
         view.setWantsLayer(true);
         let font = settings.font.clone();
         let remote_files = settings.remote_files.clone();
+        let stats_driver = StatsDriver::new(&settings.remote_stats);
         let dim = DimOverlay::new(mtm);
         dim.paint(&theme);
         let link_label = LinkLabel::new(mtm);
@@ -1186,6 +1193,7 @@ impl TerminalPane {
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
             remote_helper: RefCell::new(RemoteHelper::default()),
+            stats: RefCell::new(stats_driver),
             remote_files: RefCell::new(remote_files),
             previews: RefCell::new(HashMap::new()),
             finder: RefCell::new(FinderDrops::default()),
@@ -1953,6 +1961,7 @@ impl TerminalPane {
         self.finder_abandon();
         // The helper's ssh goes now, not when the last reference drops.
         self.remote_helper().borrow_mut().close();
+        self.stop_stats();
         self.ivars().closed.set(true);
         // SAFETY: the observer is this object, registered in `observe_frame`;
         // a no-op if it is not registered.
@@ -2055,7 +2064,7 @@ impl TerminalPane {
     /// ones are cancelled — 037 Karar 7 → Kullanıcı kararı 6), then the owner
     /// re-reads the title and the tab's dot ([`PaneHost::title_changed`]).
     pub(crate) fn remote_or_title_changed(&self) {
-        self.check_upload_connection();
+        self.remote_edge();
         // The remote session ended: its helper ssh is not held open until idle.
         if self
             .session()
@@ -2067,6 +2076,15 @@ impl TerminalPane {
         // keeps the status bar); a no-op unless the answer changed.
         self.alt_screen_did_change();
         self.host().title_changed(self.ivars().id);
+    }
+
+    /// The remote state's edge, from both of its paths — the probe
+    /// ([`TerminalPane::remote_or_title_changed`]) and the title news that
+    /// carries `C`/`D`/`A`'s deletion: the upload queue's connection, then the
+    /// load indicator's generation (046 phase-4).
+    pub(crate) fn remote_edge(&self) {
+        self.check_upload_connection();
+        self.sync_stats_generation();
     }
 
     /// Edit ▸ Find ▸ Find… (⌘F): opens the panel, focuses the field and selects
@@ -2365,6 +2383,11 @@ impl TerminalPane {
     /// The helper ssh session's handle (045 Karar 10).
     pub(crate) fn remote_helper(&self) -> &RefCell<RemoteHelper> {
         &self.ivars().remote_helper
+    }
+
+    /// The load indicator's sampling state ([`crate::stats`]).
+    pub(crate) fn stats_driver(&self) -> &RefCell<StatsDriver> {
+        &self.ivars().stats
     }
 
     /// `[remote]`'s preview and download keys as last read.

@@ -48,6 +48,7 @@ mod promise;
 mod search_bar;
 mod settings_window;
 mod split_view;
+mod stats;
 mod updater;
 mod uploader;
 mod view;
