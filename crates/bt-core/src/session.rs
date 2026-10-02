@@ -13585,8 +13585,13 @@ mod tests {
             crate::dock::stats_span(&lock(&session.shell).context, 80),
             "the hit test reads the drawing's layout"
         );
-        assert!(!session.set_remote_stats(command, Some(&stats)));
-        assert!(!session.take_damage(), "the same value requests no frame");
+        // The return value is the frame request (`request_frame` runs only on a
+        // change); `take_damage` is not asked here, because the live shell's
+        // late PTY output damages too and a loaded single-threaded run sees it.
+        assert!(
+            !session.set_remote_stats(command, Some(&stats)),
+            "the same value requests no frame"
+        );
         assert!(session.set_transfer(Some(&Transfer::default())));
         assert_eq!(
             session.stats_span(80),
