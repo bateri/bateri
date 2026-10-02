@@ -118,3 +118,7 @@ _Requirements: R6.1, R6.2_
 - Düzeltmelerden sonra `make check`, `make smoke` yeşil; `make linux`
   ilk koşuda dokunulmamış `jobs::tests::the_process_table_reads_a_real_argv`
   ile bir kez kırmızı (phase-1'deki bilinen yarış), ikinci koşu yeşil.
+- **Set sonrası (kullanıcı, Hetzner Ubuntu, swap yok):** popover `Swap —`
+  ve altında boş bir çubuk gösteriyordu — boş iz "bir şeyin sıfırı" diye
+  okunuyordu. Örnek gelmişse ve `SwapTotal` 0'sa değer `none` ve çubuk
+  (iz + dolgu) gizli (`swap_value`); ilk örnekten önce satır yine "—".
