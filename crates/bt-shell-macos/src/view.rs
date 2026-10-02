@@ -2101,6 +2101,7 @@ impl BateriView {
     fn hand_rects(&self) -> Vec<NSRect> {
         let mut rects = self.upload_button_rects();
         rects.extend(self.stats_rect());
+        rects.extend(self.sign_in_rect());
         rects.extend(self.link_rects());
         rects
     }
@@ -2111,6 +2112,14 @@ impl BateriView {
     fn stats_rect(&self) -> Option<NSRect> {
         let budget = self.context_budget()?;
         let (start, end) = self.pane()?.session()?.stats_span(budget)?;
+        self.context_span_rect(start, end)
+    }
+
+    /// The Sign In… button's rectangle, in view points — its click's range
+    /// (`Session::sign_in_span`, 047 R7.2); `None` if it is not drawn.
+    fn sign_in_rect(&self) -> Option<NSRect> {
+        let budget = self.context_budget()?;
+        let (start, end) = self.pane()?.session()?.sign_in_span(budget)?;
         self.context_span_rect(start, end)
     }
 
@@ -2152,7 +2161,9 @@ impl BateriView {
         self.context_column(event.locationInWindow())
             .zip(self.pane())
             .is_some_and(|((col, context), pane)| {
-                pane.upload_click(col, context) || pane.stats_click(col, context)
+                pane.upload_click(col, context)
+                    || pane.stats_click(col, context)
+                    || pane.sign_in_click(col, context)
             })
     }
 

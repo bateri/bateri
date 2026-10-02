@@ -641,6 +641,10 @@ objc2-quartz-core 0.3.2
   Copyright (c) the objc2-quartz-core developers
   https://github.com/madsmtm/objc2
 
+objc2-security 0.3.2
+  Copyright (c) the objc2-security developers
+  https://github.com/madsmtm/objc2
+
 objc2-user-notifications 0.3.2
   Copyright (c) the objc2-user-notifications developers
   https://github.com/madsmtm/objc2

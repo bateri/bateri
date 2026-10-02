@@ -76,6 +76,16 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "std", "block2", "UNUserNotificationCenter", "UNNotificationContent",
     "UNNotificationRequest", "UNNotificationTrigger",
 ] }
+# The Keychain of bateri's ssh masters (`bt-shell-macos::keychain`, 047 phase-3):
+# `SecItem*` over an internet password. User-approved dependency decision
+# (2026-10-02): the objc2 family's own generation (0.3.2) instead of a second CF
+# wrapper stack (`security-framework`) or hand-written FFI — record in
+# .tasks/047-ssh-parola-ve-keychain/discussion.md → Karar 8. Its only edge is
+# `objc2-core-foundation`, already in the graph; the error codes are named in
+# the module rather than turning on the `SecBase` header.
+objc2-security = { version = "0.3.2", default-features = false, features = [
+    "std", "SecItem",
+] }
 # The main queue (`bt-shell-macos`) and vnode sources (`bt-shell-common`'s
 # `watch`). User-approved dependency decision: .tasks/001 discussion.md →
 # Karar.

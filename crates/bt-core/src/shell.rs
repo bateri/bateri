@@ -500,6 +500,22 @@ pub struct DockContext {
     /// ([`Self::clear_remote`], [`ShellLog::set_remote`]) — otherwise a new host
     /// would show the previous one's numbers until its first sample.
     pub stats: Option<RemoteStats>,
+    /// The ssh status bar's **Sign In…** button (047 R7.2): a background job
+    /// (the link check, the load indicator) could not log in by itself — no
+    /// saved password, or the saved one was refused. `None` otherwise.
+    ///
+    /// Its writer is `bt-shell`'s pane ([`crate::Session::set_sign_in`]); it
+    /// belongs to the remote state and goes with it, like [`Self::stats`]. While
+    /// it is shown the load indicator is not (there is no sample without a
+    /// login) and the upload row wins over both.
+    pub sign_in: Option<SignIn>,
+}
+
+/// The Sign In… button's drawing state ([`DockContext::sign_in`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SignIn {
+    /// Under the mouse: the fill darkens (the upload buttons' rule).
+    pub hover: bool,
 }
 
 /// The form of the load indicator that is drawn (046 Karar 4) —
@@ -738,6 +754,7 @@ impl Clone for DockContext {
         self.reconnect.clone_from(&source.reconnect);
         self.transfer.clone_from(&source.transfer);
         self.stats = source.stats;
+        self.sign_in = source.sign_in;
     }
 }
 
@@ -752,8 +769,9 @@ impl DockContext {
     fn clear_remote(&mut self) -> bool {
         self.remote_cwd.clear();
         self.remote_mark = HostMark::None;
-        // The load belongs to the host (046 Karar 5).
+        // The load belongs to the host (046 Karar 5), and so does its login.
         self.stats = None;
+        self.sign_in = None;
         self.remote.take().is_some()
     }
 }
@@ -1932,6 +1950,7 @@ impl ShellLog {
         // re-reported keeps its indicator.
         if changed {
             self.context.stats = None;
+            self.context.sign_in = None;
         }
         match target {
             Some(target) => {

@@ -96,6 +96,20 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 /// the Shell menu with this.
 const MARK_HOLDER_TAG: isize = 37;
 
+/// The `tag` of Shell ▸ Forget Password for “{host}” (047 R6.2):
+/// [`ShellMenuDelegate`] writes the host into its title.
+const FORGET_TAG: isize = 47;
+
+/// Forget Password's title on a remote tab (`Some` host, without `user@`) or
+/// locally — a UI string. Its enablement is the pane's `validateMenuItem:`
+/// (a saved password for the tab's account).
+pub(crate) fn forget_title(host: Option<&str>) -> String {
+    match host {
+        Some(host) => format!("Forget Password for \u{201c}{}\u{201d}", bare_host(host)),
+        None => "Forget Password".to_owned(),
+    }
+}
+
 /// The items of Mark … as ▸, in order; an item's `tag` is the index here and the
 /// action (`markHost:`) reads the mark from it ([`mark_of_tag`]). No direct color:
 /// the menu never writes it (037 Karar 2).
@@ -157,10 +171,14 @@ define_class!(
         /// Only on opening — the shortcut search does not come through here.
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, menu: &NSMenu) {
+            let remote = crate::app::delegate(self.mtm()).and_then(|app| app.key_remote_mark());
+            if let Some(forget) = menu.itemWithTag(FORGET_TAG) {
+                let host = remote.as_ref().map(|(host, _)| host.as_str());
+                forget.setTitle(&NSString::from_str(&forget_title(host)));
+            }
             let Some(holder) = menu.itemWithTag(MARK_HOLDER_TAG) else {
                 return;
             };
-            let remote = crate::app::delegate(self.mtm()).and_then(|app| app.key_remote_mark());
             let model = mark_menu(remote.as_ref().map(|(host, mark)| (host.as_str(), *mark)));
             holder.setTitle(&NSString::from_str(&model.title));
             holder.setEnabled(model.enabled);
@@ -327,6 +345,13 @@ pub(crate) fn install(
             // Its title and grey state on opening ([`ShellMenuDelegate`]); the items go to the
             // app delegate with `markHost:` (the active tab's host).
             mark_holder(mtm),
+            // The tab's saved ssh password (047 R6.2): the handler is the focused
+            // pane (`forgetPassword:`), grey without one (`validateMenuItem:`).
+            {
+                let forget = item(mtm, &forget_title(None), sel!(forgetPassword:), "");
+                forget.setTag(FORGET_TAG);
+                forget
+            },
             // The whole queue of uploads to the remote directory (037 Karar 7); enabled only
             // while there is a queue (`TerminalPane`'s `validateMenuItem:`).
             item(mtm, "Cancel Upload", sel!(cancelUpload:), "."),
@@ -569,6 +594,15 @@ fn submenu(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forget_password_names_the_host_without_its_user() {
+        assert_eq!(
+            forget_title(Some("deploy@prod-web")),
+            "Forget Password for \u{201c}prod-web\u{201d}"
+        );
+        assert_eq!(forget_title(None), "Forget Password");
+    }
 
     #[test]
     fn the_mark_menu_follows_the_active_tab() {

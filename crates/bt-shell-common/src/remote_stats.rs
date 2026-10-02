@@ -386,6 +386,17 @@ impl Schedule {
         })
     }
 
+    /// The user signed in (047 R7.2): a generation that ended on a failed
+    /// open samples again at once, without waiting for a new generation. It
+    /// counts as an interaction — the user just clicked.
+    pub fn retry(&mut self, now: Instant) -> Vec<Action> {
+        self.change(now, true, |schedule| {
+            schedule.ended = false;
+            schedule.retried = false;
+            schedule.interaction = Some(now);
+        })
+    }
+
     /// The settings changed: `on` is "not `off`". Turning off hides the
     /// indicator; a new interval holds from the next tick.
     pub fn set_form(&mut self, now: Instant, on: bool, interval: Duration) -> Vec<Action> {
@@ -975,6 +986,18 @@ mod tests {
                 }]
             );
         }
+        // A sign-in brings the same generation back at once (047 R7.2).
+        let mut schedule = started(t0);
+        assert_eq!(
+            schedule.answered(t0, 7, Outcome::Unreachable),
+            [Action::Hide]
+        );
+        let later = t0 + STATS_IDLE * 2;
+        assert_eq!(schedule.retry(later), [request(true)]);
+        assert!(schedule.running(later));
+        // Without a generation there is nothing to retry.
+        let mut idle = Schedule::new(true, INTERVAL);
+        assert!(idle.retry(t0).is_empty());
     }
 
     #[test]

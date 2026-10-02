@@ -2,8 +2,8 @@
 //! connection, the user's, or a new master of ours — decided **once, before the
 //! job starts** (`.tasks/047-ssh-parola-ve-keychain/discussion.md` → Karar).
 //!
-//! The pieces here are the pure and the process half of that gate; nothing is
-//! wired to a consumer yet (047 phase-2 does):
+//! The pieces here are the pure and the process half of that gate; every
+//! remote file job goes through [`Masters::ensure`] (047 phase-2):
 //!
 //! - **Route** ([`Route`], [`plan`]): our socket alive (`-O check`) → ours; the
 //!   user's own master alive (`ssh -G`'s `ControlPath` + `-O check`) → today's
@@ -20,8 +20,15 @@
 //!   [`write_answer`]): the prompt's class and the wire between the askpass
 //!   helper (the same `bateri` binary) and the application. The wire's single
 //!   owner is this module.
+//! - **Saved passwords** ([`PasswordStore`], [`Account`]; 047 phase-3): the
+//!   platform shell's store (the macOS Keychain) behind a trait. A saved
+//!   password answers the first password prompt without a sheet; a background
+//!   job opens a master **only** with one (one prompt), and a saved password
+//!   the server refused is not tried again in the background until the user
+//!   signs in ([`Masters`]'s flag) — a stale password must not lock the
+//!   account out.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -200,16 +207,30 @@ fn names_control_path(target: &RemoteTarget) -> bool {
 /// socket's `-O check` and the user's. A stale socket of ours is removed here.
 /// An unreadable configuration is [`Route::Direct`] — today's behaviour.
 pub fn plan(runner: &dyn SshRunner, target: &RemoteTarget, bases: &[PathBuf]) -> Plan {
-    if names_control_path(target) {
-        return Plan::Ready(Route::Direct);
-    }
-    let config = runner
+    resolve(runner, target, bases).0
+}
+
+/// `ssh -G`'s configuration of the target; `None` if it cannot be read.
+fn config(runner: &dyn SshRunner, target: &RemoteTarget) -> Option<SshConfig> {
+    runner
         .run(&with_options(target, &words(&["-G"])))
         .ok()
         .filter(|(code, _, _)| *code == Some(0))
-        .and_then(|(_, out, _)| parse_config(&out));
-    let Some(config) = config else {
-        return Plan::Ready(Route::Direct);
+        .and_then(|(_, out, _)| parse_config(&out))
+}
+
+/// [`plan`] and the configuration it read — the saved password's key
+/// ([`Account::from_config`]); `None` for a target that names its own socket.
+fn resolve(
+    runner: &dyn SshRunner,
+    target: &RemoteTarget,
+    bases: &[PathBuf],
+) -> (Plan, Option<SshConfig>) {
+    if names_control_path(target) {
+        return (Plan::Ready(Route::Direct), None);
+    }
+    let Some(config) = config(runner, target) else {
+        return (Plan::Ready(Route::Direct), None);
     };
     let socket = socket_path(bases, &host_key(&config));
     let ours = match &socket {
@@ -227,20 +248,26 @@ pub fn plan(runner: &dyn SshRunner, target: &RemoteTarget, bases: &[PathBuf]) ->
         .as_ref()
         .filter(|path| ours != Check::Live && Some(path.as_path()) != socket.as_deref())
         .map(|_| check(runner, target, None));
-    decide(ours, user, socket.as_deref())
+    (decide(ours, user, socket.as_deref()), Some(config))
+}
+
+/// `ssh -O {op}` on our socket (`Some`) or the user's (`None`): `check`,
+/// Forget Password's `stop`. `BatchMode=yes`: a control command never asks.
+fn control_argv(target: &RemoteTarget, socket: Option<&Path>, op: &str) -> Vec<String> {
+    let mut ours = words(&["-o", "BatchMode=yes"]);
+    if let Some(socket) = socket {
+        ours.push("-o".to_owned());
+        ours.push(format!("ControlPath={}", socket.display()));
+    }
+    ours.extend(words(&["-O", op]));
+    with_options(target, &ours)
 }
 
 /// `ssh -O check` on our socket (`Some`) or on the user's own control path
 /// (`None`: the target's argv and configuration decide it). `BatchMode=yes`:
 /// the check never connects, and if it did, it must not ask.
 fn check(runner: &dyn SshRunner, target: &RemoteTarget, socket: Option<&Path>) -> Check {
-    let mut ours = words(&["-o", "BatchMode=yes"]);
-    if let Some(socket) = socket {
-        ours.push("-o".to_owned());
-        ours.push(format!("ControlPath={}", socket.display()));
-    }
-    ours.extend(words(&["-O", "check"]));
-    match runner.run(&with_options(target, &ours)) {
+    match runner.run(&control_argv(target, socket, "check")) {
         Ok((code, _, stderr)) => classify_check(code, &stderr),
         Err(_) => Check::Absent,
     }
@@ -565,6 +592,63 @@ pub fn askpass_main() -> Option<i32> {
     ))
 }
 
+// ─── saved passwords ─────────────────────────────────────────────────────
+
+/// The key of one saved password (047 Karar 6): the host name, user and port
+/// ssh resolves (`ssh -G`) — the alias the user typed is not the server.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Account {
+    pub host: String,
+    pub user: String,
+    pub port: u16,
+}
+
+impl Account {
+    /// From `ssh -G`'s answer; `None` without a user or a readable port.
+    pub fn from_config(config: &SshConfig) -> Option<Self> {
+        let port = config.port.parse().ok()?;
+        (!config.user.is_empty()).then(|| Self {
+            host: config.hostname.clone(),
+            user: config.user.clone(),
+            port,
+        })
+    }
+
+    /// The item's label — a UI string: the user finds it by "bateri" in
+    /// Keychain Access (Karar 6).
+    pub fn label(&self) -> String {
+        format!("bateri \u{2014} {}@{}:{}", self.user, self.host, self.port)
+    }
+}
+
+/// Where the account passwords are remembered: the macOS Keychain in the
+/// application process (`bt-shell-macos::keychain`), [`NoStore`] elsewhere.
+/// Only the application calls it — the askpass helper never does. Writes are
+/// best effort: a store that refuses leaves the password unremembered, the
+/// login itself already happened.
+pub trait PasswordStore: Send + Sync {
+    fn read(&self, account: &Account) -> Option<String>;
+    fn write(&self, account: &Account, password: &str);
+    fn delete(&self, account: &Account);
+    /// Whether a password is saved, without reading it (no consent prompt): the
+    /// menu's Forget Password.
+    fn contains(&self, account: &Account) -> bool;
+}
+
+/// No store: nothing is remembered (Linux, the tests that do not look).
+pub struct NoStore;
+
+impl PasswordStore for NoStore {
+    fn read(&self, _: &Account) -> Option<String> {
+        None
+    }
+    fn write(&self, _: &Account, _: &str) {}
+    fn delete(&self, _: &Account) {}
+    fn contains(&self, _: &Account) -> bool {
+        false
+    }
+}
+
 // ─── opening our master ──────────────────────────────────────────────────
 
 /// A question ssh asks while our master opens.
@@ -573,19 +657,30 @@ pub struct Question {
     /// ssh's own prompt text.
     pub prompt: String,
     pub class: Prompt,
-    /// A password was already given in this attempt and ssh asks again: it was
+    /// A password was already typed in this attempt and ssh asks again: it was
     /// wrong (`NumberOfPasswordPrompts` gives the signal for free).
     pub again: bool,
+    /// The saved password was given and ssh asks again: the saved one did not
+    /// work (R6.1). The sheet says so; a successful new password replaces it.
+    pub stale: bool,
+}
+
+/// A typed answer: the text and whether to remember it (the sheet's Remember
+/// in Keychain box; meaningful for a [`Prompt::Password`] only).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Typed {
+    pub text: String,
+    pub remember: bool,
 }
 
 /// Who answers a [`Question`]: the platform shell's sheet, on the job's
 /// thread (it blocks until the sheet closes). `None`: nobody answered —
 /// cancelled, the pane closed, the application quit.
-pub type Answerer = Box<dyn FnMut(&Question) -> Option<String> + Send>;
+pub type Answerer = Box<dyn FnMut(&Question) -> Option<Typed> + Send>;
 
-/// How the gate may open a master: a job the user started asks at a sheet; a
-/// background job (link check, load indicator) never opens one in 047 phase-2
-/// — it rides a live master or today's argv (phase-3 adds the Keychain).
+/// How the gate may open a master: a job the user started asks at a sheet
+/// (after the saved password); a background job (link check, load indicator)
+/// opens one only with a saved password, in one silent attempt.
 pub enum Ask {
     Sheet(Answerer),
     Never,
@@ -596,6 +691,9 @@ pub enum Ask {
 pub enum Denied {
     /// A question went unanswered: the job ends with [`CANCELLED`].
     Cancelled,
+    /// A background job cannot log in by itself — no saved password, or the
+    /// saved one was refused: the pane offers Sign In… ([`SIGN_IN_NEEDED`]).
+    SignIn,
     /// ssh refused: the job's error text.
     Failed(String),
 }
@@ -604,13 +702,36 @@ pub enum Denied {
 /// error sheet (one sheet just closed; a second saying "cancelled" is noise).
 pub const CANCELLED: &str = "Cancelled";
 
+/// The text of a background job that needs the user to sign in (R7.2) — the
+/// link label says it and the pane recognises it to show the status bar's
+/// Sign In… button. A UI string.
+pub const SIGN_IN_NEEDED: &str = "Sign in to use remote files";
+
 impl Denied {
     pub fn text(&self) -> String {
         match self {
             Self::Cancelled => CANCELLED.to_owned(),
+            Self::SignIn => SIGN_IN_NEEDED.to_owned(),
             Self::Failed(text) => text.clone(),
         }
     }
+}
+
+/// Whether ssh's standard error says the server refused the login (not the
+/// connection).
+pub fn login_refused(stderr: &str) -> bool {
+    stderr.contains("Permission denied")
+}
+
+/// Whether the refused login was one a password could open: the server
+/// lists `password` or `keyboard-interactive` among its methods
+/// (`Permission denied (publickey,password).`). A key-only refusal is not —
+/// a password sheet cannot help there, ssh's own reason stays.
+pub fn password_refused(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        line.contains("Permission denied")
+            && (line.contains("password") || line.contains("keyboard-interactive"))
+    })
 }
 
 /// The text of a master that did not open, from ssh's standard error. An
@@ -624,7 +745,7 @@ pub fn open_failure(host: &str, stderr: &str) -> String {
         )
     } else if last.is_empty() {
         format!("ssh could not connect to {host}.")
-    } else if stderr.contains("Permission denied") {
+    } else if login_refused(stderr) {
         format!("ssh could not log in to {host}.\n\n{last}")
     } else {
         format!("ssh could not connect to {host}.\n\n{last}")
@@ -671,7 +792,20 @@ pub struct Masters {
     /// The askpass program — the running `bateri` binary.
     askpass: PathBuf,
     bases: Vec<PathBuf>,
+    store: Arc<dyn PasswordStore>,
     flights: Mutex<HashMap<PathBuf, Arc<Flight>>>,
+    /// The accounts whose saved password the server refused (R7.1): a
+    /// background job does not try them again. In memory, for the
+    /// application's lifetime; neither a new remote generation nor time clears
+    /// it — only the user's successful sign-in and Forget Password do.
+    rejected: Mutex<HashSet<Account>>,
+    /// The account each target resolved to, by its argv — the main thread's
+    /// question (Forget Password's menu item) must not start `ssh -G`.
+    accounts: Mutex<HashMap<Vec<String>, Account>>,
+    /// Whether each account has a saved password, as the store last said —
+    /// the menu's question is answered from here, so the main thread never
+    /// waits on the Keychain (a locked keychain would prompt).
+    known: Mutex<HashMap<Account, bool>>,
     /// How many jobs joined someone else's flight (the single-flight test
     /// waits for it).
     #[cfg(test)]
@@ -679,82 +813,243 @@ pub struct Masters {
 }
 
 impl Masters {
-    pub fn new(askpass: PathBuf, bases: Vec<PathBuf>) -> Self {
+    pub fn new(askpass: PathBuf, bases: Vec<PathBuf>, store: Arc<dyn PasswordStore>) -> Self {
         Self {
             askpass,
             bases,
+            store,
             flights: Mutex::new(HashMap::new()),
+            rejected: Mutex::new(HashSet::new()),
+            accounts: Mutex::new(HashMap::new()),
+            known: Mutex::new(HashMap::new()),
             #[cfg(test)]
             joined: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     /// The gate before a remote job ([`plan`], then the opening): our master
-    /// alive → ours; the user's alive → today's argv; otherwise open ours — with
-    /// [`Ask::Sheet`] only; [`Ask::Never`] gets today's argv. Blocks (ssh
-    /// processes, a sheet): never on the main thread.
+    /// alive → ours; the user's alive → today's argv; otherwise open ours.
+    /// Blocks (ssh processes, a sheet, the Keychain): never on the main thread.
+    ///
+    /// - [`Ask::Sheet`]: the saved password answers the first prompt, the sheet
+    ///   the rest.
+    /// - [`Ask::Never`]: with a saved password not yet refused, one silent
+    ///   attempt (`NumberOfPasswordPrompts=1`, no sheet); a refusal marks the
+    ///   account and gives [`Denied::SignIn`], as does an account already
+    ///   marked. Without a saved password: today's argv (a key, an agent).
     ///
     /// A job that finds an opening in progress waits for it — a background job
     /// too, or its today's-argv failure would be held ([`crate::remote_helper::RETRY_AFTER`])
     /// past the master coming up. An opening **cancelled** at someone else's
-    /// sheet (another pane's) is not this job's answer: a user's job then asks
-    /// at its own sheet, a background job takes today's argv.
+    /// sheet (another pane's), or a background attempt that could not log in,
+    /// is not a user's answer: a user's job then asks at its own sheet.
     pub fn ensure(&self, target: &RemoteTarget, ask: Ask) -> Result<Route, Denied> {
+        let user = matches!(ask, Ask::Sheet(_));
         loop {
-            let socket = match plan(&SystemSsh, target, &self.bases) {
+            let (plan, account) = self.resolve(target);
+            let socket = match plan {
                 Plan::Ready(route) => return Ok(route),
                 Plan::Open(socket) => socket,
             };
-            let user = matches!(ask, Ask::Sheet(_));
-            let (flight, owner) = {
-                let mut flights = lock(&self.flights);
-                match flights.get(&socket) {
-                    Some(flight) => (Arc::clone(flight), false),
-                    None if user => {
-                        let flight = Arc::new(Flight::default());
-                        flights.insert(socket.clone(), Arc::clone(&flight));
-                        (flight, true)
-                    }
-                    None => return Ok(Route::Direct),
-                }
-            };
-            if !owner {
+            let rejected = account
+                .as_ref()
+                .is_some_and(|account| lock(&self.rejected).contains(account));
+            if !user && rejected {
+                return Err(Denied::SignIn);
+            }
+            // An opening in progress is joined before anything is read: the
+            // Keychain is not asked for a password this job would not send.
+            let existing = lock(&self.flights).get(&socket).cloned();
+            if let Some(flight) = existing {
                 #[cfg(test)]
                 self.joined
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 match flight.wait() {
                     Ok(()) => return Ok(Route::Ours(socket)),
-                    Err(Denied::Cancelled) if user => continue,
+                    Err(Denied::Cancelled | Denied::SignIn) if user => continue,
+                    Err(Denied::SignIn) => return Err(Denied::SignIn),
                     Err(_) if !user => return Ok(Route::Direct),
                     Err(denied) => return Err(denied),
                 }
             }
-            let Ask::Sheet(asker) = ask else {
-                // Only a user's job becomes the owner.
+            // The saved password — not one the server already refused: sending
+            // it again would be one more failed login (R6.1, R7.1).
+            let saved = account
+                .as_ref()
+                .filter(|_| !rejected)
+                .and_then(|account| self.read_saved(account));
+            if !user && saved.is_none() {
                 return Ok(Route::Direct);
+            }
+            let flight = {
+                let mut flights = lock(&self.flights);
+                if flights.contains_key(&socket) {
+                    // Another job started between the two looks: join it.
+                    continue;
+                }
+                let flight = Arc::new(Flight::default());
+                flights.insert(socket.clone(), Arc::clone(&flight));
+                flight
             };
-            return self.open_flight(target, socket, &flight, asker);
+            let sheet = match ask {
+                Ask::Sheet(sheet) => Some(sheet),
+                Ask::Never => None,
+            };
+            // An account already marked: its saved password is known to be
+            // refused — the sheet says so at once and a new password replaces it.
+            let responder = Responder::new(sheet, saved, rejected);
+            let outcome = self.open_flight(target, &socket, &flight, account.as_ref(), responder);
+            return match outcome {
+                Ok(()) => Ok(Route::Ours(socket)),
+                // A background attempt that failed for another reason (the
+                // host is unreachable): today's argv says so in today's words.
+                Err(Denied::Failed(_)) if !user => Ok(Route::Direct),
+                Err(denied) => Err(denied),
+            };
         }
     }
 
-    /// The owner's half of [`Masters::ensure`]: open, tell the joiners.
+    /// The store's saved password; whether there is one is remembered for
+    /// [`Self::has_saved`].
+    fn read_saved(&self, account: &Account) -> Option<String> {
+        let saved = self.store.read(account);
+        lock(&self.known).insert(account.clone(), saved.is_some());
+        saved
+    }
+
+    /// Writes or deletes the saved password, and remembers which.
+    fn keep(&self, account: &Account, password: Option<&str>) {
+        match password {
+            Some(password) => self.store.write(account, password),
+            None => self.store.delete(account),
+        }
+        lock(&self.known).insert(account.clone(), password.is_some());
+    }
+
+    /// [`resolve`] through the real ssh; the account goes to the cache.
+    fn resolve(&self, target: &RemoteTarget) -> (Plan, Option<Account>) {
+        let (plan, config) = resolve(&SystemSsh, target, &self.bases);
+        let account = config.as_ref().and_then(Account::from_config);
+        if let Some(account) = &account {
+            lock(&self.accounts).insert(target.argv.clone(), account.clone());
+        }
+        (plan, account)
+    }
+
+    /// The owner's half of [`Masters::ensure`]: open, settle the store and the
+    /// refused mark, tell the joiners.
     fn open_flight(
         &self,
         target: &RemoteTarget,
-        socket: PathBuf,
+        socket: &Path,
         flight: &Flight,
-        asker: Answerer,
-    ) -> Result<Route, Denied> {
+        account: Option<&Account>,
+        mut responder: Responder,
+    ) -> Result<(), Denied> {
+        let background = responder.sheet.is_none();
         // Between the plan and the registry another flight may have finished:
         // its master is up and asking again would be a second sheet.
-        let outcome = if check(&SystemSsh, target, Some(&socket)) == Check::Live {
+        let outcome = if check(&SystemSsh, target, Some(socket)) == Check::Live {
             Ok(())
         } else {
-            open_master(target, &socket, &self.askpass, asker)
+            let asker = if background {
+                Asker::Background
+            } else {
+                Asker::User
+            };
+            open_master(target, socket, &self.askpass, &mut responder, asker)
+                .and_then(|opened| self.settle(target, account, &responder, opened))
         };
-        lock(&self.flights).remove(&socket);
+        lock(&self.flights).remove(socket);
         flight.finish(outcome.clone());
-        outcome.map(|()| Route::Ours(socket))
+        outcome
+    }
+
+    /// What an attempt leaves behind (R6.1, R7.1): a typed password that
+    /// opened the master is saved if the box was ticked; an unticked one that
+    /// replaced a refused saved password removes it (the next background
+    /// attempt would replay a known-bad password). A saved password the server
+    /// refused marks the account; the user's success clears the mark. **Only
+    /// after the master is up** is anything written — a wrong password is never
+    /// saved.
+    fn settle(
+        &self,
+        target: &RemoteTarget,
+        account: Option<&Account>,
+        responder: &Responder,
+        opened: Opened,
+    ) -> Result<(), Denied> {
+        let background = responder.sheet.is_none();
+        let refused = match &opened {
+            Opened::Refused(stderr) => login_refused(stderr),
+            _ => false,
+        };
+        let saved_refused = responder.saved_refused
+            || (refused && responder.offered_saved && responder.typed.is_none())
+            // A background attempt cannot finish the login alone (a code, a
+            // passphrase after the password): it is not repeated either.
+            || (background && responder.offered_saved && matches!(opened, Opened::Cancelled));
+        if let Some(account) = account {
+            if let Opened::Up = opened {
+                match &responder.typed {
+                    Some(typed) if typed.remember => self.keep(account, Some(&typed.text)),
+                    Some(_) if responder.saved_refused => self.keep(account, None),
+                    _ => {}
+                }
+                if !background {
+                    lock(&self.rejected).remove(account);
+                }
+            } else if saved_refused {
+                lock(&self.rejected).insert(account.clone());
+            }
+        }
+        match opened {
+            Opened::Up => Ok(()),
+            Opened::Cancelled if background => Err(Denied::SignIn),
+            Opened::Cancelled => Err(Denied::Cancelled),
+            Opened::Refused(_) if background && refused => Err(Denied::SignIn),
+            Opened::Refused(stderr) => Err(Denied::Failed(open_failure(&target.host, &stderr))),
+        }
+    }
+
+    /// Whether a password is saved for `target` (Shell ▸ Forget Password's
+    /// enablement): from the account a job already resolved — the main thread
+    /// does not start `ssh -G` — so `false` until the first remote job.
+    pub fn has_saved(&self, target: &RemoteTarget) -> bool {
+        let account = lock(&self.accounts).get(&target.argv).cloned();
+        account.is_some_and(|account| {
+            let known = lock(&self.known).get(&account).copied();
+            known.unwrap_or_else(|| {
+                // Not asked yet this run: once, attributes only, off the cache's lock.
+                let saved = self.store.contains(&account);
+                lock(&self.known).insert(account, saved);
+                saved
+            })
+        })
+    }
+
+    /// Shell ▸ Forget Password (R6.2): the saved password goes, the refused
+    /// mark with it, and our master for the account stops taking new jobs
+    /// (`-O stop` — the transfers on it finish; never the user's master) so the
+    /// next background job finds no login and the pane offers Sign In…. Runs
+    /// ssh: never on the main thread.
+    pub fn forget(&self, target: &RemoteTarget) {
+        let Some(config) = config(&SystemSsh, target) else {
+            return;
+        };
+        if let Some(account) = Account::from_config(&config) {
+            self.keep(&account, None);
+            lock(&self.rejected).remove(&account);
+        }
+        if names_control_path(target) {
+            return;
+        }
+        let Some(socket) = socket_path(&self.bases, &host_key(&config)) else {
+            return;
+        };
+        if check(&SystemSsh, target, Some(&socket)) == Check::Live {
+            let _ = SystemSsh.run(&control_argv(target, Some(&socket), "stop"));
+        }
     }
 
     /// The startup sweep: our dead sockets left behind ([`sweep`]).
@@ -777,6 +1072,63 @@ pub fn dial(
     Ok(crate::upload::ssh_argv_for(target, &route))
 }
 
+/// Who answers one attempt's prompts: the saved password **once** (the first
+/// password prompt), then the sheet — or, for a background job, nobody: the
+/// second password prompt and every other prompt (a key's passphrase, a code)
+/// go unanswered.
+struct Responder {
+    /// `None`: a background job.
+    sheet: Option<Answerer>,
+    saved: Option<String>,
+    /// The saved password was given in this attempt.
+    offered_saved: bool,
+    /// ssh asked for the password again after the saved one: it was refused.
+    saved_refused: bool,
+    /// The last typed password — on success, the one that opened the master.
+    typed: Option<Typed>,
+}
+
+impl Responder {
+    /// `refused`: the saved password was already refused (not offered again).
+    fn new(sheet: Option<Answerer>, saved: Option<String>, refused: bool) -> Self {
+        Self {
+            sheet,
+            saved,
+            offered_saved: false,
+            saved_refused: refused,
+            typed: None,
+        }
+    }
+
+    /// The answer to one prompt; `None` — unanswered.
+    fn answer(&mut self, prompt: String) -> Option<String> {
+        let class = classify(&prompt);
+        let password = class == Prompt::Password;
+        if password {
+            if self.offered_saved && self.typed.is_none() {
+                self.saved_refused = true;
+            }
+            if let Some(saved) = self.saved.take() {
+                self.offered_saved = true;
+                return Some(saved);
+            }
+        }
+        let sheet = self.sheet.as_mut()?;
+        let question = Question {
+            prompt,
+            class,
+            again: password && self.typed.is_some(),
+            stale: password && self.saved_refused && self.typed.is_none(),
+        };
+        let typed = sheet(&question)?;
+        let text = typed.text.clone();
+        if password {
+            self.typed = Some(typed);
+        }
+        Some(text)
+    }
+}
+
 /// The askpass socket's and its error file's prefix: `q-` + 16 random hex
 /// digits, next to the master sockets in the private directory.
 const ASKPASS_PREFIX: &str = "q-";
@@ -794,7 +1146,7 @@ fn random_hex() -> io::Result<String> {
 /// Opens our master at `socket`: a fresh askpass socket for this attempt only
 /// (`0700` directory, random name, removed when the attempt ends), the master
 /// with the askpass variables in **its** environment, and every prompt handed
-/// to `asker` until ssh's foreground half exits (`-f`).
+/// to `responder` until ssh's foreground half exits (`-f`).
 ///
 /// An unanswered question **stops ssh first**, then the helper is told: ssh
 /// turns a failed askpass into an empty password and would try it on the
@@ -804,8 +1156,9 @@ fn open_master(
     target: &RemoteTarget,
     socket: &Path,
     askpass: &Path,
-    asker: Answerer,
-) -> Result<(), Denied> {
+    responder: &mut Responder,
+    asker: Asker,
+) -> Result<Opened, Denied> {
     let failed = |error: io::Error| {
         Denied::Failed(format!(
             "ssh could not be started for {}: {error}",
@@ -825,28 +1178,37 @@ fn open_master(
     let outcome = std::fs::File::create(&err_path)
         .map_err(failed)
         .and_then(|err_file| {
+            let argv = master_argv(target, socket, asker);
             run_master(
                 target,
-                socket,
+                &argv,
                 askpass,
                 &ask_socket,
                 &listener,
                 err_file,
-                asker,
+                responder,
             )
         });
     drop(listener);
     let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
     let _ = std::fs::remove_file(&ask_socket);
     let _ = std::fs::remove_file(&err_path);
-    match outcome? {
-        Opened::Up => Ok(()),
-        Opened::Cancelled => Err(Denied::Cancelled),
-        Opened::Refused => Err(Denied::Failed(open_failure(&target.host, &stderr))),
-    }
+    Ok(match outcome? {
+        Run::Up => Opened::Up,
+        Run::Cancelled => Opened::Cancelled,
+        Run::Refused => Opened::Refused(stderr),
+    })
 }
 
+/// How an attempt ended; a refusal carries ssh's standard error.
 enum Opened {
+    Up,
+    Cancelled,
+    Refused(String),
+}
+
+/// [`run_master`]'s answer (the error file is read after it).
+enum Run {
     Up,
     Cancelled,
     Refused,
@@ -855,14 +1217,13 @@ enum Opened {
 /// [`open_master`]'s process half: spawn, serve the prompts, wait.
 fn run_master(
     target: &RemoteTarget,
-    socket: &Path,
+    argv: &[String],
     askpass: &Path,
     ask_socket: &Path,
     listener: &UnixListener,
     err_file: std::fs::File,
-    mut asker: Answerer,
-) -> Result<Opened, Denied> {
-    let argv = master_argv(target, socket, Asker::User);
+    responder: &mut Responder,
+) -> Result<Run, Denied> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| Denied::Failed(format!("No ssh command for {}", target.host)))?;
@@ -913,7 +1274,6 @@ fn run_master(
         }
     };
     let mut cancelled = false;
-    let mut answered_password = false;
     loop {
         let Ok((stream, _)) = listener.accept() else {
             // No more prompts can be served: ssh would wait for an answer forever.
@@ -932,15 +1292,7 @@ fn run_master(
         let answer = if cancelled {
             None
         } else {
-            let class = classify(&prompt);
-            let question = Question {
-                prompt,
-                class,
-                again: class == Prompt::Password && answered_password,
-            };
-            let answer = asker(&question);
-            answered_password |= class == Prompt::Password && answer.is_some();
-            answer
+            responder.answer(prompt)
         };
         if answer.is_none() && !cancelled {
             cancelled = true;
@@ -951,11 +1303,11 @@ fn run_master(
     }
     let status = waiter.join().ok().and_then(Result::ok);
     Ok(if cancelled {
-        Opened::Cancelled
+        Run::Cancelled
     } else if status.is_some_and(|status| status.success()) {
-        Opened::Up
+        Run::Up
     } else {
-        Opened::Refused
+        Run::Refused
     })
 }
 
@@ -1445,31 +1797,38 @@ mod tests {
 
     /// A fake `ssh` that behaves like the real one where the gate looks: `-G`
     /// prints a configuration, `-O check` answers by the marker at the
-    /// `ControlPath`, and `-M` asks through `$SSH_ASKPASS` (up to three times,
-    /// like `NumberOfPasswordPrompts`), then plays `-f` — the marker, exit 0.
+    /// `ControlPath` (`-O stop` removes it), and `-M` asks through
+    /// `$SSH_ASKPASS` (`NumberOfPasswordPrompts` times, three by default),
+    /// then plays `-f` — the marker, exit 0.
     /// The host `stranger` has no known host key. POSIX `sh`: Debian's is dash.
     ///
     /// It records what the tests assert: every `-M` (`opens`), an askpass that
     /// failed and was followed by another try — ssh's empty password
-    /// (`empty`), and the askpass variables seen outside the master (`leak`).
+    /// (`empty`), the askpass variables seen outside the master (`leak`) and
+    /// every `-O stop` (`stops`).
     fn fake_ssh(root: &Path, password: &str) -> PathBuf {
         let script = format!(
             r#"#!/bin/sh
 root='{root}'
-cp=''; mode=''; dest=''; prev=''
+cp=''; mode=''; dest=''; prev=''; op=''; prompts=''
 for arg in "$@"; do
   if [ "$prev" = "-o" ]; then
-    case "$arg" in ControlPath=*) [ -z "$cp" ] && cp="${{arg#ControlPath=}}";; esac
+    case "$arg" in
+      ControlPath=*) [ -z "$cp" ] && cp="${{arg#ControlPath=}}";;
+      NumberOfPasswordPrompts=*) [ -z "$prompts" ] && prompts="${{arg#NumberOfPasswordPrompts=}}";;
+    esac
     prev=''; continue
   fi
+  if [ "$prev" = "-O" ]; then op="$arg"; prev=''; continue; fi
   case "$arg" in
-    -G) mode=G;; -M) mode=M;; -O) mode=O;; -o) prev=-o;; -*) ;; *) dest="$arg";;
+    -G) mode=G;; -M) mode=M;; -O) mode=O; prev=-O;; -o) prev=-o;; -*) ;; *) dest="$arg";;
   esac
 done
 if [ "$mode" != M ] && [ -n "$SSH_ASKPASS$BATERI_ASKPASS" ]; then echo "$mode" >> "$root/leak"; fi
 case "$mode" in
   G) printf 'user u\nhostname %s\nport 22\nproxyjump none\n' "$dest"; exit 0;;
-  O) if [ -e "$cp" ]; then echo 'Master running' >&2; exit 0; fi
+  O) if [ "$op" = stop ]; then echo "$cp" >> "$root/stops"; rm -f "$cp"; exit 0; fi
+     if [ -e "$cp" ]; then echo 'Master running' >&2; exit 0; fi
      echo "Control socket connect($cp): No such file or directory" >&2; exit 255;;
   M) echo "$dest" >> "$root/opens"
      if [ "$dest" = stranger ]; then
@@ -1477,10 +1836,15 @@ case "$mode" in
        echo 'Host key verification failed.' >&2; exit 255
      fi
      n=0
-     while [ $n -lt 3 ]; do
+     while [ $n -lt "${{prompts:-3}}" ]; do
        n=$((n + 1))
        if ! answer=$("$SSH_ASKPASS" "u@$dest's password: "); then echo x >> "$root/empty"; answer=''; fi
-       if [ "$answer" = '{password}' ]; then : > "$cp"; exit 0; fi
+       if [ "$answer" = '{password}' ]; then
+         if [ "$dest" = twofactor ] && ! "$SSH_ASKPASS" 'Verification code: ' >/dev/null; then
+           echo 'Permission denied (keyboard-interactive).' >&2; exit 255
+         fi
+         : > "$cp"; exit 0
+       fi
        echo 'Permission denied, please try again.' >&2
      done
      echo "u@$dest: Permission denied (publickey,password)." >&2; exit 255;;
@@ -1536,12 +1900,63 @@ exit $code
         std::process::exit(code);
     }
 
-    /// A fake ssh, an askpass wrapper and the registry over `root/s`.
+    /// A fake ssh, an askpass wrapper and the registry over `root/s`, with
+    /// nothing saved.
     fn rig(name: &str, password: &str) -> (PathBuf, Masters) {
+        let (root, masters, _) = rig_saved(name, password, None);
+        (root, masters)
+    }
+
+    /// [`rig`] with a store holding `saved` for the fake's account.
+    fn rig_saved(
+        name: &str,
+        password: &str,
+        saved: Option<&str>,
+    ) -> (PathBuf, Masters, Arc<MemoryStore>) {
         let root = scratch(name);
         fake_ssh(&root, password);
-        let masters = Masters::new(askpass_wrapper(&root), vec![root.join("s")]);
-        (root, masters)
+        let store = Arc::new(MemoryStore::default());
+        if let Some(saved) = saved {
+            lock(&store.saved).insert(account(), saved.to_owned());
+        }
+        let masters = Masters::new(
+            askpass_wrapper(&root),
+            vec![root.join("s")],
+            Arc::clone(&store) as Arc<dyn PasswordStore>,
+        );
+        (root, masters, store)
+    }
+
+    /// The fake's account: `ssh -G` says user `u`, port 22.
+    fn account() -> Account {
+        Account {
+            host: "prod".to_owned(),
+            user: "u".to_owned(),
+            port: 22,
+        }
+    }
+
+    /// The Keychain's stand-in: a map, and every write in order.
+    #[derive(Default)]
+    struct MemoryStore {
+        saved: Mutex<HashMap<Account, String>>,
+        writes: Mutex<Vec<String>>,
+    }
+
+    impl PasswordStore for MemoryStore {
+        fn read(&self, account: &Account) -> Option<String> {
+            lock(&self.saved).get(account).cloned()
+        }
+        fn write(&self, account: &Account, password: &str) {
+            lock(&self.writes).push(password.to_owned());
+            lock(&self.saved).insert(account.clone(), password.to_owned());
+        }
+        fn delete(&self, account: &Account) {
+            lock(&self.saved).remove(account);
+        }
+        fn contains(&self, account: &Account) -> bool {
+            lock(&self.saved).contains_key(account)
+        }
     }
 
     fn host_target(root: &Path, host: &str) -> RemoteTarget {
@@ -1554,11 +1969,30 @@ exit $code
         }
     }
 
-    /// Answers from a list, recording the questions.
+    /// Answers from a list with the Remember box clear, recording the questions.
     fn scripted(answers: &[Option<&str>]) -> (Answerer, Arc<Mutex<Vec<Question>>>) {
+        answering(answers, false)
+    }
+
+    /// [`scripted`] with the Remember box ticked.
+    fn remembering(answers: &[Option<&str>]) -> (Answerer, Arc<Mutex<Vec<Question>>>) {
+        answering(answers, true)
+    }
+
+    fn answering(
+        answers: &[Option<&str>],
+        remember: bool,
+    ) -> (Answerer, Arc<Mutex<Vec<Question>>>) {
         let asked = Arc::new(Mutex::new(Vec::new()));
-        let mut answers: Vec<Option<String>> =
-            answers.iter().map(|a| a.map(str::to_owned)).collect();
+        let mut answers: Vec<Option<Typed>> = answers
+            .iter()
+            .map(|a| {
+                a.map(|text| Typed {
+                    text: text.to_owned(),
+                    remember,
+                })
+            })
+            .collect();
         answers.reverse();
         let log = Arc::clone(&asked);
         let asker: Answerer = Box::new(move |question: &Question| {
@@ -1696,7 +2130,10 @@ exit $code
         let first_asker: Answerer = Box::new(move |_: &Question| {
             let _ = asked_tx.send(());
             let _ = lock(&go_rx).recv();
-            Some("s3cr3t".to_owned())
+            Some(Typed {
+                text: "s3cr3t".to_owned(),
+                remember: false,
+            })
         });
         let first = {
             let (masters, target) = (Arc::clone(&masters), target.clone());
@@ -1767,6 +2204,229 @@ exit $code
         for round in 0..20 {
             one_opening_for_two_jobs(&format!("flight{round}"));
         }
+    }
+
+    /// The live master's socket in `root/s`, removed — as if `ControlPersist`
+    /// had ended it.
+    fn master_gone(root: &Path) {
+        for name in leftovers(root) {
+            let _ = std::fs::remove_file(root.join("s").join(name));
+        }
+    }
+
+    #[test]
+    fn a_saved_password_answers_without_a_sheet() {
+        let (root, masters, store) = rig_saved("saved", "s3cr3t", Some("s3cr3t"));
+        let target = host_target(&root, "prod");
+        let (asker, asked) = remembering(&[]);
+        assert!(matches!(
+            masters.ensure(&target, Ask::Sheet(asker)),
+            Ok(Route::Ours(_))
+        ));
+        assert!(lock(&asked).is_empty(), "the sheet opened");
+        assert!(
+            lock(&store.writes).is_empty(),
+            "a saved password was saved again"
+        );
+        assert!(masters.has_saved(&target));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_refused_saved_password_asks_at_the_sheet_and_is_replaced_on_success() {
+        let (root, masters, store) = rig_saved("stale", "s3cr3t", Some("old"));
+        let target = host_target(&root, "prod");
+        let (asker, asked) = remembering(&[Some("wrong"), Some("s3cr3t")]);
+        assert!(matches!(
+            masters.ensure(&target, Ask::Sheet(asker)),
+            Ok(Route::Ours(_))
+        ));
+        let asked = lock(&asked).clone();
+        assert_eq!(
+            asked.len(),
+            2,
+            "the saved password answered the first prompt"
+        );
+        // The first sheet says the saved one failed, the second the typed one.
+        assert!(asked[0].stale && !asked[0].again, "{:?}", asked[0]);
+        assert!(!asked[1].stale && asked[1].again, "{:?}", asked[1]);
+        // Only the password that opened the master was written.
+        assert_eq!(*lock(&store.writes), ["s3cr3t"]);
+        assert_eq!(store.read(&account()).as_deref(), Some("s3cr3t"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unticked_box_saves_nothing_and_drops_a_refused_password() {
+        let (root, masters, store) = rig_saved("unticked", "s3cr3t", None);
+        let target = host_target(&root, "prod");
+        let (asker, _) = scripted(&[Some("s3cr3t")]);
+        assert!(masters.ensure(&target, Ask::Sheet(asker)).is_ok());
+        assert!(lock(&store.writes).is_empty());
+        assert!(!masters.has_saved(&target));
+        std::fs::remove_dir_all(&root).unwrap();
+        // The saved password was refused and the new one is not to be kept:
+        // the known-bad one goes rather than being replayed in the background.
+        let (root, masters, store) = rig_saved("unticked2", "s3cr3t", Some("old"));
+        let target = host_target(&root, "prod");
+        let (asker, _) = scripted(&[Some("s3cr3t")]);
+        assert!(masters.ensure(&target, Ask::Sheet(asker)).is_ok());
+        assert!(lock(&store.writes).is_empty());
+        assert_eq!(store.read(&account()), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_wrong_password_is_never_saved() {
+        let (root, masters, store) = rig_saved("nosave", "s3cr3t", None);
+        let target = host_target(&root, "prod");
+        let (asker, _) = remembering(&[Some("a"), None]);
+        assert_eq!(
+            masters.ensure(&target, Ask::Sheet(asker)),
+            Err(Denied::Cancelled)
+        );
+        let (asker, _) = remembering(&[Some("a"), Some("b"), Some("c")]);
+        assert!(matches!(
+            masters.ensure(&target, Ask::Sheet(asker)),
+            Err(Denied::Failed(_))
+        ));
+        assert!(lock(&store.writes).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_background_job_opens_once_with_the_saved_password() {
+        let (root, masters, _) = rig_saved("bgsaved", "s3cr3t", Some("s3cr3t"));
+        let target = host_target(&root, "prod");
+        assert!(matches!(
+            masters.ensure(&target, Ask::Never),
+            Ok(Route::Ours(_))
+        ));
+        assert_eq!(lines(&root.join("opens")), 1);
+        assert!(!root.join("empty").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// R7.1: a background job tries a saved password once; refused, the
+    /// account is marked and no later background job — whatever the
+    /// generation, however much later — connects again. Only the user's
+    /// successful sign-in clears it.
+    #[test]
+    fn a_refused_saved_password_is_not_retried_in_the_background() {
+        let (root, masters, store) = rig_saved("bgstale", "s3cr3t", Some("old"));
+        let target = host_target(&root, "prod");
+        assert_eq!(masters.ensure(&target, Ask::Never), Err(Denied::SignIn));
+        assert_eq!(lines(&root.join("opens")), 1);
+        // One prompt only (`NumberOfPasswordPrompts=1`): no second guess, no
+        // empty password.
+        assert!(!root.join("empty").exists());
+        for _ in 0..3 {
+            assert_eq!(masters.ensure(&target, Ask::Never), Err(Denied::SignIn));
+        }
+        assert_eq!(
+            lines(&root.join("opens")),
+            1,
+            "a refused password was retried"
+        );
+        // The user signs in: the known-bad password is not sent again — the
+        // sheet says it failed at once — the typed one replaces it and the
+        // mark goes.
+        let (asker, asked) = remembering(&[Some("s3cr3t")]);
+        assert!(masters.ensure(&target, Ask::Sheet(asker)).is_ok());
+        assert!(lock(&asked)[0].stale);
+        assert_eq!(lock(&asked).len(), 1, "the refused password was sent again");
+        assert_eq!(store.read(&account()).as_deref(), Some("s3cr3t"));
+        master_gone(&root);
+        assert!(matches!(
+            masters.ensure(&target, Ask::Never),
+            Ok(Route::Ours(_))
+        ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A background attempt that the saved password cannot finish (a code
+    /// follows it) is not repeated either: one half-login, then the mark.
+    #[test]
+    fn a_background_job_stops_at_a_second_factor_for_good() {
+        let (root, masters, store) = rig_saved("bg2fa", "s3cr3t", None);
+        let account = Account {
+            host: "twofactor".to_owned(),
+            ..account()
+        };
+        lock(&store.saved).insert(account, "s3cr3t".to_owned());
+        let target = host_target(&root, "twofactor");
+        assert_eq!(masters.ensure(&target, Ask::Never), Err(Denied::SignIn));
+        assert_eq!(masters.ensure(&target, Ask::Never), Err(Denied::SignIn));
+        assert_eq!(lines(&root.join("opens")), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_user_job_asks_itself_after_a_refused_background_attempt() {
+        let (root, masters, _) = rig_saved("bguser", "s3cr3t", Some("old"));
+        let target = host_target(&root, "prod");
+        assert_eq!(masters.ensure(&target, Ask::Never), Err(Denied::SignIn));
+        // A marked account does not stop the user's own job.
+        let (asker, asked) = scripted(&[Some("s3cr3t")]);
+        assert!(masters.ensure(&target, Ask::Sheet(asker)).is_ok());
+        assert_eq!(lock(&asked).len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn forget_removes_the_password_and_stops_our_master() {
+        let (root, masters, store) = rig_saved("forget", "s3cr3t", Some("s3cr3t"));
+        let target = host_target(&root, "prod");
+        let Ok(Route::Ours(socket)) = masters.ensure(&target, Ask::Never) else {
+            panic!("expected our master");
+        };
+        assert!(masters.has_saved(&target));
+        masters.forget(&target);
+        assert_eq!(store.read(&account()), None);
+        assert!(!masters.has_saved(&target));
+        assert_eq!(
+            std::fs::read_to_string(root.join("stops")).unwrap().trim(),
+            socket.display().to_string()
+        );
+        // The next background job has nothing to log in with: today's argv,
+        // which the server refuses — the pane's Sign In….
+        assert_eq!(masters.ensure(&target, Ask::Never), Ok(Route::Direct));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_account_and_its_label() {
+        let config = SshConfig {
+            user: "tdgunes".to_owned(),
+            hostname: "192.168.0.218".to_owned(),
+            port: "2222".to_owned(),
+            ..SshConfig::default()
+        };
+        let account = Account::from_config(&config).expect("an account");
+        assert_eq!(
+            account.label(),
+            "bateri \u{2014} tdgunes@192.168.0.218:2222"
+        );
+        let broken = SshConfig {
+            port: "ssh".to_owned(),
+            ..config.clone()
+        };
+        assert_eq!(Account::from_config(&broken), None);
+        assert!(login_refused(
+            "u@prod: Permission denied (publickey,password).\r\n"
+        ));
+        assert!(!login_refused(
+            "ssh: connect to host prod port 22: Connection refused\r\n"
+        ));
+        assert!(password_refused(
+            "u@prod: Permission denied (publickey,password).\r\n"
+        ));
+        assert!(password_refused(
+            "Permission denied (keyboard-interactive).\r\n"
+        ));
+        assert!(!password_refused(
+            "u@prod: Permission denied (publickey).\r\n"
+        ));
     }
 
     #[test]
@@ -1874,7 +2534,11 @@ exit $code
             ],
             line: String::new(),
         };
-        let masters = Masters::new(PathBuf::from("/usr/bin/false"), vec![root.join("s")]);
+        let masters = Masters::new(
+            PathBuf::from("/usr/bin/false"),
+            vec![root.join("s")],
+            Arc::new(NoStore),
+        );
         let (asker, asked) = scripted(&[]);
         let route = masters.ensure(&target, Ask::Sheet(asker)).expect("master");
         let Route::Ours(socket) = route.clone() else {

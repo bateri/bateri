@@ -7419,6 +7419,57 @@ impl Session {
         changed
     }
 
+    /// Shows (`Some`, with its hover) or hides the ssh status bar's Sign In…
+    /// button of remote generation `command` (047 R7.2); `true` if it changed.
+    /// The [`Self::set_remote_stats`] gates: another generation's or a finished
+    /// ssh's late word is a no-op, the same value asks for no frame (zero
+    /// frames while idle); only the leaf lock, dropped before `request_frame`.
+    pub fn set_sign_in(&self, command: u64, sign_in: Option<crate::SignIn>) -> bool {
+        let changed = {
+            let mut log = lock(&self.shell);
+            let current = log.running_command() == Some(command) && log.context.remote.is_some();
+            if !current || log.context.sign_in == sign_in {
+                false
+            } else {
+                log.context.sign_in = sign_in;
+                true
+            }
+        };
+        if changed {
+            self.request_frame();
+        }
+        changed
+    }
+
+    /// The Sign In… button as drawn and the remote generation it belongs to;
+    /// `None` while it is not shown (047 R7.2). The session is the button's
+    /// one owner: it clears it with the remote state ([`Self::set_remote`],
+    /// `C`/`D`/`A`), so the pane asks here rather than keeping a copy. Takes
+    /// only the leaf lock.
+    pub fn sign_in(&self) -> Option<(u64, crate::SignIn)> {
+        let log = lock(&self.shell);
+        let shown = log.context.sign_in?;
+        log.context.remote.as_ref()?;
+        Some((log.running_command()?, shown))
+    }
+
+    /// The Sign In… button's dock-local column range on the context row
+    /// ([`crate::dock::sign_in_span`]; `budget` is the context row's budget) —
+    /// `None` while it is not drawn. The click, the hover and the hand cursor
+    /// read this one range, from the drawing's layout. Takes only the leaf lock.
+    pub fn sign_in_span(&self, budget: u16) -> Option<(u16, u16)> {
+        let mut context = {
+            let log = lock(&self.shell);
+            // The common case — no button — copies nothing.
+            log.context.sign_in?;
+            log.context.clone()
+        };
+        if context.remote.is_some() {
+            self.title_folder_into(&mut context.remote_cwd);
+        }
+        crate::dock::sign_in_span(&context, budget)
+    }
+
     /// The load indicator's dock-local column range on the context row
     /// ([`crate::dock::stats_span`]; `budget` is the context row's budget) —
     /// `None` while it is not drawn (no value, an upload row in its place, it
@@ -13611,6 +13662,32 @@ mod tests {
         assert!(session.set_remote_stats(command, Some(&stats)));
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
         assert_eq!(shown(), None);
+        // 047 R7.2: the Sign In… button has the same gates and the same fate.
+        let sign_in = Some(crate::SignIn::default());
+        assert!(
+            !session.set_sign_in(command + 1, sign_in),
+            "another generation"
+        );
+        assert!(session.set_sign_in(command, sign_in));
+        assert!(!session.set_sign_in(command, sign_in), "the same value");
+        assert_eq!(
+            session.sign_in_span(80),
+            crate::dock::sign_in_span(&lock(&session.shell).context, 80),
+            "the hit test reads the drawing's layout"
+        );
+        assert!(session.sign_in_span(80).is_some());
+        assert_eq!(session.sign_in(), Some((command, crate::SignIn::default())));
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert_eq!(
+            session.sign_in(),
+            None,
+            "the session's own clearing is seen"
+        );
+        assert_eq!(
+            lock(&session.shell).context.sign_in,
+            None,
+            "another host's login"
+        );
     }
 
     /// The dock's characters as one string (every row, in sink order).

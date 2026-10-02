@@ -39,6 +39,7 @@
 pub(crate) mod app;
 mod clipboard;
 mod hyperlink;
+mod keychain;
 mod locale;
 mod menu;
 mod pacer;

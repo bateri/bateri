@@ -158,6 +158,12 @@ objc2-quartz-core = { workspace = true, features = [
 # manifest, decision record .tasks/037-ssh-ikinci-tur/phase-7.md →
 # Uygulama Notları.
 objc2-user-notifications = { workspace = true }
+# The Keychain of the ssh masters' passwords (047 phase-3, `keychain`): a new
+# crate, user-approved (2026-10-02); the rationale is in the workspace manifest.
+# `objc2-core-foundation`'s flags are the query's own types: the dictionary,
+# its string keys, the password's bytes and the port's number.
+objc2-security = { workspace = true }
+objc2-core-foundation = { workspace = true, features = ["CFData", "CFNumber"] }
 # The main queue: `Wake::child_exit` arrives on the reader thread and
 # `terminate:` is the main thread's job. The settings watch
 # (`bt_shell_common::watch`, 007 phase-4) notifies on the shared crate's own

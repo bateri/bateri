@@ -504,6 +504,12 @@ impl TerminalPane {
 
     /// "Can't preview from {host}" with the reason; a beep if another sheet is open.
     fn preview_failed(&self, host: &str, text: &str) {
+        self.failure_sheet(&format!("Can't preview from {host}"), text);
+    }
+
+    /// A remote job's error sheet — title, ssh's reason, OK — through the
+    /// pane's sheet gate; a beep when another sheet is up.
+    pub(crate) fn failure_sheet(&self, title: &str, text: &str) {
         let Some(window) = self
             .window()
             .filter(|window| window.attachedSheet().is_none() && self.accepts_drop())
@@ -512,7 +518,7 @@ impl TerminalPane {
             return;
         };
         let alert = NSAlert::new(self.mtm());
-        alert.setMessageText(&NSString::from_str(&format!("Can't preview from {host}")));
+        alert.setMessageText(&NSString::from_str(title));
         alert.setInformativeText(&NSString::from_str(text));
         alert.addButtonWithTitle(ns_string!("OK"));
         self.uploads().borrow_mut().set_asking(true);

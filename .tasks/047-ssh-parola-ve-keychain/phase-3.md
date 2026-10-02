@@ -67,12 +67,94 @@ _Requirements: R6, R6.1, R6.2, R7, R7.1, R7.2, R8_
 
 ## Checklist
 
-- [ ] `objc2-security` bağımlılığı (tek `Cargo.lock` satırı)
-- [ ] Parola deposu trait'i + reddedildi bayrağı + `Never`'ın açan kolu
-- [ ] `keychain.rs` gerçek gövde
-- [ ] Remember kutusu (varsayılan işaretli), bayat parola kolu
-- [ ] Forget Password menüsü
-- [ ] Sign In… düğmesi ve arka planın yeniden denemesi
-- [ ] Lisans dosyası, `CLAUDE.md`, gerekiyorsa `docs/AYARLAR.md`
-- [ ] Test: yukarıdaki kabul sınamaları
-- [ ] Doğrulama geçti (`make check`, `make linux`, `make bundle`)
+- [x] `objc2-security` bağımlılığı (tek `Cargo.lock` satırı)
+- [x] Parola deposu trait'i + reddedildi bayrağı + `Never`'ın açan kolu
+- [x] `keychain.rs` gerçek gövde
+- [x] Remember kutusu (varsayılan işaretli), bayat parola kolu
+- [x] Forget Password menüsü
+- [x] Sign In… düğmesi ve arka planın yeniden denemesi
+- [x] Lisans dosyası, `CLAUDE.md`, gerekiyorsa `docs/AYARLAR.md`
+- [x] Test: yukarıdaki kabul sınamaları
+- [x] Doğrulama geçti (`make check`, `make linux`, `make bundle`)
+
+## Uygulama Notları
+
+- **Parolasız arka plan işi bugünkü argv'de kalıyor; Sign In… sinyali reddin
+  kendisinden.** `Ask::Never` yalnız kayıtlı ve reddedilmemiş parolayla master
+  açıyor (planın "yoksa susar"ı); parola yoksa rota `Direct` ve sunucu girişi
+  reddedince helper'ın açılış hatası — yalnız masters'lı arka plan dial'ında
+  (`Dial::sign_in`) — `ssh_route::SIGN_IN_NEEDED`'e çevriliyor
+  (`ssh_route::login_refused`, "Permission denied"). Reddedilmiş hesap ve
+  kayıtlı parolanın reddi doğrudan `Denied::SignIn`. Pane metni iki yerde
+  tanıyor (yük göstergesinin `Unreachable`'ı, bağlantı doğrulamanın hatası:
+  `TerminalPane::background_failed`); ulaşılamayan host bu metni üretmiyor.
+  Kayıtlı parolayla denenen arka plan açılışı başka bir sebeple (ağ) düşerse
+  rota `Direct`'e dönüyor ki hata bugünkü sözlerle gelsin.
+- **Reddedildi bayrağı** `Masters`'ta hesap başına (`Account`: `ssh -G`'nin
+  host/user/port'u); kullanıcının başarılı girişi ve Forget kaldırıyor. Bayrak
+  kullanıcının kendi işini durdurmuyor; kullanıcı bayat parolanın sayfasını
+  iptal ederse de kuruluyor (parola reddedildi, bu bilgi).
+- **İşaretsiz kutu + reddedilmiş kayıt → kayıt siliniyor**: bilinen yanlış
+  parolanın arka planda bir kez daha denenmesini önlüyor. Kutu işaretliyse
+  yeni parola üstüne yazılıyor (`SecItemAdd` → `errSecDuplicateItem` →
+  `SecItemUpdate`). Yazma yalnız master açıldıktan sonra.
+- **Forget Password master'ı da `-O stop`'luyor ve pane'in helper'ını
+  kapatıyor.** Yalnız kaydı silmek kabul sahnesini (Forget → Sign In…)
+  `ControlPersist` (10 dk) boyunca imkânsız kılardı: arka plan canlı master'a
+  binmeye devam ederdi. `stop` yeni işi kabul etmiyor ama üstündeki aktarımı
+  kesmiyor (`exit`'in tersine); kullanıcının master'ına (`Direct` rota,
+  `-S`/`ControlPath` yazan hedef) hiç dokunmuyor. 048 aynı soketi paylaşınca
+  bu kural yeniden tartılmalı.
+- **Forget'ın etkinliği** bir işin çözdüğü hesaptan (`Masters::has_saved`,
+  argv başına önbellek): ana thread `ssh -G` başlatmıyor, yani uygulama
+  açıldıktan sonra ilk uzak işe kadar gri. Keychain'e yalnız öznitelik sorusu
+  (onay penceresi yok). Başlık `menuWillOpen:`'da key pencerenin host'undan.
+- **Sign In… düğmesinin yeri yük göstergesinin yeri** (`stats_layout`'un ilk
+  kolu): parola yokken örnek de yok; düğme yoldan önce geliyor, yol soldan
+  kısalıyor; sığmazsa düşüyor. Çizim yükleme düğmeleriyle aynı (`DockButton`,
+  etiket ön plan renginde, dolgu işaretin renginde, hover'da koyulaşıyor, el
+  imleci); tıklama ve el imleci `Session::sign_in_span`'den. Hover yükleme
+  hover'ının hunisinden (`upload_hover`) geçiyor.
+- **`DockContext::clone_from` alanı elle kopyalıyor**: yeni `sign_in` alanı
+  oraya da eklendi; eksikken kare yolu ve fare düğmeyi görmüyordu (Session
+  sınaması yakaladı).
+- **Başarılı her kullanıcı dial'ı bir giriş**: `TerminalPane::dial` kullanıcı
+  işinin argv kapanışını sarıyor ve `Ok`'ta pane'e `signed_in` gönderiyor
+  (düğme gider, helper tuttuğu hatayı unutur — `RemoteHelper::retry`, yük
+  göstergesi aynı nesilde yeniden başlar — `Schedule::retry`). `ssh_route`'a
+  kanca eklenmedi.
+- **Keychain'in hata kodları modülde adlı** (`errSecSuccess`,
+  `errSecDuplicateItem`): `SecBase` başlığını üç sabit için açmamak için;
+  `objc2-core-foundation`'a `bt-shell-macos`'ta `CFData`/`CFNumber`
+  bayrakları ve bir kenar. `Cargo.lock`'a giren tek paket `objc2-security`.
+- **Anahtar parolası ve 2FA sayfasında kutu yok**; Karar 7'nin "kutu yerine
+  ipucu satırı" önerisi yapılmadı (ssh'ın istem metni zaten sayfada).
+- `preview_failed`'ın gövdesi `failure_sheet(title, text)` oldu; Sign In'in
+  hatası ("Can't sign in to {host}") onu kullanıyor.
+- **Set kapısı `/code-review` (10 bulgu, 9'u giderildi):** reddedilmiş
+  hesabın kayıtlı parolası kullanıcı işinde de artık gönderilmiyor (sayfa ilk
+  soruda "The saved password didn't work" diyor — bilinen yanlış parolayla
+  ikinci başarısız giriş yok); arka plan denemesi kayıtlı paroladan sonra
+  ikinci faktörde/anahtar parolasında takılırsa da hesap işaretleniyor (tek
+  yarım giriş); Sign In… dönüşümü yalnız sunucu `password`/`keyboard-interactive`
+  listeliyorsa (`ssh_route::password_refused`; anahtar-yalnız ret ssh'ın
+  sebebini koruyor); düğmenin tek sahibi oturum (`Session::sign_in`, pane
+  kopya tutmuyor — geç gelen başka nesil cevabı ve host değişimi
+  ayrışamıyor); düğme **arka planın başarısıyla** kalkıyor (örnek ya da
+  bağlantı doğrulama — başka pane'in girişi, `ssh-add`, kullanıcının
+  master'ı), kullanıcı işinin başarısı ve `Direct` dönen Sign In yalnız
+  yeniden denetiyor; uçuşa katılan arka plan işi Keychain'i okumuyor;
+  menünün sorusu `Masters`'ın "kayıtlı mı" önbelleğinden (ana thread
+  Keychain'i beklemiyor; ilk soru bir kez öznitelikle); `sign_in_span`
+  düğme yokken kopyalamıyor; `-O check`/`-O stop` tek `control_argv`.
+  **Kalan sınır:** başka pane'de görünen düğme, o pane'in arka planı yeniden
+  denenene kadar (⌘-hover, yük göstergesinin bir sonraki nesli) duruyor; ona
+  tık sayfa açmadan canlı master'ı bulup kalkıyor. Pane'ler arası yayın
+  `AppDelegate`'e uzanmayı isterdi (pane modülünün sınırı).
+- **Gözle kontrol sahnesi (set sonu, kullanıcıda)**: parolalı gerçek bir sshd'ye
+  `ssh` ile bağlan, pencereye bir dosya bırak → parola sayfası, Remember
+  işaretli; yükleme bitiyor; ⌘-tık ve yük göstergesi sorusuz; bateri'yi yeniden
+  aç → sorusuz (Keychain); Shell ▸ Forget Password for “host” → durum
+  çubuğunda Sign In…; düğme → sayfa → giriş → gösterge geri geliyor. Ad-hoc
+  imzada macOS'un "confidential information" sorusu her derlemede (Karar 6).
+

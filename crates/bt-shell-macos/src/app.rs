@@ -1699,13 +1699,18 @@ fn verdict(
 /// sockets live under the user's cache directory (or `/tmp/bateri-$UID`). What
 /// a crashed bateri left behind is swept once, off the main thread. Nothing is
 /// sent to the masters on quit — `ControlPersist` ends them (another instance
-/// may ride on one).
+/// may ride on one). The saved passwords are the login keychain's
+/// ([`crate::keychain`], 047 phase-3).
 fn masters() -> Option<Arc<Masters>> {
     let askpass = std::env::current_exe().ok()?;
     // SAFETY: `getuid` has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
     let bases = ssh_route::socket_bases(child::home().as_deref(), uid);
-    let masters = Arc::new(Masters::new(askpass, bases));
+    let masters = Arc::new(Masters::new(
+        askpass,
+        bases,
+        Arc::new(crate::keychain::Keychain),
+    ));
     let sweeper = Arc::clone(&masters);
     let _ = std::thread::Builder::new()
         .name("ssh socket sweep".into())
