@@ -409,6 +409,7 @@ impl bt_core::Wake for SilentWake {
     // probe either (the `timed` branch).
     fn command_started(&self) {}
     fn remote_up(&self) {}
+    fn remote_typed(&self) {}
     fn link_hover_lost(&self) {}
 }
 
@@ -1206,8 +1207,8 @@ pub(crate) mod tests {
     /// environment — and a user's own `ssh` function is left alone. The
     /// fallback (049 R3): after a wrapped `ssh` that did not end with 255 it
     /// asks `ssh-fell-back` with the **wrapped** arguments and reruns a
-    /// non-empty answer, returning the last `ssh`'s code; 255 asks nothing;
-    /// inside tmux or screen nothing is wrapped.
+    /// non-empty answer, returning the last `ssh`'s code — 255 asks too (049
+    /// phase-3; the binary decides); inside tmux or screen nothing is wrapped.
     #[test]
     fn the_wrappers_ssh_function_asks_the_binary() {
         let root = TempRoot::new("ssh-function");
@@ -1327,7 +1328,10 @@ pub(crate) mod tests {
         wait_until("the plain rerun did not run", || {
             shown(&session, "[PLAIN][x]") && shown(&session, "rc=7")
         });
-        // ssh's own error asks nothing; inside tmux nothing is wrapped.
+        // 255 asks too (049 phase-3: the binary tells ssh's own error from a
+        // refusal after the login) — here it answers nothing, so no rerun;
+        // inside tmux nothing is wrapped.
+        std::fs::remove_file(&fall).expect("fall");
         std::fs::write(&code, "255").expect("code");
         session.write(b"ssh x; echo \"r1=$?\"; TMUX=t ssh x; echo \"r2=$?\"\n");
         wait_until("the 255 and tmux calls did not run", || {
@@ -1338,7 +1342,8 @@ pub(crate) mod tests {
             asked,
             "ssh-argv --tty --block 2 --instance 0a1b2c3d -- x\n\
              ssh-fell-back --rc 7 --instance 0a1b2c3d -- -t x y z BOOT\n\
-             ssh-argv --tty --block 3 --instance 0a1b2c3d -- x\n"
+             ssh-argv --tty --block 3 --instance 0a1b2c3d -- x\n\
+             ssh-fell-back --rc 255 --instance 0a1b2c3d -- -t x y z BOOT\n"
         );
         session.shutdown();
 
@@ -1388,6 +1393,7 @@ pub(crate) mod tests {
         crate::ssh_route::prepare_instance(&bases[0], &instance).expect("instance");
         let wrapper = copy_wrapper(&root);
         std::fs::write(home.join(".zshrc"), "PS1='$ '\n").expect(".zshrc");
+        let tab = bt_core::TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").expect("tab");
         let session = Session::spawn(
             SessionOptions {
                 command: Some((
@@ -1417,7 +1423,8 @@ pub(crate) mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
-                tab_id: None,
+                // The pane's identity (049 R6): `BATERI_TAB_URL` and the `LC_` trio.
+                tab_id: Some(tab.clone()),
                 hostname: None,
             },
             Arc::new(SilentWake),
@@ -1453,9 +1460,47 @@ pub(crate) mod tests {
                 .expect("ssh -G");
             crate::ssh_wrap::host_key(&String::from_utf8_lossy(&out.stdout)).expect("key")
         };
-        // The pane's half: the `up` marked at once, then `posix`.
+        // The pane's half: the remote probe (`set_remote`, the wrapped call's
+        // nonce), the login probe and the first input after it (049 R7 →
+        // `mark_used`), the `up` marked at once, then `posix`.
         let seen = std::cell::RefCell::new(None::<(u64, String)>);
+        let probed = std::cell::RefCell::new(None::<(u64, Option<String>)>);
+        let used = std::cell::RefCell::new(None::<u64>);
+        let logged = std::cell::RefCell::new(None::<u64>);
         let pane = |user_args: &[String]| {
+            if let Some(command) = session.running_command()
+                && probed.borrow().as_ref().map(|(probed, _)| *probed) != Some(command)
+                && let crate::jobs::Probe::Remote(target) = crate::jobs::remote(
+                    ShellParent::Direct,
+                    session.child_pid(),
+                    &crate::jobs::SystemTable,
+                )
+            {
+                let remote = bt_core::RemoteTarget {
+                    host: target.host.clone(),
+                    kind: target.kind,
+                    argv: target.argv.clone(),
+                    line: target.argv.join(" "),
+                };
+                session.set_remote(command, Some(&remote));
+                *probed.borrow_mut() = Some((command, target.nonce.clone()));
+            }
+            if let Some((command, nonce)) = probed.borrow().clone() {
+                if crate::jobs::remote_login(&session) == Some(command)
+                    && *logged.borrow() != Some(command)
+                    && let Some(nonce) = &nonce
+                {
+                    crate::ssh_wrap::mark_login(&state, nonce).expect("login");
+                    *logged.borrow_mut() = Some(command);
+                }
+                if session.remote_typed() == Some(command)
+                    && *used.borrow() != Some(command)
+                    && let Some(nonce) = nonce
+                {
+                    crate::ssh_wrap::mark_used(&state, &nonce).expect("used");
+                    *used.borrow_mut() = Some(command);
+                }
+            }
             let up = session.remote_up();
             if up.is_some() && *seen.borrow() != up {
                 let (_, nonce) = up.clone().unwrap();
@@ -1504,6 +1549,17 @@ pub(crate) mod tests {
             stripes().contains(&Theme::BATERI.error_linear())
         });
         eprintln!("(a) first connection: remote dir /home/deneme, remote block stripe, posix row");
+        // 049 R6: the wrapped session carries the identity (no `SendEnv`
+        // here — `-F /dev/null` — so it is the bootstrap's export).
+        let identity = format!("lc=bateri|{}|{}.", bt_core::TERM_PROGRAM_VERSION, tab.url());
+        let show_lc = b"printf 'lc=%s|%s|%s.\\n' \"${LC_TERMINAL-unset}\" \
+                        \"${LC_TERMINAL_VERSION-unset}\" \"${LC_BATERI_TAB_URL-unset}\"\r";
+        let seen_lc = count(&identity);
+        session.write(show_lc);
+        wait("no identity (wrapped)", 10, &deneme, &|| {
+            count(&identity) > seen_lc
+        });
+        eprintln!("(R6) wrapped, AcceptEnv LANG LC_*: {identity}");
         session.write(b"exit\r");
         std::thread::sleep(Duration::from_secs(3));
         session.write(b"echo done-a\r");
@@ -1535,6 +1591,45 @@ pub(crate) mod tests {
         });
         assert_eq!(std::fs::read_to_string(&state).unwrap_or_default(), before);
         eprintln!("(a') TMUX set: not wrapped, state untouched, no rerun");
+
+        // 049 R6 across the carriers: a plain ssh (`TMUX` set — never wrapped)
+        // with the stock `SendEnv LC_*` shows the identity on a server with
+        // `AcceptEnv LANG LC_*`; on a server with `AcceptEnv LANG` only
+        // (127.0.0.1:2251) the wrapped session still shows it, the plain one
+        // does not (the known limit).
+        let unset = "lc=unset|unset|unset.";
+        let remote_lc = |port: u16, wrapped: bool, expect: &str| {
+            let mut args = ssh_args("deneme", port);
+            args.splice(2..2, ["-o".to_owned(), "'SendEnv=LC_*'".to_owned()]);
+            let asked = count("(deneme@127.0.0.1) Password:");
+            let prefix = if wrapped { "" } else { "TMUX=x " };
+            session.write(format!("{prefix}ssh {}\r", args.join(" ")).as_bytes());
+            wait("no password prompt (identity)", 15, &args, &|| {
+                count("(deneme@127.0.0.1) Password:") > asked
+            });
+            session.write(b"parola123\r");
+            std::thread::sleep(Duration::from_secs(3));
+            let before = count(expect);
+            session.write(show_lc);
+            wait("no identity line", 10, &args, &|| count(expect) > before);
+            session.write(b"exit\r");
+            std::thread::sleep(Duration::from_secs(3));
+            session.write(b"echo done-lc\r");
+            let done = count("\ndone-lc");
+            wait("identity session did not end", 10, &args, &|| {
+                count("\ndone-lc") > done
+            });
+        };
+        remote_lc(2249, false, &identity);
+        eprintln!("(R6) plain, SendEnv LC_* + AcceptEnv LANG LC_*: {identity}");
+        if std::net::TcpStream::connect(("127.0.0.1", 2251)).is_ok() {
+            remote_lc(2251, true, &identity);
+            eprintln!("(R6) wrapped, AcceptEnv LANG only: {identity}");
+            remote_lc(2251, false, unset);
+            eprintln!("(R6) plain, AcceptEnv LANG only: {unset} (known limit)");
+        } else {
+            eprintln!("SKIPPED: no AcceptEnv-restricted sshd on 127.0.0.1:2251");
+        }
 
         // (b) the shell-less endpoint: plain rerun, and is a second password asked?
         let kapi = ssh_args("kapi", 2249);
@@ -1607,18 +1702,26 @@ pub(crate) mod tests {
         wait("cli did not answer", 10, &router, &|| {
             text().contains("cli: show")
         });
+        // The pane noticed the input after the login (049 R7).
+        wait(
+            "the input after the login was not marked",
+            10,
+            &router,
+            &|| {
+                used.borrow()
+                    .is_some_and(|command| Some(command) == session.running_command())
+            },
+        );
         session.write(b"exit\r");
         std::thread::sleep(Duration::from_secs(4));
         let rerun = count("(router@127.0.0.1) Password:") > asked + 1
             || text().matches("router>").count() > 2;
-        eprintln!(
-            "(c) ForceCommand CLI: reconnected after exit: {rerun}; plain row: {}",
-            load(&state).knows(Fact::Plain, &key(&router))
+        let plain = load(&state).knows(Fact::Plain, &key(&router));
+        eprintln!("(c) ForceCommand CLI: reconnected after exit: {rerun}; plain row: {plain}");
+        assert!(
+            !rerun && !plain,
+            "R7: a session the user worked in does not fall back"
         );
-        if rerun {
-            session.write(b"exit\r");
-            std::thread::sleep(Duration::from_secs(3));
-        }
         // (d) Ctrl-C at a fresh server's password prompt (rc 130): no rerun,
         // no `plain` row (phase-2 `/code-review`; an interactive zsh aborts
         // the function on the child's SIGINT anyway, `says_nothing` is the
@@ -1636,6 +1739,44 @@ pub(crate) mod tests {
         assert_eq!(count("(root@127.0.0.1) Password:"), asked + 1);
         assert!(!load(&state).knows(Fact::Plain, &key(&cancelled)));
         eprintln!("(d) Ctrl-C at the password prompt: rc=130, no rerun, no plain row");
+
+        // (e) an endpoint that refuses our command with 255 after the login
+        // (phase-3 `/code-review`; `refuse`'s login shell answers `-c` with
+        // "exec request failed" and 255, a shell request with a prompt): the
+        // pane's login proof turns the 255 into a fallback — plain rerun,
+        // `plain` row, the next connection plain from the start.
+        let refuse = ssh_args("refuse", 2249);
+        let asked = count("(refuse@127.0.0.1) Password:");
+        session.write(line(&refuse).as_bytes());
+        wait("no password prompt (refuse)", 15, &refuse, &|| {
+            count("(refuse@127.0.0.1) Password:") > asked
+        });
+        session.write(b"parola123\r");
+        wait("no refusal", 15, &refuse, &|| {
+            text().contains("exec request failed on channel 0")
+        });
+        let ended = Instant::now();
+        wait("no rerun (refuse)", 15, &refuse, &|| {
+            text().contains("sw>") || count("(refuse@127.0.0.1) Password:") > asked + 1
+        });
+        let second = count("(refuse@127.0.0.1) Password:") > asked + 1;
+        if second {
+            session.write(b"parola123\r");
+            wait("no plain prompt (refuse)", 15, &refuse, &|| {
+                text().contains("sw>")
+            });
+        }
+        assert!(load(&state).knows(Fact::Plain, &key(&refuse)));
+        eprintln!(
+            "(e) 255 after the login: rerun after {:?}; second password asked: {second}; plain row",
+            ended.elapsed()
+        );
+        session.write(b"exit\r");
+        std::thread::sleep(Duration::from_secs(3));
+        session.write(b"echo done-e\r");
+        wait("refuse exit did not return", 10, &refuse, &|| {
+            text().contains("\ndone-e")
+        });
         session.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }

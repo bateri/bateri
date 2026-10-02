@@ -758,13 +758,19 @@ sarılmış argv'ninkiyle (`jobs::Target::nonce`) eşleyince host'u `posix`
 kaydediyor (`ssh_wrap::record_posix`; `posix`'in tek yazarı). **Her zaman
 sarılıyor, kabuksuz uçta sessizce düşülüyor** (049): bilinmeyen host da
 sarılıyor, yalnız `plain` kayıtlı olan sarılmıyor; sarılmış ssh 255 dışında
-bir kodla bitince zsh `ssh` fonksiyonu `bateri ssh-fell-back`'e sarılmış
-argv'yi veriyor ve o, denemenin nonce'u görülmediyse (pane `up` gelir gelmez,
+bir kodla — ya da **girişten sonra** 255'le (exec reddi; kanıtı pane'in
+`{nonce}.login`'i ya da sarılmış çağrının hâlâ dinleyen master soketi,
+`ssh_wrap::master_listening`) — bitince zsh `ssh` fonksiyonu `bateri
+ssh-fell-back`'e sarılmış argv'yi veriyor (fonksiyon her kodda soruyor, 255'i
+ikili ayırıyor; girişten önceki 255 — parola, ağ, host anahtarı — sessiz) ve o, denemenin nonce'u görülmediyse (pane `up` gelir gelmez,
 `ssh -G`'yi beklemeden `remote-hosts.up/{nonce}`'u yaratıyor —
 `ssh_wrap::mark_up`) host'u `plain` kaydedip aynı `u-<key>` paylaşımıyla düz
 yeniden koşuyu basıyor. Yanlışın yönü "düşme yok": nonce'u bilinmeyen,
 görülen ya da `posix` olan her durumda yeniden bağlantı yok, yani `exit`'ten
-sonra bağlantı asla yeniden açılmıyor; yerel tmux/screen içinde (`$TMUX`,
+sonra bağlantı asla yeniden açılmıyor — girişten sonra yazılmış oturum da
+kullanıcınındır (`ForceCommand`'lı CLI `up` demez; pane 047'nin giriş
+kenarından sonraki ilk girdide `{nonce}.used`'ı yaratıyor,
+`Wake::remote_typed` → `ssh_wrap::mark_used`); yerel tmux/screen içinde (`$TMUX`,
 `$STY`) hiç sarılmıyor, çünkü pane `up`'ı göremez. Shell ▸ Shell Integration
 on “{host}” host'un `plain` kaydını siliyor (`ssh_wrap::forget_plain`, yanlış
 kaydın tek geri dönüşü). Gerekçeler
@@ -1637,7 +1643,12 @@ ikisine de bağlanmaz.
   pencere doğarken `NSUUID` üretir, biçimi `bt-core`'un (`TabId`). Gerekçe:
   miras kalan `TERM_PROGRAM=Apple_Terminal` `/etc/zshrc` üzerinden
   sarmalayıcının dizinine yazdırıyordu
-  (`.tasks/038-terminal-kimligi/context.md` → Kanıt). Alacritty
+  (`.tasks/038-terminal-kimligi/context.md` → Kanıt). ssh'tan geçen kimlik
+  `LC_` ailesi (049 R6, iTerm2'nin `LC_TERMINAL` emsali, aynı katmanda ve
+  mirası eziyor): `LC_TERMINAL=bateri`, `LC_TERMINAL_VERSION`,
+  `LC_BATERI_TAB_URL` — düz ssh'ta hazır `SendEnv`/`AcceptEnv LC_*` taşıyor,
+  sarılmış oturumda uzak önyükleme de argv'den dışa aktarıyor; `AcceptEnv`'i
+  kısıtlı sunucuda sarılmayan oturumda yok (bilinen sınır). Alacritty
   `ALACRITTY_WINDOW_ID` ve `WINDOWID`'yi koşulsuz yazar; shell'de görünürler.
   **Dizin ve yerel de yalnız çocuğa gider:** kabuk ev dizininde başlar (`HOME`,
   yoksa passwd kaydı; mutlak değilse miras). Ortamda `LC_ALL`/`LC_CTYPE`/`LANG`'dan

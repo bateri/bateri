@@ -1234,6 +1234,7 @@ mod tests {
                 "echo hi",
                 Some(3),
                 "0123456789abcdef",
+                None,
                 control,
             );
             let mut argv = vec!["ssh".to_owned()];

@@ -1734,6 +1734,13 @@ pub(crate) struct ShellLog {
     /// first byte and routinely beats the probe, and the pane's main-queue
     /// check may run after `D`. Written only while a command runs.
     pub(crate) remote_up: Option<(u64, String)>,
+    /// The command generation whose remote session the user typed into after
+    /// its login was seen ([`Self::login`]; 049 R7,
+    /// [`crate::Session::remote_typed`]): the session was the user's, so a
+    /// wrapped `ssh` that ends without the bootstrap's `up` (a `ForceCommand`
+    /// CLI) did not fall back. Bound to the generation like [`Self::login`];
+    /// set at the first input after the login, once.
+    pub(crate) typed: Option<u64>,
     /// Whether the shell printed a mark carrying **our** identity (an `A` or `D` with
     /// `bt_block=`) — sticky; the precondition of [`Self::apply`]'s foreign-mark gate.
     ///
@@ -2016,6 +2023,7 @@ impl ShellLog {
             paste_since_remote: false,
             login: None,
             remote_up: None,
+            typed: None,
             ours: false,
             command_open: false,
             // At startup the caret is the dock's (`caret_home_raw(None, Idle)`), so the first
@@ -2258,6 +2266,23 @@ impl ShellLog {
             .state
             .is_some_and(|state| state.phase == ShellPhase::Running);
         (running || (self.ours && self.command_open)).then_some(self.command)
+    }
+
+    /// The user sent input ([`crate::Session::send_input`], the single funnel):
+    /// `true` once per command generation, at the first input after the
+    /// remote session's login was seen (049 R7, [`Self::typed`]) — the edge
+    /// of [`crate::Wake::remote_typed`]. A login seen later than the keys
+    /// leaves them uncounted (the login probe's lag): the wrong direction is
+    /// a plain rerun, today's behaviour.
+    pub(crate) fn note_typed(&mut self) -> bool {
+        let Some(command) = self.login else {
+            return false;
+        };
+        if self.running_command() != Some(command) || self.typed == Some(command) {
+            return false;
+        }
+        self.typed = Some(command);
+        true
     }
 
     /// The scanner saw `CSI ? 2004 h` ([`ScanEvent::PasteOn`], in stream
@@ -5312,6 +5337,38 @@ mod tests {
         assert_eq!(log.dock.buffer, "ls", "the local mirror applies again");
         assert_eq!(log.context.branch, "dev");
         assert!(log.dock_editable);
+    }
+
+    /// The first input after a remote login (049 R7): one edge per command
+    /// generation, none before the login is seen or once the command ended,
+    /// and a new command starts over.
+    #[test]
+    fn the_first_input_after_a_login_is_one_edge_per_generation() {
+        let mut scanner = Scanner::new();
+        let mut feed = |log: &mut ShellLog, bytes: &[u8]| {
+            scanner.feed(bytes, |event| {
+                log.apply_scan_answering(event, 0);
+            });
+        };
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        feed(&mut log, b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+        let first = log.command;
+        assert!(!log.note_typed(), "the password: no login yet");
+        log.login = Some(first);
+        assert!(log.note_typed());
+        assert_eq!(log.typed, Some(first));
+        assert!(!log.note_typed(), "once per generation");
+        // The command ended: its login vouches for nothing.
+        feed(&mut log, b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07");
+        log.typed = None;
+        assert!(!log.note_typed());
+        // The next command's login starts over.
+        feed(&mut log, b"\x1b]133;C\x07");
+        assert_ne!(log.command, first);
+        assert!(!log.note_typed(), "an older generation's login");
+        log.login = Some(log.command);
+        assert!(log.note_typed());
+        assert_eq!(log.typed, Some(log.command));
     }
 
     /// The remote bootstrap's `up` (049 R2.2, `8133;i;up;{nonce}`): recorded

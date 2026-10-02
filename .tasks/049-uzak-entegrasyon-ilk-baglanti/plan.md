@@ -30,7 +30,8 @@ açılsın; hiçbir yeni arayüz yazılmasın. Karar ve gerekçe `discussion.md`
     ControlPath'iyle) NUL ayrımlı basar; aksi hâlde boş. Fonksiyon argv
     boş değilse `command ssh` ile yeniden koşturur.
   - **R3.3** 255 (bağlantı/kimlik hatası) hiçbir şey kaydetmez ve yeniden
-    koşturmaz.
+    koşturmaz. (phase-3 kapısında daraldı, orkestratör kararı: **girişten sonra** gelen
+    255 — exec reddi — düşmeye gider; phase-3 → Uygulama Notları.)
 - **R4 — 048'in selamdan öğrenmesi kalkar.** `RemoteHelper::with_greeted` /
   `Greeted`, `remote_helper_for(learning)` ve `ssh_wrap::learn`'in çağrısı
   sökülür; `posix` yalnız R2.3'ten yazılır. `Fact::Plain` eklenir,
@@ -118,5 +119,5 @@ ssh host ──► __bateri_ssh ──► bateri ssh-argv
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| phase-3 | |
-| kapı | |
+| phase-3 | ✅ |
+| kapı | ✅ |

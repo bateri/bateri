@@ -2,9 +2,9 @@
 #
 # HOW IT GETS THERE: the local `ssh` function asks `bateri ssh-argv`, which
 # wraps the user's `ssh` as `ssh -t <their arguments> "exec sh -c '<one-liner>'
-# bateri-boot"` (`bt-shell-common::ssh_wrap`). sshd runs that through the
-# user's login shell (`$SHELL -c`, which may be fish or csh), `exec` replaces
-# it with `sh`, and the one-liner decodes this file (base64, with the
+# bateri-boot <P> <nonce> <version> <tab>"` (`bt-shell-common::ssh_wrap`).
+# sshd runs that through the user's login shell (`$SHELL -c`, which may be
+# fish or csh), `exec` replaces it with `sh`, and the one-liner decodes this file (base64, with the
 # decoders' fallback chain) and `eval`s it. This file is therefore free of the
 # one-liner's quoting limits; the one-liner is built in Rust, next to the rule
 # that keeps it readable by every login shell.
@@ -24,6 +24,10 @@
 #      hex is not printed (the one-liner's quoting rule: nothing from the
 #      command line goes into a sequence unchecked). The one-liner's decode
 #      fallback, which never reaches this file, prints the same mark itself.
+#      Then the terminal's identity (`LC_TERMINAL`, `LC_TERMINAL_VERSION`,
+#      `LC_BATERI_TAB_URL`; 049 R6) is exported for every login shell below
+#      — the decode fallback does not (a known limit: it is a server without
+#      a base64 decoder, and its `AcceptEnv LC_*` still may).
 #   1. prints the motd — sshd does not when it runs a command (`do_login` is
 #      the interactive login's path). A known limit both ways: a server that
 #      turned the motd off for ssh (`PrintMotd no`, no pam_motd) shows it now,
@@ -56,6 +60,34 @@
 case ${2-} in
   '' | *[!0-9a-f]*) ;;
   *) printf '\033]8133;i;up;%s\007' "$2" ;;
+esac
+
+# 0b. The terminal's identity (049 R6), before every fault: every arm below
+# `exec`s a login shell, so the plain ones carry it too. `LC_TERMINAL` is
+# fixed (only bateri runs this file); the version (`$3`) and the tab's
+# address (`$4`, `bateri://tab/<uuid>` or `-`) come from the wrapped command
+# (`ssh_wrap::remote_command`) and are exported only in their own forms. A
+# server whose `AcceptEnv LC_*` already brought them gets the same values:
+# this is the path of the server that refused them.
+LC_TERMINAL=bateri
+export LC_TERMINAL
+case ${3-} in
+  '' | *[!0-9A-Za-z.+-]*) ;;
+  *)
+    LC_TERMINAL_VERSION=$3
+    export LC_TERMINAL_VERSION
+    ;;
+esac
+case ${4-} in
+  bateri://tab/?*)
+    case ${4#bateri://tab/} in
+      *[!0-9A-F-]*) ;;
+      *)
+        LC_BATERI_TAB_URL=$4
+        export LC_BATERI_TAB_URL
+        ;;
+    esac
+    ;;
 esac
 
 bt_fault() {

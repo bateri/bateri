@@ -92,8 +92,9 @@ pub(crate) fn remote_hosts_path(home: &std::path::Path) -> std::path::PathBuf {
 /// it on every `ssh`, in any session. The body is
 /// [`bt_shell_common::ssh_wrap::ssh_argv_main`]; here only the platform's
 /// inputs: the settings file's launch reading (an unusable file, or no home,
-/// turns the integration off), the state file's path and the socket roots the
-/// instance directory is looked for under (phase-5). Every failure prints
+/// turns the integration off), the state file's path, the socket roots the
+/// instance directory is looked for under (phase-5) and the pane's tab
+/// (`BATERI_TAB_URL`, 049 R6). Every failure prints
 /// nothing, and nothing means plain `ssh`.
 pub fn ssh_argv() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
@@ -110,6 +111,11 @@ pub fn ssh_argv() -> Option<i32> {
         return Some(0);
     };
     let settings = settings::load(&settings::config_root(&home)).at_launch().0;
+    // The calling pane's identity (049 R6): its shell's `BATERI_TAB_URL`, in
+    // the one form `TabId` reads — anything else carries no tab.
+    let tab = std::env::var("BATERI_TAB_URL")
+        .ok()
+        .and_then(|url| bt_core::TabId::from_url(&url));
     // SAFETY: `getuid` has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
     Some(bt_shell_common::ssh_wrap::ssh_argv_main(
@@ -120,6 +126,7 @@ pub fn ssh_argv() -> Option<i32> {
         &ssh_route::socket_bases(Some(&home), uid),
         bt_shell_common::ssh_wrap::boot(),
         bt_shell_common::ssh_wrap::new_nonce().as_deref(),
+        tab.as_ref(),
         &mut std::io::stdout().lock(),
     ))
 }

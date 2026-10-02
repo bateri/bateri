@@ -125,6 +125,19 @@ pub trait Wake: Send + Sync + 'static {
     /// most one** job to its queue.
     fn remote_up(&self);
 
+    /// The user typed into a remote session after its login was seen (049
+    /// R7): the receiver reads the generation with
+    /// [`crate::Session::remote_typed`] and, if it is a wrapped `ssh`'s, marks
+    /// the attempt used — its end then reruns nothing.
+    ///
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::remote_up`]): once per command generation. It arrives on the
+    /// thread that sent the input (the main thread), inside the input call
+    /// and after the ledger's leaf lock has been released; the contract
+    /// assumes the `Term` lock may be held and the three prohibitions above
+    /// apply. The implementor posts **at most one** job to its queue.
+    fn remote_typed(&self);
+
     /// The link hover ([`crate::Session::set_link_hover`]) went **stale** and
     /// was dropped (044 R4.1): its stamp no longer held — output came, the window
     /// scrolled, the screen was cleared, the link's cell changed — so the frame

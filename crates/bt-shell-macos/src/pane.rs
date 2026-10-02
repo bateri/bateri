@@ -290,6 +290,13 @@ struct WrapProof {
     /// The last `up` whose nonce was marked seen ([`bt_shell_common::ssh_wrap::mark_up`]):
     /// once per arrival.
     marked: Option<(u64, String)>,
+    /// The generation whose attempt was marked used — the user typed after
+    /// the login (049 R7, [`bt_shell_common::ssh_wrap::mark_used`]): once per
+    /// generation.
+    used: Option<u64>,
+    /// The generation whose attempt was marked logged in
+    /// ([`bt_shell_common::ssh_wrap::mark_login`]): once per generation.
+    login: Option<u64>,
 }
 
 /// The pane's birth package (039 Karar 3): all inputs in a single struct,
@@ -440,6 +447,9 @@ struct ShellWake {
     /// Whether the bootstrap's `up` check is waiting on the main queue (049
     /// R2.3, [`TerminalPane::check_remote_up`]) — at most one job.
     up_pending: Arc<AtomicBool>,
+    /// Whether the "typed after the login" check is waiting on the main queue
+    /// (049 R7, [`TerminalPane::check_remote_typed`]) — at most one job.
+    typed_pending: Arc<AtomicBool>,
 }
 
 /// The two bits of the remote-session probe (036 Karar 2) — and of the login
@@ -707,6 +717,24 @@ impl Wake for ShellWake {
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(pane) = lookup(mtm, id) {
                 pane.check_remote_up();
+            }
+        });
+    }
+
+    fn remote_typed(&self) {
+        // The main thread, inside the input call: `remote_up`'s gate and its
+        // at-most-one job, the check on the next main-queue turn.
+        if self.timed || self.typed_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.typed_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.store(false, Ordering::Release);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.check_remote_typed();
             }
         });
     }
@@ -1294,6 +1322,7 @@ impl TerminalPane {
                 login_probe: Arc::default(),
                 link_pending: Arc::default(),
                 up_pending: Arc::default(),
+                typed_pending: Arc::default(),
             }),
             zoom: Cell::new(zoom),
             // No dock at launch: `start` decides and computes the geometry
@@ -2095,6 +2124,50 @@ impl TerminalPane {
         }
     }
 
+    /// The user typed into the remote session after its login (049 R7,
+    /// [`Wake::remote_typed`]): when the session is the wrapped `ssh` the probe
+    /// found ([`WrapProof`], same generation), its attempt is marked used
+    /// ([`bt_shell_common::ssh_wrap::mark_used`], a file on a thread of its
+    /// own) — the local `ssh` function's fallback then reruns nothing and
+    /// brands nothing `plain`: a session the user worked in (a `ForceCommand`
+    /// CLI that ignored our command) was theirs, and its `exit` must not
+    /// connect them again. Once per generation; a timed run marks nothing.
+    pub(crate) fn check_remote_typed(&self) {
+        if self.ivars().run.is_some() {
+            return;
+        }
+        let Some(generation) = self.session().and_then(|session| session.remote_typed()) else {
+            return;
+        };
+        let nonce = {
+            let mut proof = self.ivars().wrap_proof.borrow_mut();
+            let Some((command, nonce, _)) = proof.wrapped.as_ref() else {
+                return;
+            };
+            if *command != generation || proof.used == Some(generation) {
+                return;
+            }
+            let nonce = nonce.clone();
+            proof.used = Some(generation);
+            nonce
+        };
+        let spawned = std::thread::Builder::new()
+            .name("remote used".into())
+            .spawn(move || {
+                if let Some(home) = crate::child::home() {
+                    let path = crate::remote_hosts_path(&home);
+                    for _ in 0..POSIX_ATTEMPTS {
+                        if bt_shell_common::ssh_wrap::mark_used(&path, &nonce).is_ok() {
+                            return;
+                        }
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.ivars().wrap_proof.borrow_mut().used = None;
+        }
+    }
+
     /// [`Self::check_remote_up`]'s first half: marks `seen` once per arrival.
     fn mark_up(&self, generation: u64, seen: &str) {
         let arrival = Some((generation, seen.to_owned()));
@@ -2357,12 +2430,12 @@ impl TerminalPane {
         if let Some(masters) = masters {
             masters.session_started(self.id(), &target);
         }
-        if self
+        match self
             .session()
             .and_then(|session| jobs::remote_login(session))
-            .is_none()
         {
-            self.ivars().wake.login_probe.rearm();
+            Some(command) => self.note_login(command),
+            None => self.ivars().wake.login_probe.rearm(),
         }
     }
 
@@ -2378,9 +2451,49 @@ impl TerminalPane {
         };
         if jobs::remote_login(session) == Some(command) {
             self.sync_stats_generation();
+            self.note_login(command);
             return false;
         }
         true
+    }
+
+    /// The remote session `command` got past its login (047 R9.1): when it is
+    /// the wrapped `ssh` the probe found ([`WrapProof`]), its attempt is marked
+    /// logged in ([`bt_shell_common::ssh_wrap::mark_login`], a file on a
+    /// thread of its own) — the fallback then reads a 255 as an endpoint that
+    /// refused our command, not as ssh's own error (049 phase-3
+    /// `/code-review`). Once per generation; a timed run marks nothing.
+    fn note_login(&self, command: u64) {
+        if self.ivars().run.is_some() {
+            return;
+        }
+        let nonce = {
+            let mut proof = self.ivars().wrap_proof.borrow_mut();
+            let Some((wrapped, nonce, _)) = proof.wrapped.as_ref() else {
+                return;
+            };
+            if *wrapped != command || proof.login == Some(command) {
+                return;
+            }
+            let nonce = nonce.clone();
+            proof.login = Some(command);
+            nonce
+        };
+        let spawned = std::thread::Builder::new()
+            .name("remote login".into())
+            .spawn(move || {
+                if let Some(home) = crate::child::home() {
+                    let path = crate::remote_hosts_path(&home);
+                    for _ in 0..POSIX_ATTEMPTS {
+                        if bt_shell_common::ssh_wrap::mark_login(&path, &nonce).is_ok() {
+                            return;
+                        }
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.ivars().wrap_proof.borrow_mut().login = None;
+        }
     }
 
     /// Edit ▸ Find ▸ Find… (⌘F): opens the panel, focuses the field and selects

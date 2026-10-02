@@ -293,13 +293,16 @@ __bateri_hooks() {
 # is bateri's socket directory (`__bateri_ssh_instance`): the session becomes a
 # master there and bateri's file jobs ride it (phase-5).
 #
-# THE SILENT FALLBACK (049 R3): a wrapped `ssh` that ended with anything but
-# ssh's own error (255) asks `bateri ssh-fell-back --rc N [--instance I] --
-# <the wrapped arguments>`. The binary takes the attempt's nonce out of them
-# and answers nothing when the bootstrap said `up` — the user's session ran
-# and its code is theirs, so an `exit` is never followed by a new connection
-# —, or the plain rerun's arguments when it did not (a router, Windows: our
-# command never ran); the rerun shares the wrapped call's `--instance`, so it
+# THE SILENT FALLBACK (049 R3): every wrapped `ssh` that ended asks `bateri
+# ssh-fell-back --rc N [--instance I] -- <the wrapped arguments>` — 255 too:
+# ssh's own error (a password, the network, a host key) is the binary's to
+# tell from an endpoint that refused our command after the login (049
+# phase-3, the pane's login proof). The binary takes the attempt's nonce out
+# of them and answers nothing when the bootstrap said `up` or the user typed
+# after the login — the user's session ran and its code is theirs, so an
+# `exit` is never followed by a new connection —, or the plain rerun's
+# arguments when it did not (a router, Windows: our command never ran); the
+# rerun shares the wrapped call's `--instance`, so it
 # rides the wrapped session's master while it lingers. The function returns
 # the code of the last `ssh` it ran.
 #
@@ -330,7 +333,6 @@ __bateri_ssh() {
     wrapped[-1]=()
     command ssh "${wrapped[@]}"
     rc=$?
-    (( rc == 255 )) && return rc
     out=$(command $__bateri_bin ssh-fell-back --rc $rc "${instance[@]}" -- "${wrapped[@]}" 2>/dev/null)
     if [[ -n $out && $out == *$'\0' ]]; then
       local -a plain
