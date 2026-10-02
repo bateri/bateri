@@ -307,3 +307,5 @@ Kullanıcı önerilerin tamamını onayladı ("önerilerle devam").
   (proje kuralı).
 
 Phase bölmesi `plan.md`'de.
+
+"İlk bağlantıda öğren" kararı 049'da geri alındı → `.tasks/049-uzak-entegrasyon-ilk-baglanti/`.
