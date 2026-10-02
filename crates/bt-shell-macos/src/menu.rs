@@ -1,5 +1,6 @@
 //! Main menu: the app menu (About, Check for Updates…, Settings…, Hide, Quit), Shell (New
-//! Window, New Tab, New Local Tab, Mark Host as ▸, Cancel Upload, Split
+//! Window, New Tab, New Local Tab, Mark Host as ▸, Shell Integration on Host,
+//! Forget Password, Cancel Upload, Split
 //! Right, Split Down, Close Tab/Close, Close Window), Edit (Cut, Copy, Paste, Paste
 //! Escaped Text, Select All, Clear to Start, Clear Scrollback, Find ▸
 //! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
@@ -26,7 +27,9 @@
 //! to the key window's delegate (`window::TerminalWindow` — belongs to the tab);
 //! `performMiniaturize:`, `performZoom:` and the tab actions
 //! (`selectNextTab:`, `moveTabToNewWindow:`…) to `NSWindow` itself;
-//! `openSettings:`, the theme actions, `markHost:` and
+//! `openSettings:`, the theme actions, `markHost:`, `toggleHostIntegration:`
+//! (its title, checkmark and grey state in the app delegate's
+//! `validateMenuItem:`, from [`integration_menu`]) and
 //! `newWindow:`/`newTab:`/`newLocalTab:` to the app delegate
 //! (the same path as the settings record's `settingsDidChange:` — they spread to all
 //! windows or must work even when there is no window);
@@ -107,6 +110,34 @@ pub(crate) fn forget_title(host: Option<&str>) -> String {
     match host {
         Some(host) => format!("Forget Password for \u{201c}{}\u{201d}", bare_host(host)),
         None => "Forget Password".to_owned(),
+    }
+}
+
+/// Shell ▸ Shell Integration on “{host}” (048 R6): the toggle's state, pure.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct IntegrationMenu {
+    pub(crate) title: String,
+    pub(crate) enabled: bool,
+    pub(crate) checked: bool,
+}
+
+/// The toggle's model: on a remote tab (`Some((host, on))`, `on` the
+/// **resolved** answer — `Settings::integration_for`, so a production-marked
+/// host without an entry of its own shows unchecked) the title carries the
+/// host without `user@`; locally "Shell Integration on Host", grey and
+/// unchecked. The action writes the opposite of `on` for this host.
+pub(crate) fn integration_menu(remote: Option<(&str, bool)>) -> IntegrationMenu {
+    match remote {
+        Some((host, on)) => IntegrationMenu {
+            title: format!("Shell Integration on \u{201c}{}\u{201d}", bare_host(host)),
+            enabled: true,
+            checked: on,
+        },
+        None => IntegrationMenu {
+            title: "Shell Integration on Host".to_owned(),
+            enabled: false,
+            checked: false,
+        },
     }
 }
 
@@ -345,6 +376,16 @@ pub(crate) fn install(
             // Its title and grey state on opening ([`ShellMenuDelegate`]); the items go to the
             // app delegate with `markHost:` (the active tab's host).
             mark_holder(mtm),
+            // Whether a plain ssh to the tab's host sets up the shell
+            // integration (048 R6); handled by the app delegate
+            // (`toggleHostIntegration:`), its title and state from its
+            // `validateMenuItem:`. Takes effect from the next ssh.
+            item(
+                mtm,
+                &integration_menu(None).title,
+                sel!(toggleHostIntegration:),
+                "",
+            ),
             // The tab's saved ssh password (047 R6.2): the handler is the focused
             // pane (`forgetPassword:`), grey without one (`validateMenuItem:`).
             {
@@ -630,6 +671,48 @@ mod tests {
             mark_menu(Some(("vm", HostMark::Rgb(0xc678dd)))).checked,
             None
         );
+    }
+
+    #[test]
+    fn the_integration_toggle_follows_the_resolution() {
+        let settings = |text: &str| {
+            bt_core::Settings::parse(text)
+                .expect("parseable text")
+                .settings
+        };
+        let model = |text: &str, host: &str| {
+            integration_menu(Some((host, settings(text).integration_for(host))))
+        };
+        // Locally: grey, unchecked.
+        assert_eq!(
+            integration_menu(None),
+            IntegrationMenu {
+                title: "Shell Integration on Host".to_owned(),
+                enabled: false,
+                checked: false,
+            }
+        );
+        // An unmarked host follows `[remote] integration` (on by default).
+        assert_eq!(
+            model("", "deploy@web"),
+            IntegrationMenu {
+                title: "Shell Integration on \u{201c}web\u{201d}".to_owned(),
+                enabled: true,
+                checked: true,
+            }
+        );
+        assert!(!model("[remote]\nintegration = false\n", "web").checked);
+        // A production mark turns it off — through a glob too —, an entry of the
+        // host's own turns it back on.
+        let prod = "[remote]\nhosts = [{ host = \"prod-*\", mark = \"production\" }]\n";
+        assert!(!model(prod, "prod-web").checked);
+        let edit = bt_core::SettingsEdit::RemoteHostIntegration {
+            host: "prod-web".to_owned(),
+            on: true,
+        };
+        let written = bt_core::Settings::with_edit(prod, &edit).expect("writable text");
+        assert!(model(&written, "prod-web").checked);
+        assert!(!model(&written, "prod-db").checked);
     }
 
     #[test]

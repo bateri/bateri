@@ -25,8 +25,9 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-    NSApplicationDelegate, NSApplicationTerminateReply, NSEvent, NSMenu, NSMenuDelegate,
-    NSMenuItem, NSWindow, NSWorkspace, NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
+    NSControlStateValueOn, NSEvent, NSMenu, NSMenuDelegate, NSMenuItem, NSWindow, NSWorkspace,
+    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSNumber, NSObject,
@@ -1136,7 +1137,26 @@ define_class!(
             if item.action() == Some(sel!(closeTab:)) {
                 item.setTitle(&NSString::from_str(window::close_title(1)));
             }
-            true
+            // Shell ▸ Shell Integration on “{host}” (048 R6): the key tab's host
+            // and its resolved answer; locally grey.
+            if item.action() == Some(sel!(toggleHostIntegration:)) {
+                let remote = self.key_remote_mark().map(|(host, _)| {
+                    let on = self.settings().integration_for(&host);
+                    (host, on)
+                });
+                let model = crate::menu::integration_menu(
+                    remote.as_ref().map(|(host, on)| (host.as_str(), *on)),
+                );
+                item.setTitle(&NSString::from_str(&model.title));
+                item.setState(if model.checked {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                model.enabled
+            } else {
+                true
+            }
         }
 
         /// Shell ▸ New Tab (⌘T): a new tab in the active window's group; a new
@@ -1196,6 +1216,19 @@ define_class!(
             };
             if let Some((host, _)) = self.key_remote_mark() {
                 self.save_edit(&SettingsEdit::RemoteHostMark { host, mark });
+            }
+        }
+
+        /// Shell ▸ Shell Integration on “{host}” (048 R6): writes the opposite of
+        /// the host's resolved answer as the host's own `[remote] hosts` entry
+        /// (`SettingsEdit::RemoteHostIntegration`) — the Mark … as ▸ path: the
+        /// menu only writes, nothing is written to an unparseable file, and the
+        /// next `ssh` reads the file. A no-op if the tab became local.
+        #[unsafe(method(toggleHostIntegration:))]
+        fn toggle_host_integration(&self, _sender: Option<&AnyObject>) {
+            if let Some((host, _)) = self.key_remote_mark() {
+                let on = !self.settings().integration_for(&host);
+                self.save_edit(&SettingsEdit::RemoteHostIntegration { host, on });
             }
         }
 
