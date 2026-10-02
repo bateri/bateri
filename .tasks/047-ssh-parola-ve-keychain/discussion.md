@@ -274,3 +274,28 @@ olan `objc2-core-foundation`.
     Password for “{host}”**; ayar penceresindeki liste sonraki tur (Karar 6).
   - Yeni bağımlılık **`objc2-security` 0.3.2** onaylı (`default-features =
     false`, `std` + `SecItem`; yalnız `bt-shell-macos`; Karar 8).
+
+## Karar — ek (2026-10-02, kullanıcı onayı): bağlantı kullanıcının oturumuna bağlı
+
+**Kanıt (kullanıcı, gözle kontrol adım 4):** bateri-dev kapatılıp yeniden
+açıldı, `ssh` yazıldı ve parola girilmeden yük göstergesi geldi. Süreç
+tablosu: adım 1'de 18:03:38'de açılan master (`ControlPersist=600`)
+uygulama 18:07:03'te yeniden açıldığında hâlâ canlıydı — Muhakeme'nin
+"kapanışta hiçbir şey gönderilmez" kararının sonucu. Bedeli: bağlantı
+yaşadıkça aynı kullanıcının her süreci soket üzerinden parolasız komut
+koşturabiliyor (Keychain'in "izin ver?" sorusu atlanıyor) ve sunucuda
+kullanıcı girmeden bir oturum açılıyor.
+
+**Kullanıcı kararı:** gösterge kullanıcının ssh girişinden **sonra** gelir.
+
+- **Seçilen:** (1) arka plan işleri (`Ask::Never`) kullanıcının girişini
+  bekler — işaret PTY'nin termios'u (`ICANON` + `ECHO` kapalı; master fd'den
+  okunabildiği macOS'ta ölçüldü), hızlı yan işaretler uzak başlık, uzak OSC 7,
+  `?2004h`; (2) bağlantı kullanıcının o host'taki son oturumu bitince ve
+  ⌘Q'da kapanır (`-O exit`); (3) soket dizini örnek başına, yani iki bateri
+  bağlantı paylaşmaz ve birinin kapanışı ötekini öldürmez. Muhakeme'nin
+  "kapanışta dokunulmaz" maddesi bununla **geri alındı**.
+- **Reddedilen:** "ssh başladıktan sonraki ilk Enter" işareti — ilk Enter
+  çoğu zaman host anahtarı sorusunun `yes`'i, bateri yine paroladan önce
+  bağlanırdı; yalnız açanın kaydıyla `-O exit` — paylaşılan soket yolunda
+  ikinci örneğin aktarımını öldürür. Bedel: iki örnek aynı host'a iki giriş.

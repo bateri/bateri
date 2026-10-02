@@ -71,6 +71,23 @@ gerilemez.
   bağımlılık ve katman satırlarında; `THIRD-PARTY-LICENSES.txt` yeniden
   üretilir; yeni ayar anahtarı doğarsa `docs/AYARLAR.md`.
 
+- **R9 — bateri'nin bağlantısı kullanıcının oturumundan uzun yaşamaz**
+  (kullanıcı bildirdi, 2026-10-02). Arka plan işleri kullanıcının ssh'ı
+  giriş yapmadan bağlanmaz; master kullanıcının o host'taki son oturumu
+  bitince ve uygulama kapanınca kapanır; başka bir bateri örneğinin
+  bağlantısına dokunulmaz.
+  - **R9.1** Giriş işareti: ön plandaki ssh'ın PTY'si kanonik ve yankısız
+    değil (`ICANON` ve `ECHO` ikisi de kapalı; ölçüldü — host anahtarı
+    sorusu 1/1, parola sorusu 1/0, giriş 0/0) ya da uzak başlık
+    `kullanıcı@host` biçiminde, uzak OSC 7 ya da `?2004h` geldi. Yalnız
+    `Ask::Never` çağıranlar (yük göstergesi, ⌘-hover) bekler; kullanıcının
+    başlattığı işler beklemez.
+  - **R9.2** Soket dizini örnek başına (açılışta rastgele alt dizin);
+    açılış süpürmesi yaşayan örneğin dizinine dokunmaz.
+  - **R9.3** Pane'in uzak oturumu bitince ve bu örnekte o host'ta başka uzak
+    pane yoksa master `-O exit`; ⌘Q'da bu örneğin bütün master'ları, kapanış
+    son tarihinin içinde.
+
 ## Yaklaşım
 
 1. **Saf parçalar (`bt-shell-common`).** `ssh_route` modülü: rota tipi
@@ -124,4 +141,5 @@ iş (damla, ⌘-tık, indirme, sürükle, hover, gösterge)
 | phase-1 | ✅ |
 | phase-2 | ✅ |
 | phase-3 | ✅ |
-| kapı | ✅ |
+| phase-4 | |
+| kapı | |
