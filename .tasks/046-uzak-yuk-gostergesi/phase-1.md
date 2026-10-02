@@ -57,10 +57,28 @@ _Requirements: R1.1, R1.2, R1.3, R7_
 
 ## Checklist
 
-- [ ] `small_metrics` ve küçük sınıf yordamsal kolu
-- [ ] Ayrı tampona çizim + taban çizgisi hizalı kopya
-- [ ] Test: küçük `█` yalnız küçük kutuyu dolduruyor, yuva ayrı
-- [ ] Test: `▁…█` küçük sınıfta hizalı ve sekizde bir adımlı
-- [ ] Test: `▲`, `●` küçük sınıfta kutu değil
-- [ ] `CLAUDE.md` cümlesi
-- [ ] Doğrulama geçti (`make check` + `make linux`)
+- [x] `small_metrics` ve küçük sınıf yordamsal kolu
+- [x] Ayrı tampona çizim + taban çizgisi hizalı kopya
+- [x] Test: küçük `█` yalnız küçük kutuyu dolduruyor, yuva ayrı
+- [x] Test: `▁…█` küçük sınıfta hizalı ve sekizde bir adımlı
+- [x] Test: `▲`, `●` küçük sınıfta kutu değil
+- [x] `CLAUDE.md` cümlesi
+- [x] Doğrulama geçti (`make check` + `make linux`)
+
+## Uygulama Notları
+
+- Küçük `Metrics` `rules::metrics(&small, ..)` ile değil yeni
+  `rules::metrics_at(font, advance, line_height)` ile doğuyor: genişlik
+  `context_advance`'ten geçiriliyor, yani küçük sınıfın tek genişlik kaynağı
+  korunuyor; `the_cell_is_the_rounded_advance` üçüncü okuyucuyu
+  (`small_metrics.cell_px.0 == context_cell_w`) sınıyor.
+- Taşıma `place_small` serbest fonksiyonunda; dikey kaydırma işaretli
+  (`i64`), taşan satır/sütun kırpılıyor.
+- `GATE_PROBES` bekçisinin (`fallback_gate_…`) yordamsal muafiyeti artık iki
+  sınıfta da: `⠋` küçük sınıfta yedeğe gitmiyor, "kapalı kapının tek tanığı"
+  rolü kalktı ve iki arka ucun `GATE_PROBES` listesinden çıktı (iki sınıfta da
+  ölü sondaydı); ölçüt geri alınırsa tanık yalnız `INK_CHAR`.
+- `make linux`'un ilk koşusunda dokunulmamış
+  `bt-shell-common::jobs::tests::the_process_table_reads_a_real_argv` bir kez
+  kırmızı (`/proc/{pid}/cmdline` `exec`'ten önce okundu — `None`); ikinci koşu
+  yeşil. Bu phase'in diff'iyle ilgisi yok, yarış önceden var.

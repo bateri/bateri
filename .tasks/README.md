@@ -47,7 +47,7 @@
 | 043 | [bt-shell-ayrimi](043-bt-shell-ayrimi/) | 🟢 | 5 phase + kapı tamam — kabuk katmanı `bt-shell-common` (AppKit'siz, Linux gövdeleriyle `make linux`'ta) ve `bt-shell-macos` olarak ayrıldı, macOS'ta fark yok (3 bulgu giderildi, 6 waive) |
 | 044 | [tiklanabilir-baglantilar](044-tiklanabilir-baglantilar/) | 🟢 | 6 phase + kapı tamam — ⌘-hover/⌘-tık ile URL, var olan yol ve OSC 8 açılıyor (ızgara, bant, dock), ⌘'siz OSC 8 kesikli, hedef etiketi ve sağ tık menüsü |
 | 045 | [uzak-dosya-indirme](045-uzak-dosya-indirme/) | 🟢 | 6 phase + kapı tamam — ssh'ta `ls` çıktısındaki dosyaya ⌘-tık salt okunur önizleme, ⌘-sürükle Finder'a, sağ tık Downloads'a indiriyor; aktarım kuyruğu iki yönlü, önizleme klasörü kendiliğinden temizleniyor ve ayar penceresinde Remote Files kategorisi var; gerçek ssh sunucusunda henüz gözle görülmedi |
-| 046 | [uzak-yuk-gostergesi](046-uzak-yuk-gostergesi/) | 📐 | ssh durum çubuğunun sağında uzak Linux makinenin CPU/bellek/disk yükü (varsayılan sparkline, tıkla ayrıntı popover'ı), 045'in yardımcı oturumundan yoklamayla; 5 phase planlandı |
+| 046 | [uzak-yuk-gostergesi](046-uzak-yuk-gostergesi/) | 🔨 | ssh durum çubuğunun sağında uzak Linux makinenin CPU/bellek/disk yükü (varsayılan sparkline, tıkla ayrıntı popover'ı), 045'in yardımcı oturumundan yoklamayla; 1/5 phase — küçük sınıfta yordamsal karakterler |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

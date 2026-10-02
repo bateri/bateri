@@ -27,9 +27,10 @@
 //! (the marker of Claude Code's tool results) used to arrive from the cascade
 //! as a glyph that **does not fit the cell** and came out as a box. They are
 //! face-independent (the four faces share one slot; the thin/heavy distinction
-//! is already in the character itself), but **only in the large class**: in
-//! the dock's context line the column step is the small face's advance, and a
-//! sprite at the large cell width would overlap its neighbour there.
+//! is already in the character itself) and drawn in **both** size classes,
+//! each at its own cell: in the dock's context line the column step is the
+//! small face's advance, so the small class's sprite is drawn at the small
+//! cell and placed on the large slot's baseline (046 Karar 3).
 //!
 //! A **single-cell** character missing from the selected font comes from the
 //! system's cascade (`rules::fallback_font`) and the gate is **geometric**: a
@@ -327,6 +328,24 @@ pub struct Atlas {
     /// it**: if computed by two separate routes (one `rules::metrics`, the
     /// other `space_advance`) the same measure would have two sources.
     context_cell_w: u16,
+    /// The small face's own cell: the measure a **procedural** character is
+    /// drawn at in the small class (046 Karar 3).
+    ///
+    /// A font glyph does not need it — it is drawn into the large slot on the
+    /// large baseline and its size comes from the font. A procedural sprite
+    /// has no font size: it *is* the cell, so it has to be drawn at the cell
+    /// the context line steps by, or a `█` at the large width would overlap
+    /// its neighbour. Born from [`Atlas::context_advance`]
+    /// (`rules::metrics_at`), i.e. its width is [`Atlas::context_cell_w`] and
+    /// the small class still has one width source; the height follows the
+    /// same rule and the same `line_height` as the large cell's.
+    small_metrics: Metrics,
+    /// The drawing buffer of a small procedural sprite,
+    /// [`Atlas::small_metrics`]' `slot_bytes` long. The sprite is drawn here
+    /// and then copied into [`Atlas::buffer`] baseline-aligned
+    /// (`place_small`); a field for the same reason as `buffer` — no
+    /// allocation per glyph.
+    small_buffer: Vec<u8>,
     /// The (family, point size, scale) it was built with. The criterion of
     /// [`Atlas::ensure`].
     key: Key,
@@ -469,6 +488,10 @@ impl Atlas {
         // width from it would be deriving the same number by a second route.
         let context_advance = rules::space_advance(&small);
         let context_cell_w = rules::round_up(context_advance);
+        // The small cell for procedural sprites. `line_height` **is** asked
+        // here: this is a whole cell, and the context line's row grows with the
+        // line spacing like the grid's.
+        let small_metrics = rules::metrics_at(&small, context_advance, line_height);
         let (w, h) = metrics.cell_px;
         // The edge is derived from the **slot target**: as the cell grows the
         // capacity drops and somewhere it falls below the procedural family
@@ -497,6 +520,8 @@ impl Atlas {
             cell_advance,
             context_advance,
             context_cell_w,
+            small_metrics,
+            small_buffer: vec![0u8; small_metrics.slot_bytes()],
             key: Key {
                 family: family.map(str::to_owned),
                 point_size,
@@ -663,10 +688,11 @@ impl Atlas {
         // silent.
         // `want` is normalized too and is forced down to `Whole` in two places:
         // rule sprites (independent of face and size, always one cell) and the
-        // **small class**. The reason for the second is the same as 021's
-        // procedural gate: the column step of the dock's context line is the
-        // small face's advance, yet the box derives from the large cell — a
-        // two-cell glyph would overlap its neighbour there. The dock's input
+        // **small class**. The reason for the second: the column step of the
+        // dock's context line is the small face's advance, yet the two-cell box
+        // derives from the large cell — a two-cell glyph would overlap its
+        // neighbour there. (The procedural family is single-cell by
+        // definition, so this arm does not touch it.) The dock's input
         // line is `Normal` but `wide` never arrives there (an invariant of
         // `bt_core::dock`), i.e. this arm only closes the context line.
         let want = match (sprite, size) {
@@ -675,6 +701,9 @@ impl Atlas {
         };
         let (face, size) = match (sprite, size) {
             (Sprite::Rule(_), _) => (Face::Regular, SizeClass::Normal),
+            // A small procedural character lands here too: the face is regular
+            // anyway and the class stays `Small`, so its key never collides
+            // with the large class's sprite (two cells, two measures).
             (Sprite::Char(_), SizeClass::Small) => (Face::Regular, SizeClass::Small),
             // Unicode carries the thin/heavy distinction **in the character
             // itself** (`─` U+2500 thin, `━` U+2501 heavy), i.e. SGR bold
@@ -683,14 +712,11 @@ impl Atlas {
             // loads the atlas once, not four times.
             //
             // The pattern is `SizeClass::Normal`, **not** `_`: had `_` been
-            // written, a small request would be forced to `Normal` too and the
-            // `size == Normal` guard below would open exactly where it was meant
-            // to be closed. The reason the gate is closed in the small class is
-            // not tiling but **measure divergence**: `Metrics` is the large
-            // cell's, i.e. a procedural sprite is drawn at the large cell width,
-            // while the dock's context line's column step is the small face's
-            // advance (`Frame::column_px`) — a sprite filling the cell exactly
-            // would overlap its neighbour there.
+            // written, a small request would be forced to `Normal` and drawn at
+            // the large cell's width — while the dock's context line steps by
+            // the small face's advance (`Frame::column_px`), i.e. the sprite
+            // would overlap its neighbour. The small class keeps its own key
+            // and its own measure ([`Atlas::small_metrics`], 046 Karar 3).
             (Sprite::Char(ch), SizeClass::Normal) if raster::is_procedural(ch) => {
                 (Face::Regular, SizeClass::Normal)
             }
@@ -858,16 +884,33 @@ impl Atlas {
             // below, `raster::draw` stays pure as a font path and the doc of
             // `DrawResult` ("the font's answer") is not strained.
             //
-            // `size` is the **normalized** one: the small class stays `Small`
-            // in the arm above, i.e. the guard eliminates it and the context
-            // line keeps taking box characters from the font.
+            // **Both classes** take this arm, each at its own cell (046 Karar
+            // 3): the large class at [`Atlas::metrics`] straight into the slot,
+            // the small class at [`Atlas::small_metrics`] into a separate
+            // buffer and from there into the large slot, its baseline on the
+            // large cell's — the row the small font's letters sit on, so a
+            // sparkline stands on the same line as the text beside it and tiles
+            // at the context line's column step.
             // The procedural family is **single-cell by definition**: block
             // elements, Braille, box drawing and the technical set are
             // single-column from start to finish (measured, the 023
             // inventory). So `Whole` is not an assumption but the family's own
             // property.
-            Sprite::Char(ch) if size == SizeClass::Normal && raster::is_procedural(ch) => {
-                raster::draw_procedural(ch, self.metrics, &mut self.buffer);
+            Sprite::Char(ch) if raster::is_procedural(ch) => {
+                match size {
+                    SizeClass::Normal => {
+                        raster::draw_procedural(ch, self.metrics, &mut self.buffer);
+                    }
+                    SizeClass::Small => {
+                        raster::draw_procedural(ch, self.small_metrics, &mut self.small_buffer);
+                        place_small(
+                            &self.small_buffer,
+                            self.small_metrics,
+                            &mut self.buffer,
+                            self.metrics,
+                        );
+                    }
+                }
                 (DrawResult::Drawn, Half::Whole, Plane::Mask)
             }
             Sprite::Char(ch) => {
@@ -1460,6 +1503,35 @@ fn effective_point_size(point_size: f64, scale: f64) -> f64 {
 /// others a box and which one depends on the font version. Drawing the frame
 /// ourselves makes tofu font-independent — the "visible loss" claim holds only
 /// this way.
+/// Copies a small-class sprite (`src`, drawn at `small`) into a large slot
+/// (`dst`, `large`): left edge at column 0, the small cell's baseline row on
+/// the large cell's (046 Karar 3).
+///
+/// What falls outside the large slot is **clipped**, not a panic: the small
+/// cell is shorter and narrower than the large one with every real font, but
+/// the relation is the fonts' data, not a type — and this runs in the display
+/// link's callback. The rest of the slot is zero, so neither the previous
+/// glyph nor the small cell's own box edge leaks into the neighbour.
+fn place_small(src: &[u8], small: Metrics, dst: &mut [u8], large: Metrics) {
+    dst.fill(0);
+    let (sw, sh) = small.cell_wh();
+    let (lw, lh) = large.cell_wh();
+    // Signed: the small baseline above the large one is the normal case
+    // (`dy > 0`), but nothing in the type rules out the reverse.
+    let dy = i64::from(large.baseline_px) - i64::from(small.baseline_px);
+    let cols = sw.min(lw);
+    for y in 0..sh {
+        let Some(ty) = i64::try_from(y)
+            .ok()
+            .and_then(|y| usize::try_from(y + dy).ok())
+            .filter(|&ty| ty < lh)
+        else {
+            continue;
+        };
+        dst[ty * lw..ty * lw + cols].copy_from_slice(&src[y * sw..y * sw + cols]);
+    }
+}
+
 fn tofu_buffer(m: Metrics) -> Vec<u8> {
     let (w, h) = m.cell_wh();
     let mut target = vec![0u8; m.slot_bytes()];
@@ -1574,6 +1646,12 @@ mod tests {
                 a.context_cell_w,
                 "{point_size}×{scale}: the two representations of the small class diverged ({})",
                 a.context_advance
+            );
+            // The small cell of procedural sprites (046) is a third reader of
+            // the same width, not a third source.
+            assert_eq!(
+                a.small_metrics.cell_px.0, a.context_cell_w,
+                "{point_size}×{scale}: the small procedural cell is not the context line's column step"
             );
         }
     }
@@ -1794,8 +1872,10 @@ mod tests {
         // the gate does not run on `slot`'s path, this test fails.
         //
         // If the expectation were derived from the **advance**, this test
-        // would fail on two characters ([`INK_CHAR`] and `⠋`); that is why
-        // they stay in the list — reverting the criterion must not be silent.
+        // would fail on [`INK_CHAR`]; that is why it stays in the list —
+        // reverting the criterion must not be silent. (`⠋` was the second
+        // witness until 046 opened the procedural gate in the small class:
+        // it no longer reaches the fallback in either class.)
         let mut a = atlas(POINT_SIZE, 1.0);
         let classes = size_classes(&a);
         let mut plan: Vec<(char, SizeClass, bool, String)> = Vec::new();
@@ -1811,11 +1891,8 @@ mod tests {
                 }
                 // A procedurally drawn character is not the experiment's
                 // subject either: the gate stands **before** it and the font
-                // is never asked. The gate's predicate is repeated exactly
-                // here, not `is_procedural(ch)` alone — `⠋` still goes through
-                // the fallback path in the small class and is the only witness
-                // of the closed gate in this test.
-                if size == SizeClass::Normal && raster::is_procedural(ch) {
+                // is never asked — in both classes since 046 (Karar 3).
+                if raster::is_procedural(ch) {
                     continue;
                 }
                 // If there is no candidate at all it is not the gate's subject either — the gate does not issue the rejection.
@@ -3711,52 +3788,141 @@ mod tests {
         assert_eq!(a.occupancy().0, 2, "expected tofu + a single slot");
     }
 
-    #[test]
-    fn the_small_class_still_asks_the_font() {
-        // The gate is **closed** in the small class, and the reason is not
-        // tiling but a measure mismatch: `Metrics` is the large cell's, so the
-        // procedural sprite is drawn at the large cell width, while the column
-        // step of the dock's context line is the small face's advance
-        // (`Frame::column_px`). A sprite filling the cell exactly would overlap
-        // its neighbour there — and the context line carries the path and the
-        // branch, both user data.
-        let mut a = atlas(POINT_SIZE, 1.0);
-        let (placed_normal, normal) = a.slot(
-            Sprite::Char('\u{2588}'),
-            Face::Regular,
-            SizeClass::Normal,
-            Half::Whole,
-        );
-        let normal_slot = placed_normal.slot;
-        assert!(
-            normal
-                .expect("a new slot must yield an upload")
-                .bytes
-                .iter()
-                .all(|&b| b == 255),
-            "the gate did not open in the large class"
-        );
-        let (placed_small_slot, small) = a.slot(
-            Sprite::Char('\u{2588}'),
+    /// The bytes of a fresh small-class slot.
+    fn small_slot_bytes(a: &mut Atlas, ch: char) -> (u16, Vec<u8>) {
+        let (placed, upload) = a.slot(
+            Sprite::Char(ch),
             Face::Regular,
             SizeClass::Small,
             Half::Whole,
         );
-        let small_slot = placed_small_slot.slot;
-        let small = small
+        let bytes = upload
             .expect("a new slot must yield an upload")
             .bytes
             .to_vec();
-        assert_ne!(
-            small_slot, normal_slot,
-            "the small class shared the large one's slot"
-        );
-        // Menlo's `█` does not fill the cell — the reason this set exists is
-        // exactly this. So "not all 255" is the font's signature here.
-        assert!(
-            small.iter().any(|&b| b != 255),
-            "the gate opened in the small class: the sprite was drawn procedurally"
-        );
+        (placed.slot, bytes)
+    }
+
+    /// Where the small cell lands in the large slot: (row of its top edge,
+    /// its rows, its columns), clipped to the slot — the same placement
+    /// `place_small` applies, derived from the two `Metrics` here.
+    fn small_box(a: &Atlas) -> (usize, usize, usize) {
+        let (sw, sh) = a.small_metrics.cell_wh();
+        let (lw, lh) = a.metrics.cell_wh();
+        let top = usize::from(a.metrics.baseline_px - a.small_metrics.baseline_px);
+        (top, sh.min(lh - top), sw.min(lw))
+    }
+
+    #[test]
+    fn the_small_class_draws_procedurally_at_its_own_cell() {
+        // 046 Karar 3: the gate is **open** in the small class, at the small
+        // face's own cell. `█` fills exactly that box — the context line's
+        // column step wide, the small cell high, its baseline on the large
+        // cell's — and nothing outside it, otherwise neighbouring blocks would
+        // overlap (wider) or leave a seam (narrower). Every point size and
+        // scale the other measure guards walk.
+        for (point_size, scale) in [
+            (POINT_SIZE, 1.0),
+            (POINT_SIZE, 2.0),
+            (LARGE_POINT_SIZE, 1.0),
+        ] {
+            let mut a = atlas(point_size, scale);
+            let normal_slot = a
+                .slot(
+                    Sprite::Char('\u{2588}'),
+                    Face::Regular,
+                    SizeClass::Normal,
+                    Half::Whole,
+                )
+                .0
+                .slot;
+            let (small_slot, bytes) = small_slot_bytes(&mut a, '\u{2588}');
+            assert_ne!(small_slot, TOFU, "the small block fell to tofu");
+            assert_ne!(
+                small_slot, normal_slot,
+                "the small class shared the large one's slot"
+            );
+            let (lw, lh) = a.metrics.cell_wh();
+            let (top, rows, cols) = small_box(&a);
+            assert!(
+                cols < lw,
+                "{point_size}×{scale}: the small cell is not narrower than the large one"
+            );
+            for y in 0..lh {
+                for x in 0..lw {
+                    let inside = (top..top + rows).contains(&y) && x < cols;
+                    let want = if inside { 255 } else { 0 };
+                    assert_eq!(
+                        bytes[y * lw + x],
+                        want,
+                        "{point_size}×{scale}: ({x}, {y}) of the small `█`; box rows {top}..{} cols ..{cols}",
+                        top + rows
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn small_lower_blocks_stand_on_one_row_in_eighths() {
+        // The sparkline's eight levels (U+2581–2588) in the small class: all
+        // stand on the same bottom row — the small cell's bottom edge — and
+        // each is an eighth of the small cell taller than the one before. The
+        // height is read as the column's summed coverage, i.e. the fractional
+        // edge row counts by its share, the same way `add_rect` paints it.
+        for scale in [1.0, 2.0] {
+            let mut a = atlas(POINT_SIZE, scale);
+            let (top, rows, _) = small_box(&a);
+            let (lw, _) = a.metrics.cell_wh();
+            let sh = a.small_metrics.cell_px.1;
+            let mut previous = 0.0;
+            for (k, ch) in ('\u{2581}'..='\u{2588}').enumerate() {
+                let (_, bytes) = small_slot_bytes(&mut a, ch);
+                let column: Vec<u8> = (0..bytes.len() / lw).map(|y| bytes[y * lw]).collect();
+                let bottom = column
+                    .iter()
+                    .rposition(|&b| b > 0)
+                    .expect("the block painted nothing");
+                assert_eq!(
+                    bottom,
+                    top + rows - 1,
+                    "×{scale}: '{ch}' does not stand on the small cell's bottom row"
+                );
+                let height: f64 = column.iter().map(|&b| f64::from(b) / 255.0).sum();
+                let want = f64::from(sh) * (k + 1) as f64 / 8.0;
+                assert!(
+                    (height - want).abs() <= 0.5,
+                    "×{scale}: '{ch}' is {height} rows high, an eighth step wants {want}"
+                );
+                assert!(height > previous, "×{scale}: '{ch}' is not taller");
+                previous = height;
+            }
+        }
+    }
+
+    // Calibration: names a font (042 Karar 7).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_stats_glyphs_have_no_box_in_the_small_class() {
+        // 046: the load indicator sits in the context line, i.e. the small
+        // class. A hand copy of `bt-core`'s `STATS_GLYPHS` minus the
+        // procedural blocks (this crate cannot see it; the counter-guard
+        // linking the two lists lives on `bt-core`'s side) — the twin of
+        // `the_upload_row_has_no_box_in_the_small_class`. Menlo, by name.
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
+        assert_eq!(menlo.font_issue(), None, "Menlo did not open");
+        for ch in ['▲', '●'] {
+            let slot = menlo
+                .slot(
+                    Sprite::Char(ch),
+                    Face::Regular,
+                    SizeClass::Small,
+                    Half::Whole,
+                )
+                .0
+                .slot;
+            assert_ne!(slot, TOFU, "'{ch}' is a box in Menlo's small class");
+        }
     }
 
     #[test]

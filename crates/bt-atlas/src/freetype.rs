@@ -914,14 +914,13 @@ pub mod fixture {
     /// Mono. `⟹` paints 2.3 cells, beyond `SHRINK_LIMIT` — the box side of
     /// the experiment; `⁂` is shrunk; the private-use ones have no candidate.
     /// The expectation is derived from each candidate's own ink by the test.
-    pub const GATE_PROBES: [char; 7] = [
+    pub const GATE_PROBES: [char; 6] = [
         FALLBACK_CHAR,
         INK_CHAR,
         UNKNOWN_CHAR,
         '\u{27F9}',
         WIDE_CHAR,
         '\u{10FFFD}',
-        '⠋',
     ];
 
     /// Symbols beyond ASCII whose advance must equal the cell's: all of them,

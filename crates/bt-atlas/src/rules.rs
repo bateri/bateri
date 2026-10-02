@@ -343,7 +343,16 @@ pub fn family_issue(family: &str) -> Option<FontIssue> {
 /// Derives the cell size from the font's own metrics ([`cell_metrics`] with
 /// the font's raw measurements).
 pub(crate) fn metrics(font: &Font, line_height: f64) -> Metrics {
-    cell_metrics(Backend::raw_metrics(font), space_advance(font), line_height)
+    metrics_at(font, space_advance(font), line_height)
+}
+
+/// [`metrics`] with the advance **handed in**: the caller already holds the
+/// font's [`space_advance`] and the width must not be derived a second time.
+/// The small class's `Metrics` is born this way, from the very number its
+/// column step rounds (`Atlas::context_advance`), i.e. the small class keeps
+/// one width source.
+pub(crate) fn metrics_at(font: &Font, space_advance: f64, line_height: f64) -> Metrics {
+    cell_metrics(Backend::raw_metrics(font), space_advance, line_height)
 }
 
 /// The space's horizontal advance — the cell width, **fractional**.
