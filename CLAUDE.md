@@ -1282,7 +1282,7 @@ aynı commit'te düzelir.
 ## Komutlar
 
 ```sh
-make check        # rustc sürümü + fmt --check + audit + clippy -D warnings + test (definition of done)
+make check        # rustc sürümü + eski .o temizliği (prune) + fmt --check + audit + clippy -D warnings + test (definition of done)
 make fmt          # cargo fmt --all -- --check
 make audit        # kuralların mekanik yarısı: katman yönü, bt-core'da gerekçesiz panik, rc dosyasına yazma; Cargo.lock değiştiyse uyarır
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
