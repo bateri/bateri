@@ -238,6 +238,13 @@ integration = "auto"
 #   { host = "*.staging.example.com", mark = "staging" },
 # ]
 hosts = []
+# true | false. Lets a plain ssh set up shell integration on the server, so
+# the folder (and later command blocks) follow you there too. bateri writes a
+# few small files to ~/.local/share/bateri/shell on the server and never
+# touches its rc files. A host is set up only after bateri has seen a shell
+# there once. A host marked "production" stays plain unless its entry says
+# integration = true; integration = false in an entry turns one host off.
+integration = true
 # Sizes are written like "100MB" or "2GB" (B, KB, MB, GB, TB); folders start
 # with / or ~/.
 # A file larger than this asks before its preview downloads (cmd-click on a
@@ -331,9 +338,9 @@ kopya yolu kalır.
 | açılışta | sonuç |
 |---|---|
 | dosya yok | varsayılanlar, uyarı yok |
-| dosya okunamıyor (izin, UTF-8 olmayan içerik, düz dosya değil, hedefi olmayan sembolik bağ) | varsayılanlar, yalnız `osc52` **kapalı**; uyarı |
-| geçersiz TOML | **bütün** ayarlar varsayılan, yalnız `osc52` **kapalı**; uyarı satırı gösterir |
-| bir anahtarın değeri kabul edilmiyor | yalnız o anahtar varsayılan (ya da sınırı; `osc52` için kapalı), uyarı |
+| dosya okunamıyor (izin, UTF-8 olmayan içerik, düz dosya değil, hedefi olmayan sembolik bağ) | varsayılanlar, yalnız `osc52` ve `[remote] integration` **kapalı**; uyarı |
+| geçersiz TOML | **bütün** ayarlar varsayılan, yalnız `osc52` ve `[remote] integration` **kapalı**; uyarı satırı gösterir |
+| bir anahtarın değeri kabul edilmiyor | yalnız o anahtar varsayılan (ya da sınırı; `osc52` ve `[remote] integration` için kapalı), uyarı |
 | tanınmayan anahtar ya da bölüm | sessizce yoksayılır |
 | seçilen tema bulunamıyor | görünüme uyan gömülü tema (koyuda `bateri`, açıkta `bateri-light`), uyarı |
 | tema dosyası okunamıyor, boş ya da geçersiz TOML | görünüme uyan gömülü tema, uyarı (aynı adlı gömülü tema **kullanılmaz**) |
@@ -352,7 +359,7 @@ ekranı bozmaz, uyarı çıkar ve dosyayı düzeltip kaydedince uyarı kalkar.
 |---|---|
 | ayar dosyası geçersiz TOML ya da okunamıyor | **hiçbir ayar değişmez**, uyarı |
 | ayar dosyası silindi ya da boşaltıldı | ayarlar değişmez, uyarı yok; varsayılanlar uygulamayı yeniden açınca gelir |
-| bir anahtarın değeri kabul edilmiyor | o anahtar **değişmez**, uyarı; tavanı aşan `scrollback` tavana iner, kabul edilmeyen `osc52` **kapanır** |
+| bir anahtarın değeri kabul edilmiyor | o anahtar **değişmez**, uyarı; tavanı aşan `scrollback` tavana iner, kabul edilmeyen `osc52` ve `[remote] integration` **kapanır** |
 | anahtar dosyadan silindi | o anahtar varsayılanına döner |
 | seçilen tema bulunamıyor, dosyası okunamıyor, boş ya da geçersiz TOML | **ekrandaki tema kalır**, uyarı |
 | font ailesi bulunamıyor | varsayılan font, uyarı; adı düzeltip kaydedince uyarı kalkar |
@@ -934,7 +941,9 @@ hosts = [
   { host = "prod-*", mark = "production" },
   { host = "*.staging.example.com", mark = "staging" },
   { host = "vm", mark = "#c678dd" },
+  { host = "router*", integration = false },
 ]
+integration = true
 ```
 
 | anahtar | tür | varsayılan | anlamı |
@@ -950,6 +959,7 @@ hosts = [
 | `download_notify` | `true` \| `false` | `true` | bateri arkadayken biten aktarım bildirim gönderir |
 | `stats` | `"sparkline"` \| `"numbers"` \| `"alerts"` \| `"off"` | `"sparkline"` | ssh durum çubuğunun sağındaki uzak yük göstergesinin biçimi; `off` göstergeyi ve örneklemeyi kapatır |
 | `stats_interval` | tam sayı, saniye, `2`–`60` | `3` | yük göstergesinin iki örneği arası |
+| `integration` | `true` \| `false` | `true` | düz `ssh` sunucuda kabuk entegrasyonunu kurar (uzak kabuk entegrasyonu, aşağıda) |
 
 ssh ya da mosh ile uzak bir makinedeyken dock'un bağlam satırı `⇄ host`
 gösterir ve üst çizgisi renklenir. `hosts` o rengi host'a göre seçer, yani
@@ -984,10 +994,49 @@ prod'da olduğunuzu renkten bilirsiniz.
   işaretin renginde küçük bir nokta taşır; işaretsiz uzak sekmede nokta
   yoktur.
 - Kaydettiğiniz anda geçerli olur, ssh sürerken de.
-- **Bozuk bir girdi** (bilinmeyen `mark`, `host`'suz girdi, tablo olmayan
-  öğe) listenin **tamamını** reddeder: açılışta liste boş, kayıt anında
-  ekrandaki liste kalır ve uyarı görünür. Yalnız bozuk girdiyi atmak sırayı
+- **`integration`** (`true` \| `false`, isteğe bağlı): o host'ta uzak kabuk
+  entegrasyonu (aşağıda). Girdi yalnız `integration` da taşıyabilir
+  (`{ host = "router*", integration = false }`); o zaman işareti yoktur ve
+  işaretin aramasına katılmaz. İki anahtar ayrı ayrı çözülür, ikisinde de
+  **ilk eşleşen** kazanır: `mark` için `mark` taşıyan, `integration` için
+  `integration` taşıyan ilk girdi — yani bir host'ta entegrasyonu kapatmak
+  rengini almaz. Menüden işaret verilen böyle bir girdi `mark`'ını yerinde
+  alır; menü bir girdiyi silerken ya da başa taşırken `integration`'ı yeni
+  girdiye taşır.
+- **Bozuk bir girdi** (bilinmeyen `mark`, `host`'suz girdi, ne `mark` ne
+  `integration` taşıyan girdi, `true`/`false` olmayan `integration`, tablo
+  olmayan öğe) listenin **tamamını** reddeder: açılışta liste boş, kayıt anında
+  ekrandaki liste kalır ve uyarı görünür; uzak kabuk entegrasyonu da
+  **kapanır**, çünkü listeyle birlikte prod işaretleri ve
+  `integration = false` girdileri de gitmiştir. Yalnız bozuk girdiyi atmak sırayı
   değiştirip bir host'un işaretini sessizce değiştirebilirdi.
+
+#### Uzak kabuk entegrasyonu
+
+`integration = true` iken yerel zsh'te yazılan düz bir `ssh` sunucuda da
+kabuk entegrasyonunu kurar: dizin (OSC 7) ve sonra komut blokları uzakta da
+çalışır. bateri sunucuda yalnız `~/.local/share/bateri/shell/` altına birkaç
+küçük dosya yazar; sunucunun rc dosyalarına dokunmaz.
+
+- **Hangi host'ta**: `hosts`'ta `integration` taşıyan ilk eşleşen girdinin
+  değeri; böyle girdi yoksa ve host'un işareti `"production"` ise **kapalı**;
+  kalan her durumda bu anahtar.
+  Yani prod işaretli bir host'ta açmak için girdisine `integration = true`
+  yazılır.
+- **İlk bağlantı düz açılır**: bateri bir sunucuda POSIX kabuğu olduğunu bir
+  kez gördükten sonra (ilk uzak oturumda, kendiliğinden) sonraki bağlantılar
+  entegrasyonlu açılır. Router, Windows ya da `git@github.com` hiç
+  öğrenilmez, yani hiç sarılmaz. Öğrenilen sunucular ve bateri'nin dosya
+  yazdığı sunucular bateri'nin kendi dosyasında durur
+  (`~/Library/Application Support/bateri/remote-hosts`), `settings.toml`'da
+  değil; sunucu `~/.ssh/config`'in çözdüğü `kullanıcı@host:port` ile tanınır.
+- **Hiç sarılmayanlar**: uzak komutlu ya da etkileşimsiz ssh (`ssh host
+  komut`, `-N`, `-T`, `-W`, pipe), `scp`/`rsync`/`git`, `~/.ssh/config`'te
+  `RemoteCommand`, `RequestTTY no` ya da `SessionType` taşıyan host. Bunlar
+  bugünkü gibi entegrasyonsuz kalır; uzak oturum yine algılanır.
+- Kabul edilmeyen değer ve okunamayan ayar dosyası entegrasyonu **kapatır**
+  (`osc52` gibi): yanlış tahmin sunucuya sessizce yazmak olurdu.
+- Ayar her `ssh`'ta o an okunur; açık pencereler beklemez.
 
 #### Uzak yük göstergesi
 

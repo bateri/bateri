@@ -1659,10 +1659,11 @@ ikisine de bağlanmaz.
   `bt-core::settings`'te saf, okuma ve izleme `bt-shell-common`'da. İzleme kaynağı
   okumadan **önce** kurulur ve her olayda yeniden kurulur; kayıt anında
   kullanılamayan dosya hiçbir şeyi, kabul edilmeyen değer kendi anahtarını
-  değiştirmez (`Settings::parse_keeping`). **Tek istisna `osc52`:**
-  kabul edilmeyen değeri ve açılışta kullanılamayan dosya (ya da
-  çözülemeyen ev dizini) panoyu **kapalıya** düşürür
-  (`Settings::for_unusable_file`) — yanlış tahmini görünmeyen tek anahtar. Süreli koşu
+  değiştirmez (`Settings::parse_keeping`). **İki istisna, `osc52` ve
+  `[remote] integration`:** kabul edilmeyen değerleri ve açılışta
+  kullanılamayan dosya (ya da çözülemeyen ev dizini) ikisini **kapalıya**
+  düşürür (`Settings::for_unusable_file`) — yanlış tahmini görünmeyen iki
+  anahtar: biri panoya, öbürü sunucuya sessizce yazardı (048). Süreli koşu
   (`BT_RUN_SECONDS`) dosyayı **hiç okumaz ve izlemez**: dalın tek yeri
   `bt-shell-macos`'un `app::Inputs`'u.
 - **Shell entegrasyonu bugün yalnız zsh'tir** (`ZDOTDIR`); bash (`--rcfile`) ve

@@ -68,7 +68,7 @@ _Requirements: R1.4, R3_
 - [ ] `ZDOTDIR` dansı paylaşılan dosyaya
 - [ ] `assets/shell/remote/`: önyükleme + zsh/bash/fish betikleri + motd
 - [ ] `ssh_wrap`: yük ve gerçek sarma
-- [ ] `BATERI_BIN`, durum dosyası yolu, öğrenme kancası, etiketteki neden
+- [ ] `BATERI_BIN`, öğrenme kancası (`ssh_wrap::host_key` + `record(Posix)`), etiketteki neden (durum dosyasının yolu phase-1'de geldi: `bt-shell-macos::remote_hosts_path`)
 - [ ] `Makefile` + `bundle_assets`
 - [ ] Test: PTY simülasyonu (5 kabuk), hata kolları, öğrenme
 - [ ] Doğrulama geçti (`make check` + `make bundle` + `make linux`)
