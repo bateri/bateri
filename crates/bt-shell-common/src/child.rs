@@ -1254,6 +1254,7 @@ pub(crate) mod tests {
                             "BATERI_BIN".to_owned(),
                             bin.join("bateri").display().to_string(),
                         ),
+                        ("BATERI_SSH_INSTANCE".to_owned(), "0a1b2c3d".to_owned()),
                     ]),
                     cols: 80,
                     rows: 20,
@@ -1283,15 +1284,19 @@ pub(crate) mod tests {
         };
 
         let session = spawn("PS1='$ '\n");
-        session.write(b"ssh x 'y z'; ssh x | cat; echo \"[${BATERI_BIN-unset}]\"\n");
+        session.write(
+            b"ssh x 'y z'; ssh x | cat; echo \"[${BATERI_BIN-unset}${BATERI_SSH_INSTANCE-unset}]\"\n",
+        );
         wait_until("the wrapped call did not run", || {
-            shown(&session, "[-t][x][y z][BOOT]") && shown(&session, "[unset]")
+            shown(&session, "[-t][x][y z][BOOT]") && shown(&session, "[unsetunset]")
         });
         let asked = std::fs::read_to_string(&log).expect("the binary was asked");
-        // `--block` is the command's own block: the first prompt's.
+        // `--block` is the command's own block: the first prompt's; the
+        // instance (phase-5) is the masters' directory, out of the environment.
         assert_eq!(
             asked,
-            "ssh-argv --tty --block 1 -- x y z\nssh-argv --block 1 -- x\n"
+            "ssh-argv --tty --block 1 --instance 0a1b2c3d -- x y z\n\
+             ssh-argv --block 1 --instance 0a1b2c3d -- x\n"
         );
         session.shutdown();
 

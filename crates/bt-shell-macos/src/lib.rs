@@ -86,13 +86,14 @@ pub(crate) fn remote_hosts_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join("Library/Application Support/bateri/remote-hosts")
 }
 
-/// `bateri ssh-argv [--tty] [--block N] -- <ssh arguments…>` (048): `Some(exit code)` when
+/// `bateri ssh-argv [--tty] [--block N] [--instance I] -- <ssh arguments…>` (048): `Some(exit code)` when
 /// the process was started as the subcommand, `None` otherwise. `main` calls
 /// it before the window-server check — the local zsh's `ssh` function calls
 /// it on every `ssh`, in any session. The body is
 /// [`bt_shell_common::ssh_wrap::ssh_argv_main`]; here only the platform's
 /// inputs: the settings file's launch reading (an unusable file, or no home,
-/// turns the integration off) and the state file's path. Every failure prints
+/// turns the integration off), the state file's path and the socket roots the
+/// instance directory is looked for under (phase-5). Every failure prints
 /// nothing, and nothing means plain `ssh`.
 pub fn ssh_argv() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
@@ -109,11 +110,14 @@ pub fn ssh_argv() -> Option<i32> {
         return Some(0);
     };
     let settings = settings::load(&settings::config_root(&home)).at_launch().0;
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
     Some(bt_shell_common::ssh_wrap::ssh_argv_main(
         &argv,
         &settings,
         &ssh_route::SystemSsh,
         &remote_hosts_path(&home),
+        &ssh_route::socket_bases(Some(&home), uid),
         bt_shell_common::ssh_wrap::boot(),
         &mut std::io::stdout().lock(),
     ))

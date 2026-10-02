@@ -20,6 +20,14 @@
 //!   [`write_answer`]): the prompt's class and the wire between the askpass
 //!   helper (the same `bateri` binary) and the application. The wire's single
 //!   owner is this module.
+//! - **The user's terminal session** ([`session_socket`], 048 phase-5): a
+//!   wrapped interactive `ssh` is a master at `u-<key>` in this instance's
+//!   directory ([`crate::ssh_wrap`] adds the options) and a job rides it
+//!   ([`Route::Ours`]) before ours is opened. Its lifetime is the user's: a
+//!   short [`SESSION_PERSIST`] detaches it (the user's `exit` does not wait for
+//!   our jobs) and ends it once the user's session and our jobs are gone —
+//!   bateri never sends it `-O exit`, so neither a session end nor ⌘Q can cut
+//!   the user's terminal.
 //! - **Saved passwords** ([`PasswordStore`], [`Account`]; 047 phase-3): the
 //!   platform shell's store (the macOS Keychain) behind a trait. A saved
 //!   password answers the first password prompt without a sheet; a background
@@ -88,19 +96,30 @@ pub fn classify_check(code: Option<i32>, stderr: &str) -> Check {
     }
 }
 
-/// The route's **decision** half: our socket's check, the user's master's
-/// check (`None` when the user has no control path) and where our socket would
-/// be (`None` when no base fits the socket limit).
+/// The route's **decision** half: our socket's check, the user's terminal
+/// session's master if it is alive ([`session_socket`], 048 phase-5), the
+/// user's own master's check (`None` when the user has no control path) and
+/// where our socket would be (`None` when no base fits the socket limit).
 ///
 /// Ours first: once bateri has a master to the host, the user's configuration
-/// need not be asked again. The user's master next: it is already open and the
-/// user chose it. Only then a master of ours.
-pub fn decide(ours: Check, user: Option<Check>, socket: Option<&Path>) -> Plan {
+/// need not be asked again. The user's terminal session next: it is the
+/// connection the user signed in to (R7) — riding it asks for nothing. The
+/// user's own master next: it is already open and the user chose it. Only then
+/// a master of ours.
+pub fn decide(
+    ours: Check,
+    session: Option<&Path>,
+    user: Option<Check>,
+    socket: Option<&Path>,
+) -> Plan {
     let Some(socket) = socket else {
         return Plan::Ready(Route::Direct);
     };
     if ours == Check::Live {
         return Plan::Ready(Route::Ours(socket.to_owned()));
+    }
+    if let Some(session) = session {
+        return Plan::Ready(Route::Ours(session.to_owned()));
     }
     if user == Some(Check::Live) {
         return Plan::Ready(Route::Direct);
@@ -135,7 +154,7 @@ impl SshRunner for SystemSsh {
 }
 
 /// What `ssh -G` says about the target: the four parts of the socket's key and
-/// the user's own control path.
+/// the user's own connection sharing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SshConfig {
     pub user: String,
@@ -145,6 +164,18 @@ pub struct SshConfig {
     pub proxyjump: String,
     /// `None` for `none` or an absent line.
     pub control_path: Option<PathBuf>,
+    /// `ControlMaster` is anything but `no` (`-G` spells it `false`): the user
+    /// shares connections themselves (048 phase-5 adds nothing then).
+    pub control_master: bool,
+}
+
+impl SshConfig {
+    /// Whether the user's configuration shares connections itself: a
+    /// `ControlMaster` or a `ControlPath` of their own. A wrapped session then
+    /// gets none of ours — the command line's `-o` would override theirs.
+    pub fn shares_connections(&self) -> bool {
+        self.control_master || self.control_path.is_some()
+    }
 }
 
 /// `ssh -G`'s output (one `key value` per line, keys in lower case). `None`
@@ -165,6 +196,10 @@ pub fn parse_config(out: &str) -> Option<SshConfig> {
             "port" => config.port = value.to_owned(),
             "proxyjump" => config.proxyjump = value.to_owned(),
             "controlpath" if value != "none" => config.control_path = Some(PathBuf::from(value)),
+            "controlmaster" => {
+                config.control_master =
+                    !(value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no"));
+            }
             _ => {}
         }
     }
@@ -232,7 +267,8 @@ fn resolve(runner: &dyn SshRunner, target: &RemoteTarget, bases: &[PathBuf]) -> 
     let Some(config) = config(runner, target) else {
         return (Plan::Ready(Route::Direct), None, None);
     };
-    let socket = socket_path(bases, &host_key(&config));
+    let key = host_key(&config);
+    let socket = socket_path(bases, &key);
     let ours = match &socket {
         Some(socket) => check(runner, target, Some(socket)),
         None => Check::Absent,
@@ -242,13 +278,26 @@ fn resolve(runner: &dyn SshRunner, target: &RemoteTarget, bases: &[PathBuf]) -> 
     {
         let _ = std::fs::remove_file(socket);
     }
-    // Asked only when ours is not alive: the answer would not change the route.
+    // The user's terminal session (048 phase-5), asked only when ours is not
+    // alive. A stale one is left to ssh: `ControlMaster=auto` unlinks it.
+    let session = session_socket(bases, &key).filter(|session| {
+        ours != Check::Live
+            && session.exists()
+            && check(runner, target, Some(session)) == Check::Live
+    });
+    // Asked only when neither is alive: the answer would not change the route.
     let user = config
         .control_path
         .as_ref()
-        .filter(|path| ours != Check::Live && Some(path.as_path()) != socket.as_deref())
+        .filter(|path| {
+            ours != Check::Live && session.is_none() && Some(path.as_path()) != socket.as_deref()
+        })
         .map(|_| check(runner, target, None));
-    (decide(ours, user, socket.as_deref()), Some(config), socket)
+    (
+        decide(ours, session.as_deref(), user, socket.as_deref()),
+        Some(config),
+        socket,
+    )
 }
 
 /// `ssh -O {op}` on our socket (`Some`) or the user's (`None`): `check`,
@@ -314,9 +363,15 @@ pub fn host_key(config: &SshConfig) -> String {
 }
 
 /// Whether a socket at `path` fits `sun_path` while ssh binds it under the
-/// temporary suffix.
+/// temporary suffix, and survives `-o ControlPath=` (048 phase-5,
+/// `/code-review`): ssh splits an option's value on whitespace and expands
+/// `%` tokens — a home with a space or a `%` would make every argv carrying
+/// it a configuration error. Such a base is skipped (`/tmp/bateri-$UID` next).
 pub fn fits(path: &Path) -> bool {
     path.as_os_str().len() + SSH_TEMP_SUFFIX < SUN_PATH
+        && path
+            .to_str()
+            .is_some_and(|text| !text.contains(|c: char| c.is_whitespace() || c == '%' || c == '"'))
 }
 
 /// The socket bases in order: the user's cache directory, then a short
@@ -341,6 +396,47 @@ pub fn socket_path(bases: &[PathBuf], key: &str) -> Option<PathBuf> {
         .iter()
         .map(|base| base.join(key))
         .find(|path| fits(path) && path.parent().is_some_and(|dir| prepare_dir(dir).is_ok()))
+}
+
+/// The user's terminal session's socket name: [`SESSION_PREFIX`] + the key.
+/// Not one of our names ([`our_socket_name`]): neither a session end, nor ⌘Q
+/// ([`Masters::close_all`]), nor the sweep sends it `-O exit` — it carries the
+/// user's terminal.
+pub const SESSION_PREFIX: &str = "u-";
+
+/// How long the user's terminal session's master stays with nothing on it —
+/// a **design constant** (048 phase-5). Any `ControlPersist` detaches the
+/// master, so the user's `exit` returns at once (with `no` it waited for every
+/// job riding it — measured: a 10 s stream held the `exit` 10 s, and the
+/// helper's stream is long-lived); short, so the connection ends with the
+/// user's session and our jobs on it, not later (047 R9.3).
+pub const SESSION_PERSIST: Duration = Duration::from_secs(2);
+
+/// Where the user's terminal session to `key` is a master: the first base
+/// (this instance's directories, in [`socket_bases`]' order) whose
+/// `u-<key>` fits the socket limit and is a private directory. Creates
+/// nothing: the wrapping (`bateri ssh-argv`, another process) only uses a
+/// directory bateri already made, and the route asks the same function.
+pub fn session_socket(bases: &[PathBuf], key: &str) -> Option<PathBuf> {
+    bases
+        .iter()
+        .map(|base| base.join(format!("{SESSION_PREFIX}{key}")))
+        .find(|path| fits(path) && path.parent().is_some_and(private_dir))
+}
+
+/// This instance's directories under `roots` that exist — for `bateri
+/// ssh-argv`, which runs outside the instance: a private directory of this
+/// user with an owner file ([`prepare_instance`] made it). `instance` must be
+/// an instance name ([`INSTANCE_DIGITS`] hex digits); anything else gives none.
+pub fn instance_dirs(roots: &[PathBuf], instance: &str) -> Vec<PathBuf> {
+    if !hex_name(instance, INSTANCE_DIGITS) {
+        return Vec::new();
+    }
+    roots
+        .iter()
+        .map(|root| root.join(instance))
+        .filter(|dir| owner(dir).is_some())
+        .collect()
 }
 
 /// The socket directory: created `0700`, and if it is there already it must be
@@ -1109,9 +1205,21 @@ impl Masters {
     }
 
     /// The startup sweep: what a dead bateri left behind ([`sweep`]) — never
-    /// this instance's directory.
+    /// this instance's directory — then this instance's directories, made now
+    /// (048 phase-5): the user's first wrapped `ssh` finds them, since `bateri
+    /// ssh-argv` only uses a directory that is there ([`instance_dirs`]).
     pub fn sweep(&self) {
+        // First: the sweep runs ssh per dead socket and the user's first
+        // `ssh` must not miss the directory meanwhile (it skips our own).
+        let _ = self.bases();
         sweep(&self.roots, &self.instance);
+    }
+
+    /// This instance's directory name — the panes' shells get it
+    /// (`BATERI_SSH_INSTANCE`), so a wrapped `ssh` becomes a master in it
+    /// ([`session_socket`], 048 phase-5).
+    pub fn instance(&self) -> &str {
+        &self.instance
     }
 
     // ─── the user's sessions (047 R9.3) ──────────────────────────────────
@@ -1645,8 +1753,32 @@ fn our_sockets(dir: &Path) -> Vec<PathBuf> {
 
 /// Removes an instance directory whose masters are gone: our names only
 /// (sockets, an attempt's files, the owner file), then the directory — which
-/// stays if anything else is in it.
+/// stays if anything else is in it. A user's terminal session socket
+/// ([`SESSION_PREFIX`]) nobody listens on goes too; a live one keeps the
+/// directory **and its owner file** — it ends by itself ([`SESSION_PERSIST`])
+/// and the next start's sweep removes what is left.
 fn remove_instance(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut live = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .and_then(|name| name.strip_prefix(SESSION_PREFIX))
+            .is_some_and(|key| hex_name(key, KEY_DIGITS))
+        {
+            if UnixStream::connect(entry.path()).is_ok() {
+                live = true;
+            } else {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    if live {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1762,15 +1894,35 @@ mod tests {
     }
 
     #[test]
-    fn the_decision_has_four_arms() {
+    fn the_decision_has_five_arms() {
         let socket = Path::new("/tmp/s/0123456789abcdef");
+        let session = Path::new("/tmp/s/u-0123456789abcdef");
         let ours = Plan::Ready(Route::Ours(socket.to_owned()));
-        // Our master alive: ours, whatever the user's says.
-        assert_eq!(decide(Check::Live, Some(Check::Live), Some(socket)), ours);
-        assert_eq!(decide(Check::Live, None, Some(socket)), ours);
+        let riding = Plan::Ready(Route::Ours(session.to_owned()));
+        // Our master alive: ours, whatever the others say.
+        assert_eq!(
+            decide(Check::Live, Some(session), Some(Check::Live), Some(socket)),
+            ours
+        );
+        assert_eq!(decide(Check::Live, None, None, Some(socket)), ours);
+        // The user's terminal session alive (048 phase-5): ride it, before the
+        // user's own master and before opening ours.
+        assert_eq!(
+            decide(
+                Check::Absent,
+                Some(session),
+                Some(Check::Live),
+                Some(socket)
+            ),
+            riding
+        );
+        assert_eq!(
+            decide(Check::Stale, Some(session), None, Some(socket)),
+            riding
+        );
         // The user's master alive: today's argv.
         assert_eq!(
-            decide(Check::Absent, Some(Check::Live), Some(socket)),
+            decide(Check::Absent, None, Some(Check::Live), Some(socket)),
             Plan::Ready(Route::Direct)
         );
         // Neither (a stale socket counts as none): open ours.
@@ -1780,13 +1932,13 @@ mod tests {
             (Check::Absent, Some(Check::Stale)),
         ] {
             assert_eq!(
-                decide(mine, theirs, Some(socket)),
+                decide(mine, None, theirs, Some(socket)),
                 Plan::Open(socket.to_owned())
             );
         }
         // No socket of ours possible: today's behaviour.
         assert_eq!(
-            decide(Check::Absent, None, None),
+            decide(Check::Absent, None, None, None),
             Plan::Ready(Route::Direct)
         );
     }
@@ -1916,6 +2068,17 @@ mod tests {
         );
         let none = parse_config("user u\nhostname h\nport 22\ncontrolpath none\n").unwrap();
         assert_eq!(none.control_path, None);
+        assert!(!config.shares_connections() || config.control_path.is_some());
+        // 048 phase-5: `-G` spells the default `false`; any other value is the user's own.
+        assert!(!none.shares_connections());
+        for master in ["auto", "yes", "true", "ask", "autoask"] {
+            let config = parse_config(&format!("hostname h\ncontrolmaster {master}\n")).unwrap();
+            assert!(config.shares_connections(), "{master}");
+        }
+        for master in ["false", "no"] {
+            let config = parse_config(&format!("hostname h\ncontrolmaster {master}\n")).unwrap();
+            assert!(!config.shares_connections(), "{master}");
+        }
         assert_eq!(none.proxyjump, "none");
         assert_eq!(parse_config("garbage"), None);
     }
@@ -1928,6 +2091,7 @@ mod tests {
             port: "22".into(),
             proxyjump: "none".into(),
             control_path: None,
+            control_master: false,
         };
         let key = host_key(&config);
         assert_eq!(key.len(), KEY_DIGITS);
@@ -1964,6 +2128,10 @@ mod tests {
             .join("0".repeat(INSTANCE_DIGITS))
             .join(key);
         assert!(fits(&fallback), "{}", fallback.display());
+        // A path ssh would split or expand in `-o ControlPath=` (048 phase-5).
+        for odd in ["/Users/a b/s/k", "/Users/a%b/s/k", "/Users/a\tb/s/k"] {
+            assert!(!fits(Path::new(odd)), "{odd:?}");
+        }
         let instance = "0".repeat(INSTANCE_DIGITS);
         // The longest home whose cache socket still fits, then one byte more —
         // under this instance's directory (047 R9.2).
@@ -2089,6 +2257,146 @@ mod tests {
         );
         assert!(typed.calls.borrow().is_empty());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `-O check` answered by which socket it asks: the user's terminal
+    /// session's (`u-…`), ours, or the user's own.
+    struct SessionTable {
+        ours: (Option<i32>, &'static str),
+        session: (Option<i32>, &'static str),
+        calls: RefCell<Vec<Vec<String>>>,
+    }
+
+    impl SshRunner for SessionTable {
+        fn run(&self, argv: &[String]) -> io::Result<(Option<i32>, String, String)> {
+            self.calls.borrow_mut().push(argv.to_vec());
+            if argv.iter().any(|arg| arg == "-G") {
+                let config = "user u\nhostname prod\nport 22\nproxyjump none\ncontrolpath /u/cm\n";
+                return Ok((Some(0), config.to_owned(), String::new()));
+            }
+            let (code, err) = match argv.iter().find_map(|arg| arg.strip_prefix("ControlPath=")) {
+                Some(path) if path.contains(SESSION_PREFIX) => self.session,
+                Some(_) => self.ours,
+                None => LIVE,
+            };
+            Ok((code, String::new(), err.to_owned()))
+        }
+    }
+
+    /// 048 phase-5: the user's terminal session's master is a route of ours —
+    /// after our own master, before the user's and before opening ours; its
+    /// socket is checked only when it is there.
+    #[test]
+    fn the_gate_rides_the_users_terminal_session() {
+        let root = scratch("session-gate");
+        let bases = vec![root.join("s")];
+        let target = target(&["ssh", "prod"]);
+        let config = parse_config("user u\nhostname prod\nport 22\nproxyjump none\n").unwrap();
+        let key = host_key(&config);
+        let socket = root.join("s").join(&key);
+        let session = root.join("s").join(format!("{SESSION_PREFIX}{key}"));
+        let table = |ours, session| SessionTable {
+            ours,
+            session,
+            calls: RefCell::new(Vec::new()),
+        };
+        // No session socket: today's gate (the user's own master answers).
+        let runner = table(ABSENT, LIVE);
+        assert_eq!(plan(&runner, &target, &bases), Plan::Ready(Route::Direct));
+        assert!(
+            runner
+                .calls
+                .borrow()
+                .iter()
+                .all(|call| !call.iter().any(|arg| arg.contains(SESSION_PREFIX))),
+            "an absent session socket is not asked"
+        );
+        // The session is up: ride it, the user's own master is not asked.
+        std::fs::write(&session, "").unwrap();
+        let runner = table(ABSENT, LIVE);
+        assert_eq!(
+            plan(&runner, &target, &bases),
+            Plan::Ready(Route::Ours(session.clone()))
+        );
+        assert!(
+            runner.calls.borrow().iter().all(|call| call
+                .iter()
+                .any(|arg| arg.starts_with("ControlPath="))
+                || call.contains(&"-G".to_owned())),
+            "the user's own master is not asked"
+        );
+        // Ours first.
+        assert_eq!(
+            plan(&table(LIVE, LIVE), &target, &bases),
+            Plan::Ready(Route::Ours(socket.clone()))
+        );
+        // A session socket nobody answers on is not ridden (the user's own
+        // master answers here); the file stays for ssh's `auto` to unlink.
+        assert_eq!(
+            plan(&table(ABSENT, ABSENT), &target, &bases),
+            Plan::Ready(Route::Direct)
+        );
+        let _ = socket;
+        assert!(session.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The session socket is found only in a private directory with room for
+    /// the prefix, and only an instance's directory is handed to `ssh-argv`.
+    #[test]
+    fn the_session_socket_lives_only_in_an_instance_directory() {
+        let root = scratch("session-socket");
+        let roots = vec![root.join("r")];
+        assert!(instance_dirs(&roots, "0a1b2c3d").is_empty(), "not made yet");
+        let dir = prepare_instance(&roots[0], "0a1b2c3d").unwrap();
+        assert_eq!(instance_dirs(&roots, "0a1b2c3d"), vec![dir.clone()]);
+        for bad in ["../x", "0A1B2C3", "", "0a1b2c3d/.."] {
+            assert!(instance_dirs(&roots, bad).is_empty(), "{bad:?}");
+        }
+        assert_eq!(
+            session_socket(std::slice::from_ref(&dir), "0123456789abcdef"),
+            Some(dir.join("u-0123456789abcdef"))
+        );
+        // Open to others: none.
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        assert_eq!(
+            session_socket(std::slice::from_ref(&dir), "0123456789abcdef"),
+            None
+        );
+        assert!(instance_dirs(&roots, "0a1b2c3d").is_empty());
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        // Past the socket limit: none.
+        let long = root.join("x".repeat(SUN_PATH));
+        assert_eq!(session_socket(&[long], "0123456789abcdef"), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A user's session socket is never ended by bateri: ⌘Q's `close_all`
+    /// leaves a live one (and the directory with its owner file), a stale one
+    /// goes with the directory.
+    #[test]
+    fn closing_leaves_the_users_session_alone() {
+        let scratch = scratch("session-close");
+        let root = scratch.join("r");
+        let dir = prepare_instance(&root, "0a1b2c3d").unwrap();
+        let session = dir.join("u-0123456789abcdef");
+        let listener = UnixListener::bind(&session).unwrap();
+        let masters = Masters::with_instance(
+            PathBuf::from("/nonexistent"),
+            vec![root.clone()],
+            Arc::new(NoStore),
+            "0a1b2c3d".to_owned(),
+        );
+        let _ = masters.bases();
+        masters.close_all(Instant::now() + Duration::from_secs(5));
+        assert!(session.exists(), "a live session socket stays");
+        assert!(dir.join(OWNER_FILE).exists(), "so does its owner file");
+        drop(listener);
+        masters.close_all(Instant::now() + Duration::from_secs(5));
+        assert!(!dir.exists(), "a stale one goes with the directory");
+        std::fs::remove_dir_all(&scratch).unwrap();
     }
 
     #[test]
@@ -3088,6 +3396,178 @@ exit $code
     /// the user types it, the background job opens our master with the saved
     /// password; the session's end closes it. `-F /dev/null`, no agent, a
     /// temporary `known_hosts`: `~/.ssh` is never read.
+    /// The pane's wake for [`password_sshd_jobs_ride_the_users_session`]:
+    /// when the user's ssh exited.
+    #[derive(Default)]
+    struct ExitWake(Mutex<Option<Instant>>);
+
+    impl bt_core::Wake for ExitWake {
+        fn wake(&self) {}
+        fn child_exit(&self, _code: Option<i32>) {
+            *lock(&self.0) = Some(Instant::now());
+        }
+        fn copy_to_clipboard(&self, _text: String) {}
+        fn title_changed(&self) {}
+        fn search_changed(&self) {}
+        fn command_started(&self) {}
+        fn link_hover_lost(&self) {}
+    }
+
+    /// 048 phase-5 (R7) against a real password sshd (the 047 one): the user's
+    /// wrapped `ssh` (password typed in the terminal) is a master at the
+    /// session socket; a background job — no saved password, so before 048 it
+    /// had no way in — rides it with `BatchMode=yes`, i.e. without a new
+    /// login; ⌘Q's `close_all` and a session end leave the user's session
+    /// alone; the user's `exit` returns at once although a job still rides
+    /// the connection, and the master ends after it. `-F /dev/null`, no
+    /// agent, a temporary `known_hosts`: `~/.ssh` is never read.
+    #[test]
+    #[ignore = "needs the password sshd on 127.0.0.1:2222: cargo test -p bt-shell-common password_sshd -- --ignored"]
+    fn password_sshd_jobs_ride_the_users_session() {
+        use bt_core::{
+            CaretShape, CursorBlink, Osc52, Session, SessionOptions, TerminalOptions, Theme,
+        };
+        if std::net::TcpStream::connect(("127.0.0.1", 2222)).is_err() {
+            eprintln!("SKIPPED: no sshd on 127.0.0.1:2222");
+            return;
+        }
+        let root = scratch("pwride");
+        let known = root.join("known_hosts").display().to_string();
+        let argv: Vec<String> = [
+            "ssh",
+            "-F",
+            "/dev/null",
+            "-o",
+            &format!("UserKnownHostsFile={known}"),
+            "-o",
+            "IdentityAgent=none",
+            "-o",
+            "PubkeyAuthentication=no",
+            "-p",
+            "2222",
+            "deneme@127.0.0.1",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let target = RemoteTarget {
+            host: "deneme@127.0.0.1".to_owned(),
+            kind: RemoteKind::Ssh,
+            argv: argv.clone(),
+            line: String::new(),
+        };
+        let masters = Arc::new(Masters::with_instance(
+            PathBuf::from("/nonexistent"),
+            vec![root.join("s")],
+            Arc::new(NoStore),
+            INSTANCE.to_owned(),
+        ));
+        // What `bateri ssh-argv` does: the session socket in the instance directory.
+        let key = host_key(&config(&SystemSsh, &target).expect("ssh -G"));
+        let session_socket = session_socket(masters.bases(), &key).expect("a session socket");
+        let control = crate::ssh_wrap::Control {
+            socket: session_socket.clone(),
+        };
+        let mut user_args = argv[1..].to_vec();
+        user_args.insert(0, "StrictHostKeyChecking=accept-new".to_owned());
+        user_args.insert(0, "-o".to_owned());
+        let wrapped = crate::ssh_wrap::wrap(&user_args, "exec /bin/sh -i", None, Some(&control));
+        let wake = Arc::new(ExitWake::default());
+        let session = Session::spawn(
+            SessionOptions {
+                command: Some(("ssh".to_owned(), wrapped)),
+                working_directory: None,
+                home: None,
+                env: HashMap::new(),
+                cols: 80,
+                rows: 24,
+                cell_px: (9, 18),
+                terminal: TerminalOptions {
+                    scrollback: 100,
+                    osc52: Osc52::Off,
+                    cursor: CaretShape::default(),
+                    blink: CursorBlink::default(),
+                },
+                theme: Theme::BATERI,
+                dock: false,
+                cluster: false,
+                initial_input: None,
+                shell_marks: false,
+                tab_id: None,
+                hostname: None,
+            },
+            Arc::clone(&wake) as Arc<dyn bt_core::Wake>,
+        )
+        .expect("session");
+        let password_prompt = bt_core::TtyModes {
+            canonical: true,
+            echo: false,
+        };
+        crate::child::wait_until("no password prompt", || {
+            session.with_pty_fd(crate::jobs::tty_modes) == Some(password_prompt)
+        });
+        // Before the login there is nothing to ride: no saved password, so the
+        // background job has today's argv.
+        assert_eq!(masters.ensure(&target, Ask::Never), Ok(Route::Direct));
+        session.write(b"parola123\r");
+        crate::child::wait_until("the session is no master", || {
+            check(&SystemSsh, &target, Some(&session_socket)) == Check::Live
+        });
+
+        // A background job rides the user's session: no new login (BatchMode).
+        let route = masters.ensure(&target, Ask::Never).expect("background");
+        assert_eq!(route, Route::Ours(session_socket.clone()));
+        let mut stream = crate::upload::ssh_argv_for(&target, &route);
+        stream.push("echo rode".to_owned());
+        let out = Command::new(&stream[0])
+            .args(&stream[1..])
+            .stdin(Stdio::null())
+            .output()
+            .expect("stream");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "rode",
+            "{out:?}"
+        );
+
+        // A session end and ⌘Q end only ours: the user's session lives on.
+        masters.session_started(1, &target);
+        masters.session_ended(1);
+        masters.close_all(Instant::now() + Duration::from_secs(5));
+        assert_eq!(
+            check(&SystemSsh, &target, Some(&session_socket)),
+            Check::Live,
+            "bateri ended the user's session"
+        );
+
+        // A long job on it, then the user's `exit`: it returns at once.
+        let mut long = crate::upload::ssh_argv_for(&target, &route);
+        long.push("sleep 6".to_owned());
+        let mut riding = Command::new(&long[0])
+            .args(&long[1..])
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("long stream");
+        std::thread::sleep(Duration::from_millis(500));
+        let asked = Instant::now();
+        session.write(b"exit\r");
+        crate::child::wait_until("the user's exit waited for our job", || {
+            lock(&wake.0).is_some()
+        });
+        let exited = lock(&wake.0).unwrap();
+        assert!(
+            exited.duration_since(asked) < Duration::from_secs(3),
+            "exit took {:?}",
+            exited.duration_since(asked)
+        );
+        // The job finishes on the detached master; then the master goes.
+        assert!(riding.wait().expect("long stream").success());
+        crate::child::wait_until("the session's master outlived its jobs", || {
+            !session_socket.exists()
+        });
+        session.shutdown();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     #[ignore = "needs the password sshd on 127.0.0.1:2222: cargo test -p bt-shell-common password_sshd -- --ignored"]
     fn password_sshd_background_waits_for_the_users_login() {

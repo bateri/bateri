@@ -444,13 +444,22 @@ fn shell_integration_env(
 /// empty `env` stays empty, so neither the timed run nor a non-zsh shell nor
 /// `[shell] integration = "off"` gets it — and only a UTF-8 path
 /// (`SessionOptions.env` wants a `String`; without it the function falls back
-/// to plain `ssh`).
-fn with_bateri_bin(mut env: Vec<(String, String)>, bin: Option<PathBuf>) -> Vec<(String, String)> {
+/// to plain `ssh`). With it, `BATERI_SSH_INSTANCE`: the masters' instance
+/// directory name, where a wrapped session becomes a master (phase-5;
+/// `ssh_route::session_socket`) — none without masters (the timed run).
+fn with_bateri_bin(
+    mut env: Vec<(String, String)>,
+    bin: Option<PathBuf>,
+    instance: Option<&str>,
+) -> Vec<(String, String)> {
     if env.is_empty() {
         return env;
     }
     if let Some(bin) = bin.and_then(|bin| bin.into_os_string().into_string().ok()) {
         env.push(("BATERI_BIN".to_owned(), bin));
+        if let Some(instance) = instance {
+            env.push(("BATERI_SSH_INSTANCE".to_owned(), instance.to_owned()));
+        }
     }
     env
 }
@@ -2105,6 +2114,7 @@ impl AppDelegate {
                 std::env::var_os("ZDOTDIR"),
             ),
             std::env::current_exe().ok(),
+            self.ivars().masters.as_deref().map(Masters::instance),
         );
         let birth = dock_rows_at_birth(&integration, setting);
         (integration, birth)
@@ -3901,18 +3911,26 @@ mod tests {
             "/Applications/bateri.app/Contents/MacOS/bateri",
         ));
         assert_eq!(
-            with_bateri_bin(wrapper.clone(), bin.clone()).last(),
+            with_bateri_bin(wrapper.clone(), bin.clone(), None).last(),
             Some(&(
                 "BATERI_BIN".to_owned(),
                 "/Applications/bateri.app/Contents/MacOS/bateri".to_owned()
             ))
         );
-        assert!(with_bateri_bin(Vec::new(), bin).is_empty());
-        assert_eq!(with_bateri_bin(wrapper.clone(), None), wrapper);
+        // The masters' instance rides with the binary, never alone (phase-5).
+        assert_eq!(
+            with_bateri_bin(wrapper.clone(), bin.clone(), Some("0a1b2c3d")).last(),
+            Some(&("BATERI_SSH_INSTANCE".to_owned(), "0a1b2c3d".to_owned()))
+        );
+        assert!(with_bateri_bin(Vec::new(), bin, Some("0a1b2c3d")).is_empty());
+        assert_eq!(
+            with_bateri_bin(wrapper.clone(), None, Some("0a1b2c3d")),
+            wrapper
+        );
         use std::os::unix::ffi::OsStringExt as _;
         let odd = std::ffi::OsString::from_vec(b"/x/\xff".to_vec());
         assert_eq!(
-            with_bateri_bin(wrapper.clone(), Some(PathBuf::from(odd))),
+            with_bateri_bin(wrapper.clone(), Some(PathBuf::from(odd)), None),
             wrapper
         );
     }
