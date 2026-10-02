@@ -270,6 +270,34 @@ impl LinkLabel {
 /// find a pane whose close has begun ([`TerminalPane::is_closed`]).
 pub(crate) type PaneLookup = fn(MainThreadMarker, u64) -> Option<Retained<TerminalPane>>;
 
+/// The pane's helper session handle (045): outside the timed run (the masters'
+/// registry is the application's, `None` there) its greeting teaches the
+/// remote shell integration that the server runs a POSIX `sh` (048
+/// discussion → Karar: learn on the first connection) — once per remote
+/// generation, on a thread of its own: `ssh_wrap::learn` runs `ssh -G` and may
+/// wait for the state file's lock, and the helper's next question must not
+/// wait behind it. It writes nothing for a server already learned; a home
+/// that cannot be found learns nothing.
+fn remote_helper_for(learning: bool) -> RemoteHelper {
+    if !learning {
+        return RemoteHelper::default();
+    }
+    RemoteHelper::with_greeted(Arc::new(|ssh: &[String]| {
+        let ssh = ssh.to_vec();
+        let _ = std::thread::Builder::new()
+            .name("remote learning".into())
+            .spawn(move || {
+                if let Some(home) = crate::child::home() {
+                    let _ = bt_shell_common::ssh_wrap::learn(
+                        &crate::ssh_route::SystemSsh,
+                        &ssh,
+                        &crate::remote_hosts_path(&home),
+                    );
+                }
+            });
+    }))
+}
+
 /// The pane's birth package (039 Karar 3): all inputs in a single struct,
 /// from the owner. Live changes go a separate way, through the pane's `set_*`
 /// methods.
@@ -1192,6 +1220,7 @@ impl TerminalPane {
             zoom,
             masters,
         } = launch;
+        let has_masters = masters.is_some();
         let renderer = Rc::new(Renderer::system_default()?);
         // The layer is ours (040 → Karar 8): wgpu configures its device,
         // format and drawable size, the scale stays with its owner.
@@ -1268,7 +1297,7 @@ impl TerminalPane {
             list_closed_at: Cell::new(None),
             stats_popover: RefCell::new(None),
             stats_closed_at: Cell::new(None),
-            remote_helper: RefCell::new(RemoteHelper::default()),
+            remote_helper: RefCell::new(remote_helper_for(has_masters)),
             stats: RefCell::new(stats_driver),
             remote_files: RefCell::new(remote_files),
             previews: RefCell::new(HashMap::new()),

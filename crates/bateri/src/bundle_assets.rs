@@ -130,7 +130,8 @@ fn info_plist_template_carries_the_updater_keys() {
     );
 }
 
-/// The zsh wrapper's inventory is **exactly** these five files.
+/// The zsh wrapper's inventory is **exactly** these six files (the ZDOTDIR
+/// swap, `zdotdir.zsh`, joined in 048).
 ///
 /// The "nothing missing" half is also asked by `bt-shell-common` (the test of
 /// `child::zsh_wrapper_dir`); the half this one alone sees is **the excess**.
@@ -166,7 +167,14 @@ fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     found.sort();
     assert_eq!(
         found,
-        [".zlogin", ".zprofile", ".zshenv", ".zshrc", "bateri.zsh"],
+        [
+            ".zlogin",
+            ".zprofile",
+            ".zshenv",
+            ".zshrc",
+            "bateri.zsh",
+            "zdotdir.zsh"
+        ],
         "the assets/shell/zsh inventory changed; `make bundle`'s copy and cmp \
          lists must be updated too"
     );

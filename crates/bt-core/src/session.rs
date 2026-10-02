@@ -7352,6 +7352,14 @@ impl Session {
         Some((command, target, log.context.remote_cwd.clone()))
     }
 
+    /// Why the remote bootstrap fell back to a plain login shell (048), from
+    /// the stream ([`crate::DockContext::remote_setup`]); `None` if it did not
+    /// say so. The pane's label reads it next to "Remote folder unknown". One
+    /// leaf-lock round; `Term` is not touched.
+    pub fn remote_setup_fault(&self) -> Option<crate::RemoteSetupFault> {
+        lock(&self.shell).context.remote_setup
+    }
+
     /// The directory a remote link's relative candidate resolves under: OSC 7's
     /// remote directory, or — when the server sends none — the one the title
     /// names in the `user@host: dir` / `user@host:dir` shape (`shell::title_directory`; may be

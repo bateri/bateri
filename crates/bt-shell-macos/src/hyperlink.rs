@@ -576,7 +576,9 @@ impl BateriView {
             }
             Check::CwdUnknown => {
                 self.link_state().borrow_mut().pending = None;
-                self.show_note(remote_helper::REMOTE_CWD_UNKNOWN);
+                self.show_note(remote_helper::remote_cwd_unknown(
+                    session.remote_setup_fault(),
+                ));
                 return;
             }
             Check::Gone => {

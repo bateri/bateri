@@ -335,7 +335,7 @@ pub fn decide(
     state: &HostState,
     boot: &str,
 ) -> Option<Wrapped> {
-    if boot.is_empty() || boot.contains('\'') || !tty {
+    if boot.is_empty() || !is_inline(boot) || !tty {
         return None;
     }
     let call = ssh_call("ssh", args).filter(|call| !call.command)?;
@@ -353,9 +353,162 @@ pub fn decide(
     })
 }
 
-/// The bootstrap script (phase-2 embeds it). Empty until then, so [`decide`]
-/// wraps nothing and the user sees no difference.
-pub const BOOT: &str = "";
+// ─── the bootstrap ───────────────────────────────────────────────────────
+
+/// Whether `boot` can sit inside the remote command's single quotes for every
+/// login shell sshd may run it through (`$SHELL -c`): no `'` (it would close
+/// the quote), no `\` (fish reads `\'` and `\\` inside single quotes), no `!`
+/// (csh's history expansion) and no line break (csh refuses one inside quotes)
+/// — one printable ASCII line. 037's upload rule, widened by the shells.
+pub fn is_inline(boot: &str) -> bool {
+    boot.bytes()
+        .all(|b| (b' '..=b'~').contains(&b) && !matches!(b, b'\'' | b'\\' | b'!'))
+}
+
+/// The bootstrap's payload (`assets/shell/remote/boot.sh`), decoded and
+/// `eval`ed on the server.
+const BOOT_SCRIPT: &str = include_str!("../../../assets/shell/remote/boot.sh");
+
+/// The payload's first line: the one-liner runs only a decoded text that
+/// starts with it (a decoder that ignored `-d` prints base64, not this).
+const MAGIC: &str = "bateri_boot=1";
+
+/// The files the bootstrap writes under `~/.local/share/bateri/shell/`,
+/// embedded at build time (048 phase-2 → Uygulama Notları: the subcommand runs
+/// on every `ssh`, so it reads no package file): the local zsh wrapper's four
+/// `ZDOTDIR` files and its swap **verbatim**, the remote zsh body beside them,
+/// bash's `ENV` file and fish's `vendor_conf.d` file.
+const REMOTE_FILES: [(&str, &str); 8] = [
+    (
+        "zsh/.zshenv",
+        include_str!("../../../assets/shell/zsh/.zshenv"),
+    ),
+    (
+        "zsh/.zprofile",
+        include_str!("../../../assets/shell/zsh/.zprofile"),
+    ),
+    (
+        "zsh/.zshrc",
+        include_str!("../../../assets/shell/zsh/.zshrc"),
+    ),
+    (
+        "zsh/.zlogin",
+        include_str!("../../../assets/shell/zsh/.zlogin"),
+    ),
+    (
+        "zsh/zdotdir.zsh",
+        include_str!("../../../assets/shell/zsh/zdotdir.zsh"),
+    ),
+    (
+        "zsh/bateri.zsh",
+        include_str!("../../../assets/shell/remote/zsh/bateri.zsh"),
+    ),
+    (
+        "bash/bateri.bash",
+        include_str!("../../../assets/shell/remote/bash/bateri.bash"),
+    ),
+    (
+        "fish/vendor_conf.d/bateri.fish",
+        include_str!("../../../assets/shell/remote/fish/vendor_conf.d/bateri.fish"),
+    ),
+];
+
+/// The payload: [`MAGIC`], `bt_files` (one `bt_put` per [`REMOTE_FILES`]
+/// entry, its content a single-quoted literal (`upload::sq`, the crate's one
+/// quoting rule) — no here-document: bash as
+/// `sh` would write one to `/tmp`), then [`BOOT_SCRIPT`].
+fn payload() -> String {
+    let mut text = format!("{MAGIC}\nbt_files() {{\n");
+    for (path, content) in REMOTE_FILES {
+        text.push_str(&format!(
+            "  bt_put {} {} || return 1\n",
+            crate::upload::sq(path),
+            crate::upload::sq(content)
+        ));
+    }
+    text.push_str("}\n");
+    text.push_str(BOOT_SCRIPT);
+    text
+}
+
+/// Standard base64 with padding, one line: the payload's encoding (no crate
+/// for 15 lines; the server's decoders read this form).
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> shift) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The one-liner around the payload — the text [`remote_command`] quotes.
+/// It finds a decoder among `base64 -d` (GNU, BusyBox, macOS 13+),
+/// `base64 -D` (older macOS), `b64decode -r` (BSD) and `openssl base64 -d -A`,
+/// keeps the first answer that starts with [`MAGIC`] and `eval`s it; without
+/// one it reports `decode` (`8133;f`). Both arms end in the plain login shell:
+/// the payload `exec`s its own, and a payload that returned (a parse error on
+/// an unusual `sh`) must not close the connection. The
+/// escape bytes come from `awk`'s `%c`: a `\033` is not [`is_inline`].
+fn one_liner(payload: &str) -> String {
+    format!(
+        "b={b64}; s=; for d in \"base64 -d\" \"base64 -D\" \"b64decode -r\" \
+         \"openssl base64 -d -A\"; do s=$(printf %s \"$b\" | $d 2>/dev/null); \
+         case $s in {MAGIC}*) break;; esac; s=; done; unset b d; \
+         case $s in {MAGIC}*) eval \"$s\";; *) awk -v f=%c%s%c -v m=\"]8133;f;decode\" \
+         \"BEGIN{{printf(f,27,m,7)}}\" 2>/dev/null;; esac; exec \"${{SHELL:-/bin/sh}}\" -l",
+        b64 = base64(payload.as_bytes()),
+    )
+}
+
+/// The bootstrap the wrapped `ssh` runs (built once per process): the
+/// one-liner carrying the base64 payload. Always [`is_inline`].
+pub fn boot() -> &'static str {
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BOOT.get_or_init(|| one_liner(&payload()))
+}
+
+// ─── learning ────────────────────────────────────────────────────────────
+
+/// Records that the server behind `ssh` runs a POSIX `sh` (048 discussion →
+/// Karar: learn on the first connection): `ssh` is the helper session's argv (the program, its
+/// options, the target, no remote command) and the caller calls this once its
+/// greeting arrived — the greeting comes from `sh` on the server. The key is
+/// [`host_key`] of `ssh -G` for the same argv (the route's own options do not
+/// change user, host or port). `Ok(true)` if a row was written; a server
+/// already learned writes nothing (`Ok(false)`), and so does an argv `ssh -G`
+/// cannot read.
+pub fn learn(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<bool> {
+    let Some((program, args)) = ssh.split_first() else {
+        return Ok(false);
+    };
+    let mut argv = vec![program.clone(), "-G".to_owned()];
+    argv.extend(args.iter().cloned());
+    let Some(key) = runner
+        .run(&argv)
+        .ok()
+        .filter(|(code, _, _)| *code == Some(0))
+        .and_then(|(_, out, _)| host_key(&out))
+    else {
+        return Ok(false);
+    };
+    if load(path).knows(Fact::Posix, &key) {
+        return Ok(false);
+    }
+    record(path, Fact::Posix, &key, unix_now(), LOCK_PATIENCE).map(|()| true)
+}
 
 /// `bateri ssh-argv [--tty] -- <ssh arguments…>`: the subcommand's body
 /// (`argv` is what follows `ssh-argv`). Writes the wrapped arguments to `out`,
@@ -635,15 +788,15 @@ mod tests {
         ] {
             assert_eq!(none(args, true), (None, 0), "{args:?}: no ssh -G either");
         }
-        // The bootstrap is still a placeholder (phase-2): nothing is wrapped.
-        assert_eq!(
-            decide(&args, true, &settings, &runner, &learned(), BOOT),
-            None
-        );
-        assert_eq!(
-            decide(&args, true, &settings, &runner, &learned(), "it's"),
-            None
-        );
+        // A bootstrap that is empty or would not survive a login shell's
+        // quoting is never sent.
+        for boot in ["", "it's", "a\\b", "hi!", "two\nlines"] {
+            assert_eq!(
+                decide(&args, true, &settings, &runner, &learned(), boot),
+                None,
+                "{boot:?}"
+            );
+        }
     }
 
     #[test]
@@ -720,15 +873,447 @@ mod tests {
             .collect();
         assert_eq!(printed, expected);
         assert!(load(&path).knows(Fact::Touched, "u@h:22"));
-        // Without the terminal bit, without `--`, with today's placeholder: nothing.
+        // Without the terminal bit, without `--`, without a bootstrap: nothing.
         assert!(run(&["--", "prod"], BOOT_STUB).is_empty());
         assert!(run(&["--tty", "prod"], BOOT_STUB).is_empty());
-        assert!(run(&["--tty", "--", "prod"], BOOT).is_empty());
+        assert!(run(&["--tty", "--", "prod"], "").is_empty());
         // The touched row cannot be written (another writer holds the lock past
         // the patience): nothing either.
         let held = lock(&path, LOCK_PATIENCE).unwrap();
         assert!(run(&["--tty", "--", "prod"], BOOT_STUB).is_empty());
         drop(held);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn base64_matches_the_standard_vectors() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(plain.as_bytes()), encoded, "{plain:?}");
+        }
+    }
+
+    /// The real bootstrap (not a stub) survives every login shell's quoting,
+    /// is wrapped by `decide`, round-trips through `unwrap` and stays far
+    /// below Linux's one-argument limit (`MAX_ARG_STRLEN`, 128 KiB) — the
+    /// remote command is one argument on the server.
+    #[test]
+    fn the_real_bootstrap_is_one_quotable_line() {
+        let boot = boot();
+        assert!(
+            is_inline(boot),
+            "the one-liner breaks a login shell's quoting"
+        );
+        assert!(payload().starts_with(&format!("{MAGIC}\n")));
+        let command = remote_command(boot);
+        assert!(command.len() < 64 * 1024, "{} bytes", command.len());
+        let args = words(&["-p", "2222", "prod"]);
+        let runner = Gconfig::new(PLAIN);
+        let wrapped = decide(&args, true, &Settings::default(), &runner, &learned(), boot)
+            .expect("the real bootstrap wraps");
+        assert_eq!(unwrap(&wrapped.args), &args[..]);
+        // Every file the bootstrap writes is embedded, and the shared swap is
+        // the local wrapper's own.
+        assert!(REMOTE_FILES.iter().all(|(_, content)| !content.is_empty()));
+        assert!(
+            REMOTE_FILES
+                .iter()
+                .any(|(path, content)| *path == "zsh/zdotdir.zsh"
+                    && *content == include_str!("../../../assets/shell/zsh/zdotdir.zsh"))
+        );
+    }
+
+    #[test]
+    fn the_payloads_literals_keep_every_byte() {
+        let tricky = "it's $HOME \\ `x` \"q\"\n!";
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("printf %s {}", crate::upload::sq(tricky))])
+            .output()
+            .expect("sh");
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), tricky);
+    }
+
+    /// The greeting's learning (phase-2): one `posix` row per server, the
+    /// second greeting writes nothing, an argv `ssh -G` cannot read learns
+    /// nothing — and an unreadable state file wraps nothing.
+    #[test]
+    fn a_greeting_teaches_the_server_once() {
+        let dir = scratch("learn");
+        let path = dir.join("remote-hosts");
+        let ssh = words(&["/usr/bin/ssh", "-o", "ControlPath=/s/%C", "prod"]);
+        let runner = Gconfig::new(PLAIN);
+        assert!(learn(&runner, &ssh, &path).unwrap());
+        assert_eq!(
+            runner.calls.borrow().last().cloned(),
+            Some(words(&[
+                "/usr/bin/ssh",
+                "-G",
+                "-o",
+                "ControlPath=/s/%C",
+                "prod"
+            ]))
+        );
+        assert!(load(&path).knows(Fact::Posix, "u@h:22"));
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(!learn(&runner, &ssh, &path).unwrap(), "learned already");
+        assert_eq!(fs::read_to_string(&path).unwrap(), written);
+        assert!(!learn(&Gconfig::new("garbage"), &ssh, &path).unwrap());
+        assert!(!learn(&runner, &[], &path).unwrap());
+        // A state file that cannot be read knows no server: nothing is wrapped.
+        let unreadable = dir.join("a-directory");
+        fs::create_dir_all(&unreadable).unwrap();
+        let args = words(&["prod"]);
+        assert_eq!(
+            decide(
+                &args,
+                true,
+                &Settings::default(),
+                &runner,
+                &load(&unreadable),
+                boot()
+            ),
+            None
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}
+/// The bootstrap on real shells (048 phase-2): what sshd does with the wrapped
+/// call — `"$SHELL" -c '<remote command>'` — in a real PTY, with a temporary
+/// home. Each login shell that is not installed here is `SKIPPED` (macOS has
+/// no fish or BusyBox; `make linux`'s image has all five).
+#[cfg(test)]
+mod remote_shells {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use bt_core::{
+        Blocks, CaretShape, CursorBlink, Osc52, RemoteSetupFault, Session, SessionOptions,
+        TerminalOptions, Theme,
+    };
+
+    use super::{boot, remote_command};
+    use crate::child::{SilentWake, wait_until};
+    use crate::settings::TempRoot;
+
+    /// The first `name` on `PATH`.
+    fn which(name: &str) -> Option<PathBuf> {
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(name))
+                .find(|candidate| candidate.is_file())
+        })
+    }
+
+    /// sshd's call: `shell -c '<the wrapped remote command>'`, `HOME` and
+    /// `SHELL` as sshd sets them, `XDG_DATA_HOME` pinned under the home (the
+    /// test machine's must not leak in), `extra` on top.
+    fn sshd(shell: &Path, home: &Path, extra: &[(&str, String)]) -> Session {
+        let mut env = HashMap::from([
+            ("HOME".to_owned(), home.display().to_string()),
+            ("SHELL".to_owned(), shell.display().to_string()),
+            (
+                "XDG_DATA_HOME".to_owned(),
+                home.join(".local/share").display().to_string(),
+            ),
+        ]);
+        for (key, value) in extra {
+            env.insert((*key).to_owned(), value.clone());
+        }
+        Session::spawn(
+            SessionOptions {
+                command: Some((
+                    shell.display().to_string(),
+                    vec!["-c".to_owned(), remote_command(boot())],
+                )),
+                working_directory: Some(home.to_path_buf()),
+                home: Some(home.to_path_buf()),
+                env,
+                cols: 120,
+                rows: 40,
+                cell_px: (9, 18),
+                terminal: TerminalOptions {
+                    scrollback: 100,
+                    osc52: Osc52::Off,
+                    cursor: CaretShape::default(),
+                    blink: CursorBlink::default(),
+                },
+                theme: Theme::BATERI,
+                dock: false,
+                cluster: false,
+                initial_input: None,
+                shell_marks: false,
+                tab_id: None,
+                hostname: None,
+            },
+            Arc::new(SilentWake),
+        )
+        .expect("session did not open")
+    }
+
+    fn screen_has(session: &Session, text: &str) -> bool {
+        crate::child::tests::screen(session, &mut Blocks::default())
+            .iter()
+            .any(|row| row.contains(text))
+    }
+
+    /// The remote folder bateri read, canonical (macOS's `/var` is a link).
+    fn remote_folder(session: &Session) -> Option<PathBuf> {
+        let folder = session.remote_link_directory();
+        (!folder.is_empty())
+            .then(|| std::fs::canonicalize(&folder).ok())
+            .flatten()
+    }
+
+    /// The first line of this machine's motd, if it has one — the bootstrap
+    /// must print it (sshd does not when it runs a command).
+    fn motd_line() -> Option<String> {
+        std::fs::read_to_string("/etc/motd")
+            .ok()?
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// The user's files with their contents, to show they were not written.
+    fn snapshot(home: &Path, files: &[&str]) -> Vec<(String, Option<String>)> {
+        files
+            .iter()
+            .map(|file| {
+                (
+                    (*file).to_owned(),
+                    std::fs::read_to_string(home.join(file)).ok(),
+                )
+            })
+            .collect()
+    }
+
+    /// One integrated login shell end to end: the prompt comes, OSC 7 reports
+    /// the folder (percent-encoded through a space) and follows `cd`, the
+    /// user's login file ran, nothing of theirs was written, the motd was
+    /// printed and no fault was reported. The open session and its root go
+    /// back for the shell's own claims; `None` if the shell is not installed.
+    fn integrates(name: &str, login: &str, rc: &[(&str, &str)]) -> Option<(Session, TempRoot)> {
+        let Some(shell) = which(name) else {
+            println!("SKIPPED: {name} is not installed");
+            return None;
+        };
+        let root = TempRoot::new(&format!("remote-{name}"));
+        let home = root.0.join("home");
+        let spaced = home.join("a ğ");
+        std::fs::create_dir_all(&spaced).expect("home");
+        let home = std::fs::canonicalize(&home).expect("home");
+        let mut files = vec![login];
+        let write = |file: &str, text: &str| {
+            let path = home.join(file);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("rc directory");
+            }
+            std::fs::write(path, text).expect("rc file");
+        };
+        write(login, &format!("export SEEN=login-{name}\n"));
+        for (file, text) in rc {
+            write(file, text);
+            files.push(file);
+        }
+        let before = snapshot(&home, &files);
+
+        let session = sshd(&shell, &home, &[]);
+        wait_until(&format!("{name}: no OSC 7 for the home"), || {
+            remote_folder(&session).as_deref() == Some(home.as_path())
+        });
+        session.write("cd 'a ğ'\n".as_bytes());
+        wait_until(&format!("{name}: OSC 7 did not follow cd"), || {
+            remote_folder(&session).as_deref() == Some(home.join("a ğ").as_path())
+        });
+        session.write(b"echo \"[$SEEN]\"\n");
+        wait_until(&format!("{name}: the login file did not run"), || {
+            screen_has(&session, &format!("[login-{name}]"))
+        });
+        if let Some(line) = motd_line() {
+            assert!(screen_has(&session, &line), "{name}: no motd ({line})");
+        }
+        assert_eq!(session.remote_setup_fault(), None, "{name}");
+        assert_eq!(
+            snapshot(&home, &files),
+            before,
+            "{name}: an rc file changed"
+        );
+        let shell_dir = home.join(".local/share/bateri/shell");
+        assert!(shell_dir.join("zsh/zdotdir.zsh").is_file(), "{name}");
+        Some((session, root))
+    }
+
+    fn close(session: &Session) {
+        session.write(b"exit\n");
+        session.shutdown();
+    }
+
+    #[test]
+    fn zsh_gets_the_integration_through_its_own_files() {
+        // The common shape: `~/.zshenv` moves the configuration with
+        // `ZDOTDIR` and sets a plain (not exported) variable. sshd's first hop
+        // (`zsh -c`) already read it, so the bootstrap must not take that
+        // `ZDOTDIR` for the user's starting value: `~/.zshenv` runs again.
+        let rc = [
+            (".zshenv", "export ZDOTDIR=$HOME/cfg\nZSHENV_PLAIN=1\n"),
+            ("cfg/.zshrc", "PS1='zsh> '\n"),
+        ];
+        if let Some((session, _root)) = integrates("zsh", "cfg/.zprofile", &rc) {
+            session.write(b"echo \"[z=${ZSHENV_PLAIN-} ${ZDOTDIR:t}]\"\n");
+            wait_until("zsh: ~/.zshenv skipped or ZDOTDIR lost", || {
+                screen_has(&session, "[z=1 cfg]")
+            });
+            close(&session);
+        }
+    }
+
+    /// bash: a login shell from bash 4 on (POSIX mode left, `ENV` gone, the
+    /// history file bash's own and not exported), `--rcfile` before it.
+    #[test]
+    fn bash_gets_the_integration_as_a_login_shell() {
+        let Some((session, _root)) = integrates(
+            "bash",
+            ".bash_profile",
+            &[
+                (".bashrc", "PS1='bash> '\n"),
+                (".profile", "export SEEN=wrong\n"),
+            ],
+        ) else {
+            return;
+        };
+        let major = std::process::Command::new("bash")
+            .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|out| out.trim().parse::<u32>().ok())
+            .expect("bash's version");
+        session.write(
+            b"echo \"[$(shopt -q login_shell && echo login || echo plain) \
+              $(shopt -qo posix && echo posix || echo bash) ${ENV-noenv} ${HISTFILE##*/} \
+              $(env | grep -c '^HISTFILE=')]\"\n",
+        );
+        let kind = if major >= 4 { "login" } else { "plain" };
+        let expected = format!("[{kind} bash noenv .bash_history 0]");
+        wait_until(&format!("bash {major}: not {expected}"), || {
+            screen_has(&session, &expected)
+        });
+        close(&session);
+    }
+
+    #[test]
+    fn fish_gets_the_integration_through_vendor_conf() {
+        if let Some((session, _root)) = integrates("fish", ".config/fish/config.fish", &[]) {
+            // Our directory is out of `XDG_DATA_DIRS` again (it was unset).
+            session.write(b"echo \"[x=$XDG_DATA_DIRS]\"\n");
+            wait_until("fish: XDG_DATA_DIRS kept ours", || {
+                screen_has(&session, "[x=]")
+            });
+            close(&session);
+        }
+    }
+
+    /// A login shell that is not zsh, bash or fish: a plain login shell (its
+    /// own login file runs), the reason reported, nothing written.
+    fn falls_back(name: &str, shell: &Path, extra: &[(&str, String)]) {
+        let root = TempRoot::new(&format!("remote-plain-{name}"));
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join(".profile"), format!("export SEEN=login-{name}\n"))
+            .expect(".profile");
+        let session = sshd(shell, &home, extra);
+        wait_until(&format!("{name}: no fault"), || {
+            session.remote_setup_fault() == Some(RemoteSetupFault::Shell)
+        });
+        session.write(b"echo \"[$SEEN]\"\n");
+        wait_until(&format!("{name}: no plain login shell"), || {
+            screen_has(&session, &format!("[login-{name}]"))
+        });
+        assert!(
+            !home.join(".local/share/bateri").exists(),
+            "{name}: files written"
+        );
+        assert_eq!(session.remote_link_directory(), "", "{name}: no OSC 7");
+        session.write(b"exit\n");
+        session.shutdown();
+    }
+
+    #[test]
+    fn dash_gets_a_plain_login_shell() {
+        match which("dash") {
+            Some(dash) => falls_back("dash", &dash, &[]),
+            None => println!("SKIPPED: dash is not installed"),
+        }
+    }
+
+    /// A BusyBox server: `sh`, the login shell (`ash`) and every tool the
+    /// bootstrap reaches are BusyBox's applets.
+    #[test]
+    fn busybox_gets_a_plain_login_shell() {
+        let Some(busybox) = which("busybox") else {
+            println!("SKIPPED: busybox is not installed");
+            return;
+        };
+        let root = TempRoot::new("remote-busybox-bin");
+        let bin = root.0.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        for applet in ["sh", "ash", "awk", "base64", "cat", "mkdir", "mv", "rm"] {
+            std::os::unix::fs::symlink(&busybox, bin.join(applet)).expect("applet");
+        }
+        falls_back(
+            "busybox",
+            &bin.join("ash"),
+            &[("PATH", bin.display().to_string())],
+        );
+    }
+
+    /// The two failure arms: the files cannot be written (a file where the
+    /// directory goes — read-only for root too) and no base64 decoder on
+    /// `PATH`. Both give the plain login shell and the reason.
+    #[test]
+    fn a_failed_setup_is_a_plain_login_shell_with_the_reason() {
+        let zsh = which("zsh").expect("zsh");
+        for (arm, fault) in [
+            ("write", RemoteSetupFault::Write),
+            ("decode", RemoteSetupFault::Decode),
+        ] {
+            let root = TempRoot::new(&format!("remote-fault-{arm}"));
+            let home = root.0.join("home");
+            std::fs::create_dir_all(home.join(".local/share")).expect("home");
+            std::fs::write(home.join(".zprofile"), "export SEEN=login-plain\n").expect(".zprofile");
+            let mut extra = Vec::new();
+            if arm == "write" {
+                std::fs::write(home.join(".local/share/bateri"), "").expect("blocker");
+            } else {
+                // `sh` and `awk` only: no `base64`, `b64decode` or `openssl`.
+                let bin = root.0.join("bin");
+                std::fs::create_dir_all(&bin).expect("bin");
+                for tool in ["sh", "awk"] {
+                    let path = which(tool).expect(tool);
+                    std::os::unix::fs::symlink(path, bin.join(tool)).expect("tool");
+                }
+                extra.push(("PATH", bin.display().to_string()));
+            }
+            let session = sshd(&zsh, &home, &extra);
+            wait_until(&format!("{arm}: no fault"), || {
+                session.remote_setup_fault() == Some(fault)
+            });
+            session.write(b"echo \"[$SEEN]\"\n");
+            wait_until(&format!("{arm}: no plain login shell"), || {
+                screen_has(&session, "[login-plain]")
+            });
+            assert_eq!(session.remote_link_directory(), "", "{arm}: no OSC 7");
+            session.write(b"exit\n");
+            session.shutdown();
+        }
     }
 }

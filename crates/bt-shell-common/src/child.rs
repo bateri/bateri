@@ -426,7 +426,7 @@ pub fn wait_until(message: &str, ready: impl Fn() -> bool) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
@@ -642,7 +642,14 @@ mod tests {
         // All four of zsh's startup files are in place. `.zlogout` is deliberately absent:
         // `ZDOTDIR` is restored to the user's at `.zlogin` at the latest, so on exit zsh
         // already reads the user's own `.zlogout` (`bateri.zsh`'s header).
-        for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin", "bateri.zsh"] {
+        for file in [
+            ".zshenv",
+            ".zprofile",
+            ".zshrc",
+            ".zlogin",
+            "bateri.zsh",
+            "zdotdir.zsh",
+        ] {
             assert!(dir.join(file).is_file(), "{file} missing from the wrapper");
         }
         assert!(!dir.join(".zlogout").exists(), ".zlogout was not expected");
@@ -660,7 +667,14 @@ mod tests {
         let source = zsh_wrapper_dir().expect("wrapper not found");
         let wrapper = into.join("wrapper");
         std::fs::create_dir_all(&wrapper).expect("could not set up the wrapper copy");
-        for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin", "bateri.zsh"] {
+        for file in [
+            ".zshenv",
+            ".zprofile",
+            ".zshrc",
+            ".zlogin",
+            "bateri.zsh",
+            "zdotdir.zsh",
+        ] {
             std::fs::copy(source.join(file), wrapper.join(file))
                 .unwrap_or_else(|e| panic!("could not copy {file}: {e}"));
         }
@@ -672,7 +686,7 @@ mod tests {
     /// Lining up the `Cell`s in order **would not be enough**: a space cell never reaches the
     /// sink, so `"$ ls"` and `"$ls"` would reduce to the same string and the "prompt was not
     /// drawn" claim would stay green in every case (the trap 012 phase-4 measured).
-    fn screen(session: &Session, blocks: &mut Blocks) -> Vec<String> {
+    pub(crate) fn screen(session: &Session, blocks: &mut Blocks) -> Vec<String> {
         let mut rows: Vec<Vec<char>> = Vec::new();
         session.frame(
             |cell| {
@@ -1183,6 +1197,105 @@ mod tests {
         // `/usr/share/locale/../../../usr` is a real directory (`/usr`): without the check it
         // would say "installed".
         assert!(!locale_installed("../../../usr"));
+    }
+
+    /// The wrapper's `ssh` function (048) in a real zsh: it asks `$BATERI_BIN
+    /// ssh-argv` (`--tty` only when stdin and stdout are terminals), runs
+    /// `command ssh` with the NUL-separated answer, takes `BATERI_BIN` out of the
+    /// environment — and a user's own `ssh` function is left alone.
+    #[test]
+    fn the_wrappers_ssh_function_asks_the_binary() {
+        let root = TempRoot::new("ssh-function");
+        let home = root.0.join("home");
+        let bin = root.0.join("bin");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&bin).expect("bin");
+        let log = root.0.join("asked");
+        let script = |path: PathBuf, body: String| {
+            std::fs::write(&path, body).expect("script");
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .expect("chmod");
+        };
+        // The stand-in binary records how it was asked and answers a wrapped argv.
+        script(
+            bin.join("bateri"),
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\nprintf -- '-t\\0x\\0y z\\0BOOT\\0'\n",
+                log.display()
+            ),
+        );
+        // The stand-in ssh prints its arguments, one bracket each.
+        script(
+            bin.join("ssh"),
+            "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done; echo\n".to_owned(),
+        );
+        let wrapper = copy_wrapper(&root.0);
+        // The stand-ins first on `PATH`, after the system's login files
+        // (macOS's `path_helper` rewrites it in `/etc/zprofile`).
+        let spawn = |rc: &str| {
+            std::fs::write(
+                home.join(".zshrc"),
+                format!("PATH={}:$PATH\n{rc}", bin.display()),
+            )
+            .expect(".zshrc");
+            Session::spawn(
+                SessionOptions {
+                    command: Some((
+                        "/bin/zsh".to_owned(),
+                        vec!["-l".to_owned(), "-i".to_owned()],
+                    )),
+                    working_directory: Some(home.clone()),
+                    home: Some(home.clone()),
+                    env: HashMap::from([
+                        ("HOME".to_owned(), home.display().to_string()),
+                        ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
+                        ("BATERI_DOCK".to_owned(), "off".to_owned()),
+                        (
+                            "BATERI_BIN".to_owned(),
+                            bin.join("bateri").display().to_string(),
+                        ),
+                    ]),
+                    cols: 80,
+                    rows: 20,
+                    cell_px: (9, 18),
+                    terminal: TerminalOptions {
+                        scrollback: 100,
+                        osc52: Osc52::Off,
+                        cursor: CaretShape::default(),
+                        blink: CursorBlink::default(),
+                    },
+                    theme: Theme::BATERI,
+                    dock: false,
+                    cluster: false,
+                    initial_input: None,
+                    shell_marks: false,
+                    tab_id: None,
+                    hostname: None,
+                },
+                Arc::new(SilentWake),
+            )
+            .expect("could not open the session")
+        };
+        let shown = |session: &Session, text: &str| {
+            screen(session, &mut Blocks::default())
+                .iter()
+                .any(|row| row.contains(text))
+        };
+
+        let session = spawn("PS1='$ '\n");
+        session.write(b"ssh x 'y z'; ssh x | cat; echo \"[${BATERI_BIN-unset}]\"\n");
+        wait_until("the wrapped call did not run", || {
+            shown(&session, "[-t][x][y z][BOOT]") && shown(&session, "[unset]")
+        });
+        let asked = std::fs::read_to_string(&log).expect("the binary was asked");
+        assert_eq!(asked, "ssh-argv --tty -- x y z\nssh-argv -- x\n");
+        session.shutdown();
+
+        // A user's own `ssh` function wins: ours is not defined over it.
+        let session = spawn("PS1='$ '\nssh() { echo USER-SSH }\n");
+        session.write(b"ssh x\n");
+        wait_until("the user's ssh did not run", || shown(&session, "USER-SSH"));
+        session.shutdown();
     }
 
     /// **Does the command's duration reach the screen in real zsh** (013).

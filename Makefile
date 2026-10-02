@@ -334,11 +334,12 @@ bundle: sparkle
 	@# as long as ZDOTDIR points at our directory, an arm that writes there
 	@# (in 009 phase-3 `/etc/zshrc` once spawned a `.zsh_history`) or a
 	@# `.DS_Store` would silently enter the product through a recursive copy.
-	@# That the directory's inventory is EXACTLY these five files is tested
-	@# by `bundle_assets`.
+	@# That the directory's inventory is EXACTLY these six files is tested
+	@# by `bundle_assets`. The remote wrapper (`assets/shell/remote/`, 048)
+	@# is not copied: `bateri ssh-argv` embeds it at build time.
 	mkdir -p $(STAGE)/Contents/Resources/shell/zsh
 	cp assets/shell/zsh/.zshenv assets/shell/zsh/.zprofile assets/shell/zsh/.zshrc \
-		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh \
+		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh assets/shell/zsh/zdotdir.zsh \
 		$(STAGE)/Contents/Resources/shell/zsh/
 	mkdir -p $(STAGE)/Contents/Frameworks
 	ditto --arch arm64 $(SPARKLE_DIR)/Sparkle.framework $(STAGE)/Contents/Frameworks/Sparkle.framework
@@ -377,7 +378,7 @@ bundle: sparkle
 	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f is not in the package or differs from the input"; \
 	done; \
-	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh; do \
+	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/zdotdir.zsh; do \
 		cmp -s assets/shell/$$f $$c/Resources/shell/$$f || fail "shell/$$f is not in the package or differs from the input"; \
 	done; \
 	rm -rf $(APP) && mv $(STAGE) $(APP) && \
