@@ -47,35 +47,48 @@ pub const BOOT_NAME: &str = "bateri-boot";
 /// upload rule).
 const COMMAND_HEAD: &str = "exec sh -c '";
 
-/// The remote command for a bootstrap script: `exec sh -c '<boot>' bateri-boot`.
+/// The remote command for a bootstrap script: `exec sh -c '<boot>' bateri-boot`,
+/// and with the local block of the `ssh` command (048 phase-3) one more word,
+/// its number: `sh`'s `$1`, the `P` of the remote blocks' `bt_remote=<P>.<S>.<n>`.
 /// `boot` must not contain `'` ([`decide`] refuses one that does).
-pub fn remote_command(boot: &str) -> String {
-    format!("{COMMAND_HEAD}{boot}' {BOOT_NAME}")
+pub fn remote_command(boot: &str, parent: Option<u32>) -> String {
+    match parent {
+        Some(parent) => format!("{COMMAND_HEAD}{boot}' {BOOT_NAME} {parent}"),
+        None => format!("{COMMAND_HEAD}{boot}' {BOOT_NAME}"),
+    }
 }
 
 /// The user's ssh arguments (without the program) → the wrapped arguments:
 /// `-t`, then `args` as they are, then [`remote_command`]. The user's own
 /// `-t` stays (`-t -t` still asks for a terminal).
-pub fn wrap(args: &[String], boot: &str) -> Vec<String> {
+pub fn wrap(args: &[String], boot: &str, parent: Option<u32>) -> Vec<String> {
     let mut wrapped = Vec::with_capacity(args.len() + 2);
     wrapped.push("-t".to_owned());
     wrapped.extend(args.iter().cloned());
-    wrapped.push(remote_command(boot));
+    wrapped.push(remote_command(boot, parent));
     wrapped
 }
 
 /// The inverse of [`wrap`]: the user's arguments if `args` has the wrapped
 /// shape, otherwise `args` itself. The shape is positional: `-t` first, a
-/// bootstrap command last, and in between an interactive call with no remote
-/// command of its own.
+/// bootstrap command last (with or without the parent's number), and in
+/// between an interactive call with no remote command of its own.
 pub fn unwrap(args: &[String]) -> &[String] {
     let [first, inner @ .., last] = args else {
         return args;
     };
-    let boot = last
-        .strip_prefix(COMMAND_HEAD)
-        .and_then(|rest| rest.strip_suffix(BOOT_NAME))
-        .and_then(|rest| rest.strip_suffix("' "));
+    let boot = last.strip_prefix(COMMAND_HEAD).and_then(|rest| {
+        // The parent's number, if any: ` <digits>` after the name.
+        let rest = match rest.rsplit_once(' ') {
+            Some((head, number))
+                if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                head
+            }
+            _ => rest,
+        };
+        rest.strip_suffix(BOOT_NAME)?.strip_suffix("' ")
+    });
     let wrapped = first == "-t"
         && boot.is_some_and(|boot| !boot.contains('\''))
         && ssh_call("ssh", inner).is_some_and(|call| !call.command);
@@ -334,6 +347,7 @@ pub fn decide(
     runner: &dyn SshRunner,
     state: &HostState,
     boot: &str,
+    parent: Option<u32>,
 ) -> Option<Wrapped> {
     if boot.is_empty() || !is_inline(boot) || !tty {
         return None;
@@ -348,7 +362,7 @@ pub fn decide(
     }
     let key = host_key(&out)?;
     state.knows(Fact::Posix, &key).then(|| Wrapped {
-        args: wrap(args, boot),
+        args: wrap(args, boot, parent),
         key,
     })
 }
@@ -510,13 +524,15 @@ pub fn learn(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<
     record(path, Fact::Posix, &key, unix_now(), LOCK_PATIENCE).map(|()| true)
 }
 
-/// `bateri ssh-argv [--tty] -- <ssh arguments…>`: the subcommand's body
+/// `bateri ssh-argv [--tty] [--block N] -- <ssh arguments…>`: the subcommand's body
 /// (`argv` is what follows `ssh-argv`). Writes the wrapped arguments to `out`,
 /// each followed by a NUL, or nothing; the exit code is always zero and every
 /// failure is "nothing" — the caller runs plain `ssh`.
 ///
 /// `--tty` says stdin and stdout are terminals: the caller asks, because our
-/// own stdout is the caller's pipe. `settings` is the settings file's launch
+/// own stdout is the caller's pipe. `--block N` is the local block running the
+/// `ssh` (`$__bateri_block`), carried to the server as the remote blocks'
+/// parent ([`remote_command`]); without it the server prints no block marks. `settings` is the settings file's launch
 /// reading (an unusable file turns the integration off); `state_path` is the
 /// platform's state file. A wrapped connection is recorded as
 /// [`Fact::Touched`] **before** it is printed: if the record fails nothing is
@@ -534,11 +550,18 @@ pub fn ssh_argv_main(
         [flag, rest @ ..] if flag == "--tty" => (true, rest),
         rest => (false, rest),
     };
+    // `--block N`: the local block of the `ssh` command (048 phase-3), the
+    // remote blocks' parent. A malformed one (an empty `__bateri_block`) costs
+    // only the blocks: the connection is still wrapped, without a parent.
+    let (parent, rest) = match rest {
+        [flag, number, rest @ ..] if flag == "--block" => (number.parse().ok(), rest),
+        rest => (None, rest),
+    };
     let Some(("--", args)) = rest.split_first().map(|(head, tail)| (head.as_str(), tail)) else {
         return 0;
     };
     let state = load(state_path);
-    let Some(wrapped) = decide(args, tty, settings, runner, &state, boot) else {
+    let Some(wrapped) = decide(args, tty, settings, runner, &state, boot, parent) else {
         return 0;
     };
     if record(
@@ -587,9 +610,11 @@ mod tests {
             &["-i", "~/.ssh/k", "-l", "root", "prod"],
         ] {
             let args = words(args);
-            let wrapped = wrap(&args, BOOT_STUB);
-            assert_eq!(wrapped.first().map(String::as_str), Some("-t"));
-            assert_eq!(unwrap(&wrapped), &args[..], "{wrapped:?}");
+            for parent in [None, Some(7), Some(u32::MAX)] {
+                let wrapped = wrap(&args, BOOT_STUB, parent);
+                assert_eq!(wrapped.first().map(String::as_str), Some("-t"));
+                assert_eq!(unwrap(&wrapped), &args[..], "{wrapped:?}");
+            }
             // An argv that was never wrapped is itself.
             assert_eq!(unwrap(&args), &args[..]);
         }
@@ -598,7 +623,7 @@ mod tests {
     #[test]
     fn unwrap_reads_positions_not_contents() {
         // The command somewhere other than last, or no leading `-t`: not ours.
-        let command = remote_command(BOOT_STUB);
+        let command = remote_command(BOOT_STUB, None);
         for args in [
             vec!["prod".to_owned(), command.clone()],
             vec!["-v".to_owned(), "prod".to_owned(), command.clone()],
@@ -612,6 +637,8 @@ mod tests {
             ],
             // A look-alike that is not the exact form.
             words(&["-t", "prod", "exec sh -c 'x' other"]),
+            words(&["-t", "prod", "exec sh -c 'x' bateri-boot 7x"]),
+            words(&["-t", "prod", "exec sh -c 'x' bateri-boot 7 8"]),
         ] {
             assert_eq!(unwrap(&args), &args[..], "{args:?}");
         }
@@ -620,7 +647,7 @@ mod tests {
     #[test]
     fn the_wrapped_call_still_reads_as_the_users() {
         // The remote probe sees the wrapped process; its target is the typed one.
-        let wrapped = wrap(&words(&["-o", "User=x", "--", "prod"]), BOOT_STUB);
+        let wrapped = wrap(&words(&["-o", "User=x", "--", "prod"]), BOOT_STUB, None);
         let call = ssh_call("ssh", &wrapped).expect("interactive with -t");
         assert!(call.command, "the bootstrap is a remote command");
         assert_eq!(call.host, "prod");
@@ -757,9 +784,9 @@ mod tests {
         let runner = Gconfig::new(PLAIN);
         let args = words(&["prod"]);
         assert_eq!(
-            decide(&args, true, &settings, &runner, &learned(), BOOT_STUB),
+            decide(&args, true, &settings, &runner, &learned(), BOOT_STUB, None),
             Some(Wrapped {
-                args: wrap(&args, BOOT_STUB),
+                args: wrap(&args, BOOT_STUB, None),
                 key: "u@h:22".to_owned(),
             })
         );
@@ -772,7 +799,15 @@ mod tests {
         // R1.1: no terminal, a remote command (forced tty too), a non-interactive flag.
         let none = |args: &[&str], tty: bool| {
             let runner = Gconfig::new(PLAIN);
-            let wrapped = decide(&words(args), tty, &settings, &runner, &learned(), BOOT_STUB);
+            let wrapped = decide(
+                &words(args),
+                tty,
+                &settings,
+                &runner,
+                &learned(),
+                BOOT_STUB,
+                None,
+            );
             (wrapped, runner.calls.borrow().len())
         };
         assert_eq!(none(&["prod"], false), (None, 0));
@@ -792,7 +827,7 @@ mod tests {
         // quoting is never sent.
         for boot in ["", "it's", "a\\b", "hi!", "two\nlines"] {
             assert_eq!(
-                decide(&args, true, &settings, &runner, &learned(), boot),
+                decide(&args, true, &settings, &runner, &learned(), boot, None),
                 None,
                 "{boot:?}"
             );
@@ -811,7 +846,7 @@ mod tests {
         ] {
             let runner = Gconfig::new(out);
             assert_eq!(
-                decide(&args, true, &on, &runner, &learned(), BOOT_STUB),
+                decide(&args, true, &on, &runner, &learned(), BOOT_STUB, None),
                 None,
                 "{out}"
             );
@@ -819,7 +854,15 @@ mod tests {
         // R1.4: an unlearned server.
         let runner = Gconfig::new(PLAIN);
         assert_eq!(
-            decide(&args, true, &on, &runner, &HostState::default(), BOOT_STUB),
+            decide(
+                &args,
+                true,
+                &on,
+                &runner,
+                &HostState::default(),
+                BOOT_STUB,
+                None
+            ),
             None
         );
         // R1.3: the setting is asked before `ssh -G`.
@@ -829,7 +872,7 @@ mod tests {
         };
         let runner = Gconfig::new(PLAIN);
         assert_eq!(
-            decide(&args, true, &off, &runner, &learned(), BOOT_STUB),
+            decide(&args, true, &off, &runner, &learned(), BOOT_STUB, None),
             None
         );
         assert!(runner.calls.borrow().is_empty());
@@ -842,7 +885,15 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(
-            decide(&args, true, &production, &runner, &learned(), BOOT_STUB),
+            decide(
+                &args,
+                true,
+                &production,
+                &runner,
+                &learned(),
+                BOOT_STUB,
+                None
+            ),
             None
         );
     }
@@ -866,8 +917,19 @@ mod tests {
             assert_eq!(code, 0);
             out
         };
+        // `--block` carries the parent; a malformed one wraps without it.
+        for (block, parent) in [("7", Some(7)), ("", None), ("x", None)] {
+            assert_eq!(
+                run(&["--tty", "--block", block, "--", "prod"], BOOT_STUB),
+                wrap(&words(&["prod"]), BOOT_STUB, parent)
+                    .iter()
+                    .flat_map(|arg| arg.bytes().chain([0]))
+                    .collect::<Vec<u8>>(),
+                "{block:?}"
+            );
+        }
         let printed = run(&["--tty", "--", "-p", "2", "prod"], BOOT_STUB);
-        let expected: Vec<u8> = wrap(&words(&["-p", "2", "prod"]), BOOT_STUB)
+        let expected: Vec<u8> = wrap(&words(&["-p", "2", "prod"]), BOOT_STUB, None)
             .iter()
             .flat_map(|arg| arg.bytes().chain([0]))
             .collect();
@@ -912,12 +974,20 @@ mod tests {
             "the one-liner breaks a login shell's quoting"
         );
         assert!(payload().starts_with(&format!("{MAGIC}\n")));
-        let command = remote_command(boot);
+        let command = remote_command(boot, Some(u32::MAX));
         assert!(command.len() < 64 * 1024, "{} bytes", command.len());
         let args = words(&["-p", "2222", "prod"]);
         let runner = Gconfig::new(PLAIN);
-        let wrapped = decide(&args, true, &Settings::default(), &runner, &learned(), boot)
-            .expect("the real bootstrap wraps");
+        let wrapped = decide(
+            &args,
+            true,
+            &Settings::default(),
+            &runner,
+            &learned(),
+            boot,
+            None,
+        )
+        .expect("the real bootstrap wraps");
         assert_eq!(unwrap(&wrapped.args), &args[..]);
         // Every file the bootstrap writes is embedded, and the shared swap is
         // the local wrapper's own.
@@ -977,7 +1047,8 @@ mod tests {
                 &Settings::default(),
                 &runner,
                 &load(&unreadable),
-                boot()
+                boot(),
+                None
             ),
             None
         );
@@ -1012,6 +1083,42 @@ mod remote_shells {
         })
     }
 
+    /// The local `ssh` block the harness's remote shells run under: the `P`
+    /// of their `bt_remote=<P>.<S>.<n>` and `bateri://rblock/<P>.<S>.<n>`.
+    const PARENT: u32 = 41;
+
+    /// The remote blocks end to end (048 phase-3): the server's `true`,
+    /// `false` and `sleep` get their stripes and the counter from our remote
+    /// marks and anchors — drawn with no local block at all, i.e. from the
+    /// remote trail alone (the harness has no local `ssh` block, so nothing
+    /// is "running"; a finished block needs no parent to be open).
+    fn draws_remote_blocks(session: &Session, name: &str) {
+        let stripes = |session: &Session| -> Vec<bt_core::LinearRgba> {
+            let mut blocks = Blocks::default();
+            crate::child::tests::screen(session, &mut blocks);
+            blocks.as_slice().iter().map(|block| block.stripe).collect()
+        };
+        session.write(b"false\n");
+        wait_until(&format!("{name}: no error stripe"), || {
+            stripes(session).contains(&Theme::BATERI.error_linear())
+        });
+        assert!(
+            stripes(session).contains(&Theme::BATERI.success_linear()),
+            "{name}: no success stripe"
+        );
+        session.write(b"sleep 1.5\n");
+        wait_until(&format!("{name}: no counter"), || {
+            crate::child::tests::screen(session, &mut Blocks::default())
+                .iter()
+                .any(|row| {
+                    row.contains("sleep 1.5")
+                        && ["1.5s", "1.6s", "1.7s", "1.8s", "1.9s"]
+                            .iter()
+                            .any(|counter| row.trim_end().ends_with(counter))
+                })
+        });
+    }
+
     /// sshd's call: `shell -c '<the wrapped remote command>'`, `HOME` and
     /// `SHELL` as sshd sets them, `XDG_DATA_HOME` pinned under the home (the
     /// test machine's must not leak in), `extra` on top.
@@ -1031,7 +1138,7 @@ mod remote_shells {
             SessionOptions {
                 command: Some((
                     shell.display().to_string(),
-                    vec!["-c".to_owned(), remote_command(boot())],
+                    vec!["-c".to_owned(), remote_command(boot(), Some(PARENT))],
                 )),
                 working_directory: Some(home.to_path_buf()),
                 home: Some(home.to_path_buf()),
@@ -1172,6 +1279,7 @@ mod remote_shells {
             wait_until("zsh: ~/.zshenv skipped or ZDOTDIR lost", || {
                 screen_has(&session, "[z=1 cfg]")
             });
+            draws_remote_blocks(&session, "zsh");
             close(&session);
         }
     }
@@ -1207,6 +1315,20 @@ mod remote_shells {
         wait_until(&format!("bash {major}: not {expected}"), || {
             screen_has(&session, &expected)
         });
+        // Blocks need `PS0` (bash 4.4): before it there is no `C` to close the
+        // anchor, so the script prints no block marks (`bateri.bash`).
+        let ps0 = std::process::Command::new("bash")
+            .args([
+                "-c",
+                "(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404 )) && echo y",
+            ])
+            .output()
+            .is_ok_and(|out| out.stdout.starts_with(b"y"));
+        if ps0 {
+            draws_remote_blocks(&session, "bash");
+        } else {
+            println!("SKIPPED: bash {major} has no PS0, no remote blocks");
+        }
         close(&session);
     }
 
@@ -1218,6 +1340,7 @@ mod remote_shells {
             wait_until("fish: XDG_DATA_DIRS kept ours", || {
                 screen_has(&session, "[x=]")
             });
+            draws_remote_blocks(&session, "fish");
             close(&session);
         }
     }

@@ -276,13 +276,15 @@ __bateri_hooks() {
 
 # Runs the user's `ssh`, wrapped when bateri says so (048).
 #
-# `bateri ssh-argv [--tty] -- <args…>` prints the wrapped arguments, each
+# `bateri ssh-argv [--tty] --block N -- <args…>` prints the wrapped arguments, each
 # followed by a NUL, or nothing — and nothing (also a missing binary or any
 # failure) means plain `command ssh "$@"`, today's path. `--tty` only when stdin
 # AND stdout are terminals: under `$(…)` the binary's own stdout is our pipe, so
 # it cannot ask itself (R1.1: `ssh host | grep` is not wrapped). The rules —
 # which call is interactive, the settings, `ssh -G`, whether the server was
 # learned — are all in the binary (`ssh_wrap::decide`), not here: one parser.
+# `--block` is this command's block (`__bateri_block`): the server's blocks are
+# marked as its children (`bt_remote=<P>.<S>.<n>`, 048 phase-3).
 #
 # `$(…)` keeps NUL bytes in zsh and `"${(@0)…}"` splits on them keeping empty
 # arguments; the last NUL leaves one empty element behind, which is dropped.
@@ -292,7 +294,7 @@ __bateri_ssh() {
   local out tty=
   [[ -t 0 && -t 1 ]] && tty=--tty
   if [[ -x $__bateri_bin ]]; then
-    out=$(command $__bateri_bin ssh-argv $tty -- "$@" 2>/dev/null)
+    out=$(command $__bateri_bin ssh-argv $tty --block "$__bateri_block" -- "$@" 2>/dev/null)
   fi
   if [[ -n $out && $out == *$'\0' ]]; then
     local -a wrapped

@@ -1288,7 +1288,11 @@ pub(crate) mod tests {
             shown(&session, "[-t][x][y z][BOOT]") && shown(&session, "[unset]")
         });
         let asked = std::fs::read_to_string(&log).expect("the binary was asked");
-        assert_eq!(asked, "ssh-argv --tty -- x y z\nssh-argv -- x\n");
+        // `--block` is the command's own block: the first prompt's.
+        assert_eq!(
+            asked,
+            "ssh-argv --tty --block 1 -- x y z\nssh-argv --block 1 -- x\n"
+        );
         session.shutdown();
 
         // A user's own `ssh` function wins: ours is not defined over it.

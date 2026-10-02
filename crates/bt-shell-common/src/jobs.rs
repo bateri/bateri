@@ -1214,7 +1214,7 @@ mod tests {
         // 048 R2: the process runs bateri's `-t` and bootstrap; the target, the
         // re-run argv (⏎ reconnect, ⌘T) and the line are the user's.
         let typed = ["-o", "User=x", "-L", "1:x:1", "--", "prod"];
-        let wrapped = crate::ssh_wrap::wrap(&words(&typed), "echo hi");
+        let wrapped = crate::ssh_wrap::wrap(&words(&typed), "echo hi", Some(3));
         let mut argv = vec!["ssh".to_owned()];
         argv.extend(wrapped);
         let leaked: Vec<&'static str> = argv
