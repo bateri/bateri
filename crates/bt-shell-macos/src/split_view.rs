@@ -356,15 +356,19 @@ impl SplitView {
         self.layout_panes();
     }
 
-    /// The links' visibility: the window is visible **and** the pane is not
+    /// The panes' visibility: the window is visible **and** the pane is not
     /// hidden. A hidden pane (left behind the zoom) draws zero frames like an
     /// occluded window; when it returns it asks for a frame
-    /// (`DisplayLink::set_visible`).
+    /// (`DisplayLink::set_visible`). The same answer pauses the remote load
+    /// indicator's sampling (`TerminalPane::set_visible`, 046 Karar 6).
     pub(crate) fn apply_visibility(&self, window_visible: bool) {
-        for pane in self.ivars().panes.borrow().iter() {
+        let panes = self.ivars().panes.borrow().clone();
+        for pane in &panes {
+            let visible = window_visible && !pane.isHidden();
             if let Some(link) = pane.link() {
-                link.set_visible(window_visible && !pane.isHidden());
+                link.set_visible(visible);
             }
+            pane.set_visible(visible);
         }
     }
 

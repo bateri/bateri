@@ -186,7 +186,7 @@ bağlantısı (metin taramasını yener). Algılama ve hit test `bt-core`'da
 yol **uzak işaretli** hit — `LinkHit::remote` — ve varlığını pane başına tembel
 açılan **yardımcı ssh oturumu** söylüyor (`remote_helper`, 045 Karar 10:
 `BatchMode`, cevap uzak nesil başına önbellekte, nesil değişince ya da boşta
-kapanır); göreli adın tabanı uzak OSC 7 dizini, o yoksa başlığın `kullanıcı@host: dizin`
+kapanır — yük göstergesi örnekledikçe boşta değil, açık kalır; 046 Karar 1); göreli adın tabanı uzak OSC 7 dizini, o yoksa başlığın `kullanıcı@host: dizin`
 biçimi (Debian/Ubuntu'nun hazır `.bashrc`'si; boşluksuz `kullanıcı@host:dizin` de — oh-my-zsh; `Session::remote_link_directory`),
 ikisi de yoksa göreli ad bağlantı değil ve nedeni de
 açılamayan oturumun nedeni de pane'in etiketinde; sağ tık menüsü (Open
@@ -384,7 +384,8 @@ genel panoya o yazar;
 `smooth_scroll`, `keypress`, `erase`, `shell.integration` ve `[remote]`'un
 önizleme/indirme anahtarları — `preview_max_size`, `preview_read_only`,
 `preview_dir`, `preview_keep`, `preview_limit`, `download_dir`,
-`download_conflict`, `download_notify`; 045, ayar penceresinde Remote Files),
+`download_conflict`, `download_notify`; 045 — ve yük göstergesinin `stats`,
+`stats_interval`'ı; 046, ayar penceresinde Remote Files),
 Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
@@ -677,6 +678,13 @@ açıkça söylüyor. Uzak komut `sh -c`'ye sarılı ve tırnağı ters bölüs�
 yetkili olanı uzak yuvaya gidiyor ve yerel dizine yazmıyor. Uzak durum
 `bt-core`'da (`Session::set_remote(nesil, host)`, `DockContext::remote`) ve
 `C`/`D`/`A`'da kendiliğinden siliniyor; algılama `bt-shell-macos`'ta, aşağıda.
+**Bağlam satırının sağında uzak makinenin yükü** (046): CPU (sparkline),
+bellek ve dolunca disk, yardımcı oturuma pane başına jetonlu bir ana kuyruk
+zamanlayıcısının `bt_load` isteğiyle (`stats`; karar saf
+`remote_stats::Schedule`'da, yerleşim merdiveni `bt-core`'da) — örnekleme uzak
+oturum, görünür pane ve son iki dakikada etkileşim ister, kare yalnız
+gösterilen değer değişince (`Session::set_remote_stats`'ın nesil + eşitlik
+kapısı); gerekçeler `.tasks/046-uzak-yuk-gostergesi/discussion.md` → Karar 1–8.
 Dock'a tık giriş satırı yokken no-op. Gerekçeler
 `.tasks/036-ssh-uzak-oturum/discussion.md` → Karar 3–8 ve
 `.tasks/037-ssh-ikinci-tur/discussion.md`.

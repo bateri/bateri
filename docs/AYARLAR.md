@@ -62,7 +62,8 @@ görünür. View ▸ Bigger da bu düzende `⌘:` görünür.
 
 bateri ▸ Settings… (Cmd ,) ayar penceresini açar: solda beş kategori
 (General, Appearance, Cursor, Motion, Remote Files), sağda ayarlar. Remote
-Files `[remote]`'un sekiz önizleme/indirme anahtarını gösterir; klasör
+Files `[remote]`'un sekiz önizleme/indirme anahtarını ve yük göstergesinin
+iki anahtarını (`stats`, `stats_interval`; on anahtar) gösterir; klasör
 satırlarında Change… klasör seçicisini açar (seçilen ev dizininin altındaysa
 `~/…` diye yazılır), önizleme klasöründe Show in Finder onu açar ve "In use"
 satırı klasördeki kopyaların toplamını gösterir — Clear Now önizlemeleri

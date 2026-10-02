@@ -32,8 +32,8 @@ use block2::RcBlock;
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
     CursorBlink, CursorMotion, DownloadConflict, Erase, Keypress, LINE_HEIGHT_RANGE, Osc52,
-    PreviewKeep, ReduceMotion, SCROLLBACK_MAX, SYSTEM_THEME, Settings, SettingsEdit,
-    ShellIntegration, SmoothScroll, UnfocusedCaret,
+    PreviewKeep, ReduceMotion, RemoteStatsMode, SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME,
+    Settings, SettingsEdit, ShellIntegration, SmoothScroll, UnfocusedCaret,
 };
 use bt_gpu::FontNotice;
 use objc2::rc::Retained;
@@ -66,10 +66,12 @@ use crate::zoom::{MAX_SIZE, MIN_SIZE};
 
 /// The window's content size, in points. Fixed — the window cannot be
 /// resized. The height is the longest pane's: Remote Files (045 phase-6, nine
-/// rows, two of them two lines tall) — the Cursor pane's 560 would put it on
-/// the button; at 500 the Cursor pane with a banner stuck to the button (029
-/// phase-3 eyeball check). A design constant, not a measured number.
-const WINDOW_SIZE: NSSize = NSSize::new(680.0, 680.0);
+/// rows, two of them two lines tall; 046 phase-4 adds the load indicator's two
+/// rows with a note each, about a hundred points more) — the Cursor pane's 560
+/// would put it on the button; at 500 the Cursor pane with a banner stuck to
+/// the button (029 phase-3 eyeball check). A design constant, not a measured
+/// number.
+const WINDOW_SIZE: NSSize = NSSize::new(680.0, 780.0);
 /// The sidebar's width: close to System Settings', roomy for four short
 /// titles. A design constant.
 const SIDEBAR_WIDTH: f64 = 180.0;
@@ -187,11 +189,13 @@ enum Key {
     DownloadDir,
     DownloadConflict,
     DownloadNotify,
+    RemoteStats,
+    StatsInterval,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 29] = [
+    const ALL: [Key; 31] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -221,6 +225,8 @@ impl Key {
         Key::DownloadDir,
         Key::DownloadConflict,
         Key::DownloadNotify,
+        Key::RemoteStats,
+        Key::StatsInterval,
     ];
 
     fn tag(self) -> NSInteger {
@@ -265,6 +271,8 @@ impl Key {
             Key::DownloadDir => "remote.download_dir",
             Key::DownloadConflict => "remote.download_conflict",
             Key::DownloadNotify => "remote.download_notify",
+            Key::RemoteStats => "remote.stats",
+            Key::StatsInterval => "remote.stats_interval",
         }
     }
 }
@@ -498,6 +506,20 @@ impl Choice for DownloadConflict {
     }
 }
 
+impl Choice for RemoteStatsMode {
+    fn names() -> &'static [(&'static str, Self)] {
+        RemoteStatsMode::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            RemoteStatsMode::Sparkline => "Sparkline",
+            RemoteStatsMode::Numbers => "Numbers",
+            RemoteStatsMode::Alerts => "Alerts only",
+            RemoteStatsMode::Off => "Off",
+        }
+    }
+}
+
 /// A row overridden by an input that turns motion off: whether it is enabled
 /// and what it says in place of its note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -611,6 +633,16 @@ fn parse_scrollback(text: &str) -> Option<usize> {
         .parse::<usize>()
         .ok()
         .filter(|&lines| lines <= SCROLLBACK_MAX)
+}
+
+/// The `stats_interval` the field accepts: a whole number of seconds inside
+/// [`STATS_INTERVAL_RANGE`] — the parser's own rule (a decimal is refused, not
+/// rounded).
+fn parse_interval(text: &str) -> Option<u8> {
+    text.trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|seconds| STATS_INTERVAL_RANGE.contains(seconds))
 }
 
 /// The decimal the field accepts: finite and inside the range.
@@ -851,6 +883,8 @@ struct Controls {
     download_dir: Folder,
     download_conflict: Retained<NSPopUpButton>,
     download_notify: Retained<NSSwitch>,
+    remote_stats: Retained<NSPopUpButton>,
+    stats_interval: Number,
     /// The panes' rows: the lock, the dependent row and the row's
     /// diagnostic come from here.
     rows: Vec<Row>,
@@ -1012,6 +1046,7 @@ define_class!(
                     .map(SettingsEdit::PreviewLimit),
                 Key::PreviewKeep => choice_at(index).map(SettingsEdit::PreviewKeep),
                 Key::DownloadConflict => choice_at(index).map(SettingsEdit::DownloadConflict),
+                Key::RemoteStats => choice_at(index).map(SettingsEdit::RemoteStats),
                 _ => None,
             };
             self.save(edit);
@@ -1117,6 +1152,10 @@ define_class!(
                     &controls.line_height,
                     parse_decimal(&text, LINE_HEIGHT_RANGE),
                 ),
+                Some(Key::StatsInterval) => (
+                    &controls.stats_interval,
+                    parse_interval(&text).map(f64::from),
+                ),
                 _ => return,
             };
             // Passing through an unchanged field does not write: the rounded
@@ -1127,6 +1166,8 @@ define_class!(
             let edit = value.map(|value| match Key::from_tag(field.tag()) {
                 Some(Key::Scrollback) => SettingsEdit::Scrollback(value as usize),
                 Some(Key::Size) => SettingsEdit::FontSize(value),
+                // `parse_interval` accepted it: a whole number inside the range.
+                Some(Key::StatsInterval) => SettingsEdit::StatsInterval(value as u8),
                 _ => SettingsEdit::LineHeight(value),
             });
             match edit {
@@ -1153,6 +1194,8 @@ define_class!(
                 Some(Key::Scrollback) => Some(SettingsEdit::Scrollback(value.round() as usize)),
                 Some(Key::Size) => Some(SettingsEdit::FontSize(value)),
                 Some(Key::LineHeight) => Some(SettingsEdit::LineHeight(value)),
+                // The stepper's bounds are the accepted range and its step is 1.
+                Some(Key::StatsInterval) => Some(SettingsEdit::StatsInterval(value.round() as u8)),
                 _ => None,
             };
             self.save(edit);
@@ -1384,6 +1427,14 @@ impl SettingsWindow {
             .setStringValue(&NSString::from_str(&files.download_dir));
         select_choice(&c.download_conflict, files.download_conflict);
         set_switch(&c.download_notify, files.download_notify);
+        select_choice(&c.remote_stats, settings.remote_stats.mode);
+        let interval = settings.remote_stats.interval;
+        set_number(
+            &c.stats_interval,
+            f64::from(interval),
+            &interval.to_string(),
+        );
+        let sampling = settings.remote_stats.mode != RemoteStatsMode::Off;
         self.ivars()
             .folders
             .replace((files.preview_dir.clone(), files.download_dir.clone()));
@@ -1394,6 +1445,7 @@ impl SettingsWindow {
             let depends = match row.key {
                 Key::LightTheme | Key::DarkTheme => follows,
                 Key::BlinkSpeed => blinks,
+                Key::StatsInterval => sampling,
                 _ => forced.is_none_or(|forced| forced.enabled),
             };
             let enabled = !status.locked && depends;
@@ -2038,6 +2090,14 @@ impl SettingsWindow {
         let download_dir = self.folder(Key::DownloadDir);
         let download_conflict = self.popup::<DownloadConflict>(Key::DownloadConflict);
         let download_notify = self.switch(Key::DownloadNotify);
+        let remote_stats = self.popup::<RemoteStatsMode>(Key::RemoteStats);
+        let stats_interval = self.number(
+            Key::StatsInterval,
+            f64::from(*STATS_INTERVAL_RANGE.start()),
+            f64::from(*STATS_INTERVAL_RANGE.end()),
+            1.0,
+            56.0,
+        );
         let mut remote = Form::new(mtm);
         remote.row(
             Key::PreviewMaxSize,
@@ -2112,6 +2172,21 @@ impl SettingsWindow {
             &[&download_notify],
             Some("Only while bateri is in the background."),
         );
+        // The load indicator (046 Karar 8).
+        remote.row(
+            Key::RemoteStats,
+            "Server load:",
+            &remote_stats,
+            &[&remote_stats],
+            Some("The server's CPU and memory, in the ssh status bar."),
+        );
+        remote.row(
+            Key::StatsInterval,
+            "Sample every:",
+            &number_view(mtm, &stats_interval),
+            &number_controls(&stats_interval),
+            Some("Seconds. Pauses in hidden tabs and when idle."),
+        );
 
         let rows = [
             general.rows,
@@ -2161,6 +2236,8 @@ impl SettingsWindow {
             download_dir,
             download_conflict,
             download_notify,
+            remote_stats,
+            stats_interval,
             rows,
         };
         (panes, controls)
@@ -2588,7 +2665,8 @@ mod tests {
                     [shell]\nintegration = []\n\
                     [remote]\npreview_max_size = []\npreview_read_only = []\n\
                     preview_dir = []\npreview_keep = []\npreview_limit = []\n\
-                    download_dir = []\ndownload_conflict = []\ndownload_notify = []\n";
+                    download_dir = []\ndownload_conflict = []\ndownload_notify = []\n\
+                    stats = []\nstats_interval = []\n";
         let parsed = Settings::parse_keeping(text, &Settings::default()).expect("it parses");
         let seen = status(&FileState::Usable(parsed.diagnostics), &[]);
         assert_eq!(seen.banner, Banner::default(), "no unmatched diagnostic");
@@ -2628,6 +2706,8 @@ mod tests {
                 Key::DownloadDir => SettingsEdit::DownloadDir("~".to_owned()),
                 Key::DownloadConflict => SettingsEdit::DownloadConflict(DownloadConflict::Ask),
                 Key::DownloadNotify => SettingsEdit::DownloadNotify(false),
+                Key::RemoteStats => SettingsEdit::RemoteStats(RemoteStatsMode::Off),
+                Key::StatsInterval => SettingsEdit::StatsInterval(3),
             };
             assert_eq!(edit.path(), key.path(), "{key:?}");
         }
@@ -2697,6 +2777,7 @@ mod tests {
         check::<Erase>();
         check::<PreviewKeep>();
         check::<DownloadConflict>();
+        check::<RemoteStatsMode>();
     }
 
     /// The size popups show the file's value even when it is not a preset,
@@ -2851,6 +2932,12 @@ mod tests {
 
     #[test]
     fn fields_refuse_what_the_file_would_refuse() {
+        assert_eq!(parse_interval(" 3 "), Some(3));
+        assert_eq!(parse_interval("2"), Some(2));
+        assert_eq!(parse_interval("60"), Some(60));
+        assert_eq!(parse_interval("1"), None);
+        assert_eq!(parse_interval("61"), None);
+        assert_eq!(parse_interval("2.5"), None);
         assert_eq!(parse_scrollback(" 2500 "), Some(2500));
         assert_eq!(parse_scrollback("0"), Some(0));
         assert_eq!(parse_scrollback("-1"), None);

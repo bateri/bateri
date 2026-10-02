@@ -718,6 +718,7 @@ define_class!(
         /// behaviour knows nothing of selection and would swallow the event.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            self.note_interaction();
             if event.buttonNumber() != 0 {
                 return;
             }
@@ -788,6 +789,7 @@ define_class!(
         /// test also covers the fill band, which the report keeps rejecting.
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
+            self.note_interaction();
             self.upload_hover(event);
             self.link_motion(event);
             self.motion_event(event, None);
@@ -813,6 +815,7 @@ define_class!(
         /// produce an unexpected highlight.
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
+            self.note_interaction();
             self.button_event(event, MouseButton::Right, true);
         }
 
@@ -862,6 +865,7 @@ define_class!(
         /// tell the application a **wrong** button.
         #[unsafe(method(otherMouseDown:))]
         fn other_mouse_down(&self, event: &NSEvent) {
+            self.note_interaction();
             if event.buttonNumber() != 2 {
                 return;
             }
@@ -901,6 +905,7 @@ define_class!(
         /// `smooth_scroll = "off"`, Reduce Motion and `cursor_motion = "snap"`.
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
+            self.note_interaction();
             let Some(session) = self.ivars().session.get() else {
                 return;
             };
@@ -998,6 +1003,7 @@ define_class!(
         ///    event ([`ViewIvars::consumed`]) it falls to `encode_key` anyway.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            self.note_interaction();
             let flags = event.modifierFlags();
             let Some(session) = self.ivars().session.get() else {
                 return;
@@ -2014,6 +2020,15 @@ impl BateriView {
     /// `None` if the view is not yet attached to a pane. There is no linear
     /// search in a window list or reaching for the application delegate: the
     /// owner is in the view tree.
+    /// A key, a press, the wheel or a mouse move: the remote load indicator
+    /// keeps sampling while the user is around (046 Karar 6). A stamp, no
+    /// `Term` lock — it runs at mouse-move rate.
+    fn note_interaction(&self) {
+        if let Some(pane) = self.pane() {
+            pane.note_interaction();
+        }
+    }
+
     pub(crate) fn pane(&self) -> Option<Retained<TerminalPane>> {
         // SAFETY: reading the superview; the returned `Retained` keeps it alive
         // for the caller and we are on the main thread (`MainThreadOnly`).

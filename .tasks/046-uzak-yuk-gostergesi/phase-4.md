@@ -60,11 +60,68 @@ _Requirements: R2.2, R5.1, R5.2_
 
 ## Checklist
 
-- [ ] Sürücü (`stats.rs`): jetonlu tik, istek, dönüş, gizleme
-- [ ] Pane olayları: uzak kenar, görünürlük, ayar, etkileşim, kapanış
-- [ ] `SplitView::apply_visibility` → pane
-- [ ] View/pencere etkileşim kancaları
-- [ ] Ayar penceresinin iki satırı + canlı uygulama
-- [ ] `CLAUDE.md`
-- [ ] `docs/AYARLAR.md` → Settings…: "Remote Files `[remote]`'un sekiz önizleme/indirme anahtarını" cümlesi iki satırla on anahtara (phase-2'den devredildi: satırlar bu phase'de doğuyor)
-- [ ] Doğrulama geçti (`make check` + `make smoke`)
+- [x] Sürücü (`stats.rs`): jetonlu tik, istek, dönüş, gizleme
+- [x] Pane olayları: uzak kenar, görünürlük, ayar, etkileşim, kapanış
+- [x] `SplitView::apply_visibility` → pane
+- [x] View/pencere etkileşim kancaları
+- [x] Ayar penceresinin iki satırı + canlı uygulama
+- [x] `CLAUDE.md`
+- [x] `docs/AYARLAR.md` → Settings…: "Remote Files `[remote]`'un sekiz önizleme/indirme anahtarını" cümlesi iki satırla on anahtara (phase-2'den devredildi: satırlar bu phase'de doğuyor)
+- [x] Doğrulama geçti (`make check` + `make smoke`)
+
+## Uygulama Notları
+
+- **Uzak kenarın iki yolu var, ikisi de sürücüye gidiyor:** `remote_or_title_changed`
+  yalnız yoklamadan (`probe_remote`) çağrılıyor; uzak oturumun `C`/`D`/`A`'da
+  silinmesi başlık haberinden (`announce_title`'ın kenarı) geliyor ve oraya
+  hiç uğramıyordu. İkisi tek bir `TerminalPane::remote_edge`'e (yükleme
+  kuyruğunun bağlantısı + `sync_stats_generation`) bağlandı; yoksa biten ssh'ın
+  nesli için tik kurulmaya devam ederdi.
+- **Uçuştaki istek her zaman cevaplanıyor:** `Request` eylemi koşarken
+  oturumun uzak hedefi yoksa ya da nesli `Schedule`'ınkinden farklıysa (kenar
+  henüz işlenmedi) cevap kapanışı `Err` ile hemen çağrılıyor ve ana kuyruğa
+  `Failed` olarak dönüyor — `Schedule`'ın tek uçuş bayrağı aksi hâlde hiç
+  düşmezdi. Cevap her yolda `exec_async` ile ana kuyruğa gidiyor
+  (`RemoteHelper::ask` iş parçacığını kuramazsa cevabı eşzamanlı çağırıyor).
+- **`Sampler` nesille kapılı:** örnek yalnız `Schedule`'ın nesline aitse
+  `take`'e giriyor (başka host'un sayaçları sonraki CPU farkının tabanı
+  olurdu); `answered` her durumda çağrılıyor (worker'ı serbest bırakır).
+- **Biçim değişimi hemen yeniden çiziyor (Karar 8):** `Schedule::set_form`
+  koşarken yeni istek üretmiyor, yani yeni biçim bir aralık gecikirdi.
+  Sürücü her örneği `Sparkline` olarak alıp (`last`, geçmiş dahil) gösterileni
+  `shaped` ile türetiyor: biçim değişince son değer yeni biçimde hemen
+  `set_remote_stats`'a gidiyor; öteki biçimlerde geçmiş sıfır (görünmeyen
+  geçmiş değişimi kare istemesin). `bt-shell-common`'a dokunulmadı. `last`
+  yeni nesilde, yeniden başlatmada (`restart`) ve `Hide`'da siliniyor: yoksa
+  biçim değişimi başka host'un sayılarını ya da gizlenmiş bir değeri geri
+  getirirdi (Karar 5'in sızıntısı bir kat yukarıda).
+- **Popover'ın kancası** çağrılan boş bir yöntem (`stats_detail_arrived`):
+  her örneğin `Detail`'i oraya iniyor; phase-5 doldurur. Popover'ın açılıp
+  kapanması (`Schedule::set_detail`) phase-5'in işi.
+- **`begin_close`** `stop_stats` ile nesli `None`'a çekiyor (jeton bayatlar);
+  kapanan pane'i `lookup` zaten bulmuyor.
+- **Görünürlük** `SplitView::apply_visibility`'de link'le aynı ifadeden
+  (`window_visible && !pane.isHidden()`); pane listesi kopyalanıp dolaşılıyor
+  (sürücünün eylemleri `SplitView`'ın ödüncü altında koşmasın).
+- **Etkileşim kancaları:** `keyDown:`, `mouseDown:`/`rightMouseDown:`/
+  `otherMouseDown:` (basış), `scrollWheel:`, `mouseMoved:` ve pencerenin
+  `windowDidBecomeKey:`'i. Koşarken yalnız damga; `Vec::new()` ayırmıyor,
+  `Term` kilidine uğranmıyor.
+- **Ayar penceresi:** "Server load" (`Sparkline`/`Numbers`/`Alerts only`/
+  `Off`) ve "Sample every" (tam sayı alanı + stepper, aralık
+  `STATS_INTERVAL_RANGE`; ondalık ve aralık dışı reddediliyor —
+  `parse_interval`, ayrıştırıcının kuralı). `stats = "off"` iken aralık satırı
+  devre dışı (`blinks`'in emsali, bağımlı satır).
+- **Pencere yüksekliği 680 → 780 tahminle**, ölçülmedi: Remote Files iki
+  notlu satır kazandı (satır + not ≈ 50 pt × 2). Gözle kontrol yapılmadı;
+  sığmazsa ya da boşluk fazlaysa set kapısının gözle kontrolünde düzelir.
+- **Doğrulama:** `make check` ve `make smoke` (`content=2`/`3`, `quiet=1749` ms
+  — önceki koşularla aynı sınıf; süreli koşuda uzak oturum yok, sürücü tik
+  kurmuyor). `make linux` gerekmedi (yalnız `bt-shell-macos` ve belgeler
+  değişti); `make test-race` gerekmedi: worker → ana kuyruk dönüşü mevcut
+  kimlik + nesil örüntüsü, yeni paylaşılan durum yok (sürücü `RefCell`, yalnız
+  ana thread). `/code-review` koşmadı: riskli phase tetikleyicisi yok (`.wgsl`
+  yok, kilit dosyası değişmedi, `make test-race` tetiklenmedi).
+- **Elle kabul** (gerçek Linux sunucuya ssh, sekme değişimi, `off`, `exit`
+  sonrası 120 s'de yardımcı ssh'ın kapanması) bu ajan kabuğunda yapılmadı;
+  set kapısının gözle kontrolüne kalıyor.

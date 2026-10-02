@@ -58,4 +58,5 @@ _Requirements: R6.1, R6.2_
 - [ ] Sürücüyle `detail` bağlantısı
 - [ ] Tık ve el imleci
 - [ ] Gösterge kaybolunca kapanış
+- [ ] phase-4'ten devralınan elle kabul: gerçek Linux sunucuda gösterge ~1 s'de CPU'suz, sonra CPU'lu; sekme değişince örnekleme durur, dönünce hemen örnek; `stats = "off"` göstergeyi kaldırır; `exit` sonrası 120 s'de yardımcı ssh kapanır (`ps`); ayar penceresinin 780 pt yüksekliği Remote Files'a sığıyor mu (tahmin, ölçülmedi)
 - [ ] Doğrulama geçti (`make check` + `make smoke`)
