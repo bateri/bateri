@@ -727,8 +727,17 @@ Dock'a tık giriş satırı yokken no-op. Gerekçeler
 **Düz `ssh` uzakta entegrasyonu kendisi kuruyor** (048): yerel zsh
 sarmalayıcısı kullanıcının dosyalarından sonra bir `ssh` fonksiyonu tanımlıyor
 (kullanıcının `ssh` alias'ı/fonksiyonu yoksa; `off` kademesinde yok) ve kararı
-`$BATERI_BIN ssh-argv [--tty] [--block N] -- …`'e soruyor (`ssh_wrap::decide`; boş cevap
-düz `ssh`). Sarılmış çağrı `ssh -t <kullanıcının argümanları> "exec sh -c
+`$BATERI_BIN ssh-argv [--tty] [--block N] [--instance I] -- …`'e soruyor (`ssh_wrap::decide`; boş cevap
+düz `ssh`). **Sarılmış oturum bağlantıyı paylaşıyor** (phase-5, R7):
+kullanıcının kendi `ControlMaster`/`ControlPath`'i yoksa (`ssh -G`) `-t`'nin
+hemen arkasına `ControlMaster=auto`, örnek dizininde `u-<anahtar>` ve kısa
+`ControlPersist` (`ssh_route::SESSION_PERSIST`) giriyor; dosya işleri
+terminalde parolası yazılmış bağlantıya bizim master'dan sonra, kullanıcınınkinden
+önce biniyor (`ssh_route::decide`). Soket bizim adlarımızdan biri **değil**:
+bateri ona `-O exit` göndermiyor (ne oturum sonu ne ⌘Q kullanıcının
+terminalini kesmesin), kısa persist ise `exit`'in üstündeki işleri
+beklemeden dönmesini ve bağlantının oturum + işlerle bitmesini sağlıyor
+(ölçüldü: persist'siz master `exit`'i binen akış kadar tutuyor). Sarılmış çağrı `ssh -t <kullanıcının argümanları> "exec sh -c
 '<tek satır>' bateri-boot <P>"`; tek satır her giriş kabuğunun tırnağından sağ
 çıkmak zorunda (`'`, `\`, `!`, satır sonu yok — `ssh_wrap::is_inline`) ve
 base64'lü yükü (`assets/shell/remote/boot.sh` + yazacağı dosyalar,

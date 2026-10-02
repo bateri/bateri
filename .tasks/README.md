@@ -49,7 +49,7 @@
 | 045 | [uzak-dosya-indirme](045-uzak-dosya-indirme/) | 🟢 | 6 phase + kapı tamam — ssh'ta `ls` çıktısındaki dosyaya ⌘-tık salt okunur önizleme, ⌘-sürükle Finder'a, sağ tık Downloads'a indiriyor; aktarım kuyruğu iki yönlü, önizleme klasörü kendiliğinden temizleniyor ve ayar penceresinde Remote Files kategorisi var; gerçek ssh sunucusunda henüz gözle görülmedi |
 | 046 | [uzak-yuk-gostergesi](046-uzak-yuk-gostergesi/) | 🟢 | 5 phase + kapı tamam — ssh durum çubuğunda uzak Linux makinenin yük göstergesi ve ayrıntı popover'ı; gerçek sunucuda gözle kontrol bekliyor |
 | 047 | [ssh-parola-ve-keychain](047-ssh-parola-ve-keychain/) | 🟢 | 4 phase + kapı tamam — parolalı sunucuda dosya işleri bateri'nin kendi master'ıyla, parola Keychain'de; arka plan kullanıcının ssh girişini bekliyor ve master oturumla kapanıyor
-| 048 | [uzak-kabuk-entegrasyonu](048-uzak-kabuk-entegrasyonu/) | 🔨 | düz `ssh` yazınca uzakta OSC 7/133 entegrasyonu, rc dosyasına dokunmadan; ayarla ve host başına kapatma |
+| 048 | [uzak-kabuk-entegrasyonu](048-uzak-kabuk-entegrasyonu/) | 🟢 | 5 phase + kapı tamam — düz `ssh` uzakta dizin ve komut bloklarını rc dosyasına dokunmadan kuruyor, ayarla ve host başına kapanıyor; dosya işleri terminalde açılan oturumun bağlantısına biniyor |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

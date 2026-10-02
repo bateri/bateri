@@ -141,6 +141,10 @@ fi
 if (( ! ${+__bateri_bin} )); then
   __bateri_bin=${BATERI_BIN-}
   unset BATERI_BIN
+  # The running bateri's ssh instance directory (048 phase-5): a wrapped
+  # session becomes a master there. Same rule: ours, out of the environment.
+  __bateri_ssh_instance=${BATERI_SSH_INSTANCE-}
+  unset BATERI_SSH_INSTANCE
 fi
 
 # Attaches the OSC 133 marks to zsh's own hooks.
@@ -276,7 +280,7 @@ __bateri_hooks() {
 
 # Runs the user's `ssh`, wrapped when bateri says so (048).
 #
-# `bateri ssh-argv [--tty] --block N -- <args…>` prints the wrapped arguments, each
+# `bateri ssh-argv [--tty] --block N [--instance I] -- <args…>` prints the wrapped arguments, each
 # followed by a NUL, or nothing — and nothing (also a missing binary or any
 # failure) means plain `command ssh "$@"`, today's path. `--tty` only when stdin
 # AND stdout are terminals: under `$(…)` the binary's own stdout is our pipe, so
@@ -284,7 +288,9 @@ __bateri_hooks() {
 # which call is interactive, the settings, `ssh -G`, whether the server was
 # learned — are all in the binary (`ssh_wrap::decide`), not here: one parser.
 # `--block` is this command's block (`__bateri_block`): the server's blocks are
-# marked as its children (`bt_remote=<P>.<S>.<n>`, 048 phase-3).
+# marked as its children (`bt_remote=<P>.<S>.<n>`, 048 phase-3). `--instance`
+# is bateri's socket directory (`__bateri_ssh_instance`): the session becomes a
+# master there and bateri's file jobs ride it (phase-5).
 #
 # `$(…)` keeps NUL bytes in zsh and `"${(@0)…}"` splits on them keeping empty
 # arguments; the last NUL leaves one empty element behind, which is dropped.
@@ -292,9 +298,11 @@ __bateri_hooks() {
 __bateri_ssh() {
   emulate -L zsh
   local out tty=
+  local -a instance
   [[ -t 0 && -t 1 ]] && tty=--tty
+  [[ -n $__bateri_ssh_instance ]] && instance=( --instance "$__bateri_ssh_instance" )
   if [[ -x $__bateri_bin ]]; then
-    out=$(command $__bateri_bin ssh-argv $tty --block "$__bateri_block" -- "$@" 2>/dev/null)
+    out=$(command $__bateri_bin ssh-argv $tty --block "$__bateri_block" "${instance[@]}" -- "$@" 2>/dev/null)
   fi
   if [[ -n $out && $out == *$'\0' ]]; then
     local -a wrapped

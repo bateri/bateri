@@ -19,6 +19,14 @@
 //! would be sent to the remote shell). [`unwrap`] checks those positions, it
 //! does not search for the command.
 //!
+//! **The session is a master** (R7, phase-5): when the user shares no
+//! connections themselves (`ssh -G`, [`SshConfig::shares_connections`]) and
+//! bateri's instance directory is there, the wrapped call also carries
+//! `ControlMaster=auto` at [`session_socket`] with a short
+//! [`SESSION_PERSIST`] ([`Control`]) — bateri's file jobs ride the connection
+//! the user signed in to. Those three options sit right after `-t`, again by
+//! position.
+//!
 //! The state file's rows are `{fact}\t{key}\t{unix time}`; the key is the
 //! server as `ssh -G` resolves it ([`host_key`]). Bodies with side effects (the
 //! `ssh -G` process, the file's lock and rename) are thin; the rules are pure
@@ -35,7 +43,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bt_core::Settings;
 
 use crate::jobs::ssh_call;
-use crate::ssh_route::{Account, SshRunner, parse_config};
+use crate::ssh_route::{
+    Account, SESSION_PERSIST, SshConfig, SshRunner, parse_config, session_socket,
+};
 
 /// The bootstrap's `$0` and the wrapped command's last word: what [`unwrap`]
 /// checks at the last position, together with [`COMMAND_HEAD`].
@@ -58,24 +68,72 @@ pub fn remote_command(boot: &str, parent: Option<u32>) -> String {
     }
 }
 
+/// The connection sharing a wrapped session gets (phase-5): the session is a
+/// master at `socket` (`ControlMaster=auto` — a second `ssh` to the host from
+/// this bateri joins it), detached after [`SESSION_PERSIST`]. Ours come
+/// **before** the user's arguments: ssh keeps a key's first value. Only for a
+/// user who shares no connections themselves ([`decide`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Control {
+    pub socket: PathBuf,
+}
+
+impl Control {
+    /// The three options, `-o` each.
+    fn options(&self) -> [String; 6] {
+        [
+            "-o".to_owned(),
+            "ControlMaster=auto".to_owned(),
+            "-o".to_owned(),
+            format!("ControlPath={}", self.socket.display()),
+            "-o".to_owned(),
+            format!("ControlPersist={}", SESSION_PERSIST.as_secs()),
+        ]
+    }
+
+    /// Whether `words` are [`Self::options`] for some socket — what
+    /// [`unwrap`] takes off, by position.
+    fn matches(words: &[String]) -> bool {
+        let persist = format!("ControlPersist={}", SESSION_PERSIST.as_secs());
+        matches!(words, [o1, master, o2, path, o3, keep]
+            if o1 == "-o" && master == "ControlMaster=auto"
+                && o2 == "-o" && path.strip_prefix("ControlPath=").is_some_and(|p| !p.is_empty())
+                && o3 == "-o" && *keep == persist)
+    }
+}
+
 /// The user's ssh arguments (without the program) → the wrapped arguments:
-/// `-t`, then `args` as they are, then [`remote_command`]. The user's own
-/// `-t` stays (`-t -t` still asks for a terminal).
-pub fn wrap(args: &[String], boot: &str, parent: Option<u32>) -> Vec<String> {
-    let mut wrapped = Vec::with_capacity(args.len() + 2);
+/// `-t`, [`Control`]'s options when there are any, then `args` as they are,
+/// then [`remote_command`]. The user's own `-t` stays (`-t -t` still asks for
+/// a terminal).
+pub fn wrap(
+    args: &[String],
+    boot: &str,
+    parent: Option<u32>,
+    control: Option<&Control>,
+) -> Vec<String> {
+    let mut wrapped = Vec::with_capacity(args.len() + 8);
     wrapped.push("-t".to_owned());
+    if let Some(control) = control {
+        wrapped.extend(control.options());
+    }
     wrapped.extend(args.iter().cloned());
     wrapped.push(remote_command(boot, parent));
     wrapped
 }
 
 /// The inverse of [`wrap`]: the user's arguments if `args` has the wrapped
-/// shape, otherwise `args` itself. The shape is positional: `-t` first, a
-/// bootstrap command last (with or without the parent's number), and in
-/// between an interactive call with no remote command of its own.
+/// shape, otherwise `args` itself. The shape is positional: `-t` first, then
+/// [`Control`]'s six words if they are there, a bootstrap command last (with
+/// or without the parent's number), and in between an interactive call with
+/// no remote command of its own.
 pub fn unwrap(args: &[String]) -> &[String] {
     let [first, inner @ .., last] = args else {
         return args;
+    };
+    let inner = match inner.split_at_checked(6) {
+        Some((control, rest)) if Control::matches(control) => rest,
+        _ => inner,
     };
     let boot = last.strip_prefix(COMMAND_HEAD).and_then(|rest| {
         // The parent's number, if any: ` <digits>` after the name.
@@ -339,7 +397,10 @@ pub struct Wrapped {
 /// config's `Match exec`) is asked only for a call that would be wrapped:
 /// a usable bootstrap, terminals on both ends, an interactive call without a
 /// remote command, the setting for the host as typed; then `ssh -G` and the
-/// learned state of the server it resolves to.
+/// learned state of the server it resolves to. `sockets` are this bateri's
+/// instance directories ([`crate::ssh_route::instance_dirs`]): with one, the
+/// session also becomes a master there ([`Control`]).
+#[allow(clippy::too_many_arguments)] // R1's inputs, each a different source; a struct would only rename them
 pub fn decide(
     args: &[String],
     tty: bool,
@@ -348,6 +409,7 @@ pub fn decide(
     state: &HostState,
     boot: &str,
     parent: Option<u32>,
+    sockets: &[PathBuf],
 ) -> Option<Wrapped> {
     if boot.is_empty() || !is_inline(boot) || !tty {
         return None;
@@ -361,10 +423,52 @@ pub fn decide(
         return None;
     }
     let key = host_key(&out)?;
-    state.knows(Fact::Posix, &key).then(|| Wrapped {
-        args: wrap(args, boot, parent),
+    if !state.knows(Fact::Posix, &key) {
+        return None;
+    }
+    let control = control(&out, sockets).filter(|_| !names_sharing(args));
+    Some(Wrapped {
+        args: wrap(args, boot, parent, control.as_ref()),
         key,
     })
+}
+
+/// Whether the user's arguments choose connection sharing themselves — `-S`,
+/// or a `ControlMaster`/`ControlPath`/`ControlPersist` option, an opt-out
+/// (`-o ControlMaster=no`, `-S none`) included: `ssh -G` prints an opt-out as
+/// the default, and our options, being first, would override it.
+fn names_sharing(args: &[String]) -> bool {
+    let sharing_key = |value: &str| {
+        let key: String = value
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        matches!(
+            key.as_str(),
+            "controlmaster" | "controlpath" | "controlpersist"
+        )
+    };
+    args.iter().enumerate().any(|(at, arg)| {
+        arg.starts_with("-S")
+            || (arg == "-o" && args.get(at + 1).is_some_and(|value| sharing_key(value)))
+            || arg
+                .strip_prefix("-o")
+                .is_some_and(|value| !value.is_empty() && sharing_key(value))
+    })
+}
+
+/// The session's [`Control`] (phase-5): `None` when the user's configuration
+/// shares connections itself, when `ssh -G` cannot be read as a configuration
+/// or when no instance directory holds the socket ([`session_socket`]).
+fn control(out: &str, sockets: &[PathBuf]) -> Option<Control> {
+    let config: SshConfig = parse_config(out)?;
+    if config.shares_connections() {
+        return None;
+    }
+    let socket = session_socket(sockets, &crate::ssh_route::host_key(&config))?;
+    Some(Control { socket })
 }
 
 // ─── the bootstrap ───────────────────────────────────────────────────────
@@ -524,7 +628,7 @@ pub fn learn(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<
     record(path, Fact::Posix, &key, unix_now(), LOCK_PATIENCE).map(|()| true)
 }
 
-/// `bateri ssh-argv [--tty] [--block N] -- <ssh arguments…>`: the subcommand's body
+/// `bateri ssh-argv [--tty] [--block N] [--instance I] -- <ssh arguments…>`: the subcommand's body
 /// (`argv` is what follows `ssh-argv`). Writes the wrapped arguments to `out`,
 /// each followed by a NUL, or nothing; the exit code is always zero and every
 /// failure is "nothing" — the caller runs plain `ssh`.
@@ -532,7 +636,11 @@ pub fn learn(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<
 /// `--tty` says stdin and stdout are terminals: the caller asks, because our
 /// own stdout is the caller's pipe. `--block N` is the local block running the
 /// `ssh` (`$__bateri_block`), carried to the server as the remote blocks'
-/// parent ([`remote_command`]); without it the server prints no block marks. `settings` is the settings file's launch
+/// parent ([`remote_command`]); without it the server prints no block marks.
+/// `--instance I` is the running bateri's instance directory name
+/// (`BATERI_SSH_INSTANCE`, phase-5), looked for under `roots`
+/// ([`crate::ssh_route::socket_bases`]); without it, or without the
+/// directory, the session is no master ([`Control`]). `settings` is the settings file's launch
 /// reading (an unusable file turns the integration off); `state_path` is the
 /// platform's state file. A wrapped connection is recorded as
 /// [`Fact::Touched`] **before** it is printed: if the record fails nothing is
@@ -543,6 +651,7 @@ pub fn ssh_argv_main(
     settings: &Settings,
     runner: &dyn SshRunner,
     state_path: &Path,
+    roots: &[PathBuf],
     boot: &str,
     out: &mut impl Write,
 ) -> i32 {
@@ -557,11 +666,17 @@ pub fn ssh_argv_main(
         [flag, number, rest @ ..] if flag == "--block" => (number.parse().ok(), rest),
         rest => (None, rest),
     };
+    let (sockets, rest) = match rest {
+        [flag, instance, rest @ ..] if flag == "--instance" => {
+            (crate::ssh_route::instance_dirs(roots, instance), rest)
+        }
+        rest => (Vec::new(), rest),
+    };
     let Some(("--", args)) = rest.split_first().map(|(head, tail)| (head.as_str(), tail)) else {
         return 0;
     };
     let state = load(state_path);
-    let Some(wrapped) = decide(args, tty, settings, runner, &state, boot, parent) else {
+    let Some(wrapped) = decide(args, tty, settings, runner, &state, boot, parent, &sockets) else {
         return 0;
     };
     if record(
@@ -610,10 +725,15 @@ mod tests {
             &["-i", "~/.ssh/k", "-l", "root", "prod"],
         ] {
             let args = words(args);
+            let control = Control {
+                socket: PathBuf::from("/tmp/bateri-501/0a1b2c3d/u-0123456789abcdef"),
+            };
             for parent in [None, Some(7), Some(u32::MAX)] {
-                let wrapped = wrap(&args, BOOT_STUB, parent);
-                assert_eq!(wrapped.first().map(String::as_str), Some("-t"));
-                assert_eq!(unwrap(&wrapped), &args[..], "{wrapped:?}");
+                for control in [None, Some(&control)] {
+                    let wrapped = wrap(&args, BOOT_STUB, parent, control);
+                    assert_eq!(wrapped.first().map(String::as_str), Some("-t"));
+                    assert_eq!(unwrap(&wrapped), &args[..], "{wrapped:?}");
+                }
             }
             // An argv that was never wrapped is itself.
             assert_eq!(unwrap(&args), &args[..]);
@@ -639,6 +759,18 @@ mod tests {
             words(&["-t", "prod", "exec sh -c 'x' other"]),
             words(&["-t", "prod", "exec sh -c 'x' bateri-boot 7x"]),
             words(&["-t", "prod", "exec sh -c 'x' bateri-boot 7 8"]),
+            // The sharing options before `-t`: not the wrapped shape.
+            words(&[
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/s",
+                "-o",
+                "ControlPersist=2",
+                "-t",
+                "prod",
+                "exec sh -c 'x' bateri-boot",
+            ]),
         ] {
             assert_eq!(unwrap(&args), &args[..], "{args:?}");
         }
@@ -647,7 +779,12 @@ mod tests {
     #[test]
     fn the_wrapped_call_still_reads_as_the_users() {
         // The remote probe sees the wrapped process; its target is the typed one.
-        let wrapped = wrap(&words(&["-o", "User=x", "--", "prod"]), BOOT_STUB, None);
+        let wrapped = wrap(
+            &words(&["-o", "User=x", "--", "prod"]),
+            BOOT_STUB,
+            None,
+            None,
+        );
         let call = ssh_call("ssh", &wrapped).expect("interactive with -t");
         assert!(call.command, "the bootstrap is a remote command");
         assert_eq!(call.host, "prod");
@@ -784,9 +921,18 @@ mod tests {
         let runner = Gconfig::new(PLAIN);
         let args = words(&["prod"]);
         assert_eq!(
-            decide(&args, true, &settings, &runner, &learned(), BOOT_STUB, None),
+            decide(
+                &args,
+                true,
+                &settings,
+                &runner,
+                &learned(),
+                BOOT_STUB,
+                None,
+                &[]
+            ),
             Some(Wrapped {
-                args: wrap(&args, BOOT_STUB, None),
+                args: wrap(&args, BOOT_STUB, None, None),
                 key: "u@h:22".to_owned(),
             })
         );
@@ -807,6 +953,7 @@ mod tests {
                 &learned(),
                 BOOT_STUB,
                 None,
+                &[],
             );
             (wrapped, runner.calls.borrow().len())
         };
@@ -827,7 +974,7 @@ mod tests {
         // quoting is never sent.
         for boot in ["", "it's", "a\\b", "hi!", "two\nlines"] {
             assert_eq!(
-                decide(&args, true, &settings, &runner, &learned(), boot, None),
+                decide(&args, true, &settings, &runner, &learned(), boot, None, &[]),
                 None,
                 "{boot:?}"
             );
@@ -846,7 +993,7 @@ mod tests {
         ] {
             let runner = Gconfig::new(out);
             assert_eq!(
-                decide(&args, true, &on, &runner, &learned(), BOOT_STUB, None),
+                decide(&args, true, &on, &runner, &learned(), BOOT_STUB, None, &[]),
                 None,
                 "{out}"
             );
@@ -861,7 +1008,8 @@ mod tests {
                 &runner,
                 &HostState::default(),
                 BOOT_STUB,
-                None
+                None,
+                &[],
             ),
             None
         );
@@ -872,7 +1020,7 @@ mod tests {
         };
         let runner = Gconfig::new(PLAIN);
         assert_eq!(
-            decide(&args, true, &off, &runner, &learned(), BOOT_STUB, None),
+            decide(&args, true, &off, &runner, &learned(), BOOT_STUB, None, &[]),
             None
         );
         assert!(runner.calls.borrow().is_empty());
@@ -892,7 +1040,8 @@ mod tests {
                 &runner,
                 &learned(),
                 BOOT_STUB,
-                None
+                None,
+                &[],
             ),
             None
         );
@@ -911,6 +1060,7 @@ mod tests {
                 &Settings::default(),
                 &runner,
                 &path,
+                &[],
                 boot,
                 &mut out,
             );
@@ -921,7 +1071,7 @@ mod tests {
         for (block, parent) in [("7", Some(7)), ("", None), ("x", None)] {
             assert_eq!(
                 run(&["--tty", "--block", block, "--", "prod"], BOOT_STUB),
-                wrap(&words(&["prod"]), BOOT_STUB, parent)
+                wrap(&words(&["prod"]), BOOT_STUB, parent, None)
                     .iter()
                     .flat_map(|arg| arg.bytes().chain([0]))
                     .collect::<Vec<u8>>(),
@@ -929,7 +1079,7 @@ mod tests {
             );
         }
         let printed = run(&["--tty", "--", "-p", "2", "prod"], BOOT_STUB);
-        let expected: Vec<u8> = wrap(&words(&["-p", "2", "prod"]), BOOT_STUB, None)
+        let expected: Vec<u8> = wrap(&words(&["-p", "2", "prod"]), BOOT_STUB, None, None)
             .iter()
             .flat_map(|arg| arg.bytes().chain([0]))
             .collect();
@@ -945,6 +1095,113 @@ mod tests {
         assert!(run(&["--tty", "--", "prod"], BOOT_STUB).is_empty());
         drop(held);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Phase-5 (R7): with bateri's instance directory, the session becomes a
+    /// master there — unless the user shares connections themselves.
+    #[test]
+    fn the_session_becomes_a_master_in_the_instance_directory() {
+        let root = PathBuf::from(format!("/tmp/bt-wrap-ctl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let roots = vec![root.join("r")];
+        let dir = crate::ssh_route::prepare_instance(&roots[0], "0a1b2c3d").unwrap();
+        let path = root.join("remote-hosts");
+        record(&path, Fact::Posix, "u@h:22", 1, LOCK_PATIENCE).unwrap();
+        let run = |config: &'static str, argv: &[&str]| {
+            let runner = Gconfig::new(config);
+            let mut out = Vec::new();
+            ssh_argv_main(
+                &words(argv),
+                &Settings::default(),
+                &runner,
+                &path,
+                &roots,
+                BOOT_STUB,
+                &mut out,
+            );
+            let mut args: Vec<String> = out
+                .split(|&byte| byte == 0)
+                .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
+                .collect();
+            args.pop();
+            args
+        };
+        let key = crate::ssh_route::host_key(&parse_config(PLAIN).unwrap());
+        let control = Control {
+            socket: dir.join(format!("u-{key}")),
+        };
+        let wrapped = run(PLAIN, &["--tty", "--instance", "0a1b2c3d", "--", "prod"]);
+        assert_eq!(
+            wrapped,
+            wrap(&words(&["prod"]), BOOT_STUB, None, Some(&control))
+        );
+        assert_eq!(
+            wrapped[1..7],
+            words(&[
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                &format!("ControlPath={}", control.socket.display()),
+                "-o",
+                "ControlPersist=2",
+            ])
+        );
+        assert_eq!(unwrap(&wrapped), &words(&["prod"])[..]);
+        // The block and the instance together, in the function's order.
+        assert_eq!(
+            run(
+                PLAIN,
+                &[
+                    "--tty",
+                    "--block",
+                    "4",
+                    "--instance",
+                    "0a1b2c3d",
+                    "--",
+                    "prod"
+                ]
+            ),
+            wrap(&words(&["prod"]), BOOT_STUB, Some(4), Some(&control))
+        );
+        // The user's own sharing, an unknown or a missing instance: no sharing,
+        // still wrapped.
+        let plain = wrap(&words(&["prod"]), BOOT_STUB, None, None);
+        for config in [
+            "user u\nhostname h\nport 22\ncontrolmaster auto\n",
+            "user u\nhostname h\nport 22\ncontrolpath /u/cm-%C\n",
+        ] {
+            assert_eq!(
+                run(config, &["--tty", "--instance", "0a1b2c3d", "--", "prod"]),
+                plain,
+                "{config}"
+            );
+        }
+        for instance in ["ffffffff", "../r", "x"] {
+            assert_eq!(
+                run(PLAIN, &["--tty", "--instance", instance, "--", "prod"]),
+                plain,
+                "{instance}"
+            );
+        }
+        // The user's own choice on the command line, an opt-out included
+        // (`ssh -G` prints that as the default): no sharing of ours.
+        for typed in [
+            &["-o", "ControlMaster=no", "prod"][..],
+            &["-oControlMaster=no", "prod"],
+            &["-o", "controlpath none", "prod"],
+            &["-S", "none", "prod"],
+            &["-Snone", "prod"],
+            &["prod", "-o", "ControlPersist=no"],
+        ] {
+            let mut argv = vec!["--tty", "--instance", "0a1b2c3d", "--"];
+            argv.extend_from_slice(typed);
+            assert_eq!(
+                run(PLAIN, &argv),
+                wrap(&words(typed), BOOT_STUB, None, None),
+                "{typed:?}"
+            );
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -986,6 +1243,7 @@ mod tests {
             &learned(),
             boot,
             None,
+            &[],
         )
         .expect("the real bootstrap wraps");
         assert_eq!(unwrap(&wrapped.args), &args[..]);
@@ -1048,7 +1306,8 @@ mod tests {
                 &runner,
                 &load(&unreadable),
                 boot(),
-                None
+                None,
+                &[],
             ),
             None
         );

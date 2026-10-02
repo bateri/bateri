@@ -1213,21 +1213,28 @@ mod tests {
     fn a_wrapped_ssh_reads_as_the_line_the_user_typed() {
         // 048 R2: the process runs bateri's `-t` and bootstrap; the target, the
         // re-run argv (⏎ reconnect, ⌘T) and the line are the user's.
+        // With the session's connection sharing too (phase-5): the job's route
+        // must not see bateri's `ControlPath` as the user's own.
         let typed = ["-o", "User=x", "-L", "1:x:1", "--", "prod"];
-        let wrapped = crate::ssh_wrap::wrap(&words(&typed), "echo hi", Some(3));
-        let mut argv = vec!["ssh".to_owned()];
-        argv.extend(wrapped);
-        let leaked: Vec<&'static str> = argv
-            .into_iter()
-            .map(|arg| &*Box::leak(arg.into_boxed_str()))
-            .collect();
-        let target = target_of(&leaked);
-        assert_eq!(target.host, "prod");
-        assert_eq!(target.argv, words(&["ssh", "-o", "User=x", "--", "prod"]));
-        assert_eq!(
-            crate::quote::command_line(&target.argv),
-            "ssh -o User=x -- prod"
-        );
+        let control = crate::ssh_wrap::Control {
+            socket: std::path::PathBuf::from("/tmp/bateri-501/0a1b2c3d/u-0123456789abcdef"),
+        };
+        for control in [None, Some(&control)] {
+            let wrapped = crate::ssh_wrap::wrap(&words(&typed), "echo hi", Some(3), control);
+            let mut argv = vec!["ssh".to_owned()];
+            argv.extend(wrapped);
+            let leaked: Vec<&'static str> = argv
+                .into_iter()
+                .map(|arg| &*Box::leak(arg.into_boxed_str()))
+                .collect();
+            let target = target_of(&leaked);
+            assert_eq!(target.host, "prod");
+            assert_eq!(target.argv, words(&["ssh", "-o", "User=x", "--", "prod"]));
+            assert_eq!(
+                crate::quote::command_line(&target.argv),
+                "ssh -o User=x -- prod"
+            );
+        }
     }
 
     #[test]
