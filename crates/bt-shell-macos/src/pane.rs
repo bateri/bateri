@@ -270,34 +270,6 @@ impl LinkLabel {
 /// find a pane whose close has begun ([`TerminalPane::is_closed`]).
 pub(crate) type PaneLookup = fn(MainThreadMarker, u64) -> Option<Retained<TerminalPane>>;
 
-/// The pane's helper session handle (045): outside the timed run (the masters'
-/// registry is the application's, `None` there) its greeting teaches the
-/// remote shell integration that the server runs a POSIX `sh` (048
-/// discussion → Karar: learn on the first connection) — once per remote
-/// generation, on a thread of its own: `ssh_wrap::learn` runs `ssh -G` and may
-/// wait for the state file's lock, and the helper's next question must not
-/// wait behind it. It writes nothing for a server already learned; a home
-/// that cannot be found learns nothing.
-fn remote_helper_for(learning: bool) -> RemoteHelper {
-    if !learning {
-        return RemoteHelper::default();
-    }
-    RemoteHelper::with_greeted(Arc::new(|ssh: &[String]| {
-        let ssh = ssh.to_vec();
-        let _ = std::thread::Builder::new()
-            .name("remote learning".into())
-            .spawn(move || {
-                if let Some(home) = crate::child::home() {
-                    let _ = bt_shell_common::ssh_wrap::learn(
-                        &crate::ssh_route::SystemSsh,
-                        &ssh,
-                        &crate::remote_hosts_path(&home),
-                    );
-                }
-            });
-    }))
-}
-
 /// How many times the `posix` row's write is tried ([`TerminalPane::check_remote_up`]);
 /// each attempt waits up to the state file's lock patience. A design constant.
 const POSIX_ATTEMPTS: usize = 3;
@@ -315,6 +287,9 @@ struct WrapProof {
     wrapped: Option<(u64, String, Vec<String>)>,
     /// The generation whose server was recorded: once per remote generation.
     recorded: Option<u64>,
+    /// The last `up` whose nonce was marked seen ([`bt_shell_common::ssh_wrap::mark_up`]):
+    /// once per arrival.
+    marked: Option<(u64, String)>,
 }
 
 /// The pane's birth package (039 Karar 3): all inputs in a single struct,
@@ -934,7 +909,7 @@ pub(crate) struct PaneIvars {
     /// The remote generation this pane reported to the masters' registry
     /// ([`Masters::session_started`], 047 R9.3); `None` locally.
     ssh_session: Cell<Option<u64>>,
-    /// The wrapped `ssh` the probe found and whether its server was learned
+    /// The wrapped `ssh` the probe found and whether its server was recorded
     /// (049 R2.3, [`TerminalPane::check_remote_up`]).
     wrap_proof: RefCell<WrapProof>,
     /// The open "Show files (N)" popover (037 phase-7).
@@ -1263,7 +1238,6 @@ impl TerminalPane {
             zoom,
             masters,
         } = launch;
-        let has_masters = masters.is_some();
         let renderer = Rc::new(Renderer::system_default()?);
         // The layer is ours (040 → Karar 8): wgpu configures its device,
         // format and drawable size, the scale stays with its owner.
@@ -1342,7 +1316,7 @@ impl TerminalPane {
             list_closed_at: Cell::new(None),
             stats_popover: RefCell::new(None),
             stats_closed_at: Cell::new(None),
-            remote_helper: RefCell::new(remote_helper_for(has_masters)),
+            remote_helper: RefCell::new(RemoteHelper::default()),
             stats: RefCell::new(stats_driver),
             remote_files: RefCell::new(remote_files),
             previews: RefCell::new(HashMap::new()),
@@ -2054,11 +2028,20 @@ impl TerminalPane {
         }
     }
 
-    /// The bootstrap's proof (049 R2.3): when the session's last `up`
+    /// The bootstrap's proof (049 R2.3). **First**, whatever the probe says,
+    /// the `up`'s nonce is marked seen ([`bt_shell_common::ssh_wrap::mark_up`],
+    /// a file created on a thread of its own, no `ssh -G`): the local `ssh`
+    /// function's fallback asks for its own nonce before anything else, so a
+    /// session that ends at once or a slow `ssh -G` cannot have a server with
+    /// a shell branded `plain` (049 phase-2 → Uygulama Notları). A forged `up`
+    /// (a remote program printing one) can only name a nonce it cannot know —
+    /// at worst a fallback that does not happen, the safe direction.
+    ///
+    /// Then, when the session's last `up`
     /// ([`bt_core::Session::remote_up`]) and the wrapped `ssh` the probe found
     /// ([`WrapProof`]) are of the same command generation and carry the same
     /// nonce, the server is recorded as `posix` — once per generation, on a
-    /// thread of its own: `ssh -G` (the server's key, `ssh_wrap::learn`) and
+    /// thread of its own: `ssh -G` (the server's key, `ssh_wrap::record_posix`) and
     /// the state file's lock must not hold the main thread. Called from both
     /// ends ([`Wake::remote_up`], [`Self::probe_remote`]); a mismatch, a call
     /// bateri did not wrap or a timed run records nothing.
@@ -2070,6 +2053,7 @@ impl TerminalPane {
         else {
             return;
         };
+        self.mark_up(generation, &seen);
         let argv = {
             let mut proof = self.ivars().wrap_proof.borrow_mut();
             let Some((command, nonce, argv)) = proof.wrapped.as_ref() else {
@@ -2094,8 +2078,12 @@ impl TerminalPane {
                 };
                 let path = crate::remote_hosts_path(&home);
                 for _ in 0..POSIX_ATTEMPTS {
-                    if bt_shell_common::ssh_wrap::learn(&crate::ssh_route::SystemSsh, &argv, &path)
-                        .is_ok()
+                    if bt_shell_common::ssh_wrap::record_posix(
+                        &crate::ssh_route::SystemSsh,
+                        &argv,
+                        &path,
+                    )
+                    .is_ok()
                     {
                         return;
                     }
@@ -2104,6 +2092,34 @@ impl TerminalPane {
         // No thread, no write: the next `up` or probe of this generation may try.
         if spawned.is_err() {
             self.ivars().wrap_proof.borrow_mut().recorded = None;
+        }
+    }
+
+    /// [`Self::check_remote_up`]'s first half: marks `seen` once per arrival.
+    fn mark_up(&self, generation: u64, seen: &str) {
+        let arrival = Some((generation, seen.to_owned()));
+        {
+            let mut proof = self.ivars().wrap_proof.borrow_mut();
+            if proof.marked == arrival {
+                return;
+            }
+            proof.marked.clone_from(&arrival);
+        }
+        let nonce = seen.to_owned();
+        let spawned = std::thread::Builder::new()
+            .name("remote up".into())
+            .spawn(move || {
+                if let Some(home) = crate::child::home() {
+                    let path = crate::remote_hosts_path(&home);
+                    for _ in 0..POSIX_ATTEMPTS {
+                        if bt_shell_common::ssh_wrap::mark_up(&path, &nonce).is_ok() {
+                            return;
+                        }
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.ivars().wrap_proof.borrow_mut().marked = None;
         }
     }
 

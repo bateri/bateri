@@ -278,27 +278,47 @@ __bateri_hooks() {
   fi
 }
 
-# Runs the user's `ssh`, wrapped when bateri says so (048).
+# Runs the user's `ssh`, wrapped when bateri says so (048, 049).
 #
 # `bateri ssh-argv [--tty] --block N [--instance I] -- <args…>` prints the wrapped arguments, each
 # followed by a NUL, or nothing — and nothing (also a missing binary or any
 # failure) means plain `command ssh "$@"`, today's path. `--tty` only when stdin
 # AND stdout are terminals: under `$(…)` the binary's own stdout is our pipe, so
 # it cannot ask itself (R1.1: `ssh host | grep` is not wrapped). The rules —
-# which call is interactive, the settings, `ssh -G`, whether the server was
-# learned — are all in the binary (`ssh_wrap::decide`), not here: one parser.
+# which call is interactive, the settings, `ssh -G`, whether the server is
+# known to have no shell — are all in the binary (`ssh_wrap::decide`), not
+# here: one parser.
 # `--block` is this command's block (`__bateri_block`): the server's blocks are
 # marked as its children (`bt_remote=<P>.<S>.<n>`, 048 phase-3). `--instance`
 # is bateri's socket directory (`__bateri_ssh_instance`): the session becomes a
 # master there and bateri's file jobs ride it (phase-5).
+#
+# THE SILENT FALLBACK (049 R3): a wrapped `ssh` that ended with anything but
+# ssh's own error (255) asks `bateri ssh-fell-back --rc N [--instance I] --
+# <the wrapped arguments>`. The binary takes the attempt's nonce out of them
+# and answers nothing when the bootstrap said `up` — the user's session ran
+# and its code is theirs, so an `exit` is never followed by a new connection
+# —, or the plain rerun's arguments when it did not (a router, Windows: our
+# command never ran); the rerun shares the wrapped call's `--instance`, so it
+# rides the wrapped session's master while it lingers. The function returns
+# the code of the last `ssh` it ran.
+#
+# INSIDE A LOCAL MULTIPLEXER NOTHING IS WRAPPED (`$TMUX`, `$STY`): the pane
+# sees tmux or screen, not the ssh, and the bootstrap's `up` does not reach it
+# — a wrapped session there could never prove it ran, and a fallback would
+# reconnect the user after their `exit`.
 #
 # `$(…)` keeps NUL bytes in zsh and `"${(@0)…}"` splits on them keeping empty
 # arguments; the last NUL leaves one empty element behind, which is dropped.
 # An answer that does not end with a NUL is not ours: plain `ssh`.
 __bateri_ssh() {
   emulate -L zsh
-  local out tty=
+  local out tty= rc
   local -a instance
+  if [[ -n ${TMUX-} || -n ${STY-} ]]; then
+    command ssh "$@"
+    return
+  fi
   [[ -t 0 && -t 1 ]] && tty=--tty
   [[ -n $__bateri_ssh_instance ]] && instance=( --instance "$__bateri_ssh_instance" )
   if [[ -x $__bateri_bin ]]; then
@@ -309,6 +329,17 @@ __bateri_ssh() {
     wrapped=( "${(@0)out}" )
     wrapped[-1]=()
     command ssh "${wrapped[@]}"
+    rc=$?
+    (( rc == 255 )) && return rc
+    out=$(command $__bateri_bin ssh-fell-back --rc $rc "${instance[@]}" -- "${wrapped[@]}" 2>/dev/null)
+    if [[ -n $out && $out == *$'\0' ]]; then
+      local -a plain
+      plain=( "${(@0)out}" )
+      plain[-1]=()
+      command ssh "${plain[@]}"
+      return
+    fi
+    return rc
   else
     command ssh "$@"
   fi
