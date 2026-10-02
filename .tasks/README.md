@@ -48,7 +48,7 @@
 | 044 | [tiklanabilir-baglantilar](044-tiklanabilir-baglantilar/) | 🟢 | 6 phase + kapı tamam — ⌘-hover/⌘-tık ile URL, var olan yol ve OSC 8 açılıyor (ızgara, bant, dock), ⌘'siz OSC 8 kesikli, hedef etiketi ve sağ tık menüsü |
 | 045 | [uzak-dosya-indirme](045-uzak-dosya-indirme/) | 🟢 | 6 phase + kapı tamam — ssh'ta `ls` çıktısındaki dosyaya ⌘-tık salt okunur önizleme, ⌘-sürükle Finder'a, sağ tık Downloads'a indiriyor; aktarım kuyruğu iki yönlü, önizleme klasörü kendiliğinden temizleniyor ve ayar penceresinde Remote Files kategorisi var; gerçek ssh sunucusunda henüz gözle görülmedi |
 | 046 | [uzak-yuk-gostergesi](046-uzak-yuk-gostergesi/) | 🟢 | 5 phase + kapı tamam — ssh durum çubuğunda uzak Linux makinenin yük göstergesi ve ayrıntı popover'ı; gerçek sunucuda gözle kontrol bekliyor |
-| 047 | [ssh-parola-ve-keychain](047-ssh-parola-ve-keychain/) | 🔨 | phase-4 — bağlantı kullanıcının ssh oturumuna bağlanıyor (gösterge girişten sonra, oturum bitince kapanış); 1–3 tamam
+| 047 | [ssh-parola-ve-keychain](047-ssh-parola-ve-keychain/) | 🟢 | 4 phase + kapı tamam — parolalı sunucuda dosya işleri bateri'nin kendi master'ıyla, parola Keychain'de; arka plan kullanıcının ssh girişini bekliyor ve master oturumla kapanıyor
 | 048 | [uzak-kabuk-entegrasyonu](048-uzak-kabuk-entegrasyonu/) | 📐 | düz `ssh` yazınca uzakta OSC 7/133 entegrasyonu, rc dosyasına dokunmadan; ayarla ve host başına kapatma |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.

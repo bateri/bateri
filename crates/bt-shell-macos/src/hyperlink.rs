@@ -192,7 +192,8 @@ enum Check {
     /// A remote hit that cannot be one: only relative names while the remote
     /// folder is unknown (R1.2) — the label says why.
     CwdUnknown,
-    /// A remote hit while no remote session runs any more: no link.
+    /// A remote hit while no remote session runs any more, or before the
+    /// user's ssh logged in (047 R9.1): no link.
     Gone,
 }
 
@@ -629,7 +630,10 @@ impl BateriView {
             let Some(session) = self.session() else {
                 return Check::Gone;
             };
-            if session.remote_target().is_none() {
+            // Before the user's ssh has logged in nothing is asked (047 R9.1):
+            // the check would connect in the background. No link, nothing
+            // remembered as missing — the next hover after the login asks.
+            if session.remote_target().is_none() || crate::jobs::remote_login(session).is_none() {
                 Check::Gone
             } else if remote_helper::cwd_unknown(&candidates, &session.remote_link_directory()) {
                 Check::CwdUnknown

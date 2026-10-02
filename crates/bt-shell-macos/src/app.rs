@@ -1696,11 +1696,12 @@ fn verdict(
 }
 
 /// The application's ssh masters (047): askpass is this very binary, the
-/// sockets live under the user's cache directory (or `/tmp/bateri-$UID`). What
-/// a crashed bateri left behind is swept once, off the main thread. Nothing is
-/// sent to the masters on quit — `ControlPersist` ends them (another instance
-/// may ride on one). The saved passwords are the login keychain's
-/// ([`crate::keychain`], 047 phase-3).
+/// sockets live in this instance's own directory under the user's cache
+/// directory (or `/tmp/bateri-$UID`; 047 R9.2). What a dead bateri left
+/// behind is swept once, off the main thread. A master ends with the user's
+/// last session to its host and on quit ([`AppDelegate::shutdown`], R9.3).
+/// The saved passwords are the login keychain's ([`crate::keychain`], 047
+/// phase-3).
 fn masters() -> Option<Arc<Masters>> {
     let askpass = std::env::current_exe().ok()?;
     // SAFETY: `getuid` has no preconditions and cannot fail.
@@ -2775,6 +2776,11 @@ impl AppDelegate {
             crate::watchdog();
         }
         let windows = self.windows();
+        // The panes' closes below end their remote sessions; the masters'
+        // `exit` is `close_all`'s, under the shared deadline (047 R9.3).
+        if let Some(masters) = &self.ivars().masters {
+            masters.begin_quit();
+        }
         // One teardown per pane, across all windows' panes (039): all of them
         // start, then they are awaited in parallel up to a single deadline.
         let closing: Vec<_> = windows
@@ -2782,6 +2788,14 @@ impl AppDelegate {
             .flat_map(|window| window.begin_close())
             .collect();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
+        // Our ssh masters end in parallel, under the same deadline (047 R9.3);
+        // a timed run has none.
+        let masters = self.ivars().masters.clone().and_then(|masters| {
+            std::thread::Builder::new()
+                .name("ssh masters close".into())
+                .spawn(move || masters.close_all(deadline))
+                .ok()
+        });
         // The result feeds the report (`teardown=`): if the session was never
         // born it is `None`, and that is an answer too — nothing to close.
         let mut first = None;
@@ -2790,6 +2804,9 @@ impl AppDelegate {
             if index == 0 {
                 first = teardown;
             }
+        }
+        if let Some(masters) = masters {
+            let _ = masters.join();
         }
         first
     }

@@ -407,12 +407,18 @@ struct ShellWake {
     /// The remote-session probe's arm and pending job (036); `Arc`, because
     /// the main queue's job holds it.
     remote_probe: Arc<RemoteProbe>,
+    /// The login probe of the remote session (047 R9.1): the same two bits as
+    /// [`Self::remote_probe`] — armed on the remote edge while the user's ssh
+    /// has not logged in, every output throws one check
+    /// ([`TerminalPane::login_check`]); the login is the indicator's start.
+    login_probe: Arc<RemoteProbe>,
     /// Whether the stale-link news is waiting on the main queue (044 R4.1) —
     /// `search_pending`'s twin: at most one job.
     link_pending: Arc<AtomicBool>,
 }
 
-/// The two bits of the remote-session probe (036 Karar 2): the **arm** (no
+/// The two bits of the remote-session probe (036 Karar 2) — and of the login
+/// probe (047 R9.1, the same semantics with "logged in" for "decided"): the **arm** (no
 /// definitive answer yet for this command) and the **pending job** (a probe is
 /// in the main queue — at most one, `title_pending`'s pattern).
 ///
@@ -456,7 +462,7 @@ impl RemoteProbe {
     }
 
     /// Undecided answer: the arm is set back, no job is thrown — the next
-    /// output throws one.
+    /// output throws one. Also the login probe's arming on the remote edge.
     fn rearm(&self) {
         self.armed.store(true, Ordering::Release);
     }
@@ -484,6 +490,25 @@ impl ShellWake {
                 pane.remote_or_title_changed();
             }
             if outcome.undecided {
+                probe.rearm();
+            }
+        });
+    }
+
+    /// Throws the login check to the main queue ([`ShellWake::login_probe`]).
+    fn dispatch_login_probe(&self) {
+        let probe = Arc::clone(&self.login_probe);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            if !probe.begin() {
+                return;
+            }
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            let Some(pane) = lookup(mtm, id) else {
+                return;
+            };
+            if pane.login_check() {
                 probe.rearm();
             }
         });
@@ -517,6 +542,11 @@ impl Wake for ShellWake {
         // it (036 Karar 2); when unarmed the cost is one atomic read.
         if self.remote_probe.output() {
             self.dispatch_remote_probe();
+        }
+        // The user's ssh logs in with output (a prompt, the MOTD): one check
+        // per output edge while armed (047 R9.1); one atomic read otherwise.
+        if self.login_probe.output() {
+            self.dispatch_login_probe();
         }
     }
 
@@ -833,6 +863,9 @@ pub(crate) struct PaneIvars {
     password: RefCell<Option<PasswordSheet>>,
     /// The application's ssh masters ([`PaneLaunch::masters`]).
     masters: Option<Arc<Masters>>,
+    /// The remote generation this pane reported to the masters' registry
+    /// ([`Masters::session_started`], 047 R9.3); `None` locally.
+    ssh_session: Cell<Option<u64>>,
     /// The open "Show files (N)" popover (037 phase-7).
     upload_list: RefCell<Option<UploadPopover>>,
     /// Time of the event that closed the popover (`popoverWillClose:`): so that
@@ -1212,6 +1245,7 @@ impl TerminalPane {
                 title_pending: Arc::default(),
                 search_pending: Arc::default(),
                 remote_probe: Arc::default(),
+                login_probe: Arc::default(),
                 link_pending: Arc::default(),
             }),
             zoom: Cell::new(zoom),
@@ -1229,6 +1263,7 @@ impl TerminalPane {
             upload_stop: RefCell::new(None),
             password: RefCell::new(None),
             masters,
+            ssh_session: Cell::new(None),
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
             stats_popover: RefCell::new(None),
@@ -2005,6 +2040,13 @@ impl TerminalPane {
         self.finder_abandon();
         // The helper's ssh goes now, not when the last reference drops.
         self.remote_helper().borrow_mut().close();
+        // A remote session closing with the pane is one less session to the
+        // host: our master ends with the last one (047 R9.3).
+        if self.ivars().ssh_session.take().is_some()
+            && let Some(masters) = self.ivars().masters.as_deref()
+        {
+            masters.session_ended(self.id());
+        }
         // The load popover and its Esc monitor go with the pane (the upload
         // list's goes in `abandon_uploads`).
         self.close_stats_popover();
@@ -2131,7 +2173,60 @@ impl TerminalPane {
     /// load indicator's generation (046 phase-4).
     pub(crate) fn remote_edge(&self) {
         self.check_upload_connection();
+        self.sync_ssh_session();
         self.sync_stats_generation();
+    }
+
+    /// The remote edge's half for the masters (047 R9.1, R9.3): an ended
+    /// remote session is reported to the registry — our master to the host
+    /// ends with the last pane's session — and a new one is registered and,
+    /// while the user's ssh still asks (a host key, a password), the login
+    /// probe is armed.
+    fn sync_ssh_session(&self) {
+        let current = self.session().and_then(|session| session.remote_target());
+        let previous = self.ivars().ssh_session.get();
+        if previous == current.as_ref().map(|(command, ..)| *command) {
+            return;
+        }
+        let masters = self.ivars().masters.as_ref();
+        if previous.is_some()
+            && let Some(masters) = masters
+        {
+            masters.session_ended(self.id());
+        }
+        self.ivars()
+            .ssh_session
+            .set(current.as_ref().map(|(command, ..)| *command));
+        let Some((_, target, _)) = current else {
+            return;
+        };
+        if let Some(masters) = masters {
+            masters.session_started(self.id(), &target);
+        }
+        if self
+            .session()
+            .and_then(|session| jobs::remote_login(session))
+            .is_none()
+        {
+            self.ivars().wake.login_probe.rearm();
+        }
+    }
+
+    /// The login probe's check (047 R9.1): `true` while the user's ssh has not
+    /// logged in — the probe re-arms. Logged in: the background jobs may
+    /// connect now, the load indicator starts. Not remote any more: done.
+    pub(crate) fn login_check(&self) -> bool {
+        let Some(session) = self.session() else {
+            return false;
+        };
+        let Some((command, ..)) = session.remote_target() else {
+            return false;
+        };
+        if jobs::remote_login(session) == Some(command) {
+            self.sync_stats_generation();
+            return false;
+        }
+        true
     }
 
     /// Edit ▸ Find ▸ Find… (⌘F): opens the panel, focuses the field and selects
