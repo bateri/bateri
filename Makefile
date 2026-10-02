@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check quick prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -92,23 +92,6 @@ clippy:
 # later must not stay silent: put `--doc` back here in the same commit.
 test:
 	$(CARGO) test --workspace --all-targets
-
-# The fast gate for a small fix: fmt and audit as in `check`, clippy only on the
-# crates that changed since HEAD plus the workspace crates depending on them (an
-# API change must still compile above), tests only of the changed crates
-# (`tools/changed_crates.py`). Not a phase's or a release's gate — that is
-# `check`, which also runs the dependents' tests.
-quick:
-	@rustc --version
-	@$(MAKE) --no-print-directory prune
-	$(CARGO) fmt --all -- --check
-	@$(MAKE) --no-print-directory audit
-	@out=$$(python3 tools/changed_crates.py) || exit 1; \
-	lint=$$(printf '%s\n' "$$out" | sed -n 1p); test=$$(printf '%s\n' "$$out" | sed -n 2p); \
-	if [ -z "$$lint" ]; then echo "quick: nothing changed since HEAD"; exit 0; fi; \
-	echo "quick: clippy $$lint · test $$test"; \
-	$(CARGO) clippy $$(printf -- '-p %s ' $$lint) --all-targets -- -D warnings && \
-	$(CARGO) test $$(printf -- '-p %s ' $$test) --all-targets
 
 # Opens the window, and when BT_RUN_SECONDS expires looks at the number of
 # frames, cells, glyphs, rule lines and atlas slots:
