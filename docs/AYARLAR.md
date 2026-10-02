@@ -36,7 +36,8 @@ okunur.
 Uygulama bu dosyaya dört yerden yazar: **Open settings.toml** dosya yokken
 şablonu yaratır, **View ▸ Theme ▸** ile tema seçince `[appearance] theme`
 satırını yazar (bkz. [View ▸ Theme ▸](#view--theme-)), **Shell ▸ Mark “host”
-as ▸** `[remote] hosts`'a o host'un girdisini yazar (bkz. [`[remote]`](#remote))
+as ▸** ve **Shell ▸ Shell Integration on “host”** `[remote] hosts`'a o
+host'un girdisini yazar (bkz. [`[remote]`](#remote))
 ve **ayar penceresi** değiştirdiğiniz ayarın satırını yazar. Var olan dosyanın başka hiçbir
 satırına — yorumlara, sıraya, tanımadığı anahtarlara — dokunulmaz.
 
@@ -62,8 +63,10 @@ görünür. View ▸ Bigger da bu düzende `⌘:` görünür.
 
 bateri ▸ Settings… (Cmd ,) ayar penceresini açar: solda beş kategori
 (General, Appearance, Cursor, Motion, Remote Files), sağda ayarlar. Remote
-Files `[remote]`'un sekiz önizleme/indirme anahtarını ve yük göstergesinin
-iki anahtarını (`stats`, `stats_interval`; on anahtar) gösterir; klasör
+Files en üstte `[remote] integration`'ı ("Set up shell integration on
+servers"; bkz. [Uzak kabuk entegrasyonu](#uzak-kabuk-entegrasyonu)), sonra
+`[remote]`'un sekiz önizleme/indirme anahtarını ve yük göstergesinin iki
+anahtarını (`stats`, `stats_interval`; on bir anahtar) gösterir; klasör
 satırlarında Change… klasör seçicisini açar (seçilen ev dizininin altındaysa
 `~/…` diye yazılır), önizleme klasöründe Show in Finder onu açar ve "In use"
 satırı klasördeki kopyaların toplamını gösterir — Clear Now önizlemeleri
@@ -1037,6 +1040,22 @@ küçük dosya yazar; sunucunun rc dosyalarına dokunmaz.
 - Kabul edilmeyen değer ve okunamayan ayar dosyası entegrasyonu **kapatır**
   (`osc52` gibi): yanlış tahmin sunucuya sessizce yazmak olurdu.
 - Ayar her `ssh`'ta o an okunur; açık pencereler beklemez.
+- **Ayar penceresinden**: Remote Files ▸ **Set up shell integration on
+  servers** bu anahtarı (`[remote] integration`) yazar; dosyayı elle
+  değiştirince anahtar da değişir.
+- **Menüden**: ssh sekmesindeyken **Shell ▸ Shell Integration on “host”**
+  o host'un entegrasyonunu açar ya da kapatır. Onay işareti host'un şu anki
+  cevabında — `integration` taşıyan girdisi, yoksa işareti (`"production"`
+  ise kapalı), yoksa bu anahtar; yerel sekmede öğe gri. Seçim dosyaya o
+  host'un **kendi** kararı olarak yazılır: tam o host'un girdisi varsa
+  `integration` satırı yerinde eklenir ya da değişir (işaretine dokunulmaz),
+  yoksa ya da önünde `integration` taşıyan bir desen varsa dizinin **başına**
+  `{ host = "…", integration = … }` eklenir ve o host'un geride kalan
+  girdilerinin artık etkisiz `integration`'ı silinir (yalnız onu taşıyan
+  girdi bütünüyle silinir, işaretli olan işaretini korur). Desen host'un
+  `user@`'siz kısmıdır; yorumlara ve dizinin yazılışına dokunulmaz, dosya
+  ayrıştırılamıyorsa ya da liste bozuksa yazılmaz. Değişiklik **bir sonraki**
+  `ssh`'ta geçerlidir; açık bağlantı olduğu gibi kalır.
 
 #### Uzak yük göstergesi
 

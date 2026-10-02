@@ -1227,6 +1227,19 @@ pub enum SettingsEdit {
         host: String,
         mark: HostMark,
     },
+    /// The settings window's "Set up shell integration on servers" (048 R6):
+    /// `[remote] integration`.
+    RemoteIntegration(bool),
+    /// Shell ▸ Shell Integration on “{host}” (048 R6): the `[remote] hosts`
+    /// edit after which `host`'s first matching entry that writes
+    /// `integration` writes `on` — an explicit choice for this host, even
+    /// when it equals what the mark and `[remote] integration` would give.
+    /// The rule is in [`with_host_integration`]; `host` is as in
+    /// [`Self::RemoteHostMark`].
+    RemoteHostIntegration {
+        host: String,
+        on: bool,
+    },
     /// Bytes; written in the largest exact unit ([`format_size`]).
     PreviewMaxSize(u64),
     PreviewReadOnly(bool),
@@ -1283,7 +1296,10 @@ impl SettingsEdit {
             Self::Keypress(_) => ("motion", "keypress", "motion.keypress"),
             Self::Erase(_) => ("motion", "erase", "motion.erase"),
             Self::ShellIntegration(_) => ("shell", "integration", "shell.integration"),
-            Self::RemoteHostMark { .. } => ("remote", "hosts", "remote.hosts"),
+            Self::RemoteHostMark { .. } | Self::RemoteHostIntegration { .. } => {
+                ("remote", "hosts", "remote.hosts")
+            }
+            Self::RemoteIntegration(_) => ("remote", "integration", "remote.integration"),
             Self::PreviewMaxSize(_) => ("remote", "preview_max_size", "remote.preview_max_size"),
             Self::PreviewReadOnly(_) => ("remote", "preview_read_only", "remote.preview_read_only"),
             Self::PreviewDir(_) => ("remote", "preview_dir", "remote.preview_dir"),
@@ -1320,12 +1336,16 @@ impl SettingsEdit {
             Self::ShellIntegration(integration) => integration.name().into(),
             // Not the array itself, but the written entry's `mark`.
             Self::RemoteHostMark { mark, .. } => mark.written().into(),
+            // Not the array itself, but the written entry's `integration`.
+            Self::RemoteHostIntegration { on, .. } => (*on).into(),
             Self::PreviewKeep(keep) => keep.name().into(),
             Self::DownloadConflict(conflict) => conflict.name().into(),
             Self::RemoteStats(mode) => mode.name().into(),
             Self::StatsInterval(seconds) => i64::from(*seconds).into(),
             Self::PreviewMaxSize(bytes) | Self::PreviewLimit(bytes) => format_size(*bytes).into(),
-            Self::PreviewReadOnly(on) | Self::DownloadNotify(on) => (*on).into(),
+            Self::PreviewReadOnly(on) | Self::DownloadNotify(on) | Self::RemoteIntegration(on) => {
+                (*on).into()
+            }
             Self::CursorRadius(value)
             | Self::CursorGlow(value)
             | Self::BlinkInterval(value)
@@ -1995,13 +2015,20 @@ stats_interval = 3
     ///   their contents. A value of a type that isn't accepted (`theme = 3`)
     ///   does change — the user chose a value.
     ///
-    /// [`SettingsEdit::RemoteHostMark`] writes the array's entries, not a single
-    /// value; its rule is in [`with_host_mark`], with the same contract (text
+    /// [`SettingsEdit::RemoteHostMark`] and [`SettingsEdit::RemoteHostIntegration`]
+    /// write the array's entries, not a single value; their rules are in
+    /// [`with_host_mark`] and [`with_host_integration`], with the same contract (text
     /// that can't be parsed and a broken array are `Err`, every other byte stays
     /// in place).
     pub fn with_edit(text: &str, edit: &SettingsEdit) -> Result<String, Diagnostic> {
-        if let SettingsEdit::RemoteHostMark { host, mark } = edit {
-            return with_host_mark(text, host, *mark);
+        match edit {
+            SettingsEdit::RemoteHostMark { host, mark } => {
+                return with_host_mark(text, host, *mark);
+            }
+            SettingsEdit::RemoteHostIntegration { host, on } => {
+                return with_host_integration(text, host, *on);
+            }
+            _ => {}
         }
         let (section_name, key, path) = edit.place();
         let value = edit.value();
@@ -2021,6 +2048,7 @@ stats_interval = 3
             let expected = match value {
                 toml_edit::Value::String(_) => "a string",
                 toml_edit::Value::Integer(_) => "an integer",
+                toml_edit::Value::Boolean(_) => "a boolean",
                 _ => "a number",
             };
             refused.push(Diagnostic {
@@ -2140,17 +2168,7 @@ fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<Mark
     if host_mark(rules, host) == mark {
         return None;
     }
-    let bare = bare_host(host).to_lowercase();
-    let full = host.to_lowercase();
-    let exact: Vec<usize> = rules
-        .iter()
-        .enumerate()
-        .filter(|(_, rule)| {
-            let pattern = rule.pattern.to_lowercase();
-            pattern == bare || pattern == full
-        })
-        .map(|(index, _)| index)
-        .collect();
+    let exact = exact_entries(rules, host);
     if mark != HostMark::None
         && let Some(&first) = exact.first()
     {
@@ -2185,6 +2203,82 @@ fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<Mark
     })
 }
 
+/// The indices of the entries that write exactly `host`: the pattern equals,
+/// case insensitive, the host without `user@` or the full host — the menu's
+/// "this host's own entry" ([`host_mark_plan`], [`host_integration_plan`]).
+fn exact_entries(rules: &[HostRule], host: &str) -> Vec<usize> {
+    let bare = bare_host(host).to_lowercase();
+    let full = host.to_lowercase();
+    rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| {
+            let pattern = rule.pattern.to_lowercase();
+            pattern == bare || pattern == full
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// What [`with_host_integration`] will do to the array
+/// ([`host_integration_plan`]).
+#[derive(Debug, PartialEq, Eq)]
+struct IntegrationPlan {
+    /// The entry at this index gets `integration = on` in place.
+    in_place: Option<usize>,
+    /// These exact entries lose their `integration` (they keep their `mark`).
+    strip: Vec<usize>,
+    /// These exact entries are deleted: they carried only `integration`, and
+    /// an entry with neither key would reject the whole list.
+    remove: Vec<usize>,
+    /// `{ host = <host without user@>, integration = on }` goes at the start.
+    prepend: bool,
+}
+
+/// The menu's integration rule (048 R6), pure — [`host_mark_plan`]'s twin:
+/// the least disturbing edit after which `host`'s first matching entry that
+/// writes `integration` ([`integration_rule`]) writes `on`; `None` (a no-op)
+/// if it already does.
+///
+/// - The first exact entry ([`exact_entries`]) gets `integration = on` **in
+///   place**, a mark-only entry included — the order the user set isn't
+///   disturbed and the mark stays where it is.
+/// - If that doesn't give the result (no exact entry, or a glob that writes
+///   `integration` stands in front of it) an `integration`-only entry is
+///   written **at the start**, and the exact entries lose their now shadowed
+///   `integration` — one that carried nothing else is deleted, because an
+///   entry with neither `mark` nor `integration` rejects the whole list (and
+///   with it every production mark). Marks are resolved separately, so no
+///   host's mark changes.
+fn host_integration_plan(rules: &[HostRule], host: &str, on: bool) -> Option<IntegrationPlan> {
+    if integration_rule(rules, host).map(|(_, value)| value) == Some(on) {
+        return None;
+    }
+    let exact = exact_entries(rules, host);
+    if let Some(&first) = exact.first() {
+        let mut edited = rules.to_vec();
+        edited[first].integration = Some(on);
+        if integration_rule(&edited, host).map(|(_, value)| value) == Some(on) {
+            return Some(IntegrationPlan {
+                in_place: Some(first),
+                strip: Vec::new(),
+                remove: Vec::new(),
+                prepend: false,
+            });
+        }
+    }
+    let (strip, remove) = exact
+        .into_iter()
+        .filter(|&index| rules[index].integration.is_some())
+        .partition(|&index| rules[index].mark.is_some());
+    Some(IntegrationPlan {
+        in_place: None,
+        strip,
+        remove,
+        prepend: true,
+    })
+}
+
 /// The host's part without `user@`: the match's input when the pattern has no
 /// `@` ([`host_mark`]) and the name in the menu's title.
 pub fn bare_host(host: &str) -> &str {
@@ -2198,17 +2292,7 @@ pub fn bare_host(host: &str) -> &str {
 /// leaving a broken entry in place and writing in front of it would be guessing
 /// the list's meaning.
 fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diagnostic> {
-    let parsed = document(text)?;
-    let mut refused = Vec::new();
-    let rules = match section(text, parsed.as_table(), "remote", &mut refused)
-        .and_then(|remote| remote.get("hosts"))
-    {
-        Some(item) => host_rules(text, item, &[], &mut refused),
-        None => Vec::new(),
-    };
-    if let Some(diagnostic) = refused.pop() {
-        return Err(diagnostic);
-    }
+    let (parsed, rules) = remote_rules(text)?;
     let Some(plan) = host_mark_plan(&rules, host, mark) else {
         return Ok(text.to_owned());
     };
@@ -2236,24 +2320,8 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
                     tables.remove(index);
                 }
                 if plan.prepend {
-                    let mut table = toml_edit::Table::new();
-                    table.insert("host", toml_edit::value(pattern));
-                    if plan.prepend_mark {
-                        table.insert("mark", toml_edit::value(written.as_str()));
-                    }
-                    if let Some(on) = plan.integration {
-                        table.insert("integration", toml_edit::value(on));
-                    }
-                    // The old first section's place and the comment above it pass
-                    // to the new one (writing order is by position; at equal
-                    // position the array's order), the old one is separated by a
-                    // blank line.
-                    if let Some(first) = tables.get_mut(0) {
-                        table.set_position(first.position());
-                        *table.decor_mut() = first.decor().clone();
-                        first.decor_mut().set_prefix("\n");
-                    }
-                    tables.insert(0, table);
+                    let mark = plan.prepend_mark.then_some(written.as_str());
+                    prepend_table(tables, pattern, mark, plan.integration);
                 }
             }
             Some(Item::Value(toml_edit::Value::Array(array))) => {
@@ -2269,16 +2337,15 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
                             *old.decor_mut() = decor;
                         }
                         // An `integration`-only entry (048) gets a mark.
-                        None => {
-                            entry.insert("mark", written.as_str().into());
-                        }
+                        None => inline_insert(entry, "mark", written.as_str().into()),
                     }
                 }
                 for &index in plan.remove.iter().rev() {
                     array.remove(index);
                 }
                 if plan.prepend {
-                    prepend_entry(array, pattern, &plan, &written);
+                    let mark = plan.prepend_mark.then_some(written.as_str());
+                    prepend_entry(array, pattern, mark, plan.integration);
                 }
             }
             // No key (as if the array were empty): only writing at the start is
@@ -2286,13 +2353,207 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
             _ => {
                 let mut array = toml_edit::Array::new();
                 if plan.prepend {
-                    prepend_entry(&mut array, pattern, &plan, &written);
+                    let mark = plan.prepend_mark.then_some(written.as_str());
+                    prepend_entry(&mut array, pattern, mark, plan.integration);
                 }
                 remote.insert("hosts", Item::Value(array.into()));
             }
         }
     }
     Ok(rendered(text, &doc))
+}
+
+/// The parsed text and its `[remote] hosts` list — the input of the two menu
+/// edits. Text that can't be parsed and a broken list are `Err`.
+fn remote_rules(text: &str) -> Result<(Document<&str>, Vec<HostRule>), Diagnostic> {
+    let parsed = document(text)?;
+    let mut refused = Vec::new();
+    let rules = match section(text, parsed.as_table(), "remote", &mut refused)
+        .and_then(|remote| remote.get("hosts"))
+    {
+        Some(item) => host_rules(text, item, &[], &mut refused),
+        None => Vec::new(),
+    };
+    if let Some(diagnostic) = refused.pop() {
+        return Err(diagnostic);
+    }
+    Ok((parsed, rules))
+}
+
+/// The writing of [`SettingsEdit::RemoteHostIntegration`]: applies
+/// [`host_integration_plan`] to `[remote] hosts`, with [`with_host_mark`]'s
+/// contract (both spellings stay in their form, a missing key is born as an
+/// inline array, unparseable text and a broken array are `Err`).
+fn with_host_integration(text: &str, host: &str, on: bool) -> Result<String, Diagnostic> {
+    let (parsed, rules) = remote_rules(text)?;
+    let Some(plan) = host_integration_plan(&rules, host, on) else {
+        return Ok(text.to_owned());
+    };
+    let pattern = bare_host(host);
+    let mut doc = parsed.into_mut();
+    ensure_section(&mut doc, "remote");
+    // No `else` arm: as in `with_host_mark`.
+    if let Some(remote) = doc.get_mut("remote").and_then(Item::as_table_like_mut) {
+        match remote.get_mut("hosts") {
+            Some(Item::ArrayOfTables(tables)) => {
+                if let Some(table) = plan.in_place.and_then(|index| tables.get_mut(index)) {
+                    match table.get_mut("integration").and_then(Item::as_value_mut) {
+                        Some(old) => {
+                            let decor = old.decor().clone();
+                            *old = on.into();
+                            *old.decor_mut() = decor;
+                        }
+                        None => {
+                            table.insert("integration", toml_edit::value(on));
+                        }
+                    }
+                }
+                // An entry planned for deletion that carries a key we don't
+                // know stays as it is: deleting it would drop the user's key
+                // (a `/code-review` finding), stripping it would leave an entry
+                // with neither `mark` nor `integration` and reject the list.
+                // Its `integration` is shadowed by the prepended entry.
+                let remove: Vec<usize> = plan
+                    .remove
+                    .iter()
+                    .copied()
+                    .filter(|&index| {
+                        tables.get(index).is_some_and(|table| {
+                            table
+                                .iter()
+                                .all(|(key, _)| key == "host" || key == "integration")
+                        })
+                    })
+                    .collect();
+                for &index in &plan.strip {
+                    if let Some(table) = tables.get_mut(index) {
+                        table.remove("integration");
+                    }
+                }
+                for &index in remove.iter().rev() {
+                    tables.remove(index);
+                }
+                if plan.prepend {
+                    prepend_table(tables, pattern, None, Some(on));
+                }
+            }
+            Some(Item::Value(toml_edit::Value::Array(array))) => {
+                if let Some(entry) = plan.in_place.and_then(|index| {
+                    array
+                        .get_mut(index)
+                        .and_then(toml_edit::Value::as_inline_table_mut)
+                }) {
+                    match entry.get_mut("integration") {
+                        Some(old) => {
+                            let decor = old.decor().clone();
+                            *old = on.into();
+                            *old.decor_mut() = decor;
+                        }
+                        None => inline_insert(entry, "integration", on.into()),
+                    }
+                }
+                // As above: an unknown key keeps its entry untouched.
+                let remove: Vec<usize> = plan
+                    .remove
+                    .iter()
+                    .copied()
+                    .filter(|&index| {
+                        array
+                            .get(index)
+                            .and_then(toml_edit::Value::as_inline_table)
+                            .is_some_and(|entry| {
+                                entry
+                                    .iter()
+                                    .all(|(key, _)| key == "host" || key == "integration")
+                            })
+                    })
+                    .collect();
+                for &index in &plan.strip {
+                    if let Some(entry) = array
+                        .get_mut(index)
+                        .and_then(toml_edit::Value::as_inline_table_mut)
+                    {
+                        inline_remove(entry, "integration");
+                    }
+                }
+                for &index in remove.iter().rev() {
+                    array.remove(index);
+                }
+                if plan.prepend {
+                    prepend_entry(array, pattern, None, Some(on));
+                }
+            }
+            _ => {
+                let mut array = toml_edit::Array::new();
+                if plan.prepend {
+                    prepend_entry(&mut array, pattern, None, Some(on));
+                }
+                remote.insert("hosts", Item::Value(array.into()));
+            }
+        }
+    }
+    Ok(rendered(text, &doc))
+}
+
+/// Adds `key = value` at the end of an inline table keeping its spacing: the
+/// space before `}` sits on the last value's decor and `toml_edit` would leave
+/// it there (`mark = "production" , integration = true }`); it passes to the
+/// new last value.
+fn inline_insert(entry: &mut toml_edit::InlineTable, key: &str, mut value: toml_edit::Value) {
+    let last = entry.iter().last().map(|(last, _)| last.to_owned());
+    if let Some(old) = last.as_deref().and_then(|last| entry.get_mut(last)) {
+        let suffix = old.decor().suffix().cloned();
+        old.decor_mut().set_suffix("");
+        value.decor_mut().set_prefix(" ");
+        if let Some(suffix) = suffix {
+            value.decor_mut().set_suffix(suffix);
+        }
+    }
+    entry.insert(key, value);
+}
+
+/// Removes `key` from an inline table keeping its spacing: if it was the last
+/// value, the space before `}` it carried passes to the new last one.
+fn inline_remove(entry: &mut toml_edit::InlineTable, key: &str) {
+    let was_last = entry.iter().last().is_some_and(|(last, _)| last == key);
+    let Some(removed) = entry.remove(key) else {
+        return;
+    };
+    if was_last {
+        let last = entry.iter().last().map(|(last, _)| last.to_owned());
+        if let (Some(old), Some(suffix)) = (
+            last.as_deref().and_then(|last| entry.get_mut(last)),
+            removed.decor().suffix(),
+        ) {
+            old.decor_mut().set_suffix(suffix.clone());
+        }
+    }
+}
+
+/// Writes `[[remote.hosts]] host, mark, integration` at the start of an array
+/// of tables. The old first section's place and the comment above it pass to
+/// the new one (writing order is by position; at equal position the array's
+/// order), the old one is separated by a blank line.
+fn prepend_table(
+    tables: &mut toml_edit::ArrayOfTables,
+    pattern: &str,
+    mark: Option<&str>,
+    integration: Option<bool>,
+) {
+    let mut table = toml_edit::Table::new();
+    table.insert("host", toml_edit::value(pattern));
+    if let Some(mark) = mark {
+        table.insert("mark", toml_edit::value(mark));
+    }
+    if let Some(on) = integration {
+        table.insert("integration", toml_edit::value(on));
+    }
+    if let Some(first) = tables.get_mut(0) {
+        table.set_position(first.position());
+        *table.decor_mut() = first.decor().clone();
+        first.decor_mut().set_prefix("\n");
+    }
+    tables.insert(0, table);
 }
 
 /// If `item` is a value, makes it `written`, preserving its decor (the comment
@@ -2305,17 +2566,23 @@ fn set_keeping_decor(item: Option<&mut Item>, written: &str) {
     }
 }
 
-/// Writes `{ host, mark }` at the start of an inline array and keeps the array's
-/// spelling: the new entry takes the old first entry's decor (the `\n  `
-/// indentation in a multi-line array); the old first entry gains a space after
-/// the comma in a single-line array, otherwise `{…},{…}` would stick together.
-fn prepend_entry(array: &mut toml_edit::Array, pattern: &str, plan: &MarkPlan, written: &str) {
+/// Writes `{ host, mark, integration }` (the last two when given) at the start
+/// of an inline array and keeps the array's spelling: the new entry takes the
+/// old first entry's decor (the `\n  ` indentation in a multi-line array); the
+/// old first entry gains a space after the comma in a single-line array,
+/// otherwise `{…},{…}` would stick together.
+fn prepend_entry(
+    array: &mut toml_edit::Array,
+    pattern: &str,
+    mark: Option<&str>,
+    integration: Option<bool>,
+) {
     let mut entry = toml_edit::InlineTable::new();
     entry.insert("host", pattern.into());
-    if plan.prepend_mark {
-        entry.insert("mark", written.into());
+    if let Some(mark) = mark {
+        entry.insert("mark", mark.into());
     }
-    if let Some(on) = plan.integration {
+    if let Some(on) = integration {
         entry.insert("integration", on.into());
     }
     entry.fmt();
@@ -5096,6 +5363,15 @@ cursor = \"spring\"
                     integration: None,
                 },
             ),
+            SettingsEdit::RemoteHostIntegration { host, on } => settings.remote_hosts.insert(
+                0,
+                HostRule {
+                    pattern: bare_host(&host).to_owned(),
+                    mark: None,
+                    integration: Some(on),
+                },
+            ),
+            SettingsEdit::RemoteIntegration(on) => settings.remote_integration = on,
             SettingsEdit::PreviewMaxSize(bytes) => settings.remote_files.preview_max_size = bytes,
             SettingsEdit::PreviewReadOnly(on) => settings.remote_files.preview_read_only = on,
             SettingsEdit::PreviewDir(path) => settings.remote_files.preview_dir = path,
@@ -5143,6 +5419,11 @@ cursor = \"spring\"
                 host: "deploy@prod".to_owned(),
                 mark: HostMark::Production,
             },
+            SettingsEdit::RemoteHostIntegration {
+                host: "deploy@vm".to_owned(),
+                on: false,
+            },
+            SettingsEdit::RemoteIntegration(false),
             // Written as "250MB" and "1500KB": the largest exact unit.
             SettingsEdit::PreviewMaxSize(250_000_000),
             SettingsEdit::PreviewReadOnly(false),
@@ -5187,6 +5468,166 @@ cursor = \"spring\"
             "[remote]\nhosts = [{ host = \"b\", mark = \"development\" }, \
              { host = \"a\", mark = \"staging\" }]\n"
         );
+    }
+
+    fn integrated(text: &str, host: &str, on: bool) -> String {
+        let edit = SettingsEdit::RemoteHostIntegration {
+            host: host.to_owned(),
+            on,
+        };
+        Settings::with_edit(text, &edit).expect("writable text")
+    }
+
+    #[test]
+    fn host_integration_creates_the_list() {
+        // Empty file: an `integration`-only entry, the pattern without `user@`.
+        assert_eq!(
+            integrated("", "deploy@prod", false),
+            "[remote]\nhosts = [{ host = \"prod\", integration = false }]\n"
+        );
+        // Section present, key missing; the general key stays as written.
+        assert_eq!(
+            integrated("[remote]\nintegration = true\n", "vm", false),
+            "[remote]\nintegration = true\nhosts = [{ host = \"vm\", integration = false }]\n"
+        );
+    }
+
+    #[test]
+    fn host_integration_changes_the_own_entry_in_place() {
+        // A mark-only entry gets `integration` beside its mark; comments, the
+        // unknown key and the order stay; the mark is not touched.
+        let text = "# top\n[remote]\n# prod is red\nhosts = [\n  \
+                    { host = \"db\", mark = \"staging\" }, # data\n  \
+                    { host = \"prod\", mark = \"production\" }, # prod\n]\nfuture = 1\n";
+        let written = integrated(text, "deploy@PROD", true);
+        assert_eq!(
+            written,
+            text.replace(
+                "{ host = \"prod\", mark = \"production\" }",
+                "{ host = \"prod\", mark = \"production\", integration = true }"
+            )
+        );
+        let settings = clean(&written);
+        assert!(settings.integration_for("deploy@prod"));
+        assert_eq!(
+            host_mark(&settings.remote_hosts, "prod"),
+            HostMark::Production
+        );
+        // A written value flips in place, its comment kept.
+        let flipped = integrated(&written, "prod", false);
+        assert_eq!(
+            flipped,
+            text.replace(
+                "{ host = \"prod\", mark = \"production\" }",
+                "{ host = \"prod\", mark = \"production\", integration = false }"
+            )
+        );
+        // The same choice again is a no-op: the text is returned as it is.
+        assert_eq!(integrated(&flipped, "prod", false), flipped);
+    }
+
+    #[test]
+    fn host_integration_goes_first_past_a_glob_and_never_breaks_the_list() {
+        // A glob in front decides the host's integration: the in-place edit
+        // wouldn't take, so an `integration`-only entry goes to the start. The
+        // shadowed exact entries lose `integration`: the one with a mark keeps
+        // it, the one with nothing else is deleted (an empty entry would reject
+        // the whole list).
+        let text = "[remote]\nhosts = [{ host = \"*\", integration = false }, \
+                    { host = \"vm\", mark = \"staging\", integration = false }, \
+                    { host = \"vm\", integration = false }]\n";
+        let written = integrated(text, "vm", true);
+        assert_eq!(
+            written,
+            "[remote]\nhosts = [{ host = \"vm\", integration = true }, \
+             { host = \"*\", integration = false }, \
+             { host = \"vm\", mark = \"staging\" }]\n"
+        );
+        let settings = clean(&written);
+        assert!(settings.integration_for("vm"));
+        assert!(!settings.integration_for("other"));
+        assert_eq!(host_mark(&settings.remote_hosts, "vm"), HostMark::Staging);
+    }
+
+    #[test]
+    fn host_integration_keeps_the_array_of_tables() {
+        let text = "[remote]\n# first\n[[remote.hosts]]\nhost = \"prod\"\nmark = \"production\"\n";
+        // In place: the entry gets the line.
+        assert_eq!(
+            integrated(text, "prod", true),
+            "[remote]\n# first\n[[remote.hosts]]\nhost = \"prod\"\nmark = \"production\"\n\
+             integration = true\n"
+        );
+        // Behind a glob: a new first section takes the comment above the old one.
+        let text = "[remote]\n# first\n[[remote.hosts]]\nhost = \"*\"\nintegration = false\n\n\
+                    [[remote.hosts]]\nhost = \"vm\"\nintegration = false\n";
+        let written = integrated(text, "vm", true);
+        assert_eq!(
+            written,
+            "[remote]\n# first\n[[remote.hosts]]\nhost = \"vm\"\nintegration = true\n\n\
+             [[remote.hosts]]\nhost = \"*\"\nintegration = false\n"
+        );
+        assert!(clean(&written).integration_for("vm"));
+    }
+
+    #[test]
+    fn host_integration_keeps_an_entry_with_unknown_keys() {
+        // An `integration`-only entry with a key we don't know stays untouched
+        // (a `/code-review` finding): deleting it would drop the key, stripping
+        // it would leave an entry the parser rejects with the whole list.
+        let text = "[remote]\nhosts = [{ host = \"*\", integration = false }, \
+                    { host = \"vm\", integration = false, note = \"lab box\" }]\n";
+        let written = integrated(text, "vm", true);
+        assert_eq!(
+            written,
+            "[remote]\nhosts = [{ host = \"vm\", integration = true }, \
+             { host = \"*\", integration = false }, \
+             { host = \"vm\", integration = false, note = \"lab box\" }]\n"
+        );
+        assert!(clean(&written).integration_for("vm"));
+    }
+
+    #[test]
+    fn host_integration_and_mark_leave_each_other_alone() {
+        // Toggle then mark: the mark goes in place, the integration stays.
+        let text = integrated("", "prod", true);
+        let both = marked(&text, "prod", HostMark::Production);
+        assert_eq!(
+            both,
+            "[remote]\nhosts = [{ host = \"prod\", integration = true, mark = \"production\" }]\n"
+        );
+        let settings = clean(&both);
+        assert!(
+            settings.integration_for("prod"),
+            "the prod default is overridden"
+        );
+        assert_eq!(
+            host_mark(&settings.remote_hosts, "prod"),
+            HostMark::Production
+        );
+        // Mark then toggle: the integration goes in place, the mark stays.
+        let text = marked("", "prod", HostMark::Production);
+        let settings = clean(&integrated(&text, "prod", true));
+        assert!(settings.integration_for("prod"));
+        assert_eq!(
+            host_mark(&settings.remote_hosts, "prod"),
+            HostMark::Production
+        );
+    }
+
+    #[test]
+    fn host_integration_refuses_what_it_cannot_read() {
+        for text in [
+            "[remote\n",
+            "[remote]\nhosts = [{ host = \"a\" }]\n",
+            "remote = 1\n",
+        ] {
+            let edit = SettingsEdit::RemoteHostIntegration {
+                host: "a".to_owned(),
+                on: false,
+            };
+            assert!(Settings::with_edit(text, &edit).is_err(), "{text}");
+        }
     }
 
     #[test]

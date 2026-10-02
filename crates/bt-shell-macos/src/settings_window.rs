@@ -191,11 +191,12 @@ enum Key {
     DownloadNotify,
     RemoteStats,
     StatsInterval,
+    RemoteIntegration,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 31] = [
+    const ALL: [Key; 32] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -227,6 +228,7 @@ impl Key {
         Key::DownloadNotify,
         Key::RemoteStats,
         Key::StatsInterval,
+        Key::RemoteIntegration,
     ];
 
     fn tag(self) -> NSInteger {
@@ -273,6 +275,7 @@ impl Key {
             Key::DownloadNotify => "remote.download_notify",
             Key::RemoteStats => "remote.stats",
             Key::StatsInterval => "remote.stats_interval",
+            Key::RemoteIntegration => "remote.integration",
         }
     }
 }
@@ -885,6 +888,7 @@ struct Controls {
     download_notify: Retained<NSSwitch>,
     remote_stats: Retained<NSPopUpButton>,
     stats_interval: Number,
+    remote_integration: Retained<NSSwitch>,
     /// The panes' rows: the lock, the dependent row and the row's
     /// diagnostic come from here.
     rows: Vec<Row>,
@@ -1071,6 +1075,7 @@ define_class!(
                 })),
                 Some(Key::PreviewReadOnly) => Some(SettingsEdit::PreviewReadOnly(on)),
                 Some(Key::DownloadNotify) => Some(SettingsEdit::DownloadNotify(on)),
+                Some(Key::RemoteIntegration) => Some(SettingsEdit::RemoteIntegration(on)),
                 _ => None,
             };
             self.save(edit);
@@ -1410,6 +1415,7 @@ impl SettingsWindow {
         select_choice(&c.keypress, settings.keypress);
         select_choice(&c.erase, settings.erase);
 
+        set_switch(&c.remote_integration, settings.remote_integration);
         let files = &settings.remote_files;
         let (items, index) = size_items(files.preview_max_size, PREVIEW_SIZE_PRESETS);
         fill_sizes(&c.preview_max_size, &items, index);
@@ -2074,7 +2080,9 @@ impl SettingsWindow {
             Some("On turns animations into fades and instant jumps."),
         );
 
-        // Remote Files (045 Karar 8): preview, cleanup, downloads.
+        // Remote Files (045 Karar 8): the shell integration on servers (048
+        // R6), preview, cleanup, downloads.
+        let remote_integration = self.switch(Key::RemoteIntegration);
         let preview_max_size = self.string_popup(Key::PreviewMaxSize);
         let preview_read_only = self.switch(Key::PreviewReadOnly);
         let preview_dir = self.folder(Key::PreviewDir);
@@ -2099,6 +2107,13 @@ impl SettingsWindow {
             56.0,
         );
         let mut remote = Form::new(mtm);
+        remote.row(
+            Key::RemoteIntegration,
+            "Set up shell integration on servers:",
+            &remote_integration,
+            &[&remote_integration],
+            Some("Off on hosts marked Production unless the Shell menu turns it on."),
+        );
         remote.row(
             Key::PreviewMaxSize,
             "Preview without asking:",
@@ -2238,6 +2253,7 @@ impl SettingsWindow {
             download_notify,
             remote_stats,
             stats_interval,
+            remote_integration,
             rows,
         };
         (panes, controls)
@@ -2666,7 +2682,7 @@ mod tests {
                     [remote]\npreview_max_size = []\npreview_read_only = []\n\
                     preview_dir = []\npreview_keep = []\npreview_limit = []\n\
                     download_dir = []\ndownload_conflict = []\ndownload_notify = []\n\
-                    stats = []\nstats_interval = []\n";
+                    stats = []\nstats_interval = []\nintegration = []\n";
         let parsed = Settings::parse_keeping(text, &Settings::default()).expect("it parses");
         let seen = status(&FileState::Usable(parsed.diagnostics), &[]);
         assert_eq!(seen.banner, Banner::default(), "no unmatched diagnostic");
@@ -2708,6 +2724,7 @@ mod tests {
                 Key::DownloadNotify => SettingsEdit::DownloadNotify(false),
                 Key::RemoteStats => SettingsEdit::RemoteStats(RemoteStatsMode::Off),
                 Key::StatsInterval => SettingsEdit::StatsInterval(3),
+                Key::RemoteIntegration => SettingsEdit::RemoteIntegration(false),
             };
             assert_eq!(edit.path(), key.path(), "{key:?}");
         }

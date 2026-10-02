@@ -241,7 +241,7 @@ hiçbir şey. Gerekçeler
 `.tasks/044-tiklanabilir-baglantilar/discussion.md` → Karar ve Muhakeme. Fareyle
 seçim, pano, geçmişte
 kaydırma, ana menü (About, Settings…, Quit; Shell'de New Window/Tab, New
-Local Tab (⌥⌘T), Mark “{host}” as ▸, Forget Password for “{host}”, Cancel Upload (⌘.), Split
+Local Tab (⌥⌘T), Mark “{host}” as ▸, Shell Integration on “{host}”, Forget Password for “{host}”, Cancel Upload (⌘.), Split
 Right/Down (⌘D/⇧⌘D) ve Close Tab/Window — çok pane'de ⌘W'nin başlığı
 "Close"; Edit'te Cut/Copy/Paste/Paste Escaped Text/Select All
 ve Clear to Start/Clear Scrollback — Cut yalnız dock
@@ -385,7 +385,8 @@ genel panoya o yazar;
 önizleme/indirme anahtarları — `preview_max_size`, `preview_read_only`,
 `preview_dir`, `preview_keep`, `preview_limit`, `download_dir`,
 `download_conflict`, `download_notify`; 045 — ve yük göstergesinin `stats`,
-`stats_interval`'ı; 046, ayar penceresinde Remote Files),
+`stats_interval`'ı; 046, ayar penceresinde Remote Files — ve `[remote]
+integration`; 048, Remote Files'ın başında),
 Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
@@ -1672,9 +1673,12 @@ ikisine de bağlanmaz.
   anahtar silinmez. Dosyaya yazan dört yol var: ayar penceresinin Open
   settings.toml düğmesi yalnız dosya **yokken** şablonu yaratır
   (`settings::create_if_missing`), View ▸ Theme ▸ yalnız `[appearance]
-  theme`'i, Shell ▸ Mark “{host}” as ▸ yalnız `[remote] hosts`'un o host'un
-  girdisini (`SettingsEdit::RemoteHostMark`; kural `settings::host_mark_plan`,
-  037 Karar 5), **ayar penceresi** (bateri ▸ Settings…, `settings_window`) yalnız
+  theme`'i, Shell ▸ Mark “{host}” as ▸ ve Shell Integration on “{host}”
+  yalnız `[remote] hosts`'un o host'un girdisini (`SettingsEdit::RemoteHostMark`
+  / `RemoteHostIntegration`; kurallar `settings::host_mark_plan` /
+  `host_integration_plan` — 037 Karar 5, 048 R6; ikincisinin durumu
+  `Settings::integration_for`'un çözümü, yazdığı host'un kendi kararı),
+  **ayar penceresi** (bateri ▸ Settings…, `settings_window`) yalnız
   değiştirilen anahtarı yazar — dördü de tek düzenlemeden, biçimi koruyarak
   (`Settings::with_edit`, tipli `SettingsEdit`), yerinde (sembolik bağın
   hedefine); ayrıştırılamayan dosyaya yazmaz. Menü ve pencere yalnız yazar,
