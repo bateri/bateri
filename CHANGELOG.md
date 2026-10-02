@@ -12,8 +12,34 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-03
+
 ### Added
 
+- **Folder tracking and command blocks over ssh, with nothing to install.**
+  Type `ssh server` as usual: on the first prompt the status bar shows the
+  remote folder (`⇄ server  ~/project`) and follows `cd`, remote commands get
+  their success/failure stripe and duration, and ⌘-click opens relative
+  paths. Works with zsh, bash and fish on the server; your rc files on the
+  server are never touched (bateri keeps a small folder under
+  `~/.local/share/bateri` there). Inside a local tmux, and for servers marked
+  Production, it stays off.
+- Servers without a shell (routers, Windows, `git@github.com`) are detected
+  on the first try: the connection quietly reopens as a plain ssh session and
+  bateri remembers that server.
+- **Turn it off** in Settings › Remote Files, or per server with Shell ›
+  Shell Integration on “server”.
+- **Password servers work for remote files.** Dropping a file, ⌘-click
+  preview, downloads and the server load now work on servers that ask for a
+  password. While your ssh session is open, they ride on it and ask nothing;
+  otherwise bateri asks once in its own sheet and can remember the password
+  in your Keychain (Shell › Forget Password for “server” removes it). The
+  status bar shows **Sign In…** when a password is needed.
+- Remote programs can recognise bateri: `LC_TERMINAL=bateri`,
+  `LC_TERMINAL_VERSION` and `LC_BATERI_TAB_URL` reach the server (servers
+  that accept `LC_*`, and every server bateri sets up).
+- A second `ssh` to the same server in another tab doesn't ask for the
+  password again while the first one is open.
 - **Server load in the ssh status bar.** While you're connected to a Linux
   server, the right side of the status bar shows its CPU and memory:
   `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%`, with the last eight CPU samples as a small
@@ -29,7 +55,7 @@ of every installed copy. A version without a section is not released.
 - Sampling uses the connection bateri already keeps open for remote files, so
   no extra login. It pauses while the tab is in the background or after two
   minutes without input, and stops when you leave the server. Servers that
-  ask for a password, and servers that aren't Linux, show no load.
+  aren't Linux show no load. The load appears only after you've logged in.
 
 ### Changed
 
