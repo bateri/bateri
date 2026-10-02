@@ -70,13 +70,60 @@ _Requirements: R2.1, R3.1, R3.2, R3.3, R3.4, R3.5, R7_
 
 ## Checklist
 
-- [ ] Ayar anahtarları, şablon, `SettingsEdit`, `Changes::stats`
-- [ ] `RemoteStats`, `DockContext::stats`, silinme kolları
-- [ ] `Session::set_remote_stats`
-- [ ] Eşikler, `STATS_GLYPHS` + bekçi, yerleşim merdiveni, render, `stats_at`/`stats_span`
-- [ ] Test: yerleşim ve renk senaryoları (Kabul'deki liste)
-- [ ] Test: nesil ve eşitlik kapısı, silinme
-- [ ] Test: ayar round-trip, kabul edilmeyen değer
-- [ ] `docs/AYARLAR.md`
-- [ ] Doğrulama geçti (`make check` + `make linux` + `make test-race`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Ayar anahtarları, şablon, `SettingsEdit`, `Changes::stats`
+- [x] `RemoteStats`, `DockContext::stats`, silinme kolları
+- [x] `Session::set_remote_stats`
+- [x] Eşikler, `STATS_GLYPHS` + bekçi, yerleşim merdiveni, render, `stats_at`/`stats_span`
+- [x] Test: yerleşim ve renk senaryoları (Kabul'deki liste)
+- [x] Test: nesil ve eşitlik kapısı, silinme
+- [x] Test: ayar round-trip, kabul edilmeyen değer
+- [x] `docs/AYARLAR.md`
+- [x] Doğrulama geçti (`make check` + `make linux` + `make test-race`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+
+## Uygulama Notları
+
+- **Biçim tipi ikiye ayrıldı:** ayar `RemoteStatsMode` (dört değer, `Off`
+  dahil) `settings.rs`'te; sınırı geçen değer `RemoteStats::form: StatsForm`
+  (üç değer, `Off` yok — plandaki "`mode`, `Off` yok"un tipi),
+  `RemoteStatsMode::form() -> Option<StatsForm>` köprü. Alanın adı `form`.
+- **`RemoteStats`'ın eşitliği elle:** `history` yalnız ilk `len` girdisiyle
+  karşılaştırılıyor (`history()`), yani üreticinin (phase-3) `len`'in
+  ötesini sıfırlaması gerekmiyor; eşitlik kapısı görünmeyen bir bayt farkına
+  kare istemiyor. Geçmiş **en eskiden en yeniye**.
+- **İlk örnekte CPU yok (`cpu: None`)** → CPU grubu (sparkline dahil) hiç
+  çizilmiyor, `mem 61%` tek başına; uydurma bir sayı yerine bir saniyelik
+  eksik. Planda tanımsızdı.
+- **En kötü değer diski yalnız eşik üstünde sayıyor:** taslağın `worst()`'u
+  diski her zaman aday sayıyordu (sakin bir sunucuda `disk 54%` en kötü
+  çıkabilirdi); R3.1'in "disk yalnız %85 üstünde" kuralı merdivenin son
+  basamağına da uygulandı. Taslağın `alerts` kolundaki çift disk de
+  kopyalanmadı.
+- **Eşikler** `STATS_THRESHOLDS: [StatsThreshold; 3]` (`StatsMetric` sırasıyla)
+  + `StatsMetric::level`; eşik değerin **kendisinde** başlıyor (`>=`).
+  Popover phase-5'te aynı tablodan okuyacak.
+- **Merdivenin geri kalanı taslağın betiği:** her basamak tam yol + 2 sütunla;
+  sığmazsa ve en kötü değer eşik üstündeyse `⇄ host  ` + 2 + değer, yolun
+  bütçesi kalan; yol bütçesi 1'e düşerse bugünkü kural gereği yalnız `…`.
+  Göstergenin karakterleri sabit bir tamponda (`Gauge`, 48 hücre; en geniş
+  basamak 41), kare başına ayırma yok.
+- **`render_remote_context` artık `&DockContext` alıyor** (host, uzak dizin ve
+  değer oradan) — sekiz argümanlık imza ve `too_many_arguments` muafiyeti
+  yerine.
+- **`stats_interval` için yeni `ranged_integer`** (`ranged_float`'ın ikizi):
+  aralık dışı ve ondalık değer reddedilip önceki değerde kalıyor, kırpılmıyor.
+- **`docs/AYARLAR.md` → Settings…'in "sekiz anahtar" cümlesi phase-4'e
+  devredildi** (checklist'ine yazıldı): pencerenin iki satırı orada doğuyor,
+  bu phase'de cümleyi değiştirmek pencerede olmayan satırları anlatırdı.
+- phase-1'den devralınan karşı bekçi:
+  `dock::tests::the_stats_glyphs_are_the_ones_the_atlas_checks` (listeyi
+  sabitliyor ve her basamağın ASCII dışı karakterinin `STATS_GLYPHS` ya da
+  U+2581–2588 olduğunu sınıyor); `bt-atlas`'taki elle kopyanın yorumu onu
+  adıyla anıyor.
+- Çalışma ağacında aynı anda başka bir değişiklik vardı (`title_directory`'nin
+  `user@host:dir` biçimi: `shell.rs`, `session.rs`, `CLAUDE.md`,
+  `.tasks/045-…/discussion.md`); bu phase'in commit'ine girmedi.
+- `/code-review` (medium) tek bulgu: `worst`'ün eşitlik kuralı doc'la
+  çelişiyordu (fold bellekten başlıyor, CPU eşitlikte hiç kazanamıyordu);
+  fold ilk gösterilen değerden başlıyor, eşitlik sınaması eklendi.
+

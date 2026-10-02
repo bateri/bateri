@@ -66,4 +66,5 @@ _Requirements: R2.2, R5.1, R5.2_
 - [ ] View/pencere etkileşim kancaları
 - [ ] Ayar penceresinin iki satırı + canlı uygulama
 - [ ] `CLAUDE.md`
+- [ ] `docs/AYARLAR.md` → Settings…: "Remote Files `[remote]`'un sekiz önizleme/indirme anahtarını" cümlesi iki satırla on anahtara (phase-2'den devredildi: satırlar bu phase'de doğuyor)
 - [ ] Doğrulama geçti (`make check` + `make smoke`)

@@ -260,6 +260,13 @@ download_dir = "~/Downloads"
 download_conflict = "ask"
 # true | false. Notify when a transfer ends while bateri is in the background.
 download_notify = true
+# "sparkline" | "numbers" | "alerts" | "off". The remote machine's load at
+# the right of the ssh status bar (Linux servers): sparkline shows the last
+# CPU samples and the numbers, numbers only the numbers, alerts a small dot
+# until a value passes its threshold, off nothing. Disk joins past 85%.
+stats = "sparkline"
+# Seconds between two samples, 2 to 60.
+stats_interval = 3
 ```
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
@@ -940,6 +947,8 @@ hosts = [
 | `download_dir` | klasör | `"~/Downloads"` | "Download to Downloads"'un hedefi |
 | `download_conflict` | `"ask"` \| `"keep_both"` \| `"replace"` | `"ask"` | hedefte aynı ad varsa: sor, ikisini de tut (yenisi numara alır) ya da üstüne yaz |
 | `download_notify` | `true` \| `false` | `true` | bateri arkadayken biten aktarım bildirim gönderir |
+| `stats` | `"sparkline"` \| `"numbers"` \| `"alerts"` \| `"off"` | `"sparkline"` | ssh durum çubuğunun sağındaki uzak yük göstergesinin biçimi; `off` göstergeyi ve örneklemeyi kapatır |
+| `stats_interval` | tam sayı, saniye, `2`–`60` | `3` | yük göstergesinin iki örneği arası |
 
 ssh ya da mosh ile uzak bir makinedeyken dock'un bağlam satırı `⇄ host`
 gösterir ve üst çizgisi renklenir. `hosts` o rengi host'a göre seçer, yani
@@ -979,9 +988,31 @@ prod'da olduğunuzu renkten bilirsiniz.
   ekrandaki liste kalır ve uyarı görünür. Yalnız bozuk girdiyi atmak sırayı
   değiştirip bir host'un işaretini sessizce değiştirebilirdi.
 
+#### Uzak yük göstergesi
+
+ssh ya da mosh ile bir Linux sunucudayken durum çubuğunun sağı o makinenin
+yükünü gösterir; veri dosya adlarının kullandığı yardımcı ssh oturumundan
+gelir, yeni bağlantı açılmaz.
+
+- **`stats`**: `"sparkline"` (varsayılan) `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%` — son
+  sekiz CPU örneği ve sayılar; `"numbers"` `cpu 23%  mem 61%`; `"alerts"`
+  eşik aşılmadıkça küçük yeşil bir `●`, aşılınca yalnız aşan değerler;
+  `"off"` gösterge yok, örnekleme de yok. Disk (`/`) her biçime yalnız %85'i
+  geçince eklenir.
+- **Eşikler** sabittir: cpu %70/%90, bellek %80/%92, disk %85/%95. Etiketler,
+  grafik ve eşiğin altındaki sayılar sönük; eşiği aşan sayı temanın
+  `warning`'i, ikinci eşiği aşan `error`'u ve başında `▲`.
+- **Dar pencerede** önce grafik düşer, sonra yalnız en kötü değer kalır, sonra
+  gösterge düşer; eşiği aşmış bir değer varsa yoldan önce gelir ve yol
+  soldan `…` ile kısalır. Host hiç kısalmaz. Aktarım sürerken gösterge
+  gizlidir.
+- **`stats_interval`** iki örnek arasındaki saniye, `2`–`60` arası tam sayı.
+- Kaydettiğiniz anda geçerli olur. Kabul edilmeyen değer o anahtarı açılışta
+  varsayılanda, kayıt anında ekrandaki değerde bırakır ve uyarı görünür.
+
 #### Uzak dosyalar: önizleme ve indirme
 
-Kalan sekiz anahtar ssh ya da mosh oturumundaki dosya adlarının ayarı:
+Önizleme ve indirmenin sekiz anahtarı ssh ya da mosh oturumundaki dosya adlarının ayarı:
 ⌘-tık dosyayı geçici, salt okunur bir kopyayla **önizler**, indirme kalıcı
 kopyayı `download_dir`'e koyar.
 

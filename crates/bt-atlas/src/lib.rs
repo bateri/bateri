@@ -3906,8 +3906,8 @@ mod tests {
     fn the_stats_glyphs_have_no_box_in_the_small_class() {
         // 046: the load indicator sits in the context line, i.e. the small
         // class. A hand copy of `bt-core`'s `STATS_GLYPHS` minus the
-        // procedural blocks (this crate cannot see it; the counter-guard
-        // linking the two lists lives on `bt-core`'s side) — the twin of
+        // procedural blocks (this crate cannot see it;
+        // `the_stats_glyphs_are_the_ones_the_atlas_checks` links them) — the twin of
         // `the_upload_row_has_no_box_in_the_small_class`. Menlo, by name.
         let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
         assert_eq!(menlo.font_issue(), None, "Menlo did not open");

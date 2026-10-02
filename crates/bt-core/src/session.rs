@@ -86,7 +86,8 @@ use crate::search::{
 use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule};
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection, DockState,
-    DockStatus, Precision, RemoteTarget, Scanner, ShellLog, ShellState, Stripe, Transfer,
+    DockStatus, Precision, RemoteStats, RemoteTarget, Scanner, ShellLog, ShellState, Stripe,
+    Transfer,
 };
 use crate::wake::Wake;
 
@@ -7350,6 +7351,36 @@ impl Session {
         changed
     }
 
+    /// Writes the remote host's load indicator (`None` = hide; 046 Karar 5).
+    /// Requests a frame **if it changed** and returns `true`
+    /// ([`Session::set_transfer`]'s pattern: the context row is not in
+    /// alacritty's damage).
+    ///
+    /// **Generation gated** like [`Session::set_remote`]: `command` is the
+    /// generation the sampler took with the remote target
+    /// ([`Session::remote_target`]); if that command is no longer running or
+    /// there is no remote target the call is a no-op — a finished ssh's late
+    /// answer must not land on the next host. **Equality gated**: the same value
+    /// requests no frame, so a sample that rounds to the shown numbers costs
+    /// nothing — zero frames while idle. The leaf lock drops before
+    /// `request_frame`; `Term` is not touched.
+    pub fn set_remote_stats(&self, command: u64, stats: Option<&RemoteStats>) -> bool {
+        let changed = {
+            let mut log = lock(&self.shell);
+            let current = log.running_command() == Some(command) && log.context.remote.is_some();
+            if !current || log.context.stats.as_ref() == stats {
+                false
+            } else {
+                log.context.stats = stats.copied();
+                true
+            }
+        };
+        if changed {
+            self.request_frame();
+        }
+        changed
+    }
+
     /// Whether the application is on the alternate screen — the state **in the
     /// last frame**.
     ///
@@ -13452,6 +13483,52 @@ mod tests {
         assert!(!session.set_transfer(None));
         let (dock, _) = draw_dock(&session);
         assert_eq!(dock.progress, None);
+    }
+
+    /// 046 Karar 5: the load indicator is generation and equality gated and
+    /// goes with the remote state.
+    #[test]
+    fn the_remote_load_is_gated_by_generation_and_value() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        let stats = RemoteStats {
+            cpu: Some(23),
+            mem: 61,
+            ..RemoteStats::default()
+        };
+        let shown = || lock(&session.shell).context.stats;
+        assert!(
+            !session.set_remote_stats(command, Some(&stats)),
+            "no remote target, no indicator"
+        );
+        assert_eq!(shown(), None);
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(
+            !session.set_remote_stats(command + 1, Some(&stats)),
+            "another generation's answer"
+        );
+        assert_eq!(shown(), None);
+        session.take_damage();
+        assert!(session.set_remote_stats(command, Some(&stats)));
+        assert_eq!(shown(), Some(stats));
+        assert!(session.take_damage(), "a change requests a frame");
+        assert!(!session.set_remote_stats(command, Some(&stats)));
+        assert!(!session.take_damage(), "the same value requests no frame");
+        assert!(session.set_remote_stats(command, None), "hide");
+        assert!(!session.set_remote_stats(command, None));
+        // Another host clears the previous one's value.
+        assert!(session.set_remote_stats(command, Some(&stats)));
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
+        assert_eq!(shown(), None);
     }
 
     #[test]
