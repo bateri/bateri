@@ -108,7 +108,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::dock::{self, DockPoint};
 use crate::session::{CellHalf, SelectKind};
-use crate::settings::{HostMark, HostRule};
+use crate::settings::{HostMark, HostRule, RemoteStatsMode};
 
 /// A single OSC 133 mark the shell writes into the stream.
 ///
@@ -491,7 +491,92 @@ pub struct DockContext {
     /// **separate** from the remote state, because it has to be visible when ssh has
     /// closed too ("connection closed"): it carries the host and the mark itself.
     pub transfer: Option<Transfer>,
+    /// The remote host's load indicator (046 Karar 5); `None` while there is no
+    /// sample, on an error and with `stats = "off"`.
+    ///
+    /// Its writer is `bt-shell`'s sampler ([`crate::Session::set_remote_stats`],
+    /// generation and equality gated). It belongs to the remote state and goes
+    /// with it: `C`/`D`/`A` and a new remote target clear it
+    /// ([`Self::clear_remote`], [`ShellLog::set_remote`]) — otherwise a new host
+    /// would show the previous one's numbers until its first sample.
+    pub stats: Option<RemoteStats>,
 }
+
+/// The form of the load indicator that is drawn (046 Karar 4) —
+/// [`RemoteStatsMode`] without `Off`: with `Off` there is no value at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatsForm {
+    /// `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%`.
+    #[default]
+    Sparkline,
+    /// `cpu 23%  mem 61%`.
+    Numbers,
+    /// `●`, or only the values past their threshold.
+    Alerts,
+}
+
+impl RemoteStatsMode {
+    /// The drawn form; `None` for `Off`.
+    pub fn form(self) -> Option<StatsForm> {
+        match self {
+            Self::Sparkline => Some(StatsForm::Sparkline),
+            Self::Numbers => Some(StatsForm::Numbers),
+            Self::Alerts => Some(StatsForm::Alerts),
+            Self::Off => None,
+        }
+    }
+}
+
+/// The number of CPU samples the sparkline shows (046 Karar 4).
+pub const STATS_HISTORY: usize = 8;
+
+/// One sample of the remote host's load, as the context row draws it (046
+/// Karar 5): `Copy` and fixed-size, so the frame path's context copy allocates
+/// nothing for it.
+///
+/// The percentages are **rounded** by the writer (`bt-shell-common`'s sampler):
+/// the shown value is the compared value, so a change below a percent asks for
+/// no frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RemoteStats {
+    pub form: StatsForm,
+    /// CPU %, `0..=100`; `None` on the first sample — CPU is the difference of
+    /// two counter readings.
+    pub cpu: Option<u8>,
+    /// Memory in use, %.
+    pub mem: u8,
+    /// The root file system's use, %.
+    pub disk: u8,
+    /// The sparkline's levels (`0..=7`, U+2581 + level), **oldest first**; only
+    /// the first [`Self::len`] are meaningful. Filled only in
+    /// [`StatsForm::Sparkline`]: an invisible history change must not ask for
+    /// a frame.
+    pub history: [u8; STATS_HISTORY],
+    /// How many of [`Self::history`] are filled.
+    pub len: u8,
+}
+
+impl RemoteStats {
+    /// The meaningful part of the history, oldest first.
+    pub fn history(&self) -> &[u8] {
+        &self.history[..usize::from(self.len).min(STATS_HISTORY)]
+    }
+}
+
+/// Equality is over what is **drawn**: the history's slots past [`RemoteStats::len`]
+/// do not take part — a derived comparison would let a stale byte there
+/// request a frame that changes nothing (the equality gate, 046 R3.5).
+impl PartialEq for RemoteStats {
+    fn eq(&self, other: &Self) -> bool {
+        self.form == other.form
+            && self.cpu == other.cpu
+            && self.mem == other.mem
+            && self.disk == other.disk
+            && self.history() == other.history()
+    }
+}
+
+impl Eq for RemoteStats {}
 
 /// The dock's status line for the upload queue (037 Karar 7 → Kullanıcı kararı
 /// 4): in place of the context line `⇄ {host}  {body}{controls}` and progress on
@@ -652,6 +737,7 @@ impl Clone for DockContext {
         self.remote_cwd.push_str(&source.remote_cwd);
         self.reconnect.clone_from(&source.reconnect);
         self.transfer.clone_from(&source.transfer);
+        self.stats = source.stats;
     }
 }
 
@@ -666,6 +752,8 @@ impl DockContext {
     fn clear_remote(&mut self) -> bool {
         self.remote_cwd.clear();
         self.remote_mark = HostMark::None;
+        // The load belongs to the host (046 Karar 5).
+        self.stats = None;
         self.remote.take().is_some()
     }
 }
@@ -1838,6 +1926,11 @@ impl ShellLog {
         let target = target
             .filter(|target| !target.host.is_empty() && !target.host.chars().any(char::is_control));
         let changed = self.context.remote_host() != target.map(|target| target.host.as_str());
+        // Another host's load is not this one's (046 Karar 5); the same host
+        // re-reported keeps its indicator.
+        if changed {
+            self.context.stats = None;
+        }
         match target {
             Some(target) => {
                 match &mut self.context.remote {
@@ -6272,6 +6365,76 @@ mod tests {
         assert_eq!(log.context.remote_host(), Some("deploy@10.0.0.5"));
         assert!(log.set_remote(None));
         assert_eq!(log.context.remote, None);
+    }
+
+    /// A load sample for the clearing tests: the value itself is not asked.
+    fn sample(mem: u8) -> RemoteStats {
+        RemoteStats {
+            cpu: Some(20),
+            mem,
+            ..RemoteStats::default()
+        }
+    }
+
+    #[test]
+    fn the_load_goes_with_the_remote_state() {
+        // 046 Karar 5: `C`/`D`/`A` and a new target clear the indicator — a new
+        // host must not show the previous one's numbers.
+        let remote = |log: &mut ShellLog| {
+            assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+            log.context.stats = Some(sample(40));
+        };
+        for mark in [
+            Mark::CommandEnd {
+                exit: Some(0),
+                id: Some(1),
+            },
+            Mark::PromptStart { id: Some(2) },
+        ] {
+            let mut log = running_log();
+            remote(&mut log);
+            log.apply(mark);
+            assert_eq!(log.context.stats, None, "{mark:?}");
+        }
+        // `C`'s transition into `Running`: in a shell that never showed our
+        // identity (with it, an identity-less `C` is the far end's and ignored).
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply(Mark::PromptStart { id: None });
+        log.apply(Mark::PromptEnd);
+        remote(&mut log);
+        log.apply(Mark::CommandStart);
+        assert_eq!(log.context.stats, None, "C");
+
+        // The same host re-reported keeps it; another host or none clears it.
+        let mut log = running_log();
+        remote(&mut log);
+        assert!(!log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        assert_eq!(log.context.stats, Some(sample(40)), "same host");
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("stage"))));
+        assert_eq!(log.context.stats, None, "another host");
+        log.context.stats = Some(sample(40));
+        assert!(log.set_remote(None));
+        assert_eq!(log.context.stats, None, "local");
+    }
+
+    #[test]
+    fn the_load_compares_only_what_is_drawn() {
+        // The history's slots past `len` do not take part (the equality gate).
+        let mut a = sample(40);
+        a.history = [1, 2, 0, 0, 0, 0, 0, 0];
+        a.len = 2;
+        let mut b = a;
+        b.history[5] = 7;
+        assert_eq!(a, b);
+        assert_eq!(a.history(), [1, 2]);
+        b.history[1] = 3;
+        assert_ne!(a, b);
+        assert_ne!(sample(40), sample(41));
+        assert_eq!(RemoteStatsMode::Off.form(), None);
+        assert_eq!(
+            RemoteStatsMode::Sparkline.form(),
+            Some(StatsForm::Sparkline)
+        );
     }
 
     fn rule(pattern: &str, mark: HostMark) -> HostRule {

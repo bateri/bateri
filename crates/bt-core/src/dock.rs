@@ -26,7 +26,8 @@ use crate::session::{Cell, CellHalf, SelectKind, SelectionRun, UnderlineStyle, W
 use crate::settings::HostMark;
 use crate::shell::{
     ButtonState, DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, Reconnect,
-    ShellPhase, ShellState, Transfer, TransferAction, TransferTone,
+    RemoteStats, STATS_HISTORY, ShellPhase, ShellState, StatsForm, Transfer, TransferAction,
+    TransferTone,
 };
 
 /// The dock's surface in a frame — everything **outside** the cells, resolved.
@@ -263,6 +264,23 @@ const REMOTE_GAP: &str = "  ";
 /// buttons' `⌘` is here too: this crate writes the label but its glyph is
 /// again in the small class.
 pub const UPLOAD_GLYPHS: [char; 8] = ['↑', '↓', '⌘', '✓', '—', '·', '…', '→'];
+
+/// The load indicator's non-ASCII characters drawn from the **font** (046
+/// R1.3): the critical mark and the alerts form's calm dot. The sparkline's
+/// `▁…█` are not here — they are procedural in the small class too (046 Karar
+/// 3). `bt-atlas` checks a hand copy of this list in Menlo's small class
+/// (`the_stats_glyphs_have_no_box_in_the_small_class`); the two are tied by
+/// `the_stats_glyphs_are_the_ones_the_atlas_checks`.
+pub const STATS_GLYPHS: [char; 2] = [STATS_CRITICAL, STATS_CALM];
+
+/// The mark in front of a number past its second threshold.
+const STATS_CRITICAL: char = '▲';
+
+/// The alerts form while nothing is past its threshold.
+const STATS_CALM: char = '●';
+
+/// The lowest sparkline block (U+2581); level `n` is this plus `n`.
+const SPARK_BASE: u32 = 0x2581;
 
 /// The most glyphs an edit can carry — a **design constant**.
 ///
@@ -1889,15 +1907,7 @@ fn render_context(
     }
     if let Some(host) = context.remote_host() {
         let color = theme.mark_linear(context.remote_mark);
-        render_remote_context(
-            host,
-            &context.remote_cwd,
-            color,
-            theme,
-            available,
-            row,
-            sink,
-        );
+        render_remote_context(context, host, color, theme, available, row, sink);
         return [None; 2];
     }
     let branch_chars = context.branch.chars().count();
@@ -1949,36 +1959,34 @@ fn render_context(
 /// color (`color`; the theme's `info` when unmarked, 037 Karar 3), two
 /// spaces, then the remote path in the two tiers of the local path; no branch
 /// and no `|` — the branch belongs to the local repo, the remote side's is
-/// unknown.
+/// unknown. The remote host's load indicator, if any, is right-aligned (046
+/// Karar 4).
 ///
 /// **The budget goes to `⇄ host` first.** The host is **not shortened**, for
 /// the same reason as the branch rule: a shortened host name (`prod-we…`) can
 /// be read as another machine. If it does not fit only `⇄` remains — saying
-/// we are remote is still correct information. The path gets the rest and is
-/// shortened from the left; if the remote shell prints no OSC 7 there is no
-/// path at all.
+/// we are remote is still correct information. The path and the indicator
+/// share the rest by [`stats_layout`]'s ladder; the path is shortened from
+/// the left; if the remote shell prints no OSC 7 there is no path at all.
 fn render_remote_context(
+    context: &DockContext,
     host: &str,
-    remote_cwd: &str,
     info: LinearRgba,
     theme: &Theme,
     available: usize,
     row: u16,
     sink: &mut impl FnMut(Cell),
 ) {
+    let (remote_cwd, stats) = (&context.remote_cwd, context.stats.as_ref());
     let mark = std::iter::once((REMOTE_MARK, info));
-    // `⇄` + space + host.
-    let head_chars = 2 + host.chars().count();
-    if head_chars > available {
+    let layout = stats_layout(host, remote_cwd, stats, available);
+    if !layout.head {
         emit_context(mark, available, row, sink);
         return;
     }
-    let path_budget = available
-        .saturating_sub(head_chars)
-        .saturating_sub(REMOTE_GAP.chars().count());
     let (_, path) = path_cells(
         remote_cwd,
-        path_budget,
+        layout.path_budget,
         theme.dim_linear(),
         theme.quiet_linear(),
     );
@@ -1988,6 +1996,408 @@ fn render_remote_context(
         .chain(REMOTE_GAP.chars().map(|ch| (ch, info)))
         .chain(path);
     emit_context(line, available, row, sink);
+    if let (Some(stats), Some(span)) = (stats, layout.gauge) {
+        let gauge = gauge(stats, span.step);
+        let cells = gauge.cells().iter().map(|&(ch, tone)| {
+            let color = match tone {
+                Tone::Quiet | Tone::Level(StatsLevel::Normal) => theme.dim_linear(),
+                Tone::Level(StatsLevel::Warning) => theme.warning_linear(),
+                Tone::Level(StatsLevel::Critical) => theme.error_linear(),
+                Tone::Calm => theme.success_linear(),
+            };
+            (ch, color)
+        });
+        emit_context_at(span.start, cells, available, row, sink);
+    }
+}
+
+/// One of the load indicator's three values (046 Karar 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatsMetric {
+    Cpu,
+    Mem,
+    /// The root file system.
+    Disk,
+}
+
+/// A value's two thresholds, in percent: at `warning` the number takes the
+/// theme's `warning`, at `critical` its `error` and a `▲` (046 Karar 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatsThreshold {
+    pub warning: u8,
+    pub critical: u8,
+}
+
+/// The thresholds of [`StatsMetric::Cpu`], `Mem` and `Disk`, in that order — a
+/// **design constant**, not a measurement (046 Karar 4: the approved design's
+/// numbers). The context row's colors and the popover's bars read this single
+/// table. Disk's warning is also the line below which disk is not shown at
+/// all: a full disk is news, a half-full one is not.
+pub const STATS_THRESHOLDS: [StatsThreshold; 3] = [
+    StatsThreshold {
+        warning: 70,
+        critical: 90,
+    },
+    StatsThreshold {
+        warning: 80,
+        critical: 92,
+    },
+    StatsThreshold {
+        warning: 85,
+        critical: 95,
+    },
+];
+
+/// How severe a value is ([`StatsMetric::level`]); ordered, the worst is the
+/// largest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StatsLevel {
+    #[default]
+    Normal,
+    Warning,
+    Critical,
+}
+
+impl StatsMetric {
+    /// The label drawn before the number — a UI string.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Mem => "mem",
+            Self::Disk => "disk",
+        }
+    }
+
+    /// This value's thresholds, from [`STATS_THRESHOLDS`].
+    pub fn threshold(self) -> StatsThreshold {
+        STATS_THRESHOLDS[self as usize]
+    }
+
+    /// The severity of `percent`; a threshold is reached **at** its value.
+    pub fn level(self, percent: u8) -> StatsLevel {
+        let threshold = self.threshold();
+        if percent >= threshold.critical {
+            StatsLevel::Critical
+        } else if percent >= threshold.warning {
+            StatsLevel::Warning
+        } else {
+            StatsLevel::Normal
+        }
+    }
+}
+
+/// A rung of the indicator's ladder (046 Karar 4), widest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GaugeStep {
+    /// `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%`.
+    Spark,
+    /// `cpu 23%  mem 61%`.
+    Numbers,
+    /// `●`, or only the values past their threshold.
+    Alerts,
+    /// The worst single value: severity first, then the number.
+    Worst,
+}
+
+/// The ladder of each form; the last rung is always [`GaugeStep::Worst`].
+fn ladder(form: StatsForm) -> &'static [GaugeStep] {
+    match form {
+        StatsForm::Sparkline => &[GaugeStep::Spark, GaugeStep::Numbers, GaugeStep::Worst],
+        StatsForm::Numbers => &[GaugeStep::Numbers, GaugeStep::Worst],
+        StatsForm::Alerts => &[GaugeStep::Alerts, GaugeStep::Worst],
+    }
+}
+
+/// A gauge character's tone; the color is resolved at drawing (the theme is
+/// not the layout's input).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    /// Labels, the sparkline and the gaps: dim.
+    Quiet,
+    /// A number and its `▲`: dim below the threshold, then `warning`/`error`.
+    Level(StatsLevel),
+    /// The alerts form's `●`: `success`.
+    Calm,
+}
+
+/// The widest gauge: `cpu ▁▁▁▁▁▁▁▁ ▲100%  mem ▲100%  disk ▲100%` is 41
+/// characters; a fixed capacity keeps per-frame allocation at zero.
+const GAUGE_MAX: usize = 48;
+
+/// A rung's characters, in a fixed buffer. The context row counts characters
+/// (`render_context`'s doc), and every character here is one column.
+#[derive(Clone, Copy)]
+struct Gauge {
+    cells: [(char, Tone); GAUGE_MAX],
+    len: usize,
+}
+
+impl Gauge {
+    fn new() -> Self {
+        Self {
+            cells: [(' ', Tone::Quiet); GAUGE_MAX],
+            len: 0,
+        }
+    }
+
+    fn cells(&self) -> &[(char, Tone)] {
+        &self.cells[..self.len]
+    }
+
+    fn width(&self) -> usize {
+        self.len
+    }
+
+    /// The capacity is a guard, not a policy: [`GAUGE_MAX`] holds the widest rung.
+    fn push(&mut self, ch: char, tone: Tone) {
+        if let Some(slot) = self.cells.get_mut(self.len) {
+            *slot = (ch, tone);
+            self.len += 1;
+        }
+    }
+
+    fn text(&mut self, text: &str, tone: Tone) {
+        for ch in text.chars() {
+            self.push(ch, tone);
+        }
+    }
+
+    /// The gap between two values: two columns, the remote form's own gap;
+    /// nothing before the first.
+    fn gap(&mut self) {
+        if self.len > 0 {
+            self.text(REMOTE_GAP, Tone::Quiet);
+        }
+    }
+
+    /// `[label ][▲]{n}%`: the label dim, the number in its severity; `▲` glued
+    /// to the number when critical.
+    fn value(&mut self, metric: StatsMetric, percent: u8, label: bool) {
+        if label {
+            self.text(metric.label(), Tone::Quiet);
+            self.push(' ', Tone::Quiet);
+        }
+        let level = metric.level(percent);
+        if level == StatsLevel::Critical {
+            self.push(STATS_CRITICAL, Tone::Level(level));
+        }
+        for digit in decimal(u16::from(percent)) {
+            self.push(digit, Tone::Level(level));
+        }
+        self.push('%', Tone::Level(level));
+    }
+
+    /// The sparkline's eight columns, right-aligned: missing samples on the
+    /// left are blank — a group whose width changed with every sample would
+    /// move the path's budget too.
+    fn spark(&mut self, history: &[u8]) {
+        let shown = &history[history.len().saturating_sub(STATS_HISTORY)..];
+        for _ in shown.len()..STATS_HISTORY {
+            self.push(' ', Tone::Quiet);
+        }
+        for &level in shown {
+            let block = char::from_u32(SPARK_BASE + u32::from(level.min(7))).unwrap_or(' ');
+            self.push(block, Tone::Quiet);
+        }
+    }
+}
+
+/// The values shown at all: CPU once it has a value (the first sample has
+/// none), memory always, disk only past its warning (046 Karar 4).
+fn shown_values(stats: &RemoteStats) -> impl Iterator<Item = (StatsMetric, u8)> {
+    let disk = (StatsMetric::Disk.level(stats.disk) > StatsLevel::Normal).then_some(stats.disk);
+    stats
+        .cpu
+        .map(|cpu| (StatsMetric::Cpu, cpu))
+        .into_iter()
+        .chain(std::iter::once((StatsMetric::Mem, stats.mem)))
+        .chain(disk.map(|disk| (StatsMetric::Disk, disk)))
+}
+
+/// The worst shown value: severity first, then the number; on a tie the
+/// first in `cpu, mem, disk` order.
+fn worst(stats: &RemoteStats) -> (StatsMetric, u8) {
+    let rank = |(metric, value): (StatsMetric, u8)| (metric.level(value), value);
+    let mut shown = shown_values(stats);
+    // Memory is always shown, so the first value always exists.
+    let first = shown.next().unwrap_or((StatsMetric::Mem, stats.mem));
+    shown.fold(
+        first,
+        |best, next| if rank(next) > rank(best) { next } else { best },
+    )
+}
+
+/// A rung's characters. **CPU without a value is left out** rather than
+/// guessed: the first sample carries only counters and the second follows a
+/// second later (046 Karar 2).
+fn gauge(stats: &RemoteStats, step: GaugeStep) -> Gauge {
+    let mut gauge = Gauge::new();
+    match step {
+        GaugeStep::Spark => {
+            for (metric, value) in shown_values(stats) {
+                if metric == StatsMetric::Cpu {
+                    gauge.text(metric.label(), Tone::Quiet);
+                    gauge.push(' ', Tone::Quiet);
+                    gauge.spark(stats.history());
+                    gauge.push(' ', Tone::Quiet);
+                    gauge.value(metric, value, false);
+                } else {
+                    gauge.gap();
+                    gauge.value(metric, value, true);
+                }
+            }
+        }
+        GaugeStep::Numbers => {
+            for (metric, value) in shown_values(stats) {
+                gauge.gap();
+                gauge.value(metric, value, true);
+            }
+        }
+        GaugeStep::Alerts => {
+            for (metric, value) in shown_values(stats) {
+                if metric.level(value) > StatsLevel::Normal {
+                    gauge.gap();
+                    gauge.value(metric, value, true);
+                }
+            }
+            if gauge.width() == 0 {
+                gauge.push(STATS_CALM, Tone::Calm);
+            }
+        }
+        GaugeStep::Worst => {
+            let (metric, value) = worst(stats);
+            gauge.value(metric, value, true);
+        }
+    }
+    gauge
+}
+
+/// The minimum gap between the path and the indicator.
+const STATS_GAP: usize = 2;
+
+/// Where the indicator sits: the rung and its context-local column range
+/// `[start, end)` — right-aligned, so `end` is the row's budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GaugeSpan {
+    step: GaugeStep,
+    start: usize,
+    end: usize,
+}
+
+/// The remote form's layout ([`stats_layout`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RemoteLayout {
+    /// Whether `⇄ host` fit; if not, the row is only `⇄`.
+    head: bool,
+    /// The path's budget, for [`path_cells`].
+    path_budget: usize,
+    /// The indicator; `None` → not drawn.
+    gauge: Option<GaugeSpan>,
+}
+
+/// The remote form's layout: `⇄ {host}  {path}` on the left, the load
+/// indicator right-aligned (046 Karar 4).
+///
+/// **The ladder** — the indicator is less important than the path, because
+/// the row's real answer is "where am I": each rung of the form is tried with
+/// the **whole** path and at least [`STATS_GAP`] columns between them, widest
+/// first. If none fits and the worst value is past its threshold, that value
+/// stays as long as `⇄ host` + gap + it fits and the path is shortened from
+/// the left into the rest — at that moment "disk 96%" matters more than the
+/// path. Otherwise the indicator drops and the path takes today's budget. The
+/// host is never shortened.
+///
+/// Drawing ([`render_remote_context`]), the mouse ([`stats_at`]) and the
+/// popover's anchor ([`stats_span`]) read this; had they diverged a click
+/// would fall next to the indicator.
+fn stats_layout(
+    host: &str,
+    remote_cwd: &str,
+    stats: Option<&RemoteStats>,
+    available: usize,
+) -> RemoteLayout {
+    // `⇄` + space + host.
+    let head_chars = 2 + host.chars().count();
+    if head_chars > available {
+        return RemoteLayout {
+            head: false,
+            path_budget: 0,
+            gauge: None,
+        };
+    }
+    let left = head_chars + REMOTE_GAP.chars().count();
+    let path_budget = available.saturating_sub(left);
+    let Some(stats) = stats else {
+        return RemoteLayout {
+            head: true,
+            path_budget,
+            gauge: None,
+        };
+    };
+    let placed = |step: GaugeStep, width: usize| RemoteLayout {
+        head: true,
+        path_budget: available - left - STATS_GAP - width,
+        gauge: Some(GaugeSpan {
+            step,
+            start: available - width,
+            end: available,
+        }),
+    };
+    let path_chars = remote_cwd.chars().count();
+    for &step in ladder(stats.form) {
+        let width = gauge(stats, step).width();
+        if left + path_chars + STATS_GAP + width <= available {
+            return placed(step, width);
+        }
+    }
+    let (metric, value) = worst(stats);
+    let width = gauge(stats, GaugeStep::Worst).width();
+    if metric.level(value) > StatsLevel::Normal && left + STATS_GAP + width <= available {
+        return placed(GaugeStep::Worst, width);
+    }
+    RemoteLayout {
+        head: true,
+        path_budget,
+        gauge: None,
+    }
+}
+
+/// The drawn indicator's context-local range; `None` while the upload row
+/// stands in the context row's place (046 R3.3), locally, without a value or
+/// when it did not fit.
+fn stats_range(context: &DockContext, budget: u16) -> Option<GaugeSpan> {
+    if context.transfer.is_some() {
+        return None;
+    }
+    let host = context.remote_host()?;
+    let available = usize::from(budget.saturating_sub(CONTEXT_COL));
+    stats_layout(host, &context.remote_cwd, context.stats.as_ref(), available).gauge
+}
+
+/// Whether the dock-local column `col` of the context row falls on the load
+/// indicator; `budget` is the context row's budget ([`DockCols::context`]).
+/// The mouse's only input — the twin of [`transfer_button_at`], from the same
+/// layout as the drawing ([`stats_layout`]); the range is the whole indicator,
+/// the sparkline's blank columns included.
+pub fn stats_at(context: &DockContext, budget: u16, col: u16) -> bool {
+    let Some(col) = col.checked_sub(CONTEXT_COL) else {
+        return false;
+    };
+    stats_range(context, budget)
+        .is_some_and(|span| (span.start..span.end).contains(&usize::from(col)))
+}
+
+/// The indicator's **dock-local** column range `[start, end)` on the context
+/// row; `None` if it is not drawn. The popover's anchor (046 Karar 7) — the
+/// inverse of [`stats_at`], from the same layout.
+pub fn stats_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
+    // audit: `end ≤ available ≤ budget` and `budget` is `u16`.
+    stats_range(context, budget).map(|span| {
+        (
+            CONTEXT_COL + span.start as u16,
+            CONTEXT_COL + span.end as u16,
+        )
+    })
 }
 
 /// The upload row's layout ([`transfer_layout`]): how far the row shows what.
@@ -3731,7 +4141,307 @@ mod tests {
             remote_cwd: remote_cwd.into(),
             reconnect: None,
             transfer: None,
+            stats: None,
         }
+    }
+
+    /// A load sample: `history` oldest first.
+    fn load(form: StatsForm, cpu: Option<u8>, mem: u8, disk: u8, history: &[u8]) -> RemoteStats {
+        let mut stats = RemoteStats {
+            form,
+            cpu,
+            mem,
+            disk,
+            ..RemoteStats::default()
+        };
+        stats.history[..history.len()].copy_from_slice(history);
+        stats.len = history.len() as u8;
+        stats
+    }
+
+    /// The design's calm sample: `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%`, disk at 54.
+    fn calm(form: StatsForm) -> RemoteStats {
+        load(form, Some(23), 61, 54, &[1, 2, 4, 6, 4, 2, 1, 0])
+    }
+
+    /// `⇄ prod  /srv/app` with the indicator.
+    fn loaded(stats: RemoteStats) -> DockContext {
+        DockContext {
+            stats: Some(stats),
+            ..remote("prod", "/srv/app")
+        }
+    }
+
+    /// The context row as drawn at `cols`.
+    fn load_row(context: &DockContext, cols: u16) -> (String, Vec<Cell>) {
+        let (cells, _) = draw_with(&live("", "", "", 0), context, cols);
+        let row = row_text(&cells, 1);
+        (row, cells)
+    }
+
+    #[test]
+    fn the_load_forms_draw_their_text_right_aligned_and_dim() {
+        // 046 Karar 4: three forms, right-aligned; label, sparkline and the
+        // numbers below their threshold dim — the brief, not the draft's
+        // foreground.
+        let dim = Some(THEME.dim_linear());
+        let (row, cells) = load_row(&loaded(calm(StatsForm::Sparkline)), 80);
+        assert_eq!(
+            row,
+            format!("{:<55}cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%", "⇄ prod  /srv/app")
+        );
+        for col in [55, 59, 66, 68, 73, 77, 79] {
+            assert_eq!(color_at(&cells, 1, col), dim, "col {col}");
+        }
+        let (row, _) = load_row(&loaded(calm(StatsForm::Numbers)), 80);
+        assert_eq!(row, format!("{:<64}cpu 23%  mem 61%", "⇄ prod  /srv/app"));
+        // Alerts with nothing past a threshold: only the calm dot, `success`.
+        let (row, cells) = load_row(&loaded(calm(StatsForm::Alerts)), 80);
+        assert_eq!(row, format!("{:<79}●", "⇄ prod  /srv/app"));
+        assert_eq!(color_at(&cells, 1, 79), Some(THEME.success_linear()));
+        // The host keeps the mark's color.
+        assert_eq!(color_at(&cells, 1, 2), Some(THEME.info_linear()));
+    }
+
+    #[test]
+    fn a_value_past_its_threshold_takes_its_color() {
+        let (warning, error, dim) = (
+            Some(THEME.warning_linear()),
+            Some(THEME.error_linear()),
+            Some(THEME.dim_linear()),
+        );
+        // Disk joins only from 85% on: 84 no, 85 yes, in `warning`.
+        let (row, _) = load_row(&loaded(load(StatsForm::Numbers, Some(23), 61, 84, &[])), 60);
+        assert!(row.ends_with("cpu 23%  mem 61%"), "{row}");
+        let (row, cells) = load_row(&loaded(load(StatsForm::Numbers, Some(23), 61, 85, &[])), 60);
+        assert!(row.ends_with("cpu 23%  mem 61%  disk 85%"), "{row}");
+        assert_eq!(color_at(&cells, 1, 57), warning, "disk's number");
+        assert_eq!(color_at(&cells, 1, 52), dim, "disk's label");
+        // Critical: `▲` glued to the number, both `error`; the label stays dim.
+        let (row, cells) = load_row(&loaded(load(StatsForm::Numbers, Some(95), 85, 0, &[])), 60);
+        assert!(row.ends_with("cpu ▲95%  mem 85%"), "{row}");
+        let cpu = row.chars().count() - "cpu ▲95%  mem 85%".chars().count();
+        let cpu = cpu as u16;
+        assert_eq!(color_at(&cells, 1, cpu), dim, "label");
+        assert_eq!(color_at(&cells, 1, cpu + 4), error, "▲");
+        assert_eq!(color_at(&cells, 1, cpu + 5), error, "number");
+        assert_eq!(
+            color_at(&cells, 1, cpu + 14),
+            warning,
+            "mem 85% is a warning"
+        );
+        // Thresholds are reached **at** their value.
+        assert_eq!(StatsMetric::Cpu.level(69), StatsLevel::Normal);
+        assert_eq!(StatsMetric::Cpu.level(70), StatsLevel::Warning);
+        assert_eq!(StatsMetric::Cpu.level(90), StatsLevel::Critical);
+        assert_eq!(StatsMetric::Mem.level(92), StatsLevel::Critical);
+        assert_eq!(StatsMetric::Disk.level(95), StatsLevel::Critical);
+        // Alerts: only the values past their threshold.
+        let (row, _) = load_row(&loaded(load(StatsForm::Alerts, Some(75), 93, 40, &[])), 60);
+        assert!(row.ends_with("cpu 75%  mem ▲93%"), "{row}");
+    }
+
+    #[test]
+    fn the_sparkline_keeps_eight_columns_with_few_samples() {
+        // Fewer than eight samples: blank on the left, the same width — the
+        // path's budget must not move with every sample.
+        let few = loaded(load(StatsForm::Sparkline, Some(23), 61, 0, &[3, 5]));
+        let (row, _) = load_row(&few, 80);
+        assert_eq!(
+            row,
+            format!("{:<55}cpu       ▄▆ 23%  mem 61%", "⇄ prod  /srv/app")
+        );
+        assert_eq!(
+            stats_span(&few, 80),
+            stats_span(&loaded(calm(StatsForm::Sparkline)), 80)
+        );
+        // No CPU yet (the first sample): no made-up number, memory alone.
+        let first = loaded(load(StatsForm::Sparkline, None, 61, 0, &[]));
+        let (row, _) = load_row(&first, 80);
+        assert_eq!(row, format!("{:<73}mem 61%", "⇄ prod  /srv/app"));
+    }
+
+    #[test]
+    fn a_narrowing_row_drops_the_indicator_rung_by_rung() {
+        // 046 Karar 4: full → numbers → worst → none, each with the whole path
+        // and two columns before the indicator.
+        let context = loaded(calm(StatsForm::Sparkline));
+        let left = "⇄ prod  /srv/app";
+        for (cols, gauge) in [
+            (43, "cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%"),
+            (42, "cpu 23%  mem 61%"),
+            (34, "cpu 23%  mem 61%"),
+            (33, "mem 61%"),
+            (25, "mem 61%"),
+        ] {
+            let (row, _) = load_row(&context, cols);
+            let start = usize::from(cols) - gauge.chars().count();
+            assert_eq!(row, format!("{left:<start$}{gauge}"), "{cols} columns");
+        }
+        for cols in [24, 20, 16] {
+            let (row, _) = load_row(&context, cols);
+            assert_eq!(
+                row, left,
+                "{cols} columns: the indicator drops, the path stays"
+            );
+            assert_eq!(stats_span(&context, cols), None);
+        }
+        // Below that the path is shortened as today.
+        let (row, _) = load_row(&context, 12);
+        assert_eq!(row, "⇄ prod  …app");
+        // A tie goes to the first value in `cpu, mem, disk` order.
+        let tie = loaded(load(StatsForm::Numbers, Some(50), 50, 0, &[]));
+        let (row, _) = load_row(&tie, 25);
+        assert!(row.ends_with("cpu 50%"), "{row}");
+    }
+
+    #[test]
+    fn an_alarm_comes_before_the_path() {
+        // The worst value past its threshold stays and the path shortens from
+        // the left with `…`; the host never does.
+        let context = loaded(load(StatsForm::Sparkline, Some(23), 95, 0, &[]));
+        let (row, cells) = load_row(&context, 20);
+        assert_eq!(row, "⇄ prod  …p  mem ▲95%");
+        assert_eq!(color_at(&cells, 1, 17), Some(THEME.error_linear()));
+        let (row, _) = load_row(&context, 19);
+        assert_eq!(
+            row, "⇄ prod  …  mem ▲95%",
+            "a one-column path budget is the mark alone"
+        );
+        // `⇄ prod` + gap + the alarm no longer fit: the alarm drops too.
+        let (row, _) = load_row(&context, 17);
+        assert_eq!(row, "⇄ prod  /srv/app");
+        // A calm worst value never pushes the path.
+        let calm = loaded(calm(StatsForm::Sparkline));
+        let (row, _) = load_row(&calm, 20);
+        assert_eq!(row, "⇄ prod  /srv/app");
+    }
+
+    #[test]
+    fn the_host_is_never_shortened_by_the_load() {
+        let context = loaded(load(StatsForm::Sparkline, Some(99), 99, 99, &[7; 8]));
+        for cols in 0..=70 {
+            let (row, _) = load_row(&context, cols);
+            assert!(
+                row.is_empty() || row == "⇄" || row.starts_with("⇄ prod"),
+                "{cols} columns: {row:?}"
+            );
+        }
+        let (row, _) = load_row(&context, 5);
+        assert_eq!(row, "⇄");
+        assert_eq!(stats_span(&context, 5), None);
+    }
+
+    #[test]
+    fn a_transfer_hides_the_load() {
+        // 046 R3.3: the upload row takes the context row's place; the
+        // indicator is neither drawn nor hit.
+        let context = DockContext {
+            stats: Some(calm(StatsForm::Sparkline)),
+            ..uploading("↑ a.tar", 1, Some(2_500))
+        };
+        let (row, _) = load_row(&context, 80);
+        assert!(!row.contains("cpu") && !row.contains("mem"), "{row}");
+        assert!((0..80).all(|col| !stats_at(&context, 80, col)));
+        assert_eq!(stats_span(&context, 80), None);
+        // Locally there is no indicator even with a value.
+        let local = DockContext {
+            remote: None,
+            ..loaded(calm(StatsForm::Sparkline))
+        };
+        assert_eq!(stats_span(&local, 80), None);
+    }
+
+    #[test]
+    fn the_load_span_is_the_drawn_cells() {
+        // 046 R3.4: drawing, the mouse and the popover's anchor read one layout.
+        for stats in [
+            calm(StatsForm::Sparkline),
+            calm(StatsForm::Numbers),
+            calm(StatsForm::Alerts),
+            load(StatsForm::Sparkline, Some(23), 95, 0, &[]),
+            load(StatsForm::Sparkline, Some(23), 61, 0, &[3]),
+        ] {
+            let context = loaded(stats);
+            for cols in 0..=80 {
+                let (row, _) = load_row(&context, cols);
+                let Some((start, end)) = stats_span(&context, cols) else {
+                    assert!(!row.contains('%') && !row.contains('●'), "{cols}: {row:?}");
+                    assert!((0..cols).all(|col| !stats_at(&context, cols, col)));
+                    continue;
+                };
+                assert_eq!(end, cols, "right-aligned");
+                let chars: Vec<char> = row.chars().collect();
+                let gauge: String = chars[usize::from(start)..].iter().collect();
+                let expected = gauge.trim_start();
+                assert!(
+                    expected.starts_with("cpu")
+                        || expected.starts_with("mem")
+                        || expected.starts_with('●'),
+                    "{cols}: {gauge:?}"
+                );
+                assert_eq!(
+                    chars.len(),
+                    usize::from(end),
+                    "{cols}: the last cell ends the span"
+                );
+                assert_eq!(chars[usize::from(start) - 1], ' ', "{cols}: a gap before");
+                for col in 0..cols {
+                    assert_eq!(
+                        stats_at(&context, cols, col),
+                        (start..end).contains(&col),
+                        "{cols} columns, col {col}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_stats_glyphs_are_the_ones_the_atlas_checks() {
+        // `bt-atlas` asks by hand about the indicator's font glyphs in the small
+        // class (`the_stats_glyphs_have_no_box_in_the_small_class`); every
+        // non-ASCII character any rung can draw is either there or a
+        // procedural sparkline block.
+        assert_eq!(STATS_GLYPHS, ['▲', '●']);
+        let samples = [
+            calm(StatsForm::Sparkline),
+            load(
+                StatsForm::Sparkline,
+                Some(100),
+                100,
+                100,
+                &[0, 1, 2, 3, 4, 5, 6, 7],
+            ),
+            load(StatsForm::Alerts, Some(1), 1, 1, &[]),
+            load(StatsForm::Alerts, Some(95), 95, 95, &[]),
+        ];
+        let mut seen = Vec::new();
+        for stats in samples {
+            for step in [
+                GaugeStep::Spark,
+                GaugeStep::Numbers,
+                GaugeStep::Alerts,
+                GaugeStep::Worst,
+            ] {
+                for &(ch, _) in gauge(&stats, step).cells() {
+                    if !ch.is_ascii() {
+                        assert!(
+                            STATS_GLYPHS.contains(&ch) || ('\u{2581}'..='\u{2588}').contains(&ch),
+                            "{ch:?}"
+                        );
+                        seen.push(ch);
+                    }
+                }
+            }
+        }
+        for glyph in STATS_GLYPHS {
+            assert!(seen.contains(&glyph), "{glyph} is never drawn");
+        }
+        // The widest rung fits the fixed buffer.
+        let widest = gauge(&samples[1], GaugeStep::Spark);
+        assert_eq!(widest.width(), 41);
+        assert!(widest.width() <= GAUGE_MAX);
     }
 
     fn uploading(body: &str, items: u16, progress: Option<u16>) -> DockContext {

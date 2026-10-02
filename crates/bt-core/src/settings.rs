@@ -934,6 +934,67 @@ impl Default for RemoteFiles {
     }
 }
 
+/// `[remote] stats`: how the remote host's load shows at the right of the ssh
+/// status bar (046 Karar 4, 8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteStatsMode {
+    /// `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%` — the last eight CPU samples and the numbers.
+    #[default]
+    Sparkline,
+    /// `cpu 23%  mem 61%`.
+    Numbers,
+    /// A small `●` while nothing is past its threshold, otherwise only the
+    /// values that are.
+    Alerts,
+    /// No indicator and no sampling.
+    Off,
+}
+
+impl RemoteStatsMode {
+    /// The single list of spellings in the settings file.
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("sparkline", Self::Sparkline),
+        ("numbers", Self::Numbers),
+        ("alerts", Self::Alerts),
+        ("off", Self::Off),
+    ];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
+/// `[remote] stats_interval`'s accepted range, in seconds — a **design
+/// constant**, not a measurement (046 Karar 8). The lower end keeps the
+/// sampling far below the display's rate (`CLAUDE.md` → "Boşta sıfır kare":
+/// at most one frame per sample) and one request per round trip on the shared
+/// helper session; above a minute the sparkline's eight samples would span
+/// most of ten minutes and stop reading as "now".
+pub const STATS_INTERVAL_RANGE: std::ops::RangeInclusive<u8> = 2..=60;
+
+/// `[remote] stats` and `stats_interval` (046 Karar 8): the load indicator of
+/// the ssh status bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoteStatsSettings {
+    /// `stats`: the indicator's form, or off.
+    pub mode: RemoteStatsMode,
+    /// `stats_interval`, seconds between two samples, within
+    /// [`STATS_INTERVAL_RANGE`].
+    pub interval: u8,
+}
+
+impl Default for RemoteStatsSettings {
+    /// Three seconds: `uptime`'s feel — a change shows within a breath, and
+    /// eight samples cover the last half minute. A design constant (046 Karar 8).
+    fn default() -> Self {
+        Self {
+            mode: RemoteStatsMode::default(),
+            interval: 3,
+        }
+    }
+}
+
 /// Retired keys: they stay in the file, are **not read**, and leave a
 /// diagnostic when seen.
 ///
@@ -1016,6 +1077,8 @@ pub struct Settings {
     pub remote_hosts: Vec<HostRule>,
     /// `[remote]`'s preview and download keys (045 R8, [`RemoteFiles`]).
     pub remote_files: RemoteFiles,
+    /// `[remote] stats` and `stats_interval` (046, [`RemoteStatsSettings`]).
+    pub remote_stats: RemoteStatsSettings,
 }
 
 impl Default for Settings {
@@ -1052,6 +1115,7 @@ impl Default for Settings {
             confirm_close: ConfirmClose::default(),
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
+            remote_stats: RemoteStatsSettings::default(),
         }
     }
 }
@@ -1146,6 +1210,9 @@ pub enum SettingsEdit {
     DownloadDir(String),
     DownloadConflict(DownloadConflict),
     DownloadNotify(bool),
+    RemoteStats(RemoteStatsMode),
+    /// Seconds.
+    StatsInterval(u8),
 }
 
 impl SettingsEdit {
@@ -1198,6 +1265,8 @@ impl SettingsEdit {
                 ("remote", "download_conflict", "remote.download_conflict")
             }
             Self::DownloadNotify(_) => ("remote", "download_notify", "remote.download_notify"),
+            Self::RemoteStats(_) => ("remote", "stats", "remote.stats"),
+            Self::StatsInterval(_) => ("remote", "stats_interval", "remote.stats_interval"),
         }
     }
 
@@ -1224,6 +1293,8 @@ impl SettingsEdit {
             Self::RemoteHostMark { mark, .. } => mark.written().into(),
             Self::PreviewKeep(keep) => keep.name().into(),
             Self::DownloadConflict(conflict) => conflict.name().into(),
+            Self::RemoteStats(mode) => mode.name().into(),
+            Self::StatsInterval(seconds) => i64::from(*seconds).into(),
             Self::PreviewMaxSize(bytes) | Self::PreviewLimit(bytes) => format_size(*bytes).into(),
             Self::PreviewReadOnly(on) | Self::DownloadNotify(on) => (*on).into(),
             Self::CursorRadius(value)
@@ -1408,6 +1479,13 @@ download_dir = "~/Downloads"
 download_conflict = "ask"
 # true | false. Notify when a transfer ends while bateri is in the background.
 download_notify = true
+# "sparkline" | "numbers" | "alerts" | "off". The remote machine's load at
+# the right of the ssh status bar (Linux servers): sparkline shows the last
+# CPU samples and the numbers, numbers only the numbers, alerts a small dot
+# until a value passes its threshold, off nothing. Disk joins past 85%.
+stats = "sparkline"
+# Seconds between two samples, 2 to 60.
+stats_interval = 3
 "##;
 
     /// The startup settings when the file **exists but is unusable** (can't be
@@ -1743,6 +1821,12 @@ download_notify = true
                     &fallback.remote_files,
                     &mut parsed.diagnostics,
                 );
+                parsed.settings.remote_stats = remote_stats(
+                    text,
+                    remote,
+                    &fallback.remote_stats,
+                    &mut parsed.diagnostics,
+                );
             }
             None if root.contains_key("remote") => {
                 parsed
@@ -1753,6 +1837,7 @@ download_notify = true
                     .settings
                     .remote_files
                     .clone_from(&fallback.remote_files);
+                parsed.settings.remote_stats = fallback.remote_stats;
             }
             None => {}
         }
@@ -1807,6 +1892,7 @@ download_notify = true
                 || self.erase != new.erase,
             caret: self.caret != new.caret || self.blink_interval != new.blink_interval,
             remote: self.remote_hosts != new.remote_hosts || self.remote_files != new.remote_files,
+            stats: self.remote_stats != new.remote_stats,
         }
     }
 
@@ -2177,6 +2263,10 @@ pub struct Changes {
     /// keys are read where they are used (045). One field for the section: a
     /// remote file key's change re-sends the same marks, which is a no-op.
     pub remote: bool,
+    /// [`Settings::remote_stats`] changed: the load indicator's form and the
+    /// sampling interval go to every pane (046 Karar 8). **Not** folded into
+    /// [`Self::remote`]: that field re-sends the pattern list to every session.
+    pub stats: bool,
 }
 
 /// Parses the text into a TOML document; a one-line diagnostic if it can't be
@@ -2591,6 +2681,76 @@ fn remote_files(
     files
 }
 
+/// `[remote]`'s load indicator keys (046 Karar 8): every key present is read,
+/// a value that isn't accepted takes `fallback`'s and leaves a diagnostic.
+fn remote_stats(
+    text: &str,
+    remote: &dyn TableLike,
+    fallback: &RemoteStatsSettings,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> RemoteStatsSettings {
+    let mut stats = RemoteStatsSettings::default();
+    if let Some(item) = remote.get("stats") {
+        stats.mode = named_enum(
+            text,
+            item,
+            "remote.stats",
+            RemoteStatsMode::NAMES,
+            fallback.mode,
+            diagnostics,
+        );
+    }
+    if let Some(item) = remote.get("stats_interval") {
+        stats.interval = ranged_integer(
+            text,
+            item,
+            "remote.stats_interval",
+            STATS_INTERVAL_RANGE,
+            fallback.interval,
+            diagnostics,
+        );
+    }
+    stats
+}
+
+/// The integer twin of [`ranged_float`]: not an integer or out of range → the
+/// key keeps `fallback` and a diagnostic is left. **No clamping** for the same
+/// reason; a decimal (`2.5`) is rejected rather than rounded — the key counts
+/// whole seconds and a rounded value would not be the one written.
+fn ranged_integer(
+    text: &str,
+    item: &Item,
+    key: &'static str,
+    range: std::ops::RangeInclusive<u8>,
+    fallback: u8,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> u8 {
+    let line = item.span().and_then(|span| line_of(text, span.start));
+    let reject = |message: String| Diagnostic {
+        key: Some(key),
+        line,
+        message,
+    };
+    let Some(value) = item.as_integer() else {
+        diagnostics.push(reject(format!(
+            "`{key}` must be an integer, found {}; using {fallback}",
+            kind(item)
+        )));
+        return fallback;
+    };
+    match u8::try_from(value) {
+        Ok(value) if range.contains(&value) => value,
+        _ => {
+            diagnostics.push(reject(format!(
+                "`{key}` must be an integer between {} and {}, found {value}; using {fallback}",
+                range.start(),
+                range.end()
+            )));
+            fallback
+        }
+    }
+}
+
 /// A size key: a string like `"100MB"` ([`parse_size`]). An integer is not
 /// accepted either — a bare number would leave the unit to guesswork.
 fn size(
@@ -2872,6 +3032,8 @@ mod tests {
             ("remote", "download_dir"),
             ("remote", "download_conflict"),
             ("remote", "download_notify"),
+            ("remote", "stats"),
+            ("remote", "stats_interval"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -3020,6 +3182,7 @@ mod tests {
                 motion: false,
                 caret: false,
                 remote: false,
+                stats: false,
             }
         );
         assert_eq!(
@@ -3064,6 +3227,7 @@ mod tests {
             confirm_close: ConfirmClose::Always,
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
+            remote_stats: RemoteStatsSettings::default(),
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -3219,6 +3383,7 @@ mod tests {
             motion: false,
             caret: false,
             remote: false,
+            stats: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
         assert_eq!(
@@ -3310,6 +3475,7 @@ mod tests {
                 motion: false,
                 caret: false,
                 remote: false,
+                stats: false,
             }
         );
         assert_eq!(
@@ -3457,6 +3623,7 @@ found {found}; using \"spring\""
                 motion: true,
                 caret: false,
                 remote: false,
+                stats: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -3544,6 +3711,7 @@ found {found}; using \"system\""
                 motion: true,
                 caret: false,
                 remote: false,
+                stats: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -4038,6 +4206,7 @@ found 1.5; using 0.1"
                     motion: true,
                     caret: false,
                     remote: false,
+                    stats: false,
                 },
                 "{text}"
             );
@@ -4101,6 +4270,7 @@ found 1.5; using 0.1"
                 motion: true,
                 caret: false,
                 remote: false,
+                stats: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -4632,6 +4802,8 @@ cursor = \"spring\"
                 settings.remote_files.download_conflict = conflict;
             }
             SettingsEdit::DownloadNotify(on) => settings.remote_files.download_notify = on,
+            SettingsEdit::RemoteStats(mode) => settings.remote_stats.mode = mode,
+            SettingsEdit::StatsInterval(seconds) => settings.remote_stats.interval = seconds,
         }
         settings
     }
@@ -4676,6 +4848,8 @@ cursor = \"spring\"
             SettingsEdit::DownloadDir("~/Desktop".to_owned()),
             SettingsEdit::DownloadConflict(DownloadConflict::KeepBoth),
             SettingsEdit::DownloadNotify(false),
+            SettingsEdit::RemoteStats(RemoteStatsMode::Alerts),
+            SettingsEdit::StatsInterval(10),
         ]
     }
 
@@ -5020,6 +5194,13 @@ cursor = \"spring\"
             "download_conflict",
             |s| s.remote_files.download_conflict,
         );
+        check(
+            RemoteStatsMode::NAMES,
+            RemoteStatsMode::name,
+            "remote",
+            "stats",
+            |s| s.remote_stats.mode,
+        );
     }
 
     #[test]
@@ -5165,6 +5346,105 @@ cursor = \"spring\"
         new.remote_files.download_notify = false;
         assert!(old.changes(&new).remote);
         assert!(!old.changes(&old).remote);
+    }
+
+    #[test]
+    fn the_remote_stats_keys_are_read() {
+        let settings = clean("[remote]\nstats = \"numbers\"\nstats_interval = 60\n");
+        assert_eq!(
+            settings.remote_stats,
+            RemoteStatsSettings {
+                mode: RemoteStatsMode::Numbers,
+                interval: 60,
+            }
+        );
+        assert_eq!(
+            clean("[remote]\nstats_interval = 2\n")
+                .remote_stats
+                .interval,
+            2
+        );
+        // Left out: the defaults.
+        assert_eq!(
+            clean("[remote]\n").remote_stats,
+            RemoteStatsSettings {
+                mode: RemoteStatsMode::Sparkline,
+                interval: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn a_rejected_remote_stats_value_keeps_the_previous_one() {
+        let previous = Settings {
+            remote_stats: RemoteStatsSettings {
+                mode: RemoteStatsMode::Off,
+                interval: 7,
+            },
+            ..Settings::default()
+        };
+        for (text, key, message) in [
+            (
+                "[remote]\nstats = \"graph\"\n",
+                "remote.stats",
+                "`remote.stats` must be \"sparkline\", \"numbers\", \"alerts\" or \"off\", \
+                 found \"graph\"; using \"off\"",
+            ),
+            (
+                "[remote]\nstats_interval = 1\n",
+                "remote.stats_interval",
+                "`remote.stats_interval` must be an integer between 2 and 60, found 1; using 7",
+            ),
+            (
+                "[remote]\nstats_interval = 61\n",
+                "remote.stats_interval",
+                "`remote.stats_interval` must be an integer between 2 and 60, found 61; using 7",
+            ),
+            (
+                "[remote]\nstats_interval = 300\n",
+                "remote.stats_interval",
+                "`remote.stats_interval` must be an integer between 2 and 60, found 300; using 7",
+            ),
+            (
+                "[remote]\nstats_interval = 2.5\n",
+                "remote.stats_interval",
+                "`remote.stats_interval` must be an integer, found a float; using 7",
+            ),
+        ] {
+            let parsed = Settings::parse_keeping(text, &previous).expect("parseable");
+            let [diagnostic] = <[Diagnostic; 1]>::try_from(parsed.diagnostics)
+                .unwrap_or_else(|got| panic!("a single diagnostic expected: {got:?}"));
+            assert_eq!(diagnostic.key, Some(key), "{text}");
+            assert_eq!(diagnostic.line, Some(2), "{text}");
+            assert_eq!(diagnostic.message, message, "{text}");
+            // The rejected key keeps the previous value, the other its default.
+            let stats = parsed.settings.remote_stats;
+            if key == "remote.stats" {
+                assert_eq!(stats.mode, RemoteStatsMode::Off, "{text}");
+                assert_eq!(stats.interval, 3, "{text}");
+            } else {
+                assert_eq!(stats.interval, 7, "{text}");
+                assert_eq!(stats.mode, RemoteStatsMode::Sparkline, "{text}");
+            }
+        }
+        // A `[remote]` of the wrong type keeps both.
+        let parsed = Settings::parse_keeping("remote = 5\n", &previous).expect("parseable");
+        assert_eq!(parsed.settings.remote_stats, previous.remote_stats);
+    }
+
+    #[test]
+    fn a_remote_stats_change_is_its_own_change() {
+        // Not `remote`: that field re-sends the host marks to every session.
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.remote_stats.interval = 10;
+        let changes = old.changes(&new);
+        assert!(changes.stats);
+        assert!(!changes.remote);
+        new.remote_stats = RemoteStatsSettings::default();
+        new.remote_stats.mode = RemoteStatsMode::Off;
+        assert!(old.changes(&new).stats);
+        assert!(!old.changes(&old).stats);
     }
 
     #[test]
