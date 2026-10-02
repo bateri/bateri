@@ -122,6 +122,6 @@ iş (damla, ⌘-tık, indirme, sürükle, hover, gösterge)
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | phase-3 | |
 | kapı | |

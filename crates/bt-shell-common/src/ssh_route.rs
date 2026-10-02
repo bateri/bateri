@@ -21,12 +21,16 @@
 //!   helper (the same `bateri` binary) and the application. The wire's single
 //!   owner is this module.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 use bt_core::RemoteTarget;
@@ -345,6 +349,12 @@ pub fn prepare_dir(dir: &Path) -> io::Result<()> {
 /// on it); this is the stop condition.
 pub const CONTROL_PERSIST: Duration = Duration::from_secs(600);
 
+/// How long our master may take to reach the server (`ConnectTimeout`) — a
+/// **design constant**, the helper's `OPEN_TIMEOUT`: an unreachable host must
+/// not hold the job (and the pane's helper worker behind it) for the TCP
+/// timeout. It bounds the connection, not the time at the sheet.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Who asked for the master: a job the user started (a sheet may ask for the
 /// password) or a background job (one silent attempt from the Keychain, 047
 /// phase-3).
@@ -368,6 +378,8 @@ pub fn master_argv(target: &RemoteTarget, socket: &Path, asker: Asker) -> Vec<St
     ours.push(format!("ControlPath={}", socket.display()));
     ours.push("-o".to_owned());
     ours.push(format!("ControlPersist={}", CONTROL_PERSIST.as_secs()));
+    ours.push("-o".to_owned());
+    ours.push(format!("ConnectTimeout={}", CONNECT_TIMEOUT.as_secs()));
     ours.extend(words(&[
         "-o",
         "BatchMode=no",
@@ -536,11 +548,474 @@ fn ask(socket: &Path, prompt: &str) -> io::Result<Option<String>> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "answer"))
 }
 
+/// The `bateri` binary as ssh's askpass (047): `Some(exit code)` when the
+/// process was started as one ([`ASKPASS_VAR`] set), `None` otherwise. The
+/// prompt is ssh's first argument; the answer goes to standard output and
+/// nothing else does. No AppKit, no window server: `main` calls this first.
+pub fn askpass_main() -> Option<i32> {
+    let socket = std::env::var_os(ASKPASS_VAR)?;
+    let prompt = std::env::args_os()
+        .nth(1)
+        .map(|prompt| prompt.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(run_askpass(
+        Path::new(&socket),
+        &prompt,
+        &mut io::stdout().lock(),
+    ))
+}
+
+// ─── opening our master ──────────────────────────────────────────────────
+
+/// A question ssh asks while our master opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Question {
+    /// ssh's own prompt text.
+    pub prompt: String,
+    pub class: Prompt,
+    /// A password was already given in this attempt and ssh asks again: it was
+    /// wrong (`NumberOfPasswordPrompts` gives the signal for free).
+    pub again: bool,
+}
+
+/// Who answers a [`Question`]: the platform shell's sheet, on the job's
+/// thread (it blocks until the sheet closes). `None`: nobody answered —
+/// cancelled, the pane closed, the application quit.
+pub type Answerer = Box<dyn FnMut(&Question) -> Option<String> + Send>;
+
+/// How the gate may open a master: a job the user started asks at a sheet; a
+/// background job (link check, load indicator) never opens one in 047 phase-2
+/// — it rides a live master or today's argv (phase-3 adds the Keychain).
+pub enum Ask {
+    Sheet(Answerer),
+    Never,
+}
+
+/// Why no route came back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Denied {
+    /// A question went unanswered: the job ends with [`CANCELLED`].
+    Cancelled,
+    /// ssh refused: the job's error text.
+    Failed(String),
+}
+
+/// The text of a cancelled job — the consumers recognise it and end without an
+/// error sheet (one sheet just closed; a second saying "cancelled" is noise).
+pub const CANCELLED: &str = "Cancelled";
+
+impl Denied {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Cancelled => CANCELLED.to_owned(),
+            Self::Failed(text) => text.clone(),
+        }
+    }
+}
+
+/// The text of a master that did not open, from ssh's standard error. An
+/// unknown host key is refused, never asked (`StrictHostKeyChecking=yes`, Karar 7).
+pub fn open_failure(host: &str, stderr: &str) -> String {
+    let last = crate::upload::last_line(stderr);
+    if stderr.contains("Host key verification failed") {
+        format!(
+            "The host key of {host} is not known yet — connect once in the terminal, then try \
+             again."
+        )
+    } else if last.is_empty() {
+        format!("ssh could not connect to {host}.")
+    } else if stderr.contains("Permission denied") {
+        format!("ssh could not log in to {host}.\n\n{last}")
+    } else {
+        format!("ssh could not connect to {host}.\n\n{last}")
+    }
+}
+
+/// One opening in progress: whoever asks for the same socket meanwhile waits
+/// for its outcome instead of opening (and asking) a second time.
+#[derive(Default)]
+struct Flight {
+    outcome: Mutex<Option<Result<(), Denied>>>,
+    done: Condvar,
+}
+
+impl Flight {
+    fn finish(&self, outcome: Result<(), Denied>) {
+        *lock(&self.outcome) = Some(outcome);
+        self.done.notify_all();
+    }
+
+    fn wait(&self) -> Result<(), Denied> {
+        let mut outcome = lock(&self.outcome);
+        loop {
+            if let Some(outcome) = outcome.as_ref() {
+                return outcome.clone();
+            }
+            outcome = self
+                .done
+                .wait(outcome)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// bateri's masters: the application owns one (`PaneLaunch` hands it to the
+/// panes — not a `static`), the gate runs through it on the jobs' threads.
+/// Single flight per socket: two jobs to the same host open **one** master
+/// and show one sheet.
+pub struct Masters {
+    /// The askpass program — the running `bateri` binary.
+    askpass: PathBuf,
+    bases: Vec<PathBuf>,
+    flights: Mutex<HashMap<PathBuf, Arc<Flight>>>,
+    /// How many jobs joined someone else's flight (the single-flight test
+    /// waits for it).
+    #[cfg(test)]
+    joined: std::sync::atomic::AtomicUsize,
+}
+
+impl Masters {
+    pub fn new(askpass: PathBuf, bases: Vec<PathBuf>) -> Self {
+        Self {
+            askpass,
+            bases,
+            flights: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            joined: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The gate before a remote job ([`plan`], then the opening): our master
+    /// alive → ours; the user's alive → today's argv; otherwise open ours — with
+    /// [`Ask::Sheet`] only; [`Ask::Never`] gets today's argv. Blocks (ssh
+    /// processes, a sheet): never on the main thread.
+    ///
+    /// A job that finds an opening in progress waits for it — a background job
+    /// too, or its today's-argv failure would be held ([`crate::remote_helper::RETRY_AFTER`])
+    /// past the master coming up. An opening **cancelled** at someone else's
+    /// sheet (another pane's) is not this job's answer: a user's job then asks
+    /// at its own sheet, a background job takes today's argv.
+    pub fn ensure(&self, target: &RemoteTarget, ask: Ask) -> Result<Route, Denied> {
+        loop {
+            let socket = match plan(&SystemSsh, target, &self.bases) {
+                Plan::Ready(route) => return Ok(route),
+                Plan::Open(socket) => socket,
+            };
+            let user = matches!(ask, Ask::Sheet(_));
+            let (flight, owner) = {
+                let mut flights = lock(&self.flights);
+                match flights.get(&socket) {
+                    Some(flight) => (Arc::clone(flight), false),
+                    None if user => {
+                        let flight = Arc::new(Flight::default());
+                        flights.insert(socket.clone(), Arc::clone(&flight));
+                        (flight, true)
+                    }
+                    None => return Ok(Route::Direct),
+                }
+            };
+            if !owner {
+                #[cfg(test)]
+                self.joined
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match flight.wait() {
+                    Ok(()) => return Ok(Route::Ours(socket)),
+                    Err(Denied::Cancelled) if user => continue,
+                    Err(_) if !user => return Ok(Route::Direct),
+                    Err(denied) => return Err(denied),
+                }
+            }
+            let Ask::Sheet(asker) = ask else {
+                // Only a user's job becomes the owner.
+                return Ok(Route::Direct);
+            };
+            return self.open_flight(target, socket, &flight, asker);
+        }
+    }
+
+    /// The owner's half of [`Masters::ensure`]: open, tell the joiners.
+    fn open_flight(
+        &self,
+        target: &RemoteTarget,
+        socket: PathBuf,
+        flight: &Flight,
+        asker: Answerer,
+    ) -> Result<Route, Denied> {
+        // Between the plan and the registry another flight may have finished:
+        // its master is up and asking again would be a second sheet.
+        let outcome = if check(&SystemSsh, target, Some(&socket)) == Check::Live {
+            Ok(())
+        } else {
+            open_master(target, &socket, &self.askpass, asker)
+        };
+        lock(&self.flights).remove(&socket);
+        flight.finish(outcome.clone());
+        outcome.map(|()| Route::Ours(socket))
+    }
+
+    /// The startup sweep: our dead sockets left behind ([`sweep`]).
+    pub fn sweep(&self) {
+        sweep(&self.bases);
+    }
+}
+
+/// A job's stream argv through the gate: [`Masters::ensure`], then
+/// [`crate::upload::ssh_argv_for`]. No masters (the timed run): today's argv.
+pub fn dial(
+    masters: Option<&Masters>,
+    target: &RemoteTarget,
+    ask: Ask,
+) -> Result<Vec<String>, Denied> {
+    let route = match masters {
+        Some(masters) => masters.ensure(target, ask)?,
+        None => Route::Direct,
+    };
+    Ok(crate::upload::ssh_argv_for(target, &route))
+}
+
+/// The askpass socket's and its error file's prefix: `q-` + 16 random hex
+/// digits, next to the master sockets in the private directory.
+const ASKPASS_PREFIX: &str = "q-";
+
+/// 64 random bits as hex, from the system's generator.
+fn random_hex() -> io::Result<String> {
+    let mut bytes = [0u8; 8];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    }))
+}
+
+/// Opens our master at `socket`: a fresh askpass socket for this attempt only
+/// (`0700` directory, random name, removed when the attempt ends), the master
+/// with the askpass variables in **its** environment, and every prompt handed
+/// to `asker` until ssh's foreground half exits (`-f`).
+///
+/// An unanswered question **stops ssh first**, then the helper is told: ssh
+/// turns a failed askpass into an empty password and would try it on the
+/// server (`readpass.c`). ssh's standard error goes to a file, not a pipe — the
+/// backgrounded master inherits the descriptor and a pipe's end might never come.
+fn open_master(
+    target: &RemoteTarget,
+    socket: &Path,
+    askpass: &Path,
+    asker: Answerer,
+) -> Result<(), Denied> {
+    let failed = |error: io::Error| {
+        Denied::Failed(format!(
+            "ssh could not be started for {}: {error}",
+            target.host
+        ))
+    };
+    let dir = socket
+        .parent()
+        .ok_or_else(|| failed(io::Error::from(io::ErrorKind::NotFound)))?;
+    let stem = format!("{ASKPASS_PREFIX}{}", random_hex().map_err(failed)?);
+    let ask_socket = dir.join(&stem);
+    if !fits(&ask_socket) {
+        return Err(failed(io::Error::from(io::ErrorKind::InvalidInput)));
+    }
+    let listener = UnixListener::bind(&ask_socket).map_err(failed)?;
+    let err_path = dir.join(format!("{stem}.err"));
+    let outcome = std::fs::File::create(&err_path)
+        .map_err(failed)
+        .and_then(|err_file| {
+            run_master(
+                target,
+                socket,
+                askpass,
+                &ask_socket,
+                &listener,
+                err_file,
+                asker,
+            )
+        });
+    drop(listener);
+    let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&ask_socket);
+    let _ = std::fs::remove_file(&err_path);
+    match outcome? {
+        Opened::Up => Ok(()),
+        Opened::Cancelled => Err(Denied::Cancelled),
+        Opened::Refused => Err(Denied::Failed(open_failure(&target.host, &stderr))),
+    }
+}
+
+enum Opened {
+    Up,
+    Cancelled,
+    Refused,
+}
+
+/// [`open_master`]'s process half: spawn, serve the prompts, wait.
+fn run_master(
+    target: &RemoteTarget,
+    socket: &Path,
+    askpass: &Path,
+    ask_socket: &Path,
+    listener: &UnixListener,
+    err_file: std::fs::File,
+    mut asker: Answerer,
+) -> Result<Opened, Denied> {
+    let argv = master_argv(target, socket, Asker::User);
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| Denied::Failed(format!("No ssh command for {}", target.host)))?;
+    let mut child = Command::new(program)
+        .args(args)
+        .envs(askpass_env(askpass, ask_socket))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(err_file)
+        .spawn()
+        .map_err(|error| {
+            Denied::Failed(format!(
+                "ssh could not be started for {}: {error}",
+                target.host
+            ))
+        })?;
+    let pid = child.id();
+    let done = Arc::new(AtomicBool::new(false));
+    // The waiter wakes the blocking `accept` once ssh's foreground half is gone.
+    let waiter = {
+        let done = Arc::clone(&done);
+        let ask_socket = ask_socket.to_owned();
+        thread::Builder::new()
+            .name("ssh master".into())
+            .spawn(move || {
+                let status = child.wait();
+                done.store(true, Ordering::SeqCst);
+                drop(UnixStream::connect(&ask_socket));
+                status
+            })
+    };
+    let waiter = match waiter {
+        Ok(waiter) => waiter,
+        Err(error) => {
+            // SAFETY: `pid` is our unreaped child (nobody waits on it yet).
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            return Err(Denied::Failed(format!(
+                "ssh could not be started for {}: {error}",
+                target.host
+            )));
+        }
+    };
+    let stop = || {
+        if !done.load(Ordering::SeqCst) {
+            // SAFETY: `pid` is our child; until the waiter has reaped it (and set
+            // `done`) the pid cannot belong to another process.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+    };
+    let mut cancelled = false;
+    let mut answered_password = false;
+    loop {
+        let Ok((stream, _)) = listener.accept() else {
+            // No more prompts can be served: ssh would wait for an answer forever.
+            stop();
+            break;
+        };
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        let Ok(mut reader) = stream.try_clone().map(BufReader::new) else {
+            continue;
+        };
+        let Ok(prompt) = read_request(&mut reader) else {
+            continue;
+        };
+        let answer = if cancelled {
+            None
+        } else {
+            let class = classify(&prompt);
+            let question = Question {
+                prompt,
+                class,
+                again: class == Prompt::Password && answered_password,
+            };
+            let answer = asker(&question);
+            answered_password |= class == Prompt::Password && answer.is_some();
+            answer
+        };
+        if answer.is_none() && !cancelled {
+            cancelled = true;
+            stop();
+        }
+        let mut writer = stream;
+        let _ = write_answer(&mut writer, answer.as_deref());
+    }
+    let status = waiter.join().ok().and_then(Result::ok);
+    Ok(if cancelled {
+        Opened::Cancelled
+    } else if status.is_some_and(|status| status.success()) {
+        Opened::Up
+    } else {
+        Opened::Refused
+    })
+}
+
+/// Whether a socket directory entry has one of our names: a master's
+/// ([`KEY_DIGITS`] hex digits) or an attempt's askpass socket (`q-` + hex).
+fn our_socket_name(name: &str) -> bool {
+    let hex = name.strip_prefix(ASKPASS_PREFIX).unwrap_or(name);
+    hex.len() == KEY_DIGITS && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Removes what a crashed bateri left in the socket bases: a socket of ours
+/// **nobody listens on** (`ECONNREFUSED`) and an attempt's error file whose
+/// socket is gone. A live socket — another bateri instance, 048's session — and
+/// any name that is not ours stay; a base that is not a private directory of
+/// this user is not looked into.
+pub fn sweep(bases: &[PathBuf]) {
+    use std::os::unix::fs::FileTypeExt;
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    for base in bases {
+        let private = std::fs::symlink_metadata(base).is_ok_and(|meta| {
+            meta.file_type().is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0
+        });
+        let Ok(entries) = std::fs::read_dir(base)
+            .map_err(drop)
+            .and_then(|entries| if private { Ok(entries) } else { Err(()) })
+        else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let path = entry.path();
+            if let Some(stem) = name.strip_suffix(".err") {
+                if stem.starts_with(ASKPASS_PREFIX)
+                    && our_socket_name(stem)
+                    && !base.join(stem).exists()
+                {
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
+            }
+            let socket = entry.file_type().is_ok_and(|kind| kind.is_socket());
+            if socket
+                && our_socket_name(name)
+                && UnixStream::connect(&path)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionRefused)
+            {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::os::unix::net::UnixListener;
     use std::thread;
 
     use bt_core::RemoteKind;
@@ -673,6 +1148,8 @@ mod tests {
                 "ControlPath=/tmp/s/k",
                 "-o",
                 "ControlPersist=600",
+                "-o",
+                "ConnectTimeout=15",
                 "-o",
                 "BatchMode=no",
                 "-o",
@@ -962,6 +1439,479 @@ mod tests {
         // Nobody listens at all.
         assert_eq!(run_askpass(&socket, "Password:", &mut Vec::new()), 1);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ─── opening our master, end to end ─────────────────────────────────
+
+    /// A fake `ssh` that behaves like the real one where the gate looks: `-G`
+    /// prints a configuration, `-O check` answers by the marker at the
+    /// `ControlPath`, and `-M` asks through `$SSH_ASKPASS` (up to three times,
+    /// like `NumberOfPasswordPrompts`), then plays `-f` — the marker, exit 0.
+    /// The host `stranger` has no known host key. POSIX `sh`: Debian's is dash.
+    ///
+    /// It records what the tests assert: every `-M` (`opens`), an askpass that
+    /// failed and was followed by another try — ssh's empty password
+    /// (`empty`), and the askpass variables seen outside the master (`leak`).
+    fn fake_ssh(root: &Path, password: &str) -> PathBuf {
+        let script = format!(
+            r#"#!/bin/sh
+root='{root}'
+cp=''; mode=''; dest=''; prev=''
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    case "$arg" in ControlPath=*) [ -z "$cp" ] && cp="${{arg#ControlPath=}}";; esac
+    prev=''; continue
+  fi
+  case "$arg" in
+    -G) mode=G;; -M) mode=M;; -O) mode=O;; -o) prev=-o;; -*) ;; *) dest="$arg";;
+  esac
+done
+if [ "$mode" != M ] && [ -n "$SSH_ASKPASS$BATERI_ASKPASS" ]; then echo "$mode" >> "$root/leak"; fi
+case "$mode" in
+  G) printf 'user u\nhostname %s\nport 22\nproxyjump none\n' "$dest"; exit 0;;
+  O) if [ -e "$cp" ]; then echo 'Master running' >&2; exit 0; fi
+     echo "Control socket connect($cp): No such file or directory" >&2; exit 255;;
+  M) echo "$dest" >> "$root/opens"
+     if [ "$dest" = stranger ]; then
+       echo 'No ED25519 host key is known for stranger and you have requested strict checking.' >&2
+       echo 'Host key verification failed.' >&2; exit 255
+     fi
+     n=0
+     while [ $n -lt 3 ]; do
+       n=$((n + 1))
+       if ! answer=$("$SSH_ASKPASS" "u@$dest's password: "); then echo x >> "$root/empty"; answer=''; fi
+       if [ "$answer" = '{password}' ]; then : > "$cp"; exit 0; fi
+       echo 'Permission denied, please try again.' >&2
+     done
+     echo "u@$dest: Permission denied (publickey,password)." >&2; exit 255;;
+esac
+exit 255
+"#,
+            root = root.display()
+        );
+        executable(&root.join("ssh"), &script)
+    }
+
+    /// The askpass program: the **test binary itself** runs [`askpass_child`]
+    /// — the real [`run_askpass`] on the wire — writing its answer to a file
+    /// (the harness's own header owns standard output), then the wrapper
+    /// prints it with the child's exit code.
+    fn askpass_wrapper(root: &Path) -> PathBuf {
+        let binary = std::env::current_exe().expect("the test binary");
+        let script = format!(
+            r#"#!/bin/sh
+out='{root}/answer.'$$
+BT_ASKPASS_PROMPT="$1" BT_ASKPASS_OUT="$out" '{binary}' ssh_route::tests::askpass_child --exact --ignored -q >/dev/null 2>&1
+code=$?
+cat "$out" 2>/dev/null; rm -f "$out"
+exit $code
+"#,
+            root = root.display(),
+            binary = binary.display()
+        );
+        executable(&root.join("askpass"), &script)
+    }
+
+    fn executable(path: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, script).expect("script");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        path.to_owned()
+    }
+
+    /// The other half of [`askpass_wrapper`]: does nothing unless started by it.
+    #[test]
+    #[ignore = "the askpass helper of the master tests; they start it themselves"]
+    fn askpass_child() {
+        let (Some(socket), Ok(prompt), Some(out)) = (
+            std::env::var_os(ASKPASS_VAR),
+            std::env::var("BT_ASKPASS_PROMPT"),
+            std::env::var_os("BT_ASKPASS_OUT"),
+        ) else {
+            return;
+        };
+        let mut file = std::fs::File::create(out).expect("answer file");
+        let code = run_askpass(Path::new(&socket), &prompt, &mut file);
+        drop(file);
+        std::process::exit(code);
+    }
+
+    /// A fake ssh, an askpass wrapper and the registry over `root/s`.
+    fn rig(name: &str, password: &str) -> (PathBuf, Masters) {
+        let root = scratch(name);
+        fake_ssh(&root, password);
+        let masters = Masters::new(askpass_wrapper(&root), vec![root.join("s")]);
+        (root, masters)
+    }
+
+    fn host_target(root: &Path, host: &str) -> RemoteTarget {
+        let ssh = root.join("ssh").display().to_string();
+        RemoteTarget {
+            host: host.to_owned(),
+            kind: RemoteKind::Ssh,
+            argv: vec![ssh, host.to_owned()],
+            line: String::new(),
+        }
+    }
+
+    /// Answers from a list, recording the questions.
+    fn scripted(answers: &[Option<&str>]) -> (Answerer, Arc<Mutex<Vec<Question>>>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut answers: Vec<Option<String>> =
+            answers.iter().map(|a| a.map(str::to_owned)).collect();
+        answers.reverse();
+        let log = Arc::clone(&asked);
+        let asker: Answerer = Box::new(move |question: &Question| {
+            lock(&log).push(question.clone());
+            answers.pop().flatten()
+        });
+        (asker, asked)
+    }
+
+    fn lines(path: &Path) -> usize {
+        std::fs::read_to_string(path).map_or(0, |text| text.lines().count())
+    }
+
+    /// Only our master's marker is left in the socket directory: the attempt's
+    /// askpass socket and error file went with it.
+    fn leftovers(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root.join("s"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_master_opens_through_askpass_end_to_end() {
+        let (root, masters) = rig("open", "s3cr3t");
+        let target = host_target(&root, "prod");
+        let (asker, asked) = scripted(&[Some("wrong"), Some("s3cr3t")]);
+        let route = masters.ensure(&target, Ask::Sheet(asker)).expect("opened");
+        let Route::Ours(socket) = &route else {
+            panic!("expected our route, got {route:?}");
+        };
+        // The wrong password was told on the second prompt.
+        let asked = lock(&asked).clone();
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[0].prompt, "u@prod's password: ");
+        assert_eq!(asked[0].class, Prompt::Password);
+        assert!(!asked[0].again && asked[1].again);
+        assert_eq!(lines(&root.join("opens")), 1);
+        assert_eq!(
+            leftovers(&root),
+            vec![socket.file_name().unwrap().to_string_lossy().into_owned()]
+        );
+        // The next job rides it: no question, no second master.
+        let (asker, asked) = scripted(&[]);
+        assert_eq!(
+            masters.ensure(&target, Ask::Sheet(asker)),
+            Ok(route.clone())
+        );
+        assert!(lock(&asked).is_empty());
+        assert_eq!(lines(&root.join("opens")), 1);
+        // The stream argv names our socket; the askpass variables went to the
+        // master's environment only — not to the checks, not to this process.
+        let argv = dial(Some(&masters), &target, Ask::Never).unwrap();
+        assert!(argv.contains(&format!("ControlPath={}", socket.display())));
+        assert!(argv.contains(&"BatchMode=yes".to_owned()));
+        assert!(!root.join("leak").exists(), "askpass variables leaked");
+        assert!(std::env::var_os(ASKPASS_VAR).is_none());
+        assert!(std::env::var_os("SSH_ASKPASS").is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_question_stops_ssh_before_an_empty_password() {
+        let (root, masters) = rig("cancel", "s3cr3t");
+        let target = host_target(&root, "prod");
+        let (asker, asked) = scripted(&[None]);
+        assert_eq!(
+            masters.ensure(&target, Ask::Sheet(asker)),
+            Err(Denied::Cancelled)
+        );
+        assert_eq!(lock(&asked).len(), 1);
+        assert!(!root.join("empty").exists(), "ssh tried an empty password");
+        assert!(leftovers(&root).is_empty(), "{:?}", leftovers(&root));
+        assert_eq!(Denied::Cancelled.text(), CANCELLED);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn three_wrong_passwords_fail_with_sshs_reason() {
+        let (root, masters) = rig("wrong", "s3cr3t");
+        let target = host_target(&root, "prod");
+        let (asker, asked) = scripted(&[Some("a"), Some("b"), Some("c")]);
+        let Err(Denied::Failed(text)) = masters.ensure(&target, Ask::Sheet(asker)) else {
+            panic!("expected a failure");
+        };
+        assert!(text.contains("could not log in to prod"), "{text}");
+        assert!(
+            text.contains("Permission denied (publickey,password)"),
+            "{text}"
+        );
+        assert_eq!(lock(&asked).len(), 3);
+        assert!(leftovers(&root).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_host_key_is_refused_with_the_terminal_hint() {
+        let (root, masters) = rig("hostkey", "s3cr3t");
+        let target = host_target(&root, "stranger");
+        let (asker, asked) = scripted(&[]);
+        let Err(Denied::Failed(text)) = masters.ensure(&target, Ask::Sheet(asker)) else {
+            panic!("expected a failure");
+        };
+        assert!(text.contains("connect once in the terminal"), "{text}");
+        assert!(lock(&asked).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_background_job_never_opens_a_master() {
+        let (root, masters) = rig("never", "s3cr3t");
+        let target = host_target(&root, "prod");
+        assert_eq!(masters.ensure(&target, Ask::Never), Ok(Route::Direct));
+        assert_eq!(lines(&root.join("opens")), 0);
+        // No registry (the timed run): today's argv, no process at all.
+        assert_eq!(dial(None, &target, Ask::Never).unwrap(), ssh_argv(&target));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Two jobs to one host: the second joins the first's opening, one master
+    /// and one question for both.
+    fn one_opening_for_two_jobs(name: &str) {
+        let (root, masters) = rig(name, "s3cr3t");
+        let masters = Arc::new(masters);
+        let target = host_target(&root, "prod");
+        let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let go_rx = Mutex::new(go_rx);
+        let first_asker: Answerer = Box::new(move |_: &Question| {
+            let _ = asked_tx.send(());
+            let _ = lock(&go_rx).recv();
+            Some("s3cr3t".to_owned())
+        });
+        let first = {
+            let (masters, target) = (Arc::clone(&masters), target.clone());
+            thread::spawn(move || masters.ensure(&target, Ask::Sheet(first_asker)))
+        };
+        asked_rx.recv().expect("the first job asks");
+        let (second_asker, second_asked) = scripted(&[Some("s3cr3t")]);
+        let second = {
+            let (masters, target) = (Arc::clone(&masters), target.clone());
+            thread::spawn(move || masters.ensure(&target, Ask::Sheet(second_asker)))
+        };
+        crate::child::wait_until("the second job joins the flight", || {
+            masters.joined.load(Ordering::SeqCst) == 1
+        });
+        go_tx.send(()).unwrap();
+        let first = first.join().unwrap().expect("first");
+        let second = second.join().unwrap().expect("second");
+        assert_eq!(first, second);
+        assert!(matches!(first, Route::Ours(_)));
+        assert!(lock(&second_asked).is_empty(), "the second job asked");
+        assert_eq!(lines(&root.join("opens")), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Another pane's cancelled sheet is not this job's answer: it asks at its own.
+    #[test]
+    fn a_joiner_asks_itself_when_the_owner_is_cancelled() {
+        let (root, masters) = rig("rejoin", "s3cr3t");
+        let masters = Arc::new(masters);
+        let target = host_target(&root, "prod");
+        let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let go_rx = Mutex::new(go_rx);
+        let owner: Answerer = Box::new(move |_: &Question| {
+            let _ = asked_tx.send(());
+            let _ = lock(&go_rx).recv();
+            None
+        });
+        let first = {
+            let (masters, target) = (Arc::clone(&masters), target.clone());
+            thread::spawn(move || masters.ensure(&target, Ask::Sheet(owner)))
+        };
+        asked_rx.recv().expect("the first job asks");
+        let (joiner, joiner_asked) = scripted(&[Some("s3cr3t")]);
+        let second = {
+            let (masters, target) = (Arc::clone(&masters), target.clone());
+            thread::spawn(move || masters.ensure(&target, Ask::Sheet(joiner)))
+        };
+        crate::child::wait_until("the second job joins the flight", || {
+            masters.joined.load(Ordering::SeqCst) == 1
+        });
+        go_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Err(Denied::Cancelled));
+        assert!(matches!(second.join().unwrap(), Ok(Route::Ours(_))));
+        assert_eq!(lock(&joiner_asked).len(), 1);
+        assert_eq!(lines(&root.join("opens")), 2);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn two_jobs_to_one_host_open_one_master() {
+        one_opening_for_two_jobs("flight");
+    }
+
+    #[test]
+    #[ignore = "race stress: make test-race"]
+    fn race_two_jobs_to_one_host_open_one_master() {
+        for round in 0..20 {
+            one_opening_for_two_jobs(&format!("flight{round}"));
+        }
+    }
+
+    #[test]
+    fn the_sweep_removes_only_our_dead_sockets() {
+        let root = scratch("sweep");
+        let base = root.join("s");
+        prepare_dir(&base).unwrap();
+        let dead = base.join("0123456789abcdef");
+        drop(UnixListener::bind(&dead).unwrap());
+        let dead_ask = base.join("q-0123456789abcdef");
+        drop(UnixListener::bind(&dead_ask).unwrap());
+        let orphan_err = base.join("q-fedcba9876543210.err");
+        std::fs::write(&orphan_err, "").unwrap();
+        let live = base.join("aaaaaaaaaaaaaaaa");
+        let listener = UnixListener::bind(&live).unwrap();
+        let foreign = base.join("not-ours");
+        drop(UnixListener::bind(&foreign).unwrap());
+        let plain = base.join("bbbbbbbbbbbbbbbb");
+        std::fs::write(&plain, "").unwrap();
+        sweep(std::slice::from_ref(&base));
+        assert!(!dead.exists() && !dead_ask.exists() && !orphan_err.exists());
+        assert!(live.exists(), "a live master was removed");
+        assert!(
+            foreign.exists() && plain.exists(),
+            "a name not ours was removed"
+        );
+        drop(listener);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The real master's life cycle against a local, user-privileged `sshd`
+    /// on a high port with key login (no password: a real password prompt
+    /// needs a real account — that path is checked by eye at the set's end).
+    /// Everything lives in a temporary directory: its own host key, client
+    /// key, `known_hosts` and `-F /dev/null` — `~/.ssh` is never read.
+    #[test]
+    #[ignore = "starts a local sshd: cargo test -p bt-shell-common sshd -- --ignored"]
+    fn a_real_master_opens_carries_a_stream_and_is_reused() {
+        let root = scratch("sshd");
+        let run = |program: &str, args: &[&str]| {
+            let status = Command::new(program)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect(program);
+            assert!(status.success(), "{program} {args:?}");
+        };
+        let path = |name: &str| root.join(name).display().to_string();
+        run(
+            "ssh-keygen",
+            &["-q", "-t", "ed25519", "-N", "", "-f", &path("host")],
+        );
+        run(
+            "ssh-keygen",
+            &["-q", "-t", "ed25519", "-N", "", "-f", &path("client")],
+        );
+        std::fs::copy(root.join("client.pub"), root.join("authorized_keys")).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let config = format!(
+            "Port {port}\nListenAddress 127.0.0.1\nHostKey {host}\nPidFile {pid}\n\
+             AuthorizedKeysFile {keys}\nPasswordAuthentication no\n\
+             KbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n",
+            host = path("host"),
+            pid = path("sshd.pid"),
+            keys = path("authorized_keys"),
+        );
+        std::fs::write(root.join("sshd_config"), config).unwrap();
+        let mut sshd = Command::new("/usr/sbin/sshd")
+            .args(["-D", "-e", "-f", &path("sshd_config")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(root.join("sshd.log")).unwrap())
+            .spawn()
+            .expect("sshd");
+        crate::child::wait_until("sshd listens", || {
+            std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+        });
+        let host_pub = std::fs::read_to_string(root.join("host.pub")).unwrap();
+        std::fs::write(
+            root.join("known_hosts"),
+            format!("[127.0.0.1]:{port} {host_pub}"),
+        )
+        .unwrap();
+        let user = std::env::var("USER").expect("USER");
+        let target = RemoteTarget {
+            host: "local".to_owned(),
+            kind: RemoteKind::Ssh,
+            argv: vec![
+                "ssh".to_owned(),
+                "-F".to_owned(),
+                "/dev/null".to_owned(),
+                "-i".to_owned(),
+                path("client"),
+                "-o".to_owned(),
+                "IdentitiesOnly=yes".to_owned(),
+                "-o".to_owned(),
+                format!("UserKnownHostsFile={}", path("known_hosts")),
+                "-p".to_owned(),
+                port.to_string(),
+                format!("{user}@127.0.0.1"),
+            ],
+            line: String::new(),
+        };
+        let masters = Masters::new(PathBuf::from("/usr/bin/false"), vec![root.join("s")]);
+        let (asker, asked) = scripted(&[]);
+        let route = masters.ensure(&target, Ask::Sheet(asker)).expect("master");
+        let Route::Ours(socket) = route.clone() else {
+            panic!("expected our route, got {route:?}");
+        };
+        assert!(lock(&asked).is_empty(), "a key login asked");
+        // The stream rides the master, the next job reuses it.
+        let argv = dial(Some(&masters), &target, Ask::Never).unwrap();
+        let out = Command::new(&argv[0])
+            .args(&argv[1..])
+            .arg("echo riding")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "riding");
+        assert_eq!(masters.ensure(&target, Ask::Never), Ok(route));
+        // The test's own master goes (bateri itself never sends `exit`).
+        let mut exit = vec!["ssh".to_owned(), "-o".to_owned()];
+        exit.push(format!("ControlPath={}", socket.display()));
+        exit.extend(words(&["-O", "exit", "x"]));
+        let _ = Command::new("ssh").args(&exit[1..]).output();
+        let _ = sshd.kill();
+        let _ = sshd.wait();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn open_failures_say_why() {
+        assert!(
+            open_failure("prod", "Host key verification failed.\r\n")
+                .contains("connect once in the terminal")
+        );
+        assert_eq!(open_failure("prod", ""), "ssh could not connect to prod.");
+        assert_eq!(
+            open_failure("prod", "ssh: Could not resolve hostname prod\r\n"),
+            "ssh could not connect to prod.\n\nssh: Could not resolve hostname prod"
+        );
     }
 
     #[test]

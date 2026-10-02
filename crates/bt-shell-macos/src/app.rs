@@ -41,6 +41,7 @@ use crate::preview_cache;
 use crate::remote_files::Sweep;
 use crate::settings_window::SettingsWindow;
 use crate::split::Axis;
+use crate::ssh_route::{self, Masters};
 use crate::watch::{Notify, Watch};
 use crate::window::{self, CloseScope, Launch, TerminalWindow, WindowHost};
 use crate::zoom::Zoom;
@@ -793,6 +794,11 @@ pub(crate) struct Ivars {
     /// weakly, this is what keeps it alive.
     /// Empty in an unbundled and timed run.
     updater: OnceCell<Retained<AnyObject>>,
+    /// bateri's ssh masters (047): one registry for every pane, so two jobs to
+    /// one host open one master ([`PaneLaunch::masters`]). `None` in a timed run
+    /// (no askpass, no master — the remote jobs take today's argv) and when the
+    /// running binary's path is unknown (it is the askpass program).
+    masters: Option<Arc<Masters>>,
 }
 
 define_class!(
@@ -1689,6 +1695,24 @@ fn verdict(
     }
 }
 
+/// The application's ssh masters (047): askpass is this very binary, the
+/// sockets live under the user's cache directory (or `/tmp/bateri-$UID`). What
+/// a crashed bateri left behind is swept once, off the main thread. Nothing is
+/// sent to the masters on quit — `ControlPersist` ends them (another instance
+/// may ride on one).
+fn masters() -> Option<Arc<Masters>> {
+    let askpass = std::env::current_exe().ok()?;
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let bases = ssh_route::socket_bases(child::home().as_deref(), uid);
+    let masters = Arc::new(Masters::new(askpass, bases));
+    let sweeper = Arc::clone(&masters);
+    let _ = std::thread::Builder::new()
+        .name("ssh socket sweep".into())
+        .spawn(move || sweeper.sweep());
+    Some(masters)
+}
+
 impl AppDelegate {
     pub(crate) fn new(mtm: MainThreadMarker, opts: Options) -> Retained<Self> {
         // The ring is allocated **only** when the gate is open: a closed gate must
@@ -1713,6 +1737,7 @@ impl AppDelegate {
             settings_state: RefCell::new(settings::FileState::Missing),
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
+            masters: opts.run.is_none().then(masters).flatten(),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -1957,6 +1982,7 @@ impl AppDelegate {
             reduce_motion: self.reduce_motion(),
             smooth_scroll: self.smooth_scroll(),
             zoom: from.map_or_else(Zoom::default, TerminalPane::zoom),
+            masters: self.ivars().masters.clone(),
         };
         (launch, theme)
     }

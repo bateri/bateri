@@ -55,10 +55,12 @@ use objc2_user_notifications::{
 use crate::child;
 use crate::download::{self, Conflict};
 use crate::pane::{PaneLookup, TerminalPane};
+use crate::password_sheet::Job as SheetJob;
 use crate::preview::beep;
 use crate::preview_cache;
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{Answer, Query, Request};
+use crate::ssh_route;
 use crate::upload::{
     self, Direction, Ended, Job, Lane, Local, Outcome, ProbeReply, RowAction, RowStatus, Shared,
     Started, Stop, StopQuestion, TransferList, Way,
@@ -144,8 +146,9 @@ impl TerminalPane {
         let mark = session
             .remote_mark()
             .map_or(HostMark::None, |(_, mark)| mark);
-        let ssh = upload::ssh_argv(&target);
-        let host = target.host;
+        let host = target.host.clone();
+        // The job holds the sheet gate from here: the password sheet opens within it.
+        let dial = self.dial(target, Some((SheetJob::Upload, true)));
         let reported = !cwd.is_empty();
         let (id, lookup) = (self.id(), self.lookup());
         self.uploads().borrow_mut().set_asking(true);
@@ -153,7 +156,14 @@ impl TerminalPane {
             .name("upload probe".into())
             .spawn(move || {
                 let dir = reported.then_some(cwd.as_str());
-                let result = upload::probe(&ssh, &host, dir, &paths);
+                // The route first (047 R1): the probe and the stream ride it.
+                let (ssh, result) = match (dial.argv)() {
+                    Ok(ssh) => {
+                        let result = upload::probe(&ssh, &host, dir, &paths);
+                        (ssh, result)
+                    }
+                    Err(text) => (Vec::new(), Err(text)),
+                };
                 let asked = Asked {
                     command,
                     ssh,
@@ -190,6 +200,15 @@ impl TerminalPane {
             self.uploads().borrow_mut().set_asking(false);
             return;
         };
+        // The password sheet was cancelled: nothing more to say.
+        if asked
+            .result
+            .as_ref()
+            .is_err_and(|text| text == ssh_route::CANCELLED)
+        {
+            self.uploads().borrow_mut().set_asking(false);
+            return;
+        }
         let mtm = self.mtm();
         let alert = NSAlert::new(mtm);
         let confirmed = match asked.result {
@@ -305,17 +324,19 @@ impl TerminalPane {
         let mark = session
             .remote_mark()
             .map_or(HostMark::None, |(_, mark)| mark);
-        let ssh = upload::ssh_argv(&target);
-        let host = target.host;
+        let host = target.host.clone();
+        // The job holds the sheet gate from here: the password sheet opens within it.
+        let dial = self.dial(target, Some((SheetJob::Download, true)));
         let download_dir = self.remote_files().borrow().download_dir.clone();
         let (id, lookup) = (self.id(), self.lookup());
         self.uploads().borrow_mut().set_asking(true);
         let request = Request {
             command,
-            ssh: ssh.clone(),
+            dial,
             host: host.clone(),
             query: Query::Count(remote.clone()),
-            reply: Box::new(move |answer| {
+            reply: Box::new(move |answer, ssh| {
+                let ssh = ssh.to_vec();
                 let result = match answer {
                     Ok(Answer::Counted(Some(entry))) => {
                         landing(entry, &remote, folder, &download_dir)
@@ -358,6 +379,14 @@ impl TerminalPane {
             remote,
             result,
         } = prepared;
+        // The password sheet was cancelled: nothing more to say.
+        if result
+            .as_ref()
+            .is_err_and(|text| text == ssh_route::CANCELLED)
+        {
+            self.uploads().borrow_mut().set_asking(false);
+            return;
+        }
         let name = remote_files::split_remote(&remote)
             .map_or_else(String::new, |(_, name)| name.to_owned());
         let mtm = self.mtm();

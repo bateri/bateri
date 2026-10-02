@@ -62,10 +62,75 @@ _Requirements: R1.4, R2, R2.1, R2.2, R2.3, R3, R4, R5_
 
 ## Checklist
 
-- [ ] `main`'in askpass dalı
-- [ ] `ensure`'ün açan kolu: single-flight, geçici soket, bayat soket
-- [ ] Parola sayfası + sayfa hakemliği + kanal + kapanışta düşen gönderici
-- [ ] Altı tüketici rotada; arka plan `Never`
-- [ ] Master kaydı `app.rs`'te, `PaneLaunch` ile; süreli koşuda yok
-- [ ] Test: yukarıdaki kabul sınamaları
-- [ ] Doğrulama geçti (`make check`, `make linux`, `make bundle`, `make smoke`)
+- [x] `main`'in askpass dalı
+- [x] `ensure`'ün açan kolu: single-flight, geçici soket, bayat soket
+- [x] Parola sayfası + sayfa hakemliği + kanal + kapanışta düşen gönderici
+- [x] Altı tüketici rotada; arka plan `Never`
+- [x] Master kaydı `app.rs`'te, `PaneLaunch` ile; süreli koşuda yok
+- [x] Test: yukarıdaki kabul sınamaları
+- [x] Doğrulama geçti (`make check`, `make linux`, `make bundle`, `make smoke`)
+
+## Uygulama Notları
+
+- **Rota helper'ın worker'ında çözülüyor, argv cevaba geri dönüyor.**
+  İndirme, önizleme, Finder'a sürükleme, bağlantı doğrulama ve yük göstergesi
+  aynı `remote_helper` oturumundan geçiyor ve ilk üçü akışın argv'sini o
+  isteğin argv'sinden alıyordu. `Request.ssh` yerine `Dial` (kapıyı worker
+  thread'inde, yalnız oturum açılacağı zaman koşturan bir kapanış + `user`
+  biti) geldi ve `Reply` oturumun açıldığı argv'yi ikinci argüman olarak
+  alıyor: soru ile akış aynı rotada. Yükleme kendi thread'inde kapıyı
+  doğrudan çağırıyor. `remote_stats.rs` argv görmüyordu, dokunulmadı.
+- **Kullanıcı işi `RETRY_AFTER` tutmasını ne okuyor ne yazıyor.** Okusaydı
+  parolalı host'ta başarısız bir hover ⌘-tık önizlemeyi on saniye
+  sorusuz reddederdi; yazsaydı iptal edilen sayfanın "Cancelled"ı hover
+  etiketine düşerdi.
+- **İptal sessiz bitiyor.** Planın "Cancel işi Cancelled ile bitirir"i
+  yükleme/indirme/önizlemede hata sayfası açmadan bitmek olarak uygulandı
+  (`ssh_route::CANCELLED`'ı tüketiciler tanıyor): yeni kapanan sayfanın
+  üstüne "Cancelled" diyen ikinci bir sayfa gürültü. Finder'a sürüklemede
+  söz Finder'a "Cancelled" hatasıyla bitiyor.
+- **Cevapsız soruda önce ssh durduruluyor (SIGTERM), sonra yardımcıya
+  `CANCEL` gidiyor.** ssh başarısız askpass'i boş parolaya çevirip sunucuya
+  deniyor (`readpass.c`); sıra tersi olsaydı iptal sunucuda bir başarısız
+  giriş daha sayardı. Bekçisi sahte ssh'ın `empty` kaydı (sıra bozulunca
+  kırmızı düştüğü elle denendi).
+- **ssh'ın stderr'i boruya değil özel dizindeki bir dosyaya**
+  (`q-<rastgele>.err`, askpass soketinin yanında): `-f` ile arkaya geçen
+  master tanımlayıcıyı miras alıyor ve borunun sonu hiç gelmeyebilirdi.
+  `accept` döngüsü yoklamasız: ssh'ın ön yarısını bekleyen thread çıkınca
+  askpass soketine bir kez bağlanıp döngüyü uyandırıyor.
+- **Master'a `ConnectTimeout=15` (`ssh_route::CONNECT_TIMEOUT`, tasarım
+  sabiti, helper'ın `OPEN_TIMEOUT`'u)** — planın R3 listesinde yoktu
+  (`/code-review`): ulaşılamayan host işi ve arkasındaki helper worker'ını TCP
+  zaman aşımı kadar tutuyordu. Bilinen sınır: sayfa açılmadan önce (bağlanırken)
+  pane'i kapatmak ssh'ı durdurmuyor, bu süre kadar sürüyor; takılan bir
+  `ProxyCommand`'ı süre bağlamıyor.
+- **Uçuşa katılma kuralı** (`/code-review`): açılış sürerken gelen arka plan işi
+  de bekliyor (beklemeseydi bugünkü argv'nin hatası `RETRY_AFTER` boyunca master
+  açıldıktan sonra da hover'ı reddederdi); sahibi **iptal** edilen uçuşta
+  kullanıcı işi kendi sayfasında soruyor (başka pane'in sayfasının iptali onun
+  cevabı değil), arka plan işi bugünkü argv'ye düşüyor.
+- **Sayfa hakemliği**: pencerede bağlı bir sayfa varsa (başka pane'inki,
+  kapatma sorusu dahil) parola sayfası açılmıyor; geçidi zaten tutan iş
+  (yüklemenin yoklaması, indirmenin sayımı) içinde açıyor, tutmayan
+  (önizleme, sürükleme) boşsa sayfa ömrünce alıyor. Açılamayan sayfa bip +
+  "cevapsız" → iş iptal. Gönderici pane'in `password` yuvasında;
+  `begin_close` onu helper'ın `close`'undan **önce** düşürüyor (worker
+  sayfayı bekliyorken `Close`'u işleyemez).
+- **Sayfa metni**: başlık host, metin işin cümlesi ("Log in to upload the
+  dropped items." …), yanlış parolada üstünde "Wrong password — try again.";
+  ssh'ın istemi küçük puntoyla alanın üstünde; düğmeler "Log In" / "Cancel"
+  (Esc).
+- **Askpass'in uçtan uca sınaması test binary'sinin kendisiyle.** Sahte
+  `ssh` (POSIX sh) `$SSH_ASKPASS`'i çağırıyor; o bir sarmalayıcı ve test
+  binary'sini `ssh_route::tests::askpass_child --exact --ignored` ile
+  koşturuyor, yani teldeki istemci gerçek `run_askpass`. Cevap dosyaya
+  yazılıyor, çünkü harness'ın kendi başlığı stdout'ta.
+- **Gerçek master yaşam döngüsü** `a_real_master_opens_carries_a_stream_and_is_reused`
+  (`#[ignore]`): geçici dizinde kendi host anahtarı, istemci anahtarı ve
+  `known_hosts`'u olan, yüksek portta kullanıcı ayrıcalıklı `/usr/sbin/sshd`;
+  `-F /dev/null`, `~/.ssh` okunmuyor. Bu makinede yeşil koştu
+  (`cargo test -p bt-shell-common real_master -- --ignored`).
+- **`CLAUDE.md`'nin "BatchMode=yes: parola sorulamaz" cümlesi bu phase'de
+  düzeltildi** (kodla çelişmesin diye tek cümle); Keychain ve bağımlılık
+  satırları phase-3'te.

@@ -43,6 +43,7 @@ mod locale;
 mod menu;
 mod pacer;
 mod pane;
+mod password_sheet;
 mod preview;
 mod promise;
 mod search_bar;
@@ -59,7 +60,7 @@ mod window;
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
     child, download, gesture, jobs, keys, links, notices, preview_cache, quote, remote_files,
-    remote_helper, settings, split, upload, watch, zoom,
+    remote_helper, settings, split, ssh_route, upload, watch, zoom,
 };
 
 use std::time::{Duration, Instant};
@@ -71,6 +72,11 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use bt_core::SHUTDOWN_GRACE;
 
 pub use bt_gpu::GpuError;
+
+/// The `bateri` binary as ssh's askpass (047 R2.1): `main`'s first call —
+/// `Some(exit code)` ends the process before any AppKit or window-server
+/// work. Re-exported here so the binary gains no new crate edge.
+pub use bt_shell_common::ssh_route::askpass_main as askpass;
 
 /// The shell of the smoke and measurement runs. **Not** the user's `$SHELL`:
 /// the result must not depend on the rc files.

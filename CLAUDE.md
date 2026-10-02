@@ -673,9 +673,13 @@ pencere ve sekme başlığı `↑ N% · {başlık}` (`upload::titled`, yüzde ba
 bir yazım) — alternatif ekranda dock yok ve ⌘. menü kısayolu olduğu için
 orada da çalışıyor; bateri arkadayken biten, hata veren ya da bağlantısı
 kopan kuyruk bir bildirim gönderiyor (`NSUserNotification`, kullanımdan
-kalkmış ama yeni crate istemeyen tek yol; paketsiz süreçte çağrılmıyor). ssh `BatchMode=yes` ile koşuyor: parola sorulamaz,
-anahtar/agent ya da açık bir ControlMaster gerekiyor ve yoksa sayfa bunu
-açıkça söylüyor. Uzak komut `sh -c`'ye sarılı ve tırnağı ters bölüsüz
+kalkmış ama yeni crate istemeyen tek yol; paketsiz süreçte çağrılmıyor). Akış ssh'ı `BatchMode=yes` ile koşuyor ve
+hiç soru sormuyor; bağlantının yolu işten **önce** tek kapıda
+(`ssh_route::ensure`, 047): bateri'nin canlı master'ı, kullanıcının canlı
+master'ı, yoksa kullanıcının başlattığı işte bateri'nin kendi master'ı
+açılıyor ve parola askpass'le (aynı `bateri` binary'si) işi başlatan pane'in
+sayfasında soruluyor; arka plan işi (bağlantı doğrulama, yük göstergesi) master
+açmıyor (`.tasks/047-ssh-parola-ve-keychain/`). Uzak komut `sh -c`'ye sarılı ve tırnağı ters bölüsüz
 (giriş kabuğu fish olabilir); adında ters bölü ya da kontrol karakteri olan
 öğe reddediliyor. Uzak yol **OSC
 7'nin yetkisinden**: uzak oturum sürerken her OSC 7, değilken yabancı

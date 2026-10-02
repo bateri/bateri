@@ -80,7 +80,6 @@ use crate::clipboard;
 use crate::links::{self, Content, LinkAction, Resolved};
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{self, Answer, Query, Request};
-use crate::upload;
 use crate::uploader::{ESCAPE, add_key_monitor, remove_monitor};
 use crate::view::{BateriView, OutOfGrid};
 
@@ -667,10 +666,11 @@ impl BateriView {
         let (id, lookup) = (pane.id(), pane.lookup());
         let request = Request {
             command,
-            ssh: upload::ssh_argv(&target),
-            host: target.host,
+            host: target.host.clone(),
+            // A background job: rides a live master or today's argv, never asks.
+            dial: pane.dial(target, None),
             query: Query::Verify { candidates, cwd },
-            reply: Box::new(move |answer| {
+            reply: Box::new(move |answer, _| {
                 let found = match answer {
                     Ok(Answer::Verified(found)) => Ok(found),
                     Ok(Answer::Counted(_) | Answer::Load(_)) => Ok(None),

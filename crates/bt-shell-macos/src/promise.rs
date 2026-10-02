@@ -59,9 +59,10 @@ use objc2_foundation::{
 
 use crate::download::Conflict;
 use crate::pane::{PaneLookup, TerminalPane};
+use crate::password_sheet::Job as SheetJob;
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{Answer, Query, Request};
-use crate::upload::{self, Job, Lane, Outcome, Shared};
+use crate::upload::{Job, Lane, Outcome, Shared};
 use crate::uploader::Confirmed;
 use crate::view::BateriView;
 
@@ -459,15 +460,17 @@ impl TerminalPane {
             .session()
             .and_then(|session| session.remote_mark())
             .map_or(HostMark::None, |(_, mark)| mark);
-        let ssh = upload::ssh_argv(&target);
-        let host = target.host;
+        let host = target.host.clone();
+        // The job does not hold the sheet gate: the password sheet takes it if free.
+        let dial = self.dial(target, Some((SheetJob::Finder, false)));
         let (id, lookup) = (self.id(), self.lookup());
         let request = Request {
             command,
-            ssh: ssh.clone(),
+            dial,
             host: host.clone(),
             query: Query::Count(remote.clone()),
-            reply: Box::new(move |answer| {
+            reply: Box::new(move |answer, ssh| {
+                let ssh = ssh.to_vec();
                 let counted = match answer {
                     Ok(Answer::Counted(Some(entry))) => Ok(entry),
                     Ok(_) => Err(format!("{remote} no longer exists on {host}.")),
@@ -504,6 +507,11 @@ impl TerminalPane {
     ) {
         let entry = match counted {
             Ok(entry) => entry,
+            // The password sheet was cancelled: the promise is withdrawn, not failed.
+            Err(text) if text == crate::ssh_route::CANCELLED => {
+                promised.cancel();
+                return;
+            }
             Err(text) => {
                 promised.finish(Err(text));
                 return;

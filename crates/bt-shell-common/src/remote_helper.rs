@@ -3,7 +3,7 @@
 //! so a ⌘-hover over a name in a remote `ls` costs one round trip on an open
 //! connection, not a new ssh handshake.
 //!
-//! - **[`HelperSession`]** is the process: [`crate::upload::ssh_argv`] +
+//! - **[`HelperSession`]** is the process: the route gate's argv ([`Dial`]) +
 //!   [`crate::remote_files::helper_script`], a reader thread turning its
 //!   standard output into lines and every wait bounded ([`OPEN_TIMEOUT`],
 //!   [`STAT_TIMEOUT`], [`COUNT_TIMEOUT`]) — a hung ssh never blocks for good.
@@ -383,15 +383,55 @@ pub enum LoadReply {
 }
 
 /// The reply callback — runs on the worker thread; the platform shell posts it
-/// to its main thread.
-pub type Reply = Box<dyn FnOnce(Result<Answer, String>) + Send>;
+/// to its main thread. The second argument is the ssh argv the answer came
+/// over (empty when no session opened): a download's or a preview's stream
+/// rides the **same** route as its question (047 R5).
+pub type Reply = Box<dyn FnOnce(Result<Answer, String>, &[String]) + Send>;
+
+/// How the worker gets the session's ssh argv: the route gate
+/// ([`crate::ssh_route::dial`]) runs **on the worker thread**, only when a
+/// session has to be opened — it spawns ssh processes and may wait at a sheet.
+pub struct Dial {
+    /// A job the user started (a sheet may ask for the password): it neither
+    /// reads nor writes the failed-open hold ([`RETRY_AFTER`]) — a hover's
+    /// failure must not refuse a ⌘-click for ten seconds, and a cancelled sheet
+    /// is not a hover's label.
+    pub user: bool,
+    /// The argv without the remote command (`Err`: the open's failure text).
+    pub argv: Box<dyn FnOnce() -> Result<Vec<String>, String> + Send>,
+}
+
+impl Dial {
+    /// A fixed argv, no gate (the tests' local shell).
+    pub fn fixed(argv: Vec<String>) -> Self {
+        Self {
+            user: false,
+            argv: Box::new(move || Ok(argv)),
+        }
+    }
+
+    /// The gate's dial: `masters` `None` (the timed run) → today's argv.
+    pub fn gated(
+        masters: Option<std::sync::Arc<crate::ssh_route::Masters>>,
+        target: bt_core::RemoteTarget,
+        ask: crate::ssh_route::Ask,
+    ) -> Self {
+        Self {
+            user: matches!(ask, crate::ssh_route::Ask::Sheet(_)),
+            argv: Box::new(move || {
+                crate::ssh_route::dial(masters.as_deref(), &target, ask)
+                    .map_err(|denied| denied.text())
+            }),
+        }
+    }
+}
 
 /// One question to the helper.
 pub struct Request {
     /// The remote session's generation: another one closes the open session.
     pub command: u64,
-    /// The ssh argv without the remote command ([`crate::upload::ssh_argv`]).
-    pub ssh: Vec<String>,
+    /// The session's argv, through the route gate.
+    pub dial: Dial,
     pub host: String,
     pub query: Query,
     pub reply: Reply,
@@ -431,13 +471,14 @@ impl RemoteHelper {
             Ok(_) => {
                 if let Err(mpsc::SendError(Message::Ask(request))) = tx.send(Message::Ask(request))
                 {
-                    (request.reply)(Err("The remote helper stopped".to_owned()));
+                    (request.reply)(Err("The remote helper stopped".to_owned()), &[]);
                 }
                 self.tx = Some(tx);
             }
-            Err(error) => {
-                (request.reply)(Err(format!("The remote helper could not start: {error}")))
-            }
+            Err(error) => (request.reply)(
+                Err(format!("The remote helper could not start: {error}")),
+                &[],
+            ),
         }
     }
 
@@ -453,7 +494,7 @@ impl RemoteHelper {
 /// The worker loop: one session at a time, closed on [`IDLE`], on
 /// [`Message::Close`] and on another generation.
 fn run(rx: &Receiver<Message>) {
-    let mut open: Option<(u64, HelperSession)> = None;
+    let mut open: Option<Open> = None;
     let mut failed: Option<Failure> = None;
     let mut cache = RemoteCache::default();
     loop {
@@ -477,19 +518,19 @@ fn run(rx: &Receiver<Message>) {
             Message::Ask(request) => {
                 let Request {
                     command,
-                    ssh,
+                    dial,
                     host,
                     query,
                     reply,
                 } = request;
-                let answer = serve(
+                let (answer, ssh) = serve(
                     &mut open,
                     &mut failed,
                     &mut cache,
-                    (command, &ssh, &host),
+                    (command, dial, &host),
                     query,
                 );
-                reply(answer);
+                reply(answer, &ssh);
             }
         }
     }
@@ -508,22 +549,34 @@ impl Failure {
     }
 }
 
+/// The open session: its generation and the argv it was opened with (the
+/// replies hand it on to the streams).
+struct Open {
+    command: u64,
+    ssh: Vec<String>,
+    session: HelperSession,
+}
+
 /// One question against the open session (opened or reopened as needed); a
-/// failed request drops the session, so the next question starts clean.
+/// failed request drops the session, so the next question starts clean. The
+/// argv the answer came over goes back with it.
 fn serve(
-    open: &mut Option<(u64, HelperSession)>,
+    open: &mut Option<Open>,
     failed: &mut Option<Failure>,
     cache: &mut RemoteCache,
-    (command, ssh, host): (u64, &[String], &str),
+    (command, dial, host): (u64, Dial, &str),
     query: Query,
-) -> Result<Answer, String> {
+) -> (Result<Answer, String>, Vec<String>) {
     // A name the script cannot carry is refused before it can cost the session.
     if let Query::Count(path) = &query
         && !is_safe(path)
     {
-        return Err(format!("{path} can't be downloaded safely"));
+        return (
+            Err(format!("{path} can't be downloaded safely")),
+            Vec::new(),
+        );
     }
-    if open.as_ref().is_some_and(|(at, _)| *at != command) {
+    if open.as_ref().is_some_and(|open| open.command != command) {
         *open = None;
     }
     // A load sample's failed open is an answer of its own (`LoadReply`).
@@ -532,32 +585,46 @@ fn serve(
         _ => Err(text),
     };
     if open.is_none() {
-        if let Some(failure) = failed.as_ref().filter(|failure| failure.holds(command)) {
-            return opening_failed(failure.text.clone());
+        if let Some(failure) = failed
+            .as_ref()
+            .filter(|failure| !dial.user && failure.holds(command))
+        {
+            return (opening_failed(failure.text.clone()), Vec::new());
         }
-        match HelperSession::open(ssh, host, OPEN_TIMEOUT) {
-            Ok(session) => {
+        let user = dial.user;
+        let opened = (dial.argv)().and_then(|ssh| {
+            HelperSession::open(&ssh, host, OPEN_TIMEOUT).map(|session| (ssh, session))
+        });
+        match opened {
+            Ok((ssh, session)) => {
                 *failed = None;
-                *open = Some((command, session));
+                *open = Some(Open {
+                    command,
+                    ssh,
+                    session,
+                });
             }
             Err(text) => {
-                *failed = Some(Failure {
-                    command,
-                    at: Instant::now(),
-                    text: text.clone(),
-                });
-                return opening_failed(text);
+                if !user {
+                    *failed = Some(Failure {
+                        command,
+                        at: Instant::now(),
+                        text: text.clone(),
+                    });
+                }
+                return (opening_failed(text), Vec::new());
             }
         }
     }
-    let Some((_, session)) = open.as_mut() else {
-        return Err(format!("No link: can't reach {host}"));
+    let Some(current) = open.as_mut() else {
+        return (Err(format!("No link: can't reach {host}")), Vec::new());
     };
-    let result = answer(session, cache, command, query);
+    let ssh = current.ssh.clone();
+    let result = answer(&mut current.session, cache, command, query);
     if result.is_err() {
         *open = None;
     }
-    result
+    (result, ssh)
 }
 
 /// [`serve`]'s work once a session is open.
@@ -878,10 +945,10 @@ mod tests {
             let (tx, rx) = mpsc::channel();
             helper.ask(Request {
                 command,
-                ssh: local_ssh(),
+                dial: Dial::fixed(local_ssh()),
                 host: "local".to_owned(),
                 query,
-                reply: Box::new(move |answer| {
+                reply: Box::new(move |answer, _| {
                     let _ = tx.send(answer);
                 }),
             });
@@ -951,10 +1018,10 @@ mod tests {
             let (tx, rx) = mpsc::channel();
             helper.ask(Request {
                 command,
-                ssh: vec!["/bin/sh".to_owned(), "-c".to_owned(), dial.clone()],
+                dial: Dial::fixed(vec!["/bin/sh".to_owned(), "-c".to_owned(), dial.clone()]),
                 host: "prod".to_owned(),
                 query: Query::Count("/etc".to_owned()),
-                reply: Box::new(move |answer| {
+                reply: Box::new(move |answer, _| {
                     let _ = tx.send(answer);
                 }),
             });
@@ -968,6 +1035,60 @@ mod tests {
         // Another generation dials again.
         assert!(ask(2).is_err());
         assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A job the user started (047) is not refused by a hover's held
+    /// failure, does not leave one behind, and its reply carries the argv the
+    /// session was opened with — the stream rides the same route.
+    #[test]
+    fn a_user_dial_ignores_the_held_failure_and_hands_on_its_argv() {
+        let root = scratch("user-dial");
+        let counter = root.join("dials");
+        let dial = format!(
+            "echo dial >> '{}'; echo 'Permission denied (password).' >&2; exit 255",
+            text(&counter)
+        );
+        let failing = vec!["/bin/sh".to_owned(), "-c".to_owned(), dial];
+        let counted = text(&root);
+        let mut helper = RemoteHelper::default();
+        let mut ask = |dial: Dial| {
+            let (tx, rx) = mpsc::channel();
+            helper.ask(Request {
+                command: 1,
+                dial,
+                host: "prod".to_owned(),
+                query: Query::Count(counted.clone()),
+                reply: Box::new(move |answer, ssh: &[String]| {
+                    let _ = tx.send((answer, ssh.to_vec()));
+                }),
+            });
+            rx.recv_timeout(Duration::from_secs(30))
+                .expect("the worker replies")
+        };
+        // A background failure is held...
+        assert!(ask(Dial::fixed(failing.clone())).0.is_err());
+        let user = |argv: Vec<String>| Dial {
+            user: true,
+            argv: Box::new(move || Ok(argv)),
+        };
+        // ...a user's dial tries anyway, and its own failure is not held.
+        let (answer, ssh) = ask(user(failing.clone()));
+        assert!(answer.is_err());
+        assert!(ssh.is_empty());
+        assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 2);
+        // The gate's own refusal reaches the reply as the error text.
+        let refused = Dial {
+            user: true,
+            argv: Box::new(|| Err(crate::ssh_route::CANCELLED.to_owned())),
+        };
+        assert_eq!(ask(refused).0.unwrap_err(), crate::ssh_route::CANCELLED);
+        let (answer, ssh) = ask(user(local_ssh()));
+        assert!(matches!(answer, Ok(Answer::Counted(Some(_)))), "{answer:?}");
+        assert_eq!(ssh, local_ssh());
+        // Later questions of the open session hand the same argv on.
+        let (_, ssh) = ask(Dial::fixed(failing));
+        assert_eq!(ssh, local_ssh());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -987,10 +1108,10 @@ mod tests {
             let (tx, rx) = mpsc::channel();
             helper.ask(Request {
                 command: 1,
-                ssh,
+                dial: Dial::fixed(ssh),
                 host: "prod".to_owned(),
                 query,
-                reply: Box::new(move |answer| {
+                reply: Box::new(move |answer, _| {
                     let _ = tx.send(answer);
                 }),
             });
@@ -1015,10 +1136,10 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         helper.ask(Request {
             command: 1,
-            ssh: local_ssh(),
+            dial: Dial::fixed(local_ssh()),
             host: "local".to_owned(),
             query: Query::Load { detail: true },
-            reply: Box::new(move |answer| {
+            reply: Box::new(move |answer, _| {
                 let _ = tx.send(answer);
             }),
         });

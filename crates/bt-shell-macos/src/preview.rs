@@ -44,10 +44,11 @@ use crate::download::Conflict;
 use crate::hyperlink::extension_content;
 use crate::links::Content;
 use crate::pane::TerminalPane;
+use crate::password_sheet::Job as SheetJob;
 use crate::preview_cache;
 use crate::remote_files::{self, CacheState, PreviewOpen, RemoteEntry};
 use crate::remote_helper::{Answer, Query, Request};
-use crate::upload::{self, Job, Lane, format_bytes};
+use crate::upload::{Job, Lane, format_bytes};
 use crate::uploader::{self, Confirmed, on_pane};
 
 /// How a preview in flight finishes: kept by the pane by its landing path (the
@@ -282,14 +283,16 @@ impl TerminalPane {
         if self.uploads().borrow().previewing(&local) {
             return;
         }
-        let ssh = upload::ssh_argv(&target);
+        // The job does not hold the sheet gate: the password sheet takes it if free.
+        let dial = self.dial(target, Some((SheetJob::Preview, false)));
         let (id, lookup) = (self.id(), self.lookup());
         let request = Request {
             command,
-            ssh: ssh.clone(),
+            dial,
             host: host.clone(),
             query: Query::Count(remote.clone()),
-            reply: Box::new(move |answer| {
+            reply: Box::new(move |answer, ssh| {
+                let ssh = ssh.to_vec();
                 let decided = match answer {
                     Ok(Answer::Counted(Some(entry @ RemoteEntry::File { size, mtime, .. }))) => {
                         decide(&dir, &local, &downloads, entry, (size, mtime))
@@ -338,6 +341,8 @@ impl TerminalPane {
         } = asked;
         let (entry, rescued) = match decided {
             Decided::Folder => return,
+            // The password sheet was cancelled: nothing more to say.
+            Decided::Failed(text) if text == crate::ssh_route::CANCELLED => return,
             Decided::Failed(text) => {
                 self.preview_failed(&host, &text);
                 return;
