@@ -76,10 +76,58 @@ _Requirements: R4.1, R4.2, R4.3, R4.4, R7_
 
 ## Checklist
 
-- [ ] `bt_load` betiği ve ayrıştırıcısı
-- [ ] `Query::Load` / `Answer::Load`, hata türünün ayrımı
-- [ ] `Sampler`
-- [ ] `Schedule`
-- [ ] Test: yerel `/bin/sh` uçtan uca (iki ortam)
-- [ ] Test: ayrıştırıcı, `Sampler`, `Schedule` senaryoları
-- [ ] Doğrulama geçti (`make check` + `make linux`)
+- [x] `bt_load` betiği ve ayrıştırıcısı
+- [x] `Query::Load` / `Answer::Load`, hata türünün ayrımı
+- [x] `Sampler`
+- [x] `Schedule`
+- [x] Test: yerel `/bin/sh` uçtan uca (iki ortam)
+- [x] Test: ayrıştırıcı, `Sampler`, `Schedule` senaryoları
+- [x] Doğrulama geçti (`make check` + `make linux`)
+
+## Uygulama Notları
+
+- **`ps`'in sütun sırası ters:** betik `ps -eo pcpu,comm` istiyor (plan
+  `comm,pcpu` diyordu) — `comm` boşluk taşıyabiliyor (`tmux: server`), sayı
+  önde olunca ayrıştırma belirsizleşmiyor.
+- **Zorunlu yalnız iki satır:** `cpu` satırı (en az dört sütun) ve
+  `MemTotal`; ikisinden biri eksik ya da bozuksa `Malformed`. Load, uptime,
+  disk, OS, çekirdek ve süreçler isteğe bağlı: bozuk değer o alanı boş
+  bırakıyor, örneği düşürmüyor. Bilinmeyen `BT-L` etiketi atlanıyor (daha
+  yeni betik), `BT-L` olmayan satır `Malformed`. `PRETTY_NAME`'in tırnakları
+  Rust'ta soyuluyor; `df`'in son satırı `END`'de `$0`'a değil ana kuralda bir
+  değişkene yakalanıyor (her awk `END`'de `$0`'ı tutmuyor).
+- **`Eq` için tam sayılar:** `Answer` `Eq` türetiyor, yani load ortalamaları
+  yüzde birlik, süreç `pcpu`'su onda birlik tam sayı (`LoadSample::load`,
+  `Process::cpu`). Bellek baytla (kB × 1024, doymalı).
+- **Tipler:** ham okumalar (`LoadSample`, `CpuCounters`, `Process`) ve
+  ayrıştırıcı `remote_files`'ta (`parse_load`, `Ok(None)` = `BT-NOPROC`);
+  `LoadReply` (`Sample`/`NoProc`/`Unreachable`) `remote_helper`'da.
+  `HelperSession::ask`'ın yazma-okuma döngüsü `exchange`'e çıktı, `load` onu
+  paylaşıyor — sıra numarası tek sayaç, yani geç bir `bt_load` cevabı bir
+  `bt_stat`'ınki sanılamıyor (uçtan uca sınama bunu `bt_stat`'la bitiriyor).
+- **Açılış hatasının iki yolu:** `serve`'de hem `HelperSession::open`'ın
+  `Err`'i hem `RETRY_AFTER` içinde tutulan hata `Query::Load` için
+  `Ok(Answer::Load(LoadReply::Unreachable))`. Sınama bunu çevirmenin tek ssh
+  denemesiyle olduğunu da sayıyor.
+- **`Sampler::take` biçimi `StatsForm` alıyor**, `RemoteStatsMode` değil:
+  `Off`'ta istek hiç gitmiyor (`Schedule`), yani `Off` kolu ölü olurdu.
+  Çıktı `Reading { stats, detail }`; geçmiş içeride her biçimde tutuluyor,
+  dışarı yalnız `sparkline`'da çıkıyor (biçim değişince grafik boş başlamasın).
+- **`Schedule`'ın yüzeyi:** `set_generation`, `set_form(on, interval)`,
+  `set_visible`, `interaction`, `set_detail`, `tick(token)`,
+  `answered(generation, Outcome)`; eylemler `Arm { token, after }`,
+  `Request { detail, restart }`, `Hide`. `restart` sürücüye `Sampler::reset`
+  dedirtiyor (devamda geçmiş sıfırlanır). "Dur" ayrı bir eylem değil: durmak
+  tik kurmamak, etkin durdurmalar (nesil, `off`, görünürlük) jetonu da
+  bayatlatıyor; edilgen durma (`STATS_IDLE`) tikte fark ediliyor.
+  Planda tanımsız iki karar: **yeni nesil etkileşim sayılıyor** (kullanıcı
+  az önce bağlandı; ⌘T'nin aynı host satırı tuşsuz doğuyor) ve **nesil
+  bitince `Hide` yok** — değeri `Session` zaten `C`/`D`/`A`'da siliyor.
+  Uçuşta istek varken istenen istek (devam, popover, yeni nesil) cevapta
+  gidiyor; başka neslin cevabı yalnız worker'ı serbest bırakıyor, yeni nesli
+  bitirmiyor. Başarılı bir cevap tek yeniden deneme hakkını geri veriyor.
+- `/code-review` koşmadı: riskli phase tetikleyicisi yok (`.wgsl` yok, kilit
+  dosyası değişmedi; mevcut worker'a bir sorgu türü eklendi, PTY okuyucu ya
+  da render thread'iyle paylaşılan durum yok — `make test-race` gerekmedi).
+- `make linux` ilk koşuda yeşil; `jobs::tests::the_process_table_reads_a_real_argv`
+  bu sefer düşmedi.

@@ -8,8 +8,8 @@
 //! does (`links`), the remote upload rules, processes and the two-way transfer
 //! queue (`upload`), the download's stream (`download`), the rules of
 //! previewing and downloading a remote file (`remote_files`), its helper
-//! ssh session (`remote_helper`) and the preview cache on disk
-//! (`preview_cache`), the
+//! ssh session (`remote_helper`), the preview cache on disk
+//! (`preview_cache`), the remote host's load sampling (`remote_stats`), the
 //! process table (`jobs`), the shell's birth (`child`) and file watching
 //! (`watch`).
 //!
@@ -36,6 +36,7 @@ pub mod preview_cache;
 pub mod quote;
 pub mod remote_files;
 pub mod remote_helper;
+pub mod remote_stats;
 pub mod settings;
 pub mod split;
 pub mod upload;

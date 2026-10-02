@@ -10,6 +10,9 @@
 //!   backslash, no control character — so no newline can split a request);
 //!   the reply names paths by **index** and carries the request's sequence
 //!   number, so a late answer cannot be taken for a newer question.
+//! - **The load sample** ([`load_request_line`], [`parse_load`]): 046's
+//!   `bt_load` request on the same session — raw `/proc` readings; what they
+//!   mean is `remote_stats`'s.
 //! - **The download script** ([`download_script`]): `upload`'s mirror, a
 //!   `tar c` stream of one item out of its folder (Karar 11).
 //! - **The scp path** ([`scp_path`]): "Copy as scp Path" from the session's
@@ -61,6 +64,15 @@ const HELPER_MARK: &str = "BT-HELPER";
 /// `-` if neither answers. Symlinks are followed (`-L`, `[ -d ]`): a link to a
 /// folder is a folder. A folder's bytes are its regular files' sizes as `ls -ln`
 /// prints them — what `tar` streams, not what `du` allocates.
+///
+/// A third request, `bt_load {seq} [p]` (046 Karar 2), samples the host's load
+/// for the ssh status bar: every line of its reply carries its own tag
+/// (`BT-L cpu …`, `BT-L mem {key} {kB}`, `BT-L load …`, `BT-L up …`,
+/// `BT-L disk {n}%`; with `p` also `BT-L os …`, `BT-L cores …` and up to three
+/// `BT-L ps {pcpu} {comm}`), or `BT-NOPROC` if `/proc/stat` cannot be read —
+/// a server without Linux's `/proc` has no indicator. Every source but
+/// `/proc/stat` fails silently: a missing line is a missing value
+/// ([`parse_load`]).
 pub fn helper_script() -> String {
     format!(
         "bt_sm() {{ stat -L -c '%s %Y' -- \"$1\" 2>/dev/null \
@@ -76,6 +88,21 @@ pub fn helper_script() -> String {
          for p in \"$@\"; do bt_one \"$i\" \"$p\" \"$m\"; i=$((i+1)); done; \
          echo \"BT-END $s\"; }}; \
          bt_stat() {{ bt_run s \"$@\"; }}; bt_count() {{ bt_run c \"$@\"; }}; \
+         bt_load() {{ bt_s=$1; echo \"BT-R $bt_s\"; \
+         if [ -r /proc/stat ]; then \
+         awk '/^cpu /{{$1 = \"\"; print \"BT-L cpu\" $0; exit}}' /proc/stat; \
+         awk '$1 ~ /^(MemTotal|MemAvailable|MemFree|Buffers|Cached|SwapTotal|SwapFree):$/ \
+         {{sub(/:$/, \"\", $1); print \"BT-L mem \" $1 \" \" $2}}' /proc/meminfo 2>/dev/null; \
+         read bt_a bt_b bt_c bt_r < /proc/loadavg 2>/dev/null && echo \"BT-L load $bt_a $bt_b $bt_c\"; \
+         read bt_a bt_r < /proc/uptime 2>/dev/null && echo \"BT-L up $bt_a\"; \
+         df -P / 2>/dev/null | awk 'NR > 1 {{d = $5}} END {{if (d != \"\") print \"BT-L disk \" d}}'; \
+         if [ \"$2\" = p ]; then \
+         sed -n 's/^PRETTY_NAME=/BT-L os /p' /etc/os-release 2>/dev/null; \
+         echo \"BT-L cores $(grep -c '^cpu[0-9]' /proc/stat 2>/dev/null)\"; \
+         ps -eo pcpu,comm --sort=-pcpu 2>/dev/null \
+         | awk 'NR > 1 && NR <= 4 {{c = $1; $1 = \"\"; print \"BT-L ps \" c $0}}'; \
+         fi; \
+         else echo BT-NOPROC; fi; echo \"BT-END $bt_s\"; }}; \
          echo {HELPER_MARK}; printf 'BT-HOME %s\\n' \"$HOME\"; \
          while IFS= read -r bt_line; do eval \"$bt_line\"; done"
     )
@@ -228,6 +255,228 @@ fn reply_line(line: &str) -> Option<(usize, Option<RemoteEntry>)> {
         _ => return None,
     };
     Some((index, answer))
+}
+
+// ─── load sample (046) ───────────────────────────────────────────────────
+
+/// The request line of a load sample (newline included): `bt_load 9` or, with
+/// the popover's details, `bt_load 9 p`. It shares the session's sequence
+/// numbers with [`request_line`], so no reply is taken for another's.
+pub fn load_request_line(seq: u64, detail: bool) -> String {
+    if detail {
+        format!("bt_load {seq} p\n")
+    } else {
+        format!("bt_load {seq}\n")
+    }
+}
+
+/// `/proc/stat`'s aggregate `cpu` line, reduced to what a percentage needs.
+/// The percentage is the difference of two readings (`remote_stats::Sampler`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuCounters {
+    /// All time, in jiffies: `user` through `steal` (the `guest` columns are
+    /// already inside `user` and `nice`).
+    pub total: u64,
+    /// Idle time: `idle` + `iowait`.
+    pub idle: u64,
+}
+
+/// One process of the popover's top three.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Process {
+    /// `ps`'s `comm`, control characters dropped (the name is the server's).
+    pub name: String,
+    /// `ps`'s `pcpu`, in **tenths** of a percent (an integer: the answer is `Eq`).
+    pub cpu: u32,
+}
+
+/// One `bt_load` reply ([`parse_load`]): raw readings, nothing derived yet.
+/// Sizes are in bytes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoadSample {
+    pub cpu: CpuCounters,
+    pub mem_total: u64,
+    /// `MemAvailable`, or `MemFree + Buffers + Cached` on a kernel before 3.14.
+    pub mem_available: u64,
+    pub swap_total: u64,
+    pub swap_free: u64,
+    /// The 1, 5 and 15 minute load averages, in **hundredths**.
+    pub load: Option<[u32; 3]>,
+    /// Seconds since boot.
+    pub uptime: Option<u64>,
+    /// The root file system's use, % (`df -P /`'s own rounding).
+    pub disk: Option<u8>,
+    /// `PRETTY_NAME` of `/etc/os-release` — only with the `p` flag.
+    pub os: Option<String>,
+    /// The number of `cpuN` lines — only with the `p` flag.
+    pub cores: Option<u32>,
+    /// The top three by CPU — only with the `p` flag, empty where `ps --sort`
+    /// is not procps's (busybox).
+    pub processes: Vec<Process>,
+}
+
+/// The helper's output → the `bt_load` reply to request `seq`: `Ok(None)` for
+/// `BT-NOPROC` (no Linux `/proc`, no indicator — R4.2).
+///
+/// Only the `cpu` line and `MemTotal` are required; every other value is
+/// optional and a missing line leaves it empty. An unknown `BT-L` tag is
+/// skipped (a newer script), any other line inside the reply — and a known
+/// required line that does not parse — is [`ReplyError::Malformed`]. Never a
+/// panic: the bytes are the server's.
+pub fn parse_load(out: &str, seq: u64) -> Result<Option<LoadSample>, ReplyError> {
+    let begin = format!("BT-R {seq}");
+    let mut lines = out.lines().map(str::trim).skip_while(|line| *line != begin);
+    if lines.next().is_none() {
+        return Err(ReplyError::NotStarted);
+    }
+    let mut sample = LoadSample::default();
+    let mut cpu = false;
+    let mut mem = MemFields::default();
+    let mut no_proc = false;
+    for line in lines {
+        if ends_reply(line, seq) {
+            if no_proc {
+                return Ok(None);
+            }
+            let (Some(total), true) = (mem.total, cpu) else {
+                return Err(ReplyError::Malformed("no cpu or MemTotal line".to_owned()));
+            };
+            sample.mem_total = total;
+            sample.mem_available = mem.available.unwrap_or_else(|| {
+                mem.free
+                    .unwrap_or(0)
+                    .saturating_add(mem.buffers.unwrap_or(0))
+                    .saturating_add(mem.cached.unwrap_or(0))
+            });
+            sample.swap_total = mem.swap_total.unwrap_or(0);
+            sample.swap_free = mem.swap_free.unwrap_or(0);
+            return Ok(Some(sample));
+        }
+        let malformed = || ReplyError::Malformed(line.to_owned());
+        if line == "BT-NOPROC" {
+            no_proc = true;
+            continue;
+        }
+        let rest = line.strip_prefix("BT-L ").ok_or_else(malformed)?;
+        let (tag, value) = rest.split_once(' ').unwrap_or((rest, ""));
+        let value = value.trim();
+        match tag {
+            "cpu" => {
+                sample.cpu = cpu_counters(value).ok_or_else(malformed)?;
+                cpu = true;
+            }
+            "mem" => mem.read(value).ok_or_else(malformed)?,
+            "load" => sample.load = load_averages(value),
+            "up" => sample.uptime = whole_seconds(value),
+            "disk" => {
+                sample.disk = value
+                    .strip_suffix('%')
+                    .and_then(|n| n.parse::<u8>().ok())
+                    .map(|n| n.min(100));
+            }
+            "os" => {
+                let name = clean(value.trim_matches(|c| c == '"' || c == '\''));
+                sample.os = (!name.is_empty()).then_some(name);
+            }
+            "cores" => sample.cores = value.parse().ok().filter(|&n| n > 0),
+            "ps" => {
+                if let Some(process) = process(value) {
+                    sample.processes.push(process);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(ReplyError::Unterminated)
+}
+
+/// `/proc/meminfo`'s fields as they arrive, in kB.
+#[derive(Default)]
+struct MemFields {
+    total: Option<u64>,
+    available: Option<u64>,
+    free: Option<u64>,
+    buffers: Option<u64>,
+    cached: Option<u64>,
+    swap_total: Option<u64>,
+    swap_free: Option<u64>,
+}
+
+impl MemFields {
+    /// One `{key} {kB}` line; the value is kept in bytes. `None` if the number
+    /// does not parse; an unknown key is skipped.
+    fn read(&mut self, value: &str) -> Option<()> {
+        let (key, kb) = value.split_once(' ')?;
+        let bytes = kb.trim().parse::<u64>().ok()?.saturating_mul(1024);
+        let slot = match key {
+            "MemTotal" => &mut self.total,
+            "MemAvailable" => &mut self.available,
+            "MemFree" => &mut self.free,
+            "Buffers" => &mut self.buffers,
+            "Cached" => &mut self.cached,
+            "SwapTotal" => &mut self.swap_total,
+            "SwapFree" => &mut self.swap_free,
+            _ => return Some(()),
+        };
+        *slot = Some(bytes);
+        Some(())
+    }
+}
+
+/// `user nice system idle [iowait irq softirq steal guest guest_nice]` → the
+/// counters; at least the first four (the oldest kernels' line).
+fn cpu_counters(value: &str) -> Option<CpuCounters> {
+    let mut fields = [0u64; 8];
+    let mut count = 0;
+    for (slot, field) in fields.iter_mut().zip(value.split_whitespace()) {
+        *slot = field.parse().ok()?;
+        count += 1;
+    }
+    if count < 4 {
+        return None;
+    }
+    let total = fields.iter().fold(0u64, |sum, &n| sum.saturating_add(n));
+    Some(CpuCounters {
+        total,
+        idle: fields[3].saturating_add(fields[4]),
+    })
+}
+
+/// A non-negative decimal → integer units of `1 / scale` (hundredths of a load
+/// average, tenths of a percent); `None` if it is not one.
+fn scaled(text: &str, scale: f64) -> Option<u32> {
+    let value: f64 = text.parse().ok()?;
+    let scaled = (value * scale).round();
+    (scaled.is_finite() && (0.0..=f64::from(u32::MAX)).contains(&scaled)).then_some(scaled as u32)
+}
+
+fn load_averages(value: &str) -> Option<[u32; 3]> {
+    let mut fields = value.split_whitespace().map(|field| scaled(field, 100.0));
+    Some([fields.next()??, fields.next()??, fields.next()??])
+}
+
+/// `/proc/uptime`'s `12345.67` → whole seconds.
+fn whole_seconds(value: &str) -> Option<u64> {
+    value.split('.').next()?.parse().ok()
+}
+
+/// `{pcpu} {comm}` → a process; `None` if the number does not parse.
+fn process(value: &str) -> Option<Process> {
+    let (cpu, name) = value.split_once(' ').unwrap_or((value, ""));
+    let name = clean(name.trim());
+    if name.is_empty() {
+        return None;
+    }
+    Some(Process {
+        name,
+        cpu: scaled(cpu, 10.0)?,
+    })
+}
+
+/// A string from the server, without control characters (a process name is
+/// whatever the process chose).
+fn clean(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 // ─── download ────────────────────────────────────────────────────────────
@@ -1008,6 +1257,125 @@ mod tests {
             "{out}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_load_reply_gives_the_raw_readings() {
+        assert_eq!(load_request_line(9, false), "bt_load 9\n");
+        assert_eq!(load_request_line(9, true), "bt_load 9 p\n");
+        let out = "noise\nBT-R 9\n\
+                   BT-L cpu 100 20 30 800 50 0 0 0 0 0\n\
+                   BT-L mem MemTotal 2000\nBT-L mem MemFree 100\n\
+                   BT-L mem MemAvailable 800\nBT-L mem SwapTotal 1000\n\
+                   BT-L mem SwapFree 750\nBT-L load 0.52 1.00 12.25\n\
+                   BT-L up 12345.67\nBT-L disk 54%\n\
+                   BT-L os \"Ubuntu 22.04.3 LTS\"\nBT-L cores 4\n\
+                   BT-L ps 12.5 postgres\nBT-L ps 3.0 tmux: server\n\
+                   BT-L future 1 2 3\nBT-END 9\n";
+        let sample = parse_load(out, 9).expect("readable").expect("a sample");
+        assert_eq!(
+            sample.cpu,
+            CpuCounters {
+                total: 1000,
+                idle: 850
+            }
+        );
+        assert_eq!(sample.mem_total, 2000 * 1024);
+        assert_eq!(sample.mem_available, 800 * 1024);
+        assert_eq!(
+            (sample.swap_total, sample.swap_free),
+            (1000 * 1024, 750 * 1024)
+        );
+        assert_eq!(sample.load, Some([52, 100, 1225]));
+        assert_eq!(sample.uptime, Some(12345));
+        assert_eq!(sample.disk, Some(54));
+        assert_eq!(sample.os.as_deref(), Some("Ubuntu 22.04.3 LTS"));
+        assert_eq!(sample.cores, Some(4));
+        assert_eq!(
+            sample.processes,
+            [
+                Process {
+                    name: "postgres".to_owned(),
+                    cpu: 125
+                },
+                Process {
+                    name: "tmux: server".to_owned(),
+                    cpu: 30
+                },
+            ]
+        );
+        // Another sequence number's reply is not this one.
+        assert_eq!(parse_load(out, 8), Err(ReplyError::NotStarted));
+        assert_eq!(parse_load("BT-R 1\nBT-NOPROC\nBT-END 1\n", 1), Ok(None));
+    }
+
+    #[test]
+    fn a_load_reply_without_optional_lines_is_still_a_sample() {
+        // A kernel before 3.14 (no MemAvailable), no swap, no df, no ps, the
+        // oldest four-column cpu line.
+        let out = "BT-R 2\nBT-L cpu 10 0 10 80\nBT-L mem MemTotal 1000\n\
+                   BT-L mem MemFree 100\nBT-L mem Buffers 50\nBT-L mem Cached 250\n\
+                   BT-L cores 0\nBT-L os \nBT-END 2\n";
+        let sample = parse_load(out, 2).expect("readable").expect("a sample");
+        assert_eq!(
+            sample.cpu,
+            CpuCounters {
+                total: 100,
+                idle: 80
+            }
+        );
+        assert_eq!(sample.mem_available, 400 * 1024);
+        assert_eq!(
+            (sample.swap_total, sample.load, sample.uptime),
+            (0, None, None)
+        );
+        assert_eq!((sample.disk, sample.cores, sample.os), (None, None, None));
+        assert!(sample.processes.is_empty());
+    }
+
+    #[test]
+    fn a_broken_load_reply_is_an_error_not_a_panic() {
+        let reply = |body: &str| format!("BT-R 3\n{body}BT-END 3\n");
+        let base = "BT-L cpu 1 2 3 4\nBT-L mem MemTotal 10\n";
+        assert!(parse_load(&reply(base), 3).expect("readable").is_some());
+        for broken in [
+            "BT-L cpu 1 2 3\nBT-L mem MemTotal 10\n",
+            "BT-L cpu 1 2 x 4\nBT-L mem MemTotal 10\n",
+            "BT-L mem MemTotal 10\n",
+            "BT-L cpu 1 2 3 4\n",
+            "BT-L cpu 1 2 3 4\nBT-L mem MemTotal ten\n",
+            "BT-L cpu 1 2 3 4\nBT-L mem MemTotal 10\nnot ours\n",
+            "BT-L cpu 99999999999999999999 2 3 4\nBT-L mem MemTotal 10\n",
+        ] {
+            assert!(
+                matches!(parse_load(&reply(broken), 3), Err(ReplyError::Malformed(_))),
+                "{broken:?}"
+            );
+        }
+        assert_eq!(
+            parse_load("BT-R 3\nBT-L cpu 1 2 3 4\n", 3),
+            Err(ReplyError::Unterminated)
+        );
+        // Optional values that do not parse are just missing; a process name
+        // loses its control characters, a process without a name is dropped.
+        let odd = format!(
+            "{base}BT-L load 1 x 2\nBT-L up soon\nBT-L disk 120%\nBT-L disk full\n\
+             BT-L ps 1.5 evil\x1b[2Jname\x07\nBT-L ps 2.0\nBT-L ps NaN x\nBT-L ps -1 y\n"
+        );
+        let sample = parse_load(&reply(&odd), 3)
+            .expect("readable")
+            .expect("a sample");
+        assert_eq!(
+            (sample.load, sample.uptime, sample.disk),
+            (None, None, None)
+        );
+        assert_eq!(
+            sample.processes,
+            [Process {
+                name: "evil[2Jname".to_owned(),
+                cpu: 15
+            }]
+        );
     }
 
     #[test]

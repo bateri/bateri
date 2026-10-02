@@ -14,7 +14,9 @@
 //!   ([`RemoteCache`]). A question carries the remote session's generation
 //!   (`Session::remote_target`'s command): another generation closes the old
 //!   session and opens a new one, and so does [`RemoteHelper::close`] (the
-//!   pane closing) and [`IDLE`] without a question.
+//!   pane closing) and [`IDLE`] without a question. While the load indicator
+//!   samples ([`Query::Load`], 046 Karar 1) a question comes every few seconds,
+//!   so the session stays open; it closes [`IDLE`] after sampling stops.
 //! - **Resolution** ([`remote_paths`]) is `links::resolve`'s, on the remote
 //!   disk: `~` from the helper's greeting, a relative name from the remote
 //!   OSC 7 directory and **no** relative name without it (Karar 2-A, R1.2).
@@ -33,7 +35,8 @@ use std::time::{Duration, Instant};
 
 use crate::links::{self, Entry};
 use crate::remote_files::{
-    Ask, RemoteEntry, ends_reply, helper_script, parse_greeting, parse_reply, request_line,
+    Ask, LoadSample, RemoteEntry, ends_reply, helper_script, load_request_line, parse_greeting,
+    parse_load, parse_reply, request_line,
 };
 use crate::upload::{collect_stderr, is_safe, last_line, remote_command};
 
@@ -48,6 +51,11 @@ pub const STAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a [`Ask::Count`] reply may take: it walks a whole folder tree (the
 /// download sheet's file count). Design constant.
 pub const COUNT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long a load sample's reply may take (046): a few `cat`s, a `df` and,
+/// with the popover open, a `ps`. Design constant — short, because the
+/// indicator hides on a timeout and the next tick asks again.
+pub const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A session with no question for this long closes (R1.3): an idle ssh
 /// connection is not held open for the whole remote session. Design constant —
@@ -167,6 +175,24 @@ impl HelperSession {
         let seq = self.seq;
         let line = request_line(seq, ask, paths)
             .ok_or_else(|| "The name can't be sent to the server safely".to_owned())?;
+        let out = self.exchange(&line, seq, timeout)?;
+        parse_reply(&out, seq, paths.len())
+            .map_err(|_| "The server's answer could not be read".to_owned())
+    }
+
+    /// One load sample (046 Karar 2): `Ok(None)` if the server has no Linux
+    /// `/proc` (`BT-NOPROC`). `Err` as [`Self::ask`]'s — the session is dropped
+    /// after it.
+    pub fn load(&mut self, detail: bool, timeout: Duration) -> Result<Option<LoadSample>, String> {
+        self.seq += 1;
+        let seq = self.seq;
+        let out = self.exchange(&load_request_line(seq, detail), seq, timeout)?;
+        parse_load(&out, seq).map_err(|_| "The server's answer could not be read".to_owned())
+    }
+
+    /// Writes one request line and reads up to its reply's end line, within
+    /// `timeout`.
+    fn exchange(&mut self, line: &str, seq: u64, timeout: Duration) -> Result<String, String> {
         self.stdin
             .write_all(line.as_bytes())
             .and_then(|()| self.stdin.flush())
@@ -185,8 +211,7 @@ impl HelperSession {
             out.push_str(&line);
             out.push('\n');
             if end {
-                return parse_reply(&out, seq, paths.len())
-                    .map_err(|_| "The server's answer could not be read".to_owned());
+                return Ok(out);
             }
         }
     }
@@ -324,6 +349,9 @@ pub enum Query {
     /// The download's question about one absolute path: what it is, a folder's
     /// file count and bytes included — always fresh, never from the cache.
     Count(String),
+    /// A load sample for the ssh status bar's indicator (046 Karar 1, 2);
+    /// `detail` while the popover is open (OS, cores, top processes).
+    Load { detail: bool },
 }
 
 /// The answer to a [`Query`].
@@ -334,6 +362,24 @@ pub enum Answer {
     Verified(Option<(usize, String, RemoteEntry)>),
     /// What the path is; `None` if it does not exist.
     Counted(Option<RemoteEntry>),
+    /// The load sample, or why there is none.
+    Load(LoadReply),
+}
+
+/// The answer to a [`Query::Load`]. Its failures are split by what the
+/// sampler does next (046 Karar 1): a failed **open** comes back here as
+/// [`LoadReply::Unreachable`] and ends sampling for the generation (no ssh
+/// attempt every few seconds against a server that wants a password); a
+/// failure on an **open** session stays the reply's `Err` — the indicator
+/// hides and the next tick tries once more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadReply {
+    /// The raw readings.
+    Sample(LoadSample),
+    /// The server has no Linux `/proc` (`BT-NOPROC`): no indicator.
+    NoProc,
+    /// The helper session could not be opened; the pane label's text.
+    Unreachable(String),
 }
 
 /// The reply callback — runs on the worker thread; the platform shell posts it
@@ -480,9 +526,14 @@ fn serve(
     if open.as_ref().is_some_and(|(at, _)| *at != command) {
         *open = None;
     }
+    // A load sample's failed open is an answer of its own (`LoadReply`).
+    let opening_failed = |text: String| match query {
+        Query::Load { .. } => Ok(Answer::Load(LoadReply::Unreachable(text))),
+        _ => Err(text),
+    };
     if open.is_none() {
         if let Some(failure) = failed.as_ref().filter(|failure| failure.holds(command)) {
-            return Err(failure.text.clone());
+            return opening_failed(failure.text.clone());
         }
         match HelperSession::open(ssh, host, OPEN_TIMEOUT) {
             Ok(session) => {
@@ -495,7 +546,7 @@ fn serve(
                     at: Instant::now(),
                     text: text.clone(),
                 });
-                return Err(text);
+                return opening_failed(text);
             }
         }
     }
@@ -517,6 +568,10 @@ fn answer(
     query: Query,
 ) -> Result<Answer, String> {
     match query {
+        Query::Load { detail } => Ok(Answer::Load(match session.load(detail, LOAD_TIMEOUT)? {
+            Some(sample) => LoadReply::Sample(sample),
+            None => LoadReply::NoProc,
+        })),
         Query::Count(path) => {
             let mut entries =
                 session.ask(Ask::Count, std::slice::from_ref(&path), COUNT_TIMEOUT)?;
@@ -645,6 +700,57 @@ mod tests {
                 .is_err()
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `bt_load` end to end on this machine (046 R4.1, R4.2): macOS has no
+    /// `/proc` and answers `BT-NOPROC`, `make linux` reads a real one. The
+    /// branch is the file, not the target: what decides is what the script sees.
+    #[test]
+    fn a_load_sample_answers_through_a_local_shell() {
+        use crate::remote_stats::Sampler;
+        use bt_core::StatsForm;
+
+        let mut session =
+            HelperSession::open(&local_ssh(), "local", OPEN_TIMEOUT).expect("the helper greets");
+        let first = session.load(false, LOAD_TIMEOUT).expect("a reply");
+        if Path::new("/proc/stat").exists() {
+            let plain = first.expect("a Linux /proc gives a sample");
+            assert!(
+                plain.cpu.total > 0 && plain.cpu.idle <= plain.cpu.total,
+                "{plain:?}"
+            );
+            assert!(plain.mem_total > 0, "{plain:?}");
+            assert!(plain.mem_available <= plain.mem_total, "{plain:?}");
+            assert!(plain.load.is_some() && plain.uptime.is_some(), "{plain:?}");
+            assert!(plain.disk.is_some_and(|disk| disk <= 100), "{plain:?}");
+            // The details only with `p`.
+            assert!(plain.os.is_none() && plain.cores.is_none() && plain.processes.is_empty());
+            let detailed = session
+                .load(true, LOAD_TIMEOUT)
+                .expect("a reply")
+                .expect("a sample");
+            assert!(
+                detailed.cores.is_some_and(|cores| cores > 0),
+                "{detailed:?}"
+            );
+            assert!(detailed.processes.len() <= 3, "{detailed:?}");
+            let mut sampler = Sampler::default();
+            sampler.take(&plain, StatsForm::Sparkline);
+            let reading = sampler.take(&detailed, StatsForm::Sparkline);
+            assert!(
+                reading.stats.cpu.is_none_or(|cpu| cpu <= 100),
+                "{reading:?}"
+            );
+            assert!(reading.stats.mem <= 100, "{reading:?}");
+        } else {
+            assert_eq!(first, None, "no /proc here: BT-NOPROC");
+            assert_eq!(session.load(true, LOAD_TIMEOUT), Ok(None));
+        }
+        // The session goes on: a `bt_stat` after it reads its own reply.
+        assert_eq!(
+            session.ask(Ask::Stat, &["/".to_owned()], STAT_TIMEOUT),
+            Ok(vec![Some(RemoteEntry::Dir(None))])
+        );
     }
 
     #[test]
@@ -835,5 +941,68 @@ mod tests {
         assert!(ask(2).is_err());
         assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 2);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A load sample's failed open is an answer, not an error (046 Karar 1):
+    /// the sampler ends the generation on it, while an `Err` — a failure on
+    /// an open session — earns one retry. Held failures answer the same way.
+    #[test]
+    fn a_load_samples_failed_open_is_unreachable() {
+        let root = scratch("load-open");
+        let counter = root.join("dials");
+        let dial = format!(
+            "echo dial >> '{}'; echo 'Permission denied (password).' >&2; exit 255",
+            text(&counter)
+        );
+        let mut helper = RemoteHelper::default();
+        let mut ask = |ssh: Vec<String>, query: Query| {
+            let (tx, rx) = mpsc::channel();
+            helper.ask(Request {
+                command: 1,
+                ssh,
+                host: "prod".to_owned(),
+                query,
+                reply: Box::new(move |answer| {
+                    let _ = tx.send(answer);
+                }),
+            });
+            rx.recv_timeout(Duration::from_secs(30))
+                .expect("the worker replies")
+        };
+        let failing = || vec!["/bin/sh".to_owned(), "-c".to_owned(), dial.clone()];
+        for _ in 0..2 {
+            match ask(failing(), Query::Load { detail: false }) {
+                Ok(Answer::Load(LoadReply::Unreachable(text))) => {
+                    assert!(text.contains("Permission denied"), "{text}");
+                }
+                other => panic!("expected Unreachable, got {other:?}"),
+            }
+        }
+        assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
+        // Other questions keep their `Err`.
+        assert!(ask(failing(), Query::Count("/etc".to_owned())).is_err());
+        let _ = fs::remove_dir_all(&root);
+        // An open session answers through the worker.
+        let mut helper = RemoteHelper::default();
+        let (tx, rx) = mpsc::channel();
+        helper.ask(Request {
+            command: 1,
+            ssh: local_ssh(),
+            host: "local".to_owned(),
+            query: Query::Load { detail: true },
+            reply: Box::new(move |answer| {
+                let _ = tx.send(answer);
+            }),
+        });
+        let answer = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the worker replies");
+        assert!(
+            matches!(
+                answer,
+                Ok(Answer::Load(LoadReply::Sample(_) | LoadReply::NoProc))
+            ),
+            "{answer:?}"
+        );
     }
 }

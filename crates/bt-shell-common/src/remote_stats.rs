@@ -1,0 +1,787 @@
+//! The remote host's load for the ssh status bar (046): what the samples mean
+//! and when they are taken — both pure, so `make linux` runs them too.
+//!
+//! - **[`Sampler`]** turns the helper's raw readings
+//!   ([`crate::remote_files::LoadSample`]) into the value the context row
+//!   draws ([`RemoteStats`]: rounded percentages, the sparkline's levels) and
+//!   the popover's [`Detail`]. CPU is the difference of two readings, so the
+//!   first sample after a (re)start has none.
+//! - **[`Schedule`]** says when a sample is taken: events in (the remote
+//!   generation, the form, visibility, interaction, a tick, a reply, the
+//!   popover), actions out (arm a tick with a token, send a request, hide the
+//!   indicator). The clock is an argument; the platform shell runs the actions
+//!   (`dispatch`'s `after` cannot be cancelled, hence the token).
+//!
+//! The rationale is in `.tasks/046-uzak-yuk-gostergesi/discussion.md` → Karar 1
+//! (the helper's request, the two kinds of failure), Karar 2 (what is measured
+//! and how) and Karar 6 (when sampling runs and stops).
+
+use std::time::{Duration, Instant};
+
+use bt_core::{RemoteStats, STATS_HISTORY, StatsForm};
+
+use crate::remote_files::{CpuCounters, LoadSample, Process};
+
+/// With no interaction for this long sampling pauses and the indicator keeps
+/// its last value (046 Karar 6). A **design constant**, not a measurement:
+/// long enough for reading a log, short enough that a forgotten window does
+/// not sample a server all night.
+pub const STATS_IDLE: Duration = Duration::from_secs(120);
+
+/// After a sample without CPU (the first one: CPU is a difference) the next
+/// comes this soon rather than a whole interval later (046 Karar 2). Design
+/// constant — the reason it is not a `sleep 1` inside the script is that the
+/// helper's worker is serial and a ⌘-hover would wait behind it.
+pub const FIRST_FOLLOW: Duration = Duration::from_secs(1);
+
+// ─── sampler ─────────────────────────────────────────────────────────────
+
+/// The popover's content (046 Karar 7), from one sample. Sizes in bytes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Detail {
+    /// `PRETTY_NAME`; only on a `detail` request.
+    pub os: Option<String>,
+    /// Only on a `detail` request.
+    pub cores: Option<u32>,
+    /// CPU %, rounded; `None` on the first sample.
+    pub cpu: Option<u8>,
+    /// The 1/5/15 minute load averages, in hundredths.
+    pub load: Option<[u32; 3]>,
+    pub mem_used: u64,
+    pub mem_total: u64,
+    pub swap_used: u64,
+    pub swap_total: u64,
+    /// The root file system's use, %.
+    pub disk: Option<u8>,
+    /// Seconds since boot.
+    pub uptime: Option<u64>,
+    /// The top three by CPU; only on a `detail` request, empty without procps.
+    pub processes: Vec<Process>,
+}
+
+/// What one sample gives: the context row's value and the popover's content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reading {
+    pub stats: RemoteStats,
+    pub detail: Detail,
+}
+
+/// The previous CPU counters and the sparkline's history (046 Karar 2, 4).
+#[derive(Debug, Default)]
+pub struct Sampler {
+    previous: Option<CpuCounters>,
+    /// The levels, oldest first; kept in every form, so switching to
+    /// `sparkline` does not start empty — but only that form carries it out.
+    history: [u8; STATS_HISTORY],
+    len: usize,
+}
+
+impl Sampler {
+    /// Forgets the counters and the history: sampling resumed after a pause,
+    /// and a gapped time axis would read as a continuous graph (Karar 6).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// One sample → what is drawn, in `form`.
+    pub fn take(&mut self, sample: &LoadSample, form: StatsForm) -> Reading {
+        let cpu = self.cpu(sample.cpu);
+        if let Some(cpu) = cpu {
+            self.push(level(cpu));
+        }
+        let mem_used = sample.mem_total.saturating_sub(sample.mem_available);
+        let mut stats = RemoteStats {
+            form,
+            cpu,
+            mem: percent(mem_used, sample.mem_total),
+            disk: sample.disk.unwrap_or(0),
+            ..RemoteStats::default()
+        };
+        if form == StatsForm::Sparkline {
+            stats.history = self.history;
+            stats.len = self.len as u8;
+        }
+        let detail = Detail {
+            os: sample.os.clone(),
+            cores: sample.cores,
+            cpu,
+            load: sample.load,
+            mem_used,
+            mem_total: sample.mem_total,
+            swap_used: sample.swap_total.saturating_sub(sample.swap_free),
+            swap_total: sample.swap_total,
+            disk: sample.disk,
+            uptime: sample.uptime,
+            processes: sample.processes.clone(),
+        };
+        Reading { stats, detail }
+    }
+
+    /// CPU % since the previous reading; `None` on the first one and when a
+    /// counter went back (a rebooted server, an overflow) — that difference
+    /// is thrown away and the new reading is the next one's base.
+    fn cpu(&mut self, now: CpuCounters) -> Option<u8> {
+        let before = self.previous.replace(now)?;
+        let total = now.total.checked_sub(before.total)?;
+        let idle = now.idle.checked_sub(before.idle)?;
+        if total == 0 {
+            return None;
+        }
+        Some(percent(total.saturating_sub(idle), total))
+    }
+
+    fn push(&mut self, level: u8) {
+        if self.len == STATS_HISTORY {
+            self.history.copy_within(1.., 0);
+            self.history[STATS_HISTORY - 1] = level;
+        } else {
+            self.history[self.len] = level;
+            self.len += 1;
+        }
+    }
+}
+
+/// `part / whole` as a rounded percentage, `0..=100`; 0 for an empty whole.
+fn percent(part: u64, whole: u64) -> u8 {
+    if whole == 0 {
+        return 0;
+    }
+    let part = u128::from(part.min(whole));
+    let whole = u128::from(whole);
+    ((part * 100 + whole / 2) / whole) as u8
+}
+
+/// A CPU % → the sparkline's level, `⌊v / 12.5⌋` clipped to 7 (U+2581 + level).
+fn level(cpu: u8) -> u8 {
+    (u16::from(cpu) * 2 / 25).min(7) as u8
+}
+
+// ─── schedule ────────────────────────────────────────────────────────────
+
+/// What the platform shell does next ([`Schedule`]'s output).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Call [`Schedule::tick`] with `token` after `after`. An earlier token
+    /// is stale by then — `after` cannot be cancelled.
+    Arm { token: u64, after: Duration },
+    /// Send a [`crate::remote_helper::Query::Load`] now. `restart`: reset the
+    /// [`Sampler`] first (sampling resumed after a pause).
+    Request { detail: bool, restart: bool },
+    /// Take the indicator away (`set_remote_stats(…, None)`).
+    Hide,
+}
+
+/// How a load request ended, as the schedule needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// A sample; `cpu` — whether it carried a CPU % (the first does not).
+    Sample { cpu: bool },
+    /// `BT-NOPROC`: no Linux `/proc` on this server.
+    NoProc,
+    /// The helper session could not be opened (Karar 1: no retry in this
+    /// generation — a password prompt, an unreachable host).
+    Unreachable,
+    /// The open session failed (closed, timed out, unreadable answer).
+    Failed,
+}
+
+/// When samples are taken (046 Karar 6). Sampling runs while a remote
+/// generation is on, the form is not `off`, the pane is visible, the last
+/// interaction is younger than [`STATS_IDLE`] and the generation has not
+/// ended sampling (a failed open, `BT-NOPROC`, a second failure in a row).
+/// At most one request is in flight; one wanted meanwhile goes out at the
+/// reply.
+///
+/// A pause the tick discovers (idle) just stops arming; an event that stops
+/// sampling (generation, form, visibility) also makes the armed token stale.
+/// Resuming takes the first sample at once and restarts the history.
+#[derive(Debug)]
+pub struct Schedule {
+    generation: Option<u64>,
+    on: bool,
+    interval: Duration,
+    visible: bool,
+    interaction: Option<Instant>,
+    detail: bool,
+    /// Sampling ended for this generation.
+    ended: bool,
+    /// The open session's failure was already retried once.
+    retried: bool,
+    in_flight: bool,
+    /// A request is wanted as soon as the one in flight answers.
+    wanted: Option<bool>,
+    token: u64,
+    armed: bool,
+}
+
+impl Schedule {
+    /// A schedule with the settings' form (`on` — not `off`) and interval;
+    /// nothing runs until a generation starts.
+    pub fn new(on: bool, interval: Duration) -> Self {
+        Self {
+            generation: None,
+            on,
+            interval,
+            visible: true,
+            interaction: None,
+            detail: false,
+            ended: false,
+            retried: false,
+            in_flight: false,
+            wanted: None,
+            token: 0,
+            armed: false,
+        }
+    }
+
+    /// Whether sampling runs at `now`.
+    pub fn running(&self, now: Instant) -> bool {
+        self.generation.is_some()
+            && self.on
+            && self.visible
+            && !self.ended
+            && self
+                .interaction
+                .is_some_and(|at| now.saturating_duration_since(at) < STATS_IDLE)
+    }
+
+    /// The remote generation the samples belong to; `None` while no remote
+    /// session runs.
+    pub fn generation(&self) -> Option<u64> {
+        self.generation
+    }
+
+    /// A remote session started (`Some`) or ended (`None`). A new generation
+    /// starts clean and counts as an interaction: the user just connected.
+    pub fn set_generation(&mut self, now: Instant, generation: Option<u64>) -> Vec<Action> {
+        if generation == self.generation {
+            return Vec::new();
+        }
+        // Fresh: running on into another generation still takes its first
+        // sample at once, and the old generation's tick goes stale.
+        self.change(now, true, |schedule| {
+            schedule.generation = generation;
+            schedule.ended = false;
+            schedule.retried = false;
+            if generation.is_some() {
+                schedule.interaction = Some(now);
+            }
+        })
+    }
+
+    /// The settings changed: `on` is "not `off`". Turning off hides the
+    /// indicator; a new interval holds from the next tick.
+    pub fn set_form(&mut self, now: Instant, on: bool, interval: Duration) -> Vec<Action> {
+        self.interval = interval;
+        let mut actions = self.change(now, false, |schedule| schedule.on = on);
+        if !on && self.generation.is_some() {
+            actions.push(Action::Hide);
+        }
+        actions
+    }
+
+    /// The pane became visible or covered (a background tab, a minimised
+    /// window, behind a zoomed split).
+    pub fn set_visible(&mut self, now: Instant, visible: bool) -> Vec<Action> {
+        self.change(now, false, |schedule| schedule.visible = visible)
+    }
+
+    /// A key, a click, the wheel, a mouse move or the window becoming key.
+    /// Called at mouse-move rate: while sampling runs it only stamps the time.
+    pub fn interaction(&mut self, now: Instant) -> Vec<Action> {
+        if self.running(now) {
+            self.interaction = Some(now);
+            return Vec::new();
+        }
+        self.change(now, false, |schedule| schedule.interaction = Some(now))
+    }
+
+    /// The popover opened or closed. Opening asks for the details at once
+    /// rather than at the next tick (after the request in flight, if any).
+    pub fn set_detail(&mut self, now: Instant, open: bool) -> Vec<Action> {
+        self.detail = open;
+        if !open || !self.running(now) {
+            return Vec::new();
+        }
+        self.disarm();
+        self.request(false)
+    }
+
+    /// An armed tick fired. A stale token does nothing; a paused schedule
+    /// arms nothing more.
+    pub fn tick(&mut self, now: Instant, token: u64) -> Vec<Action> {
+        if !self.armed || token != self.token {
+            return Vec::new();
+        }
+        self.armed = false;
+        if !self.running(now) {
+            return Vec::new();
+        }
+        self.request(false)
+    }
+
+    /// A request of `generation` answered. Another generation's reply only
+    /// frees the worker.
+    pub fn answered(&mut self, now: Instant, generation: u64, outcome: Outcome) -> Vec<Action> {
+        self.in_flight = false;
+        let current = self.generation == Some(generation);
+        let mut actions = Vec::new();
+        if current {
+            match outcome {
+                Outcome::Sample { cpu } => {
+                    self.retried = false;
+                    if self.running(now) && self.wanted.is_none() {
+                        let after = if cpu { self.interval } else { FIRST_FOLLOW };
+                        actions.push(self.arm(after));
+                    }
+                }
+                Outcome::NoProc | Outcome::Unreachable => {
+                    self.end();
+                    actions.push(Action::Hide);
+                }
+                Outcome::Failed if self.retried => {
+                    self.end();
+                    actions.push(Action::Hide);
+                }
+                Outcome::Failed => {
+                    self.retried = true;
+                    actions.push(Action::Hide);
+                    if self.running(now) && self.wanted.is_none() {
+                        actions.push(self.arm(self.interval));
+                    }
+                }
+            }
+        }
+        if let Some(restart) = self.wanted.take()
+            && self.running(now)
+        {
+            actions.extend(self.request(restart));
+        }
+        actions
+    }
+
+    /// Applies `edit`; if sampling started — or, `fresh`, runs on into a new
+    /// start — the first request goes out now (with a fresh history); if it
+    /// stopped, the armed tick goes stale.
+    fn change(&mut self, now: Instant, fresh: bool, edit: impl FnOnce(&mut Self)) -> Vec<Action> {
+        let before = self.running(now);
+        edit(self);
+        let after = self.running(now);
+        match (before, after) {
+            (false, true) => {
+                self.disarm();
+                self.request(true)
+            }
+            (true, true) if fresh => {
+                self.disarm();
+                self.request(true)
+            }
+            (true, false) => {
+                self.disarm();
+                self.wanted = None;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// A request now, or as soon as the one in flight answers.
+    fn request(&mut self, restart: bool) -> Vec<Action> {
+        if self.in_flight {
+            self.wanted = Some(self.wanted.unwrap_or(false) || restart);
+            return Vec::new();
+        }
+        self.in_flight = true;
+        vec![Action::Request {
+            detail: self.detail,
+            restart,
+        }]
+    }
+
+    fn arm(&mut self, after: Duration) -> Action {
+        self.token += 1;
+        self.armed = true;
+        Action::Arm {
+            token: self.token,
+            after,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.token += 1;
+        self.armed = false;
+    }
+
+    /// Sampling ends for this generation (Karar 1, R4.2).
+    fn end(&mut self) {
+        self.ended = true;
+        self.wanted = None;
+        self.disarm();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(total: u64, idle: u64) -> LoadSample {
+        LoadSample {
+            cpu: CpuCounters { total, idle },
+            mem_total: 1000,
+            mem_available: 390,
+            swap_total: 100,
+            swap_free: 75,
+            disk: Some(54),
+            ..LoadSample::default()
+        }
+    }
+
+    #[test]
+    fn cpu_is_the_difference_of_two_readings_rounded() {
+        let mut sampler = Sampler::default();
+        let first = sampler.take(&sample(1000, 800), StatsForm::Sparkline);
+        assert_eq!(first.stats.cpu, None);
+        assert_eq!(first.stats.history(), &[] as &[u8]);
+        assert_eq!(first.stats.mem, 61);
+        assert_eq!(first.stats.disk, 54);
+        assert_eq!(first.detail.mem_used, 610);
+        assert_eq!(first.detail.swap_used, 25);
+        // 200 jiffies, 47 idle → 153 busy → 76.5 % → 77.
+        let second = sampler.take(&sample(1200, 847), StatsForm::Sparkline);
+        assert_eq!(second.stats.cpu, Some(77));
+        assert_eq!(second.detail.cpu, Some(77));
+        assert_eq!(second.stats.history(), &[6]);
+        // 0.4 % rounds down.
+        let third = sampler.take(&sample(2200, 1843), StatsForm::Sparkline);
+        assert_eq!(third.stats.cpu, Some(0));
+    }
+
+    #[test]
+    fn the_level_is_an_eighth_of_the_range() {
+        let levels: Vec<u8> = [0, 12, 13, 24, 25, 37, 38, 50, 62, 63, 75, 87, 88, 99, 100]
+            .into_iter()
+            .map(level)
+            .collect();
+        assert_eq!(levels, [0, 0, 1, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 7, 7]);
+    }
+
+    #[test]
+    fn the_history_keeps_the_last_eight_oldest_first() {
+        let mut sampler = Sampler::default();
+        let mut total = 0;
+        let mut idle = 0;
+        sampler.take(&sample(total, idle), StatsForm::Sparkline);
+        let mut last = None;
+        // CPU 0, 10, …, 90 %: ten samples.
+        for busy in (0..10).map(|n| n * 10) {
+            total += 100;
+            idle += 100 - busy;
+            last = Some(sampler.take(&sample(total, idle), StatsForm::Sparkline));
+        }
+        let stats = last.expect("ten samples").stats;
+        assert_eq!(usize::from(stats.len), STATS_HISTORY);
+        // 20 % … 90 %.
+        assert_eq!(stats.history(), &[1, 2, 3, 4, 4, 5, 6, 7]);
+        // Another form carries no history, but it is kept.
+        total += 100;
+        let numbers = sampler.take(&sample(total, idle), StatsForm::Numbers).stats;
+        assert_eq!(numbers.len, 0);
+        assert_eq!(numbers.cpu, Some(100));
+        total += 100;
+        let back = sampler
+            .take(&sample(total, idle), StatsForm::Sparkline)
+            .stats;
+        assert_eq!(back.history(), &[3, 4, 4, 5, 6, 7, 7, 7]);
+        sampler.reset();
+        let fresh = sampler
+            .take(&sample(total, idle), StatsForm::Sparkline)
+            .stats;
+        assert_eq!((fresh.cpu, fresh.len), (None, 0));
+    }
+
+    #[test]
+    fn a_counter_that_goes_back_gives_no_cpu_once() {
+        let mut sampler = Sampler::default();
+        sampler.take(&sample(5000, 4000), StatsForm::Sparkline);
+        // A rebooted server: the counters start over.
+        assert_eq!(
+            sampler
+                .take(&sample(300, 200), StatsForm::Sparkline)
+                .stats
+                .cpu,
+            None
+        );
+        // Idle went back alone (an iowait quirk): no CPU either.
+        assert_eq!(
+            sampler
+                .take(&sample(400, 100), StatsForm::Sparkline)
+                .stats
+                .cpu,
+            None
+        );
+        // No time passed: no difference to divide.
+        assert_eq!(
+            sampler
+                .take(&sample(400, 100), StatsForm::Sparkline)
+                .stats
+                .cpu,
+            None
+        );
+        assert_eq!(
+            sampler
+                .take(&sample(500, 150), StatsForm::Sparkline)
+                .stats
+                .cpu,
+            Some(50)
+        );
+    }
+
+    #[test]
+    fn an_empty_memory_reading_is_zero_not_a_panic() {
+        let mut sampler = Sampler::default();
+        let reading = sampler.take(&LoadSample::default(), StatsForm::Alerts);
+        assert_eq!((reading.stats.mem, reading.stats.disk), (0, 0));
+        assert_eq!(reading.detail.disk, None);
+        // Available above total (a kernel's rounding) is 0 %, not a wrap.
+        let odd = LoadSample {
+            mem_total: 100,
+            mem_available: 120,
+            ..LoadSample::default()
+        };
+        assert_eq!(sampler.take(&odd, StatsForm::Numbers).stats.mem, 0);
+    }
+
+    // ─── schedule ───
+
+    const INTERVAL: Duration = Duration::from_secs(3);
+
+    fn request(restart: bool) -> Action {
+        Action::Request {
+            detail: false,
+            restart,
+        }
+    }
+
+    /// A schedule with generation 7 started at `t0`: the first request is out.
+    fn started(t0: Instant) -> Schedule {
+        let mut schedule = Schedule::new(true, INTERVAL);
+        assert_eq!(schedule.set_generation(t0, Some(7)), [request(true)]);
+        schedule
+    }
+
+    fn armed(actions: &[Action]) -> (u64, Duration) {
+        match actions {
+            [Action::Arm { token, after }] => (*token, *after),
+            other => panic!("expected one Arm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_first_sample_is_at_once_and_the_cpu_follows_soon() {
+        let t0 = Instant::now();
+        let mut schedule = started(t0);
+        // The first reply has no CPU: the second comes after FIRST_FOLLOW.
+        let (token, after) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: false }));
+        assert_eq!(after, FIRST_FOLLOW);
+        let t1 = t0 + after;
+        assert_eq!(schedule.tick(t1, token), [request(false)]);
+        // With CPU, the interval.
+        let (token, after) = armed(&schedule.answered(t1, 7, Outcome::Sample { cpu: true }));
+        assert_eq!(after, INTERVAL);
+        assert_eq!(schedule.tick(t1 + after, token), [request(false)]);
+    }
+
+    #[test]
+    fn nothing_runs_without_a_remote_generation_or_with_off() {
+        let t0 = Instant::now();
+        let mut schedule = Schedule::new(false, INTERVAL);
+        assert!(schedule.interaction(t0).is_empty());
+        assert!(schedule.set_generation(t0, Some(1)).is_empty());
+        assert!(!schedule.running(t0));
+        // Turning the form on starts it, at once.
+        assert_eq!(schedule.set_form(t0, true, INTERVAL), [request(true)]);
+        // Off: hidden and stopped; the armed tick is stale.
+        let (token, _) = armed(&schedule.answered(t0, 1, Outcome::Sample { cpu: true }));
+        assert_eq!(schedule.set_form(t0, false, INTERVAL), [Action::Hide]);
+        assert!(schedule.tick(t0 + INTERVAL, token).is_empty());
+        // The generation ends: no Hide (the session clears the value), no tick.
+        let mut schedule = started(t0);
+        let (token, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        assert!(schedule.set_generation(t0, None).is_empty());
+        assert!(schedule.tick(t0 + INTERVAL, token).is_empty());
+        assert!(!schedule.running(t0));
+    }
+
+    #[test]
+    fn a_stale_token_does_nothing() {
+        let t0 = Instant::now();
+        let mut schedule = started(t0);
+        let (first, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        // Hidden and shown again: a new request, a new token later.
+        assert!(schedule.set_visible(t0, false).is_empty());
+        assert_eq!(schedule.set_visible(t0, true), [request(true)]);
+        let (second, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        assert_ne!(first, second);
+        assert!(schedule.tick(t0 + INTERVAL, first).is_empty());
+        assert_eq!(schedule.tick(t0 + INTERVAL, second), [request(false)]);
+        // A token fires once.
+        assert!(schedule.tick(t0 + INTERVAL, second).is_empty());
+    }
+
+    #[test]
+    fn idleness_pauses_at_the_tick_and_an_interaction_resumes_at_once() {
+        let t0 = Instant::now();
+        let mut schedule = started(t0);
+        let (token, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        // An interaction while running only stamps the time.
+        let t1 = t0 + Duration::from_secs(60);
+        assert!(schedule.interaction(t1).is_empty());
+        assert_eq!(schedule.tick(t1, token), [request(false)]);
+        let (token, _) = armed(&schedule.answered(t1, 7, Outcome::Sample { cpu: true }));
+        // STATS_IDLE after the last interaction the tick arms nothing more.
+        let idle = t1 + STATS_IDLE;
+        assert!(!schedule.running(idle));
+        assert!(schedule.tick(idle, token).is_empty());
+        // The next interaction: a sample at once, the history restarted.
+        let t2 = idle + Duration::from_secs(30);
+        assert_eq!(schedule.interaction(t2), [request(true)]);
+    }
+
+    #[test]
+    fn one_request_in_flight_at_most() {
+        let t0 = Instant::now();
+        let mut schedule = started(t0);
+        // Covered and shown while the first request is out: no second one.
+        assert!(schedule.set_visible(t0, false).is_empty());
+        assert!(schedule.set_visible(t0, true).is_empty());
+        // The popover opens meanwhile: still none.
+        assert!(schedule.set_detail(t0, true).is_empty());
+        // The reply sends the wanted one, with the details and a restart.
+        assert_eq!(
+            schedule.answered(t0, 7, Outcome::Sample { cpu: false }),
+            [Action::Request {
+                detail: true,
+                restart: true
+            }]
+        );
+        // Its reply arms the tick again.
+        let (_, after) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        assert_eq!(after, INTERVAL);
+    }
+
+    #[test]
+    fn opening_the_popover_asks_for_details_at_once() {
+        let t0 = Instant::now();
+        let mut schedule = started(t0);
+        let (token, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        assert_eq!(
+            schedule.set_detail(t0, true),
+            [Action::Request {
+                detail: true,
+                restart: false
+            }]
+        );
+        // The tick armed before is stale.
+        assert!(schedule.tick(t0 + INTERVAL, token).is_empty());
+        let (token, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        assert_eq!(
+            schedule.tick(t0 + INTERVAL, token),
+            [Action::Request {
+                detail: true,
+                restart: false
+            }]
+        );
+        // Closing it: the next request is a plain one.
+        assert!(schedule.set_detail(t0, false).is_empty());
+        let (token, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        assert_eq!(schedule.tick(t0 + INTERVAL, token), [request(false)]);
+    }
+
+    #[test]
+    fn a_failed_open_or_no_proc_ends_the_generation() {
+        let t0 = Instant::now();
+        for outcome in [Outcome::Unreachable, Outcome::NoProc] {
+            let mut schedule = started(t0);
+            assert_eq!(schedule.answered(t0, 7, outcome), [Action::Hide]);
+            assert!(!schedule.running(t0));
+            // Nothing brings it back in this generation…
+            assert!(schedule.interaction(t0 + STATS_IDLE * 2).is_empty());
+            assert!(schedule.set_visible(t0, false).is_empty());
+            assert!(schedule.set_visible(t0, true).is_empty());
+            assert!(schedule.set_detail(t0, true).is_empty());
+            // …a new one starts clean.
+            assert_eq!(
+                schedule.set_generation(t0, Some(8)),
+                [Action::Request {
+                    detail: true,
+                    restart: true
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_failure_hides_and_retries_once() {
+        let t0 = Instant::now();
+        let mut schedule = started(t0);
+        let actions = schedule.answered(t0, 7, Outcome::Failed);
+        assert_eq!(actions[0], Action::Hide);
+        let (token, after) = armed(&actions[1..]);
+        assert_eq!(after, INTERVAL);
+        assert_eq!(schedule.tick(t0 + after, token), [request(false)]);
+        // The retry failed too: the generation is done.
+        assert_eq!(schedule.answered(t0, 7, Outcome::Failed), [Action::Hide]);
+        assert!(!schedule.running(t0));
+        // A success between two failures restores the retry.
+        let mut schedule = started(t0);
+        let actions = schedule.answered(t0, 7, Outcome::Failed);
+        let (token, _) = armed(&actions[1..]);
+        assert_eq!(schedule.tick(t0, token), [request(false)]);
+        let (token, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        assert_eq!(schedule.tick(t0, token), [request(false)]);
+        let actions = schedule.answered(t0, 7, Outcome::Failed);
+        assert_eq!(actions.len(), 2, "{actions:?}");
+    }
+
+    #[test]
+    fn an_old_generations_reply_only_frees_the_worker() {
+        let t0 = Instant::now();
+        let mut schedule = started(t0);
+        // ssh to another host while the first request is out: the new
+        // generation's first request waits for the worker.
+        assert!(schedule.set_generation(t0, Some(8)).is_empty());
+        // The old reply — even a failure — does not end the new generation;
+        // it sends the wanted request.
+        assert_eq!(
+            schedule.answered(t0, 7, Outcome::Unreachable),
+            [request(true)]
+        );
+        assert!(schedule.running(t0));
+        let (_, after) = armed(&schedule.answered(t0, 8, Outcome::Sample { cpu: false }));
+        assert_eq!(after, FIRST_FOLLOW);
+        // A reply after the session ended arms nothing.
+        assert!(schedule.set_generation(t0, None).is_empty());
+        let mut schedule = started(t0);
+        assert!(schedule.set_generation(t0, None).is_empty());
+        assert!(
+            schedule
+                .answered(t0, 7, Outcome::Sample { cpu: true })
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_new_interval_holds_from_the_next_tick() {
+        let t0 = Instant::now();
+        let mut schedule = started(t0);
+        let (token, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        assert!(
+            schedule
+                .set_form(t0, true, Duration::from_secs(10))
+                .is_empty()
+        );
+        assert_eq!(schedule.tick(t0 + INTERVAL, token), [request(false)]);
+        let (_, after) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        assert_eq!(after, Duration::from_secs(10));
+    }
+}
