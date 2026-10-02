@@ -723,6 +723,27 @@ yerleşiminden (`Session::stats_span`); gerekçeler
 Dock'a tık giriş satırı yokken no-op. Gerekçeler
 `.tasks/036-ssh-uzak-oturum/discussion.md` → Karar 3–8 ve
 `.tasks/037-ssh-ikinci-tur/discussion.md`.
+**Düz `ssh` uzakta entegrasyonu kendisi kuruyor** (048): yerel zsh
+sarmalayıcısı kullanıcının dosyalarından sonra bir `ssh` fonksiyonu tanımlıyor
+(kullanıcının `ssh` alias'ı/fonksiyonu yoksa; `off` kademesinde yok) ve kararı
+`$BATERI_BIN ssh-argv [--tty] -- …`'e soruyor (`ssh_wrap::decide`; boş cevap
+düz `ssh`). Sarılmış çağrı `ssh -t <kullanıcının argümanları> "exec sh -c
+'<tek satır>' bateri-boot"`; tek satır her giriş kabuğunun tırnağından sağ
+çıkmak zorunda (`'`, `\`, `!`, satır sonu yok — `ssh_wrap::is_inline`) ve
+base64'lü yükü (`assets/shell/remote/boot.sh` + yazacağı dosyalar,
+derlemede gömülü, pakete kopyalanmıyor) açıp `eval` ediyor. Yük motd'u
+basıyor ve dosyaları yalnız `${XDG_DATA_HOME:-~/.local/share}/bateri/shell/`'e
+yazıyor (geçici ad + `mv`, `/tmp` yok); zsh yerel sarmalayıcının dört dosyası
+ve `ZDOTDIR` dansıyla (`assets/shell/zsh/zdotdir.zsh`, yerelle **paylaşılan**
+dosya), bash 4+ `--posix -l` + `ENV` ile (öncesinde `--rcfile`), fish
+`XDG_DATA_DIRS` → `vendor_conf.d` ile OSC 7 basıyor — yetki sunucunun adı,
+yani yoklamadan önce de uzak yuvaya gidiyor. Başka kabuk, yazma ya da
+çözücü hatası düz giriş kabuğu ve `8133;f;{kod}` (`RemoteSetupFault`;
+uzak oturumun 8133 kapısının dışında, uzak durumla silinir) — pane'in
+etiketi nedeni söylüyor. Host ancak **öğrenildiyse** sarılıyor: yardımcı
+oturumun selamı (sunucuda `sh`) `ssh_wrap::learn` ile `remote-hosts`'a
+`posix` yazıyor, uzak nesil başına bir kez. Gerekçeler
+`.tasks/048-uzak-kabuk-entegrasyonu/`.
 **Dock sütun sayıyor** (024): giriş satırının sarması, caret'in yeri ve
 geniş karakterin iki hücresi karakter indeksinden değil **genişlikten**
 birikiyor ve satır sonunda geniş glyph yarılanmıyor — sığmayan karakter alt
@@ -1666,8 +1687,9 @@ ikisine de bağlanmaz.
   anahtar: biri panoya, öbürü sunucuya sessizce yazardı (048). Süreli koşu
   (`BT_RUN_SECONDS`) dosyayı **hiç okumaz ve izlemez**: dalın tek yeri
   `bt-shell-macos`'un `app::Inputs`'u.
-- **Shell entegrasyonu bugün yalnız zsh'tir** (`ZDOTDIR`); bash (`--rcfile`) ve
-  fish (`vendor_conf.d`) sonraki settedir. Kullanıcının rc dosyasına **asla**
+- **Yerel shell entegrasyonu bugün yalnız zsh'tir** (`ZDOTDIR`); bash
+  (`--rcfile`) ve fish (`vendor_conf.d`) sonraki settedir — uzakta (048)
+  üçü de var, yalnız OSC 7 ile. Kullanıcının rc dosyasına **asla**
   yazılmaz — kapısı `make audit` ve listesi zsh'in beş dosyasını da kapsar.
   Betik `assets/shell/` altında **kaynaktır**, üretilmez: `make bundle` onu
   pakete kopyalar ve kopyayı `cmp` ile denetler, `make check` de girdi

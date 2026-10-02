@@ -114,7 +114,7 @@ pub fn ssh_argv() -> Option<i32> {
         &settings,
         &ssh_route::SystemSsh,
         &remote_hosts_path(&home),
-        bt_shell_common::ssh_wrap::BOOT,
+        bt_shell_common::ssh_wrap::boot(),
         &mut std::io::stdout().lock(),
     ))
 }

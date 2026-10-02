@@ -87,9 +87,9 @@ pub use settings::{
 };
 pub use shell::{
     ButtonState, DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor,
-    HighlightStyle, Reconnect, RemoteKind, RemoteStats, RemoteTarget, STATS_HISTORY, ShellPhase,
-    ShellState, SignIn, StatsForm, Transfer, TransferAction, TransferControls, TransferTone,
-    TtyModes,
+    HighlightStyle, Reconnect, RemoteKind, RemoteSetupFault, RemoteStats, RemoteTarget,
+    STATS_HISTORY, ShellPhase, ShellState, SignIn, StatsForm, Transfer, TransferAction,
+    TransferControls, TransferTone, TtyModes,
 };
 pub use wake::Wake;
 

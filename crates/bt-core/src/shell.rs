@@ -512,6 +512,40 @@ pub struct DockContext {
     /// it is shown the load indicator is not (there is no sample without a
     /// login) and the upload row wins over both.
     pub sign_in: Option<SignIn>,
+    /// Why bateri's remote bootstrap fell back to a plain login shell (048
+    /// R3.2, R3.4): the shell integration did not start on the server, so the
+    /// remote folder stays unknown and the pane's label says why
+    /// ([`crate::Session::remote_setup_fault`]). `None` otherwise. It comes from
+    /// the stream (`8133;f`, [`RemoteSetupFault::from_code`]) and belongs to the
+    /// remote state like [`Self::remote_cwd`]: written whether or not the probe
+    /// has landed, cleared with it.
+    pub remote_setup: Option<RemoteSetupFault>,
+}
+
+/// Why the remote bootstrap (048, `assets/shell/remote/`) did not start the
+/// shell integration — the bootstrap's fixed codes, never the server's text
+/// (`ESC ] 8133 ; f ; {code} BEL`, [`parse_dock`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteSetupFault {
+    /// `write`: the files could not be written under
+    /// `~/.local/share/bateri/shell/` (a read-only home, a full disk).
+    Write,
+    /// `decode`: the server has no base64 decoder the bootstrap knows.
+    Decode,
+    /// `shell`: the login shell is not zsh, bash or fish.
+    Shell,
+}
+
+impl RemoteSetupFault {
+    /// The wire code → the fault; an unknown code (a newer bootstrap) is `None`.
+    pub fn from_code(code: &[u8]) -> Option<Self> {
+        match code {
+            b"write" => Some(Self::Write),
+            b"decode" => Some(Self::Decode),
+            b"shell" => Some(Self::Shell),
+            _ => None,
+        }
+    }
 }
 
 /// The Sign In… button's drawing state ([`DockContext::sign_in`]).
@@ -758,6 +792,7 @@ impl Clone for DockContext {
         self.transfer.clone_from(&source.transfer);
         self.stats = source.stats;
         self.sign_in = source.sign_in;
+        self.remote_setup = source.remote_setup;
     }
 }
 
@@ -771,6 +806,7 @@ impl DockContext {
     /// host). The remote slot goes too: it is not the next session's directory.
     fn clear_remote(&mut self) -> bool {
         self.remote_cwd.clear();
+        self.remote_setup = None;
         self.remote_mark = HostMark::None;
         // The load belongs to the host (046 Karar 5), and so does its login.
         self.stats = None;
@@ -1948,6 +1984,11 @@ impl ShellLog {
             // the probe and must not change the result. The remote slot does not enter the
             // title, so there is no notification.
             ScanEvent::PasteOn => self.note_paste_on(),
+            // **Not gated by the remote session** (048): it is the remote side's
+            // own report about itself, it touches no dock state, and it can arrive
+            // before the probe has set the remote state — the same lifecycle as
+            // the remote slot below (cleared on `C`/`D`/`A`).
+            ScanEvent::RemoteSetup(fault) => self.context.remote_setup = Some(fault),
             ScanEvent::Cwd { path, local } => {
                 if self.context.remote.is_some() || !local {
                     self.context.remote_cwd.clear();
@@ -2814,6 +2855,11 @@ pub(crate) enum ScanEvent<'a> {
     /// before `C`, the remote shell's after the remote state is set), so it
     /// is applied in stream order ([`ShellLog::note_paste_on`]).
     PasteOn,
+    /// `8133;f;{code}`: the remote bootstrap fell back to a plain login shell
+    /// (048, [`DockContext::remote_setup`]). On the mirror's number but **not**
+    /// a [`DockEvent`]: the remote session's gate on the dock (048 R4) must not
+    /// swallow it, and it never touches the mirror's state.
+    RemoteSetup(RemoteSetupFault),
 }
 
 /// The mirror arm's events.
@@ -3043,13 +3089,19 @@ impl Scanner {
                         &mut self.branch,
                     );
                     self.close(byte);
-                    on_event(ScanEvent::Dock(match outcome {
-                        DockOutcome::Update => DockEvent::Update(&self.line),
-                        DockOutcome::End => DockEvent::End,
-                        DockOutcome::Unavailable(fault) => DockEvent::Unavailable(fault),
-                        DockOutcome::Branch => DockEvent::Branch(&self.branch),
-                        DockOutcome::Editable => DockEvent::Editable,
-                    }));
+                    let event = match outcome {
+                        DockOutcome::Update => ScanEvent::Dock(DockEvent::Update(&self.line)),
+                        DockOutcome::End => ScanEvent::Dock(DockEvent::End),
+                        DockOutcome::Unavailable(fault) => {
+                            ScanEvent::Dock(DockEvent::Unavailable(fault))
+                        }
+                        DockOutcome::Branch => ScanEvent::Dock(DockEvent::Branch(&self.branch)),
+                        DockOutcome::Editable => ScanEvent::Dock(DockEvent::Editable),
+                        DockOutcome::Setup(Some(fault)) => ScanEvent::RemoteSetup(fault),
+                        // An unknown code is a newer bootstrap's: nothing to say.
+                        DockOutcome::Setup(None) => return,
+                    };
+                    on_event(event);
                 } else if is_ignored(byte) {
                 } else if self.dock.len() == DOCK_PAYLOAD_LIMIT {
                     // Unlike 133's silent drop, the overflow is reported **immediately**: so that the
@@ -3341,6 +3393,8 @@ enum DockOutcome {
     Unavailable(DockFault),
     Branch,
     Editable,
+    /// `f`: the remote bootstrap's fault code (048); `None` for an unknown code.
+    Setup(Option<RemoteSetupFault>),
 }
 
 /// Decodes the mirror payload and writes into `line`.
@@ -3353,6 +3407,7 @@ enum DockOutcome {
 /// ESC ] 8133 ; o BEL
 /// ESC ] 8133 ; b ; {branch} BEL
 /// ESC ] 8133 ; w BEL
+/// ESC ] 8133 ; f ; {code} BEL
 /// ```
 ///
 /// `u` refreshes the line, `e` (`line-finish`) closes it, `o` is the shell saying
@@ -3360,7 +3415,10 @@ enum DockOutcome {
 /// context line. `w` (031) says "the editing widget is bound at this prompt": the
 /// precondition of the only sequence the terminal sends to the shell
 /// (`CSI 8133 ~`); it has no payload and does not touch the mirror's state, like
-/// `b`.
+/// `b`. `f` (048) is printed by the **remote** bootstrap, not the local wrapper:
+/// the integration did not start on the server and `{code}` (plain ASCII, one of
+/// [`RemoteSetupFault::from_code`]'s) says why. It touches neither the mirror nor
+/// the dock — and an unknown code is no fault of the mirror's either.
 ///
 /// **`b` is on the mirror's channel but is not part of the mirror:** it arrives
 /// **per prompt** (`precmd`), not per keystroke, and does not touch the line's
@@ -3422,6 +3480,7 @@ fn parse_dock(
         // bound is held on would show up to the user as different behavior.
         b"o" => unavailable(line, DockFault::Overflow),
         b"w" => DockOutcome::Editable,
+        b"f" => DockOutcome::Setup(fields.next().and_then(RemoteSetupFault::from_code)),
         b"u" => match decode_line(&mut fields, decoded, line) {
             Some(()) => DockOutcome::Update,
             // The state is written too: `decode_line` says `Live` on its very first line, and
@@ -4931,6 +4990,44 @@ mod tests {
         assert!(log.dock_editable);
     }
 
+    /// The remote bootstrap's fault (048, `8133;f`) reaches the remote state
+    /// whether or not the probe has landed, never touches the mirror, and goes
+    /// with the remote state; an unknown code says nothing.
+    #[test]
+    fn the_remote_bootstraps_fault_lives_with_the_remote_state() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        let mut feed = |log: &mut ShellLog, bytes: &[u8]| {
+            scanner.feed(bytes, |event| log.apply_scan(event));
+        };
+        feed(&mut log, b"\x1b]133;A\x07\x1b]133;B\x07");
+        feed(&mut log, &dock_update(8, "% ", "ssh prod", "", &[]));
+        feed(&mut log, b"\x1b]8133;e\x07\x1b]133;C\x07");
+        let dock = log.dock.clone();
+        // Before the probe: still recorded.
+        feed(&mut log, b"\x1b]8133;f;write\x07");
+        assert_eq!(log.context.remote_setup, Some(RemoteSetupFault::Write));
+        assert_eq!(log.dock, dock, "the fault is not a mirror event");
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        assert_eq!(
+            log.context.remote_setup,
+            Some(RemoteSetupFault::Write),
+            "the probe keeps it"
+        );
+        // While remote: recorded too (the 8133 gate is the dock's, not this).
+        feed(&mut log, b"\x1b]8133;f;shell\x07");
+        assert_eq!(log.context.remote_setup, Some(RemoteSetupFault::Shell));
+        feed(&mut log, b"\x1b]8133;f;newer\x07\x1b]8133;f\x07");
+        assert_eq!(
+            log.context.remote_setup,
+            Some(RemoteSetupFault::Shell),
+            "unknown codes say nothing"
+        );
+        assert_eq!(log.dock, dock);
+        feed(&mut log, b"\x1b]133;D;0\x07");
+        assert_eq!(log.context.remote_setup, None, "our `D` clears it");
+    }
+
     /// The stamp moves **on change**, not on every event.
     ///
     /// Every keystroke produces a mirror event; if the stamp were refreshed with them
@@ -5722,7 +5819,7 @@ mod tests {
             ScanEvent::Dock(DockEvent::Update(line)) => lines.push(line.buffer.clone()),
             ScanEvent::Dock(_) => {}
             ScanEvent::Cwd { path, .. } => paths.push(path.to_owned()),
-            ScanEvent::PasteOn => {}
+            ScanEvent::PasteOn | ScanEvent::RemoteSetup(_) => {}
         });
 
         assert_eq!(marks, vec![Mark::PromptEnd]);

@@ -54,34 +54,15 @@
 # the restore would mean leaking ZDOTDIR to children for the whole session
 # (tmux, nested shell).
 
-# Our directory. zsh used ZDOTDIR to find this file, so the value is ours right
-# now; `${0:A:h}` is only a fallback for the `unsetopt function_argzero` edge.
-: ${__bateri_dir:=${ZDOTDIR:-${0:A:h}}}
+# THE ZDOTDIR SWAP is in `zdotdir.zsh`, shared with the remote wrapper (048):
+# our directory, the user's original ZDOTDIR, `__bateri_begin`/`__bateri_end`
+# and `__bateri_restore`. `source`d at the top level (the `typeset` rule above);
+# if it cannot be read this body fails and the calling file's fallback arm
+# hands ZDOTDIR back.
+source ${ZDOTDIR:-${0:A:h}}/zdotdir.zsh || return 1
 
-# The user's directory and WHETHER THEIR ZDOTDIR EXISTS — two separate pieces of
-# information. Determined once: `.zshenv` is read by every zsh and we take the
-# environment variable from there and delete it.
-if (( ! ${+__bateri_had} )); then
-  # A SELF-POINTING VALUE IS REJECTED: if `BATERI_ZDOTDIR` points at our own
-  # directory we would put ourselves back instead of "the user's original
-  # value" — `__bateri_begin` would reload our own `.zshenv` and recurse up to
-  # zsh's FUNCNEST limit (measured: 336 lines of errors, the session is left
-  # without ZDOTDIR). The first layer of the gate is on the Rust side
-  # (`shell_integration_env`); this second layer is for the cases where the
-  # environment is set up by hand.
-  # The right-hand side is QUOTED: inside `[[ ]]` an unquoted right operand is a
-  # **glob pattern**, not plain text. Had the package sat at a path like
-  # `/Applications/[dev] bateri.app/…` the pattern would not match its own plain
-  # value, the gate would open and we would fall into exactly the recursion it
-  # prevents (`/code-review`, 009 phase-5).
-  if [[ -n ${BATERI_ZDOTDIR} && ${BATERI_ZDOTDIR:A} != "${__bateri_dir:A}" ]]; then
-    __bateri_had=1
-    __bateri_user=$BATERI_ZDOTDIR
-  else
-    __bateri_had=0
-    __bateri_user=$HOME
-  fi
-  unset BATERI_ZDOTDIR
+# The dock's decisions, once per shell (`.zshenv` is read by every zsh).
+if (( ! ${+__bateri_dock} )); then
   # WHETHER THERE IS A DOCK IN THIS SESSION. A single variable, because it is a
   # single decision: if there is a dock the input line is the TERMINAL's — the
   # prompt is reset, ZLE is mirrored, the context's branch is printed. If there
@@ -153,58 +134,14 @@ if (( ! ${+__bateri_had} )); then
   fi
 fi
 
-# PREPARES the loading of the user's same-named startup file; the calling file
-# does the loading at its own top level.
-#
-# ZDOTDIR carries the USER's value during loading, for two reasons: so the file
-# itself sees `$ZDOTDIR` correctly, and so that child processes born from that
-# file (brew shellenv, nvm, direnv) do not inherit our directory.
-__bateri_begin() {
-  if (( __bateri_had )); then
-    ZDOTDIR=$__bateri_user
-  else
-    unset ZDOTDIR
-  fi
-  # The SYSTEM's rc file was read BEFORE us and ZDOTDIR was pointing at us at
-  # that time: macOS's `/etc/zshrc` sets `HISTFILE` to
-  # `${ZDOTDIR:-$HOME}/.zsh_history`. If we did not fix it the user's command
-  # history would be written into the application's package and their own file
-  # would freeze — and the symptom would be silent. The fix comes BEFORE the
-  # user's file is loaded, because their rc can read `HISTFILE` and build on it.
-  # A user who wrote their own path is not touched: the condition only catches a
-  # value that points at OUR directory.
-  if [[ -n $HISTFILE && $HISTFILE == "$__bateri_dir"/* ]]; then
-    HISTFILE=${ZDOTDIR:-$HOME}/${HISTFILE#"$__bateri_dir"/}
-  fi
-  # `typeset -g`: the one who will read the value is the top level of the CALLING
-  # file, not this function. `-r` filters out an unreadable file (missing, no
-  # permission) with an empty value; `source`'s own error is not fatal either —
-  # a syntax error abandons that file, not the shell.
-  local file=${ZDOTDIR:-$HOME}/$1
-  if [[ -r $file ]]; then
-    typeset -g __bateri_file=$file
-  else
-    typeset -g __bateri_file=
-  fi
-}
-
-# Loading is done: re-reads the user's value and takes ZDOTDIR back to us.
-#
-# The value is RE-READ: the most common way for a user to have a ZDOTDIR is to
-# assign it inside `~/.zshenv`. Had we not read it we would look for the
-# remaining files in the old directory, i.e. miss exactly the configuration the
-# user moved.
-__bateri_end() {
-  if (( ${+ZDOTDIR} )); then
-    __bateri_had=1
-    __bateri_user=$ZDOTDIR
-  else
-    __bateri_had=0
-    __bateri_user=$HOME
-  fi
-  ZDOTDIR=$__bateri_dir
-  unset __bateri_file
-}
+# THE BINARY THAT DECIDES `ssh`'s WRAPPING (048): `BATERI_BIN`, the path of the
+# running bateri (`app::with_bateri_bin`), is kept in a shell variable and
+# taken out of the environment — it is ours, children have no use for it
+# (`BATERI_DOCK` precedent). Once per shell, like the decisions above.
+if (( ! ${+__bateri_bin} )); then
+  __bateri_bin=${BATERI_BIN-}
+  unset BATERI_BIN
+fi
 
 # Attaches the OSC 133 marks to zsh's own hooks.
 #
@@ -323,6 +260,47 @@ __bateri_hooks() {
     add-zle-hook-widget line-init __bateri_dock_redraw
     add-zle-hook-widget line-pre-redraw __bateri_dock_redraw
     add-zle-hook-widget line-finish __bateri_dock_finish
+  fi
+  # THE REMOTE INTEGRATION'S `ssh` (048 Karar 1-A): the user types plain `ssh`
+  # and bateri decides whether the connection gets the remote bootstrap
+  # (`__bateri_ssh`). Defined here, AFTER the user's files, so a user's own
+  # `ssh` alias or function is seen and wins — we define nothing then (a
+  # known limit: theirs bypasses the integration and today's detection
+  # stays). Not at the `off` tier (no wrapper at all) and only with the
+  # binary's path; at the `blocks` tier it exists, since the remote
+  # integration does not depend on the dock.
+  if [[ -n $__bateri_bin ]] && (( ! ${+aliases[ssh]} && ! ${+functions[ssh]} )); then
+    ssh() { __bateri_ssh "$@" }
+  fi
+}
+
+# Runs the user's `ssh`, wrapped when bateri says so (048).
+#
+# `bateri ssh-argv [--tty] -- <args…>` prints the wrapped arguments, each
+# followed by a NUL, or nothing — and nothing (also a missing binary or any
+# failure) means plain `command ssh "$@"`, today's path. `--tty` only when stdin
+# AND stdout are terminals: under `$(…)` the binary's own stdout is our pipe, so
+# it cannot ask itself (R1.1: `ssh host | grep` is not wrapped). The rules —
+# which call is interactive, the settings, `ssh -G`, whether the server was
+# learned — are all in the binary (`ssh_wrap::decide`), not here: one parser.
+#
+# `$(…)` keeps NUL bytes in zsh and `"${(@0)…}"` splits on them keeping empty
+# arguments; the last NUL leaves one empty element behind, which is dropped.
+# An answer that does not end with a NUL is not ours: plain `ssh`.
+__bateri_ssh() {
+  emulate -L zsh
+  local out tty=
+  [[ -t 0 && -t 1 ]] && tty=--tty
+  if [[ -x $__bateri_bin ]]; then
+    out=$(command $__bateri_bin ssh-argv $tty -- "$@" 2>/dev/null)
+  fi
+  if [[ -n $out && $out == *$'\0' ]]; then
+    local -a wrapped
+    wrapped=( "${(@0)out}" )
+    wrapped[-1]=()
+    command ssh "${wrapped[@]}"
+  else
+    command ssh "$@"
   fi
 }
 
@@ -619,41 +597,8 @@ __bateri_b64() {
   REPLY=$out
 }
 
-# Hexadecimal digits, for the two digits of percent encoding.
-typeset -ga __bateri_hex
-__bateri_hex=( 0 1 2 3 4 5 6 7 8 9 A B C D E F )
-
-# Percent-encodes `$1` (RFC 3986's "unreserved" set + `/`); the result is in `REPLY`.
-#
-# NO FORK, the same reason as `__bateri_b64` and the same two subtleties:
-# `nomultibyte` makes every element a BYTE (percent encoding is of bytes, not
-# characters) and the byte value is first taken into a scalar (`x=…`, then
-# `#x`) — the arithmetic `##` form interprets escape sequences and reads the
-# backslash as 32 instead of 92.
-#
-# `/` IS NOT ENCODED: it is the path separator and an encoded `/` would make the
-# path look like a single component. The decoding side reads both, so this is
-# not a necessity but readability: the user's path stays human-readable to us
-# too.
-__bateri_percent() {
-  emulate -L zsh
-  setopt nomultibyte
-  REPLY=
-  [[ -n $1 ]] || return 0
-  local -a bytes
-  bytes=( ${(s::)1} )
-  local out= x
-  local -i v
-  for x in $bytes; do
-    if [[ $x == [A-Za-z0-9/._~-] ]]; then
-      out+=$x
-    else
-      v=$(( #x ))
-      out+='%'${__bateri_hex[$(( (v >> 4) + 1 ))]}${__bateri_hex[$(( (v & 15) + 1 ))]}
-    fi
-  done
-  REPLY=$out
-}
+# `__bateri_percent` (OSC 7's percent encoding) is in `zdotdir.zsh`, shared
+# with the remote wrapper (048).
 
 # Prints ZLE's display state to the mirror; its hooks are `line-init` and
 # `line-pre-redraw` (the first is the prompt's first draw, the second every change).
@@ -786,21 +731,4 @@ __bateri_dock_arm() {
     bindkey -M $map $'\e[8133~' __bateri_dock_edit
   done
   print -nr -- $'\e]8133;w\a'
-}
-
-# Restores the user's ZDOTDIR PERMANENTLY and erases our traces.
-#
-# Its callers are `.zshrc` and `.zlogin`, whichever is read; also `.zshenv`, in
-# shells where no file of ours other than itself will be read (`no_rcs`; or
-# `zsh -c`, which is neither interactive nor login).
-__bateri_restore() {
-  if (( __bateri_had )); then
-    export ZDOTDIR=$__bateri_user
-  else
-    unset ZDOTDIR
-  fi
-  unset __bateri_dir __bateri_user __bateri_had __bateri_file
-  # The hooks stay, the loader goes: the first works throughout the session, the
-  # second's job is done and there is no point in it staying in the user's namespace.
-  unfunction __bateri_begin __bateri_end __bateri_hooks __bateri_restore
 }

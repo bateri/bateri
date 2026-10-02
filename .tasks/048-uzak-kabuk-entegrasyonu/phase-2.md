@@ -62,13 +62,119 @@ _Requirements: R1.4, R3_
   etiketi "Remote folder unknown" demiyor, dock'ta `⇄ host  /yol`, `cd` ile
   değişiyor; `⏎ reconnect` satırı kullanıcının yazdığı.
 
+## Uygulama Notları
+
+- **Tel iki katlı**: uzak komut `exec sh -c '<tek satır>' bateri-boot`; tek
+  satır (Rust'ta, `ssh_wrap::one_liner`) çözücü zincirini (`base64 -d`,
+  `base64 -D`, `b64decode -r`, `openssl base64 -d -A`) dener, çözülen metin
+  sihirli satırla (`bateri_boot=1`) başlıyorsa `eval` eder, yoksa `8133;f;decode`
+  basıp düz giriş kabuğunu açar. Okunur betik çözülen yükte
+  (`assets/shell/remote/boot.sh`) ve tırnak kısıtı yok. **Tırnak kuralı
+  genişledi** (phase-1 yalnız `'`'yu reddediyordu): tek satır `'`, `\`, `!`
+  ve satır sonu taşımıyor (`ssh_wrap::is_inline`) — fish tek tırnak içinde
+  `\'`/`\\` okuyor, csh `!`'de geçmiş genişletiyor ve tırnak içinde satır
+  sonunu reddediyor; ESC baytı bu yüzden `awk`'ın `%c`'sinden. Gerçek sshd
+  üstünden tcsh ve BusyBox ash ile ölçüldü (aşağıda).
+- **Yük derlemede gömülü** (`include_str!`), pakete kopyalanmıyor: alt komut
+  her `ssh`'ta koşuyor ve paket dosyası okumamalı. Pakete giren tek yeni dosya
+  paylaşılan `assets/shell/zsh/zdotdir.zsh` (envanter beşten altıya;
+  `Makefile` kopya + `cmp`, `bundle_assets`, `child`'ın iki listesi). Uzak
+  komut ~30 KB (Linux'un tek argüman sınırı 128 KiB; sınama 64 KiB'ın altını
+  bekliyor).
+- **Dosyalar yükte tek tırnaklı literal** (`'` → `'\''`) + `printf '%s'`,
+  here-document değil: `sh` bash olan sunucuda (RHEL, bash < 5.1) her
+  here-document `/tmp`'de dosya olur — "`/tmp` yok" kuralı. Yazım alt
+  kabukta `umask 077` ile (kullanıcının kabuğu kendi `umask`'ını tutuyor);
+  göreli olmayan `XDG_DATA_HOME` okunuyor, yoksa `~/.local/share`.
+- **zsh uzakta yerelin dört dosyasını aynen** yazıyor; `ZDOTDIR` dansı
+  (`__bateri_dir`/had/user, `__bateri_begin`/`__bateri_end`/`__bateri_restore`)
+  `zdotdir.zsh`'e çıktı ve iki gövde de (`bateri.zsh`, uzakta
+  `remote/zsh/bateri.zsh`) onu kendi üst düzeyinden `source` ediyor; dock
+  kararları yerelde kendi kez-bekçisiyle (`${+__bateri_dock}`) kaldı. Yerel
+  davranışın tanığı `the_zsh_wrapper_loads_the_users_files_and_reports_marks`
+  ve dock/blok sınamaları — yeşil, değişmeden.
+- **`ssh` fonksiyonu `__bateri_end`'de değil `__bateri_hooks`'ta** (plan
+  `__bateri_end` diyordu): dans uzakla paylaşılıyor ve uzakta `ssh` yok;
+  `__bateri_hooks` kullanıcının `.zshrc`'sinden sonra koşuyor. Kullanıcının
+  `.zlogin`'de tanımladığı `ssh` fonksiyonu bizimkini zaten eziyor, alias da
+  fonksiyonu yeniyor. `BATERI_BIN` kabuk değişkenine (`__bateri_bin`) alınıp
+  ortamdan siliniyor (`BATERI_DOCK` emsali). Bekçisi
+  `the_wrappers_ssh_function_asks_the_binary` (gerçek zsh: `--tty` yalnız
+  terminalde, NUL ayrık cevap, kullanıcının fonksiyonu kazanıyor).
+- **bash `--posix -l` + `ENV`** (planın `--rcfile`'ı değil; plan da "kitty'nin
+  yöntemi" diyordu): `--rcfile` giriş kabuğunda yok sayılıyor, POSIX kipinde
+  etkileşimli bash yalnız `$ENV`'i okuyor; dosyamız kipten çıkıp
+  `/etc/profile` + ilk okunur `~/.bash_profile`/`~/.bash_login`/`~/.profile`'ı
+  üst düzeyde okuyor — gerçek giriş kabuğu (`logout`, `~/.bash_logout`).
+  POSIX kipinin geçmiş dosyası `~/.sh_history` olurdu: kullanıcının
+  `HISTFILE`'ı yoksa önyükleme bash'in varsayılanını yazıp dosyamız ihracını
+  geri alıyor. **bash 4'ten önce `--rcfile -i`**: Apple'ın `/bin/bash` 3.2'si
+  `--posix`'te `$ENV`'i okumuyor (ölçüldü; upstream 3.2/4.0/4.4/5.0 okuyor) —
+  orada kabuk giriş kabuğu değil, dosyalar yine giriş sırasıyla okunuyor.
+- **fish her zaman `vendor_conf.d`** (planın "kendi OSC 7'si doğrulanırsa
+  hiçbir şey" kolu yok): fish'in kendi OSC 7'si sürüme ve terminali
+  tanımasına bağlı ve önyükleme bunu bilemez (fish 3.6 bizim ortamımızda hiç
+  basmadı, ölçüldü); ikinci, aynı rapor zararsız ve phase-3'ün 133'ü dosyayı
+  zaten istiyor. Dosya ilk iş `XDG_DATA_DIRS`'i geri alıyor (yoksa siliyor).
+- **Uzak OSC 7'nin yetkisi sunucunun adı** (`$HOST`/`$HOSTNAME`/`$hostname`),
+  yerelin boş yetkisi değil: yabancı yetki yoklama inmeden de uzak yuvaya
+  gidiyor, boş yetki o pencerede yerel dizini ezerdi. Yerel sarmalayıcı
+  değişmedi.
+- **Nedenin teli `8133;f;{write|decode|shell}`** (biçim burada karar):
+  sabit kod, sunucudan metin yok. `bt-core`'da `DockEvent` değil ayrı bir
+  `ScanEvent::RemoteSetup` — phase-1'in uzak 8133 kapısı onu yutmuyor ve
+  dock'un durumuna dokunmuyor (bilinmeyen kod hiçbir şey); yuvası
+  `DockContext::remote_setup`, `remote_cwd` gibi `C`/`D`/`A` ile siliniyor.
+  Etiket `remote_helper::remote_cwd_unknown(fault)`: nedeni söylüyor, yoksa
+  bugünkü "enable OSC 7" metni.
+- **Öğrenme kancası `RemoteHelper::with_greeted`**: worker selamı alınmış
+  oturumun argv'siyle, **cevaptan sonra** ve uzak nesil başına bir kez
+  çağırıyor (ilk ⌘-hover `ssh -G`'yi beklemesin); pane onu yalnız masters
+  varken (süreli koşu dışında) kuruyor. `ssh_wrap::learn` `ssh -G`'yi aynı
+  argv'yle soruyor (rotanın `-o`'ları user/host/port'u değiştirmiyor) ve
+  `knows` ise yazmıyor.
+- **motd**: `/run/motd.dynamic` sonra `/etc/motd` (`-ef` ile aynı dosya bir
+  kez), `~/.hushlogin` susturuyor. **Gerçek sshd ile doğrulandı** (Docker'da
+  geçici Debian bookworm sshd, anahtarlı; kullanıcılar zsh/bash/fish/tcsh/
+  BusyBox ash): motd bir kez, sshd'nin `Last login`'i yok (komutlu oturumda
+  `do_login` koşmuyor — kabul), üç kabukta her prompt'ta OSC 7 ve
+  kullanıcının giriş dosyası, tcsh ve ash'te `8133;f;shell` + düz kabuk.
+  Container sınamadan sonra silindi.
+- **`$0` farkı**: giriş kabuğu `-l` ile başlıyor, yani `$0` yolun kendisi
+  (`-zsh` değil; `exec -a` POSIX değil) — `$0`'ın başındaki `-`'ye bakan giriş
+  dosyası farkı görür.
+- **Sınama altyapısı** `ssh_wrap::remote_shells`: sshd'nin
+  `"$SHELL" -c '<komut>'`'u gerçek PTY'de (`bt_core::Session`), geçici ev;
+  kurulu olmayan kabuk `SKIPPED` (macOS'ta fish ve BusyBox yok). Salt okunur
+  ev root'ta `chmod`'la kurulamadığı için dizinin yerinde bir dosya. İmaja
+  `fish` ve `busybox` girdi (`tools/linux/Dockerfile`, yalnız sınama
+  paketleri). `child::tests::screen` paylaşılmak için `pub(crate)`.
+
+- **`/code-review` (10 bulgu; 8'i giderildi, 2'si waive):** bash 3.2'nin
+  `printf "'c"`'si 0x7F üstü baytı işaret genişletiyordu (`ğ` →
+  `%FFFFFFFFFFFFFFC4`) — maskeleniyor, sınamaların klasörü artık `a ğ`;
+  sshd'nin ilk durağı (`zsh -c`) `~/.zshenv`'i zaten okuduğu için ortamdaki
+  `ZDOTDIR` kullanıcının başlangıç değeri değil — önyükleme onu taşımıyor,
+  dans `~/.zshenv`'den başlıyor (bekçisi `.zshenv`'de `ZDOTDIR` + ihraç
+  edilmemiş değişken); tek satırın `eval` kolundan dönen yük de düz giriş
+  kabuğuna düşüyor (bağlantı kapanmıyor); `__bateri_percent` iki kopya
+  yerine `zdotdir.zsh`'te tek; aynı içerikli dosya yeniden yazılmıyor
+  (`cmp -s`); öğrenme kancası worker'ı bekletmiyor (pane'in kancası kendi
+  thread'inde); yükün literalleri `upload::sq` (crate'in tek tırnak kuralı);
+  iki doc-comment birleşmesi ve yorumlardaki Türkçe alıntılar düzeltildi.
+  **Waive:** her bağlantıda ~30 KB'lık yük (yorumlar dahil; sürüm/özet
+  damgası phase-5'in paylaşılan bağlantısıyla "önce yokla" — discussion →
+  Karar 3-C — açılırsa ucuzlar) ve motd'un iki yönlü sınırı (bilinen sınır,
+  `boot.sh`'in başlığında: `PrintMotd no`'lu sunucuda motd görünür, çözücü
+  yoksa motd yok).
+
 ## Checklist
 
-- [ ] `bateri.zsh`'te `ssh` fonksiyonu
-- [ ] `ZDOTDIR` dansı paylaşılan dosyaya
-- [ ] `assets/shell/remote/`: önyükleme + zsh/bash/fish betikleri + motd
-- [ ] `ssh_wrap`: yük ve gerçek sarma
-- [ ] `BATERI_BIN`, öğrenme kancası (`ssh_wrap::host_key` + `record(Posix)`), etiketteki neden (durum dosyasının yolu phase-1'de geldi: `bt-shell-macos::remote_hosts_path`)
-- [ ] `Makefile` + `bundle_assets`
-- [ ] Test: PTY simülasyonu (5 kabuk), hata kolları, öğrenme
-- [ ] Doğrulama geçti (`make check` + `make bundle` + `make linux`)
+- [x] `bateri.zsh`'te `ssh` fonksiyonu
+- [x] `ZDOTDIR` dansı paylaşılan dosyaya
+- [x] `assets/shell/remote/`: önyükleme + zsh/bash/fish betikleri + motd
+- [x] `ssh_wrap`: yük ve gerçek sarma
+- [x] `BATERI_BIN`, öğrenme kancası (`ssh_wrap::host_key` + `record(Posix)`), etiketteki neden (durum dosyasının yolu phase-1'de geldi: `bt-shell-macos::remote_hosts_path`)
+- [x] `Makefile` + `bundle_assets`
+- [x] Test: PTY simülasyonu (5 kabuk), hata kolları, öğrenme
+- [x] Doğrulama geçti (`make check` + `make bundle` + `make linux`)

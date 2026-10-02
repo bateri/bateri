@@ -4221,6 +4221,7 @@ mod tests {
             transfer: None,
             stats: None,
             sign_in: None,
+            remote_setup: None,
         }
     }
 

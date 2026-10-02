@@ -74,6 +74,26 @@ pub const RETRY_AFTER: Duration = Duration::from_secs(10);
 /// remote shell has not reported its folder (Karar 2-A, R1.2).
 pub const REMOTE_CWD_UNKNOWN: &str = "Remote folder unknown — enable OSC 7 on the server";
 
+/// The label's text for an unknown remote folder: [`REMOTE_CWD_UNKNOWN`], or —
+/// when bateri's remote bootstrap reported why its integration did not start
+/// (048, `bt_core::RemoteSetupFault`) — that reason, since turning OSC 7 on by
+/// hand is then not the fix.
+pub fn remote_cwd_unknown(fault: Option<bt_core::RemoteSetupFault>) -> &'static str {
+    use bt_core::RemoteSetupFault;
+    match fault {
+        None => REMOTE_CWD_UNKNOWN,
+        Some(RemoteSetupFault::Write) => {
+            "Remote folder unknown — bateri couldn't write its shell files on the server"
+        }
+        Some(RemoteSetupFault::Decode) => {
+            "Remote folder unknown — the server has no base64 tool for bateri's shell setup"
+        }
+        Some(RemoteSetupFault::Shell) => {
+            "Remote folder unknown — bateri's shell integration needs zsh, bash or fish"
+        }
+    }
+}
+
 /// The open helper process.
 pub struct HelperSession {
     child: Child,
@@ -453,15 +473,34 @@ enum Message {
     Retry,
 }
 
+/// What the worker does once a generation's session has greeted (048: the
+/// greeting comes from `sh` on the server, so the server is learned to have a
+/// POSIX shell — `ssh_wrap::learn`). Called on the worker thread with the
+/// session's argv, **after** the question's reply was sent, at most once per
+/// remote generation. It must not block: the worker's next question waits
+/// behind it (the pane's hook hands the work to a thread of its own).
+pub type Greeted = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
+
 /// The pane's handle on its helper session. The worker thread is born at the
 /// first [`RemoteHelper::ask`] and ends when the handle drops (the session's
 /// ssh with it).
 #[derive(Default)]
 pub struct RemoteHelper {
     tx: Option<Sender<Message>>,
+    greeted: Option<Greeted>,
 }
 
 impl RemoteHelper {
+    /// A handle whose worker calls `greeted` once per remote generation whose
+    /// session greeted ([`Greeted`]); [`RemoteHelper::default`] has no hook
+    /// (the timed run, the tests).
+    pub fn with_greeted(greeted: Greeted) -> Self {
+        Self {
+            tx: None,
+            greeted: Some(greeted),
+        }
+    }
+
     /// Sends a question; the reply comes on the worker thread. If the worker
     /// cannot be started the reply is called here with the reason.
     pub fn ask(&mut self, request: Request) {
@@ -475,9 +514,10 @@ impl RemoteHelper {
             None => request,
         };
         let (tx, rx) = mpsc::channel();
+        let greeted = self.greeted.clone();
         let spawned = thread::Builder::new()
             .name("remote helper".into())
-            .spawn(move || run(&rx));
+            .spawn(move || run(&rx, greeted));
         match spawned {
             Ok(_) => {
                 if let Err(mpsc::SendError(Message::Ask(request))) = tx.send(Message::Ask(request))
@@ -513,10 +553,13 @@ impl RemoteHelper {
 
 /// The worker loop: one session at a time, closed on [`IDLE`], on
 /// [`Message::Close`] and on another generation.
-fn run(rx: &Receiver<Message>) {
+fn run(rx: &Receiver<Message>, greeted: Option<Greeted>) {
     let mut open: Option<Open> = None;
     let mut failed: Option<Failure> = None;
     let mut cache = RemoteCache::default();
+    // The generation the hook last ran for: once per remote session, not once
+    // per (re)opened helper session.
+    let mut greeted_for: Option<u64> = None;
     loop {
         let message = if open.is_some() {
             match rx.recv_timeout(IDLE) {
@@ -552,6 +595,13 @@ fn run(rx: &Receiver<Message>) {
                     query,
                 );
                 reply(answer, &ssh);
+                if let (Some(hook), Some(current)) = (&greeted, &open)
+                    && current.command == command
+                    && greeted_for != Some(command)
+                {
+                    greeted_for = Some(command);
+                    hook(&current.ssh);
+                }
             }
         }
     }
@@ -1030,6 +1080,50 @@ mod tests {
         let answer = ask(&mut helper, 2, Query::Count(text(&root.join("nothing"))));
         assert_eq!(answer, Ok(Answer::Counted(None)));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The greeting hook (048's learning) runs once per remote generation, with
+    /// the session's argv, after the reply — not per question, not per reopened
+    /// session, never for a session that did not greet.
+    #[test]
+    fn the_greeting_hook_runs_once_per_generation() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let hook = {
+            let seen = std::sync::Arc::clone(&seen);
+            std::sync::Arc::new(move |ssh: &[String]| {
+                seen.lock().unwrap().push(ssh.to_vec());
+            })
+        };
+        let mut helper = RemoteHelper::with_greeted(hook);
+        let ask = |helper: &mut RemoteHelper, command: u64, dial: Vec<String>| {
+            let (tx, rx) = mpsc::channel();
+            helper.ask(Request {
+                command,
+                dial: Dial::fixed(dial),
+                host: "local".to_owned(),
+                query: Query::Verify {
+                    candidates: vec!["/".to_owned()],
+                    cwd: String::new(),
+                },
+                reply: Box::new(move |answer, _| {
+                    let _ = tx.send(answer);
+                }),
+            });
+            rx.recv_timeout(Duration::from_secs(30))
+                .expect("the worker replies")
+        };
+        assert!(ask(&mut helper, 1, local_ssh()).is_ok());
+        assert!(ask(&mut helper, 1, local_ssh()).is_ok());
+        // A reopened session in the same generation: still once.
+        helper.close();
+        assert!(ask(&mut helper, 1, local_ssh()).is_ok());
+        // A session that never greets is not a POSIX shell's.
+        let silent = vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 255".to_owned()];
+        assert!(ask(&mut helper, 2, silent).is_err());
+        assert!(ask(&mut helper, 3, local_ssh()).is_ok());
+        // The hook runs after the reply: the next question's round trip orders it.
+        assert!(ask(&mut helper, 3, local_ssh()).is_ok());
+        assert_eq!(*seen.lock().unwrap(), vec![local_ssh(), local_ssh()]);
     }
 
     /// An unreachable server is not dialled once per hovered word: within

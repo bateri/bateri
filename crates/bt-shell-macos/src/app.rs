@@ -437,6 +437,23 @@ fn shell_integration_env(
     env
 }
 
+/// Adds `BATERI_BIN` (048) to a session's shell integration: the path of the
+/// running bateri, which the wrapper's `ssh` function asks for the wrapping
+/// decision (`bateri ssh-argv`). Only where the wrapper is installed — an
+/// empty `env` stays empty, so neither the timed run nor a non-zsh shell nor
+/// `[shell] integration = "off"` gets it — and only a UTF-8 path
+/// (`SessionOptions.env` wants a `String`; without it the function falls back
+/// to plain `ssh`).
+fn with_bateri_bin(mut env: Vec<(String, String)>, bin: Option<PathBuf>) -> Vec<(String, String)> {
+    if env.is_empty() {
+        return env;
+    }
+    if let Some(bin) = bin.and_then(|bin| bin.into_os_string().into_string().ok()) {
+        env.push(("BATERI_BIN".to_owned(), bin));
+    }
+    env
+}
+
 /// The grid derived from the window geometry + the cell size.
 ///
 /// Its name is not `Metrics`: the owner of the cell metrics is now `bt-gpu`
@@ -2046,12 +2063,15 @@ impl AppDelegate {
     /// could read the two from different files.
     pub(crate) fn shell_integration(&self) -> (Vec<(String, String)>, u16) {
         let setting = self.ivars().settings.borrow().shell_integration;
-        let integration = shell_integration_env(
-            &self.inputs(),
-            setting,
-            child::shell,
-            child::zsh_wrapper_dir,
-            std::env::var_os("ZDOTDIR"),
+        let integration = with_bateri_bin(
+            shell_integration_env(
+                &self.inputs(),
+                setting,
+                child::shell,
+                child::zsh_wrapper_dir,
+                std::env::var_os("ZDOTDIR"),
+            ),
+            std::env::current_exe().ok(),
         );
         let birth = dock_rows_at_birth(&integration, setting);
         (integration, birth)
@@ -3838,6 +3858,30 @@ mod tests {
         assert!(!resolve_reduce_motion(&user, ReduceMotion::System, || {
             false
         }));
+    }
+
+    /// 048: `BATERI_BIN` rides only with an installed wrapper, and only as UTF-8.
+    #[test]
+    fn the_binary_path_rides_only_with_the_wrapper() {
+        let wrapper = vec![("ZDOTDIR".to_owned(), "/w".to_owned())];
+        let bin = Some(PathBuf::from(
+            "/Applications/bateri.app/Contents/MacOS/bateri",
+        ));
+        assert_eq!(
+            with_bateri_bin(wrapper.clone(), bin.clone()).last(),
+            Some(&(
+                "BATERI_BIN".to_owned(),
+                "/Applications/bateri.app/Contents/MacOS/bateri".to_owned()
+            ))
+        );
+        assert!(with_bateri_bin(Vec::new(), bin).is_empty());
+        assert_eq!(with_bateri_bin(wrapper.clone(), None), wrapper);
+        use std::os::unix::ffi::OsStringExt as _;
+        let odd = std::ffi::OsString::from_vec(b"/x/\xff".to_vec());
+        assert_eq!(
+            with_bateri_bin(wrapper.clone(), Some(PathBuf::from(odd))),
+            wrapper
+        );
     }
 
     /// The fixed input of the arm where integration is installed: zsh + a directory with a body.

@@ -107,7 +107,7 @@ bateri: C kenarı → jobs::ssh_target(unwrap(argv)) → Session::set_remote(hos
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | phase-3 | |
 | phase-4 | |
 | phase-5 | |

@@ -58,6 +58,15 @@ RUN apt-get update \
     && printf '%s\n' 'HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history' 'HISTSIZE=2000' \
         'SAVEHIST=1000' >> /etc/zsh/zshrc
 
+# The remote shell integration's login shells (048 phase-2): bt-shell-common's
+# bootstrap tests run sshd's `"$SHELL" -c '<command>'` with each login shell
+# the bootstrap handles — zsh (above), bash and dash (the base image), fish
+# (integrated through `vendor_conf.d`) and BusyBox (the plain-shell arm, its
+# applets standing in for a whole server's tools). Test packages only.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fish busybox \
+    && rm -rf /var/lib/apt/lists/*
+
 # clippy from the compiler's own release; a no-op if the image already has it.
 RUN rustup component add clippy
 
