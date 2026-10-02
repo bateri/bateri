@@ -11,7 +11,8 @@
 //!   the notification's object; each has its own close-time slot, so a second
 //!   press on the indicator does not reopen it.
 //! - **Refreshed in place**: the rows are fixed (title, CPU, load, memory,
-//!   swap, disk, uptime, three processes), so the views are built once and
+//!   swap, disk, uptime, three processes — "Measuring…" until the second
+//!   process scan), so the views are built once and
 //!   every sample only rewrites their text, bar width and bar colour.
 //! - **While open the samples carry the details** (OS, cores, processes):
 //!   `Schedule::set_detail`, and opening asks at once rather than at the next
@@ -25,7 +26,8 @@
 //! no threshold and stays `info`.
 
 use bt_core::{StatsLevel, StatsMetric, Theme};
-use bt_shell_common::remote_stats::Detail;
+use bt_shell_common::remote_files::Process;
+use bt_shell_common::remote_stats::{Detail, TOP_PROCESSES};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly};
@@ -47,11 +49,13 @@ const LINE: f64 = 16.0;
 const BAR: f64 = 4.0;
 /// The value column's width (right-aligned).
 const VALUE_WIDTH: f64 = 150.0;
-/// How many processes the server sends (`bt_load`'s `head -3`).
-const PROCESSES: usize = 3;
+/// How many processes the popover lists.
+const PROCESSES: usize = TOP_PROCESSES;
 
 /// What an unknown value shows: an empty row would read as "nothing", not "not yet".
 const UNKNOWN: &str = "—";
+/// The process list before its second scan: CPU is a difference.
+const MEASURING: &str = "Measuring…";
 /// The swap row of a server without swap (`SwapTotal` 0).
 const NO_SWAP: &str = "none";
 
@@ -458,12 +462,8 @@ fn fill(rows: &Rows, host: Option<&str>, detail: Option<&Detail>, theme: &Theme)
         &detail.uptime.map_or_else(|| UNKNOWN.to_owned(), uptime),
     );
     for (index, (name, value)) in rows.processes.iter().enumerate() {
-        let (left, right) = match detail.processes.get(index) {
-            Some(process) => (process.name.clone(), tenths(process.cpu)),
-            // No processes at all (not yet, or no procps): one "—", not three.
-            None if index == 0 => (UNKNOWN.to_owned(), String::new()),
-            None => (String::new(), String::new()),
-        };
+        let (left, right) =
+            process_row(sampled, detail.processes.as_deref(), index).unwrap_or_default();
         set_text(name, &left);
         set_text(value, &right);
     }
@@ -476,6 +476,26 @@ impl Meter {
             self.track.setHidden(hidden);
             self.fill.setHidden(hidden);
         }
+    }
+}
+
+/// The process list's `index`th line: a process and its CPU; before the
+/// second scan one "Measuring…" (no sample at all yet: one "—"); measured but
+/// nothing used the CPU: one "—". `None` for an empty line.
+fn process_row(
+    sampled: bool,
+    processes: Option<&[Process]>,
+    index: usize,
+) -> Option<(String, String)> {
+    match processes {
+        Some(list) => match list.get(index) {
+            Some(process) => Some((process.name.clone(), tenths(process.cpu))),
+            None => (index == 0 && list.is_empty()).then(|| (UNKNOWN.to_owned(), String::new())),
+        },
+        None => (index == 0).then(|| {
+            let text = if sampled { MEASURING } else { UNKNOWN };
+            (text.to_owned(), String::new())
+        }),
     }
 }
 
@@ -632,6 +652,33 @@ mod tests {
             swap_value(true, 0, 2 << 30),
             ("0.0 / 2.0 GB".to_owned(), false)
         );
+    }
+
+    #[test]
+    fn the_process_list_says_when_it_is_still_measuring() {
+        let row = |sampled, list: Option<&[Process]>, index| process_row(sampled, list, index);
+        assert_eq!(
+            row(false, None, 0),
+            Some((UNKNOWN.to_owned(), String::new()))
+        );
+        assert_eq!(
+            row(true, None, 0),
+            Some((MEASURING.to_owned(), String::new()))
+        );
+        assert_eq!(row(true, None, 1), None);
+        assert_eq!(
+            row(true, Some(&[]), 0),
+            Some((UNKNOWN.to_owned(), String::new()))
+        );
+        let list = [Process {
+            name: "postgres".to_owned(),
+            cpu: 1234,
+        }];
+        assert_eq!(
+            row(true, Some(&list), 0),
+            Some(("postgres".to_owned(), "123.4%".to_owned()))
+        );
+        assert_eq!(row(true, Some(&list), 1), None);
     }
 
     #[test]

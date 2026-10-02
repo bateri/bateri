@@ -68,11 +68,11 @@ const HELPER_MARK: &str = "BT-HELPER";
 /// A third request, `bt_load {seq} [p]` (046 Karar 2), samples the host's load
 /// for the ssh status bar: every line of its reply carries its own tag
 /// (`BT-L cpu …`, `BT-L mem {key} {kB}`, `BT-L load …`, `BT-L up …`,
-/// `BT-L disk {n}%`; with `p` also `BT-L os …`, `BT-L cores …` and up to three
-/// `BT-L ps {pcpu} {comm}`), or `BT-NOPROC` if `/proc/stat` cannot be read —
-/// a server without Linux's `/proc` has no indicator. Every source but
-/// `/proc/stat` fails silently: a missing line is a missing value
-/// ([`parse_load`]).
+/// `BT-L disk {n}%`; with `p` also `BT-L os …`, `BT-L cores …`, the script's
+/// own PID `BT-L self {pid}` and one `BT-L proc …` line per live process
+/// ([`PROC_AWK`])), or `BT-NOPROC` if `/proc/stat` cannot be read — a server
+/// without Linux's `/proc` has no indicator. Every source but `/proc/stat`
+/// fails silently: a missing line is a missing value ([`parse_load`]).
 pub fn helper_script() -> String {
     format!(
         "bt_sm() {{ stat -L -c '%s %Y' -- \"$1\" 2>/dev/null \
@@ -99,14 +99,37 @@ pub fn helper_script() -> String {
          if [ \"$2\" = p ]; then \
          sed -n 's/^PRETTY_NAME=/BT-L os /p' /etc/os-release 2>/dev/null; \
          echo \"BT-L cores $(grep -c '^cpu[0-9]' /proc/stat 2>/dev/null)\"; \
-         ps -eo pcpu,comm --sort=-pcpu 2>/dev/null \
-         | awk 'NR > 1 && NR <= 4 {{c = $1; $1 = \"\"; print \"BT-L ps \" c $0}}'; \
+         echo \"BT-L self $$\"; awk '{PROC_AWK}' /proc/[0-9]*/stat 2>/dev/null; \
          fi; \
          else echo BT-NOPROC; fi; echo \"BT-END $bt_s\"; }}; \
          echo {HELPER_MARK}; printf 'BT-HOME %s\\n' \"$HOME\"; \
          while IFS= read -r bt_line; do eval \"$bt_line\"; done"
     )
 }
+
+/// The `awk` program that reads every `/proc/[pid]/stat` the glob names and
+/// prints `BT-L proc {pid} {ppid} {starttime} {utime} {stime} {comm}` for each
+/// live process — the raw counters of `top`'s method; the difference is
+/// `remote_stats::Sampler`'s (the server keeps no state).
+///
+/// - **`comm` is split at the last `)`** (`proc(5)`: it is in parentheses and
+///   may itself carry spaces and `)`; nothing after it does). `[)]`, not `\)`:
+///   the script carries no backslash it does not need (fish reads the outer
+///   quoting).
+/// - **Zombies (`Z`) and dead tasks (`X`) are skipped on the server**: they
+///   have no CPU to show, and a host with thousands of them (the user's had
+///   7 079) would otherwise send them all every sample.
+/// - **One file at a time with `getline` in `BEGIN`**: a process that exits
+///   between the glob and the read gives `-1`, not the fatal "cannot open" a
+///   file operand gives in some `awk`s; `close` keeps the descriptors few.
+/// - `utime` and `stime` are printed as read, not summed: `awk`'s numbers are
+///   doubles and `mawk` prints a large one in exponent form.
+pub const PROC_AWK: &str = "BEGIN { for (i = 1; i < ARGC; i++) { f = ARGV[i]; \
+     if ((getline l < f) > 0 && match(l, /[)] [^)]*$/)) { h = substr(l, 1, RSTART - 1); \
+     n = split(substr(l, RSTART + 2), s, \" \"); p = index(h, \" (\"); \
+     if (n >= 20 && p > 1 && s[1] != \"Z\" && s[1] != \"X\") \
+     print \"BT-L proc \" substr(h, 1, p - 1) \" \" s[2] \" \" s[20] \" \" s[12] \" \" s[13] \" \" substr(h, p + 2) } \
+     close(f) } }";
 
 /// What a request asks of each path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,13 +304,38 @@ pub struct CpuCounters {
     pub idle: u64,
 }
 
-/// One process of the popover's top three.
+/// One process of the popover's top three (`remote_stats::Sampler` derives it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Process {
-    /// `ps`'s `comm`, control characters dropped (the name is the server's).
+    /// `/proc/[pid]/stat`'s `comm`, control characters dropped (the name is
+    /// the server's).
     pub name: String,
-    /// `ps`'s `pcpu`, in **tenths** of a percent (an integer: the answer is `Eq`).
+    /// CPU between two samples in **tenths** of a percent, one core = 100 %
+    /// (`top`'s Irix mode; an integer: the answer is `Eq`).
     pub cpu: u32,
+}
+
+/// One live process's raw counters from `/proc/[pid]/stat` ([`PROC_AWK`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Task {
+    pub pid: u32,
+    pub ppid: u32,
+    /// `starttime` (clock ticks after boot): with the PID, the process's
+    /// identity — a PID reused between two samples is another process.
+    pub start: u64,
+    /// `utime + stime`, clock ticks.
+    pub ticks: u64,
+    /// `comm`, control characters dropped.
+    pub name: String,
+}
+
+/// The process scan of a `p` sample.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessScan {
+    /// The helper's `sh` (`$$`): it and its children are our own measuring,
+    /// not the server's load.
+    pub self_pid: Option<u32>,
+    pub tasks: Vec<Task>,
 }
 
 /// One `bt_load` reply ([`parse_load`]): raw readings, nothing derived yet.
@@ -310,9 +358,8 @@ pub struct LoadSample {
     pub os: Option<String>,
     /// The number of `cpuN` lines — only with the `p` flag.
     pub cores: Option<u32>,
-    /// The top three by CPU — only with the `p` flag, empty where `ps --sort`
-    /// is not procps's (busybox).
-    pub processes: Vec<Process>,
+    /// Every live process's counters — only with the `p` flag.
+    pub scan: Option<ProcessScan>,
 }
 
 /// The helper's output → the `bt_load` reply to request `seq`: `Ok(None)` for
@@ -379,9 +426,16 @@ pub fn parse_load(out: &str, seq: u64) -> Result<Option<LoadSample>, ReplyError>
                 sample.os = (!name.is_empty()).then_some(name);
             }
             "cores" => sample.cores = value.parse().ok().filter(|&n| n > 0),
-            "ps" => {
-                if let Some(process) = process(value) {
-                    sample.processes.push(process);
+            "self" => {
+                sample
+                    .scan
+                    .get_or_insert_with(ProcessScan::default)
+                    .self_pid = value.parse().ok();
+            }
+            "proc" => {
+                let scan = sample.scan.get_or_insert_with(ProcessScan::default);
+                if let Some(task) = task(value) {
+                    scan.tasks.push(task);
                 }
             }
             _ => {}
@@ -460,16 +514,26 @@ fn whole_seconds(value: &str) -> Option<u64> {
     value.split('.').next()?.parse().ok()
 }
 
-/// `{pcpu} {comm}` → a process; `None` if the number does not parse.
-fn process(value: &str) -> Option<Process> {
-    let (cpu, name) = value.split_once(' ').unwrap_or((value, ""));
-    let name = clean(name.trim());
-    if name.is_empty() {
-        return None;
-    }
-    Some(Process {
-        name,
-        cpu: scaled(cpu, 10.0)?,
+/// `{pid} {ppid} {starttime} {utime} {stime} {comm}` → a task; `None` if a
+/// number does not parse. `comm` is the rest of the line, spaces and `)`
+/// included.
+fn task(value: &str) -> Option<Task> {
+    let mut rest = value;
+    let mut number = || {
+        let (field, tail) = rest.split_once(' ').unwrap_or((rest, ""));
+        rest = tail;
+        field.parse::<u64>().ok()
+    };
+    let pid = u32::try_from(number()?).ok()?;
+    let ppid = u32::try_from(number()?).ok()?;
+    let start = number()?;
+    let ticks = number()?.checked_add(number()?)?;
+    Some(Task {
+        pid,
+        ppid,
+        start,
+        ticks,
+        name: clean(rest),
     })
 }
 
@@ -1269,8 +1333,9 @@ mod tests {
                    BT-L mem MemAvailable 800\nBT-L mem SwapTotal 1000\n\
                    BT-L mem SwapFree 750\nBT-L load 0.52 1.00 12.25\n\
                    BT-L up 12345.67\nBT-L disk 54%\n\
-                   BT-L os \"Ubuntu 22.04.3 LTS\"\nBT-L cores 4\n\
-                   BT-L ps 12.5 postgres\nBT-L ps 3.0 tmux: server\n\
+                   BT-L os \"Ubuntu 22.04.3 LTS\"\nBT-L cores 4\nBT-L self 77\n\
+                   BT-L proc 812 1 4000 1200 300 postgres\n\
+                   BT-L proc 900 1 5000 7 3 tmux: server\n\
                    BT-L future 1 2 3\nBT-END 9\n";
         let sample = parse_load(out, 9).expect("readable").expect("a sample");
         assert_eq!(
@@ -1292,17 +1357,26 @@ mod tests {
         assert_eq!(sample.os.as_deref(), Some("Ubuntu 22.04.3 LTS"));
         assert_eq!(sample.cores, Some(4));
         assert_eq!(
-            sample.processes,
-            [
-                Process {
-                    name: "postgres".to_owned(),
-                    cpu: 125
-                },
-                Process {
-                    name: "tmux: server".to_owned(),
-                    cpu: 30
-                },
-            ]
+            sample.scan,
+            Some(ProcessScan {
+                self_pid: Some(77),
+                tasks: vec![
+                    Task {
+                        pid: 812,
+                        ppid: 1,
+                        start: 4000,
+                        ticks: 1500,
+                        name: "postgres".to_owned(),
+                    },
+                    Task {
+                        pid: 900,
+                        ppid: 1,
+                        start: 5000,
+                        ticks: 10,
+                        name: "tmux: server".to_owned(),
+                    },
+                ],
+            })
         );
         // Another sequence number's reply is not this one.
         assert_eq!(parse_load(out, 8), Err(ReplyError::NotStarted));
@@ -1330,7 +1404,7 @@ mod tests {
             (0, None, None)
         );
         assert_eq!((sample.disk, sample.cores, sample.os), (None, None, None));
-        assert!(sample.processes.is_empty());
+        assert_eq!(sample.scan, None, "no `p`, no scan");
     }
 
     #[test]
@@ -1357,10 +1431,13 @@ mod tests {
             Err(ReplyError::Unterminated)
         );
         // Optional values that do not parse are just missing; a process name
-        // loses its control characters, a process without a name is dropped.
+        // loses its control characters, a process whose numbers do not parse
+        // is dropped.
         let odd = format!(
             "{base}BT-L load 1 x 2\nBT-L up soon\nBT-L disk 120%\nBT-L disk full\n\
-             BT-L ps 1.5 evil\x1b[2Jname\x07\nBT-L ps 2.0\nBT-L ps NaN x\nBT-L ps -1 y\n"
+             BT-L self x\nBT-L proc 5 1 9 10 5 evil\x1b[2Jname\x07\nBT-L proc 6 1 9 x 1 a\n\
+             BT-L proc -1 1 9 1 1 b\nBT-L proc 7 1 9 1\n\
+             BT-L proc 8 1 9 18446744073709551615 1 c\n"
         );
         let sample = parse_load(&reply(&odd), 3)
             .expect("readable")
@@ -1370,11 +1447,78 @@ mod tests {
             (None, None, None)
         );
         assert_eq!(
-            sample.processes,
-            [Process {
-                name: "evil[2Jname".to_owned(),
-                cpu: 15
-            }]
+            sample.scan,
+            Some(ProcessScan {
+                self_pid: None,
+                tasks: vec![Task {
+                    pid: 5,
+                    ppid: 1,
+                    start: 9,
+                    ticks: 15,
+                    name: "evil[2Jname".to_owned(),
+                }],
+            })
+        );
+    }
+
+    /// [`PROC_AWK`] in this machine's `awk` (BSD here, `mawk`/`gawk` under
+    /// `make linux`) over hand-made `/proc/[pid]/stat` files: the fields are
+    /// `proc(5)`'s (`ppid` 4, `utime` 14, `stime` 15, `starttime` 22), `comm`
+    /// is cut at the **last** `)` with its spaces and parentheses, a zombie
+    /// and a short line are skipped, a file that vanished does not stop the
+    /// scan.
+    #[test]
+    fn the_proc_scan_reads_stat_files_in_awk() {
+        let dir = std::env::temp_dir().join(format!("bt-proc-awk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch folder");
+        // Fields 3.. numbered so a shifted index shows: state, ppid 4, pgrp 5, …
+        let tail = |state: &str| {
+            format!(
+                "{state} 104 105 106 107 108 109 110 111 112 113 1400 1500 116 117 118 119 \
+                 120 121 22000 123 124 125"
+            )
+        };
+        let files = [
+            ("1", format!("4242 (tmux: server) {}\n", tail("S"))),
+            ("2", format!("4243 (a) (b) {}\n", tail("R"))),
+            ("3", format!("4244 (gone) {}\n", tail("Z"))),
+            ("4", "4245 (short) S 1 2 3\n".to_owned()),
+        ];
+        let mut paths: Vec<_> = files
+            .iter()
+            .map(|(name, body)| {
+                let path = dir.join(name);
+                std::fs::write(&path, body).expect("a stat file");
+                path
+            })
+            .collect();
+        paths.insert(1, dir.join("vanished"));
+        let out = std::process::Command::new("awk")
+            .arg(PROC_AWK)
+            .args(&paths)
+            .output()
+            .expect("awk runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                "BT-L proc 4242 104 22000 1400 1500 tmux: server",
+                "BT-L proc 4243 104 22000 1400 1500 a) (b",
+            ],
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let parsed = task(
+            text.lines()
+                .nth(1)
+                .and_then(|l| l.strip_prefix("BT-L proc "))
+                .unwrap_or(""),
+        );
+        assert_eq!(
+            parsed.map(|task| (task.ticks, task.name)),
+            Some((2900, "a) (b".to_owned()))
         );
     }
 
