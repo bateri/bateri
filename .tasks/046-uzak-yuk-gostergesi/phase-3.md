@@ -131,3 +131,31 @@ _Requirements: R4.1, R4.2, R4.3, R4.4, R7_
   da render thread'iyle paylaşılan durum yok — `make test-race` gerekmedi).
 - `make linux` ilk koşuda yeşil; `jobs::tests::the_process_table_reads_a_real_argv`
   bu sefer düşmedi.
+- **Set sonrası — süreç listesi `top`'un yöntemine geçti** (kullanıcı,
+  Hetzner Ubuntu 24.04, ~7.500 süreç, 7.079'u zombi; Karar 2'nin `ps -eo
+  pcpu` satırının yerine): `pcpu` sürecin **ömrü boyunca** ortalama, anlık
+  değil — popover `ps 2200.0%` (ölçen komut kendini ölçüyordu), `btop 131%`,
+  `bash 99.9%` gösterdi. Artık `p` bayrağıyla betik `BT-L self $$` ve
+  `/proc/[0-9]*/stat`'ları okuyan tek bir `awk` (`PROC_AWK`) basıyor:
+  süreç başına `pid ppid starttime utime stime comm`; fark ve yüzde Rust'ta
+  (`Sampler::processes`, uzakta durum yok). Ölçek `top`'un varsayılanı Irix
+  kipi (tek çekirdek = %100; geçen süre toplam `cpu` farkı ÷ çekirdek,
+  çekirdek bilinmezse bölünmüyor — Solaris kipi). Kararlar: `comm` **son
+  `)`'ten** bölünüyor ve `awk` içinde, çünkü zombi (`Z`) ile ölü (`X`)
+  sunucuda atlanmalı — yoksa o makinede her örnek binlerce satır, ~2 MB
+  taşırdı ve sshd'nin şifrelemesi kendisi üst sürece çıkardı; her dosya
+  `BEGIN`'de `getline` ile (kaybolan süreç `-1`, `mawk`'ın ölümcül "cannot
+  open"ı değil); `utime`/`stime` toplanmadan basılıyor (`mawk` büyük
+  double'ı üslü basar). **Kendi ölçümümüz süreç ağacıyla** dışarıda:
+  yardımcının `sh`'ı ve bütün torunları — ada göre ayırmak bizim `awk`'ımızı
+  kullanıcınınkinden ayıramaz. Kimlik PID + `starttime` (araya giren PID
+  yeniden kullanımı sahte fark vermesin); tabanı olmayan, geri giden ve
+  sıfır farklı süreç atlanıyor. Taban yalnız ardışık `p` örnekleri arasında:
+  `p`'siz örnek (popover kapalı) onu düşürüyor, yani yeniden açılışta
+  dakikalarca geniş bir fark yok — ilk taramada liste "Measuring…"
+  (`Detail::processes = None`) ve bir sonraki örnek `FIRST_FOLLOW` sonra
+  geliyor (`Outcome::Sample { cpu: false }` gibi). Tarama yine yalnız
+  popover açıkken. Sınamalar: `awk` programı bu makinenin `awk`'ında el
+  yapımı `stat` dosyalarıyla (`the_proc_scan_reads_stat_files_in_awk`),
+  fark hesabı birim sınamalarıyla, uçtan uca sınama `make linux`'ta gerçek
+  `/proc`'ta iki taramayla.

@@ -724,7 +724,7 @@ mod tests {
             assert!(plain.load.is_some() && plain.uptime.is_some(), "{plain:?}");
             assert!(plain.disk.is_some_and(|disk| disk <= 100), "{plain:?}");
             // The details only with `p`.
-            assert!(plain.os.is_none() && plain.cores.is_none() && plain.processes.is_empty());
+            assert!(plain.os.is_none() && plain.cores.is_none() && plain.scan.is_none());
             let detailed = session
                 .load(true, LOAD_TIMEOUT)
                 .expect("a reply")
@@ -733,7 +733,20 @@ mod tests {
                 detailed.cores.is_some_and(|cores| cores > 0),
                 "{detailed:?}"
             );
-            assert!(detailed.processes.len() <= 3, "{detailed:?}");
+            // The scan: our own `sh` is named and read like every live
+            // process; every task is well formed (a real `/proc`).
+            let scan = detailed.scan.as_ref().expect("a `p` sample scans");
+            let own = scan.self_pid.expect("the helper names its PID");
+            assert!(
+                scan.tasks.iter().any(|task| task.pid == own),
+                "the helper's own stat line: {scan:?}"
+            );
+            assert!(
+                scan.tasks
+                    .iter()
+                    .all(|task| task.pid > 0 && !task.name.is_empty()),
+                "{scan:?}"
+            );
             let mut sampler = Sampler::default();
             sampler.take(&plain, StatsForm::Sparkline);
             let reading = sampler.take(&detailed, StatsForm::Sparkline);
@@ -742,6 +755,21 @@ mod tests {
                 "{reading:?}"
             );
             assert!(reading.stats.mem <= 100, "{reading:?}");
+            assert_eq!(reading.detail.processes, None, "one scan: measuring");
+            // The second scan has a difference; our own measuring is not in it.
+            let again = session
+                .load(true, LOAD_TIMEOUT)
+                .expect("a reply")
+                .expect("a sample");
+            let measured = sampler.take(&again, StatsForm::Sparkline);
+            let top = measured.detail.processes.expect("two scans: measured");
+            assert!(top.len() <= crate::remote_stats::TOP_PROCESSES, "{top:?}");
+            let cores = again.cores.unwrap_or(1);
+            assert!(
+                top.iter()
+                    .all(|process| process.cpu > 0 && process.cpu <= 1000 * cores),
+                "{top:?}"
+            );
         } else {
             assert_eq!(first, None, "no /proc here: BT-NOPROC");
             assert_eq!(session.load(true, LOAD_TIMEOUT), Ok(None));

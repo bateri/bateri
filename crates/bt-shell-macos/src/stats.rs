@@ -315,8 +315,11 @@ impl TerminalPane {
                 {
                     let reading = driver.sampler.take(sample, StatsForm::Sparkline);
                     driver.last = Some(reading.stats);
+                    // A first process scan is "Measuring…" like a first CPU
+                    // reading: the next sample follows as soon.
+                    let measuring = sample.scan.is_some() && reading.detail.processes.is_none();
                     outcome = Outcome::Sample {
-                        cpu: reading.stats.cpu.is_some(),
+                        cpu: reading.stats.cpu.is_some() && !measuring,
                     };
                     Some((shaped(reading.stats, form), reading.detail))
                 }
@@ -373,10 +376,10 @@ mod tests {
             os: Some("Ubuntu 24.04".to_owned()),
             cores: Some(8),
             cpu: Some(12),
-            processes: vec![Process {
+            processes: Some(vec![Process {
                 name: "postgres".to_owned(),
                 cpu: 123,
-            }],
+            }]),
             ..Detail::default()
         });
         driver.keep_detail(Detail {
@@ -386,7 +389,7 @@ mod tests {
         let detail = driver.detail().expect("a sample arrived");
         assert_eq!(detail.os.as_deref(), Some("Ubuntu 24.04"));
         assert_eq!((detail.cores, detail.cpu), (Some(8), Some(40)));
-        assert!(detail.processes.is_empty(), "processes are live, not kept");
+        assert_eq!(detail.processes, None, "processes are live, not kept");
         driver.forget();
         assert_eq!(driver.detail(), None, "another host's details do not stay");
     }

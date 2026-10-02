@@ -16,11 +16,15 @@
 //! (the helper's request, the two kinds of failure), Karar 2 (what is measured
 //! and how) and Karar 6 (when sampling runs and stops).
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use bt_core::{RemoteStats, STATS_HISTORY, StatsForm};
 
-use crate::remote_files::{CpuCounters, LoadSample, Process};
+use crate::remote_files::{CpuCounters, LoadSample, Process, ProcessScan};
+
+/// How many processes the popover lists.
+pub const TOP_PROCESSES: usize = 3;
 
 /// With no interaction for this long sampling pauses and the indicator keeps
 /// its last value (046 Karar 6). A **design constant**, not a measurement:
@@ -55,8 +59,11 @@ pub struct Detail {
     pub disk: Option<u8>,
     /// Seconds since boot.
     pub uptime: Option<u64>,
-    /// The top three by CPU; only on a `detail` request, empty without procps.
-    pub processes: Vec<Process>,
+    /// The top [`TOP_PROCESSES`] by CPU since the previous scan
+    /// ([`Sampler`]); `None` while there is no difference yet — the first
+    /// `detail` sample after the popover opened, and every plain one.
+    /// `Some(empty)`: measured, and nothing used the CPU.
+    pub processes: Option<Vec<Process>>,
 }
 
 /// What one sample gives: the context row's value and the popover's content.
@@ -66,10 +73,15 @@ pub struct Reading {
     pub detail: Detail,
 }
 
-/// The previous CPU counters and the sparkline's history (046 Karar 2, 4).
+/// The previous CPU counters, the previous process scan and the sparkline's
+/// history (046 Karar 2, 4).
 #[derive(Debug, Default)]
 pub struct Sampler {
     previous: Option<CpuCounters>,
+    /// The last `detail` sample's per-process ticks; a sample without a scan
+    /// (the popover closed) drops it, so a reopened popover never shows a
+    /// difference minutes wide.
+    scan: Option<ScanBase>,
     /// The levels, oldest first; kept in every form, so switching to
     /// `sparkline` does not start empty — but only that form carries it out.
     history: [u8; STATS_HISTORY],
@@ -85,6 +97,7 @@ impl Sampler {
 
     /// One sample → what is drawn, in `form`.
     pub fn take(&mut self, sample: &LoadSample, form: StatsForm) -> Reading {
+        let processes = self.processes(sample);
         let cpu = self.cpu(sample.cpu);
         if let Some(cpu) = cpu {
             self.push(level(cpu));
@@ -112,9 +125,50 @@ impl Sampler {
             swap_total: sample.swap_total,
             disk: sample.disk,
             uptime: sample.uptime,
-            processes: sample.processes.clone(),
+            processes,
         };
         Reading { stats, detail }
+    }
+
+    /// The top processes since the previous scan — `top`'s method: each
+    /// process's `utime + stime` difference over the elapsed time, one core =
+    /// 100 % (`top`'s default **Irix mode**, so a busy multi-threaded process
+    /// can pass 100 %). The elapsed time is the aggregate `cpu` line's
+    /// difference divided by the cores (it sums every core); with the core
+    /// count unknown it is not divided, i.e. the whole machine = 100 %
+    /// (Solaris mode). `ps`'s `pcpu` is not used: it is the average over the
+    /// process's **lifetime** (a short-lived `ps` showed 2200 %).
+    ///
+    /// Left out: our own measuring (the helper's `sh` and its descendants —
+    /// by process tree, not by name: our `awk` and the user's look alike),
+    /// a process with no base (started since, or its PID reused — the
+    /// identity is PID + `starttime`), a counter that went back and a zero
+    /// difference. Zombies never arrive (`PROC_AWK`).
+    fn processes(&mut self, sample: &LoadSample) -> Option<Vec<Process>> {
+        let Some(scan) = &sample.scan else {
+            self.scan = None;
+            return None;
+        };
+        let next = ScanBase {
+            total: sample.cpu.total,
+            ticks: scan
+                .tasks
+                .iter()
+                .map(|task| ((task.pid, task.start), task.ticks))
+                .collect(),
+        };
+        let base = self.scan.replace(next)?;
+        let elapsed = sample
+            .cpu
+            .total
+            .checked_sub(base.total)
+            .filter(|&n| n > 0)?;
+        Some(top_processes(
+            scan,
+            &base.ticks,
+            elapsed,
+            sample.cores.unwrap_or(1),
+        ))
     }
 
     /// CPU % since the previous reading; `None` on the first one and when a
@@ -139,6 +193,69 @@ impl Sampler {
             self.len += 1;
         }
     }
+}
+
+/// One process scan's ticks by identity (PID, `starttime`) and the aggregate
+/// CPU total at that moment.
+#[derive(Debug)]
+struct ScanBase {
+    total: u64,
+    ticks: HashMap<(u32, u64), u64>,
+}
+
+/// The [`TOP_PROCESSES`] largest differences against `before`, in tenths of a
+/// percent of one core; `elapsed` is the aggregate CPU difference (all cores'
+/// jiffies). See [`Sampler::processes`] for what is left out.
+fn top_processes(
+    scan: &ProcessScan,
+    before: &HashMap<(u32, u64), u64>,
+    elapsed: u64,
+    cores: u32,
+) -> Vec<Process> {
+    let ours = own_tree(scan);
+    let mut top: Vec<Process> = scan
+        .tasks
+        .iter()
+        .filter(|task| !ours.contains(&task.pid) && !task.name.is_empty())
+        .filter_map(|task| {
+            let delta = task
+                .ticks
+                .checked_sub(*before.get(&(task.pid, task.start))?)?;
+            let elapsed = u128::from(elapsed);
+            let tenths =
+                (u128::from(delta) * 1000 * u128::from(cores.max(1)) + elapsed / 2) / elapsed;
+            let cpu = u32::try_from(tenths).unwrap_or(u32::MAX);
+            (cpu > 0).then(|| Process {
+                name: task.name.clone(),
+                cpu,
+            })
+        })
+        .collect();
+    top.sort_by(|a, b| b.cpu.cmp(&a.cpu).then_with(|| a.name.cmp(&b.name)));
+    top.truncate(TOP_PROCESSES);
+    top
+}
+
+/// The helper's `sh` and every descendant (the scan's `awk`; any pipeline the
+/// script grows later). Empty without a `self` line.
+fn own_tree(scan: &ProcessScan) -> HashSet<u32> {
+    let mut ours = HashSet::new();
+    let Some(root) = scan.self_pid else {
+        return ours;
+    };
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for task in &scan.tasks {
+        children.entry(task.ppid).or_default().push(task.pid);
+    }
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        if ours.insert(pid)
+            && let Some(kids) = children.get(&pid)
+        {
+            stack.extend(kids);
+        }
+    }
+    ours
 }
 
 /// `part / whole` as a rounded percentage, `0..=100`; 0 for an empty whole.
@@ -426,6 +543,7 @@ impl Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote_files::Task;
 
     fn sample(total: u64, idle: u64) -> LoadSample {
         LoadSample {
@@ -536,6 +654,125 @@ mod tests {
                 .stats
                 .cpu,
             Some(50)
+        );
+    }
+
+    fn task(pid: u32, ppid: u32, start: u64, ticks: u64, name: &str) -> Task {
+        Task {
+            pid,
+            ppid,
+            start,
+            ticks,
+            name: name.to_owned(),
+        }
+    }
+
+    /// A `detail` sample at CPU total `total` on four cores, `self` = 50.
+    fn scanned(total: u64, tasks: Vec<Task>) -> LoadSample {
+        LoadSample {
+            cores: Some(4),
+            scan: Some(ProcessScan {
+                self_pid: Some(50),
+                tasks,
+            }),
+            ..sample(total, 0)
+        }
+    }
+
+    fn top(reading: &Reading) -> Vec<(&str, u32)> {
+        reading
+            .detail
+            .processes
+            .as_deref()
+            .expect("measured")
+            .iter()
+            .map(|process| (process.name.as_str(), process.cpu))
+            .collect()
+    }
+
+    #[test]
+    fn process_cpu_is_the_difference_of_two_scans_one_core_a_hundred() {
+        let mut sampler = Sampler::default();
+        let first = sampler.take(
+            &scanned(
+                1000,
+                vec![
+                    task(10, 1, 7, 500, "postgres"),
+                    task(11, 1, 7, 100, "btop"),
+                    task(12, 1, 7, 900, "idle one"),
+                    task(13, 1, 7, 40, "nginx"),
+                    task(14, 1, 7, 0, "java"),
+                    task(15, 1, 7, 0, "new pid"),
+                ],
+            ),
+            StatsForm::Sparkline,
+        );
+        assert_eq!(first.detail.processes, None, "one scan: measuring");
+        // 400 jiffies over four cores = 100 wall ticks.
+        let second = sampler.take(
+            &scanned(
+                1400,
+                vec![
+                    task(10, 1, 7, 650, "postgres"), // 150 → 150 %
+                    task(11, 1, 7, 105, "btop"),     // 5 → 5 %
+                    task(12, 1, 7, 900, "idle one"), // 0 → left out
+                    task(13, 1, 7, 41, "nginx"),     // 1 → 1 %
+                    task(14, 1, 7, 2, "java"),       // 2 → 2 %
+                    task(15, 1, 9, 80, "new pid"),   // another start: no base
+                    task(16, 1, 9, 80, "born"),      // no base
+                ],
+            ),
+            StatsForm::Sparkline,
+        );
+        assert_eq!(
+            top(&second),
+            [("postgres", 1500), ("btop", 50), ("java", 20)]
+        );
+        // A plain sample (the popover closed) drops the base: no difference
+        // minutes wide on the next open.
+        let plain = sampler.take(&sample(1800, 0), StatsForm::Sparkline);
+        assert_eq!(plain.detail.processes, None);
+        let reopened = sampler.take(
+            &scanned(9000, vec![task(10, 1, 7, 9000, "postgres")]),
+            StatsForm::Sparkline,
+        );
+        assert_eq!(reopened.detail.processes, None, "measuring again");
+    }
+
+    #[test]
+    fn our_own_measuring_is_not_the_servers_load() {
+        let mut sampler = Sampler::default();
+        let tasks = |ticks: u64| {
+            vec![
+                task(50, 40, 1, ticks, "sh"),       // the helper (`self`)
+                task(51, 50, 1, ticks, "awk"),      // its scan
+                task(52, 51, 1, ticks, "cat"),      // a grandchild
+                task(40, 1, 1, ticks / 10, "sshd"), // its parent stays
+                task(60, 1, 1, ticks, "awk"),       // the user's awk stays
+            ]
+        };
+        sampler.take(&scanned(0, tasks(0)), StatsForm::Sparkline);
+        let reading = sampler.take(&scanned(400, tasks(30)), StatsForm::Sparkline);
+        assert_eq!(top(&reading), [("awk", 300), ("sshd", 30)]);
+    }
+
+    #[test]
+    fn a_scan_without_elapsed_time_or_cores_is_still_safe() {
+        let mut sampler = Sampler::default();
+        let busy = |ticks| vec![task(10, 1, 7, ticks, "postgres")];
+        sampler.take(&scanned(1000, busy(0)), StatsForm::Sparkline);
+        // No time passed (or the counters went back): no difference yet.
+        let still = sampler.take(&scanned(1000, busy(50)), StatsForm::Sparkline);
+        assert_eq!(still.detail.processes, None);
+        // A counter that went back is left out, not a wrap.
+        let back = sampler.take(&scanned(1400, busy(10)), StatsForm::Sparkline);
+        assert_eq!(top(&back), []);
+        // Unknown cores: the whole machine = 100 % (400 jiffies, 100 used → 25 %).
+        let mut unknown = scanned(1800, busy(110));
+        unknown.cores = None;
+        assert_eq!(
+            top(&sampler.take(&unknown, StatsForm::Sparkline)),
+            [("postgres", 250)]
         );
     }
 
