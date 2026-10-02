@@ -1907,8 +1907,7 @@ fn render_context(
     }
     if let Some(host) = context.remote_host() {
         let color = theme.mark_linear(context.remote_mark);
-        render_remote_context(context, host, color, theme, available, row, sink);
-        return [None; 2];
+        return render_remote_context(context, host, color, theme, available, row, sink);
     }
     let branch_chars = context.branch.chars().count();
     // The budget is set aside **for the branch first**; the path gets the
@@ -1968,6 +1967,10 @@ fn render_context(
 /// we are remote is still correct information. The path and the indicator
 /// share the rest by [`stats_layout`]'s ladder; the path is shortened from
 /// the left; if the remote shell prints no OSC 7 there is no path at all.
+///
+/// The return is the Sign In… button (047 R7.2), in the upload buttons'
+/// place and drawing: label in the foreground, fill and border in the mark's
+/// color.
 fn render_remote_context(
     context: &DockContext,
     host: &str,
@@ -1976,13 +1979,19 @@ fn render_remote_context(
     available: usize,
     row: u16,
     sink: &mut impl FnMut(Cell),
-) {
+) -> [Option<DockButton>; 2] {
     let (remote_cwd, stats) = (&context.remote_cwd, context.stats.as_ref());
     let mark = std::iter::once((REMOTE_MARK, info));
-    let layout = stats_layout(host, remote_cwd, stats, available);
+    let layout = stats_layout(
+        host,
+        remote_cwd,
+        stats,
+        context.sign_in.is_some(),
+        available,
+    );
     if !layout.head {
         emit_context(mark, available, row, sink);
-        return;
+        return [None; 2];
     }
     let (_, path) = path_cells(
         remote_cwd,
@@ -2009,6 +2018,27 @@ fn render_remote_context(
         });
         emit_context_at(span.start, cells, available, row, sink);
     }
+    let (Some(sign_in), Some((start, end))) = (context.sign_in, layout.sign_in) else {
+        return [None; 2];
+    };
+    let label = ButtonLabel::SignIn
+        .chars()
+        .map(|ch| (ch, theme.foreground_linear()));
+    emit_context_at(start + BUTTON_PAD, label, available, row, sink);
+    [
+        None,
+        Some(DockButton {
+            // audit: `end ≤ available ≤ cols` and `cols` is `u16`.
+            start: CONTEXT_COL + start as u16,
+            end: CONTEXT_COL + end as u16,
+            color: info,
+            state: if sign_in.hover {
+                ButtonState::Hover
+            } else {
+                ButtonState::Idle
+            },
+        }),
+    ]
 }
 
 /// One of the load indicator's three values (046 Karar 4).
@@ -2293,6 +2323,9 @@ struct RemoteLayout {
     path_budget: usize,
     /// The indicator; `None` → not drawn.
     gauge: Option<GaugeSpan>,
+    /// The Sign In… button's context-local range `[start, end)` — the whole
+    /// fill and the hit area; `None` → not drawn.
+    sign_in: Option<(usize, usize)>,
 }
 
 /// The remote form's layout: `⇄ {host}  {path}` on the left, the load
@@ -2307,13 +2340,20 @@ struct RemoteLayout {
 /// path. Otherwise the indicator drops and the path takes today's budget. The
 /// host is never shortened.
 ///
-/// Drawing ([`render_remote_context`]), the mouse ([`stats_at`]) and the
-/// popover's anchor ([`stats_span`]) read this; had they diverged a click
-/// would fall next to the indicator.
+/// **The Sign In… button** (047 R7.2) takes the indicator's place — there is
+/// no sample without a login — and goes **before the path**: it is the row's
+/// only action and the path is shortened from the left into the rest. If even
+/// `⇄ host` + gap + button does not fit it drops and the path takes today's
+/// budget.
+///
+/// Drawing ([`render_remote_context`]), the mouse ([`stats_at`],
+/// [`sign_in_span`]) and the popover's anchor ([`stats_span`]) read this; had
+/// they diverged a click would fall next to the indicator or the button.
 fn stats_layout(
     host: &str,
     remote_cwd: &str,
     stats: Option<&RemoteStats>,
+    sign_in: bool,
     available: usize,
 ) -> RemoteLayout {
     // `⇄` + space + host.
@@ -2323,16 +2363,30 @@ fn stats_layout(
             head: false,
             path_budget: 0,
             gauge: None,
+            sign_in: None,
         };
     }
     let left = head_chars + REMOTE_GAP.chars().count();
     let path_budget = available.saturating_sub(left);
-    let Some(stats) = stats else {
+    let bare = RemoteLayout {
+        head: true,
+        path_budget,
+        gauge: None,
+        sign_in: None,
+    };
+    if sign_in {
+        let width = button_width(ButtonLabel::SignIn, false);
+        if left + STATS_GAP + width > available {
+            return bare;
+        }
         return RemoteLayout {
-            head: true,
-            path_budget,
-            gauge: None,
+            path_budget: available - left - STATS_GAP - width,
+            sign_in: Some((available - width, available)),
+            ..bare
         };
+    }
+    let Some(stats) = stats else {
+        return bare;
     };
     let placed = |step: GaugeStep, width: usize| RemoteLayout {
         head: true,
@@ -2342,6 +2396,7 @@ fn stats_layout(
             start: available - width,
             end: available,
         }),
+        sign_in: None,
     };
     let path_chars = remote_cwd.chars().count();
     for &step in ladder(stats.form) {
@@ -2355,23 +2410,43 @@ fn stats_layout(
     if metric.level(value) > StatsLevel::Normal && left + STATS_GAP + width <= available {
         return placed(GaugeStep::Worst, width);
     }
-    RemoteLayout {
-        head: true,
-        path_budget,
-        gauge: None,
-    }
+    bare
 }
 
 /// The drawn indicator's context-local range; `None` while the upload row
 /// stands in the context row's place (046 R3.3), locally, without a value or
 /// when it did not fit.
 fn stats_range(context: &DockContext, budget: u16) -> Option<GaugeSpan> {
+    remote_layout(context, budget)?.gauge
+}
+
+/// The remote form's layout of `context` on a `budget`-column context row;
+/// `None` while the upload row stands in its place or locally.
+fn remote_layout(context: &DockContext, budget: u16) -> Option<RemoteLayout> {
     if context.transfer.is_some() {
         return None;
     }
     let host = context.remote_host()?;
     let available = usize::from(budget.saturating_sub(CONTEXT_COL));
-    stats_layout(host, &context.remote_cwd, context.stats.as_ref(), available).gauge
+    Some(stats_layout(
+        host,
+        &context.remote_cwd,
+        context.stats.as_ref(),
+        context.sign_in.is_some(),
+        available,
+    ))
+}
+
+/// The Sign In… button's **dock-local** column range `[start, end)` on the
+/// context row — the whole fill, the click's and the hand cursor's range;
+/// `None` if it is not drawn (047 R7.2). From the drawing's layout
+/// ([`stats_layout`]), so a click cannot fall next to it.
+pub fn sign_in_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
+    context.sign_in?;
+    // audit: `end ≤ available ≤ budget` and `budget` is `u16`.
+    remote_layout(context, budget)?
+        .sign_in
+        .map(|(start, end)| (CONTEXT_COL + start as u16, CONTEXT_COL + end as u16))
 }
 
 /// Whether the dock-local column `col` of the context row falls on the load
@@ -2437,6 +2512,8 @@ enum ButtonLabel {
     /// tone). "Transfers", not "files": the list carries both directions (045
     /// Karar 6).
     ShowFiles(u16),
+    /// The ssh status bar's login (047 R7.2): the ellipsis says a sheet opens.
+    SignIn,
 }
 
 impl ButtonLabel {
@@ -2446,6 +2523,7 @@ impl ButtonLabel {
             Self::Cancel => ("Cancel", None, ""),
             Self::CancelAll => ("Cancel all", None, ""),
             Self::ShowFiles(items) => ("Show transfers (", Some(items), ")"),
+            Self::SignIn => ("Sign In\u{2026}", None, ""),
         };
         head.chars()
             .chain(count.into_iter().flat_map(decimal))
@@ -4142,6 +4220,7 @@ mod tests {
             reconnect: None,
             transfer: None,
             stats: None,
+            sign_in: None,
         }
     }
 
@@ -4395,6 +4474,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 047 R7.2: the Sign In… button takes the indicator's place, right-aligned
+    /// in the upload buttons' drawing; the click's range is the drawn fill.
+    #[test]
+    fn the_sign_in_button_is_drawn_where_it_is_hit() {
+        let context = DockContext {
+            stats: Some(calm(StatsForm::Sparkline)),
+            sign_in: Some(crate::SignIn::default()),
+            ..remote("prod", "/srv/app")
+        };
+        let (cells, dock) = draw_with(&live("", "", "", 0), &context, 60);
+        let row = row_text(&cells, 1);
+        assert_eq!(row, format!("{:<51}Sign In\u{2026}", "⇄ prod  /srv/app"));
+        assert!(!row.contains("cpu"), "no indicator without a login: {row}");
+        assert_eq!(
+            dock.buttons,
+            [
+                None,
+                Some(DockButton {
+                    start: 50,
+                    end: 60,
+                    color: THEME.info_linear(),
+                    state: ButtonState::Idle,
+                })
+            ]
+        );
+        assert_eq!(color_at(&cells, 1, 51), Some(THEME.foreground_linear()));
+        assert_eq!(sign_in_span(&context, 60), Some((50, 60)));
+        assert_eq!(stats_span(&context, 60), None);
+        // The hover darkens the fill only.
+        let hovered = DockContext {
+            sign_in: Some(crate::SignIn { hover: true }),
+            ..context.clone()
+        };
+        let (_, dock) = draw_with(&live("", "", "", 0), &hovered, 60);
+        assert_eq!(dock.buttons[1].map(|b| b.state), Some(ButtonState::Hover));
+        // At every width the hit range is the drawn button, and the path gives
+        // way before it does.
+        for cols in 0..=60 {
+            let (cells, dock) = draw_with(&live("", "", "", 0), &context, cols);
+            let drawn = dock.buttons[1].map(|b| (b.start, b.end));
+            assert_eq!(sign_in_span(&context, cols), drawn, "{cols} columns");
+            if let Some((start, _)) = drawn {
+                let row = row_text(&cells, 1);
+                assert!(row.starts_with("⇄ prod"), "{cols}: {row:?}");
+                assert!(row.ends_with("Sign In\u{2026}"), "{cols}: {row:?}");
+                assert_eq!(row.chars().nth(usize::from(start) - 1), Some(' '));
+            }
+        }
+        // The upload row wins; locally and without the flag there is none.
+        let uploading = DockContext {
+            sign_in: Some(crate::SignIn::default()),
+            ..uploading("↑ a.tar", 1, Some(2_500))
+        };
+        assert_eq!(sign_in_span(&uploading, 60), None);
+        assert_eq!(sign_in_span(&remote("prod", "/srv/app"), 60), None);
+        let local = DockContext {
+            remote: None,
+            ..context
+        };
+        assert_eq!(sign_in_span(&local, 60), None);
     }
 
     #[test]

@@ -203,6 +203,17 @@ impl TerminalPane {
         self.run_stats(actions);
     }
 
+    /// The user signed in (047 R7.2): a generation that ended on a failed
+    /// open samples again at once.
+    pub(crate) fn retry_stats(&self) {
+        let actions = self
+            .stats_driver()
+            .borrow_mut()
+            .schedule
+            .retry(Instant::now());
+        self.run_stats(actions);
+    }
+
     /// The pane closes: sampling stops. The armed tick goes stale and the pane
     /// lookup would not find a closed pane anyway.
     pub(crate) fn stop_stats(&self) {
@@ -306,6 +317,9 @@ impl TerminalPane {
     /// would be the next CPU difference's base; the session gates the value by
     /// generation and equality (one frame only when the shown value changed).
     fn stats_answered(&self, generation: u64, answer: Result<Answer, String>) {
+        if let Ok(Answer::Load(LoadReply::Unreachable(text))) = &answer {
+            self.background_failed(generation, text);
+        }
         let mut outcome = outcome(&answer);
         let reading = {
             let mut driver = self.stats_driver().borrow_mut();
@@ -327,6 +341,8 @@ impl TerminalPane {
             }
         };
         if let Some((stats, detail)) = reading {
+            // A sample is a login: a Sign In… left from before goes (047 R7.2).
+            self.hide_sign_in();
             if let Some(session) = self.session() {
                 session.set_remote_stats(generation, Some(&stats));
             }

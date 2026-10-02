@@ -718,6 +718,8 @@ impl TerminalPane {
     /// an upload it exits on the first question - every motion of an idle
     /// window would cost a borrow.
     pub(crate) fn upload_hover(&self, at: Option<(u16, u16)>) {
+        // The status bar's other button (047 R7.2) shares this funnel.
+        self.sign_in_hover(at);
         let fresh = {
             let mut uploads = self.uploads().borrow_mut();
             let Some(shown) = uploads.shown() else {

@@ -7,8 +7,10 @@
 //!   [`crate::remote_files::helper_script`], a reader thread turning its
 //!   standard output into lines and every wait bounded ([`OPEN_TIMEOUT`],
 //!   [`STAT_TIMEOUT`], [`COUNT_TIMEOUT`]) — a hung ssh never blocks for good.
-//!   `BatchMode=yes` (the upload's argv): no password can be asked, a server
-//!   that wants one fails the open and the reason goes to the pane's label (R1.3).
+//!   `BatchMode=yes` (the upload's argv): no password is asked on the stream —
+//!   the route gate opens bateri's own master first when it may (047), and a
+//!   background job whose server wants a password it does not have fails the
+//!   open with [`crate::ssh_route::SIGN_IN_NEEDED`] (the pane's Sign In…).
 //! - **[`RemoteHelper`]** is the pane's handle: a worker thread born at the
 //!   first question (lazy), owning the session and the answer cache
 //!   ([`RemoteCache`]). A question carries the remote session's generation
@@ -397,6 +399,11 @@ pub struct Dial {
     /// failure must not refuse a ⌘-click for ten seconds, and a cancelled sheet
     /// is not a hover's label.
     pub user: bool,
+    /// A background job through bateri's masters: a login the server refused
+    /// on today's argv is [`crate::ssh_route::SIGN_IN_NEEDED`] — signing in
+    /// would fix it (047 R7.2). `false` without masters (the timed run, the
+    /// tests' fixed argv): there is nothing to sign in with.
+    pub sign_in: bool,
     /// The argv without the remote command (`Err`: the open's failure text).
     pub argv: Box<dyn FnOnce() -> Result<Vec<String>, String> + Send>,
 }
@@ -406,6 +413,7 @@ impl Dial {
     pub fn fixed(argv: Vec<String>) -> Self {
         Self {
             user: false,
+            sign_in: false,
             argv: Box::new(move || Ok(argv)),
         }
     }
@@ -416,8 +424,10 @@ impl Dial {
         target: bt_core::RemoteTarget,
         ask: crate::ssh_route::Ask,
     ) -> Self {
+        let user = matches!(ask, crate::ssh_route::Ask::Sheet(_));
         Self {
-            user: matches!(ask, crate::ssh_route::Ask::Sheet(_)),
+            user,
+            sign_in: !user && masters.is_some(),
             argv: Box::new(move || {
                 crate::ssh_route::dial(masters.as_deref(), &target, ask)
                     .map_err(|denied| denied.text())
@@ -440,6 +450,7 @@ pub struct Request {
 enum Message {
     Ask(Request),
     Close,
+    Retry,
 }
 
 /// The pane's handle on its helper session. The worker thread is born at the
@@ -459,7 +470,7 @@ impl RemoteHelper {
             Some(tx) => match tx.send(Message::Ask(request)) {
                 Ok(()) => return,
                 Err(mpsc::SendError(Message::Ask(request))) => request,
-                Err(mpsc::SendError(Message::Close)) => return,
+                Err(mpsc::SendError(Message::Close | Message::Retry)) => return,
             },
             None => request,
         };
@@ -489,6 +500,15 @@ impl RemoteHelper {
             let _ = tx.send(Message::Close);
         }
     }
+
+    /// Forgets the held failed open ([`RETRY_AFTER`]): the user just signed
+    /// in (047 R7.2) and the background jobs try again without waiting for a
+    /// new generation.
+    pub fn retry(&mut self) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Message::Retry);
+        }
+    }
 }
 
 /// The worker loop: one session at a time, closed on [`IDLE`], on
@@ -515,6 +535,7 @@ fn run(rx: &Receiver<Message>) {
         };
         match message {
             Message::Close => open = None,
+            Message::Retry => failed = None,
             Message::Ask(request) => {
                 let Request {
                     command,
@@ -591,9 +612,17 @@ fn serve(
         {
             return (opening_failed(failure.text.clone()), Vec::new());
         }
-        let user = dial.user;
+        let (user, sign_in) = (dial.user, dial.sign_in);
         let opened = (dial.argv)().and_then(|ssh| {
-            HelperSession::open(&ssh, host, OPEN_TIMEOUT).map(|session| (ssh, session))
+            HelperSession::open(&ssh, host, OPEN_TIMEOUT)
+                .map(|session| (ssh, session))
+                .map_err(|text| {
+                    if sign_in && crate::ssh_route::password_refused(&text) {
+                        crate::ssh_route::SIGN_IN_NEEDED.to_owned()
+                    } else {
+                        text
+                    }
+                })
         });
         match opened {
             Ok((ssh, session)) => {
@@ -1070,6 +1099,7 @@ mod tests {
         assert!(ask(Dial::fixed(failing.clone())).0.is_err());
         let user = |argv: Vec<String>| Dial {
             user: true,
+            sign_in: false,
             argv: Box::new(move || Ok(argv)),
         };
         // ...a user's dial tries anyway, and its own failure is not held.
@@ -1080,6 +1110,7 @@ mod tests {
         // The gate's own refusal reaches the reply as the error text.
         let refused = Dial {
             user: true,
+            sign_in: false,
             argv: Box::new(|| Err(crate::ssh_route::CANCELLED.to_owned())),
         };
         assert_eq!(ask(refused).0.unwrap_err(), crate::ssh_route::CANCELLED);
@@ -1131,6 +1162,37 @@ mod tests {
         // Other questions keep their `Err`.
         assert!(ask(failing(), Query::Count("/etc".to_owned())).is_err());
         let _ = fs::remove_dir_all(&root);
+        // Through bateri's masters a refused login is the Sign In… text (047
+        // R7.2) — a background job's only; a user's job keeps ssh's reason.
+        let mut helper = RemoteHelper::default();
+        let mut gated = |user: bool, command: u64| {
+            let (tx, rx) = mpsc::channel();
+            let argv = failing();
+            helper.ask(Request {
+                command,
+                dial: Dial {
+                    user,
+                    sign_in: !user,
+                    argv: Box::new(move || Ok(argv)),
+                },
+                host: "prod".to_owned(),
+                query: Query::Load { detail: false },
+                reply: Box::new(move |answer, _| {
+                    let _ = tx.send(answer);
+                }),
+            });
+            rx.recv_timeout(Duration::from_secs(30))
+                .expect("the worker replies")
+        };
+        let unreachable = |answer: Result<Answer, String>| match answer {
+            Ok(Answer::Load(LoadReply::Unreachable(text))) => text,
+            other => panic!("expected Unreachable, got {other:?}"),
+        };
+        assert_eq!(
+            unreachable(gated(false, 1)),
+            crate::ssh_route::SIGN_IN_NEEDED
+        );
+        assert!(unreachable(gated(true, 2)).contains("Permission denied"));
         // An open session answers through the worker.
         let mut helper = RemoteHelper::default();
         let (tx, rx) = mpsc::channel();

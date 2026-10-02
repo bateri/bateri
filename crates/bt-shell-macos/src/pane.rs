@@ -1087,6 +1087,9 @@ define_class!(
                 // ⌘. only while this pane has a queue (037 Karar 7); the grey
                 // item's shortcut falls to `keyDown:` and is swallowed there.
                 self.ivars().uploads.borrow().active()
+            } else if action == Some(sel!(forgetPassword:)) {
+                // A remote tab with a saved password (047 R6.2).
+                self.can_forget_password()
             } else {
                 true
             }
@@ -1102,6 +1105,13 @@ define_class!(
         #[unsafe(method(cancelUpload:))]
         fn cancel_upload(&self, _sender: Option<&AnyObject>) {
             self.cancel_uploads();
+        }
+
+        /// Shell ▸ Forget Password for “{host}” (047 R6.2): this pane's remote
+        /// account's saved password (`validateMenuItem:` greys it without one).
+        #[unsafe(method(forgetPassword:))]
+        fn forget_password_sent(&self, _sender: Option<&AnyObject>) {
+            self.forget_password();
         }
 
         /// The popover row's button (`Cancel`/`Remove`): `tag` is the item's
