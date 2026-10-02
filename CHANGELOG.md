@@ -12,6 +12,31 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Server load in the ssh status bar.** While you're connected to a Linux
+  server, the right side of the status bar shows its CPU and memory:
+  `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%`, with the last eight CPU samples as a small
+  graph. Values stay dim until they cross a threshold (CPU 70/90%, memory
+  80/92%), then turn yellow or red, with a `▲` when critical. Disk usage
+  appears only once `/` is more than 85% full. In a narrow window the graph
+  goes first, then all but the worst value; the host name is never cut.
+- **Click the load for details**: CPU cores, load average, memory and swap,
+  disk, uptime and the three processes using the most CPU right now.
+- **Settings › Remote Files › Server load**: graph, numbers only, alerts only
+  (a green dot until something crosses a threshold) or off, and how often to
+  sample (every 3 seconds by default).
+- Sampling uses the connection bateri already keeps open for remote files, so
+  no extra login. It pauses while the tab is in the background or after two
+  minutes without input, and stops when you leave the server. Servers that
+  ask for a password, and servers that aren't Linux, show no load.
+
+### Changed
+
+- The ssh status bar now shows the remote folder from the window title too
+  (`⇄ host  ~`), not only from servers that report it (OSC 7). The title can
+  also be in the `user@host:folder` form, without a space.
+
 ## [0.2.0] - 2026-10-02
 
 ### Added
