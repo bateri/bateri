@@ -242,23 +242,7 @@ olan `objc2-core-foundation`.
   multiplexing'siz bir arka plan bağlantısına çevirir (işletme); kontrol yerel
   bir soket çağrısı, ucuz.
 
-## Kullanıcıya sorulacaklar
-
-1. "Remember in Keychain" kutusu varsayılan **işaretli** mi gelsin? (Öneri:
-   evet.)
-2. Arka plan (yük göstergesi, ⌘-hover) parola sormasın, etiket "giriş yap"
-   desin — etiket düz metin mi, tıklanabilir **Sign In…** düğmesi mi? (Öneri:
-   düğme.)
-3. Bilinmeyen host anahtarında bateri sorusuz reddetsin ve "önce terminalde
-   bağlan" desin mi, yoksa parmak iziyle bir "Trust" sayfası mı açsın?
-   (Öneri: bu sette reddet — `StrictHostKeyChecking=yes`; `accept-new`
-   kullanan biri terminalde sorusuz kabul edilen yeni host'ta burada ret
-   görür.)
-4. Kayıtlı parolayı silmek için Shell menüsünde **Forget Password for “host”**
-   yeterli mi, ayar penceresinde liste de ister misin? (Öneri: şimdilik menü.)
-5. Yeni bağımlılık `objc2-security` (objc2 ailesi, aynı nesil) — onay?
-
-## Karar (2026-10-02, öneri — kullanıcı onayı bekliyor)
+## Karar (2026-10-02, kullanıcı onayı)
 
 - **Seçilen:** askpass (aynı `bateri` binary'si, `BATERI_ASKPASS` kipi,
   deneme başına geçici soket) + iş başlamadan tek kapıda rota
@@ -276,3 +260,17 @@ olan `objc2-core-foundation`.
   kalabilirdi); hatadan sonra yeniden deneme (altı tüketiciye dağılır);
   uygulama ömürlü dinleyici + jeton tablosu (bayat soket, yeni global
   servis); kapanışta `-O exit` (öteki örneğin ve 048'in master'ını öldürür).
+- **Ürün kararları (kullanıcı, 2026-10-02 — "önerilerle devam"):**
+  - Parola sayfasındaki **Remember in Keychain** varsayılan **işaretli**
+    (Karar 4).
+  - Arka plan işleri sayfa açmıyor; Keychain'de parola yoksa pane'in
+    etiketinde tıklanabilir bir **Sign In…** düğmesi (fiil etiketli, dolgulu;
+    Karar 5). Düğme parola sayfasını açar ve giriş başarılı olunca arka plan
+    işleri yeni nesil beklemeden yeniden dener.
+  - Bilinmeyen host anahtarında **ret**, sayfa yok: master
+    `StrictHostKeyChecking=yes` ile açılır, hata satırı "connect once in the
+    terminal" der (Karar 7). Trust sayfası bu sette yok.
+  - Kayıtlı parolayı silmek: Shell menüsünde uzak sekmedeyken **Forget
+    Password for “{host}”**; ayar penceresindeki liste sonraki tur (Karar 6).
+  - Yeni bağımlılık **`objc2-security` 0.3.2** onaylı (`default-features =
+    false`, `std` + `SecItem`; yalnız `bt-shell-macos`; Karar 8).

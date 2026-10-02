@@ -149,6 +149,8 @@ soket düzeni oturduktan sonra.
 
 ## Kaba phase taslağı
 
+_İlk taslak; Muhakeme onu değiştirdi, geçerli bölme `plan.md`'de._
+
 1. **Uzakta OSC 7.** `bateri ssh-argv` alt komutu + `bateri.zsh`'in `ssh`
    fonksiyonu + uzak önyükleme (üç kabuk, yalnız OSC 7) + `jobs`'un
    önyüklemeyi ayıklaması. `bt-core` değişmez.
@@ -239,29 +241,63 @@ koruma (kapatma düğmesi ve config okuması phase-3'te).
 - Sürümlü uzak dizin + süpürme (işletme) — sabit yol aynı korumayı birikmesiz
   veriyor.
 
-## Kullanıcıya sorulacaklar
+## Karar (2026-10-02, kullanıcı onayı)
 
-1. Varsayılan: her sunucuda açık mı, kapalı mı? (Öneri: açık, `production`
-   işaretli host'ta kapalı.)
-2. Kabuksuz uçlar (router, Windows, `git@github.com`): sarılmış ilk bağlantı
-   kırılabilir. (a) İlk bağlantı düz, bateri arka planda sunucunun bir POSIX
-   kabuğu olduğunu öğrendikten sonra sonraki bağlantılar entegre; (b) hemen
-   sar, kırılırsa o host'u kendiliğinden kapatıp etikette söyle. (Öneri: a —
-   kırık bağlantı hiç görülmez, bedeli ilk bağlantıda entegrasyon yok.)
-3. Sarılmış bağlantıda sshd `Last login:` satırını ve kendi motd'unu basmıyor
-   (Fedora'da doğrulanacak). (a) Kabul; (b) önyükleme `/etc/motd`'u kendisi
-   basar, `Last login` kaybolur. (Öneri: b.)
-4. ssh bitince uzak komutların blok şeritleri geçmişte kalsın mı? (Öneri:
-   evet, yerel bloklar gibi.)
-5. Sunucuda kalan `~/.local/share/bateri` için "Remove bateri files from this
-   host" ilk sürümde gerekli mi? (Öneri: hayır; dokunulan host'ların yerel
-   listesi tutulur, düğme sonra.)
+Kullanıcı önerilerin tamamını onayladı ("önerilerle devam").
 
-## Karar (2026-10-02, öneri — kullanıcı onayı bekliyor)
+**Ürün kararları (kullanıcı):**
+- **Varsayılan açık**, `production` işaretli host'ta kapalı (Karar 7). Genel
+  `[remote] integration = false` ve host başına `integration = false` kapatır;
+  host başına `integration = true` prod işaretini ezer.
+- **Kabuksuz uçlar: ilk bağlantıda öğren** (soru 2-a). Bir host'a ilk
+  bağlantı düz açılır; bateri o host'ta POSIX kabuğu olduğunu öğrendikten
+  sonra sonraki bağlantılar sarılır. Router, Windows ya da `git@github.com`
+  hiç öğrenilmez, yani hiç sarılmaz ve kırık bağlantı görülmez. Bedeli: her
+  host'ta ilk bağlantı entegrasyonsuz.
+- **motd'u önyükleme basar**, `Last login:` satırının kaybı kabul (soru 3-b).
+- **Uzak blok şeritleri ssh bitince geçmişte kalır**, yerel bloklar gibi
+  (soru 4).
+- **"Remove bateri files" düğmesi yok** (soru 5); bateri dokunduğu host'ların
+  yerel listesini tutar, düğme sonra.
 
-- **Önerilen:** yerel zsh'te `ssh` fonksiyonu (1-A), karar ve argv `bateri
+**Teknik kararlar (ajan):**
+- **Öğrenmenin kaynağı yardımcı oturumun selamı.** Uzak pane'in yardımcı
+  oturumu (`remote_helper`, 045 Karar 10) sunucuda `sh` ile koşuyor ve
+  `parse_greeting` `BT-HOME` satırını aldığında sunucuda çalışan bir POSIX
+  `sh` olduğu kanıtlanmış olur; yük göstergesi (046) bu oturumu uzak oturum
+  başlar başlamaz açtığı için ilk bağlantının içinde, kullanıcı bir şey
+  yapmadan gerçekleşir. Yeni bir yoklama doğmaz. `BT-NOPROC` öğrenmeyi
+  engellemez (macOS/BSD sunucuda da `sh` var). Yardımcı açılamıyorsa
+  (parolalı host, 047'den önce) öğrenme yok ve host sarılmaz — yanlışın yönü
+  güvenli; 047 inince Keychain'li host'lar da öğrenilir.
+- **Öğrenilen kalıcı**, bellekte değil: bellekte tutulsaydı bateri her
+  açıldığında her host'un ilk bağlantısı yeniden entegrasyonsuz olurdu.
+  Kayıt yeri bateri'nin kendi durum dosyası (`settings.toml` değil — o
+  kullanıcının dosyası ve menüden yazılan anahtarlardan ibaret): macOS'ta
+  `~/Library/Application Support/bateri/remote-hosts`, Linux'ta
+  `$XDG_STATE_HOME/bateri/remote-hosts`. Satır biçimi sekmeyle ayrık
+  (`posix`/`touched`, host anahtarı, Unix zamanı); yazım geçici ad + `rename`,
+  eşzamanlı iki `ssh` için `flock`. Aynı dosya "dokunulan host'lar" listesini
+  de taşır (sarılmış bağlantı başına `touched`). Bozuk satır atlanır, dosya
+  okunamazsa hiçbir host öğrenilmemiş sayılır (sarılmaz).
+- **Host anahtarı `ssh -G`'nin kanonik `(user, hostname, port)` üçlüsü**,
+  yazıldığı hâli değil: `ssh web` ile `ssh deploy@10.0.0.5` aynı makineyse
+  bir kez öğrenilir. Sarma kararında `ssh-argv` `ssh -G`'yi zaten koşuyor;
+  öğrenme tarafı da aynı fonksiyonla (`ssh_wrap::host_key`) ve yalnız host
+  henüz öğrenilmemişken koşar. Prod işareti ise bugünkü gibi yazılan host'a
+  eşlenir (`settings::host_mark`), ikisi ayrı sorular.
+- **Sızıntı savunması phase-1'de yalnız OSC 8133 için**: uzak oturum
+  etkinken 8133 yok sayılır (`ShellLog::apply_dock`'un kapısı). `bt_block=`'in
+  uzaktan taklidine karşı bir oturum anahtarı **eklenmedi**: uzak betiklerimiz
+  `bt_block=` basmıyor (yalnız `bt_remote=`, `plan.md` → phase-3), yabancı betikler onu
+  bilmiyor; anahtar yerel işaretin biçimini değiştirirdi. Bilinen sınır,
+  phase-3'ün Uygulama Notları'nda yeniden bakılır.
+
+### Seçilen ve reddedilen
+
+- **Seçilen:** yerel zsh'te `ssh` fonksiyonu (1-A), karar ve argv `bateri
   ssh-argv` alt komutunda `ssh -G` okumasıyla (2-B), satır içi önyükleme
-  (3-A), phase-1'de kabuk başına küçük uzak betik + `bt-core`'da sızıntı
+  (3-A), ilk teslimde kabuk başına küçük uzak betik + `bt-core`'da sızıntı
   savunması + genel ve host başına kapama, uzak blok kimliği yerel ssh
   bloğuyla önekli ayrı izde (4), sabit `~/.local/share/bateri/shell/` ve
   etiketli düşüş (5), konumla `unwrap` (6), paylaşılan bağlantı son phase (9).
@@ -270,7 +306,4 @@ koruma (kapatma düğmesi ve config okuması phase-3'te).
   Muhakeme), sürümlü uzak dizin, kullanıcının rc dosyasına satır eklemek
   (proje kuralı).
 
-Revize phase taslağı: (1) uzakta OSC 7 + `ssh-argv` + `ssh -G` + kapama +
-sızıntı savunması; (2) uzakta bloklar (`BlockTrack`, önekli kimlik);
-(3) menü ve ayar penceresi, `docs/AYARLAR.md`; (4) paylaşılan bağlantı
-(047'den sonra).
+Phase bölmesi `plan.md`'de.
