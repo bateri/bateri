@@ -673,7 +673,7 @@ impl BateriView {
             reply: Box::new(move |answer| {
                 let found = match answer {
                     Ok(Answer::Verified(found)) => Ok(found),
-                    Ok(Answer::Counted(_)) => Ok(None),
+                    Ok(Answer::Counted(_) | Answer::Load(_)) => Ok(None),
                     Err(text) => Err(text),
                 };
                 DispatchQueue::main().exec_async(move || {
