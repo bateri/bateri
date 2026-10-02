@@ -46,6 +46,12 @@ pub(crate) struct StatsDriver {
     /// otherwise a form change would bring back another host's numbers or a
     /// hidden value (Karar 5).
     last: Option<RemoteStats>,
+    /// The last sample's details — the popover's content ([`crate::stats_popover`]);
+    /// cleared with [`Self::last`] for the same reason (another host's
+    /// processes must not show). The OS and the core count come only with a
+    /// `detail` request and do not change within a generation: a plain sample
+    /// keeps the previous ones.
+    detail: Option<Detail>,
 }
 
 impl StatsDriver {
@@ -57,7 +63,33 @@ impl StatsDriver {
             sampler: Sampler::default(),
             form,
             last: None,
+            detail: None,
         }
+    }
+
+    /// The last sample's details (the popover's content), if any.
+    pub(crate) fn detail(&self) -> Option<&Detail> {
+        self.detail.as_ref()
+    }
+
+    /// Forgets the last sample: a new generation, a restart, a hide.
+    fn forget(&mut self) {
+        self.last = None;
+        self.detail = None;
+    }
+
+    /// Takes a sample's details; a plain sample keeps the OS and the cores of
+    /// the previous `detail` one (they do not change within a generation).
+    fn keep_detail(&mut self, mut detail: Detail) {
+        if let Some(previous) = self.detail.take() {
+            if detail.os.is_none() {
+                detail.os = previous.os;
+            }
+            if detail.cores.is_none() {
+                detail.cores = previous.cores;
+            }
+        }
+        self.detail = Some(detail);
     }
 }
 
@@ -102,11 +134,12 @@ impl TerminalPane {
         let actions = {
             let mut driver = self.stats_driver().borrow_mut();
             if driver.schedule.generation() != generation {
-                driver.last = None;
+                driver.forget();
             }
             driver.schedule.set_generation(Instant::now(), generation)
         };
         self.run_stats(actions);
+        self.stats_gauge_changed();
     }
 
     /// The pane became visible or covered (a background tab, a minimised
@@ -157,6 +190,18 @@ impl TerminalPane {
             session.set_remote_stats(generation, Some(&stats));
         }
         self.run_stats(actions);
+        self.stats_gauge_changed();
+    }
+
+    /// The popover opened or closed ([`crate::stats_popover`]): while it is
+    /// open every request asks for the details, and opening asks at once.
+    pub(crate) fn set_stats_detail(&self, open: bool) {
+        let actions = self
+            .stats_driver()
+            .borrow_mut()
+            .schedule
+            .set_detail(Instant::now(), open);
+        self.run_stats(actions);
     }
 
     /// The pane closes: sampling stops. The armed tick goes stale and the pane
@@ -179,12 +224,13 @@ impl TerminalPane {
                 Action::Hide => {
                     let generation = {
                         let mut driver = self.stats_driver().borrow_mut();
-                        driver.last = None;
+                        driver.forget();
                         driver.schedule.generation()
                     };
                     if let (Some(generation), Some(session)) = (generation, self.session()) {
                         session.set_remote_stats(generation, None);
                     }
+                    self.stats_gauge_changed();
                 }
             }
         }
@@ -221,7 +267,7 @@ impl TerminalPane {
             let mut driver = self.stats_driver().borrow_mut();
             if restart {
                 driver.sampler.reset();
-                driver.last = None;
+                driver.forget();
             }
             driver.schedule.generation()
         };
@@ -281,7 +327,11 @@ impl TerminalPane {
             if let Some(session) = self.session() {
                 session.set_remote_stats(generation, Some(&stats));
             }
-            self.stats_detail_arrived(&detail);
+            self.stats_driver().borrow_mut().keep_detail(detail);
+            self.refresh_stats_popover();
+            // Every sample, not only a changed one: the indicator's rectangle
+            // also moves with the window and the hand cursor must follow.
+            self.stats_gauge_changed();
         }
         let actions =
             self.stats_driver()
@@ -290,15 +340,12 @@ impl TerminalPane {
                 .answered(Instant::now(), generation, outcome);
         self.run_stats(actions);
     }
-
-    /// The popover's seam (046 Karar 7): every sample's details land here.
-    /// Phase-5's popover refreshes itself in place from it; until then nothing
-    /// shows them.
-    fn stats_detail_arrived(&self, _detail: &Detail) {}
 }
 
 #[cfg(test)]
 mod tests {
+    use bt_shell_common::remote_files::Process;
+
     use super::*;
 
     #[test]
@@ -317,6 +364,31 @@ mod tests {
         assert_eq!(numbers.form, StatsForm::Numbers);
         assert_eq!((numbers.cpu, numbers.mem, numbers.disk), (Some(23), 61, 40));
         assert_eq!((numbers.len, numbers.history), (0, [0; STATS_HISTORY]));
+    }
+
+    #[test]
+    fn a_plain_sample_keeps_the_os_and_cores_but_not_the_processes() {
+        let mut driver = StatsDriver::new(&RemoteStatsSettings::default());
+        driver.keep_detail(Detail {
+            os: Some("Ubuntu 24.04".to_owned()),
+            cores: Some(8),
+            cpu: Some(12),
+            processes: vec![Process {
+                name: "postgres".to_owned(),
+                cpu: 123,
+            }],
+            ..Detail::default()
+        });
+        driver.keep_detail(Detail {
+            cpu: Some(40),
+            ..Detail::default()
+        });
+        let detail = driver.detail().expect("a sample arrived");
+        assert_eq!(detail.os.as_deref(), Some("Ubuntu 24.04"));
+        assert_eq!((detail.cores, detail.cpu), (Some(8), Some(40)));
+        assert!(detail.processes.is_empty(), "processes are live, not kept");
+        driver.forget();
+        assert_eq!(driver.detail(), None, "another host's details do not stay");
     }
 
     #[test]

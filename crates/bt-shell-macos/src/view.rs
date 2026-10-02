@@ -1743,9 +1743,10 @@ impl BateriView {
             }
             return;
         }
-        // The upload line's buttons (037 Karar 7): on the context line, without
-        // entering the gesture ledger - a click is a button, it starts no drag.
-        if button == MouseButton::Left && self.upload_control(event) {
+        // The upload line's buttons (037 Karar 7) and the load indicator (046
+        // phase-5): on the context line, without entering the gesture ledger -
+        // a click is a button, it starts no drag.
+        if button == MouseButton::Left && self.context_control(event) {
             return;
         }
         self.forget_link_menu();
@@ -2016,10 +2017,6 @@ impl BateriView {
         point_to_cell((point.x, point.y), metrics, top, outside, scale, cols, rows)
     }
 
-    /// The owner pane of this view - its direct superview (039 Karar 2);
-    /// `None` if the view is not yet attached to a pane. There is no linear
-    /// search in a window list or reaching for the application delegate: the
-    /// owner is in the view tree.
     /// A key, a press, the wheel or a mouse move: the remote load indicator
     /// keeps sampling while the user is around (046 Karar 6). A stamp, no
     /// `Term` lock — it runs at mouse-move rate.
@@ -2029,6 +2026,10 @@ impl BateriView {
         }
     }
 
+    /// The owner pane of this view - its direct superview (039 Karar 2);
+    /// `None` if the view is not yet attached to a pane. There is no linear
+    /// search in a window list or reaching for the application delegate: the
+    /// owner is in the view tree.
     pub(crate) fn pane(&self) -> Option<Retained<TerminalPane>> {
         // SAFETY: reading the superview; the returned `Retained` keeps it alive
         // for the caller and we are on the main thread (`MainThreadOnly`).
@@ -2095,11 +2096,22 @@ impl BateriView {
         self.ivars().cursor_rects.replace(rects);
     }
 
-    /// Every hand-cursor rectangle: the upload buttons and the shown link.
+    /// Every hand-cursor rectangle: the upload buttons, the load indicator
+    /// (046 phase-5) and the shown link.
     fn hand_rects(&self) -> Vec<NSRect> {
         let mut rects = self.upload_button_rects();
+        rects.extend(self.stats_rect());
         rects.extend(self.link_rects());
         rects
+    }
+
+    /// The load indicator's rectangle, in view points — the same range as its
+    /// click and its popover's anchor (`Session::stats_span`); `None` if it is
+    /// not drawn.
+    fn stats_rect(&self) -> Option<NSRect> {
+        let budget = self.context_budget()?;
+        let (start, end) = self.pane()?.session()?.stats_span(budget)?;
+        self.context_span_rect(start, end)
     }
 
     /// The buttons' current rectangles, in view points - from click and hover's
@@ -2133,11 +2145,15 @@ impl BateriView {
     }
 
     /// Whether the click landed on one of the upload line's buttons (037 Karar
-    /// 7); `true` → the click was consumed. The geometry is [`Self::context_column`]'s.
-    fn upload_control(&self, event: &NSEvent) -> bool {
+    /// 7) or, failing that, on the load indicator (046 phase-5; never both —
+    /// the indicator is not drawn while an upload row is); `true` → the click
+    /// was consumed. The geometry is [`Self::context_column`]'s.
+    fn context_control(&self, event: &NSEvent) -> bool {
         self.context_column(event.locationInWindow())
             .zip(self.pane())
-            .is_some_and(|((col, context), pane)| pane.upload_click(col, context))
+            .is_some_and(|((col, context), pane)| {
+                pane.upload_click(col, context) || pane.stats_click(col, context)
+            })
     }
 
     /// The mouse's **current** place on the context line ([`Self::context_column`]):

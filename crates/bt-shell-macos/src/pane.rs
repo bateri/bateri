@@ -74,6 +74,7 @@ use crate::quote;
 use crate::remote_helper::RemoteHelper;
 use crate::search_bar::{SearchBar, selection_query};
 use crate::stats::StatsDriver;
+use crate::stats_popover::StatsPopover;
 use crate::upload::Transfers;
 use crate::uploader::{StopSheet, UploadPopover};
 use crate::view::BateriView;
@@ -826,6 +827,11 @@ pub(crate) struct PaneIvars {
     /// Time of the event that closed the popover (`popoverWillClose:`): so that
     /// pressing the button again does not reopen the popover.
     list_closed_at: Cell<Option<f64>>,
+    /// The open load indicator popover (046 phase-5, [`crate::stats_popover`]).
+    stats_popover: RefCell<Option<StatsPopover>>,
+    /// Time of the event that closed the load popover — its own slot, so a
+    /// press on one control never swallows the other's.
+    stats_closed_at: Cell<Option<f64>>,
     /// The helper ssh session that verifies remote links and counts a download
     /// (045 Karar 10): its worker is born at the first question, its session
     /// closes on another generation, when idle and with the pane — while the
@@ -876,18 +882,27 @@ define_class!(
         }
     }
 
-    /// Closing of the "Show files (N)" popover (037 phase-7): AppKit also
-    /// closes a `transient` popover (click outside) and the button's pressed
-    /// tone and the Esc monitor must go away then too.
+    /// Closing of the "Show files (N)" popover (037 phase-7) and of the load
+    /// indicator's popover (046 phase-5), told apart by the notification's
+    /// object: AppKit also closes a `transient` popover (click outside) and
+    /// its Esc monitor (and the list button's pressed tone) must go away then too.
     unsafe impl NSPopoverDelegate for TerminalPane {
         #[unsafe(method(popoverWillClose:))]
-        fn popover_will_close(&self, _n: &NSNotification) {
-            self.upload_list_will_close();
+        fn popover_will_close(&self, n: &NSNotification) {
+            if self.is_stats_popover(n) {
+                self.stats_popover_will_close();
+            } else {
+                self.upload_list_will_close();
+            }
         }
 
         #[unsafe(method(popoverDidClose:))]
-        fn popover_did_close(&self, _n: &NSNotification) {
-            self.close_upload_list();
+        fn popover_did_close(&self, n: &NSNotification) {
+            if self.is_stats_popover(n) {
+                self.close_stats_popover();
+            } else {
+                self.close_upload_list();
+            }
         }
     }
 
@@ -1192,6 +1207,8 @@ impl TerminalPane {
             upload_stop: RefCell::new(None),
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
+            stats_popover: RefCell::new(None),
+            stats_closed_at: Cell::new(None),
             remote_helper: RefCell::new(RemoteHelper::default()),
             stats: RefCell::new(stats_driver),
             remote_files: RefCell::new(remote_files),
@@ -1961,6 +1978,9 @@ impl TerminalPane {
         self.finder_abandon();
         // The helper's ssh goes now, not when the last reference drops.
         self.remote_helper().borrow_mut().close();
+        // The load popover and its Esc monitor go with the pane (the upload
+        // list's goes in `abandon_uploads`).
+        self.close_stats_popover();
         self.stop_stats();
         self.ivars().closed.set(true);
         // SAFETY: the observer is this object, registered in `observe_frame`;
@@ -2423,6 +2443,16 @@ impl TerminalPane {
     /// The time of the event that closed the popover.
     pub(crate) fn list_closed_at(&self) -> &Cell<Option<f64>> {
         &self.ivars().list_closed_at
+    }
+
+    /// The open load indicator popover (046 phase-5).
+    pub(crate) fn stats_popover(&self) -> &RefCell<Option<StatsPopover>> {
+        &self.ivars().stats_popover
+    }
+
+    /// The time of the event that closed the load popover.
+    pub(crate) fn stats_closed_at(&self) -> &Cell<Option<f64>> {
+        &self.ivars().stats_closed_at
     }
 
     /// The queue's sent and total bytes; `None` if there is no queue — the

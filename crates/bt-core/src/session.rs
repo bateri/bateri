@@ -7381,6 +7381,16 @@ impl Session {
         changed
     }
 
+    /// The load indicator's dock-local column range on the context row
+    /// ([`crate::dock::stats_span`]; `budget` is the context row's budget) —
+    /// `None` while it is not drawn (no value, an upload row in its place, it
+    /// did not fit). The mouse's hit test, the popover's anchor and the hand
+    /// cursor read this one range, from the drawing's layout (046 R3.4). Takes
+    /// only the leaf lock.
+    pub fn stats_span(&self, budget: u16) -> Option<(u16, u16)> {
+        crate::dock::stats_span(&lock(&self.shell).context, budget)
+    }
+
     /// Whether the application is on the alternate screen — the state **in the
     /// last frame**.
     ///
@@ -13521,9 +13531,29 @@ mod tests {
         assert!(session.set_remote_stats(command, Some(&stats)));
         assert_eq!(shown(), Some(stats));
         assert!(session.take_damage(), "a change requests a frame");
+        let span = session.stats_span(80);
+        assert!(span.is_some(), "a drawn indicator has a range");
+        assert_eq!(
+            span,
+            crate::dock::stats_span(&lock(&session.shell).context, 80),
+            "the hit test reads the drawing's layout"
+        );
         assert!(!session.set_remote_stats(command, Some(&stats)));
         assert!(!session.take_damage(), "the same value requests no frame");
+        assert!(session.set_transfer(Some(&Transfer::default())));
+        assert_eq!(
+            session.stats_span(80),
+            None,
+            "the upload row stands in its place"
+        );
+        assert!(session.set_transfer(None));
+        assert_eq!(session.stats_span(80), span);
         assert!(session.set_remote_stats(command, None), "hide");
+        assert_eq!(
+            session.stats_span(80),
+            None,
+            "a hidden indicator is not hit"
+        );
         assert!(!session.set_remote_stats(command, None));
         // Another host clears the previous one's value.
         assert!(session.set_remote_stats(command, Some(&stats)));
