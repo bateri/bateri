@@ -105,5 +105,5 @@ TerminalPane (ana kuyruk)
 | phase-2 | ✅ |
 | phase-3 | ✅ |
 | phase-4 | ✅ |
-| phase-5 | |
-| kapı | |
+| phase-5 | ✅ |
+| kapı | ✅ |

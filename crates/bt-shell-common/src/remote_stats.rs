@@ -288,8 +288,11 @@ impl Schedule {
 
     /// A key, a click, the wheel, a mouse move or the window becoming key.
     /// Called at mouse-move rate: while sampling runs it only stamps the time.
+    /// So does an interaction after [`STATS_IDLE`] that the tick has not yet
+    /// found (a tick armed or a request in flight): there was no gap in the
+    /// samples, so the history is not restarted (`/code-review`).
     pub fn interaction(&mut self, now: Instant) -> Vec<Action> {
-        if self.running(now) {
+        if self.running(now) || self.armed || self.in_flight {
             self.interaction = Some(now);
             return Vec::new();
         }
@@ -645,6 +648,23 @@ mod tests {
         // The next interaction: a sample at once, the history restarted.
         let t2 = idle + Duration::from_secs(30);
         assert_eq!(schedule.interaction(t2), [request(true)]);
+    }
+
+    #[test]
+    fn an_interaction_before_the_tick_found_the_pause_keeps_the_history() {
+        let t0 = Instant::now();
+        let mut schedule = started(t0);
+        let (token, _) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
+        // Past STATS_IDLE, but the armed tick has not fired yet.
+        let late = t0 + STATS_IDLE + Duration::from_secs(1);
+        assert!(!schedule.running(late));
+        assert!(schedule.interaction(late).is_empty(), "no restart");
+        assert_eq!(schedule.tick(late, token), [request(false)]);
+        // The same with a request in flight: its reply arms the next tick.
+        let later = late + STATS_IDLE + Duration::from_secs(1);
+        assert!(schedule.interaction(later).is_empty());
+        let (_, after) = armed(&schedule.answered(later, 7, Outcome::Sample { cpu: true }));
+        assert_eq!(after, INTERVAL);
     }
 
     #[test]

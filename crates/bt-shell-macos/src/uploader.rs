@@ -662,7 +662,9 @@ impl TerminalPane {
         }
         self.uploads().borrow_mut().set_shown(transfer);
         // `borrow_mut` is done: computing the rects borrows `uploads` again.
-        self.view().sync_cursor_rects();
+        // An upload row takes the load indicator's place: its popover closes
+        // (046 R3.3), and the hand cursor's rects are refreshed there.
+        self.stats_gauge_changed();
     }
 
     /// The dock-local column ranges of the shown line's buttons (`context` is
@@ -1347,7 +1349,12 @@ fn shape_of(list: &TransferList) -> Vec<(u64, u8)> {
 }
 
 /// A plain label: a single line, not selectable.
-fn label(mtm: MainThreadMarker, text: &str, size: f64, color: &NSColor) -> Retained<NSTextField> {
+pub(crate) fn label(
+    mtm: MainThreadMarker,
+    text: &str,
+    size: f64,
+    color: &NSColor,
+) -> Retained<NSTextField> {
     let field = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     // SAFETY: `NSFontWeightRegular` is an AppKit constant global.
     let weight = unsafe { NSFontWeightRegular };

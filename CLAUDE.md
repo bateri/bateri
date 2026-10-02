@@ -684,7 +684,12 @@ zamanlayıcısının `bt_load` isteğiyle (`stats`; karar saf
 `remote_stats::Schedule`'da, yerleşim merdiveni `bt-core`'da) — örnekleme uzak
 oturum, görünür pane ve son iki dakikada etkileşim ister, kare yalnız
 gösterilen değer değişince (`Session::set_remote_stats`'ın nesil + eşitlik
-kapısı); gerekçeler `.tasks/046-uzak-yuk-gostergesi/discussion.md` → Karar 1–8.
+kapısı); göstergeye tık yerinde tazelenen bir `NSPopover` açıyor (host + OS,
+CPU, load, bellek, swap, disk, uptime, ilk üç süreç; `stats_popover`, yükleme
+listesinin emsali — açıkken örnekler ayrıntılı, Esc kabuğa gitmez, gösterge
+kaybolunca kapanır) ve üstünde el imleci; tık, çıpa ve el imleci çizimin
+yerleşiminden (`Session::stats_span`); gerekçeler
+`.tasks/046-uzak-yuk-gostergesi/discussion.md` → Karar 1–8.
 Dock'a tık giriş satırı yokken no-op. Gerekçeler
 `.tasks/036-ssh-uzak-oturum/discussion.md` → Karar 3–8 ve
 `.tasks/037-ssh-ikinci-tur/discussion.md`.

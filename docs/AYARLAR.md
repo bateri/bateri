@@ -1007,6 +1007,10 @@ gelir, yeni bağlantı açılmaz.
   gösterge düşer; eşiği aşmış bir değer varsa yoldan önce gelir ve yol
   soldan `…` ile kısalır. Host hiç kısalmaz. Aktarım sürerken gösterge
   gizlidir.
+- **Göstergeye tıklayınca** ayrıntı açılır: host ve işletim sistemi, CPU
+  (çekirdek sayısıyla), load 1/5/15, bellek, swap, disk `/`, açık kalma süresi
+  ve en çok CPU kullanan üç süreç; açıkken her örnekte tazelenir. İkinci tık,
+  dışarı tık ya da Esc kapatır (Esc sunucuya gitmez).
 - **`stats_interval`** iki örnek arasındaki saniye, `2`–`60` arası tam sayı.
 - Kaydettiğiniz anda geçerli olur. Kabul edilmeyen değer o anahtarı açılışta
   varsayılanda, kayıt anında ekrandaki değerde bırakır ve uyarı görünür.
