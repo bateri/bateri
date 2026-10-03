@@ -322,6 +322,46 @@ impl SplitView {
         true
     }
 
+    /// Session restore's bulk placement (053): the saved `tree` replaces the
+    /// single-pane one, `extra` (every pane but the one the container was
+    /// born with) join as subviews and all are laid out with the saved
+    /// ratios at once — no pane passes through an intermediate size. `false`
+    /// and nothing changes unless the tree's leaves are exactly the born pane
+    /// and `extra`.
+    pub(crate) fn adopt(&self, tree: Tree, extra: &[Retained<TerminalPane>]) -> bool {
+        let mut wanted: Vec<u64> = self.ivars().panes.borrow().iter().map(|p| p.id()).collect();
+        wanted.extend(extra.iter().map(|pane| pane.id()));
+        wanted.sort_unstable();
+        let mut leaves = tree.leaves();
+        leaves.sort_unstable();
+        if leaves != wanted {
+            return false;
+        }
+        self.ivars().tree.replace(tree);
+        for pane in extra {
+            self.ivars().panes.borrow_mut().push(pane.retain());
+            self.addSubview(pane);
+        }
+        self.layout_panes();
+        true
+    }
+
+    /// A copy of the split tree — what session restore saves (053).
+    pub(crate) fn tree(&self) -> Tree {
+        self.ivars().tree.borrow().clone()
+    }
+
+    /// Whether every pane's plain (unzoomed) frame passes its smallest-pane
+    /// limit ([`TerminalPane::min_size`]) — a restored tree from a larger
+    /// screen or a smaller font may not (053 R3.3).
+    pub(crate) fn fits(&self) -> bool {
+        self.plain_layout().panes.iter().all(|(id, rect)| {
+            self.pane(*id)
+                .and_then(|pane| pane.min_size())
+                .is_none_or(|min| rect.width >= min.width && rect.height >= min.height)
+        })
+    }
+
     /// Removes `id` from the tree ([`Tree::remove`]); the pane stays in the
     /// view and the list - the caller first moves focus, then calls
     /// [`SplitView::detach`] (a window whose view carrying the first
