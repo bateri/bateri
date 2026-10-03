@@ -13,9 +13,20 @@
 //! What is written: text, SGR (foreground and background — named, 256 and
 //! truecolour kept apart —, bold, dim, italic, inverse, hidden, the five
 //! underline styles and the `58` colour, strikeout) and a cell's zero-width
-//! characters behind its base character. What is **not**: OSC 8 (links and
-//! our block anchors — the new shell numbers its blocks afresh), modes,
-//! the cursor, the alternate screen.
+//! characters behind its base character, and a **finished** block's anchor
+//! rewritten into our saved namespace (`bateri://sblock/<k>.<role>`, below).
+//! What is **not**: other OSC 8 links (their text stays), modes, the cursor,
+//! the alternate screen.
+//!
+//! **The block anchor is rewritten, not copied** (user decision 2026-10-03,
+//! `.tasks/053-oturum-geri-yukleme/discussion.md` → Set sonrası
+//! düzeltmeler): the new shell numbers its blocks from one, so a replayed
+//! `block/N` would take the colour of the new session's block `N`. The
+//! saved anchor carries the colour's **role** (`success`/`error`, resolved
+//! from the ledger at quit) and the live theme paints it; `k` only keeps two
+//! blocks apart, so a multi-row command's continuation rows stay one block.
+//! A block running, pending or with an unreadable code at quit gets no
+//! anchor — unknown is not drawn. No duration counter comes back.
 //!
 //! Only the **difference** of the pen is written between two cells; at the
 //! end of an unwrapped row the pen goes back to the default before `\r\n`,
@@ -27,6 +38,39 @@ use alacritty_terminal::index::Line;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use std::collections::HashMap;
+
+use crate::shell::{BlockKey, Stripe};
+
+/// The saved block anchor's prefix — written by [`encode`], read by
+/// [`saved_key`].
+const SAVED_PREFIX: &str = "bateri://sblock/";
+
+/// The URI of saved block `id` with `stripe`'s role; `None` for a running
+/// block, which is never saved.
+fn saved_anchor(id: u32, stripe: Stripe) -> Option<String> {
+    let role = match stripe {
+        Stripe::Success => "success",
+        Stripe::Error => "error",
+        Stripe::Running => return None,
+    };
+    Some(format!("{SAVED_PREFIX}{id}.{role}"))
+}
+
+/// The key of a saved block anchor (`bateri://sblock/<k>.<role>`); `None`
+/// for any other URI or an unknown role.
+pub(crate) fn saved_key(uri: &str) -> Option<BlockKey> {
+    let (id, role) = uri.strip_prefix(SAVED_PREFIX)?.split_once('.')?;
+    let stripe = match role {
+        "success" => Stripe::Success,
+        "error" => Stripe::Error,
+        _ => return None,
+    };
+    Some(BlockKey::Saved {
+        id: id.parse().ok()?,
+        stripe,
+    })
+}
 
 /// The flags the pen carries; the rest (wrap, wide, spacer) are geometry.
 const STYLE: Flags = Flags::BOLD
@@ -77,7 +121,14 @@ impl Pen {
 /// (`.tasks/053-oturum-geri-yukleme/plan.md` → R1.2): the new shell's first
 /// prompt starts on a fresh row, without zsh's `PROMPT_SP` mark. An empty
 /// history gives an empty vector.
-pub(crate) fn encode<T>(term: &Term<T>, end: i32) -> Vec<u8> {
+///
+/// `stripe` answers a cell link's URI: `Some` → a finished block of that
+/// colour, written as a saved anchor; `None` → the link is dropped.
+pub(crate) fn encode<T>(
+    term: &Term<T>,
+    end: i32,
+    mut stripe: impl FnMut(&str) -> Option<Stripe>,
+) -> Vec<u8> {
     let grid = term.grid();
     let top = grid.topmost_line().0;
     let end = end.min(grid.bottommost_line().0 + 1);
@@ -92,6 +143,10 @@ pub(crate) fn encode<T>(term: &Term<T>, end: i32) -> Vec<u8> {
     };
     let mut out = Vec::new();
     let mut pen = Pen::DEFAULT;
+    // URI → saved anchor; `k` counts the saved blocks in order.
+    let mut anchors: HashMap<String, Option<String>> = HashMap::new();
+    let mut saved_blocks: u32 = 0;
+    let mut open: Option<String> = None;
     for (index, cells) in rows[..=last].iter().enumerate() {
         let wrap = wrapped(cells) && index < last;
         let end = if wrap {
@@ -106,6 +161,26 @@ pub(crate) fn encode<T>(term: &Term<T>, end: i32) -> Vec<u8> {
             {
                 continue;
             }
+            let anchor = cell.hyperlink().and_then(|link| {
+                let uri = link.uri();
+                if let Some(saved) = anchors.get(uri) {
+                    return saved.clone();
+                }
+                let saved = stripe(uri)
+                    .filter(|stripe| *stripe != Stripe::Running)
+                    .and_then(|stripe| {
+                        saved_blocks = saved_blocks.saturating_add(1);
+                        saved_anchor(saved_blocks, stripe)
+                    });
+                anchors.insert(uri.to_owned(), saved.clone());
+                saved
+            });
+            if anchor != open {
+                out.extend_from_slice(b"\x1b]8;;");
+                out.extend_from_slice(anchor.as_deref().unwrap_or_default().as_bytes());
+                out.push(0x07);
+                open = anchor;
+            }
             let next = Pen::of(cell);
             transition(&mut out, pen, next);
             pen = next;
@@ -115,6 +190,11 @@ pub(crate) fn encode<T>(term: &Term<T>, end: i32) -> Vec<u8> {
             }
         }
         if !wrap {
+            // The link closes before the break like the pen: the rows a line
+            // feed opens must not inherit it.
+            if open.take().is_some() {
+                out.extend_from_slice(b"\x1b]8;;\x07");
+            }
             if pen != Pen::DEFAULT {
                 out.extend_from_slice(b"\x1b[0m");
                 pen = Pen::DEFAULT;
@@ -291,9 +371,31 @@ mod tests {
         parser.advance(&mut ClusterHandler::new(term, true, &mut last_input), bytes);
     }
 
-    /// Everything up to and including the cursor's row.
+    /// Everything up to and including the cursor's row, no block resolved.
     fn snapshot(term: &Term<VoidListener>) -> Vec<u8> {
-        encode(term, term.grid().cursor.point.line.0 + 1)
+        snapshot_with(term, |_| None)
+    }
+
+    fn snapshot_with(
+        term: &Term<VoidListener>,
+        stripe: impl FnMut(&str) -> Option<Stripe>,
+    ) -> Vec<u8> {
+        encode(term, term.grid().cursor.point.line.0 + 1, stripe)
+    }
+
+    /// The saved block key of every cell of `line`.
+    fn keys(term: &Term<VoidListener>, line: i32) -> Vec<Option<BlockKey>> {
+        (0..term.grid().columns())
+            .map(|col| {
+                term.grid()[Line(line)][Column(col)]
+                    .hyperlink()
+                    .and_then(|link| saved_key(link.uri()))
+            })
+            .collect()
+    }
+
+    fn saved(id: u32, stripe: Stripe) -> Option<BlockKey> {
+        Some(BlockKey::Saved { id, stripe })
     }
 
     /// Every cell from the top of the history to the last non-empty row, as
@@ -306,9 +408,14 @@ mod tests {
                 (0..grid.columns())
                     .map(|col| {
                         let cell = &row[Column(col)];
-                        assert!(cell.hyperlink().is_none(), "a link survived");
+                        let link = cell.hyperlink().map(|link| link.uri().to_owned());
+                        assert!(
+                            link.as_deref()
+                                .is_none_or(|uri| uri.starts_with(SAVED_PREFIX)),
+                            "a link survived: {link:?}"
+                        );
                         format!(
-                            "{:?}{:?}|{:?}|{:?}|{:?}|{:?}",
+                            "{:?}{:?}|{:?}|{:?}|{:?}|{:?}|{link:?}",
                             cell.c,
                             cell.zerowidth().unwrap_or_default(),
                             cell.fg,
@@ -321,13 +428,14 @@ mod tests {
             })
             .collect();
         let blank = format!(
-            "{:?}{:?}|{:?}|{:?}|{:?}|{:?}",
+            "{:?}{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             ' ',
             <&[char]>::default(),
             Pen::DEFAULT.fg,
             Pen::DEFAULT.bg,
             None::<Color>,
-            Flags::empty()
+            Flags::empty(),
+            None::<String>,
         );
         while rows
             .last()
@@ -432,6 +540,106 @@ mod tests {
         assert_eq!(text, "$ ls x");
         // `cells` asserts there is no link left.
         cells(&replayed);
+    }
+
+    /// The ledger of the block-anchor tests: 3 succeeded, 4 failed, 5 runs.
+    fn ledger(uri: &str) -> Option<Stripe> {
+        match uri {
+            "bateri://block/3" => Some(Stripe::Success),
+            "bateri://block/4" => Some(Stripe::Error),
+            "bateri://block/5" => Some(Stripe::Running),
+            _ => saved_key(uri).and_then(|key| match key {
+                BlockKey::Saved { stripe, .. } => Some(stripe),
+                _ => None,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_finished_blocks_anchor_comes_back_saved_with_its_role() {
+        // 053, seen in the real window: the restored commands had no chevron.
+        let bytes = b"\x1b]8;;bateri://block/3\x07$ ls\x1b]8;;\x07\r\nout\r\n\
+                      \x1b]8;;bateri://block/4\x07$ false\x1b]8;;\x07 \
+                      \x1b]8;;https://x.dev\x07x\x1b]8;;\x07\r\n\
+                      \x1b]8;;bateri://block/5\x07$ run\x1b]8;;\x07\r\n";
+        let mut original = term(40, 6);
+        feed(&mut original, bytes);
+        let snap = snapshot_with(&original, ledger);
+        let text = String::from_utf8(snap.clone()).unwrap();
+        assert!(
+            text.starts_with("\x1b]8;;bateri://sblock/1.success\x07$ ls\x1b]8;;\x07\r\nout\r\n")
+        );
+        assert!(text.contains("\x1b]8;;bateri://sblock/2.error\x07$ false\x1b]8;;\x07 x\r\n"));
+        // The running block and the foreign link leave only their text.
+        assert!(
+            !text.contains("block/5") && !text.contains("x.dev"),
+            "{text:?}"
+        );
+        let mut replayed = term(40, 6);
+        feed(&mut replayed, &snap);
+        let success = saved(1, Stripe::Success);
+        let error = saved(2, Stripe::Error);
+        assert_eq!(
+            keys(&replayed, 0)[..5],
+            [success, success, success, success, None]
+        );
+        assert_eq!(keys(&replayed, 1)[0], None);
+        let row = keys(&replayed, 2);
+        assert!(row[..7].iter().all(|key| *key == error), "{row:?}");
+        assert_eq!(row[7], None);
+        assert!(keys(&replayed, 3).iter().all(Option::is_none));
+        // The text and the pen are what they were.
+        let text_of = |term: &Term<VoidListener>| -> Vec<String> {
+            (0..4)
+                .map(|line| {
+                    (0..40)
+                        .map(|col| {
+                            let cell = &term.grid()[Line(line)][Column(col)];
+                            format!("{:?}{:?}{:?}", cell.c, cell.fg, cell.flags)
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        assert_eq!(text_of(&replayed), text_of(&original));
+    }
+
+    #[test]
+    fn a_multi_row_command_stays_one_saved_block() {
+        // The continuation rule (`block_row_continues`) needs every row of
+        // the command to carry the **same** key: the wrapped row and the
+        // `PS2` row after a line break alike, at the old and a new width.
+        let bytes = b"\x1b]8;;bateri://block/3\x07$ abcdefghijkl\r\n> done\x1b]8;;\x07\r\n";
+        let mut original = term(10, 6);
+        feed(&mut original, bytes);
+        let snap = snapshot_with(&original, ledger);
+        let success = saved(1, Stripe::Success);
+        for width in [10, 40] {
+            let mut replayed = term(width, 6);
+            feed(&mut replayed, &snap);
+            let rows = if width == 10 { 3 } else { 2 };
+            for line in 0..rows {
+                assert_eq!(
+                    keys(&replayed, line)[0],
+                    success,
+                    "width {width}, row {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_save_writes_the_same_bytes() {
+        // A restored pane quit again: its anchors are already saved ones and
+        // no ledger knows them — the key carries the colour.
+        let bytes = b"\x1b]8;;bateri://block/4\x07$ false\x1b]8;;\x07\r\nout\r\n\
+                      \x1b]8;;bateri://block/3\x07$ ls\x1b]8;;\x07\r\n";
+        let mut original = term(40, 6);
+        feed(&mut original, bytes);
+        let first = snapshot_with(&original, ledger);
+        let mut replayed = term(40, 6);
+        feed(&mut replayed, &first);
+        assert_eq!(snapshot_with(&replayed, ledger), first);
     }
 
     #[test]

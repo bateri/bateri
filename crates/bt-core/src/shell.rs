@@ -184,10 +184,24 @@ pub(crate) struct RemoteMark {
 /// would paint a remote row with a local command's colour. The shell is part
 /// of the key for the same reason one level up: two ssh sessions' `rblock/1`s
 /// are two blocks.
+///
+/// A third namespace is no shell's: `bateri://sblock/<k>.<role>`, a block of
+/// a **restored** history ([`crate::snapshot`]). Its colour travels in the
+/// key, because no ledger of this session knows it — and the new shell
+/// counts from one, so the old `block/N` would paint the wrong block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BlockKey {
     Local(u32),
-    Remote { shell: RemoteShell, id: u32 },
+    Remote {
+        shell: RemoteShell,
+        id: u32,
+    },
+    /// `id` is unique within one saved history only; `stripe` is never
+    /// [`Stripe::Running`] (the snapshot writes only finished blocks).
+    Saved {
+        id: u32,
+        stripe: Stripe,
+    },
 }
 
 /// The running block of each ledger — the frame path's `running` argument
@@ -207,6 +221,7 @@ impl RunningBlocks {
         match key {
             BlockKey::Local(id) => self.local == Some(id),
             BlockKey::Remote { shell, id } => self.remote == Some((shell, id)),
+            BlockKey::Saved { .. } => false,
         }
     }
 }
@@ -1200,6 +1215,7 @@ const BLOCK_LOG_FLOOR: usize = 256;
 /// **Known limit:** the ceiling is set when the session is born; if `scrollback`
 /// is enlarged live the ring does not grow and as many old blocks as the
 /// difference lose their color — the stripe is **not drawn**, not drawn wrongly.
+#[derive(Clone)]
 pub(crate) struct BlockLog {
     /// `entries[i]` is the fate of the block whose identity is `first + i`.
     entries: VecDeque<Outcome>,
@@ -1285,6 +1301,17 @@ impl BlockLog {
         }
     }
 
+    /// A **not running** block's stripe — the one table of "unknown is not
+    /// drawn" ([`ShellLog::stripe`]): `Pending`, an unreadable code and an id
+    /// the ledger lost are `None`.
+    fn finished_stripe(&self, id: u32) -> Option<Stripe> {
+        match self.get(id)? {
+            Outcome::Finished { exit: Some(0), .. } => Some(Stripe::Success),
+            Outcome::Finished { exit: Some(_), .. } => Some(Stripe::Error),
+            Outcome::Finished { exit: None, .. } | Outcome::Pending => None,
+        }
+    }
+
     /// The block's fate; `None` if not in the ledger, and in that state the stripe is not drawn.
     fn get(&self, id: u32) -> Option<Outcome> {
         self.index_of(id).map(|at| self.entries[at])
@@ -1306,6 +1333,36 @@ impl BlockLog {
     fn index_of(&self, id: u32) -> Option<usize> {
         let at = id.checked_sub(self.first)? as usize;
         (at < self.entries.len()).then_some(at)
+    }
+}
+
+/// The ledgers' copy the quit-time snapshot resolves anchors with
+/// ([`ShellLog::saved_stripes`]).
+pub(crate) struct SavedStripes {
+    local: BlockLog,
+    remote: Option<(RemoteShell, BlockLog)>,
+    running: RunningBlocks,
+}
+
+impl SavedStripes {
+    /// The colour a saved anchor carries; `None` → the row is saved without
+    /// one. A block **running** at quit is `None` too: the command dies with
+    /// the shell, `accent` would claim it still runs and there is no neutral
+    /// role — "unknown is not drawn" (`.tasks/053-oturum-geri-yukleme/discussion.md`
+    /// → Set sonrası düzeltmeler).
+    pub(crate) fn stripe(&self, key: BlockKey) -> Option<Stripe> {
+        if self.running.is(key) {
+            return None;
+        }
+        match key {
+            BlockKey::Local(id) => self.local.finished_stripe(id),
+            BlockKey::Remote { shell, id } => self
+                .remote
+                .as_ref()
+                .filter(|(saved, _)| *saved == shell)
+                .and_then(|(_, blocks)| blocks.finished_stripe(id)),
+            BlockKey::Saved { stripe, .. } => Some(stripe),
+        }
     }
 }
 
@@ -1444,11 +1501,7 @@ impl BlockTrack {
         if running {
             return Some(Stripe::Running);
         }
-        match self.blocks.get(id)? {
-            Outcome::Finished { exit: Some(0), .. } => Some(Stripe::Success),
-            Outcome::Finished { exit: Some(_), .. } => Some(Stripe::Error),
-            Outcome::Finished { exit: None, .. } | Outcome::Pending => None,
-        }
+        self.blocks.finished_stripe(id)
     }
 
     /// [`ShellLog::duration`] on this trail; `running` as in [`Self::stripe`].
@@ -2557,6 +2610,21 @@ impl ShellLog {
             BlockKey::Remote { shell, id } => {
                 (self.remote_shell == Some(shell)).then_some((&self.remote, id))
             }
+            BlockKey::Saved { .. } => None,
+        }
+    }
+
+    /// An owned copy of what [`Self::stripe`] reads, for the quit-time
+    /// snapshot ([`crate::Session::final_history`]): the snapshot walks the
+    /// grid under `Term` and the leaf lock does not go there. A copy of the
+    /// two ledgers (12 bytes a block), once per pane at quit.
+    pub(crate) fn saved_stripes(&self) -> SavedStripes {
+        SavedStripes {
+            local: self.local.blocks.clone(),
+            remote: self
+                .remote_shell
+                .map(|shell| (shell, self.remote.blocks.clone())),
+            running: self.running_blocks(),
         }
     }
 
@@ -2727,7 +2795,12 @@ impl ShellLog {
     /// - `Finished(None)`: the command finished but the code could not be read —
     ///   there is no neutral role for "finished" and imitating a nonexistent role
     ///   with `accent` would be showing a non-running block as running.
+    ///
+    /// A restored block ([`BlockKey::Saved`]) carries its colour in the key.
     pub(crate) fn stripe(&self, key: BlockKey, running: RunningBlocks) -> Option<Stripe> {
+        if let BlockKey::Saved { stripe, .. } = key {
+            return Some(stripe);
+        }
         let (track, id) = self.track(key)?;
         track.stripe(id, running.is(key))
     }
