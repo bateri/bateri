@@ -20,7 +20,10 @@
 //! the running programs are handed over instead of hung up
 //! ([`take_relaunch`]). An aborted install (`updater:didAbortWithError:`)
 //! clears it, and the quit that reads it consumes it: a ⌘Q after a failed
-//! install is today's quit.
+//! install is today's quit. While a transfer streams or a password sheet is
+//! open it postpones the relaunch until they end
+//! (`updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:`,
+//! [`crate::app::AppDelegate::postpone_update`]).
 //!
 //! It is never started in a timed run (`BT_RUN_SECONDS`): the hermetic run
 //! does not go to the network and an update prompt must not cover the window.
@@ -28,6 +31,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use block2::DynBlock;
+use objc2::MainThreadMarker;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, Bool, NSObject, NSObjectProtocol};
 use objc2::{AllocAnyThread, define_class, msg_send};
@@ -72,10 +77,35 @@ define_class!(
         }
 
         /// The update ended without installing (a refused administrator
-        /// password, a failed install): the next quit is not a relaunch.
+        /// password, a failed install): the next quit is not a relaunch, and
+        /// a postponed relaunch is not waited for any more.
         #[unsafe(method(updater:didAbortWithError:))]
         fn did_abort(&self, _updater: &AnyObject, _error: &AnyObject) {
             RELAUNCH.store(false, Ordering::SeqCst);
+            if let Some(mtm) = MainThreadMarker::new()
+                && let Some(app) = crate::app::delegate(mtm)
+            {
+                app.drop_postponed_update();
+            }
+        }
+
+        /// Sparkle is about to quit for the install (055 R5.2, Karar 10 (a)):
+        /// while a transfer streams or a password sheet is open — bytes and
+        /// answers that pass through bateri and cannot be handed over — the
+        /// relaunch waits; `install` is called when the last one ends (⌘.
+        /// cancels and so moves it on). Off the main thread (not promised by
+        /// Sparkle): no wait, the safe direction is today's.
+        #[unsafe(method(updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:))]
+        fn should_postpone(
+            &self,
+            _updater: &AnyObject,
+            _item: &AnyObject,
+            install: &DynBlock<dyn Fn()>,
+        ) -> Bool {
+            let postponed = MainThreadMarker::new()
+                .and_then(crate::app::delegate)
+                .is_some_and(|app| app.postpone_update(install.copy()));
+            Bool::new(postponed)
         }
     }
 );

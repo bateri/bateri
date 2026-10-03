@@ -1795,6 +1795,16 @@ impl TerminalPane {
         // will ever take the dock away — the reserve is matched here, once.
         if adopting {
             self.alt_screen_did_change();
+            // The remote target is not carried (the process table is its
+            // source, 055 Karar 4) and a carried `ssh` gives no new `C` edge:
+            // the probe is armed once by hand, so `⇄ host`, the masters'
+            // session and the lazy helper come back without a prompt.
+            if self
+                .session()
+                .is_some_and(|session| session.running_command().is_some())
+            {
+                Wake::command_started(&*self.ivars().wake);
+            }
         }
         Ok(())
     }

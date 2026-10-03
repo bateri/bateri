@@ -1650,6 +1650,10 @@ pub struct Transfers {
     list_open: bool,
     /// The arrow and percentage last written to the title ([`Self::title_percent_changed`]).
     titled: Option<(&'static str, u8)>,
+    /// An update waits for the application's transfers to end (055 R5.2,
+    /// `discussion.md` → Karar 10 (a)): how many are left across every
+    /// pane — the line leads with it ([`Self::status`]). `None`: no update waits.
+    update_waits: Option<usize>,
 }
 
 /// The queue ended: the result line, its generation and the notification (title,
@@ -1765,6 +1769,27 @@ impl Transfers {
     /// Whether a queue is running (⌘.'s gate).
     pub fn active(&self) -> bool {
         self.queue.is_some()
+    }
+
+    /// The items not finished yet — streaming or waiting (055 R5.2): what an
+    /// update waits for. A cancelled queue still deleting its half-written
+    /// file counts its streaming item.
+    pub fn unfinished(&self) -> usize {
+        self.queue.as_ref().map_or(0, |queue| {
+            queue
+                .entries
+                .iter()
+                .filter(|entry| entry.state != EntryState::Done)
+                .count()
+        })
+    }
+
+    /// An update waits for `left` transfers of the application (`None`: no
+    /// update waits); `true` if that changed — the caller redraws the line.
+    pub fn set_update_waits(&mut self, left: Option<usize>) -> bool {
+        let changed = self.update_waits != left;
+        self.update_waits = left;
+        changed
     }
 
     /// Whether the queue is streaming: the gate of the sheet's "added to the queue" line.
@@ -2500,6 +2525,11 @@ impl Transfers {
         let local = &entry.job.local;
         let items = queue.entries.len();
         let mut body = String::new();
+        // The update's wait leads (055 R5.2): ⌘. is the way past it.
+        if let Some(left) = self.update_waits.filter(|&left| left > 0) {
+            let noun = if left == 1 { "transfer" } else { "transfers" };
+            let _ = write!(body, "Update waits for {left} {noun} · ");
+        }
         match queue.ways(None) {
             Ways::Both => {
                 let down = queue
@@ -3206,6 +3236,39 @@ mod tests {
             HostMark::None,
             vec![job("b", false, 1, 1)]
         ));
+    }
+
+    /// 055 R5.2: the unfinished items are what an update waits for, and a
+    /// waiting update leads the line — only while it waits.
+    #[test]
+    fn a_waiting_update_leads_the_line_with_the_unfinished_count() {
+        let mut uploads = queue_of(vec![job("a", false, 1, 10), job("b", false, 1, 10)]);
+        assert_eq!(Transfers::default().unfinished(), 0);
+        assert_eq!(uploads.unfinished(), 2);
+        let start = Instant::now();
+        let _ = uploads.start_next(start).unwrap();
+        assert_eq!(uploads.finish(Outcome::Done), None);
+        let _ = uploads.start_next(start).unwrap();
+        assert_eq!(
+            uploads.unfinished(),
+            1,
+            "the finished item is not waited for"
+        );
+        let plain = uploads.status(start).expect("line").body;
+        assert!(uploads.set_update_waits(Some(3)));
+        assert!(!uploads.set_update_waits(Some(3)), "no change, no redraw");
+        let waiting = uploads.status(start).expect("line").body;
+        assert_eq!(waiting, format!("Update waits for 3 transfers · {plain}"));
+        uploads.set_update_waits(Some(1));
+        assert!(
+            uploads
+                .status(start)
+                .unwrap()
+                .body
+                .starts_with("Update waits for 1 transfer · ")
+        );
+        uploads.set_update_waits(None);
+        assert_eq!(uploads.status(start).unwrap().body, plain);
     }
 
     #[test]

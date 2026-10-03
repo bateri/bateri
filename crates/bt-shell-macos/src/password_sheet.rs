@@ -210,6 +210,8 @@ impl TerminalPane {
                     remember: remember.is_some_and(|box_| box_.state() == NSControlStateValueOn),
                 });
             let _ = sheet.reply.send(answer);
+            // A postponed update may have waited for this sheet (055 R5.2).
+            pane.host().uploads_changed(pane.id());
         });
         alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
     }

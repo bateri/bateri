@@ -742,6 +742,20 @@ pub fn layout_of(blob: &[u8]) -> Option<(&str, &str)> {
         .then_some((bundle, layout))
 }
 
+/// The bundle a layout blob's header names, **whatever its version**: a
+/// layout this bateri cannot read is released only when it is its own
+/// bundle's — another bundle's holder (the real app's, during its update)
+/// is let go untouched even when its version is newer.
+fn layout_bundle(blob: &[u8]) -> Option<&str> {
+    let end = blob.iter().position(|&byte| byte == b'\n')?;
+    let first = std::str::from_utf8(&blob[..end]).ok()?;
+    let mut words = first.split(' ');
+    match (words.next(), words.next(), words.next(), words.next()) {
+        (Some(LAYOUT_WORD), Some(_), Some(bundle), None) if !bundle.is_empty() => Some(bundle),
+        _ => None,
+    }
+}
+
 /// A pane's blob: the platform shell's state for one frozen session
 /// (`bt_core::Frozen` minus the master and the tail, which cross as the
 /// frame's fd and buffer). Versioned on its own: a new bateri reads this
@@ -1071,6 +1085,12 @@ pub struct Arrival {
     links: Vec<Link>,
     /// The newest holder's layout (053's text).
     pub layout: String,
+    /// The newest holder's instance name (055 R5.1): the new bateri's ssh
+    /// registry takes it as its own, so its masters, its focus listener and
+    /// the carried shells' `BATERI_SSH_INSTANCE` stay one directory. The
+    /// other holders' directories (an earlier unacknowledged attempt) are
+    /// adopted too but not used; they go with this process.
+    pub instance: String,
     pub panes: Vec<(usize, HeldPane)>,
 }
 
@@ -1178,6 +1198,12 @@ pub fn arrive(roots: &[PathBuf], uid: u32, me: u32, bundle_id: &str) -> Option<A
                 continue;
             }
             Some((_, layout)) => layout.to_owned(),
+            None if layout_bundle(&bundle.layout).is_some_and(|owner| owner != bundle_id) => {
+                // Another bundle's, in a version this one cannot read: untouched.
+                drop(bundle);
+                drop(link);
+                continue;
+            }
             None => {
                 let _ = link.release_all(bundle);
                 continue;
@@ -1196,6 +1222,7 @@ pub fn arrive(roots: &[PathBuf], uid: u32, me: u32, bundle_id: &str) -> Option<A
         let arrival = arrival.get_or_insert_with(|| Arrival {
             links: Vec::new(),
             layout,
+            instance: instance.clone(),
             panes: Vec::new(),
         });
         let index = arrival.links.len();
@@ -2333,9 +2360,16 @@ mod tests {
     }
 
     /// The layout blob names the bundle that wrote it: a dev package's
-    /// holder is not another bundle's to take.
+    /// holder is not another bundle's to take — not even when its version
+    /// is one this bateri cannot read.
     #[test]
     fn a_layout_blob_names_its_bundle() {
+        assert_eq!(
+            layout_bundle(b"bateri-handover 2 dev.bateri.bateri\nx"),
+            Some("dev.bateri.bateri")
+        );
+        assert_eq!(layout_bundle(b"bateri-handover 2 \nx"), None);
+        assert_eq!(layout_bundle(b"something 1 a\nx"), None);
         let blob = layout_blob("dev.bateri.bateri", "bateri-session 1\nW x\n");
         assert_eq!(
             layout_of(&blob),
@@ -2389,6 +2423,11 @@ mod tests {
             arrive(&[root.clone()], uid(), me, "dev.bateri.test").expect("an arrival");
         assert_eq!(arrival.layout, "the layout");
         assert_eq!(owner_of(&dir), Some(me), "the directory was not adopted");
+        // The instance's name comes with it (R5.1): the registry runs on in it.
+        assert_eq!(
+            Some(arrival.instance.as_str()),
+            dir.file_name().and_then(|name| name.to_str())
+        );
         let (link, pane) = arrival.panes.remove(0);
         assert_eq!((link, pane.pid, pane.start), (0, 1, 2));
         assert_eq!(

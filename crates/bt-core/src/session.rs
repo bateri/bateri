@@ -3432,6 +3432,17 @@ fn block_key(uri: &str) -> Option<BlockKey> {
     Some(BlockKey::Remote { shell, id })
 }
 
+/// [`block_key`] for the wire fixture (`shell::tests`): `(remote shell's
+/// (P, S), n)`; a restored history's key is `None`.
+#[cfg(test)]
+pub(crate) fn block_key_for_tests(uri: &str) -> Option<(Option<(u32, u32)>, u32)> {
+    match block_key(uri)? {
+        BlockKey::Local(id) => Some((None, id)),
+        BlockKey::Remote { shell, id } => Some((Some((shell.parent, shell.pid)), id)),
+        BlockKey::Saved { .. } => None,
+    }
+}
+
 /// [`Session::scroll_wheel`]'s answer: where the wheel went.
 ///
 /// Not `Option<i32>`, because `bt-shell` does three separate things on three
@@ -4073,6 +4084,7 @@ impl Session {
         } = adoption;
         let master = File::from(master);
         let copy = master.try_clone().ok();
+        let prefix_len = prefix.len();
         options.initial_input = None;
         let (session, mut event_loop, _) = Self::assemble(
             options,
@@ -4096,7 +4108,7 @@ impl Session {
         if !input.is_empty() {
             session.send(Msg::Input(input.into()));
         }
-        event_loop.read_first();
+        event_loop.read_first(prefix_len);
         *lock(&session.reader) = Some(event_loop.spawn());
         Ok(session)
     }
@@ -14550,6 +14562,27 @@ mod tests {
     fn the_refresh_command_is_the_wire_format() {
         assert_eq!(DOCK_REFRESH_COMMAND, b"\x1b[8133~r\x07");
         assert!(DOCK_REFRESH_COMMAND.starts_with(DOCK_EDIT_PREFIX.as_bytes()));
+    }
+
+    /// **Wire (b), the terminal → the shell** (055 Karar 8): after an update
+    /// the new bateri sends its commands to the **previous** version's
+    /// widget, so the commands' form is frozen — the two tests above hold
+    /// the bytes, this one the binding they reach and the capability that
+    /// opens the edit gate, in today's script. **The rule:** a new command is added
+    /// beside these (an older widget ignores an unknown one: its `L` does
+    /// not match); none of these changes its form.
+    #[test]
+    fn the_previous_widget_still_takes_the_commands() {
+        let script = include_str!("../../../assets/shell/zsh/bateri.zsh");
+        assert!(
+            script.contains("bindkey -M $map $'\\e[8133~' __bateri_dock_edit"),
+            "the widget's binding moved"
+        );
+        assert_eq!(DOCK_EDIT_PREFIX, "\x1b[8133~");
+        assert!(
+            script.contains("$'\\e]8133;w\\a'"),
+            "the capability's form moved"
+        );
     }
 
     #[test]

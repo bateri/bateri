@@ -14,7 +14,13 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
-- **Windows come back after quitting.** After ⌘Q, an update or a restart,
+- **Updates keep your programs running.** “Install and Relaunch” no longer
+  ends what runs in your panes: shells, vim, `npm run dev` and an ssh session
+  — Claude Code on a server included — carry on in the new version with their
+  screens as they were. A file transfer or a password prompt in progress makes
+  the relaunch wait (the status line says “Update waits for N transfers”; ⌘.
+  cancels the transfer and lets the update go on).
+- **Windows come back after quitting.** After ⌘Q or a restart,
   bateri reopens your windows, tabs and splits — each pane in its folder, at
   its font size and with its scrollback in colour. Shells start fresh; a pane
   that was on ssh comes back with the `ssh …` line typed and waiting for ⏎.

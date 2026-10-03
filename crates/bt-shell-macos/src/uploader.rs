@@ -606,9 +606,29 @@ impl TerminalPane {
         self.uploads_changed();
     }
 
-    /// The owner's Dock tile (the total over all panes) should refresh.
+    /// The owner's Dock tile (the total over all panes) should refresh — and a
+    /// postponed update may go (055 R5.2).
     fn uploads_changed(&self) {
         self.host().uploads_changed(self.id());
+    }
+
+    /// The queue's items not finished yet — what an update waits for (055 R5.2).
+    pub(crate) fn upload_unfinished(&self) -> usize {
+        self.uploads().borrow().unfinished()
+    }
+
+    /// An update waits for `left` transfers of the application (`None`: it
+    /// does not wait any more): the line leads with it, redrawn at once if
+    /// this pane streams.
+    pub(crate) fn set_update_waits(&self, left: Option<usize>) {
+        let changed = self.uploads().borrow_mut().set_update_waits(left);
+        if !changed {
+            return;
+        }
+        let status = self.uploads().borrow_mut().status(Instant::now());
+        if let Some(status) = status {
+            self.show_transfer(Some(status));
+        }
     }
 
     /// The flowing item `item` ended (`landed`: where a download landed): move

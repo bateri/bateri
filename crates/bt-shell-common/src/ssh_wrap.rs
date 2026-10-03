@@ -1182,6 +1182,44 @@ mod tests {
     const BOOT_STUB: &str = "echo hi";
     const NONCE: &str = "0123456789abcdef";
 
+    /// **Wire (c), the old `ssh` function → the new binary** (055 Karar 8):
+    /// after an update the carried zsh still has the **previous** version's
+    /// `ssh` function, which asks the binary at the same path — now the new
+    /// one — with its own flags, and hands `ssh-fell-back` the argv the old
+    /// binary wrapped. Frozen here: the function's two calls as today's
+    /// script makes them and a wrapped argv of an older version (another
+    /// version word). **The rule:** a flag or a tail form is added beside
+    /// these, never changed; this fixture goes two versions later.
+    #[test]
+    fn the_previous_functions_calls_still_parse() {
+        let script = include_str!("../../../assets/shell/zsh/bateri.zsh");
+        for call in [
+            r#"ssh-argv $tty --block "$__bateri_block" "${instance[@]}" -- "$@""#,
+            r#"ssh-fell-back --rc $rc "${instance[@]}" -- "${wrapped[@]}""#,
+        ] {
+            assert!(script.contains(call), "the function's call moved: {call}");
+        }
+        let older = words(&[
+            "-t",
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            "ControlPath=/tmp/bateri-501/0a1b2c3d/u-0123456789abcdef",
+            "-o",
+            "ControlPersist=2",
+            "-p",
+            "2222",
+            "prod",
+            "exec sh -c 'echo hi' bateri-boot 7 0123456789abcdef 0.0.1 -",
+        ]);
+        assert_eq!(unwrap(&older), &words(&["-p", "2222", "prod"])[..]);
+        assert_eq!(nonce(&older), Some("0123456789abcdef"));
+        assert_eq!(
+            master_socket(&older),
+            Some("/tmp/bateri-501/0a1b2c3d/u-0123456789abcdef")
+        );
+    }
+
     #[test]
     fn unwrap_inverts_wrap() {
         for args in [

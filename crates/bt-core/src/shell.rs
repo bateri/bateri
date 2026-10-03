@@ -8689,6 +8689,95 @@ mod tests {
         assert!(Carried::decode(b"").is_none());
     }
 
+    /// **Wire (a), the shell → the terminal** (055 Karar 8): after an update
+    /// the carried shell keeps running the **previous** version's script, so
+    /// this bateri must read what that script printed. The stream below is
+    /// frozen as the scripts in `assets/shell/` print it today — the local
+    /// zsh's prompt, mirror, branch, capability, command and directory and
+    /// the remote scripts' marks, bootstrap proof and fault. **The rule:**
+    /// when a format changes, this fixture stays (it is the version before)
+    /// and a new one is added next to it; it goes two versions later.
+    #[test]
+    fn the_previous_scripts_stream_still_reads() {
+        let stream: &[u8] = b"\x1b]133;A;bt_block=5\x07\
+            \x1b]8;;bateri://block/5\x07  \x1b]133;B\x07\
+            \x1b]7;file:///Users/me/a%20b\x07\
+            \x1b]8133;b;ZmVhdHVyZS94\x07\
+            \x1b]8133;w\x07\
+            \x1b]8133;u;6;;bHMgLWxh;;MCAyIGZnPWdyZWVu;bWFpbg==;ZWNobyBhCg==\x07\
+            \x1b]8133;e\x07\
+            \x1b]8;;\x07\x1b]133;C\x07\
+            \x1b]8133;i;up;0123456789abcdef\x07\
+            \x1b]133;A;bt_remote=5.4242.1\x07\x1b]8;;bateri://rblock/5.4242.1\x07\
+            \x1b]8;;\x07\x1b]133;C;bt_remote=5.4242.1\x07\
+            \x1b]133;D;3;bt_remote=5.4242.1\x07\
+            \x1b]8133;f;shell\x07\
+            \x1b]133;D;0;bt_block=5\x07";
+        let mut scanner = Scanner::new();
+        let mut seen = Vec::new();
+        scanner.feed(stream, |event| {
+            seen.push(match event {
+                ScanEvent::Mark(mark) => format!("mark {mark:?}"),
+                ScanEvent::RemoteMark(remote) => format!(
+                    "remote {}.{}.{} {:?}",
+                    remote.shell.parent, remote.shell.pid, remote.id, remote.mark
+                ),
+                ScanEvent::Cwd { path, local } => format!("cwd {path} {local}"),
+                ScanEvent::Dock(DockEvent::Update(state)) => {
+                    assert_eq!(state.status, DockStatus::Live);
+                    assert_eq!(
+                        (
+                            state.buffer.as_str(),
+                            state.prebuffer.as_str(),
+                            state.cursor
+                        ),
+                        ("ls -la", "echo a\n", 6)
+                    );
+                    assert!(state.insert_keymap, "`main` is an insert keymap");
+                    let highlight = state.highlights.first().expect("a highlight");
+                    assert_eq!((highlight.start, highlight.end), (0, 2));
+                    assert!(highlight.style.fg.is_some());
+                    "mirror".to_owned()
+                }
+                ScanEvent::Dock(DockEvent::End) => "end".to_owned(),
+                ScanEvent::Dock(DockEvent::Branch(branch)) => format!("branch {branch}"),
+                ScanEvent::Dock(DockEvent::Editable) => "editable".to_owned(),
+                ScanEvent::Dock(DockEvent::Unavailable(fault)) => format!("fault {fault:?}"),
+                ScanEvent::PasteOn => "paste".to_owned(),
+                ScanEvent::RemoteSetup(fault) => format!("setup {}", fault.code()),
+                ScanEvent::RemoteUp(nonce) => format!("up {nonce}"),
+            });
+        });
+        assert_eq!(
+            seen,
+            [
+                "mark PromptStart { id: Some(5) }",
+                "mark PromptEnd",
+                "cwd /Users/me/a b true",
+                "branch feature/x",
+                "editable",
+                "mirror",
+                "end",
+                "mark CommandStart",
+                "up 0123456789abcdef",
+                "remote 5.4242.1 PromptStart { id: None }",
+                "remote 5.4242.1 CommandStart",
+                "remote 5.4242.1 CommandEnd { exit: Some(3), id: None }",
+                "setup shell",
+                "mark CommandEnd { exit: Some(0), id: Some(5) }",
+            ]
+        );
+        // The anchors the prompt cells carry (read by the session's loops).
+        assert_eq!(
+            crate::session::block_key_for_tests("bateri://block/5"),
+            Some((None, 5))
+        );
+        assert_eq!(
+            crate::session::block_key_for_tests("bateri://rblock/5.4242.1"),
+            Some((Some((5, 4242)), 1))
+        );
+    }
+
     #[test]
     fn the_version_1_fixture_still_reads() {
         // Written by version 1; the reader takes the current version and

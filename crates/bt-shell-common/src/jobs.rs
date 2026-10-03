@@ -2045,6 +2045,22 @@ mod tests {
         );
     }
 
+    /// A program writing without pause (`yes`) across the handover: the
+    /// adopted reader's first reads end with the carried prefix, not when a
+    /// round comes back short — every round is full here, and a reader stuck
+    /// there would never take the shutdown off its channel (`/code-review`).
+    #[test]
+    fn a_flooding_program_does_not_hold_the_adopted_reader() {
+        use std::time::Instant;
+        let (_old, new, _pid, _start, _wake) = hand_over("exec yes", "y", &[b'y'; 64 * 1024]);
+        let began = Instant::now();
+        assert_eq!(new.shutdown(), bt_core::Teardown::HungUp);
+        assert!(
+            began.elapsed() < bt_core::SHUTDOWN_GRACE,
+            "the shutdown waited on a flooded reader"
+        );
+    }
+
     /// A real PTY whose program sets `stty`'s modes and then sleeps.
     fn stty_session(modes: &str) -> Session {
         Session::spawn(

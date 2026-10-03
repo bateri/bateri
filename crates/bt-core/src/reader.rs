@@ -217,9 +217,9 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     /// Whether clustering is on (`SessionOptions::cluster`); passed to the
     /// wrapper on every call.
     cluster: bool,
-    /// Whether the thread reads once before its first `poll.wait`
-    /// ([`EventLoop::read_first`]).
-    read_first: bool,
+    /// How many carried bytes the thread reads before its first
+    /// `poll.wait` ([`EventLoop::read_first`]); `None`: none.
+    read_first: Option<usize>,
 }
 
 impl<T, U> EventLoop<T, U>
@@ -245,17 +245,20 @@ where
             event_proxy,
             drain_on_exit,
             cluster,
-            read_first: false,
+            read_first: None,
         })
     }
 
     /// Reads once before the first `poll.wait` (055): an adopted PTY's
     /// carried prefix (`TappedPty`) must reach **this** loop's parser — it
     /// may end inside a sequence — and a quiet PTY gives no readable event
-    /// to carry it. `pty_read` stops on its own once the prefix is drained
-    /// and the fd would block.
-    pub(crate) fn read_first(&mut self) {
-        self.read_first = true;
+    /// to carry it. The reads stop once `prefix` bytes went through (a
+    /// round may take some of the fd's too) — **not** when a round comes
+    /// back short: a program writing without pause (`yes`, a build held at
+    /// the holder's limit) fills every round, and the loop would never
+    /// reach the channel (keys, resizes, the shutdown).
+    pub(crate) fn read_first(&mut self, prefix: usize) {
+        self.read_first = Some(prefix);
     }
 
     /// The PTY the loop owned — after `join`, when nothing reads it.
@@ -431,15 +434,19 @@ where
             }
 
             // One `pty_read` stops at `MAX_LOCKED_READ`; a long prefix on a
-            // quiet PTY would wait for the next output, so read until a round
-            // ends short of the bound (drained, the fd would block).
-            while self.read_first {
-                match self.pty_read(&mut state, &mut buf) {
-                    Ok(processed) if processed >= MAX_LOCKED_READ => {}
-                    Ok(_) => break,
-                    Err(err) => {
-                        eprintln!("bateri: the first PTY read failed: {err}");
-                        break;
+            // quiet PTY would wait for the next output, so read rounds until
+            // the prefix went through — bounded by its length, so a program
+            // writing without pause cannot keep the loop from the channel.
+            if let Some(prefix) = self.read_first {
+                let mut through = 0;
+                while through < prefix.max(1) {
+                    match self.pty_read(&mut state, &mut buf) {
+                        Ok(0) => break,
+                        Ok(processed) => through += processed,
+                        Err(err) => {
+                            eprintln!("bateri: the first PTY read failed: {err}");
+                            break;
+                        }
                     }
                 }
             }

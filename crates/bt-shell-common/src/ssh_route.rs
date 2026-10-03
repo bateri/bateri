@@ -934,7 +934,8 @@ impl Masters {
         Self::with_instance(askpass, roots, store, new_instance())
     }
 
-    /// [`Self::new`] with the instance directory's name given (the tests).
+    /// [`Self::new`] with the instance directory's name given: an instance
+    /// carried over an update (055 R5.1) and the tests.
     pub fn with_instance(
         askpass: PathBuf,
         roots: Vec<PathBuf>,
@@ -1214,7 +1215,12 @@ impl Masters {
     pub fn sweep(&self) {
         // First: the sweep runs ssh per dead socket and the user's first
         // `ssh` must not miss the directory meanwhile (it skips our own).
-        let _ = self.bases();
+        // An instance carried over an update (055 R5.1) has its masters in
+        // them already: a live one is ours again — [`resolve`]'s `-O check`
+        // finds it, no password asked — and a dead one goes now.
+        for dir in self.bases() {
+            remove_dead_sockets(dir);
+        }
         sweep(&self.roots, &self.instance);
     }
 
@@ -1784,6 +1790,18 @@ fn our_sockets(dir: &Path) -> Vec<PathBuf> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The master sockets in `dir` nobody listens on any more (`ECONNREFUSED`):
+/// removed. A live one stays — it is a master this instance owns.
+fn remove_dead_sockets(dir: &Path) {
+    for socket in our_sockets(dir) {
+        if UnixStream::connect(&socket)
+            .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionRefused)
+        {
+            let _ = std::fs::remove_file(&socket);
+        }
+    }
 }
 
 /// Removes an instance directory whose masters are gone: our names only
@@ -3440,6 +3458,30 @@ exit $code
         let _listener = UnixListener::bind(dir.join(FOCUS_SOCKET)).unwrap();
         masters.close_all(Instant::now() + Duration::from_secs(2));
         assert!(!dir.exists(), "the instance directory stayed");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 055 R5.1: an instance carried over an update keeps its live masters
+    /// and loses its dead ones at the sweep — the sweep of other instances
+    /// never looks into one's own directory.
+    #[test]
+    fn a_carried_instance_keeps_its_live_masters_and_loses_the_dead() {
+        let root = scratch("carried");
+        let base = root.join("s");
+        let dir = prepare_instance(&base, "66666666").unwrap();
+        let live = dir.join("0123456789abcdef");
+        let dead = dir.join("fedcba9876543210");
+        let _listener = UnixListener::bind(&live).unwrap();
+        drop(UnixListener::bind(&dead).unwrap());
+        let masters = Masters::with_instance(
+            PathBuf::from("/usr/bin/false"),
+            vec![base],
+            Arc::new(NoStore),
+            "66666666".to_owned(),
+        );
+        masters.sweep();
+        assert!(live.exists(), "a live master was swept");
+        assert!(!dead.exists(), "a dead master stayed");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

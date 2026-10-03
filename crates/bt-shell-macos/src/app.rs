@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use block2::RcBlock;
 use bt_core::{
     CursorMotion, HostMark, InitialInput, ReduceMotion, RestoreWindows, SHUTDOWN_GRACE,
     SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll, TabId, Teardown, Theme,
@@ -448,6 +449,23 @@ fn adoption(
         state,
         prefix: held.buffer,
     })
+}
+
+/// What an update's relaunch waits for ([`AppDelegate::postpone_update`],
+/// 055 R5.2): the application's unfinished transfers and an open password
+/// sheet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct UpdateWait {
+    transfers: usize,
+    sheet: bool,
+}
+
+impl UpdateWait {
+    /// Whether the relaunch must wait — the user's answer (Karar 10 (a)):
+    /// it waits rather than cutting a transfer or a sign-in short.
+    fn holds(self) -> bool {
+        self.transfers > 0 || self.sheet
+    }
 }
 
 /// **The handover's sequence point** in this process (055 R4.3,
@@ -991,6 +1009,9 @@ pub(crate) struct Ivars {
     /// The handover test item asked for this quit (055 R4.4): bateri starts
     /// itself again once this process is gone.
     relaunch_after: Cell<bool>,
+    /// Sparkle's install handler while the relaunch waits for the transfers
+    /// and the password sheets to end (055 R5.2, [`AppDelegate::postpone_update`]).
+    postponed_update: RefCell<Option<RcBlock<dyn Fn()>>>,
 }
 
 define_class!(
@@ -1961,16 +1982,22 @@ fn verdict(
 /// last session to its host and on quit ([`AppDelegate::shutdown`], R9.3).
 /// The saved passwords are the login keychain's ([`crate::keychain`], 047
 /// phase-3).
-fn masters() -> Option<Arc<Masters>> {
+///
+/// `carried` is the instance an update's holder handed over (055 R5.1,
+/// [`Arrival::instance`]): its directories are this process's already
+/// ([`arrive`]), so the masters opened before the update are recognised
+/// again, the focus listener moves into them and the carried shells'
+/// `BATERI_SSH_INSTANCE` still names this instance. `None`: a fresh name.
+fn masters(carried: Option<&str>) -> Option<Arc<Masters>> {
     let askpass = std::env::current_exe().ok()?;
     // SAFETY: `getuid` has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
     let bases = ssh_route::socket_bases(child::home().as_deref(), uid);
-    let masters = Arc::new(Masters::new(
-        askpass,
-        bases,
-        Arc::new(crate::keychain::Keychain),
-    ));
+    let store = Arc::new(crate::keychain::Keychain);
+    let masters = Arc::new(match carried {
+        Some(instance) => Masters::with_instance(askpass, bases, store, instance.to_owned()),
+        None => Masters::new(askpass, bases, store),
+    });
     // `crate::run` took the update's holders before this (the handover's
     // sequence point, [`arrive`]): the sweep's `ssh` children come after it.
     let sweeper = Arc::clone(&masters);
@@ -2036,11 +2063,16 @@ impl AppDelegate {
             settings_state: RefCell::new(settings::FileState::Missing),
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
-            masters: opts.run.is_none().then(masters).flatten(),
+            masters: opts
+                .run
+                .is_none()
+                .then(|| masters(arrival.as_ref().map(|arrival| arrival.instance.as_str())))
+                .flatten(),
             restore_lock: RefCell::new(None),
             arrival: RefCell::new(arrival),
             holder: RefCell::new(None),
             relaunch_after: Cell::new(false),
+            postponed_update: RefCell::new(None),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -2103,6 +2135,86 @@ impl AppDelegate {
         let panes = self.all_panes();
         let panes: Vec<&TerminalPane> = panes.iter().map(|pane| &**pane).collect();
         crate::uploader::refresh_dock_tile(self.mtm(), &panes);
+        self.update_may_go();
+    }
+
+    /// What an update's relaunch waits for across every pane (055 R5.2,
+    /// Karar 10 (a)): the unfinished transfers — their bytes pass through
+    /// bateri — and whether a password sheet is open (its answer does too).
+    fn update_waits_for(&self) -> UpdateWait {
+        let panes = self.all_panes();
+        UpdateWait {
+            transfers: panes.iter().map(|pane| pane.upload_unfinished()).sum(),
+            sheet: panes.iter().any(|pane| pane.password().borrow().is_some()),
+        }
+    }
+
+    /// Sparkle asks whether the relaunch should wait
+    /// (`updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:`):
+    /// `true` and `install` kept while something is waited for — the panes'
+    /// lines say so — `false` (install now) otherwise.
+    pub(crate) fn postpone_update(&self, install: RcBlock<dyn Fn()>) -> bool {
+        let wait = self.update_waits_for();
+        if !wait.holds() {
+            return false;
+        }
+        self.ivars().postponed_update.replace(Some(install));
+        self.show_update_wait(Some(wait.transfers));
+        true
+    }
+
+    /// The update was aborted: the kept handler is let go, the lines lose
+    /// their lead.
+    pub(crate) fn drop_postponed_update(&self) {
+        if self.ivars().postponed_update.take().is_some() {
+            self.show_update_wait(None);
+        }
+    }
+
+    /// Something the relaunch waits for changed (a transfer ended or was
+    /// cancelled — ⌘. —, a sheet closed, a pane closed): with nothing left
+    /// the kept handler runs, once, **on the next main-queue turn** — this
+    /// is called from inside a pane's close and upload paths, and the
+    /// handler quits for the install (the handover must not freeze a pane
+    /// halfway through its own close); otherwise the lines' count follows.
+    fn update_may_go(&self) {
+        if self.ivars().postponed_update.borrow().is_none() {
+            return;
+        }
+        let wait = self.update_waits_for();
+        if wait.holds() {
+            self.show_update_wait(Some(wait.transfers));
+            return;
+        }
+        DispatchQueue::main().exec_async(|| {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = delegate(mtm) {
+                app.install_postponed_update();
+            }
+        });
+    }
+
+    /// The deferred half of [`Self::update_may_go`]: asks again (a transfer
+    /// may have started in between) and runs the kept handler once.
+    fn install_postponed_update(&self) {
+        let wait = self.update_waits_for();
+        if wait.holds() {
+            self.show_update_wait(Some(wait.transfers));
+            return;
+        }
+        let install = self.ivars().postponed_update.take();
+        if let Some(install) = install {
+            self.show_update_wait(None);
+            install.call(());
+        }
+    }
+
+    /// Every pane's line leads with the update's wait, or stops.
+    fn show_update_wait(&self, left: Option<usize>) {
+        for pane in self.all_panes() {
+            pane.set_update_waits(left);
+        }
     }
 
     /// The pane with tab identity `id` and its window; `None` if closed
@@ -2351,6 +2463,11 @@ impl AppDelegate {
             return false;
         }
         eprintln!("bateri: handed {count} pane(s) over to the update's holder");
+        // The panes that could not be frozen close below: their session ends
+        // must not `-O exit` a master a carried pane still rides (Karar 10).
+        if let Some(masters) = &self.ivars().masters {
+            masters.begin_quit();
+        }
         let closing: Vec<_> = left.iter().filter_map(|pane| pane.begin_close()).collect();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
         for closing in closing {
@@ -5172,6 +5289,27 @@ mod tests {
         Some(std::os::fd::OwnedFd::from(
             std::fs::File::open("/dev/null").unwrap(),
         ))
+    }
+
+    /// 055 R5.2 (Karar 10 (a)): the relaunch waits for a transfer or an
+    /// open password sheet, either alone; with neither it goes at once.
+    #[test]
+    fn an_update_waits_for_a_transfer_or_a_password_sheet() {
+        assert!(!UpdateWait::default().holds());
+        assert!(
+            UpdateWait {
+                transfers: 1,
+                sheet: false
+            }
+            .holds()
+        );
+        assert!(
+            UpdateWait {
+                transfers: 0,
+                sheet: true
+            }
+            .holds()
+        );
     }
 
     /// Only a relaunch hands over, only where 053 restores and only in a
