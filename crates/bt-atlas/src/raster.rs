@@ -546,8 +546,8 @@ fn family(ch: char) -> Option<Family> {
 /// procedural drawing wins. The reason is tiling — the font's em box is not
 /// the cell box and there is no criterion that guarantees a font will provide
 /// it. Measured (019 phase-2, reported by the user with a screenshot): in
-/// Menlo 13pt only rows 3–16 of the 8×18 cell are painted, so ~5 pixels of
-/// stripe remain between two stacked `█`. The same as 012 phase-9's prompt
+/// Menlo 13pt only rows 3–16 of the cell are painted (the cell was 8×18
+/// then), so a stripe of several pixels remains between two stacked `█`. The same as 012 phase-9's prompt
 /// mark decision: *the mark is the terminal's own, not the user's font's.*
 pub(crate) fn is_procedural(ch: char) -> bool {
     family(ch).is_some()
@@ -640,8 +640,9 @@ fn rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32, join:
 /// There is **no pattern, only flat coverage** and this is deliberate: CP437's
 /// checkerboard was a density trick for one-bit displays, while the atlas is
 /// eight-bit. Had a checkerboard been written, its phase would hold only if
-/// the step divided **both** measures of the cell, and it does not — on this
-/// machine 13pt@2x's cell is 16×33 and 33 is odd, so the pattern would break
+/// the step divided **both** measures of the cell, and not every size gives
+/// such a cell — on this machine 13pt@1x's cell is 8×17 and 17 is odd, so the
+/// pattern would break
 /// at every row boundary and horizontal stripes would appear in an area full
 /// of `░`. Tiling is this set's reason to exist; flat coverage gives it by
 /// construction.
@@ -1021,7 +1022,7 @@ const LINES: [Recipe; 128] = [
 /// thickness)`.
 ///
 /// The rounding is mandatory and its cost is visible to the eye: on this
-/// machine 13pt@1x's cell is 8×18, so the vertical line's axis is x = 4.0 and
+/// machine 13pt@1x's cell is 8×17, so the vertical line's axis is x = 4.0 and
 /// an unrounded light band `[3.5, 4.5)` would fall 50% on each of two columns
 /// — every vertical line grey, horizontals (axis 9.0) crisp. The rule is not
 /// new: the underline's position and thickness are already integers

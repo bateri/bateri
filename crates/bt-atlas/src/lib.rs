@@ -2400,8 +2400,17 @@ mod tests {
             MIN_EDGE,
             "the default point size must stay at the floor"
         );
-        // Measured number: `docs/OLCUMLER.md` → Atlas yuva ayak izi, 13pt@2x.
-        assert_eq!(a.occupancy().1, 1984, "the 13pt@2x capacity changed");
+        // At the floor the capacity is the floor's grid of cells. The dated
+        // 1984 in `docs/OLCUMLER.md` → Atlas yuva ayak izi is the 13pt@2x
+        // cell before 052 phase-0 dropped `line_height = 1.0`'s extra pixel
+        // (16×33); the cell now comes from the font's natural height.
+        let (w, h) = a.metrics.cell_px;
+        let floor = usize::from(MIN_EDGE);
+        assert_eq!(
+            a.occupancy().1,
+            (floor / usize::from(w)) * (floor / usize::from(h)),
+            "the 13pt@2x capacity is not the floor's grid"
+        );
     }
 
     /// Invariant: at **every accepted size** the capacity is above the
@@ -2615,22 +2624,43 @@ mod tests {
         );
 
         // (4) **`1.0` is reproducible.** The same quadruple gives the same
-        //     metrics; `metrics()` is pure, not tied to hidden state.
-        //
-        //     This line used to be read as "`1.0` is a no-op" and that claim
-        //     was **wrong**: `tight` is also built with `1.0`, so the
-        //     comparison was a tautology. Measured at 019's gate — at `1.0`,
-        //     `extra = round_up(natural * 0.0)` and `round_up`'s floor is 1,
-        //     so the default path **adds one pixel** to the cell (Menlo 13pt:
-        //     the font wants 17, the cell becomes 18). The excess falls to
-        //     the bottom, the baseline does not move; the symptom is one
-        //     pixel too much line spacing. The fix is outside this set and is
-        //     a debt in `docs/YOL-HARITASI.md`: it would move every user's
-        //     grid, so it is a product decision.
+        //     metrics; `metrics()` is pure, not tied to hidden state. That
+        //     `1.0` adds nothing is a separate claim with its own guard,
+        //     `line_height_one_is_the_natural_height` — comparing `1.0` with
+        //     `1.0` here would be a tautology.
         assert_eq!(
             Atlas::new(None, POINT_SIZE, 1.0, Spacing::default()).metrics(),
             tight
         );
+    }
+
+    #[test]
+    fn line_height_one_is_the_natural_height() {
+        // `line_height = 1.0` is exactly the font's own line spacing (052
+        // R1.2): the cell is the two rounded parts and nothing more, and the
+        // baseline is the rounded ascent. `extra` used to go through
+        // `round_up`, whose floor of 1 added a pixel to every default cell.
+        // Read from the font itself, so the guard holds for any family.
+        for (point_size, scale) in [
+            (POINT_SIZE, 1.0),
+            (POINT_SIZE, 2.0),
+            (LARGE_POINT_SIZE, 1.0),
+            (LARGE_POINT_SIZE, 2.0),
+        ] {
+            let a = atlas(point_size, scale);
+            let raw = Backend::raw_metrics(a.faces.get(Face::Regular));
+            let ascent = rules::round_up(raw.ascent);
+            let natural = ascent + rules::round_up(raw.descent + raw.leading);
+            let m = a.metrics();
+            assert_eq!(
+                m.cell_px.1, natural,
+                "{point_size}pt@{scale}x: the cell is not the natural height"
+            );
+            assert_eq!(
+                m.baseline_px, ascent,
+                "{point_size}pt@{scale}x: the baseline moved"
+            );
+        }
     }
 
     /// The first and one-past-last inked column of a mask slot.
@@ -3713,11 +3743,11 @@ mod tests {
     /// The (point size, scale) pairs the procedural invariants run at.
     ///
     /// All three are needed and each opens a different arithmetic (the
-    /// measures are on this machine, Menlo): the 13pt@1x cell is 8×18 —
-    /// eighth slices land fractional (18/8 = 2.25) and anti-aliasing really
-    /// runs; 13pt@2x is 16×33, i.e. an **odd** height, and halves fall to a
-    /// fraction too; 144pt@1x is 87×169, a large cell where most slices
-    /// divide evenly. An invariant that runs at only one pair has never
+    /// measures are on this machine, Menlo): the 13pt@1x cell is 8×17 —
+    /// an **odd** height, so eighth slices land fractional (17/8 = 2.125),
+    /// halves fall to a fraction too and anti-aliasing really runs; 13pt@2x
+    /// is 16×32, the default Retina cell; 144pt@1x is a large cell where
+    /// most slices divide evenly. An invariant that runs at only one pair has never
     /// tested the others — the lesson in `envelope_stays_inside_cell`'s doc
     /// ("the clipping branch never fires with a real font").
     const PROCEDURAL_SIZES: [(f64, f64); 3] = [
@@ -3755,7 +3785,7 @@ mod tests {
     #[test]
     fn the_full_block_fills_the_cell() {
         // **The exact opposite of the reported defect**, equality and not `> 0`:
-        // Menlo's `█` paints only rows 3-16 of an 8×18 cell, which left a ~5 pixel
+        // Menlo's `█` paints only rows 3-16 of the 13pt cell, which left a ~5 pixel
         // strip between two stacked blocks (019 phase-2, reported by the user with
         // a screenshot). A single missing byte is a faint copy of that strip, so
         // the criterion cannot be "is there any ink at all".
@@ -3960,8 +3990,8 @@ mod tests {
     fn the_shades_are_flat_and_ordered() {
         // The shades are **patternless** (see the `SHADE_LEVELS` doc of `raster`):
         // a checkerboard tiles only if the step divides both dimensions of the
-        // cell, and it does not: on this machine the 13pt@2x cell is 16×33 and 33
-        // is odd. Flat coverage tiles by construction and this is its guard: every
+        // cell, and not every size gives one: on this machine the 13pt@1x cell
+        // is 8×17 and 17 is odd. Flat coverage tiles by construction and this is its guard: every
         // shade is single-valued.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();

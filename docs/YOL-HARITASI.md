@@ -771,6 +771,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   dokunuyor.
   İkisi tek sette birleşebilir: ortak yanları fare değil **bildirim yönü**.
 - **`line_height = 1.0` bir no-op değil: hücreye bir piksel ekliyor.**
+  **Kapandı (2026-10-03) → `.tasks/052-tasan-glyph/` phase-0**: fazlalık
+  tabansız `ceil`'den geçiyor, `1.0`'da hücre fontun doğal yüksekliği
+  (bekçisi `line_height_one_is_the_natural_height`). Kayıt olarak:
   019'un kapısında ölçüldü (2026-09-20). `font::metrics` fazlalığı
   `round_up(natural * (line_height - 1.0))` ile hesaplıyor ve `round_up`'ın
   **tabanı 1** — taban ölçüler (genişlik, yükseklik) sıfır olmasın diye

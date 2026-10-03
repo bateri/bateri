@@ -1328,7 +1328,7 @@ yordamsal çiziliyor** (021,
 U+23B8–U+23BF fonta hiç sorulmadan hücre ölçüsünden hesaplanıyor ve kapı `Atlas::slot`'ta,
 `Sprite::Rule` kolunun ikizi olarak, **yedekten önce** duruyor. Sıra zorunlu
 ve "fontta yoksa yordamsal çiz" yanlış kol olurdu: `█` Menlo'da *var* ama
-hücreyi doldurmuyor (8×18 hücrenin yalnız 3–16 satırları), yani yedeğe hiç
+hücreyi doldurmuyor (13pt'de yalnız 3–16 satırları), yani yedeğe hiç
 gitmeden bozuk geliyor; `⠋` ise Menlo'da yok ve yedek koşarsa Apple
 Braille'den gelirdi. **Yordamsal çizim fontu
 koşulsuz yeniyor** — kullanıcı bu karakterleri taşıyan bir font seçse de
@@ -1343,8 +1343,8 @@ hizalı** taşınıyor — büyük hücrenin genişliğinde çizilseydi bağlam 
 komşu hücreler örtüşürdü, fonttan alınsaydı sparkline döşemezdi
 (`.tasks/046-uzak-yuk-gostergesi/discussion.md` → Karar 3). Gölgeler
 (`░▒▓`) dama deseniyle değil **düz kapsamayla** çiziliyor: dama ancak adım
-hücrenin iki ölçüsünü de bölerse döşer ve bölmüyor (ölçüldü: 13pt@2x hücresi
-16×33, yüksekliği tek). **Çizginin dört kolu var** (yukarı/aşağı/sol/sağ) ve
+hücrenin iki ölçüsünü de bölerse döşer ve her punto o hücreyi vermiyor
+(13pt@1x hücresi 8×17, yüksekliği tek). **Çizginin dört kolu var** (yukarı/aşağı/sol/sağ) ve
 her kolun stili {yok, ince, kalın, çift}; tablo **gerçek tablo**, formül
 değil — aynı ailenin iki yarısı (`251C..2523` ile `252C..2533`) kalın
 maskesinin iki ayrı permütasyonu. İnce kalınlık alt çizginin kalınlığı, kalın
