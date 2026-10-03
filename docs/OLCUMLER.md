@@ -973,8 +973,10 @@ içerik bu sayıyı ödemiyor.
 > kalıcı kutu" cümlesi bugünün kodu için **yanlıştır**. Bugünkü sözleşme bir
 > tablo değil bir değişmez:
 > `bt_atlas::tests::capacity_clears_the_family_at_every_accepted_size`
-> (kabul edilen her aile × punto × ölçek × `line_height` için kapasite ≥
-> ailenin istediği 429). Atlas hâlâ dolabilir; kalan senaryo "tek karede
+> (kabul edilen her aile × punto × ölçek × `line_height` × `letter_spacing`
+> için kapasite ≥ ailenin istediği 429; iki çarpanın birlikte en üstte olduğu
+> köşe 051'de doku tavanını `bt_atlas::MAX_EDGE` 4096'dan 8192'ye çıkardı —
+> `.tasks/051-harf-araligi/discussion.md` → Karar). Atlas hâlâ dolabilir; kalan senaryo "tek karede
 > hedeften fazla farklı glyph" ve **ölçülmedi** (`docs/YOL-HARITASI.md` →
 > "Atlas dolunca geri dönüşü yok").
 

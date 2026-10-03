@@ -2465,7 +2465,7 @@ struct Lists {
 impl Lists {
     fn new(scale: f64) -> Self {
         Self {
-            atlas: Atlas::new(None, 13.0, scale, 1.0),
+            atlas: Atlas::new(None, 13.0, scale, bt_atlas::Spacing::default()),
             upload: RecordingUpload::default(),
             mask: Vec::new(),
             color: Vec::new(),

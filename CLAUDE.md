@@ -56,9 +56,16 @@ mürekkebini ölçmek zorunda, yoksa çizilmeyen bir yerleşimi sınardı. Boy s
 de **ayrı ayrı** değerlendiriliyor; yedeğin tabanı ile sınırı o sınıfın kendi
 fontu, yoksa küçük satıra büyük punto glyph düşerdi. Glyph hücrede
 **ortalanıyor** ve kural evrensel, yedeğe koşullu değil: eşaralıklı taban
-fontta her glyph'in ilerlemesi hücrenin ilerlemesinin ta kendisi (ölçüldü, beş
-yüzün beşinde de — dört yüz artı küçük sınıf), yani kaydırma tam olarak sıfır
-ve raster bit bit aynı. Ortalamanın girdisi hücrenin **kesirli** ilerlemesi,
+fontta her glyph'in ilerlemesi fontun kendi hücre ilerlemesinin ta kendisi
+(ölçüldü, beş yüzün beşinde de — dört yüz artı küçük sınıf), yani
+`letter_spacing = 1`'de kaydırma tam olarak sıfır ve raster bit bit aynı;
+açılınca aynı formül harfi geniş hücrenin ortasına koyuyor (051). Hücrenin
+genişliği iki sınıfta da `space × letter_spacing` (`bt_atlas::Spacing`) ve
+çizim kutusu, ortalama, ikinci kol ile küçültme o sayıyı görüyor; yedek
+kapının **kol kararı** ("bugün tek hücreye sığıyor mu") ise doğal
+ilerlemede, yoksa iki sütunlu CJK/emoji geniş tek hücreye düşüp sol sütunda
+çizilirdi (`rules::accept`, `.tasks/051-harf-araligi/discussion.md` →
+Muhakeme). Ortalamanın girdisi hücrenin **kesirli** ilerlemesi,
 yuvarlanmış genişliği değil: ızgaranın adımı yuvarlanmış olan, ama ortalamayı
 **yuvarlanmışa** bağlamak taban fontun kendi glyph'ini bile hücreden dar
 gösterir (7.827 < 8) ve her harfi yarım pikselin altında kaydırırdı.
@@ -385,7 +392,7 @@ ta kendisi), her pane (`TerminalPane`, `NSView` alt sınıfı; oturumun
 zorunda (033 → R4.1). Uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard` → `PaneHost::copy_to_clipboard`)
 genel panoya o yazar;
-`settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı, `osc52`, `[remote] hosts`,
+`settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı/harf aralığı (`letter_spacing`), `osc52`, `[remote] hosts`,
 `cursor`, `cursor_blink`, `cursor_radius`, `cursor_glow`, `cursor_unfocused`,
 `cursor_blink_interval`, `confirm_close`, `cursor_motion`, `reduce_motion`,
 `smooth_scroll`, `keypress`, `erase`, `shell.integration` ve `[remote]`'un

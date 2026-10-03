@@ -85,6 +85,15 @@ pub struct FontOptions {
     /// guard (`descender_fits_in_the_cell` in `bt-atlas`). A setting punching
     /// through a guard matters more than the setting itself.
     pub line_height: f64,
+    /// Letter-spacing multiplier — the horizontal twin of
+    /// [`FontOptions::line_height`] (051): the cell becomes this multiple of
+    /// the font's own advance and the glyph sits **centred** in it, i.e. the
+    /// letters keep their size and the columns open up.
+    ///
+    /// The floor is `1.0` and it **isn't gone below**: a cell narrower than
+    /// the font's advance would silently clip the edges of wide letters
+    /// (`M`, `W`) — the same protection as the line height's.
+    pub letter_spacing: f64,
 }
 
 impl Default for FontOptions {
@@ -95,6 +104,7 @@ impl Default for FontOptions {
             family: None,
             size: 13.0,
             line_height: 1.0,
+            letter_spacing: 1.0,
         }
     }
 }
@@ -1210,6 +1220,7 @@ pub enum SettingsEdit {
     FontFamily(String),
     FontSize(f64),
     LineHeight(f64),
+    LetterSpacing(f64),
     Osc52(Osc52),
     CursorMotion(CursorMotion),
     ReduceMotion(ReduceMotion),
@@ -1289,6 +1300,7 @@ impl SettingsEdit {
             Self::FontFamily(_) => ("font", "family", "font.family"),
             Self::FontSize(_) => ("font", "size", "font.size"),
             Self::LineHeight(_) => ("font", "line_height", "font.line_height"),
+            Self::LetterSpacing(_) => ("font", "letter_spacing", "font.letter_spacing"),
             Self::Osc52(_) => ("clipboard", "osc52", "clipboard.osc52"),
             Self::CursorMotion(_) => ("motion", "cursor_motion", "motion.cursor_motion"),
             Self::ReduceMotion(_) => ("motion", "reduce_motion", "motion.reduce_motion"),
@@ -1350,7 +1362,8 @@ impl SettingsEdit {
             | Self::CursorGlow(value)
             | Self::BlinkInterval(value)
             | Self::FontSize(value)
-            | Self::LineHeight(value) => decimal(*value),
+            | Self::LineHeight(value)
+            | Self::LetterSpacing(value) => decimal(*value),
             Self::Theme(name)
             | Self::LightTheme(name)
             | Self::DarkTheme(name)
@@ -1441,6 +1454,10 @@ size = 13
 # 1 to 2. Line spacing as a multiple of the font's own: 1 is the font's own
 # spacing, 1.4 is airy. Below 1 is refused — it would clip the tails of g and y.
 line_height = 1.0
+# 1 to 2. Letter spacing as a multiple of the font's own: 1 is the font's own
+# spacing, 1.2 opens the columns a little. Letters keep their size and sit in
+# the middle of the wider cell. Below 1 is refused — it would clip wide letters.
+letter_spacing = 1.0
 
 [clipboard]
 # "copy" | "off". Lets programs in the terminal, also over ssh, copy text to
@@ -1751,6 +1768,10 @@ stats_interval = 3
                 if let Some(item) = font.get("line_height") {
                     parsed.settings.font.line_height =
                         line_height(text, item, fallback.font.line_height, diagnostics);
+                }
+                if let Some(item) = font.get("letter_spacing") {
+                    parsed.settings.font.letter_spacing =
+                        letter_spacing(text, item, fallback.font.letter_spacing, diagnostics);
                 }
             }
             None if root.contains_key("font") => {
@@ -2834,6 +2855,27 @@ fn line_height(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Dia
     )
 }
 
+/// `font.letter_spacing`: a multiplier between `1.0` and
+/// [`MAX_LETTER_SPACING`] — [`line_height`]'s horizontal twin, with the same
+/// two ends for the same kind of reasons: the lower end forbids clipping wide
+/// letters ([`FontOptions::letter_spacing`]), the upper end is the atlas
+/// budget (a wider slot fits fewer glyphs).
+fn letter_spacing(
+    text: &str,
+    item: &Item,
+    fallback: f64,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> f64 {
+    ranged_float(
+        text,
+        item,
+        "font.letter_spacing",
+        LETTER_SPACING_RANGE,
+        fallback,
+        diagnostics,
+    )
+}
+
 /// The **shared body** of a ranged decimal key: if it isn't a number or is out
 /// of range the key stays at its own value and a diagnostic is left.
 ///
@@ -2890,6 +2932,16 @@ pub const MAX_LINE_HEIGHT: f64 = 2.0;
 /// The line-height multiplier's accepted range: its lower end is the font's own
 /// metrics ([`FontOptions::line_height`]), its upper end [`MAX_LINE_HEIGHT`].
 pub const LINE_HEIGHT_RANGE: std::ops::RangeInclusive<f64> = 1.0..=MAX_LINE_HEIGHT;
+
+/// The letter-spacing multiplier's ceiling — the atlas budget (see
+/// [`letter_spacing`]); the capacity guard in `bt-atlas` covers this corner
+/// together with [`MAX_LINE_HEIGHT`].
+pub const MAX_LETTER_SPACING: f64 = 2.0;
+
+/// The letter-spacing multiplier's accepted range: its lower end is the font's
+/// own advance ([`FontOptions::letter_spacing`]), its upper end
+/// [`MAX_LETTER_SPACING`].
+pub const LETTER_SPACING_RANGE: std::ops::RangeInclusive<f64> = 1.0..=MAX_LETTER_SPACING;
 
 fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagnostic>) -> f64 {
     const KEY: &str = "font.size";
@@ -3421,6 +3473,7 @@ mod tests {
             ("appearance", "dark_theme"),
             ("font", "size"),
             ("font", "line_height"),
+            ("font", "letter_spacing"),
             ("clipboard", "osc52"),
             ("motion", "cursor_motion"),
             ("motion", "reduce_motion"),
@@ -3689,7 +3742,8 @@ mod tests {
             FontOptions {
                 family: None,
                 size: 13.0,
-                line_height: 1.0
+                line_height: 1.0,
+                letter_spacing: 1.0,
             }
         );
         assert_eq!(
@@ -3697,7 +3751,8 @@ mod tests {
             FontOptions {
                 family: Some("Monaco".to_owned()),
                 size: 14.5,
-                line_height: 1.0
+                line_height: 1.0,
+                letter_spacing: 1.0,
             }
         );
         // An integer is a point size too: the first thing the user will write is
@@ -3759,6 +3814,7 @@ mod tests {
                 family: Some("Monaco".to_owned()),
                 size: 18.0,
                 line_height: 1.0,
+                letter_spacing: 1.0,
             },
             ..Settings::default()
         };
@@ -4332,6 +4388,54 @@ found 1.5; using 0.1"
         let parsed = Settings::parse("[font]\nline_height = 9\nsize = 18\n").expect("parses");
         assert_eq!(parsed.settings.font.size, 18.0);
         assert_eq!(parsed.settings.font.line_height, 1.0);
+    }
+
+    #[test]
+    fn letter_spacing_is_read_and_bounded() {
+        assert_eq!(
+            clean("").font.letter_spacing,
+            1.0,
+            "the default is the font's own"
+        );
+        assert_eq!(
+            clean("[font]\nletter_spacing = 1.25\n").font.letter_spacing,
+            1.25
+        );
+        // An integer is a multiplier too.
+        assert_eq!(
+            clean("[font]\nletter_spacing = 2\n").font.letter_spacing,
+            2.0
+        );
+        // Two-ended like the line height: below 1 clips wide letters, above
+        // 2 is past the atlas budget.
+        for value in ["0.9", "2.1", "nan"] {
+            let (settings, diagnostic) = rejected(&format!("[font]\nletter_spacing = {value}\n"));
+            assert_eq!(settings, Settings::default(), "{value}");
+            assert_eq!(diagnostic.key, Some("font.letter_spacing"), "{value}");
+            assert!(
+                diagnostic.message.contains("between 1 and 2"),
+                "{value}: {}",
+                diagnostic.message
+            );
+        }
+        let (_, diagnostic) = rejected("[font]\nletter_spacing = \"wide\"\n");
+        assert_eq!(diagnostic.key, Some("font.letter_spacing"));
+        assert!(diagnostic.message.contains("must be a number"));
+
+        // The neighbouring keys aren't dropped.
+        let parsed = Settings::parse("[font]\nletter_spacing = 9\nsize = 18\nline_height = 1.4\n")
+            .expect("parses");
+        assert_eq!(parsed.settings.font.size, 18.0);
+        assert_eq!(parsed.settings.font.line_height, 1.4);
+        assert_eq!(parsed.settings.font.letter_spacing, 1.0);
+
+        // The edit writes only its key and keeps the comment and the unknown
+        // key around it.
+        let text = "[font]\n# mine\nletter_spacing = 1.0\nfuture = 1\n";
+        let edited = Settings::with_edit(text, &SettingsEdit::LetterSpacing(1.3)).expect("edits");
+        assert!(edited.contains("# mine"), "{edited}");
+        assert!(edited.contains("future = 1"), "{edited}");
+        assert_eq!(clean(&edited).font.letter_spacing, 1.3);
     }
 
     #[test]
@@ -5344,6 +5448,7 @@ cursor = \"spring\"
             }
             SettingsEdit::FontSize(size) => settings.font.size = two(size),
             SettingsEdit::LineHeight(height) => settings.font.line_height = two(height),
+            SettingsEdit::LetterSpacing(spacing) => settings.font.letter_spacing = two(spacing),
             SettingsEdit::Osc52(mode) => settings.osc52 = mode,
             SettingsEdit::CursorMotion(motion) => settings.cursor_motion = motion,
             SettingsEdit::ReduceMotion(reduce) => settings.reduce_motion = reduce,
@@ -5408,6 +5513,7 @@ cursor = \"spring\"
             SettingsEdit::FontFamily(String::new()),
             SettingsEdit::FontSize(14.5),
             SettingsEdit::LineHeight(1.25),
+            SettingsEdit::LetterSpacing(1.3),
             SettingsEdit::Osc52(Osc52::Off),
             SettingsEdit::CursorMotion(CursorMotion::Ease),
             SettingsEdit::ReduceMotion(ReduceMotion::On),

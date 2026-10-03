@@ -37,13 +37,11 @@ pub struct Zoom {
 impl Zoom {
     /// The font to hand to the renderer: the settings' one, its point size offset.
     pub fn apply(self, font: &FontOptions) -> FontOptions {
+        // Only the point size is temporary; every other `[font]` key (the spacing
+        // multipliers scale with the point size by themselves) passes through.
         FontOptions {
-            family: font.family.clone(),
             size: self.size(font),
-            // The point size is temporary, the line height is **not**: Cmd +/− moves the
-            // point size and the multiplier already scales with it (the cell height derives
-            // from the font's metrics).
-            line_height: font.line_height,
+            ..font.clone()
         }
     }
 
@@ -96,6 +94,7 @@ mod tests {
             family: Some("Menlo".to_owned()),
             size,
             line_height: 1.0,
+            letter_spacing: 1.0,
         }
     }
 
@@ -120,6 +119,7 @@ mod tests {
             family: None,
             size: 13.0,
             line_height: 1.0,
+            letter_spacing: 1.0,
         };
         assert_eq!(zoom.after_reload(&font(13.0), &other), zoom);
         assert_eq!(zoom.after_reload(&font(13.0), &font(13.0)), zoom);

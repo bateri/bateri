@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use bt_atlas::{Atlas, Metrics, Plane, TOFU};
+use bt_atlas::{Atlas, Metrics, Plane, Spacing, TOFU};
 use bt_core::{Clusters, FontOptions, LinearRgba};
 
 use crate::GpuError;
@@ -1370,16 +1370,17 @@ impl Renderer {
         let font = self.font.borrow();
         let family = font.family.as_deref();
         let mut state = self.state.borrow_mut();
+        let spacing = Spacing {
+            line: font.line_height,
+            letter: font.letter_spacing,
+        };
         let entry = state.atlas.get_or_insert_with(|| WgpuAtlas {
-            atlas: Atlas::new(family, font.size, scale, font.line_height),
+            atlas: Atlas::new(family, font.size, scale, spacing),
             mask: None,
             color: None,
             fx_bind: None,
         });
-        if entry
-            .atlas
-            .ensure(family, font.size, scale, font.line_height)
-        {
+        if entry.atlas.ensure(family, font.size, scale, spacing) {
             entry.mask = None;
             entry.color = None;
             entry.fx_bind = None;

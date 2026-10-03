@@ -52,6 +52,7 @@
 | 048 | [uzak-kabuk-entegrasyonu](048-uzak-kabuk-entegrasyonu/) | 🟢 | 5 phase + kapı tamam — düz `ssh` uzakta dizin ve komut bloklarını rc dosyasına dokunmadan kuruyor, ayarla ve host başına kapanıyor; dosya işleri terminalde açılan oturumun bağlantısına biniyor |
 | 049 | [uzak-entegrasyon-ilk-baglanti](049-uzak-entegrasyon-ilk-baglanti/) | 🟢 | 3 phase + kapı tamam — her `ssh` ilk bağlantıdan sarılıyor, kabuksuz ya da exec reddeden uçta sessizce düz yeniden bağlanıyor, kullanılmış oturum düşmüyor ve terminal kimliği `LC_` ailesiyle ssh'ın öbür ucuna geçiyor |
 | 050 | [odak-sorgusu](050-odak-sorgusu/) | 🟢 | 2 phase + kapı tamam — `bateri focus bateri://tab/<UUID>` dış sürece yalnız sorulan pane için GUI açmadan odak ve tam saniyelik `idle` söylüyor, tanınmayan alt komut pencere açmıyor |
+| 051 | [harf-araligi](051-harf-araligi/) | 🟢 | 1 phase + kapı tamam — `[font] letter_spacing` hücreyi fontun aralığının 1–2 katına açıyor, harf ve iki sütunlu karakter genişleyen hücrenin ortasında, ayar penceresinde ve Cmd +/−'da taşınıyor |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

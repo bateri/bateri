@@ -177,6 +177,10 @@ size = 13
 # 1 to 2. Line spacing as a multiple of the font's own: 1 is the font's own
 # spacing, 1.4 is airy. Below 1 is refused — it would clip the tails of g and y.
 line_height = 1.0
+# 1 to 2. Letter spacing as a multiple of the font's own: 1 is the font's own
+# spacing, 1.2 opens the columns a little. Letters keep their size and sit in
+# the middle of the wider cell. Below 1 is refused — it would clip wide letters.
+letter_spacing = 1.0
 
 [clipboard]
 # "copy" | "off". Lets programs in the terminal, also over ssh, copy text to
@@ -548,6 +552,7 @@ dark_theme = "bateri"
 family = "Menlo"
 size = 13
 line_height = 1.0
+letter_spacing = 1.0
 ```
 
 | anahtar | tür | varsayılan | anlamı |
@@ -555,6 +560,7 @@ line_height = 1.0
 | `family` | metin | yok (SF Mono, yoksa Menlo) | yazı ailesi |
 | `size` | sayı, `0`'dan büyük | `13` | punto |
 | `line_height` | sayı, `1` – `2` | `1.0` | satır aralığı çarpanı |
+| `letter_spacing` | sayı, `1` – `2` | `1.0` | harf aralığı çarpanı |
 
 - `family` bir **aile adıdır**, Font Kitabı'nda görünen ad (`"JetBrains
   Mono"`, `"Menlo"`); büyük/küçük harf fark etmez. Tek bir yüzün PostScript
@@ -610,6 +616,22 @@ line_height = 1.0
   döner ve uyarı verir.
 - Satır aralığı **kayıt anında** uygulanır, punto gibi; Cmd +/− puntoyu
   oynatır, çarpan olduğu yerde kalır ve yeni puntoya göre ölçeklenir.
+- `letter_spacing` `line_height`'ın **yatay ikizidir**: hücre genişliğini
+  fontun kendi ilerlemesinin katı olarak verir. `1.0` fontun aralığı, `1.2`
+  sütunları biraz açar. Harfin boyu değişmez, **genişleyen hücrenin
+  ortasında** durur; sütunlar açılır. Kutu ve blok çizgileri (`─ │ █`)
+  hücreyi boydan boya doldurduğu için geniş hücrede de birbirine bitişik
+  kalır, iki sütunlu karakter (`中`, emoji) iki sütunun ortasında durur ve
+  pencerenin altındaki bağlam satırı da aynı oranda açılır.
+- **`1`'in altına inilmez**, aynı koruma: fontun ilerlemesinden dar bir
+  hücre `M` ve `W` gibi geniş harflerin kenarını sessizce keser. Üst sınır
+  `2`, satır aralığıyla aynı atlas bütçesi; iki çarpan birlikte en üstteyken
+  de atlas bütün çizgi ve blok karakterlerini taşır. Aralık dışındaki ya da
+  sayı olmayan değer varsayılana (kayıt anında o anki değere) döner ve uyarı
+  verir.
+- Harf aralığı da **kayıt anında** uygulanır: sütun sayısı yeniden
+  hesaplanır ve kabuk yeni boyutu alır. Cmd +/− çarpanı taşır, yani yeni
+  puntoda harfler yine aynı oranda açık durur.
 - Çok büyük puntoda glyph atlası çabuk dolar: dolduktan sonra ekranda ilk
   kez görünen karakterler kutu (□) olarak çizilir. Punto küçültülünce ya da
   uygulama yeniden açılınca geçer.

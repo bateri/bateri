@@ -35,7 +35,7 @@
 //! Rust releases.
 #![cfg(target_os = "macos")]
 
-use bt_atlas::{Atlas, Face, Half, Placed, RuleKind, SizeClass, Sprite, Upload};
+use bt_atlas::{Atlas, Face, Half, Placed, RuleKind, SizeClass, Spacing, Sprite, Upload};
 use std::fmt::Write as _;
 
 /// FNV-1a, 64 bit. Stable by construction: the constants are the algorithm.
@@ -193,7 +193,17 @@ fn configuration(out: &mut String, family: Option<&str>, pt: f64, scale: f64, lh
         out: String::new(),
         prefix,
     };
-    let new = || Atlas::new(family, pt, scale, lh);
+    let new = || {
+        Atlas::new(
+            family,
+            pt,
+            scale,
+            Spacing {
+                line: lh,
+                ..Spacing::default()
+            },
+        )
+    };
     let n = SizeClass::Normal;
     let small = SizeClass::Small;
 

@@ -31,9 +31,10 @@ use std::path::Path;
 use block2::RcBlock;
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
-    CursorBlink, CursorMotion, DownloadConflict, Erase, Keypress, LINE_HEIGHT_RANGE, Osc52,
-    PreviewKeep, ReduceMotion, RemoteStatsMode, SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME,
-    Settings, SettingsEdit, ShellIntegration, SmoothScroll, UnfocusedCaret,
+    CursorBlink, CursorMotion, DownloadConflict, Erase, Keypress, LETTER_SPACING_RANGE,
+    LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion, RemoteStatsMode, SCROLLBACK_MAX,
+    STATS_INTERVAL_RANGE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
+    UnfocusedCaret,
 };
 use bt_gpu::FontNotice;
 use objc2::rc::Retained;
@@ -170,6 +171,7 @@ enum Key {
     Font,
     Size,
     LineHeight,
+    LetterSpacing,
     Shape,
     Blink,
     BlinkSpeed,
@@ -196,7 +198,7 @@ enum Key {
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 32] = [
+    const ALL: [Key; 33] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -207,6 +209,7 @@ impl Key {
         Key::Font,
         Key::Size,
         Key::LineHeight,
+        Key::LetterSpacing,
         Key::Shape,
         Key::Blink,
         Key::BlinkSpeed,
@@ -254,6 +257,7 @@ impl Key {
             Key::Font => "font.family",
             Key::Size => "font.size",
             Key::LineHeight => "font.line_height",
+            Key::LetterSpacing => "font.letter_spacing",
             Key::Shape => "terminal.cursor",
             Key::Blink => "terminal.cursor_blink",
             Key::BlinkSpeed => "terminal.cursor_blink_interval",
@@ -865,6 +869,7 @@ struct Controls {
     font: Retained<NSPopUpButton>,
     size: Number,
     line_height: Number,
+    letter_spacing: Number,
     shape: Retained<NSPopUpButton>,
     blink: Retained<NSPopUpButton>,
     blink_speed: Slide,
@@ -1157,6 +1162,10 @@ define_class!(
                     &controls.line_height,
                     parse_decimal(&text, LINE_HEIGHT_RANGE),
                 ),
+                Some(Key::LetterSpacing) => (
+                    &controls.letter_spacing,
+                    parse_decimal(&text, LETTER_SPACING_RANGE),
+                ),
                 Some(Key::StatsInterval) => (
                     &controls.stats_interval,
                     parse_interval(&text).map(f64::from),
@@ -1168,12 +1177,14 @@ define_class!(
             if number.unchanged(&text, value) {
                 return;
             }
-            let edit = value.map(|value| match Key::from_tag(field.tag()) {
-                Some(Key::Scrollback) => SettingsEdit::Scrollback(value as usize),
-                Some(Key::Size) => SettingsEdit::FontSize(value),
+            let edit = value.and_then(|value| match Key::from_tag(field.tag()) {
+                Some(Key::Scrollback) => Some(SettingsEdit::Scrollback(value as usize)),
+                Some(Key::Size) => Some(SettingsEdit::FontSize(value)),
+                Some(Key::LineHeight) => Some(SettingsEdit::LineHeight(value)),
+                Some(Key::LetterSpacing) => Some(SettingsEdit::LetterSpacing(value)),
                 // `parse_interval` accepted it: a whole number inside the range.
-                Some(Key::StatsInterval) => SettingsEdit::StatsInterval(value as u8),
-                _ => SettingsEdit::LineHeight(value),
+                Some(Key::StatsInterval) => Some(SettingsEdit::StatsInterval(value as u8)),
+                _ => None,
             });
             match edit {
                 Some(edit) => self.save(Some(edit)),
@@ -1199,6 +1210,7 @@ define_class!(
                 Some(Key::Scrollback) => Some(SettingsEdit::Scrollback(value.round() as usize)),
                 Some(Key::Size) => Some(SettingsEdit::FontSize(value)),
                 Some(Key::LineHeight) => Some(SettingsEdit::LineHeight(value)),
+                Some(Key::LetterSpacing) => Some(SettingsEdit::LetterSpacing(value)),
                 // The stepper's bounds are the accepted range and its step is 1.
                 Some(Key::StatsInterval) => Some(SettingsEdit::StatsInterval(value.round() as u8)),
                 _ => None,
@@ -1387,6 +1399,11 @@ impl SettingsWindow {
             &c.line_height,
             settings.font.line_height,
             &decimal_label(settings.font.line_height),
+        );
+        set_number(
+            &c.letter_spacing,
+            settings.font.letter_spacing,
+            &decimal_label(settings.font.letter_spacing),
         );
 
         select_choice(&c.shape, settings.cursor);
@@ -1946,6 +1963,13 @@ impl SettingsWindow {
             0.1,
             56.0,
         );
+        let letter_spacing = self.number(
+            Key::LetterSpacing,
+            *LETTER_SPACING_RANGE.start(),
+            *LETTER_SPACING_RANGE.end(),
+            0.1,
+            56.0,
+        );
         let mut appearance = Form::new(mtm);
         appearance.row(Key::Theme, "Theme:", &theme, &[&theme], None);
         appearance.row(
@@ -1975,6 +1999,13 @@ impl SettingsWindow {
             "Line height:",
             &number_view(mtm, &line_height),
             &number_controls(&line_height),
+            None,
+        );
+        appearance.row(
+            Key::LetterSpacing,
+            "Letter spacing:",
+            &number_view(mtm, &letter_spacing),
+            &number_controls(&letter_spacing),
             None,
         );
 
@@ -2231,6 +2262,7 @@ impl SettingsWindow {
             font,
             size,
             line_height,
+            letter_spacing,
             shape,
             blink,
             blink_speed,
@@ -2674,7 +2706,7 @@ mod tests {
                     cursor_radius = []\ncursor_glow = []\ncursor_unfocused = []\n\
                     cursor_blink_interval = []\nconfirm_close = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
-                    [font]\nfamily = []\nsize = []\nline_height = []\n\
+                    [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
                     keypress = []\nerase = []\n\
@@ -2703,6 +2735,7 @@ mod tests {
                 Key::Font => SettingsEdit::FontFamily(String::new()),
                 Key::Size => SettingsEdit::FontSize(13.0),
                 Key::LineHeight => SettingsEdit::LineHeight(1.0),
+                Key::LetterSpacing => SettingsEdit::LetterSpacing(1.0),
                 Key::Shape => SettingsEdit::Cursor(CaretShape::Beam),
                 Key::Blink => SettingsEdit::CursorBlink(CursorBlink::On),
                 Key::BlinkSpeed => SettingsEdit::BlinkInterval(0.5),
@@ -2964,6 +2997,8 @@ mod tests {
         assert_eq!(parse_decimal("NaN", MIN_SIZE..=MAX_SIZE), None);
         assert_eq!(parse_decimal("500", MIN_SIZE..=MAX_SIZE), None);
         assert_eq!(parse_decimal("0.9", LINE_HEIGHT_RANGE), None);
+        assert_eq!(parse_decimal("0.9", LETTER_SPACING_RANGE), None);
+        assert_eq!(parse_decimal("1.3", LETTER_SPACING_RANGE), Some(1.3));
     }
 
     #[test]
