@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 
 use bt_core::RemoteTarget;
 
+use crate::focus::FOCUS_SOCKET;
 use crate::upload::connection;
 
 // ─── route ───────────────────────────────────────────────────────────────
@@ -1752,7 +1753,7 @@ fn our_sockets(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Removes an instance directory whose masters are gone: our names only
-/// (sockets, an attempt's files, the owner file), then the directory — which
+/// (sockets, an attempt's files, the focus listener, the owner file), then the directory — which
 /// stays if anything else is in it. A user's terminal session socket
 /// ([`SESSION_PREFIX`]) nobody listens on goes too; a live one keeps the
 /// directory **and its owner file** — it ends by itself ([`SESSION_PERSIST`])
@@ -1787,7 +1788,12 @@ fn remove_instance(dir: &Path) {
         let Some(name) = name.to_str() else {
             continue;
         };
-        let ours = name == OWNER_FILE || our_socket_name(name) || attempt_error_file(name);
+        // The focus listener (050) by name only: on ⌘Q it is this process's
+        // and still listening, and it goes with the directory.
+        let ours = name == OWNER_FILE
+            || name == FOCUS_SOCKET
+            || our_socket_name(name)
+            || attempt_error_file(name);
         if ours {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -1804,35 +1810,85 @@ fn remove_instance(dir: &Path) {
 /// rule: removed only when nobody listens. A root that is not a private
 /// directory of this user is not looked into. Runs ssh: never on the main thread.
 pub fn sweep(roots: &[PathBuf], own: &str) {
-    for root in roots {
-        if !private_dir(root) {
+    for root in roots.iter().filter(|root| private_dir(root)) {
+        sweep_flat(root);
+    }
+    for entry in instance_entries(roots) {
+        if entry.name == own || entry.owner.is_none_or(alive) {
             continue;
         }
-        sweep_flat(root);
+        for socket in our_sockets(&entry.dir) {
+            if UnixStream::connect(&socket).is_ok() {
+                let _ = SystemSsh.run(&exit_argv("ssh", &socket));
+            }
+            let _ = std::fs::remove_file(&socket);
+        }
+        remove_instance(&entry.dir);
+    }
+}
+
+/// One instance directory entry under a root ([`instance_entries`]).
+struct InstanceEntry {
+    name: String,
+    dir: PathBuf,
+    /// [`owner`]: `None` for one without an owner file or not private.
+    owner: Option<u32>,
+}
+
+/// The **one** walk over the instance directories: under every root that is a
+/// private directory of this user, each entry with an instance name — whole
+/// or half born ([`instance_entry`]) — and its owner. [`sweep`] retires the
+/// dead ones, [`live_instances`] gives the living ones (050).
+fn instance_entries(roots: &[PathBuf]) -> Vec<InstanceEntry> {
+    let mut found = Vec::new();
+    for root in roots.iter().filter(|root| private_dir(root)) {
         let Ok(entries) = std::fs::read_dir(root) else {
             continue;
         };
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            if name == own || !instance_entry(name) {
+            if !instance_entry(&name) {
                 continue;
             }
             let dir = entry.path();
-            if owner(&dir).is_none_or(alive) {
-                continue;
-            }
-            for socket in our_sockets(&dir) {
-                if UnixStream::connect(&socket).is_ok() {
-                    let _ = SystemSsh.run(&exit_argv("ssh", &socket));
-                }
-                let _ = std::fs::remove_file(&socket);
-            }
-            remove_instance(&dir);
+            let owner = owner(&dir);
+            found.push(InstanceEntry { name, dir, owner });
         }
     }
+    found
+}
+
+/// A living bateri instance: its pid and its directories, in the roots' order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Instance {
+    pub pid: u32,
+    pub dirs: Vec<PathBuf>,
+}
+
+/// The living instances under `roots` (050, `bateri focus`, outside any
+/// instance): whole instance directories whose owner is alive, one
+/// [`Instance`] per pid — the same pid's directories under two roots are one
+/// instance. In the order first seen.
+pub fn live_instances(roots: &[PathBuf]) -> Vec<Instance> {
+    let mut instances: Vec<Instance> = Vec::new();
+    for entry in instance_entries(roots) {
+        let Some(pid) = entry.owner.filter(|&pid| alive(pid)) else {
+            continue;
+        };
+        if !hex_name(&entry.name, INSTANCE_DIGITS) {
+            continue;
+        }
+        match instances.iter_mut().find(|instance| instance.pid == pid) {
+            Some(instance) => instance.dirs.push(entry.dir),
+            None => instances.push(Instance {
+                pid,
+                dirs: vec![entry.dir],
+            }),
+        }
+    }
+    instances
 }
 
 /// The flat half of [`sweep`]: a socket of ours directly in `base` **nobody
@@ -3185,7 +3241,7 @@ exit $code
         // A dead one, with a dead master, an attempt's files and a stranger's file.
         let dead = prepare_instance(&base, "33333333").unwrap();
         std::fs::write(dead.join(OWNER_FILE), dead_pid().to_string()).unwrap();
-        for name in ["0123456789abcdef", "q-0123456789abcdef"] {
+        for name in ["0123456789abcdef", "q-0123456789abcdef", FOCUS_SOCKET] {
             drop(UnixListener::bind(dead.join(name)).unwrap());
         }
         std::fs::write(dead.join("q-0123456789abcdef.err"), "").unwrap();
@@ -3216,6 +3272,64 @@ exit $code
         assert!(!dead.exists() && !half.exists(), "a dead instance stays");
         assert_eq!(names(&crowded), ["notes"]);
         assert!(ownerless.exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 050: the living instances are the whole directories of a live owner,
+    /// one per pid across roots; the dead, the half born and the ownerless
+    /// are not among them.
+    #[test]
+    fn live_instances_are_one_per_living_pid() {
+        let root = scratch("live-instances");
+        let (first, second) = (root.join("a"), root.join("b"));
+        let mine_a = prepare_instance(&first, "11111111").unwrap();
+        let mine_b = prepare_instance(&second, "11111111").unwrap();
+        let parent = prepare_instance(&first, "22222222").unwrap();
+        let parent_pid = std::os::unix::process::parent_id();
+        std::fs::write(parent.join(OWNER_FILE), parent_pid.to_string()).unwrap();
+        let dead = prepare_instance(&first, "33333333").unwrap();
+        std::fs::write(dead.join(OWNER_FILE), dead_pid().to_string()).unwrap();
+        let half = first.join(".44444444-0123456789abcdef");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&half)
+            .unwrap();
+        std::fs::write(half.join(OWNER_FILE), std::process::id().to_string()).unwrap();
+        prepare_dir(&first.join("55555555")).unwrap();
+        let mut found = live_instances(&[first, second]);
+        found.sort_by_key(|instance| instance.pid != std::process::id());
+        assert_eq!(
+            found,
+            [
+                Instance {
+                    pid: std::process::id(),
+                    dirs: vec![mine_a, mine_b],
+                },
+                Instance {
+                    pid: parent_pid,
+                    dirs: vec![parent],
+                },
+            ]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 050: ⌘Q removes the instance directory with its live focus listener.
+    #[test]
+    fn closing_removes_the_directory_with_its_focus_socket() {
+        let root = scratch("close-focus");
+        let base = root.join("s");
+        let masters = Masters::with_instance(
+            PathBuf::from("/usr/bin/false"),
+            vec![base.clone()],
+            Arc::new(NoStore),
+            "77777777".to_owned(),
+        );
+        masters.sweep();
+        let dir = base.join("77777777");
+        let _listener = UnixListener::bind(dir.join(FOCUS_SOCKET)).unwrap();
+        masters.close_all(Instant::now() + Duration::from_secs(2));
+        assert!(!dir.exists(), "the instance directory stayed");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

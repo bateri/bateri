@@ -58,9 +58,39 @@ _Requirements: R1.1, R1.2, R3, R4, R5, R6_
   (bugünkü süpürme sınamalarının yanında).
 - `make check` ve `make linux` yeşil.
 
+## Uygulama Notları
+
+- **`ask` `Reply` dönüyor, `Answer` değil:** Karar 8'in "cevabı örnek üretir,
+  CLI olduğu gibi aktarır"ı için `pane=live`'da örneğin kendi satırı
+  (`Reply::line`) aynen basılıyor; istemci tanımadığı jetonu atlıyor, yalnız
+  `pane=`/`focused=`/`idle=`'yi ve satırın basılabilir ASCII olmasını şart
+  koşuyor. `none` ve `unknown` kanonik satırla.
+- **Sunucu bağlantı başına kısa ömürlü thread** (en çok `MAX_IN_FLIGHT` = 8,
+  fazlası kabul edilip kapanıyor): tek accept thread'inde sıralı sınır,
+  yazmayan bir istemcinin ardındakini `SERVER_READ_LIMIT` kadar bekletirdi;
+  sınama ikinci istemcinin bu sınırın altında cevaplandığını ölçüyor.
+  `serve` soketi döndürmeden bağlıyor, accept döngüsünü kendi thread'inde
+  başlatıyor (phase-2 ve sınamalar dinlemeyi hazır buluyor).
+- **Canlı ama soketsiz örnek `unknown`:** eski sürüm, açılışta henüz
+  kurulmamış dinleyici ya da bayat soket (`ECONNREFUSED`) o pane'i yine de
+  tutabilir — "bilinmiyor ≠ yok". Toplama: ilk `live` kazanır, yoksa bir
+  `unknown` varsa `unknown`, yoksa `none`; canlı örnek yoksa `none`.
+- **connect'in ayrı sınırı yok:** std'de `UnixStream::connect` zaman aşımı
+  almıyor ve yerel connect yalnız dolu backlog'da (Linux) bloklanıyor;
+  sunucu accept'i hiçbir şeyi beklemeden döndüğü için o durum ölü dinleyici
+  demek. Sınırı okuma/yazma zaman aşımı ve toplam son tarih taşıyor.
+- **Sınır sayıları:** sunucu okuma 200 ms, cevaplayıcı bekleme
+  (`ANSWER_WAIT`, phase-2'nin ana kuyruğu) 200 ms, istemci örnek başına
+  500 ms, toplam 900 ms; çıkış kodları `0` cevap, `2` kullanım, `3` unknown.
+- **Süpürme:** `sweep` ve `live_instances` tek yürüyüşü (`instance_entries`)
+  paylaşıyor; `live_instances` yarım doğmuş dizinleri almıyor. `FOCUS_SOCKET`
+  `focus.rs`'de, `remove_instance` onu yalnız adıyla siliyor (⌘Q'da
+  dinleyici hâlâ canlı); `close_all` aynı yoldan dizini kaldırıyor, sınaması
+  var.
+
 ## Checklist
 
-- [ ] `focus.rs`: tel, saat, sunucu, istemci, `focus_main`
-- [ ] `ssh_route.rs`: paylaşılan canlı örnek sayımı, `FOCUS_SOCKET` süpürmede
-- [ ] Test: yukarıdaki Kabul senaryoları
-- [ ] Doğrulama geçti (`make check` + `make linux`)
+- [x] `focus.rs`: tel, saat, sunucu, istemci, `focus_main`
+- [x] `ssh_route.rs`: paylaşılan canlı örnek sayımı, `FOCUS_SOCKET` süpürmede
+- [x] Test: yukarıdaki Kabul senaryoları
+- [x] Doğrulama geçti (`make check` + `make linux`)

@@ -75,6 +75,6 @@ evlat ──exec──▶ bateri focus --pid P bateri://tab/U        (GUI yok)
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | kapı | |
