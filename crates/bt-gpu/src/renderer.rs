@@ -108,35 +108,41 @@ const _: () = assert!(std::mem::offset_of!(Immediates, viewport_px) == 32);
 const _: () = assert!(size_of::<Immediates>() as u32 <= IMMEDIATE_BUDGET);
 
 /// Field-for-field twin of `cell.wgsl` → `Immediates`: the vertex stage's
-/// `viewport_px`, `cell_px` and `uv_size` and the fragment's [`CursorBlock`]
-/// in one block.
+/// `viewport_px`, the slot's geometry ([`SlotQuad`]), the viewport's `lift`
+/// and the fragment's [`CursorBlock`] in one block.
 ///
 /// `CursorBlock` is embedded **as is** (rect@0, rgba@16, its own asserts in
 /// `frame.rs`), so there is no second copy of the cursor's layout. Then the
-/// `vec2`s: viewport_px@32, cell_px@40, uv_size@48; WGSL rounds 56 up to the
-/// struct's 16-byte alignment, and the trailing 8 bytes are the explicit
-/// `pad`.
+/// `vec2`s: viewport_px@32, slot_px@40, uv_size@48, slot_offset@56, then the
+/// `f32` lift@64; WGSL rounds 68 up to the struct's 16-byte alignment, and the
+/// trailing 12 bytes are the explicit `pad`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct GlyphImmediates {
     cursor: CursorBlock,
     viewport_px: [f32; 2],
-    cell_px: [f32; 2],
+    slot_px: [f32; 2],
     uv_size: [f32; 2],
-    pad: [f32; 2],
+    slot_offset: [f32; 2],
+    lift: f32,
+    pad: [f32; 3],
 }
 
-const _: () = assert!(size_of::<GlyphImmediates>() == 64);
+const _: () = assert!(size_of::<GlyphImmediates>() == 80);
 const _: () = assert!(std::mem::offset_of!(GlyphImmediates, viewport_px) == 32);
-const _: () = assert!(std::mem::offset_of!(GlyphImmediates, cell_px) == 40);
+const _: () = assert!(std::mem::offset_of!(GlyphImmediates, slot_px) == 40);
 const _: () = assert!(std::mem::offset_of!(GlyphImmediates, uv_size) == 48);
-// 64 ≤ 128: this block stays in immediates too (Karar 5).
+const _: () = assert!(std::mem::offset_of!(GlyphImmediates, slot_offset) == 56);
+const _: () = assert!(std::mem::offset_of!(GlyphImmediates, lift) == 64);
+// 80 ≤ 128: this block stays in immediates too (Karar 5).
 const _: () = assert!(size_of::<GlyphImmediates>() as u32 <= IMMEDIATE_BUDGET);
 
 /// Field-for-field twin of `glyph_fx.wgsl` → `Immediates`: `heat` (the
-/// `heat` effect's glowing colour, one per frame) and the three sizes.
-/// heat@0, viewport_px@16, cell_px@24, uv_size@32; WGSL rounds 40 up to 48 and
-/// the trailing 8 bytes are the explicit `pad`.
+/// `heat` effect's glowing colour, one per frame), the viewport, the grid
+/// cell (the effects' amplitudes are its ratios) and the slot's geometry.
+/// heat@0, viewport_px@16, cell_px@24, uv_size@32, slot_px@40,
+/// slot_offset@48; WGSL rounds 56 up to 64 and the trailing 8 bytes are the
+/// explicit `pad`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct FxImmediates {
@@ -144,14 +150,18 @@ struct FxImmediates {
     viewport_px: [f32; 2],
     cell_px: [f32; 2],
     uv_size: [f32; 2],
+    slot_px: [f32; 2],
+    slot_offset: [f32; 2],
     pad: [f32; 2],
 }
 
-const _: () = assert!(size_of::<FxImmediates>() == 48);
+const _: () = assert!(size_of::<FxImmediates>() == 64);
 const _: () = assert!(std::mem::offset_of!(FxImmediates, viewport_px) == 16);
 const _: () = assert!(std::mem::offset_of!(FxImmediates, cell_px) == 24);
 const _: () = assert!(std::mem::offset_of!(FxImmediates, uv_size) == 32);
-// 48 ≤ 128: immediates (Karar 5).
+const _: () = assert!(std::mem::offset_of!(FxImmediates, slot_px) == 40);
+const _: () = assert!(std::mem::offset_of!(FxImmediates, slot_offset) == 48);
+// 64 ≤ 128: immediates (Karar 5).
 const _: () = assert!(size_of::<FxImmediates>() as u32 <= IMMEDIATE_BUDGET);
 
 /// `Instance`'s vertex buffer layout: the three `@location`s of
@@ -283,6 +293,12 @@ enum Op {
     /// origin past the texture's edge is fine: fragments outside the viewport
     /// are clipped.
     Viewport(f32),
+    /// A glyph list's viewport (052, [`Renderer::glyph_draws`]): the surface's
+    /// at `y`, raised by `lift` **and taller by it**, so the raised top does
+    /// not pull the bottom edge up with it — a window without a dock would
+    /// otherwise cut the ink of its bottom row. The list's `viewport_px`
+    /// immediate carries the same taller height (the NDC scale's other half).
+    Lifted { y: f32, lift: f32 },
     /// Scissor: (x, y, width, height), inside the texture.
     Scissor([u32; 4]),
     /// The `cell_bg` pipeline over a range of the instance buffer.
@@ -303,12 +319,15 @@ enum Op {
     /// The `cell` (mask) or `emoji` (colour) pipeline over a range of the
     /// glyph buffer, with that plane's texture bound. `cursor` is the text
     /// inversion rectangle for this list (degenerate for stripes and the fill
-    /// band, [`Renderer::plan`] says why); `uv_size` is the atlas's.
+    /// band, [`Renderer::plan`] says why); `quad` is the atlas's slot
+    /// geometry and `lift` how far the viewport was raised for this list
+    /// ([`Renderer::glyph_draws`]).
     Glyphs {
         plane: Plane,
         range: Range<u32>,
         cursor: CursorBlock,
-        uv_size: [f32; 2],
+        quad: SlotQuad,
+        lift: f32,
     },
     /// The `glyph_fx` pipeline over a range of the effect buffer: drawn in
     /// its own full-texture viewport (instances already carry `origin_y`),
@@ -317,9 +336,79 @@ enum Op {
     Fx {
         range: Range<u32>,
         heat: [f32; 4],
-        uv_size: [f32; 2],
+        quad: SlotQuad,
         origin_y: f32,
     },
+}
+
+/// The atlas's slot geometry as the glyph shaders read it (052): the slot's
+/// size, where the grid cell sits inside it and one slot's uv size. Taken
+/// from the atlas's **slot** metric, not from `Frame::cell_px` — on the frame
+/// between a scale change and the geometry event the two disagree and the uv
+/// belongs to the atlas.
+///
+/// At `line_height, letter_spacing >= 1` the slot **is** the cell: the
+/// offset is zero, the size is the grid cell and there is no overflow, i.e.
+/// the quad is today's (`slot_quad_is_the_cell_at_or_above_one`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SlotQuad {
+    pub(crate) slot_px: [f32; 2],
+    pub(crate) slot_offset: [f32; 2],
+    pub(crate) uv_size: [f32; 2],
+}
+
+impl SlotQuad {
+    pub(crate) fn of(atlas: &Atlas) -> Self {
+        let (sw, sh) = atlas.slot_metrics().cell_px;
+        let (ox, oy) = atlas.slot_offset();
+        Self {
+            slot_px: [f32::from(sw), f32::from(sh)],
+            slot_offset: [f32::from(ox), f32::from(oy)],
+            uv_size: uv_size(atlas),
+        }
+    }
+
+    /// How far a glyph's quad reaches above its cell's top, in pixels — the
+    /// lift a surface's glyph viewport needs so its top row is not clipped.
+    pub(crate) fn overflow(self) -> f32 {
+        self.slot_offset[1]
+    }
+
+    /// The `cell.wgsl` immediates of one glyph draw.
+    fn glyph_immediates(
+        self,
+        cursor: CursorBlock,
+        viewport_px: [f32; 2],
+        lift: f32,
+    ) -> GlyphImmediates {
+        GlyphImmediates {
+            cursor,
+            viewport_px,
+            slot_px: self.slot_px,
+            uv_size: self.uv_size,
+            slot_offset: self.slot_offset,
+            lift,
+            pad: [0.0; 3],
+        }
+    }
+
+    /// The `glyph_fx.wgsl` immediates of one effect draw.
+    fn fx_immediates(
+        self,
+        heat: [f32; 4],
+        viewport_px: [f32; 2],
+        cell_px: [f32; 2],
+    ) -> FxImmediates {
+        FxImmediates {
+            heat,
+            viewport_px,
+            cell_px,
+            uv_size: self.uv_size,
+            slot_px: self.slot_px,
+            slot_offset: self.slot_offset,
+            pad: [0.0; 2],
+        }
+    }
 }
 
 /// The frame's draw plan: three instance buffers and the steps reading ranges
@@ -412,7 +501,7 @@ impl Plan {
     }
 
     /// Moves the scratch list of `plane` into `glyphs` and records its draw.
-    fn glyph_draw(&mut self, plane: Plane, cursor: CursorBlock, uv_size: [f32; 2]) {
+    fn glyph_draw(&mut self, plane: Plane, cursor: CursorBlock, quad: SlotQuad, lift: f32) {
         let list = match plane {
             Plane::Mask => &self.mask,
             Plane::Color => &self.color,
@@ -427,7 +516,8 @@ impl Plan {
             plane,
             range,
             cursor,
-            uv_size,
+            quad,
+            lift,
         });
     }
 }
@@ -1521,14 +1611,24 @@ impl Renderer {
     /// here with `None` means "drawing glyphs without ever saying the scale";
     /// rather than invent a @1x atlas the frame fails ([`GpuError::NoAtlas`]).
     ///
-    /// The quad's size is the **frame's** cell (`Frame::clear`), the uv size
-    /// the **atlas's**. They are born from the same scale; the only window
-    /// where they differ is the one frame between a scale change and the
-    /// geometry event, and there the glyph stretches, it does not break. The
-    /// quad's size cannot be taken from the atlas: the position
-    /// (`GlyphCell::pos`) and the background under it come from the frame's
-    /// cell, and tying only the size to the atlas would shift the glyph out of
-    /// its cell.
+    /// The quad's position is the **frame's** cell (`GlyphCell::pos`, the
+    /// background under it comes from the same cell), its size and uv size
+    /// the **atlas's slot** ([`SlotQuad`], 052). They are born from the same
+    /// scale; the only window where they differ is the one frame between a
+    /// scale change and the geometry event, and there the glyph lands a
+    /// little off, it does not break.
+    ///
+    /// **The overflow is not clipped** (052 R3.1): below `1` a slot reaches
+    /// [`SlotQuad::overflow`] pixels above its cell, and the surface's
+    /// viewport starts at its top row — the top row's accents would be cut.
+    /// So the lists are drawn in a viewport raised by `lift` (the overflow,
+    /// at most `max_lift`: the dock may rise only to its band's top) above
+    /// `origin_y` and taller by as much ([`Op::Lifted`]: the bottom edge stays
+    /// put), the shader adds `lift` back and a glyph lands on the same window
+    /// pixel. The viewport goes back to `origin_y` after the draw, so
+    /// the caller's later lists are untouched. At `>= 1` the lift is zero and
+    /// no viewport op is pushed: the plan is today's.
+    #[allow(clippy::too_many_arguments)] // the surface's origin and lift cap are one viewport
     fn glyph_draws(
         &self,
         plan: &mut Plan,
@@ -1537,6 +1637,8 @@ impl Renderer {
         clusters: &Clusters,
         rules: &[RuleCell],
         cursor: CursorBlock,
+        origin_y: f32,
+        max_lift: f32,
     ) -> Result<(), GpuError> {
         if glyphs.is_empty() && rules.is_empty() {
             return Ok(());
@@ -1562,14 +1664,25 @@ impl Renderer {
             &mut plan.mask,
             &mut plan.color,
         );
-        let uv_size = uv_size(atlas);
+        let quad = SlotQuad::of(atlas);
+        let lift = quad.overflow().min(max_lift).max(0.0);
+        // Nothing to draw (the colour list counts only with its texture),
+        // nothing to lift.
+        let drawn = !plan.mask.is_empty() || (color.is_some() && !plan.color.is_empty());
+        let lifted = drawn && lift > 0.0;
+        if lifted {
+            plan.ops.push(Op::Lifted { y: origin_y, lift });
+        }
         // The colour list can only be non-empty once its texture exists (the
         // upload created it); the check keeps a missing texture a skipped
         // draw rather than the mask texture read as colour.
         if color.is_some() {
-            plan.glyph_draw(Plane::Color, cursor, uv_size);
+            plan.glyph_draw(Plane::Color, cursor, quad, lift);
         }
-        plan.glyph_draw(Plane::Mask, cursor, uv_size);
+        plan.glyph_draw(Plane::Mask, cursor, quad, lift);
+        if lifted {
+            plan.ops.push(Op::Viewport(origin_y));
+        }
         Ok(())
     }
 
@@ -1590,13 +1703,16 @@ impl Renderer {
     /// to its inverted form on the hand-over frame; in insert mode the caret
     /// leaves the typed letter long before the effect ends.
     ///
-    /// **In its own viewport, not the dock's**: the dock's viewport starts at
-    /// the band's top and clips above it, while `drop` falls from above the
-    /// cell, `sublime` floats up and there is only a thin breathing margin
-    /// above the input row — the first frames showed half-cut letters. The
-    /// effect is drawn in window space (positions moved down by `origin_y`)
-    /// and may spill over the hairline by its pad (`glyph_fx.wgsl` →
-    /// `FX_PAD`); the dock's viewport is restored after the draw.
+    /// **In its own viewport, not the dock's**: the dock's glyph viewport
+    /// starts no higher than the band's top and clips above it (the static
+    /// glyphs must stay inside their band, 052 R3.2), while `drop` falls from
+    /// above the cell, `sublime` floats up and there is only a thin breathing
+    /// margin above the input row — the first frames showed half-cut letters.
+    /// The effect is drawn in window space (positions moved down by
+    /// `origin_y`) and may spill over the hairline by its pad (`glyph_fx.wgsl`
+    /// → `FX_PAD`); the dock's viewport at `origin_y` is restored after the
+    /// draw. At `t = 1` an arrival equals its static glyph as long as the
+    /// glyph's overflow fits the breathing margin above the input row.
     #[allow(clippy::too_many_arguments)] // the cluster table is half of `cells`
     fn fx_draw(
         &self,
@@ -1640,7 +1756,7 @@ impl Renderer {
         plan.ops.push(Op::Fx {
             range,
             heat,
-            uv_size: uv_size(atlas),
+            quad: SlotQuad::of(atlas),
             origin_y,
         });
         Ok(())
@@ -1703,10 +1819,20 @@ impl Renderer {
     /// in a settled frame the caret's screen row is always inside the
     /// content; passing the real one would paint the letter under a caret
     /// sliding over the band in the ground colour — an unreadable cell for a
-    /// caret that is not drawn. **After the grid, before the dock**: the
-    /// grid's lists never enter the band (all `y ≥ origin_px`), the only thing
-    /// that does is the offset-exempt caret, so the band is drawn after it;
-    /// and the dock's opaque ground must be drawn last.
+    /// caret that is not drawn. **Interleaved with the grid** (052 R3.1): the
+    /// band and the grid are two parts of the same history and the seam
+    /// between them must not cut a letter, so the order is grid ground →
+    /// search → selection → caret → **band ground** → band search → **grid
+    /// glyphs** → **band glyphs**. Below `1` a glyph's slot reaches past its
+    /// cell, so the grid's top row's accent rises into the band and the
+    /// band's bottom row's tail falls into the grid; each lands on the other
+    /// surface's ground because every ground is drawn first. The
+    /// offset-exempt caret is the one grid list that enters the band and it
+    /// stays **under** the band's ground (`caret_stays_under_the_fill_band`).
+    /// The glyph lists are drawn in viewports raised by the slot's overflow
+    /// ([`Renderer::glyph_draws`]), or the top row's accent would be clipped
+    /// at the surface's origin. The dock's opaque ground is still drawn last
+    /// and covers whatever spills into it.
     ///
     /// **Dock** — the second coordinate space, **last**. Its own viewport is
     /// structural: the dock must be exempt from the offset and building the
@@ -1728,6 +1854,10 @@ impl Renderer {
     /// push time and a motion frame does not re-push them; the layout is
     /// bottom-aligned, so while the band grows and shrinks the text stays put
     /// and only the band's top moves. At rest the two are the same number.
+    /// The dock's glyph viewport may rise above the layout's top only up to
+    /// the band's top (052 R3.2): an accent spilling into the breathing
+    /// margin shows, one spilling past the band is cut — the dock is its own
+    /// panel, no scissor needed.
     /// Ground and separator first: the dock's own backgrounds (highlight
     /// ranges, caret) must come over them. **A growing band clips**: if the
     /// layout spills over the band's current top (the band has not risen yet),
@@ -1766,8 +1896,11 @@ impl Renderer {
         plan.clear();
         // Grid: the offset lives in one viewport. Command marks first (sprites,
         // degenerate inversion rectangle), then ground → search → selection →
-        // caret → glyphs.
-        plan.ops.push(Op::Viewport(frame.origin_px()));
+        // caret; the grid's glyphs wait for the band's ground (052 R3.1).
+        let origin = frame.origin_px();
+        let fill_origin = frame.fill_origin_px();
+        let free = f32::INFINITY;
+        plan.ops.push(Op::Viewport(origin));
         self.glyph_draws(
             plan,
             atlas,
@@ -1775,6 +1908,8 @@ impl Renderer {
             frame.clusters(),
             frame.stripes(),
             CursorBlock::default(),
+            origin,
+            free,
         )?;
         plan.quads(frame.bg_instances());
         plan.search(frame, false);
@@ -1788,6 +1923,18 @@ impl Renderer {
             frame.caret_core(),
             frame.caret_sdf(),
         );
+        // Fill band: the third coordinate space, above the grid; search but no
+        // selection, no caret slot, so the inversion rectangle is degenerate.
+        // Its ground comes after the grid's caret (the caret stays under it)
+        // and before both surfaces' glyphs (ink spilling across the seam stays
+        // on top of the other surface's ground).
+        let band = frame.fill_rows() != 0;
+        if band {
+            plan.ops.push(Op::Viewport(fill_origin));
+            plan.quads(frame.fill_bg());
+            plan.search(frame, true);
+            plan.ops.push(Op::Viewport(origin));
+        }
         self.glyph_draws(
             plan,
             atlas,
@@ -1795,13 +1942,11 @@ impl Renderer {
             frame.clusters(),
             frame.rules(),
             *frame.cursor_block(),
+            origin,
+            free,
         )?;
-        // Fill band: the third coordinate space, above the grid; search but no
-        // selection, no caret slot, so the inversion rectangle is degenerate.
-        if frame.fill_rows() != 0 {
-            plan.ops.push(Op::Viewport(frame.fill_origin_px()));
-            plan.quads(frame.fill_bg());
-            plan.search(frame, true);
+        if band {
+            plan.ops.push(Op::Viewport(fill_origin));
             self.glyph_draws(
                 plan,
                 atlas,
@@ -1809,6 +1954,8 @@ impl Renderer {
                 frame.clusters(),
                 frame.fill_rules(),
                 CursorBlock::default(),
+                fill_origin,
+                free,
             )?;
         }
         // Dock: last, with two origins.
@@ -1819,6 +1966,11 @@ impl Renderer {
             plan.quads(&frame.dock_ground(viewport_px[0]));
             plan.ops.push(Op::Viewport(origin_y));
             let clipped = band_y > origin_y;
+            // The dock's glyphs may rise above the layout's top only up to the
+            // band's (052 R3.2): the dock is a separate panel and its ink must
+            // not leave it. In a clipped frame the band's top is below the
+            // layout's and the scissor does the clipping.
+            let dock_lift = (origin_y - band_y).max(0.0);
             let band = Op::Scissor(scissor_below(band_y, viewport_px));
             let open = Op::Scissor(scissor_below(0.0, viewport_px));
             if clipped {
@@ -1870,6 +2022,8 @@ impl Renderer {
                 frame.dock_clusters(),
                 glyph_rules,
                 *frame.cursor_block(),
+                origin_y,
+                dock_lift,
             )?;
             self.fx_draw(plan, atlas, arrivals, frame.dock_clusters(), heat, origin_y)?;
             self.glyph_draws(
@@ -1879,6 +2033,8 @@ impl Renderer {
                 frame.dock_clusters(),
                 late_rules,
                 *frame.cursor_block(),
+                origin_y,
+                dock_lift,
             )?;
             if clipped {
                 plan.ops.push(open);
@@ -1985,6 +2141,10 @@ impl Renderer {
                     Op::Viewport(y) => {
                         pass.set_viewport(0.0, *y, viewport_px[0], viewport_px[1], 0.0, 1.0);
                     }
+                    Op::Lifted { y, lift } => {
+                        let h = viewport_px[1] + lift;
+                        pass.set_viewport(0.0, y - lift, viewport_px[0], h, 0.0, 1.0);
+                    }
                     Op::Scissor([x, y, w, h]) => pass.set_scissor_rect(*x, *y, *w, *h),
                     Op::Quads(range) => {
                         let Some(buffer) = state.quads.as_ref() else {
@@ -2029,7 +2189,8 @@ impl Renderer {
                         plane,
                         range,
                         cursor,
-                        uv_size,
+                        quad,
+                        lift,
                     } => {
                         let atlas = state.atlas.as_ref();
                         let (pipeline, texture) = match plane {
@@ -2039,13 +2200,10 @@ impl Renderer {
                         let (Some(texture), Some(buffer)) = (texture, state.glyphs.as_ref()) else {
                             continue;
                         };
-                        let glyph_imm = GlyphImmediates {
-                            cursor: *cursor,
-                            viewport_px,
-                            cell_px,
-                            uv_size: *uv_size,
-                            pad: [0.0; 2],
-                        };
+                        // A lifted list's viewport is taller by the lift
+                        // (`Op::Lifted`); the NDC scale must match it.
+                        let tall = [viewport_px[0], viewport_px[1] + lift];
+                        let glyph_imm = quad.glyph_immediates(*cursor, tall, *lift);
                         pass.set_pipeline(pipeline);
                         pass.set_bind_group(0, &texture.bind, &[]);
                         pass.set_vertex_buffer(0, buffer.slice(..));
@@ -2055,20 +2213,14 @@ impl Renderer {
                     Op::Fx {
                         range,
                         heat,
-                        uv_size,
+                        quad,
                         origin_y,
                     } => {
                         let (Some(bind), Some(buffer)) = (fx_bind.as_ref(), state.fx.as_ref())
                         else {
                             continue;
                         };
-                        let fx_imm = FxImmediates {
-                            heat: *heat,
-                            viewport_px,
-                            cell_px,
-                            uv_size: *uv_size,
-                            pad: [0.0; 2],
-                        };
+                        let fx_imm = quad.fx_immediates(*heat, viewport_px, cell_px);
                         pass.set_viewport(0.0, 0.0, viewport_px[0], viewport_px[1], 0.0, 1.0);
                         pass.set_pipeline(&self.gpu.glyph_fx);
                         pass.set_bind_group(0, bind, &[]);
