@@ -34,7 +34,8 @@ pub(crate) trait SlotUpload {
 }
 
 /// A slot's byte length and row pitch for `plane`: mask `w*h` / `w`, colour
-/// `4*w*h` / `4*w`.
+/// `4*w*h` / `4*w`. `metrics` is the atlas's **slot** metric
+/// (`Atlas::slot_metrics`, 052), not the grid's.
 ///
 /// One copy: wgpu's `bytes_per_row` comes from here, and if it drifted from
 /// the buffer the GPU would read past a short buffer — silently. The lengths come from
@@ -64,7 +65,9 @@ pub(crate) fn glyph_lists(
     mask: &mut Vec<GlyphInstance>,
     color: &mut Vec<GlyphInstance>,
 ) {
-    let metrics = atlas.metrics();
+    // The **slot** metric (052): uploads are slot-sized; the grid's cell is
+    // read only for the wide glyph's second quad ([`fan`]).
+    let metrics = atlas.slot_metrics();
     let (tw, th) = atlas.texture_px();
     mask.clear();
     color.clear();
@@ -140,7 +143,9 @@ pub(crate) fn fx_list(
     clusters: &Clusters,
     out: &mut Vec<FxInstance>,
 ) {
-    let metrics = atlas.metrics();
+    // The **slot** metric (052): uploads are slot-sized; the grid's cell is
+    // read only for the wide glyph's second quad ([`fan`]).
+    let metrics = atlas.slot_metrics();
     let (tw, th) = atlas.texture_px();
     let inv = (1.0 / f32::from(tw), 1.0 / f32::from(th));
     out.clear();
@@ -197,6 +202,10 @@ pub(crate) struct Part {
 /// the sink would keep the borrow alive across `draw` and the first frame with
 /// a glyph would hit `BorrowMutError`). Here the atlas is already borrowed.
 ///
+/// `metrics` is the atlas's **slot** metric (the uploads' size, 052); the
+/// right half's quad steps by the **grid's** cell, read from
+/// `Atlas::metrics` here.
+///
 /// Every surface gets it for free: [`glyph_lists`] runs per list (stripes,
 /// grid, fill band, dock) and the typing effects fan out through here too.
 /// 017's lesson — a surface must earn everything derived from the grid on its
@@ -210,6 +219,9 @@ pub(crate) fn fan(
     clusters: &Clusters,
 ) -> [Option<Part>; 2] {
     let want = if glyph.wide { Half::Left } else { Half::Whole };
+    // The second quad steps by the **grid's** cell, not the slot (052): the
+    // right half is the next column.
+    let cell_w = atlas.metrics().cell_px.0;
     // **The cluster reaches the atlas here** (035 Karar 4B): interning needs
     // the atlas's borrow and the sink cannot take it (023). Both halves come
     // from the same sprite. Falling back to the base character is not written
@@ -260,7 +272,7 @@ pub(crate) fn fan(
     [
         Some(first),
         Some(Part {
-            pos: [glyph.pos[0] + f32::from(metrics.cell_px.0), glyph.pos[1]],
+            pos: [glyph.pos[0] + f32::from(cell_w), glyph.pos[1]],
             uv0: uv1,
             plane: right.plane,
             half: right.half,
