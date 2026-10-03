@@ -601,11 +601,25 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
 /// Reads the layout and deletes it — before anything is replayed (module doc). A missing or
 /// unreadable layout is `None`; one that does not parse is `None` and takes its histories with
 /// it. Histories the layout does not name are swept.
-pub fn take(lock: &Lock) -> Option<Saved> {
+///
+/// Without `histories` (`restore_windows = "layout"`) every history is swept **unread** and no
+/// returned pane claims one: a user who said the scrollback should not come back must not see an
+/// earlier `"all"` save's once more (053 phase-4).
+pub fn take(lock: &Lock, histories: bool) -> Option<Saved> {
     let path = lock.dir.join(LAYOUT);
     let text = fs::read_to_string(&path);
     let _ = fs::remove_file(&path);
-    let saved = text.ok().as_deref().and_then(Saved::parse);
+    let mut saved = text.ok().as_deref().and_then(Saved::parse);
+    if !histories {
+        for pane in saved
+            .iter_mut()
+            .flat_map(|saved| &mut saved.windows)
+            .flat_map(|window| &mut window.tabs)
+            .flat_map(|tab| &mut tab.panes)
+        {
+            pane.history = false;
+        }
+    }
     let keep = saved.as_ref().map(kept_histories).unwrap_or_default();
     sweep(lock, &keep);
     saved
@@ -894,7 +908,7 @@ mod tests {
         }
 
         // `take` returns the layout and deletes it; the histories wait for `history`.
-        assert_eq!(take(&lock), Some(saved));
+        assert_eq!(take(&lock, true), Some(saved));
         assert!(!dir.join(LAYOUT).exists());
         assert_eq!(
             history(&lock, &id(A)).as_deref(),
@@ -903,7 +917,7 @@ mod tests {
         assert_eq!(history(&lock, &id(A)), None, "read once");
         assert_eq!(history(&lock, &id(B)), None);
         // Without a layout, the histories nobody read are orphans and go with the next take.
-        assert_eq!(take(&lock), None);
+        assert_eq!(take(&lock, true), None);
         assert_eq!(names(&dir), vec!["lock".to_owned()]);
 
         // `clear` leaves only the lock.
@@ -925,7 +939,7 @@ mod tests {
         // The next save wrote its histories and died before the layout's rename.
         write_histories(&lock, &[(id(A), b"second".to_vec())]).expect("histories");
         fs::write(lock.dir().join("layout.tmp"), b"bateri-session 1\nW").expect("temporary");
-        assert_eq!(take(&lock), Some(first));
+        assert_eq!(take(&lock, true), Some(first));
         assert!(!lock.dir().join("layout.tmp").exists(), "temporary swept");
         assert_eq!(history(&lock, &id(A)).as_deref(), Some(&b"second"[..]));
     }
@@ -936,8 +950,47 @@ mod tests {
         let lock = lock(&root.0.join("s")).expect("lock");
         save(&lock, &rich(), &[(id(A), b"x".to_vec())]).expect("save");
         fs::write(lock.dir().join(LAYOUT), b"bateri-session 9\n").expect("overwrite");
-        assert_eq!(take(&lock), None);
+        assert_eq!(take(&lock, true), None);
         assert_eq!(names(lock.dir()), vec!["lock".to_owned()]);
+    }
+
+    #[test]
+    fn a_layout_only_take_deletes_the_histories_unread() {
+        let root = TempRoot::new("restore-layout-only");
+        let lock = lock(&root.0.join("s")).expect("lock");
+        let saved = rich();
+        assert!(
+            saved
+                .windows
+                .iter()
+                .flat_map(|window| &window.tabs)
+                .flat_map(|tab| &tab.panes)
+                .any(|pane| pane.history),
+            "the fixture claims a history"
+        );
+        save(&lock, &saved, &[(id(A), b"secret".to_vec())]).expect("save");
+        let taken = take(&lock, false).expect("the layout still comes back");
+        assert_eq!(names(lock.dir()), vec!["lock".to_owned()]);
+        assert!(
+            taken
+                .windows
+                .iter()
+                .flat_map(|window| &window.tabs)
+                .flat_map(|tab| &tab.panes)
+                .all(|pane| !pane.history)
+        );
+        assert_eq!(history(&lock, &id(A)), None);
+        // Everything but the history bit is the save's.
+        let mut expected = saved;
+        for pane in expected
+            .windows
+            .iter_mut()
+            .flat_map(|window| &mut window.tabs)
+            .flat_map(|tab| &mut tab.panes)
+        {
+            pane.history = false;
+        }
+        assert_eq!(taken, expected);
     }
 
     #[test]
@@ -954,6 +1007,6 @@ mod tests {
         )
         .expect("empty save");
         assert_eq!(names(lock.dir()), vec!["lock".to_owned()]);
-        assert_eq!(take(&lock), None);
+        assert_eq!(take(&lock, true), None);
     }
 }

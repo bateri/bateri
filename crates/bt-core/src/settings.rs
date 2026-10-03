@@ -12,8 +12,10 @@
 //! invented — what to do is the caller's decision (defaults at startup, nothing
 //! on a live reload). If it parses, every key takes either its valid value or
 //! its default; a value that isn't accepted leaves a [`Diagnostic`].
-//! **The one exception is `clipboard.osc52`:** for a value that isn't accepted it
-//! takes not the default (on) but off (the doc of [`Settings::parse_keeping`]).
+//! **The exceptions are `clipboard.osc52`, `remote.integration` and
+//! `terminal.restore_windows`:** for a value that isn't accepted they take not
+//! the default but the safe side — off, off and `"layout"` (the doc of
+//! [`Settings::parse_keeping`]).
 //! **An unknown key and section are silently ignored:** a later set's key
 //! (`[motion] intensity`) mustn't produce a diagnostic in today's version.
 //!
@@ -1438,7 +1440,8 @@ impl Settings {
     pub const TEMPLATE: &str = r##"# bateri settings. Changes apply as soon as you save this file.
 # A key you delete goes back to its default. Values are case-sensitive; one that
 # is not understood leaves its key alone and says so under the title — except
-# clipboard.osc52, which turns off instead.
+# clipboard.osc52 and remote.integration, which turn off instead, and
+# terminal.restore_windows, which falls to "layout".
 
 [terminal]
 # 0 to 100000. Lines of history kept above the screen.
@@ -1668,11 +1671,15 @@ stats_interval = 3
     /// intent is clear). If a section has the wrong type (`terminal = 5`) all of
     /// the section's keys count as not accepted.
     ///
-    /// **The one exception is `clipboard.osc52`:** a value that isn't accepted
-    /// takes `"off"`, not `fallback`'s, even when the section has the wrong type.
-    /// The rule's reason was the application that can't be undone and turning
-    /// OSC 52 off is reversible; the opposite, a turn-off mistyped as `"of"`
-    /// silently keeping the clipboard on, is not (`discussion.md` → Karar 5).
+    /// **The exceptions are `clipboard.osc52`, `remote.integration` and
+    /// `terminal.restore_windows`:** a value that isn't accepted takes the safe
+    /// side — `"off"`, `false` and `"layout"` —, not `fallback`'s, even when the
+    /// section has the wrong type. The rule's reason was the application that
+    /// can't be undone and turning OSC 52 off is reversible; the opposite, a
+    /// turn-off mistyped as `"of"` silently keeping the clipboard on, is not
+    /// (`discussion.md` → Karar 5). The same holds for writing to a server (048)
+    /// and for writing the scrollback to disk (053): `"layout"` still brings the
+    /// windows back, the visible half.
     pub fn parse_keeping(text: &str, fallback: &Settings) -> Result<Parsed, Diagnostic> {
         let doc = document(text)?;
         let mut parsed = Parsed {
@@ -1756,13 +1763,15 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                // `fallback` is deliberately not read, as for `osc52`: a value
+                // that isn't accepted keeps the layout and writes no scrollback.
                 if let Some(item) = terminal.get("restore_windows") {
                     parsed.settings.restore_windows = named_enum(
                         text,
                         item,
                         "terminal.restore_windows",
                         RestoreWindows::NAMES,
-                        fallback.restore_windows,
+                        RestoreWindows::Layout,
                         &mut parsed.diagnostics,
                     );
                 }
@@ -1774,7 +1783,7 @@ stats_interval = 3
                 parsed.settings.caret = fallback.caret;
                 parsed.settings.blink_interval = fallback.blink_interval;
                 parsed.settings.confirm_close = fallback.confirm_close;
-                parsed.settings.restore_windows = fallback.restore_windows;
+                parsed.settings.restore_windows = RestoreWindows::Layout;
             }
             None => {}
         }
@@ -3058,8 +3067,9 @@ fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagn
 /// A value that isn't accepted falling to `fallback`
 /// ([`Settings::parse_keeping`]) is right for all of these keys, because the
 /// symptom of a wrong guess is visible: the cursor's shape, its glide, the
-/// scroll step. The one exception is `osc52` and the caller sets it up by
-/// passing `Osc52::Off` — there a wrong guess is silent.
+/// scroll step. The exceptions are `osc52` and `restore_windows` and the caller
+/// sets them up by passing `Osc52::Off` / `RestoreWindows::Layout` — there a
+/// wrong guess is silent.
 ///
 /// **Case-sensitive**: `"Hollow"` is a typo and silently accepting it would
 /// mislead the user.
@@ -3795,10 +3805,16 @@ mod tests {
         assert_eq!(parsed.settings.scrollback, SCROLLBACK_MAX);
 
         // The section has the wrong type: all of the section's keys count as not
-        // accepted.
+        // accepted — `restore_windows` takes its safe side, not the given one.
         let parsed = Settings::parse_keeping("terminal = 5\nappearance = 1\n", &current)
             .expect("parseable text");
-        assert_eq!(parsed.settings, current);
+        assert_eq!(
+            parsed.settings,
+            Settings {
+                restore_windows: RestoreWindows::Layout,
+                ..current.clone()
+            }
+        );
         assert_eq!(parsed.diagnostics.len(), 2);
 
         // `parse` is the startup rule: the same text falls to the default.
@@ -3806,7 +3822,10 @@ mod tests {
             Settings::parse("terminal = 5\nappearance = 1\n")
                 .expect("parseable text")
                 .settings,
-            Settings::default()
+            Settings {
+                restore_windows: RestoreWindows::Layout,
+                ..Settings::default()
+            }
         );
     }
 
@@ -4607,7 +4626,7 @@ found 1.5; using 0.1"
     }
 
     #[test]
-    fn restore_windows_is_read_and_a_rejected_value_keeps_its_own_key() {
+    fn restore_windows_is_read_and_a_rejected_value_is_layout() {
         assert_eq!(clean("").restore_windows, RestoreWindows::All);
         for (value, expected) in [
             ("all", RestoreWindows::All),
@@ -4623,6 +4642,7 @@ found 1.5; using 0.1"
             settings,
             Settings {
                 scrollback: 42,
+                restore_windows: RestoreWindows::Layout,
                 ..Settings::default()
             }
         );
@@ -4630,20 +4650,28 @@ found 1.5; using 0.1"
         assert_eq!(
             diagnostic.message,
             "`terminal.restore_windows` must be \"all\", \"layout\" or \"off\", \
-             found \"none\"; using \"all\""
+             found \"none\"; using \"layout\""
         );
-        // At save time the current value stands in, also for a broken section.
-        let current = Settings {
-            restore_windows: RestoreWindows::Off,
-            ..Settings::default()
-        };
-        for text in ["[terminal]\nrestore_windows = 3\n", "terminal = 5\n"] {
-            let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
-            assert_eq!(
-                parsed.settings.restore_windows,
-                RestoreWindows::Off,
-                "{text}"
-            );
+        // A mistyped value is "layout" whatever the current value, also for a
+        // broken section (`osc52`'s precedent): the windows come back, no
+        // scrollback is written.
+        for restore_windows in [RestoreWindows::All, RestoreWindows::Off] {
+            let current = Settings {
+                restore_windows,
+                ..Settings::default()
+            };
+            for text in [
+                "[terminal]\nrestore_windows = \"Off\"\n",
+                "[terminal]\nrestore_windows = 3\n",
+                "terminal = 5\n",
+            ] {
+                let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
+                assert_eq!(
+                    parsed.settings.restore_windows,
+                    RestoreWindows::Layout,
+                    "{text}"
+                );
+            }
         }
     }
 
@@ -4879,7 +4907,13 @@ found 1.5; using 0.1"
     #[test]
     fn section_of_wrong_type_is_diagnosed() {
         let (settings, diagnostic) = rejected("terminal = 5\n");
-        assert_eq!(settings, Settings::default());
+        assert_eq!(
+            settings,
+            Settings {
+                restore_windows: RestoreWindows::Layout,
+                ..Settings::default()
+            }
+        );
         assert_eq!(diagnostic.key, Some("terminal"));
         assert_eq!(diagnostic.line, Some(1));
 

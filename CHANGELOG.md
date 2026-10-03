@@ -14,6 +14,12 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **Windows come back after quitting.** After ⌘Q, an update or a restart,
+  bateri reopens your windows, tabs and splits — each pane in its folder, at
+  its font size and with its scrollback in colour. Shells start fresh; a pane
+  that was on ssh comes back with the `ssh …` line typed and waiting for ⏎.
+  `[terminal] restore_windows` (or Settings › General) chooses `"all"`,
+  `"layout"` (no scrollback is written to disk) or `"off"`.
 - **Letter spacing.** `[font] letter_spacing` in `settings.toml` (or Settings
   › Font) widens or narrows the space between letters, the horizontal twin of
   line spacing — iTerm2's “Horizontal spacing” divided by 100.
