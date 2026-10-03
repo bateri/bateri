@@ -12,7 +12,8 @@
 //! (`preview_cache`), the remote host's load sampling (`remote_stats`), which
 //! ssh connection a remote job rides on and the askpass wire (`ssh_route`), whether
 //! the user's `ssh` gets the remote shell integration (`ssh_wrap`), what an
-//! outside process may ask about one pane's focus (`focus`), the
+//! outside process may ask about one pane's focus (`focus`), the saved
+//! session layout and its file (`restore`), the
 //! process table (`jobs`), the shell's birth (`child`) and file watching
 //! (`watch`).
 //!
@@ -41,6 +42,7 @@ pub mod quote;
 pub mod remote_files;
 pub mod remote_helper;
 pub mod remote_stats;
+pub mod restore;
 pub mod settings;
 pub mod split;
 pub mod ssh_route;
