@@ -581,25 +581,36 @@ pub(crate) fn rule_envelope(top: u16, thickness: u16, cell_h: u16) -> (u16, u16)
 /// The box a glyph is centred in, and the room around it (052 R2.2).
 ///
 /// `advance` is the **centring** box: `cols × cell advance` at the grid's
-/// spacing — the glyph's middle is the middle of its cells. `pad` is where
+/// spacing — the glyph's middle is the middle of its cells. `left` is where
 /// that box starts inside the raster target: the slot is wider than the cell
-/// below `letter_spacing = 1` and the cell sits in its middle. The **bound**
-/// the ink may reach is the box with the pad on both sides ([`Self::bound`]):
+/// below `letter_spacing = 1` and the cell sits at [`slot_offset`]'s whole
+/// pixel — the same number `bt-gpu` subtracts from the quad, for both size
+/// classes (the small class shares the large slot), so a glyph is centred on
+/// the cell the screen actually draws. `pad` is the **fractional** room on
+/// each side, half of the slot's advance minus the cell's; the **bound** the
+/// ink may reach is the box with the pad on both sides ([`Self::bound`]):
 /// one cell → the slot, two cells → `cell + slot`.
 ///
-/// `pad` is `0.0` **exactly** at `letter_spacing >= 1` (`Atlas::glyph_box`
-/// derives it as a difference of two identical products), and then every
-/// formula below is bit for bit today's.
+/// `left` and `pad` are `0.0` **exactly** at `letter_spacing >= 1` (a zero
+/// offset; a difference of two identical products), and then every formula
+/// below is bit for bit today's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct GlyphBox {
     pub(crate) advance: f64,
+    pub(crate) left: f64,
     pub(crate) pad: f64,
 }
 
 impl GlyphBox {
-    /// A box with no room around it: the slot is the box.
+    /// A box with no room around it: the slot is the box. Only the tests and
+    /// the census build one (the gate derives its boxes from the atlas).
+    #[cfg(test)]
     pub(crate) fn unpadded(advance: f64) -> Self {
-        Self { advance, pad: 0.0 }
+        Self {
+            advance,
+            left: 0.0,
+            pad: 0.0,
+        }
     }
 
     /// The same cell's box `cols` columns wide: the centring box grows, the
@@ -607,6 +618,7 @@ impl GlyphBox {
     pub(crate) fn cols(self, cols: u8) -> Self {
         Self {
             advance: self.advance * f64::from(cols.max(1)),
+            left: self.left,
             pad: self.pad,
         }
     }
@@ -634,18 +646,20 @@ impl GlyphBox {
 /// only one of them, the gate would test a placement that will not be drawn.
 ///
 /// `max(0.0)` is the drawing's own rule: a glyph whose advance exceeds the
-/// box **and its pad** sticks to the left edge of the target, because
+/// box **and its offset** sticks to the left edge of the target, because
 /// clipping should happen on the right — the rationale is in the body of
 /// `raster::draw_glyph`. The gate must share it **exactly**, otherwise it
 /// would assume a negative shift and believe the candidate's left side to be
-/// inside the target. With a pad (052) a base-font glyph narrower spaced
-/// lands exactly at `0`: its advance is the slot's and the pad is half the
-/// difference, so it keeps the raster it has at `1`. For two columns the
-/// box is `2 × cell` and the bound `cell + slot`: a wide glyph is centred on
-/// its cells' boundary while its advance fits that bound, and one advancing
-/// wider sticks to the slot's left edge — the gate still checks its ink.
+/// inside the target. With an offset (052) a base-font glyph narrower spaced
+/// lands at `0`: its advance is the slot's and the whole-pixel offset is at
+/// most half the difference, so it keeps the raster it has at `1` — up to
+/// that rounding (under a pixel) right of the cell's fractional centre. For
+/// two columns the box is `2 × cell`: a wide glyph is centred on its cells'
+/// boundary while that does not push it past the slot's left edge, and one
+/// advancing wider sticks to that edge — the gate still checks its ink
+/// against the bound `cell + slot`.
 pub(crate) fn centre_shift(bx: GlyphBox, advance: f64) -> f64 {
-    (bx.pad + (bx.advance - advance) / 2.0).max(0.0)
+    (bx.left + (bx.advance - advance) / 2.0).max(0.0)
 }
 
 /// The font-free body of [`ink_fits_box`]: does a glyph with advance
@@ -814,11 +828,17 @@ pub(crate) fn accept(
     // drawn in the left column instead of across both. Above `1` a glyph that
     // fits the natural cell also fits the spaced one at the centred place.
     // Below `1` the drawing's bound is the slot, whose advance **is** the
-    // natural one and whose pad puts the centred glyph exactly where this
-    // question measures it, so the answer is the same up to the slot's whole
-    // pixel; what does not fit the narrow cell spills into the neighbours,
-    // which is what the slot is for (052).
-    if ink_fits_placed(GlyphBox::unpadded(natural_advance), advance, ink) {
+    // natural one; the box is centred where the drawing puts it (the cell's
+    // whole-pixel `left`), so the question measures the drawn placement.
+    // What does not fit the narrow cell spills into the neighbours, which is
+    // what the slot is for (052). At `>= 1` `left` and `pad` are zero and
+    // this is the unpadded natural box, bit for bit.
+    let natural_box = GlyphBox {
+        advance: natural_advance - 2.0 * cell.pad,
+        left: cell.left,
+        pad: cell.pad,
+    };
+    if ink_fits_placed(natural_box, advance, ink) {
         return Some(Accepted {
             font: candidate,
             glyph,

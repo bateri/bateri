@@ -348,9 +348,10 @@ pub struct Atlas {
     /// inside it at `rules::slot_offset`, and a glyph that does not fit the
     /// narrow cell keeps its full size and overflows into the neighbours.
     slot_metrics: Metrics,
-    /// Where the grid cell starts inside the slot, horizontally, as a
-    /// **fractional** pad: half of the slot's advance minus the cell's — the
-    /// pad of [`rules::GlyphBox`] for the large class. `0.0` exactly at
+    /// The **fractional** room on each side of the grid cell inside the slot:
+    /// half of the slot's advance minus the cell's — the pad of
+    /// [`rules::GlyphBox`] for the large class (the gate's bound; the
+    /// centring starts at the whole-pixel [`Atlas::slot_offset`]). `0.0` exactly at
     /// `letter_spacing >= 1` (a difference of two identical products).
     pad: f64,
     /// The small class's twin of [`Atlas::pad`], from the small face's own
@@ -695,10 +696,15 @@ impl Atlas {
     /// and the font's own advance — the inputs of the fallback gate and the
     /// drawing, per class.
     fn glyph_box(&self, size: SizeClass) -> (rules::GlyphBox, f64) {
+        // The cell's left edge in the slot is where `bt-gpu` puts it — the
+        // whole-pixel offset, for the small class too: its glyphs go into the
+        // large slot and the same quad (code review of 052).
+        let left = f64::from(self.slot_offset().0);
         match size {
             SizeClass::Normal => (
                 rules::GlyphBox {
                     advance: self.cell_advance,
+                    left,
                     pad: self.pad,
                 },
                 self.natural_advance,
@@ -706,6 +712,7 @@ impl Atlas {
             SizeClass::Small => (
                 rules::GlyphBox {
                     advance: self.context_advance,
+                    left,
                     pad: self.context_pad,
                 },
                 self.natural_context_advance,
@@ -5928,12 +5935,13 @@ mod tests {
 
     /// A wide glyph's two halves are cut at the split line (052 R2.1): their
     /// inks are disjoint and together they are the one-piece raster, pixel
-    /// for pixel; the glyph is centred on the boundary of its two cells when
-    /// its advance fits `cell + slot`, otherwise it sticks to the slot's left
-    /// edge (`rules::centre_shift`'s floor) with its ink still inside.
+    /// for pixel; the glyph is centred on the boundary of its two cells (at
+    /// the cell's whole-pixel place in the slot) when that keeps it inside
+    /// the slot's left edge, otherwise it sticks to that edge
+    /// (`rules::centre_shift`'s floor) with its ink still inside.
     ///
-    /// Two spacings, one per branch on macOS: the fixture (`.LastResort`)
-    /// advances wider than `cell + slot` at `0.7` and narrower at `0.85`.
+    /// Both branches on macOS (the fixture is `.LastResort`): `0.7` sticks to
+    /// the edge at both scales, `0.85@2x` is centred.
     #[test]
     fn wide_halves_partition_the_glyph() {
         for (scale, letter) in [(1.0, 0.7), (2.0, 0.7), (1.0, 0.85), (2.0, 0.85)] {
@@ -6013,16 +6021,19 @@ mod tests {
             }
             assert!(inked, "@{scale}x: the wide glyph drew nothing");
             // The centring: the middle of the advance box is the middle of
-            // the two cells, unless the advance exceeds the bound.
+            // the two cells — at the cell's whole-pixel place in the slot,
+            // the one the GPU draws — unless that pushes the glyph past the
+            // slot's left edge.
             let pair = bx.cols(2);
             let advance = Backend::advance(&alt.font, alt.glyph);
             let shift = rules::centre_shift(pair, advance);
-            if advance <= pair.bound() {
+            assert_eq!(bx.left, f64::from(a.slot_offset().0));
+            if pair.left + (pair.advance - advance) / 2.0 >= 0.0 {
                 let mid = shift + advance / 2.0;
                 assert!(
-                    (mid - (bx.pad + bx.advance)).abs() < 1e-9,
+                    (mid - (bx.left + bx.advance)).abs() < 1e-9,
                     "@{scale}x ls {letter}: the glyph's middle {mid} is not the cells' {}",
-                    bx.pad + bx.advance
+                    bx.left + bx.advance
                 );
             } else {
                 assert_eq!(

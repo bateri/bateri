@@ -80,10 +80,11 @@ pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,
     CURSOR_RADIUS_RANGE, CaretShape, CaretStyle, Changes, ConfirmClose, CursorBlink, CursorMotion,
     Diagnostic, DownloadConflict, Erase, FontOptions, HostMark, HostRule, Keypress,
-    LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MAX_LETTER_SPACING, MAX_LINE_HEIGHT, Parsed,
-    PreviewKeep, ReduceMotion, RemoteFiles, RemoteStatsMode, RemoteStatsSettings, SCROLLBACK_MAX,
-    SIZE_UNITS, STATS_INTERVAL_RANGE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration,
-    SmoothScroll, UnfocusedCaret, bare_host, expand_home, format_size, parse_size,
+    LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MAX_LETTER_SPACING, MAX_LINE_HEIGHT, MIN_SPACING,
+    Parsed, PreviewKeep, ReduceMotion, RemoteFiles, RemoteStatsMode, RemoteStatsSettings,
+    SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE, SYSTEM_THEME, Settings, SettingsEdit,
+    ShellIntegration, SmoothScroll, UnfocusedCaret, bare_host, expand_home, format_size,
+    parse_size,
 };
 pub use shell::{
     ButtonState, DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor,
