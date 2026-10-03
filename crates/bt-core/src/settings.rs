@@ -366,6 +366,41 @@ impl ConfirmClose {
     }
 }
 
+/// `[terminal] restore_windows`: what comes back when bateri opens again after
+/// quitting (053 Karar 5) — the windows, tabs and splits, and with them each
+/// pane's scrollback.
+///
+/// Read at quit and at launch only, from the current settings — the precedent
+/// of [`ConfirmClose`]: it **doesn't enter** `TerminalOptions` and [`Changes`].
+/// The unusable-file value is [`RestoreWindows::Layout`]
+/// ([`Settings::for_unusable_file`]): writing the scrollback to disk is the
+/// invisible side effect, the layout is the visible gain.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RestoreWindows {
+    /// The layout and every pane's scrollback.
+    #[default]
+    All,
+    /// The layout only; no scrollback is written to disk.
+    Layout,
+    /// Nothing is written and what is left on disk is deleted.
+    Off,
+}
+
+impl RestoreWindows {
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("all", Self::All),
+        ("layout", Self::Layout),
+        ("off", Self::Off),
+    ];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[terminal] cursor_radius` and `cursor_glow`: the cursor's **drawing**
 /// numbers.
 ///
@@ -1105,6 +1140,9 @@ pub struct Settings {
     /// `[terminal] confirm_close`: when to ask on close ([`ConfirmClose`]).
     /// Doesn't enter `TerminalOptions`.
     pub confirm_close: ConfirmClose,
+    /// `[terminal] restore_windows`: what comes back after quitting
+    /// ([`RestoreWindows`]). Doesn't enter `TerminalOptions`.
+    pub restore_windows: RestoreWindows,
     /// `[remote] hosts`: the remote hosts' mark patterns, in the file's order
     /// (037 Karar 2; matching is [`host_mark`]). Empty by default.
     pub remote_hosts: Vec<HostRule>,
@@ -1152,6 +1190,7 @@ impl Default for Settings {
             erase: Erase::default(),
             shell_integration: ShellIntegration::default(),
             confirm_close: ConfirmClose::default(),
+            restore_windows: RestoreWindows::default(),
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
@@ -1213,6 +1252,7 @@ pub enum SettingsEdit {
     CursorUnfocused(UnfocusedCaret),
     BlinkInterval(f64),
     ConfirmClose(ConfirmClose),
+    RestoreWindows(RestoreWindows),
     Theme(String),
     LightTheme(String),
     DarkTheme(String),
@@ -1295,6 +1335,7 @@ impl SettingsEdit {
                 "terminal.cursor_blink_interval",
             ),
             Self::ConfirmClose(_) => ("terminal", "confirm_close", "terminal.confirm_close"),
+            Self::RestoreWindows(_) => ("terminal", "restore_windows", "terminal.restore_windows"),
             Self::Theme(_) => ("appearance", "theme", "appearance.theme"),
             Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
             Self::DarkTheme(_) => ("appearance", "dark_theme", "appearance.dark_theme"),
@@ -1340,6 +1381,7 @@ impl SettingsEdit {
             Self::CursorBlink(blink) => blink.name().into(),
             Self::CursorUnfocused(unfocused) => unfocused.name().into(),
             Self::ConfirmClose(confirm) => confirm.name().into(),
+            Self::RestoreWindows(restore) => restore.name().into(),
             Self::Osc52(mode) => mode.name().into(),
             Self::CursorMotion(motion) => motion.name().into(),
             Self::ReduceMotion(reduce) => reduce.name().into(),
@@ -1434,6 +1476,12 @@ cursor_blink_interval = 0.5
 # prompt, never closes without asking. Typing exit never asks, and neither do
 # programs left running in the background.
 confirm_close = "running"
+# "all" | "layout" | "off". What comes back when bateri opens again after
+# quitting, an update or a restart: all brings back the windows, tabs and
+# splits with each pane's scrollback, layout brings back the windows without
+# the scrollback (nothing you saw is written to disk), off starts with a
+# single window and deletes what was saved. Shells always start fresh.
+restore_windows = "all"
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
@@ -1582,6 +1630,10 @@ stats_interval = 3
             // 048 R1.3: the file may hold `integration = false`; writing to a
             // server is the unsafe direction of the guess, as the clipboard is.
             remote_integration: false,
+            // 053 Karar 5: the file may hold `restore_windows = "off"` (or
+            // `"layout"`); writing the scrollback to disk is the invisible side
+            // effect, the layout is the visible gain.
+            restore_windows: RestoreWindows::Layout,
             ..Self::default()
         }
     }
@@ -1704,6 +1756,16 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = terminal.get("restore_windows") {
+                    parsed.settings.restore_windows = named_enum(
+                        text,
+                        item,
+                        "terminal.restore_windows",
+                        RestoreWindows::NAMES,
+                        fallback.restore_windows,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("terminal") => {
                 parsed.settings.scrollback = fallback.scrollback;
@@ -1712,6 +1774,7 @@ stats_interval = 3
                 parsed.settings.caret = fallback.caret;
                 parsed.settings.blink_interval = fallback.blink_interval;
                 parsed.settings.confirm_close = fallback.confirm_close;
+                parsed.settings.restore_windows = fallback.restore_windows;
             }
             None => {}
         }
@@ -3479,6 +3542,7 @@ mod tests {
             ("terminal", "cursor_unfocused"),
             ("terminal", "cursor_blink_interval"),
             ("terminal", "confirm_close"),
+            ("terminal", "restore_windows"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -3695,6 +3759,7 @@ mod tests {
             erase: Erase::Recede,
             shell_integration: ShellIntegration::Auto,
             confirm_close: ConfirmClose::Always,
+            restore_windows: RestoreWindows::Off,
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
@@ -4529,15 +4594,70 @@ found 1.5; using 0.1"
     }
 
     #[test]
-    fn unusable_file_closes_osc52_and_the_remote_integration_only() {
+    fn unusable_file_closes_osc52_the_remote_integration_and_the_saved_history_only() {
         assert_eq!(
             Settings::for_unusable_file(),
             Settings {
                 osc52: Osc52::Off,
                 remote_integration: false,
+                restore_windows: RestoreWindows::Layout,
                 ..Settings::default()
             }
         );
+    }
+
+    #[test]
+    fn restore_windows_is_read_and_a_rejected_value_keeps_its_own_key() {
+        assert_eq!(clean("").restore_windows, RestoreWindows::All);
+        for (value, expected) in [
+            ("all", RestoreWindows::All),
+            ("layout", RestoreWindows::Layout),
+            ("off", RestoreWindows::Off),
+        ] {
+            let text = format!("[terminal]\nrestore_windows = \"{value}\"\n");
+            assert_eq!(clean(&text).restore_windows, expected, "{value}");
+        }
+        let (settings, diagnostic) =
+            rejected("[terminal]\nscrollback = 42\nrestore_windows = \"none\"\n");
+        assert_eq!(
+            settings,
+            Settings {
+                scrollback: 42,
+                ..Settings::default()
+            }
+        );
+        assert_eq!(diagnostic.key, Some("terminal.restore_windows"));
+        assert_eq!(
+            diagnostic.message,
+            "`terminal.restore_windows` must be \"all\", \"layout\" or \"off\", \
+             found \"none\"; using \"all\""
+        );
+        // At save time the current value stands in, also for a broken section.
+        let current = Settings {
+            restore_windows: RestoreWindows::Off,
+            ..Settings::default()
+        };
+        for text in ["[terminal]\nrestore_windows = 3\n", "terminal = 5\n"] {
+            let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
+            assert_eq!(
+                parsed.settings.restore_windows,
+                RestoreWindows::Off,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_windows_write_keeps_comments_and_unknown_keys() {
+        let text = "[terminal]\nrestore_windows = \"all\" # keep\nask_twice = true\n";
+        let written = Settings::with_edit(text, &SettingsEdit::RestoreWindows(RestoreWindows::Off))
+            .expect("editable text");
+        assert!(
+            written.contains("restore_windows = \"off\" # keep"),
+            "{written}"
+        );
+        assert!(written.contains("ask_twice = true"), "{written}");
+        assert_eq!(clean(&written).restore_windows, RestoreWindows::Off);
     }
 
     #[test]
@@ -5463,6 +5583,7 @@ cursor = \"spring\"
             SettingsEdit::CursorUnfocused(unfocused) => settings.caret.unfocused = unfocused,
             SettingsEdit::BlinkInterval(seconds) => settings.blink_interval = two(seconds),
             SettingsEdit::ConfirmClose(confirm) => settings.confirm_close = confirm,
+            SettingsEdit::RestoreWindows(restore) => settings.restore_windows = restore,
             SettingsEdit::Theme(name) => settings.theme = name,
             SettingsEdit::LightTheme(name) => settings.light_theme = name,
             SettingsEdit::DarkTheme(name) => settings.dark_theme = name,
@@ -5529,6 +5650,7 @@ cursor = \"spring\"
             SettingsEdit::CursorUnfocused(UnfocusedCaret::Solid),
             SettingsEdit::BlinkInterval(0.75),
             SettingsEdit::ConfirmClose(ConfirmClose::Always),
+            SettingsEdit::RestoreWindows(RestoreWindows::Layout),
             SettingsEdit::Theme("paper".to_owned()),
             SettingsEdit::LightTheme("paper".to_owned()),
             SettingsEdit::DarkTheme("ink".to_owned()),
@@ -6027,6 +6149,13 @@ cursor = \"spring\"
             "terminal",
             "confirm_close",
             |s| s.confirm_close,
+        );
+        check(
+            RestoreWindows::NAMES,
+            RestoreWindows::name,
+            "terminal",
+            "restore_windows",
+            |s| s.restore_windows,
         );
         check(Osc52::NAMES, Osc52::name, "clipboard", "osc52", |s| s.osc52);
         check(

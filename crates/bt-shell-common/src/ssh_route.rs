@@ -3618,6 +3618,7 @@ exit $code
                 shell_marks: false,
                 tab_id: None,
                 hostname: None,
+                replay: None,
             },
             Arc::clone(&wake) as Arc<dyn bt_core::Wake>,
         )
@@ -3755,6 +3756,7 @@ exit $code
                 shell_marks: false,
                 tab_id: None,
                 hostname: None,
+                replay: None,
             },
             Arc::new(crate::child::SilentWake),
         )

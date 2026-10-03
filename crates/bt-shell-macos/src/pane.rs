@@ -42,8 +42,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bt_core::{
-    FontOptions, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
-    SearchStatus, Session, SessionOptions, Settings, TabId, Theme, Wake,
+    FontOptions, InitialInput, RemoteFiles, RemoteTarget, SearchCover, SearchDirection,
+    SearchReport, SearchStatus, Session, SessionOptions, Settings, TabId, Theme, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Pacer, Renderer, Stats, Surface, Waker};
@@ -1633,7 +1633,7 @@ impl TerminalPane {
                 cluster: true,
                 // A timed run always gets `None` from `open_window` (single
                 // window, no ⌘T), so its fixed scripts are unaffected by this.
-                initial_input,
+                initial_input: initial_input.map(InitialInput::run),
                 shell_marks,
                 // The identity is in every window, timed run included (038
                 // Karar 8): the variables read no file and do not move the tokens.
@@ -1642,6 +1642,7 @@ impl TerminalPane {
                 // and OSC 7's named authority count as local. One `gethostname`
                 // per pane; the timed run's tokens do not depend on it.
                 hostname: crate::links::hostname(),
+                replay: None,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );
