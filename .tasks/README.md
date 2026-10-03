@@ -54,6 +54,7 @@
 | 050 | [odak-sorgusu](050-odak-sorgusu/) | 🟢 | 2 phase + kapı tamam — `bateri focus bateri://tab/<UUID>` dış sürece yalnız sorulan pane için GUI açmadan odak ve tam saniyelik `idle` söylüyor, tanınmayan alt komut pencere açmıyor |
 | 051 | [harf-araligi](051-harf-araligi/) | 🟢 | 1 phase + kapı tamam — `[font] letter_spacing` hücreyi fontun aralığının 1–2 katına açıyor, harf ve iki sütunlu karakter genişleyen hücrenin ortasında, ayar penceresinde ve Cmd +/−'da taşınıyor |
 | 052 | [tasan-glyph](052-tasan-glyph/) | 🟢 | 4 phase + kapı tamam — `line_height`/`letter_spacing` `0.5`'e iniyor, yuva hücreden ayrı ve harf kesilmeden komşu hücreye taşıyor, `1.0` tam olarak fontun aralığı |
+| 053 | [oturum-geri-yukleme](053-oturum-geri-yukleme/) | 📐 | yeniden açılışta (Sparkle güncellemesi dahil) pencere, sekme, bölme, odak, dizin, punto, uzak hedef ve renkli geçmiş geri geliyor; sürümlü biçim canlı devrin (Set B) temeli |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
