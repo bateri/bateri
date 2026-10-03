@@ -103,3 +103,6 @@ _Requirements: R1.1, R1.2, R1.3, R1.4, R1.5, R4.1_
   **kullanılamayan dosyada** `"layout"`'u istiyor; değiştirmek bir ürün
   kararı (`osc52` istisnasının üçüncü üyesi olmak) — kullanıcıya sorulacak;
   düzeltme phase-4'ün ayar satırıyla birlikte yapılabilir.
+  **Karar (orkestratör, 2026-10-03): waive reddedildi** — yanlış yazılmış
+  değer `"layout"`'a düşer (kullanıcının niyeti çoğunlukla daha azı; yanlış
+  tahmin görünmeden sırrı diske yazardı). Düzeltme phase-4'ün checklist'inde.
