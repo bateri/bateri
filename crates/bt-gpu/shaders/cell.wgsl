@@ -12,9 +12,16 @@
 // (pos@0, uv0@8, rgba@16).
 //
 // `size` and the uv size are NOT in the instance: every glyph is exactly one
-// cell (fixed slot grid) and both are constant over the frame, so they come as
+// SLOT (fixed slot grid) and both are constant over the frame, so they come as
 // immediates. A side effect is that the layout packs without padding; a
 // `size` field in between would push `rgba` and grow the stride.
+//
+// **The quad is the slot, not the cell** (052): below `line_height` /
+// `letter_spacing = 1` the slot (the glyph's own metric) is larger than the
+// grid cell and the glyph spills into its neighbours. `pos` is still the
+// CELL's corner; the slot's corner is `slot_offset` up and left of it
+// (`bt_atlas::Atlas::slot_offset`). At `>= 1` the two are equal and the
+// offset is zero, i.e. the quad is today's cell.
 
 struct GlyphInstance {
     // The cell's top-left corner, pixels.
@@ -31,11 +38,20 @@ struct GlyphInstance {
 // block (a module has one; both stages share it).
 //
 // **Order follows alignment**: the two `vec4`s first (the `CursorBlock`
-// struct, rect@0 rgba@16), then the `vec2`s: viewport_px@32, cell_px@40,
-// uv_size@48. 56 bytes round up to the struct's 16-byte alignment: size 64.
-// The Rust twin is `crate::renderer::GlyphImmediates`; it embeds
-// `CursorBlock` as is and spells the trailing 8 bytes as an explicit `pad`,
-// pinned by `offset_of`/`size_of` asserts.
+// struct, rect@0 rgba@16), then the `vec2`s: viewport_px@32, slot_px@40,
+// uv_size@48, slot_offset@56, then the `f32` lift@64. 68 bytes round up to the
+// struct's 16-byte alignment: size 80. The Rust twin is
+// `crate::renderer::GlyphImmediates`; it embeds `CursorBlock` as is and
+// spells the trailing 12 bytes as an explicit `pad`, pinned by
+// `offset_of`/`size_of` asserts.
+//
+//   slot_px     = the atlas's slot size (its slot metric), pixels.
+//   slot_offset = where the grid cell sits inside the slot (x, y), pixels:
+//                 the quad starts this much up and left of `pos`.
+//   lift        = how many pixels the viewport was raised above the surface's
+//                 origin so the overflow above the top row is not clipped
+//                 (`crate::renderer::Renderer::plan`); added back here, so a
+//                 glyph lands on the same window pixel. Zero at `>= 1`.
 //
 //   cursor_rect = the caret block's pixel rectangle (x0, y0, x1, y1), top-left
 //                 origin, WINDOW space. Min/max, so the fragment test is two
@@ -53,8 +69,10 @@ struct Immediates {
     cursor_rect: vec4<f32>,
     cursor_rgba: vec4<f32>,
     viewport_px: vec2<f32>,
-    cell_px: vec2<f32>,
+    slot_px: vec2<f32>,
     uv_size: vec2<f32>,
+    slot_offset: vec2<f32>,
+    lift: f32,
 }
 
 var<immediate> imm: Immediates;
@@ -77,7 +95,8 @@ struct Out {
 @vertex
 fn cell_vertex(@builtin(vertex_index) vid: u32, it: GlyphInstance) -> Out {
     let corner = vec2<f32>(f32(vid & 1u), f32(vid >> 1u));
-    let ndc = (it.pos + corner * imm.cell_px) / imm.viewport_px * 2.0 - 1.0;
+    let at = it.pos - imm.slot_offset + corner * imm.slot_px + vec2<f32>(0.0, imm.lift);
+    let ndc = at / imm.viewport_px * 2.0 - 1.0;
     var o: Out;
     // Pixel space starts at the top left, NDC at the bottom left: flip y. The
     // atlas's own y also starts at the top (its rows are uploaded top-down),
@@ -143,8 +162,8 @@ fn cell_fragment(in: Out) -> @location(0) vec4<f32> {
 
 // **Emoji: the colour plane's sibling fragment.** It shares `cell_vertex`
 // VERBATIM (as `caret_fragment` shares `cell_bg_vertex`): only the fragment
-// differs, because the geometry is identical — a full one-cell quad, the same
-// `cell_px` and `uv_size`, the same 32-byte `GlyphInstance`.
+// differs, because the geometry is identical — a full one-slot quad, the same
+// `slot_px` and `uv_size`, the same 32-byte `GlyphInstance`.
 //
 // The texture is `Rgba8UnormSrgb`: the hardware DECODES sRGB when sampling, so
 // the value here is linear, in the space the target (`Bgra8UnormSrgb`)

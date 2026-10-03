@@ -529,6 +529,18 @@ pub(crate) fn slot_offset(slot: Metrics, cell: Metrics) -> (u16, u16) {
     )
 }
 
+/// The metric a rule sprite (underline, strikeout, chevron) is drawn at: the
+/// slot's height, baseline and rule lines with the grid cell's **width**
+/// (052). Vertically a rule belongs to the glyph's baseline; horizontally it
+/// tiles the grid, so its pattern period divides the cell and it is placed at
+/// the cell's column in the slot ([`slot_offset`]). At `>= 1` it is the slot.
+pub(crate) fn rule_metrics(slot: Metrics, cell: Metrics) -> Metrics {
+    Metrics {
+        cell_px: (cell.cell_px.0, slot.cell_px.1),
+        ..slot
+    }
+}
+
 /// The cell's extra height for a line-height multiplier, rounded up.
 ///
 /// Unlike [`round_up`] there is no floor of 1: zero surplus is zero pixels,

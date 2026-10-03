@@ -55,5 +55,6 @@ _Requirements: R4_
 - [ ] Aralıklar ve sabitler, doc'lar, şablon
 - [ ] Ayar penceresi
 - [ ] `docs/AYARLAR.md`, `CLAUDE.md`
+- [ ] `CLAUDE.md`'ın çizim sırası cümleleri phase-2'nin sözleşmesine (phase-2'den devir): "Encode sırası ızgara → doldurma → dock" artık ızgara zemini → vurgu → caret → bant zemini → bant araması → ızgara glyph'leri → bant glyph'leri → dock; glyph/emoji dörtgeni yuva boyunda ve `slot_offset` kadar geride, glyph viewport'u taşma payı kadar kaldırılmış (dock'ta bandın tepesine kadar); kural sprite'ları hücre genişliğinde (`rules::rule_metrics`)
 - [ ] Test: okuma sınamaları
 - [ ] Doğrulama geçti: `make check`, `make linux`, `make smoke`

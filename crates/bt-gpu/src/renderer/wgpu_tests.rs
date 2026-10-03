@@ -101,7 +101,7 @@ fn emoji_round_trip(rgb: (u8, u8, u8), alpha: u8) -> (u8, u8, u8) {
     let target = gpu.target(EDGE);
     let imm = GlyphImmediates {
         viewport_px: [EDGE as f32; 2],
-        cell_px: [f32::from(SLOT); 2],
+        slot_px: [f32::from(SLOT); 2],
         uv_size: [f32::from(SLOT) / EDGE as f32; 2],
         ..GlyphImmediates::default()
     };

@@ -37,12 +37,21 @@ struct FxInstance {
     @location(3) fx: vec4<f32>,
 }
 
-// The vertex and fragment sizes (`viewport_px`, `cell_px`, `uv_size`) and the
-// `heat` colour share one `var<immediate>` block. Order follows alignment:
-// heat@0 (vec4), viewport_px@16, cell_px@24, uv_size@32; 40 bytes round up to
-// the struct's 16-byte alignment: size 48. The Rust twin is
+// The vertex and fragment sizes (`viewport_px`, `cell_px`, `uv_size`,
+// `slot_px`, `slot_offset`) and the `heat` colour share one `var<immediate>`
+// block. Order follows alignment: heat@0 (vec4), viewport_px@16, cell_px@24,
+// uv_size@32, slot_px@40, slot_offset@48; 56 bytes round up to the struct's
+// 16-byte alignment: size 64. The Rust twin is
 // `crate::renderer::FxImmediates`, pinned by `offset_of`/`size_of` asserts and
 // an explicit trailing `pad`.
+//
+// **Two boxes** (052): `cell_px` is the grid cell — the effects' amplitudes
+// are its ratios and `local` is measured from its corner — and `slot_px` is
+// the atlas's slot, which below `line_height` / `letter_spacing = 1` is larger
+// than the cell. The glyph's ink lives in the slot, whose top-left corner is
+// `slot_offset` up and left of the cell's: a cell-local point `g` is the slot
+// point `g + slot_offset`. At `>= 1` the two boxes are equal and the offset is
+// zero.
 //
 //   heat = the `heat` effect's glowing colour (the theme's `cursor`), one per
 //          frame (`Frame::dock_fx_heat`).
@@ -51,6 +60,8 @@ struct Immediates {
     viewport_px: vec2<f32>,
     cell_px: vec2<f32>,
     uv_size: vec2<f32>,
+    slot_px: vec2<f32>,
+    slot_offset: vec2<f32>,
 }
 
 var<immediate> imm: Immediates;
@@ -87,7 +98,8 @@ const FX_SUBLIME: u32 = 22u;
 const FX_SHATTER: u32 = 23u;
 const FX_GHOST_FIRST: u32 = 16u;
 
-// The quad's inflation on every side, in cells. The farthest points:
+// The quad's inflation on every side, in slots (052: the quad is the slot's,
+// grown by this much). The farthest points:
 // horizontally `echo`'s copy (a wide glyph's two-cell box grown by ECHO_SCALE
 // overflows each half's quad by 1.2 cells), vertically `shatter`'s falling
 // shard (SHATTER_FALL + half a shard) and `undertow`. The margin is also where
@@ -199,8 +211,8 @@ struct FxOut {
 @vertex
 fn glyph_fx_vertex(@builtin(vertex_index) vid: u32, it: FxInstance) -> FxOut {
     let corner = vec2<f32>(f32(vid & 1u), f32(vid >> 1u));
-    let pad = imm.cell_px * FX_PAD;
-    let local = -pad + corner * (imm.cell_px + 2.0 * pad);
+    let pad = imm.slot_px * FX_PAD;
+    let local = -imm.slot_offset - pad + corner * (imm.slot_px + 2.0 * pad);
     let ndc = (it.pos + local) / imm.viewport_px * 2.0 - 1.0;
     var o: FxOut;
     o.position = vec4<f32>(ndc.x, -ndc.y, 0.0, 1.0);
@@ -233,8 +245,9 @@ fn ease_out_back(t: f32, back: f32) -> f32 {
 // coverage, on the colour plane the texture itself. **The slot's outside is
 // never sampled** and the rule lives in one place: every sample (the main
 // glyph, `echo`'s copy, `spread`'s disc, `shatter`'s shards) goes through
-// here. The bound is half-open, like the static path's fragment centres: when
-// `g` is inside the cell it lands on a texel centre.
+// here. `g` is cell-local; the bound is the SLOT's (`g + slot_offset` inside
+// `[0, slot_px)`). Half-open, like the static path's fragment centres: when
+// the point is inside the slot it lands on a texel centre.
 //
 // **`smooth_` is for the scaling and rotating branches** (`pop`, `squeeze`,
 // `recede`, `sublime`, `shatter`…): on a growing or shrinking glyph `nearest`
@@ -246,13 +259,14 @@ fn ease_out_back(t: f32, back: f32) -> f32 {
 // (`t = 0`, `t = 1`) use `nearest`: the letter stays sharp and bit for bit
 // equal to the static path.
 fn paint(g: vec2<f32>, uv0: vec2<f32>, fg: vec3<f32>, colored: bool, smooth_: bool) -> vec4<f32> {
-    let cell_px = imm.cell_px;
-    if (any(g < vec2<f32>(0.0)) || any(g >= cell_px)) {
+    let slot_px = imm.slot_px;
+    let s = g + imm.slot_offset;
+    if (any(s < vec2<f32>(0.0)) || any(s >= slot_px)) {
         return vec4<f32>(0.0);
     }
-    let texel = imm.uv_size / cell_px;
+    let texel = imm.uv_size / slot_px;
     if (!smooth_) {
-        let uv = uv0 + g * texel;
+        let uv = uv0 + s * texel;
         if (colored) {
             // Colour plane: the same as `emoji_fragment` — colour from the
             // texture.
@@ -260,7 +274,7 @@ fn paint(g: vec2<f32>, uv0: vec2<f32>, fg: vec3<f32>, colored: bool, smooth_: bo
         }
         return vec4<f32>(fg, textureSampleLevel(mask_tex, near, uv, 0.0).r);
     }
-    let q = clamp(g, vec2<f32>(0.5), cell_px - 0.5);
+    let q = clamp(s, vec2<f32>(0.5), slot_px - 0.5);
     if (colored) {
         // The hardware filter cannot be used on the colour plane: the bytes
         // are straight alpha (`raster::unpremultiply`) and a transparent
@@ -269,7 +283,7 @@ fn paint(g: vec2<f32>, uv0: vec2<f32>, fg: vec3<f32>, colored: bool, smooth_: bo
         let p = q - 0.5;
         let i0 = floor(p);
         let f = p - i0;
-        let i1 = min(i0 + 1.0, cell_px - 1.0);
+        let i1 = min(i0 + 1.0, slot_px - 1.0);
         var a = textureSampleLevel(color_tex, near, uv0 + (vec2<f32>(i0.x, i0.y) + 0.5) * texel, 0.0);
         var b = textureSampleLevel(color_tex, near, uv0 + (vec2<f32>(i1.x, i0.y) + 0.5) * texel, 0.0);
         var c = textureSampleLevel(color_tex, near, uv0 + (vec2<f32>(i0.x, i1.y) + 0.5) * texel, 0.0);
@@ -338,15 +352,16 @@ fn over(top: vec4<f32>, under: vec4<f32>) -> vec4<f32> {
 // `ink`'s "depth": the mean coverage of the point's 3×3 neighbourhood. The
 // stroke's core (ink on every side) is near 1, its edge near 0 — a single
 // texel's coverage is partial on most pixels of a thin font, so it could not
-// tell the core from the edge. Neighbours are **clamped into the cell**: the
+// tell the core from the edge. Neighbours are **clamped into the slot**: the
 // slot's outside is not sampled here either.
 fn ink_depth(g: vec2<f32>, uv0: vec2<f32>) -> f32 {
-    let cell_px = imm.cell_px;
+    let slot_px = imm.slot_px;
+    let s = g + imm.slot_offset;
     var sum = 0.0;
     for (var dy: i32 = -1; dy <= 1; dy++) {
         for (var dx: i32 = -1; dx <= 1; dx++) {
-            let q = clamp(g + vec2<f32>(f32(dx), f32(dy)), vec2<f32>(0.5), cell_px - 0.5);
-            sum += textureSampleLevel(mask_tex, near, uv0 + q / cell_px * imm.uv_size, 0.0).r;
+            let q = clamp(s + vec2<f32>(f32(dx), f32(dy)), vec2<f32>(0.5), slot_px - 0.5);
+            sum += textureSampleLevel(mask_tex, near, uv0 + q / slot_px * imm.uv_size, 0.0).r;
         }
     }
     return sum / 9.0;
@@ -360,9 +375,10 @@ fn ink_depth(g: vec2<f32>, uv0: vec2<f32>) -> f32 {
 // the one breaking away. Where shards overlap the darkest wins, not "first
 // hit": a shard with an empty corner landing on a full one must not cover it.
 //
-// The shard grid is on the glyph's BOX (`box_left`, width `box_w`), not the
-// half's cell: a wide glyph's two halves break like one box and each half
-// paints only the hits that land in its own slot (`paint`).
+// The shard grid is on the glyph's BOX (`box_left`, width `box_w`; the slot
+// box, from `-slot_offset.y` and `slot_px.y` tall), not the half's cell: a
+// wide glyph's two halves break like one box and each half paints only the
+// hits that land in its own slot (`paint`).
 //
 // WGSL has no comma operator, so the shard counter `n` advances in the loop
 // body.
@@ -371,14 +387,14 @@ fn shatter_paint(p: vec2<f32>, t: f32, e: f32, seed: u32, center: vec2<f32>,
                  uv0: vec2<f32>, fg: vec3<f32>, colored: bool) -> vec4<f32> {
     let cell_px = imm.cell_px;
     let cols = select(SHATTER_COLS, SHATTER_COLS_WIDE, wide);
-    let tile = vec2<f32>(box_w / cols, cell_px.y / SHATTER_ROWS);
+    let tile = vec2<f32>(box_w / cols, imm.slot_px.y / SHATTER_ROWS);
     var best = vec4<f32>(0.0);
     var n = 0u;
     for (var row = 0.0; row < SHATTER_ROWS; row += 1.0) {
         for (var col = 0.0; col < cols; col += 1.0) {
             let k = n;
             n += 1u;
-            let lo = vec2<f32>(box_left, 0.0) + vec2<f32>(col, row) * tile;
+            let lo = vec2<f32>(box_left, -imm.slot_offset.y) + vec2<f32>(col, row) * tile;
             let mid = lo + tile * 0.5;
             // Direction: outward from the box's centre, with a seeded jitter;
             // the middle shard (on the centre) goes down.
@@ -432,10 +448,16 @@ fn glyph_fx_fragment(in: FxOut) -> @location(0) vec4<f32> {
     // `recede` would split an emoji down the middle. 0 = single cell, 1 = left
     // half (box extends right), 2 = right half (box extends left). `extrude`'s
     // anchor is also the box's left edge, not the half's.
+    //
+    // The centre stays on the CELL box (the glyph is centred on its cells);
+    // the box `extrude`, `iris` and `shatter` read is the SLOT box (052): the
+    // ink can spill past the cells and their bound must cover it — one slot
+    // wide for a single glyph, `cell + slot` for a wide one, `slot_offset.x`
+    // left of the cells. At `>= 1` the added terms are exactly zero.
     let cx = select(select(0.0, cell_px.x, half_ == 1u), cell_px.x * 0.5, half_ == 0u);
     let center = vec2<f32>(cx, cell_px.y * 0.5);
-    let box_left = select(0.0, -cell_px.x, half_ == 2u);
-    let box_w = select(2.0 * cell_px.x, cell_px.x, half_ == 0u);
+    let box_left = select(0.0, -cell_px.x, half_ == 2u) - imm.slot_offset.x;
+    let box_w = select(2.0 * cell_px.x, cell_px.x, half_ == 0u) + (imm.slot_px.x - cell_px.x);
 
     var g = in.local;
     var alpha = 1.0;
@@ -533,7 +555,7 @@ fn glyph_fx_fragment(in: FxOut) -> @location(0) vec4<f32> {
             // (the box's width, IRIS_REACH of its height); the glyph does not
             // fade, it is covered. Starting from the box's corner, the first
             // third of the duration would close over an empty cell.
-            let reach = length(vec2<f32>(box_w, cell_px.y * IRIS_REACH) * 0.5) + 1.0;
+            let reach = length(vec2<f32>(box_w, imm.slot_px.y * IRIS_REACH) * 0.5) + 1.0;
             iris = reach * (1.0 - e);
         } else if (id == FX_UNDERTOW) {
             // The pull starts slow and speeds up (`smoothstep`): the current

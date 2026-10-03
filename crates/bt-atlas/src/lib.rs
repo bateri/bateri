@@ -1183,11 +1183,26 @@ impl Atlas {
             }
             // Procedural drawing cannot fail: the font is not asked, no context
             // is built. `Drawn` is not an assumption, it is the type itself.
-            // Rules are drawn at the **slot** metric (052): an underline and a
-            // strikeout belong to the glyph's baseline, and the chevron is a
-            // glyph, so all three go where the letter goes.
+            // Rules are drawn at the **slot's** height and baseline (052): an
+            // underline and a strikeout belong to the glyph's baseline, and the
+            // chevron is a glyph, so all three go where the letter goes
+            // vertically. Horizontally they are the **cell's** width, placed at
+            // the cell's column in the slot ([`rules::rule_metrics`]): a rule
+            // tiles the grid, and a slot-wide sprite below `letter_spacing = 1`
+            // would overlap its neighbour by the pad with the dotted, dashed
+            // and curly patterns out of phase. At `>= 1` the two are the slot.
             Sprite::Rule(kind) => {
-                raster::draw_rule(kind, self.slot_metrics, &mut self.buffer);
+                let m = rules::rule_metrics(self.slot_metrics, self.metrics);
+                let mut rule = vec![0u8; m.slot_bytes()];
+                raster::draw_rule(kind, m, &mut rule);
+                let (x, _) = self.slot_offset();
+                place(
+                    &rule,
+                    m,
+                    &mut self.buffer,
+                    self.slot_metrics,
+                    (i64::from(x), 0),
+                );
                 (DrawResult::Drawn, Half::Whole, Plane::Mask)
             }
         };
@@ -5854,6 +5869,59 @@ mod tests {
                     );
                 }
                 assert!(own.iter().any(|&b| b != 0), "'{c}' drew nothing");
+            }
+        }
+    }
+
+    /// Rule sprites tile the **cell**, not the slot (052, phase-2's seam
+    /// check): below `letter_spacing = 1` a slot-wide rule would overlap its
+    /// neighbour quad by the pad and the dotted, dashed and curly patterns
+    /// would meet out of phase. Every rule is drawn at the cell's width on
+    /// the slot's height and baseline and placed at the cell's column, so
+    /// the pad columns are empty and the pattern's period divides the cell.
+    #[test]
+    fn rules_tile_the_cell_column_inside_the_slot() {
+        for scale in [1.0, 2.0] {
+            let mut a = Atlas::new(
+                None,
+                POINT_SIZE,
+                scale,
+                Spacing {
+                    line: 0.7,
+                    letter: 0.7,
+                },
+            );
+            let (cell, slot) = (a.metrics(), a.slot_metrics());
+            assert!(
+                slot.cell_px.0 > cell.cell_px.0,
+                "0.7 must open a horizontal pad to test anything"
+            );
+            let m = rules::rule_metrics(slot, cell);
+            let (ox, _) = a.slot_offset();
+            let ox = usize::from(ox);
+            let (cw, sw) = (usize::from(cell.cell_px.0), usize::from(slot.cell_px.0));
+            for kind in [
+                RuleKind::Single,
+                RuleKind::Double,
+                RuleKind::Curl,
+                RuleKind::Dotted,
+                RuleKind::Dashed,
+                RuleKind::Strike,
+                RuleKind::Chevron,
+            ] {
+                let mut own = vec![0u8; m.slot_bytes()];
+                raster::draw_rule(kind, m, &mut own);
+                assert!(own.iter().any(|&b| b != 0), "{kind:?} drew nothing");
+                let bytes = slot_bytes_of(&mut a, Sprite::Rule(kind), Face::Regular);
+                for (i, &b) in bytes.iter().enumerate() {
+                    let (x, y) = (i % sw, i / sw);
+                    let want = if (ox..ox + cw).contains(&x) {
+                        own[y * cw + (x - ox)]
+                    } else {
+                        0
+                    };
+                    assert_eq!(b, want, "{kind:?} @{scale}x at ({x}, {y})");
+                }
             }
         }
     }

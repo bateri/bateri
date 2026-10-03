@@ -3053,3 +3053,329 @@ fn a_wide_glyph_transforms_as_one_box() {
         );
     }
 }
+
+// **052 phase-2: the slot quad.** Below `line_height = 1` the glyph's slot is taller than the
+// grid cell and the glyph spills into its neighbours instead of being cut. `< 1` is reachable
+// only from here in this phase: `set_font` takes the struct as is, the settings parser still
+// clamps at `1`.
+
+/// The line height the overflow guards draw at: low enough that `g`'s tail leaves its cell and
+/// `É`'s accent rises above it, at both scales.
+const TIGHT_LINE: f64 = 0.6;
+
+fn tight_renderer() -> TestRenderer {
+    let r = renderer();
+    r.set_font(&FontOptions {
+        line_height: TIGHT_LINE,
+        ..FontOptions::default()
+    });
+    r
+}
+
+/// The open atlas's slot geometry (the renderer must have been asked for its metrics).
+fn slot_quad_of(r: &TestRenderer) -> SlotQuad {
+    let state = r.state.borrow();
+    SlotQuad::of(&state.atlas.as_ref().expect("an open atlas").atlas)
+}
+
+/// The atlas's grid cell **without a gutter**, so column `n` starts at `n * cell width`.
+fn flush(m: CellMetrics) -> CellMetrics {
+    let (cw, ch) = m.cell_px();
+    CellMetrics::new(cw, ch, m.context_cell_px(), 0, m.rule_px()).expect("non-zero metrics")
+}
+
+#[test]
+fn slot_quad_is_the_cell_at_or_above_one() {
+    // R5's GPU half: at `>= 1` the immediates describe today's quad — no offset, the slot is
+    // the cell, no viewport lift. Below `1` the same function opens all three, or the claim
+    // above would be vacuous.
+    for scale in [1.0, 2.0] {
+        for (line, letter) in [(1.0, 1.0), (1.2, 1.0), (1.0, 1.3), (1.2, 1.3)] {
+            let atlas = Atlas::new(None, 13.0, scale, bt_atlas::Spacing { line, letter });
+            let quad = SlotQuad::of(&atlas);
+            let (cw, ch) = atlas.metrics().cell_px;
+            let at = format!("{line}/{letter} @{scale}x");
+            assert_eq!(quad.slot_offset, [0.0, 0.0], "offset, {at}");
+            assert_eq!(quad.slot_px, [f32::from(cw), f32::from(ch)], "slot, {at}");
+            assert_eq!(quad.overflow(), 0.0, "lift, {at}");
+            let imm = quad.glyph_immediates(CursorBlock::default(), [64.0; 2], quad.overflow());
+            assert_eq!(imm.slot_offset, [0.0, 0.0], "immediate offset, {at}");
+            assert_eq!(
+                imm.slot_px,
+                [f32::from(cw), f32::from(ch)],
+                "immediate slot, {at}"
+            );
+            assert_eq!(imm.lift, 0.0, "immediate lift, {at}");
+            let fx = quad.fx_immediates([0.0; 4], [64.0; 2], [f32::from(cw), f32::from(ch)]);
+            assert_eq!(
+                (fx.slot_px, fx.slot_offset),
+                (fx.cell_px, [0.0; 2]),
+                "fx, {at}"
+            );
+        }
+        let atlas = Atlas::new(
+            None,
+            13.0,
+            scale,
+            bt_atlas::Spacing {
+                line: 0.6,
+                letter: 0.7,
+            },
+        );
+        let quad = SlotQuad::of(&atlas);
+        let (cw, ch) = atlas.metrics().cell_px;
+        assert!(
+            quad.overflow() > 0.0
+                && quad.slot_offset[0] > 0.0
+                && quad.slot_px[0] > f32::from(cw)
+                && quad.slot_px[1] > f32::from(ch),
+            "below 1 the slot must be larger than the cell @{scale}x: {quad:?}"
+        );
+    }
+}
+
+#[test]
+fn descender_paints_over_the_next_rows_background() {
+    // R3.1: `g`'s tail leaves row 0 and lands on row 1's red ground in the foreground colour —
+    // the grid's grounds are all drawn before its glyphs and the quad is the slot. @2x only:
+    // the cut below `1` is proportional to ascent:descent, and at 13pt@1x it takes a single
+    // pixel off the bottom — the descent's own slack, so the tail still fits its cell there
+    // (measured: no ink on row 1 for `g j y p _ , ( Q }`).
+    const EDGE: usize = 64;
+    let r = tight_renderer();
+    let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+    let m = flush(r.cell_metrics(2.0));
+    let (cw, ch) = (usize::from(m.cell_px().0), usize::from(m.cell_px().1));
+    let mut frame = Frame::default();
+    frame.clear(m, CaretStyle::default());
+    frame.push(bg_cell(0, 1, red));
+    frame.push(Cell {
+        fg: WHITE,
+        ..glyph_cell(0, 'g', None)
+    });
+    let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+    // Red has no green: any green on row 1 is the white tail over it.
+    let tail = (ch..2 * ch)
+        .flat_map(|y| (0..cw).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixel_at(&pixels, EDGE, x, y).1 > 0x80)
+        .count();
+    assert!(tail > 0, "the tail of `g` is not on row 1's ground");
+    assert!(
+        (ch..2 * ch).any(|y| pixel_at(&pixels, EDGE, cw - 1, y) == (0xff, 0x00, 0x00)),
+        "row 1's red ground was not drawn"
+    );
+}
+
+#[test]
+fn grid_top_accent_survives_the_fill_band() {
+    // R3.1, the seam between the grid and the fill band: the grid's top row's accent rises
+    // into the band, and the band's ground is drawn **before** the grid's glyphs, so it shows.
+    const EDGE: usize = 64;
+    let r = tight_renderer();
+    let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+    for scale in [1.0, 2.0] {
+        let m = flush(r.cell_metrics(scale));
+        let (cw, ch) = (usize::from(m.cell_px().0), usize::from(m.cell_px().1));
+        assert!(slot_quad_of(&r).overflow() > 0.0, "no overflow @{scale}x");
+        let mut frame = Frame::default();
+        frame.clear(m, CaretStyle::default());
+        frame.push(Cell {
+            fg: WHITE,
+            ..glyph_cell(0, 'É', None)
+        });
+        frame.set_fill_rows(1);
+        frame.push_fill(bg_cell(0, 0, red));
+        frame.set_origin_rows(1.0);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+        assert_eq!(
+            pixel_at(&pixels, EDGE, 0, 0),
+            (0xff, 0x00, 0x00),
+            "the band's ground was not drawn @{scale}x"
+        );
+        let accent = (0..ch)
+            .flat_map(|y| (0..cw).map(move |x| (x, y)))
+            .any(|(x, y)| pixel_at(&pixels, EDGE, x, y).1 > 0x80);
+        assert!(
+            accent,
+            "the accent of `É` is hidden under the band @{scale}x"
+        );
+    }
+}
+
+#[test]
+fn caret_stays_under_the_fill_band() {
+    // The order's other half (`CLAUDE.md` → draw order): a grid caret sliding into the band is
+    // drawn **before** the band's ground and is covered by it. Raising the grid's glyphs over the
+    // band must not raise the caret with them.
+    let r = renderer();
+    const EDGE: usize = 16;
+    const CELL: u16 = 8;
+    let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+    let mut frame = Frame::default();
+    frame.clear(grid(CELL, CELL), CaretStyle::default());
+    frame.set_fill_rows(1);
+    frame.push_fill(bg_cell(0, 0, red));
+    frame.set_origin_rows(1.0);
+    // Half a row into the band, in window rows.
+    frame.push_caret([0.0, 0.5], BACKGROUND, ACCENT, 1.0, CaretShape::Block, true);
+    assert!(
+        frame.grid_caret().is_some(),
+        "the caret is not in the grid slot"
+    );
+    let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+    let accent = {
+        let hex = Theme::BATERI.accent;
+        ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+    };
+    let near = |seen: (u8, u8, u8), want: (u8, u8, u8)| {
+        seen.0.abs_diff(want.0) <= 1 && seen.1.abs_diff(want.1) <= 1 && seen.2.abs_diff(want.2) <= 1
+    };
+    let x = usize::from(CELL) / 2;
+    assert_eq!(
+        pixel_at(&pixels, EDGE, x, 6),
+        (0xff, 0x00, 0x00),
+        "the caret is drawn over the band's ground"
+    );
+    let below = pixel_at(&pixels, EDGE, x, 10);
+    assert!(
+        near(below, accent),
+        "the caret's grid half is missing: {below:02x?}"
+    );
+}
+
+#[test]
+fn dock_glyph_stays_inside_its_band() {
+    // R3.2: the dock is a separate panel. With no breathing margin (gutter zero) its input row
+    // starts at the band's top and the accent rising above it is cut at the band's top — the
+    // grid's area above stays the clear colour.
+    const EDGE: usize = 64;
+    let r = tight_renderer();
+    for scale in [1.0, 2.0] {
+        let m = flush(r.cell_metrics(scale));
+        let ch = usize::from(m.cell_px().1);
+        assert!(slot_quad_of(&r).overflow() > 0.0, "no overflow @{scale}x");
+        let mut frame = Frame::default();
+        frame.clear(m, CaretStyle::default());
+        frame.push_dock(Cell {
+            fg: WHITE,
+            ..glyph_cell(1, 'É', None)
+        });
+        frame.set_dock_rows(1);
+        frame.open_dock(BACKGROUND, BACKGROUND, BACKGROUND);
+        let band_top = EDGE - frame.dock_layout_px() as usize;
+        assert_eq!(band_top, EDGE - ch, "the band is one row @{scale}x");
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        let cw = usize::from(m.cell_px().0);
+        assert!(
+            (cw..2 * cw).any(|x| pixel_at(&pixels, EDGE, x, band_top).1 > 0x80),
+            "the accent does not reach the band's top — nothing to clip @{scale}x"
+        );
+        let clear = pixel_at(&pixels, EDGE, EDGE - 1, 0);
+        for y in 0..band_top {
+            for x in 0..EDGE {
+                assert_eq!(
+                    pixel_at(&pixels, EDGE, x, y),
+                    clear,
+                    "the dock's glyph spilled above its band at ({x}, {y}) @{scale}x"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn arrival_effect_matches_static_glyph_below_one() {
+    // R3.2/R3.3: below `1` the arrival at `t = 1` is still the static glyph pixel for pixel —
+    // the effect samples the slot (bound, texel), and the static glyph's accent, spilling into
+    // the breathing margin above the input row, is not cut by the dock's glyph viewport.
+    const EDGE: usize = 96;
+    let r = tight_renderer();
+    let m = r.cell_metrics(2.0);
+    let gutter = usize::from(m.gutter_px());
+    assert!(
+        slot_quad_of(&r).overflow() > 0.0 && slot_quad_of(&r).overflow() < gutter as f32,
+        "the overflow must be inside the breathing margin to be tested"
+    );
+    let still_frame = |fx: &[Fx], cell: Cell| {
+        let mut frame = Frame::default();
+        frame.clear(m, CaretStyle::default());
+        frame.push_dock(cell);
+        frame.set_dock_fx(fx.iter().copied(), &Clusters::default(), HEAT);
+        frame.set_dock_rows(1);
+        frame.open_dock(BACKGROUND, BACKGROUND, BACKGROUND);
+        frame
+    };
+    let cell = Cell {
+        fg: WHITE,
+        ..glyph_cell(1, 'É', None)
+    };
+    let still = still_frame(&[], cell);
+    let band_top = EDGE - still.dock_layout_px() as usize;
+    let a = render_offscreen(&r, EDGE, BACKGROUND, &still);
+    assert!(
+        (band_top..band_top + gutter).any(|y| (0..EDGE).any(|x| pixel_at(&a, EDGE, x, y).1 > 0x80)),
+        "the static accent does not spill into the breathing margin — the claim is vacuous"
+    );
+    for &keypress in &Keypress::effects() {
+        let id = keypress.id().expect("a drawing effect");
+        let moving = still_frame(&[effect(cell, Kind::Arrival, id, 1.0)], cell);
+        assert!(
+            moving.dock_glyphs().is_empty() && moving.dock_arrivals().len() == 1,
+            "the arrival is not drawn through the effect's path ({keypress:?})"
+        );
+        let b = render_offscreen(&r, EDGE, BACKGROUND, &moving);
+        assert!(
+            a == b,
+            "at t = 1 the arrival differs from the static glyph ({keypress:?})"
+        );
+    }
+}
+
+#[test]
+fn a_lifted_viewport_keeps_the_window_bottom() {
+    // The glyph viewport is raised by the overflow and **taller by it** (`Op::Lifted`): a grid
+    // row sitting on the window's bottom edge (no dock to cover it — vim, `blocks`) keeps the
+    // ink of its cell's last pixels. Raised but not taller, the viewport's bottom would end
+    // `lift` pixels above the window's (`/code-review`). The same glyph on the top row and on
+    // the bottom row of a grid whose origin leaves less than a row: the cell's pixels match.
+    const EDGE: usize = 64;
+    let r = tight_renderer();
+    let m = flush(r.cell_metrics(2.0));
+    let (cw, ch) = (usize::from(m.cell_px().0), usize::from(m.cell_px().1));
+    let lift = slot_quad_of(&r).overflow() as usize;
+    let last = EDGE / ch - 1;
+    let origin = EDGE - (last + 1) * ch;
+    assert!(
+        lift > origin,
+        "the case needs a lift larger than the origin"
+    );
+    let draw = |row: u16| {
+        let mut frame = Frame::default();
+        frame.clear(m, CaretStyle::default());
+        frame.push(Cell {
+            row,
+            fg: WHITE,
+            ..glyph_cell(0, 'g', None)
+        });
+        frame.set_origin_rows(origin as f32 / ch as f32);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+        let top = origin + usize::from(row) * ch;
+        (0..ch)
+            .map(|y| {
+                (0..cw)
+                    .map(|x| pixel_at(&pixels, EDGE, x, top + y))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = draw(0);
+    let bottom = draw(last as u16);
+    assert!(
+        first[ch - lift..].concat().iter().any(|p| p.1 > 0x80),
+        "no ink in the cell's last `lift` rows — nothing to lose"
+    );
+    assert_eq!(
+        first, bottom,
+        "the bottom row's glyph lost ink at the window's edge"
+    );
+}
