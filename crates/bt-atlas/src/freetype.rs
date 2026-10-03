@@ -1074,7 +1074,7 @@ mod tests {
             "{CLUSTER_BASE} from a text font"
         );
         let glyph = FreeType::glyph(&emoji, CLUSTER_BASE).expect("the emoji is mapped");
-        let m = crate::rules::metrics(&base, 1.0);
+        let m = crate::rules::metrics_at(&base, crate::rules::space_advance(&base), 1.0);
         let (w, h) = m.cell_wh();
         // Shrunk so it fits the slot, as the gate's shrink arm would.
         let ink = FreeType::ink(&emoji, glyph);

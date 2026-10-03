@@ -73,9 +73,11 @@ fn position(
     // advance can be narrower than the cell's and a mark stuck to the left
     // looks misaligned between its neighbours. The rule is **universal**, not
     // conditional on the fallback — in a monospaced base font every glyph's
-    // advance is exactly the cell's advance, so the subtraction is exactly
-    // zero and the base font's raster stays bit-for-bit the same (guarded by
-    // `every_base_glyph_advance_is_the_cell_advance`). Written conditionally,
+    // advance is exactly the font's own cell advance, so at
+    // `letter_spacing = 1` the subtraction is exactly zero and the base
+    // font's raster stays bit-for-bit the same (guarded by
+    // `every_base_glyph_advance_is_the_cell_advance`); opened up, the same
+    // formula puts the glyph in the middle of the wider cell (051). Written conditionally,
     // the "is it a fallback" question would add a second branch to the
     // drawing path and a second code path to the tests.
     //

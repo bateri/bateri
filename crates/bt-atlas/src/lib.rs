@@ -63,6 +63,32 @@ pub use rules::{Face, FontIssue, Metrics, SizeClass};
 pub use rules::{family_issue, monospaced_families};
 use system::{Backend, Font, FontSystem};
 
+/// The cell's two spacing multipliers: `[font] line_height` and
+/// `[font] letter_spacing` (051).
+///
+/// A struct, not two positional `f64`s: both have the same type and the same
+/// range, and a swapped pair would compile and silently stretch the wrong
+/// axis. `1.0` on an axis is the font's own spacing; the default is both.
+///
+/// `line` multiplies the cell **height** (`rules::cell_metrics`), `letter`
+/// the cell **width** — the space's fractional advance, i.e. the glyph keeps
+/// its size and sits centred in the wider cell. The ranges are the settings'
+/// (`bt-core`); the atlas only multiplies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spacing {
+    pub line: f64,
+    pub letter: f64,
+}
+
+impl Default for Spacing {
+    fn default() -> Self {
+        Self {
+            line: 1.0,
+            letter: 1.0,
+        }
+    }
+}
+
 /// The backend's sample characters and family names, measured on its fonts
 /// (042 Karar 7). Test support, not API: `bt-gpu`'s glyph guards take their
 /// samples from here (feature `fixture`, a dev-dependency there) so a
@@ -218,11 +244,20 @@ const MIN_EDGE: u16 = 1024;
 /// The ceiling of the texture edge, in pixels.
 ///
 /// Without a ceiling, growth would go on unbounded at the corner of
-/// [`MAX_POINT_SIZE`] × `MAX_LINE_HEIGHT`. 4096 is many times below Metal's
-/// texture limit (16384) and even at that corner it keeps the capacity above
-/// the family — its number is **computed** in
+/// [`MAX_POINT_SIZE`] × `MAX_LINE_HEIGHT` × `MAX_LETTER_SPACING`. 8192 is half
+/// of Metal's texture limit (16384; the device asks for the adapter's own
+/// ceiling) and even at that corner it keeps the capacity above the family —
+/// its number is **computed** in
 /// `capacity_clears_the_family_at_every_accepted_size`, not written here.
-const MAX_EDGE: u16 = 4096;
+///
+/// It was 4096 until the letter spacing (051) and that corner went red: the
+/// widest cell (144pt@1x, both multipliers at 2) gave fewer slots than the
+/// family. Raising the ceiling was chosen over lowering the multipliers' cap
+/// — the user sees the cap, not the edge (`.tasks/051-harf-araligi/
+/// discussion.md` → Karar). The edge still derives from the slot target, so
+/// only that corner grows; the cost is memory there (64 MB of mask, the
+/// colour texture is born only with the first emoji).
+const MAX_EDGE: u16 = 8192;
 
 /// The accepted range of the `point_size * scale` product.
 ///
@@ -311,11 +346,24 @@ pub struct Atlas {
     /// (`raster::draw`). The whole rationale is in the doc of
     /// `rules::space_advance`; the guard that the two numbers give the same
     /// measure is `the_cell_is_the_rounded_advance`.
+    ///
+    /// It is the **spaced** advance: the space's advance times
+    /// [`Spacing::letter`]. At `letter = 1` it is the font's own advance.
     cell_advance: f64,
+    /// The font's own (unspaced) advance — large class. Its **only** consumer
+    /// is the fallback gate's arm decision (`rules::accept`): "does it fit one
+    /// cell today" must not change with the letter spacing, or a two-column
+    /// character would fall into one wide cell and sit in the left column
+    /// (`.tasks/051-harf-araligi/discussion.md` → Muhakeme).
+    natural_advance: f64,
     /// The small face's fractional advance: the small-class twin of
     /// [`Atlas::cell_advance`]. The fallback gate and the centring are
     /// **per class**, because both are bounded by that class's own cell.
+    /// Spaced like [`Atlas::cell_advance`].
     context_advance: f64,
+    /// The small face's own advance: the small-class twin of
+    /// [`Atlas::natural_advance`].
+    natural_context_advance: f64,
     /// The small face's advance width, in pixels: the context line's column
     /// step.
     ///
@@ -325,7 +373,7 @@ pub struct Atlas {
     /// between letters.
     ///
     /// It is the rounded form of [`Atlas::context_advance`] and **derives from
-    /// it**: if computed by two separate routes (one `rules::metrics`, the
+    /// it**: if computed by two separate routes (one a whole `Metrics`, the
     /// other `space_advance`) the same measure would have two sources.
     context_cell_w: u16,
     /// The small face's own cell: the measure a **procedural** character is
@@ -338,7 +386,7 @@ pub struct Atlas {
     /// its neighbour. Born from [`Atlas::context_advance`]
     /// (`rules::metrics_at`), i.e. its width is [`Atlas::context_cell_w`] and
     /// the small class still has one width source; the height follows the
-    /// same rule and the same `line_height` as the large cell's.
+    /// same rule and the same [`Spacing`] as the large cell's.
     small_metrics: Metrics,
     /// The drawing buffer of a small procedural sprite,
     /// [`Atlas::small_metrics`]' `slot_bytes` long. The sprite is drawn here
@@ -346,7 +394,7 @@ pub struct Atlas {
     /// (`place_small`); a field for the same reason as `buffer` — no
     /// allocation per glyph.
     small_buffer: Vec<u8>,
-    /// The (family, point size, scale) it was built with. The criterion of
+    /// The (family, point size, scale, spacing) it was built with. The criterion of
     /// [`Atlas::ensure`].
     key: Key,
     /// What the chain said about the requested family; `None` → the requested
@@ -428,34 +476,35 @@ pub struct Atlas {
 /// The atlas's key: if any one of these four changes, the metric, the raster
 /// and the slot mapping are invalid.
 ///
-/// `line_height` is part of the key too, because it also determines the cell
-/// height: when the slot size changes the whole raster is invalid.
+/// [`Spacing`] is part of the key too, because it determines the cell size:
+/// when the slot size changes the whole raster is invalid.
 #[derive(Debug, PartialEq)]
 struct Key {
     family: Option<String>,
     point_size: f64,
     scale: f64,
-    line_height: f64,
+    spacing: Spacing,
 }
 
 impl Key {
-    /// The comparison is **exact equality**: point size and scale jump between
-    /// discrete values, there is no closeness between them to interpret. The
-    /// family name as is — even if `"menlo"` and `"Menlo"` open the same font
-    /// they are separate keys; the cost is a single rebuild.
-    fn is(&self, family: Option<&str>, point_size: f64, scale: f64, line_height: f64) -> bool {
+    /// The comparison is **exact equality** (the derived `PartialEq`): point
+    /// size, scale and the multipliers jump between discrete values, there is
+    /// no closeness between them to interpret. The family name as is — even if
+    /// `"menlo"` and `"Menlo"` open the same font they are separate keys; the
+    /// cost is a single rebuild.
+    fn is(&self, family: Option<&str>, point_size: f64, scale: f64, spacing: Spacing) -> bool {
         self.family.as_deref() == family
             && self.point_size == point_size
             && self.scale == scale
-            && self.line_height == line_height
+            && self.spacing == spacing
     }
 }
 
 impl Atlas {
     /// `family` is the settings' family name (`None` → the chain), `point_size`
     /// the logical point size, `scale` the screen's backing scale,
-    /// `line_height` the line spacing multiplier (`1.0` → the font's own
-    /// spacing).
+    /// `spacing` the line and letter spacing multipliers
+    /// ([`Spacing::default`] → the font's own spacing).
     ///
     /// Point size and scale are **multiplied** and fed to the font: the metric
     /// and the raster are born in the same physical pixel space, i.e. the scale
@@ -466,14 +515,20 @@ impl Atlas {
     /// A family not found is **not an error**: the chain's font opens and
     /// [`Atlas::font_issue`] reports it. A terminal cannot open without a
     /// font; a misspelled name should not close the window.
-    pub fn new(family: Option<&str>, point_size: f64, scale: f64, line_height: f64) -> Self {
+    pub fn new(family: Option<&str>, point_size: f64, scale: f64, spacing: Spacing) -> Self {
         let (faces, font_issue) =
             Faces::from_chain(family, effective_point_size(point_size, scale));
         // The metric comes **only from the regular face**: the cell grid cannot
         // vary with the face. A bold glyph is rasterized into the same slot and
         // may be clipped by a pixel — every terminal does it this way.
-        let metrics = rules::metrics(faces.get(Face::Regular), line_height);
-        let cell_advance = rules::space_advance(faces.get(Face::Regular));
+        //
+        // The width is the **spaced** advance and every consumer reads it
+        // from here — `cell_px.0`, the centring, the wide glyph's box and the
+        // procedural sprites see the same number. Only the fallback gate's
+        // arm decision keeps the natural one ([`Atlas::natural_advance`]).
+        let natural_advance = rules::space_advance(faces.get(Face::Regular));
+        let cell_advance = natural_advance * spacing.letter;
+        let metrics = rules::metrics_at(faces.get(Face::Regular), cell_advance, spacing.line);
         // The small face comes from the **same chain**: `font_issue` is not
         // asked a second time and is ignored, because the same family gets the
         // same answer — a second record would make the user hear the same
@@ -482,16 +537,19 @@ impl Atlas {
             family,
             effective_point_size(point_size * CONTEXT_SCALE, scale),
         );
-        // `line_height` is **not asked**: the line spacing only grows the cell's
-        // height and that height is shared by both classes, while the width is
-        // the font's own advance. Building a whole `Metrics` and taking the
-        // width from it would be deriving the same number by a second route.
-        let context_advance = rules::space_advance(&small);
+        // The letter spacing opens the small class **by the same ratio**: the
+        // context line is the grid's footer and its letters must not sit
+        // tighter than the grid's. The line spacing is not asked here: it
+        // only grows the cell's height and that height is shared by both
+        // classes. Building a whole `Metrics` and taking the width from it
+        // would be deriving the same number by a second route.
+        let natural_context_advance = rules::space_advance(&small);
+        let context_advance = natural_context_advance * spacing.letter;
         let context_cell_w = rules::round_up(context_advance);
-        // The small cell for procedural sprites. `line_height` **is** asked
+        // The small cell for procedural sprites. The line spacing **is** asked
         // here: this is a whole cell, and the context line's row grows with the
         // line spacing like the grid's.
-        let small_metrics = rules::metrics_at(&small, context_advance, line_height);
+        let small_metrics = rules::metrics_at(&small, context_advance, spacing.line);
         let (w, h) = metrics.cell_px;
         // The edge is derived from the **slot target**: as the cell grows the
         // capacity drops and somewhere it falls below the procedural family
@@ -500,7 +558,8 @@ impl Atlas {
         // point size stays at today's texture.
         //
         // Counted in `u32`: the product of the quotients overflows `u16` at a
-        // small cell (13pt@1x, 4096 edge → 116 224). `grid` is still `u16`.
+        // small cell (13pt@1x, a 4096 edge already gives 116 224). `grid` is
+        // still `u16`.
         //
         // **There is no path to `capacity()`'s `u16::MAX` clamp** and the reason
         // is the loop itself: folding runs only while the capacity is **below**
@@ -518,7 +577,9 @@ impl Atlas {
             small,
             metrics,
             cell_advance,
+            natural_advance,
             context_advance,
+            natural_context_advance,
             context_cell_w,
             small_metrics,
             small_buffer: vec![0u8; small_metrics.slot_bytes()],
@@ -526,7 +587,7 @@ impl Atlas {
                 family: family.map(str::to_owned),
                 point_size,
                 scale,
-                line_height,
+                spacing,
             },
             font_issue,
             grid,
@@ -544,7 +605,7 @@ impl Atlas {
         }
     }
 
-    /// Rebuilds the atlas if the key ([`Atlas::new`]'s four values) changed
+    /// Rebuilds the atlas if the key ([`Atlas::new`]'s four arguments) changed
     /// and returns `true`.
     ///
     /// `true` also means **"reallocate the texture"**: the metric and hence
@@ -559,12 +620,12 @@ impl Atlas {
         family: Option<&str>,
         point_size: f64,
         scale: f64,
-        line_height: f64,
+        spacing: Spacing,
     ) -> bool {
-        if self.key.is(family, point_size, scale, line_height) {
+        if self.key.is(family, point_size, scale, spacing) {
             return false;
         }
-        *self = Self::new(family, point_size, scale, line_height);
+        *self = Self::new(family, point_size, scale, spacing);
         true
     }
 
@@ -922,17 +983,27 @@ impl Atlas {
                 // the letter's own size, and that comes from the font.
                 // The fallback gate's limit is per class too: the small glyph
                 // has to fit the small cell's advance, not the large one's.
-                let (font, cell_advance) = match size {
-                    SizeClass::Normal => (self.faces.get(face), self.cell_advance),
-                    SizeClass::Small => (&self.small, self.context_advance),
+                let (font, cell_advance, natural) = match size {
+                    SizeClass::Normal => (
+                        self.faces.get(face),
+                        self.cell_advance,
+                        self.natural_advance,
+                    ),
+                    SizeClass::Small => (
+                        &self.small,
+                        self.context_advance,
+                        self.natural_context_advance,
+                    ),
                 };
                 // **The base font is always single-cell.** In a monospaced base
-                // font every glyph's advance is the cell's advance itself (its
+                // font every glyph's advance is the font's own advance (its
                 // guard is `every_base_glyph_advance_is_the_cell_advance`), i.e.
-                // if a character declared wide exists in the base font it is
-                // drawn into one cell there and its drawing stays **bit for
-                // bit** the same as before. Menlo's `☕ ⚡ ♈` family is exactly
-                // this arm: 21 of the measured 65.
+                // at `letter_spacing = 1` the centring shift is zero and the
+                // drawing stays **bit for bit** the same as before; opened up,
+                // the glyph sits centred in the wider cell. A character
+                // declared wide that exists in the base font is drawn into one
+                // cell there — Menlo's `☕ ⚡ ♈` family is exactly this arm: 21
+                // of the measured 65.
                 let drawn =
                     raster::draw(font, ch, self.metrics, cell_advance, 0.0, &mut self.buffer);
                 // **Fallback font.** The arm runs inside the `NoGlyph` leaf and
@@ -960,7 +1031,7 @@ impl Atlas {
                     // that could diverge from the grid's). The order is inside
                     // the gate: first one cell, then two.
                     let cols = if want == Half::Left { 2 } else { 1 };
-                    match rules::fallback_font(font, ch, cell_advance, cols) {
+                    match rules::fallback_font(font, ch, cell_advance, natural, cols) {
                         Some(alt) => {
                             shrunk = alt.shrunk;
                             self.draw_accepted(&alt, cell_advance)
@@ -997,15 +1068,23 @@ impl Atlas {
                 // empty but `slot()` is on the drawing path, i.e. the assumption
                 // is a space, not a panic.
                 let base = text.chars().next().unwrap_or(' ');
-                let (font, cell_advance) = match size {
-                    SizeClass::Normal => (self.faces.get(face), self.cell_advance),
-                    SizeClass::Small => (&self.small, self.context_advance),
+                let (font, cell_advance, natural) = match size {
+                    SizeClass::Normal => (
+                        self.faces.get(face),
+                        self.cell_advance,
+                        self.natural_advance,
+                    ),
+                    SizeClass::Small => (
+                        &self.small,
+                        self.context_advance,
+                        self.natural_context_advance,
+                    ),
                 };
                 // The column count is from the same source as `Char`'s (the half
                 // the caller asked for) and the gate's order is the same: first
                 // one, then two.
                 let cols = if want == Half::Left { 2 } else { 1 };
-                match rules::shape_cluster(font, text, cell_advance, cols) {
+                match rules::shape_cluster(font, text, cell_advance, natural, cols) {
                     Some(alt) => {
                         shrunk = alt.shrunk;
                         self.draw_accepted(&alt, cell_advance)
@@ -1472,7 +1551,7 @@ fn grid_at(edge: u16, w: u16, h: u16) -> (u16, u16) {
 }
 
 /// The grid's slot count. `u32`: the product exceeds `u16` at a small cell
-/// (13pt@1x, 4096 edge → 116 224).
+/// (13pt@1x, a 4096 edge already gives 116 224).
 fn slots_at((cols, rows): (u16, u16)) -> u32 {
     u32::from(cols) * u32::from(rows)
 }
@@ -1582,6 +1661,27 @@ mod tests {
     /// corner; if the two diverge this test misses the corner, it does not
     /// produce a wrong drawing.
     const LARGEST_LINE_HEIGHT: f64 = 2.0;
+
+    /// The text half of the capacity tests' pool: printable ASCII, Latin-1,
+    /// Latin Extended-A, Greek and basic Cyrillic — letters the base font
+    /// draws itself, i.e. each spends a real slot per face it has. The set is
+    /// this wide because a backend with only two faces (DejaVu in the Linux
+    /// image has no oblique) still has to overfill the smallest capacity.
+    fn text_chars() -> impl Iterator<Item = char> {
+        (' '..='~')
+            .chain('\u{a1}'..='\u{17f}')
+            // U+03A2 is unassigned (the gap of final sigma's capital).
+            .chain(('\u{391}'..='\u{3c9}').filter(|&ch| ch != '\u{3a2}'))
+            .chain('\u{410}'..='\u{44f}')
+    }
+    /// The corner of both multipliers (051): the largest cell the settings
+    /// can ask for at a given point size. `bt-core`'s ranges are the source;
+    /// `bt-atlas` cannot see them, so the numbers are repeated here and the
+    /// capacity guard is what keeps them honest.
+    const LARGEST_SPACING: Spacing = Spacing {
+        line: LARGEST_LINE_HEIGHT,
+        letter: 2.0,
+    };
     const POINT_SIZE: f64 = 13.0;
     /// A family that is on no machine; CoreText gives another font instead.
     const MISSING_FAMILY: &str = "Bu Aile Yok 12345";
@@ -1589,7 +1689,7 @@ mod tests {
     /// An atlas built through the chain — the one production builds when the
     /// settings name no family.
     fn atlas(point_size: f64, scale: f64) -> Atlas {
-        Atlas::new(None, point_size, scale, 1.0)
+        Atlas::new(None, point_size, scale, Spacing::default())
     }
 
     /// The (name, base font, **fractional** cell advance) triple of a size
@@ -1658,8 +1758,11 @@ mod tests {
 
     #[test]
     fn every_base_glyph_advance_is_the_cell_advance() {
-        // Centring is **universal** and in the base font it has to be exactly
-        // zero: if `(cell - advance) / 2` gave a fractional result CG's edge
+        // Centring is **universal** and in the base font at
+        // `letter_spacing = 1` it has to be exactly zero (opened up, the shift
+        // is what centres the glyph in the wider cell — 051, guarded by
+        // `letter_spacing_widens_the_cell_and_keeps_the_glyph_centred`): if
+        // `(cell - advance) / 2` gave a fractional result at `1` CG's edge
         // smoothing would change and the ground under all of the repo's pixel
         // guards (`glyph_sits_on_the_baseline`, `descender_fits_in_the_cell`, …)
         // would be silently hollowed out. This test holds the **reason** for
@@ -1799,7 +1902,7 @@ mod tests {
         // slot's bottom (same arithmetic as `raster::draw`).
         let baseline = f64::from(m.cell_px.1 - m.baseline_px);
         for (label, base, cell) in size_classes(&a) {
-            let alt = rules::fallback_font(base, FALLBACK_CHAR, cell, 1)
+            let alt = rules::fallback_font(base, FALLBACK_CHAR, cell, cell, 1)
                 .map(|accepted| accepted.font)
                 .unwrap_or_else(|| panic!("{label}: '{FALLBACK_CHAR}' must pass the gate"));
             let glyph = Backend::glyph(&alt, FALLBACK_CHAR)
@@ -1896,7 +1999,8 @@ mod tests {
                     continue;
                 }
                 // If there is no candidate at all it is not the gate's subject either — the gate does not issue the rejection.
-                let Some(open) = rules::fallback_font(base, ch, f64::INFINITY, 1).map(|a| a.font)
+                let Some(open) =
+                    rules::fallback_font(base, ch, f64::INFINITY, f64::INFINITY, 1).map(|a| a.font)
                 else {
                     continue;
                 };
@@ -2329,13 +2433,13 @@ mod tests {
         for family_name in [None, Some(fixture::PROPORTIONAL_FAMILY)] {
             for point_size in [MIN_POINT_SIZE, 13.0, 29.0, 56.0, MAX_POINT_SIZE] {
                 for scale in [1.0, 2.0] {
-                    for line_height in [1.0, LARGEST_LINE_HEIGHT] {
-                        let a = Atlas::new(family_name, point_size, scale, line_height);
+                    for spacing in [Spacing::default(), LARGEST_SPACING] {
+                        let a = Atlas::new(family_name, point_size, scale, spacing);
                         let total = a.occupancy().1;
                         assert!(
                             total >= family,
                             "{family_name:?} {point_size}pt@{scale}x \
-                             lh={line_height}: capacity {total} < family {family}"
+                             {spacing:?}: capacity {total} < family {family}"
                         );
                     }
                 }
@@ -2346,9 +2450,9 @@ mod tests {
     #[test]
     fn full_atlas_returns_tofu_without_caching() {
         // The corner that gives the smallest capacity: the largest point size
-        // **and** the largest line spacing. The edge hits the ceiling
+        // **and** both multipliers at their largest. The edge hits the ceiling
         // ([`MAX_EDGE`]) and stops there, so the capacity bottoms out here.
-        let mut a = Atlas::new(None, LARGE_POINT_SIZE, 1.0, LARGEST_LINE_HEIGHT);
+        let mut a = Atlas::new(None, LARGE_POINT_SIZE, 1.0, LARGEST_SPACING);
         let (used, total) = a.occupancy();
         assert_eq!(used, 1, "only tofu must be reserved in a new atlas");
         // The pool is made of two sets: the procedural family (it **always**
@@ -2359,15 +2463,17 @@ mod tests {
         // built from characters that can really be drawn. The range table is
         // **not mirrored**, the filter is `raster::is_procedural` itself: a
         // second copy would silently drift.
-        // ASCII holds a separate slot in all four faces; the procedural
-        // family is normalized to `Regular`, so it is counted **once**
-        // (`Atlas::slot`).
+        // The text set (`text_chars`) holds a separate slot in every face the
+        // font has; the procedural family is normalized to `Regular`, so it
+        // is counted **once** (`Atlas::slot`). The set outgrew ASCII in 051:
+        // at the 8192 ceiling the corner's capacity outgrew the family plus
+        // ASCII.
         let pool: Vec<(char, Face)> = procedural_chars()
             .map(|ch| (ch, Face::Regular))
             .chain(
                 [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic]
                     .into_iter()
-                    .flat_map(|f| (' '..='~').map(move |ch| (ch, f))),
+                    .flat_map(|f| text_chars().map(move |ch| (ch, f))),
             )
             .collect();
         assert!(
@@ -2460,7 +2566,16 @@ mod tests {
         //
         // Three claims and all three can break silently:
         let tight = atlas(POINT_SIZE, 1.0).metrics();
-        let airy = Atlas::new(None, POINT_SIZE, 1.0, 1.5).metrics();
+        let airy = Atlas::new(
+            None,
+            POINT_SIZE,
+            1.0,
+            Spacing {
+                line: 1.5,
+                ..Spacing::default()
+            },
+        )
+        .metrics();
 
         // (1) **Only the height grows.** The width comes from the font's
         //     advance and has nothing to do with line spacing; if it grew,
@@ -2512,7 +2627,157 @@ mod tests {
         //     pixel too much line spacing. The fix is outside this set and is
         //     a debt in `docs/YOL-HARITASI.md`: it would move every user's
         //     grid, so it is a product decision.
-        assert_eq!(Atlas::new(None, POINT_SIZE, 1.0, 1.0).metrics(), tight);
+        assert_eq!(
+            Atlas::new(None, POINT_SIZE, 1.0, Spacing::default()).metrics(),
+            tight
+        );
+    }
+
+    /// The first and one-past-last inked column of a mask slot.
+    fn ink_columns(bytes: &[u8], w: usize) -> Option<(usize, usize)> {
+        let inked = |x: usize| bytes.chunks(w).any(|row| row[x] > 0);
+        let first = (0..w).find(|&x| inked(x))?;
+        let last = (0..w).rev().find(|&x| inked(x))?;
+        Some((first, last + 1))
+    }
+
+    #[test]
+    fn letter_spacing_widens_the_cell_and_keeps_the_glyph_centred() {
+        // `[font] letter_spacing` (051): the horizontal twin of
+        // `line_height`. Three claims:
+        let mut tight = atlas(POINT_SIZE, 1.0);
+        let spaced = Spacing {
+            letter: 1.5,
+            ..Spacing::default()
+        };
+        let mut airy = Atlas::new(None, POINT_SIZE, 1.0, spaced);
+        let (t, w) = (tight.metrics(), airy.metrics());
+
+        // (1) **Only the width grows**, and from the fractional advance, not
+        //     from the rounded cell: `round_up(space × 1.5)`.
+        assert_eq!(
+            w.cell_px.0,
+            rules::round_up(tight.natural_advance * 1.5),
+            "the width is not the spaced advance"
+        );
+        assert_eq!(w.cell_px.1, t.cell_px.1, "the height changed too");
+        assert_eq!(w.baseline_px, t.baseline_px, "the baseline moved");
+
+        // (2) **The letter sits in the middle.** The base font's glyph keeps
+        //     its size and moves right by half the opened room — the
+        //     criterion is relative to the tight cell, because a glyph's own
+        //     side bearings need not be symmetric. `±1`: the split of an odd
+        //     surplus and the AA edge of a fractional shift. Letters narrower
+        //     than the tight cell, so none of them was clipped there.
+        let surplus = usize::from(w.cell_px.0 - t.cell_px.0);
+        for ch in ['H', 'n', 'o'] {
+            let ink = |a: &mut Atlas| {
+                let w = usize::from(a.metrics().cell_px.0);
+                let (_, upload) = a.slot(
+                    Sprite::Char(ch),
+                    Face::Regular,
+                    SizeClass::Normal,
+                    Half::Whole,
+                );
+                let bytes = upload.expect("new slot").bytes.to_vec();
+                ink_columns(&bytes, w).expect("an inked glyph")
+            };
+            let (l0, r0) = ink(&mut tight);
+            let (l1, r1) = ink(&mut airy);
+            assert!(
+                (r1 - l1).abs_diff(r0 - l0) <= 1,
+                "'{ch}' changed size: {} → {}",
+                r0 - l0,
+                r1 - l1
+            );
+            let moved = l1 as i64 - l0 as i64;
+            assert!(
+                moved.abs_diff(surplus as i64 / 2) <= 1,
+                "'{ch}' is not centred: moved {moved} of a {surplus} px surplus"
+            );
+        }
+
+        // (3) **The small class opens by the same ratio**: the context line's
+        //     column step is the small face's spaced advance.
+        assert_eq!(
+            airy.context_cell_w(),
+            rules::round_up(tight.natural_context_advance * 1.5),
+            "the context line did not open up"
+        );
+        assert!(airy.context_cell_w() > tight.context_cell_w());
+    }
+
+    /// At an opened letter spacing a two-column character stays split across
+    /// **both** columns (051 → Muhakeme): its ink fits one wide cell from
+    /// `letter_spacing ≳ 1.6`, and a gate asking the spaced cell would draw
+    /// it in the left column. The arm decision asks the natural cell.
+    // Calibration: names a font or a measured number (042 Karar 7).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wide_glyph_stays_split_when_letter_spacing_opens() {
+        let spaced = Spacing {
+            letter: 2.0,
+            ..Spacing::default()
+        };
+        let mut a = Atlas::new(None, POINT_SIZE, 1.0, spaced);
+        for ch in ['中', '😀'] {
+            let (left, _) = a.slot(
+                Sprite::Char(ch),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Left,
+            );
+            assert_eq!(left.half, Half::Left, "'{ch}' fell into one cell");
+            // The colour plane has no tofu share: slot 0 there is a real slot.
+            assert!(
+                left.plane == Plane::Color || left.slot != TOFU,
+                "'{ch}' fell to tofu"
+            );
+            let (right, _) = a.slot(
+                Sprite::Char(ch),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Right,
+            );
+            assert_eq!(right.half, Half::Right, "'{ch}' has no right half");
+        }
+    }
+
+    /// A procedural line still meets its neighbour in the wider cell: `─`
+    /// paints the first and the last column (the seam), in both classes.
+    #[test]
+    fn procedural_line_spans_the_spaced_cell() {
+        let spaced = Spacing {
+            letter: 1.7,
+            ..Spacing::default()
+        };
+        let mut a = Atlas::new(None, POINT_SIZE, 2.0, spaced);
+        let w = usize::from(a.metrics().cell_px.0);
+        let (_, upload) = a.slot(
+            Sprite::Char('─'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let bytes = upload.expect("new slot").bytes.to_vec();
+        assert_eq!(
+            ink_columns(&bytes, w),
+            Some((0, w)),
+            "'─' does not span the spaced cell"
+        );
+        let small_w = usize::from(a.context_cell_w());
+        let (_, upload) = a.slot(
+            Sprite::Char('─'),
+            Face::Regular,
+            SizeClass::Small,
+            Half::Whole,
+        );
+        let bytes = upload.expect("new slot").bytes.to_vec();
+        assert_eq!(
+            ink_columns(&bytes, w),
+            Some((0, small_w)),
+            "the small '─' does not span the spaced small cell"
+        );
     }
 
     #[test]
@@ -2524,7 +2789,15 @@ mod tests {
         // tested: if the arithmetic were built backwards (the whole excess
         // going on top), the bottom room would stay the same and rounding
         // could eat a pixel.
-        let mut a = Atlas::new(None, POINT_SIZE, 1.0, 1.5);
+        let mut a = Atlas::new(
+            None,
+            POINT_SIZE,
+            1.0,
+            Spacing {
+                line: 1.5,
+                ..Spacing::default()
+            },
+        );
         let m = a.metrics();
         let (placed__, upload) = a.slot(
             Sprite::Char('g'),
@@ -2619,7 +2892,7 @@ mod tests {
         let pool: Vec<char> = {
             let (_, base, cell) = size_classes(&a)[0];
             ('\u{100000}'..'\u{10FFFD}')
-                .filter(|&ch| rules::fallback_font(base, ch, cell, 1).is_none())
+                .filter(|&ch| rules::fallback_font(base, ch, cell, cell, 1).is_none())
                 .take(cap * 3)
                 .collect()
         };
@@ -2714,7 +2987,7 @@ mod tests {
         // and this test would still stay green.
         let (label, base, _) = size_classes(&a)[0];
         assert!(
-            rules::fallback_font(base, '𝔸', f64::INFINITY, 1).is_some(),
+            rules::fallback_font(base, '𝔸', f64::INFINITY, f64::INFINITY, 1).is_some(),
             "{label}: no candidate was found for the non-BMP character — the cascade's UTF-16 range is suspect"
         );
     }
@@ -2768,12 +3041,12 @@ mod tests {
             Half::Whole,
         );
         assert!(
-            !a.ensure(None, POINT_SIZE, 1.0, 1.0),
+            !a.ensure(None, POINT_SIZE, 1.0, Spacing::default()),
             "the same key must not rebuild"
         );
         assert_eq!(a.occupancy().0, 2, "slots must be kept");
         assert!(
-            a.ensure(None, POINT_SIZE, 2.0, 1.0),
+            a.ensure(None, POINT_SIZE, 2.0, Spacing::default()),
             "the scale changed: it must rebuild"
         );
         assert_eq!(a.occupancy().0, 1, "only tofu in a new atlas");
@@ -2794,11 +3067,16 @@ mod tests {
             Half::Whole,
         );
         assert!(
-            !a.ensure(None, POINT_SIZE, 1.0, 1.0),
+            !a.ensure(None, POINT_SIZE, 1.0, Spacing::default()),
             "the same key must not rebuild"
         );
         assert!(
-            a.ensure(Some(fixture::SECOND_FAMILY), POINT_SIZE, 1.0, 1.0),
+            a.ensure(
+                Some(fixture::SECOND_FAMILY),
+                POINT_SIZE,
+                1.0,
+                Spacing::default()
+            ),
             "the family changed: it must rebuild"
         );
         assert_eq!(a.occupancy().0, 1, "only tofu in a new atlas");
@@ -2809,19 +3087,24 @@ mod tests {
             Half::Whole,
         );
         assert!(
-            !a.ensure(Some(fixture::SECOND_FAMILY), POINT_SIZE, 1.0, 1.0),
+            !a.ensure(
+                Some(fixture::SECOND_FAMILY),
+                POINT_SIZE,
+                1.0,
+                Spacing::default()
+            ),
             "the same family must not rebuild"
         );
         assert_eq!(a.occupancy().0, 2, "slots must be kept");
         assert!(
-            a.ensure(None, POINT_SIZE, 1.0, 1.0),
+            a.ensure(None, POINT_SIZE, 1.0, Spacing::default()),
             "going back to the chain is also a change"
         );
     }
 
     #[test]
     fn missing_family_opens_the_chain_and_says_so() {
-        let a = Atlas::new(Some(MISSING_FAMILY), POINT_SIZE, 1.0, 1.0);
+        let a = Atlas::new(Some(MISSING_FAMILY), POINT_SIZE, 1.0, Spacing::default());
         let (_, chain) = Backend::open_default(POINT_SIZE);
         assert_eq!(
             a.font_issue(),
@@ -2850,7 +3133,7 @@ mod tests {
             family.to_lowercase(),
             family.to_uppercase(),
         ] {
-            let a = Atlas::new(Some(&name), POINT_SIZE, 1.0, 1.0);
+            let a = Atlas::new(Some(&name), POINT_SIZE, 1.0, Spacing::default());
             assert_eq!(a.font_issue(), None, "{name}");
         }
     }
@@ -2858,7 +3141,12 @@ mod tests {
     #[test]
     fn proportional_family_opens_with_a_warning() {
         // Helvetica exists on every macOS and is not monospaced.
-        let mut a = Atlas::new(Some(fixture::PROPORTIONAL_FAMILY), POINT_SIZE, 1.0, 1.0);
+        let mut a = Atlas::new(
+            Some(fixture::PROPORTIONAL_FAMILY),
+            POINT_SIZE,
+            1.0,
+            Spacing::default(),
+        );
         assert_eq!(
             a.font_issue(),
             Some(&FontIssue::NotMonospaced {
@@ -3019,7 +3307,7 @@ mod tests {
             .0
             .slot
         };
-        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
         assert_eq!(menlo.font_issue(), None, "Menlo did not open");
         assert_ne!(
             slot_of(&mut menlo),
@@ -3030,7 +3318,7 @@ mod tests {
         // SF Mono is **not a gate**: if it is not installed the query is
         // skipped and says so; if it is installed, the result is the
         // subject of the visual check, here it is only printed.
-        let mut sf = Atlas::new(Some("SF Mono"), POINT_SIZE, 1.0, 1.0);
+        let mut sf = Atlas::new(Some("SF Mono"), POINT_SIZE, 1.0, Spacing::default());
         if sf.font_issue().is_some() {
             eprintln!("SF Mono is not installed; the '{REMOTE_MARK}' query was skipped");
         } else {
@@ -3049,7 +3337,7 @@ mod tests {
         // The three non-ASCII characters too: the mark, the separator and ⏎.
         // If a box appears, the string must change in `bt-core`
         // (`dock::RECONNECT_HINT`). Menlo, by name.
-        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
         assert_eq!(menlo.font_issue(), None, "Menlo did not open");
         for ch in [REMOTE_MARK, '·', '⏎'] {
             let slot = menlo
@@ -3074,7 +3362,7 @@ mod tests {
         // `UPLOAD_GLYPHS` (this crate cannot see it;
         // `the_upload_row_is_the_one_the_atlas_checks` links them). If a box
         // appears, the string must change in `bt-shell`. Menlo, by name.
-        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
         assert_eq!(menlo.font_issue(), None, "Menlo did not open");
         for ch in ['↑', '↓', '⌘', '✓', '—', '·', '…', '→'] {
             let slot = menlo
@@ -3909,7 +4197,7 @@ mod tests {
         // procedural blocks (this crate cannot see it;
         // `the_stats_glyphs_are_the_ones_the_atlas_checks` links them) — the twin of
         // `the_upload_row_has_no_box_in_the_small_class`. Menlo, by name.
-        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
         assert_eq!(menlo.font_issue(), None, "Menlo did not open");
         for ch in ['▲', '●'] {
             let slot = menlo
@@ -4885,19 +5173,20 @@ mod tests {
     /// occupancy would stay green for nothing.
     #[test]
     fn a_wide_char_is_rejected_whole_when_only_one_slot_is_left() {
-        let mut a = Atlas::new(None, LARGE_POINT_SIZE, 1.0, LARGEST_LINE_HEIGHT);
+        let mut a = Atlas::new(None, LARGE_POINT_SIZE, 1.0, LARGEST_SPACING);
         let cap = a.capacity().saturating_sub(RULE_RESERVE);
         // The pool is built **for the same reason** as that of
         // `full_atlas_returns_tofu_without_caching`: a character falling to tofu
         // spends no slot, so the fill must be of characters that can really be
         // drawn. The procedural family is normalised to `Regular` so it takes
-        // one slot, ASCII takes a separate slot in each of the four faces.
+        // one slot, the text set takes a separate slot in each of the four
+        // faces.
         let pool: Vec<(char, Face)> = procedural_chars()
             .map(|ch| (ch, Face::Regular))
             .chain(
                 [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic]
                     .into_iter()
-                    .flat_map(|f| (' '..='~').map(move |ch| (ch, f))),
+                    .flat_map(|f| text_chars().map(move |ch| (ch, f))),
             )
             .collect();
         // Fill until exactly **one** slot is left free.
@@ -5219,7 +5508,10 @@ mod tests {
     fn a_stale_cluster_id_is_tofu() {
         let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
         let sprite = a.intern(CLUSTERS[0]);
-        assert!(a.ensure(None, POINT_SIZE + 1.0, 1.0, 1.0), "key changed");
+        assert!(
+            a.ensure(None, POINT_SIZE + 1.0, 1.0, Spacing::default()),
+            "key changed"
+        );
         let (placed, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
         assert_eq!(placed.slot, TOFU);
         assert!(upload.is_none());

@@ -80,7 +80,7 @@ pub(crate) fn classify(base: &Font, ch: char, cell_advance: f64, cols: u8) -> Cl
     let box_advance = cell_advance * f64::from(cols);
     let ratio = ink.width / box_advance;
     let fit = rules::fit_ratio(box_advance, advance, ink);
-    match rules::accept(candidate, glyph, cell_advance, cols) {
+    match rules::accept(candidate, glyph, cell_advance, cell_advance, cols) {
         Some(a) if a.shrunk => Class::Shrunk {
             font: family,
             ratio,
@@ -177,6 +177,7 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
+    use crate::Spacing;
 
     /// The characters of real tools do not come out as boxes — or the ones
     /// that do are named in [`EXPECTED_TOFU`].
@@ -191,7 +192,7 @@ mod tests {
     /// the chain's default.
     #[test]
     fn tool_chars_are_not_tofu() {
-        let a = Atlas::new(None, 16.0, 2.0, 1.0);
+        let a = Atlas::new(None, 16.0, 2.0, Spacing::default());
         let observed: Vec<(char, bool)> =
             TOOL_CHARS.iter().map(|&ch| (ch, is_tofu(&a, ch))).collect();
         let drift = tofu_drift(&observed, &EXPECTED_TOFU);
@@ -270,11 +271,11 @@ mod tests {
     #[test]
     fn shrunk_glyph_stays_inside_the_cell() {
         for (pt, scale) in [(16.0, 2.0), (13.0, 1.0)] {
-            let a = Atlas::new(None, pt, scale, 1.0);
+            let a = Atlas::new(None, pt, scale, Spacing::default());
             let base = a.faces.get(Face::Regular);
             let m = a.metrics;
             for (ch, color) in [('⧉', false), ('🌡', true)] {
-                let alt = rules::fallback_font(base, ch, a.cell_advance, 1)
+                let alt = rules::fallback_font(base, ch, a.cell_advance, a.cell_advance, 1)
                     .unwrap_or_else(|| panic!("{ch} {pt}pt@{scale}x: came out as a box"));
                 assert!(
                     alt.shrunk,
@@ -313,7 +314,7 @@ mod tests {
     /// too.
     #[test]
     fn a_shrunk_single_cell_does_not_answer_the_wide_request() {
-        let mut a = Atlas::new(None, 13.0, 1.0, 1.0);
+        let mut a = Atlas::new(None, 13.0, 1.0, Spacing::default());
         for face in [Face::Regular, Face::Bold] {
             let ask = |a: &mut Atlas, half| {
                 let (placed, upload) = a.slot(
@@ -350,9 +351,10 @@ mod tests {
     /// columns the grid set aside.
     #[test]
     fn wide_emoji_shrinks_into_two_cells_at_1x() {
-        let a = Atlas::new(None, 13.0, 1.0, 1.0);
+        let a = Atlas::new(None, 13.0, 1.0, Spacing::default());
         let base = a.faces.get(Face::Regular);
-        let alt = rules::fallback_font(base, '😀', a.cell_advance, 2).expect("😀 @1x: tofu");
+        let alt = rules::fallback_font(base, '😀', a.cell_advance, a.cell_advance, 2)
+            .expect("😀 @1x: tofu");
         assert!(alt.shrunk, "did not fit two cells at @1x; should be shrunk");
         assert_eq!(alt.cols, 2, "the shrink must target the two-cell box");
     }
@@ -364,7 +366,7 @@ mod tests {
     /// which side it fell on.
     #[test]
     fn just_above_the_limit_stays_tofu() {
-        let a = Atlas::new(None, 16.0, 2.0, 1.0);
+        let a = Atlas::new(None, 16.0, 2.0, Spacing::default());
         let base = a.faces.get(Face::Regular);
         match classify(base, '🝇', a.cell_advance, 1) {
             Class::Rejected { fit, .. } => assert!(
@@ -380,7 +382,7 @@ mod tests {
     /// is still a box.
     #[test]
     fn last_resort_is_not_shrunk() {
-        let a = Atlas::new(None, 16.0, 2.0, 1.0);
+        let a = Atlas::new(None, 16.0, 2.0, Spacing::default());
         let base = a.faces.get(Face::Regular);
         let ch = '\u{E0A0}';
         let candidate = Backend::cascade(base, ch.encode_utf8(&mut [0u8; 4]))
@@ -399,7 +401,7 @@ mod tests {
             fit <= rules::SHRINK_LIMIT,
             "fit {fit:.3} must be within the limit"
         );
-        assert!(rules::accept(candidate, glyph, a.cell_advance, 1).is_none());
+        assert!(rules::accept(candidate, glyph, a.cell_advance, a.cell_advance, 1).is_none());
     }
 
     /// Every candidate that passes the gate today is drawn **bit-for-bit the
@@ -410,7 +412,7 @@ mod tests {
     /// path (`raster::draw`, the wrapper without `rise`).
     #[test]
     fn gate_accepted_candidates_are_unchanged() {
-        let a = Atlas::new(None, 16.0, 2.0, 1.0);
+        let a = Atlas::new(None, 16.0, 2.0, Spacing::default());
         let base = a.faces.get(Face::Regular);
         let (cell, m) = (a.cell_advance, a.metrics);
         let mut passed = 0usize;
@@ -430,7 +432,8 @@ mod tests {
                     continue;
                 }
                 let ptr: *const _ = &*candidate;
-                let alt = rules::accept(candidate, glyph, cell, 1).expect("gate-passing rejected");
+                let alt =
+                    rules::accept(candidate, glyph, cell, cell, 1).expect("gate-passing rejected");
                 assert!(!alt.shrunk, "{ch}: a gate-passing candidate was shrunk");
                 assert!(std::ptr::eq(ptr, &*alt.font), "{ch}: font changed");
                 assert_eq!(alt.rise(m), 0.0, "{ch}: vertical shift");
@@ -439,7 +442,7 @@ mod tests {
         }
         assert!(passed > 300, "too few gate-passing candidates: {passed}");
 
-        let alt = rules::fallback_font(base, '⏺', cell, 1).expect("⏺ came out as a box");
+        let alt = rules::fallback_font(base, '⏺', cell, cell, 1).expect("⏺ came out as a box");
         let mut before = vec![0u8; m.slot_bytes()];
         let mut after = vec![0u8; m.slot_bytes()];
         raster::draw(&alt.font, '⏺', m, cell, 0.0, &mut before);
@@ -555,7 +558,7 @@ mod tests {
         let family = std::env::var("BT_SCAN_FONT").ok();
         let mut out = String::new();
         for (pt, scale) in COMBOS {
-            let a = Atlas::new(family.as_deref(), pt, scale, 1.0);
+            let a = Atlas::new(family.as_deref(), pt, scale, Spacing::default());
             let base = a.faces.get(Face::Regular);
             let cell = a.cell_advance;
             let base_name = crate::coretext::fixture::family_name(base);

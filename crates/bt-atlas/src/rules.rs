@@ -341,16 +341,12 @@ pub fn family_issue(family: &str) -> Option<FontIssue> {
 }
 
 /// Derives the cell size from the font's own metrics ([`cell_metrics`] with
-/// the font's raw measurements).
-pub(crate) fn metrics(font: &Font, line_height: f64) -> Metrics {
-    metrics_at(font, space_advance(font), line_height)
-}
-
-/// [`metrics`] with the advance **handed in**: the caller already holds the
-/// font's [`space_advance`] and the width must not be derived a second time.
-/// The small class's `Metrics` is born this way, from the very number its
-/// column step rounds (`Atlas::context_advance`), i.e. the small class keeps
-/// one width source.
+/// the font's raw measurements) and the advance **handed in**: the caller
+/// already holds the cell's fractional advance — the font's [`space_advance`]
+/// times the letter spacing — and the width must not be derived a second
+/// time. Both classes' `Metrics` are born this way, from the very number
+/// their column step rounds (`Atlas::cell_advance`, `Atlas::context_advance`),
+/// i.e. each class keeps one width source.
 pub(crate) fn metrics_at(font: &Font, space_advance: f64, line_height: f64) -> Metrics {
     cell_metrics(Backend::raw_metrics(font), space_advance, line_height)
 }
@@ -592,12 +588,13 @@ pub(crate) fn fallback_font(
     base: &Font,
     ch: char,
     cell_advance: f64,
+    natural_advance: f64,
     cols: u8,
 ) -> Option<Accepted> {
     let mut utf8 = [0u8; 4];
     let candidate = Backend::cascade(base, ch.encode_utf8(&mut utf8))?;
     let glyph = Backend::glyph(&candidate, ch)?;
-    accept(candidate, glyph, cell_advance, cols)
+    accept(candidate, glyph, cell_advance, natural_advance, cols)
 }
 
 /// Shapes a grapheme cluster (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) into a **single
@@ -615,10 +612,11 @@ pub(crate) fn shape_cluster(
     base: &Font,
     text: &str,
     cell_advance: f64,
+    natural_advance: f64,
     cols: u8,
 ) -> Option<Accepted> {
     let (font, glyph) = Backend::shape(base, text)?;
-    accept(font, glyph, cell_advance, cols)
+    accept(font, glyph, cell_advance, natural_advance, cols)
 }
 
 /// The ink gate: does the candidate's glyph fit first in one cell, then (if
@@ -632,7 +630,19 @@ pub(crate) fn shape_cluster(
 ///
 /// The candidate glyph's own measurements are read **once** and both gates
 /// test the **same** `(advance, ink)` pair; [`shrink`] is the third arm.
-pub(crate) fn accept(candidate: Font, glyph: u32, cell_advance: f64, cols: u8) -> Option<Accepted> {
+///
+/// **Two advances** (051): `cell_advance` is the spaced cell the glyph is
+/// drawn in — the box, the centring, the second arm and the shrinking see
+/// it — while `natural_advance` is the font's own cell, and only the first
+/// gate's **arm decision** looks at it. At `letter_spacing = 1` the two are
+/// the same number and the gate is bit for bit today's.
+pub(crate) fn accept(
+    candidate: Font,
+    glyph: u32,
+    cell_advance: f64,
+    natural_advance: f64,
+    cols: u8,
+) -> Option<Accepted> {
     let advance = Backend::advance(&candidate, glyph);
     let ink = Backend::ink(&candidate, glyph);
     // **The order is mandatory: one cell first.** A candidate that fits in
@@ -643,7 +653,14 @@ pub(crate) fn accept(candidate: Font, glyph: u32, cell_advance: f64, cols: u8) -
     // one cell — 21 are Menlo's own glyphs, 44 are CJK punctuation and
     // fullwidth forms with slender ink from the cascade (`、 。 》 ！`). A side
     // benefit is capacity: those 65 do not spend a second slot.
-    if ink_fits_placed(cell_advance, advance, ink) {
+    //
+    // The criterion is the **natural** cell: "fits one cell today". Asked
+    // with the spaced cell, a two-column CJK or emoji glyph (ink ~1.5–1.66
+    // natural cells) would fit one cell from `letter_spacing ≳ 1.6` on and be
+    // drawn in the left column instead of across both. A glyph that fits the
+    // natural cell also fits the spaced one at the centred place, so the
+    // drawing (in the spaced cell) never overflows.
+    if ink_fits_placed(natural_advance, advance, ink) {
         return Some(Accepted {
             font: candidate,
             glyph,
@@ -651,12 +668,17 @@ pub(crate) fn accept(candidate: Font, glyph: u32, cell_advance: f64, cols: u8) -
             shrunk: false,
         });
     }
-    // The second gate opens only for a character **declared two columns**.
-    // Giving two cells to a single-column character would paint over its
-    // neighbour: the grid reserves no spacer for it and that cell has its own
-    // ink. That is why the criterion is `min(columns, ink)`.
+    // The second gate's box is the character's own columns at the **spaced**
+    // cell. Two cells open only for a character **declared two columns**:
+    // giving two cells to a single-column character would paint over its
+    // neighbour — the grid reserves no spacer for it and that cell has its
+    // own ink. That is why the criterion is `min(columns, ink)`. For a
+    // single-column character the box is the one spaced cell: at
+    // `letter_spacing = 1` it is the natural cell the first gate already
+    // rejected (same answer), opened up it lets a glyph that fits the wider
+    // cell be drawn at full size instead of being shrunk.
     let box_advance = cell_advance * f64::from(cols.max(1));
-    if cols >= 2 && ink_fits_placed(box_advance, advance, ink) {
+    if ink_fits_placed(box_advance, advance, ink) {
         return Some(Accepted {
             font: candidate,
             glyph,
