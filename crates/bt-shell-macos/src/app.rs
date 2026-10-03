@@ -1690,6 +1690,7 @@ fn teardown_token(teardown: Option<Teardown>) -> &'static str {
         Some(Teardown::Panicked) => "panicked",
         Some(Teardown::Unbounded) => "unbounded",
         Some(Teardown::AlreadyDone) => "already-done",
+        Some(Teardown::HungUp) => "hung-up",
     }
 }
 

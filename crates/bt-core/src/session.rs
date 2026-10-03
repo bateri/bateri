@@ -37,8 +37,10 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read as _};
+use std::mem::ManuallyDrop;
 use std::ops::{DerefMut, RangeInclusive};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
@@ -79,7 +81,9 @@ use crate::input::{
     WheelRoute,
 };
 use crate::link;
-use crate::reader::{EventLoop, EventLoopSender, Msg, State};
+use crate::reader::{
+    EventLoop, EventLoopSender, Msg, PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN, State,
+};
 use crate::search::{
     self, SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns,
     SearchSlot, SearchStatus,
@@ -1345,6 +1349,10 @@ struct AdapterInner {
     /// the `false → true` transition produces [`Wake::search_changed`], its
     /// consumer is [`Session::search_step`] (by restarting the next pass from scratch).
     search_pending: AtomicBool,
+    /// Whether [`Wake::child_exit`] went (055): an adopted child is not ours
+    /// and its exit carries no status, so the loop sends no `ChildExit` —
+    /// the `Exit` that follows every child exit sends the news then.
+    child_exited: AtomicBool,
 }
 
 impl Adapter {
@@ -1365,6 +1373,7 @@ impl Adapter {
             wipes: AtomicU64::new(0),
             search_active: AtomicBool::new(false),
             search_pending: AtomicBool::new(false),
+            child_exited: AtomicBool::new(false),
         }))
     }
 
@@ -1440,7 +1449,19 @@ impl EventListener for Adapter {
                 self.search_changed();
                 self.wake_frame();
             }
-            Event::ChildExit(status) => self.0.wake.child_exit(status.code()),
+            Event::ChildExit(status) => {
+                self.0.child_exited.store(true, Ordering::Release);
+                self.0.wake.child_exit(status.code());
+            }
+            // `Term::exit`'s event: the reader loop sends it right after a
+            // child exit and nowhere else. A spawned child's `ChildExit` came
+            // first; an adopted one's exit has no status (055), so this is
+            // its news, without a code.
+            Event::Exit => {
+                if !self.0.child_exited.swap(true, Ordering::AcqRel) {
+                    self.0.wake.child_exit(None);
+                }
+            }
             Event::PtyWrite(text) => self.reply(text),
             // The colour question comes while the `Term` lock is held; asking
             // for the lock back to read the table would be a deadlock (the lock
@@ -1533,8 +1554,7 @@ impl EventListener for Adapter {
             Event::Bell
             | Event::ClipboardLoad(..)
             | Event::MouseCursorDirty
-            | Event::CursorBlinkingChange
-            | Event::Exit => {}
+            | Event::CursorBlinkingChange => {}
         }
     }
 }
@@ -1565,9 +1585,14 @@ impl EventListener for Adapter {
 /// separate; a reading that confuses them in a single sentence thinks the
 /// debt is closed.
 ///
+/// **Two kinds of PTY** since 055 ([`PtyKind`]): the one this process
+/// opened and the one it adopted from another bateri across an update. The
+/// byte path is the same for both; only the fds' registration, the child's
+/// exit and the shutdown differ.
+///
 /// Not `pub`: by the layer rule no alacritty type leaks outward.
 struct TappedPty {
-    pty: Pty,
+    pty: PtyKind,
     scanner: Scanner,
     /// The same slot as [`Session::shell`]. **Only** this place writes (the
     /// reader thread), [`Session::shell_state`] reads.
@@ -1601,23 +1626,44 @@ struct TappedPty {
     /// before the bytes a fresh parser reads next ([`snapshot::Tail`]).
     /// Followed on the same slice the scanner sees, no second read.
     tail: snapshot::Tail,
+    /// Bytes served **before** the fd (055): an adopted PTY's carried tail
+    /// and the holder's buffer — what the old side read or the holder
+    /// drained but no parser applied. They take the ordinary read path,
+    /// scanner and tail included; `prefix_at` is how far it went.
+    prefix: Vec<u8>,
+    prefix_at: usize,
 }
 
 impl TappedPty {
     /// The bytes since the parser last stood in its ground state — read once
     /// the reader has stopped, so no byte comes after them.
-    #[expect(
-        dead_code,
-        reason = "055 phase-2's freeze reads it after the reader stops"
-    )]
     fn tail(&self) -> &[u8] {
         self.tail.bytes()
+    }
+
+    /// The next read: the carried prefix first, then the fd.
+    fn read_raw(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.prefix_at < self.prefix.len() {
+            let rest = &self.prefix[self.prefix_at..];
+            let n = rest.len().min(buf.len());
+            buf[..n].copy_from_slice(&rest[..n]);
+            self.prefix_at += n;
+            if self.prefix_at == self.prefix.len() {
+                self.prefix = Vec::new();
+                self.prefix_at = 0;
+            }
+            return Ok(n);
+        }
+        match &mut self.pty {
+            PtyKind::Spawned(pty) => pty.reader().read(buf),
+            PtyKind::Adopted(pty) => pty.file().read(buf),
+        }
     }
 }
 
 impl io::Read for TappedPty {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let read = self.pty.reader().read(buf)?;
+        let read = self.read_raw(buf)?;
         self.tail.feed(&buf[..read]);
         // Only the slice read **in this round** is scanned; `EventLoop` reads
         // accumulating into its buffer (`buf[unprocessed..]`) and scanning from
@@ -1712,7 +1758,9 @@ impl tty::EventedReadWrite for TappedPty {
         poll_opts: PollMode,
     ) -> io::Result<()> {
         // The fd registration is the inner `Pty`'s: the readiness signal, the
-        // tokens and the child-event pipeline stay untouched.
+        // tokens and the child-event pipeline stay untouched. An adopted PTY
+        // registers the same two tokens: the master for I/O, the exit fd in
+        // the child-event pipe's place.
         //
         // SAFETY: the trait's condition is "sources must **outlive** their
         // registrations". The owner of the registered fds is `self.pty` and its
@@ -1720,7 +1768,10 @@ impl tty::EventedReadWrite for TappedPty {
         // borrow. The two move into the `EventLoop` together and since `deregister`
         // also goes through the same `self` the registration is lifted before the
         // source drops. There is no path by which `TappedPty` gives the `Pty` back.
-        unsafe { self.pty.register(poll, interest, poll_opts) }
+        match &mut self.pty {
+            PtyKind::Spawned(pty) => unsafe { pty.register(poll, interest, poll_opts) },
+            PtyKind::Adopted(pty) => unsafe { pty.register(poll, interest, poll_opts) },
+        }
     }
 
     fn reregister(
@@ -1729,11 +1780,17 @@ impl tty::EventedReadWrite for TappedPty {
         interest: PollingEvent,
         poll_opts: PollMode,
     ) -> io::Result<()> {
-        self.pty.reregister(poll, interest, poll_opts)
+        match &mut self.pty {
+            PtyKind::Spawned(pty) => pty.reregister(poll, interest, poll_opts),
+            PtyKind::Adopted(pty) => pty.reregister(poll, interest, poll_opts),
+        }
     }
 
     fn deregister(&mut self, poll: &Arc<Poller>) -> io::Result<()> {
-        self.pty.deregister(poll)
+        match &mut self.pty {
+            PtyKind::Spawned(pty) => pty.deregister(poll),
+            PtyKind::Adopted(pty) => pty.deregister(poll),
+        }
     }
 
     fn reader(&mut self) -> &mut Self {
@@ -1741,20 +1798,190 @@ impl tty::EventedReadWrite for TappedPty {
     }
 
     fn writer(&mut self) -> &mut File {
-        self.pty.writer()
+        match &mut self.pty {
+            PtyKind::Spawned(pty) => pty.writer(),
+            PtyKind::Adopted(pty) => pty.file(),
+        }
     }
 }
 
 impl tty::EventedPty for TappedPty {
     fn next_child_event(&mut self) -> Option<tty::ChildEvent> {
-        self.pty.next_child_event()
+        match &mut self.pty {
+            PtyKind::Spawned(pty) => pty.next_child_event(),
+            // The exit fd's only readiness is the exit: no status, the
+            // child is not ours (`Adapter`'s `Exit` arm sends the news).
+            PtyKind::Adopted(_) => Some(tty::ChildEvent::Exited(None)),
+        }
     }
 }
 
 impl OnResize for TappedPty {
     fn on_resize(&mut self, window_size: WindowSize) {
-        self.pty.on_resize(window_size);
+        match &mut self.pty {
+            PtyKind::Spawned(pty) => pty.on_resize(window_size),
+            PtyKind::Adopted(pty) => pty.resize(window_size),
+        }
     }
+}
+
+/// The PTY behind [`TappedPty`] (055 R2.1).
+enum PtyKind {
+    /// Opened here; its `Drop` sends `SIGHUP` and **waits** for the child.
+    Spawned(Pty),
+    /// Adopted from another bateri across an update ([`Session::adopt`]):
+    /// the child is not ours, so no `wait`.
+    Adopted(AdoptedPty),
+}
+
+/// An adopted PTY: the master, the child's exit fd and the platform's two
+/// syscalls (`bt-core` has no `libc`; [`PtyOps`]).
+struct AdoptedPty {
+    /// `ManuallyDrop` only so `Drop` can close it **before** the hangup.
+    master: ManuallyDrop<File>,
+    /// Readable once the child exited (a `kqueue` with `NOTE_EXIT` on macOS,
+    /// a pidfd on Linux) — registered in the child-event pipe's place.
+    exit: OwnedFd,
+    pid: u32,
+    ops: Arc<dyn PtyOps>,
+}
+
+impl AdoptedPty {
+    fn file(&mut self) -> &mut File {
+        &mut self.master
+    }
+
+    /// The same calls `Pty::register` makes, on the same tokens.
+    ///
+    /// # Safety
+    ///
+    /// The fds must outlive the registration (the trait's condition; the
+    /// caller is [`TappedPty`]'s `register`, which owns `self`).
+    unsafe fn register(
+        &mut self,
+        poll: &Arc<Poller>,
+        mut interest: PollingEvent,
+        poll_opts: PollMode,
+    ) -> io::Result<()> {
+        interest.key = PTY_READ_WRITE_TOKEN;
+        // SAFETY: the caller's promise — `self` owns both fds.
+        unsafe {
+            poll.add_with_mode(&*self.file(), interest, poll_opts)?;
+            poll.add_with_mode(
+                &self.exit,
+                PollingEvent::readable(PTY_CHILD_EVENT_TOKEN),
+                PollMode::Level,
+            )
+        }
+    }
+
+    fn reregister(
+        &mut self,
+        poll: &Arc<Poller>,
+        mut interest: PollingEvent,
+        poll_opts: PollMode,
+    ) -> io::Result<()> {
+        interest.key = PTY_READ_WRITE_TOKEN;
+        poll.modify_with_mode(&*self.file(), interest, poll_opts)?;
+        poll.modify_with_mode(
+            &self.exit,
+            PollingEvent::readable(PTY_CHILD_EVENT_TOKEN),
+            PollMode::Level,
+        )
+    }
+
+    fn deregister(&mut self, poll: &Arc<Poller>) -> io::Result<()> {
+        poll.delete(&*self.file())?;
+        poll.delete(&self.exit)
+    }
+
+    fn resize(&mut self, size: WindowSize) {
+        let size = PtySize {
+            cols: size.num_cols,
+            rows: size.num_lines,
+            cell_width: size.cell_width,
+            cell_height: size.cell_height,
+        };
+        let ops = Arc::clone(&self.ops);
+        ops.resize(self.file().as_fd(), size);
+    }
+}
+
+impl Drop for AdoptedPty {
+    /// The master closes first — the slave's hangup is the mechanism
+    /// (`.tasks/055-guncellemede-canli-devir/context.md` → Ölçülenler 2) —
+    /// then the belt and braces: `SIGHUP` to the pid unless it already
+    /// exited. No `wait`: the child is not ours.
+    fn drop(&mut self) {
+        // SAFETY: dropped exactly once, here, and never touched after.
+        unsafe { ManuallyDrop::drop(&mut self.master) };
+        self.ops.hangup(self.pid, self.exit.as_fd());
+    }
+}
+
+/// A PTY's size, the platform's [`PtyOps::resize`] input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PtySize {
+    pub cols: u16,
+    pub rows: u16,
+    /// A cell's pixel size (`TIOCSWINSZ`'s pixel fields are cols × this).
+    pub cell_width: u16,
+    pub cell_height: u16,
+}
+
+/// The two syscalls an adopted PTY needs and `bt-core` cannot make — it has
+/// no `libc` (the [`Session::remote_login`] precedent: the platform shell
+/// passes the call in). The body is `bt_shell_common::jobs::SystemPty`.
+pub trait PtyOps: Send + Sync {
+    /// `TIOCSWINSZ` on the master.
+    fn resize(&self, master: BorrowedFd<'_>, size: PtySize);
+    /// `SIGHUP` to `pid` **unless** `exit` (the child's exit fd) is already
+    /// readable — then the pid may be another process's.
+    fn hangup(&self, pid: u32, exit: BorrowedFd<'_>);
+}
+
+/// What [`Session::freeze`] hands over (055 R2.2): everything another
+/// process needs to carry the pane on without the child noticing.
+#[derive(Debug)]
+pub struct Frozen {
+    /// A copy of the PTY master; the original stays open in the frozen
+    /// session, which is leaked (`freeze`'s doc).
+    pub master: OwnedFd,
+    /// The PTY's child (`login(1)` in a normal session).
+    pub pid: u32,
+    /// The grid's size: the VT is laid out for it, so the adopting `Term`
+    /// is born with it ([`SessionOptions::cols`]/`rows`) and resized after.
+    pub cols: u16,
+    pub rows: u16,
+    /// [`Session::live_snapshot`].
+    pub vt: Vec<u8>,
+    /// [`Session::state_blob`].
+    pub blob: Vec<u8>,
+    /// The bytes after the parser's last ground state (a half sequence,
+    /// a half UTF-8 character): they go **before** whatever the master
+    /// gives next ([`Adoption::prefix`]).
+    pub tail: Vec<u8>,
+    /// Input the loop never wrote to the PTY: it goes out first on the
+    /// adopting side ([`Adoption::input`]).
+    pub input: Vec<u8>,
+}
+
+/// What [`Session::adopt`] takes: a [`Frozen`]'s parts plus the two things
+/// only the adopting process can make.
+pub struct Adoption {
+    /// The PTY master. **Non-blocking** — the frozen side's copy shares the
+    /// open file description, so `O_NONBLOCK` comes with it.
+    pub master: OwnedFd,
+    /// Readable once the child exited (`bt_shell_common::jobs::exit_fd`).
+    pub exit: OwnedFd,
+    pub pid: u32,
+    pub vt: Vec<u8>,
+    pub blob: Vec<u8>,
+    /// [`Frozen::tail`] followed by whatever the master gave meanwhile (the
+    /// holder's buffer): the ordinary read path, scanner included.
+    pub prefix: Vec<u8>,
+    pub input: Vec<u8>,
+    pub ops: Arc<dyn PtyOps>,
 }
 
 /// The user input held while the first input is going (037 phase-4): `Some` →
@@ -1833,6 +2060,10 @@ pub enum Teardown {
     /// The second and later calls. Nothing was waited for; the **first** call
     /// knows the shutdown's real result.
     AlreadyDone,
+    /// An **adopted** session's clean shutdown (055 R2.4): the reader
+    /// finished, the master closed and the child got its hangup — nobody
+    /// waits for it, it is not our child.
+    HungUp,
 }
 
 /// The handle of a started shutdown ([`Session::begin_shutdown`]).
@@ -1842,7 +2073,11 @@ pub enum Teardown {
 /// The handle may drop without being waited on — the shutdown still finishes,
 /// only nobody reads its result.
 #[must_use = "a dropped handle does not stop the shutdown but swallows its result"]
-pub struct ShutdownHandle(Option<mpsc::Receiver<bool>>);
+pub struct ShutdownHandle {
+    finished: Option<mpsc::Receiver<bool>>,
+    /// Whether the session was adopted: its clean end is [`Teardown::HungUp`].
+    adopted: bool,
+}
 
 impl ShutdownHandle {
     /// Waits for the shutdown until `deadline` at most and gives its result.
@@ -1853,11 +2088,12 @@ impl ShutdownHandle {
     /// [`SHUTDOWN_GRACE`]. A past deadline is a zero wait: a finished shutdown
     /// still returns `Clean`, an unfinished one `Abandoned`.
     pub fn wait_until(self, deadline: Instant) -> Teardown {
-        let Some(finished) = self.0 else {
+        let Some(finished) = self.finished else {
             return Teardown::Unbounded;
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
         match finished.recv_timeout(remaining) {
+            Ok(true) if self.adopted => Teardown::HungUp,
             Ok(true) => Teardown::Clean,
             // The shutdown **finished** but the reader ended with a panic: the
             // child was collected, yet this is a rule violation and must show in the report.
@@ -3675,7 +3911,26 @@ pub struct Session {
     /// the login signal then comes from the output alone — and after
     /// [`Session::begin_shutdown`], which closes it **before** the `Pty`'s
     /// own `Drop`: the slave's hangup comes when it always did. Read-only use.
+    /// [`Session::freeze`] takes it: it is the handover's master.
     master: Mutex<Option<File>>,
+    /// Whether the PTY was adopted ([`Session::adopt`]): its shutdown is a
+    /// hangup without `wait` ([`Teardown::HungUp`]).
+    adopted: bool,
+}
+
+/// The PTY side of [`Session::assemble`]'s input: what [`Session::spawn`]
+/// opened or [`Session::adopt`] was given.
+struct Birth {
+    pty: PtyKind,
+    child_pid: u32,
+    /// The copy behind [`Session::with_pty_fd`] and [`Session::freeze`].
+    master: Option<File>,
+    drain_on_exit: bool,
+    /// Replayed into the fresh `Term` past the scanner: the previous
+    /// session's scrollback (053) or the frozen VT (055).
+    replay: Option<Vec<u8>>,
+    /// Served by the first reads ([`TappedPty::prefix`]).
+    prefix: Vec<u8>,
 }
 
 impl Session {
@@ -3689,7 +3944,7 @@ impl Session {
     const UNSTAMPED: usize = usize::MAX;
 
     /// Opens the PTY, starts the shell and sets up the reader thread.
-    pub fn spawn(options: SessionOptions, wake: Arc<dyn Wake>) -> io::Result<Self> {
+    pub fn spawn(mut options: SessionOptions, wake: Arc<dyn Wake>) -> io::Result<Self> {
         let grid = GridSize::for_spawn(options.cols, options.rows);
         let size = window_size(grid, options.cell_px);
 
@@ -3700,7 +3955,7 @@ impl Session {
         // The order is the precedence order (`SessionOptions::env`): the two
         // constants enter the additional environment's map **afterwards** — the
         // ones that override the same key are them.
-        let mut env = options.env;
+        let mut env = std::mem::take(&mut options.env);
         env.insert("TERM".to_owned(), "xterm-256color".to_owned());
         env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
         // The identity family is in the same layer (038). A side gain of its being
@@ -3746,15 +4001,128 @@ impl Session {
         let pty_options = tty::Options {
             shell: options
                 .command
+                .take()
                 .map(|(program, args)| Shell::new(program, args)),
-            working_directory: options.working_directory,
+            working_directory: options.working_directory.take(),
             env,
             ..Default::default()
         };
-        let home = options.home;
         let pty = tty::new(&pty_options, size, 0)?;
         let child_pid = pty.child().id();
-        let master = Mutex::new(pty.file().try_clone().ok());
+        let master = pty.file().try_clone().ok();
+        let replay = options.replay.take();
+        let (session, event_loop, at_birth) = Self::assemble(
+            options,
+            wake,
+            Birth {
+                pty: PtyKind::Spawned(pty),
+                child_pid,
+                master,
+                drain_on_exit: pty_options.drain_on_exit,
+                replay,
+                prefix: Vec::new(),
+            },
+        )?;
+        *lock(&session.reader) = Some(event_loop.spawn());
+        // The session-without-wrapper's first input: the shell's typeahead, by
+        // the **same** path as user input (generation included). In a fresh
+        // session there is no selection and scrolling, i.e. `send_input`'s other
+        // jobs are no-ops.
+        if let Some(line) = at_birth {
+            session.write_owned(line.into_bytes());
+        }
+        Ok(session)
+    }
+
+    /// Carries on a pane another bateri froze ([`Session::freeze`]) — the
+    /// handover's adopting half (055 R2.3). `options` is the pane's as in
+    /// [`Session::spawn`], minus what only a birth reads (`command`,
+    /// `working_directory`, `env`, `initial_input`, `replay` are ignored);
+    /// `cols`/`rows` must be the frozen size ([`Frozen::cols`]) — the VT is
+    /// laid out for it — and the caller resizes after.
+    ///
+    /// The order: the VT is replayed into the fresh `Term` past the scanner
+    /// (the [`SessionOptions::replay`] path), the state blob is restored on
+    /// top of it, the unsent input is queued, and the reader's first read
+    /// serves the prefix before the master — through the scanner and the
+    /// loop's own parser, since it may end inside a sequence.
+    ///
+    /// `Err(InvalidData)` if the blob is corrupt or of an unknown version,
+    /// before anything is touched: the caller falls back (053's path) and
+    /// dropping `adoption` closes this side's copy of the master.
+    pub fn adopt(
+        mut options: SessionOptions,
+        adoption: Adoption,
+        wake: Arc<dyn Wake>,
+    ) -> io::Result<Self> {
+        if Carried::decode(&adoption.blob).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the handover's state blob does not decode",
+            ));
+        }
+        let Adoption {
+            master,
+            exit,
+            pid,
+            vt,
+            blob,
+            prefix,
+            input,
+            ops,
+        } = adoption;
+        let master = File::from(master);
+        let copy = master.try_clone().ok();
+        options.initial_input = None;
+        let (session, mut event_loop, _) = Self::assemble(
+            options,
+            wake,
+            Birth {
+                pty: PtyKind::Adopted(AdoptedPty {
+                    master: ManuallyDrop::new(master),
+                    exit,
+                    pid,
+                    ops,
+                }),
+                child_pid: pid,
+                master: copy,
+                drain_on_exit: false,
+                replay: Some(vt),
+                prefix,
+            },
+        )?;
+        // Checked above, so it takes.
+        session.restore_state_blob(&blob);
+        if !input.is_empty() {
+            session.send(Msg::Input(input.into()));
+        }
+        event_loop.read_first();
+        *lock(&session.reader) = Some(event_loop.spawn());
+        Ok(session)
+    }
+
+    /// The common body of [`Session::spawn`] and [`Session::adopt`]: the
+    /// session around a PTY that is already open. The reader is **not**
+    /// started — the caller does, after its own steps — and the first input
+    /// written at birth comes back for the caller to send.
+    fn assemble(
+        options: SessionOptions,
+        wake: Arc<dyn Wake>,
+        birth: Birth,
+    ) -> io::Result<(Self, EventLoop<TappedPty, Adapter>, Option<InitialInput>)> {
+        let grid = GridSize::for_spawn(options.cols, options.rows);
+        let size = window_size(grid, options.cell_px);
+        let Birth {
+            pty,
+            child_pid,
+            master,
+            drain_on_exit,
+            replay,
+            prefix,
+        } = birth;
+        let adopted = matches!(pty, PtyKind::Adopted(_));
+        let home = options.home;
+        let master = Mutex::new(master);
         // The slot is born **before** the `EventLoop`: one end goes to the
         // wrapper and the reader thread, the other stays in `Session`.
         // The scrollback's ceiling is from `scrollback`: since at least one row
@@ -3806,6 +4174,8 @@ impl Session {
             held_input: Arc::clone(&held_input),
             adapter: adapter.clone(),
             tail: snapshot::Tail::default(),
+            prefix,
+            prefix_at: 0,
         };
 
         let config = term_config(options.terminal);
@@ -3814,7 +4184,7 @@ impl Session {
         // the shell's first byte lands below it; through the reader's own
         // parser and cluster wrapper, so it is drawn as the shell's output
         // would be; past `TappedPty`, so no scanner sees it.
-        if let Some(bytes) = options.replay.as_deref().filter(|bytes| !bytes.is_empty()) {
+        if let Some(bytes) = replay.as_deref().filter(|bytes| !bytes.is_empty()) {
             let mut parser: ansi::Processor = ansi::Processor::new();
             let mut last_input = false;
             let mut term = term.lock();
@@ -3828,7 +4198,7 @@ impl Session {
             Arc::clone(&term),
             adapter.clone(),
             pty,
-            pty_options.drain_on_exit,
+            drain_on_exit,
             options.cluster,
         )?;
         let sender = event_loop.channel();
@@ -3840,7 +4210,7 @@ impl Session {
             term,
             sender,
             adapter,
-            reader: Mutex::new(Some(event_loop.spawn())),
+            reader: Mutex::new(None),
             shell,
             // There is no alternate screen at opening; the first content frame will write it anyway.
             alt_screen: AtomicBool::new(false),
@@ -3879,15 +4249,9 @@ impl Session {
             home,
             child_pid,
             master,
+            adopted,
         };
-        // The session-without-wrapper's first input: the shell's typeahead, by
-        // the **same** path as user input (generation included). In a fresh
-        // session there is no selection and scrolling, i.e. `send_input`'s other
-        // jobs are no-ops.
-        if let Some(line) = at_birth {
-            session.write_owned(line.into_bytes());
-        }
-        Ok(session)
+        Ok((session, event_loop, at_birth))
     }
 
     /// Gives the frame to draw — **scans unconditionally**, asks no damage.
@@ -9105,18 +9469,109 @@ impl Session {
         // own end (nobody blocks, but `SIGHUP` + `child.wait()` run unbounded) or
         // — if the reader thread has already ended — since the pair dropped there
         // `Pty::drop` blocks this thread. Let neither be silent.
-        Some(match teardown {
-            Ok(_) => ShutdownHandle(Some(finished)),
+        let finished = match teardown {
+            Ok(_) => Some(finished),
             Err(err) => {
                 eprintln!(
                     "bateri: the shutdown thread could not be created ({err}), the shutdown is unbounded"
                 );
-                ShutdownHandle(None)
+                None
             }
+        };
+        Some(ShutdownHandle {
+            finished,
+            adopted: self.adopted,
         })
     }
 
-    /// The pid of the PTY's child — **not the shell's**, at least not always: in
+    /// Freezes the session for the handover (055 R2.2): the reader stops,
+    /// the PTY is **not** closed and the child gets no `SIGHUP` — another
+    /// process carries the pane on ([`Session::adopt`]) from what this
+    /// returns.
+    ///
+    /// The order loses no byte: the reader stops first (`Msg::Shutdown`,
+    /// `join`), so from then on nobody reads the master — what the child
+    /// writes stays in the kernel's buffer for the next reader. Then the DEC
+    /// 2026 buffer is applied, the tail and the unwritten input are taken,
+    /// the VT is encoded and probed ([`Session::live_snapshot`]) and the
+    /// state blob is written. The `join` is **unbounded**, unlike
+    /// [`Session::shutdown`]'s: a bounded one could leave the parser
+    /// applying bytes after the snapshot; the hang guard is the caller's
+    /// (the shutdown sentinel).
+    ///
+    /// The `(EventLoop, State)` pair is **leaked** (`mem::forget`), and on
+    /// purpose: its `Pty` would send the child `SIGHUP` the moment it
+    /// dropped, and keeping it alive means trusting AppKit's releases at
+    /// exit. The caller is a process on its way out. After the call the
+    /// session is fit only for dropping: no frame, input or snapshot
+    /// (`live_snapshot` drove `Term` destructively); its `shutdown` is
+    /// [`Teardown::AlreadyDone`].
+    ///
+    /// `Err` if the session already shut down or its master copy failed at
+    /// birth — nothing to hand over; the session is untouched — or if the
+    /// reader had panicked (the `Pty` dropped while unwinding: the child is
+    /// already hung up).
+    pub fn freeze(&self) -> io::Result<Frozen> {
+        // Both or neither: a session with a reader but no master copy has
+        // nothing to hand over and must stay untouched.
+        let taken = {
+            let mut master = lock(&self.master);
+            let mut reader = lock(&self.reader);
+            if master.is_some() && reader.is_some() {
+                master.take().zip(reader.take())
+            } else {
+                None
+            }
+        };
+        let Some((master, reader)) = taken else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "the session shut down or has no copy of its PTY master",
+            ));
+        };
+        self.send(Msg::Shutdown);
+        let Ok((mut event_loop, mut state)) = reader.join() else {
+            return Err(io::Error::other("the reader thread ended with a panic"));
+        };
+        event_loop.stop_sync(&mut state);
+        let tail = event_loop.pty_mut().tail().to_vec();
+        let mut input = event_loop.unsent(&mut state);
+        // A first input still waiting for our first identified `A` (037
+        // Karar 6) goes now, with the keys held behind it, by the reader's
+        // own rule (053 Karar 3): a ready line that finds typing is dropped.
+        let line = event_loop.pty_mut().initial_input.take();
+        let typed = lock(&self.held_input).take().unwrap_or_default();
+        if let Some(line) = line
+            && (line.run || typed.is_empty())
+        {
+            input.extend_from_slice(&line.into_bytes());
+        }
+        input.extend_from_slice(&typed);
+        std::mem::forget((event_loop, state));
+        let (cols, rows) = {
+            let term = self.term.lock();
+            let grid = term.grid();
+            (
+                u16::try_from(grid.columns()).unwrap_or(u16::MAX),
+                u16::try_from(grid.screen_lines()).unwrap_or(u16::MAX),
+            )
+        };
+        let vt = self.live_snapshot();
+        let blob = self.state_blob();
+        Ok(Frozen {
+            master: OwnedFd::from(master),
+            pid: self.child_pid,
+            cols,
+            rows,
+            vt,
+            blob,
+            tail,
+            input,
+        })
+    }
+
+    /// The pid of the PTY's child — an adopted session's too ([`Session::adopt`],
+    /// the pid it was given) — **not the shell's**, at least not always: in
     /// an unbounded session the child is `login(1)` and the shell is its child
     /// (`.tasks/028-kapatma-onayi/context.md` → Süreç tarafı). The side that
     /// builds the command knows which it is, not this crate.

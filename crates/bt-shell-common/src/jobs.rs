@@ -924,6 +924,169 @@ fn parse_stat(line: &str) -> Option<Stat> {
     })
 }
 
+/// A process's start time, comparable only for equality (055 R2.5): what
+/// tells a live pid from a reused one. macOS: `p_starttime` in microseconds
+/// (`sysctl(KERN_PROC_PID)`, readable on root-owned `login(1)` too, where
+/// `PROC_PIDTBSDINFO` returns nothing — measured); Linux: `starttime` in
+/// clock ticks since boot (`/proc/<pid>/stat`, field 22). `None` if the
+/// process is gone or unreadable.
+#[cfg(target_os = "macos")]
+pub fn start_time(pid: u32) -> Option<u64> {
+    let pid = c_int::try_from(pid).ok()?;
+    // `struct kinfo_proc` (648 bytes on 64-bit macOS) is not in `libc`; its
+    // first field is `kp_proc.p_un.__p_starttime`, a `timeval` (`i64`
+    // seconds, `i32` microseconds). The buffer is generous and aligned.
+    let mut buf = [0u64; 128];
+    let mut len = size_of_val(&buf);
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    // SAFETY: the buffer belongs to this frame and `len` is its size; the
+    // kernel writes at most that many bytes and stores what it wrote in `len`.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            buf.as_mut_ptr().cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    // A vanished pid answers with zero bytes, not an error.
+    if status != 0 || len < 16 {
+        return None;
+    }
+    let seconds = u64::try_from(buf[0] as i64).ok()?;
+    let micros = u64::from(buf[1] as u32);
+    Some(seconds * 1_000_000 + micros)
+}
+
+/// A process's start time (see the macOS body).
+#[cfg(target_os = "linux")]
+pub fn start_time(pid: u32) -> Option<u64> {
+    parse_start_time(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// The pure half of the Linux [`start_time`]: field 22, counted from the
+/// last `)` like [`parse_stat`] (field 3 is the first after it).
+#[cfg(any(target_os = "linux", test))]
+fn parse_start_time(line: &str) -> Option<u64> {
+    line[line.rfind(')')? + 1..]
+        .split_whitespace()
+        .nth(22 - 3)?
+        .parse()
+        .ok()
+}
+
+/// An fd that becomes **readable when `pid` exits** — the exit signal of a
+/// process that is not our child (055 R2.5, `discussion.md` → Karar 7):
+/// macOS a `kqueue` of its own with only `EVFILT_PROC`/`NOTE_EXIT` on `pid`
+/// (a user process may watch root-owned `login(1)` — measured), Linux a
+/// pidfd. The reader loop registers it in the child-event pipe's place
+/// ([`bt_core::Adoption::exit`]); nobody drains it, so it stays readable.
+///
+/// `start` is [`start_time`] taken where the pid was known to be the right
+/// process; it is asked **after** the registration, so a pid that died and
+/// was reused before it gives `None`, never a watch on a stranger. `None`
+/// too if the process is already gone or the call fails — the caller falls
+/// back.
+pub fn exit_fd(pid: u32, start: u64) -> Option<std::os::fd::OwnedFd> {
+    let fd = watch_exit(pid)?;
+    (start_time(pid)? == start).then_some(fd)
+}
+
+#[cfg(target_os = "macos")]
+fn watch_exit(pid: u32) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: no arguments; the result is checked.
+    let raw = unsafe { libc::kqueue() };
+    if raw < 0 {
+        return None;
+    }
+    // SAFETY: `raw` is a fresh descriptor nobody else owns. A kqueue is not
+    // inherited across `fork` (kqueue(2)), so no `CLOEXEC` is needed.
+    let queue = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    // SAFETY: an all-zero `kevent` is a valid value of a plain C struct.
+    let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+    change.ident = usize::try_from(pid).ok()?;
+    change.filter = libc::EVFILT_PROC;
+    change.flags = libc::EV_ADD;
+    change.fflags = libc::NOTE_EXIT;
+    // SAFETY: one change from this frame, no event buffer; `queue` is open.
+    let status = unsafe {
+        libc::kevent(
+            raw,
+            &raw const change,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    (status == 0).then_some(queue)
+}
+
+#[cfg(target_os = "linux")]
+fn watch_exit(pid: u32) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    // SAFETY: `pidfd_open(pid, 0)`; the result is checked. The fd is
+    // `CLOEXEC` by definition (pidfd_open(2)).
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    let raw = c_int_from(raw)?;
+    // SAFETY: a fresh descriptor nobody else owns.
+    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) })
+}
+
+#[cfg(target_os = "linux")]
+fn c_int_from(raw: libc::c_long) -> Option<libc::c_int> {
+    libc::c_int::try_from(raw).ok().filter(|&fd| fd >= 0)
+}
+
+/// [`bt_core::PtyOps`]'s body: the two syscalls of an adopted PTY.
+pub struct SystemPty;
+
+impl bt_core::PtyOps for SystemPty {
+    fn resize(&self, master: std::os::fd::BorrowedFd<'_>, size: bt_core::PtySize) {
+        use std::os::fd::AsRawFd;
+        let window = libc::winsize {
+            ws_row: size.rows,
+            ws_col: size.cols,
+            ws_xpixel: size.cols.saturating_mul(size.cell_width),
+            ws_ypixel: size.rows.saturating_mul(size.cell_height),
+        };
+        // SAFETY: `master` is open for the call and `window` a valid input.
+        // A failure is left as is: the old size stays (alacritty dies here,
+        // the no-panic rule does not).
+        if unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &raw const window) } != 0 {
+            eprintln!(
+                "bateri: resizing the adopted PTY failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    fn hangup(&self, pid: u32, exit: std::os::fd::BorrowedFd<'_>) {
+        use std::os::fd::AsRawFd;
+        let mut poll = libc::pollfd {
+            fd: exit.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one `pollfd` from this frame, zero timeout.
+        let ready = unsafe { libc::poll(&raw mut poll, 1, 0) };
+        // Exited (or unknowable): the pid may be another process's now.
+        if ready != 0 {
+            return;
+        }
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return;
+        };
+        // SAFETY: a signal to a pid whose exit fd says it is still the
+        // process we adopted.
+        unsafe { libc::kill(pid, libc::SIGHUP) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1579,10 +1742,252 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("sleep did not spawn");
-        let args = SystemTable.args(child.id());
+        let expected = Some(vec!["/bin/sleep".to_owned(), "30".to_owned()]);
+        // `spawn` returns once the child forked, not once it exec'd: before
+        // the exec the argv is still the test runner's (seen on Linux).
+        wait_until("the child's argv not seen", || {
+            SystemTable.args(child.id()) == expected
+        });
         let _ = child.kill();
         let _ = child.wait();
-        assert_eq!(args, Some(vec!["/bin/sleep".to_owned(), "30".to_owned()]));
+    }
+
+    #[test]
+    fn the_start_time_is_field_twenty_two() {
+        let line = "42 (a) b) S 1 42 42 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1 2";
+        assert_eq!(parse_start_time(line), Some(987_654));
+        assert_eq!(parse_start_time("42 (a) S 1 42"), None);
+    }
+
+    /// Whether `fd` is readable within `wait`.
+    fn readable(fd: std::os::fd::BorrowedFd<'_>, wait: std::time::Duration) -> bool {
+        use std::os::fd::AsRawFd;
+        let mut poll = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = c_int_ms(wait);
+        // SAFETY: one `pollfd` from this frame.
+        unsafe { libc::poll(&raw mut poll, 1, millis) > 0 }
+    }
+
+    fn c_int_ms(wait: std::time::Duration) -> libc::c_int {
+        libc::c_int::try_from(wait.as_millis()).unwrap_or(libc::c_int::MAX)
+    }
+
+    #[test]
+    fn the_exit_fd_reads_when_a_process_exits_and_refuses_a_stranger() {
+        use std::os::fd::AsFd;
+        use std::time::Duration;
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep did not spawn");
+        let pid = child.id();
+        let start = start_time(pid).expect("the start time not read");
+        // Another start time is another process that once had this pid.
+        assert!(exit_fd(pid, start + 1).is_none());
+        let fd = exit_fd(pid, start).expect("no exit fd");
+        assert!(
+            !readable(fd.as_fd(), Duration::ZERO),
+            "readable while alive"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            readable(fd.as_fd(), Duration::from_secs(5)),
+            "not readable after the exit"
+        );
+        // Gone: nothing to watch.
+        assert!(exit_fd(pid, start).is_none());
+    }
+
+    /// Records the child's exit news.
+    #[derive(Default)]
+    struct ExitWake(std::sync::Mutex<Option<Option<i32>>>);
+
+    impl bt_core::Wake for ExitWake {
+        fn wake(&self) {}
+        fn child_exit(&self, code: Option<i32>) {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(code);
+        }
+        fn copy_to_clipboard(&self, _text: String) {}
+        fn title_changed(&self) {}
+        fn search_changed(&self) {}
+        fn command_started(&self) {}
+        fn remote_up(&self) {}
+        fn remote_typed(&self) {}
+        fn link_hover_lost(&self) {}
+    }
+
+    impl ExitWake {
+        fn exited(&self) -> Option<Option<i32>> {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
+    fn handover_options(
+        command: Option<(String, Vec<String>)>,
+        cols: u16,
+        rows: u16,
+    ) -> SessionOptions {
+        SessionOptions {
+            command,
+            working_directory: None,
+            home: None,
+            env: HashMap::new(),
+            cols,
+            rows,
+            cell_px: (9, 18),
+            terminal: TerminalOptions {
+                scrollback: 10_000,
+                osc52: Osc52::Off,
+                cursor: CaretShape::default(),
+                blink: CursorBlink::default(),
+            },
+            theme: Theme::BATERI,
+            dock: false,
+            cluster: false,
+            initial_input: None,
+            shell_marks: false,
+            tab_id: None,
+            hostname: None,
+            replay: None,
+        }
+    }
+
+    /// The whole scrollback and screen as text.
+    fn all_text(session: &Session) -> String {
+        session.select_all();
+        session.selection_text().unwrap_or_default()
+    }
+
+    /// The `nK` counter lines of `text`, in order.
+    fn counters(text: &str) -> Vec<u64> {
+        text.lines()
+            .filter_map(|line| line.trim().strip_prefix('n')?.parse().ok())
+            .collect()
+    }
+
+    /// Freezes a session running `script` and adopts it into a new one.
+    fn hand_over(
+        script: &str,
+        ready: &str,
+        held: &[u8],
+    ) -> (Session, Session, u32, u64, Arc<ExitWake>) {
+        let old = Session::spawn(
+            handover_options(
+                Some((
+                    "/bin/sh".to_owned(),
+                    vec!["-c".to_owned(), script.to_owned()],
+                )),
+                40,
+                10,
+            ),
+            Arc::new(SilentWake),
+        )
+        .expect("session did not open");
+        wait_until("the script did not start", || {
+            all_text(&old).contains(ready)
+        });
+        let pid = old.child_pid();
+        let start = start_time(pid).expect("the start time not read");
+        let frozen = old.freeze().expect("the session did not freeze");
+        assert_eq!(frozen.pid, pid);
+        assert_eq!((frozen.cols, frozen.rows), (40, 10));
+        // The holder's gap: the child keeps writing into the kernel's buffer.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(start_time(pid), Some(start), "the freeze hung the child up");
+        let exit = exit_fd(pid, start).expect("no exit fd");
+        let wake = Arc::new(ExitWake::default());
+        let new = Session::adopt(
+            handover_options(None, frozen.cols, frozen.rows),
+            bt_core::Adoption {
+                master: frozen.master,
+                exit,
+                pid,
+                vt: frozen.vt,
+                blob: frozen.blob,
+                // The holder's buffer stands behind the tail.
+                prefix: [frozen.tail.as_slice(), held].concat(),
+                input: frozen.input,
+                ops: Arc::new(SystemPty),
+            },
+            Arc::clone(&wake) as Arc<dyn bt_core::Wake>,
+        )
+        .expect("the session was not adopted");
+        assert_eq!(new.child_pid(), pid);
+        (old, new, pid, start, wake)
+    }
+
+    /// 055 phase-2's acceptance: a live `/bin/sh` crosses from one session to
+    /// another without a `SIGHUP`, its output has no gap, input reaches it and
+    /// its exit is the adopting session's `child_exit(None)`.
+    #[test]
+    fn a_frozen_shell_lives_on_in_the_adopting_session() {
+        let script = "i=0; (while [ $i -lt 2000 ]; do i=$((i+1)); echo n$i; sleep 0.01; done) & bg=$!; \
+            while read line; do echo got:$line; [ \"$line\" = quit ] && { kill $bg; exit 0; }; done";
+        let (old, new, _pid, _start, wake) = hand_over(script, "n3", b"");
+        drop(old);
+        let before = counters(&all_text(&new)).last().copied().unwrap_or(0);
+        wait_until("the output did not continue", || {
+            counters(&all_text(&new))
+                .last()
+                .is_some_and(|&n| n > before + 20)
+        });
+        let seen = counters(&all_text(&new));
+        assert_eq!(
+            seen.first(),
+            Some(&1),
+            "the replayed history lost its start"
+        );
+        for pair in seen.windows(2) {
+            assert_eq!(pair[1], pair[0] + 1, "a gap or a repeat in {seen:?}");
+        }
+        new.write(b"hello\n");
+        wait_until("the input did not reach the shell", || {
+            all_text(&new).contains("got:hello")
+        });
+        new.write(b"quit\n");
+        wait_until("no exit news", || wake.exited().is_some());
+        assert_eq!(wake.exited(), Some(None));
+        wait_until("the reader did not end", || !new.reader_alive());
+    }
+
+    /// Dropping an adopted session hangs its child up and waits for nothing.
+    #[test]
+    fn an_adopted_session_hangs_up_on_shutdown_without_waiting() {
+        use std::os::fd::AsFd;
+        use std::time::{Duration, Instant};
+        // A quiet shell: the held bytes reach the screen with no output
+        // after them (the reader's first read), through the parser.
+        let (_old, new, pid, start, _wake) = hand_over(
+            "echo ready; while :; do sleep 1; done",
+            "ready",
+            b"\x1b]2;handed\x07HELD\r\n",
+        );
+        wait_until("the held bytes were not read", || {
+            all_text(&new).contains("HELD")
+        });
+        assert_eq!(new.title(), "handed");
+        let watch = exit_fd(pid, start).expect("no exit fd");
+        let began = Instant::now();
+        assert_eq!(new.shutdown(), bt_core::Teardown::HungUp);
+        assert!(
+            began.elapsed() < bt_core::SHUTDOWN_GRACE,
+            "the shutdown waited"
+        );
+        assert!(
+            readable(watch.as_fd(), Duration::from_secs(5)),
+            "the adopted shell outlived its session"
+        );
     }
 
     /// A real PTY whose program sets `stty`'s modes and then sleeps.

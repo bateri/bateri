@@ -72,11 +72,11 @@ pub use search::{
     escape as escape_search,
 };
 pub use session::{
-    Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, InitialInput, LinkHit,
-    LinkHover, LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52, PathCandidate, SHUTDOWN_GRACE,
-    ScrollGlide, ScrollIntent, SelectKind, SelectionPoint, SelectionRun, SelectionRuns, Session,
-    SessionOptions, ShutdownHandle, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell,
-    smoke_shell,
+    Adoption, Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, Frozen,
+    InitialInput, LinkHit, LinkHover, LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52,
+    PathCandidate, PtyOps, PtySize, SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, SelectKind,
+    SelectionPoint, SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Teardown,
+    TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,

@@ -17,8 +17,15 @@
 //!   `bt-core`; the branch is unreachable); the re-registration panic was
 //!   kept with its justification;
 //! - the PTY tokens are `pub(crate)` in alacritty, their values were copied
-//!   here;
-//! - comments were translated (first to Turkish, later to English).
+//!   here (and are `pub(crate)` here too: an adopted PTY registers on them,
+//!   055);
+//! - comments were translated (first to Turkish, later to English);
+//! - the handover (055 phase-2): an opt-in read before the first poll
+//!   ([`EventLoop::read_first`], so a carried prefix reaches the parser on
+//!   a quiet PTY) and, on the loop handed back after `join`, the DEC 2026
+//!   buffer applied through the wrapper ([`EventLoop::stop_sync`]), the
+//!   PTY borrowed ([`EventLoop::pty_mut`]) and the input not yet written taken
+//!   ([`EventLoop::unsent`]); `pty_read` returns the bytes it processed.
 //!
 //! Why a copy: clustering (035) has to step **in between** the parser's
 //! `Handler` calls, and alacritty's loop hands `Term` over as a fixed type
@@ -59,10 +66,10 @@ const MAX_LOCKED_READ: usize = u16::MAX as usize;
 /// Poller token of the read/write fd (alacritty 0.26.0, `tty/unix.rs`,
 /// `pub(crate)`). `Pty::register` does the registration, so the number must
 /// equal the one given there — the version pin is its guard.
-const PTY_READ_WRITE_TOKEN: usize = 0;
+pub(crate) const PTY_READ_WRITE_TOKEN: usize = 0;
 
 /// Poller token of the child-event pipe (same source, same reason).
-const PTY_CHILD_EVENT_TOKEN: usize = 1;
+pub(crate) const PTY_CHILD_EVENT_TOKEN: usize = 1;
 
 /// Messages sent to the loop.
 #[derive(Debug)]
@@ -210,6 +217,9 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     /// Whether clustering is on (`SessionOptions::cluster`); passed to the
     /// wrapper on every call.
     cluster: bool,
+    /// Whether the thread reads once before its first `poll.wait`
+    /// ([`EventLoop::read_first`]).
+    read_first: bool,
 }
 
 impl<T, U> EventLoop<T, U>
@@ -235,7 +245,55 @@ where
             event_proxy,
             drain_on_exit,
             cluster,
+            read_first: false,
         })
+    }
+
+    /// Reads once before the first `poll.wait` (055): an adopted PTY's
+    /// carried prefix (`TappedPty`) must reach **this** loop's parser — it
+    /// may end inside a sequence — and a quiet PTY gives no readable event
+    /// to carry it. `pty_read` stops on its own once the prefix is drained
+    /// and the fd would block.
+    pub(crate) fn read_first(&mut self) {
+        self.read_first = true;
+    }
+
+    /// The PTY the loop owned — after `join`, when nothing reads it.
+    pub(crate) fn pty_mut(&mut self) -> &mut T {
+        &mut self.pty
+    }
+
+    /// Applies a pending DEC 2026 buffer to `Term` through the wrapper —
+    /// the timeout arm's body, without the `Wakeup`. Meant for the loop
+    /// handed back after `join` (the handover's freeze, 055): the snapshot
+    /// must see what the application already sent.
+    pub(crate) fn stop_sync(&mut self, state: &mut State) {
+        state.parser.stop_sync(&mut ClusterHandler::new(
+            &mut *self.terminal.lock(),
+            self.cluster,
+            &mut state.last_input,
+        ));
+    }
+
+    /// The input bytes the loop never wrote, in order: the buffer being
+    /// written, the queue behind it and the `Input` messages still in the
+    /// channel (the `Shutdown` arm stops draining at itself). Meant for the
+    /// loop handed back after `join`; a resize left in the channel is
+    /// dropped — the adopting side sizes the PTY itself.
+    pub(crate) fn unsent(&mut self, state: &mut State) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        if let Some(writing) = state.writing.take() {
+            bytes.extend_from_slice(writing.remaining_bytes());
+        }
+        for queued in state.write_list.drain(..) {
+            bytes.extend_from_slice(&queued);
+        }
+        while let Some(msg) = self.rx.recv() {
+            if let Msg::Input(input) = msg {
+                bytes.extend_from_slice(&input);
+            }
+        }
+        bytes
     }
 
     pub(crate) fn channel(&self) -> EventLoopSender {
@@ -259,7 +317,7 @@ where
     }
 
     #[inline]
-    fn pty_read(&mut self, state: &mut State, buf: &mut [u8]) -> io::Result<()> {
+    fn pty_read(&mut self, state: &mut State, buf: &mut [u8]) -> io::Result<usize> {
         let mut unprocessed = 0;
         let mut processed = 0;
 
@@ -318,7 +376,7 @@ where
             self.event_proxy.send_event(Event::Wakeup);
         }
 
-        Ok(())
+        Ok(processed)
     }
 
     #[inline]
@@ -370,6 +428,20 @@ where
             if let Err(err) = unsafe { self.pty.register(&self.poll, interest, poll_opts) } {
                 eprintln!("bateri: reader loop registration failed: {err}");
                 return (self, state);
+            }
+
+            // One `pty_read` stops at `MAX_LOCKED_READ`; a long prefix on a
+            // quiet PTY would wait for the next output, so read until a round
+            // ends short of the bound (drained, the fd would block).
+            while self.read_first {
+                match self.pty_read(&mut state, &mut buf) {
+                    Ok(processed) if processed >= MAX_LOCKED_READ => {}
+                    Ok(_) => break,
+                    Err(err) => {
+                        eprintln!("bateri: the first PTY read failed: {err}");
+                        break;
+                    }
+                }
             }
 
             let mut events = Events::with_capacity(EVENTS_CAPACITY);
