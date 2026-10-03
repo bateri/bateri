@@ -156,6 +156,12 @@ cursor_blink_interval = 0.5
 # prompt, never closes without asking. Typing exit never asks, and neither do
 # programs left running in the background.
 confirm_close = "running"
+# "all" | "layout" | "off". What comes back when bateri opens again after
+# quitting, an update or a restart: all brings back the windows, tabs and
+# splits with each pane's scrollback, layout brings back the windows without
+# the scrollback (nothing you saw is written to disk), off starts with a
+# single window and deletes what was saved. Shells always start fresh.
+restore_windows = "all"
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;

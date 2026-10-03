@@ -67,12 +67,39 @@ _Requirements: R1.1, R1.2, R1.3, R1.4, R1.5, R4.1_
 
 ## Checklist
 
-- [ ] Kodlayıcı modülü ve sınamaları
-- [ ] `Session::final_history` (kesim, alt ekran, tavan)
-- [ ] `SessionOptions::replay` ve oynatma yolu
-- [ ] İlk girdinin "çalıştır" biti
-- [ ] `restore_windows` ayar modeli
-- [ ] `CLAUDE.md` cümlesi
-- [ ] Test: round-trip, kesim, replay'li oturumun temiz defteri, ilk girdi, ayar
-- [ ] Doğrulama geçti (`make check` + `make linux` + `make test-race` — okuyucu/`Term` paylaşılan durumu)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Kodlayıcı modülü ve sınamaları
+- [x] `Session::final_history` (kesim, alt ekran, tavan)
+- [x] `SessionOptions::replay` ve oynatma yolu
+- [x] İlk girdinin "çalıştır" biti
+- [x] `restore_windows` ayar modeli
+- [x] `CLAUDE.md` cümlesi
+- [x] Test: round-trip, kesim, replay'li oturumun temiz defteri, ilk girdi, ayar
+- [x] Doğrulama geçti (`make check` + `make linux` + `make test-race` — okuyucu/`Term` paylaşılan durumu)
+- [x] Riskli phase: `/code-review` koştu; tek bulgu `## Waive`'de
+
+## Uygulama Notları
+
+- "Çalıştır" biti alan değil tip: `initial_input: Option<InitialInput>`
+  (`InitialInput::run` / `::ready`); `None` veren çağıranlar değişmedi,
+  `pane.rs` `Launch`'ın satırını `InitialInput::run`'la sarıyor.
+- `RestoreWindows` `Changes`'e girmedi: `ConfirmClose` emsali — kapanışta ve
+  açılışta güncel ayardan okunuyor, canlı uygulanacak bir yolu yok.
+- Şablona `restore_windows` satırı girdi; `docs/AYARLAR.md`'nin şablon kopyası
+  (`documented_template_is_the_template` bekçisi) bu phase'de güncellendi,
+  belgenin anahtar tablosu ve Time Machine notu phase-4'te.
+- Kesim `Input`'ta çıpanın **bitişik** koşusunun tepesi, imleçten yukarı:
+  canlı prompt'un hemen üstüne bitişik bir Ctrl-L kopyası aynı koşuya girip
+  kesiliyor (bilinen sınır, `anchor_top`'un doc'unda). `/code-review`: gerçek
+  Ctrl-L'de (`2J`) eski kopya tam üstte kalıyor, yani bu normal durum;
+  koşmamış bir giriş satırı olduğu için kaybı zararsız.
+
+## Waive
+
+- **`restore_windows`'un kabul edilmeyen değeri `"all"`a düşüyor**
+  (`/code-review`, orta): `restore_windows = "Off"` gibi yanlış yazılmış bir
+  değer açılışta varsayılana (`all`) düşer ve geçmiş diske yazılır; `osc52` ve
+  `[remote] integration` bu kolda kapalıya düşüyor. Phase metni ve R4.1
+  açıkça `parse_keeping` kuralını (kendi anahtarını değiştirmez) ve yalnız
+  **kullanılamayan dosyada** `"layout"`'u istiyor; değiştirmek bir ürün
+  kararı (`osc52` istisnasının üçüncü üyesi olmak) — kullanıcıya sorulacak;
+  düzeltme phase-4'ün ayar satırıyla birlikte yapılabilir.

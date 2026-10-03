@@ -64,7 +64,7 @@ use alacritty_terminal::term::{Config, Osc52 as TermOsc52, RenderableContent, Te
 // `Pty::reader()`, i.e. from outside its own impl block; `EventedPty` and
 // `io::Read` are not brought in, their only call site is their own impl blocks.
 use alacritty_terminal::tty::{self, EventedReadWrite as _, Pty, Shell};
-use alacritty_terminal::vte::ansi::{ClearMode, CursorShape, CursorStyle, Handler};
+use alacritty_terminal::vte::ansi::{self, ClearMode, CursorShape, CursorStyle, Handler};
 // The name `Event` belongs to alacritty's event in this module; since
 // `polling`'s never appears outside `TappedPty`, that one is aliased.
 use polling::{Event as PollingEvent, PollMode, Poller};
@@ -72,6 +72,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::cluster::{ClusterId, Clusters};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
+use crate::handler::ClusterHandler;
 use crate::identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
 use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
@@ -86,9 +87,10 @@ use crate::search::{
 use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule};
 use crate::shell::{
     BlockKey, COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection,
-    DockState, DockStatus, Precision, RemoteStats, RemoteTarget, Scanner, ShellLog, ShellState,
-    Stripe, Transfer, TtyModes,
+    DockState, DockStatus, HistoryCut, Precision, RemoteStats, RemoteTarget, Scanner, ShellLog,
+    ShellState, Stripe, Transfer, TtyModes,
 };
+use crate::snapshot;
 use crate::wake::Wake;
 
 /// Underline kind — the five are **mutually exclusive**.
@@ -790,16 +792,17 @@ pub struct SessionOptions {
     /// (`bt-shell` `window`); the field stays, because the rollback must be a
     /// single line.
     pub cluster: bool,
-    /// The line to be written to the shell as the **first input**, without
-    /// `\r` (037 Karar 6: in a remote tab ⌘T runs the same ssh/mosh command in
-    /// the new tab). `None` or an empty line → nothing is written.
+    /// The line to be written to the shell as the **first input** (037 Karar
+    /// 6: in a remote tab ⌘T runs the same ssh/mosh command in the new tab;
+    /// 053 Karar 3: a restored remote pane gets the same line, not run).
+    /// `None` or an empty line → nothing is written.
     ///
     /// When it will be written comes from [`SessionOptions::shell_marks`];
     /// the write goes through the user input's path (the generation advances,
     /// the freshness gate sees it as a keystroke) and is **one-shot** — it is
     /// not written again at the second prompt. Escaping the line is the
     /// caller's job (`RemoteTarget::line`).
-    pub initial_input: Option<String>,
+    pub initial_input: Option<InitialInput>,
     /// Whether our wrapper was installed on the shell — that is, whether it
     /// will print the OSC 133 `A` carrying our identity. **Separate** from
     /// [`SessionOptions::dock`]: `[shell] integration = "blocks"` installs the
@@ -824,6 +827,56 @@ pub struct SessionOptions {
     /// platform edge); the application supplies it. `None` → only the empty
     /// authority and `localhost` are local.
     pub hostname: Option<String>,
+    /// A previous session's scrollback to show before the shell starts (053):
+    /// the bytes [`Session::final_history`] gave at quit.
+    ///
+    /// Applied in [`Session::spawn`] between `Term::new` and the reader loop,
+    /// through the same parser and cluster wrapper as the shell's output
+    /// (`crate::reader`'s `advance`), and **past the scanner**: the shell
+    /// ledger, the dock mirror and the remote state stay empty — the bytes
+    /// carry no marks anyway ([`crate::snapshot`]). The rows arrive as
+    /// history above the new shell's first prompt; the fill band shows them
+    /// as such. `None` or empty → the session opens as it always did.
+    pub replay: Option<Vec<u8>>,
+}
+
+/// The session's first input ([`SessionOptions::initial_input`]): a line and
+/// whether it is run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InitialInput {
+    /// The line, without `\r`.
+    pub line: String,
+    /// `true` → a `\r` goes behind the line and the shell runs it (⌘T in a
+    /// remote tab); `false` → the line waits in the input line for the
+    /// user's ⏎ (a restored remote pane, 053 Karar 3).
+    pub run: bool,
+}
+
+impl InitialInput {
+    /// A line the shell runs.
+    pub fn run(line: impl Into<String>) -> Self {
+        Self {
+            line: line.into(),
+            run: true,
+        }
+    }
+
+    /// A line left ready in the input line, not run.
+    pub fn ready(line: impl Into<String>) -> Self {
+        Self {
+            line: line.into(),
+            run: false,
+        }
+    }
+
+    /// The bytes the delivery writes.
+    fn into_bytes(self) -> Vec<u8> {
+        let mut line = self.line;
+        if self.run {
+            line.push('\r');
+        }
+        line.into_bytes()
+    }
 }
 
 /// The terminal options that can change while the session lives — the
@@ -1533,7 +1586,7 @@ struct TappedPty {
     /// The session's first input, waiting for our first identified `A`
     /// ([`SessionOptions::shell_marks`]); `take` gives the one-shot.
     /// In the arm written at birth (no wrapper) this is always `None`.
-    initial_input: Option<String>,
+    initial_input: Option<InitialInput>,
     /// The same slot as [`Session::held_input`]: the bytes held while the
     /// first input is going go **behind it**, in the same lock round and the same send.
     held_input: HeldInput,
@@ -1592,9 +1645,8 @@ impl io::Read for TappedPty {
                 wake.remote_up();
             }
             if outcome.prompt
-                && let Some(mut line) = initial_input.take()
+                && let Some(line) = initial_input.take()
             {
-                line.push('\r');
                 let mut bytes = line.into_bytes();
                 // The held input is **behind** the line and the send is under the
                 // slot's lock: `send_input` sends when it sees the slot empty, so
@@ -2115,6 +2167,33 @@ fn anchor_row_at_or_above<T>(term: &Term<T>, row: u16, offset: i32, block: u32) 
                 == Some(block)
         })
     })
+}
+
+/// The top row of the run of rows carrying `block`'s anchor that is nearest
+/// **above or at** `row` (a screen line; negative lines are the history);
+/// `None` if no row up to the top of the history carries it.
+///
+/// [`Session::final_history`]'s cut. Upward and contiguous, not the topmost
+/// occurrence: Ctrl-L reprints the prompt with the same id and leaves the old
+/// copy in the history, and that copy is history. A multi-line or wrapped
+/// input carries the anchor on every row (the link is open until `preexec`),
+/// so the run is the whole input block. **Known limit:** a Ctrl-L copy
+/// directly above the live prompt is part of the same run.
+fn anchor_top<T>(term: &Term<T>, row: i32, block: u32) -> Option<i32> {
+    let top = term.grid().topmost_line().0;
+    let carries = |line: i32| {
+        term.grid()[Line(line)]
+            .into_iter()
+            .any(|cell| cell.hyperlink().and_then(|link| block_id(link.uri())) == Some(block))
+    };
+    let found = (top..=row).rev().find(|&line| carries(line))?;
+    Some(
+        (top..=found)
+            .rev()
+            .take_while(|&line| carries(line))
+            .last()
+            .unwrap_or(found),
+    )
 }
 
 /// The two modes of clearing the screen ([`Session::clear_to_start`],
@@ -3642,7 +3721,7 @@ impl Session {
         // wrapper, below, at birth. No empty line at all: a zero-byte `Input`
         // would lock the writer (`Adapter::reply`) and `\r` alone would run an
         // empty command.
-        let initial_input = options.initial_input.filter(|line| !line.is_empty());
+        let initial_input = options.initial_input.filter(|input| !input.line.is_empty());
         let (at_prompt, at_birth) = if options.shell_marks {
             (initial_input, None)
         } else {
@@ -3667,6 +3746,19 @@ impl Session {
 
         let config = term_config(options.terminal);
         let term = Arc::new(FairMutex::new(Term::new(config, &grid, adapter.clone())));
+        // The previous session's scrollback (053): before the reader loop, so
+        // the shell's first byte lands below it; through the reader's own
+        // parser and cluster wrapper, so it is drawn as the shell's output
+        // would be; past `TappedPty`, so no scanner sees it.
+        if let Some(bytes) = options.replay.as_deref().filter(|bytes| !bytes.is_empty()) {
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            let mut last_input = false;
+            let mut term = term.lock();
+            parser.advance(
+                &mut ClusterHandler::new(&mut term, options.cluster, &mut last_input),
+                bytes,
+            );
+        }
 
         let event_loop = EventLoop::new(
             Arc::clone(&term),
@@ -3728,8 +3820,7 @@ impl Session {
         // the **same** path as user input (generation included). In a fresh
         // session there is no selection and scrolling, i.e. `send_input`'s other
         // jobs are no-ops.
-        if let Some(mut line) = at_birth {
-            line.push('\r');
+        if let Some(line) = at_birth {
             session.write_owned(line.into_bytes());
         }
         Ok(session)
@@ -6135,6 +6226,48 @@ impl Session {
     /// primary grid's history is in `Term::inactive_grid` and that field is private.
     pub fn clear_to_start(&self) -> bool {
         self.clear(ClearKind::ToStart)
+    }
+
+    /// The primary grid's scrollback and screen as VT bytes — **only at quit**
+    /// (053): what the next launch replays ([`SessionOptions::replay`]).
+    ///
+    /// **Destructive on the alternate screen, and that is why it is quit-only.**
+    /// The primary grid is behind `Term`'s private `inactive_grid` there, so
+    /// this swaps it in once with `Term::swap_alt` and does **not** swap back:
+    /// the second swap would reset the alternate screen (alacritty 0.26.0,
+    /// `term/mod.rs:714`). After the call the application's screen (vim,
+    /// `less`) is gone and the session must not be drawn again. A live path
+    /// (the handover set) cannot use this method.
+    ///
+    /// Where it stops (`.tasks/053-oturum-geri-yukleme/plan.md` → R1.2):
+    ///
+    /// - The shell is at `Input` → **before** the top row of the input block's
+    ///   anchor: the prompt and the half-typed line (suppressed from the grid
+    ///   anyway) do not enter the history; the new shell prints its own
+    ///   prompt. The anchor is read before the links are dropped, from the
+    ///   cursor's row upward, so a copy Ctrl-L left in the history is not
+    ///   mistaken for it.
+    /// - No shell state at all (no integration, or a shell that never marked)
+    ///   → before the cursor's row: that row is the prompt.
+    /// - Otherwise (a command is running, or between commands) → through the
+    ///   cursor's row.
+    ///
+    /// Trailing empty rows are dropped and the stream ends with a line break.
+    /// The ceiling is the user's `scrollback` — the grid holds no more.
+    pub fn final_history(&self) -> Vec<u8> {
+        // The leaf lock **before** `Term` (module header).
+        let cut = lock(&self.shell).history_cut();
+        let mut term = self.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            term.swap_alt();
+        }
+        let cursor = term.grid().cursor.point.line.0;
+        let end = match cut {
+            HistoryCut::Anchor(block) => anchor_top(&term, cursor, block).unwrap_or(cursor),
+            HistoryCut::BeforeCursor => cursor,
+            HistoryCut::ThroughCursor => cursor + 1,
+        };
+        snapshot::encode(&term, end)
     }
 
     /// Edit ▸ Clear Scrollback (⌥⌘K): erases only the scrollback; the grid stays
@@ -9502,6 +9635,7 @@ mod tests {
             shell_marks: false,
             tab_id: None,
             hostname: None,
+            replay: None,
         }
     }
 
@@ -9548,7 +9682,7 @@ mod tests {
                 printf 'END'; sleep 5"),
             80,
         );
-        options.initial_input = Some("echo hi".to_owned());
+        options.initial_input = Some(InitialInput::run("echo hi"));
         options.shell_marks = true;
         let generation = |session: &Session| session.key_gen.load(Ordering::Acquire);
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
@@ -9596,12 +9730,136 @@ mod tests {
         // grid is the line's **output**, not its echo.
         let wake = Arc::new(TestWake::default());
         let mut options = test_options(sh("stty -echo; read x; eval \"$x\"; sleep 5"), 80);
-        options.initial_input = Some("echo birth-$((6*7))".to_owned());
+        options.initial_input = Some(InitialInput::run("echo birth-$((6*7))"));
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
         wait_frame(&session, &wake, |cells| {
             grid_glyphs(cells).contains("birth-42")
         });
         assert_eq!(session.key_gen.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_ready_initial_input_waits_for_the_users_enter_at_birth() {
+        // 053 Karar 3: a restored remote pane gets its target's line without
+        // `\r`. The fake shell's timed read must find no line; the line is
+        // still in the input buffer and the user's ⏎ completes it.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("stty -echo; if read -t 1 x; then printf 'RAN:%s|' \"$x\"; \
+                else printf 'WAIT|'; fi; read y; printf 'GOT:%s|' \"$y\"; sleep 5"),
+            80,
+        );
+        options.initial_input = Some(InitialInput::ready("ssh-prod"));
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_text(&session, "WAIT|");
+        session.write(b"\r");
+        let text = wait_text(&session, "GOT:");
+        assert!(text.contains("WAIT|GOT:ssh-prod|"), "{text}");
+    }
+
+    #[test]
+    fn a_ready_initial_input_waits_for_the_users_enter_at_the_prompt() {
+        // The wrapper arm of the same bit: the line goes at our first
+        // identified `A`, still without `\r`.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("stty -echo; printf '\\033]133;A;bt_block=1\\007'; \
+                if read -t 1 x; then printf 'RAN:%s|' \"$x\"; \
+                else printf 'WAIT|'; fi; read y; printf 'GOT:%s|' \"$y\"; sleep 5"),
+            80,
+        );
+        options.initial_input = Some(InitialInput::ready("ssh-prod"));
+        options.shell_marks = true;
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_text(&session, "WAIT|");
+        session.write(b"\r");
+        let text = wait_text(&session, "GOT:");
+        assert!(text.contains("WAIT|GOT:ssh-prod|"), "{text}");
+    }
+
+    #[test]
+    fn a_replayed_history_sits_above_the_shell_and_reaches_no_ledger() {
+        // 053 R1.3: the bytes go to `Term` before the reader loop and past the
+        // scanner. They carry marks here on purpose — a prompt, a mirror, an
+        // OSC 7 — and none of them may reach the shell ledger, the mirror or
+        // the directory.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(sh("printf 'NEW'; sleep 5"), 40);
+        options.replay = Some(
+            b"\x1b[31mOLD\x1b[0m\r\n\
+              \x1b]133;A;bt_block=7\x07\x1b]8;;bateri://block/7\x07$ \x1b]133;B\x07\
+              \x1b]7;file:///tmp\x07\x1b]8133;m;eA==\x07\r\n"
+                .to_vec(),
+        );
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        let text = wait_text(&session, "NEW");
+        let old = text.find("OLD").expect("the replayed row is missing");
+        assert!(old < text.find("NEW").unwrap_or(0), "{text}");
+        assert_eq!(session.shell_state(), None);
+        assert_eq!(session.working_directory(), None);
+        assert_eq!(session.remote_line(), None);
+        let mut dock = DockState::default();
+        session.dock_state(&mut dock);
+        assert_eq!(dock, DockState::default());
+    }
+
+    /// The fake shell's output once `until` is on screen, then the quit-time
+    /// snapshot.
+    fn final_history_of(script: &str, until: &str) -> String {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(sh(script), 40, wake);
+        wait_text(&session, until);
+        String::from_utf8(session.final_history()).expect("UTF-8 history")
+    }
+
+    #[test]
+    fn final_history_stops_before_the_prompt_being_typed() {
+        // `Input`: the prompt row and the half-typed line (wrapped onto a second
+        // row, the link still open as zsh keeps it until `preexec`) stay out.
+        let history = final_history_of(
+            "printf 'out1\\r\\n\\033]133;A;bt_block=1\\007\\033]8;;bateri://block/1\\007$ \
+             \\033]133;B\\007'; printf 'half%.0s' 1 2 3 4 5 6 7 8 9 10; sleep 5",
+            "halfhalf",
+        );
+        assert_eq!(history, "out1\r\n");
+    }
+
+    #[test]
+    fn final_history_keeps_a_ctrl_l_copy_of_the_same_prompt() {
+        // Ctrl-L reprints the prompt with the same id; the copy pushed into the
+        // history is history, only the live run is cut.
+        let history = final_history_of(
+            "printf '\\033]133;A;bt_block=1\\007\\033]8;;bateri://block/1\\007$ \
+             \\033]133;B\\007ls\\033]8;;\\007\\r\\nmid\\r\\n\
+             \\033]8;;bateri://block/1\\007$ \\033]133;B\\007ty'; sleep 5",
+            "ty",
+        );
+        assert_eq!(history, "$ ls\r\nmid\r\n");
+    }
+
+    #[test]
+    fn final_history_keeps_the_running_commands_last_row() {
+        let history = final_history_of(
+            "printf '\\033]133;A;bt_block=1\\007\\033]8;;bateri://block/1\\007$ ls\
+             \\033]8;;\\007\\r\\n\\033]133;C\\007line1\\r\\npart'; sleep 5",
+            "part",
+        );
+        assert_eq!(history, "$ ls\r\nline1\r\npart\r\n");
+    }
+
+    #[test]
+    fn final_history_without_marks_drops_the_cursors_row() {
+        let history = final_history_of("printf 'out\\r\\n$ '; sleep 5", "$");
+        assert_eq!(history, "out\r\n");
+    }
+
+    #[test]
+    fn final_history_reads_the_primary_grid_under_the_alternate_screen() {
+        let history = final_history_of(
+            "printf 'primary\\r\\n\\033[?1049hALTSCREEN'; sleep 5",
+            "ALTSCREEN",
+        );
+        assert_eq!(history, "primary\r\n");
     }
 
     /// The fake shell's grid, until `until` is visible (the first-input and offer tests).
@@ -9638,7 +9896,7 @@ mod tests {
                 read x; read y; printf 'GOT:%s|%s\\r\\n' \"$x\" \"$y\"; sleep 5"),
             80,
         );
-        options.initial_input = Some("first".to_owned());
+        options.initial_input = Some(InitialInput::run("first"));
         options.shell_marks = true;
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
         wait_text(&session, "READY");
@@ -9663,7 +9921,7 @@ mod tests {
             sh("stty -echo; printf 'READY'; read x; printf 'GOT:%s\\r\\n' \"$x\"; sleep 5"),
             80,
         );
-        options.initial_input = Some("first".to_owned());
+        options.initial_input = Some(InitialInput::run("first"));
         options.shell_marks = true;
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
         wait_text(&session, "READY");
@@ -9688,7 +9946,7 @@ mod tests {
                 read y; read z; printf 'GOT:%s|%s|%s\\r\\n' \"$x\" \"$y\" \"$z\"; sleep 5"),
             80,
         );
-        options.initial_input = Some("first".to_owned());
+        options.initial_input = Some(InitialInput::run("first"));
         options.shell_marks = true;
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
         wait_text(&session, "READY");

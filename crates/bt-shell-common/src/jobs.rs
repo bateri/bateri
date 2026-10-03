@@ -1612,6 +1612,7 @@ mod tests {
                 shell_marks: false,
                 tab_id: None,
                 hostname: None,
+                replay: None,
             },
             Arc::new(SilentWake),
         )
@@ -1680,6 +1681,7 @@ mod tests {
                 shell_marks: false,
                 tab_id: None,
                 hostname: None,
+                replay: None,
             },
             Arc::new(SilentWake),
         )

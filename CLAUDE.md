@@ -292,7 +292,7 @@ girdisine `^L` düşmüyor. Korunan ilk satır imlecin blok kimliğini taşıyan
 `PS1` bütünüyle kalır; kimlik yoksa imlecin satırı), üstü ekrandan atılıyor
 ve temizlik `2J` neslinin ikinci yazarı, yani doldurma bandı silineni geri
 getirmiyor. Alternatif ekranda temizleme ve dört kaydırma öğesi **gri** —
-birincil geçmiş orada erişilemez (`Term::inactive_grid` özel). ⌃⌘V Paste
+birincil geçmiş orada erişilemez (`Term::inactive_grid` özel; tek istisna kapanış — `Session::final_history` birincile bir kez `swap_alt` ile geçip geri çevirmiyor, 053). ⌃⌘V Paste
 Escaped Text panoyu tek argüman yapıp yapıştırıyor: satır sonu yoksa
 damlanın ters bölüsü, varsa bütünüyle tek tırnak (`quote::paste_quote`) —
 `\` + satır sonu satır devamı olup parçaları birleştirirdi. Gerekçeler

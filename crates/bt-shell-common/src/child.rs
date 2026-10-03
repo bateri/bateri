@@ -772,6 +772,7 @@ pub(crate) mod tests {
                 shell_marks: false,
                 tab_id: None,
                 hostname: None,
+                replay: None,
             },
             Arc::new(SilentWake),
         )
@@ -896,6 +897,7 @@ pub(crate) mod tests {
                     shell_marks: false,
                     tab_id: None,
                     hostname: None,
+                    replay: None,
                 },
                 Arc::new(SilentWake),
             )
@@ -990,6 +992,7 @@ pub(crate) mod tests {
                 shell_marks: false,
                 tab_id: None,
                 hostname: None,
+                replay: None,
             },
             Arc::new(SilentWake),
         )
@@ -1123,6 +1126,7 @@ pub(crate) mod tests {
                 shell_marks: false,
                 tab_id: None,
                 hostname: None,
+                replay: None,
             },
             Arc::new(SilentWake),
         )
@@ -1290,6 +1294,7 @@ pub(crate) mod tests {
                     shell_marks: false,
                     tab_id: None,
                     hostname: None,
+                    replay: None,
                 },
                 Arc::new(SilentWake),
             )
@@ -1426,6 +1431,7 @@ pub(crate) mod tests {
                 // The pane's identity (049 R6): `BATERI_TAB_URL` and the `LC_` trio.
                 tab_id: Some(tab.clone()),
                 hostname: None,
+                replay: None,
             },
             Arc::new(SilentWake),
         )
@@ -1838,6 +1844,7 @@ pub(crate) mod tests {
                 shell_marks: false,
                 tab_id: None,
                 hostname: None,
+                replay: None,
             },
             Arc::new(SilentWake),
         )

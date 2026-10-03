@@ -247,6 +247,17 @@ pub enum ShellPhase {
     Finished,
 }
 
+/// [`ShellLog::history_cut`]'s answer: where the quit-time snapshot stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HistoryCut {
+    /// The shell is at `Input`: before the top row of this block's anchor.
+    Anchor(u32),
+    /// No shell state at all: before the cursor's row.
+    BeforeCursor,
+    /// A command is running or between commands: through the cursor's row.
+    ThroughCursor,
+}
+
 /// A block's fate — the raw record the ledger keeps.
 ///
 /// `Pending` does **not mean** "running": an Enter pressed on an empty prompt
@@ -2567,6 +2578,21 @@ impl ShellLog {
             (id, Outcome::Pending) => Some(id),
             (_, Outcome::Finished { .. }) => None,
         }
+    }
+
+    /// Where the quit-time snapshot of the scrollback stops
+    /// ([`crate::Session::final_history`], 053 R1.2).
+    ///
+    /// The anchor arm is [`Self::input_block`]'s answer, i.e. the `blocks`
+    /// tier too (its prompt is the user's but carries our anchor); the
+    /// "no state" arm is a shell that never marked — integration off or a
+    /// shell we have no wrapper for — whose cursor row is the prompt.
+    pub(crate) fn history_cut(&self) -> HistoryCut {
+        if self.local.state.is_none() {
+            return HistoryCut::BeforeCursor;
+        }
+        self.input_block()
+            .map_or(HistoryCut::ThroughCursor, HistoryCut::Anchor)
     }
 
     /// The identity of the block the user is **typing right now** — `Some` if the
