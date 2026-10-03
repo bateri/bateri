@@ -3156,19 +3156,24 @@ fn block_row_continues<T>(term: &Term<T>, line: Line, id: BlockKey, boundary: us
 fn block_id(uri: &str) -> Option<u32> {
     match block_key(uri)? {
         BlockKey::Local(id) => Some(id),
-        BlockKey::Remote { .. } => None,
+        BlockKey::Remote { .. } | BlockKey::Saved { .. } => None,
     }
 }
 
 /// The block key from a prompt cell's link: [`block_id`]'s namespace, or our
 /// remote shell's `bateri://rblock/<P>.<S>.<n>` (048 phase-3,
-/// [`crate::shell::RemoteShell`]). The drawing loops, [`block_row_continues`]
-/// and ⌘K's kept row ([`row_block`]) read both; suppression's anchor
+/// [`crate::shell::RemoteShell`]), or a restored history's
+/// `bateri://sblock/<k>.<role>` ([`snapshot::saved_key`], 053). The drawing
+/// loops, [`block_row_continues`] and ⌘K's kept row ([`row_block`]) read
+/// all three; suppression's anchor
 /// ([`anchor_row_at_or_above`]) asks [`block_id`] — the local input line is
 /// the only one suppressed.
 fn block_key(uri: &str) -> Option<BlockKey> {
     if let Some(id) = uri.strip_prefix("bateri://block/") {
         return id.parse().ok().map(BlockKey::Local);
+    }
+    if let Some(key) = snapshot::saved_key(uri) {
+        return Some(key);
     }
     let (shell, id) = crate::shell::remote_key(uri.strip_prefix("bateri://rblock/")?)?;
     Some(BlockKey::Remote { shell, id })
@@ -6299,8 +6304,12 @@ impl Session {
     /// Trailing empty rows are dropped and the stream ends with a line break.
     /// The ceiling is the user's `scrollback` — the grid holds no more.
     pub fn final_history(&self) -> Vec<u8> {
-        // The leaf lock **before** `Term` (module header).
-        let cut = lock(&self.shell).history_cut();
+        // The leaf lock **before** `Term` (module header): the cut and the
+        // ledgers' copy the anchors are resolved with, in one round.
+        let (cut, stripes) = {
+            let shell = lock(&self.shell);
+            (shell.history_cut(), shell.saved_stripes())
+        };
         let mut term = self.term.lock();
         if term.mode().contains(TermMode::ALT_SCREEN) {
             term.swap_alt();
@@ -6311,7 +6320,9 @@ impl Session {
             HistoryCut::BeforeCursor => wrapped_top(&term, cursor),
             HistoryCut::ThroughCursor => cursor + 1,
         };
-        snapshot::encode(&term, end)
+        snapshot::encode(&term, end, |uri| {
+            block_key(uri).and_then(|key| stripes.stripe(key))
+        })
     }
 
     /// Edit ▸ Clear Scrollback (⌥⌘K): erases only the scrollback; the grid stays
@@ -9931,6 +9942,55 @@ mod tests {
             "halfhalfhalf",
         );
         assert_eq!(history, "out\r\n");
+    }
+
+    #[test]
+    fn final_history_saves_a_finished_blocks_anchor_with_its_role() {
+        // 053, seen in the real window: the restored commands lost their
+        // chevron. Finished blocks go out as saved anchors with the role of
+        // their colour; the block being typed is cut as before.
+        let history = final_history_of(
+            &format!(
+                "printf '{}cmd1{}{}cmd2{}{}ready'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out1"),
+                anchored_prompt(2),
+                ran(2, 1, "out2"),
+                anchored_prompt(3),
+            ),
+            "ready",
+        );
+        assert_eq!(
+            history,
+            "\x1b]8;;bateri://sblock/1.success\x07$ \x1b]8;;\x07cmd1\r\nout1\r\n\
+             \x1b]8;;bateri://sblock/2.error\x07$ \x1b]8;;\x07cmd2\r\nout2\r\n"
+        );
+    }
+
+    #[test]
+    fn a_replayed_saved_anchor_marks_its_command_row_in_the_live_theme() {
+        // The colour is the role, painted by today's theme; the `PS2` row of
+        // the second command carries the same key and is its continuation.
+        // `bateri://` is never a link (038 Karar 7): no ⌘-click reaches it.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(sh("printf 'NEW'; sleep 5"), 40);
+        options.replay = Some(
+            b"\x1b]8;;bateri://sblock/1.success\x07$ \x1b]8;;\x07cmd1\r\nout1\r\n\
+              \x1b]8;;bateri://sblock/2.error\x07$ for\r\n> done\x1b]8;;\x07\r\n"
+                .to_vec(),
+        );
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        let blocks = wait_blocks(&session, &wake, |blocks| blocks.len() >= 2);
+        assert_eq!(
+            marks(&blocks),
+            [(0, THEME.success_linear()), (2, THEME.error_linear())]
+        );
+        assert!(
+            session
+                .link_at(screen(0, 0))
+                .is_none_or(|hit| !hit.target.starts_with("bateri")),
+        );
+        session.shutdown();
     }
 
     #[test]

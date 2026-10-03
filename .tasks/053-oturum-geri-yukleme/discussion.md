@@ -175,8 +175,9 @@ Panelden geçmiş öneri; `/akis` otonom modunda kullanıcı onayı alınmadı.
   zoom, pane'in `TabId`'si, yerel dizini, punto adımı, uzak satırı ve geçmişi.
   **Saklanmayanlar:** tema (pane'e özgü tema yok, Theme ▸ ayar dosyasına
   yazıyor — saklamak ikinci kaynak olurdu), blok şeritleri ve süreleri
-  (çıpaları yeni kabuğun numaralarıyla çakışır, rengi kabuk defterinden),
-  dock aynası, arama, seçim, kaydırma konumu.
+  (çıpaları yeni kabuğun numaralarıyla çakışır, rengi kabuk defterinden;
+  biten bloğun işareti set sonrası geri geldi — aşağıda, Set sonrası
+  düzeltmeler), dock aynası, arama, seçim, kaydırma konumu.
 - **Karar 5 → ✅ (ürün) `[terminal] restore_windows = "all" | "layout" |
   "off"`, varsayılan `"all"`.** Metalterm'in adı; `"layout"` geçmiş dosyası
   yazmaz, `"off"` hiçbir şey yazmaz ve kalanı siler. Kullanılamayan ayar
@@ -202,3 +203,25 @@ Panelden geçmiş öneri; `/akis` otonom modunda kullanıcı onayı alınmadı.
   aynı satırla kapandı. `login -qflp` ortamı koruyor (ölçüldü: `PWD=/tmp`
   ile `/tmp`, `PWD=/` ile `/private/tmp`). Bekçisi
   `working_directory_keeps_its_symlinked_name_in_pwd`.
+- **Karar 4'e ek — blok işareti geri geliyor** (kullanıcı kararı
+  2026-10-03, gözle kontrolde: geri yüklenen komut satırlarında chevron
+  yoktu, yerinde `PS1`'in iki boşluğu). "Blok şeritleri saklanmaz" kararının
+  gerekçesi (çıpalar yeni kabuğun numaralarıyla çakışır, renk defterden)
+  doğru kaldı ama sonucu kısmak değil kodu açmak oldu: kodlayıcı biten
+  bloğun çıpasını kendi üçüncü şemamızla yazıyor —
+  `bateri://sblock/<k>.<success|error>`, `k` kayıt içinde blok sırası. Rol
+  kapanıştaki defterden (`ShellLog::saved_stripes`, `history_cut` ile aynı
+  yaprak kilit turunda kopya — `Term` altında defter okunamıyor), renk canlı
+  temadan (`BlockKey::Saved`, `ShellLog::stripe` defteri sormadan anahtarı
+  veriyor), yani tema değişince de doğru. Koşan, `Pending` ya da kodu
+  okunamayan blok **çıpasız** — ölü komutu `accent`'le "koşuyor" göstermek
+  yanlış, nötr rol yok; "bilinmeyen çizilmez". Süre sayacı gelmiyor.
+  Devam satırı kuralı (`block_row_continues`) aynı anahtar her satırda
+  olduğu için olduğu gibi çalışıyor; ızgara ve doldurma bandı aynı
+  `shell.stripe` çağrısından çözülüyor. Dış OSC 8 bağlantıları eskisi gibi
+  düşüyor (metni kalıyor); `bateri://` önekinin bağlantı kapısı
+  (`live_hyperlink`, `links::action`) yeni şemayı da yutuyor. İkinci kayıt
+  (geri yüklenmiş pane yeniden kapanınca) baytı baytına aynı çıkıyor.
+  Bekçiler `snapshot::tests` (rol, devam satırı, ikinci kayıt) ve
+  `final_history_saves_a_finished_blocks_anchor_with_its_role`,
+  `a_replayed_saved_anchor_marks_its_command_row_in_the_live_theme`.

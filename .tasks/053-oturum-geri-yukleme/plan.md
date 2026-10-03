@@ -80,8 +80,9 @@ Kararlar `discussion.md` → Karar.
 
 - Koşan işin, PTY'nin ve tam VT durumunun (modlar, kayıtlı imleç, charset,
   alt ekran içeriği) korunması — canlı devir seti; onun biçim/sürüm kuralı da.
-- Uzak dizin, blok şeritleri ve süreleri, dock aynası, arama, seçim,
-  kaydırma konumu, tema (`discussion.md` → Karar 4).
+- Uzak dizin, blok şeritlerinin süreleri, dock aynası, arama, seçim,
+  kaydırma konumu, tema (`discussion.md` → Karar 4; biten bloğun işareti
+  set sonrası geri geliyor — aynı dosya → Set sonrası düzeltmeler).
 - Çökme kurtarma (periyodik kayıt).
 - Linux kabuğu (henüz yok); model ve dosya katmanı platformsuz yazılır.
 - Kapanış süresi ve dosya boyutu iddiası — `/measure`'ın işi.

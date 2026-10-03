@@ -524,8 +524,8 @@ oturum kapatma, yeniden başlatma — neyin geri geleceğini söyler:
 
 - `"all"` (varsayılan) pencereleri, sekmeleri (grubu, sırası, seçili
   sekme), bölmeleri (yön ve oran), odaktaki ve büyütülmüş pane'i, her
-  pane'in dizinini ve punto farkını **ve geçmişini** renk ve biçimiyle geri
-  getirir.
+  pane'in dizinini ve punto farkını **ve geçmişini** renk ve biçimiyle,
+  biten komutların başarı/hata işaretiyle geri getirir (süreleri gelmez).
 - `"layout"` aynı düzeni geçmişsiz getirir: ekranda gördüğünüz hiçbir şey
   diske yazılmaz. Daha önce `"all"` ile kaydedilmiş bir geçmiş de
   gösterilmez, okunmadan silinir.

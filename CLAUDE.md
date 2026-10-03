@@ -405,7 +405,11 @@ paket kimliğiyle adlı kilitli dizin, açılışta oynatmadan önce tüketiliyo
 çöken kayıt geri gelmesin). Kurulumun tek yolu `TerminalWindow::restore`:
 pane'ler önce ağaçla yerleşiyor, kabuklar sonra başlıyor ve geçmiş
 `SessionOptions::replay` ile `Scanner`'a uğramadan oynatılıyor — kabuk yeni,
-koşan iş ölü. Uzak pane yerel kabukla ve hedefin satırı giriş satırında
+koşan iş ölü. Biten bloğun çıpası kendi adımızla yazılıyor
+(`bateri://sblock/<k>.<success|error>`, `snapshot`): yeni kabuk blokları
+1'den saydığı için eski `block/N` yanlış bloğun rengini alırdı; rengin
+**rolü** anahtarda ve canlı temadan çiziliyor, `k` devam satırını aynı blokta
+tutuyor; koşan/bilinmeyen blok çıpasız, süre sayacı gelmiyor. Uzak pane yerel kabukla ve hedefin satırı giriş satırında
 **çalıştırılmadan** geliyor (diskteki dosya kabuğa komut koşturmasın);
 `"layout"` geçmiş yazmıyor ve eski kaydınkini okumadan siliyor, yanlış değer
 ve kullanılamayan dosya `"layout"`'a düşüyor (geçmişi diske yazmak görünmez
