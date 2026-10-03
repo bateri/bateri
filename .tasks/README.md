@@ -51,6 +51,7 @@
 | 047 | [ssh-parola-ve-keychain](047-ssh-parola-ve-keychain/) | 🟢 | 4 phase + kapı tamam — parolalı sunucuda dosya işleri bateri'nin kendi master'ıyla, parola Keychain'de; arka plan kullanıcının ssh girişini bekliyor ve master oturumla kapanıyor
 | 048 | [uzak-kabuk-entegrasyonu](048-uzak-kabuk-entegrasyonu/) | 🟢 | 5 phase + kapı tamam — düz `ssh` uzakta dizin ve komut bloklarını rc dosyasına dokunmadan kuruyor, ayarla ve host başına kapanıyor; dosya işleri terminalde açılan oturumun bağlantısına biniyor |
 | 049 | [uzak-entegrasyon-ilk-baglanti](049-uzak-entegrasyon-ilk-baglanti/) | 🟢 | 3 phase + kapı tamam — her `ssh` ilk bağlantıdan sarılıyor, kabuksuz ya da exec reddeden uçta sessizce düz yeniden bağlanıyor, kullanılmış oturum düşmüyor ve terminal kimliği `LC_` ailesiyle ssh'ın öbür ucuna geçiyor |
+| 050 | [odak-sorgusu](050-odak-sorgusu/) | 📐 | `bateri focus bateri://tab/<UUID>` → `pane= focused= idle=`: evlat kullanıcının baktığı pane'in oturumunu göstermesin diye, yalnız sorulan pane için ve saniye çözünürlüğünde |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
