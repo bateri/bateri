@@ -6,7 +6,7 @@ All notable changes to bateri are documented here. The format follows
 
 Write user-facing changes under **Unreleased** as they land: what someone
 running bateri will notice, not how the code changed. At release time rename
-the section to the new version and date. `make gonder` takes that section as
+the section to the new version and date. `make release` takes that section as
 the release notes — they appear on the GitHub release and in the update window
 of every installed copy. A version without a section is not released.
 

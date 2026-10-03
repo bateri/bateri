@@ -389,7 +389,7 @@ bundle: sparkle
 # 2; the distinguishing signal is the "not yet" text on stdout. When the
 # target becomes real, delete its line and remove it from the list at the top
 # of proje.md too.
-henuz_yok = @echo "not yet: $(1)"; exit 1
+not_yet = @echo "not yet: $(1)"; exit 1
 
 
 # The zip to be sent to another Mac: compresses `bundle`'s checked package with
@@ -601,7 +601,7 @@ install: bundle
 	@echo "install: $(INSTALLED)"
 
 terminfo:
-	$(call henuz_yok,assets/terminfo comes with a shell/TERM set)
+	$(call not_yet,assets/terminfo comes with a shell/TERM set)
 
 # Linux gate for bt-core, bt-atlas, bt-gpu and bt-shell-common: `clippy -D warnings` and `test`, in Docker,
 # in the image from `tools/linux/Dockerfile`, with `--locked` (a run that would
