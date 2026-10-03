@@ -86,9 +86,9 @@ use crate::search::{
 };
 use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule};
 use crate::shell::{
-    BlockKey, COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection,
-    DockState, DockStatus, HistoryCut, Precision, RemoteStats, RemoteTarget, Scanner, ShellLog,
-    ShellState, Stripe, Transfer, TtyModes,
+    BlockKey, COUNTER_FLOOR, CaretHome, Carried, Counter, DockContext, DockPrediction,
+    DockSelection, DockState, DockStatus, HistoryCut, Precision, RemoteStats, RemoteTarget,
+    Scanner, ShellLog, ShellState, Stripe, Transfer, TtyModes,
 };
 use crate::snapshot;
 use crate::wake::Wake;
@@ -1597,11 +1597,28 @@ struct TappedPty {
     /// reads) and the channel is lockless. The loop's own write queue writes
     /// the bytes to the PTY.
     adapter: Adapter,
+    /// The sequence the last read stopped in (055): what the handover puts
+    /// before the bytes a fresh parser reads next ([`snapshot::Tail`]).
+    /// Followed on the same slice the scanner sees, no second read.
+    tail: snapshot::Tail,
+}
+
+impl TappedPty {
+    /// The bytes since the parser last stood in its ground state — read once
+    /// the reader has stopped, so no byte comes after them.
+    #[expect(
+        dead_code,
+        reason = "055 phase-2's freeze reads it after the reader stops"
+    )]
+    fn tail(&self) -> &[u8] {
+        self.tail.bytes()
+    }
 }
 
 impl io::Read for TappedPty {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let read = self.pty.reader().read(buf)?;
+        self.tail.feed(&buf[..read]);
         // Only the slice read **in this round** is scanned; `EventLoop` reads
         // accumulating into its buffer (`buf[unprocessed..]`) and scanning from
         // the start would turn the same byte into a marker twice.
@@ -3788,6 +3805,7 @@ impl Session {
             initial_input: at_prompt,
             held_input: Arc::clone(&held_input),
             adapter: adapter.clone(),
+            tail: snapshot::Tail::default(),
         };
 
         let config = term_config(options.terminal);
@@ -6323,6 +6341,83 @@ impl Session {
         snapshot::encode(&term, end, |uri| {
             block_key(uri).and_then(|key| stripes.stripe(key))
         })
+    }
+
+    /// The pane's **whole** terminal state as VT bytes — **only at the
+    /// handover** (055): both screens, the cursors and saved cursors, every
+    /// mode, the changed palette, the links as they are, and what alacritty
+    /// keeps private (tab stops, the scrolling region, the active set, the
+    /// keyboard and title stacks, the application's cursor style).
+    /// [`snapshot::encode_live`] has the order and the known limits.
+    ///
+    /// **Destructive, and that is why it is handover-only** — the
+    /// [`Session::final_history`] precedent, one step further: the private
+    /// fields are probed by driving `Term` **after** the content is read
+    /// (the stacks are popped empty, cells are written, the config is
+    /// replaced). After the call the session must not be drawn, fed or read
+    /// again; the caller stops the reader first, so no byte arrives in
+    /// between.
+    ///
+    /// The probes write the title slot back to the title it held; the
+    /// sentinel they pass through it may send title news on the way.
+    pub fn live_snapshot(&self) -> Vec<u8> {
+        let title = &self.adapter.0.title;
+        // `Term` → the leaf title slot: the order the title events already
+        // take (module header).
+        let mut term = self.term.lock();
+        snapshot::encode_live(&mut term, &|| lock(title).clone()).0
+    }
+
+    /// `bt-core`'s own state as a versioned blob — the handover's second half
+    /// next to [`Session::live_snapshot`] (055,
+    /// `.tasks/055-guncellemede-canli-devir/discussion.md` → Karar 4): the
+    /// block ledgers and the running command's clock, the dock's context and
+    /// last mirror, the generations the remote gates read, the deliberate
+    /// clear's flag. What is carried and what is dropped is
+    /// [`crate::shell::Carried`]'s doc. Not destructive.
+    pub fn state_blob(&self) -> Vec<u8> {
+        // A `2J` the scanner counted but no frame has turned into the flag
+        // yet (a background tab draws no frame) is a clear all the same: it
+        // crosses as set and unstamped, the frame path's own first step.
+        let unseen = self.screen_clears.load(Ordering::Relaxed)
+            != self.screen_seen.load(Ordering::Relaxed)
+            && !self.alt_screen.load(Ordering::Relaxed);
+        let cleared = if self.screen_cleared.load(Ordering::Relaxed) {
+            Some(self.screen_clear_history.load(Ordering::Relaxed))
+        } else {
+            unseen.then_some(Self::UNSTAMPED)
+        };
+        let answered = self.key_gen.load(Ordering::Acquire);
+        lock(&self.shell).carried(cleared, answered).encode()
+    }
+
+    /// Takes a [`Session::state_blob`] of this version or the one before it
+    /// over this session's fresh state; `false` → the blob is corrupt or of
+    /// an unknown version and nothing changed (the caller's fallback is the
+    /// fresh state). Meant right after the VT snapshot is replayed and
+    /// before the first frame: the clear's stamp is a scrollback length the
+    /// replay rebuilds, and the carried mirror answers this session's input
+    /// generation only if it answered the last input before the handover.
+    pub fn restore_state_blob(&self, blob: &[u8]) -> bool {
+        let Some(carried) = Carried::decode(blob) else {
+            return false;
+        };
+        let cleared = carried.cleared;
+        lock(&self.shell).restore(carried, self.key_gen.load(Ordering::Acquire));
+        // The counter's generations are this process's; only the flag and
+        // its stamp cross, and the frame path must not read the replay's
+        // `2J`s as a new clear.
+        self.screen_seen.store(
+            self.screen_clears.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.screen_cleared
+            .store(cleared.is_some(), Ordering::Relaxed);
+        self.screen_clear_history
+            .store(cleared.unwrap_or(Self::UNSTAMPED), Ordering::Relaxed);
+        self.adapter.0.wake.title_changed();
+        self.request_frame();
+        true
     }
 
     /// Edit ▸ Clear Scrollback (⌥⌘K): erases only the scrollback; the grid stays
@@ -10000,6 +10095,59 @@ mod tests {
             "ALTSCREEN",
         );
         assert_eq!(history, "primary\r\n");
+    }
+
+    #[test]
+    fn live_snapshot_carries_both_screens_and_puts_the_title_back() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh(
+                "printf 'primary\\r\\n\\033]2;mytitle\\007\\033[?1049h\\033[?2004hALTSCREEN'; sleep 5",
+            ),
+            40,
+            wake,
+        );
+        wait_text(&session, "ALTSCREEN");
+        let bytes = String::from_utf8(session.live_snapshot()).expect("UTF-8 snapshot");
+        // The title probe passed a sentinel through the slot and put it back.
+        assert_eq!(session.title(), "mytitle");
+        for part in [
+            "primary",
+            "\x1b[?1049h",
+            "ALTSCREEN",
+            "\x1b]2;mytitle\x07",
+            "\x1b[?2004h",
+        ] {
+            assert!(bytes.contains(part), "{part:?} in {bytes:?}");
+        }
+    }
+
+    #[test]
+    fn a_state_blob_moves_the_shells_ledger_to_another_session() {
+        let old = spawn_with_cols(
+            sh(
+                "printf '\\033]133;A;bt_block=1\\007\\033]133;C\\007\\033]133;D;0;bt_block=1\\007\
+                \\033]133;A;bt_block=2\\007\\033]7;file://localhost/tmp/x\\007READY'; sleep 5",
+            ),
+            40,
+            Arc::new(TestWake::default()),
+        );
+        wait_text(&old, "READY");
+        assert!(String::from_utf8_lossy(&old.state_blob()).contains("\ncleared -\n"));
+        // A `2J` no frame has seen yet (a background tab) crosses as a clear.
+        old.screen_clears.fetch_add(1, Ordering::Relaxed);
+        let blob = old.state_blob();
+        assert!(
+            String::from_utf8_lossy(&blob).contains(&format!("\ncleared {}\n", Session::UNSTAMPED))
+        );
+        let new = spawn_with_cols(sh("sleep 5"), 40, Arc::new(TestWake::default()));
+        assert!(!new.restore_state_blob(b"bateri-state 99\nend\n"));
+        assert_eq!(new.shell_state(), None);
+        assert!(new.restore_state_blob(&blob));
+        assert_eq!(new.shell_state(), old.shell_state());
+        assert_eq!(new.title(), "x");
+        // Nothing runs, so no clock: the second blob is the first, byte for byte.
+        assert_eq!(String::from_utf8(new.state_blob()), String::from_utf8(blob));
     }
 
     /// The fake shell's grid, until `until` is visible (the first-input and offer tests).

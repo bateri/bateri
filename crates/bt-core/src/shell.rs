@@ -637,6 +637,15 @@ pub enum RemoteSetupFault {
 }
 
 impl RemoteSetupFault {
+    /// The wire code; [`Self::from_code`]'s inverse.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::Decode => "decode",
+            Self::Shell => "shell",
+        }
+    }
+
     /// The wire code → the fault; an unknown code (a newer bootstrap) is `None`.
     pub fn from_code(code: &[u8]) -> Option<Self> {
         match code {
@@ -4300,6 +4309,630 @@ fn b64_value(byte: u8) -> Option<u8> {
     }
 }
 
+// ─── the handover's state blob (055) ─────────────────────────────────────
+
+/// The state blob's first word; the version follows it after one space.
+const STATE_HEADER: &str = "bateri-state";
+
+/// The state blob's version (055 R1.4): the old bateri writes it, the new one
+/// reads it across an update. A change of the format increments it.
+const STATE_VERSION: u32 = 1;
+
+/// The oldest version the reader still takes: the current one and the one
+/// before it (`.tasks/055-guncellemede-canli-devir/discussion.md` → Karar 8).
+/// While the format has one version the two are the same.
+const STATE_OLDEST: u32 = if STATE_VERSION > 1 {
+    STATE_VERSION - 1
+} else {
+    STATE_VERSION
+};
+
+/// One block trail as the blob carries it ([`BlockTrack`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CarriedTrack {
+    state: Option<ShellState>,
+    /// How long the running command has run, in milliseconds — an `Instant`
+    /// does not cross processes; the new side subtracts it from its own now.
+    running_ms: Option<u64>,
+    /// The identity of `entries[0]`.
+    first: u32,
+    entries: Vec<Outcome>,
+}
+
+impl CarriedTrack {
+    fn of(track: &BlockTrack) -> Self {
+        Self {
+            state: track.state,
+            running_ms: track
+                .running_since
+                .map(|since| u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            first: track.blocks.first,
+            entries: track.blocks.entries.iter().copied().collect(),
+        }
+    }
+
+    /// Into `track`, whose ledger keeps its own ceiling: entries over it are
+    /// dropped from the oldest, the ring's own rule.
+    fn restore(self, track: &mut BlockTrack) {
+        track.state = self.state;
+        track.running_since = self
+            .running_ms
+            .and_then(|ms| Instant::now().checked_sub(Duration::from_millis(ms)));
+        track.blocks.entries = self.entries.into();
+        track.blocks.first = self.first;
+        while track.blocks.entries.len() > track.blocks.capacity {
+            track.blocks.entries.pop_front();
+            track.blocks.first = track.blocks.first.wrapping_add(1);
+        }
+    }
+
+    fn render(&self) -> String {
+        let (phase, exit) = match self.state {
+            None => ("-", "-".to_owned()),
+            Some(state) => (
+                match state.phase {
+                    ShellPhase::Prompt => "prompt",
+                    ShellPhase::Input => "input",
+                    ShellPhase::Running => "running",
+                    ShellPhase::Finished => "finished",
+                },
+                render_number(state.last_exit),
+            ),
+        };
+        let entries = if self.entries.is_empty() {
+            "-".to_owned()
+        } else {
+            let mut out = String::new();
+            for (index, entry) in self.entries.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                match entry {
+                    Outcome::Pending => out.push('p'),
+                    Outcome::Finished { exit, elapsed_ms } => {
+                        let _ = write!(out, "{}/{elapsed_ms}", render_number(*exit));
+                    }
+                }
+            }
+            out
+        };
+        format!(
+            "{phase} {exit} {} {} {entries}",
+            render_number(self.running_ms),
+            self.first
+        )
+    }
+
+    fn parse(fields: &[&str]) -> Option<Self> {
+        let [phase, exit, running, first, entries] = fields else {
+            return None;
+        };
+        let phase = match *phase {
+            "-" => None,
+            "prompt" => Some(ShellPhase::Prompt),
+            "input" => Some(ShellPhase::Input),
+            "running" => Some(ShellPhase::Running),
+            "finished" => Some(ShellPhase::Finished),
+            _ => return None,
+        };
+        let last_exit = parse_number(exit)?;
+        let state = match phase {
+            Some(phase) => Some(ShellState { phase, last_exit }),
+            None if last_exit.is_none() => None,
+            None => return None,
+        };
+        let entries = if *entries == "-" {
+            Vec::new()
+        } else {
+            entries
+                .split(',')
+                .map(|entry| {
+                    if entry == "p" {
+                        return Some(Outcome::Pending);
+                    }
+                    let (exit, elapsed) = entry.split_once('/')?;
+                    Some(Outcome::Finished {
+                        exit: parse_number(exit)?,
+                        elapsed_ms: elapsed.parse().ok()?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?
+        };
+        Some(Self {
+            state,
+            running_ms: parse_number(running)?,
+            first: first.parse().ok()?,
+            entries,
+        })
+    }
+}
+
+/// What the handover carries of `bt-core`'s own state (055,
+/// `.tasks/055-guncellemede-canli-devir/discussion.md` → Karar 4): the
+/// ledgers, the context, the last mirror and the generations the remote
+/// gates read. **Not carried:** the transient interface state (the dock's
+/// selection, vertical window and prediction; search; the mouse selection;
+/// the scroll fraction), the remote target (the process table finds it
+/// again — a carried copy would be a second source of truth), the remote
+/// mark (resolved again from the host rules) and the title (the VT
+/// snapshot carries it, through the listener).
+///
+/// Beyond Karar 4's list, [`ShellLog::ours`] and [`ShellLog::command_open`]:
+/// without them the foreign-mark gate is off until our next mark, and a
+/// remote fish's or kitty's `A` would clear `⇄ host` under a running ssh.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Carried {
+    local: CarriedTrack,
+    remote: CarriedTrack,
+    remote_shell: Option<RemoteShell>,
+    cwd: String,
+    branch: String,
+    remote_cwd: String,
+    remote_setup: Option<RemoteSetupFault>,
+    /// The reconnect offer's host and line; its mark is resolved again.
+    reconnect: Option<(String, String)>,
+    /// `answers` and `cluster` are not carried: the new session stamps the
+    /// mirror with its own input generation ([`Self::dock_fresh`]) and reads
+    /// it with its own cluster setting.
+    dock: DockState,
+    /// Whether the mirror answered the last input before the handover — the
+    /// freshness gate's temporal half ([`DockState::answers`]). A freeze
+    /// between a key and its mirror (the `bracketed-paste-magic` arm sends
+    /// none until the next key) must cross as stale, not as fresh.
+    dock_fresh: bool,
+    dock_editable: bool,
+    command: u64,
+    login: Option<u64>,
+    remote_up: Option<(u64, String)>,
+    typed: Option<u64>,
+    ours: bool,
+    command_open: bool,
+    /// The deliberate clear's flag with its stamp (`Session`'s
+    /// `screen_cleared` and `screen_clear_history`): `Some` while set. The
+    /// stamp is a scrollback length, and the replay rebuilds the same one.
+    pub(crate) cleared: Option<usize>,
+}
+
+impl Carried {
+    /// The blob: the header line, then one `key fields…` line per field, one
+    /// `hl` line per highlight and `end`. Text is escaped so that a field never
+    /// holds a space or a line break (`+{escaped}`, `-` for none — the
+    /// `restore` format's rule, 053).
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut out = format!("{STATE_HEADER} {STATE_VERSION}\n");
+        let dock = &self.dock;
+        let status = match dock.status {
+            DockStatus::Idle => "idle",
+            DockStatus::Live => "live",
+            DockStatus::Control => "control",
+            DockStatus::Unavailable(DockFault::Overflow) => "overflow",
+            DockStatus::Unavailable(DockFault::Malformed) => "malformed",
+        };
+        let mut ink = [0; 4];
+        let lines = [
+            format!("local {}", self.local.render()),
+            format!("remote {}", self.remote.render()),
+            format!(
+                "remote-shell {}",
+                self.remote_shell.map_or("-".to_owned(), |shell| format!(
+                    "{}.{}",
+                    shell.parent, shell.pid
+                ))
+            ),
+            format!("cwd {}", render_text(Some(&self.cwd))),
+            format!("branch {}", render_text(Some(&self.branch))),
+            format!("remote-cwd {}", render_text(Some(&self.remote_cwd))),
+            format!(
+                "remote-setup {}",
+                self.remote_setup.map_or("-", RemoteSetupFault::code)
+            ),
+            match &self.reconnect {
+                None => "reconnect -".to_owned(),
+                Some((host, line)) => format!(
+                    "reconnect {} {}",
+                    render_text(Some(host)),
+                    render_text(Some(line))
+                ),
+            },
+            format!(
+                "dock {status} {} {} {} {}",
+                dock.cursor,
+                dock.display_chars,
+                render_text(dock.last_ink.map(|ch| &*ch.encode_utf8(&mut ink))),
+                u8::from(dock.insert_keymap)
+            ),
+            format!("predisplay {}", render_text(Some(&dock.predisplay))),
+            format!("buffer {}", render_text(Some(&dock.buffer))),
+            format!("postdisplay {}", render_text(Some(&dock.postdisplay))),
+            format!("prebuffer {}", render_text(Some(&dock.prebuffer))),
+            format!("dock-fresh {}", u8::from(self.dock_fresh)),
+            format!("editable {}", u8::from(self.dock_editable)),
+            format!("command {}", self.command),
+            format!("login {}", render_number(self.login)),
+            match &self.remote_up {
+                None => "remote-up -".to_owned(),
+                Some((generation, nonce)) => {
+                    format!("remote-up {generation} {}", render_text(Some(nonce)))
+                }
+            },
+            format!("typed {}", render_number(self.typed)),
+            format!("ours {}", u8::from(self.ours)),
+            format!("command-open {}", u8::from(self.command_open)),
+            format!("cleared {}", render_number(self.cleared)),
+        ];
+        for line in lines {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        for highlight in &dock.highlights {
+            let style = highlight.style;
+            let flags: String = [
+                (style.bold, 'b'),
+                (style.underline, 'u'),
+                (style.standout, 's'),
+            ]
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, letter)| *letter)
+            .collect();
+            let _ = writeln!(
+                out,
+                "hl {} {} {} {} {}",
+                highlight.start,
+                highlight.end,
+                render_color(style.fg),
+                render_color(style.bg),
+                if flags.is_empty() { "-" } else { &flags }
+            );
+        }
+        // A cut blob must not read as a shorter one (the highlights are a
+        // list): the last line says the blob is whole.
+        out.push_str("end\n");
+        out.into_bytes()
+    }
+
+    /// [`Self::encode`]'s inverse for this version and the one before it.
+    /// Strict: an unknown version or key, a missing or repeated key, a
+    /// malformed field — `None`, never a panic. A half-read state would put a
+    /// wrong caret or a wrong colour on screen; the caller's fallback is a
+    /// fresh state.
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(bytes).ok()?;
+        let mut lines = text.lines();
+        let mut header = lines.next()?.split(' ');
+        if header.next()? != STATE_HEADER {
+            return None;
+        }
+        let version: u32 = header.next()?.parse().ok()?;
+        if !(STATE_OLDEST..=STATE_VERSION).contains(&version) || header.next().is_some() {
+            return None;
+        }
+        let mut fields: Vec<(&str, Vec<&str>)> = Vec::new();
+        let mut highlights = Vec::new();
+        let mut whole = false;
+        for line in lines {
+            if whole {
+                return None;
+            }
+            if line == "end" {
+                whole = true;
+                continue;
+            }
+            let mut words = line.split(' ');
+            let key = words.next()?;
+            let rest: Vec<&str> = words.collect();
+            if key == "hl" {
+                highlights.push(parse_carried_highlight(&rest)?);
+            } else if fields.iter().any(|(seen, _)| *seen == key) {
+                return None;
+            } else {
+                fields.push((key, rest));
+            }
+        }
+        if !whole || !text.ends_with('\n') {
+            return None;
+        }
+        let mut take = |key: &str| -> Option<Vec<&str>> {
+            let at = fields.iter().position(|(seen, _)| *seen == key)?;
+            Some(fields.remove(at).1)
+        };
+        let one = |values: Vec<&str>| -> Option<String> {
+            let [value] = values.as_slice() else {
+                return None;
+            };
+            Some((*value).to_owned())
+        };
+        let text_of = |values: Vec<&str>| -> Option<String> { parse_text(&one(values)?)? };
+        let flag = |values: Vec<&str>| -> Option<bool> {
+            match one(values)?.as_str() {
+                "0" => Some(false),
+                "1" => Some(true),
+                _ => None,
+            }
+        };
+        let number = |values: Vec<&str>| -> Option<Option<u64>> { parse_number(&one(values)?) };
+
+        let local = CarriedTrack::parse(&take("local")?)?;
+        let remote = CarriedTrack::parse(&take("remote")?)?;
+        let remote_shell = match one(take("remote-shell")?)?.as_str() {
+            "-" => None,
+            shell => {
+                let (parent, pid) = shell.split_once('.')?;
+                Some(RemoteShell {
+                    parent: parent.parse().ok()?,
+                    pid: pid.parse().ok()?,
+                })
+            }
+        };
+        let cwd = text_of(take("cwd")?)?;
+        let branch = text_of(take("branch")?)?;
+        let remote_cwd = text_of(take("remote-cwd")?)?;
+        let remote_setup = match one(take("remote-setup")?)?.as_str() {
+            "-" => None,
+            code => Some(RemoteSetupFault::from_code(code.as_bytes())?),
+        };
+        let reconnect = match take("reconnect")?.as_slice() {
+            ["-"] => None,
+            [host, line] => Some((parse_text(host)??, parse_text(line)??)),
+            _ => return None,
+        };
+        let dock_fields = take("dock")?;
+        let [status, cursor, display_chars, last_ink, insert] = dock_fields.as_slice() else {
+            return None;
+        };
+        let status = match *status {
+            "idle" => DockStatus::Idle,
+            "live" => DockStatus::Live,
+            "control" => DockStatus::Control,
+            "overflow" => DockStatus::Unavailable(DockFault::Overflow),
+            "malformed" => DockStatus::Unavailable(DockFault::Malformed),
+            _ => return None,
+        };
+        let last_ink = match parse_text(last_ink)? {
+            None => None,
+            Some(ink) => {
+                let mut chars = ink.chars();
+                let ch = chars.next()?;
+                chars.next().is_none().then_some(ch)?;
+                Some(ch)
+            }
+        };
+        let insert_keymap = match *insert {
+            "0" => false,
+            "1" => true,
+            _ => return None,
+        };
+        let dock = DockState {
+            status,
+            predisplay: text_of(take("predisplay")?)?,
+            buffer: text_of(take("buffer")?)?,
+            postdisplay: text_of(take("postdisplay")?)?,
+            prebuffer: text_of(take("prebuffer")?)?,
+            cursor: cursor.parse().ok()?,
+            highlights,
+            display_chars: display_chars.parse().ok()?,
+            last_ink,
+            insert_keymap,
+            answers: 0,
+            cluster: false,
+        };
+        let dock_fresh = flag(take("dock-fresh")?)?;
+        let dock_editable = flag(take("editable")?)?;
+        let command = one(take("command")?)?.parse().ok()?;
+        let login = number(take("login")?)?;
+        let remote_up = match take("remote-up")?.as_slice() {
+            ["-"] => None,
+            [generation, nonce] => Some((generation.parse().ok()?, parse_text(nonce)??)),
+            _ => return None,
+        };
+        let typed = number(take("typed")?)?;
+        let ours = flag(take("ours")?)?;
+        let command_open = flag(take("command-open")?)?;
+        let cleared = number(take("cleared")?)?
+            .map(usize::try_from)
+            .transpose()
+            .ok()?;
+        if !fields.is_empty() {
+            return None;
+        }
+        Some(Self {
+            local,
+            remote,
+            remote_shell,
+            cwd,
+            branch,
+            remote_cwd,
+            remote_setup,
+            reconnect,
+            dock,
+            dock_fresh,
+            dock_editable,
+            command,
+            login,
+            remote_up,
+            typed,
+            ours,
+            command_open,
+            cleared,
+        })
+    }
+}
+
+impl ShellLog {
+    /// What the handover carries ([`Carried`]); `cleared` is `Session`'s,
+    /// `answered` its input generation now.
+    pub(crate) fn carried(&self, cleared: Option<usize>, answered: u64) -> Carried {
+        Carried {
+            local: CarriedTrack::of(&self.local),
+            remote: CarriedTrack::of(&self.remote),
+            remote_shell: self.remote_shell,
+            cwd: self.context.cwd.clone(),
+            branch: self.context.branch.clone(),
+            remote_cwd: self.context.remote_cwd.clone(),
+            remote_setup: self.context.remote_setup,
+            reconnect: self
+                .context
+                .reconnect
+                .as_ref()
+                .map(|offer| (offer.host.clone(), offer.line.clone())),
+            dock: self.dock.clone(),
+            dock_fresh: self.dock.answers == answered,
+            dock_editable: self.dock_editable,
+            command: self.command,
+            login: self.login,
+            remote_up: self.remote_up.clone(),
+            typed: self.typed,
+            ours: self.ours,
+            command_open: self.command_open,
+            cleared,
+        }
+    }
+
+    /// Takes the carried state over a fresh log; `answers` is this
+    /// session's input generation — a mirror that answered the last input
+    /// before the handover answers it (nothing was typed since), a stale one
+    /// is stamped one generation behind and the gate falls back to the
+    /// content comparison. The mirror
+    /// keeps this session's cluster setting; the reconnect offer's mark is
+    /// resolved from this session's host rules.
+    pub(crate) fn restore(&mut self, carried: Carried, answers: u64) {
+        carried.local.restore(&mut self.local);
+        carried.remote.restore(&mut self.remote);
+        self.remote_shell = carried.remote_shell;
+        self.context.cwd = carried.cwd;
+        self.context.branch = carried.branch;
+        self.context.remote_cwd = carried.remote_cwd;
+        self.context.remote_setup = carried.remote_setup;
+        self.context.reconnect = carried.reconnect.map(|(host, line)| Reconnect {
+            mark: crate::settings::host_mark(&self.host_rules, &host),
+            host,
+            line,
+        });
+        let cluster = self.dock.cluster;
+        self.dock = carried.dock;
+        self.dock.answers = if carried.dock_fresh {
+            answers
+        } else {
+            answers.wrapping_sub(1)
+        };
+        self.dock.cluster = cluster;
+        self.dock_editable = carried.dock_editable;
+        self.command = carried.command;
+        self.login = carried.login;
+        self.remote_up = carried.remote_up;
+        self.typed = carried.typed;
+        self.ours = carried.ours;
+        self.command_open = carried.command_open;
+    }
+}
+
+/// A number field: `-` for none.
+fn render_number<N: fmt::Display>(value: Option<N>) -> String {
+    value.map_or("-".to_owned(), |value| value.to_string())
+}
+
+/// [`render_number`]'s inverse; the outer `None` is a malformed field.
+fn parse_number<N: std::str::FromStr>(field: &str) -> Option<Option<N>> {
+    if field == "-" {
+        return Some(None);
+    }
+    field.parse().ok().map(Some)
+}
+
+/// A text field: `-` for none, `+` and the escaped text — `\` → `\\`,
+/// space → `\s`, tab → `\t`, line feed → `\n`, carriage return → `\r`.
+fn render_text(text: Option<&str>) -> String {
+    let Some(text) = text else {
+        return "-".to_owned();
+    };
+    let mut out = String::with_capacity(text.len() + 1);
+    out.push('+');
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            ' ' => out.push_str("\\s"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// [`render_text`]'s inverse; the outer `None` is a malformed field.
+fn parse_text(field: &str) -> Option<Option<String>> {
+    if field == "-" {
+        return Some(None);
+    }
+    let mut chars = field.strip_prefix('+')?.chars();
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        out.push(match chars.next()? {
+            '\\' => '\\',
+            's' => ' ',
+            't' => '\t',
+            'n' => '\n',
+            'r' => '\r',
+            _ => return None,
+        });
+    }
+    Some(Some(out))
+}
+
+fn render_color(color: Option<HighlightColor>) -> String {
+    match color {
+        None => "-".to_owned(),
+        Some(HighlightColor::Indexed(index)) => format!("i{index}"),
+        Some(HighlightColor::Rgb(rgb)) => format!("r{rgb:06x}"),
+    }
+}
+
+fn parse_carried_color(field: &str) -> Option<Option<HighlightColor>> {
+    if field == "-" {
+        return Some(None);
+    }
+    if let Some(index) = field.strip_prefix('i') {
+        return Some(Some(HighlightColor::Indexed(index.parse().ok()?)));
+    }
+    let rgb = field.strip_prefix('r')?;
+    (rgb.len() == 6).then_some(())?;
+    Some(Some(HighlightColor::Rgb(
+        u32::from_str_radix(rgb, 16).ok()?,
+    )))
+}
+
+fn parse_carried_highlight(fields: &[&str]) -> Option<Highlight> {
+    let [start, end, fg, bg, flags] = fields else {
+        return None;
+    };
+    let mut style = HighlightStyle {
+        fg: parse_carried_color(fg)?,
+        bg: parse_carried_color(bg)?,
+        ..HighlightStyle::default()
+    };
+    if *flags != "-" {
+        for letter in flags.chars() {
+            let slot = match letter {
+                'b' => &mut style.bold,
+                'u' => &mut style.underline,
+                's' => &mut style.standout,
+                _ => return None,
+            };
+            *slot = true;
+        }
+    }
+    Some(Highlight {
+        start: start.parse().ok()?,
+        end: end.parse().ok()?,
+        style,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7851,5 +8484,253 @@ mod tests {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         log.set_scrollback(BLOCK_LOG_FLOOR * 2);
         assert_eq!(log.remote.blocks.capacity, BLOCK_LOG_FLOOR * 2);
+    }
+
+    // ─── the handover's state blob (055) ────────────────────────────────
+
+    /// A log with every carried field away from its default.
+    fn carried_log() -> ShellLog {
+        let mut log = ShellLog::new(1000);
+        log.local.blocks.start(7);
+        log.local.blocks.finish(7, Some(0), 120);
+        log.local.blocks.start(8);
+        log.local.blocks.finish(8, None, 0);
+        log.local.blocks.start(9);
+        log.local.state = Some(ShellState {
+            phase: ShellPhase::Running,
+            last_exit: Some(-2),
+        });
+        log.local.running_since = Some(Instant::now() - Duration::from_secs(3));
+        log.remote.blocks.start(1);
+        log.remote.blocks.finish(1, Some(130), 4_000);
+        log.remote.state = Some(ShellState {
+            phase: ShellPhase::Finished,
+            last_exit: Some(130),
+        });
+        log.remote_shell = Some(RemoteShell {
+            parent: 9,
+            pid: 4242,
+        });
+        log.context.cwd = "/Users/me/My Drive\\x".to_owned();
+        log.context.branch = "feat/ş".to_owned();
+        log.context.remote_cwd = "/srv/app".to_owned();
+        log.context.remote_setup = Some(RemoteSetupFault::Decode);
+        log.context.reconnect = Some(Reconnect {
+            host: "prod".to_owned(),
+            mark: HostMark::None,
+            line: "ssh -p 2222 prod".to_owned(),
+        });
+        log.dock = DockState {
+            status: DockStatus::Live,
+            predisplay: String::new(),
+            buffer: "echo 'a b'\n\tz".to_owned(),
+            postdisplay: " # suggestion".to_owned(),
+            prebuffer: "for x in 1\n".to_owned(),
+            cursor: 4,
+            highlights: vec![
+                Highlight {
+                    start: 0,
+                    end: 4,
+                    style: HighlightStyle {
+                        fg: Some(HighlightColor::Indexed(2)),
+                        bg: None,
+                        bold: true,
+                        underline: false,
+                        standout: true,
+                    },
+                },
+                Highlight {
+                    start: 5,
+                    end: 10,
+                    style: HighlightStyle {
+                        fg: None,
+                        bg: Some(HighlightColor::Rgb(0x00ab_cdef)),
+                        bold: false,
+                        underline: true,
+                        standout: false,
+                    },
+                },
+            ],
+            display_chars: 26,
+            last_ink: Some('z'),
+            insert_keymap: true,
+            answers: 0,
+            cluster: false,
+        };
+        log.dock_editable = true;
+        log.command = 41;
+        log.login = Some(41);
+        log.remote_up = Some((41, "n0nce".to_owned()));
+        log.typed = Some(40);
+        log.ours = true;
+        log.command_open = true;
+        log
+    }
+
+    #[test]
+    fn the_state_blob_round_trips_every_carried_field() {
+        let log = carried_log();
+        let carried = log.carried(Some(321), 0);
+        let blob = carried.encode();
+        assert_eq!(Carried::decode(&blob).as_ref(), Some(&carried));
+
+        let mut fresh = ShellLog::new(1000);
+        fresh.dock.cluster = true;
+        fresh.host_rules = vec![HostRule {
+            pattern: "prod".to_owned(),
+            mark: Some(HostMark::Production),
+            integration: None,
+        }];
+        fresh.restore(Carried::decode(&blob).unwrap(), 17);
+        assert_eq!(fresh.local.state, log.local.state);
+        assert_eq!(fresh.local.blocks.first, 7);
+        assert_eq!(
+            fresh.local.blocks.entries,
+            [
+                Outcome::Finished {
+                    exit: Some(0),
+                    elapsed_ms: 120
+                },
+                Outcome::Finished {
+                    exit: None,
+                    elapsed_ms: 0
+                },
+                Outcome::Pending
+            ]
+        );
+        assert_eq!(fresh.running_blocks().local, Some(9));
+        let ran = fresh.local.running_since.unwrap().elapsed();
+        assert!(
+            ran >= Duration::from_secs(3) && ran < Duration::from_secs(60),
+            "{ran:?}"
+        );
+        assert_eq!(fresh.remote.blocks.entries, log.remote.blocks.entries);
+        assert_eq!(fresh.remote_shell, log.remote_shell);
+        assert_eq!(fresh.context.cwd, log.context.cwd);
+        assert_eq!(fresh.context.branch, log.context.branch);
+        // The mark comes from this session's rules, not the blob.
+        assert_eq!(
+            fresh.context.reconnect.as_ref().map(|offer| offer.mark),
+            Some(HostMark::Production)
+        );
+        assert_eq!(fresh.dock.buffer, log.dock.buffer);
+        assert_eq!(fresh.dock.highlights, log.dock.highlights);
+        assert_eq!(fresh.dock.answers, 17);
+        assert!(fresh.dock.cluster);
+        assert!(fresh.dock_editable && fresh.ours && fresh.command_open);
+        assert_eq!(
+            (fresh.command, fresh.login, fresh.typed),
+            (41, Some(41), Some(40))
+        );
+        assert_eq!(fresh.remote_up, log.remote_up);
+        // The remote target is not carried: the probe finds it again.
+        assert!(fresh.context.remote.is_none());
+    }
+
+    #[test]
+    fn a_mirror_stale_at_the_handover_stays_stale() {
+        let mut log = carried_log();
+        log.dock.answers = 4;
+        // A key went after the mirror (generation 5): stale.
+        let stale = Carried::decode(&log.carried(None, 5).encode()).unwrap();
+        let mut fresh = ShellLog::new(1000);
+        fresh.restore(stale, 0);
+        assert_ne!(fresh.dock.answers, 0);
+        let answered = Carried::decode(&log.carried(None, 4).encode()).unwrap();
+        fresh.restore(answered, 0);
+        assert_eq!(fresh.dock.answers, 0);
+    }
+
+    #[test]
+    fn a_fresh_logs_blob_round_trips_too() {
+        let carried = ShellLog::new(10).carried(None, 0);
+        assert_eq!(Carried::decode(&carried.encode()), Some(carried));
+    }
+
+    #[test]
+    fn a_ledger_longer_than_the_new_ceiling_keeps_its_newest_entries() {
+        let mut log = ShellLog::new(0);
+        for id in 0..300 {
+            log.local.blocks.start(id);
+        }
+        let mut carried = log.carried(None, 0);
+        carried.local.first = 0;
+        carried.local.entries = vec![Outcome::Pending; 300];
+        let mut fresh = ShellLog::new(0);
+        fresh.restore(carried, 0);
+        assert_eq!(fresh.local.blocks.entries.len(), BLOCK_LOG_FLOOR);
+        assert_eq!(fresh.local.blocks.first, 300 - BLOCK_LOG_FLOOR as u32);
+    }
+
+    #[test]
+    fn a_corrupt_or_cut_blob_is_none() {
+        let blob = String::from_utf8(carried_log().carried(Some(5), 0).encode()).unwrap();
+        // Every cut short of the whole: a missing line, or half of one.
+        for cut in 0..blob.len() - 1 {
+            if blob.is_char_boundary(cut) {
+                assert!(
+                    Carried::decode(&blob.as_bytes()[..cut]).is_none(),
+                    "cut at {cut}"
+                );
+            }
+        }
+        let swap = |from: &str, to: &str| Carried::decode(blob.replacen(from, to, 1).as_bytes());
+        assert!(swap("bateri-state 1", "bateri-state 2").is_none());
+        assert!(swap("bateri-state 1", "bateri-state 0").is_none());
+        assert!(swap("bateri-state 1", "bateri-session 1").is_none());
+        assert!(swap("ours 1", "ours 2").is_none());
+        assert!(swap("ours 1", "ours 1\nours 1").is_none());
+        assert!(swap("ours 1", "ours 1\nnew-key 1").is_none());
+        assert!(swap("command 41", "command x").is_none());
+        assert!(swap("cwd +", "cwd ").is_none());
+        assert!(swap("remote-setup decode", "remote-setup gone").is_none());
+        assert!(swap("end\n", "end\nhl 0 1 - - -\n").is_none());
+        assert!(Carried::decode(b"\xff\xfe").is_none());
+        assert!(Carried::decode(b"").is_none());
+    }
+
+    #[test]
+    fn the_version_1_fixture_still_reads() {
+        // Written by version 1; the reader takes the current version and
+        // the one before it, so this fixture stays until two bumps later.
+        let fixture = "bateri-state 1\n\
+                       local input 0 - 3 0/12,p\n\
+                       remote - - - 0 -\n\
+                       remote-shell -\n\
+                       cwd +/tmp/a\\sb\n\
+                       branch +main\n\
+                       remote-cwd +\n\
+                       remote-setup -\n\
+                       reconnect -\n\
+                       dock live 2 2 +s 1\n\
+                       predisplay +\n\
+                       buffer +ls\n\
+                       postdisplay +\n\
+                       prebuffer +\n\
+                       dock-fresh 1\n\
+                       editable 1\n\
+                       command 3\n\
+                       login -\n\
+                       remote-up -\n\
+                       typed -\n\
+                       ours 1\n\
+                       command-open 0\n\
+                       cleared -\n\
+                       hl 0 2 i2 - b\n\
+                       end\n";
+        let carried = Carried::decode(fixture.as_bytes()).unwrap();
+        assert_eq!(
+            carried.local.state,
+            Some(ShellState {
+                phase: ShellPhase::Input,
+                last_exit: Some(0)
+            })
+        );
+        assert_eq!(carried.local.first, 3);
+        assert_eq!(carried.cwd, "/tmp/a b");
+        assert_eq!(carried.dock.buffer, "ls");
+        assert_eq!(carried.dock.last_ink, Some('s'));
+        assert_eq!(carried.dock.highlights.len(), 1);
+        assert_eq!(carried.encode(), fixture.as_bytes());
     }
 }
