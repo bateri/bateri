@@ -65,14 +65,15 @@ use crate::settings::{self, FileState};
 use crate::upload::format_bytes;
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
 
-/// The window's content size, in points. Fixed — the window cannot be
-/// resized. The height is the longest pane's: Remote Files (045 phase-6, nine
-/// rows, two of them two lines tall; 046 phase-4 adds the load indicator's two
-/// rows with a note each, about a hundred points more) — the Cursor pane's 560
-/// would put it on the button; at 500 the Cursor pane with a banner stuck to
-/// the button (029 phase-3 eyeball check). A design constant, not a measured
-/// number.
+/// The window's opening content size, in points. The width is fixed, the
+/// height is not: the panes sit in a vertical scroll view, so a pane taller
+/// than the window (Remote Files since 048's integration row) or a screen
+/// shorter than the window scrolls instead of clipping the rows under the
+/// button. A design constant, not a measured number.
 const WINDOW_SIZE: NSSize = NSSize::new(680.0, 780.0);
+/// The shortest the window can be dragged: the header, a few rows and the
+/// button still fit. A design constant.
+const MIN_WINDOW_HEIGHT: f64 = 360.0;
 /// The sidebar's width: close to System Settings', roomy for four short
 /// titles. A design constant.
 const SIDEBAR_WIDTH: f64 = 180.0;
@@ -958,6 +959,13 @@ pub(crate) struct Ivars {
     /// Whether the window has been shown once (the gate of centring).
     shown_once: Cell<bool>,
     pane_tops: OnceCell<PaneTops>,
+    /// The scroll view the panes sit in; scrolled back to the top when the
+    /// category changes.
+    pane_scroll: OnceCell<Retained<NSScrollView>>,
+    /// One constraint per pane tying the document's bottom to that pane's
+    /// bottom; only the selected pane's is active, so each pane scrolls exactly
+    /// as far as its own rows.
+    pane_bottoms: OnceCell<Vec<Retained<NSLayoutConstraint>>>,
     /// "Open settings.toml": the default button (Enter) while locked.
     open: OnceCell<Retained<NSButton>>,
     /// One grid per category; only the selected one is visible.
@@ -1302,6 +1310,8 @@ impl SettingsWindow {
             banner: OnceCell::new(),
             shown_once: Cell::new(false),
             pane_tops: OnceCell::new(),
+            pane_scroll: OnceCell::new(),
+            pane_bottoms: OnceCell::new(),
             open: OnceCell::new(),
             panes: OnceCell::new(),
             controls: OnceCell::new(),
@@ -1599,7 +1609,7 @@ impl SettingsWindow {
         }
     }
 
-    /// Ties the grids under the banner or under the header. The old set is
+    /// Ties the panes' scroll view under the banner or under the header. The old set is
     /// released first: if both were active for a moment they would conflict.
     fn layout_panes(&self, banner_shown: bool) {
         let Some(tops) = self.ivars().pane_tops.get() else {
@@ -1634,6 +1644,21 @@ impl SettingsWindow {
         header.setStringValue(&NSString::from_str(Category::ALL[index].title()));
         for (i, pane) in panes.iter().enumerate() {
             pane.setHidden(i != index);
+        }
+        if let Some(bottoms) = self.ivars().pane_bottoms.get() {
+            for (i, bottom) in bottoms.iter().enumerate() {
+                if i != index {
+                    bottom.setActive(false);
+                }
+            }
+            if let Some(bottom) = bottoms.get(index) {
+                bottom.setActive(true);
+            }
+        }
+        if let Some(scroll) = self.ivars().pane_scroll.get() {
+            let clip = scroll.contentView();
+            clip.scrollToPoint(NSPoint::new(0.0, 0.0));
+            scroll.reflectScrolledClipView(&clip);
         }
     }
 
@@ -1753,6 +1778,7 @@ impl SettingsWindow {
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
+            | NSWindowStyleMask::Resizable
             | NSWindowStyleMask::FullSizeContentView;
         // SAFETY: with defer=false the window is created immediately;
         // `releasedWhenClosed` is turned off right below (the terminal window's reason).
@@ -1792,6 +1818,10 @@ impl SettingsWindow {
         split.addSplitViewItem(&detail_item);
         window.setContentViewController(Some(&split));
         window.setContentSize(WINDOW_SIZE);
+        // Only the height moves: the grids' column widths and the wrap
+        // widths (`BANNER_TEXT_WIDTH`, `NOTE_WIDTH`) derive from the fixed width.
+        window.setContentMinSize(NSSize::new(WINDOW_SIZE.width, MIN_WINDOW_HEIGHT));
+        window.setContentMaxSize(NSSize::new(WINDOW_SIZE.width, f64::MAX));
         if let Some(table) = self.ivars().sidebar.get() {
             window.setInitialFirstResponder(Some(table));
         }
@@ -1859,26 +1889,64 @@ impl SettingsWindow {
                 .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -MARGIN),
         ]);
 
-        // The grid's top is tied to one of two places: to the header when there
+        // The panes' top is tied to one of two places: to the header when there
         // is no banner, to the banner when there is ([`SettingsWindow::layout_panes`]).
-        // A hidden banner takes no room, so the grid moves back up under the header.
+        // A hidden banner takes no room, so the panes move back up under the header.
+        // The grids live in a flipped document inside a vertical scroll view
+        // that fills the space between the header (or banner) and the button.
         let (panes, controls) = self.build_panes();
-        let mut under_header = Vec::new();
-        let mut under_banner = Vec::new();
-        for pane in &panes {
-            add_pinned(&detail, pane);
-            activate(&[pane
+        let scroll = NSScrollView::new(mtm);
+        scroll.setDrawsBackground(false);
+        scroll.setHasVerticalScroller(true);
+        scroll.setHasHorizontalScroller(false);
+        scroll.setAutohidesScrollers(true);
+        add_pinned(&detail, &scroll);
+        let document = PaneDocument::new(mtm);
+        document.setTranslatesAutoresizingMaskIntoConstraints(false);
+        scroll.setDocumentView(Some(&document));
+        let clip = scroll.contentView();
+        activate(&[
+            scroll
                 .leadingAnchor()
-                .constraintEqualToAnchor_constant(&detail.leadingAnchor(), MARGIN)]);
-            under_header.push(
+                .constraintEqualToAnchor(&detail.leadingAnchor()),
+            scroll
+                .trailingAnchor()
+                .constraintEqualToAnchor(&detail.trailingAnchor()),
+            document
+                .topAnchor()
+                .constraintEqualToAnchor(&clip.topAnchor()),
+            document
+                .leadingAnchor()
+                .constraintEqualToAnchor(&clip.leadingAnchor()),
+            document
+                .trailingAnchor()
+                .constraintEqualToAnchor(&clip.trailingAnchor()),
+        ]);
+        let mut pane_bottoms = Vec::new();
+        for pane in &panes {
+            add_pinned(&document, pane);
+            activate(&[
+                pane.leadingAnchor()
+                    .constraintEqualToAnchor_constant(&document.leadingAnchor(), MARGIN),
                 pane.topAnchor()
-                    .constraintEqualToAnchor_constant(&header.bottomAnchor(), 18.0),
-            );
-            under_banner.push(
-                pane.topAnchor()
-                    .constraintEqualToAnchor_constant(&banner.frame.bottomAnchor(), 16.0),
+                    .constraintEqualToAnchor(&document.topAnchor()),
+            ]);
+            pane_bottoms.push(
+                document
+                    .bottomAnchor()
+                    .constraintEqualToAnchor_constant(&pane.bottomAnchor(), MARGIN),
             );
         }
+        let under_header = vec![
+            scroll
+                .topAnchor()
+                .constraintEqualToAnchor_constant(&header.bottomAnchor(), 18.0),
+        ];
+        let under_banner = vec![
+            scroll
+                .topAnchor()
+                .constraintEqualToAnchor_constant(&banner.frame.bottomAnchor(), 16.0),
+        ];
         activate(&under_header);
         banner.frame.setHidden(true);
 
@@ -1898,6 +1966,9 @@ impl SettingsWindow {
                 .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -MARGIN),
             open.bottomAnchor()
                 .constraintEqualToAnchor_constant(&detail.bottomAnchor(), -MARGIN),
+            scroll
+                .bottomAnchor()
+                .constraintEqualToAnchor_constant(&open.topAnchor(), -12.0),
         ]);
 
         let _ = self.ivars().header.set(header);
@@ -1907,6 +1978,8 @@ impl SettingsWindow {
             under_banner,
         });
         let _ = self.ivars().open.set(open);
+        let _ = self.ivars().pane_scroll.set(scroll);
+        let _ = self.ivars().pane_bottoms.set(pane_bottoms);
         let _ = self.ivars().panes.set(panes);
         let _ = self.ivars().controls.set(controls);
         detail
@@ -2292,7 +2365,35 @@ impl SettingsWindow {
     }
 }
 
-/// The two constraint sets that tie the grids' top; one is active.
+define_class!(
+    /// The scroll view's document: flipped, so the panes hang from the top and
+    /// a pane shorter than the window does not sink to the bottom.
+    // SAFETY: NSView has no subclassing requirement; Drop is not implemented.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriSettingsPaneDocument"]
+    struct PaneDocument;
+
+    unsafe impl NSObjectProtocol for PaneDocument {}
+
+    impl PaneDocument {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+    }
+);
+
+impl PaneDocument {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // SAFETY: `init` is NSView's designated initializer (zero frame);
+        // the size comes from the constraints.
+        unsafe { msg_send![Self::alloc(mtm), init] }
+    }
+}
+
+/// The two constraint sets that tie the panes' scroll view's top; one is
+/// active.
 struct PaneTops {
     under_header: Vec<Retained<NSLayoutConstraint>>,
     under_banner: Vec<Retained<NSLayoutConstraint>>,

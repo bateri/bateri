@@ -12,6 +12,26 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Letter spacing.** `[font] letter_spacing` in `settings.toml` (or Settings
+  › Font) widens or narrows the space between letters, the horizontal twin of
+  line spacing — iTerm2's “Horizontal spacing” divided by 100.
+- **Tighter spacing.** Line and letter spacing now go down to `0.5`. Below `1`
+  letters are no longer cut: accents and tails reach into the neighbouring
+  line, as in iTerm2, while box-drawing lines stay joined.
+
+### Changed
+
+- `line_height = 1.0` is now exactly the font's own line spacing; lines were
+  one pixel taller than the font asks for.
+
+### Fixed
+
+- The Settings window scrolls: the bottom rows of Remote Files were hidden
+  under the button and could not be reached. The window can also be made
+  taller or shorter.
+
 ## [0.3.0] - 2026-10-03
 
 ### Added
