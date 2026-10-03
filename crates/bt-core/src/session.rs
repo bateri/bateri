@@ -744,7 +744,8 @@ pub struct SessionOptions {
     ///
     /// Precedence, strongest to weakest: `TERM`, `COLORTERM` and the identity
     /// family (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `TERM_SESSION_ID`,
-    /// `BATERI_TAB_URL` and the `LC_` trio of 049 R6; what this crate writes, cannot be overridden — `TERM`
+    /// `BATERI_TAB_URL` and the `LC_` trio of 049 R6) and `PWD` when
+    /// [`Self::working_directory`] is absolute (what this crate writes, cannot be overridden — `TERM`
     /// is a contract, see `CLAUDE.md`) > this map > what alacritty writes
     /// unconditionally (`USER`, `HOME`, `ALACRITTY_WINDOW_ID`, `WINDOWID`) >
     /// inherited. The only exception is the two keys alacritty **removes** at
@@ -3699,6 +3700,22 @@ impl Session {
             "LC_TERMINAL_VERSION".to_owned(),
             TERM_PROGRAM_VERSION.to_owned(),
         );
+        // `PWD` is the directory as we named it (053, seen in the real
+        // window): `chdir` resolves nothing, but the shell sets its `PWD` from
+        // `getcwd()` unless the inherited one names the same directory — and
+        // the inherited one is ours (`/` from LaunchServices). Without it a
+        // restored or inherited `/tmp` came back as `/private/tmp` in the
+        // title and the dock. Only an absolute path: a shell trusts `PWD` only
+        // when it is absolute and points at `.`, so the wrong direction is
+        // safe — a stale value is ignored, not believed. `login -qflp` keeps
+        // it (`-p`).
+        if let Some(dir) = options
+            .working_directory
+            .as_deref()
+            .filter(|dir| dir.is_absolute())
+        {
+            env.insert("PWD".to_owned(), dir.display().to_string());
+        }
         if let Some(id) = &options.tab_id {
             env.insert("TERM_SESSION_ID".to_owned(), id.as_str().to_owned());
             env.insert("BATERI_TAB_URL".to_owned(), id.url());
@@ -12843,6 +12860,27 @@ mod tests {
         };
 
         assert_eq!(child_output(options), cwd_line(&dir));
+    }
+
+    #[test]
+    fn working_directory_keeps_its_symlinked_name_in_pwd() {
+        // 053, seen in the real window: `/tmp` came back as `/private/tmp`.
+        // The shell's logical `$PWD` is the name we gave, not the resolved
+        // one — the link is built here, since `/tmp` is no link on Linux.
+        let root = std::env::temp_dir().join(format!("bt-core-pwd-{}", std::process::id()));
+        let real = root.join("real");
+        let link = root.join("link");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let options = SessionOptions {
+            working_directory: Some(link.clone()),
+            home: None,
+            ..test_options(sh("printf 'pwd=%s;' \"$PWD\"; sleep 5"), 200)
+        };
+        let output = child_output(options);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(output, format!("pwd={};", link.display()).replace(' ', ""));
     }
 
     #[test]
