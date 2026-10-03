@@ -47,9 +47,22 @@ _Requirements: R2.1, R2.2, R2.3, R2.4_
 
 ## Checklist
 
-- [ ] Model ve `split::Tree` dönüşümü
-- [ ] Satır biçimi (yaz/oku) ve ret kolları
-- [ ] Dosya: kilit, atomik yazım, `take`/`history`/`clear`, süpürme
-- [ ] `Zoom` erişimcisi
-- [ ] Test: biçim round-trip, ret kolları, dosya ömrü
-- [ ] Doğrulama geçti (`make check` + `make linux`)
+- [x] Model ve `split::Tree` dönüşümü
+- [x] Satır biçimi (yaz/oku) ve ret kolları
+- [x] Dosya: kilit, atomik yazım, `take`/`history`/`clear`, süpürme
+- [x] `Zoom` erişimcisi
+- [x] Test: biçim round-trip, ret kolları, dosya ömrü
+- [x] Doğrulama geçti (`make check` + `make linux`)
+
+## Uygulama Notları
+
+- Pane listesi `SavedTab::panes`'te (phase metnindeki `SavedTab { shape,
+  focused, zoomed }`'un tamamlanmış hâli); `Shape`'in yaprakları o listenin
+  indeksi.
+- `take` yetimleri de süpürüyor: düzenin adını vermediği geçmişler ve
+  geçiciler gidiyor; ayrıştırılamayan düzen geçmişlerini de götürüyor.
+  `save` penceresiz kayıtta `clear`'a dönüşüyor.
+- UTF-8 olmayan dizin yolu "yok" diye yazılıyor (pane ev dizininde doğar).
+- `Shape::from_tree` `(0,1)` dışındaki oranı `0.5` yazıyor — okuyan taraf
+  reddederdi ve tek ayırıcı yüzünden bütün düzen kaybolurdu.
+- `TabId`'ye ekleme gerekmedi (`parse` / `as_str` yetti).

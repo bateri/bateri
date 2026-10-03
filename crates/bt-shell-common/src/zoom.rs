@@ -80,6 +80,25 @@ impl Zoom {
         }
     }
 
+    /// The step count — what session restore saves (053; `restore::SavedPane::zoom_steps`).
+    pub fn steps(self) -> i32 {
+        self.steps
+    }
+
+    /// A zoom of `steps` over `font`, held to the range [`Zoom::bigger`] and [`Zoom::smaller`]
+    /// keep: upward only while the size stays at or below [`MAX_SIZE`], downward only while it
+    /// stays at or above [`MIN_SIZE`]; a step count past the end stops at the last visible step
+    /// (a saved offset over a since-changed `size`, or a hostile file, cannot reach the clamp).
+    pub fn from_steps(steps: i32, font: &FontOptions) -> Zoom {
+        // `as i32` saturates (and maps NaN to 0), so a huge or odd `size` cannot overflow.
+        let steps = match steps {
+            0 => 0,
+            up if up > 0 => up.min((((MAX_SIZE - font.size) / STEP).floor() as i32).max(0)),
+            down => down.max((((MIN_SIZE - font.size) / STEP).ceil() as i32).min(0)),
+        };
+        Zoom { steps }
+    }
+
     fn size(self, font: &FontOptions) -> f64 {
         font.size + f64::from(self.steps) * STEP
     }
@@ -123,6 +142,31 @@ mod tests {
         };
         assert_eq!(zoom.after_reload(&font(13.0), &other), zoom);
         assert_eq!(zoom.after_reload(&font(13.0), &font(13.0)), zoom);
+    }
+
+    #[test]
+    fn steps_round_trip_within_the_ends() {
+        let base = font(13.0);
+        let zoom = Zoom::default().bigger(&base).bigger(&base);
+        assert_eq!(zoom.steps(), 2);
+        assert_eq!(Zoom::from_steps(zoom.steps(), &base), zoom);
+        assert_eq!(Zoom::from_steps(-3, &base).apply(&base).size, 10.0);
+        // Past the ends: held at the last visible step, as repeated presses would be.
+        assert_eq!(Zoom::from_steps(100, &base).apply(&base).size, 72.0);
+        assert_eq!(Zoom::from_steps(i32::MIN, &base).apply(&base).size, 4.0);
+        // From a setting outside the range only the inward direction exists.
+        assert_eq!(Zoom::from_steps(3, &font(100.0)), Zoom::default());
+        assert_eq!(
+            Zoom::from_steps(-1, &font(100.0)).apply(&font(100.0)).size,
+            99.0
+        );
+        assert_eq!(Zoom::from_steps(-1, &font(2.0)), Zoom::default());
+        assert_eq!(Zoom::from_steps(1, &font(2.0)).apply(&font(2.0)).size, 3.0);
+        // A fractional base: the last step that stays inside.
+        assert_eq!(
+            Zoom::from_steps(10, &font(70.5)).apply(&font(70.5)).size,
+            71.5
+        );
     }
 
     #[test]
