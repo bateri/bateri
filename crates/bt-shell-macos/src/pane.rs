@@ -65,6 +65,7 @@ use objc2_quartz_core::CAMetalLayer;
 
 use crate::app::{self, Grid, split_into_grid};
 use crate::clipboard::{self, PendingCopy};
+use crate::focus::Moment;
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
@@ -959,6 +960,12 @@ pub(crate) struct PaneIvars {
     /// its schedule and sampler; the settings' value from the birth package,
     /// refreshed live ([`TerminalPane::set_stats_settings`]).
     stats: RefCell<StatsDriver>,
+    /// The pane's last input (050): a key, a press, the wheel, a mouse move or
+    /// its window becoming key — set at birth, then only by
+    /// [`TerminalPane::note_interaction`]. On the sleep-counting clock, so the
+    /// focus query's `idle` does not stop with the lid closed
+    /// (`.tasks/050-odak-sorgusu/discussion.md` → Karar 4, 6).
+    last_input: Cell<Moment>,
     /// `[remote]`'s preview and download keys (045 R8): from the birth package,
     /// refreshed live with the host marks ([`TerminalPane::set_host_marks`]).
     remote_files: RefCell<RemoteFiles>,
@@ -1132,6 +1139,9 @@ define_class!(
         /// and the ⊗ button.
         #[unsafe(method(searchFieldChanged:))]
         fn search_field_changed(&self, _sender: Option<&AnyObject>) {
+            // Typing in the field is input to this pane (050 R3): the focus
+            // query counts the field as the pane's focus, so its `idle` too.
+            self.note_interaction();
             self.apply_search();
         }
 
@@ -1155,6 +1165,7 @@ define_class!(
             _text_view: &AnyObject,
             command: Sel,
         ) -> bool {
+            self.note_interaction();
             if command == sel!(insertNewline:) {
                 let shift = NSApplication::sharedApplication(self.mtm())
                     .currentEvent()
@@ -1347,6 +1358,7 @@ impl TerminalPane {
             stats_closed_at: Cell::new(None),
             remote_helper: RefCell::new(RemoteHelper::default()),
             stats: RefCell::new(stats_driver),
+            last_input: Cell::new(Moment::now()),
             remote_files: RefCell::new(remote_files),
             previews: RefCell::new(HashMap::new()),
             finder: RefCell::new(FinderDrops::default()),
@@ -2797,6 +2809,12 @@ impl TerminalPane {
     /// The load indicator's sampling state ([`crate::stats`]).
     pub(crate) fn stats_driver(&self) -> &RefCell<StatsDriver> {
         &self.ivars().stats
+    }
+
+    /// The pane's last input ([`PaneIvars::last_input`]); its one writer is
+    /// [`TerminalPane::note_interaction`].
+    pub(crate) fn input_stamp(&self) -> &Cell<Moment> {
+        &self.ivars().last_input
     }
 
     /// `[remote]`'s preview and download keys as last read.

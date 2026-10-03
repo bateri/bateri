@@ -1060,8 +1060,9 @@ impl Masters {
     /// The socket bases: this instance's directory under each root that can
     /// hold one, created on the first call (a job's thread — directories and a
     /// rename, never the main thread). An empty list: no socket of ours is
-    /// possible, every route is [`Route::Direct`].
-    fn bases(&self) -> &[PathBuf] {
+    /// possible, every route is [`Route::Direct`]. The first is also where the
+    /// focus listener lives (050, [`crate::focus::serve`]).
+    pub fn bases(&self) -> &[PathBuf] {
         self.bases.get_or_init(|| {
             self.roots
                 .iter()

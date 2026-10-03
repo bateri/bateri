@@ -60,8 +60,8 @@ mod window;
 // The platform-independent half lives in `bt-shell-common` (043); imported
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
-    child, download, gesture, jobs, keys, links, notices, preview_cache, quote, remote_files,
-    remote_helper, settings, split, ssh_route, upload, watch, zoom,
+    child, download, focus, gesture, jobs, keys, links, notices, preview_cache, quote,
+    remote_files, remote_helper, settings, split, ssh_route, upload, watch, zoom,
 };
 
 use std::time::{Duration, Instant};
@@ -160,6 +160,35 @@ pub fn ssh_fell_back() -> Option<i32> {
         &remote_hosts_path(&home),
         &ssh_route::socket_bases(Some(&home), uid),
         bt_shell_common::ssh_wrap::FELL_BACK_PATIENCE,
+        &mut std::io::stdout().lock(),
+    ))
+}
+
+/// `bateri focus [--pid P] bateri://tab/<UUID>` (050): `Some(exit code)`
+/// when the process was started as the subcommand, `None` otherwise. `main`
+/// calls it before the window-server check — the outside process may ask from
+/// any session and only the token line may reach standard output. The body
+/// is [`focus::focus_main`]; here only the platform's input: the socket roots,
+/// by **the same expression** the application's listener uses
+/// (`app::masters`), or `--pid` would never find the instance.
+pub fn focus() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != "focus" {
+        return None;
+    }
+    let Some(argv) = args
+        .map(|arg| arg.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("{}", focus::USAGE);
+        return Some(focus::EXIT_USAGE);
+    };
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let roots = ssh_route::socket_bases(child::home().as_deref(), uid);
+    Some(focus::focus_main(
+        &argv,
+        &roots,
         &mut std::io::stdout().lock(),
     ))
 }

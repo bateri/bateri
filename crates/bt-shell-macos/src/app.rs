@@ -47,7 +47,7 @@ use crate::watch::{Notify, Watch};
 use crate::window::{self, CloseScope, Launch, TerminalWindow, WindowHost};
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
-use crate::{child, settings};
+use crate::{child, focus, settings};
 
 /// Guard for zero idle frames: in the [`Workload::Smoke`] workload the window
 /// sits idle for ~`run_seconds` seconds after the first draw.
@@ -1787,8 +1787,36 @@ fn masters() -> Option<Arc<Masters>> {
     let sweeper = Arc::clone(&masters);
     let _ = std::thread::Builder::new()
         .name("ssh socket sweep".into())
-        .spawn(move || sweeper.sweep());
+        .spawn(move || {
+            // The focus listener (050) in this instance's first directory,
+            // **before** the sweep: it runs ssh per dead socket and an outside
+            // process asking meanwhile must not wait on it. No directory, no
+            // listener — silently; the client then reads `unknown`.
+            if let Some(dir) = sweeper.bases().first() {
+                let _ = focus::serve(dir, focus_answerer());
+            }
+            sweeper.sweep();
+        });
     Some(masters)
+}
+
+/// The focus query's answerer (050): from the listener's thread, one hop to
+/// the main queue — the answer is computed from the live state there, at the
+/// moment of the question, with no shared copy — waited for at most
+/// [`focus::ANSWER_WAIT`]. A busy main thread, or no delegate yet, is `None`
+/// (`pane=unknown`); a hop that runs after the wait sends to a dropped
+/// receiver and is lost.
+fn focus_answerer() -> focus::Answerer {
+    Arc::new(|tab: &TabId| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let tab = tab.clone();
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            let _ = sender.send(delegate(mtm).map(|delegate| delegate.focus_answer(&tab)));
+        });
+        receiver.recv_timeout(focus::ANSWER_WAIT).ok().flatten()
+    })
 }
 
 impl AppDelegate {
@@ -1894,6 +1922,25 @@ impl AppDelegate {
             })?;
             Some((window, pane))
         })
+    }
+
+    /// The focus query's answer for pane `id` (050 R2, R3): `pane=none` if no
+    /// open pane has it ([`Self::pane_by_tab`] — a closing pane is none);
+    /// otherwise `focused` — bateri active, the pane's window key **and** the
+    /// window's focused pane this one (the search field included,
+    /// [`TerminalWindow::focused_pane`]) — and the whole seconds since its last
+    /// input. Main thread, at the moment of the question.
+    fn focus_answer(&self, id: &TabId) -> focus::Answer {
+        let Some((window, pane)) = self.pane_by_tab(id) else {
+            return focus::Answer::None;
+        };
+        let focused = NSApplication::sharedApplication(self.mtm()).isActive()
+            && pane.window().is_some_and(|window| window.isKeyWindow())
+            && window.focused_pane().id() == pane.id();
+        focus::Answer::Live {
+            focused,
+            idle_secs: focus::idle_secs(pane.input_stamp().get(), focus::Moment::now()),
+        }
     }
 
     /// The active window: `NSApp.keyWindow` is looked up in the list. `None` if the

@@ -46,11 +46,51 @@ _Requirements: R1, R2, R3, R6, R7, R8_
   nonsense` pencere açmadan çıkar.
 - `make check`, `make bundle`, `make smoke` yeşil.
 
+## Uygulama Notları
+
+- **Damga stats'ın kancasında:** `last_input` (`Cell<Moment>`, doğumda
+  `Moment::now()`) `stats.rs`'in `note_interaction`'ının ilk satırında
+  yazılıyor; erişim `TerminalPane::input_stamp` (`stats_driver`'ın emsali).
+  Altı view kancası + `windowDidBecomeKey` yeni çağrı yeri olmadan kapsandı.
+- **`Masters::bases` `pub` oldu** (bt-shell-common'da tek satır); dinleyici
+  süpürme thread'inde, `sweep`'ten **önce** kuruluyor — süpürme ölü soket
+  başına ssh koşturuyor, o arada gelen sorgu beklemesin.
+- **Ana kuyruk sırası sınırsız bırakıldı:** `ANSWER_WAIT`'ten sonra koşan
+  hop düşmüş alıcıya yollayıp kayboluyor; ikinci bir sayaç kurulmadı (R5'in
+  sınırı bekleme, sunucunun `MAX_IN_FLIGHT`'ı eşzamanlılığı zaten kısıyor).
+- **`focus` kökleri `socket_bases(child::home().as_deref(), uid)`** —
+  dinleyicinin (`app::masters`) ifadesinin aynısı; `ssh_argv`'nin "ev yoksa
+  çık"ı değil, yoksa `--pid` örneği bulamazdı. UTF-8 olmayan argv kullanım
+  hatası (`focus::USAGE` `pub` oldu, metin tek yerde).
+- **Tanınmayan alt komut 64 (EX_USAGE)**, aşağıdaki 78'in (EX_CONFIG)
+  sysexits ailesinden; kural saf fonksiyon (`is_unknown_subcommand`) ve
+  sınaması `main.rs`'de.
+- **Set kapısı (/code-review) iki bulgu:** (1) `accept`'in geçici hatası
+  (`EMFILE`/`ENFILE`/`ENOBUFS`/`ENOMEM`) dinleyiciyi
+  kalıcı öldürüyordu → 50 ms bekleyip dinlemeye devam (`focus::is_transient`,
+  sınamalı). (2) ⌘F alanına yazmak `focused=1` sayılıyor ama damgayı
+  yenilemiyordu → alanın eylemi ve komut kancası da `note_interaction`.
+  Kalan: yalnız menü kısayoluyla (⌘V, ⌘K…) geçen süre damgalanmıyor — WAIVE.
+- **Elle doğrulanan (GUI'siz):** `bateri nonsense` → pencere yok, 64;
+  `bateri focus` / `focus bad` / `--pid 0` → kullanım satırı, 2;
+  `--pid 1` → `pane=none`, 0; pid'siz → kullanıcının 050 öncesi açık
+  bateri'si soketsiz olduğu için `pane=unknown`, 3 (phase-1'in kuralı).
+  Açık pencere isteyen senaryolar (focused=1/0, bölme, ⌘F, idle artışı,
+  pane kapanınca none) gözle kontrolde.
+
+## WAIVE
+
+- **Menü kısayolu damga değil:** `performKeyEquivalent:` ile giden ⌘V/⌘K/⌘G
+  `keyDown:`'a uğramıyor ve `idle`'ı sıfırlamıyor. Yalnız kısayolla geçen bir
+  aralık nadir, hata yönü `focused=1` iken `idle`'ın fazla görünmesi (tüketici
+  odaktayken zaten susar); kapatmak her pane seçicisine ya da bir
+  `sendEvent:` hunisine dokunmayı isterdi — 050'nin kapsamından büyük.
+
 ## Checklist
 
-- [ ] Pane'in son girdi damgası
-- [ ] Ana kuyruk cevaplayıcısı + dinleyicinin kurulması
-- [ ] `bateri focus` girişi ve `main.rs`'in tanınmayan alt komut kuralı
-- [ ] `CLAUDE.md` satırı
-- [ ] Test: yukarıdaki elle senaryolar; varsa saf parçalar için birim sınama
-- [ ] Doğrulama geçti (`make check` + `make bundle` + `make smoke`)
+- [x] Pane'in son girdi damgası
+- [x] Ana kuyruk cevaplayıcısı + dinleyicinin kurulması
+- [x] `bateri focus` girişi ve `main.rs`'in tanınmayan alt komut kuralı
+- [x] `CLAUDE.md` satırı
+- [x] Test: yukarıdaki elle senaryolar; varsa saf parçalar için birim sınama
+- [x] Doğrulama geçti (`make check` + `make bundle` + `make smoke`)

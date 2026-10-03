@@ -282,6 +282,13 @@ fn accept_loop(listener: &UnixListener, answerer: &Answerer) {
             Ok((stream, _)) => stream,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => continue,
+            // Out of descriptors or buffers (a GUI app's soft limit is low):
+            // passing, so back off and listen on — returning would leave a
+            // bound socket nobody reads until the process ends.
+            Err(error) if is_transient(&error) => {
+                thread::sleep(ACCEPT_BACKOFF);
+                continue;
+            }
             // A dead listener: every client reads `unknown` — the safe way.
             Err(_) => return,
         };
@@ -300,6 +307,19 @@ fn accept_loop(listener: &UnixListener, answerer: &Answerer) {
             in_flight.fetch_sub(1, Ordering::SeqCst);
         }
     }
+}
+
+/// How long the accept loop waits after a passing failure ([`is_transient`])
+/// — a **design constant**, well below the client's per-instance limit.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+
+/// An accept failure that passes: the process' or the system's descriptor
+/// table is full, or the kernel is out of buffers.
+fn is_transient(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    )
 }
 
 /// One connection: the request within the limit, then the answer line. A
@@ -403,7 +423,8 @@ fn exchange(stream: &mut UnixStream, tab: &TabId, deadline: Instant) -> Reply {
 
 // ─── `bateri focus` ──────────────────────────────────────────────────────
 
-const USAGE: &str = "usage: bateri focus [--pid PID] bateri://tab/<UUID>";
+/// `bateri focus`'s usage line (stderr, on a usage error).
+pub const USAGE: &str = "usage: bateri focus [--pid PID] bateri://tab/<UUID>";
 
 /// `bateri focus [--pid P] <url>`'s body (`args` after `focus`): the token
 /// line and its newline to `out`, the exit code back — [`EXIT_ANSWER`],
@@ -489,6 +510,15 @@ mod tests {
             std::fs::write(dir.join("pid"), pid.to_string()).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn running_out_of_descriptors_does_not_end_the_listener() {
+        for code in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            assert!(is_transient(&io::Error::from_raw_os_error(code)), "{code}");
+        }
+        assert!(!is_transient(&io::Error::from_raw_os_error(libc::EBADF)));
+        assert!(!is_transient(&io::Error::other("no os code")));
     }
 
     #[test]

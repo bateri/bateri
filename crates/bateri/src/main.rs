@@ -26,6 +26,23 @@ fn main() -> ExitCode {
     if let Some(code) = bt_shell_macos::ssh_fell_back() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
+    // The focus query (050): `bateri focus [--pid P] bateri://tab/<UUID>`,
+    // asked by an outside process at the moment of an event — the same
+    // reasons: only the token line reaches standard output, any session.
+    if let Some(code) = bt_shell_macos::focus() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
+    // An unknown subcommand must not open a window (050 Karar 9): a typo, or a
+    // subcommand of a newer bateri asked of an older one, would otherwise
+    // start the whole GUI. Arguments starting with `-` pass —
+    // LaunchServices' `-psn_…` among them.
+    if let Some(arg) = std::env::args_os().nth(1)
+        && is_unknown_subcommand(&arg)
+    {
+        eprintln!("bateri: unknown subcommand {arg:?}");
+        // EX_USAGE, beside the EX_CONFIG below.
+        return ExitCode::from(64);
+    }
     // **First line of the application.** The earlier the startup stamp is taken the more honest
     // it is: `has_aqua_session()` right below spawns a child process and that
     // is today a part of bateri's startup path. Had the stamp been taken after
@@ -102,10 +119,33 @@ fn main() -> ExitCode {
     }
 }
 
+/// Whether argv[1] — left after every subcommand above passed — is a
+/// subcommand nobody knows: anything not starting with `-` (050 Karar 9).
+fn is_unknown_subcommand(arg: &std::ffi::OsStr) -> bool {
+    !arg.to_string_lossy().starts_with('-')
+}
+
 fn has_aqua_session() -> bool {
     Command::new("launchctl")
         .arg("managername")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "Aqua")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_unknown_subcommand;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn only_dashless_arguments_are_unknown_subcommands() {
+        for unknown in ["nonsense", "focsu", "bateri://tab/x", ""] {
+            assert!(is_unknown_subcommand(OsStr::new(unknown)), "{unknown:?}");
+        }
+        // LaunchServices' process serial number and any flag still open the GUI.
+        for flag in ["-psn_0_12345", "--help", "-"] {
+            assert!(!is_unknown_subcommand(OsStr::new(flag)), "{flag:?}");
+        }
+    }
 }
