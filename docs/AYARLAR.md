@@ -118,7 +118,8 @@ değeri yerinde değiştirip kaydetmek yeter.
 # bateri settings. Changes apply as soon as you save this file.
 # A key you delete goes back to its default. Values are case-sensitive; one that
 # is not understood leaves its key alone and says so under the title — except
-# clipboard.osc52, which turns off instead.
+# clipboard.osc52 and remote.integration, which turn off instead, and
+# terminal.restore_windows, which falls to "layout".
 
 [terminal]
 # 0 to 100000. Lines of history kept above the screen.
@@ -352,9 +353,9 @@ kopya yolu kalır.
 | açılışta | sonuç |
 |---|---|
 | dosya yok | varsayılanlar, uyarı yok |
-| dosya okunamıyor (izin, UTF-8 olmayan içerik, düz dosya değil, hedefi olmayan sembolik bağ) | varsayılanlar, yalnız `osc52` ve `[remote] integration` **kapalı**; uyarı |
-| geçersiz TOML | **bütün** ayarlar varsayılan, yalnız `osc52` ve `[remote] integration` **kapalı**; uyarı satırı gösterir |
-| bir anahtarın değeri kabul edilmiyor | yalnız o anahtar varsayılan (ya da sınırı; `osc52` ve `[remote] integration` için kapalı), uyarı |
+| dosya okunamıyor (izin, UTF-8 olmayan içerik, düz dosya değil, hedefi olmayan sembolik bağ) | varsayılanlar, yalnız `osc52` ve `[remote] integration` **kapalı**, `restore_windows` **`"layout"`**; uyarı |
+| geçersiz TOML | **bütün** ayarlar varsayılan, yalnız `osc52` ve `[remote] integration` **kapalı**, `restore_windows` **`"layout"`**; uyarı satırı gösterir |
+| bir anahtarın değeri kabul edilmiyor | yalnız o anahtar varsayılan (ya da sınırı; `osc52` ve `[remote] integration` için kapalı, `restore_windows` için `"layout"`), uyarı |
 | tanınmayan anahtar ya da bölüm | sessizce yoksayılır |
 | seçilen tema bulunamıyor | görünüme uyan gömülü tema (koyuda `bateri`, açıkta `bateri-light`), uyarı |
 | tema dosyası okunamıyor, boş ya da geçersiz TOML | görünüme uyan gömülü tema, uyarı (aynı adlı gömülü tema **kullanılmaz**) |
@@ -373,7 +374,7 @@ ekranı bozmaz, uyarı çıkar ve dosyayı düzeltip kaydedince uyarı kalkar.
 |---|---|
 | ayar dosyası geçersiz TOML ya da okunamıyor | **hiçbir ayar değişmez**, uyarı |
 | ayar dosyası silindi ya da boşaltıldı | ayarlar değişmez, uyarı yok; varsayılanlar uygulamayı yeniden açınca gelir |
-| bir anahtarın değeri kabul edilmiyor | o anahtar **değişmez**, uyarı; tavanı aşan `scrollback` tavana iner, kabul edilmeyen `osc52` ve `[remote] integration` **kapanır** |
+| bir anahtarın değeri kabul edilmiyor | o anahtar **değişmez**, uyarı; tavanı aşan `scrollback` tavana iner, kabul edilmeyen `osc52` ve `[remote] integration` **kapanır**, `restore_windows` **`"layout"`** olur |
 | anahtar dosyadan silindi | o anahtar varsayılanına döner |
 | seçilen tema bulunamıyor, dosyası okunamıyor, boş ya da geçersiz TOML | **ekrandaki tema kalır**, uyarı |
 | font ailesi bulunamıyor | varsayılan font, uyarı; adı düzeltip kaydedince uyarı kalkar |
@@ -399,7 +400,9 @@ bugünkü sürüm hata diye göstermemeli.
 değeri yanlış yazılınca (`"of"`) kullanıcının onu kapatıp kapatmadığı
 bilinemez, ve yanlış tahmin öteki anahtarlarda ekranda görünürken burada
 görünmez — uzaktaki bir program panoya sessizce yazabilirdi. Kapalıya düşmek
-geri alınabilir: dosyayı düzeltip kaydetmek yeter.
+geri alınabilir: dosyayı düzeltip kaydetmek yeter. `restore_windows` aynı
+kuralla `"layout"`'a düşer: pencereler yine gelir (görünen yarısı), geçmiş
+diske yazılmaz (görünmeyen yarısı).
 
 ## Anahtarlar
 
@@ -415,6 +418,7 @@ cursor_glow = 1.0
 cursor_unfocused = "hollow"
 cursor_blink_interval = 0.5
 confirm_close = "running"
+restore_windows = "all"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
@@ -427,6 +431,7 @@ confirm_close = "running"
 | `cursor_unfocused` | `"hollow"` \| `"solid"` | `"hollow"` | pencere odakta değilken imleç: `hollow` içini boşaltır, `solid` dokunmaz |
 | `cursor_blink_interval` | ondalık, `0.05`–`5.0` | `0.5` | blink'in **yarım** periyodu, saniye |
 | `confirm_close` | `"never"` \| `"running"` \| `"always"` | `"running"` | sekme, pencere ya da uygulama kapanırken ne zaman sorulsun |
+| `restore_windows` | `"all"` \| `"layout"` \| `"off"` | `"all"` | bateri yeniden açılınca ne geri gelsin |
 
 - `100000`'den büyük değer **`100000`** olur ve uyarı verir. Sınır
   alacritty'nin kendi ayar sınırı (`MAX_SCROLLBACK_LINES`); ölçülmüş bir
@@ -513,6 +518,33 @@ koşan programları adıyla sayar; Return kapatır, Esc vazgeçer.
   geçen program (`exec vim`). Üçü de kabuk boştaymış gibi görünür.
 
 Değer kapanış anında okunur, yani kaydettiğiniz anda geçerlidir.
+
+`restore_windows` bateri kapanıp yeniden açıldığında — ⌘Q, güncelleme,
+oturum kapatma, yeniden başlatma — neyin geri geleceğini söyler:
+
+- `"all"` (varsayılan) pencereleri, sekmeleri (grubu, sırası, seçili
+  sekme), bölmeleri (yön ve oran), odaktaki ve büyütülmüş pane'i, her
+  pane'in dizinini ve punto farkını **ve geçmişini** renk ve biçimiyle geri
+  getirir.
+- `"layout"` aynı düzeni geçmişsiz getirir: ekranda gördüğünüz hiçbir şey
+  diske yazılmaz. Daha önce `"all"` ile kaydedilmiş bir geçmiş de
+  gösterilmez, okunmadan silinir.
+- `"off"` tek bir boş pencereyle açar, hiçbir şey yazmaz ve kalanı siler.
+- Kabuklar **her zaman yeni**: koşan programlar (vim, bir derleme) kapanışta
+  biter, geri gelen geçmiş yalnız metin. Kayıt yalnız düzgün kapanışta
+  yazılır; çökmeden sonra açılış tek pencereyle olur.
+- **ssh'taki pane** yerel kabukla, eski yerel dizininde gelir ve bağlantının
+  satırı (`ssh prod` gibi) giriş satırında **hazır ama çalıştırılmamış**
+  bekler: ⏎ bağlanır. Kendiliğinden bağlanmaz — güncellemeden sonra her
+  pane'in aynı anda parola sorması ya da bir production sunucusuna siz
+  dokunmadan bağlanılması istenmez.
+- Kayıt `~/Library/Application Support/bateri/session/dev.bateri.bateri/`
+  altındadır (dizin yalnız sizin, dosyalar `0600`) ve açılışta okunur okunmaz
+  silinir. Geçmiş orada **düz metin** olarak durur — ekrana basılmış bir
+  token ya da parola dahil — ve dizin Time Machine'in yedeklediği yerdedir;
+  bateri kapalıyken yedeklenen bir kopya orada kalır. İstemiyorsanız
+  `"layout"`.
+- İki bateri aynı anda açıksa yalnız ilki kaydeder ve geri yükler.
 
 Bölüm satır içi de yazılabilir: `terminal = { scrollback = 5000 }`.
 `[[terminal]]` (bölüm dizisi) bölüm sayılmaz ve uyarı verir.

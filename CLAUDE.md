@@ -395,7 +395,23 @@ Other Tabs" ve ⇧⌘W jest başına **tek** sayfa, ⌘Q tek uyarı açar; boş 
 `exit` ve süreli koşu hiç sormaz. Kırmızı düğme ve sekme menüsü grubun
 sekmelerine birer `windowShouldClose:` yolladığı için karar bir tur sonra
 jestin kapsamıyla veriliyor, ⌘W de `performClose:` değil `closeTab:` —
-gerekçeler `.tasks/028-kapatma-onayi/phase-2.md` → Uygulama Notları. **Krom temanın**
+gerekçeler `.tasks/028-kapatma-onayi/phase-2.md` → Uygulama Notları. **Kapanış
+düzeni kaydediyor, açılış geri kuruyor** (053, `[terminal] restore_windows`):
+kayıt `AppDelegate::shutdown`'ın başında, pane'ler kapanmadan (pencere,
+sekme sırası, bölme ağacı, odak, zoom, pane'in `TabId`'si, yerel dizini, punto
+adımı, uzak satırı; `"all"`'da geçmiş `Session::final_history`'nin VT
+baytları), dosya `bt-shell-common`'ın `restore`'unda (sürümlü satır biçimi,
+paket kimliğiyle adlı kilitli dizin, açılışta oynatmadan önce tüketiliyor —
+çöken kayıt geri gelmesin). Kurulumun tek yolu `TerminalWindow::restore`:
+pane'ler önce ağaçla yerleşiyor, kabuklar sonra başlıyor ve geçmiş
+`SessionOptions::replay` ile `Scanner`'a uğramadan oynatılıyor — kabuk yeni,
+koşan iş ölü. Uzak pane yerel kabukla ve hedefin satırı giriş satırında
+**çalıştırılmadan** geliyor (diskteki dosya kabuğa komut koşturmasın);
+`"layout"` geçmiş yazmıyor ve eski kaydınkini okumadan siliyor, yanlış değer
+ve kullanılamayan dosya `"layout"`'a düşüyor (geçmişi diske yazmak görünmez
+yan etki); paketsiz süreç ve süreli koşu ne okuyor ne yazıyor, pencereler
+`setRestorable(false)`. Gerekçeler
+`.tasks/053-oturum-geri-yukleme/discussion.md` → Karar. **Krom temanın**
 (`TerminalWindow::apply_chrome`): başlık çubuğu saydam ve ayırıcısız,
 pencerenin zemini temanın `background`'ı (sRGB), görünümü zeminin
 açıklığından (`window::is_dark_background`), yani tek sekmede başlık ile
@@ -414,7 +430,7 @@ OSC 52 kopyasını (`Wake::copy_to_clipboard` → `PaneHost::copy_to_clipboard`)
 genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı/harf aralığı (`letter_spacing`), `osc52`, `[remote] hosts`,
 `cursor`, `cursor_blink`, `cursor_radius`, `cursor_glow`, `cursor_unfocused`,
-`cursor_blink_interval`, `confirm_close`, `cursor_motion`, `reduce_motion`,
+`cursor_blink_interval`, `confirm_close`, `restore_windows`, `cursor_motion`, `reduce_motion`,
 `smooth_scroll`, `keypress`, `erase`, `shell.integration` ve `[remote]`'un
 önizleme/indirme anahtarları — `preview_max_size`, `preview_read_only`,
 `preview_dir`, `preview_keep`, `preview_limit`, `download_dir`,
@@ -1768,11 +1784,12 @@ ikisine de bağlanmaz.
   `bt-core::settings`'te saf, okuma ve izleme `bt-shell-common`'da. İzleme kaynağı
   okumadan **önce** kurulur ve her olayda yeniden kurulur; kayıt anında
   kullanılamayan dosya hiçbir şeyi, kabul edilmeyen değer kendi anahtarını
-  değiştirmez (`Settings::parse_keeping`). **İki istisna, `osc52` ve
-  `[remote] integration`:** kabul edilmeyen değerleri ve açılışta
-  kullanılamayan dosya (ya da çözülemeyen ev dizini) ikisini **kapalıya**
-  düşürür (`Settings::for_unusable_file`) — yanlış tahmini görünmeyen iki
-  anahtar: biri panoya, öbürü sunucuya sessizce yazardı (048). Süreli koşu
+  değiştirmez (`Settings::parse_keeping`). **Üç istisna, `osc52`,
+  `[remote] integration` ve `restore_windows`:** kabul edilmeyen değerleri ve
+  açılışta kullanılamayan dosya (ya da çözülemeyen ev dizini) ilk ikisini
+  **kapalıya**, üçüncüsünü `"layout"`'a düşürür (`Settings::for_unusable_file`)
+  — yanlış tahmini görünmeyen üç anahtar: biri panoya, biri sunucuya, biri
+  diske sessizce yazardı (048, 053). Süreli koşu
   (`BT_RUN_SECONDS`) dosyayı **hiç okumaz ve izlemez**: dalın tek yeri
   `bt-shell-macos`'un `app::Inputs`'u.
 - **Yerel shell entegrasyonu bugün yalnız zsh'tir** (`ZDOTDIR`); bash

@@ -1647,14 +1647,21 @@ impl io::Read for TappedPty {
             if outcome.prompt
                 && let Some(line) = initial_input.take()
             {
-                let mut bytes = line.into_bytes();
                 // The held input is **behind** the line and the send is under the
                 // slot's lock: `send_input` sends when it sees the slot empty, so
                 // every key after it enters the channel after this line.
+                //
+                // A **ready** line (053 Karar 3) that finds unsent typing is
+                // dropped: nothing runs it, so the keys would join it
+                // (`ssh prodgit st`) — the user already started their own line.
                 let mut held = lock(held_input);
-                if let Some(typed) = held.take() {
-                    bytes.extend_from_slice(&typed);
-                }
+                let typed = held.take().unwrap_or_default();
+                let mut bytes = if line.run || typed.is_empty() {
+                    line.into_bytes()
+                } else {
+                    Vec::new()
+                };
+                bytes.extend_from_slice(&typed);
                 key_gen.fetch_add(1, Ordering::Release);
                 adapter.input(bytes);
             }
@@ -2194,6 +2201,23 @@ fn anchor_top<T>(term: &Term<T>, row: i32, block: u32) -> Option<i32> {
             .last()
             .unwrap_or(found),
     )
+}
+
+/// The top row of the logical line `row` is on: upward while the row above
+/// wraps into it (`WRAPLINE` on its last cell) — [`Session::final_history`]'s
+/// cut without marks.
+fn wrapped_top<T>(term: &Term<T>, row: i32) -> i32 {
+    let top = term.grid().topmost_line().0;
+    let last = term.columns().saturating_sub(1);
+    let mut line = row;
+    while line > top
+        && term.grid()[Line(line - 1)][Column(last)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    {
+        line -= 1;
+    }
+    line
 }
 
 /// The two modes of clearing the screen ([`Session::clear_to_start`],
@@ -6248,7 +6272,10 @@ impl Session {
     ///   cursor's row upward, so a copy Ctrl-L left in the history is not
     ///   mistaken for it.
     /// - No shell state at all (no integration, or a shell that never marked)
-    ///   → before the cursor's row: that row is the prompt.
+    ///   → before the cursor's logical line (the rows wrapping into it
+    ///   included): that line is the prompt and its half-typed command. A
+    ///   prompt printed over several **lines** (a two-line starship prompt)
+    ///   keeps its upper lines — without marks nothing tells them from output.
     /// - Otherwise (a command is running, or between commands) → through the
     ///   cursor's row.
     ///
@@ -6264,7 +6291,7 @@ impl Session {
         let cursor = term.grid().cursor.point.line.0;
         let end = match cut {
             HistoryCut::Anchor(block) => anchor_top(&term, cursor, block).unwrap_or(cursor),
-            HistoryCut::BeforeCursor => cursor,
+            HistoryCut::BeforeCursor => wrapped_top(&term, cursor),
             HistoryCut::ThroughCursor => cursor + 1,
         };
         snapshot::encode(&term, end)
@@ -9778,6 +9805,31 @@ mod tests {
     }
 
     #[test]
+    fn a_ready_initial_input_gives_way_to_keys_typed_before_the_prompt() {
+        // `/code-review` (053 gate): the hold puts typed keys behind the line;
+        // a ready line is not run, so they would join it (`ssh-prodls`). The
+        // user's unsent typing wins and the ready line is dropped.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("stty -echo; printf 'READY'; sleep 1; \
+                printf '\\033]133;A;bt_block=1\\007'; \
+                read x; printf 'GOT:%s|\\r\\n' \"$x\"; sleep 5"),
+            80,
+        );
+        options.initial_input = Some(InitialInput::ready("ssh-prod"));
+        options.shell_marks = true;
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_text(&session, "READY");
+        session.write(b"ls");
+        wait_until("the first input did not go", Duration::from_secs(5), || {
+            session.key_gen.load(Ordering::Acquire) == 2
+        });
+        session.write(b"\r");
+        let text = wait_text(&session, "GOT:");
+        assert!(text.contains("GOT:ls|"), "{text:?}");
+    }
+
+    #[test]
     fn a_replayed_history_sits_above_the_shell_and_reaches_no_ledger() {
         // 053 R1.3: the bytes go to `Term` before the reader loop and past the
         // scanner. They carry marks here on purpose — a prompt, a mirror, an
@@ -9850,6 +9902,17 @@ mod tests {
     #[test]
     fn final_history_without_marks_drops_the_cursors_row() {
         let history = final_history_of("printf 'out\\r\\n$ '; sleep 5", "$");
+        assert_eq!(history, "out\r\n");
+    }
+
+    #[test]
+    fn final_history_without_marks_drops_the_whole_wrapped_prompt_line() {
+        // `/code-review` (053 gate): a half-typed command wrapped past the
+        // 40 columns; the rows wrapping into the cursor's go with it.
+        let history = final_history_of(
+            "printf 'out\\r\\n$ '; printf 'half%.0s' 1 2 3 4 5 6 7 8 9 10 11 12; sleep 5",
+            "halfhalfhalf",
+        );
         assert_eq!(history, "out\r\n");
     }
 

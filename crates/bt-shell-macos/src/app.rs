@@ -27,7 +27,8 @@ use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
     NSControlStateValueOn, NSEvent, NSMenu, NSMenuDelegate, NSMenuItem, NSScreen, NSWindow,
-    NSWorkspace, NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSWindowNumberListOptions, NSWorkspace,
+    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
     NSArray, NSBundle, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSNumber,
@@ -2292,7 +2293,9 @@ impl AppDelegate {
     /// unresolvable home ([`restore_dir`]); the directory's lock held by
     /// another instance; `restore_windows = "off"` — which also deletes what
     /// is left, once the lock is ours (R4.1); no or an unreadable layout
-    /// ([`restore::take`] deletes it before anything is replayed). The lock
+    /// ([`restore::take`] deletes it before anything is replayed). Under
+    /// `"layout"` the layout comes back but an earlier `"all"` save's
+    /// histories are deleted unread (053 phase-4). The lock
     /// stays in [`Ivars::restore_lock`] for the save at quit.
     fn take_saved(&self) -> Option<Saved> {
         let dir = restore_dir(
@@ -2310,7 +2313,8 @@ impl AppDelegate {
                 let _ = restore::clear(&lock);
                 None
             }
-            RestoreWindows::All | RestoreWindows::Layout => restore::take(&lock),
+            RestoreWindows::All => restore::take(&lock, true),
+            RestoreWindows::Layout => restore::take(&lock, false),
         };
         self.ivars().restore_lock.replace(Some(lock));
         saved
@@ -2460,15 +2464,36 @@ impl AppDelegate {
         }
     }
 
+    /// The frontmost of our windows on the current space (z-order from
+    /// `windowNumbersWithOptions:`), for [`AppDelegate::saved_session`] when
+    /// neither the key nor the main window is ours.
+    fn front_terminal_window(&self) -> Option<Retained<NSWindow>> {
+        let numbers = NSWindow::windowNumbersWithOptions(NSWindowNumberListOptions(0), self.mtm())?;
+        let windows = self.windows();
+        numbers.iter().find_map(|number| {
+            windows
+                .iter()
+                .find(|window| window.ns_window().windowNumber() == number.integerValue())
+                .map(|window| window.ns_window().retain())
+        })
+    }
+
     /// The live windows as the save's model: one saved window per tab group,
     /// in the window list's order; its tabs in tab-bar order, its selected tab
-    /// and whether it holds the key window (`keyWindow`, else `mainWindow` —
-    /// ⌘Q's alert can leave no key window). The frame is the group's (tabs
-    /// share it). A tab with nothing live to save is left out, a window
+    /// and whether it holds the front terminal window (`keyWindow`, else
+    /// `mainWindow` — the first of them that is ours —, else our frontmost
+    /// window, [`AppDelegate::front_terminal_window`]: ⌘Q's alert can leave
+    /// no key window and the Settings window can be key and main). The frame
+    /// is the group's (tabs share it). A tab with nothing live to save is left out, a window
     /// without tabs too ([`TerminalWindow::saved_tab`]).
     fn saved_session(&self, with_history: bool) -> (Saved, Histories) {
         let app = NSApplication::sharedApplication(self.mtm());
-        let key = app.keyWindow().or_else(|| app.mainWindow());
+        let key = app
+            .keyWindow()
+            .into_iter()
+            .chain(app.mainWindow())
+            .find(|window| self.window_owning(window).is_some())
+            .or_else(|| self.front_terminal_window());
         let mut seen = std::collections::HashSet::new();
         let mut windows = Vec::new();
         let mut histories = Vec::new();

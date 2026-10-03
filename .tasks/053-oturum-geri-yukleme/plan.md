@@ -110,5 +110,5 @@ kapanış: AppDelegate::shutdown                açılış: did_finish_launching
 | phase-1 | ✅ |
 | phase-2 | ✅ |
 | phase-3 | ✅ |
-| phase-4 | |
-| kapı | |
+| phase-4 | ✅ |
+| kapı | ✅ |

@@ -31,10 +31,39 @@ _Requirements: R4.2_
 
 ## Checklist
 
-- [ ] Ayar penceresi satırı
-- [ ] `"layout"` ve `"off"` açılışta önceki bir `"all"` kaydının geçmişini **oynatmaz**, okumadan siler (`"layout"` düzeni yine kurar): kullanıcı geçmişi istemediğini söyledikten sonra eski geçmişi bir kez daha göstermek beklenmedik (phase-3 → Uygulama Notları'ndaki davranışın düzeltmesi; orkestratör kararı 2026-10-03)
-- [ ] `restore_windows`'un kabul edilmeyen değeri (ör. `"Off"`) `"layout"`'a düşer, `"all"`'a değil: düzen gelir, geçmiş diske yazılmaz (phase-1 → Waive'in kararı; `osc52` emsalinin güvenli yönü). Tanı yine satırda; bekçi `Settings` sınamasında
-- [ ] `docs/AYARLAR.md`
-- [ ] `CHANGELOG.md`
-- [ ] `CLAUDE.md`
-- [ ] Doğrulama geçti (`make check` + `make smoke`)
+- [x] Ayar penceresi satırı
+- [x] `"layout"` ve `"off"` açılışta önceki bir `"all"` kaydının geçmişini **oynatmaz**, okumadan siler (`"layout"` düzeni yine kurar): kullanıcı geçmişi istemediğini söyledikten sonra eski geçmişi bir kez daha göstermek beklenmedik (phase-3 → Uygulama Notları'ndaki davranışın düzeltmesi; orkestratör kararı 2026-10-03)
+- [x] `restore_windows`'un kabul edilmeyen değeri (ör. `"Off"`) `"layout"`'a düşer, `"all"`'a değil: düzen gelir, geçmiş diske yazılmaz (phase-1 → Waive'in kararı; `osc52` emsalinin güvenli yönü). Tanı yine satırda; bekçi `Settings` sınamasında
+- [x] `docs/AYARLAR.md`
+- [x] `CHANGELOG.md`
+- [x] `CLAUDE.md`
+- [x] Doğrulama geçti (`make check` + `make smoke`)
+
+## Uygulama Notları
+
+- Satır General kategorisinde, `confirm_close`'un altında ("Reopen after
+  quitting:"); ayar penceresinde "Terminal" kategorisi yok, `confirm_close`
+  da General'da.
+- `"layout"`'ın açılışı: `restore::take(lock, histories)` — `false`'ta bütün
+  geçmişler okunmadan süpürülüyor ve dönen pane'lerin `history` biti
+  düşüyor; bekçisi `a_layout_only_take_deletes_the_histories_unread`.
+  phase-3'ün notundaki davranış bununla düzeldi.
+- Yanlış `restore_windows` değeri `fallback`'i okumuyor, `osc52` emsali:
+  bozuk `[terminal]` bölümü de `"layout"`. Bilinen sınır: `"off"` iken
+  yanlış yazılmış kayıt da `"layout"`'a çıkar (düzen yazılır, geçmiş yine
+  yazılmaz).
+- Şablonun başlık yorumu istisnaları sayıyordu ve yalnız `osc52`'yi
+  diyordu; `remote.integration` ile `restore_windows` eklendi (belge kopyası
+  aynı commit'te).
+- Set kapısı `/code-review`'ının üç bulgusu giderildi: (1) geri yüklenen uzak
+  pane'de prompt'tan önce yazılan tuşlar hazır satırın arkasına yapışıyordu
+  (`ssh prodgit st`) — hazır satır gönderilmemiş yazı varsa düşüyor, kullanıcının
+  satırı kazanıyor (`a_ready_initial_input_gives_way_to_keys_typed_before_the_prompt`);
+  (2) işaretsiz kabukta kesim imlecin satırı yerine **mantıksal** satırının
+  tepesi (sarılan yarım komut da gidiyor; çok satırlı prompt'un üst satırı
+  bilinen sınır, `final_history`'nin doc'unda); (3) ⌘Q anında Settings
+  penceresi key iken öndeki terminal penceresi kayboluyordu — key/main bizim
+  değilse z-sırasında önümüzdeki pencere (`front_terminal_window`).
+  `/audit`: `make audit` temiz, mercekler temiz (6 ilgisiz).
+- Gözle kontrol (gerçek pencerede kapat-aç) koşulmadı.
+

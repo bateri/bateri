@@ -32,9 +32,9 @@ use block2::RcBlock;
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
     CursorBlink, CursorMotion, DownloadConflict, Erase, Keypress, LETTER_SPACING_RANGE,
-    LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion, RemoteStatsMode, SCROLLBACK_MAX,
-    STATS_INTERVAL_RANGE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
-    UnfocusedCaret,
+    LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion, RemoteStatsMode, RestoreWindows,
+    SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration,
+    SmoothScroll, UnfocusedCaret,
 };
 use bt_gpu::FontNotice;
 use objc2::rc::Retained;
@@ -195,11 +195,12 @@ enum Key {
     RemoteStats,
     StatsInterval,
     RemoteIntegration,
+    RestoreWindows,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 33] = [
+    const ALL: [Key; 34] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -233,6 +234,7 @@ impl Key {
         Key::RemoteStats,
         Key::StatsInterval,
         Key::RemoteIntegration,
+        Key::RestoreWindows,
     ];
 
     fn tag(self) -> NSInteger {
@@ -249,6 +251,7 @@ impl Key {
     fn path(self) -> &'static str {
         match self {
             Key::ConfirmClose => "terminal.confirm_close",
+            Key::RestoreWindows => "terminal.restore_windows",
             Key::Clipboard => "clipboard.osc52",
             Key::Scrollback => "terminal.scrollback",
             Key::ShellIntegration => "shell.integration",
@@ -367,6 +370,19 @@ impl Choice for ConfirmClose {
             ConfirmClose::Never => "Never",
             ConfirmClose::Running => "Only when a program is running",
             ConfirmClose::Always => "Always",
+        }
+    }
+}
+
+impl Choice for RestoreWindows {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            RestoreWindows::All => "Windows and scrollback",
+            RestoreWindows::Layout => "Windows only",
+            RestoreWindows::Off => "Nothing",
         }
     }
 }
@@ -861,6 +877,7 @@ struct Slide {
 /// The window's controls — what `refresh` writes and the actions read.
 struct Controls {
     confirm_close: Retained<NSPopUpButton>,
+    restore_windows: Retained<NSPopUpButton>,
     clipboard: Retained<NSSwitch>,
     scrollback: Number,
     shell_integration: Retained<NSPopUpButton>,
@@ -1041,6 +1058,7 @@ define_class!(
             };
             let edit = match key {
                 Key::ConfirmClose => choice_at(index).map(SettingsEdit::ConfirmClose),
+                Key::RestoreWindows => choice_at(index).map(SettingsEdit::RestoreWindows),
                 Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
                 Key::Shape => choice_at(index).map(SettingsEdit::Cursor),
                 Key::Blink => choice_at(index).map(SettingsEdit::CursorBlink),
@@ -1378,6 +1396,7 @@ impl SettingsWindow {
             return;
         };
         select_choice(&c.confirm_close, settings.confirm_close);
+        select_choice(&c.restore_windows, settings.restore_windows);
         set_switch(&c.clipboard, osc52_on(settings.osc52));
         set_number(
             &c.scrollback,
@@ -1990,6 +2009,7 @@ impl SettingsWindow {
 
         // General
         let confirm_close = self.popup::<ConfirmClose>(Key::ConfirmClose);
+        let restore_windows = self.popup::<RestoreWindows>(Key::RestoreWindows);
         let clipboard = self.switch(Key::Clipboard);
         let scrollback = self.number(Key::Scrollback, 0.0, SCROLLBACK_MAX as f64, 1000.0, 80.0);
         let shell_integration = self.popup::<ShellIntegration>(Key::ShellIntegration);
@@ -2000,6 +2020,13 @@ impl SettingsWindow {
             &confirm_close,
             &[&confirm_close],
             None,
+        );
+        general.row(
+            Key::RestoreWindows,
+            "Reopen after quitting:",
+            &restore_windows,
+            &[&restore_windows],
+            Some("Shells start fresh. Saved scrollback is plain text on disk."),
         );
         general.row(
             Key::Clipboard,
@@ -2326,6 +2353,7 @@ impl SettingsWindow {
         ];
         let controls = Controls {
             confirm_close,
+            restore_windows,
             clipboard,
             scrollback,
             shell_integration,
@@ -2806,6 +2834,7 @@ mod tests {
         let text = "[terminal]\nscrollback = []\ncursor = []\ncursor_blink = []\n\
                     cursor_radius = []\ncursor_glow = []\ncursor_unfocused = []\n\
                     cursor_blink_interval = []\nconfirm_close = []\n\
+                    restore_windows = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
@@ -2827,6 +2856,7 @@ mod tests {
         for key in Key::ALL {
             let edit = match key {
                 Key::ConfirmClose => SettingsEdit::ConfirmClose(ConfirmClose::Never),
+                Key::RestoreWindows => SettingsEdit::RestoreWindows(RestoreWindows::Off),
                 Key::Clipboard => SettingsEdit::Osc52(Osc52::Off),
                 Key::Scrollback => SettingsEdit::Scrollback(1),
                 Key::ShellIntegration => SettingsEdit::ShellIntegration(ShellIntegration::Off),
@@ -2918,6 +2948,7 @@ mod tests {
     #[test]
     fn popup_titles_cover_every_name() {
         check::<ConfirmClose>();
+        check::<RestoreWindows>();
         check::<ShellIntegration>();
         check::<CaretShape>();
         check::<CursorBlink>();
