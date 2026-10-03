@@ -82,5 +82,5 @@ plan: ızgara zemin → vurgu → caret → bant zemin → vurgu → ızgara gly
 | phase-0 | ✅ |
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| phase-3 | |
-| kapı | |
+| phase-3 | ✅ |
+| kapı | ✅ |

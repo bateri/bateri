@@ -2996,8 +2996,9 @@ mod tests {
         assert_eq!(parse_decimal("14.5", MIN_SIZE..=MAX_SIZE), Some(14.5));
         assert_eq!(parse_decimal("NaN", MIN_SIZE..=MAX_SIZE), None);
         assert_eq!(parse_decimal("500", MIN_SIZE..=MAX_SIZE), None);
-        assert_eq!(parse_decimal("0.9", LINE_HEIGHT_RANGE), None);
-        assert_eq!(parse_decimal("0.9", LETTER_SPACING_RANGE), None);
+        assert_eq!(parse_decimal("0.4", LINE_HEIGHT_RANGE), None);
+        assert_eq!(parse_decimal("0.4", LETTER_SPACING_RANGE), None);
+        assert_eq!(parse_decimal("0.9", LINE_HEIGHT_RANGE), Some(0.9));
         assert_eq!(parse_decimal("1.3", LETTER_SPACING_RANGE), Some(1.3));
     }
 

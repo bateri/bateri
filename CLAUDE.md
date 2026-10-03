@@ -39,8 +39,9 @@ fontlarına karşı hiç sınanmamıştı. Ölçüt ters yöndeki boşluğu da k
 dar ilerleyip geniş boyayan aday eskiden geçip sağdan kırpılıyordu, artık
 kutu — yani "kutu ya da tam glyph" ilk kez bir dilek değil sözleşme.
 Alternatifi yarım çizilmiş bir glyph'ti: kutu görünür bir eksiklik, kırpılmış
-glyph sessiz bir bozulma. **041'den beri sözleşme "kutu, tam glyph ya da
-sığacak kadar küçültülmüş glyph"**: iki kapıdan da dönen aday, bugünkü
+glyph sessiz bir bozulma. **Sözleşme "kutu, yuvaya tam sığan glyph ya da
+küçültülmüş glyph"** (041 küçültmeyi, 052 yuvayı getirdi — `1`'in altındaki
+aralıkta sınır hücre değil yuva, aşağıda): iki kapıdan da dönen aday, bugünkü
 yerleşimle sığması için gereken küçültme (`rules::fit_ratio`) sınırın
 içindeyse (`rules::SHRINK_LIMIT`, taramanın dağılımından; tek sütunlu emojiyi
 @1x'te de kapsıyor — kullanıcı küçük emojiyi kutuya tercih etti) küçük
@@ -69,6 +70,25 @@ Muhakeme). Ortalamanın girdisi hücrenin **kesirli** ilerlemesi,
 yuvarlanmış genişliği değil: ızgaranın adımı yuvarlanmış olan, ama ortalamayı
 **yuvarlanmışa** bağlamak taban fontun kendi glyph'ini bile hücreden dar
 gösterir (7.827 < 8) ve her harfi yarım pikselin altında kaydırırdı.
+**Yuva hücreden ayrı** (052): atlas iki metrik taşıyor — **yuva** (glyph
+metriği, aralık `max(·, 1)`) ve **hücre** (ızgara metriği, gerçek aralık;
+`line_height` ile `letter_spacing` `0.5`'e kadar, `settings::MIN_SPACING`).
+`≥ 1`'de ikisi eşit ve ofset sıfır, yani raster bit bit aynı; `< 1`'de glyph
+yuvaya bugünkü yoldan rasterize ediliyor ve **kesilmiyor, komşu hücreye
+taşıyor** (iTerm2), çünkü küçültme kullanıcının reddettiği yol
+(`.tasks/052-tasan-glyph/discussion.md` → Karar). Açık işaretli
+yuvarlanıp ascent:descent oranında bölünüyor (`rules::cell_metrics`, iki
+parça da en az 1 px) ve ofset tek fonksiyondan (`rules::slot_offset`).
+Döşenen yordamsal aile ve tofu hücreye çizilip yuvaya ofsetle konuyor, kural
+sprite'ları hücre genişliğinde (`rules::rule_metrics`) — yuva genişliğinde
+komşuyla örtüşür, desenin periyodu yuvayı bölerdi. Ortalama hücrenin
+yuvadaki **tam piksel** yerinden (`GlyphBox::left` = `slot_offset.x`, küçük
+sınıfta da — GPU dörtgeni oradan çiziyor, kesirli pay bağlam satırını
+kaydırıyordu), kapının sınırı ise ortalama kutusunun iki yanına kesirli pay
+eklenmiş hâli (`rules::GlyphBox`: tek sütunda yuva, iki sütunda
+`hücre + yuva`); bilinen sınır, çok dar
+`letter_spacing`'te (yaklaşık `0.7` altı) iki sütunlu karakter taşmıyor,
+küçültülüyor.
 `bt-gpu` atlası
 atlasın **iki düzlemini** iki dokuya bağlar — maske `R8Unorm`, renk
 `RGBA8Unorm_sRGB` —, `(bold, italic)`'i font yüzüne çevirir ve `cell`
@@ -1106,10 +1126,16 @@ geliyor). Çıpa yeni bir kaynak değil, hücrenin kendi OSC 8 bağlantısı;
 eksik olan **okuyan** döngüydü. Satırlar fill-yerel, yani işaret bandın kendi
 `set_viewport`'unda. **Süre sayacı hâlâ bantta yok** ve bu bilinçli daraltma:
 sayaç hücre üretiyor (`Counter`) ve çakışma ölçütünü (`last_col`) ikinci kez
-kurmayı isterdi; işaret ise bir `RuleCell`. Encode sırası **ızgara →
-doldurma → dock**, çünkü ızgaranın listeleri bandın içine hiç girmiyor ama
-ötelemeden muaf olan caret girebiliyor, ve dock'un opak zemini en altta
-kalmak zorunda.
+kurmayı isterdi; işaret ise bir `RuleCell`. Encode sırası **ızgara zemini →
+vurgu → caret → bant zemini → bant araması → ızgara glyph'leri → bant
+glyph'leri → dock** (052): zeminler glyph'lerden önce, çünkü `1`'in altında
+taşan mürekkep komşu satırın — bandınki dahil — zemininin üstünde görünmeli,
+caret ise bant zemininin altında kalmalı; dock'un opak zemini yine en altta.
+Glyph ve emoji dörtgeni yuva boyunda ve `slot_offset` kadar geride, glyph
+viewport'u taşma payı kadar yukarı kaldırılmış ve o kadar uzun
+(`Op::Lifted`; alt kenar pencerenin dibinde kalıyor), dock'ta yalnız bandın
+tepesine kadar — taşma bandın dışına çıkmıyor
+(`.tasks/052-tasan-glyph/phase-2.md` → Uygulama Notları).
 **Kaydırma konumu göreli bir kesir taşıyor** (027): trackpad parmağı piksel
 piksel izliyor, momentum AppKit'in olaylarıyla yavaşlıyor, jest bitince pencere
 en yakın satıra süzülüyor ve klasik tekerleğin çentiği süzülüyor.
@@ -1263,10 +1289,11 @@ Dock ve komutlar arası atlama henüz yok (`docs/YOL-HARITASI.md` → komut işa
 mekanizmadan: mürekkebi bir hücreye sığmayan **iki sütunlu** karakter iki
 hücre boyunda bir kutuya ortalanıp **iki yuvaya** rasterize ediliyor
 (`bt_atlas::Half`; sağ yarı tam sayı piksel ofsetiyle, yani AA fazı ikisinde
-birebir aynı ve bölünmüş bir tampon gerekmiyor). Yuvalar yine tam bir hücre,
+birebir aynı ve bölünmüş bir tampon gerekmiyor). Yarılar yine tam bir yuva,
 yani doku düzeni, `slot_bytes` ve ızgara aritmetiği **değişmiyor**; dörtlü de
-tek hücre kalıyor ve `GlyphInstance`'ın 32 baytlık stride'ı ile `cell_px`
-uniform'u el değmiyor — 012'nin `>` işaretini durduran sınır bu setle
+tek yuva kalıyor ve `GlyphInstance`'ın 32 baytlık stride'ı el değmiyor — boyu
+instance'tan değil atlastan (`renderer::SlotQuad`: `slot_px`, `slot_offset`;
+052) ve iki yarı bölme çizgisinde kırpılıyor — 012'nin `>` işaretini durduran sınır bu setle
 **aşılmadı, etrafından dolaşıldı**. Kapının **sırası** karar ve ölçülmüş:
 geniş hücrede önce tek hücrelik mürekkep kapısı, geçerse bugünkü tek yuvalı
 yol (raster bit bit aynı), geçmezse iki hücrelik kapı, o da geçmezse kutu.

@@ -80,19 +80,20 @@ pub struct FontOptions {
     /// `ascent + descent + leading`, and the excess is distributed **equally
     /// below and above** the glyph (the baseline drops by that much too).
     ///
-    /// The floor is `1.0` and it **isn't gone below**: a cell shorter than the
-    /// font wants would clip the coverage under `g j p q y` and that has its own
-    /// guard (`descender_fits_in_the_cell` in `bt-atlas`). A setting punching
-    /// through a guard matters more than the setting itself.
+    /// Below `1.0` (down to [`MIN_SPACING`]) the rows tighten but the glyph
+    /// is **not clipped**: it is rasterised at the font's own height and its
+    /// tails and accents overflow onto the neighbouring row, as in iTerm2
+    /// (`.tasks/052-tasan-glyph/`).
     pub line_height: f64,
     /// Letter-spacing multiplier — the horizontal twin of
     /// [`FontOptions::line_height`] (051): the cell becomes this multiple of
     /// the font's own advance and the glyph sits **centred** in it, i.e. the
     /// letters keep their size and the columns open up.
     ///
-    /// The floor is `1.0` and it **isn't gone below**: a cell narrower than
-    /// the font's advance would silently clip the edges of wide letters
-    /// (`M`, `W`) — the same protection as the line height's.
+    /// Below `1.0` (down to [`MIN_SPACING`]) the columns tighten and the
+    /// glyph keeps its size, overflowing onto the neighbouring column instead
+    /// of being clipped — the line height's rule on the other axis
+    /// (`.tasks/052-tasan-glyph/`).
     pub letter_spacing: f64,
 }
 
@@ -1451,12 +1452,13 @@ dark_theme = "bateri"
 # family = "Menlo"
 # Greater than 0. Size in points.
 size = 13
-# 1 to 2. Line spacing as a multiple of the font's own: 1 is the font's own
-# spacing, 1.4 is airy. Below 1 is refused — it would clip the tails of g and y.
+# 0.5 to 2. Line spacing as a multiple of the font's own: 1 is the font's own
+# spacing, 1.4 is airy. Below 1 the rows tighten; letters are not clipped, their
+# tails and accents overflow onto the neighbouring row.
 line_height = 1.0
-# 1 to 2. Letter spacing as a multiple of the font's own: 1 is the font's own
+# 0.5 to 2. Letter spacing as a multiple of the font's own: 1 is the font's own
 # spacing, 1.2 opens the columns a little. Letters keep their size and sit in
-# the middle of the wider cell. Below 1 is refused — it would clip wide letters.
+# the middle of the cell; below 1 they overflow onto the neighbouring column.
 letter_spacing = 1.0
 
 [clipboard]
@@ -2836,10 +2838,13 @@ fn font_family(
 /// silent in `bt-atlas` (`discussion.md` → Karar 4). Had there been a ceiling
 /// here it would have had two owners and the diagnostic would come and go as the
 /// window changes screens.
-/// `font.line_height`: a multiplier between `1.0` and [`MAX_LINE_HEIGHT`].
+/// `font.line_height`: a multiplier between [`MIN_SPACING`] and
+/// [`MAX_LINE_HEIGHT`].
 ///
-/// **Two-ended**, unlike [`font_size`]. The lower end forbids going below the
-/// font's own metrics (see [`FontOptions::line_height`]); the upper end isn't
+/// **Two-ended**, unlike [`font_size`]. The lower end bounds the overlap: below
+/// `1.0` glyphs overflow onto the neighbouring row (see
+/// [`FontOptions::line_height`]) and under [`MIN_SPACING`] the text stops being
+/// readable; the upper end isn't
 /// arbitrary but a budget: every slot is `cell_w × cell_h` bytes and the atlas is
 /// fixed-size, so as the multiplier grows the number of glyphs fitting the atlas
 /// falls. Leaving it unbounded would have meant a terminal that falls to tofu
@@ -2855,11 +2860,11 @@ fn line_height(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Dia
     )
 }
 
-/// `font.letter_spacing`: a multiplier between `1.0` and
+/// `font.letter_spacing`: a multiplier between [`MIN_SPACING`] and
 /// [`MAX_LETTER_SPACING`] — [`line_height`]'s horizontal twin, with the same
-/// two ends for the same kind of reasons: the lower end forbids clipping wide
-/// letters ([`FontOptions::letter_spacing`]), the upper end is the atlas
-/// budget (a wider slot fits fewer glyphs).
+/// two ends for the same kind of reasons: the lower end bounds how far letters
+/// overflow onto the neighbouring column ([`FontOptions::letter_spacing`]), the
+/// upper end is the atlas budget (a wider slot fits fewer glyphs).
 fn letter_spacing(
     text: &str,
     item: &Item,
@@ -2926,22 +2931,28 @@ fn ranged_float(
     value
 }
 
+/// The floor of both spacing multipliers (052): below `1.0` glyphs overflow
+/// onto the neighbouring cell instead of being clipped, and the floor bounds
+/// that overlap. A product choice, not a measured number: `0.5` is no longer
+/// comfortable to read, but the user picks it knowingly
+/// (`.tasks/052-tasan-glyph/discussion.md` → Karar).
+pub const MIN_SPACING: f64 = 0.5;
+
 /// The line-height multiplier's ceiling — the atlas budget (see [`line_height`]).
 pub const MAX_LINE_HEIGHT: f64 = 2.0;
 
-/// The line-height multiplier's accepted range: its lower end is the font's own
-/// metrics ([`FontOptions::line_height`]), its upper end [`MAX_LINE_HEIGHT`].
-pub const LINE_HEIGHT_RANGE: std::ops::RangeInclusive<f64> = 1.0..=MAX_LINE_HEIGHT;
+/// The line-height multiplier's accepted range: [`MIN_SPACING`] to
+/// [`MAX_LINE_HEIGHT`] ([`FontOptions::line_height`]).
+pub const LINE_HEIGHT_RANGE: std::ops::RangeInclusive<f64> = MIN_SPACING..=MAX_LINE_HEIGHT;
 
 /// The letter-spacing multiplier's ceiling — the atlas budget (see
 /// [`letter_spacing`]); the capacity guard in `bt-atlas` covers this corner
 /// together with [`MAX_LINE_HEIGHT`].
 pub const MAX_LETTER_SPACING: f64 = 2.0;
 
-/// The letter-spacing multiplier's accepted range: its lower end is the font's
-/// own advance ([`FontOptions::letter_spacing`]), its upper end
-/// [`MAX_LETTER_SPACING`].
-pub const LETTER_SPACING_RANGE: std::ops::RangeInclusive<f64> = 1.0..=MAX_LETTER_SPACING;
+/// The letter-spacing multiplier's accepted range: [`MIN_SPACING`] to
+/// [`MAX_LETTER_SPACING`] ([`FontOptions::letter_spacing`]).
+pub const LETTER_SPACING_RANGE: std::ops::RangeInclusive<f64> = MIN_SPACING..=MAX_LETTER_SPACING;
 
 fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagnostic>) -> f64 {
     const KEY: &str = "font.size";
@@ -4363,18 +4374,21 @@ found 1.5; using 0.1"
         // An integer is a multiplier too: the `line_height = 2` the user will write.
         assert_eq!(clean("[font]\nline_height = 2\n").font.line_height, 2.0);
 
+        // Below 1 the rows tighten and glyphs overflow (052), down to the floor.
+        assert_eq!(clean("[font]\nline_height = 0.5\n").font.line_height, 0.5);
+        assert_eq!(clean("[font]\nline_height = 0.75\n").font.line_height, 0.75);
+
         // **Two-ended, and the two ends have separate reasons.** The lower end
-        // protects a guard: a cell shorter than the font wants would clip the tails
-        // of `g` and `y` (`descender_fits_in_the_cell` in `bt-atlas`). The upper
+        // bounds the overlap of overflowing glyphs (`MIN_SPACING`). The upper
         // end is a budget: a slot is `cell_w × cell_h` bytes and the atlas is
         // fixed-size, so as the multiplier grows the number of fitting glyphs
         // falls.
-        for value in ["0.9", "0", "-1", "2.5", "1e9"] {
+        for value in ["0.49", "0", "-1", "2.5", "1e9"] {
             let (settings, diagnostic) = rejected(&format!("[font]\nline_height = {value}\n"));
             assert_eq!(settings, Settings::default(), "{value}");
             assert_eq!(diagnostic.key, Some("font.line_height"), "{value}");
             assert!(
-                diagnostic.message.contains("between 1 and 2"),
+                diagnostic.message.contains("between 0.5 and 2"),
                 "{value}: {}",
                 diagnostic.message
             );
@@ -4406,14 +4420,23 @@ found 1.5; using 0.1"
             clean("[font]\nletter_spacing = 2\n").font.letter_spacing,
             2.0
         );
-        // Two-ended like the line height: below 1 clips wide letters, above
-        // 2 is past the atlas budget.
-        for value in ["0.9", "2.1", "nan"] {
+        // Below 1 letters overflow onto the neighbouring column (052).
+        assert_eq!(
+            clean("[font]\nletter_spacing = 0.5\n").font.letter_spacing,
+            0.5
+        );
+        assert_eq!(
+            clean("[font]\nletter_spacing = 0.75\n").font.letter_spacing,
+            0.75
+        );
+        // Two-ended like the line height: under the floor the overlap is
+        // unbounded, above 2 is past the atlas budget.
+        for value in ["0.49", "0", "2.1", "nan"] {
             let (settings, diagnostic) = rejected(&format!("[font]\nletter_spacing = {value}\n"));
             assert_eq!(settings, Settings::default(), "{value}");
             assert_eq!(diagnostic.key, Some("font.letter_spacing"), "{value}");
             assert!(
-                diagnostic.message.contains("between 1 and 2"),
+                diagnostic.message.contains("between 0.5 and 2"),
                 "{value}: {}",
                 diagnostic.message
             );

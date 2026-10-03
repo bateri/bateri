@@ -174,12 +174,13 @@ dark_theme = "bateri"
 # family = "Menlo"
 # Greater than 0. Size in points.
 size = 13
-# 1 to 2. Line spacing as a multiple of the font's own: 1 is the font's own
-# spacing, 1.4 is airy. Below 1 is refused — it would clip the tails of g and y.
+# 0.5 to 2. Line spacing as a multiple of the font's own: 1 is the font's own
+# spacing, 1.4 is airy. Below 1 the rows tighten; letters are not clipped, their
+# tails and accents overflow onto the neighbouring row.
 line_height = 1.0
-# 1 to 2. Letter spacing as a multiple of the font's own: 1 is the font's own
+# 0.5 to 2. Letter spacing as a multiple of the font's own: 1 is the font's own
 # spacing, 1.2 opens the columns a little. Letters keep their size and sit in
-# the middle of the wider cell. Below 1 is refused — it would clip wide letters.
+# the middle of the cell; below 1 they overflow onto the neighbouring column.
 letter_spacing = 1.0
 
 [clipboard]
@@ -551,7 +552,7 @@ dark_theme = "bateri"
 [font]
 family = "Menlo"
 size = 13
-line_height = 1.0
+line_height = 0.9
 letter_spacing = 1.0
 ```
 
@@ -559,8 +560,8 @@ letter_spacing = 1.0
 |---|---|---|---|
 | `family` | metin | yok (SF Mono, yoksa Menlo) | yazı ailesi |
 | `size` | sayı, `0`'dan büyük | `13` | punto |
-| `line_height` | sayı, `1` – `2` | `1.0` | satır aralığı çarpanı |
-| `letter_spacing` | sayı, `1` – `2` | `1.0` | harf aralığı çarpanı |
+| `line_height` | sayı, `0.5` – `2` | `1.0` | satır aralığı çarpanı |
+| `letter_spacing` | sayı, `0.5` – `2` | `1.0` | harf aralığı çarpanı |
 
 - `family` bir **aile adıdır**, Font Kitabı'nda görünen ad (`"JetBrains
   Mono"`, `"Menlo"`); büyük/küçük harf fark etmez. Tek bir yüzün PostScript
@@ -606,14 +607,20 @@ letter_spacing = 1.0
   değer pencere ekran değiştirdikçe sınırın bir içinde bir dışında
   kalabilirdi.
 - `line_height` satır aralığını **fontun kendi aralığının katı** olarak
-  verir: `1.0` fontun istediği aralık, `1.4` ferah. Fazlalık satırın altına ve
-  üstüne **eşit** dağılır, yani harfler hücrenin ortasında kalır; alt çizgi ve
-  üstü çizili de birlikte iner.
-- **`1`'in altına inilmez** ve bu bir kısıtlama değil koruma: fontun
-  istediğinden kısa bir satır `g j p q y` harflerinin kuyruğunu keser.
+  verir: `1.0` tam olarak fontun istediği aralık, `1.4` ferah. Fazlalık
+  satırın altına ve üstüne **eşit** dağılır, yani harfler hücrenin ortasında
+  kalır; alt çizgi ve üstü çizili de birlikte iner.
+- **`1`'in altında satırlar sıkışır, harf kesilmez**: harf yine fontun kendi
+  boyunda çizilir ve sığmayan kısmı komşu satıra **taşar** (iTerm2'deki
+  gibi). `İ Ö Ü`'nün aksanı üstteki, `g j y`'nin kuyruğu alttaki satıra
+  değebilir. Alt sınır `0.5`; altında üst üste binme okunmaz hâle gelir.
   Üst sınır `2`, çünkü hücre büyüdükçe glyph atlasına sığan karakter sayısı
   düşer (aşağıdaki maddeyle aynı bütçe). Aralık dışındaki değer varsayılana
   döner ve uyarı verir.
+- Taşma **aynı yüzeyin içinde** kalır: pencerenin altındaki giriş satırında
+  harf giriş alanının tepesine kadar taşar, alanın dışına çıkmaz; pencerenin
+  kenarında ise kesilir. Kutu ve blok çizgileri (`─ │ █`) sıkışan hücreyi
+  yine boydan boya doldurur, yani `tree`'nin çizgileri bitişik kalır.
 - Satır aralığı **kayıt anında** uygulanır, punto gibi; Cmd +/− puntoyu
   oynatır, çarpan olduğu yerde kalır ve yeni puntoya göre ölçeklenir.
 - `letter_spacing` `line_height`'ın **yatay ikizidir**: hücre genişliğini
@@ -623,12 +630,16 @@ letter_spacing = 1.0
   hücreyi boydan boya doldurduğu için geniş hücrede de birbirine bitişik
   kalır, iki sütunlu karakter (`中`, emoji) iki sütunun ortasında durur ve
   pencerenin altındaki bağlam satırı da aynı oranda açılır.
-- **`1`'in altına inilmez**, aynı koruma: fontun ilerlemesinden dar bir
-  hücre `M` ve `W` gibi geniş harflerin kenarını sessizce keser. Üst sınır
-  `2`, satır aralığıyla aynı atlas bütçesi; iki çarpan birlikte en üstteyken
-  de atlas bütün çizgi ve blok karakterlerini taşır. Aralık dışındaki ya da
-  sayı olmayan değer varsayılana (kayıt anında o anki değere) döner ve uyarı
-  verir.
+- **`1`'in altında sütunlar sıkışır, harf kesilmez**: harf kendi boyunda
+  kalır ve `M`, `W` gibi geniş harflerin kenarı komşu sütuna taşar. Alt sınır
+  `0.5`, satır aralığıyla aynı. Üst sınır `2`, satır aralığıyla aynı atlas
+  bütçesi; iki çarpan birlikte en üstteyken de atlas bütün çizgi ve blok
+  karakterlerini taşır. Aralık dışındaki ya da sayı olmayan değer varsayılana
+  (kayıt anında o anki değere) döner ve uyarı verir.
+- **Bilinen sınır:** çok dar harf aralığında (yaklaşık `0.7`'nin altı) iki
+  sütunlu karakter (`中`, emoji) taşmak yerine **küçültülerek** çizilir, çünkü
+  sistemden gelen karakterin sığması gereken kutu iki sütunla birlikte
+  daralır.
 - Harf aralığı da **kayıt anında** uygulanır: sütun sayısı yeniden
   hesaplanır ve kabuk yeni boyutu alır. Cmd +/− çarpanı taşır, yani yeni
   puntoda harfler yine aynı oranda açık durur.
