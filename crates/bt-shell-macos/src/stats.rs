@@ -28,6 +28,7 @@ use bt_shell_common::remote_stats::{Action, Detail, Outcome, Sampler, Schedule};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::MainThreadMarker;
 
+use crate::focus::Moment;
 use crate::pane::TerminalPane;
 use crate::remote_helper::{Answer, LoadReply, Query, Request};
 
@@ -159,6 +160,8 @@ impl TerminalPane {
     /// Called at mouse-move rate: while sampling runs it only stamps the time
     /// (no allocation, no `Term` lock).
     pub(crate) fn note_interaction(&self) {
+        // The focus query's `idle` (050): the same moments, its own clock.
+        self.input_stamp().set(Moment::now());
         let actions = self
             .stats_driver()
             .borrow_mut()
