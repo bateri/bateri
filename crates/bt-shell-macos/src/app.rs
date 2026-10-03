@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    CursorMotion, HostMark, ReduceMotion, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit,
-    ShellIntegration, SmoothScroll, TabId, Teardown, Theme,
+    CursorMotion, HostMark, InitialInput, ReduceMotion, RestoreWindows, SHUTDOWN_GRACE,
+    SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll, TabId, Teardown, Theme,
 };
 use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Stats};
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -26,13 +26,14 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_clas
 use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
-    NSControlStateValueOn, NSEvent, NSMenu, NSMenuDelegate, NSMenuItem, NSWindow, NSWorkspace,
-    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSControlStateValueOn, NSEvent, NSMenu, NSMenuDelegate, NSMenuItem, NSScreen, NSWindow,
+    NSWorkspace, NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
-    NSArray, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSNumber, NSObject,
-    NSObjectNSDelayedPerforming, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
-    NSRunLoopCommonModes, NSString, NSURL, NSUserDefaults, ns_string,
+    NSArray, NSBundle, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSNumber,
+    NSObject, NSObjectNSDelayedPerforming, NSObjectNSKeyValueObserverRegistration,
+    NSObjectProtocol, NSPoint, NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL,
+    NSUserDefaults, ns_string,
 };
 
 use crate::menu::ShellMenuDelegate;
@@ -40,11 +41,12 @@ use crate::notices::{Notices, Source};
 use crate::pane::{PaneLaunch, TerminalPane};
 use crate::preview_cache;
 use crate::remote_files::Sweep;
+use crate::restore::{self, Frame, Saved, SavedPane, SavedWindow};
 use crate::settings_window::SettingsWindow;
 use crate::split::Axis;
 use crate::ssh_route::{self, Masters};
 use crate::watch::{Notify, Watch};
-use crate::window::{self, CloseScope, Launch, TerminalWindow, WindowHost};
+use crate::window::{self, CloseScope, Histories, Launch, TerminalWindow, WindowHost};
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
 use crate::{child, focus, settings};
@@ -337,6 +339,10 @@ enum Opening {
     /// pane; by ⌘T's rule, to the same host from a remote pane (039 Karar 9).
     /// The axis is carried by [`AppDelegate::open_split`].
     Split,
+    /// Session restore (053): a saved pane — its directory, identity, zoom,
+    /// history and ready remote line come from the save, not from a `from`
+    /// ([`restored_launch`]).
+    Restore,
 }
 
 /// The new shell's first input: only with ⌘T and splits and only from a remote
@@ -345,7 +351,75 @@ enum Opening {
 fn initial_line(opening: Opening, remote_line: Option<String>) -> Option<String> {
     match opening {
         Opening::Tab | Opening::Split => remote_line,
-        Opening::Window | Opening::LocalTab => None,
+        Opening::Window | Opening::LocalTab | Opening::Restore => None,
+    }
+}
+
+/// The session directory ([`restore::directory`]) — `None` in a timed run and
+/// in an unbundled process (`cargo run`), which neither restore nor save (053
+/// Karar 6), and when the home directory cannot be resolved.
+///
+/// `bundle_id` and `home` are **closures**, the precedent of
+/// [`shell_integration_env`]: a timed run never asks either, so `make smoke`
+/// cannot depend on — or touch — the user's saved session
+/// (`hermetic_run_does_not_restore_or_save`).
+fn restore_dir(
+    inputs: &Inputs,
+    bundle_id: impl FnOnce() -> Option<String>,
+    home: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Inputs::Hermetic = inputs {
+        return None;
+    }
+    let bundle_id = bundle_id()?;
+    let home = home()?;
+    Some(restore::directory(
+        &home.join("Library/Application Support"),
+        &bundle_id,
+    ))
+}
+
+/// A saved pane's start (053 R3.4): its directory, its identity, its history
+/// and its remote target's line **ready, not run** (Karar 3) — the user's ⏎
+/// connects. A directory that no longer exists is the session's to handle
+/// (an unreachable one is inherited, `SessionOptions::working_directory`).
+fn restored_launch(pane: &SavedPane, replay: Option<Vec<u8>>) -> Launch {
+    Launch {
+        working_directory: pane.dir.clone(),
+        initial_input: pane.remote_line.clone().map(InitialInput::ready),
+        tab_id: Some(pane.tab_id.clone()),
+        replay,
+    }
+}
+
+/// A saved window frame clamped onto a visible screen (053 R3.2): the screen
+/// it overlaps most, or the main one (the first) if it overlaps none — a
+/// display unplugged since the quit; the size shrinks to the screen and the
+/// origin moves inside. Frames are AppKit's (bottom-left origin, points), the
+/// screens their `visibleFrame` (no menu bar, no Dock). No screen: unchanged.
+fn clamp_frame(frame: Frame, screens: &[Frame]) -> Frame {
+    let overlap = |screen: &Frame| {
+        let width = (frame.x + frame.width).min(screen.x + screen.width) - frame.x.max(screen.x);
+        let height = (frame.y + frame.height).min(screen.y + screen.height) - frame.y.max(screen.y);
+        width.max(0.0) * height.max(0.0)
+    };
+    let mut best: Option<(&Frame, f64)> = None;
+    for screen in screens {
+        let area = overlap(screen);
+        if area > 0.0 && best.is_none_or(|(_, most)| area > most) {
+            best = Some((screen, area));
+        }
+    }
+    let Some(screen) = best.map(|(screen, _)| screen).or_else(|| screens.first()) else {
+        return frame;
+    };
+    let width = frame.width.min(screen.width);
+    let height = frame.height.min(screen.height);
+    Frame {
+        x: frame.x.clamp(screen.x, screen.x + screen.width - width),
+        y: frame.y.clamp(screen.y, screen.y + screen.height - height),
+        width,
+        height,
     }
 }
 
@@ -826,6 +900,11 @@ pub(crate) struct Ivars {
     /// (no askpass, no master — the remote jobs take today's argv) and when the
     /// running binary's path is unknown (it is the askpass program).
     masters: Option<Arc<Masters>>,
+    /// The session directory's lock (053 Karar 6), held from launch to the
+    /// save at quit ([`AppDelegate::save_session`] takes it — the one-shot).
+    /// `None`: a timed run, an unbundled process, or another instance of the
+    /// same bundle holds it — this one neither restores nor saves.
+    restore_lock: RefCell<Option<restore::Lock>>,
 }
 
 define_class!(
@@ -878,7 +957,11 @@ define_class!(
             // the error `run` returned was printed in `main` with the same line and
             // the same exit code. **Only for the first window**: the error of
             // ⌘T/⌘N does not end the process ([`AppDelegate::open_window_or_report`]).
-            if let Err(e) = self.open_window(None, Opening::Window) {
+            //
+            // The saved session comes back here if there is one (053); otherwise
+            // — or if not a single window of it could be built — today's first
+            // window ([`AppDelegate::restore_or_open`]).
+            if let Err(e) = self.restore_or_open() {
                 eprintln!("bateri: {e}");
                 std::process::exit(1);
             }
@@ -1844,6 +1927,7 @@ impl AppDelegate {
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
             masters: opts.run.is_none().then(masters).flatten(),
+            restore_lock: RefCell::new(None),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -2152,7 +2236,9 @@ impl AppDelegate {
             theme,
             launch: Launch {
                 working_directory: dir,
-                initial_input: initial,
+                initial_input: initial.map(InitialInput::run),
+                tab_id: None,
+                replay: None,
             },
             integration: self.shell_integration(),
             reduce_motion: self.reduce_motion(),
@@ -2187,6 +2273,250 @@ impl AppDelegate {
         if let Err(e) = self.open_window(from, opening) {
             eprintln!("bateri: {e}");
         }
+    }
+
+    /// Launch's first windows (053 R3.2): the saved session if there is one
+    /// and at least one of its windows comes back, otherwise today's single
+    /// window. The gate order is [`AppDelegate::take_saved`]'s.
+    fn restore_or_open(&self) -> Result<(), String> {
+        if let Some(saved) = self.take_saved()
+            && self.restore_saved(&saved)
+        {
+            return Ok(());
+        }
+        self.open_window(None, Opening::Window).map(drop)
+    }
+
+    /// Takes the saved layout (053 Karar 6). Gates in order, each falling to
+    /// today's single window: a timed run, an unbundled process, an
+    /// unresolvable home ([`restore_dir`]); the directory's lock held by
+    /// another instance; `restore_windows = "off"` — which also deletes what
+    /// is left, once the lock is ours (R4.1); no or an unreadable layout
+    /// ([`restore::take`] deletes it before anything is replayed). The lock
+    /// stays in [`Ivars::restore_lock`] for the save at quit.
+    fn take_saved(&self) -> Option<Saved> {
+        let dir = restore_dir(
+            &self.inputs(),
+            || {
+                NSBundle::mainBundle()
+                    .bundleIdentifier()
+                    .map(|id| id.to_string())
+            },
+            child::home,
+        )?;
+        let lock = restore::lock(&dir)?;
+        let saved = match self.settings().restore_windows {
+            RestoreWindows::Off => {
+                let _ = restore::clear(&lock);
+                None
+            }
+            RestoreWindows::All | RestoreWindows::Layout => restore::take(&lock),
+        };
+        self.ivars().restore_lock.replace(Some(lock));
+        saved
+    }
+
+    /// Builds the saved windows (053 R3.2–R3.4): per window the first tab at
+    /// its frame (clamped onto a visible screen, [`clamp_frame`]) and the
+    /// rest into its tab group, in order, each through
+    /// [`TerminalWindow::restore`] — placed before its shells start; then
+    /// every window's selected tab and, last, the key window. A tab that
+    /// cannot be built is skipped (its error to stderr). `true` if at least
+    /// one window came back.
+    fn restore_saved(&self, saved: &Saved) -> bool {
+        let mtm = self.mtm();
+        let screens: Vec<Frame> = NSScreen::screens(mtm)
+            .iter()
+            .map(|screen| {
+                let rect = screen.visibleFrame();
+                Frame {
+                    x: rect.origin.x,
+                    y: rect.origin.y,
+                    width: rect.size.width,
+                    height: rect.size.height,
+                }
+            })
+            .collect();
+        let mut key = None;
+        let mut restored = false;
+        for window in &saved.windows {
+            let tabs = self.restore_window(window, &screens);
+            let selected = tabs
+                .iter()
+                .find(|(index, _)| *index == window.selected)
+                .or_else(|| tabs.first())
+                .map(|(_, tab)| tab.clone());
+            if let Some(selected) = selected {
+                selected.select();
+                restored = true;
+                if window.key {
+                    key = Some(selected);
+                }
+            }
+        }
+        if let Some(key) = key {
+            key.select();
+        }
+        restored
+    }
+
+    /// One saved window's tabs, built in order; the return pairs each built
+    /// tab with its index in `window.tabs`.
+    fn restore_window(
+        &self,
+        window: &SavedWindow,
+        screens: &[Frame],
+    ) -> Vec<(usize, Retained<TerminalWindow>)> {
+        let mtm = self.mtm();
+        let frame = clamp_frame(window.frame, screens);
+        let frame = NSRect::new(
+            NSPoint::new(frame.x, frame.y),
+            NSSize::new(frame.width, frame.height),
+        );
+        let mut built: Vec<(usize, Retained<TerminalWindow>)> = Vec::new();
+        for (index, tab) in window.tabs.iter().enumerate() {
+            let id = self.next_window_id();
+            let mut theme = None;
+            let launches: Vec<PaneLaunch> = tab
+                .panes
+                .iter()
+                .map(|pane| {
+                    let (launch, pane_theme) = self.restored_pane_launch(id, pane);
+                    theme.get_or_insert(pane_theme);
+                    launch
+                })
+                .collect();
+            let theme = theme.unwrap_or_else(|| self.resolve_theme());
+            let first = built.first().map(|(_, first)| first.clone());
+            let result = TerminalWindow::restore(
+                mtm,
+                id,
+                &tab.shape,
+                launches,
+                tab.focused,
+                tab.zoomed,
+                |this| {
+                    // `open_window`'s order: subtitle, list, chrome, then shown.
+                    this.set_subtitle(&NSString::from_str(
+                        &self.ivars().notices.borrow().subtitle(),
+                    ));
+                    self.ivars().windows.borrow_mut().push(this.clone());
+                    this.set_theme(theme);
+                    match &first {
+                        Some(first) => this.show_as_tab_of(first),
+                        None => this.show_at(frame),
+                    }
+                },
+            );
+            match result {
+                Ok(tab) => built.push((index, tab)),
+                Err(e) => eprintln!("bateri: could not restore a tab: {e}"),
+            }
+        }
+        built
+    }
+
+    /// A saved pane's birth package: [`AppDelegate::pane_launch`]'s without a
+    /// `from` ([`Opening::Restore`]), with the save's start
+    /// ([`restored_launch`]: directory, identity, ready remote line, history
+    /// read and deleted here) and point-size step.
+    fn restored_pane_launch(&self, window: u64, pane: &SavedPane) -> (PaneLaunch, Theme) {
+        let (mut launch, theme) = self.pane_launch(window, None, Opening::Restore);
+        let replay = if pane.history {
+            self.ivars()
+                .restore_lock
+                .borrow()
+                .as_ref()
+                .and_then(|lock| restore::history(lock, &pane.tab_id))
+        } else {
+            None
+        };
+        launch.launch = restored_launch(pane, replay);
+        launch.zoom = Zoom::from_steps(pane.zoom_steps, &launch.settings.font);
+        (launch, theme)
+    }
+
+    /// Session restore's save (053 Karar 6), at the head of
+    /// [`AppDelegate::shutdown`], before any pane closes. **One-shot**: it
+    /// takes the lock — a second `shutdown` would find sessionless panes and
+    /// overwrite the save with nothing. `restore_windows = "off"` deletes what
+    /// is left; `"layout"` saves without scrollback; `"all"` with it. No
+    /// window → nothing to restore, deleted ([`restore::save`]). Without a lock
+    /// (timed run, unbundled, another instance) nothing is touched.
+    fn save_session(&self) {
+        let Some(lock) = self.ivars().restore_lock.take() else {
+            return;
+        };
+        let setting = self.settings().restore_windows;
+        let result = match setting {
+            RestoreWindows::Off => restore::clear(&lock),
+            RestoreWindows::All | RestoreWindows::Layout => {
+                let (saved, histories) = self.saved_session(setting == RestoreWindows::All);
+                restore::save(&lock, &saved, &histories)
+            }
+        };
+        if let Err(e) = result {
+            eprintln!("bateri: could not save the session: {e}");
+        }
+    }
+
+    /// The live windows as the save's model: one saved window per tab group,
+    /// in the window list's order; its tabs in tab-bar order, its selected tab
+    /// and whether it holds the key window (`keyWindow`, else `mainWindow` —
+    /// ⌘Q's alert can leave no key window). The frame is the group's (tabs
+    /// share it). A tab with nothing live to save is left out, a window
+    /// without tabs too ([`TerminalWindow::saved_tab`]).
+    fn saved_session(&self, with_history: bool) -> (Saved, Histories) {
+        let app = NSApplication::sharedApplication(self.mtm());
+        let key = app.keyWindow().or_else(|| app.mainWindow());
+        let mut seen = std::collections::HashSet::new();
+        let mut windows = Vec::new();
+        let mut histories = Vec::new();
+        for window in self.windows() {
+            if seen.contains(&window.id()) {
+                continue;
+            }
+            let (group, selected) = window.tab_group_windows();
+            let members: Vec<Retained<TerminalWindow>> = group
+                .iter()
+                .filter_map(|member| self.window_owning(member))
+                .collect();
+            seen.insert(window.id());
+            seen.extend(members.iter().map(|member| member.id()));
+            let mut tabs = Vec::new();
+            let mut selected_index = 0;
+            for member in &members {
+                let Some((tab, tab_histories)) = member.saved_tab(with_history) else {
+                    continue;
+                };
+                if selected
+                    .as_deref()
+                    .is_some_and(|selected| member.owns(selected))
+                {
+                    selected_index = tabs.len();
+                }
+                histories.extend(tab_histories);
+                tabs.push(tab);
+            }
+            if tabs.is_empty() {
+                continue;
+            }
+            let rect = window.ns_window().frame();
+            windows.push(SavedWindow {
+                frame: Frame {
+                    x: rect.origin.x,
+                    y: rect.origin.y,
+                    width: rect.size.width,
+                    height: rect.size.height,
+                },
+                tabs,
+                selected: selected_index,
+                key: key
+                    .as_deref()
+                    .is_some_and(|key| members.iter().any(|member| member.owns(key))),
+            });
+        }
+        (Saved { windows }, histories)
     }
 
     /// The quiet stamp of the timed run's single window (`quiet=`).
@@ -2949,6 +3279,9 @@ impl AppDelegate {
         if self.ivars().run.is_some() {
             crate::watchdog();
         }
+        // Session restore's save comes **first** (053 Karar 6): the scrollback
+        // is read from live sessions and `begin_close` below drops them.
+        self.save_session();
         let windows = self.windows();
         // The panes' closes below end their remote sessions; the masters'
         // `exit` is `close_all`'s, under the shared deadline (047 R9.3).
@@ -4117,6 +4450,116 @@ mod tests {
     }
 
     #[test]
+    fn hermetic_run_does_not_restore_or_save() {
+        // 053 Karar 6: a timed run never reads nor writes the saved session — `make smoke`
+        // must neither depend on the user's last quit nor overwrite it. The closures' panic is
+        // the gate, as in `hermetic_run_does_not_set_up_shell_integration`.
+        let dir = restore_dir(
+            &Inputs::Hermetic,
+            || panic!("timed run asked the bundle id"),
+            || panic!("timed run resolved the home directory"),
+        );
+        assert_eq!(dir, None);
+    }
+
+    #[test]
+    fn an_unbundled_process_does_not_restore_or_save() {
+        let user = Inputs::User { config_root: None };
+        assert_eq!(
+            restore_dir(&user, || None, || panic!("no bundle, no home lookup")),
+            None,
+            "`cargo run` has no bundle id (053 Karar 6)"
+        );
+        assert_eq!(
+            restore_dir(&user, || Some("dev.bateri.bateri".into()), || None),
+            None
+        );
+        assert_eq!(
+            restore_dir(
+                &user,
+                || Some("dev.bateri.agent-check".into()),
+                || Some(PathBuf::from("/Users/someone"))
+            ),
+            Some(PathBuf::from(
+                "/Users/someone/Library/Application Support/bateri/session/dev.bateri.agent-check"
+            )),
+            "named by the bundle: a development copy never shares the installed app's session"
+        );
+    }
+
+    #[test]
+    fn a_restored_pane_keeps_its_identity_and_readies_its_remote_line() {
+        let id = TabId::parse("0A1B2C3D-4E5F-4061-8293-A4B5C6D7E8F9").expect("canonical");
+        let pane = SavedPane {
+            tab_id: id.clone(),
+            dir: Some(PathBuf::from("/tmp/proje dizini")),
+            zoom_steps: 2,
+            remote_line: Some("ssh prod".into()),
+            history: true,
+        };
+        let launch = restored_launch(&pane, Some(b"ls\r\n".to_vec()));
+        assert_eq!(launch.tab_id, Some(id));
+        assert_eq!(launch.working_directory, pane.dir);
+        assert_eq!(launch.replay.as_deref(), Some(&b"ls\r\n"[..]));
+        assert_eq!(
+            launch.initial_input,
+            Some(InitialInput::ready("ssh prod")),
+            "the remote line waits for the user's ⏎ (053 Karar 3)"
+        );
+        let local = SavedPane {
+            remote_line: None,
+            ..pane
+        };
+        assert_eq!(restored_launch(&local, None).initial_input, None);
+    }
+
+    fn frame(x: f64, y: f64, width: f64, height: f64) -> Frame {
+        Frame {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn a_frame_on_a_screen_stays_where_it_was() {
+        let screens = [frame(0.0, 0.0, 1440.0, 875.0)];
+        let saved = frame(100.0, 120.0, 900.0, 600.0);
+        assert_eq!(clamp_frame(saved, &screens), saved);
+    }
+
+    #[test]
+    fn a_frame_of_an_unplugged_screen_comes_to_the_main_one() {
+        // The second display is gone; the frame lies wholly outside the remaining one.
+        let screens = [frame(0.0, 0.0, 1440.0, 875.0)];
+        let clamped = clamp_frame(frame(2000.0, 300.0, 900.0, 600.0), &screens);
+        assert_eq!(clamped, frame(540.0, 275.0, 900.0, 600.0));
+    }
+
+    #[test]
+    fn a_frame_larger_than_the_screen_shrinks_to_it() {
+        let screens = [frame(0.0, 25.0, 1280.0, 775.0)];
+        let clamped = clamp_frame(frame(-50.0, 0.0, 2560.0, 1400.0), &screens);
+        assert_eq!(clamped, frame(0.0, 25.0, 1280.0, 775.0));
+    }
+
+    #[test]
+    fn a_frame_goes_to_the_screen_it_overlaps_most() {
+        let screens = [
+            frame(0.0, 0.0, 1440.0, 875.0),
+            frame(1440.0, 0.0, 1920.0, 1055.0),
+        ];
+        // Mostly on the second screen, sticking out past its right edge.
+        let clamped = clamp_frame(frame(3000.0, 100.0, 900.0, 600.0), &screens);
+        assert_eq!(clamped, frame(2460.0, 100.0, 900.0, 600.0));
+        assert_eq!(
+            clamp_frame(frame(5.0, 5.0, 10.0, 10.0), &[]),
+            frame(5.0, 5.0, 10.0, 10.0)
+        );
+    }
+
+    #[test]
     fn only_a_new_tab_follows_a_remote_tab() {
         // The three arms of 037 Karar 6: on a remote tab ⌘T (and `+`) carries the same
         // command; ⌥⌘T and ⌘N are local even from a remote tab; on a local tab ⌘T is local.
@@ -4132,11 +4575,17 @@ mod tests {
         );
         assert_eq!(initial_line(Opening::LocalTab, remote()), None);
         assert_eq!(initial_line(Opening::Window, remote()), None);
+        assert_eq!(
+            initial_line(Opening::Restore, remote()),
+            None,
+            "a restored pane's line comes from the save, ready and not run (053 Karar 3)"
+        );
         for opening in [
             Opening::Tab,
             Opening::LocalTab,
             Opening::Window,
             Opening::Split,
+            Opening::Restore,
         ] {
             assert_eq!(initial_line(opening, None), None, "{opening:?}");
         }

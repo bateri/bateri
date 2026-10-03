@@ -69,10 +69,33 @@ _Requirements: R3.1, R3.2, R3.3, R3.4, R3.5_
 
 ## Checklist
 
-- [ ] `Launch` alanları ve `pane.rs`'te tüketimi
-- [ ] `TerminalWindow::restore` + `SplitView` toplu yerleşim
-- [ ] Kayıt toplama ve `shutdown`'daki kayıt
-- [ ] Açılışta `restore_or_open`, çerçeve kırpma, sekme grubu, seçili sekme, key
-- [ ] `setRestorable(false)`
-- [ ] Test: saf parçalar, hermetik kapı
-- [ ] Doğrulama geçti (`make check` + `make smoke`)
+- [x] `Launch` alanları ve `pane.rs`'te tüketimi
+- [x] `TerminalWindow::restore` + `SplitView` toplu yerleşim
+- [x] Kayıt toplama ve `shutdown`'daki kayıt
+- [x] Açılışta `restore_or_open`, çerçeve kırpma, sekme grubu, seçili sekme, key
+- [x] `setRestorable(false)`
+- [x] Test: saf parçalar, hermetik kapı
+- [x] Doğrulama geçti (`make check` + `make smoke`)
+
+## Uygulama Notları
+
+- `Launch::initial_input` `Option<InitialInput>` oldu (ayrı bir "çalıştır"
+  biti yerine phase-1'in tipi); bugünkü yollar `InitialInput::run`'la sarıyor.
+- `TerminalWindow::restore` yerleşimi bir `place` kapanışıyla alıyor: liste,
+  tema, çerçeve ya da sekme grubu `AppDelegate`'in işi, pencere modülü
+  `app`'e uzanmıyor; kabuklar kapanıştan sonra başlıyor.
+- `setRestorable` `NSWindowRestoration` flag'inde; `NSScreen`'le birlikte
+  eklendi, `Cargo.lock` oynamadı.
+- `TerminalPane::min_size` başlamamış pane'de dock payını doğum paketinden
+  okuyor — sığma denetimi kabuklardan önce koşuyor, `dock_rows` ise `start`'ta
+  kuruluyor.
+- Kaydın tek-atımlığı kilidin `take`'i: ikinci bir `shutdown` oturumsuz
+  pane'leri bulup kaydı boşla ezemez; kilit kayıttan sonra bırakılıyor.
+- `"layout"`'ta açılış, önceki bir `"all"` kaydının geçmişini yine oynatıp
+  siliyor (yazmama kuralı kayıtta); `"off"` açılışta kalanı siliyor.
+- **Bilinen sınır:** çok sekmeli pencerenin **ilk** sekmesi kabuklarını sekme
+  çubuğu doğmadan başlatıyor; ikinci sekme eklenince çubuk içeriği kısaltıyor
+  (026 phase-4), yani o sekme bir resize görür ve oynatılan geçmiş bir kez
+  yeniden sarılır — veri kaybı değil. `NSWindowTabGroup`'ta çubuğu açan
+  setter yok; `toggleTabBar:` kullanıcının çubuk tercihine dokunacağı için
+  denenmedi. Gözle kontrolde (set kapısı) bu beklenen.

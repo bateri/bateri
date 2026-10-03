@@ -35,7 +35,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use block2::RcBlock;
-use bt_core::{ConfirmClose, HostMark, Settings, ShutdownHandle, Teardown, Theme};
+use bt_core::{
+    ConfirmClose, HostMark, InitialInput, Settings, ShutdownHandle, TabId, Teardown, Theme,
+};
 use bt_gpu::GpuError;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -59,6 +61,7 @@ use crate::app::{self, AppDelegate};
 use crate::jobs::Foreground;
 use crate::notices::Source;
 use crate::pane::{PaneHost, PaneLaunch, TerminalPane};
+use crate::restore::{SavedTab, Shape};
 use crate::split::{Axis, Direction, Removal};
 use crate::split_view::SplitView;
 use crate::upload;
@@ -511,8 +514,17 @@ pub(crate) struct WindowIvars {
 pub(crate) struct Launch {
     /// Start directory (026 → Karar 4: the active tab's directory, else home).
     pub(crate) working_directory: Option<PathBuf>,
-    /// The shell's first input (037 Karar 6); `None` → an ordinary local shell.
-    pub(crate) initial_input: Option<String>,
+    /// The shell's first input (037 Karar 6) and whether it runs: ⌘T in a
+    /// remote tab runs it, a restored remote pane leaves it ready (053
+    /// Karar 3); `None` → an ordinary local shell.
+    pub(crate) initial_input: Option<InitialInput>,
+    /// The pane's persistent identity; `None` → a new one (038). A restored
+    /// pane keeps its saved one (053 Karar 4), so `bateri://tab/<id>` and
+    /// `TERM_SESSION_ID` survive the quit.
+    pub(crate) tab_id: Option<TabId>,
+    /// A previous session's scrollback, replayed before the shell starts
+    /// (053; `SessionOptions::replay`); `None` → an empty grid.
+    pub(crate) replay: Option<Vec<u8>>,
 }
 
 define_class!(
@@ -837,6 +849,14 @@ define_class!(
     }
 );
 
+/// Saved scrollback, `(tab id, VT bytes)` per pane (053; `restore::save`'s input).
+pub(crate) type Histories = Vec<(TabId, Vec<u8>)>;
+
+/// A new window's first size, before the caller places it.
+fn initial_rect() -> NSRect {
+    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0))
+}
+
 impl TerminalWindow {
     /// Builds the window and its single pane (view, surface, renderer); the
     /// session and link are **not there yet** ([`TerminalWindow::start`]).
@@ -860,9 +880,21 @@ impl TerminalWindow {
         launch: PaneLaunch,
     ) -> Result<Retained<Self>, GpuError> {
         let run = launch.run;
-        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0));
-        let pane = TerminalPane::new(mtm, rect, launch)?;
-        let container = SplitView::new(mtm, rect, &pane);
+        let pane = TerminalPane::new(mtm, initial_rect(), launch)?;
+        Ok(Self::with_pane(mtm, id, run, &pane))
+    }
+
+    /// The window around its first pane — [`TerminalWindow::new`]'s body and
+    /// the start of [`TerminalWindow::restore`]: one constructor, so a
+    /// restored window is the same window a new one is.
+    fn with_pane(
+        mtm: MainThreadMarker,
+        id: u64,
+        run: Option<Run>,
+        pane: &TerminalPane,
+    ) -> Retained<Self> {
+        let rect = initial_rect();
+        let container = SplitView::new(mtm, rect, pane);
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
@@ -882,6 +914,10 @@ impl TerminalWindow {
         };
         // SAFETY: only changes the ownership semantics; we are the Retained's owner.
         unsafe { window.setReleasedWhenClosed(false) };
+        // Session restore is bateri's own file (053 Karar 1): were AppKit to
+        // restore its own copy of the window one day, every window would come
+        // back twice.
+        window.setRestorable(false);
         // The content view is the splits container; the window sets its frame,
         // the container lays the panes out (`SplitView::layout_panes`; with a
         // single pane the whole boundary).
@@ -935,7 +971,163 @@ impl TerminalWindow {
         // built before the window is ready.
         pane.observe_frame();
         this.observe_focus();
+        this
+    }
+
+    /// Session restore's **single** setup path for a tab (053 R3.3): every
+    /// pane is born, laid out in the saved `shape` with its ratios at once
+    /// ([`SplitView::adopt`]), the window is placed by the caller (`place`:
+    /// the list, the theme, the frame or the tab group — the application's
+    /// business) and only **then** do the shells start, so each sees its
+    /// final size in its first `TIOCSWINSZ` and the replayed history wraps
+    /// once. The live-handover set hands file descriptors here instead of
+    /// shells (`context.md` → Sonraki set ile ilişki).
+    ///
+    /// `launches` is indexed by `shape`'s leaves. A tree that does not fit
+    /// the panes' smallest size on this screen is equalized; the zoom comes
+    /// before the focus, so a focus on another pane drops the zoom (the
+    /// keyboard is never given to a hidden pane, [`Self::focus_pane`]). A pane
+    /// whose shell cannot start leaves the tree (the precedent of
+    /// [`Self::add_pane`]); if none starts the window closes and the error
+    /// returns.
+    pub(crate) fn restore(
+        mtm: MainThreadMarker,
+        id: u64,
+        shape: &Shape,
+        launches: Vec<PaneLaunch>,
+        focused: usize,
+        zoomed: Option<usize>,
+        place: impl FnOnce(&Retained<Self>),
+    ) -> Result<Retained<Self>, String> {
+        let ids: Vec<u64> = launches.iter().map(|launch| launch.id).collect();
+        let tree = shape
+            .to_tree(&ids)
+            .filter(|tree| {
+                let mut leaves = tree.leaves();
+                leaves.sort_unstable();
+                let mut wanted = ids.clone();
+                wanted.sort_unstable();
+                leaves == wanted
+            })
+            .ok_or_else(|| "the saved split tree does not match its panes".to_owned())?;
+        let run = launches.first().and_then(|launch| launch.run);
+        let rect = initial_rect();
+        let panes = launches
+            .into_iter()
+            .map(|launch| TerminalPane::new(mtm, rect, launch).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (first, extra) = panes
+            .split_first()
+            .ok_or_else(|| "a saved tab without panes".to_owned())?;
+        let this = Self::with_pane(mtm, id, run, first);
+        let container = this.ivars().container.clone();
+        // Cannot fail: the leaves were matched against the panes above.
+        let adopted = container.adopt(tree, extra);
+        debug_assert!(adopted, "the checked tree must be adopted");
+        for pane in extra {
+            pane.observe_frame();
+        }
+        place(&this);
+        if !container.fits() {
+            container.equalize();
+        }
+        // The zoom after the plain layout: the hidden panes keep real frames.
+        let zoomed = zoomed.and_then(|index| ids.get(index).copied());
+        if panes.len() > 1 {
+            container.set_zoomed(zoomed);
+        }
+        for pane in this.panes() {
+            if let Err(e) = pane.start(mtm) {
+                eprintln!("bateri: could not start a restored pane's shell: {e}");
+                if let Removal::Last = container.remove_leaf(pane.id()) {
+                    this.close();
+                    return Err(format!("could not start the shell: {e}"));
+                }
+                drop(pane.begin_close());
+                drop(container.detach(pane.id()));
+            }
+        }
+        if container
+            .zoomed()
+            .is_some_and(|zoomed| container.pane(zoomed).is_none())
+        {
+            container.set_zoomed(None);
+        }
+        let focus = ids
+            .get(focused)
+            .and_then(|id| container.pane(*id))
+            .or_else(|| this.panes().into_iter().next());
+        if let Some(focus) = focus {
+            this.focus_pane(&focus);
+        }
+        // The links were born after the zoom hid its panes; they learn it now.
+        let visible = this
+            .ivars()
+            .window
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible);
+        container.apply_visibility(visible);
+        this.refresh_title();
+        this.refresh_dim();
         Ok(this)
+    }
+
+    /// What session restore saves of this tab (053 Karar 4) and, with
+    /// `with_history`, its panes' scrollback (`(tab id, bytes)`). `None` if a
+    /// pane has nothing live to save ([`TerminalPane::saved`]): a tab whose
+    /// tree would not match its panes is not saved at all.
+    pub(crate) fn saved_tab(&self, with_history: bool) -> Option<(SavedTab, Histories)> {
+        let panes = self.panes();
+        let mut saved = Vec::with_capacity(panes.len());
+        let mut histories = Vec::new();
+        for pane in &panes {
+            let (entry, history) = pane.saved(with_history)?;
+            if let Some(history) = history {
+                histories.push((entry.tab_id.clone(), history));
+            }
+            saved.push(entry);
+        }
+        let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
+        let shape = Shape::from_tree(&self.ivars().container.tree(), &ids)?;
+        let position = |id: u64| ids.iter().position(|candidate| *candidate == id);
+        let tab = SavedTab {
+            shape,
+            panes: saved,
+            focused: position(self.focused_pane().id()).unwrap_or(0),
+            zoomed: self.ivars().container.zoomed().and_then(position),
+        };
+        Some((tab, histories))
+    }
+
+    /// The `NSWindow` — session restore reads its frame and tab group.
+    pub(crate) fn ns_window(&self) -> &NSWindow {
+        &self.ivars().window
+    }
+
+    /// The tab group's windows in tab-bar order and its selected one; only
+    /// this window if there is no group (the [`Self::tab_windows`] precedent).
+    pub(crate) fn tab_group_windows(
+        &self,
+    ) -> (Vec<Retained<NSWindow>>, Option<Retained<NSWindow>>) {
+        let window = &self.ivars().window;
+        match window.tabGroup() {
+            Some(group) => (group.windows().to_vec(), group.selectedWindow()),
+            None => (vec![window.clone()], Some(window.clone())),
+        }
+    }
+
+    /// Brings a restored window to the front at its saved `frame` (already
+    /// clamped onto a visible screen by the caller).
+    pub(crate) fn show_at(&self, frame: NSRect) {
+        let window = &self.ivars().window;
+        window.setFrame_display(frame, false);
+        window.makeKeyAndOrderFront(None);
+    }
+
+    /// Makes the window its group's selected tab and key — the restored
+    /// selection and key window.
+    pub(crate) fn select(&self) {
+        self.ivars().window.makeKeyAndOrderFront(None);
     }
 
     pub(crate) fn id(&self) -> u64 {

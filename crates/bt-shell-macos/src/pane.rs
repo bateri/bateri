@@ -42,8 +42,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bt_core::{
-    FontOptions, InitialInput, RemoteFiles, RemoteTarget, SearchCover, SearchDirection,
-    SearchReport, SearchStatus, Session, SessionOptions, Settings, TabId, Theme, Wake,
+    FontOptions, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
+    SearchStatus, Session, SessionOptions, Settings, TabId, Theme, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Pacer, Renderer, Stats, Surface, Waker};
@@ -74,6 +74,7 @@ use crate::preview::PreviewTicket;
 use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
+use crate::restore::SavedPane;
 use crate::search_bar::{SearchBar, selection_query};
 use crate::ssh_route::Masters;
 use crate::stats::StatsDriver;
@@ -1270,13 +1271,15 @@ impl TerminalPane {
             stats,
             settings,
             theme,
-            launch,
+            mut launch,
             integration,
             reduce_motion,
             smooth_scroll,
             zoom,
             masters,
         } = launch;
+        // The saved identity of a restored pane (053), a new one otherwise.
+        let tab_id = launch.tab_id.take().unwrap_or_else(new_tab_id);
         let renderer = Rc::new(Renderer::system_default()?);
         // The layer is ours (040 → Karar 8): wgpu configures its device,
         // format and drawable size, the scale stays with its owner.
@@ -1340,7 +1343,7 @@ impl TerminalPane {
             // after that.
             dock_rows: Cell::new(0),
             dock_rows_at_birth: Cell::new(0),
-            tab_id: new_tab_id(),
+            tab_id,
             closed: Cell::new(false),
             search: OnceCell::new(),
             search_status: Cell::new(SearchStatus::Empty),
@@ -1442,6 +1445,31 @@ impl TerminalPane {
     /// (026 → Karar 3).
     pub(crate) fn zoom(&self) -> Zoom {
         self.ivars().zoom.get()
+    }
+
+    /// What session restore saves of this pane (053 Karar 4) and, with
+    /// `with_history`, its scrollback as VT bytes ([`Session::final_history`];
+    /// an empty one is no file). `None` for a pane without a session or whose
+    /// closing has begun: there is nothing live to save.
+    ///
+    /// **Quit only**: `final_history` leaves the alternate screen for good
+    /// (`AppDelegate::shutdown` calls this once, before `begin_close`).
+    pub(crate) fn saved(&self, with_history: bool) -> Option<(SavedPane, Option<Vec<u8>>)> {
+        if self.is_closed() {
+            return None;
+        }
+        let session = self.session()?;
+        let history = with_history
+            .then(|| session.final_history())
+            .filter(|bytes| !bytes.is_empty());
+        let pane = SavedPane {
+            tab_id: self.ivars().tab_id.clone(),
+            dir: session.working_directory(),
+            zoom_steps: self.zoom().steps(),
+            remote_line: session.remote_line(),
+            history: history.is_some(),
+        };
+        Some((pane, history))
     }
 
     /// Owner of the events ([`PaneHost`]).
@@ -1551,6 +1579,8 @@ impl TerminalPane {
         let Launch {
             working_directory,
             initial_input,
+            tab_id: _,
+            replay,
         } = launch;
         // In smoke and measurement runs the shell is fixed: the result must not
         // depend on the user's `$SHELL` and rc file. The owner of the scripts
@@ -1633,7 +1663,7 @@ impl TerminalPane {
                 cluster: true,
                 // A timed run always gets `None` from `open_window` (single
                 // window, no ⌘T), so its fixed scripts are unaffected by this.
-                initial_input: initial_input.map(InitialInput::run),
+                initial_input,
                 shell_marks,
                 // The identity is in every window, timed run included (038
                 // Karar 8): the variables read no file and do not move the tokens.
@@ -1642,7 +1672,8 @@ impl TerminalPane {
                 // and OSC 7's named authority count as local. One `gethostname`
                 // per pane; the timed run's tokens do not depend on it.
                 hostname: crate::links::hostname(),
-                replay: None,
+                // A restored pane's scrollback (053); `None` everywhere else.
+                replay,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );
@@ -1967,12 +1998,22 @@ impl TerminalPane {
     /// per pane. The split's gate ([`TerminalPane::grid_fits`]) and the
     /// resizing's limit (`SplitView::resize`) come from here. `None` if not
     /// attached to a window.
+    ///
+    /// Before [`TerminalPane::start`] the dock reserve is the birth package's
+    /// (the one `start` will set): session restore checks the saved tree
+    /// against this limit before any shell starts (053).
     pub(crate) fn min_size(&self) -> Option<NSSize> {
         let scale = self.window()?.backingScaleFactor();
         let cell = self.ivars().renderer.cell_metrics(scale);
         let (cell_w, cell_h) = cell.cell_px();
+        let dock_rows = self
+            .ivars()
+            .birth
+            .borrow()
+            .as_ref()
+            .map_or(self.ivars().dock_rows.get(), |birth| birth.integration.1);
         let width = f64::from(cell.gutter_px()) + f64::from(MIN_PANE_COLS) * f64::from(cell_w);
-        let height = f64::from(bt_gpu::dock_px(self.ivars().dock_rows.get(), cell))
+        let height = f64::from(bt_gpu::dock_px(dock_rows, cell))
             + f64::from(MIN_PANE_ROWS) * f64::from(cell_h);
         Some(NSSize::new(width / scale, height / scale))
     }
