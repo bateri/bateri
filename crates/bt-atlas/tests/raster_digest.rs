@@ -3,9 +3,9 @@
 //! Prints one `key<TAB>digest` line for every observable output of the atlas:
 //! metrics, the font diagnostic, every `slot()` answer (`Placed`) of a fixed
 //! inventory together with its `Upload` bytes (left and right halves), the
-//! tofu bitmap and the occupancy counters — across 13/16 pt × @1x/@2x × two
-//! line heights and four family requests. A difference names the sprite it is
-//! in.
+//! tofu bitmap and the occupancy counters — across 13/16 pt × @1x/@2x × three
+//! spacings (natural, taller, wider) and four family requests. A difference
+//! names the sprite it is in.
 //!
 //! It reads **only the public API** of `bt_atlas`, so it stays valid while
 //! the crate's internals are rewritten, and it is `#[ignore]`d because its
@@ -187,23 +187,22 @@ fn char_label(ch: char) -> String {
 /// One configuration of the atlas. Each inventory group gets a **fresh**
 /// atlas so that a capacity limit in one group cannot shift slot numbers in
 /// another: a difference then stays in the group that caused it.
-fn configuration(out: &mut String, family: Option<&str>, pt: f64, scale: f64, lh: f64) {
-    let prefix = format!("{pt}pt@{scale}x lh{lh:.1} family={}", family.unwrap_or("-"));
+fn configuration(
+    out: &mut String,
+    family: Option<&str>,
+    pt: f64,
+    scale: f64,
+    (lh, letter): (f64, f64),
+) {
+    let prefix = format!(
+        "{pt}pt@{scale}x lh{lh:.1} ls{letter:.1} family={}",
+        family.unwrap_or("-")
+    );
     let mut sink = Sink {
         out: String::new(),
         prefix,
     };
-    let new = || {
-        Atlas::new(
-            family,
-            pt,
-            scale,
-            Spacing {
-                line: lh,
-                ..Spacing::default()
-            },
-        )
-    };
+    let new = || Atlas::new(family, pt, scale, Spacing { line: lh, letter });
     let n = SizeClass::Normal;
     let small = SizeClass::Small;
 
@@ -330,6 +329,11 @@ fn configuration(out: &mut String, family: Option<&str>, pt: f64, scale: f64, lh
     out.push_str(&sink.out);
 }
 
+/// `(line_height, letter_spacing)` pairs: the natural cell, a taller one and
+/// a wider one (052: at or above `1` the slot is the cell, so all three must
+/// stay byte-identical while the slot geometry moves to its own metric).
+const SPACINGS: [(f64, f64); 3] = [(1.0, 1.0), (1.2, 1.0), (1.0, 1.3)];
+
 /// The whole witness as one string.
 fn witness() -> String {
     let mut out = String::new();
@@ -364,8 +368,8 @@ fn witness() -> String {
     for family in families {
         for pt in [13.0, 16.0] {
             for scale in [1.0, 2.0] {
-                for lh in [1.0, 1.2] {
-                    configuration(&mut out, family, pt, scale, lh);
+                for spacing in SPACINGS {
+                    configuration(&mut out, family, pt, scale, spacing);
                 }
             }
         }

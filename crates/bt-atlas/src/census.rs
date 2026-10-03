@@ -79,8 +79,14 @@ pub(crate) fn classify(base: &Font, ch: char, cell_advance: f64, cols: u8) -> Cl
     let ink = Backend::ink(&candidate, glyph);
     let box_advance = cell_advance * f64::from(cols);
     let ratio = ink.width / box_advance;
-    let fit = rules::fit_ratio(box_advance, advance, ink);
-    match rules::accept(candidate, glyph, cell_advance, cell_advance, cols) {
+    let fit = rules::fit_ratio(rules::GlyphBox::unpadded(box_advance), advance, ink);
+    match rules::accept(
+        candidate,
+        glyph,
+        rules::GlyphBox::unpadded(cell_advance),
+        cell_advance,
+        cols,
+    ) {
         Some(a) if a.shrunk => Class::Shrunk {
             font: family,
             ratio,
@@ -240,7 +246,7 @@ mod tests {
                 &alt.font,
                 alt.glyph,
                 wide,
-                box_advance,
+                rules::GlyphBox::unpadded(box_advance),
                 offset,
                 rise,
                 &mut rgba,
@@ -252,7 +258,7 @@ mod tests {
                 &alt.font,
                 alt.glyph,
                 wide,
-                box_advance,
+                rules::GlyphBox::unpadded(box_advance),
                 offset,
                 rise,
                 &mut mask,
@@ -275,8 +281,14 @@ mod tests {
             let base = a.faces.get(Face::Regular);
             let m = a.metrics;
             for (ch, color) in [('⧉', false), ('🌡', true)] {
-                let alt = rules::fallback_font(base, ch, a.cell_advance, a.cell_advance, 1)
-                    .unwrap_or_else(|| panic!("{ch} {pt}pt@{scale}x: came out as a box"));
+                let alt = rules::fallback_font(
+                    base,
+                    ch,
+                    rules::GlyphBox::unpadded(a.cell_advance),
+                    a.cell_advance,
+                    1,
+                )
+                .unwrap_or_else(|| panic!("{ch} {pt}pt@{scale}x: came out as a box"));
                 assert!(
                     alt.shrunk,
                     "{ch} {pt}pt@{scale}x was accepted without shrinking"
@@ -353,8 +365,14 @@ mod tests {
     fn wide_emoji_shrinks_into_two_cells_at_1x() {
         let a = Atlas::new(None, 13.0, 1.0, Spacing::default());
         let base = a.faces.get(Face::Regular);
-        let alt = rules::fallback_font(base, '😀', a.cell_advance, a.cell_advance, 2)
-            .expect("😀 @1x: tofu");
+        let alt = rules::fallback_font(
+            base,
+            '😀',
+            rules::GlyphBox::unpadded(a.cell_advance),
+            a.cell_advance,
+            2,
+        )
+        .expect("😀 @1x: tofu");
         assert!(alt.shrunk, "did not fit two cells at @1x; should be shrunk");
         assert_eq!(alt.cols, 2, "the shrink must target the two-cell box");
     }
@@ -393,7 +411,7 @@ mod tests {
         );
         let glyph = Backend::glyph(&candidate, ch).expect(".LastResort gave no glyph");
         let fit = rules::fit_ratio(
-            a.cell_advance,
+            rules::GlyphBox::unpadded(a.cell_advance),
             Backend::advance(&candidate, glyph),
             Backend::ink(&candidate, glyph),
         );
@@ -401,7 +419,16 @@ mod tests {
             fit <= rules::SHRINK_LIMIT,
             "fit {fit:.3} must be within the limit"
         );
-        assert!(rules::accept(candidate, glyph, a.cell_advance, a.cell_advance, 1).is_none());
+        assert!(
+            rules::accept(
+                candidate,
+                glyph,
+                rules::GlyphBox::unpadded(a.cell_advance),
+                a.cell_advance,
+                1
+            )
+            .is_none()
+        );
     }
 
     /// Every candidate that passes the gate today is drawn **bit-for-bit the
@@ -428,12 +455,12 @@ mod tests {
                 };
                 let advance = Backend::advance(&candidate, glyph);
                 let ink = Backend::ink(&candidate, glyph);
-                if !rules::ink_fits_placed(cell, advance, ink) {
+                if !rules::ink_fits_placed(rules::GlyphBox::unpadded(cell), advance, ink) {
                     continue;
                 }
                 let ptr: *const _ = &*candidate;
-                let alt =
-                    rules::accept(candidate, glyph, cell, cell, 1).expect("gate-passing rejected");
+                let alt = rules::accept(candidate, glyph, rules::GlyphBox::unpadded(cell), cell, 1)
+                    .expect("gate-passing rejected");
                 assert!(!alt.shrunk, "{ch}: a gate-passing candidate was shrunk");
                 assert!(std::ptr::eq(ptr, &*alt.font), "{ch}: font changed");
                 assert_eq!(alt.rise(m), 0.0, "{ch}: vertical shift");
@@ -442,11 +469,27 @@ mod tests {
         }
         assert!(passed > 300, "too few gate-passing candidates: {passed}");
 
-        let alt = rules::fallback_font(base, '⏺', cell, cell, 1).expect("⏺ came out as a box");
+        let alt = rules::fallback_font(base, '⏺', rules::GlyphBox::unpadded(cell), cell, 1)
+            .expect("⏺ came out as a box");
         let mut before = vec![0u8; m.slot_bytes()];
         let mut after = vec![0u8; m.slot_bytes()];
-        raster::draw(&alt.font, '⏺', m, cell, 0.0, &mut before);
-        raster::draw_glyph(&alt.font, alt.glyph, m, cell, 0.0, alt.rise(m), &mut after);
+        raster::draw(
+            &alt.font,
+            '⏺',
+            m,
+            rules::GlyphBox::unpadded(cell),
+            0.0,
+            &mut before,
+        );
+        raster::draw_glyph(
+            &alt.font,
+            alt.glyph,
+            m,
+            rules::GlyphBox::unpadded(cell),
+            0.0,
+            alt.rise(m),
+            &mut after,
+        );
         assert_eq!(before, after, "⏺ raster changed");
     }
 

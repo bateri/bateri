@@ -2,7 +2,7 @@
 //! platform's [`FontSystem`], positioned here), a rule line or a procedural
 //! character (block elements, Braille, box drawing — no font asked).
 
-use crate::rules::{self, Metrics, unpremultiply};
+use crate::rules::{self, GlyphBox, Metrics, unpremultiply};
 use crate::system::{Backend, Font, FontSystem};
 
 /// The result of [`draw`].
@@ -27,25 +27,27 @@ pub(crate) enum DrawResult {
 
 /// Draws the coverage (alpha) bytes of `ch` into `target`.
 ///
-/// `box_advance` is the fractional advance of the **box** the glyph is
-/// centred in ([`rules::space_advance`], twice that for a wide character);
-/// `m.cell_px.0` is it rounded up and does not enter here (the reason is in
-/// the doc of [`rules::space_advance`]). `x_offset` is a **whole** pixel shift
-/// applied after drawing — non-zero only for the right half of a wide glyph.
+/// `m` is the **slot** metric (052): the target is one slot, the glyph sits on
+/// the slot's baseline. `bx` is the fractional **box** the glyph is centred
+/// in ([`rules::space_advance`], twice that for a wide character) with its
+/// pad inside the slot ([`GlyphBox`]); `m.cell_px.0` is not the box and does
+/// not enter here (the reason is in the doc of [`rules::space_advance`]).
+/// `x_offset` is a **whole** pixel shift applied after drawing — non-zero
+/// only for the right half of a wide glyph.
 ///
 /// The buffer is cleared only if drawing actually happens.
 pub(crate) fn draw(
     font: &Font,
     ch: char,
     m: Metrics,
-    box_advance: f64,
+    bx: GlyphBox,
     x_offset: f64,
     target: &mut [u8],
 ) -> DrawResult {
     let Some(glyph) = Backend::glyph(font, ch) else {
         return DrawResult::NoGlyph;
     };
-    draw_glyph(font, glyph, m, box_advance, x_offset, 0.0, target)
+    draw_glyph(font, glyph, m, bx, x_offset, 0.0, target)
 }
 
 /// Where a glyph goes in its slot — **one formula** for both drawing recipes
@@ -60,7 +62,7 @@ fn position(
     font: &Font,
     glyph: u32,
     m: Metrics,
-    box_advance: f64,
+    bx: GlyphBox,
     x_offset: f64,
     rise: f64,
 ) -> (f64, f64) {
@@ -86,12 +88,14 @@ fn position(
     // candidate will stand **here**. The `max(0.0)` inside is this drawing's
     // rule — the width gate runs only for the **fallback**, the base font may
     // not be monospaced ([`rules::FontIssue::NotMonospaced`]) and a wide glyph
-    // may exceed the cell. Spilling into the neighbouring cell is **not
-    // possible** — the target is exactly one slot wide and clips there — so
-    // the issue is not spilling but the **direction** of clipping: a negative
-    // shift cuts off the glyph's left side, whereas clipping must happen on
-    // the right. Latin script is recognised from the left; a 'W' with its
-    // left edge cut off cannot be told from a 'V'.
+    // may exceed the cell. The target is one **slot** and clips there; the
+    // slot may be larger than the grid cell (052: below `1` the cell sits in
+    // its middle and the glyph keeps its room), so spilling into the
+    // neighbouring cell happens by the pad and no further. The issue at the
+    // slot's edge is the **direction** of clipping: a negative shift cuts off
+    // the glyph's left side, whereas clipping must happen on the right. Latin
+    // script is recognised from the left; a 'W' with its left edge cut off
+    // cannot be told from a 'V'.
     // `x_offset` is for the **right half** of a wide glyph: the same glyph is
     // centred in the same two-cell box, then shifted one cell to the left and
     // the overflowing left half is clipped. The offset is a **whole** pixel
@@ -100,7 +104,7 @@ fn position(
     // split in two — no split buffer, no second `slot_bytes` and no risk of a
     // seam at half a pixel. In a single-cell drawing it is zero, and then
     // this line is the same as it was in 022.
-    let x = rules::centre_shift(box_advance, Backend::advance(font, glyph)) - x_offset;
+    let x = rules::centre_shift(bx, Backend::advance(font, glyph)) - x_offset;
     (x, baseline)
 }
 
@@ -114,12 +118,12 @@ pub(crate) fn draw_glyph(
     font: &Font,
     glyph: u32,
     m: Metrics,
-    box_advance: f64,
+    bx: GlyphBox,
     x_offset: f64,
     rise: f64,
     target: &mut [u8],
 ) -> DrawResult {
-    let (x, baseline) = position(font, glyph, m, box_advance, x_offset, rise);
+    let (x, baseline) = position(font, glyph, m, bx, x_offset, rise);
     Backend::draw_mask(font, glyph, m, x, baseline, target)
 }
 
@@ -140,12 +144,12 @@ pub(crate) fn draw_color_glyph(
     font: &Font,
     glyph: u32,
     m: Metrics,
-    box_advance: f64,
+    bx: GlyphBox,
     x_offset: f64,
     rise: f64,
     target: &mut [u8],
 ) -> DrawResult {
-    let (x, baseline) = position(font, glyph, m, box_advance, x_offset, rise);
+    let (x, baseline) = position(font, glyph, m, bx, x_offset, rise);
     let drawn = Backend::draw_color(font, glyph, m, x, baseline, target);
     if drawn == DrawResult::Drawn {
         unpremultiply(target);
@@ -555,9 +559,10 @@ pub(crate) fn is_procedural(ch: char) -> bool {
 
 /// Draws the coverage bytes of a procedural character into `target`.
 ///
-/// `m` is the cell the sprite *is*: the large cell, or in the small class the
-/// small face's own cell (`Atlas::small_metrics`, 046) — `target` is then that
-/// cell's buffer, not a slot, and the atlas places it.
+/// `m` is the cell the sprite *is*: the large **grid** cell, or in the small
+/// class the small face's own cell (`Atlas::small_metrics`, 046) — `target`
+/// is that cell's buffer, not a slot, and the atlas places it into the slot
+/// (below `1` the slot is larger than the cell, 052).
 ///
 /// The twin of [`draw_rule`], starting with the same two opening lines; the
 /// reasons are the same too. It cannot fail — no font is asked, no context is

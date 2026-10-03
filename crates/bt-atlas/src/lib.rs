@@ -319,9 +319,10 @@ pub struct Upload<'a> {
 
 /// The glyph atlas living in a fixed slot grid.
 ///
-/// There is no packer: in this set **all sprites are cell-sized** (emoji and
-/// wide glyphs are out of scope), i.e. the `slot_no → pixel corner`
-/// conversion is arithmetic. Procedural characters (block, Braille, line) do
+/// There is no packer: **all sprites are slot-sized** (a wide glyph is two
+/// slots, [`Half`]), i.e. the `slot_no → pixel corner` conversion is
+/// arithmetic. The slot is the cell at `>= 1` and larger than the grid cell
+/// below it ([`Atlas::slot_metrics`], 052). Procedural characters (block, Braille, line) do
 /// not break that constraint — by definition they are exactly one cell; what's
 /// more they are what demands the constraint, because their tiling runs to the
 /// edge of the cell.
@@ -336,7 +337,25 @@ pub struct Atlas {
     /// derivations and a second "face could not be obtained" warning — both
     /// costs with no return.
     small: Font,
+    /// The **grid** metric: the cell the grid steps by, at the real spacing
+    /// (052). Its name and meaning are today's, so its consumers (`bt-gpu`'s
+    /// `CellMetrics`, the PTY's size, the mouse) did not move.
     metrics: Metrics,
+    /// The **slot** metric: the cell at the spacing clamped to `>= 1` on both
+    /// axes (052 R1) — the box a glyph is rasterized into and the owner of the
+    /// slot geometry (the grid of slots, the texture, the buffers, tofu).
+    /// Equal to [`Atlas::metrics`] at `>= 1`; below `1` the grid cell sits
+    /// inside it at `rules::slot_offset`, and a glyph that does not fit the
+    /// narrow cell keeps its full size and overflows into the neighbours.
+    slot_metrics: Metrics,
+    /// Where the grid cell starts inside the slot, horizontally, as a
+    /// **fractional** pad: half of the slot's advance minus the cell's — the
+    /// pad of [`rules::GlyphBox`] for the large class. `0.0` exactly at
+    /// `letter_spacing >= 1` (a difference of two identical products).
+    pad: f64,
+    /// The small class's twin of [`Atlas::pad`], from the small face's own
+    /// advances.
+    context_pad: f64,
     /// The cell's **fractional** advance, physical pixels — large class.
     ///
     /// [`Metrics::cell_px`]'s width is this rounded up and the grid's step is
@@ -391,9 +410,14 @@ pub struct Atlas {
     /// The drawing buffer of a small procedural sprite,
     /// [`Atlas::small_metrics`]' `slot_bytes` long. The sprite is drawn here
     /// and then copied into [`Atlas::buffer`] baseline-aligned
-    /// (`place_small`); a field for the same reason as `buffer` — no
+    /// (`place`); a field for the same reason as `buffer` — no
     /// allocation per glyph.
     small_buffer: Vec<u8>,
+    /// The drawing buffer of a large-class tiled sprite (the procedural family
+    /// and tofu), [`Atlas::metrics`]' `slot_bytes` long: drawn at the grid
+    /// cell and placed into the slot at `rules::slot_offset` (052 R2), so a
+    /// box-drawing line still tiles the grid when the slot is larger.
+    cell_buffer: Vec<u8>,
     /// The (family, point size, scale, spacing) it was built with. The criterion of
     /// [`Atlas::ensure`].
     key: Key,
@@ -529,6 +553,16 @@ impl Atlas {
         let natural_advance = rules::space_advance(faces.get(Face::Regular));
         let cell_advance = natural_advance * spacing.letter;
         let metrics = rules::metrics_at(faces.get(Face::Regular), cell_advance, spacing.line);
+        // The slot: the same derivation at the spacing clamped to `>= 1`
+        // (052). `max` returns its argument itself when it is the larger, so
+        // at `>= 1` the inputs are bit for bit the grid's and so is the slot.
+        let slot_advance = natural_advance * spacing.letter.max(1.0);
+        let slot_metrics = rules::metrics_at(
+            faces.get(Face::Regular),
+            slot_advance,
+            spacing.line.max(1.0),
+        );
+        let pad = (slot_advance - cell_advance) / 2.0;
         // The small face comes from the **same chain**: `font_issue` is not
         // asked a second time and is ignored, because the same family gets the
         // same answer — a second record would make the user hear the same
@@ -545,12 +579,16 @@ impl Atlas {
         // would be deriving the same number by a second route.
         let natural_context_advance = rules::space_advance(&small);
         let context_advance = natural_context_advance * spacing.letter;
+        let context_pad =
+            (natural_context_advance * spacing.letter.max(1.0) - context_advance) / 2.0;
         let context_cell_w = rules::round_up(context_advance);
         // The small cell for procedural sprites. The line spacing **is** asked
         // here: this is a whole cell, and the context line's row grows with the
         // line spacing like the grid's.
         let small_metrics = rules::metrics_at(&small, context_advance, spacing.line);
-        let (w, h) = metrics.cell_px;
+        // The slot grid is the **slot** metric's: below `1` a slot is larger
+        // than the cell it is drawn at.
+        let (w, h) = slot_metrics.cell_px;
         // The edge is derived from the **slot target**: as the cell grows the
         // capacity drops and somewhere it falls below the procedural family
         // (422 slots) — the measured break is 29pt on Retina
@@ -576,6 +614,9 @@ impl Atlas {
             faces,
             small,
             metrics,
+            slot_metrics,
+            pad,
+            context_pad,
             cell_advance,
             natural_advance,
             context_advance,
@@ -583,6 +624,7 @@ impl Atlas {
             context_cell_w,
             small_metrics,
             small_buffer: vec![0u8; small_metrics.slot_bytes()],
+            cell_buffer: vec![0u8; metrics.slot_bytes()],
             key: Key {
                 family: family.map(str::to_owned),
                 point_size,
@@ -594,12 +636,12 @@ impl Atlas {
             slots: HashMap::new(),
             shrunk: HashSet::new(),
             next: TOFU + 1,
-            buffer: vec![0u8; metrics.slot_bytes()],
-            buffer_right: vec![0u8; metrics.slot_bytes()],
+            buffer: vec![0u8; slot_metrics.slot_bytes()],
+            buffer_right: vec![0u8; slot_metrics.slot_bytes()],
             color_next: 0,
-            color_buffer: vec![0u8; metrics.slot_bytes_rgba()],
-            color_buffer_right: vec![0u8; metrics.slot_bytes_rgba()],
-            tofu: tofu_buffer(metrics),
+            color_buffer: vec![0u8; slot_metrics.slot_bytes_rgba()],
+            color_buffer_right: vec![0u8; slot_metrics.slot_bytes_rgba()],
+            tofu: tofu_slot(metrics, slot_metrics),
             clusters: Vec::new(),
             cluster_ids: HashMap::new(),
         }
@@ -629,8 +671,46 @@ impl Atlas {
         true
     }
 
+    /// The **grid** metric: the cell the grid steps by (052 → the two
+    /// metrics are on [`Metrics`]' doc).
     pub fn metrics(&self) -> Metrics {
         self.metrics
+    }
+
+    /// The **slot** metric: the size of every slot, its baseline and its rule
+    /// lines. [`Upload::bytes`] is its `slot_bytes` long and the uv size of a
+    /// slot is its `cell_px` over [`Atlas::texture_px`]. Equal to
+    /// [`Atlas::metrics`] at `line_height, letter_spacing >= 1`.
+    pub fn slot_metrics(&self) -> Metrics {
+        self.slot_metrics
+    }
+
+    /// Where the grid cell sits inside a slot, in pixels from the slot's
+    /// top-left corner (`rules::slot_offset`); `(0, 0)` at `>= 1`.
+    pub fn slot_offset(&self) -> (u16, u16) {
+        rules::slot_offset(self.slot_metrics, self.metrics)
+    }
+
+    /// The centring box of one cell of `size` with its pad inside the slot,
+    /// and the font's own advance — the inputs of the fallback gate and the
+    /// drawing, per class.
+    fn glyph_box(&self, size: SizeClass) -> (rules::GlyphBox, f64) {
+        match size {
+            SizeClass::Normal => (
+                rules::GlyphBox {
+                    advance: self.cell_advance,
+                    pad: self.pad,
+                },
+                self.natural_advance,
+            ),
+            SizeClass::Small => (
+                rules::GlyphBox {
+                    advance: self.context_advance,
+                    pad: self.context_pad,
+                },
+                self.natural_context_advance,
+            ),
+        }
     }
 
     /// The context line's column step, in pixels; see [`Atlas::context_cell_w`].
@@ -658,7 +738,7 @@ impl Atlas {
     /// The **full grid**, not the derived edge: the leftover strip on the edge
     /// falls into no slot, and there is no point allocating it.
     pub fn texture_px(&self) -> (u16, u16) {
-        let (w, h) = self.metrics.cell_px;
+        let (w, h) = self.slot_metrics.cell_px;
         (self.grid.0 * w, self.grid.1 * h)
     }
 
@@ -672,7 +752,7 @@ impl Atlas {
         // is returned, `replaceRegion` writes out of bounds and the symptom is
         // silent.
         let slot = if slot < self.capacity() { slot } else { TOFU };
-        let (w, h) = self.metrics.cell_px;
+        let (w, h) = self.slot_metrics.cell_px;
         ((slot % self.grid.0) * w, (slot / self.grid.0) * h)
     }
 
@@ -957,18 +1037,35 @@ impl Atlas {
             // single-column from start to finish (measured, the 023
             // inventory). So `Whole` is not an assumption but the family's own
             // property.
+            //
+            // The sprite is drawn at the **grid** cell, not the slot (052 R2):
+            // it is the cell and has to tile the grid, so below `1` it lands
+            // inside the slot at the cell's offset and the pad stays empty.
             Sprite::Char(ch) if raster::is_procedural(ch) => {
+                let (x, y) = self.slot_offset();
                 match size {
                     SizeClass::Normal => {
-                        raster::draw_procedural(ch, self.metrics, &mut self.buffer);
+                        raster::draw_procedural(ch, self.metrics, &mut self.cell_buffer);
+                        place(
+                            &self.cell_buffer,
+                            self.metrics,
+                            &mut self.buffer,
+                            self.slot_metrics,
+                            (i64::from(x), i64::from(y)),
+                        );
                     }
                     SizeClass::Small => {
                         raster::draw_procedural(ch, self.small_metrics, &mut self.small_buffer);
-                        place_small(
+                        // The small cell's baseline on the large cell's, which
+                        // is the slot's.
+                        let dy = i64::from(self.slot_metrics.baseline_px)
+                            - i64::from(self.small_metrics.baseline_px);
+                        place(
                             &self.small_buffer,
                             self.small_metrics,
                             &mut self.buffer,
-                            self.metrics,
+                            self.slot_metrics,
+                            (i64::from(x), dy),
                         );
                     }
                 }
@@ -983,29 +1080,23 @@ impl Atlas {
                 // the letter's own size, and that comes from the font.
                 // The fallback gate's limit is per class too: the small glyph
                 // has to fit the small cell's advance, not the large one's.
-                let (font, cell_advance, natural) = match size {
-                    SizeClass::Normal => (
-                        self.faces.get(face),
-                        self.cell_advance,
-                        self.natural_advance,
-                    ),
-                    SizeClass::Small => (
-                        &self.small,
-                        self.context_advance,
-                        self.natural_context_advance,
-                    ),
+                let (cell, natural) = self.glyph_box(size);
+                let font = match size {
+                    SizeClass::Normal => self.faces.get(face),
+                    SizeClass::Small => &self.small,
                 };
                 // **The base font is always single-cell.** In a monospaced base
                 // font every glyph's advance is the font's own advance (its
                 // guard is `every_base_glyph_advance_is_the_cell_advance`), i.e.
                 // at `letter_spacing = 1` the centring shift is zero and the
                 // drawing stays **bit for bit** the same as before; opened up,
-                // the glyph sits centred in the wider cell. A character
+                // the glyph sits centred in the wider cell; narrowed, its
+                // advance is the slot's and it keeps the raster it has at `1`
+                // (`rules::centre_shift`). A character
                 // declared wide that exists in the base font is drawn into one
                 // cell there — Menlo's `☕ ⚡ ♈` family is exactly this arm: 21
                 // of the measured 65.
-                let drawn =
-                    raster::draw(font, ch, self.metrics, cell_advance, 0.0, &mut self.buffer);
+                let drawn = raster::draw(font, ch, self.slot_metrics, cell, 0.0, &mut self.buffer);
                 // **Fallback font.** The arm runs inside the `NoGlyph` leaf and
                 // only on the regular face, i.e. the order is: first the face
                 // ladder (the `face != Regular` arm below falls to the regular
@@ -1031,10 +1122,10 @@ impl Atlas {
                     // that could diverge from the grid's). The order is inside
                     // the gate: first one cell, then two.
                     let cols = if want == Half::Left { 2 } else { 1 };
-                    match rules::fallback_font(font, ch, cell_advance, natural, cols) {
+                    match rules::fallback_font(font, ch, cell, natural, cols) {
                         Some(alt) => {
                             shrunk = alt.shrunk;
-                            self.draw_accepted(&alt, cell_advance)
+                            self.draw_accepted(&alt, cell)
                         }
                         None => (drawn, Half::Whole, Plane::Mask),
                     }
@@ -1068,26 +1159,19 @@ impl Atlas {
                 // empty but `slot()` is on the drawing path, i.e. the assumption
                 // is a space, not a panic.
                 let base = text.chars().next().unwrap_or(' ');
-                let (font, cell_advance, natural) = match size {
-                    SizeClass::Normal => (
-                        self.faces.get(face),
-                        self.cell_advance,
-                        self.natural_advance,
-                    ),
-                    SizeClass::Small => (
-                        &self.small,
-                        self.context_advance,
-                        self.natural_context_advance,
-                    ),
+                let (cell, natural) = self.glyph_box(size);
+                let font = match size {
+                    SizeClass::Normal => self.faces.get(face),
+                    SizeClass::Small => &self.small,
                 };
                 // The column count is from the same source as `Char`'s (the half
                 // the caller asked for) and the gate's order is the same: first
                 // one, then two.
                 let cols = if want == Half::Left { 2 } else { 1 };
-                match rules::shape_cluster(font, text, cell_advance, natural, cols) {
+                match rules::shape_cluster(font, text, cell, natural, cols) {
                     Some(alt) => {
                         shrunk = alt.shrunk;
-                        self.draw_accepted(&alt, cell_advance)
+                        self.draw_accepted(&alt, cell)
                     }
                     // It did not shape into a single glyph or was rejected by the
                     // gate: the answer is the **base character's** (035 R1.1).
@@ -1099,8 +1183,11 @@ impl Atlas {
             }
             // Procedural drawing cannot fail: the font is not asked, no context
             // is built. `Drawn` is not an assumption, it is the type itself.
+            // Rules are drawn at the **slot** metric (052): an underline and a
+            // strikeout belong to the glyph's baseline, and the chevron is a
+            // glyph, so all three go where the letter goes.
             Sprite::Rule(kind) => {
-                raster::draw_rule(kind, self.metrics, &mut self.buffer);
+                raster::draw_rule(kind, self.slot_metrics, &mut self.buffer);
                 (DrawResult::Drawn, Half::Whole, Plane::Mask)
             }
         };
@@ -1329,7 +1416,7 @@ impl Atlas {
     fn draw_accepted(
         &mut self,
         alt: &rules::Accepted,
-        cell_advance: f64,
+        cell: rules::GlyphBox,
     ) -> (DrawResult, Half, Plane) {
         // **The plane comes from the candidate's own property**: a font
         // carrying colour glyphs goes to the `RGBA8` plane, the others to the
@@ -1342,30 +1429,27 @@ impl Atlas {
         };
         // The two halves are centred in the **same box** and both are drawn in
         // the same call: the right half's offset is a whole number of pixels,
-        // i.e. the AA phase is exactly the same in both.
+        // i.e. the AA phase is exactly the same in both. The offset is the
+        // **grid's** step (052): the second cell starts one cell to the right,
+        // not one slot, so the box's middle stays on the grid.
         let pair = alt.cols >= 2;
-        let box_advance = cell_advance * f64::from(alt.cols);
+        let bx = cell.cols(alt.cols);
         let shift = f64::from(self.metrics.cell_px.0);
         let half = if pair { Half::Left } else { Half::Whole };
-        let rise = alt.rise(self.metrics);
+        let rise = alt.rise(self.slot_metrics);
+        let m = self.slot_metrics;
         // One drawer, two recipes: `Plane` says which it will be and the buffer
         // matches it. If they do not match, `raster`'s precondition assert
         // fires — that assert is the only thing that catches the wrong plane.
         let left = match plane {
-            Plane::Mask => raster::draw_glyph(
-                &alt.font,
-                alt.glyph,
-                self.metrics,
-                box_advance,
-                0.0,
-                rise,
-                &mut self.buffer,
-            ),
+            Plane::Mask => {
+                raster::draw_glyph(&alt.font, alt.glyph, m, bx, 0.0, rise, &mut self.buffer)
+            }
             Plane::Color => raster::draw_color_glyph(
                 &alt.font,
                 alt.glyph,
-                self.metrics,
-                box_advance,
+                m,
+                bx,
                 0.0,
                 rise,
                 &mut self.color_buffer,
@@ -1378,8 +1462,8 @@ impl Atlas {
             Plane::Mask => raster::draw_glyph(
                 &alt.font,
                 alt.glyph,
-                self.metrics,
-                box_advance,
+                m,
+                bx,
                 shift,
                 rise,
                 &mut self.buffer_right,
@@ -1387,13 +1471,33 @@ impl Atlas {
             Plane::Color => raster::draw_color_glyph(
                 &alt.font,
                 alt.glyph,
-                self.metrics,
-                box_advance,
+                m,
+                bx,
                 shift,
                 rise,
                 &mut self.color_buffer_right,
             ),
         };
+        // **The halves are cut at the split line** (052 R2.1): below `1` a
+        // slot is wider than its cell, so the left slot also covers the
+        // start of the second cell and the right slot the end of the first.
+        // Left of the line belongs to the left half, the rest to the right,
+        // so the two quads never paint the same pixel twice and their union
+        // is the one-piece raster. The line is the cell's edge in slot
+        // pixels; at `>= 1` the offset is zero and the cell is the slot, i.e.
+        // neither cut touches a pixel.
+        let edge = usize::from(self.slot_offset().0);
+        let split = edge + usize::from(self.metrics.cell_px.0);
+        let bpp = match plane {
+            Plane::Mask => 1,
+            Plane::Color => 4,
+        };
+        let (left_buf, right_buf) = match plane {
+            Plane::Mask => (&mut self.buffer, &mut self.buffer_right),
+            Plane::Color => (&mut self.color_buffer, &mut self.color_buffer_right),
+        };
+        clear_columns(left_buf, m, bpp, split..usize::from(m.cell_px.0));
+        clear_columns(right_buf, m, bpp, 0..edge);
         // The two calls ask for the same glyph of the same font, i.e. both
         // succeed or neither does. Still **both** are tested: if one fails the
         // pair must not be accepted, otherwise a glyph with an empty half would
@@ -1576,41 +1680,81 @@ fn effective_point_size(point_size: f64, scale: f64) -> f64 {
     }
 }
 
+/// Copies a sprite drawn at its own cell (`src`, `from`) into a slot (`dst`,
+/// `to`) with its top-left corner at `(dx, dy)` — **the single placer** of
+/// the sprites that are a cell rather than a glyph (052 R2): the large
+/// procedural family and tofu at `rules::slot_offset`, the small procedural
+/// family at the cell's column with the small cell's baseline row on the
+/// slot's (046 Karar 3).
+///
+/// What falls outside the slot is **clipped**, not a panic: the relation of
+/// the two cells is the fonts' data, not a type — and this runs in the
+/// display link's callback. The rest of the slot is zero, so neither the
+/// previous glyph nor the cell's own box edge leaks into the pad.
+fn place(src: &[u8], from: Metrics, dst: &mut [u8], to: Metrics, (dx, dy): (i64, i64)) {
+    dst.fill(0);
+    let (sw, sh) = from.cell_wh();
+    let (dw, dh) = to.cell_wh();
+    // The source columns that land inside the slot. Signed, because nothing
+    // in the type rules out a negative offset.
+    let to_index = |v: usize, d: i64, limit: usize| {
+        i64::try_from(v)
+            .ok()
+            .and_then(|v| usize::try_from(v + d).ok())
+            .filter(|&t| t < limit)
+    };
+    let Some(first) = (0..sw).find(|&x| to_index(x, dx, dw).is_some()) else {
+        return;
+    };
+    let Some(tx) = to_index(first, dx, dw) else {
+        return;
+    };
+    let cols = (sw - first).min(dw - tx);
+    for y in 0..sh {
+        let Some(ty) = to_index(y, dy, dh) else {
+            continue;
+        };
+        dst[ty * dw + tx..ty * dw + tx + cols]
+            .copy_from_slice(&src[y * sw + first..y * sw + first + cols]);
+    }
+}
+
+/// Zeroes the columns `cols` of every row of a slot buffer with `bpp` bytes
+/// per pixel — the cut of a wide glyph's halves at the split line
+/// ([`Atlas::draw_accepted`]). An empty or out-of-slot range does nothing.
+fn clear_columns(buffer: &mut [u8], m: Metrics, bpp: usize, cols: std::ops::Range<usize>) {
+    let (w, h) = m.cell_wh();
+    let (start, end) = (cols.start.min(w), cols.end.min(w));
+    if start >= end {
+        return;
+    }
+    for y in 0..h {
+        buffer[(y * w + start) * bpp..(y * w + end) * bpp].fill(0);
+    }
+}
+
+/// The resident tofu slot: the box drawn at the **grid** cell ([`tofu_buffer`])
+/// and placed into the slot at `rules::slot_offset` (052 R2), like the
+/// procedural family — the box is the cell, not a glyph.
+fn tofu_slot(cell: Metrics, slot: Metrics) -> Vec<u8> {
+    let (x, y) = rules::slot_offset(slot, cell);
+    let mut target = vec![0u8; slot.slot_bytes()];
+    place(
+        &tofu_buffer(cell),
+        cell,
+        &mut target,
+        slot,
+        (i64::from(x), i64::from(y)),
+    );
+    target
+}
+
 /// Draws the tofu box: a 1 px frame, one pixel inside the cell edge.
 ///
 /// The font's `.notdef` glyph is **not used**: in some fonts it is empty, in
 /// others a box and which one depends on the font version. Drawing the frame
 /// ourselves makes tofu font-independent — the "visible loss" claim holds only
 /// this way.
-/// Copies a small-class sprite (`src`, drawn at `small`) into a large slot
-/// (`dst`, `large`): left edge at column 0, the small cell's baseline row on
-/// the large cell's (046 Karar 3).
-///
-/// What falls outside the large slot is **clipped**, not a panic: the small
-/// cell is shorter and narrower than the large one with every real font, but
-/// the relation is the fonts' data, not a type — and this runs in the display
-/// link's callback. The rest of the slot is zero, so neither the previous
-/// glyph nor the small cell's own box edge leaks into the neighbour.
-fn place_small(src: &[u8], small: Metrics, dst: &mut [u8], large: Metrics) {
-    dst.fill(0);
-    let (sw, sh) = small.cell_wh();
-    let (lw, lh) = large.cell_wh();
-    // Signed: the small baseline above the large one is the normal case
-    // (`dy > 0`), but nothing in the type rules out the reverse.
-    let dy = i64::from(large.baseline_px) - i64::from(small.baseline_px);
-    let cols = sw.min(lw);
-    for y in 0..sh {
-        let Some(ty) = i64::try_from(y)
-            .ok()
-            .and_then(|y| usize::try_from(y + dy).ok())
-            .filter(|&ty| ty < lh)
-        else {
-            continue;
-        };
-        dst[ty * lw..ty * lw + cols].copy_from_slice(&src[y * sw..y * sw + cols]);
-    }
-}
-
 fn tofu_buffer(m: Metrics) -> Vec<u8> {
     let (w, h) = m.cell_wh();
     let mut target = vec![0u8; m.slot_bytes()];
@@ -1819,12 +1963,26 @@ mod tests {
         let mut own = vec![0u8; m.slot_bytes()];
         let mut wider = vec![0u8; m.slot_bytes()];
         assert_eq!(
-            raster::draw(font, 'W', m, a.cell_advance, 0.0, &mut own),
+            raster::draw(
+                font,
+                'W',
+                m,
+                rules::GlyphBox::unpadded(a.cell_advance),
+                0.0,
+                &mut own
+            ),
             DrawResult::Drawn
         );
         // A cell four pixels wider pushes the glyph two pixels to the right.
         assert_eq!(
-            raster::draw(font, 'W', m, a.cell_advance + 4.0, 0.0, &mut wider),
+            raster::draw(
+                font,
+                'W',
+                m,
+                rules::GlyphBox::unpadded(a.cell_advance + 4.0),
+                0.0,
+                &mut wider
+            ),
             DrawResult::Drawn
         );
         assert_ne!(
@@ -1902,13 +2060,22 @@ mod tests {
         // slot's bottom (same arithmetic as `raster::draw`).
         let baseline = f64::from(m.cell_px.1 - m.baseline_px);
         for (label, base, cell) in size_classes(&a) {
-            let alt = rules::fallback_font(base, FALLBACK_CHAR, cell, cell, 1)
-                .map(|accepted| accepted.font)
-                .unwrap_or_else(|| panic!("{label}: '{FALLBACK_CHAR}' must pass the gate"));
+            let alt = rules::fallback_font(
+                base,
+                FALLBACK_CHAR,
+                rules::GlyphBox::unpadded(cell),
+                cell,
+                1,
+            )
+            .map(|accepted| accepted.font)
+            .unwrap_or_else(|| panic!("{label}: '{FALLBACK_CHAR}' must pass the gate"));
             let glyph = Backend::glyph(&alt, FALLBACK_CHAR)
                 .expect("the candidate that passed the gate can draw");
             let rect = Backend::ink(&alt, glyph);
-            let x = rules::centre_shift(cell, Backend::advance(&alt, glyph));
+            let x = rules::centre_shift(
+                rules::GlyphBox::unpadded(cell),
+                Backend::advance(&alt, glyph),
+            );
             let (left, right) = (x + rect.x, x + rect.x + rect.width);
             assert!(left >= 0.0, "{label}: ink spilled over the left ({left})");
             assert!(
@@ -1943,11 +2110,25 @@ mod tests {
             let mut centred = vec![0u8; m.slot_bytes()];
             let mut flush = vec![0u8; m.slot_bytes()];
             assert_eq!(
-                raster::draw(&alt, FALLBACK_CHAR, m, cell, 0.0, &mut centred),
+                raster::draw(
+                    &alt,
+                    FALLBACK_CHAR,
+                    m,
+                    rules::GlyphBox::unpadded(cell),
+                    0.0,
+                    &mut centred
+                ),
                 DrawResult::Drawn
             );
             assert_eq!(
-                raster::draw(&alt, FALLBACK_CHAR, m, advance, 0.0, &mut flush),
+                raster::draw(
+                    &alt,
+                    FALLBACK_CHAR,
+                    m,
+                    rules::GlyphBox::unpadded(advance),
+                    0.0,
+                    &mut flush
+                ),
                 DrawResult::Drawn
             );
             assert_ne!(
@@ -1999,9 +2180,14 @@ mod tests {
                     continue;
                 }
                 // If there is no candidate at all it is not the gate's subject either — the gate does not issue the rejection.
-                let Some(open) =
-                    rules::fallback_font(base, ch, f64::INFINITY, f64::INFINITY, 1).map(|a| a.font)
-                else {
+                let Some(open) = rules::fallback_font(
+                    base,
+                    ch,
+                    rules::GlyphBox::unpadded(f64::INFINITY),
+                    f64::INFINITY,
+                    1,
+                )
+                .map(|a| a.font) else {
                     continue;
                 };
                 let glyph = Backend::glyph(&open, ch).expect("the candidate can draw");
@@ -2011,14 +2197,14 @@ mod tests {
                 // (`rules::centre_shift`), otherwise the test would measure a
                 // placement that is never drawn.
                 let ink = Backend::ink(&open, glyph);
-                let left = ink.x + rules::centre_shift(cell, advance);
+                let left = ink.x + rules::centre_shift(rules::GlyphBox::unpadded(cell), advance);
                 let right = left + ink.width;
                 // A candidate that does not fit is drawn shrunk if it is
                 // within the limit and is not `.LastResort` (041); the
                 // expectation again comes from the candidate's own
                 // measurements, from the same function as the shrink
                 // coefficient.
-                let fit = rules::fit_ratio(cell, advance, ink);
+                let fit = rules::fit_ratio(rules::GlyphBox::unpadded(cell), advance, ink);
                 let shrinks = fit <= rules::SHRINK_LIMIT && !Backend::is_last_resort(&open);
                 let family = fixture::family_name(&open);
                 plan.push((
@@ -2922,7 +3108,10 @@ mod tests {
         let pool: Vec<char> = {
             let (_, base, cell) = size_classes(&a)[0];
             ('\u{100000}'..'\u{10FFFD}')
-                .filter(|&ch| rules::fallback_font(base, ch, cell, cell, 1).is_none())
+                .filter(|&ch| {
+                    rules::fallback_font(base, ch, rules::GlyphBox::unpadded(cell), cell, 1)
+                        .is_none()
+                })
                 .take(cap * 3)
                 .collect()
         };
@@ -3017,7 +3206,14 @@ mod tests {
         // and this test would still stay green.
         let (label, base, _) = size_classes(&a)[0];
         assert!(
-            rules::fallback_font(base, '𝔸', f64::INFINITY, f64::INFINITY, 1).is_some(),
+            rules::fallback_font(
+                base,
+                '𝔸',
+                rules::GlyphBox::unpadded(f64::INFINITY),
+                f64::INFINITY,
+                1
+            )
+            .is_some(),
             "{label}: no candidate was found for the non-BMP character — the cascade's UTF-16 range is suspect"
         );
     }
@@ -4123,7 +4319,7 @@ mod tests {
 
     /// Where the small cell lands in the large slot: (row of its top edge,
     /// its rows, its columns), clipped to the slot — the same placement
-    /// `place_small` applies, derived from the two `Metrics` here.
+    /// `place` applies, derived from the two `Metrics` here.
     fn small_box(a: &Atlas) -> (usize, usize, usize) {
         let (sw, sh) = a.small_metrics.cell_wh();
         let (lw, lh) = a.metrics.cell_wh();
@@ -5550,5 +5746,261 @@ mod tests {
             sprite,
             "a cluster asked for again gets its identity again"
         );
+    }
+
+    /// Below `1` (052 R1.1): the grid cell's baseline is strictly inside it,
+    /// the cell is no larger than the slot and sits inside it at the offset
+    /// — at the smallest point size too (`0.5 × 4pt@1x` is the corner where
+    /// the proportional cut would empty a part).
+    #[test]
+    fn below_one_keeps_the_baseline_inside_the_cell() {
+        for pt in [MIN_POINT_SIZE, POINT_SIZE, 29.0] {
+            for scale in [1.0, 2.0] {
+                for lh in [0.5, 0.7, 0.99] {
+                    let a = Atlas::new(
+                        None,
+                        pt,
+                        scale,
+                        Spacing {
+                            line: lh,
+                            letter: lh,
+                        },
+                    );
+                    let (cell, slot) = (a.metrics(), a.slot_metrics());
+                    let (x, y) = a.slot_offset();
+                    let at = format!("{pt}pt@{scale}x lh {lh}: cell {cell:?}, slot {slot:?}");
+                    assert!(
+                        0 < cell.baseline_px && cell.baseline_px < cell.cell_px.1,
+                        "baseline outside the cell, {at}"
+                    );
+                    assert!(
+                        cell.cell_px.0 <= slot.cell_px.0 && cell.cell_px.1 <= slot.cell_px.1,
+                        "the cell is larger than the slot, {at}"
+                    );
+                    assert!(
+                        x + cell.cell_px.0 <= slot.cell_px.0
+                            && y + cell.cell_px.1 <= slot.cell_px.1,
+                        "the cell at ({x}, {y}) leaves the slot, {at}"
+                    );
+                    assert_eq!(
+                        y + cell.baseline_px,
+                        slot.baseline_px,
+                        "the cell's baseline is not the slot's, {at}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// At or above `1` the slot **is** the cell (052 R5): the offset is zero
+    /// and the two metrics are one value, so nothing drawn at `>= 1` moves.
+    #[test]
+    fn slot_equals_cell_at_or_above_one() {
+        for (line, letter) in [(1.0, 1.0), (1.2, 1.0), (1.0, 1.3), (1.5, 2.0), (2.0, 2.0)] {
+            for scale in [1.0, 2.0] {
+                let a = Atlas::new(None, POINT_SIZE, scale, Spacing { line, letter });
+                let at = format!("lh {line}, ls {letter} @{scale}x");
+                assert_eq!(a.slot_offset(), (0, 0), "{at}");
+                assert_eq!(a.slot_metrics(), a.metrics(), "{at}");
+                assert_eq!(a.pad.to_bits(), 0.0f64.to_bits(), "pad, {at}");
+                assert_eq!(a.context_pad.to_bits(), 0.0f64.to_bits(), "small pad, {at}");
+            }
+        }
+    }
+
+    /// The tiled family is drawn at the **grid** cell and lands inside the
+    /// slot at the offset (052 R2): every inked pixel is the cell's own
+    /// drawing and the pad around it is empty, so `─` still meets its
+    /// neighbour when the slot is larger than the cell.
+    #[test]
+    fn procedural_family_tiles_the_cell_inside_the_slot() {
+        for scale in [1.0, 2.0] {
+            let mut a = Atlas::new(
+                None,
+                POINT_SIZE,
+                scale,
+                Spacing {
+                    line: 0.7,
+                    letter: 0.7,
+                },
+            );
+            let (cell, slot) = (a.metrics(), a.slot_metrics());
+            assert_ne!(cell, slot, "0.7 must open a pad to test anything");
+            let (ox, oy) = a.slot_offset();
+            let (ox, oy) = (usize::from(ox), usize::from(oy));
+            let (cw, ch) = cell.cell_wh();
+            let (sw, _) = slot.cell_wh();
+            for c in ['─', '█', '│'] {
+                let mut own = vec![0u8; cell.slot_bytes()];
+                raster::draw_procedural(c, cell, &mut own);
+                let (_, upload) = a.slot(
+                    Sprite::Char(c),
+                    Face::Regular,
+                    SizeClass::Normal,
+                    Half::Whole,
+                );
+                let bytes = upload.expect("a new sprite uploads").bytes;
+                for (i, &b) in bytes.iter().enumerate() {
+                    let (x, y) = (i % sw, i / sw);
+                    let inside = (ox..ox + cw).contains(&x) && (oy..oy + ch).contains(&y);
+                    let want = if inside {
+                        own[(y - oy) * cw + (x - ox)]
+                    } else {
+                        0
+                    };
+                    assert_eq!(
+                        b, want,
+                        "'{c}' @{scale}x at ({x}, {y}), cell at ({ox}, {oy})"
+                    );
+                }
+                assert!(own.iter().any(|&b| b != 0), "'{c}' drew nothing");
+            }
+        }
+    }
+
+    /// A wide glyph's two halves are cut at the split line (052 R2.1): their
+    /// inks are disjoint and together they are the one-piece raster, pixel
+    /// for pixel; the glyph is centred on the boundary of its two cells when
+    /// its advance fits `cell + slot`, otherwise it sticks to the slot's left
+    /// edge (`rules::centre_shift`'s floor) with its ink still inside.
+    ///
+    /// Two spacings, one per branch on macOS: the fixture (`.LastResort`)
+    /// advances wider than `cell + slot` at `0.7` and narrower at `0.85`.
+    #[test]
+    fn wide_halves_partition_the_glyph() {
+        for (scale, letter) in [(1.0, 0.7), (2.0, 0.7), (1.0, 0.85), (2.0, 0.85)] {
+            let spacing = Spacing { line: 1.0, letter };
+            let mut a = Atlas::new(None, POINT_SIZE, scale, spacing);
+            let (cell, slot) = (a.metrics(), a.slot_metrics());
+            let (bx, natural) = a.glyph_box(SizeClass::Normal);
+            assert!(bx.pad > 0.0, "0.7 must open a pad to test anything");
+            let alt = rules::fallback_font(a.faces.get(Face::Regular), WIDE_CHAR, bx, natural, 2)
+                .expect("the fixture's wide character is accepted in two cells");
+            assert_eq!(alt.cols, 2, "'{WIDE_CHAR}' must be a pair");
+            // The one-piece raster: both cells' slots side by side.
+            let (cw, sw, sh) = (
+                usize::from(cell.cell_px.0),
+                usize::from(slot.cell_px.0),
+                usize::from(slot.cell_px.1),
+            );
+            let wide = Metrics {
+                cell_px: (cell.cell_px.0 + slot.cell_px.0, slot.cell_px.1),
+                ..slot
+            };
+            let color = Backend::has_color_glyphs(&alt.font);
+            let bpp = if color { 4 } else { 1 };
+            let rise = alt.rise(slot);
+            let whole = if color {
+                let mut b = vec![0u8; wide.slot_bytes_rgba()];
+                raster::draw_color_glyph(&alt.font, alt.glyph, wide, bx.cols(2), 0.0, rise, &mut b);
+                b
+            } else {
+                let mut b = vec![0u8; wide.slot_bytes()];
+                raster::draw_glyph(&alt.font, alt.glyph, wide, bx.cols(2), 0.0, rise, &mut b);
+                b
+            };
+            let edge = usize::from(a.slot_offset().0);
+            let (placed, upload) = a.slot(
+                Sprite::Char(WIDE_CHAR),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Left,
+            );
+            assert_eq!(placed.half, Half::Left, "@{scale}x: a pair is expected");
+            let upload = upload.expect("a new pair uploads");
+            let (left, right) = (upload.bytes, upload.right_bytes);
+            let split = edge + cw;
+            let ww = cw + sw;
+            let mut inked = false;
+            for y in 0..sh {
+                for x in 0..sw {
+                    for k in 0..bpp {
+                        let l = left[(y * sw + x) * bpp + k];
+                        let r = right[(y * sw + x) * bpp + k];
+                        assert!(
+                            x < split || l == 0,
+                            "@{scale}x: left half past the split at ({x}, {y})"
+                        );
+                        assert!(
+                            x >= edge || r == 0,
+                            "@{scale}x: right half before the split at ({x}, {y})"
+                        );
+                    }
+                }
+                for x in 0..ww {
+                    for k in 0..bpp {
+                        let got = if x < split {
+                            left[(y * sw + x) * bpp + k]
+                        } else {
+                            right[(y * sw + x - cw) * bpp + k]
+                        };
+                        let want = whole[(y * ww + x) * bpp + k];
+                        inked |= want != 0;
+                        assert_eq!(
+                            got, want,
+                            "@{scale}x: the halves differ from the whole at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+            assert!(inked, "@{scale}x: the wide glyph drew nothing");
+            // The centring: the middle of the advance box is the middle of
+            // the two cells, unless the advance exceeds the bound.
+            let pair = bx.cols(2);
+            let advance = Backend::advance(&alt.font, alt.glyph);
+            let shift = rules::centre_shift(pair, advance);
+            if advance <= pair.bound() {
+                let mid = shift + advance / 2.0;
+                assert!(
+                    (mid - (bx.pad + bx.advance)).abs() < 1e-9,
+                    "@{scale}x ls {letter}: the glyph's middle {mid} is not the cells' {}",
+                    bx.pad + bx.advance
+                );
+            } else {
+                assert_eq!(
+                    shift, 0.0,
+                    "@{scale}x ls {letter}: sticks to the slot's left"
+                );
+                let ink = Backend::ink(&alt.font, alt.glyph);
+                assert!(
+                    rules::ink_fits_placed(pair, advance, ink),
+                    "@{scale}x ls {letter}: the ink left `cell + slot`"
+                );
+            }
+        }
+    }
+
+    /// Rules belong to the glyph's baseline (052): below `1` the underline
+    /// is where it is at `1`, in the slot, whatever the cell's height.
+    #[test]
+    fn underline_follows_the_baseline() {
+        for scale in [1.0, 2.0] {
+            let mut tight = Atlas::new(
+                None,
+                POINT_SIZE,
+                scale,
+                Spacing {
+                    line: 0.5,
+                    letter: 1.0,
+                },
+            );
+            let mut natural = atlas(POINT_SIZE, scale);
+            assert!(tight.metrics().cell_px.1 < natural.metrics().cell_px.1);
+            assert_eq!(
+                tight.slot_metrics().underline_px,
+                natural.slot_metrics().underline_px,
+                "@{scale}x"
+            );
+            let rule = Sprite::Rule(RuleKind::Single);
+            let ask = |a: &mut Atlas| {
+                let (_, upload) = a.slot(rule, Face::Regular, SizeClass::Normal, Half::Whole);
+                upload.expect("a new rule uploads").bytes.to_vec()
+            };
+            assert_eq!(
+                ask(&mut tight),
+                ask(&mut natural),
+                "@{scale}x: the underline moved"
+            );
+        }
     }
 }

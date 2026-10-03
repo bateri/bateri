@@ -66,6 +66,7 @@ _Requirements: R3, R3.1, R3.2, R3.3, R5_
 - [ ] `cell.wgsl` + `GlyphImmediates`: `slot_px`/`slot_offset`, assert'ler
 - [ ] `glyph_fx.wgsl` + `FxImmediates`: yuva kutusu
 - [ ] `plan`: taşma viewport'u, ızgara/bant sırası, dock viewport'u
+- [ ] Kural ailesi (`Sprite::Rule`) phase-1'den beri yuva genişliğinde çiziliyor: `< 1`'de komşu dörtgenle payı kadar örtüşüyor ve `curl`/`dotted`/`dashed` deseninin periyodu yuvanın genişliği — dikişin bozulmadığını bekçiyle/gözle doğrula (phase-1'den devir)
 - [ ] Test: yukarıdaki Kabul sınamaları
 - [ ] Doğrulama geçti: `make check`, `make shader`, `make linux`, `make smoke`
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi

@@ -2256,7 +2256,7 @@ fn mask_texture<'a>(
         gpu.write_slot(
             &plane.texture,
             atlas.slot_origin(TOFU),
-            atlas.metrics(),
+            atlas.slot_metrics(),
             atlas.tofu_bitmap(),
             Plane::Mask,
         );
@@ -2276,9 +2276,10 @@ pub(crate) fn plane_format(plane: Plane) -> wgpu::TextureFormat {
     Gpu::shared().plane_texture(format, (8, 8)).texture.format()
 }
 
-/// The atlas's uv size of one slot.
+/// The atlas's uv size of one slot — the **slot** metric's (052), which
+/// below `1` is larger than the grid cell.
 fn uv_size(atlas: &Atlas) -> [f32; 2] {
-    let (cw, ch) = atlas.metrics().cell_px;
+    let (cw, ch) = atlas.slot_metrics().cell_px;
     let (tw, th) = atlas.texture_px();
     [f32::from(cw) / f32::from(tw), f32::from(ch) / f32::from(th)]
 }
