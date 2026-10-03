@@ -415,7 +415,7 @@ impl bt_core::Wake for SilentWake {
 
 /// Waits until `ready` says true; if time runs out, fails with `message`.
 #[cfg(any(test, feature = "test-support"))]
-pub fn wait_until(message: &str, ready: impl Fn() -> bool) {
+pub fn wait_until(message: &str, mut ready: impl FnMut() -> bool) {
     use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {

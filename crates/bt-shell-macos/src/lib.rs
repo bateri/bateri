@@ -193,6 +193,26 @@ pub fn focus() -> Option<i32> {
     ))
 }
 
+/// `bateri hold --fd FD --dir DIR` (055): `Some(exit code)` when the process
+/// was started as the update's holder, `None` otherwise. `main` calls it
+/// before the window-server check — the holder has no GUI and outlives the
+/// bateri that started it. The body is
+/// [`bt_shell_common::handover::hold_main`].
+pub fn hold() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != "hold" {
+        return None;
+    }
+    let Some(argv) = args
+        .map(|arg| arg.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("{}", bt_shell_common::handover::USAGE);
+        return Some(bt_shell_common::handover::EXIT_USAGE);
+    };
+    Some(bt_shell_common::handover::hold_main(&argv))
+}
+
 /// The shell of the smoke and measurement runs. **Not** the user's `$SHELL`:
 /// the result must not depend on the rc files.
 ///

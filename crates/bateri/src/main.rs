@@ -32,6 +32,12 @@ fn main() -> ExitCode {
     if let Some(code) = bt_shell_macos::focus() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
+    // The update's holder (055): `bateri hold --fd N --dir D`, started by the
+    // old bateri while it exits — before the window-server check, since it
+    // has no GUI, and before the unknown-subcommand rule.
+    if let Some(code) = bt_shell_macos::hold() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     // An unknown subcommand must not open a window (050 Karar 9): a typo, or a
     // subcommand of a newer bateri asked of an older one, would otherwise
     // start the whole GUI. Arguments starting with `-` pass —
