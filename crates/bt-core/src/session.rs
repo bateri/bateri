@@ -49,7 +49,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
+use alacritty_terminal::event::{Event, EventListener, OnResize, VoidListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
@@ -6693,20 +6693,61 @@ impl Session {
             (shell.history_cut(), shell.saved_stripes())
         };
         let mut term = self.term.lock();
-        if term.mode().contains(TermMode::ALT_SCREEN) {
-            term.swap_alt();
-        }
-        let cursor = term.grid().cursor.point.line.0;
-        let end = match cut {
-            HistoryCut::Anchor(block) => anchor_top(&term, cursor, block).unwrap_or(cursor),
-            HistoryCut::BeforeCursor => wrapped_top(&term, cursor),
-            HistoryCut::ThroughCursor => cursor + 1,
-        };
-        snapshot::encode(&term, end, |uri| {
-            block_key(uri).and_then(|key| stripes.stripe(key))
-        })
+        history_of(&mut term, cut, &stripes)
     }
 
+    /// [`Session::final_history`] of a **frozen** session (055): `freeze`
+    /// drove the live `Term` destructively, so the history is read from the
+    /// VT it returned, replayed into a scratch `Term` of the frozen size —
+    /// the same screens, links and cursor, cut by the same ledger. What a
+    /// pane that falls back after the handover (or 053's save at that quit)
+    /// replays.
+    pub fn frozen_history(&self, frozen: &Frozen) -> Vec<u8> {
+        let (cut, stripes) = {
+            let shell = lock(&self.shell);
+            (shell.history_cut(), shell.saved_stripes())
+        };
+        // Room for every line the VT carries: it holds no more than the
+        // scrollback it was read from.
+        let lines = frozen.vt.iter().filter(|&&byte| byte == b'\n').count();
+        let config = Config {
+            scrolling_history: lines,
+            ..Config::default()
+        };
+        let grid = GridSize::for_spawn(frozen.cols, frozen.rows);
+        let mut term = Term::new(config, &grid, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        let mut last_input = false;
+        parser.advance(
+            &mut ClusterHandler::new(&mut term, self.cluster, &mut last_input),
+            &frozen.vt,
+        );
+        history_of(&mut term, cut, &stripes)
+    }
+}
+
+/// The body of [`Session::final_history`] on `term` — destructive on the
+/// alternate screen (its doc).
+fn history_of<T: EventListener>(
+    term: &mut Term<T>,
+    cut: HistoryCut,
+    stripes: &crate::shell::SavedStripes,
+) -> Vec<u8> {
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        term.swap_alt();
+    }
+    let cursor = term.grid().cursor.point.line.0;
+    let end = match cut {
+        HistoryCut::Anchor(block) => anchor_top(term, cursor, block).unwrap_or(cursor),
+        HistoryCut::BeforeCursor => wrapped_top(term, cursor),
+        HistoryCut::ThroughCursor => cursor + 1,
+    };
+    snapshot::encode(term, end, |uri| {
+        block_key(uri).and_then(|key| stripes.stripe(key))
+    })
+}
+
+impl Session {
     /// The pane's **whole** terminal state as VT bytes — **only at the
     /// handover** (055): both screens, the cursors and saved cursors, every
     /// mode, the changed palette, the links as they are, and what alacritty

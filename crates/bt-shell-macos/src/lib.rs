@@ -60,7 +60,7 @@ mod window;
 // The platform-independent half lives in `bt-shell-common` (043); imported
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
-    child, download, focus, gesture, jobs, keys, links, notices, preview_cache, quote,
+    child, download, focus, gesture, handover, jobs, keys, links, notices, preview_cache, quote,
     remote_files, remote_helper, restore, settings, split, ssh_route, upload, watch, zoom,
 };
 
@@ -305,11 +305,14 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
     // The startup stamp must be taken **before** the first renderer (first
     // window), and the type enforces it: `Options` carries an `Instant`, not
     // a flag.
+    // The update's handover comes first (055): nothing of this process may
+    // spawn a child before it ([`app::arrive`]).
+    let arrival = app::arrive(&opts);
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // `delegate` outlives `app.run()` in this scope: AppKit's and the
     // window's delegate properties are weak, this Retained is the owner.
-    let delegate = app::AppDelegate::new(mtm, opts);
+    let delegate = app::AppDelegate::new(mtm, opts, arrival);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.run();
     Ok(())

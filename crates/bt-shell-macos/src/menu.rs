@@ -251,6 +251,7 @@ pub(crate) fn install(
     mtm: MainThreadMarker,
     themes: &ProtocolObject<dyn NSMenuDelegate>,
     updater: Option<&AnyObject>,
+    handover_test: bool,
 ) -> Retained<ShellMenuDelegate> {
     let command = NSEventModifierFlags::Command;
     let mut app_items = vec![item(
@@ -269,6 +270,17 @@ pub(crate) fn install(
         // process.
         unsafe { check.setTarget(Some(updater)) };
         app_items.push(check);
+    }
+    // The handover's test item (055 R4.4): only with the defaults key
+    // `BateriHandoverTestMenu` (the caller reads it); the update's quit
+    // without Sparkle — the same path, then bateri starts itself again.
+    if handover_test {
+        app_items.push(item(
+            mtm,
+            "Relaunch with Handover",
+            sel!(relaunchWithHandover:),
+            "",
+        ));
     }
     app_items.extend([
         NSMenuItem::separatorItem(mtm),

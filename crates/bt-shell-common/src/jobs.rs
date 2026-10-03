@@ -1961,6 +1961,61 @@ mod tests {
         wait_until("the reader did not end", || !new.reader_alive());
     }
 
+    /// A program on the alternate screen crosses on it (vim across the
+    /// update), and the frozen pane's history — what a fallback replays —
+    /// is still the primary screen: read from the frozen VT, since the
+    /// freeze's snapshot drove the live `Term` destructively.
+    #[test]
+    fn the_alternate_screen_crosses_and_the_history_is_the_primary() {
+        let old = Session::spawn(
+            handover_options(
+                Some((
+                    "/bin/sh".to_owned(),
+                    vec![
+                        "-c".to_owned(),
+                        "echo PRIMARY; printf '\\033[?1049hALT'; while :; do sleep 1; done"
+                            .to_owned(),
+                    ],
+                )),
+                40,
+                10,
+            ),
+            Arc::new(SilentWake),
+        )
+        .expect("session did not open");
+        wait_until("the script did not reach the alternate screen", || {
+            all_text(&old).contains("ALT")
+        });
+        let frozen = old.freeze().expect("the session did not freeze");
+        let history = String::from_utf8_lossy(&old.frozen_history(&frozen)).into_owned();
+        assert!(history.contains("PRIMARY"), "{history:?}");
+        assert!(!history.contains("ALT"), "{history:?}");
+        let pid = frozen.pid;
+        let start = start_time(pid).expect("the start time not read");
+        let new = Session::adopt(
+            handover_options(None, frozen.cols, frozen.rows),
+            bt_core::Adoption {
+                master: frozen.master,
+                exit: exit_fd(pid, start).expect("no exit fd"),
+                pid,
+                vt: frozen.vt,
+                blob: frozen.blob,
+                prefix: frozen.tail,
+                input: frozen.input,
+                ops: Arc::new(SystemPty),
+            },
+            Arc::new(SilentWake),
+        )
+        .expect("the session was not adopted");
+        let screen = all_text(&new);
+        assert!(
+            screen.contains("ALT") && !screen.contains("PRIMARY"),
+            "not on the alternate screen: {screen:?}"
+        );
+        drop(old);
+        let _ = new.shutdown();
+    }
+
     /// Dropping an adopted session hangs its child up and waits for nothing.
     #[test]
     fn an_adopted_session_hangs_up_on_shutdown_without_waiting() {

@@ -525,6 +525,41 @@ pub(crate) struct Launch {
     /// A previous session's scrollback, replayed before the shell starts
     /// (053; `SessionOptions::replay`); `None` → an empty grid.
     pub(crate) replay: Option<Vec<u8>>,
+    /// The update's handover (055 R4.3): a running program to carry on
+    /// instead of a new shell; `None` → a shell is born.
+    pub(crate) adopt: Option<Adopted>,
+}
+
+/// A pane the previous bateri froze and its holder gave, checked to be
+/// adoptable (`AppDelegate`'s arrival): the master, the exit watch of its
+/// child, the pane's state and the bytes to read before the master's.
+#[derive(Debug)]
+pub(crate) struct Adopted {
+    pub(crate) master: std::os::fd::OwnedFd,
+    pub(crate) exit: std::os::fd::OwnedFd,
+    pub(crate) pid: u32,
+    pub(crate) state: crate::handover::PaneState,
+    /// The frozen tail, then what the holder drained (`HeldPane::buffer`).
+    pub(crate) prefix: Vec<u8>,
+}
+
+/// The note under a pane whose program did not cross the update (055
+/// Karar 8): one dim line at the bottom of its replayed history — no pane
+/// comes back as a half screen without saying so.
+pub(crate) const FALLBACK_NOTE: &str =
+    "bateri: the program running here did not survive the update; this is a new shell";
+
+/// `history` (if any) with [`FALLBACK_NOTE`] under it, on a line of its own:
+/// the replay of a pane that fell back to 053's path.
+pub(crate) fn fallen_back(history: Option<Vec<u8>>) -> Vec<u8> {
+    let mut replay = history.unwrap_or_default();
+    if !replay.is_empty() && !replay.ends_with(b"\n") {
+        replay.extend_from_slice(b"\r\n");
+    }
+    replay.extend_from_slice(b"\x1b[0m\x1b[2m");
+    replay.extend_from_slice(FALLBACK_NOTE.as_bytes());
+    replay.extend_from_slice(b"\x1b[0m\r\n");
+    replay
 }
 
 define_class!(
@@ -2255,5 +2290,23 @@ mod tests {
         assert_eq!(tab_index(9, 0), None);
         assert_eq!(tab_index(0, 3), None);
         assert_eq!(tab_index(10, 12), None);
+    }
+
+    /// The fallback's note sits on a line of its own under the history,
+    /// dim, and resets what the history left on (055 Karar 8).
+    #[test]
+    fn the_fallback_note_has_a_line_of_its_own() {
+        use super::{FALLBACK_NOTE, fallen_back};
+        let note = format!("\x1b[0m\x1b[2m{FALLBACK_NOTE}\x1b[0m\r\n");
+        assert_eq!(fallen_back(None), note.as_bytes());
+        assert_eq!(fallen_back(Some(Vec::new())), note.as_bytes());
+        assert_eq!(
+            fallen_back(Some(b"$ ls\r\n".to_vec())),
+            [&b"$ ls\r\n"[..], note.as_bytes()].concat()
+        );
+        assert_eq!(
+            fallen_back(Some(b"\x1b[1m$ half".to_vec())),
+            [&b"\x1b[1m$ half\r\n"[..], note.as_bytes()].concat()
+        );
     }
 }

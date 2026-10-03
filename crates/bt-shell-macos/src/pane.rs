@@ -1581,6 +1581,7 @@ impl TerminalPane {
             initial_input,
             tab_id: _,
             replay,
+            adopt,
         } = launch;
         // In smoke and measurement runs the shell is fixed: the result must not
         // depend on the user's `$SHELL` and rc file. The owner of the scripts
@@ -1620,66 +1621,84 @@ impl TerminalPane {
         // no dock but has marks, i.e. it cannot be derived from `dock`). Before
         // the environment is moved into `env` below.
         let shell_marks = !integration.is_empty();
-        let session = Session::spawn(
-            SessionOptions {
-                command,
-                // Directory and locale follow the same rule in **every**
-                // session, timed run included: the decision has a single arm
-                // (`discussion.md` → Karar 6 eki, "istisnasız") and neither of
-                // the two fixed scripts depends on directory or locale —
-                // `printf` with `sleep`, `date` with `printf`; paths absolute
-                // or from `PATH`, output ASCII.
-                //
-                // The directory now comes from the caller: a new tab is in the
-                // active tab's OSC 7 directory (026 → Karar 4); in a timed run
-                // and the first window `child::working_directory()`.
-                working_directory,
-                // The title's `~` rule; **the same resolution** as the directory (`child::home`).
-                home: child::home(),
-                // Shell integration sits beside the locale, in the same map:
-                // both are environment **added** to the child and both go only
-                // to the child. Their keys are disjoint (`LANG` ↔ `ZDOTDIR`),
-                // so order does not matter.
-                // The integration's environment comes **from the caller**: the
-                // same answer also determines the dock's existence (`start`)
-                // and if it were asked a second time here the two decisions
-                // could diverge.
-                env: child::locale_env(locale::system_locale())
-                    .into_iter()
-                    .chain(integration)
-                    .collect(),
-                cols: grid.cols,
-                rows: grid.rows,
-                cell_px: grid.cell.cell_px(),
-                terminal: settings.terminal(),
-                theme,
-                // The dock's **existence**, not its reserve: `bt-core` hands
-                // the caret over accordingly. Its source is the birth-reserve
-                // slot (`start` wrote it a line earlier) and the alternate-screen
-                // notifier's gate reads the same slot too, so they cannot diverge.
-                dock: self.ivars().dock_rows_at_birth.get() > 0,
-                // Clustering (035) is on in all windows, timed run included.
-                // Not a settings key (035 Karar 2): rolling back is this one line.
-                cluster: true,
-                // A timed run always gets `None` from `open_window` (single
-                // window, no ⌘T), so its fixed scripts are unaffected by this.
-                initial_input,
-                shell_marks,
-                // The identity is in every window, timed run included (038
-                // Karar 8): the variables read no file and do not move the tokens.
-                tab_id: Some(self.ivars().tab_id.clone()),
-                // The machine's name (044): `file://$HOST/…` (GNU `ls --hyperlink`)
-                // and OSC 7's named authority count as local. One `gethostname`
-                // per pane; the timed run's tokens do not depend on it.
-                hostname: crate::links::hostname(),
-                // A restored pane's scrollback (053); `None` everywhere else.
-                replay,
+        let options = SessionOptions {
+            command,
+            // Directory and locale follow the same rule in **every**
+            // session, timed run included: the decision has a single arm
+            // (`discussion.md` → Karar 6 eki, "istisnasız") and neither of
+            // the two fixed scripts depends on directory or locale —
+            // `printf` with `sleep`, `date` with `printf`; paths absolute
+            // or from `PATH`, output ASCII.
+            //
+            // The directory now comes from the caller: a new tab is in the
+            // active tab's OSC 7 directory (026 → Karar 4); in a timed run
+            // and the first window `child::working_directory()`.
+            working_directory,
+            // The title's `~` rule; **the same resolution** as the directory (`child::home`).
+            home: child::home(),
+            // Shell integration sits beside the locale, in the same map:
+            // both are environment **added** to the child and both go only
+            // to the child. Their keys are disjoint (`LANG` ↔ `ZDOTDIR`),
+            // so order does not matter.
+            // The integration's environment comes **from the caller**: the
+            // same answer also determines the dock's existence (`start`)
+            // and if it were asked a second time here the two decisions
+            // could diverge.
+            env: child::locale_env(locale::system_locale())
+                .into_iter()
+                .chain(integration)
+                .collect(),
+            cols: grid.cols,
+            rows: grid.rows,
+            cell_px: grid.cell.cell_px(),
+            terminal: settings.terminal(),
+            theme,
+            // The dock's **existence**, not its reserve: `bt-core` hands
+            // the caret over accordingly. Its source is the birth-reserve
+            // slot (`start` wrote it a line earlier) and the alternate-screen
+            // notifier's gate reads the same slot too, so they cannot diverge.
+            dock: self.ivars().dock_rows_at_birth.get() > 0,
+            // Clustering (035) is on in all windows, timed run included.
+            // Not a settings key (035 Karar 2): rolling back is this one line.
+            cluster: true,
+            // A timed run always gets `None` from `open_window` (single
+            // window, no ⌘T), so its fixed scripts are unaffected by this.
+            initial_input,
+            shell_marks,
+            // The identity is in every window, timed run included (038
+            // Karar 8): the variables read no file and do not move the tokens.
+            tab_id: Some(self.ivars().tab_id.clone()),
+            // The machine's name (044): `file://$HOST/…` (GNU `ls --hyperlink`)
+            // and OSC 7's named authority count as local. One `gethostname`
+            // per pane; the timed run's tokens do not depend on it.
+            hostname: crate::links::hostname(),
+            // A restored pane's scrollback (053); `None` everywhere else.
+            replay,
+        };
+        let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
+        // The update's handover (055 R4.3): the running program is carried
+        // on; if the session cannot be adopted after all (its `bt-core` blob
+        // does not decode) the pane falls back to a new shell here, with the
+        // carried history and the note (Karar 8).
+        let adopting = adopt.is_some();
+        let (session, shell_parent) = match adopt {
+            Some(adopted) => match adopt_session(options.clone(), adopted, grid, &wake) {
+                Ok((session, parent)) => (session, parent),
+                Err((error, history)) => {
+                    eprintln!("bateri: could not carry a pane over the update: {error}");
+                    let options = SessionOptions {
+                        replay: Some(crate::window::fallen_back(history)),
+                        ..options
+                    };
+                    (Session::spawn(options, wake)?, shell_parent)
+                }
             },
-            Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
-        );
-        // A terminal window without a shell is an empty box; what to do is the
-        // caller's call (first window: the process exits; later ones: that window closes).
-        let session = Arc::new(session?);
+            // A terminal window without a shell is an empty box; what to do is
+            // the caller's call (first window: the process exits; later ones:
+            // that window closes).
+            None => (Session::spawn(options, wake)?, shell_parent),
+        };
+        let session = Arc::new(session);
         // The closing sequence reaches the session from here, not through the
         // link, and the keyboard holds its own copy; all three live on the main
         // thread, so where the last reference drops is clear (see `shutdown`).
@@ -1771,6 +1790,12 @@ impl TerminalPane {
         // arrive and `focused` would stay `true`: an unfocused window would
         // draw a filled caret and set up the blink clock (`/code-review`).
         self.apply_focus(self.window().is_some_and(|window| window.isKeyWindow()));
+        // A carried-on session can be on the alternate screen already (vim
+        // across the update): the link was born seeing it, so no transition
+        // will ever take the dock away — the reserve is matched here, once.
+        if adopting {
+            self.alt_screen_did_change();
+        }
         Ok(())
     }
 
@@ -2313,6 +2338,76 @@ impl TerminalPane {
     /// the observer is a no-op if unregistered). `None` if the session was
     /// never born — there is nothing to close.
     pub(crate) fn begin_close(&self) -> Option<Closing> {
+        self.quiesce(true);
+        let session = self.ivars().session.get()?;
+        Some(match session.begin_shutdown() {
+            Some(handle) => Closing::Started(handle),
+            None => Closing::AlreadyDone,
+        })
+    }
+
+    /// Freezes the pane for the update's handover (055 R4.2) and returns
+    /// what the holder carries: the master, the child's pid and start time,
+    /// the pane's state ([`PaneState`](crate::handover::PaneState): the
+    /// VT, `bt-core`'s blob, the unsent input, the scrollback for a
+    /// fallback) and the tail as the buffer's head.
+    ///
+    /// The second half of the return is the pane's 053 history
+    /// (`Session::frozen_history`, also inside the state) for the caller's
+    /// save at this quit.
+    ///
+    /// The start time is read **before** the freeze, and so is the pane's
+    /// own quiet-down ([`Self::quiesce`]: no frame may reach the `Term` the
+    /// freeze probed destructively) — but not the remote session's end: the
+    /// ssh master is not closed by a handover (Karar 10). `None` if there is
+    /// nothing to carry (no session, already closed, the child's start time
+    /// unreadable) or the freeze failed — the caller closes the pane today's
+    /// way, which a failed freeze leaves intact.
+    pub(crate) fn freeze_for_handover(&self) -> Option<(crate::handover::HeldPane, Vec<u8>)> {
+        if self.is_closed() {
+            return None;
+        }
+        let session = Arc::clone(self.session()?);
+        let parent = *self.ivars().shell_parent.get()?;
+        let pid = session.child_pid();
+        let start = jobs::start_time(pid)?;
+        self.quiesce(false);
+        let frozen = match session.freeze() {
+            Ok(frozen) => frozen,
+            Err(error) => {
+                eprintln!("bateri: could not freeze a pane for the update: {error}");
+                return None;
+            }
+        };
+        // From the frozen VT: the freeze's snapshot drove the live `Term`
+        // destructively (and a live read before it would have destroyed the
+        // alternate screen the snapshot must carry).
+        let history = session.frozen_history(&frozen);
+        let state = crate::handover::PaneState {
+            cols: frozen.cols,
+            rows: frozen.rows,
+            parent,
+            vt: frozen.vt,
+            core: frozen.blob,
+            input: frozen.input,
+            history: history.clone(),
+        };
+        let held = crate::handover::HeldPane::new(
+            self.ivars().tab_id.clone(),
+            pid,
+            start,
+            state.encode(),
+            frozen.tail,
+            frozen.master,
+        );
+        Some((held, history))
+    }
+
+    /// The pane's side of closing, the session aside — shared by
+    /// [`Self::begin_close`] and [`Self::freeze_for_handover`]; `end_remote`
+    /// tells the ssh registry this pane's remote session ended (not in a
+    /// handover: the master lives on). Idempotent.
+    fn quiesce(&self, end_remote: bool) {
         // First: a job's thread waiting at the password sheet holds the helper's
         // worker too — dropping the sender answers it, then `close` is served.
         self.close_password();
@@ -2323,7 +2418,8 @@ impl TerminalPane {
         self.remote_helper().borrow_mut().close();
         // A remote session closing with the pane is one less session to the
         // host: our master ends with the last one (047 R9.3).
-        if self.ivars().ssh_session.take().is_some()
+        if end_remote
+            && self.ivars().ssh_session.take().is_some()
             && let Some(masters) = self.ivars().masters.as_deref()
         {
             masters.session_ended(self.id());
@@ -2340,11 +2436,6 @@ impl TerminalPane {
             link.stop();
         }
         drop(self.ivars().wake.detach());
-        let session = self.ivars().session.get()?;
-        Some(match session.begin_shutdown() {
-            Some(handle) => Closing::Started(handle),
-            None => Closing::AlreadyDone,
-        })
     }
 
     /// Pane geometry or font moved: match the layer, update the grid, ask for
@@ -2930,6 +3021,55 @@ impl TerminalPane {
     pub(crate) fn upload_title_prefix(&self) -> Option<(&'static str, u8)> {
         self.ivars().uploads.borrow().title_prefix()
     }
+}
+
+/// [`adopt_session`]'s failure: why, and the carried history for the
+/// fallback's replay.
+type NotAdopted = (std::io::Error, Option<Vec<u8>>);
+
+/// Carries a frozen pane on in this process ([`Session::adopt`], 055 R2.3):
+/// born at the frozen grid size (the VT is laid out for it), then resized
+/// to this pane's grid. `Err` gives back the carried history for the
+/// fallback.
+fn adopt_session(
+    options: SessionOptions,
+    adopted: crate::window::Adopted,
+    grid: Grid,
+    wake: &Arc<dyn Wake>,
+) -> Result<(Session, ShellParent), NotAdopted> {
+    let crate::window::Adopted {
+        master,
+        exit,
+        pid,
+        mut state,
+        prefix,
+    } = adopted;
+    let history = Some(std::mem::take(&mut state.history)).filter(|bytes| !bytes.is_empty());
+    let parent = state.parent;
+    let options = SessionOptions {
+        cols: state.cols,
+        rows: state.rows,
+        ..options
+    };
+    let session = Session::adopt(
+        options,
+        bt_core::Adoption {
+            master,
+            exit,
+            pid,
+            vt: state.vt,
+            blob: state.core,
+            prefix,
+            input: state.input,
+            ops: Arc::new(jobs::SystemPty),
+        },
+        Arc::clone(wake),
+    )
+    .map_err(|error| (error, history))?;
+    // `false` is "nothing to do" (the same size) or a refused one (zero):
+    // the session keeps the frozen size, the next geometry change resizes.
+    let _ = session.resize(grid.cols, grid.rows, grid.cell.cell_px());
+    Ok((session, parent))
 }
 
 /// A new tab identity, from `NSUUID` (038 Karar 2).

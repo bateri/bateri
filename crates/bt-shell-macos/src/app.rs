@@ -37,6 +37,7 @@ use objc2_foundation::{
     NSUserDefaults, ns_string,
 };
 
+use crate::handover::{self, Arrival, HeldPane, PaneState};
 use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
 use crate::pane::{PaneLaunch, TerminalPane};
@@ -47,10 +48,12 @@ use crate::settings_window::SettingsWindow;
 use crate::split::Axis;
 use crate::ssh_route::{self, Masters};
 use crate::watch::{Notify, Watch};
-use crate::window::{self, CloseScope, Histories, Launch, TerminalWindow, WindowHost};
+use crate::window::{
+    self, Adopted, CloseScope, Histories, Launch, TerminalWindow, WindowHost, fallen_back,
+};
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
-use crate::{child, focus, settings};
+use crate::{child, focus, jobs, settings};
 
 /// Guard for zero idle frames: in the [`Workload::Smoke`] workload the window
 /// sits idle for ~`run_seconds` seconds after the first draw.
@@ -390,7 +393,78 @@ fn restored_launch(pane: &SavedPane, replay: Option<Vec<u8>>) -> Launch {
         initial_input: pane.remote_line.clone().map(InitialInput::ready),
         tab_id: Some(pane.tab_id.clone()),
         replay,
+        adopt: None,
     }
+}
+
+/// Whether a quit hands the programs over (055 R4.2, Karar 9 and 11): only
+/// Sparkle's relaunch (or the test item's), only where 053 restores at all
+/// (`restore_windows` not `"off"`) and only in a bundled process — the
+/// layout is matched to its bundle on the other side.
+fn hands_over(relaunch: bool, restore_windows: RestoreWindows, bundled: bool) -> bool {
+    relaunch && bundled && restore_windows != RestoreWindows::Off
+}
+
+/// A pane the holder gave that cannot be carried on (055 Karar 8): handed
+/// back for release, with the history its blob carried if it decoded.
+#[derive(Debug)]
+struct Refused {
+    pane: HeldPane,
+    history: Option<Vec<u8>>,
+}
+
+/// Whether a held pane can be carried on: its program alive as the holder
+/// saw it, its blob of a version this binary reads, and an exit watch on
+/// its child (`watch` is [`jobs::exit_fd`]: `None` if the pid died or was
+/// reused). `bt-core`'s own blob is checked by `Session::adopt` itself, in
+/// the pane, which falls back there.
+fn adoption(
+    held: HeldPane,
+    watch: impl FnOnce(u32, u64) -> Option<std::os::fd::OwnedFd>,
+) -> Result<Adopted, Refused> {
+    let Some(state) = PaneState::decode(&held.blob) else {
+        return Err(Refused {
+            pane: held,
+            history: None,
+        });
+    };
+    let history = || Some(state.history.clone()).filter(|bytes| !bytes.is_empty());
+    if held.ended {
+        return Err(Refused {
+            history: history(),
+            pane: held,
+        });
+    }
+    let Some(exit) = watch(held.pid, held.start) else {
+        return Err(Refused {
+            history: history(),
+            pane: held,
+        });
+    };
+    Ok(Adopted {
+        master: held.master,
+        exit,
+        pid: held.pid,
+        state,
+        prefix: held.buffer,
+    })
+}
+
+/// **The handover's sequence point** in this process (055 R4.3,
+/// [`handover::arrive`]): called by [`crate::run`] first, before the
+/// application delegate is born — its ssh registry's sweep runs `ssh` on a
+/// thread of its own ([`masters`]), and no child may be spawned while a
+/// received master is not yet close-on-exec (macOS' `recvmsg` has no
+/// `MSG_CMSG_CLOEXEC`). Never in a timed run nor in an unbundled process.
+pub(crate) fn arrive(opts: &Options) -> Option<Arrival> {
+    if opts.run.is_some() {
+        return None;
+    }
+    let bundle_id = NSBundle::mainBundle().bundleIdentifier()?.to_string();
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let roots = ssh_route::socket_bases(child::home().as_deref(), uid);
+    handover::arrive(&roots, uid, std::process::id(), &bundle_id)
 }
 
 /// A saved window frame clamped onto a visible screen (053 R3.2): the screen
@@ -895,7 +969,7 @@ pub(crate) struct Ivars {
     /// Sparkle's updater ([`crate::updater`]): "Check for Updates…" holds it
     /// weakly, this is what keeps it alive.
     /// Empty in an unbundled and timed run.
-    updater: OnceCell<Retained<AnyObject>>,
+    updater: OnceCell<crate::updater::Updater>,
     /// bateri's ssh masters (047): one registry for every pane, so two jobs to
     /// one host open one master ([`PaneLaunch::masters`]). `None` in a timed run
     /// (no askpass, no master — the remote jobs take today's argv) and when the
@@ -906,6 +980,17 @@ pub(crate) struct Ivars {
     /// `None`: a timed run, an unbundled process, or another instance of the
     /// same bundle holds it — this one neither restores nor saves.
     restore_lock: RefCell<Option<restore::Lock>>,
+    /// What the update's holders gave at launch (055 R4.3,
+    /// [`arrive`] — taken before this delegate was born); consumed by the
+    /// first windows ([`AppDelegate::restore_or_open`]).
+    arrival: RefCell<Option<Arrival>>,
+    /// The update's holder, spawned when the quit was found to be a
+    /// relaunch ([`AppDelegate::terminate_reply`]) and given the panes in
+    /// [`AppDelegate::shutdown`].
+    holder: RefCell<Option<handover::Spawned>>,
+    /// The handover test item asked for this quit (055 R4.4): bateri starts
+    /// itself again once this process is gone.
+    relaunch_after: Cell<bool>,
 }
 
 define_class!(
@@ -933,10 +1018,16 @@ define_class!(
             {
                 let _ = self.ivars().updater.set(updater);
             }
+            // The handover's test item (055 R4.4): a defaults key, never read
+            // in a timed run; the product's code names no bundle.
+            let handover_test = self.ivars().run.is_none()
+                && NSUserDefaults::standardUserDefaults()
+                    .boolForKey(ns_string!("BateriHandoverTestMenu"));
             let shell_menu = crate::menu::install(
                 mtm,
                 ProtocolObject::from_ref(self),
-                self.ivars().updater.get().map(|u| &**u),
+                self.ivars().updater.get().map(|u| &*u.controller),
+                handover_test,
             );
             let _ = self.ivars().shell_menu.set(shell_menu);
             // The settings are read **before** the first window: `scrollback` and
@@ -1198,6 +1289,17 @@ define_class!(
             // (`settings_window::motion_override`): if open it must refresh too,
             // otherwise Reduce Motion turned on from the system would not look like it overrides the rows.
             self.refresh_settings_window();
+        }
+
+        /// The handover's test item (055 R4.4, the defaults key
+        /// `BateriHandoverTestMenu`): the update's quit without Sparkle — the
+        /// relaunch flag, the quit, and bateri starting itself again once this
+        /// process is gone ([`AppDelegate::spawn_relauncher`]).
+        #[unsafe(method(relaunchWithHandover:))]
+        fn relaunch_with_handover(&self, _sender: Option<&AnyObject>) {
+            crate::updater::request_relaunch();
+            self.ivars().relaunch_after.set(true);
+            NSApplication::sharedApplication(self.mtm()).terminate(None);
         }
 
         /// Shell ▸ New Window (⌘N): a new window in the active window's
@@ -1869,6 +1971,8 @@ fn masters() -> Option<Arc<Masters>> {
         bases,
         Arc::new(crate::keychain::Keychain),
     ));
+    // `crate::run` took the update's holders before this (the handover's
+    // sequence point, [`arrive`]): the sweep's `ssh` children come after it.
     let sweeper = Arc::clone(&masters);
     let _ = std::thread::Builder::new()
         .name("ssh socket sweep".into())
@@ -1905,7 +2009,11 @@ fn focus_answerer() -> focus::Answerer {
 }
 
 impl AppDelegate {
-    pub(crate) fn new(mtm: MainThreadMarker, opts: Options) -> Retained<Self> {
+    pub(crate) fn new(
+        mtm: MainThreadMarker,
+        opts: Options,
+        arrival: Option<Arrival>,
+    ) -> Retained<Self> {
         // The ring is allocated **only** when the gate is open: a closed gate must
         // cost an `Option` branch, not an allocation (R4.1). Deriving the capacity
         // from the run duration is `bt-gpu`'s job too — it is the side that knows the refresh rate.
@@ -1930,6 +2038,9 @@ impl AppDelegate {
             updater: OnceCell::new(),
             masters: opts.run.is_none().then(masters).flatten(),
             restore_lock: RefCell::new(None),
+            arrival: RefCell::new(arrival),
+            holder: RefCell::new(None),
+            relaunch_after: Cell::new(false),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -2118,8 +2229,15 @@ impl AppDelegate {
         if timed {
             return NSApplicationTerminateReply::TerminateNow;
         }
+        // Consumed by this quit whatever it turns into (Karar 9).
+        let relaunch = crate::updater::take_relaunch();
         let windows = self.windows();
         if windows.is_empty() {
+            return NSApplicationTerminateReply::TerminateNow;
+        }
+        // A relaunch hands the programs over: nothing dies, so nothing is
+        // asked — unless the holder cannot be born, then today's question.
+        if relaunch && self.prepare_handover() {
             return NSApplicationTerminateReply::TerminateNow;
         }
         let confirm = self.settings().confirm_close;
@@ -2135,7 +2253,130 @@ impl AppDelegate {
         if alert.runModal() == NSAlertFirstButtonReturn {
             NSApplicationTerminateReply::TerminateNow
         } else {
+            self.ivars().relaunch_after.set(false);
             NSApplicationTerminateReply::TerminateCancel
+        }
+    }
+
+    /// The handover's first step (055 R4.2): spawns the holder
+    /// ([`handover::spawn_holder`]) with this instance's directories, kept
+    /// for [`AppDelegate::shutdown`]. `false` — today's quit — when
+    /// `restore_windows = "off"` (Karar 11), in an unbundled process, without
+    /// an ssh registry (its directories are the holder's socket) or when the
+    /// spawn fails.
+    fn prepare_handover(&self) -> bool {
+        let Some(masters) = self.ivars().masters.as_deref() else {
+            return false;
+        };
+        let bundled = NSBundle::mainBundle().bundleIdentifier().is_some();
+        if !hands_over(true, self.settings().restore_windows, bundled) {
+            return false;
+        }
+        let dirs = masters.bases().to_vec();
+        let spawned = std::env::current_exe().and_then(|exe| handover::spawn_holder(&exe, &dirs));
+        match spawned {
+            Ok(spawned) => {
+                self.ivars().holder.replace(Some(spawned));
+                true
+            }
+            Err(error) => {
+                eprintln!("bateri: the update's holder could not start: {error}");
+                false
+            }
+        }
+    }
+
+    /// The handover's second step, at the head of [`AppDelegate::shutdown`]
+    /// after 053's save: every pane is frozen
+    /// ([`TerminalPane::freeze_for_handover`]) and given with the layout to
+    /// the holder; `true` once the holder said it holds them. The panes that
+    /// could not be frozen close today's way. `false` → today's quit closes
+    /// what is left — a frozen pane cannot go back, its master stays open in
+    /// this process until it exits and that is its hang-up.
+    fn hand_over(&self, holder: handover::Spawned) -> bool {
+        let Some(bundle_id) = NSBundle::mainBundle().bundleIdentifier() else {
+            return false;
+        };
+        // The layout reads the live sessions: before any freeze.
+        let (mut saved, _) = self.saved_session(false);
+        let with_history = self.settings().restore_windows == RestoreWindows::All;
+        let mut held = Vec::new();
+        let mut left = Vec::new();
+        let mut histories: Histories = Vec::new();
+        for window in self.windows() {
+            for pane in window.panes() {
+                match pane.freeze_for_handover() {
+                    Some((frozen, history)) => {
+                        histories.push((frozen.tab.clone(), history));
+                        held.push(frozen);
+                    }
+                    None => {
+                        // Not frozen: it closes today's way below, its
+                        // scrollback read live first.
+                        if let Some(session) = pane.session() {
+                            histories.push((pane.tab_id().clone(), session.final_history()));
+                        }
+                        left.push(pane);
+                    }
+                }
+            }
+        }
+        // 053's save, the fallback if the new bateri finds no holder.
+        if let Some(lock) = self.ivars().restore_lock.take() {
+            histories.retain(|(_, history)| with_history && !history.is_empty());
+            for pane in saved
+                .windows
+                .iter_mut()
+                .flat_map(|window| window.tabs.iter_mut())
+                .flat_map(|tab| tab.panes.iter_mut())
+            {
+                pane.history = histories.iter().any(|(tab, _)| *tab == pane.tab_id);
+            }
+            if let Err(error) = restore::save(&lock, &saved, &histories) {
+                eprintln!("bateri: could not save the session: {error}");
+            }
+        }
+        if held.is_empty() {
+            return false;
+        }
+        // After the save: the layout carries its history flags, so a pane
+        // that was not frozen falls back with the history saved for it.
+        let layout = handover::layout_blob(&bundle_id.to_string(), &saved.render());
+        let count = held.len();
+        if let Err(error) = holder.give(handover::Bundle {
+            layout,
+            panes: held,
+        }) {
+            eprintln!("bateri: the update's holder did not take the panes: {error}");
+            return false;
+        }
+        eprintln!("bateri: handed {count} pane(s) over to the update's holder");
+        let closing: Vec<_> = left.iter().filter_map(|pane| pane.begin_close()).collect();
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        for closing in closing {
+            let _ = closing.wait_until(deadline);
+        }
+        true
+    }
+
+    /// The handover test item's relaunch (055 R4.4): a waiting shell that
+    /// starts this very binary once this process is gone — spawned clean
+    /// ([`handover::spawn_clean`]), so no master of a frozen pane rides
+    /// along, and with this process's environment (not `open`'s: a test
+    /// package started with its own `HOME` stays in it).
+    fn spawn_relauncher(&self) {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let script = "while /bin/kill -0 \"$0\" 2>/dev/null; do /bin/sleep 0.1; done; exec \"$1\"";
+        let args = [
+            OsString::from("-c"),
+            OsString::from(script),
+            OsString::from(std::process::id().to_string()),
+            exe.into_os_string(),
+        ];
+        if let Err(error) = handover::spawn_clean(Path::new("/bin/sh"), &args, None) {
+            eprintln!("bateri: could not relaunch: {error}");
         }
     }
 
@@ -2241,6 +2482,7 @@ impl AppDelegate {
                 initial_input: initial.map(InitialInput::run),
                 tab_id: None,
                 replay: None,
+                adopt: None,
             },
             integration: self.shell_integration(),
             reduce_motion: self.reduce_motion(),
@@ -2281,12 +2523,57 @@ impl AppDelegate {
     /// and at least one of its windows comes back, otherwise today's single
     /// window. The gate order is [`AppDelegate::take_saved`]'s.
     fn restore_or_open(&self) -> Result<(), String> {
+        let arrival = self.ivars().arrival.take();
+        if let Some(arrival) = arrival
+            && self.restore_arrival(arrival)
+        {
+            return Ok(());
+        }
         if let Some(saved) = self.take_saved()
-            && self.restore_saved(&saved)
+            && self.restore_saved(&saved, None)
         {
             return Ok(());
         }
         self.open_window(None, Opening::Window).map(drop)
+    }
+
+    /// The first windows from the update's holders (055 R4.3): the layout
+    /// they carried, each pane carried on or fallen back
+    /// ([`AppDelegate::restored_pane_launch`]); once every window is built
+    /// the holders are acknowledged — the panes nobody placed released —
+    /// and 053's save, which describes the same session, is deleted. The
+    /// session directory's lock is taken here for the save at quit.
+    /// `false` (the holders hang everything up) if the layout does not read
+    /// or no window comes back; the caller goes on with 053's path.
+    fn restore_arrival(&self, mut arrival: Arrival) -> bool {
+        let Some(saved) = Saved::parse(&arrival.layout) else {
+            arrival.release_all();
+            return false;
+        };
+        let lock = restore_dir(
+            &self.inputs(),
+            || {
+                NSBundle::mainBundle()
+                    .bundleIdentifier()
+                    .map(|id| id.to_string())
+            },
+            child::home,
+        )
+        .and_then(|dir| restore::lock(&dir));
+        self.ivars().restore_lock.replace(lock);
+        if !self.restore_saved(&saved, Some(&mut arrival)) {
+            arrival.release_all();
+            // `take_saved` takes the lock again.
+            self.ivars().restore_lock.replace(None);
+            return false;
+        }
+        arrival.finish();
+        if let Some(lock) = self.ivars().restore_lock.borrow().as_ref()
+            && let Err(error) = restore::clear(lock)
+        {
+            eprintln!("bateri: could not delete the saved session: {error}");
+        }
+        true
     }
 
     /// Takes the saved layout (053 Karar 6). Gates in order, each falling to
@@ -2328,7 +2615,7 @@ impl AppDelegate {
     /// every window's selected tab and, last, the key window. A tab that
     /// cannot be built is skipped (its error to stderr). `true` if at least
     /// one window came back.
-    fn restore_saved(&self, saved: &Saved) -> bool {
+    fn restore_saved(&self, saved: &Saved, mut arrival: Option<&mut Arrival>) -> bool {
         let mtm = self.mtm();
         let screens: Vec<Frame> = NSScreen::screens(mtm)
             .iter()
@@ -2345,7 +2632,7 @@ impl AppDelegate {
         let mut key = None;
         let mut restored = false;
         for window in &saved.windows {
-            let tabs = self.restore_window(window, &screens);
+            let tabs = self.restore_window(window, &screens, arrival.as_deref_mut());
             let selected = tabs
                 .iter()
                 .find(|(index, _)| *index == window.selected)
@@ -2371,6 +2658,7 @@ impl AppDelegate {
         &self,
         window: &SavedWindow,
         screens: &[Frame],
+        mut arrival: Option<&mut Arrival>,
     ) -> Vec<(usize, Retained<TerminalWindow>)> {
         let mtm = self.mtm();
         let frame = clamp_frame(window.frame, screens);
@@ -2386,7 +2674,8 @@ impl AppDelegate {
                 .panes
                 .iter()
                 .map(|pane| {
-                    let (launch, pane_theme) = self.restored_pane_launch(id, pane);
+                    let (launch, pane_theme) =
+                        self.restored_pane_launch(id, pane, arrival.as_deref_mut());
                     theme.get_or_insert(pane_theme);
                     launch
                 })
@@ -2425,18 +2714,56 @@ impl AppDelegate {
     /// `from` ([`Opening::Restore`]), with the save's start
     /// ([`restored_launch`]: directory, identity, ready remote line, history
     /// read and deleted here) and point-size step.
-    fn restored_pane_launch(&self, window: u64, pane: &SavedPane) -> (PaneLaunch, Theme) {
+    ///
+    /// With an `arrival` (055 R4.3) the pane the holder gave under the same
+    /// identity is carried on if it can be ([`adoption`]); one that cannot —
+    /// or that the old bateri could not freeze — falls back to 053's start
+    /// with its history and the note ([`fallen_back`]), and the holder
+    /// hangs a refused one up at once.
+    fn restored_pane_launch(
+        &self,
+        window: u64,
+        pane: &SavedPane,
+        arrival: Option<&mut Arrival>,
+    ) -> (PaneLaunch, Theme) {
         let (mut launch, theme) = self.pane_launch(window, None, Opening::Restore);
-        let replay = if pane.history {
-            self.ivars()
-                .restore_lock
-                .borrow()
-                .as_ref()
-                .and_then(|lock| restore::history(lock, &pane.tab_id))
-        } else {
-            None
+        let saved_history = || {
+            if pane.history {
+                self.ivars()
+                    .restore_lock
+                    .borrow()
+                    .as_ref()
+                    .and_then(|lock| restore::history(lock, &pane.tab_id))
+            } else {
+                None
+            }
+        };
+        let mut adopt = None;
+        let replay = match arrival {
+            None => saved_history(),
+            Some(arrival) => {
+                let held = arrival
+                    .panes
+                    .iter()
+                    .position(|(_, held)| held.tab == pane.tab_id)
+                    .map(|index| arrival.panes.remove(index));
+                match held {
+                    None => Some(fallen_back(saved_history())),
+                    Some((link, held)) => match adoption(held, jobs::exit_fd) {
+                        Ok(adopted) => {
+                            adopt = Some(adopted);
+                            None
+                        }
+                        Err(refused) => {
+                            arrival.release(link, refused.pane);
+                            Some(fallen_back(refused.history.or_else(saved_history)))
+                        }
+                    },
+                }
+            }
         };
         launch.launch = restored_launch(pane, replay);
+        launch.launch.adopt = adopt;
         launch.zoom = Zoom::from_steps(pane.zoom_steps, &launch.settings.font);
         (launch, theme)
     }
@@ -3305,8 +3632,22 @@ impl AppDelegate {
         if self.ivars().run.is_some() {
             crate::watchdog();
         }
+        if self.ivars().relaunch_after.get() {
+            self.spawn_relauncher();
+        }
+        // The update's handover (055 R4.2): the programs go to the holder
+        // and nothing below runs — no pane closes, no ssh master ends
+        // (Karar 10). It writes 053's save itself, from the frozen panes:
+        // reading the scrollback live first would destroy an alternate
+        // screen before the freeze reads it (`Session::final_history`).
+        if let Some(holder) = self.ivars().holder.take()
+            && self.hand_over(holder)
+        {
+            return None;
+        }
         // Session restore's save comes **first** (053 Karar 6): the scrollback
-        // is read from live sessions and `begin_close` below drops them.
+        // is read from live sessions and `begin_close` below drops them. A
+        // failed handover has saved already and this is a no-op.
         self.save_session();
         let windows = self.windows();
         // The panes' closes below end their remote sessions; the masters'
@@ -4799,5 +5140,71 @@ mod tests {
         // not the split, the `as u16` saturation carries it.
         let g = split_into_grid(0.0, 0.0, metrics(9, 18, 8), NO_DOCK);
         assert_eq!((g.cols, g.rows), (0, 0));
+    }
+
+    fn held(blob: Vec<u8>, ended: bool) -> HeldPane {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut pane = HeldPane::new(
+            bt_core::TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap(),
+            42,
+            7,
+            blob,
+            b"tail".to_vec(),
+            std::os::fd::OwnedFd::from(file),
+        );
+        pane.ended = ended;
+        pane
+    }
+
+    fn pane_state(history: &[u8]) -> PaneState {
+        PaneState {
+            cols: 80,
+            rows: 24,
+            parent: crate::jobs::ShellParent::Login,
+            vt: b"vt".to_vec(),
+            core: b"core".to_vec(),
+            input: Vec::new(),
+            history: history.to_vec(),
+        }
+    }
+
+    fn a_watch(_: u32, _: u64) -> Option<std::os::fd::OwnedFd> {
+        Some(std::os::fd::OwnedFd::from(
+            std::fs::File::open("/dev/null").unwrap(),
+        ))
+    }
+
+    /// Only a relaunch hands over, only where 053 restores and only in a
+    /// bundle (055 Karar 9, 11): ⌘Q, `"off"` and `cargo run` quit today's way.
+    #[test]
+    fn only_a_bundled_relaunch_with_restore_hands_over() {
+        assert!(hands_over(true, RestoreWindows::All, true));
+        assert!(hands_over(true, RestoreWindows::Layout, true));
+        assert!(!hands_over(true, RestoreWindows::Off, true));
+        assert!(!hands_over(false, RestoreWindows::All, true));
+        assert!(!hands_over(true, RestoreWindows::All, false));
+    }
+
+    /// A held pane is carried on only alive, readable and watched; the
+    /// others fall back with whatever history their blob carried (Karar 8).
+    #[test]
+    fn a_held_pane_is_adopted_or_falls_back_with_its_history() {
+        let blob = pane_state(b"history").encode();
+        let adopted = adoption(held(blob.clone(), false), |pid, start| {
+            assert_eq!((pid, start), (42, 7));
+            a_watch(pid, start)
+        })
+        .expect("an alive, readable, watched pane is adopted");
+        assert_eq!((adopted.pid, adopted.prefix.as_slice()), (42, &b"tail"[..]));
+        assert_eq!(adopted.state, pane_state(b"history"));
+
+        let ended = adoption(held(blob.clone(), true), a_watch).unwrap_err();
+        assert_eq!(ended.history.as_deref(), Some(&b"history"[..]));
+        let gone = adoption(held(blob, false), |_, _| None).unwrap_err();
+        assert_eq!(gone.history.as_deref(), Some(&b"history"[..]));
+        let unread = adoption(held(b"not a blob".to_vec(), false), a_watch).unwrap_err();
+        assert_eq!(unread.history, None);
+        let empty = adoption(held(pane_state(b"").encode(), true), a_watch).unwrap_err();
+        assert_eq!(empty.history, None, "an empty history is no history");
     }
 }

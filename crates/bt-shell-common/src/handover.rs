@@ -70,6 +70,7 @@ use std::time::{Duration, Instant};
 
 use bt_core::TabId;
 
+use crate::jobs::ShellParent;
 use crate::ssh_route::{self, SUN_PATH};
 
 /// The holder's socket in the instance directory.
@@ -703,6 +704,507 @@ impl Link {
         let mut rest = Vec::new();
         (&self.stream).read_to_end(&mut rest).map(|_| ())
     }
+}
+
+// ─── the two bateris' own side (055 phase-4) ─────────────────────────────
+//
+// What crosses inside the frame's opaque fields, and the two process steps
+// around it: the old bateri spawns the holder and gives it the bundle
+// ([`spawn_holder`], [`Spawned::give`]), the new one takes every holder's
+// bundle at its sequence point ([`arrive`]).
+
+/// The layout blob's first line: this word, [`LAYOUT_VERSION`] and the
+/// bundle id of the bateri that wrote it; the rest is 053's layout text
+/// (`restore::Saved::render`).
+const LAYOUT_WORD: &str = "bateri-handover";
+
+/// The layout blob's version. A new bateri reads this one and the one
+/// before it (Karar 8); there is none before it yet.
+pub const LAYOUT_VERSION: u32 = 1;
+
+/// The layout blob for `layout` (053's text) of the bundle `bundle_id`.
+pub fn layout_blob(bundle_id: &str, layout: &str) -> Vec<u8> {
+    format!("{LAYOUT_WORD} {LAYOUT_VERSION} {bundle_id}\n{layout}").into_bytes()
+}
+
+/// A layout blob's bundle id and layout text; `None` if it is not one of a
+/// version this binary reads.
+pub fn layout_of(blob: &[u8]) -> Option<(&str, &str)> {
+    let text = std::str::from_utf8(blob).ok()?;
+    let (first, layout) = text.split_once('\n')?;
+    let mut words = first.split(' ');
+    let (Some(LAYOUT_WORD), Some(version), Some(bundle), None) =
+        (words.next(), words.next(), words.next(), words.next())
+    else {
+        return None;
+    };
+    (version.parse::<u32>().ok()? == LAYOUT_VERSION && !bundle.is_empty())
+        .then_some((bundle, layout))
+}
+
+/// A pane's blob: the platform shell's state for one frozen session
+/// (`bt_core::Frozen` minus the master and the tail, which cross as the
+/// frame's fd and buffer). Versioned on its own: a new bateri reads this
+/// version and the one before it (Karar 8); there is none before it yet.
+///
+/// ```text
+/// "BTPS" | version u32 | cols u16 | rows u16 | flags u32 (bit 0: login)
+/// vt | core | input | history: each len u64, bytes
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneState {
+    /// The grid's size the VT is laid out for (`bt_core::Frozen::cols`).
+    pub cols: u16,
+    pub rows: u16,
+    /// Who the PTY's child is: the foreground question needs it.
+    pub parent: ShellParent,
+    /// `bt_core::Frozen::vt`.
+    pub vt: Vec<u8>,
+    /// `bt_core::Frozen::blob` — `bt-core`'s own state.
+    pub core: Vec<u8>,
+    /// `bt_core::Frozen::input`.
+    pub input: Vec<u8>,
+    /// `Session::final_history` — 053's scrollback, taken before the
+    /// freeze: a pane that falls back gets it from here (in memory, so
+    /// `restore_windows = "layout"` keeps its promise, Karar 5 and 8).
+    pub history: Vec<u8>,
+}
+
+const PANE_MAGIC: [u8; 4] = *b"BTPS";
+
+/// The pane blob's version.
+pub const PANE_VERSION: u32 = 1;
+
+/// The `login` bit of a pane blob's flags.
+const LOGIN: u32 = 1;
+
+impl PaneState {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            32 + self.vt.len() + self.core.len() + self.input.len() + self.history.len(),
+        );
+        out.extend_from_slice(&PANE_MAGIC);
+        out.extend_from_slice(&PANE_VERSION.to_le_bytes());
+        out.extend_from_slice(&self.cols.to_le_bytes());
+        out.extend_from_slice(&self.rows.to_le_bytes());
+        let flags = match self.parent {
+            ShellParent::Login => LOGIN,
+            ShellParent::Direct => 0,
+        };
+        out.extend_from_slice(&flags.to_le_bytes());
+        for field in [&self.vt, &self.core, &self.input, &self.history] {
+            out.extend_from_slice(&(field.len() as u64).to_le_bytes());
+            out.extend_from_slice(field);
+        }
+        out
+    }
+
+    /// `None` for anything that is not exactly one blob of
+    /// [`PANE_VERSION`]: an unknown flag bit, a field past the end, a byte
+    /// past the last field.
+    pub fn decode(bytes: &[u8]) -> Option<PaneState> {
+        let mut rest = bytes;
+        let mut take = |len: usize| -> Option<&[u8]> {
+            let (head, tail) = rest.split_at_checked(len)?;
+            rest = tail;
+            Some(head)
+        };
+        if take(4)? != PANE_MAGIC {
+            return None;
+        }
+        let version = u32::from_le_bytes(take(4)?.try_into().ok()?);
+        if version != PANE_VERSION {
+            return None;
+        }
+        let cols = u16::from_le_bytes(take(2)?.try_into().ok()?);
+        let rows = u16::from_le_bytes(take(2)?.try_into().ok()?);
+        let parent = match u32::from_le_bytes(take(4)?.try_into().ok()?) {
+            LOGIN => ShellParent::Login,
+            0 => ShellParent::Direct,
+            _ => return None,
+        };
+        let mut field = || -> Option<Vec<u8>> {
+            let len = u64::from_le_bytes(take(8)?.try_into().ok()?);
+            Some(take(usize::try_from(len).ok()?)?.to_vec())
+        };
+        let state = PaneState {
+            cols,
+            rows,
+            parent,
+            vt: field()?,
+            core: field()?,
+            input: field()?,
+            history: field()?,
+        };
+        rest.is_empty().then_some(state)
+    }
+}
+
+/// The spawned holder before it has the bundle (055 R4.2): spawning comes
+/// first — in `applicationShouldTerminate:`, so a holder that cannot be
+/// born leaves today's quit (its question included) — and the panes are
+/// frozen only after.
+#[derive(Debug)]
+pub struct Spawned {
+    pub pid: u32,
+    stream: UnixStream,
+}
+
+/// Spawns `exe hold --fd 3 --dir …` ([`hold_main`]) with one end of a fresh
+/// `socketpair` at fd 3 and nothing else of this process
+/// ([`spawn_clean`]). `dirs` are the instance's directories, the first
+/// holds the socket — so the first whose socket path fits `sun_path` goes
+/// first (a long home's cache directory does not; the short `/tmp` root
+/// does), and with none that fits there is no holder.
+pub fn spawn_holder(exe: &Path, dirs: &[PathBuf]) -> io::Result<Spawned> {
+    let dirs = socket_first(dirs).ok_or(io::ErrorKind::InvalidInput)?;
+    let (ours, theirs) = UnixStream::pair()?;
+    let mut args: Vec<std::ffi::OsString> = vec!["hold".into(), "--fd".into(), "3".into()];
+    for dir in &dirs {
+        args.push("--dir".into());
+        args.push(dir.as_os_str().to_owned());
+    }
+    let pid = spawn_clean(exe, &args, Some(std::os::fd::AsFd::as_fd(&theirs)))?;
+    drop(theirs);
+    Ok(Spawned { pid, stream: ours })
+}
+
+/// `dirs` with the first whose [`HANDOVER_SOCKET`] fits `sun_path` moved to
+/// the front; `None` if none fits.
+fn socket_first(dirs: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    let first = dirs
+        .iter()
+        .position(|dir| dir.join(HANDOVER_SOCKET).as_os_str().len() < SUN_PATH)?;
+    let mut ordered = vec![dirs[first].clone()];
+    ordered.extend(
+        dirs.iter()
+            .enumerate()
+            .filter(|(index, _)| *index != first)
+            .map(|(_, dir)| dir.clone()),
+    );
+    Some(ordered)
+}
+
+impl Spawned {
+    /// Gives `bundle` to the holder and waits (at most [`HAND_WAIT`]) for
+    /// its [`READY`]: `Ok` only then — the directories are the holder's and
+    /// it listens. This side's copies of the masters close here either way
+    /// (`bundle` is consumed); on an `Err` the caller goes on with today's
+    /// quit.
+    pub fn give(self, bundle: Bundle) -> io::Result<()> {
+        write_frame(&self.stream, &bundle)?;
+        drop(bundle);
+        let wire = Wire {
+            stream: &self.stream,
+            deadline: None,
+        };
+        let mut ready = [0u8];
+        wire.read_exact(&mut ready)?;
+        if ready[0] == READY {
+            Ok(())
+        } else {
+            Err(io::ErrorKind::InvalidData.into())
+        }
+    }
+}
+
+/// Spawns `program` with `args` (its `argv[0]` is `program`) and returns
+/// its pid without waiting: standard I/O on `/dev/null`, `keep` (if any) at
+/// fd 3, the signal mask empty and `SIGPIPE` back to its default — and **no
+/// other descriptor of this process**, close-on-exec or not. On macOS
+/// `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT` (Karar 2): a frozen
+/// session's master is still open here and a copy in the child would defeat
+/// the hang-up. Elsewhere a `fork` + `exec` (the holder closes what it
+/// inherited itself, [`detach`]). The environment is this process's.
+pub fn spawn_clean(
+    program: &Path,
+    args: &[std::ffi::OsString],
+    keep: Option<std::os::fd::BorrowedFd<'_>>,
+) -> io::Result<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        posix_spawn_clean(program, args, keep)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::process::CommandExt;
+        let raw = keep.map(|fd| fd.as_raw_fd());
+        let mut command = std::process::Command::new(program);
+        command
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // SAFETY: only async-signal-safe calls between `fork` and `exec`.
+        unsafe {
+            command.pre_exec(move || {
+                if let Some(raw) = raw {
+                    if raw == 3 {
+                        libc::fcntl(3, libc::F_SETFD, 0);
+                    } else if libc::dup2(raw, 3) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn()?;
+        Ok(child.id())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn posix_spawn_clean(
+    program: &Path,
+    args: &[std::ffi::OsString],
+    keep: Option<std::os::fd::BorrowedFd<'_>>,
+) -> io::Result<u32> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    fn invalid<E>(_: E) -> io::Error {
+        io::ErrorKind::InvalidInput.into()
+    }
+    let path = CString::new(program.as_os_str().as_bytes()).map_err(invalid)?;
+    let mut owned = vec![path.clone()];
+    for arg in args {
+        owned.push(CString::new(arg.as_bytes()).map_err(invalid)?);
+    }
+    let mut argv: Vec<*mut libc::c_char> =
+        owned.iter().map(|arg| arg.as_ptr().cast_mut()).collect();
+    argv.push(std::ptr::null_mut());
+    // `dup2(3, 3)` would not clear close-on-exec everywhere: a `keep` that
+    // already is 3 moves out of the way first (the copy closes on return).
+    let moved = match keep {
+        Some(fd) if fd.as_raw_fd() == 3 => Some(fd.try_clone_to_owned()?),
+        _ => None,
+    };
+    let source = moved
+        .as_ref()
+        .map(AsRawFd::as_raw_fd)
+        .or_else(|| keep.map(|fd| fd.as_raw_fd()));
+    let null = c"/dev/null";
+    let mut actions: libc::posix_spawn_file_actions_t = std::ptr::null_mut();
+    let mut attr: libc::posix_spawnattr_t = std::ptr::null_mut();
+    // SAFETY: the two objects are initialised before use and destroyed on
+    // every way out below; every pointer handed in lives for the call
+    // (`owned` holds the strings `argv` points into, `null` is static), and
+    // `_NSGetEnviron` is the process's own environment.
+    unsafe {
+        let check = |status: libc::c_int| {
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(status))
+            }
+        };
+        check(libc::posix_spawn_file_actions_init(&raw mut actions))?;
+        if let Err(error) = check(libc::posix_spawnattr_init(&raw mut attr)) {
+            libc::posix_spawn_file_actions_destroy(&raw mut actions);
+            return Err(error);
+        }
+        let result = (|| {
+            check(libc::posix_spawn_file_actions_addopen(
+                &raw mut actions,
+                0,
+                null.as_ptr(),
+                libc::O_RDONLY,
+                0,
+            ))?;
+            for fd in [1, 2] {
+                check(libc::posix_spawn_file_actions_addopen(
+                    &raw mut actions,
+                    fd,
+                    null.as_ptr(),
+                    libc::O_WRONLY,
+                    0,
+                ))?;
+            }
+            if let Some(source) = source {
+                check(libc::posix_spawn_file_actions_adddup2(
+                    &raw mut actions,
+                    source,
+                    3,
+                ))?;
+            }
+            let mut empty: libc::sigset_t = 0;
+            libc::sigemptyset(&raw mut empty);
+            let mut defaults: libc::sigset_t = 0;
+            libc::sigemptyset(&raw mut defaults);
+            libc::sigaddset(&raw mut defaults, libc::SIGPIPE);
+            check(libc::posix_spawnattr_setsigmask(
+                &raw mut attr,
+                &raw const empty,
+            ))?;
+            check(libc::posix_spawnattr_setsigdefault(
+                &raw mut attr,
+                &raw const defaults,
+            ))?;
+            let flags = libc::POSIX_SPAWN_CLOEXEC_DEFAULT
+                | libc::POSIX_SPAWN_SETSIGMASK
+                | libc::POSIX_SPAWN_SETSIGDEF;
+            check(libc::posix_spawnattr_setflags(
+                &raw mut attr,
+                libc::c_short::try_from(flags).map_err(invalid)?,
+            ))?;
+            let mut pid: libc::pid_t = 0;
+            check(libc::posix_spawn(
+                &raw mut pid,
+                path.as_ptr(),
+                &raw const actions,
+                &raw const attr,
+                argv.as_ptr(),
+                (*libc::_NSGetEnviron()).cast_const(),
+            ))?;
+            u32::try_from(pid).map_err(invalid)
+        })();
+        libc::posix_spawnattr_destroy(&raw mut attr);
+        libc::posix_spawn_file_actions_destroy(&raw mut actions);
+        result
+    }
+}
+
+/// What the new bateri took at its sequence point ([`arrive`]): the
+/// connections, the newest layout and every pane — each with the index of
+/// the connection it came from.
+#[derive(Debug)]
+pub struct Arrival {
+    links: Vec<Link>,
+    /// The newest holder's layout (053's text).
+    pub layout: String,
+    pub panes: Vec<(usize, HeldPane)>,
+}
+
+impl Arrival {
+    /// Releases one pane ([`Link::release`]): the holder hangs it up now.
+    pub fn release(&mut self, link: usize, pane: HeldPane) {
+        if let Some(link) = self.links.get_mut(link) {
+            let _ = link.release(pane);
+        }
+    }
+
+    /// Every pane is placed: what is left is released, then every holder is
+    /// acknowledged and exits ([`Link::ack`]).
+    pub fn finish(mut self) {
+        for (link, pane) in std::mem::take(&mut self.panes) {
+            self.release(link, pane);
+        }
+        for link in self.links {
+            let _ = link.ack();
+        }
+    }
+
+    /// Nothing could be placed: every holder hangs every pane up and exits.
+    pub fn release_all(self) {
+        drop(self.panes);
+        for link in self.links {
+            let _ = link.release_all(Bundle::default());
+        }
+    }
+}
+
+/// The holders listening in `roots`' instance directories, with the
+/// instance's name, newest socket first.
+fn holders(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    use std::os::unix::fs::FileTypeExt;
+    let mut names: Vec<String> = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && !names.iter().any(|seen| seen == name)
+            {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    let mut found: Vec<(PathBuf, String, std::time::SystemTime)> = Vec::new();
+    for name in names {
+        for dir in ssh_route::instance_dirs(roots, &name) {
+            let socket = dir.join(HANDOVER_SOCKET);
+            let Ok(meta) = std::fs::symlink_metadata(&socket) else {
+                continue;
+            };
+            if meta.file_type().is_socket() {
+                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                found.push((dir, name.clone(), modified));
+                break;
+            }
+        }
+    }
+    found.sort_by(|a, b| b.2.cmp(&a.2));
+    found
+        .into_iter()
+        .map(|(dir, name, _)| (dir, name))
+        .collect()
+}
+
+/// **The new bateri's sequence point** (055 R4.3): takes every holder's
+/// bundle in `roots`' instance directories and adopts their instance
+/// directories (`me` from each holder, [`ssh_route::adopt_instance`]).
+///
+/// **It must run before this process spawns any child, on any thread** —
+/// one caller, at the top of the platform shell's `run`, before the
+/// application delegate (whose ssh registry sweeps on a thread of its own
+/// and runs `ssh`). macOS' `recvmsg` has no `MSG_CMSG_CLOEXEC`: a received
+/// master is close-on-exec only after it arrived, and a child spawned in
+/// between keeps a copy that defeats the hang-up. It must also run before
+/// the sweep for the directories' sake: a dead owner's directory would be
+/// swept with its live sockets.
+///
+/// Only a holder of `bundle_id` is taken: another bundle's (a dev package
+/// next to the real one) is let go without an acknowledgement — it waits
+/// for its own bateri, its directories untouched. A holder whose layout
+/// cannot be read is released whole. `None` if nothing was taken.
+pub fn arrive(roots: &[PathBuf], uid: u32, me: u32, bundle_id: &str) -> Option<Arrival> {
+    let mut arrival: Option<Arrival> = None;
+    for (dir, instance) in holders(roots) {
+        let (bundle, link) = match take(&dir, uid) {
+            Ok(taken) => taken,
+            Err(error) => {
+                eprintln!(
+                    "bateri: the update's holder in {} failed: {error:?}",
+                    dir.display()
+                );
+                continue;
+            }
+        };
+        let layout = match layout_of(&bundle.layout) {
+            Some((owner, _)) if owner != bundle_id => {
+                // Another bundle's: its masters close here, the holder keeps its own.
+                drop(bundle);
+                drop(link);
+                continue;
+            }
+            Some((_, layout)) => layout.to_owned(),
+            None => {
+                let _ = link.release_all(bundle);
+                continue;
+            }
+        };
+        for instance_dir in ssh_route::instance_dirs(roots, &instance) {
+            if let Err(error) =
+                ssh_route::adopt_instance(&instance_dir, Some(link.holder_pid()), me)
+            {
+                eprintln!(
+                    "bateri: could not adopt {}: {error}",
+                    instance_dir.display()
+                );
+            }
+        }
+        let arrival = arrival.get_or_insert_with(|| Arrival {
+            links: Vec::new(),
+            layout,
+            panes: Vec::new(),
+        });
+        let index = arrival.links.len();
+        arrival.links.push(link);
+        arrival
+            .panes
+            .extend(bundle.panes.into_iter().map(|pane| (index, pane)));
+    }
+    arrival
 }
 
 // ─── the holder ──────────────────────────────────────────────────────────
@@ -1788,5 +2290,171 @@ mod tests {
         ] {
             assert_eq!(parse_args(&args(wrong)), None, "{wrong:?}");
         }
+    }
+
+    fn state() -> PaneState {
+        PaneState {
+            cols: 80,
+            rows: 24,
+            parent: ShellParent::Login,
+            vt: b"\x1b[?1049hvt".to_vec(),
+            core: b"core".to_vec(),
+            input: b"ls\r".to_vec(),
+            history: b"history".to_vec(),
+        }
+    }
+
+    /// The pane blob round-trips every field and refuses anything else: a
+    /// cut at any length, a byte past the end, another version, an unknown
+    /// flag — a half-read blob would replay a wrong screen (Karar 8).
+    #[test]
+    fn a_pane_state_round_trips_and_refuses_damage() {
+        let state = state();
+        let bytes = state.encode();
+        assert_eq!(PaneState::decode(&bytes), Some(state.clone()));
+        let direct = PaneState {
+            parent: ShellParent::Direct,
+            history: Vec::new(),
+            ..state
+        };
+        assert_eq!(PaneState::decode(&direct.encode()), Some(direct));
+        for cut in 0..bytes.len() {
+            assert_eq!(PaneState::decode(&bytes[..cut]), None, "cut at {cut}");
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert_eq!(PaneState::decode(&longer), None);
+        let mut version = bytes.clone();
+        version[4] = 2;
+        assert_eq!(PaneState::decode(&version), None);
+        let mut flags = bytes.clone();
+        flags[12] = 2;
+        assert_eq!(PaneState::decode(&flags), None);
+    }
+
+    /// The layout blob names the bundle that wrote it: a dev package's
+    /// holder is not another bundle's to take.
+    #[test]
+    fn a_layout_blob_names_its_bundle() {
+        let blob = layout_blob("dev.bateri.bateri", "bateri-session 1\nW x\n");
+        assert_eq!(
+            layout_of(&blob),
+            Some(("dev.bateri.bateri", "bateri-session 1\nW x\n"))
+        );
+        for broken in [
+            &b"bateri-handover 2 dev.bateri.bateri\nx"[..],
+            b"bateri-handover 1 \nx",
+            b"bateri-handover 1 a b\nx",
+            b"something 1 a\nx",
+            b"bateri-handover 1 a",
+            b"\xff\n",
+        ] {
+            assert_eq!(layout_of(broken), None, "{broken:?}");
+        }
+    }
+
+    /// The new bateri takes its own bundle's holder and the instance's
+    /// directory with it; another bundle's holder is let go untouched — it
+    /// still listens and still owns its directory.
+    #[test]
+    fn arrival_takes_only_its_own_bundles_holder() {
+        let (root, dir) = scratch("arrive");
+        let (fd, kept) = carried();
+        let bundle = Bundle {
+            layout: layout_blob("dev.bateri.test", "the layout"),
+            panes: vec![HeldPane::new(
+                tab(ID),
+                1,
+                2,
+                b"blob".to_vec(),
+                b"buf".to_vec(),
+                fd,
+            )],
+        };
+        let mut holder = spawn_holder(&dir, Duration::from_secs(20), bundle);
+        let me = std::process::id();
+
+        assert!(arrive(&[root.clone()], uid(), me, "dev.bateri.other").is_none());
+        assert_eq!(
+            owner_of(&dir),
+            Some(holder.id()),
+            "another bundle took the directory"
+        );
+        assert!(
+            holder_listening(&dir),
+            "another bundle's arrival ended the holder"
+        );
+
+        let mut arrival =
+            arrive(&[root.clone()], uid(), me, "dev.bateri.test").expect("an arrival");
+        assert_eq!(arrival.layout, "the layout");
+        assert_eq!(owner_of(&dir), Some(me), "the directory was not adopted");
+        let (link, pane) = arrival.panes.remove(0);
+        assert_eq!((link, pane.pid, pane.start), (0, 1, 2));
+        assert_eq!(
+            (pane.blob.as_slice(), pane.buffer.as_slice()),
+            (&b"blob"[..], &b"buf"[..])
+        );
+        proves_alive(&pane.master, &kept, b"after");
+        arrival.panes.push((link, pane));
+        arrival.finish();
+        wait_until("the holder did not exit after the ACK", || {
+            exited(&mut holder)
+        });
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The holder's spawn passes fd 3 and nothing else of this process —
+    /// a descriptor without close-on-exec included (macOS: the frozen
+    /// masters are such; elsewhere the holder closes them itself).
+    #[test]
+    fn a_clean_spawn_passes_only_the_kept_descriptor() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        // SAFETY: a plain open of a static path; checked.
+        let stray = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        assert!(stray > 2);
+        // SAFETY: `stray` is open; descriptor flags only.
+        unsafe { libc::fcntl(stray, libc::F_SETFD, 0) };
+        let script =
+            format!("if [ -e /dev/fd/{stray} ]; then echo leak >&3; else echo clean >&3; fi");
+        let pid = spawn_clean(
+            Path::new("/bin/sh"),
+            &["-c".into(), script.into()],
+            Some(std::os::fd::AsFd::as_fd(&theirs)),
+        )
+        .expect("spawn");
+        drop(theirs);
+        ours.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut said = String::new();
+        (&ours).read_to_string(&mut said).unwrap();
+        // SAFETY: our own descriptor.
+        unsafe { libc::close(stray) };
+        let mut status = 0;
+        // SAFETY: our own child.
+        unsafe { libc::waitpid(i32::try_from(pid).unwrap(), &raw mut status, 0) };
+        if cfg!(target_os = "macos") {
+            assert_eq!(said, "clean\n");
+        } else {
+            assert!(said == "clean\n" || said == "leak\n", "{said:?}");
+        }
+    }
+
+    /// The holder's socket goes to the first directory where it fits: a
+    /// long home's cache directory is passed over for the short root.
+    #[test]
+    fn the_socket_goes_where_it_fits() {
+        let long = PathBuf::from(format!("/{}", "x".repeat(120)));
+        let short = PathBuf::from("/tmp/bateri-501/12345678");
+        assert_eq!(
+            socket_first(&[long.clone(), short.clone()]),
+            Some(vec![short.clone(), long.clone()])
+        );
+        assert_eq!(
+            socket_first(&[short.clone(), long.clone()]),
+            Some(vec![short, long.clone()])
+        );
+        assert_eq!(socket_first(&[long]), None);
+        assert_eq!(socket_first(&[]), None);
     }
 }
