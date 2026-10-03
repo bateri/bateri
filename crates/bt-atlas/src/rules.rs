@@ -403,8 +403,10 @@ pub(crate) fn cell_metrics(raw: RawMetrics, space_advance: f64, line_height: f64
     // The multiplier is applied to the **cell**, not to the ascent: the
     // criterion is the distance between lines, and the font's definition of
     // that distance is `ascent + descent + leading`. At `1.0` the surplus is
-    // zero, so by default this path is a no-op.
-    let extra = round_up(f64::from(natural) * (line_height - 1.0));
+    // zero, so by default this path is a no-op. The rounding is a plain
+    // `ceil`, not `round_up`: `round_up` pins every measurement to `>= 1`, and
+    // that floor once added a pixel to every default cell (052 phase-0).
+    let extra = surplus_px(f64::from(natural) * (line_height - 1.0));
     let above = extra / 2;
     let baseline = round_up(ascent).saturating_add(above);
     let cell_px = (
@@ -444,6 +446,18 @@ pub(crate) fn cell_metrics(raw: RawMetrics, space_advance: f64, line_height: f64
         underline_px,
         strikeout_px,
     }
+}
+
+/// The cell's extra height for a line-height multiplier, rounded up.
+///
+/// Unlike [`round_up`] there is no floor of 1: zero surplus is zero pixels,
+/// so `line_height = 1.0` is exactly the font's natural height. A negative
+/// or non-finite input gives no surplus.
+fn surplus_px(v: f64) -> u16 {
+    if !v.is_finite() {
+        return 0;
+    }
+    v.ceil().clamp(0.0, f64::from(u16::MAX)) as u16
 }
 
 /// Fits a rule line **inside** the cell: (position from the top, thickness).
