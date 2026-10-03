@@ -1,4 +1,4 @@
-//! Clustering of emoji sequences (035): does a code point extend the open
+//! Clustering of emoji sequences: does a code point extend the open
 //! cluster, and how many columns does the cluster take.
 //!
 //! **The single authority.** The grid's wrapper ([`crate::handler`]), the
@@ -6,11 +6,10 @@
 //! (`dock::grid_span`) and the mirror half of the freshness gate
 //! (`last_ink`) ask only the two functions here. The day the two rules
 //! diverge, the dock shifts by a column or the freshness gate says "stale"
-//! permanently, and the symptom is silent (the walk's counterpart of 024
-//! Karar 1).
+//! permanently, and the symptom is silent (the walk's counterpart of the
+//! shared width table).
 //!
-//! **The rule comes from the emoji arms only**, not all of UAX #29
-//! (`.tasks/035-grapheme-dizileri/discussion.md` → Muhakeme, first item): a
+//! **The rule comes from the emoji arms only**, not all of UAX #29: a
 //! general "the table swallowed the sequence" arm also collapsed Arabic `لا`
 //! and `⌚︎` into one cluster, which produced two side effects that diverge
 //! from a wcwidth-counting shell and want to narrow a wide cell. Non-emoji
@@ -47,8 +46,7 @@ fn is_skin_tone(c: char) -> bool {
 /// Can `c` take emoji presentation: `c ++ VS16` is two columns. The `❤`
 /// behind a ZWJ is **text** presentation without VS16 and the intermediate
 /// string (`…‍❤`) is not in the table; had the criterion been the code
-/// point's own width, the ten-code-point kiss would split in two
-/// (`discussion.md` → Karar 3, fourth arm).
+/// point's own width, the ten-code-point kiss would split in two.
 fn emoji_capable(c: char) -> bool {
     let mut buf = [0u8; 8];
     let len = c.encode_utf8(&mut buf).len();
@@ -213,7 +211,7 @@ impl Walk {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ClusterId(NonZeroU32);
 
-/// The per-frame cluster table (035 Karar 4B): the boundary cell's
+/// The per-frame cluster table: the boundary cell's
 /// [`crate::Cell::cluster`] points at a string here.
 ///
 /// **The owner is the drawing side, the filler is [`crate::Session`]** — the
@@ -245,7 +243,7 @@ impl Clusters {
     /// Appends the string and returns its identity. `None` if the identity or
     /// byte space ran out — the cell is then clusterless, i.e. drawn with its
     /// **base character** (the same answer as for a cluster that does not
-    /// shape, 035 R1.1).
+    /// shape).
     pub fn push(&mut self, cluster: &str) -> Option<ClusterId> {
         self.push_chars(cluster.chars())
     }
@@ -325,8 +323,8 @@ mod tests {
         vec![(text.to_owned(), 2)]
     }
 
-    /// The seventeen samples of the scratchpad measurement (`discussion.md` →
-    /// Karar 3): each is a single cluster of two columns, or the measured
+    /// The seventeen samples of the scratchpad measurement: each is a single
+    /// cluster of two columns, or the measured
     /// split.
     #[test]
     fn the_measured_sequences_are_single_two_column_clusters() {

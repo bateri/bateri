@@ -11,7 +11,7 @@
 //! question, tab actions) and per-session state (`pane`: an `NSView` subclass;
 //! the session's core, the search bar, the upload queue and the pane-level menu
 //! selectors) live in separate objects. The boundary between a pane and its
-//! owner has three parts (039 Karar 1–3): inputs arrive in one package at birth
+//! owner has three parts: inputs arrive in one package at birth
 //! (`pane::PaneLaunch`), events go through a trait (`pane::PaneHost`; today's
 //! owner is `window::WindowHost`), and every menu job is a named method on the
 //! pane — the selector is a wrapper calling it. The pane module does not reach
@@ -33,7 +33,7 @@
 //! The platform-independent half — settings reading, the split tree, zoom,
 //! notices, the gesture ledger, shell quoting, key encoding, the upload rules,
 //! the process table, the child's command and environment, and the file watch
-//! — lives in `bt-shell-common` (043) and is imported at the crate root below,
+//! — lives in `bt-shell-common` and is imported at the crate root below,
 //! so `crate::settings` and friends keep resolving.
 
 pub(crate) mod app;
@@ -57,7 +57,7 @@ mod uploader;
 mod view;
 mod window;
 
-// The platform-independent half lives in `bt-shell-common` (043); imported
+// The platform-independent half lives in `bt-shell-common`; imported
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
     child, download, focus, gesture, handover, jobs, keys, links, notices, preview_cache, quote,
@@ -74,27 +74,27 @@ use bt_core::SHUTDOWN_GRACE;
 
 pub use bt_gpu::GpuError;
 
-/// The `bateri` binary as ssh's askpass (047 R2.1): `main`'s first call —
+/// The `bateri` binary as ssh's askpass: `main`'s first call —
 /// `Some(exit code)` ends the process before any AppKit or window-server
 /// work. Re-exported here so the binary gains no new crate edge.
 pub use bt_shell_common::ssh_route::askpass_main as askpass;
 
-/// The remote shell integration's state file on macOS (048):
+/// The remote shell integration's state file on macOS:
 /// `~/Library/Application Support/bateri/remote-hosts` — bateri's own file,
-/// not the user's `settings.toml` (discussion → Karar).
+/// not the user's `settings.toml`.
 pub(crate) fn remote_hosts_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join("Library/Application Support/bateri/remote-hosts")
 }
 
-/// `bateri ssh-argv [--tty] [--block N] [--instance I] -- <ssh arguments…>` (048): `Some(exit code)` when
+/// `bateri ssh-argv [--tty] [--block N] [--instance I] -- <ssh arguments…>`: `Some(exit code)` when
 /// the process was started as the subcommand, `None` otherwise. `main` calls
 /// it before the window-server check — the local zsh's `ssh` function calls
 /// it on every `ssh`, in any session. The body is
 /// [`bt_shell_common::ssh_wrap::ssh_argv_main`]; here only the platform's
 /// inputs: the settings file's launch reading (an unusable file, or no home,
 /// turns the integration off), the state file's path, the socket roots the
-/// instance directory is looked for under (phase-5) and the pane's tab
-/// (`BATERI_TAB_URL`, 049 R6). Every failure prints
+/// instance directory is looked for under and the pane's tab
+/// (`BATERI_TAB_URL`). Every failure prints
 /// nothing, and nothing means plain `ssh`.
 pub fn ssh_argv() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
@@ -111,7 +111,7 @@ pub fn ssh_argv() -> Option<i32> {
         return Some(0);
     };
     let settings = settings::load(&settings::config_root(&home)).at_launch().0;
-    // The calling pane's identity (049 R6): its shell's `BATERI_TAB_URL`, in
+    // The calling pane's identity: its shell's `BATERI_TAB_URL`, in
     // the one form `TabId` reads — anything else carries no tab.
     let tab = std::env::var("BATERI_TAB_URL")
         .ok()
@@ -131,8 +131,8 @@ pub fn ssh_argv() -> Option<i32> {
     ))
 }
 
-/// `bateri ssh-fell-back --rc N [--instance I] -- <ssh arguments…>` (049
-/// R3.2): [`ssh_argv`]'s sibling, asked by the local zsh's `ssh` function
+/// `bateri ssh-fell-back --rc N [--instance I] -- <ssh arguments…>`:
+/// [`ssh_argv`]'s sibling, asked by the local zsh's `ssh` function
 /// after a wrapped `ssh` ended with `N` — `Some(exit code)` when the process
 /// was started as the subcommand. The body is
 /// [`bt_shell_common::ssh_wrap::ssh_fell_back_main`]; here only the platform's
@@ -164,7 +164,7 @@ pub fn ssh_fell_back() -> Option<i32> {
     ))
 }
 
-/// `bateri focus [--pid P] bateri://tab/<UUID>` (050): `Some(exit code)`
+/// `bateri focus [--pid P] bateri://tab/<UUID>`: `Some(exit code)`
 /// when the process was started as the subcommand, `None` otherwise. `main`
 /// calls it before the window-server check — the outside process may ask from
 /// any session and only the token line may reach standard output. The body
@@ -193,7 +193,7 @@ pub fn focus() -> Option<i32> {
     ))
 }
 
-/// `bateri hold --fd FD --dir DIR` (055): `Some(exit code)` when the process
+/// `bateri hold --fd FD --dir DIR`: `Some(exit code)` when the process
 /// was started as the update's holder, `None` otherwise. `main` calls it
 /// before the window-server check — the holder has no GUI and outlives the
 /// bateri that started it. The body is
@@ -288,7 +288,7 @@ pub struct Options {
 /// process. `Ok(())` is seen only if AppKit's `run` ever returns.
 ///
 /// **`Err` is not returned today.** The first window now sets up the renderer
-/// (one renderer per window, `.tasks/026-sekmeler/discussion.md` → Karar 2a)
+/// (one renderer per window)
 /// and by then we are inside the main loop: a setup error is printed in
 /// `applicationDidFinishLaunching:` with the same line (`bateri: {error}`)
 /// and the same exit code (1). The signature stays so as not to change the
@@ -305,7 +305,7 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
     // The startup stamp must be taken **before** the first renderer (first
     // window), and the type enforces it: `Options` carries an `Instant`, not
     // a flag.
-    // The update's handover comes first (055): nothing of this process may
+    // The update's handover comes first: nothing of this process may
     // spawn a child before it ([`app::arrive`]).
     let arrival = app::arrive(&opts);
     let app = NSApplication::sharedApplication(mtm);

@@ -1,12 +1,12 @@
-//! The history search panel (⌘F, 033): an AppKit surface **floating above**
+//! The history search panel (⌘F): an AppKit surface **floating above**
 //! the terminal at the window's top right - an `NSSearchField`, the `Aa` and
 //! `.*` toggles, the count label, two arrows and a close button.
 //!
-//! **Why AppKit** (`.tasks/033-gecmiste-arama/discussion.md` → Karar 1): all
+//! **Why AppKit**: all
 //! the correctness of text entry (dead keys, IME, pasteboard, undo,
 //! VoiceOver) comes free with the field; a field drawn in Metal would have to
 //! rewrite each of them. The panel does **not push** the content, it rides
-//! on top - the PTY size does not change on ⌘F (032's "PTY stays fixed" rule).
+//! on top - the PTY size does not change on ⌘F (the dock's "PTY stays fixed" rule).
 //!
 //! **This file holds looks, not decisions.** Compiling the query, the
 //! current match and the window's move to a match live in `bt-core`
@@ -17,7 +17,7 @@
 //! placement and the open/close animation, reading and writing the toggles
 //! and the label.
 //!
-//! State is **per tab** (Karar 6): when the panel closes it is hidden, the
+//! State is **per tab**: when the panel closes it is hidden, the
 //! query and the two toggles stay in the field and come back selected on the
 //! next ⌘F. It is not written to the settings file.
 
@@ -69,8 +69,8 @@ const COUNT_WIDTH: f64 = 96.0;
 const BUTTON_WIDTH: f64 = 24.0;
 
 /// The duration of the open and close, in seconds. It started from the
-/// 240 ms floor found by eye in 030 and was shortened in the real window
-/// (phase-4 Uygulama Notları): the panel is small and its motion short, and
+/// 240 ms floor found by eye for the dock's typing effects and was shortened
+/// in the real window: the panel is small and its motion short, and
 /// at 240 ms the eye that had already started typing still saw the area
 /// settling into place.
 const APPEAR_SECS: f64 = 0.18;
@@ -117,7 +117,7 @@ impl SearchBar {
         let field = NSSearchField::new(mtm);
         field.setPlaceholderString(Some(ns_string!("Find")));
         // Every change sends the action immediately: the highlight follows
-        // typing (Karar 7) and the field's ⊗ button goes the same way (clearing
+        // typing and the field's ⊗ button goes the same way (clearing
         // the text does not cause `controlTextDidChange:`).
         field.setSendsSearchStringImmediately(true);
         field.setSendsWholeSearchString(false);
@@ -143,7 +143,7 @@ impl SearchBar {
         count.setTextColor(Some(&NSColor::secondaryLabelColor()));
         width(&count, COUNT_WIDTH);
 
-        // ⏎ = up, older (Karar 3): the up arrow is ⌘G's action, the down arrow
+        // ⏎ = up, older: the up arrow is ⌘G's action, the down arrow
         // ⇧⌘G's - the same selectors as the menu.
         let older = symbol(
             mtm,
@@ -351,7 +351,7 @@ impl SearchBar {
         self.applied.borrow_mut().take();
     }
 
-    /// Writes the count label (Karar 3).
+    /// Writes the count label.
     pub(crate) fn set_count(&self, status: SearchStatus, report: SearchReport) {
         self.count
             .setStringValue(&NSString::from_str(&count_label(status, report)));
@@ -368,7 +368,7 @@ impl SearchBar {
     }
 }
 
-/// The label's text (Karar 3). Empty for an empty query; "Invalid
+/// The label's text. Empty for an empty query; "Invalid
 /// pattern" for an invalid pattern; "No matches" if there is no match;
 /// otherwise the count over the whole scrollback - "3 of 17", or "17
 /// matches" if the current match's ordinal is not yet known. While the count
@@ -391,7 +391,7 @@ pub(crate) fn count_label(status: SearchStatus, report: SearchReport) -> String 
     }
 }
 
-/// ⌘E's query (Karar 6): the selection's **first line** - search does not
+/// ⌘E's query: the selection's **first line** - search does not
 /// cross a hard line break, so later lines could never match anything - and,
 /// in regex mode, its escaped form, so the selected text matches itself
 /// literally. `None` for a first line that is empty or **only whitespace**:

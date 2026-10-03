@@ -90,7 +90,7 @@ impl MouseEncoding {
 
     /// Lowers the coordinate to the last value the encoding fits.
     ///
-    /// **Only the release's path** ([`crate::Session::mouse_button`], R6): a
+    /// **Only the release's path** ([`crate::Session::mouse_button`]): a
     /// coordinate that doesn't fit is rejected on press and clamped on
     /// release. The asymmetry is there because the cases are asymmetric — a
     /// rejected press is a gesture that never started, while a dropped
@@ -197,7 +197,7 @@ pub(crate) enum ButtonRoute {
     /// meaning ("extend the existing selection", `Session::extend_selection`)
     /// is independent of the mode and `bt-shell`'s gesture ledger reads it.
     /// Shift+click in mouse mode landing here is therefore also the extension
-    /// — there Shift is already the selection's only path (031 Karar 6).
+    /// — there Shift is already the selection's only path.
     Select,
 }
 
@@ -242,7 +242,7 @@ pub(crate) fn motion_route(mode: TermMode, pressed: bool) -> Option<MouseEncodin
     wanted.then(|| mouse_encoding(mode))
 }
 
-/// The wheel's decision table (006 `phase-3b.md` §1) — the order is the
+/// The wheel's decision table — the order is the
 /// table's order and the same as alacritty's `scroll_terminal`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WheelRoute {
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn clamp_lands_on_the_last_coordinate_the_encoding_accepts() {
         // The clamped value must be an **accepted** value: `mouse_report` must
-        // not reject the same number, or the release would be dropped again (R6).
+        // not reject the same number, or the release would be dropped again.
         for encoding in [MouseEncoding::Normal, MouseEncoding::Utf8] {
             let far = encoding.clamp(u16::MAX);
             assert_eq!(far, encoding.limit().unwrap() - 1);

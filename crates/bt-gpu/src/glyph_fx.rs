@@ -1,11 +1,10 @@
 //! Effects of the glyphs typed and erased in the dock — **pure**, no ObjC, no
-//! locks (030).
+//! locks.
 //!
 //! Which glyph arrived or left is told by `bt-core`
 //! ([`bt_core::DockEdit`]); here there is only **time**: the list of in-flight
 //! entries, the elapsed time and the stop condition. Drawing is the job of
-//! `Frame` and the `glyph_fx` pipeline. The reasoning for the decisions is in
-//! `.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 3, 4 and 7.
+//! `Frame` and the `glyph_fx` pipeline.
 //!
 //! **Beside `Motion`, not inside it** ([`crate::blink`]'s precedent): `Motion` is
 //! `Copy` and lives in a `Cell`; a list would either take it out of `Copy` or
@@ -22,8 +21,8 @@ use bt_core::{Cell, Clusters, DockEdit, EDIT_MAX, Erase, Keypress};
 use crate::frame::copy_cluster;
 use crate::motion::Motion;
 
-/// Duration of an arrival, seconds — **chosen, not measured**; the reference's
-/// base duration (the reference, 240 ms).
+/// Duration of an arrival, seconds — **chosen, not measured**; a base duration
+/// of 240 ms.
 ///
 /// The first choice was 120 ms and the user said in a real window "the
 /// animations are not noticeable at all": the visible part fit in three or four
@@ -64,7 +63,7 @@ pub(crate) trait Effect: Copy + PartialEq + 'static {
     fn id(self) -> Option<u32>;
 
     /// All the effects that draw (except `Off`), in `NAMES` order — the loop of the
-    /// hermetic invariants (`plan.md` → R5): every name that enters the settings
+    /// hermetic invariants: every name that enters the settings
     /// model is under the tests the moment it enters.
     #[cfg(test)]
     fn effects() -> Vec<Self>;
@@ -96,8 +95,8 @@ impl Effect for Erase {
     fn id(self) -> Option<u32> {
         match self {
             Self::Off => None,
-            // `recede` stayed at 16 (phase-2's id); the other seven were lined up behind it
-            // in Karar 6's order — the id is only a contract with the shader, the order has
+            // `recede` stayed at 16 (its original id); the other seven were lined up behind
+            // it — the id is only a contract with the shader, the order has
             // no product meaning.
             Self::Recede => Some(16),
             Self::Iris => Some(17),
@@ -178,7 +177,7 @@ pub(crate) struct GlyphFx {
     erase: Erase,
     /// The source of the seed; wrapping is harmless.
     serial: u32,
-    /// The entries' cluster table (035): the edit's cells point into the dock's frame
+    /// The entries' cluster table: the edit's cells point into the dock's frame
     /// table and that table is cleared in every content frame while the effect lives
     /// for frames. The ids are copied here and the table is rebuilt from the living
     /// entries on every edit — its size does not exceed [`FX_MAX`] clusters.
@@ -193,10 +192,10 @@ impl GlyphFx {
     /// Order: first the vertical window's shift (the in-flight entries slide with the
     /// text and those that overflow the window's rows — `rows` — drop), then the
     /// **position rule** — the arrivals that stand at the new edit's position or
-    /// after it in reading order end (`discussion.md` → Karar 3: for a user who moves
-    /// the caret to the left of an in-flight glyph and types, that glyph sits early;
-    /// 032 phase-6 carried the rule to two axes — in a wrapped input the text behind
-    /// the edit slides to the lower lines too), last the new entries.
+    /// after it in reading order end (for a user who moves the caret to the left of an
+    /// in-flight glyph and types, that glyph sits early; the rule is on two axes — in a
+    /// wrapped input the text behind the edit slides to the lower lines too), last the
+    /// new entries.
     ///
     /// `rows` is the number of input rows the dock draws (the vertical window's
     /// size); `table` is the cluster table of the edit's cells (the dock's).
@@ -330,13 +329,11 @@ impl GlyphFx {
     /// Shifts the in-flight ones by the vertical window's shift (rows); an entry that
     /// overflows the window drops (so the ghost does not hang above the context line
     /// or the grid, and the arrival's static glyph is already not in that window).
-    /// The column does not shift: the horizontal window retired in 032, a long line
-    /// wraps.
+    /// The column does not shift: there is no horizontal window, a long line wraps.
     ///
     /// It runs in a frame without a shift too: while the window's top stays in place
     /// the band can shrink (the last letter of a wrapped line was erased) and the
-    /// ghost on a row that no longer exists would be drawn above the context line
-    /// (`/code-review`, 032 gate).
+    /// ghost on a row that no longer exists would be drawn above the context line.
     fn shift(&mut self, by: i32, rows: u16) {
         self.entries.retain_mut(|entry| {
             let cell = &mut entry.fx.cell;
@@ -607,7 +604,7 @@ mod tests {
 
     #[test]
     fn a_new_edit_settles_the_arrivals_after_it_in_reading_order() {
-        // In a wrapped input (032 phase-6) the rule is on two axes: the text behind the
+        // In a wrapped input the rule is on two axes: the text behind the
         // edit slides to the lower lines too, so the arrivals on the lower line must sit
         // too; those on the upper line — even if in the right column — are in the prefix
         // and in place.
@@ -847,7 +844,7 @@ mod tests {
 
     #[test]
     fn snap_and_reduce_motion_reduce_the_effects() {
-        // The table of `discussion.md` → Karar 7: `snap` turns both off, Reduce Motion
+        // The reduction table: `snap` turns both off, Reduce Motion
         // lowers the arrival to `fade` and turns the ghost off.
         let motion = |style: CursorMotion, reduce: bool| {
             let mut motion = Motion::default();

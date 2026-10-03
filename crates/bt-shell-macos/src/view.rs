@@ -28,7 +28,7 @@
 //! `Session::paste`. Registration is with `NSPasteboardTypeFileURL` and
 //! **only** it - a plain-text drop would make the escape rule conditional on
 //! the type, and since Finder puts two types in a single drop the order of
-//! the arms would become a decision too (018 Karar 4).
+//! the arms would become a decision too.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
@@ -72,7 +72,7 @@ use crate::quote::{paste_quote, shell_quote};
 /// window's title bar, left padding or the dock band would report a **wrong**
 /// cell to the application; the coordinate of a drag and of a release is the
 /// continuation of an already started gesture and there sticking to the edge
-/// is both xterm's behaviour and R6's requirement (a dropped release leaves a
+/// is both xterm's behaviour and a requirement (a dropped release leaves a
 /// button stuck in the application).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OutOfGrid {
@@ -92,12 +92,12 @@ pub(crate) enum OutOfGrid {
 /// divides. The padding comes from the same `CellMetrics` as the `cols`
 /// computation (`split_into_grid`) and the drawing origin
 /// (`Frame::pos_at`); had the three diverged the symptom would be "the mouse
-/// is a column off" (010 Karar 3).
+/// is a column off".
 ///
 /// `origin_px` is the vertical half of the same sentence and its source is
 /// also single ([`bt_gpu::Origin`]): the **drawn** frame's origin, the value
 /// the frame path wrote. Were there a second computation the symptom would
-/// be "the mouse is a row off" and during the slide animation (phase-2) it
+/// be "the mouse is a row off" and during the slide animation it
 /// would be off by a different row every frame. A parameter, not a field: the
 /// function stays pure and tests that do not care about the origin pass `0.0`.
 ///
@@ -128,7 +128,7 @@ pub(crate) enum OutOfGrid {
 /// There are **two** reasons for `None`: a grid with zero columns/rows (a
 /// minimised window - there is no cell to stick to) and a point falling
 /// **above** the origin while `fill_rows > 0`. The second is this function's
-/// only **rejection**: when the fill band is drawn (017) that area is not
+/// only **rejection**: when the fill band is drawn that area is not
 /// blank, the scrollback's rows stand there and those rows cannot be
 /// represented by the boundary's row numbers. The rejection does not replace
 /// the clamping, it goes **beside** it - with `fill_rows == 0` a point
@@ -312,8 +312,7 @@ pub(crate) struct SmoothWheel {
 /// without one (classic wheel) is a notch. A phaseless but precise event
 /// (synthetic events of external scrollers) also counts as a notch: since it
 /// carries no phase that says when it ends, had it been tracked directly the
-/// window would rest at half a line (`.tasks/027-yumusak-kaydirma/discussion.md`
-/// → Karar 3).
+/// window would rest at half a line.
 ///
 /// - **Gesture start** (`phase` `Began`/`MayBegin`, `momentum` `Began`):
 ///   [`ScrollIntent::GestureBegan`] - the finger touched again or momentum
@@ -407,7 +406,7 @@ fn modifiers(event: &NSEvent) -> MouseModifiers {
 /// macOS's line gestures and all three bytes are really bound in zsh. The
 /// list staying **closed** is a design decision, not its length: a passing
 /// key is written by name, otherwise an open rule would one day pass Cmd-T
-/// too and type `t` into the shell (018 Karar 3; the entry of ⌘←/⌘→ is
+/// too and type `t` into the shell (the entry of ⌘←/⌘→ is
 /// justified in `encode_key`'s arm).
 ///
 /// The exception asks **only the character**, not the modifiers beside it:
@@ -522,9 +521,9 @@ pub(crate) struct ViewIvars {
     dock_rows: Cell<u16>,
     /// The hand-cursor rectangles the last `resetCursorRects` set up (what
     /// [`BateriView::sync_cursor_rects`] compares): the upload buttons' and the
-    /// ⌘-hovered link's, one list (044 Muhakeme).
+    /// ⌘-hovered link's, one list.
     cursor_rects: RefCell<Vec<NSRect>>,
-    /// The ⌘-hover and ⌘-click state (044 phase-4, [`crate::hyperlink`]).
+    /// The ⌘-hover and ⌘-click state ([`crate::hyperlink`]).
     link: RefCell<LinkState>,
     /// The drawn frame's vertical origin - the read end of the body the frame
     /// path writes ([`bt_gpu::Origin`]).
@@ -561,7 +560,7 @@ define_class!(
             true
         }
 
-        /// The keyboard came to the terminal (033 R7): the return from the
+        /// The keyboard came to the terminal: the return from the
         /// search panel's field - Esc, close or a click on the terminal. The
         /// caret's focus is "window key **and** keyboard in the terminal" and
         /// the second bit comes from a single source, from here
@@ -595,7 +594,7 @@ define_class!(
         /// pasteboard. If there is no selection or it is empty the pasteboard
         /// is left untouched (`clipboard::copy`). The window has a single
         /// selection - the grid's or the dock's - and its text is given by its
-        /// owner through `Session::selection_text` (031 Karar 7).
+        /// owner through `Session::selection_text`.
         ///
         /// The menu item has no target: the action reaches the first
         /// responder through the responder chain, i.e. here (`menu`). The text
@@ -608,7 +607,7 @@ define_class!(
         }
 
         /// Edit ▸ Cut (⌘X): writes the dock selection's text to the
-        /// pasteboard and deletes the selection (031 Karar 7). It does
+        /// pasteboard and deletes the selection. It does
         /// something only while the editing gate is open (`Session::dock_cut`);
         /// the menu item is enabled then ([`BateriView::validate_menu_item`]),
         /// so the shortcut does not reach here with the gate closed either.
@@ -627,7 +626,7 @@ define_class!(
         /// Copy, Paste and Select All are always enabled as today. Two
         /// exceptions: Cut is grey if the dock has no selection or the editing
         /// gate is closed (`vicmd`, stale mirror, a command running); Paste
-        /// Escaped Text is grey if there is no text on the pasteboard (034) -
+        /// Escaped Text is grey if there is no text on the pasteboard -
         /// Paste itself is always enabled as today and silent on an empty pasteboard.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
@@ -652,7 +651,7 @@ define_class!(
         /// wrapped in bracketed paste, otherwise written raw. Raw bytes do not
         /// touch `session.write`. Silent if there is no text on the
         /// pasteboard. If there is a selection in the dock the payload
-        /// replaces it - the deletion is inside `paste()` too (031 Karar 8).
+        /// replaces it - the deletion is inside `paste()` too.
         #[unsafe(method(paste:))]
         fn paste_clipboard(&self, _sender: Option<&AnyObject>) {
             let Some(session) = self.ivars().session.get() else {
@@ -663,14 +662,14 @@ define_class!(
             }
         }
 
-        /// Edit ▸ Paste Escaped Text (⌃⌘V; 034 Karar 3): makes the
+        /// Edit ▸ Paste Escaped Text (⌃⌘V): makes the
         /// pasteboard's text writable to the shell **as a single argument** and
         /// pastes it - with the Finder drop's backslash if there is no line
         /// break, wholly in single quotes if there is
         /// ([`crate::quote::paste_quote`]). What follows is Paste's path
         /// (`Session::paste`: bracketed wrapping, replacing the dock selection).
         ///
-        /// Here, not in `TerminalPane` (the `paste:` precedent, 034 Karar 4):
+        /// Here, not in `TerminalPane` (the `paste:` precedent):
         /// while the search field is focused the responder chain does not pass
         /// through this view and the item is grey - pasting escaped text into
         /// the field has no meaning.
@@ -762,7 +761,7 @@ define_class!(
             self.hand_cursor_rects();
         }
 
-        /// A modifier key went down or up (044 R7): ⌘ shows or clears the link
+        /// A modifier key went down or up: ⌘ shows or clears the link
         /// under the pointer without the pointer moving
         /// ([`BateriView::link_flags`]). Then `NSResponder`'s default, which
         /// passes the event along the chain.
@@ -779,13 +778,12 @@ define_class!(
         /// and if the cell did not change `bt-core` is not called at all
         /// ([`BateriView::motion_event`]). Turning it on by mode would need
         /// publishing the mode to `bt-shell-macos`, i.e. a new piece of shared
-        /// state (`.tasks/020-fare-raporlama/discussion.md` →
-        /// Karar 4); if a symptom is seen we return to that arm.
+        /// state; if a symptom is seen we return to that arm.
         ///
         /// The upload line's button ([`BateriView::upload_hover`]) is asked
         /// **before** the motion report and independently of it: the context
         /// line is outside the grid and the report path rejects that area. The
-        /// ⌘-hovered link ([`BateriView::link_motion`], 044) likewise: its hit
+        /// ⌘-hovered link ([`BateriView::link_motion`]) likewise: its hit
         /// test also covers the fill band, which the report keeps rejecting.
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
@@ -796,7 +794,7 @@ define_class!(
         }
 
         /// Left button released: if the press was reported the release is
-        /// reported too (R6), otherwise the drag ends and the selection stays
+        /// reported too, otherwise the drag ends and the selection stays
         /// on screen (Cmd-C copies it).
         ///
         /// There is **no** `buttonNumber()` gate here and the asymmetry is
@@ -810,7 +808,7 @@ define_class!(
 
         /// Right button: the report path, and where the terminal owns the press
         /// (mouse mode off, the fill band, the dock) the link's context menu
-        /// ([`BateriView::link_menu`], 044 Karar 7). Off a link a right click does
+        /// ([`BateriView::link_menu`]). Off a link a right click does
         /// nothing - no general context menu, and no selection either: it would
         /// produce an unexpected highlight.
         #[unsafe(method(rightMouseDown:))]
@@ -841,7 +839,7 @@ define_class!(
             self.menu_copy_link();
         }
 
-        /// A remote link's items (045 R3): download to the download folder, to
+        /// A remote link's items: download to the download folder, to
         /// a chosen folder, and its scp path.
         #[unsafe(method(downloadLinkFromMenu:))]
         fn download_link_from_menu(&self, _sender: Option<&AnyObject>) {
@@ -1046,7 +1044,7 @@ define_class!(
             }
             let ctrl = flags.contains(NSEventModifierFlags::Control);
             let option = flags.contains(NSEventModifierFlags::Option);
-            // **The dock selection's keys** (031 Karar 8), BEFORE the stack: ⌫
+            // **The dock selection's keys**, BEFORE the stack: ⌫
             // and the arrows would fall to `doCommandBySelector:` in the stack
             // and take their bytes from `encode_key`, i.e. instead of deleting
             // the selection they would delete one character. A key that is not
@@ -1054,7 +1052,7 @@ define_class!(
             // present path below and input removes the selection.
             // **Not asked while a composition is pending**: ⌫ must cancel it
             // (had the ⌫ after Option+e not gone to the stack the next letter
-            // would come out accented; `/code-review`, 031 gate).
+            // would come out accented; found in code review).
             if self.ivars().marked_text.borrow().is_empty()
                 && let Some(chars) = chars.as_deref()
                 && let Some(key) = dock_key(
@@ -1070,7 +1068,7 @@ define_class!(
             {
                 return;
             }
-            // `!command` is where R4.2 is **applied**: the three keys that pass
+            // `!command` is where the allow list is **applied**: the three keys that pass
             // the allow list do not enter the stack either. Had they, the stack
             // would turn them into
             // `deleteToBeginningOfLine:`/`moveToBeginningOfLine:`/`moveToEndOfLine:`,
@@ -1160,7 +1158,7 @@ define_class!(
             // attached the key is lost but `encode_key` does not send it a second time.
             self.ivars().consumed.set(true);
             // `type_text`, not `write`: if there is a selection in the dock the
-            // letter is typed in its place (031 Karar 8).
+            // letter is typed in its place.
             if let Some(session) = self.ivars().session.get() {
                 session.type_text(&text);
             }
@@ -1326,8 +1324,8 @@ define_class!(
         /// The type filtering was done at registration
         /// (`registerForDraggedTypes` in [`BateriView::new`]): this method is
         /// called only if there is a file URL on the pasteboard. The only thing
-        /// asked is the sheet of the upload to the remote directory (037 Karar
-        /// 7): two sheets cannot open on top of each other and a drop arriving
+        /// asked is the sheet of the upload to the remote directory: two
+        /// sheets cannot open on top of each other and a drop arriving
         /// meanwhile would be rejected in `performDragOperation:` - showing "+"
         /// would be a lie. While an upload is **flowing** the drop is accepted:
         /// it enters the queue.
@@ -1363,12 +1361,12 @@ define_class!(
         /// The drop was released: in a local session the paths are escaped and
         /// written to the input line; **in a remote session** a local path is
         /// not written to the remote shell - the drop is uploaded to the remote
-        /// directory (037 Karar 7; the confirmation sheet and the queue are in
-        /// `crate::uploader`) and no path is pasted on its own (phase-7).
+        /// directory (the confirmation sheet and the queue are in
+        /// `crate::uploader`) and no path is pasted on its own.
         ///
         /// The output is [`Session::paste`] - **not** `session.write`: the
-        /// bracketed paste wrapping and the dock exception come free from there
-        /// (018 Karar 4). While the dock owns the line a single-file drop enters
+        /// bracketed paste wrapping and the dock exception come free from there.
+        /// While the dock owns the line a single-file drop enters
         /// the dock "as if typed" (`Session::can_be_typed`; a backslash is not a
         /// control character, it passes the raw branch without trouble) and this
         /// is the **right** behaviour: the user sees the drop as the
@@ -1400,7 +1398,7 @@ define_class!(
         }
     }
 
-    /// **The view is also a drag source** (045 R7): a ⌘-drag of a remote link
+    /// **The view is also a drag source**: a ⌘-drag of a remote link
     /// is a file promise to Finder ([`crate::promise::begin_drag`]).
     unsafe impl NSDraggingSource for BateriView {
         /// Copy only, inside and outside the application: the remote item
@@ -1445,10 +1443,10 @@ define_class!(
 /// steps and the middle condition - the one that cannot be decoded into an
 /// `NSURL`, the one that **does not say `isFileURL`** and the one that gives no path.
 ///
-/// The middle step was added at the set's gate (018): the `NSURL` class reads
+/// The middle step was added later: the `NSURL` class reads
 /// `http://` too and `NSURL.path` answers it with `/foo`, so a user dropping a
-/// web address would find a root-anchored path on the input line. Karar 4
-/// says "only file URLs" and `plan.md` keeps a text/URL drop out of scope; the
+/// web address would find a root-anchored path on the input line. The rule
+/// is "only file URLs" and a text/URL drop is out of scope; the
 /// registration was right, the code was missing.
 fn dropped_paths(board: &NSPasteboard) -> Vec<String> {
     let classes: Retained<NSArray<AnyClass>> = NSArray::from_slice(&[NSURL::class()]);
@@ -1514,7 +1512,7 @@ impl BateriView {
         // The single condition for being a drag destination: the view must say
         // **in advance** which types it accepts, otherwise `draggingEntered:` is
         // never called. The list has a single type - a plain-text drop is out of
-        // scope and the escape rule is thus not conditional on the type (018 Karar 4).
+        // scope and the escape rule is thus not conditional on the type.
         //
         // SAFETY: the `unsafe` block is only for the **static** access of
         // `NSPasteboardTypeFileURL` (the `clipboard` precedent); it is a real
@@ -1583,7 +1581,7 @@ impl BateriView {
     ///
     /// The **settling** of a trackpad gesture glides during a drag too and the
     /// end does not follow it until the next `mouseDragged:`: the amount is
-    /// under half a line and the plan writes this limit by name (→ Kapsam Dışı).
+    /// under half a line and this limit is known and accepted.
     fn smooth_scroll_wheel(&self, event: &NSEvent, session: &Session, unit: f64) {
         let carry = &self.ivars().scroll_carry;
         let (step, rest) = smooth_wheel(
@@ -1599,7 +1597,7 @@ impl BateriView {
         };
         // The wheel above the dock is the dock's (with whole lines; there is no
         // gliding since there is no dock window resting at half a line). **The
-        // gesture's start and end stay the grid's** (`/code-review`): had the
+        // gesture's start and end stay the grid's** (found in code review): had the
         // `Settle` of a scroll that began in the grid and ended with momentum
         // above the dock been swallowed, the grid would hang at half a line.
         if !matches!(
@@ -1612,7 +1610,7 @@ impl BateriView {
         // **A notch does not glide during a held drag**, it goes by line
         // steps: the gliding's amount scrolls the window in the frame path and
         // there nobody moves the selection's end to the mouse - while the mouse
-        // is still the end would stay on the old row (`/code-review`). The line
+        // is still the end would stay on the old row (found in code review). The line
         // step returns `Scrolled(n)` and `follow_pointer` runs as today; when
         // selecting, precision in scrolling comes before ornament.
         if step.intent == ScrollIntent::Glide && self.ivars().gesture.get().dragging() {
@@ -1643,8 +1641,8 @@ impl BateriView {
     }
 
     /// Reports the keyboard's place to the owner pane; silent if the view is
-    /// not yet attached to a pane. The owner is from `superview()` (039 Karar
-    /// 2): the pane is this view's direct parent.
+    /// not yet attached to a pane. The owner is from `superview()`:
+    /// the pane is this view's direct parent.
     fn keyboard_moved(&self, here: bool) {
         if let Some(pane) = self.pane() {
             pane.keyboard_moved(here);
@@ -1715,10 +1713,9 @@ impl BateriView {
     /// not an inconsistency, it is the two faces of [`OutOfGrid`]'s single
     /// rule. A press *starts* a gesture: a point falling outside the grid is
     /// rejected, so a press on the title bar, the left padding, the dock band
-    /// and the fill band produces neither a report nor a selection (R8 is a
-    /// special case of this). A release *ends* a started gesture: the point is
+    /// and the fill band produces neither a report nor a selection. A release *ends* a started gesture: the point is
     /// clamped, because a dropped release would leave a **button stuck** in
-    /// the application (R6).
+    /// the application.
     ///
     /// On release `Clamp`'s `fill_rows` is passed as zero: the area above the
     /// band must give a cell too, `bt-core` does the clamping.
@@ -1737,26 +1734,26 @@ impl BateriView {
                 // The gesture in the dock ended: if it was a click without a drag the caret goes there.
                 Release::Dock => session.dock_click(),
                 // A ⌘-click on a link: opened if the pointer is still over the
-                // range locked at the press and this is the first click (044 R6).
+                // range locked at the press and this is the first click.
                 Release::Link => self.link_release(event),
                 Release::Done => {}
             }
             return;
         }
-        // The upload line's buttons (037 Karar 7) and the load indicator (046
-        // phase-5): on the context line, without entering the gesture ledger -
+        // The upload line's buttons and the load indicator: on the
+        // context line, without entering the gesture ledger -
         // a click is a button, it starts no drag.
         if button == MouseButton::Left && self.context_control(event) {
             return;
         }
         self.forget_link_menu();
         self.with_gesture(|g| g.begin_press(button));
-        // **A ⌘-press on the shown link is the link's in every mode** (044 R6):
+        // **A ⌘-press on the shown link is the link's in every mode**:
         // neither a report (vim, htop, Claude Code see nothing) nor a selection,
         // Shift or not. Only a **verified** hover counts — the press before the
         // path's `stat` returned takes today's route.
         //
-        // A **remote** link can also be dragged out to Finder (045 R7): the
+        // A **remote** link can also be dragged out to Finder: the
         // ledger keeps the press point and the first motion past the threshold
         // starts the file promise drag ([`Drag::Link`]).
         if button == MouseButton::Left
@@ -1769,7 +1766,7 @@ impl BateriView {
         }
         // **The dock's input line before the grid** and without asking the
         // mouse mode at all: the band is not the application's screen but the
-        // terminal's own surface (031 phase-4). Only the left button; the
+        // terminal's own surface. Only the left button; the
         // context line and the band's padding are rejected, so a press there does nothing.
         if button == MouseButton::Left
             && let Some(point) = self.window_point_dock(event.locationInWindow(), OutOfGrid::Reject)
@@ -1784,7 +1781,7 @@ impl BateriView {
         }
         let Some(cell) = self.window_point_cell(event.locationInWindow(), OutOfGrid::Reject) else {
             // The fill band and the dock are never the application's screen: a
-            // right click there is the terminal's, the link menu's (044 Karar 7).
+            // right click there is the terminal's, the link menu's.
             if button == MouseButton::Right {
                 self.link_menu(event);
             }
@@ -1826,14 +1823,14 @@ impl BateriView {
 
     /// The common body of a held drag: if the gesture is the application's a
     /// motion report, if the terminal's the selection's end. The route was
-    /// locked at the press (R6) and is not asked again here
+    /// locked at the press and is not asked again here
     /// ([`Gesture::dragged`]): releasing Shift or the application turning the
     /// mode off in the middle of the same gesture must not change the path.
     fn drag_event(&self, event: &NSEvent, button: MouseButton) {
         let at = event.locationInWindow();
         match self.with_gesture(|g| g.dragged(button, (at.x, at.y))) {
             // A ⌘-press on a remote link moved past the threshold: the file
-            // promise drag to Finder (045 R7). AppKit owns the mouse from here.
+            // promise drag to Finder. AppKit owns the mouse from here.
             Drag::Link => self.link_drag(event),
             Drag::Report => self.motion_event(event, Some(button)),
             Drag::Select => {
@@ -1843,8 +1840,8 @@ impl BateriView {
             }
             // A drag that began in the dock stays in the dock: the point is
             // clamped into the input block, it does not overflow onto the grid.
-            // **A drag past the block's edge scrolls the vertical window** (032
-            // phase-4): so the selection can extend to invisible rows in an
+            // **A drag past the block's edge scrolls the vertical window**:
+            // so the selection can extend to invisible rows in an
             // input past the ceiling. One row per event, i.e. as the mouse moves
             // beyond the edge - there is no periodic timer.
             Drag::SelectDock => {
@@ -1897,7 +1894,7 @@ impl BateriView {
         if lost.is_empty() {
             return;
         }
-        // The continuation of a gesture, not its start: the coordinate is clamped (R6).
+        // The continuation of a gesture, not its start: the coordinate is clamped.
         let clamp = OutOfGrid::Clamp { fill_rows: 0 };
         let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) else {
             return;
@@ -1988,8 +1985,8 @@ impl BateriView {
     /// Window point → row + column + half in the dock's input block. `None`
     /// if there is no dock or the point is outside the input block (under `Reject`).
     ///
-    /// The geometry is from the **drawn frame** ([`bt_gpu::Origin::dock`],
-    /// 032): the block's top and its row count are published in the same write
+    /// The geometry is from the **drawn frame** ([`bt_gpu::Origin::dock`]):
+    /// the block's top and its row count are published in the same write
     /// as the grid's origin, so while the band grows the mouse reads neither the
     /// grid nor the block a frame behind. If no frame has been drawn yet, the
     /// PTY pad's single-row block ([`dock_input_top_px`]); the height in that
@@ -2018,7 +2015,7 @@ impl BateriView {
     }
 
     /// A key, a press, the wheel or a mouse move: the remote load indicator
-    /// keeps sampling while the user is around (046 Karar 6). A stamp, no
+    /// keeps sampling while the user is around. A stamp, no
     /// `Term` lock — it runs at mouse-move rate.
     fn note_interaction(&self) {
         if let Some(pane) = self.pane() {
@@ -2026,7 +2023,7 @@ impl BateriView {
         }
     }
 
-    /// The owner pane of this view - its direct superview (039 Karar 2);
+    /// The owner pane of this view - its direct superview;
     /// `None` if the view is not yet attached to a pane. There is no linear
     /// search in a window list or reaching for the application delegate: the
     /// owner is in the view tree.
@@ -2038,7 +2035,7 @@ impl BateriView {
     }
 
     /// Window point → dock-local column on the context line and the context
-    /// line's budget (037 Karar 7, phase-6): the line is **below** the input
+    /// line's budget: the line is **below** the input
     /// block, the column pitch is the small class's advance. `None` if there is
     /// no dock, no frame yet or the point is not on the context line.
     ///
@@ -2057,7 +2054,7 @@ impl BateriView {
     /// The rectangle, at view points, of the dock-local `[start, end)` column
     /// range on the context line - the inverse of [`Self::context_column`],
     /// from the same geometry ([`context_span_px`]): the anchor of the "Show
-    /// files (N)" popover (037 phase-7) and the buttons' hand cursor
+    /// files (N)" popover and the buttons' hand cursor
     /// ([`Self::hand_cursor_rects`]).
     pub(crate) fn context_span_rect(&self, start: u16, end: u16) -> Option<NSRect> {
         let (metrics, _) = self.ivars().metrics.get()?;
@@ -2076,7 +2073,7 @@ impl BateriView {
         Some(bt_gpu::context_cols(cols, metrics))
     }
 
-    /// The upload buttons' hand cursor (after 037 phase-6): AppKit's **cursor
+    /// The upload buttons' hand cursor: AppKit's **cursor
     /// rect**, the button's whole fill. Not `set()`, because the window's
     /// re-evaluation of the cursor (every `↑ N%` write of the title, becoming
     /// key, the frame) sends the view `cursorUpdate:` and `NSView`'s default
@@ -2085,7 +2082,7 @@ impl BateriView {
     /// rect is that evaluation's **input**: inside the rectangle AppKit sets the
     /// hand itself, outside the arrow, in a non-key window none at all.
     ///
-    /// The ⌘-hovered link's cells join the **same** list (044 Muhakeme): one
+    /// The ⌘-hovered link's cells join the **same** list: one
     /// `resetCursorRects`, one comparison in [`Self::sync_cursor_rects`].
     fn hand_cursor_rects(&self) {
         let rects = self.hand_rects();
@@ -2097,7 +2094,7 @@ impl BateriView {
     }
 
     /// Every hand-cursor rectangle: the upload buttons, the load indicator
-    /// (046 phase-5) and the shown link.
+    /// and the shown link.
     fn hand_rects(&self) -> Vec<NSRect> {
         let mut rects = self.upload_button_rects();
         rects.extend(self.stats_rect());
@@ -2116,7 +2113,7 @@ impl BateriView {
     }
 
     /// The Sign In… button's rectangle, in view points — its click's range
-    /// (`Session::sign_in_span`, 047 R7.2); `None` if it is not drawn.
+    /// (`Session::sign_in_span`); `None` if it is not drawn.
     fn sign_in_rect(&self) -> Option<NSRect> {
         let budget = self.context_budget()?;
         let (start, end) = self.pane()?.session()?.sign_in_span(budget)?;
@@ -2153,8 +2150,8 @@ impl BateriView {
         }
     }
 
-    /// Whether the click landed on one of the upload line's buttons (037 Karar
-    /// 7) or, failing that, on the load indicator (046 phase-5; never both —
+    /// Whether the click landed on one of the upload line's buttons
+    /// or, failing that, on the load indicator (never both —
     /// the indicator is not drawn while an upload row is); `true` → the click
     /// was consumed. The geometry is [`Self::context_column`]'s.
     fn context_control(&self, event: &NSEvent) -> bool {
@@ -2174,7 +2171,7 @@ impl BateriView {
         self.context_column(self.window()?.mouseLocationOutsideOfEventStream())
     }
 
-    /// The upload button under the mouse (037 phase-6): a window change asks
+    /// The upload button under the mouse: a window change asks
     /// for a frame only when the button changes and turns the cursor
     /// (`TerminalPane::upload_hover`).
     fn upload_hover(&self, event: &NSEvent) {
@@ -2184,7 +2181,7 @@ impl BateriView {
     }
 
     /// If the wheel is above the dock's input block it gives it to the dock's
-    /// vertical window (032 phase-4); `true` → the event was consumed. If the
+    /// vertical window; `true` → the event was consumed. If the
     /// dock does not overflow (`Session::dock_scroll` `false`) the event is the
     /// grid's, as today.
     fn dock_wheel(&self, event: &NSEvent, session: &Session, lines: i32) -> bool {
@@ -2323,7 +2320,7 @@ mod tests {
         // The button's hand cursor (cursor rect) and the click/hover's column
         // must read the same band and the same pitch: were they to diverge the
         // hand would appear beside the button. Two dock shapes: with an input
-        // line (a gap between lines) and a remote session (input line zero, 036).
+        // line (a gap between lines) and a remote session (input line zero).
         let metrics = CellMetrics::new(16, 33, 13, 8, 2).expect("cell");
         for (top, rows) in [(500.0_f32, 2_u16), (620.0, 0)] {
             let (start, end) = (40_u16, 52_u16);
@@ -2706,7 +2703,7 @@ mod tests {
         // not change the bottom edge's rule, it only pushes the start.
         assert_eq!(row(at(600.0)), Some(32), "bottom overflow");
 
-        // **The middle of a slide is a legitimate origin too** (R2.7): the mouse
+        // **The middle of a slide is a legitimate origin too**: the mouse
         // reads the drawn value and that value does not stop at a row boundary
         // during the slide. Here half a cell (9 physical pixels) is added: the
         // content's first row is now half a cell lower and the old boundary
@@ -2793,7 +2790,7 @@ mod tests {
         assert_eq!(thin(89.0), None, "inside the band");
     }
 
-    /// **The full grid is a band higher up** (032): when the dock grows to
+    /// **The full grid is a band higher up**: when the dock grows to
     /// three input rows the drawn origin goes negative (two rows, `-36` px) and
     /// the grid's top is outside the window. The first visible pixel is row 2
     /// and a click must select that - a mapping that ignored the origin would
@@ -3127,7 +3124,7 @@ mod tests {
     /// been seen by the gate. What it pins is `NSURL`'s generosity: the class
     /// reads `http://` too and `NSURL.path` answers it with `/foo`, so without
     /// the step a link dragged from a browser would write a root-anchored path
-    /// to the input line (`discussion.md` → Karar 4: only a file URL).
+    /// to the input line (the rule: only a file URL).
     ///
     /// The pasteboard is **unique and local**: had `generalPasteboard` been
     /// used the test would have erased what the user copied.

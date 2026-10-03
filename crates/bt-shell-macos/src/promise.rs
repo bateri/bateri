@@ -1,4 +1,4 @@
-//! **⌘-dragging a remote link to Finder** (045 R7, Karar 7, 14): the drag is a
+//! **⌘-dragging a remote link to Finder**: the drag is a
 //! file promise (`NSFilePromiseProvider`), and the promise is kept by a
 //! download into the transfer queue's **Finder lane**, which never waits.
 //!
@@ -356,7 +356,7 @@ fn drag_image(
 }
 
 /// `Drag::Link` on the remote path `remote` (`entry`: what the hover found): the
-/// file promise drag from `view` (045 R7). A beep-free no-op if the pane or the
+/// file promise drag from `view`. A beep-free no-op if the pane or the
 /// remote session is gone — the gesture simply does nothing.
 pub(crate) fn begin_drag(view: &BateriView, event: &NSEvent, remote: String, entry: &RemoteEntry) {
     let Some(pane) = view.pane() else {
@@ -575,7 +575,7 @@ impl TerminalPane {
         }
     }
 
-    /// The `NSProgress` Finder reads on `landing` (Karar 7): kind file,
+    /// The `NSProgress` Finder reads on `landing`: kind file,
     /// downloading, cancellable — its cancel stops the item.
     fn finder_progress_for(&self, landing: &Path, bytes: u64) -> Retained<NSProgress> {
         let progress = NSProgress::discreteProgressWithTotalUnitCount(

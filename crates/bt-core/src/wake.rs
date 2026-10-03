@@ -82,7 +82,7 @@ pub trait Wake: Send + Sync + 'static {
     /// anyway.
     fn title_changed(&self);
 
-    /// While search in scrollback is open, **the ledger changed** (033): PTY
+    /// While search in scrollback is open, **the ledger changed**: PTY
     /// output arrived or the window was re-wrapped. The receiver drives the
     /// count index ([`crate::Session::search_step`]); the index restarts its
     /// next pass from the beginning.
@@ -96,7 +96,7 @@ pub trait Wake: Send + Sync + 'static {
     /// search is closed.
     fn search_changed(&self);
 
-    /// The shell's phase **moved** to `Running` (OSC 133 `C`; 036 Karar 2): a
+    /// The shell's phase **moved** to `Running` (OSC 133 `C`): a
     /// command started. The receiver probes the foreground program and reports
     /// the remote session via [`crate::Session::set_remote`].
     ///
@@ -112,7 +112,7 @@ pub trait Wake: Send + Sync + 'static {
     /// its queue.
     fn command_started(&self);
 
-    /// The remote bootstrap said it runs (`8133;i;up;{nonce}`, 049 R2.2)
+    /// The remote bootstrap said it runs (`8133;i;up;{nonce}`)
     /// while a command ran: the receiver reads it with
     /// [`crate::Session::remote_up`] and, if the nonce is the wrapped `ssh`'s,
     /// learns the server as one with a shell.
@@ -125,8 +125,8 @@ pub trait Wake: Send + Sync + 'static {
     /// most one** job to its queue.
     fn remote_up(&self);
 
-    /// The user typed into a remote session after its login was seen (049
-    /// R7): the receiver reads the generation with
+    /// The user typed into a remote session after its login was seen: the
+    /// receiver reads the generation with
     /// [`crate::Session::remote_typed`] and, if it is a wrapped `ssh`'s, marks
     /// the attempt used — its end then reruns nothing.
     ///
@@ -139,7 +139,7 @@ pub trait Wake: Send + Sync + 'static {
     fn remote_typed(&self);
 
     /// The link hover ([`crate::Session::set_link_hover`]) went **stale** and
-    /// was dropped (044 R4.1): its stamp no longer held — output came, the window
+    /// was dropped: its stamp no longer held — output came, the window
     /// scrolled, the screen was cleared, the link's cell changed — so the frame
     /// did not draw it. The receiver re-runs the hit test if ⌘ is still held, so
     /// the highlight lands on the right text again.

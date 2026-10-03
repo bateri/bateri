@@ -1,7 +1,7 @@
 //! Diagnostics shown in the window subtitle: one slot per source.
 //!
 //! There is no modal alert: the settings file is edited live and a window opening on every save
-//! would stop the user (`discussion.md` → Karar 8). In a window without a toolbar the subtitle
+//! would stop the user. In a window without a toolbar the subtitle
 //! is drawn **on the same line** as the title ("bateri – …"), so the text must stay short.
 //!
 //! **A slot empties only when its own source is fixed:** a successful read of an unrelated

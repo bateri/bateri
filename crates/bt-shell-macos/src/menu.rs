@@ -9,7 +9,7 @@
 //! Zoom, tab switching, Select Tab ▸, splits — Select Previous/Next Split,
 //! Select Split ▸, Resize Split ▸, Equalize Splits, Zoom Split —, Move Tab
 //! to New Window, Merge All Windows, Bring All to Front). Settings… (⌘,) opens the settings window
-//! (`settings_window`; until 029 it opened the file in the editor, that job is now
+//! (`settings_window`; it used to open the file in the editor, that job is now
 //! on the window's "Open settings.toml" button); the item and shortcut are the same.
 //!
 //! **With one exception no item has a target** (below). The action passes through the responder chain and reaches
@@ -18,9 +18,9 @@
 //! `validateMenuItem:` — only while there is a dock selection and the editing gate
 //! is open; Paste Escaped Text's while the pasteboard has text); the font-size
 //! actions, Find ▸'s four actions, the two clearing actions, the four
-//! scrolling actions (grey on the alternate screen, 034 Karar 2) and `cancelUpload:`
-//! to the focused pane (`pane::TerminalPane`, `BateriView`'s parent view — 039
-//! Karar 2); `closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`,
+//! scrolling actions (grey on the alternate screen) and `cancelUpload:`
+//! to the focused pane (`pane::TerminalPane`, `BateriView`'s parent view);
+//! `closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`,
 //! `splitDown:` and the splits' navigation/layout actions
 //! (`selectPreviousSplit:`, `selectNextSplit:`, `selectSplit:`,
 //! `resizeSplit:`, `equalizeSplits:`, `toggleSplitZoom:`; grey with a single pane)
@@ -48,7 +48,7 @@
 //! Two exceptions are delegates. Theme ▸'s is the app delegate: the submenu is not
 //! fixed, it is filled from `themes/` when opening ([`fill_themes`]). Shell's is
 //! [`ShellMenuDelegate`]: the title, enablement and checkmark of Mark “{host}” as ▸
-//! follow the active tab ([`mark_menu`], 037 Karar 5). The delegate is a weak
+//! follow the active tab ([`mark_menu`]). The delegate is a weak
 //! reference; the app delegate keeps both alive for the whole process.
 //!
 //! Shell's delegate is **a separate object and only `menuWillOpen:`**: a delegate
@@ -61,14 +61,14 @@
 //!
 //! Shortcuts come from here too: AppKit gives a Command key to the main menu
 //! before `keyDown:` (`performKeyEquivalent:`), and the `view` swallows what is
-//! not caught. **A Control key is also** asked of the menu first (026 phase-3,
-//! measured): ⌃⇥ and ⌃⇧⇥ switch tabs as hidden Window items and `keyDown:`'s Cmd
+//! not caught. **A Control key is also** asked of the menu first (measured):
+//! ⌃⇥ and ⌃⇧⇥ switch tabs as hidden Window items and `keyDown:`'s Cmd
 //! allow-list stays untouched; Ctrl-I still goes to zsh as a tab.
-//! **A function key too** (034): ⌘Home/⌘End/⌘PgUp/⌘PgDn are View items, the
+//! **A function key too**: ⌘Home/⌘End/⌘PgUp/⌘PgDn are View items, the
 //! shortcut character is AppKit's function-key code point
 //! (`NSHomeFunctionKey` U+F729 …). A menu shortcut, not a key encoding — the
 //! swallowing of Home/End in `keyDown:` and the invariant of `bt_core::Arrow` are
-//! untouched. The splits' shortcuts (039 Karar 8) go the same way: ⌘[ / ⌘],
+//! untouched. The splits' shortcuts go the same way: ⌘[ / ⌘],
 //! ⌥⌘/⌃⌘ + arrow (the arrow keys' code points U+F700–U+F703), ⌃⌘= and ⇧⌘↩ —
 //! `keyDown:`'s three-key Cmd allow-list (⌘⌫, ⌘←, ⌘→) and the dock's ⇧⏎ do not
 //! change, because the menu matches them together with their modifiers.
@@ -79,7 +79,7 @@
 //! why they are here. AppKit adds Close All itself to Shell (⌥⌘W, ⌘W's
 //! alternative).
 //!
-//! Strings are English (`CLAUDE.md` → Dil). The app menu's title in the menu bar
+//! Strings are English. The app menu's title in the menu bar
 //! comes from the process name, not from here; the "bateri" in the items' names is
 //! written by hand. AppKit adds its own items (dictation, emoji) to the menu named
 //! "Edit" and the full-screen item to the one named "View"; to the Window menu
@@ -99,7 +99,7 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 /// the Shell menu with this.
 const MARK_HOLDER_TAG: isize = 37;
 
-/// The `tag` of Shell ▸ Forget Password for “{host}” (047 R6.2):
+/// The `tag` of Shell ▸ Forget Password for “{host}”:
 /// [`ShellMenuDelegate`] writes the host into its title.
 const FORGET_TAG: isize = 47;
 
@@ -113,7 +113,7 @@ pub(crate) fn forget_title(host: Option<&str>) -> String {
     }
 }
 
-/// Shell ▸ Shell Integration on “{host}” (048 R6): the toggle's state, pure.
+/// Shell ▸ Shell Integration on “{host}”: the toggle's state, pure.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct IntegrationMenu {
     pub(crate) title: String,
@@ -143,7 +143,7 @@ pub(crate) fn integration_menu(remote: Option<(&str, bool)>) -> IntegrationMenu 
 
 /// The items of Mark … as ▸, in order; an item's `tag` is the index here and the
 /// action (`markHost:`) reads the mark from it ([`mark_of_tag`]). No direct color:
-/// the menu never writes it (037 Karar 2).
+/// the menu never writes it.
 const MARKS: [(&str, HostMark); 4] = [
     ("Production", HostMark::Production),
     ("Staging", HostMark::Staging),
@@ -170,7 +170,7 @@ pub(crate) struct MarkMenu {
 
 /// The current state of Mark … as ▸ ([`mark_menu`]).
 ///
-/// The menu's model, pure (037 Karar 5): on a remote tab the title carries the
+/// The menu's model, pure: on a remote tab the title carries the
 /// host without its `user@` and the checkmark is on the **effective resolution**
 /// (even if it comes from a glob); locally (`None`) "Mark Host as" and grey.
 pub(crate) fn mark_menu(remote: Option<(&str, HostMark)>) -> MarkMenu {
@@ -271,7 +271,7 @@ pub(crate) fn install(
         unsafe { check.setTarget(Some(updater)) };
         app_items.push(check);
     }
-    // The handover's test item (055 R4.4): only with the defaults key
+    // The handover's test item: only with the defaults key
     // `BateriHandoverTestMenu` (the caller reads it); the update's quit
     // without Sparkle — the same path, then bateri starts itself again.
     if handover_test {
@@ -296,7 +296,7 @@ pub(crate) fn install(
         item(mtm, "Quit bateri", sel!(terminate:), "q"),
     ]);
     let app_menu = submenu(mtm, "bateri", &app_items);
-    // Edit ▸ Find (033 Karar 10): macOS's submenu and shortcuts.
+    // Edit ▸ Find: macOS's submenu and shortcuts.
     // The selectors are **our own names** — `performFindPanelAction:` would be
     // swallowed by AppKit's field editor while the field is focused; the handler is
     // `TerminalPane` (the field's ancestor, above the field in the responder chain).
@@ -334,7 +334,7 @@ pub(crate) fn install(
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Select All", sel!(selectAll:), "a"),
             NSMenuItem::separatorItem(mtm),
-            // Terminal.app's place and shortcuts (034 Karar 4); the selectors are
+            // Terminal.app's place and shortcuts; the selectors are
             // our own names, the handler is `TerminalPane`.
             item(mtm, "Clear to Start", sel!(clearToStart:), "k"),
             with_modifiers(
@@ -378,8 +378,7 @@ pub(crate) fn install(
         &[
             item(mtm, "New Window", sel!(newWindow:), "n"),
             item(mtm, "New Tab", sel!(newTab:), "t"),
-            // On a remote tab ⌘T goes to the same host; this is always local (037
-            // Karar 6).
+            // On a remote tab ⌘T goes to the same host; this is always local.
             with_modifiers(
                 item(mtm, "New Local Tab", sel!(newLocalTab:), "t"),
                 command | NSEventModifierFlags::Option,
@@ -389,7 +388,7 @@ pub(crate) fn install(
             // app delegate with `markHost:` (the active tab's host).
             mark_holder(mtm),
             // Whether a plain ssh to the tab's host sets up the shell
-            // integration (048 R6); handled by the app delegate
+            // integration; handled by the app delegate
             // (`toggleHostIntegration:`), its title and state from its
             // `validateMenuItem:`. Takes effect from the next ssh.
             item(
@@ -398,18 +397,18 @@ pub(crate) fn install(
                 sel!(toggleHostIntegration:),
                 "",
             ),
-            // The tab's saved ssh password (047 R6.2): the handler is the focused
+            // The tab's saved ssh password: the handler is the focused
             // pane (`forgetPassword:`), grey without one (`validateMenuItem:`).
             {
                 let forget = item(mtm, &forget_title(None), sel!(forgetPassword:), "");
                 forget.setTag(FORGET_TAG);
                 forget
             },
-            // The whole queue of uploads to the remote directory (037 Karar 7); enabled only
+            // The whole queue of uploads to the remote directory; enabled only
             // while there is a queue (`TerminalPane`'s `validateMenuItem:`).
             item(mtm, "Cancel Upload", sel!(cancelUpload:), "."),
             NSMenuItem::separatorItem(mtm),
-            // Splits (039 Karar 8, Ghostty/iTerm2 precedent): the handler is
+            // Splits (Ghostty/iTerm2 precedent): the handler is
             // `TerminalWindow` (splits the focused pane); grey at the smallest pane
             // limit (`validateMenuItem:`).
             item(mtm, "Split Right", sel!(splitRight:), "d"),
@@ -418,11 +417,10 @@ pub(crate) fn install(
                 command | NSEventModifierFlags::Shift,
             ),
             NSMenuItem::separatorItem(mtm),
-            // Not `performClose:` (028 phase-2, measured): after the red button's cancelled
+            // Not `performClose:` (measured): after the red button's cancelled
             // group close AppKit broadcasts `performClose:` to the whole group, so ⌘W would
             // ask about the window instead of a tab. Its title is "Close" with many panes
-            // (it closes the focused pane; `TerminalWindow`'s `validateMenuItem:`, 039
-            // Karar 8).
+            // (it closes the focused pane; `TerminalWindow`'s `validateMenuItem:`).
             item(mtm, "Close Tab", sel!(closeTab:), "w"),
             with_modifiers(
                 item(mtm, "Close Window", sel!(closeWindow:), "w"),
@@ -483,7 +481,7 @@ pub(crate) fn install(
             )),
             submenu(mtm, "Select Tab", &select_tab),
             NSMenuItem::separatorItem(mtm),
-            // Splits (039 Karar 8, Ghostty/iTerm2 precedent): the handler is
+            // Splits (Ghostty/iTerm2 precedent): the handler is
             // `TerminalWindow`; grey with a single pane (`validateMenuItem:`).
             item(
                 mtm,

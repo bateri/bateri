@@ -1,5 +1,5 @@
 //! The fallback gate's **census** and a **guard** for the characters of real
-//! tools (041 phase-1).
+//! tools.
 //!
 //! The gate was calibrated twice by looking at a sample set, and both times
 //! the user found the character outside the limit (`⏺`, `⎿`, then `⧉`). The
@@ -11,7 +11,7 @@
 //!
 //! The module is compiled only for tests: the classification has no
 //! consumer in production. It does not copy the gate, it calls its steps;
-//! since phase-2 it also sees the shrink branch (`rules::accept`) the same
+//! it also sees the shrink branch (`rules::accept`) the same
 //! way.
 
 use crate::coretext::LAST_RESORT;
@@ -28,7 +28,7 @@ pub(crate) enum Class {
     /// The cascade's candidate gave `.notdef` too.
     NoFont,
     /// The candidate was turned back by both gates but its smaller-size copy
-    /// was accepted (041).
+    /// was accepted.
     Shrunk { font: String, ratio: f64, fit: f64 },
     /// There is a candidate but the gate turned it back: a box on screen.
     /// `fit` is above the limit, the candidate is `.LastResort`, or the small
@@ -127,9 +127,9 @@ const TOOL_CHARS: [char; 26] = [
 /// reverted the guard sees it again.
 ///
 /// `U+E0A0`/`U+E0B0` are in no installed font, the cascade gives
-/// `.LastResort`. R3.2 forbids shrinking it ([`FontSystem::is_last_resort`]), so
+/// `.LastResort`. Shrinking it is forbidden ([`FontSystem::is_last_resort`]), so
 /// shrinking does not empty this list; what empties it is a machine with a
-/// Nerd Font installed. `⧉` left the list in 041 phase-2: it is drawn shrunk.
+/// Nerd Font installed. `⧉` left the list when shrinking landed: it is drawn shrunk.
 const EXPECTED_TOFU: [char; 2] = ['\u{E0A0}', '\u{E0B0}'];
 
 /// Compares the observation (character, is it a box) with the expected box
@@ -318,7 +318,7 @@ mod tests {
     }
 
     /// **A shrunk single-cell acceptance is not the answer to a two-cell
-    /// request** (041): `漢` shrinks into a single cell and then, on the grid's
+    /// request**: `漢` shrinks into a single cell and then, on the grid's
     /// `Left` request, comes at full size as a **pair** — had a shortcut put
     /// the small copy on the left of the wide cell, the right half would stay
     /// empty and the result would depend on the order of requests. The face
@@ -396,7 +396,7 @@ mod tests {
     }
 
     /// `.LastResort` is within the limit (`fit` 1.660) but is not shrunk
-    /// (R3.2): the candidate meets the shrink branch's geometric condition and
+    /// (it is never shrunk): the candidate meets the shrink branch's geometric condition and
     /// is still a box.
     #[test]
     fn last_resort_is_not_shrunk() {
@@ -432,10 +432,10 @@ mod tests {
     }
 
     /// Every candidate that passes the gate today is drawn **bit-for-bit the
-    /// same** (R3.3): shrinking is the last branch, so a candidate passing
+    /// same**: shrinking is the last branch, so a candidate passing
     /// either gate comes back with the same font (same object, same size),
     /// `shrunk = false` and zero `rise`. All scanned blocks, 16pt @2x; for `⏺`
-    /// the raster is additionally compared byte for byte with the pre-041
+    /// the raster is additionally compared byte for byte with the pre-shrink
     /// path (`raster::draw`, the wrapper without `rise`).
     #[test]
     fn gate_accepted_candidates_are_unchanged() {
@@ -509,7 +509,7 @@ mod tests {
         ("Emoji (1F300–1FAFF)", 0x1F300, 0x1FAFF),
         ("Private Use Area", 0xE000, 0xF8FF),
     ];
-    /// (size, scale) — the four combinations of R1.1.
+    /// (size, scale) — the four combinations the census covers.
     const COMBOS: [(f64, f64); 4] = [(13.0, 1.0), (13.0, 2.0), (16.0, 1.0), (16.0, 2.0)];
     /// The histogram's bucket edges: <1.2 / 1.2–1.5 / 1.5–1.7 / 1.7+. The
     /// first bucket also holds values below 1.0: a candidate that overflows
@@ -620,7 +620,7 @@ mod tests {
             let mut shrink_failed: Vec<String> = Vec::new();
             // Code points that land on `.LastResort`, excluding PUA (almost
             // all of it lands there): which characters it answers is
-            // phase-2's R3.2 question.
+            // what the never-shrink-`.LastResort` rule rests on.
             let mut last_resort: Vec<u32> = Vec::new();
             for (name, first, last) in BLOCKS {
                 let mut row = [0usize; 7];

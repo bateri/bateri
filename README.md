@@ -96,7 +96,7 @@ hosts = [
 
 Themes are TOML files in `~/.config/bateri/themes/`, selectable from
 **View ▸ Theme**. The full reference for every key and the theme format is in
-[`docs/AYARLAR.md`](docs/AYARLAR.md) (Turkish).
+[`docs/SETTINGS.md`](docs/SETTINGS.md).
 
 ## Keyboard shortcuts
 

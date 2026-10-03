@@ -14,7 +14,7 @@
 //! "clear the screen on purpose" went by ([`Scanner::take_screen_clears`]) and
 //! each time a line editor switched
 //! bracketed paste on — the remote shell's login signal, an event in stream
-//! order rather than a count (047 phase-4, [`ScanEvent::PasteOn`]). It sits in the same
+//! order rather than a count ([`ScanEvent::PasteOn`]). It sits in the same
 //! state machine because the framing is still one: a scanner stuck in a
 //! malformed CSI would swallow the `ESC ] 133;…` that follows, and blocks,
 //! suppression and the dock would die **silently**. Until now `ESC [` fell to
@@ -25,7 +25,7 @@
 //! `ClearMode::All` on the primary screen with `clear_viewport()`
 //! (`term/mod.rs:1794`), that is, it **pushes the visible lines into
 //! scrollback**. The screen empties but `history_size()` grows; if the "fill the
-//! gap with scrollback" rule (017) cannot tell the two apart, it would undo
+//! gap with scrollback" rule cannot tell the two apart, it would undo
 //! Ctrl-L.
 //!
 //! Five responsibilities, one module: extracting marks from bytes
@@ -52,7 +52,7 @@
 //!
 //! **Why we have our own scanner:** `vte` does not recognize OSC 133 and the
 //! `Handler` trait has no "unknown OSC" hook, so even a type wrapping `Term`
-//! cannot see this sequence (`.tasks/009-shell-entegrasyonu/context.md` → Kanıt).
+//! cannot see this sequence.
 //! We scan the bytes on their way to the parser. The same reasoning holds for
 //! [`DOCK_OSC`] and [`CWD_OSC`]: `vte` does **not recognize** either, it drops
 //! the payload into the `_` arm of `osc_dispatch` and discards it
@@ -75,12 +75,12 @@
 //! are two escapes: **removing** the sequence from the stream (breaks the
 //! scanner's "does not touch the bytes" promise and cannot be done in place
 //! because a sequence can cross a chunk boundary) or **changing the carrier to
-//! DCS** (`put` neither buffers nor formats the payload; in `discussion.md` →
-//! Karar 5 an **unevaluated** alternative, not eliminated like 5b). Both are
+//! DCS** (`put` neither buffers nor formats the payload; an **unevaluated**
+//! alternative, not an eliminated one). Both are
 //! post-measurement work: the cost is **not on the frame path** but on the reader
 //! thread, and the shell-side base64 encoding of the same keystroke is already
-//! the dominant term. It stands as a known limit; its measurement is in the debt
-//! of R6.2 (per-keystroke cost).
+//! the dominant term. It stands as a known limit; the per-keystroke cost is
+//! not measured yet.
 //!
 //! **Framing is at parity with `vte`** and this is mandatory: the sequence
 //! boundary the scanner sees must be the same as the grid sees, otherwise the
@@ -116,7 +116,7 @@ use crate::settings::{HostMark, HostRule, RemoteStatsMode};
 /// A single OSC 133 mark the shell writes into the stream.
 ///
 /// All four are independent of the shell: neither zsh, nor bash, nor fish
-/// appears in the type (R2.4). Adding a new shell is only writing a script.
+/// appears in the type. Adding a new shell is only writing a script.
 ///
 /// **Only two variants carry the identity** (`A` and `D`), because they open
 /// and close the block; `B` and `C` sit *inside* the block and repeating the
@@ -139,7 +139,7 @@ pub(crate) enum Mark {
 
 /// Which remote shell a remote mark comes from: `P`, the local block of the
 /// `ssh` command that opened the connection, and `S`, the remote shell's own
-/// process id (048 phase-3).
+/// process id.
 ///
 /// **`P` alone is not enough**: one command line can open two connections
 /// (`ssh a; ssh b`, a `for` loop) and both servers count from one — under one
@@ -152,7 +152,7 @@ pub(crate) struct RemoteShell {
     pub(crate) pid: u32,
 }
 
-/// A mark of **our remote shell** (048 phase-3): any of the four letters
+/// A mark of **our remote shell**: any of the four letters
 /// carrying `bt_remote=<P>.<S>.<n>` — [`RemoteShell`] and `n`, the remote
 /// shell's own counter.
 ///
@@ -235,7 +235,7 @@ impl RunningBlocks {
 /// is, in code, the **absence** of this type (`Option<ShellState>`); if a
 /// separate record were kept, the two would contradict each other on the far
 /// side of SSH — integration installed locally but no marks arriving from the
-/// remote (`discussion.md` → Karar 3).
+/// remote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShellState {
     /// What the shell is doing right now.
@@ -248,7 +248,7 @@ pub struct ShellState {
 /// The shell's current phase — one for each of the four marks.
 ///
 /// `A` and `B` are **not merged**: the boundary between "the prompt is being
-/// drawn" and "the user is typing" is the first question of the Input Dock (012).
+/// drawn" and "the user is typing" is the first question of the Input Dock.
 /// Keeping the distinction here is free, winning it back later is not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellPhase {
@@ -345,19 +345,19 @@ pub(crate) enum Stripe {
 /// ZLE's display mirror — everything the dock will draw, **decoded**.
 ///
 /// Five display variables are carried ([`DOCK_OSC`]'s payload; alongside them
-/// `KEYMAP` and, since 032, `PREBUFFER`) and here they descend to strings, a
+/// `KEYMAP` and, since multi-line input, `PREBUFFER`) and here they descend to strings, a
 /// column and a list of ranges. If only `BUFFER` were carried, suppression would
 /// turn into information loss: `POSTDISPLAY` is the autosuggestions suggestion,
 /// `region_highlight` is syntax highlighting's color — the two most common
 /// plugins, and without them the dock would show the user **less** than they
-/// see (`discussion.md` → Karar 8b).
+/// see.
 ///
 /// **It is a reused buffer, not a record.** The scanner refreshes its own copy in
 /// place on every keystroke, [`ShellLog`] takes it under the lock with
 /// [`Clone::clone_from`] and [`crate::Session::dock_state`] hands it out again
 /// with `clone_from`; in all three steps the strings keep their capacities with
 /// `clear()` + `push_str`. In steady state there are **zero** allocations per
-/// keystroke — the criterion is `CLAUDE.md`'s per-frame cost rule and this type
+/// keystroke — the criterion is the per-frame cost rule and this type
 /// is read every frame.
 ///
 /// `Clone` is written by hand: `derive` produces only `clone` and the default
@@ -376,7 +376,7 @@ pub struct DockState {
     pub postdisplay: String,
     /// `PREBUFFER` — the earlier lines of a multi-line command that ZLE has
     /// **accepted** (`for`, heredoc, `\`-continuation); always ends with `\n` and
-    /// is no longer editable. The mirror's seventh, **optional** body (032); empty
+    /// is no longer editable. The mirror's seventh, **optional** body; empty
     /// with an old script.
     ///
     /// **Outside the display space:** [`Self::cursor`], [`Self::display_chars`],
@@ -439,9 +439,9 @@ pub struct DockState {
     /// `String` per frame. The classification is at decode time, in one place.
     ///
     /// The default is `false` and this is the **safe direction**: a window running
-    /// with an old script that never sends the field (`plan.md` → Göç) loses the
-    /// exception, that is, goes back to the wrapped paste — the behavior before
-    /// phase-5.
+    /// with an old script that never sends the field loses the exception, that
+    /// is, goes back to the wrapped paste — the behavior before the exception
+    /// existed.
     pub insert_keymap: bool,
     /// The user input this mirror **answers**: the input generation read at the
     /// moment the mirror was decoded (`Session`'s `key_gen`).
@@ -451,13 +451,12 @@ pub struct DockState {
     /// look at what the grid says. It sits **next to the content**, not in a free
     /// flag: the frame path reads it in the same leaf-lock turn as the text, so a
     /// stale read brings the stale stamp with it and the gate falls back to content
-    /// comparison — the wrong direction is safe
-    /// (`.tasks/025-tazelik-zamansal/discussion.md` → Muhakeme).
+    /// comparison — the wrong direction is safe.
     ///
     /// The only writer is [`ShellLog::apply_scan_answering`]; in the copy the
     /// scanner stages it is meaningless and zero.
     ///
-    /// **The `Idle` mirror is stamped too** (`End` arm, 030): the dock's typing
+    /// **The `Idle` mirror is stamped too** (`End` arm): the dock's typing
     /// animations ([`crate::DockEdit`]) bound the number of glyphs to animate by the
     /// difference of this stamp, and the base of the first keystroke after Enter is
     /// the `Idle` mirror. A base with a zero stamp would defeat that bound, and the
@@ -465,7 +464,7 @@ pub struct DockState {
     /// never reads `Idle` ([`ShellLog::suppressed_input`] requires `Live`), so it has
     /// no effect on it.
     pub answers: u64,
-    /// Whether the mirror is read by cluster (035, `SessionOptions::cluster`): the
+    /// Whether the mirror is read by cluster (`SessionOptions::cluster`): the
     /// dock's layout ([`crate::dock::layout_with`]) and [`Self::last_ink`] count an
     /// emoji sequence as one cluster.
     ///
@@ -550,8 +549,8 @@ pub struct DockContext {
     /// HEAD the short SHA instead of the branch — the shell does not say which it
     /// is, it only sends the name to show.
     pub branch: String,
-    /// The remote session's target (037 Karar 1: host, kind, argv to re-run and its
-    /// line); `None` when there is no remote session (036).
+    /// The remote session's target (host, kind, argv to re-run and its line);
+    /// `None` when there is no remote session.
     ///
     /// Its writer is `bt-shell`'s process-table probe
     /// ([`crate::Session::set_remote`]); it is cleared automatically on `C`, `D` and
@@ -560,19 +559,19 @@ pub struct DockContext {
     /// after the lock: if it were `ShellLog`'s own field, it would take either a
     /// `String` allocation per frame or holding the lock through the drawing.
     pub remote: Option<RemoteTarget>,
-    /// The **resolved** mark of the active remote host (037 Karar 2); meaningful only
+    /// The **resolved** mark of the active remote host; meaningful only
     /// while [`Self::remote`] is filled, [`HostMark::None`] locally.
     ///
     /// The pattern is not here but in `ShellLog`, and resolution happens at two edges
     /// (a change of the remote state and of the list): the frame path sees no
     /// pattern, it only reads this.
     pub remote_mark: HostMark,
-    /// The remote side's OSC 7 directory (036 Karar 4); empty if it did not arrive.
+    /// The remote side's OSC 7 directory; empty if it did not arrive.
     /// **Read only while [`Self::remote`] is filled** — it is also written while
     /// inactive (an OSC 7 with a foreign authority), so that the probe can conclude
     /// after OSC 7.
     pub remote_cwd: String,
-    /// The reconnect offer of a dropped ssh (037 Karar 8); `None` otherwise.
+    /// The reconnect offer of a dropped ssh; `None` otherwise.
     ///
     /// Set up in a single arm: the remote session is active, the kind is ssh and
     /// **our** identified `D` carries 255 ([`ShellLog::apply`]) — the target moves
@@ -585,8 +584,8 @@ pub struct DockContext {
     /// Inside the context, for the same reason as [`Self::remote`]: the dock's
     /// placeholder takes it in the frame path in the same lock turn as the context.
     pub reconnect: Option<Reconnect>,
-    /// The status line of an upload to a remote directory (037 Karar 7 → Kullanıcı
-    /// kararı 4); `None` if there is no upload.
+    /// The status line of an upload to a remote directory; `None` if there is
+    /// no upload.
     ///
     /// Its writer is `bt-shell`'s upload queue ([`crate::Session::set_transfer`]);
     /// neither `C`/`D`/`A` nor input clears it — the queue has its own lifetime and
@@ -594,7 +593,7 @@ pub struct DockContext {
     /// **separate** from the remote state, because it has to be visible when ssh has
     /// closed too ("connection closed"): it carries the host and the mark itself.
     pub transfer: Option<Transfer>,
-    /// The remote host's load indicator (046 Karar 5); `None` while there is no
+    /// The remote host's load indicator; `None` while there is no
     /// sample, on an error and with `stats = "off"`.
     ///
     /// Its writer is `bt-shell`'s sampler ([`crate::Session::set_remote_stats`],
@@ -603,7 +602,7 @@ pub struct DockContext {
     /// ([`Self::clear_remote`], [`ShellLog::set_remote`]) — otherwise a new host
     /// would show the previous one's numbers until its first sample.
     pub stats: Option<RemoteStats>,
-    /// The ssh status bar's **Sign In…** button (047 R7.2): a background job
+    /// The ssh status bar's **Sign In…** button: a background job
     /// (the link check, the load indicator) could not log in by itself — no
     /// saved password, or the saved one was refused. `None` otherwise.
     ///
@@ -612,8 +611,7 @@ pub struct DockContext {
     /// it is shown the load indicator is not (there is no sample without a
     /// login) and the upload row wins over both.
     pub sign_in: Option<SignIn>,
-    /// Why bateri's remote bootstrap fell back to a plain login shell (048
-    /// R3.2, R3.4): the shell integration did not start on the server, so the
+    /// Why bateri's remote bootstrap fell back to a plain login shell: the shell integration did not start on the server, so the
     /// remote folder stays unknown and the pane's label says why
     /// ([`crate::Session::remote_setup_fault`]). `None` otherwise. It comes from
     /// the stream (`8133;f`, [`RemoteSetupFault::from_code`]) and belongs to the
@@ -622,7 +620,7 @@ pub struct DockContext {
     pub remote_setup: Option<RemoteSetupFault>,
 }
 
-/// Why the remote bootstrap (048, `assets/shell/remote/`) did not start the
+/// Why the remote bootstrap (`assets/shell/remote/`) did not start the
 /// shell integration — the bootstrap's fixed codes, never the server's text
 /// (`ESC ] 8133 ; f ; {code} BEL`, [`parse_dock`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -664,7 +662,7 @@ pub struct SignIn {
     pub hover: bool,
 }
 
-/// The form of the load indicator that is drawn (046 Karar 4) —
+/// The form of the load indicator that is drawn —
 /// [`RemoteStatsMode`] without `Off`: with `Off` there is no value at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StatsForm {
@@ -689,11 +687,11 @@ impl RemoteStatsMode {
     }
 }
 
-/// The number of CPU samples the sparkline shows (046 Karar 4).
+/// The number of CPU samples the sparkline shows.
 pub const STATS_HISTORY: usize = 8;
 
-/// One sample of the remote host's load, as the context row draws it (046
-/// Karar 5): `Copy` and fixed-size, so the frame path's context copy allocates
+/// One sample of the remote host's load, as the context row draws it:
+/// `Copy` and fixed-size, so the frame path's context copy allocates
 /// nothing for it.
 ///
 /// The percentages are **rounded** by the writer (`bt-shell-common`'s sampler):
@@ -727,7 +725,7 @@ impl RemoteStats {
 
 /// Equality is over what is **drawn**: the history's slots past [`RemoteStats::len`]
 /// do not take part — a derived comparison would let a stale byte there
-/// request a frame that changes nothing (the equality gate, 046 R3.5).
+/// request a frame that changes nothing (the equality gate).
 impl PartialEq for RemoteStats {
     fn eq(&self, other: &Self) -> bool {
         self.form == other.form
@@ -740,8 +738,7 @@ impl PartialEq for RemoteStats {
 
 impl Eq for RemoteStats {}
 
-/// The dock's status line for the upload queue (037 Karar 7 → Kullanıcı kararı
-/// 4): in place of the context line `⇄ {host}  {body}{controls}` and progress on
+/// The dock's status line for the upload queue: in place of the context line `⇄ {host}  {body}{controls}` and progress on
 /// the top hairline.
 ///
 /// The body's text is formatted in `bt-shell` (bytes, speed, time, file count);
@@ -751,17 +748,17 @@ impl Eq for RemoteStats {}
 /// is shortened with `…`, the buttons are not shortened and if they do not fit
 /// they drop in order (half a button cannot be clicked). Which column is which
 /// button is told by [`crate::transfer_button_at`]; drawing and the mouse read
-/// the same layout (037 phase-6).
+/// the same layout.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Transfer {
     /// The target's host, as shown ([`RemoteTarget::host`]).
     pub host: String,
     /// The host's resolved mark: the color of `⇄ host` and of the progress bar.
     pub mark: HostMark,
-    /// Durum metni (`↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB · …`).
+    /// The status text (`↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB · …`).
     pub body: String,
     /// The tone of the [`Self::lead`] characters at the start of the body; the rest is
-    /// dim (037 phase-7): the result line carries the result's color — success
+    /// dim: the result line carries the result's color — success
     /// `success`, error text `error`, cancel and progress dim.
     pub tone: TransferTone,
     /// The number of leading characters drawn in [`Self::tone`]: in a failure line
@@ -809,7 +806,7 @@ pub enum TransferTone {
     Error,
 }
 
-/// The state of the upload line's buttons (037 phase-6): the labels and the
+/// The state of the upload line's buttons: the labels and the
 /// number of buttons are born from this ([`crate::dock`]'s layout).
 ///
 /// The button under the mouse and the list's openness are **here**, with the
@@ -819,8 +816,8 @@ pub enum TransferTone {
 /// frame is requested only when the state changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransferControls {
-    /// The number of items visible in the list — finished, flowing and waiting (037
-    /// phase-7). `0` → no buttons, `1` → only `Cancel`, more → `Show transfers (N)` +
+    /// The number of items visible in the list — finished, flowing and waiting.
+    /// `0` → no buttons, `1` → only `Cancel`, more → `Show transfers (N)` +
     /// `Cancel all`.
     pub items: u16,
     /// The list (popover) is open: the list button is in the pressed tone; its label does not change.
@@ -850,7 +847,7 @@ pub enum ButtonState {
     Pressed,
 }
 
-/// The reconnect offer (037 Karar 8): the placeholder's host and mark, the line
+/// The reconnect offer: the placeholder's host and mark, the line
 /// ⏎ will send.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Reconnect {
@@ -917,7 +914,7 @@ impl DockContext {
         self.remote_cwd.clear();
         self.remote_setup = None;
         self.remote_mark = HostMark::None;
-        // The load belongs to the host (046 Karar 5), and so does its login.
+        // The load belongs to the host, and so does its login.
         self.stats = None;
         self.sign_in = None;
         self.remote.take().is_some()
@@ -925,7 +922,7 @@ impl DockContext {
 }
 
 /// The two terminal modes of the PTY that say whether the remote session is
-/// past its login (047 R9.1): read from the master with `tcgetattr` by the
+/// past its login: read from the master with `tcgetattr` by the
 /// platform shell (`bt-shell-common::jobs::tty_modes`; `bt-core` has no
 /// `libc`), decided here.
 ///
@@ -948,7 +945,7 @@ impl TtyModes {
     }
 }
 
-/// The remote session's kind (037 Karar 1).
+/// The remote session's kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RemoteKind {
     #[default]
@@ -956,7 +953,7 @@ pub enum RemoteKind {
     Mosh,
 }
 
-/// The remote session's target — what the probe found, as a whole (037 Karar 1).
+/// The remote session's target — what the probe found, as a whole.
 ///
 /// ⌘T and reconnect **re-run** the same command: the host alone is not enough
 /// (without port, `-i`, `-J` a second connection cannot be made). `bt-core` sees
@@ -965,7 +962,7 @@ pub enum RemoteKind {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RemoteTarget {
     /// As the user typed it (`prod`, `deploy@10.0.0.5`); the `ssh://` scheme and the
-    /// port are dropped (036 Karar 3).
+    /// port are dropped.
     pub host: String,
     pub kind: RemoteKind,
     /// The argv to re-run — for ssh the local forwardings (`-L -R -D`), `-M` and `-f`
@@ -1007,7 +1004,7 @@ impl Clone for RemoteTarget {
 }
 
 /// The remote shell's directory as its **title** says it, the fallback when it
-/// sends no OSC 7 (045, user decision 2026-10-02): Debian's and Ubuntu's stock
+/// sends no OSC 7 (user decision 2026-10-02): Debian's and Ubuntu's stock
 /// `.bashrc` sets the title to `user@host: dir` at every prompt, so the title
 /// follows `cd`; oh-my-zsh's `termsupport` sets `user@host:dir` (`%n@%m:%~`, no
 /// space), so the space after the colon is optional. Only that shape counts and
@@ -1028,8 +1025,7 @@ pub(crate) fn title_directory(title: &str) -> Option<&str> {
         .then_some(dir)
 }
 
-/// The window's (and the native tab's) title — priority order
-/// `.tasks/026-sekmeler/discussion.md` → Karar 7.
+/// The window's (and the native tab's) title — priority order:
 ///
 /// 1. **The application's OSC 0/2 title** (vim, ssh, Claude Code, oh-my-zsh's
 ///    `termsupport`). An empty title is ignored: `\e]2;\a` is not a title, it
@@ -1040,7 +1036,7 @@ pub(crate) fn title_directory(title: &str) -> Option<&str> {
 ///    one.
 /// 3. `bateri`.
 ///
-/// **While a remote session is active** (036 Karar 5, `remote` = host) the title
+/// **While a remote session is active** (`remote` = host) the title
 /// carries the [`crate::dock::REMOTE_MARK`] prefix: `⇄ {OSC title}`, `⇄ {host}` if
 /// there is no title; the local directory is never consulted. The prefix is
 /// unconditional, because most remote shells print `user@host: dir` into the
@@ -1086,9 +1082,9 @@ pub(crate) fn title_of(
 /// `Unavailable` is a separate variant, **not** inside `Idle`: the two do not
 /// show the same thing. In `Idle` there is no line to draw (ZLE is not editing),
 /// in `Unavailable` there **is one but we cannot show it** — and the difference
-/// decides phase-4's suppression decision: a line we cannot show must stay on
-/// the grid, otherwise the user sees what they typed nowhere. Today's `Skip` arm
-/// not signaling the caller is exactly what produced this symptom (R1.2).
+/// decides the suppression decision: a line we cannot show must stay on
+/// the grid, otherwise the user sees what they typed nowhere. A `Skip` arm
+/// not signaling the caller is exactly what produced this symptom.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DockStatus {
     /// ZLE is not editing a line: no mirror ever arrived or `line-finish` arrived.
@@ -1103,7 +1099,7 @@ pub enum DockStatus {
     /// would leave that column blank, while ZLE prints a readable `^A` on the grid.
     ///
     /// The data is sound, the **surface is narrow**; a line we cannot show and its
-    /// caret stay on the grid. (Until 032 it had a sibling, a display with line
+    /// caret stay on the grid. (Until multi-line input it had a sibling, a display with line
     /// breaks, `Multiline`; it was removed when the dock learned to draw multiple
     /// lines, and `\n` is not counted as a control character by this arm.)
     /// Before this arm arrived, the fate of a control character was left to the
@@ -1111,8 +1107,7 @@ pub enum DockStatus {
     /// the two sides did not match and the line stayed on the grid, but if it was in
     /// the middle (`\x01foo`) both sides said `'o'`, the gate passed and the line went
     /// to the dock — `^A`'s column was blank, so the user saw what they typed
-    /// **nowhere**. The arm makes the decision independent of position (025,
-    /// `discussion.md` → Karar 1).
+    /// **nowhere**. The arm makes the decision independent of position.
     ///
     /// **Tab is outside this arm** and the reason is information: a tab says nothing,
     /// the blank column in the dock is not a loss — it opens into blank on the grid
@@ -1124,8 +1119,7 @@ pub enum DockStatus {
     /// It has to depend on the line's shape, not on the keystroke — if it said
     /// "return on the next key" the caret would go back and forth between the grid and
     /// the dock. **The arm's lifetime is tied to a placeholder**: the day the dock
-    /// draws a control character as `^X`, like zsh, this arm is deleted
-    /// (`docs/YOL-HARITASI.md`).
+    /// draws a control character as `^X`, like zsh, this arm is deleted.
     Control,
 }
 
@@ -1154,7 +1148,7 @@ pub struct Highlight {
     /// record starts with `P` the offset is from the start of `PREDISPLAY`, otherwise
     /// from the start of `BUFFER` (`zshzle(1)`, `region_highlight`) — and merging
     /// them on **this** side of the boundary frees the drawing side from knowing
-    /// `PREDISPLAY`'s length. This is R1.3's "decoded crosses".
+    /// `PREDISPLAY`'s length: what crosses the boundary is decoded.
     pub start: usize,
     /// The end of the range, exclusive.
     pub end: usize,
@@ -1181,7 +1175,7 @@ pub struct HighlightStyle {
 /// The color of a style component; it is **not** bound to the theme here.
 ///
 /// Resolution is in `frame()`, when the [`crate::Theme`] is in hand: the color
-/// space is linearized as it crosses the boundary (`CLAUDE.md` → Renk uzayı) and
+/// space is linearized as it crosses the boundary and
 /// this module has no theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HighlightColor {
@@ -1216,7 +1210,7 @@ const BLOCK_LOG_FLOOR: usize = 256;
 /// number of blocks that can be visible in scrollback. If a fixed ceiling were
 /// chosen it would either fall below scrollback and leave still-on-screen blocks
 /// colorless or hold space for nothing. 12 bytes per record: 120 KB at the
-/// default 10,000 rows. (Until 013 it was 8 bytes; [`Outcome::Finished`] took the
+/// default 10,000 rows. (It used to be 8 bytes; [`Outcome::Finished`] took the
 /// elapsed time next to the exit code too. The number is tied to the `const`
 /// assert next to [`Outcome`] — a budget that was written but not verified would
 /// silently go stale exactly on this line.)
@@ -1256,7 +1250,7 @@ impl BlockLog {
     ///
     /// The ceiling used to be set only when the session was born and `scrollback` is
     /// a **live-applied** setting: the excess of an enlarged history stayed colorless
-    /// (`/code-review`, 010 gate). On shrinking, the excess is dropped from the
+    /// (found in review). On shrinking, the excess is dropped from the
     /// oldest — the ring's own eviction rule, no second policy.
     fn set_capacity(&mut self, scrollback: usize) {
         self.capacity = Self::capacity_for(scrollback);
@@ -1357,8 +1351,7 @@ impl SavedStripes {
     /// The colour a saved anchor carries; `None` → the row is saved without
     /// one. A block **running** at quit is `None` too: the command dies with
     /// the shell, `accent` would claim it still runs and there is no neutral
-    /// role — "unknown is not drawn" (`.tasks/053-oturum-geri-yukleme/discussion.md`
-    /// → Set sonrası düzeltmeler).
+    /// role — "unknown is not drawn".
     pub(crate) fn stripe(&self, key: BlockKey) -> Option<Stripe> {
         if self.running.is(key) {
             return None;
@@ -1377,7 +1370,7 @@ impl SavedStripes {
 
 /// One shell's block trail: the phase, the running command's clock and the
 /// ledger — the triple a stripe, a counter and "which block is running" are
-/// read from (048 phase-3).
+/// read from.
 ///
 /// **Two instances** ([`ShellLog::local`], [`ShellLog::remote`]): our remote
 /// shell's marks drive the same rules on their own trail, so the remote rows
@@ -1432,7 +1425,7 @@ impl BlockTrack {
     /// definition. If only `D` consumed it, a lost `D` (an OSC cut halfway, an
     /// identity-less close) would leave the clock standing and the **next**
     /// block's `D` would consume it: an instant command would look like it took
-    /// "4m 12s" (`/code-review`, 013 gate). The reset's direction is safe — the
+    /// "4m 12s" (found in review). The reset's direction is safe — the
     /// worst case is the counter never appearing, not a made-up duration.
     fn prompt(&mut self, id: Option<u32>) {
         self.state().phase = ShellPhase::Prompt;
@@ -1527,12 +1520,12 @@ impl BlockTrack {
     }
 }
 
-/// Mouse selection in the dock's input line (031 phase-4): the two ends, the step
+/// Mouse selection in the dock's input line: the two ends, the step
 /// and the resolved range — in **`BUFFER`'s character indices**.
 ///
 /// **It lives next to the mirror, not in it** ([`ShellLog::dock_selection`]). If
 /// it were inside [`DockState`], the frame path's diff (`dock::change` /
-/// `diff`) would compare it too and every drag step would `Reset` 030's typing
+/// `diff`) would compare it too and every drag step would `Reset` the typing
 /// effects; moreover the scanner refreshes the mirror wholesale with `clone_from`
 /// and would overwrite the selection on every keystroke. The selection is still
 /// **tied** to the mirror: it is dropped when `BUFFER` changes
@@ -1551,7 +1544,7 @@ pub(crate) struct DockSelection {
     /// `[start, end)`; `start == end` for an empty selection.
     range: (usize, usize),
     /// The mirror's clustering flag ([`DockState::cluster`]): the ends and the
-    /// ⇧←/⇧→ step are on cluster boundaries (035 R4.2). It travels with the
+    /// ⇧←/⇧→ step are on cluster boundaries. It travels with the
     /// selection, so extension does not ask for it again.
     cluster: bool,
 }
@@ -1585,7 +1578,7 @@ impl DockSelection {
     }
 
     /// The boundary a **single click** without a drag falls on — the click-to-caret
-    /// target (031 R4.1). Only for an empty `Simple` selection: double and triple
+    /// target. Only for an empty `Simple` selection: double and triple
     /// click do not move the caret. A mouse dragged and brought back to where it
     /// started also leaves an empty `Simple` and moves the caret — the behavior of
     /// text fields.
@@ -1593,7 +1586,7 @@ impl DockSelection {
         (self.kind == SelectKind::Simple && self.range.0 == self.range.1).then_some(self.range.0)
     }
 
-    /// ⇧← / ⇧→ (031 Karar 8): moves the selection's **moving end** by one character;
+    /// ⇧← / ⇧→: moves the selection's **moving end** by one character;
     /// if there is no selection, it starts from `caret`. The result is always
     /// `Simple` — a selection started with a word or line step grows with a letter
     /// step on the keyboard (the behavior of text fields).
@@ -1606,7 +1599,7 @@ impl DockSelection {
     /// The step is a **character** but does not fall between a combining mark and its
     /// base: the keyboard form of `dock::selection_range`'s `boundary` rule,
     /// otherwise `é`'s accent could be selected apart from its base. With clustering
-    /// on (`cluster`, 035) the step is a **cluster**: half of `🇹🇷` cannot be selected.
+    /// on (`cluster`) the step is a **cluster**: half of `🇹🇷` cannot be selected.
     pub(crate) fn stepped(
         current: Option<Self>,
         caret: usize,
@@ -1628,7 +1621,7 @@ impl DockSelection {
                 let caret = caret.min(len);
                 // If the caret is **inside** a cluster (ZLE can put it there) ⇧←'s fixed end is
                 // the back of the cluster: otherwise `boundary` would lower it to the start of
-                // the cluster and the first step would give an empty selection (`/code-review`).
+                // the cluster and the first step would give an empty selection (found in review).
                 let fixed = if cluster && !forward {
                     dock::cluster_span(chars.iter().copied(), caret, true)
                         .filter(|&(start, _)| start < caret)
@@ -1700,8 +1693,7 @@ impl DockSelection {
 /// result is certain; the only ways it can come out wrong are the widget rejecting
 /// the command or a write from outside the shell, and both change the length —
 /// the next command's `L` does not match, the widget does nothing: a repeat is
-/// lost, a cluster is not split
-/// (`.tasks/035-grapheme-dizileri/phase-5.md` → Uygulama Notları).
+/// lost, a cluster is not split.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DockPrediction {
     /// The generation born when the command was sent ([`crate::Session`]'s
@@ -1716,13 +1708,13 @@ pub(crate) struct ShellLog {
     /// The local shell's trail: its phase (`None` = no integration), the
     /// running command's clock and the block ledger ([`BlockTrack`]).
     pub(crate) local: BlockTrack,
-    /// Our **remote** shell's trail (048 phase-3, [`RemoteMark`]): the stripes
+    /// Our **remote** shell's trail ([`RemoteMark`]): the stripes
     /// and counters of the rows the server's prompt anchored with
     /// `bateri://rblock/<P>.<S>.<n>`.
     ///
     /// **Not tied to the remote state** ([`DockContext::remote`]): a remote `A`
     /// can arrive before the probe has set it, and the stripes stay in the
-    /// history after ssh ends, like local ones (048 discussion → Karar). It is
+    /// history after ssh ends, like local ones. It is
     /// cleared when the remote shell changes ([`Self::remote_shell`]) — an old
     /// session's rows are then not drawn, rather than drawn with the new
     /// session's codes. Its clock is read only while the parent is the open
@@ -1739,7 +1731,7 @@ pub(crate) struct ShellLog {
     /// The dock's context line: directory and branch. **Next to** the mirror, not in
     /// it ([`DockContext`]); same lock, separate lifetime.
     pub(crate) context: DockContext,
-    /// The pattern list of `[remote] hosts` (037 Karar 2); the remote host's mark
+    /// The pattern list of `[remote] hosts`; the remote host's mark
     /// ([`DockContext::remote_mark`]) is resolved from it, at two edges.
     pub(crate) host_rules: Vec<HostRule>,
     /// The dock's mouse selection; `None` → no selection. **Next to** the mirror (see
@@ -1747,7 +1739,7 @@ pub(crate) struct ShellLog {
     /// when `BUFFER` changes (the reader thread) and the frame that reads the range
     /// see it in the same turn.
     pub(crate) dock_selection: Option<DockSelection>,
-    /// The **wheel-selected** top of the dock's vertical window (032 phase-4); `None`
+    /// The **wheel-selected** top of the dock's vertical window; `None`
     /// → the window follows the caret ([`crate::dock::render_with`]).
     ///
     /// If in an input past the ceiling the window only followed the caret, the mouse
@@ -1757,8 +1749,8 @@ pub(crate) struct ShellLog {
     /// `BUFFER`, `PREBUFFER` or the caret changes (typing, an arrow key) and the
     /// window returns to the caret; a change of suggestion does not drop it.
     pub(crate) dock_scroll: Option<usize>,
-    /// Whether the shell bound the editing widget **at this prompt** (`8133;w`,
-    /// 031) — the editing gate's fourth condition
+    /// Whether the shell bound the editing widget **at this prompt**
+    /// (`8133;w`) — the editing gate's fourth condition
     /// ([`crate::Session::can_edit_dock`]).
     ///
     /// **Next to** the mirror, not in it: the scanner refreshes [`DockState`]
@@ -1769,13 +1761,13 @@ pub(crate) struct ShellLog {
     /// `line-finish` did not run (an interrupted line) does not carry the capability
     /// to the next prompt's `w`; the wrong direction is "no editing".
     pub(crate) dock_editable: bool,
-    /// The **expected** result of the last editing command (035 phase-5): until the
+    /// The **expected** result of the last editing command: until the
     /// mirror answers that command, the editing gate looks at this line
     /// ([`DockPrediction`]). Its lifetime is only one generation — any intervening
     /// input invalidates it; `e` and `A` clear it too.
     pub(crate) dock_pending: Option<DockPrediction>,
     /// Command generation: incremented on every **transition** of the phase to
-    /// `Running` (036 Karar 2).
+    /// `Running`.
     ///
     /// The stale-answer gate for the remote session probe: the probe is on the main
     /// thread, `D` on the reader thread, and the answer of a command that finishes in
@@ -1789,18 +1781,18 @@ pub(crate) struct ShellLog {
     /// iTerm2's mid-command `C` must not invalidate the answer for a running ssh.
     pub(crate) command: u64,
     /// Whether a line editor switched bracketed paste on **since the remote
-    /// state was set** (`CSI ? 2004 h`, in stream order; 047 phase-4) — the
+    /// state was set** (`CSI ? 2004 h`, in stream order) — the
     /// remote shell's prompt. Not since `C`: what the same command line ran
     /// before ssh (`ssh $(fzf)`) switches it on too. The `C` transition and a
     /// new remote target clear it; a remote prompt that came before the
     /// probe is the terminal modes' to see.
     pub(crate) paste_since_remote: bool,
     /// The command generation whose remote session is known to be logged in
-    /// (047 R9.1, [`crate::Session::remote_login`]) — a cache: the answer does
+    /// ([`crate::Session::remote_login`]) — a cache: the answer does
     /// not change within a generation and a later question needs no syscall.
     /// Bound to the generation, so `C` invalidates it by itself.
     pub(crate) login: Option<u64>,
-    /// The remote bootstrap's last `8133;i;up;{nonce}` (049 R2.2) and the
+    /// The remote bootstrap's last `8133;i;up;{nonce}` and the
     /// command generation it arrived in ([`crate::Session::remote_up`]). Bound
     /// to the generation like [`Self::login`], so `C` invalidates it by itself
     /// — and neither `set_remote` nor `D` clears it: `up` is the bootstrap's
@@ -1808,7 +1800,7 @@ pub(crate) struct ShellLog {
     /// check may run after `D`. Written only while a command runs.
     pub(crate) remote_up: Option<(u64, String)>,
     /// The command generation whose remote session the user typed into after
-    /// its login was seen ([`Self::login`]; 049 R7,
+    /// its login was seen ([`Self::login`];
     /// [`crate::Session::remote_typed`]): the session was the user's, so a
     /// wrapped `ssh` that ends without the bootstrap's `up` (a `ForceCommand`
     /// CLI) did not fall back. Bound to the generation like [`Self::login`];
@@ -1843,7 +1835,7 @@ pub(crate) struct ShellLog {
     /// mirror event and if the stamp were refreshed with them the hold would never
     /// expire.
     caret_since: Instant,
-    /// `line-finish` (`8133;e`) is **held**: when it arrived (032 Karar 11).
+    /// `line-finish` (`8133;e`) is **held**: when it arrived.
     ///
     /// zsh runs `line-finish` on every `PS2` acceptance, with no `precmd` in between
     /// and the phase stays `Input` (measured, zpty); right after it comes
@@ -1867,7 +1859,7 @@ pub(crate) struct ShellLog {
 /// **One predicate, two consumers.** [`crate::dock::render`] asks it to draw the
 /// caret, [`crate::Session::frame`] to hide the grid's cursor; if they were written
 /// separately, the same frame would have two carets (or none) —
-/// the observed defect was exactly that (012 phase-8).
+/// the observed defect was exactly that.
 ///
 /// **This is a separate question from the suppression of the input line.**
 /// Suppression asks which **cells** will be skipped and its answer depends on the
@@ -1885,10 +1877,10 @@ pub(crate) enum CaretHome {
 /// The **hold duration** of the Dock→Grid handover (hysteresis).
 ///
 /// **Chosen, not measured.** Both ends have reasons: the lower bound is measured
-/// (`context.md` → Kanıt: while `ls` runs the phase lasts 44 ms, so any hold
+/// (while `ls` runs the phase lasts 44 ms, so any hold
 /// below 44 ms never catches `ls`) and the value here is more than three times
 /// that — so that `git status`-class commands are covered too. The upper bound's
-/// precedent is 013: the counter of a command that does not exceed one second is
+/// precedent is the duration counter: the counter of a command that does not exceed one second is
 /// **not shown**, so the threshold at which the user counts it as "running" is one
 /// second already; the hold must stay well below it so that a genuinely running
 /// command shows its caret on the grid.
@@ -1897,14 +1889,13 @@ pub(crate) enum CaretHome {
 /// settles in ~230 ms (`bt_gpu::motion`, `OMEGA`'s doc) and this value is
 /// **below** it. The consequence: every hold that expires releases the caret
 /// while the animator is still on its way, so in commands that exceed the hold a
-/// single clean targeting splits into two. A known cost, `.tasks/015-imlec-cilasi/phase-1.md`
-/// → Bilinen sınırlar; whoever changes the value must take this relation into
-/// account. The precedent is `bt_gpu::motion`'s
+/// single clean targeting splits into two. A known cost; whoever changes the
+/// value must take this relation into account. The precedent is `bt_gpu::motion`'s
 /// `const _: () = assert!(EASE_DURATION < TIME_CEILING)` — there, since the two
 /// numbers are in the same crate, the condition can be written to the compiler;
 /// here, since it crosses the crate boundary, there is only this sentence.
 ///
-/// **Not** the subject of `docs/OLCUMLER.md`: this is a feel threshold, not a
+/// **Not** a measured number: this is a feel threshold, not a
 /// measurement (the precedent is `FADE_DURATION`).
 pub(crate) const HANDOVER_HOLD: Duration = Duration::from_millis(150);
 
@@ -1958,7 +1949,7 @@ fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
 /// without building a load.
 ///
 /// `held` = whether the Dock→Grid handover is **being held** right now
-/// (hysteresis, R1.1). The hold's duration and stamp are in the ledger
+/// (hysteresis). The hold's duration and stamp are in the ledger
 /// ([`HANDOVER_HOLD`], [`ShellLog::caret`]); only the decision comes here, because
 /// this function sees no clock.
 ///
@@ -1985,15 +1976,16 @@ fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
 ///
 /// - `Running` — a command is running. It owns the line: the input `cat` waits
 ///   for, `ssh`'s password prompt and vim's own cursor live on the grid.
-/// - `Unavailable` — there is a line we cannot show and it stays on the grid
-///   (R1.2); its caret must stay there too, otherwise the user cannot see where
+/// - `Unavailable` — there is a line we cannot show and it stays on the
+///   grid; its caret must stay there too, otherwise the user cannot see where
 ///   they are typing.
 /// - `Control` — the display carries a control character the dock does not draw
 ///   ([`DockStatus::Control`]). The second application of the same sentence: since
 ///   the line stays on the grid, the caret is there too. (The line break has not
-///   been in this list since 032: the dock draws multiple lines itself.)
+///   been in this list since the dock learned multi-line input: the dock draws
+///   multiple lines itself.)
 /// - `Input` + `Idle` — the shell says "the user is typing" but ZLE has
-///   **released** the line. Suppression lifts exactly here too (R3.3): `CORRECT`'s
+///   **released** the line. Suppression lifts exactly here too: `CORRECT`'s
 ///   `[nyae]` question, a `zle -M` message, between `line-finish` and Enter. Since
 ///   the line returns to the grid, the caret has to return too.
 ///
@@ -2013,7 +2005,7 @@ fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
 /// that separates "the mirror never arrived" from "ZLE released". We do not add
 /// that state without a measured symptom; the window that was removed (`Finished`,
 /// one `git` fork) is many times above this.
-/// *(015 phase-1: the window now **melts inside the hold** — zsh's `line-init` is
+/// *(Since the hold: the window now **melts inside the hold** — zsh's `line-init` is
 /// far below [`HANDOVER_HOLD`], so it is not reported at that moment at all. The
 /// record above is dated and stays: the window itself did not close, it became
 /// invisible.)*
@@ -2046,16 +2038,16 @@ pub(crate) struct SuppressedInput {
     pub(crate) block: u32,
     /// The mirror has **no characters at all**: neither in the display
     /// (`PREDISPLAY ++ BUFFER ++ POSTDISPLAY`) nor in `PREBUFFER` — the freshness
-    /// gate's empty-mirror question (`Session::frame`'s `blank_mirror`, 025).
+    /// gate's empty-mirror question (`Session::frame`'s `blank_mirror`).
     ///
-    /// **Character, not column** (032): until 032 the criterion was "zero columns on
+    /// **Character, not column**: before multi-line input the criterion was "zero columns on
     /// both sides of the caret" and it was not line-aware — a lone `\n` pushes the
     /// cursor down a row, so the premise "the cursor must be on the anchor's row" is
     /// now true only for a genuinely empty mirror. If `PREBUFFER` is filled (a `for>`
     /// line) the cursor is legitimately below the anchor and the anchor question is
     /// never asked.
     pub(crate) blank: bool,
-    /// Whether suppression's upper floor is **the anchor's row** (032 Karar 7):
+    /// Whether suppression's upper floor is **the anchor's row**:
     /// `PREBUFFER` is filled (ZLE accepted the earlier lines, all of them together
     /// with their `PS2`s are part of the input) or `line-finish` is being held
     /// ([`ShellLog::expire_end`]; the accepted line is about to move to `PREBUFFER`).
@@ -2122,9 +2114,9 @@ impl ShellLog {
     /// tells the outside "no integration".
     ///
     /// The return value is the notifications the caller will give ([`ScanOutcome`]):
-    /// the transition to `Running` and the deletion of the remote state (036).
+    /// the transition to `Running` and the deletion of the remote state.
     pub(crate) fn apply(&mut self, mark: Mark) -> ScanOutcome {
-        // **The remote session is ended only by OUR mark** (036 phase-3): if the shell
+        // **The remote session is ended only by OUR mark**: if the shell
         // has printed our identity once and the remote session is active, an
         // identity-less mark (an identity-less `A`/`D`, every `B` and `C`) touches
         // nothing. The source is the far end of ssh: fish 4 or the kitty/iTerm2
@@ -2152,7 +2144,7 @@ impl ShellLog {
         {
             self.command_open = false;
         }
-        // **A held `line-finish` ends on every mark** (Karar 11): `C` says the command
+        // **A held `line-finish` ends on every mark**: `C` says the command
         // ran, `A` says a new prompt — in both the accepted line is now the grid's
         // permanent content.
         if self.end_since.take().is_some() {
@@ -2161,7 +2153,7 @@ impl ShellLog {
         let mut outcome = ScanOutcome::default();
         match mark {
             Mark::PromptStart { id } => {
-                // The remote state goes **by itself** (036 Karar 2): no round trip to `bt-shell`
+                // The remote state goes **by itself**: no round trip to `bt-shell`
                 // to end it. `A` is `D`'s defensive arm — like the clock's, so that a lost `D`
                 // does not carry the remote indicator into the next prompt. The remote shell's
                 // identity-less `A` never reaches here (the gate above).
@@ -2184,14 +2176,14 @@ impl ShellLog {
                     self.paste_since_remote = false;
                     outcome.started = true;
                     outcome.title = self.context.clear_remote();
-                    // The offer's lifetime is until the next command (Karar 8).
+                    // The offer's lifetime is until the next command.
                     self.context.reconnect = None;
                 }
                 // The phase and the clock: the first `C` wins ([`BlockTrack::command`]).
                 self.local.command();
             }
             Mark::CommandEnd { exit, id } => {
-                // **The offer comes before the remote state is deleted** (037 Karar 8): the
+                // **The offer comes before the remote state is deleted**: the
                 // target and mark go with `clear_remote`. The identity is required — in a shell
                 // that has never shown our identity an identity-less `D` reaches here, and a
                 // `D;255` from the far end of ssh must not produce an offer. 255 is ssh's own
@@ -2219,7 +2211,7 @@ impl ShellLog {
         outcome
     }
 
-    /// Applies our remote shell's mark to the remote trail (048 phase-3) — and
+    /// Applies our remote shell's mark to the remote trail — and
     /// **only** there: no local field, no notification ([`RemoteMark`]'s doc).
     ///
     /// A new remote shell starts a new trail: the old session's ledger cannot
@@ -2266,13 +2258,13 @@ impl ShellLog {
         let mut outcome = ScanOutcome::default();
         match event {
             ScanEvent::Mark(mark) => outcome = self.apply(mark),
-            // **Our remote shell's mark is separated before anything local**
-            // (048 phase-3): `apply`'s identity, the held `line-finish`, the
+            // **Our remote shell's mark is separated before anything local**:
+            // `apply`'s identity, the held `line-finish`, the
             // command's closing and the three notifications never see it — the
             // remote `A` must not hand ⌘T's first input to the remote shell
             // (`outcome.prompt`) nor end the remote session.
             ScanEvent::RemoteMark(remote) => self.apply_remote(remote),
-            // **While a remote session is active OSC 8133 is ignored** (048 R4): the
+            // **While a remote session is active OSC 8133 is ignored**: the
             // local shell is behind ssh and the only 8133 that can arrive is a remote
             // one — a remote mirror would draw a foreign line in the local dock, and
             // a remote `8133;w` would make the local dock send `CSI 8133 ~` editing
@@ -2285,20 +2277,20 @@ impl ShellLog {
             // local reach here. A rejected OSC 7 produces no event at all, so the old path
             // stays in place — a stale path rather than showing a wrong one.
             //
-            // **Which slot** (036 Karar 4): while a remote session is active **every** OSC 7
+            // **Which slot**: while a remote session is active **every** OSC 7
             // goes to the remote side's — the local shell is behind ssh with blocks, so a
             // remote shell printing `file:///…` must not overwrite the local directory. While
             // inactive a foreign authority goes to the remote slot: OSC 7 can arrive before
             // the probe and must not change the result. The remote slot does not enter the
             // title, so there is no notification.
             ScanEvent::PasteOn => self.note_paste_on(),
-            // **Not gated by the remote session** (048): it is the remote side's
+            // **Not gated by the remote session**: it is the remote side's
             // own report about itself, it touches no dock state, and it can arrive
             // before the probe has set the remote state — the same lifecycle as
             // the remote slot below (cleared on `C`/`D`/`A`).
             ScanEvent::RemoteSetup(fault) => self.context.remote_setup = Some(fault),
-            // **The remote 8133 defense's second narrow exception** (049 R2.2,
-            // `f`'s precedent): the bootstrap's proof that the wrapped command
+            // **The remote 8133 defense's second narrow exception** (`f`'s
+            // precedent): the bootstrap's proof that the wrapped command
             // ran. Not gated by the remote state — it is the bootstrap's first
             // byte and beats the probe — but by a running command: at a local
             // prompt there is no wrapped ssh to vouch for. Its content is a
@@ -2343,7 +2335,7 @@ impl ShellLog {
 
     /// The user sent input ([`crate::Session::send_input`], the single funnel):
     /// `true` once per command generation, at the first input after the
-    /// remote session's login was seen (049 R7, [`Self::typed`]) — the edge
+    /// remote session's login was seen ([`Self::typed`]) — the edge
     /// of [`crate::Wake::remote_typed`]. A login seen later than the keys
     /// leaves them uncounted (the login probe's lag): the wrong direction is
     /// a plain rerun, today's behaviour.
@@ -2360,15 +2352,15 @@ impl ShellLog {
 
     /// The scanner saw `CSI ? 2004 h` ([`ScanEvent::PasteOn`], in stream
     /// order): recorded only while the remote state is set — the local
-    /// prompt's and anything before ssh are not the remote shell's (047 phase-4).
+    /// prompt's and anything before ssh are not the remote shell's.
     pub(crate) fn note_paste_on(&mut self) {
         if self.context.remote.is_some() && self.running_command().is_some() {
             self.paste_since_remote = true;
         }
     }
 
-    /// The remote session's login signals that arrive with the output (047
-    /// R9.1): a remote OSC 7, bracketed paste switched on since the remote
+    /// The remote session's login signals that arrive with the output: a
+    /// remote OSC 7, bracketed paste switched on since the remote
     /// state was set, or a title of the `user@host: dir` shape written since
     /// then (`titled`, the caller's — the title is another leaf lock). `false`
     /// without a remote session.
@@ -2377,7 +2369,7 @@ impl ShellLog {
             && (!self.context.remote_cwd.is_empty() || self.paste_since_remote || titled)
     }
 
-    /// Writes the remote session's host (036); `true` **if the title's input
+    /// Writes the remote session's host; `true` **if the title's input
     /// changed**.
     ///
     /// The gate is in the caller ([`crate::Session::set_remote`]: generation and
@@ -2389,14 +2381,14 @@ impl ShellLog {
     /// ESC would go (as a box) into the window title and the context line. The wrong
     /// direction is safe: the indicator does not appear, a wrong name is not drawn.
     ///
-    /// The target is written as a whole (037 Karar 1) and the mark is resolved here,
+    /// The target is written as a whole and the mark is resolved here,
     /// from the pattern list ([`Self::host_rules`]); the return is still only the
     /// change of the **host** — that is the title's input.
     pub(crate) fn set_remote(&mut self, target: Option<&RemoteTarget>) -> bool {
         let target = target
             .filter(|target| !target.host.is_empty() && !target.host.chars().any(char::is_control));
         let changed = self.context.remote_host() != target.map(|target| target.host.as_str());
-        // Another host's load is not this one's (046 Karar 5); the same host
+        // Another host's load is not this one's; the same host
         // re-reported keeps its indicator.
         if changed {
             self.context.stats = None;
@@ -2426,7 +2418,7 @@ impl ShellLog {
     }
 
     /// Writes the host marks' pattern list and re-resolves the active remote host's
-    /// mark (037 Karar 2); `true` **if the mark changed**. The same list is a no-op.
+    /// mark; `true` **if the mark changed**. The same list is a no-op.
     pub(crate) fn set_host_rules(&mut self, rules: &[HostRule]) -> bool {
         if self.host_rules == rules {
             return false;
@@ -2465,11 +2457,11 @@ impl ShellLog {
     /// Applies the mirror event to [`Self::dock`].
     ///
     /// In the two states that cannot be drawn (`End`, `Unavailable`) the text is
-    /// **emptied**: leaving a stale line would mean that in phase-4, while the grid is
+    /// **emptied**: leaving a stale line would mean that, while the grid is
     /// suppressed, the dock shows the previous command — the user's typing and what
     /// they see silently diverging, the symptom class this repo forbids.
     ///
-    /// **A mirror whose `BUFFER` changed deletes the dock selection** (031 R3.4): the
+    /// **A mirror whose `BUFFER` changed deletes the dock selection**: the
     /// indices would now point at the characters of another text. Only `BUFFER` —
     /// the prompt being redrawn (`PREDISPLAY`) or a change of suggestion does not move
     /// the selected text. `End` and `Unavailable` empty the text, the selection too.
@@ -2496,8 +2488,8 @@ impl ShellLog {
                 // `e` is ⏎'s answer and the freshness gate asks it throughout the hold (the
                 // cursor may have descended to `PS2`'s line).
                 self.dock.answers = answers;
-                // **Held if the phase is `Input` and the mirror is live** (Karar 11,
-                // [`Self::end_since`]). The clock is read only here, that is, once per ⏎ —
+                // **Held if the phase is `Input` and the mirror is live**
+                // ([`Self::end_since`]). The clock is read only here, that is, once per ⏎ —
                 // [`Self::observe_caret`]'s rule.
                 let typing = self
                     .local
@@ -2574,7 +2566,7 @@ impl ShellLog {
     ///
     /// The raw answer returns to `Grid` at the instant of `e` as before the hold, and
     /// the caret hold ([`HANDOVER_HOLD`]) counts from the same instant — the two holds
-    /// end at the same clock, `line-finish` timing is the same as before 032. The
+    /// end at the same clock, `line-finish` timing is the same as before the hold. The
     /// mirror itself stays `Live` throughout the hold: drawing, band and suppression
     /// read it.
     fn caret_status(&self) -> DockStatus {
@@ -2658,7 +2650,7 @@ impl ShellLog {
     }
 
     /// Where the quit-time snapshot of the scrollback stops
-    /// ([`crate::Session::final_history`], 053 R1.2).
+    /// ([`crate::Session::final_history`]).
     ///
     /// The anchor arm is [`Self::input_block`]'s answer, i.e. the `blocks`
     /// tier too (its prompt is the user's but carries our anchor); the
@@ -2688,7 +2680,7 @@ impl ShellLog {
     ///   `Unavailable` are separately correct answers: in the first ZLE is not editing
     ///   a line (`line-finish` arrived), in the second there is a line we cannot show
     ///   and it **has** to stay on the grid, otherwise the user sees what they typed
-    ///   nowhere (R1.2). This tier of the gate is the reason [`DockStatus`] exists.
+    ///   nowhere. This tier of the gate is the reason [`DockStatus`] exists.
     /// - The ledger's last record is still open — the same as [`BlockTrack::running`]'s
     ///   second condition and for the same reason: a `B` arriving after an
     ///   identity-less `A` puts the phase in `Input`, while the ledger's last record
@@ -2718,8 +2710,7 @@ impl ShellLog {
     /// Its consumer is suppression's row arithmetic ([`crate::dock::grid_span`]) and
     /// it is called in the **same lock turn** as [`Self::suppressed_input`].
     /// `PREBUFFER` does not enter: on the grid those rows have long been printed with
-    /// zsh's `PS2`, and they are not the subject of the layout-walking calculation
-    /// (032 Karar 7).
+    /// zsh's `PS2`, and they are not the subject of the layout-walking calculation.
     pub(crate) fn display_into(&self, into: &mut String) -> usize {
         into.clear();
         into.push_str(&self.dock.predisplay);
@@ -2743,7 +2734,7 @@ impl ShellLog {
     /// (the caret moves **and** the fill count moves), one-shot, and the stop
     /// condition is named — the hold expired or the predicate returned to `Dock`.
     ///
-    /// **The remote session comes before the hold** (036 Karar 8): on the remote
+    /// **The remote session comes before the hold**: on the remote
     /// there is no dock input line (`Cursor::input_rows == 0`), so there is no surface
     /// to take over either — the caret is on the grid, no hold. If the hold were
     /// applied afterward, a `set_remote` arriving right after `C` would seat the caret
@@ -2845,18 +2836,17 @@ fn millis(duration: Duration) -> u32 {
 /// The counter's threshold — a command shorter than this never produces a
 /// counter.
 ///
-/// **A design constant, not a measurement** (does not go into
-/// `docs/OLCUMLER.md`): `0.01s` next to every `ls` would be noise, while a command
+/// **A design constant, not a measurement**: `0.01s` next to every `ls` would be noise, while a command
 /// that exceeds one second raises two questions — while running "is it hung", when
 /// finished "how long did it take" — and the answer to both is the same number.
-/// The reference product makes the same threshold a setting
-/// (`docs/ARASTIRMA.md` → `command_duration_threshold`); ours is constant today.
+/// Other terminals make the same threshold a setting
+/// (`command_duration_threshold`); ours is constant today.
 pub(crate) const COUNTER_FLOOR: Duration = Duration::from_secs(1);
 
 /// The counter's resolution — separate for a **running** and a **finished**
 /// command, and the reason for the distinction is both reading and battery.
 ///
-/// A running counter requests a frame at every change (013 phase-2, clock). If it
+/// A running counter requests a frame at every change (the clock). If it
 /// showed tenths it would be **ten frames per second**, yet the question asked
 /// while running is "is it hung" and the decimal is just noise. A finished value
 /// is **frozen**: it costs no frames, so there the decimal's cost is zero and its
@@ -2880,7 +2870,7 @@ pub(crate) enum Precision {
 
 /// The time remaining until the running counter's next **visible** change.
 ///
-/// The clock's only input (013 phase-2) and a direct consequence of the format:
+/// The clock's only input and a direct consequence of the format:
 /// since a running counter shows whole seconds the boundary is the next whole
 /// second. If the format changes this place has to change too and the two sit side
 /// by side — `bt-gpu` never asks the "when" question, it only waits for the given
@@ -2895,7 +2885,7 @@ pub(crate) fn next_tick(elapsed: Duration) -> Duration {
     }
     // **A separate resolution per tier.** In the hour tier the text (`1h 07m`)
     // changes once a minute; waking every second would have an hour draw 3540
-    // **identical** frames (`/code-review`, 013 gate) and we would be the first to
+    // **identical** frames (found in review) and we would be the first to
     // violate the "content must genuinely change" condition we just wrote into the
     // module header.
     let period = if elapsed.as_secs() < 3600 {
@@ -2993,7 +2983,7 @@ const MARK_OSC: u32 = 133;
 /// (urxvt), 1337 (iTerm2/WezTerm), 9278 (Warp), 30001–30002 (kitty). 8133 is in
 /// none of them.
 ///
-/// **It must be short.** The number enters the stream **per** keystroke (R6.2); a
+/// **It must be short.** The number enters the stream **per** keystroke; a
 /// six-digit number means two extra bytes on every stroke. Four digits, with a
 /// prefix saying it is `133`'s second arm: `8133`.
 ///
@@ -3090,7 +3080,7 @@ const ERASE_ALL: u32 = 2;
 /// DEC private mode 2004, bracketed paste: `CSI ? 2004 h` switches it on. A
 /// line editor turns it on at its prompt (zsh's ZLE, bash's readline, fish) —
 /// after the running command's `C`, i.e. inside an ssh, the remote shell's
-/// prompt: the user is logged in (047 phase-4). The local zsh turns it off
+/// prompt: the user is logged in. The local zsh turns it off
 /// before `C` (`zle_bracketed_paste`), so its own never counts.
 const BRACKETED_PASTE: u32 = 2004;
 
@@ -3139,7 +3129,7 @@ struct CsiScan {
     /// most a leading `?`".
     simple: bool,
     /// Whether the sequence opened with the private marker `?` (DEC private mode,
-    /// 047 phase-4: `CSI ? 2004 h`). Only a **leading** `?` counts; any other
+    /// `CSI ? 2004 h`). Only a **leading** `?` counts; any other
     /// marker or a `?` after a digit clears [`Self::simple`].
     private: bool,
 }
@@ -3165,7 +3155,7 @@ impl CsiScan {
     }
 
     /// Whether the sequence is `CSI ? 2004 h` — bracketed paste switched on, the
-    /// remote shell's prompt (047 phase-4, a login signal).
+    /// remote shell's prompt (a login signal).
     fn is_paste_on(&self, final_byte: u8) -> bool {
         self.simple
             && self.private
@@ -3192,7 +3182,7 @@ enum Arm {
 }
 
 /// The answer of [`ShellLog::apply_scan_answering`]: the notifications the reader
-/// thread will give after releasing the lock (036).
+/// thread will give after releasing the lock.
 ///
 /// One return path, two notifications: opening a second path (a flag in the
 /// ledger, a separate query) would tie the notification to a second turn of the
@@ -3204,12 +3194,12 @@ pub(crate) struct ScanOutcome {
     pub(crate) title: bool,
     /// The phase **moved** to `Running` → [`crate::Wake::command_started`].
     pub(crate) started: bool,
-    /// Our identified `A` arrived: the shell reached the prompt (037 Karar 6). Its
+    /// Our identified `A` arrived: the shell reached the prompt. Its
     /// consumer is the session's first input (`SessionOptions::initial_input`); an
     /// identity-less `A` does not count — the `A` of the far end of ssh or of another
     /// tool does not say our shell reached the prompt.
     pub(crate) prompt: bool,
-    /// The remote bootstrap's `up` was recorded (049, [`ShellLog::remote_up`])
+    /// The remote bootstrap's `up` was recorded ([`ShellLog::remote_up`])
     /// → [`crate::Wake::remote_up`].
     pub(crate) up: bool,
 }
@@ -3232,25 +3222,25 @@ pub(crate) enum ScanEvent<'a> {
     /// The working directory, the **resolved** full path, and whether the authority is
     /// this machine ([`LOCAL_AUTHORITIES`]). A rejected URI produces no event at all:
     /// there is no "directory could not be read" state, because the right answer is to
-    /// leave the old one. A foreign authority has not been rejected since 036, it goes
+    /// leave the old one. A foreign authority is not rejected, it goes
     /// to the remote slot ([`ShellLog::apply_scan_answering`]).
     Cwd {
         path: &'a str,
         local: bool,
     },
-    /// `CSI ? 2004 h`: a line editor switched bracketed paste on (047 phase-4).
+    /// `CSI ? 2004 h`: a line editor switched bracketed paste on.
     /// An **event**, not a counter like `CSI 2 J`'s: its meaning depends on
     /// where it falls between the marks of the same read (a local prompt's
     /// before `C`, the remote shell's after the remote state is set), so it
     /// is applied in stream order ([`ShellLog::note_paste_on`]).
     PasteOn,
     /// `8133;f;{code}`: the remote bootstrap fell back to a plain login shell
-    /// (048, [`DockContext::remote_setup`]). On the mirror's number but **not**
-    /// a [`DockEvent`]: the remote session's gate on the dock (048 R4) must not
+    /// ([`DockContext::remote_setup`]). On the mirror's number but **not**
+    /// a [`DockEvent`]: the remote session's gate on the dock must not
     /// swallow it, and it never touches the mirror's state.
     RemoteSetup(RemoteSetupFault),
-    /// `8133;i;up;{nonce}`: the remote bootstrap started (049 R2.2,
-    /// [`ShellLog::remote_up`]). `f`'s twin: on the mirror's number, not a
+    /// `8133;i;up;{nonce}`: the remote bootstrap started
+    /// ([`ShellLog::remote_up`]). `f`'s twin: on the mirror's number, not a
     /// [`DockEvent`]. Owned: it arrives once per connection.
     RemoteUp(String),
 }
@@ -3261,14 +3251,14 @@ pub(crate) enum DockEvent<'a> {
     Update(&'a DockState),
     /// `line-finish`: ZLE released the line.
     End,
-    /// A mirror arrived but could not be read. **The signal is here**: today's `Skip`
-    /// arm told the caller nothing (R1.2).
+    /// A mirror arrived but could not be read. **The signal is here**: a silent
+    /// `Skip` arm would tell the caller nothing.
     Unavailable(DockFault),
     /// The git branch; an empty body means "not a repository". It comes from the
     /// mirror's channel (`precmd` prints it) but does not touch the mirror's
     /// **state**.
     Branch(&'a str),
-    /// The editing widget is bound at this prompt (`line-init`, 031); does not touch
+    /// The editing widget is bound at this prompt (`line-init`); does not touch
     /// the mirror's state ([`ShellLog::dock_editable`]).
     Editable,
 }
@@ -3499,7 +3489,7 @@ impl Scanner {
                 } else if is_ignored(byte) {
                 } else if self.dock.len() == DOCK_PAYLOAD_LIMIT {
                     // Unlike 133's silent drop, the overflow is reported **immediately**: so that the
-                    // consumer can say "I cannot show it" (R1.2). The rest of the sequence is still
+                    // consumer can say "I cannot show it". The rest of the sequence is still
                     // skipped so that we see what follows it.
                     self.state = ScanState::Skip;
                     on_event(ScanEvent::Dock(DockEvent::Unavailable(DockFault::Overflow)));
@@ -3545,7 +3535,7 @@ impl Scanner {
             // sequence boundary the grid sees from ours; the two sides would read two
             // different stories from the same stream (module header).
             ScanState::Csi(mut csi) => match byte {
-                // **The cancel rules are verbatim from `vte::anywhere`** (R1.3). If they were not
+                // **The cancel rules are verbatim from `vte::anywhere`**. If they were not
                 // carried over, a corrupt CSI would get us stuck and the `ESC ] 133;…` that
                 // follows would be swallowed — blocks, suppression and the dock would die
                 // **silently**.
@@ -3671,19 +3661,19 @@ fn parse_mark(payload: &[u8]) -> Option<ScanEvent<'static>> {
 }
 
 /// The authority values that point to this machine — the answer to the "is it
-/// local" question, **not an accept list** (036): an OSC 7 with a foreign
+/// local" question, **not an accept list**: an OSC 7 with a foreign
 /// authority also produces an event and goes to the remote slot
 /// ([`ShellLog::apply_scan_answering`]), it just does not write to the local
 /// directory.
 ///
 /// **Every named host is counted as foreign** and this was chosen deliberately
 /// instead of "compare with our own name": comparison means `gethostname`, which
-/// means a new dependency edge for `bt-core` (`proje.md` → Yayın etkisi: a new
-/// dependency is an architectural decision). Our own script therefore prints with
+/// means a new dependency edge for `bt-core` (a new dependency is an
+/// architectural decision). Our own script therefore prints with
 /// an **empty authority** (`file:///…`), so the gate is never tied to a name
 /// match — it does not silently close when the machine is renamed.
 ///
-/// **The machine's name is the second arm** (044): `bt-shell` (which has `libc`)
+/// **The machine's name is the second arm**: `bt-shell` (which has `libc`)
 /// reads the name and passes it via `SessionOptions::hostname` — the precedent is
 /// `decide_locale` — so third-party hooks that print `file://$HOST$PWD` (like
 /// oh-my-zsh's `termsupport.zsh`) and GNU `ls --hyperlink`'s `file://$HOSTNAME/…`
@@ -3710,9 +3700,9 @@ pub(crate) fn is_local_authority(authority: &str, hostname: Option<&str>) -> boo
 /// payload we would read the path `/tmp/a;b` as `/tmp/a`.
 ///
 /// The result of every rejected state is the same and **ignoring, not panicking**
-/// (`CLAUDE.md` → PTY yolunda panik yok): the scheme is not `file:`, the authority
+/// (no panics on the PTY path): the scheme is not `file:`, the authority
 /// is not UTF-8, the path does not start with `/`, a percent escape is corrupt or
-/// the result is not UTF-8. A foreign authority is not a rejection (036): the
+/// the result is not UTF-8. A foreign authority is not a rejection: the
 /// answer is `Some(false)`.
 fn parse_cwd(
     payload: &[u8],
@@ -3784,7 +3774,7 @@ fn block_id(field: &[u8]) -> Option<u32> {
     number(field.strip_prefix(BLOCK_ID_FIELD)?)
 }
 
-/// Our remote shell's identity field (048 phase-3): `bt_remote=<P>.<S>.<n>`
+/// Our remote shell's identity field: `bt_remote=<P>.<S>.<n>`
 /// ([`RemoteShell`] and the remote counter). A separate name, not `bt_block=`:
 /// the local gates read that one as the local shell's.
 const REMOTE_ID_FIELD: &[u8] = b"bt_remote=";
@@ -3824,9 +3814,9 @@ enum DockOutcome {
     Unavailable(DockFault),
     Branch,
     Editable,
-    /// `f`: the remote bootstrap's fault code (048); `None` for an unknown code.
+    /// `f`: the remote bootstrap's fault code; `None` for an unknown code.
     Setup(Option<RemoteSetupFault>),
-    /// `i`: the remote bootstrap's information (049); `Some(nonce)` for a
+    /// `i`: the remote bootstrap's information; `Some(nonce)` for a
     /// well-formed `up`, `None` for anything else (a newer bootstrap's word, a
     /// malformed nonce) — nothing to say, and no fault of the mirror's.
     Info(Option<String>),
@@ -3848,14 +3838,14 @@ enum DockOutcome {
 ///
 /// `u` refreshes the line, `e` (`line-finish`) closes it, `o` is the shell saying
 /// "this display does not fit the mirror", and `b` carries the branch in the dock's
-/// context line. `w` (031) says "the editing widget is bound at this prompt": the
+/// context line. `w` says "the editing widget is bound at this prompt": the
 /// precondition of the only sequence the terminal sends to the shell
 /// (`CSI 8133 ~`); it has no payload and does not touch the mirror's state, like
-/// `b`. `f` (048) is printed by the **remote** bootstrap, not the local wrapper:
+/// `b`. `f` is printed by the **remote** bootstrap, not the local wrapper:
 /// the integration did not start on the server and `{code}` (plain ASCII, one of
 /// [`RemoteSetupFault::from_code`]'s) says why. It touches neither the mirror nor
 /// the dock — and an unknown code is no fault of the mirror's either. `i`
-/// (049) is the remote bootstrap too: `up` is its first output and `{nonce}`
+/// is the remote bootstrap too: `up` is its first output and `{nonce}`
 /// the attempt's (lowercase hex, at most [`NONCE_LIMIT`] digits — the form is
 /// checked, the content is the pane's to match); any other `i` is silent.
 ///
@@ -3864,7 +3854,7 @@ enum DockOutcome {
 /// state. It does not deserve its own OSC number — unlike the directory
 /// (`CWD_OSC`) there is no contract for the branch, so a new number would only be a
 /// second channel printed by our script alone. **Extra fields are ignored** — the
-/// same reason as [`parse_mark`] tolerating unknown key-values: phase-4's special
+/// same reason as [`parse_mark`] tolerating unknown key-values: a future special
 /// mode signal should be addable without reopening this parser.
 ///
 /// **Why base64:** the bodies are text the user typed, so they can contain `;`,
@@ -3898,7 +3888,7 @@ fn parse_dock(
         // and `b;` is an encoder detail and both mean "no branch"). This arm once returned
         // `Malformed` and that was exactly what the sentence above forbids: a truncated
         // `b` sequence dropped the input line from the dock and sent it back to the grid
-        // (`/code-review`, 012 phase-6).
+        // (found in review).
         b"b" => {
             branch.clear();
             if let Some(field) = fields.next() {
@@ -3935,7 +3925,7 @@ fn parse_dock(
     }
 }
 
-/// The longest nonce `8133;i;up` carries (049): the bootstrap's is 16 hex
+/// The longest nonce `8133;i;up` carries: the bootstrap's is 16 hex
 /// digits (`bt-shell-common::ssh_wrap::NONCE_LEN`); the bound only keeps a
 /// foreign sequence from making a long string.
 pub(crate) const NONCE_LIMIT: usize = 64;
@@ -4011,7 +4001,7 @@ fn decode_line<'a>(
     // The last non-blank character of the display's **last line**, from the end; the
     // three bodies in display order.
     //
-    // **The last line, not the last character** (032): the other half of the gate
+    // **The last line, not the last character**: the other half of the gate
     // scans **one** row of the grid — suppression's lower end, that is the display's
     // last line. In a paste of `echo a\necho b\n`, zsh keeps the final line break in
     // the buffer and that line is **empty**; if the mirror said `'b'` (or `'\n'` —
@@ -4021,16 +4011,16 @@ fn decode_line<'a>(
     // answer as the grid's empty line. Wrapping does not break this: the last
     // character of a wrapped line is on the last visual line.
     //
-    // **Known limit, safe direction** (032 phase-4): on a `PS2` line the grid carries
+    // **Known limit, safe direction**: on a `PS2` line the grid carries
     // the user's `for> ` ink, the mirror does not (`PS2` is not touched and its width
     // is not in the mirror). When `BUFFER` is empty the two sides diverge and in an
     // unanswered frame the content gate says "stale"; the temporal gate (`line-init`'s
     // mirror is ⏎'s answer) rescues as it does today, and at the moment it cannot
     // rescue (a key without redisplay) the line is visible in two places.
     //
-    // **With clustering on (035) the criterion is the cluster's first character**:
+    // **With clustering on the criterion is the cluster's first character**:
     // the grid keeps `👍🏽` in a single cell and the cell's `c` is `👍`; if the mirror
-    // said `🏽` the gate would bring back 024's symptom — the line leaps to the grid on
+    // said `🏽` the gate would bring back the zero-width symptom — the line leaps to the grid on
     // every keystroke. The three criteria below as they are: a combining mark joining
     // a cluster is already not counted separately, a headless combining mark (column
     // zero) is skipped.
@@ -4061,14 +4051,14 @@ fn decode_line<'a>(
             // inkless as well equalizes the two halves again — `"ls\t"` is `'s'` in both,
             // `"\t"` is `None` in both.
             //
-            // **A raw control character never comes to this comparison** (025): ZLE draws
+            // **A raw control character never comes to this comparison**: ZLE draws
             // `\x01` as `^A` on the grid and the dock does not draw it at all, so that line
             // stays on the grid with [`DockStatus::Control`] and is not suppressed. It was once
             // written here as a "remaining limit" and was worse than written: only when `^A`
             // was the **last** character did the gate drop, when it was in the middle the line
             // went to the dock and vanished.
             //
-            // **The third criterion is zero width and it came in 024** (the user reported,
+            // **The third criterion is zero width** (the user reported it,
             // measured): combining code points (VS16, ZWJ, skin tone) **never enter** the grid
             // cell — alacritty keeps them in `CellExtra` and `cell.c` carries the base
             // character. So in a buffer with `❤️` (U+2764 + U+FE0F) the mirror says `U+FE0F`,
@@ -4095,8 +4085,8 @@ fn decode_line<'a>(
     );
 
     // KEYMAP is an **optional field** and this is the reverse direction of the wire's
-    // "extra fields are ignored" rule: the field was added at phase-6's gate and an
-    // open window may still be running with the old script (`plan.md` → Göç). Its
+    // "extra fields are ignored" rule: the field was added later and an
+    // open window may still be running with the old script. Its
     // absence does not corrupt the payload, it just leaves `false` — that is, the
     // paste returns to the wrapped path. The direction is safe: missing information
     // **closes** the exception, it does not open it.
@@ -4105,7 +4095,7 @@ fn decode_line<'a>(
         decode_base64(field, decoded).is_some()
             && std::str::from_utf8(decoded).is_ok_and(|name| INSERT_KEYMAPS.contains(&name))
     });
-    // PREBUFFER is the **seventh, optional body** (032) and sits behind `KEYMAP`,
+    // PREBUFFER is the **seventh, optional body** and sits behind `KEYMAP`,
     // because the wire can only grow at the end: a window running with an old script
     // never sends it and its absence does not corrupt the payload, it leaves it empty.
     // A corrupt body is under the same rule as the other text bodies — the payload is
@@ -4120,8 +4110,8 @@ fn decode_line<'a>(
 
     // **A control character the dock does not draw** ([`DockStatus::Control`]). Tab is
     // an exception and its reason is in the arm's doc: it carries no information. **A
-    // line break is an exception too** (032): the dock breaks lines, so it can show it
-    // — until 032 a display with line breaks stayed on the grid in its own arm
+    // line break is an exception too**: the dock breaks lines, so it can show it
+    // — before multi-line input a display with line breaks stayed on the grid in its own arm
     // (`Multiline`). `PREBUFFER` is also asked, because the dock draws it too.
     if line
         .prebuffer
@@ -4256,8 +4246,8 @@ const B64_DECODE: [u8; 256] = {
 /// Decodes base64 into `out`; on corrupt input `None` and `out` may be left
 /// half-written (the caller does not use it).
 ///
-/// **Written by hand:** a base64 crate is an architectural decision (`proje.md` →
-/// Yayın etkisi) and this phase does not open it; a table + `chunks_exact` is thirty
+/// **Written by hand:** a base64 crate is an architectural decision and this
+/// module does not open it; a table + `chunks_exact` is thirty
 /// lines.
 ///
 /// **Padding is optional.** The encoding side is pure zsh and an implementation that
@@ -4279,7 +4269,7 @@ fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
         let d = b64_value(chunk[3])?;
         // The masks are **mandatory**, not decoration: shifting a six-bit value without a
         // mask overflows a `u8` and panics in debug — there is no unjustified panic in
-        // `bt-core` (`CLAUDE.md`).
+        // `bt-core`.
         out.push((a << 2) | (b >> 4));
         out.push(((b & 0x0f) << 4) | (c >> 2));
         out.push(((c & 0x03) << 6) | d);
@@ -4309,17 +4299,17 @@ fn b64_value(byte: u8) -> Option<u8> {
     }
 }
 
-// ─── the handover's state blob (055) ─────────────────────────────────────
+// ─── the handover's state blob ───────────────────────────────────────────
 
 /// The state blob's first word; the version follows it after one space.
 const STATE_HEADER: &str = "bateri-state";
 
-/// The state blob's version (055 R1.4): the old bateri writes it, the new one
+/// The state blob's version: the old bateri writes it, the new one
 /// reads it across an update. A change of the format increments it.
 const STATE_VERSION: u32 = 1;
 
 /// The oldest version the reader still takes: the current one and the one
-/// before it (`.tasks/055-guncellemede-canli-devir/discussion.md` → Karar 8).
+/// before it.
 /// While the format has one version the two are the same.
 const STATE_OLDEST: u32 = if STATE_VERSION > 1 {
     STATE_VERSION - 1
@@ -4447,8 +4437,7 @@ impl CarriedTrack {
     }
 }
 
-/// What the handover carries of `bt-core`'s own state (055,
-/// `.tasks/055-guncellemede-canli-devir/discussion.md` → Karar 4): the
+/// What the handover carries of `bt-core`'s own state: the
 /// ledgers, the context, the last mirror and the generations the remote
 /// gates read. **Not carried:** the transient interface state (the dock's
 /// selection, vertical window and prediction; search; the mouse selection;
@@ -4457,7 +4446,7 @@ impl CarriedTrack {
 /// mark (resolved again from the host rules) and the title (the VT
 /// snapshot carries it, through the listener).
 ///
-/// Beyond Karar 4's list, [`ShellLog::ours`] and [`ShellLog::command_open`]:
+/// Beyond that list, [`ShellLog::ours`] and [`ShellLog::command_open`]:
 /// without them the foreign-mark gate is off until our next mark, and a
 /// remote fish's or kitty's `A` would clear `⇄ host` under a running ssh.
 #[derive(Debug, PartialEq)]
@@ -4497,7 +4486,7 @@ impl Carried {
     /// The blob: the header line, then one `key fields…` line per field, one
     /// `hl` line per highlight and `end`. Text is escaped so that a field never
     /// holds a space or a line break (`+{escaped}`, `-` for none — the
-    /// `restore` format's rule, 053).
+    /// `restore` format's rule).
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = format!("{STATE_HEADER} {STATE_VERSION}\n");
         let dock = &self.dock;
@@ -5145,7 +5134,7 @@ mod tests {
 
     #[test]
     fn only_bracketed_paste_on_is_the_login_signal() {
-        // 047 phase-4: `CSI ? 2004 h` — the leading `?` only, the one parameter,
+        // `CSI ? 2004 h` — the leading `?` only, the one parameter,
         // the `h`.
         assert_eq!(paste_ons(b"\x1b[?2004h"), 1);
         assert_eq!(paste_ons(b"a\x1b[?2004hb\x1b[?2004h"), 2);
@@ -5595,7 +5584,7 @@ mod tests {
     fn highlight_offsets_collapse_into_one_space() {
         // The `P` prefix ties the offset to the start of PREDISPLAY, the unprefixed one
         // to BUFFER's: both descend into the single space counted from the start of the
-        // display (R1.3).
+        // display.
         let line = dock_line(&dock_update(
             0,
             "ab",
@@ -5673,7 +5662,7 @@ mod tests {
 
     #[test]
     fn extra_trailing_fields_are_tolerated() {
-        // A forward-looking field: phase-4's special mode signal should be addable
+        // A forward-looking field: a future special mode signal should be addable
         // without reopening this parser.
         let mut sequence = dock_update(1, "", "ab", "", &[]);
         sequence.pop();
@@ -5740,8 +5729,8 @@ mod tests {
 
     #[test]
     fn an_oversized_dock_payload_is_visible_and_the_next_sequence_survives() {
-        // Unlike 133's silent drop, the overflow **returns a result** to the caller
-        // (R1.2); a sound sequence that follows is still seen.
+        // Unlike 133's silent drop, the overflow **returns a result** to the caller;
+        // a sound sequence that follows is still seen.
         let mut stream = b"\x1b]8133;u;0;;".to_vec();
         stream.extend(std::iter::repeat_n(b'A', DOCK_PAYLOAD_LIMIT + 1));
         stream.push(0x07);
@@ -5792,7 +5781,7 @@ mod tests {
 
     #[test]
     fn a_named_host_is_foreign_and_a_broken_uri_is_ignored() {
-        // A named host is **foreign** (036): it produces an event but is not local, so it
+        // A named host is **foreign**: it produces an event but is not local, so it
         // never writes to the local directory — it goes to the remote slot.
         let named = b"\x1b]7;file://remote.example/tmp\x07";
         assert_eq!(cwd_events(named), Vec::<String>::new());
@@ -5818,7 +5807,7 @@ mod tests {
 
     #[test]
     fn the_machines_own_name_is_local_when_supplied() {
-        // 044: with the name supplied (`SessionOptions::hostname`) `file://$HOST/…`
+        // With the name supplied (`SessionOptions::hostname`) `file://$HOST/…`
         // writes the local directory; without it the same bytes stay foreign.
         let named = b"\x1b]7;file://MyMac/tmp\x07";
         let mut scanner = Scanner::new().hostname(Some("mymac".to_owned()));
@@ -5875,9 +5864,9 @@ mod tests {
         assert_eq!(log.dock.status, DockStatus::Live);
     }
 
-    /// **A fast command produces no handover** — the set's core claim.
+    /// **A fast command produces no handover** — the hold's core claim.
     ///
-    /// The measured symptom (`context.md` → Kanıt): while `ls` runs the phase lasts 44
+    /// The measured symptom: while `ls` runs the phase lasts 44
     /// ms, the cursor animation settles in 230 ms; the caret leaves the dock and comes
     /// back halfway and the eye reads that as a jump.
     ///
@@ -5913,7 +5902,7 @@ mod tests {
         // Enter → `line-finish`: the mirror released the line, the phase is still `Input`.
         scanner.feed(b"\x1b]8133;e\x07", |event| log.apply_scan(event));
         let now = Instant::now();
-        // The mirror is held (032 Karar 11) but the state the handover asks about is `Idle`.
+        // The mirror is held but the state the handover asks about is `Idle`.
         assert_eq!(
             caret_home(log.local.state, log.caret_status(), false),
             CaretHome::Grid,
@@ -5988,7 +5977,7 @@ mod tests {
         assert_eq!(back.hold_left, None);
     }
 
-    /// **The remote session comes before the hold** (036 Karar 8): a `set_remote`
+    /// **The remote session comes before the hold**: a `set_remote`
     /// arriving right after `C`, while the hold is still going, takes the caret to the
     /// grid and sets no clock — on a band with no input line the caret would seat on
     /// the context line. When `D` deletes the remote state the predicate returns to
@@ -6026,7 +6015,7 @@ mod tests {
         assert_eq!(log.caret(now + HANDOVER_HOLD).home, CaretHome::Dock);
     }
 
-    /// **A remote session's OSC 8133 does not reach the local dock** (048 R4): the
+    /// **A remote session's OSC 8133 does not reach the local dock**: the
     /// mirror, the branch and the editing widget's capability stay as the local shell
     /// left them; our `D` ends the remote session and the next local 8133 applies.
     #[test]
@@ -6071,7 +6060,7 @@ mod tests {
         assert!(log.dock_editable);
     }
 
-    /// The first input after a remote login (049 R7): one edge per command
+    /// The first input after a remote login: one edge per command
     /// generation, none before the login is seen or once the command ended,
     /// and a new command starts over.
     #[test]
@@ -6103,7 +6092,7 @@ mod tests {
         assert_eq!(log.typed, Some(log.command));
     }
 
-    /// The remote bootstrap's `up` (049 R2.2, `8133;i;up;{nonce}`): recorded
+    /// The remote bootstrap's `up` (`8133;i;up;{nonce}`): recorded
     /// with the command's generation while a command runs — before the probe
     /// and under a remote session alike, past `set_remote` and `D` — and
     /// ignored at a local prompt; a malformed nonce or another `i` word says
@@ -6184,7 +6173,7 @@ mod tests {
         assert_eq!(log.dock.status, DockStatus::Live);
     }
 
-    /// The remote bootstrap's fault (048, `8133;f`) reaches the remote state
+    /// The remote bootstrap's fault (`8133;f`) reaches the remote state
     /// whether or not the probe has landed, never touches the mirror, and goes
     /// with the remote state; an unknown code says nothing.
     #[test]
@@ -6249,8 +6238,8 @@ mod tests {
         );
     }
 
-    /// **A display carrying a line break is `Live`** (032): the dock breaks lines, so
-    /// it can show it. Until 032 this mirror was `Multiline` and both the line and its
+    /// **A display carrying a line break is `Live`**: the dock breaks lines, so
+    /// it can show it. Before multi-line input this mirror was `Multiline` and both the line and its
     /// caret stayed on the grid.
     #[test]
     fn a_newline_anywhere_in_the_display_keeps_the_mirror_live() {
@@ -6270,7 +6259,7 @@ mod tests {
         }
     }
 
-    /// **The last ink is from the display's last line** (032): the other half of the
+    /// **The last ink is from the display's last line**: the other half of the
     /// gate scans the grid's last input line. In a paste of `echo a\necho b\n` zsh
     /// keeps the final line break in the buffer and the cursor is on an empty line —
     /// the mirror must say `None` too. `\n` itself is not ink (the old filter passed it
@@ -6289,9 +6278,9 @@ mod tests {
         );
     }
 
-    /// **With clustered reading the last ink is the last cluster's head** (035): the
+    /// **With clustered reading the last ink is the last cluster's head**: the
     /// grid's cell keeps `👍🏽` with `c = 👍`; if the mirror said `🏽` the gate would
-    /// permanently say "stale" (the clustered sibling of 024's guard). The closed
+    /// permanently say "stale" (the clustered sibling of the zero-width guard). The closed
     /// reading is as today: a skin tone is ink on its own.
     #[test]
     fn the_clustered_last_ink_is_the_head_of_the_last_cluster() {
@@ -6322,7 +6311,7 @@ mod tests {
     }
 
     /// **A control character the dock does not draw lowers the line to `Control`**
-    /// (025) — independent of position and body; tab excepted.
+    /// — independent of position and body; tab excepted.
     #[test]
     fn a_control_char_anywhere_in_the_display_marks_the_mirror_control() {
         for (pre, buffer, post) in [
@@ -6346,7 +6335,7 @@ mod tests {
             let line = dock_line(&dock_update(0, "% ", buffer, "", &[]));
             assert_eq!(line.status, DockStatus::Live, "{buffer:?}");
         }
-        // A line break is not counted as a control character (032), another control
+        // A line break is not counted as a control character, another control
         // character is `Control` in a display with line breaks too.
         let both = dock_line(&dock_update(0, "", "a\x01\nb", "", &[]));
         assert_eq!(both.status, DockStatus::Control);
@@ -6389,9 +6378,9 @@ mod tests {
         }
     }
 
-    /// **The mirror takes its stamp in the same turn as the content** (025):
+    /// **The mirror takes its stamp in the same turn as the content**:
     /// `answers` is written at the mirror event, does not move on other events and
-    /// `End` re-stamps it with the current generation (030).
+    /// `End` re-stamps it with the current generation.
     #[test]
     fn the_mirror_carries_the_generation_it_answers() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -6408,7 +6397,7 @@ mod tests {
         scanner.feed(b"\x1b]8133;e\x07", |event| {
             log.apply_scan_answering(event, 9);
         });
-        // In the `Input` phase `e` is held (032 Karar 11) but the stamp is current at
+        // In the `Input` phase `e` is held but the stamp is current at
         // once: the held line is ⏎'s answer.
         assert_eq!(
             log.dock.answers, 9,
@@ -6424,7 +6413,7 @@ mod tests {
         );
     }
 
-    /// **A `line-finish` between `PS2` lines is held** (032 Karar 11).
+    /// **A `line-finish` between `PS2` lines is held**.
     ///
     /// zsh prints `e` at every `PS2` acceptance and right after it comes the new
     /// line's mirror (`u`, `PREBUFFER` filled); in between the phase is `Input`.
@@ -6514,7 +6503,7 @@ mod tests {
         assert_eq!(log.dock.status, DockStatus::Idle);
     }
 
-    /// **The wheel's window is tied to the caret's place** (032 phase-4): a change of
+    /// **The wheel's window is tied to the caret's place**: a change of
     /// suggestion leaves it, a change of the caret or the text removes it — a user
     /// typing or pressing an arrow key must see their caret.
     #[test]
@@ -6535,7 +6524,7 @@ mod tests {
         assert_eq!(log.dock_scroll, None, "the text changed");
     }
 
-    /// **An empty mirror is measured by character** (032): a lone `\n` pushes the
+    /// **An empty mirror is measured by character**: a lone `\n` pushes the
     /// cursor down, so it is not empty; if `PREBUFFER` is filled it is not empty either
     /// (on a `for>` line the cursor is legitimately below the anchor) and the floor is
     /// the anchor.
@@ -6552,7 +6541,7 @@ mod tests {
         };
         let empty = input(&dock_update(0, "", "", "", &[]));
         assert!(empty.blank && !empty.from_anchor);
-        // The shape of 025's paste: the caret is behind the trailing line break.
+        // The shape of a bracketed paste: the caret is behind the trailing line break.
         let pasted = input(&dock_update(14, "", "echo a\necho b\n", "", &[]));
         assert!(!pasted.blank);
         assert_eq!(pasted.last_ink, None);
@@ -6651,7 +6640,7 @@ mod tests {
 
     #[test]
     fn a_six_body_mirror_from_an_old_script_still_decodes() {
-        // **A window running with an old script** (032 phase-1): the seventh body
+        // **A window running with an old script**: the seventh body
         // (`PREBUFFER`) is absent altogether. Its absence does not corrupt the payload,
         // `PREBUFFER` is counted as empty — `KEYMAP`'s precedent.
         let sequence = format!("\x1b]8133;u;2;;{};;;{}\x07", b64(b"ls"), b64(b"main"));
@@ -6696,7 +6685,7 @@ mod tests {
         // Both corruption forms of the branch must drop only the branch: `Unavailable`
         // means "I cannot show the input line" and would bring the grid into play — so
         // because of a truncated branch sequence the user would see what they typed on the
-        // grid, not in the dock (`/code-review`, 012 phase-6).
+        // grid, not in the dock (found in review).
         for sequence in [
             &b"\x1b]8133;b\x07"[..], // no field at all
             b"\x1b]8133;b;!!!!\x07", // not in the base64 alphabet
@@ -6773,7 +6762,7 @@ mod tests {
         script_output_after(cursor, "", pre, buffer, post, highlights)
     }
 
-    /// [`script_output`], `PREBUFFER` doluyken (032).
+    /// [`script_output`], with `PREBUFFER` filled.
     fn script_output_after(
         cursor: usize,
         prebuffer: &str,
@@ -6838,7 +6827,7 @@ mod tests {
 
         // The wire is sound but the line is not the dock's: `ESC` is a control character,
         // the dock does not draw it and zsh prints `^[` on the grid
-        // ([`DockStatus::Control`], 025). The text is still decoded in full — the claims
+        // ([`DockStatus::Control`]). The text is still decoded in full — the claims
         // below test the wire itself.
         assert_eq!(line.status, DockStatus::Control);
         assert_eq!(line.predisplay, "❯ ");
@@ -6912,7 +6901,7 @@ mod tests {
             fits
         );
 
-        // **`PREBUFFER` enters the sum too** (032): the earlier lines of a pasted loop are
+        // **`PREBUFFER` enters the sum too**: the earlier lines of a pasted loop are
         // part of the display and can exceed the bound together with `BUFFER`.
         let before = format!("{}\n", "x".repeat(4095));
         assert_eq!(
@@ -7072,7 +7061,7 @@ mod tests {
 
     #[test]
     fn a_new_buffer_clears_the_dock_selection_and_a_new_prompt_does_not() {
-        // 031 R3.4: the selection's indices are `BUFFER`'s characters; when `BUFFER`
+        // The selection's indices are `BUFFER`'s characters; when `BUFFER`
         // changes they would point at another text. The prompt being redrawn or a change
         // of suggestion does not move the selected text.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -7206,7 +7195,7 @@ mod tests {
 
     #[test]
     fn shift_arrows_step_over_a_cluster_whole() {
-        // 035 R4.2: in `a🇹🇷b`, ⇧← takes the flag whole from the end, ⇧→ takes the flag
+        // In `a🇹🇷b`, ⇧← takes the flag whole from the end, ⇧→ takes the flag
         // after `a` from the start. In the closed reading the step is a code point.
         let range = |selection: DockSelection| selection.range;
         let text = "a🇹🇷b";
@@ -7235,7 +7224,7 @@ mod tests {
 
     #[test]
     fn the_edit_capability_lives_for_one_prompt() {
-        // `w` is the editing gate's fourth condition (031 phase-5): it has no payload,
+        // `w` is the editing gate's fourth condition: it has no payload,
         // does not touch the mirror's state and goes with the prompt's lifetime —
         // `line-finish` (`e`) and the start of the prompt (`A`) both delete it.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -7297,7 +7286,7 @@ mod tests {
 
     #[test]
     fn the_mirror_reuses_its_buffers() {
-        // R1.3's criterion: no per-keystroke allocation in steady state. The capacity not
+        // The criterion: no per-keystroke allocation in steady state. The capacity not
         // growing in the second round is the observable face of this.
         let mut scanner = Scanner::new();
         let long = "x".repeat(200);
@@ -7404,7 +7393,7 @@ mod tests {
     /// The text (`1h 07m`) changes once a minute; waking every second would have an
     /// hour draw 3540 **identical** frames and we would be the first to violate the
     /// "content must genuinely change" condition we wrote into the module header
-    /// (`/code-review`, 013 gate).
+    /// (found in review).
     #[test]
     fn the_hour_tier_ticks_once_a_minute() {
         // 1 hour 7 minutes 20 seconds: 40 seconds to the next minute.
@@ -7427,7 +7416,7 @@ mod tests {
     ///
     /// If the clock were consumed only at `D`, after an OSC cut halfway a stale
     /// `Instant` would stay standing and the next block's `D` would consume it: an
-    /// instant command would look like it took minutes (`/code-review`, 013 gate). `A`
+    /// instant command would look like it took minutes (found in review). `A`
     /// is the second reset point.
     #[test]
     fn a_lost_command_end_does_not_charge_the_next_block() {
@@ -7545,8 +7534,8 @@ mod tests {
     /// command.
     ///
     /// If it were a read instead of `take`, in the `Finished` phase (which contains a
-    /// `git` fork) a finished command would still look like it was counting and in
-    /// phase-2 the clock would never stop.
+    /// `git` fork) a finished command would still look like it was counting and
+    /// the clock would never stop.
     #[test]
     fn the_clock_is_spent_when_the_command_ends() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -7607,7 +7596,7 @@ mod tests {
 
     #[test]
     fn a_remote_session_marks_the_title() {
-        // 036 Karar 5: while remote is active the directory is never consulted; the OSC
+        // While remote is active the directory is never consulted; the OSC
         // title with the prefix, otherwise the host.
         let home = Path::new("/Users/someone");
         let remote = Some("prod");
@@ -7715,7 +7704,7 @@ mod tests {
 
     #[test]
     fn only_our_identified_prompt_announces_the_prompt() {
-        // The trigger of the session's first input (037 Karar 6): only an identified `A`.
+        // The trigger of the session's first input: only an identified `A`.
         // An identity-less `A` (another tool's integration) and the other marks do not say
         // our shell reached the prompt.
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -7882,7 +7871,7 @@ mod tests {
 
     #[test]
     fn the_login_signals_belong_to_the_running_command() {
-        // 047 R9.1: termios decides the modes, the output's signals only while
+        // Termios decides the modes, the output's signals only while
         // remote and only since `C`.
         assert!(
             !TtyModes {
@@ -7961,7 +7950,7 @@ mod tests {
 
     #[test]
     fn the_load_goes_with_the_remote_state() {
-        // 046 Karar 5: `C`/`D`/`A` and a new target clear the indicator — a new
+        // `C`/`D`/`A` and a new target clear the indicator — a new
         // host must not show the previous one's numbers.
         let remote = |log: &mut ShellLog| {
             assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
@@ -8030,7 +8019,7 @@ mod tests {
 
     #[test]
     fn the_remote_target_is_kept_whole_and_its_mark_resolved() {
-        // 037 Karar 1, 2: the target stands as a whole; the mark is resolved in
+        // The target stands as a whole; the mark is resolved in
         // `set_remote` and at a change of the list, and `C`/`D`/`A` delete it too.
         let mut log = running_log();
         assert!(!log.set_host_rules(&[rule("prod-*", HostMark::Production)]));
@@ -8085,7 +8074,7 @@ mod tests {
 
     #[test]
     fn our_ssh_255_leaves_a_reconnect_offer() {
-        // 037 Karar 8: remote ssh + our `D;255` → offer (host, resolved mark, line); `A`
+        // Remote ssh + our `D;255` → offer (host, resolved mark, line); `A`
         // does not delete it, the next `C` does.
         let mut log = running_log();
         log.set_host_rules(&[rule("prod", HostMark::Production)]);
@@ -8199,7 +8188,7 @@ mod tests {
         assert_eq!(title_directory("deploy@: /x"), None);
     }
 
-    // ─── our remote shell's blocks (048 phase-3) ─────────────────────────
+    // ─── our remote shell's blocks ─────────────────────────────────────
 
     fn events(bytes: &[u8]) -> Vec<RemoteMark> {
         let mut scanner = Scanner::new();
@@ -8486,7 +8475,7 @@ mod tests {
         assert_eq!(log.remote.blocks.capacity, BLOCK_LOG_FLOOR * 2);
     }
 
-    // ─── the handover's state blob (055) ────────────────────────────────
+    // ─── the handover's state blob ──────────────────────────────────────
 
     /// A log with every carried field away from its default.
     fn carried_log() -> ShellLog {
@@ -8689,7 +8678,7 @@ mod tests {
         assert!(Carried::decode(b"").is_none());
     }
 
-    /// **Wire (a), the shell → the terminal** (055 Karar 8): after an update
+    /// **Wire (a), the shell → the terminal**: after an update
     /// the carried shell keeps running the **previous** version's script, so
     /// this bateri must read what that script printed. The stream below is
     /// frozen as the scripts in `assets/shell/` print it today — the local

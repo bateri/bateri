@@ -4,8 +4,7 @@
 //!
 //! The font is asked **only** through the [`FontSystem`] trait of the
 //! platform's [`Backend`]; the arithmetic and its order live here once for
-//! every backend (`.tasks/042-font-sistemi-linux/discussion.md` → Karar 2,
-//! 3). The pure kernels ([`centre_shift`], [`ink_fits_placed`],
+//! every backend. The pure kernels ([`centre_shift`], [`ink_fits_placed`],
 //! [`fit_ratio`], [`cell_metrics`]) take measurements as values, so the
 //! census and the tests can call them without a font.
 //!
@@ -88,7 +87,7 @@ pub(crate) struct Faces {
 ///
 /// No text: this crate builds no UI strings, it only reports the fact. The
 /// type does not leave `bt-atlas` — `bt-gpu` translates it into its own
-/// notice type (`bt-shell` does not see this crate, 003 R5).
+/// notice type (`bt-shell` does not see this crate).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FontIssue {
     /// The family is not on this machine; `using` is the name of the family
@@ -179,7 +178,7 @@ impl Faces {
 
 /// Cell measurements, in **physical pixels**.
 ///
-/// **Two meanings, one type** (052): the atlas holds two of these. The
+/// **Two meanings, one type**: the atlas holds two of these. The
 /// **grid** metric (`Atlas::metrics`) is the cell the grid steps by, at the
 /// user's real spacing; the **slot** metric (`Atlas::slot_metrics`) is the
 /// cell at the spacing clamped to `>= 1` on both axes — the box a glyph is
@@ -190,8 +189,7 @@ impl Faces {
 /// `Atlas::new`'s `scale` parameter is multiplied with the point size and
 /// goes into the font, so the display scale is inside these numbers. The
 /// scale must be part of the key: a glyph rasterized at @1x blurs **without
-/// error** at @2x and the symptom shows only on a two-display machine
-/// (discussion.md → Muhakeme).
+/// error** at @2x and the symptom shows only on a two-display machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Metrics {
     /// (width, height).
@@ -281,7 +279,7 @@ pub(crate) struct RawMetrics {
 /// ignore the font it found. A PostScript name (`Menlo-Regular`) **does not
 /// match**: CoreText opens that too, but the family name differs, and that
 /// name names a single face of the family — the setting asks for a family
-/// (`docs/AYARLAR.md`).
+/// (`docs/SETTINGS.md`).
 pub(crate) fn same_family(returned: &str, requested: &str) -> bool {
     returned.to_lowercase() == requested.to_lowercase()
 }
@@ -341,7 +339,7 @@ pub fn monospaced_families() -> Vec<String> {
 
 /// What the chain would say while opening `family` — the state of a family
 /// **not** in the settings window's Font list (`— not found` / `— not
-/// monospaced`, 029 Karar 3). The question is [`open_chain`] itself, so what
+/// monospaced`). The question is [`open_chain`] itself, so what
 /// the window says and what the subtitle says cannot diverge.
 pub fn family_issue(family: &str) -> Option<FontIssue> {
     // The point size does not matter: family and monospacing are independent
@@ -398,7 +396,7 @@ pub(crate) fn space_advance(font: &Font) -> f64 {
 /// the baseline and the baseline has already moved. A separate correction
 /// would tear the lines away from the letters as the multiplier grows.
 ///
-/// **Below `1` the cell is shorter than the font** (052) and that is a
+/// **Below `1` the cell is shorter than the font** and that is a
 /// separate arm ([`deficit_split`]): the deficit is rounded **signed** and
 /// cut from the two parts in the ascent : descent ratio, not equally, so the
 /// baseline stays strictly inside the cell at every accepted size. The glyph
@@ -422,7 +420,7 @@ pub(crate) fn cell_metrics(raw: RawMetrics, space_advance: f64, line_height: f64
     // that distance is `ascent + descent + leading`. At `1.0` the surplus is
     // zero, so by default this path is a no-op. The rounding is a plain
     // `ceil`, not `round_up`: `round_up` pins every measurement to `>= 1`, and
-    // that floor once added a pixel to every default cell (052 phase-0).
+    // that floor once added a pixel to every default cell.
     let (baseline, height) = if line_height < 1.0 {
         deficit_split(
             round_up(ascent),
@@ -475,7 +473,7 @@ pub(crate) fn cell_metrics(raw: RawMetrics, space_advance: f64, line_height: f64
 }
 
 /// The cell below `1`: `(baseline, height)` for a cell `deficit` pixels
-/// shorter than the font's natural `above + below` (052 R1.1).
+/// shorter than the font's natural `above + below`.
 ///
 /// The deficit is rounded **signed** — towards the font, i.e. down: the
 /// rounding of a surplus (`ceil`, [`surplus_px`]) and of a deficit are the
@@ -514,7 +512,7 @@ fn deficit_split(above: u16, below: u16, deficit: f64) -> (u16, u16) {
 }
 
 /// Where the grid cell sits inside the slot: `(x, y)` pixels from the slot's
-/// top-left corner — **the single source** of the offset (052 R1).
+/// top-left corner — **the single source** of the offset.
 ///
 /// Horizontally half the width difference, vertically the slot's baseline
 /// minus the cell's: the glyph is rasterized on the slot's baseline and the
@@ -531,7 +529,7 @@ pub(crate) fn slot_offset(slot: Metrics, cell: Metrics) -> (u16, u16) {
 
 /// The metric a rule sprite (underline, strikeout, chevron) is drawn at: the
 /// slot's height, baseline and rule lines with the grid cell's **width**
-/// (052). Vertically a rule belongs to the glyph's baseline; horizontally it
+/// Vertically a rule belongs to the glyph's baseline; horizontally it
 /// tiles the grid, so its pattern period divides the cell and it is placed at
 /// the cell's column in the slot ([`slot_offset`]). At `>= 1` it is the slot.
 pub(crate) fn rule_metrics(slot: Metrics, cell: Metrics) -> Metrics {
@@ -578,7 +576,7 @@ pub(crate) fn rule_envelope(top: u16, thickness: u16, cell_h: u16) -> (u16, u16)
     (top.min(cell_h - thickness), thickness)
 }
 
-/// The box a glyph is centred in, and the room around it (052 R2.2).
+/// The box a glyph is centred in, and the room around it.
 ///
 /// `advance` is the **centring** box: `cols × cell advance` at the grid's
 /// spacing — the glyph's middle is the middle of its cells. `left` is where
@@ -641,7 +639,7 @@ impl GlyphBox {
 /// The argument is the **box's** advance, not the cell's: for a single-cell
 /// glyph the two are the same number, for a two-column character the box is
 /// two cells ([`crate::Half`]). The rename from `cell_advance` to
-/// `box_advance` in 023 was not a one-line rename: the same number goes to
+/// `box_advance` was not a one-line rename: the same number goes to
 /// both the gate and the drawing, so were it multiplied by the columns in
 /// only one of them, the gate would test a placement that will not be drawn.
 ///
@@ -650,7 +648,7 @@ impl GlyphBox {
 /// clipping should happen on the right — the rationale is in the body of
 /// `raster::draw_glyph`. The gate must share it **exactly**, otherwise it
 /// would assume a negative shift and believe the candidate's left side to be
-/// inside the target. With an offset (052) a base-font glyph narrower spaced
+/// inside the target. With an offset a base-font glyph narrower spaced
 /// lands at `0`: its advance is the slot's and the whole-pixel offset is at
 /// most half the difference, so it keeps the raster it has at `1` — up to
 /// that rounding (under a pixel) right of the cell's fractional centre. For
@@ -673,7 +671,7 @@ pub(crate) fn centre_shift(bx: GlyphBox, advance: f64) -> f64 {
 ///
 /// The bound is the box **with its pad** ([`GlyphBox::bound`]): below
 /// `letter_spacing = 1` the ink may spill into the neighbours by the pad, and
-/// that is the whole point of the slot (052). With no pad it is the box.
+/// that is the whole point of the slot. With no pad it is the box.
 pub(crate) fn ink_fits_placed(bx: GlyphBox, advance: f64, ink: InkRect) -> bool {
     let left = ink.x + centre_shift(bx, advance);
     // The left edge is tested too: a candidate carrying a negative `origin.x`
@@ -711,7 +709,7 @@ fn ink_fits_box(font: &Font, glyph: u32, bx: GlyphBox) -> bool {
 ///
 /// 1. **Candidate** ([`FontSystem::cascade`]): the system's cascade, which
 ///    the base font's own glyph lookup ([`FontSystem::glyph`]) does not walk
-///    — this difference is 019's reason to exist.
+///    — this difference is the fallback's reason to exist.
 /// 2. **Glyph.** Can the candidate really draw it. The candidate may be
 ///    `base` itself, and then this step gives `None` — we only land here
 ///    after `base` gave `.notdef`, so no separate "is it the same font"
@@ -721,9 +719,7 @@ fn ink_fits_box(font: &Font, glyph: u32, bx: GlyphBox) -> bool {
 ///    if within the limit ([`SHRINK_LIMIT`]), otherwise box. The criterion
 ///    is geometric: no family name and no trait bit, the only exception is
 ///    the shrink arm's last resort ([`FontSystem::is_last_resort`]; geometry
-///    cannot tell it apart from emoji). The measured numbers are in
-///    `.tasks/019-glyph-yedegi/phase-1.md` and
-///    `.tasks/041-yedek-glyph-kucultme/`. The box is the **fractional**
+///    cannot tell it apart from emoji; measured). The box is the **fractional**
 ///    cell advance ([`space_advance`]), not the rounded cell width: the same
 ///    number also feeds `raster::draw`'s centring, and keeping two numbers
 ///    for two jobs would make them diverge.
@@ -733,15 +729,15 @@ fn ink_fits_box(font: &Font, glyph: u32, bx: GlyphBox) -> bool {
 /// came out as a box. The cause was measured — the candidate from STIX Two
 /// Math **advances** 4.6% wider than the cell but **paints** 8.6% narrower,
 /// so the gate measuring the advance rejected a glyph that fit comfortably
-/// in the cell. 019's calibration samples (2.17× / 1.83× / 1.66×) had no
+/// in the cell. The original calibration samples (2.17× / 1.83× / 1.66×) had no
 /// candidate near 1.0, and the gate had never been tested against symbol
 /// fonts.
 ///
 /// Changing the criterion also closes the gap in the other direction: a
 /// candidate advancing narrow but painting wide is now a **box**, where it
 /// used to be silently clipped from the right. "Box or full glyph" is for the
-/// first time a contract, not a wish; since 041 "box, full glyph or a glyph
-/// shrunk just enough to fit".
+/// first time a contract, not a wish; with the shrink arm it is "box, full
+/// glyph or a glyph shrunk just enough to fit".
 ///
 /// A candidate with no ink **passes** the gate (zero width fits any cell);
 /// what gets drawn is an invisible glyph, not a box. Today this path does not
@@ -767,7 +763,7 @@ pub(crate) fn fallback_font(
 /// Shapes a grapheme cluster (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) into a **single
 /// glyph** ([`FontSystem::shape`]) and passes it through [`fallback_font`]'s
 /// gate; `None` means "not a single glyph, or rejected by the gate" and the
-/// caller falls back to the base character (035 R1.1).
+/// caller falls back to the base character.
 ///
 /// The gate measures and the atlas draws **the font the shaper returns** —
 /// the one that actually produces the glyph, not the cascade's candidate:
@@ -798,8 +794,8 @@ pub(crate) fn shape_cluster(
 /// The candidate glyph's own measurements are read **once** and both gates
 /// test the **same** `(advance, ink)` pair; [`shrink`] is the third arm.
 ///
-/// **Two advances** (051): `cell` is the spaced cell the glyph is drawn in,
-/// with its pad inside the slot (052) — the box, the centring, the second
+/// **Two advances**: `cell` is the spaced cell the glyph is drawn in,
+/// with its pad inside the slot — the box, the centring, the second
 /// arm and the shrinking see it — while `natural_advance` is the font's own
 /// cell, and only the first gate's **arm decision** looks at it. At
 /// `letter_spacing = 1` the two are the same number, the pad is zero and the
@@ -816,8 +812,8 @@ pub(crate) fn accept(
     // **The order is mandatory: one cell first.** A candidate that fits in
     // one cell fits today too and is drawn from a single slot; asked directly
     // with the two-cell box, `centre_shift` would move it to the middle of
-    // two cells and a drawing *that works today* would move. Measured (023
-    // `context.md`): 65 characters are declared wide but their ink fits in
+    // two cells and a drawing *that works today* would move. Measured:
+    // 65 characters are declared wide but their ink fits in
     // one cell — 21 are Menlo's own glyphs, 44 are CJK punctuation and
     // fullwidth forms with slender ink from the cascade (`、 。 》 ！`). A side
     // benefit is capacity: those 65 do not spend a second slot.
@@ -831,7 +827,7 @@ pub(crate) fn accept(
     // natural one; the box is centred where the drawing puts it (the cell's
     // whole-pixel `left`), so the question measures the drawn placement.
     // What does not fit the narrow cell spills into the neighbours, which is
-    // what the slot is for (052). At `>= 1` `left` and `pad` are zero and
+    // what the slot is for. At `>= 1` `left` and `pad` are zero and
     // this is the unpadded natural box, bit for bit.
     let natural_box = GlyphBox {
         advance: natural_advance - 2.0 * cell.pad,
@@ -857,7 +853,7 @@ pub(crate) fn accept(
     // cell be drawn at full size instead of being shrunk.
     //
     // Below `1` the box keeps the centring at `cols × cell` but its bound
-    // grows by the pad on both sides (052 R2.2): one column → the slot, two →
+    // grows by the pad on both sides: one column → the slot, two →
     // `cell + slot`. A two-column glyph that does not fit even that falls to
     // the shrink arm below — drawn small, not cut.
     let bx = cell.cols(cols);
@@ -869,9 +865,9 @@ pub(crate) fn accept(
             shrunk: false,
         });
     }
-    // **Third arm: shrinking** (041). The last arm, so a candidate that
+    // **Third arm: shrinking**. The last arm, so a candidate that
     // passes either gate never gets here and its raster is bit-for-bit
-    // today's (R3.3).
+    // today's.
     shrink(&candidate, glyph, bx).map(|font| Accepted {
         font,
         glyph,
@@ -893,8 +889,7 @@ pub(crate) fn accept(
 /// shrinking shrinks the advance too, and a glyph whose advance still
 /// exceeds the box sticks to the left by [`centre_shift`]'s rule. `⧉` is the
 /// example — the copy shrunk by the ratio (1.11) is rejected again on
-/// re-test, 1.22 is needed (`.tasks/041-yedek-glyph-kucultme/phase-1.md` →
-/// Uygulama Notları).
+/// re-test, 1.22 is needed.
 ///
 /// The copy ([`FontSystem::at_size`]) is **the same font** at another point
 /// size: the glyph number, the colour trait and hence the plane do not
@@ -903,7 +898,7 @@ pub(crate) fn accept(
 /// own measurements) — the rule that the gate measures the ink where the
 /// candidate will be drawn holds for the small copy too; if it fails, box.
 ///
-/// The backend's last resort is kept out of this arm (R3.2): rationale in
+/// The backend's last resort is kept out of this arm: rationale in
 /// [`FontSystem::is_last_resort`].
 fn shrink(candidate: &Font, glyph: u32, bx: GlyphBox) -> Option<Font> {
     let size = Backend::size(candidate);
@@ -955,11 +950,10 @@ const SHRINK_STEPS: usize = 10;
 /// than this stays a box.
 ///
 /// A design constant (after `GUTTER_PT`), its value from the census
-/// distribution (`make scan`, Menlo 13/16 pt × @1x/@2x,
-/// `.tasks/041-yedek-glyph-kucultme/` → phase-2 Uygulama Notları):
+/// distribution (`make scan`, Menlo 13/16 pt × @1x/@2x):
 ///
 /// - **The largest that must stay inside** is Apple Color Emoji's
-///   single-column `fit`: 1.661–1.681 at @2x, **2.124** at @1x (Karar 2, the
+///   single-column `fit`: 1.661–1.681 at @2x, **2.124** at @1x (the
 ///   user preferred a small emoji to a box; a non-Retina display is a user
 ///   too). A two-column emoji fits in neither one nor two cells at @1x, and
 ///   its `fit` in the two-cell box is 1.062 — the same arm covers it too.
@@ -1022,7 +1016,7 @@ pub(crate) struct Accepted {
     pub(crate) cols: u8,
     /// Did the candidate come from the shrink arm ([`shrink`]). `false` for a
     /// candidate that passed either gate, and then the drawing is
-    /// bit-for-bit today's (R3.3).
+    /// bit-for-bit today's.
     pub(crate) shrunk: bool,
 }
 
@@ -1031,7 +1025,7 @@ impl Accepted {
     /// **one formula**, both drawing recipes (`raster::draw_glyph`,
     /// `raster::draw_color_glyph`) read it from here.
     ///
-    /// `m` is the **slot** metric (052): the shrunk glyph is centred in the
+    /// `m` is the **slot** metric: the shrunk glyph is centred in the
     /// slot, the box it is rasterized into; at `>= 1` the slot is the cell.
     ///
     /// Zero for an unshrunk candidate: every glyph accepted today stays on
@@ -1042,8 +1036,7 @@ impl Accepted {
     /// bottom at the level of `y`'s tail. The choice was made by eye: the
     /// baseline, the cell's middle and the middle of the x-height were drawn
     /// side by side, and emoji and `⧉` read together with the text in the
-    /// second (`.tasks/041-yedek-glyph-kucultme/phase-2.md` → Uygulama
-    /// Notları). It is rounded to an integer pixel: the baseline is already an
+    /// second. It is rounded to an integer pixel: the baseline is already an
     /// integer and a fractional shift would change the AA phase and blur the
     /// edge.
     ///
@@ -1106,7 +1099,7 @@ pub(crate) fn round_up(v: f64) -> u16 {
 ///
 /// The output is **straight alpha**, so the emoji pipeline's blend stays the
 /// **same** as the mask path's: RGB source factor `SourceAlpha`. That is why
-/// 008 phase-5's "blend is not a parameter" decision was not reverted.
+/// the earlier "blend is not a parameter" decision was not reverted.
 pub(crate) fn unpremultiply(target: &mut [u8]) {
     for px in target.chunks_exact_mut(4) {
         let a = u32::from(px[3]);
@@ -1130,7 +1123,7 @@ mod tests {
     use super::*;
 
     /// Below `1` the cell keeps both parts of its height for every split a
-    /// font can ask for (052 R1.1): synthetic ascents and descents from one
+    /// font can ask for: synthetic ascents and descents from one
     /// pixel up, every multiplier down to `0.5` and the out-of-range inputs
     /// a caller could pass. The real-font corners are
     /// `below_one_keeps_the_baseline_inside_the_cell` in `lib.rs`.

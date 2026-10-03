@@ -1,13 +1,13 @@
-# bateri's REMOTE zsh wrapper (048) — the body the four `ZDOTDIR` files load on
+# bateri's REMOTE zsh wrapper — the body the four `ZDOTDIR` files load on
 # a server.
 #
 # The bootstrap (`boot.sh`) writes the local wrapper's four files verbatim
 # (`.zshenv`, `.zprofile`, `.zshrc`, `.zlogin`), the shared swap
 # (`zdotdir.zsh`) and this file in their place, so the user's own startup
 # files are read exactly as the local wrapper reads them. Only the hooks
-# differ: here the working directory (OSC 7) and the command blocks (OSC 133,
-# 048 phase-3) — no dock mirror, no prompt of the terminal's, no `ssh`
-# function (nested ssh is out of scope, 048 plan → Kapsam Dışı).
+# differ: here the working directory (OSC 7) and the command blocks (OSC
+# 133) — no dock mirror, no prompt of the terminal's, no `ssh` function
+# (nested ssh is out of scope).
 
 source ${ZDOTDIR:-${0:A:h}}/zdotdir.zsh || return 1
 
@@ -35,7 +35,7 @@ __bateri_hooks() {
   fi
 }
 
-# The command blocks on the server (048 phase-3): the local wrapper's
+# The command blocks on the server: the local wrapper's
 # `D`/`A`/`C`, but the identity is OUR REMOTE FIELD, `bt_remote=<P>.<S>.<n>`,
 # on every mark — `P` the local `ssh` block, `S` this shell's pid, `n` its
 # counter. bateri

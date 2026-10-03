@@ -1,4 +1,4 @@
-//! Content check of the bundle inputs (006 phase-4).
+//! Content check of the bundle inputs.
 //!
 //! Not a separate `tests/` test but part of the bin's unit-test bundle: that
 //! bundle is already wired into `make check`. Had it lived under `tests/`,
@@ -131,7 +131,7 @@ fn info_plist_template_carries_the_updater_keys() {
 }
 
 /// The zsh wrapper's inventory is **exactly** these six files (the ZDOTDIR
-/// swap, `zdotdir.zsh`, joined in 048).
+/// swap, `zdotdir.zsh`, joined with remote shell integration).
 ///
 /// The "nothing missing" half is also asked by `bt-shell-common` (the test of
 /// `child::zsh_wrapper_dir`); the half this one alone sees is **the excess**.
@@ -142,7 +142,7 @@ fn info_plist_template_carries_the_updater_keys() {
 ///   product check does not look for it either — the gate stays green, the
 ///   wrapper is installed incomplete.
 /// - An arm that **writes** into the directory: ZDOTDIR points here for a while
-///   during the session and in 009 phase-3 `/etc/zshrc` really did spawn a
+///   during the session and during development `/etc/zshrc` really did spawn a
 ///   `.zsh_history` once. It was a path by which user data would enter the
 ///   product.
 ///

@@ -29,12 +29,12 @@
 //! screen row does not change at all. If the two targets were not in the same
 //! space, the cursor would drop a row and climb back.
 //!
-//! **State is in cell units**, not pixels (008 Karar 5): when the font, zoom or
+//! **State is in cell units**, not pixels: when the font, zoom or
 //! screen scale changes, the pixel equivalent of the position moves but the cell
 //! coordinate stays the same, so a change of measure lands in the right place by
 //! itself.
 //!
-//! **Every animation carries a stop condition** (`CLAUDE.md`) and here it is
+//! **Every animation carries a stop condition** and here it is
 //! two-layered: a position+velocity threshold **or** a time ceiling. The second
 //! is a belt — a parameter set that never satisfies the first (extremely low
 //! damping, endless oscillation) would keep the link awake forever.
@@ -60,8 +60,7 @@ use bt_core::{CursorMotion, Erase, Keypress, ScrollGlide};
 ///
 /// In critical damping (ζ = 1) a one-cell slide settles in ~230 ms at this
 /// value (the binding threshold is [`VEL_EPSILON`], not the position).
-/// the reference's cursor is of that order by eye; the number itself rests on this
-/// target, not on a measurement.
+/// The number rests on that target by eye, not on a measurement.
 ///
 /// **The settling time grows with distance**, and this is a direct consequence
 /// of the thresholds being **absolute**: in a jump of `D` cells the time grows
@@ -250,7 +249,7 @@ pub(crate) struct Motion {
     /// used as a number.
     glide_at: Option<(i32, f32)>,
     /// The dock band's **extra** rows: how much more than the PTY's reserved share
-    /// (`DOCK_ROWS`) the drawn band is, in rows — [`Slide`]'s fourth instance (032).
+    /// (`DOCK_ROWS`) the drawn band is, in rows — [`Slide`]'s fourth instance.
     ///
     /// A separate animator and not derived from the offset: the offset's input is
     /// the content's fill and the band's is the dock's row count, and the two can go
@@ -260,10 +259,10 @@ pub(crate) struct Motion {
     /// `link.rs`), so the grid's bottom edge and the band's top edge slide together
     /// **structurally**.
     ///
-    /// **Both directions glide** ([`Motion::sync_band`]): the band's size is a
-    /// panel's size, not content — 011's "narrowing content snaps" reason (a descent
-    /// reads like falling) does not fit here, and the band vanishing while the grid
-    /// jumps when a line is deleted would be exactly the jump that rule wants to
+    /// **Both directions glide** ([`Motion::sync_band`]): the band's size is a panel's
+    /// size, not content — the content offset's "narrowing content snaps" reason (a
+    /// descent reads like falling) does not fit here, and the band vanishing while the
+    /// grid jumps when a line is deleted would be exactly the jump that rule wants to
     /// prevent.
     ///
     /// An `Option`, the same contract as the offset's: absence and the first frame
@@ -328,7 +327,7 @@ impl Motion {
     /// **`Snap` sits above the flag** and this is a product decision: a user who
     /// says `cursor_motion = "snap"` has already turned motion off, and Reduce Motion
     /// should not *add* a fade to them. The accessibility setting shortens the
-    /// animation, it does not create one that does not exist (`docs/AYARLAR.md` →
+    /// animation, it does not create one that does not exist (`docs/SETTINGS.md` →
     /// `[motion]`).
     fn mode(self) -> Mode {
         match (self.style, self.reduce) {
@@ -339,17 +338,16 @@ impl Motion {
         }
     }
 
-    /// Reduction of the dock's typing effects (030): the two effects the user picked
+    /// Reduction of the dock's typing effects: the two effects the user picked
     /// → the ones to be drawn in this mode.
     ///
     /// **It lives here** because the rule is the same as [`Motion::mode`]'s and the
-    /// reduction's one place is this module (`CLAUDE.md`): `snap` is the declaration
+    /// reduction's one place is this module: `snap` is the declaration
     /// of one who has already turned motion off, and it turns both off; Reduce
     /// Motion lowers the arrival to the cursor's own mode — a fade-in — and turns
     /// the ghost off, because the ghost is content that is not there. The
     /// accessibility setting **does not add** animation: an arrival that is off
-    /// stays off
-    /// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 7).
+    /// stays off.
     pub(crate) fn glyph_fx(self, keypress: Keypress, erase: Erase) -> (Keypress, Erase) {
         match (self.style, self.reduce) {
             (CursorMotion::Snap, _) => (Keypress::Off, Erase::Off),
@@ -362,12 +360,12 @@ impl Motion {
     /// The offset's mode: the same as [`Motion::mode`], **except the fade**.
     ///
     /// Under Reduce Motion the offset does not slide but **does not fade either**, it
-    /// snaps (R2.3). [`Mode::Fade`] means "the position is at the target at once,
+    /// snaps. [`Mode::Fade`] means "the position is at the target at once,
     /// what changes is the opacity" and opacity is nobody's field here: what slides
     /// is the whole grid and fading it in on every new line would be worse than the
     /// motion the reduction tries to remove.
     ///
-    /// The rule "the reduction's one place is `bt-gpu::motion`" (`CLAUDE.md`) stays
+    /// The rule "the reduction's one place is `bt-gpu::motion`" stays
     /// in place: the **place** is the same, the **mode** is two.
     fn origin_mode(self) -> Mode {
         match self.mode() {
@@ -378,8 +376,7 @@ impl Motion {
 
     /// The content frame's tip: a new cursor has arrived.
     ///
-    /// All **four** snap cases are here, in a single expression (008 Karar 5,
-    /// R3.4):
+    /// All **four** snap cases are here, in a single expression:
     ///
     /// - **first frame** — there is no `state`,
     /// - **a cursor that opens while invisible** — invisibility emptied `state`,
@@ -409,7 +406,7 @@ impl Motion {
     /// be that the signature took `(col, row, origin_rows)` and summed them here; now
     /// the caret has **two homes** (the grid and the dock) and the dock's row is not
     /// an integer — the dock starts lower by the breathing margin, so the target is
-    /// fractional. The single animator having two homes is this set's 9th phase: if
+    /// fractional. The single animator has two homes because if
     /// the caret glides while typing in the grid it must glide in the dock too and
     /// between the two — not three separate behaviours but one movement.
     ///
@@ -423,7 +420,7 @@ impl Motion {
     ///
     /// **`band_target` is the dock band's extra-row target** ([`Motion::band`]):
     /// fractional and signed — in a remote session the band is shorter than the PTY
-    /// share and the target is negative (036). There is no direction rule, it glides
+    /// share and the target is negative. There is no direction rule, it glides
     /// in both directions. If the band's target changed in this frame the offset's
     /// direction rule is relaxed for that frame too — `filled`'s sibling, but the
     /// bit does not come from the caller, it is born here: this type is the only
@@ -444,10 +441,10 @@ impl Motion {
         self.offset = Some(offset);
         let band_changed = self.band.is_some_and(|band| band.target != band_target);
         self.sync_band(band_target, geometry);
-        // The offset's snap trigger **covers** the cursor's: the wheel (R2.6) and
+        // The offset's snap trigger **covers** the cursor's: the wheel and
         // geometry snap both, and the offset also has its own direction gate
         // ([`Motion::sync_origin`]). The item "the grid moving for another reason
-        // does not slide" in `docs/AYARLAR.md` is these two triggers.
+        // does not slide" in `docs/SETTINGS.md` is these two triggers.
         //
         // **`filled` is not a third trigger**, it is the direction gate's exception: it
         // does not set the snap, it relaxes the direction rule while `snap` is clear
@@ -471,7 +468,7 @@ impl Motion {
             Some(state) if animated && !scrolled && !geometry => {
                 if state.target != target {
                     // **The fade restarts after a pause, not on every
-                    // frame** (`/code-review` finding). In the two sliding
+                    // frame** (a review finding). In the two sliding
                     // styles resetting the clock unconditionally is right: a new
                     // target means a new road. In the fade the clock drives
                     // the **opacity**, not the road, and an unconditional reset
@@ -566,7 +563,7 @@ impl Motion {
     /// The stream is **remembered**, not re-derived from the slide: the ending
     /// branch leaves the slide settled and in a continuous stream every second
     /// screenful frame rebuilt the burst — the grid was drawn a screen lower, the
-    /// fill band grew by a screen (measured 2026-09-30, `docs/OLCUMLER.md`: release
+    /// fill band grew by a screen (measured 2026-09-30: release
     /// `cpu_encode` p95 0.23 → 0.33). A content frame that scrolls less than a
     /// screen (zero included) ends the run, so the next burst glides again. **Known
     /// limit:** screenful frames separated by a gap with no such frame between them
@@ -622,23 +619,23 @@ impl Motion {
     /// gliding down as it leaves vim, `clear` on a full screen dropping the prompt
     /// from top to bottom. The rule therefore looks at the **sign**, not the
     /// distance: a threshold would be an unmeasured number, direction is free (an
-    /// eye check, 011 after the gate).
+    /// eye check).
     ///
     /// This has a cost and it is named: a program that writes and deletes lines one
     /// after another (a spinner) glides as it grows and jumps as it shrinks. A
     /// sawtooth instead of a symmetric oscillation; it was accepted in the eye
     /// check, because the only alternative was that unmeasured threshold.
     ///
-    /// **The direction rule's named exception is `filled`** (017 R4.1): if the gap
+    /// **The direction rule's named exception is `filled`**: if the gap
     /// above fills with the ledger's newest rows, what comes down is not a gap but
-    /// **history arriving** from above — 011's "reads as falling" reason is moot in
+    /// **history arriving** from above — the "reads as falling" reason is moot in
     /// that branch. So the rule is not lifted, it is **narrowed**: with `fill == 0`
     /// shrinking content still snaps — a window with no dock, a deliberately cleared
     /// screen (Ctrl-L, `clear` on a full screen) and a window scrolled into history.
     ///
     /// **Leaving the alternate screen is not in this list and once was written in**
-    /// (017 gate, measured 2026-09-20): because `vim`'s entry `2J` does not set the
-    /// flag (phase-1b) all four gates are open in the exit frame and `fill` comes
+    /// (measured 2026-09-20): because `vim`'s entry `2J` does not set the
+    /// flag all four gates are open in the exit frame and `fill` comes
     /// greater than zero — i.e. the offset **starts gliding** in that frame. What
     /// brings the snap is not `fill`, it is the `geometry` flag that the resize
     /// which restores the dock will plant in the **next** main-queue turn; the slide
@@ -651,7 +648,7 @@ impl Motion {
     /// **The term is inside `!snap`** and this is not a placement taste: written
     /// outside it Rust's precedence would make the expression
     /// `(animated && !snap && …) || filled`, i.e. with a fill the wheel and geometry
-    /// would slide too (R4.2) — `bt-core`'s `display_offset == 0` gate cuts the
+    /// would slide too — `bt-core`'s `display_offset == 0` gate cuts the
     /// wheel but does **not** cut the **geometry** branch. The same mistake would
     /// also skip `animated` and puncture `cursor_motion = "snap"` and Reduce Motion
     /// in the fill. Its guards are `scrolling_and_geometry_snap_the_origin` and
@@ -875,7 +872,7 @@ impl Motion {
             state.pos = state.target;
             state.vel = [0.0; 2];
             // `from` is also pulled to the target, so the settling branch leaves **the same**
-            // state as [`Motion::finish`]. Had it not (`/code-review` finding) a slide that
+            // state as [`Motion::finish`]. Had it not (a review finding) a slide that
             // settled early by the spring's threshold would not satisfy `ease`'s and
             // `fade`'s "no road to travel" condition (`from == target`), i.e. it would look
             // unsettled when the mode changed — and the link would already have counted that
@@ -1008,7 +1005,7 @@ impl Motion {
     /// the glide **ends**. If it did not end, the remaining share asked for beyond the
     /// end would have frames that change nothing drawn until it settled, and it would
     /// also swallow the first notch coming in the opposite direction — after a wheel
-    /// flung down at the bottom an upward notch did nothing (`/code-review`). A
+    /// flung down at the bottom an upward notch did nothing. A
     /// notch in the opposite direction is a separate request anyway, so ending only
     /// drops the unreachable remainder.
     ///
@@ -1045,7 +1042,7 @@ impl Motion {
     /// condition is broken"; and when occlusion lifted the cursor would come sliding
     /// from a point the user never saw.
     ///
-    /// What the snap policy already says (008 Karar 5): visibility return is without
+    /// What the snap policy already says: visibility return is without
     /// animation. Here only the same rule is applied a frame early.
     pub(crate) fn finish(&mut self) {
         if let Some(state) = &mut self.state {
@@ -1123,10 +1120,10 @@ impl Motion {
 
     /// Have **all four** animations stopped — the link's "may I sleep" question.
     ///
-    /// The offset has to be **inside** this gate (R2.5): left outside, the link would
+    /// The offset has to be **inside** this gate: left outside, the link would
     /// sleep mid-slide in the "no damage" branch and the content would freeze halfway.
     /// The glide is here for the same reason, together with its undelivered share
-    /// ([`Motion::glide_idle`]). The band too (032): left outside, the link would
+    /// ([`Motion::glide_idle`]). The band too: left outside, the link would
     /// sleep in the middle of the band's growth and the grid and the band would freeze
     /// halfway. The timed run's gate (`Verdict::MotionUnsettled`) reads this too.
     pub(crate) fn settled(&self) -> bool {
@@ -1144,7 +1141,7 @@ impl Motion {
     ///
     /// The **raw flag**, not [`Motion::mode`]: in the `Snap` style `mode()` does not
     /// return `Fade` but the reduction is still on and blink must still be off. The
-    /// accessibility setting **does not add** animation (`CLAUDE.md`).
+    /// accessibility setting **does not add** animation.
     pub(crate) fn reduce(&self) -> bool {
         self.reduce
     }
@@ -1239,7 +1236,7 @@ impl Slide {
             Mode::Spring => self.spring(dt),
             // In `Snap` `sync` already sat at the target. `Fade` **never comes** here:
             // [`Motion::origin_mode`] turns it into `Snap` and neither the offset nor the
-            // band fades (R2.3).
+            // band fades.
             Mode::Snap | Mode::Fade => {}
         }
         if self.settled(mode) {
@@ -1300,7 +1297,7 @@ fn ease_axis(from: f32, target: f32, t: f32) -> f32 {
 /// target: the expression `(d + c·t)e^{-ωt}` crosses zero when
 /// `|v| > OMEGA × remaining distance`. The worst case measured was a small target
 /// correction made in the middle of a long jump, **0.87 cells** — almost a full
-/// cell, i.e. a visible recoil. 008 Karar 6 forbids this by name ("near critical
+/// cell, i.e. a visible recoil. The motion design forbids this by name ("near critical
 /// damping, **no overshoot**"), so the axis that crosses the target is stopped at
 /// the target.
 ///
@@ -1339,7 +1336,7 @@ fn axis_settled(pos: f32, vel: f32, target: f32) -> bool {
 /// [`DT_MAX`]).
 ///
 /// ζ = 1 was chosen: **no overshoot**. Any value below it would throw the cursor
-/// past the target and bring it back, and 008 explicitly does not want that
+/// past the target and bring it back, and the design explicitly does not want that
 /// ("near critical damping, no overshoot").
 fn critically_damped(d: f32, v: f32, dt: f32) -> (f32, f32) {
     let c = v + OMEGA * d;
@@ -1387,7 +1384,7 @@ mod tests {
 
     #[test]
     fn the_handover_to_the_dock_is_one_animation_not_two() {
-        // **The user's two complaints, one cause** (012 phase-9): when `sleep 5` ended
+        // **The user's two complaints, one cause**: when `sleep 5` ended
         // the caret *teleported* to the dock and while typing in the dock it never
         // slid left or right. Both came from the dock's caret never visiting the
         // animator; now the two homes are two values of the same target.
@@ -1529,7 +1526,7 @@ mod tests {
 
     #[test]
     fn a_retarget_in_flight_does_not_overshoot() {
-        // 008 Karar 6: "near critical damping, **no overshoot**". ζ = 1 gives this only
+        // The design: "near critical damping, **no overshoot**". ζ = 1 gives this only
         // from rest; since `sync` deliberately keeps the velocity, a small correction in
         // the middle of a long jump would overshoot the target — the worst case
         // measured without the clamp was 0.87 cells.
@@ -1916,7 +1913,7 @@ mod tests {
     #[test]
     fn reduce_motion_does_not_fade_what_did_not_move() {
         // The snap cases do not fade: the cursor did not move, the **grid under it**
-        // moved (008 Karar 5). A rule looking at the clock alone would count them as
+        // moved. A rule looking at the clock alone would count them as
         // unsettled for `FADE_DURATION` and the link would draw frames that change
         // nothing — the same reason as `ease`'s second condition, the same branch.
         let mut motion = fading();
@@ -1986,7 +1983,7 @@ mod tests {
 
     #[test]
     fn a_cursor_that_keeps_moving_still_becomes_visible_while_fading() {
-        // A `/code-review` finding and the place where the reduction **turned upside
+        // A review finding and the place where the reduction **turned upside
         // down**: had every target change reset the clock, a cursor moving fast could
         // never fill 90 ms, i.e. the Reduce Motion cursor would blink (while typing) or
         // vanish entirely (in streaming output).
@@ -2107,7 +2104,7 @@ mod tests {
 
     #[test]
     fn a_flight_that_settles_early_stays_settled_in_every_mode() {
-        // A `/code-review` finding. `advance`'s settling branch pulled `pos` and `vel`
+        // A review finding. `advance`'s settling branch pulled `pos` and `vel`
         // to the target but left `from` **where it was** — yet `ease`'s and `fade`'s
         // stop condition looks exactly at `from == target` ("no road to travel"). A
         // slide that settled early by the spring's threshold would therefore look
@@ -2187,9 +2184,9 @@ mod tests {
 
     #[test]
     fn the_cursor_does_not_move_while_the_origin_slides() {
-        // **R2.1, the set's crux.** On Enter the grid row goes `r → r+1` while the
+        // **The crux.** On Enter the grid row goes `r → r+1` while the
         // offset drops by one; had the two targets not been in the same space the cursor
-        // would drop a row and the spring would bring it back (phase-1's known
+        // would drop a row and the spring would bring it back (a known earlier
         // intermediate state). In screen space the target does **not** change at all.
         let mut motion = after_enter();
         assert!(motion.cursor_settled(), "the cursor set out on Enter");
@@ -2217,7 +2214,7 @@ mod tests {
     fn the_origin_settles_and_then_lets_the_link_sleep() {
         // The checklist: "no frames are asked for after the slide settles". The link's
         // sleep decision is a single expression (the "no damage" branch of `link.rs`):
-        // `motion.settled()`. The offset is **inside** that gate (R2.5), so when the
+        // `motion.settled()`. The offset is **inside** that gate, so when the
         // slide ends the frames end too — the "zero frames at idle" contract stands.
         let mut motion = after_enter();
         assert!(!motion.settled(), "the slide did not wake the link");
@@ -2242,14 +2239,14 @@ mod tests {
 
     #[test]
     fn a_shrinking_origin_snaps_unless_history_fills_the_gap() {
-        // **The direction rule** (011 after the gate, eye check): the offset is
+        // **The direction rule** (eye check): the offset is
         // `rows - content_rows`, so the target **falling** is the content growing (the
         // grid flows up) and **rising** is it shrinking (the grid comes down). Flowing
         // up reads as content arriving, coming down as falling.
         //
-        // **017 R4.1 narrowed the rule**, it did not remove it: if the gap above fills
+        // **The fill narrowed the rule**, it did not remove it: if the gap above fills
         // with the ledger's rows what comes down is not a gap but history arriving, and
-        // 011's reason is moot in that branch. The test's name changed for that reason
+        // the rule's reason is moot in that branch. The test's name changed for that reason
         // too — the old name (`a_growing_origin_slides_and_a_shrinking_one_snaps`) would
         // now lie.
         let mut motion = after_enter();
@@ -2265,7 +2262,7 @@ mod tests {
         // Shrinking content, `fill == 0`: the offset **rises** but the shell does not
         // glide down, it sits in place at once.
         //
-        // **The scene's name is not "leaving `vim`"** and this was corrected at the 017
+        // **The scene's name is not "leaving `vim`"** and this was corrected at a review
         // gate: there `fill` is **not** zero (the entry `2J` does not set the flag, all
         // four gates are open) and what brings the snap is the next turn's `geometry`.
         // The zero here is the common state of a window with no dock, a deliberately
@@ -2287,7 +2284,7 @@ mod tests {
 
     #[test]
     fn a_filled_gap_slides_the_origin_down_and_settles() {
-        // **The crux branch of 017 R4.1:** the Tab list closes, the fill narrows and the
+        // **The crux branch of the fill exception:** the Tab list closes, the fill narrows and the
         // offset **rises** — but the ledger's newest rows enter the gap, so the screen
         // does not come down, history arrives from above. This is exactly what should
         // glide.
@@ -2308,7 +2305,7 @@ mod tests {
             "the slide is not at an intermediate position: {mid}"
         );
 
-        // **Finite** (R4.3): no new animator, `Slide::settled()` applies as is and the
+        // **Finite**: no new animator, `Slide::settled()` applies as is and the
         // time ceiling ends the slide.
         let frames = run_to_rest(&mut motion, TICK);
         assert!(frames > 0, "the slide never ran a frame");
@@ -2331,8 +2328,8 @@ mod tests {
 
     #[test]
     fn scrolling_and_geometry_snap_the_origin() {
-        // R2.6 and the item "the grid moving for another reason does not slide" of
-        // `docs/AYARLAR.md`: the wheel follows the finger (008 Karar 5), and a
+        // The item "the grid moving for another reason does not slide" of
+        // `docs/SETTINGS.md`: the wheel follows the finger, and a
         // window/font/point size change moves the grid without animation too. In both
         // the content did not rise by its own growth.
         let mut motion = after_enter();
@@ -2351,7 +2348,7 @@ mod tests {
         motion.sync(Some([0.0, 12.0]), 9, 0.0, 1, false, false);
         assert!(!motion.origin_settled(), "content growth was snapped");
 
-        // **The fill does not puncture these two triggers** (017 R4.2) and this is the
+        // **The fill does not puncture these two triggers** and this is the
         // test's second job: had the `filled` term been written **outside** `!snap` in
         // the guard, Rust's precedence would make the expression
         // `(… && !snap && …) || filled` and in a window with a fill the wheel and window
@@ -2391,7 +2388,7 @@ mod tests {
 
     #[test]
     fn a_shrinking_content_settles_too() {
-        // **R2.4:** its input is not monotonic — a program that moves the cursor up and
+        // Its input is not monotonic — a program that moves the cursor up and
         // erases the bottom line with `\e[K` can grow and shrink the offset. Because the
         // stop condition looks at the distance not the target, every new target is finite
         // on its own; if the oscillation itself continues, what asks for those frames is
@@ -2411,7 +2408,7 @@ mod tests {
             // The claim is **settling**, not how many frames it ran: since the direction rule
             // the two halves of the oscillation go through two roads — the shrinking
             // direction (the target rises) sits without running a frame, the growing one by
-            // sliding. What R2.4 wants is for both to be **finite**.
+            // sliding. What is wanted is for both to be **finite**.
             if origin > previous {
                 assert!(
                     motion.origin_settled(),
@@ -2430,15 +2427,15 @@ mod tests {
 
     #[test]
     fn reduce_motion_snaps_the_origin_instead_of_fading_it() {
-        // **R2.3.** While the cursor fades in the offset snaps: the whole screen fading
+        // While the cursor fades in the offset snaps: the whole screen fading
         // in on every new line would be worse than the motion the reduction tries to
         // remove. The rule "the reduction's one place is `bt-gpu::motion`" stands — the
         // **place** is the same, the **mode** is two.
         let mut motion = Motion::default();
         motion.set_reduce(true);
         motion.sync(Some([0.0, 29.0]), 27, 0.0, 0, false, false);
-        // The cursor changes **column too**: since the screen row does not move on Enter
-        // (R2.1), a one-row advance alone would not give birth to a fade either — for
+        // The cursor changes **column too**: since the screen row does not move on Enter,
+        // a one-row advance alone would not give birth to a fade either — for
         // the test to tell the two modes apart the cursor has to really move.
         motion.sync(Some([5.0, 29.0]), 26, 0.0, 0, false, false);
         assert_eq!(motion.origin(), 26.0, "the offset went into a fade");
@@ -2456,7 +2453,7 @@ mod tests {
         assert!(motion.set_reduce(true), "no frame was asked for");
         assert_eq!(motion.origin(), 26.0, "turning on did not end the slide");
 
-        // **The fill is no exception either** (017): the accessibility setting does not
+        // **The fill is no exception either**: the accessibility setting does not
         // *add* animation. `origin_mode()` turns `Fade` into `Snap` and the `filled`
         // term stands **inside** `animated`.
         let mut motion = Motion::default();
@@ -2747,9 +2744,9 @@ mod tests {
 
     #[test]
     fn snap_style_never_slides_the_origin() {
-        // **R2.2:** the slide follows `cursor_motion`, there is no new key. `"snap"`'s
+        // The slide follows `cursor_motion`, there is no new key. `"snap"`'s
         // promise "this is how to turn motion off completely" stands on this line —
-        // `docs/AYARLAR.md` writes it.
+        // `docs/SETTINGS.md` writes it.
         let mut motion = Motion::default();
         motion.set_style(CursorMotion::Snap);
         motion.sync(Some([0.0, 29.0]), 27, 0.0, 0, false, false);
@@ -2757,7 +2754,7 @@ mod tests {
         assert!(motion.settled(), "snap started a slide");
         assert_eq!(motion.origin(), 26.0);
 
-        // **The fill does not puncture `"snap"` either** (017): the direction rule's
+        // **The fill does not puncture `"snap"` either**: the direction rule's
         // exception is inside `animated`, not above it — for a user who has turned
         // motion off the fill does not *add* an animation.
         motion.sync(Some([0.0, 29.0]), 28, 0.0, 0, false, true);
@@ -2842,7 +2839,7 @@ mod tests {
 
     #[test]
     fn a_glide_delivers_exactly_the_rows_it_was_asked_for() {
-        // **The contract of R2.3:** the window goes exactly as many rows as the notch
+        // **The contract:** the window goes exactly as many rows as the notch
         // asked — the shares enter `Session::frame` frame by frame and had their sum
         // been short or over, every notch would shift the window by a fraction and leave
         // it there. In both sliding styles, overshoot-free.
@@ -3038,7 +3035,7 @@ mod tests {
 
     #[test]
     fn scrolling_does_not_end_the_glide() {
-        // **R2.4:** the glide moves the offset at every row boundary and `sync`'s offset
+        // The glide moves the offset at every row boundary and `sync`'s offset
         // snap belongs to the cursor and the offset. Had it touched the glide, a notch
         // that passed the first row would be cut there.
         let mut motion = Motion::default();
@@ -3087,7 +3084,7 @@ mod tests {
         assert_eq!(motion.offset, Some(5));
     }
 
-    // ---- The dock band's extra rows (032 phase-2) ----
+    // ---- The dock band's extra rows ----
 
     /// The frame that starts the band from one row (extra `0`): the cursor and offset
     /// are also settled. `style` decides the mode, `reduce` is Reduce Motion.
@@ -3103,7 +3100,7 @@ mod tests {
     #[test]
     fn the_band_slides_both_ways_and_keeps_the_link_awake() {
         // The band's extra rows are in their own `Slide` and glide in **both
-        // directions** — the panel's size is not content, the direction rule (011) does
+        // directions** — the panel's size is not content, the direction rule does
         // not fit it. `settled()` is wrong before it settles: left outside, the link
         // would sleep in the middle of the growth and the grid and the band would
         // freeze halfway.
@@ -3129,7 +3126,7 @@ mod tests {
 
     #[test]
     fn a_negative_band_slides_both_ways_and_snaps_when_asked() {
-        // **Remote session** (036 Karar 8): when the input line goes away the band's
+        // **Remote session**: when the input line goes away the band's
         // extra is negative and fractional (a cell plus the line gap). There is no
         // direction rule: the band glides in two directions with an input line of 1 → 0
         // → 1 and settles; instantly under `snap` and Reduce Motion.
@@ -3190,7 +3187,7 @@ mod tests {
 
     #[test]
     fn a_band_change_lets_the_rising_content_target_glide() {
-        // **The direction rule's second exception** (032): in the frame where the band's
+        // **The direction rule's second exception**: in the frame where the band's
         // target changes, the rising content target glides too. As rows pass from the
         // grid to the dock the suppressed rows drop out of the fill (the target rises)
         // and the band grows by that much; had either of them snapped the grid would

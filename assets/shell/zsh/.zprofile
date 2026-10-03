@@ -8,8 +8,8 @@
 # is not loaded it loads it itself. The reachable case is our `.zshenv` having
 # gone unread (a missing or unreadable file — a hand-corrupted package); NOT
 # `no_rcs`, because once that option is on zsh reads no other startup file at
-# all, `/etc/zprofile` included (`/code-review`, 009 phase-5: the rationale in
-# the first draft was wrong). A bare `return` still will not do — `ZDOTDIR`
+# all, `/etc/zprofile` included (the rationale in an earlier draft was
+# wrong). A bare `return` still will not do — `ZDOTDIR`
 # stays hanging on us, `BATERI_ZDOTDIR` stays exported and the fallback the
 # `elif` arm performs would never run.
 if (( $+functions[__bateri_begin] )) || source ${ZDOTDIR}/bateri.zsh 2>/dev/null; then

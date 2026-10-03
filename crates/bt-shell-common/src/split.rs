@@ -1,4 +1,4 @@
-//! Split layout: the **pure** binary tree that carries a tab's panes (039 Karar 6). A leaf is a
+//! Split layout: the **pure** binary tree that carries a tab's panes. A leaf is a
 //! pane identity (`TerminalPane::id`), a node is an axis and a ratio. Splitting, closing and the
 //! frame computation are each a tree operation; the AppKit part (`split_view`) only applies these
 //! frames to the panes and paints the dividers.
@@ -8,7 +8,7 @@
 //! below, so no sign needs flipping.
 //!
 //! Navigation (order and direction), resizing (keyboard step and divider drag), equalizing and
-//! zooming are tree operations too (039 phase-4). The **minimum pane** (Karar 14) is given to the
+//! zooming are tree operations too. The **minimum pane** is given to the
 //! tree as one size per leaf (`min`): the point-size delta is per pane, and so is the cell; the
 //! limit's source is the pane itself.
 
@@ -116,15 +116,15 @@ impl Rect {
 }
 
 /// The divider's thickness, in **device pixels**: one. In points `1 / scale` — half a point on
-/// Retina. Not measured, a design constant (039 Karar
-/// 7: "the divider is one pixel"); the same weight as the dock's hairlines.
+/// Retina. Not measured, a design constant ("the
+/// divider is one pixel"); the same weight as the dock's hairlines.
 const DIVIDER_PX: f64 = 1.0;
 
 /// Splits a leaf's frame in two along `axis`: the first half, the divider and the second half —
 /// in pixels, with the divider subtracted. The ratio is the first half's share.
 ///
 /// The boundary is snapped to a **whole pixel**: a pane sitting on a half pixel gets a fractional
-/// drawable and its text blurs (the tab bar symptom of 026 phase-4). If the input is already on
+/// drawable and its text blurs (the tab bar's symptom). If the input is already on
 /// whole pixels, all three outputs are whole pixels too and tile the input with no gap and no
 /// overlap.
 fn halves_px(rect: Rect, axis: Axis, ratio: f64) -> (Rect, Rect, Rect) {
@@ -149,8 +149,8 @@ fn halves_px(rect: Rect, axis: Axis, ratio: f64) -> (Rect, Rect, Rect) {
     }
 }
 
-/// The sizes of a pane's two halves if it were split, in points — the question of the split limit
-/// (039 Karar 14): the **same** arithmetic as the frame computation, so the half the check approves
+/// The sizes of a pane's two halves if it were split, in points — the question of the split limit:
+/// the **same** arithmetic as the frame computation, so the half the check approves
 /// is exactly the half that will be drawn.
 pub fn split_halves(frame: Rect, axis: Axis, scale: f64) -> (Rect, Rect) {
     let (first, _, second) = halves_px(snap(frame, scale), axis, 0.5);
@@ -304,7 +304,7 @@ impl Tree {
     }
 
     /// Splits the `target` leaf in two along `axis`: the old pane in the first half (left or top),
-    /// `new` in the second, equal area (039 Karar 9).
+    /// `new` in the second, equal area.
     /// If the leaf is missing, `false` and the tree does not change.
     pub fn split(&mut self, target: u64, axis: Axis, new: u64) -> bool {
         match self {

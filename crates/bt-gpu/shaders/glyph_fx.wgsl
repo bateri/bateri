@@ -1,7 +1,5 @@
-// The dock's typing effects (030): the arrival of a typed glyph and the ghost
-// of an erased one. Read by `crate::renderer` (`Renderer::fx_draw`). The
-// decisions' rationale is `.tasks/030-dock-yazim-animasyonlari/discussion.md`
-// → Karar 5 and 6.
+// The dock's typing effects: the arrival of a typed glyph and the ghost
+// of an erased one. Read by `crate::renderer` (`Renderer::fx_draw`).
 //
 // **No geometry is generated; there is an inverse transform.** The quad is
 // inflated from the cell by the effect margin (FX_PAD) and the fragment maps
@@ -45,7 +43,7 @@ struct FxInstance {
 // `crate::renderer::FxImmediates`, pinned by `offset_of`/`size_of` asserts and
 // an explicit trailing `pad`.
 //
-// **Two boxes** (052): `cell_px` is the grid cell — the effects' amplitudes
+// **Two boxes**: `cell_px` is the grid cell — the effects' amplitudes
 // are its ratios and `local` is measured from its corner — and `slot_px` is
 // the atlas's slot, which below `line_height` / `letter_spacing = 1` is larger
 // than the cell. The glyph's ink lives in the slot, whose top-left corner is
@@ -78,7 +76,7 @@ var<immediate> imm: Immediates;
 
 // Effect ids — the Rust side is `glyph_fx::Effect::id` (`Keypress` /
 // `Erase`). Arrivals 1..16, ghosts 16..32: the kind of input is read from the
-// id. The arrivals' order is the table in `discussion.md` → Karar 6.
+// id.
 const FX_FADE: u32 = 1u;
 const FX_RISE: u32 = 2u;
 const FX_POP: u32 = 3u;
@@ -98,7 +96,7 @@ const FX_SUBLIME: u32 = 22u;
 const FX_SHATTER: u32 = 23u;
 const FX_GHOST_FIRST: u32 = 16u;
 
-// The quad's inflation on every side, in slots (052: the quad is the slot's,
+// The quad's inflation on every side, in slots (the quad is the slot's,
 // grown by this much). The farthest points:
 // horizontally `echo`'s copy (a wide glyph's two-cell box grown by ECHO_SCALE
 // overflows each half's quad by 1.2 cells), vertically `shatter`'s falling
@@ -223,7 +221,7 @@ fn glyph_fx_vertex(@builtin(vertex_index) vid: u32, it: FxInstance) -> FxOut {
     return o;
 }
 
-// The ease-out curve — Karar 6's single curve, **quadratic**. A cubic piled
+// The ease-out curve — the effects' single curve, **quadratic**. A cubic piled
 // the change at the start (half of it done in a fifth of the duration) and the
 // visible part was squeezed into a few frames: the user said "the animations
 // are not noticeable at all". Quadratic leaves the half to a third of the
@@ -234,7 +232,7 @@ fn ease_out(t: f32) -> f32 {
 }
 
 // A curve that overshoots the target for a moment and comes back — the
-// "closed form" of `pop`, `drop` and `squeeze` (Karar 6). 0 at 0, 1 at 1;
+// "closed form" of `pop`, `drop` and `squeeze`. 0 at 0, 1 at 1;
 // `back` is the overshoot's stiffness, the peak 1 + 4·back³ / (27·(back + 1)²).
 fn ease_out_back(t: f32, back: f32) -> f32 {
     let u = t - 1.0;
@@ -450,7 +448,7 @@ fn glyph_fx_fragment(in: FxOut) -> @location(0) vec4<f32> {
     // anchor is also the box's left edge, not the half's.
     //
     // The centre stays on the CELL box (the glyph is centred on its cells);
-    // the box `extrude`, `iris` and `shatter` read is the SLOT box (052): the
+    // the box `extrude`, `iris` and `shatter` read is the SLOT box: the
     // ink can spill past the cells and their bound must cover it — one slot
     // wide for a single glyph, `cell + slot` for a wide one, `slot_offset.x`
     // left of the cells. At `>= 1` the added terms are exactly zero.
@@ -504,7 +502,7 @@ fn glyph_fx_fragment(in: FxOut) -> @location(0) vec4<f32> {
             alpha = e;
             smooth_ = true;
         } else if (id == FX_HEAT) {
-            // Cooling uses `smoothstep`, not Karar 6's curve: an ease-out
+            // Cooling uses `smoothstep`, not the shared ease-out curve: an ease-out
             // cubic cooled the colour mostly in the first quarter and the hot
             // colour lasted a single frame. `smoothstep` is slow at the start
             // — the colour stays visible — and slow at the end, so it reaches

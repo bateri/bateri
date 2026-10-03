@@ -5,7 +5,7 @@
 //! at whether a path is a directory or a file and installs its watch. The
 //! event masks and their rationale live in each body (`dispatch`, `inotify`).
 //!
-//! **One notification contract on both platforms** (043 Karar 1): `notify`
+//! **One notification contract on both platforms**: `notify`
 //! runs on the module's **own background** queue (macOS: one private serial
 //! queue for every source) or thread (Linux: one per [`Watch`]), never on the
 //! caller's thread. Carrying the event to the UI loop is the caller's job —
@@ -130,7 +130,7 @@ mod tests {
     fn truncation_without_write_is_seen() {
         // `: > settings.toml` and `truncate -s 0` never write to the file:
         // kqueue gives only an attribute event (`ATTRIB`) and the directory
-        // does not change either (a `/code-review` finding, measured on this
+        // does not change either (a review finding, measured on this
         // machine).
         let root = TempRoot::new("watch-truncate");
         std::fs::write(root.0.join(settings::FILE_NAME), "[terminal]\n").expect("write failed");
@@ -223,7 +223,7 @@ mod tests {
     fn recreated_directory_is_watched_after_reinstall() {
         // When the directory is deleted an event arrives and the reinstall
         // installs nothing: the path is gone. Nothing sees the recreated
-        // directory **on its own** (the parent is not watched, Karar 2); a
+        // directory **on its own** (the parent is not watched); a
         // reinstall on an external trigger installs the sources on the new
         // directory and the next write is seen.
         let root = TempRoot::new("watch-recreate");

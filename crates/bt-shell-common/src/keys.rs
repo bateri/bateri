@@ -92,7 +92,7 @@ pub struct KeyPress<'a> {
     /// Control is held.
     pub ctrl: bool,
     /// Option (⌥) is held. It only enables the navigation/deletion class; it does not touch
-    /// printable letters (below, R3.2).
+    /// printable letters (below).
     pub option: bool,
     /// Command (⌘) is held. **Only** a key that passed the allow-list arrives here
     /// (`view::reaches_terminal`), so the flag's only job is to tell the list's three keys (⌘⌫,
@@ -126,7 +126,7 @@ pub struct KeyPress<'a> {
 ///
 /// **Out of scope:** IME; **Option as Meta across the board** — Meta encoding only for the
 /// navigation/deletion class, printable letters do not change (`Option+7` keeps typing `{` on
-/// Turkish Q, R3.2); the kitty keyboard protocol; **modified arrows** (`\e[1;5A`) — Option+arrow's
+/// Turkish Q); the kitty keyboard protocol; **modified arrows** (`\e[1;5A`) — Option+arrow's
 /// `\eb` does not replace them, it is a Meta sequence, not xterm's modifier encoding; **backspace
 /// with Control** and **forward delete with Option/Control** (⌦, U+F728); Home/End (their
 /// sequences are not written yet — a debt; swallowed below). **Dead keys stay out of scope and are
@@ -143,7 +143,7 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // The first key of Cmd's closed allow-list: ⌘⌫ → `\x15` (`^U`, `kill-whole-line` in
         // zsh). macOS's strict meaning is "delete **up to the start** of the line", but in zsh
         // `backward-kill-line` is not bound at all by default (measured) — the expectation is
-        // that the line goes away, and `^U` does exactly that (018 Karar 3). The arm comes
+        // that the line goes away, and `^U` does exactly that. The arm comes
         // **before** Option's: ⌘⌥⌫ deletes the line, not the word — the allow-list is a named
         // exception, Option's class is a rule.
         (BACKSPACE, _) if key.command && single => Cow::Borrowed(b"\x15"),
@@ -151,7 +151,7 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // `\x05` (`^E`, `end-of-line`). The same decision as ⌘⌫ — macOS's start/end-of-line
         // gesture, with the byte that **actually** does that job in zsh.
         //
-        // 018 Karar 3 had rejected these two keys and its reasoning had two parts: "not asked
+        // An earlier decision had rejected these two keys and its reasoning had two parts: "not asked
         // for" and "the Home/End sequences are unbound in zsh". The first fell away (the user
         // asked, 2026-09-21), the second **was never a reason about these keys**: the
         // measurement shows zero bindings for `^[[H`/`^[[F`/`^[OH`/`^[OF`, but `^A`/`^E` are
@@ -167,7 +167,7 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         (ARROW_RIGHT, _) if key.command && single => Cow::Borrowed(b"\x05"),
         // Option's **navigation/deletion** class → Meta sequences. No setting is consulted,
         // because these keys produce no printable character on any keyboard layout: the conflict
-        // is in Option **letters**, and those stay untouched (018 Karar 2). The sequences are
+        // is in Option **letters**, and those stay untouched. The sequences are
         // **lowercase**: the uppercase form is bound to other widgets in zsh (`\eA` =
         // `accept-and-hold`; measured).
         //
@@ -255,7 +255,7 @@ pub fn page_scroll(chars: &str, shift: bool) -> Option<i32> {
     }
 }
 
-/// A key the terminal can handle while there is a dock selection (031 Karar 8) — what each one
+/// A key the terminal can handle while there is a dock selection — what each one
 /// does lives in `bt-core` (`Session::dock_key`), this is only `NSEvent`'s dictionary.
 ///
 /// **Unmodified** ⌫, ⌦, ←, →, the two Shift arrows, ⏎ and ⇧⏎. A key carrying Option, Control or
@@ -277,7 +277,7 @@ pub fn dock_key(key: KeyPress<'_>, shift: bool) -> Option<DockKey> {
         // habit). If the gate is closed, `bt-core` does not consume it and the key goes out as
         // Enter, as it does today.
         ('\r', true) => Some(DockKey::NewLine),
-        // Plain ⏎: consumed only while a reconnect offer is showing (037 Karar 8); otherwise
+        // Plain ⏎: consumed only while a reconnect offer is showing; otherwise
         // `bt-core` says `false` on the first question and Enter goes its current way.
         // Numpad Enter's `characters` is U+0003 (without Control; `encode_key` turns it into
         // `\r`) — the second face of the same key.
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn plain_text_passes_as_utf8() {
         // The **usual** producer of a plain letter is no longer here but the AppKit stack's
-        // `insertText:` (018). This test is still a guard: the plain-text branch is the only
+        // `insertText:`. This test is still a guard: the plain-text branch is the only
         // path for groups 2 and 4 (see [`encode_key`]) and both groups can carry multi-byte
         // letters — when `insertText:`'s downcast fails, `ğ` passes through here.
         assert_eq!(encode(plain("a")), b"a");
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn option_navigation_sends_meta_sequences() {
         // Option's navigation/deletion class produces no printable character on any layout, so
-        // it is Meta-encoded without consulting a setting (018 Karar 2).
+        // it is Meta-encoded without consulting a setting.
         // The sequences were measured in default zsh: `\eb` `backward-word`, `\ef`
         // `forward-word`, `\e\x7f` `backward-kill-word`. The letter is **lowercase** —
         // the uppercase form is bound to other widgets (`\eA` =
@@ -555,9 +555,8 @@ mod tests {
 
     #[test]
     fn option_printable_characters_are_untouched() {
-        // R3.2: on Turkish Q `{` = Option+7, `∫` = Option+b. If Option were Meta across the
-        // board, the shell's metacharacters would become untypable (018
-        // Karar 2) — Meta is only for the navigation/deletion class.
+        // On Turkish Q `{` = Option+7, `∫` = Option+b. If Option were Meta across the
+        // board, the shell's metacharacters would become untypable — Meta is only for the navigation/deletion class.
         //
         // The **usual** producer of these letters is now `insertText:`; only a type the stack
         // cannot resolve falls through to here (group 4), and even then the letter must pass
@@ -570,7 +569,7 @@ mod tests {
     fn command_backspace_kills_the_whole_line() {
         // The allow-list's first key. `\x15` = `^U`, `kill-whole-line` in zsh: macOS's
         // "delete to the start of the line" is not bound by default in zsh (measured) and the
-        // user's criterion is that the line goes away (018 Karar 3).
+        // user's criterion is that the line goes away.
         assert_eq!(encode(command("\u{7f}")), b"\x15");
         // Cmd comes **before** Option: ⌘⌥⌫ deletes the line, not the word.
         assert_eq!(

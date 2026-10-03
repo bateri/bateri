@@ -5,14 +5,14 @@
 //! (`rules`) are platformless and only the backend of the platform being
 //! built sees its font libraries — on macOS `coretext`
 //! (`objc2-core-text` / `objc2-core-graphics` / `objc2-core-foundation`), on
-//! Linux `freetype` (FreeType + fontconfig, `harfrust` for clusters; 042).
+//! Linux `freetype` (FreeType + fontconfig, `harfrust` for clusters).
 //! AppKit and the GPU are **not seen**: the textures are `bt-gpu`'s — what
 //! leaves here is a slot number and CPU bitmaps, which `bt-gpu` uploads into
 //! its own two textures (mask `R8Unorm`, colour `RGBA8Unorm_sRGB`).
 //!
 //! The four font faces (`Face`) and the rule lines (`RuleKind`) live here: the
 //! rule sprites take no glyph from the font, they are drawn procedurally. The
-//! family comes from the settings (007 phase-5) and falls back to the chain if
+//! family comes from the settings and falls back to the chain if
 //! it is missing on the machine; [`FontIssue`], which reports that, goes back
 //! to the caller — this crate prints nothing to anyone.
 //!
@@ -30,7 +30,7 @@
 //! is already in the character itself) and drawn in **both** size classes,
 //! each at its own cell: in the dock's context line the column step is the
 //! small face's advance, so the small class's sprite is drawn at the small
-//! cell and placed on the large slot's baseline (046 Karar 3).
+//! cell and placed on the large slot's baseline.
 //!
 //! A **single-cell** character missing from the selected font comes from the
 //! system's cascade (`rules::fallback_font`) and the gate is **geometric**: a
@@ -38,12 +38,12 @@
 //! cell. What is measured is ink, not advance, because the glyphs of symbol
 //! fonts paint narrower than they advance (`⏺` U+23FA) and a gate that
 //! measured the advance rejected them although they fit the cell. A candidate
-//! that does not fit is drawn into two cells if it is two columns wide (023),
+//! that does not fit is drawn into two cells if it is two columns wide,
 //! and as a smaller-point copy if it does not fit and its overflow is within
-//! the limit (041, `rules::SHRINK_LIMIT`); the rest is [`TOFU`].
+//! the limit (`rules::SHRINK_LIMIT`); the rest is [`TOFU`].
 
 // The fallback gate's scan and the guard of the tool characters; it has no
-// consumer in production (041 phase-1).
+// consumer in production.
 #[cfg(all(test, target_os = "macos"))]
 mod census;
 #[cfg(target_os = "macos")]
@@ -64,7 +64,7 @@ pub use rules::{family_issue, monospaced_families};
 use system::{Backend, Font, FontSystem};
 
 /// The cell's two spacing multipliers: `[font] line_height` and
-/// `[font] letter_spacing` (051).
+/// `[font] letter_spacing`.
 ///
 /// A struct, not two positional `f64`s: both have the same type and the same
 /// range, and a swapped pair would compile and silently stretch the wrong
@@ -89,8 +89,8 @@ impl Default for Spacing {
     }
 }
 
-/// The backend's sample characters and family names, measured on its fonts
-/// (042 Karar 7). Test support, not API: `bt-gpu`'s glyph guards take their
+/// The backend's sample characters and family names, measured on its fonts.
+/// Test support, not API: `bt-gpu`'s glyph guards take their
 /// samples from here (feature `fixture`, a dev-dependency there) so a
 /// measurement lives in one place.
 #[cfg(feature = "fixture")]
@@ -101,7 +101,7 @@ pub use system::fixture;
 /// sequence.
 ///
 /// The three live in the same grid because all three are rasterized into
-/// slots **one cell in size**: since 023 emoji and wide glyphs have joined the
+/// slots **one cell in size**: emoji and wide glyphs have joined the
 /// same union by being split into two halves ([`Half`]) and into the colour
 /// plane ([`Plane`]), i.e. no separate texture or separate packer was born.
 ///
@@ -215,8 +215,8 @@ const RULE_RESERVE: u16 = 7;
 ///
 /// **Not a measurement claim but a design constant** (like `GUTTER_PT` and
 /// [`CONTEXT_SCALE`]), though its derivation comes from a measured number:
-/// the procedural family is **421** characters (`docs/OLCUMLER.md` → Atlas
-/// yuva ayak izi) and the slots it demands of the atlas are **429** — tofu (1)
+/// the procedural family is **421** characters (measured)
+/// and the slots it demands of the atlas are **429** — tofu (1)
 /// and the rule share closed to characters ([`RULE_RESERVE`], 7) pile on top,
 /// because [`Atlas::slot`] gives characters `capacity() - RULE_RESERVE` and
 /// `next` starts at 1. The rule is "the family's share should not exceed half
@@ -250,11 +250,10 @@ const MIN_EDGE: u16 = 1024;
 /// its number is **computed** in
 /// `capacity_clears_the_family_at_every_accepted_size`, not written here.
 ///
-/// It was 4096 until the letter spacing (051) and that corner went red: the
+/// It was 4096 until letter spacing landed and that corner went red: the
 /// widest cell (144pt@1x, both multipliers at 2) gave fewer slots than the
 /// family. Raising the ceiling was chosen over lowering the multipliers' cap
-/// — the user sees the cap, not the edge (`.tasks/051-harf-araligi/
-/// discussion.md` → Karar). The edge still derives from the slot target, so
+/// — the user sees the cap, not the edge. The edge still derives from the slot target, so
 /// only that corner grows; the cost is memory there (64 MB of mask, the
 /// colour texture is born only with the first emoji).
 const MAX_EDGE: u16 = 8192;
@@ -269,7 +268,7 @@ const MAX_EDGE: u16 = 8192;
 /// not leave its own invariant to the caller's discipline, and since the
 /// criterion is `point size × scale`, a ceiling on the settings side would
 /// change meaning every time the window moved to another screen. The clamp is
-/// **silent** (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 4).
+/// **silent**.
 /// The ratio of the context line to the display font.
 ///
 /// **Not a measured number, a design constant** (like `CellMetrics::GUTTER_PT`):
@@ -322,7 +321,7 @@ pub struct Upload<'a> {
 /// There is no packer: **all sprites are slot-sized** (a wide glyph is two
 /// slots, [`Half`]), i.e. the `slot_no → pixel corner` conversion is
 /// arithmetic. The slot is the cell at `>= 1` and larger than the grid cell
-/// below it ([`Atlas::slot_metrics`], 052). Procedural characters (block, Braille, line) do
+/// below it ([`Atlas::slot_metrics`]). Procedural characters (block, Braille, line) do
 /// not break that constraint — by definition they are exactly one cell; what's
 /// more they are what demands the constraint, because their tiling runs to the
 /// edge of the cell.
@@ -337,12 +336,12 @@ pub struct Atlas {
     /// derivations and a second "face could not be obtained" warning — both
     /// costs with no return.
     small: Font,
-    /// The **grid** metric: the cell the grid steps by, at the real spacing
-    /// (052). Its name and meaning are today's, so its consumers (`bt-gpu`'s
+    /// The **grid** metric: the cell the grid steps by, at the real spacing.
+    /// Its name and meaning are today's, so its consumers (`bt-gpu`'s
     /// `CellMetrics`, the PTY's size, the mouse) did not move.
     metrics: Metrics,
     /// The **slot** metric: the cell at the spacing clamped to `>= 1` on both
-    /// axes (052 R1) — the box a glyph is rasterized into and the owner of the
+    /// axes — the box a glyph is rasterized into and the owner of the
     /// slot geometry (the grid of slots, the texture, the buffers, tofu).
     /// Equal to [`Atlas::metrics`] at `>= 1`; below `1` the grid cell sits
     /// inside it at `rules::slot_offset`, and a glyph that does not fit the
@@ -373,8 +372,7 @@ pub struct Atlas {
     /// The font's own (unspaced) advance — large class. Its **only** consumer
     /// is the fallback gate's arm decision (`rules::accept`): "does it fit one
     /// cell today" must not change with the letter spacing, or a two-column
-    /// character would fall into one wide cell and sit in the left column
-    /// (`.tasks/051-harf-araligi/discussion.md` → Muhakeme).
+    /// character would fall into one wide cell and sit in the left column.
     natural_advance: f64,
     /// The small face's fractional advance: the small-class twin of
     /// [`Atlas::cell_advance`]. The fallback gate and the centring are
@@ -397,7 +395,7 @@ pub struct Atlas {
     /// other `space_advance`) the same measure would have two sources.
     context_cell_w: u16,
     /// The small face's own cell: the measure a **procedural** character is
-    /// drawn at in the small class (046 Karar 3).
+    /// drawn at in the small class.
     ///
     /// A font glyph does not need it — it is drawn into the large slot on the
     /// large baseline and its size comes from the font. A procedural sprite
@@ -416,7 +414,7 @@ pub struct Atlas {
     small_buffer: Vec<u8>,
     /// The drawing buffer of a large-class tiled sprite (the procedural family
     /// and tofu), [`Atlas::metrics`]' `slot_bytes` long: drawn at the grid
-    /// cell and placed into the slot at `rules::slot_offset` (052 R2), so a
+    /// cell and placed into the slot at `rules::slot_offset`, so a
     /// box-drawing line still tiles the grid when the slot is larger.
     cell_buffer: Vec<u8>,
     /// The (family, point size, scale, spacing) it was built with. The criterion of
@@ -431,7 +429,7 @@ pub struct Atlas {
     /// character the font does not know also lives here as [`TOFU`], otherwise
     /// the same character would be asked of CoreText again every frame.
     slots: HashMap<(Sprite, Face, SizeClass, Half), (u16, Plane)>,
-    /// Keys whose single-cell entry was accepted **shrunk** (041).
+    /// Keys whose single-cell entry was accepted **shrunk**.
     ///
     /// The `Whole` shortcut of a `Left` request may only trust the entry "fits
     /// one cell at full size": had a shrunk `Whole` answered a two-cell
@@ -554,8 +552,8 @@ impl Atlas {
         let natural_advance = rules::space_advance(faces.get(Face::Regular));
         let cell_advance = natural_advance * spacing.letter;
         let metrics = rules::metrics_at(faces.get(Face::Regular), cell_advance, spacing.line);
-        // The slot: the same derivation at the spacing clamped to `>= 1`
-        // (052). `max` returns its argument itself when it is the larger, so
+        // The slot: the same derivation at the spacing clamped to `>= 1`.
+        // `max` returns its argument itself when it is the larger, so
         // at `>= 1` the inputs are bit for bit the grid's and so is the slot.
         let slot_advance = natural_advance * spacing.letter.max(1.0);
         let slot_metrics = rules::metrics_at(
@@ -592,8 +590,8 @@ impl Atlas {
         let (w, h) = slot_metrics.cell_px;
         // The edge is derived from the **slot target**: as the cell grows the
         // capacity drops and somewhere it falls below the procedural family
-        // (422 slots) — the measured break is 29pt on Retina
-        // (`docs/OLCUMLER.md`). The floor is [`MIN_EDGE`], i.e. the default
+        // (422 slots) — the measured break is 29pt on Retina.
+        // The floor is [`MIN_EDGE`], i.e. the default
         // point size stays at today's texture.
         //
         // Counted in `u32`: the product of the quotients overflows `u16` at a
@@ -672,7 +670,7 @@ impl Atlas {
         true
     }
 
-    /// The **grid** metric: the cell the grid steps by (052 → the two
+    /// The **grid** metric: the cell the grid steps by (the two
     /// metrics are on [`Metrics`]' doc).
     pub fn metrics(&self) -> Metrics {
         self.metrics
@@ -698,7 +696,7 @@ impl Atlas {
     fn glyph_box(&self, size: SizeClass) -> (rules::GlyphBox, f64) {
         // The cell's left edge in the slot is where `bt-gpu` puts it — the
         // whole-pixel offset, for the small class too: its glyphs go into the
-        // large slot and the same quad (code review of 052).
+        // large slot and the same quad (found in code review).
         let left = f64::from(self.slot_offset().0);
         match size {
             SizeClass::Normal => (
@@ -785,7 +783,7 @@ impl Atlas {
         // memory of random output (`cat`ed binary data, wide cells carrying
         // combining marks). A new sequence beyond the ceiling lands on its
         // **base character** — that is also the answer for a sequence that does
-        // not shape, i.e. the image is no worse than before 035; the atlas's
+        // not shape, i.e. the image is no worse than before clustering; the atlas's
         // slots could not hold that many distinct sequences anyway.
         if self.clusters.len() >= self.negative_cache_cap() {
             return Sprite::Char(base);
@@ -864,7 +862,7 @@ impl Atlas {
             // the large cell's width — while the dock's context line steps by
             // the small face's advance (`Frame::column_px`), i.e. the sprite
             // would overlap its neighbour. The small class keeps its own key
-            // and its own measure ([`Atlas::small_metrics`], 046 Karar 3).
+            // and its own measure ([`Atlas::small_metrics`]).
             (Sprite::Char(ch), SizeClass::Normal) if raster::is_procedural(ch) => {
                 (Face::Regular, SizeClass::Normal)
             }
@@ -907,7 +905,7 @@ impl Atlas {
         // and that criterion is strictly tighter than the two-cell one, i.e.
         // the inference is one-way — if `Left` was rejected `Whole` is rejected
         // too, not the reverse. Without the gate the path died like this (until
-        // dock 024 the input line **always** asked with `wide: false` and the
+        // the dock counted columns, the input line **always** asked with `wide: false` and the
         // line was `SizeClass::Normal`): a CJK character typed at the prompt
         // was first asked as `Whole` and entered the negative cache; after
         // Enter the same character arrives in the grid with `wide: true`, does
@@ -921,7 +919,7 @@ impl Atlas {
         // `cluster_as_base` and of the negative-cache filter).
         //
         // **A shrunk acceptance does not pass through this branch either**
-        // (041, [`Atlas::shrunk`]): a `漢` shrunk to one cell should be a
+        // ([`Atlas::shrunk`]): a `漢` shrunk to one cell should be a
         // full-size double in a two-cell request, not its small single-cell
         // copy.
         if want == Half::Left && !self.shrunk.contains(&(sprite, face, size)) {
@@ -968,7 +966,7 @@ impl Atlas {
         // number" true. Counted as one, a full atlas with a single free slot
         // turned the right half into a shrunk whole glyph beside a tofu left
         // half — hidden on macOS, where the fixture's wide character is
-        // `.LastResort` and never shrinks (042 phase-4, seen on Linux).
+        // `.LastResort` and never shrinks (seen on Linux).
         let need = u32::from(if want == Half::Whole { 1u16 } else { 2 });
         // The criterion is **the mask's** counter and this is a deliberate
         // narrowing. The plane is only known during drawing, i.e. there is no
@@ -998,7 +996,7 @@ impl Atlas {
             // pin it to tofu.
             //
             // Falling here means **more distinct glyphs than the target in a
-            // single frame** and that scenario is **not measured** (022). If
+            // single frame** and that scenario is **not measured**. If
             // measured, its remedy is not LRU but recycling at the
             // `encode_pass` boundary: the slot number is not stored in frame
             // data, `slot_uv` bakes the uv at resolve time and `prepare` runs
@@ -1032,8 +1030,7 @@ impl Atlas {
             // below, `raster::draw` stays pure as a font path and the doc of
             // `DrawResult` ("the font's answer") is not strained.
             //
-            // **Both classes** take this arm, each at its own cell (046 Karar
-            // 3): the large class at [`Atlas::metrics`] straight into the slot,
+            // **Both classes** take this arm, each at its own cell: the large class at [`Atlas::metrics`] straight into the slot,
             // the small class at [`Atlas::small_metrics`] into a separate
             // buffer and from there into the large slot, its baseline on the
             // large cell's — the row the small font's letters sit on, so a
@@ -1041,11 +1038,11 @@ impl Atlas {
             // at the context line's column step.
             // The procedural family is **single-cell by definition**: block
             // elements, Braille, box drawing and the technical set are
-            // single-column from start to finish (measured, the 023
-            // inventory). So `Whole` is not an assumption but the family's own
+            // single-column from start to finish (measured, the wide-
+            // glyph inventory). So `Whole` is not an assumption but the family's own
             // property.
             //
-            // The sprite is drawn at the **grid** cell, not the slot (052 R2):
+            // The sprite is drawn at the **grid** cell, not the slot:
             // it is the cell and has to tile the grid, so below `1` it lands
             // inside the slot at the cell's offset and the pad stays empty.
             Sprite::Char(ch) if raster::is_procedural(ch) => {
@@ -1181,7 +1178,7 @@ impl Atlas {
                         self.draw_accepted(&alt, cell)
                     }
                     // It did not shape into a single glyph or was rejected by the
-                    // gate: the answer is the **base character's** (035 R1.1).
+                    // gate: the answer is the **base character's**.
                     // Not a box, because the base character can often be drawn
                     // (the `👍` of `👍👍`); not half a glyph, because the base
                     // character passes through its own gate.
@@ -1190,7 +1187,7 @@ impl Atlas {
             }
             // Procedural drawing cannot fail: the font is not asked, no context
             // is built. `Drawn` is not an assumption, it is the type itself.
-            // Rules are drawn at the **slot's** height and baseline (052): an
+            // Rules are drawn at the **slot's** height and baseline: an
             // underline and a strikeout belong to the glyph's baseline, and the
             // chevron is a glyph, so all three go where the letter goes
             // vertically. Horizontally they are the **cell's** width, placed at
@@ -1367,7 +1364,7 @@ impl Atlas {
                 //
                 // When the ceiling is reached the **negative entries are thrown
                 // out wholesale**, not "stop caching from now on". The difference
-                // emerged in this set: `slot()` is now on the drawing path
+                // matters because `slot()` is now on the drawing path
                 // (`bt-gpu` calls it in the display link callback), i.e. an
                 // uncached character would be asked back of CoreText **every
                 // frame** as long as it stayed on screen — on the main thread, in
@@ -1375,15 +1372,14 @@ impl Atlas {
                 // at least `capacity()` new entries fit between two evictions.
                 // Positive entries (real slots) are kept: throwing them out
                 // wholesale would require dropping the texture too and that
-                // decision was left out of scope in 022 — the capacity derives
+                // decision was left out of scope — the capacity derives
                 // from the cell size, i.e. the positive side filling up is now
                 // much harder.
                 //
                 // **The cost grew with the fallback** and this was accepted
                 // deliberately: a character asked back after the eviction now
                 // pays not only `CTFontGetGlyphsForCharacters` but a cascade walk
-                // too. The hot walk was measured and is cheap (the set's
-                // `phase-1.md` → Uygulama Notları); what is expensive is a
+                // too. The hot walk was measured and is cheap; what is expensive is a
                 // **family's first open** and that is not affected by the
                 // eviction — the font stays open in CoreText, it is not reloaded.
                 // So the cost the eviction brings back is the hot walk, not the
@@ -1452,7 +1448,7 @@ impl Atlas {
         // The two halves are centred in the **same box** and both are drawn in
         // the same call: the right half's offset is a whole number of pixels,
         // i.e. the AA phase is exactly the same in both. The offset is the
-        // **grid's** step (052): the second cell starts one cell to the right,
+        // **grid's** step: the second cell starts one cell to the right,
         // not one slot, so the box's middle stays on the grid.
         let pair = alt.cols >= 2;
         let bx = cell.cols(alt.cols);
@@ -1500,7 +1496,7 @@ impl Atlas {
                 &mut self.color_buffer_right,
             ),
         };
-        // **The halves are cut at the split line** (052 R2.1): below `1` a
+        // **The halves are cut at the split line**: below `1` a
         // slot is wider than its cell, so the left slot also covers the
         // start of the second cell and the right slot the end of the first.
         // Left of the line belongs to the left half, the rest to the right,
@@ -1604,7 +1600,7 @@ impl Atlas {
     /// (used, total) slots.
     ///
     /// Tofu counts as used: the texture holds that slot too and the occupancy
-    /// ratio will be read from these two numbers in `/measure`.
+    /// ratio is read from these two numbers when measuring.
     pub fn occupancy(&self) -> (usize, usize) {
         (usize::from(self.next), usize::from(self.capacity()))
     }
@@ -1614,8 +1610,8 @@ impl Atlas {
     /// Published **separately** from the mask and the reason is the token
     /// contract: the smoke gate's `slots=` counter counts only the mask plane
     /// and adding a second plane into it would leave the question "which plane
-    /// filled up" unanswered. A plane it cannot see would be exactly 021's
-    /// Braille shape: spending zero slots, silent.
+    /// filled up" unanswered. A plane it cannot see would repeat the old
+    /// Braille defect: spending zero slots, silent.
     ///
     /// The total is the same in both ([`Atlas::capacity`]): the two planes
     /// share the same slot grid, only the pixel format and the counter differ.
@@ -1704,10 +1700,10 @@ fn effective_point_size(point_size: f64, scale: f64) -> f64 {
 
 /// Copies a sprite drawn at its own cell (`src`, `from`) into a slot (`dst`,
 /// `to`) with its top-left corner at `(dx, dy)` — **the single placer** of
-/// the sprites that are a cell rather than a glyph (052 R2): the large
+/// the sprites that are a cell rather than a glyph: the large
 /// procedural family and tofu at `rules::slot_offset`, the small procedural
 /// family at the cell's column with the small cell's baseline row on the
-/// slot's (046 Karar 3).
+/// slot's.
 ///
 /// What falls outside the slot is **clipped**, not a panic: the relation of
 /// the two cells is the fonts' data, not a type — and this runs in the
@@ -1756,7 +1752,7 @@ fn clear_columns(buffer: &mut [u8], m: Metrics, bpp: usize, cols: std::ops::Rang
 }
 
 /// The resident tofu slot: the box drawn at the **grid** cell ([`tofu_buffer`])
-/// and placed into the slot at `rules::slot_offset` (052 R2), like the
+/// and placed into the slot at `rules::slot_offset`, like the
 /// procedural family — the box is the cell, not a glyph.
 fn tofu_slot(cell: Metrics, slot: Metrics) -> Vec<u8> {
     let (x, y) = rules::slot_offset(slot, cell);
@@ -1802,8 +1798,8 @@ fn tofu_buffer(m: Metrics) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Sample characters and family names come from the backend's fixture
-    // (042 Karar 7): a platformless test names no font.
+    // Sample characters and family names come from the backend's fixture:
+    // a platformless test names no font.
     use crate::system::fixture::{
         self, CLUSTER_BASE, CLUSTER_SCALE, CLUSTERS, FALLBACK_CHAR, GATE_PROBES, UNKNOWN_CHAR,
         WIDE_CHAR,
@@ -1811,8 +1807,8 @@ mod tests {
 
     /// The test point size is deliberately large: the grid derives from the
     /// cell size, i.e. large point size = few slots. That way the "full atlas"
-    /// test runs without rasterizing thousands of glyphs. **The pool grew in
-    /// 022** (procedural family + ASCII × four faces ≈ 800 requests) because
+    /// test runs without rasterizing thousands of glyphs. **The pool grew when
+    /// the edge was derived** (procedural family + ASCII × four faces ≈ 800 requests) because
     /// once the edge was derived the smallest capacity rose to 564 and the
     /// 95-character ASCII cannot fill it; i.e. "dozens" is no longer right, but
     /// it is not thousands either and the reason for the choice stays the same.
@@ -1840,7 +1836,7 @@ mod tests {
             .chain(('\u{391}'..='\u{3c9}').filter(|&ch| ch != '\u{3a2}'))
             .chain('\u{410}'..='\u{44f}')
     }
-    /// The corner of both multipliers (051): the largest cell the settings
+    /// The corner of both multipliers: the largest cell the settings
     /// can ask for at a given point size. `bt-core`'s ranges are the source;
     /// `bt-atlas` cannot see them, so the numbers are repeated here and the
     /// capacity guard is what keeps them honest.
@@ -1913,7 +1909,7 @@ mod tests {
                 "{point_size}×{scale}: the two representations of the small class diverged ({})",
                 a.context_advance
             );
-            // The small cell of procedural sprites (046) is a third reader of
+            // The small cell of procedural sprites is a third reader of
             // the same width, not a third source.
             assert_eq!(
                 a.small_metrics.cell_px.0, a.context_cell_w,
@@ -1926,7 +1922,7 @@ mod tests {
     fn every_base_glyph_advance_is_the_cell_advance() {
         // Centring is **universal** and in the base font at
         // `letter_spacing = 1` it has to be exactly zero (opened up, the shift
-        // is what centres the glyph in the wider cell — 051, guarded by
+        // is what centres the glyph in the wider cell, guarded by
         // `letter_spacing_widens_the_cell_and_keeps_the_glyph_centred`): if
         // `(cell - advance) / 2` gave a fractional result at `1` CG's edge
         // smoothing would change and the ground under all of the repo's pixel
@@ -2180,7 +2176,7 @@ mod tests {
         // If the expectation were derived from the **advance**, this test
         // would fail on [`INK_CHAR`]; that is why it stays in the list —
         // reverting the criterion must not be silent. (`⠋` was the second
-        // witness until 046 opened the procedural gate in the small class:
+        // witness until the procedural gate opened in the small class:
         // it no longer reaches the fallback in either class.)
         let mut a = atlas(POINT_SIZE, 1.0);
         let classes = size_classes(&a);
@@ -2197,7 +2193,7 @@ mod tests {
                 }
                 // A procedurally drawn character is not the experiment's
                 // subject either: the gate stands **before** it and the font
-                // is never asked — in both classes since 046 (Karar 3).
+                // is never asked — in both classes.
                 if raster::is_procedural(ch) {
                     continue;
                 }
@@ -2222,7 +2218,7 @@ mod tests {
                 let left = ink.x + rules::centre_shift(rules::GlyphBox::unpadded(cell), advance);
                 let right = left + ink.width;
                 // A candidate that does not fit is drawn shrunk if it is
-                // within the limit and is not `.LastResort` (041); the
+                // within the limit and is not `.LastResort`; the
                 // expectation again comes from the candidate's own
                 // measurements, from the same function as the shrink
                 // coefficient.
@@ -2472,9 +2468,8 @@ mod tests {
         // `CTFontGetGlyphsForCharacters` per frame; now a
         // `CTFontCreateForString` is added to it and that walks the cascade.
         // The cost of the cold first call is comparable to the frame budget;
-        // its number and environment are held in escrow in
-        // `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama Notları (the first
-        // `/measure` moves it to `docs/OLCUMLER.md`). The place where the
+        // its number and environment are recorded with the fallback
+        // search's measurements. The place where the
         // record is born **on the main thread** is `slot()`'s draw path, so
         // this would be not an uncapped leak but a latency paid every frame.
         assert_eq!(
@@ -2490,7 +2485,7 @@ mod tests {
         assert_eq!(a.occupancy().0, 1, "a tofu fall must not spend a slot");
     }
 
-    // Calibration: names a font or a measured number (042 Karar 7).
+    // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn face_fallback_is_cached_under_the_requested_face() {
@@ -2502,7 +2497,7 @@ mod tests {
         // the same measurement also counted the code points missing from
         // Menlo Bold and found **one** block across the whole BMP and SMP —
         // U+2500–U+257F, exactly 128 characters. The whole of that block is
-        // within 021's scope, only its three diagonals (`╱╲╳`, Karar 3B) are
+        // within the procedural scope, only its three diagonals (`╱╲╳`) are
         // deliberately left out. So what keeps this test's load-bearing
         // claim standing is that hole in the coverage: if the hole were
         // closed, the `DrawResult::NoGlyph if face != Face::Regular` arm
@@ -2572,7 +2567,7 @@ mod tests {
     /// the whole BMP and the filter is `raster::is_procedural`.
     ///
     /// Writing a narrow range would mirror the implementation's table; a
-    /// mirrored table cannot see its own gap (the lesson of 021's arm table).
+    /// mirrored table cannot see its own gap (the lesson of the old arm table).
     fn procedural_chars() -> impl Iterator<Item = char> {
         (0u32..=0xFFFF)
             .filter_map(char::from_u32)
@@ -2592,13 +2587,13 @@ mod tests {
         procedural_chars().count() + 1 + usize::from(RULE_RESERVE)
     }
 
-    /// The default path must stay **bit for bit the same** (022 R2).
+    /// The default path must stay **bit for bit the same**.
     ///
     /// Deriving the edge only kicks in when the cell grows; the default
     /// point size is already many times above [`SLOT_TARGET`]. Without this
     /// guard, when [`MIN_EDGE`] or [`SLOT_TARGET`] moved, the default user's
     /// grid, texture and **raster** would silently change.
-    // Calibration: names a font or a measured number (042 Karar 7).
+    // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_default_size_keeps_todays_texture() {
@@ -2608,9 +2603,9 @@ mod tests {
             MIN_EDGE,
             "the default point size must stay at the floor"
         );
-        // At the floor the capacity is the floor's grid of cells. The dated
-        // 1984 in `docs/OLCUMLER.md` → Atlas yuva ayak izi is the 13pt@2x
-        // cell before 052 phase-0 dropped `line_height = 1.0`'s extra pixel
+        // At the floor the capacity is the floor's grid of cells. The measured
+        // 1984 is the 13pt@2x
+        // cell before the slot/cell split dropped `line_height = 1.0`'s extra pixel
         // (16×33); the cell now comes from the font's natural height.
         let (w, h) = a.metrics.cell_px;
         let floor = usize::from(MIN_EDGE);
@@ -2622,11 +2617,11 @@ mod tests {
     }
 
     /// Invariant: at **every accepted size** the capacity is above the
-    /// procedural family (022 R3).
+    /// procedural family.
     ///
-    /// This guard replaces 021's saturation table: the table was an
+    /// This guard replaces an earlier saturation table: the table was an
     /// observation, this is a contract. Family + tofu = 422 slots
-    /// (`docs/OLCUMLER.md`); the number is derived here **not as a constant**
+    /// (measured); the number is derived here **not as a constant**
     /// but by counting from `raster::is_procedural`, so if a character is
     /// added to the family the guard tightens by itself.
     #[test]
@@ -2636,7 +2631,7 @@ mod tests {
         // be a second copy of the implementation's table and when a new
         // block is added to the family (Legacy Computing, U+1FB00–1FBFF — the
         // roadmap's next candidate) the guard would stay green: exactly the
-        // silent divergence 021 warned about.
+        // silent divergence the earlier table warned about.
         let family = procedural_family_size();
         // The point × scale product sits in the
         // [`MIN_POINT_SIZE`]..[`MAX_POINT_SIZE`] range, so what sets the
@@ -2645,8 +2640,8 @@ mod tests {
         // spacing but also from the **family**, and the user's family is not
         // rejected, only warned about
         // (`proportional_family_opens_with_a_warning`). A single-axis guard
-        // would miss, through the second axis, exactly the defect this set
-        // turned into a contract.
+        // would miss, through the second axis, exactly the defect this guard
+        // turns into a contract.
         for family_name in [None, Some(fixture::PROPORTIONAL_FAMILY)] {
             for point_size in [MIN_POINT_SIZE, 13.0, 29.0, 56.0, MAX_POINT_SIZE] {
                 for scale in [1.0, 2.0] {
@@ -2682,7 +2677,7 @@ mod tests {
         // second copy would silently drift.
         // The text set (`text_chars`) holds a separate slot in every face the
         // font has; the procedural family is normalized to `Regular`, so it
-        // is counted **once** (`Atlas::slot`). The set outgrew ASCII in 051:
+        // is counted **once** (`Atlas::slot`). The set outgrew ASCII with letter spacing:
         // at the 8192 ceiling the corner's capacity outgrew the family plus
         // ASCII.
         let pool: Vec<(char, Face)> = procedural_chars()
@@ -2844,8 +2839,8 @@ mod tests {
 
     #[test]
     fn line_height_one_is_the_natural_height() {
-        // `line_height = 1.0` is exactly the font's own line spacing (052
-        // R1.2): the cell is the two rounded parts and nothing more, and the
+        // `line_height = 1.0` is exactly the font's own line spacing:
+        // the cell is the two rounded parts and nothing more, and the
         // baseline is the rounded ascent. `extra` used to go through
         // `round_up`, whose floor of 1 added a pixel to every default cell.
         // Read from the font itself, so the guard holds for any family.
@@ -2881,7 +2876,7 @@ mod tests {
 
     #[test]
     fn letter_spacing_widens_the_cell_and_keeps_the_glyph_centred() {
-        // `[font] letter_spacing` (051): the horizontal twin of
+        // `[font] letter_spacing`: the horizontal twin of
         // `line_height`. Three claims:
         let mut tight = atlas(POINT_SIZE, 1.0);
         let spaced = Spacing {
@@ -2946,10 +2941,10 @@ mod tests {
     }
 
     /// At an opened letter spacing a two-column character stays split across
-    /// **both** columns (051 → Muhakeme): its ink fits one wide cell from
+    /// **both** columns: its ink fits one wide cell from
     /// `letter_spacing ≳ 1.6`, and a gate asking the spaced cell would draw
     /// it in the left column. The arm decision asks the natural cell.
-    // Calibration: names a font or a measured number (042 Karar 7).
+    // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn wide_glyph_stays_split_when_letter_spacing_opens() {
@@ -3115,12 +3110,11 @@ mod tests {
         // **The pool still works after the fallback search**, but each record
         // now pays a `CTFontCreateForString`; the pool's cost was measured
         // and narrowing it was not needed, its number and environment are
-        // held in escrow in `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama
-        // Notları.
+        // recorded with the fallback search's measurements.
         //
         // The pool is **filtered** and this is not a convenience but a
         // necessity: the gate's answer depends on which font the character
-        // falls to. The pool was CJK until 041; when shrinking made that fit
+        // falls to. The pool used to be CJK; when shrinking made that fit
         // a single cell, the pool moved to the sixteenth plane's private-use
         // area (rationale of [`UNKNOWN_CHAR`]: `.LastResort`, not shrunk). The
         // experiment's subject is the negative cache, so only the truly
@@ -3163,8 +3157,8 @@ mod tests {
         // a record arriving after the eviction enters the map. Under the old
         // behaviour ("cap full → never write") this would come back empty
         // and every unsupported character on screen would be asked of
-        // CoreText again every frame — since `slot()` entered the draw path
-        // in this set, the cost would be paid on the main thread.
+        // CoreText again every frame — since `slot()` entered the draw path,
+        // the cost would be paid on the main thread.
         let last = *pool.last().expect("the pool is not empty");
         assert_eq!(
             a.slots.get(&(
@@ -3191,7 +3185,7 @@ mod tests {
         );
     }
 
-    // Calibration: names a font or a measured number (042 Karar 7).
+    // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn non_bmp_char_path_works() {
@@ -3207,7 +3201,7 @@ mod tests {
         // of `len_utf16`, half of the surrogate pair would be requested and
         // the cascade would look up the wrong character. This test is now
         // that range's guard too. The candidate (STIX Two Math) is found,
-        // returns from the ink gate (1.07×) and since 041 is drawn shrunk.
+        // returns from the ink gate (1.07×) and is drawn shrunk.
         let mut a = atlas(POINT_SIZE, 1.0);
         assert_ne!(
             a.slot(
@@ -3500,7 +3494,7 @@ mod tests {
         // Only the faces the family really has: a missing face collapses to
         // the regular one **by design** (`Faces::effective`) and shares its
         // slot. On macOS Menlo has all four; the Linux image's DejaVu Sans
-        // Mono has no italic (042 phase-4).
+        // Mono has no italic.
         let faces: Vec<Face> = [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic]
             .into_iter()
             .filter(|&face| a.faces.effective(face) == face)
@@ -3527,7 +3521,7 @@ mod tests {
         assert_eq!(slots.len(), faces.len());
     }
 
-    /// The remote session's mark (`bt_core::dock::REMOTE_MARK`, 036 Karar 7).
+    /// The remote session's mark (`bt_core::dock::REMOTE_MARK`).
     ///
     /// **A second copy, deliberately**: this crate does not see `bt-core`
     /// (layer direction), so the character is written by hand here. The
@@ -3536,7 +3530,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     const REMOTE_MARK: char = '⇄';
 
-    // Calibration: names a font or a measured number (042 Karar 7).
+    // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_remote_mark_is_a_glyph_in_the_small_class() {
@@ -3575,12 +3569,12 @@ mod tests {
         }
     }
 
-    // Calibration: names a font or a measured number (042 Karar 7).
+    // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_reconnect_placeholder_has_no_box_in_the_normal_class() {
-        // 037 Karar 8: the reconnect offer's placeholder is **in the input
-        // line**, i.e. in the large class — 036's test only asked the small
+        // The reconnect offer's placeholder is **in the input
+        // line**, i.e. in the large class — the remote-mark test only asked the small
         // class (the context line) and the face ladder is different there.
         // The three non-ASCII characters too: the mark, the separator and ⏎.
         // If a box appears, the string must change in `bt-core`
@@ -3601,11 +3595,11 @@ mod tests {
         }
     }
 
-    // Calibration: names a font or a measured number (042 Karar 7).
+    // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_upload_row_has_no_box_in_the_small_class() {
-        // 037 Karar 7: the upload's status line is in the context line, i.e.
+        // The upload's status line is in the context line, i.e.
         // in the small class. The characters are a hand copy of `bt-core`'s
         // `UPLOAD_GLYPHS` (this crate cannot see it;
         // `the_upload_row_is_the_one_the_atlas_checks` links them). If a box
@@ -3712,7 +3706,7 @@ mod tests {
 
     #[test]
     fn bold_glyph_fits_regular_face_slot() {
-        // The metrics come only from the regular face (R1.3); the bold glyph
+        // The metrics come only from the regular face; the bold glyph
         // is rasterized into the same slot. Clipping is an accepted cost,
         // but the slot **not overflowing** is the contract: `raster::draw`
         // asserts the buffer's length.
@@ -3785,7 +3779,7 @@ mod tests {
 
     #[test]
     fn the_chevron_points_right_and_sits_on_the_x_height() {
-        // **The mark is the terminal's own, not the font's** (012 phase-9): a
+        // **The mark is the terminal's own, not the font's**: a
         // procedural chevron instead of the `>` character. Three claims, and
         // all three can break silently.
         let mut a = atlas(POINT_SIZE, 1.0);
@@ -3872,7 +3866,7 @@ mod tests {
         let tops: Vec<usize> = (0..w)
             .filter_map(|x| (0..h).find(|&y| bytes[y * w + x] > 0))
             .collect();
-        // If a **whole** number of waves fits in the cell (R2.4), the sine is
+        // If a **whole** number of waves fits in the cell, the sine is
         // mirror-symmetric about the middle axis: `center(x) + center(w-1-x)`
         // is constant. If it does not fit, the phase breaks at the cell
         // boundary and a multi-cell underline looks interrupted — the sprite
@@ -3926,7 +3920,7 @@ mod tests {
             );
         }
     }
-    // Calibration: names a font or a measured number (042 Karar 7).
+    // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn missing_face_falls_back_to_regular() {
@@ -4004,7 +3998,7 @@ mod tests {
     fn the_full_block_fills_the_cell() {
         // **The exact opposite of the reported defect**, equality and not `> 0`:
         // Menlo's `█` paints only rows 3-16 of the 13pt cell, which left a ~5 pixel
-        // strip between two stacked blocks (019 phase-2, reported by the user with
+        // strip between two stacked blocks (reported by the user with
         // a screenshot). A single missing byte is a faint copy of that strip, so
         // the criterion cannot be "is there any ink at all".
         for (point_size, scale) in PROCEDURAL_SIZES {
@@ -4028,8 +4022,8 @@ mod tests {
         // The union of the disjoint parts must give **full** coverage, and the
         // criterion is the saturating sum: at h = 33 of 13pt@2x the half falls on
         // 16.5, and the two neighbouring parts leave 128 each on that row. `max`
-        // would have left a 50% strip in the **middle** of the cell — the defect
-        // this set came to close, moved inside the cell, and a guard testing `> 0`
+        // would have left a 50% strip in the **middle** of the cell — the stacked-block
+        // defect, moved inside the cell, and a guard testing `> 0`
         // would not have seen it.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
@@ -4351,7 +4345,7 @@ mod tests {
 
     #[test]
     fn the_small_class_draws_procedurally_at_its_own_cell() {
-        // 046 Karar 3: the gate is **open** in the small class, at the small
+        // The gate is **open** in the small class, at the small
         // face's own cell. `█` fills exactly that box — the context line's
         // column step wide, the small cell high, its baseline on the large
         // cell's — and nothing outside it, otherwise neighbouring blocks would
@@ -4436,11 +4430,11 @@ mod tests {
         }
     }
 
-    // Calibration: names a font (042 Karar 7).
+    // Calibration: names a font.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_stats_glyphs_have_no_box_in_the_small_class() {
-        // 046: the load indicator sits in the context line, i.e. the small
+        // The load indicator sits in the context line, i.e. the small
         // class. A hand copy of `bt-core`'s `STATS_GLYPHS` minus the
         // procedural blocks (this crate cannot see it;
         // `the_stats_glyphs_are_the_ones_the_atlas_checks` links them) — the twin of
@@ -5056,9 +5050,9 @@ mod tests {
 
     #[test]
     fn dashed_densities_collapse_only_with_the_period() {
-        // `dividing_period` is kept (`discussion.md` → Karar 4): the period
+        // `dividing_period` is kept: the period
         // must divide the cell evenly, otherwise the pattern breaks phase at the
-        // cell boundary and tiling is the reason this set exists. The cost is a
+        // cell boundary and tiling is the reason the procedural family exists. The cost is a
         // visible loss of information — on this machine at `w = 8` `┄` and `╌`
         // collapse into **the same sprite** — and the guard does not write it
         // into a list, it **derives** it: two densities are equal only if their
@@ -5241,7 +5235,7 @@ mod tests {
     #[test]
     fn the_diagonals_stay_out_of_scope() {
         // The diagonals are **a hole deliberately left** inside the scope
-        // (Karar 3B) and the hole has a second job: the fixture (`╱`) of
+        // and the hole has a second job: the fixture (`╱`) of
         // `face_fallback_is_cached_under_the_requested_face` lives there — on
         // this machine the only block in U+2500–U+257F that is in Menlo Regular
         // but not in Bold, and the rest is now procedural.
@@ -5291,7 +5285,7 @@ mod tests {
     /// Atomicity is no convenience: had the two halves been split across
     /// rounds, the capacity limit could fall between them, the left slot would
     /// be granted and the right fall to tofu, and half a glyph + half a box
-    /// would appear on screen. `CLAUDE.md`'s rule forbids this by name: "a box
+    /// would appear on screen. The rule forbids this by name: "a box
     /// is a visible omission, a clipped glyph a silent corruption".
     #[test]
     fn a_wide_char_takes_two_slots_in_one_answer() {
@@ -5358,10 +5352,10 @@ mod tests {
     /// bit** the same as with the `Half::Whole` request.
     ///
     /// This is the contract of the 65 measured characters ("declared wide, fits
-    /// a single cell"): this set does not move the drawings that have worked
-    /// since 021. Had the order been reversed, `centre_shift` would centre them
+    /// a single cell"): the two-cell gate does not move the drawings that
+    /// already worked. Had the order been reversed, `centre_shift` would centre them
     /// against the two-cell box and they would all move from their places.
-    // Calibration: names a font or a measured number (042 Karar 7).
+    // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_wide_char_that_fits_one_cell_keeps_the_single_slot_raster() {
@@ -5490,7 +5484,7 @@ mod tests {
     // `.LastResort`, which the shrink arm keeps out by name. A backend
     // without a last-resort font cannot produce it — a glyph that fits two
     // cells fits one at half the size, under `SHRINK_LIMIT` — so the premise
-    // exists only on macOS (042 phase-4).
+    // exists only on macOS.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_single_cell_rejection_does_not_answer_the_wide_request() {
@@ -5591,8 +5585,8 @@ mod tests {
     /// colour plane with two halves.
     ///
     /// The criterion is the two columns the grid reserves: the sequence
-    /// glyph's geometry is the same as the single-code-point emoji's (035
-    /// `context.md` → Ölçülen: şekillendirme), so it must pass 023's two-cell
+    /// glyph's geometry is the same as the single-code-point emoji's
+    /// (measured), so it must pass the two-cell
     /// gate. The right half must not be empty — an empty right half would leave
     /// the "took two slots" test green and draw half an emoji on screen.
     #[test]
@@ -5698,7 +5692,7 @@ mod tests {
     }
 
     /// A string that does not shape into a single glyph gets the **base
-    /// character's** answer — not a box, not half a glyph (R1.1).
+    /// character's** answer — not a box, not half a glyph.
     ///
     /// `👍👍` shapes into two separate glyphs; the grid would never cluster it
     /// but the boundary is the cleanest way to test this arm. The answer is
@@ -5770,7 +5764,7 @@ mod tests {
         );
     }
 
-    /// Below `1` (052 R1.1): the grid cell's baseline is strictly inside it,
+    /// Below `1`: the grid cell's baseline is strictly inside it,
     /// the cell is no larger than the slot and sits inside it at the offset
     /// — at the smallest point size too (`0.5 × 4pt@1x` is the corner where
     /// the proportional cut would empty a part).
@@ -5814,7 +5808,7 @@ mod tests {
         }
     }
 
-    /// At or above `1` the slot **is** the cell (052 R5): the offset is zero
+    /// At or above `1` the slot **is** the cell: the offset is zero
     /// and the two metrics are one value, so nothing drawn at `>= 1` moves.
     #[test]
     fn slot_equals_cell_at_or_above_one() {
@@ -5831,7 +5825,7 @@ mod tests {
     }
 
     /// The tiled family is drawn at the **grid** cell and lands inside the
-    /// slot at the offset (052 R2): every inked pixel is the cell's own
+    /// slot at the offset: every inked pixel is the cell's own
     /// drawing and the pad around it is empty, so `─` still meets its
     /// neighbour when the slot is larger than the cell.
     #[test]
@@ -5880,8 +5874,7 @@ mod tests {
         }
     }
 
-    /// Rule sprites tile the **cell**, not the slot (052, phase-2's seam
-    /// check): below `letter_spacing = 1` a slot-wide rule would overlap its
+    /// Rule sprites tile the **cell**, not the slot: below `letter_spacing = 1` a slot-wide rule would overlap its
     /// neighbour quad by the pad and the dotted, dashed and curly patterns
     /// would meet out of phase. Every rule is drawn at the cell's width on
     /// the slot's height and baseline and placed at the cell's column, so
@@ -5933,7 +5926,7 @@ mod tests {
         }
     }
 
-    /// A wide glyph's two halves are cut at the split line (052 R2.1): their
+    /// A wide glyph's two halves are cut at the split line: their
     /// inks are disjoint and together they are the one-piece raster, pixel
     /// for pixel; the glyph is centred on the boundary of its two cells (at
     /// the cell's whole-pixel place in the slot) when that keeps it inside
@@ -6049,7 +6042,7 @@ mod tests {
         }
     }
 
-    /// Rules belong to the glyph's baseline (052): below `1` the underline
+    /// Rules belong to the glyph's baseline: below `1` the underline
     /// is where it is at `1`, in the slot, whatever the cell's height.
     #[test]
     fn underline_follows_the_baseline() {

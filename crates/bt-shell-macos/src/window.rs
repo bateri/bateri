@@ -9,15 +9,15 @@
 //! here too.
 //!
 //! **The focused pane** is the pane of the window's first responder
-//! ([`TerminalWindow::focused_pane`]; 039 Karar 11): the title, `⇄`, upload
+//! ([`TerminalWindow::focused_pane`]): the title, `⇄`, upload
 //! percentage, tab dot and the inheritance of a new tab/split come from it.
-//! ⌘W closes it, and in the last pane the tab (Karar 8). The other panes are
-//! under the dim veil ([`TerminalWindow::refresh_dim`], Karar 7). Split,
+//! ⌘W closes it, and in the last pane the tab. The other panes are
+//! under the dim veil ([`TerminalWindow::refresh_dim`]). Split,
 //! navigation, resizing, equalizing and pane closing drop the zoom (⇧⌘↩)
-//! (Karar 8; resizing and equalizing because the user asked for a layout
+//! (resizing and equalizing because the user asked for a layout
 //! change — silently changing a hidden layout would be an invisible effect).
 //!
-//! This is the pane's owner (039 Karar 3): the pane's events come through
+//! This is the pane's owner: the pane's events come through
 //! [`WindowHost`] (`PaneHost`) and reach the window or the application, its
 //! inputs from the `PaneLaunch` that `AppDelegate::open_window` builds. The
 //! application-wide parts (settings, watching, subtitle slots, measurement
@@ -27,7 +27,7 @@
 //! **all** panes too. There is no drawing call here either; this file's job
 //! is wiring.
 //!
-//! Renderer per pane (`pane`'s header; 039 Karar 5).
+//! Renderer per pane (`pane`'s header).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -88,7 +88,7 @@ pub(crate) fn is_dark_background(theme: &Theme) -> bool {
     against_white > against_black
 }
 
-/// The owner handle the window gives the pane ([`PaneHost`], 039 Karar 3).
+/// The owner handle the window gives the pane ([`PaneHost`]).
 ///
 /// **It finds the window by id**, does not hold it by reference: the window
 /// holds the pane strongly (`contentView` and ivar), a back reference would
@@ -127,7 +127,7 @@ impl PaneHost for WindowHost {
     }
 
     fn shell_exited(&self, pane: u64) {
-        // Only that pane (039 Karar 8); the last pane closes the tab.
+        // Only that pane; the last pane closes the tab.
         if let Some(window) = self.window() {
             window.close_pane(pane);
         }
@@ -198,18 +198,17 @@ enum CloseTarget {
     Pane(u64),
 }
 
-/// Title of the Shell ▸ Close Tab item (039 Karar 8): with several panes ⌘W
+/// Title of the Shell ▸ Close Tab item: with several panes ⌘W
 /// closes the focused pane and the item is "Close", with one pane it closes
 /// the tab and is "Close Tab".
 pub(crate) fn close_title(panes: usize) -> &'static str {
     if panes > 1 { "Close" } else { "Close Tab" }
 }
 
-/// What is being closed — chooses the question's title and confirm button
-/// (`.tasks/028-kapatma-onayi/discussion.md` → Karar 4).
+/// What is being closed — chooses the question's title and confirm button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseScope {
-    /// A pane whose tab has other panes (⌘W; 039 Karar 8).
+    /// A pane whose tab has other panes (⌘W).
     Pane,
     /// A tab whose group has other tabs (⌘W).
     Tab,
@@ -238,7 +237,7 @@ pub(crate) fn close_scope(requested: usize, group: usize) -> CloseScope {
 }
 
 /// Whether to ask on close — the **single** decision of the three closing
-/// paths (R2.1).
+/// paths.
 ///
 /// The timed run is the **first** question and its answer is no under every
 /// setting: a timed run reads no settings, so `confirm` there is the default
@@ -261,7 +260,7 @@ pub(crate) fn should_ask(
 }
 
 /// The foreground of every closing pane if it will ask, `None` if it will
-/// not — [`should_ask`] over panes (039 Karar 11: the question gathers the
+/// not — [`should_ask`] over panes (the question gathers the
 /// running job from the **panes**, not the tabs).
 ///
 /// Under `running` the table is read once for the decision and the text uses
@@ -291,7 +290,7 @@ pub(crate) fn foregrounds_to_ask(
     ask.then(|| seen.unwrap_or_else(read))
 }
 
-/// The unit the question counts: tab or pane (039 Karar 11).
+/// The unit the question counts: tab or pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Unit {
     Tab,
@@ -322,7 +321,7 @@ pub(crate) struct Prompt {
     pub(crate) confirm: &'static str,
 }
 
-/// The question's text from the closing panes' foregrounds (Karar 4). Pure;
+/// The question's text from the closing panes' foregrounds. Pure;
 /// the single text source of the three paths that build the question
 /// ([`alert`]).
 ///
@@ -423,7 +422,7 @@ fn listed(names: &[String]) -> String {
 ///
 /// Esc is bound **by hand**: the documentation says it binds Esc to a button
 /// titled "Cancel" itself, but in a real window Esc did not close the sheet
-/// (measured, phase-2 Uygulama Notları); Return worked on the first button.
+/// (measured); Return worked on the first button.
 pub(crate) fn alert(mtm: MainThreadMarker, prompt: &Prompt) -> Retained<NSAlert> {
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(&prompt.title));
@@ -472,7 +471,7 @@ fn close_requested_tabs(app: &AppDelegate) {
 /// The window's state — what belongs to the **tab**: chrome, tab dot, the
 /// close question and focus. The session's core (session, link, renderer,
 /// surface, view, dock reserve, point size, identity, search, upload) is in
-/// the panes ([`TerminalPane`], 039 Karar 1–3), the panes and the split tree
+/// the panes ([`TerminalPane`]), the panes and the split tree
 /// in the container ([`SplitView`]).
 pub(crate) struct WindowIvars {
     /// Our own counter ([`AppDelegate`] hands it out): the key by which the
@@ -498,7 +497,7 @@ pub(crate) struct WindowIvars {
     /// The last colour set for the tab's dot, sRGB (the gate of
     /// [`TerminalWindow::refresh_tab_mark`]); `None`: no dot.
     tab_mark: Cell<Option<u32>>,
-    /// The open close question in this window (028 → R2.8): keeps the `NSAlert`
+    /// The open close question in this window: keeps the `NSAlert`
     /// alive for the sheet's duration and is the "no second question while the
     /// sheet is open" gate ([`TerminalWindow::asking`]). The completion block
     /// empties it on every answer.
@@ -512,20 +511,20 @@ pub(crate) struct WindowIvars {
 /// The new shell's birth information — the two decisions the birth package
 /// (`PaneLaunch::launch`) takes from the caller (`AppDelegate::open_window`).
 pub(crate) struct Launch {
-    /// Start directory (026 → Karar 4: the active tab's directory, else home).
+    /// Start directory (the active tab's directory, else home).
     pub(crate) working_directory: Option<PathBuf>,
-    /// The shell's first input (037 Karar 6) and whether it runs: ⌘T in a
-    /// remote tab runs it, a restored remote pane leaves it ready (053
-    /// Karar 3); `None` → an ordinary local shell.
+    /// The shell's first input and whether it runs: ⌘T in a
+    /// remote tab runs it, a restored remote pane leaves it ready;
+    /// `None` → an ordinary local shell.
     pub(crate) initial_input: Option<InitialInput>,
-    /// The pane's persistent identity; `None` → a new one (038). A restored
-    /// pane keeps its saved one (053 Karar 4), so `bateri://tab/<id>` and
+    /// The pane's persistent identity; `None` → a new one. A restored
+    /// pane keeps its saved one, so `bateri://tab/<id>` and
     /// `TERM_SESSION_ID` survive the quit.
     pub(crate) tab_id: Option<TabId>,
     /// A previous session's scrollback, replayed before the shell starts
-    /// (053; `SessionOptions::replay`); `None` → an empty grid.
+    /// (`SessionOptions::replay`); `None` → an empty grid.
     pub(crate) replay: Option<Vec<u8>>,
-    /// The update's handover (055 R4.3): a running program to carry on
+    /// The update's handover: a running program to carry on
     /// instead of a new shell; `None` → a shell is born.
     pub(crate) adopt: Option<Adopted>,
 }
@@ -543,14 +542,14 @@ pub(crate) struct Adopted {
     pub(crate) prefix: Vec<u8>,
 }
 
-/// The note under a pane whose program did not cross the update (055
-/// Karar 8): one dim line at the bottom of its replayed history — no pane
-/// comes back as a half screen without saying so.
+/// The note under a pane whose program did not cross the update: one dim
+/// line at the bottom of its replayed history — no pane comes back as a
+/// half screen without saying so.
 pub(crate) const FALLBACK_NOTE: &str =
     "bateri: the program running here did not survive the update; this is a new shell";
 
 /// `history` (if any) with [`FALLBACK_NOTE`] under it, on a line of its own:
-/// the replay of a pane that fell back to 053's path.
+/// the replay of a pane that fell back to session restore's path.
 pub(crate) fn fallen_back(history: Option<Vec<u8>>) -> Vec<u8> {
     let mut replay = history.unwrap_or_default();
     if !replay.is_empty() && !replay.ends_with(b"\n") {
@@ -595,8 +594,7 @@ define_class!(
         //
         // A single hook suffices: both miniaturizing and occlusion drop
         // `occlusionState`, so `windowDidDeminiaturize:` would be a subset of
-        // it. **The non-selected tab goes through this path too** (026 R3.7,
-        // measured): when a tab goes to the back `visible=false` arrives, when
+        // it. **The non-selected tab goes through this path too** (measured): when a tab goes to the back `visible=false` arrives, when
         // it comes to the front `true`, so a background tab draws zero frames
         // and there is no tab-specific hook. Stacking special cases on top of
         // the general signal would mean the list never closes (full screen,
@@ -617,7 +615,7 @@ define_class!(
 
         // **Focus path.** In an unfocused window the caret's inside empties and
         // the blink stops; both are `bt-gpu`'s decision, `bt-core` never sees
-        // focus (015 R7).
+        // focus.
         //
         // The "a single hook suffices" reasoning above **does not carry over
         // here**: there occlusion and miniaturizing are two states of the same
@@ -625,7 +623,7 @@ define_class!(
         // and AppKit gives them with separate notifications — there is no
         // general signal to merge them.
         //
-        // The window's key bit goes to **all** panes (039 Karar 7); an
+        // The window's key bit goes to **all** panes; an
         // unfocused pane's hollow caret comes from the second bit, from its
         // own `BateriView`'s first-responder hooks.
         #[unsafe(method(windowDidBecomeKey:))]
@@ -634,14 +632,14 @@ define_class!(
                 pane.apply_focus(true);
                 pane.rehover_upload();
                 // Coming back to the window is an interaction: the remote load
-                // indicator samples again at once (046 Karar 6).
+                // indicator samples again at once.
                 pane.note_interaction();
             }
         }
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _n: &NSNotification) {
-            // The ⌘-hovered link clears too (044 R7): ⌘'s release may go to
+            // The ⌘-hovered link clears too: ⌘'s release may go to
             // another application. The key window also resigns key when the
             // application deactivates, so this one hook covers both.
             for pane in self.panes() {
@@ -652,13 +650,13 @@ define_class!(
         }
 
         /// The red button and the tab bar's menu (Close Tab, Close Other
-        /// Tabs): whether to ask before closing (028 → Karar 3). `false` stops
+        /// Tabs): whether to ask before closing. `false` stops
         /// the closing; if a question was asked the closing is in its answer
         /// ([`TerminalWindow::ask`]). The main menu's ⌘W does not go through
         /// here (`closeTab:`).
         ///
         /// The shell's exit does **not** go through here: `close` does not ask
-        /// the delegate (R2.6).
+        /// the delegate.
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
             self.should_close_now()
@@ -667,7 +665,7 @@ define_class!(
         /// The window (or tab) is closing: the red button, ⌘W, ⇧⌘W and the
         /// shell's exit (`ShellWake::child_exit` → `close`) arrive here.
         ///
-        /// Closing is **not waited on** (026 → Karar 5): it is started and the
+        /// Closing is **not waited on**: it is started and the
         /// handle drops, the `"PTY teardown"` thread finishes its work in the
         /// background — closing a single tab must not stall the main thread for
         /// up to half a second. The order is in [`TerminalWindow::begin_close`].
@@ -713,7 +711,7 @@ define_class!(
 
     // **Actions that belong to the tab** are here (closing, tab selection,
     // split); the pane-level ones (point size, find, clear, scroll, upload
-    // cancel) are in the pane (039 Karar 2), those that spread application-wide
+    // cancel) are in the pane, those that spread application-wide
     // (`settingsDidChange:`, theme, `openSettings:`) in `AppDelegate`.
     // The responder chain of a targetless action is view → pane → container →
     // window → **window delegate** → `NSApp` → app delegate; so if this object
@@ -725,8 +723,7 @@ define_class!(
         /// keyboard moved to another pane the focus is that one's.
         /// `BateriView`'s own hook (`PaneHost::focused`) did not see a click on
         /// the search field — the keyboard goes to the other pane's field, and
-        /// the veil and title would stay on the old pane (`/code-review`, set
-        /// gate). This is the single source: **every** path of a focus change
+        /// the veil and title would stay on the old pane. This is the single source: **every** path of a focus change
         /// (click, field, menu) goes through here.
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         fn observe_value(
@@ -743,8 +740,8 @@ define_class!(
 
         /// ⌘W's title and the split's enabled state; **an unknown item is
         /// `true`**. With several panes ⌘W is "Close" (the focused pane), with
-        /// one pane "Close Tab" (039 Karar 8). A split is grey if one of the
-        /// halves would drop below the smallest pane limit (Karar 14).
+        /// one pane "Close Tab". A split is grey if one of the
+        /// halves would drop below the smallest pane limit.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             let action = item.action();
@@ -824,7 +821,7 @@ define_class!(
         }
 
         /// Shell ▸ Split Right (⌘D): splits the focused pane in two, the new
-        /// one on the right (039 Karar 8, 9).
+        /// one on the right.
         #[unsafe(method(splitRight:))]
         fn split_right(&self, _sender: Option<&AnyObject>) {
             self.split(Axis::Horizontal);
@@ -838,10 +835,10 @@ define_class!(
         }
 
         /// Shell ▸ Close Tab (⌘W): with several panes the **focused pane**,
-        /// with one pane **only this tab** (039 Karar 8); asking if needed.
+        /// with one pane **only this tab**; asking if needed.
         ///
         /// Not `performClose:`, because AppKit's interpretation of it is
-        /// stateful (measured, phase-2 Uygulama Notları): when the red
+        /// stateful (measured): when the red
         /// button's group close was stopped by a `windowShouldClose:` `false`,
         /// the next `performClose:` also sent `windowShouldClose:` to every
         /// tab of the group and ⌘W ended up asking about the window. Our own
@@ -855,7 +852,7 @@ define_class!(
         /// Shell ▸ Close Window (⇧⌘W): the window **with all its tabs and
         /// panes**.
         ///
-        /// A **single** question for the whole group (R2.3) and on confirm
+        /// A **single** question for the whole group and on confirm
         /// every tab closes with `close` — not `performClose:`, because that
         /// goes through each tab's `windowShouldClose:` and would produce a
         /// second question per tab. The closing itself is still every tab's
@@ -884,7 +881,7 @@ define_class!(
     }
 );
 
-/// Saved scrollback, `(tab id, VT bytes)` per pane (053; `restore::save`'s input).
+/// Saved scrollback, `(tab id, VT bytes)` per pane (`restore::save`'s input).
 pub(crate) type Histories = Vec<(TabId, Vec<u8>)>;
 
 /// A new window's first size, before the caller places it.
@@ -949,7 +946,7 @@ impl TerminalWindow {
         };
         // SAFETY: only changes the ownership semantics; we are the Retained's owner.
         unsafe { window.setReleasedWhenClosed(false) };
-        // Session restore is bateri's own file (053 Karar 1): were AppKit to
+        // Session restore is bateri's own file: were AppKit to
         // restore its own copy of the window one day, every window would come
         // back twice.
         window.setRestorable(false);
@@ -958,7 +955,7 @@ impl TerminalWindow {
         // single pane the whole boundary).
         window.setContentView(Some(&container));
         window.setTitle(ns_string!("bateri"));
-        // **Native tabs** (026 → Karar 1): AppKit gathers windows carrying the
+        // **Native tabs**: AppKit gathers windows carrying the
         // same identifier into a single window as tabs. `tabbingMode` is
         // deliberately left at the default — respecting the system's "Prefer
         // tabs" setting. This is the only place the identifier is written, so
@@ -972,8 +969,7 @@ impl TerminalWindow {
         // (`BateriView::hand_cursor_rects`), and the view is already first
         // responder — the window-level `mouseMoved:` reaches it. Turning them
         // on and off by mode would want broadcasting the mode to
-        // `bt-shell-macos`
-        // (`.tasks/020-fare-raporlama/discussion.md` → Karar 4).
+        // `bt-shell-macos`.
         window.setAcceptsMouseMovedEvents(true);
         // The keyboard's path to the PTY starts here. The view (even as the
         // pane's child) is NOT an automatic first responder; without this line
@@ -1009,14 +1005,14 @@ impl TerminalWindow {
         this
     }
 
-    /// Session restore's **single** setup path for a tab (053 R3.3): every
+    /// Session restore's **single** setup path for a tab: every
     /// pane is born, laid out in the saved `shape` with its ratios at once
     /// ([`SplitView::adopt`]), the window is placed by the caller (`place`:
     /// the list, the theme, the frame or the tab group — the application's
     /// business) and only **then** do the shells start, so each sees its
     /// final size in its first `TIOCSWINSZ` and the replayed history wraps
-    /// once. The live-handover set hands file descriptors here instead of
-    /// shells (`context.md` → Sonraki set ile ilişki).
+    /// once. The live handover hands file descriptors here instead of
+    /// shells.
     ///
     /// `launches` is indexed by `shape`'s leaves. A tree that does not fit
     /// the panes' smallest size on this screen is equalized; the zoom comes
@@ -1107,7 +1103,7 @@ impl TerminalWindow {
         Ok(this)
     }
 
-    /// What session restore saves of this tab (053 Karar 4) and, with
+    /// What session restore saves of this tab and, with
     /// `with_history`, its panes' scrollback (`(tab id, bytes)`). `None` if a
     /// pane has nothing live to save ([`TerminalPane::saved`]): a tab whose
     /// tree would not match its panes is not saved at all.
@@ -1171,12 +1167,12 @@ impl TerminalWindow {
 
     /// The tab's panes, in tree order (left to right, top to bottom). Never
     /// empty: when the last pane closes the tab closes. A single pane in a
-    /// timed run (039 Karar 12).
+    /// timed run.
     pub(crate) fn panes(&self) -> Vec<Retained<TerminalPane>> {
         self.ivars().container.panes()
     }
 
-    /// The focused pane (039 Karar 11): the pane of the window's first
+    /// The focused pane: the pane of the window's first
     /// responder — `BateriView` or the search field's field editor, both
     /// descendants of the pane. If the first responder is not inside a pane
     /// (the window itself) the last focused pane ([`WindowIvars::focused`]),
@@ -1265,7 +1261,7 @@ impl TerminalWindow {
         self.refresh_dim();
     }
 
-    /// The dim veil of unfocused panes (039 Karar 7, R4.4): with several panes
+    /// The dim veil of unfocused panes: with several panes
     /// in the window, those other than the focused one. No veil with a single
     /// pane. AppKit's work, it asks for no frame.
     pub(crate) fn refresh_dim(&self) {
@@ -1294,7 +1290,7 @@ impl TerminalWindow {
         self.refresh_dim();
     }
 
-    /// ⌘] / ⌘[: the next or previous pane in tree order (039 R4.1).
+    /// ⌘] / ⌘[: the next or previous pane in tree order.
     pub(crate) fn select_split(&self, forward: bool) {
         let from = self.focused_pane();
         if let Some(next) = self
@@ -1307,7 +1303,7 @@ impl TerminalWindow {
         }
     }
 
-    /// ⌥⌘ + arrow: the pane in that direction (039 R4.1); a no-op at the edge.
+    /// ⌥⌘ + arrow: the pane in that direction; a no-op at the edge.
     /// The neighbour is from the layout without zoom — the panes' real places
     /// even while zoomed.
     pub(crate) fn select_split_toward(&self, direction: Direction) {
@@ -1322,8 +1318,8 @@ impl TerminalWindow {
         }
     }
 
-    /// ⌃⌘ + arrow: moves the focused pane's divider on that axis by one cell
-    /// (039 R4.2). The step is the focused pane's **one cell** — every press
+    /// ⌃⌘ + arrow: moves the focused pane's divider on that axis by one cell.
+    /// The step is the focused pane's **one cell** — every press
     /// changes the grid by one column or row; a design decision, the number
     /// from the font. Stops at the smallest pane limit.
     pub(crate) fn resize_split(&self, direction: Direction) {
@@ -1339,13 +1335,13 @@ impl TerminalWindow {
         self.ivars().container.resize(pane.id(), direction, step);
     }
 
-    /// ⌃⌘=: the panes on the same axis are equal (039 R4.3).
+    /// ⌃⌘=: the panes on the same axis are equal.
     pub(crate) fn equalize_splits(&self) {
         self.set_zoom(None);
         self.ivars().container.equalize();
     }
 
-    /// ⇧⌘↩: zooms the focused pane or undoes the zoom (039 R4.3). A no-op
+    /// ⇧⌘↩: zooms the focused pane or undoes the zoom. A no-op
     /// with a single pane.
     pub(crate) fn toggle_split_zoom(&self) {
         if self.panes().len() < 2 {
@@ -1358,7 +1354,7 @@ impl TerminalWindow {
         self.set_zoom(zoomed);
     }
 
-    /// Whether the focused pane can be split on `axis` (039 Karar 14): both
+    /// Whether the focused pane can be split on `axis`: both
     /// halves' grids must pass the smallest pane limit
     /// ([`TerminalPane::grid_fits`]). Since the new pane inherits the focused
     /// one's point-size delta the measure is from the focused one's cell.
@@ -1372,10 +1368,10 @@ impl TerminalWindow {
 
     /// ⌘D / ⇧⌘D: a new split from the focused pane — the application builds
     /// the birth package (`AppDelegate::open_split`: directory, point-size
-    /// delta, theme and remote line from the focused one, 039 Karar 9). A
-    /// no-op if it would drop below the limit (Karar 14).
+    /// delta, theme and remote line from the focused one). A
+    /// no-op if it would drop below the limit.
     fn split(&self, axis: Axis) {
-        // The zoom is dropped first (Karar 8): the split's limit is asked from
+        // The zoom is dropped first: the split's limit is asked from
         // the layout without zoom (`can_split`) and the new pane must be visible.
         self.set_zoom(None);
         if !self.can_split(axis) {
@@ -1458,7 +1454,7 @@ impl TerminalWindow {
         }
     }
 
-    /// `bateri://tab/<id>`'s only effect (038 Karar 4, 6; 039 Karar 10):
+    /// `bateri://tab/<id>`'s only effect:
     /// reopens it if miniaturized, makes it the selected tab and key, brings
     /// the application to the front and gives the keyboard to the id's pane.
     /// Sends no byte to the shell.
@@ -1519,8 +1515,8 @@ impl TerminalWindow {
     /// Other Tabs"): whether to close now.
     ///
     /// **The decision is not made in this call, but one turn later and for
-    /// the whole gesture** ([`close_requested`]). Measured (phase-2 Uygulama
-    /// Notları): in a multi-tab window the red button sends a
+    /// the whole gesture** ([`close_requested`]). Measured: in a multi-tab
+    /// window the red button sends a
     /// `windowShouldClose:` to **every** tab of the group, "Close Other Tabs"
     /// to every other tab, both in the same event turn. A decision looking at
     /// a single tab would open a question tab by tab on the red button or ask
@@ -1548,7 +1544,7 @@ impl TerminalWindow {
         // scope. The job looks for the **flags**, not the requesting window:
         // if the first requester closed in the meantime (its shell exited in
         // the same turn) the other tabs' flags would stay set permanently and
-        // the red button would never set up a job again (`/code-review`).
+        // the red button would never set up a job again.
         let first = !group.iter().any(|tab| tab.ivars().close_requested.get());
         self.ivars().close_requested.set(true);
         if first {
@@ -1607,7 +1603,7 @@ impl TerminalWindow {
     }
 
     /// ⌘W in a multi-pane tab: only the focused pane, asking only about the
-    /// running job if there is one (039 Karar 8).
+    /// running job if there is one.
     fn close_pane_asking(&self, app: &AppDelegate) {
         let pane = self.focused_pane();
         let confirm = app.settings().confirm_close;
@@ -1643,7 +1639,7 @@ impl TerminalWindow {
     /// tabs to be closed is selected. **If the single target is a background
     /// tab** (a background tab's × in the tab bar) that tab is selected first
     /// and the question is on it: "Close this tab?" must ask about the tab the
-    /// eye is on, not another (`/code-review`).
+    /// eye is on, not another.
     fn confirm_close(
         &self,
         app: &AppDelegate,
@@ -1686,7 +1682,7 @@ impl TerminalWindow {
     /// Opens the question on this window as a sheet; on confirm closes the
     /// tabs in `targets` or the pane.
     ///
-    /// **The block captures only ids** (R2.8, the alternate-screen notifier's
+    /// **The block captures only ids** (the alternate-screen notifier's
     /// pattern): it looks the windows up in the list at answer time and skips
     /// those it cannot find. Only `NSAlertFirstButtonReturn` closes — if the
     /// shell exits while the sheet is open [`TerminalWindow::close`] drops the
@@ -1793,15 +1789,14 @@ impl TerminalWindow {
 
     /// Reads the title from the **focused** pane's session and writes it to
     /// the window — the pane's `PaneHost::title_changed` event ([`WindowHost`])
-    /// and the focus change ([`TerminalWindow::pane_focused`]; 039 Karar 11).
-    /// The frame path computes no title; writing is only on **change** (026
-    /// R2.4). If there is no session yet the title stays the constructor's
+    /// and the focus change ([`TerminalWindow::pane_focused`]).
+    /// The frame path computes no title; writing is only on **change**. If there is no session yet the title stays the constructor's
     /// `bateri`.
     ///
     /// The tab's dot is refreshed from here too ([`Self::refresh_tab_mark`]):
     /// the remote state's two edges (the return of `set_remote`, the
     /// `title_changed` that `D`/`A`'s deletion brings) are the same as the
-    /// title's (037 Karar 4). The upload queue's connection edge is the
+    /// title's. The upload queue's connection edge is the
     /// pane's, **before** the event (`TerminalPane::remote_or_title_changed`).
     pub(crate) fn refresh_title(&self) {
         self.apply_title();
@@ -1809,8 +1804,8 @@ impl TerminalWindow {
     }
 
     /// Writes the window's (and tab's) title from the session; while an upload
-    /// flows `↑ N% · ` in front (037 phase-7, `upload::titled_as`; `↓` while
-    /// only downloads flow, 045 Karar 6; the arrow and percentage from the
+    /// flows `↑ N% · ` in front (`upload::titled_as`; `↓` while
+    /// only downloads flow; the arrow and percentage from the
     /// pane's queue).
     fn apply_title(&self) {
         let pane = self.focused_pane();
@@ -1831,7 +1826,7 @@ impl TerminalWindow {
         self.focused_pane().session()?.remote_mark()
     }
 
-    /// The tab's dot (037 Karar 4): on a marked remote host a small filled
+    /// The tab's dot: on a marked remote host a small filled
     /// circle in the mark's colour next to the tab title
     /// (`NSWindowTab.accessoryView`); none on an unmarked remote or locally —
     /// an unmarked remote tab already carries `⇄` in its title and a dot on
@@ -1843,7 +1838,7 @@ impl TerminalWindow {
     /// settings ([`Self::set_host_marks`]) and the theme ([`Self::set_theme`]);
     /// a no-op on the same colour, so a new view does not go to AppKit on
     /// every title news.
-    /// The drawing is an `NSBox` (the precedent of the 033 panel): asking for
+    /// The drawing is an `NSBox` (the precedent of the search panel): asking for
     /// a colour through the layer would want `CGColor`, i.e. the
     /// `objc2-core-graphics` edge. The dot exists only while the tab bar is
     /// visible; in a single-tab window the indicator is the dock's top line.
@@ -1930,7 +1925,7 @@ impl TerminalWindow {
         self.refresh_tab_mark();
     }
 
-    /// Paints the window chrome with the theme (026 → Karar 1, Option C): the
+    /// Paints the window chrome with the theme: the
     /// title bar transparent and separatorless, the window's background the
     /// theme's `background`, its appearance (traffic lights, title text, tab
     /// bar) from the background's lightness ([`is_dark_background`]).
@@ -1940,7 +1935,7 @@ impl TerminalWindow {
     /// clear colour is from the same theme (`Theme::background_linear`). The
     /// colour is set here in **sRGB**, not linear — the linear value is
     /// `bt-gpu`'s, because the hardware encodes it to sRGB; giving `NSColor`
-    /// a linear value would lighten the background (`CLAUDE.md` → Renk uzayı).
+    /// a linear value would lighten the background.
     ///
     /// Setting an appearance on the window **detaches** it from the system's
     /// appearance: the view no longer sees the system's light/dark change and
@@ -1995,7 +1990,7 @@ impl TerminalWindow {
 mod tests {
     #[test]
     fn term_program_version_is_the_workspace_version() {
-        // Karar 3's guard: `bt-core`'s constant and the application's version
+        // The guard: `bt-core`'s constant and the application's version
         // come from the same field (`version.workspace = true`); if one
         // diverges it turns red here.
         assert_eq!(bt_core::TERM_PROGRAM_VERSION, env!("CARGO_PKG_VERSION"));
@@ -2074,7 +2069,7 @@ mod tests {
     fn a_timed_run_never_asks_and_never_reads_the_table() {
         // A timed run reads no settings and a headless question would hang
         // `make smoke`: the answer is no under every setting **and** the table
-        // is never read (R2.1).
+        // is never read.
         for confirm in ALL {
             for busy in [false, true] {
                 let reads = Cell::new(0);
@@ -2143,7 +2138,7 @@ mod tests {
 
     #[test]
     fn the_gesture_scope_comes_from_how_many_tabs_it_asked_for() {
-        // The measured gestures (phase-2 Uygulama Notları): ⌘W a single tab,
+        // The measured gestures: ⌘W a single tab,
         // the red button the whole group, "Close Other Tabs" the unselected ones.
         assert_eq!(close_scope(1, 1), CloseScope::Window, "single-tab window");
         assert_eq!(close_scope(1, 3), CloseScope::Tab, "⌘W");
@@ -2167,7 +2162,7 @@ mod tests {
             message(&["a", "b", "c"]),
             "“a”, “b” and “c” are still running. Closing ends them."
         );
-        // The table could not be read but a job was counted as running (R1.5): nameless.
+        // The table could not be read but a job was counted as running: nameless.
         assert_eq!(message(&[]), "A process is still running. Closing ends it.");
     }
 
@@ -2237,7 +2232,7 @@ mod tests {
     #[test]
     fn one_pane_per_tab_keeps_the_tab_wording() {
         // With single-pane tabs the unit is the tab and the text is the same as
-        // before splits (039 Karar 11); the pane once the pane count exceeds the tabs.
+        // before splits; the pane once the pane count exceeds the tabs.
         assert_eq!(unit_for(1, 1), Unit::Tab);
         assert_eq!(unit_for(3, 3), Unit::Tab);
         assert_eq!(unit_for(2, 1), Unit::Pane);
@@ -2293,7 +2288,7 @@ mod tests {
     }
 
     /// The fallback's note sits on a line of its own under the history,
-    /// dim, and resets what the history left on (055 Karar 8).
+    /// dim, and resets what the history left on.
     #[test]
     fn the_fallback_note_has_a_line_of_its_own() {
         use super::{FALLBACK_NOTE, fallen_back};

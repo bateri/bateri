@@ -1,28 +1,28 @@
-//! Remote shell integration's wrapping decision (048): whether the user's
+//! Remote shell integration's wrapping decision: whether the user's
 //! `ssh` gets bateri's bootstrap, and the argv round trip.
 //!
-//! **One owner.** The local zsh's `ssh` function (phase-2) asks
+//! **One owner.** The local zsh's `ssh` function asks
 //! `bateri ssh-argv` ([`ssh_argv_main`]); the answer is either the wrapped
 //! argv or nothing, and nothing means plain `ssh` — today's path. Every
-//! condition of R1 is in [`decide`]: the call is interactive (the same walk as
+//! wrapping condition is in [`decide`]: the call is interactive (the same walk as
 //! the remote probe's, `jobs::ssh_call`), stdin and stdout are terminals (the
 //! caller's bit — under `$(…)` our stdout is a pipe), the setting allows it
 //! for the host as typed ([`Settings::integration_for`]), `ssh -G` does not
 //! say the session runs something else ([`Session`]) and the server is not
-//! recorded as one without a shell ([`Fact::Plain`]; 049 Karar → "her zaman
-//! sar"). A server bateri knows nothing about **is** wrapped: the bootstrap's
+//! recorded as one without a shell ([`Fact::Plain`]; always wrap otherwise).
+//! A server bateri knows nothing about **is** wrapped: the bootstrap's
 //! nonce'd `up` proves the wrap ran ([`Fact::Posix`], the pane's), and a
 //! wrapped connection that ends without it falls back to a plain rerun
 //! ([`ssh_fell_back_main`]).
 //!
-//! **The wrapped form is positional** (discussion → Muhakeme): `-t` first,
+//! **The wrapped form is positional**: `-t` first,
 //! the user's arguments unchanged, the bootstrap command last — one argument
 //! that starts with a letter, so it is the remote command whether or not the
 //! user ended the options with `--` (a second `--` after a terminated walk
 //! would be sent to the remote shell). [`unwrap`] checks those positions, it
 //! does not search for the command.
 //!
-//! **The session is a master** (R7, phase-5): when the user shares no
+//! **The session is a master**: when the user shares no
 //! connections themselves (`ssh -G`, [`SshConfig::shares_connections`]) and
 //! bateri's instance directory is there, the wrapped call also carries
 //! `ControlMaster=auto` at [`session_socket`] with a short
@@ -56,24 +56,24 @@ pub const BOOT_NAME: &str = "bateri-boot";
 
 /// The remote command's head. `exec` replaces the login shell sshd started
 /// (`$SHELL -c '<command>'`, which may be fish or csh): one word, a single
-/// quote and no backslash, the quoting every shell reads the same way (037's
+/// quote and no backslash, the quoting every shell reads the same way (the
 /// upload rule).
 const COMMAND_HEAD: &str = "exec sh -c '";
 
 /// The remote command for a bootstrap script:
 /// `exec sh -c '<boot>' bateri-boot <P> <nonce> <version> <tab>` — `sh`'s `$1` is the local
-/// block of the `ssh` command (048 phase-3), the `P` of the remote blocks'
+/// block of the `ssh` command, the `P` of the remote blocks'
 /// `bt_remote=<P>.<S>.<n>`, or [`NO_PARENT`] without one; `$2` is the
-/// attempt's [`NONCE_LEN`]-digit nonce (049 R2.1), the bootstrap's first
+/// attempt's [`NONCE_LEN`]-digit nonce, the bootstrap's first
 /// output (`8133;i;up;{nonce}`) proves the command ran. The placeholder keeps
 /// the nonce at `$2`: without it a nonce of digits would read as a parent.
 /// `$3` and `$4` are the terminal's identity the bootstrap exports as
-/// `LC_TERMINAL_VERSION` and `LC_BATERI_TAB_URL` (049 R6; `LC_TERMINAL` is
+/// `LC_TERMINAL_VERSION` and `LC_BATERI_TAB_URL` (`LC_TERMINAL` is
 /// fixed): the version is [`bt_core::TERM_PROGRAM_VERSION`], the tab the
 /// pane's `bateri://tab/<id>` or [`NO_TAB`] without one. Both words sit
 /// outside the quotes and are read by any login shell, so only
 /// [`is_version`]'s alphabet and [`TabId::url`]'s form go there; visible in
-/// `ps`, which is harmless — the tab's address only focuses (038 Karar 5).
+/// `ps`, which is harmless — the tab's address only focuses.
 /// `boot` must not contain `'` ([`decide`] refuses one that does).
 pub fn remote_command(boot: &str, parent: Option<u32>, nonce: &str, tab: Option<&TabId>) -> String {
     let parent = parent.map_or_else(|| NO_PARENT.to_owned(), |parent| parent.to_string());
@@ -109,10 +109,10 @@ fn is_nonce(word: &str) -> bool {
     word.len() == NONCE_LEN && word.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// A fresh nonce for one wrapped attempt (049 R2.1): [`NONCE_LEN`] hex digits
+/// A fresh nonce for one wrapped attempt: [`NONCE_LEN`] hex digits
 /// from `/dev/urandom` (no crate; both platforms have it). `None` if it cannot
 /// be read — the caller then does not wrap: a wrap without a nonce could never
-/// prove it ran, and phase-2's fallback would take the server for one without
+/// prove it ran, and the fallback would take the server for one without
 /// a shell.
 pub fn new_nonce() -> Option<String> {
     use std::io::Read as _;
@@ -123,7 +123,7 @@ pub fn new_nonce() -> Option<String> {
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// The connection sharing a wrapped session gets (phase-5): the session is a
+/// The connection sharing a wrapped session gets: the session is a
 /// master at `socket` (`ControlMaster=auto` — a second `ssh` to the host from
 /// this bateri joins it), detached after [`SESSION_PERSIST`]. Ours come
 /// **before** the user's arguments: ssh keeps a key's first value. Only for a
@@ -183,8 +183,8 @@ pub fn wrap(
 /// command at all (the outer `None`). The accepted tails after the name:
 /// nothing, a parent's digits, a parent (digits or [`NO_PARENT`]) and a
 /// nonce, or those two and the identity's version and tab
-/// ([`remote_command`]) — the first two are 048's forms and the third is 049
-/// phase-1's, read for a session an older build wrapped; the first two carry
+/// ([`remote_command`]) — the first three are older builds' forms, read
+/// for a session an older build wrapped; the first two carry
 /// no nonce. The script must not contain `'`.
 fn boot_tail(last: &str) -> Option<Option<&str>> {
     // The script has no `'`, so the first one closes it.
@@ -230,7 +230,7 @@ pub fn unwrap(args: &[String]) -> &[String] {
     if wrapped { inner } else { args }
 }
 
-/// The nonce a wrapped argv carries (049 R2.3): `Some` only when [`unwrap`]
+/// The nonce a wrapped argv carries: `Some` only when [`unwrap`]
 /// takes `args` for ours and its bootstrap command has a nonce. The pane
 /// matches it against the one the bootstrap printed.
 pub fn nonce(args: &[String]) -> Option<&str> {
@@ -242,7 +242,7 @@ pub fn nonce(args: &[String]) -> Option<&str> {
 
 // ─── ssh -G ──────────────────────────────────────────────────────────────
 
-/// What `ssh -G` says about the session the target would open (R1.2).
+/// What `ssh -G` says about the session the target would open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
     /// `RemoteCommand` is set: our command would replace the user's.
@@ -288,8 +288,8 @@ impl Session {
 }
 
 /// The state file's key for a server: `user@hostname:port` as `ssh -G`
-/// resolves them — the same triple as the saved password's account (047
-/// Karar 6, [`Account`]), so `ssh web` and `ssh deploy@10.0.0.5` on one
+/// resolves them — the same triple as the saved password's account
+/// ([`Account`]), so `ssh web` and `ssh deploy@10.0.0.5` on one
 /// machine are learned once. `None` without a user, a readable port or a host
 /// name, and for a value that would break a row (a tab or a line break).
 pub fn host_key(out: &str) -> Option<String> {
@@ -316,14 +316,14 @@ fn config(runner: &dyn SshRunner, args: &[String]) -> Option<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fact {
     /// The server runs a POSIX `sh`: a wrapped connection started there — the
-    /// bootstrap's nonce'd `8133;i;up` arrived (049 R2.3; until phase-2 also
-    /// the helper session's greeting, 048 phase-2).
+    /// bootstrap's nonce'd `8133;i;up` arrived (older builds also counted
+    /// the helper session's greeting).
     Posix,
     /// bateri's bootstrap ran there — the list of servers with bateri's files
-    /// (048 Karar: the remove button comes later).
+    /// (the remove button comes later).
     Touched,
     /// A wrapped connection ended without the bootstrap's `up` and not with
-    /// ssh's own error (049 R3.2, [`fell_back`]): the login shell does not run
+    /// ssh's own error ([`fell_back`]): the login shell does not run
     /// our command (a router, Windows) — the server is not wrapped again.
     Plain,
 }
@@ -498,19 +498,19 @@ pub struct Wrapped {
     pub key: String,
 }
 
-/// R1's every condition in one place; `None` → plain `ssh`.
+/// Every wrapping condition in one place; `None` → plain `ssh`.
 ///
 /// The cheap questions come first, so `ssh -G` (a process, and it runs the
 /// config's `Match exec`) is asked only for a call that would be wrapped:
 /// a usable bootstrap and nonce, terminals on both ends, an interactive call without a
 /// remote command, the setting for the host as typed; then `ssh -G` and the
 /// state of the server it resolves to — only a [`Fact::Plain`] server is not
-/// wrapped (049 R1), an unknown one is. `sockets` are this bateri's
+/// wrapped, an unknown one is. `sockets` are this bateri's
 /// instance directories ([`crate::ssh_route::instance_dirs`]): with one, the
 /// session also becomes a master there ([`Control`]). `tab` is the pane's
-/// identity the bootstrap exports (049 R6, [`remote_command`]); it decides
+/// identity the bootstrap exports ([`remote_command`]); it decides
 /// nothing.
-#[allow(clippy::too_many_arguments)] // R1's inputs, each a different source; a struct would only rename them
+#[allow(clippy::too_many_arguments)] // The conditions' inputs, each a different source; a struct would only rename them
 pub fn decide(
     args: &[String],
     tty: bool,
@@ -571,7 +571,7 @@ fn names_sharing(args: &[String]) -> bool {
     })
 }
 
-/// The session's [`Control`] (phase-5): `None` when the user's configuration
+/// The session's [`Control`]: `None` when the user's configuration
 /// shares connections itself, when `ssh -G` cannot be read as a configuration
 /// or when no instance directory holds the socket ([`session_socket`]).
 fn control(out: &str, sockets: &[PathBuf]) -> Option<Control> {
@@ -589,7 +589,7 @@ fn control(out: &str, sockets: &[PathBuf]) -> Option<Control> {
 /// login shell sshd may run it through (`$SHELL -c`): no `'` (it would close
 /// the quote), no `\` (fish reads `\'` and `\\` inside single quotes), no `!`
 /// (csh's history expansion) and no line break (csh refuses one inside quotes)
-/// — one printable ASCII line. 037's upload rule, widened by the shells.
+/// — one printable ASCII line. The upload rule, widened by the shells.
 pub fn is_inline(boot: &str) -> bool {
     boot.bytes()
         .all(|b| (b' '..=b'~').contains(&b) && !matches!(b, b'\'' | b'\\' | b'!'))
@@ -604,7 +604,7 @@ const BOOT_SCRIPT: &str = include_str!("../../../assets/shell/remote/boot.sh");
 const MAGIC: &str = "bateri_boot=1";
 
 /// The files the bootstrap writes under `~/.local/share/bateri/shell/`,
-/// embedded at build time (048 phase-2 → Uygulama Notları: the subcommand runs
+/// embedded at build time (the subcommand runs
 /// on every `ssh`, so it reads no package file): the local zsh wrapper's four
 /// `ZDOTDIR` files and its swap **verbatim**, the remote zsh body beside them,
 /// bash's `ENV` file and fish's `vendor_conf.d` file.
@@ -688,10 +688,10 @@ fn base64(bytes: &[u8]) -> String {
 /// It finds a decoder among `base64 -d` (GNU, BusyBox, macOS 13+),
 /// `base64 -D` (older macOS), `b64decode -r` (BSD) and `openssl base64 -d -A`,
 /// keeps the first answer that starts with [`MAGIC`] and `eval`s it; without
-/// one it reports `decode` (`8133;f`) — after the attempt's `8133;i;up` (049
-/// R2.1), which the payload would have printed first: our `sh -c` ran, so the
+/// one it reports `decode` (`8133;f`) — after the attempt's `8133;i;up`,
+/// which the payload would have printed first: our `sh -c` ran, so the
 /// server has a shell, it only lacks a decoder, and the user gets a working
-/// plain login shell (phase-2's fallback must not take it for a shell-less
+/// plain login shell (the fallback must not take it for a shell-less
 /// endpoint and reconnect the user after their `exit`). The nonce is `$2`,
 /// checked by `awk`'s regex (no `[!…]` here: [`is_inline`]). Both arms end in the plain login shell:
 /// the payload `exec`s its own, and a payload that returned (a parse error on
@@ -735,9 +735,9 @@ fn key_of(runner: &dyn SshRunner, ssh: &[String]) -> Option<String> {
 /// Records that the server behind `ssh` runs a POSIX `sh`: `ssh` is an argv
 /// to the server (the program, its options, the target, no remote command)
 /// and the caller calls this once the server proved it — the wrapped call's
-/// bootstrap said `up` with the attempt's nonce (049 R2.3, the pane's
+/// bootstrap said `up` with the attempt's nonce (the pane's
 /// `check_remote_up`, with the user's argv); nothing else writes `posix`
-/// (049 R4). The key is
+/// The key is
 /// [`host_key`] of `ssh -G` for the same argv (the route's own options do not
 /// change user, host or port). `Ok(true)` if a row was written; a server
 /// already recorded writes nothing (`Ok(false)`), and so does an argv `ssh -G`
@@ -752,7 +752,7 @@ pub fn record_posix(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::
     record(path, Fact::Posix, &key, unix_now(), LOCK_PATIENCE).map(|()| true)
 }
 
-/// The directory of the seen nonces beside the state file (049 phase-2):
+/// The directory of the seen nonces beside the state file:
 /// `{state file}.up/`, one empty file per nonce.
 pub fn up_dir(state_path: &Path) -> PathBuf {
     let mut name = state_path.file_name().unwrap_or_default().to_os_string();
@@ -767,8 +767,8 @@ pub fn up_dir(state_path: &Path) -> PathBuf {
 /// [`fell_back`] asks as well. A design constant.
 pub const UP_KEEP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Records that the bootstrap of the attempt `nonce` said `up` (049 phase-2,
-/// the fallback's first question): an empty file in [`up_dir`], created
+/// Records that the bootstrap of the attempt `nonce` said `up` (the
+/// fallback's first question): an empty file in [`up_dir`], created
 /// without the state file's lock and **before** `ssh -G` — the pane calls it
 /// as soon as `up` arrives, so a session that ends at once (a login file that
 /// exits) or a slow `ssh -G` (`Match exec`) cannot outrun the proof and have
@@ -823,7 +823,7 @@ fn mark_with(state_path: &Path, nonce: &str, suffix: &str) -> io::Result<()> {
 }
 
 /// Records that the user typed into the attempt `nonce`'s session after its
-/// login (049 R7): an empty `{nonce}.used` beside [`mark_up`]'s file. The
+/// login: an empty `{nonce}.used` beside [`mark_up`]'s file. The
 /// pane calls it at the first input after the login edge; the fallback then
 /// takes the session for the user's — a `ForceCommand` CLI ignores our
 /// command and never says `up`, but its user's `exit` must not reconnect
@@ -832,8 +832,8 @@ pub fn mark_used(state_path: &Path, nonce: &str) -> io::Result<()> {
     mark_with(state_path, nonce, USED_SUFFIX)
 }
 
-/// Records that the attempt `nonce`'s session got past its login (049
-/// phase-3 `/code-review`; the pane's login edge, 047's terminal modes): an
+/// Records that the attempt `nonce`'s session got past its login (the
+/// pane's login edge, from the terminal modes): an
 /// empty `{nonce}.login`. It turns the fallback's reading of
 /// [`SSH_FAILURE`]: before the login 255 is ssh's own error (a password, the
 /// network, a host key) and says nothing; after it, with no `up` and no
@@ -860,7 +860,7 @@ fn master_socket(wrapped: &[String]) -> Option<&str> {
 /// [`SESSION_PERSIST`] past the session, so a live one says the server was
 /// logged in to — the race-free twin of [`mark_login`] for a session too
 /// short for the pane's login probe (an endpoint that refuses our command at
-/// once; measured in 049 phase-3's end-to-end run, where the probe never saw
+/// once; measured in an end-to-end run, where the probe never saw
 /// it). **Known limit**: the path is per host, not per attempt — another
 /// pane's live master to the same server, logged in while this attempt was
 /// still at its own password prompt, reads the same; the cost is one plain
@@ -899,7 +899,7 @@ fn take_up(state_path: &Path, nonce: &str) -> bool {
 /// `ssh` (`$__bateri_block`), carried to the server as the remote blocks'
 /// parent ([`remote_command`]); without it the server prints no block marks.
 /// `--instance I` is the running bateri's instance directory name
-/// (`BATERI_SSH_INSTANCE`, phase-5), looked for under `roots`
+/// (`BATERI_SSH_INSTANCE`), looked for under `roots`
 /// ([`crate::ssh_route::socket_bases`]); without it, or without the
 /// directory, the session is no master ([`Control`]). `settings` is the settings file's launch
 /// reading (an unusable file turns the integration off); `state_path` is the
@@ -908,7 +908,7 @@ fn take_up(state_path: &Path, nonce: &str) -> bool {
 /// printed, because the touched list is the user's account of where bateri
 /// wrote. `nonce` is this attempt's ([`new_nonce`]); without one nothing is
 /// printed either. `tab` is the calling pane's identity (`BATERI_TAB_URL`,
-/// 049 R6), carried to the server ([`remote_command`]).
+/// carried to the server ([`remote_command`]).
 #[allow(clippy::too_many_arguments)] // the platform's inputs, each a different source
 pub fn ssh_argv_main(
     argv: &[String],
@@ -928,7 +928,7 @@ pub fn ssh_argv_main(
         [flag, rest @ ..] if flag == "--tty" => (true, rest),
         rest => (false, rest),
     };
-    // `--block N`: the local block of the `ssh` command (048 phase-3), the
+    // `--block N`: the local block of the `ssh` command, the
     // remote blocks' parent. A malformed one (an empty `__bateri_block`) costs
     // only the blocks: the connection is still wrapped, without a parent.
     let (parent, rest) = match rest {
@@ -980,9 +980,9 @@ pub const SSH_FAILURE: i32 = 255;
 /// [`SSH_FAILURE`] before the login (`logged_in`, [`mark_login`]), or a
 /// signal's (`128 + N`, the shell's spelling — a Ctrl-C at the password or
 /// host-key prompt is 130, before our command could run). A cancelled
-/// connection must neither brand the server `plain` nor open again (049
-/// phase-2 `/code-review`); a 255 after the login is an endpoint that refused
-/// our command and does fall back (phase-3 `/code-review`) — otherwise it
+/// connection must neither brand the server `plain` nor open again; a 255
+/// after the login is an endpoint that refused our command and does fall
+/// back — otherwise it
 /// would be wrapped, and broken, on every connection.
 fn says_nothing(rc: i32, logged_in: bool) -> bool {
     if rc == SSH_FAILURE {
@@ -992,7 +992,7 @@ fn says_nothing(rc: i32, logged_in: bool) -> bool {
     }
 }
 
-/// A wrapped connection that fell back (049 R3.2): the arguments to run again,
+/// A wrapped connection that fell back: the arguments to run again,
 /// plain, and the server's key (the caller records [`Fact::Plain`] for it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FellBack {
@@ -1000,8 +1000,7 @@ pub struct FellBack {
     pub key: String,
 }
 
-/// The fallback's decision once the wrapped `ssh` ended with `rc` (049 R3.2,
-/// R3.3) — pure: `config` is `ssh -G`'s output for the user's `args` and
+/// The fallback's decision once the wrapped `ssh` ended with `rc` — pure: `config` is `ssh -G`'s output for the user's `args` and
 /// `state` the state file as read now.
 ///
 /// - `rc` is a signal's (`> 128`), or [`SSH_FAILURE`] and not `logged_in`
@@ -1040,7 +1039,7 @@ pub fn fell_back(
 }
 
 /// How long [`ssh_fell_back_main`] waits for the `posix` row before it calls a
-/// server shell-less (049 phase-1 → Uygulama Notları): the row is the pane's,
+/// server shell-less: the row is the pane's,
 /// written when the bootstrap's `up` arrives — a main-queue turn, then `ssh -G`
 /// and the state file's lock on a thread of its own — and a session that ends
 /// within that chain (a login file that exits at once) would otherwise find
@@ -1054,7 +1053,7 @@ pub const FELL_BACK_PATIENCE: Duration = Duration::from_millis(500);
 const FELL_BACK_POLL: Duration = Duration::from_millis(25);
 
 /// `bateri ssh-fell-back --rc N [--instance I] -- <wrapped ssh arguments…>`
-/// (049 R3.2): the subcommand's body (`argv` is what follows
+/// The subcommand's body (`argv` is what follows
 /// `ssh-fell-back`), asked by the local zsh's `ssh` function after a wrapped
 /// `ssh` ended with `N`. The arguments are the **wrapped** ones, as
 /// `ssh-argv` printed them: [`unwrap`] gives back the user's and [`nonce`]
@@ -1064,12 +1063,12 @@ const FELL_BACK_POLL: Duration = Duration::from_millis(25);
 /// `--instance` is `ssh-argv`'s, so the rerun's sharing options are the
 /// wrapped call's.
 ///
-/// **The wrong direction is a rerun** (049 phase-2 → Uygulama Notları): a
+/// **The wrong direction is a rerun**: a
 /// server with a shell branded `plain` loses its integration, and a user who
 /// typed `exit` would be connected again. So the first question is the
 /// attempt's own proof ([`mark_up`], written by the pane the moment `up`
 /// arrives, before any `ssh -G`; or [`mark_used`], the user typed after the
-/// login — 049 R7): seen → nothing. Then [`fell_back`] (`posix`
+/// login): seen → nothing. Then [`fell_back`] (`posix`
 /// also says nothing). Every unknown says nothing: arguments that are not
 /// ours, no nonce, a malformed call, a signal's code, an [`SSH_FAILURE`] before
 /// the login (neither [`mark_login`] nor the wrapped call's master listening,
@@ -1156,7 +1155,7 @@ pub fn ssh_fell_back_main(
 }
 
 /// Forgets that the server behind `ssh` (an argv like [`record_posix`]'s) has
-/// no shell (049 R4): the Shell menu's integration toggle — the one way back
+/// no shell: the Shell menu's integration toggle — the one way back
 /// from a `plain` row learned wrongly. `Ok(true)` if a row was removed.
 pub fn forget_plain(runner: &dyn SshRunner, ssh: &[String], path: &Path) -> io::Result<bool> {
     let Some(key) = key_of(runner, ssh) else {
@@ -1182,7 +1181,7 @@ mod tests {
     const BOOT_STUB: &str = "echo hi";
     const NONCE: &str = "0123456789abcdef";
 
-    /// **Wire (c), the old `ssh` function → the new binary** (055 Karar 8):
+    /// **Wire (c), the old `ssh` function → the new binary**:
     /// after an update the carried zsh still has the **previous** version's
     /// `ssh` function, which asks the binary at the same path — now the new
     /// one — with its own flags, and hands `ssh-fell-back` the argv the old
@@ -1239,7 +1238,7 @@ mod tests {
             let tab = TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
             for parent in [None, Some(7), Some(u32::MAX)] {
                 for control in [None, Some(&control)] {
-                    // The identity's words (049 R6) unwrap with the rest.
+                    // The identity's words unwrap with the rest.
                     for tab in [None, Some(&tab)] {
                         let wrapped = wrap(&args, BOOT_STUB, parent, NONCE, tab, control);
                         assert_eq!(wrapped.first().map(String::as_str), Some("-t"));
@@ -1290,7 +1289,7 @@ mod tests {
                 "prod",
                 "exec sh -c 'x' bateri-boot 7 0123456789abcdef 9",
             ]),
-            // The identity's words (049 R6) only in their own forms: a
+            // The identity's words only in their own forms: a
             // version outside `[0-9A-Za-z.+-]`, a tab that is not
             // `bateri://tab/<uuid>` or `-`, a fifth word.
             words(&[
@@ -1324,7 +1323,7 @@ mod tests {
             assert_eq!(unwrap(&args), &args[..], "{args:?}");
             assert_eq!(nonce(&args), None, "{args:?}");
         }
-        // 048's forms (an older build's session) still unwrap, without a nonce.
+        // The oldest forms (an older build's session) still unwrap, without a nonce.
         for last in ["exec sh -c 'x' bateri-boot", "exec sh -c 'x' bateri-boot 7"] {
             let args = words(&["-t", "prod", last]);
             assert_eq!(unwrap(&args), &words(&["prod"])[..], "{last}");
@@ -1334,7 +1333,7 @@ mod tests {
 
     #[test]
     fn the_remote_command_carries_the_identity() {
-        // 049 R6: the version and the tab after the nonce, the placeholder
+        // The version and the tab after the nonce, the placeholder
         // without a tab; the workspace version is one `is_version` takes.
         assert!(is_version(TERM_PROGRAM_VERSION), "{TERM_PROGRAM_VERSION}");
         assert!(!is_version("") && !is_version("1 0") && !is_version("1!"));
@@ -1349,7 +1348,7 @@ mod tests {
             remote_command("x", None, NONCE, None)
                 .ends_with(&format!(" bateri-boot - {NONCE} {TERM_PROGRAM_VERSION} -"))
         );
-        // 049 phase-1's form (no identity) still unwraps with its nonce.
+        // The older form (no identity) still unwraps with its nonce.
         let args = words(&[
             "-t",
             "prod",
@@ -1548,7 +1547,7 @@ mod tests {
             "ssh -G sees the user's arguments"
         );
 
-        // R1.1: no terminal, a remote command (forced tty too), a non-interactive flag.
+        // No terminal, a remote command (forced tty too), a non-interactive flag.
         let none = |args: &[&str], tty: bool| {
             let runner = Gconfig::new(PLAIN);
             let wrapped = decide(
@@ -1604,7 +1603,7 @@ mod tests {
     fn decide_asks_the_config_the_setting_and_the_state() {
         let args = words(&["prod"]);
         let on = Settings::default();
-        // R1.2: the config runs something else.
+        // The config runs something else.
         for out in [
             "user u\nhostname h\nport 22\nremotecommand tmux\n",
             "user u\nhostname h\nport 22\nrequesttty false\n",
@@ -1628,7 +1627,7 @@ mod tests {
                 "{out}"
             );
         }
-        // 049 R1: an unknown server is wrapped, one recorded `plain` is not
+        // An unknown server is wrapped, one recorded `plain` is not
         // — `posix` or not.
         let runner = Gconfig::new(PLAIN);
         let with = |state: &HostState| {
@@ -1653,7 +1652,7 @@ mod tests {
         let mut other = HostState::default();
         other.note(Fact::Plain, "v@h:22", 2);
         assert_eq!(with(&other), Some("u@h:22".to_owned()));
-        // R1.3: the setting is asked before `ssh -G`.
+        // The setting is asked before `ssh -G`.
         let off = Settings {
             remote_integration: false,
             ..Settings::default()
@@ -1759,7 +1758,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Phase-5 (R7): with bateri's instance directory, the session becomes a
+    /// With bateri's instance directory, the session becomes a
     /// master there — unless the user shares connections themselves.
     #[test]
     fn the_session_becomes_a_master_in_the_instance_directory() {
@@ -1882,7 +1881,7 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 049 R3.2/R3.3: the fallback's table — 255 says nothing about the shell,
+    /// The fallback's table — 255 says nothing about the shell,
     /// a `posix` server's session was the user's, a touched server without
     /// `posix` reruns plain with the wrapped call's sharing options.
     #[test]
@@ -1919,7 +1918,7 @@ mod tests {
                 "{rc}: ssh's own error or a signal"
             );
         }
-        // After the login (phase-3 `/code-review`): 255 is an endpoint that
+        // After the login: 255 is an endpoint that
         // refused our command — the rerun; a signal still says nothing, and
         // `posix` still wins.
         assert_eq!(
@@ -1982,7 +1981,7 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    /// The subcommand (049 R3.2, phase-2): it is given the **wrapped**
+    /// The subcommand: it is given the **wrapped**
     /// arguments and its first question is the attempt's own proof.
     #[test]
     fn the_fallback_subcommand_records_plain_and_prints_the_rerun() {
@@ -2041,7 +2040,7 @@ mod tests {
         assert!(run(&call(&["--rc", "0", "--"]), Duration::ZERO).is_empty());
         assert!(!up_dir(&path).join(NONCE).exists());
         assert!(!load(&path).knows(Fact::Plain, "u@h:22"));
-        // The user typed after the login (049 R7): nothing either, consumed.
+        // The user typed after the login: nothing either, consumed.
         mark_used(&path, NONCE).unwrap();
         assert!(run(&call(&["--rc", "0", "--"]), Duration::ZERO).is_empty());
         assert!(!up_dir(&path).join(format!("{NONCE}{USED_SUFFIX}")).exists());
@@ -2068,7 +2067,7 @@ mod tests {
         assert!(run(&call(&["--rc", "130", "--"]), Duration::ZERO).is_empty());
         assert!(!load(&path).knows(Fact::Plain, "u@h:22"));
         // 255 after the login, no `up`, no input — an endpoint that refused
-        // our command (phase-3 `/code-review`): `plain` and the rerun.
+        // our command: `plain` and the rerun.
         mark_login(&path, NONCE).unwrap();
         assert_eq!(
             run(&call(&["--rc", "255", "--"]), Duration::ZERO),
@@ -2233,9 +2232,9 @@ mod tests {
         assert_eq!(String::from_utf8(out.stdout).unwrap(), tricky);
     }
 
-    /// The bootstrap's proof (049 R2.3): one `posix` row per server, a
+    /// The bootstrap's proof: one `posix` row per server, a
     /// second proof writes nothing, an argv `ssh -G` cannot read records
-    /// nothing. The menu's toggle forgets a `plain` row the same way (R4).
+    /// nothing. The menu's toggle forgets a `plain` row the same way.
     #[test]
     fn the_proof_records_the_server_once_and_the_toggle_forgets_plain() {
         let dir = scratch("learn");
@@ -2279,7 +2278,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The seen nonces (049 phase-2): a file per nonce beside the state file,
+    /// The seen nonces: a file per nonce beside the state file,
     /// consumed by the one question; only a nonce of our form names a file;
     /// an old unconsumed one is swept by the next mark.
     #[test]
@@ -2297,7 +2296,7 @@ mod tests {
         assert!(take_login(&path, NONCE));
         assert!(!take_login(&path, NONCE), "consumed");
         assert!(mark_login(&path, "../x").is_err());
-        // The "used" twin (049 R7) answers the same question; both go.
+        // The "used" twin answers the same question; both go.
         mark_used(&path, NONCE).unwrap();
         assert!(take_up(&path, NONCE));
         mark_up(&path, NONCE).unwrap();
@@ -2321,7 +2320,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 }
-/// The bootstrap on real shells (048 phase-2): what sshd does with the wrapped
+/// The bootstrap on real shells: what sshd does with the wrapped
 /// call — `"$SHELL" -c '<remote command>'` — in a real PTY, with a temporary
 /// home. Each login shell that is not installed here is `SKIPPED` (macOS has
 /// no fish or BusyBox; `make linux`'s image has all five).
@@ -2352,10 +2351,10 @@ mod remote_shells {
     /// The local `ssh` block the harness's remote shells run under: the `P`
     /// of their `bt_remote=<P>.<S>.<n>` and `bateri://rblock/<P>.<S>.<n>`.
     const PARENT: u32 = 41;
-    /// The attempt's nonce the simulated sshd passes (049 R2.1).
+    /// The attempt's nonce the simulated sshd passes.
     const NONCE: &str = "00c0ffee00c0ffee";
 
-    /// The remote blocks end to end (048 phase-3): the server's `true`,
+    /// The remote blocks end to end: the server's `true`,
     /// `false` and `sleep` get their stripes and the counter from our remote
     /// marks and anchors — drawn with no local block at all, i.e. from the
     /// remote trail alone (the harness has no local `ssh` block, so nothing
@@ -2746,7 +2745,7 @@ mod remote_shells {
         reader.join().expect("reader")
     }
 
-    /// 049 R6: every login shell the bootstrap `exec`s — the integration's
+    /// Every login shell the bootstrap `exec`s — the integration's
     /// (zsh) and the plain fault's (`sh`) — gets the terminal's identity from
     /// the wrapped command's words; a tab not of `bateri://tab/<uuid>`'s form
     /// and a version outside its alphabet are not exported. The login shell
@@ -2803,7 +2802,7 @@ mod remote_shells {
         }
     }
 
-    /// 049 R2.1: the attempt's `up` is the bootstrap's **first** output —
+    /// The attempt's `up` is the bootstrap's **first** output —
     /// before the motd and before every fault, the decode arm's included
     /// (the one-liner prints it there itself, then `decode`).
     #[test]

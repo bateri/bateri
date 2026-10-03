@@ -1,4 +1,4 @@
-//! Downloading a remote item to this Mac (045 Karar 11): `upload`'s mirror. The
+//! Downloading a remote item to this Mac: `upload`'s mirror. The
 //! remote side `tar c`s one item to its standard output
 //! ([`crate::remote_files::download_script`]), the bytes pass through us
 //! ([`crate::upload`]'s `TarWatcher`, so progress is exact) and a local
@@ -28,7 +28,7 @@ use crate::upload::{
     wait_untracked,
 };
 
-/// What happens when the landing name is taken (045 R4, `download_conflict`):
+/// What happens when the landing name is taken (`download_conflict`):
 /// keep both — the new item takes the next free `name 2` — or replace the old one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Conflict {
@@ -48,7 +48,7 @@ pub const TEMP_PREFIX: &str = ".bateri-download-";
 /// Downloads the remote absolute path `remote` to `landing`: `ssh … tar c` remotely,
 /// `tar x` locally into a temporary folder next to `landing` (its folder is
 /// created here, when the stream starts — nothing is made on disk before the
-/// user confirmed, 045 phase-4), then `seal` (the
+/// user confirmed), then `seal` (the
 /// caller's last word on the finished item — the quarantine mark, while it is still
 /// hidden) and one `rename` to `landing`, or by `conflict` to its next free name.
 /// **On a background thread**; `tick` posts the progress report to the main queue (at
@@ -250,7 +250,7 @@ fn land(
             {
                 // A file never replaces a folder: "Replace" was asked about a
                 // name, and a whole folder of the user's must not go silently
-                // under `download_conflict = "replace"` (`/code-review`, 045).
+                // under `download_conflict = "replace"`.
                 if old.is_dir() && !meta.is_dir() {
                     return Err(format!(
                         "{} is a folder; a file does not replace it",
@@ -289,7 +289,7 @@ fn replace_aside(item: &Path, landing: &Path, old_dir: bool) -> Result<PathBuf, 
     Ok(landing.to_owned())
 }
 
-/// "Keep both" (045 R4): `path` if it is free, otherwise the first free `name 2`,
+/// "Keep both": `path` if it is free, otherwise the first free `name 2`,
 /// `name 3` … — Finder's form, the number before the **last** extension
 /// (`a.tar 2.gz`). A folder and a dot file (`.bashrc`) have no extension.
 pub fn keep_both_name(path: &Path, dir: bool, taken: impl Fn(&Path) -> bool) -> PathBuf {
@@ -317,7 +317,7 @@ pub fn keep_both_name(path: &Path, dir: bool, taken: impl Fn(&Path) -> bool) -> 
 
 /// Free bytes on the volume that holds `dir` (`statvfs`: the blocks an
 /// unprivileged process may use) — the download sheet's "not enough space"
-/// (045 R4). A folder that does not exist yet (it is created when the stream
+/// A folder that does not exist yet (it is created when the stream
 /// starts) is asked through its nearest existing ancestor. `None` if it cannot be
 /// asked; blocking (a network volume), so off the main thread.
 pub fn free_space(dir: &Path) -> Option<u64> {
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn a_linked_item_lands_as_its_target() {
-        // `/code-review` (045): the helper answered for the target (`stat -L`).
+        // The helper answered for the target (`stat -L`).
         let root = scratch("link");
         let remote = root.join("remote");
         let downloads = root.join("Downloads");

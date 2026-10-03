@@ -2,19 +2,19 @@
 //! session, the display link that drives frames, its own `Renderer`, the
 //! `CAMetalLayer` surface, `BateriView`, the shell's wake end (`ShellWake`),
 //! the dock reserve, the temporary point-size delta, the tab identity, the
-//! scrollback search panel and the upload queue (039 Karar 1–3).
+//! scrollback search panel and the upload queue.
 //!
 //! `TerminalPane` is an `NSView` subclass and is the very same thing as
-//! today's content container (033 → R4.1): `BateriView` is its child that
+//! today's content container: `BateriView` is its child that
 //! fills it via autoresizing, and the search panel floats inside it as a
 //! sibling of the Metal layer. The window (`window::TerminalWindow`) plugs the
 //! pane into the splits container (`split_view::SplitView`) and keeps the
 //! work that belongs to the **tab**: chrome, title, tab, the close question;
 //! geometry, occlusion and focus are distributed from the window to all
-//! panes. A tab can hold several panes (039 splits): each with its own
+//! panes. A tab can hold several panes (splits): each with its own
 //! session, link and renderer.
 //!
-//! **The boundary has three parts** (Karar 1, 3): the pane takes its inputs
+//! **The boundary has three parts**: the pane takes its inputs
 //! at birth in a single package ([`PaneLaunch`]: settings snapshot, theme,
 //! timed-run recipe, measurement ledger, integration environment + dock
 //! reserve, identity, start directory and first input, motion flags), hands
@@ -29,7 +29,7 @@
 //! that reaches `AppDelegate`: main-queue returns find the pane by id through
 //! the lookup function the owner supplies ([`PaneLookup`]).
 //!
-//! **Renderer per pane** (039 Karar 5; 026 → Karar 2a): the atlas key
+//! **Renderer per pane**: the atlas key
 //! includes scale and point size, and the point-size delta belongs to the pane.
 
 use std::cell::{Cell, OnceCell, RefCell};
@@ -87,7 +87,7 @@ use crate::zoom::Zoom;
 use crate::{Run, Workload};
 use crate::{child, locale};
 
-/// Events the pane hands to its owner (039 Karar 3) — today
+/// Events the pane hands to its owner — today
 /// `window::WindowHost`, tomorrow an embedding application.
 ///
 /// All of them are called **on the main thread** and with the pane's id
@@ -99,12 +99,12 @@ pub(crate) trait PaneHost {
     /// Title, working directory, remote state or upload percentage changed:
     /// the window's title and the tab's dot must be re-read from the pane.
     fn title_changed(&self, pane: u64);
-    /// The shell exited: the pane has nothing left to stand on and must close
-    /// (026 → Karar 5) — only this pane, not the tab (039 Karar 8).
+    /// The shell exited: the pane has nothing left to stand on and must close —
+    /// only this pane, not the tab.
     fn shell_exited(&self, pane: u64);
     /// The keyboard arrived at this pane's terminal (`BateriView` became first
     /// responder): the focused pane is now this one — the title, the tab dot
-    /// and the new split's inheritance come from it (039 Karar 11).
+    /// and the new split's inheritance come from it.
     fn focused(&self, pane: u64);
     /// The upload queue's progress or existence changed — the application's
     /// Dock icon is the total of all panes ([`TerminalPane::upload_totals`]).
@@ -121,20 +121,20 @@ pub(crate) trait PaneHost {
     }
 }
 
-/// Column count of the smallest pane (039 Karar 14): a split that would drop
+/// Column count of the smallest pane: a split that would drop
 /// below it is not made. Not measured, a design constant — room for the
 /// prompt's two columns, a short command and the folder name in the dock's
 /// context line; narrower makes the shell's own line wrapping meaningless.
 /// Tuned by eye.
 const MIN_PANE_COLS: u16 = 20;
 
-/// Row count of the smallest pane (039 Karar 14), grid rows **excluding** the
+/// Row count of the smallest pane, grid rows **excluding** the
 /// dock's reserve. Design constant: one command and a few lines of its
 /// output; a full-screen program (vim, htop) can show nothing but a status
 /// line below it.
 const MIN_PANE_ROWS: u16 = 5;
 
-/// Opacity of the unfocused pane's veil (039 Karar 7): the theme's
+/// Opacity of the unfocused pane's veil: the theme's
 /// background overlays the text at this ratio. Not measured, a design
 /// constant (like `GUTTER_PT`) — Ghostty's `unfocused-split-opacity` default
 /// is `0.7`, i.e. a veil of `0.3`; the same ratio: focus reads at a glance
@@ -154,7 +154,7 @@ define_class!(
     impl DimOverlay {
         /// Never takes part in hit testing: clicks, drags and the wheel fall
         /// through to the `BateriView` underneath — clicking a dimmed pane
-        /// focuses it (039 phase-3's click path) and the veil must not cut that.
+        /// focuses it (the click path) and the veil must not cut that.
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
             None
@@ -177,7 +177,7 @@ impl DimOverlay {
     }
 
     /// The theme's background at [`DIM_ALPHA`] opacity. `NSColor` takes sRGB
-    /// (`CLAUDE.md` → Renk uzayı; like the separator's `separator_srgb`).
+    /// (the colour-space boundary; like the separator's `separator_srgb`).
     fn paint(&self, theme: &Theme) {
         let [r, g, b] = theme.background_srgb().map(|byte| f64::from(byte) / 255.0);
         self.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
@@ -215,7 +215,7 @@ define_class!(
 );
 
 impl LinkLabel {
-    /// The ⌘-hovered OSC 8 link's target (044 Karar 7): a small box in the
+    /// The ⌘-hovered OSC 8 link's target: a small box in the
     /// pane's bottom-left corner, born hidden, its single child the text. The
     /// text is the whole target, cut in the **middle** when it does not fit —
     /// the scheme and host on the left and the file name on the right are what
@@ -276,7 +276,7 @@ pub(crate) type PaneLookup = fn(MainThreadMarker, u64) -> Option<Retained<Termin
 /// each attempt waits up to the state file's lock patience. A design constant.
 const POSIX_ATTEMPTS: usize = 3;
 
-/// The pane's half of the bootstrap's proof (049 R2.3): the bootstrap's
+/// The pane's half of the bootstrap's proof: the bootstrap's
 /// `8133;i;up;{nonce}` (in the session, [`bt_core::Session::remote_up`]) and
 /// the wrapped `ssh` the remote probe found arrive in either order — `up` is
 /// the bootstrap's first byte and routinely beats the probe — so whichever
@@ -293,7 +293,7 @@ struct WrapProof {
     /// once per arrival.
     marked: Option<(u64, String)>,
     /// The generation whose attempt was marked used — the user typed after
-    /// the login (049 R7, [`bt_shell_common::ssh_wrap::mark_used`]): once per
+    /// the login ([`bt_shell_common::ssh_wrap::mark_used`]): once per
     /// generation.
     used: Option<u64>,
     /// The generation whose attempt was marked logged in
@@ -301,7 +301,7 @@ struct WrapProof {
     login: Option<u64>,
 }
 
-/// The pane's birth package (039 Karar 3): all inputs in a single struct,
+/// The pane's birth package: all inputs in a single struct,
 /// from the owner. Live changes go a separate way, through the pane's `set_*`
 /// methods.
 pub(crate) struct PaneLaunch {
@@ -328,9 +328,9 @@ pub(crate) struct PaneLaunch {
     pub(crate) reduce_motion: bool,
     /// Resolved mode of the wheel.
     pub(crate) smooth_scroll: bool,
-    /// Inherited temporary point-size delta (026 → Karar 3).
+    /// Inherited temporary point-size delta.
     pub(crate) zoom: Zoom,
-    /// bateri's ssh masters (047): the application's registry, shared by every
+    /// bateri's ssh masters: the application's registry, shared by every
     /// pane — one opening per host. `None` in a timed run: the remote jobs
     /// take today's argv.
     pub(crate) masters: Option<Arc<Masters>>,
@@ -350,7 +350,7 @@ struct Birth {
 /// missed), then the pane's own edge (`edge`: the upload queue's connection)
 /// and the owner re-read the title. The edge must also come after the flag:
 /// an ssh that ends in between spawns no job and the queue would stay on a
-/// dead connection (`/code-review`). `swap`, because the read-modify-write
+/// dead connection. `swap`, because the read-modify-write
 /// pairs with the writer's `swap` and makes what it wrote to the slot visible.
 fn announce_title(pending: &AtomicBool, edge: impl FnOnce(), host: &dyn PaneHost, pane: u64) {
     pending.swap(false, Ordering::AcqRel);
@@ -367,7 +367,7 @@ fn announce_copy(pending: &PendingCopy, host: &dyn PaneHost, pane: u64) {
     }
 }
 
-/// Text on the system's find pasteboard (033 Karar 6: ⌘E's cross-application
+/// Text on the system's find pasteboard (⌘E's cross-application
 /// norm), through the same filter as ⌘E's query: its first line, `None` if
 /// empty or only whitespace ([`selection_query`]).
 fn find_pasteboard_text() -> Option<String> {
@@ -377,7 +377,7 @@ fn find_pasteboard_text() -> Option<String> {
         .and_then(|text| selection_query(&text, false))
 }
 
-/// The six items that are greyed out on the alternate screen (034 Karar 2):
+/// The six items that are greyed out on the alternate screen:
 /// the two clear modes and the four scrolls — all touch the primary
 /// scrollback and that scrollback is unreachable on the alternate screen.
 fn is_scrollback_action(action: Sel) -> bool {
@@ -433,29 +433,29 @@ struct ShellWake {
     /// payload: the title itself is in the session, the job reads it).
     title_pending: Arc<AtomicBool>,
     /// Whether the search count's scrollback news is waiting on the main
-    /// queue — `title_pending`'s twin (033).
+    /// queue — `title_pending`'s twin.
     search_pending: Arc<AtomicBool>,
-    /// The remote-session probe's arm and pending job (036); `Arc`, because
+    /// The remote-session probe's arm and pending job; `Arc`, because
     /// the main queue's job holds it.
     remote_probe: Arc<RemoteProbe>,
-    /// The login probe of the remote session (047 R9.1): the same two bits as
+    /// The login probe of the remote session: the same two bits as
     /// [`Self::remote_probe`] — armed on the remote edge while the user's ssh
     /// has not logged in, every output throws one check
     /// ([`TerminalPane::login_check`]); the login is the indicator's start.
     login_probe: Arc<RemoteProbe>,
-    /// Whether the stale-link news is waiting on the main queue (044 R4.1) —
+    /// Whether the stale-link news is waiting on the main queue —
     /// `search_pending`'s twin: at most one job.
     link_pending: Arc<AtomicBool>,
-    /// Whether the bootstrap's `up` check is waiting on the main queue (049
-    /// R2.3, [`TerminalPane::check_remote_up`]) — at most one job.
+    /// Whether the bootstrap's `up` check is waiting on the main queue
+    /// ([`TerminalPane::check_remote_up`]) — at most one job.
     up_pending: Arc<AtomicBool>,
     /// Whether the "typed after the login" check is waiting on the main queue
-    /// (049 R7, [`TerminalPane::check_remote_typed`]) — at most one job.
+    /// ([`TerminalPane::check_remote_typed`]) — at most one job.
     typed_pending: Arc<AtomicBool>,
 }
 
-/// The two bits of the remote-session probe (036 Karar 2) — and of the login
-/// probe (047 R9.1, the same semantics with "logged in" for "decided"): the **arm** (no
+/// The two bits of the remote-session probe — and of the login
+/// probe (the same semantics with "logged in" for "decided"): the **arm** (no
 /// definitive answer yet for this command) and the **pending job** (a probe is
 /// in the main queue — at most one, `title_pending`'s pattern).
 ///
@@ -576,12 +576,12 @@ impl Wake for ShellWake {
             waker.wake();
         }
         // If the remote-session probe stayed undecided this output re-triggers
-        // it (036 Karar 2); when unarmed the cost is one atomic read.
+        // it; when unarmed the cost is one atomic read.
         if self.remote_probe.output() {
             self.dispatch_remote_probe();
         }
         // The user's ssh logs in with output (a prompt, the MOTD): one check
-        // per output edge while armed (047 R9.1); one atomic read otherwise.
+        // per output edge while armed; one atomic read otherwise.
         if self.login_probe.output() {
             self.dispatch_login_probe();
         }
@@ -589,7 +589,7 @@ impl Wake for ShellWake {
 
     fn child_exit(&self, _code: Option<i32>) {
         // The shell is gone, the pane has nothing to stand on: **that window**
-        // closes (026 → Karar 5), not the application. Closing goes through the
+        // closes, not the application. Closing goes through the
         // window's own `windowWillClose:` — the red button, ⌘W and `exit` reach
         // the same sequence.
         //
@@ -610,7 +610,7 @@ impl Wake for ShellWake {
         // adding "damage exhausted, exit now" semantics to the display link —
         // the second would put terminal knowledge into the renderer. When the
         // `bateri -e cmd` path arrives it will be designed together with
-        // `drain_on_exit` (`.tasks/002-vt-motoru/phase-4.md` → Uygulama Notları).
+        // `drain_on_exit`.
         let (timed, id, lookup) = (self.timed, self.id, self.lookup);
         DispatchQueue::main().exec_async(move || {
             // audit: a block running on the main queue is on the main thread by definition.
@@ -842,7 +842,7 @@ pub(crate) struct PaneIvars {
     /// `Rc`: the renderer is pinned to the main thread (see `bt_gpu::DisplayLink`)
     /// and the link holds a copy too.
     renderer: Rc<Renderer>,
-    /// The terminal view's layer — this pane owns it (040 → Karar 8): it is
+    /// The terminal view's layer — this pane owns it: it is
     /// hung on the view here and its scale is set from the window
     /// (`sync_geometry`); `bt-gpu` draws into it through [`Surface`].
     layer: Retained<CAMetalLayer>,
@@ -852,11 +852,11 @@ pub(crate) struct PaneIvars {
     /// The inputs of the mouse translation are refreshed with the pane's size
     /// (`set_metrics`); this view is also the source of the geometry (`sync_geometry`).
     view: Retained<BateriView>,
-    /// The unfocused pane's dim veil (039 Karar 7): the pane's topmost child,
+    /// The unfocused pane's dim veil: the pane's topmost child,
     /// a sibling of the Metal layer — it is not in the frame path, its
     /// composition is CoreAnimation's. The owner determines its visibility.
     dim: Retained<DimOverlay>,
-    /// The ⌘-hovered OSC 8 link's target (044 Karar 7) and its text: above the
+    /// The ⌘-hovered OSC 8 link's target and its text: above the
     /// terminal and the search panel, below the dim veil. AppKit's, outside the
     /// frame path; shown by [`TerminalPane::set_link_target`].
     link_label: (Retained<LinkLabel>, Retained<NSTextField>),
@@ -876,7 +876,7 @@ pub(crate) struct PaneIvars {
     zoom: Cell<Zoom>,
     /// How many rows the dock has; `0` → this pane has no dock.
     ///
-    /// **Decided when the session is born** (012 → R5.1): the source is
+    /// **Decided when the session is born**: the source is
     /// whether the integration was installed and it is asked **once** in
     /// [`TerminalPane::start`]. The slot exists for that reason: `sync_geometry`
     /// runs on every geometry event and must know the answer when computing the
@@ -892,18 +892,18 @@ pub(crate) struct PaneIvars {
     /// would close this path with an `unwrap`.
     ///
     /// **This field is the current reserve**, not the birth value: it drops to
-    /// zero on the alternate screen and comes back on exit (R5.2). The birth
+    /// zero on the alternate screen and comes back on exit. The birth
     /// value is in a separate field ([`PaneIvars::dock_rows_at_birth`]) and
     /// keeping the two apart is required — otherwise leaving the alternate
     /// screen would conjure a dock in a pane that never had one.
     dock_rows: Cell<u16>,
     /// The dock reserve decided when the session is born: `DOCK_ROWS` if the
-    /// integration was installed, `0` if not (R5.1).
+    /// integration was installed, `0` if not.
     ///
     /// It does **not move** during the run; this is the value the alternate
     /// screen will bring back and its only writer is the session's birth.
     dock_rows_at_birth: Cell<u16>,
-    /// The session's persistent identity (038, 039 Karar 10): goes to the
+    /// The session's persistent identity: goes to the
     /// shell as `TERM_SESSION_ID` and `BATERI_TAB_URL`, `bateri://tab/<id>`
     /// finds the pane with it. Constant for the pane's lifetime; the
     /// in-process [`id`] is a separate thing (the key of main-queue returns).
@@ -912,68 +912,67 @@ pub(crate) struct PaneIvars {
     /// leaves the list one turn later (`forget_window`) and in the meantime
     /// `AppDelegate::pane` must not find it — so that a stale report from the
     /// reader thread does not act on a closed session and `bateri://tab/`
-    /// does not bring a sessionless window to the screen (`/code-review`, 038).
+    /// does not bring a sessionless window to the screen.
     closed: Cell<bool>,
-    /// The scrollback search's panel (033) — born on the first ⌘F: a pane
+    /// The scrollback search's panel — born on the first ⌘F: a pane
     /// that never searches carries no views. The query and keys are in the
-    /// panel, i.e. **per pane**, and are not forgotten on close (Karar 6).
+    /// panel, i.e. **per pane**, and are not forgotten on close.
     search: OnceCell<SearchBar>,
     /// The state of the last query given to the session — the label's input.
     search_status: Cell<SearchStatus>,
     /// Whether the count index's driver is waiting one turn in the main queue
     /// ([`TerminalPane::kick_search`]): so that a second driver is not set up.
     search_driving: Cell<bool>,
-    /// Upload of a Finder drop to the remote directory (037 Karar 7): queue,
+    /// Upload of a Finder drop to the remote directory: queue,
     /// progress and result line ([`crate::upload::Transfers`]). The queue is
     /// **this pane's ssh connection's** — switching to another tab does not stop it.
     uploads: RefCell<Transfers>,
     /// The open upload sheet (confirmation or error): lives for the sheet's duration.
     upload_alert: RefCell<Option<Retained<NSAlert>>>,
-    /// The open stop question (037 phase-7, [`crate::uploader`]).
+    /// The open stop question ([`crate::uploader`]).
     upload_stop: RefCell<Option<StopSheet>>,
-    /// The open password sheet (047, [`crate::password_sheet`]): its sender is
+    /// The open password sheet ([`crate::password_sheet`]): its sender is
     /// what the waiting job's thread blocks on — dropping it answers "nobody".
     password: RefCell<Option<PasswordSheet>>,
     /// The application's ssh masters ([`PaneLaunch::masters`]).
     masters: Option<Arc<Masters>>,
     /// The remote generation this pane reported to the masters' registry
-    /// ([`Masters::session_started`], 047 R9.3); `None` locally.
+    /// ([`Masters::session_started`]); `None` locally.
     ssh_session: Cell<Option<u64>>,
     /// The wrapped `ssh` the probe found and whether its server was recorded
-    /// (049 R2.3, [`TerminalPane::check_remote_up`]).
+    /// ([`TerminalPane::check_remote_up`]).
     wrap_proof: RefCell<WrapProof>,
-    /// The open "Show files (N)" popover (037 phase-7).
+    /// The open "Show files (N)" popover.
     upload_list: RefCell<Option<UploadPopover>>,
     /// Time of the event that closed the popover (`popoverWillClose:`): so that
     /// pressing the button again does not reopen the popover.
     list_closed_at: Cell<Option<f64>>,
-    /// The open load indicator popover (046 phase-5, [`crate::stats_popover`]).
+    /// The open load indicator popover ([`crate::stats_popover`]).
     stats_popover: RefCell<Option<StatsPopover>>,
     /// Time of the event that closed the load popover — its own slot, so a
     /// press on one control never swallows the other's.
     stats_closed_at: Cell<Option<f64>>,
-    /// The helper ssh session that verifies remote links and counts a download
-    /// (045 Karar 10): its worker is born at the first question, its session
+    /// The helper ssh session that verifies remote links and counts a download:
+    /// its worker is born at the first question, its session
     /// closes on another generation, when idle and with the pane — while the
-    /// load indicator samples (046 Karar 1) it is never idle.
+    /// load indicator samples it is never idle.
     remote_helper: RefCell<RemoteHelper>,
-    /// The remote load indicator's sampling (046 phase-4, [`crate::stats`]):
+    /// The remote load indicator's sampling ([`crate::stats`]):
     /// its schedule and sampler; the settings' value from the birth package,
     /// refreshed live ([`TerminalPane::set_stats_settings`]).
     stats: RefCell<StatsDriver>,
-    /// The pane's last input (050): a key, a press, the wheel, a mouse move or
+    /// The pane's last input: a key, a press, the wheel, a mouse move or
     /// its window becoming key — set at birth, then only by
     /// [`TerminalPane::note_interaction`]. On the sleep-counting clock, so the
-    /// focus query's `idle` does not stop with the lid closed
-    /// (`.tasks/050-odak-sorgusu/discussion.md` → Karar 4, 6).
+    /// focus query's `idle` does not stop with the lid closed.
     last_input: Cell<Moment>,
-    /// `[remote]`'s preview and download keys (045 R8): from the birth package,
+    /// `[remote]`'s preview and download keys: from the birth package,
     /// refreshed live with the host marks ([`TerminalPane::set_host_marks`]).
     remote_files: RefCell<RemoteFiles>,
-    /// The previews this pane downloaded, by landing path (045 phase-4): how each
+    /// The previews this pane downloaded, by landing path: how each
     /// opens and where its index is ([`crate::preview::PreviewTicket`]).
     previews: RefCell<HashMap<PathBuf, PreviewTicket>>,
-    /// The file promises of ⌘-dragged remote links (045 phase-5): the delegates
+    /// The file promises of ⌘-dragged remote links: the delegates
     /// kept alive and the Finder downloads that fulfil them.
     finder: RefCell<FinderDrops>,
 }
@@ -999,8 +998,8 @@ define_class!(
         /// is left the bar goes away and the content lengthens — the window's
         /// frame is the same in both. Bound to the window notification the
         /// drawable stayed at the old size, the layer **stretched** it to the new
-        /// size and the text blurred vertically (measured, 026 phase-4
-        /// Uygulama Notları). The view's notification also covers window
+        /// size and the text blurred vertically (measured). The view's
+        /// notification also covers window
         /// resizing, so a single source.
         #[unsafe(method(viewFrameDidChange:))]
         fn view_frame_did_change(&self, _n: &NSNotification) {
@@ -1008,8 +1007,8 @@ define_class!(
         }
     }
 
-    /// Closing of the "Show files (N)" popover (037 phase-7) and of the load
-    /// indicator's popover (046 phase-5), told apart by the notification's
+    /// Closing of the "Show files (N)" popover and of the load
+    /// indicator's popover, told apart by the notification's
     /// object: AppKit also closes a `transient` popover (click outside) and
     /// its Esc monitor (and the list button's pressed tone) must go away then too.
     unsafe impl NSPopoverDelegate for TerminalPane {
@@ -1032,18 +1031,18 @@ define_class!(
         }
     }
 
-    // The search field's delegate (033): all methods of all three protocols
+    // The search field's delegate: all methods of all three protocols
     // are optional; the ones used are in the `impl` below.
     unsafe impl NSControlTextEditingDelegate for TerminalPane {}
     unsafe impl NSTextFieldDelegate for TerminalPane {}
     unsafe impl NSSearchFieldDelegate for TerminalPane {}
 
-    // **Pane-level menu selectors** (039 Karar 2): each is a one-line wrapper
-    // around a named method (R2.3) — an owner without a menu can call the
+    // **Pane-level menu selectors**: each is a one-line wrapper
+    // around a named method — an owner without a menu can call the
     // same method directly. The responder chain of a targetless action is
     // `BateriView` → pane → window → delegate, and while the search field has
     // focus field editor → field → … → pane; so the item reaches the focused
-    // pane and 033's "while the field has focus the chain does not pass
+    // pane and the "while the field has focus the chain does not pass
     // through `BateriView`" reason is moot. Application-wide ones
     // (`settingsDidChange:`, theme) are in `AppDelegate`, tab jobs
     // (`closeTab:`, `selectTab:`) in the window.
@@ -1068,8 +1067,8 @@ define_class!(
 
         /// Edit ▸ Find ▸ Find… (⌘F).
         ///
-        /// The selectors are **our own names**, not `performFindPanelAction:`
-        /// (033 Karar 10): while the field has focus the first responder is
+        /// The selectors are **our own names**, not `performFindPanelAction:`:
+        /// while the field has focus the first responder is
         /// AppKit's field editor and it would implement that selector itself and swallow it.
         #[unsafe(method(findInScrollback:))]
         fn find_in_scrollback(&self, _sender: Option<&AnyObject>) {
@@ -1130,7 +1129,7 @@ define_class!(
             self.page_down();
         }
 
-        /// The panel's close button — the same path as Esc (033 Karar 5).
+        /// The panel's close button — the same path as Esc.
         #[unsafe(method(closeSearch:))]
         fn close_search_action(&self, _sender: Option<&AnyObject>) {
             self.close_search();
@@ -1140,7 +1139,7 @@ define_class!(
         /// and the ⊗ button.
         #[unsafe(method(searchFieldChanged:))]
         fn search_field_changed(&self, _sender: Option<&AnyObject>) {
-            // Typing in the field is input to this pane (050 R3): the focus
+            // Typing in the field is input to this pane: the focus
             // query counts the field as the pane's focus, so its `idle` too.
             self.note_interaction();
             self.apply_search();
@@ -1152,7 +1151,7 @@ define_class!(
             self.apply_search();
         }
 
-        /// The field's command hook (033 Karar 10): ⏎ the previous (older), ⇧⏎
+        /// The field's command hook: ⏎ the previous (older), ⇧⏎
         /// the next (newer) match; Esc closes the panel — instead of
         /// `NSSearchField`'s "clear the text" default. The remaining commands
         /// go to the field itself (`false`).
@@ -1187,8 +1186,8 @@ define_class!(
 
         /// Enabled state of the Find items, clearing, scrolling and upload
         /// cancel; **an unknown item is `true`** — point size is always enabled.
-        /// Clearing and scrolling are greyed out on the alternate screen (034
-        /// Karar 2): the primary scrollback is unreachable there, a grey item is
+        /// Clearing and scrolling are greyed out on the alternate screen: the
+        /// primary scrollback is unreachable there, a grey item is
         /// an honest "not here"; they are grey without a session too.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
@@ -1203,11 +1202,11 @@ define_class!(
                 self.session()
                     .is_some_and(|session| session.has_selection())
             } else if action == Some(sel!(cancelUpload:)) {
-                // ⌘. only while this pane has a queue (037 Karar 7); the grey
+                // ⌘. only while this pane has a queue; the grey
                 // item's shortcut falls to `keyDown:` and is swallowed there.
                 self.ivars().uploads.borrow().active()
             } else if action == Some(sel!(forgetPassword:)) {
-                // A remote tab with a saved password (047 R6.2).
+                // A remote tab with a saved password.
                 self.can_forget_password()
             } else {
                 true
@@ -1215,9 +1214,9 @@ define_class!(
         }
 
         /// Shell ▸ Cancel Upload (⌘.) and the popover's `Cancel all ⌘.`: this
-        /// pane's **whole** upload queue (037 Karar 7 → Kullanıcı kararı 5);
-        /// if the flowing item has gone past 30 seconds it asks first
-        /// (phase-7). Not Esc, because the keyboard goes to the remote shell at
+        /// pane's **whole** upload queue;
+        /// if the flowing item has gone past 30 seconds it asks first.
+        /// Not Esc, because the keyboard goes to the remote shell at
         /// that moment. The menu shortcut is caught before `keyDown:`, so it
         /// also works on the alternate screen (vim) — its only gate is the queue
         /// (`validateMenuItem:`).
@@ -1226,7 +1225,7 @@ define_class!(
             self.cancel_uploads();
         }
 
-        /// Shell ▸ Forget Password for “{host}” (047 R6.2): this pane's remote
+        /// Shell ▸ Forget Password for “{host}”: this pane's remote
         /// account's saved password (`validateMenuItem:` greys it without one).
         #[unsafe(method(forgetPassword:))]
         fn forget_password_sent(&self, _sender: Option<&AnyObject>) {
@@ -1278,10 +1277,10 @@ impl TerminalPane {
             zoom,
             masters,
         } = launch;
-        // The saved identity of a restored pane (053), a new one otherwise.
+        // The saved identity of a restored pane, a new one otherwise.
         let tab_id = launch.tab_id.take().unwrap_or_else(new_tab_id);
         let renderer = Rc::new(Renderer::system_default()?);
-        // The layer is ours (040 → Karar 8): wgpu configures its device,
+        // The layer is ours: wgpu configures its device,
         // format and drawable size, the scale stays with its owner.
         let layer = CAMetalLayer::new();
         // SAFETY: `layer` is a live `CAMetalLayer`; wgpu retains it.
@@ -1369,8 +1368,8 @@ impl TerminalPane {
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
-        // The pane is a plain **container**, `BateriView` is its child (033 →
-        // R4.1): the search panel will float above the terminal and must be a
+        // The pane is a plain **container**, `BateriView` is its child: the
+        // search panel will float above the terminal and must be a
         // sibling of the Metal layer, not its child — the subviews of a
         // layer-hosting view are outside AppKit's contract. The pane is
         // layer-backed, otherwise the sibling panel could end up **below** the
@@ -1429,8 +1428,8 @@ impl TerminalPane {
         self.ivars().id
     }
 
-    /// The session's persistent identity (`TERM_SESSION_ID`, `bateri://tab/<id>`;
-    /// 038). Separate from the in-process [`TerminalPane::id`]: that one is
+    /// The session's persistent identity (`TERM_SESSION_ID`, `bateri://tab/<id>`).
+    /// Separate from the in-process [`TerminalPane::id`]: that one is
     /// the key of main-queue returns, this is the name given outward.
     pub(crate) fn tab_id(&self) -> &TabId {
         &self.ivars().tab_id
@@ -1441,13 +1440,12 @@ impl TerminalPane {
         self.ivars().closed.get()
     }
 
-    /// This pane's temporary point-size delta — a new tab inherits it
-    /// (026 → Karar 3).
+    /// This pane's temporary point-size delta — a new tab inherits it.
     pub(crate) fn zoom(&self) -> Zoom {
         self.ivars().zoom.get()
     }
 
-    /// What session restore saves of this pane (053 Karar 4) and, with
+    /// What session restore saves of this pane and, with
     /// `with_history`, its scrollback as VT bytes ([`Session::final_history`];
     /// an empty one is no file). `None` for a pane without a session or whose
     /// closing has begun: there is nothing live to save.
@@ -1533,12 +1531,12 @@ impl TerminalPane {
     /// see the dock reserve, otherwise the shell is born at launch with one
     /// row too many and the first frame eats a `TIOCSWINSZ` for the correction.
     ///
-    /// `working_directory` is the caller's decision (026 → Karar 4: the active
+    /// `working_directory` is the caller's decision (the active
     /// tab's directory, else home). The error returns to the caller: in the
     /// first window the process exits, in ⌘T/⌘N only that window closes —
     /// the other tabs' shells must not die because a new one could not be born.
     ///
-    /// `launch.initial_input` is the shell's first input (037 Karar 6: ⌘T in
+    /// `launch.initial_input` is the shell's first input (⌘T in
     /// a remote tab, `AppDelegate::open_window`'s decision); `None` → an
     /// ordinary local shell.
     ///
@@ -1624,14 +1622,14 @@ impl TerminalPane {
         let options = SessionOptions {
             command,
             // Directory and locale follow the same rule in **every**
-            // session, timed run included: the decision has a single arm
-            // (`discussion.md` → Karar 6 eki, "istisnasız") and neither of
+            // session, timed run included: the decision has a single arm,
+            // without exception, and neither of
             // the two fixed scripts depends on directory or locale —
             // `printf` with `sleep`, `date` with `printf`; paths absolute
             // or from `PATH`, output ASCII.
             //
             // The directory now comes from the caller: a new tab is in the
-            // active tab's OSC 7 directory (026 → Karar 4); in a timed run
+            // active tab's OSC 7 directory; in a timed run
             // and the first window `child::working_directory()`.
             working_directory,
             // The title's `~` rule; **the same resolution** as the directory (`child::home`).
@@ -1658,28 +1656,28 @@ impl TerminalPane {
             // slot (`start` wrote it a line earlier) and the alternate-screen
             // notifier's gate reads the same slot too, so they cannot diverge.
             dock: self.ivars().dock_rows_at_birth.get() > 0,
-            // Clustering (035) is on in all windows, timed run included.
-            // Not a settings key (035 Karar 2): rolling back is this one line.
+            // Clustering is on in all windows, timed run included.
+            // Not a settings key: rolling back is this one line.
             cluster: true,
             // A timed run always gets `None` from `open_window` (single
             // window, no ⌘T), so its fixed scripts are unaffected by this.
             initial_input,
             shell_marks,
-            // The identity is in every window, timed run included (038
-            // Karar 8): the variables read no file and do not move the tokens.
+            // The identity is in every window, timed run included: the
+            // variables read no file and do not move the tokens.
             tab_id: Some(self.ivars().tab_id.clone()),
-            // The machine's name (044): `file://$HOST/…` (GNU `ls --hyperlink`)
+            // The machine's name: `file://$HOST/…` (GNU `ls --hyperlink`)
             // and OSC 7's named authority count as local. One `gethostname`
             // per pane; the timed run's tokens do not depend on it.
             hostname: crate::links::hostname(),
-            // A restored pane's scrollback (053); `None` everywhere else.
+            // A restored pane's scrollback; `None` everywhere else.
             replay,
         };
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
-        // The update's handover (055 R4.3): the running program is carried
+        // The update's handover: the running program is carried
         // on; if the session cannot be adopted after all (its `bt-core` blob
         // does not decode) the pane falls back to a new shell here, with the
-        // carried history and the note (Karar 8).
+        // carried history and the note.
         let adopting = adopt.is_some();
         let (session, shell_parent) = match adopt {
             Some(adopted) => match adopt_session(options.clone(), adopted, grid, &wake) {
@@ -1704,7 +1702,7 @@ impl TerminalPane {
         // thread, so where the last reference drops is clear (see `shutdown`).
         let _ = self.ivars().session.set(Arc::clone(&session));
         let _ = self.ivars().shell_parent.set(shell_parent);
-        // The host marks' list at birth (037 Karar 2); its live change comes
+        // The host marks' list at birth; its live change comes
         // from `AppDelegate::reload_settings` ([`Self::set_host_marks`]).
         session.set_host_marks(&settings.remote_hosts);
         // A title notification that arrived before the session entered the slot
@@ -1717,8 +1715,8 @@ impl TerminalPane {
         // above. On the `resize` path the same triple is also written together
         // (`refresh_geometry`).
         view.set_metrics(grid, self.ivars().dock_rows.get());
-        // The rhythm is the view's display link, as a timer (040 → Karar 7,
-        // path (b)); it gets the frame loop to tick right below.
+        // The rhythm is the view's display link, as a timer; it gets the
+        // frame loop to tick right below.
         let pacer = MacPacer::new(mtm, view);
         let link = DisplayLink::new(
             Arc::clone(&pacer) as Arc<dyn Pacer>,
@@ -1732,7 +1730,7 @@ impl TerminalPane {
             },
             stats,
             // **The path is set up only in a window that has a dock** and this
-            // is structural (R5.1): in a dockless session an alternate-screen
+            // is structural: in a dockless session an alternate-screen
             // transition cannot change anything, so there is no watch either.
             // Had it been shut off by a condition, the claim "no resize at all"
             // would depend on the correctness of a branch.
@@ -1788,7 +1786,7 @@ impl TerminalPane {
         // opened in the background (`open -g`, a login item, a script-launched
         // open while another application is in front) no notification would
         // arrive and `focused` would stay `true`: an unfocused window would
-        // draw a filled caret and set up the blink clock (`/code-review`).
+        // draw a filled caret and set up the blink clock.
         self.apply_focus(self.window().is_some_and(|window| window.isKeyWindow()));
         // A carried-on session can be on the alternate screen already (vim
         // across the update): the link was born seeing it, so no transition
@@ -1796,7 +1794,7 @@ impl TerminalPane {
         if adopting {
             self.alt_screen_did_change();
             // The remote target is not carried (the process table is its
-            // source, 055 Karar 4) and a carried `ssh` gives no new `C` edge:
+            // source) and a carried `ssh` gives no new `C` edge:
             // the probe is armed once by hand, so `⇄ host`, the masters'
             // session and the lazy helper come back without a prompt.
             if self
@@ -1818,7 +1816,7 @@ impl TerminalPane {
     /// **It re-reads the truth**, ignoring what the notification carried: if
     /// two transitions chase each other (vim open-close) both jobs waiting in
     /// the queue see the same, current answer. If nothing changed it **does
-    /// nothing** — this gate upholds the "one resize per transition" (R5.3)
+    /// nothing** — this gate upholds the "one resize per transition"
     /// claim.
     pub(crate) fn alt_screen_did_change(&self) {
         let Some(session) = self.ivars().session.get() else {
@@ -1885,9 +1883,9 @@ impl TerminalPane {
     }
 
     /// `[remote]` changed — the `hosts` pattern list goes to the session; the
-    /// active remote host's mark is re-resolved there (037 Karar 2). The tab's
+    /// active remote host's mark is re-resolved there. The tab's
     /// dot is the window's job (`TerminalWindow::set_host_marks`). The preview
-    /// and download keys (045 R8) are kept here for the next download.
+    /// and download keys are kept here for the next download.
     pub(crate) fn set_host_marks(&self, settings: &Settings) {
         if let Some(session) = self.ivars().session.get() {
             session.set_host_marks(&settings.remote_hosts);
@@ -1920,7 +1918,7 @@ impl TerminalPane {
         self.ivars().link_label.0.paint(&theme);
     }
 
-    /// Shows or hides the dim veil (039 Karar 7, R4.4). The decision is the
+    /// Shows or hides the dim veil. The decision is the
     /// owner's ("not focused and more than one pane in the window",
     /// `TerminalWindow::refresh_dim`); it asks for no frame — the veil is AppKit's.
     pub(crate) fn set_dimmed(&self, dimmed: bool) {
@@ -1928,7 +1926,7 @@ impl TerminalPane {
     }
 
     /// Shows the ⌘-hovered OSC 8 link's target in the bottom-left label, or
-    /// hides it (`None`; 044 Karar 7). The caller is `hyperlink`'s hover: only
+    /// hides it (`None`). The caller is `hyperlink`'s hover: only
     /// with ⌘ and only for an OSC 8 link — a plain-text link is its own target.
     /// The width is the text's, at most the pane's minus the margins; asks for
     /// no frame.
@@ -1965,11 +1963,11 @@ impl TerminalPane {
     /// Gives the link the cursor's values that descend from the settings.
     ///
     /// **Launch and save time go through the same code** and the reason is a
-    /// class of defect (`/code-review`, 016): had the two lists been written
+    /// class of defect: had the two lists been written
     /// separately they could drift — a key seeded only at launch would not
     /// apply at save time, a key only reloaded would stay at the default at
-    /// launch. Both are silent and `plan.md` names that class ("a key that
-    /// descends halfway shows up in no gate").
+    /// launch. Both are silent: a key that descends halfway shows up in no
+    /// gate.
     ///
     /// A single `Changes::caret` field, two calls: the destinations are
     /// separate (drawing numbers to `Frame`, the period to `bt_gpu::blink`)
@@ -1999,14 +1997,14 @@ impl TerminalPane {
     /// Gives the view the scrolling's **resolved** mode
     /// (`AppDelegate::smooth_scroll`). To the view, not the link: the decision
     /// is made in the event's classification, in `scrollWheel:`, and the
-    /// `false` arm is the very same as today's line path (027 Karar 5).
+    /// `false` arm is the very same as today's line path.
     pub(crate) fn set_smooth_scroll(&self, smooth: bool) {
         self.ivars().smooth_scroll.set(smooth);
         self.ivars().view.set_smooth_scroll(smooth);
     }
 
     /// The keyboard came to the terminal (`here`) or went to the search field
-    /// — `BateriView`'s first-responder hooks supply it (033 R7). The focus's
+    /// — `BateriView`'s first-responder hooks supply it. The focus's
     /// second bit; the combination of the two bits is in `bt-gpu`
     /// (`DisplayLink::set_keyboard_in_terminal`). In a timed run it stays
     /// silent through [`TerminalPane::apply_focus`]'s gate.
@@ -2026,7 +2024,7 @@ impl TerminalPane {
         }
     }
 
-    /// The smallest pane's size, in points (039 Karar 14): a pane whose grid
+    /// The smallest pane's size, in points: a pane whose grid
     /// is exactly [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`] — the inverse of
     /// [`split_into_grid`] (left gutter + columns, dock reserve + rows). The
     /// measure is this pane's cell and dock reserve: the point-size delta is
@@ -2036,7 +2034,7 @@ impl TerminalPane {
     ///
     /// Before [`TerminalPane::start`] the dock reserve is the birth package's
     /// (the one `start` will set): session restore checks the saved tree
-    /// against this limit before any shell starts (053).
+    /// against this limit before any shell starts.
     pub(crate) fn min_size(&self) -> Option<NSSize> {
         let scale = self.window()?.backingScaleFactor();
         let cell = self.ivars().renderer.cell_metrics(scale);
@@ -2065,7 +2063,7 @@ impl TerminalPane {
     }
 
     /// Whether a pane of `size` (points) has a grid that passes the smallest
-    /// pane limit (039 Karar 14) — the split's gate. The new split inherits
+    /// pane limit — the split's gate. The new split inherits
     /// the cell and the dock reserve from this pane ([`TerminalPane::min_size`]).
     /// `false` if not attached to a window.
     pub(crate) fn grid_fits(&self, size: NSSize) -> bool {
@@ -2073,7 +2071,7 @@ impl TerminalPane {
             .is_some_and(|min| size.width >= min.width && size.height >= min.height)
     }
 
-    /// The job running in the foreground outside the shell (028 → Karar 1).
+    /// The job running in the foreground outside the shell.
     /// Idle if there is no session or the reader thread has finished: the
     /// shell is gone and `child_pid` may be stale, a stale pid is not asked.
     pub(crate) fn foreground(&self) -> Foreground {
@@ -2088,7 +2086,7 @@ impl TerminalPane {
         jobs::foreground(parent, session.child_pid(), &SystemTable)
     }
 
-    /// The remote-session probe (036 Karar 2): takes the running command's
+    /// The remote-session probe: takes the running command's
     /// generation, probes the foreground group and reports to the session if
     /// it found ssh/mosh. The return is two bits ([`RemoteProbeOutcome`]):
     /// **whether undecided** — if so the arm stays set and the next output
@@ -2118,14 +2116,14 @@ impl TerminalPane {
             },
             Probe::Local => settled,
             Probe::Remote(target) => {
-                // A call bateri wrapped carries its nonce (049 R2.3): kept for
+                // A call bateri wrapped carries its nonce: kept for
                 // the bootstrap's `up`, which may already be here.
                 if let Some(nonce) = &target.nonce {
                     self.ivars().wrap_proof.borrow_mut().wrapped =
                         Some((command, nonce.clone(), target.argv.clone()));
                 }
                 let wrapped = target.nonce.is_some();
-                // The line is per argument, with readable quoting (037 Karar 1);
+                // The line is per argument, with readable quoting;
                 // `bt-core` does not write the rule a second time, it stores the string.
                 let line = quote::command_line(&target.argv);
                 let target = RemoteTarget {
@@ -2146,12 +2144,12 @@ impl TerminalPane {
         }
     }
 
-    /// The bootstrap's proof (049 R2.3). **First**, whatever the probe says,
+    /// The bootstrap's proof. **First**, whatever the probe says,
     /// the `up`'s nonce is marked seen ([`bt_shell_common::ssh_wrap::mark_up`],
     /// a file created on a thread of its own, no `ssh -G`): the local `ssh`
     /// function's fallback asks for its own nonce before anything else, so a
     /// session that ends at once or a slow `ssh -G` cannot have a server with
-    /// a shell branded `plain` (049 phase-2 → Uygulama Notları). A forged `up`
+    /// a shell branded `plain`. A forged `up`
     /// (a remote program printing one) can only name a nonce it cannot know —
     /// at worst a fallback that does not happen, the safe direction.
     ///
@@ -2187,7 +2185,7 @@ impl TerminalPane {
         // A write that fails (the state file's lock past its patience, a
         // full disk) is tried again a few times on the thread: nothing else
         // asks again for this generation, and a missing `posix` row is the
-        // wrong direction for phase-2's fallback.
+        // wrong direction for the plain-ssh fallback.
         let spawned = std::thread::Builder::new()
             .name("remote posix".into())
             .spawn(move || {
@@ -2213,8 +2211,8 @@ impl TerminalPane {
         }
     }
 
-    /// The user typed into the remote session after its login (049 R7,
-    /// [`Wake::remote_typed`]): when the session is the wrapped `ssh` the probe
+    /// The user typed into the remote session after its login
+    /// ([`Wake::remote_typed`]): when the session is the wrapped `ssh` the probe
     /// found ([`WrapProof`], same generation), its attempt is marked used
     /// ([`bt_shell_common::ssh_wrap::mark_used`], a file on a thread of its
     /// own) — the local `ssh` function's fallback then reruns nothing and
@@ -2287,7 +2285,7 @@ impl TerminalPane {
 
     /// The focus changed — forwards it to `bt-gpu`.
     ///
-    /// **Never called in a hermetic run** (R7.1) and the gate is here, not in
+    /// **Never called in a hermetic run** and the gate is here, not in
     /// `bt-gpu`'s default: `DisplayLink`'s `focused` is born `true` anyway but
     /// that alone is not enough — a Spotlight opening during `make smoke`
     /// produces `windowDidResignKey:`, which asks for a frame, and the gate
@@ -2326,8 +2324,7 @@ impl TerminalPane {
     /// 0. Count the pane as closed ([`PaneIvars::closed`]) and remove the frame
     ///    observer: while the tab bar closes AppKit can re-lay-out the content
     ///    and if the observer stayed the dying session would receive a resize
-    ///    (and a `Msg::Resize` that cannot be written to a dropped reader)
-    ///    (`/code-review`).
+    ///    (and a `Msg::Resize` that cannot be written to a dropped reader).
     /// 1. Cut the rhythm (`DisplayLink::stop`): the link stops, leaves the
     ///    run loop and the wake gate closes. No new frame is asked after this.
     /// 2. **Detach** the `Waker` from `ShellWake` and drop it here, on the
@@ -2356,20 +2353,20 @@ impl TerminalPane {
         })
     }
 
-    /// Freezes the pane for the update's handover (055 R4.2) and returns
+    /// Freezes the pane for the update's handover and returns
     /// what the holder carries: the master, the child's pid and start time,
     /// the pane's state ([`PaneState`](crate::handover::PaneState): the
     /// VT, `bt-core`'s blob, the unsent input, the scrollback for a
     /// fallback) and the tail as the buffer's head.
     ///
-    /// The second half of the return is the pane's 053 history
+    /// The second half of the return is the pane's session-restore history
     /// (`Session::frozen_history`, also inside the state) for the caller's
     /// save at this quit.
     ///
     /// The start time is read **before** the freeze, and so is the pane's
     /// own quiet-down ([`Self::quiesce`]: no frame may reach the `Term` the
     /// freeze probed destructively) — but not the remote session's end: the
-    /// ssh master is not closed by a handover (Karar 10). `None` if there is
+    /// ssh master is not closed by a handover. `None` if there is
     /// nothing to carry (no session, already closed, the child's start time
     /// unreadable) or the freeze failed — the caller closes the pane today's
     /// way, which a failed freeze leaves intact.
@@ -2427,7 +2424,7 @@ impl TerminalPane {
         // The helper's ssh goes now, not when the last reference drops.
         self.remote_helper().borrow_mut().close();
         // A remote session closing with the pane is one less session to the
-        // host: our master ends with the last one (047 R9.3).
+        // host: our master ends with the last one.
         if end_remote
             && self.ivars().ssh_session.take().is_some()
             && let Some(masters) = self.ivars().masters.as_deref()
@@ -2482,10 +2479,9 @@ impl TerminalPane {
     /// there is blur.
     ///
     /// **The scale's two gates** (`Surface::set_size`, `Renderer::cell_metrics`;
-    /// debt since 003) are not merged: this function is the only caller of the
+    /// a long-standing debt) are not merged: this function is the only caller of the
     /// two, the scale is read once here and goes to both from the same local;
-    /// the font setting does not touch the scale
-    /// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 6).
+    /// the font setting does not touch the scale.
     ///
     /// The font slot is written here too, at the end: the only path that
     /// (re)builds the atlas is `cell_metrics` and the font notice is current
@@ -2502,7 +2498,7 @@ impl TerminalPane {
         let bounds = view.bounds().size;
         let (width_px, height_px) = (bounds.width * scale, bounds.height * scale);
         // The scale is the layer owner's; the pixel size is the surface's
-        // configuration (040 → Karar 8).
+        // configuration.
         self.ivars().layer.setContentsScale(scale);
         self.ivars().surface.set_size(width_px, height_px);
 
@@ -2527,12 +2523,12 @@ impl TerminalPane {
     }
 }
 
-/// Pane-level actions (R2.3) and scrollback search (033) — the menu
+/// Pane-level actions and scrollback search — the menu
 /// selectors and the search panel's controls land here.
 impl TerminalPane {
     /// Remote state or title changed: first the upload queue's connection edge
     /// ([`TerminalPane::check_upload_connection`]; if ssh closed the waiting
-    /// ones are cancelled — 037 Karar 7 → Kullanıcı kararı 6), then the owner
+    /// ones are cancelled), then the owner
     /// re-reads the title and the tab's dot ([`PaneHost::title_changed`]).
     pub(crate) fn remote_or_title_changed(&self) {
         self.remote_edge();
@@ -2552,14 +2548,14 @@ impl TerminalPane {
     /// The remote state's edge, from both of its paths — the probe
     /// ([`TerminalPane::remote_or_title_changed`]) and the title news that
     /// carries `C`/`D`/`A`'s deletion: the upload queue's connection, then the
-    /// load indicator's generation (046 phase-4).
+    /// load indicator's generation.
     pub(crate) fn remote_edge(&self) {
         self.check_upload_connection();
         self.sync_ssh_session();
         self.sync_stats_generation();
     }
 
-    /// The remote edge's half for the masters (047 R9.1, R9.3): an ended
+    /// The remote edge's half for the masters: an ended
     /// remote session is reported to the registry — our master to the host
     /// ends with the last pane's session — and a new one is registered and,
     /// while the user's ssh still asks (a host key, a password), the login
@@ -2594,7 +2590,7 @@ impl TerminalPane {
         }
     }
 
-    /// The login probe's check (047 R9.1): `true` while the user's ssh has not
+    /// The login probe's check: `true` while the user's ssh has not
     /// logged in — the probe re-arms. Logged in: the background jobs may
     /// connect now, the load indicator starts. Not remote any more: done.
     pub(crate) fn login_check(&self) -> bool {
@@ -2612,12 +2608,11 @@ impl TerminalPane {
         true
     }
 
-    /// The remote session `command` got past its login (047 R9.1): when it is
+    /// The remote session `command` got past its login: when it is
     /// the wrapped `ssh` the probe found ([`WrapProof`]), its attempt is marked
     /// logged in ([`bt_shell_common::ssh_wrap::mark_login`], a file on a
     /// thread of its own) — the fallback then reads a 255 as an endpoint that
-    /// refused our command, not as ssh's own error (049 phase-3
-    /// `/code-review`). Once per generation; a timed run marks nothing.
+    /// refused our command, not as ssh's own error. Once per generation; a timed run marks nothing.
     fn note_login(&self, command: u64) {
         if self.ivars().run.is_some() {
             return;
@@ -2652,14 +2647,13 @@ impl TerminalPane {
     }
 
     /// Edit ▸ Find ▸ Find… (⌘F): opens the panel, focuses the field and selects
-    /// its text (033 Karar 5); if the panel is open, only focus and selection.
-    /// If the pane has no query the field fills with the find pasteboard's text (Karar 6).
+    /// its text; if the panel is open, only focus and selection.
+    /// If the pane has no query the field fills with the find pasteboard's text.
     pub(crate) fn find(&self) {
         self.open_search(true);
     }
 
-    /// Edit ▸ Find ▸ Find Next (⌘G): the previous, **older** match
-    /// (033 Karar 3).
+    /// Edit ▸ Find ▸ Find Next (⌘G): the previous, **older** match.
     pub(crate) fn find_next(&self) {
         self.search_step(SearchDirection::Older);
     }
@@ -2669,7 +2663,7 @@ impl TerminalPane {
         self.search_step(SearchDirection::Newer);
     }
 
-    /// Edit ▸ Clear to Start (⌘K; 034 Karar 1): deletes the screen and the
+    /// Edit ▸ Clear to Start (⌘K): deletes the screen and the
     /// scrollback, the current block stays — `Session::clear_to_start`. No
     /// byte goes to the shell; on the alternate screen the item is grey and
     /// the call is a no-op anyway.
@@ -2688,7 +2682,7 @@ impl TerminalPane {
     }
 
     /// View ▸ Scroll to Top (⌘Home): the start of the scrollback. There is no
-    /// new scroll API in `bt-core` (034 Muhakeme): `scroll_page`'s
+    /// new scroll API in `bt-core`: `scroll_page`'s
     /// `saturating_mul` clamps `i32::MAX` pages to the end of the scrollback.
     pub(crate) fn scroll_to_top(&self) {
         self.scroll_pages(i32::MAX);
@@ -2730,8 +2724,8 @@ impl TerminalPane {
     fn search_bar(&self) -> &SearchBar {
         self.ivars().search.get_or_init(|| {
             // The panel is inside the pane, a sibling of the view that carries
-            // the Metal layer (033 → R4.1; the pane is that very container,
-            // 039 Karar 2). The field's delegate and the controls' target are
+            // the Metal layer (the pane is that very container). The field's
+            // delegate and the controls' target are
             // the pane — both weak, the pane holds the panel.
             let bar = SearchBar::new(
                 self.mtm(),
@@ -2793,7 +2787,7 @@ impl TerminalPane {
         true
     }
 
-    /// Sets up the count index's driver (033 phase-5, Karar 2-B): one chunk on
+    /// Sets up the count index's driver: one chunk on
     /// the next turn of the main queue. A no-op if already set up, if the
     /// panel is closed or if the query is not a pattern to count.
     ///
@@ -2856,7 +2850,7 @@ impl TerminalPane {
     /// If the opening gave the query **again** (Esc had closed the search) the
     /// step is that selection itself: `set_search` chose and revealed the
     /// nearest match and one more step on top would make ⇧⌘G wrap to the
-    /// oldest (`/code-review`).
+    /// oldest.
     fn search_step(&self, direction: SearchDirection) {
         if self.open_search(false) {
             return;
@@ -2879,9 +2873,9 @@ impl TerminalPane {
         }
     }
 
-    /// Esc and the close button (033 Karar 5): the panel goes away, **the
+    /// Esc and the close button: the panel goes away, **the
     /// window stays in place**, the current match becomes the grid's selection
-    /// and the keyboard returns to the terminal. The query stays in the field (Karar 6).
+    /// and the keyboard returns to the terminal. The query stays in the field.
     pub(crate) fn close_search(&self) {
         let Some(bar) = self.ivars().search.get() else {
             return;
@@ -2898,7 +2892,7 @@ impl TerminalPane {
         }
     }
 
-    /// Edit ▸ Find ▸ Use Selection for Find (⌘E; 033 Karar 6): the selection's
+    /// Edit ▸ Find ▸ Use Selection for Find (⌘E): the selection's
     /// first line (grid or dock) becomes the query — escaped in regex mode —,
     /// is written to the find pasteboard and the panel opens with the field focused.
     pub(crate) fn use_selection_for_find(&self) {
@@ -2944,7 +2938,7 @@ impl TerminalPane {
         &self.ivars().uploads
     }
 
-    /// The helper ssh session's handle (045 Karar 10).
+    /// The helper ssh session's handle.
     pub(crate) fn remote_helper(&self) -> &RefCell<RemoteHelper> {
         &self.ivars().remote_helper
     }
@@ -3005,7 +2999,7 @@ impl TerminalPane {
         &self.ivars().list_closed_at
     }
 
-    /// The open load indicator popover (046 phase-5).
+    /// The open load indicator popover.
     pub(crate) fn stats_popover(&self) -> &RefCell<Option<StatsPopover>> {
         &self.ivars().stats_popover
     }
@@ -3037,7 +3031,7 @@ impl TerminalPane {
 /// fallback's replay.
 type NotAdopted = (std::io::Error, Option<Vec<u8>>);
 
-/// Carries a frozen pane on in this process ([`Session::adopt`], 055 R2.3):
+/// Carries a frozen pane on in this process ([`Session::adopt`]):
 /// born at the frozen grid size (the VT is laid out for it), then resized
 /// to this pane's grid. `Err` gives back the carried history for the
 /// fallback.
@@ -3082,7 +3076,7 @@ fn adopt_session(
     Ok((session, parent))
 }
 
-/// A new tab identity, from `NSUUID` (038 Karar 2).
+/// A new tab identity, from `NSUUID`.
 fn new_tab_id() -> TabId {
     // `UUIDString` gives the canonical 8-4-4-4-12 form; if `parse` rejects it
     // the defect is in `bt-core`'s contract, not on this line.
@@ -3100,7 +3094,7 @@ mod tests {
     }
 
     /// Fake owner: records the events with their ids — no window, no
-    /// pasteboard (039 phase-2).
+    /// pasteboard.
     #[derive(Default)]
     struct FakeHost(std::cell::RefCell<Vec<(u64, String)>>);
 

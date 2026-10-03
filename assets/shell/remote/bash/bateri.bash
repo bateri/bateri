@@ -1,4 +1,4 @@
-# bateri's REMOTE bash wrapper (048) — read as `$ENV` by `bash --posix -l`.
+# bateri's REMOTE bash wrapper — read as `$ENV` by `bash --posix -l`.
 #
 # WHY POSIX MODE: `--rcfile` is ignored by a login shell, and a login shell is
 # what sshd would have started. In POSIX mode an interactive bash reads
@@ -11,7 +11,7 @@
 #
 # THE USER'S FILES ARE READ AT THE TOP LEVEL, not from a function: `declare`
 # and `local` inside a function are local, so `declare -x PATH=…` would be
-# undone on return (the trap the zsh wrapper measured, 009 phase-5). They are
+# undone on return (the trap the zsh wrapper measured). They are
 # read, never written (the `make audit` gate).
 
 # `ENV` is ours only for this start: the user's own value comes back, and
@@ -26,7 +26,7 @@ if [ -n "${BATERI_ENV+x}" ]; then
 else
   unset ENV
 fi
-# The blocks' parent (048 phase-3): the local `ssh` block the bootstrap
+# The blocks' parent: the local `ssh` block the bootstrap
 # exported; ours, so out of the environment (the zsh wrapper's reason).
 __bateri_rblock=${BATERI_RBLOCK-}
 unset BATERI_RBLOCK
@@ -77,7 +77,7 @@ __bateri_percent() {
   REPLY=$out
 }
 
-# The command blocks on the server (048 phase-3): the zsh wrapper's `D`/`A`/`C`
+# The command blocks on the server: the zsh wrapper's `D`/`A`/`C`
 # with our remote field, `bt_remote=<P>.<S>.<n>` (`P` the local `ssh` block,
 # `S` this shell's pid — two shells under one `ssh` command line are two
 # trails — and `n` its counter) — never `bt_block=`, which bateri reads as the local

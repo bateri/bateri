@@ -1,6 +1,5 @@
 //! The FreeType + fontconfig backend of [`FontSystem`] — the Linux font
-//! system, and the only module of this crate that sees either library
-//! (`.tasks/042-font-sistemi-linux/discussion.md` → Karar 5, 6).
+//! system, and the only module of this crate that sees either library.
 //!
 //! fontconfig **chooses** (the chain, the faces, the settings list, the
 //! cascade) and FreeType **measures and draws**. A font's file is read into
@@ -16,7 +15,7 @@
 //! face is opened at its nearest strike and its one **scale factor**
 //! (`FtFont::bitmap_scale`) is the single owner of the measured advance, the
 //! measured ink and the drawn size — the gate and the drawing read the same
-//! number, or `centre_shift`'s two consumers would disagree (Karar 6).
+//! number, or `centre_shift`'s two consumers would disagree.
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
@@ -39,7 +38,7 @@ use crate::rules::{Face, InkRect, Metrics, RawMetrics};
 use crate::system::FontSystem;
 
 /// fontconfig's alias for the monospaced font the user's configuration
-/// chose — the default chain's only link (Karar 3.1, 6). An alias has no name
+/// chose — the default chain's only link. An alias has no name
 /// to check, so the returned family is reported as is.
 const MONOSPACE: &str = "monospace";
 
@@ -63,7 +62,7 @@ pub(crate) struct FtFont {
     strike: Option<f64>,
     /// The cascade's sorted candidates — sorted once, on the first fallback,
     /// and shared by every face, size and copy of the chain it came from
-    /// (Karar 6: `FcFontSort` once per atlas).
+    /// (`FcFontSort` once per atlas).
     fallbacks: Rc<OnceCell<Option<FontSet<'static>>>>,
 }
 
@@ -232,7 +231,7 @@ impl FtFont {
     /// face, `1` for a scalable one. The **single owner** of a bitmap font's
     /// scale — [`FreeType::advance`], [`FreeType::ink`] and
     /// [`FreeType::draw_color`] all read it, so what the gate measures is
-    /// what is drawn (Karar 6).
+    /// what is drawn.
     fn bitmap_scale(&self) -> f64 {
         match self.strike {
             Some(strike) => self.size / strike,
@@ -425,7 +424,7 @@ impl FontSystem for FreeType {
     /// The `monospace` alias: whatever the user's fontconfig configuration
     /// resolves it to, reported by the family it resolved to — an alias has
     /// no name of its own to compare, so there is no substitution warning
-    /// here (Karar 3.1).
+    /// here.
     fn open_default(size: f64) -> (Self::Font, String) {
         let (font, family) = open_named(MONOSPACE, size);
         if font.face.is_none() {
@@ -469,7 +468,7 @@ impl FontSystem for FreeType {
     }
 
     /// The file's own fixed-width bit (`FT_IS_FIXED_WIDTH`) — CoreText's
-    /// `TraitMonoSpace` counterpart (Karar 6).
+    /// `TraitMonoSpace` counterpart.
     fn is_monospaced(font: &Self::Font) -> bool {
         font.face.as_ref().is_some_and(|face| face.is_fixed_width())
     }
@@ -529,8 +528,8 @@ impl FontSystem for FreeType {
     }
 
     /// Scaled from design units (the `hhea` values FreeType reports), not
-    /// from FreeType's rounded `size->metrics` — fractional like CoreText's
-    /// (Karar 6). The x-height is the OS/2 table's, else the top of `x`.
+    /// from FreeType's rounded `size->metrics` — fractional like CoreText's.
+    /// The x-height is the OS/2 table's, else the top of `x`.
     fn raw_metrics(font: &Self::Font) -> RawMetrics {
         let Some(face) = &font.face else {
             return RawMetrics {
@@ -577,7 +576,7 @@ impl FontSystem for FreeType {
         }
     }
 
-    /// `FcFontSort` on the chain's family, once (Karar 6), then the first
+    /// `FcFontSort` on the chain's family, once, then the first
     /// font in that order whose charset carries every code point of `text`
     /// ([`covers`]). `None` when no installed font covers it — fontconfig has
     /// no last-resort font, so "no candidate" arises here.
@@ -619,7 +618,7 @@ impl FontSystem for FreeType {
     }
 
     /// `harfrust` over the **same bytes** the candidate's FreeType face was
-    /// opened from, so the glyph number is the drawing font's (Karar 6). The
+    /// opened from, so the glyph number is the drawing font's. The
     /// candidate is the cascade's for the whole string; unlike `CTLine`,
     /// harfrust never substitutes another font, so the font that produces
     /// the glyph **is** the candidate — the CoreText backend's "the run's own
@@ -660,7 +659,7 @@ impl FontSystem for FreeType {
     /// (`FT_Outline_Translate`), the whole part to the blit — the cell
     /// advance is fractional and the centring gives a fractional `x`; a
     /// hinted or pixel-snapped glyph would stand somewhere other than where
-    /// the gate measured it (Karar 6).
+    /// the gate measured it.
     fn draw_mask(
         font: &Self::Font,
         glyph: u32,
@@ -832,7 +831,7 @@ fn box_weights(start: f64, scale: f64, count: usize, extent: usize) -> Vec<Vec<(
 /// every source pixel `scale` target pixels wide.
 ///
 /// A box filter in **premultiplied** space — the one resampler, no filter
-/// choice (Karar 6). It is written for shrinking (Noto's strike is 109 px,
+/// choice. It is written for shrinking (Noto's strike is 109 px,
 /// a cell is far smaller), and being an exact overlap integration it also
 /// enlarges, blockily, for the size a strike does not reach, instead of
 /// giving that glyph up to the box.
@@ -869,9 +868,8 @@ fn resample(
     }
 }
 
-/// Sample characters and family names for the platformless tests
-/// (`.tasks/042-font-sistemi-linux/discussion.md` → Karar 7), measured on
-/// the `make linux` image's fonts (`fonts-dejavu-core`).
+/// Sample characters and family names for the platformless tests, measured
+/// on the `make linux` image's fonts (`fonts-dejavu-core`).
 #[cfg(any(test, feature = "fixture"))]
 pub mod fixture {
     #[cfg(test)]

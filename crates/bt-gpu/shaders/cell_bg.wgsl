@@ -25,7 +25,7 @@ struct Instance {
 }
 
 // Small values are **immediates** (wgpu lowers them to `set*Bytes` on Metal and
-// to push constants on Vulkan; discussion.md → Karar 5). A module has one
+// to push constants on Vulkan). A module has one
 // `var<immediate>` block and both stages share it.
 //
 // **The order follows alignment**: `vec4` aligns to 16, `vec2` to 8. With

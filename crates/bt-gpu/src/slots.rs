@@ -8,8 +8,8 @@
 //! becomes one quad or two, which plane's list it lands in, the baked uv — is
 //! decided here, once.
 //!
-//! The colour plane's monotonic counter keeps its meaning (`CLAUDE.md` → "Renk
-//! ikinci bir düzlem"): uvs are baked at list-building time from the atlas's
+//! The colour plane's monotonic counter keeps its meaning (the colour plane
+//! has its own counter): uvs are baked at list-building time from the atlas's
 //! own slot origins.
 
 use bt_atlas::{Atlas, Face, Half, Metrics, Placed, Plane, SizeClass, Sprite};
@@ -35,7 +35,7 @@ pub(crate) trait SlotUpload {
 
 /// A slot's byte length and row pitch for `plane`: mask `w*h` / `w`, colour
 /// `4*w*h` / `4*w`. `metrics` is the atlas's **slot** metric
-/// (`Atlas::slot_metrics`, 052), not the grid's.
+/// (`Atlas::slot_metrics`), not the grid's.
 ///
 /// One copy: wgpu's `bytes_per_row` comes from here, and if it drifted from
 /// the buffer the GPU would read past a short buffer — silently. The lengths come from
@@ -65,7 +65,7 @@ pub(crate) fn glyph_lists(
     mask: &mut Vec<GlyphInstance>,
     color: &mut Vec<GlyphInstance>,
 ) {
-    // The **slot** metric (052): uploads are slot-sized; the grid's cell is
+    // The **slot** metric: uploads are slot-sized; the grid's cell is
     // read only for the wide glyph's second quad ([`fan`]).
     let metrics = atlas.slot_metrics();
     let (tw, th) = atlas.texture_px();
@@ -126,7 +126,7 @@ pub(crate) fn glyph_lists(
     }
 }
 
-/// Fills the typing effects' instance list (030): slot resolution and fan-out
+/// Fills the typing effects' instance list: slot resolution and fan-out
 /// through [`fan`], the **same** body as [`glyph_lists`] — no second copy.
 ///
 /// A wide glyph yields two instances and each carries **which half** it is:
@@ -143,7 +143,7 @@ pub(crate) fn fx_list(
     clusters: &Clusters,
     out: &mut Vec<FxInstance>,
 ) {
-    // The **slot** metric (052): uploads are slot-sized; the grid's cell is
+    // The **slot** metric: uploads are slot-sized; the grid's cell is
     // read only for the wide glyph's second quad ([`fan`]).
     let metrics = atlas.slot_metrics();
     let (tw, th) = atlas.texture_px();
@@ -202,13 +202,13 @@ pub(crate) struct Part {
 /// the sink would keep the borrow alive across `draw` and the first frame with
 /// a glyph would hit `BorrowMutError`). Here the atlas is already borrowed.
 ///
-/// `metrics` is the atlas's **slot** metric (the uploads' size, 052); the
+/// `metrics` is the atlas's **slot** metric (the uploads' size); the
 /// right half's quad steps by the **grid's** cell, read from
 /// `Atlas::metrics` here.
 ///
 /// Every surface gets it for free: [`glyph_lists`] runs per list (stripes,
 /// grid, fill band, dock) and the typing effects fan out through here too.
-/// 017's lesson — a surface must earn everything derived from the grid on its
+/// The lesson — a surface must earn everything derived from the grid on its
 /// own — is paid in one place.
 pub(crate) fn fan(
     atlas: &mut Atlas,
@@ -219,11 +219,11 @@ pub(crate) fn fan(
     clusters: &Clusters,
 ) -> [Option<Part>; 2] {
     let want = if glyph.wide { Half::Left } else { Half::Whole };
-    // The second quad steps by the **grid's** cell, not the slot (052): the
+    // The second quad steps by the **grid's** cell, not the slot: the
     // right half is the next column.
     let cell_w = atlas.metrics().cell_px.0;
-    // **The cluster reaches the atlas here** (035 Karar 4B): interning needs
-    // the atlas's borrow and the sink cannot take it (023). Both halves come
+    // **The cluster reaches the atlas here**: interning needs
+    // the atlas's borrow and the sink cannot take it. Both halves come
     // from the same sprite. Falling back to the base character is not written
     // twice: an id missing from the table is `Char`, and a cluster that does
     // not shape or fails the gate is `Atlas::slot`'s own answer.

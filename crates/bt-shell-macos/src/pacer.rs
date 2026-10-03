@@ -1,5 +1,4 @@
-//! The macOS [`Pacer`]: the vsync rhythm `bt-gpu`'s frame loop runs on (040
-//! phase-5, Karar 7's (b) path).
+//! The macOS [`Pacer`]: the vsync rhythm `bt-gpu`'s frame loop runs on.
 //!
 //! Four jobs, all AppKit/GCD, none in `bt-gpu`:
 //!
@@ -17,8 +16,8 @@
 //! 4. **The time base** — `CACurrentMediaTime`, the base of
 //!    `targetTimestamp`.
 //!
-//! The file moves to `bt-shell-macos` as it is when the shell is split (Karar
-//! 7); Linux's pacer comes with the winit set.
+//! The file moves to `bt-shell-macos` as it is when the shell is split;
+//! Linux's pacer comes with the winit set.
 
 use std::cell::RefCell;
 use std::sync::Arc;

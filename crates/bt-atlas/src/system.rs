@@ -8,8 +8,7 @@
 //!
 //! Static dispatch through a `cfg` alias ([`Backend`]), not a generic
 //! `Atlas` and not `dyn`: a process has one font system, and `bt-gpu` holds a
-//! plain `Atlas` (`.tasks/042-font-sistemi-linux/discussion.md` → Karar 1,
-//! 3).
+//! plain `Atlas`.
 
 use crate::raster::DrawResult;
 use crate::rules::{Face, InkRect, Metrics, RawMetrics};
@@ -127,11 +126,11 @@ pub(crate) type Backend = crate::freetype::FreeType;
 pub(crate) type Font = <Backend as FontSystem>::Font;
 
 /// Backend-specific sample characters and family names for the
-/// platformless tests (Karar 7).
+/// platformless tests.
 #[cfg(all(any(test, feature = "fixture"), target_os = "macos"))]
 pub use crate::coretext::fixture;
 
 /// Backend-specific sample characters and family names for the
-/// platformless tests (Karar 7).
+/// platformless tests.
 #[cfg(all(any(test, feature = "fixture"), target_os = "linux"))]
 pub use crate::freetype::fixture;

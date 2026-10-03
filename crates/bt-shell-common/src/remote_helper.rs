@@ -1,4 +1,4 @@
-//! The helper ssh session of a remote pane (045 Karar 10): one long-lived
+//! The helper ssh session of a remote pane: one long-lived
 //! `ssh … sh` that answers "does this exist, what is it, how big" line by line,
 //! so a ⌘-hover over a name in a remote `ls` costs one round trip on an open
 //! connection, not a new ssh handshake.
@@ -8,7 +8,7 @@
 //!   standard output into lines and every wait bounded ([`OPEN_TIMEOUT`],
 //!   [`STAT_TIMEOUT`], [`COUNT_TIMEOUT`]) — a hung ssh never blocks for good.
 //!   `BatchMode=yes` (the upload's argv): no password is asked on the stream —
-//!   the route gate opens bateri's own master first when it may (047), and a
+//!   the route gate opens bateri's own master first when it may, and a
 //!   background job whose server wants a password it does not have fails the
 //!   open with [`crate::ssh_route::SIGN_IN_NEEDED`] (the pane's Sign In…).
 //! - **[`RemoteHelper`]** is the pane's handle: a worker thread born at the
@@ -17,15 +17,14 @@
 //!   (`Session::remote_target`'s command): another generation closes the old
 //!   session and opens a new one, and so does [`RemoteHelper::close`] (the
 //!   pane closing) and [`IDLE`] without a question. While the load indicator
-//!   samples ([`Query::Load`], 046 Karar 1) a question comes every few seconds,
+//!   samples ([`Query::Load`]) a question comes every few seconds,
 //!   so the session stays open; it closes [`IDLE`] after sampling stops.
 //! - **Resolution** ([`remote_paths`]) is `links::resolve`'s, on the remote
 //!   disk: `~` from the helper's greeting, a relative name from the remote
-//!   OSC 7 directory and **no** relative name without it (Karar 2-A, R1.2).
+//!   OSC 7 directory and **no** relative name without it.
 //!
 //! Platform-free like `upload`'s processes; the platform shell takes the answer
-//! back to its main thread. The rationale is in
-//! `.tasks/045-uzak-dosya-indirme/discussion.md` → Karar 1, 2, 10.
+//! back to its main thread.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -54,12 +53,12 @@ pub const STAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// download sheet's file count). Design constant.
 pub const COUNT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How long a load sample's reply may take (046): a few `cat`s, a `df` and,
+/// How long a load sample's reply may take: a few `cat`s, a `df` and,
 /// with the popover open, a `ps`. Design constant — short, because the
 /// indicator hides on a timeout and the next tick asks again.
 pub const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A session with no question for this long closes (R1.3): an idle ssh
+/// A session with no question for this long closes: an idle ssh
 /// connection is not held open for the whole remote session. Design constant —
 /// long enough that hovering over a listing, reading, then hovering again does
 /// not pay a new handshake.
@@ -71,12 +70,12 @@ pub const IDLE: Duration = Duration::from_secs(120);
 pub const RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// The pane label's text when a relative name cannot be resolved because the
-/// remote shell has not reported its folder (Karar 2-A, R1.2).
+/// remote shell has not reported its folder.
 pub const REMOTE_CWD_UNKNOWN: &str = "Remote folder unknown — enable OSC 7 on the server";
 
 /// The label's text for an unknown remote folder: [`REMOTE_CWD_UNKNOWN`], or —
 /// when bateri's remote bootstrap reported why its integration did not start
-/// (048, `bt_core::RemoteSetupFault`) — that reason, since turning OSC 7 on by
+/// (`bt_core::RemoteSetupFault`) — that reason, since turning OSC 7 on by
 /// hand is then not the fix.
 pub fn remote_cwd_unknown(fault: Option<bt_core::RemoteSetupFault>) -> &'static str {
     use bt_core::RemoteSetupFault;
@@ -107,7 +106,7 @@ pub struct HelperSession {
 impl HelperSession {
     /// Starts `ssh` (the argv without the remote command) running the helper
     /// script and waits up to `timeout` for its greeting. `Err` is the pane
-    /// label's text: why there is no link (R1.3).
+    /// label's text: why there is no link.
     pub fn open(ssh: &[String], host: &str, timeout: Duration) -> Result<Self, String> {
         let Some((program, args)) = ssh.split_first() else {
             return Err(format!("No ssh command for {host}"));
@@ -131,7 +130,7 @@ impl HelperSession {
             .name("remote helper output".into())
             .spawn(move || {
                 // Bytes, not `lines()`: a remote rc file's non-UTF-8 banner must
-                // not end the session before the greeting (`/code-review`, 045).
+                // not end the session before the greeting (found in code review).
                 let mut reader = BufReader::new(stdout);
                 let mut bytes = Vec::new();
                 loop {
@@ -202,7 +201,7 @@ impl HelperSession {
             .map_err(|_| "The server's answer could not be read".to_owned())
     }
 
-    /// One load sample (046 Karar 2): `Ok(None)` if the server has no Linux
+    /// One load sample: `Ok(None)` if the server has no Linux
     /// `/proc` (`BT-NOPROC`). `Err` as [`Self::ask`]'s — the session is dropped
     /// after it.
     pub fn load(&mut self, detail: bool, timeout: Duration) -> Result<Option<LoadSample>, String> {
@@ -271,7 +270,7 @@ impl Drop for HelperSession {
     }
 }
 
-/// Why the helper did not open, as the pane's label says it (R1.3): one line,
+/// Why the helper did not open, as the pane's label says it: one line,
 /// with ssh's own last line if it gave one.
 pub fn open_failure(host: &str, timed_out: bool, stderr: &str) -> String {
     let last = last_line(stderr);
@@ -299,7 +298,7 @@ pub fn cwd_unknown(candidates: &[String], cwd: &str) -> bool {
 
 /// Each candidate's remote absolute path, in order — `links::resolve`'s rules on
 /// the remote disk: `~`/`~/…` under `home`, an absolute path as is, a relative
-/// one under `cwd` — and **not at all** if `cwd` is empty (R1.2), nor `~user`.
+/// one under `cwd` — and **not at all** if `cwd` is empty, nor `~user`.
 /// `None` also for a path that cannot safely enter the helper's script
 /// (`upload::is_safe`): such a name is not a link, never a mangled one.
 pub fn remote_paths(candidates: &[String], cwd: &str, home: Option<&str>) -> Vec<Option<String>> {
@@ -325,7 +324,7 @@ pub fn remote_paths(candidates: &[String], cwd: &str, home: Option<&str>) -> Vec
         .collect()
 }
 
-/// The helper's answers that exist, per remote generation (R1.1): a name asked
+/// The helper's answers that exist, per remote generation: a name asked
 /// once is not asked again while the same ssh session runs. A missing name is
 /// **not** cached — a file created a moment later must be found at the next ⌘
 /// (the view forgets its own "missing" when ⌘ goes up).
@@ -371,7 +370,7 @@ pub enum Query {
     /// The download's question about one absolute path: what it is, a folder's
     /// file count and bytes included — always fresh, never from the cache.
     Count(String),
-    /// A load sample for the ssh status bar's indicator (046 Karar 1, 2);
+    /// A load sample for the ssh status bar's indicator;
     /// `detail` while the popover is open (OS, cores, top processes).
     Load { detail: bool },
 }
@@ -389,7 +388,7 @@ pub enum Answer {
 }
 
 /// The answer to a [`Query::Load`]. Its failures are split by what the
-/// sampler does next (046 Karar 1): a failed **open** comes back here as
+/// sampler does next: a failed **open** comes back here as
 /// [`LoadReply::Unreachable`] and ends sampling for the generation (no ssh
 /// attempt every few seconds against a server that wants a password); a
 /// failure on an **open** session stays the reply's `Err` — the indicator
@@ -407,7 +406,7 @@ pub enum LoadReply {
 /// The reply callback — runs on the worker thread; the platform shell posts it
 /// to its main thread. The second argument is the ssh argv the answer came
 /// over (empty when no session opened): a download's or a preview's stream
-/// rides the **same** route as its question (047 R5).
+/// rides the **same** route as its question.
 pub type Reply = Box<dyn FnOnce(Result<Answer, String>, &[String]) + Send>;
 
 /// How the worker gets the session's ssh argv: the route gate
@@ -421,7 +420,7 @@ pub struct Dial {
     pub user: bool,
     /// A background job through bateri's masters: a login the server refused
     /// on today's argv is [`crate::ssh_route::SIGN_IN_NEEDED`] — signing in
-    /// would fix it (047 R7.2). `false` without masters (the timed run, the
+    /// would fix it. `false` without masters (the timed run, the
     /// tests' fixed argv): there is nothing to sign in with.
     pub sign_in: bool,
     /// The argv without the remote command (`Err`: the open's failure text).
@@ -522,7 +521,7 @@ impl RemoteHelper {
     }
 
     /// Forgets the held failed open ([`RETRY_AFTER`]): the user just signed
-    /// in (047 R7.2) and the background jobs try again without waiting for a
+    /// in and the background jobs try again without waiting for a
     /// new generation.
     pub fn retry(&mut self) {
         if let Some(tx) = &self.tx {
@@ -818,7 +817,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// `bt_load` end to end on this machine (046 R4.1, R4.2): macOS has no
+    /// `bt_load` end to end on this machine: macOS has no
     /// `/proc` and answers `BT-NOPROC`, `make linux` reads a real one. The
     /// branch is the file, not the target: what decides is what the script sees.
     #[test]
@@ -1087,7 +1086,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// A job the user started (047) is not refused by a hover's held
+    /// A job the user started is not refused by a hover's held
     /// failure, does not leave one behind, and its reply carries the argv the
     /// session was opened with — the stream rides the same route.
     #[test]
@@ -1143,7 +1142,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// A load sample's failed open is an answer, not an error (046 Karar 1):
+    /// A load sample's failed open is an answer, not an error:
     /// the sampler ends the generation on it, while an `Err` — a failure on
     /// an open session — earns one retry. Held failures answer the same way.
     #[test]
@@ -1182,8 +1181,8 @@ mod tests {
         // Other questions keep their `Err`.
         assert!(ask(failing(), Query::Count("/etc".to_owned())).is_err());
         let _ = fs::remove_dir_all(&root);
-        // Through bateri's masters a refused login is the Sign In… text (047
-        // R7.2) — a background job's only; a user's job keeps ssh's reason.
+        // Through bateri's masters a refused login is the Sign In… text — a
+        // background job's only; a user's job keeps ssh's reason.
         let mut helper = RemoteHelper::default();
         let mut gated = |user: bool, command: u64| {
             let (tx, rx) = mpsc::channel();

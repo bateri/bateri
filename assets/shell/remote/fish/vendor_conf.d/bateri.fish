@@ -1,4 +1,4 @@
-# bateri's REMOTE fish wrapper (048) — a `vendor_conf.d` file.
+# bateri's REMOTE fish wrapper — a `vendor_conf.d` file.
 #
 # The bootstrap put its directory first in `XDG_DATA_DIRS` and named it in
 # `BATERI_FISH_DIR`; fish reads this file with its other configuration
@@ -23,7 +23,7 @@ if set -q BATERI_FISH_DIR
     set -e BATERI_FISH_DIR
 end
 
-# The blocks' parent (048 phase-3): the local `ssh` block the bootstrap
+# The blocks' parent: the local `ssh` block the bootstrap
 # exported; ours, so out of the environment (the zsh wrapper's reason). Read
 # before the interactive check, so a non-interactive fish does not pass it on.
 if set -q BATERI_RBLOCK
@@ -39,7 +39,7 @@ function __bateri_cwd --on-event fish_prompt
     printf '\e]7;file://%s%s\a' $hostname (string escape --style=url -- $PWD)
 end
 
-# The command blocks on the server (048 phase-3): the zsh wrapper's `D`/`A`/`C`
+# The command blocks on the server: the zsh wrapper's `D`/`A`/`C`
 # with our remote field, `bt_remote=<P>.<S>.<n>` (`P` the local `ssh` block,
 # `S` this shell's pid — two shells under one `ssh` command line are two
 # trails — and `n` its counter; `fish_pid` is fish 3's, older fish gets none) — never `bt_block=`, which bateri reads as the local

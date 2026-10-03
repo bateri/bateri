@@ -18,10 +18,10 @@
 //! ranges of them. Those buffers are not rebuilt per frame either: they live
 //! as long as the renderer, grow on demand and are filled with
 //! `write_buffer` — creating a buffer in wgpu is a validation and tracking
-//! round trip, and it was measured (040 phase-2 → Uygulama Notları): a
+//! round trip, and it was measured: a
 //! per-frame buffer visibly inflated `cpu_encode`.
 //!
-//! **Completion** (040 Karar 6) is a submission index per frame and a
+//! **Completion** is a submission index per frame and a
 //! non-blocking [`Renderer::poll`] at the start of a tick — no closure per
 //! frame. Its jobs (counting finished frames, reporting a failed one, the GPU
 //! delta, the first finished frame) are carried by name there and in
@@ -47,7 +47,7 @@ use crate::metrics::{CellMetrics, FontNotice};
 use crate::slots::{self, SlotUpload};
 
 /// Immediate data budget in bytes: the smallest `maxPushConstantsSize` Vulkan
-/// **guarantees** (discussion.md → Karar 5). macOS offers 4096, but a layout
+/// **guarantees**. macOS offers 4096, but a layout
 /// that does not fit the smallest Linux driver would fail there; the device is
 /// requested with exactly this limit, so an oversized pipeline is rejected on
 /// macOS too.
@@ -57,8 +57,7 @@ pub(crate) const IMMEDIATE_BUDGET: u32 = 128;
 /// counts as **linear** and the hardware encodes it on write, so alpha
 /// blending runs in linear space (the glyphs' one reason for it). Its
 /// counterpart is `bt_core::color::linear_rgba`; the two change together —
-/// move one off linear without the other and the palette washes out to grey
-/// (`CLAUDE.md` → colour space).
+/// move one off linear without the other and the palette washes out to grey.
 ///
 /// A `const`, not a field: a second target (offscreen, screenshot) given a
 /// plain `Bgra8Unorm` would get **silently wrong colour**, not an error, so
@@ -79,7 +78,7 @@ pub(crate) const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm
 /// **It must be sRGB.** The target is sRGB and the hardware treats fragment
 /// output as linear; an emoji sampled from a plain `Rgba8Unorm` texture would
 /// take **undecoded** sRGB values for linear and wash the palette out — the
-/// same silent defect as `CLAUDE.md` → "Renk uzayı sınırı geçer".
+/// same silent defect as the linear palette on a non-sRGB target ([`FORMAT`]).
 pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Field-for-field twin of `cell_bg.wgsl` → `Immediates`.
@@ -103,7 +102,7 @@ struct Immediates {
 const _: () = assert!(size_of::<Immediates>() == 48);
 const _: () = assert!(std::mem::offset_of!(Immediates, shape) == 16);
 const _: () = assert!(std::mem::offset_of!(Immediates, viewport_px) == 32);
-// Chosen **per struct** and by size (Karar 5): 48 ≤ 128, so this block stays
+// Chosen **per struct** and by size: 48 ≤ 128, so this block stays
 // in immediates; no uniform-buffer fallback was needed.
 const _: () = assert!(size_of::<Immediates>() as u32 <= IMMEDIATE_BUDGET);
 
@@ -134,7 +133,7 @@ const _: () = assert!(std::mem::offset_of!(GlyphImmediates, slot_px) == 40);
 const _: () = assert!(std::mem::offset_of!(GlyphImmediates, uv_size) == 48);
 const _: () = assert!(std::mem::offset_of!(GlyphImmediates, slot_offset) == 56);
 const _: () = assert!(std::mem::offset_of!(GlyphImmediates, lift) == 64);
-// 80 ≤ 128: this block stays in immediates too (Karar 5).
+// 80 ≤ 128: this block stays in immediates too.
 const _: () = assert!(size_of::<GlyphImmediates>() as u32 <= IMMEDIATE_BUDGET);
 
 /// Field-for-field twin of `glyph_fx.wgsl` → `Immediates`: `heat` (the
@@ -161,7 +160,7 @@ const _: () = assert!(std::mem::offset_of!(FxImmediates, cell_px) == 24);
 const _: () = assert!(std::mem::offset_of!(FxImmediates, uv_size) == 32);
 const _: () = assert!(std::mem::offset_of!(FxImmediates, slot_px) == 40);
 const _: () = assert!(std::mem::offset_of!(FxImmediates, slot_offset) == 48);
-// 64 ≤ 128: immediates (Karar 5).
+// 64 ≤ 128: immediates.
 const _: () = assert!(size_of::<FxImmediates>() as u32 <= IMMEDIATE_BUDGET);
 
 /// `Instance`'s vertex buffer layout: the three `@location`s of
@@ -232,7 +231,7 @@ const FX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
 
 /// Drives a future to completion on this thread.
 ///
-/// No `pollster` (Karar 10): on native backends wgpu's futures are ready on
+/// No `pollster`: on native backends wgpu's futures are ready on
 /// the first poll. A future that never became ready would **spin here
 /// forever** — the test would hang rather than silently return a wrong
 /// result.
@@ -293,7 +292,7 @@ enum Op {
     /// origin past the texture's edge is fine: fragments outside the viewport
     /// are clipped.
     Viewport(f32),
-    /// A glyph list's viewport (052, [`Renderer::glyph_draws`]): the surface's
+    /// A glyph list's viewport ([`Renderer::glyph_draws`]): the surface's
     /// at `y`, raised by `lift` **and taller by it**, so the raised top does
     /// not pull the bottom edge up with it — a window without a dock would
     /// otherwise cut the ink of its bottom row. The list's `viewport_px`
@@ -341,7 +340,7 @@ enum Op {
     },
 }
 
-/// The atlas's slot geometry as the glyph shaders read it (052): the slot's
+/// The atlas's slot geometry as the glyph shaders read it: the slot's
 /// size, where the grid cell sits inside it and one slot's uv size. Taken
 /// from the atlas's **slot** metric, not from `Frame::cell_px` — on the frame
 /// between a scale change and the geometry event the two disagree and the uv
@@ -464,7 +463,7 @@ impl Plan {
         });
     }
 
-    /// Search highlights (033): two calls of the selection pipeline, one per
+    /// Search highlights: two calls of the selection pipeline, one per
     /// role — the colour is an immediate, so two roles are two draws. Order
     /// `search_match` → `search_current`: the current match sits over the
     /// others. `fill` picks the fill band's lists; the caller set the viewport.
@@ -523,7 +522,7 @@ impl Plan {
 }
 
 /// The texture's strip from `top_px` down to the bottom, as a scissor
-/// (x, y, width, height) — the growing dock band (032). The scissor must stay
+/// (x, y, width, height) — the growing dock band. The scissor must stay
 /// inside the texture (the backend validates it), so the bounds are clamped to
 /// the texture's height and leave at least one row; `0.0` is the whole
 /// texture.
@@ -738,7 +737,7 @@ pub(crate) struct Gpu {
     /// **required** here — the halo is translucent by definition. Its second
     /// consumer is the upload row's buttons ([`Plan::rounded`]).
     caret: wgpu::RenderPipeline,
-    /// The mouse selection and the search highlights (031, 033): its own
+    /// The mouse selection and the search highlights: its own
     /// vertex reading [`Instance`] verbatim (`selection_vertex`) and a
     /// corner-masked fragment.
     ///
@@ -757,15 +756,14 @@ pub(crate) struct Gpu {
     /// straight alpha (`raster::unpremultiply` undoes the premultiplication
     /// before upload).
     emoji: wgpu::RenderPipeline,
-    /// The dock's typing effects (030): its own vertex and its own instance
+    /// The dock's typing effects: its own vertex and its own instance
     /// ([`FxInstance`]).
     ///
     /// It cannot share `cell`'s vertex: the quad grows by the effect's margin
     /// and the fragment maps the point back into glyph space with the effect's
     /// inverse transform, so the instance must carry the effect's parameters
     /// — widening `GlyphInstance` would grow every glyph list's stride for a
-    /// handful of animated glyphs
-    /// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 5). Emoji
+    /// handful of animated glyphs. Emoji
     /// need no sibling: both textures are bound and the plane comes from the
     /// instance.
     glyph_fx: wgpu::RenderPipeline,
@@ -782,7 +780,7 @@ pub(crate) struct Gpu {
     linear: wgpu::Sampler,
     /// `TIMESTAMP_QUERY` was granted: the GPU delta can be measured
     /// ([`Renderer::set_gpu_timing`]); otherwise its token is
-    /// `unsupported` (Karar 6).
+    /// `unsupported`.
     timestamps: bool,
     fault: Arc<Fault>,
 }
@@ -826,7 +824,7 @@ impl Gpu {
     /// The backend is **pinned per target**, not wgpu's `PRIMARY`: Metal on
     /// macOS (the product target; a wider mask would change which adapters
     /// are enumerated there), Vulkan on Linux — where `make linux` runs
-    /// the pixel tests on lavapipe (042 Karar 8).
+    /// the pixel tests on lavapipe.
     pub(crate) fn new() -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: BACKENDS,
@@ -857,7 +855,7 @@ impl Gpu {
         }))
         .map_err(|e| format!("device request failed: {e}"))?;
         // Faults outside a frame's error scope become the next poll's error
-        // (Karar 6, the asynchronous leg), not a panic in wgpu's default
+        // (the asynchronous leg), not a panic in wgpu's default
         // handler.
         let fault = Arc::new(Fault::default());
         {
@@ -1557,22 +1555,22 @@ impl Renderer {
         self.timing.set(on && self.gpu.timestamps);
     }
 
-    /// `false` → the GPU delta's token value is `unsupported` (Karar 6).
+    /// `false` → the GPU delta's token value is `unsupported`.
     pub fn gpu_timing_supported(&self) -> bool {
         self.gpu.timestamps
     }
 
     /// Whether a submitted frame is still waiting for [`Renderer::poll`]:
-    /// a link going to sleep with one arms a single delayed poll (Karar 6,
-    /// "the last frame before sleep is not lost"); an empty queue arms
-    /// nothing — the stop condition.
+    /// a link going to sleep with one arms a single delayed poll ("the last
+    /// frame before sleep is not lost"); an empty queue arms nothing — the
+    /// stop condition.
     pub(crate) fn in_flight(&self) -> bool {
         !self.in_flight.borrow().is_empty()
     }
 
     /// Waits at most `timeout` for the newest submitted frame — the pending
-    /// poll at shutdown, which must come before the report reads `frames=`
-    /// (Karar 6). It only waits; counting is still [`Renderer::poll`]'s.
+    /// poll at shutdown, which must come before the report reads `frames=`.
+    /// It only waits; counting is still [`Renderer::poll`]'s.
     pub(crate) fn wait_in_flight(&self, timeout: Duration) {
         let newest = self.in_flight.borrow().back().map(|p| p.index.clone());
         if let Some(index) = newest {
@@ -1613,12 +1611,12 @@ impl Renderer {
     ///
     /// The quad's position is the **frame's** cell (`GlyphCell::pos`, the
     /// background under it comes from the same cell), its size and uv size
-    /// the **atlas's slot** ([`SlotQuad`], 052). They are born from the same
+    /// the **atlas's slot** ([`SlotQuad`]). They are born from the same
     /// scale; the only window where they differ is the one frame between a
     /// scale change and the geometry event, and there the glyph lands a
     /// little off, it does not break.
     ///
-    /// **The overflow is not clipped** (052 R3.1): below `1` a slot reaches
+    /// **The overflow is not clipped**: below `1` a slot reaches
     /// [`SlotQuad::overflow`] pixels above its cell, and the surface's
     /// viewport starts at its top row — the top row's accents would be cut.
     /// So the lists are drawn in a viewport raised by `lift` (the overflow,
@@ -1686,7 +1684,7 @@ impl Renderer {
         Ok(())
     }
 
-    /// The dock's typing effects (030): the `glyph_fx` pipeline, both textures
+    /// The dock's typing effects: the `glyph_fx` pipeline, both textures
     /// and `heat`'s glowing colour ([`Frame::dock_fx_heat`]). Slot resolution
     /// and fan-out are [`slots::fx_list`], inside the same atlas borrow as
     /// [`Renderer::glyph_draws`]. A colour-plane instance whose texture does
@@ -1705,7 +1703,7 @@ impl Renderer {
     ///
     /// **In its own viewport, not the dock's**: the dock's glyph viewport
     /// starts no higher than the band's top and clips above it (the static
-    /// glyphs must stay inside their band, 052 R3.2), while `drop` falls from
+    /// glyphs must stay inside their band), while `drop` falls from
     /// above the cell, `sublime` floats up and there is only a thin breathing
     /// margin above the input row — the first frames showed half-cut letters.
     /// The effect is drawn in window space (positions moved down by
@@ -1775,7 +1773,7 @@ impl Renderer {
     /// known only after the loop), and the viewport transform applies it from
     /// NDC to window coordinates, so grounds, glyphs, rules and stripes all
     /// move by the same amount without touching the shaders or the
-    /// `#[repr(C)]` layouts. The order is the draw order (003 → R4.1): command
+    /// `#[repr(C)]` layouts. The order is the draw order: command
     /// marks, then grounds, search, selection and the caret, then glyphs, rules
     /// last. The reverse would let the caret cover the letter under it; a rule
     /// over the caret stays visible for free from the same order.
@@ -1786,11 +1784,11 @@ impl Renderer {
     ///   (`Frame::push_block`). Their inversion rectangle is **degenerate**:
     ///   the caret never goes to the gutter, and passing the real one would
     ///   widen the claim to "a caret over the gutter turns the mark's colour".
-    /// - **Search after the ground, before the selection** (033 Karar 7):
+    /// - **Search after the ground, before the selection**:
     ///   every match, the current match over them, the user's selection on top
     ///   — when Esc turns the current match into the selection it stays
     ///   visible. Text is over all of them in its own colour.
-    /// - **Selection after the ground, before the caret and glyphs** (031):
+    /// - **Selection after the ground, before the caret and glyphs**:
     ///   text reads over the selection in its own colour and the caret stays
     ///   on top — reverse video's "the cursor wins" rule, as pixel order.
     /// - **Caret after the grounds, before the glyphs**, for the **solid**
@@ -1798,7 +1796,7 @@ impl Renderer {
     ///   in the colour `cursor_block` inverts. For a hollow caret both halves
     ///   of the reason fall away (no fill, degenerate `CursorBlock`) and the
     ///   cost is recorded: a glyph with ink at the cell's edge is drawn over
-    ///   the ring (`.tasks/015-imlec-cilasi/phase-3.md`). This slot is filled
+    ///   the ring. This slot is filled
     ///   while the caret is in the grid; once it enters the dock band the list
     ///   is empty and the instance is in the dock's list (`Frame::push_caret`).
     ///
@@ -1808,18 +1806,18 @@ impl Renderer {
     /// `origin_px − fill_px`, [`Frame::fill_origin_px`]). Its rows are
     /// fill-local and which screen row they land on is known only here, **at
     /// encode time** — baked at push time, a motion frame (lists kept, only
-    /// `origin_px` changes) would freeze the band in place (017 R3.1). The
+    /// `origin_px` changes) would freeze the band in place. The
     /// origin **may go negative** and is left so: the band's oldest rows that
-    /// do not fit spill over the top and are clipped (measured, 017 phase-0).
+    /// do not fit spill over the top and are clipped (measured).
     /// A band of zero rows sets no viewport and the frame is bit-identical to
     /// the one without it; a window without a dock never gets rows
     /// (`Session::fill_rows` returns zero). Search after the band's ground,
-    /// before its letters (033 Karar 8); no selection in the band. Its
+    /// before its letters; no selection in the band. Its
     /// inversion rectangle is **degenerate**: the band has no caret slot and
     /// in a settled frame the caret's screen row is always inside the
     /// content; passing the real one would paint the letter under a caret
     /// sliding over the band in the ground colour — an unreadable cell for a
-    /// caret that is not drawn. **Interleaved with the grid** (052 R3.1): the
+    /// caret that is not drawn. **Interleaved with the grid**: the
     /// band and the grid are two parts of the same history and the seam
     /// between them must not cut a letter, so the order is grid ground →
     /// search → selection → caret → **band ground** → band search → **grid
@@ -1848,14 +1846,14 @@ impl Renderer {
     /// the whole window); left negative, the dock would climb into the grid's
     /// area. A window without a dock sets no second viewport.
     ///
-    /// **Two origins** (032): the ground and hairlines use the **drawn band's**
+    /// **Two origins**: the ground and hairlines use the **drawn band's**
     /// viewport (`height − band`, the animation's current value); cells, caret
     /// and effects the **layout's** (`height − layout`). Cells are baked at
     /// push time and a motion frame does not re-push them; the layout is
     /// bottom-aligned, so while the band grows and shrinks the text stays put
     /// and only the band's top moves. At rest the two are the same number.
     /// The dock's glyph viewport may rise above the layout's top only up to
-    /// the band's top (052 R3.2): an accent spilling into the breathing
+    /// the band's top: an accent spilling into the breathing
     /// margin shows, one spilling past the band is cut — the dock is its own
     /// panel, no scissor needed.
     /// Ground and separator first: the dock's own backgrounds (highlight
@@ -1865,8 +1863,8 @@ impl Renderer {
     /// bottom rows. The scissor exists only in those frames: at rest it would
     /// cut the effects' margin that spills over the hairline.
     ///
-    /// In the dock: the selection in the grid's order (031 R3.2); the upload
-    /// row's buttons (037 phase-6) over the ground and selection, under their
+    /// In the dock: the selection in the grid's order; the upload
+    /// row's buttons over the ground and selection, under their
     /// labels. The caret's dock slot is after the opaque ground (or the ground
     /// would cover it) and before the glyphs (or it would paint over the
     /// letter); the instance is born in window space, the viewport is
@@ -1875,7 +1873,7 @@ impl Renderer {
     /// top of everything. **The caret is outside the scissor**: at a hand-over
     /// or on a new input row a caret touching the band's top would be a
     /// half-cut block; a whole block showing for one frame above the band is
-    /// better than a cut one. **Ghosts before the dock's glyphs** (030): the
+    /// better than a cut one. **Ghosts before the dock's glyphs**: the
     /// letter sliding into a deleted letter's place must sit over the ghost —
     /// the text flows at once, the ghost fades under it. **Arrivals after the
     /// glyphs, before the rules**, so the call splits while one is in flight:
@@ -1896,7 +1894,7 @@ impl Renderer {
         plan.clear();
         // Grid: the offset lives in one viewport. Command marks first (sprites,
         // degenerate inversion rectangle), then ground → search → selection →
-        // caret; the grid's glyphs wait for the band's ground (052 R3.1).
+        // caret; the grid's glyphs wait for the band's ground.
         let origin = frame.origin_px();
         let fill_origin = frame.fill_origin_px();
         let free = f32::INFINITY;
@@ -1967,7 +1965,7 @@ impl Renderer {
             plan.ops.push(Op::Viewport(origin_y));
             let clipped = band_y > origin_y;
             // The dock's glyphs may rise above the layout's top only up to the
-            // band's (052 R3.2): the dock is a separate panel and its ink must
+            // band's: the dock is a separate panel and its ink must
             // not leave it. In a clipped frame the band's top is below the
             // layout's and the scissor does the clipping.
             let dock_lift = (origin_y - band_y).max(0.0);
@@ -2239,7 +2237,7 @@ impl Renderer {
         Ok(self.gpu.queue.submit([encoder.finish()]))
     }
 
-    /// The frame path (Karar 6): encode and submit inside an error scope,
+    /// The frame path: encode and submit inside an error scope,
     /// then track the submission for [`Renderer::poll`].
     ///
     /// **Asynchronous**: `Ok` only says "submitted". A
@@ -2298,7 +2296,7 @@ impl Renderer {
         self.gpu.queue.present(texture);
     }
 
-    /// The non-blocking poll at the start of a tick (Karar 6): hands every
+    /// The non-blocking poll at the start of a tick: hands every
     /// submitted frame the GPU has finished, oldest first, to `on_complete` —
     /// `Ok(span)` for a frame finished without error (counted in
     /// [`Renderer::frames`]; `span` is the GPU delta when measured),
@@ -2428,7 +2426,7 @@ pub(crate) fn plane_format(plane: Plane) -> wgpu::TextureFormat {
     Gpu::shared().plane_texture(format, (8, 8)).texture.format()
 }
 
-/// The atlas's uv size of one slot — the **slot** metric's (052), which
+/// The atlas's uv size of one slot — the **slot** metric's, which
 /// below `1` is larger than the grid cell.
 fn uv_size(atlas: &Atlas) -> [f32; 2] {
     let (cw, ch) = atlas.slot_metrics().cell_px;

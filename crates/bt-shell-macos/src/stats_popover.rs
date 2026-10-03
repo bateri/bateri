@@ -1,4 +1,4 @@
-//! The remote load indicator's **detail popover** (046 phase-5, Karar 7): a
+//! The remote load indicator's **detail popover**: a
 //! click on the indicator opens it, a second click, a click outside or Esc
 //! closes it.
 //!
@@ -88,7 +88,7 @@ pub(crate) struct StatsPopover {
     monitor: Option<Retained<AnyObject>>,
 }
 
-/// The detail popover's half of the pane (046 phase-5).
+/// The detail popover's half of the pane.
 impl TerminalPane {
     /// A click on dock-local column `col` of the context row (`context` is the
     /// row's budget): if it lands on the load indicator the popover toggles and
@@ -431,7 +431,7 @@ fn fill(rows: &Rows, host: Option<&str>, detail: Option<&Detail>, theme: &Theme)
         }),
         theme,
     );
-    // Swap has no threshold (046 Karar 4): its bar stays `info`. A server
+    // Swap has no threshold: its bar stays `info`. A server
     // without swap says so and draws no bar — an empty track read as "0 of
     // something"; before the first sample the row is unknown, not "none".
     let (swap, no_swap) = swap_value(sampled, detail.swap_used, detail.swap_total);

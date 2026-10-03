@@ -1,8 +1,7 @@
 //! Whether a job is running in the foreground outside a window's shell, and
-//! if so, its name (028, the input to the close confirmation).
+//! if so, its name (the input to the close confirmation).
 //!
-//! **The process table is authoritative, not OSC 133** (`.tasks/028-kapatma-onayi/
-//! discussion.md` → Karar 1): the phase does not exist at all in a shell
+//! **The process table is authoritative, not OSC 133**: the phase does not exist at all in a shell
 //! without integration (`integration = "off"`, bash, fish), gets stuck in
 //! `Running` permanently on a transition like `exec bash`, and does not name
 //! the program. The terminal's foreground process group answers the same
@@ -11,14 +10,14 @@
 //!
 //! **The foreground group comes from the shell's `e_tpgid`**, not the PTY
 //! child's: in an untimed session the child is `login(1)` and owned by root,
-//! so `PROC_PIDTBSDINFO` returns zero bytes for it (measured, discussion.md →
-//! Muhakeme). The shell belongs to the user and the same call gives `ps`'s
-//! TPGID column for it. Members of the foreground group are asked only for
+//! so `PROC_PIDTBSDINFO` returns zero bytes for it (measured). The shell
+//! belongs to the user and the same call gives `ps`'s TPGID column for it.
+//! Members of the foreground group are asked only for
 //! short info (`PROC_PIDT_SHORTBSDINFO`), because that works on root-owned
 //! processes too (a `sudo` group).
 //!
 //! Names come from the group's **leaves**: the leader may be a wrapper (leader
-//! `bash`, the program its grandchild `claude`; the third row in context.md).
+//! `bash`, the program its grandchild `claude`).
 //!
 //! Two halves: the pure decision ([`foreground`], whose input is a
 //! [`ProcessTable`]) and the interface's system bodies ([`SystemTable`]:
@@ -26,20 +25,19 @@
 //! decision is tested with a fake table, the body with a real PTY — a fake
 //! table could not see that login is root.
 //!
-//! **Second consumer: the remote session** (036, [`remote`]). Same foreground
+//! **Second consumer: the remote session** ([`remote`]). Same foreground
 //! group, opposite direction: the close question names the group's
 //! **leaves**, the remote session looks for the group's **topmost** ssh/mosh
 //! process (`ssh -J`'s `ssh -W` child would give the jump host) and reads its
 //! arguments (`KERN_PROCARGS2`, only for members with candidate names). The
 //! probe runs on the `C` edge and, if undecided, on the next output edge
-//! (`window::RemoteProbe`); known limits in
-//! `.tasks/036-ssh-uzak-oturum/discussion.md` → Karar 2: a wrapper script that
+//! (`window::RemoteProbe`); known limits: a wrapper script that
 //! starts ssh later locks in as "local" on the first probe, `exec ssh` does
 //! not produce `C`, and `~^Z` removes the indicator until `fg`. The answer is
-//! more than the host (037 Karar 1, [`Target`]): the argv that opens a second
+//! more than the host ([`Target`]): the argv that opens a second
 //! door to the same place comes out of the same walk.
 //!
-//! **Known limits** (Karar 7): background jobs (`sleep 100 &`) are not in the
+//! **Known limits**: background jobs (`sleep 100 &`) are not in the
 //! foreground and are not counted; a job running inside the shell itself (a
 //! builtin loop, a function waiting on `read`) opens no separate group and
 //! looks idle; `exec vim` inherits the shell's pid and group, so it is idle
@@ -99,7 +97,7 @@ pub enum Probe {
     Remote(Target),
 }
 
-/// The remote target the probe found (037 Karar 1): the host to display and the
+/// The remote target the probe found: the host to display and the
 /// argv that opens a second door to the same place. The escaped line is
 /// produced by `window::probe_remote` (`quote::command_line`), so there is
 /// neither a shell nor escaping here.
@@ -110,7 +108,7 @@ pub struct Target {
     pub kind: RemoteKind,
     /// The argv to re-run ([`ssh_target`], [`mosh_argv`]).
     pub argv: Vec<String>,
-    /// The nonce of a call bateri wrapped (049 R2.3, [`ssh_wrap::nonce`]):
+    /// The nonce of a call bateri wrapped ([`ssh_wrap::nonce`]):
     /// taken from the process's argv **before** it is unwrapped, since
     /// [`Self::argv`] is the user's. The pane matches it against the
     /// bootstrap's `up`. `None` for a call bateri did not wrap and for mosh.
@@ -137,7 +135,7 @@ pub trait ProcessTable {
 
 /// The decision itself: `child` is the pid of the PTY's child.
 ///
-/// The failure branches (R1.5) follow the direction of the error: a childless
+/// The failure branches follow the direction of the error: a childless
 /// `login` (⌘W right as the tab is born) is idle, because there is no job to
 /// close; if the shell's group cannot be read it is **running without a
 /// name**, because a systematic breakage should be a visible "always asks",
@@ -169,7 +167,7 @@ fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Opti
 }
 
 /// The PTY's two terminal modes that say whether a remote session is past its
-/// login (047 R9.1, [`bt_core::TtyModes`]): `tcgetattr` on the master's copy
+/// login ([`bt_core::TtyModes`]): `tcgetattr` on the master's copy
 /// (`bt_core::Session::with_pty_fd`). On macOS and Linux the master's
 /// `tcgetattr` answers with the slave's flags — the program's (measured on
 /// macOS; Linux's `tty_mode_ioctl` reads the linked tty; the test below runs
@@ -192,13 +190,13 @@ pub fn tty_modes(fd: std::os::fd::BorrowedFd<'_>) -> Option<bt_core::TtyModes> {
 
 /// Whether `session`'s remote session is past its login ([`bt_core::Session::remote_login`]
 /// with the PTY's modes from [`tty_modes`]): `Some(the remote generation)`.
-/// The gate of the remote files' background jobs (047 R9.1) — they do not
+/// The gate of the remote files' background jobs — they do not
 /// connect while ssh still asks.
 pub fn remote_login(session: &bt_core::Session) -> Option<u64> {
     session.remote_login(tty_modes)
 }
 
-/// Whether a remote session is in the foreground (036 Karar 2, 3).
+/// Whether a remote session is in the foreground.
 ///
 /// The failure semantics are the **opposite** of [`foreground`]'s: an
 /// unreadable table is `Local`. There the safe direction was "always ask";
@@ -209,7 +207,7 @@ pub fn remote_login(session: &bt_core::Session) -> Option<u64> {
 /// `Undecided` only in two cases: the shell's group is still in the foreground
 /// (`C` is printed before the fork), or no ssh/mosh was recognized and a group
 /// member carries the shell's name (a forked child that has not `exec`ed yet).
-/// The cost is named in Karar 2: a loop running inside the shell itself, or
+/// The cost is a named limit: a loop running inside the shell itself, or
 /// `zsh script`, stays undecided for the whole command and produces a probe per
 /// output edge (at most one per main queue turn).
 pub fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Probe {
@@ -314,8 +312,8 @@ fn remote_target(name: &str, args: &[String]) -> Option<Option<Target>> {
     })
 }
 
-/// mosh's re-run argv: `mosh` + the script's arguments, as they are (037
-/// Karar 6). mosh has no local forwarding, so there is nothing to filter out.
+/// mosh's re-run argv: `mosh` + the script's arguments, as they are. mosh has
+/// no local forwarding, so there is nothing to filter out.
 fn mosh_argv<S: AsRef<str>>(args: &[S]) -> Vec<String> {
     std::iter::once("mosh")
         .chain(args.iter().map(AsRef::as_ref))
@@ -328,7 +326,7 @@ pub(crate) const SSH_VALUED: &str = "BbcDEeFIiJLlmOoPpQRSWw";
 /// Options whose presence makes the session non-interactive: tunnel (`-N`),
 /// forwarding (`-W`), control (`-O`), query (`-Q`, `-G`, `-V`) and no pty (`-T`).
 const SSH_NON_INTERACTIVE: &str = "NWOQGVT";
-/// Options **dropped** on re-run (037 Karar 6): local forwards (`-L`, `-R`,
+/// Options **dropped** on re-run: local forwards (`-L`, `-R`,
 /// `-D`, with their values) would try to bind the same local port in the
 /// second session and print a warning, or with `ExitOnForwardFailure` not
 /// connect at all; `-M` opens a second ControlMaster; `-f` drops to the
@@ -336,7 +334,7 @@ const SSH_NON_INTERACTIVE: &str = "NWOQGVT";
 const SSH_NOT_REPEATED: &str = "LRDMf";
 
 /// ssh argv (argv[0] is `program`, `args` the rest) → the interactive
-/// session's target (036 Karar 3) and the re-run argv (037 Karar 6).
+/// session's target and the re-run argv.
 ///
 /// If there is a command after the target, the session is not interactive
 /// without `-t`: `ssh prod uptime` is a one-second command and collapsing and
@@ -346,7 +344,7 @@ const SSH_NOT_REPEATED: &str = "LRDMf";
 /// second parser: [`SSH_NOT_REPEATED`] is dropped, everything else stays in
 /// order — including the target and a remote command with `-t`.
 ///
-/// **A wrapped argv is unwrapped first** (048 R2, [`ssh_wrap::unwrap`]): the
+/// **A wrapped argv is unwrapped first** ([`ssh_wrap::unwrap`]): the
 /// `-t` and the bootstrap command bateri added are not what the user typed,
 /// so the target's line, `⏎ reconnect`, ⌘T and the file jobs see the user's
 /// own argv.
@@ -372,7 +370,7 @@ pub(crate) struct SshCall {
 }
 
 /// The walk behind [`ssh_target`], without unwrapping: `None` unless the
-/// session is interactive. The wrapping decision (048, `ssh_wrap::decide`) asks
+/// session is interactive. The wrapping decision (`ssh_wrap::decide`) asks
 /// the same walk, so "interactive" has one definition.
 pub(crate) fn ssh_call(program: &str, args: &[String]) -> Option<SshCall> {
     let mut session = SshSession::default();
@@ -413,7 +411,7 @@ impl SshSession {
     /// Reads the option set in `args[index..]`; returns the index of the first
     /// non-option argument and whether it ended with `--`.
     ///
-    /// Writes the options it reads to `kept` for the re-run (037 Karar 6): a
+    /// Writes the options it reads to `kept` for the re-run: a
     /// [`SSH_NOT_REPEATED`] flag is dropped from its cluster, and so is the
     /// value of one that takes a value (attached or a separate argument); a
     /// cluster left with no flags is dropped entirely (`-fM` → nothing,
@@ -556,9 +554,9 @@ fn mosh_target<S: AsRef<str>>(args: &[S]) -> Option<String> {
 /// mosh would.
 ///
 /// The re-run argv also comes from that line: `mosh` + its whitespace-split
-/// words (037 Karar 6). **Known limit:** the script joins the line without
+/// words. **Known limit:** the script joins the line without
 /// quoting, so a value with spaces (`--ssh="ssh -i k"`) cannot be rebuilt and
-/// is written in its split form — the same root as the host's limit in 036.
+/// is written in its split form — the same root as the host's limit.
 fn mosh_client_target(args: &[String]) -> Option<Target> {
     let at = args.iter().position(|arg| arg.starts_with("-#"))?;
     let mut line = args[at].strip_prefix("-#").unwrap_or_default().trim();
@@ -924,7 +922,7 @@ fn parse_stat(line: &str) -> Option<Stat> {
     })
 }
 
-/// A process's start time, comparable only for equality (055 R2.5): what
+/// A process's start time, comparable only for equality: what
 /// tells a live pid from a reused one. macOS: `p_starttime` in microseconds
 /// (`sysctl(KERN_PROC_PID)`, readable on root-owned `login(1)` too, where
 /// `PROC_PIDTBSDINFO` returns nothing — measured); Linux: `starttime` in
@@ -978,7 +976,7 @@ fn parse_start_time(line: &str) -> Option<u64> {
 }
 
 /// An fd that becomes **readable when `pid` exits** — the exit signal of a
-/// process that is not our child (055 R2.5, `discussion.md` → Karar 7):
+/// process that is not our child:
 /// macOS a `kqueue` of its own with only `EVFILT_PROC`/`NOTE_EXIT` on `pid`
 /// (a user process may watch root-owned `login(1)` — measured), Linux a
 /// pidfd. The reader loop registers it in the child-event pipe's place
@@ -1232,7 +1230,7 @@ mod tests {
 
     #[test]
     fn a_wrapper_leader_yields_the_name_of_its_leaf() {
-        // The third row in context.md: the leader `bash` is a wrapper, the
+        // The leader `bash` is a wrapper, the
         // program is its grandchild. The leader's name would be the wrong answer.
         let table = login_shell(300)
             .with(300, 101, 300, "bash")
@@ -1295,7 +1293,7 @@ mod tests {
     fn a_direct_child_is_the_shell_itself() {
         // On the direct path `sleep`'s parent is the child itself: a flagless
         // rule like "idle if the foreground is the child's child" would count it
-        // as idle (discussion.md → Reddedilenler).
+        // as idle (a rejected alternative).
         let idle = Table::new(Some(101)).with(101, 1, 101, "zsh");
         assert_eq!(
             foreground(ShellParent::Direct, 101, &idle),
@@ -1319,8 +1317,8 @@ mod tests {
         remote(ShellParent::Login, 100, &table)
     }
 
-    /// The variant of [`probe_of`] that looks **only at the host**: 036's tests
-    /// do not ask about the target's argv and kind (037's use [`target_of`]).
+    /// The variant of [`probe_of`] that looks **only at the host**: the host tests
+    /// do not ask about the target's argv and kind (the argv tests use [`target_of`]).
     fn remote_of(procs: &[(u32, u32, &[&'static str])]) -> Probe {
         match probe_of(procs) {
             Probe::Remote(target) => remote_host(&target.host),
@@ -1351,7 +1349,7 @@ mod tests {
 
     #[test]
     fn the_rerun_argv_drops_local_forwards_master_and_background() {
-        // 037 Karar 6: `-L -R -D` with their values, `-M` and `-f` are dropped;
+        // `-L -R -D` with their values, `-M` and `-f` are dropped;
         // everything else stays in order.
         let target = target_of(&["ssh", "-p", "2222", "-J", "jump", "-L", "8080:x:80", "prod"]);
         assert_eq!(target.host, "prod");
@@ -1360,7 +1358,7 @@ mod tests {
             target.argv,
             words(&["ssh", "-p", "2222", "-J", "jump", "prod"])
         );
-        // Combined clusters are split by 036's walk: an attached value goes with
+        // Combined clusters are split by the target walk: an attached value goes with
         // its flag, a cluster left with no flags is dropped entirely.
         assert_eq!(
             target_of(&[
@@ -1383,9 +1381,9 @@ mod tests {
 
     #[test]
     fn a_wrapped_ssh_reads_as_the_line_the_user_typed() {
-        // 048 R2: the process runs bateri's `-t` and bootstrap; the target, the
+        // The process runs bateri's `-t` and bootstrap; the target, the
         // re-run argv (⏎ reconnect, ⌘T) and the line are the user's.
-        // With the session's connection sharing too (phase-5): the job's route
+        // With the session's connection sharing too: the job's route
         // must not see bateri's `ControlPath` as the user's own.
         let typed = ["-o", "User=x", "-L", "1:x:1", "--", "prod"];
         let control = crate::ssh_wrap::Control {
@@ -1429,7 +1427,7 @@ mod tests {
             target_of(&["ssh", "-t", "prod", "tmux", "attach"]).argv,
             words(&["ssh", "-t", "prod", "tmux", "attach"])
         );
-        // `-f` stays non-interactive (036's answer did not change).
+        // `-f` stays non-interactive (the host-only answer did not change).
         assert_eq!(
             remote_of(&[(200, 101, &["ssh", "-fN", "prod"])]),
             Probe::Local
@@ -1927,7 +1925,7 @@ mod tests {
         (old, new, pid, start, wake)
     }
 
-    /// 055 phase-2's acceptance: a live `/bin/sh` crosses from one session to
+    /// The handover's acceptance: a live `/bin/sh` crosses from one session to
     /// another without a `SIGHUP`, its output has no gap, input reaches it and
     /// its exit is the adopting session's `child_exit(None)`.
     #[test]
@@ -2048,7 +2046,7 @@ mod tests {
     /// A program writing without pause (`yes`) across the handover: the
     /// adopted reader's first reads end with the carried prefix, not when a
     /// round comes back short — every round is full here, and a reader stuck
-    /// there would never take the shutdown off its channel (`/code-review`).
+    /// there would never take the shutdown off its channel (found in code review).
     #[test]
     fn a_flooding_program_does_not_hold_the_adopted_reader() {
         use std::time::Instant;
@@ -2095,7 +2093,7 @@ mod tests {
         .expect("session did not open")
     }
 
-    /// 047 phase-4: the master's `tcgetattr` gives the program's modes — on
+    /// The master's `tcgetattr` gives the program's modes — on
     /// macOS and on Linux (`make linux`): a password prompt's (canonical, no
     /// echo) and a logged-in session's (neither).
     #[test]

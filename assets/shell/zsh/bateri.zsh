@@ -4,7 +4,7 @@
 # `.zlogin`). The body holds the ZDOTDIR swap and the hooks; `source` is
 # **not here**, it is at the top level of each file.
 #
-# THE USER'S FILE IS NOT `source`D FROM INSIDE A FUNCTION (009 phase-5) and the
+# THE USER'S FILE IS NOT `source`D FROM INSIDE A FUNCTION and the
 # cost of this rule was measured: in zsh a `typeset` inside a function is LOCAL,
 # so `typeset -U path; path+=(…)` — the standard PATH idiom of Homebrew, asdf,
 # pyenv and nvm — would be deleted on return. The symptom is silent: the user's
@@ -54,7 +54,7 @@
 # the restore would mean leaking ZDOTDIR to children for the whole session
 # (tmux, nested shell).
 
-# THE ZDOTDIR SWAP is in `zdotdir.zsh`, shared with the remote wrapper (048):
+# THE ZDOTDIR SWAP is in `zdotdir.zsh`, shared with the remote wrapper:
 # our directory, the user's original ZDOTDIR, `__bateri_begin`/`__bateri_end`
 # and `__bateri_restore`. `source`d at the top level (the `typeset` rule above);
 # if it cannot be read this body fails and the calling file's fallback arm
@@ -68,8 +68,7 @@ if (( ! ${+__bateri_dock} )); then
   # prompt is reset, ZLE is mirrored, the context's branch is printed. If there
   # is no dock all three are meaningless and all three are TURNED OFF; had they
   # been asked separately an inconsistent state like "the prompt is the
-  # terminal's but there is no dock" would have been possible — 012 phase-10
-  # closed exactly that.
+  # terminal's but there is no dock" would have been possible — and once was.
   #
   # The environment variable comes only at the dock-less tier
   # (`shell_integration_env`), so its absence means "there is a dock". An
@@ -102,7 +101,7 @@ if (( ! ${+__bateri_dock} )); then
   # The rationale was measured (2026-09-21, pure PTY, the same 37-line list at
   # two screen heights): when the list FITS (60 lines) zsh on Tab moves the
   # cursor above the list with `\e[37A` and sends `\e[J` when the line is
-  # erased — 017's fill band fills the gap from the scrollback and the screen
+  # erased — the fill band fills the gap from the scrollback and the screen
   # returns to its pre-Tab state. When the list OVERFLOWS (26 lines) zsh sends
   # neither; on line erase only a backspace arrives, because in a normal
   # terminal it cannot bring back the lines that scrolled into the history and
@@ -124,7 +123,7 @@ if (( ! ${+__bateri_dock} )); then
   # would be overridden.
   #
   # CONDITIONAL ON THE DOCK, because what it protects is the dock's promise
-  # (017, the return of the screen) and at the `integration = "blocks"` tier
+  # (the return of the screen) and at the `integration = "blocks"` tier
   # that promise does not exist — there the input line is the user's and the
   # shell should behave classically. It is the third decision `__bateri_dock`
   # consumes; had a separate key been opened an inconsistent state like "no
@@ -134,14 +133,14 @@ if (( ! ${+__bateri_dock} )); then
   fi
 fi
 
-# THE BINARY THAT DECIDES `ssh`'s WRAPPING (048): `BATERI_BIN`, the path of the
+# THE BINARY THAT DECIDES `ssh`'s WRAPPING: `BATERI_BIN`, the path of the
 # running bateri (`app::with_bateri_bin`), is kept in a shell variable and
 # taken out of the environment — it is ours, children have no use for it
 # (`BATERI_DOCK` precedent). Once per shell, like the decisions above.
 if (( ! ${+__bateri_bin} )); then
   __bateri_bin=${BATERI_BIN-}
   unset BATERI_BIN
-  # The running bateri's ssh instance directory (048 phase-5): a wrapped
+  # The running bateri's ssh instance directory: a wrapped
   # session becomes a master there. Same rule: ours, out of the environment.
   __bateri_ssh_instance=${BATERI_SSH_INSTANCE-}
   unset BATERI_SSH_INSTANCE
@@ -219,7 +218,7 @@ __bateri_hooks() {
   #
   # NOT `zle -N zle-line-pre-redraw`: that binding has a single owner and
   # zsh-syntax-highlighting and zsh-autosuggestions both want the same widget —
-  # the last writer would drop the other (011 measured). Instead of
+  # the last writer would drop the other (measured). Instead of
   # `add-zle-hook-widget` it sets up a dispatcher and calls them all in order.
   #
   # THE GUARD IS IN THE HOOK ITSELF: `add-zle-hook-widget` does not add the same
@@ -255,7 +254,7 @@ __bateri_hooks() {
   # debt list.
   if (( __bateri_dock )); then
     autoload -Uz add-zle-hook-widget
-    # THE EDIT WIDGET (031): the terminal's only command goes here. The definition
+    # THE EDIT WIDGET: the terminal's only command goes here. The definition
     # once, the binding on every `line-init` (`__bateri_dock_arm`) — and arm is
     # registered BEFORE the mirror, so the capability is on the wire before the
     # first mirror of the same prompt.
@@ -265,7 +264,7 @@ __bateri_hooks() {
     add-zle-hook-widget line-pre-redraw __bateri_dock_redraw
     add-zle-hook-widget line-finish __bateri_dock_finish
   fi
-  # THE REMOTE INTEGRATION'S `ssh` (048 Karar 1-A): the user types plain `ssh`
+  # THE REMOTE INTEGRATION'S `ssh`: the user types plain `ssh`
   # and bateri decides whether the connection gets the remote bootstrap
   # (`__bateri_ssh`). Defined here, AFTER the user's files, so a user's own
   # `ssh` alias or function is seen and wins — we define nothing then (a
@@ -278,26 +277,26 @@ __bateri_hooks() {
   fi
 }
 
-# Runs the user's `ssh`, wrapped when bateri says so (048, 049).
+# Runs the user's `ssh`, wrapped when bateri says so.
 #
 # `bateri ssh-argv [--tty] --block N [--instance I] -- <args…>` prints the wrapped arguments, each
 # followed by a NUL, or nothing — and nothing (also a missing binary or any
 # failure) means plain `command ssh "$@"`, today's path. `--tty` only when stdin
 # AND stdout are terminals: under `$(…)` the binary's own stdout is our pipe, so
-# it cannot ask itself (R1.1: `ssh host | grep` is not wrapped). The rules —
+# it cannot ask itself (`ssh host | grep` is not wrapped). The rules —
 # which call is interactive, the settings, `ssh -G`, whether the server is
 # known to have no shell — are all in the binary (`ssh_wrap::decide`), not
 # here: one parser.
 # `--block` is this command's block (`__bateri_block`): the server's blocks are
-# marked as its children (`bt_remote=<P>.<S>.<n>`, 048 phase-3). `--instance`
+# marked as its children (`bt_remote=<P>.<S>.<n>`). `--instance`
 # is bateri's socket directory (`__bateri_ssh_instance`): the session becomes a
-# master there and bateri's file jobs ride it (phase-5).
+# master there and bateri's file jobs ride it.
 #
-# THE SILENT FALLBACK (049 R3): every wrapped `ssh` that ended asks `bateri
+# THE SILENT FALLBACK: every wrapped `ssh` that ended asks `bateri
 # ssh-fell-back --rc N [--instance I] -- <the wrapped arguments>` — 255 too:
 # ssh's own error (a password, the network, a host key) is the binary's to
-# tell from an endpoint that refused our command after the login (049
-# phase-3, the pane's login proof). The binary takes the attempt's nonce out
+# tell from an endpoint that refused our command after the login (the pane's
+# login proof). The binary takes the attempt's nonce out
 # of them and answers nothing when the bootstrap said `up` or the user typed
 # after the login — the user's session ran and its code is theirs, so an
 # `exit` is never followed by a new connection —, or the plain rerun's
@@ -355,8 +354,8 @@ __bateri_precmd() {
   # The hook body runs with the user's options and the `psvar[9]` below is an
   # ARRAY INDEX: with `KSH_ARRAYS` on, the assignment lands in zsh's 10th slot
   # while `%9v` still reads the 9th, so the anchor carries an empty id and the
-  # blocks vanish WITHOUT A DIAGNOSTIC (`/code-review`, 010 phase-2; verified
-  # with `zsh -f`). `-L` is function-local, undone on return.
+  # blocks vanish WITHOUT A DIAGNOSTIC (found in review; verified with
+  # `zsh -f`). `-L` is function-local, undone on return.
   emulate -L zsh
   # `D` closes the FINISHED block, i.e. its id is the value BEFORE the counter increments.
   if (( __bateri_ran )); then
@@ -411,8 +410,7 @@ __bateri_cwd() {
 # A SINGLE FORK in the usual case: `--abbrev-ref` is one call even outside a
 # repository, a second call on a detached HEAD for the short SHA. The cost is
 # per PROMPT and is felt in a large repository — p10k's `gitstatusd` daemon
-# exists for this reason; speeding it up is a separate job (`plan.md` → Kapsam
-# Dışı).
+# exists for this reason; speeding it up is a separate job, out of scope here.
 #
 # `command`: so that the user's `git` alias or function does not interfere.
 __bateri_branch_print() {
@@ -437,10 +435,9 @@ __bateri_branch_print() {
 #   right prompt lives independently of PS1, resetting only PS1 would leave a
 #   theme fragment hanging on the right of the screen.
 # - if there is NO dock (`integration = "blocks"`): the user's prompt stays in
-#   place, we only ADD the marks (010's path). At one time there was a third
-#   state, "the prompt is the user's but the dock is open anyway", and it
-#   produced TWO PROMPTS on screen; it was reduced to a single decision
-#   (012 phase-10).
+#   place, we only ADD the marks. At one time there was a third state, "the
+#   prompt is the user's but the dock is open anyway", and it produced TWO
+#   PROMPTS on screen; it was reduced to a single decision.
 __bateri_prompt_set() {
   if (( __bateri_dock )); then
     PS1=$__bateri_ps1
@@ -448,7 +445,7 @@ __bateri_prompt_set() {
     RPROMPT=
     return 0
   fi
-  # The guard asks for CONTAINMENT, not position (`/code-review`, 010 phase-2):
+  # The guard asks for CONTAINMENT, not position (found in review):
   # the same form as the `B` addition's guard. A prefix test is not idempotent
   # when SOMEONE ELSE touches PS1 — a theme that decorates PS1 on every precmd
   # (virtualenv, git info) does not move our addition to the front, so we would
@@ -541,10 +538,10 @@ __bateri_preexec() {
 #   ESC ] 8133 ; b ; b64(branch) BEL   the context line's branch (`precmd`)
 #   ESC ] 8133 ; w BEL   the edit widget is bound in this prompt (`line-init`)
 #
-# REVERSE DIRECTION — FROM THE TERMINAL TO THE SHELL, the wire's two sequences (031, 032):
+# REVERSE DIRECTION — FROM THE TERMINAL TO THE SHELL, the wire's two sequences:
 #
 #   ESC [ 8133 ~ d ; S ; E ; L BEL
-#   ESC [ 8133 ~ r BEL   only mirror (032): behind a paste with line breaks;
+#   ESC [ 8133 ~ r BEL   only mirror: behind a paste with line breaks;
 #                        since `bracketed-paste-magic` pushes the payload onto the
 #                        queue with `zle -U` and skips the redisplay, the mirror
 #                        stayed stale for a key. The widget's behavior on every
@@ -560,8 +557,7 @@ __bateri_preexec() {
 # selection comes after `d` by the usual path, i.e. there is no base64 decoder
 # in the shell and the letter still passes through `self-insert`. The terminal
 # sends the sequence only if it has seen `w` in this prompt — in a shell without
-# the binding the trailing BEL would be `send-break` (measured, 031 discussion →
-# Muhakeme).
+# the binding the trailing BEL would be `send-break` (measured).
 #
 # KEYMAP IS THE SIXTH BODY and what it carries is not a POLICY but ZLE's state:
 # the side that decides which keymaps mean "a typed key turns into text" is the
@@ -569,7 +565,7 @@ __bateri_preexec() {
 # user can create their own keymap with `bindkey -N` and there is no information
 # at this end to classify it. base64, because that name may contain `;`.
 #
-# PREBUFFER IS THE SEVENTH BODY (032): the earlier lines of a multi-line command
+# PREBUFFER IS THE SEVENTH BODY: the earlier lines of a multi-line command
 # that ZLE no longer edits (`for`, heredoc, `\`-continuation). Appended at the
 # end, because the wire only grows at the end — the decoder reads it as optional,
 # so a window running with an old script is decoded too. It is part of the
@@ -641,7 +637,7 @@ __bateri_b64() {
 }
 
 # `__bateri_percent` (OSC 7's percent encoding) is in `zdotdir.zsh`, shared
-# with the remote wrapper (048).
+# with the remote wrapper.
 
 # Prints ZLE's display state to the mirror; its hooks are `line-init` and
 # `line-pre-redraw` (the first is the prompt's first draw, the second every change).
@@ -668,8 +664,8 @@ __bateri_dock_redraw() {
   # The join is BEFORE the gate, because the fourth body is also subject to the gate.
   local REPLY entries=${(F)region_highlight} pre buf post highlights keymap prebuf
   # The gate is BEFORE ENCODING, because its whole meaning is avoiding encoding —
-  # and it measures all FIVE bodies at once (`PREBUFFER` entered the total in
-  # 032: it is part of the display and the earlier lines of a pasted loop can
+  # and it measures all FIVE bodies at once (`PREBUFFER` is in the total: it
+  # is part of the display and the earlier lines of a pasted loop can
   # exceed the limit by themselves). `region_highlight` is counted separately, it
   # does not enter the total: syntax highlighting leaves one record per token, so
   # on a long line it is of the same order as the text itself and can exceed the
@@ -721,8 +717,7 @@ typeset -g __bateri_dock_edit_wait=0.5
 # line.
 #
 # `S == E` DOES NOT WRITE TO BUFFER, only `CURSOR`: even an empty assignment
-# would spawn an undo record. Deletion is ZLE's single undo unit (measured,
-# `context.md` → Ölçüm).
+# would spawn an undo record. Deletion is ZLE's single undo unit (measured).
 #
 # THE MIRROR IS EXPLICITLY PRINTED AT THE END OF THE WIDGET: `line-pre-redraw`
 # runs only when the display changes and a command that puts the caret where it

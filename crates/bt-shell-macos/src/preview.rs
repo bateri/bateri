@@ -1,4 +1,4 @@
-//! The **AppKit half** of the remote preview (045 R5, Karar 3, 4, 9): a
+//! The **AppKit half** of the remote preview: a
 //! ⌘-click (or the menu's "Open Preview") on a remote file downloads a
 //! temporary, read-only copy into the preview folder and opens it.
 //!
@@ -6,21 +6,21 @@
 //!
 //! 1. **Main** ([`TerminalPane::preview_remote`]): the copy's place
 //!    (`remote_files::preview_path`) and a fresh question to the pane's helper
-//!    session (`Query::Count` — the hover's answer may be cached, and R5.4 compares
+//!    session (`Query::Count` — the hover's answer may be cached, and the cache compares
 //!    the remote size and mtime **now**).
 //! 2. **The helper's worker**: the cache's answer (`preview_cache::state`): an
 //!    unchanged copy opens as it is (its age restarts), a changed remote file
 //!    downloads, a copy the user edited is moved to the download folder first —
-//!    a re-download never destroys it (Karar 9).
+//!    a re-download never destroys it.
 //! 3. **Main** ([`TerminalPane::preview_decided`]): the open policy
 //!    (`remote_files::preview_open`: scripts, programs and unknown types as plain
-//!    text, R5.3), the size limit's question (R5.2), and the download into the
-//!    transfer queue's preview lane, which never waits (Karar 6).
+//!    text), the size limit's question, and the download into the
+//!    transfer queue's preview lane, which never waits.
 //! 4. **The stream thread** (`uploader`'s `spawn_transfer`): the landed copy is
 //!    sealed — `0444` if `preview_read_only`, recorded in the index
 //!    (`preview_cache::seal`) — and the main thread opens it.
 //!
-//! A folder does nothing (Karar 3). A refused action is never silent: a beep, or
+//! A folder does nothing. A refused action is never silent: a beep, or
 //! a sheet that says why.
 
 use std::cell::RefCell;
@@ -72,7 +72,7 @@ enum Decided {
         entry: RemoteEntry,
         rescued: Option<PathBuf>,
     },
-    /// A folder: nothing (Karar 3).
+    /// A folder: nothing.
     Folder,
     /// The sheet's text.
     Failed(String),
@@ -118,7 +118,7 @@ fn file_url(path: &Path) -> Retained<NSURL> {
 }
 
 /// The remote open policy for `remote`'s name ([`remote_files::preview_open`]):
-/// the content class from the name's extension (044's UTType white list).
+/// the content class from the name's extension (the link opener's UTType white list).
 fn policy(entry: &RemoteEntry, remote: &str) -> Option<PreviewOpen> {
     remote_files::preview_open(entry, || {
         Path::new(remote)
@@ -146,7 +146,7 @@ fn plain_text_app() -> Option<Retained<NSURL>> {
 
 /// Opens a preview copy by the policy: a known document in its default
 /// application, anything else in the default plain-text application — a
-/// preview is read, never run (Karar 4). Without a plain-text application the
+/// preview is read, never run. Without a plain-text application the
 /// copy is revealed in Finder, the white list's safe side.
 pub(crate) fn open_copy(path: &Path, open: PreviewOpen) {
     let workspace = NSWorkspace::sharedWorkspace();
@@ -181,7 +181,7 @@ pub(crate) fn open_copy(path: &Path, open: PreviewOpen) {
     }
 }
 
-/// Tells the user that edited previews were kept, not removed (Karar 9): a sheet
+/// Tells the user that edited previews were kept, not removed: a sheet
 /// on `window` when bateri is in front (a notification would not show), a
 /// notification otherwise; `then` runs when the sheet is dismissed (at once
 /// without one). "Show in Finder" reveals the moved files.
@@ -248,7 +248,7 @@ pub(crate) fn report_rescued(
 }
 
 impl TerminalPane {
-    /// The ⌘-click (or "Open Preview") on the remote file `remote` (045 R5): asks
+    /// The ⌘-click (or "Open Preview") on the remote file `remote`: asks
     /// the helper what it is now, then [`TerminalPane::preview_decided`].
     pub(crate) fn preview_remote(&self, remote: String) {
         let Some((command, target, _)) = self.session().and_then(|session| session.remote_target())
@@ -446,7 +446,7 @@ impl TerminalPane {
         }
     }
 
-    /// R5.2: a file over `preview_max_size` asks first — "Open Preview" (the
+    /// A file over `preview_max_size` asks first — "Open Preview" (the
     /// default), "Cancel" (Esc) and, on the left, "Save to Downloads instead"
     /// (the right-click download's path). The text says the copy is temporary
     /// (and read-only) and removed at a later launch.
@@ -553,7 +553,7 @@ impl TerminalPane {
     }
 }
 
-/// The cache's answer for a remote file, on the helper's worker (R5.4, Karar 9).
+/// The cache's answer for a remote file, on the helper's worker.
 fn decide(
     dir: &Path,
     local: &Path,

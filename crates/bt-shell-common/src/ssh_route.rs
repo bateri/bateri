@@ -1,9 +1,9 @@
-//! Which ssh connection a remote file job rides on (047): bateri's own master
+//! Which ssh connection a remote file job rides on: bateri's own master
 //! connection, the user's, or a new master of ours — decided **once, before the
-//! job starts** (`.tasks/047-ssh-parola-ve-keychain/discussion.md` → Karar).
+//! job starts**.
 //!
 //! The pieces here are the pure and the process half of that gate; every
-//! remote file job goes through [`Masters::ensure`] (047 phase-2):
+//! remote file job goes through [`Masters::ensure`]:
 //!
 //! - **Route** ([`Route`], [`plan`]): our socket alive (`-O check`) → ours; the
 //!   user's own master alive (`ssh -G`'s `ControlPath` + `-O check`) → today's
@@ -20,7 +20,7 @@
 //!   [`write_answer`]): the prompt's class and the wire between the askpass
 //!   helper (the same `bateri` binary) and the application. The wire's single
 //!   owner is this module.
-//! - **The user's terminal session** ([`session_socket`], 048 phase-5): a
+//! - **The user's terminal session** ([`session_socket`]): a
 //!   wrapped interactive `ssh` is a master at `u-<key>` in this instance's
 //!   directory ([`crate::ssh_wrap`] adds the options) and a job rides it
 //!   ([`Route::Ours`]) before ours is opened. Its lifetime is the user's: a
@@ -28,7 +28,7 @@
 //!   our jobs) and ends it once the user's session and our jobs are gone —
 //!   bateri never sends it `-O exit`, so neither a session end nor ⌘Q can cut
 //!   the user's terminal.
-//! - **Saved passwords** ([`PasswordStore`], [`Account`]; 047 phase-3): the
+//! - **Saved passwords** ([`PasswordStore`], [`Account`]): the
 //!   platform shell's store (the macOS Keychain) behind a trait. A saved
 //!   password answers the first password prompt without a sheet; a background
 //!   job opens a master **only** with one (one prompt), and a saved password
@@ -99,13 +99,13 @@ pub fn classify_check(code: Option<i32>, stderr: &str) -> Check {
 }
 
 /// The route's **decision** half: our socket's check, the user's terminal
-/// session's master if it is alive ([`session_socket`], 048 phase-5), the
+/// session's master if it is alive ([`session_socket`]), the
 /// user's own master's check (`None` when the user has no control path) and
 /// where our socket would be (`None` when no base fits the socket limit).
 ///
 /// Ours first: once bateri has a master to the host, the user's configuration
 /// need not be asked again. The user's terminal session next: it is the
-/// connection the user signed in to (R7) — riding it asks for nothing. The
+/// connection the user signed in to — riding it asks for nothing. The
 /// user's own master next: it is already open and the user chose it. Only then
 /// a master of ours.
 pub fn decide(
@@ -167,7 +167,7 @@ pub struct SshConfig {
     /// `None` for `none` or an absent line.
     pub control_path: Option<PathBuf>,
     /// `ControlMaster` is anything but `no` (`-G` spells it `false`): the user
-    /// shares connections themselves (048 phase-5 adds nothing then).
+    /// shares connections themselves (the session socket adds nothing then).
     pub control_master: bool,
 }
 
@@ -280,7 +280,7 @@ fn resolve(runner: &dyn SshRunner, target: &RemoteTarget, bases: &[PathBuf]) -> 
     {
         let _ = std::fs::remove_file(socket);
     }
-    // The user's terminal session (048 phase-5), asked only when ours is not
+    // The user's terminal session, asked only when ours is not
     // alive. A stale one is left to ssh: `ControlMaster=auto` unlinks it.
     let session = session_socket(bases, &key).filter(|session| {
         ours != Check::Live
@@ -343,8 +343,7 @@ pub const SUN_PATH: usize =
 
 /// The socket's name: FNV-1a 64 of the canonical (user, host name, port, jump)
 /// quadruple as [`KEY_DIGITS`] hex digits. The **one** place of the algorithm —
-/// 048 makes the user's terminal session a master at the same path (discussion
-/// → Karar 9). FNV and not `DefaultHasher`: the name must not change with the
+/// the user's terminal session is a master at the same path. FNV and not `DefaultHasher`: the name must not change with the
 /// Rust version, a master outlives the process that opened it.
 pub fn host_key(config: &SshConfig) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -365,8 +364,8 @@ pub fn host_key(config: &SshConfig) -> String {
 }
 
 /// Whether a socket at `path` fits `sun_path` while ssh binds it under the
-/// temporary suffix, and survives `-o ControlPath=` (048 phase-5,
-/// `/code-review`): ssh splits an option's value on whitespace and expands
+/// temporary suffix, and survives `-o ControlPath=` (found in
+/// code review): ssh splits an option's value on whitespace and expands
 /// `%` tokens — a home with a space or a `%` would make every argv carrying
 /// it a configuration error. Such a base is skipped (`/tmp/bateri-$UID` next).
 pub fn fits(path: &Path) -> bool {
@@ -407,11 +406,11 @@ pub fn socket_path(bases: &[PathBuf], key: &str) -> Option<PathBuf> {
 pub const SESSION_PREFIX: &str = "u-";
 
 /// How long the user's terminal session's master stays with nothing on it —
-/// a **design constant** (048 phase-5). Any `ControlPersist` detaches the
+/// a **design constant**. Any `ControlPersist` detaches the
 /// master, so the user's `exit` returns at once (with `no` it waited for every
 /// job riding it — measured: a 10 s stream held the `exit` 10 s, and the
 /// helper's stream is long-lived); short, so the connection ends with the
-/// user's session and our jobs on it, not later (047 R9.3).
+/// user's session and our jobs on it, not later.
 pub const SESSION_PERSIST: Duration = Duration::from_secs(2);
 
 /// Where the user's terminal session to `key` is a master: the first base
@@ -472,7 +471,7 @@ pub fn prepare_dir(dir: &Path) -> io::Result<()> {
 /// connection, short enough that an idle server is not held. It is the stop
 /// condition of a master whose owner died; otherwise the user's last session
 /// to the host ([`Masters::session_ended`]) and quitting
-/// ([`Masters::close_all`]) end it first (047 R9.3).
+/// ([`Masters::close_all`]) end it first.
 pub const CONTROL_PERSIST: Duration = Duration::from_secs(600);
 
 /// How long our master may take to reach the server (`ConnectTimeout`) — a
@@ -482,8 +481,7 @@ pub const CONTROL_PERSIST: Duration = Duration::from_secs(600);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Who asked for the master: a job the user started (a sheet may ask for the
-/// password) or a background job (one silent attempt from the Keychain, 047
-/// phase-3).
+/// password) or a background job (one silent attempt from the Keychain).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asker {
     User,
@@ -496,7 +494,7 @@ pub enum Asker {
 /// as the stream ([`crate::upload::ssh_argv_for`]), then the destination.
 ///
 /// `BatchMode=no`: the password goes through askpass. `StrictHostKeyChecking=yes`:
-/// an unknown host key is refused, never asked (Karar 7). A background master
+/// an unknown host key is refused, never asked. A background master
 /// gets **one** password prompt — a stale Keychain password must not lock the
 /// account out.
 pub fn master_argv(target: &RemoteTarget, socket: &Path, asker: Asker) -> Vec<String> {
@@ -674,7 +672,7 @@ fn ask(socket: &Path, prompt: &str) -> io::Result<Option<String>> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "answer"))
 }
 
-/// The `bateri` binary as ssh's askpass (047): `Some(exit code)` when the
+/// The `bateri` binary as ssh's askpass: `Some(exit code)` when the
 /// process was started as one ([`ASKPASS_VAR`] set), `None` otherwise. The
 /// prompt is ssh's first argument; the answer goes to standard output and
 /// nothing else does. No AppKit, no window server: `main` calls this first.
@@ -693,7 +691,7 @@ pub fn askpass_main() -> Option<i32> {
 
 // ─── saved passwords ─────────────────────────────────────────────────────
 
-/// The key of one saved password (047 Karar 6): the host name, user and port
+/// The key of one saved password: the host name, user and port
 /// ssh resolves (`ssh -G`) — the alias the user typed is not the server.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Account {
@@ -714,7 +712,7 @@ impl Account {
     }
 
     /// The item's label — a UI string: the user finds it by "bateri" in
-    /// Keychain Access (Karar 6).
+    /// Keychain Access.
     pub fn label(&self) -> String {
         format!("bateri \u{2014} {}@{}:{}", self.user, self.host, self.port)
     }
@@ -760,7 +758,7 @@ pub struct Question {
     /// wrong (`NumberOfPasswordPrompts` gives the signal for free).
     pub again: bool,
     /// The saved password was given and ssh asks again: the saved one did not
-    /// work (R6.1). The sheet says so; a successful new password replaces it.
+    /// work. The sheet says so; a successful new password replaces it.
     pub stale: bool,
 }
 
@@ -801,7 +799,7 @@ pub enum Denied {
 /// error sheet (one sheet just closed; a second saying "cancelled" is noise).
 pub const CANCELLED: &str = "Cancelled";
 
-/// The text of a background job that needs the user to sign in (R7.2) — the
+/// The text of a background job that needs the user to sign in — the
 /// link label says it and the pane recognises it to show the status bar's
 /// Sign In… button. A UI string.
 pub const SIGN_IN_NEEDED: &str = "Sign in to use remote files";
@@ -834,7 +832,7 @@ pub fn password_refused(stderr: &str) -> bool {
 }
 
 /// The text of a master that did not open, from ssh's standard error. An
-/// unknown host key is refused, never asked (`StrictHostKeyChecking=yes`, Karar 7).
+/// unknown host key is refused, never asked (`StrictHostKeyChecking=yes`).
 pub fn open_failure(host: &str, stderr: &str) -> String {
     let last = crate::upload::last_line(stderr);
     if stderr.contains("Host key verification failed") {
@@ -893,14 +891,14 @@ pub struct Masters {
     /// The socket roots ([`socket_bases`]); this instance's directory is under
     /// each ([`prepare_instance`]).
     roots: Vec<PathBuf>,
-    /// This instance's directory name (R9.2): random, chosen at birth.
+    /// This instance's directory name: random, chosen at birth.
     instance: String,
     /// The socket bases: this instance's directory under each root that could
     /// hold one — prepared once, on the first job's thread.
     bases: OnceLock<Vec<PathBuf>>,
     store: Arc<dyn PasswordStore>,
     flights: Mutex<HashMap<PathBuf, Arc<Flight>>>,
-    /// The accounts whose saved password the server refused (R7.1): a
+    /// The accounts whose saved password the server refused: a
     /// background job does not try them again. In memory, for the
     /// application's lifetime; neither a new remote generation nor time clears
     /// it — only the user's successful sign-in and Forget Password do.
@@ -915,7 +913,7 @@ pub struct Masters {
     /// The socket each target resolved to, by its argv — which panes share a
     /// master ([`Self::session_ended`]).
     sockets: Mutex<HashMap<Vec<String>, PathBuf>>,
-    /// The panes whose terminal is in a remote session, and its target (R9.3).
+    /// The panes whose terminal is in a remote session, and its target.
     sessions: Mutex<HashMap<u64, RemoteTarget>>,
     /// The application quits ([`Self::begin_quit`]): no pane's session end
     /// sends its own `exit` — [`Self::close_all`] does it under the deadline —
@@ -935,7 +933,7 @@ impl Masters {
     }
 
     /// [`Self::new`] with the instance directory's name given: an instance
-    /// carried over an update (055 R5.1) and the tests.
+    /// carried over an update and the tests.
     pub fn with_instance(
         askpass: PathBuf,
         roots: Vec<PathBuf>,
@@ -1006,7 +1004,7 @@ impl Masters {
                 }
             }
             // The saved password — not one the server already refused: sending
-            // it again would be one more failed login (R6.1, R7.1).
+            // it again would be one more failed login.
             let saved = account
                 .as_ref()
                 .filter(|_| !rejected)
@@ -1063,7 +1061,7 @@ impl Masters {
     /// hold one, created on the first call (a job's thread — directories and a
     /// rename, never the main thread). An empty list: no socket of ours is
     /// possible, every route is [`Route::Direct`]. The first is also where the
-    /// focus listener lives (050, [`crate::focus::serve`]).
+    /// focus listener lives ([`crate::focus::serve`]).
     pub fn bases(&self) -> &[PathBuf] {
         self.bases.get_or_init(|| {
             self.roots
@@ -1121,7 +1119,7 @@ impl Masters {
         outcome
     }
 
-    /// What an attempt leaves behind (R6.1, R7.1): a typed password that
+    /// What an attempt leaves behind: a typed password that
     /// opened the master is saved if the box was ticked; an unticked one that
     /// replaced a refused saved password removes it (the next background
     /// attempt would replay a known-bad password). A saved password the server
@@ -1184,7 +1182,7 @@ impl Masters {
         })
     }
 
-    /// Shell ▸ Forget Password (R6.2): the saved password goes, the refused
+    /// Shell ▸ Forget Password: the saved password goes, the refused
     /// mark with it, and our master for the account stops taking new jobs
     /// (`-O stop` — the transfers on it finish; never the user's master) so the
     /// next background job finds no login and the pane offers Sign In…. Runs
@@ -1210,12 +1208,12 @@ impl Masters {
 
     /// The startup sweep: what a dead bateri left behind ([`sweep`]) — never
     /// this instance's directory — then this instance's directories, made now
-    /// (048 phase-5): the user's first wrapped `ssh` finds them, since `bateri
+    /// so the user's first wrapped `ssh` finds them, since `bateri
     /// ssh-argv` only uses a directory that is there ([`instance_dirs`]).
     pub fn sweep(&self) {
         // First: the sweep runs ssh per dead socket and the user's first
         // `ssh` must not miss the directory meanwhile (it skips our own).
-        // An instance carried over an update (055 R5.1) has its masters in
+        // An instance carried over an update has its masters in
         // them already: a live one is ours again — [`resolve`]'s `-O check`
         // finds it, no password asked — and a dead one goes now.
         for dir in self.bases() {
@@ -1226,12 +1224,12 @@ impl Masters {
 
     /// This instance's directory name — the panes' shells get it
     /// (`BATERI_SSH_INSTANCE`), so a wrapped `ssh` becomes a master in it
-    /// ([`session_socket`], 048 phase-5).
+    /// ([`session_socket`]).
     pub fn instance(&self) -> &str {
         &self.instance
     }
 
-    // ─── the user's sessions (047 R9.3) ──────────────────────────────────
+    // ─── the user's sessions ──────────────────────────────────────────────
 
     /// Pane `pane`'s terminal is in a remote session to `target` (the remote
     /// edge): while it lasts, our master for the host stays. Which socket the
@@ -1263,7 +1261,7 @@ impl Masters {
         }
     }
 
-    /// ⌘Q begins (R9.3): the panes' session ends that follow send nothing,
+    /// ⌘Q begins: the panes' session ends that follow send nothing,
     /// [`Self::close_all`] ends every master under the shared deadline.
     pub fn begin_quit(&self) {
         self.closing.store(true, Ordering::SeqCst);
@@ -1310,7 +1308,7 @@ impl Masters {
         (!shared).then_some((target, socket))
     }
 
-    /// ⌘Q (R9.3): every master in this instance's directories is ended
+    /// ⌘Q: every master in this instance's directories is ended
     /// (`-O exit`, in parallel), waiting until `deadline` — the panes' close
     /// shares it. A master that does not answer in time is left to its
     /// `ControlPersist`; the directory keeps its owner file then, so the next
@@ -1634,7 +1632,7 @@ pub(crate) fn private_dir(dir: &Path) -> bool {
     })
 }
 
-// ─── this instance's directory (047 R9.2) ──────────────────────────────
+// ─── this instance's directory ─────────────────────────────────────────
 
 /// An instance directory's owner file: the owning bateri's pid, in decimal.
 const OWNER_FILE: &str = "pid";
@@ -1722,8 +1720,7 @@ pub fn prepare_instance(root: &Path, instance: &str) -> io::Result<PathBuf> {
     }
 }
 
-/// Hands an existing instance directory to `to` (055 R3.4, `discussion.md`
-/// → Karar 10): the update's holder takes the old bateri's directories
+/// Hands an existing instance directory to `to`: the update's holder takes the old bateri's directories
 /// (`from` = its spawner), the new bateri takes them from the holder (`from`
 /// = the holder's pid, from the connection's credentials) — **before** its
 /// sweep, or the sweep of a dead owner's directory would end the live ssh's
@@ -1840,9 +1837,9 @@ fn remove_instance(dir: &Path) {
         let Some(name) = name.to_str() else {
             continue;
         };
-        // The focus listener (050) by name only: on ⌘Q it is this process's
+        // The focus listener by name only: on ⌘Q it is this process's
         // and still listening, and it goes with the directory.
-        // The holder's socket (055) likewise: a holder that ended by its
+        // The holder's socket likewise: a holder that ended by its
         // limit leaves the directory to the next start's sweep.
         let ours = name == OWNER_FILE
             || name == FOCUS_SOCKET
@@ -1856,7 +1853,7 @@ fn remove_instance(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
-/// What a dead bateri left behind (R9.2): under every root, an instance
+/// What a dead bateri left behind: under every root, an instance
 /// directory (or one half born) whose owner is **dead** has its live masters
 /// ended (`-O exit` — a connection must not outlive the bateri that opened it)
 /// and is removed. A living instance's directory, this instance's (`own`),
@@ -1869,7 +1866,7 @@ pub fn sweep(roots: &[PathBuf], own: &str) {
         sweep_flat(root);
     }
     for entry in instance_entries(roots) {
-        // A live holder (055) keeps its directory whoever the owner file
+        // A live holder keeps its directory whoever the owner file
         // names: a new bateri that adopted it may have died before its ACK,
         // and the holder still waits for the next one.
         if entry.name == own || entry.owner.is_none_or(alive) || holder_listening(&entry.dir) {
@@ -1896,7 +1893,7 @@ struct InstanceEntry {
 /// The **one** walk over the instance directories: under every root that is a
 /// private directory of this user, each entry with an instance name — whole
 /// or half born ([`instance_entry`]) — and its owner. [`sweep`] retires the
-/// dead ones, [`live_instances`] gives the living ones (050).
+/// dead ones, [`live_instances`] gives the living ones.
 fn instance_entries(roots: &[PathBuf]) -> Vec<InstanceEntry> {
     let mut found = Vec::new();
     for root in roots.iter().filter(|root| private_dir(root)) {
@@ -1925,7 +1922,7 @@ pub struct Instance {
     pub dirs: Vec<PathBuf>,
 }
 
-/// The living instances under `roots` (050, `bateri focus`, outside any
+/// The living instances under `roots` (`bateri focus`, outside any
 /// instance): whole instance directories whose owner is alive, one
 /// [`Instance`] per pid — the same pid's directories under two roots are one
 /// instance. In the order first seen.
@@ -2019,7 +2016,7 @@ mod tests {
             ours
         );
         assert_eq!(decide(Check::Live, None, None, Some(socket)), ours);
-        // The user's terminal session alive (048 phase-5): ride it, before the
+        // The user's terminal session alive: ride it, before the
         // user's own master and before opening ours.
         assert_eq!(
             decide(
@@ -2183,7 +2180,7 @@ mod tests {
         let none = parse_config("user u\nhostname h\nport 22\ncontrolpath none\n").unwrap();
         assert_eq!(none.control_path, None);
         assert!(!config.shares_connections() || config.control_path.is_some());
-        // 048 phase-5: `-G` spells the default `false`; any other value is the user's own.
+        // `-G` spells the default `false`; any other value is the user's own.
         assert!(!none.shares_connections());
         for master in ["auto", "yes", "true", "ask", "autoask"] {
             let config = parse_config(&format!("hostname h\ncontrolmaster {master}\n")).unwrap();
@@ -2210,7 +2207,7 @@ mod tests {
         let key = host_key(&config);
         assert_eq!(key.len(), KEY_DIGITS);
         assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        // Pinned: the name outlives the process (and 048 computes it too).
+        // Pinned: the name outlives the process (and the `ssh` wrapper computes it too).
         assert_eq!(key, "fbe5e00e347eecdb");
         let other = |edit: fn(&mut SshConfig)| {
             let mut changed = config.clone();
@@ -2242,13 +2239,13 @@ mod tests {
             .join("0".repeat(INSTANCE_DIGITS))
             .join(key);
         assert!(fits(&fallback), "{}", fallback.display());
-        // A path ssh would split or expand in `-o ControlPath=` (048 phase-5).
+        // A path ssh would split or expand in `-o ControlPath=`.
         for odd in ["/Users/a b/s/k", "/Users/a%b/s/k", "/Users/a\tb/s/k"] {
             assert!(!fits(Path::new(odd)), "{odd:?}");
         }
         let instance = "0".repeat(INSTANCE_DIGITS);
         // The longest home whose cache socket still fits, then one byte more —
-        // under this instance's directory (047 R9.2).
+        // under this instance's directory.
         let tail = socket_bases(Some(Path::new("/")), 0)[0]
             .strip_prefix("/")
             .unwrap()
@@ -2397,7 +2394,7 @@ mod tests {
         }
     }
 
-    /// 048 phase-5: the user's terminal session's master is a route of ours —
+    /// The user's terminal session's master is a route of ours —
     /// after our own master, before the user's and before opening ours; its
     /// socket is checked only when it is there.
     #[test]
@@ -3115,7 +3112,7 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// R7.1: a background job tries a saved password once; refused, the
+    /// A background job tries a saved password once; refused, the
     /// account is marked and no later background job — whatever the
     /// generation, however much later — connects again. Only the user's
     /// successful sign-in clears it.
@@ -3273,7 +3270,7 @@ exit $code
         pid
     }
 
-    /// 047 R9.2: an instance directory is born whole with its owner, and the
+    /// An instance directory is born whole with its owner, and the
     /// sweep retires only a dead owner's — never a living instance's, this
     /// one's or one without an owner.
     #[test]
@@ -3333,7 +3330,7 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 055 R3.4: a directory passes to a new owner only from a dead owner or
+    /// A directory passes to a new owner only from a dead owner or
     /// from the one handing it over — never from any other living bateri —
     /// and the sweep leaves a live holder's directory alone even when its
     /// owner file names a dead process.
@@ -3403,7 +3400,7 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 050: the living instances are the whole directories of a live owner,
+    /// The living instances are the whole directories of a live owner,
     /// one per pid across roots; the dead, the half born and the ownerless
     /// are not among them.
     #[test]
@@ -3442,7 +3439,7 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 050: ⌘Q removes the instance directory with its live focus listener.
+    /// ⌘Q removes the instance directory with its live focus listener.
     #[test]
     fn closing_removes_the_directory_with_its_focus_socket() {
         let root = scratch("close-focus");
@@ -3461,7 +3458,7 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 055 R5.1: an instance carried over an update keeps its live masters
+    /// An instance carried over an update keeps its live masters
     /// and loses its dead ones at the sweep — the sweep of other instances
     /// never looks into one's own directory.
     #[test]
@@ -3485,7 +3482,7 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 047 R9.3: a pane's session end ends the master only when no other pane
+    /// A pane's session end ends the master only when no other pane
     /// of this instance is in a session to it — through an alias, the same
     /// argv, or one not resolved yet (kept: it may be the same host).
     #[test]
@@ -3634,7 +3631,7 @@ exit $code
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "riding");
         assert_eq!(masters.ensure(&target, Ask::Never), Ok(route.clone()));
-        // The user's last session to the host ends it (047 R9.3).
+        // The user's last session to the host ends it.
         masters.session_started(1, &target);
         masters.session_ended(1);
         crate::child::wait_until("the master outlived the session", || {
@@ -3654,8 +3651,8 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 047 phase-4's Kabul against a **password** server: the Docker sshd of
-    /// the set's manual check (`127.0.0.1:2222`, `deneme`/`parola123`;
+    /// The acceptance scenario against a **password** server: the Docker sshd
+    /// of the manual check (`127.0.0.1:2222`, `deneme`/`parola123`;
     /// skipped when it does not answer). The user's ssh runs in a real PTY
     /// and a password is saved: while ssh's password prompt is on screen the
     /// background gate says "not logged in" and no socket of ours exists; once
@@ -3681,10 +3678,11 @@ exit $code
         fn link_hover_lost(&self) {}
     }
 
-    /// 048 phase-5 (R7) against a real password sshd (the 047 one): the user's
+    /// The terminal session's sharing against a real password sshd (the one
+    /// above): the user's
     /// wrapped `ssh` (password typed in the terminal) is a master at the
-    /// session socket; a background job — no saved password, so before 048 it
-    /// had no way in — rides it with `BatchMode=yes`, i.e. without a new
+    /// session socket; a background job — no saved password, so without the
+    /// session socket it had no way in — rides it with `BatchMode=yes`, i.e. without a new
     /// login; ⌘Q's `close_all` and a session end leave the user's session
     /// alone; the user's `exit` returns at once although a job still rides
     /// the connection, and the master ends after it. `-F /dev/null`, no

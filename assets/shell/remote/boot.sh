@@ -1,4 +1,4 @@
-# bateri's remote bootstrap (048) — POSIX sh, run on the SERVER.
+# bateri's remote bootstrap — POSIX sh, run on the SERVER.
 #
 # HOW IT GETS THERE: the local `ssh` function asks `bateri ssh-argv`, which
 # wraps the user's `ssh` as `ssh -t <their arguments> "exec sh -c '<one-liner>'
@@ -16,7 +16,7 @@
 # literal, so no here-document — bash as `sh` would put one in `/tmp`).
 #
 # WHAT IT DOES, IN ORDER:
-#   0. says it runs (049 R2.1): `ESC ] 8133 ; i ; up ; {nonce} BEL`, the
+#   0. says it runs: `ESC ] 8133 ; i ; up ; {nonce} BEL`, the
 #      attempt's nonce from `$2` (`ssh_wrap::remote_command`), before the motd
 #      and before every fault — the proof that the server's login shell ran
 #      our command, so bateri learns the server as `posix` (the pane matches
@@ -25,19 +25,19 @@
 #      command line goes into a sequence unchecked). The one-liner's decode
 #      fallback, which never reaches this file, prints the same mark itself.
 #      Then the terminal's identity (`LC_TERMINAL`, `LC_TERMINAL_VERSION`,
-#      `LC_BATERI_TAB_URL`; 049 R6) is exported for every login shell below
+#      `LC_BATERI_TAB_URL`) is exported for every login shell below
 #      — the decode fallback does not (a known limit: it is a server without
 #      a base64 decoder, and its `AcceptEnv LC_*` still may).
 #   1. prints the motd — sshd does not when it runs a command (`do_login` is
 #      the interactive login's path). A known limit both ways: a server that
 #      turned the motd off for ssh (`PrintMotd no`, no pam_motd) shows it now,
 #      and the one-liner's decode fallback prints none; `Last login:` is lost and that is
-#      accepted (048 discussion → Karar). `~/.hushlogin` silences it, as it
+#      accepted. `~/.hushlogin` silences it, as it
 #      silences sshd's.
 #   2. checks the login shell: zsh, bash and fish get the integration; any
-#      other (sh, csh, BusyBox ash) gets a plain login shell (R3.4).
+#      other (sh, csh, BusyBox ash) gets a plain login shell.
 #   3. writes the files under `${XDG_DATA_HOME:-~/.local/share}/bateri/shell/`
-#      — temporary name + `mv`, owner-only, nothing in `/tmp`, no log (R3.2).
+#      — temporary name + `mv`, owner-only, nothing in `/tmp`, no log.
 #      The same fixed path every time: a shell reads its files when it starts,
 #      so rewriting them under a running shell is harmless and nothing piles
 #      up.
@@ -45,7 +45,7 @@
 #      parent, `$1`, in `BATERI_RBLOCK`): zsh through the
 #      `ZDOTDIR` swap, bash in POSIX mode with `ENV`, fish through
 #      `XDG_DATA_DIRS` → `vendor_conf.d`. Each one reads the user's own login
-#      files, unchanged; no rc file on the server is written (R3.1).
+#      files, unchanged; no rc file on the server is written.
 #
 # EVERY FAILURE IS A PLAIN LOGIN SHELL, never a broken connection: the reason
 # goes to bateri as `ESC ] 8133 ; f ; {code} BEL` (`write`, `shell`; the
@@ -62,7 +62,7 @@ case ${2-} in
   *) printf '\033]8133;i;up;%s\007' "$2" ;;
 esac
 
-# 0b. The terminal's identity (049 R6), before every fault: every arm below
+# 0b. The terminal's identity, before every fault: every arm below
 # `exec`s a login shell, so the plain ones carry it too. `LC_TERMINAL` is
 # fixed (only bateri runs this file); the version (`$3`) and the tab's
 # address (`$4`, `bateri://tab/<uuid>` or `-`) come from the wrapped command
@@ -150,7 +150,7 @@ if ! (umask 077 && mkdir -p "$bt_dir/zsh" "$bt_dir/bash" "$bt_dir/fish/vendor_co
   bt_login
 fi
 
-# The remote blocks' parent (048 phase-3): the local block of the `ssh`
+# The remote blocks' parent: the local block of the `ssh`
 # command, `sh -c`'s `$1` (`ssh_wrap::remote_command`), handed to the login
 # shell's script, which takes it out of the environment again. Digits only;
 # without it the scripts print no block marks.

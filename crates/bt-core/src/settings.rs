@@ -4,8 +4,7 @@
 //! It **doesn't see** the file system: `bt-shell` reads the text, watches it
 //! and shows the error in the window. Only the decision is here — the "pure
 //! decision + thin system wrapper" pattern of `child.rs` — and this is the
-//! defaults' only owner. The decision's record is
-//! `.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1.
+//! defaults' only owner.
 //!
 //! **There is a single error rule:** if the text can't be parsed as TOML the
 //! result is a separate value (the `Err` of [`Settings::parse`]) and no field is
@@ -45,7 +44,7 @@ use crate::session::{Osc52, TerminalOptions};
 /// is no other gate that clamps `SessionOptions.scrollback` and none is needed,
 /// the only value going there passes through this parser. `pub`, because the
 /// settings window's field asks for the same ceiling: a second copy could have
-/// made the window write a number the parser rejects (029).
+/// made the window write a number the parser rejects.
 pub const SCROLLBACK_MAX: usize = 100_000;
 
 /// The reserved value of `[appearance] theme`: the system's light/dark
@@ -84,24 +83,22 @@ pub struct FontOptions {
     ///
     /// Below `1.0` (down to [`MIN_SPACING`]) the rows tighten but the glyph
     /// is **not clipped**: it is rasterised at the font's own height and its
-    /// tails and accents overflow onto the neighbouring row, as in iTerm2
-    /// (`.tasks/052-tasan-glyph/`).
+    /// tails and accents overflow onto the neighbouring row, as in iTerm2.
     pub line_height: f64,
     /// Letter-spacing multiplier — the horizontal twin of
-    /// [`FontOptions::line_height`] (051): the cell becomes this multiple of
+    /// [`FontOptions::line_height`]: the cell becomes this multiple of
     /// the font's own advance and the glyph sits **centred** in it, i.e. the
     /// letters keep their size and the columns open up.
     ///
     /// Below `1.0` (down to [`MIN_SPACING`]) the columns tighten and the
     /// glyph keeps its size, overflowing onto the neighbouring column instead
-    /// of being clipped — the line height's rule on the other axis
-    /// (`.tasks/052-tasan-glyph/`).
+    /// of being clipped — the line height's rule on the other axis.
     pub letter_spacing: f64,
 }
 
 impl Default for FontOptions {
-    /// 13 points was `bt-gpu`'s `POINT_SIZE` constant until 006: a chosen
-    /// default, not a measured number.
+    /// 13 points was `bt-gpu`'s `POINT_SIZE` constant before settings
+    /// existed: a chosen default, not a measured number.
     fn default() -> Self {
         Self {
             family: None,
@@ -120,11 +117,11 @@ impl Default for FontOptions {
 /// the durations and spring coefficients is `bt_gpu::motion` — keeping the
 /// numbers in the settings model would make them changeable from two places.
 ///
-/// `Default` is **`Spring`** (008 Karar 6): the set's product rationale is "one
-/// of the three things that introduce the reference on screen" and making the
-/// default `Snap` would have meant shipping the feature off. Because the default
-/// has a single owner here, the hermetic timed run (it doesn't read a settings
-/// file) gets this value too — `make smoke`'s `motion > 0` requirement leans
+/// `Default` is **`Spring`**: the cursor's motion is one of the three things
+/// that introduce the product on screen, and making the default `Snap` would
+/// have meant shipping the feature off. Because the default has a single
+/// owner here, the hermetic timed run (it doesn't read a settings file) gets
+/// this value too — `make smoke`'s `motion > 0` requirement leans
 /// exactly on this.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorMotion {
@@ -207,11 +204,11 @@ impl CursorBlink {
 /// value lands in `Session` with [`TerminalOptions`], where it becomes
 /// alacritty's `default_cursor_style`.
 ///
-/// **That mirror is descriptive, not prescriptive** (016): `[clipboard] osc52`
+/// **That mirror is descriptive, not prescriptive**: `[clipboard] osc52`
 /// enters `TerminalOptions` too, while `[terminal] cursor_radius` doesn't. The
 /// section names **what the user is setting**, not which struct carries it. The
-/// reference keeps the key in its own `[typography]` (`docs/ARASTIRMA.md` →
-/// İmleç); we took the name, not the place.
+/// reference keeps the key in its own `[typography]`; we took the name, not
+/// the place.
 ///
 /// **This setting only says the default.** An application can change the shape
 /// with DECSCUSR (`\e[5 q`) or OSC 50 and that word is heeded: if vim wants a bar
@@ -220,8 +217,7 @@ impl CursorBlink {
 ///
 /// `Hidden` and `HollowBlock` are **not represented**: the first isn't a shape
 /// but visibility (`\e[?25l`) and `Cursor::visible` already carries it; the
-/// second is the state of lost focus and focus doesn't cross the boundary today
-/// (`.tasks/014-imlec-stilleri/plan.md` → Kapsam Dışı).
+/// second is the state of lost focus and focus doesn't cross the boundary today.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CaretShape {
     /// A block filling the cell — alacritty's default too.
@@ -239,19 +235,19 @@ pub enum CaretShape {
 /// `bt-gpu` **imports** the same constant (`Frame::default()` and the pixel
 /// guards). Had there been two literals the guards would test their own
 /// consistency and pass green even if the shipped cursor had a different size —
-/// the recipe for a silent breakage (`/plan-review`, 016). The precedent is
+/// the recipe for a silent breakage. The precedent is
 /// [`FontOptions`]'s doc: *"had it been the renderer's own constant, a timed
 /// run's font and a file-less user's would be tied to two separate numbers"*.
 ///
 /// The value is **chosen, not measured** and went down in two rounds of eyeballing
-/// in 015 (0.18 → 0.10): the block caret is shorter than the cell width and a
+/// (0.18 → 0.10): the block caret is shorter than the cell width and a
 /// larger radius turned it from a rectangle into a pill.
 pub const CURSOR_RADIUS: f64 = 0.10;
 
 /// The cursor's **glow strength** default; `1.0` = the design's own measure.
 ///
-/// **One number, not two** (`/plan-review`, 016): the halo margin and its alpha
-/// went down in the same two eyeballing rounds in 015 **in the same direction**
+/// **One number, not two**: the halo margin and its alpha
+/// went down in the same two eyeballing rounds **in the same direction**
 /// (margin 1.0 → 0.5 → 0.4, alpha 0.35 → 0.14 → 0.10), i.e. the user moved along
 /// a single feel, not two axes. Separate keys would also produce meaningless
 /// states: `margin = 2, alpha = 0` means a quad that paints the halo of nothing.
@@ -274,9 +270,9 @@ pub const CURSOR_BLINK_INTERVAL: f64 = 0.5;
 /// second and going below it would turn the terminal into a strobe. **The gate
 /// can't see this** and let that be written down: the timed run never reads the
 /// settings file and the blink default is off too, so a broken period will
-/// **under no condition** turn `make smoke`'s `quiet=` tier red (014
-/// `teslim.md`: "the protection is not a token but the default itself"). The
-/// only protection is this range.
+/// **under no condition** turn `make smoke`'s `quiet=` tier red (the
+/// protection is not a token but the default itself). The only protection is
+/// this range.
 pub const CURSOR_BLINK_RANGE: std::ops::RangeInclusive<f64> = 0.05..=5.0;
 
 /// The accepted range of the radius; half = half the cell, beyond is
@@ -284,14 +280,14 @@ pub const CURSOR_BLINK_RANGE: std::ops::RangeInclusive<f64> = 0.05..=5.0;
 ///
 /// The ranges are `pub`: the settings window's controls are built with these
 /// ends too, so what the parser accepts and what the window offers come from a
-/// single place (029).
+/// single place.
 pub const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
 
 /// The accepted range of the glow multiplier — **chosen, not measured**.
 ///
 /// The multiplier scales **both axes at once** and the ceiling's rationale must
-/// count both (`/code-review`): at 3.0 the alpha is 0.30 (below the 0.35
-/// rejected in 015) but the spread is `1.2 × gutter_px`, i.e. **above** the
+/// count both (found in code review): at 3.0 the alpha is 0.30 (below the 0.35
+/// rejected by eye) but the spread is `1.2 × gutter_px`, i.e. **above** the
 /// "the whole left margin" that `CARET_GLOW_RATIO`'s doc records as "neon, not a
 /// glow".
 ///
@@ -303,9 +299,9 @@ pub const CURSOR_GLOW_RANGE: std::ops::RangeInclusive<f64> = 0.0..=3.0;
 
 /// `[terminal] cursor_unfocused`: what the cursor is in an unfocused window.
 ///
-/// 015 hollows out the cursor when focus is lost; this key turns that off. **It
+/// The cursor is hollowed out when focus is lost; this key turns that off. **It
 /// doesn't touch blink** — blink stopping when unfocused is a separate signal
-/// and a separate decision (015 R7.4).
+/// and a separate decision.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UnfocusedCaret {
     /// Hollows out: the frame stays, the fill goes. Today's behavior.
@@ -332,7 +328,7 @@ impl UnfocusedCaret {
 }
 
 /// `[terminal] confirm_close`: when to ask as a window, tab or the application
-/// closes (`.tasks/028-kapatma-onayi/discussion.md` → Karar 6).
+/// closes.
 ///
 /// "Running" means a program in the foreground **outside** the shell (vim,
 /// `ssh`, Claude Code); a background job and the shell's own loop aren't
@@ -369,7 +365,7 @@ impl ConfirmClose {
 }
 
 /// `[terminal] restore_windows`: what comes back when bateri opens again after
-/// quitting (053 Karar 5) — the windows, tabs and splits, and with them each
+/// quitting — the windows, tabs and splits, and with them each
 /// pane's scrollback.
 ///
 /// Read at quit and at launch only, from the current settings — the precedent
@@ -417,7 +413,7 @@ pub struct CaretStyle {
     /// `f64`, not `f32`, and the reason is the **diagnostic text**: `ranged_float`
     /// prints the fallen-back value into the message and `f64::from(0.10f32)`
     /// comes to `0.10000000149011612` — the user would see float noise rather
-    /// than the number they wrote (`/code-review`). The narrowing is at the
+    /// than the number they wrote (found in code review). The narrowing is at the
     /// `bt-gpu` boundary, once rather than per frame.
     pub radius_ratio: f64,
     /// The glow's strength; `0.0` is off, `1.0` is the design's own measure.
@@ -460,7 +456,7 @@ impl CaretShape {
 /// Reading the system's answer is `bt-shell`'s job (`NSWorkspace`); the only
 /// information here is **which one** the user wants. The place where the three
 /// collapse to a single `bool` is also there, because `bt-gpu` doesn't see
-/// AppKit (`CLAUDE.md` → the layer table).
+/// AppKit (the crate layering).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReduceMotion {
     /// Follow macOS's Reduce Motion setting.
@@ -496,7 +492,7 @@ impl ReduceMotion {
 /// Its consumer is `bt-shell` (the precedent of [`CursorMotion`]) and there it
 /// collapses **to a single `bool`** with Reduce Motion and `cursor_motion =
 /// "snap"`: if one of the three turns motion off, the wheel goes by today's line
-/// step (`.tasks/027-yumusak-kaydirma/discussion.md` → Karar 5).
+/// step.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SmoothScroll {
     /// The trackpad follows the finger, the notch glides, at the gesture's end it
@@ -517,13 +513,12 @@ impl SmoothScroll {
     }
 }
 
-/// `[motion] keypress`: how a glyph typed in the dock arrives (030).
+/// `[motion] keypress`: how a glyph typed in the dock arrives.
 ///
 /// **Only drawable names** ([`Self::NAMES`]) and today the reference list in
 /// full: names go in as they become drawable — had a name that isn't drawn been
-/// accepted in the popup or the file, selecting it would do nothing
-/// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 7). The
-/// definition of the looks is Karar 6's table; the amplitudes are in `bt-gpu`'s
+/// accepted in the popup or the file, selecting it would do nothing. The
+/// amplitudes are in `bt-gpu`'s
 /// `shaders/glyph_fx.metal`.
 ///
 /// Its consumer is `bt-gpu` (the precedent of [`CursorMotion`]) and the value
@@ -585,7 +580,7 @@ impl Keypress {
     }
 }
 
-/// `[motion] erase`: how a glyph erased in the dock goes away (030).
+/// `[motion] erase`: how a glyph erased in the dock goes away.
 ///
 /// [`Keypress`]'s sibling, with the same rules: only drawable names, the raw
 /// value to `bt-gpu`. The default is **[`Self::Recede`]** — the departure that
@@ -645,8 +640,8 @@ impl Erase {
 /// **The only setting not applied at save time** and this is the first exception
 /// to the "settings apply at save time" contract: the wrapper is installed at the
 /// shell's **birth**, by the time the file is saved the shell is already born.
-/// That's why no arm is attached to [`Changes`] and `docs/AYARLAR.md` says in
-/// the key's own line that it takes effect **in the next session** (009 Karar 5).
+/// That's why no arm is attached to [`Changes`] and `docs/SETTINGS.md` says in
+/// the key's own line that it takes effect **in the next session**.
 ///
 /// Its consumer is `bt-shell` (the precedent of [`CursorMotion`]): it gives the
 /// decision, because it is the side that sees which shell is running and where
@@ -668,7 +663,7 @@ pub enum ShellIntegration {
     /// born, those shells will have marks but no dock. This value only gives the
     /// zsh user the right to **choose** the same state.
     ///
-    /// It replaced `[shell] prompt` in 012 phase-10: a separate key produced
+    /// It replaced `[shell] prompt`: a separate key produced
     /// **two prompts** on screen (the user's in the grid, the dock's below) and
     /// the caret jumped between the two. Saying "the prompt is the user's"
     /// already means "the line is in the grid".
@@ -702,7 +697,7 @@ impl ShellIntegration {
     }
 }
 
-/// A remote host's mark (037 Karar 2, 3): meaning, not color — its color comes
+/// A remote host's mark: meaning, not color — its color comes
 /// from the theme's role ([`crate::Theme::mark_linear`]), so the light/dark
 /// switch carries the mark along by itself.
 ///
@@ -722,7 +717,7 @@ pub enum HostMark {
     None,
     /// A direct color, `0xRRGGBB` (`"#rrggbb"`). It doesn't change with the theme
     /// and nobody checks that it will be legible on the light theme — the cost is
-    /// named in Karar 2; the menu never writes it.
+    /// accepted; the menu never writes it.
     Rgb(u32),
 }
 
@@ -749,17 +744,17 @@ impl HostMark {
     }
 }
 
-/// One entry of the `[remote] hosts` array: a pattern and its mark (037 Karar 2).
+/// One entry of the `[remote] hosts` array: a pattern and its mark.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRule {
     /// `*` (any string, empty included) and `?` (a single character), case
     /// insensitive; if it carries `@` it matches the whole host, if not the part
     /// after the last `@` ([`host_mark`]).
     pub pattern: String,
-    /// `None` when the entry writes only `integration` (048): it then takes
+    /// `None` when the entry writes only `integration`: it then takes
     /// no part in the mark's match ([`host_mark`]).
     pub mark: Option<HostMark>,
-    /// `integration`: the remote shell integration for this host (048 R1.3);
+    /// `integration`: the remote shell integration for this host;
     /// `None` leaves it to the mark and the `[remote] integration` key
     /// ([`Settings::integration_for`]). Resolved separately from the mark,
     /// each by its own first matching entry: turning a host's integration off
@@ -768,9 +763,9 @@ pub struct HostRule {
 }
 
 /// The host's mark: that of `rules`'s **first** matching entry, or
-/// [`HostMark::None`] if none matches (037 Karar 2).
+/// [`HostMark::None`] if none matches.
 ///
-/// The input is the host the remote session shows (036: as the user typed it,
+/// The input is the host the remote session shows (as the user typed it,
 /// scheme and port dropped). If the pattern has no `@`, the part of the input
 /// after the last `@` is matched — `deploy@prod` and `prod` are the same machine;
 /// if the pattern has `@`, the whole input, so `root@*` can be written. The
@@ -785,7 +780,7 @@ pub fn host_mark(rules: &[HostRule], host: &str) -> HostMark {
         .unwrap_or(HostMark::None)
 }
 
-/// The first entry matching `host` that writes `integration` (048), and its
+/// The first entry matching `host` that writes `integration`, and its
 /// index — [`Settings::integration_for`]'s match and the menu's carry.
 fn integration_rule(rules: &[HostRule], host: &str) -> Option<(usize, bool)> {
     matching(rules, host).find_map(|(index, rule)| rule.integration.map(|on| (index, on)))
@@ -809,7 +804,7 @@ fn matching<'a>(
 }
 
 /// A pattern with `*` and `?`, case insensitive; no class (`[a-z]`) or set
-/// (`{a,b}`) — those would mean a separate glob library (Karar 2).
+/// (`{a,b}`) — those would mean a separate glob library.
 ///
 /// Both sides are lowered to lowercase **once** and the comparison is over
 /// character sequences: case folding can expand one character into several
@@ -846,7 +841,7 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
 }
 
 /// `[remote] preview_keep`: how long a remote file's preview copy stays in the
-/// preview folder after it was last opened (045 Karar 9). Checked at launch and
+/// preview folder after it was last opened. Checked at launch and
 /// once a day; nothing is removed at quit, so [`Self::UntilLaunch`] removes this
 /// session's previews at the **next** launch.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -887,7 +882,7 @@ impl PreviewKeep {
 }
 
 /// `[remote] download_conflict`: what a download does when its name already
-/// exists in the target folder (045 Karar 5).
+/// exists in the target folder.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DownloadConflict {
     /// The sheet asks: Keep both / Replace.
@@ -962,9 +957,9 @@ pub fn expand_home(text: &str, home: Option<&std::path::Path>) -> Option<std::pa
         .then(|| std::path::PathBuf::from(text))
 }
 
-/// `[remote]`'s remote file keys (045 R8): previewing a remote file (⌘-click),
+/// `[remote]`'s remote file keys: previewing a remote file (⌘-click),
 /// cleaning the preview folder and downloading. The numbers are design
-/// constants' starting values, not measured (045 Karar 8).
+/// constants' starting values, not measured.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteFiles {
     /// `preview_max_size`, bytes: a larger file asks before its preview downloads.
@@ -1005,7 +1000,7 @@ impl Default for RemoteFiles {
 }
 
 /// `[remote] stats`: how the remote host's load shows at the right of the ssh
-/// status bar (046 Karar 4, 8).
+/// status bar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RemoteStatsMode {
     /// `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%` — the last eight CPU samples and the numbers.
@@ -1036,14 +1031,14 @@ impl RemoteStatsMode {
 }
 
 /// `[remote] stats_interval`'s accepted range, in seconds — a **design
-/// constant**, not a measurement (046 Karar 8). The lower end keeps the
-/// sampling far below the display's rate (`CLAUDE.md` → "Boşta sıfır kare":
+/// constant**, not a measurement. The lower end keeps the
+/// sampling far below the display's rate (zero frames when idle:
 /// at most one frame per sample) and one request per round trip on the shared
 /// helper session; above a minute the sparkline's eight samples would span
 /// most of ten minutes and stop reading as "now".
 pub const STATS_INTERVAL_RANGE: std::ops::RangeInclusive<u8> = 2..=60;
 
-/// `[remote] stats` and `stats_interval` (046 Karar 8): the load indicator of
+/// `[remote] stats` and `stats_interval`: the load indicator of
 /// the ssh status bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RemoteStatsSettings {
@@ -1056,7 +1051,7 @@ pub struct RemoteStatsSettings {
 
 impl Default for RemoteStatsSettings {
     /// Three seconds: `uptime`'s feel — a change shows within a breath, and
-    /// eight samples cover the last half minute. A design constant (046 Karar 8).
+    /// eight samples cover the last half minute. A design constant.
     fn default() -> Self {
         Self {
             mode: RemoteStatsMode::default(),
@@ -1075,7 +1070,7 @@ impl Default for RemoteStatsSettings {
 /// line stays in place and the subtitle says where to look.
 const RETIRED: &[(&str, &str)] = &[(
     "prompt",
-    // 012 phase-10: `[shell] prompt` as a separate key produced two prompts on
+    // `[shell] prompt` as a separate key produced two prompts on
     // screen; the choice moved to `integration`'s third value.
     "`shell.prompt` is no longer read; use `shell.integration = \"blocks\"` \
      to keep your own prompt",
@@ -1146,14 +1141,14 @@ pub struct Settings {
     /// ([`RestoreWindows`]). Doesn't enter `TerminalOptions`.
     pub restore_windows: RestoreWindows,
     /// `[remote] hosts`: the remote hosts' mark patterns, in the file's order
-    /// (037 Karar 2; matching is [`host_mark`]). Empty by default.
+    /// (matching is [`host_mark`]). Empty by default.
     pub remote_hosts: Vec<HostRule>,
-    /// `[remote]`'s preview and download keys (045 R8, [`RemoteFiles`]).
+    /// `[remote]`'s preview and download keys ([`RemoteFiles`]).
     pub remote_files: RemoteFiles,
-    /// `[remote] stats` and `stats_interval` (046, [`RemoteStatsSettings`]).
+    /// `[remote] stats` and `stats_interval` ([`RemoteStatsSettings`]).
     pub remote_stats: RemoteStatsSettings,
     /// `[remote] integration`: whether a plain `ssh` sets up the shell
-    /// integration on the server (048 R1.3). The host's own entry and the
+    /// integration on the server. The host's own entry and the
     /// production mark come first ([`Self::integration_for`]). Like `osc52`, a
     /// value that is not accepted and an unusable file turn it **off**: a wrong
     /// guess here writes to servers silently.
@@ -1163,8 +1158,8 @@ pub struct Settings {
 impl Default for Settings {
     /// The values in effect when there is no file and when a key is missing.
     ///
-    /// `scrollback` was `bt-shell`'s `SCROLLBACK` constant until 006; the value
-    /// stayed the same, its owner moved here. The theme follows the system's
+    /// `scrollback` was `bt-shell`'s `SCROLLBACK` constant before settings
+    /// existed; the value stayed the same, its owner moved here. The theme follows the system's
     /// appearance: the embedded `bateri-light` on light, the embedded `bateri` on
     /// dark.
     ///
@@ -1214,7 +1209,7 @@ pub struct Parsed {
 /// Why a setting wasn't accepted.
 ///
 /// The text is **English**: it appears in the window's subtitle, so it is a UI
-/// string (`CLAUDE.md` → Dil); stderr prints a copy of the same text.
+/// string; stderr prints a copy of the same text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     /// Dotted key path (`terminal.scrollback`); `None` on a syntax error.
@@ -1226,7 +1221,7 @@ pub struct Diagnostic {
 
 impl fmt::Display for Diagnostic {
     /// A single line: the window's subtitle is drawn **on the same line** as the
-    /// title (a window without a toolbar, 007 phase-1 eyeball check), a long and
+    /// title (a window without a toolbar, checked by eye), a long and
     /// multi-line text would be cut off there.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(line) = self.line {
@@ -1271,7 +1266,7 @@ pub enum SettingsEdit {
     Keypress(Keypress),
     Erase(Erase),
     ShellIntegration(ShellIntegration),
-    /// Shell ▸ Mark … as ▸ (037 Karar 5): the `[remote] hosts` edit that makes
+    /// Shell ▸ Mark … as ▸: the `[remote] hosts` edit that makes
     /// `host`'s mark `mark`. Not a single key's value but the array's entries —
     /// the rule is in this arm of [`Settings::with_edit`]. `host` is the form the
     /// remote session shows (`user@` included, the match's input); the pattern
@@ -1281,10 +1276,10 @@ pub enum SettingsEdit {
         host: String,
         mark: HostMark,
     },
-    /// The settings window's "Set up shell integration on servers" (048 R6):
+    /// The settings window's "Set up shell integration on servers":
     /// `[remote] integration`.
     RemoteIntegration(bool),
-    /// Shell ▸ Shell Integration on “{host}” (048 R6): the `[remote] hosts`
+    /// Shell ▸ Shell Integration on “{host}”: the `[remote] hosts`
     /// edit after which `host`'s first matching entry that writes
     /// `integration` writes `on` — an explicit choice for this host, even
     /// when it equals what the mark and `[remote] integration` would give.
@@ -1435,8 +1430,7 @@ impl Settings {
     /// removed were left without a header it would become a root key and would be
     /// **silently** ignored as an unrecognized key.
     ///
-    /// The text is English: the file the user opens is a UI string
-    /// (`CLAUDE.md` → Dil).
+    /// The text is English: the file the user opens is a UI string.
     pub const TEMPLATE: &str = r##"# bateri settings. Changes apply as soon as you save this file.
 # A key you delete goes back to its default. Values are case-sensitive; one that
 # is not understood leaves its key alone and says so under the title — except
@@ -1619,7 +1613,7 @@ stats_interval = 3
     ///
     /// The file may hold the user's `osc52 = "off"` and an unreadable file can't
     /// say so: the clipboard falls to off for a remote program, not to on
-    /// (`discussion.md` → Karar 5). A wrong guess on every other key is harmless
+    /// A wrong guess on every other key is harmless
     /// and visible (theme, point size); OSC 52's is silent. When the file is
     /// fixed and saved, the live reload applies the value in the file.
     ///
@@ -1630,10 +1624,10 @@ stats_interval = 3
     pub fn for_unusable_file() -> Self {
         Self {
             osc52: Osc52::Off,
-            // 048 R1.3: the file may hold `integration = false`; writing to a
+            // The file may hold `integration = false`; writing to a
             // server is the unsafe direction of the guess, as the clipboard is.
             remote_integration: false,
-            // 053 Karar 5: the file may hold `restore_windows = "off"` (or
+            // The file may hold `restore_windows = "off"` (or
             // `"layout"`); writing the scrollback to disk is the invisible side
             // effect, the layout is the visible gain.
             restore_windows: RestoreWindows::Layout,
@@ -1650,7 +1644,7 @@ stats_interval = 3
     /// Wider than invalid TOML syntax: a duplicate key and a number exceeding
     /// TOML's integer limit (`i64`) also drop the whole document —
     /// `scrollback = 99999999999999999999` can't be clamped to the ceiling,
-    /// because the value can't be read at all. `docs/AYARLAR.md` says this.
+    /// because the value can't be read at all. `docs/SETTINGS.md` says this.
     pub fn parse(text: &str) -> Result<Parsed, Diagnostic> {
         Self::parse_keeping(text, &Settings::default())
     }
@@ -1677,8 +1671,8 @@ stats_interval = 3
     /// section has the wrong type. The rule's reason was the application that
     /// can't be undone and turning OSC 52 off is reversible; the opposite, a
     /// turn-off mistyped as `"of"` silently keeping the clipboard on, is not
-    /// (`discussion.md` → Karar 5). The same holds for writing to a server (048)
-    /// and for writing the scrollback to disk (053): `"layout"` still brings the
+    /// The same holds for writing to a server
+    /// and for writing the scrollback to disk: `"layout"` still brings the
     /// windows back, the visible half.
     pub fn parse_keeping(text: &str, fallback: &Settings) -> Result<Parsed, Diagnostic> {
         let doc = document(text)?;
@@ -1972,7 +1966,7 @@ stats_interval = 3
                 }
                 // A rejected list keeps the previous one, and at launch that is
                 // empty: the production marks and every `integration = false`
-                // would be gone. The integration turns off instead (048 R1.3).
+                // would be gone. The integration turns off instead.
                 let hosts_rejected = parsed.diagnostics.len() > before;
                 parsed.settings.remote_files = remote_files(
                     text,
@@ -2019,7 +2013,7 @@ stats_interval = 3
     }
 
     /// Whether a plain `ssh` to `host` (as typed, like [`host_mark`]'s input)
-    /// sets up the remote shell integration (048 R1.3): the first matching
+    /// sets up the remote shell integration: the first matching
     /// `[remote] hosts` entry that writes `integration`; if none does and the
     /// host's mark is `production`, off; otherwise the `[remote] integration`
     /// key. "The first match wins" as for the mark, per key.
@@ -2134,7 +2128,7 @@ stats_interval = 3
         // An inline table (`theme = { … }`) is a section too: `is_value` would let
         // it through and writing in its place would in this spelling silently
         // delete the content that `[appearance.theme]` is rejected for
-        // (a `/code-review` finding).
+        // (a code-review finding).
         if let Some(table) = section(text, parsed.as_table(), section_name, &mut refused)
             && let Some(item) = table
                 .get(key)
@@ -2205,7 +2199,7 @@ fn ensure_section(doc: &mut toml_edit::DocumentMut, name: &str) {
 /// CRLF; otherwise a single selection would show the whole file as changed in a
 /// dotfile repository. A file with mixed line endings takes the first line's.
 ///
-/// It is first lowered to LF and then converted (a `/code-review` finding):
+/// It is first lowered to LF and then converted (a code-review finding):
 /// `toml_edit` leaves a `\r\n` **inside** a multi-line string as it is and a
 /// direct conversion would turn it into `\r\r\n` — invalid TOML, so the file
 /// couldn't be written again and no save would be applied.
@@ -2233,13 +2227,13 @@ struct MarkPlan {
     /// The prepended entry also writes `mark` (an entry that only carries
     /// `integration` has none).
     prepend_mark: bool,
-    /// The prepended entry carries this `integration` (048): the removed exact
+    /// The prepended entry carries this `integration`: the removed exact
     /// entry was the one deciding the host's integration, and the new first
     /// entry keeps that answer.
     integration: Option<bool>,
 }
 
-/// The menu's writing rule (037 Karar 5), pure: the edit that disturbs `rules`
+/// The menu's writing rule, pure: the edit that disturbs `rules`
 /// the least so that `host`'s resolution becomes `mark`; `None` (a no-op) if the
 /// resolution is already `mark`.
 ///
@@ -2254,7 +2248,7 @@ struct MarkPlan {
 ///   entry with a glob in front of it is moved to the start for the same reason.
 /// - **None** deletes the exact entries; if a glob still gives a mark afterwards
 ///   `mark = "none"` is written at the start.
-/// - **`integration` is not lost** (048): a deleted exact entry that decided
+/// - **`integration` is not lost**: a deleted exact entry that decided
 ///   the host's integration hands its value to the entry written at the start
 ///   (an `integration`-only one when no mark is needed), so the host's answer
 ///   stays what it was. An exact entry is changed in place even if it carries
@@ -2330,7 +2324,7 @@ struct IntegrationPlan {
     prepend: bool,
 }
 
-/// The menu's integration rule (048 R6), pure — [`host_mark_plan`]'s twin:
+/// The menu's integration rule, pure — [`host_mark_plan`]'s twin:
 /// the least disturbing edit after which `host`'s first matching entry that
 /// writes `integration` ([`integration_rule`]) writes `on`; `None` (a no-op)
 /// if it already does.
@@ -2403,7 +2397,7 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
                 if let Some(index) = plan.in_place
                     && let Some(table) = tables.get_mut(index)
                 {
-                    // An entry that writes only `integration` (048) has no
+                    // An entry that writes only `integration` has no
                     // `mark` line to change: it gets one.
                     if table.contains_key("mark") {
                         set_keeping_decor(table.get_mut("mark"), &written);
@@ -2431,7 +2425,7 @@ fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diag
                             *old = written.as_str().into();
                             *old.decor_mut() = decor;
                         }
-                        // An `integration`-only entry (048) gets a mark.
+                        // An `integration`-only entry gets a mark.
                         None => inline_insert(entry, "mark", written.as_str().into()),
                     }
                 }
@@ -2505,7 +2499,7 @@ fn with_host_integration(text: &str, host: &str, on: bool) -> Result<String, Dia
                 }
                 // An entry planned for deletion that carries a key we don't
                 // know stays as it is: deleting it would drop the user's key
-                // (a `/code-review` finding), stripping it would leave an entry
+                // (a code-review finding), stripping it would leave an entry
                 // with neither `mark` nor `integration` and reject the list.
                 // Its `integration` is shadowed by the prepended entry.
                 let remove: Vec<usize> = plan
@@ -2735,12 +2729,12 @@ pub struct Changes {
     pub caret: bool,
     /// [`Settings::remote_hosts`] or [`Settings::remote_files`] changed: the
     /// pattern list goes to every session (`Session::set_host_marks`) and the
-    /// active remote host's mark is resolved again (037 Karar 2); the remote file
-    /// keys are read where they are used (045). One field for the section: a
+    /// active remote host's mark is resolved again; the remote file
+    /// keys are read where they are used. One field for the section: a
     /// remote file key's change re-sends the same marks, which is a no-op.
     pub remote: bool,
     /// [`Settings::remote_stats`] changed: the load indicator's form and the
-    /// sampling interval go to every pane (046 Karar 8). **Not** folded into
+    /// sampling interval go to every pane. **Not** folded into
     /// [`Self::remote`]: that field re-sends the pattern list to every session.
     pub stats: bool,
 }
@@ -2907,7 +2901,7 @@ fn font_family(
 /// `font.size`: an integer or a decimal, finite and greater than zero.
 ///
 /// There is **no** upper bound: clamping depends on `point size × scale` and is
-/// silent in `bt-atlas` (`discussion.md` → Karar 4). Had there been a ceiling
+/// silent in `bt-atlas`. Had there been a ceiling
 /// here it would have had two owners and the diagnostic would come and go as the
 /// window changes screens.
 /// `font.line_height`: a multiplier between [`MIN_SPACING`] and
@@ -2957,9 +2951,9 @@ fn letter_spacing(
 /// of range the key stays at its own value and a diagnostic is left.
 ///
 /// A separate function, because the same ~35 lines had been written **twice by
-/// hand** in the repo (`line_height`, `font_size`) and 016 was bringing three
-/// more keys — had the helper not been named, three more copies would have been
-/// born (`/plan-review`).
+/// hand** in the repo (`line_height`, `font_size`) and the cursor settings were
+/// bringing three more keys — had the helper not been named, three more copies
+/// would have been born.
 ///
 /// **No clamping, rejection:** had an out-of-range value been silently pulled
 /// to the end, the user would never see they wrote it wrong. That is the repo's
@@ -3003,11 +2997,10 @@ fn ranged_float(
     value
 }
 
-/// The floor of both spacing multipliers (052): below `1.0` glyphs overflow
+/// The floor of both spacing multipliers: below `1.0` glyphs overflow
 /// onto the neighbouring cell instead of being clipped, and the floor bounds
 /// that overlap. A product choice, not a measured number: `0.5` is no longer
-/// comfortable to read, but the user picks it knowingly
-/// (`.tasks/052-tasan-glyph/discussion.md` → Karar).
+/// comfortable to read, but the user picks it knowingly.
 pub const MIN_SPACING: f64 = 0.5;
 
 /// The line-height multiplier's ceiling — the atlas budget (see [`line_height`]).
@@ -3112,7 +3105,7 @@ fn named_enum<T: Copy + PartialEq>(
     fallback
 }
 
-/// `[remote]`'s remote file keys (045 R8): every key present is read, a value
+/// `[remote]`'s remote file keys: every key present is read, a value
 /// that isn't accepted takes `fallback`'s and leaves a diagnostic.
 fn remote_files(
     text: &str,
@@ -3198,7 +3191,7 @@ fn remote_files(
     files
 }
 
-/// `[remote]`'s load indicator keys (046 Karar 8): every key present is read,
+/// `[remote]`'s load indicator keys: every key present is read,
 /// a value that isn't accepted takes `fallback`'s and leaves a diagnostic.
 fn remote_stats(
     text: &str,
@@ -3347,7 +3340,7 @@ fn folder(
     fallback.to_owned()
 }
 
-/// `remote.hosts`: the array of `{ host, mark }` entries (037 Karar 2).
+/// `remote.hosts`: the array of `{ host, mark }` entries.
 ///
 /// **A single broken entry rejects the whole key** and `fallback`'s list stays —
 /// `parse_keeping`'s rule, without exception: dropping only the broken entry from
@@ -3408,7 +3401,7 @@ fn host_rules(
                 .map(|(_, named)| *named)
                 .or_else(|| crate::theme::hex_color(mark).map(HostMark::Rgb))
         });
-        // `integration` (048): a boolean; an entry may carry it alone, and then
+        // `integration`: a boolean; an entry may carry it alone, and then
         // it has no mark. A value of another type rejects the list like a bad mark.
         let integration = match table.get("integration") {
             None => None,
@@ -3598,11 +3591,11 @@ mod tests {
 
     #[test]
     fn documented_template_is_the_template() {
-        // `docs/AYARLAR.md` shows the template as it is; a copy would drift.
-        let doc = include_str!("../../../docs/AYARLAR.md");
+        // `docs/SETTINGS.md` shows the template as it is; a copy would drift.
+        let doc = include_str!("../../../docs/SETTINGS.md");
         let (_, after) = doc
-            .split_once("### Şablon\n")
-            .expect("no template heading in AYARLAR.md");
+            .split_once("### Template\n")
+            .expect("no template heading in SETTINGS.md");
         let (_, block) = after
             .split_once("```toml\n")
             .expect("no toml block under the heading");
@@ -3746,7 +3739,7 @@ mod tests {
 
     #[test]
     fn rejected_values_keep_the_given_settings() {
-        // The save-time rule (a `/code-review` finding): had a wrong-typed save of
+        // The save-time rule (a code-review finding): had a wrong-typed save of
         // `scrollback` fallen to the default (ten thousand), a hundred-thousand
         // history would have been irreversibly truncated at that moment. A value
         // that isn't accepted takes the given settings' and the diagnostic says
@@ -4111,7 +4104,7 @@ mod tests {
     #[test]
     fn cursor_motion_is_read() {
         // `spring` if not in the file: not shipping the feature off is the
-        // decision itself (008 Karar 6).
+        // decision itself.
         assert_eq!(clean("").cursor_motion, CursorMotion::Spring);
         assert_eq!(
             clean("[motion]\ncursor_motion = \"snap\"\n").cursor_motion,
@@ -4131,7 +4124,7 @@ mod tests {
     fn unrecognized_cursor_motion_keeps_its_own_key() {
         // `osc52`'s "a value that isn't accepted falls to off" exception does
         // **not** pass here: the cost of a wrong guess is a visible animation, not
-        // a silent clipboard leak (008 Karar 6). So the rule is the other keys':
+        // a silent clipboard leak. So the rule is the other keys':
         // the key stays at its own value, with a diagnostic beside it.
         for (value, found) in [
             ("\"sprong\"", "\"sprong\""),
@@ -4334,7 +4327,7 @@ found {found}; using \"auto\""
         // The contract's only exception and its test is here: even if the key
         // changes `Changes` stays empty, because the shell is already born and
         // there is nothing to apply. If an arm is ever attached to `Changes` this
-        // will go red and `docs/AYARLAR.md`'s "takes effect in the next session"
+        // will go red and `docs/SETTINGS.md`'s "takes effect in the next session"
         // sentence will have to be corrected too.
         let before = clean("");
         let after = clean("[shell]\nintegration = \"off\"\n");
@@ -4344,8 +4337,8 @@ found {found}; using \"auto\""
 
     #[test]
     fn caret_style_is_read_and_bounded() {
-        // **The default is today's look:** a user with no file sees the cursor 015
-        // shipped and `bt-gpu` imports the same constants (016 R2) — had there been
+        // **The default is today's look:** a user with no file sees the cursor as
+        // shipped and `bt-gpu` imports the same constants — had there been
         // two literals the pixel guards would have stayed blind.
         assert_eq!(clean("").caret, CaretStyle::default());
         assert_eq!(
@@ -4364,7 +4357,7 @@ found {found}; using \"auto\""
 
     #[test]
     fn a_rejected_caret_number_keeps_its_own_key() {
-        // **No clamping, rejection** (016 R1.3): had an out-of-range value been
+        // **No clamping, rejection**: had an out-of-range value been
         // silently pulled to the end, the user would never see they wrote it
         // wrong. The rejected key stays at its own default, **its neighbor is
         // read**.
@@ -4410,7 +4403,7 @@ found {found}; using \"auto\""
     #[test]
     fn a_rejected_caret_number_names_the_value_the_user_kept() {
         // **The diagnostic text must show the number the user wrote**, not float
-        // noise (`/code-review`): when `CaretStyle` was `f32`, `f64::from(0.10f32)`
+        // noise (found in code review): when `CaretStyle` was `f32`, `f64::from(0.10f32)`
         // came to `0.10000000149011612` and the message said
         // "using 0.10000000149011612". The sibling tests (font, theme) check the
         // whole message; this key looked only at `key` and the defect leaked from
@@ -4458,7 +4451,7 @@ found 1.5; using 0.1"
         // An integer is a multiplier too: the `line_height = 2` the user will write.
         assert_eq!(clean("[font]\nline_height = 2\n").font.line_height, 2.0);
 
-        // Below 1 the rows tighten and glyphs overflow (052), down to the floor.
+        // Below 1 the rows tighten and glyphs overflow, down to the floor.
         assert_eq!(clean("[font]\nline_height = 0.5\n").font.line_height, 0.5);
         assert_eq!(clean("[font]\nline_height = 0.75\n").font.line_height, 0.75);
 
@@ -4504,7 +4497,7 @@ found 1.5; using 0.1"
             clean("[font]\nletter_spacing = 2\n").font.letter_spacing,
             2.0
         );
-        // Below 1 letters overflow onto the neighbouring column (052).
+        // Below 1 letters overflow onto the neighbouring column.
         assert_eq!(
             clean("[font]\nletter_spacing = 0.5\n").font.letter_spacing,
             0.5
@@ -4547,7 +4540,7 @@ found 1.5; using 0.1"
 
     #[test]
     fn the_retired_prompt_key_is_kept_but_not_read() {
-        // **012 phase-10: `shell.prompt` is retired.** A separate key produced two
+        // **`shell.prompt` is retired.** A separate key produced two
         // prompts on screen (the user's in the grid, the dock's below) and the
         // caret jumped between the two; the choice moved to `integration`'s third
         // value.
@@ -4603,7 +4596,7 @@ found 1.5; using 0.1"
         }
         // Two derived questions and **separate** answers: `blocks` installs the
         // wrapper (for blocks and marks) but doesn't want the dock. Deriving one
-        // from the other would bring back the bug phase-10 closed.
+        // from the other would bring back the two-prompt bug.
         assert!(ShellIntegration::Auto.installs_wrapper());
         assert!(ShellIntegration::Blocks.installs_wrapper());
         assert!(!ShellIntegration::Off.installs_wrapper());
@@ -4693,7 +4686,7 @@ found 1.5; using 0.1"
         assert!(clean("").remote_integration);
         assert!(!clean("[remote]\nintegration = false\n").remote_integration);
         assert!(clean("[remote]\nintegration = true\n").remote_integration);
-        // The osc52 exception (048 R1.3): neither the default nor the given value.
+        // The osc52 exception: neither the default nor the given value.
         let current = Settings::default();
         for text in ["[remote]\nintegration = \"no\"\n", "remote = 5\n"] {
             let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
@@ -4928,7 +4921,7 @@ found 1.5; using 0.1"
 
     #[test]
     fn smooth_scroll_is_read() {
-        // `on` if not in the file: the feature isn't shipped off (027 Karar 4).
+        // `on` if not in the file: the feature isn't shipped off.
         assert_eq!(clean("").smooth_scroll, SmoothScroll::On);
         assert_eq!(
             clean("[motion]\nsmooth_scroll = \"off\"\n").smooth_scroll,
@@ -4950,7 +4943,7 @@ found 1.5; using 0.1"
     #[test]
     fn keypress_and_erase_are_read() {
         // `fade` / `recede` if not in the file: the animation must be visible out
-        // of the box (030 Karar 7).
+        // of the box.
         let empty = clean("");
         assert_eq!(
             (empty.keypress, empty.erase),
@@ -4979,7 +4972,7 @@ found 1.5; using 0.1"
     #[test]
     fn unrecognized_keypress_and_erase_keep_their_own_keys() {
         // `bounce` is in no list: it is unrecognized, i.e. a name that does nothing
-        // when selected isn't accepted (030 Karar 7).
+        // when selected isn't accepted.
         for (value, found) in [
             ("\"bounce\"", "\"bounce\""),
             ("\"Fade\"", "\"Fade\""),
@@ -5200,8 +5193,7 @@ found 1.5; using 0.1"
     #[test]
     fn confirm_close_change_reaches_no_session() {
         // Read from the current settings at close time: the difference mustn't send
-        // anything to the sessions, the font or the cursor (028 → Karar 6,
-        // precedent `caret`).
+        // anything to the sessions, the font or the cursor (precedent `caret`).
         let before = clean("");
         let after = clean("[terminal]\nconfirm_close = \"always\"\n");
         assert_eq!(before.terminal(), after.terminal());
@@ -5228,7 +5220,7 @@ found 1.5; using 0.1"
 
     #[test]
     fn a_host_pattern_matches_with_star_and_question_ignoring_case() {
-        // 037 Karar 2: `*` is any string, empty included, `?` a single character.
+        // `*` is any string, empty included, `?` a single character.
         let prod = [host_rule("prod-*", HostMark::Production)];
         assert_eq!(host_mark(&prod, "prod-web-1"), HostMark::Production);
         assert_eq!(host_mark(&prod, "PROD-WEB-1"), HostMark::Production);
@@ -5382,7 +5374,7 @@ found 1.5; using 0.1"
 
     #[test]
     fn theme_write_keeps_remote_hosts_comments_and_unknown_keys() {
-        // R2.4: every path that writes to the file leaves `[remote]`, its comment
+        // Every path that writes to the file leaves `[remote]`, its comment
         // and a key we don't recognize in place.
         let text = "[remote]\n# prod kırmızı\nhosts = [\n  { host = \"prod\", mark = \"production\" }, # canlı\n]\nfuture = 1\n";
         let written = Settings::with_theme(text, "paper").expect("writable text");
@@ -5398,8 +5390,8 @@ found 1.5; using 0.1"
     #[test]
     fn unknown_keys_and_sections_are_silent() {
         // A later set's keys mustn't produce a diagnostic today: `intensity` and
-        // `speed` are in the reference's `[motion]` section, not ours (008 → Kapsam
-        // dışı; `keypress` was recognized in 030 and served as the witness).
+        // `speed` are in the reference's `[motion]` section, not ours (out of
+        // scope; `keypress` was later recognized and served as the witness).
         let text = "\
 future = true
 [terminal]
@@ -5430,7 +5422,7 @@ line_height = 1.2
         assert!(Settings::parse("[terminal").is_err());
         // A number exceeding TOML's integer limit can't be clamped to the ceiling:
         // the value can't be read at all and the document drops
-        // (`docs/AYARLAR.md`).
+        // (`docs/SETTINGS.md`).
         assert!(Settings::parse("[terminal]\nscrollback = 99999999999999999999\n").is_err());
     }
 
@@ -5506,7 +5498,7 @@ cursor = \"spring\"
 
     #[test]
     fn theme_write_leaves_trailing_comments_where_they_were() {
-        // A `/code-review` finding: a comment at the end of the document is the
+        // A code-review finding: a comment at the end of the document is the
         // document's tail in `toml_edit`, the new section was being added **in
         // front of** it. The line of a user who uncommented it would become
         // `appearance.family` and be silently ignored.
@@ -5522,7 +5514,7 @@ cursor = \"spring\"
 
     #[test]
     fn theme_write_keeps_crlf_line_endings() {
-        // A `/code-review` finding: `toml_edit` writes line endings as LF; a single
+        // A code-review finding: `toml_edit` writes line endings as LF; a single
         // theme selection would show the whole file as changed in a dotfile
         // repository.
         let text = "[appearance]\r\ntheme = \"a\"  # c\r\n\r\n[font]\r\nsize = 14\r\n";
@@ -5535,7 +5527,7 @@ cursor = \"spring\"
             Settings::with_theme("[font]\r\nsize = 14\r\n", "paper").expect("writable text"),
             "[font]\r\nsize = 14\r\n\r\n[appearance]\r\ntheme = \"paper\"\r\n"
         );
-        // A `/code-review` finding: `toml_edit` leaves the `\r\n` inside a
+        // A code-review finding: `toml_edit` leaves the `\r\n` inside a
         // multi-line string raw; the conversion turned it into `\r\r\n` and left the
         // file invalid. The result is parseable and the text is the same.
         let text = "[appearance]\r\ntheme = \"a\"\r\n[notes]\r\nnote = \"\"\"x\r\ny\"\"\"\r\n";
@@ -5592,7 +5584,7 @@ cursor = \"spring\"
             assert!(err.message.contains("must be a section"), "{err}");
         }
         // A `theme` that is a table: writing a value in its place would delete the
-        // subtable — both spellings (a `/code-review` finding: the inline form was
+        // subtable — both spellings (a code-review finding: the inline form was
         // getting through).
         for text in [
             "[appearance.theme]\nx = 1\n",
@@ -5858,7 +5850,7 @@ cursor = \"spring\"
     #[test]
     fn host_integration_keeps_an_entry_with_unknown_keys() {
         // An `integration`-only entry with a key we don't know stays untouched
-        // (a `/code-review` finding): deleting it would drop the key, stripping
+        // (a code-review finding): deleting it would drop the key, stripping
         // it would leave an entry the parser rejects with the whole list.
         let text = "[remote]\nhosts = [{ host = \"*\", integration = false }, \
                     { host = \"vm\", integration = false, note = \"lab box\" }]\n";

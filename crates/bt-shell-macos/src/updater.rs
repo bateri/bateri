@@ -15,7 +15,7 @@
 //! Sparkle's own preferences live in `NSUserDefaults` and its documentation
 //! asks not to build a second layer on top of them.
 //!
-//! **The delegate** ([`UpdaterDelegate`], 055 Karar 9) tells one thing: the
+//! **The delegate** ([`UpdaterDelegate`]) tells one thing: the
 //! coming quit is Sparkle's relaunch (`updaterWillRelaunchApplication:`), so
 //! the running programs are handed over instead of hung up
 //! ([`take_relaunch`]). An aborted install (`updater:didAbortWithError:`)
@@ -47,7 +47,7 @@ const FRAMEWORK: &str = "Sparkle.framework";
 /// callbacks are not promised a thread.
 static RELAUNCH: AtomicBool = AtomicBool::new(false);
 
-/// Marks the coming quit as a relaunch (055 R4.1).
+/// Marks the coming quit as a relaunch.
 pub(crate) fn request_relaunch() {
     RELAUNCH.store(true, Ordering::SeqCst);
 }
@@ -89,7 +89,7 @@ define_class!(
             }
         }
 
-        /// Sparkle is about to quit for the install (055 R5.2, Karar 10 (a)):
+        /// Sparkle is about to quit for the install:
         /// while a transfer streams or a password sheet is open — bytes and
         /// answers that pass through bateri and cannot be handed over — the
         /// relaunch waits; `install` is called when the last one ends (⌘.

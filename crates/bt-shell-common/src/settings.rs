@@ -8,7 +8,7 @@
 //!
 //! The result carries four distinct states and is **not collapsed** into
 //! [`Settings::default`]: "no file" is a silent and correct state, while "could not be parsed"
-//! requires applying nothing on a live reload and turning OSC 52 off at launch (phase-8). What
+//! requires applying nothing on a live reload and turning OSC 52 off at launch. What
 //! to do in which state is the caller's rule; the launch rule is [`Loaded::at_launch`], the
 //! save-time rule [`Loaded::live`]. The two rules for a theme name are the same pair:
 //! [`ThemeLoaded::or_embedded`], [`ThemeLoaded::or_current`]. The watched paths also come from
@@ -20,7 +20,7 @@
 //! before reading; but a link to a file evicted from iCloud Drive or a hung network home
 //! directory can stall the launch. The settings file is small and local; moving this to a
 //! separate thread would make the launch order (settings → geometry → session) asynchronous
-//! and was not worth the cost in this set.
+//! and was not worth the cost.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ const THEMES_DIR: &str = "themes";
 
 /// The root in production: `{home}/.config/bateri/`.
 ///
-/// Not macOS's `~/Library/Application Support`: the file is edited by hand and `CLAUDE.md`'s
+/// Not macOS's `~/Library/Application Support`: the file is edited by hand and the documented
 /// contract names this path explicitly.
 pub fn config_root(home: &Path) -> PathBuf {
     home.join(".config").join("bateri")
@@ -117,8 +117,7 @@ pub fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
 /// to the truncated file; if that write fails or the process dies at exactly that moment the
 /// file is left empty or half written. A temporary file + rename next to the resolved target
 /// would close this window, but it breaks hard links, drops permissions and extended
-/// attributes and fails in an unwritable directory; writing in place is the plan's decision
-/// (`/code-review` finding, waived: `.tasks/007-ayarlar-ve-tema/phase-7.md`).
+/// attributes and fails in an unwritable directory; writing in place is the deliberate choice.
 pub fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String> {
     let subject = match edit {
         SettingsEdit::Theme(_) => "theme",
@@ -183,7 +182,7 @@ pub enum Loaded {
     /// Read, but could not be parsed as TOML.
     Unparseable(Diagnostic),
     /// Parsed; the diagnostics are the rejected keys. Boxed: the settings
-    /// record dwarfs the other variants (045's remote file keys tipped
+    /// record dwarfs the other variants (the remote file keys tipped
     /// `clippy::large_enum_variant`).
     Parsed(Box<Parsed>),
 }
@@ -266,10 +265,9 @@ pub enum ThemeLoaded {
 ///
 /// `root` `None` → the home directory could not be resolved, only the embedded ones. A key
 /// missing from the file comes from the **base**: in a file shadowing an embedded theme, that
-/// theme itself; under another name, `Theme::BATERI` (`docs/AYARLAR.md` → Temalar). A user who
+/// theme itself; under another name, `Theme::BATERI` (`docs/SETTINGS.md` → Themes). A user who
 /// writes only `accent` into a shadowing `themes/bateri-light.toml` expects the light theme
-/// with a red cursor; read from the dark base, it would get a dark background in light mode
-/// (`/code-review` finding).
+/// with a red cursor; read from the dark base, it would get a dark background in light mode.
 ///
 /// **If the file exists but is unusable, there is no fallback to the embedded one**: if a
 /// broken `themes/bateri.toml` silently opened the embedded `bateri`, the user could not see
@@ -358,12 +356,12 @@ impl ThemeLoaded {
 }
 
 /// A diagnostic's form in the subtitle and on stderr; in one place so that both branches and
-/// the live reload (phase-4) use the same form.
+/// the live reload use the same form.
 pub fn notice(diagnostic: &Diagnostic) -> String {
     format!("{FILE_NAME}: {diagnostic}")
 }
 
-/// The file's state as the settings window sees it (029 Karar 7) — and the **source** of the
+/// The file's state as the settings window sees it — and the **source** of the
 /// text in the subtitle's settings slot ([`FileState::notices`]): the window's banner and the
 /// subtitle say the same sentence, two texts are not produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -430,7 +428,7 @@ impl Loaded {
     ///   write the new one" (vim's backup) and the path is briefly absent in between; applying
     ///   the defaults would slam the window on every save. An empty file is also this branch
     ///   ([`load_keeping`]). The cost: a user who really deletes or empties the file sees the
-    ///   defaults on the next launch (`docs/AYARLAR.md`).
+    ///   defaults on the next launch (`docs/SETTINGS.md`).
     pub fn live(self) -> (Option<Settings>, Vec<String>) {
         let notices = self.state().notices();
         let settings = match self {
@@ -654,7 +652,7 @@ mod tests {
         let root = TempRoot::new("theme-names");
         // Without a themes directory the list is empty, not an error.
         assert_eq!(user_theme_names(&root.0), Vec::<String>::new());
-        // `""`: a file named exactly `.toml` — `/code-review` finding, an item with an empty
+        // `""`: a file named exactly `.toml` — a review finding, an item with an empty
         // title would write `theme = ""`.
         for name in ["paper", "Ink", "bateri", "system", ".hidden", "._paper", ""] {
             write_theme_file(&root, name, "");
@@ -810,7 +808,7 @@ mod tests {
         );
 
         // The base of a file shadowing the light embedded theme is the light theme
-        // (`/code-review` finding): a user who changes only the cursor must not get a dark
+        // (a review finding): a user who changes only the cursor must not get a dark
         // background in light mode. The base of a non-shadowing name stays `bateri`.
         write_theme_file(&root, "bateri-light", "accent = \"#ff0000\"\n");
         write_theme_file(&root, "paper", "accent = \"#ff0000\"\n");
@@ -839,7 +837,7 @@ mod tests {
     fn empty_user_theme_is_unusable() {
         // An editor saving in place first truncates the file: an empty theme read in the middle
         // of the save would be the dark base itself and the live reload would slam the window
-        // to it (`/code-review` finding). `settings.toml`'s rule: an empty file is unusable.
+        // to it (a review finding). `settings.toml`'s rule: an empty file is unusable.
         let root = TempRoot::new("theme-empty");
         write_theme_file(&root, "paper", " \n");
         assert_eq!(
@@ -900,7 +898,7 @@ mod tests {
 
     #[test]
     fn appearance_switches_never_leave_the_other_appearances_theme() {
-        // `/code-review`'s scenario: `dark_theme` is not found, the window goes back and forth
+        // A review scenario: `dark_theme` is not found, the window goes back and forth
         // dark → light → dark. Every switch chooses the theme again for that appearance; the
         // broken dark theme does **not leave** the light theme on screen, it falls back to the
         // embedded dark one. The light switch empties the theme slot.

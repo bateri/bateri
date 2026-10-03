@@ -1,8 +1,8 @@
 //! Clipboard bridge: carries the text `bt-core` knows to the AppKit pasteboard.
 //!
 //! Only `bt-shell-macos` (AppKit) touches the pasteboard; `bt-core` sees bytes, not
-//! the pasteboard (`CLAUDE.md` → layer layout). The copied text comes from
-//! phase-1's single text path (`Session::selection_text`); a second text path
+//! the pasteboard (the layer layout). The copied text comes from the
+//! single text path (`Session::selection_text`); a second text path
 //! would mean a second wrapping bug.
 //!
 //! Both directions go through `NSPasteboard`; the board comes in as a **parameter**
@@ -90,7 +90,7 @@ pub(crate) fn read(board: &NSPasteboard) -> Option<String> {
 ///
 /// **Lock-free**, because `put` is called on the reader thread while the `Term` lock
 /// is held and whoever implements `Wake` does not take a lock (`bt-core`'s
-/// `wake.rs`; `discussion.md` → Karar 5). `AtomicPtr` + `Box`: std has no other
+/// `wake.rs`). `AtomicPtr` + `Box`: std has no other
 /// type that atomically swaps an owned value.
 ///
 /// Separate from AppKit: the slot logic is tested without a pasteboard, the side

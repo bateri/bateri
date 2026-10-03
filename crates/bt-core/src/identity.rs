@@ -1,7 +1,6 @@
 //! The terminal's identity: the environment that tells the shell which
 //! terminal it runs in (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`) and the tab's
-//! externally openable name (`TERM_SESSION_ID`, `BATERI_TAB_URL=bateri://tab/<id>`;
-//! 038).
+//! externally openable name (`TERM_SESSION_ID`, `BATERI_TAB_URL=bateri://tab/<id>`).
 //!
 //! **Why here:** all four are in the `TERM` family and are written in the same
 //! "cannot be overridden" layer as it (`Session::spawn`), so their owner is
@@ -17,15 +16,14 @@
 pub const TERM_PROGRAM: &str = "bateri";
 
 /// The value of `TERM_PROGRAM_VERSION`: the workspace version. All crates use
-/// `version.workspace = true`; a test in `bt-shell` expects equality
-/// (`.tasks/038-terminal-kimligi/discussion.md` → Karar 3).
+/// `version.workspace = true`; a test in `bt-shell` expects equality.
 pub const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The value of `LC_TERMINAL` (049 R6): the identity that crosses ssh. The
+/// The value of `LC_TERMINAL`: the identity that crosses ssh. The
 /// `LC_` prefix is the carrier — the stock `SendEnv LANG LC_*` /
 /// `AcceptEnv LANG LC_*` pair passes it without any configuration — and the
 /// name is iTerm2's precedent, so tools that already read it find us. Never
-/// another terminal's value (R6.2). With it go `LC_TERMINAL_VERSION`
+/// another terminal's value. With it go `LC_TERMINAL_VERSION`
 /// ([`TERM_PROGRAM_VERSION`]) and `LC_BATERI_TAB_URL` ([`TabId::url`]).
 pub const LC_TERMINAL: &str = TERM_PROGRAM;
 

@@ -65,41 +65,40 @@ use crate::{child, focus, jobs, settings};
 /// own doc: "an animation with a forgotten stop condition passes today's gate
 /// green". The remedy was not to move the limit but to keep motion frames out
 /// of the gate: a cursor slide legitimately raises `frames` to ~24 and never
-/// raises `content` (`.tasks/008-hareket-ve-imlec/discussion.md` → Karar 2).
+/// raises `content`.
 ///
-/// **The relation between the two counters broke with motion** (a
-/// `/code-review` finding): when the operand changed it was written that
+/// **The relation between the two counters broke with motion** (a code
+/// review finding): when the operand changed it was written that
 /// "every frame that ends without error was a content frame", and that
-/// sentence was true in phase-1, **not** after phase-3 — a motion frame also
+/// sentence was true before motion landed, **not** after — a motion frame also
 /// commits a command buffer, so it raises `frames` without raising `content`.
 /// The direction has even reversed today: the measured healthy smoke run has
-/// `frames` 27–30 while `content` is 2–3 (the 008 row below). So the limit
+/// `frames` 27–30 while `content` is 2–3 (the 2026-09-16 row below). So the limit
 /// sits on a **looser** counter, not a tighter one — and that is why a
-/// number that was **re-measured**, not carried over, was needed; phase-6 measured it.
+/// number that was **re-measured**, not carried over, was needed.
 ///
 /// **The number was measured twice; the second time in a visible window, and
-/// it did not change it.** Run tables, environment and method are in
-/// `docs/OLCUMLER.md` → `## Boşta kare`; here only the poles that gave rise
-/// to the limit and the derivation are kept.
+/// it did not change it.** Here only the poles that gave rise to the limit
+/// and the derivation are kept.
 ///
-/// - **005 phase-3 (2026-09-12, debug, unbundled process):** `2` → `8`. The
+/// - **2026-09-12 (debug, unbundled process):** `2` → `8`. The
 ///   basis of the old `2` ("the system suspends the display link, ceiling ~3
-///   frames") was refuted in 005 phase-2b: [`Workload::Load`] produced
+///   frames") was refuted by measurement: [`Workload::Load`] produced
 ///   `frames=594` in five seconds in the same window state, so what was
 ///   measured was not a ceiling but a run corrupted by shutdown locking.
 ///   Moreover `2` **fell red on a correct build** (a healthy five-second run
 ///   was `frames=4`). Poles: healthy at most `4`, broken at least `49`.
-/// - **006 phase-5 (2026-09-15, debug + release bundle; in the two probed
+/// - **2026-09-15 (debug + release bundle; in the two probed
 ///   runs the window was on screen and in front):** the highest of fifty
 ///   healthy runs is `2`, the lowest of six broken runs is `353`. The visible
 ///   window did **not** raise the legitimate frame count; it did take the broken run to the full refresh rate.
 ///
 /// `8` lies between the poles of the two measurements: twice the highest
 /// healthy observation (`4`), a sixth of the lowest broken observation
-/// (`49`). 006 only widened the gap; there is no observation that would move
-/// the limit — lowering it would mean declaring 005's healthy `4` invalid without re-measuring it.
+/// (`49`). The second measurement only widened the gap; there is no observation that would move
+/// the limit — lowering it would mean declaring the first healthy `4` invalid without re-measuring it.
 ///
-/// - **008 phase-6 (2026-09-16, debug + release bundle):** the **first**
+/// - **2026-09-16 (debug + release bundle):** the **first**
 ///   measurement after the operand moved from `frames` to `content`, so the
 ///   numbers in the two rows above now belong to another counter. In thirty
 ///   healthy runs `content` is at most `3`, in the broken arm (an
@@ -113,13 +112,13 @@ use crate::{child, focus, jobs, settings};
 /// was measured separately; the same number carries both.
 ///
 /// The limit is safe in both regimes of this machine, but the margin depends
-/// on the regime. In the throttled regime (005: the measurement load gave
+/// on the regime. In the throttled regime (2026-09-12: the measurement load gave
 /// `frames=21` in 5 s, i.e. ~4 Hz) a broken three-second smoke makes ~12
 /// frames, **1.5 times** `8` — this is the reason not to raise the limit from
-/// here. No throttling was seen in 006's visible window. The likeliest
+/// here. No throttling was seen in the 2026-09-15 visible window. The likeliest
 /// variable for the same binary giving two regimes under the measurement load
 /// (`frames=21` in one run, `frames=597` in another) is window visibility, but
-/// this is **unverified**: 006 saw the window on screen under the smoke load
+/// this is **unverified**: the 2026-09-15 runs saw the window on screen under the smoke load
 /// and did not run the measurement load.
 ///
 /// **As the limit grew, the gate's detection floor rose too** and its cost
@@ -130,22 +129,22 @@ use crate::{child, focus, jobs, settings};
 /// 2 Hz blink with a forgotten stop condition makes ~6 frames in three
 /// seconds — below the limit, so this number alone **cannot see** it.
 ///
-/// **So the limit is not the whole gate, only one tier.** 008 builds the gate
+/// **So the limit is not the whole gate, only one tier.** The gate is built
 /// in two tiers and both are independent of this one: (a) if an **unsettled**
 /// animation remains at the deadline the run is red — independent of speed,
 /// needs no measurement, but only sees animations that go through the motion
 /// infrastructure; (b) the quiet between the last frame and the deadline
 /// ([`QUIET_FLOOR`]) — sees leaks that bypass the infrastructure too and was
-/// **measured** (phase-6): it is now the gate's most sensitive tier, because
+/// **measured**: it is now the gate's most sensitive tier, because
 /// it catches every leak with a period shorter than 868 ms, while this number catches only those above 3 Hz.
 ///
 /// **The mechanism of the variation in healthy runs was not measured.** The
 /// frame request (`requests=`) stayed **constant** in all three measurements
-/// (2–3 in 006, 4 in 008), so the extra frames do not come from extra
+/// (2–3 on 2026-09-15, 4 on 2026-09-16), so the extra frames do not come from extra
 /// **requests** — had it been the geometry/occlusion hooks, `requests` would
 /// have risen too. The variation split by profile in all three measurements
-/// but its direction **turned** in 008: in 006 `frames` was mostly `1` in
-/// debug and `2` in the release bundle; in 008 `content` is mostly `3` in
+/// but its direction **turned** on 2026-09-16: on 2026-09-15 `frames` was mostly `1` in
+/// debug and `2` in the release bundle; on 2026-09-16 `content` is mostly `3` in
 /// debug and `2` in the release bundle. The request again did not split. What
 /// remains is whether requests merge or not (if the startup frame was drawn
 /// before the shell's first bytes a second frame is needed; the profile
@@ -155,10 +154,10 @@ use crate::{child, focus, jobs, settings};
 /// **The gate is evaluated only on the `BT_RUN_SECONDS` path**
 /// ([`AppDelegate::report_and_exit`]). The only unattended context is `make
 /// smoke`; a run opened from the bundle with the same environment is subject
-/// to the same limit (006's broken bundle runs fired it). An interactive run never evaluates this limit.
+/// to the same limit (the 2026-09-15 broken bundle runs fired it). An interactive run never evaluates this limit.
 ///
 /// **When to re-measure:** when a set arrives that changes the frame path or
-/// the window's visibility (motion, tabs). The recipe is in `docs/OLCUMLER.md` → `## Nasıl yeniden ölçülür`.
+/// the window's visibility (motion, tabs).
 ///
 /// **Known false positive (stays):** `DisplayLink::resize` requests a frame
 /// unconditionally, so dragging the window during the run produces legitimate
@@ -169,19 +168,19 @@ use crate::{child, focus, jobs, settings};
 /// when idle" is a claim about drawing. `requests=` counts earlier but is not
 /// a gate — its threshold was not measured.
 ///
-/// **The measured `requests ≈ frames + 2` relation became invalid in 008**
+/// **The measured `requests ≈ frames + 2` relation became invalid with motion**
 /// and what the sentence corrects is not a number but a mechanism: motion
 /// frames never touch the `Waker` (the `bt_gpu::link` module header), so they
 /// inflate `frames` without inflating `requests`. The new form of the
-/// relation was **measured** (phase-6, thirty healthy runs): `requests` is
+/// relation was **measured** (2026-09-16, thirty healthy runs): `requests` is
 /// `4` in all thirty runs, `content` `2`–`3`, i.e. `requests ≈ content +
 /// 1..2` — while `frames` is 27–30, completely detached from it.
-/// (In a later run `requests=3` was seen and its cause was not measured; the record is in `docs/OLCUMLER.md`.)
+/// (In a later run `requests=3` was seen and its cause was not measured.)
 /// Under the measurement load `requests` and `frames` differ by three orders
 /// of magnitude (see `bt_gpu`'s `requests` counter); a gate could be built on
 /// the ratio but that was not measured.
-/// Re-observed after the 040 move to the wgpu window path (2026-09-30,
-/// healthy and broken distributions in `docs/OLCUMLER.md`): unchanged.
+/// Re-observed after the move to the wgpu window path (2026-09-30):
+/// unchanged.
 const IDLE_FRAME_LIMIT: u64 = 8;
 
 /// The **minimum** quiet expected at the end of a smoke run: between the last
@@ -192,7 +191,7 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// above ~3 Hz; this one sees every leak whose **period** is shorter than
 /// this value (above ~1.15 Hz). The measured gap was exactly this: a
 /// half-second leak passes with `content=8` **without exceeding** the limit
-/// and that run fell green today (`docs/OLCUMLER.md` → `## Boşta kare`, "yavaş sızıntı").
+/// and that run fell green (the "slow leak" measurement).
 ///
 /// **The rule's direction is reversed in this token:** `quiet` is large in a
 /// healthy run, small in a broken one. So the floor is "at most half the
@@ -204,17 +203,16 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 ///
 /// **It has already fired once, and that is this constant's real lesson.**
 /// The 2026-09-16 derivation had given `870` from an end of `1742.29 ms`;
-/// after 011 changed the smoke recipe, a twenty-run re-observation lowered
+/// after the smoke recipe changed, a twenty-run re-observation lowered
 /// the band's lower end to `1737.12` and `870` exceeded the rule's ceiling by
 /// **1.44 ms**. The gate was green in those runs — the excess hid in the
 /// denominator, not in the number. Lesson: this constant's trigger is narrow
 /// and **silent**; if a healthy three-second run drops below `1737 ms` what
-/// breaks is not the gate but **the rule itself**, and the number must be re-derived with `/measure`.
+/// breaks is not the gate but **the rule itself**, and the number must be re-derived.
 ///
-/// **Four numbers are tied together and their rationales are in the same
-/// block** (`docs/OLCUMLER.md` → `## Boşta kare`): `BT_RUN_SECONDS`'s 3,
+/// **Four numbers are tied together**: `BT_RUN_SECONDS`'s 3,
 /// [`bt_core::smoke_shell`]'s 1-second sleep, the same recipe's cursor jump
-/// **distance** (011) and this floor. The quiet is `run duration − (sleep +
+/// **distance** and this floor. The quiet is `run duration − (sleep +
 /// settling)`, so **if either of the two moves this number must move too**:
 /// with `BT_RUN_SECONDS=2` the tail shrinks to ~0.75 seconds and the gate
 /// falls while the code is right. If the three are spread over three files,
@@ -224,13 +222,13 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// the window, covering and uncovering it or waking the screen during the
 /// last `QUIET_FLOOR` of the run gives birth to a legitimate frame and resets
 /// the tail. The lasting remedy is the same: keep geometry-caused frames out
-/// of the counter (a recorded debt, `docs/YOL-HARITASI.md`).
+/// of the counter (a recorded debt).
 ///
 /// Asked only in [`Workload::Smoke`]: the measurement load streams output
 /// until the deadline, so there the quiet **must** be near zero (with the
 /// same rationale as [`Verdict::MotionUnsettled`] being exempt in the same arm).
 ///
-/// Re-observed after the 040 move to the wgpu window path (2026-09-30): the
+/// Re-observed after the move to the wgpu window path (2026-09-30): the
 /// lowest healthy run was `1746.88 ms` (half: `873.44`), the highest broken
 /// one `155.21 ms` — `868` is still inside the rule, unchanged.
 const QUIET_FLOOR: Duration = Duration::from_millis(868);
@@ -248,9 +246,9 @@ const QUIET_FLOOR: Duration = Duration::from_millis(868);
 /// the theme choice that writes ([`AppDelegate::save_theme`]) look at this
 /// value too and do not write their own `run.is_some()` condition — the day
 /// one of five separate conditions is forgotten the gate would silently be
-/// tied to the user's file (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1).
+/// tied to the user's file.
 ///
-/// **The fifth is Reduce Motion** ([`resolve_reduce_motion`], 008 phase-5) and
+/// **The fifth is Reduce Motion** ([`resolve_reduce_motion`]) and
 /// its branch is not in the settings file but in the system: if
 /// `NSWorkspace`'s accessibility setting were read, `make smoke`'s `motion=`
 /// token would be tied to the measuring machine's accessibility preference,
@@ -286,7 +284,7 @@ fn decide_inputs(run: Option<Run>, home: Option<PathBuf>) -> Inputs {
 /// Three-valued `[motion] reduce_motion` + the system's answer → a single `bool`.
 ///
 /// **The combination is here because this is the layer that sees the system:**
-/// `bt-gpu` does not see AppKit (`CLAUDE.md` → layer table) and `bt-core`'s
+/// `bt-gpu` does not see AppKit (the layer rule) and `bt-core`'s
 /// settings model is already the counterpart of a file, not of an
 /// accessibility setting. A **resolved** `bool` descends below (the `Renderer::set_font` precedent).
 ///
@@ -319,7 +317,7 @@ fn resolve_reduce_motion(
 /// *add* animation for one who turned motion off (the same as
 /// `cursor_motion = "snap"`'s relation to Reduce Motion). Quantization is
 /// **at the source**, not in `bt-gpu`'s `Motion`: the `false` arm stays as
-/// today's line path (`.tasks/027-yumusak-kaydirma/discussion.md` → Karar 5).
+/// today's line path.
 ///
 /// `reduce` is [`resolve_reduce_motion`]'s resolved answer, i.e. a timed run
 /// does not read the system here either. Pure, tested.
@@ -336,15 +334,15 @@ enum Opening {
     /// ⌘N, Dock icon, the startup's first window: a separate window, local shell.
     Window,
     /// ⌘T and the tab bar's `+`: a tab in `from`'s group; to the same host if
-    /// `from` is remote (037 Karar 6).
+    /// `from` is remote.
     Tab,
     /// Shell ▸ New Local Tab (⌥⌘T): a tab, always a local shell.
     LocalTab,
     /// Shell ▸ Split Right / Split Down (⌘D / ⇧⌘D): a split next to the focused
-    /// pane; by ⌘T's rule, to the same host from a remote pane (039 Karar 9).
+    /// pane; by ⌘T's rule, to the same host from a remote pane.
     /// The axis is carried by [`AppDelegate::open_split`].
     Split,
-    /// Session restore (053): a saved pane — its directory, identity, zoom,
+    /// Session restore: a saved pane — its directory, identity, zoom,
     /// history and ready remote line come from the save, not from a `from`
     /// ([`restored_launch`]).
     Restore,
@@ -352,7 +350,7 @@ enum Opening {
 
 /// The new shell's first input: only with ⌘T and splits and only from a remote
 /// `from` — the line is `from`'s remote target's escaped line ([`bt_core::Session::remote_line`]).
-/// ⌘N is a new workspace, ⌥⌘T the escape route; both are local (037 Karar 6).
+/// ⌘N is a new workspace, ⌥⌘T the escape route; both are local.
 fn initial_line(opening: Opening, remote_line: Option<String>) -> Option<String> {
     match opening {
         Opening::Tab | Opening::Split => remote_line,
@@ -361,8 +359,8 @@ fn initial_line(opening: Opening, remote_line: Option<String>) -> Option<String>
 }
 
 /// The session directory ([`restore::directory`]) — `None` in a timed run and
-/// in an unbundled process (`cargo run`), which neither restore nor save (053
-/// Karar 6), and when the home directory cannot be resolved.
+/// in an unbundled process (`cargo run`), which neither restore nor save,
+/// and when the home directory cannot be resolved.
 ///
 /// `bundle_id` and `home` are **closures**, the precedent of
 /// [`shell_integration_env`]: a timed run never asks either, so `make smoke`
@@ -384,8 +382,8 @@ fn restore_dir(
     ))
 }
 
-/// A saved pane's start (053 R3.4): its directory, its identity, its history
-/// and its remote target's line **ready, not run** (Karar 3) — the user's ⏎
+/// A saved pane's start: its directory, its identity, its history
+/// and its remote target's line **ready, not run** — the user's ⏎
 /// connects. A directory that no longer exists is the session's to handle
 /// (an unreachable one is inherited, `SessionOptions::working_directory`).
 fn restored_launch(pane: &SavedPane, replay: Option<Vec<u8>>) -> Launch {
@@ -398,15 +396,15 @@ fn restored_launch(pane: &SavedPane, replay: Option<Vec<u8>>) -> Launch {
     }
 }
 
-/// Whether a quit hands the programs over (055 R4.2, Karar 9 and 11): only
-/// Sparkle's relaunch (or the test item's), only where 053 restores at all
+/// Whether a quit hands the programs over: only
+/// Sparkle's relaunch (or the test item's), only where session restore runs at all
 /// (`restore_windows` not `"off"`) and only in a bundled process — the
 /// layout is matched to its bundle on the other side.
 fn hands_over(relaunch: bool, restore_windows: RestoreWindows, bundled: bool) -> bool {
     relaunch && bundled && restore_windows != RestoreWindows::Off
 }
 
-/// A pane the holder gave that cannot be carried on (055 Karar 8): handed
+/// A pane the holder gave that cannot be carried on: handed
 /// back for release, with the history its blob carried if it decoded.
 #[derive(Debug)]
 struct Refused {
@@ -451,8 +449,8 @@ fn adoption(
     })
 }
 
-/// What an update's relaunch waits for ([`AppDelegate::postpone_update`],
-/// 055 R5.2): the application's unfinished transfers and an open password
+/// What an update's relaunch waits for ([`AppDelegate::postpone_update`]):
+/// the application's unfinished transfers and an open password
 /// sheet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct UpdateWait {
@@ -461,15 +459,15 @@ struct UpdateWait {
 }
 
 impl UpdateWait {
-    /// Whether the relaunch must wait — the user's answer (Karar 10 (a)):
+    /// Whether the relaunch must wait — the user's answer:
     /// it waits rather than cutting a transfer or a sign-in short.
     fn holds(self) -> bool {
         self.transfers > 0 || self.sheet
     }
 }
 
-/// **The handover's sequence point** in this process (055 R4.3,
-/// [`handover::arrive`]): called by [`crate::run`] first, before the
+/// **The handover's sequence point** in this process
+/// ([`handover::arrive`]): called by [`crate::run`] first, before the
 /// application delegate is born — its ssh registry's sweep runs `ssh` on a
 /// thread of its own ([`masters`]), and no child may be spawned while a
 /// received master is not yet close-on-exec (macOS' `recvmsg` has no
@@ -485,7 +483,7 @@ pub(crate) fn arrive(opts: &Options) -> Option<Arrival> {
     handover::arrive(&roots, uid, std::process::id(), &bundle_id)
 }
 
-/// A saved window frame clamped onto a visible screen (053 R3.2): the screen
+/// A saved window frame clamped onto a visible screen: the screen
 /// it overlaps most, or the main one (the first) if it overlaps none — a
 /// display unplugged since the quit; the size shrinks to the screen and the
 /// origin moves inside. Frames are AppKit's (bottom-left origin, points), the
@@ -565,7 +563,7 @@ fn shell_integration_env(
         None => None,
         Some(value) if value.is_empty() => None,
         Some(value) => match value.into_string() {
-            // **A self-pointing value** (`/code-review`, 009 gate): if the
+            // **A self-pointing value** (found in code review): if the
             // `ZDOTDIR` in the environment already points at the script's
             // directory (set by hand or leaked), handing it back as "the
             // user's original value" makes the script reload its own
@@ -575,7 +573,7 @@ fn shell_integration_env(
             Ok(value) => Some(value),
             // **A non-UTF-8 value rejects the integration entirely** and this
             // arm is the reason it wants `var_os` instead of `var`
-            // (`/code-review`, 009 gate): `var().ok()` dropped it to `None`,
+            // (found in code review): `var().ok()` dropped it to `None`,
             // i.e. it counted as "the user had no `ZDOTDIR`" and the script
             // **deleted** the variable at the end of the session — the user's
             // entire configuration would be lost without a diagnostic. Every
@@ -605,15 +603,15 @@ fn shell_integration_env(
     env
 }
 
-/// Adds `BATERI_BIN` (048) to a session's shell integration: the path of the
+/// Adds `BATERI_BIN` to a session's shell integration: the path of the
 /// running bateri, which the wrapper's `ssh` function asks for the wrapping
 /// decision (`bateri ssh-argv`). Only where the wrapper is installed — an
 /// empty `env` stays empty, so neither the timed run nor a non-zsh shell nor
 /// `[shell] integration = "off"` gets it — and only a UTF-8 path
 /// (`SessionOptions.env` wants a `String`; without it the function falls back
 /// to plain `ssh`). With it, `BATERI_SSH_INSTANCE`: the masters' instance
-/// directory name, where a wrapped session becomes a master (phase-5;
-/// `ssh_route::session_socket`) — none without masters (the timed run).
+/// directory name, where a wrapped session becomes a master
+/// (`ssh_route::session_socket`) — none without masters (the timed run).
 fn with_bateri_bin(
     mut env: Vec<(String, String)>,
     bin: Option<PathBuf>,
@@ -663,20 +661,20 @@ pub(crate) struct Grid {
 /// deliberately `pub`, so a placeholder like `CellMetrics::new(9, 18, 7, 8,
 /// 1)` written there would revive and the two tests here would stay green.
 ///
-/// **The left gutter is subtracted from the columns** (010 Karar 3): so the
+/// **The left gutter is subtracted from the columns**: so the
 /// stripe does not overlap the text. The gutter is always reserved — the
 /// accepted cost is that it stays empty in a session without integration
 /// (bash/fish, `shell.integration = false`, SSH); the alternative was a
 /// SIGWINCH at the first prompt and three consumers being updated at once.
 ///
-/// **The dock share is subtracted from the rows** (012) and, unlike the left
+/// **The dock share is subtracted from the rows** and, unlike the left
 /// gutter, is **conditional**: the dock exists only in an integrated zsh
 /// session and the decision is made while the session is born
 /// (`TerminalPane::start`). Reserving the share unconditionally would take
 /// two rows for no reason from a window without a dock — a cost not
 /// comparable with the left gutter's eight points.
 ///
-/// **The share varies during the run** (R5.2): it drops to zero on the
+/// **The share varies during the run**: it drops to zero on the
 /// alternate screen and returns to its birth value on exit (`dock_rows_for`,
 /// `TerminalPane::alt_screen_did_change`). The cost of varying is one `TIOCSWINSZ` and that cost is paid **per
 /// transition, not per command** — commands like `git log` that do not enter
@@ -719,7 +717,7 @@ pub(crate) fn split_into_grid(
     }
 }
 
-/// The daily preview sweep's period (045 Karar 9) — "once a day", a design
+/// The daily preview sweep's period — "once a day", a design
 /// constant.
 const DAILY_SWEEP: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -740,8 +738,8 @@ pub(crate) fn delegate(mtm: MainThreadMarker) -> Option<Retained<AppDelegate>> {
 
 /// The open pane whose id is `id` — the lookup path in the pane's birth
 /// package (`pane::PaneLookup`): jobs returning to the main queue from the
-/// reader thread and from background jobs find the pane with it (039 Karar
-/// 3). A plain `fn`, i.e. `Send`, and the pane's module does not see `AppDelegate`.
+/// reader thread and from background jobs find the pane with it.
+/// A plain `fn`, i.e. `Send`, and the pane's module does not see `AppDelegate`.
 pub(crate) fn pane_by_id(mtm: MainThreadMarker, id: u64) -> Option<Retained<TerminalPane>> {
     delegate(mtm)?.pane(id)
 }
@@ -751,7 +749,7 @@ pub(crate) fn pane_by_id(mtm: MainThreadMarker, id: u64) -> Option<Retained<Term
 /// The watch notifies on its own background queue (`watch`'s contract); the
 /// applier needs the main thread, so the event hops there.
 ///
-/// **At most one hop in flight** ([`WATCH_PENDING`]): before 043 the sources
+/// **At most one hop in flight** ([`WATCH_PENDING`]): earlier the sources
 /// ran on the main queue and libdispatch merged the events that arrived while
 /// main was busy into one handler call. Without the flag a burst (a chunked
 /// write, a rename-over's directory + file events) would reload the settings
@@ -793,7 +791,7 @@ fn notify_settings_changed() {
     let _ = unsafe { app.sendAction_to_from(sel!(settingsDidChange:), None, None) };
 }
 
-/// The dock share to reserve while the session is born (R5.1).
+/// The dock share to reserve while the session is born.
 ///
 /// **Both conditions are necessary and separate questions.** If `integration`
 /// is empty the wrapper was never set up — hermetic run, `"off"`, an
@@ -802,8 +800,8 @@ fn notify_settings_changed() {
 /// tier the wrapper is set up (blocks and marks are its whole reason) but the
 /// input line stays in the grid, i.e. no share is reserved.
 ///
-/// Deriving one from the other would bring back the defect 012 phase-10
-/// closed: **two prompts** on screen (the user's in the grid, the dock's
+/// Deriving one from the other would bring back a closed defect:
+/// **two prompts** on screen (the user's in the grid, the dock's
 /// below) and a caret jumping between them.
 fn dock_rows_at_birth(integration: &[(String, String)], setting: ShellIntegration) -> u16 {
     if integration.is_empty() || !setting.wants_dock() {
@@ -859,8 +857,8 @@ fn find_open<T>(items: impl IntoIterator<Item = T>, key: impl Fn(&T) -> (bool, b
 ///
 /// **Known limit — the main thread waits.** `open` does not return while the
 /// editor starts cold and the display link is on the main thread: meanwhile
-/// the window draws no frames and no keys are processed (a `/code-review`
-/// finding, waived at the 007 gate). Only when no application claims `.toml`
+/// the window draws no frames and no keys are processed (a code review
+/// finding, waived). Only when no application claims `.toml`
 /// and on the user's own click; focus is moving to the editor anyway. Not waiting would cut the error's path to the subtitle.
 fn open_in_editor(path: &Path) -> bool {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
@@ -877,7 +875,7 @@ fn open_in_editor(path: &Path) -> bool {
 /// Turns off the **accent popover** of a held-down letter: in a terminal a
 /// held key means **repeat** (`j` in vim, `u` in the shell), the popover would swallow it.
 ///
-/// The side effect comes with `NSTextInputClient` itself (018 phase-1): in a
+/// The side effect comes with `NSTextInputClient` itself: in a
 /// view that does not implement the protocol the popover did not appear anyway.
 ///
 /// The place written is the app's **own `registerDefaults`**, i.e. the
@@ -906,7 +904,7 @@ fn open_in_editor(path: &Path) -> bool {
 /// is `insertText:"é" replacementRange:{n-1,1}` and since
 /// `view::BateriView` skips the range, `eé` is typed. What opens the popover
 /// is `NSTextInputClient` itself, i.e. the same change that causes both
-/// symptoms and whose only remedy is here (018 phase-1).
+/// symptoms and whose only remedy is here.
 fn disable_press_and_hold() {
     let key = ns_string!("ApplePressAndHoldEnabled");
     let off = NSNumber::numberWithBool(false);
@@ -973,11 +971,11 @@ pub(crate) struct Ivars {
     /// is the same there is no reason to reread the theme file and repaint all windows.
     appearance_dark: Cell<Option<bool>>,
     /// The settings window (bateri ▸ Settings…): born on first open, hidden
-    /// when closed and lives for the whole process (029 Karar 4). **Not** a
+    /// when closed and lives for the whole process. **Not** a
     /// terminal window — it does not enter [`Ivars::windows`], i.e. ⌘Q's
     /// confirmation, settings propagation and tab jobs do not see it. Never born in a timed run.
     settings_window: RefCell<Option<Retained<SettingsWindow>>>,
-    /// The settings file's state at its last read (029 Karar 7): the settings
+    /// The settings file's state at its last read: the settings
     /// window's lock and line diagnostics come from here. Written at startup
     /// and at every live read, so even if the window opens later it sees the file's state.
     settings_state: RefCell<settings::FileState>,
@@ -988,29 +986,29 @@ pub(crate) struct Ivars {
     /// weakly, this is what keeps it alive.
     /// Empty in an unbundled and timed run.
     updater: OnceCell<crate::updater::Updater>,
-    /// bateri's ssh masters (047): one registry for every pane, so two jobs to
+    /// bateri's ssh masters: one registry for every pane, so two jobs to
     /// one host open one master ([`PaneLaunch::masters`]). `None` in a timed run
     /// (no askpass, no master — the remote jobs take today's argv) and when the
     /// running binary's path is unknown (it is the askpass program).
     masters: Option<Arc<Masters>>,
-    /// The session directory's lock (053 Karar 6), held from launch to the
+    /// The session directory's lock, held from launch to the
     /// save at quit ([`AppDelegate::save_session`] takes it — the one-shot).
     /// `None`: a timed run, an unbundled process, or another instance of the
     /// same bundle holds it — this one neither restores nor saves.
     restore_lock: RefCell<Option<restore::Lock>>,
-    /// What the update's holders gave at launch (055 R4.3,
-    /// [`arrive`] — taken before this delegate was born); consumed by the
+    /// What the update's holders gave at launch
+    /// ([`arrive`] — taken before this delegate was born); consumed by the
     /// first windows ([`AppDelegate::restore_or_open`]).
     arrival: RefCell<Option<Arrival>>,
     /// The update's holder, spawned when the quit was found to be a
     /// relaunch ([`AppDelegate::terminate_reply`]) and given the panes in
     /// [`AppDelegate::shutdown`].
     holder: RefCell<Option<handover::Spawned>>,
-    /// The handover test item asked for this quit (055 R4.4): bateri starts
+    /// The handover test item asked for this quit: bateri starts
     /// itself again once this process is gone.
     relaunch_after: Cell<bool>,
     /// Sparkle's install handler while the relaunch waits for the transfers
-    /// and the password sheets to end (055 R5.2, [`AppDelegate::postpone_update`]).
+    /// and the password sheets to end ([`AppDelegate::postpone_update`]).
     postponed_update: RefCell<Option<RcBlock<dyn Fn()>>>,
 }
 
@@ -1029,7 +1027,7 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
             disable_press_and_hold();
-            // Native tabs are on (026 → Karar 1): `setAllowsAutomaticWindowTabbing`
+            // Native tabs are on: `setAllowsAutomaticWindowTabbing`
             // at its default, the windows carry a common `tabbingIdentifier`
             // (`TerminalWindow::new`).
             // The updater comes **before** the menu: it is its item's target. A
@@ -1039,7 +1037,7 @@ define_class!(
             {
                 let _ = self.ivars().updater.set(updater);
             }
-            // The handover's test item (055 R4.4): a defaults key, never read
+            // The handover's test item: a defaults key, never read
             // in a timed run; the product's code names no bundle.
             let handover_test = self.ivars().run.is_none()
                 && NSUserDefaults::standardUserDefaults()
@@ -1058,20 +1056,20 @@ define_class!(
             // first for the diagnostics to reach the subtitle: the new window takes
             // its subtitle over from the slots (`open_window`).
             self.load_settings();
-            // The preview cache's launch sweep and the daily one (045 Karar 9):
+            // The preview cache's launch sweep and the daily one:
             // on their own thread and the main queue's timer, never the frame
             // path; a timed run never touches the user's cache.
             self.sweep_previews(Sweep::Launch);
             self.schedule_daily_sweep();
             NSApplication::sharedApplication(mtm).activate();
-            // The renderer is born with the window (026 → Karar 2a) and its error
+            // The renderer is born with the window and its error
             // lands here. `didFinishLaunching` cannot return an error; a terminal
             // window without Metal or without a shell is an empty box, and formerly
             // the error `run` returned was printed in `main` with the same line and
             // the same exit code. **Only for the first window**: the error of
             // ⌘T/⌘N does not end the process ([`AppDelegate::open_window_or_report`]).
             //
-            // The saved session comes back here if there is one (053); otherwise
+            // The saved session comes back here if there is one; otherwise
             // — or if not a single window of it could be built — today's first
             // window ([`AppDelegate::restore_or_open`]).
             if let Err(e) = self.restore_or_open() {
@@ -1105,7 +1103,7 @@ define_class!(
             }
         }
 
-        /// After the last window closes the app **stays open** (026 → Karar 5):
+        /// After the last window closes the app **stays open**:
         /// macOS's multi-window app convention; the Dock icon and ⌘N open a new
         /// window.
         ///
@@ -1129,7 +1127,7 @@ define_class!(
             //
             // The criterion is only the terminal window list: `has_visible_windows`
             // also counts a non-terminal window like the About panel and an open
-            // panel would block the new window (`/code-review`); the list already
+            // panel would block the new window (found in code review); the list already
             // covers the minimized ones.
             let default = !self.ivars().windows.borrow().is_empty();
             if !default {
@@ -1138,14 +1136,14 @@ define_class!(
             default
         }
 
-        /// `bateri://…` was opened (`open`, the browser, another app; 038
-        /// Karar 4–6). URLs are processed in order, the last one comes to the front.
+        /// `bateri://…` was opened (`open`, the browser, another app).
+        /// URLs are processed in order, the last one comes to the front.
         ///
         /// **Security invariant: this path only focuses.** Any app can open the
         /// scheme; here not a single byte goes to the shell, no command runs, no
         /// window opens. Arms: `bateri://tab/<id>` and a live pane → its tab to
-        /// the front and the keyboard to that pane ([`TerminalWindow::bring_to_front`],
-        /// 039 Karar 10); a recognized but dead id →
+        /// the front and the keyboard to that pane ([`TerminalWindow::bring_to_front`]);
+        /// a recognized but dead id →
         /// only the app to the front; every other form (`block/` included) → nothing.
         ///
         /// On a cold start the list is empty (the URL can arrive before
@@ -1167,8 +1165,8 @@ define_class!(
             }
         }
 
-        /// ⌘Q, Dock ▸ Quit, logout and restart: should it ask before quitting
-        /// (028 → Karar 3, 5). The question is **one** alert for all windows;
+        /// ⌘Q, Dock ▸ Quit, logout and restart: should it ask before quitting.
+        /// The question is **one** alert for all windows;
         /// `runModal` is synchronous, i.e. the answer returns directly and
         /// `NSTerminateLater` is not needed.
         ///
@@ -1199,7 +1197,7 @@ define_class!(
             // The gate is asked **before reading**: `quiet_since` is a clock read
             // (`CACurrentMediaTime`) and in an untimed run this value will be
             // discarded. "Not even a single clock read when the gate is off"
-            // (`CLAUDE.md`) holds on the Cmd-Q path too; the `if let` below alone
+            // holds on the Cmd-Q path too; the `if let` below alone
             // discarded the value but did not prevent the read.
             let quiet = self
                 .ivars()
@@ -1312,7 +1310,7 @@ define_class!(
             self.refresh_settings_window();
         }
 
-        /// The handover's test item (055 R4.4, the defaults key
+        /// The handover's test item (the defaults key
         /// `BateriHandoverTestMenu`): the update's quit without Sparkle — the
         /// relaunch flag, the quit, and bateri starting itself again once this
         /// process is gone ([`AppDelegate::spawn_relauncher`]).
@@ -1324,7 +1322,7 @@ define_class!(
         }
 
         /// Shell ▸ New Window (⌘N): a new window in the active window's
-        /// directory and with its point-size delta (026 → Karar 3, 4). Here, not
+        /// directory and with its point-size delta. Here, not
         /// in the window: it must work when there is no window too.
         #[unsafe(method(newWindow:))]
         fn new_window(&self, _sender: Option<&AnyObject>) {
@@ -1336,7 +1334,7 @@ define_class!(
         /// AppKit's own path. In a terminal window the window's delegate
         /// answers the action first (`TerminalWindow`'s `closeTab:`) — so that
         /// once the menu is separated from `performClose:` ⌘W does not silently
-        /// die in panels (`/code-review`).
+        /// die in panels (found in code review).
         #[unsafe(method(closeTab:))]
         fn close_tab(&self, _sender: Option<&AnyObject>) {
             if let Some(key) = NSApplication::sharedApplication(self.mtm()).keyWindow() {
@@ -1346,14 +1344,14 @@ define_class!(
 
         /// The title of ⌘W while a non-terminal window is key: so the "Close"
         /// that a split tab left behind (`TerminalWindow`'s
-        /// `validateMenuItem:`, 039 Karar 8) does not stay in the panel. **An
+        /// `validateMenuItem:`) does not stay in the panel. **An
         /// unknown item is `true`** — the behavior before it was defined.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             if item.action() == Some(sel!(closeTab:)) {
                 item.setTitle(&NSString::from_str(window::close_title(1)));
             }
-            // Shell ▸ Shell Integration on “{host}” (048 R6): the key tab's host
+            // Shell ▸ Shell Integration on “{host}”: the key tab's host
             // and its resolved answer; locally grey.
             if item.action() == Some(sel!(toggleHostIntegration:)) {
                 let remote = self.key_remote_mark().map(|(host, _)| {
@@ -1377,14 +1375,14 @@ define_class!(
 
         /// Shell ▸ New Tab (⌘T): a new tab in the active window's group; a new
         /// window if there is no window. If the active tab is remote the new tab
-        /// is born with the same ssh/mosh command (037 Karar 6, [`initial_line`]).
+        /// is born with the same ssh/mosh command ([`initial_line`]).
         #[unsafe(method(newTab:))]
         fn new_tab(&self, _sender: Option<&AnyObject>) {
             self.open_from_key_window(Opening::Tab);
         }
 
         /// Shell ▸ New Local Tab (⌥⌘T): **always** a local tab, even from a
-        /// remote tab (037 Karar 6) — ⌘T's escape route; in a local tab the same
+        /// remote tab — ⌘T's escape route; in a local tab the same
         /// as ⌘T.
         #[unsafe(method(newLocalTab:))]
         fn new_local_tab(&self, _sender: Option<&AnyObject>) {
@@ -1416,7 +1414,7 @@ define_class!(
             self.save_theme(&item.title().to_string());
         }
 
-        /// Shell ▸ Mark “{host}” as ▸ {mark} (037 Karar 5): the item's `tag` is
+        /// Shell ▸ Mark “{host}” as ▸ {mark}: the item's `tag` is
         /// the mark ([`crate::menu::mark_of_tag`]), the host is the active tab's
         /// remote host. The menu only **writes** — the path that reads the file
         /// applies ([`AppDelegate::save_edit`], the Theme ▸ precedent); nothing
@@ -1435,14 +1433,14 @@ define_class!(
             }
         }
 
-        /// Shell ▸ Shell Integration on “{host}” (048 R6): writes the opposite of
+        /// Shell ▸ Shell Integration on “{host}”: writes the opposite of
         /// the host's resolved answer as the host's own `[remote] hosts` entry
         /// (`SettingsEdit::RemoteHostIntegration`) — the Mark … as ▸ path: the
         /// menu only writes, nothing is written to an unparseable file, and the
         /// next `ssh` reads the file. A no-op if the tab became local.
         ///
-        /// It also forgets the server's `plain` row (049 R4,
-        /// `ssh_wrap::forget_plain`), the one way back for a server branded
+        /// It also forgets the server's `plain` row
+        /// (`ssh_wrap::forget_plain`), the one way back for a server branded
         /// shell-less by mistake — which the check mark cannot show (it is the
         /// setting's; the row's key is `ssh -G`'s, too slow for validation).
         /// So a click on a **checked** item asks first: when a `plain` row was
@@ -1494,7 +1492,7 @@ define_class!(
 ///
 /// A struct, because they are all numbers: if passed positionally, when
 /// `cells` and `glyphs` swapped places **it would compile** and since the test
-/// uses the same order the two would be wrong together (a `/code-review` finding).
+/// uses the same order the two would be wrong together (a code review finding).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counters {
     /// Frames the GPU finished without error.
@@ -1526,7 +1524,7 @@ struct Counters {
     /// this gate silently falls — that change must either pin the hermetic
     /// run's style explicitly in the run or will find this sentence facing it.
     ///
-    /// **It does not count blink** (014 phase-2): the cursor's blinking lives
+    /// **It does not count blink**: the cursor's blinking lives
     /// outside `bt_gpu::motion`, i.e. `cursor_settled()` never sees it and this
     /// counter does not rise. A blink frame has **no CPU witness at all** —
     /// `requests=` does not rise (`Waker::resume` does not touch the counter),
@@ -1569,14 +1567,8 @@ enum MotionState {
 ///
 /// # The honest limits of the measurement
 ///
-/// **The list moved from here.** Its owner since 2026-09-21 is
-/// `docs/OLCUMLER.md` → `## Yöntem` → "Kare süresi ve açılış"; that kind's
-/// first `/measure` did the move and the same run added a seventh item (the
-/// GPU column not being stable enough to be a floor). **No copy is kept**
-/// here: a list standing in two places silently diverges, which was this item's own warning.
-///
-/// The field docs below repeat from that list's **scope** items only the one
-/// that falls to their own field; the whole and the **open items** are in that file.
+/// The field docs below state the **scope** limit that falls to their own field.
+/// The GPU column is not stable enough to be a floor.
 ///
 struct Measured {
     /// From `main()`'s first line to the first **completed** frame. `None` → no
@@ -1600,8 +1592,8 @@ struct Measured {
     cpu_frame: Option<(Duration, Duration)>,
     cpu_encode: Option<(Duration, Duration)>,
     gpu: Option<(Duration, Duration)>,
-    /// The adapter gives GPU timestamps (wgpu's `TIMESTAMP_QUERY`, 040
-    /// phase-5); `false` → the GPU column's tokens say `unsupported` — the
+    /// The adapter gives GPU timestamps (wgpu's `TIMESTAMP_QUERY`);
+    /// `false` → the GPU column's tokens say `unsupported` — the
     /// keys stay (a token is never deleted), the value names the absence.
     gpu_supported: bool,
 }
@@ -1678,7 +1670,7 @@ impl Report {
     /// The line is printed **explicitly** (a `println!` in `report_and_exit`);
     /// no path is left to a buffer that would be flushed in `Drop` —
     /// `process::exit` runs no `Drop`, and the guard's `_exit(70)` skips even
-    /// atexit (R5.5).
+    /// atexit.
     fn token_line(&self) -> String {
         let Counters {
             frames,
@@ -1692,9 +1684,8 @@ impl Report {
         let (used, total) = self.atlas;
         let (color_used, color_total) = self.color_atlas;
         // `profile=` is printed even with the gate closed: `make smoke` runs
-        // **debug**, `/measure` demands **release**, and mistaking a debug number
-        // for a floor becomes impossible only if the line itself states its profile
-        // (R5.3).
+        // **debug**, measurement demands **release**, and mistaking a debug number
+        // for a floor becomes impossible only if the line itself states its profile.
         let profile = if cfg!(debug_assertions) {
             "debug"
         } else {
@@ -1723,7 +1714,7 @@ profile={profile}",
         match &self.measured {
             // The gate was closed. **Not `samples=0`:** zero would look the same as
             // "the gate was open but no samples were collected", and that is exactly
-            // the blindness R5.2 wants to close. The measurement tokens are not
+            // the blindness this closes. The measurement tokens are not
             // printed at all either; the contract allows reading a token's absence,
             // not a false value.
             None => line.push_str(" samples=off"),
@@ -1756,7 +1747,7 @@ profile={profile}",
 
 /// The two tokens of one column.
 ///
-/// Below the floor there is **no** number (R5.6): `insufficient` is printed and
+/// Below the floor there is **no** number: `insufficient` is printed and
 /// the reason can be read from the `samples=`/`gpu_samples=` and `floor=` pair on
 /// the same line. The two fall silent **together**, because both come from the
 /// same `Option`: below the floor the p95 is just a copy of the worst anyway, so
@@ -1782,7 +1773,7 @@ fn ms(value: Duration) -> String {
 /// the `quiet` of a failing run was visible nowhere. The `quiet ≥ T` gate, on
 /// the other hand, derives from **two** distributions and the second is
 /// exactly the failing runs: had a deliberately broken arm not printed its
-/// `quiet`, `T` would be derived from one side only, i.e. its lower bound would be an unmeasured number (008 phase-6).
+/// `quiet`, `T` would be derived from one side only, i.e. its lower bound would be an unmeasured number.
 ///
 /// The reason this is a separate function is the token contract: the line's
 /// `quiet=` is read by machines and this phrase must **not resemble** it — a
@@ -1942,7 +1933,7 @@ fn verdict(
         // The lower bound is on `frames`, the upper bound on `content`, and this is
         // deliberate: the question "did the pipeline run" is answered by the frame the
         // GPU finished, the question "are frames flowing at idle" by the frame decided
-        // to be drawn — the next phase's motion frames will legitimately inflate `frames`.
+        // to be drawn — motion frames legitimately inflate `frames`.
         Workload::Smoke => {
             // `motion` is the fifth requirement and in the same class as the
             // others: the smoke recipe has a cursor motion (`bt_core::smoke_shell`),
@@ -1975,16 +1966,15 @@ fn verdict(
     }
 }
 
-/// The application's ssh masters (047): askpass is this very binary, the
+/// The application's ssh masters: askpass is this very binary, the
 /// sockets live in this instance's own directory under the user's cache
-/// directory (or `/tmp/bateri-$UID`; 047 R9.2). What a dead bateri left
+/// directory (or `/tmp/bateri-$UID`). What a dead bateri left
 /// behind is swept once, off the main thread. A master ends with the user's
-/// last session to its host and on quit ([`AppDelegate::shutdown`], R9.3).
-/// The saved passwords are the login keychain's ([`crate::keychain`], 047
-/// phase-3).
+/// last session to its host and on quit ([`AppDelegate::shutdown`]).
+/// The saved passwords are the login keychain's ([`crate::keychain`]).
 ///
-/// `carried` is the instance an update's holder handed over (055 R5.1,
-/// [`Arrival::instance`]): its directories are this process's already
+/// `carried` is the instance an update's holder handed over
+/// ([`Arrival::instance`]): its directories are this process's already
 /// ([`arrive`]), so the masters opened before the update are recognised
 /// again, the focus listener moves into them and the carried shells'
 /// `BATERI_SSH_INSTANCE` still names this instance. `None`: a fresh name.
@@ -2004,7 +1994,7 @@ fn masters(carried: Option<&str>) -> Option<Arc<Masters>> {
     let _ = std::thread::Builder::new()
         .name("ssh socket sweep".into())
         .spawn(move || {
-            // The focus listener (050) in this instance's first directory,
+            // The focus listener in this instance's first directory,
             // **before** the sweep: it runs ssh per dead socket and an outside
             // process asking meanwhile must not wait on it. No directory, no
             // listener — silently; the client then reads `unknown`.
@@ -2016,7 +2006,7 @@ fn masters(carried: Option<&str>) -> Option<Arc<Masters>> {
     Some(masters)
 }
 
-/// The focus query's answerer (050): from the listener's thread, one hop to
+/// The focus query's answerer: from the listener's thread, one hop to
 /// the main queue — the answer is computed from the live state there, at the
 /// moment of the question, with no shared copy — waited for at most
 /// [`focus::ANSWER_WAIT`]. A busy main thread, or no delegate yet, is `None`
@@ -2042,7 +2032,7 @@ impl AppDelegate {
         arrival: Option<Arrival>,
     ) -> Retained<Self> {
         // The ring is allocated **only** when the gate is open: a closed gate must
-        // cost an `Option` branch, not an allocation (R4.1). Deriving the capacity
+        // cost an `Option` branch, not an allocation. Deriving the capacity
         // from the run duration is `bt-gpu`'s job too — it is the side that knows the refresh rate.
         // taraf o.
         let stats = opts
@@ -2138,8 +2128,8 @@ impl AppDelegate {
         self.update_may_go();
     }
 
-    /// What an update's relaunch waits for across every pane (055 R5.2,
-    /// Karar 10 (a)): the unfinished transfers — their bytes pass through
+    /// What an update's relaunch waits for across every pane:
+    /// the unfinished transfers — their bytes pass through
     /// bateri — and whether a password sheet is open (its answer does too).
     fn update_waits_for(&self) -> UpdateWait {
         let panes = self.all_panes();
@@ -2220,7 +2210,7 @@ impl AppDelegate {
     /// The pane with tab identity `id` and its window; `None` if closed
     /// (`bateri://tab/`, `application:openURLs:`): bringing to the front a pane
     /// whose teardown has started but which has not yet left the list would put
-    /// a sessionless window on screen ([`find_open`]). The identity is per pane (039 Karar 10).
+    /// a sessionless window on screen ([`find_open`]). The identity is per pane.
     fn pane_by_tab(
         &self,
         id: &TabId,
@@ -2233,7 +2223,7 @@ impl AppDelegate {
         })
     }
 
-    /// The focus query's answer for pane `id` (050 R2, R3): `pane=none` if no
+    /// The focus query's answer for pane `id`: `pane=none` if no
     /// open pane has it ([`Self::pane_by_tab`] — a closing pane is none);
     /// otherwise `focused` — bateri active, the pane's window key **and** the
     /// window's focused pane this one (the search field included,
@@ -2261,8 +2251,7 @@ impl AppDelegate {
     }
 
     /// The active tab's remote host and its resolved mark; `None` in a local tab or
-    /// when no terminal window is key — the input of Shell ▸ Mark … as ▸ (037 Karar 5).
-    /// girdisi (037 Karar 5).
+    /// when no terminal window is key — the input of Shell ▸ Mark … as ▸.
     pub(crate) fn key_remote_mark(&self) -> Option<(String, HostMark)> {
         self.key_window()?.remote_mark()
     }
@@ -2341,7 +2330,7 @@ impl AppDelegate {
         if timed {
             return NSApplicationTerminateReply::TerminateNow;
         }
-        // Consumed by this quit whatever it turns into (Karar 9).
+        // Consumed by this quit whatever it turns into.
         let relaunch = crate::updater::take_relaunch();
         let windows = self.windows();
         if windows.is_empty() {
@@ -2353,7 +2342,7 @@ impl AppDelegate {
             return NSApplicationTerminateReply::TerminateNow;
         }
         let confirm = self.settings().confirm_close;
-        // The question collects the running job from the panes (039 Karar 11).
+        // The question collects the running job from the panes.
         let panes = self.all_panes();
         let unit = window::unit_for(panes.len(), windows.len());
         let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &panes) else {
@@ -2370,10 +2359,10 @@ impl AppDelegate {
         }
     }
 
-    /// The handover's first step (055 R4.2): spawns the holder
+    /// The handover's first step: spawns the holder
     /// ([`handover::spawn_holder`]) with this instance's directories, kept
     /// for [`AppDelegate::shutdown`]. `false` — today's quit — when
-    /// `restore_windows = "off"` (Karar 11), in an unbundled process, without
+    /// `restore_windows = "off"`, in an unbundled process, without
     /// an ssh registry (its directories are the holder's socket) or when the
     /// spawn fails.
     fn prepare_handover(&self) -> bool {
@@ -2399,7 +2388,7 @@ impl AppDelegate {
     }
 
     /// The handover's second step, at the head of [`AppDelegate::shutdown`]
-    /// after 053's save: every pane is frozen
+    /// after the session restore save: every pane is frozen
     /// ([`TerminalPane::freeze_for_handover`]) and given with the layout to
     /// the holder; `true` once the holder said it holds them. The panes that
     /// could not be frozen close today's way. `false` → today's quit closes
@@ -2433,7 +2422,7 @@ impl AppDelegate {
                 }
             }
         }
-        // 053's save, the fallback if the new bateri finds no holder.
+        // The session restore save, the fallback if the new bateri finds no holder.
         if let Some(lock) = self.ivars().restore_lock.take() {
             histories.retain(|(_, history)| with_history && !history.is_empty());
             for pane in saved
@@ -2464,7 +2453,7 @@ impl AppDelegate {
         }
         eprintln!("bateri: handed {count} pane(s) over to the update's holder");
         // The panes that could not be frozen close below: their session ends
-        // must not `-O exit` a master a carried pane still rides (Karar 10).
+        // must not `-O exit` a master a carried pane still rides.
         if let Some(masters) = &self.ivars().masters {
             masters.begin_quit();
         }
@@ -2476,7 +2465,7 @@ impl AppDelegate {
         true
     }
 
-    /// The handover test item's relaunch (055 R4.4): a waiting shell that
+    /// The handover test item's relaunch: a waiting shell that
     /// starts this very binary once this process is gone — spawned clean
     /// ([`handover::spawn_clean`]), so no master of a frozen pane rides
     /// along, and with this process's environment (not `open`'s: a test
@@ -2517,12 +2506,12 @@ impl AppDelegate {
     /// bar's `+` and the Dock icon.
     ///
     /// `from` is the active window; the new shell starts in its OSC 7 directory (home
-    /// if none, 026 → Karar 4), the temporary point-size delta comes from it (Karar 3) and the theme from its
+    /// if none), the temporary point-size delta comes from it and the theme from its
     /// session — all windows share the same theme; without `from` the theme is
     /// resolved from settings. A tab request without `from` is a separate window.
     /// The shell's first input comes from `opening` and `from`'s remote target
     /// ([`initial_line`]); directory inheritance is the same in all three openings — in a remote tab
-    /// `working_directory()` returns the local directory (036 Karar 4).
+    /// `working_directory()` returns the local directory.
     ///
     /// Order: point size, subtitle and chrome before the window is visible, the list before placement
     /// (so geometry events find the window in the list), the session **after**
@@ -2537,7 +2526,7 @@ impl AppDelegate {
     ) -> Result<Retained<TerminalWindow>, String> {
         let mtm = self.mtm();
         let id = self.next_window_id();
-        // Inheritance comes from the active window's **focused pane** (039 Karar 9).
+        // Inheritance comes from the active window's **focused pane**.
         let source = from.map(TerminalWindow::focused_pane);
         let (launch, theme) = self.pane_launch(id, source.as_deref(), opening);
         let window = TerminalWindow::new(mtm, id, launch).map_err(|e| e.to_string())?;
@@ -2565,13 +2554,13 @@ impl AppDelegate {
         Ok(window)
     }
 
-    /// The new pane's birth package (039 Karar 3) and its theme — the single source
+    /// The new pane's birth package and its theme — the single source
     /// for both the window-spawning path and splitting. All inputs are here, the pane
     /// does not reach into `AppDelegate`. The pane identity comes from the same counter as
     /// windows' (one namespace); its owner is `window`'s [`WindowHost`].
     ///
     /// `from` is the source of inheritance (the focused pane): the OSC 7 directory (home
-    /// if none, 026 → Karar 4), the point-size delta (Karar 3), the theme and the remote line ([`initial_line`]);
+    /// if none), the point-size delta, the theme and the remote line ([`initial_line`]);
     /// without `from` the theme is resolved from settings. The integration is asked **once**
     /// and gives both answers at once (environment + dock share).
     fn pane_launch(
@@ -2636,7 +2625,7 @@ impl AppDelegate {
         }
     }
 
-    /// Launch's first windows (053 R3.2): the saved session if there is one
+    /// Launch's first windows: the saved session if there is one
     /// and at least one of its windows comes back, otherwise today's single
     /// window. The gate order is [`AppDelegate::take_saved`]'s.
     fn restore_or_open(&self) -> Result<(), String> {
@@ -2654,14 +2643,14 @@ impl AppDelegate {
         self.open_window(None, Opening::Window).map(drop)
     }
 
-    /// The first windows from the update's holders (055 R4.3): the layout
+    /// The first windows from the update's holders: the layout
     /// they carried, each pane carried on or fallen back
     /// ([`AppDelegate::restored_pane_launch`]); once every window is built
     /// the holders are acknowledged — the panes nobody placed released —
-    /// and 053's save, which describes the same session, is deleted. The
+    /// and the session restore save, which describes the same session, is deleted. The
     /// session directory's lock is taken here for the save at quit.
     /// `false` (the holders hang everything up) if the layout does not read
-    /// or no window comes back; the caller goes on with 053's path.
+    /// or no window comes back; the caller goes on with session restore's path.
     fn restore_arrival(&self, mut arrival: Arrival) -> bool {
         let Some(saved) = Saved::parse(&arrival.layout) else {
             arrival.release_all();
@@ -2693,14 +2682,14 @@ impl AppDelegate {
         true
     }
 
-    /// Takes the saved layout (053 Karar 6). Gates in order, each falling to
+    /// Takes the saved layout. Gates in order, each falling to
     /// today's single window: a timed run, an unbundled process, an
     /// unresolvable home ([`restore_dir`]); the directory's lock held by
     /// another instance; `restore_windows = "off"` — which also deletes what
-    /// is left, once the lock is ours (R4.1); no or an unreadable layout
+    /// is left, once the lock is ours; no or an unreadable layout
     /// ([`restore::take`] deletes it before anything is replayed). Under
     /// `"layout"` the layout comes back but an earlier `"all"` save's
-    /// histories are deleted unread (053 phase-4). The lock
+    /// histories are deleted unread. The lock
     /// stays in [`Ivars::restore_lock`] for the save at quit.
     fn take_saved(&self) -> Option<Saved> {
         let dir = restore_dir(
@@ -2725,7 +2714,7 @@ impl AppDelegate {
         saved
     }
 
-    /// Builds the saved windows (053 R3.2–R3.4): per window the first tab at
+    /// Builds the saved windows: per window the first tab at
     /// its frame (clamped onto a visible screen, [`clamp_frame`]) and the
     /// rest into its tab group, in order, each through
     /// [`TerminalWindow::restore`] — placed before its shells start; then
@@ -2832,9 +2821,9 @@ impl AppDelegate {
     /// ([`restored_launch`]: directory, identity, ready remote line, history
     /// read and deleted here) and point-size step.
     ///
-    /// With an `arrival` (055 R4.3) the pane the holder gave under the same
+    /// With an `arrival` the pane the holder gave under the same
     /// identity is carried on if it can be ([`adoption`]); one that cannot —
-    /// or that the old bateri could not freeze — falls back to 053's start
+    /// or that the old bateri could not freeze — falls back to session restore's start
     /// with its history and the note ([`fallen_back`]), and the holder
     /// hangs a refused one up at once.
     fn restored_pane_launch(
@@ -2885,7 +2874,7 @@ impl AppDelegate {
         (launch, theme)
     }
 
-    /// Session restore's save (053 Karar 6), at the head of
+    /// Session restore's save, at the head of
     /// [`AppDelegate::shutdown`], before any pane closes. **One-shot**: it
     /// takes the lock — a second `shutdown` would find sessionless panes and
     /// overwrite the save with nothing. `restore_windows = "off"` deletes what
@@ -2991,7 +2980,7 @@ impl AppDelegate {
 
     /// The quiet stamp of the timed run's single window (`quiet=`).
     ///
-    /// A timed run has a single window and a single pane (039 Karar 12) and the report
+    /// A timed run has a single window and a single pane and the report
     /// reads it; it is the first in the list.
     fn quiet_since(&self) -> Option<Duration> {
         let pane = self.windows().first().map(|window| window.focused_pane());
@@ -3078,10 +3067,10 @@ impl AppDelegate {
         self.ivars().settings.replace(settings);
     }
 
-    /// Sweeps the preview cache (045 Karar 9, R6) on a background thread with
+    /// Sweeps the preview cache on a background thread with
     /// the settings as they are now: `Launch` at startup, `Daily` from
     /// [`AppDelegate::schedule_daily_sweep`] and `ClearNow` — the single method
-    /// the settings window's Clear Now calls (phase-6). Edited copies it moved to
+    /// the settings window's Clear Now calls. Edited copies it moved to
     /// the download folder are reported on the main thread
     /// ([`crate::preview::report_rescued`]) and the settings window's usage is
     /// measured again ([`AppDelegate::measure_preview_usage`]). Nothing in a timed run.
@@ -3162,7 +3151,7 @@ impl AppDelegate {
             });
     }
 
-    /// The daily sweep (Karar 9: once a day, only what outlived `preview_keep`):
+    /// The daily sweep (once a day, only what outlived `preview_keep`):
     /// one delayed block on the main queue that sweeps and sets up the next —
     /// a timer, not a frame; idle frames stay at zero. Nothing in a timed run.
     fn schedule_daily_sweep(&self) {
@@ -3265,7 +3254,7 @@ impl AppDelegate {
         if let Some(new) = loaded {
             let changes = {
                 let old = self.ivars().settings.borrow();
-                // The point-size delta is **per pane** (026 → Karar 3, 039 Karar 5)
+                // The point-size delta is **per pane**
                 // and is reset in every pane with the same rule.
                 for pane in &panes {
                     pane.zoom_after_reload(&old.font, &new.font);
@@ -3282,7 +3271,7 @@ impl AppDelegate {
                     window.set_host_marks(&new);
                 }
             }
-            // The load indicator's form and interval (046 Karar 8): `off`
+            // The load indicator's form and interval: `off`
             // hides it at once, another form redraws the last value.
             if changes.stats {
                 for pane in &panes {
@@ -3348,8 +3337,8 @@ impl AppDelegate {
         self.refresh_settings_window();
     }
 
-    /// The settings window's "Open settings.toml" button (029 Karar 8; until 029
-    /// it was bateri ▸ Settings… itself): creates the file from the template if missing
+    /// The settings window's "Open settings.toml" button (it was once
+    /// bateri ▸ Settings… itself): creates the file from the template if missing
     /// ([`settings::create_if_missing`]), re-sets up the watching and reads, and
     /// opens the file in the editor ([`open_in_editor`]).
     ///
@@ -3461,7 +3450,7 @@ impl AppDelegate {
     /// and the window can come back and reach the delegate.
     ///
     /// The file's state comes from [`Ivars::settings_state`], the write error from the subtitle's
-    /// write slot (029 Karar 7): both are a single source, the window keeps no copy of its own.
+    /// write slot: both are a single source, the window keeps no copy of its own.
     /// The write slot is emptied on a successful write and once the file is read and
     /// applied, i.e. the strip goes away at that moment too.
     ///
@@ -3516,7 +3505,7 @@ impl AppDelegate {
     /// `viewDidChangeEffectiveAppearance`: the window's chrome carries the theme's
     /// appearance ([`TerminalWindow::apply_chrome`]) and a window with its appearance set
     /// stops inheriting from the system — from then on the view never sees the
-    /// system's change (measured, 026 phase-4 Uygulama Notları), it saw only
+    /// system's change (measured), it saw only
     /// the one we set ourselves.
     ///
     /// The observer is **not removed**: both `AppDelegate` and `NSApp` live for the
@@ -3721,7 +3710,7 @@ impl AppDelegate {
     /// ([`TerminalWindow::begin_close`]); not a guard — a second call
     /// does not cause a second wait but the result becomes `AlreadyDone`.
     ///
-    /// **Parallel, a single deadline** (026 → Karar 5): first every window's
+    /// **Parallel, a single deadline**: first every window's
     /// teardown starts (the pacing stops, the `Waker` is removed, `SIGHUP` goes out), then
     /// all are waited for until the **same** `now + SHUTDOWN_GRACE` — the
     /// total wait of N tabs is one `SHUTDOWN_GRACE`, not N × `SHUTDOWN_GRACE`.
@@ -3738,8 +3727,8 @@ impl AppDelegate {
     /// carry no `Waker` (`wake.rs` → Sahiplik).
     ///
     /// The returned result is the **first** window's first pane's: the only path asking for a report is
-    /// the timed run and there is a single window and a single pane there (026 → Karar 9, 039
-    /// Karar 12). On an interactive close the result
+    /// the timed run and there is a single window and a single pane there.
+    /// On an interactive close the result
     /// is dropped — not collected, since nobody reads it.
     fn shutdown(&self) -> Option<Teardown> {
         // The watchdog's budget starts at **shutdown**, not at process start:
@@ -3752,9 +3741,9 @@ impl AppDelegate {
         if self.ivars().relaunch_after.get() {
             self.spawn_relauncher();
         }
-        // The update's handover (055 R4.2): the programs go to the holder
-        // and nothing below runs — no pane closes, no ssh master ends
-        // (Karar 10). It writes 053's save itself, from the frozen panes:
+        // The update's handover: the programs go to the holder
+        // and nothing below runs — no pane closes, no ssh master ends.
+        // It writes the session restore save itself, from the frozen panes:
         // reading the scrollback live first would destroy an alternate
         // screen before the freeze reads it (`Session::final_history`).
         if let Some(holder) = self.ivars().holder.take()
@@ -3762,24 +3751,24 @@ impl AppDelegate {
         {
             return None;
         }
-        // Session restore's save comes **first** (053 Karar 6): the scrollback
+        // Session restore's save comes **first**: the scrollback
         // is read from live sessions and `begin_close` below drops them. A
         // failed handover has saved already and this is a no-op.
         self.save_session();
         let windows = self.windows();
         // The panes' closes below end their remote sessions; the masters'
-        // `exit` is `close_all`'s, under the shared deadline (047 R9.3).
+        // `exit` is `close_all`'s, under the shared deadline.
         if let Some(masters) = &self.ivars().masters {
             masters.begin_quit();
         }
-        // One teardown per pane, across all windows' panes (039): all of them
+        // One teardown per pane, across all windows' panes: all of them
         // start, then they are awaited in parallel up to a single deadline.
         let closing: Vec<_> = windows
             .iter()
             .flat_map(|window| window.begin_close())
             .collect();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
-        // Our ssh masters end in parallel, under the same deadline (047 R9.3);
+        // Our ssh masters end in parallel, under the same deadline;
         // a timed run has none.
         let masters = self.ivars().masters.clone().and_then(|masters| {
             std::thread::Builder::new()
@@ -3824,10 +3813,10 @@ impl AppDelegate {
     /// had already exited) the counters are zero and the gate says `MissingCounter`.
     fn report_and_exit(&self, run: Run, teardown: Option<Teardown>, quiet: Option<Duration>) -> ! {
         let windows = self.windows();
-        // The smoke run's only window's only pane (039 Karar 12).
+        // The smoke run's only window's only pane.
         let pane = windows.first().map(|window| window.focused_pane());
-        // The frames still in flight are counted **before** `frames=` is read
-        // (040 Karar 6): completion is polled by the ticks, and the link is
+        // The frames still in flight are counted **before** `frames=` is read:
+        // completion is polled by the ticks, and the link is
         // stopped, so nothing else would count them.
         if let Some(link) = pane.as_deref().and_then(TerminalPane::link) {
             link.drain();
@@ -3839,7 +3828,7 @@ impl AppDelegate {
         // and strikeouts drawn. While one is zero the others cannot pass
         // green — frames>0 & cells=0 means "a window exists, no shell
         // output"; cells>0 & glyphs=0 means "cells are painted but there are
-        // no letters", i.e. silently falling back to 002's blind-writing era:
+        // no letters", i.e. silently falling back to the blind-writing era:
         // without the `glyphs` gate `frames=1 cells=8 pipeline=ok` would be
         // printed even if the `frame()` boundary passed no characters. The
         // half `rules` closes is separate the same way: the boundary carries
@@ -3886,7 +3875,7 @@ impl AppDelegate {
             MotionState::Unsettled
         };
         // The fifth token `slots=U/T` is a **counter**, not a gate: it says how many of the atlas's
-        // slots are filled and `/measure` will read the occupancy ratio from it. It stays out of the
+        // slots are filled and a measurement will read the occupancy ratio from it. It stays out of the
         // gate because of its meaning: an empty atlas is legitimate (a frame with no glyphs) and so
         // is a full one — the failure threshold is unknown until measured, and an unmeasured number
         // is not written into the gate. Same for `requests=`: the frame **request** sees
@@ -3971,7 +3960,7 @@ mod tests {
     use super::*;
 
     /// The **measured** tail of a healthy smoke run (2026-09-16, the lowest of
-    /// thirty-seven runs: `1742,29 ms`; owner `docs/OLCUMLER.md`).
+    /// thirty-seven runs: `1742,29 ms`).
     /// Tests that do not ask about the gate get this so the `quiet` arm does not
     /// shadow what they do ask; the arm's own tests are below and name the
     /// floor explicitly.
@@ -4054,14 +4043,14 @@ mod tests {
         assert!(line.ends_with(" pipeline=ok"), "{line}");
 
         // The four new keys are **permanent** too: from today the contract puts them on the
-        // "never deleted" side as well. `slide=` arrived with 011 and sat next to `motion=` —
+        // "never deleted" side as well. `slide=` arrived later and sat next to `motion=` —
         // the token is **never deleted, only added**.
         for token in [
             "content=1",
             "motion=3",
             "slide=2",
             "quiet=2950.00ms",
-            // Arrived with 023 and sits **right next to** `slots=`: the two are
+            // Arrived with the colour plane and sits **right next to** `slots=`: the two are
             // the atlas's two planes and are read side by side. It was put in the list the same
             // day, because the "never deleted" promise is a promise only if
             // a guard exists — the list above protects only the **old** tokens.
@@ -4078,7 +4067,7 @@ mod tests {
 
         // With the gate closed the measurement tokens are **absent**, and `samples=0` is absent too: zero
         // would be confused with "the gate was open but no samples were collected", and
-        // the blindness R5.2 wants to close is exactly that.
+        // the blindness this closes is exactly that.
         assert!(line.contains(" samples=off"), "{line}");
         assert!(!line.contains("cpu_frame_p95"), "{line}");
         assert!(!line.contains("startup="), "{line}");
@@ -4162,13 +4151,13 @@ mod tests {
         ] {
             assert!(line.contains(token), "{token} yok: {line}");
         }
-        // A column below the floor **prints no number** (R5.6) and the reason can be read in the same
+        // A column below the floor **prints no number** and the reason can be read in the same
         // line's `samples=`/`floor=` pair. p95 and worst are silent
         // together: with few samples they are the same element anyway.
         assert!(line.contains("cpu_encode_p95=insufficient"), "{line}");
         assert!(line.contains("cpu_encode_max=insufficient"), "{line}");
         // Without timestamp support the GPU keys stay and say why there is
-        // no number (Karar 6: a token is never deleted).
+        // no number (a token is never deleted).
         if let Some(m) = r.measured.as_mut() {
             m.gpu_supported = false;
         }
@@ -4192,7 +4181,7 @@ mod tests {
 
     #[test]
     fn the_gutter_costs_columns() {
-        // The left gutter is deducted from columns (010 Karar 3): so the stripe does not
+        // The left gutter is deducted from columns: so the stripe does not
         // sit on top of the text. 900 pixels, 9-pixel cells → 100 columns with no gutter; an 8-pixel
         // gutter takes one column, and so does 9 pixels (a full cell).
         let plain = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK);
@@ -4436,7 +4425,7 @@ mod tests {
         // The gate's half that **asks for no measurement** and the leak class `IDLE_FRAME_LIMIT`
         // cannot see: all counters in place, the frame limit
         // not exceeded — a slow animation passes both — but still in flight at
-        // the deadline. The pure form of phase-3's acceptance scenario "temporary mutation:
+        // the deadline. The pure form of the acceptance scenario "temporary mutation:
         // `settled` always `false`".
         let good = Counters {
             frames: 1,
@@ -4531,8 +4520,7 @@ mod tests {
         // frames **below** the limit, animation settled — but the gap between the last frame and
         // the deadline is short, i.e. frames were still flowing at the end of the run.
         // Its measured scenario is a half-second leak: with `content=8` it does
-        // not exceed the limit and without this arm it was **green**
-        // (`docs/OLCUMLER.md` → `## Boşta kare`).
+        // not exceed the limit and without this arm it was **green**.
         let good = Counters {
             frames: 30,
             content: 3,
@@ -4625,7 +4613,7 @@ mod tests {
     #[test]
     fn motion_and_panic_report_the_more_fundamental_fault() {
         // The order of the arms is a **diagnostic** preference: when two faults coincide the run is red
-        // either way, but which does the line write? The `/code-review`
+        // either way, but which does the line write? The code review
         // finding was that this combination was never tested.
         //
         // Failure to settle says what the run **measures** broke, panic is
@@ -4666,7 +4654,7 @@ mod tests {
 
     #[test]
     fn shutdown_panic_cannot_pass_the_gate() {
-        // `/code-review` finding: the `teardown=` token became visible but the gate did not
+        // Code review finding: the `teardown=` token became visible but the gate did not
         // read it, so a run that panicked on the shutdown path still
         // printed `pipeline=ok` and exited 0 — the exact opposite of the
         // token's reason for being added.
@@ -4766,7 +4754,7 @@ mod tests {
 
     #[test]
     fn smooth_scroll_is_off_when_any_input_turns_motion_off() {
-        // If any of the three inputs turns motion off, the line step applies (027 Karar 5).
+        // If any of the three inputs turns motion off, the line step applies.
         let on = Settings::default();
         assert!(resolve_smooth_scroll(&on, false), "default is not smooth");
         assert!(
@@ -4801,7 +4789,7 @@ mod tests {
 
     #[test]
     fn hermetic_run_does_not_read_reduce_motion() {
-        // `Inputs`'s fifth condition (008 phase-5): a timed run does **not** read the
+        // `Inputs`'s fifth condition: a timed run does **not** read the
         // system's Reduce Motion setting. If it did, `make smoke`'s
         // `motion=` token would depend on the measuring machine's accessibility preference —
         // a gate green on one machine and red on another.
@@ -4831,7 +4819,7 @@ mod tests {
         }));
     }
 
-    /// 048: `BATERI_BIN` rides only with an installed wrapper, and only as UTF-8.
+    /// `BATERI_BIN` rides only with an installed wrapper, and only as UTF-8.
     #[test]
     fn the_binary_path_rides_only_with_the_wrapper() {
         let wrapper = vec![("ZDOTDIR".to_owned(), "/w".to_owned())];
@@ -4845,7 +4833,7 @@ mod tests {
                 "/Applications/bateri.app/Contents/MacOS/bateri".to_owned()
             ))
         );
-        // The masters' instance rides with the binary, never alone (phase-5).
+        // The masters' instance rides with the binary, never alone.
         assert_eq!(
             with_bateri_bin(wrapper.clone(), bin.clone(), Some("0a1b2c3d")).last(),
             Some(&("BATERI_SSH_INSTANCE".to_owned(), "0a1b2c3d".to_owned()))
@@ -4876,7 +4864,7 @@ mod tests {
 
     #[test]
     fn blocks_keeps_the_wrapper_and_drops_the_dock() {
-        // **012 phase-10's acceptance criterion.** At the `"blocks"` tier the wrapper
+        // **The acceptance criterion.** At the `"blocks"` tier the wrapper
         // is installed — `ZDOTDIR` goes, so blocks and marks work —
         // but the window is born **without a dock**: the input line and the prompt both
         // stay in the grid.
@@ -4912,7 +4900,7 @@ mod tests {
 
     #[test]
     fn hermetic_run_does_not_set_up_shell_integration() {
-        // `Inputs`'s sixth condition (009 phase-3): a timed run **never** installs
+        // `Inputs`'s sixth condition: a timed run **never** installs
         // integration. If it did, `make smoke`'s result would depend on the measuring
         // machine's shell configuration — were the user's `.zshrc` to write a single byte to
         // the window `cells=8` would fail. The closure's panic is sharper than a
@@ -4935,7 +4923,7 @@ mod tests {
 
     #[test]
     fn hermetic_run_does_not_restore_or_save() {
-        // 053 Karar 6: a timed run never reads nor writes the saved session — `make smoke`
+        // A timed run never reads nor writes the saved session — `make smoke`
         // must neither depend on the user's last quit nor overwrite it. The closures' panic is
         // the gate, as in `hermetic_run_does_not_set_up_shell_integration`.
         let dir = restore_dir(
@@ -4952,7 +4940,7 @@ mod tests {
         assert_eq!(
             restore_dir(&user, || None, || panic!("no bundle, no home lookup")),
             None,
-            "`cargo run` has no bundle id (053 Karar 6)"
+            "`cargo run` has no bundle id"
         );
         assert_eq!(
             restore_dir(&user, || Some("dev.bateri.bateri".into()), || None),
@@ -4988,7 +4976,7 @@ mod tests {
         assert_eq!(
             launch.initial_input,
             Some(InitialInput::ready("ssh prod")),
-            "the remote line waits for the user's ⏎ (053 Karar 3)"
+            "the remote line waits for the user's ⏎"
         );
         let local = SavedPane {
             remote_line: None,
@@ -5045,7 +5033,7 @@ mod tests {
 
     #[test]
     fn only_a_new_tab_follows_a_remote_tab() {
-        // The three arms of 037 Karar 6: on a remote tab ⌘T (and `+`) carries the same
+        // The three arms: on a remote tab ⌘T (and `+`) carries the same
         // command; ⌥⌘T and ⌘N are local even from a remote tab; on a local tab ⌘T is local.
         let remote = || Some("ssh -p 2222 prod".to_owned());
         assert_eq!(
@@ -5055,14 +5043,14 @@ mod tests {
         assert_eq!(
             initial_line(Opening::Split, remote()).as_deref(),
             Some("ssh -p 2222 prod"),
-            "a split goes to the same host like ⌘T (039 Karar 9)"
+            "a split goes to the same host like ⌘T"
         );
         assert_eq!(initial_line(Opening::LocalTab, remote()), None);
         assert_eq!(initial_line(Opening::Window, remote()), None);
         assert_eq!(
             initial_line(Opening::Restore, remote()),
             None,
-            "a restored pane's line comes from the save, ready and not run (053 Karar 3)"
+            "a restored pane's line comes from the save, ready and not run"
         );
         for opening in [
             Opening::Tab,
@@ -5212,7 +5200,7 @@ mod tests {
         // "user value" to put back. If it were given the script would reload its own `.zshenv`
         // and recurse up to zsh's `FUNCNEST` limit; the measured
         // result was 336 lines of errors and a session left without `ZDOTDIR`
-        // (`/code-review`, 009 gate).
+        // (found in code review).
         let user = Inputs::User { config_root: None };
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(
@@ -5291,7 +5279,7 @@ mod tests {
         ))
     }
 
-    /// 055 R5.2 (Karar 10 (a)): the relaunch waits for a transfer or an
+    /// The relaunch waits for a transfer or an
     /// open password sheet, either alone; with neither it goes at once.
     #[test]
     fn an_update_waits_for_a_transfer_or_a_password_sheet() {
@@ -5312,8 +5300,8 @@ mod tests {
         );
     }
 
-    /// Only a relaunch hands over, only where 053 restores and only in a
-    /// bundle (055 Karar 9, 11): ⌘Q, `"off"` and `cargo run` quit today's way.
+    /// Only a relaunch hands over, only where session restore runs and only in a
+    /// bundle: ⌘Q, `"off"` and `cargo run` quit today's way.
     #[test]
     fn only_a_bundled_relaunch_with_restore_hands_over() {
         assert!(hands_over(true, RestoreWindows::All, true));
@@ -5324,7 +5312,7 @@ mod tests {
     }
 
     /// A held pane is carried on only alive, readable and watched; the
-    /// others fall back with whatever history their blob carried (Karar 8).
+    /// others fall back with whatever history their blob carried.
     #[test]
     fn a_held_pane_is_adopted_or_falls_back_with_its_history() {
         let blob = pane_state(b"history").encode();

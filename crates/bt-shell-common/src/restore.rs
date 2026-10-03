@@ -1,7 +1,7 @@
-//! Session restore (053): the saved layout's model, its versioned line format and the life of
+//! Session restore: the saved layout's model, its versioned line format and the life of
 //! the directory that holds it.
 //!
-//! **The model** is what comes back after a quit (053 Karar 4): windows (frame, selected tab,
+//! **The model** is what comes back after a quit: windows (frame, selected tab,
 //! key), tabs (the split tree's shape, focus, zoom) and panes (the persistent `TabId`, the local
 //! directory, the point-size step, the remote target's line, whether a history file was written).
 //! The tree's leaves are **indices** into the tab's pane list ([`Shape`]): the in-process `u64`
@@ -20,7 +20,7 @@
 //! layout would put panes in the wrong place, and the caller's fallback (one fresh window) is
 //! today's launch. No panic on any input.
 //!
-//! **The directory** (053 Karar 6) is given by the caller ([`directory`] names the production
+//! **The directory** is given by the caller ([`directory`] names the production
 //! one), created `0700`, its files `0600`. A [`Lock`] owns it: a second instance of the same
 //! bundle neither reads nor writes. [`save`] writes the histories first and the layout **last**,
 //! each through a temporary name and a `rename` — the layout's rename is the commit, so a save cut
@@ -70,7 +70,7 @@ pub struct Saved {
 }
 
 /// A window's frame in the platform's screen coordinates (AppKit: bottom-left origin), points.
-/// Clamping onto a visible screen is the restoring side's job (R3.2).
+/// Clamping onto a visible screen is the restoring side's job.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
     pub x: f64,
@@ -112,8 +112,7 @@ pub struct SavedPane {
     pub dir: Option<PathBuf>,
     /// The temporary point-size offset, in steps (`zoom::Zoom::steps`).
     pub zoom_steps: i32,
-    /// The remote target's command line (`ssh prod`), restored as a ready, not run, first input
-    /// (053 Karar 3).
+    /// The remote target's command line (`ssh prod`), restored as a ready, not run, first input.
     pub remote_line: Option<String>,
     /// Whether a history file was written for this pane.
     pub history: bool,
@@ -473,7 +472,7 @@ fn parse_pane<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<SavedPan
 
 // ─── the directory ───────────────────────────────────────────────────────
 
-/// The production directory: `{application support}/bateri/session/{bundle id}` (053 Karar 6).
+/// The production directory: `{application support}/bateri/session/{bundle id}`.
 /// Named by the bundle so that a development build and the installed app never share a layout.
 pub fn directory(application_support: &Path, bundle_id: &str) -> PathBuf {
     application_support
@@ -604,7 +603,7 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
 ///
 /// Without `histories` (`restore_windows = "layout"`) every history is swept **unread** and no
 /// returned pane claims one: a user who said the scrollback should not come back must not see an
-/// earlier `"all"` save's once more (053 phase-4).
+/// earlier `"all"` save's once more.
 pub fn take(lock: &Lock, histories: bool) -> Option<Saved> {
     let path = lock.dir.join(LAYOUT);
     let text = fs::read_to_string(&path);

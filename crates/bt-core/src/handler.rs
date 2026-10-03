@@ -1,7 +1,7 @@
 //! The wrapper between the parser and `Term`.
 //!
 //! The reader loop ([`crate::reader`]) hands `Term` to the parser not
-//! directly but through this type: clustering (035) has to step **in
+//! directly but through this type: clustering has to step **in
 //! between** `input`s and close the cluster on every other intervening call,
 //! so it must see all of the parser's `Handler` calls. With clustering off
 //! (`SessionOptions::cluster`) every call goes to `Term` as is — the

@@ -101,8 +101,7 @@ pub use wake::Wake;
 /// `c` 4 + `fg` 4 + `bg` 4 + `flags` 2 + padding + `Option<Arc<CellExtra>>` 8
 /// = 24 bytes.
 /// Sparse data (grapheme cluster, underline color, hyperlink) is already in a
-/// side table — `CellExtra`. If this number changes, the cell item of
-/// `CLAUDE.md` changes in the same commit: it is what grows a 10,000-line
+/// side table — `CellExtra`. This number is what grows a 10,000-line
 /// scrollback per tab.
 ///
 /// Honestly on scope: the measured type is not ours, and this assert blocks no

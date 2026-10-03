@@ -1,11 +1,11 @@
-# bateri's zsh wrapper — the ZDOTDIR swap (048).
+# bateri's zsh wrapper — the ZDOTDIR swap.
 #
 # Shared by the local wrapper (`bateri.zsh`, loaded by the four files in our
 # ZDOTDIR) and the remote one (the bootstrap writes the same four files and
 # this file to the server, with its own small `bateri.zsh` beside them —
 # `assets/shell/remote/zsh/bateri.zsh`). The swap is one file so the two
 # wrappers cannot drift apart: the day they diverged one of them would break
-# silently (048 discussion → Muhakeme). The rationale for the shape (why the
+# silently. The rationale for the shape (why the
 # user's file is `source`d at the top level, why ZDOTDIR is re-read, the
 # `HISTFILE` fix) is in `bateri.zsh`'s header.
 #
@@ -34,7 +34,7 @@ if (( ! ${+__bateri_had} )); then
   # **glob pattern**, not plain text. Had the package sat at a path like
   # `/Applications/[dev] bateri.app/…` the pattern would not match its own plain
   # value, the gate would open and we would fall into exactly the recursion it
-  # prevents (`/code-review`, 009 phase-5).
+  # prevents.
   if [[ -n ${BATERI_ZDOTDIR} && ${BATERI_ZDOTDIR:A} != "${__bateri_dir:A}" ]]; then
     __bateri_had=1
     __bateri_user=$BATERI_ZDOTDIR

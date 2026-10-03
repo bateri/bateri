@@ -18,7 +18,7 @@
 //! once every ~5 wake-ups and draw four **identical** frames in between. The
 //! symptom would be silent: the window wakes, draws, and no pixel changes.
 //!
-//! **The stop condition is named** (`CLAUDE.md`): the app or the user turns it
+//! **The stop condition is named**: the app or the user turns it
 //! off, the caret is hidden, the window is occluded (`Gate` already drops to
 //! `setPaused`), or [`IDLE_STOP`] has passed since the last content frame.
 //! Stopping **leaves the phase lit**: stopping in the dark phase would make

@@ -1,38 +1,37 @@
-//! A remote session's files (045): the rules of previewing (⌘-click) and
+//! A remote session's files: the rules of previewing (⌘-click) and
 //! downloading a file named in an ssh or mosh session's output — the pure
 //! half, without I/O.
 //!
 //! - **The helper session's protocol** ([`helper_script`], [`request_line`],
 //!   [`parse_greeting`], [`parse_reply`]): one long-lived `ssh … sh` per pane
-//!   answers "does this exist, what is it, how big, how old" line by line
-//!   (Karar 10). A request is one line of `sh` the loop `eval`s, every path
+//!   answers "does this exist, what is it, how big, how old" line by
+//!   line. A request is one line of `sh` the loop `eval`s, every path
 //!   quoted with `upload`'s [`sq`] and rejected by its [`is_safe`] (no
 //!   backslash, no control character — so no newline can split a request);
 //!   the reply names paths by **index** and carries the request's sequence
 //!   number, so a late answer cannot be taken for a newer question.
-//! - **The load sample** ([`load_request_line`], [`parse_load`]): 046's
+//! - **The load sample** ([`load_request_line`], [`parse_load`]): the
 //!   `bt_load` request on the same session — raw `/proc` readings; what they
 //!   mean is `remote_stats`'s.
 //! - **The download script** ([`download_script`]): `upload`'s mirror, a
-//!   `tar c` stream of one item out of its folder (Karar 11).
+//!   `tar c` stream of one item out of its folder.
 //! - **The scp path** ([`scp_path`]): "Copy as scp Path" from the session's
-//!   ssh argv (R3).
+//!   ssh argv.
 //! - **The download sheet** ([`download_sheet`]): whether a download asks
-//!   first (a folder, a clash, no space) and with which buttons (R4).
+//!   first (a folder, a clash, no space) and with which buttons.
 //! - **The open policy** ([`preview_open`]): a file previews, in its default
 //!   application if it is a known document, as plain text otherwise; a folder
-//!   does not preview (Karar 3, 4).
+//!   does not preview.
 //! - **The preview path** ([`preview_path`]): `{dir}/{host}/{remote absolute
 //!   path}`, every escape refused.
 //! - **The cleanup planner** ([`plan_sweep`]): what the launch, the daily and
 //!   the Clear Now sweeps delete and what they move to the download folder
-//!   instead (Karar 9).
+//!   instead.
 //! - **The preview index's text** ([`PreviewIndex`]): what bateri wrote and
-//!   when it last opened each copy, `{preview_dir}/.index` (phase-4).
+//!   when it last opened each copy, `{preview_dir}/.index`.
 //!
-//! The stream and the two-way queue are `download` and `upload::Transfers`
-//! (045 phase-2), the helper session `remote_helper` (phase-3), the cache's
-//! disk half `preview_cache` (phase-4); the drag comes with phase-5. The rationale is in `.tasks/045-uzak-dosya-indirme/discussion.md`.
+//! The stream and the two-way queue are `download` and `upload::Transfers`,
+//! the helper session `remote_helper`, the cache's disk half `preview_cache`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -65,7 +64,7 @@ const HELPER_MARK: &str = "BT-HELPER";
 /// folder is a folder. A folder's bytes are its regular files' sizes as `ls -ln`
 /// prints them — what `tar` streams, not what `du` allocates.
 ///
-/// A third request, `bt_load {seq} [p]` (046 Karar 2), samples the host's load
+/// A third request, `bt_load {seq} [p]`, samples the host's load
 /// for the ssh status bar: every line of its reply carries its own tag
 /// (`BT-L cpu …`, `BT-L mem {key} {kB}`, `BT-L load …`, `BT-L up …`,
 /// `BT-L disk {n}%`; with `p` also `BT-L os …`, `BT-L cores …`, the script's
@@ -280,7 +279,7 @@ fn reply_line(line: &str) -> Option<(usize, Option<RemoteEntry>)> {
     Some((index, answer))
 }
 
-// ─── load sample (046) ───────────────────────────────────────────────────
+// ─── load sample ─────────────────────────────────────────────────────────
 
 /// The request line of a load sample (newline included): `bt_load 9` or, with
 /// the popover's details, `bt_load 9 p`. It shares the session's sequence
@@ -363,7 +362,7 @@ pub struct LoadSample {
 }
 
 /// The helper's output → the `bt_load` reply to request `seq`: `Ok(None)` for
-/// `BT-NOPROC` (no Linux `/proc`, no indicator — R4.2).
+/// `BT-NOPROC` (no Linux `/proc`, no indicator).
 ///
 /// Only the `cpu` line and `MemTotal` are required; every other value is
 /// optional and a missing line leaves it empty. An unknown `BT-L` tag is
@@ -573,7 +572,7 @@ pub fn download_script(path: &str) -> Option<String> {
     }
     // A symlink is followed (`-h`) only when it is the item itself: the helper
     // answered for its target (`stat -L`), and an archived link would land
-    // dangling. Links **inside** a folder stay links (`/code-review`, 045).
+    // dangling. Links **inside** a folder stay links.
     let item = sq(&format!("./{name}"));
     Some(format!(
         "cd {} || exit {NO_DIRECTORY}; if [ -L {item} ]; then exec tar -c -h -f - {item}; \
@@ -582,7 +581,7 @@ pub fn download_script(path: &str) -> Option<String> {
     ))
 }
 
-/// The download's confirmation sheet (R4): the text and the confirm buttons, each
+/// The download's confirmation sheet: the text and the confirm buttons, each
 /// with the conflict rule it starts the download under; the caller adds
 /// "Cancel" last.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -596,7 +595,7 @@ pub struct DownloadSheet {
     pub enabled: bool,
 }
 
-/// Whether a download asks first (Karar 5, R4) and how: `Ok(conflict)` starts
+/// Whether a download asks first and how: `Ok(conflict)` starts
 /// it without a sheet, `Err(sheet)` asks. A sheet only when it is needed — a
 /// **folder** (its file count and size), a **clash** at the destination while
 /// `download_conflict` is `ask` (Keep Both / Replace), or **not enough space** on
@@ -689,7 +688,7 @@ pub fn download_sheet(
 
 // ─── scp path ────────────────────────────────────────────────────────────
 
-/// "Copy as scp Path" (R3): the remote item as `scp` names it —
+/// "Copy as scp Path": the remote item as `scp` names it —
 /// `-P 2222 deploy@prod:/var/log/x` — from the session's argv.
 ///
 /// The port (`-p N`, `-o Port=N`, `ssh://host:N`) becomes scp's `-P N` and the
@@ -852,20 +851,20 @@ fn ssh_option(option: &str) -> Option<(&'static str, &str)> {
 
 // ─── open policy ─────────────────────────────────────────────────────────
 
-/// How a remote file's preview opens (R5.3).
+/// How a remote file's preview opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreviewOpen {
     /// In the default application of its content type — a known document.
     Default,
     /// In the default plain-text application: a script, a program, an `x`-bit
     /// file and every unknown type — the user wants to **read** it, and a
-    /// preview is never run (Karar 4).
+    /// preview is never run.
     PlainText,
 }
 
 /// The remote open policy: what a ⌘-click on `entry` does. `content` is the
-/// platform's answer for the file's name (044's `DOCUMENT_TYPES`, UTType on
-/// macOS) — asked only for a file. A folder does not preview (`None`, Karar 3).
+/// platform's answer for the file's name (the link opener's `DOCUMENT_TYPES`,
+/// UTType on macOS) — asked only for a file. A folder does not preview (`None`).
 ///
 /// | entry | action |
 /// |---|---|
@@ -889,8 +888,8 @@ pub fn preview_open(entry: &RemoteEntry, content: impl FnOnce() -> Content) -> O
 // ─── preview path ────────────────────────────────────────────────────────
 
 /// Where a remote file's preview lives: `{dir}/{host}/{remote absolute path}`
-/// (R5.1) — the same file always lands on the same copy, which is what lets an
-/// unchanged file open from the cache (R5.4).
+/// — the same file always lands on the same copy, which is what lets an
+/// unchanged file open from the cache.
 ///
 /// Refused (`None`), because the copy must never land outside `{dir}/{host}`:
 /// a remote path that is not absolute, has a `.` or `..` segment or names no
@@ -919,7 +918,7 @@ pub fn preview_path(dir: &Path, host: &str, remote: &str) -> Option<PathBuf> {
 
 // ─── cleanup ─────────────────────────────────────────────────────────────
 
-/// What runs a cleanup (Karar 9).
+/// What runs a cleanup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sweep {
     /// At launch: the expired previews, then the oldest until the folder is
@@ -963,7 +962,7 @@ pub struct SweepPlan {
     pub rescue: Vec<PathBuf>,
 }
 
-/// The cleanup planner (Karar 9): which of `previews` the `sweep` removes,
+/// The cleanup planner: which of `previews` the `sweep` removes,
 /// `keep` and `limit` (bytes) from the settings, `now` in Unix seconds.
 ///
 /// - The age is counted from the **last opening**, so a preview in use stays.
@@ -1055,10 +1054,10 @@ pub struct IndexRecord {
     pub last_open: u64,
 }
 
-/// The preview folder's index, `{preview_dir}/.index` (045 Karar 9): a record
+/// The preview folder's index, `{preview_dir}/.index`: a record
 /// per copy, by its path **relative** to the folder. It is what tells bateri's
-/// copy from the user's edit (R6) and an unchanged remote file from a changed
-/// one (R5.4).
+/// copy from the user's edit and an unchanged remote file from a changed
+/// one.
 ///
 /// The text is a header line and one line per copy, `{last_open} {size}
 /// {mtime} {path}` — the path last, so it may hold spaces. A path with a
@@ -1068,7 +1067,7 @@ pub struct PreviewIndex {
     pub records: BTreeMap<String, IndexRecord>,
 }
 
-/// Why an index could not be read: the sweep then deletes nothing (Karar 9).
+/// Why an index could not be read: the sweep then deletes nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexDamaged(pub String);
 
@@ -1123,7 +1122,7 @@ impl PreviewIndex {
     }
 }
 
-/// Whether a cached copy can open as it is (R5.4): the remote file's size and
+/// Whether a cached copy can open as it is: the remote file's size and
 /// mtime are what bateri wrote, and the local copy is still what bateri wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheState {
@@ -1134,8 +1133,8 @@ pub enum CacheState {
     /// The local copy changed since bateri wrote it (the user unlocked and
     /// edited it) or the index has no record of it: it is moved to the download
     /// folder before a new copy takes its place — a re-download must not destroy
-    /// what may be the user's edits (Karar 9; the unknown copy's side is the
-    /// sweep's, which never deletes one).
+    /// what may be the user's edits (the unknown copy's side is the sweep's,
+    /// which never deletes one).
     Diverged,
 }
 

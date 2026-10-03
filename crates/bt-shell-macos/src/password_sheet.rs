@@ -1,5 +1,5 @@
-//! The password sheet of bateri's own ssh master (047 R4) and the pane's half
-//! of the saved passwords (047 phase-3): ssh asks through askpass
+//! The password sheet of bateri's own ssh master and the pane's half
+//! of the saved passwords: ssh asks through askpass
 //! ([`crate::ssh_route`]), the job's thread hands the question to the pane
 //! that started the job and blocks on a channel until the sheet closes.
 //!
@@ -8,7 +8,7 @@
 //!   "Wrong password — try again", one after the saved password "The saved
 //!   password didn't work". "Log In" (default) / "Cancel" (Esc).
 //! - **Remember in Keychain** — only for an account password
-//!   ([`Prompt::Password`]; a passphrase or a code is never kept, Karar 7) and
+//!   ([`Prompt::Password`]; a passphrase or a code is never kept) and
 //!   **ticked by default** (the user's decision, 2026-10-02). It is written
 //!   after the master is up, never before: a wrong password is not saved.
 //! - **Arbitration**: never on top of another sheet (the window's attached
@@ -19,13 +19,13 @@
 //!   sheet, a pane that is gone, [`TerminalPane::close_password`] on
 //!   `begin_close` (⌘W, ⌘Q). The job's thread then sees `None` and ssh is
 //!   stopped before it could try an empty password.
-//! - **Sign In…** (R7.2): a background job (the link check, the load
+//! - **Sign In…**: a background job (the link check, the load
 //!   indicator) that could not log in by itself says so
 //!   ([`ssh_route::SIGN_IN_NEEDED`]); the ssh status bar then shows the
 //!   button, whose click opens this sheet. Any user job's successful login
 //!   hides it and the background jobs try again at once
 //!   ([`TerminalPane::signed_in`]).
-//! - **Forget Password** (R6.2): Shell ▸ Forget Password for “{host}” drops the
+//! - **Forget Password**: Shell ▸ Forget Password for “{host}” drops the
 //!   saved password and stops our master for it
 //!   ([`crate::ssh_route::Masters::forget`]).
 
@@ -56,7 +56,7 @@ pub(crate) enum Job {
     Download,
     Preview,
     Finder,
-    /// The ssh status bar's Sign In… (R7.2).
+    /// The ssh status bar's Sign In….
     SignIn,
 }
 
@@ -95,7 +95,7 @@ fn lead(question: &Question) -> Option<&'static str> {
 }
 
 impl TerminalPane {
-    /// A remote job's route gate (047 R5): `job` `Some` — the user started it
+    /// A remote job's route gate: `job` `Some` — the user started it
     /// and a sheet may ask; `holds` — the job already holds the pane's sheet
     /// gate (the upload's probe, the download's count). `None` — a background
     /// job, which never asks. A user job's successful dial is a login: the
@@ -210,7 +210,7 @@ impl TerminalPane {
                     remember: remember.is_some_and(|box_| box_.state() == NSControlStateValueOn),
                 });
             let _ = sheet.reply.send(answer);
-            // A postponed update may have waited for this sheet (055 R5.2).
+            // A postponed update may have waited for this sheet.
             pane.host().uploads_changed(pane.id());
         });
         alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
@@ -236,7 +236,7 @@ impl TerminalPane {
         }
     }
 
-    // ─── Sign In… (R7.2) ─────────────────────────────────────────────────
+    // ─── Sign In… ────────────────────────────────────────────────────────
     //
     // The button's one owner is the session (`Session::sign_in`): it clears it
     // with the remote state, so the pane keeps no copy that could disagree.
@@ -367,7 +367,7 @@ impl TerminalPane {
             });
     }
 
-    // ─── Forget Password (R6.2) ──────────────────────────────────────────
+    // ─── Forget Password ─────────────────────────────────────────────────
 
     /// Shell ▸ Forget Password's enablement: a remote tab whose account has a
     /// saved password. The account is the one a job already resolved — the

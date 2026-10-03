@@ -4,7 +4,7 @@
 //! `src/event_loop.rs` — Copyright Christian Duerr, Joe Wilm and the
 //! alacritty contributors, under the Apache License 2.0 (text in the bundle
 //! as `THIRD-PARTY-LICENSES.txt`, attribution in `Credits.html`). Per
-//! Apache-2.0 §4(b): the file was **modified** (035 phase-2), the changes
+//! Apache-2.0 §4(b): the file was **modified**, the changes
 //! being —
 //!
 //! - the parser sees `Term` not directly but through [`ClusterHandler`], both
@@ -12,25 +12,23 @@
 //! - the `ref_test` recording and `Notifier` were removed (nothing calls
 //!   either);
 //! - `log::error!` lines became `eprintln!` (`log` is not a dependency of
-//!   this crate, `CLAUDE.md` → logging debt);
+//!   this crate; logging is still a debt);
 //! - a dead channel is an empty read, not a panic (no unjustified panic in
 //!   `bt-core`; the branch is unreachable); the re-registration panic was
 //!   kept with its justification;
 //! - the PTY tokens are `pub(crate)` in alacritty, their values were copied
-//!   here (and are `pub(crate)` here too: an adopted PTY registers on them,
-//!   055);
+//!   here (and are `pub(crate)` here too: an adopted PTY registers on them);
 //! - comments were translated (first to Turkish, later to English);
-//! - the handover (055 phase-2): an opt-in read before the first poll
+//! - the update handover: an opt-in read before the first poll
 //!   ([`EventLoop::read_first`], so a carried prefix reaches the parser on
 //!   a quiet PTY) and, on the loop handed back after `join`, the DEC 2026
 //!   buffer applied through the wrapper ([`EventLoop::stop_sync`]), the
 //!   PTY borrowed ([`EventLoop::pty_mut`]) and the input not yet written taken
 //!   ([`EventLoop::unsent`]); `pty_read` returns the bytes it processed.
 //!
-//! Why a copy: clustering (035) has to step **in between** the parser's
-//! `Handler` calls, and alacritty's loop hands `Term` over as a fixed type
-//! (`.tasks/035-grapheme-dizileri/discussion.md` → Karar). The version is
-//! pinned with `=0.26.0` for that reason (root `Cargo.toml`).
+//! Why a copy: grapheme clustering has to step **in between** the parser's
+//! `Handler` calls, and alacritty's loop hands `Term` over as a fixed type.
+//! The version is pinned with `=0.26.0` for that reason (root `Cargo.toml`).
 //!
 //! Preserved contracts — `session.rs`'s lock order and shutdown lean on
 //! them: the terminal lease is held for the whole of `pty_read` (the `term`
@@ -249,7 +247,7 @@ where
         })
     }
 
-    /// Reads once before the first `poll.wait` (055): an adopted PTY's
+    /// Reads once before the first `poll.wait`: an adopted PTY's
     /// carried prefix (`TappedPty`) must reach **this** loop's parser — it
     /// may end inside a sequence — and a quiet PTY gives no readable event
     /// to carry it. The reads stop once `prefix` bytes went through (a
@@ -268,7 +266,7 @@ where
 
     /// Applies a pending DEC 2026 buffer to `Term` through the wrapper —
     /// the timeout arm's body, without the `Wakeup`. Meant for the loop
-    /// handed back after `join` (the handover's freeze, 055): the snapshot
+    /// handed back after `join` (the handover's freeze): the snapshot
     /// must see what the application already sent.
     pub(crate) fn stop_sync(&mut self, state: &mut State) {
         state.parser.stop_sync(&mut ClusterHandler::new(
@@ -473,7 +471,7 @@ where
 
                 // Timeout of a synchronized update: the buffered bytes go to
                 // the **wrapper**, by the same path `advance` sees — handed
-                // to `Term` directly, clustering (035) would be skipped in
+                // to `Term` directly, clustering would be skipped in
                 // this arm.
                 if events.is_empty() && self.rx.peek().is_none() {
                     state.parser.stop_sync(&mut ClusterHandler::new(

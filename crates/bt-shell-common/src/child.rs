@@ -8,8 +8,8 @@
 //! The policy lives **here**, not in `bt-core`: "home directory" and "which locale" are the
 //! application's decision, `bt-core` only passes what it is given on to the child
 //! (`SessionOptions`). Both go **only to the child** — our own process's directory and
-//! environment never change (no `set_current_dir`, `set_var` or `setlocale`; `CLAUDE.md` →
-//! `tty::setup_env()` çağrılmaz). alacritty does the same two jobs in its own process; that is
+//! environment never change (no `set_current_dir`, `set_var` or `setlocale`;
+//! `tty::setup_env()` is never called). alacritty does the same two jobs in its own process; that is
 //! why it is not followed.
 //!
 //! Which shell runs ([`shell`]) and where the shell integration script lives
@@ -26,7 +26,7 @@ pub use crate::jobs::ShellParent;
 
 /// The shell's starting directory: the user's home directory — on **every** launch, `cargo
 /// run` included (same as alacritty and Terminal.app). "Home directory only if `/` comes in"
-/// was rejected: the rule would have two branches (`discussion.md` → Karar 6 eki).
+/// was rejected: the rule would have two branches.
 ///
 /// The source is `std::env::home_dir`: `HOME`, or if that is missing the user's passwd entry
 /// (`getpwuid_r`) — the order alacritty follows when writing `HOME` for the child
@@ -60,7 +60,7 @@ fn home_directory(home: Option<PathBuf>) -> Option<PathBuf> {
 ///
 /// `system` is the system's `(language, region)` pair, read by the platform shell — on macOS
 /// from `NSLocale` (`bt-shell-macos`'s `locale::system_locale`, where the rationale for which
-/// `NSLocale` answer is read lives); this crate sees no Foundation (043 Karar 2). The
+/// `NSLocale` answer is read lives); this crate sees no Foundation. The
 /// decision itself is [`decide_locale`].
 pub fn locale_env(system: Option<(String, String)>) -> Option<(String, String)> {
     decide_locale(|name| std::env::var_os(name), system, locale_installed)
@@ -90,7 +90,7 @@ pub fn locale_env(system: Option<(String, String)>) -> Option<(String, String)> 
 /// not (e.g. an image carrying only `C.UTF-8`) the warning still appears — the cost for every
 /// terminal that sets `LANG=en_US.UTF-8`. Moreover `LC_CTYPE` is stronger than `LANG`: it
 /// would also lock the character class of a user who changes only `LANG` in their rc. User
-/// decision (`discussion.md` → Karar 6 eki, son madde).
+/// decision.
 ///
 /// Whether `en_US.UTF-8` is installed is **not asked**: on macOS that locale ships with the
 /// system (`/usr/share/locale` is on the read-only system volume). A last resort of "if that
@@ -222,7 +222,7 @@ fn passwd_field(pick: impl Fn(&libc::passwd) -> *mut std::ffi::c_char) -> Option
 /// - **Linux:** `$SHELL -l` (passwd if `$SHELL` is missing) +
 ///   [`ShellParent::Direct`]. **Not** alacritty parity — 0.26.0 spawns the
 ///   shell without arguments outside macOS — but the same startup-file chain as
-///   the login session on macOS (043 Karar 1). An unresolvable shell gives
+///   the login session on macOS. An unresolvable shell gives
 ///   `None`, and alacritty's own Linux path spawns the shell directly, so the
 ///   parent stays `Direct`.
 pub fn shell_command() -> (Option<(String, Vec<String>)>, ShellParent) {
@@ -324,13 +324,13 @@ pub fn is_zsh(shell: &Path) -> bool {
 ///
 /// The repo branch exists **only in debug**, because of `cargo run`: development runs
 /// unbundled, and a resolution that only looked at the bundle would disable the feature on
-/// the path we run most (009 Karar 4). In release that branch is not compiled at all — the
+/// the path we run most. In release that branch is not compiled at all — the
 /// shipped binary falling back to a path on a development machine would tie the product to
 /// that machine.
 ///
 /// **Known limit (Linux):** there is no bundle, so a Linux release build finds no script and
 /// the integration is not installed; where a Linux package puts the script is the packaging
-/// set's question (043 plan → Kapsam Dışı). The repo branch works on both platforms.
+/// set's question (out of scope here). The repo branch works on both platforms.
 pub fn zsh_wrapper_dir() -> Option<PathBuf> {
     bundle_shell_dir()
         .and_then(wrapper_dir)
@@ -339,7 +339,7 @@ pub fn zsh_wrapper_dir() -> Option<PathBuf> {
 
 /// The repo's `assets/shell/zsh` — **exists only in a debug build**.
 ///
-/// `#[cfg]`, not `cfg!` (`/code-review`, 009 gate): the latter is a runtime `bool`, so the
+/// `#[cfg]`, not `cfg!` (found in code review): the latter is a runtime `bool`, so the
 /// development machine's absolute path embedded via `env!("CARGO_MANIFEST_DIR")` went through
 /// type checking and code generation in the release binary too; what kept it out of the
 /// product was not a language guarantee but LLVM's dead code elimination. The sentence "in
@@ -374,7 +374,7 @@ fn bundle_shell_dir() -> Option<PathBuf> {
 }
 
 /// No bundle outside macOS; where a Linux release finds the script is the
-/// packaging set's question (043 plan → Kapsam Dışı).
+/// packaging set's question (out of scope here).
 #[cfg(not(target_os = "macos"))]
 fn bundle_shell_dir() -> Option<PathBuf> {
     None
@@ -405,7 +405,7 @@ impl bt_core::Wake for SilentWake {
     fn copy_to_clipboard(&self, _text: String) {}
     fn title_changed(&self) {}
     fn search_changed(&self) {}
-    // The tests do not probe for a remote session (036); the timed run's `ShellWake` does not
+    // The tests do not probe for a remote session; the timed run's `ShellWake` does not
     // probe either (the `timed` branch).
     fn command_started(&self) {}
     fn remote_up(&self) {}
@@ -660,7 +660,7 @@ pub(crate) mod tests {
     /// A copy of the wrapper taken outside the repo; this is what is given as `ZDOTDIR`,
     /// **not** the repo directory.
     ///
-    /// Rationale (`/code-review`, 009 gate): `ZDOTDIR` points at us for a while during the
+    /// Rationale (found in code review): `ZDOTDIR` points at us for a while during the
     /// session, and if the `HISTFILE` fix regresses zsh leaves a `.zsh_history` there. On the
     /// repo path this, beyond dirtying the working copy, would turn **another crate's** test
     /// (`zsh_wrapper_inventory_is_exactly_what_the_bundle_copies`, `bateri`) permanently red —
@@ -687,7 +687,7 @@ pub(crate) mod tests {
     ///
     /// Lining up the `Cell`s in order **would not be enough**: a space cell never reaches the
     /// sink, so `"$ ls"` and `"$ls"` would reduce to the same string and the "prompt was not
-    /// drawn" claim would stay green in every case (the trap 012 phase-4 measured).
+    /// drawn" claim would stay green in every case (a measured trap).
     pub(crate) fn screen(session: &Session, blocks: &mut Blocks) -> Vec<String> {
         let mut rows: Vec<Vec<char>> = Vec::new();
         session.frame(
@@ -723,7 +723,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_terminal_takes_the_prompt_and_the_block_survives_it() {
-        // **The guard of the set's most silent defect** (012 phase-5): a zero-width `PS1`
+        // **The guard of the set's most silent defect**: a zero-width `PS1`
         // writes no cell, so had the anchor's close stayed at the end of `PS1`, the cell
         // carrying the anchor would **never be born** — both the block stripe and the
         // suppression of the input line derive from that cell, and both would silently die
@@ -787,11 +787,11 @@ pub(crate) mod tests {
         });
 
         // **The moment of typing: does suppression still work under the new anchor format.**
-        // R4.2 changed the wire — the anchor is open throughout `Input`, so **every** cell ZLE
-        // writes carries the id. All of phase-4's unit guards build the anchor in the **old**
+        // The wire changed — the anchor is open throughout `Input`, so **every** cell ZLE
+        // writes carries the id. All of the suppression's unit guards build the anchor in the **old**
         // format that closes at the end of the prompt (`anchored_prompt`), so none of them can
         // see a regression specific to the new format: if suppression died while typing, the
-        // grid and the dock would show the same line at once — the double image phase-4 came
+        // grid and the dock would show the same line at once — the double image suppression came
         // to close — and all three gates would stay green. Its only witness is real zsh.
         session.write(b"true");
         wait_until("the mirror did not show the typed line", || {
@@ -807,7 +807,7 @@ pub(crate) mod tests {
 
         // **The claims come AFTER the command runs, and this order is mandatory** — measured:
         // saying "not drawn" at an idle prompt is a claim that carries no weight, because
-        // phase-4's suppression **already** hides the user's prompt (the range runs from the
+        // the suppression **already** hides the user's prompt (the range runs from the
         // anchor row to the cursor's row and the prompt is in that range). It stayed green
         // even under a regression that undid the handover, and it was timing-sensitive on top:
         // a frame taken before the mirror was `Live` would see the prompt and the claim would
@@ -848,7 +848,7 @@ pub(crate) mod tests {
         session.shutdown();
     }
 
-    /// **`👍🏽` at zsh's wrap edge** (035 phase-3, `discussion.md` → Karar, bedel 3): zsh
+    /// **`👍🏽` at zsh's wrap edge** (a known cost of clustering): zsh
     /// counts the sequence as four columns with wcwidth, the clustered grid and the dock as
     /// two. At ten columns the prompt's two spaces + `abcdef` put `👍` in the last two
     /// columns — by zsh's count `🏽` is on the next row, on the grid in the same cell; at nine
@@ -1064,11 +1064,11 @@ pub(crate) mod tests {
             home.join(".zshenv"),
             "export ZDOTDIR=$HOME/cfg\nexport SEEN_ZSHENV=1\n",
         );
-        // R3.5's pin. `typeset` is **local** inside a function: if the user's file is
+        // The pin. `typeset` is **local** inside a function: if the user's file is
         // `source`d from a function, these two lines are erased on return and the symptom is
         // silent. The chosen idiom is not made up — Homebrew, asdf, pyenv and nvm set up PATH
-        // exactly like this, so the defect meant those tools vanishing in bateri (009
-        // phase-5, the measurement is in that file).
+        // exactly like this, so the defect meant those tools vanishing in bateri
+        // (measured).
         write(
             cfg.join(".zprofile"),
             "export SEEN_ZPROFILE=1\n\
@@ -1161,7 +1161,7 @@ pub(crate) mod tests {
         let seen = home.join("zlogin");
         wait_until("the user's .zlogin was not read", || seen.is_file());
         let seen = std::fs::read_to_string(&seen).expect("could not read zlogin trace");
-        // The last three fields are R3.5: the directory added with `typeset -U path` is in
+        // The last three fields are the pin: the directory added with `typeset -U path` is in
         // `path`, the `typeset -A` array is still an association and the user's file sees no
         // positional parameters. All three fail in a file `source`d from inside a function.
         assert_eq!(
@@ -1174,7 +1174,7 @@ pub(crate) mod tests {
         // The defect's own trace: the history must not have been written into **our**
         // directory.
         //
-        // WAITING for shutdown is mandatory (`/code-review`, 009 gate): zsh writes
+        // WAITING for shutdown is mandatory (found in code review): zsh writes
         // `$HISTFILE` **at exit** (nothing in the chain sets `inc_append_history` or
         // `share_history`). A claim that looks microseconds after `exit` wins the race every
         // time and would stay green even if the defect regressed — the trap's guard would fall
@@ -1184,7 +1184,7 @@ pub(crate) mod tests {
         // user's directory. Two candidates were rejected — `reader_alive()` is already `false`
         // on return because `shutdown()` `take`s the reader, and `Teardown::Clean` is not
         // guaranteed here (measured: `Abandoned` arrives; a child stuck in its exit cannot hang
-        // the shutdown, a recorded debt — `CLAUDE.md` → Kapanış). The awaited event is also a
+        // the shutdown, a recorded debt). The awaited event is also a
         // **positive** claim: a negative claim alone could not tell "written to the right
         // place" from "never written", both leave the wrapper's directory empty.
         wait_until(
@@ -1205,14 +1205,14 @@ pub(crate) mod tests {
         assert!(!locale_installed("../../../usr"));
     }
 
-    /// The wrapper's `ssh` function (048) in a real zsh: it asks `$BATERI_BIN
+    /// The wrapper's `ssh` function in a real zsh: it asks `$BATERI_BIN
     /// ssh-argv` (`--tty` only when stdin and stdout are terminals), runs
     /// `command ssh` with the NUL-separated answer, takes `BATERI_BIN` out of the
     /// environment — and a user's own `ssh` function is left alone. The
-    /// fallback (049 R3): after a wrapped `ssh` that did not end with 255 it
+    /// fallback: after a wrapped `ssh` that did not end with 255 it
     /// asks `ssh-fell-back` with the **wrapped** arguments and reruns a
-    /// non-empty answer, returning the last `ssh`'s code — 255 asks too (049
-    /// phase-3; the binary decides); inside tmux or screen nothing is wrapped.
+    /// non-empty answer, returning the last `ssh`'s code — 255 asks too
+    /// (the binary decides); inside tmux or screen nothing is wrapped.
     #[test]
     fn the_wrappers_ssh_function_asks_the_binary() {
         let root = TempRoot::new("ssh-function");
@@ -1315,7 +1315,7 @@ pub(crate) mod tests {
         });
         let asked = std::fs::read_to_string(&log).expect("the binary was asked");
         // `--block` is the command's own block: the first prompt's; the
-        // instance (phase-5) is the masters' directory, out of the environment.
+        // instance is the masters' directory, out of the environment.
         // The wrapped call that ended with 0 asked the fallback with the
         // wrapped arguments (nothing came back: no rerun).
         assert_eq!(
@@ -1333,7 +1333,7 @@ pub(crate) mod tests {
         wait_until("the plain rerun did not run", || {
             shown(&session, "[PLAIN][x]") && shown(&session, "rc=7")
         });
-        // 255 asks too (049 phase-3: the binary tells ssh's own error from a
+        // 255 asks too (the binary tells ssh's own error from a
         // refusal after the login) — here it answers nothing, so no rerun;
         // inside tmux nothing is wrapped.
         std::fs::remove_file(&fall).expect("fall");
@@ -1359,7 +1359,7 @@ pub(crate) mod tests {
         session.shutdown();
     }
 
-    /// 049 phase-2's Kabul end to end: the real wrapper, the real `bateri`
+    /// The acceptance scenario end to end: the real wrapper, the real `bateri`
     /// binary (`ssh-argv`, `ssh-fell-back`; `target/debug/bateri`, built
     /// first) and a real password sshd in Docker on `127.0.0.1:2249` (the
     /// set's own container; skipped when it does not answer) with three users:
@@ -1428,7 +1428,7 @@ pub(crate) mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
-                // The pane's identity (049 R6): `BATERI_TAB_URL` and the `LC_` trio.
+                // The pane's identity: `BATERI_TAB_URL` and the `LC_` trio.
                 tab_id: Some(tab.clone()),
                 hostname: None,
                 replay: None,
@@ -1467,8 +1467,8 @@ pub(crate) mod tests {
             crate::ssh_wrap::host_key(&String::from_utf8_lossy(&out.stdout)).expect("key")
         };
         // The pane's half: the remote probe (`set_remote`, the wrapped call's
-        // nonce), the login probe and the first input after it (049 R7 →
-        // `mark_used`), the `up` marked at once, then `posix`.
+        // nonce), the login probe and the first input after it
+        // (`mark_used`), the `up` marked at once, then `posix`.
         let seen = std::cell::RefCell::new(None::<(u64, String)>);
         let probed = std::cell::RefCell::new(None::<(u64, Option<String>)>);
         let used = std::cell::RefCell::new(None::<u64>);
@@ -1555,7 +1555,7 @@ pub(crate) mod tests {
             stripes().contains(&Theme::BATERI.error_linear())
         });
         eprintln!("(a) first connection: remote dir /home/deneme, remote block stripe, posix row");
-        // 049 R6: the wrapped session carries the identity (no `SendEnv`
+        // The wrapped session carries the identity (no `SendEnv`
         // here — `-F /dev/null` — so it is the bootstrap's export).
         let identity = format!("lc=bateri|{}|{}.", bt_core::TERM_PROGRAM_VERSION, tab.url());
         let show_lc = b"printf 'lc=%s|%s|%s.\\n' \"${LC_TERMINAL-unset}\" \
@@ -1565,7 +1565,7 @@ pub(crate) mod tests {
         wait("no identity (wrapped)", 10, &deneme, &|| {
             count(&identity) > seen_lc
         });
-        eprintln!("(R6) wrapped, AcceptEnv LANG LC_*: {identity}");
+        eprintln!("(identity) wrapped, AcceptEnv LANG LC_*: {identity}");
         session.write(b"exit\r");
         std::thread::sleep(Duration::from_secs(3));
         session.write(b"echo done-a\r");
@@ -1598,7 +1598,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(&state).unwrap_or_default(), before);
         eprintln!("(a') TMUX set: not wrapped, state untouched, no rerun");
 
-        // 049 R6 across the carriers: a plain ssh (`TMUX` set — never wrapped)
+        // The identity across the carriers: a plain ssh (`TMUX` set — never wrapped)
         // with the stock `SendEnv LC_*` shows the identity on a server with
         // `AcceptEnv LANG LC_*`; on a server with `AcceptEnv LANG` only
         // (127.0.0.1:2251) the wrapped session still shows it, the plain one
@@ -1627,12 +1627,12 @@ pub(crate) mod tests {
             });
         };
         remote_lc(2249, false, &identity);
-        eprintln!("(R6) plain, SendEnv LC_* + AcceptEnv LANG LC_*: {identity}");
+        eprintln!("(identity) plain, SendEnv LC_* + AcceptEnv LANG LC_*: {identity}");
         if std::net::TcpStream::connect(("127.0.0.1", 2251)).is_ok() {
             remote_lc(2251, true, &identity);
-            eprintln!("(R6) wrapped, AcceptEnv LANG only: {identity}");
+            eprintln!("(identity) wrapped, AcceptEnv LANG only: {identity}");
             remote_lc(2251, false, unset);
-            eprintln!("(R6) plain, AcceptEnv LANG only: {unset} (known limit)");
+            eprintln!("(identity) plain, AcceptEnv LANG only: {unset} (known limit)");
         } else {
             eprintln!("SKIPPED: no AcceptEnv-restricted sshd on 127.0.0.1:2251");
         }
@@ -1708,7 +1708,7 @@ pub(crate) mod tests {
         wait("cli did not answer", 10, &router, &|| {
             text().contains("cli: show")
         });
-        // The pane noticed the input after the login (049 R7).
+        // The pane noticed the input after the login.
         wait(
             "the input after the login was not marked",
             10,
@@ -1726,10 +1726,10 @@ pub(crate) mod tests {
         eprintln!("(c) ForceCommand CLI: reconnected after exit: {rerun}; plain row: {plain}");
         assert!(
             !rerun && !plain,
-            "R7: a session the user worked in does not fall back"
+            "a session the user worked in does not fall back"
         );
         // (d) Ctrl-C at a fresh server's password prompt (rc 130): no rerun,
-        // no `plain` row (phase-2 `/code-review`; an interactive zsh aborts
+        // no `plain` row (found in code review; an interactive zsh aborts
         // the function on the child's SIGINT anyway, `says_nothing` is the
         // binary's half for the other signals).
         let cancelled = ssh_args("root", 2249);
@@ -1747,7 +1747,7 @@ pub(crate) mod tests {
         eprintln!("(d) Ctrl-C at the password prompt: rc=130, no rerun, no plain row");
 
         // (e) an endpoint that refuses our command with 255 after the login
-        // (phase-3 `/code-review`; `refuse`'s login shell answers `-c` with
+        // (found in code review; `refuse`'s login shell answers `-c` with
         // "exec request failed" and 255, a shell request with a prompt): the
         // pane's login proof turns the 255 into a fallback — plain rerun,
         // `plain` row, the next connection plain from the start.
@@ -1787,7 +1787,7 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **Does the command's duration reach the screen in real zsh** (013).
+    /// **Does the command's duration reach the screen in real zsh**.
     ///
     /// All of `bt-core`'s counter tests print OSC 133 **by hand**; the real script's order
     /// (the anchor closes in `preexec`, `D` and the next `A` in the same `precmd`) is tried in

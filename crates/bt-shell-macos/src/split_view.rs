@@ -1,11 +1,11 @@
 //! Container for the splits: a plain `NSView` that is the window's
-//! `contentView` (039 Karar 6). It holds the tab's panes and the split tree
+//! `contentView`. It holds the tab's panes and the split tree
 //! ([`crate::split`]), applies the tree's frames to the panes and shows the
 //! dividers. It is not on the frame path: it draws nothing.
 //!
 //! **The tree lives here, not in the window**: the container's own size
-//! changes independently of the window (the tab bar shortens the content;
-//! 026 phase-4) and the notification about it is AppKit's
+//! changes independently of the window (the tab bar shortens the content)
+//! and the notification about it is AppKit's
 //! `resizeSubviewsWithOldSize:` call on this view. Were the tree in the
 //! window, the view would have to reach back to the window on every size
 //! change.
@@ -13,7 +13,7 @@
 //! **The divider is a gap**: the panes are opaque and one device pixel is
 //! left open between their frames; what shows through is the fill, in the
 //! theme's `separator` tone, of a single `NSBox` that sits behind the panes
-//! and fills the container (039 Karar 7, R3.5). There is no `drawRect:` and
+//! and fills the container. There is no `drawRect:` and
 //! no layer path that would need a `CGColor` (same precedent as the tab
 //! dot). With a single pane the box is hidden and the pane fills the
 //! container **unadjusted**, exactly the layout from before splitting.
@@ -23,7 +23,7 @@
 //! divider is being dragged the PTY resizes by the same path as window
 //! resizing.
 //!
-//! **Drag handles** (039 phase-4): the drawn line is one pixel, but the hit
+//! **Drag handles**: the drawn line is one pixel, but the hit
 //! area is a transparent view ([`DividerHandle`]) [`HANDLE_PT`] wide on
 //! every side that sits **above** the panes: the panes are opaque and cover
 //! every point outside the line, so the area could not live in the fill
@@ -85,7 +85,7 @@ define_class!(
     impl DividerHandle {
         /// `resizeLeftRightCursor`/`resizeUpDownCursor` are deprecated but
         /// their replacement `columnResizeCursorInDirections:` arrives in
-        /// macOS 15; the floor is macOS 14 (`CLAUDE.md` → Taban).
+        /// macOS 15; the floor is macOS 14.
         #[unsafe(method(resetCursorRects))]
         #[allow(deprecated)]
         fn reset_cursor_rects(&self) {
@@ -215,7 +215,7 @@ define_class!(
         }
 
         /// The container's size changed (window, tab bar): the panes are laid
-        /// out again, keeping their proportions (039 Karar 14).
+        /// out again, keeping their proportions.
         #[unsafe(method(resizeSubviewsWithOldSize:))]
         fn resize_subviews(&self, _old: NSSize) {
             self.layout_panes();
@@ -322,7 +322,7 @@ impl SplitView {
         true
     }
 
-    /// Session restore's bulk placement (053): the saved `tree` replaces the
+    /// Session restore's bulk placement: the saved `tree` replaces the
     /// single-pane one, `extra` (every pane but the one the container was
     /// born with) join as subviews and all are laid out with the saved
     /// ratios at once — no pane passes through an intermediate size. `false`
@@ -346,14 +346,14 @@ impl SplitView {
         true
     }
 
-    /// A copy of the split tree — what session restore saves (053).
+    /// A copy of the split tree — what session restore saves.
     pub(crate) fn tree(&self) -> Tree {
         self.ivars().tree.borrow().clone()
     }
 
     /// Whether every pane's plain (unzoomed) frame passes its smallest-pane
     /// limit ([`TerminalPane::min_size`]) — a restored tree from a larger
-    /// screen or a smaller font may not (053 R3.3).
+    /// screen or a smaller font may not.
     pub(crate) fn fits(&self) -> bool {
         self.plain_layout().panes.iter().all(|(id, rect)| {
             self.pane(*id)
@@ -400,7 +400,7 @@ impl SplitView {
     /// hidden. A hidden pane (left behind the zoom) draws zero frames like an
     /// occluded window; when it returns it asks for a frame
     /// (`DisplayLink::set_visible`). The same answer pauses the remote load
-    /// indicator's sampling (`TerminalPane::set_visible`, 046 Karar 6).
+    /// indicator's sampling (`TerminalPane::set_visible`).
     pub(crate) fn apply_visibility(&self, window_visible: bool) {
         let panes = self.ivars().panes.borrow().clone();
         for pane in &panes {
@@ -430,7 +430,7 @@ impl SplitView {
         self.ivars().tree.borrow().cycle(from, forward)
     }
 
-    /// The smallest-pane limit, per leaf (039 Karar 14): from the pane's own
+    /// The smallest-pane limit, per leaf: from the pane's own
     /// cell (`TerminalPane::min_size`). A pane that cannot measure is unlimited.
     fn limits(&self) -> impl Fn(u64) -> Size + use<> {
         let panes = self.ivars().panes.borrow().clone();
@@ -503,9 +503,9 @@ impl SplitView {
         }
     }
 
-    /// The divider's colour comes from the theme (039 Karar 7):
+    /// The divider's colour comes from the theme:
     /// `Theme::separator_srgb` - the same tier as the dock's hairlines.
-    /// `NSColor` takes sRGB; the linear value is the GPU's (`CLAUDE.md` → Renk uzayı).
+    /// `NSColor` takes sRGB; the linear value is the GPU's.
     pub(crate) fn set_theme(&self, theme: &Theme) {
         let [r, g, b] = theme.separator_srgb().map(|byte| f64::from(byte) / 255.0);
         self.ivars()

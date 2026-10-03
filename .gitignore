@@ -1,15 +1,15 @@
-# derleme çıktıları
+# build outputs
 /target/
 *.metallib
 *.air
 *.dSYM/
-# paketleme (`make kur` hepsini target/ altında üretir; kaynak ikon PNG'si girer)
+# packaging (`make bundle` produces all of these under target/; the source icon PNG is committed)
 *.app/
 *.dmg
 *.icns
 *.iconset/
 # macOS
 .DS_Store
-# ölçüm kayıtları
+# measurement recordings
 *.trace/
 __pycache__/

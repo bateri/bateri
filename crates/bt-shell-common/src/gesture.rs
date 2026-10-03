@@ -4,7 +4,7 @@
 //!
 //! The ledger once lived in `BateriView`'s `impl` body, and code next to `define_class!` could not
 //! be tested: the four transitions that lock the route (press, drag, release, lost release) had
-//! only been verified by eye (the 020 set gate's waiver, closed in `.tasks/031-fare-ile-secim/`).
+//! only been verified by eye.
 //! There is no AppKit here: the view turns the event into a button, a click count and Shift, and
 //! calls `Session` according to the ledger's answer.
 //!
@@ -26,7 +26,7 @@ pub struct Gesture {
     /// (`Session::set_selection`). The only remaining question is "is a drag in progress": a
     /// press-less `mouseDragged:` must not move the old selection's end.
     dragging: bool,
-    /// Whether the selection drag is on the **dock's** input line (031 phase-4).
+    /// Whether the selection drag is on the **dock's** input line.
     ///
     /// The target is locked at the press, like the report's route: even if the drag runs out of
     /// the band it grows the dock's selection (clamped to the input block),
@@ -35,7 +35,7 @@ pub struct Gesture {
     /// Buttons whose press was **reported to the application**, one bit per button
     /// ([`button_bit`]).
     ///
-    /// The route is locked at the press (020 R6): if Shift were read on every event, releasing
+    /// The route is locked at the press: if Shift were read on every event, releasing
     /// Shift in the middle of a drag would turn a selection gesture into a report gesture. That is
     /// why the release asks **this bit**, not the mode.
     /// It sits next to `dragging` and not inside it: pressing the right button while a left-button
@@ -50,15 +50,15 @@ pub struct Gesture {
     /// Press and release refresh the notch only **when they are reported** ([`Gesture::stamp`]):
     /// the criterion is "this was reported to the application".
     notch: Option<(u16, u16)>,
-    /// Whether the left button's press was a ⌘-click on a **verified** link (044 R6,
-    /// [`Gesture::pressed_link`]).
+    /// Whether the left button's press was a ⌘-click on a **verified** link
+    /// ([`Gesture::pressed_link`]).
     ///
     /// Only the route is here, not the link's range: the ledger stays `Copy` and the view
     /// already holds the verified hover the press was matched against, so the release compares
-    /// with that (`discussion.md` → Muhakeme, İşletme: the hit test does not run again).
+    /// with that (the hit test does not run again).
     link: bool,
     /// Where a ⌘-press on a **draggable** link went down (window points) — `None`
-    /// for a link that cannot be dragged (045 Karar 14: only a remote one) and
+    /// for a link that cannot be dragged (only a remote one can) and
     /// for every other press. The first held motion farther than
     /// [`LINK_DRAG_THRESHOLD`] from it turns the gesture into a drag
     /// ([`Drag::Link`]) and takes the press point and `link` down with it.
@@ -66,7 +66,7 @@ pub struct Gesture {
 }
 
 /// How far (window points) a ⌘-press on a draggable link must move before the
-/// gesture is a drag, not a click (045 Karar 14). A design constant, not a
+/// gesture is a drag, not a click. A design constant, not a
 /// measurement and not AppKit's own drag threshold: a hand that trembles while
 /// clicking must still open the link, a deliberate pull must not wait.
 pub const LINK_DRAG_THRESHOLD: f64 = 4.0;
@@ -91,7 +91,7 @@ pub enum Drag {
     /// The press started a selection in the dock: the dock selection's end is moved.
     SelectDock,
     /// A ⌘-press on a draggable (remote) link moved past [`LINK_DRAG_THRESHOLD`]: the view
-    /// starts the file promise drag (045 R7). Returned **once**; the gesture is then over in the
+    /// starts the file promise drag. Returned **once**; the gesture is then over in the
     /// ledger — AppKit owns the mouse for the drag session and the release does not open the link.
     Link,
     /// Neither (the right/middle button has no gesture in the terminal, a press-less drag): the
@@ -108,11 +108,11 @@ pub enum Release {
     /// send.
     Done,
     /// The end of a selection gesture **in the dock**: if it was a single click without a drag,
-    /// the caret moves to the clicked spot (031 R4.1, `Session::dock_click`). Whether the click
+    /// the caret moves to the clicked spot (`Session::dock_click`). Whether the click
     /// had no drag is told by `bt-core`'s selection, not the ledger
     /// — a `Simple` selection that stayed empty.
     Dock,
-    /// The end of a ⌘-click on a link (044 R6): nothing is reported and no selection ends;
+    /// The end of a ⌘-click on a link: nothing is reported and no selection ends;
     /// the view opens the link if the pointer is still over the range locked at the press and
     /// the click count is one.
     Link,
@@ -137,7 +137,7 @@ impl Gesture {
     }
 
     /// A left-button press with ⌘ inside the **verified** link hover's range: the gesture is
-    /// the link's in **every** mode (044 R6). The caller must have called
+    /// the link's in **every** mode. The caller must have called
     /// [`Gesture::begin_press`] first and must **not** call `Session::mouse_button` — so no
     /// report goes to the application (vim, htop, Claude Code) and no selection starts, Shift
     /// or not.
@@ -150,11 +150,10 @@ impl Gesture {
     /// **Why here and not in `bt-core`'s `button_route`** (the road map's "fourth arm"
     /// sketch): the link bit can only come from the view's verified hover — whether a path
     /// exists is unknown to `bt-core` — so a `bt-core` arm would only reflect the decision
-    /// back (`.tasks/044-tiklanabilir-baglantilar/discussion.md` → Muhakeme, Sadelik 1). The
-    /// dock press is the precedent ([`Gesture::pressed_dock`]).
+    /// back. The dock press is the precedent ([`Gesture::pressed_dock`]).
     ///
     /// `drag_from` is the press point (window points) when the link can be dragged out — a
-    /// remote one (045 Karar 14); `None` keeps today's click-only route at any distance.
+    /// remote one; `None` keeps today's click-only route at any distance.
     pub fn pressed_link(&mut self, drag_from: Option<(f64, f64)>) {
         self.dragging = false;
         self.dock = false;
@@ -181,8 +180,8 @@ impl Gesture {
     ///
     /// **Shift comes before the count**: Shift+click extends the selection whatever the click
     /// count, and the rule is the same in both modes — in mouse mode a Shift press already falls
-    /// to selection (`bt-core`'s arbitration) and there Shift is the only way to select (031
-    /// Karar 6). If there is no selection, the extension starts from the clicked point; that
+    /// to selection (`bt-core`'s arbitration) and there Shift is the only way to select. If
+    /// there is no selection, the extension starts from the clicked point; that
     /// decision is `Session::extend_selection`'s.
     ///
     /// Only the **left** button starts a selection: a right or middle click would produce an
@@ -474,7 +473,7 @@ mod tests {
         assert_eq!(gesture.dragged(LEFT, HERE), Drag::SelectDock);
         // Scrolling must not move the grid's end.
         assert!(!gesture.dragging(), "dock drag counted as a grid drag");
-        // The release is the dock's: the click-to-caret gate (031 phase-5). Once —
+        // The release is the dock's: the click-to-caret gate. Once —
         // a second release has no gesture.
         assert_eq!(gesture.released(LEFT), Release::Dock);
         assert_eq!(gesture.released(LEFT), Release::Done);
@@ -538,7 +537,7 @@ mod tests {
 
     #[test]
     fn a_remote_link_press_drags_once_past_the_threshold() {
-        // 045 R7, Karar 14: a ⌘-press on a remote link that moves past the threshold is a file
+        // A ⌘-press on a remote link that moves past the threshold is a file
         // promise drag — once.
         let mut gesture = Gesture::default();
         gesture.begin_press(LEFT);
@@ -574,7 +573,7 @@ mod tests {
 
     #[test]
     fn a_local_link_never_drags() {
-        // Karar 14: local links are not dragged in this set — any distance stays a click.
+        // Local links are not dragged — any distance stays a click.
         let mut gesture = Gesture::default();
         gesture.begin_press(LEFT);
         gesture.pressed_link(None);

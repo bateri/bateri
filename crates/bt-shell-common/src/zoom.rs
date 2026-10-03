@@ -22,7 +22,7 @@ const STEP: f64 = 1.0;
 /// point size outside the range a press inward works, one outward does not.
 ///
 /// The second consumer is the Size row of the settings window (`settings_window`): the range
-/// the stepper and the field accept is this one, no second number was invented (029 Karar 2).
+/// the stepper and the field accept is this one, no second number was invented.
 /// If the file holds a value outside the range, the field shows it as is.
 pub const MIN_SIZE: f64 = 4.0;
 pub const MAX_SIZE: f64 = 72.0;
@@ -80,7 +80,7 @@ impl Zoom {
         }
     }
 
-    /// The step count — what session restore saves (053; `restore::SavedPane::zoom_steps`).
+    /// The step count — what session restore saves (`restore::SavedPane::zoom_steps`).
     pub fn steps(self) -> i32 {
         self.steps
     }

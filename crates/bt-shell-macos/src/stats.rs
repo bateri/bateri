@@ -1,4 +1,4 @@
-//! The pane's **sampling driver** for the remote load indicator (046 phase-4):
+//! The pane's **sampling driver** for the remote load indicator:
 //! it runs [`Schedule`]'s actions on the main queue and turns the helper's
 //! replies into the context row's value.
 //!
@@ -6,7 +6,7 @@
 //!   when to sample, what a sample means. Here only the binding — a tick is a
 //!   `dispatch` `after` carrying a **token** (`after` cannot be cancelled, a
 //!   stale token is ignored by the schedule), a request is a
-//!   [`Query::Load`] to the pane's helper session (045 Karar 10), the reply
+//!   [`Query::Load`] to the pane's helper session, the reply
 //!   comes back to the main queue **with the pane id and the generation**
 //!   (`hyperlink::verify_remote`'s pattern): a closed pane drops it, another
 //!   generation's sample only frees the worker.
@@ -14,12 +14,9 @@
 //!   or ended), visibility (`SplitView::apply_visibility`), the settings,
 //!   interaction (the view's keys, presses, wheel and mouse moves, the window
 //!   becoming key) and the close.
-//! - **Zero frames when idle** (`CLAUDE.md` → "Boşta sıfır kare", 046 Karar 6):
+//! - **Zero frames when idle**:
 //!   the timer never wakes the link; a frame is asked only by
 //!   `Session::set_remote_stats`'s equality gate when the shown value changes.
-//!
-//! The rationale is in `.tasks/046-uzak-yuk-gostergesi/discussion.md` → Karar 1,
-//! 5, 6 and 8.
 
 use std::time::{Duration, Instant};
 
@@ -41,10 +38,10 @@ pub(crate) struct StatsDriver {
     form: Option<StatsForm>,
     /// The last sample's value, taken as a sparkline (history included): a
     /// form change redraws from it at once rather than a whole interval later
-    /// (Karar 8, [`shaped`]). Only ever the schedule's current generation's
+    /// ([`shaped`]). Only ever the schedule's current generation's
     /// and only while shown: a new generation, a restart and a hide clear it —
     /// otherwise a form change would bring back another host's numbers or a
-    /// hidden value (Karar 5).
+    /// hidden value.
     last: Option<RemoteStats>,
     /// The last sample's details — the popover's content ([`crate::stats_popover`]);
     /// cleared with [`Self::last`] for the same reason (another host's
@@ -121,9 +118,9 @@ fn outcome(reply: &Result<Answer, String>) -> Outcome {
     }
 }
 
-/// The sampling half of the pane (046 phase-4).
+/// The sampling half of the pane.
 impl TerminalPane {
-    /// The remote edge and the user's login (047 R9.1): the session's remote
+    /// The remote edge and the user's login: the session's remote
     /// generation goes to the schedule **once the user's ssh has logged in**
     /// (or none). A new generation takes its first sample at once; an ended one
     /// stops arming (the value itself `Session` already dropped on `C`/`D`/`A`).
@@ -160,7 +157,7 @@ impl TerminalPane {
     /// Called at mouse-move rate: while sampling runs it only stamps the time
     /// (no allocation, no `Term` lock).
     pub(crate) fn note_interaction(&self) {
-        // The focus query's `idle` (050): the same moments, its own clock.
+        // The focus query's `idle`: the same moments, its own clock.
         self.input_stamp().set(Moment::now());
         let actions = self
             .stats_driver()
@@ -172,7 +169,7 @@ impl TerminalPane {
 
     /// `[remote] stats`/`stats_interval` changed (`AppDelegate::reload_settings`).
     /// `off` hides the indicator and stops sampling; another form redraws the
-    /// last value at once (Karar 8); a new interval holds from the next tick.
+    /// last value at once; a new interval holds from the next tick.
     pub(crate) fn set_stats_settings(&self, settings: &RemoteStatsSettings) {
         let form = settings.mode.form();
         let (actions, redraw) = {
@@ -209,7 +206,7 @@ impl TerminalPane {
         self.run_stats(actions);
     }
 
-    /// The user signed in (047 R7.2): a generation that ended on a failed
+    /// The user signed in: a generation that ended on a failed
     /// open samples again at once.
     pub(crate) fn retry_stats(&self) {
         let actions = self
@@ -347,7 +344,7 @@ impl TerminalPane {
             }
         };
         if let Some((stats, detail)) = reading {
-            // A sample is a login: a Sign In… left from before goes (047 R7.2).
+            // A sample is a login: a Sign In… left from before goes.
             self.hide_sign_in();
             if let Some(session) = self.session() {
                 session.set_remote_stats(generation, Some(&stats));

@@ -27,7 +27,7 @@ pub(crate) enum DrawResult {
 
 /// Draws the coverage (alpha) bytes of `ch` into `target`.
 ///
-/// `m` is the **slot** metric (052): the target is one slot, the glyph sits on
+/// `m` is the **slot** metric: the target is one slot, the glyph sits on
 /// the slot's baseline. `bx` is the fractional **box** the glyph is centred
 /// in ([`rules::space_advance`], twice that for a wide character) with its
 /// pad inside the slot ([`GlyphBox`]); `m.cell_px.0` is not the box and does
@@ -79,7 +79,7 @@ fn position(
     // `letter_spacing = 1` the subtraction is exactly zero and the base
     // font's raster stays bit-for-bit the same (guarded by
     // `every_base_glyph_advance_is_the_cell_advance`); opened up, the same
-    // formula puts the glyph in the middle of the wider cell (051). Written conditionally,
+    // formula puts the glyph in the middle of the wider cell. Written conditionally,
     // the "is it a fallback" question would add a second branch to the
     // drawing path and a second code path to the tests.
     //
@@ -89,7 +89,7 @@ fn position(
     // rule — the width gate runs only for the **fallback**, the base font may
     // not be monospaced ([`rules::FontIssue::NotMonospaced`]) and a wide glyph
     // may exceed the cell. The target is one **slot** and clips there; the
-    // slot may be larger than the grid cell (052: below `1` the cell sits in
+    // slot may be larger than the grid cell (below `1` the cell sits in
     // its middle and the glyph keeps its room), so spilling into the
     // neighbouring cell happens by the pad and no further. The issue at the
     // slot's edge is the **direction** of clipping: a negative shift cuts off
@@ -103,14 +103,14 @@ fn position(
     // the two halves come out bit-for-bit the same as a single 2w-wide raster
     // split in two — no split buffer, no second `slot_bytes` and no risk of a
     // seam at half a pixel. In a single-cell drawing it is zero, and then
-    // this line is the same as it was in 022.
+    // this line is the same as it was before wide glyphs were split.
     let x = rules::centre_shift(bx, Backend::advance(font, glyph)) - x_offset;
     (x, baseline)
 }
 
 /// The body of [`draw`], called with a glyph number.
 ///
-/// It is separate because of grapheme sequences (035): a sequence's glyph
+/// It is separate because of grapheme sequences: a sequence's glyph
 /// comes not from a code point but from shaping ([`rules::shape_cluster`]),
 /// so the `glyph(ch)` question cannot be asked there. Placement and centring
 /// stay **in one place** ([`position`]); [`draw`] only finds the number.
@@ -200,7 +200,7 @@ pub enum RuleKind {
     ///
     /// We do **not** take a `>` from the font, and the reason is a product
     /// decision: the mark is the terminal's own, not the user's font's. The
-    /// prompt's shape must not change when the font does (012 phase-9, the
+    /// prompt's shape must not change when the font does (the
     /// user: "could you draw this yourself, nicer").
     Chevron,
 }
@@ -435,7 +435,7 @@ fn coverage(y: usize, y0: f32, y1: f32) -> u8 {
 /// once and the **product** of the two ratios must be rounded once: multiplying
 /// two `coverage` bytes rounds twice and the saturating sum of `▀` and `▄`
 /// would not stop at 255 — it would fall one or two short, so between two
-/// stacked half blocks a faint copy of the seam this set exists to close would
+/// stacked half blocks a faint copy of the seam procedural drawing exists to close would
 /// appear.
 fn overlap(i: usize, a: f32, b: f32) -> f32 {
     (b.min(i as f32 + 1.0) - a.max(i as f32)).clamp(0.0, 1.0)
@@ -520,16 +520,15 @@ fn family(ch: char) -> Option<Family> {
         '\u{2580}'..='\u{259F}' => Some(Family::Block),
         '\u{2800}'..='\u{28FF}' => Some(Family::Braille),
         // The diagonals (`╱╲╳`) are a **deliberately left hole** inside the
-        // coverage (`discussion.md` → Karar 3B): the distance field could have
-        // drawn them too, but all three are rare and the set's measure was to
-        // keep the coverage closed. This arm must stand **above** the range
-        // below, otherwise the hole closes.
+        // coverage: the distance field could have drawn them too, but all three
+        // are rare and the measure was to keep the coverage closed. This arm
+        // must stand **above** the range below, otherwise the hole closes.
         //
         // The hole has a second job and that is deliberate too: these three
         // characters are the only remaining block in Menlo Regular that is
         // absent from Bold, i.e. the fixture of
         // `face_fallback_is_cached_under_the_requested_face` (the only guard on
-        // this machine for 019's face ladder arm) lives here.
+        // this machine for the fallback's face ladder arm) lives here.
         '\u{2571}'..='\u{2573}' => None,
         '\u{2500}'..='\u{257F}' => Some(Family::Line),
         // U+23B7 (`⎷` RADICAL SYMBOL BOTTOM) stands **below** the range and
@@ -549,9 +548,9 @@ fn family(ch: char) -> Option<Family> {
 /// decision: even if the user picks a font that carries these characters,
 /// procedural drawing wins. The reason is tiling — the font's em box is not
 /// the cell box and there is no criterion that guarantees a font will provide
-/// it. Measured (019 phase-2, reported by the user with a screenshot): in
+/// it. Measured (reported by the user with a screenshot): in
 /// Menlo 13pt only rows 3–16 of the cell are painted (the cell was 8×18
-/// then), so a stripe of several pixels remains between two stacked `█`. The same as 012 phase-9's prompt
+/// then), so a stripe of several pixels remains between two stacked `█`. The same as the prompt
 /// mark decision: *the mark is the terminal's own, not the user's font's.*
 pub(crate) fn is_procedural(ch: char) -> bool {
     family(ch).is_some()
@@ -560,9 +559,9 @@ pub(crate) fn is_procedural(ch: char) -> bool {
 /// Draws the coverage bytes of a procedural character into `target`.
 ///
 /// `m` is the cell the sprite *is*: the large **grid** cell, or in the small
-/// class the small face's own cell (`Atlas::small_metrics`, 046) — `target`
+/// class the small face's own cell (`Atlas::small_metrics`) — `target`
 /// is that cell's buffer, not a slot, and the atlas places it into the slot
-/// (below `1` the slot is larger than the cell, 052).
+/// (below `1` the slot is larger than the cell).
 ///
 /// The twin of [`draw_rule`], starting with the same two opening lines; the
 /// reasons are the same too. It cannot fail — no font is asked, no context is
@@ -597,7 +596,7 @@ pub(crate) fn draw_procedural(ch: char, m: Metrics, target: &mut [u8]) {
 /// criterion: the union of parts that tile each other (disjoint) must give
 /// **full** coverage. `▀` and `▄` meet at row 16.5 of 13pt@2x's h = 33 and both
 /// leave 128 in that row; with `max` a 50% stripe would remain in the middle of
-/// the cell — the defect this set exists to close, moved inside the cell.
+/// the cell — the defect procedural drawing exists to close, moved inside the cell.
 /// Saturating addition closes it to 255.
 fn add_rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32) {
     rect(target, m, x0, x1, y0, y1, u8::saturating_add);
@@ -649,7 +648,7 @@ fn rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32, join:
 /// such a cell — on this machine 13pt@1x's cell is 8×17 and 17 is odd, so the
 /// pattern would break
 /// at every row boundary and horizontal stripes would appear in an area full
-/// of `░`. Tiling is this set's reason to exist; flat coverage gives it by
+/// of `░`. Tiling is the reason procedural drawing exists; flat coverage gives it by
 /// construction.
 const SHADE_LEVELS: [f32; 3] = [0.25, 0.5, 0.75];
 
@@ -752,8 +751,8 @@ fn block(ch: char, m: Metrics, target: &mut [u8]) {
 /// count — so the dot grows as the point size and scale grow; a fixed pixel
 /// radius would turn into a pinhead at @2x.
 ///
-/// In this phase the dot is a **rectangle**; the distance field a round one
-/// wants is phase-2's primitive, and bringing it in just for this would be a
+/// The dot is a **rectangle**; the distance field a round one wants is a
+/// separate primitive, and bringing it in just for this would be a
 /// cost with no return — at 13pt the sub-cell is 4×4.25 pixels, and the
 /// difference between a square and a circle there is under one pixel.
 const BRAILLE_DOT_FILL: f32 = 0.7;
@@ -1187,9 +1186,9 @@ fn arm(spec: Recipe, dir: usize, m: Metrics, target: &mut [u8]) {
 /// The dashed line family (`┄┅┆┇┈┉┊┋╌╍╎╏`).
 ///
 /// The period comes from [`dividing_period`], i.e. it is pulled to the nearest
-/// value that **divides the cell exactly**; tiling is this set's reason to
-/// exist and the phase cannot break at the cell boundary. The cost is a visible
-/// loss of information and it was accepted (`discussion.md` → Karar 4): on
+/// value that **divides the cell exactly**; tiling is the reason procedural
+/// drawing exists and the phase cannot break at the cell boundary. The cost is a visible
+/// loss of information and it was accepted: on
 /// this machine at `w = 8` the period the triple dash wants, 3, is pulled to
 /// **4** and `┄` and `╌` collapse into **the same sprite**; at a measure whose
 /// divisors are sparse (144pt@1x's `w = 87`: 1, 3, 29, 87) `╌` drops to **one**
@@ -1372,7 +1371,7 @@ fn scan_centre(line: f32, h: f32) -> f32 {
 ///   cell and the "left edge line" did not stay on the left.
 /// - `⎺⎻⎼⎽` **did not tile** — Monaco's ink spans 0.03–19.19 in a 20 px cell,
 ///   so a 0.8 px gap is left at the right end of every cell and scan lines
-///   laid side by side look dashed. 021's thesis holds here too: there is no
+///   laid side by side look dashed. The block elements' thesis holds here too: there is no
 ///   guarantee that the font's em box will be the cell box.
 ///
 /// The vertical extent is the **full cell** and this too is from measurement:

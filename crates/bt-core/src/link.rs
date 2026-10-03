@@ -1,18 +1,17 @@
-//! Finding links in plain text (044): the URL or the path candidates under a
+//! Finding links in plain text: the URL or the path candidates under a
 //! point of one logical line's string.
 //!
 //! A hand-written scanner, not a regex: trimming trailing punctuation, keeping
 //! brackets balanced and splitting off the `:line:col` suffix are rules a regex
 //! can't express, and the three surfaces (grid, fill band, dock) must call one
-//! function (`.tasks/044-tiklanabilir-baglantilar/discussion.md` → Karar 1).
+//! function.
 //!
 //! **A URL is one token** ([`links_at`]): whitespace ends it. **A path is not**: a
 //! name with spaces (`My Drive`, `4.04.2022 06.29.36.pklg`) is found the way
-//! iTerm2's semantic history finds it ([`path_candidates`], set sonrası —
-//! `phase-1.md` → Uygulama Notları): the text around the point is cut into
-//! chunks at `\t ():",`, and growing combinations of chunks — rightwards first,
-//! then one more chunk to the left — are the candidates, shortest first. The
-//! first one that **exists** wins.
+//! iTerm2's semantic history finds it ([`path_candidates`]): the text around the
+//! point is cut into chunks at `\t ():",`, and growing combinations of chunks —
+//! rightwards first, then one more chunk to the left — are the candidates, shortest
+//! first. The first one that **exists** wins.
 //!
 //! **Syntax only:** whether a path exists is not asked here (no file I/O in
 //! `bt-core`); the shell layer resolves the candidates off the main thread.
@@ -187,8 +186,7 @@ fn chunks(chars: &[char], range: Range<usize>) -> Vec<Range<usize>> {
 }
 
 /// The path candidates under char `at`, in iTerm2's order
-/// (`iTermPathFinder.searchSynchronously`; `discussion.md` and
-/// `phase-1.md` → Uygulama Notları, set sonrası):
+/// (`iTermPathFinder.searchSynchronously`):
 ///
 /// 1. The run of file-name chars around `at` ([`is_filename_char`]), at most
 ///    [`CONTEXT`] chars each side, is cut at the point into a left and a right
@@ -205,7 +203,7 @@ fn chunks(chars: &[char], range: Range<usize>) -> Vec<Range<usize>> {
 /// So the shortest combination that exists wins: `ls`'s `My Drive` beside
 /// `Screen Studio Projects` is found without swallowing its neighbour column.
 ///
-/// Three choices of ours on top (Uygulama Notları → SAPMA):
+/// Three choices of ours on top (deviations from iTerm2):
 /// - **The point is word-aligned**: the cut is at the start of the chunk under
 ///   `at`, not at `at` itself — iTerm2 would try the partial word (`rive` of
 ///   `Drive`), and every cell of a word would give another list (another `stat`

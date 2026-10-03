@@ -2,17 +2,16 @@
 //! [`Theme`].
 //!
 //! It does **not** see the file system: `bt-shell` resolves the name to a file
-//! or an embedded theme and reads the text. The format's record is
-//! `.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 3, its explanation to the
-//! user is `docs/AYARLAR.md` → Temalar.
+//! or an embedded theme and reads the text. Its explanation to the user is
+//! `docs/SETTINGS.md` → Themes.
 //!
 //! **Read on top of a base:** every key is optional, a missing key comes from
 //! the base — a user can copy an embedded theme and leave only what they
 //! changed. The error rule is the same as the settings file's: text that
 //! cannot be parsed is a separate result (`Err`), a color that is not accepted
 //! in parsed text takes the base's value and leaves a diagnostic, an unknown
-//! key is silent — 013's remaining status role (warning) must not count as an
-//! error in today's version.
+//! key is silent — a status role a later version adds must not count as an
+//! error in an earlier one.
 
 use toml_edit::TableLike;
 
@@ -169,7 +168,7 @@ mod tests {
     #[test]
     fn empty_theme_is_the_base() {
         assert_eq!(clean("", &SENTINEL), SENTINEL);
-        assert_eq!(clean("# yalnız yorum\n", &Theme::BATERI), Theme::BATERI);
+        assert_eq!(clean("# comment only\n", &Theme::BATERI), Theme::BATERI);
     }
 
     #[test]
@@ -257,9 +256,9 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_silent() {
-        // 013's **remaining** status role and other terminals' extra keys.
-        // The sentinel changed in 010: `success` is now a known key, and if the
-        // test used it as the example it would silently ask nothing.
+        // A status role and other terminals' extra keys. The sentinel changed
+        // once: `success` is now a known key, and if the test used it as the
+        // example it would silently ask nothing.
         let theme = clean(
             "name = \"x\"\nwarning = \"#00ff00\"\n[ansi]\nred = \"#ff0000\"\norange = 1\n[meta]\n",
             &Theme::BATERI,
@@ -278,7 +277,7 @@ mod tests {
                 ..SENTINEL
             }
         );
-        // …the unwritten role comes from the base. This is 010's migration
+        // …the unwritten role comes from the base. This is the migration
         // sentence: a user who wrote their own theme inherits the two roles
         // from the embedded `bateri`.
         let inherited = clean("background = \"#ffffff\"\n", &Theme::BATERI);
@@ -290,7 +289,7 @@ mod tests {
 
     #[test]
     fn the_info_role_is_read_and_inherited() {
-        // 036: the rule has no exception — the written one is read, the unwritten one comes from the base.
+        // The rule has no exception — the written one is read, the unwritten one comes from the base.
         let theme = clean("info = \"#0a0b0c\"\n", &SENTINEL);
         assert_eq!(
             theme,
@@ -305,7 +304,7 @@ mod tests {
 
     #[test]
     fn the_warning_role_is_read_and_inherited() {
-        // 037 Karar 3: `info`'s rule — optional, from the base if missing.
+        // `info`'s rule — optional, from the base if missing.
         let theme = clean("warning = \"#0a0b0c\"\n", &SENTINEL);
         assert_eq!(
             theme,
@@ -320,7 +319,7 @@ mod tests {
 
     #[test]
     fn search_roles_are_read_and_inherited() {
-        // Neither of 033's two roles is an exception to the rule: the written
+        // Neither of the two search roles is an exception to the rule: the written
         // one is read, the unwritten one comes from the base — even if one is
         // written and the other is not.
         let theme = clean("search_current = \"#0a0b0c\"\n", &SENTINEL);
@@ -353,13 +352,13 @@ mod tests {
 
     #[test]
     fn documented_blocks_are_the_embedded_themes() {
-        // `docs/AYARLAR.md` gives a full block for every embedded theme as
+        // `docs/SETTINGS.md` gives a full block for every embedded theme as
         // "copy, change". Since the document **copies** values it drifts; this
         // test ties the blocks to the embedded themes. The base is distinct: a
         // key dropped from the block would be filled from the base and break
         // equality, so the block has to stay complete. The list comes from the
         // table itself: an added embedded theme has to come with its block.
-        let doc = include_str!("../../../docs/AYARLAR.md");
+        let doc = include_str!("../../../docs/SETTINGS.md");
         let names: Vec<_> = Theme::embedded_names().collect();
         assert_eq!(names, ["bateri", "bateri-light"]);
         for name in names {
@@ -367,10 +366,10 @@ mod tests {
             // The heading is searched with its line ending: "`bateri`" is a
             // prefix of "`bateri-light`" and an unbounded search would read the
             // wrong block.
-            let heading = format!("### Gömülü `{name}`\n");
+            let heading = format!("### Embedded `{name}`\n");
             let (_, after) = doc
                 .split_once(&heading)
-                .unwrap_or_else(|| panic!("{heading:?} not found in AYARLAR.md"));
+                .unwrap_or_else(|| panic!("{heading:?} not found in SETTINGS.md"));
             let (_, block) = after
                 .split_once("```toml\n")
                 .expect("no toml block under the heading");

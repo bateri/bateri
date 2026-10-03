@@ -11,11 +11,9 @@ FROM rust:1.88-bookworm
 # zsh: bt-core's mirror tests and bt-shell-common's `child`/`jobs` tests run a
 # real zsh. LANG: the image defaults to the C locale, where zsh does not
 # recognise multibyte characters — a non-ASCII letter comes out as `??` in the
-# mirror and three mirror tests fail because of the environment (measured,
-# `.tasks/040-linux-kapisi-ve-wgpu/context.md` → Kanıt).
+# mirror and three mirror tests fail because of the environment (measured).
 #
-# The font stack of bt-atlas's Linux backend (042 Karar 5, 8; user-approved
-# packages, record in `.tasks/042-font-sistemi-linux/phase-4.md`):
+# The font stack of bt-atlas's Linux backend (user-approved packages):
 # pkg-config + libfreetype-dev + libfontconfig-dev are what freetype-sys and
 # yeslogic-fontconfig-sys link against dynamically; zlib1g-dev so libz-sys
 # finds the system zlib instead of compiling its own. fonts-dejavu-core is the
@@ -25,7 +23,7 @@ FROM rust:1.88-bookworm
 # the two halves of an emoji and the grapheme-cluster tests draw from it.
 # mesa-vulkan-drivers + libvulkan1 are lavapipe, Mesa's CPU Vulkan driver, and
 # its loader: bt-gpu's device (Vulkan on Linux), `wgsl_pipelines_build` and the
-# offscreen pixel tests run on it (042 Karar 8).
+# offscreen pixel tests run on it.
 # The version check stops the build if FreeType is older than 2.12.1
 # (libtool 24.3.18 — 2.12.0 is 24.1.18), the release the backend was
 # written against.
@@ -38,7 +36,7 @@ RUN apt-get update \
     && dpkg --compare-versions "$(pkg-config --modversion freetype2)" ge 24.3.18
 ENV LANG=C.UTF-8
 
-# bt-shell-common's real-zsh tests (043 phase-3) need two pieces of macOS's
+# bt-shell-common's real-zsh tests need two pieces of macOS's
 # environment that Debian lacks:
 # - locales + en_US.UTF-8: the emoji wrap test pins `LANG=en_US.UTF-8` (the
 #   name `child::decide_locale` writes); the image only has C.UTF-8, and zsh in
@@ -58,7 +56,7 @@ RUN apt-get update \
     && printf '%s\n' 'HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history' 'HISTSIZE=2000' \
         'SAVEHIST=1000' >> /etc/zsh/zshrc
 
-# The remote shell integration's login shells (048 phase-2): bt-shell-common's
+# The remote shell integration's login shells: bt-shell-common's
 # bootstrap tests run sshd's `"$SHELL" -c '<command>'` with each login shell
 # the bootstrap handles — zsh (above), bash and dash (the base image), fish
 # (integrated through `vendor_conf.d`) and BusyBox (the plain-shell arm, its

@@ -25,15 +25,14 @@ prune:
 fmt:
 	$(CARGO) fmt --all -- --check
 
-# The mechanical half of the project rules (moved out of `/audit`): agentless
-# and done in seconds, on every `make check`. The lenses that need judgment stay
-# in `/audit` and run once at the end of a set (`.claude/is-akisi/proje.md`).
+# The mechanical half of the project rules: agentless and done in seconds, on
+# every `make check`. The checks that need judgment stay in code review.
 # - Layering: `cargo tree` sees the contract in Cargo.toml, grep sees calls
 #   leaking into the source (a use behind `cfg` may not show up in the tree).
 #   The source grep drops comment lines: bt-core's header comment says "no
 #   objc2". In bt-atlas `objc2-core-*` is allowed, only the `objc2` core is
 #   forbidden.
-# - bt-atlas's font system sits behind a trait (042): the CoreText/CoreGraphics
+# - bt-atlas's font system sits behind a trait: the CoreText/CoreGraphics
 #   names (`objc2_core_*`, `CT…`/`CG…`/`CF…`) appear only in the macOS backend
 #   (`coretext.rs`); the rules half stays platformless and the Linux backend
 #   gets the same calls from the trait.
@@ -46,7 +45,7 @@ fmt:
 #   exactly those, and the gate never asks the question for a file whose name
 #   is not in the list. `.zlogout` is in the list even though we have no such
 #   file — the gate protects the user's files, not our directory.
-# - bt-gpu sees no platform library (040): its direct dependencies (dev
+# - bt-gpu sees no platform library: its direct dependencies (dev
 #   included, `--depth 1`) and its source contain no objc2/dispatch2/block2/
 #   metal. The GPU is reached through wgpu; what wgpu's Metal backend pulls in
 #   **indirectly** is not this check's subject — the contract is the crate's
@@ -54,7 +53,7 @@ fmt:
 #   business. The layer and the vsync rhythm come from bt-shell-macos
 #   (`Surface::from_layer`, `Pacer`). The `bt-shell` pattern of the "bt-gpu
 #   does not link upward" line catches all three shell crates.
-# - bt-shell-common sees no platform shell (043 Karar 2): its direct normal
+# - bt-shell-common sees no platform shell: its direct normal
 #   dependencies contain no objc2 core, AppKit, Quartz, Foundation,
 #   notification center, block2, or a platform shell (`bt-shell-macos`/
 #   `-linux`) — the layering direction is `bt-shell-{macos,linux} ->
@@ -62,7 +61,7 @@ fmt:
 #   `cfg(macos)`; in the source `objc2`/`dispatch2`/`block2` appear only in
 #   `watch`'s macOS body (`watch/dispatch.rs`).
 # - It does NOT fail on a dependency change, it warns: a deliberate dependency
-#   decision also changes Cargo.lock; `/audit` looks for the decision's record.
+#   decision also changes Cargo.lock; review looks for the decision's record.
 audit:
 	@fail=0; \
 	if $(CARGO) tree -p bt-core -e normal | grep -E "objc2|core-text|core-graphics|metal"; then echo "audit: bt-core links to a platform library"; fail=1; fi; \
@@ -80,7 +79,6 @@ audit:
 	done; \
 	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshenv|\.zprofile|\.zshrc|\.zlogin|\.zlogout|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "audit: shell integration writes to the user's rc file"; fail=1; fi; \
 	git diff --quiet HEAD -- Cargo.lock $$(git ls-files '*Cargo.toml') || echo "audit: warning — Cargo.toml/Cargo.lock differs from HEAD; is the dependency decision recorded?"; \
-	if grep -rnEi "bateri|bt-(core|gpu|shell|atlas)|make [a-z]|cargo|crates/|assets/|metal|olcumler|yol-harita|arastirma|ayarlar\.md|zsh|dock|emoji|glyph|\bcrate|alacritty|terminfo|origin/main" .claude/skills .claude/is-akisi/duzen.md .claude/is-akisi/sablonlar; then echo "audit: project trace in a generic workflow file — it belongs in .claude/is-akisi/proje.md"; fail=1; fi; \
 	test $$fail -eq 0 && echo "audit: clean"
 
 clippy:
@@ -100,14 +98,15 @@ test:
 # Red if ONE of the first four (frames, cells, glyphs, rules) or `motion` is 0;
 # `slots`, `slots2`, `load`, `requests`, `slide` and `profile` are not gates,
 # they are counters and labels. `slots` is the atlas's **mask** plane, `slots2`
-# its **color** plane (023): both share the same slot grid, have separate
+# its **color** plane: both share the same slot grid, have separate
 # counters, and their totals are the same. Since the recipe prints no emoji,
 # `slots2=0/T` is expected; the reason it is on the line is diagnosis — a plane
-# it could not see would be 021's Braille shape (spending zero slots, silent).
-# `slide` is the witness of the content's offset (011) and is expected to be 0
+# it could not see would fail the way Braille once did (spending zero slots,
+# silent).
+# `slide` is the witness of the content's offset and is expected to be 0
 # because the recipe does not trigger it; the reason it is on the line is
 # diagnosis, read together with `motion` it tells which animator did not settle.
-# `motion` moved from counter to requirement in 008: the smoke recipe has a
+# `motion` is a requirement, not a counter: the smoke recipe has a
 # cursor motion (bt-core smoke_shell), so 0 means "the animation path never
 # ran". The hidden link is written there too — the requirement rests on the
 # default cursor style being ANIMATED.
@@ -125,13 +124,13 @@ test:
 # and an unmeasured number is not written into a gate.
 # THE LOWER LIMIT is on `quiet` (the time between the last frame and the
 # deadline; if there are no frames at all it is `none` and that is red too):
-# MEASURED in 008 phase-6 and wired into the gate (app.rs QUIET_FLOOR; the
-# number and its derivation are owned by docs/OLCUMLER.md). Its rule is the
+# MEASURED and wired into the gate (app.rs QUIET_FLOOR, whose doc carries the
+# number and its derivation). Its rule is the
 # OPPOSITE of the others — large in a healthy run, small under a leak — and it
 # is the gate's most sensitive layer: it sees EVERY leak whose period is
 # shorter than the floor, while the `content` limit sees only one that is fast
 # enough. A leak that requests frames rarely enough to stay under the limit
-# passed GREEN without this arm (the measured evidence is in that file).
+# passed GREEN without this arm (measured).
 # The floor DEPENDS on the duration of `BT_RUN_SECONDS` and on smoke_shell's
 # sleep: whoever shortens the duration must re-derive it too, or the gate
 # fails while the code is right.
@@ -154,14 +153,14 @@ test:
 # must be hermetic.
 # In a timed run the window opens at a floating level (`float_for_timed_run`):
 # wgpu gives no drawable to an occluded window, and the gate used to fall with
-# `frames=0` when another application was in front (040 phase-7).
+# `frames=0` when another application was in front.
 smoke:
 	env -u BT_SCROLL_TEST -u BT_FRAME_STATS BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
 
 # WGSL canary: the shaders are embedded with `include_str!` and have no build
 # step, so the canary is the test that sets up the pipelines — naga validation
-# + pipeline creation on a device requested with Vulkan's immediate floor (040
-# Karar 9). Since there is a single canary, "1 passed" is searched for: if the
+# + pipeline creation on a device requested with Vulkan's immediate floor.
+# Since there is a single canary, "1 passed" is searched for: if the
 # test's name changes or it falls behind `cfg`, cargo returns 0 with zero tests
 # and the gate would silently stay green.
 shader:
@@ -181,7 +180,7 @@ test-race:
 	$(CARGO) test --workspace -- --ignored race_
 	$(CARGO) test --workspace -- --include-ignored --test-threads=1
 
-# Inventory of the fallback-glyph gate (041): passes every character in the
+# Inventory of the fallback-glyph gate: passes every character in the
 # symbol and emoji blocks through the atlas's own gate and prints, per block
 # and for 13/16pt × @1x/@2x, the groups (in the base / fit from the fallback /
 # in no font / rejected by the gate), the ratio histogram of the rejected ones
@@ -253,7 +252,7 @@ SIGN_ID ?= $(eval SIGN_ID := $$(shell ids=$$$$(security find-identity -v -p code
 # is read from the binary the two can never diverge — if they did,
 # LaunchServices would open the app on a system it cannot run on.
 #
-# The URL scheme (`CFBundleURLTypes` -> `bateri`, 038) is also looked for in
+# The URL scheme (`CFBundleURLTypes` -> `bateri`) is also looked for in
 # the product: `bateri://tab/<id>` is registered with LaunchServices only from
 # the package's plist, and a scheme dropped from the template would silently
 # turn into "open opens nothing".
@@ -332,10 +331,10 @@ bundle: sparkle
 	cp LICENSE assets/bundle/Credits.html assets/bundle/THIRD-PARTY-LICENSES.txt $(STAGE)/Contents/Resources/
 	@# The wrapper is copied file by file, NOT with `cp -R assets/shell`:
 	@# as long as ZDOTDIR points at our directory, an arm that writes there
-	@# (in 009 phase-3 `/etc/zshrc` once spawned a `.zsh_history`) or a
+	@# (`/etc/zshrc` once spawned a `.zsh_history` there) or a
 	@# `.DS_Store` would silently enter the product through a recursive copy.
 	@# That the directory's inventory is EXACTLY these six files is tested
-	@# by `bundle_assets`. The remote wrapper (`assets/shell/remote/`, 048)
+	@# by `bundle_assets`. The remote wrapper (`assets/shell/remote/`)
 	@# is not copied: `bateri ssh-argv` embeds it at build time.
 	mkdir -p $(STAGE)/Contents/Resources/shell/zsh
 	cp assets/shell/zsh/.zshenv assets/shell/zsh/.zprofile assets/shell/zsh/.zshrc \
@@ -607,17 +606,16 @@ terminfo:
 # Linux gate for bt-core, bt-atlas, bt-gpu and bt-shell-common: `clippy -D warnings` and `test`, in Docker,
 # in the image from `tools/linux/Dockerfile`, with `--locked` (a run that would
 # change Cargo.lock fails red, it does not silently resolve new versions).
-# CLAUDE.md's "bt-core is platformless, the gate is compiling for Linux" is
+# The rule "bt-core is platformless, the gate is compiling for Linux" is
 # this command.
 # OUTSIDE `make check`, because it needs Docker and its first run builds the
-# image and compiles the whole graph for Linux; when it runs is in
-# `.claude/is-akisi/proje.md` -> Doğrulama (if a crate that compiles on Linux
-# changed).
-# The scope grows with the sets — today bt-core, bt-atlas's FreeType/
+# image and compiles the whole graph for Linux; run it when a crate that
+# compiles on Linux changed.
+# The scope grows over time — today bt-core, bt-atlas's FreeType/
 # fontconfig/harfrust backend, bt-gpu (Vulkan; `wgsl_pipelines_build` and the
-# offscreen pixel tests run on lavapipe, 042) and bt-shell-common (`jobs`'s
+# offscreen pixel tests run on lavapipe) and bt-shell-common (`jobs`'s
 # `/proc` body and the real-PTY test, `child`'s `$SHELL -l` arm and the real
-# zsh tests, 043); the order is in `docs/YOL-HARITASI.md`. As it grows the `-p`
+# zsh tests). As it grows the `-p`
 # list and the image recipe change together.
 # Order:
 # 1. Version: RED (exit 1) if the local `rustc`'s major.minor is not the same

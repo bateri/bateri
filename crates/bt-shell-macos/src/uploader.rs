@@ -1,10 +1,9 @@
-//! The **AppKit half** of the transfer queue (037 Karar 7 → Kullanıcı kararı;
-//! both directions since 045 Karar 6, 12): the AppKit and dispatch work that
+//! The **AppKit half** of the transfer queue (both directions): the AppKit and dispatch work that
 //! goes from the drop to the confirmation sheet, from the sheet to the stream
 //! (an upload's or a download's — the latter quarantined before it lands), from
 //! the stream to the dock's status line, to the "Show transfers (N)" popover
 //! and to the stop question. The queue
-//! is **the pane's** (039 phase-2): sheets attach to the pane view's window,
+//! is **the pane's**: sheets attach to the pane view's window,
 //! the popover to the pane's `BateriView`; the title's `↑ N%` prefix, the
 //! notification and the Dock tile come from the pane's owner
 //! ([`crate::pane::PaneHost`] - `title_changed`, `notify`, `uploads_changed`),
@@ -86,7 +85,7 @@ pub(crate) struct Confirmed {
     pub(crate) jobs: Vec<Job>,
 }
 
-/// A download's question answered (045 R4): what the remote item is and what
+/// A download's question answered: what the remote item is and what
 /// its destination holds — everything the sheet decides on, gathered on the
 /// helper's thread (the remote count, then the local folder: a network volume
 /// must not stall the main thread).
@@ -127,7 +126,7 @@ pub(crate) fn on_pane(
 }
 
 impl TerminalPane {
-    /// A Finder drop in a remote session (037 Karar 7): local measurement and
+    /// A Finder drop in a remote session: local measurement and
     /// remote probe in the background, then the confirmation sheet. `false` →
     /// the drop was refused (local session, or another sheet is in progress -
     /// two sheets cannot open on top of each other).
@@ -138,7 +137,7 @@ impl TerminalPane {
         let Some((command, target, _)) = session.remote_target() else {
             return false;
         };
-        // OSC 7's directory, or the title's when the server sends none (045).
+        // OSC 7's directory, or the title's when the server sends none.
         let cwd = session.remote_link_directory();
         if !self.accepts_drop() {
             return false;
@@ -156,7 +155,7 @@ impl TerminalPane {
             .name("upload probe".into())
             .spawn(move || {
                 let dir = reported.then_some(cwd.as_str());
-                // The route first (047 R1): the probe and the stream ride it.
+                // The route first: the probe and the stream ride it.
                 let (ssh, result) = match (dial.argv)() {
                     Ok(ssh) => {
                         let result = upload::probe(&ssh, &host, dir, &paths);
@@ -273,7 +272,7 @@ impl TerminalPane {
 
     /// Confirmation (an upload's, a download's or a preview's): the items go to
     /// the end of the queue, the first starts if the queue is idle — a lingering
-    /// result line ends with it (045 phase-4). `false` if they could not enter:
+    /// result line ends with it. `false` if they could not enter:
     /// the remote session ended, or the queue is still stopping (its half-written
     /// file is being deleted); the caller beeps, an action is never dropped in
     /// silence.
@@ -301,7 +300,7 @@ impl TerminalPane {
     }
 
     /// A remote link's "Download to Downloads" (`folder` `None`: `[remote]
-    /// download_dir`) or "Download To…" (045 R3, R4): the helper counts the item
+    /// download_dir`) or "Download To…": the helper counts the item
     /// and the destination is looked at on its thread, then
     /// [`TerminalPane::download_prepared`] asks or starts. Refused with a beep
     /// while another sheet is in progress (two sheets cannot open on top of each
@@ -317,7 +316,7 @@ impl TerminalPane {
         };
         if !self.accepts_drop() {
             // Another sheet is open (two cannot stack) or the queue is still
-            // stopping: refused, but audibly (045 phase-4).
+            // stopping: refused, but audibly.
             beep();
             return;
         }
@@ -463,7 +462,7 @@ impl TerminalPane {
         alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
     }
 
-    /// The download goes to the queue's end under `conflict` (045 R2.1: a
+    /// The download goes to the queue's end under `conflict` (a
     /// right-click download waits its turn like an upload).
     #[allow(clippy::too_many_arguments)]
     fn download_confirmed(
@@ -507,7 +506,7 @@ impl TerminalPane {
 
     /// Starts every item that may start on its own background thread: the
     /// queue's next item (no-op while one flows) and every preview and Finder
-    /// item, which never wait (045 Karar 6, 7).
+    /// item, which never wait.
     /// Whether anything started (the line was refreshed then).
     fn start_transfers(&self) -> bool {
         let started = self.uploads().borrow_mut().start(Instant::now());
@@ -531,7 +530,7 @@ impl TerminalPane {
             job,
             shared,
         } = started;
-        // A preview's ticket (045 phase-4): sealed on this thread when it lands,
+        // A preview's ticket: sealed on this thread when it lands,
         // opened on the main thread after its row is updated.
         let ticket = match job.way {
             Way::Down {
@@ -540,7 +539,7 @@ impl TerminalPane {
             } => self.previews().borrow().get(job.landing()).cloned(),
             _ => None,
         };
-        // A Finder drop's promise (045 phase-5) follows this item from now on.
+        // A Finder drop's promise follows this item from now on.
         if let Way::Down {
             lane: Lane::Finder, ..
         } = job.way
@@ -607,12 +606,12 @@ impl TerminalPane {
     }
 
     /// The owner's Dock tile (the total over all panes) should refresh — and a
-    /// postponed update may go (055 R5.2).
+    /// postponed update may go.
     fn uploads_changed(&self) {
         self.host().uploads_changed(self.id());
     }
 
-    /// The queue's items not finished yet — what an update waits for (055 R5.2).
+    /// The queue's items not finished yet — what an update waits for.
     pub(crate) fn upload_unfinished(&self) -> usize {
         self.uploads().borrow().unfinished()
     }
@@ -632,7 +631,7 @@ impl TerminalPane {
     }
 
     /// The flowing item `item` ended (`landed`: where a download landed): move
-    /// on to the next or show the result. No path is pasted (037 phase-7): the
+    /// on to the next or show the result. No path is pasted: the
     /// result line says where it went.
     fn upload_finished(&self, item: u64, outcome: Outcome, landed: Option<std::path::PathBuf>) {
         // A Finder drop's promise is kept or failed first: when a stop already
@@ -661,7 +660,7 @@ impl TerminalPane {
         self.dismiss_stale_stop();
         self.show_transfer(Some(ended.line));
         self.refresh_upload_title();
-        // `[remote] download_notify` (045 R8): a transfer ending in the
+        // `[remote] download_notify`: a transfer ending in the
         // background notifies only if the user wants it — either direction.
         if let Some((title, body)) = ended.notice
             && self.remote_files().borrow().download_notify
@@ -686,7 +685,7 @@ impl TerminalPane {
         });
     }
 
-    /// The title's `↑ N% · ` prefix (037 phase-7): if the percentage changed
+    /// The title's `↑ N% · ` prefix: if the percentage changed
     /// the owner rewrites the title - at most once per percent. There is no
     /// dock on the alternate screen and the title and tab are the only place that shows progress.
     ///
@@ -712,7 +711,7 @@ impl TerminalPane {
         self.uploads().borrow_mut().set_shown(transfer);
         // `borrow_mut` is done: computing the rects borrows `uploads` again.
         // An upload row takes the load indicator's place: its popover closes
-        // (046 R3.3), and the hand cursor's rects are refreshed there.
+        // and the hand cursor's rects are refreshed there.
         self.stats_gauge_changed();
     }
 
@@ -733,12 +732,12 @@ impl TerminalPane {
     /// The mouse is on the context line at dock-local column `col` (`None` →
     /// outside the line; `context` is the context line's budget): if the
     /// button under it **changed**, rewrites the line - the hover tone, a
-    /// frame only on that edge (037 phase-6). It does not set the cursor: the
+    /// frame only on that edge. It does not set the cursor: the
     /// hand comes from the cursor rect, only refreshed here if stale. Without
     /// an upload it exits on the first question - every motion of an idle
     /// window would cost a borrow.
     pub(crate) fn upload_hover(&self, at: Option<(u16, u16)>) {
-        // The status bar's other button (047 R7.2) shares this funnel.
+        // The status bar's other button (Sign In…) shares this funnel.
         self.sign_in_hover(at);
         let fresh = {
             let mut uploads = self.uploads().borrow_mut();
@@ -759,7 +758,7 @@ impl TerminalPane {
 
     /// Recomputes the hover from the pointer's **current** place: the buttons
     /// are right-aligned and their widths come from the state (item count), so
-    /// the line can change under a motionless pointer - `/code-review`.
+    /// the line can change under a motionless pointer.
     pub(crate) fn rehover_upload(&self) {
         let at = self.view().pointer_context_column();
         self.upload_hover(at);
@@ -771,7 +770,7 @@ impl TerminalPane {
         self.upload_hover(None);
     }
 
-    /// Stop request (037 phase-7): ⌘., the line's `Cancel`/`Cancel all` and
+    /// Stop request: ⌘., the line's `Cancel`/`Cancel all` and
     /// the popover's `Cancel all` are `all`, the popover row's `Cancel` is
     /// not. If the flowing item has been flowing longer than
     /// [`upload::STOP_ASK_AFTER`] it asks first; while an upload sheet is open
@@ -860,7 +859,7 @@ impl TerminalPane {
             // audit: the local event monitor runs on the main thread.
             let mtm = MainThreadMarker::new().expect("the event monitor is on the main thread");
             // The window is compared at event time: the sheet's number is only
-            // certain once it is shown (`/code-review`).
+            // certain once it is shown.
             let on_sheet = event
                 .window(mtm)
                 .is_some_and(|window| Retained::as_ptr(&window) == Retained::as_ptr(&sheet_window));
@@ -908,7 +907,7 @@ impl TerminalPane {
     /// A popover row's button (`tag` is the item's id): `Cancel` on a flowing
     /// item (asks first if past 30 s), `Remove` on a waiting one (does not
     /// ask), `Show in Finder` on a finished download, `Open` on a finished
-    /// preview (045 Karar 6).
+    /// preview.
     pub(crate) fn upload_row_action(&self, id: u64) {
         let action = self.uploads().borrow().list().and_then(|list| {
             list.rows
@@ -930,7 +929,7 @@ impl TerminalPane {
                     );
                 }
             }
-            // Through the preview's open policy (R5.3): a script opens as text.
+            // Through the preview's open policy: a script opens as text.
             Some(RowAction::Open) => {
                 if let Some(path) = landed() {
                     self.open_preview(&path);
@@ -985,7 +984,7 @@ impl TerminalPane {
         true
     }
 
-    /// "Show transfers (N)": the queue's popover (037 phase-7) - attached to the
+    /// "Show transfers (N)": the queue's popover - attached to the
     /// button, `transient`: a click outside, Esc or pressing the button again closes it.
     ///
     /// **Pressing the button again**: a `transient` popover closes itself on a
@@ -1217,7 +1216,7 @@ impl TerminalPane {
 
         for (row, button) in list.rows.iter().zip(buttons) {
             let row_top = top;
-            // The row's arrow: ↑ to the server, ↓ to this Mac (045 Karar 6).
+            // The row's arrow: ↑ to the server, ↓ to this Mac.
             let arrow = match row.direction {
                 Direction::Up => "↑",
                 Direction::Down => "↓",
@@ -1443,14 +1442,13 @@ pub(crate) fn remove_monitor(monitor: Option<Retained<AnyObject>>) {
     }
 }
 
-/// A macOS notification while bateri is in the background (037 phase-7): the
+/// A macOS notification while bateri is in the background: the
 /// queue finished, failed or the connection dropped. None while in the
 /// foreground - the result is in the dock and the title. The pane's request
 /// goes through the owner ([`crate::pane::PaneHost::notify`]); today's owner
 /// lands here (`window::WindowHost`).
 ///
-/// `UNUserNotificationCenter` (a user-approved dependency, decision record
-/// `.tasks/037-ssh-ikinci-tur/phase-7.md` → Uygulama Notları). Three rules:
+/// `UNUserNotificationCenter` (a user-approved dependency). Three rules:
 ///
 /// - **Permission is requested at the first notification**, not at launch: a
 ///   user who has never finished an upload in the background never sees the
@@ -1473,7 +1471,7 @@ pub(crate) fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
 }
 
 /// [`notify`] without the background gate: the caller decided a notification is
-/// the right channel (045: an edited preview kept while no window can show a
+/// the right channel (an edited preview kept while no window can show a
 /// sheet). Never in an unbundled process.
 pub(crate) fn deliver_notification(title: &str, body: &str) {
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
@@ -1508,7 +1506,7 @@ fn file_url(path: &Path) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
 }
 
-/// The quarantine mark of a downloaded item (045 Karar 5, 15): Gatekeeper asks
+/// The quarantine mark of a downloaded item: Gatekeeper asks
 /// before a downloaded program first runs, as for a browser's download. A
 /// folder's every entry is marked too (a browser's unpacked archive is). The
 /// download's `seal` hook: it runs on the stream thread while the item is still
@@ -1549,7 +1547,7 @@ fn quarantine(path: &Path) {
 /// The download's destination on the helper's thread: `folder` or the expanded
 /// `download_dir`, its free space and whether the remote name is already taken
 /// there. Nothing is created here — a missing folder is made when the stream
-/// starts (`download::transfer`), after the user confirmed (045 phase-4).
+/// starts (`download::transfer`), after the user confirmed.
 fn landing(
     entry: RemoteEntry,
     remote: &str,
@@ -1582,8 +1580,8 @@ fn tick(lookup: PaneLookup, id: u64, shared: &Arc<Shared>) {
     });
 }
 
-/// The progress of all panes' uploads on the application's Dock tile (Kullanıcı
-/// kararı 4); the owner walks the panes (`AppDelegate::refresh_dock_tile`).
+/// The progress of all panes' uploads on the application's Dock tile (the
+/// user's decision); the owner walks the panes (`AppDelegate::refresh_dock_tile`).
 /// When there is no upload the tile returns to its own state. It is not
 /// touched at all until the first upload - launch (and the timed run) does
 /// not visit the Dock tile.

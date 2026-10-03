@@ -1,8 +1,5 @@
 //! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar with five
-//! categories on the left, a label–control grid on the right. The decisions
-//! on the skeleton and behaviour are in
-//! `.tasks/029-ayarlar-penceresi/discussion.md` → Karar 2–6, 9; they are not
-//! repeated here.
+//! categories on the left, a label–control grid on the right.
 //!
 //! The window **holds no state of its own**: every value it shows comes from
 //! `AppDelegate`'s active settings ([`SettingsWindow::refresh`]) and every
@@ -18,7 +15,7 @@
 //! table: a new variant is a compile error, it does not silently go missing
 //! from the popup.
 //!
-//! Remote Files (045 phase-6) adds three row kinds that are not a single
+//! Remote Files adds three row kinds that are not a single
 //! control: a size popup (presets, [`size_items`]), a folder row (the path as
 //! the file writes it, Change… → `NSOpenPanel`) and the preview folder's usage
 //! with Clear Now. The usage is not a setting: it is measured off the main
@@ -67,7 +64,7 @@ use crate::zoom::{MAX_SIZE, MIN_SIZE};
 
 /// The window's opening content size, in points. The width is fixed, the
 /// height is not: the panes sit in a vertical scroll view, so a pane taller
-/// than the window (Remote Files since 048's integration row) or a screen
+/// than the window (Remote Files since its integration row) or a screen
 /// shorter than the window scrolls instead of clipping the rows under the
 /// button. A design constant, not a measured number.
 const WINDOW_SIZE: NSSize = NSSize::new(680.0, 780.0);
@@ -98,7 +95,7 @@ const NOTE_WIDTH: f64 = POPUP_WIDTH;
 /// A folder row's path label: as wide as the popups' column allows, the
 /// middle truncated beyond it (the end of a path is what tells folders apart).
 const PATH_WIDTH: f64 = 280.0;
-/// The size popups' presets, bytes (045 Karar 8's starting values among
+/// The size popups' presets, bytes (the keys' starting values among
 /// them). A design constant; a value the file holds that is not here is
 /// still shown ([`size_items`]).
 const PREVIEW_SIZE_PRESETS: &[u64] = &[
@@ -288,7 +285,7 @@ impl Key {
     }
 }
 
-/// The sentence under the reason in a locked window's banner (029 phase-3).
+/// The sentence under the reason in a locked window's banner.
 const LOCK_HINT: &str = "Fix the file and save it; this window follows.";
 
 /// The banner above the right pane; invisible if it has no lines.
@@ -301,7 +298,7 @@ struct Banner {
     hint: Option<&'static str>,
 }
 
-/// What the window sees from the file's state (029 Karar 7) — pure, so the
+/// What the window sees from the file's state — pure, so the
 /// three states are tested without building a window.
 #[derive(Debug, PartialEq, Eq)]
 struct Status {
@@ -556,14 +553,14 @@ struct Override {
 /// the setting and the system's merged answer) overrides this row's value —
 /// pure, so the rule is tested without building a window.
 ///
-/// An overridden row is not hidden, it is left **disabled** and says why
-/// (029 Karar 6): the value stays visible and comes back when the overriding
-/// input goes away. The rule is that of the reduction's owners (`bt_gpu`'s
+/// An overridden row is not hidden, it is left **disabled** and says why:
+/// the value stays visible and comes back when the overriding input goes
+/// away. The rule is that of the reduction's owners (`bt_gpu`'s
 /// `Motion::glyph_fx`, `app::resolve_smooth_scroll`): `snap` is above both;
 /// Reduce Motion turns off the ghost and smooth scrolling, while it
 /// **reduces** typing to a fade-in — that row stays enabled, because the
 /// choice between `off` and an effect is a difference there too, and since
-/// the disabled typing stays disabled there is nothing to say there (030 Karar 7).
+/// the disabled typing stays disabled there is nothing to say there.
 fn motion_override(key: Key, settings: &Settings, reduce: bool) -> Option<Override> {
     let disabled = |note| {
         Some(Override {
@@ -622,7 +619,7 @@ fn smooth_on(smooth: SmoothScroll) -> bool {
 /// short half period) ↔ half period, in seconds. The scale is
 /// **logarithmic**: the range is a hundredfold (`CURSOR_BLINK_RANGE`) and on
 /// a linear scale all the useful values would be squeezed into the left's
-/// first percent (029 Karar 5). The ends return explicitly, because
+/// first percent. The ends return explicitly, because
 /// `exp(ln(x))` is not bit for bit `x` and the ends being the range's ends
 /// is the contract.
 fn blink_from_position(position: f64) -> f64 {
@@ -689,8 +686,8 @@ enum ThemeItem {
 /// The theme popup's items and the selected one's index — the order of the
 /// Theme ▸ menu (`menu::fill_themes`): Match System, embedded ones, the
 /// user's. If the name in the file is not in the list (a deleted theme) it is
-/// appended at the end: the popup does not hide what the user wrote (Karar
-/// 3's Font rule).
+/// appended at the end: the popup does not hide what the user wrote (the
+/// Font popup's rule).
 fn theme_items(
     selected: &str,
     with_system: bool,
@@ -783,7 +780,7 @@ enum SizeItem {
 
 /// A size popup's items and the selected one's index: the presets, and the
 /// file's value appended after a separator when it is not one of them — the
-/// popup does not hide what the user wrote (Karar 3's Font rule).
+/// popup does not hide what the user wrote (the Font popup's rule).
 fn size_items(current: u64, presets: &[u64]) -> (Vec<SizeItem>, usize) {
     let mut items: Vec<SizeItem> = presets.iter().copied().map(SizeItem::Preset).collect();
     if let Some(index) = presets.iter().position(|&bytes| bytes == current) {
@@ -931,7 +928,7 @@ struct Row {
 
 impl Row {
     /// Whether the row's controls are enabled, whether its label is dimmed
-    /// (Karar 6's dependent row and Karar 7's lock go through the same gate).
+    /// (a dependent row and the lock go through the same gate).
     fn set_enabled(&self, enabled: bool) {
         for control in &self.controls {
             control.setEnabled(enabled);
@@ -1113,7 +1110,7 @@ define_class!(
         }
 
         /// While a slider is dragged only the value label changes; it is
-        /// written to the file **on release** (Karar 5). `continuous` is on,
+        /// written to the file **on release**. `continuous` is on,
         /// otherwise the label would freeze during the drag: the decision to
         /// write or not is from the event's type — if the mouse is down and
         /// dragging it is an intermediate value. The event of a slider changed
@@ -1167,7 +1164,7 @@ define_class!(
             self.save(edit);
         }
 
-        /// Number field: on Enter or on leaving focus (Karar 5). An input that
+        /// Number field: on Enter or on leaving focus. An input that
         /// is not accepted is not written, the field returns to the active value.
         #[unsafe(method(fieldChanged:))]
         fn field_changed(&self, sender: Option<&AnyObject>) {
@@ -1244,7 +1241,7 @@ define_class!(
             self.save(edit);
         }
 
-        /// "Open settings.toml": today's "Settings…" path (Karar 8).
+        /// "Open settings.toml": today's "Settings…" path.
         #[unsafe(method(openFile:))]
         fn open_file(&self, _sender: Option<&AnyObject>) {
             if let Some(delegate) = app::delegate(self.mtm()) {
@@ -1277,13 +1274,13 @@ define_class!(
                     ));
                     NSWorkspace::sharedWorkspace().openURL(&url);
                 }
-                // Nothing is created to be shown (045 phase-4: no folder
+                // Nothing is created to be shown (no folder
                 // before a preview lands); the folder appears with the first one.
                 None => crate::preview::beep(),
             }
         }
 
-        /// Clear Now: the preview cache's single sweep method (045 phase-4);
+        /// Clear Now: the preview cache's single sweep method;
         /// it measures the usage again when it ends.
         #[unsafe(method(clearPreviews:))]
         fn clear_previews(&self, _sender: Option<&AnyObject>) {
@@ -1755,7 +1752,7 @@ impl SettingsWindow {
         width_constraint(&field, width);
         self.wire(&field, key, sel!(fieldChanged:));
         if let Some(cell) = field.cell() {
-            // An action on leaving focus too: Karar 5's "on Enter or on
+            // An action on leaving focus too: "on Enter or on
             // leaving focus".
             cell.setSendsActionOnEndEditing(true);
         }
@@ -1811,7 +1808,7 @@ impl SettingsWindow {
             )
         };
         // SAFETY: only changes the ownership semantics; we are the Retained's owner.
-        // Closing hides, reopening returns on the same category (Karar 4).
+        // Closing hides, reopening returns on the same category.
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(ns_string!("Settings"));
         // The title is in the pane's header; the window title is for the Window menu.
@@ -2211,8 +2208,8 @@ impl SettingsWindow {
             Some("On turns animations into fades and instant jumps."),
         );
 
-        // Remote Files (045 Karar 8): the shell integration on servers (048
-        // R6), preview, cleanup, downloads.
+        // Remote Files: the shell integration on servers, preview, cleanup,
+        // downloads.
         let remote_integration = self.switch(Key::RemoteIntegration);
         let preview_max_size = self.string_popup(Key::PreviewMaxSize);
         let preview_read_only = self.switch(Key::PreviewReadOnly);
@@ -2318,7 +2315,7 @@ impl SettingsWindow {
             &[&download_notify],
             Some("Only while bateri is in the background."),
         );
-        // The load indicator (046 Karar 8).
+        // The load indicator.
         remote.row(
             Key::RemoteStats,
             "Server load:",
@@ -2537,7 +2534,7 @@ impl Form {
 
     /// Adds the row and the note row below it. The note row exists even in a
     /// row with no description — hidden; the diagnostic of a value that was
-    /// not accepted appears there (Karar 7).
+    /// not accepted appears there.
     fn row(
         &mut self,
         key: Key,
@@ -3023,7 +3020,7 @@ mod tests {
         assert_eq!(usage_label(Some((340_000_000, 12))), "340.0 MB · 12 files");
     }
 
-    /// The two inputs that turn motion off (030 Karar 7): the overridden row
+    /// The two inputs that turn motion off: the overridden row
     /// is disabled and says why; under Reduce Motion the typing row stays
     /// enabled, because the choice between `off` and an effect is a
     /// difference there too.

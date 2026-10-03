@@ -1,6 +1,6 @@
-//! ⌘-hover and ⌘-click on a link in the grid, the fill band (044 phase-4) and
-//! the dock's input line (phase-5); the ⌘-less OSC 8 hover, the target label
-//! and the right-click menu (phase-6).
+//! ⌘-hover and ⌘-click on a link in the grid, the fill band and the dock's
+//! input line; the ⌘-less OSC 8 hover, the target label and the right-click
+//! menu.
 //!
 //! `bt-core` finds the link (`Session::link_at`) and draws its underline from the
 //! hover slot (`Session::set_link_hover`); `bt-shell-common::links` says what a
@@ -18,9 +18,9 @@
 //!   no-op `set_link_hover` (no frame). With ⌘ any link counts (solid
 //!   underline, hand cursor); without it only an OSC 8 link does (a **dashed**
 //!   underline, no hand — the text does not name its target, a plain-text link
-//!   is its own target and every `ls` word would light up; Karar 3).
+//!   is its own target and every `ls` word would light up).
 //! - **⌘ over an OSC 8 link shows its target** in the pane's bottom-left label
-//!   ([`crate::pane::TerminalPane::set_link_target`], Karar 7): AppKit's, outside
+//!   ([`crate::pane::TerminalPane::set_link_target`]): AppKit's, outside
 //!   the frame path.
 //! - **A path is verified on a background queue** — a serial queue per view, so
 //!   a `stat` hanging on a network disk stalls only this pane's next
@@ -28,14 +28,13 @@
 //!   to the main queue by pane id ([`crate::pane::PaneLookup`]) and is taken
 //!   only if the pointer is still on the same candidate. Until it is back the
 //!   path is not underlined and a ⌘-press takes today's route (report or
-//!   selection) — the known limit `discussion.md` → Muhakeme names.
-//! - **A remote path is verified remotely** (`LinkHit::remote`, 045 Karar 1,
-//!   13): its candidates name the remote disk, so instead of a local `stat` the
+//!   selection) — a known limit.
+//! - **A remote path is verified remotely** (`LinkHit::remote`): its candidates name the remote disk, so instead of a local `stat` the
 //!   pane's helper ssh session is asked ([`crate::remote_helper`], one round
 //!   trip on an open connection, its answers cached per remote generation). A
 //!   relative name needs the remote OSC 7 folder: without it there is no link
-//!   and the pane's label says why (R1.2); a helper that cannot connect says
-//!   its reason there too (R1.3). The right-click menu downloads it (R3).
+//!   and the pane's label says why; a helper that cannot connect says its
+//!   reason there too. The right-click menu downloads it.
 //! - **A stale stamp re-finds**: when output, a scroll or a clear moves the
 //!   scrollback the frame drops the hover and says so (`Wake::link_hover_lost`);
 //!   while the window is key the same point is asked again and, if the link is the
@@ -92,7 +91,7 @@ pub(crate) struct Verified {
     hit: LinkHit,
     /// What the path is on disk; `None` for a link that names no local path.
     resolved: Option<Resolved>,
-    /// A remote path's absolute path and what it is on the remote disk (045);
+    /// A remote path's absolute path and what it is on the remote disk;
     /// `None` for every local link.
     remote: Option<(String, RemoteEntry)>,
     /// The hit as the hit test gave it — a re-found link is matched against
@@ -157,7 +156,7 @@ fn narrowed(query: &LinkHit, index: usize) -> LinkHit {
 }
 
 /// The file-system paths a hit asks about, in order: a path query's
-/// candidates (044 set sonrası, iTerm2's search), a `file://` link's path —
+/// candidates (iTerm2's search), a `file://` link's path —
 /// `None` for a link that names no local path.
 fn local_paths(hit: &LinkHit) -> Option<Vec<std::path::PathBuf>> {
     if hit.candidates.is_empty() {
@@ -187,13 +186,13 @@ enum Check {
     None,
     /// The local `stat`s of these paths, in order.
     Local(Vec<std::path::PathBuf>),
-    /// The helper session's answer for these remote candidates (045).
+    /// The helper session's answer for these remote candidates.
     Remote(Vec<String>),
     /// A remote hit that cannot be one: only relative names while the remote
-    /// folder is unknown (R1.2) — the label says why.
+    /// folder is unknown — the label says why.
     CwdUnknown,
     /// A remote hit while no remote session runs any more, or before the
-    /// user's ssh logged in (047 R9.1): no link.
+    /// user's ssh logged in: no link.
     Gone,
 }
 
@@ -238,7 +237,7 @@ pub(crate) struct LinkState {
     pending: Option<LinkHit>,
     /// The last candidate the `stat` did not find: moving inside it does not ask again.
     missing: Option<LinkHit>,
-    /// The hover locked at a ⌘-press (044 R6); the release compares with it.
+    /// The hover locked at a ⌘-press; the release compares with it.
     pressed: Option<Verified>,
     /// A right click's path candidate whose `stat` is in flight: the menu pops
     /// only if it is still this one (a later press or a cleared hover forgets it,
@@ -249,7 +248,7 @@ pub(crate) struct LinkState {
     /// The serial queue of the path verifications, born at the first one.
     queue: Option<DispatchRetained<DispatchQueue>>,
     /// Whether the pane's label shows a note in place of a link — why a remote
-    /// name is no link (R1.2, R1.3); cleared with the hover.
+    /// name is no link; cleared with the hover.
     note: bool,
 }
 
@@ -270,7 +269,7 @@ fn on_link(hit: &LinkHit, cell: LinkCell) -> bool {
     spans_contain(&hit.spans, hit.in_dock(), cell)
 }
 
-/// How a hit is drawn with ⌘ down or up (Karar 3): with ⌘ every link solid;
+/// How a hit is drawn with ⌘ down or up: with ⌘ every link solid;
 /// without it only an OSC 8 link, dashed — the plain-text link is not
 /// highlighted at all. `None` → nothing to show.
 fn hover_style(hit: &LinkHit, command: bool) -> Option<UnderlineStyle> {
@@ -353,8 +352,7 @@ fn span_rects_px(spans: &[LinkSpan], metrics: CellMetrics, origin_px: f64) -> Ve
 }
 
 /// The UTTypes a file conforms to to be opened in its default application
-/// (`links::Content::Document`): text and source code, image, PDF, audio/video
-/// (`plan.md` → R5.1).
+/// (`links::Content::Document`): text and source code, image, PDF, audio/video.
 const DOCUMENT_TYPES: [&str; 6] = [
     "public.plain-text",
     "public.source-code",
@@ -369,7 +367,7 @@ const DOCUMENT_TYPES: [&str; 6] = [
 /// `.command` or a `.py` runs it (Terminal, Python Launcher). Asked first.
 const NEVER_DOCUMENT: [&str; 2] = ["public.script", "public.executable"];
 
-/// The content class of a file name's extension, from UTType (044 R5.1).
+/// The content class of a file name's extension, from UTType.
 /// `Other` without an extension, for an unknown one and if the runtime has no
 /// `UTType` class — the white list's safe side (the file is revealed).
 pub(crate) fn extension_content(ext: &str) -> Content {
@@ -632,7 +630,7 @@ impl BateriView {
             let Some(session) = self.session() else {
                 return Check::Gone;
             };
-            // Before the user's ssh has logged in nothing is asked (047 R9.1):
+            // Before the user's ssh has logged in nothing is asked:
             // the check would connect in the background. No link, nothing
             // remembered as missing — the next hover after the login asks.
             if session.remote_target().is_none() || crate::jobs::remote_login(session).is_none() {
@@ -657,8 +655,7 @@ impl BateriView {
         }
     }
 
-    /// Asks the pane's helper session which remote candidate exists (045
-    /// Karar 1-B, 10); the answer returns to the main queue by pane id with the
+    /// Asks the pane's helper session which remote candidate exists; the answer returns to the main queue by pane id with the
     /// generation it was asked under — a reply from an ended ssh session is
     /// dropped ([`BateriView::link_remote_verified`]).
     fn verify_remote(&self, candidates: Vec<String>, hit: LinkHit, then: Then) {
@@ -696,7 +693,7 @@ impl BateriView {
 
     /// The helper's answer: the hover's or the menu's, as [`Then`] says — only if
     /// the remote session it was asked under still runs. An error is no link and
-    /// its reason goes to the label while ⌘ is down (R1.3).
+    /// its reason goes to the label while ⌘ is down.
     fn link_remote_verified(
         &self,
         hit: &LinkHit,
@@ -710,7 +707,7 @@ impl BateriView {
             .is_some_and(|(now, ..)| now == command);
         let (found, note) = match found {
             Ok(found) if current => {
-                // The helper answered: the login works (047 R7.2).
+                // The helper answered: the login works.
                 if let Some(pane) = self.pane() {
                     pane.background_succeeded();
                 }
@@ -815,7 +812,7 @@ impl BateriView {
         }
     }
 
-    /// Writes a note in the pane's label in place of a link (R1.2, R1.3); a
+    /// Writes a note in the pane's label in place of a link; a
     /// shown hover goes.
     fn show_note(&self, text: &str) {
         let shown = {
@@ -903,7 +900,7 @@ impl BateriView {
     /// hover is locked for the release and the caller routes the gesture to the
     /// link (`Gesture::pressed_link`), calling neither the report nor the
     /// selection. The answer says whether the link can be dragged out to Finder:
-    /// only a remote one (045 Karar 14 — a local file is already in Finder).
+    /// only a remote one (a local file is already in Finder).
     pub(crate) fn link_press(&self, event: &NSEvent) -> Option<bool> {
         if !event
             .modifierFlags()
@@ -953,7 +950,7 @@ impl BateriView {
     }
 
     /// The click's action (`links::action`, the white list). A remote path has
-    /// its own policy (045 Karar 3, 13): a file previews
+    /// its own policy: a file previews
     /// ([`crate::pane::TerminalPane::preview_remote`]), a folder does nothing.
     fn open_link(&self, link: &Verified) {
         if let Some((path, entry)) = &link.remote {
@@ -988,7 +985,7 @@ impl BateriView {
 
     /// A right press the terminal owns — mouse mode off (or Shift, its escape)
     /// in the grid, always on the fill band and the dock's input line (never the
-    /// application's screen): the context menu if a link is under it (Karar 7).
+    /// application's screen): the context menu if a link is under it.
     /// No ⌘ needed. A link the hover already verified pops at once; a path
     /// candidate is `stat`ed on the background queue first and pops on its
     /// return ([`BateriView::settle_menu`]) — a missing path is no link and
@@ -1179,7 +1176,7 @@ impl BateriView {
         clipboard::copy(&NSPasteboard::generalPasteboard(), text);
     }
 
-    /// "Copy as scp Path" (R3): `-P 2222 deploy@prod:/var/log/x` from the
+    /// "Copy as scp Path": `-P 2222 deploy@prod:/var/log/x` from the
     /// remote session's argv ([`remote_files::scp_path`]).
     pub(crate) fn menu_copy_scp_path(&self) {
         let link = self.link_state().borrow_mut().menu.take();

@@ -11,16 +11,15 @@ license.workspace = true
 fixture = []
 
 # CoreText is the macOS backend's font system (`src/coretext.rs`); no other
-# platform sees it (042 Karar 1).
+# platform sees it.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = { workspace = true }
 objc2-core-graphics = { workspace = true }
 objc2-core-text = { workspace = true }
 
 # FreeType + fontconfig (+ harfrust for clusters) are the Linux backend's font
-# system
-# (`src/freetype.rs`); the decision and the linking are in the workspace
-# manifest (042 Karar 5).
+# system (`src/freetype.rs`); the decision and the linking are in the workspace
+# manifest.
 [target.'cfg(target_os = "linux")'.dependencies]
 freetype-rs = { workspace = true }
 fontconfig = { workspace = true }

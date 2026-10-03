@@ -28,7 +28,7 @@ use std::fmt::Write as _;
 /// continuation* in both zsh and bash, so a file whose name carries a newline (pathological
 /// but possible) is written with its two parts joined. Not escaping would be worse — a raw
 /// newline becomes a command boundary in the buffer and would run a line the user did not
-/// type. `$'\n'` would be correct but would split the single rule in two (018 Karar 4: one
+/// type. `$'\n'` would be correct but would split the single rule in two (one
 /// type, one rule).
 ///
 /// An empty list gives an empty string: if the drop has no readable path, there is nothing to
@@ -49,7 +49,7 @@ pub fn shell_quote(paths: &[String]) -> String {
     line
 }
 
-/// The rule of Edit ▸ Paste Escaped Text (⌃⌘V) (034 Karar 3): text without a newline goes
+/// The rule of Edit ▸ Paste Escaped Text (⌃⌘V): text without a newline goes
 /// through the Finder drop's escaping ([`shell_quote`], same appearance); text with a newline
 /// is wrapped **entirely in single quotes** and any `'` inside becomes `'\''`.
 ///
@@ -83,7 +83,7 @@ pub fn paste_quote(text: &str) -> String {
     quoted
 }
 
-/// The remote session's **re-run line** (037 Karar 1): argv → a single readable line to be
+/// The remote session's **re-run line**: argv → a single readable line to be
 /// written to the shell. The line written by ⌘T and by reconnecting is in front of the user's
 /// eyes (the new tab's dock, the history), so [`shell_quote`]'s narrow whitelist for drops
 /// would read `ssh deploy\@prod -o User\=x` here.
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn spaces_are_escaped_so_the_shell_sees_one_argument() {
-        // The set's headline case (018 Karar 4, Terminal.app parity): a file with a space in
+        // The headline case (Terminal.app parity): a file with a space in
         // its name must be a single argument, otherwise the shell sees two paths.
         assert_eq!(
             quote("/Users/a/İki Kelime/a.txt"),
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn a_command_line_stays_readable() {
-        // 037 Karar 1: `@ : , +` and a `=` inside a word are not escaped.
+        // `@ : , +` and a `=` inside a word are not escaped.
         assert_eq!(
             line(&["ssh", "-o", "User=x", "deploy@prod"]),
             "ssh -o User=x deploy@prod"
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn a_control_character_puts_its_argument_in_ansi_c_quotes() {
-        // `\` + newline would be a line continuation (`/code-review`): the argument goes into
+        // `\` + newline would be a line continuation (found in code review): the argument goes into
         // `$'…'`, and the `\` and `'` inside it are escaped.
         assert_eq!(
             line(&["ssh", "-t", "prod", "echo a\necho 'b'\\"]),

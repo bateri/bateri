@@ -1,8 +1,7 @@
-//! Uploading a Finder drop to the remote directory (037 Karar 7 → Kullanıcı
-//! kararı): a file or folder dropped in a remote session goes, after
-//! confirmation, to the remote shell's directory through a `tar c | ssh … tar x`
-//! stream. Nothing is pasted on its own (037 phase-7); the result line says
-//! where it went.
+//! Uploading a Finder drop to the remote directory: a file or folder dropped in
+//! a remote session goes, after confirmation, to the remote shell's directory
+//! through a `tar c | ssh … tar x` stream. Nothing is pasted on its own; the
+//! result line says where it went.
 //!
 //! Three halves:
 //!
@@ -12,7 +11,7 @@
 //! - **Process:** local measurement ([`measure`]), the probe ([`probe`]) and the
 //!   stream ([`transfer`]) — all on a background thread, results to the main queue.
 //! - **Queue** ([`Transfers`]): the main thread's state — order, progress, result
-//!   line — for **both directions** (045 Karar 12): an item carries its way
+//!   line — for **both directions**: an item carries its way
 //!   ([`Way`]) and lane ([`Lane`]), the stream of a download is
 //!   [`crate::download`]'s. AppKit-free; `uploader` sets up the sheet and the
 //!   dispatch.
@@ -84,7 +83,7 @@ pub fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
     ssh_argv_for(target, &Route::Direct)
 }
 
-/// [`ssh_argv`] on a route ([`crate::ssh_route`], 047): on [`Route::Direct`]
+/// [`ssh_argv`] on a route ([`crate::ssh_route`]): on [`Route::Direct`]
 /// byte for byte today's argv; on [`Route::Ours`] `-o ControlPath=<socket>` goes
 /// **behind** the user's options, right before the destination — ssh takes a
 /// key's first value, so a `-S`/`-o ControlPath` the user typed is never
@@ -635,7 +634,7 @@ fn landed_label(entry: &Item) -> String {
     }
 }
 
-/// Which way a set of items goes (045 Karar 6): every text that names the
+/// Which way a set of items goes: every text that names the
 /// direction reads it from here, so an upload-only queue keeps its words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ways {
@@ -735,7 +734,7 @@ fn failure_reason(end: &End, host: &str) -> Option<String> {
 const LOCAL_DISK_FULL: &str = "disk full on this Mac";
 
 /// The result line's body, its tone and the number of leading characters drawn in
-/// that tone (037 phase-7): success green, cancel dim, the failure text red and the
+/// that tone: success green, cancel dim, the failure text red and the
 /// count after it dim.
 fn end_line(end: &End, host: &str, tally: &Tally) -> (String, TransferTone, usize) {
     let verb = tally.ways.verb();
@@ -768,7 +767,7 @@ fn end_line(end: &End, host: &str, tally: &Tally) -> (String, TransferTone, usiz
     (body, tone, lead)
 }
 
-/// The notification shown while bateri is in the background (037 phase-7): title
+/// The notification shown while bateri is in the background: title
 /// and body. Cancelling is the user's own action — no notification.
 fn end_notice(end: &End, host: &str, tally: &Tally) -> Option<(String, String)> {
     if let Some(reason) = failure_reason(end, host) {
@@ -869,7 +868,7 @@ pub struct Sheet {
     pub enabled: bool,
 }
 
-/// The confirmation sheet (Kullanıcı kararı 1; its text 037 phase-7): the title says
+/// The confirmation sheet: the title says
 /// what goes where, the first line states the size and destination
 /// (`96.0 MB → /var/www/app`, with the file count for a folder), a list of names for
 /// multiple items; same-named item, free space and tar as today. `reported`: whether
@@ -1196,7 +1195,7 @@ const LOCAL_TAR_FLAGS: [&str; 7] = [
 /// The local `tar c`'s flags up to `-C` on Linux, where `/usr/bin/tar` is GNU
 /// tar: it has no `--no-mac-metadata` (there is no Mac metadata to drop) and its
 /// default `gnu` format writes `@LongLink` records, so the format is pinned to
-/// pax — the family [`TarWatcher`] reads. Found by `make linux` (043 phase-3).
+/// pax — the family [`TarWatcher`] reads. Found by `make linux`.
 #[cfg(not(target_os = "macos"))]
 const LOCAL_TAR_FLAGS: [&str; 7] = [
     "-c",
@@ -1214,7 +1213,7 @@ const LOCAL_TAR_FLAGS: [&str; 7] = [
 ///
 /// Cancel or disk full: both processes are killed and the file **being written** is
 /// deleted remotely — for a single file the file itself, for a folder only the one
-/// being written at that moment; finished ones stay (Kullanıcı kararı 5, 6).
+/// being written at that moment; finished ones stay.
 pub fn transfer(
     ssh: &[String],
     local: &Local,
@@ -1346,14 +1345,14 @@ pub(crate) fn collect_stderr(
     })
 }
 
-/// The window and tab title (037 phase-7): while an upload streams, `↑ N% · ` in
+/// The window and tab title: while an upload streams, `↑ N% · ` in
 /// front of the current title — on the alternate screen (vim) there is no dock and
 /// this is the only place showing progress; otherwise the title as is.
 pub fn titled(percent: Option<u8>, title: &str) -> String {
     titled_as(percent.map(|percent| ("↑", percent)), title)
 }
 
-/// [`titled`] with the direction's arrow (045 Karar 6): `↓ N% · ` while only
+/// [`titled`] with the direction's arrow: `↓ N% · ` while only
 /// downloads stream, `↑↓ N% · ` while both do ([`Transfers::title_prefix`]).
 pub fn titled_as(prefix: Option<(&str, u8)>, title: &str) -> String {
     match prefix {
@@ -1364,13 +1363,13 @@ pub fn titled_as(prefix: Option<(&str, u8)>, title: &str) -> String {
 
 // ─── queue ───────────────────────────────────────────────────────────────
 
-/// Stopping the streaming item asks first if it has been running longer than this
-/// (037 phase-7) — a **design constant, not a measurement**. Stopping a short upload
+/// Stopping the streaming item asks first if it has been running longer than
+/// this — a **design constant, not a measurement**. Stopping a short upload
 /// is cheap (dropping again takes seconds); losing an upload past half a minute must
 /// not happen with a single wrong click.
 pub const STOP_ASK_AFTER: Duration = Duration::from_secs(30);
 
-/// Which way an item goes (045 Karar 12): `Up` to the server, `Down` to this Mac.
+/// Which way an item goes: `Up` to the server, `Down` to this Mac.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Direction {
     #[default]
@@ -1378,7 +1377,7 @@ pub enum Direction {
     Down,
 }
 
-/// Where an item waits (045 Karar 6, 7): the **queue** runs one item at a time
+/// Where an item waits: the **queue** runs one item at a time
 /// (uploads and right-click downloads); a **preview** and a **Finder** drop start
 /// at once — the user is looking at the screen, or Finder holds a placeholder.
 /// Every lane is counted alike by the line, the totals, the list, the stop question
@@ -1392,7 +1391,7 @@ pub enum Lane {
 }
 
 /// How an item travels: an upload always waits in the queue; a download carries
-/// its lane and what happens when its landing name is taken (045 R4).
+/// its lane and what happens when its landing name is taken.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Way {
     #[default]
@@ -1498,7 +1497,7 @@ enum EntryState {
     Done,
 }
 
-/// An item of the queue. A finished item **stays** on the list (037 phase-7): the
+/// An item of the queue. A finished item **stays** on the list: the
 /// popover shows it as `✓ Uploaded` and the result line counts it.
 #[derive(Debug)]
 struct Item {
@@ -1534,7 +1533,7 @@ pub struct Started {
     pub shared: Arc<Shared>,
 }
 
-/// A tab's transfer queue — **bound to that tab's ssh connection** (Kullanıcı kararı 7):
+/// A tab's transfer queue — **bound to that tab's ssh connection**:
 /// its generation is the remote session's command generation; if the generation
 /// changes (ssh closed) the pending items are cancelled.
 #[derive(Debug)]
@@ -1561,7 +1560,7 @@ struct Queue {
     /// A preview or Finder lane item failed: those lanes are independent of the
     /// queue lane, so the failure does not stop the waiting items — it is the
     /// queue's end once everything else finished, unless that end is already
-    /// something else (`/code-review`, 045 set gate).
+    /// something else.
     side_failure: Option<End>,
 }
 
@@ -1643,15 +1642,14 @@ pub struct Transfers {
     serial: u64,
     /// The line last written to the dock ([`Self::shown`]).
     shown: Option<Transfer>,
-    /// The button under the mouse and whether the list is open (037 phase-6): the line
+    /// The button under the mouse and whether the list is open: the line
     /// is reborn on every refresh and these two are stamped on it at each birth —
     /// otherwise the 200 ms refresh would overwrite the mouse state.
     hover: Option<TransferAction>,
     list_open: bool,
     /// The arrow and percentage last written to the title ([`Self::title_percent_changed`]).
     titled: Option<(&'static str, u8)>,
-    /// An update waits for the application's transfers to end (055 R5.2,
-    /// `discussion.md` → Karar 10 (a)): how many are left across every
+    /// An update waits for the application's transfers to end: how many are left across every
     /// pane — the line leads with it ([`Self::status`]). `None`: no update waits.
     update_waits: Option<usize>,
 }
@@ -1674,7 +1672,7 @@ pub enum Stop {
     Ask(StopQuestion),
 }
 
-/// The stop question (037 phase-7): the sheet's title and text, which item it was
+/// The stop question: the sheet's title and text, which item it was
 /// asked for (if it finishes meanwhile the sheet closes on its own) and whether it is
 /// the whole queue.
 #[derive(Debug, PartialEq, Eq)]
@@ -1703,9 +1701,9 @@ pub enum RowAction {
     Cancel,
     /// Remove the waiting item from the queue (does not ask).
     Remove,
-    /// A finished download: reveal it in Finder (045 Karar 6).
+    /// A finished download: reveal it in Finder.
     ShowInFinder,
-    /// A finished preview: open it (045 Karar 6).
+    /// A finished preview: open it.
     Open,
 }
 
@@ -1734,7 +1732,7 @@ pub struct ListRow {
     pub action: Option<RowAction>,
 }
 
-/// The "Show transfers (N)" popover (037 phase-7, 045 Karar 6): title and rows.
+/// The "Show transfers (N)" popover: title and rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TransferList {
     pub title: String,
@@ -1771,7 +1769,7 @@ impl Transfers {
         self.queue.is_some()
     }
 
-    /// The items not finished yet — streaming or waiting (055 R5.2): what an
+    /// The items not finished yet — streaming or waiting: what an
     /// update waits for. A cancelled queue still deleting its half-written
     /// file counts its streaming item.
     pub fn unfinished(&self) -> usize {
@@ -1847,8 +1845,8 @@ impl Transfers {
     }
 
     /// Starts at `now` every item that may start: each waiting preview and Finder
-    /// item, and the queue lane's next item if none of its own streams (045 Karar 6,
-    /// 7). Empty if the queue is ending.
+    /// item, and the queue lane's next item if none of its own streams.
+    /// Empty if the queue is ending.
     pub fn start(&mut self, now: Instant) -> Vec<Started> {
         let Some(queue) = self.queue.as_mut() else {
             return Vec::new();
@@ -1925,7 +1923,7 @@ impl Transfers {
             .is_some_and(|queue| queue.current(id).is_some())
     }
 
-    /// A stop request (037 phase-7) at `now`: `all` is the whole queue (⌘., the line's
+    /// A stop request at `now`: `all` is the whole queue (⌘., the line's
     /// `Cancel`/`Cancel all`, the popover's `Cancel all`), otherwise the queue lane's
     /// streaming item. [`Self::stop_request_item`] with no id.
     pub fn stop_request(&self, all: bool, now: Instant) -> Option<Stop> {
@@ -2057,7 +2055,7 @@ impl Transfers {
         }
         // With nothing else waiting or streaming, stopping the streaming item cancels
         // the queue: the result must say `Cancelled — 1 of 2 uploaded, …`, not the
-        // finished items' `✓` (`/code-review`).
+        // finished items' `✓`.
         let alone = queue.waiting() + queue.running.len().saturating_sub(1) == 0;
         if all || queue.entries.len() <= 1 || alone {
             return self.cancel();
@@ -2126,7 +2124,7 @@ impl Transfers {
     /// The streaming item `id` finished (`landed`: where a download landed); the
     /// result if the queue finished too — once **nothing** streams any more, so a
     /// preview's report is never lost behind a failed upload. Nothing is pasted on its
-    /// own (037 phase-7): an upload can take minutes and the path would be typed into
+    /// own: an upload can take minutes and the path would be typed into
     /// whatever vim or mysql is open at that moment — the result line says where it went.
     pub fn finish_item(
         &mut self,
@@ -2208,7 +2206,7 @@ impl Transfers {
 
     /// Whether a preview to `landing` is already on its way: a second ⌘-click on
     /// the same file waits for it instead of streaming the copy twice
-    /// (`/code-review`, 045 — the second stream's cache question could see the
+    /// (the second stream's cache question could see the
     /// first one's renamed but not yet recorded copy as edited).
     pub fn previewing(&self, landing: &Path) -> bool {
         self.queue.as_ref().is_some_and(|queue| {
@@ -2232,7 +2230,7 @@ impl Transfers {
         let queue = self.queue.take()?;
         self.serial += 1;
         // ssh closed but the streaming item finished over its own connection and
-        // nothing was waiting: everything arrived, the result is a success (`/code-review`).
+        // nothing was waiting: everything arrived, the result is a success.
         let all_done = queue
             .entries
             .iter()
@@ -2244,7 +2242,7 @@ impl Transfers {
         let tally = Tally::of(&queue.entries);
         let (body, tone, lead) = end_line(&end, &queue.host, &tally);
         // A queue of previews only that succeeded opens its files: the opened
-        // window is the news, a notification would repeat it (045 phase-4). The
+        // window is the news, a notification would repeat it. The
         // result line stays — it says where the copy is. A failure still notifies.
         let previews_only = queue
             .entries
@@ -2334,7 +2332,7 @@ impl Transfers {
         Some((queue.bytes_done + queue.running_bytes(), queue.bytes_total))
     }
 
-    /// The percentage for the title prefix (037 phase-7): while an item streams, based
+    /// The percentage for the title prefix: while an item streams, based
     /// on the whole queue's bytes, rounded down; `None` if nothing streams or it is
     /// being cancelled. If ssh closed, the streaming items finish over their own
     /// connections and the prefix stays with them.
@@ -2391,7 +2389,7 @@ impl Transfers {
         self.queue.is_none() && self.serial == serial
     }
 
-    /// The popover's content (037 phase-7): all items — finished, streaming and
+    /// The popover's content: all items — finished, streaming and
     /// waiting — in order. `None` if there is no queue or it is ending: the popover
     /// must close.
     pub fn list(&self) -> Option<TransferList> {
@@ -2497,8 +2495,7 @@ impl Transfers {
 
     /// The dock's status line at `now`; `None` if nothing streams. The line names the
     /// queue lane's item (otherwise the longest-streaming one); a queue going one way
-    /// leads with its arrow and `k of n`, a mixed one with the summary `↑1 ↓2`
-    /// (045 Karar 6).
+    /// leads with its arrow and `k of n`, a mixed one with the summary `↑1 ↓2`.
     pub fn status(&mut self, now: Instant) -> Option<Transfer> {
         let queue = self.queue.as_mut()?;
         let current = queue.subject()?;
@@ -2525,7 +2522,7 @@ impl Transfers {
         let local = &entry.job.local;
         let items = queue.entries.len();
         let mut body = String::new();
-        // The update's wait leads (055 R5.2): ⌘. is the way past it.
+        // The update's wait leads: ⌘. is the way past it.
         if let Some(left) = self.update_waits.filter(|&left| left > 0) {
             let noun = if left == 1 { "transfer" } else { "transfers" };
             let _ = write!(body, "Update waits for {left} {noun} · ");
@@ -2551,7 +2548,7 @@ impl Transfers {
             body.push('/');
         }
         // The folder's file count next to the name: the item's own information, while
-        // the bytes are the queue's (the demo the user approved, after 037 phase-7).
+        // the bytes are the queue's (the demo the user approved).
         if local.dir {
             let _ = write!(
                 body,
@@ -3238,7 +3235,7 @@ mod tests {
         ));
     }
 
-    /// 055 R5.2: the unfinished items are what an update waits for, and a
+    /// The unfinished items are what an update waits for, and a
     /// waiting update leads the line — only while it waits.
     #[test]
     fn a_waiting_update_leads_the_line_with_the_unfinished_count() {
@@ -3717,7 +3714,7 @@ mod tests {
 
     #[test]
     fn a_failed_preview_does_not_stop_the_waiting_queue() {
-        // `/code-review` (045 set gate): the lanes are independent.
+        // The lanes are independent.
         let now = Instant::now();
         let mut transfers = queue_of(vec![
             download("a.log", Lane::Queue, 10),
@@ -3756,7 +3753,7 @@ mod tests {
 
     #[test]
     fn a_download_during_the_result_line_starts_at_once() {
-        // 045 phase-4 (f): the right-click download while the last result lingers.
+        // The right-click download while the last result lingers.
         let now = Instant::now();
         let mut transfers = queue_of(vec![download("a.log", Lane::Queue, 10)]);
         let started = transfers.start(now);

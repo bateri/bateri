@@ -1,4 +1,4 @@
-//! The focus query (050): an outside process asks a running bateri, for the
+//! The focus query: an outside process asks a running bateri, for the
 //! one pane whose identity it holds, "is the user looking at this pane, and
 //! how long since they last touched it".
 //!
@@ -6,7 +6,7 @@
 //! finished or asks something; when the user is looking at that session's
 //! pane the signal is noise. From outside, without a permission, nobody can
 //! tell which pane inside bateri has the focus — so bateri says it, **for the
-//! asked pane only**: the pane's UUID (`bateri://tab/<UUID>`, 038) is the
+//! asked pane only**: the pane's UUID (`bateri://tab/<UUID>`) is the
 //! authority, no other pane, title, directory or list leaves by any path.
 //! Pull only, asked at the moment of the event; `idle` in whole seconds,
 //! because a millisecond series of key moments is a known side channel on
@@ -20,8 +20,6 @@
 //! clock that counts sleep, and `bateri focus`'s body ([`focus_main`]).
 //! No answer in time, an unknown version or a broken line is `pane=unknown` —
 //! never `pane=none`, which only means "no live instance knows this pane".
-//!
-//! The rationale is in `.tasks/050-odak-sorgusu/discussion.md` → Karar 1–9.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -82,7 +80,7 @@ pub const EXIT_ANSWER: i32 = 0;
 pub const EXIT_USAGE: i32 = 2;
 
 /// `bateri focus`'s exit code for `pane=unknown` — kept apart from `none` so
-/// the difference stays testable (Karar 8).
+/// the difference stays testable.
 pub const EXIT_UNKNOWN: i32 = 3;
 
 // ─── wire ────────────────────────────────────────────────────────────────
@@ -101,7 +99,7 @@ pub enum Answer {
 
 impl Answer {
     /// The token line, without the newline: a machine contract — tokens are
-    /// added, never removed (`CLAUDE.md` → Dil).
+    /// added, never removed.
     pub fn token_line(&self) -> String {
         match self {
             Answer::Live { focused, idle_secs } => {
@@ -204,7 +202,7 @@ fn read_line(stream: &mut UnixStream, limit: usize, deadline: Instant) -> Option
 /// A moment on a monotonic clock that **counts sleep** (macOS
 /// `CLOCK_MONOTONIC`, Linux `CLOCK_BOOTTIME`): Rust's `Instant` stops during
 /// sleep on macOS, and after two hours with the lid closed `idle` would say
-/// four seconds — the outside process would take it as "looking" (Karar 6).
+/// four seconds — the outside process would take it as "looking".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Moment(Duration);
 
@@ -340,7 +338,7 @@ fn answer(mut stream: UnixStream, answerer: &Answerer) {
 // ─── client ──────────────────────────────────────────────────────────────
 
 /// The client's result: the answer and the line to print — for `pane=live`
-/// the instance's own line, as it sent it (Karar 8: a new token reaches the
+/// the instance's own line, as it sent it (a new token reaches the
 /// outside process without a new client); otherwise the canonical line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reply {

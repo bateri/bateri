@@ -1,9 +1,9 @@
 //! bt-gpu — the renderer (wgpu), shaders, the frame loop, motion, overlays.
 //!
 //! It takes "what to draw" from `bt-core` and does not know "what it means":
-//! a branch recognising an escape sequence does not come in here
-//! (`CLAUDE.md` → pitfalls). **No platform library in its direct
-//! dependencies or source** (040): the GPU is reached through wgpu, and the
+//! a branch recognising an escape sequence does not come in here.
+//! **No platform library in its direct
+//! dependencies or source**: the GPU is reached through wgpu, and the
 //! two platform jobs left — the window's layer and the vsync rhythm — are
 //! handed in by `bt-shell`. The layer comes as a pointer through one `unsafe`
 //! entry ([`Surface::from_layer`]); the rhythm as a [`Pacer`] (the tick, its

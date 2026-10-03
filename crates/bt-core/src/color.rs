@@ -76,13 +76,12 @@ impl LinearRgba {
 /// (OSC 10/11) are all read from the same value. Had they lived in two places,
 /// when one changed the window and the cells would be different colors.
 ///
-/// Seven of the **nine-role** model are here: 007's four, 010's two status
-/// roles (`success`, `error`) and 014's `cursor`; beside them 031's
-/// `selection` and 033's two search highlights (`search_match`,
-/// `search_current`) — outside the nine: the model is the reference's, the
-/// selection and search colors are the terminal's own surface. The remaining
-/// two status roles (warning, info) are left to later sets — **a role that
-/// isn't drawn isn't added**, because the day a key with no consumer enters
+/// The **nine-role** model: the four base roles, the two status roles
+/// (`success`, `error`) and `cursor`, then `info` and `warning`; beside them
+/// `selection` and the two search highlights (`search_match`,
+/// `search_current`) — outside the nine: the selection and search colors are
+/// the terminal's own surface. The last two status roles (warning, info) came
+/// only once something drew them — **a role that isn't drawn isn't added**, because the day a key with no consumer enters
 /// the theme file it promises a format, and the promise has nothing behind it.
 /// The fields are `0xRRGGBB` (the top byte is not read) and `pub`: the type is
 /// a record, like `Settings`; the path that establishes validity is the theme
@@ -120,14 +119,14 @@ pub struct Theme {
     pub cursor: u32,
     /// The mouse selection's highlight — the ground of the line runs.
     ///
-    /// **The text's color doesn't change** (031 Karar 3): the selected cell is
+    /// **The text's color doesn't change**: the selected cell is
     /// drawn with its own foreground, so this color has to be legible with the
     /// default foreground **and** with the palette's colored eight, and also
     /// distinct from the background. In an unfocused window it fades toward the
     /// background ([`Theme::selection_unfocused_linear`]).
     pub selection: u32,
     /// The highlight of all matches of the scrollback search (⌘F) — the tone
-    /// that stays in the background and says "it's here too" (033 Karar 7).
+    /// that stays in the background and says "it's here too".
     ///
     /// The same contract as the selection: the text is drawn with its own
     /// foreground, so the criterion is the selection's (text legible on the
@@ -146,7 +145,7 @@ pub struct Theme {
     /// Status: error. Today the stripe of a command block that ended with a
     /// nonzero exit code.
     pub error: u32,
-    /// Status: info. Today the **remote session** (036): the `⇄` with the host
+    /// Status: info. Today the **remote session**: the `⇄` with the host
     /// in the context line and the dock's top hairline.
     ///
     /// Not `accent`, because that is the running command's stripe and ssh is a
@@ -154,7 +153,7 @@ pub struct Theme {
     /// ("something is running" / "you are remote"). It must be legible on the
     /// background (3:1, `color::tests`): the host is text in the context line.
     pub info: u32,
-    /// Status: warning. Today the remote host marked **staging** (037 Karar 3):
+    /// Status: warning. Today the remote host marked **staging**:
     /// `⇄ host`, the dock's top hairline and the tab's dot.
     ///
     /// Its value is the theme's own ANSI yellow (the precedent of `info`'s
@@ -175,10 +174,10 @@ impl Theme {
     /// The ANSI tones are colors with broken saturation on a neutral gray base.
     /// Black is deliberately distinct from the background — `\e[40m` must be a
     /// visible block, not an undrawn cell. `dim` is the result of vte's
-    /// multiplication of `foreground × 2/3` (`f32`, truncation): until 006 the
+    /// multiplication of `foreground × 2/3` (`f32`, truncation): originally the
     /// dim foreground was computed that way. The role is a value, not a rule —
-    /// when the dim of named colors started blending toward the background in
-    /// 007 phase-3 this value stayed in place.
+    /// when the dim of named colors started blending toward the background this
+    /// value stayed in place.
     ///
     /// `success` and `error` are the palette's green and red **themselves**:
     /// the same precedent as `accent` being equal to blue. The reason the role
@@ -206,8 +205,7 @@ impl Theme {
         // A cool, dark and **low-saturation** slate; from `accent`'s family but
         // much darker than it, because text will be read on it. Criterion: every
         // text color that exceeds 3:1 on the background also exceeds 3:1 on the
-        // selection (the weakest is `red`, 3.84; the calculation is in 031
-        // phase-3 → Uygulama Notları). The saturation is deliberately low: a
+        // selection (the weakest is `red`, 3.84). The saturation is deliberately low: a
         // bluer tone (`0x2b3a50`) stayed in the same color family as ANSI blue
         // and made that text harder to read than the ratio says. Distinct in
         // tone from the palette's two near-gray blacks (`0x22252b`, `0x4a4e57`)
@@ -221,16 +219,15 @@ impl Theme {
         // criterion — every text color that exceeds 3:1 on the background
         // exceeds it on both highlights; the weakest is `red` on the current
         // match, 3.13 (`search_highlights_keep_every_readable_text_readable`).
-        // **A taste decision**, chosen with an offscreen dump (033 phase-2 →
-        // Uygulama Notları).
+        // **A taste decision**, chosen with an offscreen dump.
         search_match: 0x3a3212,
         search_current: 0x503a0c,
         success: 0x8bb58b,
         error: 0xd16d6a,
-        // The theme's own ANSI cyan (036 Karar 6), the same precedent as
+        // The theme's own ANSI cyan, the same precedent as
         // `success`/`error` being the palette's own colors.
         info: 0x79b3b3,
-        // The theme's own ANSI yellow (037 Karar 3).
+        // The theme's own ANSI yellow.
         warning: 0xd6b16a,
         ansi: [
             0x22252b, 0xd16d6a, 0x8bb58b, 0xd6b16a, // black   red      green    yellow
@@ -289,9 +286,9 @@ impl Theme {
         search_current: 0xfee29a,
         success: 0x3b7a3b,
         error: 0xb5423d,
-        // The theme's own ANSI cyan (036 Karar 6).
+        // The theme's own ANSI cyan.
         info: 0x23787f,
-        // The theme's own ANSI yellow (037 Karar 3).
+        // The theme's own ANSI yellow.
         warning: 0x8f6a00,
         ansi: [
             0x2b2e35, 0xb5423d, 0x3b7a3b, 0x8f6a00, // black   red      green    yellow
@@ -340,7 +337,7 @@ impl Theme {
     }
 
     /// The accent color, **linear** RGBA — today **only the running command
-    /// block's stripe**. The cursor was split into its own role in 014
+    /// block's stripe**. The cursor was split into its own role
     /// ([`Theme::cursor_linear`]); while the two were fed from a single value,
     /// a "make the cursor gold" request made the stripe gold too.
     pub const fn accent_linear(&self) -> LinearRgba {
@@ -358,8 +355,7 @@ impl Theme {
     /// Not a new role but a derived value (the precedent of
     /// [`Theme::quiet_linear`]): the selection isn't erased, it's pulled back —
     /// when focus returns the same selection is in the same place. Which one
-    /// gets drawn is `bt-gpu`'s decision, because focus doesn't enter `bt-core`
-    /// (031 Karar 9).
+    /// gets drawn is `bt-gpu`'s decision, because focus doesn't enter `bt-core`.
     pub const fn selection_unfocused_linear(&self) -> LinearRgba {
         linear_rgba(dim_toward(rgb(self.selection), self.background_rgb()))
     }
@@ -408,8 +404,8 @@ impl Theme {
 
     /// The dim of the dim — text that **must be read but doesn't stand out**.
     ///
-    /// **Not a new role but a derived value** (`CLAUDE.md` → a role that isn't
-    /// drawn isn't added): the dim foreground blended into the background once
+    /// **Not a new role but a derived value** (a role that isn't drawn isn't
+    /// added): the dim foreground blended into the background once
     /// more, the rule again [`dim_toward`].
     ///
     /// Its only consumer is the **parent directories** in the dock's context
@@ -429,7 +425,7 @@ impl Theme {
     /// The extra step is deliberate and the criterion is this: the separator is
     /// **not ink**. Had it stopped at `quiet_linear`, the lines would have the
     /// same weight as the quietest text next to them and the eye would take them
-    /// for something to read too (the user, 012: "darken the lines' colors
+    /// for something to read too (the user: "darken the lines' colors
     /// further, don't make them so noticeable"). It must be seen but must not be
     /// something to read.
     pub const fn separator_linear(&self) -> LinearRgba {
@@ -437,7 +433,7 @@ impl Theme {
     }
 
     /// The hairlines' color, as **sRGB** bytes (`[r, g, b]`) — the separator
-    /// between splits (`bt-shell`, `NSColor` sRGB; 039 Karar 7). The path to the
+    /// between splits (`bt-shell`, `NSColor` sRGB). The path to the
     /// GPU is [`Theme::separator_linear`]; both come from the same chain (the
     /// precedent of [`Theme::background_srgb`] and `background_linear`), so the
     /// separator and the dock's lines can't drift apart.
@@ -476,17 +472,17 @@ impl Theme {
     }
 
     /// The info role, **linear** RGBA — the remote session's host and the
-    /// dock's top hairline (036).
+    /// dock's top hairline.
     pub const fn info_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.info))
     }
 
-    /// The warning role, **linear** RGBA — the remote host marked staging (037).
+    /// The warning role, **linear** RGBA — the remote host marked staging.
     pub const fn warning_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.warning))
     }
 
-    /// The **single** path from a remote host's mark to a color (037 Karar 3),
+    /// The **single** path from a remote host's mark to a color,
     /// **linear**: production is `error`, staging `warning`, development
     /// `success`, unmarked `info`; a direct color is itself, linearized from
     /// sRGB.
@@ -500,7 +496,7 @@ impl Theme {
 
     /// The mark's color, **sRGB** `0xRRGGBB` — the mapping itself
     /// ([`Theme::mark_linear`] linearizes it). For the tab's dot, which wants
-    /// sRGB (`NSColor`, 037 Karar 4); the linear value is only the GPU's.
+    /// sRGB (`NSColor`); the linear value is only the GPU's.
     pub const fn mark_rgb(&self, mark: HostMark) -> u32 {
         match mark {
             HostMark::Production => self.error,
@@ -567,7 +563,7 @@ const EMBEDDED: [(&str, Theme); 2] = [
 /// the way toward the background.
 ///
 /// Why toward the background: dimness means "reduce the difference from the
-/// background". Until 006 the rule was vte's `× 2/3` (`impl Mul<f32> for Rgb`,
+/// background". Originally the rule was vte's `× 2/3` (`impl Mul<f32> for Rgb`,
 /// its comment literally "the default dim is just *2/3") and that is blending
 /// toward black itself — on a light background it **darkened** dim text and
 /// made it stand out.
@@ -786,7 +782,7 @@ mod tests {
         assert_eq!(THEME.background_linear(), linear_rgba(background));
         // The cursor too from its **own** role: so the answer to the color
         // question and the drawn block don't drift apart. 258 was an alias to
-        // `accent` until now (014 phase-3).
+        // `accent` once.
         assert_eq!(
             THEME.default(NamedColor::Cursor as usize),
             rgb(THEME.cursor)
@@ -798,7 +794,7 @@ mod tests {
     fn separator_has_one_source() {
         // The splits' separator (sRGB, `NSColor`) and the dock's hairlines
         // (linear, GPU) come from the same value: if they part ways, the split
-        // line sits in a different tone than the dock's line (039 Karar 7).
+        // line sits in a different tone than the dock's line.
         for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
             let [r, g, b] = theme.separator_srgb();
             let hex = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
@@ -955,7 +951,7 @@ mod tests {
             let color = Rgb { r: c, g: c, b: c };
             assert_eq!(dim_toward(color, black), color * (2.0 / 3.0), "{c}");
         }
-        // `BATERI`'s `dim` role is 006's calculation frozen.
+        // `BATERI`'s `dim` role is the original calculation frozen.
         assert_eq!(rgb(THEME.dim), dim_toward(rgb(THEME.foreground), black));
     }
 
@@ -1002,8 +998,8 @@ mod tests {
         assert_eq!(resolve(Color::Indexed(2), &colors, &THEME), green);
     }
 
-    /// WCAG contrast ratio between two `0xRRGGBB` — the very measure 031
-    /// phase-3 used for the selection color.
+    /// WCAG contrast ratio between two `0xRRGGBB` — the very measure used for
+    /// the selection color.
     fn contrast(a: u32, b: u32) -> f64 {
         let luminance = |hex: u32| {
             let channel = |shift: u32| {
@@ -1022,8 +1018,8 @@ mod tests {
 
     #[test]
     fn the_info_role_reads_on_the_ground() {
-        // 036 Karar 6: the host is **text** in the context line, so the
-        // criterion is text's — 3:1 on the background. 037's `warning` is in the
+        // The host is **text** in the context line, so the criterion is
+        // text's — 3:1 on the background. `warning` is in the
         // same place (the host marked staging) with the same criterion.
         for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
             for role in [theme.info, theme.warning] {
@@ -1035,7 +1031,7 @@ mod tests {
 
     #[test]
     fn a_host_mark_takes_its_role_color() {
-        // 037 Karar 3: meaning → role; a direct color is linearized from sRGB.
+        // Meaning → role; a direct color is linearized from sRGB.
         let theme = Theme::BATERI;
         assert_eq!(
             theme.mark_linear(HostMark::Production),
@@ -1058,7 +1054,7 @@ mod tests {
 
     #[test]
     fn search_highlights_keep_every_readable_text_readable() {
-        // 033's two highlights carry the selection's criterion (Karar 7: the
+        // The two search highlights carry the selection's criterion (the
         // text in its own foreground): every text color (foreground, `dim`, 16
         // ANSI) that exceeds 3:1 on the embedded theme's background also
         // exceeds 3:1 on the highlight. The current match must be **more

@@ -8,7 +8,7 @@ Usage (from the repo root, after `make bundle` has downloaded Sparkle):
 
 Why it exists: MIT and Apache-2.0 require the notice to travel with copies, and
 `bateri.app` is distributed. A hand-kept list silently went stale whenever a
-dependency was added (the debt in `docs/YOL-HARITASI.md`); the yardstick is
+dependency was added; the yardstick is
 therefore `cargo tree` — `bateri`'s **product** graph (normal + build edges,
 aarch64-apple-darwin), dev-dependencies (like the wgpu trial) are excluded.
 
@@ -37,7 +37,7 @@ TARGET = "aarch64-apple-darwin"
 # Licenses without an MIT option that are accepted, each a recorded decision
 # (all GPL-3 compatible): Apache-2.0 (alacritty_terminal; codespan-reporting
 # via wgpu), Zlib (foldhash via wgpu) and ISC (libloading via wgpu) — user
-# decision 2026-09-30, .tasks/040-linux-kapisi-ve-wgpu/phase-5.md. Anything
+# decision 2026-09-30. Anything
 # else without an MIT option stops the script.
 OWN_LICENSES = {"Apache-2.0", "Zlib", "ISC"}
 # For crates whose license file carries no copyright line, the project's own

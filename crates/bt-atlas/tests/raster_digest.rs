@@ -1,4 +1,4 @@
-//! Bit-equality witness for the atlas (042, `discussion.md` → Karar 4).
+//! Bit-equality witness for the atlas.
 //!
 //! Prints one `key<TAB>digest` line for every observable output of the atlas:
 //! metrics, the font diagnostic, every `slot()` answer (`Placed`) of a fixed
@@ -77,7 +77,7 @@ const RULES: [RuleKind; 7] = [
 /// system cascade (`⏺` is the U+23FA case the ink gate was rebuilt for).
 const FALLBACK: &[char] = &['⏺', '✓', '⚙', 'ℵ', '∮', '⌘', '★', '→', 'Ω', 'λ'];
 
-/// Fallbacks accepted only after shrinking (041); `⧉` is the named case.
+/// Fallbacks accepted only after shrinking; `⧉` is the named case.
 const SHRUNK: &[char] = &['⧉', '⟶', '⨁'];
 
 /// Width-2 characters: CJK, fullwidth, and wide-declared-but-narrow ink
@@ -99,7 +99,7 @@ const CLUSTERS: &[&str] = &[
 /// No font has these: unassigned and supplementary private use.
 const TOFU_CHARS: &[char] = &['\u{0378}', '\u{10fffd}'];
 
-/// Procedural ranges (021): box drawing, blocks, Braille, terminal graphics.
+/// Procedural ranges: box drawing, blocks, Braille, terminal graphics.
 fn procedural() -> impl Iterator<Item = char> {
     [
         0x2500..=0x257f_u32,
@@ -330,7 +330,7 @@ fn configuration(
 }
 
 /// `(line_height, letter_spacing)` pairs: the natural cell, a taller one and
-/// a wider one (052: at or above `1` the slot is the cell, so all three must
+/// a wider one (at or above `1` the slot is the cell, so all three must
 /// stay byte-identical while the slot geometry moves to its own metric).
 const SPACINGS: [(f64, f64); 3] = [(1.0, 1.0), (1.2, 1.0), (1.0, 1.3)];
 

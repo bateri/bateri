@@ -42,7 +42,7 @@ pub struct Dock {
     pub ground: LinearRgba,
     /// Color of the **top** hairline separating the dock from the grid: in a
     /// remote session the color of the host's mark (the theme's `info` when
-    /// unmarked; 036 Karar 6, 037 Karar 3), otherwise [`Self::separator`].
+    /// unmarked), otherwise [`Self::separator`].
     ///
     /// A separate field, because the second hairline (between the input block
     /// and the context row) does not convey distance — that is a division,
@@ -50,7 +50,7 @@ pub struct Dock {
     pub edge: LinearRgba,
     /// The hairline separating the input block from the context row.
     pub separator: LinearRgba,
-    /// The caret's place in the input block — row **and** column (032): a long
+    /// The caret's place in the input block — row **and** column: a long
     /// line wraps, so the caret can stand on the second visual row too. The
     /// row is inside the vertical window, dock-local (`0` = the first drawn
     /// input row). `None` → no caret is drawn (ZLE is not editing the line or
@@ -72,7 +72,7 @@ pub struct Dock {
     /// mark in the phase color.
     ///
     /// `None` → no mark is drawn: the vertical window has scrolled and the
-    /// **first** row of the input is not on screen (032). The mark is the
+    /// **first** row of the input is not on screen. The mark is the
     /// prompt's place; standing next to a continuation row it would read as
     /// if the command started there.
     ///
@@ -84,17 +84,17 @@ pub struct Dock {
     pub sigil: Option<LinearRgba>,
     /// The **filled** share of the top hairline, in ten-thousandths
     /// (`0..=10_000`): while an upload to a remote directory is running the
-    /// line is a progress bar (037 Karar 7 → Kullanıcı kararı 4). The filled
+    /// line is a progress bar. The filled
     /// part is in [`Self::edge`]'s color, the rest in [`Self::track`]'s;
     /// `None` → the line is entirely `edge`.
     pub progress: Option<u16>,
-    /// The progress bar's **empty track** (037 phase-7): the mark's color on a
+    /// The progress bar's **empty track**: the mark's color on a
     /// marked host, the separator's on an unmarked one. The filled part is
     /// always the theme's `info` ([`Self::edge`]) — a red filling bar on prod
     /// read like an error (the user, visual check). A separate field, because
     /// [`Self::separator`] is also the second hairline's color.
     pub track: LinearRgba,
-    /// The buttons of the upload row (037 phase-6), left to right; at most
+    /// The buttons of the upload row, left to right; at most
     /// two. The cells (label) flow from the sink, the fill and border from
     /// here — the layout's decision, not the drawing's
     /// ([`transfer_button_at`] reads the same layout).
@@ -118,7 +118,7 @@ pub struct DockButton {
 }
 
 /// The dock caret's place: the **screen** column in the input block and the
-/// row inside the vertical window (032).
+/// row inside the vertical window.
 ///
 /// The two numbers are in named fields, not two `u16`s side by side — the
 /// reason of [`DockCols`]: were they passed swapped, the symptom would show
@@ -140,7 +140,7 @@ pub struct DockCaret {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DockCols {
     /// The width of the input block: the grid's column count. The dock uses
-    /// the same columns and a line that overflows **wraps** (032 Karar 3).
+    /// the same columns and a line that overflows **wraps**.
     pub grid: u16,
     /// The context row's budget. A separate number, because that row is drawn
     /// in a **small point size**: more letters fit in the same pixel strip.
@@ -152,7 +152,7 @@ pub struct DockCols {
 
 /// The room that can be given to the dock's input block: up to what share of
 /// the grid's rows and wrapping at how many columns — the argument of
-/// [`crate::Session::frame`] (032).
+/// [`crate::Session::frame`].
 ///
 /// **The layout decision is the drawer's**, `bt-gpu` supplies the numbers
 /// (the precedent of [`DockCols`]): the ceiling is a design ratio
@@ -213,11 +213,10 @@ const SEPARATOR: &str = " | ";
 /// The column where the context row starts: the dock's **left edge**.
 ///
 /// Aligned with the `>` mark, not with the input row's text. Had it started
-/// from [`TEXT_COL`] — and it did — the context row would look indented for
-/// no reason (the user, 012 phase-9: "why does this path display look
-/// indented"): the text's alignment makes the room the mark opens read like
-/// an indent, yet the context is not a continuation of the input row, it is
-/// the dock's **footer**.
+/// from [`TEXT_COL`] — and it did — the context row would look indented for no
+/// reason (the user: "why does this path display look indented"): the text's
+/// alignment makes the room the mark opens read like an indent, yet the context
+/// is not a continuation of the input row, it is the dock's **footer**.
 const CONTEXT_COL: u16 = 0;
 
 /// The dock-local row number of the context row in a dock with a single input
@@ -233,7 +232,7 @@ const CONTEXT_ROW: u16 = 1;
 /// The mark at the start of a path shortened from the left.
 const ELLIPSIS: char = '…';
 
-/// The remote session's mark (036 Karar 7): in front of the host on the
+/// The remote session's mark: in front of the host on the
 /// context row, and a prefix in the title and the tab
 /// ([`crate::shell::title_of`]). The **single copy** in this crate.
 ///
@@ -244,8 +243,8 @@ const ELLIPSIS: char = '…';
 /// copies are tied by `the_remote_mark_is_the_one_the_atlas_checks`.
 pub(crate) const REMOTE_MARK: char = '⇄';
 
-/// The part of the reconnect offer's placeholder after the host (037 Karar
-/// 8) — a UI string. A single text: ssh's 255 does not tell a broken
+/// The part of the reconnect offer's placeholder after the host — a UI
+/// string. A single text: ssh's 255 does not tell a broken
 /// connection from a failed one, what tells them apart is ssh's own line
 /// right above.
 const RECONNECT_HINT: &str = "  Connection lost · ⏎ reconnect";
@@ -255,20 +254,18 @@ const RECONNECT_HINT: &str = "  Connection lost · ⏎ reconnect";
 /// the same thing (the remote location).
 const REMOTE_GAP: &str = "  ";
 
-/// The non-ASCII characters of the transfer row (037 Karar 7 → Kullanıcı
-/// kararı 4; `↓` the download, 045 Karar 6) — the **vocabulary** of the text
-/// `bt-shell` formats. The text
-/// is born there, but the gate checking that no box appears in the small
-/// class is in `bt-atlas` and that crate cannot see either side; the copies
-/// are tied to this list (`the_upload_row_is_the_one_the_atlas_checks`). The
-/// buttons' `⌘` is here too: this crate writes the label but its glyph is
-/// again in the small class.
+/// The non-ASCII characters of the transfer row (`↓` the download) — the
+/// **vocabulary** of the text `bt-shell` formats. The text is born there, but
+/// the gate checking that no box appears in the small class is in `bt-atlas`
+/// and that crate cannot see either side; the copies are tied to this list
+/// (`the_upload_row_is_the_one_the_atlas_checks`). The buttons' `⌘` is here
+/// too: this crate writes the label but its glyph is again in the small class.
 pub const UPLOAD_GLYPHS: [char; 8] = ['↑', '↓', '⌘', '✓', '—', '·', '…', '→'];
 
-/// The load indicator's non-ASCII characters drawn from the **font** (046
-/// R1.3): the critical mark and the alerts form's calm dot. The sparkline's
-/// `▁…█` are not here — they are procedural in the small class too (046 Karar
-/// 3). `bt-atlas` checks a hand copy of this list in Menlo's small class
+/// The load indicator's non-ASCII characters drawn from the **font**: the
+/// critical mark and the alerts form's calm dot. The sparkline's `▁…█` are not
+/// here — they are procedural in the small class too. `bt-atlas` checks a hand
+/// copy of this list in Menlo's small class
 /// (`the_stats_glyphs_have_no_box_in_the_small_class`); the two are tied by
 /// `the_stats_glyphs_are_the_ones_the_atlas_checks`.
 pub const STATS_GLYPHS: [char; 2] = [STATS_CRITICAL, STATS_CALM];
@@ -293,15 +290,13 @@ const SPARK_BASE: u32 = 0x2581;
 pub const EDIT_MAX: usize = 8;
 
 /// What changed in the dock's input row **in this frame** — the input of the
-/// typing animations (030).
+/// typing animations.
 ///
 /// The decision is here: which glyph the user typed, which they deleted,
 /// which change must not come alive (paste, history, completion). Time and
-/// drawing are in `bt-gpu`. The rule and its table are in
-/// `.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 2; why a
-/// second sink crosses the boundary → Karar 3.
+/// drawing are in `bt-gpu`.
 ///
-/// **Position on two axes** (032 phase-6): `(row, col)` are the vertical
+/// **Position on two axes**: `(row, col)` are the vertical
 /// window's row and the screen column, and the cells carry their own
 /// `(row, col)` — in a wrapped input the letter filling the row crosses to
 /// the next row with its effect. Text that moves by wrapping **behind** the
@@ -309,8 +304,8 @@ pub const EDIT_MAX: usize = 8;
 /// (in-flight ones in `bt-gpu` cannot find their static glyph and end).
 /// **`shift` and `Shift` are in rows**: when the vertical window's top moves,
 /// in-flight ones move with the text (the vertical counterpart of the shift
-/// of 030's horizontal window; the horizontal window retired with 032 Karar
-/// 3). The side comparing the top is [`crate::Session::dock`], because the
+/// of the old single-row dock's horizontal window, retired when the input
+/// started wrapping). The side comparing the top is [`crate::Session::dock`], because the
 /// last **drawn** top is knowledge of the permission, not of the drawing
 /// ([`with_shift`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -415,7 +410,7 @@ pub(crate) enum Change {
 
 /// The deleted code points and the highlights on the old row.
 ///
-/// **All code points**, not just glyphs (035): so that the ghosts' layout
+/// **All code points**, not just glyphs: so that the ghosts' layout
 /// can build the cluster the same as in the new layout — the ghost of `🇹🇷`
 /// is one glyph, the VS16 of `❤️` carries its base character's emoji
 /// presentation. A zero-width code point takes no cell in the layout, so with
@@ -432,8 +427,8 @@ pub(crate) struct Ghosts {
 const GHOST_CHARS: usize = EDIT_MAX * 4;
 
 /// The range of the cluster containing `index`, `[start, end)` — so that the
-/// dock's selection ends, the ⇧←/⇧→ step and the four editing keys (035
-/// Karar 7) do not split a cluster. A single code point with clustering off;
+/// dock's selection ends, the ⇧←/⇧→ step and the four editing keys do
+/// not split a cluster. A single code point with clustering off;
 /// `None` if `index` is outside the text.
 ///
 /// The single cluster rule ([`Walk`]): the same as the layout, the grid and
@@ -455,7 +450,7 @@ pub(crate) fn cluster_span(
     found
 }
 
-/// Is `index` a cluster boundary in `text` (035 R4.2): if an edit starts or
+/// Is `index` a cluster boundary in `text`: if an edit starts or
 /// ends inside a cluster (only the `🇷` of `🇹🇷` was deleted, a skin tone was
 /// added to a `👍`) what comes alive would be half a glyph and the diff falls
 /// to [`Change::Reset`] — the text appears instantly. The single cluster rule
@@ -536,7 +531,7 @@ pub(crate) fn diff(old: &DockState, new: &DockState) -> Change {
     };
     let old_len = old_buffer.chars().count();
     let new_len = new.buffer.chars().count();
-    // Glyph count: with clustering on, **clusters** (035) — `🇹🇷` is one input
+    // Glyph count: with clustering on, **clusters** — `🇹🇷` is one input
     // and one glyph, not two RIs. The two ends of the range are tested below
     // as cluster boundaries, so clustering the range alone is the same as
     // clustering it in its context.
@@ -643,8 +638,8 @@ fn display(state: &DockState) -> impl Iterator<Item = char> + '_ {
         .chain(state.postdisplay.chars())
 }
 
-/// The dock's **stream**: `PREBUFFER ++ PREDISPLAY ++ BUFFER ++ POSTDISPLAY`
-/// (032 Karar 2). `PREBUFFER` is the earlier lines ZLE accepted and always
+/// The dock's **stream**: `PREBUFFER ++ PREDISPLAY ++ BUFFER ++ POSTDISPLAY`.
+/// `PREBUFFER` is the earlier lines ZLE accepted and always
 /// ends with `\n`, so the editable lines start on a row below and at the same
 /// indent on their own. The stream's index is ahead of the display's by
 /// [`prebuffer_chars`] — `CURSOR` and `region_highlight` are read with that
@@ -660,7 +655,7 @@ pub(crate) fn prebuffer_chars(state: &DockState) -> usize {
     state.prebuffer.chars().count()
 }
 
-/// The **selectable** text in the dock: `PREBUFFER ++ BUFFER` (032 Karar 2) —
+/// The **selectable** text in the dock: `PREBUFFER ++ BUFFER` —
 /// the space of [`DockPoint`] and of the selection range. `PREBUFFER` can be
 /// selected and copied (copying the whole loop is what is expected) but ZLE
 /// cannot edit it: a range touching it yields no edit command
@@ -674,7 +669,7 @@ pub(crate) fn selectable(state: &DockState) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// The **dock** parametrization of [`layout`] (032 Karar 3 and 7): both the
+/// The **dock** parametrization of [`layout`]: both the
 /// first row and the continuation rows start from the text's column
 /// ([`TEXT_COL`], hanging indent), the width is the grid's. The columns are
 /// directly **screen** columns — the two columns of the mark and the breathing
@@ -685,7 +680,8 @@ pub(crate) fn selectable(state: &DockState) -> std::borrow::Cow<'_, str> {
 /// ghosts (the same walk starting from the caret). Had the hit test written
 /// its own walk, the day the wrap or wide-character rule diverged between the
 /// two the mouse would shift by a column — now a row too — and the symptom
-/// would be silent (the walk's counterpart of 024's "single table" reason).
+/// would be silent (the walk's counterpart of the column arithmetic's "single table"
+/// reason).
 pub(crate) fn dock_layout<T>(
     items: impl IntoIterator<Item = (char, T)>,
     caret: usize,
@@ -723,7 +719,7 @@ pub(crate) fn dock_layout<T>(
 /// the band would grow and shrink on every key at the wrap limit, and the
 /// whole grid would breathe while typing. The suggestion **stays** in the walk
 /// (one layout, the same columns) and what fits in the text's rows is drawn,
-/// the overflow clipped — as it was cut at the right edge in 030's
+/// the overflow clipped — as it was cut at the right edge in the old
 /// single-row dock.
 ///
 /// The walk is the very walk of the drawing, not a stream without the
@@ -743,7 +739,7 @@ pub(crate) fn needed_rows(state: &DockState, cols: u16) -> usize {
 /// ([`render_with`]: the vertical window's top and the "single row?" gate),
 /// so the band, the window and the effects' gate look at the same number — in
 /// separate measures a one-row input wrapped by the suggestion reset its
-/// effects on every key (`/code-review`).
+/// effects on every key.
 fn measure(state: &DockState, cols: u16) -> (usize, usize) {
     let shift = prebuffer_chars(state);
     let text = shift + state.predisplay.chars().count() + state.buffer.chars().count();
@@ -773,8 +769,8 @@ fn measure(state: &DockState, cols: u16) -> (usize, usize) {
 }
 
 /// The vertical window's first row: the **smallest** shift that keeps the
-/// caret's row visible (032 Karar 4). Stateless — the vertical twin of 030's
-/// horizontal `window_skip`: the window follows the caret, it keeps no
+/// caret's row visible. Stateless — the vertical twin of the old
+/// single-row dock's horizontal `window_skip`: the window follows the caret, it keeps no
 /// history of its own. `shown` is the number of input rows to draw; `0` is
 /// also one row.
 fn window_top(caret_row: usize, shown: usize) -> usize {
@@ -782,7 +778,7 @@ fn window_top(caret_row: usize, shown: usize) -> usize {
 }
 
 /// The offer's placeholder: `⇄ {host}` in the mark's color, [`RECONNECT_HINT`]
-/// in `dim`, after the caret when the line is empty (037 Karar 8).
+/// in `dim`, after the caret when the line is empty.
 ///
 /// The same layer as the suggestion and **the same walk** ([`dock_layout`]):
 /// the stream is `PREDISPLAY ++ placeholder`, so the placeholder starts at the
@@ -851,7 +847,7 @@ fn render_reconnect(
 }
 
 /// Which string a character of the stream belongs to: only `PREBUFFER ++
-/// BUFFER` is selectable (031 Karar 8, 032 Karar 2), `PREDISPLAY` and the
+/// BUFFER` is selectable, `PREDISPLAY` and the
 /// suggestion land on the two ends of `BUFFER` in the hit test.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Part {
@@ -900,7 +896,7 @@ pub(crate) struct DockPoint {
 /// - `PREDISPLAY` lands on the start of `BUFFER`, the suggestion
 ///   (`POSTDISPLAY`) on the end of `BUFFER`: neither is selectable but where
 ///   the click goes is clear.
-/// - `PREBUFFER` (032) is the start of the selectable text: it lands on its
+/// - `PREBUFFER` is the start of the selectable text: it lands on its
 ///   own character. The caret cannot move there — that decision is at the
 ///   editing gate, not here.
 /// - The column to the left of a row (mark, breathing room, hanging indent)
@@ -990,7 +986,7 @@ pub(crate) fn hit(
                 if part != Part::Post {
                     text_end = end;
                 }
-                // With the cluster's code point count (035): the wrap question
+                // With the cluster's code point count: the wrap question
                 // looks **behind** the cluster, not at the head character.
                 last = Some((part, placed.end - placed.index));
             }
@@ -1026,8 +1022,7 @@ pub(crate) fn hit(
 /// a `Live` mirror drawn with `input_rows ≥ 1` rows at width `cols`: the
 /// wheel's chosen top (clamped) or the caret-following one. The single
 /// formula of [`render_with`] and of the dock link stamp's check
-/// (`Session::dock`, 044 phase-5: a window that moved left the view's cells
-/// stale).
+/// (`Session::dock`: a window that moved left the view's cells stale).
 pub(crate) fn window_of(
     state: &DockState,
     cols: u16,
@@ -1059,8 +1054,8 @@ fn selectable_index(index: usize, shift: usize, pre: usize, buffer: usize) -> Op
     }
 }
 
-/// The links under row `row`, column `col` of the dock's drawn vertical window
-/// (044 phase-5, R8): the found candidates in the **selectable** text
+/// The links under row `row`, column `col` of the dock's drawn vertical window:
+/// the found candidates in the **selectable** text
 /// ([`selectable`], their char ranges; a URL alone or the path candidates in
 /// the order they are to be tried — [`crate::link::links_at`]) and each one's
 /// cells as window-local spans — the rows of the input block inside the
@@ -1161,16 +1156,16 @@ pub(crate) fn link_at(
 /// from the two ends and the step. `start == end` for an empty selection.
 ///
 /// **The behavior's owner is alacritty** and this function is its copy in
-/// text space (031 Karar 5): `Simple` draws a boundary from the halves of the
+/// text space: `Simple` draws a boundary from the halves of the
 /// ends (`range_simple`), `Word` widens both ends to a word boundary
 /// (`range_semantic` — [`WORD_SEPARATORS`], including the bracket matching and
-/// the double-click-on-a-separator rule), `Line` the **logical line** (032
-/// Karar 6): the rows of the two ends, between `\n`s and together with their
+/// the double-click-on-a-separator rule), `Line` the **logical line**:
+/// the rows of the two ends, between `\n`s and together with their
 /// wrapped visual rows — the grid's triple click also selects a wrapped
 /// logical line, and so does the paragraph selection of macOS text fields.
 /// The line break does not enter the range. On a single logical line (a
-/// `BUFFER` without `\n`) the result is the whole `BUFFER`, i.e. 031's
-/// answer; the whole `BUFFER` stays ⌘A's job. In the grid the same string
+/// `BUFFER` without `\n`) the result is the whole `BUFFER`, i.e. the
+/// single-line answer; the whole `BUFFER` stays ⌘A's job. In the grid the same string
 /// gives the same range; its guard is `a_dock_word_matches_the_grid_word`
 /// (`session.rs`).
 ///
@@ -1236,7 +1231,7 @@ pub(crate) fn selection_range(
 /// right half its back — the zero-width ones behind it (combiners) stay with
 /// the character, or an `é` would be separated from its accent.
 ///
-/// **With clustering on the unit is the cluster** (035 R4.2): [`hit`] gives
+/// **With clustering on the unit is the cluster**: [`hit`] gives
 /// the cluster's head character and the right half lands on the **end** of
 /// the cluster — a click on the right half of `🇹🇷` falls behind the flag,
 /// not between the two RIs. The left half lands on the cluster's start too:
@@ -1336,7 +1331,7 @@ fn bracket_match(chars: &[char], index: usize) -> Option<usize> {
 /// a translucent ground would flicker in the slide frames.
 ///
 /// `cols` is the grid's width: the dock uses the same columns and text that
-/// overflows is **wrapped** (032 Karar 3; 030's left windowing retired) —
+/// overflows is **wrapped** (the old left windowing retired) —
 /// continuation rows start from the text's column, a wide glyph is **not
 /// split** at the end of a row, if it does not fit it moves to the next row
 /// ([`dock_layout`]). If the wrapped input exceeds `input_rows`
@@ -1358,21 +1353,21 @@ fn bracket_match(chars: &[char], index: usize) -> Option<usize> {
 /// in the arm where the text is drawn and the caret is in the dock: if the
 /// line is in the grid the effect has no subject, and every arm that does not
 /// come alive ends the in-flight ones (`Reset`). The position is **(row,
-/// column)** and the vertical window's row (032 phase-6); the shift of the
+/// column)** and the vertical window's row; the shift of the
 /// window's top (`shift`) is not here but in the caller ([`with_shift`]).
 ///
-/// `selection` is the character range of the dock selection in `BUFFER` (031,
-/// [`crate::shell::DockSelection::range`]); it is turned into `runs` as **one
+/// `selection` is the character range of the dock selection in `BUFFER`
+/// ([`crate::shell::DockSelection::range`]); it is turned into `runs` as **one
 /// run per visual row**, with the vertical window's rows and the screen
 /// columns — the same as the grid's [`crate::SelectionRun`] and by the same
-/// rule (031 Karar 4): the run spans from the row's first drawable selected
+/// rule: the run spans from the row's first drawable selected
 /// cell to the last, the gaps between bridged. `runs` is emptied first.
 ///
 /// The second half of the return is the vertical window's first row
 /// ([`window_top`]) and the input's ceiling-free row count: the trace for the
 /// hit test and the wheel ([`crate::Session::dock`] writes it).
 ///
-/// **`input_rows == 0` means no input row** (036 Karar 8, remote session):
+/// **`input_rows == 0` means no input row** (remote session):
 /// only the context row is printed, on row 0, there is no prompt mark and no
 /// caret, the trace is `(0, 0)` — there is no input block to click or scroll.
 ///
@@ -1394,7 +1389,7 @@ fn bracket_match(chars: &[char], index: usize) -> Option<usize> {
 /// window a row off (the rule of an input past the ceiling) and the next
 /// frame corrects it — a sibling of `line-finish`'s known limit in the same
 /// gap (`Session::frame`). The remote session's two edges are in the same
-/// class (036): `frame()`'s remote decision and this call's context come from
+/// class: `frame()`'s remote decision and this call's context come from
 /// separate lock rounds and a `set_remote` or `D` falling in between can make
 /// the input row count and the context row's form (and the top line's color)
 /// diverge for one frame; the next frame corrects it.
@@ -1431,7 +1426,7 @@ pub(crate) fn render_with(
         separator: theme.separator_linear(),
         caret: None,
         caret_text: theme.background_linear(),
-        // With no input row (remote session, 036) there is no mark either:
+        // With no input row (remote session) there is no mark either:
         // the mark is the start of the input row and must not sit on the
         // context row. Before all the early returns, so no arm brings it back.
         sigil: (input_rows > 0).then(|| sigil_color(shell, theme)),
@@ -1470,7 +1465,7 @@ pub(crate) fn render_with(
     // on every command.
     surface.buttons = render_context(context, theme, cols.context, input_rows, &mut sink);
 
-    // **Zero input rows** (036 Karar 8): the band is only the context row.
+    // **Zero input rows**: the band is only the context row.
     // No caret (`owned` is already `false` — `frame()`'s fourth
     // precondition), the row count is zero too: there is no window the wheel
     // could scroll ([`crate::Session::dock_scroll`], `rows <= shown`).
@@ -1485,8 +1480,8 @@ pub(crate) fn render_with(
     // A non-`Live` mirror draws no text and both are the right answer: in
     // `Idle` ZLE is not editing the line, in `Unavailable` there is a line we
     // cannot show and its fields are already empty (`DockState::reset`). The
-    // place that consumes the distinction is phase-4's suppression decision,
-    // not here.
+    // place that consumes the distinction is the suppression decision, not
+    // here.
     //
     // **The caret can still be drawn**: a row without text does not mean a
     // row without a caret. At startup and between two commands the mirror is
@@ -1507,7 +1502,7 @@ pub(crate) fn render_with(
     // The suggestion is dim: "text not yet typed" and what SGR 2 asks are the
     // same thing.
     let suggestion = theme.dim_linear();
-    // **`PREBUFFER` at the start of the stream** (032 Karar 2, [`stream`]):
+    // **`PREBUFFER` at the start of the stream** ([`stream`]):
     // the earlier lines ZLE accepted are above the editable rows, in the same
     // color and at the same indent — the dock is an editor, a `for` loop is
     // one piece of text. The display's indices (`CURSOR`,
@@ -1525,8 +1520,7 @@ pub(crate) fn render_with(
     // character's index advances by one, its columns by two, wrapping the
     // row. A caret after a completely full row is at the start of the next
     // row ([`layout`]'s caret rule): the same as zsh's grid, i.e. a row typed
-    // at full width grows the dock by a row too (032 phase-1 → Uygulama
-    // Notları).
+    // at full width grows the dock by a row too.
     // The arm above took zero: here `input_rows ≥ 1`.
     let shown = usize::from(input_rows);
     let (top, rows) = window_of(state, cols.grid, input_rows, scroll);
@@ -1547,7 +1541,7 @@ pub(crate) fn render_with(
     // `PREDISPLAY` and the suggestion fall on no index.
     let selected = selection.map_or(0..0, |(start, end)| start..end);
     let selectable_at = |index: usize| selectable_index(index, shift, pre, buffer);
-    // The ⌘-hovered link (044 phase-5) is in the same space: its line goes on
+    // The ⌘-hovered link is in the same space: its line goes on
     // the cells whose selectable index is inside the range.
     let linked = |index: usize| {
         link.as_ref().and_then(|(range, style)| {
@@ -1599,7 +1593,7 @@ pub(crate) fn render_with(
                 }),
                 ..cell(ch, col, base, style, theme, width == 2, is_selected)
             };
-            // **A selection creates no content** (Karar 4, the grid's rule):
+            // **A selection creates no content** (the grid's rule):
             // the run extends from the first drawable selected cell to the
             // last. The criterion is the drawability of the state without the
             // selection — a selected cell's ground drops out, and looking at
@@ -1626,8 +1620,8 @@ pub(crate) fn render_with(
                     }
                 }
             }
-            // **The link's line after the selection's drawability** (044
-            // phase-5): the hover creates no selection content — the grid's
+            // **The link's line after the selection's drawability**:
+            // the hover creates no selection content — the grid's
             // rule that keeps the hover out of `ruled`. The single override
             // helper, the grid's and the band's.
             crate::session::underline_link(&mut lead, linked(index));
@@ -1667,7 +1661,7 @@ pub(crate) fn render_with(
         },
     );
     runs.extend(run);
-    // **The reconnect offer's placeholder** (037 Karar 8): when the line is
+    // **The reconnect offer's placeholder**: when the line is
     // empty, after the caret — the suggestion's layer.
     // The gate is the same as ⏎'s (`Session::reconnect`): the visible hint
     // must work. Freshness cannot be asked here (the generation is not in
@@ -1875,13 +1869,13 @@ fn settle(change: Option<&Change>, edits: &mut impl FnMut(DockEdit)) {
 /// branch, and that is the "silently wrong" class this repository forbids.
 ///
 /// The shortening is in **character** units and does not lean on component
-/// boundaries: leaning on a boundary would leave some of the available
-/// columns empty, and its gain would be taste, its loss information. **This
-/// row stays in character units** and its reason differs from the input
-/// row's: the context row is drawn in the **small size class**, the column
-/// pitch is the small face's advance and the wide path is closed there (the
-/// precedent of 021). So a path with CJK still shifts columns here — a known
-/// limit, guarded by `the_context_line_keeps_character_columns`.
+/// boundaries: leaning on a boundary would leave some of the available columns
+/// empty, and its gain would be taste, its loss information. **This row stays
+/// in character units** and its reason differs from the input row's: the
+/// context row is drawn in the **small size class**, the column pitch is the
+/// small face's advance and the wide path is closed there (the precedent of the
+/// procedural characters). So a path with CJK still shifts columns here — a
+/// known limit, guarded by `the_context_line_keeps_character_columns`.
 ///
 /// **The separator is drawn if both sides are filled.** A dangling `|` in a
 /// directory that is not a repo would say "the branch could not be read";
@@ -1901,7 +1895,7 @@ fn render_context(
         return [None; 2];
     }
     // The upload row **before** the remote form: it carries its own host and
-    // must show its result after ssh has closed too (037 Karar 7).
+    // must show its result after ssh has closed too.
     if let Some(transfer) = &context.transfer {
         return render_transfer(transfer, theme, available, row, sink);
     }
@@ -1921,7 +1915,7 @@ fn render_context(
     // not exist**, and putting a marker (`rele…`) would not fix that either —
     // a shortened branch name can be misread anyway. Not showing it at all is
     // a loss of information but not wrong information; a window that narrow
-    // is unreadable anyway (`/code-review`, 012 phase-7).
+    // is unreadable anyway.
     let shows_branch = branch_chars > 0 && branch_chars <= available;
     let path_budget = if shows_branch {
         available
@@ -1954,12 +1948,11 @@ fn render_context(
     [None; 2]
 }
 
-/// The context row's **remote** form (036 R4.1): `⇄ {host}` in the mark's
-/// color (`color`; the theme's `info` when unmarked, 037 Karar 3), two
+/// The context row's **remote** form: `⇄ {host}` in the mark's
+/// color (`color`, the theme's `info` when unmarked), two
 /// spaces, then the remote path in the two tiers of the local path; no branch
 /// and no `|` — the branch belongs to the local repo, the remote side's is
-/// unknown. The remote host's load indicator, if any, is right-aligned (046
-/// Karar 4).
+/// unknown. The remote host's load indicator, if any, is right-aligned.
 ///
 /// **The budget goes to `⇄ host` first.** The host is **not shortened**, for
 /// the same reason as the branch rule: a shortened host name (`prod-we…`) can
@@ -1968,7 +1961,7 @@ fn render_context(
 /// share the rest by [`stats_layout`]'s ladder; the path is shortened from
 /// the left; if the remote shell prints no OSC 7 there is no path at all.
 ///
-/// The return is the Sign In… button (047 R7.2), in the upload buttons'
+/// The return is the Sign In… button, in the upload buttons'
 /// place and drawing: label in the foreground, fill and border in the mark's
 /// color.
 fn render_remote_context(
@@ -2041,7 +2034,7 @@ fn render_remote_context(
     ]
 }
 
-/// One of the load indicator's three values (046 Karar 4).
+/// One of the load indicator's three values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatsMetric {
     Cpu,
@@ -2051,7 +2044,7 @@ pub enum StatsMetric {
 }
 
 /// A value's two thresholds, in percent: at `warning` the number takes the
-/// theme's `warning`, at `critical` its `error` and a `▲` (046 Karar 4).
+/// theme's `warning`, at `critical` its `error` and a `▲`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StatsThreshold {
     pub warning: u8,
@@ -2059,10 +2052,10 @@ pub struct StatsThreshold {
 }
 
 /// The thresholds of [`StatsMetric::Cpu`], `Mem` and `Disk`, in that order — a
-/// **design constant**, not a measurement (046 Karar 4: the approved design's
-/// numbers). The context row's colors and the popover's bars read this single
-/// table. Disk's warning is also the line below which disk is not shown at
-/// all: a full disk is news, a half-full one is not.
+/// **design constant**, not a measurement (the approved design's numbers). The
+/// context row's colors and the popover's bars read this single table. Disk's
+/// warning is also the line below which disk is not shown at all: a full disk
+/// is news, a half-full one is not.
 pub const STATS_THRESHOLDS: [StatsThreshold; 3] = [
     StatsThreshold {
         warning: 70,
@@ -2116,7 +2109,7 @@ impl StatsMetric {
     }
 }
 
-/// A rung of the indicator's ladder (046 Karar 4), widest first.
+/// A rung of the indicator's ladder, widest first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GaugeStep {
     /// `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%`.
@@ -2233,7 +2226,7 @@ impl Gauge {
 }
 
 /// The values shown at all: CPU once it has a value (the first sample has
-/// none), memory always, disk only past its warning (046 Karar 4).
+/// none), memory always, disk only past its warning.
 fn shown_values(stats: &RemoteStats) -> impl Iterator<Item = (StatsMetric, u8)> {
     let disk = (StatsMetric::Disk.level(stats.disk) > StatsLevel::Normal).then_some(stats.disk);
     stats
@@ -2259,7 +2252,7 @@ fn worst(stats: &RemoteStats) -> (StatsMetric, u8) {
 
 /// A rung's characters. **CPU without a value is left out** rather than
 /// guessed: the first sample carries only counters and the second follows a
-/// second later (046 Karar 2).
+/// second later.
 fn gauge(stats: &RemoteStats, step: GaugeStep) -> Gauge {
     let mut gauge = Gauge::new();
     match step {
@@ -2329,7 +2322,7 @@ struct RemoteLayout {
 }
 
 /// The remote form's layout: `⇄ {host}  {path}` on the left, the load
-/// indicator right-aligned (046 Karar 4).
+/// indicator right-aligned.
 ///
 /// **The ladder** — the indicator is less important than the path, because
 /// the row's real answer is "where am I": each rung of the form is tried with
@@ -2340,7 +2333,7 @@ struct RemoteLayout {
 /// path. Otherwise the indicator drops and the path takes today's budget. The
 /// host is never shortened.
 ///
-/// **The Sign In… button** (047 R7.2) takes the indicator's place — there is
+/// **The Sign In… button** takes the indicator's place — there is
 /// no sample without a login — and goes **before the path**: it is the row's
 /// only action and the path is shortened from the left into the rest. If even
 /// `⇄ host` + gap + button does not fit it drops and the path takes today's
@@ -2414,7 +2407,7 @@ fn stats_layout(
 }
 
 /// The drawn indicator's context-local range; `None` while the upload row
-/// stands in the context row's place (046 R3.3), locally, without a value or
+/// stands in the context row's place, locally, without a value or
 /// when it did not fit.
 fn stats_range(context: &DockContext, budget: u16) -> Option<GaugeSpan> {
     remote_layout(context, budget)?.gauge
@@ -2439,7 +2432,7 @@ fn remote_layout(context: &DockContext, budget: u16) -> Option<RemoteLayout> {
 
 /// The Sign In… button's **dock-local** column range `[start, end)` on the
 /// context row — the whole fill, the click's and the hand cursor's range;
-/// `None` if it is not drawn (047 R7.2). From the drawing's layout
+/// `None` if it is not drawn. From the drawing's layout
 /// ([`stats_layout`]), so a click cannot fall next to it.
 pub fn sign_in_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
     context.sign_in?;
@@ -2463,7 +2456,7 @@ pub fn stats_at(context: &DockContext, budget: u16, col: u16) -> bool {
 }
 
 /// The indicator's **dock-local** column range `[start, end)` on the context
-/// row; `None` if it is not drawn. The popover's anchor (046 Karar 7) — the
+/// row; `None` if it is not drawn. The popover's anchor — the
 /// inverse of [`stats_at`], from the same layout.
 pub fn stats_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
     // audit: `end ≤ available ≤ budget` and `budget` is `u16`.
@@ -2508,11 +2501,10 @@ enum ButtonLabel {
     Cancel,
     CancelAll,
     /// With the number of items in the list; the same label while the list is
-    /// open (037 phase-7: `Hide files` was dropped, the button is in the pressed
-    /// tone). "Transfers", not "files": the list carries both directions (045
-    /// Karar 6).
+    /// open (`Hide files` was dropped, the button is in the pressed tone).
+    /// "Transfers", not "files": the list carries both directions.
     ShowFiles(u16),
-    /// The ssh status bar's login (047 R7.2): the ellipsis says a sheet opens.
+    /// The ssh status bar's login: the ellipsis says a sheet opens.
     SignIn,
 }
 
@@ -2585,7 +2577,7 @@ fn button_width(label: ButtonLabel, hint: bool) -> usize {
 ///
 /// Right-aligned, because the body changes size on every refresh (speed,
 /// remaining time) and buttons stuck behind it would slide out from under the
-/// mouse (037 phase-6).
+/// mouse.
 ///
 /// Drawing ([`render_transfer`]) and the mouse ([`transfer_button_at`]) read
 /// this; had the two arithmetics diverged a click would fall next to the
@@ -2694,7 +2686,7 @@ pub fn transfer_button_at(transfer: &Transfer, context: u16, col: u16) -> Option
 
 /// The button's **dock-local** column range `[start, end)` on the context row
 /// — the whole of the fill; `None` if there is no button or it did not fit.
-/// The anchor of the list popover (037 phase-7): the popover is tied to the
+/// The anchor of the list popover: the popover is tied to the
 /// button, not to the clicked point. The inverse of [`transfer_button_at`],
 /// from the same layout.
 pub fn transfer_button_span(
@@ -2717,8 +2709,7 @@ pub fn transfer_button_span(
         })
 }
 
-/// The context row's **upload** form (037 Karar 7 → Kullanıcı kararı 4,
-/// buttons phase-6): `⇄ {host}` in the mark's color (the remote form's prefix
+/// The context row's **upload** form: `⇄ {host}` in the mark's color (the remote form's prefix
 /// and color are kept), the body dim, buttons on the right.
 ///
 /// The button's label is in the **foreground** — the row's only foreground
@@ -2740,7 +2731,7 @@ fn render_transfer(
         return [None; 2];
     }
     let dim = theme.dim_linear();
-    // The result's tone at the start of the body (037 phase-7): success green,
+    // The result's tone at the start of the body: success green,
     // error text red; the rest dim.
     let toned = match transfer.tone {
         TransferTone::Quiet => dim,
@@ -2980,8 +2971,7 @@ fn style_at(state: &DockState, index: usize) -> HighlightStyle {
 /// The source is `unicode-width` and this is not a preference but a
 /// **necessity**: the grid uses the same crate (alacritty sets
 /// `Flags::WIDE_CHAR` with it) and the day a second width source diverged the
-/// symptom would be silent — the dock would shift by a column. The decision's
-/// record is `.tasks/024-dock-sutun-aritmetigi/discussion.md` → Karar 1.
+/// symptom would be silent — the dock would shift by a column.
 ///
 /// **There are two distinct zeros and the `Option` carries the
 /// distinction.** `width()` returns `None` for control characters and
@@ -2992,20 +2982,20 @@ fn style_at(state: &DockState, index: usize) -> HighlightStyle {
 ///   grid either (alacritty `CellExtra`), so not consuming a column is
 ///   right.
 /// - `None` → **1 column.** A control character is not drawn in the dock
-///   ([`cell`]) but before 024 it **held its column** (every index was a
+///   ([`cell`]) but before column arithmetic it **held its column** (every index was a
 ///   column) and dropping it to zero would be a regression: the words on both
 ///   sides of a TAB inserted with `Ctrl-V` would merge and the caret would
-///   shift left by one column per control character. The set gate
-///   (`/code-review`) caught this.
+///   shift left by one column per control character. Code review
+///   caught this.
 ///
 /// **A known limit, and its direction changed.** The right display is
 /// neither 0 nor 1: zsh shows a control character as `^C` in **two**
 /// columns. [`cell`]'s doc had written the reason for not drawing a
 /// placeholder as "it takes the column arithmetic out of character units" and
-/// that constraint was **lifted** by this set — the arithmetic is now columns
-/// anyway. So drawing `^C` is possible today; it was not done because it is
-/// not this set's subject and nobody asked. **Since 025 the limit has
-/// narrowed to the tab:** a row carrying the other control characters stays
+/// that constraint was **lifted** since — the arithmetic is now columns
+/// anyway. So drawing `^C` is possible today; it was not done because nobody
+/// asked. **Since [`DockStatus::Control`] the limit has narrowed to the
+/// tab:** a row carrying the other control characters stays
 /// in the grid with [`DockStatus::Control`] and never reaches this function.
 pub(crate) fn column_width(ch: char) -> usize {
     // `unwrap_or(1)`, not `unwrap_or(0)`: see the doc.
@@ -3039,7 +3029,7 @@ pub(crate) struct LayoutEnd {
     pub(crate) rows: usize,
 }
 
-/// The **row-aware** layout of the display — a single walk (032 Karar 7).
+/// The **row-aware** layout of the display — a single walk.
 ///
 /// It splits the stream at `\n`s and wraps at `width` columns; the first row
 /// starts from column `first`, all continuation rows (those opened by wrapping
@@ -3048,13 +3038,13 @@ pub(crate) struct LayoutEnd {
 ///
 /// **The single authority for column counts is again [`column_width`]:** the
 /// grid's wrapping, the dock's drawing and the suppression's row arithmetic
-/// count from the same table (024 Karar 1), or one would be hidden while the
+/// count from the same table, or one would be hidden while the
 /// other showed.
 ///
 /// The rules and the reason for each:
 ///
-/// - **`\n` takes no column, it breaks the row.** It has no glyph; before 032
-///   the dock flattened it into a single row and it consumed a column and
+/// - **`\n` takes no column, it breaks the row.** It has no glyph; before multi-line
+///   input the dock flattened it into a single row and it consumed a column and
 ///   squashed the text.
 /// - **A wide character is not split**, if it does not fit it moves to the
 ///   next row and an empty column remains behind it — the grid's rule
@@ -3103,7 +3093,7 @@ pub(crate) struct Placed<T> {
     /// Its order in the stream (zero-widths and `\n` also count): the
     /// display's character index, the unit of `region_highlight` and `CURSOR`.
     pub(crate) index: usize,
-    /// One past the cluster (035): with clustering on, the cluster's remaining
+    /// One past the cluster: with clustering on, the cluster's remaining
     /// code points (the `🇷` of `🇹🇷`, VS16, the ZWJ pieces) are in the range
     /// `index..end` and have no `Placed` of their own; `index + 1` when off.
     pub(crate) end: usize,
@@ -3141,16 +3131,16 @@ impl<T> Placed<T> {
 /// separate walks, the day the wrap or wide-character rule diverged between
 /// them the band would shift by a row and the mouse by a column.
 ///
-/// **With clustering on (`cluster`, 035) the unit is the cluster**, not the
+/// **With clustering on (`cluster`) the unit is the cluster**, not the
 /// code point: the same rule as the grid's wrapper
 /// ([`crate::cluster::extends`]) and the same column
 /// ([`crate::cluster::width`]), so `👨‍👩‍👧` is two columns in the grid and the dock
 /// alike and the suppression's span does not diverge from the grid. A cluster
 /// is a single `Placed` (the head character and the head character's tag), the
 /// wrap decision applies to the whole cluster; if `caret` falls **inside** a
-/// cluster the caret is at the cluster's start (Karar 7) — there is no column
+/// cluster the caret is at the cluster's start — there is no column
 /// to write in the middle of a cluster.
-// The eighth argument is `cluster` (035): the session's one flag; since all
+// The eighth argument is `cluster`: the session's one flag; since all
 // four callers share the same walk, wrapping it in a struct would add a constructor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_with<T>(
@@ -3281,7 +3271,7 @@ pub(crate) fn layout_with<T>(
 /// The suppression's row arithmetic: how many rows **above** the cursor's
 /// grid row the input starts and how many rows **below** it extends.
 ///
-/// The **grid** parametrization of [`layout`] (032 Karar 7): zsh's layout —
+/// The **grid** parametrization of [`layout`]: zsh's layout —
 /// the first row from the column where the prompt ended, continuation rows
 /// from `0`. The prompt's width is not in the mirror but it is observed: the
 /// cursor's column in the grid (`cursor_col`) minus the column of the text
@@ -3320,10 +3310,9 @@ pub(crate) fn grid_span(
     // the cursor falls inside is not counted**: ZLE does not know clusters
     // (wcwidth, code point by code point), so after `👍🏽` a ← puts `CURSOR`
     // before the `🏽` and the grid's cursor is at the cluster's head column;
-    // the layout also seats the caret at the cluster's start (Karar 7).
+    // the layout also seats the caret at the cluster's start.
     // Counting a half cluster would shift the start column two columns left
-    // and at the wrap limit the suppression would be off by a row
-    // (`/code-review`, phase-3).
+    // and at the wrap limit the suppression would be off by a row.
     let mut on_line = 0;
     let mut first_line = true;
     if cluster {
@@ -3359,7 +3348,7 @@ pub(crate) fn grid_span(
 
 /// A character's cell: the base color + the range's style.
 ///
-/// **A selected cell by the grid's rule** (031 Karar 3): the text in its own
+/// **A selected cell by the grid's rule**: the text in its own
 /// foreground, reverse video resolved, the ground dropped — the selection's
 /// color takes its place. `region_highlight`'s `standout` (zsh's paste
 /// highlight is that by default) reads in its normal foreground in a selection.
@@ -3392,9 +3381,9 @@ fn cell(
         // single pixel). Control characters produce none either, but now only
         // the **tab** reaches here: a row carrying the other control
         // characters stays in the grid with [`DockStatus::Control`] and the
-        // dock never draws it (025) — ZLE prints the raw byte in the grid as a
+        // dock never draws it — ZLE prints the raw byte in the grid as a
         // readable `^A`, while the dock would leave that column empty. Drawing
-        // a placeholder in place (`^C`) has been possible since 024 (the
+        // a placeholder in place (`^C`) is possible now (the
         // arithmetic is already columns) and on that day the `Control` arm is
         // deleted. Details in [`column_width`]'s doc.
         ch: (!ch.is_control() && ch != ' ').then_some(ch),
@@ -3410,10 +3399,10 @@ fn cell(
         // There is no counterpart of SGR 58 in `region_highlight`: the line takes the foreground.
         underline_color: None,
         strikeout: false,
-        // **The wide path is now open in the dock** (024): the column above
+        // **The wide path is now open in the dock**: the column above
         // accumulates from **width**, not from the character index, so the
         // right column of a two-cell glyph is really reserved and does not
-        // paint over its neighbor. In 023 this line was a constant `false` and
+        // paint over its neighbor. Once this line was a constant `false` and
         // its reason was sound *with that arithmetic*; when the arithmetic
         // changed the invariant went.
         wide,
@@ -3422,7 +3411,7 @@ fn cell(
     }
 }
 
-/// A cluster's boundary identity in the layout (035 Karar 4B/6): only
+/// A cluster's boundary identity in the layout: only
 /// **wide** clusters of more than one code point go into the table — the
 /// grid's rule (`session::cell_cluster`). `chars` is the cluster's code
 /// points; read only if a cluster will be born, so plain text pays no more
@@ -3772,7 +3761,7 @@ mod tests {
         // startup and between two commands the mirror is `Idle`, but where the
         // user will start typing is the dock. Keeping the caret in the grid in
         // those windows would make it **jump** when the prompt arrives — the
-        // observed defect was this (012 phase-8).
+        // observed defect was this.
         let state = DockState {
             status: DockStatus::Idle,
             ..live("% ", "ls", "", 2)
@@ -3806,7 +3795,7 @@ mod tests {
 
     #[test]
     fn an_unavailable_mirror_leaves_the_caret_to_the_grid() {
-        // The row we cannot show stays in the grid (R1.2); its caret must stay
+        // The row we cannot show stays in the grid; its caret must stay
         // there too, or the user cannot see where they type. This is the one
         // point where it departs from `Idle` and the reason for
         // [`DockStatus`]'s existence is this distinction.
@@ -3820,7 +3809,7 @@ mod tests {
 
     #[test]
     fn a_multiline_mirror_draws_its_rows_and_keeps_the_caret() {
-        // **Until 032 this mirror was `Multiline` and the dock drew nothing**
+        // **This mirror was once `Multiline` and the dock drew nothing**
         // (both the row and the caret were in the grid; flattening to a single
         // row squashed the text with invisible blanks). Now a line break
         // breaks the row: each logical row on its own visual row, from the
@@ -3840,7 +3829,7 @@ mod tests {
         );
     }
 
-    /// **`PREBUFFER` above the editable rows** (032 Karar 2): the `for` row ZLE
+    /// **`PREBUFFER` above the editable rows**: the `for` row ZLE
     /// accepted is in the dock, at the same indent and in the same color; the
     /// mark on the row where the command started, the caret on `BUFFER`'s row.
     /// A selection extends over it too (selectable, copyable), and the hit test
@@ -3896,7 +3885,7 @@ mod tests {
 
     #[test]
     fn the_context_row_sits_under_the_input_block() {
-        // **The context row is under the input block** (032 phase-2): its row
+        // **The context row is under the input block**: its row
         // number is the very number of input rows to draw, not a fixed `1`.
         // `bt-gpu` places it at the bottom of the band from the same number;
         // were they to diverge here the context row would land in the place of
@@ -3934,7 +3923,7 @@ mod tests {
 
     #[test]
     fn the_budget_is_a_share_of_the_grid_and_keeps_one_row() {
-        // The ceiling is a share of the grid's rows (032 Karar 4), rounded
+        // The ceiling is a share of the grid's rows, rounded
         // down; the dock's input row never disappears: a zero share and a
         // one-row grid both give one row.
         let half = DockBudget {
@@ -3952,7 +3941,7 @@ mod tests {
 
     #[test]
     fn a_long_line_wraps_under_the_text_column() {
-        // The counterpart of 030's left windowing (032 Karar 3): a row that
+        // The counterpart of the old left windowing: a row that
         // overflows is now **wrapped** and the whole command is visible.
         // Continuation rows start from the text's column (hanging indent), the
         // caret at its own column on the wrapped row.
@@ -3979,9 +3968,9 @@ mod tests {
         assert_eq!(dock.caret, caret_at(TEXT_COL));
     }
 
-    /// **An input past the ceiling opens a vertical window** (032 Karar 4):
+    /// **An input past the ceiling opens a vertical window**:
     /// the smallest shift that keeps the caret's row visible, stateless — the
-    /// vertical twin of 030's horizontal window. A row outside the window
+    /// vertical twin of the old horizontal window. A row outside the window
     /// never reaches the sink (it would land on the context row); if the first
     /// row is outside, so is the mark.
     #[test]
@@ -4019,7 +4008,7 @@ mod tests {
         assert!(dock.sigil.is_some());
     }
 
-    /// **The window top chosen with the wheel** (032 phase-4): in an input
+    /// **The window top chosen with the wheel**: in an input
     /// past the ceiling the mouse also reaches the rows other than the
     /// caret's. The top is clamped to the row count; if the caret is outside
     /// the window it is not drawn, the mark comes back if the first row is on
@@ -4097,7 +4086,7 @@ mod tests {
         // **Two sources, one number.** The dock's text starts `TEXT_COL`
         // columns after the mark; what gives the same alignment in the grid is
         // the zsh script's prompt, because the command really does start that
-        // far in there (012 phase-11). The constant cannot be shared — one is
+        // far in there. The constant cannot be shared — one is
         // Rust, one is shell — but their divergence would be **silent**: the
         // grid and the dock would start from different columns, nobody gets
         // angry.
@@ -4261,7 +4250,7 @@ mod tests {
 
     #[test]
     fn the_load_forms_draw_their_text_right_aligned_and_dim() {
-        // 046 Karar 4: three forms, right-aligned; label, sparkline and the
+        // Three forms, right-aligned; label, sparkline and the
         // numbers below their threshold dim — the brief, not the draft's
         // foreground.
         let dim = Some(THEME.dim_linear());
@@ -4343,7 +4332,7 @@ mod tests {
 
     #[test]
     fn a_narrowing_row_drops_the_indicator_rung_by_rung() {
-        // 046 Karar 4: full → numbers → worst → none, each with the whole path
+        // Full → numbers → worst → none, each with the whole path
         // and two columns before the indicator.
         let context = loaded(calm(StatsForm::Sparkline));
         let left = "⇄ prod  /srv/app";
@@ -4414,7 +4403,7 @@ mod tests {
 
     #[test]
     fn a_transfer_hides_the_load() {
-        // 046 R3.3: the upload row takes the context row's place; the
+        // The upload row takes the context row's place; the
         // indicator is neither drawn nor hit.
         let context = DockContext {
             stats: Some(calm(StatsForm::Sparkline)),
@@ -4434,7 +4423,7 @@ mod tests {
 
     #[test]
     fn the_load_span_is_the_drawn_cells() {
-        // 046 R3.4: drawing, the mouse and the popover's anchor read one layout.
+        // Drawing, the mouse and the popover's anchor read one layout.
         for stats in [
             calm(StatsForm::Sparkline),
             calm(StatsForm::Numbers),
@@ -4477,7 +4466,7 @@ mod tests {
         }
     }
 
-    /// 047 R7.2: the Sign In… button takes the indicator's place, right-aligned
+    /// The Sign In… button takes the indicator's place, right-aligned
     /// in the upload buttons' drawing; the click's range is the drawn fill.
     #[test]
     fn the_sign_in_button_is_drawn_where_it_is_hit() {
@@ -4622,10 +4611,10 @@ mod tests {
 
     #[test]
     fn an_upload_takes_over_the_context_row_and_the_edge() {
-        // 037 Karar 7 → Kullanıcı kararı 4: `⇄ host` prefix and color are kept,
+        // The `⇄ host` prefix and color are kept,
         // the status next to it; the top line is a bar — the filled part
-        // `info`, the empty track in the mark's color (phase-7). With a single
-        // item only `Cancel ⌘.` (phase-6), right-aligned.
+        // `info`, the empty track in the mark's color. With a single
+        // item only `Cancel ⌘.`, right-aligned.
         let state = live("", "", "", 0);
         let context = uploading("↑ a.tar", 1, Some(2_500));
         let (cells, dock) = draw_with(&state, &context, COLS);
@@ -4743,7 +4732,7 @@ mod tests {
             "hint"
         );
 
-        // List open: the label does not change (no `Hide files`, phase-7), the
+        // List open: the label does not change (no `Hide files`), the
         // button in the pressed tone; the popover's anchor is the button's exact range.
         let open = with_controls(context, |c| c.list_open = true);
         let (cells, dock) = draw_with(&state, &open, 64);
@@ -4763,7 +4752,7 @@ mod tests {
 
     #[test]
     fn the_end_line_carries_the_outcome_colour_and_an_unmarked_track() {
-        // 037 phase-7: success green, error text red and its tally dim, cancel
+        // Success green, error text red and its tally dim, cancel
         // dim. On an unmarked host the empty track is in the separator's color.
         let state = live("", "", "", 0);
         let line = |body: &str, tone: TransferTone, lead: usize| DockContext {
@@ -4927,7 +4916,7 @@ mod tests {
 
     #[test]
     fn a_reconnect_offer_fills_the_empty_line() {
-        // 037 Karar 8: on an empty input row, after the caret, `⇄ host` in the
+        // On an empty input row, after the caret, `⇄ host` in the
         // mark's color, the rest `dim`; the caret at the start of the row, the
         // context row local.
         let state = live("", "", "", 0);
@@ -4995,7 +4984,7 @@ mod tests {
 
     #[test]
     fn a_remote_session_shows_the_host_and_the_remote_path() {
-        // 036 R4.1: `⇄ host`, two spaces, the remote path; no local path and no branch.
+        // `⇄ host`, two spaces, the remote path; no local path and no branch.
         let state = live("", "", "", 0);
         let (cells, dock) = draw_with(&state, &remote("prod", "/var/www/app"), COLS);
         assert_eq!(row_text(&cells, 1), "⇄ prod  /var/www/app");
@@ -5018,7 +5007,7 @@ mod tests {
 
     #[test]
     fn a_marked_host_takes_its_mark_color() {
-        // 037 Karar 3: `⇄ host` and the top line in the mark's color; the path
+        // `⇄ host` and the top line in the mark's color; the path
         // tiers and the second line do not change.
         let state = live("", "", "", 0);
         for (mark, expected) in [
@@ -5199,16 +5188,17 @@ mod tests {
     /// **A wide character takes two columns in the dock** and its head cell
     /// ends up marked.
     ///
-    /// In 023 this guard was the guard of the **opposite**
+    /// This guard was once the guard of the **opposite**
     /// (`the_dock_never_marks_a_cell_wide`) and its reason was sound with that
     /// arithmetic: while the column derived from the character index a
-    /// two-cell glyph would paint over its neighbor. 024 changed the
-    /// arithmetic, so the invariant went too — the box was not deleted, its
-    /// **claim** changed. The lesson is in `/rfc` → Bulguyu işleme yolu: a
-    /// truly mandatory constraint could not be lifted in the next set.
+    /// two-cell glyph would paint over its neighbor. The column arithmetic
+    /// changed, so the invariant went too — the box was not deleted, its
+    /// **claim** changed. The lesson: a truly mandatory constraint could not
+    /// have been lifted later.
     ///
     /// The context row is **outside** the scope: the small class, the column
-    /// pitch is the small face's advance (the precedent of 021).
+    /// pitch is the small face's advance (the precedent of the procedural
+    /// characters).
     #[test]
     fn a_wide_char_takes_two_columns_in_the_dock() {
         let state = live("", "漢ls", "", 3);
@@ -5297,12 +5287,12 @@ mod tests {
     }
 
     /// A wide glyph is **not split** at the row end (the wrapping counterpart
-    /// of 030's window-edge guard, 032).
+    /// of the old horizontal window's edge guard).
     ///
     /// The character that does not fit moves to the next row and an empty
-    /// column remains behind it: 023's contract is "a box or a whole glyph"
-    /// and half a glyph is a **silent** corruption (`discussion.md` → Karar 2,
-    /// 024). The same place as the grid's `LEADING_WIDE_CHAR_SPACER` rule.
+    /// column remains behind it: the wide-glyph contract is "a box or a whole
+    /// glyph" and half a glyph is a **silent** corruption. The same place as
+    /// the grid's `LEADING_WIDE_CHAR_SPACER` rule.
     #[test]
     fn a_wide_char_is_never_split_at_the_row_end() {
         // **Two** columns are left for the text: `a` eats one, `漢` wants two
@@ -5329,7 +5319,7 @@ mod tests {
     /// no cell of its own in the grid either), a control character does.
     /// Dropping it to zero would be a regression — the words on both sides of
     /// a TAB inserted with `Ctrl-V` would merge and the caret would shift left
-    /// by one column per control character. The set gate (`/code-review`)
+    /// by one column per control character. Code review
     /// caught this and this guard pins it.
     ///
     /// The right display is neither 0 nor 1 (zsh shows `^C` in **two**
@@ -5355,9 +5345,9 @@ mod tests {
     }
 
     /// **A wide character under the caret is drawn whole and the caret is on
-    /// top of it** — the wrapping counterpart of 030's window guard (032).
+    /// top of it** — the wrapping counterpart of the old horizontal window guard.
     ///
-    /// The regression the set gate (`/code-review`, 024) found: when the caret
+    /// The regression code review found: when the caret
     /// stood on a wide glyph the glyph was not drawn at all and the caret
     /// stayed over an empty cell. In wrapping, if the character does not fit
     /// at the row end it drops to the next row and the caret with it; in a
@@ -5399,12 +5389,12 @@ mod tests {
     ///
     /// Its reason is not the absence of a wide glyph but the **small size
     /// class**: the column pitch is the small face's advance and the wide path
-    /// is closed there (the precedent of 021). So a path with CJK still shifts
-    /// columns here.
+    /// is closed there (the precedent of the procedural characters). So a path
+    /// with CJK still shifts columns here.
     ///
-    /// The guard fills the gap left by 023's deleted test: it was the **only**
+    /// The guard fills the gap left by an earlier deleted test: it was the **only**
     /// test passing `render_context` a CJK `cwd` and the four that replaced it
-    /// never touched the context row (the set gate, `/code-review`).
+    /// never touched the context row (found in code review).
     #[test]
     fn the_context_line_keeps_character_columns() {
         let state = live("", "ls", "", 2);
@@ -5447,9 +5437,9 @@ mod tests {
     /// No overflow **if the row is narrower** than the caret's character.
     ///
     /// One column for the text and a two-column character under the caret:
-    /// [`layout`]'s "an empty row that does not fit overflows" arm. In 030's
-    /// window `caret_col - skip` dropped to negative here (the set gate,
-    /// `/code-review`); in wrapping the character overflows the row and is
+    /// [`layout`]'s "an empty row that does not fit overflows" arm. In the old
+    /// horizontal window `caret_col - skip` dropped to negative here (found
+    /// in code review); in wrapping the character overflows the row and is
     /// **not drawn** (it would write outside the grid), the caret stays in the
     /// text column and no number overflows — in debug there is no panic on the
     /// frame path in `bt-core`.
@@ -5484,7 +5474,7 @@ mod tests {
         }
     }
 
-    // ---- Row-aware layout (032) ----
+    // ---- Row-aware layout ----
 
     /// The layout's visual rows, as text; and its end.
     fn laid_out(
@@ -5596,7 +5586,7 @@ mod tests {
 
     #[test]
     fn grid_span_matches_the_column_division_on_one_line() {
-        // **Equivalence guard** (032 phase-1): the suppression's row arithmetic
+        // **Equivalence guard**: the suppression's row arithmetic
         // moved from column division to the layout walk and on a one-row display
         // the result **must stay the same** — including the `saturating_sub(1)`
         // rule of a completely full row. The old formula stands here as it was;
@@ -5634,7 +5624,7 @@ mod tests {
         assert_eq!(grid_span("abcd日日日", 0, 0, 5, false), (0, 2));
     }
 
-    // ---- Clustering (035) ----
+    // ---- Clustering ----
 
     /// The pieces of the clustered sequences and the single wide character
     /// that stands in for each: in the clustered reading `👍🏽` must take as
@@ -5689,7 +5679,7 @@ mod tests {
     /// `🏽` and the grid's cursor is at the cluster's head column. The walk
     /// must count that state as if the caret were at the cluster's start — had
     /// a half cluster been counted the start column would shift two to the
-    /// left (`/code-review`, phase-3).
+    /// left.
     #[test]
     fn a_caret_inside_a_cluster_counts_like_its_head_in_grid_span() {
         let text = "abc👍🏽de\u{1F1F9}\u{1F1F7}f";
@@ -5743,7 +5733,7 @@ mod tests {
     }
 
     /// If `CURSOR` falls **inside** a cluster the caret is at the cluster's
-    /// start (Karar 7): between the two RIs and in the middle of a ZWJ sequence alike.
+    /// start: between the two RIs and in the middle of a ZWJ sequence alike.
     #[test]
     fn a_caret_inside_a_cluster_sits_at_its_head() {
         for (text, inside) in [("a🇹🇷b", 2), ("a👨\u{200D}👩\u{200D}👧b", 3), ("a👍🏽b", 2)]
@@ -5769,9 +5759,9 @@ mod tests {
         assert_eq!(needed_rows(&state, cols), 2);
     }
 
-    // ---- The typing animations' edit (030) ----
+    // ---- The typing animations' edit ----
     //
-    // The table of `discussion.md` → Karar 2: one test per row.
+    // One test per row of the edit rule's table.
 
     /// The row the user typed: `PREDISPLAY` empty, the caret in `BUFFER`, the
     /// stamp `answers`.
@@ -6023,7 +6013,7 @@ mod tests {
     #[test]
     fn a_typed_space_still_marks_its_column() {
         // A space is not a glyph but it shifts a column: the ending of
-        // in-flight arrivals looks at this column (`discussion.md` → Karar 3).
+        // in-flight arrivals looks at this column.
         let edits = edits_between(&at_end("ls", 1), &at_end("ls ", 2), COLS);
         let DockEdit::Arrive { col, cells, .. } = only(&edits) else {
             panic!("{edits:?}");
@@ -6121,8 +6111,8 @@ mod tests {
         (at, cells)
     }
 
-    /// Effects at **(row, column)** positions in a wrapped input (032
-    /// phase-6): the letter filling the row comes with its effect as it wraps
+    /// Effects at **(row, column)** positions in a wrapped input: the
+    /// letter filling the row comes with its effect as it wraps
     /// to the next row, Backspace on the second row leaves its ghost on that
     /// row, the ghosts of a multi-character deletion drop to the next row with
     /// the old layout's wrapping. Sliding letters (the tail changing row by
@@ -6216,7 +6206,7 @@ mod tests {
     /// An input that wraps with the suggestion but whose text is a single row
     /// still comes alive: the "single row?" gate is from the band's measure
     /// (suggestion excluded), or a long history suggestion would reset every
-    /// key's effect (`/code-review`).
+    /// key's effect.
     #[test]
     fn a_wrapping_suggestion_does_not_stop_the_effects() {
         let cols = TEXT_COL + 4;
@@ -6272,7 +6262,7 @@ mod tests {
         reset(&edits, "caret in the grid");
     }
 
-    // ---- Mouse selection (031 phase-4) ----
+    // ---- Mouse selection ----
 
     /// Drawing with a selection and a single input row: cells, surface and runs.
     fn draw_selected(
@@ -6417,7 +6407,7 @@ mod tests {
     /// The selection looks like the grid's: a single-row run, the blank
     /// between words bridged, the blank in the tail unhighlighted, both halves
     /// of a wide character inside; the selected text in its own foreground,
-    /// reverse video resolved and the ground dropped (031 Karar 3, 4).
+    /// reverse video resolved and the ground dropped.
     #[test]
     fn a_dock_selection_is_one_run_over_what_is_drawn() {
         let mut state = live("% ", "ls 漢 x  ", "", 2);
@@ -6455,7 +6445,7 @@ mod tests {
         assert_eq!(l.bg, Some(THEME.foreground_linear()));
     }
 
-    /// **A selection across rows is one run per visual row** (032 Karar 6):
+    /// **A selection across rows is one run per visual row**:
     /// the same shape as the grid's runs, so the drawing side draws the
     /// corners as one piece by looking at the neighboring row's run.
     #[test]
@@ -6475,7 +6465,7 @@ mod tests {
     /// On a wide character that does not fit the row end the walk **moves to
     /// the next row** and the narrow character behind it lands next to it, it
     /// does not slip into the first row's empty column (the wrapping form of
-    /// 030's "the walk ends" guard; the set gate, `/code-review`).
+    /// the old "the walk ends" guard; found in code review).
     #[test]
     fn a_wide_char_that_does_not_fit_wraps_and_the_next_follows_it() {
         let mut placed = Vec::new();
@@ -6545,7 +6535,7 @@ mod tests {
         );
         // Line: on a single logical row the whole of `BUFFER`, independent of the point.
         assert_eq!(range(SelectKind::Line, at, at), (0, 6));
-        // In a `BUFFER` with line breaks the **logical row** (032 Karar 6):
+        // In a `BUFFER` with line breaks the **logical row**:
         // between `\n`s, line break excluded; if the two ends are on two rows, both and what is between.
         let lines = "echo a\necho b\nx";
         let line = |a: usize, b: usize| {
@@ -6609,7 +6599,7 @@ mod tests {
         assert_eq!((start, end), (0, 13));
     }
 
-    // ---- Drawing and editing a cluster (035 phase-4) ----
+    // ---- Drawing and editing a cluster ----
 
     /// A clustered mirror (`cluster` on), the caret at the end of the row.
     fn clustered(buffer: &str, answers: u64) -> DockState {
@@ -6663,7 +6653,7 @@ mod tests {
             vec![
                 (Some('a'), None),
                 (Some('🇹'), Some("🇹🇷".into())),
-                // A one-column combiner with the base character (Karar 6).
+                // A one-column combiner with the base character.
                 (Some('e'), None),
             ]
         );

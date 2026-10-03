@@ -1,4 +1,4 @@
-//! The remote host's load for the ssh status bar (046): what the samples mean
+//! The remote host's load for the ssh status bar: what the samples mean
 //! and when they are taken — both pure, so `make linux` runs them too.
 //!
 //! - **[`Sampler`]** turns the helper's raw readings
@@ -11,10 +11,6 @@
 //!   popover), actions out (arm a tick with a token, send a request, hide the
 //!   indicator). The clock is an argument; the platform shell runs the actions
 //!   (`dispatch`'s `after` cannot be cancelled, hence the token).
-//!
-//! The rationale is in `.tasks/046-uzak-yuk-gostergesi/discussion.md` → Karar 1
-//! (the helper's request, the two kinds of failure), Karar 2 (what is measured
-//! and how) and Karar 6 (when sampling runs and stops).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -27,20 +23,20 @@ use crate::remote_files::{CpuCounters, LoadSample, Process, ProcessScan};
 pub const TOP_PROCESSES: usize = 3;
 
 /// With no interaction for this long sampling pauses and the indicator keeps
-/// its last value (046 Karar 6). A **design constant**, not a measurement:
+/// its last value. A **design constant**, not a measurement:
 /// long enough for reading a log, short enough that a forgotten window does
 /// not sample a server all night.
 pub const STATS_IDLE: Duration = Duration::from_secs(120);
 
 /// After a sample without CPU (the first one: CPU is a difference) the next
-/// comes this soon rather than a whole interval later (046 Karar 2). Design
+/// comes this soon rather than a whole interval later. Design
 /// constant — the reason it is not a `sleep 1` inside the script is that the
 /// helper's worker is serial and a ⌘-hover would wait behind it.
 pub const FIRST_FOLLOW: Duration = Duration::from_secs(1);
 
 // ─── sampler ─────────────────────────────────────────────────────────────
 
-/// The popover's content (046 Karar 7), from one sample. Sizes in bytes.
+/// The popover's content, from one sample. Sizes in bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Detail {
     /// `PRETTY_NAME`; only on a `detail` request.
@@ -74,7 +70,7 @@ pub struct Reading {
 }
 
 /// The previous CPU counters, the previous process scan and the sparkline's
-/// history (046 Karar 2, 4).
+/// history.
 #[derive(Debug, Default)]
 pub struct Sampler {
     previous: Option<CpuCounters>,
@@ -90,7 +86,7 @@ pub struct Sampler {
 
 impl Sampler {
     /// Forgets the counters and the history: sampling resumed after a pause,
-    /// and a gapped time axis would read as a continuous graph (Karar 6).
+    /// and a gapped time axis would read as a continuous graph.
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -295,14 +291,14 @@ pub enum Outcome {
     Sample { cpu: bool },
     /// `BT-NOPROC`: no Linux `/proc` on this server.
     NoProc,
-    /// The helper session could not be opened (Karar 1: no retry in this
+    /// The helper session could not be opened (no retry in this
     /// generation — a password prompt, an unreachable host).
     Unreachable,
     /// The open session failed (closed, timed out, unreadable answer).
     Failed,
 }
 
-/// When samples are taken (046 Karar 6). Sampling runs while a remote
+/// When samples are taken. Sampling runs while a remote
 /// generation is on, the form is not `off`, the pane is visible, the last
 /// interaction is younger than [`STATS_IDLE`] and the generation has not
 /// ended sampling (a failed open, `BT-NOPROC`, a second failure in a row).
@@ -386,7 +382,7 @@ impl Schedule {
         })
     }
 
-    /// The user signed in (047 R7.2): a generation that ended on a failed
+    /// The user signed in: a generation that ended on a failed
     /// open samples again at once, without waiting for a new generation. It
     /// counts as an interaction — the user just clicked.
     pub fn retry(&mut self, now: Instant) -> Vec<Action> {
@@ -418,7 +414,7 @@ impl Schedule {
     /// Called at mouse-move rate: while sampling runs it only stamps the time.
     /// So does an interaction after [`STATS_IDLE`] that the tick has not yet
     /// found (a tick armed or a request in flight): there was no gap in the
-    /// samples, so the history is not restarted (`/code-review`).
+    /// samples, so the history is not restarted.
     pub fn interaction(&mut self, now: Instant) -> Vec<Action> {
         if self.running(now) || self.armed || self.in_flight {
             self.interaction = Some(now);
@@ -543,7 +539,7 @@ impl Schedule {
         self.armed = false;
     }
 
-    /// Sampling ends for this generation (Karar 1, R4.2).
+    /// Sampling ends for this generation.
     fn end(&mut self) {
         self.ended = true;
         self.wanted = None;
@@ -986,7 +982,7 @@ mod tests {
                 }]
             );
         }
-        // A sign-in brings the same generation back at once (047 R7.2).
+        // A sign-in brings the same generation back at once.
         let mut schedule = started(t0);
         assert_eq!(
             schedule.answered(t0, 7, Outcome::Unreachable),

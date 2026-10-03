@@ -264,7 +264,7 @@ impl FontSystem for CoreText {
     /// `CTFontCreateForString` walks the cascade for us, and that is exactly
     /// what `CTFontGetGlyphsForCharacters`, which [`CoreText::glyph`] wraps,
     /// **does not do**: it only looks at the given font. This difference is
-    /// 019's reason to exist (`⏵` U+23F5 is not in Menlo).
+    /// the fallback's reason to exist (`⏵` U+23F5 is not in Menlo).
     ///
     /// Never `None`: for a character nobody can draw CoreText gives
     /// `.LastResort`, and that returns a glyph too, so the "no candidate"
@@ -310,8 +310,8 @@ impl FontSystem for CoreText {
     /// no font" group is zero, 7189 code points come back with `.LastResort`'s
     /// real glyph), so the "no candidate" question cannot see it. The
     /// comparison is therefore by name, and by PostScript name, because that
-    /// is the font's unique identity. Its scope is the shrink arm only (041
-    /// R3.2): the two gates reject it by geometry, so the name changes no
+    /// is the font's unique identity. Its scope is the shrink arm only:
+    /// the two gates reject it by geometry, so the name changes no
     /// drawing they accept.
     fn is_last_resort(font: &Self::Font) -> bool {
         // SAFETY: `font` is alive; a pure read.
@@ -445,8 +445,7 @@ impl FontSystem for CoreText {
 
         CGContext::set_should_antialias(Some(&ctx), true);
         // Subpixel AA is off: the atlas is single-channel and the system
-        // itself dropped subpixel AA in macOS 10.14 (discussion.md → karar
-        // 3a). Both calls are needed separately: `allows_font_smoothing` turns
+        // itself dropped subpixel AA in macOS 10.14. Both calls are needed separately: `allows_font_smoothing` turns
         // off the context's permission, `should` the preference for this
         // drawing.
         CGContext::set_allows_font_smoothing(Some(&ctx), false);
@@ -475,7 +474,7 @@ impl FontSystem for CoreText {
     /// (`RGBA8Unorm_sRGB`): the target is `BGRA8Unorm_sRGB`, the hardware
     /// treats fragment output as linear, and an emoji sampled from a non-sRGB
     /// texture **washes out** the palette. The symptom is the same silent
-    /// defect as in `CLAUDE.md` → "Renk uzayı sınırı geçer", so its witness
+    /// defect as a colour space mismatch at the linear/sRGB boundary, so its witness
     /// is of the same kind: a mid-tone pixel (`0.0` and `1.0` are fixed points
     /// of the transfer function).
     ///
@@ -543,8 +542,7 @@ impl FontSystem for CoreText {
     }
 }
 
-/// Sample characters and family names for the platformless tests
-/// (`.tasks/042-font-sistemi-linux/discussion.md` → Karar 7): a test body
+/// Sample characters and family names for the platformless tests: a test body
 /// names no font and assumes no character of the base font; what it needs
 /// comes from here, measured on this backend's fonts.
 #[cfg(any(test, feature = "fixture"))]
@@ -573,7 +571,7 @@ pub mod fixture {
     /// slots for a wide request): `.LastResort`'s box fits two cells.
     pub const WIDE_CHAR: char = UNKNOWN_CHAR;
 
-    /// A character the fallback **accepts**, 019's reason to exist: `⏵` is
+    /// A character the fallback **accepts**, its reason to exist: `⏵` is
     /// not in Menlo and comes from STIX Two Math (measured, macOS 26.4.1),
     /// advancing 0.84 of the cell with ink 0.69 — the ratio is scale-free, so
     /// it passes the gate in both size classes. Its side bearings are

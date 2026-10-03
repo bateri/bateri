@@ -31,9 +31,9 @@
 //! is the reader's own order and cannot deadlock. The other edge of the only
 //! cycle that could close would be the reverse direction, so `frame`'s second
 //! phase (the block stripes) takes `shell` **after `term` is released**, and
-//! `shell_state` and `set_terminal_options` do the same. (`/audit`, 010 gate:
-//! the old rationale here put the prohibition in the reverse direction and
-//! made the reader's own order look dangerous.)
+//! `shell_state` and `set_terminal_options` do the same. (An older rationale
+//! here put the prohibition in the reverse direction and made the reader's
+//! own order look dangerous.)
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -57,7 +57,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::TermMode;
 // The grid cell comes in **under an alias**: this module's `Cell` is the
 // frame record crossing the boundary, and had both come under the same name
-// it could not be read which budget applies (`CLAUDE.md` → the cell is fixed size).
+// it could not be read which budget applies (the grid cell is fixed size).
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags, Hyperlink};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search as search_engine;
@@ -104,7 +104,7 @@ use crate::wake::Wake;
 /// bitflag the type could carry an unrepresentable state (`Curl + Dotted`)
 /// and force the drawing side to write a precedence rule.
 ///
-/// Alacritty's `Flags` is **not re-exported** (`CLAUDE.md`):
+/// Alacritty's `Flags` is **not re-exported**:
 /// `bt-core` encapsulates alacritty, no alacritty type shows in the `pub` API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UnderlineStyle {
@@ -131,14 +131,14 @@ pub enum UnderlineStyle {
 /// [`UnderlineStyle`]. Alacritty's `Flags` is never re-exported in any form —
 /// the day it is, `bt-gpu` starts knowing terminal semantics.
 ///
-/// **`CLAUDE.md`'s 24-byte `const` assert is bound not to this type but to
+/// **The 24-byte `const` assert is bound not to this type but to
 /// alacritty's grid cell** (`lib.rs`): the record that grows a 10 000-line
 /// scrollback by megabytes per tab is that one, not this. The fields here
 /// are born per frame and only for **drawn** cells; the sink is generic
 /// (`impl FnMut(Cell)`) and inlined, so the copy does not cross a call
 /// boundary either. If rare data is to be moved to a side table, the
 /// criterion is not that assert but this type's per-frame cost.
-/// **Measured** (035): the type is **76 bytes** today, alignment 4 — 023's
+/// **Measured**: the type is **76 bytes** today, alignment 4 — the earlier
 /// 72 plus the cluster id's 4 ([`Cell::cluster`], a niche'd `Option`); the
 /// only **buffered** array of it is the fill band's `Vec<Cell>`
 /// (`bt_gpu::link`, its capacity kept), every other path is an inlined
@@ -216,11 +216,11 @@ pub struct Cell {
     pub wide: bool,
     /// If the cell is the head cell of an emoji **sequence** (`🇹🇷`,
     /// `👨‍👩‍👧`, `👍🏽`, `❤️`), the string's id in the caller's table
-    /// ([`Clusters`], 035 Karar 4B); [`Cell::ch`] is still the base character.
+    /// ([`Clusters`]); [`Cell::ch`] is still the base character.
     ///
     /// Born only in a **wide** cell with more than one code point and only
     /// while clustering is on: a single-column combiner (`é`, `⌚︎`) is drawn
-    /// with the base character as today (Karar 6), so a cluster-less cell
+    /// with the base character as today, so a cluster-less cell
     /// pays nothing and with clustering off the frame is bit for bit the same.
     pub cluster: Option<ClusterId>,
 }
@@ -270,7 +270,7 @@ impl Default for Cell {
 /// unreadable. "What colour the text underneath should be" is terminal
 /// semantics and this crate's decision — [`Cursor::text`] carries it across
 /// the boundary. Which **pixels** take that colour is the drawer's job: when
-/// the block sits between two cells (008) the boundary passes through the
+/// the block sits between two cells the boundary passes through the
 /// middle of a cell and this crate cannot see that boundary. The decision
 /// used to be written into the cell (the foreground of the cell where the
 /// cursor stood was turned into the background and its `underline_color`
@@ -299,7 +299,7 @@ pub struct Cursor {
     /// on an overflowing input the dock opens a vertical window inside
     /// itself.
     ///
-    /// **Zero = no input row** (036 Karar 8): in a remote session (ssh, mosh)
+    /// **Zero = no input row**: in a remote session (ssh, mosh)
     /// the dock drops to a status bar consisting only of the context row, the
     /// caret is in the grid ([`Cursor::caret_in_dock`] `false`) and a click on
     /// the dock does nothing. `1` in a window with no dock and on the
@@ -312,7 +312,7 @@ pub struct Cursor {
     /// suppression decision (the precedent of `caret_in_dock`: the answer
     /// passes from where it is computed). The share the PTY reserves is
     /// **independent** of this — that is `bt-gpu`'s `DOCK_ROWS` and never
-    /// changes; this number only grows the drawing (032 Karar 1).
+    /// changes; this number only grows the drawing.
     ///
     /// A long single line wraps, a display with line breaks (paste,
     /// `Esc-Enter`) and `PREBUFFER` (`for`, heredoc) grow the band with their
@@ -340,7 +340,7 @@ pub struct Cursor {
     /// **The last word is not here.** `bt-gpu` `AND`s this bit with two more
     /// things and both are things `bt-core` cannot see: Reduce Motion (the
     /// accessibility setting does not *add* animation) and the window's
-    /// **focus** (015 R7.4 — in an unfocused window the blink stops, the
+    /// **focus** (in an unfocused window the blink stops, the
     /// cursor stays visible). So a `true` here does not mean "it will blink",
     /// it means "there is no obstacle on this side".
     pub blink: bool,
@@ -352,14 +352,14 @@ pub struct Cursor {
     ///
     /// Not a position but an **identity**: the drawing side compares it
     /// between two frames, it does not use it as a number. The reason it is
-    /// needed is 008's snap rule (Karar 5): the cursor's own movement is
+    /// needed is the snap rule: the cursor's own movement is
     /// animated, the shift of the world under it is instant. The two are
     /// **indistinguishable** from `row` — scrolling three rows into the
     /// scrollback moves the cursor three rows down the screen, just like
     /// pressing enter three times. If the offset moved, the cursor did not
     /// move, the grid did.
     ///
-    /// **Since 011 it snaps two animators at once.** The content's offset
+    /// **It snaps two animators at once.** The content's offset
     /// (`content_rows`) slides too and wants the same distinction: content
     /// rising with enter slides softly, scrollback browsed with the wheel
     /// does **not** slide — the finger must see what it is dragging. The
@@ -375,7 +375,7 @@ pub struct Cursor {
     /// **A fact, not an offset.** The drawing side turns this into an offset
     /// with `rows - content_rows`; "content sticks to the bottom" is a
     /// placement decision and `bt-gpu`'s — this crate only says how many rows
-    /// are full (`CLAUDE.md` → the decision is here, the painting there; the
+    /// are full (the decision is here, the painting there; the
     /// decision here is "which rows are full", not "where it will stick").
     ///
     /// **It is born from two sources at once and both are needed**
@@ -393,7 +393,7 @@ pub struct Cursor {
     /// On the alternate screen `rows`, i.e. zero offset: vim and htop own the
     /// whole grid.
     ///
-    /// **`rows` in a window scrolled into the scrollback too** (017): sticking
+    /// **`rows` in a window scrolled into the scrollback too**: sticking
     /// is the job of the bottom-anchored window, because the fill band and
     /// the sticking must split the screen **exactly** and cannot live
     /// together — `fill = rows - content_rows` and since `content_rows` is
@@ -403,7 +403,7 @@ pub struct Cursor {
     /// is `content_rows_come_from_the_visible_window_while_scrolled`.
     pub content_rows: u16,
     /// How many rows of the blank left at the top were filled **with
-    /// scrollback** (R2.1).
+    /// scrollback**.
     ///
     /// There are `rows - content_rows` rows of blank, and if that many rows
     /// have arrived **since the last clear**, all of them, otherwise what has
@@ -420,11 +420,11 @@ pub struct Cursor {
     /// fullness is the single input of the "content sticks to the bottom"
     /// offset and the fill fills exactly the blank that offset opens. Were it
     /// counted, the offset would close and the content would tear off the
-    /// bottom — the cost of `27a0b98` (R2.3).
+    /// bottom — the cost of `27a0b98`.
     ///
     /// Zero is the **rollback strip**: when [`Session::fill_rows`] returns
     /// zero the second sink is never called and the frame is bit for bit the
-    /// same as today's (R2.4).
+    /// same as today's.
     ///
     /// **While a slide is in flight the band extends**: by the grid top the
     /// drawing side reported ([`Session::set_grid_top`]) and the rows sliding
@@ -522,7 +522,7 @@ pub struct Cursor {
     ///
     /// **It has two sources and the nearer wins** (`shell::sooner`): the
     /// running command's duration counter and the caret handover's **hold**
-    /// (015 phase-1). The second is one-shot; the merge is `min`, not a write,
+    /// The second is one-shot; the merge is `min`, not a write,
     /// or one would silently extinguish the other.
     ///
     /// **`None` is the stopping condition** and arises from four paths: the
@@ -536,7 +536,7 @@ pub struct Cursor {
 /// A command block's trace in the frame: **the command's row** and that
 /// command's colour.
 ///
-/// **A marker, not a region** (user decision, 010 delivery). The block used to
+/// **A marker, not a region** (a user decision). The block used to
 /// carry the row range it occupied and the stripe also painted the left of
 /// the output; today only the command's own row is marked. The gain is not
 /// aesthetic but structural: the answer to "which block does this row belong
@@ -549,7 +549,7 @@ pub struct Cursor {
 /// **It crosses resolved.** The exit code, the block id and the shell's phase
 /// do not cross this boundary; the drawing side receives the answer to
 /// "which row, which colour" and does not ask "why that colour" —
-/// `CLAUDE.md`'s **the decision is here, the painting there** rule. A branch
+/// the **decision is here, the painting there** rule. A branch
 /// in the renderer that recognizes exit codes is in the wrong place.
 ///
 /// The row is in terms of the **visible window**; it comes out of the same
@@ -606,7 +606,7 @@ pub struct Blocks {
     fill_resolved: Vec<Block>,
     /// The suppressed input row's display (`PREDISPLAY ++ BUFFER ++
     /// POSTDISPLAY`) and the caret's character index — the input of the
-    /// suppression's row arithmetic ([`crate::dock::grid_span`]) (032).
+    /// suppression's row arithmetic ([`crate::dock::grid_span`]).
     ///
     /// The text is copied under the leaf lock (`shell`) and walked under the
     /// `Term` lock: the walk wants the grid's width and the cursor's column,
@@ -631,12 +631,12 @@ impl Blocks {
     ///
     /// **Why a separate list** (2026-09-20, the user reported): the band is a
     /// second surface and must win separately everything derived from the
-    /// grid — it had taken the cells in phase-2, it had not taken the block
+    /// grid — it had taken the cells earlier, it had not taken the block
     /// marker. The symptom was this: a completion list pushes the command row
     /// into the scrollback, when the list goes away the band brings that row
     /// back but **without the marker**, and when the user scrolled the marker
     /// came back because the same row passed through the grid. The screen
-    /// returning to its pre-Tab state is 017's promise; a row returning
+    /// returning to its pre-Tab state is the fill band's promise; a row returning
     /// without its marker does not keep that promise.
     ///
     /// **The duration counter is still not in the band** and this is a
@@ -652,7 +652,7 @@ impl Blocks {
 /// A one-row piece of the selection highlight: columns `first..=last` on row
 /// `row`, in screen coordinates (the same space as `Cell`).
 ///
-/// **A row run, not a cell** (031 `discussion.md` → Karar 4): the run extends
+/// **A row run, not a cell**: the run extends
 /// from the row's first drawable selected cell to the last and bridges the
 /// gaps between — the space between words is highlighted (the clipboard
 /// already copies it), the empty tail at the end of a row and an empty row
@@ -669,8 +669,8 @@ pub struct SelectionRun {
 /// precedent of [`Blocks`], a buffer the caller spreads across frames (no
 /// per-frame allocation).
 ///
-/// **The colours arrive ready, the drawing side picks the selection**
-/// (Karar 9): focus does not enter `bt-core`, so `bt-gpu` knows which of
+/// **The colours arrive ready, the drawing side picks the selection**:
+/// focus does not enter `bt-core`, so `bt-gpu` knows which of
 /// them will be drawn. Both come from the same copy of the theme, in the same
 /// frame as the runs — had they been read from a separate query they would
 /// have diverged by a frame on a theme swap.
@@ -748,9 +748,9 @@ pub struct SessionOptions {
     ///
     /// Precedence, strongest to weakest: `TERM`, `COLORTERM` and the identity
     /// family (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `TERM_SESSION_ID`,
-    /// `BATERI_TAB_URL` and the `LC_` trio of 049 R6) and `PWD` when
+    /// `BATERI_TAB_URL` and the `LC_` trio) and `PWD` when
     /// [`Self::working_directory`] is absolute (what this crate writes, cannot be overridden — `TERM`
-    /// is a contract, see `CLAUDE.md`) > this map > what alacritty writes
+    /// is a contract) > this map > what alacritty writes
     /// unconditionally (`USER`, `HOME`, `ALACRITTY_WINDOW_ID`, `WINDOWID`) >
     /// inherited. The only exception is the two keys alacritty **removes** at
     /// the very end (`XDG_ACTIVATION_TOKEN`, `DESKTOP_STARTUP_ID`): even if
@@ -785,21 +785,21 @@ pub struct SessionOptions {
     /// is exactly that arm.
     pub dock: bool,
     /// Whether emoji sequences (`🇹🇷`, `👍🏽`, `👨‍👩‍👧`, `❤️`) cluster in a
-    /// single cell (035; the rule is in `crate::cluster`).
+    /// single cell (the rule is in `crate::cluster`).
     ///
     /// **A single source, all consumers from here:** the grid's wrapper (the
     /// reader loop), the dock's layout, the suppression's grid walk and the
     /// mirror half of the freshness gate. Read once at opening and constant
     /// for the session's life; if they could be switched on separately the
     /// grid would count the sequence as two columns, the dock as four, and the
-    /// suppression's range would diverge from the grid (032's "two
+    /// suppression's range would diverge from the grid (the "two
     /// arithmetics" symptom). Every window of the application turns it on
     /// (`bt-shell` `window`); the field stays, because the rollback must be a
     /// single line.
     pub cluster: bool,
-    /// The line to be written to the shell as the **first input** (037 Karar
-    /// 6: in a remote tab ⌘T runs the same ssh/mosh command in the new tab;
-    /// 053 Karar 3: a restored remote pane gets the same line, not run).
+    /// The line to be written to the shell as the **first input** (in a
+    /// remote tab ⌘T runs the same ssh/mosh command in the new tab; a
+    /// restored remote pane gets the same line, not run).
     /// `None` or an empty line → nothing is written.
     ///
     /// When it will be written comes from [`SessionOptions::shell_marks`];
@@ -819,20 +819,20 @@ pub struct SessionOptions {
     /// oh-my-zsh's update question), when `false` at birth, as the shell's
     /// typeahead. **Known limit:** if `true` but the identified `A` never
     /// comes (a broken rc, `exec fish` at the end of the rc) the line never
-    /// goes; a timeout would be an unmeasured number (037 Karar 6).
+    /// goes; a timeout would be an unmeasured number.
     pub shell_marks: bool,
-    /// The tab's identity (038): if given the child gets `TERM_SESSION_ID` and
+    /// The tab's identity: if given the child gets `TERM_SESSION_ID` and
     /// `BATERI_TAB_URL` ([`TabId::url`]). `None` only for tests and embedded
     /// use; the application supplies it in every window (`bt-shell` `window`,
     /// from `NSUUID`).
     pub tab_id: Option<TabId>,
-    /// This machine's name (044): a `file://` authority equal to it counts as
+    /// This machine's name: a `file://` authority equal to it counts as
     /// local — in OSC 7 and in the link hit test ([`Session::link_at`]) alike
     /// (`crate::shell::is_local_authority`). `bt-core` reads no name itself (no
     /// platform edge); the application supplies it. `None` → only the empty
     /// authority and `localhost` are local.
     pub hostname: Option<String>,
-    /// A previous session's scrollback to show before the shell starts (053):
+    /// A previous session's scrollback to show before the shell starts:
     /// the bytes [`Session::final_history`] gave at quit.
     ///
     /// Applied in [`Session::spawn`] between `Term::new` and the reader loop,
@@ -853,7 +853,7 @@ pub struct InitialInput {
     pub line: String,
     /// `true` → a `\r` goes behind the line and the shell runs it (⌘T in a
     /// remote tab); `false` → the line waits in the input line for the
-    /// user's ⏎ (a restored remote pane, 053 Karar 3).
+    /// user's ⏎ (a restored remote pane).
     pub run: bool,
 }
 
@@ -924,7 +924,7 @@ fn caret_shape(shape: CaretShape) -> CursorShape {
 /// decisions: [`Cursor::visible`] already carries the first (a fact
 /// represented in two places diverges), the second is the state of focus loss
 /// and focus **still does not cross the boundary** — the hollow cursor came
-/// in 015 phase-3 but as `bt-gpu`'s own bit (`DisplayLink::set_focused`). Not
+/// later but as `bt-gpu`'s own bit (`DisplayLink::set_focused`). Not
 /// being added here is deliberate: `CaretShape` is the settings file's
 /// vocabulary (`"block" | "underline" | "beam"`) and focus is an axis
 /// **orthogonal** to shape — had the two met in a single enum, "unfocused
@@ -943,7 +943,7 @@ fn caret_shape_of(shape: CursorShape) -> CaretShape {
 ///
 /// alacritty's same-named type is not re-exported (`lib.rs`) and two of its
 /// four values **cannot be represented** here: there is no read direction
-/// (006 Karar 5 — a remote program must not be able to read the user's
+/// (a remote program must not be able to read the user's
 /// clipboard). The default value is the settings model's decision, not this
 /// type's (`Settings::default`), the type does not take `Default`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -958,7 +958,7 @@ impl Osc52 {
     /// The single list of spellings in the settings file; its parser is in
     /// `settings.rs`. The read direction's values (`"paste"`, alacritty's
     /// `"copy_paste"`) are deliberately absent — there is no read direction
-    /// (006 Karar 5).
+    /// (a remote program must not read the clipboard).
     pub const NAMES: &'static [(&'static str, Self)] = &[("copy", Self::Copy), ("off", Self::Off)];
 
     /// The spelling in the settings file.
@@ -1076,15 +1076,15 @@ impl DirtyFlag {
 /// fifteen rules bit for bit in place — but takes the cursor from the start
 /// of the line `\n` left to the second column of the same line, i.e. **one**
 /// cursor movement arises in every run. The gate's `motion > 0` requirement
-/// rests on this (008 Karar 8): without it the cursor would move only with
+/// rests on this: without it the cursor would move only with
 /// the output itself, and whether the first frame fell before or after the
 /// output varies from run to run (`frames=1↔2`), so the gate might not see
 /// that the animation ran.
 ///
-/// **The movement is purely horizontal and this is a contract** (011
-/// phase-0). It used to be `\033[H`, i.e. purely **vertical**: it took the
-/// cursor from (row 1, column 0) to (0, 0). After the content stuck to the
-/// bottom that target **zeroes `motion=`**: since the offset is born from
+/// **The movement is purely horizontal and this is a contract.** It used to
+/// be `\033[H`, i.e. purely **vertical**: it took the cursor
+/// from (row 1, column 0) to (0, 0). After the content stuck to the bottom
+/// that target **zeroes `motion=`**: since the offset is born from
 /// `max(largest drawn row, cursor row)`, moving the cursor up shifts the
 /// offset down by the same amount and the cursor's **screen** row stays
 /// unchanged — and `Motion::sync`'s target is exactly that row. The screen is
@@ -1099,9 +1099,8 @@ impl DirtyFlag {
 /// time eats from the tail of the `quiet=` token. Measured with three columns
 /// (`\033[4G`) the floor came to violate `QUIET_FLOOR`'s **own derivation
 /// rule** ("at most half of the lowest healthy observation") — the gate was
-/// still green in that run, i.e. the defect hid behind the token. The owner
-/// of the numbers and the derivation is `docs/OLCUMLER.md` → Boşta kare;
-/// someone who lengthens the distance must re-derive `QUIET_FLOOR` from there
+/// still green in that run, i.e. the defect hid behind the token. Someone
+/// who lengthens the distance must re-derive `QUIET_FLOOR`
 /// and the recipe's distance is the **fourth** bound input of that block.
 ///
 /// **The sleep in between is generous (1 s) and this is not a margin, it is
@@ -1316,16 +1315,15 @@ struct AdapterInner {
     /// **since the running command started**: the remote folder's title
     /// fallback ([`Session::title_folder_into`]) reads only such a title — the
     /// slot keeps a title until the next OSC 0/2, so another host's or the
-    /// local prompt's would otherwise pass for this host's (`/code-review`).
+    /// local prompt's would otherwise pass for this host's.
     title_epoch: AtomicU64,
     /// [`AdapterInner::title_epoch`] at the last transition to `Running`; the
     /// reader writes it when the scanner sees the `C`, before the read's bytes
     /// reach `Term`.
     title_at_command: AtomicU64,
-    /// [`AdapterInner::title_epoch`] when the remote state was last set (047
-    /// phase-4): a title written since is the remote shell's — the login
-    /// signal ([`Session::remote_login`]). Read under the `Term` lock
-    /// ([`Session::set_remote`]), so a local title still being parsed in the
+    /// [`AdapterInner::title_epoch`] when the remote state was last set: a title written since
+    /// is the remote shell's — the login signal ([`Session::remote_login`]). Read under the
+    /// `Term` lock ([`Session::set_remote`]), so a local title still being parsed in the
     /// same read as `C` is already counted.
     title_at_remote: AtomicU64,
     /// The **generation** of PTY output: each alacritty `Wakeup` (a parsed
@@ -1336,20 +1334,20 @@ struct AdapterInner {
     /// the session's own frame request ([`Session::request_frame`]) does not
     /// move it.
     ledger: AtomicU64,
-    /// The generation of clearing the screen (034): [`Session::clear_to_start`]
+    /// The generation of clearing the screen: [`Session::clear_to_start`]
     /// and [`Session::clear_scrollback`] increment it, under the `Term` lock.
     /// The "was there a clear in between" question of the current search match
     /// ([`search::LedgerMark::wipes`]) — separate from `ledger`, because in an
     /// unsaturated scrollback `ledger` is not read.
     wipes: AtomicU64,
-    /// Whether search is open (033) — [`Session::store_search`] writes it; the
+    /// Whether search is open — [`Session::store_search`] writes it; the
     /// gate of the scrollback news.
     search_active: AtomicBool,
     /// Whether the scrollback changed since the index's last pass — an **edge**:
     /// the `false → true` transition produces [`Wake::search_changed`], its
     /// consumer is [`Session::search_step`] (by restarting the next pass from scratch).
     search_pending: AtomicBool,
-    /// Whether [`Wake::child_exit`] went (055): an adopted child is not ours
+    /// Whether [`Wake::child_exit`] went: an adopted child is not ours
     /// and its exit carries no status, so the loop sends no `ChildExit` —
     /// the `Exit` that follows every child exit sends the news then.
     child_exited: AtomicBool,
@@ -1404,7 +1402,7 @@ impl Adapter {
 
 impl Adapter {
     /// Puts bytes on the loop's write queue — the answer to the application's
-    /// question ([`Self::reply`]) and the session's first input (037 Karar 6) go through here.
+    /// question ([`Self::reply`]) and the session's first input go through here.
     fn input(&self, bytes: Vec<u8>) {
         // A zero-byte write locks the `EventLoop`'s writer: `write` returns
         // `Ok(0)`, the item is put back at the head of the queue and is never
@@ -1455,7 +1453,7 @@ impl EventListener for Adapter {
             }
             // `Term::exit`'s event: the reader loop sends it right after a
             // child exit and nowhere else. A spawned child's `ChildExit` came
-            // first; an adopted one's exit has no status (055), so this is
+            // first; an adopted one's exit has no status, so this is
             // its news, without a code.
             Event::Exit => {
                 if !self.0.child_exited.swap(true, Ordering::AcqRel) {
@@ -1475,8 +1473,8 @@ impl EventListener for Adapter {
             // pick a light/dark theme). The draw path reads the table right,
             // only the answer path does not; the two diverge. The root is not
             // in the theme but in alacritty: the `Colors` table the application
-            // writes is inside `Term`, i.e. behind this lock. The theme set
-            // (007) left the boundary out of scope; the remedy is a copy of the
+            // writes is inside `Term`, i.e. behind this lock. The theme work
+            // left the boundary out of scope; the remedy is a copy of the
             // table outside `Term`.
             Event::ColorRequest(index, format) => {
                 let theme = *lock(&self.0.theme);
@@ -1534,14 +1532,14 @@ impl EventListener for Adapter {
             Event::Title(title) => self.store_title(Some(title)),
             Event::ResetTitle => self.store_title(None),
             // There is no bell in this set; it is silently dropped like an
-            // unknown sequence (`CLAUDE.md` → no panic in the PTY path). The
+            // unknown sequence (no panic in the PTY path). The
             // second half of the "ignored and LOGGED" rule is debt: `tracing` is
             // not yet a dependency, there is no logger in the workspace —
             // alacritty's own `log::error!` lines fall to the floor for the same
             // reason.
             //
-            // `ClipboardLoad` is OSC 52's read direction and is absent (006
-            // Karar 5): `Osc52::OnlyCopy` does not produce it anyway, the arm is
+            // `ClipboardLoad` is OSC 52's read direction and is absent:
+            // `Osc52::OnlyCopy` does not produce it anyway, the arm is
             // empty against a version change.
             //
             // `MouseCursorDirty` is `Term::scroll_display`'s **only** event and
@@ -1573,9 +1571,9 @@ impl EventListener for Adapter {
 /// **`Reader = Self` is the core of the decision.** `Pty::reader()` returns
 /// `&mut File`, so borrowing suffices to hand over the reader: **no second fd
 /// is needed** for scanning. The panel's "`pty.file().try_clone()` is
-/// mandatory" objection was rejected for this reason (`discussion.md` →
-/// Muhakeme) and the gain is that the measured shutdown balance (the `SIGHUP`
-/// window, `teardown=`) stays truly **untouched** in this phase. The wrapper
+/// mandatory" objection was rejected for this reason and the gain is that
+/// the measured shutdown balance (the `SIGHUP` window, `teardown=`) stays
+/// truly **untouched**. The wrapper
 /// owns the `Pty`, so the order of `Drop` is the same too.
 ///
 /// This neither refutes nor blocks the `try_clone` that [`Session::shutdown`]
@@ -1585,7 +1583,7 @@ impl EventListener for Adapter {
 /// separate; a reading that confuses them in a single sentence thinks the
 /// debt is closed.
 ///
-/// **Two kinds of PTY** since 055 ([`PtyKind`]): the one this process
+/// **Two kinds of PTY** ([`PtyKind`]): the one this process
 /// opened and the one it adopted from another bateri across an update. The
 /// byte path is the same for both; only the fds' registration, the child's
 /// exit and the shutdown differ.
@@ -1622,11 +1620,11 @@ struct TappedPty {
     /// reads) and the channel is lockless. The loop's own write queue writes
     /// the bytes to the PTY.
     adapter: Adapter,
-    /// The sequence the last read stopped in (055): what the handover puts
+    /// The sequence the last read stopped in: what the handover puts
     /// before the bytes a fresh parser reads next ([`snapshot::Tail`]).
     /// Followed on the same slice the scanner sees, no second read.
     tail: snapshot::Tail,
-    /// Bytes served **before** the fd (055): an adopted PTY's carried tail
+    /// Bytes served **before** the fd: an adopted PTY's carried tail
     /// and the holder's buffer — what the old side read or the holder
     /// drained but no parser applied. They take the ordinary read path,
     /// scanner and tail included; `prefix_at` is how far it went.
@@ -1715,7 +1713,7 @@ impl io::Read for TappedPty {
                 // slot's lock: `send_input` sends when it sees the slot empty, so
                 // every key after it enters the channel after this line.
                 //
-                // A **ready** line (053 Karar 3) that finds unsent typing is
+                // A **ready** line that finds unsent typing is
                 // dropped: nothing runs it, so the keys would join it
                 // (`ssh prodgit st`) — the user already started their own line.
                 let mut held = lock(held_input);
@@ -1825,7 +1823,7 @@ impl OnResize for TappedPty {
     }
 }
 
-/// The PTY behind [`TappedPty`] (055 R2.1).
+/// The PTY behind [`TappedPty`].
 enum PtyKind {
     /// Opened here; its `Drop` sends `SIGHUP` and **waits** for the child.
     Spawned(Pty),
@@ -1909,8 +1907,7 @@ impl AdoptedPty {
 
 impl Drop for AdoptedPty {
     /// The master closes first — the slave's hangup is the mechanism
-    /// (`.tasks/055-guncellemede-canli-devir/context.md` → Ölçülenler 2) —
-    /// then the belt and braces: `SIGHUP` to the pid unless it already
+    /// (measured) — then the belt and braces: `SIGHUP` to the pid unless it already
     /// exited. No `wait`: the child is not ours.
     fn drop(&mut self) {
         // SAFETY: dropped exactly once, here, and never touched after.
@@ -1940,7 +1937,7 @@ pub trait PtyOps: Send + Sync {
     fn hangup(&self, pid: u32, exit: BorrowedFd<'_>);
 }
 
-/// What [`Session::freeze`] hands over (055 R2.2): everything another
+/// What [`Session::freeze`] hands over: everything another
 /// process needs to carry the pane on without the child noticing.
 #[derive(Debug)]
 pub struct Frozen {
@@ -1984,7 +1981,7 @@ pub struct Adoption {
     pub ops: Arc<dyn PtyOps>,
 }
 
-/// The user input held while the first input is going (037 phase-4): `Some` →
+/// The user input held while the first input is going: `Some` →
 /// held, `None` → no hold or it is over. Its writers are two threads — user
 /// input on the main thread ([`Session::send_or_hold`]), delivery on the reader
 /// thread (`TappedPty::read`) — and both write to the same channel **under the
@@ -2060,7 +2057,7 @@ pub enum Teardown {
     /// The second and later calls. Nothing was waited for; the **first** call
     /// knows the shutdown's real result.
     AlreadyDone,
-    /// An **adopted** session's clean shutdown (055 R2.4): the reader
+    /// An **adopted** session's clean shutdown: the reader
     /// finished, the master closed and the child got its hangup — nobody
     /// waits for it, it is not our child.
     HungUp,
@@ -2130,7 +2127,7 @@ impl ShutdownHandle {
 /// Without this field the user presses **right to the left** of the letter
 /// they target — that is what is natural — and that pixel falls on the right
 /// half of the previous cell; since the half was not carried the previous
-/// letter is copied too (the defect reported in 006).
+/// letter is copied too (a reported defect).
 ///
 /// In a wide character the "cell" is the two-cell **glyph**: the head cell
 /// counts as the glyph's left half, the spacer the right half (`anchor`). Had
@@ -2184,8 +2181,8 @@ pub enum SelectKind {
     Line,
 }
 
-/// The keys the **terminal** handles while there is a dock selection (031
-/// Karar 8) — the vocabulary of [`Session::dock_key`]. Every other key goes
+/// The keys the **terminal** handles while there is a dock selection — the
+/// vocabulary of [`Session::dock_key`]. Every other key goes
 /// its current way and input removes the selection ([`Session::send_input`]).
 ///
 /// `bt-core`'s type, because the decision is here: `bt-shell` translates
@@ -2208,8 +2205,8 @@ pub enum DockKey {
     /// ⇧⏎ — inserts a line break at the cursor's place without running the line
     /// (in place of the selection if there is one). Consumed whether or not there is a selection.
     NewLine,
-    /// ⏎ — consumed only when there is a reconnect offer and the line is empty
-    /// (037 Karar 8): sends the offer's line as if typed. If there is no offer
+    /// ⏎ — consumed only when there is a reconnect offer and the line is empty:
+    /// sends the offer's line as if typed. If there is no offer
     /// it is never consumed and Enter goes byte for byte its current way.
     Enter,
 }
@@ -2235,11 +2232,10 @@ struct DockEditLine {
     /// command's prediction. ⇧←/⇧→ only on the mirror: the selection is built against the mirror's text.
     fresh: bool,
     /// The clusters to the caret's left and right, `[start, end)` in `BUFFER` —
-    /// only when clustering is on and it has more than one code point (035
-    /// Karar 7): ⌫/← walks the left one, ⌦/→ the right one, whole. If the caret
-    /// is **inside** a cluster (ZLE can put it there) both sides are that
-    /// cluster. If the line has an **emoji** cluster, a single-code-point
-    /// neighbour goes by command too (phase-5): a key going to ZLE breaks the
+    /// only when clustering is on and it has more than one code point: ⌫/← walks the left one,
+    /// ⌦/→ the right one, whole. If the caret is **inside** a cluster (ZLE can put it there)
+    /// both sides are that cluster. If the line has an **emoji** cluster, a single-code-point
+    /// neighbour goes by command too: a key going to ZLE breaks the
     /// prediction chain and would drop a repeat arriving faster than the mirror
     /// from the closed gate to ZLE, i.e. into the middle of the cluster
     /// ([`DockPrediction`]).
@@ -2249,10 +2245,10 @@ struct DockEditLine {
 
 impl DockEditLine {
     /// The selection's range **in `BUFFER`**; `None` if there is no selection,
-    /// it is empty or it touches `PREBUFFER` (032 Karar 2). ZLE cannot edit the
+    /// it is empty or it touches `PREBUFFER`. ZLE cannot edit the
     /// lines it accepted: in that selection the editing keys send no command,
-    /// they go the current way and remove the selection (031 Karar 8's "every
-    /// other key" arm).
+    /// they go the current way and remove the selection (the "every other
+    /// key" arm).
     fn buffer_range(&self) -> Option<(usize, usize)> {
         let (start, end) = self.selection.and_then(|selection| selection.range())?;
         Some((start.checked_sub(self.shift)?, end - self.shift))
@@ -2266,7 +2262,7 @@ const DOCK_EDIT_PREFIX: &str = "\x1b[8133~";
 /// The edit command: delete `BUFFER`'s `[start, end)` range, put the caret at
 /// `start`; `len` is the `${#BUFFER}` the terminal saw (if it does not match
 /// the widget does nothing). Free and pure: the test compares the bytes
-/// directly. The refresh command (032 R5): a payload the widget does not
+/// directly. The refresh command: a payload the widget does not
 /// recognize does not touch `BUFFER` but still prints the mirror, i.e. `r`
 /// means "just mirror". It goes behind a paste with line breaks
 /// ([`Session::paste`]).
@@ -2290,13 +2286,12 @@ impl SelectKind {
 /// — letters, digits, everything non-ASCII (except `│`) and `_ - . / ~ : @` —
 /// stays inside the word, i.e. a path (`~/src/a-b.rs`), `user@host`,
 /// `host:8080`, `file.rs:42` and a URL without a query come with a single
-/// double click, in `KEY=value` the `value` alone (`.tasks/031-fare-ile-secim/discussion.md`
-/// → Karar 5).
+/// double click, in `KEY=value` the `value` alone.
 ///
 /// The behaviour beyond separating the separator from the word is **alacritty's
 /// `Semantic`**: bracket matching and the rule for double-clicking on a
 /// separator (`selection.rs` `range_semantic`, `term/search.rs`). The dock's
-/// word boundary (031 phase-4) reads the same constant, so that a word is the
+/// word boundary reads the same constant, so that a word is the
 /// same thing on both surfaces. There is **no** settings key: the request
 /// asked for a default.
 pub(crate) const WORD_SEPARATORS: &str = " \t`'\"│|;,=()[]{}<>!#$%&*+?\\^";
@@ -2354,7 +2349,7 @@ fn anchor<T>(term: &Term<T>, at: SelectionPoint) -> (Point, Side) {
 /// count — or the two sides look at the same row and answer differently.
 ///
 /// The point is clamped with `grid_clamp`: in a scrolled window the row may
-/// fall into the scrollback and indexing is under the panic ban (`CLAUDE.md`).
+/// fall into the scrollback and indexing is under the panic ban.
 fn last_ink_in_row<T>(term: &Term<T>, row: u16, offset: i32) -> Option<char> {
     let line = Point::new(Line(i32::from(row) - offset), Column(0))
         .grid_clamp(term, Boundary::Grid)
@@ -2488,25 +2483,25 @@ enum ClearKind {
 /// [`block_key`], the reading idiom of [`block_row_continues`]. The first
 /// found wins: two blocks' anchors cannot be on one row (the link closes at
 /// `preexec`). Both namespaces: inside ssh the remote prompt's anchor is what
-/// tells ⌘K which rows are the input's (048 phase-3).
+/// tells ⌘K which rows are the input's.
 fn row_block<T>(term: &Term<T>, line: Line) -> Option<BlockKey> {
     term.grid()[line]
         .into_iter()
         .find_map(|cell| cell.hyperlink().and_then(|link| block_key(link.uri())))
 }
 
-/// ⌘K's **first kept row** (034 R1.1): everything above that row is discarded
+/// ⌘K's **first kept row**: everything above that row is discarded
 /// from the screen.
 ///
 /// The **topmost** screen row carrying the block's id, between the cursor's
 /// row and above — not [`anchor_row_at_or_above`]: that gives the anchored row
 /// **nearest** the cursor and since the link is open until `preexec`, in a
 /// wrapped or multi-line input this would be the cursor's own row, i.e. the
-/// input's upper rows would go (`discussion.md` → Muhakeme). Nor walking
+/// input's upper rows would go. Nor walking
 /// through adjacent rows: the **empty** row of a multi-line input (`Esc-Enter`
 /// twice) writes no cell at all, zsh only erases there and the erase leaves
 /// link-less cells — the walk would stop at that gap, and the prompt and the
-/// input's upper part would go (`/code-review`, 034 phase-1). The topmost row
+/// input's upper part would go. The topmost row
 /// is right, because the id is one per prompt: there is no other region on
 /// screen carrying the same id (the copy Ctrl-L leaves is in the scrollback).
 ///
@@ -2544,7 +2539,7 @@ struct CellStyle {
     underline_color: Option<LinearRgba>,
 }
 
-/// The cell's cluster (035 Karar 4B/6): the clustering is on, the cell is
+/// The cell's cluster: the clustering is on, the cell is
 /// **wide** and there is `zerowidth` behind the base character → the string
 /// goes down to the table.
 ///
@@ -2578,7 +2573,7 @@ fn cell_cluster(
 /// `UNDERCURL` does **not contain** `UNDERLINE`: `Attr::Undercurl` first
 /// clears `ALL_UNDERLINES`, then adds only itself (alacritty `term/mod.rs`,
 /// all five arms are so). A single reflexively written `contains(UNDERLINE)`
-/// would silently lower 004's raison d'être, the wavy line, to a straight one
+/// would silently lower the undercurl's raison d'être, the wavy line, to a straight one
 /// and no counter could see it — `undercurl_text_yields_curl` does.
 ///
 /// If `ruled` is false the chain is not asked at all: a hidden cell and a cell
@@ -2675,7 +2670,7 @@ struct SearchWindow {
     hidden: Option<RangeInclusive<u16>>,
 }
 
-/// Turns the drawn rows' matches into runs (033 phase-1).
+/// Turns the drawn rows' matches into runs.
 ///
 /// **While the `Term` lock is held** ([`Session::frame`]). Row `L` is at
 /// `L + offset` (`0..rows`) in the grid, at `L + offset + channel`
@@ -2684,9 +2679,9 @@ struct SearchWindow {
 /// `continues`.
 ///
 /// **Two excluded matches**, both entirely — a half-highlighted match would
-/// be one match in the count (phase-5) but something else on screen:
+/// be one match in the count but something else on screen:
 ///
-/// - One touching the suppressed input row (Karar 8): that row is not drawn in
+/// - One touching the suppressed input row: that row is not drawn in
 ///   the grid and the dock is a separate surface; no highlight, count or
 ///   navigation target is given to an invisible row.
 /// - Ink-less ([`search::has_ink`]): a match consisting only of blanks would
@@ -2863,7 +2858,7 @@ fn drawn_lines<T>(term: &Term<T>, offset: i32, band: i32) -> RangeInclusive<i32>
     -offset - band..=term.screen_lines() as i32 - 1 - offset
 }
 
-/// The current match while typing (Karar 3): the bottommost if a match drawn
+/// The current match while typing: the bottommost if a match drawn
 /// in the window exists, else the first match upward from `origin` (wraps at the end).
 fn nearest_match<T>(
     term: &Term<T>,
@@ -2886,7 +2881,7 @@ fn nearest_match<T>(
     search::next_eligible(term, regex, origin, Direction::Left, hidden)
 }
 
-/// Whether the match is visible without being under the panel (Karar 4): in a
+/// Whether the match is visible without being under the panel: in a
 /// window all of whose rows are drawn, and those in the covered rows are to
 /// the panel's left.
 fn match_visible<T>(
@@ -2934,7 +2929,7 @@ fn visible_range<T>(selection: Option<&Selection>, term: &Term<T>) -> Option<Sel
     (range.end.line >= top && range.start.line <= bottom).then_some(range)
 }
 
-/// The point the link hit test asks about (044, [`Session::link_at`]).
+/// The point the link hit test asks about ([`Session::link_at`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkPoint {
     /// A screen row: `0..rows` is the grid, a negative row the fill band above
@@ -2945,7 +2940,7 @@ pub enum LinkPoint {
     Screen { row: i32, col: u16 },
     /// The dock's input line (`dock_select`'s point: the row inside the drawn
     /// vertical window, the screen column; the half is not read). The same space
-    /// as a dock hit's [`LinkSpan::row`] (044 phase-5).
+    /// as a dock hit's [`LinkSpan::row`].
     Dock(SelectionPoint),
 }
 
@@ -2967,13 +2962,13 @@ pub enum LinkKind {
     Url,
     /// A plain-text path **candidate** — whether it exists is the shell
     /// layer's question; the `:line(:col)`/`(line,col)` suffix is split off the
-    /// target (recognized, not jumped to — `plan.md` → Kapsam Dışı).
+    /// target (recognized, not jumped to — out of scope).
     Path { line: Option<u32>, col: Option<u32> },
     /// An OSC 8 hyperlink: the target is the link's URI, not the visible text.
     Osc8,
 }
 
-/// The stamp a link carries from the hit test (044 Karar 3, Muhakeme): the
+/// The stamp a link carries from the hit test: the
 /// scrollback's state ([`search::LedgerMark`]) and, for OSC 8, the hyperlink
 /// itself. If the stamp no longer matches, the link is stale — output came, the
 /// window scrolled, the screen was cleared — and must not be drawn. Opaque: no
@@ -2990,7 +2985,7 @@ enum Stamped {
         /// The OSC 8 link's `(id, uri)`.
         hyperlink: Option<(String, String)>,
     },
-    /// The dock's input line (044 phase-5): the selectable text
+    /// The dock's input line: the selectable text
     /// (`PREBUFFER ++ BUFFER`) the hit test saw, the link's char range in it
     /// and the drawn window its cells were measured in (top row, width).
     /// Checked by [`Session::dock`]: the scrollback does not move the dock's
@@ -3008,8 +3003,8 @@ enum Stamped {
 
 /// The link under a point ([`Session::link_at`]).
 ///
-/// A plain-text path is a **query**, not one candidate (044 set sonrası,
-/// iTerm2's semantic history): [`LinkHit::candidates`] lists every name the
+/// A plain-text path is a **query**, not one candidate (iTerm2's semantic
+/// history): [`LinkHit::candidates`] lists every name the
 /// point may belong to (`Drive`, …, `My Drive`), in the order they are to be
 /// tried, and the shell layer takes the first that exists
 /// ([`LinkHit::choose`]). The top-level fields are then the first candidate's.
@@ -3024,7 +3019,7 @@ pub struct LinkHit {
     /// A path query's candidates (`link::path_candidates`, at most 100); empty
     /// for a URL, an OSC 8 link and a hit already narrowed by [`LinkHit::choose`].
     pub candidates: Vec<PathCandidate>,
-    /// A plain-text path found in a remote session (045 Karar 13): its
+    /// A plain-text path found in a remote session: its
     /// candidates name the **remote** disk, so the shell layer must verify them
     /// there, never with a local `stat`. Always `false` for a URL and an OSC 8
     /// link.
@@ -3083,8 +3078,7 @@ impl LinkHit {
     }
 
     /// The hover this hit draws with `style` ([`Session::set_link_hover`]):
-    /// ⌘ → [`UnderlineStyle::Single`], ⌘-less OSC 8 → [`UnderlineStyle::Dashed`]
-    /// (044 Karar 3).
+    /// ⌘ → [`UnderlineStyle::Single`], ⌘-less OSC 8 → [`UnderlineStyle::Dashed`].
     pub fn hover(&self, style: UnderlineStyle) -> LinkHover {
         LinkHover {
             spans: self.spans.clone(),
@@ -3094,7 +3088,7 @@ impl LinkHit {
     }
 }
 
-/// The highlighted link (044 R4): its cells, the stamp they were found under and
+/// The highlighted link: its cells, the stamp they were found under and
 /// the underline that overrides theirs while the stamp holds
 /// ([`Session::set_link_hover`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3112,7 +3106,7 @@ impl LinkHover {
 
     /// The dock link's char range in the selectable text and the line, if the
     /// stamp holds against the live mirror `state` drawn with `input_rows` rows
-    /// of width `cols`, wheel top `scroll` (044 phase-5): `Live`, the same
+    /// of width `cols`, wheel top `scroll`: `Live`, the same
     /// selectable text and the same window ([`dock::window_of`], the drawing's
     /// own formula). `None` for a screen hover.
     fn dock_link(
@@ -3151,7 +3145,7 @@ impl LinkHover {
 
 /// The hover's style at a cell of the grid or the band — the frame path's single
 /// question. `None` hover is the **single branch** the frame pays per cell while
-/// nothing is highlighted (R4.2); a `HIDDEN` cell takes no line (its single `let`).
+/// nothing is highlighted; a `HIDDEN` cell takes no line (its single `let`).
 fn hover_style(
     hover: Option<&LinkHover>,
     hidden: bool,
@@ -3161,7 +3155,7 @@ fn hover_style(
     hover.and_then(|hover| (!hidden).then(|| hover.style_at(row, col)).flatten())
 }
 
-/// **The single underline override** (044 Karar 3): a highlighted cell takes the
+/// **The single underline override**: a highlighted cell takes the
 /// hover's line in the text's own colour, whatever SGR gave it. The grid, the
 /// fill band and the dock (`dock::render_with`) call it — so the surfaces
 /// cannot draw a link differently.
@@ -3176,7 +3170,7 @@ pub(crate) fn underline_link(cell: &mut Cell, style: Option<UnderlineStyle>) {
 const SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
 
 /// The cell's OSC 8 link, unless it is ours: `bateri://` (the block anchor) is
-/// not a link (044 Karar 2) and the text under it is scanned as plain text.
+/// not a link and the text under it is scanned as plain text.
 fn live_hyperlink(cell: &TermCell) -> Option<Hyperlink> {
     cell.hyperlink().filter(|link| {
         !link
@@ -3218,7 +3212,7 @@ fn wrap_reach<T>(term: &Term<T>, at: Line) -> (Line, Line) {
 }
 
 /// The OSC 8 link under `at`: the contiguous run of cells carrying the **same**
-/// hyperlink (id + uri) along the logical line (044 Karar 2). A spacer never
+/// hyperlink (id + uri) along the logical line. A spacer never
 /// breaks the run; it is counted only between linked cells (or as the right
 /// half of a linked wide char).
 fn hyperlink_run<T>(term: &Term<T>, at: Point) -> Option<(Point, Point, Hyperlink)> {
@@ -3259,8 +3253,8 @@ fn hyperlink_run<T>(term: &Term<T>, at: Point) -> Option<(Point, Point, Hyperlin
 }
 
 /// The plain-text links under `at`: the logical line's string goes to
-/// [`link::links_at`] (044 Karar 1) — a URL alone, or the path candidates in
-/// the order they are to be tried (set sonrası, iTerm2's search).
+/// [`link::links_at`] — a URL alone, or the path candidates in
+/// the order they are to be tried (iTerm2's search).
 ///
 /// Cell ↔ char: spacers carry no char and are skipped, a cluster's zero-width
 /// chars map to their base cell — so a wide char or `🇹🇷` before the link does
@@ -3369,8 +3363,8 @@ fn link_spans<T>(term: &Term<T>, first: Point, last: Point, offset: i32) -> Vec<
 /// ([`Session::frame`]'s anchor collection, the grid and the fill band): the
 /// link is open until `preexec` and all rows of a multi-line command carry the
 /// id, so the "first visible anchored row" criterion, when the command's start
-/// slid off the top of the screen, placed the marker on its continuation (seen
-/// in 032 phase-5).
+/// slid off the top of the screen, placed the marker on its continuation
+/// (seen in practice).
 ///
 /// A row outside the scrollback (empty history, the oldest row) is `false`:
 /// clamping turns the row into itself and every prompt would count as its own
@@ -3386,7 +3380,7 @@ fn block_row_continues<T>(term: &Term<T>, line: Line, id: BlockKey, boundary: us
         return false;
     }
     // `grid_clamp` is only the call site's safety belt: the range was asked
-    // above (the panic ban, `CLAUDE.md`).
+    // above (the panic ban).
     let line = Point::new(line, Column(0))
         .grid_clamp(term, Boundary::Grid)
         .line;
@@ -3414,9 +3408,9 @@ fn block_id(uri: &str) -> Option<u32> {
 }
 
 /// The block key from a prompt cell's link: [`block_id`]'s namespace, or our
-/// remote shell's `bateri://rblock/<P>.<S>.<n>` (048 phase-3,
-/// [`crate::shell::RemoteShell`]), or a restored history's
-/// `bateri://sblock/<k>.<role>` ([`snapshot::saved_key`], 053). The drawing
+/// remote shell's `bateri://rblock/<P>.<S>.<n>`
+/// ([`crate::shell::RemoteShell`]), or a restored history's
+/// `bateri://sblock/<k>.<role>` ([`snapshot::saved_key`]). The drawing
 /// loops, [`block_row_continues`] and ⌘K's kept row ([`row_block`]) read
 /// all three; suppression's anchor
 /// ([`anchor_row_at_or_above`]) asks [`block_id`] — the local input line is
@@ -3492,8 +3486,8 @@ pub enum Wheel {
 /// four fractional arms and today's row path.
 ///
 /// **The arrow and report arms do not look at the intent**: on the alternate
-/// screen and in mouse mode the wheel goes by whole rows, as today (plan →
-/// Kapsam Dışı). Each of the fractional arms also applies the event's `rows` —
+/// screen and in mouse mode the wheel goes by whole rows, as today (out of
+/// scope). Each of the fractional arms also applies the event's `rows` —
 /// settling and gesture-begin events mostly carry zero delta but must not drop
 /// it when they do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3579,12 +3573,12 @@ pub enum Click {
     Ignored,
 }
 
-/// The dock's last drawn window: the trace for the hit test (031 R3.5).
+/// The dock's last drawn window: the trace for the hit test.
 ///
 /// The mouse clicks on what is on screen and the row on screen is the **last
 /// drawn** mirror; the live mirror may have advanced since that frame (a new
 /// key's mirror, a suggestion). The trace carries the vertical window's top
-/// (032: when the wrapped input exceeds the ceiling), the wrap's width and the
+/// (when the wrapped input exceeds the ceiling), the wrap's width and the
 /// length of that mirror's `BUFFER`: if the live `BUFFER` has the same length
 /// the text is taken to be the same and the drawn one is matched with the
 /// shift, otherwise the click produces no selection — better to build none
@@ -3678,10 +3672,10 @@ pub struct Session {
     /// The twin of [`Session::alt_screen`] and atomic for the same reason: the
     /// only place that writes is `frame()`, the reader is Edit ▸ Select All
     /// ([`Session::select_all`]) — ⌘A selects the dock's row while the dock
-    /// owns the caret (031 Karar 7) and re-deriving that decision would mean
+    /// owns the caret and re-deriving that decision would mean
     /// writing `frame()`'s three preconditions a second time.
     caret_in_dock: AtomicBool,
-    /// The search's compiled pattern and generation in the scrollback (033) —
+    /// The search's compiled pattern and generation in the scrollback —
     /// a **leaf lock**, precedent `theme`; the borrowing rule is in [`SearchSlot`].
     search: Mutex<SearchSlot>,
     /// The scrollback's ceiling (`scrollback`) — the "did the scrollback
@@ -3693,7 +3687,7 @@ pub struct Session {
     /// coming from output is separated from this ([`search::LedgerMark::user`]).
     user_scroll: AtomicI64,
     /// The trace of the dock's **last drawn** window ([`DockWindow`]): the hit
-    /// test looks not at the live mirror but at what is on screen (031 R3.5).
+    /// test looks not at the live mirror but at what is on screen.
     ///
     /// A leaf lock and **separate** from `shell`: its writer is [`Session::dock`]
     /// **after** the windowing computation (the shift is born there), after the
@@ -3721,7 +3715,7 @@ pub struct Session {
     /// The **generation** of user input: every send passing through
     /// [`Session::send_input`] increments it, **before** the bytes go.
     ///
-    /// The temporal half of the freshness gate (025): the reader thread reads
+    /// The temporal half of the freshness gate: the reader thread reads
     /// this the moment the mirror is decoded and puts it next to the mirror as a
     /// stamp ([`crate::shell::DockState::answers`]); the frame path compares the
     /// stamp with the current generation and if equal the mirror of the user's
@@ -3750,7 +3744,7 @@ pub struct Session {
     /// the second is what closes the race.
     screen_seen: AtomicU32,
     /// The screen was **deliberately** cleared and the scrollback has not yet
-    /// grown since that clear (R1.1, R1.2; the screen's natural filling is the
+    /// grown since that clear (the screen's natural filling is the
     /// second arm).
     ///
     /// **Its only consumer is [`Session::fill_rows`]** and the place it is read
@@ -3764,7 +3758,7 @@ pub struct Session {
     /// reason ([`Session::alt_screen`]'s precedent).
     screen_cleared: AtomicBool,
     /// The scrollback's length when the flag was set — the **stamp** of the
-    /// dropping criterion (R1.2).
+    /// dropping criterion.
     ///
     /// The question is one: "did a row fall into the history **after** the
     /// clear". If it did, the history's newest rows no longer belong to before
@@ -3789,7 +3783,7 @@ pub struct Session {
     /// id** and the clear pushes the old prompt row into the history, i.e. above
     /// the new prompt there stands a row carrying the same id — but that row is
     /// not the command's start, it is the remnant of the cleared screen
-    /// (`/code-review`, 032 gate). The identity is the row's buffer, not a
+    /// The identity is the row's buffer, not a
     /// number: the ring keeps the buffer in place during scrolling. **Known
     /// limit:** when the scrollback saturates the buffer can be handed again to a
     /// new row and if that row is a continuation row the marker sits on it (the
@@ -3817,7 +3811,7 @@ pub struct Session {
     /// This machine's name ([`SessionOptions::hostname`]): the link hit test's
     /// `file://` authority question ([`crate::shell::is_local_authority`]).
     hostname: Option<String>,
-    /// The highlighted link (044 R4, [`Session::set_link_hover`]); `None` → no
+    /// The highlighted link ([`Session::set_link_hover`]); `None` → no
     /// highlight.
     ///
     /// **Leaf lock**, the `Theme` pattern: `frame()` copies it **before** the
@@ -3856,7 +3850,7 @@ pub struct Session {
     grid_top: AtomicU16,
     /// The share of `grid_top` that comes from **the band's shortness**: the
     /// dock band is drawn shorter than the PTY share (in a remote session only
-    /// the context row, 036 Karar 8) and the grid is that much lower — not a
+    /// the context row) and the grid is that much lower — not a
     /// temporary shift, permanent for the whole remote session. A separate
     /// number, because it must be closed in a scrolled window too and there
     /// the rest of `grid_top` (the offset's blank) must not be filled
@@ -3870,7 +3864,7 @@ pub struct Session {
     /// absolute position been kept, `display_offset`'s four outside writers
     /// (returning to the bottom on input, Shift+PgUp, output arriving while in
     /// the scrollback, resize) would be overwritten every frame
-    /// (`discussion.md` → Muhakeme). The fraction's direction is **backwards**:
+    /// The fraction's direction is **backwards**:
     /// the grid is drawn down by the fraction and the row right above the grid
     /// closes the strip opened at the top ([`Cursor::top_row`]).
     ///
@@ -3905,7 +3899,7 @@ pub struct Session {
     ///
     /// Decided at birth and never changes again, so neither a lock nor an
     /// atomic: `[shell] integration` takes effect **in the next session**
-    /// (`CLAUDE.md`) and the dock's existence depends on it.
+    /// and the dock's existence depends on it.
     dock: bool,
     /// [`SessionOptions::cluster`]; decided at birth like `dock`. The boundary
     /// cell's cluster ([`Cell::cluster`]) is born only when it is on.
@@ -3918,7 +3912,7 @@ pub struct Session {
     child_pid: u32,
     /// A copy of the PTY's master (`pty.file().try_clone()`, taken at birth for
     /// `child_pid`'s reason): its terminal modes are the slave's
-    /// ([`Session::with_pty_fd`], 047 phase-4). `None` if the copy failed —
+    /// ([`Session::with_pty_fd`]). `None` if the copy failed —
     /// the login signal then comes from the output alone — and after
     /// [`Session::begin_shutdown`], which closes it **before** the `Pty`'s
     /// own `Drop`: the slave's hangup comes when it always did. Read-only use.
@@ -3938,7 +3932,7 @@ struct Birth {
     master: Option<File>,
     drain_on_exit: bool,
     /// Replayed into the fresh `Term` past the scanner: the previous
-    /// session's scrollback (053) or the frozen VT (055).
+    /// session's scrollback or the frozen VT.
     replay: Option<Vec<u8>>,
     /// Served by the first reads ([`TappedPty::prefix`]).
     prefix: Vec<u8>,
@@ -3969,17 +3963,16 @@ impl Session {
         let mut env = std::mem::take(&mut options.env);
         env.insert("TERM".to_owned(), "xterm-256color".to_owned());
         env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
-        // The identity family is in the same layer (038). A side gain of its being
+        // The identity family is in the same layer. A side gain of its being
         // non-overridable: the `TERM_PROGRAM=Apple_Terminal` inherited from
         // another terminal was making Apple's session script write into the
-        // wrapper's `ZDOTDIR` via `/etc/zshrc` (`.tasks/038-terminal-kimligi/context.md`
-        // → Kanıt).
+        // wrapper's `ZDOTDIR` via `/etc/zshrc` (measured).
         env.insert("TERM_PROGRAM".to_owned(), TERM_PROGRAM.to_owned());
         env.insert(
             "TERM_PROGRAM_VERSION".to_owned(),
             TERM_PROGRAM_VERSION.to_owned(),
         );
-        // The `LC_` family is the same identity across ssh (049 R6): ssh's stock
+        // The `LC_` family is the same identity across ssh: ssh's stock
         // `SendEnv LC_*` carries it, a wrapped session's bootstrap exports it
         // too. An inherited `LC_TERMINAL=iTerm2` is overridden like
         // `TERM_PROGRAM=Apple_Terminal`.
@@ -3988,7 +3981,7 @@ impl Session {
             "LC_TERMINAL_VERSION".to_owned(),
             TERM_PROGRAM_VERSION.to_owned(),
         );
-        // `PWD` is the directory as we named it (053, seen in the real
+        // `PWD` is the directory as we named it (seen in the real
         // window): `chdir` resolves nothing, but the shell sets its `PWD` from
         // `getcwd()` unless the inherited one names the same directory — and
         // the inherited one is ours (`/` from LaunchServices). Without it a
@@ -4046,7 +4039,7 @@ impl Session {
     }
 
     /// Carries on a pane another bateri froze ([`Session::freeze`]) — the
-    /// handover's adopting half (055 R2.3). `options` is the pane's as in
+    /// handover's adopting half. `options` is the pane's as in
     /// [`Session::spawn`], minus what only a birth reads (`command`,
     /// `working_directory`, `env`, `initial_input`, `replay` are ignored);
     /// `cols`/`rows` must be the frozen size ([`Frozen::cols`]) — the VT is
@@ -4059,7 +4052,7 @@ impl Session {
     /// loop's own parser, since it may end inside a sequence.
     ///
     /// `Err(InvalidData)` if the blob is corrupt or of an unknown version,
-    /// before anything is touched: the caller falls back (053's path) and
+    /// before anything is touched: the caller falls back (the restore path) and
     /// dropping `adoption` closes this side's copy of the master.
     pub fn adopt(
         mut options: SessionOptions,
@@ -4159,7 +4152,7 @@ impl Session {
             options.theme,
             options.terminal.blink,
         );
-        // The first input's two delivery paths (037 Karar 6): in a session with a
+        // The first input's two delivery paths: in a session with a
         // wrapper, on the reader thread at our first identified `A`; without a
         // wrapper, below, at birth. No empty line at all: a zero-byte `Input`
         // would lock the writer (`Adapter::reply`) and `\r` alone would run an
@@ -4171,7 +4164,7 @@ impl Session {
             (None, initial_input)
         };
         // The hold is only while the first input is **waiting for the prompt**
-        // (Karar 6's wrapper arm); a line written at birth is already before every key.
+        // (the wrapper arm); a line written at birth is already before every key.
         let held_input: HeldInput = Arc::new(Mutex::new(at_prompt.is_some().then(Vec::new)));
         let pty = TappedPty {
             pty,
@@ -4192,7 +4185,7 @@ impl Session {
 
         let config = term_config(options.terminal);
         let term = Arc::new(FairMutex::new(Term::new(config, &grid, adapter.clone())));
-        // The previous session's scrollback (053): before the reader loop, so
+        // The previous session's scrollback: before the reader loop, so
         // the shell's first byte lands below it; through the reader's own
         // parser and cluster wrapper, so it is drawn as the shell's output
         // would be; past `TappedPty`, so no scanner sees it.
@@ -4290,7 +4283,7 @@ impl Session {
     /// there**. The cells do not know the cursor at all — none changes its colour
     /// because of it — and the drawer that draws the pixels the block covers
     /// overrides. The reason for the distinction is the cell's indivisibility:
-    /// when the block is between two cells (008) the boundary passes through the
+    /// when the block is between two cells the boundary passes through the
     /// middle of a cell and a per-cell decision given here cannot see that
     /// boundary.
     ///
@@ -4300,12 +4293,12 @@ impl Session {
     /// sink's job is to fill the buffer, nothing else — the same contract as
     /// `Wake`.
     ///
-    /// **`fill_sink` is a second and separate channel** (R2.1): the history rows
+    /// **`fill_sink` is a second and separate channel**: the history rows
     /// filling the blank left at the top go through it, their row numbers are
     /// **fill-local** (`0..fill`) and their count is in [`Cursor::fill`]. Its
     /// being separate is mandatory — the dock pattern: the fill enters its own
     /// lists and does **not** enter the grid's counters
-    /// (`cells=`/`glyphs=`/`rules=`) (R3.2), and since the row numbers collide
+    /// (`cells=`/`glyphs=`/`rules=`), and since the row numbers collide
     /// with the grid's they could not be told apart in a single channel. If
     /// [`Session::fill_rows`] says zero it is never called.
     ///
@@ -4321,10 +4314,10 @@ impl Session {
     /// The runs are in the grid's screen rows, the suppressed input row excluded
     /// — the fill band cannot be selected, the dock's selection is separate.
     ///
-    /// **`glide` is the glide amount the frame path delivers in this frame**
-    /// (027): in the same `Term` lock, applied before the scan starts and it
+    /// **`glide` is the glide amount the frame path delivers in this frame**:
+    /// in the same `Term` lock, applied before the scan starts and it
     /// **does not wake** — the animation's frame request cannot pass through
-    /// `Waker::wake` (`CLAUDE.md` → zero frames when idle), the side that draws
+    /// `Waker::wake` (zero frames when idle), the side that draws
     /// the frame already requests it. A separate call would have been a second
     /// lock round per frame. An amount whose generation differs from the current
     /// generation is dropped ([`ScrollGlide`]); a zero amount leaves the frame
@@ -4335,7 +4328,7 @@ impl Session {
     /// layout decision, this crate only clamps the number and gives it across
     /// the boundary as [`Cursor::input_rows`].
     ///
-    /// **`search` is the search highlight's runs** ([`SearchRuns`], 033): while
+    /// **`search` is the search highlight's runs** ([`SearchRuns`]): while
     /// search is active, the matches of the drawn rows, the grid and the fill
     /// channel in separate lists; if there is no pattern both lists are empty and
     /// the scan does not run.
@@ -4377,7 +4370,7 @@ impl Session {
         // frame with **one** grid suppressed and the dock emptied — the moment the
         // user presses Enter. One frame, and the way to close it is to reduce the
         // two calls to a single lock round, i.e. to change the `bt-gpu` boundary;
-        // it stands as a known limit (012 phase-4).
+        // it stands as a known limit.
         //
         // A marker falling between the copy and the `Term` lock likewise draws with
         // at most one frame of old decision; whoever writes the marker requests a
@@ -4388,13 +4381,13 @@ impl Session {
         // `line-finish` falling between them would yield a frame with the cursor
         // hidden **and** the dock emptied.
         //
-        // **The display's text is from the same round too** (032): the
+        // **The display's text is from the same round too**: the
         // suppression's row arithmetic walks it under the `Term` lock
         // ([`dock::grid_span`]) and had it been taken from a separate round the
         // numbers would belong to another mirror. Copied only while a suppressed
         // row exists.
         //
-        // **The dock's row count is from the same round as well** (032 phase-3):
+        // **The dock's row count is from the same round as well**:
         // the band, the suppression and the caret must belong to the same mirror.
         // The walk is the dock parametrization ([`dock::needed_rows`]; hanging
         // indent, the grid's width) and **separate** from the suppression's grid
@@ -4403,11 +4396,11 @@ impl Session {
         // the other. It needs no text, no copy.
         //
         // **The held `line-finish` is resolved at the start of this round too**
-        // (032 Karar 11, [`crate::shell::ShellLog::expire_end`]): if its time is
+        // ([`crate::shell::ShellLog::expire_end`]): if its time is
         // up the mirror is reset here, i.e. the suppression, the band and the caret
         // see the same mirror; if not, the remainder enters the clock.
         //
-        // **The remote session is from this round too** (036 Karar 8): the input
+        // **The remote session is from this round too**: the input
         // row count and the caret's owner ([`crate::shell::ShellLog::caret`]) must
         // see the same remote state — a `D` falling between separate rounds would
         // yield a dock caret in a zero-row band.
@@ -4438,7 +4431,7 @@ impl Session {
         // **The search's pattern is borrowed, before the `Term` lock**
         // ([`SearchSlot`]): `RegexIter` wants `&mut` and the leaf lock does not go
         // under `Term`. If there is no pattern (search closed, query empty or
-        // invalid) the scan does not run at all and the two lists stay empty (R2.2).
+        // invalid) the scan does not run at all and the two lists stay empty.
         search.clear();
         search.colors = search::SearchColors::of(&theme);
         let (search_generation, mut search_pattern, mut search_tracking) = {
@@ -4446,7 +4439,7 @@ impl Session {
             (slot.generation, slot.pattern.take(), slot.tracking())
         };
         let search_taken = search_tracking.mark;
-        // **The link hover too, before the `Term` lock** (044 R4): the theme's
+        // **The link hover too, before the `Term` lock**: the theme's
         // pattern, a reference count. Its stamp is checked under the lock, below.
         let hover_taken = lock(&self.link_hover).clone();
         let mut term = self.term.lock();
@@ -4460,7 +4453,7 @@ impl Session {
             let frac = f64::from_bits(self.scroll_frac.load(Ordering::Relaxed));
             let _ = self.scroll_fraction(&mut term, frac, f64::from(glide.rows), self.band_shown());
         }
-        // **The hover's stamp after the glide** (044 R4.1): the glide can move the
+        // **The hover's stamp after the glide**: the glide can move the
         // offset and the stamp carries it. A stale hover is not drawn — better no
         // line than a line under the wrong text — and is dropped after the lock.
         // A dock hover is not the frame's: neither drawn nor dropped here
@@ -4533,7 +4526,7 @@ impl Session {
         // **Blink is the union of two sources and the place of union is here.**
         // `RenderableCursor` does not carry the blink bit (only `shape` and
         // `point`), so `cursor_style()` is asked separately — that is also why
-        // phase-1's shape did not take it from there, that value already comes
+        // the first shape did not take it from there, that value already comes
         // resolved. The user's setting is applied **afterwards**: `"on"`/`"off"`
         // are overrides and cannot be written to config (`AdapterInner::blink`).
         let requested_blink = blink.resolve(term.cursor_style().blinking);
@@ -4558,7 +4551,7 @@ impl Session {
         // The suppression's **upper** end: the first row carrying the anchor of
         // the block being written. Born inside the loop, because only the grid
         // knows the answer — which row it is on is not something the shell knows,
-        // it is read from the anchor every frame (010's thesis; that is why it
+        // it is read from the anchor every frame (the block design's thesis; that is why it
         // stays right after scrolling and reflow too).
         //
         // A block whose anchor is **not visible** in the window leaves `None` and
@@ -4570,12 +4563,12 @@ impl Session {
         // Ctrl-A or the up arrow takes the cursor to the first row the tail stays
         // in the rows below — while the dock shows the whole buffer the grid shows
         // the tail, i.e. the double image the phase came to close returns and
-        // becomes **permanent** (`/code-review`, phase-4).
+        // becomes **permanent**.
         //
         // The end comes from exact data, it is not guessed from behaviour: the
         // caret's column from the grid, the text from the mirror, and the **single
         // layout walk** that combines them ([`dock::grid_span`] →
-        // [`dock::layout`], 032 Karar 7): the display is walked with zsh's layout
+        // [`dock::layout`]): the display is walked with zsh's layout
         // in the grid — the first row from the column where the prompt ends
         // (observed from the cursor's column), the wrap at the grid's width — and
         // how many rows remain above and below the cursor is read from there. A
@@ -4590,17 +4583,17 @@ impl Session {
         // at the end of a row drops to the next row in the grid and the division
         // did not see this, i.e. it counted the tail after the cursor **short**
         // and leaked the last row in the grid. A display carrying line breaks
-        // (`PS2`, Esc-Enter) (032) is from the same walk too: `BUFFER`'s
+        // (`PS2`, Esc-Enter) is from the same walk too: `BUFFER`'s
         // continuation rows from column 0, the lower end the rows after the
         // cursor with their wraps ([`dock::grid_span`]). The only remaining
         // over-suppression path is a stale mirror (`line-pre-redraw` runs before
         // drawing) and that lasts one frame.
         //
-        // **The unit is column, not character** (024): a combiner is zero, a wide
+        // **The unit is column, not character**: a combiner is zero, a wide
         // glyph two columns — the table of [`dock::column_width`], the same as the
         // grid's wrapping. Counted by character, an NFD file name (`é` = two
         // characters, one column) over-rounded the row and hid the first row of
-        // the completion list beneath it. The set gate (`/code-review`) had caught it.
+        // the completion list beneath it. A review had caught it.
         let span = suppressed_block.map(|_| {
             let (above, below) = dock::grid_span(
                 &blocks.input,
@@ -4638,8 +4631,8 @@ impl Session {
             // mirror carries no character its last ink is `None`, and an empty grid
             // row's is `None` too — the comparison says "fresh" in a vacuum. The
             // legitimate state is the empty prompt (the user has not typed yet) and
-            // that state **must enter** the suppression: were it not to, 012
-            // phase-8's defect would return (the row hidden but taking space). The
+            // that state **must enter** the suppression: were it not to, an earlier
+            // defect would return (the row hidden but taking space). The
             // stale state was **measured** (2026-09-21, the user reported + verified
             // with a pure PTY): zsh **keeps the last line break** of a bracketed
             // paste in the buffer (`BUFFER='echo a\necho b\n'`, `CURSOR=14`), i.e.
@@ -4656,13 +4649,13 @@ impl Session {
             // is above, the cursor on the empty row below.
             //
             // **If no anchor is found the gate stays silent** and this is deliberate:
-            // in a cell-less prompt (the state 012 phase-7 set up) there is nothing
+            // in a cell-less prompt (the state the prompt takeover set up) there is nothing
             // to say, i.e. the decision is left to today's comparison. The gate's
             // direction is the same in both arms: a suspicious state **gives up** the
             // suppression, i.e. at worst the line shows in two places.
             //
-            // **The blank's criterion is character** (032,
-            // [`crate::shell::SuppressedInput::blank`]): a lone `\n` pushes the
+            // **The blank's criterion is character**
+            // ([`crate::shell::SuppressedInput::blank`]): a lone `\n` pushes the
             // cursor down too. In a mirror with `PREBUFFER` the question is never
             // asked — on a `for>` row the cursor is legitimately below the anchor.
             let blank_mirror = input.blank;
@@ -4670,7 +4663,7 @@ impl Session {
                 || anchor_row_at_or_above(&term, to, offset, input.block)
                     .is_none_or(|anchor| anchor == to);
             //
-            // **The temporal question first** (025): if the mirror of the user's
+            // **The temporal question first**: if the mirror of the user's
             // last input has arrived the mirror is fresh and there is no need to look
             // at what the grid says — the content comparison was a **proxy** and broke
             // in every state where zsh transforms a character (`🥰` raw in the mirror,
@@ -4682,7 +4675,7 @@ impl Session {
             // is today: both sides are still old and match, or the mirror is behind
             // and it drops. The short circuit skips the scan too.
             //
-            // **Two known limits, by name** (`discussion.md` → Karar 2). If a paste
+            // **Two known limits, by name**. If a paste
             // goes right away while a key's mirror is on the way the mirror is stamped
             // with the paste's generation and the gate takes it as the answer for one
             // key — the terminal has no way to know "did ZLE process this". And writing
@@ -4710,8 +4703,8 @@ impl Session {
         // an `od` dump disappeared entirely. Of the two candidates the **lower** one
         // is chosen: the anchor's row, or the first row the mirror computed.
         //
-        // **If `PREBUFFER` is full the floor is the anchor's row** (032 Karar 7,
-        // [`crate::shell::SuppressedInput::from_anchor`]): the accepted rows are in
+        // **If `PREBUFFER` is full the floor is the anchor's row**
+        // ([`crate::shell::SuppressedInput::from_anchor`]): the accepted rows are in
         // the grid with their `PS2`s and `PS2`'s width is not in the mirror; the link
         // is open until `preexec`, i.e. the whole command carries the anchor. Floor
         // `0` → `from.max(floor)` below picks the anchor.
@@ -4727,7 +4720,7 @@ impl Session {
         // dock's own caret (goes to `Session::dock` as an argument). All four depend
         // on the answer to "is the input row the grid's or the dock's" and when asked
         // separately they diverged — the observed defect was exactly that divergence
-        // (012 phase-8, the user): in an empty prompt no cell carried the anchor so
+        // (the user reported it): in an empty prompt no cell carried the anchor so
         // the row was **not drawn but entered the fullness**, on the first key the
         // anchor was born and the fullness dropped a row and the whole grid moved.
         // Down when typing, up when deleting.
@@ -4737,12 +4730,12 @@ impl Session {
         // - `self.dock` — the window has a surface to take over. If not, nobody
         //   will give the caret or the row; hiding the row in a dock-less window
         //   would show what the user typed **nowhere**.
-        // - `!alt_screen` — the dock is lifted on the alternate screen (phase-7).
+        // - `!alt_screen` — the dock is lifted on the alternate screen.
         // - If there is a suppressed row the **freshness gate**: `suppress_to`
         //   carries it (`None` on a stale mirror). While there is no suppressed row
         //   there is no freshness to ask — the dock shows an empty caret, not text.
         //
-        // **The fourth is the remote session** (036 Karar 8) and it is not here but
+        // **The fourth is the remote session** and it is not here but
         // inside `caret.home` ([`crate::shell::ShellLog::caret`]), because it must be
         // applied **before** the hold: a `set_remote` falling into the hold window
         // after `C` would otherwise produce `caret_in_dock` with `input_rows == 0`
@@ -4775,7 +4768,7 @@ impl Session {
         // - `LEADING_WIDE_CHAR_SPACER`: the blank a wide character that does not fit
         //   at the end of a row leaves; the same rationale.
         // The fourth is the space character itself: it has no ink either and **not
-        // even when underlined**. 003 had foreseen the opposite here; the decision
+        // even when underlined**. An earlier design had foreseen the opposite here; the decision
         // came out reversed, because `Some(' ')` would load a space glyph — it
         // spends a slot in the atlas and paints not a single pixel. What an
         // underlined space wants is a rule line and the skip condition below carries it.
@@ -4828,13 +4821,12 @@ impl Session {
             let flags = cell.flags;
             let dim = flags.contains(Flags::DIM);
             let hidden = flags.contains(Flags::HIDDEN);
-            // **Selection no longer paints the cell, it gives a row run** (031
-            // phase-2). The highlight is the theme's `selection` colour and the
-            // drawing side puts it as a flat quad between the background and the
-            // glyphs; the only job here is to find which cells determine the run. The
-            // inverse-video swap (`inverse ^ selected`) is gone: the selected cell's
-            // text is drawn **with its own foreground** and with inverse video
-            // resolved (Karar 3) — a selected inverse-video cell (vim's status line)
+            // **Selection no longer paints the cell, it gives a row run**. The highlight is the
+            // theme's `selection` colour and the drawing side puts it as a flat quad between
+            // the background and the glyphs; the only job here is to find which cells determine
+            // the run. The inverse-video swap (`inverse ^ selected`) is gone: the selected
+            // cell's text is drawn **with its own foreground** and with inverse video
+            // resolved — a selected inverse-video cell (vim's status line)
             // reads with its normal foreground, syntax colours do not vanish in the
             // selection. The cursor stays above the selection: the run is drawn
             // before the caret.
@@ -4858,10 +4850,10 @@ impl Session {
             // here": a user dragging the mouse on an empty screen saw a huge block,
             // and that selection **copies nothing** (observed, 2026-09-18). The
             // criterion is **not** "ink" but "is it drawable" (the background occupies
-            // the column too; 013 Karar 7): an inverse-video blank — vim's status
+            // the column too): an inverse-video blank — vim's status
             // line, tmux's bar — has no ink but is visible and extends the run; an
             // empty cell with the default background is invisible and does not extend
-            // the run. The unit is not the cell but the **row** (Karar 4): the run
+            // the run. The unit is not the cell but the **row**: the run
             // extends from the first drawable selected cell to the last, i.e. the gap
             // between words is highlighted (the clipboard already copies it), the
             // empty tail at the end of the row and an empty middle row are not.
@@ -4882,8 +4874,8 @@ impl Session {
             // had it stayed outside a hidden and underlined cell would pass the gate
             // and arrive at `sink` with nothing to draw.
             let ruled = !hidden && flags.intersects(RULES);
-            // **A spacer counts as drawable too** and this is a must
-            // (`/code-review`, 014 gate): the second cell of a wide character has no
+            // **A spacer counts as drawable too** and this is a must:
+            // the second cell of a wide character has no
             // ink of its own (`ch` eliminates it) and its background may be the
             // default, i.e. had the criterion been only ink + background + rule, **half**
             // of a selected CJK character would have stayed unhighlighted —
@@ -4942,7 +4934,7 @@ impl Session {
             // scan would change with the selection — just as the selection does not
             // create content, it does not delete content either.
             let plain_bg = (plain_back != background).then(|| color::linear_rgba(plain_back));
-            // **The link hover's line** (044 R4): a highlighted blank (a space inside
+            // **The link hover's line**: a highlighted blank (a space inside
             // an OSC 8 link's text) passes the gate too, or the line would have gaps.
             // It is **not** folded into `ruled`: `drawable` reads that and the
             // selection must not move with the mouse.
@@ -4961,13 +4953,13 @@ impl Session {
             }
             // The selected cell's background is **not drawn**: it stays under the
             // selection's shape and the opaque shape already covers it. The only
-            // place it does not cover is the shape's rounded corner (031 phase-3)
+            // place it does not cover is the shape's rounded corner
             // and there the window background shows; had the background been left
             // underneath, at the corner of a coloured row (an inverse-video status
             // line) a few pixels of broken blot would have stayed sticking out of the
             // selection — looked at by eye, the notch is not readable. Inverse video
-            // is resolved here too — the text with the cell's own foreground
-            // (Karar 3). The dimming again goes to the colour born from `cell.fg`
+            // is resolved here too — the text with the cell's own foreground.
+            // The dimming again goes to the colour born from `cell.fg`
             // (`color::resolve_fg`), i.e. in a selected dim inverse-video cell that
             // colour returns to the foreground.
             let bg = if selected { None } else { plain_bg };
@@ -4978,7 +4970,7 @@ impl Session {
             // window an empty grid would look "full" too and the content would
             // never be offset. `saturating_add`: `row < rows ≤ u16::MAX`, i.e.
             // overflow cannot be represented but a wrap would be silent.
-            // **Phase 1.** The anchor read is after the gate too (R3.4), for the same
+            // **Phase 1.** The anchor read is after the gate too, for the same
             // reason as the foreground: `hyperlink()` goes down to the side table
             // (`CellExtra`) and must not be paid for a cell that is not drawn — had it
             // been above the gate it would be paid at ~1900 cells on an empty 80×24
@@ -4989,7 +4981,7 @@ impl Session {
             // `Option<Hyperlink>` and the `CellExtra.hyperlink` field is not `pub`, i.e.
             // there is no way to borrow. Since every cell of the prompt has a link, a
             // three-row prompt makes a few hundred atomic counter rounds per frame
-            // (`/code-review`, 010 gate). The way to close it is a `&Hyperlink`
+            // The way to close it is a `&Hyperlink`
             // accessor in alacritty; the upstream was not changed without a measured need.
             //
             // **The gate's cost** (the same finding): a prompt row consisting entirely
@@ -5008,7 +5000,7 @@ impl Session {
                 // second time (after another id intervened) counts as a new anchor:
                 // the rows are increasing, the ranges stay consistent.
                 //
-                // **A continuation row is not an anchor** (032 phase-6): the prompt's
+                // **A continuation row is not an anchor**: the prompt's
                 // link is open until `preexec`, i.e. **all** rows of a multi-line
                 // command (and of a wrapped long line) carry the id. When the
                 // command's first row slid above the window, "the first visible
@@ -5037,20 +5029,20 @@ impl Session {
                     suppress_from.get_or_insert(row);
                 }
             }
-            // **Suppression: the input row is not drawn in the grid** (R3.1). The
+            // **Suppression: the input row is not drawn in the grid**. The
             // range is from the prompt's anchor row to the cursor's row and **all
             // columns**: had column arithmetic been done, the column where the
             // prompt ends would have had to be known to the sink and that knowledge
             // is not here.
             //
-            // **The gate is AFTER the anchor scan** and the order is mandatory
-            // (R3.2): a naive suppression skips the row entirely, kills the anchor
+            // **The gate is AFTER the anchor scan** and the order is mandatory:
+            // a naive suppression skips the row entirely, kills the anchor
             // too and the block stripe would vanish. The scan runs independently of
             // glyph production; its guard is
             // `a_suppressed_input_line_keeps_the_block_stripe`.
             //
             // **Above `drawn_rows` too**: the suppressed row is not counted in the
-            // fullness, otherwise 011's sticking to the bottom would reserve space
+            // fullness, otherwise sticking to the bottom would reserve space
             // for a row that is not drawn and an empty strip would remain between the
             // dock and the content.
             if suppressed_rows(caret_in_dock, suppress_from, suppress_to, suppress_floor)
@@ -5079,13 +5071,13 @@ impl Session {
             // has either a background, ink, or a rule line — all three occupy the
             // column.
             //
-            // The distinction closes two real defects (`/code-review`, 013 gate):
+            // The distinction closes two real defects:
             //
             // - **Selection — this half is now unreachable and stands as a
-            //   record** (`/code-review`, 014 gate). In 013 the empty tail cells of a
+            //   record**. Earlier the empty tail cells of a
             //   selected row got an inverted background and if the counter had
-            //   fallen on them the dim foreground would have been unreadable. 014
-            //   closed the selection to the "drawable cell" (`drawable`), i.e. the
+            //   fallen on them the dim foreground would have been unreadable. Later
+            //   work closed the selection to the "drawable cell" (`drawable`), i.e. the
             //   empty tail is no longer painted at all; it never reaches `last_col`
             //   either. What keeps the criterion at occupancy is the wide glyph
             //   below, not the selection.
@@ -5094,7 +5086,7 @@ impl Session {
             //   `col + 1` from its head; otherwise in a command ending with `çç` the
             //   counter would eat the one-cell margin it promised. Not visible today
             //   (wide glyphs are not drawn yet) but the arithmetic would be wrong
-            //   **now** and 015 would make it visible.
+            //   **now** and drawing them would make it visible.
             if !hover_only
                 && let Some((_, anchor_row, last_col)) = blocks.anchors.last_mut()
                 && *anchor_row == row
@@ -5112,7 +5104,7 @@ impl Session {
             // lines the cell's `fg` was turned into the background and its
             // `underline_color` dropped; since the cell is indivisible **all** of a
             // half-covered cell was drawn inverted — the target cell of the cursor
-            // 008 slid would have become invisible before it was even covered.
+            // slid to would have become invisible before it was even covered.
             let mut drawn = Cell {
                 col,
                 row,
@@ -5147,7 +5139,7 @@ impl Session {
         // three consumers: the skipped cells (inside the loop), the selection runs
         // and the search matches (below). Had they been written separately one
         // would diverge from another and an invisible row would be highlighted
-        // (015's lesson).
+        // (a lesson learned).
         let hidden = suppressed_rows(caret_in_dock, suppress_from, suppress_to, suppress_floor);
         if let Some(hidden) = &hidden {
             selection.runs.retain(|run| !hidden.contains(&run.row));
@@ -5168,8 +5160,8 @@ impl Session {
         // screen the maximum of two sources; the rationale is in
         // [`Cursor::content_rows`].
         //
-        // **In a scrolled window too from the visible rows** and this is 011's
-        // rule: the content is always bottom-anchored, in a history window too. At
+        // **In a scrolled window too from the visible rows** and this is the
+        // bottom-anchoring rule: the content is always bottom-anchored, in a history window too. At
         // one time there was `offset != 0 => grid_rows` here and the symptom was
         // measured (2026-09-20, eye check; the user): the grid's **empty** bottom
         // rows entered the fullness, the offset closed and all the content jumped to
@@ -5315,16 +5307,16 @@ impl Session {
         // style.** The guard of the loop above, `debug_assert!((0..rows).contains(&row))`,
         // would blow up on a negative row, and the filled rows must **not** enter
         // `drawn_rows`: had they, the offset would close and the content would tear
-        // off the bottom (R2.3, the cost of `27a0b98`).
+        // off the bottom (the cost of `27a0b98`).
         //
         // The row number is **fill-local** (`0..top_row + fill`) and its order is the
         // history's own: `0` the oldest (the top row if there is a fraction), the last
         // right above the visible window. The side that converts to a screen row is
-        // the **drawing** side (phase-3) — this crate says "which rows", not "where".
+        // the **drawing** side — this crate says "which rows", not "where".
         //
         // `grid_clamp` is a safety belt: all of the channel's rows are inside the
         // scrollback (band `fill <= history_size`, the top row the gate above), but
-        // indexing in `bt-core` is under the panic ban (R2.5) and what carries the
+        // indexing in `bt-core` is under the panic ban and what carries the
         // ban is the **call site**, not the type.
         let mut fill_continued: Option<(u16, BlockKey)> = None;
         for fill_row in 0..channel {
@@ -5335,7 +5327,7 @@ impl Session {
             let line = Line(i32::from(fill_row) - i32::from(channel) - offset)
                 .grid_clamp(&*term, Boundary::Grid);
             let cells = &term.grid()[line];
-            // **`zip`, not indexing** and the rationale is the panic ban (R2.5):
+            // **`zip`, not indexing** and the rationale is the panic ban:
             // `Row`'s `Index` panics out of bounds and `make audit` cannot see
             // indexing — what it looks for is `unwrap`/`expect`/`panic!`. Today there
             // is no overflow, since alacritty keeps every row `columns()` long
@@ -5371,8 +5363,8 @@ impl Session {
                 let dim = flags.contains(Flags::DIM);
                 let hidden = flags.contains(Flags::HIDDEN);
                 // **The selection is not in this loop and this is a decision, not a
-                // forgotten branch.** The filled rows cannot be selected (plan → Kapsam
-                // Dışı; R5.1 rejects a click above the origin) and highlighting them
+                // forgotten branch.** The filled rows cannot be selected (out of scope;
+                // a click above the origin is rejected) and highlighting them
                 // would say "there is something selectable here" — what the eye sees and
                 // what the clipboard gives would diverge exactly where this repo forbids.
                 // The grid gives the same answer: a range lying entirely in the history
@@ -5419,14 +5411,14 @@ impl Session {
             }
         }
 
-        // **Search highlight** (033): the matches of the drawn rows, the grid and
+        // **Search highlight**: the matches of the drawn rows, the grid and
         // the fill channel together — the two are consecutive rows
         // (`-offset - channel ..= rows - 1 - offset`), i.e. a match wrapping from the
         // channel's bottom to the grid's top is split into two lists but stays a
         // single match. **After** the loops, because the suppression's upper end is
         // born in the grid loop (the selection filter's rationale).
         if let Some(regex) = search_pattern.as_mut() {
-            // The current match is first pinned to its content (phase-5): if output
+            // The current match is first pinned to its content: if output
             // scrolled the scrollback its highlight is at its scrolled place.
             let now = self.ledger_now(&term);
             search::track(
@@ -5480,9 +5472,9 @@ impl Session {
             // One row in a window with no dock and on the alternate screen: there is
             // no band there and in the transition frame until `bt-shell`'s resize
             // zeroes the share a mirror left `Live` (while ZLE's `edit-command-line`
-            // opens vim) must not push the grid up by the band (`/code-review`).
+            // opens vim) must not push the grid up by the band.
             //
-            // **Zero in a remote session** (036 Karar 8): while ssh runs the shell has
+            // **Zero in a remote session**: while ssh runs the shell has
             // no input row, the dock drops to the context row alone and the grid is
             // drawn down (`bt-gpu`'s band surplus). The rule does not change on the
             // alternate screen: there the remote dock **stays** as the status bar
@@ -5508,7 +5500,7 @@ impl Session {
             // would kill the blink while typing in the dock. In a hidden cursor
             // (`\e[?25l`, htop) no caret is drawn at all and leaving the blink on
             // would wake the window twice a second to draw the **exactly same**
-            // frame — R9's "the cursor hides" stopping condition is this line.
+            // frame — the "the cursor hides" stopping condition is this line.
             blink: requested_blink && (cursor_visible || caret_in_dock),
             // The block is opaque and covers the text beneath it: the background
             // colour makes it readable again. The source `theme` is **the same** as
@@ -5540,7 +5532,7 @@ impl Session {
         // **The stale hover drops here**, after the `Term` lock (a leaf lock does
         // not go under it), and only if the slot still holds the copy this frame
         // checked: a hover set in between is the view's newer answer. The news is
-        // edge-triggered — once per dropped hover (R4.1).
+        // edge-triggered — once per dropped hover.
         if hover_lost && let Some(taken) = &hover_taken {
             self.drop_link_hover(taken);
         }
@@ -5585,7 +5577,7 @@ impl Session {
         // `resolve_blocks` used to **overwrite** `next_tick` directly and that path
         // depends on the running block's anchor being visible; the handover cannot
         // depend on that. The precedent is `arm_clock`, which merges two deadlines
-        // into a single clock (014 phase-2): the nearer wins, the farther is not lost.
+        // into a single clock: the nearer wins, the farther is not lost.
         //
         // Two of the three preconditions are asked again here (`self.dock`,
         // `!alt_screen`), because the hold deserves a frame only if it can turn
@@ -5596,11 +5588,10 @@ impl Session {
         // hold is filled only while the raw answer is `Grid`, and the raw answer
         // being `Grid` means `Running`, `Unavailable` or `Input`+`Idle`;
         // `suppressed_input()` is filled only in `Input`+`Live`. The two are
-        // **disjoint with a single exception**: the held `line-finish` (032 Karar
-        // 11) leaves the mirror `Live` while counting the handover as `Idle` — in
-        // that time the suppression continues and `e`'s stamp (the answer to ⏎)
-        // passes the freshness gate. The exception has its own clock (`end_left`)
-        // and the two holds count from the same moment.
+        // **disjoint with a single exception**: the held `line-finish` leaves the mirror `Live`
+        // while counting the handover as `Idle` — in that time the suppression continues and
+        // `e`'s stamp (the answer to ⏎) passes the freshness gate. The exception has its own
+        // clock (`end_left`) and the two holds count from the same moment.
         if self.dock && !alt_screen {
             cursor.next_tick = crate::shell::sooner(
                 cursor.next_tick,
@@ -5611,7 +5602,7 @@ impl Session {
     }
 
     /// Reconciles the "screen was deliberately cleared" flag with this frame's
-    /// grid (R1.1, R1.2).
+    /// grid.
     ///
     /// **The call site is part of the contract: while the `Term` lock is held.**
     /// For two reasons and both are measurable defects:
@@ -5641,7 +5632,7 @@ impl Session {
     /// second half of the lifetime works only when the generation is equal.
     ///
     /// **The alternate screen's `CSI 2 J` consumes the generation but does not set
-    /// the flag** (phase-1b, Fix A). The semantics are from alacritty:
+    /// the flag**. The semantics are from alacritty:
     /// `ClearMode::All` under ALT_SCREEN calls `reset_region(..)`, **not**
     /// `clear_viewport()` — the history does not grow and the main screen's state
     /// is not touched at all, i.e. there is nothing to bring back. The generation
@@ -5665,10 +5656,10 @@ impl Session {
     /// window: in the frame the flag is set the stamp has not been taken yet
     /// (`UNSTAMPED`) and there the "fresh row" cannot be computed. The gate closes that frame.
     ///
-    /// There is **no** `content_rows == rows` arm: it was phase-1's criterion, and
+    /// There is **no** `content_rows == rows` arm: it was an earlier criterion, and
     /// since [`Cursor::content_rows`] does not count the input row in a window with
     /// a dock (`drawn_rows.max(1)`, ceiling `rows - 1`) it is practically
-    /// unreachable — measured (`phase-2.md` → Uygulama Notları §7b). After the
+    /// unreachable — measured. After the
     /// clamp came, keeping it as a second arm lost its meaning too: in a
     /// saturated scrollback (below) even if it dropped the flag `fill` comes out
     /// zero from the clamp, i.e. the arm is **dead**.
@@ -5683,10 +5674,10 @@ impl Session {
     ///   repo's own test `content_rows_come_from_the_visible_window_while_scrolled`.
     ///   Without it **a single wheel gesture** would undo Ctrl-L: the flag would
     ///   drop during scrolling and when the user returned to the bottom
-    ///   (`display_offset == 0`) the fill would refill the cleared screen. R2.2's
+    ///   (`display_offset == 0`) the fill would refill the cleared screen. The fill's
     ///   `display_offset == 0` gate does not save this — that gate stops the fill
-    ///   *during* scrolling, while the flag's loss is permanent. (`/code-review`,
-    ///   017 phase-1.) The stamp criterion makes it unnecessary (scrolling does not
+    ///   *during* scrolling, while the flag's loss is permanent. The stamp criterion makes it
+    ///   unnecessary (scrolling does not
     ///   grow the scrollback) but the condition is cheap and its guard
     ///   `scrolling_into_history_never_drops_the_flag` stays in place.
     ///
@@ -5697,9 +5688,8 @@ impl Session {
     /// closed with a single stamp — what is needed is a "rows pushed into the
     /// history" counter and that counter must increase in a saturated scrollback
     /// too, i.e. `history_size` cannot be derived from it. The direction is safe
-    /// (not filling is phase-1's behaviour) and it is **not a regression** relative
-    /// to phase-1b: the flag's lifetime in phase-1 was already unreachable in a
-    /// window with a dock.
+    /// (not filling is the earlier behaviour) and it is **not a regression**: the
+    /// flag's earlier lifetime was already unreachable in a window with a dock.
     ///
     /// **Known limit 1:** synchronized update (`\e[?2026h`) buffers the bytes in
     /// `vte::ansi::Processor`, i.e. several frames can pass **before** a `CSI 2 J`
@@ -5760,35 +5750,34 @@ impl Session {
         }
     }
 
-    /// How many rows of the blank left at the top will be filled with history
-    /// (R2.1, R2.2).
+    /// How many rows of the blank left at the top will be filled with history.
     ///
-    /// **The fill's single choke point** and this is a rollback strip (R2.4):
+    /// **The fill's single choke point** and this is a rollback strip:
     /// when this returns zero the second sink is never called, [`Cursor::fill`]
     /// stays zero and the frame crossing the boundary is **bit for bit** the same
-    /// as today's — the same pattern as 016's "radius 0, halo 0" arm. Had the
+    /// as today's — the same pattern as the caret's "radius 0, halo 0" arm. Had the
     /// conditions been spread over two places the rollback path would have been
     /// split in two too.
     ///
     /// The number is `min(gap, fresh rows)`: as many rows as the blank are
     /// wanted, and if that many have not arrived since the clear, what has
     /// arrived. In a session where no clear ever happened "fresh" is the whole
-    /// scrollback, i.e. the formula is R2.1's `min(history_size, gap)` — in a new
+    /// scrollback, i.e. the formula is the plain `min(history_size, gap)` — in a new
     /// session the scrollback is empty, `0` and there is no extra read.
     ///
-    /// **The third term came in phase-1b and is a deviation from R2.1**; the
+    /// **The third term came later and is a deviation from the plain formula**; the
     /// rationale is below, in the body, in its measured form.
     ///
     /// **Four gates and all four are mandatory:**
     ///
     /// - `self.dock` — the fill's consumer is a window with a dock. The criterion
-    ///   is **not** [`Cursor::caret_in_dock`] but the window having a dock (R2.2):
+    ///   is **not** [`Cursor::caret_in_dock`] but the window having a dock:
     ///   the handover plays depending on the key, the phase and the mirror's
     ///   freshness and the blank is independent of them.
     /// - `!alt_screen` — vim and htop own the whole grid, there is no blank
     ///   anyway; the dock is lifted too.
     /// - The flag is clean — if the user **deliberately** cleared the screen it
-    ///   must not come back (R1). The flag's lifetime is in
+    ///   must not come back. The flag's lifetime is in
     ///   [`Session::observe_screen_clear`] and the call order is mandatory: the
     ///   lifetime acts **first**. The flag is the gate, the clamp the measure: the
     ///   gate says "none", the clamp "how much".
@@ -5800,15 +5789,15 @@ impl Session {
     ///   window `fill = rows - content_rows` decreased by one at every notch,
     ///   `fill + offset` stayed **constant** and the band's reading point
     ///   `-(fill + offset)` never budged — scrolling looked dead for as many
-    ///   notches as the blank. The sticking (011) itself does **not change** in
+    ///   notches as the blank. The sticking itself does **not change** in
     ///   this arm: in a scrolled window too the content is bottom-anchored and
     ///   since `fill == 0` the offset shrinks as the fullness grows, i.e. a new
     ///   row enters from the top. The continuity the user lost is the scroll's
     ///   responsibility, not the gate's, and its counterpart is [`scroll_locked`]'s
     ///   `band` term.
     ///
-    /// **There is no phase gate** and this is a measured decision
-    /// (`discussion.md` → Karar 5): in the Enter arm `\e[J` passes through the
+    /// **There is no phase gate** and this is a measured decision:
+    /// in the Enter arm `\e[J` passes through the
     /// `Running` phase and had there been a phase gate `fill` would stay zero in
     /// that frame and the return would be without animation.
     fn fill_rows<T>(&self, term: &Term<T>, gap: u16, alt_screen: bool, scrolled: bool) -> u16 {
@@ -5819,7 +5808,7 @@ impl Session {
         // flag dropping does not say "the history's newest rows no longer belong to
         // before the clear", it says only "a row arrived"; if the blank is bigger
         // than that one row the difference is directly the screen the user deleted.
-        // Measured (2026-09-20, `/code-review` 017 phase-1b): Ctrl-L → 12 rows of
+        // Measured (2026-09-20): Ctrl-L → 12 rows of
         // output (scrollback +3) → a seven-row hole, and **four** of the seven rows
         // filled belonged to before the clear
         // (`["27","28","29","30","1","2","3"]`). With the clamp the same scene gives
@@ -5896,10 +5885,10 @@ impl Session {
     /// never visible.
     ///
     /// **In a scrolled window only the band's shortness** ([`Session::grid_lowered`],
-    /// 036): in a remote session the grid is one row plus the gap lower and the
+    /// in a remote session the grid is one row plus the gap lower and the
     /// strip at the top is open while looking at the history too. That share is
     /// the **same** at every notch, i.e. scrolling advances a full row at every
-    /// notch — what 017 rejected was filling the offset's blank that changes with
+    /// notch — what was rejected was filling the offset's blank that changes with
     /// the notch and that is not filled here. The rows are those above the
     /// window's top, i.e. as many as remain beyond the offset in the scrollback.
     fn slide_fill_rows<T>(
@@ -6006,7 +5995,7 @@ impl Session {
         let shell = lock(&self.shell);
         let running = shell.running_blocks();
         let counter_fg = theme.dim_linear();
-        // **The clock's stopping condition is born here** (013 phase-2): if the
+        // **The clock's stopping condition is born here**: if the
         // running block's anchor is not visible in this frame (slid up, alternate
         // screen) the counter is not drawn either, i.e. there is nothing to advance
         // and the clock goes out. Requesting a frame when the id is in the ledger
@@ -6025,7 +6014,7 @@ impl Session {
                 // `last_mut`), i.e. the earlier ones would pass with zero ink and
                 // print a second counter onto the same columns — overlapping
                 // glyphs. zsh's `PROMPT_SP` hardly produces this in practice but the
-                // defence must be in the code, not in a comment (`/code-review`, 013 gate).
+                // defence must be in the code, not in a comment.
                 let taken = counted_row == Some(row);
                 // Below the threshold it is not drawn but **the loop is not left**:
                 // the stripe is resolved below, independent of the duration.
@@ -6054,7 +6043,7 @@ impl Session {
                                     // buffer and an entirely transparent quad on
                                     // the GPU. Let it not be paid for the space of
                                     // `1m 05s` — it would also inflate the `slots=`
-                                    // token (`/code-review`, 013 gate).
+                                    // token.
                                     ch: (ch != ' ').then_some(ch),
                                     fg: counter_fg,
                                     // **No** background: the counter is not a
@@ -6094,7 +6083,7 @@ impl Session {
                 // expected to fit later either (if the window widens damage is born
                 // anyway and the decision is made again).
                 // **The sooner one** ([`crate::shell::sooner`]): the local `ssh` block and
-                // the remote block under it can both be live (048 phase-3), on different
+                // the remote block under it can both be live, on different
                 // sub-second phases; the later one's deadline would make the other's
                 // counter step late.
                 if live && (drawn || duration < COUNTER_FLOOR) {
@@ -6104,7 +6093,7 @@ impl Session {
             }
             // An id the ledger does not know (the ring wrapped, the counter reset)
             // and a non-running `Pending` (Enter pressed on an empty prompt, a
-            // waiting prompt) return `None`: **unknown is not drawn**, 010's
+            // waiting prompt) return `None`: **unknown is not drawn**, the
             // defensive thesis.
             let Some(stripe) = shell.stripe(id, running) else {
                 continue;
@@ -6120,7 +6109,7 @@ impl Session {
         }
         // **The band's stripes from the same ledger, into a separate list**
         // ([`Blocks::fill_slice`]). The loop has no counter: the duration produces
-        // cells and the band's sink is closed in this phase — the decision and its
+        // cells and the band's sink is closed — the decision and its
         // rationale are in `fill_slice`'s doc. The "unknown is not drawn" rule
         // applies here exactly too.
         for &(id, row) in fill_anchors.iter() {
@@ -6142,7 +6131,7 @@ impl Session {
     /// The column where the duration counter will start; `None` if it does not
     /// fit and the counter is **not** drawn on that row at all.
     ///
-    /// **In a collision the counter loses** (013 Karar 7): the command the user
+    /// **In a collision the counter loses**: the command the user
     /// typed is not covered under any condition — the selection highlight too.
     /// Had the reverse been chosen the last letters of a long command would
     /// silently turn into a number and the symptom would be read as "my command
@@ -6192,7 +6181,7 @@ impl Session {
     }
 
     /// The mouse selection's two ends — the range model lives here, because
-    /// "which cells" is grid knowledge (Karar 1).
+    /// "which cells" is grid knowledge.
     ///
     /// The ends come in terms of the visible window (column, row) **and with
     /// their half**; they are lowered to a grid row with the current
@@ -6259,7 +6248,7 @@ impl Session {
     /// lowers a visible-window cell to a grid row, while here the window is not
     /// asked at all.
     ///
-    /// **It goes to the owner** (031 Karar 7): while the dock owns the caret and
+    /// **It goes to the owner**: while the dock owns the caret and
     /// there is text in the row the dock's whole `BUFFER` is selected — that is
     /// where the user typed. If the row is empty the grid: there is nothing to
     /// select in the dock and an empty ⌘A selecting the history is Terminal.app's norm.
@@ -6297,7 +6286,7 @@ impl Session {
             visible_range(term.selection.as_ref(), &term) != visible_range(Some(&selection), &term);
         term.selection = Some(selection);
         drop(term);
-        // **A single owner** (031 Karar 7): starting a selection in the grid
+        // **A single owner**: starting a selection in the grid
         // clears the dock's. After the `Term` lock is dropped — a leaf lock does
         // not go under it.
         let dock = self.clear_dock_selection();
@@ -6412,7 +6401,7 @@ impl Session {
     /// scroll path's clamp (the reachable range, `scroll_locked`) is not here,
     /// because the terminal does not know how far the application can scroll.
     ///
-    /// **The event comes down in both its forms at once** (027 Karar 6): `rows`
+    /// **The event comes down in both its forms at once**: `rows`
     /// is the fractional amount, `lines` the same event's whole rows
     /// (`bt-shell`'s remainder path). The route is chosen **first** and the
     /// fraction carries meaning only in the scrolling arm; the arrow and report
@@ -6423,7 +6412,7 @@ impl Session {
     /// **The fractional arm's frame**: a frame is requested if the offset or the
     /// fraction changed and a glide request accumulated, not if neither —
     /// momentum showering at the end of the history and a notch returning down at
-    /// the bottom must not produce an empty frame (R1.2).
+    /// the bottom must not produce an empty frame.
     pub fn scroll_wheel(
         &self,
         rows: f64,
@@ -6492,8 +6481,8 @@ impl Session {
     /// the press: had Shift been read at every event, letting go of Shift in the
     /// middle of a drag would turn the selection gesture into a report gesture.
     /// That is why in the call where `pressed` is `false` **Shift is not asked**.
-    /// The mode **is still asked** and this is a narrowing of R6 ("a release is
-    /// never dropped"): the promise was for the coordinate, not for the mode. If
+    /// The mode **is still asked** and this is a narrowing of the rule "a release
+    /// is never dropped": the promise was for the coordinate, not for the mode. If
     /// after the press was reported the application exited and sent `\e[?1000l`
     /// (vim closed) the release report would go to **the shell** — `\e[<0;5;3m`
     /// would land on a zsh command line. alacritty also re-asks the mode in
@@ -6649,7 +6638,7 @@ impl Session {
     }
 
     /// Edit ▸ Clear to Start (⌘K): erases the screen and the scrollback, **keeps
-    /// the current block** — Terminal.app's Clear to Start (034 Karar 1, Option A).
+    /// the current block** — Terminal.app's Clear to Start.
     ///
     /// Everything above the kept first row is scrolled out of the top of the grid
     /// and the scrollback is erased; nothing is left to scroll up to. What the
@@ -6662,14 +6651,14 @@ impl Session {
     /// happens in the terminal's scrollback, it never touches `send_input` — i.e.
     /// it works while a command runs too and does not write `^L` to `cat`'s input.
     ///
-    /// On the alternate screen it does nothing and returns `false` (Karar 2): the
+    /// On the alternate screen it does nothing and returns `false`: the
     /// primary grid's history is in `Term::inactive_grid` and that field is private.
     pub fn clear_to_start(&self) -> bool {
         self.clear(ClearKind::ToStart)
     }
 
-    /// The primary grid's scrollback and screen as VT bytes — **only at quit**
-    /// (053): what the next launch replays ([`SessionOptions::replay`]).
+    /// The primary grid's scrollback and screen as VT bytes — **only at quit**:
+    /// what the next launch replays ([`SessionOptions::replay`]).
     ///
     /// **Destructive on the alternate screen, and that is why it is quit-only.**
     /// The primary grid is behind `Term`'s private `inactive_grid` there, so
@@ -6679,7 +6668,7 @@ impl Session {
     /// `less`) is gone and the session must not be drawn again. A live path
     /// (the handover set) cannot use this method.
     ///
-    /// Where it stops (`.tasks/053-oturum-geri-yukleme/plan.md` → R1.2):
+    /// Where it stops:
     ///
     /// - The shell is at `Input` → **before** the top row of the input block's
     ///   anchor: the prompt and the half-typed line (suppressed from the grid
@@ -6708,11 +6697,11 @@ impl Session {
         history_of(&mut term, cut, &stripes)
     }
 
-    /// [`Session::final_history`] of a **frozen** session (055): `freeze`
+    /// [`Session::final_history`] of a **frozen** session: `freeze`
     /// drove the live `Term` destructively, so the history is read from the
     /// VT it returned, replayed into a scratch `Term` of the frozen size —
     /// the same screens, links and cursor, cut by the same ledger. What a
-    /// pane that falls back after the handover (or 053's save at that quit)
+    /// pane that falls back after the handover (or the layout save at that quit)
     /// replays.
     pub fn frozen_history(&self, frozen: &Frozen) -> Vec<u8> {
         let (cut, stripes) = {
@@ -6761,7 +6750,7 @@ fn history_of<T: EventListener>(
 
 impl Session {
     /// The pane's **whole** terminal state as VT bytes — **only at the
-    /// handover** (055): both screens, the cursors and saved cursors, every
+    /// handover**: both screens, the cursors and saved cursors, every
     /// mode, the changed palette, the links as they are, and what alacritty
     /// keeps private (tab stops, the scrolling region, the active set, the
     /// keyboard and title stacks, the application's cursor style).
@@ -6786,8 +6775,7 @@ impl Session {
     }
 
     /// `bt-core`'s own state as a versioned blob — the handover's second half
-    /// next to [`Session::live_snapshot`] (055,
-    /// `.tasks/055-guncellemede-canli-devir/discussion.md` → Karar 4): the
+    /// next to [`Session::live_snapshot`]: the
     /// block ledgers and the running command's clock, the dock's context and
     /// last mirror, the generations the remote gates read, the deliberate
     /// clear's flag. What is carried and what is dropped is
@@ -6917,7 +6905,7 @@ impl Session {
     /// the frame that sets the flag sees the clean screen. Since the scrollback is
     /// empty the fill would by chance give zero today even without the flag; the
     /// generation tells the flag's **present and future** consumers the clear in a
-    /// single word (`discussion.md` → Muhakeme, rejected).
+    /// single word (rejected).
     fn note_screen_clear(&self) {
         self.screen_clears.fetch_add(1, Ordering::Relaxed);
     }
@@ -7134,7 +7122,7 @@ impl Session {
     /// `Wakeup` arm uses (`Adapter::wake_frame`), not a second copy of it: the
     /// "flag before waking" order lives in one place. It does not go through the
     /// `Wakeup` event, because that arm increments the output's generation and
-    /// tells the search index "the scrollback changed" (033) — selection and
+    /// tells the search index "the scrollback changed" — selection and
     /// scrolling do not change the scrollback. Called **after the `Term` lock is
     /// released**: waking must not run while the two-mutex `FairMutex` is held.
     ///
@@ -7148,7 +7136,7 @@ impl Session {
         self.adapter.wake_frame();
     }
 
-    /// The selected range's text — the **single** path for copying (phase-2) and
+    /// The selected range's text — the **single** path for copying and
     /// tests. Line wrapping and wide-character spacers are resolved inside
     /// alacritty; a second text path would mean a second wrapping bug.
     ///
@@ -7156,7 +7144,7 @@ impl Session {
     /// reaches `send_input` — after copying the highlight stays on screen
     /// (alacritty too).
     ///
-    /// **The owner's text** (031 Karar 7): there is a single selection in the
+    /// **The owner's text**: there is a single selection in the
     /// window, if a range is selected in the dock its `BUFFER` slice, otherwise the
     /// grid's. The two cannot be full at once — starting in one clears the other.
     pub fn selection_text(&self) -> Option<String> {
@@ -7181,12 +7169,12 @@ impl Session {
                 .is_some_and(|selection| !selection.is_empty())
     }
 
-    /// A new selection in the dock: a press, with the click count's step (031 R3.1).
+    /// A new selection in the dock: a press, with the click count's step.
     ///
     /// `point` is a cell and its half in the dock's input block: `col` is the
     /// **screen** column (the marker at 0, the text at [`crate::DOCK_TEXT_COL`]),
-    /// `row` the **drawn** row of the input block (inside the vertical window,
-    /// 032) — the grid's [`SelectionPoint`], dock-local. The point is resolved
+    /// `row` the **drawn** row of the input block (inside the vertical window)
+    /// — the grid's [`SelectionPoint`], dock-local. The point is resolved
     /// against the **last drawn** window ([`Session::dock_window`]); if the
     /// mirror has changed `BUFFER` since that frame or is not `Live` there is no
     /// selection.
@@ -7206,8 +7194,8 @@ impl Session {
 
     /// Shift+click in the dock: moves the existing selection's end, keeps the
     /// step; if there is no selection a `Simple` starts **from the caret** to the
-    /// clicked point — a text field's Shift+click (031 phase-5; in phase-4 it
-    /// started empty from the clicked point, because the path that moves the
+    /// clicked point — a text field's Shift+click (it once started empty from
+    /// the clicked point, because the path that moves the
     /// caret did not exist yet). The grid's selection goes away (a single owner).
     pub fn dock_extend(&self, point: SelectionPoint) {
         let grid = clear_selection_locked(&mut self.term.lock());
@@ -7277,7 +7265,7 @@ impl Session {
 
     /// The wheel (or a drag touching the edge) is above the dock's input block:
     /// scrolls the vertical window by `lines` rows — positive is **backwards**
-    /// (up), the same direction as [`Session::scroll_wheel`] (032 phase-4).
+    /// (up), the same direction as [`Session::scroll_wheel`].
     ///
     /// `true` → the event is the dock's: the input exceeds the ceiling and the
     /// window can slide (even if it does not budge at the end — so that it does
@@ -7311,12 +7299,12 @@ impl Session {
 
     /// ⌘A's dock arm: in a `Live` row that is not empty, the whole of the
     /// selectable text — `PREBUFFER ++ BUFFER`, i.e. the entire command on screen
-    /// (032: copying a `for` loop is what is expected; in a selection touching
+    /// (copying a `for` loop is what is expected; in a selection touching
     /// `PREBUFFER` the editing keys go the current way). `false` if there is
     /// nothing to select and the caller falls to the grid.
     ///
     /// The step is `Simple` and the two ends the text's two ends: `Line` has
-    /// selected the **logical row** since 032 and in a multi-line `BUFFER` would
+    /// selected the **logical row** and in a multi-line `BUFFER` would
     /// take only the first row.
     fn dock_select_all(&self) -> bool {
         let changed = {
@@ -7376,7 +7364,7 @@ impl Session {
             .is_some_and(|selection| selection.range().is_some())
     }
 
-    /// **The editing gate** (031 R4.4): can a command that changes the dock's row
+    /// **The editing gate**: can a command that changes the dock's row
     /// go to ZLE right now. Four conditions, all four existing predicates:
     ///
     /// - the dock owns the row ([`ShellLog::suppressed_input`]: phase `Input`,
@@ -7386,10 +7374,10 @@ impl Session {
     ///   the sequence is not bound and its bytes would be a **command** (`~`
     ///   toggles the letter's case; measured);
     /// - the mirror is the answer to the user's last input (`answers == key_gen`,
-    ///   025) — the indices sent must belong to the `BUFFER` ZLE sees;
+    ///   the temporal gate) — the indices sent must belong to the `BUFFER` ZLE sees;
     /// - the shell said it bound the widget in this prompt
     ///   ([`ShellLog::dock_editable`]) — in a shell without the binding the
-    ///   trailing BEL becomes `send-break` and the line dies (measured, 031 → Muhakeme).
+    ///   trailing BEL becomes `send-break` and the line dies (measured).
     ///
     /// While the gate is closed **no command goes**: the selection can still be
     /// copied, the keys go the current way and remove the selection.
@@ -7397,7 +7385,7 @@ impl Session {
         self.dock_edit_line().is_some()
     }
 
-    /// The reconnect offer's ⏎ (037 Karar 8); `true` → the line went.
+    /// The reconnect offer's ⏎; `true` → the line went.
     ///
     /// The gate: there is an offer, the dock owns the caret (the last frame's
     /// answer, the one ⌘A reads), the mirror is the answer to the user's last
@@ -7468,8 +7456,8 @@ impl Session {
                 .filter(|p| p.generation == generation && log.dock_selection.is_none())?;
             (pending.buffer.as_str(), pending.caret, None)
         };
-        // A neighbouring cluster of more than one code point goes by command
-        // (phase-4). A single-code-point neighbour only in a row carrying an
+        // A neighbouring cluster of more than one code point goes by command.
+        // A single-code-point neighbour only in a row carrying an
         // **emoji cluster** (two columns): the chain must not break there
         // ([`DockEditLine::before`]). The criterion is emoji, not combiner,
         // because an NFD path (`Masaüstü`, macOS's file names) would make the row
@@ -7530,7 +7518,7 @@ impl Session {
     }
 
     /// Whether Edit ▸ Cut is enabled: there is a non-empty selection in the dock
-    /// **and** the gate is open. There is nothing to cut in the grid (031 Karar 7).
+    /// **and** the gate is open. There is nothing to cut in the grid.
     pub fn can_cut(&self) -> bool {
         self.dock_edit_line()
             .is_some_and(|line| line.buffer_range().is_some())
@@ -7561,7 +7549,7 @@ impl Session {
     }
 
     /// The release of a gesture in the dock: a single click without a drag moves
-    /// the caret to the clicked boundary (031 R4.1, `d;N;N;L`). A click falling on
+    /// the caret to the clicked boundary (`d;N;N;L`). A click falling on
     /// the suggestion or the blank to the right of the row lands at the end of
     /// `BUFFER` (the hit test).
     ///
@@ -7573,7 +7561,7 @@ impl Session {
             return;
         };
         // A click falling on `PREBUFFER` does not move the caret: ZLE accepted
-        // those rows and the only place the caret can go is `BUFFER` (032 Karar 2).
+        // those rows and the only place the caret can go is `BUFFER`.
         let Some(index) = line
             .selection
             .and_then(|s| s.click())
@@ -7586,19 +7574,19 @@ impl Session {
         }
     }
 
-    /// The terminal's counterpart of a key while there is a dock selection (031
-    /// Karar 8); `true` → the key was consumed, the caller must **not send** it
+    /// The terminal's counterpart of a key while there is a dock selection;
+    /// `true` → the key was consumed, the caller must **not send** it
     /// to the shell.
     ///
     /// Always `false` if the gate is closed: the key goes the current way, the
     /// selection goes away. If there is no selection ⇧←/⇧→ are consumed (starts a
     /// selection from the caret); ⌫, ⌦, ←, → only if there is a cluster of more
-    /// than one code point adjacent to the caret (035 Karar 7), otherwise the
+    /// than one code point adjacent to the caret, otherwise the
     /// current path. ⇧←/⇧→ too are tied to the gate, even though they send
     /// nothing to the shell: the selection starts from the caret and the caret's
     /// place is right only in a fresh mirror — in `vicmd` the key is vi's.
     pub fn dock_key(&self, key: DockKey) -> bool {
-        // ⏎ **before** the editing gate and not tied to it (Karar 8): what goes is
+        // ⏎ **before** the editing gate and not tied to it: what goes is
         // typed bytes, not the widget command.
         if key == DockKey::Enter {
             return self.reconnect();
@@ -7607,7 +7595,7 @@ impl Session {
             return false;
         };
         // A selection touching `PREBUFFER` is as if there were no selection for the
-        // editing keys: the key goes the current way and removes the selection (032 Karar 2).
+        // editing keys: the key goes the current way and removes the selection.
         let range = line.buffer_range();
         match (key, range) {
             (DockKey::Backspace | DockKey::Delete, Some((start, end))) => {
@@ -7616,7 +7604,7 @@ impl Session {
             (DockKey::Left, Some((start, _))) => self.send_dock_edit(&line, start, start),
             (DockKey::Right, Some((_, end))) => self.send_dock_edit(&line, end, end),
             // On a prediction row ⇧←/⇧→ go the current way (the answer of the gate
-            // that was closed before phase-5): a selection cannot be built on the
+            // that was closed before prediction): a selection cannot be built on the
             // stale mirror's text.
             (DockKey::ShiftLeft | DockKey::ShiftRight, _) if !line.fresh => return false,
             (DockKey::ShiftLeft | DockKey::ShiftRight, _) => {
@@ -7667,13 +7655,12 @@ impl Session {
                 }
                 self.paste(b"\n".to_vec());
             }
-            // **The four keys without a selection walk the cluster whole** (035
-            // Karar 7): ZLE walks code point by code point and in `🇹🇷` ⌫ would
-            // delete only the `🇷`. If there is a cluster of more than one code point
-            // in the row the key becomes the widget's single command (⌫/⌦ `[S,E)`,
-            // ←/→ `S == E`) and its expected result keeps the gate open for the
-            // repeat of a held key ([`DockPrediction`]); in a row without a cluster
-            // and at the row's end the current path — `self-insert`, the typing
+            // **The four keys without a selection walk the cluster whole**: ZLE walks code
+            // point by code point and in `🇹🇷` ⌫ would delete only the `🇷`. If there is a
+            // cluster of more than one code point in the row the key becomes the widget's
+            // single command (⌫/⌦ `[S,E)`, ←/→ `S == E`) and its expected result keeps the gate
+            // open for the repeat of a held key ([`DockPrediction`]); in a row without a
+            // cluster and at the row's end the current path — `self-insert`, the typing
             // effects, ZLE's deletion and the trailing →'s accepting the suggestion as they are.
             (DockKey::Backspace | DockKey::Delete | DockKey::Left | DockKey::Right, None) => {
                 let span = match key {
@@ -7713,7 +7700,7 @@ impl Session {
     ///
     /// The same shape as [`Session::theme`]: takes and releases the leaf lock,
     /// does not touch the `Term` lock, can be called from `frame()`'s `sink` too.
-    /// `frame()` takes the same leaf lock too (010, phase 2) but **after** it
+    /// `frame()` takes the same leaf lock too (in its phase 2) but **after** it
     /// releases the `Term` lock; the two never nest anywhere.
     pub fn shell_state(&self) -> Option<ShellState> {
         lock(&self.shell).local.state
@@ -7729,17 +7716,17 @@ impl Session {
         (!log.context.cwd.is_empty()).then(|| PathBuf::from(&log.context.cwd))
     }
 
-    /// The link under a point (044): its cells, raw target, kind and stamp;
+    /// The link under a point: its cells, raw target, kind and stamp;
     /// `None` if there is none. Pure — no file I/O: a [`LinkKind::Path`] is a
     /// candidate the shell layer still has to resolve.
     ///
     /// One `Term` lock round. The remote flag is read **before** it (a leaf lock
     /// never goes under `Term`): in a remote session every `file://` is not a
-    /// link and a path is marked remote ([`LinkHit::remote`], 045). A `file://` with a
+    /// link and a path is marked remote ([`LinkHit::remote`]). A `file://` with a
     /// foreign authority is not a link either ([`crate::shell::is_local_authority`],
     /// the machine's name from [`SessionOptions::hostname`]).
     ///
-    /// The cell's OSC 8 link beats the text under it (Karar 2); `bateri://` is
+    /// The cell's OSC 8 link beats the text under it; `bateri://` is
     /// not a link. A point on a wide char's right half asks its base cell.
     ///
     /// A [`LinkPoint::Dock`] asks the dock's input line ([`Session::dock_link_at`]).
@@ -7804,7 +7791,7 @@ impl Session {
         })
     }
 
-    /// The dock arm of [`Session::link_at`] (044 phase-5, R8): the link under a
+    /// The dock arm of [`Session::link_at`]: the link under a
     /// point of the dock's input line, from the same scanner ([`link::links_at`]
     /// over the selectable text, `PREBUFFER ++ BUFFER`; a path is a query of
     /// candidates, [`LinkHit::candidates`]) and the dock's single
@@ -7814,7 +7801,7 @@ impl Session {
     /// ([`DockWindow`], `dock_select`'s rule): a mirror whose text changed since
     /// that frame gives no hit — a frame later the right row is on screen. The
     /// locks in sequence, the trace first, then `shell` (never nested). In a
-    /// remote session there is no input line (036): the trace shows zero rows
+    /// remote session there is no input line: the trace shows zero rows
     /// and every point is rejected. The context line is not a link.
     ///
     /// The stamp is the selectable text: the hover holds while `BUFFER` and
@@ -7859,7 +7846,7 @@ impl Session {
 
     /// Whether a found link is one here: a plain-text path always is — in a
     /// remote session it is marked remote ([`LinkHit::remote`]) and resolved on
-    /// the remote disk (045 Karar 13); every `file://` of a remote session is
+    /// the remote disk; every `file://` of a remote session is
     /// not (which disk it names is unclear), nor is a `file://` with a foreign
     /// authority ([`crate::shell::is_local_authority`]).
     fn link_allowed(&self, kind: &LinkKind, target: &str, remote: bool) -> bool {
@@ -7875,15 +7862,15 @@ impl Session {
         }
     }
 
-    /// Highlights a link (044 R4): while `hover`'s stamp holds, the next frames
+    /// Highlights a link: while `hover`'s stamp holds, the next frames
     /// draw its cells with the hover's underline — a screen hover in the grid and
     /// the fill band ([`Session::frame`] checks it), a dock hover on the dock's
     /// input line ([`Session::dock`] checks it). `None` removes the highlight.
     ///
     /// The `set_theme` pattern: the same value is a **no-op and does not wake**
-    /// (moving inside a link produces no frame, R4.2), a change requests a frame.
+    /// (moving inside a link produces no frame), a change requests a frame.
     /// A stale stamp is not drawn: the frame drops the slot and says so with
-    /// [`Wake::link_hover_lost`] (R4.1).
+    /// [`Wake::link_hover_lost`].
     pub fn set_link_hover(&self, hover: Option<LinkHover>) {
         let changed = {
             let mut slot = lock(&self.link_hover);
@@ -7901,7 +7888,7 @@ impl Session {
 
     /// Drops a stale hover — only if the slot still holds `taken`, the copy the
     /// caller checked (a hover set in between is the view's newer answer) — and
-    /// says so once ([`Wake::link_hover_lost`], R4.1). The two checkers' single
+    /// says so once ([`Wake::link_hover_lost`]). The two checkers' single
     /// drop: [`Session::frame`] (screen) and [`Session::dock`] (dock). Called
     /// with no lock held.
     fn drop_link_hover(&self, taken: &Arc<LinkHover>) {
@@ -7918,7 +7905,7 @@ impl Session {
         }
     }
 
-    /// Whether `hover`'s stamp still holds under the `Term` lock (044 R4.1): the
+    /// Whether `hover`'s stamp still holds under the `Term` lock: the
     /// scrollback's state is the one the hit test saw ([`search::LedgerMark`] —
     /// output, scrolling, a clear, a resize, the alternate screen all move it) and,
     /// for an OSC 8 link, every drawn cell of its spans still carries the same
@@ -7977,8 +7964,8 @@ impl Session {
         )
     }
 
-    /// The running command's generation; `None` if no command is running (036
-    /// Karar 2; defined in `ShellLog::running_command`).
+    /// The running command's generation; `None` if no command is running
+    /// (defined in `ShellLog::running_command`).
     ///
     /// The first half of the remote-session probe: the caller takes the
     /// generation **before** probing and gives the answer back with it to
@@ -7987,9 +7974,9 @@ impl Session {
         lock(&self.shell).running_command()
     }
 
-    /// Reports the remote session's target (`None` = local; 037 Karar 1: host,
+    /// Reports the remote session's target (`None` = local; host,
     /// kind, argv and line as a whole); `true` if the title's input (the host)
-    /// **changed** and the caller refreshes the title (036 Karar 1, 5). The
+    /// **changed** and the caller refreshes the title. The
     /// host's mark is resolved here, from the pattern list
     /// ([`Session::set_host_marks`]).
     ///
@@ -8004,7 +7991,7 @@ impl Session {
     /// know this). The leaf lock drops before `request_frame`; `Term` is not touched.
     pub fn set_remote(&self, command: u64, target: Option<&RemoteTarget>) -> bool {
         // The title's epoch under `Term`: a read in flight (the `C` and a local
-        // title in one chunk) is parsed by then (047 phase-4).
+        // title in one chunk) is parsed by then.
         let titles = {
             let _term = self.term.lock();
             self.adapter.0.title_epoch.load(Ordering::Acquire)
@@ -8032,7 +8019,7 @@ impl Session {
     }
 
     /// Writes the `[remote] hosts` pattern list and re-resolves the active
-    /// remote host's mark (037 Karar 2) — the settings file's opening and live
+    /// remote host's mark — the settings file's opening and live
     /// refresh. `true` and requests a frame **if the mark changed**
     /// ([`Session::set_theme`]'s precedent: the dock's two colours changed,
     /// alacritty's damage does not know this); the same list or a list that does
@@ -8050,7 +8037,7 @@ impl Session {
     }
 
     /// The remote session's host (as displayed, `user@` included) and its
-    /// resolved mark; `None` locally (037 Karar 4, 5). Its readers are the tab's
+    /// resolved mark; `None` locally. Its readers are the tab's
     /// dot and Shell ▸ Mark … as ▸ — both on the main thread, on the edge; the
     /// frame path does not call this. A leaf lock, `Term` is not touched.
     pub fn remote_mark(&self) -> Option<(String, HostMark)> {
@@ -8061,7 +8048,7 @@ impl Session {
     }
 
     /// The remote target's line escaped for the shell (`ssh -p 2222 prod`);
-    /// `None` locally (037 Karar 6). Its reader is ⌘T: the new tab's first input
+    /// `None` locally. Its reader is ⌘T: the new tab's first input
     /// ([`SessionOptions::initial_input`]). On the main thread, on the edge; a
     /// leaf lock, `Term` is not touched.
     pub fn remote_line(&self) -> Option<String> {
@@ -8073,15 +8060,13 @@ impl Session {
     }
 
     /// The remote session's target, remote directory and its command's
-    /// generation **in a single read**; `None` locally or while no command runs
-    /// (037 Karar 7).
+    /// generation **in a single read**; `None` locally or while no command runs.
     ///
     /// Its reader is the Finder drop's upload: the generation is taken at the
     /// drop and re-asked after the confirmation and throughout the queue's life —
-    /// if it does not match ssh has ended, the waiting ones are cancelled (037
-    /// Karar 7). All three are in the same leaf-lock round, i.e. a `D` cannot pair
-    /// the new target with the old generation or the reverse. On the main thread,
-    /// on the edge; `Term` is not touched.
+    /// if it does not match ssh has ended, the waiting ones are cancelled. All three are in the
+    /// same leaf-lock round, i.e. a `D` cannot pair the new target with the old generation or
+    /// the reverse. On the main thread, on the edge; `Term` is not touched.
     pub fn remote_target(&self) -> Option<(u64, RemoteTarget, String)> {
         let log = lock(&self.shell);
         let command = log.running_command()?;
@@ -8089,7 +8074,7 @@ impl Session {
         Some((command, target, log.context.remote_cwd.clone()))
     }
 
-    /// Why the remote bootstrap fell back to a plain login shell (048), from
+    /// Why the remote bootstrap fell back to a plain login shell, from
     /// the stream ([`crate::DockContext::remote_setup`]); `None` if it did not
     /// say so. The pane's label reads it next to "Remote folder unknown". One
     /// leaf-lock round; `Term` is not touched.
@@ -8097,7 +8082,7 @@ impl Session {
         lock(&self.shell).context.remote_setup
     }
 
-    /// The remote bootstrap's last `8133;i;up;{nonce}` (049 R2.2) and the
+    /// The remote bootstrap's last `8133;i;up;{nonce}` and the
     /// command generation ([`Self::running_command`]'s) it arrived in; `None`
     /// if none arrived while a command ran. Not cleared by `D` or the probe's
     /// answer — the caller compares the generation with its own probe's, and
@@ -8108,7 +8093,7 @@ impl Session {
     }
 
     /// The command generation whose remote session the user typed into after
-    /// its login ([`Self::remote_login`]) was seen (049 R7); `None` if not.
+    /// its login ([`Self::remote_login`]) was seen; `None` if not.
     /// The pane marks the wrapped attempt "used" with it, and the local `ssh`
     /// function's fallback then reruns nothing. One leaf-lock round; `Term`
     /// is not touched.
@@ -8155,7 +8140,7 @@ impl Session {
         }
     }
 
-    /// Writes the upload queue's status row (`None` = remove; 037 Karar 7).
+    /// Writes the upload queue's status row (`None` = remove).
     /// Requests a frame **if it changed** ([`Session::set_remote`]'s pattern: the
     /// row is not in alacritty's damage) and returns `true`.
     ///
@@ -8183,7 +8168,7 @@ impl Session {
         changed
     }
 
-    /// Writes the remote host's load indicator (`None` = hide; 046 Karar 5).
+    /// Writes the remote host's load indicator (`None` = hide).
     /// Requests a frame **if it changed** and returns `true`
     /// ([`Session::set_transfer`]'s pattern: the context row is not in
     /// alacritty's damage).
@@ -8214,7 +8199,7 @@ impl Session {
     }
 
     /// Shows (`Some`, with its hover) or hides the ssh status bar's Sign In…
-    /// button of remote generation `command` (047 R7.2); `true` if it changed.
+    /// button of remote generation `command`; `true` if it changed.
     /// The [`Self::set_remote_stats`] gates: another generation's or a finished
     /// ssh's late word is a no-op, the same value asks for no frame (zero
     /// frames while idle); only the leaf lock, dropped before `request_frame`.
@@ -8236,7 +8221,7 @@ impl Session {
     }
 
     /// The Sign In… button as drawn and the remote generation it belongs to;
-    /// `None` while it is not shown (047 R7.2). The session is the button's
+    /// `None` while it is not shown. The session is the button's
     /// one owner: it clears it with the remote state ([`Self::set_remote`],
     /// `C`/`D`/`A`), so the pane asks here rather than keeping a copy. Takes
     /// only the leaf lock.
@@ -8268,7 +8253,7 @@ impl Session {
     /// ([`crate::dock::stats_span`]; `budget` is the context row's budget) —
     /// `None` while it is not drawn (no value, an upload row in its place, it
     /// did not fit). The mouse's hit test, the popover's anchor and the hand
-    /// cursor read this one range, from the drawing's layout (046 R3.4). Takes
+    /// cursor read this one range, from the drawing's layout. Takes
     /// only the leaf lock.
     pub fn stats_span(&self, budget: u16) -> Option<(u16, u16)> {
         let mut context = lock(&self.shell).context.clone();
@@ -8284,7 +8269,7 @@ impl Session {
     /// Its own query, **not** a field of [`Cursor`]: `Cursor` is a frame record
     /// (the cursor's place, the fullness), while this is the session's truth at
     /// that moment and its consumer is not drawing but **window geometry** — the
-    /// dock is lifted on the alternate screen (012 → R5.2). Had it been added to
+    /// dock is lifted on the alternate screen. Had it been added to
     /// `Cursor`, information with a session lifetime would have been loaded onto
     /// a record born per frame.
     ///
@@ -8308,7 +8293,7 @@ impl Session {
     /// and for one reason: [`DockState`] is not `Copy`, it carries three strings
     /// and a list. Had a copy been returned four allocations would be born per
     /// frame; `into` keeps its own capacity and in steady state the allocation is
-    /// **zero** (R1.3).
+    /// **zero**.
     pub fn dock_state(&self, into: &mut DockState) {
         into.clone_from(&lock(&self.shell).dock);
     }
@@ -8339,7 +8324,7 @@ impl Session {
     /// crate does not know it — had it known, a second record of the question
     /// "was the shell integration installed" would have been born.
     ///
-    /// **The second sink is the typing animations'** (030): it prints the glyph
+    /// **The second sink is the typing animations'**: it prints the glyph
     /// added or removed since the last drawn mirror, with its screen column, as
     /// **at most one** [`DockEdit`]. The diff is taken against the caller's
     /// buffer, i.e. `into` **must be the last drawn** mirror — its only caller is
@@ -8355,7 +8340,7 @@ impl Session {
     /// its row number is this number itself; had it been derived from two
     /// separate lock rounds the band and the dock's rows could diverge by a frame.
     ///
-    /// **`runs` is the selection's runs per visual row** (032): a long row wraps
+    /// **`runs` is the selection's runs per visual row**: a long row wraps
     /// and the selection can span several rows. The caller's buffer (the
     /// precedent of [`SelectionRuns`]), emptied and refilled on every call; its
     /// rows are inside the vertical window, dock-local.
@@ -8376,7 +8361,7 @@ impl Session {
         edits: impl FnMut(DockEdit),
     ) -> Dock {
         let theme = *lock(&self.adapter.0.theme);
-        // **The link hover before `shell`** (044 phase-5; leaf locks in
+        // **The link hover before `shell`** (leaf locks in
         // sequence): only a dock hover is this surface's, checked against the
         // mirror in the same round as the copy.
         let hover_taken = lock(&self.link_hover)
@@ -8432,7 +8417,7 @@ impl Session {
         );
         // The hit test's trace: this frame's window ([`Session::dock_window`]).
         // The vertical window's shift is from the **last drawn** top: so that
-        // in-flight effects slide with the text (032 phase-6). No shift in the first frame.
+        // in-flight effects slide with the text. No shift in the first frame.
         let painted = lock(&self.dock_window).map(|drawn| drawn.painted);
         let by = painted.map_or(0, |painted| painted as i64 - top as i64);
         // audit: the clamp is only for the type; both tops are bounded by the
@@ -8444,7 +8429,7 @@ impl Session {
             painted: top,
             // Zero at zero input rows (a remote session): the hit test rejects
             // every point ([`DockWindow::hit`]), the wheel does not scroll the
-            // dock — there is no input row to click (036 R5.3).
+            // dock — there is no input row to click.
             shown: input_rows,
             rows,
             cols: cols.grid,
@@ -8454,7 +8439,7 @@ impl Session {
     }
 
     /// Builds the history search's query and returns the state of its compiled
-    /// form (033); the next content frame draws the highlight.
+    /// form; the next content frame draws the highlight.
     ///
     /// The compilation is **outside** the leaf lock: so that building a long
     /// pattern's DFA does not enter the time the frame path waits for the slot.
@@ -8464,7 +8449,7 @@ impl Session {
     /// must carry a pattern — going from an empty query to an empty query does
     /// not break zero frames when idle.
     ///
-    /// **It also selects the current match** (Karar 3): the bottommost if a match
+    /// **It also selects the current match**: the bottommost if a match
     /// drawn in the window exists, otherwise the first match upward from the
     /// bottom of the window where the search started ([`SearchSlot::origin`]). It
     /// does not move the window — revealing is the second step of the caller that
@@ -8501,7 +8486,7 @@ impl Session {
     }
 
     /// Moves from the current match to the next one in `direction` (⏎/⌘G,
-    /// ⇧⏎/⇧⌘G; Karar 3) and reveals it ([`Session::search_reveal`]'s rule). It
+    /// ⇧⏎/⇧⌘G) and reveals it ([`Session::search_reveal`]'s rule). It
     /// wraps at the end; if there is no current match [`Session::set_search`]'s
     /// choice.
     ///
@@ -8562,10 +8547,10 @@ impl Session {
         .unwrap_or_default()
     }
 
-    /// If the current match is not visible moves the window to it (Karar 4):
+    /// If the current match is not visible moves the window to it:
     /// if it is under the panel ([`SearchCover`]) or outside the window, by as
-    /// much as brings the row to the middle, gliding within a screen (027's
-    /// `Glide`); if far away, it lands instantly within a screen of the target
+    /// much as brings the row to the middle, gliding within a screen (the
+    /// scroll `Glide`); if far away, it lands instantly within a screen of the target
     /// and the remaining screen glides; `smooth == false`
     /// (`smooth_scroll = "off"`, Reduce Motion, `snap`) instantly. On a visible
     /// match the window **does not move**.
@@ -8588,7 +8573,7 @@ impl Session {
         .unwrap_or_default()
     }
 
-    /// A chunk of the index (phase-5, Karar 2-B): advances the count of the whole
+    /// A chunk of the index: advances the count of the whole
     /// scrollback bottom to top by [`search::CHUNK_LINES`] rows and gives the
     /// panel's report. `None` if search is closed (no pattern).
     ///
@@ -8710,13 +8695,13 @@ impl Session {
         }
     }
 
-    /// Makes the current match the grid's selection (Esc, the close button; Karar
-    /// 5): ⌘C copies it at once. The window does not move. `false` if there is
+    /// Makes the current match the grid's selection (Esc, the close button):
+    /// ⌘C copies it at once. The window does not move. `false` if there is
     /// no match.
     ///
     /// The ends are in the scrollback's absolute coordinates, i.e. the selection
     /// is built even if the match is in the fill band — the band draws no
-    /// selection (017's debt, the known limit of Karar 5) but ⌘C copies.
+    /// selection (the fill band's debt, a known limit) but ⌘C copies.
     pub fn select_search_match(&self) -> bool {
         let tracking = lock(&self.search).tracking();
         let term = self.term.lock();
@@ -8844,14 +8829,14 @@ impl Session {
         band: i32,
         smooth: bool,
     ) -> bool {
-        // The alternate screen has no scrollback: navigation does not scroll (Karar 8).
+        // The alternate screen has no scrollback: navigation does not scroll.
         if term.mode().contains(TermMode::ALT_SCREEN) {
             return false;
         }
         if match_visible(term, found, cover, band) {
             // **The window stays in place — the in-flight glide included.** Had the
             // previous navigation's glide still been on the way it would carry the
-            // visible match away (⇧⏎ right after ⏎; `/code-review`): the generation
+            // visible match away (⇧⏎ right after ⏎): the generation
             // increments and the glide ends where it is. If the fraction dropped a
             // frame is needed.
             return self.reset_scroll();
@@ -8861,7 +8846,7 @@ impl Session {
         if delta == 0 {
             return false;
         }
-        // Like every path that resets the position from outside (027): the
+        // Like every path that resets the position from outside: the
         // in-flight glide drops, the fraction is zeroed, the generation increments.
         self.reset_scroll();
         let rows = term.screen_lines() as i32;
@@ -8992,7 +8977,7 @@ impl Session {
         self.term.lock().set_options(term_config(options));
         // The block ledger's ceiling is derived from `scrollback` too and that
         // setting is **applied live**: had it not been carried here the excess of
-        // a grown history would stay uncoloured (`/code-review`, 010 gate). The
+        // a grown history would stay uncoloured. The
         // lock order is mandatory — the `Term` guard dropped at the end of the
         // expression above, the leaf lock is taken **after** it; the reverse order
         // would close a cycle with the reader thread's order (`Term` → `shell`).
@@ -9034,7 +9019,7 @@ impl Session {
     /// The keyboard's **text** — the letter AppKit's text stack delivers
     /// (`insertText:`). Its only difference from [`Session::write`] is the dock
     /// selection: while there is a selection and the editing gate is open the
-    /// text is written **in place of** the selection (031 Karar 8) — first the
+    /// text is written **in place of** the selection — first the
     /// delete command, then the letter by the usual path, i.e. it still passes
     /// through `self-insert`. Function keys, Enter and Control bytes stay in
     /// `write`: they remove the selection and do today's job.
@@ -9072,7 +9057,7 @@ impl Session {
     /// alacritty's pair: `on_terminal_input_start` clears the selection and
     /// returns to the bottom both on key input and in both branches of paste. A
     /// frame is requested only when a **drawn** range goes away
-    /// (`clear_selection_locked`, phase-1's frame rule): the empty selection a
+    /// (`clear_selection_locked`'s frame rule): the empty selection a
     /// click without a drag leaves would otherwise make the first key after every
     /// click request an empty frame.
     ///
@@ -9134,15 +9119,15 @@ impl Session {
                 self.scroll_user(&mut term, i32::MIN, self.band_shown()),
             )
         };
-        // The dock's selection too (031 R3.4): input clears both selections, this
+        // The dock's selection too: input clears both selections, this
         // is the single funnel. The leaf lock is **outside** `Term`.
         let redraw = self.clear_dock_selection() || redraw;
-        // The reconnect offer too (037 Karar 8): it goes away at the **first key**
+        // The reconnect offer too: it goes away at the **first key**
         // — if the user started typing something else the intent is not to
         // reconnect. The placeholder is not in alacritty's damage, i.e. the frame is requested here.
         //
-        // The same lock round notes the first input after a remote login (049
-        // R7): the edge goes out after the lock is released.
+        // The same lock round notes the first input after a remote login: the edge goes out
+        // after the lock is released.
         let (reconnect, typed) = {
             let mut log = lock(&self.shell);
             (log.context.reconnect.take().is_some(), log.note_typed())
@@ -9166,7 +9151,7 @@ impl Session {
     }
 
     /// Sends the bytes — or **holds** them if the first input has not gone yet
-    /// ([`HeldInput`]; a `/code-review` finding inherited from phase-3).
+    /// ([`HeldInput`]; a review finding).
     ///
     /// In ⌘T's remote tab the line goes at our first identified `A` and the keys
     /// typed until then would stick **in front of** the line in ZLE's typeahead
@@ -9179,11 +9164,10 @@ impl Session {
     /// accumulated up to then and the hold **continues** — ssh's line is still
     /// waiting and a half line typed behind it would stick in front of it
     /// (`ls⏎pwd` → `ls` runs, then `pwd` after the line). Only the delivery of the
-    /// line ends the hold. If the identified `A` never comes (Karar 6's known
+    /// line ends the hold. If the identified `A` never comes (a known
     /// limit: `exec fish` at the end of the rc) or the rc reads a line from stdin
-    /// the keyboard does not die: every ⏎ or ^C sends what was typed. Its cost
-    /// (no echo, a question that reads a single key wanting ⏎) is in phase-4's
-    /// Uygulama Notları.
+    /// the keyboard does not die: every ⏎ or ^C sends what was typed. Its cost:
+    /// no echo, and a question that reads a single key wants ⏎.
     ///
     /// The send is **under** the slot's lock: the reader thread's delivery is in
     /// the same lock and writes to the same channel, i.e. the channel's order is
@@ -9207,7 +9191,7 @@ impl Session {
     /// The remedy is bracketed paste (`\e[200~` … `\e[201~`): the application is
     /// told "this is a paste". If the application asked (DECSET 2004) wrap,
     /// otherwise write raw — the terminal cannot decide what the application does
-    /// not want and the terminal cannot know (Karar 3).
+    /// not want and the terminal cannot know.
     ///
     /// The mode is **not kept**; it lives in alacritty's `Term` and is queried
     /// under the lock. Paste bytes are never given straight to `session.write` —
@@ -9236,7 +9220,7 @@ impl Session {
         // The refresh decision **before everything**: deleting the selection
         // advances the generation and would close the gate's "the mirror answered" condition.
         let refresh = self.paste_refreshes(&bytes);
-        // **Paste in place of the selection** (031 Karar 8): while there is a
+        // **Paste in place of the selection**: while there is a
         // selection in the dock and the editing gate is open the selection is
         // deleted first, the payload after that by this path — the wrapping
         // decision still below, independent of the deletion.
@@ -9280,7 +9264,7 @@ impl Session {
     /// stays stale, the freshness gate gives up the suppression and the text the
     /// user pasted appears in the grid instead of the dock — for one key's time
     /// the owner of the input row is not the dock. Five remedies were measured on
-    /// the shell side and only this last one works (012 phase-4 → Uygulama Notları).
+    /// the shell side and only this last one works.
     ///
     /// **Why safety is not lost.** The two things the wrapping protects are both
     /// outside the condition: with no line break no line **runs** by itself (the
@@ -9300,8 +9284,8 @@ impl Session {
     ///   line break, tab and `ESC` are all inside this test, i.e. they are not
     ///   counted separately.
     ///
-    /// **The keymap condition was added later and its absence was a defect**
-    /// (`/code-review`, 012 phase-6): the sentence above, "typing it by hand would
+    /// **The keymap condition was added later and its absence was a defect**:
+    /// the sentence above, "typing it by hand would
     /// give the same result", assumes every printable byte is bound to
     /// `self-insert` and that assumption is true only in the insert keymap. When
     /// someone using `bindkey -v` presses Esc ZLE goes to `vicmd` but the phase is
@@ -9313,7 +9297,7 @@ impl Session {
     /// `bracketed-paste-magic`) insert literally in every keymap, i.e. once the
     /// exception closes the behaviour returns to correct.
     /// Whether a refresh command will be appended behind a paste with line
-    /// breaks (032 R5): the payload carries a line break **and** the editing
+    /// breaks: the payload carries a line break **and** the editing
     /// gate's four conditions are open **before** the paste
     /// ([`Session::can_edit_dock`]).
     ///
@@ -9331,7 +9315,7 @@ impl Session {
     }
 
     fn can_be_typed(&self, bytes: &[u8]) -> bool {
-        // The held `line-finish` (032 Karar 11) closes the exception: the mirror
+        // The held `line-finish` closes the exception: the mirror
         // is the accepted line's and so is its keymap — not the new line's.
         let typed = {
             let log = lock(&self.shell);
@@ -9407,7 +9391,7 @@ impl Session {
         // job (`bt-shell` opens the link after the resize); the flag wakes nobody.
         self.adapter.0.dirty.store(true, Ordering::Release);
         // The rewrapping changed the scrollback's rows: if search is open the
-        // count starts over (033; the loss of the current match is in `search::ledger_shift`).
+        // count starts over (the loss of the current match is in `search::ledger_shift`).
         self.adapter.search_changed();
         true
     }
@@ -9450,7 +9434,7 @@ impl Session {
     /// a copy of the master with `pty.file().try_clone()` in `Session::spawn`
     /// (`EventLoop` does **not give** the `Pty` back after `join`, i.e. the copy
     /// must be taken at the start). The copy is taken today ([`Session::with_pty_fd`],
-    /// 047) but only read for the terminal modes; the draining is not done and
+    /// but only read for the terminal modes; the draining is not done and
     /// is recorded as debt: the limit is needed in any case, (1) is not solved
     /// by draining.
     ///
@@ -9486,7 +9470,7 @@ impl Session {
     pub fn begin_shutdown(&self) -> Option<ShutdownHandle> {
         let reader = lock(&self.reader).take()?;
         // The modes' copy goes first: the `Pty`'s `Drop` closes the last master
-        // fd, as before 047.
+        // fd, as before the copy existed.
         drop(lock(&self.master).take());
         self.send(Msg::Shutdown);
 
@@ -9537,7 +9521,7 @@ impl Session {
         })
     }
 
-    /// Freezes the session for the handover (055 R2.2): the reader stops,
+    /// Freezes the session for the handover: the reader stops,
     /// the PTY is **not** closed and the child gets no `SIGHUP` — another
     /// process carries the pane on ([`Session::adopt`]) from what this
     /// returns.
@@ -9589,9 +9573,9 @@ impl Session {
         event_loop.stop_sync(&mut state);
         let tail = event_loop.pty_mut().tail().to_vec();
         let mut input = event_loop.unsent(&mut state);
-        // A first input still waiting for our first identified `A` (037
-        // Karar 6) goes now, with the keys held behind it, by the reader's
-        // own rule (053 Karar 3): a ready line that finds typing is dropped.
+        // A first input still waiting for our first identified `A` goes now,
+        // with the keys held behind it, by the reader's own rule: a ready line that finds
+        // typing is dropped.
         let line = event_loop.pty_mut().initial_input.take();
         let typed = lock(&self.held_input).take().unwrap_or_default();
         if let Some(line) = line
@@ -9625,8 +9609,8 @@ impl Session {
 
     /// The pid of the PTY's child — an adopted session's too ([`Session::adopt`],
     /// the pid it was given) — **not the shell's**, at least not always: in
-    /// an unbounded session the child is `login(1)` and the shell is its child
-    /// (`.tasks/028-kapatma-onayi/context.md` → Süreç tarafı). The side that
+    /// an unbounded session the child is `login(1)` and the shell is its child.
+    /// The side that
     /// builds the command knows which it is, not this crate.
     ///
     /// After the child is reaped it **goes stale**: the number stays the same, the
@@ -9639,7 +9623,7 @@ impl Session {
 
     /// Runs `read` on the PTY master's copy ([`Session::master`]); `None` if
     /// there is none (the copy failed, the session is shutting down). Its one
-    /// use is reading the terminal modes (047 phase-4, [`Session::remote_login`])
+    /// use is reading the terminal modes ([`Session::remote_login`])
     /// — nothing is written to or read from it. The copy's leaf lock is held
     /// for the call: `read` must be a syscall, not a wait.
     pub fn with_pty_fd<T>(
@@ -9652,10 +9636,10 @@ impl Session {
             .and_then(|file| read(file.as_fd()))
     }
 
-    /// Whether the remote session is past its login (047 R9.1): `Some(the
+    /// Whether the remote session is past its login: `Some(the
     /// remote generation)` if so, `None` while ssh still asks (a host key, a
     /// password) or without a remote session. A background job of the remote
-    /// files does not connect before it (`discussion.md` → Karar — ek).
+    /// files does not connect before it.
     ///
     /// The signals: the output's since the remote state was set — a remote
     /// OSC 7, bracketed paste switched on, a `user@host: dir` title — and the
@@ -9838,7 +9822,7 @@ fn scroll_locked<T: EventListener>(term: &mut Term<T>, lines: i32, band: i32) ->
 /// **The band mapping is not written a second time**: what carries the whole
 /// row is still [`scroll_locked`], i.e. the band's virtual scroll, the `1..band`
 /// exemption and the clamp apply as they are. This function's own rule is one
-/// and drops the fraction from two ends (R1.2):
+/// and drops the fraction from two ends:
 ///
 /// - **No fraction if the whole part could not go.** If the row at the top of
 ///   the screen ([`visual_top`]) did not move by the whole part the scroll has
@@ -9870,9 +9854,8 @@ fn scroll_fraction_locked<T: EventListener>(
     // comes in `f32` ([`ScrollGlide`]) and settling's `−0.3` is `−0.30000001` in
     // `f32`. The total would become `−1.2e-8`, `floor` would throw it one row
     // down and the window would be left unsettled with a `0.99999998` fraction —
-    // the top row open, the next row step jumping two rows (`/code-review`, 027
-    // phase-1). The threshold is far below a pixel; a fraction this small cannot
-    // be drawn anyway.
+    // the top row open, the next row step jumping two rows. The threshold is far below a pixel;
+    // a fraction this small cannot be drawn anyway.
     let nearest = total.round();
     let total = if (total - nearest).abs() < 1e-5 {
         nearest
@@ -9949,7 +9932,7 @@ fn clear_selection_locked<T>(term: &mut Term<T>) -> bool {
 /// the report's format (`M`/`m` in SGR) and **the fate of a coordinate that
 /// does not fit**. An event that starts or continues a gesture (press, motion)
 /// is rejected; the release that ends the gesture is clamped, because a dropped
-/// release leaves a button stuck in the application (R6).
+/// release leaves a button stuck in the application.
 fn mouse_report_at(
     encoding: MouseEncoding,
     byte: u8,
@@ -10301,8 +10284,8 @@ mod tests {
     fn shell_state_stays_empty_without_marks() {
         // The scanner is now tied to the stream, but in a shell that prints no
         // marker the slot must stay empty: the meaning of `None` is not "nobody
-        // feeds it" but **"no integration"** and in this set most real shells are
-        // so (the zsh script lands in phase-3, on the far side of SSH it never does).
+        // feeds it" but **"no integration"** and many real shells are so (a
+        // shell without the wrapper, the far side of a plain SSH).
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("printf 'merhaba'; sleep 5", Arc::clone(&wake));
         wait_settled(&session);
@@ -10321,7 +10304,7 @@ mod tests {
 
     #[test]
     fn the_initial_input_waits_for_our_first_identified_prompt() {
-        // 037 Karar 6: in a session with a wrapper the first input goes at our
+        // In a session with a wrapper the first input goes at our
         // first identified `A`. The fake shell sets up three gates: after an
         // unidentified `A`, `EARLY` if something came within a second; after the
         // identified `A`, read the line and `GOT:`; after a second identified `A`,
@@ -10398,7 +10381,7 @@ mod tests {
 
     #[test]
     fn a_ready_initial_input_waits_for_the_users_enter_at_birth() {
-        // 053 Karar 3: a restored remote pane gets its target's line without
+        // A restored remote pane gets its target's line without
         // `\r`. The fake shell's timed read must find no line; the line is
         // still in the input buffer and the user's ⏎ completes it.
         let wake = Arc::new(TestWake::default());
@@ -10437,7 +10420,7 @@ mod tests {
 
     #[test]
     fn a_ready_initial_input_gives_way_to_keys_typed_before_the_prompt() {
-        // `/code-review` (053 gate): the hold puts typed keys behind the line;
+        // The hold puts typed keys behind the line;
         // a ready line is not run, so they would join it (`ssh-prodls`). The
         // user's unsent typing wins and the ready line is dropped.
         let wake = Arc::new(TestWake::default());
@@ -10462,7 +10445,7 @@ mod tests {
 
     #[test]
     fn a_replayed_history_sits_above_the_shell_and_reaches_no_ledger() {
-        // 053 R1.3: the bytes go to `Term` before the reader loop and past the
+        // The bytes go to `Term` before the reader loop and past the
         // scanner. They carry marks here on purpose — a prompt, a mirror, an
         // OSC 7 — and none of them may reach the shell ledger, the mirror or
         // the directory.
@@ -10538,7 +10521,7 @@ mod tests {
 
     #[test]
     fn final_history_without_marks_drops_the_whole_wrapped_prompt_line() {
-        // `/code-review` (053 gate): a half-typed command wrapped past the
+        // A half-typed command wrapped past the
         // 40 columns; the rows wrapping into the cursor's go with it.
         let history = final_history_of(
             "printf 'out\\r\\n$ '; printf 'half%.0s' 1 2 3 4 5 6 7 8 9 10 11 12; sleep 5",
@@ -10549,7 +10532,7 @@ mod tests {
 
     #[test]
     fn final_history_saves_a_finished_blocks_anchor_with_its_role() {
-        // 053, seen in the real window: the restored commands lost their
+        // Seen in the real window: the restored commands lost their
         // chevron. Finished blocks go out as saved anchors with the role of
         // their colour; the block being typed is cut as before.
         let history = final_history_of(
@@ -10574,7 +10557,7 @@ mod tests {
     fn a_replayed_saved_anchor_marks_its_command_row_in_the_live_theme() {
         // The colour is the role, painted by today's theme; the `PS2` row of
         // the second command carries the same key and is its continuation.
-        // `bateri://` is never a link (038 Karar 7): no ⌘-click reaches it.
+        // `bateri://` is never a link: no ⌘-click reaches it.
         let wake = Arc::new(TestWake::default());
         let mut options = test_options(sh("printf 'NEW'; sleep 5"), 40);
         options.replay = Some(
@@ -10681,7 +10664,7 @@ mod tests {
 
     #[test]
     fn keys_typed_before_the_initial_input_follow_it() {
-        // A `/code-review` finding of phase-3: in ⌘T's remote tab the line goes at
+        // A review finding: in ⌘T's remote tab the line goes at
         // our first `A` and the keys typed before it are held, then go **behind**
         // the line in the same order — not `lsfirst`, `first` then `ls`. The fake
         // shell holds `A` for a second after `READY`; the `ls` typed in between must be held.
@@ -10709,7 +10692,7 @@ mod tests {
 
     #[test]
     fn a_return_sends_the_held_input_without_a_prompt() {
-        // If the identified `A` never comes (Karar 6's known limit: `exec fish`,
+        // If the identified `A` never comes (a known limit: `exec fish`,
         // the rc's stdin question) the keyboard does not die: ⏎ sends the
         // accumulated bytes at that moment.
         let wake = Arc::new(TestWake::default());
@@ -10732,7 +10715,7 @@ mod tests {
 
     #[test]
     fn a_line_after_the_release_still_follows_the_initial_input() {
-        // `/code-review` (phase-4): had the hold ended when ⏎ sent what was held,
+        // Had the hold ended when ⏎ sent what was held,
         // a half line typed behind it would stick in front of ssh's line
         // (`ls⏎pwd` → `pwdfirst`). The hold lasts until the line's delivery.
         let wake = Arc::new(TestWake::default());
@@ -10833,7 +10816,7 @@ mod tests {
 
     #[test]
     fn any_input_drops_the_offer() {
-        // The lifetime at the first key (Karar 8): the typed letter removes the
+        // The lifetime at the first key: the typed letter removes the
         // offer and deleting to empty does not bring it back.
         let (session, _wake) = offered_session(true);
         session.write(b"x");
@@ -10982,7 +10965,7 @@ mod tests {
                 // born only after the threshold (1 s), i.e. at 1.2 the "running"
                 // window was left ~200 ms and on a loaded machine the polling could
                 // skip it and take its first sample after `D` — and then fall with
-                // "the running counter shows decimals" (`/code-review`, 013 gate).
+                // "the running counter shows decimals".
                 // At 2.5 the window is ~1.5 seconds.
                 "printf '{}ls -la\\033]133;C\\007\\r\\nout\\r\\n'; sleep 2.5; \
                  printf '\\033]133;D;0;bt_block=1\\007'; sleep 5",
@@ -11144,7 +11127,7 @@ mod tests {
     ///
     /// In a narrow window a long command makes no counter drawn at all; had the
     /// clock been set anyway the window would wake once a second forever and
-    /// change **not a single pixel** (`/code-review`, 013 gate). Below the
+    /// change **not a single pixel**. Below the
     /// threshold is separate: there the counter does not exist yet but will
     /// **appear** when a second passes, i.e. the tick is legitimate.
     #[test]
@@ -11302,7 +11285,7 @@ mod tests {
 
     #[test]
     fn an_empty_prompt_keeps_its_caret_in_the_dock_alone() {
-        // **The observed defect** (the user, 012 phase-7): on a prompt idling, the
+        // **The observed defect** (the user reported it): on a prompt idling, the
         // grid drew **a second cursor** next to the dock's caret. The cause was at
         // the very start of the chain: the zero-width `PS1` writes no cell and since
         // the user has typed nothing yet ZLE writes nothing — i.e. **no cell carried
@@ -11344,7 +11327,7 @@ mod tests {
 
     #[test]
     fn the_first_keystroke_does_not_move_the_grid() {
-        // **The observed defect** (the user, 012 phase-8): in a window where `ls`
+        // **The observed defect** (the user reported it): in a window where `ls`
         // output stood, typing a letter into the dock moved the whole grid down a
         // row and deleting moved it up a row. The user's diagnosis was exactly
         // right: the row was not drawn but **took space** — `visibility: hidden`,
@@ -11416,7 +11399,7 @@ mod tests {
 
     #[test]
     fn the_grid_keeps_no_cursor_before_the_dock_comes_alive() {
-        // **The observed defect** (the user, 012 phase-8): while the window was
+        // **The observed defect** (the user reported it): while the window was
         // opening — while zsh's rc was running, before any marker had come — the
         // caret was in the grid and **jumped** to the dock when the prompt came.
         // The same window opens after every command too (`Finished`, with
@@ -11478,7 +11461,7 @@ mod tests {
             session.shell_state().map(|s| s.phase) == Some(ShellPhase::Running)
         });
 
-        // **The handover lags by the hold time** (015 R1.1): not as soon as the
+        // **The handover lags by the hold time**: not as soon as the
         // predicate says `Running`, it passes to the grid when `HANDOVER_HOLD`
         // expires. The wait makes this test also the guard of "the hold really
         // fills" — an indefinite hold turns this red.
@@ -11626,9 +11609,9 @@ mod tests {
 
     #[test]
     fn the_input_line_leaves_the_grid_while_the_dock_shows_it() {
-        // The suppression itself (R3.1): while the mirror is live the row the user
+        // The suppression itself: while the mirror is live the row the user
         // typed **never** falls into the grid, because the dock draws it. The
-        // double image phase-3 left closes here.
+        // double image the integration left closes here.
         let wake = Arc::new(TestWake::default());
         let session = spawn_typing_session(&mirror("bHMgLWxh", 6), Arc::clone(&wake));
         wait_mirror(&session, DockStatus::Live);
@@ -11648,7 +11631,7 @@ mod tests {
         assert_eq!(row_glyphs(&cells, 1), "out", "the output vanished");
         // The input row is **entirely** empty: the prompt's `$` went too, because
         // the range starts from the anchor row and `$ ` is on that row. A
-        // deliberate intermediate state — phase-5 takes over the prompt.
+        // deliberate intermediate state — the prompt takeover is tested elsewhere.
         assert_eq!(row_glyphs(&cells, 2), "", "the input row is in the grid");
         // **The cursor is not drawn either**: the caret is in the dock and had both
         // been drawn the user would see two carets.
@@ -11662,7 +11645,7 @@ mod tests {
 
     #[test]
     fn a_suppressed_input_line_keeps_the_block_stripe() {
-        // **R3.2's guard.** A naive suppression (skipping the row wholesale in the
+        // **The anchor-order guard.** A naive suppression (skipping the row wholesale in the
         // loop) would kill the anchor too and the finished block's stripe would be
         // lost; the symptom would be silent, because the side that draws the stripe
         // does not distinguish "no id" from "no block". The gate is therefore
@@ -11693,7 +11676,7 @@ mod tests {
 
     #[test]
     fn the_grid_keeps_the_input_line_when_the_mirror_cannot_show_it() {
-        // A row we cannot show **must stay** in the grid (R1.2): on an overflow the
+        // A row we cannot show **must stay** in the grid: on an overflow the
         // dock is empty and had the suppression been done too the user would see
         // what they typed nowhere. This is where the variant that separates `Idle`
         // from `Unavailable` is consumed — and the modes ZLE draws outside the five
@@ -11737,7 +11720,7 @@ mod tests {
         // state (`ls`) in the mirror. The gate must see the mismatch and give up
         // the suppression.
         //
-        // **And the mirror is unanswered** (025): the user's last input went after
+        // **And the mirror is unanswered**: the user's last input went after
         // the mirror. The generation is advanced by hand (the precedent of
         // `screen_clears`), because a real write would also change the grid with
         // `/bin/sh`'s echo; the measured state is exactly this — the paste went,
@@ -11765,7 +11748,7 @@ mod tests {
             "the grid was suppressed too while the mirror is stale: the user sees what they typed nowhere"
         );
         assert!(cursor.visible, "{cursor:?}");
-        // **And the dock does not take the caret.** The set gate's (`/code-review`)
+        // **And the dock does not take the caret.** A review's
         // finding was exactly here: ownership was computed a second time inside
         // `dock::render` and that call **did not know** the freshness gate, i.e. in
         // this frame while the grid was showing its cursor the dock was giving its
@@ -11817,7 +11800,7 @@ mod tests {
             Arc::clone(&wake),
         );
         wait_mirror(&session, DockStatus::Live);
-        // **The unanswered mirror** (025): had the generation not advanced the
+        // **The unanswered mirror**: had the generation not advanced the
         // temporal short circuit would never drop the gate to the content
         // comparison and this guard would test nothing. The content gate is still
         // the sole arbiter after a paste.
@@ -11844,7 +11827,7 @@ mod tests {
         session.shutdown();
     }
 
-    /// **The defect the user reported** (2026-09-22, 025): typing `🥰` made the
+    /// **The defect the user reported** (2026-09-22): typing `🥰` made the
     /// caret jump from the dock to the grid.
     ///
     /// zsh cannot find U+1F970 in its own printability table and writes an
@@ -11890,7 +11873,7 @@ mod tests {
     }
 
     /// **A control character the dock does not draw keeps the row in the grid** —
-    /// whatever its position (025, [`DockStatus::Control`]).
+    /// whatever its position ([`DockStatus::Control`]).
     ///
     /// ZLE prints `Ctrl-V Ctrl-A` as a readable `^A` in the grid; the dock would
     /// leave that column blank. Before this arm came the decision was left to the
@@ -11933,7 +11916,7 @@ mod tests {
         }
     }
 
-    /// **A known limit, by name** (025, `discussion.md` → Karar 2): the stamp
+    /// **A known limit, by name**: the stamp
     /// says **when** the mirror came, not which input it answers.
     ///
     /// If a paste goes right away while a key's mirror is on the way the mirror
@@ -11983,7 +11966,7 @@ mod tests {
         // The datum that tells them apart is the anchor's row: a mirror with no
         // characters cannot push the cursor below the prompt's row.
         //
-        // **"Unanswered" is in the name** (025): an empty mirror that really came
+        // **"Unanswered" is in the name**: an empty mirror that really came
         // (the redisplay after `zle -I`) is now fresh even if it is below the
         // anchor and that is right — the row is empty, the dock's caret is in the
         // right place. The blind spot is a blind spot only **while the mirror has
@@ -12029,14 +12012,14 @@ mod tests {
     fn a_blank_mirror_on_the_anchor_row_is_fresh() {
         // The opposite end of the above and **the gate's real job**: in an empty
         // prompt the mirror and the row are both empty, but the row is really the
-        // dock's. Had the gate lost this arm 012 phase-8's defect would return —
+        // dock's. Had the gate lost this arm an earlier defect would return —
         // the row hidden but taking space.
         //
         // The prompt is built here **in the shape of the real `PS1`**: two
         // zero-width markers plus two real blanks (`dock::TEXT_COL`), i.e. two
         // cells that carry the anchor but have no ink. `anchored_prompt`'s `$ `
         // would get caught on the gate's **other** half — it has ink, the mirror
-        // has none (`docs/YOL-HARITASI.md`: the gate counts the prompt cells too).
+        // has none (the gate counts the prompt cells too).
         let wake = Arc::new(TestWake::default());
         let session = spawn_docked_session(
             &format!(
@@ -12050,7 +12033,7 @@ mod tests {
             Arc::clone(&wake),
         );
         wait_mirror(&session, DockStatus::Live);
-        // **The unanswered mirror** (025): had the generation not advanced the
+        // **The unanswered mirror**: had the generation not advanced the
         // temporal short circuit would never drop the gate to the content
         // comparison and this guard would test nothing. The content gate is still
         // the sole arbiter after a paste.
@@ -12076,12 +12059,12 @@ mod tests {
 
     #[test]
     fn a_wrapped_input_line_is_suppressed_below_the_cursor_row_too() {
-        // **`/code-review`'s middle finding.** The range's bottom used to be the
+        // **A review's middle finding.** The range's bottom used to be the
         // cursor's row; since ZLE moves the caret freely inside the buffer, on a
         // wrapped row when Ctrl-A (or the up arrow) took the cursor to the first
         // row the tail **stayed** in the rows below — the dock showing the whole
         // buffer and the grid the tail. A permanent double image, i.e exactly what
-        // this phase came to close.
+        // the suppression came to close.
         //
         // The criterion is row 4: the suppression **must stop** at the input's last
         // row, or it would swallow the completion list too.
@@ -12137,7 +12120,7 @@ mod tests {
 
     #[test]
     fn the_grid_takes_the_input_line_back_when_zle_lets_go() {
-        // **The release arm's guard (R3.3).** When ZLE releases the row
+        // **The release arm's guard.** When ZLE releases the row
         // (`line-finish` → `e` → `Idle`) the suppression lifts and what was typed
         // becomes an ordinary row of the grid. In real life this path is passed
         // twice: at Enter and at `CORRECT`'s `[nyae]` — in the second
@@ -12179,7 +12162,7 @@ mod tests {
             "there is no suppression while the mirror is live"
         );
 
-        // **`line-finish` is held while the phase is `Input`** (032 Karar 11): the
+        // **`line-finish` is held while the phase is `Input`**: the
         // mirror stays `Live` for `HANDOVER_HOLD` and the frame path resolves the
         // hold (`ShellLog::expire_end`), i.e. frames must run to see `Idle`. The
         // caret's hold counts from the same moment; `content_rows` depends on the
@@ -12352,7 +12335,7 @@ mod tests {
 
     #[test]
     fn output_rows_never_carry_a_mark() {
-        // **User decision (010 delivery): the marker is the command's, not the
+        // **User decision: the marker is the command's, not the
         // output's.** When scrolled into the middle of a long output there is no
         // command row in the window, i.e. no marker either — and this is
         // consistent: the same row looks the same at every scroll position. In the
@@ -12411,7 +12394,7 @@ mod tests {
     fn a_running_command_is_marked_on_its_own_row() {
         // A running command gets `accent` and **a single row**: this block used to
         // extend to the bottom of the window and on a command with no output drew a
-        // long bar over the empty screen (a user finding, 010 delivery).
+        // long bar over the empty screen (a user finding).
         let wake = Arc::new(TestWake::default());
         let session = spawn_session(
             &format!(
@@ -12553,12 +12536,12 @@ mod tests {
         (0..rows).any(|row| row_glyphs(cells, row).contains(needle))
     }
 
-    /// **A multi-line paste in the dock** — end to end (032 phase-4).
+    /// **A multi-line paste in the dock** — end to end.
     ///
     /// Real zsh takes the bracketed paste, keeps `BUFFER` together with the line
     /// breaks (measured, pure PTY: `BUFFER='echo a\necho b\n'`), ZLE's hook
     /// prints it to the mirror and the mirror is `Live`: the rows are in the
-    /// dock, suppressed in the grid, the caret in the dock. Until 032 this
+    /// dock, suppressed in the grid, the caret in the dock. Earlier this
     /// mirror was `Multiline` and both the row and the caret stayed in the grid.
     /// The last line break is in the buffer, i.e. the grid's cursor is on an
     /// empty row — since the freshness gate's last ink is asked from that row
@@ -12594,7 +12577,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// **The refresh behind `bracketed-paste-magic`** (032 R5), in real ZLE. The
+    /// **The refresh behind `bracketed-paste-magic`**, in real ZLE. The
     /// widget pushes the payload back into the queue with `zle -U` and the
     /// redisplay is skipped while there is typeahead; since the `r` command comes
     /// **behind** the queue, the widget prints the mirror with the paste's result
@@ -12628,13 +12611,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// **A `for` loop in the dock** — `PREBUFFER` end to end (032 phase-4).
+    /// **A `for` loop in the dock** — `PREBUFFER` end to end.
     ///
     /// `for i in 1 2; do` ⏎: zsh accepts the line, prints `PS2` and the new
     /// row's mirror carries `PREBUFFER`. The dock draws two rows, in the grid both
     /// the `for` row and the `PS2` row are suppressed (the floor is the anchor's
-    /// row), the caret is in the dock. The `line-finish` at the ⏎ moment is held
-    /// (Karar 11): the accepted row does not return to the grid in between — the
+    /// row), the caret is in the dock. The `line-finish` at the ⏎ moment is held:
+    /// the accepted row does not return to the grid in between — the
     /// hold's timing is not here but in `shell.rs`'s guard, open to a race in a live test.
     #[test]
     fn a_for_loop_keeps_its_rows_in_the_dock() {
@@ -12699,7 +12682,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// Real zsh + the wrapper: the setup of 031's editing tests. The returned
+    /// Real zsh + the wrapper: the setup of the dock editing tests. The returned
     /// session is at an empty prompt, the mirror `Live` and the capability seen.
     fn spawn_editing_zsh(name: &str) -> (Session, PathBuf) {
         let home = empty_home(name);
@@ -12755,7 +12738,7 @@ mod tests {
 
     #[test]
     fn the_widget_deletes_moves_and_types_over_a_selection_in_zle() {
-        // **End to end, the emacs keymap** (031 phase-5): the terminal's command
+        // **End to end, the emacs keymap**: the terminal's command
         // changes `BUFFER` in real ZLE and its answer returns to the mirror.
         let (session, home) = spawn_editing_zsh("dock-edit");
         let mut dock = DockState::default();
@@ -12804,7 +12787,7 @@ mod tests {
     fn the_widget_is_bound_in_viins_and_in_a_keymap_linked_to_main() {
         // The binding is renewed at every `line-init` to `main`/`emacs`/`viins`:
         // the command holds after `bindkey -v` and for a user who binds their own
-        // keymap to `main` too (031 → Muhakeme, an unbound sequence was breaking the row).
+        // keymap to `main` too (an unbound sequence was breaking the row).
         for setup in [
             "bindkey -v",
             "bindkey -N mymap emacs; bindkey -A mymap main",
@@ -12884,7 +12867,7 @@ mod tests {
 
     #[test]
     fn a_continuation_row_does_not_take_the_block_mark() {
-        // Seen in 032 phase-5: the prompt's link is open until `preexec`, i.e.
+        // Seen in practice: the prompt's link is open until `preexec`, i.e.
         // **all** rows of a multi-line command carry the anchor. When the first
         // row slid into the scrollback the marker sat on the continuation row, at
         // the grid's top, and stayed there. The rule: if the row above (history
@@ -12959,7 +12942,7 @@ mod tests {
 
     #[test]
     fn remote_blocks_are_drawn_from_their_own_ledger_and_stay_after_ssh() {
-        // 048 phase-3: the local `ssh` (block 1) runs; under it our remote shell's
+        // The local `ssh` (block 1) runs; under it our remote shell's
         // blocks are anchored with `rblock/1.n` and marked with `bt_remote=1.n` — a
         // finished one, a failed two-row one (its continuation row takes no mark)
         // and a running one. When our local `D` ends ssh the finished rows keep
@@ -13011,8 +12994,8 @@ mod tests {
 
     #[test]
     fn clear_to_start_keeps_every_row_of_a_wrapped_remote_input() {
-        // Inside ssh (048 phase-3) the input's rows carry the remote prompt's
-        // `rblock/` anchor, not a local id; ⌘K keeps them all (034 R1.1), since it
+        // Inside ssh the input's rows carry the remote prompt's
+        // `rblock/` anchor, not a local id; ⌘K keeps them all, since it
         // sends no byte and the remote shell would never redraw a lost upper row.
         let wake = Arc::new(TestWake::default());
         let typed = "a".repeat(60);
@@ -13380,8 +13363,8 @@ mod tests {
         let a = at_col(0);
         assert_eq!((a.fg, a.bg), (dim_foreground, None), "{a:?}");
         // `0xd16d6a`, a third toward the background: per channel `(2·source +
-        // background) / 3`, truncated. The rule went from `× 2/3` to this in 007
-        // phase-3; the number is **still** `0x8b4846` but the same rule, because
+        // background) / 3`, truncated. The rule went from `× 2/3` to this
+        // earlier; the number is **still** `0x8b4846` but the same rule, because
         // `bateri`'s background is now pure black and the mixing term drops. The
         // rule itself diverges in the light theme and is tested there
         // ([`color::tests::dim_colors_move_toward_the_background`]).
@@ -13433,7 +13416,7 @@ mod tests {
         // cursor stands loses nothing — neither its own foreground nor its SGR 58.
         // The rollback (inverting the cell here) **would pass** `bt-gpu`'s pixel
         // tests: a colour inverted twice arrives at the same pixel. The visible
-        // symptom would come out only in a half-covered cell (008 → Karar 3) and no
+        // symptom would come out only in a half-covered cell and no
         // test can see that cell, because the cell is indivisible.
         let wake = Arc::new(TestWake::default());
         // `\033[D` brings the cursor back onto X; X carries both ink and a rule with
@@ -13580,7 +13563,7 @@ mod tests {
 
     #[test]
     fn working_directory_keeps_its_symlinked_name_in_pwd() {
-        // 053, seen in the real window: `/tmp` came back as `/private/tmp`.
+        // Seen in the real window: `/tmp` came back as `/private/tmp`.
         // The shell's logical `$PWD` is the name we gave, not the resolved
         // one — the link is built here, since `/tmp` is no link on Linux.
         let root = std::env::temp_dir().join(format!("bt-core-pwd-{}", std::process::id()));
@@ -13647,7 +13630,7 @@ mod tests {
 
     #[test]
     fn identity_env_reaches_child_without_being_overridden() {
-        // The identity family is in `TERM`'s layer (038): the additional
+        // The identity family is in `TERM`'s layer: the additional
         // environment gives all four other values and none of them reaches the child.
         let script = "printf 'id=%s|%s|%s|%s;' \"$TERM_PROGRAM\" \
                       \"$TERM_PROGRAM_VERSION\" \"$TERM_SESSION_ID\" \
@@ -13676,7 +13659,7 @@ mod tests {
 
     #[test]
     fn lc_identity_env_overrides_an_inherited_one() {
-        // The `LC_` family (049 R6) is in the same layer: an inherited
+        // The `LC_` family is in the same layer: an inherited
         // `LC_TERMINAL=iTerm2` (the additional environment plays the
         // inheritance) becomes `bateri`, never another terminal's value.
         let script = "printf 'lc=%s|%s|%s;' \"$LC_TERMINAL\" \
@@ -14230,7 +14213,7 @@ mod tests {
 
     #[test]
     fn each_condition_of_the_edit_gate_closes_it_alone() {
-        // The four conditions, each alone (031 R4.4). With the gate closed the
+        // The four conditions, each alone. With the gate closed the
         // selection stands but the key is not consumed: it will go its current way.
         let open = spawn_editable_od(Arc::new(TestWake::default()), HELLO, EDITABLE);
         wait_mirror(&open, DockStatus::Live);
@@ -14308,7 +14291,7 @@ mod tests {
 
     #[test]
     fn plain_keys_walk_a_cluster_whole() {
-        // 035 Karar 7: while the gate is open a flag adjacent to the caret is
+        // While the gate is open a flag adjacent to the caret is
         // deleted whole with ⌫ and walked whole with ← — a single command to the
         // shell. No selection; with clustering off the same key goes its current
         // way (is not consumed).
@@ -14378,7 +14361,7 @@ mod tests {
 
     #[test]
     fn a_held_backspace_never_splits_a_cluster() {
-        // 035 phase-5: the repeats that arrive before the mirror answers the first
+        // The repeats that arrive before the mirror answers the first
         // command decide against the command's expected result. In a clustered row
         // the single-code-point `a` goes by command too, or the chain breaks and
         // the third ⌫ would go to ZLE and delete only the `🇷` of `🇹🇷`.
@@ -14447,7 +14430,7 @@ mod tests {
 
     #[test]
     fn shift_arrows_select_from_the_caret_without_writing() {
-        // ⇧←/⇧→ only in the terminal (031 Karar 8): nothing goes to the shell, i.e.
+        // ⇧←/⇧→ only in the terminal: nothing goes to the shell, i.e.
         // the generation does not advance either and the gate stays open.
         let session = spawn_editable_od(Arc::new(TestWake::default()), HELLO, EDITABLE);
         wait_mirror(&session, DockStatus::Live);
@@ -14505,7 +14488,7 @@ mod tests {
         // still `Live`, the block still open — i.e. the other three conditions are
         // met too. Had we streamed it raw the bytes would become **commands**: `dd`
         // on the clipboard deletes the row. The wrapped path inserts literally in
-        // every keymap, that is the right answer (`/code-review`, 012 phase-6).
+        // every keymap, that is the right answer.
         let wake = Arc::new(TestWake::default());
         // `dmljbWQ=` = `vicmd`.
         let session = spawn_docked_od_in(Arc::clone(&wake), "\\033]8133;u;0;;;;;dmljbWQ=\\007");
@@ -14524,9 +14507,9 @@ mod tests {
 
     #[test]
     fn paste_stays_wrapped_when_the_mirror_carries_no_keymap() {
-        // **A window running an old script** (`plan.md` → Göç): there is no keymap
+        // **A window running an old script**: there is no keymap
         // field, i.e. we do not know which keymap we are in. Not knowing **closes**
-        // the exception — we return to the wrapped path from before phase-5, which
+        // the exception — we return to the plain wrapped path, which
         // is right in every keymap.
         let wake = Arc::new(TestWake::default());
         let session = spawn_docked_od_in(Arc::clone(&wake), "\\033]8133;u;0;;;;\\007");
@@ -14564,7 +14547,7 @@ mod tests {
         assert!(DOCK_REFRESH_COMMAND.starts_with(DOCK_EDIT_PREFIX.as_bytes()));
     }
 
-    /// **Wire (b), the terminal → the shell** (055 Karar 8): after an update
+    /// **Wire (b), the terminal → the shell**: after an update
     /// the new bateri sends its commands to the **previous** version's
     /// widget, so the commands' form is frozen — the two tests above hold
     /// the bytes, this one the binding they reach and the capability that
@@ -14587,7 +14570,7 @@ mod tests {
 
     #[test]
     fn a_multiline_paste_asks_for_a_refresh_behind_the_closing_bracket() {
-        // 032 R5: **behind** the wrapped payload, in the same write. The wrapped
+        // **Behind** the wrapped payload, in the same write. The wrapped
         // form is 6 + 4 + 6 = 16 bytes, i.e. `od`'s first row; the command (9
         // bytes) and the seven bytes typed after it fill the second row — the
         // needle stays in a single dump row.
@@ -14788,7 +14771,7 @@ mod tests {
     fn a_double_click_selects_the_word_under_the_pointer() {
         let session = separator_session();
         // `.`, `/` and `:` are inside the word: a path, `host:port`, `file.rs:42`
-        // come with a single double click (Karar 5).
+        // come with a single double click.
         session.set_selection(
             SelectKind::Word,
             at(4, 0, CellHalf::Left),
@@ -14852,7 +14835,7 @@ mod tests {
         assert_eq!(session.selection_text().as_deref(), Some("b.c"));
     }
 
-    /// In the dock a word is **the same thing** as in the grid (031 Karar 5): the
+    /// In the dock a word is **the same thing** as in the grid: the
     /// same string on the two surfaces gives the same range at every column —
     /// separators, a double click on a separator and bracket matching included.
     /// The grid's answer is from alacritty's `Semantic`, the dock's from its copy
@@ -14944,12 +14927,12 @@ mod tests {
         }
     }
 
-    /// **No input row in a remote session** (036 R5.1, R5.3, R5.4): in a window
+    /// **No input row in a remote session**: in a window
     /// with a dock `input_rows == 0`, the caret is in the grid, the dock has no
     /// marker and a click on the dock neither builds a selection nor sends a
     /// command to the shell — the same point used to select `foo` before
     /// `set_remote`. On the alternate screen the count is `1` as today.
-    /// 037 Karar 7: the upload's two gates — the target, the remote directory and
+    /// The upload's two gates — the target, the remote directory and
     /// the generation in a single read (`remote_target`), the status row requests
     /// a frame only when it changes and turns the dock's top line into a bar.
     #[test]
@@ -14992,7 +14975,7 @@ mod tests {
         );
         let (dock, _) = draw_dock(&session);
         assert_eq!(dock.progress, Some(5_000));
-        // The filled part is `info`, on an empty track the marker (037 phase-7).
+        // The filled part is `info`, on an empty track the marker.
         assert_eq!(dock.edge, session.theme().info_linear());
         assert_eq!(dock.track, session.theme().error_linear());
         assert!(session.set_transfer(None));
@@ -15001,7 +14984,7 @@ mod tests {
         assert_eq!(dock.progress, None);
     }
 
-    /// 046 Karar 5: the load indicator is generation and equality gated and
+    /// The load indicator is generation and equality gated and
     /// goes with the remote state.
     #[test]
     fn the_remote_load_is_gated_by_generation_and_value() {
@@ -15070,7 +15053,7 @@ mod tests {
         assert!(session.set_remote_stats(command, Some(&stats)));
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
         assert_eq!(shown(), None);
-        // 047 R7.2: the Sign In… button has the same gates and the same fate.
+        // The Sign In… button has the same gates and the same fate.
         let sign_in = Some(crate::SignIn::default());
         assert!(
             !session.set_sign_in(command + 1, sign_in),
@@ -15170,7 +15153,7 @@ mod tests {
         assert!(shown.ends_with("kararla_hetzner/srv/app"), "{shown:?}");
     }
 
-    /// 047 R9.1: the remote session's login — the PTY's modes (read through
+    /// The remote session's login — the PTY's modes (read through
     /// the caller's closure, only when the output has not said it), kept for
     /// the generation; the output's bracketed paste after `C` says it too.
     #[test]
@@ -15257,7 +15240,7 @@ mod tests {
         assert_eq!(session.remote_login(|_| None), Some(command), "kept");
     }
 
-    /// 049 R7: the input before the login (the password) says nothing; the
+    /// The input before the login (the password) says nothing; the
     /// first input after it is one `Wake::remote_typed` and
     /// `Session::remote_typed` names the generation; later input adds no edge.
     #[test]
@@ -15380,7 +15363,7 @@ mod tests {
 
     #[test]
     fn a_marked_remote_host_paints_the_dock_edge_in_its_color() {
-        // 037 Karar 2, 3: the marker is resolved in `set_remote` and in
+        // The marker is resolved in `set_remote` and in
         // `set_host_marks`; the dock's top line is in the marker's colour, today's
         // `info` when unmarked. A changing marker requests a frame, the same list does not.
         let wake = Arc::new(TestWake::default());
@@ -15408,7 +15391,7 @@ mod tests {
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("deploy@prod-web"))));
         let theme = session.theme();
         assert_eq!(draw_dock(&session).0.edge, theme.warning_linear());
-        // The tab's dot and the menu read the same resolution (037 Karar 4, 5).
+        // The tab's dot and the menu read the same resolution.
         assert_eq!(
             session.remote_mark(),
             Some(("deploy@prod-web".to_owned(), HostMark::Staging))
@@ -15468,7 +15451,7 @@ mod tests {
         session.shutdown();
     }
 
-    /// A wrapped long row (032 phase-3): `frame()` clamps the dock's row count
+    /// A wrapped long row: `frame()` clamps the dock's row count
     /// with the grid's share, the dock's mouse path can select the second and
     /// third visual rows and the highlight is one run per row.
     #[test]
@@ -15582,7 +15565,7 @@ mod tests {
         session.shutdown();
     }
 
-    /// **The wheel scrolls the dock's vertical window** (032 phase-4): in an
+    /// **The wheel scrolls the dock's vertical window**: in an
     /// input exceeding the ceiling the mouse reaches the rows outside the caret
     /// too. Clamped at the end, a dock that does not overflow leaves the event to
     /// the grid; when the caret's place changes the window returns to the caret
@@ -15738,7 +15721,7 @@ mod tests {
 
     #[test]
     fn selection_text_follows_the_half_of_the_left_end() {
-        // The defect reported in 006, exactly: the user selects the `raba` part of
+        // The reported defect, exactly: the user selects the `raba` part of
         // `araba`, `araba` arrived in the copy. The cause was the half never being
         // asked: someone who presses **right to the left** of the letter they
         // target drops that pixel onto the previous cell's right half and because
@@ -16044,7 +16027,7 @@ mod tests {
 
     #[test]
     fn selected_cells_give_one_run_and_drop_their_ground() {
-        // The highlight does not paint the cell, it gives a **run** (031 phase-2):
+        // The highlight does not paint the cell, it gives a **run**:
         // the background of the three selected cells drops from the boundary (it
         // would have stayed under the selection's shape), their text stays in
         // their own colours. In the recipe only the selected range has a bg
@@ -16075,7 +16058,7 @@ mod tests {
             "the selected background was drawn: {next:?}"
         );
         // The text in place and in its own colour: the selection deletes no
-        // content, nor does it invert the colour (Karar 3).
+        // content, nor does it invert the colour.
         assert_eq!(
             next.iter().filter_map(|c| c.ch).collect::<String>(),
             "hello"
@@ -16087,7 +16070,7 @@ mod tests {
 
     #[test]
     fn selected_inverse_cell_is_drawn_in_its_own_foreground() {
-        // The selection **resolves** inverse video (Karar 3): a selected
+        // The selection **resolves** inverse video: a selected
         // inverse-video cell is drawn with its own foreground, without a
         // background — the selection's colour is beneath.
         //
@@ -16155,7 +16138,7 @@ mod tests {
         // **The measured defect** (the user, 2026-09-18): dragging the mouse on an
         // empty screen produced a huge highlight block and that selection copied
         // nothing — the eye said "I selected" while the clipboard came empty. Since
-        // the content sticks to the bottom (011) the block started from the middle
+        // the content sticks to the bottom the block started from the middle
         // of the window and read as if "there were a separate area below what is visible".
         //
         // The selection highlights content, it does not create content: no cell
@@ -16185,7 +16168,7 @@ mod tests {
 
     #[test]
     fn a_run_bridges_the_gaps_between_words_but_not_the_tail() {
-        // **The unit is the row, not the cell** (031 Karar 4): the gaps between
+        // **The unit is the row, not the cell**: the gaps between
         // words of `echo hello world` are inside the run — the clipboard already
         // copies them and now the eye sees them too. The row's empty tail (the
         // range goes up to column 20) is outside: the selection does not create content.
@@ -16208,7 +16191,7 @@ mod tests {
     #[test]
     fn an_empty_row_splits_the_runs() {
         // In a multi-line selection an empty middle row produces no run and the
-        // shape splits there (Karar 4). **One** run per row: the second row's gap
+        // shape splits there. **One** run per row: the second row's gap
         // between words is bridged too.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("printf 'ab\\n\\ncd ef'; sleep 5", Arc::clone(&wake));
@@ -16257,8 +16240,8 @@ mod tests {
     #[test]
     fn the_selection_colors_come_from_the_theme() {
         // The two colours come ready from `bt-core`, `bt-gpu`, which knows focus,
-        // picks which will be drawn (Karar 9). A theme swap changes both in the
-        // next frame — there is no separate query. Search's two roles (033) are
+        // picks which will be drawn. A theme swap changes both in the
+        // next frame — there is no separate query. Search's two roles are
         // from the same copy and also while search is **closed**: the colour is
         // independent of the run, not of the scan.
         let wake = Arc::new(TestWake::default());
@@ -16303,7 +16286,7 @@ mod tests {
 
     #[test]
     fn the_blink_setting_reaches_the_first_frame() {
-        // **The measured defect** (`/code-review`, 014 phase-2): `Adapter::new`
+        // **The measured defect**: `Adapter::new`
         // set blink to its default and `Session::spawn` never wrote the setting.
         // Since the only writer was `set_terminal_options` the feature stayed
         // silently dead in a fresh window and came alive only when the user
@@ -16317,7 +16300,7 @@ mod tests {
 
     #[test]
     fn a_hidden_cursor_does_not_blink() {
-        // **R9's "the cursor hides" stopping condition.** A caret that is not
+        // **The "the cursor hides" stopping condition.** A caret that is not
         // drawn does not blink: had it stayed on, in a TUI sending `\e[?25l` the
         // window would wake twice a second to draw the **exactly same** frame and
         // `IDLE_STOP` would never fill, since the TUI's own output keeps
@@ -16331,7 +16314,7 @@ mod tests {
 
     #[test]
     fn a_wide_char_keeps_both_halves_highlighted() {
-        // **The measured defect** (`/code-review`, 014 gate): when the "is it
+        // **The measured defect**: when the "is it
         // drawable" gate was added to the selection highlight the wide character's
         // second cell (the spacer) was left outside — it has no ink of its own and
         // its background is the default, i.e. **half** of a selected CJK character
@@ -16535,7 +16518,7 @@ mod tests {
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
         wait_ink(&session, &wake, "a");
 
-        // `"auto"`'s floor is on (`docs/AYARLAR.md`): had it been off it could not
+        // `"auto"`'s floor is on (`docs/SETTINGS.md`): had it been off it could not
         // be told apart from `"off"`.
         assert!(cursor_now(&session).blink, "auto's floor started off");
 
@@ -16639,7 +16622,7 @@ mod tests {
         // the same while `display_offset > 0`: in a cleared window the wheel's
         // first notch shows two rows of content and the two stay at the bottom.
         //
-        // At one time there was an `offset != 0 => rows` arm here (017, to solve
+        // At one time there was an `offset != 0 => rows` arm here (to solve
         // the dead scroll) and **the user saw it**: the grid's **empty** bottom
         // rows entered the fullness, the offset closed and all the content jumped
         // to the top of the window. The cause of the dead scroll turned out not to
@@ -16695,9 +16678,9 @@ mod tests {
 
     #[test]
     fn a_deliberate_clear_sets_the_flag_until_the_screen_fills_again() {
-        // The flag's lifetime (R1.1, R1.2): `CSI 2 J` sets it, it drops when the
+        // The flag's lifetime: `CSI 2 J` sets it, it drops when the
         // screen fills again **the natural way**. Today it has no consumer — this
-        // test carries phase-2's fill gate alone.
+        // test carries the fill gate alone.
         //
         // The three steps are ordered with `read`: had they been written back to
         // back in a single script two could come in the same PTY read and the state
@@ -16737,7 +16720,7 @@ mod tests {
     #[test]
     fn scrolling_into_history_never_drops_the_flag() {
         // **The lifetime's third condition and without it a single wheel gesture
-        // was undoing Ctrl-L** (`/code-review`, 017 phase-1): `content_rows` is
+        // was undoing Ctrl-L**: `content_rows` is
         // born from the visible window, i.e. when a window scrolled into the
         // history fills with history rows `content_rows == rows`. If the flag drops
         // there, when the user returns to the bottom the fill refills the screen
@@ -16831,7 +16814,7 @@ mod tests {
     /// exit. The steps are ordered **separately** with `read` — had they come in
     /// a single read the mode change and the clear would be visible in the same
     /// round and the test would measure a race instead of the arm it wants to
-    /// measure ([`Session::observe_screen_clear`] → Bilinen sınır 2).
+    /// measure ([`Session::observe_screen_clear`] → known limit 2).
     fn alternate_screen_round_trip(armed: bool) {
         // Two starting states, the same step count: the flagless arm prints
         // something too so that the `read` steps stay aligned.
@@ -16916,7 +16899,7 @@ mod tests {
 
     #[test]
     fn the_alternate_screen_clear_leaves_an_armed_flag_armed() {
-        // **Fix A's first arm** (phase-1b): entering and leaving `vim` after Ctrl-L
+        // **The alternate-screen fix's first arm**: entering and leaving `vim` after Ctrl-L
         // must not set the flag again — but must not drop it either.
         alternate_screen_round_trip(true);
     }
@@ -17042,7 +17025,7 @@ mod tests {
         // into the history" counter that increases in a saturated scrollback too.
         //
         // The test **does not claim this, it observes**: the direction is safe (not
-        // filling is phase-1's behaviour) and when the fix comes this goes red and
+        // filling is the earlier behaviour) and when the fix comes this goes red and
         // reminds itself.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("sleep 5", Arc::clone(&wake));
@@ -17076,7 +17059,7 @@ mod tests {
     ///
     /// The fill-asking sibling of [`cursor_now`]: the fill passes through a second
     /// sink ([`Session::frame`]) and when [`Session::fill_rows`] says zero that
-    /// sink must **never** be called. The witness of the rollback strip (R2.4) is
+    /// sink must **never** be called. The witness of the rollback strip is
     /// exactly that empty list: in a frame returning zero what crosses the
     /// boundary is bit for bit the same as today's.
     fn fill_now(session: &Session) -> (Cursor, Vec<Cell>) {
@@ -17146,7 +17129,7 @@ mod tests {
     ///
     /// The hermetic equivalent of the Tab→Ctrl-C recipe: `\e[4A\e[J` shortens the
     /// content from the top, just as when the completion list closes. **Not** a
-    /// deliberate clear — the scanner counts only `CSI 2 J` (R1.1), ED 0 sets no
+    /// deliberate clear — the scanner counts only `CSI 2 J`, ED 0 sets no
     /// flag. The two steps are ordered with `read` (precedent
     /// `content_rows_come_from_the_visible_window_while_scrolled`).
     ///
@@ -17175,9 +17158,9 @@ mod tests {
 
     #[test]
     fn the_gap_above_fills_with_the_newest_history_rows() {
-        // **R2.1 and R2.3 together**: the blank is filled with the scrollback's
+        // **Both together**: the blank is filled with the scrollback's
         // newest rows and `content_rows` is **not affected** by it. The second is
-        // this phase's most concrete gain — had the filled rows entered the fullness
+        // the fill's most concrete gain — had the filled rows entered the fullness
         // the offset would close and the content would tear off the bottom (the
         // cost of `27a0b98`).
         let (session, _wake) = gapped_session(true);
@@ -17202,7 +17185,7 @@ mod tests {
 
     #[test]
     fn a_deliberate_clear_keeps_the_gap_empty() {
-        // **The other half of the set's reason to exist** (R2.2): after Ctrl-L there
+        // **The other half of the fill's reason to exist**: after Ctrl-L there
         // is a huge blank at the top and the fill does not run — if the user
         // deliberately cleared the screen it must not come back.
         let wake = Arc::new(TestWake::default());
@@ -17231,7 +17214,7 @@ mod tests {
 
     #[test]
     fn a_clear_without_new_history_keeps_the_gap_empty() {
-        // **The other half of the stamp criterion** (phase-1b): if the screen did
+        // **The other half of the stamp criterion**: if the screen did
         // not slide the scrollback does not grow and the flag stands. This is the
         // right answer — the history's newest rows still belong to before the clear,
         // i.e. the fill would undo Ctrl-L.
@@ -17268,7 +17251,7 @@ mod tests {
 
     #[test]
     fn the_fill_stops_at_the_rows_that_arrived_after_the_clear() {
-        // **`/code-review`'s measured finding** (017 phase-1b): the flag dropping
+        // **A review's measured finding**: the flag dropping
         // does not say "the whole blank can be given back". The flag drops when the
         // scrollback grows by one row, but the fill pulls `gap` rows — the
         // difference in between is directly the screen the user deleted.
@@ -17318,12 +17301,12 @@ mod tests {
 
     #[test]
     fn a_grown_history_lets_the_gap_fill_again() {
-        // **The reason phase-1b exists and where the waivers' rejection was
-        // measured.** The recipe is as the user saw it: Ctrl-L → twenty rows of
+        // **The reason the stamp criterion exists and where the waivers' rejection
+        // was measured.** The recipe is as the user saw it: Ctrl-L → twenty rows of
         // output → Tab → Ctrl-C. With the dropping criterion `content_rows == rows`
         // `fill == 0` came out here — since in a window with a dock the fullness does
         // not count the input row the ceiling is `rows - 1` and the predicate is
-        // unreachable (`phase-2.md` → Uygulama Notları §7b).
+        // unreachable (measured).
         //
         // The four steps are ordered with `read`: had they come in the same PTY read
         // the states in between would never be observed (precedent
@@ -17345,8 +17328,8 @@ mod tests {
 
         // (2) Twenty rows of output: the scrollback grows, i.e. the history's newest
         // rows no longer belong to before the clear. **The criterion is not the
-        // screen filling but the last row's ink** and the difference is this phase
-        // itself: in a window with a dock the cursor stands on an empty bottom row,
+        // screen filling but the last row's ink** and the difference is the stamp
+        // criterion itself: in a window with a dock the cursor stands on an empty bottom row,
         // i.e. `content_rows` stays at nine and never reaches `rows` (measured —
         // this wait falls to a timeout when written `content_rows == rows`).
         session.write(b"\n");
@@ -17390,7 +17373,7 @@ mod tests {
         // the command row into the scrollback, when the list goes away the band
         // brings that row back but **without the block marker**; when scrolled the
         // marker came back because the same row passed through the grid. The screen
-        // returning to its pre-Tab state is 017's promise and a row returning
+        // returning to its pre-Tab state is the fill band's promise and a row returning
         // without its marker does not keep it.
         //
         // The scene does not want zsh: the anchor is the cell's own OSC 8 link
@@ -17471,7 +17454,7 @@ mod tests {
 
     #[test]
     fn a_prompt_redrawn_after_a_clear_keeps_its_block_mark() {
-        // `/code-review` (032 gate): Ctrl-L reprints the same prompt with the same
+        // Ctrl-L reprints the same prompt with the same
         // id and `CSI 2 J` pushes the old prompt row into the history. The row above
         // the new prompt carries the same id but is not the command's start — the
         // marker must stay on the new prompt.
@@ -17763,7 +17746,7 @@ mod tests {
 
     #[test]
     fn scrolling_into_history_keeps_the_gap_empty() {
-        // R2.2's gate: in a scrolled window the fill **does not run** and the
+        // The scroll gate: in a scrolled window the fill **does not run** and the
         // second sink is never called. The rationale is no longer "the blank is
         // already full" — there is **no** blank: the sticking is lifted while
         // scrolling too ([`Session::frame`]), i.e. the viewport fills the whole
@@ -17786,7 +17769,7 @@ mod tests {
         // The first gate (`SessionOptions::dock`): the fill's consumer is a window
         // with a dock and the distinction is decided as the session is born. The
         // same scene, the only difference the flag — i.e. this test is **the
-        // rollback strip** itself (R2.4): in a dock-less window the frame crossing
+        // rollback strip** itself: in a dock-less window the frame crossing
         // the boundary is bit for bit the same as today's.
         let (session, _wake) = gapped_session(false);
 
@@ -17833,7 +17816,7 @@ mod tests {
 
     #[test]
     fn fractional_deltas_move_the_screen_continuously() {
-        // **R1.1's guard**: the sum of the fractional deltas produces whole rows
+        // **The continuity guard**: the sum of the fractional deltas produces whole rows
         // **continuously** — the position moves by exactly the delta at every step
         // and when a whole row passes the screen slides a single row. The banded and
         // bandless windows are separate scenes, because the band's first notch moves
@@ -17887,7 +17870,7 @@ mod tests {
 
     #[test]
     fn the_top_row_is_the_row_above_the_screen() {
-        // **R1.4**: while the fraction is greater than zero the row right above the
+        // While the fraction is greater than zero the row right above the
         // top of the screen comes at the very top of the fill channel. The criterion
         // is not the number itself but **continuity**: when the fraction completes
         // the grid's first row must be exactly that row, or going from a half row to
@@ -17940,9 +17923,9 @@ mod tests {
 
     #[test]
     fn the_top_row_ignores_the_bands_gates() {
-        // **The top row's single gate is the scrollback** (`discussion.md` →
-        // Muhakeme): the band's gates are not here. After Ctrl-L the band is closed
-        // (the flag), but a user going up must not see an empty half row in the fraction.
+        // **The top row's single gate is the scrollback**: the band's gates are not here. After
+        // Ctrl-L the band is closed (the flag), but a user going up must not see an empty half
+        // row in the fraction.
         let wake = Arc::new(TestWake::default());
         let session = spawn_docked_session(
             "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; sleep 5",
@@ -17995,7 +17978,7 @@ mod tests {
 
     #[test]
     fn the_edges_keep_no_fraction_and_ask_for_no_frame() {
-        // **R1.2**: no negative fraction is left at the bottom, no positive one at
+        // No negative fraction is left at the bottom, no positive one at
         // the top of the history, and an event that changes nothing requests no
         // frame — momentum showers events at the end too and each would be an empty frame.
         let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
@@ -18057,7 +18040,7 @@ mod tests {
 
     #[test]
     fn output_while_scrolled_keeps_the_fraction() {
-        // **R1.3, the external writer**: output arriving while in the scrollback
+        // **The external writer**: output arriving while in the scrollback
         // raises the offset by alacritty's own rule (so that the visible rows stay
         // in place) and does not touch the fraction; the next delta continues from
         // the new offset, it does not take back a whole row. Had an absolute
@@ -18090,7 +18073,7 @@ mod tests {
 
     #[test]
     fn input_and_a_page_reset_the_fraction_and_the_generation() {
-        // **R1.3, the internal writers**: returning to the bottom on input and
+        // **The internal writers**: returning to the bottom on input and
         // Shift+PgUp zero the fraction, drop the pending request and increment the
         // generation. The generation also eliminates the frame path's amount: an
         // amount computed before the reset must not pull back a window that returned
@@ -18163,7 +18146,7 @@ mod tests {
 
     #[test]
     fn notches_settles_and_momentum_are_glide_requests() {
-        // The event path's three request arms (R1.5): the notch accumulates a
+        // The event path's three request arms: the notch accumulates a
         // request and requests a frame, settling computes its amount from the
         // fraction, the momentum start drops the pending one and increments the
         // generation. The frame path delivers the amount.
@@ -18219,7 +18202,7 @@ mod tests {
 
     #[test]
     fn a_settle_delivered_in_f32_lands_on_a_whole_row() {
-        // `/code-review` (027 phase-1): settling's amount is delivered in `f32` and
+        // Settling's amount is delivered in `f32` and
         // `0.3 + (−0.30000001)` fell one row down in `floor`, leaving the window
         // with a `0.99999998` fraction. All four fractions were measured; all must
         // settle on a whole row.
@@ -18271,7 +18254,7 @@ mod tests {
         // The row step (`off`) is a path that resets the position from outside: the
         // fraction drops and the generation increments, otherwise the amount of a
         // glide in flight would come with the current generation and bring back the
-        // fraction (`/code-review`, 027 phase-1).
+        // fraction.
         let (session, _wake) =
             history_session("stty -echo; seq 1 30; read _; printf '\\033[?1000h'; sleep 5");
         smooth(&session, 2.5, ScrollIntent::Direct);
@@ -18429,7 +18412,7 @@ mod tests {
 
     #[test]
     fn a_lowered_grid_keeps_its_strip_filled_while_scrolled_back() {
-        // **The band's shortness** (036 Karar 8): in a remote session the grid is one
+        // **The band's shortness**: in a remote session the grid is one
         // row plus the gap down and the strip at the top is open while looking at
         // the history too. In a scrolled window only that share is closed — the same
         // number at every notch, i.e. the screen slides exactly one row per notch.
@@ -18476,7 +18459,7 @@ mod tests {
 
         // (2) **The alternate screen**: vim and htop own the whole grid, i.e. `gap`
         // is already zero. The gate is therefore a second lock today — but it is
-        // what R2.2 wrote and if the alternate-screen arm of `content_rows` changes
+        // what the fill's rule wrote and if the alternate-screen arm of `content_rows` changes
         // the only thing that holds is this.
         let wake = Arc::new(TestWake::default());
         let session = spawn_docked_session(
@@ -18572,7 +18555,7 @@ mod tests {
         );
     }
 
-    /// The scene for reading the bytes going to the PTY — phase-2's `od` mould,
+    /// The scene for reading the bytes going to the PTY — the `od` mould,
     /// with one difference: the child first silences the line discipline (`stty
     /// -echo -icanon`). There is no `\n` in the arrow and report sequences, in
     /// canonical mode `od` would never see them; the echo would also produce a
@@ -18624,7 +18607,7 @@ mod tests {
 
     #[test]
     fn alternate_screen_wheel_sends_arrows() {
-        // R3.3: `less` and `man` scroll with the wheel — one arrow per row,
+        // `less` and `man` scroll with the wheel — one arrow per row,
         // backwards up. Nobody turns DECSET 1007 on: it is on by default in alacritty.
         let (session, wake) = dump_session(40, "printf '\\033[?1049h'", |mode| {
             mode.contains(TermMode::ALT_SCREEN)
@@ -19177,7 +19160,7 @@ mod tests {
 
     #[test]
     fn release_follows_press() {
-        // R6: if the press was reported the release is **not dropped**, it is
+        // If the press was reported the release is **not dropped**, it is
         // clamped — dropping would leave a button stuck in the application. The
         // criterion is therefore asymmetric and the asymmetry is deliberate: the
         // same coordinate is rejected at a press (the gesture has not started at
@@ -19206,7 +19189,7 @@ mod tests {
         // The clamped coordinate: the negative row drops to 0, i.e. to SGR's 1.
         expect_sent(&session, &wake, b"\x1b[<0;1;1m");
 
-        // The route is locked but **the mode is asked again** (R6's narrowing): had
+        // The route is locked but **the mode is asked again** (a narrowing): had
         // the application exited after the press and sent `\e[?1000l` the release
         // report would land on the shell's command line. The "nothing went" needle
         // is once per session and the **first** step (`expect_sent`'s rule), hence a
@@ -19297,13 +19280,13 @@ mod tests {
     }
 
     /// **A DEC 2026 block is applied on timeout even if it does not close** — and
-    /// from the reader loop's own arm (035 phase-2): the block's bytes wait in the
+    /// from the reader loop's own arm: the block's bytes wait in the
     /// parser's buffer, the `EventLoop` poller waits until vte's deadline and when
     /// the time runs out `stop_sync` gives the buffer to the wrapper
     /// ([`crate::handler::ClusterHandler`]). **A parity guard**: it tests the
     /// arm's existence, it cannot tell whether it went to `Term` through the
-    /// wrapper or directly (the wrapper is a plain pass-through today); phase-3's
-    /// clustering test will see that distinction. Had the arm dropped `synced`
+    /// wrapper or directly (the wrapper is a plain pass-through here); the
+    /// clustering test sees that distinction. Had the arm dropped `synced`
     /// would never be seen: no other byte comes during the `sleep`, i.e. there is
     /// no second way to drain the buffer.
     #[test]
@@ -19315,8 +19298,8 @@ mod tests {
         });
     }
 
-    /// **A DEC 2026 block applied on timeout clusters too** (035 phase-3; the open
-    /// half of phase-2's parity guard): the block carries `🇹🇷` and does not close,
+    /// **A DEC 2026 block applied on timeout clusters too** (the open half of
+    /// the parity guard above): the block carries `🇹🇷` and does not close,
     /// i.e. the bytes reach `Term` only from `stop_sync`. Had they not passed
     /// through the wrapper the two RIs would be two narrow cells; in a clustered
     /// session it is a single wide cell and `🇷` is in no cell.
@@ -19360,8 +19343,8 @@ e\\314\\201.'; sleep 5";
 
     #[test]
     fn a_wide_cluster_reaches_the_frame_as_one_string() {
-        // 035 R4.1: the head cell carries the base character and the table's string;
-        // the single-column combiner (`é`) is the base character as today (Karar 6).
+        // The head cell carries the base character and the table's string;
+        // the single-column combiner (`é`) is the base character as today.
         let (session, cells, clusters) = cluster_frame(true);
         let text = |ch| {
             let cell = cells
@@ -19398,7 +19381,7 @@ e\\314\\201.'; sleep 5";
     #[test]
     fn a_selected_family_copies_every_code_point() {
         // The grid selection's copy takes the cluster whole from alacritty's row
-        // text (035 R4.2) — the code did not change, the contract was pinned.
+        // text — the code did not change, the contract was pinned.
         let (session, cells, _) = cluster_frame(true);
         let family = cells
             .iter()
@@ -19493,7 +19476,7 @@ e\\314\\201.'; sleep 5";
 
     #[test]
     fn a_dropped_shutdown_handle_still_finishes_the_teardown() {
-        // The tab close's path (026 R3.6): the shutdown is started, the handle drops
+        // The tab close's path: the shutdown is started, the handle drops
         // **without being waited on**. The teardown thread must still finish its job
         // — `SIGHUP` goes in `Pty::drop`, i.e. in that thread's step after `join`.
         // The child verifies the signal by writing to a file.
@@ -19554,7 +19537,7 @@ e\\314\\201.'; sleep 5";
         //
         // Every step is behind a `read`: the script waits for the test's line
         // break, i.e. the reads do not race with the sleeps' durations
-        // (`/code-review`: in a parallel run the 0.5 s interval could be exceeded).
+        // (in a parallel run the 0.5 s interval could be exceeded).
         let session = spawn_session(
             "stty -echo; read _; printf '\\033]7;file:///tmp\\007'; \
              printf '\\033]7;file:///tmp\\007'; read _; \
@@ -19595,7 +19578,7 @@ e\\314\\201.'; sleep 5";
 
     #[test]
     fn a_command_start_is_reported_once_per_transition() {
-        // 036 Karar 2: the news is **on the transition** to `Running`; a second `C`
+        // The news is **on the transition** to `Running`; a second `C`
         // in the same command (iTerm2) is not a transition. The generation exists
         // only while running and drops if the probe's answer does not hold it.
         let wake = Arc::new(TestWake::default());
@@ -19612,7 +19595,7 @@ e\\314\\201.'; sleep 5";
         assert!(session.set_remote(first, Some(&RemoteTarget::ssh("prod"))));
         assert_eq!(session.title(), "⇄ prod");
         // In a dock-less window the remote session does not move the input row
-        // count: there is no band (036 R5.1).
+        // count: there is no band.
         let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
         assert_eq!(cursor.input_rows, 1, "dock-less window: {cursor:?}");
 
@@ -19634,7 +19617,7 @@ e\\314\\201.'; sleep 5";
 
     #[test]
     fn the_bootstraps_up_reaches_the_wake_and_the_session() {
-        // 049 R2.2: the reader's path — the mark at a local prompt is silent,
+        // The reader's path — the mark at a local prompt is silent,
         // while a command runs it is one news and the session keeps it with the
         // command's generation (no probe has landed).
         let wake = Arc::new(TestWake::default());
@@ -19888,7 +19871,7 @@ e\\314\\201.'; sleep 5";
     #[test]
     #[ignore = "runs with make test-race"]
     fn race_key_gen_and_mirror_stamp() {
-        // 025 put an **atomic** between the reader thread and the main thread
+        // The freshness gate put an **atomic** between the reader thread and the main thread
         // (`Session.key_gen`): the main thread increments it on every input, the
         // reader reads it at the mirror event and stamps. The shell puts every row
         // it reads into the mirror, i.e. the mirror of the `k`th input has the
@@ -19948,9 +19931,9 @@ e\\314\\201.'; sleep 5";
     #[test]
     #[ignore = "runs with make test-race"]
     fn race_shell_state_and_frame() {
-        // 009 put a **fifth** shared mutex (`Session.shell`) between the reader
+        // Shell integration put a **fifth** shared mutex (`Session.shell`) between the reader
         // thread and the main thread but did not add its counterpart to the `race_*`
-        // family (`/audit`, 009 gate): each of the four pairs has a test, this pair
+        // family: each of the four pairs has a test, this pair
         // did not.
         //
         // The two racing paths: while scanning OSC 133 inside `TappedPty::read` the
@@ -19959,7 +19942,7 @@ e\\314\\201.'; sleep 5";
         // thread takes only `shell` with `shell_state()` and with `frame()` **first**
         // `Term` then `shell`.
         //
-        // **What it holds and what it does not** (`/audit`, 010 gate): this test
+        // **What it holds and what it does not**: this test
         // hangs in an edit that **asks for `Term` while holding `shell`** — that is
         // the only forbidden direction. An edit that takes `shell` under `Term` does
         // **not** stay here and must not: the reader thread already takes it that
@@ -20005,7 +19988,7 @@ e\\314\\201.'; sleep 5";
     #[test]
     #[ignore = "runs with make test-race"]
     fn race_dock_state_and_frame() {
-        // 012 added a **third** record (`ShellLog.dock`) to the same leaf lock and
+        // The dock added a **third** record (`ShellLog.dock`) to the same leaf lock and
         // the path that writes it is new: the scanner now decodes base64 and does
         // `clone_from` under the lock, i.e. the time spent under the lock is longer
         // than the marker arm's. It repeats `race_shell_state_and_frame`'s pair for
@@ -20017,7 +20000,7 @@ e\\314\\201.'; sleep 5";
         let wake = Arc::new(TestWake::default());
         // **A session with a dock is mandatory** and this test ran without one for
         // a while: when the caret's handover was tied to `SessionOptions::dock`
-        // (012, "tie the handover to a single source") `spawn_session`'s dock-less
+        // ("tie the handover to a single source") `spawn_session`'s dock-less
         // default made this claim unreachable — the test stayed not silently but
         // **red**, but was not noticed since `make test-race` is conditional.
         // Bisect: the first red commit is `3273647`.
@@ -20093,7 +20076,7 @@ e\\314\\201.'; sleep 5";
     #[test]
     #[ignore = "runs with make test-race"]
     fn race_cluster_split_and_resize() {
-        // Clustering (035) does not store the open cluster's position, it derives it
+        // Clustering does not store the open cluster's position, it derives it
         // from the grid at every code point ([`crate::handler::ClusterHandler`]).
         // The racing path: a cluster's two halves come in two separate `read`s (a
         // `sleep` between `printf`s) and in between the main thread re-flows the row
@@ -20144,7 +20127,7 @@ e\\314\\201.'; sleep 5";
     #[test]
     #[ignore = "runs with make test-race"]
     fn race_screen_clear_and_frame() {
-        // 017 put a **sixth** shared slot (`Session.screen_clears`) between the
+        // The fill band put a **sixth** shared slot (`Session.screen_clears`) between the
         // reader thread and the main thread and this time not a mutex but an
         // atomic: it is read under the `Term` lock, i.e. it could not be a leaf
         // lock ([`Session::observe_screen_clear`]).
@@ -20156,10 +20139,10 @@ e\\314\\201.'; sleep 5";
         //
         // **The defect the guard catches is silent:** an edit that reads the counter
         // before the lock (or never does the generation comparison) loses a `CSI 2 J`
-        // and the fill of 017 phase-2 undoes Ctrl-L. The predicate can be turned
+        // and the fill undoes Ctrl-L. The predicate can be turned
         // around: if the screen is **freshly cleared** the flag must be set — in the
         // script the only thing that brings the screen down to a single row is
-        // `CSI 2 J`. The predicate narrowed in phase-1b (it was "if the screen is
+        // `CSI 2 J`. The predicate narrowed later (it was "if the screen is
         // not full"); the rationale is at the call site.
         //
         // **It was measured to go red on two edits** (2026-09-20, three runs each):
@@ -20170,7 +20153,7 @@ e\\314\\201.'; sleep 5";
         // one frame long and in that frame `content_rows == rows`, i.e. `gap` is zero
         // and the fill would not draw anyway.
         let wake = Arc::new(TestWake::default());
-        // **A session with a dock** and this is the only detail phase-2 added: the
+        // **A session with a dock** and this is the only detail added later: the
         // flag's only consumer is the fill ([`Session::fill_rows`]) and its first
         // gate is `SessionOptions::dock`. In a race run without a dock `fill` stays
         // zero in any case, i.e. the claim below would be for nothing.
@@ -20222,7 +20205,7 @@ e\\314\\201.'; sleep 5";
             // the flag is rightly not set; the predicate is meaningful only after the
             // first `CSI 2 J` has been seen.
             //
-            // **The criterion narrowed in phase-1b: not "the screen is not full" but
+            // **The criterion narrowed later: not "the screen is not full" but
             // "the screen is freshly cleared"** (`content_rows == 1`, the script's
             // `sleep 0.01` window). The old criterion wrote the flag's dropping
             // condition and that condition was **unreachable** in a window with a dock —
@@ -20262,7 +20245,7 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    // --- Search in the scrollback (033 phase-1) ---
+    // --- Search in the scrollback ---
 
     /// A plain-text query; `Aa` off (smart mode).
     fn plain(text: &str) -> SearchQuery {
@@ -20321,7 +20304,7 @@ e\\314\\201.'; sleep 5";
 
     #[test]
     fn a_plain_query_matches_every_meta_character_literally() {
-        // **The guard of the escape set** (Karar 11): the set is a copy of
+        // **The guard of the escape set**: the set is a copy of
         // `regex-syntax`'s meta set and a missing character would produce either a
         // pattern error (`(`) or a wrong match (`.` matching every letter). Every
         // meta character occurs once in the row; the plain query must find exactly
@@ -20403,7 +20386,7 @@ e\\314\\201.'; sleep 5";
 
     #[test]
     fn empty_and_blank_matches_are_not_highlighted() {
-        // An empty match (`^`, `z*`) is not highlighted (Karar 11) and neither is one
+        // An empty match (`^`, `z*`) is not highlighted and neither is one
         // consisting only of blanks: the highlight does not create content.
         let session = text_session("abc def");
         for pattern in ["^", "z*", "\\s+", " "] {
@@ -20593,7 +20576,7 @@ e\\314\\201.'; sleep 5";
     #[test]
     fn the_suppressed_input_line_is_not_searched() {
         // The grid: `$ cmd1` (0), `out` (1), `$ ls -la` (2, in the dock; suppressed
-        // in the grid). An invisible row gets no highlight (Karar 8).
+        // in the grid). An invisible row gets no highlight.
         let wake = Arc::new(TestWake::default());
         let session = spawn_typing_session(&mirror("bHMgLWxh", 6), Arc::clone(&wake));
         wait_mirror(&session, DockStatus::Live);
@@ -20626,7 +20609,7 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    // --- Gezinme (033 phase-4) ---
+    // --- Navigation ---
 
     /// Drives the index to the end (the test's counterpart of `bt-shell`'s driver)
     /// and gives the last report; the ceiling is against an endless driver.
@@ -20708,7 +20691,7 @@ e\\314\\201.'; sleep 5";
     #[test]
     fn next_goes_up_to_older_matches_and_wraps() {
         // `smooth == false`: the window instantly, the row in the middle.
-        // The ordinal is carried to the neighbour too (phase-5): let the count finish first.
+        // The ordinal is carried to the neighbour too: let the count finish first.
         let (session, _wake) = sevens();
         assert_eq!(count_all(&session).ordinal, Some(1));
         let report = session.search_next(SearchDirection::Older, OPEN, false);
@@ -20894,7 +20877,7 @@ e\\314\\201.'; sleep 5";
         let report = session.search_next(SearchDirection::Older, OPEN, true);
         assert!(report.found, "{report:?}");
         assert_eq!(scroll_state(&session), (0, 0.0));
-        // The count is the alternate screen's visible grid (Karar 8): the primary
+        // The count is the alternate screen's visible grid: the primary
         // screen's `hello` is not counted.
         let report = count_all(&session);
         assert_eq!((report.total, report.ordinal), (1, Some(1)), "{report:?}");
@@ -21002,7 +20985,7 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    // --- Counting the whole scrollback (033 phase-5) ---
+    // --- Counting the whole scrollback ---
 
     /// A dock-less session with `scrollback` coming from the caller: the
     /// saturated scrollback's tests.
@@ -21306,7 +21289,7 @@ e\\314\\201.'; sleep 5";
         // There is no match while the query is being typed; it comes with the output.
         // The highlight and the count see it, the label must not say "No matches"; when
         // ⏎ makes it current the ordinal asks one more pass on the finished index
-        // and is found (`/code-review`).
+        // and is found.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session(
             "stty -echo; seq 1 5; read x; echo zebra; sleep 5",
@@ -21391,7 +21374,7 @@ e\\314\\201.'; sleep 5";
             ledger_shift(mark(10, 0, 0, 1), mark(0, 0, 0, 2), 100),
             Shift::Lost
         );
-        // The terminal-side clear (034): even if the scrollback stays 0 → 0 and even
+        // The terminal-side clear: even if the scrollback stays 0 → 0 and even
         // if the generation does not move it is lost — the `history` difference would take it for `Still`.
         let mut wiped = mark(0, 0, 0, 1);
         wiped.wipes = 1;
@@ -21447,7 +21430,7 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    // --- Clear the screen (034 phase-1) ---
+    // --- Clear the screen ---
 
     /// The anchored prompt the shell really prints: the link is **open** until
     /// `preexec` ([`anchored_prompt`] closes it after `$ `), i.e. the input typed
@@ -21576,7 +21559,7 @@ e\\314\\201.'; sleep 5";
 
     #[test]
     fn clear_to_start_keeps_a_multiline_input_across_an_empty_row() {
-        // A `/code-review` finding (034 phase-1): `echo 1`, `Esc-Enter` twice,
+        // A review finding: `echo 1`, `Esc-Enter` twice,
         // `echo 2`. The empty row in the middle writes no cell, i.e. carries no
         // link; a rule that walks through adjacent rows would stop there and
         // erase the prompt and `echo 1`.
@@ -21820,7 +21803,7 @@ e\\314\\201.'; sleep 5";
     #[test]
     #[ignore = "runs with make test-race"]
     fn race_clear_to_start_and_frame() {
-        // 034 brought a **second writer** to `screen_clears`: the main thread
+        // Terminal-side clearing brought a **second writer** to `screen_clears`: the main thread
         // increments under the `Term` lock at ⌘K, the reader thread counts `CSI 2 J`
         // lock-free, the frame path consumes both under the lock. Three paths race
         // while output flows; if the lock order is broken the test hangs; on the
@@ -21859,7 +21842,7 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    // --- 044: the link hit test (`Session::link_at`) ---
+    // --- The link hit test (`Session::link_at`) ---
 
     fn screen(row: i32, col: u16) -> LinkPoint {
         LinkPoint::Screen { row, col }
@@ -22092,7 +22075,7 @@ e\\314\\201.'; sleep 5";
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
         assert_eq!(kind(5), Some(LinkKind::Url), "a URL stays a link");
         assert_eq!(remote(5), Some(false), "a URL is never remote-marked");
-        // 045 Karar 13: the path is a candidate of the remote disk.
+        // The path is a candidate of the remote disk.
         let hit = session.link_at(screen(0, 18)).expect("a remote path hit");
         assert!(hit.remote);
         assert_eq!(hit.target, "~/x.txt");
@@ -22120,7 +22103,7 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    // --- 044: the link hover (`Session::set_link_hover`) ---
+    // --- The link hover (`Session::set_link_hover`) ---
 
     /// One frame's grid cells.
     fn grid_now(session: &Session) -> Vec<Cell> {
@@ -22381,7 +22364,7 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    // --- 044 phase-5: the dock's input line ---
+    // --- The dock's input line ---
 
     /// A docked session whose mirror is `buffer_b64` (`cursor` its `CURSOR`),
     /// drawn once — the dock's hit test looks at the drawn window.
@@ -22681,7 +22664,7 @@ e\\314\\201.'; sleep 5";
     #[test]
     #[ignore = "runs with make test-race"]
     fn race_dock_link_hover_and_dock() {
-        // The dock's twin (044 phase-5): `Session::dock` reads the hover slot
+        // The dock's twin: `Session::dock` reads the hover slot
         // before `shell`, drops a stale one after it, and `link_at(Dock)` takes
         // the trace then `shell` — while the reader keeps changing `BUFFER`
         // (two mirrors in turn), so most dock hovers go stale. A broken lock

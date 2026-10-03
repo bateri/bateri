@@ -7,7 +7,7 @@ use bt_atlas::{FontIssue, Metrics};
 /// counterpart of `bt_atlas::FontIssue` **in this crate**.
 ///
 /// A separate type, because `bt-shell` does not see `bt-atlas` and must not
-/// (the rationale of [`CellMetrics`], 003 R5): a re-export would blur the
+/// (the rationale of [`CellMetrics`]): a re-export would blur the
 /// layer table. There is no text; the one that builds the subtitle's string is
 /// `bt-shell`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,13 +50,12 @@ impl CellMetrics {
     /// stripe sits; [`crate::Renderer::cell_metrics`] converts it to physical
     /// pixels and that is the **only** place.
     ///
-    /// A constant, not a setting (010 Karar 6): `command_gutter` is
+    /// A constant, not a setting: `command_gutter` is
     /// deliberately absent from this set, because a setting applied at save
     /// time forced three consumers to update in the same frame. Its value is a
     /// product decision — the stripe plus breathing room on both sides — and at
     /// a typical point size/scale it takes **at most one** column from `cols`;
-    /// it is not a measured number, so it is not the subject of
-    /// `docs/OLCUMLER.md` either.
+    /// it is not a measured number.
     ///
     /// `private`: everyone who reads the gutter **carries** it with
     /// [`CellMetrics`], not from the constant. A second reader would bring back

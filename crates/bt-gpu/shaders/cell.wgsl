@@ -1,8 +1,8 @@
 // The `cell` pipeline (glyphs and rules, sampling the atlas's mask plane) and
 // `emoji_fragment` (the colour plane). Read by `crate::renderer`.
 //
-// **Emoji shares `cell_vertex` verbatim**; only the fragment differs (the
-// `CLAUDE.md` pipeline contract). Both fragments sample with the same
+// **Emoji shares `cell_vertex` verbatim**; only the fragment differs.
+// Both fragments sample with the same
 // nearest/clamp sampler (`cell_fragment` says why).
 //
 // Rust counterpart: bt_gpu::frame::GlyphInstance, #[repr(C)]
@@ -16,7 +16,7 @@
 // immediates. A side effect is that the layout packs without padding; a
 // `size` field in between would push `rgba` and grow the stride.
 //
-// **The quad is the slot, not the cell** (052): below `line_height` /
+// **The quad is the slot, not the cell**: below `line_height` /
 // `letter_spacing = 1` the slot (the glyph's own metric) is larger than the
 // grid cell and the glyph spills into its neighbours. `pos` is still the
 // CELL's corner; the slot's corner is `slot_offset` up and left of it

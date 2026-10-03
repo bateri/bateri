@@ -8,7 +8,7 @@
 //! those two lines; every `set_running(true)` needs a reason and every frame
 //! carries a stop condition.
 //!
-//! **The platform's four jobs are behind [`Pacer`]** (040 → Karar 7): the
+//! **The platform's four jobs are behind [`Pacer`]**: the
 //! vsync tick, `set_running` from any thread, one delayed wakeup, and the
 //! time base (`now()`). Everything else — the frame's decision, drawing,
 //! completion, the clock — is here and platform-free. The macOS pacer lives
@@ -16,14 +16,14 @@
 //! delayed wakeup, `CACurrentMediaTime` for `now`); Linux's comes with the
 //! winit set.
 //!
-//! **Three things ask for a frame** (008, 013):
+//! **Three things ask for a frame**:
 //!
 //! - **Damage** — through the `Waker`, from another thread, by planting a
 //!   flag.
 //! - **Motion** ([`crate::motion`]) — without waking anyone, because the tick
 //!   that is already running decides: while an animation has not settled,
 //!   the tick refuses to sleep. **The notch glide takes this road too, only
-//!   its drawing is on the other branch** (027): its request is motion's (no
+//!   its drawing is on the other branch**: its request is motion's (no
 //!   wakeup, no damage), but its share scrolls the window inside
 //!   `Session::frame`, so a frame in flight is drawn as a **content** frame
 //!   and counted in `content=` — for the reason the clock's content flavour
@@ -36,7 +36,7 @@
 //!   changes, so counting it in `content=` is right), the *motion flavour*
 //!   does not, through [`Waker::resume`] (the cursor's blink; only the
 //!   caret's alpha changes — and the completion poll of a frame still in
-//!   flight, Karar 6). The armed wakeup is still **one**: the nearest
+//!   flight). The armed wakeup is still **one**: the nearest
 //!   deadline wins ([`due_clock`]), because a delayed wakeup cannot be
 //!   cancelled and a second one would invalidate the first's generation.
 //!
@@ -64,13 +64,13 @@
 //! damage, so the woken tick lands on the "no damage" branch and draws the
 //! motion frame there — no grid scan, no `Term` lock, no trip into
 //! `bt-core`. **The sleep test therefore asks three questions** (four since
-//! 030 — the typing effects live outside `Motion` too, below): blink lives
+//! the typing effects — they live outside `Motion` too, below): blink lives
 //! outside `Motion`, so `settled()` does not see it, and without asking
 //! about a pending phase change `resume` would create a wake/sleep spin that
 //! draws nothing.
 //!
-//! **The dock's typing effects take the motion road too** (030,
-//! [`crate::glyph_fx`]): they live outside `Motion` (blink's precedent) and
+//! **The dock's typing effects take the motion road too**
+//! ([`crate::glyph_fx`]): they live outside `Motion` (blink's precedent) and
 //! enter the sleep test under their own named term — while an arrival or a
 //! ghost is in flight the pacer does not sleep, when the list empties it
 //! does. They plant no damage: a frame an effect keeps alive raises `frames`,
@@ -103,7 +103,7 @@ use crate::stats::Stats;
 use crate::surface::{self, Acquired};
 use crate::{GpuError, Renderer, Surface};
 
-/// The platform's side of the frame loop — **four jobs** (040 → Karar 7).
+/// The platform's side of the frame loop — **four jobs**.
 ///
 /// 1. **The vsync tick.** The pacer calls [`Ticker::tick`] once per display
 ///    refresh while running, on the thread that created the
@@ -140,13 +140,13 @@ pub trait Pacer: Send + Sync {
     fn stop(&self);
 }
 
-/// Where this tick draws — the seam of Karar 7's two providers.
+/// Where this tick draws — the seam of the two texture providers.
 ///
 /// Today only (b): the pacer is a timer and the frame takes its texture from
 /// the window's [`Surface`]. The (a) provider (a display link handing over a
 /// drawable, wrapped with `create_texture_from_hal`) would add a variant
-/// carrying that texture, if the window path's measurement asks for it
-/// (phase-5b); no variant is written ahead of its provider.
+/// carrying that texture, if the window path's measurement asks for it;
+/// no variant is written ahead of its provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TickTarget {
     /// Acquire this frame's texture from the window's surface.
@@ -162,7 +162,7 @@ pub enum TickTarget {
 /// without planting damage. For a long time the text said "a path doing the
 /// two separately does not exist on purpose", and the reason was right — a
 /// pacer started without the flag says "no damage" and goes straight back to
-/// sleep. 014 **answered** that reason: the tick's "no damage" branch can now
+/// sleep. Blink **answered** that reason: the tick's "no damage" branch can now
 /// have work to do (blink's phase change), so the pacer does not wake for
 /// nothing. That is the only legitimate reason to start without the flag.
 ///
@@ -227,9 +227,9 @@ struct WakerInner {
     /// purpose. An animation never touches [`Waker::wake`] (module header), so
     /// this counter stays close to `content` while `frames` drifts away from it
     /// during an animation. The `requests ≈ frames + 2` relation of the "smoke
-    /// load" measurement below **stopped holding in 008** for exactly that
+    /// load" measurement below **stopped holding once motion frames existed** for exactly that
     /// reason; the numbers themselves (that day's observations) stay, the new
-    /// form was **measured** through `content` (008 phase-6, thirty healthy
+    /// form was **measured** through `content` (thirty healthy
     /// runs): `requests` was `4` in all thirty while `content` was `2`–`3` and
     /// `frames` 27–30. The counter is still **not constant** — a later run gave
     /// `3`, probably because of the coalescing; not measured.
@@ -350,8 +350,7 @@ impl Waker {
 /// caller (an `NSView` mouse event) is on the main thread too. Both sides are
 /// on one thread, so there is no race. Escaping to `Arc<AtomicU32>` would
 /// write as if atomics were needed and bring back `make test-yaris`'s "shared
-/// state" trigger without reason
-/// (`.tasks/011-tabana-yapisik-icerik/discussion.md` → Karar 4 eki).
+/// state" trigger without reason.
 ///
 /// So `Rc` is not `Send`, and must not be: the type itself says "main
 /// thread".
@@ -374,7 +373,7 @@ struct Drawn {
     px: f32,
     fill_rows: u16,
     /// The top of the dock's input block (physical pixels, from the top) and
-    /// the number of input rows (032); `None` → no dock in this frame.
+    /// the number of input rows; `None` → no dock in this frame.
     dock: Option<(f32, u16)>,
 }
 
@@ -399,7 +398,7 @@ impl Origin {
     /// (**physical pixels**, from the texture's top) and the number of input
     /// rows; `None` → no dock, or never drawn yet.
     ///
-    /// **In the same body as the origin** and for the same reason (032):
+    /// **In the same body as the origin** and for the same reason:
     /// while the band grows the grid moves up and the input block widens row
     /// by row, and published from separate frames a click could translate
     /// against a new origin and an old block. The value is the **layout's**
@@ -532,7 +531,7 @@ impl FailureStreak {
     /// a permanent error would turn "plant, try, fail" into an endless loop at
     /// the refresh rate.
     ///
-    /// **Since 008 this alone is not enough:** the "no damage" branch no
+    /// **Since motion frames exist this alone is not enough:** the "no damage" branch no
     /// longer sleeps unconditionally, it draws a motion frame while an
     /// animation has not settled. When the budget is spent that branch also
     /// finishes the animation ([`crate::motion::Motion::finish`]) — otherwise
@@ -545,7 +544,7 @@ impl FailureStreak {
 }
 
 /// How long [`Core::arm_clock`] waits before polling a frame still in flight
-/// as the link goes to sleep (Karar 6: "the last frame before sleep is not
+/// as the link goes to sleep ("the last frame before sleep is not
 /// lost").
 ///
 /// A design constant, not a measurement: one refresh at 120 Hz, the fastest
@@ -565,7 +564,7 @@ const POLL_DELAY: f64 = 1.0 / 120.0;
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// The frame loop's state — the old display-link delegate, now a plain type
-/// behind an `Rc` (040 phase-5). Main-thread state is in `Cell`/`RefCell`;
+/// behind an `Rc`. Main-thread state is in `Cell`/`RefCell`;
 /// nothing here crosses threads except through the [`Waker`].
 struct Core {
     /// `Rc`, not `Arc`: `Renderer` is not `Sync`. The removable reason is the
@@ -583,7 +582,7 @@ struct Core {
     waker: Waker,
     /// The measurement gate. `None` → the gate is closed and the frame path
     /// runs as it did **before** measurement existed: not a single clock read
-    /// (R4.1). The GPU delta comes from the renderer's completion poll, on
+    /// The GPU delta comes from the renderer's completion poll, on
     /// this thread.
     stats: Option<Arc<Stats>>,
     /// The frame list is long-lived: it is refilled with `clear` every frame
@@ -599,14 +598,14 @@ struct Core {
     /// `Frame`'s own `stripes`; this buffer is its **input**, not the list —
     /// `Frame::push_block` reads the ranges here and turns them into quads.
     blocks: RefCell<Blocks>,
-    /// The selection's row runs and two colours (031); same lifetime and
+    /// The selection's row runs and two colours; same lifetime and
     /// reason as `blocks` — next to `Frame`, not inside it;
     /// `Frame::push_selection` turns it into quads.
     selection: RefCell<SelectionRuns>,
-    /// The search highlight's runs (033); same lifetime and reason as
+    /// The search highlight's runs; same lifetime and reason as
     /// `selection`.
     search: RefCell<SearchRuns>,
-    /// The dock selection's runs per visual row (032); same reason as
+    /// The dock selection's runs per visual row; same reason as
     /// `selection` — `bt_core::Session::dock` empties and refills it every
     /// content frame, the capacity is kept.
     dock_selection: RefCell<Vec<SelectionRun>>,
@@ -637,10 +636,10 @@ struct Core {
     /// How many rows the dock has; `0` → no dock in this window.
     ///
     /// **A `Cell`, because it moves now:** the dock goes away on the
-    /// alternate screen and comes back when leaving it (R5.2), so the value
+    /// alternate screen and comes back when leaving it, so the value
     /// is refreshed by [`DisplayLink::resize`]. The cost of moving is the
     /// grid's height, i.e. a `TIOCSWINSZ` — paid **per transition, not per
-    /// command** (R5.3): commands that do not enter the alternate screen,
+    /// command**: commands that do not enter the alternate screen,
     /// like `git log`, never see a resize.
     ///
     /// Zero means **two different things** and both mean "no dock drawn":
@@ -709,8 +708,7 @@ struct Core {
     /// different moments (`frames` when the completion poll sees the frame
     /// finished, this one when the frame is decided), so a deadline in the
     /// middle of an animation would leave the difference open to `u64`
-    /// wrap-around. The gate looks at one of them only
-    /// (`.tasks/008-hareket-ve-imlec/discussion.md` → Karar 2).
+    /// wrap-around. The gate looks at one of them only.
     ///
     /// `Cell`, not atomic: only the tick writes it and the tick is on the
     /// main thread; the reader is on the main thread too
@@ -746,12 +744,11 @@ struct Core {
     /// work but would mean a second runtime borrow next to `frame`'s, and it
     /// buys nothing.
     motion: Cell<Motion>,
-    /// The dock's typing effects (030): arrivals and ghosts in flight.
+    /// The dock's typing effects: arrivals and ghosts in flight.
     ///
     /// **Next to `motion`, not inside it**, and a `RefCell`: the list is not
     /// `Copy`, and taking `Motion` out of `Copy` or copying on every
-    /// `get`/`set` was a cost (`.tasks/030-dock-yazim-animasyonlari/
-    /// discussion.md` → Karar 4). Only the tick and `DisplayLink`'s settings
+    /// `get`/`set` was a cost. Only the tick and `DisplayLink`'s settings
     /// paths borrow it, both on the main thread and both release it at the
     /// call boundary.
     glyph_fx: RefCell<GlyphFx>,
@@ -780,7 +777,7 @@ struct Core {
     ///
     /// The motion frame **does not call** `session.theme()`: that takes a
     /// leaf lock, and the motion frame not touching `Session` at all is the
-    /// design itself (008 Karar 4). A theme swap asks for a frame anyway
+    /// design itself. A theme swap asks for a frame anyway
     /// (`Session::set_theme`), so the next frame is a content frame and the
     /// copy is refreshed there.
     theme: Cell<Theme>,
@@ -806,7 +803,7 @@ struct Core {
     /// frame does not refresh `Cursor`, so a tick armed after a long animation
     /// can be one animation late" — closes too.
     ///
-    /// `None` **clears** (013 gate's lesson): a stale deadline after the
+    /// `None` **clears** (a lesson learned the hard way): a stale deadline after the
     /// command ended would ask for one frame too many.
     content_deadline: Cell<Option<f64>>,
     /// The cursor's blink; the phase's owner is the painting side
@@ -814,7 +811,7 @@ struct Core {
     blink: Cell<Blink>,
     /// Whether the window is **focused** — `bt-shell`'s answer.
     ///
-    /// Never enters `bt-core` (R7): focus is a window fact and has nothing to
+    /// Never enters `bt-core`: focus is a window fact and has nothing to
     /// do with the terminal's state. `bt-gpu` reads it in two places — the
     /// blink's gate and the caret's hollowing.
     ///
@@ -826,10 +823,10 @@ struct Core {
     /// `windowDidResignKey:` and ask for a frame.
     focused: Cell<bool>,
     /// Whether the keyboard is **in the terminal** — `bt-shell`'s answer
-    /// (033 R7): `false` when the search panel's field becomes first
+    /// `false` when the search panel's field becomes first
     /// responder.
     ///
-    /// **Focus is two bits** (033 → Muhakeme) and they combine here, in one
+    /// **Focus is two bits** and they combine here, in one
     /// place ([`Core::caret_focused`]): the caret's hollowing and blink's
     /// stopping answer "window key **and** keyboard in the terminal" — the
     /// caret is the one signal saying where the keyboard goes. The selection
@@ -901,15 +898,15 @@ struct Core {
 }
 
 impl Core {
-    /// The caret's focus: window key **and** keyboard in the terminal (033 →
-    /// Muhakeme, "focus is two bits"). Its hollowing, blink's gate and its
+    /// The caret's focus: window key **and** keyboard in the terminal
+    /// ("focus is two bits"). Its hollowing, blink's gate and its
     /// redraw in the motion frame come from here; highlights and selection
     /// colour from `focused` alone.
     fn caret_focused(&self) -> bool {
         self.focused.get() && self.keyboard.get()
     }
 
-    /// Hands every frame the GPU has finished to the four jobs of Karar 6:
+    /// Hands every frame the GPU has finished to its four jobs:
     /// a frame finished without error gives the failure budget back, closes
     /// `startup=` (the first one) and records the GPU delta when measured; a
     /// frame that failed on the GPU goes to the same policy as a synchronous
@@ -922,7 +919,7 @@ impl Core {
             Ok(span) => {
                 self.retry.streak.succeeded();
                 // The measurement gate is **here**: closed, not a single
-                // extra call is made (R4.1). `startup=` closes here, not in
+                // extra call is made. `startup=` closes here, not in
                 // `draw` — what is measured is "main to the first **finished**
                 // frame" and submitting is not finishing.
                 if let Some(stats) = &self.stats {
@@ -1029,13 +1026,13 @@ impl Core {
         // does not re-enter `Session`, so no second borrow is born.
         let mut frame = self.frame.borrow_mut();
         let mut motion = self.motion.get();
-        // **The damage question comes before the scan** (008 Karar 4): the
+        // **The damage question comes before the scan**: the
         // motion frame uses the list without clearing it, so "clear or not" is
         // decided before `clear`. `Session::frame`'s old `Option` made exactly
         // this order impossible.
         //
         // **While the glide is in flight a frame without damage is a content
-        // frame too** (027): its share scrolls the window inside
+        // frame too**: its share scrolls the window inside
         // `Session::frame`, and the motion frame never goes to `bt-core`. The
         // request is motion's — nobody wakes, `Waker::wake` is not touched —
         // the drawing is content's (module header).
@@ -1054,9 +1051,9 @@ impl Core {
         frame.clear(self.cell.get(), self.caret_style.get());
         // **Two** CPU spans, not one: the lock wait is inside
         // `session.frame`, the encode inside `draw`. One span would add them
-        // and erase the split (R3.1).
+        // and erase the split.
         //
-        // With the gate closed the clock is **never** read (R4.1): `then`
+        // With the gate closed the clock is **never** read: `then`
         // runs its closure only on the full side, so a closed gate costs one
         // branch.
         let t0 = self.stats.is_some().then(Instant::now);
@@ -1074,7 +1071,7 @@ impl Core {
         // frame's `advance` — for a slide heading to settle a little larger
         // than needed, so the excess is off screen.
         //
-        // **The band's excess is subtracted** (032): the grid is drawn that
+        // **The band's excess is subtracted**: the grid is drawn that
         // much higher and the opening strip is that much higher.
         let grid_top = motion.origin() - motion.band();
         // **Elapsed time is processed before the scan**, because of the
@@ -1088,7 +1085,7 @@ impl Core {
         // notch.
         motion.request_glide(self.session.take_scroll_glide());
         let glide = motion.take_glide();
-        // The band being shorter than the PTY share (remote session, 036) is
+        // The band being shorter than the PTY share (remote session) is
         // separate: the grid is that much lower for good and the strip must be
         // covered in a scrolled window too (`Session::slide_fill_rows`).
         let lowered = (-motion.band()).max(0.0).ceil() as u16;
@@ -1108,7 +1105,7 @@ impl Core {
             // The share **does not wake**: this tick draws the frame anyway
             // (`Session::frame`). If its generation changed it drops there.
             glide,
-            // **The cap is a ratio** (`DOCK_MAX_SHARE`, 032 Karar 4): `frame()`
+            // **The cap is a ratio** (`DOCK_MAX_SHARE`): `frame()`
             // reads the row count under the `Term` lock, this layer keeps no
             // copy of it. The wrapping width is the grid's — the dock uses the
             // same columns.
@@ -1153,12 +1150,12 @@ impl Core {
         }
         // Stripes in the **same** frame as the cells and from the same
         // `frame()` call: read from a separate query they would lag one frame
-        // behind on a scroll frame (010 discussion.md → Karar 2). After the
+        // behind on a scroll frame. After the
         // sink rather than inside it, because the block list is resolved per
         // frame, not per cell — and `borrow_mut` dropped at the end of the
         // expression above, so this `borrow` does not clash.
         //
-        // **No animation** (Karar 5): the stripe appears at once, `motion`
+        // **No animation**: the stripe appears at once, `motion`
         // gains no second consumer and this path asks for no frame — zero
         // frames at idle stays untouched. The motion frame's path
         // (`Core::motion_tick`, `move_caret`) never comes here; the grid did
@@ -1166,7 +1163,7 @@ impl Core {
         for block in self.blocks.borrow().as_slice() {
             frame.push_block(*block);
         }
-        // **The selection's colour comes from focus** (031 Karar 9): both
+        // **The selection's colour comes from focus**: both
         // colours arrive ready from the boundary, which one is drawn is
         // decided here. Not a new source of frames — a focus change asks for a
         // content frame already ([`DisplayLink::set_focused`]) and the colour
@@ -1177,11 +1174,11 @@ impl Core {
         // row's run.
         frame.push_selection(selection.as_slice(), rgba);
         drop(selection);
-        // **The search highlight by the same rule** (033 Karar 7): two roles,
+        // **The search highlight by the same rule**: two roles,
         // colour from focus; the grid's and the band's runs from the same
         // `frame()` round. The band's after `set_fill_rows` — its guard reads
         // the band's height — and their colours are the uniform `push_search`
-        // wrote. The motion frame keeps the lists and does not scan (R2.2).
+        // wrote. The motion frame keeps the lists and does not scan.
         let search = self.search.borrow();
         let focused = self.focused.get();
         frame.push_search(
@@ -1279,7 +1276,7 @@ impl Core {
             // known **after** the dock is printed, and the list to draw comes
             // last.
             if cursor.input_rows == 0 {
-                // No input row (remote session, 036): no surface for the
+                // No input row (remote session): no surface for the
                 // effect either. It ends unconditionally — `Reset` only comes
                 // when the mirror changed, and an arrival left in flight would
                 // be drawn on row 0, i.e. now in the context row's place, at
@@ -1293,8 +1290,8 @@ impl Core {
             frame.suppress_dock(&mut glyph_fx);
             frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), theme.cursor_linear());
             dock_caret = dock.caret.map(|at| (at, dock.caret_text));
-            // The dock's selection is the grid's shape and colour uniform (031
-            // R3.2); the colour was written above with `push_selection` — one
+            // The dock's selection is the grid's shape and colour uniform;
+            // the colour was written above with `push_selection` — one
             // selection per window, one colour.
             frame.push_dock_selection(&self.dock_selection.borrow());
             // No mark → the input's first row is outside the vertical window.
@@ -1324,11 +1321,11 @@ impl Core {
         // false: `dock::render` asked the predicate itself, did not know
         // `frame()`'s three preconditions, and on a stale mirror both were
         // born — the `.or_else` below picked the dock and the fresh row lost
-        // its caret (set gate, `/code-review`). The order still stays written:
+        // its caret. The order still stays written:
         // a caret drawn in the wrong place is a visible defect, rather than
         // one drawn in two places.
         //
-        // **The band's excess in both targets** (032): the grid's caret is
+        // **The band's excess in both targets**: the grid's caret is
         // that much higher together with the grid by the band's **target**
         // excess, the dock's is in the bottom-aligned input block, on the
         // wrapped row's own row.
@@ -1362,13 +1359,13 @@ impl Core {
         //
         // The setting and the application combine in `bt-core`
         // (`Cursor::blink`); Reduce Motion **turns it off** — an accessibility
-        // setting does not *add* animation (`CLAUDE.md`), and the side gain is
+        // setting does not *add* animation, and the side gain is
         // structural: `Mode::Fade` and blink exclude each other, so the
         // `alpha()` channel gets no second writer.
         let at = caret.map(|(at, _)| at);
         let moved = self.last_caret_at.replace(at) != at;
         let mut blink = self.blink.get();
-        // **The third term is focus** (R7.4): in an unfocused window blink
+        // **The third term is focus**: in an unfocused window blink
         // stops and the cursor stays visible. Not a new mechanism — the
         // "disabled blink stays visible" invariant (`content_frame`,
         // `enabled=false` → `lit=true`, `next_flip=None`) protects the hidden
@@ -1413,7 +1410,7 @@ impl Core {
             // The geometry flag is **consumed** here: left unconsumed, every
             // frame after a window drag would snap.
             self.geometry_changed.replace(false),
-            // **The direction rule's exception is computed here** (017 R4.1):
+            // **The direction rule's exception is computed here**:
             // if the gap above is filling with history, what comes down is not
             // the gap but the arriving history — the offset glides while
             // rising too. `bt-gpu` does not learn a terminal concept called
@@ -1465,8 +1462,7 @@ impl Core {
                 // **leaves**, for the same reason: a frame that could not be
                 // encoded changed nothing on screen. The stamp is the tick's
                 // `now`; reading it twice would tie `dt`'s base and `quiet=`'s
-                // base to two reads — what `last_update_at`'s doc bans by name
-                // (`/code-review` finding).
+                // base to two reads — what `last_update_at`'s doc bans by name.
                 self.last_frame_at.set(Some(now));
                 if let Some((stats, (cpu_frame, cpu_encode))) = self.stats.as_ref().zip(spans) {
                     stats.record_cpu(cpu_frame, cpu_encode);
@@ -1499,7 +1495,7 @@ impl Core {
         let mut blink = self.blink.get();
         let flipped = blink.advance(now);
         self.blink.set(blink);
-        // **The fourth question: typing effects** (030). Asked **before**
+        // **The fourth question: typing effects**. Asked **before**
         // `advance`: the last state of an effect finishing in this step (an
         // arrival settled on its static glyph, a ghost gone) is not drawn yet,
         // and sleeping would leave a half-transparent letter hanging on
@@ -1562,7 +1558,7 @@ impl Core {
         }
         let theme = self.theme.get();
         let bottom = texture.texture.height() as f32;
-        // **The offset's second write point** (R2.5). On this arm neither
+        // **The offset's second write point**. On this arm neither
         // `frame()` nor `clear` is called, so the offset is **kept** — but an
         // animation is defined by *changing* between two content frames, and a
         // kept value cannot change. **Before** `move_caret`: the cursor's
@@ -1603,8 +1599,7 @@ impl Core {
         // consequence is a measurement scope item: `samples=` and `gpu_samples=`
         // count different frame populations (the GPU's includes motion
         // frames) and the two columns' p95 cannot be compared directly in a
-        // run where the cursor glides. The item is written in
-        // `docs/OLCUMLER.md` → `## Yöntem`.
+        // run where the cursor glides.
         match self.draw(texture, theme.background_linear(), frame) {
             // A motion frame is a frame that **leaves** too: `quiet=` should
             // measure the tail after settling, not the moment the animation
@@ -1614,7 +1609,7 @@ impl Core {
                 self.publish_origin(frame);
                 self.last_frame_at.set(Some(now));
             }
-            // **This arm's own stop** (`/code-review` finding): on the damage
+            // **This arm's own stop**: on the damage
             // path the stop was the flag not being planted, here it cannot be
             // — the "no damage" branch does not sleep while an animation has
             // not settled. When the budget is spent the animation is finished
@@ -1624,7 +1619,7 @@ impl Core {
             // duration cap (0.7 s) — exactly what `FailureStreak` was written
             // to prevent.
             //
-            // **Asynchronous errors** (`/code-review` finding) reach
+            // **Asynchronous errors** reach
             // `draw_failed` from the completion poll at the start of a tick,
             // where the return is not used either: that path's stop for the
             // animation is not `finish()` but the **duration cap**, so even
@@ -1640,7 +1635,7 @@ impl Core {
                     // The effect lists in `Frame` empty too: the pacer sleeps
                     // and the next damage-free frame (blink's tick) would
                     // redraw the old lists frozen halfway without passing
-                    // through `set_dock_fx` (`/code-review`).
+                    // through `set_dock_fx`.
                     frame.set_dock_fx(
                         std::iter::empty(),
                         &Clusters::default(),
@@ -1664,7 +1659,7 @@ impl Core {
     ///
     /// **The gate is here, not in the notifier**: the notifier itself sends
     /// work to the main queue, and sending work every frame would silently
-    /// break zero frames at idle (`CLAUDE.md`) — every job landing in the
+    /// break zero frames at idle — every job landing in the
     /// queue wakes the main thread. The comparison is a `Cell` read, so on an
     /// ordinary frame this function's cost is not measurable.
     ///
@@ -1685,13 +1680,13 @@ impl Core {
     /// The vertical origin **to draw** in this frame: the animation's row at
     /// this moment → pixels.
     ///
-    /// **Two write points, one function** (R2.5): the content frame calls it
+    /// **Two write points, one function**: the content frame calls it
     /// after `sync`, the motion frame before `move_caret`. A second
     /// computation meant a drift that shows as "the mouse is one row off".
     ///
     /// **One write for two consumers.** The pixel value is read back from
     /// `Frame`, not recomputed: this line is what makes the viewport and the
-    /// mouse mapping see the same number — through the slide too (R2.7).
+    /// mouse mapping see the same number — through the slide too.
     ///
     /// **Nothing is clipped in a resting frame** and it is the offset's
     /// *definition* that guarantees it, not `setViewport`'s clipping: the
@@ -1703,7 +1698,7 @@ impl Core {
     /// the content flows up — so part of the lowest row is below the window
     /// in those frames: the new row rises from the bottom edge and settles
     /// into place when the slide ends. The direct consequence of the single
-    /// viewport (R1.1): all four lists move together, so a new row appearing
+    /// viewport: all four lists move together, so a new row appearing
     /// in place while the others slide is not a representable thing.
     ///
     /// **The scroll fraction is the second deliberate exception**
@@ -1719,7 +1714,7 @@ impl Core {
     /// the previous frame stays on screen and a click must be translated
     /// against its offset.
     ///
-    /// **This is also where the band joins** (032): the band's current height
+    /// **This is also where the band joins**: the band's current height
     /// is written here from both frame paths and the grid's drawn origin is
     /// `origin − band` ([`compose`]). The offset keeps a `u16` target, it
     /// does not switch to a signed one — the join happens only in drawing.
@@ -1761,7 +1756,7 @@ impl Core {
     ///   caret's alpha. The ban on motion protected the opposite (a motion
     ///   frame counting itself as content), so this arm obeys it. **The
     ///   completion poll of a frame still in flight rides this flavour too**
-    ///   (Karar 6: the woken tick polls first, then finds nothing to draw and
+    ///   (the woken tick polls first, then finds nothing to draw and
     ///   sleeps again), `POLL_DELAY` after the sleep.
     ///
     /// The stop condition is `None` **in each**: on the counter's side the
@@ -1780,7 +1775,7 @@ impl Core {
         // `after` cannot be cancelled; the only way to cancel is for the
         // pending tick to find its own generation void. Had the increment been
         // caught by the early returns below, the stop condition would take
-        // effect one period late (`/code-review`, 013 gate).
+        // effect one period late.
         let generation = self.clock_generation.fetch_add(1, Ordering::Relaxed) + 1;
         // A frame still in flight: its completion is polled once more.
         let poll = self.renderer.in_flight().then_some(now + POLL_DELAY);
@@ -1828,7 +1823,7 @@ impl Core {
 ///
 /// **The content sticks to the bottom** is decided here, not in `bt-core`:
 /// that side only says how many rows are filled (`Cursor::content_rows`);
-/// where they stick is a layout decision and the drawer's (`CLAUDE.md` → the
+/// where they stick is a layout decision and the drawer's (the
 /// decision here, the painting there).
 ///
 /// `saturating_sub`: the contract is `content_rows ≤ rows` (a `debug_assert`
@@ -1843,10 +1838,10 @@ fn origin_target(cursor: Cursor) -> u16 {
 }
 
 /// This frame's band **excess** target, rows: the drawn band's difference from
-/// the PTY share (032). Zero in a frame without a dock (the alternate screen,
+/// the PTY share. Zero in a frame without a dock (the alternate screen,
 /// a shell without integration) — no band, the grid is not offset.
 ///
-/// **Fractional and signed, one formula** (036 Karar 8): `(band_px − dock_px)
+/// **Fractional and signed, one formula**: `(band_px − dock_px)
 /// / cell_h`. With one or more input rows the difference is whole rows
 /// (`input_rows − 1`; both have the inter-row gap), with zero input rows (a
 /// remote session) it is **negative** and one cell plus the inter-row gap —
@@ -1882,7 +1877,7 @@ fn band_target(input_rows: u16, dock_rows: u16, cell: CellMetrics) -> f32 {
 /// the alternate screen, the window's share is back but the last content
 /// frame may be dockless, and a motion frame running in between that wrote
 /// the band would drop the caret on the grid's bottom row into an undrawn
-/// dock slot and lose it (`/code-review`).
+/// dock slot and lose it.
 fn compose(frame: &mut Frame, motion: Motion, bottom_px: f32, dock_rows: u16) {
     if dock_rows > 0 && frame.dock().is_some() {
         frame.set_dock_share(dock_rows);
@@ -1904,7 +1899,7 @@ fn compose(frame: &mut Frame, motion: Motion, bottom_px: f32, dock_rows: u16) {
 /// that threshold silently and tie the animation's feel to an unmeasured
 /// number.
 ///
-/// **Bottom-aligned** (032): the top of input row `row`, in the bottom-aligned
+/// **Bottom-aligned**: the top of input row `row`, in the bottom-aligned
 /// layout of an `input_rows`-row band — not from the band's current
 /// (animated) height, because the cells stand in the layout and the caret is
 /// on them.
@@ -1975,10 +1970,10 @@ pub struct Layout {
     pub cols: u16,
     /// How many rows the dock has; `0` → no dock in this window.
     ///
-    /// **The birth value is the session's constant** (R5.1: is the
+    /// **The birth value is the session's constant** (is the
     /// integration installed) but this field is its state *at the moment*:
     /// the dock goes away on the alternate screen and comes back when leaving
-    /// (R5.2), so [`DisplayLink::resize`] carries it too. Telling apart the
+    /// so [`DisplayLink::resize`] carries it too. Telling apart the
     /// two reasons that drop it to zero is `bt-shell`'s job — leaving the
     /// alternate screen in a session without integration must **not** give
     /// birth to a dock.
@@ -2115,8 +2110,8 @@ impl DisplayLink {
     /// **No order relation** to `frames`, and mixing them up means misreading
     /// the gate: a motion frame submits a frame too, so it is written to
     /// `frames` and not here ([`Self::motion_frames`]). The measured healthy
-    /// smoke run had `frames` 27–30 while `content` was 2–3 (`docs/OLCUMLER.md` →
-    /// `## Boşta kare`); most of the difference is the cursor glide, the rest
+    /// smoke run had `frames` 27–30 while `content` was 2–3; most of the
+    /// difference is the cursor glide, the rest
     /// frames that could not be encoded and frames left in flight. The reader
     /// of a red run uses this too: all three high means damage flowing, only
     /// `frames` high means an animation not settling.
@@ -2125,13 +2120,14 @@ impl DisplayLink {
     }
 
     /// Frames drawn because the **cursor** animation had not settled — the
-    /// `motion=` token. A pure cursor witness since 011: frames drawn only
+    /// `motion=` token. A pure cursor witness since the slide got its own
+    /// counter: frames drawn only
     /// for the slide are counted by `slide=` and this counter does not see
     /// them.
     ///
     /// The smoke gate's **required** counter: the recipe has a cursor move
     /// (`bt_core::smoke_shell`), so zero means "the animation never ran". It
-    /// does not enter `content=`, and that is the gate itself (008 Karar 2).
+    /// does not enter `content=`, and that is the gate itself.
     pub fn motion_frames(&self) -> u64 {
         self.core.motion_frames.get()
     }
@@ -2179,8 +2175,8 @@ impl DisplayLink {
     /// "frames were flowing at the deadline", not "drawn exactly then".
     ///
     /// **The gate's most sensitive layer** and evaluated outside `bt-gpu`: the
-    /// threshold is a measured contract (`bt-shell`'s `QUIET_FLOOR`, 008
-    /// phase-6) and red below it on the smoke load. The responsibility here is
+    /// threshold is a measured contract (`bt-shell`'s `QUIET_FLOOR`) and red
+    /// below it on the smoke load. The responsibility here is
     /// only producing the number honestly — `None` "no frame drawn",
     /// `0.00ms` "frames were flowing at the deadline".
     ///
@@ -2196,7 +2192,7 @@ impl DisplayLink {
 
     /// Waits (bounded) for the frames still in flight and counts them — the
     /// pending poll at shutdown, which comes **before** the report reads
-    /// `frames=` (Karar 6). The link is already stopped: no tick would count
+    /// `frames=`. The link is already stopped: no tick would count
     /// them otherwise.
     pub fn drain(&self) {
         self.core.renderer.wait_in_flight(DRAIN_TIMEOUT);
@@ -2327,7 +2323,7 @@ impl DisplayLink {
         // animation; blink lives outside it and its gate is read only on a
         // **content** frame (combined with `Cursor::blink`). In an idle window
         // switching Reduce Motion on without a frame request would leave the
-        // blink fading — `CLAUDE.md`'s "while on, blink never starts" would be
+        // blink fading — the rule "while on, blink never starts" would be
         // a lie.
         if finished || changed {
             self.request_frame();
@@ -2371,7 +2367,7 @@ impl DisplayLink {
     }
 
     /// The keyboard came to the terminal or left — `bt-shell`'s view gives it
-    /// when it becomes/resigns first responder (033 R7; the search panel's
+    /// when it becomes/resigns first responder (the search panel's
     /// field).
     ///
     /// [`DisplayLink::set_focused`]'s rule: a no-op on the same value, a frame
@@ -2385,7 +2381,7 @@ impl DisplayLink {
 
     /// The window's focus changed — `bt-shell`'s `NSWindowDelegate` gives it.
     ///
-    /// **A no-op on the same value** (015 R7.2; precedent
+    /// **A no-op on the same value** (precedent
     /// [`crate::Session::set_theme`]): the opening `windowDidBecomeKey:`
     /// falls exactly on this path and would write a free content frame.
     ///
@@ -2436,7 +2432,7 @@ impl DisplayLink {
     /// on a rejected size the gutter would be new, the grid old, and the
     /// glyphs would shift from the `cols` computation. The gutter changing
     /// **together** with the cell size is not a code invariant but a result
-    /// of today's scales (`/audit`, 010 gate): both are functions of the scale
+    /// of today's scales: both are functions of the scale
     /// (`Renderer::cell_metrics` gives them in one call), but
     /// `round(8.0 * scale)` and `round_up(cell_w * scale)` are separate
     /// functions. On macOS's integer backing scales (1.0, 2.0) they cannot
@@ -2445,7 +2441,7 @@ impl DisplayLink {
     /// `Frame::pos_at` and `point_to_cell` would drift for one frame. The
     /// place to close it is here, the day that scale arrives.
     /// **The cursor snaps in this frame.** On a geometry change the cursor did
-    /// not move, the grid under it did (008 Karar 5) — an animation would show
+    /// not move, the grid under it did — an animation would show
     /// it coming from where it never was. The flag is planted
     /// unconditionally, not tied to `Session::resize`'s acceptance: the window
     /// may have moved even if the cell size did not.
@@ -2491,7 +2487,7 @@ impl Drop for DisplayLink {
 ///
 /// A separate function, for `arm_clock`'s reason: the defect itself lived
 /// here and could not be tested inside the tick's body. `None` clearing is
-/// 013's gate's lesson — a finished command's stale deadline would ask for
+/// a lesson learned the hard way — a finished command's stale deadline would ask for
 /// one frame too many.
 fn content_deadline(now: f64, tick: Option<Duration>) -> Option<f64> {
     tick.map(|tick| now + tick.as_secs_f64())
@@ -2500,10 +2496,10 @@ fn content_deadline(now: f64, tick: Option<Duration>) -> Option<f64> {
 /// Which of the clock's deadlines is due first and **which flavour** it wants
 /// (`true` → the damage-planting content flavour, `false` → the damage-free
 /// motion flavour). `poll` is the completion poll of a frame still in flight
-/// (Karar 6): motion flavour, it draws nothing.
+/// Motion flavour, it draws nothing.
 ///
-/// A separate function, because the new guise of the defect fixed in 013's
-/// gate lives exactly here and could not be tested inside `arm_clock`'s
+/// A separate function, because the new guise of a defect fixed earlier
+/// lives exactly here and could not be tested inside `arm_clock`'s
 /// body.
 ///
 /// **Contract:** the content deadline is **not affected** by blink's ticks
@@ -2565,7 +2561,7 @@ mod tests {
         // been rounded, the two would collide.
         assert!(row > dock_top / 18.0, "the caret did not land on the band");
 
-        // **Bottom-anchored** (032): in a three-input-row band the band's top is
+        // **Bottom-anchored**: in a three-input-row band the band's top is
         // two rows higher (600 − 104 = 496), the first row is at (496+8)/18 and
         // the **last** row is in the same place as the one-row band's row — the
         // band grows upward, the row the caret types on does not move.
@@ -2575,7 +2571,7 @@ mod tests {
 
     #[test]
     fn the_grid_the_fill_band_and_the_dock_band_meet_in_every_frame() {
-        // **Composition guard** (032 phase-2, `n = 3`): the grid's bottom edge,
+        // **Composition guard** (`n = 3`): the grid's bottom edge,
         // the fill band and the dock band's top edge coincide **in the same
         // frame** — in the middle of the animation too. Testing the components
         // separately is not enough: the band and the offset are two separate
@@ -2657,7 +2653,7 @@ mod tests {
         // bit-for-bit in `f32` too: today's frame does not change.
         assert_eq!(band_target(1, DOCK_ROWS, cell), 0.0);
         assert_eq!(band_target(3, DOCK_ROWS, cell), 2.0);
-        // With zero input rows (remote session, 036) it is negative: one cell
+        // With zero input rows (remote session) it is negative: one cell
         // plus the row gap, `(34 − 68) / 18`.
         let remote = band_target(0, DOCK_ROWS, cell);
         assert!(remote < -1.0, "{remote}");
@@ -2668,7 +2664,7 @@ mod tests {
 
     #[test]
     fn a_remote_band_drops_the_input_row_and_the_grid_moves_down() {
-        // **Composition guard** (036 Karar 8): once the input row goes away, the
+        // **Composition guard**: once the input row goes away, the
         // band's drawn height is `band_px(0)` (the context row only), the grid's
         // origin is lower by that difference, the fill band is glued to the grid
         // and the grid and band coincide in every frame — in both directions.
@@ -2922,7 +2918,7 @@ mod tests {
         // On a tie the content wins: the frame will be drawn anyway, the
         // motion flavour needs no second wakeup.
         assert_eq!(due_clock(Some(1.0), Some(1.0), None), Some((1.0, true)));
-        // The completion poll of a frame in flight (Karar 6) rides the motion
+        // The completion poll of a frame in flight rides the motion
         // flavour: it draws nothing, so it plants no damage, and the nearest
         // of blink and the poll competes with the content tick.
         assert_eq!(due_clock(None, None, Some(0.2)), Some((0.2, false)));
@@ -2935,7 +2931,7 @@ mod tests {
 
     #[test]
     fn a_blinking_cursor_does_not_starve_the_duration_counter() {
-        // **013's regression guard.** A running command's counter must tick at
+        // **Regression guard.** A running command's counter must tick at
         // t=1.0; the blink wakes every 0.5. The clock is re-set on every wakeup
         // and in the old (duration-based) state the counter's tick would be
         // pushed a second ahead each time, i.e. would **never** fire.
@@ -2963,10 +2959,10 @@ mod tests {
 
     #[test]
     fn a_finished_command_clears_the_clock() {
-        // **R7.3.** The running command's tick is converted to an absolute
+        // The running command's tick is converted to an absolute
         // stamp; when the command ends (`next_tick` is `None`) the stored
         // deadline is **cleared**. Had the mapping kept the `Some` or ignored the
-        // `None`, the defect fixed at 013's gate would come back.
+        // `None`, the stale-deadline defect would come back.
         assert_eq!(
             content_deadline(5.0, Some(Duration::from_millis(400))),
             Some(5.4)

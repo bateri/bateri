@@ -1,17 +1,16 @@
-//! The scrollback's snapshot as VT bytes (053): what a pane leaves behind
+//! The scrollback's snapshot as VT bytes: what a pane leaves behind
 //! when bateri quits, so the next launch can replay it into a fresh `Term`
 //! ([`crate::SessionOptions::replay`]).
 //!
-//! **Two kinds, one row walk.** [`encode`] is 053's: the primary history, a
+//! **Two kinds, one row walk.** [`encode`] is session restore's: the primary history, a
 //! finished block's anchor saved, nothing else — byte for byte as it was.
-//! [`encode_live`] is the handover's (055): the **whole** terminal state of
+//! [`encode_live`] is the update handover's: the **whole** terminal state of
 //! a pane whose processes live on — both screens, links as they are, the
 //! cursors, the modes and what only a destructive probe reads; its doc
 //! holds the order. [`Tail`] keeps the sequence a read stopped in. The
-//! paragraphs below describe the 053 kind.
+//! paragraphs below describe the restore kind.
 //!
-//! **Bytes, not a grid dump** (`.tasks/053-oturum-geri-yukleme/discussion.md`
-//! → Karar 2): the replay goes through the same parser and the same
+//! **Bytes, not a grid dump**: the replay goes through the same parser and the same
 //! [`crate::handler::ClusterHandler`] as the shell's output, so colour, style,
 //! the underline colour and emoji clusters come back by the path the parser
 //! already knows, and a wrapped row — which carries no line break — rewraps
@@ -26,9 +25,7 @@
 //! What is **not**: other OSC 8 links (their text stays), modes, the cursor,
 //! the alternate screen.
 //!
-//! **The block anchor is rewritten, not copied** (user decision 2026-10-03,
-//! `.tasks/053-oturum-geri-yukleme/discussion.md` → Set sonrası
-//! düzeltmeler): the new shell numbers its blocks from one, so a replayed
+//! **The block anchor is rewritten, not copied** (user decision 2026-10-03): the new shell numbers its blocks from one, so a replayed
 //! `block/N` would take the colour of the new session's block `N`. The
 //! saved anchor carries the colour's **role** (`success`/`error`, resolved
 //! from the ledger at quit) and the live theme paints it; `k` only keeps two
@@ -130,7 +127,7 @@ impl Pen {
 /// screen line — `Line(0)` is the screen's top row) as VT bytes.
 ///
 /// Trailing empty rows are dropped and the stream ends with a line break
-/// (`.tasks/053-oturum-geri-yukleme/plan.md` → R1.2): the new shell's first
+/// the new shell's first
 /// prompt starts on a fresh row, without zsh's `PROMPT_SP` mark. An empty
 /// history gives an empty vector.
 ///
@@ -390,7 +387,7 @@ fn color_code(color: Color, layer: Layer) -> String {
     }
 }
 
-// ─── the live kind (055) ─────────────────────────────────────────────────
+// ─── the live kind ───────────────────────────────────────────────────────
 
 /// alacritty's keyboard-mode stack depth (`KEYBOARD_MODE_STACK_MAX_DEPTH`,
 /// private in 0.26.0); [`probe_keyboard`] pops one past it.
@@ -471,8 +468,7 @@ const DESIGNATORS: [(CharsetIndex, u8); 4] = [
 /// foreground, background and cursor colours with OSC 10/11/12.
 const LAST_SETTABLE_COLOR: usize = NamedColor::Cursor as usize;
 
-/// What only a **destructive probe** reads from `Term` (`.tasks/055-guncellemede-canli-devir/discussion.md`
-/// → Muhakeme): alacritty keeps these fields private and no getter exists.
+/// What only a **destructive probe** reads from `Term`: alacritty keeps these fields private and no getter exists.
 /// [`encode_live`] writes them; the round-trip tests compare them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Probed {
@@ -759,14 +755,13 @@ impl ScreenShot {
     }
 }
 
-/// The pane's **whole** terminal state as VT bytes (055, the handover): a
+/// The pane's **whole** terminal state as VT bytes (the update handover): a
 /// fresh `Term` of the **same size** with at least as much `scrolling_history`
 /// that parses them through [`crate::handler::ClusterHandler`] reads back
 /// every field `Term` shows and every field [`Probed`] lists. Resizing is the
 /// caller's, after the replay.
 ///
-/// **Destructive** (`.tasks/055-guncellemede-canli-devir/discussion.md` →
-/// Karar 3): what alacritty keeps private is probed **after** the content is
+/// **Destructive**: what alacritty keeps private is probed **after** the content is
 /// read, by driving `Term` itself — on the alternate screen the primary is
 /// reached with `swap_alt`, the keyboard and title stacks are popped empty,
 /// tabs and the active set write cells, the config is replaced. The `Term`
@@ -973,7 +968,7 @@ fn osc2(out: &mut Vec<u8>, title: &str) {
     out.push(0x07);
 }
 
-// ─── the cut sequence (055) ──────────────────────────────────────────────
+// ─── the cut sequence ────────────────────────────────────────────────────
 
 /// Where the parser stands, as far as [`Tail`] needs: vte's states folded
 /// into the ones that end a sequence alike (`vte-0.15.0/src/lib.rs`).
@@ -1003,14 +998,13 @@ enum Seq {
 /// large OSC 52 must not pin its size for the session's life.
 const TAIL_KEEP: usize = 4096;
 
-/// The bytes since the parser last stood in its **ground state** (055,
-/// `.tasks/055-guncellemede-canli-devir/discussion.md` → Karar 3): a read
+/// The bytes since the parser last stood in its **ground state**: a read
 /// that ended inside a CSI/OSC/DCS or inside one character's UTF-8 left
 /// them with no effect on `Term` yet — vte dispatches only at the final
 /// byte — so the new side puts them **before** the bytes that follow and a
 /// fresh parser picks the sequence up where the old one stood.
 ///
-/// vte does not say where it stands (`context.md` Ö6); this follows the
+/// vte does not say where it stands; this follows the
 /// same bytes on the read path. The C0 controls vte **executes** inside an
 /// escape or a CSI are left out — they already took effect.
 ///
@@ -1377,7 +1371,7 @@ mod tests {
 
     #[test]
     fn a_finished_blocks_anchor_comes_back_saved_with_its_role() {
-        // 053, seen in the real window: the restored commands had no chevron.
+        // Seen in the real window: the restored commands had no chevron.
         let bytes = b"\x1b]8;;bateri://block/3\x07$ ls\x1b]8;;\x07\r\nout\r\n\
                       \x1b]8;;bateri://block/4\x07$ false\x1b]8;;\x07 \
                       \x1b]8;;https://x.dev\x07x\x1b]8;;\x07\r\n\
@@ -1485,7 +1479,7 @@ mod tests {
         assert_eq!(cells(&replayed), cells(&original));
     }
 
-    // ─── the live kind (055) ────────────────────────────────────────────
+    // ─── the live kind ──────────────────────────────────────────────────
 
     use alacritty_terminal::event::Event;
     use std::sync::{Arc, Mutex};

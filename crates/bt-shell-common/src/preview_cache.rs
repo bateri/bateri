@@ -1,5 +1,5 @@
-//! The preview cache on disk (045 R5, R6, Karar 9): the index file, the cached
-//! copy's question (R5.4), the finished preview's seal, the rescue of a copy the
+//! The preview cache on disk: the index file, the cached
+//! copy's question, the finished preview's seal, the rescue of a copy the
 //! user changed and the sweep that carries out [`plan_sweep`]'s answer.
 //!
 //! The rules are `remote_files`' (pure, tested there); this is their I/O —
@@ -91,7 +91,7 @@ fn key(dir: &Path, path: &Path) -> Option<String> {
     (!key.is_empty()).then_some(key)
 }
 
-/// Whether the copy at `path` can open as it is (R5.4), given the remote file's
+/// Whether the copy at `path` can open as it is, given the remote file's
 /// size and mtime ([`cache_state`]). A damaged index is no record: a copy then
 /// reads as [`CacheState::Diverged`] and is rescued, never overwritten.
 pub fn state(dir: &Path, path: &Path, remote: (Option<u64>, Option<u64>)) -> CacheState {
@@ -228,7 +228,7 @@ fn scan(dir: &Path) -> Vec<(PathBuf, (u64, u64))> {
 }
 
 /// What the preview folder holds: the copies' total size in bytes and their
-/// count — the settings window's "In use" row (045 phase-6). The sweep's own
+/// count — the settings window's "In use" row. The sweep's own
 /// walk ([`scan`]), so the index and a stream in flight are not counted. A
 /// folder that does not exist holds nothing. Blocks on the disk (the module's
 /// header): the caller measures on its own thread.
@@ -242,7 +242,7 @@ pub fn usage(dir: &Path) -> (u64, usize) {
 /// one's folder and stopping below `dir` or at the first folder that still holds
 /// something. Only those: the preview folder can be one the user chose
 /// (`~/Downloads`), and the user's own empty folders there are not the sweep's
-/// to remove (`/code-review`, 045).
+/// to remove.
 fn prune(dir: &Path, paths: &[PathBuf]) {
     for path in paths {
         let mut folder = path.parent();
@@ -255,7 +255,7 @@ fn prune(dir: &Path, paths: &[PathBuf]) {
     }
 }
 
-/// Carries out `sweep` on the preview folder `dir` (Karar 9): [`plan_sweep`]'s
+/// Carries out `sweep` on the preview folder `dir`: [`plan_sweep`]'s
 /// deletions, its rescues into `download_dir`, the index updated, the emptied
 /// folders removed. `keep`, `limit` (bytes) and `now` (Unix seconds) as there.
 ///

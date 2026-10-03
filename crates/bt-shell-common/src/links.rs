@@ -1,4 +1,4 @@
-//! What a ⌘-clicked link **is** on disk and what opening it does (044 R5).
+//! What a ⌘-clicked link **is** on disk and what opening it does.
 //!
 //! `bt-core` finds the link and gives its raw target ([`bt_core::LinkHit`]): a URL, a path
 //! **candidate** with its `:line:col` suffix already split off, or an OSC 8 URI. Whether the
@@ -11,8 +11,8 @@
 //!   path to the pane's OSC 7 directory); the `stat` is **injected**, so the tests use a fake
 //!   and the shell passes [`stat`]. **A path that does not exist is not a link.**
 //! - [`resolve_first`] — a path query's candidates (`My Drive`'s `Drive`, …, `My Drive`) →
-//!   the first that exists, iTerm2's semantic history (044 set sonrası).
-//! - [`action`] — the policy table (`plan.md` → R5.1): a **white list**, the
+//!   the first that exists, iTerm2's semantic history.
+//! - [`action`] — the policy table: a **white list**, the
 //!   [`quote::shell_quote`](crate::quote::shell_quote) precedent — a document of a known
 //!   content type without the `x` bit opens in its default application, a directory opens in
 //!   Finder, **everything else** is revealed in Finder; an OSC 8 scheme off the common list
@@ -22,12 +22,9 @@
 //! "Is this a known content type" and "is this directory a package" are AppKit's questions
 //! (UTType, `NSWorkspace`), so they come in as an argument ([`Content`]); this module has no
 //! queue, no `dispatch2` and no AppKit (`make audit`). The background queue and the return to
-//! the main queue are the platform shell's (044 phase-4), the `pane::RemoteProbe` precedent.
+//! the main queue are the platform shell's, the `pane::RemoteProbe` precedent.
 //! [`hostname`] reads the machine's name for `SessionOptions::hostname` — `child`'s precedent
 //! of a thin system read next to the policy.
-//!
-//! The rationale is in `.tasks/044-tiklanabilir-baglantilar/discussion.md` → Karar 5 and
-//! Muhakeme.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
@@ -78,7 +75,8 @@ pub enum LinkAction {
     OpenDir(PathBuf),
     /// An OSC 8 URI with an uncommon scheme: ask with the whole target before opening.
     Confirm(String),
-    /// `bateri://`: our own scheme is never opened from a click (038 Karar 7).
+    /// `bateri://`: our own scheme is never opened from a click (sending it to ourselves
+    /// means nothing).
     Swallow,
 }
 
@@ -139,13 +137,13 @@ fn file_url_path(url: &str) -> Option<PathBuf> {
 }
 
 /// The candidate → the object on disk, or `None`: **a path that does not exist is not a
-/// link** (iTerm2's semantic history; `discussion.md` → Karar 5).
+/// link** (iTerm2's semantic history).
 ///
 /// - `~` and `~/…` go to `home`; `~user` is not expanded (not a link — it would need a passwd
 ///   lookup per hover and nothing in the scanner's output asks for it).
 /// - An absolute path is taken as is.
 /// - A relative path is joined to `cwd`, the pane's **current** OSC 7 directory — not the
-///   directory the line was printed in (the named known limit, `plan.md` → Kapsam Dışı).
+///   directory the line was printed in (a named known limit).
 ///
 /// The `:line:col` suffix is already off the candidate (`bt-core` splits it into
 /// [`LinkKind::Path`]); it is **not** stripped again here, so a file whose name really ends
@@ -184,7 +182,7 @@ pub fn resolve(
     Some(Resolved { path, entry })
 }
 
-/// A path query's answer (044 set sonrası, iTerm2's semantic history): the
+/// A path query's answer (iTerm2's semantic history): the
 /// **first** candidate that [`resolve`]s, with its index — the candidates come
 /// from `bt-core` in the order they are to be tried
 /// ([`bt_core::LinkHit::candidates`], shortest first), so `My Drive` wins only
@@ -220,7 +218,7 @@ pub fn stat(path: &Path) -> Option<Entry> {
     })
 }
 
-/// The policy table (`plan.md` → R5.1). `resolved` is [`resolve`]'s answer for a link that
+/// The policy table. `resolved` is [`resolve`]'s answer for a link that
 /// names a local path ([`local_path`]); `content` is asked only for a resolved path.
 ///
 /// | link | action |
@@ -236,7 +234,7 @@ pub fn stat(path: &Path) -> Option<Entry> {
 /// | OSC 8, any other scheme (or none) | [`LinkAction::Confirm`] |
 ///
 /// The swallow row comes **first** and reads the target whatever the kind: the hit test does
-/// not hand `bateri://` out today, the row is the one-line defence 038 Karar 7 asks for.
+/// not hand `bateri://` out today, the row is a one-line defence in depth.
 ///
 /// A `file:` URL [`local_path`] cannot read (`file:/x`, no authority) is swallowed too:
 /// handed to `NSWorkspace` as a URL it would **run** a `.command` or launch an `.app` — the
@@ -275,7 +273,7 @@ pub fn action(
 
 /// This machine's name (`gethostname`) for `SessionOptions::hostname`: GNU `ls --hyperlink`
 /// prints `file://$HOSTNAME/…` and OSC 7 may carry the same name, so the "is this authority
-/// local" question needs it (044 Muhakeme → İşletme 2). `None` if the call fails or the name
+/// local" question needs it. `None` if the call fails or the name
 /// is empty or not UTF-8 — the authority then falls back to the empty/`localhost` rule.
 pub fn hostname() -> Option<String> {
     let mut buf = [0u8; 256];
@@ -454,7 +452,7 @@ mod tests {
     #[test]
     fn the_suffix_is_bt_cores_and_is_not_stripped_again() {
         // `bt-core` hands `src/main.rs` with `line: 12, col: 3` — the file opens, the suffix
-        // is only recognized (no jump, `plan.md` → Kapsam Dışı).
+        // is only recognized (no jump; out of scope).
         let kind = LinkKind::Path {
             line: Some(12),
             col: Some(3),

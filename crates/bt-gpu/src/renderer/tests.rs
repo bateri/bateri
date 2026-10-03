@@ -19,7 +19,7 @@ pub(crate) const ACCENT: LinearRgba = Theme::BATERI.accent_linear();
 /// taste: `0.0` and `1.0` are the fixed points of the sRGB transfer function, so the day the
 /// background was pulled to pure black (and that happened) this claim would have held with or
 /// without linearisation, and the only guard would have gone silently blind. The value is
-/// the old background itself — its record sits in `CLAUDE.md` with the same number.
+/// the old background itself.
 pub(crate) const MIDTONE_SRGB: u32 = 0x1a1c21;
 pub(crate) const MIDTONE: LinearRgba = {
     let (r, g, b) = (
@@ -62,7 +62,7 @@ pub(crate) fn bg_cell(col: u16, row: u16, bg: LinearRgba) -> Cell {
 
 #[test]
 fn two_scales_give_two_metrics() {
-    // The scale is part of the cache key (`plan.md` → R1.2) and the metric is that key's
+    // The scale is part of the cache key and the metric is that key's
     // visible end: if the cell does not grow at @2x, the atlas is swallowing the scale and
     // glyphs go blurry without any error.
     let r = renderer();
@@ -257,7 +257,7 @@ pub(crate) fn cell_rows(
 /// needs no colour table.
 ///
 /// A shared helper, because all the caret tests ask the same question and each used to carry
-/// its own copy (`/code-review`): a fix could be forgotten in one of the copies.
+/// its own copy (found in code review): a fix could be forgotten in one of the copies.
 pub(crate) fn brightness(pixels: &[u8], edge: usize, x: usize, y: usize) -> u32 {
     let (r8, g8, b8) = pixel_at(pixels, edge, x, y);
     u32::from(r8) + u32::from(g8) + u32::from(b8)
@@ -265,7 +265,7 @@ pub(crate) fn brightness(pixels: &[u8], edge: usize, x: usize, y: usize) -> u32 
 
 /// The cell's **middle band**: pulled in from top and bottom by the radius, full width.
 ///
-/// Because the caret's corner is rounded (015 phase-2), the corner pixels are no longer the
+/// Because the caret's corner is rounded, the corner pixels are no longer the
 /// block's colour; an equality claim that passes through there tests the **roundness**, not
 /// the fill. Pulling in does not weaken the claim, it **separates** it: on the band the
 /// equality is still bit for bit, and the corner has its own guard
@@ -293,7 +293,7 @@ fn cell_body(
 /// How many pixels the caret's corner radius is at this cell size — the tests' inset
 /// margin. It reads **from production's own function**, not from a copy: the formula used
 /// to be written in three places and when one changed the guard would silently loosen
-/// (`/code-review`).
+/// (found in code review).
 fn caret_radius_px(cell_px: (u16, u16), ratio: f32) -> usize {
     crate::frame::caret_radius_px((f32::from(cell_px.0), f32::from(cell_px.1)), ratio).ceil()
         as usize
@@ -342,7 +342,7 @@ fn rule_cell(col: u16, underline: UnderlineStyle) -> Cell {
 
 #[test]
 fn cell_bg_paints_pixels_on_the_gpu() {
-    // This test replaces the "the draw call went through the pipeline" proof that phase-2
+    // This test replaces the "the draw call went through the pipeline" proof that was
     // deleted, and says more: buffer indices, the NDC transform, the y flip, the instance
     // stride and the GPU reading the `Instance` layout correctly. The asserts on the two
     // sides bind the layout at compile time but never RUN it; this place runs it. It needs no
@@ -421,7 +421,7 @@ fn cell_bg_paints_pixels_on_the_gpu() {
 
 #[test]
 fn a_selection_run_paints_between_the_ground_and_the_glyph() {
-    // The GPU witness of 031 phase-2: the selection run is drawn **after the background,
+    // The GPU witness of the selection: the run is drawn **after the background,
     // before the glyph**. A run of three cells: in column 0 a cell with a red background (the
     // run must cover it), in column 1 a white `M` (it must stay in its own colour above the
     // run), column 2 empty (the bridge). Column 3 is outside the run and must stay the clear
@@ -462,7 +462,7 @@ fn a_selection_run_paints_between_the_ground_and_the_glyph() {
     let midtone = srgb(MIDTONE_SRGB);
     let accent = srgb(Theme::BATERI.accent);
     let cell = |col: usize| cell_rows(&pixels, EDGE, (cw, ch), col).concat();
-    // The run's four corners are round (phase-3): those closer than `inset` pixels to a
+    // The run's four corners are round: those closer than `inset` pixels to a
     // corner are outside the question, the corner guards ask about them.
     let inset = caret_radius_px((cw, ch), crate::frame::SELECTION_RADIUS);
     let body = |col: usize, left: bool| -> Band {
@@ -677,7 +677,7 @@ fn render_search(
 
 #[test]
 fn search_roles_paint_their_colors_under_the_selection() {
-    // 033 Karar 7's order on the GPU: background → `search_match` → `search_current` →
+    // The search highlight's order on the GPU: background → `search_match` → `search_current` →
     // selection. The match is 0..=2 of row 0, the current match is 0..=1 of row 2; the
     // selection is 2..=3 of row 0 and covers the match's last cell — the user's selection is
     // above the search.
@@ -738,7 +738,7 @@ fn adjacent_matches_are_two_shapes_and_a_wrapped_match_is_one() {
 
 #[test]
 fn the_fill_band_highlights_its_matches() {
-    // 033 Karar 8: the band's rows are real history and their matches are highlighted too —
+    // The band's rows are real history and their matches are highlighted too —
     // in the band's own viewport. The band is at 0..80 (the grid is one row lower); nothing
     // must land on the grid's row with the same number (80..160).
     let at = render_search(&[], &[search_run(0, 0, 1, true, false)], &[]);
@@ -824,7 +824,7 @@ fn origin_shifted_halves(r: &TestRenderer, frame: &mut Frame, clear: LinearRgba)
 fn content_sticks_to_the_bottom_for_cell_bg() {
     // **This set's CPU→GPU seam.** The offset is applied on the GPU with `setViewport`, so a
     // test that measured two CPU lists against each other would test something that is right
-    // by construction (`discussion.md` → Muhakeme round 2, accepted 4). What is asked is that
+    // by construction. What is asked is that
     // the painted **pixel** moved.
     //
     // It is also the `setViewport` canary: the viewport overflows below the texture (origin 8
@@ -897,14 +897,13 @@ fn content_sticks_to_the_bottom_for_glyphs() {
     );
 }
 
-/// **017 phase-0's measurement, pinned into a test.**
+/// **A measurement, pinned into a test.**
 ///
-/// 017's fill band will land **above** the grid and its candidate is a third `setViewport`:
+/// The fill band lands **above** the grid and its candidate is a third `setViewport`:
 /// `originY = origin_px − fill_px`. That number goes negative in the middle of the slide,
 /// whereas the clamp in [`MetalRenderer::encode_dock`] said *"a negative `originY` would fall
 /// into Metal's validation — an exception that kills the process"* and that sentence had
-/// **not been measured**. This test measures it; the numbers, the machine and the validation
-/// layer's answer are in `.tasks/017-ekranin-geri-donusu/phase-0.md` → Uygulama Notları.
+/// **not been measured**. This test measures it.
 ///
 /// The only thing asked is the `originY` field of `MTLViewport`: which list is drawn is of no
 /// concern to Metal, so the witness goes through the grid's **own** viewport
@@ -912,7 +911,7 @@ fn content_sticks_to_the_bottom_for_glyphs() {
 ///
 /// **Four of the five values are not settled** and in three `originY` is negative, i.e. the
 /// middle of the slide: if the settled frame alone were asked, the canary would pass at rest
-/// and fall in the middle of the 150 ms slide (phase-0 → Kabul).
+/// and fall in the middle of the 150 ms slide.
 #[test]
 fn a_negative_viewport_origin_draws_and_clips_from_the_top() {
     let r = renderer();
@@ -1006,7 +1005,7 @@ const FILL_ROWS: u16 = 1;
 
 #[test]
 fn the_fill_band_draws_above_the_content_and_rides_the_origin() {
-    // **017 phase-3's only visible claim and the pixel half of R3.1.** The band is drawn above
+    // **The fill band's only visible claim, the pixel half.** The band is drawn above
     // the offset (a third `setViewport`, `originY = origin_px − fill_px`) and **in a motion
     // frame** — the lists are kept, only `origin_px` changes — it slides together with the
     // grid. A position baked at push time would drop the second half: the band would freeze in
@@ -1075,7 +1074,7 @@ fn the_fill_band_draws_above_the_content_and_rides_the_origin() {
 }
 #[test]
 fn a_frame_without_fill_draws_todays_picture() {
-    // **Rollback lane** (R2.4/R3.2), 016's "radius 0, glow 0" pattern: with the fill off, the
+    // **Rollback lane**, the caret's "radius 0, glow 0" pattern: with the fill off, the
     // frame drawn must be **bit for bit** identical to today's, and only the GPU can say so. Had
     // the third viewport been set up unconditionally (or had `clear` forgotten the band's
     // height), the third read would diverge from the first — the one defect that could stay
@@ -1123,8 +1122,8 @@ fn command_marks_paint_the_gutter_on_the_gpu() {
     // counters, has not even a smoke token — if this test fails, no other guard is left to say
     // the mark was drawn.
     //
-    // **The mark is now a sprite**, not a rectangle: the same shape as the dock's chevron (012
-    // phase-9, user: "the result color boxes will be this new one too"). The shape's own guard
+    // **The mark is now a sprite**, not a rectangle: the same shape as the dock's chevron
+    // (user: "the result color boxes will be this new one too"). The shape's own guard
     // lives in `bt-atlas`; this test's job is the pipeline — the right row, the right color,
     // inside the gutter.
     let r = renderer();
@@ -1136,8 +1135,8 @@ fn command_marks_paint_the_gutter_on_the_gpu() {
         usize::from(ch) * 3 <= EDGE,
         "three rows do not fit the texture"
     );
-    // The gutter is one cell; the mark is no longer in the gutter but in **column 0** (012
-    // phase-11), so the gutter is a pure left margin.
+    // The gutter is one cell; the mark is no longer in the gutter but in **column 0**,
+    // so the gutter is a pure left margin.
     let gutter = cw;
 
     let mut frame = Frame::default();
@@ -1196,7 +1195,7 @@ fn command_marks_paint_the_gutter_on_the_gpu() {
         distance(second, error) < distance(second, success),
         "the second command is not in the error color: {second:02x?}"
     );
-    // **The output row is unmarked** (user decision, 010 delivery): its gutter must stay the
+    // **The output row is unmarked** (user decision): its gutter must stay the
     // **same** as the clear color, not a single ink pixel. This is the one-pixel proof that the
     // mark stays one cell tall — if the height turned into the line spacing, this would fail.
     assert_eq!(boldest(1), clear, "the output row received a mark");
@@ -1306,7 +1305,7 @@ fn the_dock_paints_the_bottom_band_and_the_sliding_grid_cannot_reach_it() {
 
 #[test]
 fn a_growing_band_reveals_its_rows_from_the_bottom() {
-    // **032 phase-2, the pixel half.** A dock with three input rows (four-row layout): the
+    // **The growing band, the pixel half.** A dock with three input rows (four-row layout): the
     // cells are bottom-anchored and come from the layout's viewport, the ground from the band's
     // current height. While the band has not yet risen (extra 0), an input row spilling over
     // the top of the band **must not be drawn** — it would be text without a ground, on top of
@@ -1465,7 +1464,7 @@ fn the_dock_draws_glyphs_and_its_own_caret() {
 
 #[test]
 fn an_upload_button_paints_a_fill_and_a_brighter_edge_in_the_dock() {
-    // 037 phase-6: the button's fill and frame come from the caret's fragment, in the dock's
+    // The button's fill and frame come from the caret's fragment, in the dock's
     // viewport. The core must be in window space: had it stayed dock-local, the SDF would
     // measure outside the quad and no pixel would be painted — a class the counters cannot see.
     let r = renderer();
@@ -1788,9 +1787,9 @@ pub(crate) fn cursor_at(col: u16, text: LinearRgba) -> Cursor {
         // that concern the origin (`content_sticks_to_the_bottom_*`) state it directly. A full
         // grid, i.e. zero offset.
         content_rows: 1,
-        // Drawing the fill is phase-3's job (017); these tests do not consume it yet.
+        // Drawing the fill is another test's job; these tests do not consume it yet.
         fill: 0,
-        // Fractional scrolling (027) does not concern this list either: on a whole row, no top
+        // Fractional scrolling does not concern this list either: on a whole row, no top
         // row.
         top_row: 0,
         scrolled: 0,
@@ -1849,7 +1848,7 @@ fn glyph_under_the_cursor_takes_the_cursor_text_color() {
     push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
 
     let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
-    // **The claim was split in two, not turned into a tolerance** (015 phase-2): the caret's
+    // **The claim was split in two, not turned into a tolerance**: the caret's
     // corner is now round, so the corner pixels are not the block's color and an equality that
     // passed through there would test the roundness. On the body the equality is still **bit
     // for bit**; the corner and the glow have their own separate guards
@@ -1870,8 +1869,8 @@ fn glyph_under_the_cursor_takes_the_cursor_text_color() {
 
 #[test]
 fn a_degenerate_caret_shape_paints_the_old_rectangle() {
-    // **The rollback path's guard** (R8): "radius 0, glow 0" must be a supported and tested
-    // state, i.e. its output is bit for bit identical to 014's plain rectangle. Only the GPU
+    // **The rollback path's guard**: "radius 0, glow 0" must be a supported and tested
+    // state, i.e. its output is bit for bit identical to the old plain rectangle. Only the GPU
     // can say so — in the degenerate arm the fragment uses `step`, in the open arm
     // `smoothstep`, and their edge pixels diverge. If `smoothstep` leaks into that arm, this
     // goes red.
@@ -1880,7 +1879,7 @@ fn a_degenerate_caret_shape_paints_the_old_rectangle() {
     let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
     let mut frame = Frame::default();
-    // **The degenerate arm is now driven by the setting** (016 R6): `cursor_radius = 0` and
+    // **The degenerate arm is now driven by the setting**: `cursor_radius = 0` and
     // `cursor_glow = 0` are a supported user setting, i.e. the rollback path is not a test hook
     // but a **real path**.
     frame.clear(
@@ -1910,7 +1909,7 @@ fn the_caret_corner_is_rounded() {
     // The radius's own guard. `glyph_under_the_cursor_...` deliberately leaves the corners out
     // (middle band); this is the only place that says the roundness **really** exists.
     //
-    // **The reference is from OUTSIDE the caret** (`/code-review`): the earlier version made
+    // **The reference is from OUTSIDE the caret** (found in code review): the earlier version made
     // the comparison with the caret's own opposite corner and, since the SDF is symmetric, the
     // `d` of the two corners is always equal — the claim was a tautology that could not fail at
     // any radius value. The measure is also no longer "equal/different" but the **paint
@@ -1920,7 +1919,7 @@ fn the_caret_corner_is_rounded() {
     let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
     let mut frame = Frame::default();
-    // **The radius is driven by the setting** (016 R6), without overriding: `cursor_radius` is
+    // **The radius is driven by the setting**, without overriding: `cursor_radius` is
     // now a user key and the guard must pass through the real path. The ratio is given
     // **explicitly**, not from the production default — the default is a matter of taste and
     // corresponds to ~1.6 px on a 1x cell, i.e. most of the corner pixel would still be
@@ -1950,9 +1949,9 @@ fn the_caret_corner_is_rounded() {
 
 #[test]
 fn a_hollow_caret_paints_only_its_edge() {
-    // **The edge arm must not ship dead** (`/code-review`). `caret_shape()` gives `stroke` a
+    // **The edge arm must not ship dead** (found in code review). `caret_shape()` gives `stroke` a
     // constant 0 in this version, so the shader's `stroke > 0` branch would never have run and
-    // phase-3 would open it believing it "already written and passing". The test drives that
+    // a later change would open it believing it "already written and passing". The test drives that
     // branch **now**.
     //
     // The second job: the `body -= inner` subtraction can zero the body entirely on a thick
@@ -1980,7 +1979,7 @@ fn a_hollow_caret_paints_only_its_edge() {
 
 #[test]
 fn the_caret_glow_spills_but_stops() {
-    // **The glow is sampled OUTSIDE the rectangle** (R6): a test that looks from the inside
+    // **The glow is sampled OUTSIDE the rectangle**: a test that looks from the inside
     // cannot see the glow, because the body is already opaque there.
     let r = renderer();
     const EDGE: usize = 64;
@@ -2059,7 +2058,7 @@ fn the_glow_setting_reaches_the_pixels() {
 #[test]
 fn the_caret_glow_fades_with_the_caret() {
     // The glow is **multiplied** by the caret's own alpha, so as the blink fades out the glow
-    // fades too (R6). The guard again samples **from outside**:
+    // fades too. The guard again samples **from outside**:
     // `cursor_alpha_is_blended_on_the_gpu` looks only at the caret's own cell and cannot see
     // this symptom.
     let r = renderer();
@@ -2071,7 +2070,7 @@ fn the_caret_glow_fades_with_the_caret() {
     let pad = (f32::from(GUTTER) * crate::frame::CARET_GLOW_RATIO) as usize;
     let at = usize::from(GUTTER) + usize::from(cw) + pad / 2;
     // `pixel_at` does not bound x: an overflowing index does not panic but reads a pixel of
-    // **the next row down**, i.e. the test silently makes a wrong claim (`/code-review`).
+    // **the next row down**, i.e. the test silently makes a wrong claim (found in code review).
     // `fitting_cell_px` never sees the gutter.
     assert!(at < EDGE, "the sample point does not fit the texture");
 
@@ -2126,7 +2125,7 @@ fn a_hollow_caret_leaves_the_glyph_its_own_color() {
     );
 
     let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
-    // **The inset is derived from production**, not a constant (`/code-review`): the ring's
+    // **The inset is derived from production**, not a constant (found in code review): the ring's
     // thickness is `rule_px` and the radius eats the corner; a fixed 3 would either pull the ring
     // into the sample on a large point size or, in a narrow cell, empty the range and fall into an
     // equality that claims nothing.
@@ -2187,8 +2186,8 @@ fn an_unfocused_caret_paints_a_ring_through_the_production_path() {
 
 #[test]
 fn cursor_alpha_is_blended_on_the_gpu() {
-    // Reduce Motion's fade-in (008 phase-5) is blended **on the GPU**: the `cell_bg` pipeline became
-    // blended in this phase and the `cell` fragment does a `mix` instead of an overwrite. The
+    // Reduce Motion's fade-in is blended **on the GPU**: the `cell_bg` pipeline became
+    // blended for it and the `cell` fragment does a `mix` instead of an overwrite. The
     // counter in `frame.rs` shows the alpha was written to the list but cannot show it was painted
     // — exactly the repo rule's counterpart ("a CPU counter does not prove what the GPU painted").
     //
@@ -2234,7 +2233,7 @@ fn cursor_alpha_is_blended_on_the_gpu() {
     // Alpha zero = **no caret at all**: both the block and the letter under it must stay untouched.
     // With blending off, this would have been an opaque rectangle.
     assert_eq!(clear, none, "alpha 0 still drew the caret opaquely");
-    // Alpha one = the state from **before** this phase: the visual result did not change for a
+    // Alpha one = the state from **before** the fade-in: the visual result did not change for a
     // settled caret.
     assert_ne!(opaque, none, "alpha 1 never drew the caret");
 
@@ -2434,9 +2433,9 @@ fn renderer_without_atlas_refuses_glyphs() {
 }
 
 /// A [`SlotUpload`] that only records which planes were written: the
-/// list-building guards below ask the shared `slots::glyph_lists` (040
-/// phase-4 — the Metal `AtlasTexture` they used to build by hand goes
-/// away with Metal), so no texture is involved.
+/// list-building guards below ask the shared `slots::glyph_lists` (the
+/// Metal `AtlasTexture` they used to build by hand went away with
+/// Metal), so no texture is involved.
 #[derive(Default)]
 struct RecordingUpload {
     planes: Vec<Plane>,
@@ -2556,8 +2555,8 @@ fn a_wide_cell_that_fits_one_cell_stays_one_quad() {
 ///
 /// A plain `RGBA8Unorm` texture would be silently wrong: the hardware does **not** decode sRGB
 /// when sampling, the fragment treats the values as linear and the target (`BGRA8Unorm_sRGB`)
-/// encodes once more on write — the palette washes out. The very same silent defect as in
-/// `CLAUDE.md` → "the colour space crosses the boundary", and the only place it is asked
+/// encodes once more on write — the palette washes out. The very same silent defect as "the
+/// colour space crosses the boundary", and the only place it is asked
 /// directly.
 #[test]
 fn the_color_plane_is_an_srgb_texture() {
@@ -2578,7 +2577,7 @@ fn the_color_plane_is_an_srgb_texture() {
     assert_eq!(MASK_FORMAT, wgpu::TextureFormat::R8Unorm);
 }
 
-/// A cluster (`🇹🇷`) landing as **one** colour glyph on all three surfaces (035 R4.1): the grid,
+/// A cluster (`🇹🇷`) landing as **one** colour glyph on all three surfaces: the grid,
 /// the fill band and the dock carry the cell with their own table, `prepare` asks the atlas for
 /// it as `Sprite::Cluster`, and a wide glyph puts two quads from the colour plane — not the box
 /// slot, not two RIs. On a frame where the lists are kept (motion) the second `prepare` gives
@@ -2587,7 +2586,7 @@ fn the_color_plane_is_an_srgb_texture() {
 fn a_cluster_is_one_color_glyph_on_every_surface() {
     // Retina: at 13pt@1x the flag's ink exceeds two cells and the
     // cluster falls back to its base character (the scale of `bt-atlas`'s
-    // cluster tests, 035 phase-1 → Uygulama Notları).
+    // cluster tests).
     let mut tex = Lists::new(2.0);
     let mut frame = Frame::default();
     frame.clear(grid(16, 32), CaretStyle::default());
@@ -2718,7 +2717,7 @@ fn a_color_glyph_goes_to_the_color_list() {
 /// change (the edge derives from `SLOT_TARGET` and the cell size). If a colour texture left at
 /// the old edge is written with the new grid's corners, `replaceRegion` overflows **outside** the
 /// texture — growing the point size with Cmd+ triggers this path while an emoji is on screen.
-/// The same line for the mask texture has existed since 022; this guard keeps the two together.
+/// The same line for the mask texture has existed for longer; this guard keeps the two together.
 #[test]
 fn rebuilding_the_atlas_drops_both_textures() {
     let r = renderer();
@@ -2761,7 +2760,7 @@ fn rebuilding_the_atlas_drops_both_textures() {
     );
 }
 
-// ---- The dock's typing effects (030): hermetic invariants (R5) ----
+// ---- The dock's typing effects: hermetic invariants ----
 //
 // The correctness of the in-between frames is by eye only; here, for each effect, what is
 // tested by loop is the ends and the boundaries: an arrival at `t = 1` is the static glyph
@@ -3054,9 +3053,9 @@ fn a_wide_glyph_transforms_as_one_box() {
     }
 }
 
-// **052 phase-2: the slot quad.** Below `line_height = 1` the glyph's slot is taller than the
+// **The slot quad.** Below `line_height = 1` the glyph's slot is taller than the
 // grid cell and the glyph spills into its neighbours instead of being cut. `< 1` is reachable
-// only from here in this phase: `set_font` takes the struct as is, the settings parser still
+// only from here: `set_font` takes the struct as is, the settings parser still
 // clamps at `1`.
 
 /// The line height the overflow guards draw at: low enough that `g`'s tail leaves its cell and
@@ -3086,7 +3085,7 @@ fn flush(m: CellMetrics) -> CellMetrics {
 
 #[test]
 fn slot_quad_is_the_cell_at_or_above_one() {
-    // R5's GPU half: at `>= 1` the immediates describe today's quad — no offset, the slot is
+    // The GPU half: at `>= 1` the immediates describe today's quad — no offset, the slot is
     // the cell, no viewport lift. Below `1` the same function opens all three, or the claim
     // above would be vacuous.
     for scale in [1.0, 2.0] {
@@ -3136,7 +3135,7 @@ fn slot_quad_is_the_cell_at_or_above_one() {
 
 #[test]
 fn descender_paints_over_the_next_rows_background() {
-    // R3.1: `g`'s tail leaves row 0 and lands on row 1's red ground in the foreground colour —
+    // `g`'s tail leaves row 0 and lands on row 1's red ground in the foreground colour —
     // the grid's grounds are all drawn before its glyphs and the quad is the slot. @2x only:
     // the cut below `1` is proportional to ascent:descent, and at 13pt@1x it takes a single
     // pixel off the bottom — the descent's own slack, so the tail still fits its cell there
@@ -3168,7 +3167,7 @@ fn descender_paints_over_the_next_rows_background() {
 
 #[test]
 fn grid_top_accent_survives_the_fill_band() {
-    // R3.1, the seam between the grid and the fill band: the grid's top row's accent rises
+    // The seam between the grid and the fill band: the grid's top row's accent rises
     // into the band, and the band's ground is drawn **before** the grid's glyphs, so it shows.
     const EDGE: usize = 64;
     let r = tight_renderer();
@@ -3204,7 +3203,7 @@ fn grid_top_accent_survives_the_fill_band() {
 
 #[test]
 fn caret_stays_under_the_fill_band() {
-    // The order's other half (`CLAUDE.md` → draw order): a grid caret sliding into the band is
+    // The draw order's other half: a grid caret sliding into the band is
     // drawn **before** the band's ground and is covered by it. Raising the grid's glyphs over the
     // band must not raise the caret with them.
     let r = renderer();
@@ -3245,7 +3244,7 @@ fn caret_stays_under_the_fill_band() {
 
 #[test]
 fn dock_glyph_stays_inside_its_band() {
-    // R3.2: the dock is a separate panel. With no breathing margin (gutter zero) its input row
+    // The dock is a separate panel. With no breathing margin (gutter zero) its input row
     // starts at the band's top and the accent rising above it is cut at the band's top — the
     // grid's area above stays the clear colour.
     const EDGE: usize = 64;
@@ -3285,7 +3284,7 @@ fn dock_glyph_stays_inside_its_band() {
 
 #[test]
 fn arrival_effect_matches_static_glyph_below_one() {
-    // R3.2/R3.3: below `1` the arrival at `t = 1` is still the static glyph pixel for pixel —
+    // Below `1` the arrival at `t = 1` is still the static glyph pixel for pixel —
     // the effect samples the slot (bound, texel), and the static glyph's accent, spilling into
     // the breathing margin above the input row, is not cut by the dock's glyph viewport.
     const EDGE: usize = 96;
@@ -3336,7 +3335,7 @@ fn a_lifted_viewport_keeps_the_window_bottom() {
     // The glyph viewport is raised by the overflow and **taller by it** (`Op::Lifted`): a grid
     // row sitting on the window's bottom edge (no dock to cover it — vim, `blocks`) keeps the
     // ink of its cell's last pixels. Raised but not taller, the viewport's bottom would end
-    // `lift` pixels above the window's (`/code-review`). The same glyph on the top row and on
+    // `lift` pixels above the window's (found in code review). The same glyph on the top row and on
     // the bottom row of a grid whose origin leaves less than a row: the cell's pixels match.
     const EDGE: usize = 64;
     let r = tight_renderer();

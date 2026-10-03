@@ -2,9 +2,7 @@
 //! queue.
 //!
 //! Nothing wakes until a change arrives — no polling, no thread of ours; the
-//! kernel queues work on the source's queue when a file is touched. The
-//! decision is recorded in `.tasks/007-ayarlar-ve-tema/discussion.md` →
-//! Karar 2.
+//! kernel queues work on the source's queue when a file is touched.
 //!
 //! - **Directory** (`WRITE | DELETE | RENAME`): an entry being created, deleted
 //!   or renamed over — the editor's "write to a temp file, rename over" save.
@@ -135,7 +133,7 @@ fn arm(
     // reader already writes the error to the subtitle when it reads the same
     // path.
     //
-    // `O_EVTONLY`, not read-only (a `/code-review` finding): the descriptor is
+    // `O_EVTONLY`, not read-only (a code-review finding): the descriptor is
     // for events only. A read descriptor would keep an external disk holding
     // the link's target "in use" and prevent its ejection, and on a file
     // evicted to iCloud it could trigger a download on every reinstall.

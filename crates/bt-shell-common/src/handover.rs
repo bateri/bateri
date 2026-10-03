@@ -1,11 +1,10 @@
-//! The update's live handover (055 phase-3): the holder process (`bateri
+//! The update's live handover: the holder process (`bateri
 //! hold`) and its frame.
 //!
 //! When Sparkle relaunches bateri, the old process gives every pane's PTY
 //! master and opaque state to a holder and exits **without** hanging the
 //! shells up; the new process connects, takes them and acknowledges, and the
-//! holder exits. Decisions: `.tasks/055-guncellemede-canli-devir/discussion.md`
-//! → Karar 1, 2, 5, 6, 8, 10.
+//! holder exits.
 //!
 //! - **The frame** ([`Bundle`], [`write_frame`], [`read_frame`]) is **frozen**:
 //!   the holder is the old binary and the client the new one, so the bytes
@@ -56,9 +55,9 @@
 //! `MSG_CMSG_CLOEXEC`: a received master is close-on-exec only after it
 //! arrives, so a child spawned by another thread of the receiving process in
 //! that window inherits a copy — the new bateri takes before it spawns
-//! anything (phase-4).
+//! anything.
 //!
-//! **Order for the new bateri** (phase-4): [`take`] → `adopt_instance` (from
+//! **Order for the new bateri**: [`take`] → `adopt_instance` (from
 //! [`Link::holder_pid`]) → adopt the panes ([`Link::release`] those that fall
 //! back) → [`Link::ack`].
 
@@ -84,7 +83,7 @@ const MAGIC: [u8; 4] = *b"BTHO";
 pub const FRAME_VERSION: u32 = 1;
 
 /// How long a holder lives without an acknowledgement — a **design
-/// constant** (055 R3.3). Long enough for Sparkle to install and start the
+/// constant**. Long enough for Sparkle to install and start the
 /// new bateri on a slow disk and for that bateri to come up; short enough
 /// that an update nobody completes does not keep the user's programs
 /// blocked out of sight for long. After it every shell is hung up.
@@ -628,7 +627,7 @@ pub struct Link {
 
 /// Connects to the holder in `dir`, checks it is user `uid`, and takes the
 /// bundle. A frame of a version this binary does not know is released at
-/// once ([`RELEASE_ALL`]: the holder hangs every shell up — Karar 8) and
+/// once ([`RELEASE_ALL`]: the holder hangs every shell up) and
 /// answered with [`HandoverError::Version`]; the caller falls back.
 pub fn take(dir: &Path, uid: u32) -> Result<(Bundle, Link), HandoverError> {
     let path = dir.join(HANDOVER_SOCKET);
@@ -706,7 +705,7 @@ impl Link {
     }
 }
 
-// ─── the two bateris' own side (055 phase-4) ─────────────────────────────
+// ─── the two bateris' own side ───────────────────────────────────────────
 //
 // What crosses inside the frame's opaque fields, and the two process steps
 // around it: the old bateri spawns the holder and gives it the bundle
@@ -714,15 +713,15 @@ impl Link {
 // bundle at its sequence point ([`arrive`]).
 
 /// The layout blob's first line: this word, [`LAYOUT_VERSION`] and the
-/// bundle id of the bateri that wrote it; the rest is 053's layout text
+/// bundle id of the bateri that wrote it; the rest is session restore's layout text
 /// (`restore::Saved::render`).
 const LAYOUT_WORD: &str = "bateri-handover";
 
 /// The layout blob's version. A new bateri reads this one and the one
-/// before it (Karar 8); there is none before it yet.
+/// before it; there is none before it yet.
 pub const LAYOUT_VERSION: u32 = 1;
 
-/// The layout blob for `layout` (053's text) of the bundle `bundle_id`.
+/// The layout blob for `layout` (session restore's text) of the bundle `bundle_id`.
 pub fn layout_blob(bundle_id: &str, layout: &str) -> Vec<u8> {
     format!("{LAYOUT_WORD} {LAYOUT_VERSION} {bundle_id}\n{layout}").into_bytes()
 }
@@ -759,7 +758,7 @@ fn layout_bundle(blob: &[u8]) -> Option<&str> {
 /// A pane's blob: the platform shell's state for one frozen session
 /// (`bt_core::Frozen` minus the master and the tail, which cross as the
 /// frame's fd and buffer). Versioned on its own: a new bateri reads this
-/// version and the one before it (Karar 8); there is none before it yet.
+/// version and the one before it; there is none before it yet.
 ///
 /// ```text
 /// "BTPS" | version u32 | cols u16 | rows u16 | flags u32 (bit 0: login)
@@ -778,9 +777,9 @@ pub struct PaneState {
     pub core: Vec<u8>,
     /// `bt_core::Frozen::input`.
     pub input: Vec<u8>,
-    /// `Session::final_history` — 053's scrollback, taken before the
+    /// `Session::final_history` — session restore's scrollback, taken before the
     /// freeze: a pane that falls back gets it from here (in memory, so
-    /// `restore_windows = "layout"` keeps its promise, Karar 5 and 8).
+    /// `restore_windows = "layout"` keeps its promise).
     pub history: Vec<u8>,
 }
 
@@ -854,7 +853,7 @@ impl PaneState {
     }
 }
 
-/// The spawned holder before it has the bundle (055 R4.2): spawning comes
+/// The spawned holder before it has the bundle: spawning comes
 /// first — in `applicationShouldTerminate:`, so a holder that cannot be
 /// born leaves today's quit (its question included) — and the panes are
 /// frozen only after.
@@ -926,7 +925,7 @@ impl Spawned {
 /// its pid without waiting: standard I/O on `/dev/null`, `keep` (if any) at
 /// fd 3, the signal mask empty and `SIGPIPE` back to its default — and **no
 /// other descriptor of this process**, close-on-exec or not. On macOS
-/// `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT` (Karar 2): a frozen
+/// `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`: a frozen
 /// session's master is still open here and a copy in the child would defeat
 /// the hang-up. Elsewhere a `fork` + `exec` (the holder closes what it
 /// inherited itself, [`detach`]). The environment is this process's.
@@ -1083,9 +1082,9 @@ fn posix_spawn_clean(
 #[derive(Debug)]
 pub struct Arrival {
     links: Vec<Link>,
-    /// The newest holder's layout (053's text).
+    /// The newest holder's layout (session restore's text).
     pub layout: String,
-    /// The newest holder's instance name (055 R5.1): the new bateri's ssh
+    /// The newest holder's instance name: the new bateri's ssh
     /// registry takes it as its own, so its masters, its focus listener and
     /// the carried shells' `BATERI_SSH_INSTANCE` stay one directory. The
     /// other holders' directories (an earlier unacknowledged attempt) are
@@ -1160,7 +1159,7 @@ fn holders(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-/// **The new bateri's sequence point** (055 R4.3): takes every holder's
+/// **The new bateri's sequence point**: takes every holder's
 /// bundle in `roots`' instance directories and adopts their instance
 /// directories (`me` from each holder, [`ssh_route::adopt_instance`]).
 ///
@@ -1616,7 +1615,7 @@ fn messages(
 
 // ─── the process ─────────────────────────────────────────────────────────
 
-/// `bateri hold --fd FD --dir DIR [--dir DIR]...` (055 R3.2): the update's
+/// `bateri hold --fd FD --dir DIR [--dir DIR]...`: the update's
 /// holder process, started by the old bateri with one end of a `socketpair`
 /// at `FD` and the instance's directories (the first holds the socket).
 /// Returns the exit code. The body is [`hold`]; here the argv and the
@@ -2333,7 +2332,7 @@ mod tests {
 
     /// The pane blob round-trips every field and refuses anything else: a
     /// cut at any length, a byte past the end, another version, an unknown
-    /// flag — a half-read blob would replay a wrong screen (Karar 8).
+    /// flag — a half-read blob would replay a wrong screen.
     #[test]
     fn a_pane_state_round_trips_and_refuses_damage() {
         let state = state();
@@ -2423,7 +2422,7 @@ mod tests {
             arrive(&[root.clone()], uid(), me, "dev.bateri.test").expect("an arrival");
         assert_eq!(arrival.layout, "the layout");
         assert_eq!(owner_of(&dir), Some(me), "the directory was not adopted");
-        // The instance's name comes with it (R5.1): the registry runs on in it.
+        // The instance's name comes with it: the registry runs on in it.
         assert_eq!(
             Some(arrival.instance.as_str()),
             dir.file_name().and_then(|name| name.to_str())

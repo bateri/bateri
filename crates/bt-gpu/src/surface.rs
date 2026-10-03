@@ -1,5 +1,5 @@
 //! The window surface: a wgpu surface over the `CAMetalLayer` that `bt-shell`
-//! owns (040 → Karar 8).
+//! owns.
 //!
 //! `bt-shell` creates the layer, hangs it on the view and sets its scale
 //! (`contentsScale`); this crate opens a wgpu surface on it through **one**
@@ -108,8 +108,7 @@ impl Surface {
                 // usage is the colour target alone).
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 // The single target format (`FORMAT`): the fragment writes
-                // linear, the hardware encodes sRGB (`CLAUDE.md` → colour
-                // space).
+                // linear, the hardware encodes sRGB.
                 format: FORMAT,
                 // `Auto` resolves to sRGB for this format, which resets the
                 // layer to its default colour space — what the old layer had.

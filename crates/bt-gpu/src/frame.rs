@@ -16,9 +16,9 @@
 //! ([`crate::Renderer`]). The pipelines, on the other hand, are three and
 //! surface-independent: stripes and backgrounds go to `cell_bg`'s, glyphs and
 //! rule lines to `cell`'s, and the caret to the sibling fragment (`caret`)
-//! that shares `cell_bg`'s vertex. The selection's list (031) belongs to the
+//! that shares `cell_bg`'s vertex. The selection's list belongs to the
 //! sixth pipeline (`selection`): the same `Instance`, its own vertex and a
-//! corner-masked fragment; the search's four lists (033; two each on the grid
+//! corner-masked fragment; the search's four lists (two each on the grid
 //! and on the band, one per role) share the same pipeline. The reason the
 //! lists within a group stay separate is draw order — glyphs must come on top
 //! of backgrounds and rules on top of glyphs, and in a single list the order
@@ -53,8 +53,7 @@ pub(crate) struct Instance {
     size: [f32; 2],
     /// **Linear** RGBA. The target is `BGRA8Unorm_sRGB` and the ROP does the
     /// encoding: a second gamma correction on the shader side would encode the
-    /// palette twice. Its source is `bt_core::color::linear_rgba` (`CLAUDE.md`
-    /// → colour space).
+    /// palette twice. Its source is `bt_core::color::linear_rgba`.
     rgba: [f32; 4],
 }
 
@@ -71,7 +70,7 @@ const _: () = assert!(offset_of!(Instance, rgba) == 16);
 /// `Instance`'s field offsets, for the wgpu vertex layout
 /// (`crate::renderer`): the fields are private and `offset_of!` only sees
 /// them here. The layout's second consumer is fed from next to the asserts,
-/// not from three hand-written numbers (040 phase-2 `/code-review`).
+/// not from three hand-written numbers.
 pub(crate) const INSTANCE_OFFSETS: [u64; 3] = [
     offset_of!(Instance, pos) as u64,
     offset_of!(Instance, size) as u64,
@@ -81,7 +80,7 @@ pub(crate) const INSTANCE_OFFSETS: [u64; 3] = [
 /// Identical to `shaders/cell.wgsl` -> `GlyphInstance`, field by field.
 ///
 /// **No `size`, no uv size**: in this set every glyph is exactly one cell
-/// tall (`plan.md` → R1.4, fixed slot grid) and both are constant across the
+/// tall (fixed slot grid) and both are constant across the
 /// frame, so they are passed as uniforms rather than per instance. The gain
 /// is not just bandwidth: the `{pos, size, uv0, rgba}` layout comes to 40
 /// bytes in Rust and 48 in MSL (`float4` is 16-aligned, `[f32; 4]` 4) and
@@ -106,7 +105,7 @@ const _: () = assert!(offset_of!(GlyphInstance, rgba) == 16);
 
 /// `GlyphInstance`'s field offsets, for the wgpu vertex layout
 /// (`crate::renderer`): fed from next to the asserts, like
-/// [`INSTANCE_OFFSETS`] (040 phase-3).
+/// [`INSTANCE_OFFSETS`].
 pub(crate) const GLYPH_INSTANCE_OFFSETS: [u64; 3] = [
     offset_of!(GlyphInstance, pos) as u64,
     offset_of!(GlyphInstance, uv0) as u64,
@@ -114,11 +113,10 @@ pub(crate) const GLYPH_INSTANCE_OFFSETS: [u64; 3] = [
 ];
 
 /// Identical to `shaders/glyph_fx.wgsl` -> `FxInstance`, field by field: the
-/// instance of the dock's typing effects (030).
+/// instance of the dock's typing effects.
 ///
 /// **A sibling of [`GlyphInstance`], not an extension of it**: the stride of
-/// all the glyph lists would grow for a handful of animated glyphs
-/// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 5). The
+/// all the glyph lists would grow for a handful of animated glyphs. The
 /// first three fields are in the same places as its, the fourth is the
 /// effect's parameters:
 ///
@@ -149,7 +147,7 @@ const _: () = assert!(offset_of!(FxInstance, fx) == 32);
 
 /// `FxInstance`'s field offsets, for the wgpu vertex layout
 /// (`crate::renderer`): fed from next to the asserts, like
-/// [`INSTANCE_OFFSETS`] (040 phase-4).
+/// [`INSTANCE_OFFSETS`].
 pub(crate) const FX_INSTANCE_OFFSETS: [u64; 4] = [
     offset_of!(FxInstance, pos) as u64,
     offset_of!(FxInstance, uv0) as u64,
@@ -214,8 +212,8 @@ impl Caret {
     /// slot selection ([`Frame::push_caret`]) **must** look at the unswollen
     /// rectangle — had the halo enlarged the footprint and moved the caret
     /// into the dock slot, the caret would be drawn after the grid's glyphs
-    /// and paint over the letter beneath it (the same trap was fallen into in
-    /// 014 phase-1).
+    /// and paint over the letter beneath it (the same trap was fallen into
+    /// once before).
     fn instance(self, cell_px: (f32, f32), shape: CaretShape, rule: f32, glow: f32) -> Instance {
         let (pos, size) = caret_painted_rect(self.at, cell_px, shape, rule);
         Instance {
@@ -253,13 +251,12 @@ pub(crate) const CARET_GLOW_RATIO: f32 = 0.4;
 /// **Chosen, not measured**, and again corrected by eye: 0.35 glowed around a
 /// gold block. What was wanted is "a clean, light design touch like a box
 /// shadow", that is, an alpha at shadow scale. It is **multiplied** by the
-/// caret's own alpha, so when the blink goes dark the halo goes dark too (R6)
+/// caret's own alpha, so when the blink goes dark the halo goes dark too
 /// and no second path is written.
 ///
 /// It came down in two rounds: 0.35 → 0.14 → **0.10**; both by eye. Like
 /// [`CARET_GLOW_RATIO`] it is a **floor**: `cursor_glow` scales it with the
-/// same multiplier, because margin and alpha are one feeling (016
-/// `discussion.md` → Muhakeme).
+/// same multiplier, because margin and alpha are one feeling.
 const CARET_GLOW_ALPHA: f32 = 0.10;
 
 /// The caret's corner radius, in pixels — **including its clamp**.
@@ -271,7 +268,7 @@ const CARET_GLOW_ALPHA: f32 = 0.10;
 /// the extent); this function chooses the value. Tests read from here too,
 /// otherwise the formula would have a third writer.
 ///
-/// The ratio is an **argument**, not a constant: since 016 it comes from the
+/// The ratio is an **argument**, not a constant: it comes from the
 /// setting ([`bt_core::CaretStyle`]) and its default has a single owner,
 /// `bt-core` ([`bt_core::CURSOR_RADIUS`]).
 pub(crate) fn caret_radius_px(cell_px: (f32, f32), ratio: f32) -> f32 {
@@ -286,16 +283,16 @@ pub(crate) fn caret_radius_px(cell_px: (f32, f32), ratio: f32) -> f32 {
 /// **Separate** from the caret's ratio ([`bt_core::CURSOR_RADIUS`]) and more
 /// than twice as large: the selection is a surface wrapping a block of text,
 /// whereas the caret is a block one cell tall — the same pixel radius made
-/// the corner invisible on the selection (031 phase-3's by-eye check, the
+/// the corner invisible on the selection (a by-eye check, the
 /// user: "you could increase the radius value a bit"; at 13pt@2x ≈3 px → ≈7
 /// px). A ratio, not pixels: the corner grows with Cmd +/−. The clamp is from
 /// [`caret_radius_px`]: on a one-cell selection the radius does not exceed
 /// half the cell's short side, so the shape is not broken even if it becomes
-/// a pill. The user's `cursor_radius` does not touch this (Karar 10: the key
+/// a pill. The user's `cursor_radius` does not touch this (the key
 /// is the caret's).
 pub(crate) const SELECTION_RADIUS: f32 = 0.22;
 
-/// One corner of the selection shape (031 phase-3); its order in
+/// One corner of the selection shape; its order in
 /// [`selection_corners`]'s array is TL, TR, BR, BL — `selection_fragment`'s
 /// mask order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,7 +315,7 @@ pub(crate) enum Corner {
 /// The four corners of `runs[index]` (TL, TR, BR, BL).
 ///
 /// A neighbour is only the **adjacent** row's run: if a row with no run comes
-/// between (Karar 4 — a row with no drawable cell produces no run) the shape
+/// between (a row with no drawable cell produces no run) the shape
 /// splits there and the two pieces take their own corners. `runs` is in row
 /// order with at most one run per row (`bt_core::SelectionRuns::as_slice`).
 ///
@@ -398,7 +395,7 @@ fn caret_painted_rect(
     shape: CaretShape,
     rule: f32,
 ) -> ([f32; 2], [f32; 2]) {
-    // **`min`+`max`, not `clamp`** (`/code-review`, 014 gate): `f32::clamp`
+    // **`min`+`max`, not `clamp`**: `f32::clamp`
     // wants `min <= max` and `Frame::default()`'s cell is `(0.0, 0.0)` — a
     // `push_caret` arriving without `clear` would **panic** inside the
     // display link callback. Not a panic path as such, but it would kill a
@@ -488,14 +485,14 @@ pub(crate) struct GlyphCell {
     /// atlas is already borrowed and the cell size is at hand.
     pub(crate) wide: bool,
     /// The boundary's `Cell::cluster`: the emoji sequence's id in the
-    /// list's **own** table (035 Karar 4B) — the grid and the fill band use
+    /// list's **own** table — the grid and the fill band use
     /// [`Frame::clusters`], the dock [`Frame::dock_clusters`], the ghosts
     /// [`Frame::fx_clusters`]. The string goes into the atlas at `prepare`
     /// time (`Atlas::intern`), like `ch`: this list does not see the atlas.
     pub(crate) cluster: Option<ClusterId>,
 }
 
-/// Moves a cluster id from the `from` table to the `to` table (035): lists
+/// Moves a cluster id from the `from` table to the `to` table: lists
 /// that outlive their source (typing effects) copy the string into their own
 /// tables. An id not found in the source is `None` — the glyph is drawn with
 /// its base character, not with a wrong string.
@@ -539,8 +536,8 @@ pub(crate) struct RuleCell {
 ///
 /// **The translation is here because it is the only place.** `bt-atlas` does
 /// not see `bt-core` and must not: that edge would pull `alacritty_terminal`
-/// into the pure-CoreText crate (`CLAUDE.md` → "a dependency is an
-/// architectural decision"); `bt-gpu` is the only layer that sees both. Their
+/// into the pure-CoreText crate (a dependency is an
+/// architectural decision); `bt-gpu` is the only layer that sees both. Their
 /// four variants are the same but **their reasons are separate** — one is SGR
 /// 1/3 semantics, the other a CoreText trait. If they are merged because
 /// "they look the same", the layer direction inverts: the merged type would
@@ -586,7 +583,7 @@ fn rule_kind(underline: UnderlineStyle) -> Option<RuleKind> {
 
 /// The dock's two colours, one per frame.
 ///
-/// The row count is **not** here (032): the cells' layout depends on it and
+/// The row count is **not** here: the cells' layout depends on it and
 /// the cells are pushed **before** the surface ([`Frame::open_dock`]), so the
 /// count is in a separate field written before the cells
 /// ([`Frame::set_dock_rows`]).
@@ -597,22 +594,21 @@ pub(crate) struct DockSurface {
     ground: [f32; 4],
     /// The **top** hairline that separates the dock from the grid
     /// (`bt_core::Dock::edge`): on a remote session it is a separate colour
-    /// (036), so it cannot be the same field as the second line.
+    /// so it cannot be the same field as the second line.
     edge: [f32; 4],
     /// The hairline that separates the input block from the context row.
     separator: [f32; 4],
     /// The filled share of the top line, `0..=1`
     /// ([`Frame::set_dock_progress`]); `None` → the line is entirely `edge`.
     progress: Option<f32>,
-    /// The empty track of the progress bar (`bt_core::Dock::track`, 037
-    /// phase-7); drawn only while `progress` is present.
+    /// The empty track of the progress bar (`bt_core::Dock::track`); drawn only while `progress` is present.
     track: [f32; 4],
     /// The upload row's buttons ([`Frame::set_dock_buttons`]); opening clears
     /// them every frame, so a button exists only in the frame it is told.
     buttons: [Option<DockButton>; 2],
 }
 
-/// Alpha of the upload button's fill and border, per state (037 phase-6) —
+/// Alpha of the upload button's fill and border, per state —
 /// a **design constant**, the values of the approved design: a resting button
 /// is a faint fill and a distinct border, under the pointer both darken, and
 /// while pressed the fill goes one shade further.
@@ -640,15 +636,15 @@ pub(crate) struct RoundedDraw {
 /// The share the PTY **reserves** for the dock, in rows: one input row + one
 /// context row.
 ///
-/// Two, because the dock's design is two rows (`plan.md` → Hedef): on top
+/// Two, because the dock's design is two rows: on top
 /// `>` + ZLE's display, below `[folder] | [branch]`. The share is deducted
 /// from the grid's height, so enlarging the number later would mean a second
 /// `TIOCSWINSZ` that shortens the user's window by a row.
 ///
-/// **Reserved, not drawn** (032): the dock's drawn band grows with the number
+/// **Reserved, not drawn**: the dock's drawn band grows with the number
 /// of input rows ([`band_px`]) but this share **never changes** — the shell
 /// sees no SIGWINCH, the grid makes room by being offset upward in the
-/// drawing (`.tasks/032-cok-satirli-dock/discussion.md` → Karar 1).
+/// drawing.
 ///
 /// A constant of this crate because this crate does the drawing; `bt-shell`
 /// **consumes** it in the grid arithmetic (`split_into_grid`) and keeps no
@@ -666,7 +662,7 @@ pub const DOCK_ROWS: u16 = 2;
 /// `DOCK_ROWS` being consumed by `bt-shell`.
 ///
 /// **Breathing room above and below the rows** (`2 *`): with the two rows
-/// glued to the hairline the dock looked "ugly" (the user, 012 phase-9). The
+/// glued to the hairline the dock looked "ugly" (the user). The
 /// user chose the adjacent + breathing-room look, not a detached surface.
 ///
 /// The margin's source is **the left margin itself** ([`CellMetrics::gutter_px`]):
@@ -683,7 +679,7 @@ pub fn dock_px(dock_rows: u16, cell: CellMetrics) -> f32 {
 }
 
 /// The height of the dock's **drawn** band, in pixels: `input_rows` input
-/// rows plus the context row (032).
+/// rows plus the context row.
 ///
 /// The sibling of [`dock_px`] (the share the PTY **reserves**) and a separate
 /// name from it, because the two numbers now diverge: the share is fixed at
@@ -693,14 +689,14 @@ pub fn dock_px(dock_rows: u16, cell: CellMetrics) -> f32 {
 ///
 /// There is no gap between input rows — a single editor surface; the gap and
 /// the second hairline are only between the input block and the context row
-/// (`discussion.md` → Karar 9). The formula's body is still [`dock_height`]:
+/// The formula's body is still [`dock_height`]:
 /// the band is a dock of `input_rows + 1` rows.
 pub(crate) fn band_px(input_rows: u16, cell: CellMetrics) -> f32 {
     dock_px(input_rows.saturating_add(1), cell)
 }
 
-/// The ceiling of the dock's input rows: **half** of the grid's rows (032
-/// Karar 4) — a **design constant**, not a measured number (the precedent of
+/// The ceiling of the dock's input rows: **half** of the grid's rows — a
+/// **design constant**, not a measured number (the precedent of
 /// [`bt_atlas::CONTEXT_SCALE`]).
 ///
 /// Rationale: the surface where the command is typed and the output that is
@@ -737,8 +733,8 @@ pub fn context_cols(cols: u16, cell: CellMetrics) -> u16 {
 
 /// The top of the context row's cell band, in pixels measured from the
 /// **bottom** of the input block: the row gap if there is an input row,
-/// otherwise (remote session, 036) zero — [`Frame::dock_pos`]'s rule. The
-/// mouse reads the upload button's vertical span from this (037 phase-6):
+/// otherwise (remote session) zero — [`Frame::dock_pos`]'s rule. The
+/// mouse reads the upload button's vertical span from this:
 /// the fill is exactly in that band ([`Frame::dock_button_draws`]).
 pub fn context_row_offset(input_rows: u16, cell: CellMetrics) -> f32 {
     if input_rows == 0 {
@@ -753,10 +749,10 @@ pub fn context_row_offset(input_rows: u16, cell: CellMetrics) -> f32 {
 /// as a field (its constructor rejects zero, so it has no `Default`), but it
 /// already has the two components.
 ///
-/// **A single row gap** (032): between the context row and the input block
+/// **A single row gap**: between the context row and the input block
 /// above it. The input rows are adjacent among themselves, so a dock of
 /// `rows` rows is `rows · cell_h + 2 · pad + gap`; a one-row dock (only in
-/// tests) has no gap. Before 032 there was a gap between every row, and for a
+/// tests) has no gap. Before multi-row input there was a gap between every row, and for a
 /// two-row dock the two formulas give the same number.
 fn dock_height(rows: u16, cell_h: f32, pad: f32) -> f32 {
     if rows == 0 {
@@ -785,7 +781,7 @@ fn dock_height(rows: u16, cell_h: f32, pad: f32) -> f32 {
 ///   ─────────── bottom of the dock
 /// ```
 ///
-/// In phase-9 it was `pad / 2` and its rationale was "the outer gap is larger
+/// It used to be `pad / 2` and its rationale was "the outer gap is larger
 /// than the inner one". That rule is right for **groups** but there is no
 /// group here: the line turns the two rows into two separate things, and then
 /// above the input row there was `pad` and below it `pad / 2` — the user saw
@@ -821,7 +817,7 @@ const SEPARATOR_PX: f32 = 1.0;
 /// been frozen in the constructor it would silently go stale when the screen
 /// scale changes (`windowDidChangeBackingProperties:`).
 ///
-/// **Not every frame sees `clear`, and this is the distinction 008 brought:**
+/// **Not every frame sees `clear`, and this is the distinction motion frames brought:**
 /// a motion frame draws without finding the grid dirty, so it cannot clear the
 /// list — [`Frame::move_caret`] moves only the caret, preserving it. The only
 /// place `clear` is called is the content frame.
@@ -830,11 +826,10 @@ pub(crate) struct Frame {
     /// The command blocks' stripes in the left margin; through the **same**
     /// pipeline as the backgrounds but in a separate list.
     ///
-    /// The reason for the separation is not draw order but lifetime (010 →
-    /// R4.1): had it gone into `bg`, it would go in either uncounted — back
+    /// The reason for the separation is not draw order but lifetime: had it gone into `bg`, it would go in either uncounted — back
     /// then the motion frame trimmed `bg` to `bg_count` and the stripe would
-    /// **flicker** as the caret glided; since 012 the caret has its own slot
-    /// ([`Frame::grid_caret`]) and since 015 its own pipeline — it never
+    /// **flicker** as the caret glided; now the caret has its own slot
+    /// ([`Frame::grid_caret`]) and its own pipeline — it never
     /// enters the background list and the trimming is gone, but the
     /// rationale for the separation stands — or counted, and the meaning of
     /// the `cells=` token would drift ("drawn cells" would now also count
@@ -842,7 +837,7 @@ pub(crate) struct Frame {
     /// unrepresentable.
     stripes: Vec<RuleCell>,
     bg: Vec<Instance>,
-    /// The mouse selection's row runs and concave fills (031); drawn from its
+    /// The mouse selection's row runs and concave fills; drawn from its
     /// own pipeline (`selection`, a corner-masked SDF), **after** the
     /// backgrounds and before the caret and the glyphs
     /// ([`Renderer::encode_pass`](crate::renderer::Renderer)).
@@ -855,7 +850,7 @@ pub(crate) struct Frame {
     /// so the token would say nothing; the proof is `renderer.rs`'s offscreen
     /// read.
     selection: Vec<Instance>,
-    /// The dock's selection run (031 phase-4): the twin of `selection` on the
+    /// The dock's selection run: the twin of `selection` on the
     /// dock surface — the same pipeline, the same colour and radius uniform,
     /// in the dock's own viewport ([`Frame::push_dock_selection`]). A
     /// separate list, because the grid's list slides with the offset while
@@ -864,12 +859,12 @@ pub(crate) struct Frame {
     /// The selection's colour in this frame ([`Frame::push_selection`] writes
     /// it); a motion frame keeps it just as it keeps the list.
     selection_rgba: [f32; 4],
-    /// The search highlight's pieces (033), from `selection`'s pipeline and
+    /// The search highlight's pieces, from `selection`'s pipeline and
     /// shape: all the matches (`search_match`) and the current match
     /// (`search_current`). **One list per role**, because the colour is a
     /// per-call uniform — two roles, two encodes ([`Frame::push_search`]).
     /// Separate from the selection, because the selection is drawn **on top
-    /// of** the search (Karar 7) and carries its own colour. No counter, the
+    /// of** the search and carries its own colour. No counter, the
     /// same rationale as the selection's.
     search_match: Vec<Instance>,
     search_current: Vec<Instance>,
@@ -904,7 +899,7 @@ pub(crate) struct Frame {
     /// `bt-core` and does not know the focus. Without the field the caret
     /// would fill in on the first motion frame of an unfocused window.
     ///
-    /// It was **not added** to `CaretShape` (R7.3): that enum is the settings
+    /// It was **not added** to `CaretShape`: that enum is the settings
     /// file's vocabulary (`"block" | "underline" | "beam"`) and focus is an
     /// axis **orthogonal** to the shape.
     caret_hollow: bool,
@@ -915,7 +910,7 @@ pub(crate) struct Frame {
     /// argument of `clear` writes them, a motion frame keeps them (it does not
     /// call `clear`).
     ///
-    /// It was **not loaded onto** `CellMetrics` (016 R3.1): that is font
+    /// It was **not loaded onto** `CellMetrics`: that is font
     /// geometry and has 32 call sites; the doc of `GUTTER_PT` already says
     /// "a constant, not a setting".
     caret_style: CaretStyle,
@@ -925,7 +920,7 @@ pub(crate) struct Frame {
     /// reason as `cell_px` (both arrive with one [`CellMetrics`]): when the
     /// scale changes the two are refreshed together. Had it been read from a
     /// separate constant it could diverge from the `cols` computation — its
-    /// having a single source for all three is the condition of 010 Karar 3.
+    /// having a single source for all three is the condition for the gutter.
     gutter_px: f32,
     /// The **drawn** top of the dock band, **in pixels in window space**; if
     /// there is no dock, infinity (the caret never falls into the dock slot).
@@ -950,7 +945,7 @@ pub(crate) struct Frame {
     ///
     /// It is not derived from the row count, because a one-row layout has two
     /// meanings: in production a remote session's band consisting of the
-    /// context row alone (036, [`Frame::set_dock_input_rows`] with zero) and
+    /// context row alone ([`Frame::set_dock_input_rows`] with zero) and
     /// in tests a single input row without context ([`Frame::set_dock_rows`]).
     /// The second stays under the "two or more → last row is context" rule.
     dock_context: bool,
@@ -1053,21 +1048,21 @@ pub(crate) struct Frame {
     /// The caret's **painted** rectangle (x0, y0, x1, y1), window space.
     ///
     /// A separate field from [`CursorBlock::rect`] and the separation is a
-    /// condition of phase-3: on a hollow caret there is paint but no opaque
+    /// condition of the hollow caret: on a hollow caret there is paint but no opaque
     /// interior. Degenerate (all zero) = no caret to draw.
     caret_core: [f32; 4],
     /// The SDF uniform's **test override**; always `None` in production.
     ///
-    /// **A half override** (`/code-review`): it only flips the fragment
+    /// **A half override**: it only flips the fragment
     /// uniform, not the quad's swelling by the halo margin
     /// ([`Frame::glow_px`]). So enlarging the halo margin here does not
     /// enlarge the quad and the halo cannot extend outside the core. The tests
     /// therefore turn the halo on **with a margined grid**, not with the
     /// override; the override is only to drive the radius and the edge.
     ///
-    /// The single guard of the rollback path (R8) goes through here: the
+    /// The single guard of the rollback path goes through here: the
     /// output of the "radius 0, halo 0" arm must be **bit for bit** the same as
-    /// 014's plain quad and only the GPU can say that — in the degenerate arm
+    /// the plain quad and only the GPU can say that — in the degenerate arm
     /// the fragment uses `step`, in the open arm `smoothstep`, and their edge
     /// pixels would diverge. A constructor in production would be dead code.
     #[cfg(test)]
@@ -1092,7 +1087,7 @@ pub(crate) struct Frame {
     dock_bg: Vec<Instance>,
     dock_glyphs: Vec<GlyphCell>,
     dock_rules: Vec<RuleCell>,
-    /// The clusters' tables (035 Karar 4B): they live and are cleared
+    /// The clusters' tables: they live and are cleared
     /// **together with** the lists, so a motion frame (which keeps the lists)
     /// draws the same ids with the same strings. Three tables, because there
     /// are three writers: `frame()` fills the grid and the fill band in one
@@ -1107,7 +1102,7 @@ pub(crate) struct Frame {
     clusters: Clusters,
     dock_clusters: Clusters,
     fx_clusters: Clusters,
-    /// The dock's typing effects (030): the ghosts of deleted glyphs and the
+    /// The dock's typing effects: the ghosts of deleted glyphs and the
     /// arriving glyphs. Two lists, because their draw orders are separate —
     /// ghosts **before** the dock glyphs, arrivals **after**
     /// ([`crate::Renderer`]'s `encode_dock`).
@@ -1148,11 +1143,10 @@ pub(crate) struct Frame {
     fill_bg: Vec<Instance>,
     fill_glyphs: Vec<GlyphCell>,
     fill_rules: Vec<RuleCell>,
-    /// The fill band's search highlight (033 Karar 8): the band's rows are
+    /// The fill band's search highlight: the band's rows are
     /// real history and their matches are highlighted like the grid's — the
     /// rows are fill-local, drawn in the band's viewport. The colours are the
-    /// same uniform as the grid's. There is no selection drawing in the band
-    /// (Karar 12).
+    /// same uniform as the grid's. There is no selection drawing in the band.
     fill_search_match: Vec<Instance>,
     fill_search_current: Vec<Instance>,
     /// The fill band's height, in **rows** (`bt_core::Cursor::fill`); zero →
@@ -1313,7 +1307,7 @@ impl Frame {
     }
 
     /// This frame's vertical origin, in pixels; `setViewport`'s `originY` —
-    /// the offset plus the scroll fraction, **minus the band's excess** (032).
+    /// the offset plus the scroll fraction, **minus the band's excess**.
     ///
     /// As the band's drawn height exceeds the PTY share, the grid is drawn
     /// that much higher: the full grid's top is clipped, and the fill band and
@@ -1339,7 +1333,7 @@ impl Frame {
         if let Some(bg) = cell.bg {
             // The counter and the list having the **same** length is the
             // proof that nothing not counted, like the caret, leaked into
-            // `bg`; since 012 the caret has its own slot
+            // `bg`; the caret has its own slot
             // ([`Frame::grid_caret`]) and never enters here.
             debug_assert_eq!(
                 self.bg.len(),
@@ -1378,7 +1372,7 @@ impl Frame {
             self.rules.push(RuleCell {
                 pos,
                 kind,
-                // SGR 58 if present, otherwise the foreground (`bt-core` → R3.5).
+                // SGR 58 if present, otherwise the foreground (`bt-core`).
                 rgba: cell.underline_color.unwrap_or(cell.fg).to_array(),
             });
         }
@@ -1395,7 +1389,7 @@ impl Frame {
     }
 
     /// The selection's row runs: **one** quad per run, as the pieces of a
-    /// single rounded-corner shape (031 phase-3).
+    /// single rounded-corner shape.
     ///
     /// One instance per run, not per cell: the bridged gaps have no cell of
     /// their own (they never reach the sink) and the seam between neighbouring
@@ -1423,7 +1417,7 @@ impl Frame {
     }
 
     /// The dock's selection runs: one run per visual row of the input block
-    /// (`bt_core::Session::dock`'s `runs`; a long line wraps, 032). By the
+    /// (`bt_core::Session::dock`'s `runs`; a long line wraps). By the
     /// **same** path as the grid's shape ([`Frame::selection_parts`]) — the
     /// corner decision looks at the neighbouring row's run, so a selection
     /// across rows is a single-piece shape; the position is dock-local
@@ -1489,12 +1483,12 @@ impl Frame {
         }
     }
 
-    /// The search highlight's runs on the grid (033): the selection's shape
+    /// The search highlight's runs on the grid: the selection's shape
     /// ([`Frame::selection_parts`], `SELECTION_RADIUS`) but the corners are
     /// **per match** — [`selection_corners`] assumes one run per row and
     /// array adjacency, whereas search puts several runs on a row and two
     /// separate matches on consecutive rows must not fuse into a single shape
-    /// (Karar 7). A single wrapped match does fuse: `SearchRun::continues`
+    /// A single wrapped match does fuse: `SearchRun::continues`
     /// says so.
     ///
     /// The colours are the caller's choice by focus (`bt_core::SearchRuns`),
@@ -1621,7 +1615,7 @@ impl Frame {
     }
 
     /// The selection's corner radius, in pixels: the selection's own ratio
-    /// ([`SELECTION_RADIUS`]), not the user's `cursor_radius` (Karar 10 — the
+    /// ([`SELECTION_RADIUS`]), not the user's `cursor_radius` (the
     /// key is the caret's). Its clamp is from [`caret_radius_px`], i.e. half
     /// the width on a one-cell run.
     pub(crate) fn selection_radius(&self) -> f32 {
@@ -1634,7 +1628,7 @@ impl Frame {
     /// **The colour is carried, not produced.** `bt-core` hands over the
     /// "which rows, which colour" question already resolved ([`Block`]); a
     /// branch here that recognises exit codes would be in the wrong place
-    /// (`CLAUDE.md` → the decision is here, the painting there).
+    /// (the decision is here, the painting there).
     ///
     /// It **goes through** [`Frame::pos`] and must: the dock's prompt mark
     /// goes through the same row (`dock::render`, column 0), so the alignment
@@ -1657,7 +1651,7 @@ impl Frame {
         let h = self.cell_px.1;
         debug_assert!(h > 0.0, "clear(metrics) was not called");
         // **The mark is no longer a rectangle, it is the dock's chevron
-        // itself** (012 phase-9, the user: "in the grid part the result colour
+        // itself** (the user: "in the grid part the result colour
         // boxes will be this new > too, their colours staying the same"). The
         // two already said the same thing — a prompt mark in the phase colour —
         // and drawing them with separate shapes was not a design decision but
@@ -1734,7 +1728,7 @@ impl Frame {
     /// `bt-core`'s decision and do not depend on position — the intermediate
     /// position is the drawer's, the target the boundary's.
     ///
-    /// **`at` is a screen row, not a grid row** (`crate::motion`, R2.1): the
+    /// **`at` is a screen row, not a grid row** (`crate::motion`): the
     /// caret is exempt from the offset, because on Enter the grid row goes up
     /// by one while the offset goes down by one and the caret's place on
     /// screen never changes. While the content flows up behind it, the caret
@@ -1765,7 +1759,7 @@ impl Frame {
         //
         // **The third term is the user's** (`[terminal] cursor_unfocused`):
         // `"solid"` turns hollowing off and does **not touch** the blink —
-        // the blink stopping when unfocused is 015's separate decision, the two
+        // the blink stopping when unfocused is a separate decision, the two
         // being separate signals.
         let hollow = !focused
             && matches!(shape, CaretShape::Block)
@@ -1790,7 +1784,7 @@ impl Frame {
         // the two coinciding in the same frame is narrow; closing it would mean
         // moving the fraction into the caret's animator.
         //
-        // **An overlap below half a pixel is not a handover** (036): in a
+        // **An overlap below half a pixel is not a handover**: in a
         // remote session the band's excess is fractional
         // (`(band_px − dock_px) / cell_h`) and not exactly representable in
         // `f32`; the bottom edge of the caret on the last row would exceed the
@@ -1837,7 +1831,7 @@ impl Frame {
         };
         // **The painted rectangle is kept separate**, not derived from
         // `CursorBlock`'s: today they are equal, but on a hollow caret
-        // (phase-3, R5) the inversion area empties while the painted area
+        // the inversion area empties while the painted area
         // stays. This is the fragment SDF's core; in screen space, i.e. the
         // same space as `[[position]]`.
         let (painted_pos, painted_size) = rects.painted;
@@ -1874,8 +1868,7 @@ impl Frame {
     ///
     /// The grid is not dirty, so the glyph and rule lists are still valid —
     /// rebuilding them would mean taking the `Term` lock 120 times a second
-    /// and fighting "the render path does not block" right there (008 Karar
-    /// 4). The background list is trimmed to `bg_count`: the only thing
+    /// and fighting "the render path does not block" right there. The background list is trimmed to `bg_count`: the only thing
     /// trimmed is the previous frame's caret, because [`Frame::push`] must add
     /// backgrounds **before** the caret and a `debug_assert` holds that. The
     /// trimming keeps that guard valid — the list stays in "backgrounds first,
@@ -1976,7 +1969,7 @@ impl Frame {
     /// and the typing effects ([`Frame::set_dock_fx`]).
     ///
     /// A single place, because the effect's drawing at `t = 1` must be pixel
-    /// for pixel the same as the static glyph (`plan.md` → R5): had the
+    /// for pixel the same as the static glyph: had the
     /// position, face, size class or colour been computed in two places, the
     /// letter would jump for a moment in the handover frame.
     fn dock_glyph(&self, cell: Cell) -> Option<GlyphCell> {
@@ -1992,10 +1985,10 @@ impl Frame {
             } else {
                 SizeClass::Normal
             },
-            // **The boundary can now also give `true` here** (024): the
+            // **The boundary can now also give `true` here**: the
             // dock's column accumulates from width, not from the character
             // index, so the head cell of a wide character arrives marked and a
-            // glyphless ground cell falls on the spacer column. In 023 the
+            // glyphless ground cell falls on the spacer column. Earlier the
             // comment on this line said "the boundary always gives `false`" and
             // that was exactly the rationale for reading the field from the
             // cell — "if `bt-core` ever removed it this line would silently
@@ -2003,7 +1996,7 @@ impl Frame {
             // the constant was not written.
             wide: cell.wide,
             rgba: cell.fg.to_array(),
-            // The context row (small class) carries no clusters (Karar 6): the
+            // The context row (small class) carries no clusters: the
             // boundary pushes no clustered cell there.
             cluster: cell.cluster,
         })
@@ -2016,7 +2009,7 @@ impl Frame {
     /// same [`Frame::dock_pos`], i.e. exact equality) and character. An
     /// arrival that cannot be found either fell outside the window or that
     /// character is no longer there — on a wrapped input the letter that
-    /// slides behind the edit also ends here (032 phase-6); had it been drawn,
+    /// slides behind the edit also ends here; had it been drawn,
     /// a letter not on the line would appear. Ghosts are not asked: they have
     /// no static glyph to begin with.
     pub(crate) fn suppress_dock(&self, fx: &mut GlyphFx) {
@@ -2142,7 +2135,7 @@ impl Frame {
     /// The frame path's layout: `input_rows` input rows
     /// (`bt_core::Cursor::input_rows`) and **always** a context row below.
     ///
-    /// Zero input rows is legitimate (036 Karar 8, remote session): the
+    /// Zero input rows is legitimate (remote session): the
     /// layout is the context row alone, in the small face and with no row gap
     /// above it — there is no input row to separate.
     pub(crate) fn set_dock_input_rows(&mut self, input_rows: u16) {
@@ -2201,7 +2194,7 @@ impl Frame {
         });
     }
 
-    /// The upload row's buttons (`bt_core::Dock::buttons`, 037 phase-6): after
+    /// The upload row's buttons (`bt_core::Dock::buttons`): after
     /// [`Frame::open_dock`]; a no-op if the dock is not open.
     pub(crate) fn set_dock_buttons(&mut self, buttons: [Option<DockButton>; 2]) {
         if let Some(dock) = &mut self.dock {
@@ -2262,9 +2255,9 @@ impl Frame {
     }
 
     /// Turns the top hairline into a **progress bar** for this frame
-    /// (`bt_core::Dock::progress`, in ten-thousandths; 037 Karar 7): the filled
-    /// part in `edge`'s colour, the rest in `track`'s (`bt_core::Dock::track`,
-    /// 037 phase-7). After [`Frame::open_dock`]; opening resets it to `None`
+    /// (`bt_core::Dock::progress`, in ten-thousandths): the filled
+    /// part in `edge`'s colour, the rest in `track`'s (`bt_core::Dock::track`).
+    /// After [`Frame::open_dock`]; opening resets it to `None`
     /// every frame, so the bar exists only in the frame it is told. A no-op if
     /// the dock is not open.
     pub(crate) fn set_dock_progress(&mut self, progress: Option<u16>, track: LinearRgba) {
@@ -2324,7 +2317,7 @@ impl Frame {
     /// `None` if there is no dock or this frame did not tell the window's
     /// bottom.
     ///
-    /// If there is no input row (remote session, 036) the row count is
+    /// If there is no input row (remote session) the row count is
     /// **zero**, not `None`: `None` goes, on the mouse side, to the one-row
     /// fallback of "no frame yet" and a phantom input block would be born on
     /// the context row.
@@ -2376,7 +2369,7 @@ impl Frame {
     /// `LinkDelegate::set_origin`) and this rectangle is the only thing that
     /// covers it.
     ///
-    /// **In the band's space** (032): all three are drawn from the drawn
+    /// **In the band's space**: all three are drawn from the drawn
     /// band's viewport (`Renderer::encode_dock`, `height − band`), so the
     /// ground and the top hairline rise and fall with the animation; the
     /// second hairline is **bottom-anchored** — it stays in the gap above the
@@ -2417,13 +2410,13 @@ impl Frame {
             // The separator is **above** the ground and in the dock's topmost
             // pixel: that is the boundary between the grid and the dock. Its
             // colour is from its own field: in a remote session the surface's
-            // edge says the distance (036), it is not a divider.
+            // edge says the distance, it is not a divider.
             Instance {
                 pos: [0.0, 0.0],
                 size: [width_px, SEPARATOR_PX],
                 rgba: edge_base,
             },
-            // While an upload runs (037 Karar 7), the part of the line that
+            // While an upload runs, the part of the line that
             // fills from the left: by the bytes of the whole queue, in the
             // host's colour. It is rounded (the hairline's rationale: an edge
             // that does not land on the device grid would fade).
@@ -2435,8 +2428,8 @@ impl Frame {
             // **The second separator: between the input row and the context
             // row.** Locally the same colour and the same thickness as the top
             // one, because it says the same thing — "these are two separate
-            // surfaces"; it does not take the remote session's colour. phase-9
-            // had put a gap between; a gap *suggests* a separation, a line
+            // surfaces"; it does not take the remote session's colour. An earlier
+            // design had put a gap between; a gap *suggests* a separation, a line
             // **says** it (the user asked).
             //
             // Its place is the **middle** of the gap, not its top or bottom
@@ -2594,7 +2587,7 @@ impl Frame {
     /// arithmetic been written the band's and the content's columns could
     /// diverge.
     ///
-    /// **The position is not baked at push time** (R3.1) and could not be: a
+    /// **The position is not baked at push time** and could not be: a
     /// motion frame keeps the lists and rewrites only `origin_px`
     /// (`LinkDelegate::set_origin`), so a baked position would go stale in
     /// every frame of the slide — the fill would freeze in place while the grid
@@ -2671,19 +2664,19 @@ impl Frame {
     ///
     /// **Negative is legitimate** and happens in production: when `origin_px`
     /// is smaller than the band's height the band's oldest rows overflow the
-    /// top of the window and Metal clips them. Measured (017 phase-0, Apple M1
+    /// top of the window and Metal clips them. Measured (Apple M1
     /// Pro / macOS 26.4.1, API validation layer on); the witness is
     /// `Renderer::tests::a_negative_viewport_origin_draws_and_clips_from_the_top`.
     ///
     /// **At read time**, not at push time: between the two `set_origin_rows`
     /// runs once more (motion frame) and the band must slide **together with**
-    /// it (R3.1).
+    /// it.
     pub(crate) fn fill_origin_px(&self) -> f32 {
         self.origin_px() - f32::from(self.fill_rows) * self.cell_px.1
     }
 
     /// The halo's margin, in pixels — derived from the left margin
-    /// ([`CARET_GLOW_RATIO`]), not a second design constant (R3).
+    /// ([`CARET_GLOW_RATIO`]), not a second design constant.
     ///
     /// The same inner indent is used for the third time: the left margin, the
     /// dock's breathing room and now the halo — all three from a **single
@@ -2703,7 +2696,7 @@ impl Frame {
     /// The caret fragment's shape uniform: radius, edge, halo margin, halo
     /// alpha — all in pixels, the last 0..1.
     ///
-    /// **A bare `[f32; 4]`, not a struct** (R2.1): in Rust `[f32; 4]` is
+    /// **A bare `[f32; 4]`, not a struct**: in Rust `[f32; 4]` is
     /// 4-aligned, in MSL `float4` is 16-aligned, and when the two meet inside
     /// a struct the stride silently diverges. As a lone argument both are 16
     /// bytes at offset 0, so the trap is never born.
@@ -2727,7 +2720,7 @@ impl Frame {
             // rule, while a zero edge tells the shader "solid". In that case,
             // with the inversion long gone, the caret would be drawn **opaque**
             // and the letter under it would stay in its own colour — the very
-            // combination that cannot be read (`/code-review`). The two halves
+            // combination that cannot be read. The two halves
             // of the decision must see the same floor.
             if self.caret_hollow {
                 self.rule_px.max(1.0)
@@ -2873,7 +2866,7 @@ impl Frame {
         // and the margin are common, the small glyph stands on the large
         // cell's baseline. The band ([`dock_px`]) therefore never shortens.
         //
-        // **The row gap is only above the context row** (032): the input rows
+        // **The row gap is only above the context row**: the input rows
         // are a single editor surface, adjacent. The layout is counted from
         // the top but its viewport is bottom-anchored (`height − layout`,
         // `Renderer::encode_dock`), so the context row is always at the bottom
@@ -3096,10 +3089,10 @@ mod tests {
             // **input**, i.e. where `link.rs` reads. A full grid, i.e. offset
             // zero.
             content_rows: 1,
-            // Drawing the fill is phase-3's job (017); this module does not
-            // consume it yet.
+            // Drawing the fill is a separate path; this list does not
+            // consume it.
             fill: 0,
-            // Fractional scrolling (027) does not concern this list either:
+            // Fractional scrolling does not concern this list either:
             // at a whole row, no top row.
             top_row: 0,
             scrolled: 0,
@@ -3202,8 +3195,8 @@ mod tests {
 
     #[test]
     fn a_hollow_caret_survives_a_zero_rule_metric() {
-        // **The two halves of the decision must see the same floor**
-        // (`/code-review`). `CellMetrics::new` accepts a zero rule; had the
+        // **The two halves of the decision must see the same floor**.
+        // `CellMetrics::new` accepts a zero rule; had the
         // edge been left without a floor the hollow caret's `stroke` would be
         // 0, the shader would read it as "solid" and the caret would be drawn
         // **opaque** — and since the inversion is already lifted, the letter
@@ -3475,7 +3468,7 @@ mod tests {
 
     #[test]
     fn the_gutter_offsets_every_pixel_position() {
-        // The left margin (010 Karar 3) is added to the drawing origin
+        // The left margin is added to the drawing origin
         // **once** in `pos_at`; since all four consumers (background, glyph,
         // rule, caret) go through that line, all four shift by the same
         // amount. Had it been added in two places one would apply the margin
@@ -3515,7 +3508,7 @@ mod tests {
 
     #[test]
     fn the_cursor_rect_keeps_the_screen_row_and_the_instance_gives_the_origin_back() {
-        // **The third symptom of Karar 7 that was left without a guard.** The
+        // **The third symptom that was left without a guard.** The
         // caret's rectangle and its `bg` instance live in two separate spaces:
         // the instance goes through the vertex stage, i.e. `setViewport`, and
         // the GPU **gives the offset back**; the rectangle is compared with the
@@ -3591,7 +3584,7 @@ mod tests {
         frame.set_origin_rows(2.0 - 0.009);
         assert_eq!(frame.origin_px(), 36.0, "frame before settling is shifted");
 
-        // At a whole row rounding is the identity: phase-1's three guards and
+        // At a whole row rounding is the identity: the three origin guards and
         // the settled state in production go through here.
         frame.set_origin_rows(3.0);
         assert_eq!(frame.origin_px(), 54.0);
@@ -3627,8 +3620,7 @@ mod tests {
         // sprite as the dock's chevron** — both are a prompt mark in the phase
         // colour and drawing them with separate shapes was a leftover; (2) it
         // starts on its own row — it shows the command's row, not a range; (3)
-        // **at column 0**, i.e. at the same x as the dock's prompt mark (012
-        // phase-11).
+        // **at column 0**, i.e. at the same x as the dock's prompt mark.
         let mut frame = Frame::default();
         frame.clear(
             CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics"),
@@ -3766,7 +3758,7 @@ mod tests {
 
     #[test]
     fn an_upload_button_fills_its_columns_on_the_context_row() {
-        // 037 phase-6: the fill's edge is the button's column boundary — the
+        // The fill's edge is the button's column boundary — the
         // same columns as the mouse's hit range (`bt_core::transfer_button_at`),
         // at the context row's small step. The label's glyph is inside that range.
         let metrics = CellMetrics::new(10, 20, 8, GUTTER, 1).expect("metrics");
@@ -3838,7 +3830,7 @@ mod tests {
 
     #[test]
     fn stripes_stay_out_of_the_cell_count_and_survive_motion_frames() {
-        // The phase's real contract (010 → R4.1): the stripe does **not** enter
+        // The real contract: the stripe does **not** enter
         // `bg`. Had it entered uncounted, `move_cursor`'s trimming would erase
         // it in every motion frame and the stripe would flicker as the caret
         // glides; had it been counted, the `cells=` token would also count
@@ -3887,7 +3879,7 @@ mod tests {
 
     #[test]
     fn the_dock_keeps_its_own_lists_and_stays_out_of_the_counters() {
-        // The phase's first contract: the dock lists do **not** enter `bg`.
+        // The dock's first contract: the dock lists do **not** enter `bg`.
         // Had they entered they would be tied to the grid's frame lifetime and
         // torn from their own viewport — the same rationale as the stripe
         // being a separate list, with a more visible symptom.
@@ -3993,7 +3985,7 @@ mod tests {
 
     #[test]
     fn the_fill_keeps_its_own_lists_and_stays_out_of_the_counters() {
-        // The sibling of the dock guard (R3.2) and the same two contracts: the
+        // The sibling of the dock guard and the same two contracts: the
         // fill lists do **not** enter the grid's — had they entered they would
         // be drawn from the grid's space, i.e. on top of the content instead
         // of in the band's place — and they do not enter the counters either:
@@ -4055,7 +4047,7 @@ mod tests {
 
     #[test]
     fn the_fill_band_rides_the_origin() {
-        // **R3.1's CPU half.** The band stands above the offset and slides
+        // **The CPU half.** The band stands above the offset and slides
         // **together with** the offset: the cells are born fill-local, what
         // carries them onto the screen is `origin_px − fill_px`, and that is
         // derived at read time. Had it been baked at push time the motion frame
@@ -4068,7 +4060,7 @@ mod tests {
         let pushed = frame.fill_bg()[0];
 
         // With no offset the band's origin is negative: both rows overflow the
-        // top of the window and Metal clips them (017 phase-0's measurement).
+        // top of the window and Metal clips them (measured).
         assert_eq!(frame.fill_origin_px(), -32.0, "band did not slide");
         for rows in [3.0, 2.5, 1.0] {
             frame.set_origin_rows(rows);
@@ -4084,7 +4076,7 @@ mod tests {
 
     #[test]
     fn the_scroll_fraction_lowers_the_grid_by_whole_device_pixels() {
-        // **R2.1:** the scroll fraction draws the grid that much lower and,
+        // The scroll fraction draws the grid that much lower and,
         // like the pixel offset, lands on the **device grid** — a scroll
         // resting at half a pixel would blur all the text. The fraction is
         // rounded **separately** from the offset, because the caret is exempt
@@ -4147,7 +4139,7 @@ mod tests {
 
     #[test]
     fn the_top_row_sits_above_the_band_and_rides_with_it() {
-        // **R2.2:** the row that closes the strip the fraction opens is at the
+        // The row that closes the strip the fraction opens is at the
         // very top of the fill channel (fill-local `0`), with the band's rows
         // below it. The channel's height is `top_row + fill` and the band's
         // origin is derived from it, so the top row slides **together with**
@@ -4283,7 +4275,7 @@ mod tests {
         frame
     }
 
-    /// 033 Karar 7: the corners are **per match**. Two separate matches on
+    /// The search's corners are **per match**. Two separate matches on
     /// consecutive rows are two separate shapes — all four corners rounded, no
     /// concave fill —; when the same two runs are a single match's wrapping
     /// they fuse into one shape and the steps are closed with fills.
@@ -4402,7 +4394,7 @@ mod tests {
         assert!(frame.fill_search_current_instances().is_empty());
     }
 
-    /// On a wrapped input the selection is one run per row (032): the second
+    /// On a wrapped input the selection is one run per row: the second
     /// run is one cell lower — the input rows are adjacent, with no gap
     /// between them — and the corner decision looks at the neighbouring row
     /// like the grid's.
@@ -4447,7 +4439,7 @@ mod tests {
         // during the slide the grid's overflowing bottom row stays under it.
         let mut frame = Frame::default();
         frame.clear(grid(9, 18), CaretStyle::default());
-        // The top line's colour is a separate field (036): the two lines are
+        // The top line's colour is a separate field: the two lines are
         // opened with two separate colours so that if one took the other's
         // colour it would show.
         frame.open_dock(BG, SUCCESS, CURSOR);
@@ -4474,8 +4466,8 @@ mod tests {
         assert_eq!(divider.size, [500.0, SEPARATOR_PX]);
         assert_eq!(divider.rgba, CURSOR.to_array());
 
-        // While an upload runs (037 Karar 7) the top line is a bar: its ground
-        // in the empty track's colour (phase-7), the part filling from the left
+        // While an upload runs the top line is a bar: its ground
+        // in the empty track's colour, the part filling from the left
         // in the edge's colour; the second separator keeps its own colour.
         frame.set_dock_progress(Some(2_500), BG);
         let [_, base, fill, divider] = frame.dock_ground(500.0);
@@ -4498,7 +4490,7 @@ mod tests {
 
     #[test]
     fn the_dock_breathes_above_and_below_its_rows() {
-        // **Breathing room** (012 phase-9, the user: "there is literally no
+        // **Breathing room** (the user: "there is literally no
         // padding top"). There is margin above and below the two rows, and its
         // source is the left margin itself — no second design constant was
         // made up.
@@ -4581,7 +4573,7 @@ mod tests {
 
     #[test]
     fn a_remote_dock_is_only_its_context_row() {
-        // **Zero input rows** (036 Karar 8): the layout is only the context
+        // **Zero input rows**: the layout is only the context
         // row — small face, small step, no row gap above it (there is no input
         // row to separate) and the band is one row plus two outer margins. The
         // top line is at the top of the band and in the edge's colour; the
@@ -4644,7 +4636,7 @@ mod tests {
 
     #[test]
     fn a_three_row_band_stacks_its_input_above_the_context_row() {
-        // **032 phase-2's test hook** (`n = 3`): the band is `n` input rows
+        // **The multi-row test hook** (`n = 3`): the band is `n` input rows
         // plus the context row; the input rows are adjacent, the gap and the
         // second hairline only between the input block and the context row.
         // At @1x, 9×18 cells, margin 7: `4·18 + 2·7 + 14 = 100` px.
@@ -4696,7 +4688,7 @@ mod tests {
 
     #[test]
     fn a_growing_band_keeps_its_rows_and_divider_on_the_bottom() {
-        // **Bottom-anchored** (032): while the band is halfway (excess
+        // **Bottom-anchored**: while the band is halfway (excess
         // targeting 2, now 0.5) the ground and the top hairline are at the
         // animation's height, the cells and the second hairline at the
         // layout's — the text stays in place, only the band's top rises. The
@@ -4750,7 +4742,7 @@ mod tests {
         assert_eq!(caret.pos[1], -8.0, "dock-local translation is wrong");
 
         // **The `f32` error of a fractional band excess is not a handover**
-        // (036): even if the last row's bottom edge exceeds the band's top by
+        // even if the last row's bottom edge exceeds the band's top by
         // an epsilon, it stays on the grid.
         frame.move_caret([3.0, 3.000_001], TEXT, CURSOR, OPAQUE, true);
         assert!(frame.grid_caret().is_some(), "epsilon moved caret");
@@ -4807,8 +4799,8 @@ mod tests {
     #[test]
     fn caret_geometry_survives_a_zero_cell() {
         // `Frame::default()`'s cell is `(0.0, 0.0)` and the old
-        // `rule.clamp(1.0, 0.0)` **panicked** because `min > max`
-        // (`/code-review`, 014 gate). In debug `push_caret`'s own
+        // `rule.clamp(1.0, 0.0)` **panicked** because `min > max`.
+        // In debug `push_caret`'s own
         // `debug_assert` fires first, but `f32::clamp`'s assert exists **in
         // release too** — i.e. in a release build it would kill a window. The
         // geometry is tested directly, because the way to reach `push_caret`
@@ -4835,7 +4827,7 @@ mod tests {
     fn a_motion_frame_keeps_the_caret_shape() {
         // A motion frame never goes to `bt-core`, so it does not know the
         // shape. Had the field not been in `Frame`, a beam would turn back
-        // into a block on the first blink-off — blink (phase-2) will go
+        // into a block on the first blink-off — blink goes
         // through exactly this path.
         let mut frame = Frame::default();
         frame.clear(
@@ -5044,7 +5036,7 @@ mod tests {
 
     #[test]
     fn a_clustered_ghost_outlives_the_dock_table() {
-        // 035 R4.1: the ghost's cell points into the dock's frame table and
+        // The ghost's cell points into the dock's frame table and
         // that table is cleared in the next content frame; the effect copies
         // the string into its own table, and `Frame` into the ghost list's
         // table.

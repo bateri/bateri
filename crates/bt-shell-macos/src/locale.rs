@@ -2,7 +2,7 @@
 //! locale decision (`bt_shell_common::child::locale_env`).
 //!
 //! The Foundation read lives here because the shared crate sees no
-//! Foundation (043 Karar 2); the decision stays there.
+//! Foundation; the decision stays there.
 
 use bt_shell_common::child::primary_language;
 use objc2_foundation::NSLocale;

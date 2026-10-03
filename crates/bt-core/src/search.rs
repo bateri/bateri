@@ -1,8 +1,7 @@
-//! Scrollback search (⌘F, 033): compiling the query and the matches of the
+//! Scrollback search (⌘F): compiling the query and the matches of the
 //! visible rows.
 //!
-//! **There are two budgets and this module is the first's** (`.tasks/033-gecmiste-arama/
-//! discussion.md` → Karar 2, Muhakeme): the highlight runs on every content
+//! **There are two budgets and this module is the first's**: the highlight runs on every content
 //! frame, within the `Term` lock turn that [`crate::Session::frame`] already
 //! takes, over only the **drawn** rows — its cost is bounded by the screen's
 //! height. Counting the whole scrollback is a separate path: an anchorless
@@ -29,7 +28,7 @@ use crate::color::{LinearRgba, Theme};
 /// The user's query: the text and the two switches in the panel.
 ///
 /// Keeping it per tab and not writing it to the settings file is the caller's
-/// job (Karar 6); this crate only compiles.
+/// job; this crate only compiles.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchQuery {
     /// The text searched for; **plain** text when `regex` is off ([`escape`]).
@@ -38,13 +37,13 @@ pub struct SearchQuery {
     pub regex: bool,
     /// The `Aa` switch: when on, always case-sensitive; when off, **smart** —
     /// sensitive if the text has an uppercase letter, insensitive otherwise
-    /// (alacritty's own rule, Karar 11).
+    /// (alacritty's own rule).
     pub case_sensitive: bool,
 }
 
-/// The compiled state of the query — the input of the panel's label (Karar 3).
+/// The compiled state of the query — the input of the panel's label.
 ///
-/// An invalid pattern is **a state, not a panic** (R1): the moment the user
+/// An invalid pattern is **a state, not a panic**: the moment the user
 /// types `(` the screen must not break, the label must say "Invalid pattern".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchStatus {
@@ -61,7 +60,7 @@ pub enum SearchStatus {
 /// `regex_syntax::is_meta_character`'s.
 ///
 /// The set is a **copy** here and deliberately: making `regex-syntax` a direct
-/// dependency would add an edge to `Cargo.lock` (Karar 11). The copy's guard is
+/// dependency would add an edge to `Cargo.lock`. The copy's guard is
 /// a test: every character, once escaped, must match itself literally.
 const META: &[char] = &[
     '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$', '#', '&', '-', '~',
@@ -71,7 +70,7 @@ const META: &[char] = &[
 /// pattern: a backslash before every meta character.
 ///
 /// `pub`, because its second consumer is ⌘E: in regex mode the selected text is
-/// entered escaped (Karar 6).
+/// entered escaped.
 pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -175,7 +174,7 @@ fn inked(cell: &TermCell) -> bool {
 
 /// Whether the match touches at least one **inked** cell.
 ///
-/// **A highlight creates no content** (the selection's rule from 031, for
+/// **A highlight creates no content** (the selection's rule, for
 /// search): a match made only of blanks (the query ` `, `\s+`) would paint the
 /// grid's empty rows and the invisible tail of line ends — blocks that say
 /// "there is something here" on screen but show nothing. Hidden text (`\e[8m`)
@@ -206,12 +205,12 @@ pub(crate) fn has_ink<T>(term: &Term<T>, found: &Match) -> bool {
 /// (the space of [`crate::SelectionRun`]).
 ///
 /// It has two bits more than a selection run and both are inputs of the
-/// drawing (phase-2):
+/// drawing:
 ///
 /// - `current` — the current match's run; drawn with the `search_current`
 ///   color, the others with `search_match`.
 /// - `continues` — the run is the continuation **of the same match** of the run
-///   on the previous row. Corners are computed per match (Karar 7): two
+///   on the previous row. Corners are computed per match: two
 ///   separate matches on consecutive rows mustn't fuse into one shape, a single
 ///   wrapped match must — this bit is the only thing that tells them apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,10 +234,10 @@ pub struct SearchRun {
 /// [`crate::Cursor::top_row`]). The two are drawn in separate `setViewport`s.
 ///
 /// When search is off, or the query is empty or invalid, both lists are
-/// **empty** and the scan never runs (R2.2's stopping condition).
+/// **empty** and the scan never runs (the stopping condition).
 ///
 /// **The colors are ready from the boundary too** (the precedent of
-/// [`crate::SelectionRuns`], 031 Karar 9): the two roles and their unfocused
+/// [`crate::SelectionRuns`]): the two roles and their unfocused
 /// counterparts are written from the theme copy `frame()` already takes; which
 /// one gets drawn is the decision of `bt-gpu`, which knows the focus.
 #[derive(Debug)]
@@ -317,7 +316,7 @@ impl SearchRuns {
     }
 }
 
-/// The direction of navigation (Karar 3): a terminal reads with the newest at
+/// The direction of navigation: a terminal reads with the newest at
 /// the bottom, ⏎ and ⌘G go **up**, to the older; ⇧⏎ and ⇧⌘G go down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchDirection {
@@ -335,7 +334,7 @@ pub enum SearchDirection {
 /// the grid's screen row 0: `0` covers no row, a negative value says that that
 /// many rows of the fill band are exposed too. Of the covered rows only
 /// `from_col` and to its right are under the panel; a match to its left is
-/// visible (Karar 4: "the window doesn't move if it isn't under the panel").
+/// visible ("the window doesn't move if it isn't under the panel").
 ///
 /// Its default **covers nothing** (`first_row` is the smallest value): `0`
 /// would count the band's rows as covered.
@@ -355,7 +354,7 @@ impl Default for SearchCover {
 }
 
 /// The search's answer to the panel — the input of the label ("3 of 17",
-/// "3 of 17…") (Karar 3).
+/// "3 of 17…").
 ///
 /// The count and order are **from the whole scrollback's index**
 /// ([`SearchIndex`]): while the index is being built piece by piece `complete`
@@ -377,7 +376,7 @@ pub struct SearchReport {
     pub complete: bool,
 }
 
-/// Whether the match is **in the highlight's set** (phase-1's two exclusions):
+/// Whether the match is **in the highlight's set** (the two exclusions):
 /// it doesn't touch the suppressed input row and it has ink. Navigation and
 /// counting are asked from the same set, or ⏎ would take the window to an
 /// invisible row.
@@ -456,27 +455,26 @@ pub(crate) fn same_place(a: &Match, b: &Match) -> bool {
     a.start() == b.start() || a.end() == b.end()
 }
 
-/// The number of rows in one piece of the index (Karar 2-B):
+/// The number of rows in one piece of the index:
 /// [`crate::Session::search_step`] holds the `Term` lock long enough to scan
 /// that many rows, then returns to the main queue and key events slip in
 /// between the pieces.
 ///
 /// **Not measured**, a design constant (the precedent of `GUTTER_PT`); it has no
 /// derivation. There is no hook that measures the scan time under the lock and
-/// the claim ("the piece size doesn't feel like key latency") is in
-/// `docs/OLCUMLER.md` → Bekleyen iddialar. Its safety comes not from the number
+/// the claim ("the piece size doesn't feel like key latency") is unmeasured.
+/// Its safety comes not from the number
 /// but from the piece being bounded and cancellable: a wrapped row extends a
 /// piece by at most [`WRAP_REACH`].
 pub(crate) const CHUNK_LINES: i32 = 500;
 
-/// Counting the whole scrollback (phase-5): **anchorless** and bottom-up piece
-/// by piece (`discussion.md` → Muhakeme: `row_identity` can't be a long-held
-/// anchor).
+/// Counting the whole scrollback: **anchorless** and bottom-up piece
+/// by piece (`row_identity` can't be a long-held anchor).
 ///
 /// Matches are **not stored**, they are counted: what the label wants is the
 /// count and the current match's ordinal, and a pattern like `.` means millions
 /// of matches in ten thousand rows. Navigation doesn't use the index
-/// (`Term::search_next`, phase-4); the ordinal is carried ±1 on navigation
+/// (`Term::search_next`); the ordinal is carried ±1 on navigation
 /// ([`crate::Session::search_next`]).
 ///
 /// It is rebuilt **from scratch** when the query changes
@@ -484,7 +482,7 @@ pub(crate) const CHUNK_LINES: i32 = 500;
 /// notice, [`crate::Session::search_step`]).
 #[derive(Debug, Default)]
 pub(crate) struct SearchIndex {
-    /// The index's **own** copy of the pattern (Muhakeme: so it doesn't race
+    /// The index's **own** copy of the pattern (so it doesn't race
     /// with the pattern the frame path borrows); `None` while a piece is in
     /// flight.
     pub(crate) pattern: Option<RegexSearch>,
@@ -556,7 +554,7 @@ pub(crate) enum Shift {
     Lost,
 }
 
-/// The current match's shift (Karar 9, Muhakeme) — **only from definite
+/// The current match's shift — **only from definite
 /// sources**:
 ///
 /// - While the scrollback is unsaturated, the `history_size` difference: the
@@ -618,7 +616,7 @@ pub(crate) enum Relocate {
     /// To the match nearest the window (the shift couldn't be known).
     Nearest,
     /// To the oldest remaining match: the current match fell off the top of the
-    /// saturated scrollback (Karar 9).
+    /// saturated scrollback.
     Oldest,
 }
 
@@ -743,7 +741,7 @@ pub(crate) fn index_chunk<T>(
 /// "search lock → `Term`" order would break the module's contract. The frame
 /// path takes the pattern from the slot **before** the `Term` lock and owns it,
 /// and after the turn puts it back if the generation is still the same; no lock
-/// is taken under `Term` (`discussion.md` → Muhakeme). It is not copied, it is
+/// is taken under `Term`. It is not copied, it is
 /// **lent**: the pattern carries the cache of four lazy DFAs and cloning it per
 /// frame would be both an allocation and a cold cache.
 #[derive(Debug, Default)]
@@ -756,7 +754,7 @@ pub(crate) struct SearchSlot {
     pub(crate) pattern: Option<RegexSearch>,
     /// Whether there is a pattern (even if lent) — the gate of the frame request.
     pub(crate) active: bool,
-    /// The **current match** (Karar 3), in the scrollback's absolute coordinates.
+    /// The **current match**, in the scrollback's absolute coordinates.
     /// It is reselected when the query changes, navigation moves it, and the
     /// frame marks it with the `search_current` color ([`same_place`]).
     ///
@@ -771,8 +769,7 @@ pub(crate) struct SearchSlot {
     pub(crate) origin: Option<Point>,
     /// The input rows suppressed in the last content frame, as an **absolute**
     /// `Line` range — the frame's own answer, so that navigation and counting
-    /// exclude what the highlight excludes; it isn't derived a second time
-    /// (015's lesson).
+    /// exclude what the highlight excludes; it isn't derived a second time.
     pub(crate) hidden: Option<RangeInclusive<i32>>,
     /// The scrollback's last observation — [`current`](SearchSlot::current) and
     /// [`origin`](SearchSlot::origin) are according to this state ([`track`]).
@@ -781,7 +778,7 @@ pub(crate) struct SearchSlot {
     /// The current match was lost by the scrollback's shift: it will be
     /// reselected at the end of the index.
     pub(crate) relocate: Option<Relocate>,
-    /// The count of the whole scrollback (phase-5).
+    /// The count of the whole scrollback.
     pub(crate) index: SearchIndex,
 }
 

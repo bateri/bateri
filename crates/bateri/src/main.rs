@@ -7,38 +7,38 @@ use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 fn main() -> ExitCode {
-    // ssh's askpass (047): the same binary, started by our own master
+    // ssh's askpass: the same binary, started by our own master
     // connection with `BATERI_ASKPASS` in its environment. Before everything
     // else — the stamp, `launchctl`, AppKit — because only the answer may
     // reach standard output and a window-server session is not needed.
     if let Some(code) = bt_shell_macos::askpass() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
-    // The remote shell integration's decision (048): `bateri ssh-argv -- …`,
+    // The remote shell integration's decision: `bateri ssh-argv -- …`,
     // asked by the local zsh's `ssh` function. Before the window-server check
     // for the same reason as askpass: only the wrapped argv may reach standard
     // output, and the caller may be any session.
     if let Some(code) = bt_shell_macos::ssh_argv() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
-    // Its sibling (049): `bateri ssh-fell-back --rc N -- …`, asked after a
+    // Its sibling: `bateri ssh-fell-back --rc N -- …`, asked after a
     // wrapped `ssh` ended — the same function, the same wire, the same reason.
     if let Some(code) = bt_shell_macos::ssh_fell_back() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
-    // The focus query (050): `bateri focus [--pid P] bateri://tab/<UUID>`,
+    // The focus query: `bateri focus [--pid P] bateri://tab/<UUID>`,
     // asked by an outside process at the moment of an event — the same
     // reasons: only the token line reaches standard output, any session.
     if let Some(code) = bt_shell_macos::focus() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
-    // The update's holder (055): `bateri hold --fd N --dir D`, started by the
+    // The update's holder: `bateri hold --fd N --dir D`, started by the
     // old bateri while it exits — before the window-server check, since it
     // has no GUI, and before the unknown-subcommand rule.
     if let Some(code) = bt_shell_macos::hold() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
-    // An unknown subcommand must not open a window (050 Karar 9): a typo, or a
+    // An unknown subcommand must not open a window: a typo, or a
     // subcommand of a newer bateri asked of an older one, would otherwise
     // start the whole GUI. Arguments starting with `-` pass —
     // LaunchServices' `-psn_…` among them.
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
     // done before this stamp. This is the earliest point we have and the
     // number means "from main to the first completed frame".
     //
-    // While the gate is closed the clock is **never** read (R4.1): the `then`
+    // While the gate is closed the clock is **never** read: the `then`
     // closure runs only on `true`.
     let stats_since = std::env::var_os("BT_FRAME_STATS")
         .is_some()
@@ -92,7 +92,7 @@ fn main() -> ExitCode {
     // `glyphs=0`, sending the reader to a pipeline failure that does not exist.
     //
     // The env is read **only here** and goes deep into the code as a typed
-    // field (R4.2). The parsing half does not resemble `BT_RUN_SECONDS` and
+    // field. The parsing half does not resemble `BT_RUN_SECONDS` and
     // need not: the **presence** of these two flags carries the meaning, not
     // the value — `BT_SCROLL_TEST=0` also selects the load.
     let scroll_test = std::env::var_os("BT_SCROLL_TEST").is_some();
@@ -126,7 +126,7 @@ fn main() -> ExitCode {
 }
 
 /// Whether argv[1] — left after every subcommand above passed — is a
-/// subcommand nobody knows: anything not starting with `-` (050 Karar 9).
+/// subcommand nobody knows: anything not starting with `-`.
 fn is_unknown_subcommand(arg: &std::ffi::OsStr) -> bool {
     !arg.to_string_lossy().starts_with('-')
 }

@@ -19,7 +19,7 @@ const CELL: (u16, u16) = (8, 16);
 
 #[test]
 fn wgsl_pipelines_build() {
-    // The shader canary (`make shader`, Karar 9): the WGSL passes naga and every pipeline builds on a device requested
+    // The shader canary (`make shader`): the WGSL passes naga and every pipeline builds on a device requested
     // with Vulkan's immediate floor. If the WGSL side of an `Immediates`
     // block outgrows its pipeline layout, creation fails and `shared`'s
     // `expect` names the failing pipeline.
@@ -243,7 +243,7 @@ fn a_rule_is_drawn_over_its_glyph() {
     );
 }
 
-// **Completion model** (Karar 6): four jobs carried by the submission index
+// **Completion model**: four jobs carried by the submission index
 // and `poll` — `frames=` counts only finished frames, a failed frame goes to
 // `Retry`, `startup=` closes on the first finished frame, and a frame in
 // flight is polled before the link sleeps.
@@ -1027,14 +1027,14 @@ fn every_scene_draws_all_its_pipelines_together() {
     }
 }
 
-// **Measurement hook** (R2.4). Not part of `make check`; `/measure` runs it
-// and reads the line (`.claude/is-akisi/olcum.md` → Türler). The line's keys
+// **Measurement hook**. Not part of `make check`; it is run on demand and its
+// line is read. The line's keys
 // (`backend=`, `frames=`, …) follow the project's token contract: never
 // delete a key, only add. They were renamed once from Turkish (2026-10-01).
 
 /// The hook's frame: a full grid (a ground in every cell), a caret and a
 /// two-row dock — `cell_bg` and the caret only, so the numbers stay
-/// comparable with the recorded rows (`docs/OLCUMLER.md` → `## wgpu denemesi`).
+/// comparable with the recorded rows.
 fn loaded_frame(frame: &mut Frame, edge: u16) {
     let tints = [MIDTONE, ACCENT, BACKGROUND, WHITE];
     frame.clear(grid_with_gutter(CELL.0, CELL.1, 8), CaretStyle::default());
@@ -1073,7 +1073,7 @@ fn report(frames: usize, stats: &Stats, supported: bool) -> String {
     let cpu = stats.cpu_frame();
     let gpu = stats.gpu();
     let gpu_line = if !supported {
-        // No `TIMESTAMP_QUERY`: the key stays, the value says so (Karar 6).
+        // No `TIMESTAMP_QUERY`: the key stays, the value says so.
         " gpu_p95=unsupported gpu_max=unsupported".to_owned()
     } else {
         span("gpu", gpu)
@@ -1087,7 +1087,7 @@ fn report(frames: usize, stats: &Stats, supported: bool) -> String {
 }
 
 #[test]
-#[ignore = "measurement hook: run by /measure (olcum.md → Türler)"]
+#[ignore = "measurement hook: run on demand"]
 fn offscreen_frame_loop() {
     // The same frame, `FRAMES` times; the two CPU spans of `Stats`:
     // `cpu_frame` builds the frame (the run's noise witness), `cpu_encode` is

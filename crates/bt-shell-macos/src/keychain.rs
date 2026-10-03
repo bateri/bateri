@@ -1,16 +1,16 @@
-//! The saved ssh passwords in the macOS Keychain (047 phase-3, R6): the real
+//! The saved ssh passwords in the macOS Keychain: the real
 //! body of [`bt_shell_common::ssh_route::PasswordStore`].
 //!
 //! - **What**: an *internet password* (`kSecClassInternetPassword`) — server
 //!   the host, account the user, the port, protocol SSH — labelled
 //!   `bateri — user@host:port`, so Keychain Access shows it under the host and
-//!   finds it by "bateri" (Karar 6). The login keychain, **not** the
+//!   finds it by "bateri". The login keychain, **not** the
 //!   data-protection keychain (`kSecUseDataProtectionKeychain` is not set: that
 //!   one wants a provisioning profile's entitlement).
 //! - **Who**: only the application process. The askpass helper (the same
 //!   binary, started by ssh) never reaches here — it asks the application over
 //!   its socket ([`bt_shell_common::ssh_route::run_askpass`]).
-//! - **Known limit** (Karar 6): an ad-hoc signed build changes its signature at
+//! - **Known limit**: an ad-hoc signed build changes its signature at
 //!   every build, so macOS asks "bateri wants to use your confidential
 //!   information" each time; a Developer ID build asks once.
 //!
