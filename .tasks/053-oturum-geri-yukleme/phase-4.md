@@ -32,6 +32,7 @@ _Requirements: R4.2_
 ## Checklist
 
 - [ ] Ayar penceresi satırı
+- [ ] `"layout"` ve `"off"` açılışta önceki bir `"all"` kaydının geçmişini **oynatmaz**, okumadan siler (`"layout"` düzeni yine kurar): kullanıcı geçmişi istemediğini söyledikten sonra eski geçmişi bir kez daha göstermek beklenmedik (phase-3 → Uygulama Notları'ndaki davranışın düzeltmesi; orkestratör kararı 2026-10-03)
 - [ ] `restore_windows`'un kabul edilmeyen değeri (ör. `"Off"`) `"layout"`'a düşer, `"all"`'a değil: düzen gelir, geçmiş diske yazılmaz (phase-1 → Waive'in kararı; `osc52` emsalinin güvenli yönü). Tanı yine satırda; bekçi `Settings` sınamasında
 - [ ] `docs/AYARLAR.md`
 - [ ] `CHANGELOG.md`
