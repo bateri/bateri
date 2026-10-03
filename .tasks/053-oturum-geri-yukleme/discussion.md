@@ -189,3 +189,16 @@ Panelden geçmiş öneri; `/akis` otonom modunda kullanıcı onayı alınmadı.
   silinir. Açılışta düzen oynatmadan önce tüketilir; çökme kurtarma kapsam
   dışı.
 
+
+## Set sonrası düzeltmeler (2026-10-03, gözle kontrol)
+
+- **Dizin adıyla geri geliyor.** Kayıt `+/tmp` tutuyordu ama başlık ve dock
+  `/private/tmp` gösteriyordu: `chdir` sembolik bağı çözmüyor, kabuk ise
+  `PWD`'yi miras değer `.`'yı göstermiyorsa `getcwd()`'den kuruyor ve miras
+  değer bizim sürecimizinki (`/`). Çare `Session::spawn`'da: mutlak
+  `working_directory` çocuğa `PWD` olarak da gidiyor, `TERM` katmanında.
+  Yanlışın yönü güvenli — kabuk `.`'yı göstermeyen `PWD`'ye inanmıyor. Aynı
+  kusur ⌘T/bölme mirasında da vardı (yeni pane OSC 7 dizininde doğuyor) ve
+  aynı satırla kapandı. `login -qflp` ortamı koruyor (ölçüldü: `PWD=/tmp`
+  ile `/tmp`, `PWD=/` ile `/private/tmp`). Bekçisi
+  `working_directory_keeps_its_symlinked_name_in_pwd`.

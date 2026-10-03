@@ -1708,7 +1708,10 @@ ikisine de bağlanmaz.
   kısıtlı sunucuda sarılmayan oturumda yok (bilinen sınır). Alacritty
   `ALACRITTY_WINDOW_ID` ve `WINDOWID`'yi koşulsuz yazar; shell'de görünürler.
   **Dizin ve yerel de yalnız çocuğa gider:** kabuk ev dizininde başlar (`HOME`,
-  yoksa passwd kaydı; mutlak değilse miras). Ortamda `LC_ALL`/`LC_CTYPE`/`LANG`'dan
+  yoksa passwd kaydı; mutlak değilse miras) ve mutlak dizin `PWD` olarak da
+  verilir (`TERM` katmanında, ezilemez): kabuk `PWD`'yi ancak `.`'yı
+  gösteriyorsa kullanıyor, yoksa `getcwd()`'den kuruyor ve geri yüklenen ya
+  da devralınan `/tmp` `/private/tmp` oluyordu (053, gözle kontrol). Ortamda `LC_ALL`/`LC_CTYPE`/`LANG`'dan
   hiçbiri boş olmayan bir değer taşımıyorsa macOS'un dil/bölge ayarından
   `LANG={dil}_{bölge}.UTF-8`, o yerel `/usr/share/locale`'de yoksa
   `LANG=en_US.UTF-8` alır — alacritty'nin `LC_CTYPE=UTF-8`'i değil (gerekçe
