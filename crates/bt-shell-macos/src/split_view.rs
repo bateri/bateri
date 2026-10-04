@@ -115,8 +115,14 @@ define_class!(
             }
         }
 
+        /// The drag ended: the split's ratio is part of the layout the
+        /// bound holder keeps (once per drag, not per step).
         #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, _event: &NSEvent) {}
+        fn mouse_up(&self, _event: &NSEvent) {
+            if let Some(app) = crate::app::delegate(self.mtm()) {
+                app.layout_changed();
+            }
+        }
     }
 );
 

@@ -2203,6 +2203,7 @@ impl ShellLog {
                     offer.mark = self.context.remote_mark;
                 }
                 outcome.title = self.context.clear_remote();
+                outcome.ended = true;
                 // The code, and the clock consumed **only by OUR `D`** — the one carrying the
                 // identity ([`BlockTrack::end`]).
                 self.local.end(exit, id);
@@ -2271,7 +2272,7 @@ impl ShellLog {
             // commands to the remote shell. The defense is here, not in a script's
             // care. Our `D` clears the remote state, so the next local 8133 applies.
             ScanEvent::Dock(_) if self.context.remote.is_some() => {}
-            ScanEvent::Dock(event) => self.apply_dock(event, answers),
+            ScanEvent::Dock(event) => outcome.mirrored = self.apply_dock(event, answers),
             // The directory arrives **resolved**: the scanner did the scheme, the path and
             // the percent-decoding, and only a drawable path and whether the authority is
             // local reach here. A rejected OSC 7 produces no event at all, so the old path
@@ -2465,7 +2466,10 @@ impl ShellLog {
     /// indices would now point at the characters of another text. Only `BUFFER` —
     /// the prompt being redrawn (`PREDISPLAY`) or a change of suggestion does not move
     /// the selected text. `End` and `Unavailable` empty the text, the selection too.
-    fn apply_dock(&mut self, event: DockEvent<'_>, answers: u64) {
+    ///
+    /// `true` if the mirror or the dock's context changed — every event but
+    /// the editing widget's word, which is not part of the carried state.
+    fn apply_dock(&mut self, event: DockEvent<'_>, answers: u64) -> bool {
         match event {
             DockEvent::Update(staged) => {
                 self.end_since = None;
@@ -2517,8 +2521,12 @@ impl ShellLog {
                 self.context.branch.clear();
                 self.context.branch.push_str(branch);
             }
-            DockEvent::Editable => self.dock_editable = true,
+            DockEvent::Editable => {
+                self.dock_editable = true;
+                return false;
+            }
         }
+        true
     }
 
     /// `line-finish`'s reset: the text empties, the state is `Idle`; the stamp
@@ -3202,6 +3210,11 @@ pub(crate) struct ScanOutcome {
     /// The remote bootstrap's `up` was recorded ([`ShellLog::remote_up`])
     /// → [`crate::Wake::remote_up`].
     pub(crate) up: bool,
+    /// A `D` reached the local ledger (past the remote session's gate): with
+    /// [`Self::prompt`] → [`crate::Wake::phase_edge`].
+    pub(crate) ended: bool,
+    /// The dock's mirror or context changed → [`crate::Wake::mirror_changed`].
+    pub(crate) mirrored: bool,
 }
 
 /// The event the scanner hands out.

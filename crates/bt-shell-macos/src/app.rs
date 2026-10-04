@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{
-    CursorMotion, HostMark, InitialInput, ReduceMotion, RestoreWindows, SHUTDOWN_GRACE,
-    SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll, TabId, Teardown, Theme,
+    CursorMotion, HostMark, InitialInput, KeepRunning, ReduceMotion, RestoreWindows,
+    SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll, TabId,
+    Teardown, Theme,
 };
 use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Stats};
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -39,6 +40,7 @@ use objc2_foundation::{
 };
 
 use crate::handover::{self, Arrival, HeldPane, PaneState};
+use crate::keeper::{self, Keeper, QuitPath};
 use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
 use crate::pane::{PaneLaunch, TerminalPane};
@@ -396,12 +398,55 @@ fn restored_launch(pane: &SavedPane, replay: Option<Vec<u8>>) -> Launch {
     }
 }
 
-/// Whether a quit hands the programs over: only
-/// Sparkle's relaunch (or the test item's), only where session restore runs at all
-/// (`restore_windows` not `"off"`) and only in a bundled process — the
-/// layout is matched to its bundle on the other side.
-fn hands_over(relaunch: bool, restore_windows: RestoreWindows, bundled: bool) -> bool {
-    relaunch && bundled && restore_windows != RestoreWindows::Off
+/// Where a deliberate handover goes ([`AppDelegate::hand_over`]).
+enum Target {
+    /// The update's holder, spawned when the quit was found to be a relaunch.
+    Update(handover::Spawned),
+    /// The bound holder, over the connection it has had since launch, and
+    /// which process it is (a failed handover ends it).
+    Bound(handover::Bound, keeper::HolderId),
+}
+
+impl Target {
+    /// Nothing is handed over after all: the update's holder goes with its
+    /// connection, the bound one leaves quietly — dropped, it would take the
+    /// end of its connection for a crash and keep the programs on.
+    fn dismiss(self) {
+        match self {
+            Target::Update(holder) => drop(holder),
+            Target::Bound(bound, _) => bound.quit(),
+        }
+    }
+}
+
+/// A copy of a frozen bundle with every master duplicated — the spare a
+/// failed handover falls back on. `None` if a duplicate fails (no spare,
+/// rather than a partial one that would leave a pane behind silently).
+fn copy_bundle(bundle: &handover::Bundle) -> Option<handover::Bundle> {
+    let panes = bundle
+        .panes
+        .iter()
+        .map(|pane| {
+            Some(HeldPane::new(
+                pane.tab.clone(),
+                pane.pid,
+                pane.start,
+                pane.blob.clone(),
+                pane.buffer.clone(),
+                pane.master.try_clone().ok()?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(handover::Bundle {
+        layout: bundle.layout.clone(),
+        panes,
+    })
+}
+
+/// The layout source of the bound holder ([`keeper::LayoutSource`]): the
+/// application's live windows.
+fn current_layout(mtm: MainThreadMarker) -> Option<Vec<u8>> {
+    delegate(mtm)?.layout_blob()
 }
 
 /// A pane the holder gave that cannot be carried on: handed
@@ -446,6 +491,7 @@ fn adoption(
         pid: held.pid,
         state,
         prefix: held.buffer,
+        taken_from: None,
     })
 }
 
@@ -1004,6 +1050,14 @@ pub(crate) struct Ivars {
     /// relaunch ([`AppDelegate::terminate_reply`]) and given the panes in
     /// [`AppDelegate::shutdown`].
     holder: RefCell<Option<handover::Spawned>>,
+    /// The bound holder's driver (`[terminal] keep_running`,
+    /// [`crate::keeper`]): spawned at launch for `"crash"` and `"quit"`, on a
+    /// live switch, and when one dies. `None` in a timed run, an unbundled
+    /// process and without an ssh registry (its directories hold the socket).
+    keeper: Option<Rc<Keeper>>,
+    /// This quit hands the panes to the bound holder
+    /// ([`AppDelegate::terminate_reply`] → [`AppDelegate::shutdown`]).
+    hand_to_bound: Cell<bool>,
     /// The handover test item asked for this quit: bateri starts
     /// itself again once this process is gone.
     relaunch_after: Cell<bool>,
@@ -1061,6 +1115,17 @@ define_class!(
             // path; a timed run never touches the user's cache.
             self.sweep_previews(Sweep::Launch);
             self.schedule_daily_sweep();
+            // The bound holder before the first windows: a carried-on pane
+            // registers with it before the holder it came from is
+            // acknowledged ([`AppDelegate::restore_arrival`]).
+            let bundled = NSBundle::mainBundle().bundleIdentifier().is_some();
+            if keeper::wants_holder(
+                self.settings().keep_running,
+                self.ivars().run.is_some(),
+                bundled,
+            ) {
+                self.start_keeper();
+            }
             NSApplication::sharedApplication(mtm).activate();
             // The renderer is born with the window and its error
             // lands here. `didFinishLaunching` cannot return an error; a terminal
@@ -2039,6 +2104,23 @@ impl AppDelegate {
             .run
             .and_then(|run| run.stats_since.map(|since| Stats::new(since, run.seconds)))
             .map(Arc::new);
+        let masters = opts
+            .run
+            .is_none()
+            .then(|| masters(arrival.as_ref().map(|arrival| arrival.instance.as_str())))
+            .flatten();
+        let bundled = NSBundle::mainBundle().bundleIdentifier().is_some();
+        let keeper = masters
+            .as_ref()
+            .filter(|_| opts.run.is_none() && bundled)
+            .and_then(|masters| {
+                let exe = std::env::current_exe().ok()?;
+                Some(Rc::new(Keeper::new(
+                    exe,
+                    Arc::clone(masters),
+                    current_layout,
+                )))
+            });
         let this = Self::alloc(mtm).set_ivars(Ivars {
             run: opts.run,
             notices: RefCell::new(Notices::default()),
@@ -2053,14 +2135,12 @@ impl AppDelegate {
             settings_state: RefCell::new(settings::FileState::Missing),
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
-            masters: opts
-                .run
-                .is_none()
-                .then(|| masters(arrival.as_ref().map(|arrival| arrival.instance.as_str())))
-                .flatten(),
+            masters,
             restore_lock: RefCell::new(None),
             arrival: RefCell::new(arrival),
             holder: RefCell::new(None),
+            keeper,
+            hand_to_bound: Cell::new(false),
             relaunch_after: Cell::new(false),
             postponed_update: RefCell::new(None),
         });
@@ -2332,14 +2412,34 @@ impl AppDelegate {
         }
         // Consumed by this quit whatever it turns into.
         let relaunch = crate::updater::take_relaunch();
+        self.ivars().hand_to_bound.set(false);
         let windows = self.windows();
         if windows.is_empty() {
             return NSApplicationTerminateReply::TerminateNow;
         }
-        // A relaunch hands the programs over: nothing dies, so nothing is
-        // asked — unless the holder cannot be born, then today's question.
-        if relaunch && self.prepare_handover() {
-            return NSApplicationTerminateReply::TerminateNow;
+        // Where the programs go (`keep_running`): to the bound holder, to
+        // the update's holder, or nowhere — then today's question. A holder
+        // counts only if it answers now; under `"quit"` one that does not is
+        // replaced first, so no program ends unasked on an assumption.
+        let keep = self.settings().keep_running;
+        // Asked only where the answer can matter (a relaunch, or `"quit"`):
+        // a ping is a wait on the main thread.
+        let mut bound = (relaunch || keep == KeepRunning::Quit)
+            && self.ivars().keeper.as_deref().is_some_and(Keeper::verified);
+        if keeper::spawns_for_quit(keep, relaunch, bound) {
+            bound = self.replace_keeper();
+        }
+        match keeper::quit_path(keep, relaunch, bound) {
+            QuitPath::ToBound => {
+                self.ivars().hand_to_bound.set(true);
+                return NSApplicationTerminateReply::TerminateNow;
+            }
+            // Nothing dies, so nothing is asked — unless the holder cannot be
+            // born, then today's question.
+            QuitPath::ToUpdateHolder if self.prepare_handover() => {
+                return NSApplicationTerminateReply::TerminateNow;
+            }
+            QuitPath::ToUpdateHolder | QuitPath::Close => {}
         }
         let confirm = self.settings().confirm_close;
         // The question collects the running job from the panes.
@@ -2361,16 +2461,17 @@ impl AppDelegate {
 
     /// The handover's first step: spawns the holder
     /// ([`handover::spawn_holder`]) with this instance's directories, kept
-    /// for [`AppDelegate::shutdown`]. `false` — today's quit — when
-    /// `restore_windows = "off"`, in an unbundled process, without
-    /// an ssh registry (its directories are the holder's socket) or when the
-    /// spawn fails.
+    /// for [`AppDelegate::shutdown`]. `false` — today's quit — in an
+    /// unbundled process (the layout is matched to its bundle on the other
+    /// side), without an ssh registry (its directories are the holder's
+    /// socket) or when the spawn fails. `restore_windows` does not take
+    /// part: `keep_running` is the programs' one authority, and every value
+    /// of it keeps them across an update.
     fn prepare_handover(&self) -> bool {
         let Some(masters) = self.ivars().masters.as_deref() else {
             return false;
         };
-        let bundled = NSBundle::mainBundle().bundleIdentifier().is_some();
-        if !hands_over(true, self.settings().restore_windows, bundled) {
+        if NSBundle::mainBundle().bundleIdentifier().is_none() {
             return false;
         }
         let dirs = masters.bases().to_vec();
@@ -2390,12 +2491,15 @@ impl AppDelegate {
     /// The handover's second step, at the head of [`AppDelegate::shutdown`]
     /// after the session restore save: every pane is frozen
     /// ([`TerminalPane::freeze_for_handover`]) and given with the layout to
-    /// the holder; `true` once the holder said it holds them. The panes that
-    /// could not be frozen close today's way. `false` → today's quit closes
-    /// what is left — a frozen pane cannot go back, its master stays open in
-    /// this process until it exits and that is its hang-up.
-    fn hand_over(&self, holder: handover::Spawned) -> bool {
+    /// the holder — the update's, spawned at this quit, or the bound one over
+    /// its connection ([`Target`]); `true` once the holder said it holds
+    /// them. The panes that could not be frozen close today's way. `false` →
+    /// today's quit closes what is left — a frozen pane cannot go back, its
+    /// master stays open in this process until it exits and that is its
+    /// hang-up.
+    fn hand_over(&self, target: Target) -> bool {
         let Some(bundle_id) = NSBundle::mainBundle().bundleIdentifier() else {
+            target.dismiss();
             return false;
         };
         // The layout reads the live sessions: before any freeze.
@@ -2422,36 +2526,50 @@ impl AppDelegate {
                 }
             }
         }
-        // The session restore save, the fallback if the new bateri finds no holder.
+        // The session restore save, the fallback if the new bateri finds no
+        // holder — `"off"` deletes what is left, as today's quit does (the
+        // programs still cross: `restore_windows` no longer decides that).
         if let Some(lock) = self.ivars().restore_lock.take() {
-            histories.retain(|(_, history)| with_history && !history.is_empty());
-            for pane in saved
-                .windows
-                .iter_mut()
-                .flat_map(|window| window.tabs.iter_mut())
-                .flat_map(|tab| tab.panes.iter_mut())
-            {
-                pane.history = histories.iter().any(|(tab, _)| *tab == pane.tab_id);
-            }
-            if let Err(error) = restore::save(&lock, &saved, &histories) {
+            let result = if self.settings().restore_windows == RestoreWindows::Off {
+                restore::clear(&lock)
+            } else {
+                histories.retain(|(_, history)| with_history && !history.is_empty());
+                for pane in saved
+                    .windows
+                    .iter_mut()
+                    .flat_map(|window| window.tabs.iter_mut())
+                    .flat_map(|tab| tab.panes.iter_mut())
+                {
+                    pane.history = histories.iter().any(|(tab, _)| *tab == pane.tab_id);
+                }
+                restore::save(&lock, &saved, &histories)
+            };
+            if let Err(error) = result {
                 eprintln!("bateri: could not save the session: {error}");
             }
         }
         if held.is_empty() {
+            target.dismiss();
             return false;
         }
         // After the save: the layout carries its history flags, so a pane
         // that was not frozen falls back with the history saved for it.
         let layout = handover::layout_blob(&bundle_id.to_string(), &saved.render());
         let count = held.len();
-        if let Err(error) = holder.give(handover::Bundle {
+        let bundle = handover::Bundle {
             layout,
             panes: held,
-        }) {
-            eprintln!("bateri: the update's holder did not take the panes: {error}");
+        };
+        let given = match target {
+            Target::Update(holder) => holder.give(bundle).map_err(|error| {
+                eprintln!("bateri: the update's holder did not take the panes: {error}");
+            }),
+            Target::Bound(bound, id) => self.give_to_bound((bound, id), bundle),
+        };
+        if given.is_err() {
             return false;
         }
-        eprintln!("bateri: handed {count} pane(s) over to the update's holder");
+        eprintln!("bateri: handed {count} pane(s) over to the holder");
         // The panes that could not be frozen close below: their session ends
         // must not `-O exit` a master a carried pane still rides.
         if let Some(masters) = &self.ivars().masters {
@@ -2463,6 +2581,144 @@ impl AppDelegate {
             let _ = closing.wait_until(deadline);
         }
         true
+    }
+
+    /// [`AppDelegate::hand_over`] to the bound holder: the frame over its
+    /// connection. Giving consumes the bundle (this side's copies of the
+    /// masters close either way), so a copy of each master is taken first: if
+    /// the holder does not take them, the frozen panes go to a **fresh** bound
+    /// holder — not the update's kind, whose time limit would end the
+    /// programs two minutes later. `Err` if neither takes them (the frozen
+    /// panes then cannot go back, a known limit).
+    ///
+    /// Once the fresh holder has them the first one is **ended**: it may
+    /// have taken the frame and answered too late, or refused and kept its
+    /// registrations — either way it would go on holding copies of the same
+    /// programs. If no fresh holder takes them it is left alone, since it may
+    /// still be holding them.
+    fn give_to_bound(
+        &self,
+        (bound, first): (handover::Bound, keeper::HolderId),
+        bundle: handover::Bundle,
+    ) -> Result<(), ()> {
+        let spare = copy_bundle(&bundle);
+        let Err(error) = bound.hand_over(bundle) else {
+            return Ok(());
+        };
+        eprintln!("bateri: the holder did not take the panes ({error}); trying a new one");
+        let (Some(keeper), Some(spare)) = (self.ivars().keeper.as_deref(), spare) else {
+            return Err(());
+        };
+        let mtm = self.mtm();
+        if !keeper.spawn(mtm) {
+            return Err(());
+        }
+        let Some((fresh, _)) = keeper.take() else {
+            return Err(());
+        };
+        match fresh.hand_over(spare) {
+            Ok(()) => {
+                first.kill();
+                Ok(())
+            }
+            Err(error) => {
+                eprintln!("bateri: the new holder did not take the panes either: {error}");
+                Err(())
+            }
+        }
+    }
+
+    /// Spawns the bound holder at launch (`keep_running` `"crash"` or
+    /// `"quit"`), before the first windows: they register as they are
+    /// born. A holder that cannot start leaves the programs unprotected,
+    /// said on stderr.
+    fn start_keeper(&self) {
+        if let Some(keeper) = &self.ivars().keeper {
+            keeper.spawn(self.mtm());
+        }
+    }
+
+    /// A bound holder in place of one that did not answer (or of none): the
+    /// old one goes ([`Keeper::discard`]), a new one is spawned and every
+    /// live pane registers with it. `true` if one runs.
+    fn replace_keeper(&self) -> bool {
+        let Some(keeper) = self.ivars().keeper.as_deref() else {
+            return false;
+        };
+        keeper.discard();
+        self.spawn_keeper_and_register(keeper)
+    }
+
+    /// Spawns a holder and registers every live pane with it — after the
+    /// handshake's layout, each registration sends the layout again.
+    fn spawn_keeper_and_register(&self, keeper: &Keeper) -> bool {
+        let mtm = self.mtm();
+        if !keeper.spawn(mtm) {
+            return false;
+        }
+        for pane in self.all_panes() {
+            pane.register_with_holder(mtm);
+        }
+        true
+    }
+
+    /// The bound holder of `generation` went away while bound (its
+    /// handle's death news, [`Keeper::spawn`]): another is spawned and
+    /// everything registered again — under `"crash"` and `"quit"` only, and
+    /// a bounded number of times ([`keeper::RESPAWN_LIMIT`]).
+    pub(crate) fn holder_died(&self, generation: u64) {
+        let Some(keeper) = self.ivars().keeper.as_deref() else {
+            return;
+        };
+        if !keeper.died(generation) {
+            return;
+        }
+        if self.settings().keep_running == KeepRunning::Update {
+            return;
+        }
+        eprintln!("bateri: the holder went away; starting another");
+        self.spawn_keeper_and_register(keeper);
+    }
+
+    /// A live change of `keep_running` ([`keeper::switch`]): away from
+    /// `"update"` a holder is spawned and every live pane registers — from
+    /// now on its program outlives a crash; to `"update"` the holder leaves
+    /// quietly and the programs stay with bateri. `"crash"` ↔ `"quit"` is
+    /// only ⌘Q's to read.
+    fn switch_keeper(&self, switch: keeper::Switch) {
+        let Some(keeper) = self.ivars().keeper.as_deref() else {
+            return;
+        };
+        match switch {
+            keeper::Switch::Spawn => {
+                self.spawn_keeper_and_register(keeper);
+            }
+            keeper::Switch::Leave => keeper.leave(),
+            keeper::Switch::Stay => {}
+        }
+    }
+
+    /// The bound holder's driver, for the delayed jobs that find it from
+    /// the main queue.
+    pub(crate) fn keeper(&self) -> Option<&Keeper> {
+        self.ivars().keeper.as_deref()
+    }
+
+    /// A layout edge (a window, a tab, a split, the focus, a directory, a
+    /// close): the bound holder gets the layout once the burst settles
+    /// ([`Keeper::layout_changed`]). Nothing without a holder.
+    pub(crate) fn layout_changed(&self) {
+        if let Some(keeper) = &self.ivars().keeper {
+            keeper.layout_changed();
+        }
+    }
+
+    /// The live windows as the frame's layout ([`handover::layout_blob`]):
+    /// session restore's text without histories, named by the bundle.
+    fn layout_blob(&self) -> Option<Vec<u8>> {
+        let bundle_id = NSBundle::mainBundle().bundleIdentifier()?.to_string();
+        let (saved, _) = self.saved_session(false);
+        Some(handover::layout_blob(&bundle_id, &saved.render()))
     }
 
     /// The handover test item's relaunch: a waiting shell that
@@ -2499,6 +2755,7 @@ impl AppDelegate {
                 .map(|index| windows.remove(index))
         };
         drop(removed);
+        self.layout_changed();
     }
 
     /// Opens a new window (or a new tab in `from`'s group) — the **only** path that
@@ -2595,6 +2852,7 @@ impl AppDelegate {
             smooth_scroll: self.smooth_scroll(),
             zoom: from.map_or_else(Zoom::default, TerminalPane::zoom),
             masters: self.ivars().masters.clone(),
+            keeper: self.ivars().keeper.clone(),
         };
         (launch, theme)
     }
@@ -2674,6 +2932,11 @@ impl AppDelegate {
             return false;
         }
         arrival.finish();
+        // The holders are acknowledged and gone: the carried-on panes are
+        // the bound holder's to drain from now on.
+        if let Some(keeper) = &self.ivars().keeper {
+            keeper.confirm_taken();
+        }
         if let Some(lock) = self.ivars().restore_lock.borrow().as_ref()
             && let Err(error) = restore::clear(lock)
         {
@@ -2856,7 +3119,11 @@ impl AppDelegate {
                 match held {
                     None => Some(fallen_back(saved_history())),
                     Some((link, held)) => match adoption(held, jobs::exit_fd) {
-                        Ok(adopted) => {
+                        Ok(mut adopted) => {
+                            adopted.taken_from = arrival
+                                .holders
+                                .get(link)
+                                .map(|holder| holder.socket.clone());
                             adopt = Some(adopted);
                             None
                         }
@@ -3299,7 +3566,11 @@ impl AppDelegate {
                     pane.apply_caret(&new);
                 }
             }
+            // `keep_running` is read when quitting; its live part is the
+            // bound holder's birth or departure, from the old and new value.
+            let switch = keeper::switch(self.settings().keep_running, new.keep_running);
             self.ivars().settings.replace(new);
+            self.switch_keeper(switch);
             // **After** the settings are written: `apply_reduce_motion` is the shared path of
             // three callers and reads the value from the slot, not from the `new` in hand.
             // The style's path stayed separate because it takes the link directly;
@@ -3741,15 +4012,41 @@ impl AppDelegate {
         if self.ivars().relaunch_after.get() {
             self.spawn_relauncher();
         }
-        // The update's handover: the programs go to the holder
-        // and nothing below runs — no pane closes, no ssh master ends.
-        // It writes the session restore save itself, from the frozen panes:
-        // reading the scrollback live first would destroy an alternate
-        // screen before the freeze reads it (`Session::final_history`).
-        if let Some(holder) = self.ivars().holder.take()
-            && self.hand_over(holder)
+        // A deliberate handover (`keep_running`, [`AppDelegate::terminate_reply`]):
+        // the programs go to a holder and nothing below runs — no pane
+        // closes, no ssh master ends. It writes the session restore save
+        // itself, from the frozen panes: reading the scrollback live first
+        // would destroy an alternate screen before the freeze reads it
+        // (`Session::final_history`).
+        let target = match self.ivars().holder.take() {
+            Some(holder) => {
+                // A bound holder that did not answer (it would have taken
+                // the panes otherwise) goes first: kept until this process
+                // ends, it would go detached with copies of the same programs
+                // and the next bateri would take them from it, screenless.
+                if let Some(keeper) = &self.ivars().keeper {
+                    keeper.discard();
+                }
+                Some(Target::Update(holder))
+            }
+            None if self.ivars().hand_to_bound.take() => self
+                .ivars()
+                .keeper
+                .as_deref()
+                .and_then(Keeper::take)
+                .map(|(bound, id)| Target::Bound(bound, id)),
+            None => None,
+        };
+        if let Some(target) = target
+            && self.hand_over(target)
         {
             return None;
+        }
+        // The quit ends the programs: the bound holder (if any) lets every
+        // copy go **first** and is gone before a pane closes — a close that
+        // hangs must not leave a copy of a master held anywhere.
+        if let Some(keeper) = &self.ivars().keeper {
+            keeper.quit();
         }
         // Session restore's save comes **first**: the scrollback
         // is read from live sessions and `begin_close` below drops them. A
@@ -5298,17 +5595,6 @@ mod tests {
             }
             .holds()
         );
-    }
-
-    /// Only a relaunch hands over, only where session restore runs and only in a
-    /// bundle: ⌘Q, `"off"` and `cargo run` quit today's way.
-    #[test]
-    fn only_a_bundled_relaunch_with_restore_hands_over() {
-        assert!(hands_over(true, RestoreWindows::All, true));
-        assert!(hands_over(true, RestoreWindows::Layout, true));
-        assert!(!hands_over(true, RestoreWindows::Off, true));
-        assert!(!hands_over(false, RestoreWindows::All, true));
-        assert!(!hands_over(true, RestoreWindows::All, false));
     }
 
     /// A held pane is carried on only alive, readable and watched; the

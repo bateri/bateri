@@ -172,8 +172,15 @@ confirm_close = "running"
 # quitting, an update or a restart: all brings back the windows, tabs and
 # splits with each pane's scrollback, layout brings back the windows without
 # the scrollback (nothing you saw is written to disk), off starts with a
-# single window and deletes what was saved. Shells always start fresh.
+# single window and deletes what was saved. A pane whose program is kept
+# running (keep_running) comes back with it; the others start a new shell.
 restore_windows = "all"
+# "update" | "crash" | "quit". When the programs running in bateri (vim, a
+# build, a session over ssh) outlive it: update keeps them only across an
+# update, crash also when bateri crashes or is forced to quit, quit also when
+# you quit it, and then quitting asks nothing. The next bateri takes them
+# back. Restarting the Mac or logging out ends them.
+keep_running = "crash"
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
@@ -440,6 +447,7 @@ cursor_unfocused = "hollow"
 cursor_blink_interval = 0.5
 confirm_close = "running"
 restore_windows = "all"
+keep_running = "crash"
 ```
 
 | key | type | default | meaning |
@@ -453,6 +461,7 @@ restore_windows = "all"
 | `cursor_blink_interval` | decimal, `0.05`–`5.0` | `0.5` | **half** the blink period, in seconds |
 | `confirm_close` | `"never"` \| `"running"` \| `"always"` | `"running"` | when to ask while closing a tab, a window or the app |
 | `restore_windows` | `"all"` \| `"layout"` \| `"off"` | `"all"` | what comes back when bateri opens again |
+| `keep_running` | `"update"` \| `"crash"` \| `"quit"` | `"crash"` | when the running programs outlive bateri |
 
 - A value above `100000` becomes **`100000`** and gives a warning. The limit
   is alacritty's own setting limit (`MAX_SCROLLBACK_LINES`); it is not a
@@ -557,15 +566,16 @@ The value is read at closing time, so it takes effect the moment you save.
   shown either; it is deleted unread.
 - `"off"` opens with a single empty window, writes nothing and deletes the
   rest.
-- After ⌘Q, logging out and restarting, the shells are **new**: running
-  programs (vim, a build) end on closing, and the history that comes back is
-  text only. The saved state is written only on a clean shutdown; after a
-  crash, bateri opens with a single window.
-- **Updates are the exception**: on "Install and Relaunch" (with `"all"` and
-  `"layout"`) the shells and the running programs — vim, `npm run dev`, a
-  session over ssh — **do not die**, they move to the new version with their
-  screens; on this path the history is not written to disk either, it is
-  carried in memory. `"off"` closes them on updates too, as before. While a
+- After ⌘Q, logging out and restarting, the shells are **new** — unless
+  `keep_running` (below) kept their programs: running programs (vim, a build)
+  end on closing, and the history that comes back is text only. The saved
+  state is written only on a clean shutdown.
+- **Updates are the exception**: on "Install and Relaunch" the shells and the
+  running programs — vim, `npm run dev`, a session over ssh — **do not die**,
+  they move to the new version with their screens; on this path the history
+  is not written to disk either, it is carried in memory. This holds under
+  every `restore_windows` value, `"off"` included: whether programs live on
+  is `keep_running`'s to say, and every value of it covers updates. While a
   file transfer or a password prompt is in progress, the relaunch waits for
   them to finish ("Update waits for N transfers" on the status line; ⌘.
   cancels the transfer and lets the update proceed). A pane that cannot be
@@ -585,6 +595,32 @@ The value is read at closing time, so it takes effect the moment you save.
   you do not want that, use `"layout"`.
 - If two copies of bateri are open at the same time, only the first one saves
   and restores.
+
+`keep_running` says when the programs running in bateri — vim, `npm run
+dev`, a session over ssh — outlive it. Each value includes the ones before
+it:
+
+- `"update"` keeps them only across "Install and Relaunch" (above); ⌘Q, a
+  crash and a forced quit end them.
+- `"crash"` (the default) also keeps them when bateri crashes or is forced to
+  quit (Activity Monitor, `kill -9`): they keep running without a window and
+  the next bateri takes them back into their windows, the same processes. The
+  screen does not come back with them yet: the pane opens empty and a
+  full-screen program fills it again with its next output. ⌘Q still ends
+  them, after the usual question.
+- `"quit"` also keeps them when you quit with ⌘Q, which then asks nothing:
+  the programs run on with no window until bateri opens again, and then they
+  come back with their screens.
+- Under every value, closing a pane, a tab or a window (⌘W, the red button)
+  and typing `exit` end the programs as before, and restarting the Mac or
+  logging out ends them.
+- With `"crash"` and `"quit"` a small helper process (`bateri hold`) runs
+  beside bateri and keeps a copy of each terminal, so the programs have
+  somewhere to stay when bateri goes. While bateri runs it reads nothing and
+  wakes for nothing; when no program is left for it to keep, it exits.
+- A change applies when you save: moving away from `"update"` protects the
+  programs that are already running from then on, moving back to it lets
+  them end with bateri again.
 
 The section can also be written inline: `terminal = { scrollback = 5000 }`.
 `[[terminal]]` (an array of sections) does not count as a section and gives a

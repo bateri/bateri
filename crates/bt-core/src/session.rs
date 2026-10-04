@@ -1706,6 +1706,12 @@ impl io::Read for TappedPty {
             if outcome.up {
                 wake.remote_up();
             }
+            if outcome.prompt || outcome.ended {
+                wake.phase_edge();
+            }
+            if outcome.mirrored {
+                wake.mirror_changed();
+            }
             if outcome.prompt
                 && let Some(line) = initial_input.take()
             {
@@ -9622,10 +9628,11 @@ impl Session {
     }
 
     /// Runs `read` on the PTY master's copy ([`Session::master`]); `None` if
-    /// there is none (the copy failed, the session is shutting down). Its one
-    /// use is reading the terminal modes ([`Session::remote_login`])
-    /// — nothing is written to or read from it. The copy's leaf lock is held
-    /// for the call: `read` must be a syscall, not a wait.
+    /// there is none (the copy failed, the session is shutting down). Its
+    /// uses are reading the terminal modes ([`Session::remote_login`]) and
+    /// duplicating the descriptor for a process that keeps the program alive
+    /// past this one — nothing is written to or read from it here. The copy's
+    /// leaf lock is held for the call: `read` must be a syscall, not a wait.
     pub fn with_pty_fd<T>(
         &self,
         read: impl FnOnce(std::os::fd::BorrowedFd<'_>) -> Option<T>,
@@ -10094,6 +10101,10 @@ mod tests {
         ups: u32,
         /// How many times [`Wake::remote_typed`] came.
         typed: u32,
+        /// How many times [`Wake::phase_edge`] came.
+        edges: u32,
+        /// How many times [`Wake::mirror_changed`] came.
+        mirrors: u32,
     }
 
     impl TestWake {
@@ -10194,6 +10205,16 @@ mod tests {
 
         fn link_hover_lost(&self) {
             self.state.lock().unwrap().hovers_lost += 1;
+            self.cond.notify_all();
+        }
+
+        fn phase_edge(&self) {
+            self.state.lock().unwrap().edges += 1;
+            self.cond.notify_all();
+        }
+
+        fn mirror_changed(&self) {
+            self.state.lock().unwrap().mirrors += 1;
             self.cond.notify_all();
         }
     }
@@ -19613,6 +19634,34 @@ e\\314\\201.'; sleep 5";
         // The second `C` produced no news: the count stays at two.
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(wake.state.lock().unwrap().commands, 2);
+    }
+
+    #[test]
+    fn the_prompt_the_end_and_the_mirror_reach_the_wake() {
+        // Our identified `A` and a `D` are the phase's other two edges; an
+        // identity-less `A` is not ours to report. The mirror's channel
+        // reports each change (the branch is part of it), the editing
+        // widget's word does not.
+        let wake = Arc::new(TestWake::default());
+        let _session = spawn_session(
+            "printf '\\033]133;A\\007'; \
+             printf '\\033]133;A;bt_block=1\\007\\033]133;C\\007\\033]133;D;0;bt_block=1\\007'; \
+             printf '\\033]8133;w\\007\\033]8133;b;\\007'; sleep 5",
+            Arc::clone(&wake),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let state = wake.state.lock().unwrap();
+            if state.edges >= 2 && state.mirrors >= 1 {
+                break;
+            }
+            drop(state);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let state = wake.state.lock().unwrap();
+        assert_eq!((state.edges, state.mirrors), (2, 1));
+        assert_eq!(state.commands, 1);
     }
 
     #[test]

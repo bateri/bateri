@@ -12,7 +12,8 @@
 //! `DockContext`, the dock surface's `Dock`, the typing animations'
 //! `DockEdit`, `EditCells` and the text's column (`DOCK_TEXT_COL`),
 //! `Wake` and the settings model's `Settings`, `SettingsEdit`, `Parsed`, `Diagnostic`,
-//! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose`, `RestoreWindows` and the tables
+//! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose`, `RestoreWindows`,
+//! `KeepRunning` and the tables
 //! of valid values (`NAMES`, `*_RANGE`) (the full
 //! list is the `pub use` block below). `Osc52` is the counterpart of
 //! alacritty's type of the same name, not that type itself. The move to our
@@ -81,7 +82,7 @@ pub use session::{
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,
     CURSOR_RADIUS_RANGE, CaretShape, CaretStyle, Changes, ConfirmClose, CursorBlink, CursorMotion,
-    Diagnostic, DownloadConflict, Erase, FontOptions, HostMark, HostRule, Keypress,
+    Diagnostic, DownloadConflict, Erase, FontOptions, HostMark, HostRule, KeepRunning, Keypress,
     LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MAX_LETTER_SPACING, MAX_LINE_HEIGHT, MIN_SPACING,
     Parsed, PreviewKeep, ReduceMotion, RemoteFiles, RemoteStatsMode, RemoteStatsSettings,
     RestoreWindows, SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE, SYSTEM_THEME, Settings,

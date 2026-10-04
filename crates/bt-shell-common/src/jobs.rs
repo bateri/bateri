@@ -1820,6 +1820,8 @@ mod tests {
         fn remote_up(&self) {}
         fn remote_typed(&self) {}
         fn link_hover_lost(&self) {}
+        fn phase_edge(&self) {}
+        fn mirror_changed(&self) {}
     }
 
     impl ExitWake {

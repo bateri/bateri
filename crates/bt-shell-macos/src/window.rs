@@ -123,6 +123,8 @@ impl PaneHost for WindowHost {
         // the same read and rewrites the unchanged title — cheap and branchless.
         if let Some(window) = self.window() {
             window.refresh_title();
+            // The news also says a directory moved: a layout edge.
+            window.layout_changed();
         }
     }
 
@@ -540,6 +542,9 @@ pub(crate) struct Adopted {
     pub(crate) state: crate::handover::PaneState,
     /// The frozen tail, then what the holder drained (`HeldPane::buffer`).
     pub(crate) prefix: Vec<u8>,
+    /// The socket of the holder it came from: the pane registers with this
+    /// bateri's own holder unconfirmed until that one is acknowledged.
+    pub(crate) taken_from: Option<std::path::PathBuf>,
 }
 
 /// The note under a pane whose program did not cross the update: one dim
@@ -572,6 +577,17 @@ define_class!(
     unsafe impl NSObjectProtocol for TerminalWindow {}
 
     unsafe impl NSWindowDelegate for TerminalWindow {
+        // The frame is part of the layout the bound holder keeps; a drag or
+        // a live resize is a burst the delayed trigger folds into one.
+        #[unsafe(method(windowDidMove:))]
+        fn window_did_move(&self, _n: &NSNotification) {
+            self.layout_changed();
+        }
+
+        #[unsafe(method(windowDidResize:))]
+        fn window_did_resize(&self, _n: &NSNotification) {
+            self.layout_changed();
+        }
 
         // On a move between screens the size (points) does not change but the
         // scale does; nobody but us writes that in a layer-hosting view.
@@ -635,6 +651,8 @@ define_class!(
                 // indicator samples again at once.
                 pane.note_interaction();
             }
+            // The key window and the selected tab are part of the layout.
+            self.layout_changed();
         }
 
         #[unsafe(method(windowDidResignKey:))]
@@ -1232,6 +1250,7 @@ impl TerminalWindow {
         if self.ivars().focused.replace(id) == id {
             return;
         }
+        self.layout_changed();
         let window = self.id();
         DispatchQueue::main().exec_async(move || {
             // audit: a block running on the main queue is on the main thread by definition.
@@ -1333,12 +1352,14 @@ impl TerminalWindow {
             Direction::Up | Direction::Down => cell.height,
         };
         self.ivars().container.resize(pane.id(), direction, step);
+        self.layout_changed();
     }
 
     /// ⌃⌘=: the panes on the same axis are equal.
     pub(crate) fn equalize_splits(&self) {
         self.set_zoom(None);
         self.ivars().container.equalize();
+        self.layout_changed();
     }
 
     /// ⇧⌘↩: zooms the focused pane or undoes the zoom. A no-op
@@ -1352,6 +1373,14 @@ impl TerminalWindow {
             None => Some(self.focused_pane().id()),
         };
         self.set_zoom(zoomed);
+        self.layout_changed();
+    }
+
+    /// A layout edge for the bound holder (`AppDelegate::layout_changed`).
+    pub(crate) fn layout_changed(&self) {
+        if let Some(app) = app::delegate(self.mtm()) {
+            app.layout_changed();
+        }
     }
 
     /// Whether the focused pane can be split on `axis`: both
@@ -1449,6 +1478,7 @@ impl TerminalWindow {
                 self.refresh_dim();
                 if let Some(app) = app::delegate(self.mtm()) {
                     app.refresh_dock_tile();
+                    app.layout_changed();
                 }
             }
         }

@@ -399,6 +399,50 @@ impl RestoreWindows {
     }
 }
 
+/// `[terminal] keep_running`: when the programs running in bateri outlive
+/// it. The values are **cumulative**: `Crash` keeps them across an update
+/// too, `Quit` across an update and a crash.
+///
+/// The only authority on the programs' lifetime: [`RestoreWindows`] says what
+/// is written to disk and how a pane whose program did not live comes back,
+/// so `restore_windows = "off"` no longer ends the programs on an update.
+///
+/// It **doesn't enter** `TerminalOptions` and [`Changes`] (precedent
+/// [`ConfirmClose`]): ⌘Q and the quit read it at that moment, and the live
+/// switch — the holder that keeps the programs is spawned or told to leave —
+/// is the platform shell's, from the old and the new value. It is an ordinary
+/// key: a value that isn't accepted is the default at launch and leaves the
+/// value in effect at save time, and an unusable file is the default. A
+/// fallback never **turns** the value into `Quit` — the default is `Crash` —
+/// because its effect is invisible: the user would think ⌘Q ended the
+/// programs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeepRunning {
+    /// Only an update's relaunch carries the programs over.
+    Update,
+    /// A crash or a forced quit leaves them running too; the next bateri
+    /// takes them back.
+    #[default]
+    Crash,
+    /// ⌘Q leaves them running as well, without asking.
+    Quit,
+}
+
+impl KeepRunning {
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("update", Self::Update),
+        ("crash", Self::Crash),
+        ("quit", Self::Quit),
+    ];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[terminal] cursor_radius` and `cursor_glow`: the cursor's **drawing**
 /// numbers.
 ///
@@ -1140,6 +1184,9 @@ pub struct Settings {
     /// `[terminal] restore_windows`: what comes back after quitting
     /// ([`RestoreWindows`]). Doesn't enter `TerminalOptions`.
     pub restore_windows: RestoreWindows,
+    /// `[terminal] keep_running`: when the programs outlive bateri
+    /// ([`KeepRunning`]). Doesn't enter `TerminalOptions`.
+    pub keep_running: KeepRunning,
     /// `[remote] hosts`: the remote hosts' mark patterns, in the file's order
     /// (matching is [`host_mark`]). Empty by default.
     pub remote_hosts: Vec<HostRule>,
@@ -1188,6 +1235,7 @@ impl Default for Settings {
             shell_integration: ShellIntegration::default(),
             confirm_close: ConfirmClose::default(),
             restore_windows: RestoreWindows::default(),
+            keep_running: KeepRunning::default(),
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
@@ -1250,6 +1298,7 @@ pub enum SettingsEdit {
     BlinkInterval(f64),
     ConfirmClose(ConfirmClose),
     RestoreWindows(RestoreWindows),
+    KeepRunning(KeepRunning),
     Theme(String),
     LightTheme(String),
     DarkTheme(String),
@@ -1333,6 +1382,7 @@ impl SettingsEdit {
             ),
             Self::ConfirmClose(_) => ("terminal", "confirm_close", "terminal.confirm_close"),
             Self::RestoreWindows(_) => ("terminal", "restore_windows", "terminal.restore_windows"),
+            Self::KeepRunning(_) => ("terminal", "keep_running", "terminal.keep_running"),
             Self::Theme(_) => ("appearance", "theme", "appearance.theme"),
             Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
             Self::DarkTheme(_) => ("appearance", "dark_theme", "appearance.dark_theme"),
@@ -1379,6 +1429,7 @@ impl SettingsEdit {
             Self::CursorUnfocused(unfocused) => unfocused.name().into(),
             Self::ConfirmClose(confirm) => confirm.name().into(),
             Self::RestoreWindows(restore) => restore.name().into(),
+            Self::KeepRunning(keep) => keep.name().into(),
             Self::Osc52(mode) => mode.name().into(),
             Self::CursorMotion(motion) => motion.name().into(),
             Self::ReduceMotion(reduce) => reduce.name().into(),
@@ -1477,8 +1528,15 @@ confirm_close = "running"
 # quitting, an update or a restart: all brings back the windows, tabs and
 # splits with each pane's scrollback, layout brings back the windows without
 # the scrollback (nothing you saw is written to disk), off starts with a
-# single window and deletes what was saved. Shells always start fresh.
+# single window and deletes what was saved. A pane whose program is kept
+# running (keep_running) comes back with it; the others start a new shell.
 restore_windows = "all"
+# "update" | "crash" | "quit". When the programs running in bateri (vim, a
+# build, a session over ssh) outlive it: update keeps them only across an
+# update, crash also when bateri crashes or is forced to quit, quit also when
+# you quit it, and then quitting asks nothing. The next bateri takes them
+# back. Restarting the Mac or logging out ends them.
+keep_running = "crash"
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
@@ -1769,6 +1827,16 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = terminal.get("keep_running") {
+                    parsed.settings.keep_running = named_enum(
+                        text,
+                        item,
+                        "terminal.keep_running",
+                        KeepRunning::NAMES,
+                        fallback.keep_running,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("terminal") => {
                 parsed.settings.scrollback = fallback.scrollback;
@@ -1778,6 +1846,7 @@ stats_interval = 3
                 parsed.settings.blink_interval = fallback.blink_interval;
                 parsed.settings.confirm_close = fallback.confirm_close;
                 parsed.settings.restore_windows = RestoreWindows::Layout;
+                parsed.settings.keep_running = fallback.keep_running;
             }
             None => {}
         }
@@ -3763,6 +3832,7 @@ mod tests {
             shell_integration: ShellIntegration::Auto,
             confirm_close: ConfirmClose::Always,
             restore_windows: RestoreWindows::Off,
+            keep_running: KeepRunning::Quit,
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
@@ -4679,6 +4749,92 @@ found 1.5; using 0.1"
         );
         assert!(written.contains("ask_twice = true"), "{written}");
         assert_eq!(clean(&written).restore_windows, RestoreWindows::Off);
+    }
+
+    #[test]
+    fn keep_running_is_read_and_defaults_to_crash() {
+        // Not in the file: the programs outlive a crash, not a quit.
+        assert_eq!(clean("").keep_running, KeepRunning::Crash);
+        for (value, expected) in [
+            ("update", KeepRunning::Update),
+            ("crash", KeepRunning::Crash),
+            ("quit", KeepRunning::Quit),
+        ] {
+            let text = format!("[terminal]\nkeep_running = \"{value}\"\n");
+            assert_eq!(clean(&text).keep_running, expected, "{value}");
+        }
+        // An unusable file is the default too, never `quit`: its effect is
+        // the invisible one.
+        assert_eq!(
+            Settings::for_unusable_file().keep_running,
+            KeepRunning::Crash
+        );
+    }
+
+    #[test]
+    fn unrecognized_keep_running_keeps_its_own_key() {
+        for (value, found) in [("\"Quit\"", "\"Quit\""), ("true", "a boolean")] {
+            let text = format!("[terminal]\nscrollback = 42\nkeep_running = {value}\n");
+            let (settings, diagnostic) = rejected(&text);
+            assert_eq!(
+                settings,
+                Settings {
+                    scrollback: 42,
+                    ..Settings::default()
+                },
+                "{value}"
+            );
+            assert_eq!(diagnostic.key, Some("terminal.keep_running"), "{value}");
+            assert_eq!(diagnostic.line, Some(3), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`terminal.keep_running` must be \"update\", \"crash\" or \"quit\", \
+                     found {found}; using \"crash\""
+                )
+            );
+        }
+        // At save time the current value stands in — an ordinary key, not one
+        // of the safe-side exceptions; also when the section has the wrong type.
+        let current = Settings {
+            keep_running: KeepRunning::Quit,
+            ..Settings::default()
+        };
+        for text in ["[terminal]\nkeep_running = \"always\"\n", "terminal = 5\n"] {
+            let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
+            assert_eq!(parsed.settings.keep_running, KeepRunning::Quit, "{text}");
+        }
+    }
+
+    #[test]
+    fn keep_running_change_reaches_no_session() {
+        // Read when quitting, applied by the platform shell from the old and
+        // the new value: nothing goes to the sessions, the font or the cursor.
+        let before = clean("");
+        let after = clean("[terminal]\nkeep_running = \"quit\"\n");
+        assert_eq!(before.terminal(), after.terminal());
+        assert_eq!(before.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn keep_running_write_keeps_comments_and_unknown_keys() {
+        let text = "[terminal]\nkeep_running = \"crash\" # keep\nask_twice = true\n";
+        let written = Settings::with_edit(text, &SettingsEdit::KeepRunning(KeepRunning::Quit))
+            .expect("editable text");
+        assert!(
+            written.contains("keep_running = \"quit\" # keep"),
+            "{written}"
+        );
+        assert!(written.contains("ask_twice = true"), "{written}");
+        assert_eq!(clean(&written).keep_running, KeepRunning::Quit);
+        // A file without the key gets it in its section, the rest untouched.
+        let written = Settings::with_edit(
+            "[terminal]\nscrollback = 5\n",
+            &SettingsEdit::KeepRunning(KeepRunning::Update),
+        )
+        .expect("editable text");
+        assert_eq!(clean(&written).keep_running, KeepRunning::Update);
+        assert_eq!(clean(&written).scrollback, 5);
     }
 
     #[test]
@@ -5610,6 +5766,7 @@ cursor = \"spring\"
             SettingsEdit::BlinkInterval(seconds) => settings.blink_interval = two(seconds),
             SettingsEdit::ConfirmClose(confirm) => settings.confirm_close = confirm,
             SettingsEdit::RestoreWindows(restore) => settings.restore_windows = restore,
+            SettingsEdit::KeepRunning(keep) => settings.keep_running = keep,
             SettingsEdit::Theme(name) => settings.theme = name,
             SettingsEdit::LightTheme(name) => settings.light_theme = name,
             SettingsEdit::DarkTheme(name) => settings.dark_theme = name,
@@ -5677,6 +5834,7 @@ cursor = \"spring\"
             SettingsEdit::BlinkInterval(0.75),
             SettingsEdit::ConfirmClose(ConfirmClose::Always),
             SettingsEdit::RestoreWindows(RestoreWindows::Layout),
+            SettingsEdit::KeepRunning(KeepRunning::Quit),
             SettingsEdit::Theme("paper".to_owned()),
             SettingsEdit::LightTheme("paper".to_owned()),
             SettingsEdit::DarkTheme("ink".to_owned()),

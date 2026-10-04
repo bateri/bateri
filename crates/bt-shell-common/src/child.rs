@@ -411,6 +411,8 @@ impl bt_core::Wake for SilentWake {
     fn remote_up(&self) {}
     fn remote_typed(&self) {}
     fn link_hover_lost(&self) {}
+    fn phase_edge(&self) {}
+    fn mirror_changed(&self) {}
 }
 
 /// Waits until `ready` says true; if time runs out, fails with `message`.

@@ -3692,6 +3692,8 @@ exit $code
         fn remote_up(&self) {}
         fn remote_typed(&self) {}
         fn link_hover_lost(&self) {}
+        fn phase_edge(&self) {}
+        fn mirror_changed(&self) {}
     }
 
     /// The terminal session's sharing against a real password sshd (the one

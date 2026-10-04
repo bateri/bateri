@@ -112,6 +112,33 @@ pub trait Wake: Send + Sync + 'static {
     /// its queue.
     fn command_started(&self);
 
+    /// The shell's phase moved at the other two edges: our identified `A`
+    /// (a prompt) or a `D` (a command ended) — the edges where the state
+    /// [`crate::Session::state_blob`] carries (the block ledger, the
+    /// command's clock) changes. With [`Wake::command_started`] the receiver
+    /// sees all three, and a copy of the state it keeps elsewhere is never a
+    /// command behind.
+    ///
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::command_started`]): the receiver reads the state itself. It
+    /// arrives on the reader thread after the ledger's leaf lock has been
+    /// released; the contract assumes the `Term` lock may be held and the
+    /// three prohibitions above apply. The implementor posts **at most one**
+    /// job to its queue.
+    fn phase_edge(&self);
+
+    /// The dock's mirror or its context changed (OSC 8133: the line, its
+    /// end, a mirror that could not be read, the branch) — the part of
+    /// [`crate::Session::state_blob`] that moves with every keystroke.
+    ///
+    /// **Payload-free** (the precedent is [`Wake::title_changed`]): once per
+    /// event, i.e. as often as the shell redraws its line; the receiver that
+    /// copies the state elsewhere coalesces — one copy per interval, not per
+    /// key. It arrives on the reader thread after the ledger's leaf lock has
+    /// been released; the contract assumes the `Term` lock may be held and
+    /// the three prohibitions above apply.
+    fn mirror_changed(&self);
+
     /// The remote bootstrap said it runs (`8133;i;up;{nonce}`)
     /// while a command ran: the receiver reads it with
     /// [`crate::Session::remote_up`] and, if the nonce is the wrapped `ssh`'s,

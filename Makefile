@@ -586,12 +586,15 @@ ship:
 # the old one only when the copy is done: so that an install cut halfway does
 # not destroy the working package. It stops if a bateri is open and does not
 # close it — killing the shells in the user's session is not a build target's
-# decision.
+# decision. Only the application counts: its argv is the binary alone (or
+# with AppKit's `-` options), while `bateri hold …` — the process that keeps
+# the programs running after bateri quits — and the other subcommands carry a
+# word after it and do not block an install.
 INSTALL_DIR ?= /Applications
 INSTALLED = $(INSTALL_DIR)/bateri.app
 
 install: bundle
-	@if pgrep -f '$(INSTALLED)/Contents/MacOS/bateri' >/dev/null; then \
+	@if pgrep -f '^$(INSTALLED)/Contents/MacOS/bateri( -.*)?$$' >/dev/null; then \
 		echo "install: $(INSTALLED) is open — quit it first (⌘Q), then retry"; exit 1; fi
 	rm -rf $(INSTALLED).new
 	ditto $(APP) $(INSTALLED).new

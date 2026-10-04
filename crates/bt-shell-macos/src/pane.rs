@@ -47,7 +47,7 @@ use bt_core::{
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Pacer, Renderer, Stats, Surface, Waker};
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -67,6 +67,7 @@ use crate::app::{self, Grid, split_into_grid};
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
+use crate::keeper::{Keeper, MIRROR_DELAY};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::password_sheet::PasswordSheet;
@@ -334,6 +335,10 @@ pub(crate) struct PaneLaunch {
     /// pane — one opening per host. `None` in a timed run: the remote jobs
     /// take today's argv.
     pub(crate) masters: Option<Arc<Masters>>,
+    /// The bound holder's driver, the application's: the pane registers
+    /// with it when its session is born and releases at its close. `None` in
+    /// a timed run and an unbundled process.
+    pub(crate) keeper: Option<Rc<Keeper>>,
 }
 
 /// The half of the birth package that only [`TerminalPane::start`] consumes.
@@ -452,6 +457,16 @@ struct ShellWake {
     /// Whether the "typed after the login" check is waiting on the main queue
     /// ([`TerminalPane::check_remote_typed`]) — at most one job.
     typed_pending: Arc<AtomicBool>,
+    /// Whether a bound holder keeps the programs ([`Keeper::active_flag`]):
+    /// the gate of the two state sends below — without a holder a shell's
+    /// edges and keystrokes post nothing. `None` in a timed run.
+    kept: Option<Arc<AtomicBool>>,
+    /// Whether the state send of a shell edge is waiting on the main queue
+    /// ([`TerminalPane::push_state`]) — at most one job.
+    state_pending: Arc<AtomicBool>,
+    /// Whether the delayed state send of a mirror change is waiting
+    /// ([`MIRROR_DELAY`]) — at most one.
+    mirror_pending: Arc<AtomicBool>,
 }
 
 /// The two bits of the remote-session probe — and of the login
@@ -562,6 +577,57 @@ impl ShellWake {
     /// it drops on the main thread ([`ShellWake::waker`]). The second call is `None`.
     fn detach(&self) -> Option<Waker> {
         self.slot().take()
+    }
+
+    /// Whether a holder keeps this pane's program — one atomic read.
+    fn kept(&self) -> bool {
+        !self.timed
+            && self
+                .kept
+                .as_ref()
+                .is_some_and(|kept| kept.load(Ordering::Acquire))
+    }
+
+    /// A shell edge: the pane's state goes to the holder on the next
+    /// main-queue turn — `state_blob` takes the ledger's lock and must not
+    /// run here (reader thread, possibly under the `Term` lock).
+    fn push_state_soon(&self) {
+        if !self.kept() || self.state_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.state_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.store(false, Ordering::Release);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.push_state();
+            }
+        });
+    }
+
+    /// A mirror change: the pane's state goes after [`MIRROR_DELAY`], once
+    /// per interval however fast the keys come. The flag drops when the job
+    /// runs, before the read: a change after it schedules the next.
+    fn push_state_later(&self) {
+        if !self.kept() || self.mirror_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Ok(when) = DispatchTime::try_from(MIRROR_DELAY) else {
+            self.mirror_pending.store(false, Ordering::Release);
+            return;
+        };
+        let pending = Arc::clone(&self.mirror_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        let _ = DispatchQueue::main().after(when, move || {
+            pending.store(false, Ordering::Release);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.push_state();
+            }
+        });
     }
 }
 
@@ -700,9 +766,21 @@ impl Wake for ShellWake {
         if self.timed {
             return;
         }
+        self.push_state_soon();
         if self.remote_probe.command_started() {
             self.dispatch_remote_probe();
         }
+    }
+
+    fn phase_edge(&self) {
+        // Reader thread, lock-free: a prompt or a command's end — the
+        // holder's copy of the state must not lag a command behind.
+        self.push_state_soon();
+    }
+
+    fn mirror_changed(&self) {
+        // Reader thread, per keystroke: one delayed send per interval.
+        self.push_state_later();
     }
 
     fn remote_up(&self) {
@@ -936,6 +1014,12 @@ pub(crate) struct PaneIvars {
     password: RefCell<Option<PasswordSheet>>,
     /// The application's ssh masters ([`PaneLaunch::masters`]).
     masters: Option<Arc<Masters>>,
+    /// The bound holder's driver ([`PaneLaunch::keeper`]).
+    keeper: Option<Rc<Keeper>>,
+    /// The socket of the holder a carried-on pane was taken from, until
+    /// its registration ([`TerminalPane::register_with_holder`]): the new
+    /// holder must not drain the master while that one still does.
+    taken_from: RefCell<Option<PathBuf>>,
     /// The remote generation this pane reported to the masters' registry
     /// ([`Masters::session_started`]); `None` locally.
     ssh_session: Cell<Option<u64>>,
@@ -1276,6 +1360,7 @@ impl TerminalPane {
             smooth_scroll,
             zoom,
             masters,
+            keeper,
         } = launch;
         // The saved identity of a restored pane, a new one otherwise.
         let tab_id = launch.tab_id.take().unwrap_or_else(new_tab_id);
@@ -1336,6 +1421,9 @@ impl TerminalPane {
                 link_pending: Arc::default(),
                 up_pending: Arc::default(),
                 typed_pending: Arc::default(),
+                kept: keeper.as_ref().map(|keeper| keeper.active_flag()),
+                state_pending: Arc::default(),
+                mirror_pending: Arc::default(),
             }),
             zoom: Cell::new(zoom),
             // No dock at launch: `start` decides and computes the geometry
@@ -1352,6 +1440,8 @@ impl TerminalPane {
             upload_stop: RefCell::new(None),
             password: RefCell::new(None),
             masters,
+            keeper,
+            taken_from: RefCell::new(None),
             ssh_session: Cell::new(None),
             wrap_proof: RefCell::new(WrapProof::default()),
             upload_list: RefCell::new(None),
@@ -1680,17 +1770,23 @@ impl TerminalPane {
         // carried history and the note.
         let adopting = adopt.is_some();
         let (session, shell_parent) = match adopt {
-            Some(adopted) => match adopt_session(options.clone(), adopted, grid, &wake) {
-                Ok((session, parent)) => (session, parent),
-                Err((error, history)) => {
-                    eprintln!("bateri: could not carry a pane over the update: {error}");
-                    let options = SessionOptions {
-                        replay: Some(crate::window::fallen_back(history)),
-                        ..options
-                    };
-                    (Session::spawn(options, wake)?, shell_parent)
+            Some(adopted) => {
+                let taken_from = adopted.taken_from.clone();
+                match adopt_session(options.clone(), adopted, grid, &wake) {
+                    Ok((session, parent)) => {
+                        self.ivars().taken_from.replace(taken_from);
+                        (session, parent)
+                    }
+                    Err((error, history)) => {
+                        eprintln!("bateri: could not carry a pane over the update: {error}");
+                        let options = SessionOptions {
+                            replay: Some(crate::window::fallen_back(history)),
+                            ..options
+                        };
+                        (Session::spawn(options, wake)?, shell_parent)
+                    }
                 }
-            },
+            }
             // A terminal window without a shell is an empty box; what to do is
             // the caller's call (first window: the process exits; later ones:
             // that window closes).
@@ -1804,7 +1900,71 @@ impl TerminalPane {
                 Wake::command_started(&*self.ivars().wake);
             }
         }
+        // Last: the session is in its slot and the pane in its window, so the
+        // layout the registration sends at once places this pane.
+        self.register_with_holder(mtm);
         Ok(())
+    }
+
+    /// Registers this pane with the bound holder ([`Keeper::add`]): a copy
+    /// of the master (close-on-exec), the identity, the child and its start
+    /// time, the shell's parent and `bt-core`'s state now — a crash right
+    /// after still leaves a bundle. A carried-on pane goes unconfirmed, named
+    /// by the holder it was taken from, until that holder is acknowledged.
+    /// No VT base: nothing carries it forward between here and a crash
+    /// hours later, and a stale screen must not come back as the whole one.
+    ///
+    /// A no-op without a bound holder, for a closed pane, or when the child's
+    /// start time or the master's copy cannot be read (the program then ends
+    /// with bateri, as before). Called again for every live pane when a
+    /// holder is (re)spawned.
+    pub(crate) fn register_with_holder(&self, mtm: MainThreadMarker) {
+        let Some(keeper) = self.ivars().keeper.as_deref() else {
+            return;
+        };
+        if !keeper.is_active() || self.is_closed() {
+            return;
+        }
+        let Some(session) = self.session() else {
+            return;
+        };
+        let Some(&parent) = self.ivars().shell_parent.get() else {
+            return;
+        };
+        let pid = session.child_pid();
+        let Some(start) = jobs::start_time(pid) else {
+            return;
+        };
+        let Some(master) = session.with_pty_fd(|fd| fd.try_clone_to_owned().ok()) else {
+            return;
+        };
+        keeper.add(
+            mtm,
+            crate::handover::BoundPane {
+                tab: self.ivars().tab_id.clone(),
+                pid,
+                start,
+                parent,
+                blob: session.state_blob(),
+                master,
+                taken_from: self.ivars().taken_from.take(),
+            },
+        );
+    }
+
+    /// Sends this pane's current `bt-core` state to the bound holder —
+    /// the shell's edges and, delayed, the mirror's changes
+    /// ([`ShellWake`]'s two sends). A no-op without a holder or once closed.
+    pub(crate) fn push_state(&self) {
+        let Some(keeper) = self.ivars().keeper.as_deref() else {
+            return;
+        };
+        if self.is_closed() || !keeper.is_active() {
+            return;
+        }
+        if let Some(session) = self.session() {
+            keeper.state(&self.ivars().tab_id, session.state_blob());
+        }
     }
 
     /// The alternate screen changed: the dock goes away or comes back.
@@ -1857,6 +2017,10 @@ impl TerminalPane {
         let zoom = step(self.ivars().zoom.get(), &self.ivars().font.borrow());
         self.ivars().zoom.set(zoom);
         self.apply_font();
+        // The point-size step is part of the layout the bound holder keeps.
+        if let Some(keeper) = self.ivars().keeper.as_deref() {
+            keeper.layout_changed();
+        }
     }
 
     /// The setting's font changed (`AppDelegate::reload_settings`, after the
@@ -2316,10 +2480,12 @@ impl TerminalPane {
     /// deadline) — and a single pane's closing (`TerminalWindow::close_pane`,
     /// the handle drops; if the split could not be born, `add_pane`'s rollback).
     ///
-    /// The order is required: first the upload queue is released (processes are
-    /// killed and the half file is deleted; there is no dock left to show the
-    /// result), **then** the rhythm, the `Waker` and `SIGHUP` — in the reverse
-    /// order the cancellation would go after the shell's `SIGHUP`.
+    /// The order is required: first the bound holder lets its copy of the
+    /// master go ([`Keeper::release`]), then the upload queue is released
+    /// (processes are killed and the half file is deleted; there is no dock
+    /// left to show the result), **then** the rhythm, the `Waker` and
+    /// `SIGHUP` — in the reverse order the cancellation would go after the
+    /// shell's `SIGHUP`.
     ///
     /// 0. Count the pane as closed ([`PaneIvars::closed`]) and remove the frame
     ///    observer: while the tab bar closes AppKit can re-lay-out the content
@@ -2345,6 +2511,12 @@ impl TerminalPane {
     /// the observer is a no-op if unregistered). `None` if the session was
     /// never born — there is nothing to close.
     pub(crate) fn begin_close(&self) -> Option<Closing> {
+        // The holder lets its copy go **first**: a program with unread
+        // output cannot finish exiting while an unread copy of its master is
+        // open, and the hang-up below waits for that exit.
+        if let Some(keeper) = self.ivars().keeper.as_deref() {
+            keeper.release(&self.ivars().tab_id);
+        }
         self.quiesce(true);
         let session = self.ivars().session.get()?;
         Some(match session.begin_shutdown() {
@@ -3047,6 +3219,7 @@ fn adopt_session(
         pid,
         mut state,
         prefix,
+        taken_from: _,
     } = adopted;
     let history = Some(std::mem::take(&mut state.history)).filter(|bytes| !bytes.is_empty());
     let parent = state.parent;
