@@ -1992,6 +1992,11 @@ impl BateriView {
     /// PTY pad's single-row block ([`dock_input_top_px`]); the height in that
     /// arm is from the view's bounds - the drawable's size is set in the same
     /// call as that (`TerminalPane::sync_geometry`).
+    ///
+    /// A drawn frame with **zero** input rows (a remote session's status bar,
+    /// or no band at all while a program reads the keyboard itself) is left
+    /// to [`point_to_cell`]'s rejection of a zero-row grid: no point is the
+    /// dock's, so a click on the lowered grid's bottom row reaches the grid.
     pub(crate) fn window_point_dock(
         &self,
         in_window: NSPoint,
@@ -2313,6 +2318,29 @@ mod tests {
     /// separate things are asked: the cell arithmetic (padding zero) and the padding itself.
     fn grid(gutter: u16) -> CellMetrics {
         CellMetrics::new(9, 18, 9, gutter, 1).expect("non-zero cell")
+    }
+
+    #[test]
+    fn a_click_on_the_lowered_grids_bottom_row_is_the_grids() {
+        // No band (a program reading the keyboard itself): the grid is drawn
+        // the whole PTY share lower, so its bottom row sits where the dock's
+        // input row was. The drawn frame's dock is a zero-row block below the
+        // window (`Frame::dock_hit`), so the dock rejects the point and the
+        // grid takes it — the bottom row, not a phantom dock row.
+        let metrics = grid(8);
+        let rows: u16 = 10;
+        let share = f64::from(bt_gpu::dock_px(bt_gpu::DOCK_ROWS, metrics));
+        let height = f64::from(rows) * 18.0 + share;
+        let click = (40.0, height - 9.0);
+        let dock_top = height + f64::from(metrics.gutter_px());
+        assert_eq!(
+            point_to_cell(click, metrics, dock_top, OutOfGrid::Reject, 1.0, 40, 0),
+            None,
+            "a zero-row dock takes no point"
+        );
+        let cell = point_to_cell(click, metrics, share, OutOfGrid::Reject, 1.0, 40, rows)
+            .expect("the grid takes it");
+        assert_eq!(cell.row, rows - 1);
     }
 
     #[test]

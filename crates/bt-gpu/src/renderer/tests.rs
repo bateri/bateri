@@ -1304,6 +1304,48 @@ fn the_dock_paints_the_bottom_band_and_the_sliding_grid_cannot_reach_it() {
 }
 
 #[test]
+fn no_band_paints_no_dock_pixel_and_the_grid_reaches_the_bottom() {
+    // **No band** (a program reading the keyboard itself): the surface is open but the
+    // band's height is zero — the ground and both hairlines must not reach a single pixel,
+    // and the grid, the whole share lower, owns the window's bottom. Asked of pixels, not of
+    // the zero-size instances: a viewport set at the texture's bottom edge is the renderer's
+    // to clip.
+    let r = renderer();
+    const EDGE: usize = 16;
+    const CELL: u16 = 8;
+    let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+    let green = LinearRgba::from_srgb(0x00, 0xff, 0x00);
+    let mut frame = Frame::default();
+    frame.clear(grid(CELL, CELL), CaretStyle::default());
+    frame.push(bg_cell(0, 0, red));
+    frame.set_dock_input_rows(None);
+    // A one-row share, settled at no band: the excess is the whole share.
+    frame.set_dock_share(1);
+    frame.set_dock_band(EDGE as f32, -1.0);
+    frame.open_dock(green, WHITE, WHITE);
+    assert_eq!(frame.dock_band_px(), 0.0);
+
+    let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+    let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
+    assert_eq!(
+        pixel(2, 12),
+        (255, 0, 0),
+        "the grid's row is not at the bottom"
+    );
+    assert_eq!(
+        pixel(14, 12),
+        pixel(14, 2),
+        "something painted beside the grid's cell"
+    );
+    for y in 0..EDGE {
+        for x in 0..EDGE {
+            assert_ne!(pixel(x, y), (0, 255, 0), "the dock's ground at {x},{y}");
+            assert_ne!(pixel(x, y), (255, 255, 255), "a hairline at {x},{y}");
+        }
+    }
+}
+
+#[test]
 fn a_growing_band_reveals_its_rows_from_the_bottom() {
     // **The growing band, the pixel half.** A dock with three input rows (four-row layout): the
     // cells are bottom-anchored and come from the layout's viewport, the ground from the band's
@@ -1777,6 +1819,7 @@ pub(crate) fn cursor_at(col: u16, text: LinearRgba) -> Cursor {
         // These tests ask about the pixel; the handover is `link`'s question.
         caret_in_dock: false,
         input_rows: 1,
+        band_hidden: false,
         shape: CaretShape::Block,
         blink: false,
         text,

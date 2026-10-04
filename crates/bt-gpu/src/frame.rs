@@ -691,8 +691,13 @@ pub fn dock_px(dock_rows: u16, cell: CellMetrics) -> f32 {
 /// the second hairline are only between the input block and the context row
 /// The formula's body is still [`dock_height`]:
 /// the band is a dock of `input_rows + 1` rows.
-pub(crate) fn band_px(input_rows: u16, cell: CellMetrics) -> f32 {
-    dock_px(input_rows.saturating_add(1), cell)
+///
+/// `None` is **no band** (`bt_core::Cursor::band_rows`): zero pixels — a
+/// program reading the keyboard itself has the dock step aside, and the
+/// grid is drawn the whole PTY share lower. A height, not a terminal
+/// concept: this layer only learns that the band is empty.
+pub(crate) fn band_px(input_rows: Option<u16>, cell: CellMetrics) -> f32 {
+    input_rows.map_or(0.0, |rows| dock_px(rows.saturating_add(1), cell))
 }
 
 /// The ceiling of the dock's input rows: **half** of the grid's rows — a
@@ -1315,7 +1320,22 @@ impl Frame {
     /// is no band or it is the share's height, the term is zero and the frame
     /// is bit for bit the same as today's.
     pub(crate) fn origin_px(&self) -> f32 {
-        self.origin_px + self.frac_px - self.dock_band.unwrap_or(0.0)
+        self.origin_px + self.frac_px - self.band_excess().unwrap_or(0.0)
+    }
+
+    /// The band's excess as both consumers read it ([`Frame::dock_band`]):
+    /// **never below minus the share**. A band sliding to no band at all can
+    /// overshoot its target on a spring; a deeper excess would draw a negative
+    /// band and push the grid's bottom row out of the window while the band's
+    /// top stays at its bottom. Clamped once, here, so the grid's bottom edge
+    /// and the band's top still meet in the overshooting frames.
+    fn band_excess(&self) -> Option<f32> {
+        let share = dock_height(
+            self.dock_share.unwrap_or(DOCK_ROWS),
+            self.cell_px.1,
+            self.gutter_px,
+        );
+        self.dock_band.map(|extra| extra.max(-share))
     }
 
     /// The sink's single entry: if the cell has a background it is painted,
@@ -2133,14 +2153,19 @@ impl Frame {
     }
 
     /// The frame path's layout: `input_rows` input rows
-    /// (`bt_core::Cursor::input_rows`) and **always** a context row below.
+    /// (`bt_core::Cursor::band_rows`) and **always** a context row below.
     ///
     /// Zero input rows is legitimate (remote session): the
     /// layout is the context row alone, in the small face and with no row gap
     /// above it — there is no input row to separate.
-    pub(crate) fn set_dock_input_rows(&mut self, input_rows: u16) {
-        self.dock_rows = input_rows.saturating_add(1);
-        self.dock_context = true;
+    ///
+    /// `None` is **no band**: zero layout rows and no context row, so the
+    /// layout's height is zero and the mouse's input block has zero rows
+    /// ([`Frame::dock_hit`]) — the surface stays open, a click falls to the
+    /// grid.
+    pub(crate) fn set_dock_input_rows(&mut self, input_rows: Option<u16>) {
+        self.dock_rows = input_rows.map_or(0, |rows| rows.saturating_add(1));
+        self.dock_context = input_rows.is_some();
     }
 
     /// The band's **drawn** height in this frame: the window's bottom and the
@@ -2299,8 +2324,10 @@ impl Frame {
 
     /// The dock-independent body of [`Frame::dock_band_px`]: if the band was
     /// told, the PTY share plus the excess, otherwise the layout's height.
+    /// The excess is the clamped one ([`Frame::band_excess`]), so the height
+    /// never goes below zero.
     fn band_height(&self) -> f32 {
-        match self.dock_band {
+        match self.band_excess() {
             Some(extra) => {
                 dock_height(
                     self.dock_share.unwrap_or(DOCK_ROWS),
@@ -2320,7 +2347,8 @@ impl Frame {
     /// If there is no input row (remote session) the row count is
     /// **zero**, not `None`: `None` goes, on the mouse side, to the one-row
     /// fallback of "no frame yet" and a phantom input block would be born on
-    /// the context row.
+    /// the context row. With no band at all, the same zero — a click on the
+    /// lowered grid's bottom row is the grid's, not a phantom dock row's.
     ///
     /// **From the layout**, not from the drawn band: the text is
     /// bottom-anchored and stays in place throughout the animation, so the
@@ -3077,6 +3105,7 @@ mod tests {
             // This module tests the grid's lists; the handover is `link`'s question.
             caret_in_dock: false,
             input_rows: 1,
+            band_hidden: false,
             shape: CaretShape::Block,
             blink: false,
             text: TEXT,
@@ -4581,7 +4610,7 @@ mod tests {
         let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics");
         let mut frame = Frame::default();
         frame.clear(metrics, CaretStyle::default());
-        frame.set_dock_input_rows(0);
+        frame.set_dock_input_rows(Some(0));
         for col in 0..2 {
             frame.push_dock(Cell {
                 col,
@@ -4594,7 +4623,7 @@ mod tests {
         frame.open_dock(BG, edge, CURSOR);
         let band = 18.0 + 2.0 * f32::from(GUTTER);
         assert_eq!(frame.dock_layout_px(), band);
-        assert_eq!(band_px(0, metrics), band);
+        assert_eq!(band_px(Some(0), metrics), band);
         let glyphs = frame.dock_glyphs();
         assert_eq!(glyphs[0].pos[1], f32::from(GUTTER), "gap was applied");
         assert_eq!(
@@ -4624,6 +4653,43 @@ mod tests {
         assert_eq!(frame.dock_glyphs()[0].size, SizeClass::Normal);
     }
 
+    #[test]
+    fn no_band_opens_a_surface_of_zero_rows() {
+        // **No band** (a program reading the keyboard itself): the layout has
+        // no row, the settled band has no height, so neither the ground nor
+        // either hairline covers a pixel of the window; the surface is still
+        // open and the mouse reads a zero-row input block, so a click on the
+        // grid's bottom row is the grid's.
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics");
+        assert_eq!(band_px(None, metrics), 0.0);
+        let mut frame = Frame::default();
+        frame.clear(metrics, CaretStyle::default());
+        frame.set_dock_input_rows(None);
+        let share = dock_px(DOCK_ROWS, metrics);
+        // Settled: the excess is the whole share, negative.
+        frame.set_dock_band(600.0, -share / 18.0);
+        frame.open_dock(BG, CURSOR, CURSOR);
+        assert_eq!(frame.dock_layout_px(), 0.0);
+        assert_eq!(frame.dock_band_px(), 0.0);
+        let [ground, separator, fill, divider] = frame.dock_ground(500.0);
+        assert_eq!(ground.size, [500.0, 0.0]);
+        // The top hairline sits on the band's top, i.e. at the window's bottom:
+        // the band's viewport starts there, so it is below every pixel.
+        assert_eq!(separator.pos, [0.0, 0.0]);
+        assert_eq!(fill.size[0], 0.0, "no progress");
+        assert_eq!(divider.size[1], 0.0);
+        assert_eq!(frame.dock_hit(), Some((600.0 + f32::from(GUTTER), 0)));
+        // The grid's origin is lower by the whole share.
+        frame.set_origin_rows(5.0);
+        assert_eq!(frame.origin_px(), 5.0 * 18.0 + share);
+        // A spring overshooting past zero does not draw a negative band, and
+        // the grid stops with it: its bottom does not leave the window.
+        frame.set_dock_band(600.0, -share / 18.0 - 0.5);
+        assert_eq!(frame.dock_band_px(), 0.0);
+        assert_eq!(frame.dock_top_px, 600.0);
+        assert_eq!(frame.origin_px(), 5.0 * 18.0 + share);
+    }
+
     /// A cell of a dock with three input rows: `row` 0..3 input, 3 context.
     fn dock_row(row: u16) -> Cell {
         Cell {
@@ -4641,9 +4707,9 @@ mod tests {
         // second hairline only between the input block and the context row.
         // At @1x, 9×18 cells, margin 7: `4·18 + 2·7 + 14 = 100` px.
         let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics");
-        assert_eq!(band_px(3, metrics), 100.0);
+        assert_eq!(band_px(Some(3), metrics), 100.0);
         // With one row it is the PTY share itself — the screen is bit for bit the same.
-        assert_eq!(band_px(1, metrics), dock_px(DOCK_ROWS, metrics));
+        assert_eq!(band_px(Some(1), metrics), dock_px(DOCK_ROWS, metrics));
 
         let mut frame = Frame::default();
         frame.clear(metrics, CaretStyle::default());

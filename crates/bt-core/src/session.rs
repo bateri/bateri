@@ -327,6 +327,20 @@ pub struct Cursor {
     /// `Esc-Enter`) and `PREBUFFER` (`for`, heredoc) grow the band with their
     /// own rows.
     pub input_rows: u16,
+    /// **No band at all** in this frame: the running command's program reads
+    /// the keyboard itself (a REPL, an agent's prompt — raw mode,
+    /// [`Session::note_raw`]) and the dock steps aside for it, like on the
+    /// alternate screen — but without touching the PTY's size: the band's
+    /// drawn height is zero, the grid is drawn the whole share lower and the
+    /// fill band covers the strip that opens at the top. `input_rows` is zero
+    /// with it.
+    ///
+    /// The band has three states and this bit is the third: input rows and
+    /// the context row (today's dock), the context row alone (`input_rows ==
+    /// 0`: a remote session, or the upload row that a raw program does not
+    /// hide), and none. The alternate screen and a remote session come
+    /// before it. [`Cursor::band_rows`] is the one reading of the three.
+    pub band_hidden: bool,
     /// The caret's **shape** — the application's DECSCUSR or the setting's default.
     ///
     /// Separate questions from `visible`: this is "which form", that is "will
@@ -540,6 +554,17 @@ pub struct Cursor {
     /// handover hold remains. In all four the clock goes out and the window
     /// returns to zero frames when idle.
     pub next_tick: Option<Duration>,
+}
+
+impl Cursor {
+    /// The drawn band's input rows: `Some(n)` is `n` input rows and the
+    /// context row under them (`n == 0`: the context row alone), `None` is no
+    /// band ([`Cursor::band_hidden`]). The band's height, the dock's layout
+    /// and [`Session::dock`] read this one answer, so the three cannot
+    /// disagree about which of the band's states this frame is in.
+    pub fn band_rows(&self) -> Option<u16> {
+        (!self.band_hidden).then_some(self.input_rows)
+    }
 }
 
 /// A command block's trace in the frame: **the command's row** and that
@@ -4538,7 +4563,10 @@ impl Session {
         // row count and the caret's owner ([`crate::shell::ShellLog::caret`]) must
         // see the same remote state — a `D` falling between separate rounds would
         // yield a dock caret in a zero-row band.
-        let (suppressed_block, caret, needed_rows, end_left, remote) = {
+        //
+        // **The raw program and the upload row are from this round too**, for the
+        // same reason: the band's state and the caret's owner must see one ledger.
+        let (suppressed_block, caret, needed_rows, end_left, remote, raw, transfer) = {
             let now = Instant::now();
             let mut log = lock(&self.shell);
             let end_left = log.expire_end(now);
@@ -4553,6 +4581,8 @@ impl Session {
                 dock::needed_rows(&log.dock, budget.cols),
                 end_left,
                 log.context.remote.is_some(),
+                log.raw_active(),
+                log.context.transfer.is_some(),
             )
         };
         blocks.anchors.clear();
@@ -4878,6 +4908,8 @@ impl Session {
         // after `C` would otherwise produce `caret_in_dock` with `input_rows == 0`
         // and the caret would sit on the context row. It also extinguishes the
         // remaining time there — an answer that is not translated sets no clock.
+        // A program reading the keyboard itself is in the same place, for the same
+        // reason: its band has no input row either.
         //
         // There is **no** comparison like `suppress_floor <= suppress_to` here and
         // there must not be: both derive from the cursor's row (`floor = row -
@@ -5617,15 +5649,27 @@ impl Session {
             // alternate screen: there the remote dock **stays** as the status bar
             // (its share is one row, `bt-shell`'s `dock_rows_for`), the local one
             // is lifted.
+            //
+            // **Zero for a program reading the keyboard itself** too, after the
+            // alternate screen: the input row is the program's own now.
             input_rows: if !self.dock {
                 1
             } else if remote {
                 0
             } else if alt_screen {
                 1
+            } else if raw {
+                0
             } else {
                 budget.fit(needed_rows, grid_rows)
             },
+            // **No band** for that program, unless the upload row is shown: the
+            // row a transfer writes stays visible until it lingers out, so the
+            // band keeps the context row alone for it — the remote session's
+            // shape. `raw` already excludes a remote session
+            // (`ShellLog::raw_active`). With `input_rows` above, the one place
+            // both fields are written: `band_hidden` implies zero input rows.
+            band_hidden: self.dock && !alt_screen && raw && !transfer,
             // The shape was read **before** the loop (`cursor_shape`) and comes from
             // there: `RenderableCursor` resolves it from `Term::cursor_style()`, i.e.
             // DECSCUSR and the setting's default are already merged. A second
@@ -8569,11 +8613,14 @@ impl Session {
     /// shift goes together with the edit as a **row** difference (the doc of
     /// [`DockEdit`]); a window that shifts without the text changing is a lone `Shift`.
     ///
-    /// **`input_rows` is the number of input rows to draw** and `frame()`'s
-    /// answer ([`Cursor::input_rows`]): not re-derived here, like `caret_in_dock`
+    /// **`band` is the number of input rows to draw** and `frame()`'s
+    /// answer ([`Cursor::band_rows`]): not re-derived here, like `caret_in_dock`
     /// it passes from where it is computed. The context row is **below** it, i.e.
     /// its row number is this number itself; had it been derived from two
     /// separate lock rounds the band and the dock's rows could diverge by a frame.
+    /// `None` is **no band** ([`Cursor::band_hidden`]): the surface stays open
+    /// but nothing is printed — no context row, no button, no mark, no caret —
+    /// and the hit test's trace is empty, so a click there falls to the grid.
     ///
     /// **`runs` is the selection's runs per visual row**: a long row wraps
     /// and the selection can span several rows. The caller's buffer (the
@@ -8586,7 +8633,7 @@ impl Session {
     pub fn dock(
         &self,
         cols: DockCols,
-        input_rows: u16,
+        band: Option<u16>,
         into: &mut DockState,
         context: &mut DockContext,
         caret_in_dock: bool,
@@ -8596,6 +8643,9 @@ impl Session {
         edits: impl FnMut(DockEdit),
     ) -> Dock {
         let theme = *lock(&self.adapter.0.theme);
+        // No band has no input row either: the hover, the window and the trace
+        // below read the remote session's zero.
+        let input_rows = band.unwrap_or(0);
         // **The link hover before `shell`** (leaf locks in
         // sequence): only a dock hover is this surface's, checked against the
         // mirror in the same round as the copy.
@@ -8639,7 +8689,7 @@ impl Session {
             shell,
             &theme,
             cols,
-            input_rows,
+            band,
             scroll,
             caret_in_dock,
             selection,
@@ -9989,6 +10039,54 @@ impl Session {
             log.login = Some(command);
             command
         })
+    }
+
+    /// Marks the running command as a program that reads the keyboard itself
+    /// when the PTY's modes say so ([`TtyModes::raw`], read by `modes` from the
+    /// master's copy — the platform shell's `tcgetattr`); `Some(the
+    /// generation)` once it is marked, `None` while the modes are canonical,
+    /// unreadable or no command runs. The dock steps aside for the rest of
+    /// the command ([`crate::shell::ShellLog::raw`]): no band, the PTY's size
+    /// untouched.
+    ///
+    /// **The caller decides whose modes these are**: the shell's own raw
+    /// moment (a builtin `read -k`, an `exec`'d shell) is not a program, so
+    /// it asks only while a job outside the shell's process group holds the
+    /// terminal. A remote session is not refused — ssh is raw too and the
+    /// caller's probe settles with it — but the bit stays dormant under the
+    /// remote state ([`crate::shell::ShellLog::raw_active`]).
+    ///
+    /// Requests a frame when it marks (the band changes); a second call for
+    /// the same generation asks no modes and requests nothing. The leaf locks
+    /// in sequence, the syscall outside them; `Term` is not touched.
+    pub fn note_raw(
+        &self,
+        modes: impl FnOnce(std::os::fd::BorrowedFd<'_>) -> Option<TtyModes>,
+    ) -> Option<u64> {
+        let command = {
+            let log = lock(&self.shell);
+            let command = log.running_command()?;
+            if log.raw == Some(command) {
+                return Some(command);
+            }
+            command
+        };
+        // Off the shell lock: a syscall.
+        if !self.with_pty_fd(modes).is_some_and(TtyModes::raw) {
+            return None;
+        }
+        let marked = {
+            let mut log = lock(&self.shell);
+            // The same generation still runs: a `D` in between ended it.
+            (log.running_command() == Some(command)).then(|| {
+                log.raw = Some(command);
+                command
+            })
+        };
+        if marked.is_some() {
+            self.request_frame();
+        }
+        marked
     }
 
     /// Whether the title was written since the remote state was set and has
@@ -12263,7 +12361,7 @@ mod tests {
                 grid: 40,
                 context: 40,
             },
-            1,
+            Some(1),
             &mut DockState::default(),
             &mut DockContext::default(),
             cursor.caret_in_dock,
@@ -13158,7 +13256,7 @@ mod tests {
                 grid: 60,
                 context: 60,
             },
-            cursor.input_rows,
+            cursor.band_rows(),
             &mut into,
             &mut DockContext::default(),
             cursor.caret_in_dock,
@@ -15407,7 +15505,7 @@ mod tests {
                 grid: 40,
                 context: 40,
             },
-            cursor.input_rows,
+            cursor.band_rows(),
             &mut DockState::default(),
             &mut DockContext::default(),
             cursor.caret_in_dock,
@@ -15591,7 +15689,7 @@ mod tests {
                 grid: 60,
                 context: 60,
             },
-            0,
+            Some(0),
             &mut DockState::default(),
             &mut DockContext::default(),
             false,
@@ -15861,6 +15959,152 @@ mod tests {
             cursor.input_rows, 0,
             "a remote alternate screen keeps the dock as the context row alone"
         );
+    }
+
+    /// A program reading the keyboard itself: the PTY's raw modes mark the
+    /// running generation, once — the band goes (`band_hidden`, no input row,
+    /// the caret in the grid) and the dock prints nothing; an upload row keeps
+    /// the context row alone; the alternate screen and a remote session keep
+    /// today's shapes; the next command brings the dock back.
+    #[test]
+    fn a_raw_program_hides_the_band_for_its_command() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}echo foo bar{}'; read _; \
+                 printf '\\033]133;C\\007'; read _; \
+                 printf '\\033]133;D;0;bt_block=1\\007{}'; read _; \
+                 printf '\\033]133;C\\007'; read _; printf '\\033[?1049h'; sleep 5",
+                anchored_prompt(1),
+                mirror("ZWNobyBmb28gYmFy", 12),
+                anchored_prompt(2),
+            ),
+            Arc::clone(&wake),
+        );
+        let canonical = |_: std::os::fd::BorrowedFd<'_>| {
+            Some(TtyModes {
+                canonical: true,
+                echo: false,
+            })
+        };
+        let raw = |_: std::os::fd::BorrowedFd<'_>| {
+            Some(TtyModes {
+                canonical: false,
+                echo: false,
+            })
+        };
+        wait_mirror(&session, DockStatus::Live);
+        assert_eq!(session.note_raw(raw), None, "no command runs");
+
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert_eq!(session.note_raw(canonical), None, "a password question");
+        assert_eq!(session.note_raw(|_| None), None, "unreadable modes");
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert!(!cursor.band_hidden, "a command that prints keeps the dock");
+        assert_eq!(cursor.input_rows, 1);
+
+        let wakes = wake.wait_wakes(0, Duration::ZERO);
+        assert_eq!(session.note_raw(raw), Some(command));
+        assert!(
+            wake.wait_wakes(wakes + 1, Duration::from_secs(5)) > wakes,
+            "the band changes: a frame"
+        );
+        assert_eq!(
+            session.note_raw(|_| panic!("kept for the generation")),
+            Some(command)
+        );
+
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert!(cursor.band_hidden, "{cursor:?}");
+        assert_eq!(cursor.input_rows, 0);
+        assert_eq!(cursor.band_rows(), None);
+        assert!(
+            !cursor.caret_in_dock,
+            "the caret is the program's: {cursor:?}"
+        );
+        assert!(cursor.visible, "the grid's cursor is drawn: {cursor:?}");
+        let (dock, runs) = draw_dock(&session);
+        assert_eq!(dock.sigil, None);
+        assert_eq!(dock.caret, None);
+        assert_eq!(dock.buttons, [None; 2]);
+        assert!(runs.is_empty());
+        assert_eq!(
+            dock_cell_count(&session, None),
+            0,
+            "no cell on an undrawn row"
+        );
+        assert!(!session.dock_scroll(1), "there is no input block to scroll");
+
+        // An upload row lingering on: the context row alone, as remotely.
+        let transfer = Transfer {
+            host: "prod".into(),
+            body: "✓ a.tar → /srv".into(),
+            ..Transfer::default()
+        };
+        assert!(session.set_transfer(Some(&transfer)));
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert!(!cursor.band_hidden);
+        assert_eq!(cursor.band_rows(), Some(0));
+        assert!(session.set_transfer(None));
+
+        // A remote session's status bar comes first: ssh is raw too.
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert!(!cursor.band_hidden, "the remote shape: {cursor:?}");
+        assert_eq!(cursor.band_rows(), Some(0));
+
+        // Our `D` ends the command; the next `C` starts unmarked.
+        session.write(b"\n");
+        frame_until(&session, BUDGET, |_, cursor| {
+            !cursor.band_hidden && cursor.input_rows > 0
+        });
+        assert_eq!(
+            session.running_command(),
+            None,
+            "the dock is back at the prompt"
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(2, Duration::from_secs(5)), 2);
+        let next = session.running_command().expect("the second command");
+        assert_ne!(next, command);
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert!(!cursor.band_hidden, "a new generation is unmarked");
+        assert_eq!(session.note_raw(raw), Some(next));
+        let (_, cursor) = frame_until(&session, BUDGET, |_, cursor| cursor.band_hidden);
+        assert_eq!(cursor.input_rows, 0);
+
+        // The alternate screen comes before it: the dock is lifted there.
+        session.write(b"\n");
+        let (_, cursor) = frame_until(&session, BUDGET, |_, cursor| {
+            cursor.content_rows == cursor.rows
+        });
+        assert!(
+            !cursor.band_hidden,
+            "the alternate screen's shape: {cursor:?}"
+        );
+        assert_eq!(cursor.input_rows, 1);
+    }
+
+    /// The dock's cell count for a band, with the frame's caret answer.
+    fn dock_cell_count(session: &Session, band: Option<u16>) -> usize {
+        let mut count = 0;
+        session.dock(
+            DockCols {
+                grid: 40,
+                context: 40,
+            },
+            band,
+            &mut DockState::default(),
+            &mut DockContext::default(),
+            false,
+            &mut Vec::new(),
+            &mut Clusters::default(),
+            |_| count += 1,
+            |_| (),
+        );
+        count
     }
 
     #[test]
@@ -20579,7 +20823,7 @@ e\\314\\201.'; sleep 5";
                             grid: 80,
                             context: 80,
                         },
-                        1,
+                        Some(1),
                         &mut dock,
                         &mut context,
                         cursor.caret_in_dock,
@@ -22935,7 +23179,7 @@ e\\314\\201.'; sleep 5";
                 grid: 40,
                 context: 40,
             },
-            cursor.input_rows,
+            cursor.band_rows(),
             &mut DockState::default(),
             &mut DockContext::default(),
             cursor.caret_in_dock,

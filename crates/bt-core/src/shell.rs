@@ -938,10 +938,19 @@ pub struct TtyModes {
 }
 
 impl TtyModes {
-    /// Whether these modes are a logged-in session's: neither canonical nor
-    /// echoing. A question (host key, password, a passphrase) is canonical.
-    pub fn logged_in(self) -> bool {
+    /// Whether a program reads the keyboard itself: neither canonical nor
+    /// echoing — a line editor (a REPL, an agent's prompt, ssh's session)
+    /// takes every key as it comes. Both bits, because a password question
+    /// turns echo off and keeps the line discipline, and a command that only
+    /// prints or reads one line touches neither.
+    pub fn raw(self) -> bool {
         !self.canonical && !self.echo
+    }
+
+    /// Whether these modes are a logged-in session's: raw ([`Self::raw`]).
+    /// A question (host key, password, a passphrase) is canonical.
+    pub fn logged_in(self) -> bool {
+        self.raw()
     }
 }
 
@@ -1823,6 +1832,17 @@ pub(crate) struct ShellLog {
     /// not change within a generation and a later question needs no syscall.
     /// Bound to the generation, so `C` invalidates it by itself.
     pub(crate) login: Option<u64>,
+    /// The command generation whose program was seen reading the keyboard
+    /// itself ([`crate::Session::note_raw`]): the PTY raw while a job outside
+    /// the shell's own group held the terminal. [`Self::login`]'s twin —
+    /// bound to the generation, so `C` invalidates it by itself and nothing
+    /// clears it; [`Self::raw_active`] is the one reading. **Sticky for the
+    /// command**: a REPL returns to canonical mode while it runs the code it
+    /// was given, and a rule that looked at the moment would open and close
+    /// the dock on every Enter. Not carried across a handover: the adopting
+    /// pane arms its probe by hand for a command that is still running, so a
+    /// carried REPL is seen again within the probe's delay.
+    pub(crate) raw: Option<u64>,
     /// The remote bootstrap's last `8133;i;up;{nonce}` and the
     /// command generation it arrived in ([`crate::Session::remote_up`]). Bound
     /// to the generation like [`Self::login`], so `C` invalidates it by itself
@@ -2118,6 +2138,7 @@ impl ShellLog {
             command: 0,
             paste_since_remote: false,
             login: None,
+            raw: None,
             remote_up: None,
             typed: None,
             ours: false,
@@ -2159,13 +2180,21 @@ impl ShellLog {
         // `Running` would never end, the clock would not stop and the counter would
         // request frames while idle. The race before the probe is in
         // [`Self::command_open`].
+        //
+        // **A program reading the keyboard itself is the gate's second arm**
+        // ([`Self::raw_active`]): a nested fish 4 started from the prompt prints its
+        // identity-less 133 into the same PTY, and its `A` would end the command, its
+        // `C` open a new generation — the dock would come and go with every inner
+        // command. `exec fish` stays outside this arm too: the exec'd shell keeps the
+        // shell's own process group, and the probe never marks a program in that group
+        // ([`crate::Session::note_raw`]'s caller), so its marks still drive the phase.
         let identified = match mark {
             Mark::PromptStart { id } | Mark::CommandEnd { id, .. } => id.is_some(),
             Mark::PromptEnd | Mark::CommandStart => false,
         };
         if identified {
             self.ours = true;
-        } else if self.ours && self.context.remote.is_some() {
+        } else if self.ours && (self.context.remote.is_some() || self.raw_active()) {
             return ScanOutcome::default();
         }
         // What closes the command: our identified `A`/`D`; any `A`/`D` in a shell that
@@ -2363,6 +2392,14 @@ impl ShellLog {
             .state
             .is_some_and(|state| state.phase == ShellPhase::Running);
         (running || (self.ours && self.command_open)).then_some(self.command)
+    }
+
+    /// Whether the running command's program reads the keyboard itself
+    /// ([`Self::raw`]) — the dock steps aside for it. The single reading of
+    /// the bit: the running generation is the marked one and no remote session
+    /// is on (ssh is raw too, but its status bar comes from the remote state).
+    pub(crate) fn raw_active(&self) -> bool {
+        self.context.remote.is_none() && self.raw.is_some() && self.running_command() == self.raw
     }
 
     /// The user sent input ([`crate::Session::send_input`], the single funnel):
@@ -2782,8 +2819,13 @@ impl ShellLog {
     /// `D`/`A`/a new `C`. The remainder is `None` too: no frame is requested for an
     /// answer that is not flipped. The raw answer's stamp ([`Self::observe_caret`])
     /// does not look at this — the remote state does not change the phase.
+    ///
+    /// **A program reading the keyboard itself, the same** ([`Self::raw_active`]):
+    /// the dock has no input row then either, and the bit can arrive inside the
+    /// hold that follows `C` — a held answer would give the caret to a dock that
+    /// draws no row and the grid's cursor would be hidden with it.
     pub(crate) fn caret(&self, now: Instant) -> CaretDecision {
-        if self.context.remote.is_some() {
+        if self.context.remote.is_some() || self.raw_active() {
             return CaretDecision {
                 home: CaretHome::Grid,
                 hold_left: None,
@@ -7833,6 +7875,83 @@ mod tests {
         assert!(outcome.title);
         assert_eq!(log.context.remote, None);
         assert_eq!(log.running_command(), None);
+    }
+
+    #[test]
+    fn the_raw_bit_holds_only_for_its_own_generation() {
+        let mut log = running_log();
+        assert!(!log.raw_active(), "nothing seen yet");
+        log.raw = log.running_command();
+        assert!(log.raw_active());
+        // A second `C` (iTerm2) is not a transition: the bit stays.
+        log.apply(Mark::CommandStart);
+        assert!(log.raw_active());
+        // A remote session's status bar wins: ssh is raw too.
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        assert!(!log.raw_active(), "the remote state comes first");
+        // Our `D` ends the command; the next `C` is a new generation and the
+        // old bit invalidates itself — nothing clears it.
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert!(!log.raw_active(), "no command runs");
+        log.apply(Mark::PromptStart { id: Some(2) });
+        log.apply(Mark::CommandStart);
+        assert!(
+            log.raw.is_some(),
+            "the old generation's stamp is still there"
+        );
+        assert!(!log.raw_active(), "a new `C` invalidates it");
+    }
+
+    #[test]
+    fn foreign_marks_leave_a_raw_program_alone() {
+        // A nested fish 4 started from the prompt: its identity-less `A`, `B`, `C`,
+        // `D` neither end the command nor open a new generation, so the bit and
+        // the phase stay put.
+        let mut log = running_log();
+        let command = log.running_command();
+        log.raw = command;
+        for mark in [
+            Mark::PromptStart { id: None },
+            Mark::PromptEnd,
+            Mark::CommandStart,
+            Mark::CommandEnd {
+                exit: Some(1),
+                id: None,
+            },
+        ] {
+            assert_eq!(log.apply(mark), ScanOutcome::default(), "{mark:?}");
+            assert_eq!(log.running_command(), command, "{mark:?}");
+            assert!(log.raw_active(), "{mark:?}");
+            assert_eq!(
+                log.local.state.map(|state| state.phase),
+                Some(ShellPhase::Running),
+                "{mark:?}"
+            );
+        }
+        // Our `D` ends it.
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert_eq!(log.running_command(), None);
+        assert!(!log.raw_active());
+    }
+
+    #[test]
+    fn a_raw_program_keeps_the_caret_in_the_grid_through_the_hold() {
+        // Right after `C` the hold keeps the caret in the dock; a raw program
+        // has no input row to keep it in, so the bit cuts the hold short.
+        let mut log = running_log();
+        let now = Instant::now();
+        log.caret_since = now;
+        assert_eq!(log.caret(now).home, CaretHome::Dock, "the hold");
+        log.raw = log.running_command();
+        let decision = log.caret(now);
+        assert_eq!(decision.home, CaretHome::Grid);
+        assert_eq!(decision.hold_left, None, "no frame for an unflipped answer");
     }
 
     #[test]

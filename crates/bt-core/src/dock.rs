@@ -1370,6 +1370,11 @@ fn bracket_match(chars: &[char], index: usize) -> Option<usize> {
 /// **`input_rows == 0` means no input row** (remote session):
 /// only the context row is printed, on row 0, there is no prompt mark and no
 /// caret, the trace is `(0, 0)` — there is no input block to click or scroll.
+/// **`None` means no band at all** (a program reading the keyboard itself,
+/// [`crate::Cursor::band_hidden`]): nothing is printed — the context row and
+/// its buttons neither, so nothing on a row the drawing does not show can be
+/// hit — and the trace is `(0, 0)`. The surface's colours still come back:
+/// the band slides to zero height with them.
 ///
 /// `scroll` is the window top the user chose with the wheel
 /// ([`crate::shell::ShellLog::dock_scroll`]); `None` → the window follows the
@@ -1400,7 +1405,7 @@ pub(crate) fn render_with(
     shell: Option<ShellState>,
     theme: &Theme,
     cols: DockCols,
-    input_rows: u16,
+    band: Option<u16>,
     scroll: Option<usize>,
     owned: bool,
     selection: Option<(usize, usize)>,
@@ -1412,6 +1417,7 @@ pub(crate) fn render_with(
     mut edits: impl FnMut(DockEdit),
 ) -> (Dock, usize, usize) {
     runs.clear();
+    let input_rows = band.unwrap_or(0);
     let mut surface = Dock {
         ground: theme.background_linear(),
         // While an upload runs the line is in the color of the queue's host
@@ -1440,6 +1446,12 @@ pub(crate) fn render_with(
         },
         buttons: [None; 2],
     };
+    // **No band**: the surface without a cell. Before the context row, so its
+    // buttons are not laid out either; the mark is already off (no input row).
+    if band.is_none() {
+        settle(change, &mut edits);
+        return (surface, 0, 0);
+    }
     if cols.grid == 0 {
         settle(change, &mut edits);
         // With no input row the trace is zero rows (the rule of the
@@ -1835,7 +1847,7 @@ pub(crate) fn render(
         shell,
         theme,
         cols,
-        CONTEXT_ROW,
+        Some(CONTEXT_ROW),
         None,
         owned,
         None,
@@ -3600,7 +3612,7 @@ mod tests {
             None,
             &THEME,
             same(cols),
-            input_rows,
+            Some(input_rows),
             scroll,
             true,
             selection,
@@ -3897,7 +3909,7 @@ mod tests {
             None,
             &THEME,
             same(COLS),
-            3,
+            Some(3),
             None,
             true,
             None,
@@ -4682,6 +4694,51 @@ mod tests {
         assert_eq!(dock.buttons, [None; 2]);
         let transfer = closed.transfer.as_ref().unwrap();
         assert!((0..COLS).all(|col| transfer_button_at(transfer, COLS, col).is_none()));
+    }
+
+    #[test]
+    fn no_band_prints_no_cell_and_lays_out_no_button() {
+        // A program reading the keyboard itself: the band is gone, so neither
+        // the context row nor a button on it may exist — a row the drawing does
+        // not show must not be hit. A context that would draw both (an upload
+        // row with a button, a live mirror with a caret) proves the arm.
+        let state = live("", "echo hi", "", 7);
+        let context = uploading("↑ a.tar", 1, Some(2_500));
+        let draw = |band: Option<u16>| {
+            let mut cells = Vec::new();
+            let mut runs = Vec::new();
+            let mut edits = Vec::new();
+            let (dock, top, rows) = render_with(
+                &state,
+                &context,
+                None,
+                &THEME,
+                same(COLS),
+                band,
+                None,
+                true,
+                Some((0, 4)),
+                None,
+                Some(&Change::Insert { start: 0, end: 1 }),
+                &mut runs,
+                &mut Clusters::default(),
+                |cell| cells.push(cell),
+                |edit| edits.push(edit),
+            );
+            (cells, dock, top, rows, runs, edits)
+        };
+        let (cells, dock, top, rows, runs, edits) = draw(None);
+        assert!(cells.is_empty(), "{cells:?}");
+        assert_eq!(dock.buttons, [None; 2]);
+        assert_eq!(dock.sigil, None);
+        assert_eq!(dock.caret, None);
+        assert_eq!((top, rows), (0, 0), "nothing to click or scroll");
+        assert!(runs.is_empty(), "no selection on a row that is not drawn");
+        assert_eq!(edits, [DockEdit::Reset], "in-flight effects end");
+        // The same context with the context row alone draws both.
+        let (cells, dock, ..) = draw(Some(0));
+        assert!(!cells.is_empty());
+        assert!(dock.buttons.iter().any(Option::is_some));
     }
 
     #[test]
@@ -6077,7 +6134,7 @@ mod tests {
             None,
             &THEME,
             same(cols),
-            rows,
+            Some(rows),
             None,
             owned,
             None,
@@ -6619,7 +6676,7 @@ mod tests {
             None,
             &THEME,
             same(COLS),
-            CONTEXT_ROW,
+            Some(CONTEXT_ROW),
             None,
             true,
             None,

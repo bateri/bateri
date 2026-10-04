@@ -1229,13 +1229,17 @@ impl Core {
         // typing every tick finds damage and the motion arm never runs.
         let mut glyph_fx = self.glyph_fx.borrow_mut();
         glyph_fx.advance(dt);
+        // The band's rows, `None` for no band: one reading for the layout, the
+        // dock's cells and the band's target below.
+        let band_rows = cursor.band_rows();
         if dock_rows > 0 {
             // **The layout before the cells** (`Frame::set_dock_input_rows`):
             // input rows + the context row, from the number `frame()` gave in
             // the same read as the suppression. The band's top is not written
             // here — the band is the animation's value and comes after `sync`
-            // (`Core::set_origin`).
-            frame.set_dock_input_rows(cursor.input_rows);
+            // (`Core::set_origin`). With no band the surface still opens: the
+            // band slides to zero height and the mouse reads a zero-row dock.
+            frame.set_dock_input_rows(band_rows);
             let mut dock_state = self.dock.borrow_mut();
             let mut dock_context = self.dock_context.borrow_mut();
             // **The second sink flows into a local slot**, not straight into
@@ -1261,7 +1265,7 @@ impl Core {
                 },
                 // The number passes from where it was computed, the dock does
                 // not derive it again (`caret_in_dock`'s precedent).
-                cursor.input_rows,
+                band_rows,
                 &mut dock_state,
                 &mut dock_context,
                 cursor.caret_in_dock,
@@ -1276,7 +1280,7 @@ impl Core {
             // known **after** the dock is printed, and the list to draw comes
             // last.
             if cursor.input_rows == 0 {
-                // No input row (remote session): no surface for the
+                // No input row (remote session, no band): no surface for the
                 // effect either. It ends unconditionally — `Reset` only comes
                 // when the mirror changed, and an arrival left in flight would
                 // be drawn on row 0, i.e. now in the context row's place, at
@@ -1329,9 +1333,11 @@ impl Core {
         // that much higher together with the grid by the band's **target**
         // excess, the dock's is in the bottom-aligned input block, on the
         // wrapped row's own row.
-        let band_target = band_target(cursor.input_rows, dock_rows, self.cell.get());
+        let band_target = band_target(band_rows, dock_rows, self.cell.get());
         let caret = dock_caret
             .map(|(at, text)| {
+                // A dock caret exists only on a band with input rows: the
+                // dock gives none with no band.
                 let at = dock_caret_at(
                     at.col,
                     at.row,
@@ -1849,7 +1855,12 @@ fn origin_target(cursor: Cursor) -> u16 {
 /// lower and the fill band covers the strip opening at the top
 /// (`Session::set_grid_top`). The formula's single copy is in pixels, so the
 /// band's drawn height and the grid's offset come from the same number.
-fn band_target(input_rows: u16, dock_rows: u16, cell: CellMetrics) -> f32 {
+///
+/// **No band** (`None`, a program reading the keyboard itself) is the
+/// remote arm's extension: `band_px` is zero, so the excess is the whole PTY
+/// share, negative — the grid is drawn at the window's bottom and the fill
+/// band covers the share's height at the top. The PTY's size never moves.
+fn band_target(input_rows: Option<u16>, dock_rows: u16, cell: CellMetrics) -> f32 {
     if dock_rows == 0 {
         return 0.0;
     }
@@ -1912,7 +1923,7 @@ fn dock_caret_at(
 ) -> [f32; 2] {
     let cell_h = f32::from(cell.cell_px().1);
     let pad = f32::from(cell.gutter_px());
-    let top = bottom_px - crate::frame::band_px(input_rows, cell);
+    let top = bottom_px - crate::frame::band_px(Some(input_rows), cell);
     [f32::from(col), (top + pad) / cell_h + f32::from(row)]
 }
 
@@ -2651,15 +2662,106 @@ mod tests {
         let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
         // With one or more input rows, whole rows — integer pixels, so
         // bit-for-bit in `f32` too: today's frame does not change.
-        assert_eq!(band_target(1, DOCK_ROWS, cell), 0.0);
-        assert_eq!(band_target(3, DOCK_ROWS, cell), 2.0);
+        assert_eq!(band_target(Some(1), DOCK_ROWS, cell), 0.0);
+        assert_eq!(band_target(Some(3), DOCK_ROWS, cell), 2.0);
         // With zero input rows (remote session) it is negative: one cell
         // plus the row gap, `(34 − 68) / 18`.
-        let remote = band_target(0, DOCK_ROWS, cell);
+        let remote = band_target(Some(0), DOCK_ROWS, cell);
         assert!(remote < -1.0, "{remote}");
         assert!((remote * 18.0 + (18.0 + 16.0)).abs() < 1e-4, "{remote}");
         // There is no band in a dock-less frame.
-        assert_eq!(band_target(0, 0, cell), 0.0);
+        assert_eq!(band_target(Some(0), 0, cell), 0.0);
+        // No band (a program reading the keyboard itself): the whole PTY
+        // share, negative — `−68 / 18`.
+        let none = band_target(None, DOCK_ROWS, cell);
+        assert!((none * 18.0 + crate::frame::dock_px(DOCK_ROWS, cell)).abs() < 1e-4);
+        assert!(none < remote, "lower than the remote shape: {none}");
+        assert_eq!(band_target(None, 0, cell), 0.0);
+    }
+
+    #[test]
+    fn no_band_drops_the_grid_to_the_window_bottom_in_every_frame() {
+        // **Composition guard** for a program reading the keyboard itself: the
+        // band slides to zero height, the grid's origin goes the whole PTY
+        // share lower, the fill band stays glued to the grid and the grid's
+        // bottom edge meets the band's top in every frame — both ways. The
+        // setup is the remote twin's.
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        const BOTTOM: f32 = 600.0;
+        const ROWS: f32 = 29.0;
+        const FILL: u16 = 7;
+        let share = crate::frame::dock_px(DOCK_ROWS, cell);
+        let strip = BOTTOM - share - ROWS * 18.0;
+        let frame_at = |motion: Motion, band: Option<u16>| {
+            let mut frame = Frame::default();
+            frame.clear(cell, CaretStyle::default());
+            frame.set_dock_input_rows(band);
+            frame.set_fill_rows(FILL);
+            frame.open_dock(
+                Theme::BATERI.background_linear(),
+                Theme::BATERI.separator_linear(),
+                Theme::BATERI.separator_linear(),
+            );
+            compose(&mut frame, motion, BOTTOM, DOCK_ROWS);
+            frame
+        };
+        let mut motion = Motion::default();
+        motion.sync(Some([0.0, 30.0]), 5, 0.0, 0, false, false);
+        let local_origin = frame_at(motion, Some(1)).origin_px();
+
+        // Both curves, the spring's included: whatever the path to no band,
+        // the grid stays glued to the band and the band never goes negative
+        // (the clamp itself is `frame::tests::no_band_opens_a_surface_of_zero_rows`).
+        let none = band_target(None, DOCK_ROWS, cell);
+        for style in [CursorMotion::Ease, CursorMotion::Spring] {
+            motion.set_style(style);
+            for (band, target) in [(None, none), (Some(1), 0.0)] {
+                motion.sync(Some([0.0, 30.0]), 5, target, 0, false, false);
+                let mut frames = 0;
+                let mut mid = false;
+                loop {
+                    let frame = frame_at(motion, band);
+                    let grid_bottom = frame.origin_px() + (ROWS - 5.0) * 18.0;
+                    let band_top = BOTTOM - frame.dock_band_px();
+                    assert_eq!(
+                        band_top - grid_bottom,
+                        strip,
+                        "{style:?} {band:?}/{frames}: grid and band diverged ({})",
+                        motion.band()
+                    );
+                    assert!(frame.dock_band_px() >= 0.0, "{style:?}: a negative band");
+                    assert_eq!(
+                        frame.fill_origin_px() + f32::from(FILL) * 18.0,
+                        frame.origin_px(),
+                        "{style:?} {band:?}/{frames}: the fill band came off the grid"
+                    );
+                    mid |= motion.band() < 0.0 && motion.band() > none;
+                    if motion.settled() {
+                        break;
+                    }
+                    motion.advance(1.0 / 120.0);
+                    frames += 1;
+                    assert!(frames < 1000, "the band did not settle");
+                }
+                assert!(
+                    mid,
+                    "{style:?} {band:?}: the middle of the animation was never tested"
+                );
+            }
+        }
+        motion.set_style(CursorMotion::Ease);
+
+        motion.sync(Some([0.0, 30.0]), 5, none, 0, true, false);
+        let frame = frame_at(motion, None);
+        assert_eq!(frame.dock_band_px(), 0.0, "no band");
+        assert_eq!(frame.dock_layout_px(), 0.0);
+        assert!(frame.dock().is_some(), "the surface stays open");
+        // The grid is lower by the whole share: its bottom row sits on the
+        // window's bottom strip.
+        assert_eq!(frame.origin_px(), local_origin + share);
+        assert_eq!(frame.origin_px() + (ROWS - 5.0) * 18.0, BOTTOM - strip);
+        // Mouse: a zero-row input block, not "no frame yet".
+        assert_eq!(frame.dock_hit().map(|(_, rows)| rows), Some(0));
     }
 
     #[test]
@@ -2678,7 +2780,7 @@ mod tests {
         let frame_at = |motion: Motion, input_rows: u16| {
             let mut frame = Frame::default();
             frame.clear(cell, CaretStyle::default());
-            frame.set_dock_input_rows(input_rows);
+            frame.set_dock_input_rows(Some(input_rows));
             frame.set_fill_rows(FILL);
             frame.open_dock(
                 Theme::BATERI.background_linear(),
@@ -2698,7 +2800,7 @@ mod tests {
             "today's frame with a single input row"
         );
 
-        let remote = band_target(0, DOCK_ROWS, cell);
+        let remote = band_target(Some(0), DOCK_ROWS, cell);
         for (input_rows, target) in [(0, remote), (1, 0.0)] {
             motion.sync(Some([0.0, 30.0]), 5, target, 0, false, false);
             let mut frames = 0;
@@ -2734,7 +2836,7 @@ mod tests {
 
         motion.sync(Some([0.0, 30.0]), 5, remote, 0, true, false);
         let frame = frame_at(motion, 0);
-        let band = crate::frame::band_px(0, cell);
+        let band = crate::frame::band_px(Some(0), cell);
         assert_eq!(band, 18.0 + 2.0 * 8.0, "context row only");
         assert_eq!(frame.dock_band_px(), band);
         assert_eq!(frame.dock_band_px(), frame.dock_layout_px());
@@ -2757,10 +2859,10 @@ mod tests {
         // alone — the band is exactly the share and the grid stays put.
         let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
         let mut motion = Motion::default();
-        motion.sync(None, 0, band_target(0, 1, cell), 0, true, false);
+        motion.sync(None, 0, band_target(Some(0), 1, cell), 0, true, false);
         let mut frame = Frame::default();
         frame.clear(cell, CaretStyle::default());
-        frame.set_dock_input_rows(0);
+        frame.set_dock_input_rows(Some(0));
         frame.open_dock(
             Theme::BATERI.background_linear(),
             Theme::BATERI.accent_linear(),
@@ -2768,7 +2870,7 @@ mod tests {
         );
         compose(&mut frame, motion, 600.0, 1);
         assert_eq!(frame.dock_band_px(), crate::frame::dock_px(1, cell));
-        assert_eq!(frame.dock_band_px(), crate::frame::band_px(0, cell));
+        assert_eq!(frame.dock_band_px(), crate::frame::band_px(Some(0), cell));
         assert_eq!(frame.origin_px(), 0.0, "the remote app's grid moved");
     }
 

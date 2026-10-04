@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bt_core::{
     FontOptions, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
-    SearchStatus, Session, SessionOptions, Settings, TabId, Theme, Wake,
+    SearchStatus, Session, SessionOptions, Settings, TabId, Theme, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Pacer, Renderer, Stats, Surface, Waker};
@@ -449,6 +449,12 @@ struct ShellWake {
     /// has not logged in, every output throws one check
     /// ([`TerminalPane::login_check`]); the login is the indicator's start.
     login_probe: Arc<RemoteProbe>,
+    /// Whether the running program reads the keyboard itself: the same two
+    /// bits again — armed on the `C` edge, settled by the raw modes
+    /// ([`TerminalPane::probe_program`]) — but its job is **delayed**
+    /// ([`PROBE_DELAY`]) and reads the moment it runs, so a burst of output
+    /// is one probe and an idle pane runs none.
+    program_probe: Arc<RemoteProbe>,
     /// Whether the stale-link news is waiting on the main queue —
     /// `search_pending`'s twin: at most one job.
     link_pending: Arc<AtomicBool>,
@@ -471,7 +477,8 @@ struct ShellWake {
 }
 
 /// The two bits of the remote-session probe — and of the login
-/// probe (the same semantics with "logged in" for "decided"): the **arm** (no
+/// probe (the same semantics with "logged in" for "decided") and the program
+/// probe (with "raw" for it, its job delayed): the **arm** (no
 /// definitive answer yet for this command) and the **pending job** (a probe is
 /// in the main queue — at most one, `title_pending`'s pattern).
 ///
@@ -519,7 +526,28 @@ impl RemoteProbe {
     fn rearm(&self) {
         self.armed.store(true, Ordering::Release);
     }
+
+    /// A claimed job that could not be scheduled gives its slot back; the arm
+    /// stays, so the next edge tries again.
+    fn release(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
 }
+
+/// How long after an edge (`C`, output) the program probe reads the PTY's
+/// modes — a **design constant**, not a measurement.
+///
+/// Why not at once: at `C` the modes are still the shell's own, cooked from
+/// ZLE's hand-off, and a REPL prints its banner in canonical mode and goes
+/// raw only for its first prompt. A job that read at the edge would say "not
+/// raw" exactly when the program is about to be; read a little later, it
+/// sees the program's own mode, and the prompt printed after the switch is a
+/// new edge that schedules the next look. The value folds a burst of output
+/// into one probe and stays well under the time a person takes to start
+/// typing at a prompt that just appeared, so the dock is gone before the first
+/// key. A program that goes raw after its last output and later than this
+/// stays unseen — the dock stays, today's behaviour, the safe direction.
+const PROBE_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl ShellWake {
     /// Throws the remote-session probe to the main queue ([`RemoteProbe`]).
@@ -562,6 +590,31 @@ impl ShellWake {
                 return;
             };
             if pane.login_check() {
+                probe.rearm();
+            }
+        });
+    }
+
+    /// Throws the program probe to the main queue **after [`PROBE_DELAY`]**
+    /// ([`ShellWake::program_probe`]); the job drops its slot before reading,
+    /// so an edge that arrives while it runs schedules the next look.
+    fn dispatch_program_probe(&self) {
+        let Ok(when) = DispatchTime::try_from(PROBE_DELAY) else {
+            self.program_probe.release();
+            return;
+        };
+        let probe = Arc::clone(&self.program_probe);
+        let (id, lookup) = (self.id, self.lookup);
+        let _ = DispatchQueue::main().after(when, move || {
+            if !probe.begin() {
+                return;
+            }
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            let Some(pane) = lookup(mtm, id) else {
+                return;
+            };
+            if pane.probe_program() {
                 probe.rearm();
             }
         });
@@ -651,6 +704,11 @@ impl Wake for ShellWake {
         // per output edge while armed; one atomic read otherwise.
         if self.login_probe.output() {
             self.dispatch_login_probe();
+        }
+        // A program that goes raw prints its prompt after the switch: while
+        // armed, an edge with no look pending schedules one.
+        if self.program_probe.output() {
+            self.dispatch_program_probe();
         }
     }
 
@@ -770,6 +828,9 @@ impl Wake for ShellWake {
         self.push_state_soon();
         if self.remote_probe.command_started() {
             self.dispatch_remote_probe();
+        }
+        if self.program_probe.command_started() {
+            self.dispatch_program_probe();
         }
     }
 
@@ -1423,6 +1484,7 @@ impl TerminalPane {
                 search_pending: Arc::default(),
                 remote_probe: Arc::default(),
                 login_probe: Arc::default(),
+                program_probe: Arc::default(),
                 link_pending: Arc::default(),
                 up_pending: Arc::default(),
                 typed_pending: Arc::default(),
@@ -2381,6 +2443,45 @@ impl TerminalPane {
                 }
             }
         }
+    }
+
+    /// The program probe: whether the running command's program reads the
+    /// keyboard itself — `true` while there is no answer yet (the arm stays
+    /// set, the next output edge looks again). Asked only while a job outside
+    /// the shell's own group holds the terminal
+    /// ([`jobs::job_in_foreground`]): the shell's own raw moments (ZLE, a
+    /// builtin `read -k`, `exec fish`) are not a program. Raw modes mark the
+    /// generation ([`bt_core::Session::note_raw`]) and settle the arm; no
+    /// command, or a reader that has finished, settles it too — the next `C`
+    /// arms again. Main thread, syscalls only: the group and `tcgetattr`.
+    ///
+    /// **Not on the alternate screen**: a full-screen program (vim from `git
+    /// rebase -i`, `less`) is raw too, but the dock is already lifted for it,
+    /// and marking would keep the band hidden for the rest of the command
+    /// after it exits — over a build's output. No answer there; the arm
+    /// stays and the next output after the program looks again.
+    ///
+    /// **Cheapest first**: an output-heavy command that never goes raw (a
+    /// build, `tail -f`) is asked once per delay while it prints, so the
+    /// atomic read and the one `tcgetattr` come before the process table.
+    pub(crate) fn probe_program(&self) -> bool {
+        let (Some(session), Some(&parent)) =
+            (self.ivars().session.get(), self.ivars().shell_parent.get())
+        else {
+            return false;
+        };
+        if !session.reader_alive() || session.running_command().is_none() {
+            return false;
+        }
+        if session.alt_screen()
+            || !session
+                .with_pty_fd(jobs::tty_modes)
+                .is_some_and(TtyModes::raw)
+            || !jobs::job_in_foreground(parent, session.child_pid(), &SystemTable)
+        {
+            return true;
+        }
+        session.note_raw(jobs::tty_modes).is_none()
     }
 
     /// The bootstrap's proof. **First**, whatever the probe says,
@@ -3455,5 +3556,10 @@ mod tests {
         assert!(probe.begin(), "the new command must be probed");
         // When the arm is down a job that fell into the queue does not probe.
         assert!(!probe.begin());
+        // A job that could not be scheduled gives its slot back and keeps the
+        // arm: the next edge schedules again.
+        assert!(probe.command_started());
+        probe.release();
+        assert!(probe.output(), "the slot was given back");
     }
 }

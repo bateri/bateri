@@ -12,6 +12,17 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Changed
+
+- **The input dock steps aside for programs that read the keyboard
+  themselves.** When a command such as `codex`, Claude Code in its inline
+  mode, `python3` or `node` takes the keyboard, the dock at the bottom goes
+  away for as long as that program runs — the program sits at the bottom of
+  the window and the recent history fills the top — and comes back when you
+  return to the prompt, as it does after vim. The terminal's size does not
+  change, so the program is never asked to redraw. Commands that only print
+  (a build, `ls -R`, `npm run dev`) keep the dock as before.
+
 ## [0.5.0] - 2026-10-04
 
 ### Added

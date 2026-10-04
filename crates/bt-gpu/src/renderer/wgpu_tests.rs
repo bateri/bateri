@@ -416,7 +416,7 @@ fn scene_dock_ground() -> Scene {
     frame.clear(grid_with_gutter(CELL.0, CELL.1, 4), CaretStyle::default());
     frame.push(bg_cell(0, 0, MIDTONE));
     frame.push(bg_cell(3, 1, ACCENT));
-    frame.set_dock_input_rows(2);
+    frame.set_dock_input_rows(Some(2));
     frame.push_dock(bg_cell(1, 0, MIDTONE));
     frame.open_dock(
         LinearRgba::from_srgb(0x20, 0x22, 0x28),
@@ -712,7 +712,7 @@ fn scene_dock_glyphs(m: CellMetrics) -> Scene {
     const EDGE: u32 = 192;
     let mut frame = glyph_frame(m);
     frame.push(glyph_cell(0, 0, 'g'));
-    frame.set_dock_input_rows(1);
+    frame.set_dock_input_rows(Some(1));
     frame.set_dock_band(EDGE as f32, 0.0);
     frame.push_dock_sigil(Theme::BATERI.success_linear());
     for (col, ch) in (2u16..).zip("ls -la".chars()) {
@@ -938,7 +938,7 @@ fn scene_three_viewports(m: CellMetrics) -> Scene {
     );
     frame.push_fill_search(&[search_run(0, 0, 0, false, false)]);
     frame.push_selection(&[selection_run(1, 0, 2)], Theme::BATERI.selection_linear());
-    frame.set_dock_input_rows(1);
+    frame.set_dock_input_rows(Some(1));
     frame.set_dock_band(EDGE as f32, 0.0);
     frame.push_dock_sigil(Theme::BATERI.success_linear());
     let typed = glyph_cell(3, 0, 'k');
@@ -1044,7 +1044,7 @@ fn loaded_frame(frame: &mut Frame, edge: u16) {
             frame.push(bg_cell(col, row, tints[usize::from((col + row) % 4)]));
         }
     }
-    frame.set_dock_input_rows(1);
+    frame.set_dock_input_rows(Some(1));
     frame.push_dock(bg_cell(2, 0, MIDTONE));
     frame.open_dock(BACKGROUND, WHITE, WHITE);
     frame.push_caret([3.0, 2.0], BACKGROUND, ACCENT, 1.0, CaretShape::Block, true);

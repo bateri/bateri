@@ -166,6 +166,26 @@ fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Opti
     }
 }
 
+/// Whether a job outside the shell's own process group holds the terminal —
+/// the gate before asking whether the running program reads the keyboard
+/// itself ([`bt_core::Session::note_raw`]). The criterion is [`remote`]'s
+/// `Undecided` arm: the same group is the shell's own.
+///
+/// `false` is "no answer yet", never "not a program": the shell itself in the
+/// foreground (its own raw moments — ZLE, a builtin `read -k`, a shell `exec`'d
+/// in its place keeps its group), `login` with no shell forked yet, and an
+/// unreadable group. The caller keeps its arm and asks on the next output
+/// edge, so a systematic read error costs at most one probe per delay while
+/// output flows — and the dock is never hidden on a guess.
+pub fn job_in_foreground(parent: ShellParent, child: u32, table: &impl ProcessTable) -> bool {
+    let Some(shell) = shell_pid(parent, child, table) else {
+        return false;
+    };
+    table
+        .groups(shell)
+        .is_some_and(|groups| groups.foreground != 0 && groups.foreground != groups.own)
+}
+
 /// The PTY's two terminal modes that say whether a remote session is past its
 /// login ([`bt_core::TtyModes`]): `tcgetattr` on the master's copy
 /// (`bt_core::Session::with_pty_fd`). On macOS and Linux the master's
@@ -1209,6 +1229,35 @@ mod tests {
         Table::new(Some(terminal))
             .with(100, 1, 100, "login")
             .with(101, 100, 101, "zsh")
+    }
+
+    #[test]
+    fn only_a_job_outside_the_shells_group_holds_the_terminal() {
+        // The shell itself in the foreground: ZLE, `read -k`, an `exec`'d shell.
+        assert!(!job_in_foreground(
+            ShellParent::Login,
+            100,
+            &login_shell(101)
+        ));
+        let fish = Table::new(Some(101))
+            .with(100, 1, 100, "login")
+            .with(101, 100, 101, "fish");
+        assert!(
+            !job_in_foreground(ShellParent::Login, 100, &fish),
+            "`exec fish` keeps the shell's group"
+        );
+        // A program in its own group.
+        let python = login_shell(200).with(200, 101, 200, "python3");
+        assert!(job_in_foreground(ShellParent::Login, 100, &python));
+        assert!(job_in_foreground(ShellParent::Direct, 101, &python));
+        // No answer: no shell yet, an unreadable group, no foreground.
+        let unforked = Table::new(Some(200)).with(100, 1, 100, "login");
+        assert!(!job_in_foreground(ShellParent::Login, 100, &unforked));
+        let unreadable = Table::new(None)
+            .with(100, 1, 100, "login")
+            .with(101, 100, 101, "zsh");
+        assert!(!job_in_foreground(ShellParent::Login, 100, &unreadable));
+        assert!(!job_in_foreground(ShellParent::Login, 100, &login_shell(0)));
     }
 
     #[test]
