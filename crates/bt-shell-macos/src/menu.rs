@@ -86,7 +86,7 @@
 //! "Edit" and the full-screen item to the one named "View"; to the Window menu
 //! registered with `setWindowsMenu` it adds the window list and placement items.
 
-use bt_core::{HostMark, KeepRunning, SYSTEM_THEME, bare_host};
+use bt_core::{HostMark, KeepRunning, MarkSubject, SYSTEM_THEME, bare_host};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -200,7 +200,7 @@ pub(crate) fn mark_of_tag(tag: isize) -> Option<HostMark> {
         .map(|(_, mark)| *mark)
 }
 
-/// Mark … as ▸'nin o anki hâli ([`mark_menu`]).
+/// Mark … as ▸ as it stands ([`mark_menu`]).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MarkMenu {
     pub(crate) title: String,
@@ -211,15 +211,16 @@ pub(crate) struct MarkMenu {
 
 /// The current state of Mark … as ▸ ([`mark_menu`]).
 ///
-/// The menu's model, pure: with a markable host (a remote tab's, or the
-/// server of a database client's guide bar) the title carries the host
-/// without its `user@` and the checkmark is on the **effective resolution**
-/// (even if it comes from a glob); without one (`None`) "Mark Host as" and
-/// grey.
-pub(crate) fn mark_menu(remote: Option<(&str, HostMark)>) -> MarkMenu {
+/// The menu's model, pure: with a markable host (a remote tab's, the server
+/// of a database client's guide bar or a Kubernetes context) the title
+/// carries the name the menu writes — a host without its `user@`, a context
+/// whole ([`MarkSubject::name`]) — and the checkmark is on the **effective
+/// resolution** (even if it comes from a glob); without one (`None`) "Mark
+/// Host as" and grey.
+pub(crate) fn mark_menu(remote: Option<(&str, HostMark, MarkSubject)>) -> MarkMenu {
     match remote {
-        Some((host, mark)) => MarkMenu {
-            title: format!("Mark \u{201c}{}\u{201d} as", bare_host(host)),
+        Some((host, mark, subject)) => MarkMenu {
+            title: format!("Mark \u{201c}{}\u{201d} as", subject.name(host)),
             enabled: true,
             checked: MARKS.iter().position(|(_, candidate)| *candidate == mark),
         },
@@ -258,7 +259,11 @@ define_class!(
                 return;
             };
             let target = app.and_then(|app| app.key_mark_target());
-            let model = mark_menu(target.as_ref().map(|(host, mark)| (host.as_str(), *mark)));
+            let model = mark_menu(
+                target
+                    .as_ref()
+                    .map(|(host, mark, subject)| (host.as_str(), *mark, *subject)),
+            );
             holder.setTitle(&NSString::from_str(&model.title));
             holder.setEnabled(model.enabled);
             if let Some(submenu) = holder.submenu() {
@@ -724,17 +729,34 @@ mod tests {
         );
         // Remote tab: the host without `user@` in the title, the checkmark on the effective resolution.
         assert_eq!(
-            mark_menu(Some(("deploy@prod-web", HostMark::Staging))),
+            mark_menu(Some((
+                "deploy@prod-web",
+                HostMark::Staging,
+                MarkSubject::Host
+            ))),
             MarkMenu {
                 title: "Mark \u{201c}prod-web\u{201d} as".to_owned(),
                 enabled: true,
                 checked: Some(1),
             }
         );
-        // A host with no mark is checked on "None"; no direct color on any item.
-        assert_eq!(mark_menu(Some(("vm", HostMark::None))).checked, Some(3));
+        // A Kubernetes context: its whole name, the one the menu writes.
         assert_eq!(
-            mark_menu(Some(("vm", HostMark::Rgb(0xc678dd)))).checked,
+            mark_menu(Some((
+                "kubernetes-admin@kubernetes",
+                HostMark::None,
+                MarkSubject::Whole
+            )))
+            .title,
+            "Mark \u{201c}kubernetes-admin@kubernetes\u{201d} as"
+        );
+        // A host with no mark is checked on "None"; no direct color on any item.
+        assert_eq!(
+            mark_menu(Some(("vm", HostMark::None, MarkSubject::Host))).checked,
+            Some(3)
+        );
+        assert_eq!(
+            mark_menu(Some(("vm", HostMark::Rgb(0xc678dd), MarkSubject::Host))).checked,
             None
         );
     }
@@ -786,7 +808,10 @@ mod tests {
         for (index, (_, mark)) in MARKS.iter().enumerate() {
             let tag = isize::try_from(index).expect("small index");
             assert_eq!(mark_of_tag(tag), Some(*mark));
-            assert_eq!(mark_menu(Some(("h", *mark))).checked, Some(index));
+            assert_eq!(
+                mark_menu(Some(("h", *mark, MarkSubject::Host))).checked,
+                Some(index)
+            );
         }
         assert_eq!(mark_of_tag(-1), None);
         assert_eq!(mark_of_tag(4), None);

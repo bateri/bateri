@@ -766,6 +766,33 @@ pub enum HostMark {
     Rgb(u32),
 }
 
+/// How a name meets the `[remote] hosts` patterns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkSubject {
+    /// A host as ssh is given it: a pattern without `@` sees the part after
+    /// the last `@` — `deploy@prod` and `prod` are the same machine — and the
+    /// menu writes the host without its `user@`.
+    #[default]
+    Host,
+    /// A name whose `@` is no user's: a Kubernetes context names a user and
+    /// a cluster as **one** name (kubeadm's `kubernetes-admin@kubernetes`).
+    /// Every pattern sees all of it and the menu writes all of it — taken as
+    /// a host, an ssh entry for `kubernetes` would color the context, and
+    /// the menu would rewrite that entry.
+    Whole,
+}
+
+impl MarkSubject {
+    /// The name a pattern without `@` is matched against, and the one the
+    /// menu shows and writes: the host without `user@`, or the whole name.
+    pub fn name(self, host: &str) -> &str {
+        match self {
+            Self::Host => bare_host(host),
+            Self::Whole => host,
+        }
+    }
+}
+
 impl HostMark {
     /// The spellings of the named marks in the settings file; `Rgb` isn't a name,
     /// it is the `"#rrggbb"` format.
@@ -820,24 +847,31 @@ pub struct HostRule {
 /// Pure and not on the frame path: `Session` calls it only at the two edges
 /// where the remote state and the list change.
 pub fn host_mark(rules: &[HostRule], host: &str) -> HostMark {
-    matching(rules, host)
+    subject_mark(rules, host, MarkSubject::Host)
+}
+
+/// [`host_mark`] for a name met as `subject` says — a Kubernetes context
+/// whole ([`MarkSubject::Whole`]).
+pub fn subject_mark(rules: &[HostRule], name: &str, subject: MarkSubject) -> HostMark {
+    matching(rules, name, subject)
         .find_map(|(_, rule)| rule.mark)
         .unwrap_or(HostMark::None)
 }
 
 /// The first entry matching `host` that writes `integration`, and its
 /// index — [`Settings::integration_for`]'s match and the menu's carry.
-fn integration_rule(rules: &[HostRule], host: &str) -> Option<(usize, bool)> {
-    matching(rules, host).find_map(|(index, rule)| rule.integration.map(|on| (index, on)))
+fn integration_rule(rules: &[HostRule], host: &str, subject: MarkSubject) -> Option<(usize, bool)> {
+    matching(rules, host, subject).find_map(|(index, rule)| rule.integration.map(|on| (index, on)))
 }
 
 /// The entries of `rules` matching `host`, in order, with their indices — the
-/// one match of [`host_mark`] and [`integration_rule`].
+/// one match of [`subject_mark`] and [`integration_rule`].
 fn matching<'a>(
     rules: &'a [HostRule],
     host: &'a str,
+    subject: MarkSubject,
 ) -> impl Iterator<Item = (usize, &'a HostRule)> + 'a {
-    let bare = bare_host(host);
+    let bare = subject.name(host);
     rules.iter().enumerate().filter(move |(_, rule)| {
         let subject = if rule.pattern.contains('@') {
             host
@@ -1320,11 +1354,13 @@ pub enum SettingsEdit {
     /// `host`'s mark `mark`. Not a single key's value but the array's entries —
     /// the rule is in this arm of [`Settings::with_edit`]. `host` is the form the
     /// remote session shows (`user@` included, the match's input); the pattern
-    /// written is its part without `user@`. [`HostMark::None`] is the menu's
-    /// "None".
+    /// written is its part without `user@` — or, for a [`MarkSubject::Whole`]
+    /// name (a Kubernetes context), all of it. [`HostMark::None`] is the
+    /// menu's "None".
     RemoteHostMark {
         host: String,
         mark: HostMark,
+        subject: MarkSubject,
     },
     /// The settings window's "Set up shell integration on servers":
     /// `[remote] integration`.
@@ -1621,14 +1657,16 @@ integration = "auto"
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
 # production machine is never mistaken for another. A database client (psql,
-# mysql, redis-cli, mongosh) is colored by its server's host the same way.
+# mysql, redis-cli, mongosh) is colored by its server's host the same way, and
+# kubectl by its Kubernetes context.
 # Each entry names a host pattern and a mark: "production" (red), "staging"
 # (yellow), "development" (green), "none" (no mark), or a color like
 # "#c678dd". In a pattern * stands for any run of characters and ? for one,
-# ignoring case; a pattern without @ matches the host after any user@. The
-# first entry that matches wins, so put exact names before wide patterns;
-# "none" stops the search. Shell > Mark "host" as writes the entry for the
-# host of the ssh tab or the database client you are in.
+# ignoring case; a pattern without @ matches the host after any user@ (a
+# context is always matched whole). The first entry that matches wins, so put
+# exact names before wide patterns; "none" stops the search. Shell > Mark
+# "host" as writes the entry for the host of the ssh tab, the database client
+# or the Kubernetes context you are in.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },
@@ -2094,7 +2132,7 @@ stats_interval = 3
     /// host's mark is `production`, off; otherwise the `[remote] integration`
     /// key. "The first match wins" as for the mark, per key.
     pub fn integration_for(&self, host: &str) -> bool {
-        if let Some((_, on)) = integration_rule(&self.remote_hosts, host) {
+        if let Some((_, on)) = integration_rule(&self.remote_hosts, host, MarkSubject::Host) {
             return on;
         }
         host_mark(&self.remote_hosts, host) != HostMark::Production && self.remote_integration
@@ -2187,8 +2225,12 @@ stats_interval = 3
     /// in place).
     pub fn with_edit(text: &str, edit: &SettingsEdit) -> Result<String, Diagnostic> {
         match edit {
-            SettingsEdit::RemoteHostMark { host, mark } => {
-                return with_host_mark(text, host, *mark);
+            SettingsEdit::RemoteHostMark {
+                host,
+                mark,
+                subject,
+            } => {
+                return with_host_mark(text, host, *mark, *subject);
             }
             SettingsEdit::RemoteHostIntegration { host, on } => {
                 return with_host_integration(text, host, *on);
@@ -2298,7 +2340,8 @@ struct MarkPlan {
     in_place: Option<usize>,
     /// The deleted entries, in ascending order.
     remove: Vec<usize>,
-    /// `{ host = <host without user@>, mark }` goes at the start of the array.
+    /// `{ host = <the subject's name>, mark }` goes at the start of the array —
+    /// the host without `user@`, a whole name all of it ([`MarkSubject::name`]).
     prepend: bool,
     /// The prepended entry also writes `mark` (an entry that only carries
     /// `integration` has none).
@@ -2329,17 +2372,22 @@ struct MarkPlan {
 ///   (an `integration`-only one when no mark is needed), so the host's answer
 ///   stays what it was. An exact entry is changed in place even if it carries
 ///   only `integration` — it gets a `mark`.
-fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<MarkPlan> {
-    if host_mark(rules, host) == mark {
+fn host_mark_plan(
+    rules: &[HostRule],
+    host: &str,
+    mark: HostMark,
+    subject: MarkSubject,
+) -> Option<MarkPlan> {
+    if subject_mark(rules, host, subject) == mark {
         return None;
     }
-    let exact = exact_entries(rules, host);
+    let exact = exact_entries(rules, host, subject);
     if mark != HostMark::None
         && let Some(&first) = exact.first()
     {
         let mut edited = rules.to_vec();
         edited[first].mark = Some(mark);
-        if host_mark(&edited, host) == mark {
+        if subject_mark(&edited, host, subject) == mark {
             return Some(MarkPlan {
                 in_place: Some(first),
                 remove: Vec::new(),
@@ -2355,10 +2403,10 @@ fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<Mark
         .filter(|(index, _)| !exact.contains(index))
         .map(|(_, rule)| rule.clone())
         .collect();
-    let integration = integration_rule(rules, host)
+    let integration = integration_rule(rules, host, subject)
         .filter(|(index, _)| exact.contains(index))
         .map(|(_, on)| on);
-    let prepend_mark = host_mark(&kept, host) != mark;
+    let prepend_mark = subject_mark(&kept, host, subject) != mark;
     Some(MarkPlan {
         in_place: None,
         prepend: prepend_mark || integration.is_some(),
@@ -2369,10 +2417,11 @@ fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<Mark
 }
 
 /// The indices of the entries that write exactly `host`: the pattern equals,
-/// case insensitive, the host without `user@` or the full host — the menu's
-/// "this host's own entry" ([`host_mark_plan`], [`host_integration_plan`]).
-fn exact_entries(rules: &[HostRule], host: &str) -> Vec<usize> {
-    let bare = bare_host(host).to_lowercase();
+/// case insensitive, the host without `user@` or the full host — the full
+/// name alone for a [`MarkSubject::Whole`] one — the menu's "this host's own
+/// entry" ([`host_mark_plan`], [`host_integration_plan`]).
+fn exact_entries(rules: &[HostRule], host: &str, subject: MarkSubject) -> Vec<usize> {
+    let bare = subject.name(host).to_lowercase();
     let full = host.to_lowercase();
     rules
         .iter()
@@ -2416,14 +2465,14 @@ struct IntegrationPlan {
 ///   with it every production mark). Marks are resolved separately, so no
 ///   host's mark changes.
 fn host_integration_plan(rules: &[HostRule], host: &str, on: bool) -> Option<IntegrationPlan> {
-    if integration_rule(rules, host).map(|(_, value)| value) == Some(on) {
+    if integration_rule(rules, host, MarkSubject::Host).map(|(_, value)| value) == Some(on) {
         return None;
     }
-    let exact = exact_entries(rules, host);
+    let exact = exact_entries(rules, host, MarkSubject::Host);
     if let Some(&first) = exact.first() {
         let mut edited = rules.to_vec();
         edited[first].integration = Some(on);
-        if integration_rule(&edited, host).map(|(_, value)| value) == Some(on) {
+        if integration_rule(&edited, host, MarkSubject::Host).map(|(_, value)| value) == Some(on) {
             return Some(IntegrationPlan {
                 in_place: Some(first),
                 strip: Vec::new(),
@@ -2456,12 +2505,17 @@ pub fn bare_host(host: &str) -> &str {
 /// inline array. Text that can't be parsed and a broken array are `Err` —
 /// leaving a broken entry in place and writing in front of it would be guessing
 /// the list's meaning.
-fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diagnostic> {
+fn with_host_mark(
+    text: &str,
+    host: &str,
+    mark: HostMark,
+    subject: MarkSubject,
+) -> Result<String, Diagnostic> {
     let (parsed, rules) = remote_rules(text)?;
-    let Some(plan) = host_mark_plan(&rules, host, mark) else {
+    let Some(plan) = host_mark_plan(&rules, host, mark, subject) else {
         return Ok(text.to_owned());
     };
-    let pattern = bare_host(host);
+    let pattern = subject.name(host);
     let written = mark.written();
     let mut doc = parsed.into_mut();
     ensure_section(&mut doc, "remote");
@@ -4970,7 +5024,7 @@ found 1.5; using 0.1"
             ),
         ] {
             assert!(!integration(text), "{text}");
-            let edited = with_host_mark(text, "router", mark).expect("edit");
+            let edited = with_host_mark(text, "router", mark, MarkSubject::Host).expect("edit");
             assert_eq!(
                 host_mark(&clean(&edited).remote_hosts, "router"),
                 mark,
@@ -4988,7 +5042,8 @@ found 1.5; using 0.1"
             "[remote]\nintegration = false\nhosts = [{ host = \"prod\", integration = false }]\n",
             "[remote]\nintegration = false\n\n[[remote.hosts]]\nhost = \"prod\"\nintegration = false\n",
         ] {
-            let edited = with_host_mark(text, "prod", HostMark::Production).expect("edit");
+            let edited = with_host_mark(text, "prod", HostMark::Production, MarkSubject::Host)
+                .expect("edit");
             assert!(
                 !clean(&edited).remote_integration,
                 "the section's own key stays: {edited}"
@@ -5420,6 +5475,34 @@ found 1.5; using 0.1"
     }
 
     #[test]
+    fn a_whole_name_is_matched_whole() {
+        // kubeadm's context: its `@` is no user's, so the ssh entry for the
+        // host `kubernetes` does not color it.
+        let context = "kubernetes-admin@kubernetes";
+        let whole = |rules: &[HostRule]| subject_mark(rules, context, MarkSubject::Whole);
+        let bare = [host_rule("kubernetes", HostMark::Production)];
+        assert_eq!(host_mark(&bare, context), HostMark::Production, "as a host");
+        assert_eq!(whole(&bare), HostMark::None);
+        // Its own entry, a glob over the whole name, and `*` match.
+        let own = [host_rule(context, HostMark::Staging)];
+        assert_eq!(whole(&own), HostMark::Staging);
+        let glob = [host_rule("kubernetes-admin@*", HostMark::Development)];
+        assert_eq!(whole(&glob), HostMark::Development);
+        let wide = [host_rule("*", HostMark::Development)];
+        assert_eq!(whole(&wide), HostMark::Development);
+        let tail = [host_rule("*@kubernetes", HostMark::Production)];
+        assert_eq!(whole(&tail), HostMark::Production);
+        // Without an `@` the two subjects are one.
+        let prod = [host_rule("prod-*", HostMark::Production)];
+        assert_eq!(
+            subject_mark(&prod, "prod-eu", MarkSubject::Whole),
+            host_mark(&prod, "prod-eu")
+        );
+        assert_eq!(MarkSubject::Whole.name(context), context);
+        assert_eq!(MarkSubject::Host.name(context), "kubernetes");
+    }
+
+    #[test]
     fn the_first_matching_host_rule_wins_and_none_stops_the_search() {
         let rules = [
             host_rule("prod-canary", HostMark::None),
@@ -5794,10 +5877,14 @@ cursor = \"spring\"
             }
             // The oracle is right only from an empty list: both of `every_edit`'s
             // texts carry `hosts = []`. The filled list's rule is in its own test.
-            SettingsEdit::RemoteHostMark { host, mark } => settings.remote_hosts.insert(
+            SettingsEdit::RemoteHostMark {
+                host,
+                mark,
+                subject,
+            } => settings.remote_hosts.insert(
                 0,
                 HostRule {
-                    pattern: bare_host(&host).to_owned(),
+                    pattern: subject.name(&host).to_owned(),
                     mark: Some(mark),
                     integration: None,
                 },
@@ -5860,6 +5947,12 @@ cursor = \"spring\"
             SettingsEdit::RemoteHostMark {
                 host: "deploy@prod".to_owned(),
                 mark: HostMark::Production,
+                subject: MarkSubject::Host,
+            },
+            SettingsEdit::RemoteHostMark {
+                host: "kubernetes-admin@kubernetes".to_owned(),
+                mark: HostMark::Staging,
+                subject: MarkSubject::Whole,
             },
             SettingsEdit::RemoteHostIntegration {
                 host: "deploy@vm".to_owned(),
@@ -5881,9 +5974,14 @@ cursor = \"spring\"
     }
 
     fn marked(text: &str, host: &str, mark: HostMark) -> String {
+        marked_as(text, host, mark, MarkSubject::Host)
+    }
+
+    fn marked_as(text: &str, host: &str, mark: HostMark, subject: MarkSubject) -> String {
         let edit = SettingsEdit::RemoteHostMark {
             host: host.to_owned(),
             mark,
+            subject,
         };
         Settings::with_edit(text, &edit).expect("writable text")
     }
@@ -6135,6 +6233,47 @@ cursor = \"spring\"
     }
 
     #[test]
+    fn marking_a_whole_name_writes_all_of_it() {
+        let context = "kubernetes-admin@kubernetes";
+        let whole = |text: &str, mark| marked_as(text, context, mark, MarkSubject::Whole);
+        let resolved =
+            |text: &str| subject_mark(&clean(text).remote_hosts, context, MarkSubject::Whole);
+        assert_eq!(
+            whole("", HostMark::Production),
+            "[remote]\nhosts = [{ host = \"kubernetes-admin@kubernetes\", mark = \"production\" }]\n"
+        );
+        // The ssh host `kubernetes`'s entry is another name's: it is not
+        // rewritten, the context's own goes before it.
+        let ssh = "[remote]\nhosts = [{ host = \"kubernetes\", mark = \"development\" }]\n";
+        let written = whole(ssh, HostMark::Staging);
+        assert_eq!(
+            written,
+            "[remote]\nhosts = [{ host = \"kubernetes-admin@kubernetes\", mark = \"staging\" }, \
+             { host = \"kubernetes\", mark = \"development\" }]\n"
+        );
+        assert_eq!(resolved(&written), HostMark::Staging);
+        assert_eq!(
+            host_mark(&clean(&written).remote_hosts, "deploy@kubernetes"),
+            HostMark::Development,
+            "the ssh host keeps its mark"
+        );
+        // Its own entry changes in place; None deletes it.
+        assert_eq!(
+            whole(&written, HostMark::Production),
+            written.replace("\"staging\"", "\"production\"")
+        );
+        assert_eq!(
+            clean(&whole(&written, HostMark::None)).remote_hosts,
+            clean(ssh).remote_hosts
+        );
+        // A glob over every context: None writes the whole name's `none`.
+        let glob = "[remote]\nhosts = [{ host = \"*@kubernetes\", mark = \"production\" }]\n";
+        let none = whole(glob, HostMark::None);
+        assert_eq!(resolved(&none), HostMark::None);
+        assert!(none.contains("{ host = \"kubernetes-admin@kubernetes\", mark = \"none\" }"));
+    }
+
+    #[test]
     fn marking_a_host_in_an_array_of_sections() {
         let text = "[[remote.hosts]]\nhost = \"db\"\nmark = \"staging\" # veri\n\n\
                     [[remote.hosts]]\nhost = \"prod-*\"\nmark = \"production\"\n";
@@ -6193,6 +6332,7 @@ cursor = \"spring\"
             let edit = SettingsEdit::RemoteHostMark {
                 host: "b".to_owned(),
                 mark: HostMark::Production,
+                subject: MarkSubject::Host,
             };
             assert!(Settings::with_edit(text, &edit).is_err(), "{text}");
         }

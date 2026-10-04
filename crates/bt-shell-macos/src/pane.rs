@@ -2496,8 +2496,9 @@ impl TerminalPane {
     /// with what the process table says (main thread, system calls only —
     /// the group's members, their exec records and the program's start
     /// time), then by a background job on a thread of its own: completed
-    /// with the interpreter's `--version` (killed past its timeout) and a
-    /// venv's `pyvenv.cfg` ([`program::details`]), and taken away when the
+    /// with the interpreter's `--version` (killed past its timeout), a
+    /// venv's `pyvenv.cfg` and a kubectl session's context from its
+    /// kubeconfig ([`program::details`]), and taken away when the
     /// program exits ([`program::wait_for_exit`]) — the command can go on
     /// without it (`python3; make`). Each answer comes back on the main
     /// queue, finds the pane by its id and is written for the **same

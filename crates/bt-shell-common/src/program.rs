@@ -18,9 +18,9 @@
 //! **Three halves.** The decision is pure ([`classify`], whose input is the
 //! foreground group's records), [`find`] walks the process table for it on
 //! the main thread — system calls only — and [`details`] is the background
-//! job's: the interpreter's own `--version` and a virtual environment's
-//! `pyvenv.cfg`. The bar is first written with what the table knows and
-//! completed when the job returns.
+//! job's: the interpreter's own `--version`, a virtual environment's
+//! `pyvenv.cfg` and a kubeconfig's `current-context:` line. The bar is first
+//! written with what the table knows and completed when the job returns.
 //!
 //! **The environment is read through a fixed list** ([`ENV_KEYS`],
 //! `jobs::ProcArgs`): a program that reads the keyboard often carries API
@@ -32,9 +32,20 @@
 //! client is connected to — `postgres  app@db.prod:5432/main` — from its
 //! command line ([`database`]), never its password, and its server's host is
 //! what the `[remote] hosts` marks color the bar by.
+//!
+//! **Containers and clusters** (`docker`/`podman` `run`/`exec`, compose's
+//! `exec`/`run`; `kubectl exec`/`run`/`debug`): the bar names where the
+//! session runs — `container redis:alpine`, `k8s prod-eu · payments
+//! pod/api-7f9c` ([`container`]). kubectl's context is the marks' name,
+//! **whole** (`kubernetes-admin@kubernetes` is one name, its `@` no user's),
+//! read from `--context` or, in the background job, from the kubeconfig's
+//! `current-context:` line.
 
+mod container;
 mod database;
+mod options;
 
+pub use container::Kube;
 pub use database::{Client, Target};
 
 use std::io::Read as _;
@@ -43,7 +54,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use bt_core::{ProgramBar, ProgramTone};
+use bt_core::{MarkSubject, ProgramBar, ProgramTone};
 
 use crate::jobs::{self, ProcArgs, ProcessTable, ShellParent};
 
@@ -51,10 +62,10 @@ use crate::jobs::{self, ProcArgs, ProcessTable, ShellParent};
 /// list**; no other variable of any process is read. Each has a single
 /// use: the framework Python's launcher path, the managers' roots, and the
 /// database clients' server, address, port, user, database and libpq
-/// service. **No
+/// service, and kubectl's kubeconfig files and home. **No
 /// password variable** (`PGPASSWORD`, `MYSQL_PWD`, `REDISCLI_AUTH`) is
 /// here, so none is ever read out of a process.
-pub const ENV_KEYS: [&str; 15] = [
+pub const ENV_KEYS: [&str; 17] = [
     "__PYVENV_LAUNCHER__",
     "VIRTUAL_ENV",
     "CONDA_PREFIX",
@@ -70,6 +81,8 @@ pub const ENV_KEYS: [&str; 15] = [
     "PGSERVICE",
     "MYSQL_HOST",
     "MYSQL_TCP_PORT",
+    "KUBECONFIG",
+    "HOME",
 ];
 
 /// How long the interpreter's `--version` may take before it is killed — a
@@ -86,7 +99,8 @@ const VERSION_OUTPUT_MAX: u64 = 4096;
 const VENV_CONFIG_MAX: u64 = 64 * 1024;
 
 /// A program the guide bar knows: an interpreter family with a REPL (a row
-/// of [`INTERPRETERS`]) or a database client.
+/// of [`INTERPRETERS`]), a database client, a container session or a
+/// Kubernetes one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
     Python,
@@ -95,6 +109,10 @@ pub enum Family {
     Deno,
     Ruby,
     Database(Client),
+    /// `docker`, `podman` or compose in a container.
+    Container,
+    /// `kubectl` in a pod or on a node.
+    Kubernetes,
 }
 
 /// One interpreter: the family, the bar's label and its exit hint. A new
@@ -181,6 +199,11 @@ impl Family {
         if let Some(client) = Client::of_name(name) {
             return Some(Self::Database(client));
         }
+        match name {
+            "docker" | "podman" | "docker-compose" => return Some(Self::Container),
+            "kubectl" => return Some(Self::Kubernetes),
+            _ => {}
+        }
         let versioned = name
             .strip_prefix("python")
             .is_some_and(|rest| rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.'));
@@ -200,6 +223,8 @@ impl Family {
     fn label(self) -> &'static str {
         match self {
             Self::Database(client) => client.label(),
+            Self::Container => "container",
+            Self::Kubernetes => "k8s",
             interpreter => interpreter.row().map_or("", |row| row.label),
         }
     }
@@ -208,11 +233,13 @@ impl Family {
     fn hint(self) -> &'static str {
         match self {
             Self::Database(client) => client.hint(),
+            // The shell inside: its own `exit`.
+            Self::Container | Self::Kubernetes => "exit to leave",
             interpreter => interpreter.row().map_or("", |row| row.hint),
         }
     }
 
-    /// An interpreter's row; `None` for a database client (its own
+    /// An interpreter's row; `None` for the other families (their own
     /// `label`/`hint`). Every interpreter has one —
     /// `the_bars_strings_are_the_ones_the_atlas_checks` walks them.
     fn row(self) -> Option<&'static Interpreter> {
@@ -234,11 +261,14 @@ pub struct Program {
     /// Where it runs from, as shown: the path the user ran (the framework
     /// Python's launcher, a venv's `bin/python`), `~`-shortened; for a
     /// database client what it is connected to (`app@db.prod:5432/main`,
-    /// SQLite's file). Empty when unknown.
+    /// SQLite's file); for a container its image, container or service, for
+    /// a Kubernetes session its resource (`pod/api-7f9c`). Empty when
+    /// unknown.
     pub path: String,
     /// The detail after the title: what manages an interpreter, from the
-    /// environment and the path (`venv`, `nvm`, `conda base`), or a database
-    /// client's libpq service (`service prod`); `None` when nothing says.
+    /// environment and the path (`venv`, `nvm`, `conda base`), a database
+    /// client's libpq service (`service prod`) or a Kubernetes session's
+    /// namespace; `None` when nothing says.
     pub detail: Option<String>,
     /// The server's host the `[remote] hosts` marks are resolved against
     /// (a database client's); `None` for an interpreter, a socket or a
@@ -248,6 +278,10 @@ pub struct Program {
     /// a Python run from `{dir}/bin/python` that nothing else names is a
     /// venv's when `{dir}/pyvenv.cfg` is one (an unactivated venv).
     pub venv_config: Option<PathBuf>,
+    /// A Kubernetes session's context and namespace, and the kubeconfig
+    /// files the background job reads its context from when its command
+    /// line names none.
+    pub kube: Option<Kube>,
 }
 
 /// What the background job adds ([`details`]).
@@ -258,16 +292,37 @@ pub struct Details {
     pub version: Option<String>,
     /// [`Program::venv_config`] is a virtual environment's.
     pub venv: bool,
+    /// The context the kubeconfig files of [`Kube::files`] name.
+    pub context: Option<String>,
 }
 
 impl Program {
     /// The guide bar: what the table knew, completed by `details` when the
     /// background job has returned.
+    ///
+    /// A Kubernetes session's context is in the **title** — `k8s prod-eu` —
+    /// since the title is never shortened (a cut context reads as another
+    /// one) and carries the mark's color; it is the marks' name, whole. The
+    /// namespace is the detail (`· payments`): it can drop on a narrow row,
+    /// and it shows while the context is not known.
     pub fn bar(&self, details: Option<&Details>) -> ProgramBar {
-        let label = self.family.label();
-        let title = match details.and_then(|details| details.version.as_deref()) {
-            Some(version) => format!("{label} {version}"),
-            None => label.to_owned(),
+        let mut title = self.family.label().to_owned();
+        if let Some(version) = details.and_then(|details| details.version.as_deref()) {
+            title.push(' ');
+            title.push_str(version);
+        }
+        let context = self.kube.as_ref().and_then(|kube| {
+            kube.context
+                .clone()
+                .or_else(|| details.and_then(|details| details.context.clone()))
+        });
+        if let Some(context) = &context {
+            title.push(' ');
+            title.push_str(context);
+        }
+        let (host, subject) = match context {
+            Some(context) => (context, MarkSubject::Whole),
+            None => (self.host.clone().unwrap_or_default(), MarkSubject::Host),
         };
         let detail = self
             .detail
@@ -283,7 +338,8 @@ impl Program {
             detail,
             path: self.path.clone(),
             hint: self.family.hint().to_owned(),
-            host: self.host.clone().unwrap_or_default(),
+            host,
+            subject,
             tone: ProgramTone::Info,
         }
     }
@@ -388,6 +444,18 @@ pub fn classify(members: &[Member], home: Option<&Path>) -> Option<Program> {
 fn recognize(pid: u32, name: &str, record: &ProcArgs, home: Option<&Path>) -> Option<Program> {
     let family = Family::of_name(name)?;
     let args = record.args.get(1..).unwrap_or_default();
+    match family {
+        Family::Container => {
+            let target = container::container(name, args)?;
+            return Some(tool(pid, family, target.unwrap_or_default(), None));
+        }
+        Family::Kubernetes => {
+            let kube = container::kubernetes(args, record)?;
+            let resource = kube.resource.clone().unwrap_or_default();
+            return Some(tool(pid, family, resource, Some(kube)));
+        }
+        _ => {}
+    }
     if let Family::Database(client) = family {
         // On Linux a script run by its own shebang (`#!/usr/bin/node`) is
         // named after the script while its argv is the interpreter's —
@@ -443,7 +511,24 @@ fn recognize(pid: u32, name: &str, record: &ProcArgs, home: Option<&Path>) -> Op
         detail: manager,
         host: None,
         venv_config,
+        kube: None,
     })
+}
+
+/// A container's or a cluster's program: no executable asked for a
+/// version, `path` where the session runs, a Kubernetes namespace the
+/// detail.
+fn tool(pid: u32, family: Family, path: String, kube: Option<Kube>) -> Program {
+    Program {
+        pid,
+        family,
+        exec: None,
+        path,
+        detail: kube.as_ref().and_then(|kube| kube.namespace.clone()),
+        host: None,
+        venv_config: None,
+        kube,
+    }
 }
 
 /// A database client's program: what it is connected to ([`Target`]), its
@@ -469,6 +554,7 @@ fn client_program(
             .map(|service| format!("service {service}")),
         host: target.mark_host(),
         venv_config: None,
+        kube: None,
     })
 }
 
@@ -509,8 +595,9 @@ fn is_repl(family: Family, argv: &[String]) -> bool {
             argv.first().is_some_and(|zero| named(zero))
                 || first_positional(args, &["-I", "-r", "-C", "-E"]).is_some_and(named)
         }
-        // A client's prompt is decided with its target (`client_program`).
-        Family::Database(_) => false,
+        // A client's or a tool's session is decided with its target
+        // (`client_program`, `container`).
+        Family::Database(_) | Family::Container | Family::Kubernetes => false,
     }
 }
 
@@ -721,9 +808,11 @@ fn tilde(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
-/// The background job: the interpreter's `--version` ([`VERSION_TIMEOUT`])
-/// and the venv's configuration. Blocks for at most the timeout plus a
-/// file read — never on the main thread.
+/// The background job: the interpreter's `--version` ([`VERSION_TIMEOUT`]),
+/// the venv's configuration and a Kubernetes session's context from its
+/// kubeconfig files (their `current-context:` line alone,
+/// `container::read_context`). Blocks for at most the timeout plus a few file reads
+/// — never on the main thread.
 pub fn details(program: &Program) -> Details {
     Details {
         version: program
@@ -736,6 +825,11 @@ pub fn details(program: &Program) -> Details {
             .as_deref()
             .and_then(read_venv_config)
             .is_some_and(|text| pyvenv_value(&text, "home").is_some()),
+        context: program
+            .kube
+            .as_ref()
+            .filter(|kube| kube.context.is_none())
+            .and_then(|kube| container::read_context(&kube.files)),
     }
 }
 
@@ -939,6 +1033,7 @@ mod tests {
         let details = Details {
             version: Some("3.14.5".into()),
             venv: false,
+            context: None,
         };
         let bar = program.bar(Some(&details));
         assert_eq!(bar.title, "Python 3.14.5");
@@ -987,6 +1082,7 @@ mod tests {
         let details = Details {
             version: Some("3.14.5".into()),
             venv: true,
+            context: None,
         };
         let bar = unactivated.bar(Some(&details));
         assert_eq!(bar.title, "Python 3.14.5");
@@ -1063,6 +1159,7 @@ mod tests {
         let details = Details {
             version: Some("v22.13.0".into()),
             venv: false,
+            context: None,
         };
         assert_eq!(nvm.bar(Some(&details)).title, "Node v22.13.0");
         // `NVM_DIR` alone does not claim a Homebrew node.
@@ -1729,12 +1826,14 @@ mod tests {
             detail: None,
             host: None,
             venv_config: venv_config(&exec),
+            kube: None,
         };
         assert_eq!(
             details(&program),
             Details {
                 version: Some("3.99.1".into()),
                 venv: true,
+                context: None,
             }
         );
         // No `home` line: not a venv's configuration; a FIFO is not read.
@@ -1772,6 +1871,179 @@ mod tests {
     }
 
     #[test]
+    fn a_container_session_names_where_it_runs() {
+        // Measured: `docker run -it --rm redis:alpine sh` is one `docker`
+        // in its own group, argv as typed.
+        let table = login_shell(200).exec(
+            200,
+            101,
+            200,
+            (
+                "docker",
+                "/Applications/OrbStack.app/Contents/MacOS/xbin/docker",
+            ),
+            &["docker", "run", "-it", "--rm", "redis:alpine", "sh"],
+            &[],
+        );
+        let program = find(ShellParent::Login, 100, &table, home()).expect("docker run");
+        assert_eq!(program.family, Family::Container);
+        assert_eq!(program.exec, None, "no version is asked of a tool");
+        let bar = program.bar(None);
+        assert_eq!(bar.title, "container");
+        assert_eq!(bar.path, "redis:alpine");
+        assert_eq!(bar.hint, "exit to leave");
+        assert_eq!(bar.host, "", "a container is no host to mark");
+        assert_eq!(program.bar(Some(&details(&program))), bar);
+        // Measured: `docker compose exec` is docker running its plugin; the
+        // topmost one names it and the plugin is its descendant.
+        let table = login_shell(200)
+            .exec(
+                200,
+                101,
+                200,
+                ("docker", "/usr/local/bin/docker"),
+                &["docker", "compose", "-p", "proj", "exec", "cache", "sh"],
+                &[],
+            )
+            .exec(
+                201,
+                200,
+                200,
+                (
+                    "docker-compose",
+                    "/Users/me/.docker/cli-plugins/docker-compose",
+                ),
+                &[
+                    "/Users/me/.docker/cli-plugins/docker-compose",
+                    "compose",
+                    "-p",
+                    "proj",
+                    "exec",
+                    "cache",
+                    "sh",
+                ],
+                &[],
+            );
+        let program = find(ShellParent::Login, 100, &table, home()).expect("compose exec");
+        assert_eq!(program.pid, 200);
+        assert_eq!(program.bar(None).path, "cache");
+        // Another command of docker's is no session: no bar.
+        assert_eq!(
+            one(member(
+                "docker",
+                "/usr/local/bin/docker",
+                &["docker", "login"],
+                &[]
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn a_kubernetes_session_names_its_context_whole() {
+        // `--context` names it at once; the namespace follows it.
+        let program = one(member(
+            "kubectl",
+            "/usr/local/bin/kubectl",
+            &[
+                "kubectl",
+                "--context",
+                "kubernetes-admin@kubernetes",
+                "-n",
+                "payments",
+                "exec",
+                "-it",
+                "api-7f9c",
+                "--",
+                "sh",
+            ],
+            &[],
+        ))
+        .expect("kubectl exec");
+        assert_eq!(program.family, Family::Kubernetes);
+        let bar = program.bar(None);
+        assert_eq!(bar.title, "k8s kubernetes-admin@kubernetes");
+        assert_eq!(bar.detail, "payments");
+        assert_eq!(bar.path, "pod/api-7f9c");
+        assert_eq!(bar.hint, "exit to leave");
+        assert_eq!(bar.host, "kubernetes-admin@kubernetes");
+        assert_eq!(bar.subject, MarkSubject::Whole);
+        // Without one, the title waits for the kubeconfig's line.
+        let program = one(member(
+            "kubectl",
+            "/usr/local/bin/kubectl",
+            &[
+                "kubectl", "exec", "-it", "-n", "payments", "api-7f9c", "--", "sh",
+            ],
+            &[("KUBECONFIG", "/Users/me/.kube/prod:/Users/me/.kube/config")],
+        ))
+        .expect("kubectl exec");
+        assert_eq!(
+            program.kube.as_ref().map(|kube| kube.files.clone()),
+            Some(vec![
+                PathBuf::from("/Users/me/.kube/prod"),
+                PathBuf::from("/Users/me/.kube/config")
+            ])
+        );
+        let bar = program.bar(None);
+        assert_eq!(bar.title, "k8s");
+        assert_eq!(bar.detail, "payments", "the namespace is known already");
+        assert_eq!(bar.host, "", "no context, no mark");
+        assert_eq!(bar.subject, MarkSubject::Host);
+        let details = Details {
+            context: Some("prod-eu".into()),
+            ..Details::default()
+        };
+        let bar = program.bar(Some(&details));
+        assert_eq!(bar.title, "k8s prod-eu");
+        assert_eq!(bar.host, "prod-eu");
+        assert_eq!(bar.subject, MarkSubject::Whole);
+    }
+
+    #[test]
+    fn the_details_job_reads_the_kubeconfigs_line_alone() {
+        let dir = std::env::temp_dir().join(format!("bt-program-kube-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let config = dir.join("config");
+        std::fs::write(
+            &config,
+            "apiVersion: v1\nusers:\n- name: admin\n  user:\n    token: hunter2-token\n    \
+             client-key-data: S0VZ\ncurrent-context: prod-eu\n",
+        )
+        .expect("kubeconfig");
+        let program = tool(
+            1,
+            Family::Kubernetes,
+            "pod/api".into(),
+            Some(Kube {
+                files: vec![config],
+                ..Kube::default()
+            }),
+        );
+        let details = details(&program);
+        assert_eq!(details.context.as_deref(), Some("prod-eu"));
+        let printed = format!("{details:?} {:?}", program.bar(Some(&details)));
+        assert!(
+            !printed.contains("hunter") && !printed.contains("S0VZ"),
+            "a secret of the kubeconfig reached the bar"
+        );
+        // A context the command line names is not read for.
+        let named = tool(
+            1,
+            Family::Kubernetes,
+            String::new(),
+            Some(Kube {
+                context: Some("stage".into()),
+                files: vec![dir.join("config")],
+                ..Kube::default()
+            }),
+        );
+        assert_eq!(super::details(&named).context, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_bars_strings_are_the_ones_the_atlas_checks() {
         // Every non-ASCII character a bar can carry from here is in the list
         // `bt-atlas` checks in Menlo's small class.
@@ -1787,7 +2059,8 @@ mod tests {
         let families = INTERPRETERS
             .iter()
             .map(|row| row.family)
-            .chain(Client::ALL.map(Family::Database));
+            .chain(Client::ALL.map(Family::Database))
+            .chain([Family::Container, Family::Kubernetes]);
         for family in families {
             for ch in family.label().chars().chain(family.hint().chars()) {
                 assert!(

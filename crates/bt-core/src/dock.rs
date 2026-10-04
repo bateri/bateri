@@ -5124,6 +5124,7 @@ mod tests {
                 path: path.into(),
                 hint: hint.into(),
                 host: String::new(),
+                subject: crate::MarkSubject::Host,
                 tone: ProgramTone::Info,
             }),
             ..context("/Users/me/proj", "main")

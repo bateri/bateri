@@ -111,7 +111,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::dock::{self, DockPoint};
 use crate::session::{CellHalf, SelectKind};
-use crate::settings::{HostMark, HostRule, RemoteStatsMode};
+use crate::settings::{HostMark, HostRule, MarkSubject, RemoteStatsMode};
 
 /// A single OSC 133 mark the shell writes into the stream.
 ///
@@ -660,10 +660,13 @@ pub struct ProgramBar {
     /// How to leave (`⌃D exit`), right-aligned; the first part to drop.
     pub hint: String,
     /// The server the program is connected to, as the `[remote] hosts`
-    /// marks see it (a database client's: `db.prod`); empty when the bar
-    /// is no server's. Not drawn — [`DockContext::program_mark`] is its
-    /// resolution, the bar's color.
+    /// marks see it (a database client's: `db.prod`; a Kubernetes context:
+    /// `prod-eu`); empty when the bar is no server's. Not drawn —
+    /// [`DockContext::program_mark`] is its resolution, the bar's color.
     pub host: String,
+    /// How [`Self::host`] meets the patterns: a server's host as ssh's
+    /// (`user@` dropped), a Kubernetes context whole — its `@` is no user's.
+    pub subject: MarkSubject,
     pub tone: ProgramTone,
 }
 
@@ -693,6 +696,7 @@ impl Clone for ProgramBar {
         self.path.clone_from(&source.path);
         self.hint.clone_from(&source.hint);
         self.host.clone_from(&source.host);
+        self.subject = source.subject;
         self.tone = source.tone;
     }
 }
@@ -2608,7 +2612,7 @@ impl ShellLog {
             .as_ref()
             .filter(|bar| !bar.host.is_empty())
             .map_or(HostMark::None, |bar| {
-                crate::settings::host_mark(&self.host_rules, &bar.host)
+                crate::settings::subject_mark(&self.host_rules, &bar.host, bar.subject)
             })
     }
 
@@ -8077,6 +8081,7 @@ mod tests {
             path: "~/proj/.venv/bin/python3".into(),
             hint: "⌃D exit".into(),
             host: String::new(),
+            subject: MarkSubject::Host,
             tone: ProgramTone::Info,
         }
     }
@@ -8165,8 +8170,47 @@ mod tests {
             path: format!("app@{host}:5432/main"),
             hint: "\\q to leave".into(),
             host: host.into(),
+            subject: MarkSubject::Host,
             tone: ProgramTone::Info,
         }
+    }
+
+    /// A Kubernetes session's bar in `context`: the name is matched whole.
+    fn kubernetes_bar(context: &str) -> ProgramBar {
+        ProgramBar {
+            title: format!("k8s {context}"),
+            detail: String::new(),
+            path: "pod/api-7f9c".into(),
+            hint: "exit to leave".into(),
+            host: context.into(),
+            subject: MarkSubject::Whole,
+            tone: ProgramTone::Info,
+        }
+    }
+
+    #[test]
+    fn a_kubernetes_context_is_marked_whole() {
+        // kubeadm's context carries an `@` that is no user's: the ssh host
+        // `kubernetes`'s entry does not color it, its own entry does.
+        let mut log = running_log();
+        log.raw = log.running_command();
+        let context = "kubernetes-admin@kubernetes";
+        log.set_host_rules(&[marked("kubernetes", HostMark::Production)]);
+        assert!(log.set_program(Some(&kubernetes_bar(context))));
+        assert_eq!(log.context.program_mark, HostMark::None);
+        assert!(log.set_host_rules(&[
+            marked(context, HostMark::Staging),
+            marked("kubernetes", HostMark::Production),
+        ]));
+        assert_eq!(log.context.program_mark, HostMark::Staging);
+        // The same name as a server's host is matched after its `@`.
+        log.set_host_rules(&[marked("kubernetes", HostMark::Production)]);
+        assert_eq!(log.context.program_mark, HostMark::None);
+        assert!(log.set_program(Some(&ProgramBar {
+            subject: MarkSubject::Host,
+            ..kubernetes_bar(context)
+        })));
+        assert_eq!(log.context.program_mark, HostMark::Production);
     }
 
     #[test]

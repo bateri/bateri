@@ -264,14 +264,16 @@ integration = "auto"
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
 # production machine is never mistaken for another. A database client (psql,
-# mysql, redis-cli, mongosh) is colored by its server's host the same way.
+# mysql, redis-cli, mongosh) is colored by its server's host the same way, and
+# kubectl by its Kubernetes context.
 # Each entry names a host pattern and a mark: "production" (red), "staging"
 # (yellow), "development" (green), "none" (no mark), or a color like
 # "#c678dd". In a pattern * stands for any run of characters and ? for one,
-# ignoring case; a pattern without @ matches the host after any user@. The
-# first entry that matches wins, so put exact names before wide patterns;
-# "none" stops the search. Shell > Mark "host" as writes the entry for the
-# host of the ssh tab or the database client you are in.
+# ignoring case; a pattern without @ matches the host after any user@ (a
+# context is always matched whole). The first entry that matches wins, so put
+# exact names before wide patterns; "none" stops the search. Shell > Mark
+# "host" as writes the entry for the host of the ssh tab, the database client
+# or the Kubernetes context you are in.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },
@@ -1198,7 +1200,7 @@ integration = true
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `hosts` | array of `{ host, mark }` | `[]` | marks for hosts: the dock's colors while ssh or mosh is on that host, or a database client is connected to it |
+| `hosts` | array of `{ host, mark }` | `[]` | marks for hosts: the dock's colors while ssh or mosh is on that host, a database client is connected to it, or kubectl works in that Kubernetes context |
 | `preview_max_size` | size | `"100MB"` | if a remote file's preview (⌘-click) is larger than this, asks before downloading |
 | `preview_read_only` | `true` \| `false` | `true` | the preview copy opens read-only (`0444`) — a hint, an app can unlock it |
 | `preview_dir` | folder | `"~/Library/Caches/bateri/Previews"` | the folder of preview copies |
@@ -1230,10 +1232,28 @@ with**: connecting elsewhere from inside it (psql's `\c`, mysql's
 `connect`, redis-cli's `CONNECT`) is not followed, so the color stays the
 first server's until you quit.
 
-Since one list serves both, **a wide pattern written for ssh colors every
-database client too**: `{ host = "*", mark = "development" }` makes each
-`psql` guide green as well. Put the exact names you mean before it, or mark a
-host `"none"` to leave it out.
+They apply to **Kubernetes contexts** as well. While `kubectl exec -it`,
+`kubectl run -it` or `kubectl debug -it` holds a shell in a pod, the guide
+names the context, the namespace if you gave one, and the pod
+(`k8s prod-eu · payments  pod/api-7f9c`); the first entry matching the
+**context's name** colors it, so a production cluster is as red as a
+production machine. The context is the one `--context` names, or else the
+`current-context` of your kubeconfig (`--kubeconfig`, the files in
+`KUBECONFIG` in order, or `.kube/config` in kubectl's `HOME`; only that one
+line is read, and a kubeconfig whose `current-context` is written in another
+form, such as JSON, leaves the context unnamed rather than guessed). A
+context's name is matched **whole**: kubeadm's `kubernetes-admin@kubernetes`
+is one name, not a user at a host, so the pattern `kubernetes` does not match
+it — write the whole name, or a pattern such as `*@kubernetes`. When
+`--cluster` or `--server` sends kubectl to another cluster than the context's,
+the guide names no context and stays unmarked. A `docker`, `podman` or
+`docker compose` shell in a container gets a guide too
+(`container redis:alpine`), but it is not marked.
+
+Since one list serves all three, **a wide pattern written for ssh colors
+every database client and every context too**: `{ host = "*", mark =
+"development" }` makes each `psql` and `kubectl` guide green as well. Put the
+exact names you mean before it, or mark a host `"none"` to leave it out.
 
 - **`mark`**: `"production"` (the theme's `error`, red), `"staging"`
   (`warning`, yellow), `"development"` (`success`, green), `"none"` (no mark —
@@ -1247,12 +1267,14 @@ host `"none"` to leave it out.
 - If the pattern has no `@`, it is compared with the part of the host **after
   the last `@`**: both `ssh deploy@prod` and `ssh prod` match the pattern
   `prod`. A pattern with an `@`, such as `root@*`, checks the user name too.
+  A Kubernetes context is the exception: every pattern sees its whole name.
 - The host is the name **you type** to `ssh` (`ssh prod` → `prod`, `ssh
   deploy@10.0.0.5` → `deploy@10.0.0.5`); the `HostName` of `~/.ssh/config` is
   not resolved. If you connect with an alias, write the pattern for the alias.
   A database client's host is the server's name alone (`psql -h db.prod -U
   app` → `db.prod`), so a pattern with `@` such as `root@*` never matches
-  one. A libpq service file and MySQL's option files (`~/.my.cnf`) are not
+  one; a Kubernetes context is matched whole, its `@` included (above). A
+  libpq service file and MySQL's option files (`~/.my.cnf`) are not
   read, so a server named only there is not known and the guide stays
   unmarked; for the same reason `MYSQL_HOST` is used only with
   `mysql --no-defaults`, since an option file would override it.
@@ -1262,22 +1284,23 @@ host `"none"` to leave it out.
 - Instead of an inline array, a `[[remote.hosts]]` array of sections can be
   written too.
 - **From the menu**: while in an ssh tab, or while a database client shows
-  its server in the guide, **Shell ▸ Mark “host” as ▸** Production / Staging
-  / Development / None; the check mark is on the host's current mark (even if
-  it comes from a pattern), and with neither the item is grayed out. The choice is written to the file: if there is an entry for
-  exactly that host, its mark changes in place; otherwise it is added at the
-  **beginning** of the array (if a glob comes before it, the entry is moved to
-  the beginning). **None** deletes that host's entry; if a pattern still
-  catches it, it writes `mark = "none"` at the beginning. The pattern is the
-  host without its `user@`. Comments and the array's formatting are not
-  touched; if the file cannot be parsed or the list is broken, nothing is
-  written.
+  its server or kubectl its context in the guide, **Shell ▸ Mark “host” as
+  ▸** Production / Staging / Development / None; the check mark is on the
+  host's current mark (even if it comes from a pattern), and with none of them
+  the item is grayed out. The choice is written to the file: if there is an
+  entry for exactly that host, its mark changes in place; otherwise it is
+  added at the **beginning** of the array (if a glob comes before it, the
+  entry is moved to the beginning). **None** deletes that host's entry; if a
+  pattern still catches it, it writes `mark = "none"` at the beginning. The
+  pattern is the host without its `user@`, or a Kubernetes context's whole
+  name. Comments and the array's formatting are not touched; if the file
+  cannot be parsed or the list is broken, nothing is written.
 - A marked remote host's tab carries a small dot in the mark's color next
   to its title while the tab bar is visible; an unmarked remote tab has no
-  dot. A database client's mark shows in its guide and the dock's top line
-  only.
-- It takes effect the moment you save, even while ssh or a database client
-  is running.
+  dot. A database client's or a context's mark shows in its guide and the
+  dock's top line only.
+- It takes effect the moment you save, even while ssh, a database client or
+  kubectl is running.
 - **`integration`** (`true` \| `false`, optional): remote shell integration on
   that host (below). An entry may carry only `integration`
   (`{ host = "router*", integration = false }`); it then has no mark and takes

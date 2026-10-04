@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{
-    AdoptMode, CursorMotion, HostMark, InitialInput, KeepRunning, ReduceMotion, RestoreWindows,
-    SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll, TabId,
-    Teardown, Theme,
+    AdoptMode, CursorMotion, HostMark, InitialInput, KeepRunning, MarkSubject, ReduceMotion,
+    RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration,
+    SmoothScroll, TabId, Teardown, Theme,
 };
 use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Stats};
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -1732,8 +1732,12 @@ define_class!(
             else {
                 return;
             };
-            if let Some((host, _)) = self.key_mark_target() {
-                self.save_edit(&SettingsEdit::RemoteHostMark { host, mark });
+            if let Some((host, _, subject)) = self.key_mark_target() {
+                self.save_edit(&SettingsEdit::RemoteHostMark {
+                    host,
+                    mark,
+                    subject,
+                });
             }
         }
 
@@ -2587,7 +2591,7 @@ impl AppDelegate {
     /// its database client is connected to — and its resolved mark; `None`
     /// when there is neither or no terminal window is key. The input of
     /// Shell ▸ Mark … as ▸ (`TerminalWindow::mark_target`).
-    pub(crate) fn key_mark_target(&self) -> Option<(String, HostMark)> {
+    pub(crate) fn key_mark_target(&self) -> Option<(String, HostMark, MarkSubject)> {
         self.key_window()?.mark_target()
     }
 

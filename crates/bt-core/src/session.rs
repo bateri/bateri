@@ -97,7 +97,7 @@ use crate::search::{
     self, SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns,
     SearchSlot, SearchStatus,
 };
-use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule};
+use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule, MarkSubject};
 use crate::shell::{
     BlockKey, COUNTER_FLOOR, CaretHome, Carried, Counter, DockContext, DockPrediction,
     DockSelection, DockState, DockStatus, HistoryCut, Precision, RemoteStats, RemoteTarget,
@@ -8361,19 +8361,20 @@ impl Session {
             .map(|host| (host.to_owned(), log.context.remote_mark))
     }
 
-    /// The running program's server host (a database client's, as its
-    /// guide bar names it: [`crate::ProgramBar::host`]) and its resolved
-    /// mark; `None` without a bar or a host. Shell ▸ Mark … as ▸'s second
+    /// The running program's server host (a database client's, a
+    /// Kubernetes context, as its guide bar names it:
+    /// [`crate::ProgramBar::host`]), its resolved mark and how the patterns
+    /// meet it; `None` without a bar or a host. Shell ▸ Mark … as ▸'s second
     /// source after [`Self::remote_mark`] — a separate call, because
     /// `remote_mark` answers "is this pane remote" too. On the main thread,
     /// on the edge; a leaf lock, `Term` is not touched.
-    pub fn program_mark(&self) -> Option<(String, HostMark)> {
+    pub fn program_mark(&self) -> Option<(String, HostMark, MarkSubject)> {
         let log = lock(&self.shell);
         log.context
             .program
             .as_ref()
             .filter(|bar| !bar.host.is_empty())
-            .map(|bar| (bar.host.clone(), log.context.program_mark))
+            .map(|bar| (bar.host.clone(), log.context.program_mark, bar.subject))
     }
 
     /// The remote target's line escaped for the shell (`ssh -p 2222 prod`);
@@ -16166,6 +16167,7 @@ mod tests {
             path: "~/p/.venv/bin/python3".into(),
             hint: "⌃D exit".into(),
             host: String::new(),
+            subject: crate::MarkSubject::Host,
             tone: crate::ProgramTone::Info,
         };
         wait_mirror(&session, DockStatus::Live);
@@ -16228,6 +16230,7 @@ mod tests {
             path: "app@db.prod/main".into(),
             hint: "\\q to leave".into(),
             host: "db.prod".into(),
+            subject: crate::MarkSubject::Host,
             tone: crate::ProgramTone::Info,
         };
         let rules = [HostRule {
@@ -16243,7 +16246,11 @@ mod tests {
         assert!(session.set_program(command, Some(&database)));
         assert_eq!(
             session.program_mark(),
-            Some(("db.prod".to_owned(), HostMark::Production))
+            Some((
+                "db.prod".to_owned(),
+                HostMark::Production,
+                MarkSubject::Host
+            ))
         );
         assert_eq!(
             session.remote_mark(),
@@ -16259,7 +16266,7 @@ mod tests {
         );
         assert_eq!(
             session.program_mark(),
-            Some(("db.prod".to_owned(), HostMark::None))
+            Some(("db.prod".to_owned(), HostMark::None, MarkSubject::Host))
         );
         assert_eq!(draw_dock(&session).0.edge, Theme::BATERI.info_linear());
         assert!(session.set_program(command, Some(&bar)));

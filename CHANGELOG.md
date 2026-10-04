@@ -45,6 +45,18 @@ of every installed copy. A version without a section is not released.
   connection URI or string). A wide pattern you wrote for ssh, like
   `{ host = "*", mark = "development" }`, now colors database clients as
   well.
+- **Containers and Kubernetes pods say where you are.** A shell opened with
+  `docker run -it`, `docker exec -it`, `docker compose exec` or `run` (and
+  their `podman` forms) gets the guide line with the image, container or
+  service it runs in — `container redis:alpine`. `kubectl exec -it`,
+  `kubectl run -it` and `kubectl debug -it` name the cluster's context, the
+  namespace you gave and the pod — `k8s prod-eu · payments  pod/api-7f9c` —
+  and your `[remote] hosts` marks color the guide by the context, so a
+  production cluster is red too; **Shell ▸ Mark “host” as** marks the
+  context from there. The context is the one `--context` names or your
+  kubeconfig's current one (only that line of the file is read), and a
+  context's name is matched whole: write `kubernetes-admin@kubernetes`, not
+  `kubernetes`.
 
 ## [0.5.0] - 2026-10-04
 

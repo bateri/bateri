@@ -36,7 +36,8 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use bt_core::{
-    ConfirmClose, HostMark, InitialInput, Settings, ShutdownHandle, TabId, Teardown, Theme,
+    ConfirmClose, HostMark, InitialInput, MarkSubject, Settings, ShutdownHandle, TabId, Teardown,
+    Theme,
 };
 use bt_gpu::GpuError;
 use dispatch2::DispatchQueue;
@@ -1974,14 +1975,17 @@ impl TerminalWindow {
     }
 
     /// The host Shell ▸ Mark … as ▸ marks in the focused pane: the remote
-    /// host, else the server a database client's guide bar names
-    /// (`Session::program_mark`); with its resolved mark. Only the marks
-    /// read this — "Forget Password" and "Shell Integration on" are ssh's
-    /// and stay on [`Self::remote_mark`].
-    pub(crate) fn mark_target(&self) -> Option<(String, HostMark)> {
+    /// host, else the server or Kubernetes context a guide bar names
+    /// (`Session::program_mark`); with its resolved mark and how the
+    /// patterns meet it. Only the marks read this — "Forget Password" and
+    /// "Shell Integration on" are ssh's and stay on [`Self::remote_mark`].
+    pub(crate) fn mark_target(&self) -> Option<(String, HostMark, MarkSubject)> {
         let pane = self.focused_pane();
         let session = pane.session()?;
-        session.remote_mark().or_else(|| session.program_mark())
+        session
+            .remote_mark()
+            .map(|(host, mark)| (host, mark, MarkSubject::Host))
+            .or_else(|| session.program_mark())
     }
 
     /// The tab's dot: on a marked remote host a small filled
