@@ -5,7 +5,9 @@
 //! between** `input`s and close the cluster on every other intervening call,
 //! so it must see all of the parser's `Handler` calls. With clustering off
 //! (`SessionOptions::cluster`) every call goes to `Term` as is — the
-//! behavior is alacritty's, byte for byte.
+//! behavior is alacritty's, byte for byte. The one departure is the view:
+//! dropping the wrapper keeps a scrolled-back view inside the history (the
+//! `Drop` impl).
 //!
 //! **Clustering happens in `input` and only there.** If the incoming code
 //! point does not extend the open cluster it goes to `Term::input`; if it
@@ -33,7 +35,7 @@
 //! in `make clippy`; the same place catches a new method arriving in vte.
 
 use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
@@ -143,6 +145,24 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         };
         cell.c = head;
         chars.skip(kept).for_each(|c| cell.push_zerowidth(c));
+    }
+}
+
+/// The view goes back inside the history once the parser is done with
+/// `Term`. alacritty 0.26.0's `Grid::scroll_up` moves a scrolled-back view up
+/// by every line a scrolling region scrolls, also when the region does not
+/// start at the top and no line enters the history (a line feed at the
+/// bottom of a region below a fixed row — apt's progress bar —, `CSI M`): the
+/// view ends past the history and the next frame indexes outside the grid.
+/// The clamp moves only the view, which the snapshot does not read, so the
+/// journal needs no record of it; the view lands on the history's top, where
+/// alacritty's arithmetic was heading anyway.
+impl<U: EventListener> Drop for ClusterHandler<'_, U> {
+    fn drop(&mut self) {
+        let grid = self.term.grid();
+        if grid.display_offset() > grid.history_size() {
+            self.term.scroll_display(Scroll::Delta(0));
+        }
     }
 }
 
@@ -488,6 +508,34 @@ mod tests {
                     on.grid().cursor.point,
                     native.grid().cursor.point,
                     "cols={cols} lead={lead}"
+                );
+            }
+        }
+    }
+
+    /// A scrolled-back view stays inside the history when a scrolling region
+    /// that does not start at the top scrolls (a line feed at its bottom, a
+    /// `CSI M` inside it): no line goes into the history there, yet
+    /// alacritty 0.26.0 moves the view up by every scrolled line, and the
+    /// next frame would index past the grid's top.
+    #[test]
+    fn a_region_scroll_keeps_a_scrolled_back_view_inside_the_history() {
+        for cluster in [false, true] {
+            for scroll in [
+                "\x1b[2;5r\x1b[5H\n\n\n\n\n\n\n\x1b[r",
+                "\x1b[2;5r\x1b[3H\x1b[3M\x1b[r",
+            ] {
+                let mut t = term(10, 5);
+                feed(&mut t, cluster, &"x\r\n".repeat(8));
+                assert_eq!(t.grid().history_size(), 4);
+                t.scroll_display(Scroll::Delta(3));
+                feed(&mut t, cluster, scroll);
+                let grid = t.grid();
+                assert!(
+                    grid.display_offset() <= grid.history_size(),
+                    "cluster={cluster} {scroll:?}: the view {} is past the history {}",
+                    grid.display_offset(),
+                    grid.history_size(),
                 );
             }
         }

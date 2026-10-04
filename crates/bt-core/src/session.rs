@@ -23368,6 +23368,63 @@ e\\314\\201.'; sleep 5";
         }
     }
 
+    #[test]
+    fn a_region_scroll_while_scrolled_back_still_draws() {
+        // A program scrolling a region below a fixed top row (apt's progress
+        // bar) while the user looks at the history: the frame after it must
+        // still find the window's rows. No journal — the plain session.
+        use std::io::Write as _;
+        let dir = TempDir::new("region-scroll");
+        let path = dir.0.join("in");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+        let mut options = test_options(
+            (
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    "stty -opost; exec cat \"$1\"".into(),
+                    "sh".into(),
+                    path.display().to_string(),
+                ],
+            ),
+            10,
+        );
+        options.rows = 5;
+        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
+        let mut fifo = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("the fifo opens");
+        fifo.write_all("x\r\n".repeat(8).as_bytes()).unwrap();
+        wait_until("the lines did not arrive", Duration::from_secs(10), || {
+            session.term.lock().grid().history_size() == 4
+        });
+        session.term.lock().scroll_display(Scroll::Delta(3));
+        fifo.write_all(b"\x1b[2;5r\x1b[5H\n\n\n\n\n\n\n\x1b[rdone")
+            .unwrap();
+        wait_until("the region did not scroll", Duration::from_secs(10), || {
+            let term = session.term.lock();
+            let row = &term.grid()[Line(0)];
+            (0..4).map(|col| row[Column(col)].c).collect::<String>() == "done"
+        });
+        {
+            let term = session.term.lock();
+            let grid = term.grid();
+            assert!(
+                grid.display_offset() <= grid.history_size(),
+                "the view {} is past the history {}",
+                grid.display_offset(),
+                grid.history_size(),
+            );
+        }
+        draw(&session);
+        session.shutdown();
+    }
+
     /// xorshift64: the guard's sequences, the same for a seed on every run.
     struct Rng(u64);
 

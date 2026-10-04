@@ -55,6 +55,9 @@ of every installed copy. A version without a section is not released.
   moved right by the tab's width), a line that wrapped onto a line erased
   since keeps its own row (the two came back as one), and a tab stop set in
   the last column is still there when the window grows wider.
+- bateri no longer crashes when a program redraws a progress bar under a
+  fixed top line (apt does) while you are scrolled up in the history; the
+  view now stops at the top of the history.
 
 ## [0.4.0] - 2026-10-03
 
