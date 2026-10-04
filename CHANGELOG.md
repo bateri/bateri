@@ -12,16 +12,10 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
-### Changed
+## [0.6.0] - 2026-10-05
 
-- **The input dock steps aside for programs that read the keyboard
-  themselves.** When a command such as `codex`, Claude Code in its inline
-  mode, `python3` or `node` takes the keyboard, the dock at the bottom goes
-  away for as long as that program runs — the program sits at the bottom of
-  the window and the recent history fills the top — and comes back when you
-  return to the prompt, as it does after vim. The terminal's size does not
-  change, so the program is never asked to redraw. Commands that only print
-  (a build, `ls -R`, `npm run dev`) keep the dock as before.
+### Added
+
 - **A REPL gets a one-line guide in the dock's place.** In the Python, Node,
   Bun, Deno and Ruby (`irb`, `pry`) REPLs — `ipython` and `bpython` too — the
   dock shrinks to a single line, like the ssh status bar, that says which
@@ -64,6 +58,17 @@ of every installed copy. A version without a section is not released.
   one a tool opened names the tool (`nested poetry shell`). While `sudo`
   asks for your password, and for the whole of a `sudo` command that is not
   a shell (`sudo make install`), the dock stays as it was.
+
+### Changed
+
+- **The input dock steps aside for programs that read the keyboard
+  themselves.** When a command such as `codex`, Claude Code in its inline
+  mode, `python3` or `node` takes the keyboard, the dock at the bottom goes
+  away for as long as that program runs — the program sits at the bottom of
+  the window and the recent history fills the top — and comes back when you
+  return to the prompt, as it does after vim. The terminal's size does not
+  change, so the program is never asked to redraw. Commands that only print
+  (a build, `ls -R`, `npm run dev`) keep the dock as before.
 
 ## [0.5.0] - 2026-10-04
 
