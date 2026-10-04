@@ -1351,6 +1351,13 @@ struct AdapterInner {
     /// and its exit carries no status, so the loop sends no `ChildExit` —
     /// the `Exit` that follows every child exit sends the news then.
     child_exited: AtomicBool,
+    /// Whether the application's questions go unanswered ([`Adapter::reply`])
+    /// and its clipboard writes are dropped: set while an adopted pane's
+    /// carried prefix is parsed under [`AdoptMode::Bound`] — that output was
+    /// written while no bateri read, maybe hours ago: an answer now would
+    /// land in the shell as typed input, a copy would replace what the user
+    /// copied since. `TappedPty` clears it at the master's first read.
+    muted: AtomicBool,
 }
 
 impl Adapter {
@@ -1372,6 +1379,7 @@ impl Adapter {
             search_active: AtomicBool::new(false),
             search_pending: AtomicBool::new(false),
             child_exited: AtomicBool::new(false),
+            muted: AtomicBool::new(false),
         }))
     }
 
@@ -1394,8 +1402,12 @@ impl Adapter {
     }
 
     /// Answers what the application asked from the PTY. Writing to the channel
-    /// is lockless; it is fine to call while the `Term` lock is held.
+    /// is lockless; it is fine to call while the `Term` lock is held. Nothing
+    /// while muted ([`AdapterInner::muted`]).
     fn reply(&self, text: String) {
+        if self.0.muted.load(Ordering::Acquire) {
+            return;
+        }
         self.input(text.into_bytes());
     }
 }
@@ -1513,8 +1525,11 @@ impl EventListener for Adapter {
             // the write finishes, the threshold is unmeasured. A ceiling would
             // need a chosen number; a program flooding output can keep the
             // window busy anyway.
+            // A copy a program made while no bateri read (a bound holder's
+            // prefix, [`AdapterInner::muted`]) is hours old: it must not
+            // replace what the user copied since.
             Event::ClipboardStore(_, text) => {
-                if !text.is_empty() {
+                if !text.is_empty() && !self.0.muted.load(Ordering::Acquire) {
                     self.0.wake.copy_to_clipboard(text);
                 }
             }
@@ -1630,6 +1645,11 @@ struct TappedPty {
     /// scanner and tail included; `prefix_at` is how far it went.
     prefix: Vec<u8>,
     prefix_at: usize,
+    /// The prefix's replies are dropped ([`AdapterInner::muted`]) until the
+    /// first read from the master — the reader parses every read of the
+    /// prefix before the next one (`EventLoop::read_first`), so the bytes of
+    /// that read are the first live ones.
+    muting: bool,
 }
 
 impl TappedPty {
@@ -1651,6 +1671,10 @@ impl TappedPty {
                 self.prefix_at = 0;
             }
             return Ok(n);
+        }
+        if self.muting {
+            self.muting = false;
+            self.adapter.0.muted.store(false, Ordering::Release);
         }
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.reader().read(buf),
@@ -1985,6 +2009,30 @@ pub struct Adoption {
     pub prefix: Vec<u8>,
     pub input: Vec<u8>,
     pub ops: Arc<dyn PtyOps>,
+    pub mode: AdoptMode,
+}
+
+/// Which holder an adopted pane comes from — what its carried parts can be
+/// trusted for ([`Session::adopt`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdoptMode {
+    /// An update's holder: the frozen side handed over a moment ago, so the
+    /// prefix's questions are answered (the program waits for them) and a
+    /// state blob that does not decode refuses the adoption.
+    Update,
+    /// A bound holder, after a crash or a quit: the prefix may be hours of
+    /// output nobody read, so its questions go **unanswered** — a reply now
+    /// would be typed input to whatever runs — and its clipboard writes are
+    /// dropped (an old copy must not replace a newer one); an empty or undecodable blob
+    /// is a fresh state rather than a refusal (refusing after the holder
+    /// was acknowledged would end the program); and the carried mirror is
+    /// marked stale, because the blob may be older than the screen — the
+    /// freshness gate falls back on the content, the safe direction.
+    ///
+    /// **Known limit:** a prefix that ends inside a synchronized update
+    /// (DEC 2026) leaves its buffered bytes to the master's first bytes or to
+    /// the update's timeout, and a question among them is answered.
+    Bound,
 }
 
 /// The user input held while the first input is going: `Some` →
@@ -3927,6 +3975,10 @@ pub struct Session {
     /// Whether the PTY was adopted ([`Session::adopt`]): its shutdown is a
     /// hangup without `wait` ([`Teardown::HungUp`]).
     adopted: bool,
+    /// An adopted PTY's syscalls ([`Adoption::ops`]): the nudge sizes the PTY
+    /// through them on the master's copy, not through the reader
+    /// ([`Session::nudge_size`]). `None` for a spawned PTY.
+    ops: Option<Arc<dyn PtyOps>>,
 }
 
 /// The PTY side of [`Session::assemble`]'s input: what [`Session::spawn`]
@@ -3942,6 +3994,10 @@ struct Birth {
     replay: Option<Vec<u8>>,
     /// Served by the first reads ([`TappedPty::prefix`]).
     prefix: Vec<u8>,
+    /// The prefix's replies are dropped ([`AdoptMode::Bound`]).
+    mute_prefix: bool,
+    /// [`Session::ops`].
+    ops: Option<Arc<dyn PtyOps>>,
 }
 
 impl Session {
@@ -4031,6 +4087,8 @@ impl Session {
                 drain_on_exit: pty_options.drain_on_exit,
                 replay,
                 prefix: Vec::new(),
+                mute_prefix: false,
+                ops: None,
             },
         )?;
         *lock(&session.reader) = Some(event_loop.spawn());
@@ -4055,17 +4113,20 @@ impl Session {
     /// (the [`SessionOptions::replay`] path), the state blob is restored on
     /// top of it, the unsent input is queued, and the reader's first read
     /// serves the prefix before the master — through the scanner and the
-    /// loop's own parser, since it may end inside a sequence.
+    /// loop's own parser, since it may end inside a sequence. What the mode
+    /// changes is [`AdoptMode`]'s doc.
     ///
-    /// `Err(InvalidData)` if the blob is corrupt or of an unknown version,
-    /// before anything is touched: the caller falls back (the restore path) and
-    /// dropping `adoption` closes this side's copy of the master.
+    /// Under [`AdoptMode::Update`], `Err(InvalidData)` if the blob is corrupt
+    /// or of an unknown version, before anything is touched: the caller falls
+    /// back (the restore path) and dropping `adoption` closes this side's copy
+    /// of the master.
     pub fn adopt(
         mut options: SessionOptions,
         adoption: Adoption,
         wake: Arc<dyn Wake>,
     ) -> io::Result<Self> {
-        if Carried::decode(&adoption.blob).is_none() {
+        let carried = Carried::decode(&adoption.blob);
+        if carried.is_none() && adoption.mode == AdoptMode::Update {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "the handover's state blob does not decode",
@@ -4076,14 +4137,16 @@ impl Session {
             exit,
             pid,
             vt,
-            blob,
+            blob: _,
             prefix,
             input,
             ops,
+            mode,
         } = adoption;
         let master = File::from(master);
         let copy = master.try_clone().ok();
         let prefix_len = prefix.len();
+        let nudge_ops = Arc::clone(&ops);
         options.initial_input = None;
         let (session, mut event_loop, _) = Self::assemble(
             options,
@@ -4099,11 +4162,17 @@ impl Session {
                 master: copy,
                 drain_on_exit: false,
                 replay: Some(vt),
+                mute_prefix: mode == AdoptMode::Bound && !prefix.is_empty(),
                 prefix,
+                ops: Some(nudge_ops),
             },
         )?;
-        // Checked above, so it takes.
-        session.restore_state_blob(&blob);
+        if let Some(mut carried) = carried {
+            if mode == AdoptMode::Bound {
+                carried.mark_mirror_stale();
+            }
+            session.restore_carried(carried);
+        }
         if !input.is_empty() {
             session.send(Msg::Input(input.into()));
         }
@@ -4130,6 +4199,8 @@ impl Session {
             drain_on_exit,
             replay,
             prefix,
+            mute_prefix,
+            ops,
         } = birth;
         let adopted = matches!(pty, PtyKind::Adopted(_));
         let home = options.home;
@@ -4187,7 +4258,9 @@ impl Session {
             tail: snapshot::Tail::default(),
             prefix,
             prefix_at: 0,
+            muting: mute_prefix,
         };
+        adapter.0.muted.store(mute_prefix, Ordering::Release);
 
         let config = term_config(options.terminal);
         let term = Arc::new(FairMutex::new(Term::new(config, &grid, adapter.clone())));
@@ -4261,6 +4334,7 @@ impl Session {
             child_pid,
             master,
             adopted,
+            ops,
         };
         Ok((session, event_loop, at_birth))
     }
@@ -6813,6 +6887,12 @@ impl Session {
         let Some(carried) = Carried::decode(blob) else {
             return false;
         };
+        self.restore_carried(carried);
+        true
+    }
+
+    /// [`Session::restore_state_blob`]'s body, on a decoded blob.
+    fn restore_carried(&self, carried: Carried) {
         let cleared = carried.cleared;
         lock(&self.shell).restore(carried, self.key_gen.load(Ordering::Acquire));
         // The counter's generations are this process's; only the flag and
@@ -6828,7 +6908,6 @@ impl Session {
             .store(cleared.unwrap_or(Self::UNSTAMPED), Ordering::Relaxed);
         self.adapter.0.wake.title_changed();
         self.request_frame();
-        true
     }
 
     /// Edit ▸ Clear Scrollback (⌥⌘K): erases only the scrollback; the grid stays
@@ -9402,6 +9481,56 @@ impl Session {
         true
     }
 
+    /// Nudges the program to redraw — the PTY's size only, `Term` untouched:
+    /// `narrow` sets it one column narrower (one wider in a single column),
+    /// then `false` puts the grid's own size back. An adopted pane whose
+    /// screen did not come back is redrawn by its program this way.
+    ///
+    /// Two calls, not one: the caller leaves a moment between them. A
+    /// program behind ssh only redraws if ssh **read** the narrower size —
+    /// ssh forwards the size it reads, and the remote kernel signals only a
+    /// change — and two sizes written back to back are read as the last one.
+    /// For the same reason the size goes **straight to the PTY**, on the
+    /// master's copy through the adopted PTY's own syscall: through the
+    /// reader both halves would wait behind the carried prefix's parsing
+    /// and could still go out back to back. The program's redraw lands in
+    /// the PTY behind its earlier output, so the order on screen holds. A
+    /// session without the copy or the syscall (a spawned one) goes through
+    /// the reader.
+    ///
+    /// The size the adapter knows stays the grid's, so a resize in between
+    /// is not swallowed and the second call sends whatever the grid is then;
+    /// a resize the reader still has queued lands after it with the grid's
+    /// size too. The size is read and written under its lock — a concurrent
+    /// resize updates it under the same lock — and `term` is not taken.
+    pub fn nudge_size(&self, narrow: bool) {
+        let size = lock(&self.adapter.0.size);
+        let mut sent = *size;
+        if narrow {
+            sent.num_cols = if sent.num_cols > 1 {
+                sent.num_cols - 1
+            } else {
+                sent.num_cols + 1
+            };
+        }
+        let pty = PtySize {
+            cols: sent.num_cols,
+            rows: sent.num_lines,
+            cell_width: sent.cell_width,
+            cell_height: sent.cell_height,
+        };
+        let direct = self.ops.as_ref().is_some_and(|ops| {
+            use std::os::fd::AsFd;
+            lock(&self.master)
+                .as_ref()
+                .map(|master| ops.resize(master.as_fd(), pty))
+                .is_some()
+        });
+        if !direct {
+            self.send(Msg::Resize(sent));
+        }
+    }
+
     /// Stops the reader thread and ends the shell child.
     ///
     /// `Msg::Shutdown` → `join` → the returned `(EventLoop, State)` dropping.
@@ -10660,6 +10789,183 @@ mod tests {
         assert_eq!(new.title(), "x");
         // Nothing runs, so no clock: the second blob is the first, byte for byte.
         assert_eq!(String::from_utf8(new.state_blob()), String::from_utf8(blob));
+    }
+
+    /// The two syscalls an adopted PTY makes, recorded instead of made.
+    #[derive(Default)]
+    struct RecordingOps {
+        resizes: Mutex<Vec<(u16, u16)>>,
+    }
+
+    impl PtyOps for RecordingOps {
+        fn resize(&self, _master: BorrowedFd<'_>, size: PtySize) {
+            lock(&self.resizes).push((size.cols, size.rows));
+        }
+        fn hangup(&self, _pid: u32, _exit: BorrowedFd<'_>) {}
+    }
+
+    /// Freezes a `/bin/sh` running `script` (after `ready` shows) and adopts
+    /// it under `mode`, `prefix` behind the frozen tail and `blob` (or the
+    /// frozen one) as the state. The returned stream is the exit watch's
+    /// other end: kept open, the adopted child counts as alive.
+    fn adopt_frozen(
+        script: &str,
+        ready: &str,
+        mode: AdoptMode,
+        prefix: &[u8],
+        blob: Option<Vec<u8>>,
+        ops: Arc<dyn PtyOps>,
+    ) -> io::Result<(Session, Session, std::os::unix::net::UnixStream)> {
+        adopt_frozen_with(script, ready, mode, prefix, blob, ops, Arc::default())
+    }
+
+    /// [`adopt_frozen`] with the adopted session's wake.
+    fn adopt_frozen_with(
+        script: &str,
+        ready: &str,
+        mode: AdoptMode,
+        prefix: &[u8],
+        blob: Option<Vec<u8>>,
+        ops: Arc<dyn PtyOps>,
+        wake: Arc<TestWake>,
+    ) -> io::Result<(Session, Session, std::os::unix::net::UnixStream)> {
+        let old = spawn_with_cols(sh(script), 40, Arc::new(TestWake::default()));
+        wait_text(&old, ready);
+        let frozen = old.freeze().expect("the session did not freeze");
+        let (exit, alive) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let new = Session::adopt(
+            test_options(sh("unused"), frozen.cols),
+            Adoption {
+                master: frozen.master,
+                exit: OwnedFd::from(exit),
+                pid: frozen.pid,
+                vt: frozen.vt,
+                blob: blob.unwrap_or(frozen.blob),
+                prefix: [frozen.tail.as_slice(), prefix].concat(),
+                input: frozen.input,
+                ops,
+                mode,
+            },
+            wake,
+        )?;
+        Ok((old, new, alive))
+    }
+
+    /// A question in a bound holder's prefix was asked while no bateri read
+    /// — maybe hours ago — and goes unanswered, and its clipboard write is
+    /// dropped; an update's (seconds old) is answered and copied. The answer would reach the PTY's input, where the line
+    /// discipline echoes it (`echoctl`: `^[[?6c`).
+    #[test]
+    fn a_bound_prefix_asks_and_nobody_answers() {
+        for (mode, answered) in [(AdoptMode::Update, true), (AdoptMode::Bound, false)] {
+            let wake = Arc::new(TestWake::default());
+            let (_old, new, _alive) = adopt_frozen_with(
+                "stty echo echoctl; echo READY; sleep 8",
+                "READY",
+                mode,
+                b"\x1b]52;c;c3RhbGU=\x07\x1b[cPREFIXDONE",
+                None,
+                Arc::new(RecordingOps::default()),
+                Arc::clone(&wake),
+            )
+            .expect("adopted");
+            // The query and the marker are parsed together, so an answer is
+            // queued before the input below.
+            wait_text(&new, "PREFIXDONE");
+            new.write(b"MARK\n");
+            let text = wait_text(&new, "MARK");
+            assert_eq!(text.contains("[?6c"), answered, "{mode:?}: {text:?}");
+            // An old copy does not replace what the user copied since.
+            let copies = lock(&wake.state).copies.clone();
+            let expected: &[&str] = if answered { &["stale"] } else { &[] };
+            assert_eq!(copies, expected, "{mode:?}");
+            // The master's own questions are answered again.
+            assert!(!new.adapter.0.muted.load(Ordering::Acquire), "{mode:?}");
+        }
+    }
+
+    /// A bound holder's blob that does not decode (or none) is a fresh state,
+    /// not a refusal — the holder is acknowledged by then, and refusing would
+    /// end the program; an update's refuses.
+    #[test]
+    fn a_bound_adoption_takes_a_broken_blob_as_a_fresh_state() {
+        let ops = || Arc::new(RecordingOps::default()) as Arc<dyn PtyOps>;
+        let refused = adopt_frozen(
+            "echo READY; sleep 8",
+            "READY",
+            AdoptMode::Update,
+            b"",
+            Some(b"not a blob".to_vec()),
+            ops(),
+        );
+        assert_eq!(
+            refused.err().map(|error| error.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
+        for blob in [b"not a blob".to_vec(), Vec::new()] {
+            let (_old, new, _alive) = adopt_frozen(
+                "printf '\\033]133;A;bt_block=1\\007READY'; sleep 8",
+                "READY",
+                AdoptMode::Bound,
+                b"",
+                Some(blob),
+                ops(),
+            )
+            .expect("a bound adoption does not refuse");
+            assert_eq!(new.shell_state(), None, "a fresh state");
+        }
+    }
+
+    /// The carried mirror crosses stale under a bound holder (its blob may be
+    /// older than the screen) and as it was under an update's.
+    #[test]
+    fn a_bound_adoption_marks_the_mirror_stale() {
+        for (mode, fresh) in [(AdoptMode::Update, true), (AdoptMode::Bound, false)] {
+            let (_old, new, _alive) = adopt_frozen(
+                "printf '\\033]133;A;bt_block=1\\007READY'; sleep 8",
+                "READY",
+                mode,
+                b"",
+                None,
+                Arc::new(RecordingOps::default()),
+            )
+            .expect("adopted");
+            assert!(
+                new.shell_state().is_some(),
+                "{mode:?}: the blob was restored"
+            );
+            let answers = lock(&new.shell).dock.answers;
+            let generation = new.key_gen.load(Ordering::Acquire);
+            assert_eq!(answers == generation, fresh, "{mode:?}");
+        }
+    }
+
+    /// The nudge: the PTY one column narrower, then back, at once — `Term`
+    /// and the size the session knows untouched, so the grid needs no redraw
+    /// and a resize to the same size stays a no-op.
+    #[test]
+    fn a_nudge_moves_only_the_ptys_size() {
+        let ops = Arc::new(RecordingOps::default());
+        let (_old, new, _alive) = adopt_frozen(
+            "echo READY; sleep 8",
+            "READY",
+            AdoptMode::Bound,
+            b"",
+            None,
+            Arc::clone(&ops) as Arc<dyn PtyOps>,
+        )
+        .expect("adopted");
+        new.nudge_size(true);
+        // Straight to the PTY, not behind the reader's queue: the gap the
+        // caller leaves between the halves is the gap the program sees.
+        assert_eq!(*lock(&ops.resizes), [(39, 10)]);
+        new.nudge_size(false);
+        assert_eq!(*lock(&ops.resizes), [(39, 10), (40, 10)]);
+        assert_eq!(new.term.lock().columns(), 40);
+        assert!(
+            !new.resize(40, 10, (9, 18)),
+            "the session's size did not move"
+        );
     }
 
     /// The fake shell's grid, until `until` is visible (the first-input and offer tests).

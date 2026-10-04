@@ -1769,18 +1769,22 @@ impl TerminalPane {
         // does not decode) the pane falls back to a new shell here, with the
         // carried history and the note.
         let adopting = adopt.is_some();
+        let mut nudge = false;
         let (session, shell_parent) = match adopt {
             Some(adopted) => {
                 let taken_from = adopted.taken_from.clone();
+                let note = adopted.note;
+                nudge = adopted.nudge;
                 match adopt_session(options.clone(), adopted, grid, &wake) {
                     Ok((session, parent)) => {
                         self.ivars().taken_from.replace(taken_from);
                         (session, parent)
                     }
                     Err((error, history)) => {
-                        eprintln!("bateri: could not carry a pane over the update: {error}");
+                        eprintln!("bateri: could not carry a pane over: {error}");
+                        nudge = false;
                         let options = SessionOptions {
-                            replay: Some(crate::window::fallen_back(history)),
+                            replay: Some(crate::window::fallen_back(history, note)),
                             ..options
                         };
                         (Session::spawn(options, wake)?, shell_parent)
@@ -1793,6 +1797,9 @@ impl TerminalPane {
             None => (Session::spawn(options, wake)?, shell_parent),
         };
         let session = Arc::new(session);
+        if nudge {
+            nudge_program(&session);
+        }
         // The closing sequence reaches the session from here, not through the
         // link, and the keyboard holds its own copy; all three live on the main
         // thread, so where the last reference drops is clear (see `shutdown`).
@@ -3220,6 +3227,9 @@ fn adopt_session(
         mut state,
         prefix,
         taken_from: _,
+        mode,
+        nudge: _,
+        note: _,
     } = adopted;
     let history = Some(std::mem::take(&mut state.history)).filter(|bytes| !bytes.is_empty());
     let parent = state.parent;
@@ -3239,6 +3249,7 @@ fn adopt_session(
             prefix,
             input: state.input,
             ops: Arc::new(jobs::SystemPty),
+            mode,
         },
         Arc::clone(wake),
     )
@@ -3247,6 +3258,34 @@ fn adopt_session(
     // the session keeps the frozen size, the next geometry change resizes.
     let _ = session.resize(grid.cols, grid.rows, grid.cell.cell_px());
     Ok((session, parent))
+}
+
+/// How long a nudged program sees the narrower size before the real one
+/// comes back ([`nudge_program`]). A program behind ssh redraws only if ssh
+/// **read** the narrower size — it forwards the size it reads, and the remote
+/// kernel signals only a change — and ssh reads it on its next turn after
+/// the signal, a scheduling round; a quarter of a second covers a loaded
+/// machine and is too short to notice the narrower frame. A design constant.
+const NUDGE_GAP: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Nudges an adopted pane's program to redraw the screen that did not come
+/// back: the PTY one column narrower now, its own size [`NUDGE_GAP`] later
+/// (`Session::nudge_size`). The second half is skipped once the session's
+/// reader is gone (the pane closed meanwhile).
+fn nudge_program(session: &Arc<Session>) {
+    session.nudge_size(true);
+    let back = Arc::clone(session);
+    let restore = move || {
+        if back.reader_alive() {
+            back.nudge_size(false);
+        }
+    };
+    match DispatchTime::try_from(NUDGE_GAP) {
+        Ok(when) => {
+            let _ = DispatchQueue::main().after(when, restore);
+        }
+        Err(_) => restore(),
+    }
 }
 
 /// A new tab identity, from `NSUUID`.

@@ -27,7 +27,15 @@
 //! halfway leaves the previous layout readable. [`take`] reads the layout and **deletes** it
 //! before anything is replayed (a layout that crashes the launch must not come back on the next
 //! one); [`history`] reads and deletes one pane's history; [`clear`] removes everything.
-//! Histories no layout names, and leftover temporaries, are swept.
+//! Histories no layout names, and leftover temporaries, are swept. [`save_layout`] writes the
+//! layout alone, without histories, while bateri runs — the way back after a crash nobody held
+//! the programs through (no holder, or `keep_running = "update"`).
+//!
+//! **The attempt marker** ([`bump_attempt`], [`attempt_mode`]) counts, in a holder's instance
+//! directory, the launches that started taking that holder's programs and never settled: a
+//! restore that crashes the launch would otherwise crash every launch after it — the holder
+//! waits for an acknowledgement that never comes. The second attempt restores no screen, the
+//! third gives the programs up.
 //!
 //! Pure except the file bodies, which are thin; it sees no AppKit (the `split`/`zoom`
 //! precedent).
@@ -249,6 +257,105 @@ impl Shape {
             }
             _ => None,
         }
+    }
+}
+
+impl Shape {
+    /// The tree without the leaves `keep` says no to (`keep[index]`; an index past its end is
+    /// dropped), each kept index counted again over the kept ones: a split left with one side
+    /// becomes that side. `None` if no leaf is left.
+    fn retain(&self, keep: &[bool]) -> Option<Shape> {
+        match self {
+            Shape::Leaf(index) => keep
+                .get(*index)
+                .copied()
+                .unwrap_or(false)
+                .then(|| Shape::Leaf(keep[..*index].iter().filter(|kept| **kept).count())),
+            Shape::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => match (first.retain(keep), second.retain(keep)) {
+                (Some(first), Some(second)) => Some(Shape::Split {
+                    axis: *axis,
+                    ratio: *ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(side), None) | (None, Some(side)) => Some(side),
+                (None, None) => None,
+            },
+        }
+    }
+}
+
+impl Saved {
+    /// This layout without the panes `taken` names — they come back where an
+    /// earlier layout placed them — and without a tab or a window left
+    /// empty; every pane it keeps joins `taken`. Several holders' layouts can
+    /// name one program (a holder's, and the holder of the bateri that took
+    /// it and crashed): walked newest first, each comes once.
+    pub fn place_after(&self, taken: &mut Vec<TabId>) -> Saved {
+        let mut windows = Vec::new();
+        for window in &self.windows {
+            let mut tabs = Vec::new();
+            let mut selected = None;
+            for (index, tab) in window.tabs.iter().enumerate() {
+                let keep: Vec<bool> = tab
+                    .panes
+                    .iter()
+                    .map(|pane| !taken.contains(&pane.tab_id))
+                    .collect();
+                let Some(tab) = tab.retain(&keep) else {
+                    continue;
+                };
+                taken.extend(tab.panes.iter().map(|pane| pane.tab_id.clone()));
+                if index == window.selected {
+                    selected = Some(tabs.len());
+                }
+                tabs.push(tab);
+            }
+            if tabs.is_empty() {
+                continue;
+            }
+            windows.push(SavedWindow {
+                frame: window.frame,
+                tabs,
+                selected: selected.unwrap_or(0),
+                key: window.key,
+            });
+        }
+        Saved { windows }
+    }
+}
+
+impl SavedTab {
+    /// The tab without the panes `keep` says no to (`keep` runs over `panes`): the tree loses
+    /// their leaves ([`Shape`]'s split with one side left becomes that side), the indices count
+    /// again, the focus moves to the first pane left if its own went and the zoom goes with its
+    /// pane. `None` if no pane is left — a pane that cannot come back takes nothing else with it.
+    pub fn retain(&self, keep: &[bool]) -> Option<SavedTab> {
+        let shape = self.shape.retain(keep)?;
+        let kept = |index: usize| keep.get(index).copied().unwrap_or(false);
+        let moved = |index: usize| keep[..index].iter().filter(|kept| **kept).count();
+        let panes: Vec<SavedPane> = self
+            .panes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| kept(*index))
+            .map(|(_, pane)| pane.clone())
+            .collect();
+        Some(SavedTab {
+            shape,
+            focused: if kept(self.focused) {
+                moved(self.focused)
+            } else {
+                0
+            },
+            zoomed: self.zoomed.filter(|index| kept(*index)).map(moved),
+            panes,
+        })
     }
 }
 
@@ -633,6 +740,30 @@ pub fn history(lock: &Lock, tab_id: &TabId) -> Option<Vec<u8>> {
     bytes.ok()
 }
 
+/// Writes the layout alone, every pane's `history` flag low — while bateri runs, so that a
+/// crash nobody held the programs through still brings the windows back. No history is written,
+/// read or swept: the clean quit's [`save`] overwrites this with the whole save. A layout without
+/// windows removes the layout file only.
+pub fn save_layout(lock: &Lock, saved: &Saved) -> io::Result<()> {
+    let path = lock.dir.join(LAYOUT);
+    if saved.windows.is_empty() {
+        return match fs::remove_file(path) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        };
+    }
+    let mut layout = saved.clone();
+    for pane in layout
+        .windows
+        .iter_mut()
+        .flat_map(|window| &mut window.tabs)
+        .flat_map(|tab| &mut tab.panes)
+    {
+        pane.history = false;
+    }
+    write_atomic(&path, layout.render().as_bytes())
+}
+
 /// Removes the layout and every history (`restore_windows = "off"`, no windows at quit).
 pub fn clear(lock: &Lock) -> io::Result<()> {
     match fs::remove_file(lock.dir.join(LAYOUT)) {
@@ -641,6 +772,55 @@ pub fn clear(lock: &Lock) -> io::Result<()> {
     }
     sweep(lock, &HashSet::new());
     Ok(())
+}
+
+// ─── the attempt marker ──────────────────────────────────────────────────
+
+/// The attempt marker's name in an instance directory (the module doc).
+const ATTEMPT: &str = "restore-attempt";
+
+/// What a launch does with a holder's programs, from the attempts before it that never
+/// settled ([`bump_attempt`]'s answer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptMode {
+    /// The first attempt: everything comes back.
+    Normal,
+    /// The second: the programs are taken, but nothing that went through the parser before the
+    /// crash is replayed again — no screen, no state, no carried output, no history.
+    Safe,
+    /// The third: the programs are given up, nothing is restored, one empty window.
+    GiveUp,
+}
+
+/// The mode after `previous` unsettled attempts.
+pub fn attempt_mode(previous: u32) -> AttemptMode {
+    match previous {
+        0 => AttemptMode::Normal,
+        1 => AttemptMode::Safe,
+        _ => AttemptMode::GiveUp,
+    }
+}
+
+/// Counts one more attempt in `dir` (`0600`, through a temporary name) and returns the count
+/// before it. A missing or unreadable marker counts as none — the wrong way is one attempt too
+/// many, never a lost program. A write that fails is not an error the launch can act on: the
+/// count before it is still the answer.
+pub fn bump_attempt(dir: &Path) -> u32 {
+    let path = dir.join(ATTEMPT);
+    let previous = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let _ = write_atomic(
+        &path,
+        format!("{}\n", previous.saturating_add(1)).as_bytes(),
+    );
+    previous
+}
+
+/// Removes the marker in `dir`: the launch settled, or bateri quit cleanly.
+pub fn clear_attempt(dir: &Path) {
+    let _ = fs::remove_file(dir.join(ATTEMPT));
 }
 
 #[cfg(test)]
@@ -1007,5 +1187,146 @@ mod tests {
         .expect("empty save");
         assert_eq!(names(lock.dir()), vec!["lock".to_owned()]);
         assert_eq!(take(&lock, true), None);
+    }
+
+    #[test]
+    fn a_layout_written_while_running_leaves_the_histories_alone() {
+        let root = TempRoot::new("restore-running");
+        let lock = lock(&root.0.join("s")).expect("lock");
+        save(&lock, &rich(), &[(id(A), b"kept".to_vec())]).expect("save");
+        let mut later = rich();
+        later.windows.truncate(1);
+        save_layout(&lock, &later).expect("save layout");
+        // The history file is untouched; the layout claims none.
+        assert_eq!(
+            fs::read(history_path(lock.dir(), &id(A))).expect("history"),
+            b"kept"
+        );
+        assert_eq!(mode(&lock.dir().join(LAYOUT)), 0o600);
+        let taken = take(&lock, true).expect("the layout comes back");
+        assert_eq!(taken.windows.len(), 1);
+        assert!(
+            taken
+                .windows
+                .iter()
+                .flat_map(|window| &window.tabs)
+                .flat_map(|tab| &tab.panes)
+                .all(|pane| !pane.history)
+        );
+        // Without windows only the layout goes.
+        save_layout(&lock, &later).expect("save layout");
+        fs::write(history_path(lock.dir(), &id(B)), b"other").expect("history");
+        save_layout(
+            &lock,
+            &Saved {
+                windows: Vec::new(),
+            },
+        )
+        .expect("empty layout");
+        assert!(!lock.dir().join(LAYOUT).exists());
+        assert!(history_path(lock.dir(), &id(B)).exists());
+    }
+
+    #[test]
+    fn a_tab_loses_panes_and_keeps_its_shape() {
+        let tab = rich().windows[0].tabs[1].clone();
+        // Leaves: 2 | (0 / 1); focus 1, zoom 2.
+        assert_eq!(tab.retain(&[true, true, true]), Some(tab.clone()));
+        // Without pane 2 the outer split goes: what is left is the inner one, reindexed.
+        let without_two = tab.retain(&[true, true, false]).expect("two panes left");
+        assert_eq!(
+            without_two.shape,
+            Shape::Split {
+                axis: Axis::Vertical,
+                ratio: 0.71,
+                first: Box::new(Shape::Leaf(0)),
+                second: Box::new(Shape::Leaf(1)),
+            }
+        );
+        assert_eq!((without_two.focused, without_two.zoomed), (1, None));
+        assert_eq!(without_two.panes, tab.panes[..2]);
+        // Without pane 0: the inner split collapses to pane 1, which is index 0 now.
+        let without_zero = tab.retain(&[false, true, true]).expect("two panes left");
+        assert_eq!(
+            without_zero.shape,
+            Shape::Split {
+                axis: Axis::Horizontal,
+                ratio: 0.3333333333333333,
+                first: Box::new(Shape::Leaf(1)),
+                second: Box::new(Shape::Leaf(0)),
+            }
+        );
+        assert_eq!((without_zero.focused, without_zero.zoomed), (0, Some(1)));
+        // The focused pane goes: the focus moves to the first left.
+        let without_one = tab.retain(&[true, false, true]).expect("two panes left");
+        assert_eq!(without_one.focused, 0);
+        assert!(without_one.shape.covers(without_one.panes.len()));
+        assert_eq!(tab.retain(&[false, false, false]), None);
+        assert_eq!(tab.retain(&[]), None);
+    }
+
+    #[test]
+    fn the_attempt_marker_counts_until_cleared() {
+        let root = TempRoot::new("restore-attempt");
+        let dir = root.0.join("instance");
+        fs::create_dir_all(&dir).expect("dir");
+        assert_eq!(bump_attempt(&dir), 0);
+        assert_eq!(mode(&dir.join(ATTEMPT)), 0o600);
+        assert_eq!(bump_attempt(&dir), 1);
+        assert_eq!(bump_attempt(&dir), 2);
+        assert_eq!(bump_attempt(&dir), 3);
+        clear_attempt(&dir);
+        assert_eq!(bump_attempt(&dir), 0);
+        fs::write(dir.join(ATTEMPT), b"garbage").expect("garbage");
+        assert_eq!(bump_attempt(&dir), 0, "an unreadable marker counts as none");
+        assert_eq!(
+            [0, 1, 2, 7].map(attempt_mode),
+            [
+                AttemptMode::Normal,
+                AttemptMode::Safe,
+                AttemptMode::GiveUp,
+                AttemptMode::GiveUp
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pane_two_layouts_name_comes_once_where_the_first_places_it() {
+        let newest = Saved {
+            windows: vec![window(vec![single(A), single(B)]), window(vec![single(C)])],
+        };
+        let mut taken = Vec::new();
+        assert_eq!(newest.place_after(&mut taken), newest, "nothing taken yet");
+        assert_eq!(
+            taken,
+            [id(A), id(B), id(C)],
+            "every pane of the first layout"
+        );
+        // An older layout: B alone in a tab (taken), a tab of A beside a new
+        // pane, and a window of C only (taken).
+        let new = "22222222-3333-4444-5555-666666666666";
+        let mut older_split = single(A);
+        older_split.panes.push(pane(new));
+        older_split.shape = Shape::Split {
+            axis: Axis::Vertical,
+            ratio: 0.5,
+            first: Box::new(Shape::Leaf(0)),
+            second: Box::new(Shape::Leaf(1)),
+        };
+        let mut first = window(vec![single(B), older_split]);
+        first.selected = 1;
+        let older = Saved {
+            windows: vec![first, window(vec![single(C)])],
+        };
+        let placed = older.place_after(&mut taken);
+        assert_eq!(placed.windows.len(), 1, "the window of C alone went");
+        let window = &placed.windows[0];
+        assert_eq!(window.tabs.len(), 1, "the tab of B alone went");
+        assert_eq!(window.selected, 0, "the selected tab moved with the tabs");
+        assert_eq!(window.tabs[0].panes, vec![pane(new)]);
+        assert_eq!(window.tabs[0].shape, Shape::Leaf(0));
+        assert!(taken.contains(&id(new)));
+        // Nothing left to place.
+        assert_eq!(older.place_after(&mut taken).windows, Vec::new());
     }
 }

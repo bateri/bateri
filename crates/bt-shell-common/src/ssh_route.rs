@@ -1682,7 +1682,7 @@ fn owner(dir: &Path) -> Option<u32> {
 
 /// Whether process `pid` exists and is this user's (`kill(pid, 0)`). A pid
 /// reused by another user's process counts as dead: the directory is ours.
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };

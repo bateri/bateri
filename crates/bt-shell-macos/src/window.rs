@@ -545,24 +545,77 @@ pub(crate) struct Adopted {
     /// The socket of the holder it came from: the pane registers with this
     /// bateri's own holder unconfirmed until that one is acknowledged.
     pub(crate) taken_from: Option<std::path::PathBuf>,
+    /// Which kind of holder it came from (`bt_core::AdoptMode`).
+    pub(crate) mode: bt_core::AdoptMode,
+    /// Its screen did not come back whole: the program is nudged to redraw
+    /// it (`Session::nudge_size`).
+    pub(crate) nudge: bool,
+    /// The note if the session cannot be adopted after all and the pane
+    /// falls back to a new shell.
+    pub(crate) note: Note,
 }
 
-/// The note under a pane whose program did not cross the update: one dim
-/// line at the bottom of its replayed history — no pane comes back as a
-/// half screen without saying so.
-pub(crate) const FALLBACK_NOTE: &str =
-    "bateri: the program running here did not survive the update; this is a new shell";
+/// The dim line a pane says when it does not come back whole — no pane
+/// comes back as a half screen, or as a new shell, without saying so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Note {
+    /// The program did not cross an update.
+    Update,
+    /// The program was not carried through a crash (its holder did not have
+    /// it, or could not give it).
+    Crash,
+    /// A deliberate handover to a bound holder (a quit, or an update that
+    /// found one) did not carry the program — which of the two it was, the
+    /// holder cannot tell.
+    NotCarried,
+    /// The program ended while bateri was closed.
+    Ended,
+    /// The program runs on, its screen did not come back: it redraws it.
+    Screenless,
+    /// The program runs on, but the output of while bateri was closed lost
+    /// its oldest part.
+    Cut,
+}
 
-/// `history` (if any) with [`FALLBACK_NOTE`] under it, on a line of its own:
-/// the replay of a pane that fell back to session restore's path.
-pub(crate) fn fallen_back(history: Option<Vec<u8>>) -> Vec<u8> {
+impl Note {
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Note::Update => {
+                "bateri: the program running here did not survive the update; this is a new shell"
+            }
+            Note::Crash => {
+                "bateri: the program running here did not survive the crash; this is a new shell"
+            }
+            Note::NotCarried => {
+                "bateri: the program running here could not be carried over; this is a new shell"
+            }
+            Note::Ended => {
+                "bateri: the program running here ended while bateri was closed; this is a new shell"
+            }
+            Note::Screenless => {
+                "bateri: the screen could not be restored; the program kept running"
+            }
+            Note::Cut => "bateri: output from while bateri was closed was cut short",
+        }
+    }
+
+    /// The note as a line of its own: dim, and the pen reset after it.
+    pub(crate) fn line(self) -> Vec<u8> {
+        let mut line = b"\x1b[0m\x1b[2m".to_vec();
+        line.extend_from_slice(self.text().as_bytes());
+        line.extend_from_slice(b"\x1b[0m\r\n");
+        line
+    }
+}
+
+/// `history` (if any) with `note` under it, on a line of its own: the
+/// replay of a pane that fell back to a new shell.
+pub(crate) fn fallen_back(history: Option<Vec<u8>>, note: Note) -> Vec<u8> {
     let mut replay = history.unwrap_or_default();
     if !replay.is_empty() && !replay.ends_with(b"\n") {
         replay.extend_from_slice(b"\r\n");
     }
-    replay.extend_from_slice(b"\x1b[0m\x1b[2m");
-    replay.extend_from_slice(FALLBACK_NOTE.as_bytes());
-    replay.extend_from_slice(b"\x1b[0m\r\n");
+    replay.extend_from_slice(&note.line());
     replay
 }
 
@@ -2321,17 +2374,37 @@ mod tests {
     /// dim, and resets what the history left on.
     #[test]
     fn the_fallback_note_has_a_line_of_its_own() {
-        use super::{FALLBACK_NOTE, fallen_back};
-        let note = format!("\x1b[0m\x1b[2m{FALLBACK_NOTE}\x1b[0m\r\n");
-        assert_eq!(fallen_back(None), note.as_bytes());
-        assert_eq!(fallen_back(Some(Vec::new())), note.as_bytes());
+        use super::{Note, fallen_back};
+        for kind in [Note::Update, Note::Crash, Note::NotCarried, Note::Ended] {
+            let note = format!("\x1b[0m\x1b[2m{}\x1b[0m\r\n", kind.text());
+            assert_eq!(kind.line(), note.as_bytes());
+            assert_eq!(fallen_back(None, kind), note.as_bytes());
+            assert_eq!(fallen_back(Some(Vec::new()), kind), note.as_bytes());
+            assert_eq!(
+                fallen_back(Some(b"$ ls\r\n".to_vec()), kind),
+                [&b"$ ls\r\n"[..], note.as_bytes()].concat()
+            );
+            assert_eq!(
+                fallen_back(Some(b"\x1b[1m$ half".to_vec()), kind),
+                [&b"\x1b[1m$ half\r\n"[..], note.as_bytes()].concat()
+            );
+        }
+        // Every event says its own thing, and the update's is today's text.
         assert_eq!(
-            fallen_back(Some(b"$ ls\r\n".to_vec())),
-            [&b"$ ls\r\n"[..], note.as_bytes()].concat()
+            Note::Update.text(),
+            "bateri: the program running here did not survive the update; this is a new shell"
         );
-        assert_eq!(
-            fallen_back(Some(b"\x1b[1m$ half".to_vec())),
-            [&b"\x1b[1m$ half\r\n"[..], note.as_bytes()].concat()
-        );
+        let texts = [
+            Note::Update,
+            Note::Crash,
+            Note::NotCarried,
+            Note::Ended,
+            Note::Screenless,
+            Note::Cut,
+        ]
+        .map(Note::text);
+        for (index, text) in texts.iter().enumerate() {
+            assert!(!texts[..index].contains(text), "{text}");
+        }
     }
 }

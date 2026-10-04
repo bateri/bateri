@@ -1919,6 +1919,7 @@ mod tests {
                 prefix: [frozen.tail.as_slice(), held].concat(),
                 input: frozen.input,
                 ops: Arc::new(SystemPty),
+                mode: bt_core::AdoptMode::Update,
             },
             Arc::clone(&wake) as Arc<dyn bt_core::Wake>,
         )
@@ -2003,6 +2004,7 @@ mod tests {
                 prefix: frozen.tail,
                 input: frozen.input,
                 ops: Arc::new(SystemPty),
+                mode: bt_core::AdoptMode::Update,
             },
             Arc::new(SilentWake),
         )

@@ -568,8 +568,11 @@ The value is read at closing time, so it takes effect the moment you save.
   rest.
 - After ⌘Q, logging out and restarting, the shells are **new** — unless
   `keep_running` (below) kept their programs: running programs (vim, a build)
-  end on closing, and the history that comes back is text only. The saved
-  state is written only on a clean shutdown.
+  end on closing, and the history that comes back is text only. The history
+  is written only on a clean shutdown; the layout (windows, tabs, splits,
+  directories) is also kept up to date on disk while bateri runs, so after a
+  crash or a power cut with nothing keeping the programs the windows still
+  come back, with new shells.
 - **Updates are the exception**: on "Install and Relaunch" the shells and the
   running programs — vim, `npm run dev`, a session over ssh — **do not die**,
   they move to the new version with their screens; on this path the history
@@ -578,9 +581,10 @@ The value is read at closing time, so it takes effect the moment you save.
   is `keep_running`'s to say, and every value of it covers updates. While a
   file transfer or a password prompt is in progress, the relaunch waits for
   them to finish ("Update waits for N transfers" on the status line; ⌘.
-  cancels the transfer and lets the update proceed). A pane that cannot be
-  carried over comes back as above, with a new shell and a dim note under its
-  history.
+  cancels the transfer and lets the update proceed). A pane whose program
+  cannot be carried over comes back with a new shell and a dim note saying
+  why — under its history with `"all"`, alone with `"layout"`; with `"off"`
+  it does not come back.
 - **A pane in ssh** comes back with a local shell in its old local directory,
   and the connection's line (such as `ssh prod`) waits on the input line
   **ready but not run**: ⏎ connects. It does not connect by itself — after an
@@ -595,6 +599,14 @@ The value is read at closing time, so it takes effect the moment you save.
   you do not want that, use `"layout"`.
 - If two copies of bateri are open at the same time, only the first one saves
   and restores.
+- Holding **⇧** while bateri opens skips all of this: one empty window opens,
+  nothing saved is read, and from then on this session is the one that gets
+  saved. Programs kept through a crash or a quit (`keep_running`) are left
+  alone and come back at the next launch; programs crossing an update still
+  come back, since they cannot wait.
+- If bateri crashes while it brings programs back, the next launch brings
+  them back without their screens, and if that crashes too, the one after
+  gives them up and opens a single empty window.
 
 `keep_running` says when the programs running in bateri — vim, `npm run
 dev`, a session over ssh — outlive it. Each value includes the ones before
@@ -605,9 +617,10 @@ it:
 - `"crash"` (the default) also keeps them when bateri crashes or is forced to
   quit (Activity Monitor, `kill -9`): they keep running without a window and
   the next bateri takes them back into their windows, the same processes. The
-  screen does not come back with them yet: the pane opens empty and a
-  full-screen program fills it again with its next output. ⌘Q still ends
-  them, after the usual question.
+  screen does not come back with them yet: the pane says so in a dim line and
+  a full-screen program (vim, htop) is made to redraw at once; in a plain
+  shell what was on screen is gone. ⌘Q still ends them, after the usual
+  question.
 - `"quit"` also keeps them when you quit with ⌘Q, which then asks nothing:
   the programs run on with no window until bateri opens again, and then they
   come back with their screens.

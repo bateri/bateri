@@ -105,7 +105,7 @@
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use unicode_width::UnicodeWidthChar;
 
@@ -1389,9 +1389,40 @@ pub(crate) struct BlockTrack {
     /// 10,000-line scrollback.
     ///
     /// `Instant`, not system time: even if the user changes the clock or daylight
-    /// saving passes, the duration does not run backwards.
-    pub(crate) running_since: Option<Instant>,
+    /// saving passes, the duration does not run backwards ([`RunClock`]).
+    pub(crate) running_since: Option<RunClock>,
     pub(crate) blocks: BlockLog,
+}
+
+/// The running command's clock: an `Instant` and how long the command had
+/// already run when this process took it over. A carried command crosses
+/// with its wall-clock start ([`Carried`]) and an `Instant` cannot be set
+/// back by any amount — macOS' does not count sleep, so a night spent
+/// closed (a quit with `keep_running = "quit"`) can be more than it can
+/// subtract, and the counter would silently go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RunClock {
+    since: Instant,
+    before: Duration,
+}
+
+impl RunClock {
+    /// A command starting now.
+    fn now() -> Self {
+        Self::ran_for(Duration::ZERO)
+    }
+
+    /// A command that has run for `ran` already.
+    pub(crate) fn ran_for(ran: Duration) -> Self {
+        Self {
+            since: Instant::now(),
+            before: ran,
+        }
+    }
+
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.before.saturating_add(self.since.elapsed())
+    }
 }
 
 impl BlockTrack {
@@ -1448,7 +1479,7 @@ impl BlockTrack {
     /// the prompt (`A`).
     fn command(&mut self) {
         self.state().phase = ShellPhase::Running;
-        self.running_since.get_or_insert_with(Instant::now);
+        self.running_since.get_or_insert_with(RunClock::now);
     }
 
     /// `D`: the command ended.
@@ -4319,7 +4350,11 @@ const STATE_HEADER: &str = "bateri-state";
 
 /// The state blob's version: the old bateri writes it, the new one
 /// reads it across an update. A change of the format increments it.
-const STATE_VERSION: u32 = 1;
+///
+/// Version 2: a running command's clock is its wall-clock start, not how
+/// long it had run when the blob was written — a blob read hours later (a
+/// crash or a quit kept the program running meanwhile) counts the gap.
+const STATE_VERSION: u32 = 2;
 
 /// The oldest version the reader still takes: the current one and the one
 /// before it.
@@ -4330,13 +4365,24 @@ const STATE_OLDEST: u32 = if STATE_VERSION > 1 {
     STATE_VERSION
 };
 
+/// The wall clock now, in milliseconds since the Unix epoch (0 before it).
+fn wall_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// One block trail as the blob carries it ([`BlockTrack`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CarriedTrack {
     state: Option<ShellState>,
-    /// How long the running command has run, in milliseconds — an `Instant`
-    /// does not cross processes; the new side subtracts it from its own now.
-    running_ms: Option<u64>,
+    /// When the running command started, in wall-clock milliseconds since
+    /// the Unix epoch — an `Instant` does not cross processes, and a start
+    /// (version 2) rather than an age (version 1) counts the time the blob
+    /// waited in a holder.
+    running_since_ms: Option<u64>,
     /// The identity of `entries[0]`.
     first: u32,
     entries: Vec<Outcome>,
@@ -4346,21 +4392,23 @@ impl CarriedTrack {
     fn of(track: &BlockTrack) -> Self {
         Self {
             state: track.state,
-            running_ms: track
-                .running_since
-                .map(|since| u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            running_since_ms: track.running_since.map(|clock| {
+                let ran = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+                wall_ms().saturating_sub(ran)
+            }),
             first: track.blocks.first,
             entries: track.blocks.entries.iter().copied().collect(),
         }
     }
 
     /// Into `track`, whose ledger keeps its own ceiling: entries over it are
-    /// dropped from the oldest, the ring's own rule.
+    /// dropped from the oldest, the ring's own rule. A start ahead of this
+    /// clock (the clock was set back) is a command that starts now.
     fn restore(self, track: &mut BlockTrack) {
         track.state = self.state;
         track.running_since = self
-            .running_ms
-            .and_then(|ms| Instant::now().checked_sub(Duration::from_millis(ms)));
+            .running_since_ms
+            .map(|start| RunClock::ran_for(Duration::from_millis(wall_ms().saturating_sub(start))));
         track.blocks.entries = self.entries.into();
         track.blocks.first = self.first;
         while track.blocks.entries.len() > track.blocks.capacity {
@@ -4401,12 +4449,14 @@ impl CarriedTrack {
         };
         format!(
             "{phase} {exit} {} {} {entries}",
-            render_number(self.running_ms),
+            render_number(self.running_since_ms),
             self.first
         )
     }
 
-    fn parse(fields: &[&str]) -> Option<Self> {
+    /// One trail of a blob of `version`: version 1's clock field is the age
+    /// the command had when the blob was written, taken as a start from now.
+    fn parse(fields: &[&str], version: u32) -> Option<Self> {
         let [phase, exit, running, first, entries] = fields else {
             return None;
         };
@@ -4441,9 +4491,15 @@ impl CarriedTrack {
                 })
                 .collect::<Option<Vec<_>>>()?
         };
+        let clock: Option<u64> = parse_number(running)?;
+        let running_since_ms = if version == 1 {
+            clock.map(|ran| wall_ms().saturating_sub(ran))
+        } else {
+            clock
+        };
         Some(Self {
             state,
-            running_ms: parse_number(running)?,
+            running_since_ms,
             first: first.parse().ok()?,
             entries,
         })
@@ -4496,6 +4552,13 @@ pub(crate) struct Carried {
 }
 
 impl Carried {
+    /// The carried mirror crosses as stale whatever it answered: the blob
+    /// may be older than the screen it goes with (a bound holder's last
+    /// copy), so the freshness gate falls back on the content.
+    pub(crate) fn mark_mirror_stale(&mut self) {
+        self.dock_fresh = false;
+    }
+
     /// The blob: the header line, then one `key fields…` line per field, one
     /// `hl` line per highlight and `end`. Text is escaped so that a field never
     /// holds a space or a line break (`+{escaped}`, `-` for none — the
@@ -4654,8 +4717,8 @@ impl Carried {
         };
         let number = |values: Vec<&str>| -> Option<Option<u64>> { parse_number(&one(values)?) };
 
-        let local = CarriedTrack::parse(&take("local")?)?;
-        let remote = CarriedTrack::parse(&take("remote")?)?;
+        let local = CarriedTrack::parse(&take("local")?, version)?;
+        let remote = CarriedTrack::parse(&take("remote")?, version)?;
         let remote_shell = match one(take("remote-shell")?)?.as_str() {
             "-" => None,
             shell => {
@@ -8502,7 +8565,7 @@ mod tests {
             phase: ShellPhase::Running,
             last_exit: Some(-2),
         });
-        log.local.running_since = Some(Instant::now() - Duration::from_secs(3));
+        log.local.running_since = Some(RunClock::ran_for(Duration::from_secs(3)));
         log.remote.blocks.start(1);
         log.remote.blocks.finish(1, Some(130), 4_000);
         log.remote.state = Some(ShellState {
@@ -8677,9 +8740,9 @@ mod tests {
             }
         }
         let swap = |from: &str, to: &str| Carried::decode(blob.replacen(from, to, 1).as_bytes());
-        assert!(swap("bateri-state 1", "bateri-state 2").is_none());
-        assert!(swap("bateri-state 1", "bateri-state 0").is_none());
-        assert!(swap("bateri-state 1", "bateri-session 1").is_none());
+        assert!(swap("bateri-state 2", "bateri-state 3").is_none());
+        assert!(swap("bateri-state 2", "bateri-state 0").is_none());
+        assert!(swap("bateri-state 2", "bateri-session 2").is_none());
         assert!(swap("ours 1", "ours 2").is_none());
         assert!(swap("ours 1", "ours 1\nours 1").is_none());
         assert!(swap("ours 1", "ours 1\nnew-key 1").is_none());
@@ -8822,6 +8885,130 @@ mod tests {
         assert_eq!(carried.dock.buffer, "ls");
         assert_eq!(carried.dock.last_ink, Some('s'));
         assert_eq!(carried.dock.highlights.len(), 1);
+        // Written again, it is the current version's.
+        let again = String::from_utf8(carried.encode()).unwrap();
+        assert_eq!(
+            again,
+            fixture.replacen(
+                "bateri-state 1",
+                &format!("bateri-state {STATE_VERSION}"),
+                1
+            )
+        );
+    }
+
+    /// Version 1's clock is the command's age when the blob was written: a
+    /// v1 blob of a running command still reads, its age counted from now.
+    #[test]
+    fn a_version_1_clock_is_an_age() {
+        let fixture = "bateri-state 1\n\
+                       local running - 5000 4 p\n\
+                       remote - - - 0 -\n\
+                       remote-shell -\n\
+                       cwd +\n\
+                       branch +\n\
+                       remote-cwd +\n\
+                       remote-setup -\n\
+                       reconnect -\n\
+                       dock idle 0 0 - 0\n\
+                       predisplay +\n\
+                       buffer +\n\
+                       postdisplay +\n\
+                       prebuffer +\n\
+                       dock-fresh 0\n\
+                       editable 0\n\
+                       command 4\n\
+                       login -\n\
+                       remote-up -\n\
+                       typed -\n\
+                       ours 1\n\
+                       command-open 1\n\
+                       cleared -\n\
+                       end\n";
+        let mut fresh = ShellLog::new(100);
+        fresh.restore(Carried::decode(fixture.as_bytes()).unwrap(), 0);
+        let ran = fresh.local.running_since.unwrap().elapsed();
+        assert!(
+            ran >= Duration::from_secs(5) && ran < Duration::from_secs(60),
+            "{ran:?}"
+        );
+    }
+
+    #[test]
+    fn the_version_2_fixture_reads_and_writes_byte_for_byte() {
+        // Written by version 2 — the current one: the running command's
+        // clock is its wall-clock start (here 2026-10-04T10:00:00Z).
+        let fixture = "bateri-state 2\n\
+                       local running 0 1791108000000 7 0/120,p\n\
+                       remote - - - 0 -\n\
+                       remote-shell -\n\
+                       cwd +/tmp\n\
+                       branch +\n\
+                       remote-cwd +\n\
+                       remote-setup -\n\
+                       reconnect -\n\
+                       dock idle 0 0 - 1\n\
+                       predisplay +\n\
+                       buffer +\n\
+                       postdisplay +\n\
+                       prebuffer +\n\
+                       dock-fresh 0\n\
+                       editable 1\n\
+                       command 8\n\
+                       login -\n\
+                       remote-up -\n\
+                       typed -\n\
+                       ours 1\n\
+                       command-open 1\n\
+                       cleared -\n\
+                       end\n";
+        let carried = Carried::decode(fixture.as_bytes()).unwrap();
+        assert_eq!(carried.local.running_since_ms, Some(1_791_108_000_000));
         assert_eq!(carried.encode(), fixture.as_bytes());
+    }
+
+    /// The point of version 2: the time a blob spends in a holder (a night
+    /// with bateri closed under `keep_running = "quit"`) counts in the
+    /// running command's clock, and a gap longer than an `Instant` can
+    /// subtract does not lose it.
+    #[test]
+    fn a_running_clock_counts_the_time_the_blob_waited() {
+        let mut log = ShellLog::new(100);
+        log.local.blocks.start(1);
+        log.local.state = Some(ShellState {
+            phase: ShellPhase::Running,
+            last_exit: None,
+        });
+        log.local.running_since = Some(RunClock::ran_for(Duration::from_secs(2)));
+        let mut carried = Carried::decode(&log.carried(None, 0).encode()).unwrap();
+        // The blob waited ten years: the start moves back by as much.
+        let ten_years = 10 * 365 * 24 * 3600 * 1000;
+        carried.local.running_since_ms = carried
+            .local
+            .running_since_ms
+            .map(|start| start - ten_years);
+        let mut fresh = ShellLog::new(100);
+        fresh.restore(Carried::decode(&carried.encode()).unwrap(), 0);
+        let ran = fresh.local.running_since.unwrap().elapsed();
+        assert!(
+            ran >= Duration::from_millis(ten_years + 2000),
+            "the gap was lost: {ran:?}"
+        );
+        // A start ahead of the clock (it was set back) starts now.
+        carried.local.running_since_ms = Some(wall_ms() + 3_600_000);
+        fresh.restore(carried, 0);
+        assert!(fresh.local.running_since.unwrap().elapsed() < Duration::from_secs(60));
+    }
+
+    /// A mirror marked stale crosses one input generation behind, whatever
+    /// it answered — a bound holder's copy may be older than the screen.
+    #[test]
+    fn a_mirror_marked_stale_crosses_behind() {
+        let mut carried = Carried::decode(&carried_log().carried(None, 0).encode()).unwrap();
+        assert!(carried.dock_fresh);
+        carried.mark_mirror_stale();
+        let mut fresh = ShellLog::new(100);
+        fresh.restore(carried, 9);
+        assert_eq!(fresh.dock.answers, 8);
     }
 }

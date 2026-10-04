@@ -73,7 +73,7 @@ pub use search::{
     escape as escape_search,
 };
 pub use session::{
-    Adoption, Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, Frozen,
+    AdoptMode, Adoption, Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, Frozen,
     InitialInput, LinkHit, LinkHover, LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52,
     PathCandidate, PtyOps, PtySize, SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, SelectKind,
     SelectionPoint, SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Teardown,

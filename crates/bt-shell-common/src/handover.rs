@@ -93,8 +93,12 @@
 //! anything.
 //!
 //! **Order for the new bateri**: [`arrive`] (it takes every holder, drops
-//! duplicates and adopts the instance directories) → adopt the panes
-//! ([`Arrival::release`] those that fall back) → [`Arrival::finish`].
+//! duplicates, counts the attempt in each holder's directory and adopts the
+//! instance directories) → adopt the panes ([`Arrival::release`] those that
+//! fall back) → [`Arrival::finish`] → once the launch settled, clear the
+//! attempt markers ([`Arrival::marked`]). A launch that never settles leaves
+//! its count: the next one restores no screen, the one after gives the
+//! programs up ([`restore::attempt_mode`]).
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -107,6 +111,7 @@ use std::time::{Duration, Instant};
 use bt_core::TabId;
 
 use crate::jobs::{self, ShellParent};
+use crate::restore;
 use crate::ssh_route::{self, SUN_PATH};
 
 /// The socket of a holder born at the moment of an update, in the instance
@@ -1376,8 +1381,6 @@ fn posix_spawn_clean(
 #[derive(Debug)]
 pub struct Arrival {
     links: Vec<Link>,
-    /// The newest holder's layout (session restore's text).
-    pub layout: String,
     /// The newest holder's instance name: the new bateri's ssh
     /// registry takes it as its own, so its masters, its focus listener and
     /// the carried shells' `BATERI_SSH_INSTANCE` stay one directory. The
@@ -1390,6 +1393,13 @@ pub struct Arrival {
     /// windows come back, not only the newest's.
     pub holders: Vec<Holder>,
     pub panes: Vec<(usize, HeldPane)>,
+    /// The launches before this one that started taking these programs and
+    /// never settled — the most any holder's directory counted
+    /// ([`restore::bump_attempt`], [`restore::attempt_mode`]).
+    pub attempt: u32,
+    /// The directories whose attempt marker this launch counted: cleared once
+    /// it settles, or at a clean quit ([`restore::clear_attempt`]).
+    pub marked: Vec<PathBuf>,
 }
 
 /// One holder an [`Arrival`] took from.
@@ -1502,12 +1512,47 @@ fn holders(roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
 /// can only be an unconfirmed registration, and the older one drained the
 /// output; the younger is released without a signal. `None` if nothing was
 /// taken.
-pub fn arrive(roots: &[PathBuf], uid: u32, me: u32, bundle_id: &str) -> Option<Arrival> {
+///
+/// Every holder of this bundle that gives a frame counts one attempt in its
+/// directory's marker **before its panes are read** — a launch that crashes
+/// reading or replaying them counts too — once per directory per launch
+/// ([`Arrival::attempt`]). A bound holder (it declines), another bundle's and
+/// a socket nobody listens on count nothing: a second instance or a dev
+/// package must not push the real one's programs toward being given up. A
+/// launch that took nothing in the end clears what it counted — no restore
+/// of it can crash.
+///
+/// Without `bound` the bound holders are not asked at all — a launch with ⇧
+/// held leaves their programs waiting for the next one; the update's holder
+/// is taken still, since it cannot wait ([`HOLD_LIMIT`]).
+pub fn arrive(
+    roots: &[PathBuf],
+    uid: u32,
+    me: u32,
+    bundle_id: &str,
+    bound: bool,
+) -> Option<Arrival> {
     let mut arrival: Option<Arrival> = None;
+    let mut attempt = 0;
+    let mut marked: Vec<PathBuf> = Vec::new();
     for (socket, instance) in holders(roots) {
+        if !bound && is_bound_socket(&socket) {
+            continue;
+        }
         let opened = match open(&socket, uid) {
             Ok(opened) => opened,
             Err(HandoverError::Declined) => continue,
+            // A holder that is gone (`kill -9` leaves its socket behind):
+            // nothing to say about it.
+            Err(HandoverError::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) =>
+            {
+                forget_dead_socket(&socket);
+                continue;
+            }
             Err(error) => {
                 eprintln!(
                     "bateri: the holder on {} failed: {error:?}",
@@ -1526,6 +1571,13 @@ pub fn arrive(roots: &[PathBuf], uid: u32, me: u32, bundle_id: &str) -> Option<A
             }
             None => None,
         };
+        if layout_bundle(&opened.layout) == Some(bundle_id)
+            && let Some(dir) = socket.parent()
+            && !marked.iter().any(|seen| seen == dir)
+        {
+            attempt = attempt.max(restore::bump_attempt(dir));
+            marked.push(dir.to_owned());
+        }
         let (bundle, link) = match opened.body() {
             Ok(taken) => taken,
             Err((HandoverError::Malformed(why), link)) => {
@@ -1568,10 +1620,11 @@ pub fn arrive(roots: &[PathBuf], uid: u32, me: u32, bundle_id: &str) -> Option<A
         }
         let arrival = arrival.get_or_insert_with(|| Arrival {
             links: Vec::new(),
-            layout: layout.clone(),
             instance: instance.clone(),
             holders: Vec::new(),
             panes: Vec::new(),
+            attempt: 0,
+            marked: Vec::new(),
         });
         let index = arrival.links.len();
         arrival.links.push(link);
@@ -1580,10 +1633,41 @@ pub fn arrive(roots: &[PathBuf], uid: u32, me: u32, bundle_id: &str) -> Option<A
             .panes
             .extend(bundle.panes.into_iter().map(|pane| (index, pane)));
     }
-    if let Some(arrival) = &mut arrival {
-        drop_duplicates(arrival);
+    match &mut arrival {
+        Some(arrival) => {
+            drop_duplicates(arrival);
+            arrival.attempt = attempt;
+            arrival.marked = marked;
+        }
+        None => {
+            for dir in &marked {
+                restore::clear_attempt(dir);
+            }
+        }
     }
     arrival
+}
+
+/// Removes a bound holder's socket that nothing listens on, once the pid its
+/// name carries is gone — a holder between its `bind` and its `listen`
+/// refuses a connection too, and its pid is alive. The update's
+/// [`HANDOVER_SOCKET`] is left to the next holder's bind, which removes a
+/// dead one.
+fn forget_dead_socket(socket: &Path) {
+    let Some(pid) = socket
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(BOUND_SOCKET_PREFIX))
+        .filter(|_| is_bound_socket(socket))
+        .and_then(|pid| pid.parse::<u32>().ok())
+    else {
+        return;
+    };
+    // The directory is this user's: a pid that is gone, or another user's,
+    // is not the holder that bound here.
+    if !ssh_route::alive(pid) {
+        let _ = std::fs::remove_file(socket);
+    }
 }
 
 /// Keeps one copy of each program — `(tab, pid, start)` — from the oldest
@@ -4237,7 +4321,7 @@ mod tests {
         let mut holder = spawn_holder(&dir, Duration::from_secs(20), bundle);
         let me = std::process::id();
 
-        assert!(arrive(&[root.clone()], uid(), me, "dev.bateri.other").is_none());
+        assert!(arrive(&[root.clone()], uid(), me, "dev.bateri.other", true).is_none());
         assert_eq!(
             owner_of(&dir),
             Some(holder.id()),
@@ -4249,8 +4333,8 @@ mod tests {
         );
 
         let mut arrival =
-            arrive(&[root.clone()], uid(), me, "dev.bateri.test").expect("an arrival");
-        assert_eq!(arrival.layout, "the layout");
+            arrive(&[root.clone()], uid(), me, "dev.bateri.test", true).expect("an arrival");
+        assert_eq!(arrival.holders[0].layout, "the layout");
         assert_eq!(owner_of(&dir), Some(me), "the directory was not adopted");
         // The instance's name comes with it: the registry runs on in it.
         assert_eq!(
@@ -4269,6 +4353,67 @@ mod tests {
         wait_until("the holder did not exit after the ACK", || {
             exited(&mut holder)
         });
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A launch that took a holder's programs and never settled is counted
+    /// in the holder's directory before the panes are read: the next launch
+    /// sees one attempt. Another bundle's arrival counts nothing.
+    #[test]
+    fn an_unsettled_arrival_is_counted_in_the_holders_directory() {
+        let (root, dir) = scratch("attempt");
+        let (fd, _kept) = carried();
+        let bundle = Bundle {
+            layout: layout_blob("dev.bateri.test", "the layout"),
+            panes: vec![HeldPane::new(
+                tab(ID),
+                1,
+                2,
+                b"blob".to_vec(),
+                Vec::new(),
+                fd,
+            )],
+        };
+        let mut holder = spawn_holder(&dir, Duration::from_secs(20), bundle);
+        let me = std::process::id();
+        assert!(arrive(&[root.clone()], uid(), me, "dev.bateri.other", true).is_none());
+        let first =
+            arrive(&[root.clone()], uid(), me, "dev.bateri.test", true).expect("an arrival");
+        assert_eq!(
+            (first.attempt, first.marked.as_slice()),
+            (0, &[dir.clone()][..])
+        );
+        // Gone without an acknowledgement: the holder waits for the next.
+        drop(first);
+        let second =
+            arrive(&[root.clone()], uid(), me, "dev.bateri.test", true).expect("an arrival");
+        assert_eq!(second.attempt, 1, "the first attempt was not counted");
+        second.finish();
+        wait_until("the holder did not exit after the ACK", || {
+            exited(&mut holder)
+        });
+        assert_eq!(restore::bump_attempt(&dir), 2);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A holder killed with `-9` leaves its socket behind: nothing is said
+    /// about it, and a bound one's is removed once its pid is gone — while a
+    /// live pid's (a holder between its `bind` and its `listen`) stays.
+    #[test]
+    fn a_dead_holders_socket_is_passed_over_and_removed() {
+        let (root, dir) = scratch("stale");
+        let mut gone = std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("a child");
+        let dead = gone.id();
+        gone.wait().expect("the child exits");
+        let stale = dir.join(bound_socket(dead));
+        let live = dir.join(bound_socket(std::process::id()));
+        drop(UnixListener::bind(&stale).unwrap());
+        drop(UnixListener::bind(&live).unwrap());
+        assert!(arrive(&[root.clone()], uid(), 1, "dev.bateri.test", true).is_none());
+        assert!(!stale.exists(), "the dead holder's socket stayed");
+        assert!(live.exists(), "a live pid's socket was removed");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -4304,10 +4449,61 @@ mod tests {
         });
         let me = std::process::id();
         for _ in 0..2 {
-            assert!(arrive(std::slice::from_ref(&root), uid(), me, "dev.bateri.test").is_none());
+            assert!(
+                arrive(
+                    std::slice::from_ref(&root),
+                    uid(),
+                    me,
+                    "dev.bateri.test",
+                    true
+                )
+                .is_none()
+            );
         }
         assert_eq!(holder.join().unwrap(), [vec![], vec![RELEASE_ALL]]);
         assert_eq!(owner_of(&dir), Some(me));
+        // Nothing was taken, so nothing this launch counted can crash a
+        // restore: the attempt it counted for its own bundle is gone.
+        assert_eq!(restore::bump_attempt(&dir), 0);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A launch with ⇧ held does not ask the bound holders — their programs
+    /// wait for the next one — but still takes the update's, which cannot.
+    #[test]
+    fn a_launch_without_the_bound_holders_still_takes_the_updates() {
+        let (root, dir) = scratch("shift");
+        let bound = UnixListener::bind(dir.join(bound_socket(std::process::id()))).unwrap();
+        bound.set_nonblocking(true).unwrap();
+        let (fd, _kept) = carried();
+        let bundle = Bundle {
+            layout: layout_blob("dev.bateri.test", "the layout"),
+            panes: vec![HeldPane::new(
+                tab(ID),
+                1,
+                2,
+                b"blob".to_vec(),
+                Vec::new(),
+                fd,
+            )],
+        };
+        let mut holder = spawn_holder(&dir, Duration::from_secs(20), bundle);
+        let arrival = arrive(
+            std::slice::from_ref(&root),
+            uid(),
+            std::process::id(),
+            "dev.bateri.test",
+            false,
+        )
+        .expect("the update's holder is taken");
+        assert!(
+            matches!(bound.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+            "a bound holder was asked"
+        );
+        arrival.finish();
+        wait_until("the holder did not exit after the ACK", || {
+            exited(&mut holder)
+        });
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -4998,6 +5194,7 @@ mod tests {
             uid(),
             std::process::id(),
             "dev.bateri.test",
+            true,
         )
         .expect("an arrival");
         assert_eq!(arrival.holders.len(), 1);
@@ -5128,10 +5325,11 @@ mod tests {
             uid(),
             std::process::id(),
             "dev.bateri.test",
+            true,
         )
         .expect("an arrival");
         assert_eq!(arrival.holders.len(), 2);
-        assert_eq!(arrival.layout, "younger layout");
+        assert_eq!(arrival.holders[0].layout, "younger layout");
         let shared: Vec<usize> = (0..arrival.panes.len())
             .filter(|&i| arrival.panes[i].1.tab.as_str() == ID)
             .collect();

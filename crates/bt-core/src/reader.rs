@@ -24,7 +24,11 @@
 //!   a quiet PTY) and, on the loop handed back after `join`, the DEC 2026
 //!   buffer applied through the wrapper ([`EventLoop::stop_sync`]), the
 //!   PTY borrowed ([`EventLoop::pty_mut`]) and the input not yet written taken
-//!   ([`EventLoop::unsent`]); `pty_read` returns the bytes it processed.
+//!   ([`EventLoop::unsent`]); `pty_read` returns the bytes it processed and,
+//!   during that first read, waits for the terminal lock instead of reading
+//!   on (every read is parsed before the next, so a carried prefix and the
+//!   master's bytes never share one `advance` — the adopted session drops
+//!   the prefix's replies, `Session::adopt`).
 //!
 //! Why a copy: grapheme clustering has to step **in between** the parser's
 //! `Handler` calls, and alacritty's loop hands `Term` over as a fixed type.
@@ -255,6 +259,11 @@ where
     /// back short: a program writing without pause (`yes`, a build held at
     /// the holder's limit) fills every round, and the loop would never
     /// reach the channel (keys, resizes, the shutdown).
+    ///
+    /// These reads wait for the terminal lock rather than reading on while
+    /// it is busy: each read is parsed before the next one, so no `advance`
+    /// mixes the prefix's last bytes with the master's first — what lets the
+    /// reader tell the prefix's replies from the live ones (`TappedPty`).
     pub(crate) fn read_first(&mut self, prefix: usize) {
         self.read_first = Some(prefix);
     }
@@ -317,8 +326,10 @@ where
         true
     }
 
+    /// `serial`: wait for the terminal lock after a read instead of reading
+    /// on into the same buffer ([`EventLoop::read_first`]'s rounds).
     #[inline]
-    fn pty_read(&mut self, state: &mut State, buf: &mut [u8]) -> io::Result<usize> {
+    fn pty_read(&mut self, state: &mut State, buf: &mut [u8], serial: bool) -> io::Result<usize> {
         let mut unprocessed = 0;
         let mut processed = 0;
 
@@ -350,8 +361,11 @@ where
             let terminal = match &mut terminal {
                 Some(terminal) => terminal,
                 None => terminal.insert(match self.terminal.try_lock_unfair() {
-                    // At the buffer limit, take the lock by waiting.
-                    None if unprocessed >= READ_BUFFER_SIZE => self.terminal.lock_unfair(),
+                    // At the buffer limit, take the lock by waiting — and in
+                    // the serial rounds always, so a read is parsed alone.
+                    None if serial || unprocessed >= READ_BUFFER_SIZE => {
+                        self.terminal.lock_unfair()
+                    }
                     None => continue,
                     Some(terminal) => terminal,
                 }),
@@ -438,7 +452,7 @@ where
             if let Some(prefix) = self.read_first {
                 let mut through = 0;
                 while through < prefix.max(1) {
-                    match self.pty_read(&mut state, &mut buf) {
+                    match self.pty_read(&mut state, &mut buf, true) {
                         Ok(0) => break,
                         Ok(processed) => through += processed,
                         Err(err) => {
@@ -498,7 +512,7 @@ where
                                     self.event_proxy.send_event(Event::ChildExit(status));
                                 }
                                 if self.drain_on_exit {
-                                    let _ = self.pty_read(&mut state, &mut buf);
+                                    let _ = self.pty_read(&mut state, &mut buf, false);
                                 }
                                 self.terminal.lock().exit();
                                 self.event_proxy.send_event(Event::Wakeup);
@@ -513,7 +527,7 @@ where
                             }
 
                             if event.readable
-                                && let Err(err) = self.pty_read(&mut state, &mut buf)
+                                && let Err(err) = self.pty_read(&mut state, &mut buf, false)
                             {
                                 // On Linux, when the client end closes, the
                                 // master's `read` may return `EIO`; go back to

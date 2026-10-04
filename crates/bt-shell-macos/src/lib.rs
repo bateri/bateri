@@ -307,13 +307,15 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
     // window), and the type enforces it: `Options` carries an `Instant`, not
     // a flag.
     // The update's handover comes first: nothing of this process may
-    // spawn a child before it ([`app::arrive`]).
-    let arrival = app::arrive(&opts);
+    // spawn a child before it ([`app::arrive`]). ⇧ held leaves the bound
+    // holders out — they keep their programs for the next launch.
+    let skip_restore = app::shift_held_at_launch(&opts);
+    let arrival = app::arrive(&opts, !skip_restore);
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // `delegate` outlives `app.run()` in this scope: AppKit's and the
     // window's delegate properties are weak, this Retained is the owner.
-    let delegate = app::AppDelegate::new(mtm, opts, arrival);
+    let delegate = app::AppDelegate::new(mtm, opts, arrival, skip_restore);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.run();
     Ok(())

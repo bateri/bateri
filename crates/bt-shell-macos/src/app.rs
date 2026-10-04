@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{
-    CursorMotion, HostMark, InitialInput, KeepRunning, ReduceMotion, RestoreWindows,
+    AdoptMode, CursorMotion, HostMark, InitialInput, KeepRunning, ReduceMotion, RestoreWindows,
     SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll, TabId,
     Teardown, Theme,
 };
@@ -28,8 +28,8 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_clas
 use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
-    NSControlStateValueOn, NSEvent, NSMenu, NSMenuDelegate, NSMenuItem, NSScreen, NSWindow,
-    NSWindowNumberListOptions, NSWorkspace,
+    NSControlStateValueOn, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSScreen, NSWindow, NSWindowNumberListOptions, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
@@ -52,7 +52,7 @@ use crate::split::Axis;
 use crate::ssh_route::{self, Masters};
 use crate::watch::{Notify, Watch};
 use crate::window::{
-    self, Adopted, CloseScope, Histories, Launch, TerminalWindow, WindowHost, fallen_back,
+    self, Adopted, CloseScope, Histories, Launch, Note, TerminalWindow, WindowHost, fallen_back,
 };
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
@@ -443,6 +443,17 @@ fn copy_bundle(bundle: &handover::Bundle) -> Option<handover::Bundle> {
     })
 }
 
+/// How long after the first windows are built a launch counts as settled
+/// ([`AppDelegate::settled`]): the attempt markers go and the layout starts
+/// going to disk. Not counted in frames — a background tab, a pane hidden by
+/// a zoom or a sleeping display draws none, and a launch with two tabs would
+/// never settle. What can still crash a launch after its windows are built is
+/// the readers parsing each adopted pane's carried output, at most a holder's
+/// buffer ([`handover::BUFFER_LIMIT`]) each, which takes a fraction of this;
+/// a crash later than this is another fault than the restore and must not
+/// push the next launch toward giving the programs up. A design constant.
+const SETTLE_DELAY: Duration = Duration::from_secs(5);
+
 /// The layout source of the bound holder ([`keeper::LayoutSource`]): the
 /// application's live windows.
 fn current_layout(mtm: MainThreadMarker) -> Option<Vec<u8>> {
@@ -450,11 +461,14 @@ fn current_layout(mtm: MainThreadMarker) -> Option<Vec<u8>> {
 }
 
 /// A pane the holder gave that cannot be carried on: handed
-/// back for release, with the history its blob carried if it decoded.
+/// back for release, with the history its blob carried if it decoded and
+/// whether its program is known to have ended (the holder saw it end, or its
+/// pid is gone).
 #[derive(Debug)]
 struct Refused {
     pane: HeldPane,
     history: Option<Vec<u8>>,
+    ended: bool,
 }
 
 /// Whether a held pane can be carried on: its program alive as the holder
@@ -465,25 +479,28 @@ struct Refused {
 fn adoption(
     held: HeldPane,
     watch: impl FnOnce(u32, u64) -> Option<std::os::fd::OwnedFd>,
-) -> Result<Adopted, Refused> {
+) -> Result<Adopted, Box<Refused>> {
     let Some(state) = PaneState::decode(&held.blob) else {
-        return Err(Refused {
+        return Err(Box::new(Refused {
             pane: held,
             history: None,
-        });
+            ended: false,
+        }));
     };
     let history = || Some(state.history.clone()).filter(|bytes| !bytes.is_empty());
     if held.ended {
-        return Err(Refused {
+        return Err(Box::new(Refused {
             history: history(),
             pane: held,
-        });
+            ended: true,
+        }));
     }
     let Some(exit) = watch(held.pid, held.start) else {
-        return Err(Refused {
+        return Err(Box::new(Refused {
             history: history(),
             pane: held,
-        });
+            ended: true,
+        }));
     };
     Ok(Adopted {
         master: held.master,
@@ -492,7 +509,136 @@ fn adoption(
         state,
         prefix: held.buffer,
         taken_from: None,
+        mode: AdoptMode::Update,
+        nudge: false,
+        note: Note::Update,
     })
+}
+
+/// What the first windows take from the holders
+/// ([`AppDelegate::restore_arrival`]).
+struct Arriving<'a> {
+    arrival: &'a mut Arrival,
+    /// The second attempt at these holders ([`restore::AttemptMode::Safe`]).
+    safe: bool,
+    /// The holder whose layout is being built — whose kind a pane it names
+    /// but nobody holds speaks for ([`fallen_note`]).
+    layout_of: usize,
+    /// Per holder, [`deliberate_holders`].
+    deliberate: Vec<bool>,
+}
+
+impl Arriving<'_> {
+    /// The kind of the holder at `link`: its socket's name, then whether it
+    /// was handed its panes.
+    fn kind(&self, link: usize) -> HolderKind {
+        let bound = self
+            .arrival
+            .holders
+            .get(link)
+            .is_some_and(|holder| handover::is_bound_socket(&holder.socket));
+        if bound {
+            HolderKind::Bound {
+                deliberate: self.deliberate.get(link).copied().unwrap_or(false),
+            }
+        } else {
+            HolderKind::Update
+        }
+    }
+}
+
+/// Which holder a pane comes from — the socket's name tells (the update's
+/// `handover`, a bound one's `handover-<pid>`), the frame does not: it
+/// carries a quit's handover and an update's to a bound holder alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HolderKind {
+    /// The update's holder, spawned at the moment of the update.
+    Update,
+    /// A bound holder; `deliberate` if it was handed the panes (a quit, or an
+    /// update that found it) rather than left with them by a crash.
+    Bound { deliberate: bool },
+}
+
+impl HolderKind {
+    fn mode(self) -> AdoptMode {
+        match self {
+            HolderKind::Update => AdoptMode::Update,
+            HolderKind::Bound { .. } => AdoptMode::Bound,
+        }
+    }
+}
+
+/// Per holder, whether it was handed its panes deliberately: any of them
+/// carries a frozen screen — only a freeze makes one, a crash bundle's
+/// screens are empty.
+fn deliberate_holders(arrival: &Arrival) -> Vec<bool> {
+    let mut deliberate = vec![false; arrival.holders.len()];
+    for (link, pane) in &arrival.panes {
+        if PaneState::decode(&pane.blob).is_some_and(|state| !state.vt.is_empty())
+            && let Some(slot) = deliberate.get_mut(*link)
+        {
+            *slot = true;
+        }
+    }
+    deliberate
+}
+
+/// The note of a pane whose program did not come back, by the holder it
+/// came from (or whose layout named it) and whether the program is known to
+/// have ended.
+fn fallen_note(kind: HolderKind, ended: bool) -> Note {
+    match kind {
+        HolderKind::Update => Note::Update,
+        HolderKind::Bound { .. } if ended => Note::Ended,
+        HolderKind::Bound { deliberate: true } => Note::NotCarried,
+        HolderKind::Bound { deliberate: false } => Note::Crash,
+    }
+}
+
+/// The replay of a pane that falls back to a new shell, by
+/// `restore_windows`: `"all"` its history and the note — no history in the
+/// second attempt (`safe`: what went through the parser before the crash is
+/// not replayed again) —, `"layout"` the note alone, `"off"` nothing at all:
+/// the pane does not come back.
+fn fallen_replay(
+    setting: RestoreWindows,
+    safe: bool,
+    history: Option<Vec<u8>>,
+    note: Note,
+) -> Option<Vec<u8>> {
+    match setting {
+        RestoreWindows::Off => None,
+        RestoreWindows::Layout => Some(fallen_back(None, note)),
+        RestoreWindows::All => Some(fallen_back(history.filter(|_| !safe), note)),
+    }
+}
+
+/// The screen an adopted pane comes back with; `true` if its program is to
+/// be nudged into redrawing it (`Session::nudge_size`).
+///
+/// A frozen screen (a deliberate handover) comes back whole; one that lost
+/// output while bateri was closed (the holder's cut) gets the note under it.
+/// A crash's pane has no screen: the note goes on the empty grid's first
+/// line, where the program's redraw covers it rather than mixing with it.
+/// The second attempt (`safe`) replays nothing of what went through the
+/// parser before the crash — no screen, no state blob, no carried output.
+fn adopted_screen(adopted: &mut Adopted, cut: bool, safe: bool) -> bool {
+    if safe {
+        adopted.state.vt = Note::Screenless.line();
+        adopted.state.core.clear();
+        adopted.prefix.clear();
+        return true;
+    }
+    if adopted.state.vt.is_empty() {
+        adopted.state.vt = Note::Screenless.line();
+        return true;
+    }
+    if cut {
+        adopted.state.vt.extend_from_slice(b"\r\n");
+        adopted.state.vt.extend_from_slice(&Note::Cut.line());
+        return true;
+    }
+    false
 }
 
 /// What an update's relaunch waits for ([`AppDelegate::postpone_update`]):
@@ -518,7 +664,10 @@ impl UpdateWait {
 /// thread of its own ([`masters`]), and no child may be spawned while a
 /// received master is not yet close-on-exec (macOS' `recvmsg` has no
 /// `MSG_CMSG_CLOEXEC`). Never in a timed run nor in an unbundled process.
-pub(crate) fn arrive(opts: &Options) -> Option<Arrival> {
+///
+/// `bound`: whether the bound holders are asked — not with ⇧ held
+/// ([`shift_held_at_launch`]); the update's holder is asked either way.
+pub(crate) fn arrive(opts: &Options, bound: bool) -> Option<Arrival> {
     if opts.run.is_some() {
         return None;
     }
@@ -526,7 +675,19 @@ pub(crate) fn arrive(opts: &Options) -> Option<Arrival> {
     // SAFETY: `getuid` has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
     let roots = ssh_route::socket_bases(child::home().as_deref(), uid);
-    handover::arrive(&roots, uid, std::process::id(), &bundle_id)
+    handover::arrive(&roots, uid, std::process::id(), &bundle_id, bound)
+}
+
+/// Whether ⇧ is held as this launch begins — macOS' "launch without
+/// restoring" gesture: the bound holders are not asked (their programs wait
+/// for the next launch, untouched) and the saved session is not read, so a
+/// restore that crashes every launch has a way out. An update's holder is
+/// still taken: it ends its programs if nobody comes ([`arrive`]). Read at
+/// the sequence point, before [`arrive`] and before `NSApplication` exists:
+/// the class's modifier state is the window server's, it needs no
+/// application. Never in a timed run.
+pub(crate) fn shift_held_at_launch(opts: &Options) -> bool {
+    opts.run.is_none() && NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Shift)
 }
 
 /// A saved window frame clamped onto a visible screen: the screen
@@ -1064,6 +1225,18 @@ pub(crate) struct Ivars {
     /// Sparkle's install handler while the relaunch waits for the transfers
     /// and the password sheets to end ([`AppDelegate::postpone_update`]).
     postponed_update: RefCell<Option<RcBlock<dyn Fn()>>>,
+    /// ⇧ was held when this launch began ([`shift_held_at_launch`]): the
+    /// holders were not asked and nothing is restored.
+    skip_restore: bool,
+    /// The holders' directories whose attempt marker this launch counted
+    /// ([`Arrival::marked`]): cleared once the launch settles
+    /// ([`AppDelegate::settled`]) and at a clean quit.
+    attempt_marks: RefCell<Vec<PathBuf>>,
+    /// The launch settled: the layout goes to disk on its edges
+    /// ([`AppDelegate::save_layout_later`]).
+    layout_writer: Cell<bool>,
+    /// A delayed layout write is in the main queue (at most one).
+    layout_save_pending: Cell<bool>,
 }
 
 define_class!(
@@ -1141,6 +1314,9 @@ define_class!(
                 eprintln!("bateri: {e}");
                 std::process::exit(1);
             }
+            // The launch settles a moment after its windows are built
+            // ([`AppDelegate::settled`]).
+            self.settle_later();
             // The system's Reduce Motion notification is app-wide and once; the
             // window's first value descended to its own link in `start`.
             self.observe_reduce_motion();
@@ -2095,6 +2271,7 @@ impl AppDelegate {
         mtm: MainThreadMarker,
         opts: Options,
         arrival: Option<Arrival>,
+        skip_restore: bool,
     ) -> Retained<Self> {
         // The ring is allocated **only** when the gate is open: a closed gate must
         // cost an `Option` branch, not an allocation. Deriving the capacity
@@ -2143,6 +2320,10 @@ impl AppDelegate {
             hand_to_bound: Cell::new(false),
             relaunch_after: Cell::new(false),
             postponed_update: RefCell::new(None),
+            skip_restore,
+            attempt_marks: RefCell::new(Vec::new()),
+            layout_writer: Cell::new(false),
+            layout_save_pending: Cell::new(false),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -2706,10 +2887,92 @@ impl AppDelegate {
 
     /// A layout edge (a window, a tab, a split, the focus, a directory, a
     /// close): the bound holder gets the layout once the burst settles
-    /// ([`Keeper::layout_changed`]). Nothing without a holder.
+    /// ([`Keeper::layout_changed`]), and so does the disk
+    /// ([`AppDelegate::save_layout_later`]).
     pub(crate) fn layout_changed(&self) {
         if let Some(keeper) = &self.ivars().keeper {
             keeper.layout_changed();
+        }
+        self.save_layout_later();
+    }
+
+    /// Schedules [`AppDelegate::settled`] [`SETTLE_DELAY`] after the first
+    /// windows are built — never in a timed run, which neither restores nor
+    /// saves.
+    fn settle_later(&self) {
+        if self.ivars().run.is_some() {
+            return;
+        }
+        let Ok(when) = DispatchTime::try_from(SETTLE_DELAY) else {
+            self.settled();
+            return;
+        };
+        let _ = DispatchQueue::main().after(when, || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = delegate(mtm) {
+                app.settled();
+            }
+        });
+    }
+
+    /// The launch settled: what it restored did not crash it, so the attempt
+    /// markers go, and the layout starts going to disk on its edges — written
+    /// once now, so a crash before the next edge still finds it. Not before:
+    /// the layout file is read and deleted before a restore replays anything,
+    /// and writing it back during a restore that crashes would bring the same
+    /// restore back on every launch.
+    fn settled(&self) {
+        self.clear_attempt_marks();
+        self.ivars().layout_writer.set(true);
+        self.save_layout();
+    }
+
+    /// Removes the attempt markers this launch counted
+    /// ([`restore::clear_attempt`]): it settled, or it quits cleanly.
+    fn clear_attempt_marks(&self) {
+        for dir in self.ivars().attempt_marks.take() {
+            restore::clear_attempt(&dir);
+        }
+    }
+
+    /// A layout edge's disk write, once the burst settles
+    /// ([`keeper::LAYOUT_DELAY`]) — only once the launch settled.
+    fn save_layout_later(&self) {
+        if !self.ivars().layout_writer.get() || self.ivars().layout_save_pending.replace(true) {
+            return;
+        }
+        let Ok(when) = DispatchTime::try_from(keeper::LAYOUT_DELAY) else {
+            self.ivars().layout_save_pending.set(false);
+            return;
+        };
+        let _ = DispatchQueue::main().after(when, || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = delegate(mtm) {
+                app.ivars().layout_save_pending.set(false);
+                app.save_layout();
+            }
+        });
+    }
+
+    /// The live windows' layout to disk without histories
+    /// ([`restore::save_layout`]) — the way back after a crash no holder
+    /// carried the programs through (`keep_running = "update"`, no holder,
+    /// a power cut). `restore_windows = "off"` writes nothing; neither does a
+    /// process without the session directory's lock, nor one that quits —
+    /// the quit's save took the lock and writes the whole session.
+    fn save_layout(&self) {
+        if self.settings().restore_windows == RestoreWindows::Off {
+            return;
+        }
+        let lock = self.ivars().restore_lock.borrow();
+        let Some(lock) = lock.as_ref() else {
+            return;
+        };
+        let (saved, _) = self.saved_session(false);
+        if let Err(error) = restore::save_layout(lock, &saved) {
+            eprintln!("bateri: could not save the window layout: {error}");
         }
     }
 
@@ -2883,17 +3146,43 @@ impl AppDelegate {
         }
     }
 
-    /// Launch's first windows: the saved session if there is one
-    /// and at least one of its windows comes back, otherwise today's single
-    /// window. The gate order is [`AppDelegate::take_saved`]'s.
+    /// Launch's first windows: the holders' programs if any came
+    /// ([`AppDelegate::restore_arrival`]), else the saved session if at least
+    /// one of its windows comes back, otherwise today's single window. The
+    /// gate order is [`AppDelegate::take_saved`]'s.
+    ///
+    /// Two launches skip both: one with ⇧ held ([`shift_held_at_launch`] — the
+    /// bound holders were not even asked, they wait for the next launch; only
+    /// an update's holder, which cannot wait, came) and the third attempt at
+    /// holders that crashed two launches before it
+    /// ([`restore::AttemptMode::GiveUp`]: their programs end). Neither reads
+    /// the saved session; the directory's lock is still taken for the save at
+    /// quit.
     fn restore_or_open(&self) -> Result<(), String> {
         let arrival = self.ivars().arrival.take();
-        if let Some(arrival) = arrival
-            && self.restore_arrival(arrival)
-        {
-            return Ok(());
+        let mut safe = false;
+        if let Some(arrival) = arrival {
+            self.ivars().attempt_marks.replace(arrival.marked.clone());
+            match restore::attempt_mode(arrival.attempt) {
+                restore::AttemptMode::GiveUp => {
+                    eprintln!(
+                        "bateri: restoring crashed bateri twice; the programs it kept end here"
+                    );
+                    arrival.release_all();
+                    return self.open_unrestored();
+                }
+                mode => {
+                    safe = mode == restore::AttemptMode::Safe;
+                    if self.restore_arrival(arrival, safe) {
+                        return Ok(());
+                    }
+                }
+            }
         }
-        if let Some(saved) = self.take_saved()
+        if self.ivars().skip_restore {
+            return self.open_unrestored();
+        }
+        if let Some(saved) = self.take_saved(!safe)
             && self.restore_saved(&saved, None)
         {
             return Ok(());
@@ -2901,20 +3190,19 @@ impl AppDelegate {
         self.open_window(None, Opening::Window).map(drop)
     }
 
-    /// The first windows from the update's holders: the layout
-    /// they carried, each pane carried on or fallen back
-    /// ([`AppDelegate::restored_pane_launch`]); once every window is built
-    /// the holders are acknowledged — the panes nobody placed released —
-    /// and the session restore save, which describes the same session, is deleted. The
-    /// session directory's lock is taken here for the save at quit.
-    /// `false` (the holders hang everything up) if the layout does not read
-    /// or no window comes back; the caller goes on with session restore's path.
-    fn restore_arrival(&self, mut arrival: Arrival) -> bool {
-        let Some(saved) = Saved::parse(&arrival.layout) else {
-            arrival.release_all();
-            return false;
-        };
-        let lock = restore_dir(
+    /// Today's single window, with nothing restored and the saved session
+    /// left unread — its lock taken for the save at quit.
+    fn open_unrestored(&self) -> Result<(), String> {
+        let lock = self.restore_lock();
+        self.ivars().restore_lock.replace(lock);
+        self.open_window(None, Opening::Window).map(drop)
+    }
+
+    /// The session directory's lock ([`restore_dir`], [`restore::lock`]);
+    /// `None` in a timed run, an unbundled process, without a home, or while
+    /// another instance holds it.
+    fn restore_lock(&self) -> Option<restore::Lock> {
+        restore_dir(
             &self.inputs(),
             || {
                 NSBundle::mainBundle()
@@ -2923,9 +3211,72 @@ impl AppDelegate {
             },
             child::home,
         )
-        .and_then(|dir| restore::lock(&dir));
+        .and_then(|dir| restore::lock(&dir))
+    }
+
+    /// The first windows from the holders: every holder's layout with its own
+    /// windows, the newest first, each pane carried on or fallen back
+    /// ([`AppDelegate::restored_pane_launch`]) — a program two layouts name
+    /// (an older holder's, and the holder of the bateri that took it and
+    /// crashed) comes once, where the newest places it
+    /// ([`Saved::place_after`]); a pane is looked up among every holder's,
+    /// since the copy kept of a repeated program is the older holder's.
+    /// Once every window is
+    /// built the holders are acknowledged — the panes nobody placed released,
+    /// a layout that does not read among them — and the session restore save,
+    /// which describes the same session, is deleted. The session directory's
+    /// lock is taken here for the save at quit.
+    ///
+    /// `safe` is the second attempt at the same holders
+    /// ([`restore::AttemptMode::Safe`]): the programs are taken but nothing is
+    /// replayed ([`adopted_screen`], [`fallen_replay`]).
+    ///
+    /// `false` (the holders hang everything up) if no layout reads or no
+    /// window comes back; the caller goes on with session restore's path.
+    fn restore_arrival(&self, mut arrival: Arrival, safe: bool) -> bool {
+        let mut taken = Vec::new();
+        let layouts: Vec<(usize, Saved)> = arrival
+            .holders
+            .iter()
+            .enumerate()
+            .filter_map(|(link, holder)| {
+                Some((link, Saved::parse(&holder.layout)?.place_after(&mut taken)))
+            })
+            .collect();
+        if layouts.is_empty() {
+            arrival.release_all();
+            return false;
+        }
+        let lock = self.restore_lock();
         self.ivars().restore_lock.replace(lock);
-        if !self.restore_saved(&saved, Some(&mut arrival)) {
+        let deliberate = deliberate_holders(&arrival);
+        let mut arriving = Arriving {
+            arrival: &mut arrival,
+            safe,
+            layout_of: 0,
+            deliberate,
+        };
+        let mut restored = false;
+        let mut key = None;
+        for (link, saved) in &layouts {
+            arriving.layout_of = *link;
+            let (built, layout_key) = self.restore_windows(saved, Some(&mut arriving));
+            restored |= built;
+            key = key.or(layout_key);
+        }
+        if let Some(key) = key {
+            key.select();
+        }
+        // The test hook of the attempt marker: a crash in the middle of a
+        // restore, after the programs were taken and before their holders
+        // were acknowledged — the next launches must find them waiting. A
+        // launch argument only, never a stored default: a key left behind
+        // would crash every restore until the programs were given up.
+        if std::env::args().any(|arg| arg == "-BateriCrashDuringRestore") {
+            // SAFETY: a signal to this process; `SIGKILL` is the crash it stands for.
+            unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+        }
+        if !restored {
             arrival.release_all();
             // `take_saved` takes the lock again.
             self.ivars().restore_lock.replace(None);
@@ -2951,40 +3302,47 @@ impl AppDelegate {
     /// another instance; `restore_windows = "off"` — which also deletes what
     /// is left, once the lock is ours; no or an unreadable layout
     /// ([`restore::take`] deletes it before anything is replayed). Under
-    /// `"layout"` the layout comes back but an earlier `"all"` save's
-    /// histories are deleted unread. The lock
+    /// `"layout"` — or without `histories` (the second attempt at holders, whose
+    /// fallback must not replay either) — the layout comes back but an
+    /// earlier `"all"` save's histories are deleted unread. The lock
     /// stays in [`Ivars::restore_lock`] for the save at quit.
-    fn take_saved(&self) -> Option<Saved> {
-        let dir = restore_dir(
-            &self.inputs(),
-            || {
-                NSBundle::mainBundle()
-                    .bundleIdentifier()
-                    .map(|id| id.to_string())
-            },
-            child::home,
-        )?;
-        let lock = restore::lock(&dir)?;
+    fn take_saved(&self, histories: bool) -> Option<Saved> {
+        let lock = self.restore_lock()?;
         let saved = match self.settings().restore_windows {
             RestoreWindows::Off => {
                 let _ = restore::clear(&lock);
                 None
             }
-            RestoreWindows::All => restore::take(&lock, true),
+            RestoreWindows::All => restore::take(&lock, histories),
             RestoreWindows::Layout => restore::take(&lock, false),
         };
         self.ivars().restore_lock.replace(Some(lock));
         saved
     }
 
-    /// Builds the saved windows: per window the first tab at
+    /// Builds the saved windows ([`AppDelegate::restore_windows`]) and
+    /// selects, last, the key window. `true` if at least one window came
+    /// back.
+    fn restore_saved(&self, saved: &Saved, arriving: Option<&mut Arriving<'_>>) -> bool {
+        let (restored, key) = self.restore_windows(saved, arriving);
+        if let Some(key) = key {
+            key.select();
+        }
+        restored
+    }
+
+    /// The saved windows: per window the first tab at
     /// its frame (clamped onto a visible screen, [`clamp_frame`]) and the
     /// rest into its tab group, in order, each through
     /// [`TerminalWindow::restore`] — placed before its shells start; then
-    /// every window's selected tab and, last, the key window. A tab that
-    /// cannot be built is skipped (its error to stderr). `true` if at least
-    /// one window came back.
-    fn restore_saved(&self, saved: &Saved, mut arrival: Option<&mut Arrival>) -> bool {
+    /// every window's selected tab. A tab that cannot be built is skipped
+    /// (its error to stderr). `true` if at least one window came back, and
+    /// the key window's selected tab for the caller to select last.
+    fn restore_windows(
+        &self,
+        saved: &Saved,
+        mut arriving: Option<&mut Arriving<'_>>,
+    ) -> (bool, Option<Retained<TerminalWindow>>) {
         let mtm = self.mtm();
         let screens: Vec<Frame> = NSScreen::screens(mtm)
             .iter()
@@ -3001,7 +3359,7 @@ impl AppDelegate {
         let mut key = None;
         let mut restored = false;
         for window in &saved.windows {
-            let tabs = self.restore_window(window, &screens, arrival.as_deref_mut());
+            let tabs = self.restore_window(window, &screens, arriving.as_deref_mut());
             let selected = tabs
                 .iter()
                 .find(|(index, _)| *index == window.selected)
@@ -3015,19 +3373,19 @@ impl AppDelegate {
                 }
             }
         }
-        if let Some(key) = key {
-            key.select();
-        }
-        restored
+        (restored, key)
     }
 
     /// One saved window's tabs, built in order; the return pairs each built
-    /// tab with its index in `window.tabs`.
+    /// tab with its index in `window.tabs`. A pane that does not come back
+    /// ([`AppDelegate::restored_pane_launch`]'s `None`) leaves its tab
+    /// without it ([`restore::SavedTab::retain`]), a tab left with none is
+    /// not built.
     fn restore_window(
         &self,
         window: &SavedWindow,
         screens: &[Frame],
-        mut arrival: Option<&mut Arrival>,
+        mut arriving: Option<&mut Arriving<'_>>,
     ) -> Vec<(usize, Retained<TerminalWindow>)> {
         let mtm = self.mtm();
         let frame = clamp_frame(window.frame, screens);
@@ -3039,16 +3397,21 @@ impl AppDelegate {
         for (index, tab) in window.tabs.iter().enumerate() {
             let id = self.next_window_id();
             let mut theme = None;
-            let launches: Vec<PaneLaunch> = tab
+            let launches: Vec<Option<PaneLaunch>> = tab
                 .panes
                 .iter()
                 .map(|pane| {
                     let (launch, pane_theme) =
-                        self.restored_pane_launch(id, pane, arrival.as_deref_mut());
+                        self.restored_pane_launch(id, pane, arriving.as_deref_mut())?;
                     theme.get_or_insert(pane_theme);
-                    launch
+                    Some(launch)
                 })
                 .collect();
+            let keep: Vec<bool> = launches.iter().map(Option::is_some).collect();
+            let Some(tab) = tab.retain(&keep) else {
+                continue;
+            };
+            let launches: Vec<PaneLaunch> = launches.into_iter().flatten().collect();
             let theme = theme.unwrap_or_else(|| self.resolve_theme());
             let first = built.first().map(|(_, first)| first.clone());
             let result = TerminalWindow::restore(
@@ -3084,18 +3447,21 @@ impl AppDelegate {
     /// ([`restored_launch`]: directory, identity, ready remote line, history
     /// read and deleted here) and point-size step.
     ///
-    /// With an `arrival` the pane the holder gave under the same
-    /// identity is carried on if it can be ([`adoption`]); one that cannot —
-    /// or that the old bateri could not freeze — falls back to session restore's start
-    /// with its history and the note ([`fallen_back`]), and the holder
-    /// hangs a refused one up at once.
+    /// With `arriving` the pane a holder gave under the same identity is
+    /// carried on if it can be ([`adoption`], its screen [`adopted_screen`]);
+    /// one that cannot — or that the old bateri could not freeze or register
+    /// — falls back to a new shell with the note of what happened
+    /// ([`fallen_note`]) and the history `restore_windows` allows
+    /// ([`fallen_replay`]), and the holder hangs a refused one up at once.
+    /// `None`: the pane does not come back — `restore_windows = "off"` keeps
+    /// no pane without its program.
     fn restored_pane_launch(
         &self,
         window: u64,
         pane: &SavedPane,
-        arrival: Option<&mut Arrival>,
-    ) -> (PaneLaunch, Theme) {
-        let (mut launch, theme) = self.pane_launch(window, None, Opening::Restore);
+        arriving: Option<&mut Arriving<'_>>,
+    ) -> Option<(PaneLaunch, Theme)> {
+        let setting = self.settings().restore_windows;
         let saved_history = || {
             if pane.history {
                 self.ivars()
@@ -3108,37 +3474,66 @@ impl AppDelegate {
             }
         };
         let mut adopt = None;
-        let replay = match arrival {
+        let replay = match arriving {
             None => saved_history(),
-            Some(arrival) => {
-                let held = arrival
+            Some(arriving) => {
+                let held = arriving
+                    .arrival
                     .panes
                     .iter()
                     .position(|(_, held)| held.tab == pane.tab_id)
-                    .map(|index| arrival.panes.remove(index));
+                    .map(|index| arriving.arrival.panes.remove(index));
+                let safe = arriving.safe;
+                // A history the setting throws away is not read from disk.
+                let fallen = |note: Note, history: Option<Vec<u8>>| {
+                    let wanted = setting == RestoreWindows::All && !safe;
+                    let history = history.or_else(|| wanted.then(saved_history).flatten());
+                    fallen_replay(setting, safe, history, note)
+                };
                 match held {
-                    None => Some(fallen_back(saved_history())),
-                    Some((link, held)) => match adoption(held, jobs::exit_fd) {
-                        Ok(mut adopted) => {
-                            adopted.taken_from = arrival
-                                .holders
-                                .get(link)
-                                .map(|holder| holder.socket.clone());
-                            adopt = Some(adopted);
-                            None
+                    None => {
+                        let note = fallen_note(arriving.kind(arriving.layout_of), false);
+                        Some(fallen(note, None)?)
+                    }
+                    Some((link, held)) => {
+                        let kind = arriving.kind(link);
+                        let cut = held.cut;
+                        match adoption(held, jobs::exit_fd) {
+                            Ok(mut adopted) => {
+                                adopted.taken_from = arriving
+                                    .arrival
+                                    .holders
+                                    .get(link)
+                                    .map(|holder| holder.socket.clone());
+                                // An emptied state blob must not refuse.
+                                adopted.mode = if safe { AdoptMode::Bound } else { kind.mode() };
+                                adopted.note = fallen_note(kind, false);
+                                adopted.nudge = adopted_screen(&mut adopted, cut, safe);
+                                if setting != RestoreWindows::All || safe {
+                                    adopted.state.history.clear();
+                                }
+                                adopt = Some(adopted);
+                                None
+                            }
+                            Err(refused) => {
+                                let Refused {
+                                    pane: held,
+                                    history,
+                                    ended,
+                                } = *refused;
+                                arriving.arrival.release(link, held);
+                                Some(fallen(fallen_note(kind, ended), history)?)
+                            }
                         }
-                        Err(refused) => {
-                            arrival.release(link, refused.pane);
-                            Some(fallen_back(refused.history.or_else(saved_history)))
-                        }
-                    },
+                    }
                 }
             }
         };
+        let (mut launch, theme) = self.pane_launch(window, None, Opening::Restore);
         launch.launch = restored_launch(pane, replay);
         launch.launch.adopt = adopt;
         launch.zoom = Zoom::from_steps(pane.zoom_steps, &launch.settings.font);
-        (launch, theme)
+        Some((launch, theme))
     }
 
     /// Session restore's save, at the head of
@@ -4012,6 +4407,8 @@ impl AppDelegate {
         if self.ivars().relaunch_after.get() {
             self.spawn_relauncher();
         }
+        // A clean quit — a handover or not — is no crash of a restore.
+        self.clear_attempt_marks();
         // A deliberate handover (`keep_running`, [`AppDelegate::terminate_reply`]):
         // the programs go to a holder and nothing below runs — no pane
         // closes, no ssh master ends. It writes the session restore save
@@ -5618,5 +6015,101 @@ mod tests {
         assert_eq!(unread.history, None);
         let empty = adoption(held(pane_state(b"").encode(), true), a_watch).unwrap_err();
         assert_eq!(empty.history, None, "an empty history is no history");
+        // Whether the program is known to have ended: the holder saw it, or
+        // its pid is gone — not an unreadable blob.
+        assert!(ended.ended && gone.ended && empty.ended);
+        assert!(!unread.ended);
+    }
+
+    /// The note of a pane whose program did not come back says what
+    /// happened: the update's holder, a crash, a deliberate handover that did
+    /// not carry it, or the program's own end while bateri was closed.
+    #[test]
+    fn a_fallen_pane_says_what_happened() {
+        let crash = HolderKind::Bound { deliberate: false };
+        let quit = HolderKind::Bound { deliberate: true };
+        assert_eq!(fallen_note(HolderKind::Update, false), Note::Update);
+        assert_eq!(fallen_note(HolderKind::Update, true), Note::Update);
+        assert_eq!(fallen_note(crash, false), Note::Crash);
+        assert_eq!(fallen_note(crash, true), Note::Ended);
+        assert_eq!(fallen_note(quit, false), Note::NotCarried);
+        assert_eq!(fallen_note(quit, true), Note::Ended);
+        assert_eq!(HolderKind::Update.mode(), AdoptMode::Update);
+        assert_eq!(crash.mode(), AdoptMode::Bound);
+    }
+
+    /// `restore_windows` decides what a pane without its program brings:
+    /// `"all"` its history (none in the second attempt) and the note,
+    /// `"layout"` the note alone, `"off"` nothing — the pane does not come.
+    #[test]
+    fn restore_windows_decides_a_fallen_panes_fate() {
+        let history = || Some(b"$ ls\r\n".to_vec());
+        let note = Note::Crash;
+        assert_eq!(
+            fallen_replay(RestoreWindows::All, false, history(), note),
+            Some(fallen_back(history(), note))
+        );
+        assert_eq!(
+            fallen_replay(RestoreWindows::All, true, history(), note),
+            Some(fallen_back(None, note)),
+            "the second attempt replays no history"
+        );
+        assert_eq!(
+            fallen_replay(RestoreWindows::Layout, false, history(), note),
+            Some(fallen_back(None, note))
+        );
+        assert_eq!(
+            fallen_replay(RestoreWindows::Off, false, history(), note),
+            None
+        );
+    }
+
+    fn adopted(vt: &[u8]) -> Adopted {
+        let mut state = pane_state(b"history");
+        state.vt = vt.to_vec();
+        adoption(held(state.encode(), false), a_watch).expect("adopted")
+    }
+
+    /// A frozen screen comes back whole; a crash's (none) is the note on the
+    /// first line and a nudge; a cut one gets the note under it and a nudge;
+    /// the second attempt replays nothing that went through the parser.
+    #[test]
+    fn an_adopted_panes_screen_and_its_nudge() {
+        let mut whole = adopted(b"screen");
+        assert!(!adopted_screen(&mut whole, false, false));
+        assert_eq!(whole.state.vt, b"screen");
+
+        let mut crash = adopted(b"");
+        assert!(adopted_screen(&mut crash, false, false));
+        assert_eq!(crash.state.vt, Note::Screenless.line());
+        assert_eq!(crash.state.core, b"core", "the state still comes");
+        assert_eq!(crash.prefix, b"tail", "the held output still comes");
+
+        let mut cut = adopted(b"screen");
+        assert!(adopted_screen(&mut cut, true, false));
+        assert_eq!(
+            cut.state.vt,
+            [&b"screen\r\n"[..], &Note::Cut.line()].concat()
+        );
+
+        let mut safe = adopted(b"screen");
+        assert!(adopted_screen(&mut safe, true, true));
+        assert_eq!(safe.state.vt, Note::Screenless.line());
+        assert!(safe.state.core.is_empty() && safe.prefix.is_empty());
+    }
+
+    /// The modifier state is readable before `NSApplication` exists — the
+    /// sequence point's ⇧ — and a timed run never asks.
+    #[test]
+    fn shift_is_read_without_an_application() {
+        let _ = NSEvent::modifierFlags_class();
+        let timed = Options {
+            run: Some(Run {
+                seconds: 1,
+                workload: Workload::Smoke,
+                stats_since: None,
+            }),
+        };
+        assert!(!shift_held_at_launch(&timed));
     }
 }
