@@ -128,9 +128,58 @@ pub trait ProcessTable {
     fn members(&self, group: u32) -> Vec<u32>;
     fn parent(&self, pid: u32) -> Option<u32>;
     fn name(&self, pid: u32) -> Option<String>;
-    /// The process's argv; `None` if unreadable. Asked only of members with
-    /// candidate names ([`remote`]).
-    fn args(&self, pid: u32) -> Option<Vec<String>>;
+    /// The process's exec record — its executable, its argv and the
+    /// environment variables named in `keys`, **no other** ([`ProcArgs`]) —
+    /// in one read. `None` if unreadable, and for a process of another user
+    /// whenever variables are asked (on macOS always). Asked only of members
+    /// with candidate names ([`remote`], [`crate::program::find`]).
+    fn procargs(&self, pid: u32, keys: &[&str]) -> Option<ProcArgs>;
+}
+
+/// One process's exec record ([`ProcessTable::procargs`]).
+///
+/// **The environment is never whole here**: only the variables the caller
+/// named are kept; every other entry is skipped while the kernel's buffer
+/// is parsed, before a `String` is made of it, and the buffer does not
+/// outlive the read — so the rest never lands in a value, a `Debug` print or
+/// a test's output. A program that reads the keyboard itself (an agent, a
+/// REPL) routinely carries API keys in its environment, and bateri has no
+/// business keeping them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcArgs {
+    /// The executable as it was started. On Linux the kernel's resolved
+    /// path (`/proc/<pid>/exe`); on macOS the path given to `execve`, made
+    /// absolute from the executable itself when it was relative (`./node`
+    /// would otherwise name a file relative to a directory we do not know).
+    /// Empty when unreadable: another user's process on Linux, read without
+    /// variables.
+    pub exec: String,
+    pub args: Vec<String>,
+    /// The asked variables the process was started with, `(name, value)`
+    /// in the environment's order; an asked variable that was not set is
+    /// absent.
+    pub env: Vec<(String, String)>,
+}
+
+impl ProcArgs {
+    /// An asked variable's value; `None` if it was not set (or not asked).
+    pub fn var(&self, key: &str) -> Option<&str> {
+        self.env
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// `NAME=value` → `(NAME, value)` when `NAME` is one of `keys`; any other
+/// entry is dropped here, before a `String` is made of it.
+fn asked_var(entry: &[u8], keys: &[&str]) -> Option<(String, String)> {
+    let eq = entry.iter().position(|&b| b == b'=')?;
+    let name = keys.iter().find(|key| key.as_bytes() == &entry[..eq])?;
+    Some((
+        (*name).to_owned(),
+        String::from_utf8_lossy(&entry[eq + 1..]).into_owned(),
+    ))
 }
 
 /// The decision itself: `child` is the pid of the PTY's child.
@@ -159,7 +208,7 @@ pub fn foreground(parent: ShellParent, child: u32, table: &impl ProcessTable) ->
 
 /// The shell's pid: on the direct path the child itself, on the `login` path
 /// its only child (`None` if there is none yet).
-fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<u32> {
+pub(crate) fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<u32> {
     match parent {
         ShellParent::Direct => Some(child),
         ShellParent::Login => table.children(child).first().copied(),
@@ -255,7 +304,7 @@ pub fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Pro
             if !is_candidate(name) {
                 return None;
             }
-            let args = table.args(pid)?;
+            let args = table.procargs(pid, &[])?.args;
             Some((pid, remote_target(name, &args)?))
         })
         .collect();
@@ -693,16 +742,35 @@ impl ProcessTable for Libproc {
         }
     }
 
-    fn args(&self, pid: u32) -> Option<Vec<String>> {
-        process_args(pid)
+    fn procargs(&self, pid: u32, keys: &[&str]) -> Option<ProcArgs> {
+        let mut record = process_args(pid, keys)?;
+        // The kernel keeps the path `execve` was given; a relative one
+        // (`./node`) is the executable's own path instead.
+        if !record.exec.starts_with('/') {
+            record.exec = executable_path(pid).unwrap_or_default();
+        }
+        Some(record)
     }
+}
+
+/// `proc_pidpath`: the executable's absolute path, symlinks resolved.
+#[cfg(target_os = "macos")]
+fn executable_path(pid: u32) -> Option<String> {
+    let pid = c_int::try_from(pid).ok()?;
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: the buffer belongs to this frame and its size goes to the call
+    // as is; the kernel writes at most that many bytes.
+    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let len = usize::try_from(len).ok().filter(|&len| len > 0)?;
+    Some(String::from_utf8_lossy(&buf[..len.min(buf.len())]).into_owned())
 }
 
 /// `sysctl(KERN_PROCARGS2)`: the layout is `argc` (4 bytes), the exec path, NUL
 /// padding, `argc` NUL-terminated arguments — then the **environment**
-/// follows, which is not read.
+/// follows, of which only `keys` are kept ([`parse_procargs`]). The call
+/// fails for another user's process, so that is `None`.
 #[cfg(target_os = "macos")]
-fn process_args(pid: u32) -> Option<Vec<String>> {
+fn process_args(pid: u32, keys: &[&str]) -> Option<ProcArgs> {
     let pid = c_int::try_from(pid).ok()?;
     // The buffer is `kern.argmax` long: a query with an empty buffer gives this
     // ceiling, not the real size.
@@ -744,24 +812,37 @@ fn process_args(pid: u32) -> Option<Vec<String>> {
     if status != 0 {
         return None;
     }
-    parse_procargs(buf.get(..len)?)
+    parse_procargs(buf.get(..len)?, keys)
 }
 
-/// The pure half of [`process_args`].
+/// The pure half of [`process_args`]. The environment's strings follow the
+/// arguments up to the first empty string (the kernel pads the area with
+/// NULs, and `apple[]` strings come after one); each is checked against
+/// `keys` **before** it becomes a `String`, so an unasked variable is never
+/// copied.
 #[cfg(target_os = "macos")]
-fn parse_procargs(buf: &[u8]) -> Option<Vec<String>> {
+fn parse_procargs(buf: &[u8], keys: &[&str]) -> Option<ProcArgs> {
     let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
     let rest = &buf[4..];
     // The exec path, then NUL padding: argv[0] cannot be empty, so the first
     // non-NUL byte is the start of argv.
     let path_end = rest.iter().position(|&b| b == 0)?;
+    let exec = String::from_utf8_lossy(&rest[..path_end]).into_owned();
     let start = path_end + rest[path_end..].iter().position(|&b| b != 0)?;
     let mut args = Vec::with_capacity(argc);
     let mut fields = rest[start..].split(|&b| b == 0);
     for _ in 0..argc {
         args.push(String::from_utf8_lossy(fields.next()?).into_owned());
     }
-    Some(args)
+    let env = if keys.is_empty() {
+        Vec::new()
+    } else {
+        fields
+            .take_while(|entry| !entry.is_empty())
+            .filter_map(|entry| asked_var(entry, keys))
+            .collect()
+    };
+    Some(ProcArgs { exec, args, env })
 }
 
 /// The common signature of `proc_listchildpids` and `proc_listpgrppids`.
@@ -875,19 +956,39 @@ impl ProcessTable for Procfs {
         (!comm.is_empty()).then(|| String::from_utf8_lossy(comm).into_owned())
     }
 
-    /// `/proc/<pid>/cmdline`: NUL-separated arguments. Empty for a zombie or a
-    /// kernel thread, which is `None` — there is no argv to read.
-    fn args(&self, pid: u32) -> Option<Vec<String>> {
+    /// `/proc/<pid>/exe`, `cmdline` and — when variables are asked —
+    /// `environ`. `exe` and `environ` are readable only for the same user
+    /// (or root), `cmdline` for anyone: with variables asked the record is
+    /// `None` unless all three read — another user's process, as on macOS;
+    /// without, the argv still reads and an unreadable executable is empty
+    /// (the remote probe finds `sudo ssh host` by its argv, as it did before
+    /// the record had an executable). An empty `cmdline` (a zombie, a kernel
+    /// thread) is `None` — there is no argv to read.
+    fn procargs(&self, pid: u32, keys: &[&str]) -> Option<ProcArgs> {
+        let exec = match std::fs::read_link(format!("/proc/{pid}/exe")) {
+            Ok(exec) => exec.to_string_lossy().into_owned(),
+            Err(_) if keys.is_empty() => String::new(),
+            Err(_) => return None,
+        };
         let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
         let raw = raw.strip_suffix(b"\0").unwrap_or(&raw);
         if raw.is_empty() {
             return None;
         }
-        Some(
-            raw.split(|&b| b == 0)
-                .map(|arg| String::from_utf8_lossy(arg).into_owned())
-                .collect(),
-        )
+        let args = raw
+            .split(|&b| b == 0)
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect();
+        let env = if keys.is_empty() {
+            Vec::new()
+        } else {
+            std::fs::read(format!("/proc/{pid}/environ"))
+                .ok()?
+                .split(|&b| b == 0)
+                .filter_map(|entry| asked_var(entry, keys))
+                .collect()
+        };
+        Some(ProcArgs { exec, args, env })
     }
 }
 
@@ -1106,7 +1207,7 @@ impl bt_core::PtyOps for SystemPty {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -1117,24 +1218,28 @@ mod tests {
     use super::*;
     use crate::child::{SilentWake, wait_until};
 
-    /// Fake process: parent, group, name (`None` → the name is unreadable).
+    /// Fake process: parent, group, name (`None` → the name is unreadable),
+    /// its exec record's parts (`args: None` → the record is unreadable).
     struct Proc {
         parent: u32,
         group: u32,
         name: Option<&'static str>,
         args: Option<Vec<&'static str>>,
+        /// The executable; argv[0] when `None`.
+        exec: Option<&'static str>,
+        env: Vec<(&'static str, &'static str)>,
     }
 
     /// Fake table. `terminal` is the shell's `e_tpgid`; `None` → the shell's long
     /// info is unreadable.
-    struct Table {
+    pub(crate) struct Table {
         procs: HashMap<u32, Proc>,
         terminal: Option<u32>,
         members_readable: bool,
     }
 
     impl Table {
-        fn new(terminal: Option<u32>) -> Self {
+        pub(crate) fn new(terminal: Option<u32>) -> Self {
             Self {
                 procs: HashMap::new(),
                 terminal,
@@ -1142,7 +1247,13 @@ mod tests {
             }
         }
 
-        fn with(mut self, pid: u32, parent: u32, group: u32, name: &'static str) -> Self {
+        pub(crate) fn with(
+            mut self,
+            pid: u32,
+            parent: u32,
+            group: u32,
+            name: &'static str,
+        ) -> Self {
             self.procs.insert(
                 pid,
                 Proc {
@@ -1150,13 +1261,21 @@ mod tests {
                     group,
                     name: Some(name),
                     args: None,
+                    exec: None,
+                    env: Vec::new(),
                 },
             );
             self
         }
 
         /// A process with an argv; argv[0] is the name itself.
-        fn run(mut self, pid: u32, parent: u32, group: u32, argv: &[&'static str]) -> Self {
+        pub(crate) fn run(
+            mut self,
+            pid: u32,
+            parent: u32,
+            group: u32,
+            argv: &[&'static str],
+        ) -> Self {
             let name = argv[0].rsplit('/').next().expect("name");
             let name: &'static str = Box::leak(name.to_owned().into_boxed_str());
             self.procs.insert(
@@ -1166,6 +1285,33 @@ mod tests {
                     group,
                     name: Some(name),
                     args: Some(argv.to_vec()),
+                    exec: None,
+                    env: Vec::new(),
+                },
+            );
+            self
+        }
+
+        /// A process whose name and executable are not its argv[0] (the
+        /// framework Python, Ruby's rewritten title), with its environment.
+        pub(crate) fn exec(
+            mut self,
+            pid: u32,
+            parent: u32,
+            group: u32,
+            (name, exec): (&'static str, &'static str),
+            argv: &[&'static str],
+            env: &[(&'static str, &'static str)],
+        ) -> Self {
+            self.procs.insert(
+                pid,
+                Proc {
+                    parent,
+                    group,
+                    name: Some(name),
+                    args: Some(argv.to_vec()),
+                    exec: Some(exec),
+                    env: env.to_vec(),
                 },
             );
             self
@@ -1214,9 +1360,19 @@ mod tests {
             self.procs.get(&pid)?.name.map(str::to_owned)
         }
 
-        fn args(&self, pid: u32) -> Option<Vec<String>> {
-            let args = self.procs.get(&pid)?.args.as_ref()?;
-            Some(args.iter().map(|&arg| arg.to_owned()).collect())
+        fn procargs(&self, pid: u32, keys: &[&str]) -> Option<ProcArgs> {
+            let proc = self.procs.get(&pid)?;
+            let args = proc.args.as_ref()?;
+            Some(ProcArgs {
+                exec: proc.exec.unwrap_or(args[0]).to_owned(),
+                args: args.iter().map(|&arg| arg.to_owned()).collect(),
+                env: proc
+                    .env
+                    .iter()
+                    .filter(|(name, _)| keys.contains(name))
+                    .map(|&(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect(),
+            })
         }
     }
 
@@ -1225,7 +1381,7 @@ mod tests {
     }
 
     /// `login` 100 → `zsh` 101 (group 101); the foreground group is the caller's.
-    fn login_shell(terminal: u32) -> Table {
+    pub(crate) fn login_shell(terminal: u32) -> Table {
         Table::new(Some(terminal))
             .with(100, 1, 100, "login")
             .with(101, 100, 101, "zsh")
@@ -1752,14 +1908,47 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn procargs_layout_yields_argv_without_the_environment() {
+    fn procargs_layout_yields_the_exec_path_argv_and_only_the_asked_variables() {
         let mut buf = 2i32.to_ne_bytes().to_vec();
-        buf.extend_from_slice(b"/bin/sleep\0\0\0\0/bin/sleep\0\x33\x30\0HOME=/x\0");
-        assert_eq!(
-            parse_procargs(&buf),
-            Some(vec!["/bin/sleep".to_owned(), "30".to_owned()])
+        buf.extend_from_slice(
+            b"/opt/x/Python\0\0\0\0python3\0-q\0SECRET_TOKEN=hunter2\0HOME=/x\0\
+              VIRTUAL_ENV=/p/.venv\0\0\0ptr_munge=VIRTUAL_ENV=/apple\0",
         );
-        assert_eq!(parse_procargs(&buf[..3]), None);
+        let asked = ["VIRTUAL_ENV", "HOME"];
+        let record = parse_procargs(&buf, &asked).expect("record");
+        assert_eq!(record.exec, "/opt/x/Python");
+        assert_eq!(record.args, ["python3", "-q"]);
+        // Only the asked ones, in the environment's order; the `apple[]`
+        // strings after the empty entry are not the environment.
+        assert_eq!(
+            record.env,
+            [
+                ("HOME".to_owned(), "/x".to_owned()),
+                ("VIRTUAL_ENV".to_owned(), "/p/.venv".to_owned()),
+            ]
+        );
+        assert_eq!(record.var("VIRTUAL_ENV"), Some("/p/.venv"));
+        // An unasked variable is in no field and no `Debug` print.
+        assert!(!format!("{record:?}").contains("hunter2"));
+        assert!(!format!("{record:?}").contains("SECRET_TOKEN"));
+        // Nothing asked, nothing kept.
+        assert_eq!(parse_procargs(&buf, &[]).expect("record").env, []);
+        assert_eq!(parse_procargs(&buf[..3], &asked), None);
+    }
+
+    #[test]
+    fn an_asked_variable_is_matched_by_its_whole_name() {
+        assert_eq!(
+            asked_var(b"NVM_DIR=/u/.nvm", &["NVM_DIR"]),
+            Some(("NVM_DIR".to_owned(), "/u/.nvm".to_owned()))
+        );
+        assert_eq!(asked_var(b"NVM_DIRX=/u", &["NVM_DIR"]), None);
+        assert_eq!(asked_var(b"NVM=/u", &["NVM_DIR"]), None);
+        assert_eq!(asked_var(b"NVM_DIR", &["NVM_DIR"]), None, "no `=`");
+        assert_eq!(
+            asked_var(b"K==v", &["K"]),
+            Some(("K".to_owned(), "=v".to_owned()))
+        );
     }
 
     #[test]
@@ -1781,22 +1970,102 @@ mod tests {
         assert_eq!(parse_stat("7 (x) S 1"), None);
     }
 
+    /// The variable that turns [`sleeper_process`] into a sleeping child.
+    const SLEEPER_ENV: &str = "BT_JOBS_SLEEPER";
+
+    /// Not a test of its own: the child
+    /// [`the_process_table_reads_a_real_exec_record`] spawns (this binary
+    /// again, run with `--exact` and [`SLEEPER_ENV`]). A process of the same
+    /// user that is not a platform binary — macOS does not show a platform
+    /// binary's environment (measured: `/bin/sleep`'s is empty). Without the
+    /// variable it does nothing.
     #[test]
-    fn the_process_table_reads_a_real_argv() {
-        // The witness for the argv body (`KERN_PROCARGS2` on macOS, `cmdline`
-        // on Linux): a child of the same user with a known argv.
-        let mut child = std::process::Command::new("/bin/sleep")
-            .arg("30")
+    fn sleeper_process() {
+        if std::env::var_os(SLEEPER_ENV).is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn the_process_table_reads_a_real_exec_record() {
+        // The witness for the record's body (`KERN_PROCARGS2` on macOS,
+        // `/proc/<pid>/{exe,cmdline,environ}` on Linux): a child of the same
+        // user with a known argv and environment.
+        let tail = ["--exact", "jobs::tests::sleeper_process", "-q"];
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(tail)
+            .env(SLEEPER_ENV, "1")
+            .env("BT_PROBE_ASKED", "kept")
+            .env("BT_PROBE_SECRET", "never-read")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("sleep did not spawn");
-        let expected = Some(vec!["/bin/sleep".to_owned(), "30".to_owned()]);
+            .expect("the sleeper did not spawn");
+        let keys = ["BT_PROBE_ASKED"];
         // `spawn` returns once the child forked, not once it exec'd: before
         // the exec the argv is still the test runner's (seen on Linux).
+        let execd = |record: &ProcArgs| record.args.get(1..) == Some(&tail.map(str::to_owned)[..]);
         wait_until("the child's argv not seen", || {
-            SystemTable.args(child.id()) == expected
+            SystemTable
+                .procargs(child.id(), &keys)
+                .is_some_and(|record| execd(&record))
         });
+        let record = SystemTable.procargs(child.id(), &keys).expect("record");
         let _ = child.kill();
         let _ = child.wait();
+        let exec = std::path::Path::new(&record.exec);
+        assert!(exec.is_absolute(), "{}", record.exec);
+        assert_eq!(
+            exec.file_name(),
+            std::env::current_exe().expect("test binary").file_name()
+        );
+        assert_eq!(
+            record.env,
+            [("BT_PROBE_ASKED".to_owned(), "kept".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_relative_exec_path_is_made_absolute() {
+        // `./node` is kept relative by macOS's kernel and names a file
+        // relative to a directory the reader does not know: the record's
+        // path is the executable's own. Spawned through `../` up to `/` and
+        // down again, so the path is relative whatever the cwd.
+        let exe = std::env::current_exe().expect("test binary");
+        let cwd = std::env::current_dir().expect("cwd");
+        let ups = cwd.components().count().saturating_sub(1);
+        let relative: std::path::PathBuf =
+            std::iter::repeat_n(std::path::Component::ParentDir, ups)
+                .map(|up| up.as_os_str().to_owned())
+                .chain(
+                    exe.components()
+                        .skip(1)
+                        .map(|part| part.as_os_str().to_owned()),
+                )
+                .collect();
+        assert!(relative.is_relative(), "{}", relative.display());
+        let tail = ["--exact", "jobs::tests::sleeper_process", "-q"];
+        let mut child = std::process::Command::new(&relative)
+            .args(tail)
+            .env(SLEEPER_ENV, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the sleeper did not spawn");
+        let execd = |record: &ProcArgs| record.args.get(1..) == Some(&tail.map(str::to_owned)[..]);
+        wait_until("the child's argv not seen", || {
+            SystemTable
+                .procargs(child.id(), &[])
+                .is_some_and(|record| execd(&record))
+        });
+        let record = SystemTable.procargs(child.id(), &[]).expect("record");
+        let _ = child.kill();
+        let _ = child.wait();
+        let exec = std::path::Path::new(&record.exec);
+        assert!(exec.is_absolute(), "{}", record.exec);
+        assert_eq!(exec.file_name(), exe.file_name());
     }
 
     #[test]

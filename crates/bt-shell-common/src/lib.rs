@@ -16,7 +16,8 @@
 //! live handover and its holder process (`handover`), a pane's journal in
 //! shared memory and `bateri compact` (`journal`), the saved
 //! session layout and its file (`restore`), the
-//! process table (`jobs`), the shell's birth (`child`) and file watching
+//! process table (`jobs`), which program reads the keyboard and its guide
+//! bar (`program`), the shell's birth (`child`) and file watching
 //! (`watch`).
 //!
 //! **The boundary:** no AppKit, Foundation, Quartz or notification centre —
@@ -41,6 +42,7 @@ pub mod keys;
 pub mod links;
 pub mod notices;
 pub mod preview_cache;
+pub mod program;
 pub mod quote;
 pub mod remote_files;
 pub mod remote_helper;

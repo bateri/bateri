@@ -62,7 +62,8 @@ mod window;
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
     child, download, focus, gesture, handover, jobs, journal, keys, links, notices, preview_cache,
-    quote, remote_files, remote_helper, restore, settings, split, ssh_route, upload, watch, zoom,
+    program, quote, remote_files, remote_helper, restore, settings, split, ssh_route, upload,
+    watch, zoom,
 };
 
 use std::time::{Duration, Instant};

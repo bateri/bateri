@@ -3620,6 +3620,31 @@ mod tests {
         }
     }
 
+    // Calibration: names a font or a measured number.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_program_bar_has_no_box_in_the_small_class() {
+        // A program's guide bar stands in the context line, i.e. the small
+        // class. A hand copy of `bt-core`'s `PROGRAM_GLYPHS` (this crate
+        // cannot see it; `the_program_bar_is_the_one_the_atlas_checks` links
+        // them) — the twin of `the_upload_row_has_no_box_in_the_small_class`.
+        // If a box appears, the hint must be spelled out. Menlo, by name.
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
+        assert_eq!(menlo.font_issue(), None, "Menlo did not open");
+        for ch in ['⌃', '·', '…'] {
+            let slot = menlo
+                .slot(
+                    Sprite::Char(ch),
+                    Face::Regular,
+                    SizeClass::Small,
+                    Half::Whole,
+                )
+                .0
+                .slot;
+            assert_ne!(slot, TOFU, "'{ch}' is a box in Menlo's small class");
+        }
+    }
+
     #[test]
     fn the_small_class_is_narrower_and_keeps_its_own_slot() {
         let mut a = atlas(POINT_SIZE, 1.0);

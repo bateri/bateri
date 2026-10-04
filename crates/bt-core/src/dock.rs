@@ -25,9 +25,9 @@ use crate::session::{Cell, CellHalf, SelectKind, SelectionRun, UnderlineStyle, W
 
 use crate::settings::HostMark;
 use crate::shell::{
-    ButtonState, DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, Reconnect,
-    RemoteStats, STATS_HISTORY, ShellPhase, ShellState, StatsForm, Transfer, TransferAction,
-    TransferTone,
+    ButtonState, DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ProgramBar,
+    ProgramTone, Reconnect, RemoteStats, STATS_HISTORY, ShellPhase, ShellState, StatsForm,
+    Transfer, TransferAction, TransferTone,
 };
 
 /// The dock's surface in a frame — everything **outside** the cells, resolved.
@@ -42,7 +42,8 @@ pub struct Dock {
     pub ground: LinearRgba,
     /// Color of the **top** hairline separating the dock from the grid: in a
     /// remote session the color of the host's mark (the theme's `info` when
-    /// unmarked), otherwise [`Self::separator`].
+    /// unmarked), under a program's guide bar the bar's tone, otherwise
+    /// [`Self::separator`].
     ///
     /// A separate field, because the second hairline (between the input block
     /// and the context row) does not convey distance — that is a division,
@@ -261,6 +262,18 @@ const REMOTE_GAP: &str = "  ";
 /// (`the_upload_row_is_the_one_the_atlas_checks`). The buttons' `⌘` is here
 /// too: this crate writes the label but its glyph is again in the small class.
 pub const UPLOAD_GLYPHS: [char; 8] = ['↑', '↓', '⌘', '✓', '—', '·', '…', '→'];
+
+/// A program guide bar's non-ASCII characters: the separator and the
+/// shortening mark drawn here, and the **vocabulary** of the hints
+/// `bt-shell` writes (`⌃D exit`). `bt-atlas` checks a hand copy of this list
+/// in Menlo's small class (`the_program_bar_has_no_box_in_the_small_class`);
+/// the two are tied by `the_program_bar_is_the_one_the_atlas_checks`, and
+/// `bt-shell`'s recognizer checks its strings against it.
+pub const PROGRAM_GLYPHS: [char; 3] = ['⌃', '·', '…'];
+
+/// The separator between a guide bar's title and its detail
+/// (`Python 3.14.5 · venv`).
+const PROGRAM_DETAIL: &str = " · ";
 
 /// The load indicator's non-ASCII characters drawn from the **font**: the
 /// critical mark and the alerts form's calm dot. The sparkline's `▁…█` are not
@@ -1423,11 +1436,13 @@ pub(crate) fn render_with(
         // While an upload runs the line is in the color of the queue's host
         // (also after ssh closes, as long as the result row is shown).
         // While progress runs the filled part is `info` (the mark's meaning is in the empty track).
-        edge: match (&context.transfer, &context.remote) {
-            (Some(transfer), _) if transfer.progress.is_some() => theme.info_linear(),
-            (Some(transfer), _) => theme.mark_linear(transfer.mark),
-            (None, Some(_)) => theme.mark_linear(context.remote_mark),
-            (None, None) => theme.separator_linear(),
+        edge: match (&context.transfer, &context.remote, &context.program) {
+            (Some(transfer), _, _) if transfer.progress.is_some() => theme.info_linear(),
+            (Some(transfer), _, _) => theme.mark_linear(transfer.mark),
+            (None, Some(_), _) => theme.mark_linear(context.remote_mark),
+            // A program's guide bar, in its tone: the band is the program's.
+            (None, None, Some(bar)) => program_color(bar.tone, theme),
+            (None, None, None) => theme.separator_linear(),
         },
         separator: theme.separator_linear(),
         caret: None,
@@ -1871,7 +1886,9 @@ fn settle(change: Option<&Change>, edits: &mut impl FnMut(DockEdit)) {
 }
 
 /// The dock's **bottom** row: `{full path} | {branch}`, bottom left and dim;
-/// in a remote session `⇄ {host}  {remote path}` ([`render_remote_context`]).
+/// in a remote session `⇄ {host}  {remote path}` ([`render_remote_context`]),
+/// and while a recognized program reads the keyboard its guide bar
+/// ([`render_program`]).
 ///
 /// **On overflow the path is shortened from the left, the branch never.**
 /// Two separate reasons: the path's information is in its tail (which folder
@@ -1914,6 +1931,12 @@ fn render_context(
     if let Some(host) = context.remote_host() {
         let color = theme.mark_linear(context.remote_mark);
         return render_remote_context(context, host, color, theme, available, row, sink);
+    }
+    // A recognized program's guide bar after both: the upload's result and
+    // the remote session say more about where the keys go.
+    if let Some(bar) = &context.program {
+        render_program(bar, theme, available, row, sink);
+        return [None; 2];
     }
     let branch_chars = context.branch.chars().count();
     // The budget is set aside **for the branch first**; the path gets the
@@ -2044,6 +2067,140 @@ fn render_remote_context(
             },
         }),
     ]
+}
+
+/// A guide bar's tone as a color: the title and the top hairline.
+fn program_color(tone: ProgramTone, theme: &Theme) -> LinearRgba {
+    match tone {
+        ProgramTone::Info => theme.info_linear(),
+    }
+}
+
+/// Which parts of a guide bar show on `available` columns
+/// ([`program_layout`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProgramLayout {
+    /// The title shows; when it does not, nothing does.
+    title: bool,
+    /// The separator and the detail show after the title.
+    detail: bool,
+    /// The path's budget in characters ([`path_cells`]); `0` = no path.
+    path_budget: usize,
+    /// The hint's context-local start column; `None` = dropped.
+    hint: Option<usize>,
+}
+
+/// A guide bar's layout: `{title} · {detail}  {path}` from the left, the
+/// hint right-aligned.
+///
+/// **What drops first is what the user needs least**: the hint (how to
+/// leave — the program's own prompt usually says it too), then the path is
+/// shortened from the left (its tail names the interpreter) and dropped,
+/// then the detail; **the title is never shortened** — a cut version
+/// (`Python 3.1…`) reads as another one, the remote host's rule. A title
+/// that does not fit leaves the row empty; the hairline still says the band
+/// is a program's. Monotonic: a part that dropped does not come back when
+/// a more important one drops in turn.
+fn program_layout(bar: &ProgramBar, available: usize) -> ProgramLayout {
+    let none = ProgramLayout {
+        title: false,
+        detail: false,
+        path_budget: 0,
+        hint: None,
+    };
+    let title = bar.title.chars().count();
+    if title == 0 || title > available {
+        return none;
+    }
+    let detail_chars = bar.detail.chars().count();
+    let detail_cols = if detail_chars == 0 {
+        0
+    } else {
+        PROGRAM_DETAIL.chars().count() + detail_chars
+    };
+    if title + detail_cols > available {
+        return ProgramLayout {
+            title: true,
+            ..none
+        };
+    }
+    let head = title + detail_cols;
+    let path = bar.path.chars().count();
+    let path_cols = if path == 0 {
+        0
+    } else {
+        REMOTE_GAP.chars().count() + path
+    };
+    let hint = bar.hint.chars().count();
+    let placed = ProgramLayout {
+        title: true,
+        detail: detail_chars > 0,
+        path_budget: path,
+        hint: None,
+    };
+    if hint > 0 && head + path_cols + STATS_GAP + hint <= available {
+        return ProgramLayout {
+            hint: Some(available - hint),
+            ..placed
+        };
+    }
+    ProgramLayout {
+        path_budget: if path == 0 {
+            0
+        } else {
+            available.saturating_sub(head + REMOTE_GAP.chars().count())
+        },
+        ..placed
+    }
+}
+
+/// The context row's **program** form ([`DockContext::program`]): the
+/// title in the bar's tone (`info`, the unmarked remote host's color — both
+/// bars are the same kind of guide), the separator quiet, the detail dim,
+/// the path quiet (a location, the remote path's quieter tier) and the
+/// hint dim; [`program_layout`] decides what shows.
+fn render_program(
+    bar: &ProgramBar,
+    theme: &Theme,
+    available: usize,
+    row: u16,
+    sink: &mut impl FnMut(Cell),
+) {
+    let layout = program_layout(bar, available);
+    if !layout.title {
+        return;
+    }
+    let tone = program_color(bar.tone, theme);
+    let (dim, quiet) = (theme.dim_linear(), theme.quiet_linear());
+    let (shows_path, path) = path_cells(&bar.path, layout.path_budget, quiet, quiet);
+    let line = bar
+        .title
+        .chars()
+        .map(|ch| (ch, tone))
+        .chain(
+            layout
+                .detail
+                .then(|| {
+                    PROGRAM_DETAIL
+                        .chars()
+                        .map(|ch| (ch, quiet))
+                        .chain(bar.detail.chars().map(|ch| (ch, dim)))
+                })
+                .into_iter()
+                .flatten(),
+        )
+        .chain(
+            shows_path
+                .then(|| REMOTE_GAP.chars().map(|ch| (ch, quiet)))
+                .into_iter()
+                .flatten(),
+        )
+        .chain(path);
+    emit_context(line, available, row, sink);
+    if let Some(start) = layout.hint {
+        let hint = bar.hint.chars().map(|ch| (ch, dim));
+        emit_context_at(start, hint, available, row, sink);
+    }
 }
 
 /// One of the load indicator's three values.
@@ -4223,6 +4380,7 @@ mod tests {
             stats: None,
             sign_in: None,
             remote_setup: None,
+            program: None,
         }
     }
 
@@ -4948,6 +5106,153 @@ mod tests {
                 .chars()
                 .filter(|ch| !ch.is_ascii())
                 .all(|ch| UPLOAD_GLYPHS.contains(&ch))
+        );
+    }
+
+    /// A program's guide bar; the local path and branch are filled, so the
+    /// bar must hide them.
+    fn program(title: &str, detail: &str, path: &str, hint: &str) -> DockContext {
+        DockContext {
+            program: Some(ProgramBar {
+                title: title.into(),
+                detail: detail.into(),
+                path: path.into(),
+                hint: hint.into(),
+                tone: ProgramTone::Info,
+            }),
+            ..context("/Users/me/proj", "main")
+        }
+    }
+
+    /// The band's context row alone (a raw program's band) at `cols`: the
+    /// row's text, its cells and the surface.
+    fn program_row(context: &DockContext, cols: u16) -> (String, Vec<Cell>, Dock) {
+        let mut cells = Vec::new();
+        let (dock, _, rows) = render_with(
+            &live("", "", "", 0),
+            context,
+            None,
+            &THEME,
+            same(cols),
+            Some(0),
+            None,
+            false,
+            None,
+            None,
+            None,
+            &mut Vec::new(),
+            &mut Clusters::default(),
+            |cell| cells.push(cell),
+            |_| (),
+        );
+        assert_eq!(rows, 0, "no input row to scroll");
+        (row_text(&cells, 0), cells, dock)
+    }
+
+    #[test]
+    fn a_program_bar_takes_the_context_row_and_the_edge() {
+        // `Python 3.14.5 · venv  ~/proj/.venv/bin/python3` on the left, the
+        // hint right-aligned; the title in the bar's tone, the detail dim,
+        // the path quiet, the hint dim; the top hairline `info`.
+        let context = program(
+            "Python 3.14.5",
+            "venv",
+            "~/proj/.venv/bin/python3",
+            "⌃D exit",
+        );
+        let (row, cells, dock) = program_row(&context, 60);
+        let left = "Python 3.14.5 · venv  ~/proj/.venv/bin/python3";
+        assert_eq!(row, format!("{left:<53}⌃D exit"));
+        assert_eq!(color_at(&cells, 0, 0), Some(THEME.info_linear()), "title");
+        assert_eq!(color_at(&cells, 0, 7), Some(THEME.info_linear()), "version");
+        assert_eq!(color_at(&cells, 0, 14), Some(THEME.quiet_linear()), "·");
+        assert_eq!(color_at(&cells, 0, 16), Some(THEME.dim_linear()), "detail");
+        assert_eq!(color_at(&cells, 0, 22), Some(THEME.quiet_linear()), "path");
+        assert_eq!(
+            color_at(&cells, 0, 45),
+            Some(THEME.quiet_linear()),
+            "path's tail"
+        );
+        assert_eq!(color_at(&cells, 0, 53), Some(THEME.dim_linear()), "hint");
+        assert_eq!(dock.edge, THEME.info_linear());
+        assert_eq!(dock.sigil, None, "no input row, no prompt mark");
+        assert_eq!(dock.caret, None);
+        assert_eq!(dock.buttons, [None; 2]);
+        // Nothing of the local context: the bar is the row.
+        assert!(!row.contains("main") && !row.contains("/Users/me"), "{row}");
+        // No detail, no separator; no path, no gap.
+        let bare = program("Node v22.13.0", "", "", "⌃D exit");
+        let (row, _, _) = program_row(&bare, 30);
+        assert_eq!(row, format!("{:<23}⌃D exit", "Node v22.13.0"));
+    }
+
+    #[test]
+    fn a_narrow_program_bar_drops_the_hint_then_shortens_the_path() {
+        let context = program(
+            "Node v22.13.0",
+            "nvm",
+            "~/.nvm/versions/node/v22.13.0/bin/node",
+            "⌃D exit",
+        );
+        let full = "Node v22.13.0 · nvm  ~/.nvm/versions/node/v22.13.0/bin/node";
+        // Everything fits with the hint's two-column gap…
+        let width = full.chars().count() + 2 + "⌃D exit".chars().count();
+        let (row, _, _) = program_row(&context, width as u16);
+        assert_eq!(row, format!("{full}  ⌃D exit"));
+        // …one column less and the hint drops first: the path stays whole.
+        let (row, _, _) = program_row(&context, width as u16 - 1);
+        assert_eq!(row, full);
+        // Then the path is shortened from the left, its tail kept.
+        let (row, _, _) = program_row(&context, 40);
+        assert_eq!(row, "Node v22.13.0 · nvm  …/v22.13.0/bin/node");
+        assert_eq!(row.chars().count(), 40);
+        // The path goes before the detail, and does not come back when the
+        // detail drops in turn.
+        let (row, _, _) = program_row(&context, 19);
+        assert_eq!(row, "Node v22.13.0 · nvm");
+        let (row, _, _) = program_row(&context, 18);
+        assert_eq!(row, "Node v22.13.0");
+        // The title is never shortened: no room for it, nothing at all.
+        let (row, cells, _) = program_row(&context, 13);
+        assert_eq!(row, "Node v22.13.0");
+        assert_eq!(cells.len(), 12, "one space, no cell");
+        let (row, cells, dock) = program_row(&context, 12);
+        assert_eq!(row, "");
+        assert!(cells.is_empty());
+        assert_eq!(dock.edge, THEME.info_linear(), "the edge still says where");
+    }
+
+    #[test]
+    fn the_remote_status_bar_and_the_upload_row_come_before_a_program_bar() {
+        let bar = program("Python 3.14.5", "", "/usr/bin/python3", "⌃D exit");
+        let remote = DockContext {
+            program: bar.program.clone(),
+            ..remote("prod", "/srv/app")
+        };
+        let (row, _, _) = program_row(&remote, 60);
+        assert_eq!(row, "⇄ prod  /srv/app");
+        let upload = DockContext {
+            program: bar.program.clone(),
+            remote: None,
+            ..uploading("Connection closed", 0, None)
+        };
+        let (row, _, _) = program_row(&upload, 60);
+        assert_eq!(row, "⇄ prod  Connection closed");
+    }
+
+    #[test]
+    fn the_program_bar_is_the_one_the_atlas_checks() {
+        // `bt-atlas` asks by hand about the guide bar's non-ASCII characters
+        // in the small class (`the_program_bar_has_no_box_in_the_small_class`):
+        // the separator and the shortening mark drawn here, and the hints'
+        // vocabulary (`bt-shell`'s `program` checks its strings against this).
+        assert_eq!(PROGRAM_GLYPHS, ['⌃', '·', '…']);
+        assert!(
+            PROGRAM_DETAIL
+                .chars()
+                .chain(std::iter::once(ELLIPSIS))
+                .filter(|ch| !ch.is_ascii())
+                .all(|ch| PROGRAM_GLYPHS.contains(&ch))
         );
     }
 

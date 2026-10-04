@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bt_core::{
-    FontOptions, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
+    FontOptions, ProgramBar, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
     SearchStatus, Session, SessionOptions, Settings, TabId, Theme, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
@@ -73,6 +73,7 @@ use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::password_sheet::PasswordSheet;
 use crate::preview::PreviewTicket;
+use crate::program;
 use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
@@ -2464,6 +2465,9 @@ impl TerminalPane {
     /// **Cheapest first**: an output-heavy command that never goes raw (a
     /// build, `tail -f`) is asked once per delay while it prints, so the
     /// atomic read and the one `tcgetattr` come before the process table.
+    ///
+    /// **Once marked, the program is recognized** ([`Self::recognize_program`]):
+    /// the arm drops with the mark, so this runs once per command.
     pub(crate) fn probe_program(&self) -> bool {
         let (Some(session), Some(&parent)) =
             (self.ivars().session.get(), self.ivars().shell_parent.get())
@@ -2481,7 +2485,55 @@ impl TerminalPane {
         {
             return true;
         }
-        session.note_raw(jobs::tty_modes).is_none()
+        let Some(command) = session.note_raw(jobs::tty_modes) else {
+            return true;
+        };
+        self.recognize_program(session, parent, command);
+        false
+    }
+
+    /// The marked program's guide bar ([`program::find`]): written at once
+    /// with what the process table says (main thread, system calls only —
+    /// the group's members, their exec records and the program's start
+    /// time), then by a background job on a thread of its own: completed
+    /// with the interpreter's `--version` (killed past its timeout) and a
+    /// venv's `pyvenv.cfg` ([`program::details`]), and taken away when the
+    /// program exits ([`program::wait_for_exit`]) — the command can go on
+    /// without it (`python3; make`). Each answer comes back on the main
+    /// queue, finds the pane by its id and is written for the **same
+    /// generation**: a command that ended in between rejects it
+    /// ([`bt_core::Session::set_program`]). An unrecognized program writes
+    /// nothing — no band. A timed run never gets here: its probe is never
+    /// armed ([`ShellWake::command_started`]'s gate).
+    fn recognize_program(&self, session: &Session, parent: ShellParent, command: u64) {
+        let home = crate::child::home();
+        let Some(found) = program::find(parent, session.child_pid(), &SystemTable, home.as_deref())
+        else {
+            return;
+        };
+        session.set_program(command, Some(&found.bar(None)));
+        let start = jobs::start_time(found.pid);
+        let (id, lookup) = (self.ivars().id, self.ivars().lookup);
+        let post = move |bar: Option<ProgramBar>| {
+            DispatchQueue::main().exec_async(move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(pane) = lookup(mtm, id)
+                    && let Some(session) = pane.session()
+                {
+                    session.set_program(command, bar.as_ref());
+                }
+            });
+        };
+        // No thread, no details: the bar stays with what was known.
+        let _ = std::thread::Builder::new()
+            .name("program details".into())
+            .spawn(move || {
+                let details = program::details(&found);
+                post(Some(found.bar(Some(&details))));
+                program::wait_for_exit(found.pid, start);
+                post(None);
+            });
     }
 
     /// The bootstrap's proof. **First**, whatever the probe says,

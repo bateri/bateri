@@ -22,6 +22,18 @@ of every installed copy. A version without a section is not released.
   return to the prompt, as it does after vim. The terminal's size does not
   change, so the program is never asked to redraw. Commands that only print
   (a build, `ls -R`, `npm run dev`) keep the dock as before.
+- **A REPL gets a one-line guide in the dock's place.** In the Python, Node,
+  Bun, Deno and Ruby (`irb`, `pry`) REPLs — `ipython` and `bpython` too — the
+  dock shrinks to a single line, like the ssh status bar, that says which
+  interpreter you are in and where it comes from:
+  `Python 3.14.5 · venv  ~/proj/.venv/bin/python3` or
+  `Node v22.13.0 · nvm  ~/.nvm/versions/node/v22.13.0/bin/node`, with how to
+  leave (`⌃D exit`) on the right. The version manager is named when the
+  interpreter is one's — a venv, conda, pyenv, uv, nvm, volta, fnm, asdf,
+  rbenv or mise. On a narrow window the exit hint goes first, then the path
+  is shortened from the left. Programs that merely run on an interpreter (a
+  script, a coding agent like codex or gemini) get no guide; the dock just
+  steps aside for them.
 
 ## [0.5.0] - 2026-10-04
 

@@ -618,6 +618,68 @@ pub struct DockContext {
     /// remote state like [`Self::remote_cwd`]: written whether or not the probe
     /// has landed, cleared with it.
     pub remote_setup: Option<RemoteSetupFault>,
+    /// The guide bar of the running program that reads the keyboard itself
+    /// (a REPL), shown in the context row's place while the band is the
+    /// context row alone; `None` for every other command — an unrecognized
+    /// program gets no band at all.
+    ///
+    /// Its writer is `bt-shell`'s program probe ([`crate::Session::set_program`],
+    /// generation gated and only while the raw bit holds); it belongs to the
+    /// command like the remote state and goes with it on `C`, `D` and `A`
+    /// ([`Self::clear_remote`]). Inside the context for [`Self::remote`]'s
+    /// reason: the frame path takes it in the same `clone_from`.
+    pub program: Option<ProgramBar>,
+}
+
+/// What a program's guide bar says ([`DockContext::program`]): which
+/// program, where it comes from and how to leave it —
+/// `Python 3.14.5 · venv  ~/proj/.venv/bin/python3   ⌃D exit`.
+///
+/// **Text, already decided**: `bt-shell` recognizes the program from the
+/// process table and writes these strings; this side only lays them out
+/// (`dock::render_context`) — which part drops first on a narrow row is
+/// the drawing's rule, what the parts say is the recognizer's.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ProgramBar {
+    /// The program and its version (`Python 3.14.5`, `Node v22.13.0`);
+    /// never shortened — a cut version reads as another one.
+    pub title: String,
+    /// What manages it (`venv`, `nvm`, `conda base`); empty when nothing
+    /// does.
+    pub detail: String,
+    /// Where it runs from, `~`-shortened; empty when unknown. Shortened from
+    /// the left on a narrow row.
+    pub path: String,
+    /// How to leave (`⌃D exit`), right-aligned; the first part to drop.
+    pub hint: String,
+    pub tone: ProgramTone,
+}
+
+/// The color a guide bar takes — its title and the dock's top hairline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProgramTone {
+    /// The theme's `info`: the remote status bar's color for an unmarked
+    /// host, so both bars read as the same kind of guide.
+    #[default]
+    Info,
+}
+
+impl Clone for ProgramBar {
+    fn clone(&self) -> Self {
+        let mut fresh = Self::default();
+        fresh.clone_from(self);
+        fresh
+    }
+
+    /// The frame path takes the context every frame with `clone_from`: a
+    /// derived `Clone` would reallocate four strings every frame.
+    fn clone_from(&mut self, source: &Self) {
+        self.title.clone_from(&source.title);
+        self.detail.clone_from(&source.detail);
+        self.path.clone_from(&source.path);
+        self.hint.clone_from(&source.hint);
+        self.tone = source.tone;
+    }
 }
 
 /// Why the remote bootstrap (`assets/shell/remote/`) did not start the
@@ -899,6 +961,7 @@ impl Clone for DockContext {
         self.stats = source.stats;
         self.sign_in = source.sign_in;
         self.remote_setup = source.remote_setup;
+        self.program.clone_from(&source.program);
     }
 }
 
@@ -910,7 +973,10 @@ impl DockContext {
 
     /// Deletes the remote state; `true` **if the title's input changed** (there was a
     /// host). The remote slot goes too: it is not the next session's directory.
+    /// So does the program's guide bar: like the remote state it belongs to
+    /// the command, and the same three marks end it.
     fn clear_remote(&mut self) -> bool {
+        self.program = None;
         self.remote_cwd.clear();
         self.remote_setup = None;
         self.remote_mark = HostMark::None;
@@ -2484,6 +2550,31 @@ impl ShellLog {
             }
         }
         changed
+    }
+
+    /// Writes the running program's guide bar; `true` **if it changed**.
+    ///
+    /// The gate is in the caller ([`crate::Session::set_program`]: generation
+    /// and the raw bit); only the write is here. **A bar carrying a control
+    /// character is ignored as a whole**, [`Self::set_remote`]'s rule: its
+    /// strings come from the process table — an argv, an environment
+    /// variable, a path the user named — and a line break or ESC would be
+    /// drawn as a box. The wrong direction is safe: no bar, the band stays
+    /// as it is without one.
+    pub(crate) fn set_program(&mut self, bar: Option<&ProgramBar>) -> bool {
+        let bar = bar.filter(|bar| {
+            ![&bar.title, &bar.detail, &bar.path, &bar.hint]
+                .iter()
+                .any(|text| text.chars().any(char::is_control))
+        });
+        if self.context.program.as_ref() == bar {
+            return false;
+        }
+        match (bar, &mut self.context.program) {
+            (Some(bar), Some(slot)) => slot.clone_from(bar),
+            (bar, slot) => *slot = bar.cloned(),
+        }
+        true
     }
 
     /// Writes the host marks' pattern list and re-resolves the active remote host's
@@ -7938,6 +8029,80 @@ mod tests {
         });
         assert_eq!(log.running_command(), None);
         assert!(!log.raw_active());
+    }
+
+    fn python_bar() -> ProgramBar {
+        ProgramBar {
+            title: "Python 3.14.5".into(),
+            detail: "venv".into(),
+            path: "~/proj/.venv/bin/python3".into(),
+            hint: "⌃D exit".into(),
+            tone: ProgramTone::Info,
+        }
+    }
+
+    #[test]
+    fn a_program_bar_belongs_to_its_command() {
+        let mut log = running_log();
+        log.raw = log.running_command();
+        let bar = python_bar();
+        assert!(log.set_program(Some(&bar)));
+        assert!(!log.set_program(Some(&bar)), "the same bar is no change");
+        // A bar carrying a control character is no bar: its strings come
+        // from an argv or an environment variable.
+        for bad in [
+            ProgramBar {
+                path: "/tmp/a\nb/python3".into(),
+                ..python_bar()
+            },
+            ProgramBar {
+                detail: "\u{1b}[31mvenv".into(),
+                ..python_bar()
+            },
+        ] {
+            assert!(log.set_program(Some(&bad)), "{bad:?}");
+            assert_eq!(log.context.program, None, "{bad:?}");
+            assert!(!log.set_program(Some(&bad)), "still none: {bad:?}");
+            assert!(log.set_program(Some(&bar)));
+        }
+        // A nested shell's identity-less marks and a second `C` leave it.
+        for mark in [
+            Mark::PromptStart { id: None },
+            Mark::PromptEnd,
+            Mark::CommandStart,
+            Mark::CommandEnd {
+                exit: Some(1),
+                id: None,
+            },
+        ] {
+            log.apply(mark);
+            assert_eq!(log.context.program.as_ref(), Some(&bar), "{mark:?}");
+        }
+        // Our `D`, our `A` and the next `C` each end it.
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert_eq!(log.context.program, None, "`D`");
+        assert!(log.set_program(Some(&bar)));
+        log.apply(Mark::PromptStart { id: Some(2) });
+        assert_eq!(log.context.program, None, "`A`");
+        log.apply(Mark::PromptEnd);
+        assert!(log.set_program(Some(&bar)));
+        log.apply(Mark::CommandStart);
+        assert_eq!(log.context.program, None, "`C`");
+    }
+
+    #[test]
+    fn the_context_copy_keeps_the_program_bar() {
+        // The frame path's `clone_from`: the bar crosses with the context.
+        let mut log = running_log();
+        assert!(log.set_program(Some(&python_bar())));
+        let mut copy = DockContext::default();
+        copy.clone_from(&log.context);
+        assert_eq!(copy.program, Some(python_bar()));
+        copy.clone_from(&DockContext::default());
+        assert_eq!(copy.program, None);
     }
 
     #[test]

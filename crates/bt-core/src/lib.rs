@@ -64,9 +64,10 @@ mod wake;
 pub use cluster::{ClusterId, Clusters};
 pub use color::{LinearRgba, Theme};
 pub use dock::{
-    Dock, DockBudget, DockButton, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells, STATS_GLYPHS,
-    STATS_THRESHOLDS, StatsLevel, StatsMetric, StatsThreshold, TEXT_COL as DOCK_TEXT_COL,
-    UPLOAD_GLYPHS, sign_in_span, stats_at, stats_span, transfer_button_at, transfer_button_span,
+    Dock, DockBudget, DockButton, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells,
+    PROGRAM_GLYPHS, STATS_GLYPHS, STATS_THRESHOLDS, StatsLevel, StatsMetric, StatsThreshold,
+    TEXT_COL as DOCK_TEXT_COL, UPLOAD_GLYPHS, sign_in_span, stats_at, stats_span,
+    transfer_button_at, transfer_button_span,
 };
 pub use identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
 pub use input::{Arrow, MouseButton, MouseModifiers};
@@ -98,9 +99,9 @@ pub use settings::{
 };
 pub use shell::{
     ButtonState, DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor,
-    HighlightStyle, Reconnect, RemoteKind, RemoteSetupFault, RemoteStats, RemoteTarget,
-    STATS_HISTORY, ShellPhase, ShellState, SignIn, StatsForm, Transfer, TransferAction,
-    TransferControls, TransferTone, TtyModes,
+    HighlightStyle, ProgramBar, ProgramTone, Reconnect, RemoteKind, RemoteSetupFault, RemoteStats,
+    RemoteTarget, STATS_HISTORY, ShellPhase, ShellState, SignIn, StatsForm, Transfer,
+    TransferAction, TransferControls, TransferTone, TtyModes,
 };
 pub use wake::Wake;
 

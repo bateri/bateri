@@ -337,8 +337,9 @@ pub struct Cursor {
     ///
     /// The band has three states and this bit is the third: input rows and
     /// the context row (today's dock), the context row alone (`input_rows ==
-    /// 0`: a remote session, or the upload row that a raw program does not
-    /// hide), and none. The alternate screen and a remote session come
+    /// 0`: a remote session, a recognized program's guide bar
+    /// ([`Session::set_program`]), or the upload row that a raw program does
+    /// not hide), and none. The alternate screen and a remote session come
     /// before it. [`Cursor::band_rows`] is the one reading of the three.
     pub band_hidden: bool,
     /// The caret's **shape** — the application's DECSCUSR or the setting's default.
@@ -4564,9 +4565,10 @@ impl Session {
         // see the same remote state — a `D` falling between separate rounds would
         // yield a dock caret in a zero-row band.
         //
-        // **The raw program and the upload row are from this round too**, for the
-        // same reason: the band's state and the caret's owner must see one ledger.
-        let (suppressed_block, caret, needed_rows, end_left, remote, raw, transfer) = {
+        // **The raw program, its guide bar and the upload row are from this round
+        // too**, for the same reason: the band's state and the caret's owner must
+        // see one ledger.
+        let (suppressed_block, caret, needed_rows, end_left, remote, raw, transfer, program) = {
             let now = Instant::now();
             let mut log = lock(&self.shell);
             let end_left = log.expire_end(now);
@@ -4583,6 +4585,7 @@ impl Session {
                 log.context.remote.is_some(),
                 log.raw_active(),
                 log.context.transfer.is_some(),
+                log.context.program.is_some(),
             )
         };
         blocks.anchors.clear();
@@ -5663,13 +5666,15 @@ impl Session {
             } else {
                 budget.fit(needed_rows, grid_rows)
             },
-            // **No band** for that program, unless the upload row is shown: the
-            // row a transfer writes stays visible until it lingers out, so the
-            // band keeps the context row alone for it — the remote session's
-            // shape. `raw` already excludes a remote session
-            // (`ShellLog::raw_active`). With `input_rows` above, the one place
-            // both fields are written: `band_hidden` implies zero input rows.
-            band_hidden: self.dock && !alt_screen && raw && !transfer,
+            // **No band** for that program, unless the upload row is shown or
+            // the program was recognized: the row a transfer writes stays
+            // visible until it lingers out, and a recognized program's guide
+            // bar (`Session::set_program`) stands in the context row — either
+            // keeps the context row alone, the remote session's shape. `raw`
+            // already excludes a remote session (`ShellLog::raw_active`). With
+            // `input_rows` above, the one place both fields are written:
+            // `band_hidden` implies zero input rows.
+            band_hidden: self.dock && !alt_screen && raw && !transfer && !program,
             // The shape was read **before** the loop (`cursor_shape`) and comes from
             // there: `RenderableCursor` resolves it from `Term::cursor_style()`, i.e.
             // DECSCUSR and the setting's default are already merged. A second
@@ -8292,6 +8297,35 @@ impl Session {
             }
         };
         if repaint {
+            self.request_frame();
+        }
+        changed
+    }
+
+    /// Writes the running program's guide bar ([`crate::DockContext::program`]):
+    /// a program that reads the keyboard itself and that `bt-shell`
+    /// recognized (a REPL) — the band keeps the context row alone and the bar
+    /// stands in it, where an unrecognized one has no band at all. `true` if
+    /// it **changed**; then a frame is requested ([`Session::set_remote`]'s
+    /// pattern), an equal bar requests nothing.
+    ///
+    /// **The stale-answer gate is [`Session::set_remote`]'s, and one more
+    /// bit**: `command` must be the generation that is still running **and**
+    /// marked raw ([`Session::note_raw`]) with no remote session on — the
+    /// bit's one reading, `raw_active`, says both for the running
+    /// generation; a bar with a live input row under it would stand in a
+    /// band it does not describe. The recognizer writes up to three times
+    /// (what it knows at once, the version from a background job, `None`
+    /// when the program exits before the command ends); a command that ended
+    /// in between rejects the later ones. `C`, `D` and `A` erase it too.
+    ///
+    /// The leaf lock drops before `request_frame`; `Term` is not touched.
+    pub fn set_program(&self, command: u64, bar: Option<&crate::ProgramBar>) -> bool {
+        let changed = {
+            let mut log = lock(&self.shell);
+            log.running_command() == Some(command) && log.raw_active() && log.set_program(bar)
+        };
+        if changed {
             self.request_frame();
         }
         changed
@@ -16085,6 +16119,99 @@ mod tests {
             "the alternate screen's shape: {cursor:?}"
         );
         assert_eq!(cursor.input_rows, 1);
+    }
+
+    /// A recognized program's guide bar: written only for the running
+    /// generation marked raw; the band keeps the context row alone and the
+    /// bar stands in it; our `D` takes it with the command.
+    #[test]
+    fn a_program_bar_keeps_the_context_row_for_its_command() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}echo foo bar{}'; read _; \
+                 printf '\\033]133;C\\007'; read _; \
+                 printf '\\033]133;D;0;bt_block=1\\007{}'; sleep 5",
+                anchored_prompt(1),
+                mirror("ZWNobyBmb28gYmFy", 12),
+                anchored_prompt(2),
+            ),
+            Arc::clone(&wake),
+        );
+        let raw = |_: std::os::fd::BorrowedFd<'_>| {
+            Some(TtyModes {
+                canonical: false,
+                echo: false,
+            })
+        };
+        let bar = crate::ProgramBar {
+            title: "Python 3.14.5".into(),
+            detail: "venv".into(),
+            path: "~/p/.venv/bin/python3".into(),
+            hint: "⌃D exit".into(),
+            tone: crate::ProgramTone::Info,
+        };
+        wait_mirror(&session, DockStatus::Live);
+        assert!(!session.set_program(1, Some(&bar)), "no command runs");
+
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(
+            !session.set_program(command, Some(&bar)),
+            "not raw: the band has its input row"
+        );
+        assert_eq!(session.note_raw(raw), Some(command));
+        assert!(
+            !session.set_program(command + 1, Some(&bar)),
+            "another generation's answer"
+        );
+        let wakes = wake.wait_wakes(0, Duration::ZERO);
+        assert!(session.set_program(command, Some(&bar)));
+        assert!(
+            wake.wait_wakes(wakes + 1, Duration::from_secs(5)) > wakes,
+            "the band changes: a frame"
+        );
+        assert!(!session.set_program(command, Some(&bar)), "the same bar");
+
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert!(!cursor.band_hidden, "{cursor:?}");
+        assert_eq!(cursor.band_rows(), Some(0), "the context row alone");
+        assert!(!cursor.caret_in_dock, "the caret is the program's");
+        let mut row = String::new();
+        let dock = session.dock(
+            DockCols {
+                grid: 40,
+                context: 40,
+            },
+            cursor.band_rows(),
+            &mut DockState::default(),
+            &mut DockContext::default(),
+            cursor.caret_in_dock,
+            &mut Vec::new(),
+            &mut Clusters::default(),
+            |cell| row.extend(cell.ch),
+            |_| (),
+        );
+        // Spaces print no cell; forty columns shorten the path from the left.
+        assert_eq!(row, "Python3.14.5·venv….venv/bin/python3");
+        assert_eq!(dock.edge, Theme::BATERI.info_linear());
+
+        // Without a bar the band goes again.
+        assert!(session.set_program(command, None));
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert!(cursor.band_hidden);
+        assert!(session.set_program(command, Some(&bar)));
+
+        // Our `D` ends the command and the bar with it.
+        session.write(b"\n");
+        frame_until(&session, BUDGET, |_, cursor| {
+            !cursor.band_hidden && cursor.input_rows > 0
+        });
+        assert!(
+            !session.set_program(command, Some(&bar)),
+            "the command ended"
+        );
     }
 
     /// The dock's cell count for a band, with the frame's caret answer.
