@@ -584,12 +584,19 @@ impl HolderKind {
 }
 
 /// Per holder, whether it was handed its panes deliberately: any of them
-/// carries a frozen screen — only a freeze makes one, a crash bundle's
-/// screens are empty.
+/// carries a frozen screen — only a freeze makes one; a crash bundle's
+/// screens, when it has any, were rebuilt from the journal and say so
+/// (`HeldPane::crashed`).
 fn deliberate_holders(arrival: &Arrival) -> Vec<bool> {
-    let mut deliberate = vec![false; arrival.holders.len()];
-    for (link, pane) in &arrival.panes {
-        if PaneState::decode(&pane.blob).is_some_and(|state| !state.vt.is_empty())
+    deliberate_of(arrival.holders.len(), &arrival.panes)
+}
+
+/// [`deliberate_holders`] over `holders` holders and their panes.
+fn deliberate_of(holders: usize, panes: &[(usize, HeldPane)]) -> Vec<bool> {
+    let mut deliberate = vec![false; holders];
+    for (link, pane) in panes {
+        if !pane.crashed
+            && PaneState::decode(&pane.blob).is_some_and(|state| !state.vt.is_empty())
             && let Some(slot) = deliberate.get_mut(*link)
         {
             *slot = true;
@@ -2903,12 +2910,21 @@ impl AppDelegate {
     fn spawn_keeper_and_register(&self, keeper: &Keeper) -> bool {
         let mtm = self.mtm();
         if !keeper.spawn(mtm) {
+            self.break_journals();
             return false;
         }
         for pane in self.all_panes() {
             pane.register_with_holder(mtm);
         }
         true
+    }
+
+    /// Every pane's journal breaks: no holder confirms a base any more, so
+    /// the journals would only fill and stall the panes' reading.
+    fn break_journals(&self) {
+        for pane in self.all_panes() {
+            pane.break_journal();
+        }
     }
 
     /// The bound holder of `generation` went away while bound (its
@@ -2920,9 +2936,14 @@ impl AppDelegate {
             return;
         };
         if !keeper.died(generation) {
+            // The run goes on unprotected once the replacements are spent.
+            if !keeper.is_active() {
+                self.break_journals();
+            }
             return;
         }
         if self.settings().keep_running == KeepRunning::Update {
+            self.break_journals();
             return;
         }
         eprintln!("bateri: the holder went away; starting another");
@@ -2942,7 +2963,11 @@ impl AppDelegate {
             keeper::Switch::Spawn => {
                 self.spawn_keeper_and_register(keeper);
             }
-            keeper::Switch::Leave => keeper.leave(),
+            keeper::Switch::Leave => {
+                keeper.leave();
+                // Under `"update"` nothing reads a journal: recording stops.
+                self.break_journals();
+            }
             keeper::Switch::Stay => {}
         }
     }
@@ -6074,6 +6099,22 @@ mod tests {
         );
         pane.ended = ended;
         pane
+    }
+
+    /// A holder handed its panes carries a frozen screen; a crashed one's
+    /// rebuilt screen does not make it deliberate, nor does an empty one.
+    #[test]
+    fn only_a_frozen_screen_marks_a_deliberate_holder() {
+        let frozen = held(pane_state(b"").encode(), false);
+        let mut rebuilt = held(pane_state(b"").encode(), false);
+        rebuilt.crashed = true;
+        let mut screenless = pane_state(b"");
+        screenless.vt.clear();
+        let screenless = held(screenless.encode(), false);
+        assert_eq!(
+            deliberate_of(3, &[(0, frozen), (1, rebuilt), (2, screenless)]),
+            [true, false, false]
+        );
     }
 
     fn pane_state(history: &[u8]) -> PaneState {

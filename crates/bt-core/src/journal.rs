@@ -43,6 +43,13 @@
 //! vte and does not travel. Programs send the character and the repeat in
 //! one write; a cut between them needs a read to end exactly there.
 //!
+//! **After a crash** another process holds what the session left: the
+//! last base it was handed ([`Journal::current_base`], encoded) and the
+//! two streams. [`rebuild`] replays them — every byte recorded, applied or
+//! not, and an open synchronized update applied as a freeze applies it —
+//! into the update handover's parts: the VT, the tail and session
+//! restore's history.
+//!
 //! **The body is the platform's** ([`JournalStore`], the [`crate::PtyOps`]
 //! precedent: `bt-core` has no `libc`): shared memory a holder process
 //! keeps, or the in-process body here ([`Journal::in_memory`]) for the
@@ -64,8 +71,9 @@ use alacritty_terminal::vte::ansi::{self, Handler as _, Timeout as _};
 
 use crate::handler::ClusterHandler;
 use crate::reader::{MAX_LOCKED_READ, READ_BUFFER_SIZE};
-use crate::session::{GridSize, Osc52, TerminalOptions, term_config, wipe};
+use crate::session::{GridSize, Osc52, TerminalOptions, history_of_vt, term_config, wipe};
 use crate::settings::{CaretShape, CursorBlink};
+use crate::shell::{Carried, ShellLog};
 use crate::snapshot::{self, Tail};
 
 /// The journal format's version — the side records' layout and the meaning
@@ -83,6 +91,11 @@ pub(crate) const GATE_ROOM: usize = READ_BUFFER_SIZE + MAX_LOCKED_READ;
 /// read's worth, so output keeps flowing while a compaction runs.
 /// A design constant; the bodies size their streams around it.
 const MARGIN: usize = GATE_ROOM;
+
+/// What a byte stream needs beyond the journal it lets grow before a
+/// compaction: the gate's room and [`MARGIN`]. A body sizes its byte
+/// stream as this plus the journal it wants between compactions.
+pub const HEADROOM: usize = GATE_ROOM + MARGIN;
 
 /// The least journal a compaction waits for. The trigger is "the journal is
 /// as long as the base" — each compaction replays both, so the work stays
@@ -226,7 +239,85 @@ impl Base {
     fn len(&self) -> usize {
         self.vt.len() + self.tail.len()
     }
+
+    /// The base as another process of this build reads it ([`Base::decode`]):
+    ///
+    /// ```text
+    /// "BTJB" | JOURNAL_FORMAT u32 | cols u16 | rows u16
+    /// scrollback u32 | osc52 u8 | cursor u8 | blink u8 | cluster u8 | last_input u8
+    /// at: pty u64, side u64 | vt: len u64, bytes | tail: len u64, bytes
+    /// ```
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 + self.len());
+        out.extend_from_slice(&BASE_MAGIC);
+        out.extend_from_slice(&JOURNAL_FORMAT.to_le_bytes());
+        out.extend_from_slice(&self.cols.to_le_bytes());
+        out.extend_from_slice(&self.rows.to_le_bytes());
+        let mut options = [0u8; SIDE_MAX];
+        // The options' payload is the side record's: one encoding of them.
+        let len = Side::Options(self.options).encode(0, &mut options);
+        out.extend_from_slice(options.get(9..len).unwrap_or_default());
+        out.push(u8::from(self.cluster));
+        out.push(u8::from(self.last_input));
+        out.extend_from_slice(&self.at.pty.to_le_bytes());
+        out.extend_from_slice(&self.at.side.to_le_bytes());
+        for field in [&self.vt, &self.tail] {
+            out.extend_from_slice(&(field.len() as u64).to_le_bytes());
+            out.extend_from_slice(field);
+        }
+        out
+    }
+
+    /// `None` for anything that is not exactly one base of this format.
+    fn decode(bytes: &[u8]) -> Option<Base> {
+        let mut rest = bytes;
+        let mut take = |len: usize| -> Option<&[u8]> {
+            let (head, tail) = rest.split_at_checked(len)?;
+            rest = tail;
+            Some(head)
+        };
+        if take(4)? != BASE_MAGIC || u32::from_le_bytes(take(4)?.try_into().ok()?) != JOURNAL_FORMAT
+        {
+            return None;
+        }
+        let cols = u16::from_le_bytes(take(2)?.try_into().ok()?);
+        let rows = u16::from_le_bytes(take(2)?.try_into().ok()?);
+        let mut record = vec![OPTIONS];
+        record.extend_from_slice(&[0; 8]);
+        record.extend_from_slice(take(7)?);
+        let (Side::Options(options), _, _) = Side::decode(&record)? else {
+            return None;
+        };
+        let flag = |byte: u8| match byte {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        };
+        let cluster = flag(take(1)?[0])?;
+        let last_input = flag(take(1)?[0])?;
+        let pty = u64::from_le_bytes(take(8)?.try_into().ok()?);
+        let side = u64::from_le_bytes(take(8)?.try_into().ok()?);
+        let mut field = || -> Option<Vec<u8>> {
+            let len = u64::from_le_bytes(take(8)?.try_into().ok()?);
+            Some(take(usize::try_from(len).ok()?)?.to_vec())
+        };
+        let vt = field()?;
+        let tail = field()?;
+        rest.is_empty().then_some(Base {
+            vt,
+            tail,
+            last_input,
+            cols,
+            rows,
+            options,
+            cluster,
+            at: JournalCut { pty, side },
+        })
+    }
 }
+
+/// An encoded base's first bytes.
+const BASE_MAGIC: [u8; 4] = *b"BTJB";
 
 /// A change to `Term`'s content that is not a PTY byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -433,6 +524,14 @@ impl Journal {
     pub(crate) fn seed(&self, base: Base) {
         self.base_len.store(base.len(), Ordering::Relaxed);
         *lock(&self.base) = Some(Arc::new(base));
+    }
+
+    /// The current base as another process of this build reads it, with
+    /// where it cut the journal — what a body hands the process that keeps
+    /// it ([`rebuild`]). `None` until the session seeds it.
+    pub fn current_base(&self) -> Option<(JournalCut, Vec<u8>)> {
+        let base = lock(&self.base).clone()?;
+        Some((base.at, base.encode()))
     }
 
     /// The reader loop's wake for [`Journal::release`] and a break.
@@ -643,6 +742,11 @@ impl Journal {
         self.progress.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Both streams as the store keeps them.
+    pub(crate) fn records(&self) -> JournalRecords {
+        self.store.read()
+    }
+
     /// The side records still in the store, decoded.
     pub(crate) fn side_records(&self) -> Vec<Side> {
         let records = self.store.read();
@@ -748,6 +852,84 @@ impl<'a> Replay<'a> {
             progress,
         ))
     }
+
+    /// [`Replay::run`] to the last byte, for [`rebuild`]: every side record
+    /// at its stamp (one past the bytes after them), and an open
+    /// synchronized update applied rather than given up on.
+    fn run_out(self) -> Base {
+        let progress = AtomicU64::new(0);
+        let mut scratch = Scratch::new(self.base, &progress);
+        let start = self.base.at.pty;
+        let mut fed = start;
+        let slice = |from: u64, to: u64| {
+            let (from, to) = ((from - start) as usize, (to - start) as usize);
+            self.bytes.get(from..to).unwrap_or_default()
+        };
+        for side in &self.sides {
+            let stop = side.stamp.clamp(fed, self.limit);
+            scratch.feed(slice(fed, stop));
+            fed = stop;
+            scratch.apply(side.side);
+        }
+        scratch.feed(slice(fed, self.limit));
+        if scratch.in_sync() {
+            scratch.apply(Side::StopSync);
+        }
+        scratch.finish(JournalCut::default(), &progress)
+    }
+}
+
+/// What [`rebuild`] gives: a pane's terminal as it stood at the journal's
+/// last byte, in the update handover's parts.
+#[derive(Debug)]
+pub struct Rebuilt {
+    /// The grid the VT is laid out for.
+    pub cols: u16,
+    pub rows: u16,
+    /// The handover VT — what a freeze's `vt` would have been.
+    pub vt: Vec<u8>,
+    /// The bytes after the parser's last ground state: they go before
+    /// whatever the PTY gives next, as a freeze's `tail`.
+    pub tail: Vec<u8>,
+    /// Session restore's scrollback (`Session::final_history`), for a pane
+    /// whose program did not come back.
+    pub history: Vec<u8>,
+}
+
+/// Rebuilds a pane's terminal from its last base and its journal once the
+/// session is gone — in the process that kept them, after a crash. Every
+/// byte recorded counts, applied or not (the reader took it from the PTY,
+/// nothing gives it again), the side records go in at their stamps, and a
+/// synchronized update still open is applied, as a freeze applies it. `blob`
+/// is the session's state blob (`Session::state_blob`): its shell ledger
+/// says where the history stops, and one that does not decode stops it
+/// before the cursor's line. `None` if `base` is not of this build's format
+/// or the records do not continue it.
+pub fn rebuild(blob: &[u8], base: &[u8], records: &JournalRecords) -> Option<Rebuilt> {
+    let base = Base::decode(base)?;
+    let end = records
+        .bytes_at
+        .checked_add(u64::try_from(records.bytes.len()).ok()?)?;
+    let next = Replay::new(&base, records, end)?.run_out();
+    let mut log = ShellLog::new(next.options.scrollback);
+    if let Some(carried) = Carried::decode(blob) {
+        log.restore(carried, 0);
+    }
+    let history = history_of_vt(
+        &next.vt,
+        next.cols,
+        next.rows,
+        next.cluster,
+        log.history_cut(),
+        &log.saved_stripes(),
+    );
+    Some(Rebuilt {
+        cols: next.cols,
+        rows: next.rows,
+        vt: next.vt,
+        tail: next.tail,
+        history,
+    })
 }
 
 /// The title as `Title`/`ResetTitle` leave it — `Adapter`'s slot, for the
@@ -1115,6 +1297,108 @@ mod tests {
         // An unknown tag and a cut record do not read back.
         assert!(decode_sides(0, &[99; 9]).is_none());
         assert!(decode_sides(0, &stream[..12]).is_none());
+    }
+
+    #[test]
+    fn a_base_reads_back_and_refuses_damage() {
+        let mut base = Base::birth(b"\x1b[1mvt\r\n".to_vec(), 33, 11, options(), true);
+        base.tail = b"\x1b[3".to_vec();
+        base.last_input = true;
+        base.at = JournalCut {
+            pty: 1 << 40,
+            side: 77,
+        };
+        let bytes = base.encode();
+        let back = Base::decode(&bytes).expect("decodes");
+        assert_eq!(back.encode(), bytes);
+        assert_eq!(
+            (
+                back.cols,
+                back.rows,
+                back.options,
+                back.cluster,
+                back.last_input
+            ),
+            (33, 11, options(), true, true)
+        );
+        assert_eq!((back.vt, back.tail, back.at), (base.vt, base.tail, base.at));
+        // Cut short, one byte long, another format or a flag that is no bool.
+        assert!(Base::decode(&bytes[..bytes.len() - 1]).is_none());
+        let mut long = bytes.clone();
+        long.push(0);
+        assert!(Base::decode(&long).is_none());
+        let mut other = bytes.clone();
+        other[4] ^= 0xff;
+        assert!(Base::decode(&other).is_none());
+        let mut flag = bytes;
+        flag[4 + 4 + 4 + 7] = 2;
+        assert!(Base::decode(&flag).is_none());
+    }
+
+    /// The crash's rebuild takes every byte recorded — the last read was
+    /// never applied —, a side record at its stamp, and applies an update
+    /// left open; the half sequence at the end is the tail.
+    #[test]
+    fn a_rebuild_replays_every_byte_and_applies_an_open_update() {
+        use crate::snapshot::tests::readable;
+        let base = Base::birth(b"base\r\n".to_vec(), 20, 6, options(), true);
+        let bytes = b"one\r\ntwo\x1b[?2026hsynced\r\n\x1b[1".to_vec();
+        let resize_at = 5;
+        let mut sides = [0; SIDE_MAX];
+        let len = Side::Resize { cols: 12, rows: 4 }.encode(resize_at, &mut sides);
+        let records = JournalRecords {
+            bytes_at: 0,
+            bytes: bytes.clone(),
+            sides_at: 0,
+            sides: sides[..len].to_vec(),
+        };
+        let rebuilt = rebuild(&[], &base.encode(), &records).expect("rebuilds");
+        assert_eq!((rebuilt.cols, rebuilt.rows), (12, 4));
+
+        // The same by hand: the base, the bytes with the resize between
+        // them, the update applied.
+        let progress = AtomicU64::new(0);
+        let mut by_hand = Scratch::new(&base, &progress);
+        by_hand.feed(&bytes[..resize_at as usize]);
+        by_hand.apply(Side::Resize { cols: 12, rows: 4 });
+        by_hand.feed(&bytes[resize_at as usize..]);
+        assert!(by_hand.in_sync());
+        by_hand.apply(Side::StopSync);
+        assert_eq!(rebuilt.tail, b"\x1b[1");
+
+        let mut copy = Term::new(
+            term_config(options()),
+            &GridSize::for_spawn(rebuilt.cols, rebuilt.rows),
+            TitleSlot::default(),
+        );
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        let mut last_input = false;
+        parser.advance(
+            &mut ClusterHandler::new(&mut copy, true, &mut last_input),
+            &rebuilt.vt,
+        );
+        assert_eq!(readable(&copy), readable(&by_hand.term));
+        let by_hand = by_hand.finish(JournalCut::default(), &progress);
+        assert_eq!(
+            String::from_utf8_lossy(&rebuilt.vt),
+            String::from_utf8_lossy(&by_hand.vt)
+        );
+        assert!(
+            String::from_utf8_lossy(&rebuilt.vt).contains("synced"),
+            "the open update stayed out"
+        );
+        // No state blob: the history stops before the cursor's line.
+        assert!(!rebuilt.history.is_empty());
+
+        // Records that no longer reach back to the base rebuild nothing.
+        let released = JournalRecords {
+            bytes_at: 3,
+            bytes: bytes[3..].to_vec(),
+            sides_at: 0,
+            sides: Vec::new(),
+        };
+        assert!(rebuild(&[], &base.encode(), &released).is_none());
+        assert!(rebuild(&[], b"not a base", &records).is_none());
     }
 
     #[test]

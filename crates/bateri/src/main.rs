@@ -38,6 +38,11 @@ fn main() -> ExitCode {
     if let Some(code) = bt_shell_macos::hold() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
+    // A bound holder's child after a crash: `bateri compact --fd N`
+    // rebuilds one pane's screen — no GUI, any session, the same reasons.
+    if let Some(code) = bt_shell_macos::compact() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     // An unknown subcommand must not open a window: a typo, or a
     // subcommand of a newer bateri asked of an older one, would otherwise
     // start the whole GUI. Arguments starting with `-` pass —

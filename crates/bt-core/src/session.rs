@@ -6869,23 +6869,44 @@ impl Session {
             let shell = lock(&self.shell);
             (shell.history_cut(), shell.saved_stripes())
         };
-        // Room for every line the VT carries: it holds no more than the
-        // scrollback it was read from.
-        let lines = frozen.vt.iter().filter(|&&byte| byte == b'\n').count();
-        let config = Config {
-            scrolling_history: lines,
-            ..Config::default()
-        };
-        let grid = GridSize::for_spawn(frozen.cols, frozen.rows);
-        let mut term = Term::new(config, &grid, VoidListener);
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        let mut last_input = false;
-        parser.advance(
-            &mut ClusterHandler::new(&mut term, self.cluster, &mut last_input),
+        history_of_vt(
             &frozen.vt,
-        );
-        history_of(&mut term, cut, &stripes)
+            frozen.cols,
+            frozen.rows,
+            self.cluster,
+            cut,
+            &stripes,
+        )
     }
+}
+
+/// [`Session::final_history`] of a terminal known only by its handover VT
+/// (`encode_live`'s): replayed into a scratch `Term` of `cols` × `rows`
+/// — the same screens, links and cursor — and cut by `cut` and `stripes`.
+pub(crate) fn history_of_vt(
+    vt: &[u8],
+    cols: u16,
+    rows: u16,
+    cluster: bool,
+    cut: HistoryCut,
+    stripes: &crate::shell::SavedStripes,
+) -> Vec<u8> {
+    // Room for every line the VT carries: it holds no more than the
+    // scrollback it was read from.
+    let lines = vt.iter().filter(|&&byte| byte == b'\n').count();
+    let config = Config {
+        scrolling_history: lines,
+        ..Config::default()
+    };
+    let grid = GridSize::for_spawn(cols, rows);
+    let mut term = Term::new(config, &grid, VoidListener);
+    let mut parser: ansi::Processor = ansi::Processor::new();
+    let mut last_input = false;
+    parser.advance(
+        &mut ClusterHandler::new(&mut term, cluster, &mut last_input),
+        vt,
+    );
+    history_of(&mut term, cut, stripes)
 }
 
 /// The clear's grid work on any `Term` — the live clear's and the
@@ -23581,6 +23602,12 @@ e\\314\\201.'; sleep 5";
             }
         }
         draw(&lo.session);
+        // What a holder would keep: the base before the last compaction and
+        // the journal after it, with the state blob — rebuilt below, as
+        // `bateri compact` rebuilds it after a crash.
+        let (_, kept_base) = journal.current_base().expect("seeded");
+        let kept_records = journal.records();
+        let kept_blob = lo.session.state_blob();
         if let Some(cut) = journal.compact() {
             journal.release(cut);
         }
@@ -23636,6 +23663,41 @@ e\\314\\201.'; sleep 5";
             "seed {seed}"
         );
         assert_eq!(copy_probed, live_probed, "seed {seed}");
+
+        // The crash's copy: the kept base and journal, rebuilt.
+        let rebuilt =
+            crate::journal::rebuild(&kept_blob, &kept_base, &kept_records).expect("rebuilds");
+        assert_eq!((rebuilt.cols, rebuilt.rows), (base.cols, base.rows));
+        let titles = Titles::default();
+        let mut crash = Term::new(
+            term_config(base.options),
+            &GridSize::for_spawn(rebuilt.cols, rebuilt.rows),
+            titles.clone(),
+        );
+        let mut last_input = false;
+        for bytes in [&rebuilt.vt, &rebuilt.tail] {
+            // A fresh parser for each, the handover's order.
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(
+                &mut ClusterHandler::new(&mut crash, true, &mut last_input),
+                bytes,
+            );
+        }
+        assert_eq!(readable(&crash), live_shown, "seed {seed}: the rebuild");
+        assert_eq!(lock(&titles.0).clone(), live_title, "seed {seed}");
+        let crash_titles = titles.clone();
+        let (crash_vt, crash_probed) =
+            snapshot::encode_live(&mut crash, &move || lock(&crash_titles.0).clone(), &|| ());
+        assert_eq!(
+            String::from_utf8_lossy(&crash_vt),
+            String::from_utf8_lossy(&live_vt),
+            "seed {seed}: the rebuild"
+        );
+        assert_eq!(crash_probed, live_probed, "seed {seed}: the rebuild");
+        assert!(
+            rebuilt.history.ends_with(b"\r\n") || rebuilt.history.is_empty(),
+            "seed {seed}: the history is session restore's"
+        );
     }
 
     #[test]
@@ -23673,6 +23735,24 @@ e\\314\\201.'; sleep 5";
         wait_until("the gate closes", Duration::from_secs(10), || {
             !journal.gate_open()
         });
+        // The read that closed the gate is recorded before it is applied, and
+        // the `pty_read` it is part of may read on: the count is taken once
+        // everything recorded is applied and stays so.
+        wait_until(
+            "the last read was not applied",
+            Duration::from_secs(10),
+            || {
+                let settled = || {
+                    let records = journal.records();
+                    journal.applied_bytes() == records.bytes_at + records.bytes.len() as u64
+                };
+                let before = journal.applied_bytes();
+                settled() && {
+                    std::thread::sleep(Duration::from_millis(50));
+                    settled() && journal.applied_bytes() == before
+                }
+            },
+        );
         // The reader reads no more…
         let applied = journal.applied_bytes();
         std::thread::sleep(Duration::from_millis(300));

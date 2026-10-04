@@ -71,8 +71,9 @@ pub use dock::{
 pub use identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use journal::{
-    JOURNAL_FORMAT, Journal, JournalCut, JournalRecords, JournalStore, JournalStream,
-    STALL as JOURNAL_STALL, due as journal_due,
+    HEADROOM as JOURNAL_HEADROOM, JOURNAL_FORMAT, Journal, JournalCut, JournalRecords,
+    JournalStore, JournalStream, Rebuilt, STALL as JOURNAL_STALL, due as journal_due,
+    rebuild as journal_rebuild,
 };
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,

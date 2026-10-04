@@ -13,7 +13,8 @@
 //! ssh connection a remote job rides on and the askpass wire (`ssh_route`), whether
 //! the user's `ssh` gets the remote shell integration (`ssh_wrap`), what an
 //! outside process may ask about one pane's focus (`focus`), the update's
-//! live handover and its holder process (`handover`), the saved
+//! live handover and its holder process (`handover`), a pane's journal in
+//! shared memory and `bateri compact` (`journal`), the saved
 //! session layout and its file (`restore`), the
 //! process table (`jobs`), the shell's birth (`child`) and file watching
 //! (`watch`).
@@ -35,6 +36,7 @@ pub mod focus;
 pub mod gesture;
 pub mod handover;
 pub mod jobs;
+pub mod journal;
 pub mod keys;
 pub mod links;
 pub mod notices;

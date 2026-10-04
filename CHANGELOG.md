@@ -17,11 +17,15 @@ of every installed copy. A version without a section is not released.
 - **Your programs survive a crash.** If bateri crashes or is forced to quit
   (Activity Monitor, `kill -9`), vim, `npm run dev` and an ssh session keep
   running without a window, and the next bateri takes them back into their
-  windows — the same processes, not restarted copies. The screen does not
-  come back with them yet: a full-screen program such as vim or htop redraws
-  itself at once, a plain shell's screen is gone, and the pane says so in a
-  dim line. This is the new default; a small helper process (`bateri hold`)
-  runs beside bateri to keep the programs somewhere while bateri is gone.
+  windows — the same processes, not restarted copies — with their screens
+  and scrollback as they were at the crash, and whatever they printed while
+  bateri was closed below. This is the new default; a small helper process
+  (`bateri hold`) runs beside bateri to keep the programs somewhere while
+  bateri is gone, and bateri keeps a record of each pane's recent output in
+  memory it shares with that helper (nothing is written to disk). A pane
+  that was already open when you switched away from `"update"` comes back
+  with its program redrawing the screen — vim or htop at once, a plain
+  shell's screen is gone — and the pane says so in a dim line.
 - **Programs can outlive ⌘Q too.** `[terminal] keep_running` (or Settings ›
   General › Keep programs running) chooses `"update"` (only an update keeps
   them, as before), `"crash"` (the default) or `"quit"`: with `"quit"`, ⌘Q

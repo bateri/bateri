@@ -67,6 +67,7 @@ use crate::app::{self, Grid, split_into_grid};
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
+use crate::journal::PaneJournal;
 use crate::keeper::{Keeper, MIRROR_DELAY};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
@@ -1020,6 +1021,10 @@ pub(crate) struct PaneIvars {
     /// its registration ([`TerminalPane::register_with_holder`]): the new
     /// holder must not drain the master while that one still does.
     taken_from: RefCell<Option<PathBuf>>,
+    /// The session's journal in shared memory, for a pane born while a
+    /// bound holder kept the programs: after a crash the holder rebuilds the
+    /// screen from it. `None` for every other pane.
+    journal: RefCell<Option<PaneJournal>>,
     /// The remote generation this pane reported to the masters' registry
     /// ([`Masters::session_started`]); `None` locally.
     ssh_session: Cell<Option<u64>>,
@@ -1442,6 +1447,7 @@ impl TerminalPane {
             masters,
             keeper,
             taken_from: RefCell::new(None),
+            journal: RefCell::new(None),
             ssh_session: Cell::new(None),
             wrap_proof: RefCell::new(WrapProof::default()),
             upload_list: RefCell::new(None),
@@ -1762,13 +1768,7 @@ impl TerminalPane {
             hostname: crate::links::hostname(),
             // A restored pane's scrollback; `None` everywhere else.
             replay,
-            // Only the timed run's `BT_JOURNAL` records a journal so far,
-            // in this process.
-            journal: self
-                .ivars()
-                .run
-                .filter(|run| run.journal)
-                .map(|_| bt_core::Journal::in_memory()),
+            journal: self.open_journal(settings.terminal().scrollback),
         };
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
         // The update's handover: the running program is carried
@@ -1920,50 +1920,111 @@ impl TerminalPane {
         Ok(())
     }
 
+    /// The session's journal at birth: the timed run's `BT_JOURNAL` in this
+    /// process; a region in shared memory while a bound holder keeps the
+    /// programs (it rebuilds the screen after a crash); none otherwise — under
+    /// `"update"` the journal would cost the reader thread for nothing.
+    fn open_journal(&self, scrollback: usize) -> Option<Arc<bt_core::Journal>> {
+        if let Some(run) = self.ivars().run {
+            return run.journal.then(bt_core::Journal::in_memory);
+        }
+        let keeper = self.ivars().keeper.as_deref()?;
+        if !keeper.is_active() {
+            return None;
+        }
+        match PaneJournal::open(scrollback) {
+            Ok(journal) => {
+                let shared = Arc::clone(journal.journal());
+                self.ivars().journal.replace(Some(journal));
+                Some(shared)
+            }
+            Err(error) => {
+                eprintln!("bateri: no journal for a pane ({error}); a crash loses its screen");
+                None
+            }
+        }
+    }
+
+    /// Breaks this pane's journal ([`PaneJournal::break_journal`]): no holder
+    /// will confirm its bases any more — `"update"`, or a holder that cannot
+    /// be replaced. A crash brings the screen back from its program's
+    /// redraw.
+    pub(crate) fn break_journal(&self) {
+        if let Some(journal) = self.ivars().journal.borrow().as_ref() {
+            journal.break_journal();
+        }
+    }
+
     /// Registers this pane with the bound holder ([`Keeper::add`]): a copy
     /// of the master (close-on-exec), the identity, the child and its start
     /// time, the shell's parent and `bt-core`'s state now — a crash right
     /// after still leaves a bundle. A carried-on pane goes unconfirmed, named
     /// by the holder it was taken from, until that holder is acknowledged.
-    /// No VT base: nothing carries it forward between here and a crash
-    /// hours later, and a stale screen must not come back as the whole one.
+    /// A journaled pane sends its region and its current base along
+    /// ([`PaneJournal::register`]), and its later bases follow as the
+    /// compaction makes them; a pane without a journal (born under
+    /// `"update"`, or its journal broke) sends none — a stale screen must not
+    /// come back as the whole one.
     ///
     /// A no-op without a bound holder, for a closed pane, or when the child's
     /// start time or the master's copy cannot be read (the program then ends
-    /// with bateri, as before). Called again for every live pane when a
-    /// holder is (re)spawned.
+    /// with bateri, as before); the journal is then no holder's and frees
+    /// itself ([`PaneJournal::disconnect`]) — a failure of the moment must not
+    /// cost the screen for good, the next registration carries it again.
+    /// Called again for every live pane when a holder is (re)spawned.
     pub(crate) fn register_with_holder(&self, mtm: MainThreadMarker) {
+        if !self.try_register(mtm)
+            && let Some(journal) = self.ivars().journal.borrow().as_ref()
+        {
+            journal.disconnect();
+        }
+    }
+
+    /// [`TerminalPane::register_with_holder`]'s body; `false` if the pane
+    /// was not registered.
+    fn try_register(&self, mtm: MainThreadMarker) -> bool {
         let Some(keeper) = self.ivars().keeper.as_deref() else {
-            return;
+            return false;
         };
         if !keeper.is_active() || self.is_closed() {
-            return;
+            return false;
         }
         let Some(session) = self.session() else {
-            return;
+            return false;
         };
         let Some(&parent) = self.ivars().shell_parent.get() else {
-            return;
+            return false;
         };
         let pid = session.child_pid();
         let Some(start) = jobs::start_time(pid) else {
-            return;
+            return false;
         };
         let Some(master) = session.with_pty_fd(|fd| fd.try_clone_to_owned().ok()) else {
-            return;
+            return false;
         };
-        keeper.add(
-            mtm,
-            crate::handover::BoundPane {
-                tab: self.ivars().tab_id.clone(),
-                pid,
-                start,
-                parent,
-                blob: session.state_blob(),
-                master,
-                taken_from: self.ivars().taken_from.take(),
-            },
-        );
+        let pane = |journal| crate::handover::BoundPane {
+            tab: self.ivars().tab_id.clone(),
+            pid,
+            start,
+            parent,
+            blob: session.state_blob(),
+            master,
+            taken_from: self.ivars().taken_from.take(),
+            journal,
+        };
+        match self.ivars().journal.borrow().as_ref() {
+            Some(journal) => journal.register(|registration| {
+                let bound = registration.map(|registration| crate::handover::BoundJournal {
+                    registration,
+                    journal: Arc::downgrade(journal.journal()),
+                });
+                keeper.add(mtm, pane(bound))
+            }),
+            None => {
+                keeper.add(mtm, pane(None));
+            }
+        }
+        true
     }
 
     /// Sends this pane's current `bt-core` state to the bound holder —

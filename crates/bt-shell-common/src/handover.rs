@@ -18,7 +18,9 @@
 //!   copy of a pane whose program exited ([`jobs::exit_fd`]), so a lost
 //!   release leaks no device. When the connection ends without a goodbye
 //!   (bateri crashed, was force-quit or killed) the holder goes
-//!   **detached**: it builds the bundle from what it was sent last and holds
+//!   **detached**: it builds the bundle from what it was sent last — each
+//!   journaled pane's screen rebuilt by a `bateri compact` child from the
+//!   last base and the pane's journal region ([`crate::journal`]) — and holds
 //!   until a client takes it — without a time limit, because the programs
 //!   are meant to run on. A deliberate handover (quit, update) sends the
 //!   frozen bundle over the live connection instead, and a quiet exit closes
@@ -42,13 +44,15 @@
 //!   panes: count u32, then per pane:
 //!     'F' (one byte carrying the master by SCM_RIGHTS)
 //!     tab: len u32, UUID text | pid u32 | start u64
-//!     flags u32 (bit 0: ended, bit 1: cut — the oldest bytes were dropped)
+//!     flags u32 (bit 0: ended, bit 1: cut — the oldest bytes were dropped,
+//!               bit 2: crashed — its bateri died and the holder rebuilt
+//!               the screen from the pane's journal)
 //!     blob: len u64, bytes | buffer: len u64, bytes
 //!   ```
 //!
 //!   Integers are little-endian. A reader ignores a flag bit it does not
-//!   know, so a bit is added without a new version (the cut bit was). The
-//!   client opens with [`TAKE`] and answers
+//!   know, so a bit is added without a new version (the cut and crashed bits
+//!   were). The client opens with [`TAKE`] and answers
 //!   with one-byte messages; their values are fixed **across every version**
 //!   (a newer client must be able to release an older holder's panes):
 //!   [`ACK`], [`RELEASE`] + the pane's position as `u32`, [`RELEASE_ALL`]. The
@@ -105,12 +109,13 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use bt_core::TabId;
+use bt_core::{Journal, JournalCut, TabId};
 
 use crate::jobs::{self, ShellParent};
+use crate::journal::{BaseSink, CompactRequest, Region, Registration};
 use crate::restore;
 use crate::ssh_route::{self, SUN_PATH};
 
@@ -231,6 +236,10 @@ const ENDED: u32 = 1;
 /// The `cut` bit of a pane's flags: a detached holder dropped the buffer's
 /// oldest bytes.
 const CUT: u32 = 2;
+/// The `crashed` bit of a pane's flags: a bound holder kept it after its
+/// bateri died — a screen it carries was rebuilt from the journal, not
+/// frozen.
+const CRASHED: u32 = 4;
 
 /// One read or write's size: the deadline is checked between them.
 const CHUNK: usize = 64 * 1024;
@@ -257,6 +266,9 @@ pub struct HeldPane {
     pub ended: bool,
     /// The holder dropped the buffer's oldest bytes: it starts mid-stream.
     pub cut: bool,
+    /// Its bateri died: whatever screen it carries was rebuilt from the
+    /// journal rather than frozen by a deliberate handover.
+    pub crashed: bool,
     /// Opaque: the platform shell's state for the pane.
     pub blob: Vec<u8>,
     /// Opaque: the bytes to read before the master's — the frozen side's
@@ -284,6 +296,7 @@ impl HeldPane {
             start,
             ended: false,
             cut: false,
+            crashed: false,
             blob,
             buffer,
             master,
@@ -435,6 +448,7 @@ struct PaneView<'a> {
     start: u64,
     ended: bool,
     cut: bool,
+    crashed: bool,
     blob: &'a [u8],
     buffer: &'a [u8],
     master: RawFd,
@@ -453,6 +467,7 @@ fn write_bundle(wire: &Wire<'_>, bundle: &Bundle) -> io::Result<()> {
         start: pane.start,
         ended: pane.ended,
         cut: pane.cut,
+        crashed: pane.crashed,
         blob: &pane.blob,
         buffer: &pane.buffer,
         master: pane.master.as_raw_fd(),
@@ -478,6 +493,9 @@ fn write_views(wire: &Wire<'_>, layout: &[u8], panes: Vec<PaneView<'_>>) -> io::
         }
         if pane.cut {
             flags |= CUT;
+        }
+        if pane.crashed {
+            flags |= CRASHED;
         }
         wire.write_all(&flags.to_le_bytes())?;
         write_field(wire, pane.blob)?;
@@ -555,6 +573,7 @@ fn read_panes(wire: &Wire<'_>, total: &mut u64) -> Result<Vec<HeldPane>, Handove
             start,
             ended: flags & ENDED != 0,
             cut: flags & CUT != 0,
+            crashed: flags & CRASHED != 0,
             blob,
             buffer,
             master,
@@ -594,7 +613,7 @@ fn read_field(
 const FD_ROOM: usize = 4;
 
 /// Sends `fd` on [`FD_MARK`]: one byte, the descriptor attached to it.
-fn send_fd(stream: &UnixStream, fd: RawFd) -> io::Result<()> {
+pub(crate) fn send_fd(stream: &UnixStream, fd: RawFd) -> io::Result<()> {
     let mut byte = [FD_MARK];
     let mut iov = libc::iovec {
         iov_base: byte.as_mut_ptr().cast(),
@@ -640,7 +659,7 @@ fn send_fd(stream: &UnixStream, fd: RawFd) -> io::Result<()> {
 /// ancillary data travels with the first byte of its `sendmsg`), exactly one
 /// descriptor, nothing truncated. Every descriptor that arrived is owned at
 /// once, so a refused message leaks none.
-fn recv_fd(stream: &UnixStream) -> Result<OwnedFd, HandoverError> {
+pub(crate) fn recv_fd(stream: &UnixStream) -> Result<OwnedFd, HandoverError> {
     let mut byte = [0u8];
     let mut iov = libc::iovec {
         iov_base: byte.as_mut_ptr().cast(),
@@ -1709,16 +1728,26 @@ fn drop_duplicates(arrival: &mut Arrival) {
 //              → READY, or REFUSED (another build, or no socket)
 // bateri → holder, a tag byte, then:
 //   ADD        'F' + master | tab | pid u32 | start u64
-//              flags u32 (bit 0: login is the child, bit 1: unconfirmed)
+//              flags u32 (bit 0: login is the child, bit 1: unconfirmed,
+//                         bit 2: journaled)
 //              taken from: len u32, socket path | blob: len u64, bytes
+//              journaled: 'F' + region | base: cut, len u64, bytes
 //              → PANE_REFUSED tab, if the holder cannot keep it
+//              → BASE_TAKEN tab | cut, if it keeps a journaled one
+//              → BASE_REFUSED tab, if it keeps the pane but not its region
 //   DROP tab | CONFIRM tab | LAYOUT len u64, bytes
 //   STATE      tab | blob: len u64, bytes
+//   BASE       tab | cut | base: len u64, bytes → BASE_TAKEN tab | cut,
+//              or BASE_REFUSED tab for a pane it keeps no journal of
 //   PING → PONG | QUIT
 //   HANDOVER   then a frame, byte for byte → READY or REFUSED
 // ```
 //
-// A tab is its length as `u32` and its text, as in the frame.
+// A tab is its length as `u32` and its text, as in the frame; a cut is the
+// journal's two positions, `pty u64 | side u64`. A base (`bt-core`'s,
+// opaque here) replaces the pane's previous one; [`BASE_TAKEN`] is the
+// holder's word that it keeps it — only then does bateri free the journal
+// before the cut (the module doc of [`crate::journal`]).
 
 /// The bound handshake's first bytes.
 const BOUND_MAGIC: [u8; 4] = *b"BTHB";
@@ -1738,6 +1767,7 @@ const MSG_STATE: u8 = b's';
 const MSG_PING: u8 = b'p';
 const MSG_QUIT: u8 = b'q';
 const MSG_HANDOVER: u8 = b'h';
+const MSG_BASE: u8 = b'b';
 
 /// Holder → bateri: it refuses the handshake or a handover.
 const REFUSED: u8 = b'N';
@@ -1745,10 +1775,16 @@ const REFUSED: u8 = b'N';
 const PANE_REFUSED: u8 = b'n';
 /// Holder → bateri: the answer to a ping.
 const PONG: u8 = b'P';
+/// Holder → bateri: it keeps a pane's base (tab and cut follow).
+const BASE_TAKEN: u8 = b'B';
+/// Holder → bateri: it keeps no journal of a pane (tab follows) — bateri
+/// breaks it at once rather than wait for a confirmation that never comes.
+const BASE_REFUSED: u8 = b'J';
 
 /// An added pane's flags.
 const ADD_LOGIN: u32 = 1;
 const ADD_UNCONFIRMED: u32 = 2;
+const ADD_JOURNALED: u32 = 4;
 
 /// This build's identity: the workspace version and the running image's own
 /// — the Mach-O `LC_UUID` on macOS (new at every link), the executable's
@@ -1850,6 +1886,20 @@ pub struct BoundPane {
     /// other holder listens it drains the master, and two drains would split
     /// the output between them. `None` for a pane this bateri spawned.
     pub taken_from: Option<PathBuf>,
+    /// The pane's journal ([`crate::journal::PaneJournal::register`]):
+    /// `None` for a pane registered without one (born under `"update"`, or
+    /// its journal broke) — a crash brings its screen back from its
+    /// program's redraw.
+    pub journal: Option<BoundJournal>,
+}
+
+/// A journaled pane's part of its registration.
+#[derive(Debug)]
+pub struct BoundJournal {
+    /// The region's descriptor and the current base; sent and closed here.
+    pub registration: Registration,
+    /// Where the holder's confirmations go (`Journal::release`).
+    pub journal: Weak<Journal>,
 }
 
 /// bateri's end of a bound holder ([`spawn_bound`]). Every send queues and
@@ -1875,6 +1925,9 @@ struct Shared {
     wake: Condvar,
     news: Mutex<News>,
     heard: Condvar,
+    /// The journaled panes, for the holder's confirmations: a base it keeps
+    /// frees the pane's journal before its cut.
+    journals: Mutex<Vec<(TabId, Weak<Journal>)>>,
 }
 
 /// What waits to be written.
@@ -1899,6 +1952,9 @@ enum Order {
     Add(BoundPane),
     Drop(TabId),
     Confirm(TabId),
+    /// A pane's newer base: in order behind its registration, never folded
+    /// into a later one — each waits for its own confirmation.
+    Base(TabId, JournalCut, Vec<u8>),
     Ping,
     Quit,
     Handover(Bundle),
@@ -2018,6 +2074,7 @@ impl Bound {
             wake: Condvar::new(),
             news: Mutex::new(News::default()),
             heard: Condvar::new(),
+            journals: Mutex::new(Vec::new()),
         });
         {
             let stream = stream.try_clone()?;
@@ -2060,7 +2117,23 @@ impl Bound {
     /// refuses one it cannot keep — over [`PANE_CAP`], or a program already
     /// gone — and that is written to stderr ([`Bound::refused`]).
     pub fn add(&self, pane: BoundPane) {
+        {
+            let mut journals = lock(&self.shared.journals);
+            journals.retain(|(known, _)| *known != pane.tab);
+            if let Some(journal) = &pane.journal {
+                journals.push((pane.tab.clone(), journal.journal.clone()));
+            }
+        }
         self.order(Order::Add(pane));
+    }
+
+    /// Where a registered pane's newer bases go ([`BaseSink`]): in order
+    /// behind everything queued before.
+    pub fn sink(&self, tab: &TabId) -> Box<dyn BaseSink> {
+        Box::new(BaseSender {
+            shared: Arc::clone(&self.shared),
+            tab: tab.clone(),
+        })
     }
 
     /// Releases a pane: the holder closes its copy and signals nobody (the
@@ -2069,6 +2142,7 @@ impl Bound {
         lock(&self.shared.outbox)
             .states
             .retain(|(pending, _)| pending != tab);
+        lock(&self.shared.journals).retain(|(known, _)| known != tab);
         self.order(Order::Drop(tab.clone()));
     }
 
@@ -2224,6 +2298,26 @@ impl Drop for Bound {
     }
 }
 
+/// A pane's [`BaseSink`] on a bound connection ([`Bound::sink`]).
+struct BaseSender {
+    shared: Arc<Shared>,
+    tab: TabId,
+}
+
+impl BaseSink for BaseSender {
+    fn send(&self, cut: JournalCut, base: Vec<u8>) {
+        let mut outbox = lock(&self.shared.outbox);
+        if outbox.closed {
+            return;
+        }
+        outbox
+            .orders
+            .push_back(Order::Base(self.tab.clone(), cut, base));
+        drop(outbox);
+        self.shared.wake.notify_all();
+    }
+}
+
 /// The writer thread: everything queued ([`write_batch`]'s order) until the
 /// outbox is closed and empty or a write fails. Its writes wait for the holder
 /// without a bound — except the last batch, behind a goodbye, whose every
@@ -2328,11 +2422,27 @@ fn write_order(wire: &Wire<'_>, order: Order) -> io::Result<()> {
             if !from.is_empty() {
                 flags |= ADD_UNCONFIRMED;
             }
+            if pane.journal.is_some() {
+                flags |= ADD_JOURNALED;
+            }
             wire.write_all(&flags.to_le_bytes())?;
             let len = u32::try_from(from.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
             wire.write_all(&len.to_le_bytes())?;
             wire.write_all(&from)?;
             write_field(wire, &pane.blob)?;
+            if let Some(journal) = &pane.journal {
+                let registration = &journal.registration;
+                wire.arm(true)?;
+                send_fd(wire.stream, registration.region.as_raw_fd())?;
+                write_cut(wire, registration.cut)?;
+                write_field(wire, &registration.base)?;
+            }
+        }
+        Order::Base(tab, cut, base) => {
+            wire.write_all(&[MSG_BASE])?;
+            write_tab(wire, tab.as_str())?;
+            write_cut(wire, cut)?;
+            write_field(wire, &base)?;
         }
         Order::Drop(tab) => {
             wire.write_all(&[MSG_DROP])?;
@@ -2350,6 +2460,27 @@ fn write_order(wire: &Wire<'_>, order: Order) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A journal cut: its two positions.
+fn write_cut(wire: &Wire<'_>, cut: JournalCut) -> io::Result<()> {
+    wire.write_all(&cut.pty.to_le_bytes())?;
+    wire.write_all(&cut.side.to_le_bytes())
+}
+
+fn read_cut(wire: &Wire<'_>) -> io::Result<JournalCut> {
+    Ok(JournalCut {
+        pty: wire.u64()?,
+        side: wire.u64()?,
+    })
+}
+
+/// The journal registered for `tab`, if it is still alive.
+fn journal_of(shared: &Shared, tab: &TabId) -> Option<Arc<Journal>> {
+    lock(&shared.journals)
+        .iter()
+        .find(|(known, _)| known == tab)
+        .and_then(|(_, journal)| journal.upgrade())
 }
 
 /// The reader thread: what the holder says, until the connection ends. A
@@ -2384,10 +2515,35 @@ fn read_loop(
                         "bateri: the holder cannot keep pane {}; its programs end with bateri",
                         tab.as_str()
                     );
+                    // Nobody would confirm its bases: the journal would only
+                    // fill and stall.
+                    if let Some(journal) = journal_of(shared, &tab) {
+                        journal.break_journal();
+                    }
                     lock(&shared.news).refused.push(tab);
                     true
                 }
                 Err(_) => false,
+            },
+            BASE_REFUSED => match read_tab(&wire, &mut total) {
+                Ok(tab) => {
+                    if let Some(journal) = journal_of(shared, &tab) {
+                        journal.break_journal();
+                    }
+                    true
+                }
+                Err(_) => false,
+            },
+            BASE_TAKEN => match read_tab(&wire, &mut total).ok().zip(read_cut(&wire).ok()) {
+                Some((tab, cut)) => {
+                    // Outside every lock of this side: the release takes the
+                    // pane journal's own.
+                    if let Some(journal) = journal_of(shared, &tab) {
+                        journal.release(cut);
+                    }
+                    true
+                }
+                None => false,
             },
             _ => false,
         };
@@ -2432,6 +2588,53 @@ pub struct HoldConfig {
     pub limit: Option<Duration>,
     /// [`BUFFER_LIMIT`], smaller in the tests.
     pub buffer_limit: usize,
+    /// What rebuilds a journaled pane's screen after a crash; `None`: none
+    /// does, every pane comes back from its program's redraw.
+    pub compactor: Option<Compactor>,
+}
+
+/// The program a holder runs to rebuild one pane's screen after its bateri
+/// died ([`crate::journal::compact_main`]), with the request socket at fd 3:
+/// `bateri compact --fd 3`, the holder's own binary — the same build, or the
+/// child refuses the input. The tests' holder is the test binary, whose
+/// entry differs.
+#[derive(Clone, Debug)]
+pub struct Compactor {
+    pub program: PathBuf,
+    pub args: Vec<std::ffi::OsString>,
+}
+
+impl Compactor {
+    /// `bateri compact --fd 3` from this process's executable; `None` if it
+    /// cannot be named. Linux names the running image even after its path
+    /// was replaced (`/proc/self/exe`); macOS has no such name, so a bateri
+    /// installed over a running one leaves a crash's panes screenless — the
+    /// other build refuses the input, and each pane says its screen could not
+    /// be restored.
+    pub fn this_binary() -> Option<Compactor> {
+        #[cfg(target_os = "linux")]
+        let program = PathBuf::from("/proc/self/exe");
+        #[cfg(not(target_os = "linux"))]
+        let program = std::env::current_exe().ok()?;
+        Some(Compactor {
+            program,
+            args: vec!["compact".into(), "--fd".into(), "3".into()],
+        })
+    }
+}
+
+/// How long a holder whose bateri died waits for the panes' screens — a
+/// **design constant**. A client that came while the holder took in its
+/// spawner's end waits [`HAND_WAIT`] for the frame, so this stays well under
+/// it; a pane still compacting at the deadline comes back from its
+/// program's redraw.
+const COMPACT_WAIT: Duration = Duration::from_secs(3);
+
+/// How many `bateri compact` children run at once — a **design constant**:
+/// the machine's cores, at most eight; each child holds a socket, and two
+/// hundred panes must not become two hundred processes at once.
+fn compact_workers() -> usize {
+    std::thread::available_parallelism().map_or(2, |cores| cores.get().clamp(1, 8))
 }
 
 /// How the holder ended.
@@ -2457,6 +2660,7 @@ struct Held {
     start: u64,
     ended: bool,
     cut: bool,
+    crashed: bool,
     blob: Vec<u8>,
     buffer: VecDeque<u8>,
     /// `None` once released.
@@ -2476,6 +2680,7 @@ impl Held {
             start: pane.start,
             ended: pane.ended,
             cut: pane.cut,
+            crashed: pane.crashed,
             blob: pane.blob,
             buffer: pane.buffer.into(),
             master: Some(pane.master),
@@ -2507,6 +2712,16 @@ struct Registered {
     master: OwnedFd,
     exit: OwnedFd,
     taken_from: Option<PathBuf>,
+    /// The pane's journal: its region and the last base bateri was told was
+    /// kept. `None` for a pane registered without one.
+    journal: Option<HeldJournal>,
+}
+
+/// A journaled pane's region and base, as a bound holder keeps them.
+struct HeldJournal {
+    region: OwnedFd,
+    cut: JournalCut,
+    base: Vec<u8>,
 }
 
 /// What a bound holder was sent.
@@ -2742,6 +2957,24 @@ fn bound_end(
     }
 }
 
+/// Tells bateri a pane's base at `cut` is kept ([`BASE_TAKEN`]). A failed
+/// write is the connection's end, which the next read sees.
+fn take_base(spawner: &UnixStream, tab: &TabId, cut: JournalCut) {
+    let answer = Wire::new(spawner, None);
+    let _ = answer
+        .write_all(&[BASE_TAKEN])
+        .and_then(|()| write_tab(&answer, tab.as_str()))
+        .and_then(|()| write_cut(&answer, cut));
+}
+
+/// Tells bateri the holder keeps no journal of a pane ([`BASE_REFUSED`]).
+fn refuse_base(spawner: &UnixStream, tab: &TabId) {
+    let answer = Wire::new(spawner, None);
+    let _ = answer
+        .write_all(&[BASE_REFUSED])
+        .and_then(|()| write_tab(&answer, tab.as_str()));
+}
+
 /// Whether an I/O error is the other side's end rather than a fault.
 fn gone(error: &io::Error) -> bool {
     matches!(
@@ -2768,6 +3001,7 @@ fn bound_step(spawner: &UnixStream, registry: &mut Registry) -> Option<BoundEnd>
         MSG_CONFIRM => registry.confirm(&wire),
         MSG_LAYOUT => registry.layout(&wire),
         MSG_STATE => registry.state(&wire),
+        MSG_BASE => registry.base(spawner, &wire),
         MSG_PING => {
             let _ = Wire::new(spawner, None).write_all(&[PONG]);
             Ok(())
@@ -2803,6 +3037,22 @@ impl Registry {
         let flags = wire.u32()?;
         let from = read_field(wire, u64::from(wire.u32()?), PATH_LIMIT, &mut total)?;
         let blob = read_field(wire, wire.u64()?, FIELD_LIMIT, &mut total)?;
+        // The whole message is read before anything is decided: a refusal
+        // must leave the stream at the next message.
+        let journaled = flags & ADD_JOURNALED != 0;
+        let journal = if journaled {
+            wire.arm(false)?;
+            let region = match recv_fd(spawner) {
+                Ok(region) => Some(region),
+                Err(HandoverError::Truncated) => None,
+                Err(error) => return Err(error),
+            };
+            let cut = read_cut(wire)?;
+            let base = read_field(wire, wire.u64()?, FIELD_LIMIT, &mut total)?;
+            region.map(|region| HeldJournal { region, cut, base })
+        } else {
+            None
+        };
         self.panes.retain(|pane| pane.tab != tab);
         let room = self.panes.len() < PANE_CAP;
         let kept = master
@@ -2822,6 +3072,14 @@ impl Registry {
             use std::os::unix::ffi::OsStringExt;
             PathBuf::from(std::ffi::OsString::from_vec(from))
         });
+        // The registration's base is kept: bateri may free what is before it.
+        // A region that could not be received (a full descriptor table) is
+        // refused out loud, so bateri breaks that journal now.
+        match &journal {
+            Some(journal) => take_base(spawner, &tab, journal.cut),
+            None if journaled => refuse_base(spawner, &tab),
+            None => {}
+        }
         self.panes.push(Registered {
             tab,
             pid,
@@ -2835,7 +3093,32 @@ impl Registry {
             master,
             exit,
             taken_from,
+            journal,
         });
+        Ok(())
+    }
+
+    /// A journaled pane's newer base: kept, and bateri told so. A base for
+    /// a pane kept without a journal (or not at all) is refused, and bateri
+    /// breaks that journal.
+    fn base(&mut self, spawner: &UnixStream, wire: &Wire<'_>) -> Result<(), HandoverError> {
+        let mut total = 0u64;
+        let tab = read_tab(wire, &mut total)?;
+        let cut = read_cut(wire)?;
+        let base = read_field(wire, wire.u64()?, FIELD_LIMIT, &mut total)?;
+        let journal = self
+            .panes
+            .iter_mut()
+            .find(|pane| pane.tab == tab)
+            .and_then(|pane| pane.journal.as_mut());
+        match journal {
+            Some(journal) => {
+                journal.cut = cut;
+                journal.base = base;
+                take_base(spawner, &tab, cut);
+            }
+            None => refuse_base(spawner, &tab),
+        }
         Ok(())
     }
 
@@ -2886,35 +3169,62 @@ fn hold_after_crash(
     client: Option<UnixStream>,
     watch: Option<OwnedFd>,
 ) -> HoldEnd {
-    let Registry { panes, layout } = registry;
+    let Registry { mut panes, layout } = registry;
     if panes.is_empty() {
         return HoldEnd::Released;
     }
-    let held = panes
-        .into_iter()
-        .map(|pane| {
-            let (cols, rows) = window_size(pane.master.as_fd());
+    let screens = compact_all(config.compactor.as_ref(), &mut panes);
+    let mut states: Vec<(PaneState, Vec<u8>)> = panes
+        .iter_mut()
+        .zip(screens)
+        .map(|(pane, screen)| {
+            let pty = window_size(pane.master.as_fd());
+            // The rebuilt screen's own grid; without one, the PTY's size.
+            let (cols, rows) = screen.as_ref().map_or(pty, |s| (s.cols, s.rows));
+            // The grid is the truth the VT is laid out for: a crash between a
+            // resize of the terminal and its PTY (or inside a nudge) leaves
+            // the PTY behind, and the adopting side, born at the grid's size,
+            // would see no change to send.
+            if screen.is_some() && pty != (cols, rows) {
+                set_window_size(pane.master.as_fd(), cols, rows);
+            }
+            let (vt, tail, history) = screen.map_or_else(Default::default, |screen| {
+                (screen.vt, screen.tail, screen.history)
+            });
             let state = PaneState {
                 cols,
                 rows,
                 parent: pane.parent,
-                vt: Vec::new(),
-                core: pane.blob,
+                vt,
+                core: std::mem::take(&mut pane.blob),
                 input: Vec::new(),
-                history: Vec::new(),
+                history,
             };
-            Held {
-                tab: pane.tab.as_str().to_owned(),
-                pid: pane.pid,
-                start: pane.start,
-                ended: false,
-                cut: false,
-                blob: state.encode(),
-                buffer: VecDeque::new(),
-                master: Some(pane.master),
-                exit: Some(pane.exit),
-                beside: pane.taken_from,
-            }
+            (state, tail)
+        })
+        .collect();
+    // What the frame carries besides the blobs: each pane's drained buffer
+    // at its limit with its fixed fields, and the layout.
+    let reserved = (layout.len() as u64)
+        .saturating_add((states.len() as u64).saturating_mul(config.buffer_limit as u64 + 512));
+    fit_frame(&mut states, FIELD_LIMIT, TOTAL_LIMIT, reserved);
+    let held = panes
+        .into_iter()
+        .zip(states)
+        .map(|(pane, (state, tail))| Held {
+            tab: pane.tab.as_str().to_owned(),
+            pid: pane.pid,
+            start: pane.start,
+            ended: false,
+            cut: false,
+            crashed: true,
+            blob: state.encode(),
+            // The bytes after the parser's last ground state go before
+            // whatever the master gives from now on — a freeze's tail.
+            buffer: tail.into(),
+            master: Some(pane.master),
+            exit: Some(pane.exit),
+            beside: pane.taken_from,
         })
         .collect();
     let holding = Detached {
@@ -2930,6 +3240,210 @@ fn hold_after_crash(
         }),
     };
     hold_detached(holding, held, client)
+}
+
+/// A pane blob's encoded length ([`PaneState::encode`]).
+fn blob_len(state: &PaneState) -> u64 {
+    [&state.vt, &state.core, &state.input, &state.history]
+        .iter()
+        .fold(48u64, |len, field| len.saturating_add(field.len() as u64))
+}
+
+/// Keeps a crash bundle readable: the next bateri refuses a whole frame with
+/// a blob past `field_limit` or a frame past `total_limit`, and a screen
+/// rebuilt from a long scrollback is large. A pane past the field's limit
+/// loses its history first (only a pane that falls back replays it), then
+/// its screen (its program redraws it); past the frame's, the largest
+/// histories go first, then the largest screens. A pane that loses its
+/// screen loses its tail too. `reserved` is what the frame carries besides
+/// the blobs.
+fn fit_frame(
+    states: &mut [(PaneState, Vec<u8>)],
+    field_limit: u64,
+    total_limit: u64,
+    reserved: u64,
+) {
+    for (state, _) in states.iter_mut() {
+        if blob_len(state) > field_limit {
+            state.history = Vec::new();
+        }
+        if blob_len(state) > field_limit {
+            state.vt = Vec::new();
+        }
+    }
+    let total = |states: &[(PaneState, Vec<u8>)]| {
+        states.iter().fold(reserved, |total, (state, tail)| {
+            total
+                .saturating_add(blob_len(state))
+                .saturating_add(tail.len() as u64)
+        })
+    };
+    while total(states) > total_limit {
+        let largest = |field: fn(&PaneState) -> usize| {
+            states
+                .iter()
+                .enumerate()
+                .filter(|(_, (state, _))| field(state) > 0)
+                .max_by_key(|(_, (state, _))| field(state))
+                .map(|(index, _)| index)
+        };
+        if let Some(index) = largest(|state| state.history.len()) {
+            states[index].0.history = Vec::new();
+        } else if let Some(index) = largest(|state| state.vt.len()) {
+            states[index].0.vt = Vec::new();
+        } else {
+            break;
+        }
+    }
+    for (state, tail) in states.iter_mut() {
+        if state.vt.is_empty() {
+            tail.clear();
+        }
+    }
+}
+
+/// The journaled panes' screens, rebuilt after their bateri died: a `bateri
+/// compact` child per pane ([`compact_workers`] at once), all by one
+/// deadline ([`COMPACT_WAIT`]). The regions close here. `None` for a pane
+/// without a journal, one whose journal broke or no longer reaches back to
+/// its base, or whose child failed, refused another build's input or was
+/// late — its program redraws the screen.
+fn compact_all(
+    compactor: Option<&Compactor>,
+    panes: &mut [Registered],
+) -> Vec<Option<bt_core::Rebuilt>> {
+    let deadline = Instant::now() + COMPACT_WAIT;
+    let jobs: Vec<(Option<HeldJournal>, &[u8])> = panes
+        .iter_mut()
+        .map(|pane| (pane.journal.take(), pane.blob.as_slice()))
+        .collect();
+    let Some(compactor) = compactor else {
+        return jobs.iter().map(|_| None).collect();
+    };
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let screens: Vec<Mutex<Option<bt_core::Rebuilt>>> =
+        jobs.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..compact_workers().min(jobs.len()) {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((journal, blob)) = jobs.get(index) else {
+                        return;
+                    };
+                    let screen = journal
+                        .as_ref()
+                        .and_then(|journal| compact_pane(compactor, journal, blob, deadline));
+                    *lock(&screens[index]) = screen;
+                }
+            });
+        }
+    });
+    screens
+        .into_iter()
+        .map(|screen| {
+            screen
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        })
+        .collect()
+}
+
+/// One pane's screen from its region and last base ([`compact_all`]).
+fn compact_pane(
+    compactor: &Compactor,
+    journal: &HeldJournal,
+    blob: &[u8],
+    deadline: Instant,
+) -> Option<bt_core::Rebuilt> {
+    // Past the deadline nothing more is opened, copied or spawned.
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let region = Region::open(journal.region.try_clone().ok()?).ok()?;
+    let records = region.snapshot()?;
+    drop(region);
+    // The region must still hold everything after the base.
+    if records.bytes_at > journal.cut.pty || records.sides_at > journal.cut.side {
+        return None;
+    }
+    let request = CompactRequest {
+        blob,
+        base: &journal.base,
+        records: &records,
+    };
+    run_compactor(compactor, &request, deadline)
+}
+
+/// Runs the compactor on `request` and reads its reply, killing it at
+/// `deadline`. The child gets one end of a socket pair at fd 3 and nothing
+/// else of the holder ([`spawn_clean`]): every master is open here.
+fn run_compactor(
+    compactor: &Compactor,
+    request: &CompactRequest<'_>,
+    deadline: Instant,
+) -> Option<bt_core::Rebuilt> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let (ours, theirs) = UnixStream::pair().ok()?;
+    let pid = spawn_clean(&compactor.program, &compactor.args, Some(theirs.as_fd())).ok()?;
+    drop(theirs);
+    let mut timed = Deadlined {
+        stream: &ours,
+        deadline,
+    };
+    let reply = crate::journal::write_request(&mut timed, request)
+        .ok()
+        .and_then(|()| ours.shutdown(std::net::Shutdown::Write).ok())
+        .and_then(|()| crate::journal::read_reply(&mut timed));
+    if reply.is_none()
+        && let Ok(raw) = libc::pid_t::try_from(pid)
+    {
+        // SAFETY: our own child, not yet reaped — the pid is still it.
+        unsafe { libc::kill(raw, libc::SIGKILL) };
+    }
+    reap(pid);
+    reply
+}
+
+/// A stream whose every read and write ends by `deadline`.
+struct Deadlined<'a> {
+    stream: &'a UnixStream,
+    deadline: Instant,
+}
+
+impl Deadlined<'_> {
+    fn arm(&self, write: bool) -> io::Result<()> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let _ = if write {
+            self.stream.set_write_timeout(Some(remaining))
+        } else {
+            self.stream.set_read_timeout(Some(remaining))
+        };
+        Ok(())
+    }
+}
+
+impl Read for Deadlined<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.arm(false)?;
+        (&*self.stream).read(buf)
+    }
+}
+
+impl Write for Deadlined<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.arm(true)?;
+        (&*self.stream).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A deliberate handover over the live connection: the frame replaces the
@@ -3000,6 +3514,20 @@ fn window_size(master: BorrowedFd<'_>) -> (u16, u16) {
         (size.ws_col, size.ws_row)
     } else {
         (0, 0)
+    }
+}
+
+/// Sets the PTY's size from its master (`TIOCSWINSZ`), keeping the pixel
+/// fields it had; the program gets `SIGWINCH`. A failure leaves the size.
+fn set_window_size(master: BorrowedFd<'_>, cols: u16, rows: u16) {
+    // SAFETY: an all-zero `winsize` is valid; the ioctl fills it or fails.
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: `master` is open for the calls; `size` belongs to this frame.
+    unsafe {
+        libc::ioctl(master.as_raw_fd(), libc::TIOCGWINSZ, &raw mut size);
+        size.ws_col = cols;
+        size.ws_row = rows;
+        libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &raw const size);
     }
 }
 
@@ -3390,6 +3918,7 @@ fn serve(
                 start: pane.start,
                 ended: pane.ended,
                 cut: pane.cut,
+                crashed: pane.crashed,
                 blob: &pane.blob,
                 buffer: pane.buffer.as_slices().0,
                 master: pane.master.as_ref()?.as_raw_fd(),
@@ -3473,10 +4002,15 @@ fn messages(
 /// first bytes on `FD` tell which. Returns the exit code. The body is
 /// [`hold`]; here the argv and the process ([`detach`]).
 pub fn hold_main(args: &[String]) -> i32 {
-    hold_process(args, None, BUFFER_LIMIT)
+    hold_process(args, None, BUFFER_LIMIT, Compactor::this_binary())
 }
 
-fn hold_process(args: &[String], limit: Option<Duration>, buffer_limit: usize) -> i32 {
+fn hold_process(
+    args: &[String],
+    limit: Option<Duration>,
+    buffer_limit: usize,
+    compactor: Option<Compactor>,
+) -> i32 {
     let Some((fd, dirs)) = parse_args(args) else {
         eprintln!("{USAGE}");
         return EXIT_USAGE;
@@ -3508,6 +4042,7 @@ fn hold_process(args: &[String], limit: Option<Duration>, buffer_limit: usize) -
         uid,
         limit,
         buffer_limit,
+        compactor,
     };
     match hold(spawner, &config) {
         HoldEnd::Acked | HoldEnd::Released | HoldEnd::Limit | HoldEnd::Quit => EXIT_DONE,
@@ -3769,6 +4304,7 @@ mod tests {
             uid: uid() ^ 1,
             limit: Some(Duration::from_millis(1500)),
             buffer_limit: BUFFER_LIMIT,
+            compactor: None,
         };
         let holder = std::thread::spawn(move || hold(theirs, &config));
         let (fd, _kept) = carried();
@@ -3828,11 +4364,46 @@ mod tests {
             .ok()
             .and_then(|buffer| buffer.parse().ok())
             .unwrap_or(BUFFER_LIMIT);
-        std::process::exit(hold_process(&args, Some(limit), buffer));
+        std::process::exit(hold_process(&args, Some(limit), buffer, test_compactor()));
     }
 
     /// The buffer limit of a holder the tests spawn ([`holder_process`]).
     const BUFFER_ENV: &str = "BT_TEST_HOLDER_BUFFER";
+
+    /// The environment that turns this test binary into `bateri compact`
+    /// ([`compact_process`]); a holder the tests spawn passes it on.
+    const COMPACT_ENV: &str = "BT_TEST_COMPACT";
+
+    /// The compactor of a holder the tests spawn: this test binary again,
+    /// entered at [`compact_process`].
+    fn test_compactor() -> Option<Compactor> {
+        Some(Compactor {
+            program: std::env::current_exe().ok()?,
+            args: [
+                "--exact",
+                "handover::tests::compact_process",
+                "--nocapture",
+                "--test-threads",
+                "1",
+                "-q",
+            ]
+            .map(Into::into)
+            .to_vec(),
+        })
+    }
+
+    /// Not a test of its own: `bateri compact` for the holders the tests
+    /// spawn. Without the variable it does nothing.
+    #[test]
+    fn compact_process() {
+        if std::env::var_os(COMPACT_ENV).is_none() {
+            return;
+        }
+        std::process::exit(crate::journal::compact_main(&[
+            "--fd".to_owned(),
+            "3".to_owned(),
+        ]));
+    }
 
     /// Spawns a holder process for `dirs` (this test binary,
     /// [`holder_process`]) with `limit` and a buffer limit; returns it and
@@ -3850,6 +4421,7 @@ mod tests {
             .args(["--test-threads", "1", "-q"])
             .env(HOLDER_ENV, spec)
             .env(BUFFER_ENV, buffer.to_string())
+            .env(COMPACT_ENV, "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -4699,6 +5271,7 @@ mod tests {
             uid: uid(),
             limit: Some(Duration::from_millis(1500)),
             buffer_limit: BUFFER_LIMIT,
+            compactor: None,
         };
         let (spawner, theirs) = UnixStream::pair().unwrap();
         let refusing = {
@@ -4773,6 +5346,7 @@ mod tests {
             blob: blob.to_vec(),
             master: master.try_clone().unwrap(),
             taken_from: None,
+            journal: None,
         });
         (master, shell)
     }
@@ -4884,6 +5458,324 @@ mod tests {
         assert!(!exited(&mut shell), "the shell died with its bateri");
         drop(pane);
         wait_until("the shell outlived its last master", || exited(&mut shell));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ── a crash with a journal ───────────────────────────────────────────
+
+    fn sized(vt: usize, history: usize, tail: usize) -> (PaneState, Vec<u8>) {
+        let mut state = state();
+        state.vt = vec![b'v'; vt];
+        state.history = vec![b'h'; history];
+        state.core.clear();
+        state.input.clear();
+        (state, vec![b't'; tail])
+    }
+
+    /// A crash bundle stays readable: a pane past the field's limit loses
+    /// its history, then its screen; past the frame's limit the largest
+    /// histories go first, then the largest screens, and a pane without its
+    /// screen keeps no tail.
+    #[test]
+    fn a_crash_bundle_stays_inside_the_frames_limits() {
+        let field = 1_000;
+        let lens = |states: &[(PaneState, Vec<u8>)]| -> Vec<(usize, usize, usize)> {
+            states
+                .iter()
+                .map(|(state, tail)| (state.vt.len(), state.history.len(), tail.len()))
+                .collect()
+        };
+        let mut states = vec![sized(500, 600, 3), sized(990, 10, 3), sized(100, 100, 3)];
+        fit_frame(&mut states, field, u64::MAX, 0);
+        assert_eq!(lens(&states), [(500, 0, 3), (0, 0, 0), (100, 100, 3)]);
+
+        let mut states = vec![sized(300, 400, 3), sized(200, 100, 3), sized(250, 300, 3)];
+        // Over by less than the largest history: that one alone goes.
+        fit_frame(&mut states, field, 1_500, 100);
+        assert_eq!(lens(&states), [(300, 0, 3), (200, 100, 3), (250, 300, 3)]);
+        // Room for less than the screens: the largest screen goes too.
+        fit_frame(&mut states, field, 760, 100);
+        assert_eq!(lens(&states), [(0, 0, 0), (200, 0, 3), (250, 0, 3)]);
+        // Within the limits nothing changes.
+        let mut states = vec![sized(10, 10, 1)];
+        fit_frame(&mut states, field, 10_000, 0);
+        assert_eq!(lens(&states), [(10, 10, 1)]);
+    }
+
+    #[test]
+    fn the_pty_takes_the_rebuilt_grids_size() {
+        let (master, _slave) = open_pty();
+        set_window_size(master.as_fd(), 100, 30);
+        assert_eq!(window_size(master.as_fd()), (100, 30));
+        set_window_size(master.as_fd(), 41, 11);
+        assert_eq!(window_size(master.as_fd()), (41, 11));
+    }
+
+    /// A base for a pane the holder keeps without a journal is refused out
+    /// loud, and bateri breaks that journal at once instead of waiting for
+    /// the read gate's stall.
+    #[test]
+    fn a_base_the_holder_cannot_keep_breaks_the_journal() {
+        let (root, dir) = scratch("refused-base");
+        let (mut holder, bound) = start_bound(&dir, Duration::from_secs(20), BUFFER_LIMIT);
+        let (master, mut shell) = register(&bound, ID, TICKS, b"blob");
+        let journal = crate::journal::PaneJournal::open(100).expect("journal");
+        lock(&bound.shared.journals).push((tab(ID), Arc::downgrade(journal.journal())));
+        bound
+            .sink(&tab(ID))
+            .send(JournalCut::default(), b"a base".to_vec());
+        wait_until("the journal did not break", || journal.is_broken());
+        drop(bound);
+        let _ = holder.kill();
+        let _ = holder.wait();
+        // A program with unread output cannot finish exiting while a copy of
+        // its master is open.
+        drop(master);
+        let _ = shell.kill();
+        let _ = shell.wait();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The environment that turns this test binary into a bateri that
+    /// crashes ([`crashing_client_process`]): its holder's pid.
+    const CLIENT_ENV: &str = "BT_TEST_CRASHING_CLIENT";
+
+    /// The crashing bateri's pane: colored output past the compaction's
+    /// trigger, a line of input, then a full-screen program's screen — the
+    /// alternate screen with bracketed paste — and a program that keeps
+    /// running.
+    const CRASH_SCRIPT: &str = "stty -echo; \
+        yes \"$(printf '\\033[33mcolored\\033[0m line')\" | head -n 70000; \
+        printf '\\033[1;31mPART-ONE\\033[0m\\r\\n'; read x; \
+        printf '\\033[?1049h\\033[?2004h\\033[2;3HALT-END'; exec sleep 600";
+
+    fn journal_options(
+        journal: Option<Arc<Journal>>,
+        cols: u16,
+        rows: u16,
+    ) -> bt_core::SessionOptions {
+        bt_core::SessionOptions {
+            command: Some((
+                "/bin/sh".to_owned(),
+                vec!["-c".to_owned(), CRASH_SCRIPT.to_owned()],
+            )),
+            working_directory: None,
+            home: None,
+            env: std::collections::HashMap::new(),
+            cols,
+            rows,
+            cell_px: (9, 18),
+            terminal: bt_core::TerminalOptions {
+                scrollback: 200,
+                osc52: bt_core::Osc52::Off,
+                cursor: bt_core::CaretShape::default(),
+                blink: bt_core::CursorBlink::default(),
+            },
+            theme: bt_core::Theme::BATERI,
+            dock: false,
+            cluster: true,
+            initial_input: None,
+            shell_marks: false,
+            tab_id: None,
+            hostname: None,
+            replay: None,
+            journal,
+        }
+    }
+
+    /// Whether `session`'s grid shows `needle` now (one frame).
+    fn shows(session: &bt_core::Session, needle: &str) -> bool {
+        let mut rows: Vec<Vec<char>> = Vec::new();
+        session.frame(
+            |cell| {
+                let (row, col) = (usize::from(cell.row), usize::from(cell.col));
+                if rows.len() <= row {
+                    rows.resize(row + 1, Vec::new());
+                }
+                if rows[row].len() <= col {
+                    rows[row].resize(col + 1, ' ');
+                }
+                rows[row][col] = cell.ch.unwrap_or(' ');
+            },
+            |_| (),
+            &mut bt_core::Blocks::default(),
+            &mut bt_core::SelectionRuns::default(),
+            &mut bt_core::SearchRuns::default(),
+            &mut bt_core::Clusters::default(),
+            bt_core::ScrollGlide::default(),
+            bt_core::DockBudget {
+                share: 0.5,
+                cols: 80,
+            },
+        );
+        rows.iter()
+            .any(|row| row.iter().collect::<String>().contains(needle))
+    }
+
+    /// Not a test of its own: the bateri the next test crashes. It binds
+    /// the holder on fd 3, runs one journaled pane, resizes it, takes its
+    /// live screen as the handover would, writes it to fd 4 and dies by
+    /// `SIGKILL`.
+    #[test]
+    fn crashing_client_process() {
+        let Ok(holder) = std::env::var(CLIENT_ENV) else {
+            return;
+        };
+        let holder: u32 = holder.parse().expect("the holder's pid");
+        // SAFETY: the holder's connection the test put at fd 3, and the
+        // result's pipe at fd 4, for this process alone.
+        let (stream, mut result) = unsafe { (UnixStream::from_raw_fd(3), File::from_raw_fd(4)) };
+        // Inherited without close-on-exec: the pane's shell must not keep
+        // either alive past this process — bateri's own are born with it.
+        set_cloexec(3);
+        set_cloexec(4);
+        let bound = Bound::connect(stream, holder, false, initial(), || {}).expect("handshake");
+        let journal = crate::journal::PaneJournal::open(200).expect("journal");
+        let session = bt_core::Session::spawn(
+            journal_options(Some(Arc::clone(journal.journal())), 50, 12),
+            Arc::new(crate::child::SilentWake),
+        )
+        .expect("session");
+        let pid = session.child_pid();
+        let start = start_time(pid).expect("start time");
+        journal.register(|registration| {
+            bound.add(BoundPane {
+                tab: tab(ID),
+                pid,
+                start,
+                parent: ShellParent::Direct,
+                blob: session.state_blob(),
+                master: session
+                    .with_pty_fd(|fd| fd.try_clone_to_owned().ok())
+                    .expect("master"),
+                taken_from: None,
+                journal: registration.map(|registration| BoundJournal {
+                    registration,
+                    journal: Arc::downgrade(journal.journal()),
+                }),
+            });
+            Some(bound.sink(&tab(ID)))
+        });
+        wait_until("the first part did not arrive", || {
+            shows(&session, "PART-ONE")
+        });
+        assert!(session.resize(30, 8, (9, 18)));
+        session.write(b"go\n");
+        wait_until("the screen did not arrive", || shows(&session, "ALT-END"));
+        bound.state(&tab(ID), session.state_blob());
+        assert!(bound.ping(HAND_WAIT), "the holder does not answer");
+        assert!(!journal.is_broken());
+        // The output went past the trigger: a base reached the holder, which
+        // said so, and the journal was freed before it.
+        wait_until("no base was confirmed", || journal.released() > 0);
+        let screen = session.live_snapshot();
+        result
+            .write_all(&screen)
+            .expect("the screen goes to the test");
+        // SAFETY: `kill` has no memory preconditions; this process ends.
+        unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+    }
+
+    /// The acceptance of the crash's whole screen: a bateri with a journaled
+    /// pane dies by `SIGKILL`; its bound holder rebuilds the screen with a
+    /// `bateri compact` child (this test binary) — the same VT the dead
+    /// bateri's handover would have frozen — and the next bateri adopts it
+    /// into a terminal that encodes the same again.
+    #[test]
+    fn a_crashed_bateris_screen_comes_back_from_its_journal() {
+        let (root, dir) = scratch("journal");
+        let (mut holder, ours) = spawn_harness(&[&dir], Duration::from_secs(60), BUFFER_LIMIT);
+        let socket = dir.join(bound_socket(holder.id()));
+        let (mut screen_in, screen_out) = UnixStream::pair().unwrap();
+        let (bound_raw, screen_raw) = (ours.as_raw_fd(), screen_out.as_raw_fd());
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "handover::tests::crashing_client_process",
+                "--nocapture",
+            ])
+            .args(["--test-threads", "1", "-q"])
+            .env(CLIENT_ENV, holder.id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: only async-signal-safe calls between fork and exec; the
+        // two descriptors go to 3 and 4 through numbers above both, so
+        // neither overwrites the other.
+        unsafe {
+            command.pre_exec(move || {
+                let (a, b) = (
+                    libc::fcntl(bound_raw, libc::F_DUPFD, 100),
+                    libc::fcntl(screen_raw, libc::F_DUPFD, 100),
+                );
+                if a < 0 || b < 0 || libc::dup2(a, 3) < 0 || libc::dup2(b, 4) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::close(a);
+                libc::close(b);
+                Ok(())
+            });
+        }
+        let mut client = command.spawn().expect("the client did not start");
+        drop(ours);
+        drop(screen_out);
+        screen_in
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .unwrap();
+        let mut screen = Vec::new();
+        screen_in.read_to_end(&mut screen).expect("the screen");
+        let status = client.wait().unwrap();
+        assert!(!status.success(), "the client did not crash");
+        assert!(
+            String::from_utf8_lossy(&screen).contains("ALT-END"),
+            "the client sent no screen"
+        );
+
+        let (mut taken, link) = take_from(&socket);
+        let pane = taken.panes.remove(0);
+        assert!(pane.crashed, "a crash's pane is not marked");
+        let state = PaneState::decode(&pane.blob).expect("a pane state");
+        assert_eq!((state.cols, state.rows), (30, 8));
+        assert_eq!(
+            String::from_utf8_lossy(&state.vt),
+            String::from_utf8_lossy(&screen),
+            "the rebuilt screen is not the one the bateri showed"
+        );
+        assert!(!state.history.is_empty(), "no history for a fallback");
+
+        // The next bateri adopts it: the same screen, the program alive.
+        let exit = jobs::exit_fd(pane.pid, pane.start).expect("the program lives");
+        let program = pane.pid;
+        let adopted = bt_core::Session::adopt(
+            journal_options(None, state.cols, state.rows),
+            bt_core::Adoption {
+                master: pane.master,
+                exit,
+                pid: pane.pid,
+                vt: state.vt,
+                blob: state.core,
+                prefix: pane.buffer,
+                input: state.input,
+                ops: Arc::new(jobs::SystemPty),
+                mode: bt_core::AdoptMode::Bound,
+            },
+            Arc::new(crate::child::SilentWake),
+        )
+        .expect("adopts");
+        assert!(shows(&adopted, "ALT-END"));
+        link.ack().expect("ack");
+        let again = adopted.live_snapshot();
+        assert_eq!(
+            String::from_utf8_lossy(&again),
+            String::from_utf8_lossy(&screen),
+            "the adopted terminal is not the crashed one"
+        );
+        drop(adopted);
+        wait_until("the holder did not exit after the ACK", || {
+            exited(&mut holder)
+        });
+        hang_up(program, start_time(program).unwrap_or(0), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -5079,6 +5971,7 @@ mod tests {
             blob: Vec::new(),
             master,
             taken_from: None,
+            journal: None,
         });
         assert!(bound.ping(HAND_WAIT));
         let refused: Vec<String> = bound
@@ -5272,6 +6165,7 @@ mod tests {
             blob: b"younger".to_vec(),
             master: taken.master.try_clone().unwrap(),
             taken_from: Some(older_socket.clone()),
+            journal: None,
         });
         let (own_master, own_shell) = register(&bound, OTHER, TICKS, b"own");
         assert!(bound.ping(HAND_WAIT));
@@ -5423,6 +6317,7 @@ mod tests {
                 uid: uid(),
                 limit: Some(Duration::from_secs(20)),
                 buffer_limit: BUFFER_LIMIT,
+                compactor: None,
             };
             let (ours, theirs) = UnixStream::pair().unwrap();
             let holding = std::thread::spawn(move || hold(theirs, &config));
@@ -5495,6 +6390,7 @@ mod tests {
             blob: Vec::new(),
             master: copy,
             taken_from: Some(dir.join(HANDOVER_SOCKET)),
+            journal: None,
         });
         assert!(bound.ping(HAND_WAIT));
         drop(bound);
@@ -5535,6 +6431,7 @@ mod tests {
             uid: uid(),
             limit: Some(Duration::from_secs(20)),
             buffer_limit: BUFFER_LIMIT,
+            compactor: None,
         };
         let (ours, theirs) = UnixStream::pair().unwrap();
         let holding = std::thread::spawn(move || hold(theirs, &config));
@@ -5562,6 +6459,7 @@ mod tests {
                         blob: Vec::new(),
                         master,
                         taken_from: None,
+                        journal: None,
                     });
                     for n in 0..STATES {
                         bound.state(&tab(id), n.to_string().into_bytes());

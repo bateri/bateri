@@ -11,8 +11,11 @@
 //! master is open), the layout goes on its edges behind one delayed trigger
 //! ([`Keeper::layout_changed`]) and at once when a pane registers, the panes'
 //! `bt-core` state at the shell's edges and, delayed, when the dock's mirror
-//! moves (the pane's side). A holder that dies while bound is replaced and
-//! everything registered again, a bounded number of times.
+//! moves (the pane's side), and each journaled pane's bases as its compaction
+//! makes them (the pane's journal, through [`Keeper::add`]'s sink). A holder
+//! that dies while bound is replaced and everything registered again, a
+//! bounded number of times; past that, and on the switch to `"update"`, the
+//! panes' journals break — no holder confirms their bases any more.
 //!
 //! Main thread only: the panes hold it in an `Rc`. The reader threads see
 //! only [`Keeper::active_flag`], so in `"update"` (no holder) a shell's
@@ -33,6 +36,7 @@ use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::MainThreadMarker;
 
 use crate::handover::{self, Bound, BoundPane};
+use crate::journal::BaseSink;
 use crate::ssh_route::Masters;
 
 /// How many times one run replaces a holder that died while bound. A holder
@@ -309,24 +313,26 @@ impl Keeper {
 
     /// Registers a pane, then sends the layout at once: a crash before the
     /// delayed one would carry a program no window places, and the next
-    /// bateri would release it.
-    pub(crate) fn add(&self, mtm: MainThreadMarker, pane: BoundPane) {
-        {
+    /// bateri would release it. Returns where the pane's later journal bases
+    /// go ([`Bound::sink`]); `None` without a holder.
+    pub(crate) fn add(&self, mtm: MainThreadMarker, pane: BoundPane) -> Option<Box<dyn BaseSink>> {
+        let sink = {
             let bound = self.bound.borrow();
-            let Some(bound) = bound.as_ref() else {
-                return;
-            };
+            let bound = bound.as_ref()?;
             let tab = pane.tab.clone();
             if pane.taken_from.is_some() {
                 self.unconfirmed.borrow_mut().push(tab.clone());
             }
+            let sink = bound.sink(&tab);
             let mut registered = self.registered.borrow_mut();
             if !registered.contains(&tab) {
                 registered.push(tab);
             }
             bound.add(pane);
-        }
+            sink
+        };
         self.send_layout(mtm);
+        Some(sink)
     }
 
     /// The pane closes: the holder lets its copy go.

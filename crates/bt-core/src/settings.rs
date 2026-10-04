@@ -1537,9 +1537,10 @@ restore_windows = "all"
 # build, a session over ssh) outlive it: update keeps them only across an
 # update, crash also when bateri crashes or is forced to quit, quit also when
 # you quit it — then quitting asks nothing, and Quit and End Programs (⌥⌘Q)
-# ends them. The next bateri takes them back; after a crash a full-screen
-# program redraws its screen and a plain shell's screen is gone. Restarting
-# the Mac or logging out ends them.
+# ends them. The next bateri takes them back with their screens and
+# scrollback; a pane already open when you switched away from update comes
+# back with its program redrawing the screen. Restarting the Mac or logging
+# out ends them.
 keep_running = "crash"
 
 [appearance]

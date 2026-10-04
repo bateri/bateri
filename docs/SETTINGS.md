@@ -180,9 +180,10 @@ restore_windows = "all"
 # build, a session over ssh) outlive it: update keeps them only across an
 # update, crash also when bateri crashes or is forced to quit, quit also when
 # you quit it — then quitting asks nothing, and Quit and End Programs (⌥⌘Q)
-# ends them. The next bateri takes them back; after a crash a full-screen
-# program redraws its screen and a plain shell's screen is gone. Restarting
-# the Mac or logging out ends them.
+# ends them. The next bateri takes them back with their screens and
+# scrollback; a pane already open when you switched away from update comes
+# back with its program redrawing the screen. Restarting the Mac or logging
+# out ends them.
 keep_running = "crash"
 
 [appearance]
@@ -582,9 +583,8 @@ The value is read at closing time, so it takes effect the moment you save.
   directories) is also kept up to date on disk while bateri runs, without
   the history, so after a crash or a power cut the windows come back under
   every `keep_running` value: with their programs where they were kept, with
-  new shells where nothing kept them. After a crash the screen does not come
-  back with a kept program: a full-screen program (vim, htop) redraws it at
-  once, a plain shell's screen is gone, and the pane says so in a dim line.
+  new shells where nothing kept them. After a crash a kept program comes back
+  with its screen and history as they were at the crash.
 - **Updates are the exception**: on "Install and Relaunch" the shells and the
   running programs — vim, `npm run dev`, a session over ssh — **do not die**,
   they move to the new version with their screens; on this path the history
@@ -628,11 +628,14 @@ it:
   crash and a forced quit end them.
 - `"crash"` (the default) also keeps them when bateri crashes or is forced to
   quit (Activity Monitor, `kill -9`): they keep running without a window and
-  the next bateri takes them back into their windows, the same processes. The
-  screen does not come back with them yet: the pane says so in a dim line and
-  a full-screen program (vim, htop) is made to redraw at once; in a plain
-  shell what was on screen is gone. ⌘Q still ends them, after the usual
-  question.
+  the next bateri takes them back into their windows, the same processes,
+  with the screen and the history as they were at the crash and whatever the
+  programs printed while bateri was closed below. ⌘Q still ends them, after
+  the usual question. A pane that was already open when you moved away from
+  `"update"`, or whose record could not be kept (below), comes back with its
+  program redrawing the screen instead: the pane says so in a dim line, a
+  full-screen program (vim, htop) is made to redraw at once, and in a plain
+  shell what was on screen is gone.
 - `"quit"` also keeps them when you quit with ⌘Q, which then asks nothing:
   the programs run on with no window until bateri opens again, and then they
   come back with their screens. So that they are not forgotten, a quit that
@@ -659,6 +662,14 @@ it:
   beside bateri and keeps a copy of each terminal, so the programs have
   somewhere to stay when bateri goes. While bateri runs it reads nothing and
   wakes for nothing; when no program is left for it to keep, it exits.
+- So that the screen survives a crash, bateri keeps a record of what each
+  pane printed since it last summarized it, in memory shared with the helper
+  — never on disk — and summarizes it from time to time on a thread of its
+  own; the record's room grows with `scrollback`. After a crash the helper
+  rebuilds each screen from the summary and the record with `bateri compact`. A program that prints without pause for a long time may
+  be slowed down to the pace of the summaries; if a summary cannot keep up,
+  that pane's record is dropped and a crash brings it back redrawn by its
+  program.
 - A change applies when you save, in every direction, without restarting
   bateri: moving away from `"update"` protects the programs that are already
   running from then on, moving back to it lets them end with bateri again,

@@ -61,8 +61,8 @@ mod window;
 // The platform-independent half lives in `bt-shell-common`; imported
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
-    child, download, focus, gesture, handover, jobs, keys, links, notices, preview_cache, quote,
-    remote_files, remote_helper, restore, settings, split, ssh_route, upload, watch, zoom,
+    child, download, focus, gesture, handover, jobs, journal, keys, links, notices, preview_cache,
+    quote, remote_files, remote_helper, restore, settings, split, ssh_route, upload, watch, zoom,
 };
 
 use std::time::{Duration, Instant};
@@ -212,6 +212,26 @@ pub fn hold() -> Option<i32> {
         return Some(bt_shell_common::handover::EXIT_USAGE);
     };
     Some(bt_shell_common::handover::hold_main(&argv))
+}
+
+/// `bateri compact --fd FD`: `Some(exit code)` when a bound holder started
+/// this process to rebuild one pane's screen after a crash, `None`
+/// otherwise. Before the window-server check, like [`hold`]: no GUI, and the
+/// holder runs it from any session. The body is
+/// [`bt_shell_common::journal::compact_main`].
+pub fn compact() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != "compact" {
+        return None;
+    }
+    let Some(argv) = args
+        .map(|arg| arg.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("{}", bt_shell_common::journal::COMPACT_USAGE_TEXT);
+        return Some(bt_shell_common::journal::COMPACT_USAGE);
+    };
+    Some(bt_shell_common::journal::compact_main(&argv))
 }
 
 /// The shell of the smoke and measurement runs. **Not** the user's `$SHELL`:
