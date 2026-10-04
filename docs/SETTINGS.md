@@ -263,13 +263,15 @@ integration = "auto"
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
-# production machine is never mistaken for another. Each entry names a host
-# pattern and a mark: "production" (red), "staging" (yellow), "development"
-# (green), "none" (no mark), or a color like "#c678dd". In a pattern * stands
-# for any run of characters and ? for one, ignoring case; a pattern without @
-# matches the host after any user@. The first entry that matches wins, so put
-# exact names before wide patterns; "none" stops the search. Shell > Mark
-# "host" as writes the entry for the host of the ssh tab you are in.
+# production machine is never mistaken for another. A database client (psql,
+# mysql, redis-cli, mongosh) is colored by its server's host the same way.
+# Each entry names a host pattern and a mark: "production" (red), "staging"
+# (yellow), "development" (green), "none" (no mark), or a color like
+# "#c678dd". In a pattern * stands for any run of characters and ? for one,
+# ignoring case; a pattern without @ matches the host after any user@. The
+# first entry that matches wins, so put exact names before wide patterns;
+# "none" stops the search. Shell > Mark "host" as writes the entry for the
+# host of the ssh tab or the database client you are in.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },
@@ -1196,7 +1198,7 @@ integration = true
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `hosts` | array of `{ host, mark }` | `[]` | marks for remote hosts: the dock's colors while ssh or mosh is on that host |
+| `hosts` | array of `{ host, mark }` | `[]` | marks for hosts: the dock's colors while ssh or mosh is on that host, or a database client is connected to it |
 | `preview_max_size` | size | `"100MB"` | if a remote file's preview (⌘-click) is larger than this, asks before downloading |
 | `preview_read_only` | `true` \| `false` | `true` | the preview copy opens read-only (`0444`) — a hint, an app can unlock it |
 | `preview_dir` | folder | `"~/Library/Caches/bateri/Previews"` | the folder of preview copies |
@@ -1213,6 +1215,26 @@ While you are on a remote machine over ssh or mosh, the dock's context line
 shows `⇄ host` and its top line is colored. `hosts` picks that color by host,
 so you know from the color that you are on prod.
 
+The same marks apply to **database clients**. While `psql`, `mysql` or
+`mariadb`, `redis-cli` or `mongosh` waits at its prompt, a one-line guide in
+the dock's place names the server it is connected to
+(`postgres  app@db.prod:5432/main`, how to leave on the right); the first
+entry matching the server's host colors that guide and the dock's top line,
+so a production database is as red as a production machine. The host is the
+server's name as you gave it — to an option (`-h db.prod`), in a connection
+URI or string, or in `PGHOST` — without the user; libpq's `hostaddr` is
+shown in its place, since that is where the client connects. A local socket
+and `sqlite3`'s file have no host. The password, in whatever form you passed
+it, is never shown. The guide names the server the client **was started
+with**: connecting elsewhere from inside it (psql's `\c`, mysql's
+`connect`, redis-cli's `CONNECT`) is not followed, so the color stays the
+first server's until you quit.
+
+Since one list serves both, **a wide pattern written for ssh colors every
+database client too**: `{ host = "*", mark = "development" }` makes each
+`psql` guide green as well. Put the exact names you mean before it, or mark a
+host `"none"` to leave it out.
+
 - **`mark`**: `"production"` (the theme's `error`, red), `"staging"`
   (`warning`, yellow), `"development"` (`success`, green), `"none"` (no mark —
   the theme's `info`, cyan) or a color in the form `"#rrggbb"`. Named marks
@@ -1228,15 +1250,21 @@ so you know from the color that you are on prod.
 - The host is the name **you type** to `ssh` (`ssh prod` → `prod`, `ssh
   deploy@10.0.0.5` → `deploy@10.0.0.5`); the `HostName` of `~/.ssh/config` is
   not resolved. If you connect with an alias, write the pattern for the alias.
+  A database client's host is the server's name alone (`psql -h db.prod -U
+  app` → `db.prod`), so a pattern with `@` such as `root@*` never matches
+  one. A libpq service file and MySQL's option files (`~/.my.cnf`) are not
+  read, so a server named only there is not known and the guide stays
+  unmarked; for the same reason `MYSQL_HOST` is used only with
+  `mysql --no-defaults`, since an option file would override it.
 - **The first match wins**, in the order of the array: write exact names
   before wide patterns. `"none"` ends the search there — that is the way to
   leave a single host caught by a glob unmarked.
 - Instead of an inline array, a `[[remote.hosts]]` array of sections can be
   written too.
-- **From the menu**: while in an ssh tab, **Shell ▸ Mark “host” as ▸**
-  Production / Staging / Development / None; the check mark is on the host's
-  current mark (even if it comes from a pattern), and in a local tab the item
-  is grayed out. The choice is written to the file: if there is an entry for
+- **From the menu**: while in an ssh tab, or while a database client shows
+  its server in the guide, **Shell ▸ Mark “host” as ▸** Production / Staging
+  / Development / None; the check mark is on the host's current mark (even if
+  it comes from a pattern), and with neither the item is grayed out. The choice is written to the file: if there is an entry for
   exactly that host, its mark changes in place; otherwise it is added at the
   **beginning** of the array (if a glob comes before it, the entry is moved to
   the beginning). **None** deletes that host's entry; if a pattern still
@@ -1244,9 +1272,12 @@ so you know from the color that you are on prod.
   host without its `user@`. Comments and the array's formatting are not
   touched; if the file cannot be parsed or the list is broken, nothing is
   written.
-- A marked host's tab carries a small dot in the mark's color next to its
-  title while the tab bar is visible; an unmarked remote tab has no dot.
-- It takes effect the moment you save, even while ssh is running.
+- A marked remote host's tab carries a small dot in the mark's color next
+  to its title while the tab bar is visible; an unmarked remote tab has no
+  dot. A database client's mark shows in its guide and the dock's top line
+  only.
+- It takes effect the moment you save, even while ssh or a database client
+  is running.
 - **`integration`** (`true` \| `false`, optional): remote shell integration on
   that host (below). An entry may carry only `integration`
   (`{ host = "router*", integration = false }`); it then has no mark and takes

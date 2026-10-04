@@ -34,6 +34,17 @@ of every installed copy. A version without a section is not released.
   is shortened from the left. Programs that merely run on an interpreter (a
   script, a coding agent like codex or gemini) get no guide; the dock just
   steps aside for them.
+- **Database clients get the same guide, colored like the host they are
+  on.** In `psql`, `mysql` and `mariadb`, `sqlite3`, `redis-cli` and
+  `mongosh` the line names the server the client was started with —
+  `postgres  app@db.prod:5432/main`, or the file for SQLite — with how to
+  leave (`\q to leave`) on the right. Your `[remote] hosts` marks now apply
+  to the database's server too, so a production database is as red as a
+  production machine, and **Shell ▸ Mark “host” as** marks it from there. A
+  password is never shown, whichever way you passed it (an option, a
+  connection URI or string). A wide pattern you wrote for ssh, like
+  `{ host = "*", mark = "development" }`, now colors database clients as
+  well.
 
 ## [0.5.0] - 2026-10-04
 

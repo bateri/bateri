@@ -1718,10 +1718,12 @@ define_class!(
 
         /// Shell ▸ Mark “{host}” as ▸ {mark}: the item's `tag` is
         /// the mark ([`crate::menu::mark_of_tag`]), the host is the active tab's
-        /// remote host. The menu only **writes** — the path that reads the file
-        /// applies ([`AppDelegate::save_edit`], the Theme ▸ precedent); nothing
-        /// is written to an unparseable file, the diagnostic goes to the write
-        /// slot. A no-op if the tab became local in the meantime.
+        /// remote host or its database client's server
+        /// ([`AppDelegate::key_mark_target`]). The menu only **writes** — the
+        /// path that reads the file applies ([`AppDelegate::save_edit`], the
+        /// Theme ▸ precedent); nothing is written to an unparseable file, the
+        /// diagnostic goes to the write slot. A no-op if the tab has no such
+        /// host any more.
         #[unsafe(method(markHost:))]
         fn mark_host(&self, sender: Option<&AnyObject>) {
             let Some(mark) = sender
@@ -1730,7 +1732,7 @@ define_class!(
             else {
                 return;
             };
-            if let Some((host, _)) = self.key_remote_mark() {
+            if let Some((host, _)) = self.key_mark_target() {
                 self.save_edit(&SettingsEdit::RemoteHostMark { host, mark });
             }
         }
@@ -2579,6 +2581,14 @@ impl AppDelegate {
     /// when no terminal window is key — the input of Shell ▸ Mark … as ▸.
     pub(crate) fn key_remote_mark(&self) -> Option<(String, HostMark)> {
         self.key_window()?.remote_mark()
+    }
+
+    /// The active tab's markable host — its remote host, else the server
+    /// its database client is connected to — and its resolved mark; `None`
+    /// when there is neither or no terminal window is key. The input of
+    /// Shell ▸ Mark … as ▸ (`TerminalWindow::mark_target`).
+    pub(crate) fn key_mark_target(&self) -> Option<(String, HostMark)> {
+        self.key_window()?.mark_target()
     }
 
     /// [`Self::toggle_host_integration`]'s `plain` forgetting: the key tab's

@@ -211,9 +211,11 @@ pub(crate) struct MarkMenu {
 
 /// The current state of Mark … as ▸ ([`mark_menu`]).
 ///
-/// The menu's model, pure: on a remote tab the title carries the
-/// host without its `user@` and the checkmark is on the **effective resolution**
-/// (even if it comes from a glob); locally (`None`) "Mark Host as" and grey.
+/// The menu's model, pure: with a markable host (a remote tab's, or the
+/// server of a database client's guide bar) the title carries the host
+/// without its `user@` and the checkmark is on the **effective resolution**
+/// (even if it comes from a glob); without one (`None`) "Mark Host as" and
+/// grey.
 pub(crate) fn mark_menu(remote: Option<(&str, HostMark)>) -> MarkMenu {
     match remote {
         Some((host, mark)) => MarkMenu {
@@ -239,19 +241,24 @@ define_class!(
     unsafe impl NSObjectProtocol for ShellMenuDelegate {}
 
     unsafe impl NSMenuDelegate for ShellMenuDelegate {
-        /// Shell is opening: Mark … as ▸ is built from the active tab's remote state.
-        /// Only on opening — the shortcut search does not come through here.
+        /// Shell is opening: Mark … as ▸ is built from the active tab's
+        /// markable host — its remote host, else its database client's
+        /// server — and Forget Password from its remote host alone (a
+        /// database's password is not bateri's). Only on opening — the
+        /// shortcut search does not come through here.
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, menu: &NSMenu) {
-            let remote = crate::app::delegate(self.mtm()).and_then(|app| app.key_remote_mark());
+            let app = crate::app::delegate(self.mtm());
             if let Some(forget) = menu.itemWithTag(FORGET_TAG) {
+                let remote = app.as_ref().and_then(|app| app.key_remote_mark());
                 let host = remote.as_ref().map(|(host, _)| host.as_str());
                 forget.setTitle(&NSString::from_str(&forget_title(host)));
             }
             let Some(holder) = menu.itemWithTag(MARK_HOLDER_TAG) else {
                 return;
             };
-            let model = mark_menu(remote.as_ref().map(|(host, mark)| (host.as_str(), *mark)));
+            let target = app.and_then(|app| app.key_mark_target());
+            let model = mark_menu(target.as_ref().map(|(host, mark)| (host.as_str(), *mark)));
             holder.setTitle(&NSString::from_str(&model.title));
             holder.setEnabled(model.enabled);
             if let Some(submenu) = holder.submenu() {

@@ -26,6 +26,16 @@
 //! `jobs::ProcArgs`): a program that reads the keyboard often carries API
 //! keys in its environment, and nothing but the listed variables is ever
 //! copied out of a process's record.
+//!
+//! **Database clients** (`psql`, `mysql`, `mariadb`, `sqlite3`,
+//! `redis-cli`, `mongosh`) are a family too: their bar names what the
+//! client is connected to — `postgres  app@db.prod:5432/main` — from its
+//! command line ([`database`]), never its password, and its server's host is
+//! what the `[remote] hosts` marks color the bar by.
+
+mod database;
+
+pub use database::{Client, Target};
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -39,8 +49,12 @@ use crate::jobs::{self, ProcArgs, ProcessTable, ShellParent};
 
 /// The environment variables a candidate's record carries — **the whole
 /// list**; no other variable of any process is read. Each has a single
-/// use: the framework Python's launcher path, and the managers' roots.
-pub const ENV_KEYS: [&str; 7] = [
+/// use: the framework Python's launcher path, the managers' roots, and the
+/// database clients' server, address, port, user, database and libpq
+/// service. **No
+/// password variable** (`PGPASSWORD`, `MYSQL_PWD`, `REDISCLI_AUTH`) is
+/// here, so none is ever read out of a process.
+pub const ENV_KEYS: [&str; 15] = [
     "__PYVENV_LAUNCHER__",
     "VIRTUAL_ENV",
     "CONDA_PREFIX",
@@ -48,6 +62,14 @@ pub const ENV_KEYS: [&str; 7] = [
     "NVM_DIR",
     "VOLTA_HOME",
     "PYENV_ROOT",
+    "PGHOST",
+    "PGHOSTADDR",
+    "PGPORT",
+    "PGUSER",
+    "PGDATABASE",
+    "PGSERVICE",
+    "MYSQL_HOST",
+    "MYSQL_TCP_PORT",
 ];
 
 /// How long the interpreter's `--version` may take before it is killed — a
@@ -63,7 +85,8 @@ const VERSION_OUTPUT_MAX: u64 = 4096;
 /// The longest `pyvenv.cfg` that is read — the file is a few lines.
 const VENV_CONFIG_MAX: u64 = 64 * 1024;
 
-/// An interpreter family with a REPL — a row of [`INTERPRETERS`].
+/// A program the guide bar knows: an interpreter family with a REPL (a row
+/// of [`INTERPRETERS`]) or a database client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
     Python,
@@ -71,6 +94,7 @@ pub enum Family {
     Bun,
     Deno,
     Ruby,
+    Database(Client),
 }
 
 /// One interpreter: the family, the bar's label and its exit hint. A new
@@ -154,6 +178,9 @@ impl Family {
     /// tool that merely starts with the word (`python-lsp-server`) is not an
     /// interpreter, and its executable must not be run for a version.
     fn of_name(name: &str) -> Option<Self> {
+        if let Some(client) = Client::of_name(name) {
+            return Some(Self::Database(client));
+        }
         let versioned = name
             .strip_prefix("python")
             .is_some_and(|rest| rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.'));
@@ -169,12 +196,27 @@ impl Family {
         }
     }
 
-    fn row(self) -> &'static Interpreter {
-        // audit: every family has a row; the table is the enum's own list.
-        INTERPRETERS
-            .iter()
-            .find(|row| row.family == self)
-            .expect("every family is in the table")
+    /// The bar's title, before a version.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Database(client) => client.label(),
+            interpreter => interpreter.row().map_or("", |row| row.label),
+        }
+    }
+
+    /// How to leave.
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Database(client) => client.hint(),
+            interpreter => interpreter.row().map_or("", |row| row.hint),
+        }
+    }
+
+    /// An interpreter's row; `None` for a database client (its own
+    /// `label`/`hint`). Every interpreter has one —
+    /// `the_bars_strings_are_the_ones_the_atlas_checks` walks them.
+    fn row(self) -> Option<&'static Interpreter> {
+        INTERPRETERS.iter().find(|row| row.family == self)
     }
 }
 
@@ -190,12 +232,18 @@ pub struct Program {
     /// `None` when the executable's path is unknown.
     pub exec: Option<PathBuf>,
     /// Where it runs from, as shown: the path the user ran (the framework
-    /// Python's launcher, a venv's `bin/python`), `~`-shortened; empty when
-    /// unknown.
+    /// Python's launcher, a venv's `bin/python`), `~`-shortened; for a
+    /// database client what it is connected to (`app@db.prod:5432/main`,
+    /// SQLite's file). Empty when unknown.
     pub path: String,
-    /// What manages it, from the environment and the path (`venv`, `nvm`,
-    /// `conda base`); `None` when nothing says.
-    pub manager: Option<String>,
+    /// The detail after the title: what manages an interpreter, from the
+    /// environment and the path (`venv`, `nvm`, `conda base`), or a database
+    /// client's libpq service (`service prod`); `None` when nothing says.
+    pub detail: Option<String>,
+    /// The server's host the `[remote] hosts` marks are resolved against
+    /// (a database client's); `None` for an interpreter, a socket or a
+    /// file.
+    pub host: Option<String>,
     /// A virtual environment's configuration to look for in the background:
     /// a Python run from `{dir}/bin/python` that nothing else names is a
     /// venv's when `{dir}/pyvenv.cfg` is one (an unactivated venv).
@@ -216,13 +264,13 @@ impl Program {
     /// The guide bar: what the table knew, completed by `details` when the
     /// background job has returned.
     pub fn bar(&self, details: Option<&Details>) -> ProgramBar {
-        let row = self.family.row();
+        let label = self.family.label();
         let title = match details.and_then(|details| details.version.as_deref()) {
-            Some(version) => format!("{} {version}", row.label),
-            None => row.label.to_owned(),
+            Some(version) => format!("{label} {version}"),
+            None => label.to_owned(),
         };
         let detail = self
-            .manager
+            .detail
             .clone()
             .or_else(|| {
                 details
@@ -234,7 +282,8 @@ impl Program {
             title,
             detail,
             path: self.path.clone(),
-            hint: row.hint.to_owned(),
+            hint: self.family.hint().to_owned(),
+            host: self.host.clone().unwrap_or_default(),
             tone: ProgramTone::Info,
         }
     }
@@ -338,6 +387,30 @@ pub fn classify(members: &[Member], home: Option<&Path>) -> Option<Program> {
 /// One member: its family, whether it is a REPL, then the bar's parts.
 fn recognize(pid: u32, name: &str, record: &ProcArgs, home: Option<&Path>) -> Option<Program> {
     let family = Family::of_name(name)?;
+    let args = record.args.get(1..).unwrap_or_default();
+    if let Family::Database(client) = family {
+        // On Linux a script run by its own shebang (`#!/usr/bin/node`) is
+        // named after the script while its argv is the interpreter's —
+        // `/usr/bin/node /usr/bin/mongosh …`: the client's arguments come
+        // after the script.
+        let interpreted = record
+            .args
+            .first()
+            .is_some_and(|zero| matches!(base(zero), "node" | "nodejs"));
+        let args = if interpreted {
+            node_script(args).map_or(args, |(_, rest)| rest)
+        } else {
+            args
+        };
+        return client_program(pid, client, args, record, home);
+    }
+    // A client shipped as a node script (Homebrew's `mongosh`).
+    if family == Family::Node
+        && let Some((script, rest)) = node_script(args)
+        && let Some(client) = Client::of_script(base(script))
+    {
+        return client_program(pid, client, rest, record, home);
+    }
     if !is_repl(family, &record.args) {
         return None;
     }
@@ -367,9 +440,59 @@ fn recognize(pid: u32, name: &str, record: &ProcArgs, home: Option<&Path>) -> Op
             .as_deref()
             .map(|path| tilde(path, home))
             .unwrap_or_default(),
-        manager,
+        detail: manager,
+        host: None,
         venv_config,
     })
+}
+
+/// A database client's program: what it is connected to ([`Target`]), its
+/// libpq service as the detail and its server's host for the marks. No
+/// executable to ask for a version — the client's name is the title. `None`
+/// when the command line is not the client's prompt.
+fn client_program(
+    pid: u32,
+    client: Client,
+    args: &[String],
+    record: &ProcArgs,
+    home: Option<&Path>,
+) -> Option<Program> {
+    let target = client.target(args, record)?;
+    Some(Program {
+        pid,
+        family: Family::Database(client),
+        exec: None,
+        path: target.shown(home),
+        detail: target
+            .service
+            .as_ref()
+            .map(|service| format!("service {service}")),
+        host: target.mark_host(),
+        venv_config: None,
+    })
+}
+
+/// The script node runs and the arguments after it, skipping node's own
+/// options ([`NODE_VALUED`] take a value); `None` when node runs no script
+/// — none given, or code given inline (`-e`, `-p`), after which the next
+/// argument is that code's, not a script.
+fn node_script(args: &[String]) -> Option<(&str, &[String])> {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            let script = args.get(index + 1)?;
+            return Some((script, args.get(index + 2..).unwrap_or_default()));
+        }
+        if !arg.starts_with('-') {
+            return Some((arg, args.get(index + 1..).unwrap_or_default()));
+        }
+        let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+        if NODE_CODE.contains(&name) {
+            return None;
+        }
+        index += 1 + usize::from(NODE_VALUED.contains(&name) && !arg.contains('='));
+    }
+    None
 }
 
 /// Whether the command line starts the interpreter's REPL rather than code
@@ -386,6 +509,8 @@ fn is_repl(family: Family, argv: &[String]) -> bool {
             argv.first().is_some_and(|zero| named(zero))
                 || first_positional(args, &["-I", "-r", "-C", "-E"]).is_some_and(named)
         }
+        // A client's prompt is decided with its target (`client_program`).
+        Family::Database(_) => false,
     }
 }
 
@@ -458,15 +583,6 @@ fn runs_nothing(rest: &[String]) -> bool {
 /// option this list does not know that takes a separate value makes its
 /// value look like a script — no bar, the safe direction.
 fn node_is_repl(args: &[String]) -> bool {
-    const VALUED: [&str; 7] = [
-        "-r",
-        "--require",
-        "--import",
-        "--loader",
-        "--experimental-loader",
-        "-C",
-        "--conditions",
-    ];
     let mut interactive = false;
     let mut code = false;
     let mut index = 0;
@@ -474,12 +590,12 @@ fn node_is_repl(args: &[String]) -> bool {
         let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
         match name {
             "-i" | "--interactive" => interactive = true,
-            "-e" | "--eval" | "-p" | "--print" => {
+            _ if NODE_CODE.contains(&name) => {
                 code = true;
                 index += usize::from(!arg.contains('='));
             }
             "--" | "-" => return false,
-            _ if VALUED.contains(&name) => index += usize::from(!arg.contains('=')),
+            _ if NODE_VALUED.contains(&name) => index += usize::from(!arg.contains('=')),
             _ if !arg.starts_with('-') => return false,
             _ => {}
         }
@@ -487,6 +603,20 @@ fn node_is_repl(args: &[String]) -> bool {
     }
     !code || interactive
 }
+
+/// Node's options that take a value (besides the code's).
+const NODE_VALUED: [&str; 7] = [
+    "-r",
+    "--require",
+    "--import",
+    "--loader",
+    "--experimental-loader",
+    "-C",
+    "--conditions",
+];
+
+/// Node's options that run the code given as their value.
+const NODE_CODE: [&str; 4] = ["-e", "--eval", "-p", "--print"];
 
 /// The first argument that is not an option, skipping the value of each
 /// option in `valued`; `None` when there is none.
@@ -688,7 +818,7 @@ pub fn parse_version(family: Family, output: &str) -> Option<String> {
     let line = output.lines().next()?.trim();
     let mut words = line.split_whitespace();
     let mut word = words.next()?;
-    if word.eq_ignore_ascii_case(family.row().label) {
+    if word.eq_ignore_ascii_case(family.label()) {
         word = words.next()?;
     }
     let digits = word.strip_prefix('v').unwrap_or(word);
@@ -795,7 +925,7 @@ mod tests {
         assert_eq!(program.family, Family::Python);
         assert_eq!(program.path, "/opt/homebrew/bin/python3");
         assert_eq!(program.exec.as_deref(), Some(Path::new(FRAMEWORK)));
-        assert_eq!(program.manager, None);
+        assert_eq!(program.detail, None);
         // Homebrew's `bin` has no `pyvenv.cfg` but it is asked: nothing
         // else names it.
         assert_eq!(
@@ -829,7 +959,7 @@ mod tests {
         ))
         .expect("venv python");
         assert_eq!(activated.path, "~/proj/.venv/bin/python3");
-        assert_eq!(activated.manager.as_deref(), Some("venv"));
+        assert_eq!(activated.detail.as_deref(), Some("venv"));
         assert_eq!(activated.venv_config, None, "already named");
         // An activated venv does not make another interpreter its own.
         let system = one(member(
@@ -839,7 +969,7 @@ mod tests {
             &[("VIRTUAL_ENV", "/Users/me/proj/.venv")],
         ))
         .expect("system python");
-        assert_eq!(system.manager, None);
+        assert_eq!(system.detail, None);
         assert_eq!(system.path, "/usr/bin/python3");
         // Not activated: run by path, the configuration says.
         let unactivated = one(member(
@@ -849,7 +979,7 @@ mod tests {
             &[("__PYVENV_LAUNCHER__", "/Users/me/proj/.venv/bin/python")],
         ))
         .expect("unactivated venv");
-        assert_eq!(unactivated.manager, None);
+        assert_eq!(unactivated.detail, None);
         assert_eq!(
             unactivated.venv_config.as_deref(),
             Some(Path::new("/Users/me/proj/.venv/pyvenv.cfg"))
@@ -876,7 +1006,7 @@ mod tests {
             ],
         ))
         .expect("conda python");
-        assert_eq!(conda.manager.as_deref(), Some("conda ml"));
+        assert_eq!(conda.detail.as_deref(), Some("conda ml"));
         assert_eq!(conda.path, "~/miniconda3/envs/ml/bin/python3.12");
         // An active conda environment does not claim `/usr/bin/python3`.
         let outside = one(member(
@@ -889,7 +1019,7 @@ mod tests {
             ],
         ))
         .expect("system python");
-        assert_eq!(outside.manager, None);
+        assert_eq!(outside.detail, None);
         let pyenv = one(member(
             "python3.12",
             "/Users/me/.pyenv/versions/3.12.4/bin/python3.12",
@@ -897,7 +1027,7 @@ mod tests {
             &[],
         ))
         .expect("pyenv python");
-        assert_eq!(pyenv.manager.as_deref(), Some("pyenv"));
+        assert_eq!(pyenv.detail.as_deref(), Some("pyenv"));
         let moved = one(member(
             "python3.12",
             "/opt/pyenv/versions/3.12.4/bin/python3.12",
@@ -905,7 +1035,7 @@ mod tests {
             &[("PYENV_ROOT", "/opt/pyenv")],
         ))
         .expect("pyenv python under its variable");
-        assert_eq!(moved.manager.as_deref(), Some("pyenv"));
+        assert_eq!(moved.detail.as_deref(), Some("pyenv"));
         let uv = one(member(
             "python3.13",
             "/Users/me/.local/share/uv/python/cpython-3.13.1-macos-aarch64-none/bin/python3.13",
@@ -913,7 +1043,7 @@ mod tests {
             &[],
         ))
         .expect("uv python");
-        assert_eq!(uv.manager.as_deref(), Some("uv"));
+        assert_eq!(uv.detail.as_deref(), Some("uv"));
     }
 
     #[test]
@@ -927,7 +1057,7 @@ mod tests {
         ))
         .expect("node REPL");
         assert_eq!(nvm.family, Family::Node);
-        assert_eq!(nvm.manager.as_deref(), Some("nvm"));
+        assert_eq!(nvm.detail.as_deref(), Some("nvm"));
         assert_eq!(nvm.path, "~/.nvm/versions/node/v22.13.0/bin/node");
         assert_eq!(nvm.venv_config, None, "only Python has a venv");
         let details = Details {
@@ -943,7 +1073,7 @@ mod tests {
             &[("NVM_DIR", "/Users/me/.nvm")],
         ))
         .expect("brew node");
-        assert_eq!(brew.manager, None);
+        assert_eq!(brew.detail, None);
         let volta = one(member(
             "node",
             "/Users/me/.volta/tools/image/node/22.13.0/bin/node",
@@ -951,7 +1081,7 @@ mod tests {
             &[],
         ))
         .expect("volta node");
-        assert_eq!(volta.manager.as_deref(), Some("volta"));
+        assert_eq!(volta.detail.as_deref(), Some("volta"));
         let fnm = one(member(
             "node",
             "/Users/me/.local/state/fnm_multishells/123_456/bin/node",
@@ -959,7 +1089,7 @@ mod tests {
             &[],
         ))
         .expect("fnm node");
-        assert_eq!(fnm.manager.as_deref(), Some("fnm"));
+        assert_eq!(fnm.detail.as_deref(), Some("fnm"));
         let asdf = one(member(
             "node",
             "/Users/me/.asdf/installs/nodejs/22.13.0/bin/node",
@@ -967,7 +1097,7 @@ mod tests {
             &[],
         ))
         .expect("asdf node");
-        assert_eq!(asdf.manager.as_deref(), Some("asdf"));
+        assert_eq!(asdf.detail.as_deref(), Some("asdf"));
     }
 
     #[test]
@@ -1212,7 +1342,7 @@ mod tests {
             ],
         ))
         .expect("conda python");
-        assert_eq!(program.manager.as_deref(), Some("conda ml"));
+        assert_eq!(program.detail.as_deref(), Some("conda ml"));
         // Base's own interpreter is base's.
         let base = one(member(
             "python3.12",
@@ -1224,7 +1354,7 @@ mod tests {
             ],
         ))
         .expect("conda python");
-        assert_eq!(base.manager.as_deref(), Some("conda base"));
+        assert_eq!(base.detail.as_deref(), Some("conda base"));
     }
 
     #[test]
@@ -1357,17 +1487,136 @@ mod tests {
             ],
         );
         let program = find(ShellParent::Login, 100, &table, home()).expect("node");
-        assert_eq!(program.manager.as_deref(), Some("nvm"));
+        assert_eq!(program.detail.as_deref(), Some("nvm"));
         let printed = format!("{program:?} {:?}", program.bar(None));
         assert!(
             !printed.contains("sk-secret") && !printed.contains("OPENAI"),
             "{printed}"
         );
-        assert!(
-            !ENV_KEYS
-                .iter()
-                .any(|key| key.contains("KEY") || key.contains("TOKEN"))
+        for key in ENV_KEYS {
+            for word in ["KEY", "TOKEN", "PASS", "PWD", "AUTH", "SECRET"] {
+                assert!(!key.contains(word), "{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_database_client_names_its_server_and_its_mark_host() {
+        // `psql` in its own group under the shell; its password variable is
+        // not asked for, its server's are.
+        let table = login_shell(200).exec(
+            200,
+            101,
+            200,
+            ("psql", "/opt/homebrew/opt/libpq/bin/psql"),
+            &[
+                "psql",
+                "-U",
+                "app",
+                "postgresql://app:hunter2@db.prod:5432/main",
+            ],
+            &[("PGPASSWORD", "hunter2"), ("PGHOST", "db.stage")],
         );
+        let program = find(ShellParent::Login, 100, &table, home()).expect("psql");
+        assert_eq!(program.family, Family::Database(Client::Postgres));
+        assert_eq!(program.exec, None, "no version is asked of a client");
+        assert_eq!(program.host.as_deref(), Some("db.prod"));
+        let bar = program.bar(None);
+        assert_eq!(bar.title, "postgres");
+        assert_eq!(bar.path, "app@db.prod:5432/main");
+        assert_eq!(bar.detail, "");
+        assert_eq!(bar.hint, "\\q to leave");
+        assert_eq!(bar.host, "db.prod");
+        assert_eq!(bar.tone, ProgramTone::Info);
+        // The background job adds nothing: the bar is whole at once.
+        assert_eq!(program.bar(Some(&details(&program))), bar);
+        let printed = format!("{program:?} {bar:?}");
+        assert!(
+            !printed.contains("hunter"),
+            "the password reached the program or its bar"
+        );
+        // A service names the server from its file: the detail says it.
+        let service = one(member(
+            "psql",
+            "/usr/bin/psql",
+            &["psql", "service=prod"],
+            &[],
+        ))
+        .expect("psql");
+        assert_eq!(service.bar(None).detail, "service prod");
+        assert_eq!(service.host, None);
+        // SQLite's file, `~`-shortened; no host to mark.
+        let sqlite = one(member(
+            "sqlite3",
+            "/usr/bin/sqlite3",
+            &["sqlite3", "/Users/me/x.db"],
+            &[],
+        ))
+        .expect("sqlite3");
+        assert_eq!(sqlite.bar(None).path, "~/x.db");
+        assert_eq!(sqlite.bar(None).title, "sqlite");
+        assert_eq!(sqlite.host, None);
+        // A client running a command is no prompt: no bar.
+        assert_eq!(
+            one(member(
+                "redis-cli",
+                "/opt/homebrew/bin/redis-cli",
+                &["redis-cli", "get", "k"],
+                &[],
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn mongosh_as_a_node_script_is_the_client() {
+        // Homebrew's `mongosh`: node running the script by its path.
+        let node = "/opt/homebrew/opt/node/bin/node";
+        let program = one(member(
+            "node",
+            node,
+            &[
+                "node",
+                "/opt/homebrew/bin/mongosh",
+                "mongodb://app:hunter2@db.prod/shop",
+            ],
+            &[],
+        ))
+        .expect("mongosh");
+        assert_eq!(program.family, Family::Database(Client::Mongo));
+        assert_eq!(program.bar(None).path, "app@db.prod/shop");
+        assert_eq!(program.host.as_deref(), Some("db.prod"));
+        // As Linux shows a script run by its own shebang: named after the
+        // script, the argv the interpreter's.
+        let shebang = one(member(
+            "mongosh",
+            "/usr/bin/node",
+            &[
+                "/usr/bin/node",
+                "/usr/bin/mongosh",
+                "mongodb://db.prod/shop",
+            ],
+            &[],
+        ))
+        .expect("mongosh");
+        assert_eq!(shebang.bar(None).path, "db.prod/shop");
+        // With node's own options before it.
+        let optioned = one(member(
+            "node",
+            node,
+            &["node", "--no-warnings", "-r", "x", "/x/mongosh.js", "shop"],
+            &[],
+        ))
+        .expect("mongosh");
+        assert_eq!(optioned.bar(None).path, "/shop");
+        // Another script is no client — and no REPL either; nor is inline
+        // code whose argument happens to be named so.
+        for argv in [
+            &["node", "/x/server.js"][..],
+            &["node", "-e", "run()", "mongosh"],
+        ] {
+            assert_eq!(one(member("node", node, argv, &[])), None, "{argv:?}");
+        }
     }
 
     #[test]
@@ -1384,7 +1633,7 @@ mod tests {
                 &[("VIRTUAL_ENV", "/Users/me/proj/.venv")],
             );
         let program = find(ShellParent::Login, 100, &table, home()).expect("python");
-        assert_eq!(program.manager.as_deref(), Some("venv"));
+        assert_eq!(program.detail.as_deref(), Some("venv"));
         // The shell's own group (`exec`'d, or between commands): no program.
         let idle = login_shell(101).exec(
             300,
@@ -1477,7 +1726,8 @@ mod tests {
             family: Family::Python,
             exec: Some(exec.clone()),
             path: exec.to_string_lossy().into_owned(),
-            manager: None,
+            detail: None,
+            host: None,
             venv_config: venv_config(&exec),
         };
         assert_eq!(
@@ -1525,12 +1775,24 @@ mod tests {
     fn the_bars_strings_are_the_ones_the_atlas_checks() {
         // Every non-ASCII character a bar can carry from here is in the list
         // `bt-atlas` checks in Menlo's small class.
-        for row in &INTERPRETERS {
-            for ch in row.label.chars().chain(row.hint.chars()) {
+        for family in [
+            Family::Python,
+            Family::Node,
+            Family::Bun,
+            Family::Deno,
+            Family::Ruby,
+        ] {
+            assert!(family.row().is_some(), "{family:?} has no row");
+        }
+        let families = INTERPRETERS
+            .iter()
+            .map(|row| row.family)
+            .chain(Client::ALL.map(Family::Database));
+        for family in families {
+            for ch in family.label().chars().chain(family.hint().chars()) {
                 assert!(
                     ch.is_ascii() || bt_core::PROGRAM_GLYPHS.contains(&ch),
-                    "'{ch}' in {:?}",
-                    row.label
+                    "'{ch}' in {family:?}"
                 );
             }
         }

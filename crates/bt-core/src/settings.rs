@@ -1620,13 +1620,15 @@ integration = "auto"
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
-# production machine is never mistaken for another. Each entry names a host
-# pattern and a mark: "production" (red), "staging" (yellow), "development"
-# (green), "none" (no mark), or a color like "#c678dd". In a pattern * stands
-# for any run of characters and ? for one, ignoring case; a pattern without @
-# matches the host after any user@. The first entry that matches wins, so put
-# exact names before wide patterns; "none" stops the search. Shell > Mark
-# "host" as writes the entry for the host of the ssh tab you are in.
+# production machine is never mistaken for another. A database client (psql,
+# mysql, redis-cli, mongosh) is colored by its server's host the same way.
+# Each entry names a host pattern and a mark: "production" (red), "staging"
+# (yellow), "development" (green), "none" (no mark), or a color like
+# "#c678dd". In a pattern * stands for any run of characters and ? for one,
+# ignoring case; a pattern without @ matches the host after any user@. The
+# first entry that matches wins, so put exact names before wide patterns;
+# "none" stops the search. Shell > Mark "host" as writes the entry for the
+# host of the ssh tab or the database client you are in.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },

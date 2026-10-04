@@ -1973,6 +1973,17 @@ impl TerminalWindow {
         self.focused_pane().session()?.remote_mark()
     }
 
+    /// The host Shell ▸ Mark … as ▸ marks in the focused pane: the remote
+    /// host, else the server a database client's guide bar names
+    /// (`Session::program_mark`); with its resolved mark. Only the marks
+    /// read this — "Forget Password" and "Shell Integration on" are ssh's
+    /// and stay on [`Self::remote_mark`].
+    pub(crate) fn mark_target(&self) -> Option<(String, HostMark)> {
+        let pane = self.focused_pane();
+        let session = pane.session()?;
+        session.remote_mark().or_else(|| session.program_mark())
+    }
+
     /// The tab's dot: on a marked remote host a small filled
     /// circle in the mark's colour next to the tab title
     /// (`NSWindowTab.accessoryView`); none on an unmarked remote or locally —

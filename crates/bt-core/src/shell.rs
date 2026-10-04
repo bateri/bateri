@@ -629,6 +629,13 @@ pub struct DockContext {
     /// ([`Self::clear_remote`]). Inside the context for [`Self::remote`]'s
     /// reason: the frame path takes it in the same `clone_from`.
     pub program: Option<ProgramBar>,
+    /// The **resolved** mark of the guide bar's host ([`ProgramBar::host`],
+    /// a database client's server): [`Self::remote_mark`]'s twin, from the
+    /// same `[remote] hosts` list and at the same two edges — the bar's
+    /// write and the list's change ([`ShellLog::set_program`],
+    /// [`ShellLog::set_host_rules`]). [`HostMark::None`] without a bar or a
+    /// host.
+    pub program_mark: HostMark,
 }
 
 /// What a program's guide bar says ([`DockContext::program`]): which
@@ -652,14 +659,21 @@ pub struct ProgramBar {
     pub path: String,
     /// How to leave (`⌃D exit`), right-aligned; the first part to drop.
     pub hint: String,
+    /// The server the program is connected to, as the `[remote] hosts`
+    /// marks see it (a database client's: `db.prod`); empty when the bar
+    /// is no server's. Not drawn — [`DockContext::program_mark`] is its
+    /// resolution, the bar's color.
+    pub host: String,
     pub tone: ProgramTone,
 }
 
 /// The color a guide bar takes — its title and the dock's top hairline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProgramTone {
-    /// The theme's `info`: the remote status bar's color for an unmarked
-    /// host, so both bars read as the same kind of guide.
+    /// The mark of the bar's host ([`DockContext::program_mark`]), the
+    /// theme's `info` when unmarked: the remote status bar's colors, so
+    /// both bars read as the same kind of guide and a production database
+    /// is as red as a production machine.
     #[default]
     Info,
 }
@@ -678,6 +692,7 @@ impl Clone for ProgramBar {
         self.detail.clone_from(&source.detail);
         self.path.clone_from(&source.path);
         self.hint.clone_from(&source.hint);
+        self.host.clone_from(&source.host);
         self.tone = source.tone;
     }
 }
@@ -962,6 +977,7 @@ impl Clone for DockContext {
         self.sign_in = source.sign_in;
         self.remote_setup = source.remote_setup;
         self.program.clone_from(&source.program);
+        self.program_mark = source.program_mark;
     }
 }
 
@@ -977,6 +993,7 @@ impl DockContext {
     /// the command, and the same three marks end it.
     fn clear_remote(&mut self) -> bool {
         self.program = None;
+        self.program_mark = HostMark::None;
         self.remote_cwd.clear();
         self.remote_setup = None;
         self.remote_mark = HostMark::None;
@@ -2561,9 +2578,13 @@ impl ShellLog {
     /// variable, a path the user named — and a line break or ESC would be
     /// drawn as a box. The wrong direction is safe: no bar, the band stays
     /// as it is without one.
+    ///
+    /// The bar's host is marked here, from the pattern list
+    /// ([`Self::program_mark`]); the mark changes only with the bar, so the
+    /// return covers it.
     pub(crate) fn set_program(&mut self, bar: Option<&ProgramBar>) -> bool {
         let bar = bar.filter(|bar| {
-            ![&bar.title, &bar.detail, &bar.path, &bar.hint]
+            ![&bar.title, &bar.detail, &bar.path, &bar.hint, &bar.host]
                 .iter()
                 .any(|text| text.chars().any(char::is_control))
         });
@@ -2574,18 +2595,35 @@ impl ShellLog {
             (Some(bar), Some(slot)) => slot.clone_from(bar),
             (bar, slot) => *slot = bar.cloned(),
         }
+        self.context.program_mark = self.program_mark();
         true
     }
 
-    /// Writes the host marks' pattern list and re-resolves the active remote host's
-    /// mark; `true` **if the mark changed**. The same list is a no-op.
+    /// The guide bar's host resolved against the pattern list;
+    /// [`HostMark::None`] without a bar or a host — an empty host is
+    /// nothing to mark, not a name `*` would match.
+    fn program_mark(&self) -> HostMark {
+        self.context
+            .program
+            .as_ref()
+            .filter(|bar| !bar.host.is_empty())
+            .map_or(HostMark::None, |bar| {
+                crate::settings::host_mark(&self.host_rules, &bar.host)
+            })
+    }
+
+    /// Writes the host marks' pattern list and re-resolves the active remote
+    /// host's mark and the guide bar's ([`DockContext::program_mark`]); `true`
+    /// **if a mark changed**. The same list is a no-op.
     pub(crate) fn set_host_rules(&mut self, rules: &[HostRule]) -> bool {
         if self.host_rules == rules {
             return false;
         }
         self.host_rules = rules.to_vec();
+        let program_mark = self.program_mark();
+        let mut changed = program_mark != self.context.program_mark;
+        self.context.program_mark = program_mark;
         // The offer's color is the mark's too: the placeholder's host is painted with it.
-        let mut changed = false;
         if let Some(offer) = &mut self.context.reconnect {
             let mark = crate::settings::host_mark(&self.host_rules, &offer.host);
             changed |= mark != offer.mark;
@@ -3913,8 +3951,9 @@ fn parse_cwd(
 ///
 /// Passing a corrupt escape through as it is was an option too and was rejected: a
 /// path carrying `%zz` says either the encoder is broken or the payload is not
-/// ours; in both the right answer is not to show the path at all.
-fn decode_percent(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
+/// ours; in both the right answer is not to show the path at all. Its second
+/// reader is `bt-shell`'s database clients' URIs (a guide bar's server).
+pub fn decode_percent(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
     let mut rest = input;
     while let Some((&byte, tail)) = rest.split_first() {
         if byte != b'%' {
@@ -8037,6 +8076,7 @@ mod tests {
             detail: "venv".into(),
             path: "~/proj/.venv/bin/python3".into(),
             hint: "⌃D exit".into(),
+            host: String::new(),
             tone: ProgramTone::Info,
         }
     }
@@ -8095,14 +8135,78 @@ mod tests {
 
     #[test]
     fn the_context_copy_keeps_the_program_bar() {
-        // The frame path's `clone_from`: the bar crosses with the context.
+        // The frame path's `clone_from`: the bar crosses with the context,
+        // its host and its resolved mark with it.
         let mut log = running_log();
-        assert!(log.set_program(Some(&python_bar())));
+        log.set_host_rules(&[marked("db.prod", HostMark::Staging)]);
+        assert!(log.set_program(Some(&postgres_bar("db.prod"))));
         let mut copy = DockContext::default();
         copy.clone_from(&log.context);
-        assert_eq!(copy.program, Some(python_bar()));
+        assert_eq!(copy.program, Some(postgres_bar("db.prod")));
+        assert_eq!(copy.program_mark, HostMark::Staging);
         copy.clone_from(&DockContext::default());
         assert_eq!(copy.program, None);
+        assert_eq!(copy.program_mark, HostMark::None);
+    }
+
+    fn marked(pattern: &str, mark: HostMark) -> HostRule {
+        HostRule {
+            pattern: pattern.into(),
+            mark: Some(mark),
+            integration: None,
+        }
+    }
+
+    /// A database client's bar, connected to `host`.
+    fn postgres_bar(host: &str) -> ProgramBar {
+        ProgramBar {
+            title: "postgres".into(),
+            detail: String::new(),
+            path: format!("app@{host}:5432/main"),
+            hint: "\\q to leave".into(),
+            host: host.into(),
+            tone: ProgramTone::Info,
+        }
+    }
+
+    #[test]
+    fn a_program_bars_host_takes_its_mark() {
+        let mut log = running_log();
+        log.raw = log.running_command();
+        let rules = [marked("db.prod", HostMark::Production)];
+        assert!(!log.set_host_rules(&rules), "no bar, no mark moves");
+        assert!(log.set_program(Some(&postgres_bar("db.prod"))));
+        assert_eq!(log.context.program_mark, HostMark::Production);
+        // The list changes: re-resolved, and the change reported.
+        assert!(log.set_host_rules(&[]));
+        assert_eq!(log.context.program_mark, HostMark::None);
+        assert!(log.set_host_rules(&rules));
+        assert_eq!(log.context.program_mark, HostMark::Production);
+        // Another server, another mark.
+        assert!(log.set_program(Some(&postgres_bar("db.stage"))));
+        assert_eq!(log.context.program_mark, HostMark::None);
+        // An empty host is nothing to mark, even under `*`.
+        let wide = [marked("*", HostMark::Development)];
+        assert!(log.set_host_rules(&wide));
+        assert_eq!(log.context.program_mark, HostMark::Development);
+        assert!(log.set_program(Some(&python_bar())));
+        assert_eq!(log.context.program_mark, HostMark::None, "no host");
+        assert!(!log.set_host_rules(&[]), "still none: nothing moved");
+        // A host with a control character drops the bar, mark and all.
+        assert!(!log.set_host_rules(&rules), "a bar without a host");
+        assert!(log.set_program(Some(&postgres_bar("db.prod"))));
+        assert_eq!(log.context.program_mark, HostMark::Production);
+        assert!(log.set_program(Some(&postgres_bar("db.prod\u{1b}"))));
+        assert_eq!(log.context.program, None);
+        assert_eq!(log.context.program_mark, HostMark::None);
+        // The command's end takes the mark with the bar.
+        assert!(log.set_program(Some(&postgres_bar("db.prod"))));
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert_eq!(log.context.program, None);
+        assert_eq!(log.context.program_mark, HostMark::None);
     }
 
     #[test]

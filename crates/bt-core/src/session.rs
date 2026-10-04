@@ -8332,8 +8332,9 @@ impl Session {
     }
 
     /// Writes the `[remote] hosts` pattern list and re-resolves the active
-    /// remote host's mark — the settings file's opening and live
-    /// refresh. `true` and requests a frame **if the mark changed**
+    /// remote host's mark and the guide bar's host's
+    /// ([`crate::DockContext::program_mark`]) — the settings file's opening
+    /// and live refresh. `true` and requests a frame **if a mark changed**
     /// ([`Session::set_theme`]'s precedent: the dock's two colours changed,
     /// alacritty's damage does not know this); the same list or a list that does
     /// not move the mark is a no-op. The return says something visible changed,
@@ -8358,6 +8359,21 @@ impl Session {
         log.context
             .remote_host()
             .map(|host| (host.to_owned(), log.context.remote_mark))
+    }
+
+    /// The running program's server host (a database client's, as its
+    /// guide bar names it: [`crate::ProgramBar::host`]) and its resolved
+    /// mark; `None` without a bar or a host. Shell ▸ Mark … as ▸'s second
+    /// source after [`Self::remote_mark`] — a separate call, because
+    /// `remote_mark` answers "is this pane remote" too. On the main thread,
+    /// on the edge; a leaf lock, `Term` is not touched.
+    pub fn program_mark(&self) -> Option<(String, HostMark)> {
+        let log = lock(&self.shell);
+        log.context
+            .program
+            .as_ref()
+            .filter(|bar| !bar.host.is_empty())
+            .map(|bar| (bar.host.clone(), log.context.program_mark))
     }
 
     /// The remote target's line escaped for the shell (`ssh -p 2222 prod`);
@@ -16149,6 +16165,7 @@ mod tests {
             detail: "venv".into(),
             path: "~/p/.venv/bin/python3".into(),
             hint: "⌃D exit".into(),
+            host: String::new(),
             tone: crate::ProgramTone::Info,
         };
         wait_mirror(&session, DockStatus::Live);
@@ -16201,6 +16218,50 @@ mod tests {
         assert!(session.set_program(command, None));
         let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
         assert!(cursor.band_hidden);
+        assert!(session.set_program(command, Some(&bar)));
+
+        // A database's bar: its server marked from the `[remote] hosts`
+        // list, the edge in the mark's colour, the list's change repainted.
+        let database = crate::ProgramBar {
+            title: "postgres".into(),
+            detail: String::new(),
+            path: "app@db.prod/main".into(),
+            hint: "\\q to leave".into(),
+            host: "db.prod".into(),
+            tone: crate::ProgramTone::Info,
+        };
+        let rules = [HostRule {
+            pattern: "db.prod".into(),
+            mark: Some(HostMark::Production),
+            integration: None,
+        }];
+        assert!(
+            !session.set_host_marks(&rules),
+            "the Python bar has no host"
+        );
+        assert_eq!(session.program_mark(), None);
+        assert!(session.set_program(command, Some(&database)));
+        assert_eq!(
+            session.program_mark(),
+            Some(("db.prod".to_owned(), HostMark::Production))
+        );
+        assert_eq!(
+            session.remote_mark(),
+            None,
+            "a database is no remote session"
+        );
+        assert_eq!(draw_dock(&session).0.edge, Theme::BATERI.error_linear());
+        let wakes = wake.wait_wakes(0, Duration::ZERO);
+        assert!(session.set_host_marks(&[]));
+        assert!(
+            wake.wait_wakes(wakes + 1, Duration::from_secs(5)) > wakes,
+            "the mark changes: a frame"
+        );
+        assert_eq!(
+            session.program_mark(),
+            Some(("db.prod".to_owned(), HostMark::None))
+        );
+        assert_eq!(draw_dock(&session).0.edge, Theme::BATERI.info_linear());
         assert!(session.set_program(command, Some(&bar)));
 
         // Our `D` ends the command and the bar with it.

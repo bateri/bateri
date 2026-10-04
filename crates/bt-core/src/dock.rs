@@ -1441,7 +1441,7 @@ pub(crate) fn render_with(
             (Some(transfer), _, _) => theme.mark_linear(transfer.mark),
             (None, Some(_), _) => theme.mark_linear(context.remote_mark),
             // A program's guide bar, in its tone: the band is the program's.
-            (None, None, Some(bar)) => program_color(bar.tone, theme),
+            (None, None, Some(bar)) => program_color(bar.tone, context.program_mark, theme),
             (None, None, None) => theme.separator_linear(),
         },
         separator: theme.separator_linear(),
@@ -1935,7 +1935,8 @@ fn render_context(
     // A recognized program's guide bar after both: the upload's result and
     // the remote session say more about where the keys go.
     if let Some(bar) = &context.program {
-        render_program(bar, theme, available, row, sink);
+        let tone = program_color(bar.tone, context.program_mark, theme);
+        render_program(bar, tone, theme, available, row, sink);
         return [None; 2];
     }
     let branch_chars = context.branch.chars().count();
@@ -2069,10 +2070,12 @@ fn render_remote_context(
     ]
 }
 
-/// A guide bar's tone as a color: the title and the top hairline.
-fn program_color(tone: ProgramTone, theme: &Theme) -> LinearRgba {
+/// A guide bar's tone as a color: the title and the top hairline — its
+/// host's mark ([`DockContext::program_mark`]), `info` when unmarked, the
+/// remote status bar's mapping.
+fn program_color(tone: ProgramTone, mark: HostMark, theme: &Theme) -> LinearRgba {
     match tone {
-        ProgramTone::Info => theme.info_linear(),
+        ProgramTone::Info => theme.mark_linear(mark),
     }
 }
 
@@ -2155,12 +2158,14 @@ fn program_layout(bar: &ProgramBar, available: usize) -> ProgramLayout {
 }
 
 /// The context row's **program** form ([`DockContext::program`]): the
-/// title in the bar's tone (`info`, the unmarked remote host's color — both
-/// bars are the same kind of guide), the separator quiet, the detail dim,
-/// the path quiet (a location, the remote path's quieter tier) and the
-/// hint dim; [`program_layout`] decides what shows.
+/// title in the bar's `tone` ([`program_color`]: its host's mark, `info`
+/// unmarked — the remote host's colors, both bars are the same kind of
+/// guide), the separator quiet, the detail dim, the path quiet (a location,
+/// the remote path's quieter tier) and the hint dim; [`program_layout`]
+/// decides what shows.
 fn render_program(
     bar: &ProgramBar,
+    tone: LinearRgba,
     theme: &Theme,
     available: usize,
     row: u16,
@@ -2170,7 +2175,6 @@ fn render_program(
     if !layout.title {
         return;
     }
-    let tone = program_color(bar.tone, theme);
     let (dim, quiet) = (theme.dim_linear(), theme.quiet_linear());
     let (shows_path, path) = path_cells(&bar.path, layout.path_budget, quiet, quiet);
     let line = bar
@@ -4381,6 +4385,7 @@ mod tests {
             sign_in: None,
             remote_setup: None,
             program: None,
+            program_mark: HostMark::None,
         }
     }
 
@@ -5118,6 +5123,7 @@ mod tests {
                 detail: detail.into(),
                 path: path.into(),
                 hint: hint.into(),
+                host: String::new(),
                 tone: ProgramTone::Info,
             }),
             ..context("/Users/me/proj", "main")
@@ -5184,6 +5190,37 @@ mod tests {
         let bare = program("Node v22.13.0", "", "", "⌃D exit");
         let (row, _, _) = program_row(&bare, 30);
         assert_eq!(row, format!("{:<23}⌃D exit", "Node v22.13.0"));
+    }
+
+    #[test]
+    fn a_marked_program_host_paints_the_bar_and_the_edge() {
+        // A database client's bar: the title and the top hairline in its
+        // server's mark, the remote status bar's mapping; the target quiet
+        // like a path.
+        let mut context = program("postgres", "", "app@db.prod:5432/main", "\\q to leave");
+        if let Some(bar) = context.program.as_mut() {
+            bar.host = "db.prod".into();
+        }
+        context.program_mark = HostMark::Production;
+        let (row, cells, dock) = program_row(&context, 60);
+        let left = "postgres  app@db.prod:5432/main";
+        assert_eq!(row, format!("{left:<49}\\q to leave"));
+        assert_eq!(color_at(&cells, 0, 0), Some(THEME.error_linear()), "title");
+        assert_eq!(
+            color_at(&cells, 0, 10),
+            Some(THEME.quiet_linear()),
+            "target"
+        );
+        assert_eq!(dock.edge, THEME.error_linear());
+        for (mark, color) in [
+            (HostMark::Staging, THEME.warning_linear()),
+            (HostMark::None, THEME.info_linear()),
+        ] {
+            context.program_mark = mark;
+            let (_, cells, dock) = program_row(&context, 60);
+            assert_eq!(color_at(&cells, 0, 0), Some(color), "{mark:?}");
+            assert_eq!(dock.edge, color, "{mark:?}");
+        }
     }
 
     #[test]

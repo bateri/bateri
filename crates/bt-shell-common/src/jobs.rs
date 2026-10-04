@@ -145,7 +145,12 @@ pub trait ProcessTable {
 /// a test's output. A program that reads the keyboard itself (an agent, a
 /// REPL) routinely carries API keys in its environment, and bateri has no
 /// business keeping them.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// **The argv is not printed either** (a hand-written `Debug`: the
+/// executable and the count): a command line carries passwords —
+/// `mysql -psecret`, `redis-cli -a secret`, a URI's `user:secret@` — and a
+/// `Debug` print ends up in a log or a test's output.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProcArgs {
     /// The executable as it was started. On Linux the kernel's resolved
     /// path (`/proc/<pid>/exe`); on macOS the path given to `execve`, made
@@ -159,6 +164,16 @@ pub struct ProcArgs {
     /// in the environment's order; an asked variable that was not set is
     /// absent.
     pub env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for ProcArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcArgs")
+            .field("exec", &self.exec)
+            .field("argc", &self.args.len())
+            .field("env", &self.env)
+            .finish()
+    }
 }
 
 impl ProcArgs {
@@ -1904,6 +1919,19 @@ pub(crate) mod tests {
         // An ssh whose argv is unreadable is not recognized.
         let table = login_shell(200).with(200, 101, 200, "ssh");
         assert_eq!(remote(ShellParent::Login, 100, &table), Probe::Local);
+    }
+
+    #[test]
+    fn a_records_debug_print_shows_no_argument() {
+        // A command line carries passwords; a `Debug` print ends in a log.
+        let record = ProcArgs {
+            exec: "/usr/bin/mysql".into(),
+            args: vec!["mysql".into(), "-phunter2".into()],
+            env: vec![("MYSQL_HOST".into(), "db".into())],
+        };
+        let printed = format!("{record:?}");
+        assert!(!printed.contains("hunter2"), "an argument was printed");
+        assert!(printed.contains("argc: 2") && printed.contains("MYSQL_HOST"));
     }
 
     #[cfg(target_os = "macos")]
