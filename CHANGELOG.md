@@ -48,6 +48,14 @@ of every installed copy. A version without a section is not released.
   only decides what is written to disk and how a pane whose program did not
   live comes back.
 
+### Fixed
+
+- A screen brought back after quitting or an update keeps its layout in
+  three cases where it shifted: text after a tab stays in its column (it
+  moved right by the tab's width), a line that wrapped onto a line erased
+  since keeps its own row (the two came back as one), and a tab stop set in
+  the last column is still there when the window grows wider.
+
 ## [0.4.0] - 2026-10-03
 
 ### Added

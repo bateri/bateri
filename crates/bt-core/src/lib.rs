@@ -14,7 +14,8 @@
 //! `Wake` and the settings model's `Settings`, `SettingsEdit`, `Parsed`, `Diagnostic`,
 //! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose`, `RestoreWindows`,
 //! `KeepRunning` and the tables
-//! of valid values (`NAMES`, `*_RANGE`) (the full
+//! of valid values (`NAMES`, `*_RANGE`), the journal's `Journal`,
+//! `JournalStore`, `JournalStream`, `JournalRecords` and `JournalCut` (the full
 //! list is the `pub use` block below). `Osc52` is the counterpart of
 //! alacritty's type of the same name, not that type itself. The move to our
 //! own grid (00X) is done behind this boundary and does not know the renderer.
@@ -49,6 +50,7 @@ mod dock;
 mod handler;
 mod identity;
 mod input;
+mod journal;
 mod link;
 mod reader;
 mod search;
@@ -68,6 +70,10 @@ pub use dock::{
 };
 pub use identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
 pub use input::{Arrow, MouseButton, MouseModifiers};
+pub use journal::{
+    JOURNAL_FORMAT, Journal, JournalCut, JournalRecords, JournalStore, JournalStream,
+    STALL as JOURNAL_STALL, due as journal_due,
+};
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,
     escape as escape_search,

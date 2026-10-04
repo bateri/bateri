@@ -12,6 +12,12 @@
 //! terminal options (`set_terminal_options`) and clearing the screen
 //! (`clear_to_start`, `clear_scrollback`: returning to the bottom, scrolling,
 //! scrollback, selection and the `2J` generation in the same lock).
+//! With a journal ([`SessionOptions::journal`]) every site that changes
+//! `Term`'s content records a side record in the same lock round —
+//! `resize`, the two clears, `set_terminal_options` and `frame`'s
+//! cursor-style reset on leaving the alternate screen; the others move only
+//! what the snapshot does not read (the selection, the view) and say so in
+//! their doc. A new site that changes the content records one too.
 //! The lock **order** is the same everywhere — `term` first, `size` second;
 //! when adding a new site this order is followed, because if the two locks
 //! are taken in reverse order a deadlock arises. `theme`, `shell` and `search`
@@ -76,10 +82,13 @@ use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
 use crate::handler::ClusterHandler;
 use crate::identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
+// The journal's side record comes in under an alias: `Side` is alacritty's
+// selection side in this module.
 use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
 };
+use crate::journal::{Base, Journal, Side as JournalSide};
 use crate::link;
 use crate::reader::{
     EventLoop, EventLoopSender, Msg, PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN, State,
@@ -843,6 +852,13 @@ pub struct SessionOptions {
     /// history above the new shell's first prompt; the fill band shows them
     /// as such. `None` or empty → the session opens as it always did.
     pub replay: Option<Vec<u8>>,
+    /// Where the session records what its `Term` goes through, so another
+    /// process can rebuild the screen after bateri dies (`crate::journal`):
+    /// the PTY's bytes and the side records, and the read gate that stops
+    /// reading while it has no room. The session seeds its base from what it
+    /// replays (`replay`, or an adopted pane's VT). One session per journal.
+    /// `None` → nothing is recorded and every path is as it was without it.
+    pub journal: Option<Arc<Journal>>,
 }
 
 /// The session's first input ([`SessionOptions::initial_input`]): a line and
@@ -976,7 +992,7 @@ impl Osc52 {
 /// (cursor styles, `kitty_keyboard`) are at alacritty's default: nothing sets
 /// them, so they do not move between two calls either.
 /// `term_config_keeps_every_other_field` pins this.
-fn term_config(options: TerminalOptions) -> Config {
+pub(crate) fn term_config(options: TerminalOptions) -> Config {
     Config {
         semantic_escape_chars: WORD_SEPARATORS.to_owned(),
         scrolling_history: options.scrollback,
@@ -1202,7 +1218,7 @@ pub fn load_shell(secs: u64) -> (String, Vec<String>) {
 /// scrollback). If it starts reading it the scrollback would be silently
 /// zeroed — on that day this place changes too.
 #[derive(Clone, Copy)]
-struct GridSize {
+pub(crate) struct GridSize {
     cols: usize,
     rows: usize,
 }
@@ -1218,7 +1234,7 @@ impl GridSize {
     /// a single column and throws away nearly all of the history with
     /// `reversed.truncate(max_scroll_limit + lines)`; going back to 80 columns
     /// does not bring it back. A degenerate size is not clamped, it is ignored.
-    fn for_spawn(cols: u16, rows: u16) -> Self {
+    pub(crate) fn for_spawn(cols: u16, rows: u16) -> Self {
         Self {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
@@ -1227,7 +1243,7 @@ impl GridSize {
 
     /// Without clamping. The caller must already have eliminated the
     /// degenerate size; the counterpart of `for_spawn`, and `resize` uses this.
-    fn exact(cols: u16, rows: u16) -> Self {
+    pub(crate) fn exact(cols: u16, rows: u16) -> Self {
         Self {
             cols: cols as usize,
             rows: rows as usize,
@@ -1650,6 +1666,12 @@ struct TappedPty {
     /// prefix before the next one (`EventLoop::read_first`), so the bytes of
     /// that read are the first live ones.
     muting: bool,
+    /// [`SessionOptions::journal`]: every read's bytes are recorded before
+    /// the parser sees them — a byte read but not yet parsed is not lost
+    /// with the process. After the terminal lock is taken `pty_read` reads
+    /// on under it, so this copy sometimes runs under the lock too (at most
+    /// `MAX_LOCKED_READ` bytes): a copy, no wait, no system call.
+    journal: Option<Arc<Journal>>,
 }
 
 impl TappedPty {
@@ -1686,6 +1708,9 @@ impl TappedPty {
 impl io::Read for TappedPty {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let read = self.read_raw(buf)?;
+        if let Some(journal) = &self.journal {
+            journal.record_bytes(&buf[..read]);
+        }
         self.tail.feed(&buf[..read]);
         // Only the slice read **in this round** is scanned; `EventLoop` reads
         // accumulating into its buffer (`buf[unprocessed..]`) and scanning from
@@ -3979,6 +4004,9 @@ pub struct Session {
     /// through them on the master's copy, not through the reader
     /// ([`Session::nudge_size`]). `None` for a spawned PTY.
     ops: Option<Arc<dyn PtyOps>>,
+    /// [`SessionOptions::journal`]: the side records go here, each in the
+    /// `Term` lock round that made its change ([`Session::record`]).
+    journal: Option<Arc<Journal>>,
 }
 
 /// The PTY side of [`Session::assemble`]'s input: what [`Session::spawn`]
@@ -4205,6 +4233,7 @@ impl Session {
         let adopted = matches!(pty, PtyKind::Adopted(_));
         let home = options.home;
         let master = Mutex::new(master);
+        let journal = options.journal;
         // The slot is born **before** the `EventLoop`: one end goes to the
         // wrapper and the reader thread, the other stays in `Session`.
         // The scrollback's ceiling is from `scrollback`: since at least one row
@@ -4259,6 +4288,7 @@ impl Session {
             prefix,
             prefix_at: 0,
             muting: mute_prefix,
+            journal: journal.clone(),
         };
         adapter.0.muted.store(mute_prefix, Ordering::Release);
 
@@ -4277,8 +4307,19 @@ impl Session {
                 bytes,
             );
         }
+        // The journal's base is what this `Term` starts from: the bytes just
+        // replayed, at the same size and options — moved, not copied.
+        if let Some(journal) = &journal {
+            journal.seed(Base::birth(
+                replay.unwrap_or_default(),
+                options.cols,
+                options.rows,
+                options.terminal,
+                options.cluster,
+            ));
+        }
 
-        let event_loop = EventLoop::new(
+        let mut event_loop = EventLoop::new(
             Arc::clone(&term),
             adapter.clone(),
             pty,
@@ -4289,6 +4330,14 @@ impl Session {
         // The channel is born only here; since the adapter's copies share the
         // same body a single `set` binds them all.
         let _ = adapter.0.sender.set(sender.clone());
+        // The compaction's room wakes the loop through its channel.
+        if let Some(journal) = &journal {
+            event_loop.journal(Arc::clone(journal));
+            let sender = sender.clone();
+            journal.set_room(Box::new(move || {
+                let _ = sender.send(Msg::Room);
+            }));
+        }
 
         let session = Self {
             term,
@@ -4335,6 +4384,7 @@ impl Session {
             master,
             adopted,
             ops,
+            journal,
         };
         Ok((session, event_loop, at_birth))
     }
@@ -4412,6 +4462,10 @@ impl Session {
     /// search is active, the matches of the drawn rows, the grid and the fill
     /// channel in separate lists; if there is no pattern both lists are empty and
     /// the scan does not run.
+    ///
+    /// **The journal:** the cursor-style reset on leaving the alternate screen
+    /// is recorded in this lock round; the glide moves only the view, which
+    /// the snapshot does not read.
     // The arguments are the two sinks that go through the frame's single read
     // and the caller's buffers (the precedent of `Session::dock`); gathering
     // them in a struct would create a type only for this call.
@@ -4584,6 +4638,9 @@ impl Session {
             // cost is one prompt — zsh's vi-mode resends the style in
             // `zle-line-init`.
             term.set_cursor_style(None);
+            // In this lock round. The journal is asked to compact elsewhere —
+            // the frame path starts no thread.
+            self.record(JournalSide::CursorStyleReset);
         }
         let RenderableContent {
             display_iter,
@@ -6284,6 +6341,9 @@ impl Session {
     /// `kind` is the selection's step ([`SelectKind`]) and is stored with the
     /// selection: dragging ([`Session::update_selection`]) and Shift+click
     /// ([`Session::extend_selection`]) preserve it.
+    ///
+    /// **Journal-neutral:** moves only the selection, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn set_selection(&self, kind: SelectKind, start: SelectionPoint, end: SelectionPoint) {
         let term = self.term.lock();
         let (start_point, start_side) = anchor(&term, start);
@@ -6307,6 +6367,9 @@ impl Session {
     /// A selection pushed into the history (not drawn on screen) extends too: the
     /// selection is stored in every case ([`Session::set_selection`]'s rationale)
     /// and its anchor stays in grid absolute — Terminal.app's behaviour.
+    ///
+    /// **Journal-neutral:** moves only the selection, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn extend_selection(&self, end: SelectionPoint) {
         let term = self.term.lock();
         let (point, side) = anchor(&term, end);
@@ -6332,6 +6395,9 @@ impl Session {
     /// there is text in the row the dock's whole `BUFFER` is selected — that is
     /// where the user typed. If the row is empty the grid: there is nothing to
     /// select in the dock and an empty ⌘A selecting the history is Terminal.app's norm.
+    ///
+    /// **Journal-neutral:** moves only the selection, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn select_all(&self) {
         if self.caret_in_dock.load(Ordering::Relaxed) && self.dock_select_all() {
             return;
@@ -6395,6 +6461,9 @@ impl Session {
     ///
     /// The frame gate is the same as [`Session::set_selection`]'s: if the drawn
     /// range did not change no frame is requested.
+    ///
+    /// **Journal-neutral:** moves only the selection, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn update_selection(&self, end: SelectionPoint) {
         let mut term = self.term.lock();
         let (point, side) = anchor(&term, end);
@@ -6414,6 +6483,9 @@ impl Session {
     /// there is no selection at all, if it is the empty selection a click
     /// without a drag leaves, or if output pushed it into the history: the flag
     /// is not raised, no frame is requested.
+    ///
+    /// **Journal-neutral:** moves only the selection, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn clear_selection(&self) {
         // The lock drops before the body: `request_frame` must not run while the
         // `Term` lock (the two-mutex `FairMutex`) is held — the same discipline as
@@ -6493,6 +6565,9 @@ impl Session {
     /// fraction changed and a glide request accumulated, not if neither —
     /// momentum showering at the end of the history and a notch returning down at
     /// the bottom must not produce an empty frame.
+    ///
+    /// **Journal-neutral:** moves only the view, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn scroll_wheel(
         &self,
         rows: f64,
@@ -6699,6 +6774,9 @@ impl Session {
     /// **The fraction is zeroed and the generation increments**
     /// ([`Session::reset_scroll`]): the page is a whole-row step and an in-flight
     /// glide must not shift its destination.
+    ///
+    /// **Journal-neutral:** moves only the view, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn scroll_page(&self, pages: i32) -> Option<i32> {
         let (moved, dropped) = {
             let mut term = self.term.lock();
@@ -6766,6 +6844,9 @@ impl Session {
     ///
     /// Trailing empty rows are dropped and the stream ends with a line break.
     /// The ceiling is the user's `scrollback` — the grid holds no more.
+    ///
+    /// **Not journaled:** the session's life ends with it — what
+    /// the journal records leads up to this, not past it.
     pub fn final_history(&self) -> Vec<u8> {
         // The leaf lock **before** `Term` (module header): the cut and the
         // ledgers' copy the anchors are resolved with, in one round.
@@ -6807,6 +6888,24 @@ impl Session {
     }
 }
 
+/// The clear's grid work on any `Term` — the live clear's and the
+/// journal's replay of it: `top` screen rows scroll into the history,
+/// deliberately past the scrolling region (the clear is the screen's), with
+/// the cursor and DECSC's record dropped by hand by as much
+/// (`Grid::scroll_up` moves neither), then the history is erased — after the
+/// scroll, so the rows scrolled out go too.
+pub(crate) fn wipe<T: EventListener>(term: &mut Term<T>, top: usize) {
+    if top > 0 {
+        let rows = term.screen_lines();
+        let grid = term.grid_mut();
+        grid.scroll_up(&(Line(0)..Line(rows as i32)), top);
+        let by = i32::try_from(top).unwrap_or(i32::MAX);
+        grid.cursor.point.line = Line((grid.cursor.point.line.0 - by).max(0));
+        grid.saved_cursor.point.line = Line((grid.saved_cursor.point.line.0 - by).max(0));
+    }
+    term.clear_screen(ClearMode::Saved);
+}
+
 /// The body of [`Session::final_history`] on `term` — destructive on the
 /// alternate screen (its doc).
 fn history_of<T: EventListener>(
@@ -6846,12 +6945,15 @@ impl Session {
     ///
     /// The probes write the title slot back to the title it held; the
     /// sentinel they pass through it may send title news on the way.
+    ///
+    /// **Not journaled:** the session's life ends with it — what
+    /// the journal records leads up to this, not past it.
     pub fn live_snapshot(&self) -> Vec<u8> {
         let title = &self.adapter.0.title;
         // `Term` → the leaf title slot: the order the title events already
         // take (module header).
         let mut term = self.term.lock();
-        snapshot::encode_live(&mut term, &|| lock(title).clone()).0
+        snapshot::encode_live(&mut term, &|| lock(title).clone(), &|| ()).0
     }
 
     /// `bt-core`'s own state as a versioned blob — the handover's second half
@@ -6955,19 +7057,16 @@ impl Session {
             }
             self.reset_scroll();
             self.scroll_user(&mut term, i32::MIN, self.band_shown());
-            if kind == ClearKind::ToStart {
-                let top = protected_top(&term, input_block);
-                if top > 0 {
-                    let rows = term.screen_lines();
-                    let grid = term.grid_mut();
-                    grid.scroll_up(&(Line(0)..Line(rows as i32)), top);
-                    let by = i32::try_from(top).unwrap_or(i32::MAX);
-                    grid.cursor.point.line = Line((grid.cursor.point.line.0 - by).max(0));
-                    grid.saved_cursor.point.line =
-                        Line((grid.saved_cursor.point.line.0 - by).max(0));
-                }
-            }
-            term.clear_screen(ClearMode::Saved);
+            let top = match kind {
+                ClearKind::ToStart => protected_top(&term, input_block),
+                ClearKind::Scrollback => 0,
+            };
+            wipe(&mut term, top);
+            // The resolved effect, not the command: the replay has no shell
+            // ledger to find the kept block with.
+            self.record(JournalSide::Clear {
+                top: u32::try_from(top).unwrap_or(u32::MAX),
+            });
             clear_selection_locked(&mut term);
             self.note_screen_clear();
             self.adapter.0.wipes.fetch_add(1, Ordering::AcqRel);
@@ -6975,7 +7074,25 @@ impl Session {
         self.clear_dock_selection();
         self.adapter.search_changed();
         self.request_frame();
+        self.poke_journal();
         true
+    }
+
+    /// Records a side record in the journal, if there is one — **while the
+    /// `Term` lock is held**, in the round that made the change: its stamp is
+    /// the bytes applied by then ([`crate::journal`]).
+    fn record(&self, side: JournalSide) {
+        if let Some(journal) = &self.journal {
+            journal.record(side);
+        }
+    }
+
+    /// Asks the journal's body for a compaction if one is due — **after**
+    /// the `Term` lock: it may start a thread.
+    fn poke_journal(&self) {
+        if let Some(journal) = &self.journal {
+            Journal::poke(journal);
+        }
     }
 
     /// The **second writer** of the `CSI 2 J` generation ([`Session::screen_clears`]):
@@ -7267,6 +7384,9 @@ impl Session {
     /// **A single owner**: the grid's selection goes away in every case — a click
     /// on the dock is "clicking elsewhere". A single click without a drag is an
     /// empty selection and removes the old highlight (the grid's rule).
+    ///
+    /// **Journal-neutral:** clears only the grid's selection, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn dock_select(&self, kind: SelectKind, point: SelectionPoint) {
         let grid = clear_selection_locked(&mut self.term.lock());
         let dock = self.change_dock_selection(point, |_, point, buffer, _, cluster| {
@@ -7282,6 +7402,9 @@ impl Session {
     /// clicked point — a text field's Shift+click (it once started empty from
     /// the clicked point, because the path that moves the
     /// caret did not exist yet). The grid's selection goes away (a single owner).
+    ///
+    /// **Journal-neutral:** clears only the grid's selection, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn dock_extend(&self, point: SelectionPoint) {
         let grid = clear_selection_locked(&mut self.term.lock());
         let dock = self.change_dock_selection(point, |current, point, buffer, caret, cluster| {
@@ -7391,6 +7514,9 @@ impl Session {
     /// The step is `Simple` and the two ends the text's two ends: `Line` has
     /// selected the **logical row** and in a multi-line `BUFFER` would
     /// take only the first row.
+    ///
+    /// **Journal-neutral:** clears only the grid's selection, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     fn dock_select_all(&self) -> bool {
         let changed = {
             let mut log = lock(&self.shell);
@@ -7670,6 +7796,9 @@ impl Session {
     /// current path. ⇧←/⇧→ too are tied to the gate, even though they send
     /// nothing to the shell: the selection starts from the caret and the caret's
     /// place is right only in a fresh mirror — in `vicmd` the key is vi's.
+    ///
+    /// **Journal-neutral:** clears only the grid's selection, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn dock_key(&self, key: DockKey) -> bool {
         // ⏎ **before** the editing gate and not tied to it: what goes is
         // typed bytes, not the widget command.
@@ -8787,6 +8916,9 @@ impl Session {
     /// The ends are in the scrollback's absolute coordinates, i.e. the selection
     /// is built even if the match is in the fill band — the band draws no
     /// selection (the fill band's debt, a known limit) but ⌘C copies.
+    ///
+    /// **Journal-neutral:** moves only the selection and the view, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn select_search_match(&self) -> bool {
         let tracking = lock(&self.search).tracking();
         let term = self.term.lock();
@@ -8817,6 +8949,9 @@ impl Session {
     /// ordinal with `work`'s step and requests a frame if the window moved or the
     /// current match changed. `None` if there is no pattern (search closed, query
     /// empty or invalid).
+    ///
+    /// **Journal-neutral:** moves only the view, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     fn with_search(
         &self,
         work: impl FnOnce(
@@ -9059,7 +9194,11 @@ impl Session {
         // so it is written to the leaf lock. **Before the `Term` lock**: the
         // reverse order would close a cycle with the reader thread's order.
         *lock(&self.adapter.0.blink) = options.blink;
-        self.term.lock().set_options(term_config(options));
+        {
+            let mut term = self.term.lock();
+            term.set_options(term_config(options));
+            self.record(JournalSide::Options(options));
+        }
         // The block ledger's ceiling is derived from `scrollback` too and that
         // setting is **applied live**: had it not been carried here the excess of
         // a grown history would stay uncoloured. The
@@ -9071,6 +9210,7 @@ impl Session {
         // A shrinking `scrollback` trims the history: if search is open the count starts over.
         self.adapter.search_changed();
         self.request_frame();
+        self.poke_journal();
     }
 
     /// A handle that can mark damage remotely.
@@ -9182,6 +9322,9 @@ impl Session {
     /// is not reentrant, a re-entering closure locks itself.
     ///
     /// Returns the generation the send produced; `None` for empty bytes.
+    ///
+    /// **Journal-neutral:** clears only the selection and moves only the view, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     fn send_input(&self, bytes: impl FnOnce(TermMode) -> Vec<u8>) -> Option<u64> {
         let (bytes, redraw, moved) = {
             let mut term = self.term.lock();
@@ -9469,6 +9612,7 @@ impl Session {
             return false;
         }
         term.resize(grid);
+        self.record(JournalSide::Resize { cols, rows });
         *prev = size;
         self.send(Msg::Resize(size));
         // A size change is the only path that changes the grid but produces no
@@ -9478,6 +9622,9 @@ impl Session {
         // The rewrapping changed the scrollback's rows: if search is open the
         // count starts over (the loss of the current match is in `search::ledger_shift`).
         self.adapter.search_changed();
+        drop(prev);
+        drop(term);
+        self.poke_journal();
         true
     }
 
@@ -9503,6 +9650,9 @@ impl Session {
     /// a resize the reader still has queued lands after it with the grid's
     /// size too. The size is read and written under its lock — a concurrent
     /// resize updates it under the same lock — and `term` is not taken.
+    ///
+    /// **Journal-neutral:** sizes only the PTY, which the snapshot
+    /// does not read — no side record ([`crate::journal`]).
     pub fn nudge_size(&self, narrow: bool) {
         let size = lock(&self.adapter.0.size);
         let mut sent = *size;
@@ -9683,6 +9833,9 @@ impl Session {
     /// birth — nothing to hand over; the session is untouched — or if the
     /// reader had panicked (the `Pty` dropped while unwinding: the child is
     /// already hung up).
+    ///
+    /// **Not journaled:** the session's life ends with it — what
+    /// the journal records leads up to this, not past it.
     pub fn freeze(&self) -> io::Result<Frozen> {
         // Both or neither: a session with a reader but no master copy has
         // nothing to hand over and must stay untouched.
@@ -10427,6 +10580,7 @@ mod tests {
             tab_id: None,
             hostname: None,
             replay: None,
+            journal: None,
         }
     }
 
@@ -23072,4 +23226,784 @@ e\\314\\201.'; sleep 5";
         assert!(session.reader_alive(), "the reader thread died in the race");
         session.shutdown();
     }
+
+    // ─── the journal ────────────────────────────────────────────────────
+
+    use crate::journal::{GATE_ROOM, JournalCut, MemoryStore, Side as Record};
+    use crate::snapshot::tests::readable;
+
+    /// A journal in memory that compacts only when the test says so.
+    fn manual_journal(bytes: usize, stall: Duration) -> Arc<Journal> {
+        Journal::new(Box::new(MemoryStore::new(bytes, 64 << 10, false)), stall)
+    }
+
+    /// The `StopSync` records still in `journal`.
+    fn stop_syncs(journal: &Journal) -> usize {
+        journal
+            .side_records()
+            .into_iter()
+            .filter(|side| *side == Record::StopSync)
+            .count()
+    }
+
+    /// Whether the grid shows `needle` now (one frame).
+    fn shows(session: &Session, needle: &str) -> bool {
+        let mut cells = Vec::new();
+        session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        grid_glyphs(&cells).contains(needle)
+    }
+
+    /// One frame, damaged or not: the alternate screen's falling edge is
+    /// the frame's.
+    fn draw(session: &Session) {
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+    }
+
+    /// A temporary directory removed when dropped.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("bateri-journal-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temporary directory");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A session whose child copies a FIFO to the PTY byte for byte (`stty
+    /// -opost`: no `\n` → `\r\n`) — the test chooses every byte the reader
+    /// reads and, by waiting for the bytes applied, where a read ends.
+    struct Loopback {
+        session: Session,
+        journal: Arc<Journal>,
+        fifo: File,
+        written: u64,
+        _dir: TempDir,
+    }
+
+    impl Loopback {
+        fn new(name: &str, journal: Arc<Journal>, cols: u16, rows: u16, scrollback: usize) -> Self {
+            let dir = TempDir::new(name);
+            let path = dir.0.join("in");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .expect("mkfifo");
+            assert!(made.success());
+            let mut options = test_options(
+                (
+                    "/bin/sh".into(),
+                    vec![
+                        "-c".into(),
+                        "stty -opost; exec cat \"$1\"".into(),
+                        "sh".into(),
+                        path.display().to_string(),
+                    ],
+                ),
+                cols,
+            );
+            options.rows = rows;
+            options.cluster = true;
+            options.terminal.scrollback = scrollback;
+            options.journal = Some(Arc::clone(&journal));
+            let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
+            // The open waits for `cat` — after `stty`.
+            let (opened, open) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = opened.send(std::fs::OpenOptions::new().write(true).open(path));
+            });
+            let fifo = open
+                .recv_timeout(Duration::from_secs(10))
+                .expect("cat did not open the fifo")
+                .expect("the fifo opens");
+            Self {
+                session,
+                journal,
+                fifo,
+                written: 0,
+                _dir: dir,
+            }
+        }
+
+        /// Writes `bytes` and waits until the reader applied them: the next
+        /// write lands in a later read.
+        fn send(&mut self, bytes: &[u8]) {
+            use std::io::Write as _;
+            self.fifo
+                .write_all(bytes)
+                .expect("the fifo takes the bytes");
+            self.written += bytes.len() as u64;
+            let (journal, target) = (Arc::clone(&self.journal), self.written);
+            wait_until(
+                "the loopback's bytes applied",
+                Duration::from_secs(10),
+                || journal.applied_bytes() >= target,
+            );
+        }
+    }
+
+    /// xorshift64: the guard's sequences, the same for a seed on every run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n.max(1)
+        }
+
+        fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+            &items[self.below(items.len() as u64) as usize]
+        }
+    }
+
+    /// Output that reaches what the snapshot carries: text, wide characters
+    /// and clusters, the pen, cursor moves, erasing, the scrolling region,
+    /// inserting and deleting, tab stops, the character sets, the saved
+    /// cursor, the alternate screen, the modes, titles and their stack, the
+    /// palette, links, the cursor style, and a CSI a line feed interrupts.
+    /// Outside it, by the encoder's named limits: `CSI b` (the journal's),
+    /// RIS, G2/G3 as the active set, and DECSC on the alternate screen (its
+    /// saved cursor does not travel while the primary is shown — the trip
+    /// keeps `ESC 7` off the alternate screen).
+    const PIECES: &[&str] = &[
+        "plain text\r\n",
+        "abcdefghijklmnopqrstuvwxyz0123456789 wraps\r\n",
+        "漢字かな 漢\r\n",
+        "a👍🏽b 🇹🇷 ❤️ 👨\u{200d}👩\u{200d}👧 é\r\n",
+        "\x1b[1;31mred\x1b[0m \x1b[38;2;10;20;30;48;5;200mtrue\x1b[m\r\n",
+        "\x1b[4:3mcurly\x1b[58;5;3m under\x1b[0m \x1b[7m inverse \x1b[27m\r\n",
+        "\x1b[3;5Hcup\x1b[6;2H",
+        "\x1b[2J\x1b[H",
+        "\x1b[K\x1b[1J",
+        "\x1b[2;5r\x1b[5H\n\n\nscrolled\x1b[r",
+        "\x1b[2L\x1b[1M\x1b[3@\x1b[2P",
+        "\tT\x1b[3g\x1b[5G\x1bH\x1b[12G\x1bH\r\n\tx\tu\r\n",
+        "\x1b(0lqqk\x1b(B ok\r\n",
+        "\x1b)0\x0eqqq\x0f back\r\n",
+        "\x1b7\x1b[4;4Hsaved\x1b8",
+        "\x1b[?1049h\x1b[Halt\x1b[2;3Hvim \x1b[1;33m~\x1b[0m",
+        "\x1b[?1049l",
+        "\x1b[?2004h\x1b[?1h\x1b=",
+        "\x1b[?2004l\x1b[?1l\x1b>",
+        "\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[?1004h",
+        "\x1b[?25h\x1b[?1000l\x1b[?1006l",
+        "\x1b[?7l0123456789012345678901234567890123456789\x1b[?7h\r\n",
+        "\x1b[4hins\x1b[4l",
+        "\x1b]2;one\x07",
+        "\x1b]0;two\x1b\\",
+        "\x1b[22t\x1b]2;pushed\x07",
+        "\x1b[23t",
+        "\x1b]4;3;rgb:11/22/33\x07\x1b]11;rgb:01/02/03\x07",
+        "\x1b]8;id=x;https://bateri.dev\x07link\x1b]8;;\x07 after\r\n",
+        "\x1b[5 q",
+        "\x1b[2 q\x1b[?12h",
+        "\x1b[0 q\x1b[?12l",
+        "\x1b[3\n1mfed\x1b[0m\r\n",
+        "\u{3042}\u{3099} e\u{301} x\r\n",
+    ];
+
+    /// Feeds a live session random output and random calls of every
+    /// `Session` method that writes `Term`, compacts at random points, and
+    /// checks the journal's copy against the live terminal: replayed into a
+    /// fresh `Term`, what `Term` shows, the encoder's bytes and every probed
+    /// field are the live one's.
+    fn copy_trip(seed: u64) {
+        let journal = manual_journal(64 << 20, Duration::from_secs(60));
+        let mut lo = Loopback::new(&format!("copy-{seed}"), Arc::clone(&journal), 30, 8, 50);
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        // A title first: a pushed `None` title comes back as `""`.
+        lo.send(b"\x1b]2;start\x07");
+        let mut alternate = false;
+        for _ in 0..80 {
+            match rng.below(14) {
+                0..=5 => {
+                    let text = *rng.pick(PIECES);
+                    if alternate && text.contains("\x1b7") {
+                        continue;
+                    }
+                    if text.contains("\x1b[?1049h") {
+                        alternate = true;
+                    } else if text.contains("\x1b[?1049l") {
+                        alternate = false;
+                    }
+                    let piece = text.as_bytes();
+                    // A read may end anywhere: inside a character, a CSI, an OSC.
+                    let split = rng.below(piece.len() as u64 + 1) as usize;
+                    if rng.below(2) == 0 && split > 0 && split < piece.len() {
+                        lo.send(&piece[..split]);
+                        lo.send(&piece[split..]);
+                    } else {
+                        lo.send(piece);
+                    }
+                }
+                6 => {
+                    // A synchronized update, ended by its own ESU or by the
+                    // timeout — the reader's side record.
+                    if rng.below(2) == 0 {
+                        lo.send(b"\x1b[?2026hin sync\r\n\x1b[1;32mgreen\x1b[0m\x1b[?2026l");
+                    } else {
+                        let before = journal.sides_written();
+                        lo.send(b"\x1b[?2026htimed \x1b[4mout\x1b[0m\r\n");
+                        wait_until("the update's timeout", Duration::from_secs(5), || {
+                            journal.sides_written() > before
+                        });
+                    }
+                }
+                7 => {
+                    let cols = 10 + rng.below(30) as u16;
+                    let rows = 4 + rng.below(7) as u16;
+                    let _ = lo.session.resize(cols, rows, (9, 18));
+                }
+                8 => {
+                    if rng.below(2) == 0 {
+                        lo.session.clear_to_start();
+                    } else {
+                        lo.session.clear_scrollback();
+                    }
+                }
+                9 => lo.session.set_terminal_options(TerminalOptions {
+                    scrollback: 20 + rng.below(180) as usize,
+                    osc52: *rng.pick(&[Osc52::Off, Osc52::Copy]),
+                    cursor: *rng.pick(&[
+                        CaretShape::Block,
+                        CaretShape::Underline,
+                        CaretShape::Beam,
+                    ]),
+                    blink: *rng.pick(&[CursorBlink::Auto, CursorBlink::On, CursorBlink::Off]),
+                }),
+                10 => {
+                    // The content-neutral writers, and the frame whose edge
+                    // resets the cursor style. The view is back at the bottom
+                    // before more output: a scrolling region that scrolls
+                    // while the view is scrolled back pushes alacritty's
+                    // display offset past the history — a separate bug, not
+                    // the journal's.
+                    draw(&lo.session);
+                    let _ = lo.session.scroll_page(1);
+                    lo.session.clear_selection();
+                    draw(&lo.session);
+                    let _ = lo.session.scroll_page(-1);
+                }
+                11 => draw(&lo.session),
+                _ => {
+                    let base = journal.base().expect("seeded");
+                    let applied = journal.applied_bytes();
+                    let limit = base.at.pty + rng.below(applied - base.at.pty + 1);
+                    if let Some(cut) = journal.compact_until(limit) {
+                        journal.release(cut);
+                    }
+                }
+            }
+        }
+        draw(&lo.session);
+        if let Some(cut) = journal.compact() {
+            journal.release(cut);
+        }
+        assert!(!journal.is_broken(), "seed {seed}: the journal broke");
+        let base = journal.base().expect("seeded");
+        assert_eq!(
+            base.at.pty,
+            journal.applied_bytes(),
+            "seed {seed}: the last compaction did not reach the last byte"
+        );
+
+        // The copy, as the next process replays it.
+        #[derive(Clone, Default)]
+        struct Titles(Arc<Mutex<Option<String>>>);
+        impl EventListener for Titles {
+            fn send_event(&self, event: Event) {
+                match event {
+                    Event::Title(title) => *lock(&self.0) = Some(title),
+                    Event::ResetTitle => *lock(&self.0) = None,
+                    _ => {}
+                }
+            }
+        }
+        let titles = Titles::default();
+        let mut copy = Term::new(
+            term_config(base.options),
+            &GridSize::for_spawn(base.cols, base.rows),
+            titles.clone(),
+        );
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        let mut last_input = false;
+        parser.advance(
+            &mut ClusterHandler::new(&mut copy, true, &mut last_input),
+            &base.vt,
+        );
+
+        let slot = &lo.session.adapter.0.title;
+        let live_title = lock(slot).clone();
+        let (live_shown, live_vt, live_probed) = {
+            let mut term = lo.session.term.lock();
+            let shown = readable(&*term);
+            let (vt, probed) = snapshot::encode_live(&mut *term, &|| lock(slot).clone(), &|| ());
+            (shown, vt, probed)
+        };
+        assert_eq!(readable(&copy), live_shown, "seed {seed}");
+        assert_eq!(lock(&titles.0).clone(), live_title, "seed {seed}");
+        let copy_titles = titles.clone();
+        let (copy_vt, copy_probed) =
+            snapshot::encode_live(&mut copy, &move || lock(&copy_titles.0).clone(), &|| ());
+        assert_eq!(
+            String::from_utf8_lossy(&copy_vt),
+            String::from_utf8_lossy(&live_vt),
+            "seed {seed}"
+        );
+        assert_eq!(copy_probed, live_probed, "seed {seed}");
+    }
+
+    #[test]
+    fn the_journals_copy_is_the_live_terminal() {
+        for seed in [1, 7, 42, 2026, 9001] {
+            copy_trip(seed);
+        }
+    }
+
+    #[test]
+    fn a_session_without_a_journal_records_nothing_and_keeps_its_gate_open() {
+        // The reader's journal paths are all behind the option: nothing is
+        // seeded, no record is written, the read interest never moves.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf 'plain'; sleep 5", Arc::clone(&wake));
+        wait_text(&session, "plain");
+        assert!(session.journal.is_none());
+    }
+
+    #[test]
+    fn a_full_journal_stops_the_reader_and_keeps_its_channel() {
+        let dir = TempDir::new("channel");
+        let seen = dir.0.join("seen");
+        let journal = manual_journal(GATE_ROOM + (8 << 10), Duration::from_secs(60));
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh(&format!(
+                "stty -echo; cat < /dev/tty > '{}' & while :; do printf '%0100d\\n' 0; done",
+                seen.display()
+            )),
+            40,
+        );
+        options.journal = Some(Arc::clone(&journal));
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_until("the gate closes", Duration::from_secs(10), || {
+            !journal.gate_open()
+        });
+        // The reader reads no more…
+        let applied = journal.applied_bytes();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            journal.applied_bytes(),
+            applied,
+            "the reader read through a closed gate"
+        );
+        assert!(!journal.is_broken());
+        // …but its channel turns: input reaches the PTY, ⌃C its program.
+        session.write(b"ping\n");
+        wait_until("the input reaches the PTY", Duration::from_secs(10), || {
+            std::fs::read_to_string(&seen).is_ok_and(|text| text.contains("ping"))
+        });
+        session.write(b"\x03");
+        assert!(
+            wake.wait_exit(Duration::from_secs(10)).is_some(),
+            "⌃C did not end the program behind a closed gate"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_shutdown_reaches_a_reader_behind_a_closed_gate() {
+        // `freeze` sends the shutdown and joins the reader without a bound:
+        // it returns only if the closed gate kept the channel turning.
+        let journal = manual_journal(GATE_ROOM + (8 << 10), Duration::from_secs(60));
+        let mut options = test_options(sh("while :; do printf '%0100d\\n' 0; done"), 40);
+        options.journal = Some(Arc::clone(&journal));
+        let session = Arc::new(Session::spawn(options, Arc::new(TestWake::default())).unwrap());
+        wait_until("the gate closes", Duration::from_secs(10), || {
+            !journal.gate_open()
+        });
+        let (done, frozen) = mpsc::channel();
+        {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let _ = done.send(session.freeze().map(|frozen| frozen.pid));
+            });
+        }
+        let pid = frozen
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the reader did not take the shutdown")
+            .expect("the session froze");
+        // The frozen PTY is leaked on purpose; its writer would block on it.
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+
+    #[test]
+    fn the_compactions_room_lets_the_reader_read_on() {
+        // A fixed amount of output, larger than the journal: it all arrives
+        // only through compactions.
+        let journal = manual_journal(GATE_ROOM + (64 << 10), Duration::from_secs(60));
+        let mut options = test_options(
+            sh(
+                "i=0; while [ $i -lt 4000 ]; do printf 'line %06d of the output\\n' $i; i=$((i+1)); done; printf END; sleep 30",
+            ),
+            40,
+        );
+        options.journal = Some(Arc::clone(&journal));
+        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
+        wait_until("the gate closes", Duration::from_secs(10), || {
+            !journal.gate_open()
+        });
+        let mut rounds = 0;
+        wait_until(
+            "the output arrives through compactions",
+            Duration::from_secs(30),
+            || {
+                if !journal.gate_open() {
+                    if let Some(cut) = journal.compact() {
+                        journal.release(cut);
+                        rounds += 1;
+                    }
+                }
+                shows(&session, "END")
+            },
+        );
+        assert!(rounds > 0);
+        assert!(!journal.is_broken());
+    }
+
+    #[test]
+    fn a_room_wake_is_not_the_sync_timeout() {
+        // `Msg::Room` is a channel message: an empty wake would be the
+        // DEC 2026 timeout's arm — an early `stop_sync` and a frame per wake.
+        let journal = manual_journal(64 << 20, Duration::from_secs(60));
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(sh("printf '\\033[?2026hSYNCED'; sleep 30"), 40);
+        options.journal = Some(Arc::clone(&journal));
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_until("the update's bytes", Duration::from_secs(10), || {
+            journal.applied_bytes() >= 14
+        });
+        // A journaled loop's arm also wants the update's own deadline: not
+        // even a wake whose message an earlier round drained ends it.
+        let wakes = lock(&wake.state).wakes;
+        for _ in 0..200 {
+            journal.release(JournalCut::default());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(stop_syncs(&journal), 1, "only the update's own timeout");
+        assert!(
+            lock(&wake.state).wakes - wakes < 10,
+            "the room wakes asked for frames"
+        );
+        drop(session);
+    }
+
+    #[test]
+    fn a_gate_closed_inside_an_update_opens_when_the_update_times_out() {
+        // The compaction finds the update open — no cut — and waits for a
+        // new side record: the update's timeout. It must be asked again then,
+        // or the closed gate would wait out the stall and break the journal.
+        let journal = Journal::new(
+            Box::new(MemoryStore::new(GATE_ROOM + (32 << 10), 64 << 10, true)),
+            Duration::from_secs(1),
+        );
+        let mut options = test_options(
+            sh(
+                "printf '\\033[?2026h'; i=0; while [ $i -lt 4000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n'; i=$((i+1)); done; printf END; sleep 30",
+            ),
+            40,
+        );
+        options.journal = Some(Arc::clone(&journal));
+        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
+        wait_until("the output arrives", Duration::from_secs(30), || {
+            shows(&session, "END")
+        });
+        assert!(
+            !journal.is_broken(),
+            "the journal broke waiting for the update's timeout"
+        );
+    }
+
+    #[test]
+    fn the_stall_timer_does_not_end_an_open_sync() {
+        // The gate closes inside a synchronized update; the stall deadline
+        // wakes the loop every few milliseconds while the compaction makes
+        // progress. Only the update's own timeout applies it: once.
+        let journal = manual_journal(GATE_ROOM + (4 << 10), Duration::from_millis(5));
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh(
+                "printf '\\033[?2026h'; i=0; while [ $i -lt 8000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n'; i=$((i+1)); done; sleep 30",
+            ),
+            40,
+        );
+        options.journal = Some(Arc::clone(&journal));
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        let progressing = Arc::new(AtomicBool::new(true));
+        let stepper = {
+            let (journal, progressing) = (Arc::clone(&journal), Arc::clone(&progressing));
+            std::thread::spawn(move || {
+                while progressing.load(Ordering::Acquire) {
+                    journal.step();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+        };
+        wait_until("the gate closes", Duration::from_secs(10), || {
+            !journal.gate_open()
+        });
+        let wakes = lock(&wake.state).wakes;
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            !journal.is_broken(),
+            "a compaction that progresses broke the journal"
+        );
+        assert_eq!(
+            stop_syncs(&journal),
+            1,
+            "the stall deadline ended the update"
+        );
+        assert!(
+            lock(&wake.state).wakes - wakes < 10,
+            "the stall deadline asked for frames"
+        );
+        // Without progress the journal breaks and the reader reads on.
+        progressing.store(false, Ordering::Release);
+        stepper.join().unwrap();
+        wait_until("the journal breaks", Duration::from_secs(5), || {
+            journal.is_broken()
+        });
+        let applied = journal.applied_bytes();
+        wait_until("the reader reads on", Duration::from_secs(5), || {
+            journal.applied_bytes() > applied
+        });
+        drop(session);
+    }
+
+    #[test]
+    fn a_compaction_without_progress_breaks_the_journal() {
+        let journal = manual_journal(GATE_ROOM + (8 << 10), Duration::from_millis(100));
+        let mut options = test_options(sh("while :; do printf '%0100d\\n' 0; done"), 40);
+        options.journal = Some(Arc::clone(&journal));
+        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
+        wait_until("the journal breaks", Duration::from_secs(10), || {
+            journal.is_broken()
+        });
+        assert!(journal.gate_open());
+        let applied = journal.applied_bytes();
+        wait_until("the reader reads on", Duration::from_secs(5), || {
+            journal.applied_bytes() > applied
+        });
+        drop(session);
+    }
+
+    #[test]
+    fn a_full_side_stream_breaks_the_journal_instead_of_waiting() {
+        // The main thread's room is the side stream: when it is full the
+        // journal breaks, nothing waits for a compaction.
+        let journal = Journal::new(
+            Box::new(MemoryStore::new(64 << 20, 40, false)),
+            Duration::from_secs(60),
+        );
+        let mut options = test_options(sh("printf ready; sleep 30"), 40);
+        options.journal = Some(Arc::clone(&journal));
+        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
+        wait_text(&session, "ready");
+        let started = Instant::now();
+        for n in 0..10 {
+            let _ = session.resize(20 + n, 6, (9, 18));
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(journal.is_broken());
+        assert_eq!(
+            journal.sides_written(),
+            3,
+            "three 13-byte records fit in 40 bytes"
+        );
+    }
+
+    #[test]
+    fn the_prefix_waits_for_room_and_finishes_on_a_quiet_pty() {
+        // More than one read of prefix: the gate closes inside the serial
+        // rounds, the room wakes them and they finish without the PTY ever
+        // becoming readable (the child sleeps).
+        let old = spawn_with_cols(
+            sh("echo READY; sleep 30"),
+            40,
+            Arc::new(TestWake::default()),
+        );
+        wait_text(&old, "READY");
+        let frozen = old.freeze().expect("the session did not freeze");
+        let mut prefix = vec![b'p'; 3 << 19];
+        prefix.extend_from_slice(b"\r\nPREFIXEND");
+        let total = (frozen.tail.len() + prefix.len()) as u64;
+        let journal = manual_journal(GATE_ROOM + (64 << 10), Duration::from_secs(60));
+        let mut options = test_options(sh("unused"), frozen.cols);
+        options.journal = Some(Arc::clone(&journal));
+        let (exit, _alive) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let new = Session::adopt(
+            options,
+            Adoption {
+                master: frozen.master,
+                exit: OwnedFd::from(exit),
+                pid: frozen.pid,
+                vt: frozen.vt,
+                blob: frozen.blob,
+                prefix: [frozen.tail.as_slice(), &prefix].concat(),
+                input: frozen.input,
+                ops: Arc::new(RecordingOps::default()),
+                mode: AdoptMode::Update,
+            },
+            Arc::new(TestWake::default()),
+        )
+        .expect("adopted");
+        wait_until(
+            "the gate closes inside the prefix",
+            Duration::from_secs(10),
+            || !journal.gate_open(),
+        );
+        assert!(journal.applied_bytes() < total);
+        wait_until(
+            "the prefix finishes through compactions",
+            Duration::from_secs(20),
+            || {
+                if !journal.gate_open()
+                    && let Some(cut) = journal.compact()
+                {
+                    journal.release(cut);
+                }
+                journal.applied_bytes() >= total
+            },
+        );
+        wait_text(&new, "PREFIXEND");
+        drop(old);
+    }
+
+    #[test]
+    #[ignore = "runs with make test-race"]
+    fn race_journal_copy_and_everything_that_writes_term() {
+        // The reader records and applies, the main thread resizes, clears
+        // and changes options, the in-process body compacts on its own
+        // thread — all at once. The stamps put the side records back in the
+        // order the live `Term` took them: the copy is the live terminal.
+        // Room for the gate and the margin plus 16 KiB: a compaction every
+        // 16 KiB of output, on the body's own thread.
+        let journal = Journal::new(
+            Box::new(MemoryStore::new(2 * GATE_ROOM + (16 << 10), 64 << 10, true)),
+            STALL_FOR_RACE,
+        );
+        let mut options = test_options(
+            sh("i=0; while [ $i -lt 1500 ]; do \
+                printf '\\033[3%dmline %d\\033[0m 漢字 👍🏽 \\033]2;t%d\\007\\n' $((i%8)) $i $i; \
+                if [ $((i%300)) -eq 0 ]; then printf '\\033[?1049hALT\\033[3;3Hv'; printf '\\033[?1049l'; fi; \
+                if [ $((i%170)) -eq 0 ]; then printf '\\033[?2026hSYNC'; fi; \
+                if [ $((i%50)) -eq 0 ]; then sleep 0.05; fi; \
+                i=$((i+1)); done; printf DONE; sleep 30"),
+            30,
+        );
+        options.cluster = true;
+        options.journal = Some(Arc::clone(&journal));
+        let session = Arc::new(Session::spawn(options, Arc::new(TestWake::default())).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let writer = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut n = 0u16;
+                while Instant::now() < deadline {
+                    let _ = session.resize(12 + n % 25, 4 + n % 6, (9, 18));
+                    if n % 7 == 0 {
+                        session.clear_to_start();
+                    }
+                    if n % 11 == 0 {
+                        session.set_terminal_options(TerminalOptions {
+                            scrollback: 30 + usize::from(n % 90),
+                            osc52: Osc52::Copy,
+                            cursor: CaretShape::Block,
+                            blink: CursorBlink::Auto,
+                        });
+                    }
+                    n = n.wrapping_add(1);
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            })
+        };
+        while Instant::now() < deadline {
+            draw(&session);
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        writer.join().unwrap();
+        // The output ends and every update's timeout passed.
+        wait_until("the output ends", Duration::from_secs(30), || {
+            shows(&session, "DONE")
+        });
+        let mut last = journal.applied_bytes();
+        wait_until("the reader settles", Duration::from_secs(10), || {
+            std::thread::sleep(Duration::from_millis(300));
+            let now = journal.applied_bytes();
+            std::mem::replace(&mut last, now) == now
+        });
+        draw(&session);
+        assert!(
+            journal.base().is_some_and(|base| base.at.pty > 0),
+            "no compaction ran during the race"
+        );
+        if let Some(cut) = journal.compact() {
+            journal.release(cut);
+        }
+        assert!(!journal.is_broken(), "the journal broke in the race");
+        let base = journal.base().expect("seeded");
+        assert_eq!(base.at.pty, journal.applied_bytes());
+        let mut copy = Term::new(
+            term_config(base.options),
+            &GridSize::for_spawn(base.cols, base.rows),
+            VoidListener,
+        );
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        let mut last_input = false;
+        parser.advance(
+            &mut ClusterHandler::new(&mut copy, true, &mut last_input),
+            &base.vt,
+        );
+        let live_shown = readable(&*session.term.lock());
+        assert_eq!(readable(&copy), live_shown);
+        let (copy_vt, _) = snapshot::encode_live(&mut copy, &|| None, &|| ());
+        let (live_vt, _) = snapshot::encode_live(&mut *session.term.lock(), &|| None, &|| ());
+        assert_eq!(
+            String::from_utf8_lossy(&copy_vt),
+            String::from_utf8_lossy(&live_vt)
+        );
+        session.shutdown();
+    }
+
+    /// The race's stall: generous, the race must not break the journal.
+    const STALL_FOR_RACE: Duration = Duration::from_secs(10);
 }

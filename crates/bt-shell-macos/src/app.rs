@@ -5551,6 +5551,7 @@ mod tests {
                 seconds: 3,
                 workload,
                 stats_since: None,
+                journal: false,
             };
             assert_eq!(decide_inputs(Some(run), home.clone()), Inputs::Hermetic);
         }
@@ -6228,6 +6229,7 @@ mod tests {
                 seconds: 1,
                 workload: Workload::Smoke,
                 stats_since: None,
+                journal: false,
             }),
         };
         assert!(!shift_held_at_launch(&timed));

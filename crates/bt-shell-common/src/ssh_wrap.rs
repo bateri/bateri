@@ -2430,6 +2430,7 @@ mod remote_shells {
                 tab_id: None,
                 hostname: None,
                 replay: None,
+                journal: None,
             },
             Arc::new(SilentWake),
         )

@@ -44,11 +44,12 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags, Hyperlink};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
-    CharsetIndex, Color, CursorShape, CursorStyle, Handler, KeyboardModes, NamedColor,
+    CharsetIndex, ClearMode, Color, CursorShape, CursorStyle, Handler, KeyboardModes, NamedColor,
     NamedPrivateMode, PrivateMode, Rgb, StandardCharset,
 };
 use std::collections::HashMap;
 
+use crate::session::GridSize;
 use crate::shell::{BlockKey, Stripe};
 
 /// The saved block anchor's prefix — written by [`encode`], read by
@@ -173,8 +174,29 @@ pub(crate) fn encode<T>(
             // No parameters: the saved anchor carries no `id`.
             .map(|anchor| format!(";{anchor}"))
     };
-    write_rows(&mut out, &rows[..=last], &mut link_of, true);
+    write_rows(
+        &mut out,
+        &rows[..=last],
+        &mut link_of,
+        true,
+        Width::Any,
+        &|| (),
+    );
     out
+}
+
+/// How many rows [`write_rows`] writes between two calls of its `step`.
+const ROW_STEP: usize = 1024;
+
+/// The replay a row walk writes for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Width {
+    /// A fresh `Term` of the same size ([`encode_live`]): every cell comes
+    /// back in its column, so the walk may name columns.
+    Same,
+    /// The next launch's window, at whatever width ([`encode`]): rows
+    /// rewrap, so nothing may name a column or lean on where a row ends.
+    Any,
 }
 
 /// Writes `rows` as VT bytes — the one row walk of both kinds ([`encode`],
@@ -184,24 +206,71 @@ pub(crate) fn encode<T>(
 /// `;` and the URI); `None` → no link. Every row that does not wrap into the
 /// next ends with the link closed, the pen back at the default and `\r\n` —
 /// except the last one when `break_last` is `false`: a live screen's last row
-/// must not scroll the screen one row into the history.
+/// must not scroll the screen one row into the history. `step` is called every
+/// [`ROW_STEP`] rows — a long walk's sign of life.
+///
+/// A tab in a cell (alacritty keeps one where a tab started) comes back as
+/// that tab at [`Width::Same`] and as a blank at [`Width::Any`]: replayed,
+/// a tab moves by the stops in force, and only a known column can put the
+/// cursor back. **Known limit** at [`Width::Any`]: a row a wide character
+/// wrapped (it did not fit and left its spacer) whose continuation was
+/// erased comes back joined to the row after it at the same width — the
+/// wrap only a wide character makes is gone with it, and rewrapping forbids
+/// making it by position.
 fn write_rows(
     out: &mut Vec<u8>,
     rows: &[Vec<&TermCell>],
     link_of: &mut dyn FnMut(&TermCell) -> Option<String>,
     break_last: bool,
+    width_of_replay: Width,
+    step: &dyn Fn(),
 ) {
+    let same = width_of_replay == Width::Same;
     let last = rows.len().saturating_sub(1);
     let mut pen = Pen::DEFAULT;
     let mut open: Option<String> = None;
+    // How the row before ended: `None` with a break (or there was none),
+    // `Some(spacer)` wrapped with no break — `spacer` when its last cell is
+    // the blank a wide character that did not fit left there.
+    let mut continues: Option<bool> = None;
     for (index, cells) in rows.iter().enumerate() {
+        if index % ROW_STEP == ROW_STEP - 1 {
+            step();
+        }
         let wrap = wrapped(cells) && index < last;
-        let end = if wrap {
+        let mut end = if wrap {
             cells.len()
         } else {
             content_end(cells)
         };
-        for cell in &cells[..end] {
+        let starts_wide = cells
+            .first()
+            .is_some_and(|cell| cell.flags.contains(Flags::WIDE_CHAR));
+        match continues {
+            // The wrap would come from this row's wide first character, and
+            // it is not one (erased or overwritten since): a wide placeholder
+            // makes it, and the row it lands on is erased again.
+            Some(true) if same && !starts_wide => {
+                if pen != Pen::DEFAULT {
+                    out.extend_from_slice(b"\x1b[0m");
+                    pen = Pen::DEFAULT;
+                }
+                out.extend_from_slice("\u{3000}\r\x1b[2K".as_bytes());
+            }
+            // The row before carried no break: its wrap happens when this
+            // row's first cell is written. A continuation erased since
+            // (`ED 1`, `EL 2`) is blank and would write nothing — the two
+            // rows would replay as one.
+            Some(_) => end = end.max(1).min(cells.len()),
+            None => {}
+        }
+        continues = wrap.then(|| {
+            cells
+                .last()
+                .is_some_and(|cell| cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER))
+        });
+        let width = cells.len();
+        for (column, cell) in cells[..end].iter().enumerate() {
             if cell
                 .flags
                 .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -218,7 +287,26 @@ fn write_rows(
             let next = Pen::of(cell);
             transition(out, pen, next);
             pen = next;
-            push_cell_text(out, cell);
+            if cell.c == '\t' && !same {
+                push_char(out, ' ');
+            } else if cell.c == '\t' && wrap && column + 1 == width {
+                // A tab in a wrapping row's last cell: a tab there stays put
+                // and would clear the pending wrap. A blank makes the wrap
+                // pending, a tab past the last column is the wrap, and the
+                // cursor goes back up to write the tab into the cell and down
+                // to where the next row starts.
+                out.extend_from_slice(format!(" \t\x1b[A\x1b[{width}G\t\x1b[B\r").as_bytes());
+            } else if cell.c == '\t' {
+                // alacritty keeps a tab in the cell it started from (a copy
+                // of the row gives the tab back). Replayed, the tab writes
+                // that cell the same way but moves by the stops in force —
+                // the defaults, the stops come later — so the cursor goes
+                // back to the next column.
+                out.push(b'\t');
+                out.extend_from_slice(format!("\x1b[{}G", column + 2).as_bytes());
+            } else {
+                push_cell_text(out, cell);
+            }
         }
         if !wrap {
             // The link closes before the break like the pen: the rows a line
@@ -490,6 +578,9 @@ pub(crate) struct Probed {
     pub(crate) title: Option<String>,
     /// The application's cursor style; `None` → the terminal's default.
     pub(crate) cursor_style: Option<CursorStyle>,
+    /// Whether the last column is a tab stop. A tab always stops there, so
+    /// `tabs` cannot list it — but a wider grid later tabs onto it.
+    pub(crate) last_tab: bool,
 }
 
 /// A cursor as written: where it is, the cell to write again when
@@ -591,13 +682,13 @@ fn live_link(link: &Hyperlink) -> String {
 
 /// The rows from `top` through the bottom of the screen, with links as they
 /// are and no break after the last row.
-fn live_rows(grid: &Grid<TermCell>, top: i32) -> Vec<u8> {
+fn live_rows(grid: &Grid<TermCell>, top: i32, step: &dyn Fn()) -> Vec<u8> {
     let rows: Vec<Vec<&TermCell>> = (top..=grid.bottommost_line().0)
         .map(|line| grid[Line(line)].into_iter().collect())
         .collect();
     let mut out = Vec::new();
     let mut link_of = |cell: &TermCell| cell.hyperlink().as_ref().map(live_link);
-    write_rows(&mut out, &rows, &mut link_of, false);
+    write_rows(&mut out, &rows, &mut link_of, false, Width::Same, step);
     out
 }
 
@@ -676,6 +767,34 @@ fn probe_tabs<T: EventListener>(term: &mut Term<T>) -> Vec<usize> {
     }
 }
 
+/// Whether the last column is a tab stop — **destructive**: the grid grows
+/// one column (the stops keep their flags) and a tab from the column before
+/// the old last lands on it only if it is a stop. Last of the probes: a
+/// resize resets the scrolling region. Nothing is read after it, so both
+/// histories go first — the resize reflows only the screens, not the
+/// scrollback.
+fn probe_last_tab<T: EventListener>(term: &mut Term<T>) -> bool {
+    let columns = term.columns();
+    let (Ok(cols), Ok(rows)) = (
+        u16::try_from(columns + 1),
+        u16::try_from(term.screen_lines()),
+    ) else {
+        return false;
+    };
+    if columns < 2 {
+        return false;
+    }
+    term.clear_screen(ClearMode::Saved);
+    term.swap_alt();
+    term.clear_screen(ClearMode::Saved);
+    term.resize(GridSize::exact(cols, rows));
+    let cursor = &mut term.grid_mut().cursor;
+    cursor.point = Point::new(Line(0), Column(columns - 2));
+    cursor.input_needs_wrap = false;
+    term.put_tab(1);
+    term.grid().cursor.point.column.0 == columns - 1
+}
+
 /// The scrolling region — **destructive**: origin mode is left on and the
 /// cursor moved. Under origin mode `goto` clamps into the region, so the
 /// home position is its first row and a goto far below its last one; no row
@@ -739,10 +858,10 @@ struct ScreenShot {
 impl ScreenShot {
     /// Reads the active grid from `top` (the history's top on the primary
     /// screen, `0` on the alternate one) and then probes its keyboard stack.
-    fn read<T: EventListener>(term: &mut Term<T>, primary: bool) -> Self {
+    fn read<T: EventListener>(term: &mut Term<T>, primary: bool, step: &dyn Fn()) -> Self {
         let grid = term.grid();
         let top = if primary { grid.topmost_line().0 } else { 0 };
-        let rows = live_rows(grid, top);
+        let rows = live_rows(grid, top, step);
         let cursor = CursorShot::of(grid, &grid.cursor);
         let saved = CursorShot::of(grid, &grid.saved_cursor);
         let keyboard = probe_keyboard(term);
@@ -768,7 +887,9 @@ impl ScreenShot {
 /// must not be drawn or fed again; quit-only, like
 /// [`crate::Session::final_history`].
 ///
-/// `title` reads the listener's title (`Title`/`ResetTitle`).
+/// `title` reads the listener's title (`Title`/`ResetTitle`); `step` is
+/// called through the walk — every [`ROW_STEP`] rows and between the
+/// probes — for a caller that watches a long encode's progress.
 ///
 /// **The order is the contract** (alacritty 0.26.0's `swap_alt`,
 /// `term/mod.rs:714`: entering the alternate screen copies the primary
@@ -806,6 +927,7 @@ impl ScreenShot {
 pub(crate) fn encode_live<T: EventListener>(
     term: &mut Term<T>,
     title: &dyn Fn() -> Option<String>,
+    step: &dyn Fn(),
 ) -> (Vec<u8>, Probed) {
     let mode = *term.mode();
     let colors: Vec<Option<Rgb>> = (0..=LAST_SETTABLE_COLOR)
@@ -815,15 +937,20 @@ pub(crate) fn encode_live<T: EventListener>(
     let (title_now, titles) = probe_titles(term, title);
     // The active screen first: the other one is behind `swap_alt`.
     let (primary, alternate, kept) = if alt {
-        let alternate = ScreenShot::read(term, false);
+        let alternate = ScreenShot::read(term, false, step);
         term.swap_alt();
-        (ScreenShot::read(term, true), Some(alternate), Vec::new())
+        (
+            ScreenShot::read(term, true, step),
+            Some(alternate),
+            Vec::new(),
+        )
     } else {
-        let primary = ScreenShot::read(term, true);
+        let primary = ScreenShot::read(term, true, step);
         // Entering resets the alternate grid; only its kept stack is read.
         term.swap_alt();
         (primary, None, probe_keyboard(term))
     };
+    step();
     let lines = term.screen_lines();
     let columns = term.columns();
     let probed = Probed {
@@ -838,10 +965,13 @@ pub(crate) fn encode_live<T: EventListener>(
         ],
         titles,
         title: title_now,
-        // Last: it replaces the config, and a different `kitty_keyboard`
-        // would empty the stacks.
+        // After the stacks: it replaces the config, and a different
+        // `kitty_keyboard` would empty them.
         cursor_style: probe_cursor_style(term),
+        // Last: it resizes, which resets the scrolling region.
+        last_tab: probe_last_tab(term),
     };
+    step();
 
     // 1–4: the screens.
     let mut out = primary.rows;
@@ -877,9 +1007,13 @@ pub(crate) fn encode_live<T: EventListener>(
     }
     let last = columns.saturating_sub(1);
     let default_tabs: Vec<usize> = (8..last).step_by(8).collect();
-    if probed.tabs != default_tabs {
+    // A fresh grid's stops are every eighth column, the last one included
+    // when it falls there.
+    let default_last = last % 8 == 0;
+    if probed.tabs != default_tabs || probed.last_tab != default_last {
         out.extend_from_slice(b"\x1b[3g");
-        for stop in &probed.tabs {
+        let last_stop = probed.last_tab.then_some(last);
+        for stop in probed.tabs.iter().chain(&last_stop) {
             out.extend_from_slice(format!("\x1b[{}G\x1bH", stop + 1).as_bytes());
         }
     }
@@ -1162,7 +1296,7 @@ impl Tail {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::handler::ClusterHandler;
     use alacritty_terminal::event::VoidListener;
@@ -1526,11 +1660,11 @@ mod tests {
 
     fn encode_of(term: &mut Term<Recorder>, recorder: &Recorder) -> (Vec<u8>, Probed) {
         let recorder = recorder.clone();
-        encode_live(term, &move || recorder.title())
+        encode_live(term, &move || recorder.title(), &|| ())
     }
 
     /// What `Term` shows of the active screen without a probe.
-    fn readable<T>(term: &Term<T>) -> String {
+    pub(crate) fn readable<T>(term: &Term<T>) -> String {
         let grid = term.grid();
         let cursor = |cursor: &Cursor<TermCell>| {
             format!(
@@ -1725,6 +1859,103 @@ mod tests {
             "abcdefghij".repeat(3)
         );
         live_trip(10, 6, bytes.as_bytes());
+    }
+
+    #[test]
+    fn a_tab_comes_back_in_its_cell_and_the_text_after_it_in_place() {
+        // The stops in force when the row was written are not the replay's:
+        // the default ones, then custom ones.
+        live_trip(20, 6, b"\tx\tu\r\nab\tc");
+        live_trip(20, 6, b"\x1b[3g\x1b[5G\x1bH\x1b[12G\x1bH\r\n\tT\tU\r\n\tx");
+        // The restore kind writes the tab cell as a blank: replayed at
+        // another width, no column can be named.
+        let (_, _, snap) = round_trip(20, 6, b"\x1b[3g\x1b[4G\x1bH\r\n\tz");
+        assert!(
+            snap.ends_with(b"   z\r\n"),
+            "{:?}",
+            String::from_utf8_lossy(&snap)
+        );
+    }
+
+    #[test]
+    fn a_wrap_a_wide_character_made_keeps_its_rows_after_the_character_goes() {
+        // A wide character that did not fit left its spacer and wrapped;
+        // the row it went to is erased, or overwritten from its start.
+        live_trip(10, 6, "abcdefghi漢\x1b[2K\r\nnext".as_bytes());
+        live_trip(10, 6, "abcdefghi漢\r\x1b[K  x\r\nnext".as_bytes());
+        live_trip(10, 6, "abcdefghi漢字\r\nnext".as_bytes());
+    }
+
+    #[test]
+    fn a_tab_in_a_wrapping_rows_last_cell_keeps_the_wrap() {
+        live_trip(10, 6, b"abcdefghi KL\x1b[1;10H\t\x1b[3;1Hz");
+    }
+
+    /// The restore kind's rows at another width: the text of each logical
+    /// line, in order, joined by `|`.
+    fn rewrapped(term: &Term<VoidListener>) -> String {
+        let grid = term.grid();
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        for row in grid.topmost_line().0..=grid.bottommost_line().0 {
+            let row = &grid[Line(row)];
+            line.extend(
+                (0..grid.columns())
+                    .filter(|&c| {
+                        !row[Column(c)]
+                            .flags
+                            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    })
+                    .map(|c| row[Column(c)].c),
+            );
+            if !row[Column(grid.columns() - 1)]
+                .flags
+                .contains(Flags::WRAPLINE)
+            {
+                lines.push(std::mem::take(&mut line).trim_end().to_owned());
+            }
+        }
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines.join("|")
+    }
+
+    #[test]
+    fn the_restore_kind_names_no_column_at_another_width() {
+        // A wide character's wrap with its continuation erased, and a tab in
+        // a wrapping row's last cell: wider and narrower, the next row
+        // survives and the text rewraps.
+        for cols in [6, 14, 40] {
+            let (_, replayed, _) = round_trip(10, cols, "abcdefghi漢\x1b[2K\r\nnext".as_bytes());
+            assert_eq!(rewrapped(&replayed), "abcdefghi|next", "{cols} columns");
+            let (_, replayed, _) = round_trip(10, cols, b"abcdefghi KL\x1b[1;10H\t\x1b[3;1Hz");
+            assert_eq!(rewrapped(&replayed), "abcdefghi KL|z", "{cols} columns");
+            let (_, replayed, _) = round_trip(10, cols, b"ab\tcd\r\nnext");
+            assert_eq!(rewrapped(&replayed), "ab      cd|next", "{cols} columns");
+        }
+    }
+
+    #[test]
+    fn the_last_columns_tab_stop_comes_back() {
+        // A stop set there, and a fresh grid's stop there cleared: a tab
+        // cannot tell either at this width, a wider grid can.
+        let trip = live_trip(12, 6, b"\x1b[3g\x1b[5G\x1bH\x1b[12G\x1bH");
+        assert_eq!((trip.probed.tabs, trip.probed.last_tab), (vec![4], true));
+        let trip = live_trip(17, 6, b"\x1b[3g\x1b[5G\x1bH");
+        assert_eq!((trip.probed.tabs, trip.probed.last_tab), (vec![4], false));
+        // The defaults write nothing.
+        assert!(live_trip(17, 6, b"x").probed.last_tab);
+    }
+
+    #[test]
+    fn a_wrapped_row_keeps_its_erased_continuation() {
+        // The first row wraps into the second, which is erased afterwards:
+        // the wrap flag stays, the continuation is blank.
+        live_trip(10, 6, b"abcdefghijXY\x1b[2K\r\nnext");
+        live_trip(10, 4, b"one\r\ntwo\r\nabcdefghijXY\r\nz\r\nw\x1b[1J");
+        let (original, replayed, _) = round_trip(10, 10, b"abcdefghijXY\x1b[2K\r\nnext");
+        assert_eq!(cells(&replayed), cells(&original));
     }
 
     #[test]

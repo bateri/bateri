@@ -775,6 +775,7 @@ pub(crate) mod tests {
                 tab_id: None,
                 hostname: None,
                 replay: None,
+                journal: None,
             },
             Arc::new(SilentWake),
         )
@@ -900,6 +901,7 @@ pub(crate) mod tests {
                     tab_id: None,
                     hostname: None,
                     replay: None,
+                    journal: None,
                 },
                 Arc::new(SilentWake),
             )
@@ -995,6 +997,7 @@ pub(crate) mod tests {
                 tab_id: None,
                 hostname: None,
                 replay: None,
+                journal: None,
             },
             Arc::new(SilentWake),
         )
@@ -1129,6 +1132,7 @@ pub(crate) mod tests {
                 tab_id: None,
                 hostname: None,
                 replay: None,
+                journal: None,
             },
             Arc::new(SilentWake),
         )
@@ -1297,6 +1301,7 @@ pub(crate) mod tests {
                     tab_id: None,
                     hostname: None,
                     replay: None,
+                    journal: None,
                 },
                 Arc::new(SilentWake),
             )
@@ -1434,6 +1439,7 @@ pub(crate) mod tests {
                 tab_id: Some(tab.clone()),
                 hostname: None,
                 replay: None,
+                journal: None,
             },
             Arc::new(SilentWake),
         )
@@ -1847,6 +1853,7 @@ pub(crate) mod tests {
                 tab_id: None,
                 hostname: None,
                 replay: None,
+                journal: None,
             },
             Arc::new(SilentWake),
         )

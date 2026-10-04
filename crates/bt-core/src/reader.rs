@@ -58,12 +58,13 @@ use alacritty_terminal::{thread, tty};
 use polling::{Event as PollingEvent, Events, PollMode, Poller};
 
 use crate::handler::ClusterHandler;
+use crate::journal::{Journal, Side};
 
 /// The most bytes read from the PTY before a forced synchronization.
-const READ_BUFFER_SIZE: usize = 0x10_0000;
+pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
 
 /// The most bytes read from the PTY while the terminal is locked.
-const MAX_LOCKED_READ: usize = u16::MAX as usize;
+pub(crate) const MAX_LOCKED_READ: usize = u16::MAX as usize;
 
 /// Poller token of the read/write fd (alacritty 0.26.0, `tty/unix.rs`,
 /// `pub(crate)`). `Pty::register` does the registration, so the number must
@@ -84,6 +85,13 @@ pub(crate) enum Msg {
 
     /// The PTY must be resized.
     Resize(WindowSize),
+
+    /// The journal's compaction made room (or the journal broke): the
+    /// read gate is asked again. A channel message, not a bare poller
+    /// wake: an empty wake with an empty channel is the DEC 2026 timeout's
+    /// arm, which would apply a synchronized update early and ask for a
+    /// frame. Sent only to a loop that has a journal.
+    Room,
 }
 
 /// Sending end of the loop's channel: queues the message and wakes the
@@ -222,6 +230,29 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     /// How many carried bytes the thread reads before its first
     /// `poll.wait` ([`EventLoop::read_first`]); `None`: none.
     read_first: Option<usize>,
+    /// The session's journal ([`EventLoop::journal`]); `None`: none, and
+    /// the loop runs as alacritty's does.
+    journal: Option<Arc<Journal>>,
+}
+
+/// The read gate's state between two loop rounds: while closed, since when
+/// the compaction's progress last moved and what it read then.
+#[derive(Default)]
+struct Gate {
+    stalled: Option<(Instant, u64)>,
+}
+
+/// Whether an empty wake with an empty channel is the DEC 2026 timeout.
+/// Without a journal it always is — alacritty's arm, kept as it was (a wake
+/// whose message an earlier round already drained lands here too, and
+/// applies a pending update early). With one, only once the update's own
+/// deadline has passed: the poll also wakes for the read gate's stall
+/// deadline, and every `stop_sync` is a side record — even one with nothing
+/// pending closes the open cluster — so a spurious one would apply what
+/// the application is still writing, ask for a frame and fill the side
+/// stream.
+fn sync_due(sync: Option<Instant>, journaled: bool, now: Instant) -> bool {
+    !journaled || sync.is_some_and(|deadline| deadline <= now)
 }
 
 impl<T, U> EventLoop<T, U>
@@ -248,7 +279,93 @@ where
             drain_on_exit,
             cluster,
             read_first: None,
+            journal: None,
         })
+    }
+
+    /// Records the PTY into `journal`: the bytes `advance` applies are
+    /// counted, the DEC 2026 timeout is recorded, and reading stops while
+    /// the journal has no room for one more read ([`Journal::gate_open`]).
+    pub(crate) fn journal(&mut self, journal: Arc<Journal>) {
+        self.journal = Some(journal);
+    }
+
+    /// Whether the journal has room for the next read — always without a
+    /// journal.
+    fn gate_open(&self) -> bool {
+        self.journal
+            .as_ref()
+            .is_none_or(|journal| journal.gate_open())
+    }
+
+    /// The read gate, before the next poll: closes the PTY's read interest
+    /// while the journal has no room for a whole `pty_read` (the poll is
+    /// level-triggered — a readable fd left registered would spin the
+    /// loop) and opens it again once it has. While closed it asks the
+    /// compaction to run and watches its progress: none for the journal's
+    /// stall time breaks the journal and opens the gate, so a dead or stuck
+    /// compaction cannot hold the pane. Returns the stall deadline while
+    /// closed. Without a journal nothing happens and `None` comes back.
+    fn gate(
+        &mut self,
+        gate: &mut Gate,
+        interest: &mut PollingEvent,
+        poll_opts: PollMode,
+    ) -> Option<Instant> {
+        let journal = Arc::clone(self.journal.as_ref()?);
+        let mut open = journal.gate_open();
+        if open {
+            gate.stalled = None;
+        } else {
+            let now = Instant::now();
+            let progress = journal.progress();
+            match gate.stalled {
+                Some((since, seen)) if seen == progress => {
+                    if now >= since + journal.stall() {
+                        eprintln!(
+                            "bateri: the journal's compaction made no progress, the journal breaks"
+                        );
+                        journal.break_journal();
+                        gate.stalled = None;
+                        open = true;
+                    }
+                }
+                _ => {
+                    gate.stalled = Some((now, progress));
+                    Journal::poke(&journal);
+                }
+            }
+        }
+        if open != interest.readable {
+            interest.readable = open;
+            // The same deliberate panic as the write interest's below.
+            if let Err(err) = self.pty.reregister(&self.poll, *interest, poll_opts) {
+                panic!("reader loop re-registration failed: {err}"); // audit: alacritty parity, the crash reaches the shutdown report through join's Err
+            }
+        }
+        gate.stalled.map(|(since, _)| since + journal.stall())
+    }
+
+    /// The carried prefix's serial reads ([`EventLoop::read_first`]): `left`
+    /// counts down as bytes go through and ends at zero when a round reads
+    /// nothing or fails. A closed read gate stops the rounds with `left`
+    /// kept; the loop calls this again once the gate opens — the prefix does
+    /// not make the fd readable, so a quiet PTY would otherwise keep the
+    /// rest until its next output.
+    fn read_prefix(&mut self, state: &mut State, buf: &mut [u8], left: &mut usize) {
+        while *left > 0 {
+            if !self.gate_open() {
+                return;
+            }
+            match self.pty_read(state, buf, true) {
+                Ok(0) => *left = 0,
+                Ok(processed) => *left = left.saturating_sub(processed),
+                Err(err) => {
+                    eprintln!("bateri: the first PTY read failed: {err}");
+                    *left = 0;
+                }
+            }
+        }
     }
 
     /// Reads once before the first `poll.wait`: an adopted PTY's
@@ -319,6 +436,8 @@ where
             match msg {
                 Msg::Input(input) => state.write_list.push_back(input),
                 Msg::Resize(window_size) => self.pty.on_resize(window_size),
+                // Only a wake: the gate is asked at the top of the round.
+                Msg::Room => {}
                 Msg::Shutdown => return false,
             }
         }
@@ -376,6 +495,12 @@ where
                 &mut ClusterHandler::new(&mut **terminal, self.cluster, &mut state.last_input),
                 &buf[..unprocessed],
             );
+            // The journal's applied count, under the terminal lock and by the
+            // slice `advance` got — not the bytes read: the reads before the
+            // lock accumulate into one `advance`.
+            if let Some(journal) = &self.journal {
+                journal.applied(unprocessed);
+            }
 
             processed += unprocessed;
             unprocessed = 0;
@@ -449,28 +574,29 @@ where
             // quiet PTY would wait for the next output, so read rounds until
             // the prefix went through — bounded by its length, so a program
             // writing without pause cannot keep the loop from the channel.
-            if let Some(prefix) = self.read_first {
-                let mut through = 0;
-                while through < prefix.max(1) {
-                    match self.pty_read(&mut state, &mut buf, true) {
-                        Ok(0) => break,
-                        Ok(processed) => through += processed,
-                        Err(err) => {
-                            eprintln!("bateri: the first PTY read failed: {err}");
-                            break;
-                        }
-                    }
-                }
-            }
+            let mut prefix_left = self.read_first.map_or(0, |prefix| prefix.max(1));
+            self.read_prefix(&mut state, &mut buf, &mut prefix_left);
 
             let mut events = Events::with_capacity(EVENTS_CAPACITY);
+            let mut gate = Gate::default();
 
             'event_loop: loop {
-                // Wake at the deadline of a synchronized update (DEC 2026).
+                // The journal's read gate (nothing without a journal), and the
+                // prefix a closed gate stopped.
+                let stall = self.gate(&mut gate, &mut interest, poll_opts);
+                if prefix_left > 0 && interest.readable {
+                    self.read_prefix(&mut state, &mut buf, &mut prefix_left);
+                }
+
+                // Wake at the deadline of a synchronized update (DEC 2026) —
+                // or at the read gate's stall deadline, if sooner.
                 let handler = state.parser.sync_timeout();
-                let timeout = handler
-                    .sync_timeout()
-                    .map(|st| st.saturating_duration_since(Instant::now()));
+                let sync = handler.sync_timeout();
+                let deadline = match (sync, stall) {
+                    (Some(sync), Some(stall)) => Some(sync.min(stall)),
+                    (sync, stall) => sync.or(stall),
+                };
+                let timeout = deadline.map(|st| st.saturating_duration_since(Instant::now()));
 
                 events.clear();
                 if let Err(err) = self.poll.wait(&mut events, timeout) {
@@ -488,12 +614,27 @@ where
                 // to `Term` directly, clustering would be skipped in
                 // this arm.
                 if events.is_empty() && self.rx.peek().is_none() {
-                    state.parser.stop_sync(&mut ClusterHandler::new(
-                        &mut *self.terminal.lock(),
-                        self.cluster,
-                        &mut state.last_input,
-                    ));
-                    self.event_proxy.send_event(Event::Wakeup);
+                    if sync_due(sync, self.journal.is_some(), Instant::now()) {
+                        let mut terminal = self.terminal.lock();
+                        state.parser.stop_sync(&mut ClusterHandler::new(
+                            &mut terminal,
+                            self.cluster,
+                            &mut state.last_input,
+                        ));
+                        // In the same lock round: the replay applies the
+                        // buffer after exactly the bytes applied so far.
+                        if let Some(journal) = &self.journal {
+                            journal.record(Side::StopSync);
+                        }
+                        drop(terminal);
+                        self.event_proxy.send_event(Event::Wakeup);
+                        // A compaction that found the update open gave up
+                        // until a new side record — this one: ask again, or
+                        // a closed gate would wait for the stall.
+                        if let Some(journal) = &self.journal {
+                            Journal::poke(journal);
+                        }
+                    }
                     continue;
                 }
 
@@ -526,9 +667,17 @@ where
                                 continue;
                             }
 
-                            if event.readable
-                                && let Err(err) = self.pty_read(&mut state, &mut buf, false)
-                            {
+                            let read = if event.readable {
+                                let read = self.pty_read(&mut state, &mut buf, false);
+                                // Outside the lease: the compaction may start a thread.
+                                if let Some(journal) = &self.journal {
+                                    Journal::poke(journal);
+                                }
+                                read
+                            } else {
+                                Ok(0)
+                            };
+                            if let Err(err) = read {
                                 // On Linux, when the client end closes, the
                                 // master's `read` may return `EIO`; go back to
                                 // the loop for the inevitable `Exited` event.

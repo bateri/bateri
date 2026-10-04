@@ -1860,6 +1860,7 @@ mod tests {
             tab_id: None,
             hostname: None,
             replay: None,
+            journal: None,
         }
     }
 
@@ -2091,6 +2092,7 @@ mod tests {
                 tab_id: None,
                 hostname: None,
                 replay: None,
+                journal: None,
             },
             Arc::new(SilentWake),
         )
@@ -2160,6 +2162,7 @@ mod tests {
                 tab_id: None,
                 hostname: None,
                 replay: None,
+                journal: None,
             },
             Arc::new(SilentWake),
         )

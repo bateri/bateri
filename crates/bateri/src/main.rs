@@ -96,9 +96,14 @@ fn main() -> ExitCode {
     // need not: the **presence** of these two flags carries the meaning, not
     // the value — `BT_SCROLL_TEST=0` also selects the load.
     let scroll_test = std::env::var_os("BT_SCROLL_TEST").is_some();
+    // `BT_JOURNAL` records every pane's journal in this process — the cost a
+    // crash-proof screen puts on the reader thread, for `/measure`; a
+    // journal nobody compacts or reads back has no use outside a timed run.
+    let journal = std::env::var_os("BT_JOURNAL").is_some();
     for (name, asked) in [
         ("BT_SCROLL_TEST", scroll_test),
         ("BT_FRAME_STATS", stats_since.is_some()),
+        ("BT_JOURNAL", journal),
     ] {
         if asked && !matches!(run_seconds, Some(n) if n > 0) {
             eprintln!("bateri: {name} needs a BT_RUN_SECONDS greater than zero");
@@ -115,6 +120,7 @@ fn main() -> ExitCode {
             bt_shell_macos::Workload::Smoke
         },
         stats_since,
+        journal,
     });
     match bt_shell_macos::run(bt_shell_macos::Options { run }) {
         Ok(()) => ExitCode::SUCCESS,

@@ -155,7 +155,7 @@ test:
 # wgpu gives no drawable to an occluded window, and the gate used to fall with
 # `frames=0` when another application was in front.
 smoke:
-	env -u BT_SCROLL_TEST -u BT_FRAME_STATS BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
+	env -u BT_SCROLL_TEST -u BT_FRAME_STATS -u BT_JOURNAL BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
 
 # WGSL canary: the shaders are embedded with `include_str!` and have no build
 # step, so the canary is the test that sets up the pipelines — naga validation

@@ -1762,6 +1762,13 @@ impl TerminalPane {
             hostname: crate::links::hostname(),
             // A restored pane's scrollback; `None` everywhere else.
             replay,
+            // Only the timed run's `BT_JOURNAL` records a journal so far,
+            // in this process.
+            journal: self
+                .ivars()
+                .run
+                .filter(|run| run.journal)
+                .map(|_| bt_core::Journal::in_memory()),
         };
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
         // The update's handover: the running program is carried

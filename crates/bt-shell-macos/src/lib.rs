@@ -274,6 +274,11 @@ pub struct Run {
     /// it, so the most expensive part of startup (creating the GPU device and
     /// the pipelines) is inside the measurement.
     pub stats_since: Option<Instant>,
+    /// `BT_JOURNAL`: every pane records its journal in this process and
+    /// compacts it here too — no holder takes it (`bt_core::Journal::in_memory`).
+    /// The run measures what the journal costs the reader thread and the
+    /// compaction; the token line does not change.
+    pub journal: bool,
 }
 
 pub struct Options {
