@@ -57,6 +57,13 @@ of every installed copy. A version without a section is not released.
   kubeconfig's current one (only that line of the file is read), and a
   context's name is matched whole: write `kubernetes-admin@kubernetes`, not
   `kubernetes`.
+- **A root shell is red, a nested shell says so.** After `sudo -i`,
+  `sudo -s` or `su` the guide line reads `root  exit to leave` in red,
+  whatever your marks say, so a root shell is never mistaken for your own;
+  a shell started from the prompt reads `nested bash  exit to return`, and
+  one a tool opened names the tool (`nested poetry shell`). While `sudo`
+  asks for your password, and for the whole of a `sudo` command that is not
+  a shell (`sudo make install`), the dock stays as it was.
 
 ## [0.5.0] - 2026-10-04
 

@@ -679,6 +679,9 @@ pub enum ProgramTone {
     /// is as red as a production machine.
     #[default]
     Info,
+    /// The theme's `error`, whatever the mark: a root shell's bar — every
+    /// key typed there runs as root, which is the one thing the bar says.
+    Error,
 }
 
 impl Clone for ProgramBar {
@@ -8136,6 +8139,55 @@ mod tests {
         assert!(log.set_program(Some(&bar)));
         log.apply(Mark::CommandStart);
         assert_eq!(log.context.program, None, "`C`");
+    }
+
+    #[test]
+    fn a_nested_shells_marks_leave_its_bar_and_the_raw_bit() {
+        // A nested fish 4 (or a root shell's own integration) prints its
+        // identity-less `A`, `B`, `C`, `D` around every command it runs: the
+        // bar that says where the keys go and the bit that keeps the band
+        // down both stay, for a nested shell's bar and a root one's alike.
+        for bar in [
+            ProgramBar {
+                title: "nested fish".into(),
+                hint: "exit to return".into(),
+                ..ProgramBar::default()
+            },
+            ProgramBar {
+                title: "root".into(),
+                hint: "exit to leave".into(),
+                tone: ProgramTone::Error,
+                ..ProgramBar::default()
+            },
+        ] {
+            let mut log = running_log();
+            let command = log.running_command();
+            log.raw = command;
+            assert!(log.set_program(Some(&bar)));
+            for _ in 0..2 {
+                for mark in [
+                    Mark::PromptStart { id: None },
+                    Mark::PromptEnd,
+                    Mark::CommandStart,
+                    Mark::CommandEnd {
+                        exit: Some(0),
+                        id: None,
+                    },
+                ] {
+                    log.apply(mark);
+                    assert_eq!(log.running_command(), command, "{mark:?}");
+                    assert!(log.raw_active(), "{mark:?}");
+                    assert_eq!(log.context.program.as_ref(), Some(&bar), "{mark:?}");
+                }
+            }
+            // `exit`: our `D` ends the command, the bar and the bit with it.
+            log.apply(Mark::CommandEnd {
+                exit: Some(0),
+                id: Some(1),
+            });
+            assert!(!log.raw_active());
+            assert_eq!(log.context.program, None);
+        }
     }
 
     #[test]

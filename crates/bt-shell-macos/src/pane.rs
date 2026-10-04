@@ -2454,7 +2454,17 @@ impl TerminalPane {
     /// builtin `read -k`, `exec fish`) are not a program. Raw modes mark the
     /// generation ([`bt_core::Session::note_raw`]) and settle the arm; no
     /// command, or a reader that has finished, settles it too — the next `C`
-    /// arms again. Main thread, syscalls only: the group and `tcgetattr`.
+    /// arms again. Main thread, syscalls only: the group, `tcgetattr` and
+    /// the group's process table ([`program::find`]).
+    ///
+    /// **Not on sudo's modes** ([`program::Found`]): while sudo holds the
+    /// terminal its raw modes are its own — its password prompt with
+    /// `pwfeedback`, its relay of the terminal it opened for the command
+    /// with `use_pty` — and marking would keep the band down for a whole
+    /// `sudo make install`. The command it runs answers instead: none yet is
+    /// no answer (the prompt — at most an ask per keystroke), one no bar
+    /// knows settles the arm **unmarked**, so the build's output asks
+    /// nothing more.
     ///
     /// **Not on the alternate screen**: a full-screen program (vim from `git
     /// rebase -i`, `less`) is raw too, but the dock is already lifted for it,
@@ -2466,8 +2476,8 @@ impl TerminalPane {
     /// build, `tail -f`) is asked once per delay while it prints, so the
     /// atomic read and the one `tcgetattr` come before the process table.
     ///
-    /// **Once marked, the program is recognized** ([`Self::recognize_program`]):
-    /// the arm drops with the mark, so this runs once per command.
+    /// **The program is known before the mark** ([`Self::show_program`]): the
+    /// arm drops with the mark, so a bar is written once per command.
     pub(crate) fn probe_program(&self) -> bool {
         let (Some(session), Some(&parent)) =
             (self.ivars().session.get(), self.ivars().shell_parent.get())
@@ -2485,33 +2495,40 @@ impl TerminalPane {
         {
             return true;
         }
+        let home = crate::child::home();
+        let program =
+            match program::find(parent, session.child_pid(), &SystemTable, home.as_deref()) {
+                program::Found::Waiting => return true,
+                program::Found::Elevated => return false,
+                program::Found::Unknown => None,
+                program::Found::Program(program) => Some(*program),
+            };
         let Some(command) = session.note_raw(jobs::tty_modes) else {
             return true;
         };
-        self.recognize_program(session, parent, command);
+        if let Some(program) = program {
+            self.show_program(session, command, program);
+        }
         false
     }
 
     /// The marked program's guide bar ([`program::find`]): written at once
     /// with what the process table says (main thread, system calls only —
-    /// the group's members, their exec records and the program's start
-    /// time), then by a background job on a thread of its own: completed
-    /// with the interpreter's `--version` (killed past its timeout), a
+    /// the group's members and their exec records in the probe, the
+    /// program's start time here), then by a background job on a thread of
+    /// its own: completed with the interpreter's `--version` (killed past
+    /// its timeout), a
     /// venv's `pyvenv.cfg` and a kubectl session's context from its
     /// kubeconfig ([`program::details`]), and taken away when the
     /// program exits ([`program::wait_for_exit`]) — the command can go on
     /// without it (`python3; make`). Each answer comes back on the main
     /// queue, finds the pane by its id and is written for the **same
     /// generation**: a command that ended in between rejects it
-    /// ([`bt_core::Session::set_program`]). An unrecognized program writes
-    /// nothing — no band. A timed run never gets here: its probe is never
-    /// armed ([`ShellWake::command_started`]'s gate).
-    fn recognize_program(&self, session: &Session, parent: ShellParent, command: u64) {
-        let home = crate::child::home();
-        let Some(found) = program::find(parent, session.child_pid(), &SystemTable, home.as_deref())
-        else {
-            return;
-        };
+    /// ([`bt_core::Session::set_program`]). Only a recognized program gets
+    /// here; an unrecognized one writes nothing — no band. A timed run never
+    /// gets here: its probe is never armed ([`ShellWake::command_started`]'s
+    /// gate).
+    fn show_program(&self, session: &Session, command: u64, found: program::Program) {
         session.set_program(command, Some(&found.bar(None)));
         let start = jobs::start_time(found.pid);
         let (id, lookup) = (self.ivars().id, self.ivars().lookup);

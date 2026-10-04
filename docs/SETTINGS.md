@@ -1255,6 +1255,23 @@ every database client and every context too**: `{ host = "*", mark =
 "development" }` makes each `psql` and `kubectl` guide green as well. Put the
 exact names you mean before it, or mark a host `"none"` to leave it out.
 
+These guides are behavior, not settings — no key turns them on or off.
+While a command runs that reads the keyboard itself, the dock steps aside;
+for a program bateri knows it leaves a one-line guide in its place: an
+interpreter's REPL (`Python 3.14.5 · venv  ~/proj/.venv/bin/python3`), a
+database client or a container or pod shell (above), a **root shell**
+(`sudo -i`, `sudo -s`, `su`) — `root  exit to leave`, always in the theme's
+`error` (red), whatever `hosts` says — and a **nested shell**, one started
+from the prompt or by a tool that opens one (`nested bash  exit to return`,
+`nested poetry shell`; a tool that hands its place over to the shell
+entirely leaves the shell's own name). A shell that runs a script or a
+`-c` command is no nested session and gets no guide. While `sudo` asks for
+your password, and while it runs anything other than a shell (`sudo make
+install`), the dock stays as it is: what sudo does to the terminal says
+nothing about the program under it. macOS does not let bateri read the
+command line of a program running as root, so a script run with `sudo`
+(`sudo ./install.sh`) shows the root line too while it runs.
+
 - **`mark`**: `"production"` (the theme's `error`, red), `"staging"`
   (`warning`, yellow), `"development"` (`success`, green), `"none"` (no mark —
   the theme's `info`, cyan) or a color in the form `"#rrggbb"`. Named marks

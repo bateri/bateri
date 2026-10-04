@@ -40,10 +40,20 @@
 //! **whole** (`kubernetes-admin@kubernetes` is one name, its `@` no user's),
 //! read from `--context` or, in the background job, from the kubeconfig's
 //! `current-context:` line.
+//!
+//! **Shells** ([`shell`]): a shell running as root — `root  exit to
+//! leave`, in the theme's `error` — and an interactive shell started from
+//! the prompt or by a tool that opens one — `nested bash  exit to return`.
+//! The order is the bar's: a root shell first, then what runs in the group
+//! (an interpreter, a client, a container session — a shell that started
+//! python leaves the bar to python), a nested shell last. While sudo holds
+//! the terminal its own raw modes say nothing of the program
+//! ([`Found::Sudo`]).
 
 mod container;
 mod database;
 mod options;
+mod shell;
 
 pub use container::Kube;
 pub use database::{Client, Target};
@@ -113,6 +123,11 @@ pub enum Family {
     Container,
     /// `kubectl` in a pod or on a node.
     Kubernetes,
+    /// A shell running as root (`sudo -i`, `su`).
+    Root,
+    /// An interactive shell started from the prompt, or the tool that
+    /// opened one: its name or the tool's title (`bash`, `poetry shell`).
+    Nested(&'static str),
 }
 
 /// One interpreter: the family, the bar's label and its exit hint. A new
@@ -219,12 +234,15 @@ impl Family {
         }
     }
 
-    /// The bar's title, before a version.
+    /// The bar's title, before a version (a nested shell's name follows
+    /// it).
     fn label(self) -> &'static str {
         match self {
             Self::Database(client) => client.label(),
             Self::Container => "container",
             Self::Kubernetes => "k8s",
+            Self::Root => "root",
+            Self::Nested(_) => shell::NESTED,
             interpreter => interpreter.row().map_or("", |row| row.label),
         }
     }
@@ -234,7 +252,9 @@ impl Family {
         match self {
             Self::Database(client) => client.hint(),
             // The shell inside: its own `exit`.
-            Self::Container | Self::Kubernetes => "exit to leave",
+            Self::Container | Self::Kubernetes | Self::Root => "exit to leave",
+            // Back to the terminal's own shell.
+            Self::Nested(_) => "exit to return",
             interpreter => interpreter.row().map_or("", |row| row.hint),
         }
     }
@@ -307,6 +327,10 @@ impl Program {
     /// and it shows while the context is not known.
     pub fn bar(&self, details: Option<&Details>) -> ProgramBar {
         let mut title = self.family.label().to_owned();
+        if let Family::Nested(name) = self.family {
+            title.push(' ');
+            title.push_str(name);
+        }
         if let Some(version) = details.and_then(|details| details.version.as_deref()) {
             title.push(' ');
             title.push_str(version);
@@ -340,35 +364,123 @@ impl Program {
             hint: self.family.hint().to_owned(),
             host,
             subject,
-            tone: ProgramTone::Info,
+            // Every key typed there runs as root: the bar is red whatever
+            // a mark says.
+            tone: if self.family == Family::Root {
+                ProgramTone::Error
+            } else {
+                ProgramTone::Info
+            },
+        }
+    }
+
+    /// A shell's program: nothing to ask in the background, no path — the
+    /// bar is its title and how to leave.
+    fn shell(pid: u32, family: Family) -> Self {
+        Self {
+            pid,
+            family,
+            exec: None,
+            path: String::new(),
+            detail: None,
+            host: None,
+            venv_config: None,
+            kube: None,
         }
     }
 }
 
 /// A member of the foreground group: its pid, its parent and — for a
-/// candidate name only — its name and record.
+/// candidate name only — what the bars ask of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
     pub pid: u32,
     pub parent: Option<u32>,
-    /// `None` for a name that is no interpreter's, or an unreadable record.
-    pub candidate: Option<(String, ProcArgs)>,
+    /// `None` for a name no bar knows.
+    pub candidate: Option<Candidate>,
 }
 
-/// The program in the terminal's foreground group, if one is recognized:
-/// every member with its parent, records read only for candidate names
-/// ([`ENV_KEYS`] only). `None` when the shell's own group holds the terminal
-/// or the table is unreadable. Main thread: system calls only.
+/// A member whose name a bar knows: an interpreter's, a client's, a tool's,
+/// a shell's or an elevator's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub name: String,
+    /// The effective user ([`ProcessTable::uid`]); `None` if unreadable.
+    pub uid: Option<u32>,
+    /// The exec record ([`ENV_KEYS`] only); `None` when unreadable —
+    /// another user's process, a root shell's.
+    pub record: Option<ProcArgs>,
+}
+
+/// What the foreground group says once the terminal went raw ([`find`]).
+///
+/// **While sudo (or `su`) holds the terminal the raw modes are its own**,
+/// not the program's — its password prompt with `pwfeedback`, the relay of
+/// the terminal it opened for the command with `use_pty` (sudo's default) —
+/// so the answer is the command it runs, looked at by itself: nothing yet
+/// is [`Self::Waiting`], a command no bar knows is [`Self::Elevated`].
+/// Marking on sudo's modes would keep the band down for a whole `sudo make
+/// install`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// No answer yet — asked again on the next output: the terminal's own
+    /// shell holds it, the group cannot be read, or sudo runs nothing yet
+    /// (its password prompt; `sudo -i`'s root shell comes after it).
+    Waiting,
+    /// sudo runs a command no bar knows (`sudo make install`): not marked,
+    /// and not asked again for this command — the dock stays.
+    Elevated,
+    /// A program no bar knows — an agent, a TUI: marked, the band goes and
+    /// nothing takes its place.
+    Unknown,
+    /// A program a guide bar names (boxed: the other answers carry
+    /// nothing).
+    Program(Box<Program>),
+}
+
+#[cfg(test)]
+impl Found {
+    /// The program, when one is named.
+    pub fn program(self) -> Option<Program> {
+        match self {
+            Self::Program(program) => Some(*program),
+            Self::Waiting | Self::Elevated | Self::Unknown => None,
+        }
+    }
+}
+
+/// How deep the command sudo runs is looked for, through the processes of
+/// [`shell::ELEVATORS`] — a **design constant**: the measured chain is sudo,
+/// the monitor it forks for `use_pty`, then the command (two levels);
+/// `sudo su -` adds su and the shell it forks.
+const ELEVATED_DEPTH: usize = 4;
+
+/// How far above a nested shell the tool that opened it is looked for, up
+/// to the terminal's own shell — a **design constant**: a forking tool is
+/// the shell's parent, one wrapper between them is allowed.
+const TOOL_DEPTH: usize = 2;
+
+/// The program in the terminal's foreground group: every member with its
+/// parent, candidates with their user and record ([`ENV_KEYS`] only). A
+/// group sudo holds is answered by the command it runs ([`Found`]); a
+/// nested shell a forking tool opened takes the tool's title.
+/// [`Found::Waiting`] when the shell's own group holds the terminal or the
+/// table is unreadable. Main thread: system calls only.
 pub fn find(
     parent: ShellParent,
     child: u32,
     table: &impl ProcessTable,
     home: Option<&Path>,
-) -> Option<Program> {
-    let shell = jobs::shell_pid(parent, child, table)?;
-    let groups = table
+) -> Found {
+    let Some(shell) = jobs::shell_pid(parent, child, table) else {
+        return Found::Waiting;
+    };
+    let Some(groups) = table
         .groups(shell)
-        .filter(|groups| groups.foreground != 0 && groups.foreground != groups.own)?;
+        .filter(|groups| groups.foreground != 0 && groups.foreground != groups.own)
+    else {
+        return Found::Waiting;
+    };
     let mut pids = table.members(groups.foreground);
     pids.sort_unstable();
     let members: Vec<Member> = pids
@@ -376,30 +488,156 @@ pub fn find(
         .map(|pid| Member {
             pid,
             parent: table.parent(pid),
-            candidate: table
-                .name(pid)
-                .filter(|name| Family::of_name(name).is_some())
-                .and_then(|name| Some((name, table.procargs(pid, &ENV_KEYS)?))),
+            candidate: candidate(pid, table),
         })
         .collect();
-    classify(&members, home)
+    let elevators: Vec<u32> = members
+        .iter()
+        .filter(|member| {
+            member.candidate.as_ref().is_some_and(|candidate| {
+                shell::ELEVATORS.contains(&candidate.name.as_str()) && candidate.uid == Some(0)
+            })
+        })
+        .map(|member| member.pid)
+        .collect();
+    if !elevators.is_empty() {
+        let Some(command) = command_below(&elevators, table) else {
+            return Found::Waiting;
+        };
+        let member = Member {
+            pid: command,
+            parent: None,
+            candidate: candidate(command, table),
+        };
+        return classify(&[member], home)
+            .map_or(Found::Elevated, |program| Found::Program(Box::new(program)));
+    }
+    match classify(&members, home) {
+        Some(program) => Found::Program(Box::new(opened_by(program, shell, table))),
+        None => Found::Unknown,
+    }
 }
 
-/// The group's REPL, when the whole group is its line: the **topmost**
-/// recognized member (one with no recognized ancestor in the group — pids
-/// wrap, so the lower pid is not the parent), and every other member must
-/// be its ancestor (a wrapper: `uv run python`) or its descendant (`bun
-/// repl`'s script, a REPL's own children). A member on another branch is a
-/// pipeline's other side — in `fzf | python3` fzf turned the terminal raw
-/// and python3 reads a pipe — and the bar would name the wrong program.
+/// A member's candidate: its name when a bar knows it, its user and its
+/// record — [`ENV_KEYS`] when readable, else the argv alone (another
+/// user's process on Linux, whose `cmdline` anyone may read; on macOS
+/// neither reads).
+fn candidate(pid: u32, table: &impl ProcessTable) -> Option<Candidate> {
+    let name = table
+        .name(pid)
+        .filter(|name| Family::of_name(name).is_some() || shell::is_candidate(name))?;
+    Some(Candidate {
+        uid: table.uid(pid),
+        record: table
+            .procargs(pid, &ENV_KEYS)
+            .or_else(|| table.procargs(pid, &[])),
+        name,
+    })
+}
+
+/// The command `elevators` run: the first process under them that is not
+/// itself one, walked through sudo's monitor and `su` ([`ELEVATED_DEPTH`]);
+/// `None` before it starts (sudo at its prompt). Only the command —
+/// `sudo make`'s recipe shells are make's, not a session.
+fn command_below(elevators: &[u32], table: &impl ProcessTable) -> Option<u32> {
+    let mut level = elevators.to_vec();
+    for _ in 0..ELEVATED_DEPTH {
+        let mut next = Vec::new();
+        for child in level.iter().flat_map(|&pid| table.children(pid)) {
+            match table.name(child) {
+                Some(name) if shell::ELEVATORS.contains(&name.as_str()) => next.push(child),
+                _ => return Some(child),
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        level = next;
+    }
+    None
+}
+
+/// A nested shell a forking tool opened (`devbox shell`), named after the
+/// tool: an interactive shell takes a group of its own, so the tool is
+/// above it, outside the group — looked for up to [`TOOL_DEPTH`] parents,
+/// short of the terminal's `shell`. Any other program as it is.
+fn opened_by(program: Program, shell: u32, table: &impl ProcessTable) -> Program {
+    if !matches!(program.family, Family::Nested(_)) {
+        return program;
+    }
+    let mut at = table.parent(program.pid);
+    for _ in 0..TOOL_DEPTH {
+        let Some(pid) = at.filter(|&pid| pid != shell && pid > 1) else {
+            break;
+        };
+        let title = table
+            .name(pid)
+            .filter(|name| Family::of_name(name).is_some() || shell::is_candidate(name))
+            .and_then(|name| shell::tool(&name, &table.procargs(pid, &[])?));
+        if let Some(title) = title {
+            return Program {
+                family: Family::Nested(title),
+                ..program
+            };
+        }
+        at = table.parent(pid);
+    }
+    program
+}
+
+/// The group's program, in the bar's order: a **root shell**
+/// ([`shell::is_root_shell`]); else the group's REPL, client or container
+/// session ([`recognize`]); else a **nested shell** or the tool that opened
+/// one ([`shell::nested`]) — a shell that started python leaves the bar to
+/// python. Each kind must be the group's line ([`in_line`]): a root shell
+/// on a pipeline's other side does not name what reads the keyboard.
 pub fn classify(members: &[Member], home: Option<&Path>) -> Option<Program> {
+    let roots: Vec<Program> = members
+        .iter()
+        .filter(|member| {
+            member.candidate.as_ref().is_some_and(|candidate| {
+                shell::is_root_shell(&candidate.name, candidate.uid, candidate.record.as_ref())
+            })
+        })
+        .map(|member| Program::shell(member.pid, Family::Root))
+        .collect();
+    if let Some(root) = in_line(members, roots) {
+        return Some(root);
+    }
     let recognized: Vec<Program> = members
         .iter()
         .filter_map(|member| {
-            let (name, record) = member.candidate.as_ref()?;
-            recognize(member.pid, name, record, home)
+            let candidate = member.candidate.as_ref()?;
+            recognize(
+                member.pid,
+                &candidate.name,
+                candidate.record.as_ref()?,
+                home,
+            )
         })
         .collect();
+    if let Some(program) = in_line(members, recognized) {
+        return Some(program);
+    }
+    let nested: Vec<Program> = members
+        .iter()
+        .filter_map(|member| {
+            let candidate = member.candidate.as_ref()?;
+            let name = shell::nested(&candidate.name, candidate.record.as_ref()?)?;
+            Some(Program::shell(member.pid, Family::Nested(name)))
+        })
+        .collect();
+    in_line(members, nested)
+}
+
+/// The program of `recognized` the whole group is the line of: the
+/// **topmost** (one with no recognized ancestor in the group — pids wrap,
+/// so the lower pid is not the parent), and every other member must be its
+/// ancestor (a wrapper: `uv run python`) or its descendant (`bun repl`'s
+/// script, a REPL's own children). A member on another branch is a
+/// pipeline's other side — in `fzf | python3` fzf turned the terminal raw
+/// and python3 reads a pipe — and the bar would name the wrong program.
+fn in_line(members: &[Member], recognized: Vec<Program>) -> Option<Program> {
     let parent_of = |pid: u32| {
         members
             .iter()
@@ -596,29 +834,49 @@ fn is_repl(family: Family, argv: &[String]) -> bool {
                 || first_positional(args, &["-I", "-r", "-C", "-E"]).is_some_and(named)
         }
         // A client's or a tool's session is decided with its target
-        // (`client_program`, `container`).
-        Family::Database(_) | Family::Container | Family::Kubernetes => false,
+        // (`client_program`, `container`), a shell's by `shell`.
+        Family::Database(_)
+        | Family::Container
+        | Family::Kubernetes
+        | Family::Root
+        | Family::Nested(_) => false,
     }
 }
 
-/// Python's options: `-c` and `-m` end them (the rest is the code's
-/// argv), `-W`/`-X` and `--check-hash-based-pycs` take a value, the others
-/// are flags that may be clustered (`-iu`). A REPL when nothing runs, when
-/// `-i` asks for one after the code, or when the script or module is a
-/// front-end that is given nothing to run itself ([`runs_nothing`]).
-fn python_is_repl(args: &[String]) -> bool {
+/// What Python runs after its own options ([`python_line`]).
+enum PythonRuns<'a> {
+    /// Nothing: the REPL.
+    Nothing,
+    /// Code given inline (`-c`) or read from stdin (`-`).
+    Code,
+    /// A module (`-m`) and the arguments after it.
+    Module(&'a str, &'a [String]),
+    /// A script and the arguments after it.
+    Script(&'a str, &'a [String]),
+}
+
+/// Python's command line (argv without argv[0]): whether `-i` came before
+/// what runs, and what runs. `-c` and `-m` end the options (the rest is the
+/// code's argv), `-W`/`-X` and `--check-hash-based-pycs` take a value, the
+/// others are flags that may be clustered (`-iu`); `--` ends them and a lone
+/// `-` reads the code from stdin. The one walk over CPython's option
+/// grammar: the REPL check and the scripts of tools and shells read it.
+fn python_line(args: &[String]) -> (bool, PythonRuns<'_>) {
     let mut interactive = false;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         if arg == "--" {
-            let rest = args.get(index + 2..).unwrap_or_default();
-            return interactive
-                || args
-                    .get(index + 1)
-                    .is_none_or(|script| frontend(script, rest));
+            let runs = args.get(index + 1).map_or(PythonRuns::Nothing, |script| {
+                PythonRuns::Script(script, args.get(index + 2..).unwrap_or_default())
+            });
+            return (interactive, runs);
         }
-        if arg == "-" || !arg.starts_with('-') {
-            return interactive || frontend(arg, args.get(index + 1..).unwrap_or_default());
+        if arg == "-" {
+            return (interactive, PythonRuns::Code);
+        }
+        if !arg.starts_with('-') {
+            let rest = args.get(index + 1..).unwrap_or_default();
+            return (interactive, PythonRuns::Script(arg, rest));
         }
         if let Some(long) = arg.strip_prefix("--") {
             index += 1 + usize::from(long == "check-hash-based-pycs");
@@ -629,16 +887,17 @@ fn python_is_repl(args: &[String]) -> bool {
             let rest = &flags[at + flag.len_utf8()..];
             match flag {
                 'i' => interactive = true,
-                'c' => return interactive,
+                'c' => return (interactive, PythonRuns::Code),
                 'm' => {
                     let (module, after) = if rest.is_empty() {
                         (args.get(index + 1).map(String::as_str), index + 2)
                     } else {
                         (Some(rest), index + 1)
                     };
-                    return interactive
-                        || (module.is_some_and(|module| PYTHON_REPL_MODULES.contains(&module))
-                            && runs_nothing(args.get(after..).unwrap_or_default()));
+                    let runs = module.map_or(PythonRuns::Code, |module| {
+                        PythonRuns::Module(module, args.get(after..).unwrap_or_default())
+                    });
+                    return (interactive, runs);
                 }
                 'W' | 'X' => {
                     index += usize::from(rest.is_empty());
@@ -649,7 +908,23 @@ fn python_is_repl(args: &[String]) -> bool {
         }
         index += 1;
     }
-    true
+    (interactive, PythonRuns::Nothing)
+}
+
+/// A REPL when nothing runs, when `-i` asks for one after the code, or when
+/// the script or module is a front-end that is given nothing to run itself
+/// ([`runs_nothing`]).
+fn python_is_repl(args: &[String]) -> bool {
+    let (interactive, runs) = python_line(args);
+    interactive
+        || match runs {
+            PythonRuns::Nothing => true,
+            PythonRuns::Code => false,
+            PythonRuns::Module(module, rest) => {
+                PYTHON_REPL_MODULES.contains(&module) && runs_nothing(rest)
+            }
+            PythonRuns::Script(script, rest) => frontend(script, rest),
+        }
 }
 
 /// A Python script that is a REPL front-end, given `rest` as its arguments.
@@ -716,6 +991,16 @@ fn first_positional<'a>(args: &'a [String], valued: &[&str]) -> Option<&'a str> 
         index += 1 + usize::from(valued.contains(&arg.as_str()));
     }
     None
+}
+
+/// The script Python runs and the arguments after it ([`python_line`]);
+/// `None` when it runs no script — code given with `-c` or on stdin, a
+/// module, nothing.
+fn python_script(args: &[String]) -> Option<(&str, &[String])> {
+    match python_line(args).1 {
+        PythonRuns::Script(script, rest) => Some((script, rest)),
+        PythonRuns::Nothing | PythonRuns::Code | PythonRuns::Module(..) => None,
+    }
 }
 
 /// A path's last component.
@@ -950,7 +1235,7 @@ pub fn pyvenv_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jobs::tests::login_shell;
+    use crate::jobs::tests::{USER, login_shell};
 
     const HOME: &str = "/Users/me";
 
@@ -964,9 +1249,10 @@ mod tests {
         Member {
             pid: 200,
             parent: Some(101),
-            candidate: Some((
-                name.to_owned(),
-                ProcArgs {
+            candidate: Some(Candidate {
+                name: name.to_owned(),
+                uid: Some(USER),
+                record: Some(ProcArgs {
                     exec: exec.to_owned(),
                     args: argv.iter().map(|&arg| arg.to_owned()).collect(),
                     env: env
@@ -974,8 +1260,8 @@ mod tests {
                         .filter(|(key, _)| ENV_KEYS.contains(key))
                         .map(|&(key, value)| (key.to_owned(), value.to_owned()))
                         .collect(),
-                },
-            )),
+                }),
+            }),
         }
     }
 
@@ -1583,7 +1869,9 @@ mod tests {
                 ("NVM_DIR", "/Users/me/.nvm"),
             ],
         );
-        let program = find(ShellParent::Login, 100, &table, home()).expect("node");
+        let program = find(ShellParent::Login, 100, &table, home())
+            .program()
+            .expect("node");
         assert_eq!(program.detail.as_deref(), Some("nvm"));
         let printed = format!("{program:?} {:?}", program.bar(None));
         assert!(
@@ -1614,7 +1902,9 @@ mod tests {
             ],
             &[("PGPASSWORD", "hunter2"), ("PGHOST", "db.stage")],
         );
-        let program = find(ShellParent::Login, 100, &table, home()).expect("psql");
+        let program = find(ShellParent::Login, 100, &table, home())
+            .program()
+            .expect("psql");
         assert_eq!(program.family, Family::Database(Client::Postgres));
         assert_eq!(program.exec, None, "no version is asked of a client");
         assert_eq!(program.host.as_deref(), Some("db.prod"));
@@ -1729,7 +2019,9 @@ mod tests {
                 &["/Users/me/proj/.venv/bin/python3"],
                 &[("VIRTUAL_ENV", "/Users/me/proj/.venv")],
             );
-        let program = find(ShellParent::Login, 100, &table, home()).expect("python");
+        let program = find(ShellParent::Login, 100, &table, home())
+            .program()
+            .expect("python");
         assert_eq!(program.detail.as_deref(), Some("venv"));
         // The shell's own group (`exec`'d, or between commands): no program.
         let idle = login_shell(101).exec(
@@ -1740,10 +2032,10 @@ mod tests {
             &["node"],
             &[],
         );
-        assert_eq!(find(ShellParent::Login, 100, &idle, home()), None);
+        assert_eq!(find(ShellParent::Login, 100, &idle, home()), Found::Waiting);
         // An unreadable record (another user's process) is skipped.
         let root = login_shell(200).with(200, 101, 200, "python3");
-        assert_eq!(find(ShellParent::Login, 100, &root, home()), None);
+        assert_eq!(find(ShellParent::Login, 100, &root, home()), Found::Unknown);
         // An agent: nothing recognized.
         let codex = login_shell(200)
             .run(
@@ -1758,7 +2050,262 @@ mod tests {
                 200,
                 &["/opt/homebrew/lib/node_modules/@openai/codex/bin/codex"],
             );
-        assert_eq!(find(ShellParent::Login, 100, &codex, home()), None);
+        assert_eq!(
+            find(ShellParent::Login, 100, &codex, home()),
+            Found::Unknown
+        );
+    }
+
+    /// A shell member at `pid` under `parent` running as `uid`; another
+    /// user's record is unreadable, as root's is.
+    fn shell_member(name: &str, argv: &[&str], (pid, parent): (u32, u32), uid: u32) -> Member {
+        let mut shell = at(member(name, argv[0], argv, &[]), pid, parent);
+        if let Some(candidate) = shell.candidate.as_mut() {
+            candidate.uid = Some(uid);
+            if uid != USER {
+                candidate.record = None;
+            }
+        }
+        shell
+    }
+
+    #[test]
+    fn a_root_shell_comes_first_and_is_red() {
+        // `su -`, or `sudo -i` without `use_pty`: the root shell holds the
+        // terminal alone, its argv unreadable — its name and user say it.
+        let root =
+            classify(&[shell_member("sh", &["-sh"], (300, 299), 0)], home()).expect("a root shell");
+        assert_eq!((root.family, root.pid), (Family::Root, 300));
+        assert_eq!(root.exec, None, "no version asked");
+        let bar = root.bar(None);
+        assert_eq!(bar.title, "root");
+        assert_eq!(bar.hint, "exit to leave");
+        assert_eq!((bar.detail.as_str(), bar.path.as_str()), ("", ""));
+        assert_eq!(bar.host, "", "nothing to mark");
+        assert_eq!(bar.tone, ProgramTone::Error);
+        assert_eq!(root.bar(Some(&Details::default())), bar);
+        // Before what runs under it (a root `sh` that started python).
+        let python = || {
+            at(
+                member("python3", "/usr/bin/python3", &["python3"], &[]),
+                301,
+                300,
+            )
+        };
+        let first = classify(
+            &[shell_member("sh", &["sh"], (300, 299), 0), python()],
+            home(),
+        );
+        assert_eq!(first.map(|program| program.family), Some(Family::Root));
+        // Root is a shell's: a root python with a readable record is the
+        // interpreter.
+        let mut root_python = python();
+        if let Some(candidate) = root_python.candidate.as_mut() {
+            candidate.uid = Some(0);
+        }
+        assert_eq!(
+            classify(&[root_python], home()).map(|program| program.family),
+            Some(Family::Python)
+        );
+        // The user's own shell is no root's.
+        assert_ne!(
+            classify(&[shell_member("sh", &["sh"], (300, 299), USER)], home())
+                .map(|program| program.family),
+            Some(Family::Root)
+        );
+    }
+
+    #[test]
+    fn a_nested_shell_comes_after_what_runs_in_its_group() {
+        let bash = classify(&[shell_member("bash", &["bash"], (300, 101), USER)], home())
+            .expect("a nested bash");
+        assert_eq!((bash.family, bash.pid), (Family::Nested("bash"), 300));
+        let bar = bash.bar(None);
+        assert_eq!(bar.title, "nested bash");
+        assert_eq!(bar.hint, "exit to return");
+        assert_eq!(bar.tone, ProgramTone::Info);
+        assert_eq!((bar.detail.as_str(), bar.path.as_str()), ("", ""));
+        // A shell that started python leaves the bar to python: an
+        // interactive `sh` without job control, python in its group.
+        let python = at(
+            member("python3", "/usr/bin/python3", &["python3"], &[]),
+            301,
+            300,
+        );
+        let program = classify(
+            &[shell_member("sh", &["sh"], (300, 101), USER), python],
+            home(),
+        );
+        assert_eq!(program.map(|program| program.family), Some(Family::Python));
+        // A script's shell is no session — `bash build.sh` asking for a
+        // key, a wrapper `sh -c` around an agent.
+        for argv in [&["bash", "build.sh"][..], &["sh", "-c", "node codex.js"]] {
+            let shell = shell_member(argv[0], argv, (300, 101), USER);
+            assert_eq!(classify(&[shell], home()), None, "{argv:?}");
+        }
+        // `poetry shell` holds the terminal itself, the shell in a terminal
+        // of its own: the tool is the bar.
+        let poetry = at(
+            member(
+                "Python",
+                FRAMEWORK,
+                &[FRAMEWORK, "/Users/me/.local/bin/poetry", "shell"],
+                &[],
+            ),
+            300,
+            101,
+        );
+        let program = classify(&[poetry], home()).expect("poetry shell");
+        assert_eq!(program.bar(None).title, "nested poetry shell");
+        // A sibling is a pipeline's other side: no bar.
+        let shells = [
+            shell_member("bash", &["bash"], (300, 101), USER),
+            other(301, 101),
+        ];
+        assert_eq!(classify(&shells, home()), None);
+    }
+
+    /// `login` 100 → `zsh` 101; the foreground group is `group`; `sudo`
+    /// (pid 200, its own group 200) runs as root.
+    fn sudo_table(group: u32) -> crate::jobs::tests::Table {
+        login_shell(group)
+            .run(200, 101, 200, &["sudo", "-i"])
+            .owned_by(200, 0)
+    }
+
+    #[test]
+    fn sudo_is_looked_through_to_the_command_it_runs() {
+        let found = |table| find(ShellParent::Login, 100, &table, home());
+        // At its prompt (raw with `pwfeedback`): nothing under it yet — no
+        // answer, asked again.
+        assert_eq!(found(sudo_table(200)), Found::Waiting);
+        // `use_pty` (measured): sudo → its monitor → the root shell, in a
+        // session of their own.
+        let pty = || {
+            sudo_table(200)
+                .run(201, 200, 201, &["sudo", "-i"])
+                .owned_by(201, 0)
+        };
+        let monitor_alone = pty();
+        assert_eq!(
+            found(monitor_alone),
+            Found::Waiting,
+            "the command not forked yet"
+        );
+        let root = pty()
+            .exec(202, 201, 202, ("bash", "/bin/bash"), &["-sh"], &[])
+            .owned_by(202, 0);
+        let root = found(root).program().expect("the root shell");
+        assert_eq!((root.family, root.pid), (Family::Root, 202));
+        // `sudo make` under `use_pty` relays a raw terminal for the whole
+        // build: make is the command, its recipes' root `sh -c` are make's —
+        // settled unmarked.
+        let make = pty()
+            .run(202, 201, 202, &["make", "install"])
+            .owned_by(202, 0)
+            .run(203, 202, 202, &["sh", "-c", "cp a b"])
+            .owned_by(203, 0);
+        assert_eq!(found(make), Found::Elevated);
+        // `sudo python3`: root's record does not read on macOS — unmarked.
+        let python = || pty().run(202, 201, 202, &["python3"]).owned_by(202, 0);
+        assert_eq!(found(python()), Found::Elevated);
+        // `sudo su -`: through su too.
+        let su = pty()
+            .run(202, 201, 202, &["su", "-"])
+            .owned_by(202, 0)
+            .exec(203, 202, 203, ("zsh", "/bin/zsh"), &["-zsh"], &[])
+            .owned_by(203, 0);
+        let root = found(su).program().expect("su's root shell");
+        assert_eq!((root.family, root.pid), (Family::Root, 203));
+        // Without `use_pty` the root shell takes the terminal in a group
+        // of its own (measured), sudo outside it.
+        let direct = sudo_table(201)
+            .exec(201, 200, 201, ("bash", "/bin/bash"), &["-bash"], &[])
+            .owned_by(201, 0);
+        let root = found(direct).program().expect("the root shell");
+        assert_eq!((root.family, root.pid), (Family::Root, 201));
+        // A user's own program named sudo elevates nothing.
+        let fake = login_shell(200)
+            .run(200, 101, 200, &["sudo"])
+            .run(201, 200, 200, &["bash"]);
+        let program = found(fake).program().expect("a nested bash");
+        assert_eq!(program.family, Family::Nested("bash"));
+    }
+
+    #[test]
+    fn where_root_argv_reads_a_script_is_no_root_shell() {
+        // Linux: another user's `cmdline` reads. A root script, or `sh -c`,
+        // that sudo keeps raw is no session; a root REPL is its bar.
+        let found = |table: crate::jobs::tests::Table| {
+            find(
+                ShellParent::Login,
+                100,
+                &table.reading_others_argv(),
+                home(),
+            )
+        };
+        let under = |argv: &[&'static str]| {
+            sudo_table(200)
+                .run(201, 200, 201, &["sudo", "x"])
+                .owned_by(201, 0)
+                .exec(202, 201, 202, ("bash", "/bin/bash"), argv, &[])
+                .owned_by(202, 0)
+        };
+        let root = found(under(&["-bash"])).program().expect("sudo -i");
+        assert_eq!(root.family, Family::Root);
+        assert_eq!(
+            found(under(&["/bin/bash", "./install.sh"])),
+            Found::Elevated
+        );
+        assert_eq!(
+            found(under(&["bash", "-c", "make install"])),
+            Found::Elevated
+        );
+        let python = sudo_table(200)
+            .run(201, 200, 201, &["sudo", "python3"])
+            .owned_by(201, 0)
+            .run(202, 201, 202, &["python3"])
+            .owned_by(202, 0);
+        let program = found(python).program().expect("a root REPL");
+        assert_eq!(program.family, Family::Python);
+        assert_eq!(program.exec, None, "its executable is not read");
+        // `su -c` straight in the group, too.
+        let su = login_shell(201)
+            .run(200, 101, 200, &["su", "-c", "x"])
+            .owned_by(200, 0)
+            .exec(201, 200, 201, ("sh", "/bin/sh"), &["sh", "-c", "x"], &[])
+            .owned_by(201, 0);
+        assert_eq!(found(su), Found::Unknown);
+    }
+
+    #[test]
+    fn a_forking_tool_names_the_nested_shell_it_opened() {
+        // `bash` from the prompt: its parent is the terminal's shell.
+        let bash = login_shell(200).run(200, 101, 200, &["bash"]);
+        let program = find(ShellParent::Login, 100, &bash, home()).program();
+        assert_eq!(
+            program.map(|program| program.family),
+            Some(Family::Nested("bash"))
+        );
+        // `devbox shell` forks the shell, which takes a group of its own:
+        // the tool is its parent, outside the group.
+        let devbox = login_shell(201)
+            .run(200, 101, 200, &["devbox", "shell"])
+            .run(201, 200, 201, &["/bin/zsh", "-l"]);
+        let program = find(ShellParent::Login, 100, &devbox, home()).program();
+        assert_eq!(
+            program.map(|program| program.bar(None).title),
+            Some("nested devbox shell".to_owned())
+        );
+        // Another program above the shell leaves its name.
+        let other = login_shell(201)
+            .run(200, 101, 200, &["devbox", "run", "x"])
+            .run(201, 200, 201, &["/bin/zsh", "-l"]);
+        let program = find(ShellParent::Login, 100, &other, home()).program();
+        assert_eq!(
+            program.map(|program| program.family),
+            Some(Family::Nested("zsh"))
+        );
     }
 
     #[test]
@@ -1885,7 +2432,9 @@ mod tests {
             &["docker", "run", "-it", "--rm", "redis:alpine", "sh"],
             &[],
         );
-        let program = find(ShellParent::Login, 100, &table, home()).expect("docker run");
+        let program = find(ShellParent::Login, 100, &table, home())
+            .program()
+            .expect("docker run");
         assert_eq!(program.family, Family::Container);
         assert_eq!(program.exec, None, "no version is asked of a tool");
         let bar = program.bar(None);
@@ -1924,7 +2473,9 @@ mod tests {
                 ],
                 &[],
             );
-        let program = find(ShellParent::Login, 100, &table, home()).expect("compose exec");
+        let program = find(ShellParent::Login, 100, &table, home())
+            .program()
+            .expect("compose exec");
         assert_eq!(program.pid, 200);
         assert_eq!(program.bar(None).path, "cache");
         // Another command of docker's is no session: no bar.
@@ -2060,7 +2611,12 @@ mod tests {
             .iter()
             .map(|row| row.family)
             .chain(Client::ALL.map(Family::Database))
-            .chain([Family::Container, Family::Kubernetes]);
+            .chain([
+                Family::Container,
+                Family::Kubernetes,
+                Family::Root,
+                Family::Nested("bash"),
+            ]);
         for family in families {
             for ch in family.label().chars().chain(family.hint().chars()) {
                 assert!(

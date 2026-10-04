@@ -115,7 +115,7 @@ pub struct Target {
     pub nonce: Option<String>,
 }
 
-/// The six things the decision asks of the process table.
+/// The seven things the decisions ask of the process table.
 ///
 /// Lists are `Vec`, not `Option`: macOS's listing calls do not distinguish "no
 /// such process" from "no children" (measured: zero for a nonexistent pid), so
@@ -132,8 +132,15 @@ pub trait ProcessTable {
     /// environment variables named in `keys`, **no other** ([`ProcArgs`]) —
     /// in one read. `None` if unreadable, and for a process of another user
     /// whenever variables are asked (on macOS always). Asked only of members
-    /// with candidate names ([`remote`], [`crate::program::find`]).
+    /// with candidate names ([`remote`], [`crate::program::find`]) and of
+    /// the processes above a nested shell that bear a tool's name.
     fn procargs(&self, pid: u32, keys: &[&str]) -> Option<ProcArgs>;
+    /// The process's **effective** user — what it may do, `sudo`'s `0`
+    /// while its real user is the one who ran it. Readable for every
+    /// process, root's included (its exec record is not): the root shell
+    /// a guide bar names is known by its name and this alone
+    /// ([`crate::program`]). `None` if the process is gone.
+    fn uid(&self, pid: u32) -> Option<u32>;
 }
 
 /// One process's exec record ([`ProcessTable::procargs`]).
@@ -757,6 +764,12 @@ impl ProcessTable for Libproc {
         }
     }
 
+    /// The short info's `pbsi_uid`: the effective user (measured: `sudo`
+    /// waiting at its prompt reads `0`, its `pbsi_ruid` the user's).
+    fn uid(&self, pid: u32) -> Option<u32> {
+        short_info(pid).map(|info| info.pbsi_uid)
+    }
+
     fn procargs(&self, pid: u32, keys: &[&str]) -> Option<ProcArgs> {
         let mut record = process_args(pid, keys)?;
         // The kernel keeps the path `execve` was given; a relative one
@@ -1005,6 +1018,24 @@ impl ProcessTable for Procfs {
         };
         Some(ProcArgs { exec, args, env })
     }
+
+    /// `/proc/<pid>/status`'s `Uid:` line — readable for every process.
+    fn uid(&self, pid: u32) -> Option<u32> {
+        parse_status_uid(&std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?)
+    }
+}
+
+/// The effective user in a `/proc/<pid>/status` text: the `Uid:` line's
+/// second field (real, **effective**, saved, file system).
+#[cfg(any(target_os = "linux", test))]
+fn parse_status_uid(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// The three fields of `/proc/<pid>/stat` the table asks for.
@@ -1243,7 +1274,13 @@ pub(crate) mod tests {
         /// The executable; argv[0] when `None`.
         exec: Option<&'static str>,
         env: Vec<(&'static str, &'static str)>,
+        /// The effective user: [`USER`] unless [`Table::owned_by`] says.
+        uid: u32,
     }
+
+    /// The fake table's user: every process is theirs unless
+    /// [`Table::owned_by`] gives it to another.
+    pub(crate) const USER: u32 = 501;
 
     /// Fake table. `terminal` is the shell's `e_tpgid`; `None` → the shell's long
     /// info is unreadable.
@@ -1251,6 +1288,9 @@ pub(crate) mod tests {
         procs: HashMap<u32, Proc>,
         terminal: Option<u32>,
         members_readable: bool,
+        /// Another user's argv reads when no variable is asked — Linux's
+        /// `cmdline`; macOS reads nothing of it ([`Self::reading_others_argv`]).
+        others_argv: bool,
     }
 
     impl Table {
@@ -1259,6 +1299,7 @@ pub(crate) mod tests {
                 procs: HashMap::new(),
                 terminal,
                 members_readable: true,
+                others_argv: false,
             }
         }
 
@@ -1278,6 +1319,7 @@ pub(crate) mod tests {
                     args: None,
                     exec: None,
                     env: Vec::new(),
+                    uid: USER,
                 },
             );
             self
@@ -1302,6 +1344,7 @@ pub(crate) mod tests {
                     args: Some(argv.to_vec()),
                     exec: None,
                     env: Vec::new(),
+                    uid: USER,
                 },
             );
             self
@@ -1327,8 +1370,25 @@ pub(crate) mod tests {
                     args: Some(argv.to_vec()),
                     exec: Some(exec),
                     env: env.to_vec(),
+                    uid: USER,
                 },
             );
+            self
+        }
+
+        /// `pid` runs as `uid`; a process of another user has no readable
+        /// exec record (macOS's `KERN_PROCARGS2`; Linux's with variables).
+        pub(crate) fn owned_by(mut self, pid: u32, uid: u32) -> Self {
+            if let Some(proc) = self.procs.get_mut(&pid) {
+                proc.uid = uid;
+            }
+            self
+        }
+
+        /// Linux's table: another user's argv reads when no variable is
+        /// asked, its executable and environment do not.
+        pub(crate) fn reading_others_argv(mut self) -> Self {
+            self.others_argv = true;
             self
         }
     }
@@ -1378,6 +1438,13 @@ pub(crate) mod tests {
         fn procargs(&self, pid: u32, keys: &[&str]) -> Option<ProcArgs> {
             let proc = self.procs.get(&pid)?;
             let args = proc.args.as_ref()?;
+            if proc.uid != USER {
+                return (self.others_argv && keys.is_empty()).then(|| ProcArgs {
+                    exec: String::new(),
+                    args: args.iter().map(|&arg| arg.to_owned()).collect(),
+                    env: Vec::new(),
+                });
+            }
             Some(ProcArgs {
                 exec: proc.exec.unwrap_or(args[0]).to_owned(),
                 args: args.iter().map(|&arg| arg.to_owned()).collect(),
@@ -1388,6 +1455,10 @@ pub(crate) mod tests {
                     .map(|&(name, value)| (name.to_owned(), value.to_owned()))
                     .collect(),
             })
+        }
+
+        fn uid(&self, pid: u32) -> Option<u32> {
+            self.procs.get(&pid).map(|proc| proc.uid)
         }
     }
 
@@ -2094,6 +2165,29 @@ pub(crate) mod tests {
         let exec = std::path::Path::new(&record.exec);
         assert!(exec.is_absolute(), "{}", record.exec);
         assert_eq!(exec.file_name(), exe.file_name());
+    }
+
+    #[test]
+    fn the_uid_is_the_effective_user_of_any_process() {
+        // Our own process: the effective user.
+        // SAFETY: no arguments, no failure.
+        let euid = unsafe { libc::geteuid() };
+        assert_eq!(SystemTable.uid(std::process::id()), Some(euid));
+        // Root's processes read too — the root shell a guide bar names has
+        // no readable exec record, its user is all there is. pid 1 is
+        // launchd on macOS; in the Linux gate's container it is root's too.
+        #[cfg(target_os = "macos")]
+        assert_eq!(SystemTable.uid(1), Some(0));
+    }
+
+    #[test]
+    fn the_status_uid_is_the_second_field() {
+        // `sudo` at its prompt: real 1000, effective 0.
+        let status =
+            "Name:\tsudo\nUmask:\t0022\nUid:\t1000\t0\t0\t0\nGid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(parse_status_uid(status), Some(0));
+        assert_eq!(parse_status_uid("Name:\tx\n"), None);
+        assert_eq!(parse_status_uid("Uid:\t1000\n"), None);
     }
 
     #[test]

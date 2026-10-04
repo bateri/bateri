@@ -2072,10 +2072,11 @@ fn render_remote_context(
 
 /// A guide bar's tone as a color: the title and the top hairline — its
 /// host's mark ([`DockContext::program_mark`]), `info` when unmarked, the
-/// remote status bar's mapping.
+/// remote status bar's mapping; a root shell's `error` whatever the mark.
 fn program_color(tone: ProgramTone, mark: HostMark, theme: &Theme) -> LinearRgba {
     match tone {
         ProgramTone::Info => theme.mark_linear(mark),
+        ProgramTone::Error => theme.error_linear(),
     }
 }
 
@@ -5222,6 +5223,33 @@ mod tests {
             assert_eq!(color_at(&cells, 0, 0), Some(color), "{mark:?}");
             assert_eq!(dock.edge, color, "{mark:?}");
         }
+    }
+
+    #[test]
+    fn a_root_bar_is_the_error_color_whatever_the_mark() {
+        // `root  exit to leave`: the title and the top hairline in `error`,
+        // the hint dim; a mark (none comes with a root bar, but the tone is
+        // not the mark's) does not change it.
+        let mut context = program("root", "", "", "exit to leave");
+        if let Some(bar) = context.program.as_mut() {
+            bar.tone = ProgramTone::Error;
+        }
+        for mark in [HostMark::None, HostMark::Development] {
+            context.program_mark = mark;
+            let (row, cells, dock) = program_row(&context, 30);
+            assert_eq!(row, format!("{:<17}exit to leave", "root"), "{mark:?}");
+            assert_eq!(
+                color_at(&cells, 0, 0),
+                Some(THEME.error_linear()),
+                "{mark:?}"
+            );
+            assert_eq!(color_at(&cells, 0, 17), Some(THEME.dim_linear()), "hint");
+            assert_eq!(dock.edge, THEME.error_linear(), "{mark:?}");
+        }
+        // A nested shell's bar keeps `info`.
+        let (_, cells, dock) = program_row(&program("nested bash", "", "", "exit to return"), 30);
+        assert_eq!(color_at(&cells, 0, 0), Some(THEME.info_linear()));
+        assert_eq!(dock.edge, THEME.info_linear());
     }
 
     #[test]
