@@ -1,4 +1,5 @@
-//! Main menu: the app menu (About, Check for Updates…, Settings…, Hide, Quit), Shell (New
+//! Main menu: the app menu (About, Check for Updates…, Settings…, Hide, Quit
+//! and — ⌥ held, under `keep_running = "quit"` only — Quit and End Programs), Shell (New
 //! Window, New Tab, New Local Tab, Mark Host as ▸, Shell Integration on Host,
 //! Forget Password, Cancel Upload, Split
 //! Right, Split Down, Close Tab/Close, Close Window), Edit (Cut, Copy, Paste, Paste
@@ -30,7 +31,7 @@
 //! `openSettings:`, the theme actions, `markHost:`, `toggleHostIntegration:`
 //! (its title, checkmark and grey state in the app delegate's
 //! `validateMenuItem:`, from [`integration_menu`]) and
-//! `newWindow:`/`newTab:`/`newLocalTab:` to the app delegate
+//! `newWindow:`/`newTab:`/`newLocalTab:`/`quitAndEndPrograms:` to the app delegate
 //! (the same path as the settings record's `settingsDidChange:` — they spread to all
 //! windows or must work even when there is no window);
 //! `terminate:`, `hide:`, `arrangeInFront:` and
@@ -85,7 +86,7 @@
 //! "Edit" and the full-screen item to the one named "View"; to the Window menu
 //! registered with `setWindowsMenu` it adds the window list and placement items.
 
-use bt_core::{HostMark, SYSTEM_THEME, bare_host};
+use bt_core::{HostMark, KeepRunning, SYSTEM_THEME, bare_host};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -102,6 +103,46 @@ const MARK_HOLDER_TAG: isize = 37;
 /// The `tag` of Shell ▸ Forget Password for “{host}”:
 /// [`ShellMenuDelegate`] writes the host into its title.
 const FORGET_TAG: isize = 47;
+
+/// The `tag` of bateri ▸ Quit and End Programs: [`set_end_programs_visible`]
+/// finds it in the app menu with this.
+const END_PROGRAMS_TAG: isize = 56;
+
+/// Whether bateri ▸ Quit and End Programs (⌥⌘Q) is there: only while ⌘Q
+/// keeps the programs (`keep_running = "quit"`) — under the other values ⌘Q
+/// already ends them, and a second item would promise a difference that is
+/// not there.
+pub(crate) fn shows_end_programs(keep: KeepRunning) -> bool {
+    keep == KeepRunning::Quit
+}
+
+/// Shows or hides Quit and End Programs for `keep` ([`shows_end_programs`]):
+/// at launch and on every settings save. Hidden, its shortcut is dead too
+/// (AppKit ignores a hidden item's key equivalent), so ⌥⌘Q does nothing
+/// outside `"quit"`. Set by hand: a hidden item is not validated.
+pub(crate) fn set_end_programs_visible(mtm: MainThreadMarker, keep: KeepRunning) {
+    let app_menu = NSApplication::sharedApplication(mtm)
+        .mainMenu()
+        .and_then(|bar| bar.itemAtIndex(0))
+        .and_then(|holder| holder.submenu());
+    if let Some(item) = app_menu.and_then(|menu| menu.itemWithTag(END_PROGRAMS_TAG)) {
+        item.setHidden(!shows_end_programs(keep));
+    }
+}
+
+/// Quit bateri's alternate (⌥ held, ⌥⌘Q): `quitAndEndPrograms:` on the app
+/// delegate — today's quit with its question, the programs end. Hidden until
+/// [`set_end_programs_visible`] says otherwise.
+fn end_programs_item(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+    let item = with_modifiers(
+        item(mtm, "Quit and End Programs", sel!(quitAndEndPrograms:), "q"),
+        NSEventModifierFlags::Command | NSEventModifierFlags::Option,
+    );
+    item.setAlternate(true);
+    item.setTag(END_PROGRAMS_TAG);
+    item.setHidden(true);
+    item
+}
 
 /// Forget Password's title on a remote tab (`Some` host, without `user@`) or
 /// locally — a UI string. Its enablement is the pane's `validateMenuItem:`
@@ -294,6 +335,7 @@ pub(crate) fn install(
         item(mtm, "Show All", sel!(unhideAllApplications:), ""),
         NSMenuItem::separatorItem(mtm),
         item(mtm, "Quit bateri", sel!(terminate:), "q"),
+        end_programs_item(mtm),
     ]);
     let app_menu = submenu(mtm, "bateri", &app_items);
     // Edit ▸ Find: macOS's submenu and shortcuts.
@@ -645,6 +687,13 @@ fn submenu(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quit_and_end_programs_shows_only_while_quit_keeps_the_programs() {
+        assert!(shows_end_programs(KeepRunning::Quit));
+        assert!(!shows_end_programs(KeepRunning::Crash));
+        assert!(!shows_end_programs(KeepRunning::Update));
+    }
 
     #[test]
     fn forget_password_names_the_host_without_its_user() {

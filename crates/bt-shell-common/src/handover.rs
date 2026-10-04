@@ -3715,6 +3715,10 @@ mod tests {
             let mut answer = [0u8];
             stream.read_exact(&mut answer).unwrap();
             let (mut second, _) = listener.accept().unwrap();
+            // Its `TAKE` is read first: closing with it unread resets the
+            // connection on Linux, and the client would see that reset
+            // instead of the bytes.
+            second.read_exact(&mut take).unwrap();
             second.write_all(b"SSH-2.0").unwrap();
             answer[0]
         });

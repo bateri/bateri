@@ -419,6 +419,70 @@ fn listed(names: &[String]) -> String {
     }
 }
 
+/// The reminder a quit leaves when it keeps the programs running
+/// (`keep_running = "quit"`): a system notification after bateri is gone,
+/// so a program left behind is not forgotten. Pure.
+///
+/// `None` when no pane runs a program — an idle shell costs nothing and
+/// comes back at the next launch anyway — and while the Mac logs out or
+/// restarts (`powering_off`): the programs end with it. The names are
+/// deduplicated across the panes, at most three of them, then "and N more";
+/// a program whose name could not be read is counted, not named.
+pub(crate) fn kept_notice(tabs: &[Foreground], powering_off: bool) -> Option<Notice> {
+    /// How many names the notification spells out; the rest are counted.
+    const SHOWN: usize = 3;
+    if powering_off {
+        return None;
+    }
+    let mut names: Vec<String> = Vec::new();
+    let mut nameless = 0;
+    for tab in tabs {
+        match tab {
+            Foreground::Running(running) if running.is_empty() => nameless += 1,
+            Foreground::Running(running) => {
+                for name in running {
+                    if !names.contains(name) {
+                        names.push(name.clone());
+                    }
+                }
+            }
+            Foreground::Idle => {}
+        }
+    }
+    let count = names.len() + nameless;
+    let more = names.len().saturating_sub(SHOWN) + nameless;
+    names.truncate(SHOWN);
+    let subject = match (names.is_empty(), more) {
+        (true, 0) => return None,
+        (true, 1) => "A program".to_owned(),
+        (true, _) => "Programs".to_owned(),
+        (false, 0) => listed(&names),
+        (false, _) => {
+            let names: Vec<String> = names.iter().map(|name| quoted(name)).collect();
+            format!("{} and {more} more", names.join(", "))
+        }
+    };
+    let (verb, pronoun) = if count == 1 {
+        ("keeps", "it")
+    } else {
+        ("keep", "them")
+    };
+    Some(Notice {
+        title: "Programs keep running",
+        body: format!(
+            "{subject} {verb} running in the background. Open bateri to return to \
+             {pronoun}; \u{2325}\u{2318}Q ends {pronoun}."
+        ),
+    })
+}
+
+/// A notification's text ([`kept_notice`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Notice {
+    pub(crate) title: &'static str,
+    pub(crate) body: String,
+}
+
 /// `NSAlert` from a [`Prompt`]: confirm is the first button (Return),
 /// "Cancel" the second (Esc).
 ///
@@ -2082,7 +2146,8 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        CloseScope, Unit, close_scope, is_dark_background, prompt, should_ask, tab_index, unit_for,
+        CloseScope, Unit, close_scope, is_dark_background, kept_notice, prompt, should_ask,
+        tab_index, unit_for,
     };
     use crate::jobs::Foreground;
     use bt_core::{ConfirmClose, Theme};
@@ -2095,6 +2160,67 @@ mod tests {
 
     fn running(names: &[&str]) -> Foreground {
         Foreground::Running(names.iter().map(|&name| name.to_owned()).collect())
+    }
+
+    /// The quit's reminder names what keeps running: one program by name,
+    /// several deduplicated across the panes, three at most and then a count;
+    /// a nameless one is counted.
+    #[test]
+    fn the_kept_notice_names_the_running_programs() {
+        let body = |tabs: &[Foreground]| kept_notice(tabs, false).map(|notice| notice.body);
+        let tail = |pronoun: &str| {
+            format!(
+                "running in the background. Open bateri to return to {pronoun}; \u{2325}\u{2318}Q ends {pronoun}."
+            )
+        };
+        assert_eq!(
+            body(&[running(&["vim"]), Foreground::Idle]),
+            Some(format!("\u{201c}vim\u{201d} keeps {}", tail("it")))
+        );
+        assert_eq!(
+            body(&[running(&["vim"]), running(&["npm", "vim"])]),
+            Some(format!(
+                "\u{201c}vim\u{201d} and \u{201c}npm\u{201d} keep {}",
+                tail("them")
+            ))
+        );
+        assert_eq!(
+            body(&[running(&["vim", "npm", "ssh", "htop", "less"])]),
+            Some(format!(
+                "\u{201c}vim\u{201d}, \u{201c}npm\u{201d}, \u{201c}ssh\u{201d} and 2 more keep {}",
+                tail("them")
+            ))
+        );
+        assert_eq!(
+            body(&[running(&["vim"]), running(&[])]),
+            Some(format!(
+                "\u{201c}vim\u{201d} and 1 more keep {}",
+                tail("them")
+            ))
+        );
+        assert_eq!(
+            body(&[running(&[])]),
+            Some(format!("A program keeps {}", tail("it")))
+        );
+        assert_eq!(
+            body(&[running(&[]), running(&[])]),
+            Some(format!("Programs keep {}", tail("them")))
+        );
+        let notice = kept_notice(&[running(&["vim"])], false).expect("a program runs");
+        assert_eq!(notice.title, "Programs keep running");
+    }
+
+    /// No program, no reminder: idle shells come back anyway; and none while
+    /// the Mac logs out or restarts — the programs end with it.
+    #[test]
+    fn no_kept_notice_for_idle_shells_or_a_logout() {
+        assert_eq!(kept_notice(&[], false), None);
+        assert_eq!(
+            kept_notice(&[Foreground::Idle, Foreground::Idle], false),
+            None
+        );
+        assert_eq!(kept_notice(&[running(&["vim"])], true), None);
+        assert_eq!(kept_notice(&[running(&[])], true), None);
     }
 
     fn with_background(background: u32) -> Theme {

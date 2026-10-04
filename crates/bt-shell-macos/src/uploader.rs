@@ -24,10 +24,10 @@
 use std::cell::RefCell;
 use std::path::Path;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{HostMark, Transfer, TransferAction};
@@ -48,7 +48,7 @@ use objc2_foundation::{
 };
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-    UNUserNotificationCenter,
+    UNNotificationTrigger, UNTimeIntervalNotificationTrigger, UNUserNotificationCenter,
 };
 
 use crate::child;
@@ -1481,24 +1481,93 @@ pub(crate) fn deliver_notification(title: &str, body: &str) {
     // The block runs on a background queue: only owned strings are carried,
     // the center is fetched again and AppKit is not touched.
     let deliver = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
-        if !granted.as_bool() {
-            return;
+        if granted.as_bool() {
+            add_notification(&title, &body, None, None);
         }
-        let content = UNMutableNotificationContent::new();
-        content.setTitle(&NSString::from_str(&title));
-        content.setBody(&NSString::from_str(&body));
-        // Unique identifier: the same identifier would replace the previous one,
-        // and results must stack up.
-        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &NSUUID::new().UUIDString(),
-            &content,
-            None,
-        );
-        UNUserNotificationCenter::currentNotificationCenter()
-            .addNotificationRequest_withCompletionHandler(&request, None);
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert, &deliver);
+}
+
+/// Asks for the permission to notify, and nothing else: the system asks the
+/// user once and answers from its record afterwards. For a notification
+/// whose moment cannot ask ([`schedule_notification`]): the question comes
+/// when the user chose the setting that needs it, while bateri is in front.
+/// Never in an unbundled process.
+pub(crate) fn request_notification_permission() {
+    if NSBundle::mainBundle().bundleIdentifier().is_none() {
+        return;
+    }
+    let ignore = RcBlock::new(|_granted: Bool, _error: *mut NSError| {});
+    UNUserNotificationCenter::currentNotificationCenter()
+        .requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert, &ignore);
+}
+
+/// A notification shown `after` from now — after bateri has quit: a
+/// notification delivered while the app is in front is silenced (no
+/// delegate, [`notify`]), and one that waits on a timer is delivered by the
+/// system once the process is gone.
+///
+/// **No permission call**: this runs while quitting, where a question must not
+/// appear; the request is only added, and without permission the system
+/// drops it in the completion (its error, said on stderr). No answer is cached
+/// in the process either — a permission given later in System Settings works.
+///
+/// The receiver gets one message once the system took the request or refused
+/// it; the caller waits on it, bounded, so the request leaves the process
+/// before it exits. `None` in an unbundled process.
+pub(crate) fn schedule_notification(
+    title: &str,
+    body: &str,
+    after: Duration,
+) -> Option<mpsc::Receiver<()>> {
+    // An unbundled process has no center (it throws).
+    NSBundle::mainBundle().bundleIdentifier()?;
+    let trigger = UNTimeIntervalNotificationTrigger::triggerWithTimeInterval_repeats(
+        after.as_secs_f64(),
+        false,
+    );
+    let (done, taken) = mpsc::channel();
+    add_notification(title, body, Some(&trigger), Some(done));
+    Some(taken)
+}
+
+/// The one way a notification is added: its content, a unique identifier (the
+/// same identifier would replace the previous one, and results must stack
+/// up), the trigger (`None` — at once) and, if asked, the completion's
+/// message. Any thread: the center is thread-safe and AppKit is not touched.
+fn add_notification(
+    title: &str,
+    body: &str,
+    trigger: Option<&UNNotificationTrigger>,
+    done: Option<mpsc::Sender<()>>,
+) {
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(title));
+    content.setBody(&NSString::from_str(body));
+    let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+        &NSUUID::new().UUIDString(),
+        &content,
+        trigger,
+    );
+    let center = UNUserNotificationCenter::currentNotificationCenter();
+    let Some(done) = done else {
+        center.addNotificationRequest_withCompletionHandler(&request, None);
+        return;
+    };
+    // The block runs on a background queue; it carries only the sender.
+    let finished = RcBlock::new(move |error: *mut NSError| {
+        // SAFETY: the completion's argument is null or an `NSError` that lives
+        // for the call (UserNotifications' contract); it is only read here.
+        if let Some(error) = unsafe { error.as_ref() } {
+            eprintln!(
+                "bateri: the notification was not added: {}",
+                error.localizedDescription()
+            );
+        }
+        let _ = done.send(());
+    });
+    center.addNotificationRequest_withCompletionHandler(&request, Some(&finished));
 }
 
 /// A file URL for a local path.

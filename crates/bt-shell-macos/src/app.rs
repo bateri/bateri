@@ -31,6 +31,7 @@ use objc2_app_kit::{
     NSControlStateValueOn, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate, NSMenuItem,
     NSScreen, NSWindow, NSWindowNumberListOptions, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
     NSArray, NSBundle, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSNumber,
@@ -40,7 +41,7 @@ use objc2_foundation::{
 };
 
 use crate::handover::{self, Arrival, HeldPane, PaneState};
-use crate::keeper::{self, Keeper, QuitPath};
+use crate::keeper::{self, Keeper, QuitKind, QuitPath};
 use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
 use crate::pane::{PaneLaunch, TerminalPane};
@@ -453,6 +454,20 @@ fn copy_bundle(bundle: &handover::Bundle) -> Option<handover::Bundle> {
 /// a crash later than this is another fault than the restore and must not
 /// push the next launch toward giving the programs up. A design constant.
 const SETTLE_DELAY: Duration = Duration::from_secs(5);
+
+/// How long the system waits before it shows ⌘Q's reminder that programs
+/// keep running ([`AppDelegate::leave_quit_notice`]). A notification arriving
+/// while bateri is still in front is silenced, so it must arrive after the
+/// process is gone: what is left of the quit once the reminder is added is at
+/// most [`NOTICE_WAIT`] and the process's exit, and two seconds clear that
+/// while still reading as the quit's own answer. A design constant.
+const NOTICE_DELAY: Duration = Duration::from_secs(2);
+
+/// How long the quit waits for the system to take the reminder: the request
+/// must leave the process before it exits, and the system answers within a
+/// scheduling round; a system that does not answer within a second does not
+/// get to hold the quit. A design constant.
+const NOTICE_WAIT: Duration = Duration::from_secs(1);
 
 /// The layout source of the bound holder ([`keeper::LayoutSource`]): the
 /// application's live windows.
@@ -1219,6 +1234,17 @@ pub(crate) struct Ivars {
     /// This quit hands the panes to the bound holder
     /// ([`AppDelegate::terminate_reply`] → [`AppDelegate::shutdown`]).
     hand_to_bound: Cell<bool>,
+    /// bateri ▸ Quit and End Programs asked for the next quit — consumed by
+    /// it ([`AppDelegate::terminate_reply`]), whatever it turns into.
+    end_programs: Cell<bool>,
+    /// The Mac is logging out, restarting or shutting down
+    /// (`NSWorkspaceWillPowerOffNotification`): the programs end with it, so
+    /// a quit leaves no reminder that they keep running. Never cleared — a
+    /// logout cancelled after bateri saw it costs that reminder only.
+    powering_off: Cell<bool>,
+    /// The reminder this quit leaves once the programs are held
+    /// ([`AppDelegate::leave_quit_notice`]); read before the freeze.
+    quit_notice: RefCell<Option<window::Notice>>,
     /// The handover test item asked for this quit: bateri starts
     /// itself again once this process is gone.
     relaunch_after: Cell<bool>,
@@ -1283,6 +1309,8 @@ define_class!(
             // first for the diagnostics to reach the subtitle: the new window takes
             // its subtitle over from the slots (`open_window`).
             self.load_settings();
+            // Quit and End Programs is there only under `keep_running = "quit"`.
+            crate::menu::set_end_programs_visible(mtm, self.settings().keep_running);
             // The preview cache's launch sweep and the daily one:
             // on their own thread and the main queue's timer, never the frame
             // path; a timed run never touches the user's cache.
@@ -1300,6 +1328,13 @@ define_class!(
                 self.start_keeper();
             }
             NSApplication::sharedApplication(mtm).activate();
+            // `"quit"`'s reminder needs the permission to notify: asked now,
+            // while bateri is in front, never at the quit itself.
+            if self.ivars().run.is_none()
+                && keeper::asks_notification_permission(None, self.settings().keep_running)
+            {
+                crate::uploader::request_notification_permission();
+            }
             // The renderer is born with the window and its error
             // lands here. `didFinishLaunching` cannot return an error; a terminal
             // window without Metal or without a shell is an empty box, and formerly
@@ -1323,6 +1358,8 @@ define_class!(
             // The light/dark appearance is also app-wide and once; the first
             // window's theme was already chosen from the appearance (`open_window` → `resolve_theme`).
             self.observe_appearance();
+            // A quit while the Mac logs out leaves no reminder.
+            self.observe_power_off();
 
             if let Some(run) = self.ivars().run {
                 // The timer is not a block but `performSelector`: the selector is
@@ -1549,6 +1586,23 @@ define_class!(
             // (`settings_window::motion_override`): if open it must refresh too,
             // otherwise Reduce Motion turned on from the system would not look like it overrides the rows.
             self.refresh_settings_window();
+        }
+
+        /// bateri ▸ Quit and End Programs (⌥⌘Q, only under `keep_running =
+        /// "quit"`): today's quit — its question, the programs end, the
+        /// bound holder leaves quietly, no reminder.
+        #[unsafe(method(quitAndEndPrograms:))]
+        fn quit_and_end_programs(&self, _sender: Option<&AnyObject>) {
+            self.ivars().end_programs.set(true);
+            NSApplication::sharedApplication(self.mtm()).terminate(None);
+        }
+
+        /// The Mac is logging out, restarting or shutting down; the sender is
+        /// `NSWorkspace`'s own notification center
+        /// ([`AppDelegate::observe_power_off`]).
+        #[unsafe(method(workspaceWillPowerOff:))]
+        fn workspace_will_power_off(&self, _note: Option<&AnyObject>) {
+            self.ivars().powering_off.set(true);
         }
 
         /// The handover's test item (the defaults key
@@ -2318,6 +2372,9 @@ impl AppDelegate {
             holder: RefCell::new(None),
             keeper,
             hand_to_bound: Cell::new(false),
+            end_programs: Cell::new(false),
+            powering_off: Cell::new(false),
+            quit_notice: RefCell::new(None),
             relaunch_after: Cell::new(false),
             postponed_update: RefCell::new(None),
             skip_restore,
@@ -2593,7 +2650,9 @@ impl AppDelegate {
         }
         // Consumed by this quit whatever it turns into.
         let relaunch = crate::updater::take_relaunch();
+        let kind = QuitKind::of(relaunch, self.ivars().end_programs.take());
         self.ivars().hand_to_bound.set(false);
+        self.ivars().quit_notice.replace(None);
         let windows = self.windows();
         if windows.is_empty() {
             return NSApplicationTerminateReply::TerminateNow;
@@ -2603,16 +2662,25 @@ impl AppDelegate {
         // counts only if it answers now; under `"quit"` one that does not is
         // replaced first, so no program ends unasked on an assumption.
         let keep = self.settings().keep_running;
-        // Asked only where the answer can matter (a relaunch, or `"quit"`):
-        // a ping is a wait on the main thread.
-        let mut bound = (relaunch || keep == KeepRunning::Quit)
+        let mut bound = keeper::pings_for_quit(keep, kind)
             && self.ivars().keeper.as_deref().is_some_and(Keeper::verified);
-        if keeper::spawns_for_quit(keep, relaunch, bound) {
+        if keeper::spawns_for_quit(keep, kind, bound) {
             bound = self.replace_keeper();
         }
-        match keeper::quit_path(keep, relaunch, bound) {
+        match keeper::quit_path(keep, kind, bound) {
             QuitPath::ToBound => {
                 self.ivars().hand_to_bound.set(true);
+                // ⌘Q's reminder names the programs it keeps: read now, before
+                // the freeze stops the panes ([`AppDelegate::leave_quit_notice`]).
+                if kind == QuitKind::Quit {
+                    let foregrounds: Vec<_> = self
+                        .all_panes()
+                        .iter()
+                        .map(|pane| pane.foreground())
+                        .collect();
+                    let notice = window::kept_notice(&foregrounds, self.ivars().powering_off.get());
+                    self.ivars().quit_notice.replace(notice);
+                }
                 return NSApplicationTerminateReply::TerminateNow;
             }
             // Nothing dies, so nothing is asked — unless the holder cannot be
@@ -3963,9 +4031,15 @@ impl AppDelegate {
             }
             // `keep_running` is read when quitting; its live part is the
             // bound holder's birth or departure, from the old and new value.
-            let switch = keeper::switch(self.settings().keep_running, new.keep_running);
+            let before = self.settings().keep_running;
+            let switch = keeper::switch(before, new.keep_running);
+            let ask = keeper::asks_notification_permission(Some(before), new.keep_running);
+            crate::menu::set_end_programs_visible(self.mtm(), new.keep_running);
             self.ivars().settings.replace(new);
             self.switch_keeper(switch);
+            if ask {
+                crate::uploader::request_notification_permission();
+            }
             // **After** the settings are written: `apply_reduce_motion` is the shared path of
             // three callers and reads the value from the slot, not from the `new` in hand.
             // The style's path stayed separate because it takes the link directly;
@@ -4240,6 +4314,49 @@ impl AppDelegate {
         }
     }
 
+    /// Starts watching for the Mac logging out, restarting or shutting down —
+    /// only in a user session ([`Inputs`]) — so a quit at that moment leaves
+    /// no reminder that the programs keep running ([`window::kept_notice`]).
+    /// `NSWorkspace`'s own centre, not removed: the precedent of
+    /// [`AppDelegate::observe_reduce_motion`].
+    fn observe_power_off(&self) {
+        let Inputs::User { .. } = self.inputs() else {
+            return;
+        };
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: `workspaceWillPowerOff:` is defined on this class and takes a
+        // single `Option<&AnyObject>` argument; `self` lives for the process's
+        // lifetime, so the centre's non-owning reference does not dangle. The
+        // constant `NSString` is a name AppKit exposes.
+        unsafe {
+            center.addObserver_selector_name_object(
+                self,
+                sel!(workspaceWillPowerOff:),
+                Some(NSWorkspaceWillPowerOffNotification),
+                None,
+            );
+        }
+    }
+
+    /// ⌘Q under `keep_running = "quit"` kept the programs: the reminder that
+    /// they keep running goes to the system with a delay ([`NOTICE_DELAY`] —
+    /// it must arrive after bateri is gone) and the quit waits, bounded
+    /// ([`NOTICE_WAIT`]), for the system to take it. No permission is asked
+    /// here; without one the system drops the request.
+    fn leave_quit_notice(&self) {
+        let Some(notice) = self.ivars().quit_notice.take() else {
+            return;
+        };
+        if self.ivars().powering_off.get() {
+            return;
+        }
+        if let Some(taken) =
+            crate::uploader::schedule_notification(notice.title, &notice.body, NOTICE_DELAY)
+        {
+            let _ = taken.recv_timeout(NOTICE_WAIT);
+        }
+    }
+
     /// Starts watching the system's Reduce Motion setting — **only in a user
     /// session** ([`Inputs`]).
     ///
@@ -4437,6 +4554,9 @@ impl AppDelegate {
         if let Some(target) = target
             && self.hand_over(target)
         {
+            // Only now: had the handover failed, the programs end below and
+            // "they keep running" would be false.
+            self.leave_quit_notice();
             return None;
         }
         // The quit ends the programs: the bound holder (if any) lets every

@@ -424,7 +424,8 @@ pub enum KeepRunning {
     /// takes them back.
     #[default]
     Crash,
-    /// ⌘Q leaves them running as well, without asking.
+    /// ⌘Q leaves them running as well, without asking; bateri ▸ Quit and
+    /// End Programs (⌥⌘Q) is the quit that ends them.
     Quit,
 }
 
@@ -1524,18 +1525,21 @@ cursor_blink_interval = 0.5
 # prompt, never closes without asking. Typing exit never asks, and neither do
 # programs left running in the background.
 confirm_close = "running"
-# "all" | "layout" | "off". What comes back when bateri opens again after
-# quitting, an update or a restart: all brings back the windows, tabs and
-# splits with each pane's scrollback, layout brings back the windows without
-# the scrollback (nothing you saw is written to disk), off starts with a
-# single window and deletes what was saved. A pane whose program is kept
-# running (keep_running) comes back with it; the others start a new shell.
+# "all" | "layout" | "off". What comes back when bateri opens again: all
+# brings back the windows, tabs and splits, with each pane's scrollback after
+# a quit or a restart; layout brings back the windows without the scrollback
+# (nothing you saw is written to disk); off writes nothing and deletes what
+# was saved. A pane whose program was kept running (keep_running) comes back
+# with it under every value; the others start a new shell, or with off do not
+# come back.
 restore_windows = "all"
 # "update" | "crash" | "quit". When the programs running in bateri (vim, a
 # build, a session over ssh) outlive it: update keeps them only across an
 # update, crash also when bateri crashes or is forced to quit, quit also when
-# you quit it, and then quitting asks nothing. The next bateri takes them
-# back. Restarting the Mac or logging out ends them.
+# you quit it — then quitting asks nothing, and Quit and End Programs (⌥⌘Q)
+# ends them. The next bateri takes them back; after a crash a full-screen
+# program redraws its screen and a plain shell's screen is gone. Restarting
+# the Mac or logging out ends them.
 keep_running = "crash"
 
 [appearance]

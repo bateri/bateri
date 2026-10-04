@@ -28,10 +28,10 @@ use std::path::Path;
 use block2::RcBlock;
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
-    CursorBlink, CursorMotion, DownloadConflict, Erase, Keypress, LETTER_SPACING_RANGE,
-    LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion, RemoteStatsMode, RestoreWindows,
-    SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration,
-    SmoothScroll, UnfocusedCaret,
+    CursorBlink, CursorMotion, DownloadConflict, Erase, KeepRunning, Keypress,
+    LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion, RemoteStatsMode,
+    RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME, Settings, SettingsEdit,
+    ShellIntegration, SmoothScroll, UnfocusedCaret,
 };
 use bt_gpu::FontNotice;
 use objc2::rc::Retained;
@@ -193,11 +193,12 @@ enum Key {
     StatsInterval,
     RemoteIntegration,
     RestoreWindows,
+    KeepRunning,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 34] = [
+    const ALL: [Key; 35] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -232,6 +233,7 @@ impl Key {
         Key::StatsInterval,
         Key::RemoteIntegration,
         Key::RestoreWindows,
+        Key::KeepRunning,
     ];
 
     fn tag(self) -> NSInteger {
@@ -249,6 +251,7 @@ impl Key {
         match self {
             Key::ConfirmClose => "terminal.confirm_close",
             Key::RestoreWindows => "terminal.restore_windows",
+            Key::KeepRunning => "terminal.keep_running",
             Key::Clipboard => "clipboard.osc52",
             Key::Scrollback => "terminal.scrollback",
             Key::ShellIntegration => "shell.integration",
@@ -381,6 +384,43 @@ impl Choice for RestoreWindows {
             RestoreWindows::Layout => "Windows only",
             RestoreWindows::Off => "Nothing",
         }
+    }
+}
+
+impl Choice for KeepRunning {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            KeepRunning::Update => "Only during updates",
+            KeepRunning::Crash => "Also after a crash",
+            KeepRunning::Quit => "Also after quitting",
+        }
+    }
+}
+
+/// The note under "Keep programs running:" for the file's value: under
+/// `quit` it says, for as long as the value stands, that quitting leaves the
+/// programs behind and how to get back to them or end them — the reminder
+/// that does not depend on a notification permission. Pure.
+fn keep_running_note(keep: KeepRunning) -> &'static str {
+    match keep {
+        KeepRunning::Update | KeepRunning::Crash => "Restarting the Mac ends them.",
+        KeepRunning::Quit => {
+            "Programs keep running after you quit; open bateri to return to them, \u{2325}\u{2318}Q \
+             ends them. Restarting the Mac ends them."
+        }
+    }
+}
+
+/// A row's description that follows the file's value; `None` → the row's
+/// fixed one. The window keeps no state of its own: the text is chosen on
+/// every refresh from the settings it shows.
+fn row_description(key: Key, settings: &Settings) -> Option<&'static str> {
+    match key {
+        Key::KeepRunning => Some(keep_running_note(settings.keep_running)),
+        _ => None,
     }
 }
 
@@ -875,6 +915,7 @@ struct Slide {
 struct Controls {
     confirm_close: Retained<NSPopUpButton>,
     restore_windows: Retained<NSPopUpButton>,
+    keep_running: Retained<NSPopUpButton>,
     clipboard: Retained<NSSwitch>,
     scrollback: Number,
     shell_integration: Retained<NSPopUpButton>,
@@ -942,12 +983,19 @@ impl Row {
     }
 
     /// Sets the note to the diagnostic, the reason the overriding input gives
-    /// ([`motion_override`]) or the description — in that order; if there is
-    /// none it hides the row. A disabled row's description dims together with
-    /// its label, the reason does not dim: it is the only text that says why
-    /// the row is disabled.
-    fn set_note(&self, diagnostic: Option<&str>, reason: Option<&str>, enabled: bool) {
-        let (text, color) = match (diagnostic, reason, self.description) {
+    /// ([`motion_override`]) or the description (`description`: the one that
+    /// follows the value, [`row_description`], else the row's own) — in that
+    /// order; if there is none it hides the row. A disabled row's description
+    /// dims together with its label, the reason does not dim: it is the only
+    /// text that says why the row is disabled.
+    fn set_note(
+        &self,
+        diagnostic: Option<&str>,
+        reason: Option<&str>,
+        description: Option<&str>,
+        enabled: bool,
+    ) {
+        let (text, color) = match (diagnostic, reason, description.or(self.description)) {
             (Some(diagnostic), _, _) => (diagnostic, NSColor::systemOrangeColor()),
             (None, Some(reason), _) => (reason, NSColor::secondaryLabelColor()),
             (None, None, Some(description)) if enabled => {
@@ -1056,6 +1104,7 @@ define_class!(
             let edit = match key {
                 Key::ConfirmClose => choice_at(index).map(SettingsEdit::ConfirmClose),
                 Key::RestoreWindows => choice_at(index).map(SettingsEdit::RestoreWindows),
+                Key::KeepRunning => choice_at(index).map(SettingsEdit::KeepRunning),
                 Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
                 Key::Shape => choice_at(index).map(SettingsEdit::Cursor),
                 Key::Blink => choice_at(index).map(SettingsEdit::CursorBlink),
@@ -1394,6 +1443,7 @@ impl SettingsWindow {
         };
         select_choice(&c.confirm_close, settings.confirm_close);
         select_choice(&c.restore_windows, settings.restore_windows);
+        select_choice(&c.keep_running, settings.keep_running);
         set_switch(&c.clipboard, osc52_on(settings.osc52));
         set_number(
             &c.scrollback,
@@ -1504,7 +1554,12 @@ impl SettingsWindow {
                 .iter()
                 .find(|(key, _)| *key == row.key)
                 .map(|(_, message)| message.as_str());
-            row.set_note(diagnostic, forced.map(|forced| forced.note), enabled);
+            row.set_note(
+                diagnostic,
+                forced.map(|forced| forced.note),
+                row_description(row.key, settings),
+                enabled,
+            );
         }
         // The value label is a label, not a control: dimming it is by hand.
         let value_color = if !status.locked && blinks {
@@ -2007,6 +2062,7 @@ impl SettingsWindow {
         // General
         let confirm_close = self.popup::<ConfirmClose>(Key::ConfirmClose);
         let restore_windows = self.popup::<RestoreWindows>(Key::RestoreWindows);
+        let keep_running = self.popup::<KeepRunning>(Key::KeepRunning);
         let clipboard = self.switch(Key::Clipboard);
         let scrollback = self.number(Key::Scrollback, 0.0, SCROLLBACK_MAX as f64, 1000.0, 80.0);
         let shell_integration = self.popup::<ShellIntegration>(Key::ShellIntegration);
@@ -2023,7 +2079,15 @@ impl SettingsWindow {
             "Reopen after quitting:",
             &restore_windows,
             &[&restore_windows],
-            Some("Shells start fresh. Saved scrollback is plain text on disk."),
+            Some("Panes whose programs were not kept start a new shell. Saved scrollback is plain text on disk."),
+        );
+        // The description follows the value ([`row_description`]).
+        general.row(
+            Key::KeepRunning,
+            "Keep programs running:",
+            &keep_running,
+            &[&keep_running],
+            None,
         );
         general.row(
             Key::Clipboard,
@@ -2351,6 +2415,7 @@ impl SettingsWindow {
         let controls = Controls {
             confirm_close,
             restore_windows,
+            keep_running,
             clipboard,
             scrollback,
             shell_integration,
@@ -2576,7 +2641,7 @@ impl Form {
             note_row,
             description,
         };
-        row.set_note(None, None, true);
+        row.set_note(None, None, None, true);
         self.rows.push(row);
     }
 
@@ -2831,7 +2896,7 @@ mod tests {
         let text = "[terminal]\nscrollback = []\ncursor = []\ncursor_blink = []\n\
                     cursor_radius = []\ncursor_glow = []\ncursor_unfocused = []\n\
                     cursor_blink_interval = []\nconfirm_close = []\n\
-                    restore_windows = []\n\
+                    restore_windows = []\nkeep_running = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
@@ -2854,6 +2919,7 @@ mod tests {
             let edit = match key {
                 Key::ConfirmClose => SettingsEdit::ConfirmClose(ConfirmClose::Never),
                 Key::RestoreWindows => SettingsEdit::RestoreWindows(RestoreWindows::Off),
+                Key::KeepRunning => SettingsEdit::KeepRunning(KeepRunning::Quit),
                 Key::Clipboard => SettingsEdit::Osc52(Osc52::Off),
                 Key::Scrollback => SettingsEdit::Scrollback(1),
                 Key::ShellIntegration => SettingsEdit::ShellIntegration(ShellIntegration::Off),
@@ -2946,6 +3012,7 @@ mod tests {
     fn popup_titles_cover_every_name() {
         check::<ConfirmClose>();
         check::<RestoreWindows>();
+        check::<KeepRunning>();
         check::<ShellIntegration>();
         check::<CaretShape>();
         check::<CursorBlink>();
@@ -2957,6 +3024,40 @@ mod tests {
         check::<PreviewKeep>();
         check::<DownloadConflict>();
         check::<RemoteStatsMode>();
+    }
+
+    /// "Keep programs running:"'s note follows the value: under `quit` it
+    /// says what quitting leaves behind and how to end it, under the others
+    /// only what ends the programs anyway; no other row's note moves.
+    #[test]
+    fn keep_running_note_follows_the_value() {
+        let with = |keep| Settings {
+            keep_running: keep,
+            ..Settings::default()
+        };
+        assert_eq!(
+            row_description(Key::KeepRunning, &with(KeepRunning::Update)),
+            Some("Restarting the Mac ends them.")
+        );
+        assert_eq!(
+            row_description(Key::KeepRunning, &with(KeepRunning::Crash)),
+            Some("Restarting the Mac ends them.")
+        );
+        let quit = row_description(Key::KeepRunning, &with(KeepRunning::Quit))
+            .expect("the row has a note");
+        assert!(
+            quit.starts_with("Programs keep running after you quit"),
+            "{quit}"
+        );
+        assert!(quit.contains("\u{2325}\u{2318}Q ends them"), "{quit}");
+        assert!(quit.ends_with("Restarting the Mac ends them."), "{quit}");
+        for key in Key::ALL.into_iter().filter(|&key| key != Key::KeepRunning) {
+            assert_eq!(
+                row_description(key, &with(KeepRunning::Quit)),
+                None,
+                "{key:?}"
+            );
+        }
     }
 
     /// The size popups show the file's value even when it is not a preset,

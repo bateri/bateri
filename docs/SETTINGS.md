@@ -168,18 +168,21 @@ cursor_blink_interval = 0.5
 # prompt, never closes without asking. Typing exit never asks, and neither do
 # programs left running in the background.
 confirm_close = "running"
-# "all" | "layout" | "off". What comes back when bateri opens again after
-# quitting, an update or a restart: all brings back the windows, tabs and
-# splits with each pane's scrollback, layout brings back the windows without
-# the scrollback (nothing you saw is written to disk), off starts with a
-# single window and deletes what was saved. A pane whose program is kept
-# running (keep_running) comes back with it; the others start a new shell.
+# "all" | "layout" | "off". What comes back when bateri opens again: all
+# brings back the windows, tabs and splits, with each pane's scrollback after
+# a quit or a restart; layout brings back the windows without the scrollback
+# (nothing you saw is written to disk); off writes nothing and deletes what
+# was saved. A pane whose program was kept running (keep_running) comes back
+# with it under every value; the others start a new shell, or with off do not
+# come back.
 restore_windows = "all"
 # "update" | "crash" | "quit". When the programs running in bateri (vim, a
 # build, a session over ssh) outlive it: update keeps them only across an
 # update, crash also when bateri crashes or is forced to quit, quit also when
-# you quit it, and then quitting asks nothing. The next bateri takes them
-# back. Restarting the Mac or logging out ends them.
+# you quit it — then quitting asks nothing, and Quit and End Programs (⌥⌘Q)
+# ends them. The next bateri takes them back; after a crash a full-screen
+# program redraws its screen and a plain shell's screen is gone. Restarting
+# the Mac or logging out ends them.
 keep_running = "crash"
 
 [appearance]
@@ -432,6 +435,11 @@ Falling to off can be undone: fixing the file and saving is enough.
 back (the visible half), and the history is not written to disk (the
 invisible half).
 
+`keep_running` follows the ordinary rule — a value that is not understood is
+`"crash"` at launch and leaves the value in effect when you save — and no
+fallback ever makes it `"quit"`: had a typo made ⌘Q keep the programs, you
+would believe they had ended.
+
 ## Keys
 
 ### `[terminal]`
@@ -564,15 +572,19 @@ The value is read at closing time, so it takes effect the moment you save.
 - `"layout"` brings back the same layout without the history: nothing you saw
   on screen is written to disk. A history saved earlier with `"all"` is not
   shown either; it is deleted unread.
-- `"off"` opens with a single empty window, writes nothing and deletes the
-  rest.
+- `"off"` writes nothing and deletes the rest: bateri opens with a single
+  empty window — or, when programs were kept running (`keep_running`), with
+  just their panes.
 - After ⌘Q, logging out and restarting, the shells are **new** — unless
   `keep_running` (below) kept their programs: running programs (vim, a build)
   end on closing, and the history that comes back is text only. The history
   is written only on a clean shutdown; the layout (windows, tabs, splits,
-  directories) is also kept up to date on disk while bateri runs, so after a
-  crash or a power cut with nothing keeping the programs the windows still
-  come back, with new shells.
+  directories) is also kept up to date on disk while bateri runs, without
+  the history, so after a crash or a power cut the windows come back under
+  every `keep_running` value: with their programs where they were kept, with
+  new shells where nothing kept them. After a crash the screen does not come
+  back with a kept program: a full-screen program (vim, htop) redraws it at
+  once, a plain shell's screen is gone, and the pane says so in a dim line.
 - **Updates are the exception**: on "Install and Relaunch" the shells and the
   running programs — vim, `npm run dev`, a session over ssh — **do not die**,
   they move to the new version with their screens; on this path the history
@@ -623,7 +635,23 @@ it:
   question.
 - `"quit"` also keeps them when you quit with ⌘Q, which then asks nothing:
   the programs run on with no window until bateri opens again, and then they
-  come back with their screens.
+  come back with their screens. So that they are not forgotten, a quit that
+  leaves a program running (not an idle shell) shows a macOS notification a
+  moment after bateri is gone, naming them ("“vim” and “npm” keep running in
+  the background…"); clicking it opens bateri, which brings them back. The
+  notification needs permission, asked when you choose `"quit"` (or at the
+  first launch that finds it); without it the reminder is the line under the
+  setting in Settings. There is no notification when the Mac logs out or
+  restarts — the programs end with it.
+- With `"quit"`, holding ⌥ turns bateri ▸ Quit bateri into **Quit and End
+  Programs** (⌥⌘Q): the quit that ends the programs, after the usual
+  question (`confirm_close`), as ⌘Q does under the other values.
+- If bateri is not opened again, kept programs run until they finish, or
+  until you log out or restart the Mac; the helper exits once none is left.
+  While bateri is closed their output is still read, so a server that logs
+  does not stall — a program that prints without end keeps using the CPU, and
+  past a limit the oldest output is dropped (the pane marks the cut when it
+  comes back).
 - Under every value, closing a pane, a tab or a window (⌘W, the red button)
   and typing `exit` end the programs as before, and restarting the Mac or
   logging out ends them.
@@ -631,9 +659,12 @@ it:
   beside bateri and keeps a copy of each terminal, so the programs have
   somewhere to stay when bateri goes. While bateri runs it reads nothing and
   wakes for nothing; when no program is left for it to keep, it exits.
-- A change applies when you save: moving away from `"update"` protects the
-  programs that are already running from then on, moving back to it lets
-  them end with bateri again.
+- A change applies when you save, in every direction, without restarting
+  bateri: moving away from `"update"` protects the programs that are already
+  running from then on, moving back to it lets them end with bateri again,
+  and between `"crash"` and `"quit"` only the next ⌘Q reads the difference.
+- In Settings it is General ▸ "Keep programs running:" — Only during
+  updates, Also after a crash, Also after quitting.
 
 The section can also be written inline: `terminal = { scrollback = 5000 }`.
 `[[terminal]]` (an array of sections) does not count as a section and gives a

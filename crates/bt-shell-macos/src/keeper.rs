@@ -19,7 +19,8 @@
 //! edges and keystrokes post nothing.
 //!
 //! The decisions are pure functions beside it ([`wants_holder`],
-//! [`quit_path`], [`spawns_for_quit`], [`switch`], [`may_respawn`]).
+//! [`quit_path`], [`spawns_for_quit`], [`pings_for_quit`], [`switch`],
+//! [`may_respawn`], [`asks_notification_permission`]).
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -83,26 +84,74 @@ pub(crate) enum QuitPath {
     Close,
 }
 
-/// The quit's path from the setting, whether Sparkle relaunches, and
-/// whether a bound holder answered ([`Keeper::verified`]). A relaunch never
-/// ends the programs: `"crash"` and `"quit"` hand them to the holder they
-/// already have, `"update"` (or a run whose holder is gone) to the update's.
-/// ⌘Q keeps them only in `"quit"` and only with a holder that answered —
+/// Which quit this is — the one input of the quit's path besides the setting
+/// and the holder's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuitKind {
+    /// ⌘Q, the red buttons' last window, Dock ▸ Quit, logging out.
+    Quit,
+    /// bateri ▸ Quit and End Programs (⌥⌘Q, shown under `"quit"`): the
+    /// programs end whatever the setting says, after today's question.
+    EndPrograms,
+    /// Sparkle's relaunch: it never ends the programs — it wins over an
+    /// ⌥⌘Q that happened to be pending.
+    Relaunch,
+}
+
+impl QuitKind {
+    /// The kind from Sparkle's relaunch flag and the ⌥⌘Q flag.
+    pub(crate) fn of(relaunch: bool, end_programs: bool) -> QuitKind {
+        match (relaunch, end_programs) {
+            (true, _) => QuitKind::Relaunch,
+            (false, true) => QuitKind::EndPrograms,
+            (false, false) => QuitKind::Quit,
+        }
+    }
+}
+
+/// The quit's path from the setting, the kind of quit, and whether a bound
+/// holder answered ([`Keeper::verified`]). A relaunch never ends the
+/// programs: `"crash"` and `"quit"` hand them to the holder they already
+/// have, `"update"` (or a run whose holder is gone) to the update's. ⌘Q
+/// keeps them only in `"quit"` and only with a holder that answered —
 /// programs must not end without the question because a holder was assumed.
-pub(crate) fn quit_path(keep: KeepRunning, relaunch: bool, bound: bool) -> QuitPath {
-    match (relaunch, keep, bound) {
-        (true, KeepRunning::Crash | KeepRunning::Quit, true) => QuitPath::ToBound,
-        (true, _, _) => QuitPath::ToUpdateHolder,
-        (false, KeepRunning::Quit, true) => QuitPath::ToBound,
-        (false, _, _) => QuitPath::Close,
+/// ⌥⌘Q always closes.
+pub(crate) fn quit_path(keep: KeepRunning, kind: QuitKind, bound: bool) -> QuitPath {
+    match (kind, keep, bound) {
+        (QuitKind::Relaunch, KeepRunning::Crash | KeepRunning::Quit, true) => QuitPath::ToBound,
+        (QuitKind::Relaunch, _, _) => QuitPath::ToUpdateHolder,
+        (QuitKind::Quit, KeepRunning::Quit, true) => QuitPath::ToBound,
+        (QuitKind::Quit | QuitKind::EndPrograms, _, _) => QuitPath::Close,
     }
 }
 
 /// Whether ⌘Q spawns a holder before choosing its path: `"quit"` without a
 /// holder that answered — it died, or never started — gets one now, so the
-/// question is skipped only for programs that are actually kept.
-pub(crate) fn spawns_for_quit(keep: KeepRunning, relaunch: bool, bound: bool) -> bool {
-    keep == KeepRunning::Quit && !relaunch && !bound
+/// question is skipped only for programs that are actually kept. ⌥⌘Q spawns
+/// nothing: the holder would only be told to leave.
+pub(crate) fn spawns_for_quit(keep: KeepRunning, kind: QuitKind, bound: bool) -> bool {
+    keep == KeepRunning::Quit && kind == QuitKind::Quit && !bound
+}
+
+/// Whether the quit asks the bound holder for an answer first — a ping is a
+/// wait on the main thread, so only where the answer can change the path: a
+/// relaunch, or ⌘Q under `"quit"`.
+pub(crate) fn pings_for_quit(keep: KeepRunning, kind: QuitKind) -> bool {
+    match kind {
+        QuitKind::Relaunch => true,
+        QuitKind::Quit => keep == KeepRunning::Quit,
+        QuitKind::EndPrograms => false,
+    }
+}
+
+/// Whether the permission to notify is asked for now: when `keep_running`
+/// becomes `"quit"` — `before` is the value it had, `None` at launch. ⌘Q's
+/// reminder needs the permission and its own moment (quitting) must not ask,
+/// so the question comes right after the user chose the value, or at the
+/// launch that finds it, while bateri is in front. The system asks once and
+/// answers from its record afterwards.
+pub(crate) fn asks_notification_permission(before: Option<KeepRunning>, now: KeepRunning) -> bool {
+    now == KeepRunning::Quit && before != Some(KeepRunning::Quit)
 }
 
 /// What a live change of `keep_running` does to the holder.
@@ -467,36 +516,88 @@ mod tests {
 
     #[test]
     fn command_q_keeps_the_programs_only_in_quit_and_only_with_an_answer() {
+        use QuitKind::Quit as CommandQ;
         // ⌘Q (no relaunch): the question unless `quit` has a holder that
         // answered.
         assert_eq!(
-            quit_path(KeepRunning::Update, false, false),
+            quit_path(KeepRunning::Update, CommandQ, false),
             QuitPath::Close
         );
-        assert_eq!(quit_path(KeepRunning::Crash, false, false), QuitPath::Close);
-        assert_eq!(quit_path(KeepRunning::Crash, false, true), QuitPath::Close);
-        assert_eq!(quit_path(KeepRunning::Quit, false, true), QuitPath::ToBound);
+        assert_eq!(
+            quit_path(KeepRunning::Crash, CommandQ, false),
+            QuitPath::Close
+        );
+        assert_eq!(
+            quit_path(KeepRunning::Crash, CommandQ, true),
+            QuitPath::Close
+        );
+        assert_eq!(
+            quit_path(KeepRunning::Quit, CommandQ, true),
+            QuitPath::ToBound
+        );
         // `quit` with its holder dead: today's quit, never a silent end.
-        assert_eq!(quit_path(KeepRunning::Quit, false, false), QuitPath::Close);
+        assert_eq!(
+            quit_path(KeepRunning::Quit, CommandQ, false),
+            QuitPath::Close
+        );
+    }
+
+    #[test]
+    fn quit_and_end_programs_always_closes_and_never_spawns_or_pings() {
+        for keep in VALUES {
+            for bound in [false, true] {
+                assert_eq!(
+                    quit_path(keep, QuitKind::EndPrograms, bound),
+                    QuitPath::Close,
+                    "{keep:?} {bound}"
+                );
+                assert!(!spawns_for_quit(keep, QuitKind::EndPrograms, bound));
+            }
+            assert!(!pings_for_quit(keep, QuitKind::EndPrograms), "{keep:?}");
+        }
+    }
+
+    #[test]
+    fn the_kind_of_quit_lets_a_relaunch_win() {
+        assert_eq!(QuitKind::of(false, false), QuitKind::Quit);
+        assert_eq!(QuitKind::of(false, true), QuitKind::EndPrograms);
+        assert_eq!(QuitKind::of(true, false), QuitKind::Relaunch);
+        // An update never ends the programs, even with ⌥⌘Q pending.
+        assert_eq!(QuitKind::of(true, true), QuitKind::Relaunch);
+    }
+
+    #[test]
+    fn only_a_relaunch_or_command_q_in_quit_pings() {
+        for keep in VALUES {
+            assert!(pings_for_quit(keep, QuitKind::Relaunch), "{keep:?}");
+        }
+        assert!(pings_for_quit(KeepRunning::Quit, QuitKind::Quit));
+        assert!(!pings_for_quit(KeepRunning::Crash, QuitKind::Quit));
+        assert!(!pings_for_quit(KeepRunning::Update, QuitKind::Quit));
     }
 
     #[test]
     fn a_relaunch_never_ends_the_programs() {
+        use QuitKind::Relaunch;
         assert_eq!(
-            quit_path(KeepRunning::Update, true, false),
+            quit_path(KeepRunning::Update, Relaunch, false),
             QuitPath::ToUpdateHolder
         );
         // `update` never has a bound holder; if one answered all the same the
         // update's own path stands.
         assert_eq!(
-            quit_path(KeepRunning::Update, true, true),
+            quit_path(KeepRunning::Update, Relaunch, true),
             QuitPath::ToUpdateHolder
         );
         for keep in [KeepRunning::Crash, KeepRunning::Quit] {
-            assert_eq!(quit_path(keep, true, true), QuitPath::ToBound, "{keep:?}");
+            assert_eq!(
+                quit_path(keep, Relaunch, true),
+                QuitPath::ToBound,
+                "{keep:?}"
+            );
             // The holder is gone: the update's own holder takes them.
             assert_eq!(
-                quit_path(keep, true, false),
+                quit_path(keep, Relaunch, false),
                 QuitPath::ToUpdateHolder,
                 "{keep:?}"
             );
@@ -505,19 +606,26 @@ mod tests {
 
     #[test]
     fn only_command_q_in_quit_without_an_answer_spawns_a_holder() {
-        assert!(spawns_for_quit(KeepRunning::Quit, false, false));
-        assert!(!spawns_for_quit(KeepRunning::Quit, false, true));
-        assert!(!spawns_for_quit(KeepRunning::Quit, true, false));
+        assert!(spawns_for_quit(KeepRunning::Quit, QuitKind::Quit, false));
+        assert!(!spawns_for_quit(KeepRunning::Quit, QuitKind::Quit, true));
+        assert!(!spawns_for_quit(
+            KeepRunning::Quit,
+            QuitKind::Relaunch,
+            false
+        ));
         for keep in [KeepRunning::Update, KeepRunning::Crash] {
-            for relaunch in [false, true] {
+            for kind in [QuitKind::Quit, QuitKind::EndPrograms, QuitKind::Relaunch] {
                 for bound in [false, true] {
-                    assert!(!spawns_for_quit(keep, relaunch, bound), "{keep:?}");
+                    assert!(!spawns_for_quit(keep, kind, bound), "{keep:?}");
                 }
             }
         }
         // After the spawn the same question answers `ToBound`: the holder
         // that was just born answered its handshake.
-        assert_eq!(quit_path(KeepRunning::Quit, false, true), QuitPath::ToBound);
+        assert_eq!(
+            quit_path(KeepRunning::Quit, QuitKind::Quit, true),
+            QuitPath::ToBound
+        );
     }
 
     #[test]
@@ -531,6 +639,24 @@ mod tests {
         assert_eq!(switch(Quit, Crash), Switch::Stay);
         for keep in VALUES {
             assert_eq!(switch(keep, keep), Switch::Stay, "{keep:?}");
+        }
+    }
+
+    #[test]
+    fn the_permission_is_asked_only_on_becoming_quit() {
+        use KeepRunning::{Crash, Quit, Update};
+        // At launch: only a value that is already `quit`.
+        assert!(asks_notification_permission(None, Quit));
+        assert!(!asks_notification_permission(None, Crash));
+        assert!(!asks_notification_permission(None, Update));
+        // On a save: only the switch to `quit`, not a save that keeps it.
+        assert!(asks_notification_permission(Some(Update), Quit));
+        assert!(asks_notification_permission(Some(Crash), Quit));
+        assert!(!asks_notification_permission(Some(Quit), Quit));
+        for before in VALUES {
+            for now in [Update, Crash] {
+                assert!(!asks_notification_permission(Some(before), now));
+            }
         }
     }
 

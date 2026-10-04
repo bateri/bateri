@@ -12,6 +12,42 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Your programs survive a crash.** If bateri crashes or is forced to quit
+  (Activity Monitor, `kill -9`), vim, `npm run dev` and an ssh session keep
+  running without a window, and the next bateri takes them back into their
+  windows — the same processes, not restarted copies. The screen does not
+  come back with them yet: a full-screen program such as vim or htop redraws
+  itself at once, a plain shell's screen is gone, and the pane says so in a
+  dim line. This is the new default; a small helper process (`bateri hold`)
+  runs beside bateri to keep the programs somewhere while bateri is gone.
+- **Programs can outlive ⌘Q too.** `[terminal] keep_running` (or Settings ›
+  General › Keep programs running) chooses `"update"` (only an update keeps
+  them, as before), `"crash"` (the default) or `"quit"`: with `"quit"`, ⌘Q
+  asks nothing and the programs run on until you open bateri again, which
+  brings them back with their screens. A notification names what is still
+  running a moment after you quit, so nothing is forgotten, and **Quit and
+  End Programs** (⌥⌘Q, under the bateri menu with ⌥ held) is the quit that
+  ends them. The setting applies the moment you save it, no restart needed.
+  Restarting the Mac or logging out still ends the programs.
+- **Windows come back after a crash.** The layout — windows, tabs, splits,
+  folders — is kept on disk while bateri runs (without the scrollback), so
+  after a crash or a power cut the windows reopen even where no program was
+  kept, each pane with a new shell (not with `restore_windows = "off"`).
+- **Hold ⇧ while opening bateri** to start with one empty window and skip
+  everything saved; kept programs wait for the next launch. If bringing
+  programs back ever crashes bateri, the next launch brings them back without
+  their screens, and the one after gives them up and opens an empty window,
+  so a bad restore cannot trap you in a crash loop.
+
+### Changed
+
+- `restore_windows = "off"` no longer ends running programs on an update:
+  whether programs live on is now `keep_running`'s alone, and `restore_windows`
+  only decides what is written to disk and how a pane whose program did not
+  live comes back.
+
 ## [0.4.0] - 2026-10-03
 
 ### Added
