@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use bt_core::RemoteTarget;
 
 use crate::focus::FOCUS_SOCKET;
-use crate::handover::{HANDOVER_SOCKET, holder_listening};
+use crate::handover::{holder_listening, is_holder_socket_name};
 use crate::upload::connection;
 
 // ─── route ───────────────────────────────────────────────────────────────
@@ -1839,11 +1839,11 @@ fn remove_instance(dir: &Path) {
         };
         // The focus listener by name only: on ⌘Q it is this process's
         // and still listening, and it goes with the directory.
-        // The holder's socket likewise: a holder that ended by its
-        // limit leaves the directory to the next start's sweep.
+        // A holder's socket likewise (either kind): a holder that ended by
+        // its limit leaves the directory to the next start's sweep.
         let ours = name == OWNER_FILE
             || name == FOCUS_SOCKET
-            || name == HANDOVER_SOCKET
+            || is_holder_socket_name(name)
             || our_socket_name(name)
             || attempt_error_file(name);
         if ours {
@@ -1980,6 +1980,7 @@ fn sweep_flat(base: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handover::HANDOVER_SOCKET;
     use std::cell::RefCell;
     use std::thread;
 
@@ -3389,6 +3390,21 @@ exit $code
         drop(holder);
         sweep(std::slice::from_ref(&base), "ffffffff");
         assert!(!held.exists(), "a dead holder's directory stays");
+
+        // A bound holder's socket (`handover-<pid>`) keeps the directory the
+        // same way, beside a dead one of the other kind, and goes with it.
+        let bound = prepare_instance(&base, "44444444").unwrap();
+        std::fs::write(bound.join(OWNER_FILE), dead_pid().to_string()).unwrap();
+        drop(UnixListener::bind(bound.join(HANDOVER_SOCKET)).unwrap());
+        let holder = UnixListener::bind(bound.join("handover-4242")).unwrap();
+        sweep(std::slice::from_ref(&base), "ffffffff");
+        assert!(
+            bound.join("handover-4242").exists(),
+            "a live bound holder's directory was swept"
+        );
+        drop(holder);
+        sweep(std::slice::from_ref(&base), "ffffffff");
+        assert!(!bound.exists(), "a dead bound holder's directory stays");
 
         // Not an instance directory at all.
         let bare = root.join("bare");
