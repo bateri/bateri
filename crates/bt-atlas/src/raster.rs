@@ -883,7 +883,7 @@ const fn arc(arms: [Stroke; 4]) -> Recipe {
 /// silently encode a wrong pattern; the table was written from the character
 /// **names** and its guard is on the [`crate::tests`] side, which reads the
 /// names from the Unicode database
-/// (`the_arm_table_matches_the_unicode_names`).
+/// (`the_arms_come_from_the_unicode_names`).
 ///
 /// The rows of the diagonals (`╱╲╳`) are empty: [`family`] keeps them outside
 /// the coverage, so these three rows are never read. The table is still 128

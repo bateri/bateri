@@ -166,9 +166,9 @@ pub enum Half {
 /// the geometry of the wide emoji too and the grid arithmetic
 /// ([`Atlas::slot_origin`], [`Atlas::capacity`]) is shared by both. The only
 /// thing that differs is the pixel format: mask `R8`, colour `RGBA8` — and
-/// each plane has its **own monotonic counter**, because the uv is baked in
-/// `bt-gpu`'s `prepare` at resolve time and a shared counter whose meaning
-/// changed mid-frame would invalidate the uvs of earlier passes.
+/// each plane has its **own monotonic counter**, because `bt-gpu` bakes the
+/// uv when it builds each glyph list and a shared counter whose meaning
+/// changed mid-frame would invalidate the uvs of earlier lists.
 // `repr(u8)`: see `RuleKind`.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -997,11 +997,11 @@ impl Atlas {
             //
             // Falling here means **more distinct glyphs than the target in a
             // single frame** and that scenario is **not measured**. If
-            // measured, its remedy is not LRU but recycling at the
-            // `encode_pass` boundary: the slot number is not stored in frame
-            // data, `slot_uv` bakes the uv at resolve time and `prepare` runs
-            // four times per frame, i.e. any reuse done **mid**-frame
-            // invalidates the uvs of earlier passes.
+            // measured, its remedy is not LRU but recycling at the frame
+            // boundary (`bt-gpu`'s `Renderer::encode`): the slot number is not
+            // stored in frame data, `slot_uv` bakes the uv at resolve time and
+            // `glyph_lists` runs once per list, four times per frame, i.e. any
+            // reuse done **mid**-frame invalidates the uvs of earlier lists.
             return (
                 Placed {
                     slot: TOFU,

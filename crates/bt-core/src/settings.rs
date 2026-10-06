@@ -564,7 +564,7 @@ impl SmoothScroll {
 /// full: names go in as they become drawable — had a name that isn't drawn been
 /// accepted in the popup or the file, selecting it would do nothing. The
 /// amplitudes are in `bt-gpu`'s
-/// `shaders/glyph_fx.metal`.
+/// `shaders/glyph_fx.wgsl`.
 ///
 /// Its consumer is `bt-gpu` (the precedent of [`CursorMotion`]) and the value
 /// goes **raw**: the reduction by `cursor_motion = "snap"` and Reduce Motion is

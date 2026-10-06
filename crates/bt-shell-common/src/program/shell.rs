@@ -118,8 +118,9 @@ const SHELLS: [Shell; 7] = [
 
 /// The programs that hold the terminal while they run another as root:
 /// sudo (and `su`, the same shape) — whose own raw modes say nothing of the
-/// program ([`super::Found::Sudo`]), and under which the command is looked
-/// for through them. They run as user 0 (setuid).
+/// program ([`super::Found::Waiting`], [`super::Found::Elevated`]), and
+/// under which the command is looked for through them. They run as user 0
+/// (setuid).
 pub(super) const ELEVATORS: [&str; 2] = ["sudo", "su"];
 
 /// A tool that opens a shell: its process (or Python script) name, the

@@ -5638,7 +5638,7 @@ mod tests {
         assert!(lead.wide, "the head cell was not marked: {lead:?}");
         assert_eq!(lead.col, TEXT_COL, "the text starts from the first column");
         // The neighboring column **takes no glyph**: the head cell's `wide`
-        // draws it (`bt_gpu::AtlasTexture::prepare` fans it out). A second glyph
+        // draws it (`bt-gpu`'s `slots::fan` fans it out). A second glyph
         // cell would print two quads in the same place.
         assert!(
             !cells

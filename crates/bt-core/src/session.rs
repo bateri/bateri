@@ -417,14 +417,15 @@ pub struct Cursor {
     /// On the alternate screen `rows`, i.e. zero offset: vim and htop own the
     /// whole grid.
     ///
-    /// **`rows` in a window scrolled into the scrollback too**: sticking
-    /// is the job of the bottom-anchored window, because the fill band and
-    /// the sticking must split the screen **exactly** and cannot live
-    /// together — `fill = rows - content_rows` and since `content_rows` is
-    /// born from the visible window, when the two run together `fill + offset`
-    /// stays constant, i.e. the top of the screen never budges with
-    /// scrolling. The full rationale is in [`Session::fill_rows`], its guard
-    /// is `content_rows_come_from_the_visible_window_while_scrolled`.
+    /// **From the visible rows in a window scrolled into the scrollback
+    /// too**: the content stays bottom-anchored there as well, and it is the
+    /// fill band that steps aside, because the band and the sticking must
+    /// split the screen **exactly** and cannot run together — `fill = rows -
+    /// content_rows` and since `content_rows` is born from the visible window,
+    /// `fill + offset` would stay constant, i.e. the top of the screen would
+    /// never budge with scrolling. The full rationale is in
+    /// [`Session::fill_rows`], its guard is
+    /// `content_rows_come_from_the_visible_window_while_scrolled`.
     pub content_rows: u16,
     /// How many rows of the blank left at the top were filled **with
     /// scrollback**.
@@ -6849,10 +6850,10 @@ impl Session {
     ///
     /// Everything above the kept first row is scrolled out of the top of the grid
     /// and the scrollback is erased; nothing is left to scroll up to. What the
-    /// kept block is is in [`protected_top`]: the adjacent rows carrying the block
-    /// id of the cursor's row (wrapped and multi-line input, `PREBUFFER`, a
-    /// multi-line `PS1`), or if there is no id (a command is running, a shell
-    /// without integration) the cursor's row.
+    /// kept block is is in [`protected_top`]: from the topmost screen row
+    /// carrying the block id of the cursor's row (wrapped and multi-line input,
+    /// `PREBUFFER`, a multi-line `PS1`), or if there is no id (a command is
+    /// running, a shell without integration) the cursor's row.
     ///
     /// **Not a single byte goes to the shell or the running program**: the clear
     /// happens in the terminal's scrollback, it never touches `send_input` — i.e.

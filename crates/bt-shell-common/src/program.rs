@@ -48,7 +48,7 @@
 //! (an interpreter, a client, a container session — a shell that started
 //! python leaves the bar to python), a nested shell last. While sudo holds
 //! the terminal its own raw modes say nothing of the program
-//! ([`Found::Sudo`]).
+//! ([`Found::Waiting`], [`Found::Elevated`]).
 
 mod container;
 mod database;

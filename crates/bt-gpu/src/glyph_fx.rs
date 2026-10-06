@@ -39,7 +39,7 @@ pub(crate) const KEYPRESS_DURATION: f32 = 0.24;
 /// what was typed. The first choice was 160 ms and it was lengthened for the same
 /// reason as the arrival's; after Backspace the caret arrives right at the
 /// ghost's column, so to be visible the ghost has to be drawn above the caret
-/// (`Renderer::encode_fx`).
+/// (`Renderer::fx_draw`).
 pub(crate) const ERASE_DURATION: f32 = 0.30;
 
 /// Ceiling of in-flight entries — **a design constant**.

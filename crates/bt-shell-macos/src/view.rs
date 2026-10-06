@@ -12,8 +12,9 @@
 //!
 //! **The keyboard's text path now goes through AppKit's stack** and
 //! `keyDown:` is not a single gate but an **arbitration**: a Cmd event is
-//! swallowed except for one key of a closed allow list (⌘⌫), Shift+PgUp/PgDn
-//! is the terminal's scrolling, a Control event goes straight to
+//! swallowed except for the three keys of a closed allow list (⌘⌫, ⌘←, ⌘→),
+//! Shift+PgUp/PgDn is the terminal's scrolling, the dock selection's keys
+//! are offered to the session first, a Control event goes straight to
 //! [`crate::keys::encode_key`] and **the rest** is handed to the text stack
 //! with `interpretKeyEvents:`. The stack keeps the dead-key state itself and
 //! when the composition completes it hands the text back with `insertText:` -
@@ -967,9 +968,9 @@ define_class!(
             }
         }
 
-        /// The **arbitration** of a keystroke - four arms, and the order is the contract.
+        /// The **arbitration** of a keystroke - five arms, and the order is the contract.
         ///
-        /// The first three arms do **not enter** AppKit's text stack
+        /// The first four arms do **not enter** AppKit's text stack
         /// (`interpretKeyEvents:`) and each has its own rationale for not entering:
         ///
         /// 1. **A Cmd event** is swallowed (`reaches_terminal`); **the
@@ -985,7 +986,12 @@ define_class!(
         ///    `page_scroll` does not ask about modifiers other than Shift -
         ///    Ctrl+Shift+PgUp scrolls today too and had the order been
         ///    reversed that key would have fallen to `\e[5~`.
-        /// 3. **A Control event** goes straight to [`encode_key`]. It cannot
+        /// 3. **The dock selection's keys** ([`dock_key`]) are offered to
+        ///    `Session::dock_key` before the stack, which would hand ⌫ and the
+        ///    arrows to `doCommandBySelector:`; not while a composition is
+        ///    pending (⌫ must cancel it). A key the session does not consume
+        ///    falls through to the arms below.
+        /// 4. **A Control event** goes straight to [`encode_key`]. It cannot
         ///    be left to AppKit to choose its arm: numpad Enter's `characters`
         ///    is U+0003 (Ctrl-C's byte) and Ctrl-Y's shares U+0019 with
         ///    Shift+Tab - if the stack chose the wrong arm every command would
@@ -997,7 +1003,7 @@ define_class!(
         ///    defence was built: putting the arm into the stack would leave
         ///    numpad Enter's U+0003 to AppKit's choice, so the trade is "every
         ///    command may be interrupted" against "a rare accent".
-        /// 4. **The rest** is given to the stack; if the stack did not take the
+        /// 5. **The rest** is given to the stack; if the stack did not take the
         ///    event ([`ViewIvars::consumed`]) it falls to `encode_key` anyway.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {

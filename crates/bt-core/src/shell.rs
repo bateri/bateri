@@ -1651,14 +1651,15 @@ impl BlockTrack {
 }
 
 /// Mouse selection in the dock's input line: the two ends, the step
-/// and the resolved range — in **`BUFFER`'s character indices**.
+/// and the resolved range — in **character indices of the selectable text**,
+/// `PREBUFFER ++ BUFFER` (`dock::selectable`).
 ///
 /// **It lives next to the mirror, not in it** ([`ShellLog::dock_selection`]). If
 /// it were inside [`DockState`], the frame path's diff (`dock::change` /
 /// `diff`) would compare it too and every drag step would `Reset` the typing
 /// effects; moreover the scanner refreshes the mirror wholesale with `clone_from`
 /// and would overwrite the selection on every keystroke. The selection is still
-/// **tied** to the mirror: it is dropped when `BUFFER` changes
+/// **tied** to the mirror: it is dropped when `BUFFER` or `PREBUFFER` changes
 /// ([`ShellLog::apply_dock`]), because the indices would now point at another
 /// text.
 ///

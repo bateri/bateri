@@ -481,14 +481,15 @@ pub(crate) struct GlyphCell {
     /// The field is **not** `half` and this is deliberate: the answer to
     /// "which half" is born in the ink gate, i.e. in `Atlas::slot`, and this
     /// list never sees the atlas (the reason the type has no uv is right
-    /// above). The fan-out is therefore in `AtlasTexture::prepare`: there the
-    /// atlas is already borrowed and the cell size is at hand.
+    /// above). The fan-out is therefore in `slots::fan`: there the atlas is
+    /// already borrowed and the cell size is at hand.
     pub(crate) wide: bool,
     /// The boundary's `Cell::cluster`: the emoji sequence's id in the
     /// list's **own** table — the grid and the fill band use
     /// [`Frame::clusters`], the dock [`Frame::dock_clusters`], the ghosts
-    /// [`Frame::fx_clusters`]. The string goes into the atlas at `prepare`
-    /// time (`Atlas::intern`), like `ch`: this list does not see the atlas.
+    /// [`Frame::fx_clusters`]. The string goes into the atlas at fan-out
+    /// time (`slots::fan`, `Atlas::intern`), like `ch`: this list does not see
+    /// the atlas.
     pub(crate) cluster: Option<ClusterId>,
 }
 
@@ -845,7 +846,7 @@ pub(crate) struct Frame {
     /// The mouse selection's row runs and concave fills; drawn from its
     /// own pipeline (`selection`, a corner-masked SDF), **after** the
     /// backgrounds and before the caret and the glyphs
-    /// ([`Renderer::encode_pass`](crate::renderer::Renderer)).
+    /// ([`Renderer::plan`](crate::renderer::Renderer)).
     ///
     /// The reason for the list's separation beyond the pipeline is the same
     /// as the stripe's: had it gone into `bg`, it would go in either counted
@@ -1221,7 +1222,7 @@ impl Frame {
         // first frame that turns the fill off (Ctrl-L, entering the alternate
         // screen, a window with no dock) the previous frame's band would hang
         // above the grid. Zero is at the same time the rollback strip's gate —
-        // [`Renderer::encode_pass`] never sets up the third viewport.
+        // `Renderer::plan` never sets up the third viewport.
         self.fill_rows = 0;
         // The rectangle is zeroed too ([`Frame::clear_caret`]): had it stayed,
         // the caret going dark (`\e[?25l`) or scrolling into history would
