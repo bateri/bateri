@@ -526,6 +526,24 @@ pub struct Cursor {
     /// drawing side's copy would have written it and the offset would be
     /// computed from the wrong grid height for one frame.
     pub rows: u16,
+    /// The scrollback's length in this frame, rows — the scale of the scroll
+    /// position ([`Cursor::scroll_position`]).
+    ///
+    /// From **the same read** as the offset and `rows` (`rows`' reason): a
+    /// position computed from an offset of one round and a length of another
+    /// would put the scroll bar's thumb where the window is not. Zero on the
+    /// alternate screen, where there is nothing to scroll.
+    pub history: u32,
+    /// The **resting** fill band: the band the virtual scroll counts from
+    /// ([`Session::fill_shown`]), not this frame's [`Cursor::fill`].
+    ///
+    /// The two differ in exactly the states the scroll position must not
+    /// see: in a scrolled window `fill` is zero while the band the window will
+    /// come back to is still this number, and while a slide is in flight
+    /// `fill` is extended for the strip the slide opens. Fed the frame's
+    /// `fill`, the thumb would jump by the band's length on the first notch
+    /// and stop short of the bottom at rest.
+    pub resting_fill: u16,
     /// How long from now the duration counter drawn in this frame will show
     /// **something else**; `None` if there is no counter to advance.
     ///
@@ -567,6 +585,46 @@ impl Cursor {
     pub fn band_rows(&self) -> Option<u16> {
         (!self.band_hidden).then_some(self.input_rows)
     }
+
+    /// Where the visible window stands in the scrollback; `None` when there is
+    /// nothing to scroll — the scroll bar's one input ([`scroll_position`]).
+    pub fn scroll_position(&self) -> Option<ScrollPosition> {
+        scroll_position(
+            self.history,
+            self.resting_fill,
+            self.display_offset,
+            self.scroll_frac,
+            self.rows,
+        )
+    }
+}
+
+/// The visible window's place in the scrollback, in rows — what a scroll bar
+/// draws.
+///
+/// **Rows, not pixels**: how tall the thumb is and where its track ends are
+/// the drawing side's decisions; this crate says only how far the window can
+/// travel, where it is on that travel and how much of it is visible.
+///
+/// No [`Eq`]: the position carries `f32` (precedent: [`Cursor`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollPosition {
+    /// How far the window can travel, rows: the scrollback minus the resting
+    /// fill band. **Never zero** — a window with nothing to travel has no
+    /// position at all.
+    ///
+    /// The band is subtracted because it is a virtual scroll
+    /// ([`Session::fill_shown`]): a bottom-anchored window already shows the
+    /// band's rows of history, so the window's top is `band` rows deep at the
+    /// bottom and the travel left above it is the rest.
+    pub room: u32,
+    /// The window's distance from the **top** of the history, rows,
+    /// fractional, in `[0, room]`: `0` is the oldest row at the screen's top,
+    /// `room` is the bottom.
+    pub top: f32,
+    /// The rows the window shows; the travel plus this is the whole length,
+    /// so a thumb's share of its track is `visible / (room + visible)`.
+    pub visible: u16,
 }
 
 /// A command block's trace in the frame: **the command's row** and that
@@ -5448,6 +5506,11 @@ impl Session {
         // alternate screen (plan → known limit), mouse mode.
         let stored = f64::from_bits(self.scroll_frac.load(Ordering::Relaxed));
         let history = term.history_size() as i64;
+        // The resting band, **after** the store above: in a bottom-anchored
+        // frame it is this frame's band, in a scrolled one the band the window
+        // will come back to. The fraction's gate and the scroll position read
+        // the same number.
+        let resting_fill = self.band_shown();
         // The fraction's validity is asked by **the event path's measure**
         // ([`scroll_fraction_locked`]: above the top, with the band's virtual
         // scroll, a row in the scrollback) and the wheel must be going to the
@@ -5455,7 +5518,7 @@ impl Session {
         // application that switched to mouse mode) no wheel event can erase the
         // fraction any more; had it been left the grid would hang half a row down.
         let valid = input::wheel_route(*term.mode(), false) == WheelRoute::Scroll
-            && i64::from(visual_top(offset, self.band_shown())) < history;
+            && i64::from(visual_top(offset, resting_fill)) < history;
         let scroll_frac = if stored > 0.0 && valid {
             // Rounding to `f32` can reach `1.0` and would pierce the `[0, 1)`
             // contract; the bound is the `f32` right below `1`.
@@ -5710,6 +5773,16 @@ impl Session {
             scroll_generation: ScrollGlide::unpack(self.scroll_glide.load(Ordering::Relaxed))
                 .generation,
             rows: grid_rows,
+            // The scroll position's two inputs, from this round's reads. The
+            // alternate screen's zero is explicit: its grid has no history today
+            // anyway, but the position's "nothing to scroll there" must not rest
+            // on a fact about alacritty's grid that this crate does not name.
+            history: if alt_screen {
+                0
+            } else {
+                u32::try_from(history).unwrap_or(u32::MAX)
+            },
+            resting_fill: u16::try_from(resting_fill).unwrap_or(u16::MAX),
             // Phase 2 fills it: whether the running block's anchor is **visible** in
             // this frame is known only there and the clock's stopping condition is
             // exactly that.
@@ -10351,6 +10424,49 @@ fn scroll_fraction_locked<T: EventListener>(
 /// jumps `band + 1` while the top moves exactly one row.
 fn visual_top(offset: i32, band: i32) -> i32 {
     if offset == 0 { band } else { offset }
+}
+
+/// The scroll position's **single** arithmetic: the window's place on its
+/// travel, from the top of the history ([`ScrollPosition`]).
+///
+/// It stands next to [`visual_top`] because it is that function read from
+/// the other end: the screen's top is `visual_top(offset, band)` rows deep,
+/// and the travel starts where the resting band leaves off — so the position
+/// from the top is `room − (visual_top − band) − frac`. At the bottom
+/// `visual_top` is the band itself and the position is `room`; the band's
+/// first notch jumps the offset to `band + 1` but `visual_top` by exactly one
+/// row, so the position moves by one row too. The scroll fraction moves it by
+/// itself: the grid is drawn that much lower, i.e. that much further up the
+/// history.
+///
+/// **Clamped to `[0, room]`**: an offset a resize left inside the band's
+/// unseen range (`1..band`, [`scroll_locked`]) shows rows below the resting
+/// band's top and would come out past the bottom.
+///
+/// `None` when the travel is zero — the scrollback fits in the band, or there
+/// is none (the alternate screen's grid has no history; the caller writes a
+/// zero length there, so a reader need not know alacritty's grid layout).
+fn scroll_position(
+    history: u32,
+    band: u16,
+    offset: i32,
+    frac: f32,
+    rows: u16,
+) -> Option<ScrollPosition> {
+    let room = history.saturating_sub(u32::from(band));
+    if room == 0 {
+        return None;
+    }
+    let band = i32::from(band);
+    // In `f64`: the travel reaches the scrollback's ceiling and the depth
+    // difference is a whole number of rows, both exact there.
+    let above = f64::from(visual_top(offset, band)) - f64::from(band);
+    let top = (f64::from(room) - above - f64::from(frac)).clamp(0.0, f64::from(room));
+    Some(ScrollPosition {
+        room,
+        top: top as f32,
+        visible: rows,
+    })
 }
 
 /// Can the position move in the `up` direction — the glide request's end gate.
@@ -18748,12 +18864,95 @@ mod tests {
     /// band's top (the band is a virtual scroll, [`Session::fill_shown`]); the
     /// offset counts only after the band.
     fn position(cursor: &Cursor) -> f64 {
-        let top = if cursor.display_offset == 0 {
-            i32::from(cursor.fill)
-        } else {
-            cursor.display_offset
-        };
+        let top = visual_top(cursor.display_offset, i32::from(cursor.fill));
         f64::from(top) + f64::from(cursor.scroll_frac)
+    }
+
+    #[test]
+    fn the_scroll_position_counts_from_the_top_past_the_resting_band() {
+        // 50 rows of history, a resting band of 3: the travel is 47 rows. At
+        // the bottom the window is at the travel's end, not three rows short of
+        // it — the band is a virtual scroll and already shows its rows.
+        let at = |offset, frac| scroll_position(50, 3, offset, frac, 24);
+        let bottom = at(0, 0.0).expect("a position");
+        assert_eq!(bottom.room, 47);
+        assert_eq!(bottom.top, 47.0, "the bottom is not the travel's end");
+        assert_eq!(bottom.visible, 24);
+        // The band's first notch jumps the offset to `band + 1` and the
+        // position by exactly one row: the thumb does not leap by the band.
+        assert_eq!(at(4, 0.0).expect("a position").top, 46.0);
+        // The fraction moves it by itself, upward.
+        assert_eq!(at(4, 0.25).expect("a position").top, 45.75);
+        assert_eq!(at(0, 0.5).expect("a position").top, 46.5);
+        // The top of the history.
+        assert_eq!(at(50, 0.0).expect("a position").top, 0.0);
+        // An offset a resize left inside the band's unseen range is clamped
+        // to the bottom, not past it.
+        assert_eq!(at(2, 0.0).expect("a position").top, 47.0);
+    }
+
+    #[test]
+    fn no_travel_means_no_scroll_position() {
+        // The scrollback fits in the band, or there is none (the alternate
+        // screen writes zero): nothing to scroll, so no bar.
+        assert_eq!(scroll_position(3, 3, 0, 0.0, 24), None);
+        assert_eq!(scroll_position(2, 3, 0, 0.0, 24), None);
+        assert_eq!(scroll_position(0, 0, 0, 0.0, 24), None);
+        assert!(scroll_position(1, 0, 0, 0.0, 24).is_some());
+    }
+
+    #[test]
+    fn the_frames_scroll_position_follows_the_window() {
+        // The record's two fields come from the frame's own read: in the
+        // banded bottom the position is the travel's end, a notch moves it by
+        // one row and the fraction by the fraction — the same scene the wheel
+        // tests scroll.
+        let (session, _wake) = gapped_session(true);
+        let start = cursor_now(&session);
+        assert!(start.resting_fill > 0, "no resting band: {start:?}");
+        let bottom = start.scroll_position().expect("a scrollback to travel");
+        assert_eq!(
+            bottom.room,
+            start.history - u32::from(start.resting_fill),
+            "{start:?}"
+        );
+        assert_eq!(bottom.top, bottom.room as f32, "{start:?}");
+        assert!(matches!(scroll(&session, 1), Wheel::Scrolled(n) if n > 0));
+        let notch = cursor_now(&session);
+        assert_eq!(
+            notch.resting_fill, start.resting_fill,
+            "the scrolled window forgot the band: {notch:?}"
+        );
+        assert_eq!(
+            notch.scroll_position().map(|p| p.top),
+            Some(bottom.top - 1.0),
+            "the first notch did not move the position by one row: {notch:?}"
+        );
+        smooth(&session, 0.5, ScrollIntent::Direct);
+        assert_eq!(
+            cursor_now(&session).scroll_position().map(|p| p.top),
+            Some(bottom.top - 1.5),
+        );
+    }
+
+    #[test]
+    fn the_alternate_screen_has_no_scroll_position() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; seq 1 30; printf '\\033[?1049hALTSCREEN'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until(
+            "the alternate screen did not open",
+            Duration::from_secs(5),
+            || {
+                cursor_now(&session);
+                session.alt_screen()
+            },
+        );
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.history, 0, "{cursor:?}");
+        assert_eq!(cursor.scroll_position(), None, "{cursor:?}");
     }
 
     #[test]

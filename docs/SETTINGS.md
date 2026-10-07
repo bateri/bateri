@@ -1482,7 +1482,7 @@ is text in the form `"#rrggbb"` (uppercase works too; no `#rgb` and no alpha).
 | key | meaning |
 |---|---|
 | `background` | default background, the window's backdrop |
-| `foreground` | default foreground |
+| `foreground` | default foreground; the scroll bar's thumb, translucent |
 | `dim` | default foreground written dim (SGR 2) |
 | `accent` | accent; the mark of a **running** command |
 | `cursor` | the color of the cursor block |

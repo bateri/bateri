@@ -76,11 +76,20 @@
 //! does. They plant no damage: a frame an effect keeps alive raises `frames`,
 //! not `content`.
 //!
+//! **The scroll bar takes the motion road too** ([`crate::scrollbar`]): it
+//! lives outside `Motion`, enters the sleep test under its own term, and its
+//! one-second hold after the last scrolling input is **spent asleep** — the
+//! clock wakes the link at the hold's end in the motion flavour and the fade
+//! is drawn as motion frames. What shows it is scrolling **input**
+//! ([`DisplayLink::poke_scrollbar`], through [`Waker::resume`]), never
+//! output.
+//!
 //! The contract's consequence in one sentence: a window with a running
-//! command **or a blinking cursor** is **not idle**; every other window is
-//! idle and draws zero frames. Both carry a named stop condition — the
-//! command ends, and blink is off by default and even when on stops after
-//! keyboard silence ([`crate::blink::Blink`]).
+//! command, **a blinking cursor or a scroll bar on screen** is **not idle**;
+//! every other window is idle and draws zero frames. All carry a named stop
+//! condition — the command ends; blink is off by default and even when on
+//! stops after keyboard silence ([`crate::blink::Blink`]); the bar fades out
+//! a second after the last scrolling input.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -99,6 +108,7 @@ use crate::frame::Frame;
 use crate::glyph_fx::GlyphFx;
 use crate::metrics::CellMetrics;
 use crate::motion::Motion;
+use crate::scrollbar::{Scrollbar, ScrollbarLayout};
 use crate::stats::Stats;
 use crate::surface::{self, Acquired};
 use crate::{GpuError, Renderer, Surface};
@@ -164,7 +174,9 @@ pub enum TickTarget {
 /// pacer started without the flag says "no damage" and goes straight back to
 /// sleep. Blink **answered** that reason: the tick's "no damage" branch can now
 /// have work to do (blink's phase change), so the pacer does not wake for
-/// nothing. That is the only legitimate reason to start without the flag.
+/// nothing. The scroll bar's appearing and fading is the same kind of work —
+/// only the bar changes, never the content. Those are the legitimate reasons
+/// to start without the flag: work the "no damage" branch itself draws.
 ///
 /// **An animation does not ask [`Waker::wake`] for frames** (module header):
 /// motion is the running tick's own decision. An animation wired to this
@@ -285,7 +297,7 @@ impl Waker {
     }
 
     /// Starts the pacer **without planting damage** — the clock's second
-    /// flavour.
+    /// flavour, and the scroll bar's poke ([`DisplayLink::poke_scrollbar`]).
     ///
     /// [`Waker::wake`] with its middle job removed: the same gate, the same
     /// start; no `dirty.mark()`. The woken tick therefore lands on the "no
@@ -375,6 +387,8 @@ struct Drawn {
     /// The top of the dock's input block (physical pixels, from the top) and
     /// the number of input rows; `None` → no dock in this frame.
     dock: Option<(f32, u16)>,
+    /// The scroll bar's layout the frame was drawn with.
+    scrollbar: ScrollbarLayout,
 }
 
 impl Origin {
@@ -408,12 +422,26 @@ impl Origin {
         self.0.get().dock
     }
 
+    /// The drawn frame's scroll bar layout — where the thumb, its track and
+    /// the bar's strip are, and whether there is a bar at all.
+    ///
+    /// **In the same body as the origin** for the dock's reason: a drag
+    /// translated against a new thumb and an old origin would grab a thumb
+    /// that is not on screen. The layout is published whether the bar is
+    /// showing or not — its strip is the bar's while there is something to
+    /// scroll, and the mouse reads that from here, not from a second copy of
+    /// the bar's arithmetic.
+    pub fn scrollbar(&self) -> ScrollbarLayout {
+        self.0.get().scrollbar
+    }
+
     /// Only the frame path writes; not `pub`, and must not be.
-    fn set(&self, px: f32, fill_rows: u16, dock: Option<(f32, u16)>) {
+    fn set(&self, px: f32, fill_rows: u16, dock: Option<(f32, u16)>, scrollbar: ScrollbarLayout) {
         self.0.set(Drawn {
             px,
             fill_rows,
             dock,
+            scrollbar,
         });
     }
 }
@@ -809,6 +837,16 @@ struct Core {
     /// The cursor's blink; the phase's owner is the painting side
     /// ([`crate::blink`]).
     blink: Cell<Blink>,
+    /// The scroll bar's visibility ([`crate::scrollbar`]); `Copy`, blink's
+    /// slot.
+    scrollbar: Cell<Scrollbar>,
+    /// The scroll bar's layout from the last **content** frame.
+    ///
+    /// Kept for two readers that never reach `bt-core`: the motion frame,
+    /// which fades the bar where the content frame put it, and
+    /// [`DisplayLink::poke_scrollbar`], whose gate is "can a bar be drawn" —
+    /// asked of the last frame, not recomputed off the frame path.
+    scrollbar_layout: Cell<ScrollbarLayout>,
     /// Whether the window is **focused** — `bt-shell`'s answer.
     ///
     /// Never enters `bt-core`: focus is a window fact and has nothing to
@@ -1430,6 +1468,31 @@ impl Core {
         // Being **before** `push_caret` is required too — the caret's rectangle
         // bakes this offset in.
         self.set_origin(&mut frame, motion, viewport_height);
+        // **The scroll bar**: the layout is this frame's — the position comes
+        // from the same read as the cells — and the step's answer is dropped:
+        // the frame is drawn anyway (blink's precedent). Without this arm the
+        // bar would freeze half-appeared while scrolling, where every tick
+        // finds damage and the motion arm never runs.
+        //
+        // **The track ends at the band's target top**, not the drawn one: the
+        // motion frames keep this layout while the band slides, and against
+        // the target the thumb is right at rest and otherwise either waiting
+        // for a growing band to rise to it or under a shrinking band's opaque
+        // ground until it uncovers it. Against the drawn top it would stop
+        // short of a band that has finished shrinking, for as long as the
+        // hold lasts. The band's height is `compose`'s gate and formula.
+        let band_px = if dock_rows > 0 && frame.dock().is_some() {
+            crate::frame::band_px(band_rows, self.cell.get())
+        } else {
+            0.0
+        };
+        let layout = ScrollbarLayout::new(
+            cursor.scroll_position(),
+            texture.texture.width() as f32,
+            crate::frame::band_top(viewport_height, band_px),
+            self.cell.get(),
+        );
+        self.step_scrollbar(&mut frame, now, Some(layout));
         if let (Some(at), Some((_, text))) = (motion.position(), caret) {
             frame.push_caret(
                 at,
@@ -1510,7 +1573,15 @@ impl Core {
         let mut glyph_fx = self.glyph_fx.borrow_mut();
         let fx_idle = glyph_fx.is_empty();
         glyph_fx.advance(dt);
-        if at_rest(motion, flipped, fx_idle) {
+        // **The fifth question: the scroll bar**, appearing or fading. It
+        // lives outside `Motion` too (blink's precedent) and its step is the
+        // same one the content arm takes — only without a fresh layout: the
+        // motion frame never reaches `bt-core`, so the bar fades where the last
+        // content frame put it. The step writes the frame before the texture
+        // is acquired; that is fine, the list is state, and on the sleep path
+        // the opacity written is the one already on screen.
+        let mut bar = self.step_scrollbar(frame, now, None);
+        if at_rest(motion, flipped, fx_idle, bar.idle()) {
             // Zero frames at idle: neither new content nor an unsettled
             // animation, the pacer sleeps. The next `Wakeup` starts it again
             // through the `Waker`.
@@ -1525,6 +1596,15 @@ impl Core {
             // only needed then. Armed while awake, every content frame would
             // plant one more tick.
             self.arm_clock(now);
+            return;
+        }
+        // **Awake, but nothing new to draw**: only the scroll bar is in flight
+        // and its opacity did not move in this tick (the tick that stamps a
+        // poke on a hidden bar, the hold's last tick). The pacer keeps running
+        // for the next tick; a frame here would be pixel for pixel the one on
+        // screen, a drawable and a GPU pass for nothing.
+        if nothing_to_draw(motion, flipped, fx_idle, bar) {
+            self.motion.set(motion);
             return;
         }
         // **Motion frame** (the cursor or the offset, or both). The `Waker` is
@@ -1647,6 +1727,11 @@ impl Core {
                         &Clusters::default(),
                         theme.cursor_linear(),
                     );
+                    // The scroll bar ends too, for the same stop: a fade in
+                    // flight would retry the failing draw on every tick until
+                    // it ran out.
+                    self.hide_scrollbar(frame);
+                    bar.settled = true;
                 }
             }
         }
@@ -1655,10 +1740,50 @@ impl Core {
         // running, one more tick would be paid until the next vsync — two
         // ticks for two **visible** frames a second. If motion continues it
         // is not touched: its rhythm is vsync anyway.
-        if motion.settled() && glyph_fx.is_empty() {
+        if motion.settled() && glyph_fx.is_empty() && bar.settled {
             self.waker.pacer().set_running(false);
             self.arm_clock(now);
         }
+    }
+
+    /// Hides the scroll bar at once and takes its thumb out of the kept
+    /// frame — for the paths that can no longer draw it
+    /// ([`Scrollbar::hide`]). The frame's slot is emptied too, or the next
+    /// damage-free frame (blink's tick) would redraw the old thumb.
+    fn hide_scrollbar(&self, frame: &mut Frame) {
+        let mut bar = self.scrollbar.get();
+        bar.hide();
+        self.scrollbar.set(bar);
+        frame.set_scrollbar(
+            self.scrollbar_layout.get(),
+            0.0,
+            self.theme.get().foreground_linear(),
+        );
+    }
+
+    /// The scroll bar's **single** step — the one function both arms call
+    /// ([`scrollbar_step`] is its body): `fresh` is the content frame's
+    /// layout, `None` keeps the last one (the motion frame). The theme is the
+    /// frame path's kept copy, so the motion frame takes no lock.
+    fn step_scrollbar(
+        &self,
+        frame: &mut Frame,
+        now: f64,
+        fresh: Option<ScrollbarLayout>,
+    ) -> BarStep {
+        let mut bar = self.scrollbar.get();
+        let mut kept = self.scrollbar_layout.get();
+        let step = scrollbar_step(
+            &mut bar,
+            &mut kept,
+            fresh,
+            now,
+            frame,
+            self.theme.get().foreground_linear(),
+        );
+        self.scrollbar.set(bar);
+        self.scrollbar_layout.set(kept);
+        step
     }
 
     /// Calls the notifier if the alternate screen changed; nothing otherwise.
@@ -1744,8 +1869,12 @@ impl Core {
     /// kept there (`Frame` is not cleared), so the value published through
     /// the slide is constant.
     fn publish_origin(&self, frame: &Frame) {
-        self.origin
-            .set(frame.origin_px(), frame.fill_rows(), frame.dock_hit());
+        self.origin.set(
+            frame.origin_px(),
+            frame.fill_rows(),
+            frame.dock_hit(),
+            self.scrollbar_layout.get(),
+        );
     }
 
     /// **The clock**: the third reason to ask for a frame (module header).
@@ -1763,14 +1892,16 @@ impl Core {
     ///   frame counting itself as content), so this arm obeys it. **The
     ///   completion poll of a frame still in flight rides this flavour too**
     ///   (the woken tick polls first, then finds nothing to draw and
-    ///   sleeps again), `POLL_DELAY` after the sleep.
+    ///   sleeps again), `POLL_DELAY` after the sleep, and so does **the
+    ///   scroll bar's hold** — the bar waits asleep and its fade is a motion
+    ///   frame ([`crate::scrollbar`]).
     ///
     /// The stop condition is `None` **in each**: on the counter's side the
     /// command ended, the anchor left the screen or there is no integration;
     /// on blink's side the setting is off, the caret is not drawn or the
-    /// inactivity period ran out; on the poll's side the queue is empty. With
-    /// all three `None` no tick is armed and the window returns to zero
-    /// frames at idle.
+    /// inactivity period ran out; on the poll's side the queue is empty; on
+    /// the scroll bar's side it is hidden. With all four `None` no tick is
+    /// armed and the window returns to zero frames at idle.
     ///
     /// **Not armed with the gate closed:** in an occluded window the tick
     /// already pauses higher up, so nobody wakes to update an invisible
@@ -1785,19 +1916,22 @@ impl Core {
         let generation = self.clock_generation.fetch_add(1, Ordering::Relaxed) + 1;
         // A frame still in flight: its completion is polled once more.
         let poll = self.renderer.in_flight().then_some(now + POLL_DELAY);
-        // **Three deadlines, one wakeup.** Whichever is due first is armed and
+        // **Four deadlines, one wakeup.** Whichever is due first is armed and
         // decides the flavour: the content tick plants damage (counting
-        // `content=` is right, the grid really changes), blink and the poll do
-        // not (only the caret's alpha changes / nothing is drawn). Armed
-        // separately, since `after` cannot be cancelled, one would void the
-        // other's generation.
+        // `content=` is right, the grid really changes), blink, the poll and
+        // the scroll bar's hold do not (only the caret's alpha changes /
+        // nothing is drawn / only the bar fades). Armed separately, since
+        // `after` cannot be cancelled, one would void the other's generation.
         let Some((due, damages)) = due_clock(
             self.content_deadline.get(),
-            self.blink.get().next_flip(),
-            poll,
+            [
+                self.blink.get().next_flip(),
+                poll,
+                self.scrollbar.get().next_deadline(),
+            ],
         ) else {
-            // No running counter, no blinking cursor, no frame in flight: the
-            // window returns to zero frames at idle.
+            // No running counter, no blinking cursor, no frame in flight, no
+            // scroll bar on screen: the window returns to zero frames at idle.
             return;
         };
         // A deadline in the past **saturates to zero**: a tick firing at once
@@ -2073,6 +2207,10 @@ impl DisplayLink {
             theme: Cell::new(theme),
             content_deadline: Cell::new(None),
             blink: Cell::new(Blink::default()),
+            // Hidden, and no layout until the first content frame says where
+            // the window stands: a poke before it is ignored.
+            scrollbar: Cell::new(Scrollbar::default()),
+            scrollbar_layout: Cell::new(ScrollbarLayout::default()),
             focused: Cell::new(true),
             keyboard: Cell::new(true),
             caret_style: Cell::new(CaretStyle::default()),
@@ -2163,12 +2301,21 @@ impl DisplayLink {
     /// however slow.
     ///
     /// The limit of what it sees: only animations going through
-    /// [`crate::motion`] and the dock's typing effects ([`crate::glyph_fx`]).
-    /// A path that skips the infrastructure and asks for frames on its own is
-    /// invisible to this question; its gate is [`Self::quiet_since`]'s
-    /// measured threshold.
+    /// [`crate::motion`], the dock's typing effects ([`crate::glyph_fx`]) and
+    /// the scroll bar ([`crate::scrollbar`]). A path that skips the
+    /// infrastructure and asks for frames on its own is invisible to this
+    /// question; its gate is [`Self::quiet_since`]'s measured threshold.
+    ///
+    /// The scroll bar is asked at **the last tick's stamp**, not a fresh
+    /// clock read: the question is whether the link left anything in flight,
+    /// and a bar asleep in its hold is settled — its clock is armed. A bar
+    /// appearing or fading is not.
     pub fn motion_settled(&self) -> bool {
-        self.core.motion.get().settled() && self.core.glyph_fx.borrow().is_empty()
+        let core = &self.core;
+        let now = core.last_update_at.get().unwrap_or(0.0);
+        core.motion.get().settled()
+            && core.glyph_fx.borrow().is_empty()
+            && core.scrollbar.get().settled(now)
     }
 
     /// Time since the last drawn frame — the `quiet=` token. `None` → no
@@ -2221,6 +2368,29 @@ impl DisplayLink {
         self.waker.wake();
     }
 
+    /// Scrolling **input** arrived — the wheel, a page scroll, a search jump —
+    /// so the scroll bar shows ([`crate::scrollbar`]). Main thread, at the
+    /// shell's scroll gates.
+    ///
+    /// **Input, never output**: nothing on the frame path calls this, so a
+    /// window scrolled up while output streams below keeps its bar hidden.
+    ///
+    /// Ignored when the last content frame had no bar to draw (no travel,
+    /// the alternate screen): a poke there would wake the link for invisible
+    /// fade frames. Otherwise the poke is a bit the next tick stamps and the
+    /// link is started through [`Waker::resume`] — **never** [`Waker::wake`]:
+    /// the bar's frames change only the bar, so they are motion frames and
+    /// stay out of `content=` and `requests=`.
+    pub fn poke_scrollbar(&self) {
+        let core = &self.core;
+        let mut bar = core.scrollbar.get();
+        let wanted = bar.poke(core.scrollbar_layout.get().drawable());
+        core.scrollbar.set(bar);
+        if wanted {
+            self.waker.resume();
+        }
+    }
+
     /// The window's visibility changed.
     ///
     /// While invisible both drawing and the **rhythm** stop: the pacer is
@@ -2245,6 +2415,10 @@ impl DisplayLink {
             // The typing effects too: an effect frozen in a background tab
             // would resume from a phase never seen when it comes back.
             core.glyph_fx.borrow_mut().finish();
+            // And the scroll bar: no tick plays its fade while hidden, and a
+            // bar left appearing or fading would count as unsettled until the
+            // window came back.
+            core.hide_scrollbar(&mut core.frame.borrow_mut());
             self.waker.pacer().set_running(false);
         }
     }
@@ -2441,16 +2615,15 @@ impl DisplayLink {
     /// drawing to the new one — it would also drift from the `TIOCSWINSZ` the
     /// PTY knows. **The gutter goes through the same gate.** With split gates,
     /// on a rejected size the gutter would be new, the grid old, and the
-    /// glyphs would shift from the `cols` computation. The gutter changing
-    /// **together** with the cell size is not a code invariant but a result
-    /// of today's scales: both are functions of the scale
-    /// (`Renderer::cell_metrics` gives them in one call), but
-    /// `round(8.0 * scale)` and `round_up(cell_w * scale)` are separate
-    /// functions. On macOS's integer backing scales (1.0, 2.0) they cannot
-    /// drift; if a fractional scale arrives, a metric where only the gutter
-    /// changed would fall into `Session::resize`'s "already the same" arm, and
-    /// `Frame::pos_at` and `point_to_cell` would drift for one frame. The
-    /// place to close it is here, the day that scale arrives.
+    /// glyphs would shift from the `cols` computation. **But "already the
+    /// same" is not a rejection**: a metric whose cell size is the grid's
+    /// own — where only the gutter or the scale moved (a zoom and a display
+    /// change landing on the same cell, a fractional scale rounding the
+    /// gutter and the cell apart) — is applied too. Kept out, the gutter would
+    /// shift `Frame::pos_at` against `point_to_cell` and the scroll bar would
+    /// keep its point sizes at the old scale. The one rejection that remains
+    /// with an unchanged cell size is a degenerate grid (zero columns or
+    /// rows), where nothing is drawn.
     /// **The cursor snaps in this frame.** On a geometry change the cursor did
     /// not move, the grid under it did — an animation would show
     /// it coming from where it never was. The flag is planted
@@ -2458,7 +2631,13 @@ impl DisplayLink {
     /// may have moved even if the cell size did not.
     pub fn resize(&self, cols: u16, rows: u16, cell: CellMetrics, dock_rows: u16) {
         let core = &self.core;
-        if core.session.resize(cols, rows, cell.cell_px()) {
+        // The rest of the metric (gutter, scale, rule) follows the cell size
+        // whenever the cell size is the one the grid already has: the gate
+        // keeps a **rejected cell size** out, and an unchanged one is not
+        // rejected — `Session::resize` only says "already the same".
+        if core.session.resize(cols, rows, cell.cell_px())
+            || core.cell.get().cell_px() == cell.cell_px()
+        {
             core.cell.set(cell);
         }
         // The dock share is **outside the gate** and for `cols`' reason: at a
@@ -2506,8 +2685,10 @@ fn content_deadline(now: f64, tick: Option<Duration>) -> Option<f64> {
 
 /// Which of the clock's deadlines is due first and **which flavour** it wants
 /// (`true` → the damage-planting content flavour, `false` → the damage-free
-/// motion flavour). `poll` is the completion poll of a frame still in flight
-/// Motion flavour, it draws nothing.
+/// motion flavour). `motion` is the motion flavour's deadlines: blink's phase
+/// change, the completion poll of a frame still in flight (it draws nothing)
+/// and the scroll bar's hold; the nearest of them competes with the content
+/// tick.
 ///
 /// A separate function, because the new guise of a defect fixed earlier
 /// lives exactly here and could not be tested inside `arm_clock`'s
@@ -2519,11 +2700,8 @@ fn content_deadline(now: f64, tick: Option<Duration>) -> Option<f64> {
 /// command's one-second tick one second forward every time and it would
 /// never fire. **On a tie the content wins**: the frame will be drawn anyway,
 /// the motion flavour needs no second wakeup.
-fn due_clock(content: Option<f64>, flip: Option<f64>, poll: Option<f64>) -> Option<(f64, bool)> {
-    let motion = match (flip, poll) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
+fn due_clock(content: Option<f64>, motion: [Option<f64>; 3]) -> Option<(f64, bool)> {
+    let motion = motion.into_iter().flatten().reduce(f64::min);
     match (content, motion) {
         (Some(content), Some(motion)) if motion < content => Some((motion, false)),
         (Some(content), _) => Some((content, true)),
@@ -2533,16 +2711,76 @@ fn due_clock(content: Option<f64>, flip: Option<f64>, poll: Option<f64>) -> Opti
 }
 
 /// The "no damage" branch's sleep question: motion settled, blink's phase
-/// did not turn and **before this step** nothing was in flight in the typing
-/// effects.
+/// did not turn, **before this step** nothing was in flight in the typing
+/// effects, and the scroll bar is idle ([`BarStep::idle`]).
 ///
 /// The effect's question looks at the state before `advance` and that is
 /// required: the last state of an effect finishing in this step (an arrival
 /// settled on its static glyph, a ghost gone) has not been drawn yet; sleeping
 /// would leave a half-transparent letter hanging on screen. The frame the list
-/// empties in is drawn, the next tick sleeps.
-fn at_rest(motion: Motion, flipped: bool, fx_idle: bool) -> bool {
-    motion.settled() && !flipped && fx_idle
+/// empties in is drawn, the next tick sleeps. The bar's term carries the same
+/// requirement its own way: a step that changed the opacity is drawn even if
+/// the bar settles in it.
+fn at_rest(motion: Motion, flipped: bool, fx_idle: bool, bar_idle: bool) -> bool {
+    motion.settled() && !flipped && fx_idle && bar_idle
+}
+
+/// The "no damage" branch's second question, once [`at_rest`] said "stay
+/// awake": does this tick have anything to draw? Not when everything but the
+/// scroll bar is at rest and the bar's opacity did not move — the bar is in
+/// flight (a poke just stamped on a hidden bar, the hold about to end) and
+/// the next tick will have the change.
+fn nothing_to_draw(motion: Motion, flipped: bool, fx_idle: bool, bar: BarStep) -> bool {
+    motion.settled() && !flipped && fx_idle && !bar.changed
+}
+
+/// One tick's scroll bar answer — the bar's terms of the sleep question.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BarStep {
+    /// The opacity differs from the last one drawn: this tick has something
+    /// to draw.
+    changed: bool,
+    /// The bar needs no frame after this one ([`Scrollbar::settled`]) — the
+    /// question **after** drawing, the motion arm's tail.
+    settled: bool,
+}
+
+impl BarStep {
+    /// The question **before** drawing ([`at_rest`]): nothing new to draw
+    /// and nothing in flight. A step that settles the bar but changed its
+    /// opacity is not idle — its frame is the last one, and sleeping before
+    /// it would leave a half-faded thumb on screen.
+    fn idle(self) -> bool {
+        !self.changed && self.settled
+    }
+}
+
+/// The body of the scroll bar's single step ([`Core::step_scrollbar`]),
+/// without the link: the state advances to `now`, the layout is `fresh` (a
+/// content frame) or the kept one (a motion frame), the thumb is written into
+/// the frame — `None` once hidden, or a kept frame would go on drawing it —
+/// and the sleep terms come back.
+///
+/// **No waker anywhere in here**: the step only answers; the link's clock and
+/// sleep question use the answer in the motion flavour, so the bar never
+/// counts in `content=` or `requests=`.
+fn scrollbar_step(
+    bar: &mut Scrollbar,
+    kept: &mut ScrollbarLayout,
+    fresh: Option<ScrollbarLayout>,
+    now: f64,
+    frame: &mut Frame,
+    foreground: LinearRgba,
+) -> BarStep {
+    if let Some(layout) = fresh {
+        *kept = layout;
+    }
+    let changed = bar.advance(now, kept.drawable());
+    frame.set_scrollbar(*kept, bar.alpha(now), foreground);
+    BarStep {
+        changed,
+        settled: bar.settled(now),
+    }
 }
 
 #[cfg(test)]
@@ -2558,7 +2796,7 @@ mod tests {
         // exactly divisible by the cell height the band itself sits below the
         // leftover stripe. Had we rounded the target to an integer, the caret
         // would sit up to a cell too high.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        let cell = CellMetrics::new(9, 18, 9, 8, 1, 1.0).expect("metrics");
         // A 600 px window, a two-row dock: 2×18 rows + 2×8 outer gutter +
         // 1×16 row gap = 68, so the band starts at 532.
         let dock_top = 600.0 - crate::frame::dock_px(2, cell);
@@ -2593,7 +2831,7 @@ mod tests {
         // + 16 = 68`, the grid is `⌊532/18⌋ = 29` rows and the leftover stripe
         // is 10 px. The stripe must stay 10 px while the band grows too: the
         // grid goes up together with the band.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        let cell = CellMetrics::new(9, 18, 9, 8, 1, 1.0).expect("metrics");
         const BOTTOM: f32 = 600.0;
         const ROWS: f32 = 29.0;
         const FILL: u16 = 2;
@@ -2659,7 +2897,7 @@ mod tests {
     #[test]
     fn the_band_target_is_one_fractional_signed_formula() {
         // @1x, 9×18 cell, gutter 8: the PTY gutter is 68 px, the row gap 16.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        let cell = CellMetrics::new(9, 18, 9, 8, 1, 1.0).expect("metrics");
         // With one or more input rows, whole rows — integer pixels, so
         // bit-for-bit in `f32` too: today's frame does not change.
         assert_eq!(band_target(Some(1), DOCK_ROWS, cell), 0.0);
@@ -2686,7 +2924,7 @@ mod tests {
         // share lower, the fill band stays glued to the grid and the grid's
         // bottom edge meets the band's top in every frame — both ways. The
         // setup is the remote twin's.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        let cell = CellMetrics::new(9, 18, 9, 8, 1, 1.0).expect("metrics");
         const BOTTOM: f32 = 600.0;
         const ROWS: f32 = 29.0;
         const FILL: u16 = 7;
@@ -2772,7 +3010,7 @@ mod tests {
         // and the grid and band coincide in every frame — in both directions.
         // The setup is that of
         // `the_grid_the_fill_band_and_the_dock_band_meet_in_every_frame`.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        let cell = CellMetrics::new(9, 18, 9, 8, 1, 1.0).expect("metrics");
         const BOTTOM: f32 = 600.0;
         const ROWS: f32 = 29.0;
         const FILL: u16 = 7;
@@ -2857,7 +3095,7 @@ mod tests {
     fn a_remote_alternate_screen_keeps_a_one_row_band_without_offsetting_the_grid() {
         // vim over ssh: the share is one row and the band is the context row
         // alone — the band is exactly the share and the grid stays put.
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        let cell = CellMetrics::new(9, 18, 9, 8, 1, 1.0).expect("metrics");
         let mut motion = Motion::default();
         motion.sync(None, 0, band_target(Some(0), 1, cell), 0, true, false);
         let mut frame = Frame::default();
@@ -2881,7 +3119,7 @@ mod tests {
         // temporary, it returns when the input ends. The mouse reads the same
         // origin (`Origin::px`), so the point clicked on a visible row is the
         // right row (`point_to_cell`'s negative-origin arm).
-        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("metrics");
+        let cell = CellMetrics::new(9, 18, 9, 8, 1, 1.0).expect("metrics");
         let mut motion = Motion::default();
         motion.sync(None, 0, 2.0, 0, false, false);
         let mut frame = Frame::default();
@@ -2939,7 +3177,7 @@ mod tests {
         loop {
             let fx_idle = fx.is_empty();
             fx.advance(dt);
-            if at_rest(Motion::default(), false, fx_idle) {
+            if at_rest(Motion::default(), false, fx_idle, true) {
                 break;
             }
             drawn += 1;
@@ -2959,7 +3197,8 @@ mod tests {
         assert!(at_rest(
             Motion::default(),
             false,
-            GlyphFx::default().is_empty()
+            GlyphFx::default().is_empty(),
+            true
         ));
     }
 
@@ -3009,26 +3248,250 @@ mod tests {
     fn the_clock_picks_the_nearer_deadline_and_its_flavour() {
         // A content tick plants damage (the grid really changes), a blink does
         // not (only the caret's alpha).
-        assert_eq!(due_clock(Some(1.0), Some(0.5), None), Some((0.5, false)));
-        assert_eq!(due_clock(Some(1.0), None, None), Some((1.0, true)));
-        assert_eq!(due_clock(None, Some(0.5), None), Some((0.5, false)));
         assert_eq!(
-            due_clock(None, None, None),
+            due_clock(Some(1.0), [Some(0.5), None, None]),
+            Some((0.5, false))
+        );
+        assert_eq!(due_clock(Some(1.0), [None, None, None]), Some((1.0, true)));
+        assert_eq!(due_clock(None, [Some(0.5), None, None]), Some((0.5, false)));
+        assert_eq!(
+            due_clock(None, [None, None, None]),
             None,
             "a clock was set while idle"
         );
         // On a tie the content wins: the frame will be drawn anyway, the
         // motion flavour needs no second wakeup.
-        assert_eq!(due_clock(Some(1.0), Some(1.0), None), Some((1.0, true)));
+        assert_eq!(
+            due_clock(Some(1.0), [Some(1.0), None, None]),
+            Some((1.0, true))
+        );
         // The completion poll of a frame in flight rides the motion
         // flavour: it draws nothing, so it plants no damage, and the nearest
         // of blink and the poll competes with the content tick.
-        assert_eq!(due_clock(None, None, Some(0.2)), Some((0.2, false)));
+        assert_eq!(due_clock(None, [None, Some(0.2), None]), Some((0.2, false)));
         assert_eq!(
-            due_clock(Some(1.0), Some(0.5), Some(0.2)),
+            due_clock(Some(1.0), [Some(0.5), Some(0.2), None]),
             Some((0.2, false))
         );
-        assert_eq!(due_clock(Some(0.1), None, Some(0.2)), Some((0.1, true)));
+        assert_eq!(
+            due_clock(Some(0.1), [None, Some(0.2), None]),
+            Some((0.1, true))
+        );
+        // The scroll bar's hold rides the motion flavour too: its fade
+        // changes only the bar.
+        assert_eq!(
+            due_clock(Some(2.0), [Some(0.5), None, Some(0.3)]),
+            Some((0.3, false))
+        );
+        assert_eq!(
+            due_clock(Some(0.2), [None, None, Some(0.3)]),
+            Some((0.2, true))
+        );
+    }
+
+    /// A scroll bar with something to travel: a 400×300 window at @1x,
+    /// 100 rows above an 18-row window at the bottom.
+    fn bar_scene() -> (Frame, ScrollbarLayout) {
+        let cell = CellMetrics::new(8, 16, 8, 8, 1, 1.0).expect("non-zero cell");
+        let mut frame = Frame::default();
+        frame.clear(cell, CaretStyle::default());
+        let position = bt_core::ScrollPosition {
+            room: 100,
+            top: 100.0,
+            visible: 18,
+        };
+        let layout = ScrollbarLayout::new(Some(position), 400.0, 300.0, cell);
+        assert!(layout.drawable());
+        (frame, layout)
+    }
+
+    #[test]
+    fn the_scroll_bar_rises_on_content_frames_and_fades_from_the_motion_clock() {
+        // **The tick sequence, through the one step both arms call.**
+        let foreground = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+        let (mut frame, layout) = bar_scene();
+        let mut bar = Scrollbar::default();
+        let mut kept = ScrollbarLayout::default();
+        let tick = 1.0 / 120.0;
+        // No content frame yet: nothing laid out, the poke is ignored.
+        assert!(!bar.poke(kept.drawable()), "a poke before any layout");
+        // The first content frame lays the bar out, hidden: no op.
+        let step = scrollbar_step(
+            &mut bar,
+            &mut kept,
+            Some(layout),
+            -tick,
+            &mut frame,
+            foreground,
+        );
+        assert!(step.idle() && frame.scrollbar().is_none(), "{step:?}");
+        // Scrolling: the wheel's poke, then **content** frames back to back
+        // (the scroll damages every tick and the motion arm never runs). The
+        // bar must rise across them, not freeze waiting for a motion frame.
+        assert!(bar.poke(kept.drawable()));
+        let mut now = 0.0;
+        let mut alpha = 0.0f32;
+        while alpha < 1.0 {
+            scrollbar_step(
+                &mut bar,
+                &mut kept,
+                Some(layout),
+                now,
+                &mut frame,
+                foreground,
+            );
+            let next = bar.alpha(now);
+            assert!(
+                next > alpha || (now == 0.0 && next == 0.0),
+                "the bar did not rise at {now}: {alpha} → {next}"
+            );
+            assert_eq!(frame.scrollbar().is_some(), next > 0.0, "at {now}");
+            alpha = next;
+            now += tick;
+            assert!(now < 0.2, "the bar never finished appearing");
+        }
+        // The scrolling stopped: a motion frame finds the bar holding — idle,
+        // so the link sleeps, and the clock is armed for the hold's end in
+        // the **motion** flavour: no damage, so not a content frame and not a
+        // request.
+        let step = scrollbar_step(&mut bar, &mut kept, None, now, &mut frame, foreground);
+        assert!(
+            at_rest(Motion::default(), false, true, step.idle()),
+            "{step:?}"
+        );
+        assert_eq!(
+            due_clock(None, [None, None, bar.next_deadline()]),
+            Some((1.0, false)),
+            "the hold's end is not a motion-flavoured wakeup"
+        );
+        assert!(frame.scrollbar().is_some(), "the held bar left the frame");
+        // The clock fires: the fade is drawn in motion frames, and while it
+        // runs the link is not settled (`motion_settled`'s term).
+        let mut now = 1.0;
+        let mut alpha = 1.0f32;
+        loop {
+            let step = scrollbar_step(&mut bar, &mut kept, None, now, &mut frame, foreground);
+            assert!(
+                !at_rest(Motion::default(), false, true, step.idle()),
+                "the link slept mid-fade at {now}"
+            );
+            if step.settled {
+                // The last fading step is drawn without a bar, then nothing.
+                assert_eq!(frame.scrollbar(), None, "a gone bar is still drawn");
+                break;
+            }
+            assert!(!bar.settled(now), "a fading bar counts as settled at {now}");
+            let next = bar.alpha(now);
+            assert!(next < alpha || now == 1.0, "the bar did not fade at {now}");
+            alpha = next;
+            now += tick;
+            assert!(now < 1.5, "the fade never ended");
+        }
+        assert_eq!(
+            due_clock(None, [None, None, bar.next_deadline()]),
+            None,
+            "a hidden bar armed a clock"
+        );
+        let step = scrollbar_step(
+            &mut bar,
+            &mut kept,
+            None,
+            now + tick,
+            &mut frame,
+            foreground,
+        );
+        assert!(step.idle(), "the hidden bar keeps the link awake: {step:?}");
+    }
+
+    #[test]
+    fn a_tick_that_changes_nothing_on_screen_waits_instead_of_drawing() {
+        // The wheel at the bottom pokes without damage, so a **motion** tick
+        // stamps the poke — at an opacity still zero. The link must stay
+        // awake (the bar is rising) but draw nothing: the frame would be the
+        // one on screen. The hold's last tick is the same case at full
+        // opacity.
+        let foreground = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+        let (mut frame, layout) = bar_scene();
+        let mut bar = Scrollbar::default();
+        let mut kept = ScrollbarLayout::default();
+        let tick = 1.0 / 120.0;
+        scrollbar_step(
+            &mut bar,
+            &mut kept,
+            Some(layout),
+            -tick,
+            &mut frame,
+            foreground,
+        );
+        assert!(bar.poke(kept.drawable()));
+        let rest = Motion::default();
+        let stamped = scrollbar_step(&mut bar, &mut kept, None, 0.0, &mut frame, foreground);
+        assert!(
+            !at_rest(rest, false, true, stamped.idle()),
+            "slept on a rising bar"
+        );
+        assert!(
+            nothing_to_draw(rest, false, true, stamped),
+            "an identical frame was drawn"
+        );
+        let rising = scrollbar_step(&mut bar, &mut kept, None, tick, &mut frame, foreground);
+        assert!(
+            !nothing_to_draw(rest, false, true, rising),
+            "the rise was not drawn"
+        );
+        // Up and holding: asleep until the clock; it fires at the hold's end.
+        scrollbar_step(&mut bar, &mut kept, None, 0.5, &mut frame, foreground);
+        let ending = scrollbar_step(&mut bar, &mut kept, None, 1.0, &mut frame, foreground);
+        assert!(
+            !at_rest(rest, false, true, ending.idle()),
+            "slept at the hold's end"
+        );
+        assert!(nothing_to_draw(rest, false, true, ending));
+        // Anything else in flight still draws.
+        assert!(
+            !nothing_to_draw(rest, true, true, ending),
+            "a blink flip was not drawn"
+        );
+        assert!(
+            !nothing_to_draw(rest, false, false, ending),
+            "an effect was not drawn"
+        );
+    }
+
+    #[test]
+    fn a_long_scroll_keeps_the_bar_up_until_a_second_after_it_stops() {
+        // A trackpad scroll of a second and a half: pokes every 16 ms ride
+        // the content frames and push the hold forward each time.
+        let foreground = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+        let (mut frame, layout) = bar_scene();
+        let mut bar = Scrollbar::default();
+        let mut kept = layout;
+        let mut now = 0.0;
+        while now < 1.5 {
+            bar.poke(kept.drawable());
+            scrollbar_step(
+                &mut bar,
+                &mut kept,
+                Some(layout),
+                now,
+                &mut frame,
+                foreground,
+            );
+            if now > 0.2 {
+                assert_eq!(bar.alpha(now), 1.0, "the bar faded mid-scroll at {now}");
+            }
+            now += 0.016;
+        }
+        let last = now - 0.016;
+        assert_eq!(bar.next_deadline(), Some(last + 1.0));
+        assert!(
+            bar.settled(last + 0.9),
+            "the bar is not holding after the scroll"
+        );
+        assert!(
+            !bar.settled(last + 1.0),
+            "the bar did not start fading on time"
+        );
     }
 
     #[test]
@@ -3045,7 +3508,7 @@ mod tests {
 
         // t=0: the blink is nearer, the motion flavour is set.
         assert_eq!(
-            due_clock(content, blink.next_flip(), None),
+            due_clock(content, [blink.next_flip(), None, None]),
             Some((0.5, false))
         );
 
@@ -3053,7 +3516,7 @@ mod tests {
         assert!(blink.advance(0.5), "the blink did not flip");
         assert_eq!(blink.next_flip(), Some(1.0));
         assert_eq!(
-            due_clock(content, blink.next_flip(), None),
+            due_clock(content, [blink.next_flip(), None, None]),
             Some((1.0, true)),
             "the counter's tick was pushed by the blink"
         );
@@ -3075,6 +3538,9 @@ mod tests {
             "a finished command left the clock behind"
         );
         // A cleared deadline and a non-blinking cursor: no clock is set at all.
-        assert_eq!(due_clock(content_deadline(5.0, None), None, None), None);
+        assert_eq!(
+            due_clock(content_deadline(5.0, None), [None, None, None]),
+            None
+        );
     }
 }

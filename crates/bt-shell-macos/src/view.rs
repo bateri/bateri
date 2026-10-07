@@ -883,8 +883,9 @@ define_class!(
         /// whichever screen - the wheel goes to the application as a wheel
         /// report; if not, on the alternate screen it goes as arrows, on the
         /// primary screen it scrolls the visible window into the scrollback.
-        /// There is **no** scrollbar - AppKit's chronic (thumb, proportion,
-        /// drag), not needed for the threshold.
+        /// Scrolling the window shows the scroll bar (`bt-gpu` draws it): the
+        /// poke is **here**, at the input's gate, because what shows the bar is
+        /// scrolling input, never output ([`BateriView::poke_scrollbar`]).
         ///
         /// The decision by mode is in `bt-core` (`Session::scroll_wheel`); this
         /// supplies the line, the pointer's cell and Shift. The horizontal
@@ -958,7 +959,15 @@ define_class!(
             let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
             // Line path: the fractional amount is the line itself and the intent
             // is whole lines - the scroll arm goes through today's `scroll_locked` too.
-            match session.scroll_wheel(f64::from(lines), lines, ScrollIntent::Lines, pointer, shift) {
+            let wheel =
+                session.scroll_wheel(f64::from(lines), lines, ScrollIntent::Lines, pointer, shift);
+            // The scroll arm shows the bar, **zero included**: a wheel that
+            // could not move at either end still says "this is the end". A
+            // report or an arrow is the application's, not a scroll.
+            if matches!(wheel, Wheel::Scrolled(_)) {
+                self.poke_scrollbar();
+            }
+            match wheel {
                 Wheel::Scrolled(0) | Wheel::Ignored => carry.set(0.0),
                 Wheel::Scrolled(_) => self.follow_pointer(session),
                 // The window did not scroll, the application draws its own
@@ -1043,6 +1052,8 @@ define_class!(
                 && let Some(pages) = page_scroll(chars, shift)
                 && let Some(moved) = session.scroll_page(pages)
             {
+                // A page scroll shows the bar, at the end too (the wheel's rule).
+                self.poke_scrollbar();
                 if moved != 0 {
                     self.follow_pointer(session);
                 }
@@ -1630,7 +1641,13 @@ impl BateriView {
             return;
         };
         let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
-        match session.scroll_wheel(step.rows, step.lines, step.intent, pointer, shift) {
+        let wheel = session.scroll_wheel(step.rows, step.lines, step.intent, pointer, shift);
+        // The line arm's rule: every scroll shows the bar, a glide request
+        // and a gesture's start or settle (`Scrolled(0)`) too.
+        if matches!(wheel, Wheel::Scrolled(_)) {
+            self.poke_scrollbar();
+        }
+        match wheel {
             Wheel::Ignored if step.lines == 0 => {}
             Wheel::Scrolled(0) if step.intent == ScrollIntent::Glide => {}
             Wheel::Scrolled(0) | Wheel::Ignored => carry.set(0.0),
@@ -1643,6 +1660,14 @@ impl BateriView {
                 self.follow_pointer(session);
             }
             Wheel::Sent => {}
+        }
+    }
+
+    /// Scrolling input moved the grid: the scroll bar shows. Silent if the
+    /// view is not yet attached to a pane or the pane has no link yet.
+    fn poke_scrollbar(&self) {
+        if let Some(pane) = self.pane() {
+            pane.poke_scrollbar();
         }
     }
 
@@ -2323,7 +2348,7 @@ mod tests {
     /// The scenes' grid measure; the padding is an **argument**, because two
     /// separate things are asked: the cell arithmetic (padding zero) and the padding itself.
     fn grid(gutter: u16) -> CellMetrics {
-        CellMetrics::new(9, 18, 9, gutter, 1).expect("non-zero cell")
+        CellMetrics::new(9, 18, 9, gutter, 1, 1.0).expect("non-zero cell")
     }
 
     #[test]
@@ -2355,7 +2380,7 @@ mod tests {
         // must read the same band and the same pitch: were they to diverge the
         // hand would appear beside the button. Two dock shapes: with an input
         // line (a gap between lines) and a remote session (input line zero).
-        let metrics = CellMetrics::new(16, 33, 13, 8, 2).expect("cell");
+        let metrics = CellMetrics::new(16, 33, 13, 8, 2, 1.0).expect("cell");
         for (top, rows) in [(500.0_f32, 2_u16), (620.0, 0)] {
             let (start, end) = (40_u16, 52_u16);
             let (x, y, width, height) = context_span_px(metrics, top, rows, start, end);

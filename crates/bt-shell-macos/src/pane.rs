@@ -1649,6 +1649,17 @@ impl TerminalPane {
         self.ivars().link.get()
     }
 
+    /// Scrolling **input** reached this pane's grid — the wheel, a page
+    /// scroll, a search jump: the scroll bar shows
+    /// (`bt_gpu::DisplayLink::poke_scrollbar`). Every scroll gate calls this
+    /// and nothing on the output path does, so streaming output never lights
+    /// the bar. Silent before the link is born.
+    pub(crate) fn poke_scrollbar(&self) {
+        if let Some(link) = self.link() {
+            link.poke_scrollbar();
+        }
+    }
+
     /// The terminal view.
     pub(crate) fn view(&self) -> &BateriView {
         &self.ivars().view
@@ -3131,10 +3142,13 @@ impl TerminalPane {
     /// View ▸'s four scrolls: `Session::scroll_page`'s path (the very same as
     /// Shift+PgUp/PgDn) — the fraction is reset, the glide generation goes up,
     /// the fill-band rule is in `scroll_locked`. `None` on the alternate screen
-    /// and the items are grey anyway; the answer is not read here.
+    /// and the items are grey anyway; the answer only gates the scroll bar's
+    /// poke — a page scroll shows the bar, at either end too.
     fn scroll_pages(&self, pages: i32) {
-        if let Some(session) = self.session() {
-            session.scroll_page(pages);
+        if let Some(session) = self.session()
+            && session.scroll_page(pages).is_some()
+        {
+            self.poke_scrollbar();
         }
     }
 
@@ -3196,7 +3210,13 @@ impl TerminalPane {
         let status = session.set_search(&query);
         self.ivars().search_status.set(status);
         let report = if status == SearchStatus::Ready {
-            session.search_reveal(self.search_cover(), self.ivars().smooth_scroll.get())
+            let report =
+                session.search_reveal(self.search_cover(), self.ivars().smooth_scroll.get());
+            // An applied query is search navigation: the bar shows where the
+            // current match sits in the history, whether or not the reveal had
+            // to move the window to reach it.
+            self.poke_scrollbar();
+            report
         } else {
             SearchReport::default()
         };
@@ -3285,6 +3305,8 @@ impl TerminalPane {
             self.search_cover(),
             self.ivars().smooth_scroll.get(),
         );
+        // A search jump is scrolling input: the bar shows where it landed.
+        self.poke_scrollbar();
         bar.set_count(status, report);
         if !report.complete {
             self.kick_search();

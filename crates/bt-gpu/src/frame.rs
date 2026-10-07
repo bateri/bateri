@@ -40,6 +40,7 @@ use bt_core::{
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
 use crate::metrics::CellMetrics;
+use crate::scrollbar::{ScrollbarLayout, THUMB_ALPHA};
 
 /// Identical to `shaders/cell_bg.wgsl` -> `Instance`, field by field.
 ///
@@ -701,6 +702,16 @@ pub(crate) fn band_px(input_rows: Option<u16>, cell: CellMetrics) -> f32 {
     input_rows.map_or(0.0, |rows| dock_px(rows.saturating_add(1), cell))
 }
 
+/// Where a dock band `band_px` tall starts in a window `height_px` tall,
+/// from the top: the band is bottom-anchored. **One expression for two
+/// bands**: the drawn one ([`Frame::band_top_px`], the dock's ground) and the
+/// target one (the scroll bar's track, which ends where the dock will
+/// stand). Clamped at zero: in a window shorter than the dock, the dock
+/// covers it all.
+pub(crate) fn band_top(height_px: f32, band_px: f32) -> f32 {
+    (height_px - band_px).max(0.0)
+}
+
 /// The ceiling of the dock's input rows: **half** of the grid's rows — a
 /// **design constant**, not a measured number (the precedent of
 /// [`bt_atlas::CONTEXT_SCALE`]).
@@ -1164,6 +1175,15 @@ pub(crate) struct Frame {
     /// boundary's own number and is not derived from the cells — a fill row
     /// with no cells (entirely empty) must also take up room in the band.
     fill_rows: u16,
+    /// The scroll bar's thumb in this frame ([`Frame::set_scrollbar`]);
+    /// `None` → no bar and not a single op is planned for it.
+    ///
+    /// A slot, not a list: one thumb per window. **Window space**, outside
+    /// every surface's offset — the bar belongs to the window's edge, not to
+    /// the grid sliding under it. Both frame paths write it (the bar fades in
+    /// motion frames), and `clear` empties it so a frame that does not say
+    /// draws no bar.
+    scrollbar: Option<RoundedDraw>,
     /// The number of **background** instances drawn; the caret is not counted.
     ///
     /// `make smoke`'s `cells=K` token reads this: the proof that the sink
@@ -1257,6 +1277,7 @@ impl Frame {
         // The fraction is under the same contract: a frame that does not say
         // draws on a whole row.
         self.frac_px = 0.0;
+        self.scrollbar = None;
     }
 
     /// This frame's vertical origin, in **rows**: the content starts this much
@@ -2280,6 +2301,50 @@ impl Frame {
         })
     }
 
+    /// The scroll bar's thumb for this frame: `layout`'s rectangle in the
+    /// theme's foreground at the thumb's opacity times `alpha` (the bar's
+    /// visibility, [`crate::scrollbar::Scrollbar::alpha`]). Nothing when the
+    /// layout has no bar or the bar is fully transparent — a hidden bar costs
+    /// not one op.
+    ///
+    /// The thumb is a pill: `caret_fragment`'s rounded rectangle with the
+    /// radius half its width, so the ends are round and the edges
+    /// anti-aliased (the dock buttons' precedent — no new pipeline). The quad
+    /// and the core are the same rectangle, because the bar is drawn in a
+    /// viewport at the window's origin ([`crate::Renderer`]'s plan).
+    pub(crate) fn set_scrollbar(
+        &mut self,
+        layout: ScrollbarLayout,
+        alpha: f32,
+        foreground: LinearRgba,
+    ) {
+        self.scrollbar = (layout.drawable() && alpha > 0.0).then(|| {
+            let core = layout.thumb();
+            let [x0, y0, x1, y1] = core;
+            RoundedDraw {
+                instance: Instance {
+                    pos: [x0, y0],
+                    size: [x1 - x0, y1 - y0],
+                    rgba: with_alpha(foreground, THUMB_ALPHA * alpha),
+                },
+                core,
+                shape: [(x1 - x0) * 0.5, 0.0, 0.0, 0.0],
+            }
+        });
+    }
+
+    /// This frame's scroll bar thumb; `None` → no bar.
+    pub(crate) fn scrollbar(&self) -> Option<RoundedDraw> {
+        self.scrollbar
+    }
+
+    /// The top of the dock's **drawn** band in window space — the floor of
+    /// everything drawn above the dock; the window's bottom without a dock.
+    /// The dock's ground viewport reads it ([`crate::Renderer`]'s plan).
+    pub(crate) fn band_top_px(&self, height_px: f32) -> f32 {
+        band_top(height_px, self.dock_band_px())
+    }
+
     /// Turns the top hairline into a **progress bar** for this frame
     /// (`bt_core::Dock::progress`, in ten-thousandths): the filled
     /// part in `edge`'s colour, the rest in `track`'s (`bt_core::Dock::track`).
@@ -3058,7 +3123,7 @@ mod tests {
     /// keeps their expected pixels in cell arithmetic. The margin's own tests
     /// use [`GUTTER`] and name it.
     fn grid(width: u16, height: u16) -> CellMetrics {
-        CellMetrics::new(width, height, width, 0, 1).expect("non-zero cell")
+        CellMetrics::new(width, height, width, 0, 1, 1.0).expect("non-zero cell")
     }
 
     /// A selection's row run; shorthand for the corner-decision tests.
@@ -3129,6 +3194,10 @@ mod tests {
             scroll_frac: 0.0,
             scroll_generation: 0,
             rows: 1,
+            // No scrollback: the scroll bar is a separate list and this
+            // module's cursor tests do not draw it.
+            history: 0,
+            resting_fill: 0,
         }
     }
 
@@ -3234,7 +3303,7 @@ mod tests {
         // would appear.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(10, 20, 10, 0, 0).expect("non-zero cell"),
+            CellMetrics::new(10, 20, 10, 0, 0, 1.0).expect("non-zero cell"),
             CaretStyle::default(),
         );
         frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
@@ -3506,7 +3575,7 @@ mod tests {
         // background".
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.push(Cell {
@@ -3653,7 +3722,7 @@ mod tests {
         // **at column 0**, i.e. at the same x as the dock's prompt mark.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.push_block(block(2));
@@ -3667,7 +3736,7 @@ mod tests {
         // well; as long as the two were placed with separate arithmetic they
         // stood half a margin apart.
         frame.clear(
-            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.push_dock(Cell {
@@ -3684,7 +3753,7 @@ mod tests {
         );
         // Also the same when the margin changes: both go through the same margin.
         frame.clear(
-            CellMetrics::new(4, 18, 4, 12, 1).expect("metrics"),
+            CellMetrics::new(4, 18, 4, 12, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.push_dock(Cell {
@@ -3698,7 +3767,7 @@ mod tests {
         assert_eq!(frame.stripes()[0].pos[0], frame.dock_glyphs()[0].pos[0]);
 
         frame.clear(
-            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         assert!(
@@ -3713,7 +3782,7 @@ mod tests {
         // strip (the left margin is common), the only thing that differs is how
         // many pixels a letter advances. The number is born here because
         // `bt-core` sees no pixels.
-        let m = |w, cw| CellMetrics::new(w, 20, cw, GUTTER, 1).expect("metrics");
+        let m = |w, cw| CellMetrics::new(w, 20, cw, GUTTER, 1, 1.0).expect("metrics");
         // 80 × 10 pixels = 800; 100 columns at an 8-pixel step.
         assert_eq!(context_cols(80, m(10, 8)), 100);
         // If the ratio is 1 the budget is the same too: the "no shrinking" arm
@@ -3735,7 +3804,7 @@ mod tests {
         // draw call is born (`GlyphCell::size`).
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(10, 20, 8, GUTTER, 1).expect("metrics"),
+            CellMetrics::new(10, 20, 8, GUTTER, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         let at = |col, row| Cell {
@@ -3776,7 +3845,7 @@ mod tests {
             frame.dock_layout_px(),
             dock_px(
                 DOCK_ROWS,
-                CellMetrics::new(10, 20, 8, GUTTER, 1).expect("metrics")
+                CellMetrics::new(10, 20, 8, GUTTER, 1, 1.0).expect("metrics")
             ),
             "the small point size must not shorten the band"
         );
@@ -3791,7 +3860,7 @@ mod tests {
         // The fill's edge is the button's column boundary — the
         // same columns as the mouse's hit range (`bt_core::transfer_button_at`),
         // at the context row's small step. The label's glyph is inside that range.
-        let metrics = CellMetrics::new(10, 20, 8, GUTTER, 1).expect("metrics");
+        let metrics = CellMetrics::new(10, 20, 8, GUTTER, 1, 1.0).expect("metrics");
         let mut frame = Frame::default();
         frame.clear(metrics, CaretStyle::default());
         frame.push_dock(Cell {
@@ -3867,7 +3936,7 @@ mod tests {
         // something that is not a cell and the smoke gate's meaning would drift.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(8, 16, 8, GUTTER, 1).expect("metrics"),
+            CellMetrics::new(8, 16, 8, GUTTER, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.push(bg_cell(0, 0));
@@ -4261,7 +4330,7 @@ mod tests {
     #[test]
     fn a_dock_selection_is_one_rounded_run_in_dock_space() {
         let mut frame = Frame::default();
-        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("non-zero cell");
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("non-zero cell");
         frame.clear(metrics, CaretStyle::default());
         frame.push_selection(&[], BG);
         frame.push_dock_selection(&[SelectionRun {
@@ -4300,7 +4369,7 @@ mod tests {
     /// A frame ready for the search drawing: 9×18 cells, the colours two distinct tones.
     fn search_frame() -> Frame {
         let mut frame = Frame::default();
-        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("non-zero cell");
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("non-zero cell");
         frame.clear(metrics, CaretStyle::default());
         frame
     }
@@ -4387,7 +4456,7 @@ mod tests {
             "leaked into the band"
         );
 
-        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("non-zero cell");
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("non-zero cell");
         frame.clear(metrics, CaretStyle::default());
         assert!(frame.search_match_instances().is_empty());
         assert!(frame.search_current_instances().is_empty());
@@ -4418,7 +4487,7 @@ mod tests {
             panic!("{:?}", frame.fill_search_current_instances());
         };
         assert_eq!(current.pos, frame.pos(0, 1));
-        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("non-zero cell");
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("non-zero cell");
         frame.clear(metrics, CaretStyle::default());
         assert!(frame.fill_search_match_instances().is_empty());
         assert!(frame.fill_search_current_instances().is_empty());
@@ -4431,7 +4500,7 @@ mod tests {
     #[test]
     fn a_dock_selection_across_rows_stacks_its_runs() {
         let mut frame = Frame::default();
-        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("non-zero cell");
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("non-zero cell");
         frame.clear(metrics, CaretStyle::default());
         frame.set_dock_rows(3);
         frame.push_dock_selection(&[
@@ -4526,7 +4595,7 @@ mod tests {
         // made up.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.open_dock(BG, CURSOR, CURSOR);
@@ -4566,7 +4635,7 @@ mod tests {
 
         // The content starts below the margin: the first row is at y = margin.
         frame.clear(
-            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.push_dock(Cell {
@@ -4583,7 +4652,7 @@ mod tests {
         );
         // The second row is one cell lower, i.e. the margin is applied **once**.
         frame.clear(
-            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.push_dock(Cell {
@@ -4608,7 +4677,7 @@ mod tests {
         // row to separate) and the band is one row plus two outer margins. The
         // top line is at the top of the band and in the edge's colour; the
         // second separator has zero height.
-        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics");
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics");
         let mut frame = Frame::default();
         frame.clear(metrics, CaretStyle::default());
         frame.set_dock_input_rows(Some(0));
@@ -4661,7 +4730,7 @@ mod tests {
         // either hairline covers a pixel of the window; the surface is still
         // open and the mouse reads a zero-row input block, so a click on the
         // grid's bottom row is the grid's.
-        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics");
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics");
         assert_eq!(band_px(None, metrics), 0.0);
         let mut frame = Frame::default();
         frame.clear(metrics, CaretStyle::default());
@@ -4707,7 +4776,7 @@ mod tests {
         // plus the context row; the input rows are adjacent, the gap and the
         // second hairline only between the input block and the context row.
         // At @1x, 9×18 cells, margin 7: `4·18 + 2·7 + 14 = 100` px.
-        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics");
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics");
         assert_eq!(band_px(Some(3), metrics), 100.0);
         // With one row it is the PTY share itself — the screen is bit for bit the same.
         assert_eq!(band_px(Some(1), metrics), dock_px(DOCK_ROWS, metrics));
@@ -4760,7 +4829,7 @@ mod tests {
         // animation's height, the cells and the second hairline at the
         // layout's — the text stays in place, only the band's top rises. The
         // grid's origin is higher by the band's excess.
-        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("metrics");
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1, 1.0).expect("metrics");
         let mut frame = Frame::default();
         frame.clear(metrics, CaretStyle::default());
         frame.set_dock_rows(4);
@@ -4833,7 +4902,7 @@ mod tests {
         //
         // The thickness is from `CellMetrics::rule_px`; here 2.
         let mut frame = Frame::default();
-        let metrics = CellMetrics::new(10, 20, 10, 0, 2).expect("metrics");
+        let metrics = CellMetrics::new(10, 20, 10, 0, 2, 1.0).expect("metrics");
 
         frame.clear(metrics, CaretStyle::default());
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
@@ -4883,7 +4952,7 @@ mod tests {
         // Even if the rule metric comes out zero the thin caret stays visible.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(10, 20, 10, 0, 0).expect("metrics"),
+            CellMetrics::new(10, 20, 10, 0, 0, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
@@ -4898,7 +4967,7 @@ mod tests {
         // through exactly this path.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(10, 20, 10, 0, 2).expect("metrics"),
+            CellMetrics::new(10, 20, 10, 0, 2, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
@@ -4915,7 +4984,7 @@ mod tests {
         // grid slot — the dock's opaque ground would cover it.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(8, 16, 8, 0, 1).expect("metrics"),
+            CellMetrics::new(8, 16, 8, 0, 1, 1.0).expect("metrics"),
             CaretStyle::default(),
         );
         frame.set_dock_top(64.0);

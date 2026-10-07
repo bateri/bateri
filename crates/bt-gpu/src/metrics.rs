@@ -37,13 +37,50 @@ pub fn family_notice(family: &str) -> Option<FontNotice> {
     bt_atlas::family_issue(family).map(FontNotice::from)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct CellMetrics {
     cell_px: (u16, u16),
     context_cell_px: u16,
     gutter_px: u16,
     rule_px: u16,
+    /// Physical pixels per point — the backing scale the atlas was opened at.
+    ///
+    /// Carried because the gutter is not the last design number in points:
+    /// the scroll bar's sizes are points too ([`CellMetrics::pt_px`]), and
+    /// the scale reaches them on **the gutter's road** — from the one place
+    /// that knows it ([`crate::Renderer::cell_metrics`]) inside this type. A
+    /// scale kept anywhere else could stay at @1x after the window moved to a
+    /// Retina display while the cells grew.
+    scale: f64,
 }
+
+/// A size in **points**, in whole physical pixels at `scale` — the **one**
+/// point-to-pixel conversion: the gutter ([`CellMetrics::from_atlas`]) and
+/// the scroll bar's sizes ([`CellMetrics::pt_px`]) both go through here, so
+/// at a fractional scale the two cannot round apart.
+///
+/// Rounded, because an edge that does not land on the device grid would
+/// spread over two pixels and fade; never negative, so a degenerate scale
+/// (NaN, negative) gives zero-sized parts rather than inverted ones.
+fn points_px(pt: f64, scale: f64) -> f64 {
+    (pt * scale).round().max(0.0)
+}
+
+// By hand, because the scale is a float: equal bit for bit. The metrics are
+// compared to tell "the geometry moved" from "the same geometry again", and a
+// float compared by value would make a NaN scale never equal to itself — a
+// metric that changes on every look.
+impl PartialEq for CellMetrics {
+    fn eq(&self, other: &Self) -> bool {
+        self.cell_px == other.cell_px
+            && self.context_cell_px == other.context_cell_px
+            && self.gutter_px == other.gutter_px
+            && self.rule_px == other.rule_px
+            && self.scale.to_bits() == other.scale.to_bits()
+    }
+}
+
+impl Eq for CellMetrics {}
 
 impl CellMetrics {
     /// The width, in **points**, of the left gutter where the command block's
@@ -71,13 +108,16 @@ impl CellMetrics {
     /// a type only `Renderer::cell_metrics` could build would tie those tests
     /// to the GPU. The gutter being an **argument** is a continuation of the
     /// same rationale: a constant hidden in the body would tie the tests that
-    /// probe the gutter to the GPU as well.
+    /// probe the gutter to the GPU as well. The scale is an argument for the
+    /// same reason and without a default: a metric built at @2x for a test
+    /// must not draw its point-sized parts at @1x.
     pub fn new(
         width: u16,
         height: u16,
         context_width: u16,
         gutter: u16,
         rule: u16,
+        scale: f64,
     ) -> Option<Self> {
         // The gate asks all three at once: the context width is a **divisor**
         // too (`bt-gpu`'s context column budget) and, had a zero passed, the
@@ -87,6 +127,7 @@ impl CellMetrics {
             context_cell_px: context_width,
             gutter_px: gutter,
             rule_px: rule,
+            scale,
         })
     }
 
@@ -95,19 +136,19 @@ impl CellMetrics {
     /// ([`crate::Renderer::cell_metrics`] and the wgpu renderer's twin).
     pub(crate) fn from_atlas(metrics: Metrics, context_w: u16, scale: f64) -> Self {
         let (w, h) = metrics.cell_px;
-        // `as u16` saturates: a NaN or negative scale gives a zero gutter (the
-        // grid starts at the edge; `split_into_grid` and mouse mapping both
-        // stay correct), a huge scale stops at 65535. Rounding need not match
-        // the cell's direction: the gutter is subtracted, not divided by, so a
+        // A NaN or negative scale gives a zero gutter (the grid starts at the
+        // edge; `split_into_grid` and mouse mapping both stay correct), and
+        // `as u16` stops a huge one at 65535. Rounding need not match the
+        // cell's direction: the gutter is subtracted, not divided by, so a
         // one-pixel wobble moves the gutter, not the grid.
-        let gutter = (Self::GUTTER_PT * scale).round() as u16;
+        let gutter = points_px(Self::GUTTER_PT, scale) as u16;
         // audit: `bt_atlas::Metrics.cell_px` is a bare `pub` field, so the
         // ≥ 1 guarantee lives one crate away (`rules::round_up` clamps to 1)
         // and the type does not carry it. Building with a struct literal
         // would leave that gap silent; `expect` turns it into a programming
         // error. Not a panic path: PTY reading and parsing never pass here,
         // this is the window-geometry path.
-        Self::new(w, h, context_w, gutter, metrics.underline_px.1)
+        Self::new(w, h, context_w, gutter, metrics.underline_px.1, scale)
             .expect("bt-atlas clamps the cell size to 1")
     }
 
@@ -162,5 +203,18 @@ impl CellMetrics {
     /// `rules::round_up`, and on this side of the boundary the field is private.
     pub fn context_cell_px(self) -> u16 {
         self.context_cell_px
+    }
+
+    /// The backing scale these metrics were built at, physical pixels per
+    /// point.
+    pub fn scale(self) -> f64 {
+        self.scale
+    }
+
+    /// A design size in **points**, in whole physical pixels at this scale —
+    /// the gutter's conversion ([`points_px`]), for the sizes drawn outside
+    /// the cell grid (the scroll bar).
+    pub(crate) fn pt_px(self, pt: f32) -> f32 {
+        points_px(f64::from(pt), self.scale) as f32
     }
 }

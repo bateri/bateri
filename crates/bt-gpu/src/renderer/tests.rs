@@ -39,14 +39,14 @@ pub(crate) const MIDTONE: LinearRgba = {
 /// GPU paints into which cell. That the gutter is added to the origin is held by the `pos`
 /// tests on the `frame.rs` side.
 pub(crate) fn grid(width: u16, height: u16) -> CellMetrics {
-    CellMetrics::new(width, height, width, 0, 1).expect("non-zero cell")
+    CellMetrics::new(width, height, width, 0, 1, 1.0).expect("non-zero cell")
 }
 
 /// A grid with a **non-zero** gutter: the glow's margin derives from the left gutter
 /// ([`Frame::glow_px`]), so on a gutterless grid the glow is never born and nothing that
 /// tests it could see it.
 pub(crate) fn grid_with_gutter(width: u16, height: u16, gutter: u16) -> CellMetrics {
-    CellMetrics::new(width, height, width, gutter, 1).expect("non-zero cell")
+    CellMetrics::new(width, height, width, gutter, 1, 1.0).expect("non-zero cell")
 }
 
 /// A cell with only a background; `ch: None` produces no glyph.
@@ -150,13 +150,13 @@ fn zero_component_metrics_cannot_be_built() {
     // This is the only guarantee the type carries. If it falls, `bt-shell`'s division yields
     // `inf`, `inf as u16` becomes 65535 and a 65535×65535 `TIOCSWINSZ` gets through without
     // hitting `Session::resize`'s zero gate.
-    assert!(CellMetrics::new(0, 18, 0, 8, 1).is_none());
-    assert!(CellMetrics::new(9, 0, 9, 8, 1).is_none());
+    assert!(CellMetrics::new(0, 18, 0, 8, 1, 1.0).is_none());
+    assert!(CellMetrics::new(9, 0, 9, 8, 1, 1.0).is_none());
     // The context width is a **divisor** too (`crate::frame::context_cols`), so it goes
     // through the same gate: if zero got through, the grid's would be caught while the dock's
     // context line would silently divide by zero.
-    assert!(CellMetrics::new(9, 18, 0, 8, 1).is_none());
-    let metrics = CellMetrics::new(9, 18, 7, 8, 1).expect("metrics");
+    assert!(CellMetrics::new(9, 18, 0, 8, 1, 1.0).is_none());
+    let metrics = CellMetrics::new(9, 18, 7, 8, 1, 1.0).expect("metrics");
     assert_eq!(metrics.cell_px(), (9, 18));
     assert_eq!(metrics.context_cell_px(), 7);
     assert_eq!(metrics.gutter_px(), 8);
@@ -164,7 +164,7 @@ fn zero_component_metrics_cannot_be_built() {
     // gutter means "the grid starts at the edge". Rejecting zero here too would force every
     // test that is not about the gutter to write a made-up value.
     assert_eq!(
-        CellMetrics::new(9, 18, 9, 0, 1)
+        CellMetrics::new(9, 18, 9, 0, 1, 1.0)
             .expect("a zero gutter is legitimate")
             .gutter_px(),
         0
@@ -1141,7 +1141,7 @@ fn command_marks_paint_the_gutter_on_the_gpu() {
 
     let mut frame = Frame::default();
     frame.clear(
-        CellMetrics::new(cw, ch, cw, gutter, 1).expect("metrics"),
+        CellMetrics::new(cw, ch, cw, gutter, 1, 1.0).expect("metrics"),
         CaretStyle::default(),
     );
     // Two marks, two status colors: row 0 succeeded, row 2 failed. The row in between (output)
@@ -1558,6 +1558,90 @@ fn an_upload_button_paints_a_fill_and_a_brighter_edge_in_the_dock() {
     );
 }
 
+/// The sRGB byte a linear channel encodes to — the transfer the target's
+/// `_sRGB` format applies on write. The reference the blend tests compare
+/// with, not a production path: the GPU does the encoding.
+fn srgb_byte(linear: f32) -> u8 {
+    let encoded = if linear <= 0.003_130_8 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
+}
+
+/// A frame with a dock and a scroll bar at the bottom of its travel, drawn
+/// at `alpha` (`None` → the bar is never set): the frame, the thumb and the
+/// floor the track ends at.
+fn scroll_bar_frame(edge: usize, alpha: Option<f32>) -> (Frame, [f32; 4], f32) {
+    let cell = grid(8, 16);
+    let mut frame = Frame::default();
+    frame.clear(cell, CaretStyle::default());
+    frame.set_dock_rows(1);
+    let ground = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+    frame.open_dock(ground, ground, ground);
+    frame.set_dock_band(edge as f32, 0.0);
+    let floor = frame.band_top_px(edge as f32);
+    let position = bt_core::ScrollPosition {
+        room: 100,
+        top: 100.0,
+        visible: 2,
+    };
+    let layout = crate::scrollbar::ScrollbarLayout::new(Some(position), edge as f32, floor, cell);
+    if let Some(alpha) = alpha {
+        frame.set_scrollbar(layout, alpha, WHITE);
+    }
+    (frame, layout.thumb(), floor)
+}
+
+#[test]
+fn a_shown_scroll_bar_blends_the_foreground_and_stops_above_the_dock() {
+    // The thumb is the foreground at the thumb's opacity over the ground, in
+    // **linear** space (the target encodes on write): white at 36 % over
+    // black is 0.36 linear. It ends above the dock — the track's margin is
+    // ground, the dock's band is the dock's.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let (frame, [x0, y0, x1, y1], floor) = scroll_bar_frame(EDGE, Some(1.0));
+    assert!(
+        y1 < floor,
+        "the thumb reaches into the dock: {y1} ≥ {floor}"
+    );
+    let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+    let x = ((x0 + x1) / 2.0) as usize;
+    let mid = pixel_at(&pixels, EDGE, x, ((y0 + y1) / 2.0) as usize);
+    let expected = srgb_byte(crate::scrollbar::THUMB_ALPHA);
+    assert!(
+        mid.0.abs_diff(expected) <= 2 && mid.0 == mid.1 && mid.1 == mid.2,
+        "the thumb is not the foreground at its opacity: {mid:02x?} ≠ ~{expected:02x}"
+    );
+    let margin = pixel_at(&pixels, EDGE, x, (floor - 1.0) as usize);
+    assert_eq!(margin, (0, 0, 0), "the bar painted the track's margin");
+    let dock = pixel_at(&pixels, EDGE, x, (floor + 1.0) as usize);
+    assert_eq!(dock, (0xff, 0, 0), "the dock's band is not the dock's");
+    // Left of the thumb is untouched ground.
+    assert_eq!(
+        pixel_at(&pixels, EDGE, x0 as usize - 2, ((y0 + y1) / 2.0) as usize),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn a_hidden_scroll_bar_changes_no_pixel() {
+    // A fully faded bar is not a transparent quad, it is no op at all: the
+    // frame is byte for byte the one that never had a bar.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let (hidden, ..) = scroll_bar_frame(EDGE, Some(0.0));
+    assert!(hidden.scrollbar().is_none(), "a hidden bar planned a draw");
+    let (never, ..) = scroll_bar_frame(EDGE, None);
+    assert_eq!(
+        render_offscreen(&r, EDGE, BACKGROUND, &hidden),
+        render_offscreen(&r, EDGE, BACKGROUND, &never),
+        "the hidden bar changed pixels"
+    );
+}
+
 #[test]
 fn glyph_differs_from_cell_background() {
     // `make smoke`'s `glyphs=G` token is a CPU counter: it would print G > 0 even if the atlas
@@ -1839,6 +1923,9 @@ pub(crate) fn cursor_at(col: u16, text: LinearRgba) -> Cursor {
         scroll_frac: 0.0,
         scroll_generation: 0,
         rows: 1,
+        // No scrollback: the scroll bar is not drawn and these tests ask about cells.
+        history: 0,
+        resting_fill: 0,
     }
 }
 
@@ -3123,7 +3210,8 @@ fn slot_quad_of(r: &TestRenderer) -> SlotQuad {
 /// The atlas's grid cell **without a gutter**, so column `n` starts at `n * cell width`.
 fn flush(m: CellMetrics) -> CellMetrics {
     let (cw, ch) = m.cell_px();
-    CellMetrics::new(cw, ch, m.context_cell_px(), 0, m.rule_px()).expect("non-zero metrics")
+    CellMetrics::new(cw, ch, m.context_cell_px(), 0, m.rule_px(), m.scale())
+        .expect("non-zero metrics")
 }
 
 #[test]

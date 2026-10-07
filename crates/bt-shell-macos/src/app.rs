@@ -888,7 +888,7 @@ pub(crate) struct Grid {
 /// the `cell_metrics(scale)` call in `sync_geometry` and it is not tested
 /// because it wants a window and a Metal device. `CellMetrics::new` is
 /// deliberately `pub`, so a placeholder like `CellMetrics::new(9, 18, 7, 8,
-/// 1)` written there would revive and the two tests here would stay green.
+/// 1, 1.0)` written there would revive and the two tests here would stay green.
 ///
 /// **The left gutter is subtracted from the columns**: so the
 /// stripe does not overlap the text. The gutter is always reserved — the
@@ -4822,7 +4822,7 @@ mod tests {
     /// Grid metrics; the gutter is an **argument**, because `split_into_grid` is asked two
     /// separate things: the cell split (gutter zero) and the gutter's deduction from columns.
     fn metrics(w: u16, h: u16, gutter: u16) -> CellMetrics {
-        CellMetrics::new(w, h, w, gutter, 1).expect("non-zero cell")
+        CellMetrics::new(w, h, w, gutter, 1, 1.0).expect("non-zero cell")
     }
 
     /// A window without a dock: the state of an unintegrated session (and of the smoke recipe).

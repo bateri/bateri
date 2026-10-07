@@ -31,8 +31,13 @@
 //! because its quad grows by the effect's margin and its instance carries the
 //! effect's parameters. The effects' **timing** is here too (the `glyph_fx`
 //! module, pure): `bt-core` says which glyph arrived, this crate how long it
-//! lasts. The shaders are WGSL (`shaders/*.wgsl`), embedded with
-//! `include_str!`; there is no shader build step.
+//! lasts. The **scroll bar** needs no pipeline of its own: its thumb is one
+//! rounded quad from `caret_fragment` (the dock buttons' road), drawn in a
+//! viewport at the window's origin; its sizes, timing and layout are the
+//! `scrollbar` module's, pure — `bt-core` says where the window stands in the
+//! scrollback, this crate where that lands on the window and when it shows.
+//! The shaders are WGSL (`shaders/*.wgsl`), embedded with `include_str!`;
+//! there is no shader build step.
 //!
 //! The frame path's **measurement book** is here too ([`Stats`]): whoever
 //! produces the time collects the sample — the CPU spans from the tick, the
@@ -50,6 +55,7 @@ mod link;
 mod metrics;
 mod motion;
 mod renderer;
+mod scrollbar;
 mod slots;
 mod stats;
 mod surface;
@@ -59,6 +65,7 @@ pub use frame::{DOCK_ROWS, context_cols, context_row_offset, dock_px};
 pub use link::{DisplayLink, Layout, Origin, Pacer, TickTarget, Ticker, Waker};
 pub use metrics::{CellMetrics, FontNotice, family_notice};
 pub use renderer::Renderer;
+pub use scrollbar::ScrollbarLayout;
 pub use stats::{MIN_SAMPLES, Samples, Stats};
 pub use surface::Surface;
 

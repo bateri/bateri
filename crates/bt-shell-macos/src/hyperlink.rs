@@ -1295,7 +1295,7 @@ mod tests {
 
     /// A 10×20 px cell with an 8 px left padding.
     fn metrics() -> CellMetrics {
-        CellMetrics::new(10, 20, 15, 8, 1).expect("non-zero cell")
+        CellMetrics::new(10, 20, 15, 8, 1, 1.0).expect("non-zero cell")
     }
 
     #[test]

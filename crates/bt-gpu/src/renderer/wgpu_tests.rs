@@ -54,7 +54,8 @@ fn glyph_cell(col: u16, row: u16, ch: char) -> Cell {
 /// `n * cell width` and `cell_rows` reads it.
 fn flush_left(m: CellMetrics) -> CellMetrics {
     let (cw, ch) = m.cell_px();
-    CellMetrics::new(cw, ch, m.context_cell_px(), 0, m.rule_px()).expect("non-zero metrics")
+    CellMetrics::new(cw, ch, m.context_cell_px(), 0, m.rule_px(), m.scale())
+        .expect("non-zero metrics")
 }
 
 /// Draws one synthetic colour slot with the `emoji` pipeline over opaque
@@ -972,6 +973,36 @@ fn scene_three_viewports(m: CellMetrics) -> Scene {
     )
 }
 
+/// The scroll bar over an offset grid and a fill band, under a dock: its
+/// viewport at the window's origin between the band's and the dock's.
+fn scene_scroll_bar() -> Scene {
+    const EDGE: u32 = 128;
+    let cell = grid(CELL.0, CELL.1);
+    let mut frame = Frame::default();
+    frame.clear(cell, CaretStyle::default());
+    frame.push(bg_cell(0, 0, MIDTONE));
+    frame.set_fill_rows(1);
+    frame.push_fill(bg_cell(1, 0, ACCENT));
+    frame.set_dock_input_rows(Some(1));
+    frame.set_dock_band(EDGE as f32, 0.0);
+    frame.open_dock(
+        LinearRgba::from_srgb(0x20, 0x22, 0x28),
+        WHITE,
+        LinearRgba::from_srgb(0x60, 0x60, 0x60),
+    );
+    frame.set_origin_rows(1.5);
+    let position = bt_core::ScrollPosition {
+        room: 40,
+        top: 12.5,
+        visible: 4,
+    };
+    let floor = frame.band_top_px(EDGE as f32);
+    let layout = crate::scrollbar::ScrollbarLayout::new(Some(position), EDGE as f32, floor, cell);
+    frame.set_scrollbar(layout, 0.8, Theme::BATERI.foreground_linear());
+    assert!(frame.scrollbar().is_some(), "no bar in the scene");
+    ("scroll bar between the band and the dock", EDGE, frame)
+}
+
 fn scenes(m: CellMetrics) -> Vec<Scene> {
     let mut scenes = vec![
         scene_midtone(),
@@ -999,6 +1030,7 @@ fn scenes(m: CellMetrics) -> Vec<Scene> {
         scene_unfocused_selection(),
         scene_search(),
         scene_three_viewports(m),
+        scene_scroll_bar(),
     ];
     scenes.extend(scenes_fx(m));
     scenes

@@ -1832,6 +1832,14 @@ impl Renderer {
     /// at the surface's origin. The dock's opaque ground is still drawn last
     /// and covers whatever spills into it.
     ///
+    /// **Scroll bar** — between the band and the dock, in a viewport at the
+    /// window's origin: the thumb belongs to the window's edge and must not
+    /// slide with the grid's offset or the band's. After every grid and band
+    /// list, so text never covers it; before the dock, so the dock's opaque
+    /// ground covers a track whose end has not yet followed a growing band.
+    /// One rounded quad from `caret_fragment` (the dock buttons' road), and
+    /// no op at all while the bar is hidden.
+    ///
     /// **Dock** — the second coordinate space, **last**. Its own viewport is
     /// structural: the dock must be exempt from the offset and building the
     /// exemption arithmetically (`- origin_px`) **does not work** —
@@ -1956,9 +1964,21 @@ impl Renderer {
                 free,
             )?;
         }
+        // The scroll bar: window space, over the grid and the band and under
+        // the dock — the dock's opaque ground, drawn next, covers a track
+        // that has not caught up with a growing band.
+        if let Some(thumb) = frame.scrollbar() {
+            plan.ops.push(Op::Viewport(0.0));
+            plan.rounded(
+                std::slice::from_ref(&thumb.instance),
+                thumb.core,
+                thumb.shape,
+            );
+            plan.ops.push(Op::Viewport(origin));
+        }
         // Dock: last, with two origins.
         if frame.dock().is_some() {
-            let band_y = (viewport_px[1] - frame.dock_band_px()).max(0.0);
+            let band_y = frame.band_top_px(viewport_px[1]);
             let origin_y = (viewport_px[1] - frame.dock_layout_px()).max(0.0);
             plan.ops.push(Op::Viewport(band_y));
             plan.quads(&frame.dock_ground(viewport_px[0]));
