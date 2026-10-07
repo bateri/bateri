@@ -28,7 +28,7 @@ use std::path::Path;
 use block2::RcBlock;
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
-    CursorBlink, CursorMotion, DownloadConflict, Erase, KeepRunning, Keypress,
+    ContentEdge, CursorBlink, CursorMotion, DownloadConflict, Erase, KeepRunning, Keypress,
     LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion, RemoteStatsMode,
     RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME, Scrollbar, Settings,
     SettingsEdit, ShellIntegration, SmoothScroll, UnfocusedCaret,
@@ -195,11 +195,12 @@ enum Key {
     RestoreWindows,
     KeepRunning,
     Scrollbar,
+    ContentEdge,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 36] = [
+    const ALL: [Key; 37] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -236,6 +237,7 @@ impl Key {
         Key::RestoreWindows,
         Key::KeepRunning,
         Key::Scrollbar,
+        Key::ContentEdge,
     ];
 
     fn tag(self) -> NSInteger {
@@ -261,6 +263,7 @@ impl Key {
             Key::Theme => "appearance.theme",
             Key::LightTheme => "appearance.light_theme",
             Key::DarkTheme => "appearance.dark_theme",
+            Key::ContentEdge => "appearance.content_edge",
             Key::Font => "font.family",
             Key::Size => "font.size",
             Key::LineHeight => "font.line_height",
@@ -427,6 +430,19 @@ impl Choice for Scrollbar {
             Scrollbar::Auto => "When scrolling",
             Scrollbar::Always => "Always",
             Scrollbar::Never => "Never",
+        }
+    }
+}
+
+impl Choice for ContentEdge {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            ContentEdge::Fade => "Fade",
+            ContentEdge::Line => "Line",
+            ContentEdge::Cut => "Cut",
         }
     }
 }
@@ -975,6 +991,7 @@ struct Controls {
     line_height: Number,
     letter_spacing: Number,
     scrollbar: Retained<NSPopUpButton>,
+    content_edge: Retained<NSPopUpButton>,
     shape: Retained<NSPopUpButton>,
     blink: Retained<NSPopUpButton>,
     blink_speed: Slide,
@@ -1155,6 +1172,7 @@ define_class!(
                 Key::RestoreWindows => choice_at(index).map(SettingsEdit::RestoreWindows),
                 Key::KeepRunning => choice_at(index).map(SettingsEdit::KeepRunning),
                 Key::Scrollbar => choice_at(index).map(SettingsEdit::Scrollbar),
+                Key::ContentEdge => choice_at(index).map(SettingsEdit::ContentEdge),
                 Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
                 Key::Shape => choice_at(index).map(SettingsEdit::Cursor),
                 Key::Blink => choice_at(index).map(SettingsEdit::CursorBlink),
@@ -1533,6 +1551,7 @@ impl SettingsWindow {
             &decimal_label(settings.font.letter_spacing),
         );
         select_choice(&c.scrollbar, settings.scrollbar);
+        select_choice(&c.content_edge, settings.content_edge);
 
         select_choice(&c.shape, settings.cursor);
         select_choice(&c.blink, settings.cursor_blink);
@@ -2184,6 +2203,7 @@ impl SettingsWindow {
             56.0,
         );
         let scrollbar = self.popup::<Scrollbar>(Key::Scrollbar);
+        let content_edge = self.popup::<ContentEdge>(Key::ContentEdge);
         let mut appearance = Form::new(mtm);
         appearance.row(Key::Theme, "Theme:", &theme, &[&theme], None);
         appearance.row(
@@ -2230,6 +2250,13 @@ impl SettingsWindow {
             &scrollbar,
             &[&scrollbar],
             None,
+        );
+        appearance.row(
+            Key::ContentEdge,
+            "Content edge:",
+            &content_edge,
+            &[&content_edge],
+            Some("Where text meets the tab bar."),
         );
 
         // Cursor
@@ -2489,6 +2516,7 @@ impl SettingsWindow {
             line_height,
             letter_spacing,
             scrollbar,
+            content_edge,
             shape,
             blink,
             blink_speed,
@@ -2961,6 +2989,7 @@ mod tests {
                     cursor_blink_interval = []\nconfirm_close = []\n\
                     restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
+                    content_edge = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
@@ -2984,6 +3013,7 @@ mod tests {
                 Key::RestoreWindows => SettingsEdit::RestoreWindows(RestoreWindows::Off),
                 Key::KeepRunning => SettingsEdit::KeepRunning(KeepRunning::Quit),
                 Key::Scrollbar => SettingsEdit::Scrollbar(Scrollbar::Never),
+                Key::ContentEdge => SettingsEdit::ContentEdge(ContentEdge::Cut),
                 Key::Clipboard => SettingsEdit::Osc52(Osc52::Off),
                 Key::Scrollback => SettingsEdit::Scrollback(1),
                 Key::ShellIntegration => SettingsEdit::ShellIntegration(ShellIntegration::Off),
@@ -3078,6 +3108,7 @@ mod tests {
         check::<RestoreWindows>();
         check::<KeepRunning>();
         check::<Scrollbar>();
+        check::<ContentEdge>();
         check::<ShellIntegration>();
         check::<CaretShape>();
         check::<CursorBlink>();

@@ -12,6 +12,14 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Choose what text does at the top of the window.** Settings ▸ Appearance ▸
+  Content edge (`[appearance] content_edge` in `settings.toml`) keeps the new
+  fade, cuts the text under a thin line in the dividers' color, or cuts it
+  where the pane ends as before. The last two give back the line some window
+  heights lose to the fade.
+
 ### Changed
 
 - **Text no longer gets cut in half at the top of the window.** Where the

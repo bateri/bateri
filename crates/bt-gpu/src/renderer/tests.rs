@@ -4240,14 +4240,22 @@ fn the_production_edge_fades_the_band_and_a_lifted_grid_and_cut_draws_todays_pic
         "the lifted grid did not fade from the top down: {seen:?}"
     );
 
-    // **`Cut` through the same seam is today's frame, byte for byte**: no fade, no move.
+    // **`cut` and `line` through the same seam are today's frame, byte for byte**: no fade, no
+    // move. The mode is the one the settings file gives, the road `bt-shell` hands the link.
     let today = render_offscreen(&r, EDGE, EDGE_CLEAR, &band(None));
-    let cut = band(Some(ContentEdge::Cut));
-    assert_eq!(cut.edge_px(), 0.0);
-    let cut = render_offscreen(&r, EDGE, EDGE_CLEAR, &cut);
-    let diff = today.iter().zip(&cut).position(|(a, b)| a != b);
-    assert!(
-        diff.is_none(),
-        "`Cut` diverged from today's picture, first difference at byte {diff:?}"
-    );
+    for name in ["cut", "line"] {
+        let text = format!("[appearance]\ncontent_edge = \"{name}\"\n");
+        let edge = bt_core::Settings::parse(&text)
+            .expect("settings text")
+            .settings
+            .content_edge;
+        let frame = band(Some(edge));
+        assert_eq!(frame.edge_px(), 0.0, "{name}");
+        let pixels = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+        let diff = today.iter().zip(&pixels).position(|(a, b)| a != b);
+        assert!(
+            diff.is_none(),
+            "{name} diverged from today's picture, first difference at byte {diff:?}"
+        );
+    }
 }

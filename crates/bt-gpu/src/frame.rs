@@ -712,6 +712,19 @@ pub(crate) fn band_top(height_px: f32, band_px: f32) -> f32 {
     (height_px - band_px).max(0.0)
 }
 
+/// Whether the mode fades the content's top edge at all — **the one place
+/// `Line` reads as `Cut`**: the line is the container's chrome, not the
+/// grid's, so to this layer the two are the same mode. The three numbers
+/// below ask it, and so does a change of mode on both sides of the crate
+/// boundary: one that flips it moves the grid (the rows, and where the
+/// leftover goes), one that keeps it moves nothing here.
+pub fn edge_fades(edge: ContentEdge) -> bool {
+    match edge {
+        ContentEdge::Fade => true,
+        ContentEdge::Line | ContentEdge::Cut => false,
+    }
+}
+
 /// The height the grid's **row arithmetic** keeps free at the pane's top, in
 /// pixels: in `Fade` the content's top edge fades inside the leftover above
 /// the grid, and this much of it is kept even when the height divides into
@@ -727,9 +740,10 @@ pub(crate) fn band_top(height_px: f32, band_px: f32) -> f32 {
 /// (`split_into_grid`), the [`dock_px`] discipline: a second copy would put
 /// the grid's rows and the drawn fade a row apart for a frame on resize.
 pub fn edge_reserve_px(edge: ContentEdge, cell: CellMetrics) -> f32 {
-    match edge {
-        ContentEdge::Fade => f32::from(cell.gutter_px()),
-        ContentEdge::Line | ContentEdge::Cut => 0.0,
+    if edge_fades(edge) {
+        f32::from(cell.gutter_px())
+    } else {
+        0.0
     }
 }
 
@@ -753,12 +767,11 @@ pub fn edge_drawn_px(
     rows: u16,
     cell: CellMetrics,
 ) -> f32 {
-    match edge {
-        ContentEdge::Fade => (band_top(height_px, dock_px(dock_rows, cell))
-            - f32::from(rows) * f32::from(cell.cell_px().1))
-        .max(0.0),
-        ContentEdge::Line | ContentEdge::Cut => 0.0,
+    if !edge_fades(edge) {
+        return 0.0;
     }
+    (band_top(height_px, dock_px(dock_rows, cell)) - f32::from(rows) * f32::from(cell.cell_px().1))
+        .max(0.0)
 }
 
 /// How many history rows the fill band must stand above the grid's top to
@@ -773,14 +786,12 @@ pub fn edge_drawn_px(
 /// above the window and is clipped, the grid top's own contract ("a little
 /// larger than needed, so the excess is off screen").
 pub fn edge_ceiling_rows(edge: ContentEdge, cell: CellMetrics) -> u16 {
-    match edge {
-        ContentEdge::Fade => {
-            let cell_h = u32::from(cell.cell_px().1);
-            let rows = (u32::from(cell.gutter_px()) + cell_h).div_ceil(cell_h);
-            u16::try_from(rows).unwrap_or(u16::MAX)
-        }
-        ContentEdge::Line | ContentEdge::Cut => 0,
+    if !edge_fades(edge) {
+        return 0;
     }
+    let cell_h = u32::from(cell.cell_px().1);
+    let rows = (u32::from(cell.gutter_px()) + cell_h).div_ceil(cell_h);
+    u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
 /// The ceiling of the dock's input rows: **half** of the grid's rows — a

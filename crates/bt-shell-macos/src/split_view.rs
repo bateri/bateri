@@ -1,7 +1,8 @@
 //! Container for the splits: a plain `NSView` that is the window's
 //! `contentView`. It holds the tab's panes and the split tree
 //! ([`crate::split`]), applies the tree's frames to the panes and shows the
-//! dividers. It is not on the frame path: it draws nothing.
+//! dividers. It is not on the frame path: it draws no cells, only
+//! `NSBox` fills — the dividers' and `line`'s hairline.
 //!
 //! **The tree lives here, not in the window**: the container's own size
 //! changes independently of the window (the tab bar shortens the content)
@@ -33,6 +34,19 @@
 //! the same view stays throughout a drag, because AppKit delivers
 //! `mouseDragged:` to the view that received the press.
 //!
+//! **`line`'s hairline** (`[appearance] content_edge = "line"`): a second
+//! opaque `NSBox`, separate from the dividers' fill, one device pixel tall
+//! along the container's top edge and **above** the panes, in the same
+//! `separator` tone. It belongs to the container's edge, not a pane's, so
+//! only the panes touching the window's top run under it — a pane below a
+//! divider already has the divider's gap there, and no two-pixel line is
+//! born. Its frame does not depend on the tree: one `setFrame` before the
+//! single-pane branch covers one pane, splits and zoom alike, and its height
+//! follows the scale where the dividers' does (the window lays out again on
+//! a scale change). A pane joining the container goes in **below** it. It
+//! takes no part in hit testing ([`Hairline`]): a click on that pixel row
+//! reaches the pane under it.
+//!
 //! **Zoom** (⇧⌘↩): the zoomed pane takes the whole area
 //! ([`Tree::layout_zoomed`]), the other panes are **hidden** and their
 //! frames (and so their grids) stay as they were; there are no dividers or
@@ -41,10 +55,12 @@
 
 use std::cell::{Cell, RefCell};
 
-use bt_core::Theme;
+use bt_core::{ContentEdge, Theme};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
-use objc2_app_kit::{NSBox, NSBoxType, NSColor, NSCursor, NSEvent, NSTitlePosition, NSView};
+use objc2_app_kit::{
+    NSBox, NSBoxType, NSColor, NSCursor, NSEvent, NSTitlePosition, NSView, NSWindowOrderingMode,
+};
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 
 use crate::pane::TerminalPane;
@@ -184,6 +200,42 @@ impl DividerHandle {
     }
 }
 
+define_class!(
+    // SAFETY: NSBox is designed for subclassing; Hairline implements no
+    // `Drop`, has no ivar and is born with NSBox's constructor (`new`).
+    #[unsafe(super(NSBox))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriHairline"]
+    pub(crate) struct Hairline;
+
+    unsafe impl NSObjectProtocol for Hairline {}
+
+    impl Hairline {
+        /// Never takes part in hit testing (the pane's veil's rule): the line
+        /// lies over the panes' first pixel row, and a click, a drag or a
+        /// mouse report there belongs to the pane underneath.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+    }
+);
+
+impl Hairline {
+    /// Born hidden, without a border; the colour is the container's
+    /// ([`SplitView::set_theme`]).
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: `NSBox`'s `init`; the subclass has no ivar.
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        this.setBoxType(NSBoxType::Custom);
+        this.setTitlePosition(NSTitlePosition::NoTitle);
+        this.setBorderWidth(0.0);
+        this.setHidden(true);
+        this
+    }
+}
+
 pub(crate) struct SplitIvars {
     /// The split tree; its leaves are the ids of [`SplitIvars::panes`].
     tree: RefCell<Tree>,
@@ -193,6 +245,9 @@ pub(crate) struct SplitIvars {
     panes: RefCell<Vec<Retained<TerminalPane>>>,
     /// The dividers' colour: the fill behind the panes.
     backdrop: Retained<NSBox>,
+    /// `line`'s hairline: the fill above the panes along the top edge, shown
+    /// only while the mode is `line` (the module header).
+    hairline: Retained<Hairline>,
     /// The zoomed pane (⇧⌘↩); `None` → the splits are visible.
     zoomed: Cell<Option<u64>>,
     /// The dividers' drag handles, in the order of
@@ -241,10 +296,12 @@ impl SplitView {
         backdrop.setTitlePosition(NSTitlePosition::NoTitle);
         backdrop.setBorderWidth(0.0);
         backdrop.setHidden(true);
+        let hairline = Hairline::new(mtm);
         let this = Self::alloc(mtm).set_ivars(SplitIvars {
             tree: RefCell::new(Tree::Leaf(first.id())),
             panes: RefCell::new(vec![first.retain()]),
             backdrop: backdrop.clone(),
+            hairline: hairline.clone(),
             zoomed: Cell::new(None),
             handles: RefCell::new(Vec::new()),
         });
@@ -256,8 +313,19 @@ impl SplitView {
         this.setWantsLayer(true);
         this.addSubview(&backdrop);
         this.addSubview(first);
+        this.addSubview(&hairline);
         this.layout_panes();
         this
+    }
+
+    /// A pane joins the container **below** the hairline, so the line stays
+    /// above every pane without being taken out and put back.
+    fn add_pane(&self, pane: &TerminalPane) {
+        self.addSubview_positioned_relativeTo(
+            pane,
+            NSWindowOrderingMode::Below,
+            Some(&self.ivars().hairline),
+        );
     }
 
     /// The panes, in tree order (left to right, top to bottom).
@@ -323,7 +391,7 @@ impl SplitView {
             return false;
         }
         self.ivars().panes.borrow_mut().push(pane.retain());
-        self.addSubview(pane);
+        self.add_pane(pane);
         self.layout_panes();
         true
     }
@@ -346,7 +414,7 @@ impl SplitView {
         self.ivars().tree.replace(tree);
         for pane in extra {
             self.ivars().panes.borrow_mut().push(pane.retain());
-            self.addSubview(pane);
+            self.add_pane(pane);
         }
         self.layout_panes();
         true
@@ -512,11 +580,22 @@ impl SplitView {
     /// The divider's colour comes from the theme:
     /// `Theme::separator_srgb` - the same tier as the dock's hairlines.
     /// `NSColor` takes sRGB; the linear value is the GPU's.
+    ///
+    /// `line`'s hairline takes the same colour: it is the dividers' line
+    /// drawn along the top edge.
     pub(crate) fn set_theme(&self, theme: &Theme) {
         let [r, g, b] = theme.separator_srgb().map(|byte| f64::from(byte) / 255.0);
-        self.ivars()
-            .backdrop
-            .setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0));
+        let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0);
+        self.ivars().backdrop.setFillColor(&color);
+        self.ivars().hairline.setFillColor(&color);
+    }
+
+    /// What the content does at the panes' top edge: the hairline shows only
+    /// in `line`. The panes' own part — the rows and the fade — is theirs
+    /// (`TerminalPane::set_content_edge`); this asks for no frame, the line
+    /// is AppKit's.
+    pub(crate) fn set_content_edge(&self, edge: ContentEdge) {
+        self.ivars().hairline.setHidden(edge != ContentEdge::Line);
     }
 
     /// Applies the tree's frames to the panes. No fitting with a single pane:
@@ -531,6 +610,15 @@ impl SplitView {
         let backdrop = &self.ivars().backdrop;
         backdrop.setFrame(self.bounds());
         backdrop.setHidden(panes.len() <= 1 || zoomed.is_some());
+        // The hairline's frame is the container's top edge, whatever the
+        // tree: set **before** the single-pane branch, so one pane, splits
+        // and zoom all get it. One device pixel, from the same scale the
+        // dividers snap to.
+        let width = self.bounds().size.width;
+        self.ivars().hairline.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(width, 1.0 / self.scale()),
+        ));
         if let [only] = panes.as_slice() {
             only.setHidden(false);
             only.setFrame(self.bounds());

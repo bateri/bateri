@@ -487,13 +487,19 @@ impl Scrollbar {
     }
 }
 
-/// What the text does where it meets the pane's top edge — the tab bar, or a
-/// divider above a split pane.
+/// `[appearance] content_edge`: what the text does where it meets the pane's
+/// top edge — the tab bar, or a divider above a split pane.
 ///
 /// One type for the whole road: `bt-gpu` takes it as it is, there is no
 /// request to resolve (the precedent of [`CursorMotion`]). The drawing side
 /// owns the numbers — how tall the fade is and what it costs the grid — and
 /// reads `Line` as `Cut`: the line is the window's chrome, not the grid's.
+///
+/// It **doesn't enter** `TerminalOptions`: the session never sees it, only
+/// the grid's size and the drawing do. Its own field in [`Changes`], for
+/// [`Scrollbar`]'s reason. An ordinary key: a value that isn't accepted is
+/// the default at launch and leaves the value in effect at save time — a
+/// wrong guess here is visible at once and writes nowhere.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ContentEdge {
     /// The text fades out as it reaches the top: the pane keeps a strip at
@@ -509,6 +515,21 @@ pub enum ContentEdge {
     /// The text is cut where the pane ends, through a letter if it falls so:
     /// every row the height allows, the leftover below the last one.
     Cut,
+}
+
+impl ContentEdge {
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("fade", Self::Fade),
+        ("line", Self::Line),
+        ("cut", Self::Cut),
+    ];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
 }
 
 /// `[terminal] cursor_radius` and `cursor_glow`: the cursor's **drawing**
@@ -1263,6 +1284,9 @@ pub struct Settings {
     /// `[appearance] dark_theme`: the dark appearance's theme when
     /// `theme = "system"`.
     pub dark_theme: String,
+    /// `[appearance] content_edge`: what the text does at the pane's top edge
+    /// ([`ContentEdge`]). Doesn't enter `TerminalOptions`.
+    pub content_edge: ContentEdge,
     /// `[font] family` and `size`.
     pub font: FontOptions,
     /// `[clipboard] osc52`: `"copy"` or `"off"`.
@@ -1330,6 +1354,7 @@ impl Default for Settings {
             theme: SYSTEM_THEME.to_owned(),
             light_theme: "bateri-light".to_owned(),
             dark_theme: "bateri".to_owned(),
+            content_edge: ContentEdge::default(),
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::default(),
@@ -1409,6 +1434,7 @@ pub enum SettingsEdit {
     Theme(String),
     LightTheme(String),
     DarkTheme(String),
+    ContentEdge(ContentEdge),
     /// An empty string is the default family (the chain): the parser reads
     /// `family = ""` that way and the key isn't deleted.
     FontFamily(String),
@@ -1496,6 +1522,7 @@ impl SettingsEdit {
             Self::Theme(_) => ("appearance", "theme", "appearance.theme"),
             Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
             Self::DarkTheme(_) => ("appearance", "dark_theme", "appearance.dark_theme"),
+            Self::ContentEdge(_) => ("appearance", "content_edge", "appearance.content_edge"),
             Self::FontFamily(_) => ("font", "family", "font.family"),
             Self::FontSize(_) => ("font", "size", "font.size"),
             Self::LineHeight(_) => ("font", "line_height", "font.line_height"),
@@ -1541,6 +1568,7 @@ impl SettingsEdit {
             Self::RestoreWindows(restore) => restore.name().into(),
             Self::KeepRunning(keep) => keep.name().into(),
             Self::Scrollbar(scrollbar) => scrollbar.name().into(),
+            Self::ContentEdge(edge) => edge.name().into(),
             Self::Osc52(mode) => mode.name().into(),
             Self::CursorMotion(motion) => motion.name().into(),
             Self::ReduceMotion(reduce) => reduce.name().into(),
@@ -1666,6 +1694,12 @@ theme = "system"
 # Theme names, used while theme = "system".
 light_theme = "bateri-light"
 dark_theme = "bateri"
+# "fade" | "line" | "cut". Where the text meets the tab bar, or the divider
+# above a split pane: fade thins a line scrolling up into a strip at least as
+# tall as the left margin, so no letter is cut in half — at some window
+# heights that costs one line; line cuts the text under a thin line in the
+# divider's color; cut cuts it where the pane ends, as before.
+content_edge = "fade"
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -2018,11 +2052,22 @@ stats_interval = 3
                             .unwrap_or_else(|| kept.clone());
                     }
                 }
+                if let Some(item) = appearance.get("content_edge") {
+                    parsed.settings.content_edge = named_enum(
+                        text,
+                        item,
+                        "appearance.content_edge",
+                        ContentEdge::NAMES,
+                        fallback.content_edge,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("appearance") => {
                 for (_, _, slot, kept) in names {
                     slot.clone_from(kept);
                 }
+                parsed.settings.content_edge = fallback.content_edge;
             }
             None => {}
         }
@@ -2278,6 +2323,7 @@ stats_interval = 3
             remote: self.remote_hosts != new.remote_hosts || self.remote_files != new.remote_files,
             stats: self.remote_stats != new.remote_stats,
             scrollbar: self.scrollbar != new.scrollbar,
+            content_edge: self.content_edge != new.content_edge,
         }
     }
 
@@ -2964,6 +3010,11 @@ pub struct Changes {
     /// enter `TerminalOptions`, and its applier — the resolution the system's
     /// preference notification shares — is no other section's.
     pub scrollbar: bool,
+    /// [`Settings::content_edge`] changed: the platform shell gives the mode
+    /// to every window — the panes' rows and drawing, the container's line.
+    /// A field of its own, for [`Self::caret`]'s reason: the key doesn't
+    /// enter `TerminalOptions`, so a change must not resend them.
+    pub content_edge: bool,
 }
 
 /// Parses the text into a TOML document; a one-line diagnostic if it can't be
@@ -3777,6 +3828,7 @@ mod tests {
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
+            ("appearance", "content_edge"),
             ("font", "size"),
             ("font", "line_height"),
             ("font", "letter_spacing"),
@@ -3949,6 +4001,7 @@ mod tests {
                 remote: false,
                 stats: false,
                 scrollbar: false,
+                content_edge: false,
             }
         );
         assert_eq!(
@@ -3982,6 +4035,7 @@ mod tests {
             theme: "paper".to_owned(),
             light_theme: "chalk".to_owned(),
             dark_theme: "ink".to_owned(),
+            content_edge: ContentEdge::Line,
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::Spring,
@@ -4021,6 +4075,7 @@ mod tests {
         // and there is no value that isn't accepted either.
         assert_eq!(parsed.settings.light_theme, "bateri-light");
         assert_eq!(parsed.settings.dark_theme, "bateri");
+        assert_eq!(parsed.settings.content_edge, ContentEdge::Fade);
 
         // A value above the ceiling is clamped to the ceiling, not to the given
         // one: the intent is clear.
@@ -4167,6 +4222,7 @@ mod tests {
             remote: false,
             stats: false,
             scrollbar: false,
+            content_edge: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
         assert_eq!(
@@ -4260,6 +4316,7 @@ mod tests {
                 remote: false,
                 stats: false,
                 scrollbar: false,
+                content_edge: false,
             }
         );
         assert_eq!(
@@ -4409,6 +4466,7 @@ found {found}; using \"spring\""
                 remote: false,
                 stats: false,
                 scrollbar: false,
+                content_edge: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -4498,6 +4556,7 @@ found {found}; using \"system\""
                 remote: false,
                 stats: false,
                 scrollbar: false,
+                content_edge: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -5091,6 +5150,105 @@ found 1.5; using 0.1"
     }
 
     #[test]
+    fn content_edge_is_read_and_defaults_to_the_fade() {
+        assert_eq!(clean("").content_edge, ContentEdge::Fade);
+        for (value, expected) in [
+            ("fade", ContentEdge::Fade),
+            ("line", ContentEdge::Line),
+            ("cut", ContentEdge::Cut),
+        ] {
+            let text = format!("[appearance]\ncontent_edge = \"{value}\"\n");
+            assert_eq!(clean(&text).content_edge, expected, "{value}");
+            assert_eq!(expected.name(), value);
+        }
+        // An unusable file guesses visibly, not in the safe direction: the
+        // default, like every ordinary key.
+        assert_eq!(
+            Settings::for_unusable_file().content_edge,
+            ContentEdge::Fade
+        );
+    }
+
+    #[test]
+    fn unrecognized_content_edge_keeps_its_own_key() {
+        for (value, found) in [("\"Cut\"", "\"Cut\""), ("1", "an integer")] {
+            let text = format!("[appearance]\ntheme = \"ink\"\ncontent_edge = {value}\n");
+            let (settings, diagnostic) = rejected(&text);
+            assert_eq!(
+                settings,
+                Settings {
+                    theme: "ink".to_owned(),
+                    ..Settings::default()
+                },
+                "{value}"
+            );
+            assert_eq!(diagnostic.key, Some("appearance.content_edge"), "{value}");
+            assert_eq!(diagnostic.line, Some(3), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`appearance.content_edge` must be \"fade\", \"line\" or \"cut\", \
+                     found {found}; using \"fade\""
+                )
+            );
+        }
+        // At save time the current value stands in; also when the section has
+        // the wrong type.
+        let current = Settings {
+            content_edge: ContentEdge::Cut,
+            ..Settings::default()
+        };
+        for text in [
+            "[appearance]\ncontent_edge = \"soft\"\n",
+            "appearance = 5\n",
+        ] {
+            let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
+            assert_eq!(parsed.settings.content_edge, ContentEdge::Cut, "{text}");
+        }
+    }
+
+    #[test]
+    fn content_edge_change_is_its_own_change() {
+        // Applied by the platform shell to the windows: nothing goes to the
+        // sessions, the font or the cursor, and the field says so alone.
+        let before = clean("");
+        let after = clean("[appearance]\ncontent_edge = \"cut\"\n");
+        assert_eq!(before.terminal(), after.terminal());
+        assert_eq!(
+            before.changes(&after),
+            Changes {
+                content_edge: true,
+                ..Changes::default()
+            }
+        );
+    }
+
+    #[test]
+    fn content_edge_write_keeps_comments_and_unknown_keys() {
+        let text = "[appearance]\ncontent_edge = \"fade\" # keep\nglass = true\n";
+        let written = Settings::with_edit(text, &SettingsEdit::ContentEdge(ContentEdge::Line))
+            .expect("editable text");
+        assert!(
+            written.contains("content_edge = \"line\" # keep"),
+            "{written}"
+        );
+        assert!(written.contains("glass = true"), "{written}");
+        assert_eq!(clean(&written).content_edge, ContentEdge::Line);
+        // A file without the key gets it in its section, the rest untouched.
+        let written = Settings::with_edit(
+            "[appearance]\ndark_theme = \"ink\"\n",
+            &SettingsEdit::ContentEdge(ContentEdge::Cut),
+        )
+        .expect("editable text");
+        assert_eq!(clean(&written).content_edge, ContentEdge::Cut);
+        assert_eq!(clean(&written).dark_theme, "ink");
+        assert_eq!(
+            SettingsEdit::ContentEdge(ContentEdge::Cut).path(),
+            "appearance.content_edge"
+        );
+    }
+
+    #[test]
     fn remote_integration_is_read_and_a_rejected_value_is_off() {
         assert!(clean("").remote_integration);
         assert!(!clean("[remote]\nintegration = false\n").remote_integration);
@@ -5461,6 +5619,7 @@ found 1.5; using 0.1"
                     remote: false,
                     stats: false,
                     scrollbar: false,
+                    content_edge: false,
                 },
                 "{text}"
             );
@@ -5526,6 +5685,7 @@ found 1.5; using 0.1"
                 remote: false,
                 stats: false,
                 scrollbar: false,
+                content_edge: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -6055,6 +6215,7 @@ cursor = \"spring\"
             SettingsEdit::Theme(name) => settings.theme = name,
             SettingsEdit::LightTheme(name) => settings.light_theme = name,
             SettingsEdit::DarkTheme(name) => settings.dark_theme = name,
+            SettingsEdit::ContentEdge(edge) => settings.content_edge = edge,
             SettingsEdit::FontFamily(name) => {
                 settings.font.family = (!name.is_empty()).then_some(name);
             }
@@ -6128,6 +6289,7 @@ cursor = \"spring\"
             SettingsEdit::Theme("paper".to_owned()),
             SettingsEdit::LightTheme("paper".to_owned()),
             SettingsEdit::DarkTheme("ink".to_owned()),
+            SettingsEdit::ContentEdge(ContentEdge::Cut),
             SettingsEdit::FontFamily("Menlo".to_owned()),
             SettingsEdit::FontFamily(String::new()),
             SettingsEdit::FontSize(14.5),

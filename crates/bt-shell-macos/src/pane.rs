@@ -1410,6 +1410,12 @@ pub(crate) struct PaneIvars {
     /// the link gets it in `start_session`; its live change is
     /// [`TerminalPane::set_scrollbar_mode`].
     scrollbar: Cell<ScrollbarMode>,
+    /// What the content does at the pane's top edge (`[appearance]
+    /// content_edge`), the scroll bar's sibling: the grid's top reserve
+    /// ([`TerminalPane::sync_geometry`]) reads it from the first geometry on,
+    /// so it is the birth settings' from `new`; the link gets it in
+    /// `start_session`; its live change is [`TerminalPane::set_content_edge`].
+    content_edge: Cell<ContentEdge>,
     /// `Rc`: the renderer is pinned to the main thread (see `bt_gpu::DisplayLink`)
     /// and the link holds a copy too.
     renderer: Rc<Renderer>,
@@ -1915,6 +1921,7 @@ impl TerminalPane {
         view.setLayer(Some(&layer));
         view.setWantsLayer(true);
         let font = settings.font.clone();
+        let content_edge = settings.content_edge;
         let remote_files = settings.remote_files.clone();
         let stats_driver = StatsDriver::new(&settings.remote_stats);
         let dim = DimOverlay::new(mtm);
@@ -1943,6 +1950,7 @@ impl TerminalPane {
             reduce_motion: Cell::new(reduce_motion),
             smooth_scroll: Cell::new(smooth_scroll),
             scrollbar: Cell::new(scrollbar),
+            content_edge: Cell::new(content_edge),
             renderer,
             layer,
             surface,
@@ -2668,6 +2676,10 @@ impl TerminalPane {
         // The scroll bar's form, for the same reason; the grid above was
         // already sized with its reserve (`sync_geometry`).
         link.set_scrollbar_mode(self.ivars().scrollbar.get());
+        // The top edge's mode, the same way: the link is born with `Fade` and
+        // the grid above was cut with this mode's reserve — the two must agree
+        // before the first frame.
+        link.set_content_edge(self.ivars().content_edge.get());
         // The pointer's hand and tip over the block marks follow the drawn
         // marks, not only the pointer's moves.
         link.on_marks_published(marks_notifier(self.ivars().id, self.ivars().lookup));
@@ -3062,6 +3074,33 @@ impl TerminalPane {
             self.refresh_geometry();
         }
         self.refresh_marks_wanted();
+    }
+
+    /// Gives the pane what the content does at its top edge (`[appearance]
+    /// content_edge`; `TerminalWindow::set_content_edge` is the one caller).
+    /// A no-op on the same mode. A new one goes to the link, and when the
+    /// fade comes or goes ([`bt_gpu::edge_fades`]) the grid is resized
+    /// through the one geometry path ([`TerminalPane::refresh_geometry`]) —
+    /// **always**, not only when the row count changes: at a height where
+    /// both modes give the same rows the PTY sees no new size, yet the grid
+    /// moves by the fade and the caret must snap with it, which only the
+    /// geometry refresh does. Between `line` and `cut` nothing moves here;
+    /// the line is the container's (`SplitView::set_content_edge`).
+    ///
+    /// The split's proportions are not touched, for
+    /// [`TerminalPane::set_scrollbar_mode`]'s reason: the smallest pane's
+    /// size does not grow by the reserve ([`TerminalPane::min_size`]).
+    pub(crate) fn set_content_edge(&self, edge: ContentEdge) {
+        let before = self.ivars().content_edge.replace(edge);
+        if before == edge {
+            return;
+        }
+        if let Some(link) = self.ivars().link.get() {
+            link.set_content_edge(edge);
+        }
+        if bt_gpu::edge_fades(before) != bt_gpu::edge_fades(edge) {
+            self.refresh_geometry();
+        }
     }
 
     /// Gives the view the scrolling's **resolved** mode
@@ -3719,9 +3758,10 @@ impl TerminalPane {
         // nor the history moves the grid.
         let reserve = self.ivars().scrollbar.get().reserve_px(cell);
         // The top edge's reserve, the same kind of function: of the mode and
-        // the cell alone. `Fade` is the link's own mode (`DisplayLink`'s
-        // default), so the rows cut here and the fade drawn over them agree.
-        let top = bt_gpu::edge_reserve_px(ContentEdge::Fade, cell);
+        // the cell alone. The mode is the one the link draws with
+        // ([`TerminalPane::set_content_edge`] gives both), so the rows cut
+        // here and the fade drawn over them agree.
+        let top = bt_gpu::edge_reserve_px(self.ivars().content_edge.get(), cell);
         Some(split_into_grid(
             width_px,
             height_px,

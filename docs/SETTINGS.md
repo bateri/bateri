@@ -16,6 +16,9 @@ is `resolve_reduce_motion` in `crates/bt-shell-macos/src/app.rs`),
 `crates/bt-gpu/src/scrollbar.rs` (the scroll bar: its sizes, timing, forms and
 the track `"always"` reserves; the system's preference is resolved by
 `resolve_scrollbar` in `crates/bt-shell-macos/src/app.rs`),
+`crates/bt-gpu/src/frame.rs` and `shaders/edge.wgsl` (the content's top edge:
+the strip `"fade"` keeps and how it fades; `"line"`'s line is
+`crates/bt-shell-macos/src/split_view.rs`'s),
 `crates/bt-shell-common/src/child.rs` (which shell runs, where the wrapper
 script is), `shell_integration_env` in `crates/bt-shell-macos/src/app.rs`
 (whether shell integration is set up, and with which environment),
@@ -77,7 +80,8 @@ integration](#remote-shell-integration)), then the eight preview/download keys
 of `[remote]` and the two keys of the load indicator (`stats`,
 `stats_interval`; eleven keys in all), and Appearance also carries
 `[terminal] scrollbar` ("Scroll bar"), because it changes how the window
-looks; on folder rows Change… opens a folder
+looks, and `[appearance] content_edge` ("Content edge"); on folder rows
+Change… opens a folder
 picker (a folder under your home directory is written as `~/…`), on the
 preview folder Show in Finder opens it, and the "In use" row shows the total
 size of the copies in the folder — Clear Now deletes the previews at once (a
@@ -204,6 +208,12 @@ theme = "system"
 # Theme names, used while theme = "system".
 light_theme = "bateri-light"
 dark_theme = "bateri"
+# "fade" | "line" | "cut". Where the text meets the tab bar, or the divider
+# above a split pane: fade thins a line scrolling up into a strip at least as
+# tall as the left margin, so no letter is cut in half — at some window
+# heights that costs one line; line cuts the text under a thin line in the
+# divider's color; cut cuts it where the pane ends, as before.
+content_edge = "fade"
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -754,6 +764,7 @@ warning.
 theme = "system"
 light_theme = "bateri-light"
 dark_theme = "bateri"
+content_edge = "fade"
 ```
 
 | key | type | default | meaning |
@@ -761,6 +772,7 @@ dark_theme = "bateri"
 | `theme` | `"system"` or a theme name | `"system"` | the color theme to use |
 | `light_theme` | theme name | `"bateri-light"` | the light appearance's theme while `theme = "system"` |
 | `dark_theme` | theme name | `"bateri"` | the dark appearance's theme while `theme = "system"` |
+| `content_edge` | `"fade"` \| `"line"` \| `"cut"` | `"fade"` | what the text does where it meets the tab bar, or the divider above a split pane |
 
 - `theme = "system"` leaves the theme to the macOS appearance: `light_theme`
   in light, `dark_theme` in dark. When the appearance changes, the theme
@@ -782,6 +794,21 @@ dark_theme = "bateri"
 - An empty name or a name containing `/` (`"../x"`) is not accepted; it falls
   back to the key's default and gives a warning: themes are not read from
   outside the `themes/` directory.
+- `content_edge = "fade"` keeps a strip at the top of every pane at least as
+  tall as the left margin: a line scrolling up thins out in it instead of
+  being cut through its letters, and lines from your history fade into it.
+  The first line of a screen at rest always stands below the strip, fully
+  readable; full screen programs such as vim leave it empty. At the window
+  heights whose leftover is shorter than the margin, the pane shows one line
+  fewer than with the other two values.
+- `content_edge = "line"` cuts the text at the top as `"cut"` does, under a
+  one-pixel line in the color of the dividers between split panes, along the
+  top of the window's panes.
+- `content_edge = "cut"` cuts the text where the pane ends, through a letter
+  if it falls so — every line the height allows.
+- Changing the value applies at once; between `"fade"` and the other two the
+  panes may gain or lose a line, which the program running in them sees as a
+  resize.
 
 ### `[font]`
 

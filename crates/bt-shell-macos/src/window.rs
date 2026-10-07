@@ -36,8 +36,8 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use bt_core::{
-    ConfirmClose, HostMark, InitialInput, MarkSubject, Settings, ShutdownHandle, TabId, Teardown,
-    Theme, contrast_ratio,
+    ConfirmClose, ContentEdge, HostMark, InitialInput, MarkSubject, Settings, ShutdownHandle,
+    TabId, Teardown, Theme, contrast_ratio,
 };
 use bt_gpu::GpuError;
 use dispatch2::DispatchQueue;
@@ -2084,6 +2084,22 @@ impl TerminalWindow {
         self.apply_chrome(&theme);
         // The tab's dot is from the mark's role; the role is another colour in the new theme.
         self.refresh_tab_mark();
+    }
+
+    /// Gives what the content does at the panes' top edge (`[appearance]
+    /// content_edge`) to the panes ([`TerminalPane::set_content_edge`]: the
+    /// rows and the fade) and to the container ([`SplitView::set_content_edge`]:
+    /// `line`'s line) — one call for both, for [`Self::set_theme`]'s reason:
+    /// two callers (the window's birth, the settings' save) and a half applied
+    /// mode would put a line over a fading pane.
+    ///
+    /// A pane born later in this window (a split) takes the mode from its
+    /// birth settings, the same source as this call's.
+    pub(crate) fn set_content_edge(&self, edge: ContentEdge) {
+        for pane in self.panes() {
+            pane.set_content_edge(edge);
+        }
+        self.ivars().container.set_content_edge(edge);
     }
 
     /// Paints the window chrome with the theme: the

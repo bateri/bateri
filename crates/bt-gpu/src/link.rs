@@ -817,7 +817,8 @@ struct Core {
     /// the size, the column count is the window's own answer.
     dock_cols: Cell<u16>,
     /// What the content does at the pane's top edge; `Fade` until the
-    /// settings say otherwise. The content frame reads it twice — the fill
+    /// settings say otherwise ([`DisplayLink::set_content_edge`]). The
+    /// content frame reads it twice — the fill
     /// band's ceiling before the scan ([`crate::edge_ceiling_rows`]) and the
     /// drawn fade after it ([`place_edge`]) — and it must be the mode
     /// `bt-shell` cut the rows with, or the fade and the rows part.
@@ -2746,6 +2747,30 @@ impl DisplayLink {
         self.show_scrollbar(changed);
     }
 
+    /// What the content does at the pane's top edge changed — the settings'
+    /// value as it is (nothing to resolve), from `bt-shell` when the pane is
+    /// born and when the settings are saved.
+    ///
+    /// **It must be the mode `bt-shell` cuts the rows with** (`Core`'s
+    /// field): the drawn fade is the leftover those rows leave. So `bt-shell`
+    /// gives it here **and** resizes the grid when the fade comes or goes
+    /// ([`crate::edge_fades`]) — even at a height where both modes give the
+    /// same rows, because the grid still moves by the fade and the caret must
+    /// snap with it, which [`DisplayLink::resize`]'s geometry flag does.
+    ///
+    /// **A no-op on the same mode; a content frame when the fade comes or
+    /// goes**: the fade is placed and the fill band's ceiling read only on a
+    /// content frame, so without the request an idle window would show the
+    /// old edge until the next output. Between `Line` and `Cut` the mode is
+    /// stored and nothing is asked for — to this layer the two draw the same
+    /// frame; the line is `bt-shell`'s container.
+    pub fn set_content_edge(&self, edge: ContentEdge) {
+        let before = self.core.content_edge.replace(edge);
+        if crate::frame::edge_fades(before) != crate::frame::edge_fades(edge) {
+            self.request_frame();
+        }
+    }
+
     /// The window's visibility changed.
     ///
     /// While invisible both drawing and the **rhythm** stop: the pacer is
@@ -3602,6 +3627,19 @@ mod tests {
         fill: u16,
         frac: f32,
     ) -> Frame {
+        edge_frame(ContentEdge::Fade, motion, dock_rows, layout, fill, frac)
+    }
+
+    /// [`fade_frame`] in any mode: the mode reaches the drawn edge through
+    /// the same seam.
+    fn edge_frame(
+        edge: ContentEdge,
+        motion: Motion,
+        dock_rows: u16,
+        layout: impl FnOnce(&mut Frame),
+        fill: u16,
+        frac: f32,
+    ) -> Frame {
         let cell = fade_cell();
         let mut frame = Frame::default();
         frame.clear(cell, CaretStyle::default());
@@ -3613,14 +3651,7 @@ mod tests {
             Theme::BATERI.separator_linear(),
             Theme::BATERI.separator_linear(),
         );
-        place_edge(
-            &mut frame,
-            ContentEdge::Fade,
-            FADE_BOTTOM,
-            dock_rows,
-            FADE_ROWS,
-            cell,
-        );
+        place_edge(&mut frame, edge, FADE_BOTTOM, dock_rows, FADE_ROWS, cell);
         compose(&mut frame, motion, FADE_BOTTOM, dock_rows);
         if let Some(at) = motion.position() {
             frame.push_caret(
@@ -3937,6 +3968,67 @@ mod tests {
             grid_caret_at(3, 7, 5, 2.0, 0.0, cell),
             [3.0, 7.0 + 5.0 - 2.0]
         );
+    }
+
+    #[test]
+    fn a_change_of_mode_moves_the_grid_only_when_the_fade_comes_or_goes_and_the_caret_snaps() {
+        // `Line` reads as `Cut` — its line is the container's chrome — so
+        // between the two nothing in the grid moves: neither the link nor
+        // `bt-shell` redoes anything. The fade coming or going moves the grid.
+        use ContentEdge::{Cut, Fade, Line};
+        for (before, after, moves) in [
+            (Fade, Cut, true),
+            (Cut, Fade, true),
+            (Fade, Line, true),
+            (Line, Fade, true),
+            (Cut, Line, false),
+            (Line, Cut, false),
+            (Fade, Fade, false),
+            (Cut, Cut, false),
+            (Line, Line, false),
+        ] {
+            assert_eq!(
+                crate::frame::edge_fades(before) != crate::frame::edge_fades(after),
+                moves,
+                "{before:?} → {after:?}"
+            );
+        }
+
+        // **A height where both modes give the same rows** (the fade twins'
+        // window: 29 rows either way). The PTY's size does not move, so the
+        // session finds nothing to resize — and the grid moves all the same,
+        // by the whole fade, the caret's letter with it. The geometry refresh
+        // must not hang on the row count, and its flag is what snaps the
+        // caret instead of gliding it the fade's height.
+        let cell = fade_cell();
+        let share = crate::frame::dock_px(DOCK_ROWS, cell);
+        let rows = |edge| {
+            ((FADE_BOTTOM - share - crate::frame::edge_reserve_px(edge, cell)) / 18.0) as u16
+        };
+        assert_eq!((rows(Cut), rows(Fade)), (FADE_ROWS, FADE_ROWS));
+        let layout = |frame: &mut Frame| frame.set_dock_input_rows(Some(1));
+        let cut_caret = grid_caret_at(0, FADE_CARET_ROW, FADE_OFFSET, 0.0, 0.0, cell);
+        let mut motion = Motion::default();
+        motion.sync(Some(cut_caret), FADE_OFFSET, 0.0, 0, false, false);
+        let cut = edge_frame(Cut, motion, DOCK_ROWS, layout, 0, 0.0);
+        assert_eq!(cut.edge_px(), 0.0);
+        assert_caret_on_its_letter(&cut, "cut");
+
+        // `Cut` → `Fade` through the geometry refresh: the caret stands on its
+        // letter in the first frame, the grid lowered by the fade.
+        let mut snapped = motion;
+        snapped.sync(Some(fade_caret(0.0)), FADE_OFFSET, 0.0, 0, true, false);
+        assert!(snapped.settled(), "the caret glides after a change of mode");
+        let fade = edge_frame(Fade, snapped, DOCK_ROWS, layout, 0, 0.0);
+        assert_eq!(fade.edge_px(), FADE_EDGE);
+        assert_eq!(fade.origin_px(), cut.origin_px() + FADE_EDGE);
+        assert_caret_on_its_letter(&fade, "fade, first frame");
+
+        // Without the flag the same target would glide: the snap is the
+        // refresh's, not the target's.
+        let mut glided = motion;
+        glided.sync(Some(fade_caret(0.0)), FADE_OFFSET, 0.0, 0, false, false);
+        assert!(!glided.settled(), "a change of target alone snapped");
     }
 
     #[test]

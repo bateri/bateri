@@ -90,6 +90,16 @@ pub(crate) enum OutOfGrid {
     Reject,
 }
 
+impl OutOfGrid {
+    /// Snap to the nearest cell with no fill band and no fade: every point
+    /// outside the grid sticks to its edge — the continuation of a gesture,
+    /// and the gestures that never aim at the band.
+    pub(crate) const CLAMP: Self = Self::Clamp {
+        fill_rows: 0,
+        edge_px: 0.0,
+    };
+}
+
 /// Mouse point → selection end. **Pure and AppKit-free**, so testable.
 ///
 /// `view_px` is in view coordinates (points), `metrics` and `origin_px` are
@@ -1036,10 +1046,7 @@ define_class!(
             // as today: the application does not know about the fill anyway, it
             // is a terminal drawing.
             let Some(pointer) =
-                self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp {
-                fill_rows: 0,
-                edge_px: 0.0,
-            })
+                self.window_point_cell(event.locationInWindow(), OutOfGrid::CLAMP)
             else {
                 return;
             };
@@ -1729,13 +1736,8 @@ impl BateriView {
         }
         // The pointer's cell and the fill rejection's zero, with the
         // rationale in the line arm (`scrollWheel:`).
-        let Some(pointer) = self.window_point_cell(
-            event.locationInWindow(),
-            OutOfGrid::Clamp {
-                fill_rows: 0,
-                edge_px: 0.0,
-            },
-        ) else {
+        let Some(pointer) = self.window_point_cell(event.locationInWindow(), OutOfGrid::CLAMP)
+        else {
             return;
         };
         let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
@@ -2166,10 +2168,7 @@ impl BateriView {
         if !pressed {
             match self.with_gesture(|g| g.released(button)) {
                 Release::Report => {
-                    let clamp = OutOfGrid::Clamp {
-                        fill_rows: 0,
-                        edge_px: 0.0,
-                    };
+                    let clamp = OutOfGrid::CLAMP;
                     if let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) {
                         self.report_button(session, button, false, cell, event);
                     }
@@ -2307,10 +2306,7 @@ impl BateriView {
             // beyond the edge - there is no periodic timer.
             Drag::SelectDock => {
                 let at = event.locationInWindow();
-                let clamp = OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                };
+                let clamp = OutOfGrid::CLAMP;
                 if let Some(session) = self.ivars().session.get() {
                     let edge = self.dock_edge(at);
                     if edge != 0 {
@@ -2359,10 +2355,7 @@ impl BateriView {
             return;
         }
         // The continuation of a gesture, not its start: the coordinate is clamped.
-        let clamp = OutOfGrid::Clamp {
-            fill_rows: 0,
-            edge_px: 0.0,
-        };
+        let clamp = OutOfGrid::CLAMP;
         let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) else {
             return;
         };
@@ -2388,10 +2381,7 @@ impl BateriView {
             return;
         };
         let outside = if button.is_some() {
-            OutOfGrid::Clamp {
-                fill_rows: 0,
-                edge_px: 0.0,
-            }
+            OutOfGrid::CLAMP
         } else {
             self.flush_lost_releases(session, event);
             OutOfGrid::Reject
@@ -2893,18 +2883,7 @@ mod tests {
     /// shifting the expected x values by the padding would make their
     /// rationales unreadable. The padding's own test is `the_gutter_shifts_the_grid_origin`.
     fn scene_point(view_px: (f64, f64)) -> Option<SelectionPoint> {
-        point_to_cell(
-            view_px,
-            grid(0),
-            0.0,
-            OutOfGrid::Clamp {
-                fill_rows: 0,
-                edge_px: 0.0,
-            },
-            2.0,
-            100,
-            33,
-        )
+        point_to_cell(view_px, grid(0), 0.0, OutOfGrid::CLAMP, 2.0, 100, 33)
     }
 
     /// The scene's cell and half are read separately: let the cell tests look
@@ -3005,17 +2984,7 @@ mod tests {
         // 49 points × 2 = 98 pixels < 100: above the origin.
         assert_eq!(at((5.0, 49.0), OutOfGrid::Reject), None);
         // Without fill `Clamp` keeps sticking that area to row 0.
-        assert_eq!(
-            at(
-                (5.0, 49.0),
-                OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                }
-            )
-            .map(|p| p.row),
-            Some(0)
-        );
+        assert_eq!(at((5.0, 49.0), OutOfGrid::CLAMP).map(|p| p.row), Some(0));
         // Right below the origin is valid.
         assert_eq!(at((51.0, 51.0), OutOfGrid::Reject).map(|p| p.row), Some(0));
     }
@@ -3070,20 +3039,7 @@ mod tests {
     fn the_gutter_shifts_the_grid_origin() {
         // The scene: 9×18 cell, @2x, **8 physical pixels** of padding. In the
         // view the padding is 4 points, the cell 4.5 points.
-        let at = |x: f64| {
-            point_to_cell(
-                (x, 9.0),
-                grid(8),
-                0.0,
-                OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                },
-                2.0,
-                100,
-                33,
-            )
-        };
+        let at = |x: f64| point_to_cell((x, 9.0), grid(8), 0.0, OutOfGrid::CLAMP, 2.0, 100, 33);
         let cell = |point: Option<SelectionPoint>| point.map(|p| (p.col, p.half));
 
         // The **inside** of the padding is clamped to the first column and
@@ -3119,19 +3075,8 @@ mod tests {
         // otherwise it would pass even if the padding were never applied.
         assert_eq!(cell(at(5.0)), Some((0, CellHalf::Left)), "with padding");
         assert_eq!(
-            point_to_cell(
-                (5.0, 9.0),
-                grid(0),
-                0.0,
-                OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                },
-                2.0,
-                100,
-                33
-            )
-            .map(|p| (p.col, p.half)),
+            point_to_cell((5.0, 9.0), grid(0), 0.0, OutOfGrid::CLAMP, 2.0, 100, 33)
+                .map(|p| (p.col, p.half)),
             Some((1, CellHalf::Left)),
             "without padding the same point is the next column"
         );
@@ -3149,19 +3094,8 @@ mod tests {
             "padded right end"
         );
         assert_eq!(
-            point_to_cell(
-                (451.5, 9.0),
-                grid(0),
-                0.0,
-                OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                },
-                2.0,
-                100,
-                33
-            )
-            .map(|p| (p.col, p.half)),
+            point_to_cell((451.5, 9.0), grid(0), 0.0, OutOfGrid::CLAMP, 2.0, 100, 33)
+                .map(|p| (p.col, p.half)),
             Some((99, CellHalf::Right)),
             "without padding the same point overflows the grid"
         );
@@ -3184,20 +3118,8 @@ mod tests {
         // would overflow and that click would select the last row - the drag's
         // start would leap to the screen's bottom. In `f64` it stays negative
         // and `as u16` saturates it to zero.
-        let at = |y: f64| {
-            point_to_cell(
-                (0.0, y),
-                grid(0),
-                ORIGIN_PX,
-                OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                },
-                2.0,
-                100,
-                33,
-            )
-        };
+        let at =
+            |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX, OutOfGrid::CLAMP, 2.0, 100, 33);
         let row = |point: Option<SelectionPoint>| point.map(|p| p.row);
 
         // The whole blank area sticks to row 0: the top edge, its middle and one
@@ -3222,10 +3144,7 @@ mod tests {
                 (0.0, 99.0),
                 grid(0),
                 0.0,
-                OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                },
+                OutOfGrid::CLAMP,
                 2.0,
                 100,
                 33
@@ -3249,10 +3168,7 @@ mod tests {
                 (0.0, y),
                 grid(0),
                 ORIGIN_PX + 9.0,
-                OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                },
+                OutOfGrid::CLAMP,
                 2.0,
                 100,
                 33,
@@ -3419,19 +3335,8 @@ mod tests {
             assert_eq!(press(20.0, y), None, "y = {y}");
         }
         // The drag is clamped into the row.
-        let drag = point_to_cell(
-            (1000.0, 390.0),
-            metrics,
-            top,
-            OutOfGrid::Clamp {
-                fill_rows: 0,
-                edge_px: 0.0,
-            },
-            1.0,
-            40,
-            1,
-        )
-        .expect("no clamp");
+        let drag = point_to_cell((1000.0, 390.0), metrics, top, OutOfGrid::CLAMP, 1.0, 40, 1)
+            .expect("no clamp");
         assert_eq!((drag.col, drag.row, drag.half), (39, 0, CellHalf::Right));
     }
 
@@ -3439,33 +3344,11 @@ mod tests {
     fn empty_grid_has_no_cell() {
         // A minimised window can give zero columns/rows: there is no last cell to stick to.
         assert_eq!(
-            point_to_cell(
-                (1.0, 1.0),
-                grid(0),
-                0.0,
-                OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                },
-                2.0,
-                0,
-                33
-            ),
+            point_to_cell((1.0, 1.0), grid(0), 0.0, OutOfGrid::CLAMP, 2.0, 0, 33),
             None
         );
         assert_eq!(
-            point_to_cell(
-                (1.0, 1.0),
-                grid(0),
-                0.0,
-                OutOfGrid::Clamp {
-                    fill_rows: 0,
-                    edge_px: 0.0,
-                },
-                2.0,
-                100,
-                0
-            ),
+            point_to_cell((1.0, 1.0), grid(0), 0.0, OutOfGrid::CLAMP, 2.0, 100, 0),
             None
         );
     }
@@ -3693,30 +3576,8 @@ mod tests {
         // The same view point is two different cells at two scales: the measure
         // comes from physical pixels and if the scale factor is skipped the
         // selection is off by half on a retina machine.
-        let at1x = point_to_cell(
-            (90.0, 150.0),
-            grid(0),
-            0.0,
-            OutOfGrid::Clamp {
-                fill_rows: 0,
-                edge_px: 0.0,
-            },
-            1.0,
-            100,
-            33,
-        );
-        let at2x = point_to_cell(
-            (90.0, 150.0),
-            grid(0),
-            0.0,
-            OutOfGrid::Clamp {
-                fill_rows: 0,
-                edge_px: 0.0,
-            },
-            2.0,
-            100,
-            33,
-        );
+        let at1x = point_to_cell((90.0, 150.0), grid(0), 0.0, OutOfGrid::CLAMP, 1.0, 100, 33);
+        let at2x = point_to_cell((90.0, 150.0), grid(0), 0.0, OutOfGrid::CLAMP, 2.0, 100, 33);
         assert_eq!(
             (at1x.map(|p| (p.col, p.row)), at2x.map(|p| (p.col, p.row))),
             (Some((10, 8)), Some((20, 16)))

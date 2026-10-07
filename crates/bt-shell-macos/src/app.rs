@@ -3273,6 +3273,10 @@ impl AppDelegate {
         // would show the system's grey title bar for a frame. The separator's colour
         // comes from the same theme too (the first form of `TerminalWindow::set_theme`).
         window.set_theme(theme);
+        // The top edge's mode beside it, for the container's line: the pane
+        // already has it from its birth settings, the same slot.
+        let edge = self.settings().content_edge;
+        window.set_content_edge(edge);
         match from {
             Some(from) if opening != Opening::Window => window.show_as_tab_of(from),
             _ => window.show_after(from),
@@ -3644,6 +3648,8 @@ impl AppDelegate {
                     ));
                     self.ivars().windows.borrow_mut().push(this.clone());
                     this.set_theme(theme);
+                    let edge = self.settings().content_edge;
+                    this.set_content_edge(edge);
                     match &first {
                         Some(first) => this.show_as_tab_of(first),
                         None => this.show_at(frame),
@@ -4211,6 +4217,16 @@ impl AppDelegate {
             // writes one key at a time.
             if changes.scrollbar {
                 self.apply_scrollbar();
+            }
+            // The top edge's mode goes to every **window** — its panes and its
+            // container's line together (`TerminalWindow::set_content_edge`).
+            // A save that also changes the font resizes the grid twice, the
+            // scroll bar's case above.
+            if changes.content_edge {
+                let edge = self.settings().content_edge;
+                for window in &windows {
+                    window.set_content_edge(edge);
+                }
             }
             self.post_notices(Source::Write, Vec::new());
         }
@@ -5247,8 +5263,10 @@ mod tests {
         let gutter = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE, NO_TOP);
         assert_eq!(plain.cols, 100);
         assert_eq!(gutter.cols, 99, "the gutter takes one column");
-        // Rows **do not see** the gutter: the gutter is only on the left and does not
-        // touch the vertical geometry.
+        // Rows **do not see** the gutter as a left margin: it is only on the left.
+        // The top edge's reserve, which in `Fade` is the gutter again, is its own
+        // parameter (`top_px`, zero here) and its own test
+        // (`the_fade_keeps_the_margin_free_at_the_top_and_takes_the_leftover`).
         assert_eq!(gutter.rows, plain.rows);
         // The gutter travels with the metrics: the value that built the grid gives it back
         // and the draw origin and mouse mapping read the same value.
@@ -5258,9 +5276,11 @@ mod tests {
     #[test]
     fn the_dock_costs_rows_and_only_when_there_is_one() {
         // The dock gutter is deducted from **rows** and, unlike the left gutter, conditional:
-        // not a single row should go from a window without a dock (an unintegrated shell, the smoke recipe) —
-        // `smoke_shell`'s `cells=8 glyphs=6`
-        // contract is measured in that window.
+        // not a single row should go **to the dock** from a window without one (an
+        // unintegrated shell, the smoke recipe) — `smoke_shell`'s `cells=8 glyphs=6`
+        // contract is measured in that window. The top edge's reserve is a separate
+        // parameter (`top_px`, zero here): in `Fade` that window gives it a row at
+        // some heights (`the_fade_keeps_the_margin_free_at_the_top_and_takes_the_leftover`).
         let without = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE, NO_TOP);
         let with = split_into_grid(
             900.0,

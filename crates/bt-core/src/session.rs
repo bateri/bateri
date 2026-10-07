@@ -6878,7 +6878,8 @@ impl Session {
     /// **In a scrolled window only the permanent share** ([`Session::grid_lowered`]):
     /// in a remote session the grid is one row plus the gap lower, and the fade
     /// at the pane's top keeps it lower everywhere, so the strip at the top is
-    /// open while looking at the history too. That share is
+    /// open while looking at the history too — behind the same gates, so an
+    /// unfilled dock-less window keeps its fade empty here as well. That share is
     /// the **same** at every notch, i.e. scrolling advances a full row at every
     /// notch — what was rejected was filling the offset's blank that changes with
     /// the notch and that is not filled here. The rows are those above the

@@ -43,8 +43,9 @@
 //! The content's **top edge** follows the same discipline, beside
 //! [`dock_px`]: what the rows keep free at the pane's top
 //! ([`edge_reserve_px`], which `bt-shell`'s row arithmetic consumes), the fade
-//! drawn over the leftover ([`edge_drawn_px`]) and how many history rows the
-//! fill band stands there ([`edge_ceiling_rows`]) have their one copy here.
+//! drawn over the leftover ([`edge_drawn_px`]), how many history rows the
+//! fill band stands there ([`edge_ceiling_rows`]) and whether a mode fades at
+//! all ([`edge_fades`], where `Line` reads as `Cut`) have their one copy here.
 //! The shaders are WGSL (`shaders/*.wgsl`), embedded with `include_str!`;
 //! there is no shader build step.
 //!
@@ -72,7 +73,7 @@ mod surface;
 pub use error::GpuError;
 pub use frame::{
     DOCK_ROWS, context_cols, context_row_offset, dock_px, edge_ceiling_rows, edge_drawn_px,
-    edge_reserve_px,
+    edge_fades, edge_reserve_px,
 };
 pub use link::{DisplayLink, Layout, Origin, Pacer, TickTarget, Ticker, Waker};
 pub use metrics::{CellMetrics, FontNotice, family_notice};
