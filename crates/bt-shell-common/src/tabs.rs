@@ -391,6 +391,70 @@ impl Strip {
     }
 }
 
+/// What a tab's indicator slot shows, left of its title: one glyph, the most urgent of the tab's
+/// signals ([`indicator`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Indicator {
+    /// A question of the tab waits for an answer the user cannot see — asked while the tab was in
+    /// the background, or left up when the user switched away. First: nothing goes on in that tab
+    /// until it is answered.
+    Question,
+    /// A command runs.
+    Running,
+    /// A command failed and the user has not looked at the tab since.
+    Failed,
+    /// A command finished and the user has not looked at the tab since.
+    Finished,
+    /// An upload or download flows.
+    Uploading,
+}
+
+impl Indicator {
+    /// What VoiceOver says after the tab's title.
+    pub fn spoken(self) -> &'static str {
+        match self {
+            Indicator::Question => "waiting for an answer",
+            Indicator::Running => "running",
+            Indicator::Failed => "failed",
+            Indicator::Finished => "finished",
+            Indicator::Uploading => "uploading",
+        }
+    }
+}
+
+/// The facts a tab's indicator comes from; the platform shell reads each from the tab's panes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Signals {
+    pub question: bool,
+    pub running: bool,
+    pub failed: bool,
+    pub finished: bool,
+    pub uploading: bool,
+}
+
+/// The tab's one indicator: question > running > failed > finished > uploading; `None` when
+/// nothing is going on. A question outranks everything because the tab is stuck until it is
+/// answered; a failure outranks a success because it is the one the user must not miss; an
+/// upload is last because its progress also shows elsewhere (the underline, the Dock icon).
+pub fn indicator(signals: Signals) -> Option<Indicator> {
+    let Signals {
+        question,
+        running,
+        failed,
+        finished,
+        uploading,
+    } = signals;
+    [
+        (question, Indicator::Question),
+        (running, Indicator::Running),
+        (failed, Indicator::Failed),
+        (finished, Indicator::Finished),
+        (uploading, Indicator::Uploading),
+    ]
+    .into_iter()
+    .find_map(|(on, indicator)| on.then_some(indicator))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,5 +865,83 @@ mod tests {
         assert_eq!(strip.wheeled(-500.0, 0.0), 0.0);
         assert_eq!(strip.wheeled(0.0, 5000.0), 950.0);
         assert_eq!(bar(1000.0, 3).layout().wheeled(40.0, 0.0), 0.0);
+    }
+
+    /// Every combination of the five signals: the indicator is the first one that is on, in
+    /// the order question, running, failed, finished, uploading — and nothing when none is.
+    #[test]
+    fn the_most_urgent_signal_is_the_indicator() {
+        let order = [
+            Indicator::Question,
+            Indicator::Running,
+            Indicator::Failed,
+            Indicator::Finished,
+            Indicator::Uploading,
+        ];
+        for bits in 0u8..32 {
+            let on = |index: usize| bits & (1 << index) != 0;
+            let signals = Signals {
+                question: on(0),
+                running: on(1),
+                failed: on(2),
+                finished: on(3),
+                uploading: on(4),
+            };
+            let expected = (0..order.len())
+                .find(|&index| on(index))
+                .map(|index| order[index]);
+            assert_eq!(indicator(signals), expected, "{signals:?}");
+        }
+    }
+
+    /// The table's named rows: what the user sees when two things happen in one tab.
+    #[test]
+    fn a_question_outranks_a_running_command_and_a_failure_a_success() {
+        assert_eq!(indicator(Signals::default()), None);
+        assert_eq!(
+            indicator(Signals {
+                question: true,
+                running: true,
+                ..Signals::default()
+            }),
+            Some(Indicator::Question)
+        );
+        assert_eq!(
+            indicator(Signals {
+                failed: true,
+                finished: true,
+                ..Signals::default()
+            }),
+            Some(Indicator::Failed)
+        );
+        assert_eq!(
+            indicator(Signals {
+                running: true,
+                uploading: true,
+                ..Signals::default()
+            }),
+            Some(Indicator::Running)
+        );
+        assert_eq!(
+            indicator(Signals {
+                uploading: true,
+                ..Signals::default()
+            }),
+            Some(Indicator::Uploading)
+        );
+    }
+
+    /// VoiceOver names every indicator, the question in words a listener acts on.
+    #[test]
+    fn every_indicator_is_spoken() {
+        assert_eq!(Indicator::Question.spoken(), "waiting for an answer");
+        for indicator in [
+            Indicator::Running,
+            Indicator::Failed,
+            Indicator::Finished,
+            Indicator::Uploading,
+        ] {
+            assert!(!indicator.spoken().is_empty());
+        }
     }
 }

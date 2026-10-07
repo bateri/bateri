@@ -83,7 +83,7 @@ use crate::sheets::{self, Asker};
 use crate::split::{Axis, Direction};
 use crate::split_view::SplitView;
 use crate::tab::{self, TerminalTab};
-use crate::tab_bar::TabBar;
+use crate::tab_bar::{Label, TabBar};
 use crate::tabs::Tabs;
 
 /// Whether the theme's background is dark — the window chrome's appearance
@@ -607,6 +607,9 @@ define_class!(
         // a live resize is a burst the delayed trigger folds into one.
         #[unsafe(method(windowDidMove:))]
         fn window_did_move(&self, _n: &NSNotification) {
+            // A question up in the tab on screen sits on a window of its own
+            // that does not follow by itself (`sheets::fit_owner`).
+            sheets::fit_owner(self.selected_tab().container());
             self.layout_changed();
         }
 
@@ -670,17 +673,27 @@ define_class!(
         // background tab's are not the user's (`TerminalPane::is_active`);
         // an unfocused pane's hollow caret comes from the second bit, from
         // its own `BateriView`'s first-responder hooks.
+        //
+        // A question up in the selected tab sits on its own window and does
+        // not block this one, so the key it would have kept is handed to it
+        // (`TerminalTab::key_to_sheet`): typing never reaches the pane under
+        // the question, and the window's resigning gives the panes their
+        // focus off at once.
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
-            for pane in self.selected_tab().panes() {
+            // The key window is part of the layout.
+            self.layout_changed();
+            let tab = self.selected_tab();
+            if tab.key_to_sheet() {
+                return;
+            }
+            for pane in tab.panes() {
                 pane.apply_focus(true);
                 pane.rehover_upload();
                 // Coming back to the window is an interaction: the remote load
                 // indicator samples again at once.
                 pane.note_interaction();
             }
-            // The key window is part of the layout.
-            self.layout_changed();
         }
 
         #[unsafe(method(windowDidResignKey:))]
@@ -698,12 +711,12 @@ define_class!(
             }
         }
 
-        /// A sheet ended on the window: a question the selected tab parked
-        /// while it was in the background — or behind this sheet — opens
-        /// now ([`TerminalTab::shown`]).
+        /// The window's own question ended: a question the selected tab
+        /// parked behind it opens now ([`TerminalTab::open_parked`]). A tab's
+        /// questions sit on its owner, whose ending is heard there.
         #[unsafe(method(windowDidEndSheet:))]
         fn window_did_end_sheet(&self, _n: &NSNotification) {
-            self.selected_tab().shown();
+            self.selected_tab().open_parked();
         }
 
         /// Full screen moves the toolbar into a window of its own that
@@ -1082,7 +1095,8 @@ impl RootView {
         self.place(self.title_row());
     }
 
-    /// Puts the bar in a `row` tall title row and every container under it.
+    /// Puts the bar in a `row` tall title row and every container under it;
+    /// a question up in a tab follows its container (`sheets::fit_owner`).
     fn place(&self, row: f64) {
         let bounds = self.bounds();
         let row = row.min(bounds.size.height);
@@ -1098,6 +1112,7 @@ impl RootView {
         for view in self.subviews() {
             if let Ok(container) = view.downcast::<SplitView>() {
                 container.setFrame(below);
+                sheets::fit_owner(&container);
             }
         }
         bar.lay_out();
@@ -1437,16 +1452,19 @@ impl TerminalWindow {
             .contains(NSWindowOcclusionState::Visible)
     }
 
-    /// Whether the selection may move: not while the window holds a sheet
-    /// (the module header) — the close question, or a tab's own question,
-    /// which sits on the window too.
+    /// Whether the selection may move: not while the window holds a
+    /// question of its own (the close question, the application's report),
+    /// which blocks the whole window ([`sheets::window_asks`]). A tab's own
+    /// question does not hold it: it sits on the tab's owner and leaves the
+    /// screen with its tab.
     pub(crate) fn selection_free(&self) -> bool {
-        !sheets::seat(Asker::Window(&self.ivars().window)).is_some_and(|seat| seat.is_taken())
+        !sheets::window_asks(&self.ivars().window)
     }
 
     /// **The applier: selection.** Tab `id` comes on screen; `true` if it is
     /// (or already was) the selected one. A beep and `false` while the
-    /// window holds a sheet ([`Self::selection_free`]). ⌘1…⌘9, the next and
+    /// window holds a question of its own ([`Self::selection_free`]); a
+    /// tab's question leaves the screen with its tab. ⌘1…⌘9, the next and
     /// previous tab, a press on a chip, `bateri://tab` and the close
     /// question's "the tab the eye is on" all come here.
     pub(crate) fn select_tab(&self, id: u64) -> bool {
@@ -1601,10 +1619,16 @@ impl TerminalWindow {
         NSApplication::sharedApplication(self.mtm()).activate();
     }
 
-    /// Whether this object's `NSWindow` is that one — the active window is
-    /// looked up in the list this way from `NSApp.keyWindow` (`AppDelegate::key_window`).
+    /// Whether this object's `NSWindow` is that one, or one of its tabs'
+    /// sheet owners (`sheets`), which stands for it — the active window is
+    /// looked up in the list this way from `NSApp.keyWindow`
+    /// (`AppDelegate::key_window`: a key sheet's parent).
     pub(crate) fn owns(&self, window: &NSWindow) -> bool {
         std::ptr::eq(&*self.ivars().window, window)
+            || self
+                .tabs()
+                .iter()
+                .any(|tab| sheets::is_owner(tab.container(), window))
     }
 
     /// Closes the window (via the `windowWillClose:` path), **without
@@ -1754,11 +1778,17 @@ impl TerminalWindow {
     /// the window there would pull the rug from under the teardown.
     ///
     /// The question is the **window's** (its seat in [`crate::sheets`]): it
-    /// asks about the window, its tabs or one of its panes.
+    /// asks about the window, its tabs or one of its panes. A question up in
+    /// the tab on screen is in its way: a beep, nothing opens — two
+    /// questions are never shown at once.
     fn ask(&self, prompt: &Prompt, targets: CloseTarget) {
         let Some(seat) = sheets::seat(Asker::Window(&self.ivars().window)) else {
             return;
         };
+        if seat.is_taken() {
+            beep();
+            return;
+        }
         let alert = alert(self.mtm(), prompt);
         let host = self.id();
         let answered = RcBlock::new(move |response: NSModalResponse| {
@@ -1853,21 +1883,28 @@ impl TerminalWindow {
         self.refresh_bar();
     }
 
-    /// Gives the bar every tab's label, the selection and the diagnostic. A
-    /// single tab's label is the window's title (an upload's prefix
-    /// included); among several each tab shows its session title.
-    fn refresh_bar(&self) {
+    /// Gives the bar every tab's label and indicator, the selection and the
+    /// diagnostic. A single tab's label is the window's title (an upload's
+    /// prefix included); among several each tab shows its session title and
+    /// its indicator ([`TerminalTab::indicator`]). Every change of the tab
+    /// list and of a title calls it, and the sheet gate when a tab's
+    /// question starts or stops waiting (`sheets`).
+    pub(crate) fn refresh_bar(&self) {
         let tabs = self.tabs();
         let single = tabs.len() == 1;
         let labels = tabs
             .iter()
             .map(|tab| {
-                let label = if single {
+                let title = if single {
                     tab.title()
                 } else {
                     tab.session_title()
                 };
-                (tab.id(), label.unwrap_or_else(|| "bateri".to_owned()))
+                Label {
+                    tab: tab.id(),
+                    title: title.unwrap_or_else(|| "bateri".to_owned()),
+                    indicator: tab.indicator(),
+                }
             })
             .collect();
         let notice = self.ivars().notice.borrow().clone();
@@ -1975,6 +2012,10 @@ impl TerminalWindow {
             }
         };
         window.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
+        // A question up in a tab sits on a window of its own: it follows.
+        for tab in self.tabs() {
+            sheets::follow_appearance(tab.container(), window);
+        }
     }
 
     /// The closing sequence's steps that fall to the window — **starts, does

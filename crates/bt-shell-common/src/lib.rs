@@ -3,7 +3,8 @@
 //! The modules here decide how the terminal application behaves without
 //! touching a UI toolkit: the settings file and its diagnostics (`settings`,
 //! `notices`), the split layout tree (`split`), a window's tabs — their order,
-//! selection, ⌘1…⌘9 and where the tab strip's parts sit (`tabs`), temporary
+//! selection, ⌘1…⌘9, where the tab strip's parts sit and which indicator a
+//! tab shows (`tabs`), temporary
 //! font size (`zoom`), the mouse gesture ledger (`gesture`), shell quoting
 //! (`quote`), key encoding (`keys`), what a ⌘-clicked link resolves to and
 //! what opening it does (`links`), the remote upload rules, processes and the

@@ -2851,15 +2851,30 @@ impl AppDelegate {
     }
 
     /// The active window: `NSApp.keyWindow` is looked up in the list — a
-    /// key sheet stands for the window it sits on, so ⌘T while a question
-    /// is open reaches that window (and its selection guard) instead of
-    /// opening a window of its own. `None` if the settings window or a panel
-    /// is key, and the new window is born at home. The source of inheritance
-    /// is its selected tab's **focused pane** (`TerminalTab::focused_pane`).
+    /// key sheet stands for the window it sits on, and a tab's sheet owner
+    /// for its terminal window (`TerminalWindow::owns`), so ⌘T while a
+    /// question is open reaches that window (and its selection guard)
+    /// instead of opening a window of its own. `None` if the settings window
+    /// or a panel is key, and the new window is born at home. The source of
+    /// inheritance is its selected tab's **focused pane**
+    /// (`TerminalTab::focused_pane`).
     fn key_window(&self) -> Option<Retained<TerminalWindow>> {
         let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
         let key = key.sheetParent().unwrap_or(key);
         self.window_owning(&key)
+    }
+
+    /// The window a window-wide question of the application goes on: the
+    /// key window — a terminal window when the key one is a sheet in it, a
+    /// tab's question included, so the report never opens on a sheet; any
+    /// other key window (the settings window) as it is.
+    fn question_window(&self) -> Option<Retained<NSWindow>> {
+        let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
+        let key = key.sheetParent().unwrap_or(key);
+        match self.window_owning(&key) {
+            Some(window) => Some(window.ns_window().retain()),
+            None => Some(key),
+        }
     }
 
     /// The active tab: the key window's selected tab.
@@ -4324,7 +4339,7 @@ impl AppDelegate {
                         return;
                     }
                     // The application's own report: a window-wide seat, the key window's.
-                    let key = NSApplication::sharedApplication(mtm).keyWindow();
+                    let key = delegate(mtm).and_then(|app| app.question_window());
                     let seat = key
                         .as_deref()
                         .and_then(|key| crate::sheets::seat(crate::sheets::Asker::Window(key)));

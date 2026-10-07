@@ -17,8 +17,10 @@
 //! system says ([`title_double_click`]). With several tabs each tab is a
 //! chip: a press selects it (on the press, like macOS's tabs), a middle
 //! click closes it, and while the pointer is over it a `×` shows at its
-//! left. A diagnostic becomes a `⚠` left of `+`: its tooltip is the text and
-//! a click opens the settings window.
+//! left. Left of its title a chip has one indicator slot — the most urgent
+//! of the tab's signals (`tabs::indicator`), centred with the title. A
+//! diagnostic becomes a `⚠` left of `+`: its tooltip is the text and a
+//! click opens the settings window.
 //!
 //! **Drawing** is `drawRect:` with `NSBezierPath` and an `NSShadow` on the
 //! light theme's selected chip — no layer colours, which would want
@@ -33,9 +35,10 @@
 //! event is being handled would be taken apart under it.
 //!
 //! **VoiceOver**: the bar is a tab group, each chip a radio button with the
-//! tab-button subrole and its selection as its value, `×` and `+` buttons
-//! with names. A `×` that is not shown is still an element (drawn invisible,
-//! taking no click), so a tab can be closed without a pointer.
+//! tab-button subrole and its selection as its value, its indicator said
+//! after its title; `×` and `+` buttons with names. A `×` that is not shown
+//! is still an element (drawn invisible, taking no click), so a tab can be
+//! closed without a pointer.
 
 use std::cell::{Cell, RefCell};
 
@@ -58,7 +61,7 @@ use objc2_foundation::{
 };
 
 use crate::app;
-use crate::tabs::{BUTTON, Bar};
+use crate::tabs::{BUTTON, Bar, Indicator};
 use crate::window::{TerminalWindow, is_dark_background};
 
 /// Space between the zoom button's right edge and the strip — the design's
@@ -76,6 +79,11 @@ const CHIP_PAD: f64 = 26.0;
 
 /// The single tab's title box inset — it has no `×` to make room for.
 const SINGLE_PAD: f64 = 8.0;
+
+/// The indicator's side and the space between it and the title (the
+/// design's 12 pt glyph, 6 pt gap).
+const GLYPH_SIDE: f64 = 12.0;
+const GLYPH_GAP: f64 = 6.0;
 
 /// The `×` button: its side, its inset from the chip's corner and its
 /// corner radius.
@@ -151,6 +159,7 @@ struct Palette {
     title: u32,
     dim: u32,
     warning: u32,
+    accent: u32,
     selected: Tint,
     selected_line: Tint,
     /// The selected chip's drop shadow; `None` on a dark theme.
@@ -171,6 +180,7 @@ impl Palette {
             title: fg,
             dim: theme.dim,
             warning: theme.warning,
+            accent: theme.accent,
             selected: ink(0.10),
             selected_line: ink(0.07),
             shadow: None,
@@ -410,6 +420,121 @@ impl CloseButton {
     }
 }
 
+// ─── A chip's indicator ───────────────────────────────────────────────────
+
+pub(crate) struct GlyphIvars {
+    shown: Cell<Option<Indicator>>,
+    palette: Cell<Option<Palette>>,
+}
+
+define_class!(
+    // SAFETY: NSView is designed for subclassing; Glyph implements no `Drop`
+    // and is born with `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriTabGlyph"]
+    #[ivars = GlyphIvars]
+    pub(crate) struct Glyph;
+
+    unsafe impl NSObjectProtocol for Glyph {}
+
+    impl Glyph {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        /// The chip under it takes the press.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+
+        /// The glyph in a [`GLYPH_SIDE`] square. Only the question's is
+        /// drawn: no other signal reaches the bar yet.
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let iv = self.ivars();
+            let (Some(indicator), Some(palette)) = (iv.shown.get(), iv.palette.get()) else {
+                return;
+            };
+            if indicator == Indicator::Question {
+                draw_question(palette.accent);
+            }
+        }
+    }
+);
+
+/// "Waiting for an answer": a ring with a question mark in it, in `accent`
+/// — a mark of its own, not a role of its own.
+fn draw_question(color: u32) {
+    let ring = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+        NSPoint::new(0.75, 0.75),
+        NSSize::new(GLYPH_SIDE - 1.5, GLYPH_SIDE - 1.5),
+    ));
+    stroke(&ring, 1.3, color);
+    let mark = NSBezierPath::bezierPath();
+    mark.moveToPoint(NSPoint::new(4.3, 4.6));
+    mark.curveToPoint_controlPoint1_controlPoint2(
+        NSPoint::new(7.7, 4.6),
+        NSPoint::new(4.3, 2.5),
+        NSPoint::new(7.7, 2.5),
+    );
+    mark.curveToPoint_controlPoint1_controlPoint2(
+        NSPoint::new(6.0, 7.0),
+        NSPoint::new(7.7, 5.8),
+        NSPoint::new(6.0, 5.8),
+    );
+    stroke(&mark, 1.3, color);
+    let dot = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+        NSPoint::new(5.2, 8.05),
+        NSSize::new(1.6, 1.6),
+    ));
+    Tint::of(color, 1.0).color().setFill();
+    dot.fill();
+}
+
+impl Glyph {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(GlyphIvars {
+            shown: Cell::new(None),
+            palette: Cell::new(None),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
+        // ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        // Said through the chip, after its title.
+        this.setAccessibilityElement(false);
+        this
+    }
+
+    fn set(&self, shown: Option<Indicator>, palette: Palette) {
+        let iv = self.ivars();
+        if iv.shown.replace(shown) != shown || iv.palette.replace(Some(palette)) != Some(palette) {
+            self.setNeedsDisplay(true);
+        }
+        self.setHidden(shown.is_none());
+    }
+}
+
+/// Where a chip's indicator and title sit across its `inner` width (the
+/// chip less its padding on both sides), from the title's own width:
+/// `(indicator's x, title's x, title's width)`, relative to the padding's
+/// edge. With an indicator the two are centred together and the title
+/// gives way to the glyph first; without one the title takes the whole
+/// width (it is centred in its frame).
+fn title_row(inner: f64, text: f64, glyph: bool) -> (Option<f64>, f64, f64) {
+    if !glyph {
+        return (None, 0.0, inner);
+    }
+    let room = (inner - GLYPH_SIDE - GLYPH_GAP).max(0.0);
+    let width = text.ceil().min(room);
+    let start = ((inner - (GLYPH_SIDE + GLYPH_GAP + width)) / 2.0)
+        .max(0.0)
+        .round();
+    (Some(start), start + GLYPH_SIDE + GLYPH_GAP, width)
+}
+
 // ─── A chip: one tab ──────────────────────────────────────────────────────
 
 pub(crate) struct ChipIvars {
@@ -423,6 +548,8 @@ pub(crate) struct ChipIvars {
     /// The fill, below the label: its own view so the light theme's shadow
     /// falls from the face alone, not from the text.
     face: Retained<ChipFace>,
+    /// The indicator, left of the title.
+    glyph: Retained<Glyph>,
     label: Retained<NSTextField>,
     close: Retained<CloseButton>,
 }
@@ -511,6 +638,7 @@ impl CloseButton {
 impl Chip {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let face = ChipFace::new(mtm);
+        let glyph = Glyph::new(mtm);
         let text = label(mtm);
         let close = CloseButton::new(mtm);
         let this = Self::alloc(mtm).set_ivars(ChipIvars {
@@ -520,6 +648,7 @@ impl Chip {
             single: Cell::new(false),
             palette: Cell::new(None),
             face: face.clone(),
+            glyph: glyph.clone(),
             label: text.clone(),
             close: close.clone(),
         });
@@ -527,6 +656,7 @@ impl Chip {
         // ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         this.addSubview(&face);
+        this.addSubview(&glyph);
         this.addSubview(&text);
         this.addSubview(&close);
         this.setAccessibilityElement(true);
@@ -577,10 +707,13 @@ impl Chip {
         let Look {
             tab,
             title,
+            indicator,
             selected,
             hovered,
             single,
         } = *look;
+        // The one-tab form is today's title bar: no indicator.
+        let indicator = indicator.filter(|_| !single);
         let iv = self.ivars();
         iv.tab.set(tab);
         let changed = iv.selected.replace(selected) != selected
@@ -624,14 +757,30 @@ impl Chip {
             text.setTextColor(Some(&Tint::of(color, 1.0).color()));
             text.setStringValue(&NSString::from_str(title));
         }
-        let height = text.intrinsicContentSize().height;
+        let natural = text.intrinsicContentSize();
+        let inner = (size.width - 2.0 * pad).max(0.0);
+        let (glyph_x, text_x, text_width) = title_row(inner, natural.width, indicator.is_some());
         text.setFrame(NSRect::new(
-            NSPoint::new(pad, ((size.height - height) / 2.0).max(0.0)),
-            NSSize::new((size.width - 2.0 * pad).max(0.0), height),
+            NSPoint::new(
+                pad + text_x,
+                ((size.height - natural.height) / 2.0).max(0.0),
+            ),
+            NSSize::new(text_width, natural.height),
         ));
+        if let Some(x) = glyph_x {
+            iv.glyph.setFrame(NSRect::new(
+                NSPoint::new(pad + x, ((size.height - GLYPH_SIDE) / 2.0).round()),
+                NSSize::new(GLYPH_SIDE, GLYPH_SIDE),
+            ));
+        }
+        iv.glyph.set(indicator, palette);
         iv.close.set(!single && hovered, palette);
         iv.close.setHidden(single);
-        self.setAccessibilityLabel(Some(&NSString::from_str(title)));
+        let spoken = match indicator {
+            Some(indicator) => format!("{title}, {}", indicator.spoken()),
+            None => title.to_owned(),
+        };
+        self.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
         let value = NSNumber::numberWithBool(selected);
         // SAFETY: an `NSNumber` is a radio button's accessibility value.
         unsafe { self.setAccessibilityValue(Some(&value)) };
@@ -644,6 +793,7 @@ impl Chip {
 struct Look<'a> {
     tab: u64,
     title: &'a str,
+    indicator: Option<Indicator>,
     selected: bool,
     hovered: bool,
     /// The one-tab form: a centred title, no fill, no `×`, no click.
@@ -902,11 +1052,21 @@ impl BarButton {
 
 // ─── The bar ─────────────────────────────────────────────────────────────
 
+/// One tab as the bar shows it ([`TabBar::show`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Label {
+    /// The tab's id (`TerminalTab::id`).
+    pub(crate) tab: u64,
+    pub(crate) title: String,
+    /// What its chip shows left of the title (`TerminalTab::indicator`).
+    pub(crate) indicator: Option<Indicator>,
+}
+
 /// What the bar shows; the window gives it ([`TabBar::show`]).
 #[derive(Clone, Debug, Default)]
 struct Shown {
-    /// Every tab's id and label, in strip order.
-    tabs: Vec<(u64, String)>,
+    /// Every tab, in strip order.
+    tabs: Vec<Label>,
     selected: usize,
     /// The settings diagnostic; empty without one.
     notice: String,
@@ -1011,9 +1171,9 @@ impl TabBar {
         app::delegate(self.mtm())?.window(self.ivars().window)
     }
 
-    /// What to show: the tabs' ids and labels in order, the selected one's
-    /// position and the settings diagnostic (empty without one). Lays out.
-    pub(crate) fn show(&self, tabs: Vec<(u64, String)>, selected: usize, notice: String) {
+    /// What to show: the tabs in order, the selected one's position and the
+    /// settings diagnostic (empty without one). Lays out.
+    pub(crate) fn show(&self, tabs: Vec<Label>, selected: usize, notice: String) {
         self.ivars().shown.replace(Shown {
             tabs,
             selected,
@@ -1069,7 +1229,7 @@ impl TabBar {
         let hovered = iv
             .hovered
             .get()
-            .and_then(|id| shown.tabs.iter().position(|(tab, _)| *tab == id));
+            .and_then(|id| shown.tabs.iter().position(|label| label.tab == id));
         let single = count == 1;
         let strip = Bar {
             width: bounds.size.width,
@@ -1098,19 +1258,20 @@ impl TabBar {
         }
         let chips = iv.chips.borrow().clone();
         for (index, (chip, span)) in chips.iter().zip(&strip.chips).enumerate() {
-            let (tab, title) = &shown.tabs[index];
+            let label = &shown.tabs[index];
             let title = if single {
-                single_label(title, &shown.notice)
+                single_label(&label.title, &shown.notice)
             } else {
-                title.clone()
+                label.title.clone()
             };
             let frame = NSRect::new(
                 NSPoint::new(span.x, top),
                 NSSize::new(span.width, CHIP_HEIGHT),
             );
             let look = Look {
-                tab: *tab,
+                tab: label.tab,
                 title: &title,
+                indicator: label.indicator,
                 selected: index == shown.selected,
                 hovered: hovered == Some(index),
                 single,
@@ -1183,7 +1344,9 @@ impl TabBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Palette, TitleAction, single_label, title_double_click};
+    use super::{
+        GLYPH_GAP, GLYPH_SIDE, Palette, TitleAction, single_label, title_double_click, title_row,
+    };
     use bt_core::Theme;
 
     /// The system's setting decides; the newer key wins over the older one,
@@ -1227,5 +1390,25 @@ mod tests {
         assert!(light.shadow.is_some());
         assert_eq!(light.title, Theme::BATERI_LIGHT.foreground);
         assert_eq!(light.warning, Theme::BATERI_LIGHT.warning);
+        assert_eq!(light.accent, Theme::BATERI_LIGHT.accent);
+    }
+
+    /// The indicator and a short title are centred together; a long title
+    /// gives way to the glyph and is cut, never the glyph; without an
+    /// indicator the title has the whole width, as before.
+    #[test]
+    fn the_indicator_sits_left_of_the_title_and_both_are_centred() {
+        let step = GLYPH_SIDE + GLYPH_GAP;
+        assert_eq!(title_row(132.0, 40.0, false), (None, 0.0, 132.0));
+        let (glyph, text, width) = title_row(132.0, 40.0, true);
+        assert_eq!(glyph, Some(((132.0 - step - 40.0) / 2.0_f64).round()));
+        assert_eq!(text, glyph.unwrap() + step);
+        assert_eq!(width, 40.0);
+        let (glyph, text, width) = title_row(132.0, 300.0, true);
+        assert_eq!(glyph, Some(0.0));
+        assert_eq!(text, step);
+        assert_eq!(width, 132.0 - step, "the title is cut, not the glyph");
+        let (_, _, width) = title_row(10.0, 300.0, true);
+        assert_eq!(width, 0.0, "a chip too narrow keeps the glyph alone");
     }
 }

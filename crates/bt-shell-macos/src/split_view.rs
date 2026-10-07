@@ -65,6 +65,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 
 use crate::pane::TerminalPane;
+use crate::sheets::OwnerSlot;
 use crate::split::{self, Axis, Direction, Divider, Rect, Removal, Size, Tree};
 
 /// How far the divider's hit area extends past each side of the line, in
@@ -254,6 +255,11 @@ pub(crate) struct SplitIvars {
     /// The dividers' drag handles, in the order of
     /// [`split::Layout::dividers`].
     handles: RefCell<Vec<Retained<DividerHandle>>>,
+    /// The tab's sheet owner while one of its questions is up
+    /// ([`crate::sheets`]): here because the container is the tab's view,
+    /// which an asking pane reaches through its superview even while it
+    /// closes.
+    sheet_owner: OwnerSlot,
 }
 
 define_class!(
@@ -305,6 +311,7 @@ impl SplitView {
             hairline: hairline.clone(),
             zoomed: Cell::new(None),
             handles: RefCell::new(Vec::new()),
+            sheet_owner: OwnerSlot::default(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -461,6 +468,11 @@ impl SplitView {
     /// The zoomed pane; `None` → the splits are visible.
     pub(crate) fn zoomed(&self) -> Option<u64> {
         self.ivars().zoomed.get()
+    }
+
+    /// The tab's sheet owner slot — [`crate::sheets`]' alone.
+    pub(crate) fn sheet_owner(&self) -> &OwnerSlot {
+        &self.ivars().sheet_owner
     }
 
     /// Sets or releases the zoom and lays the panes out again. The links'

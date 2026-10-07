@@ -2,8 +2,9 @@
 //! panes (`pane::TerminalPane`) and what a window carries **once per tab** —
 //! the focused pane and the pane side of the focus watch, the dim veil, split
 //! navigation, resizing, equalizing and zoom, adding and closing panes, the
-//! title's read and the remote mark, the saved form, and the panes' share of
-//! the theme, the top edge and the host marks.
+//! title's read and the remote mark, the saved form, the panes' share of
+//! the theme, the top edge and the host marks, and where its questions sit
+//! while they are up (its sheet owner, `sheets`).
 //!
 //! **The boundary with the window.** The window (`window::TerminalWindow`)
 //! is the `NSWindow` and its delegate: chrome, the tab bar, the title it
@@ -52,6 +53,7 @@ use crate::restore::{SavedTab, Shape};
 use crate::sheets;
 use crate::split::{Axis, Direction, Removal, Tree};
 use crate::split_view::SplitView;
+use crate::tabs::{self, Indicator, Signals};
 use crate::upload;
 use crate::uploader;
 use crate::window::{Closing, TerminalWindow, initial_rect};
@@ -605,7 +607,8 @@ impl TerminalTab {
     /// no longer the user's — focus off, and what floats over a pane or
     /// follows the pointer goes, since nothing would close it while hidden:
     /// the popovers, the ⌘-hovered link, the scroll bar's hover and the
-    /// upload buttons' hover. Called after the container is hidden.
+    /// upload buttons' hover. A question up in the tab leaves with it, still
+    /// open ([`sheets::hide_owner`]). Called after the container is hidden.
     pub(crate) fn leave_screen(&self) {
         for pane in self.panes() {
             pane.apply_focus(false);
@@ -615,16 +618,41 @@ impl TerminalTab {
             pane.view().clear_link();
             pane.view().release_scrollbar_hover();
         }
+        sheets::hide_owner(self.container());
     }
 
-    /// The tab came on screen (selected): a question one of its panes asked
-    /// while it was in the background opens now ([`sheets::open_parked`]).
-    /// Called once the container is shown; the window's sheet ending calls
-    /// it again for the next one.
+    /// The tab came on screen (selected): a question left up when it went
+    /// comes back ([`sheets::show_owner`]), and one its panes asked while it
+    /// was in the background opens now ([`Self::open_parked`]). Called once
+    /// the container is shown.
     pub(crate) fn shown(&self) {
+        sheets::show_owner(self.container());
+        self.open_parked();
+    }
+
+    /// A question one of the panes parked opens, if nothing is in its way
+    /// ([`sheets::open_parked`]) — the tab coming on screen, and the
+    /// window's own question ending.
+    pub(crate) fn open_parked(&self) {
         for pane in self.panes() {
             sheets::open_parked(&pane);
         }
+    }
+
+    /// What the tab's chip shows left of its title — the most urgent of its
+    /// signals (`tabs::indicator`). Read today: a question of the tab that
+    /// waits for an answer the user cannot see ([`sheets::question_waiting`]).
+    pub(crate) fn indicator(&self) -> Option<Indicator> {
+        tabs::indicator(Signals {
+            question: sheets::question_waiting(self.container()),
+            ..Signals::default()
+        })
+    }
+
+    /// The window became key: a question up in this tab takes the keyboard
+    /// instead ([`sheets::key_to_sheet`]); `true` if it did.
+    pub(crate) fn key_to_sheet(&self) -> bool {
+        sheets::key_to_sheet(self.container())
     }
 
     /// The focused pane's remote host and resolved mark; `None` locally
@@ -787,12 +815,17 @@ impl TerminalTab {
     /// upload queue, rhythm, `Waker`, `SIGHUP`) for **every** pane; one
     /// result per pane in tree order, beside the pane's id — whoever wants
     /// one pane's result finds it by id, not by a second walk's position.
+    /// Then the tab's sheet owner goes, a question still up on it answered
+    /// `Cancel` ([`sheets::dismantle`]): it would outlive its tab otherwise.
     /// Idempotent; the result of a pane whose session never came to be is
     /// `None`.
     pub(crate) fn begin_close(&self) -> Vec<(u64, Option<Closing>)> {
-        self.panes()
+        let closing = self
+            .panes()
             .iter()
             .map(|pane| (pane.id(), pane.begin_close()))
-            .collect()
+            .collect();
+        sheets::dismantle(self.container());
+        closing
     }
 }
