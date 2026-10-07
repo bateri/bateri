@@ -65,6 +65,7 @@ use crate::pane::{PaneHost, PaneLaunch, TerminalPane};
 use crate::restore::{SavedTab, Shape};
 use crate::split::{Axis, Direction, Removal};
 use crate::split_view::SplitView;
+use crate::tabs::tab_index;
 use crate::upload;
 use crate::uploader;
 
@@ -170,19 +171,6 @@ impl Closing {
             Self::Started(handle) => handle.wait_until(deadline),
             Self::AlreadyDone => Teardown::AlreadyDone,
         }
-    }
-}
-
-/// The Select Tab ▸ item's `tag` + tab count → index of the tab to select.
-///
-/// ⌘1…⌘8 is the nth tab, `None` if absent (no-op); ⌘9 is the **last** tab —
-/// the shared rule of Safari, Terminal.app and browsers: with more than nine
-/// tabs too the last one is reached with a single key. Pure, tested.
-pub(crate) fn tab_index(tag: u8, count: usize) -> Option<usize> {
-    match tag {
-        1..=8 => Some(usize::from(tag) - 1).filter(|&index| index < count),
-        9 => count.checked_sub(1),
-        _ => None,
     }
 }
 
@@ -2177,7 +2165,7 @@ mod tests {
 
     use super::{
         CloseScope, Unit, close_scope, is_dark_background, kept_notice, prompt, should_ask,
-        tab_index, unit_for,
+        unit_for,
     };
     use crate::jobs::Foreground;
     use bt_core::{ConfirmClose, Theme};
@@ -2282,26 +2270,6 @@ mod tests {
         // mid grey is light (black text reads better), a few shades darker is dark.
         assert!(!is_dark_background(&with_background(0x808080)));
         assert!(is_dark_background(&with_background(0x606060)));
-    }
-
-    #[test]
-    fn numbered_tabs_select_the_nth_or_nothing() {
-        assert_eq!(tab_index(1, 3), Some(0));
-        assert_eq!(tab_index(3, 3), Some(2));
-        assert_eq!(tab_index(4, 3), None, "a nonexistent tab is a no-op");
-        assert_eq!(tab_index(8, 8), Some(7));
-        assert_eq!(
-            tab_index(8, 20),
-            Some(7),
-            "⌘8 is the eighth even with more than nine tabs"
-        );
-    }
-
-    #[test]
-    fn nine_selects_the_last_tab() {
-        assert_eq!(tab_index(9, 1), Some(0), "with a single tab ⌘9 is that tab");
-        assert_eq!(tab_index(9, 3), Some(2));
-        assert_eq!(tab_index(9, 20), Some(19));
     }
 
     #[test]
@@ -2516,14 +2484,6 @@ mod tests {
             prompt(CloseScope::Pane, Unit::Pane, &[Foreground::Idle]).message,
             "Closing this pane ends its shell session."
         );
-    }
-
-    #[test]
-    fn no_tabs_or_unknown_tags_select_nothing() {
-        assert_eq!(tab_index(1, 0), None);
-        assert_eq!(tab_index(9, 0), None);
-        assert_eq!(tab_index(0, 3), None);
-        assert_eq!(tab_index(10, 12), None);
     }
 
     /// The fallback's note sits on a line of its own under the history,

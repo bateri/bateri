@@ -671,7 +671,7 @@ fn hidden_shortcut(item: Retained<NSMenuItem>) -> Retained<NSMenuItem> {
 }
 
 /// Sets the item's `tag` to `tag` — Select Tab ▸'s order
-/// (`window::tab_index`) and Mark … as ▸'s mark ([`mark_of_tag`]).
+/// (`tabs::tab_index`) and Mark … as ▸'s mark ([`mark_of_tag`]).
 fn tagged(item: Retained<NSMenuItem>, tag: u8) -> Retained<NSMenuItem> {
     item.setTag(isize::from(tag));
     item

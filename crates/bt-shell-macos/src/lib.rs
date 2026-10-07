@@ -62,7 +62,7 @@ mod window;
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
     child, download, focus, gesture, handover, jobs, journal, keys, links, notices, preview_cache,
-    program, quote, remote_files, remote_helper, restore, settings, split, ssh_route, upload,
+    program, quote, remote_files, remote_helper, restore, settings, split, ssh_route, tabs, upload,
     watch, zoom,
 };
 

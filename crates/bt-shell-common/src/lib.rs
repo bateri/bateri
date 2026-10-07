@@ -2,13 +2,14 @@
 //!
 //! The modules here decide how the terminal application behaves without
 //! touching a UI toolkit: the settings file and its diagnostics (`settings`,
-//! `notices`), the split layout tree (`split`), temporary font size (`zoom`),
-//! the mouse gesture ledger (`gesture`), shell quoting (`quote`), key
-//! encoding (`keys`), what a ⌘-clicked link resolves to and what opening it
-//! does (`links`), the remote upload rules, processes and the two-way transfer
-//! queue (`upload`), the download's stream (`download`), the rules of
-//! previewing and downloading a remote file (`remote_files`), its helper
-//! ssh session (`remote_helper`), the preview cache on disk
+//! `notices`), the split layout tree (`split`), a window's tabs — their order,
+//! selection, ⌘1…⌘9 and where the tab strip's parts sit (`tabs`), temporary
+//! font size (`zoom`), the mouse gesture ledger (`gesture`), shell quoting
+//! (`quote`), key encoding (`keys`), what a ⌘-clicked link resolves to and
+//! what opening it does (`links`), the remote upload rules, processes and the
+//! two-way transfer queue (`upload`), the download's stream (`download`), the
+//! rules of previewing and downloading a remote file (`remote_files`), its
+//! helper ssh session (`remote_helper`), the preview cache on disk
 //! (`preview_cache`), the remote host's load sampling (`remote_stats`), which
 //! ssh connection a remote job rides on and the askpass wire (`ssh_route`), whether
 //! the user's `ssh` gets the remote shell integration (`ssh_wrap`), what an
@@ -52,6 +53,7 @@ pub mod settings;
 pub mod split;
 pub mod ssh_route;
 pub mod ssh_wrap;
+pub mod tabs;
 pub mod upload;
 // Bodies exist for macOS and Linux only; elsewhere the module is absent
 // rather than half-present (a `Notify` without a `Watch`).
