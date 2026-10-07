@@ -543,8 +543,8 @@ the first line has gone into history.
   the grid by the track's width; in a split, the panes keep their
   proportions, and a pane already at its narrowest gives the track's columns
   up from its text.
-- Reduce Motion leaves the bar alone: its appearing and fading are not
-  movement.
+- Reduce Motion makes the bar widen and narrow at once under the pointer;
+  its appearing and fading stay, because they are not movement.
 - In Settings it is Appearance ▸ "Scroll bar:" — Follow System Settings, When
   scrolling, Always, Never; under Follow System Settings the line below says
   what the system's preference gives right now.
