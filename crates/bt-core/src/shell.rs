@@ -283,7 +283,11 @@ pub(crate) enum HistoryCut {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// `A` arrived, `D` did not.
-    Pending,
+    Pending {
+        /// When the command started — [`Outcome::Finished`]'s `started`,
+        /// stamped by the block's first `C`.
+        started: u32,
+    },
     /// `D` arrived; `exit` is `None` if the shell printed the code in an unreadable form.
     Finished {
         exit: Option<i32>,
@@ -311,6 +315,25 @@ pub(crate) enum Outcome {
         /// **Our own work is not inside the margin:** `D` is `precmd`'s first job —
         /// **before** the branch's `git` fork, OSC 7 and `psvar`.
         elapsed_ms: u32,
+        /// When the command started, in wall-clock **seconds** since the Unix
+        /// epoch; `0` = unknown. Stamped on the block's first `C` from the
+        /// same clock the handover's blob uses ([`wall_secs`]) and kept by
+        /// `D`, so a finished block can still say what time it ran.
+        ///
+        /// **Seconds in a `u32`, not an `Instant` or milliseconds:** it is a
+        /// time of day to show, not a duration to measure (that is
+        /// `elapsed_ms`), it crosses processes in the blob, and four bytes keep
+        /// the record at 16 — `Option<u32>` would make it 20, a `u64` of
+        /// milliseconds 24. `0` doubles as "none": a block that saw no `C`
+        /// (an Enter on an empty prompt, half an integration) and a finished
+        /// one carried by a blob that did not record starts. The ceiling is
+        /// the year 2106; past it the clock reads as unknown, not wrapped.
+        ///
+        /// **Known limit:** our `C` carries no identity, so a second
+        /// integration's `C` printed for an empty prompt (iTerm2's `precmd`
+        /// arm) stamps that block too. It stays `Pending` without running,
+        /// and such a block has no stripe — the time is never shown.
+        started: u32,
     },
 }
 
@@ -318,12 +341,14 @@ pub(crate) enum Outcome {
 /// [`BlockLog`]'s doc.
 ///
 /// Rust uses the niche in `Option<i32>`'s tag for [`Outcome`]'s discrimination,
-/// so the size is not a number that can be added up by hand (by hand it comes to
-/// 16 and that is how it was written the first time): adding a field to
-/// `Finished` silently grows 12, and with it the memory paid per tab in a
-/// 10,000-line scrollback. When the assert breaks, both this place and
-/// `BlockLog`'s budget sentence are updated in the same commit.
-const _: () = assert!(size_of::<Outcome>() == 12);
+/// so the size is not a number that can be added up by hand: `Finished`'s
+/// fields come to 16 and the tag costs nothing, because `Pending`'s one field
+/// fits beside the niche. Adding a field to `Finished` silently grows 16, and
+/// with it the memory paid per tab in a 10,000-line scrollback; `Pending` has
+/// room left beside the niche, and while a field fits there the budget does
+/// not move. When the assert breaks, both this place and `BlockLog`'s budget
+/// sentence are updated in the same commit.
+const _: () = assert!(size_of::<Outcome>() == 16);
 
 /// A block's **drawable** state; it descends to a color from the theme in
 /// [`crate::Session::frame`].
@@ -1308,11 +1333,12 @@ const BLOCK_LOG_FLOOR: usize = 256;
 /// least one row (the prompt) falls to each block, that is the upper bound on the
 /// number of blocks that can be visible in scrollback. If a fixed ceiling were
 /// chosen it would either fall below scrollback and leave still-on-screen blocks
-/// colorless or hold space for nothing. 12 bytes per record: 120 KB at the
+/// colorless or hold space for nothing. 16 bytes per record: 160 KB at the
 /// default 10,000 rows. (It used to be 8 bytes; [`Outcome::Finished`] took the
-/// elapsed time next to the exit code too. The number is tied to the `const`
-/// assert next to [`Outcome`] — a budget that was written but not verified would
-/// silently go stale exactly on this line.)
+/// elapsed time next to the exit code, then both variants the start's time of
+/// day. The number is tied to the `const` assert next to [`Outcome`] — a budget
+/// that was written but not verified would silently go stale exactly on this
+/// line.)
 ///
 /// **Known limit:** the ceiling is set when the session is born; if `scrollback`
 /// is enlarged live the ring does not grow and as many old blocks as the
@@ -1372,7 +1398,7 @@ impl BlockLog {
         // identities are left over from a previous round.
         if let Some(at) = self.index_of(id) {
             self.entries.truncate(at + 1);
-            self.entries[at] = Outcome::Pending;
+            self.entries[at] = Outcome::Pending { started: 0 };
             return;
         }
         // If it is not contiguous the ledger cannot interpret this identity and carrying
@@ -1392,14 +1418,34 @@ impl BlockLog {
             self.entries.pop_front();
             self.first = self.first.wrapping_add(1);
         }
-        self.entries.push_back(Outcome::Pending);
+        self.entries.push_back(Outcome::Pending { started: 0 });
+    }
+
+    /// Stamps the start of the block `C` started: the ledger's last record,
+    /// if it is still open and unstamped.
+    ///
+    /// **Open:** a `C` after an identity-less `A` finds the previous block
+    /// finished as the last record, and that block's time is not this
+    /// command's. **Unstamped:** the first `C` wins, the clock's rule
+    /// ([`BlockTrack::command`]) — a second integration's `C`, or one from the
+    /// `^C` arm of its `precmd`, does not move the start.
+    fn stamp(&mut self, started: u32) {
+        if let Some(Outcome::Pending { started: slot @ 0 }) = self.entries.back_mut() {
+            *slot = started;
+        }
     }
 
     /// Processes the code and duration of the block closed with `D`; an identity not
-    /// in the ledger is ignored.
+    /// in the ledger is ignored. The start stays what `C` stamped.
     fn finish(&mut self, id: u32, exit: Option<i32>, elapsed_ms: u32) {
         if let Some(at) = self.index_of(id) {
-            self.entries[at] = Outcome::Finished { exit, elapsed_ms };
+            let (Outcome::Pending { started } | Outcome::Finished { started, .. }) =
+                self.entries[at];
+            self.entries[at] = Outcome::Finished {
+                exit,
+                elapsed_ms,
+                started,
+            };
         }
     }
 
@@ -1410,7 +1456,7 @@ impl BlockLog {
         match self.get(id)? {
             Outcome::Finished { exit: Some(0), .. } => Some(Stripe::Success),
             Outcome::Finished { exit: Some(_), .. } => Some(Stripe::Error),
-            Outcome::Finished { exit: None, .. } | Outcome::Pending => None,
+            Outcome::Finished { exit: None, .. } | Outcome::Pending { .. } => None,
         }
     }
 
@@ -1576,9 +1622,17 @@ impl BlockTrack {
     /// from the second mark; worse, a `C` arriving mid-command (the ^C arm of
     /// iTerm2's `precmd`) would reset the clock. The only place for resetting is
     /// the prompt (`A`).
+    ///
+    /// The block's start (its time of day, [`Outcome::Finished`]'s `started`)
+    /// is stamped where the clock is planted, but **once per block**: an
+    /// identity-less `A` resets the clock and the next `C` plants it again,
+    /// while the start stays the command's first `C` ([`BlockLog::stamp`]).
     fn command(&mut self) {
         self.state().phase = ShellPhase::Running;
-        self.running_since.get_or_insert_with(RunClock::now);
+        if self.running_since.is_none() {
+            self.running_since = Some(RunClock::now());
+            self.blocks.stamp(wall_secs());
+        }
     }
 
     /// `D`: the command ended.
@@ -1622,7 +1676,7 @@ impl BlockTrack {
             return None;
         }
         match self.blocks.last()? {
-            (id, Outcome::Pending) => Some(id),
+            (id, Outcome::Pending { .. }) => Some(id),
             (_, Outcome::Finished { .. }) => None,
         }
     }
@@ -1645,7 +1699,7 @@ impl BlockTrack {
         }
         match self.blocks.get(id)? {
             Outcome::Finished { elapsed_ms, .. } => Some(Duration::from_millis(elapsed_ms.into())),
-            Outcome::Pending => None,
+            Outcome::Pending { .. } => None,
         }
     }
 }
@@ -2804,7 +2858,10 @@ impl ShellLog {
     pub(crate) fn running_blocks(&self) -> RunningBlocks {
         let remote = self.remote_shell.and_then(|shell| {
             let open = self.running_command().is_some()
-                && self.local.blocks.last() == Some((shell.parent, Outcome::Pending));
+                && matches!(
+                    self.local.blocks.last(),
+                    Some((id, Outcome::Pending { .. })) if id == shell.parent
+                );
             if !open {
                 return None;
             }
@@ -2831,7 +2888,7 @@ impl ShellLog {
     /// An owned copy of what [`Self::stripe`] reads, for the quit-time
     /// snapshot ([`crate::Session::final_history`]): the snapshot walks the
     /// grid under `Term` and the leaf lock does not go there. A copy of the
-    /// two ledgers (12 bytes a block), once per pane at quit.
+    /// two ledgers (16 bytes a block), once per pane at quit.
     pub(crate) fn saved_stripes(&self) -> SavedStripes {
         SavedStripes {
             local: self.local.blocks.clone(),
@@ -2857,7 +2914,7 @@ impl ShellLog {
             return None;
         }
         match self.local.blocks.last()? {
-            (id, Outcome::Pending) => Some(id),
+            (id, Outcome::Pending { .. }) => Some(id),
             (_, Outcome::Finished { .. }) => None,
         }
     }
@@ -2904,7 +2961,7 @@ impl ShellLog {
             return None;
         }
         match self.local.blocks.last()? {
-            (block, Outcome::Pending) => Some(SuppressedInput {
+            (block, Outcome::Pending { .. }) => Some(SuppressedInput {
                 block,
                 blank: self.dock.display_chars == 0 && self.dock.prebuffer.is_empty(),
                 from_anchor: !self.dock.prebuffer.is_empty() || self.end_since.is_some(),
@@ -4534,7 +4591,24 @@ const STATE_HEADER: &str = "bateri-state";
 /// Version 2: a running command's clock is its wall-clock start, not how
 /// long it had run when the blob was written — a blob read hours later (a
 /// crash or a quit kept the program running meanwhile) counts the gap.
-const STATE_VERSION: u32 = 2;
+///
+/// Version 3: every ledger entry carries its block's start
+/// ([`Outcome::Finished`]'s `started`), so a block run before an update
+/// still says what time it ran; a version 2 entry reads with the start
+/// unknown (`0`), except the running command's, which its clock gives.
+///
+/// **Only forward once released.** A bateri rolled back to the version
+/// before reads this one as unknown (the reader is strict,
+/// [`Carried::decode`]): an update's pane is not adopted at all — the
+/// restore path brings its layout back, not its program — and a held pane
+/// takes a fresh shell state ([`crate::AdoptMode`]). A released bump is
+/// therefore never undone, a mistake in it is fixed by the next version.
+const STATE_VERSION: u32 = 3;
+
+/// The first version whose ledger entries carry their block's start
+/// ([`CarriedTrack::parse`]). Once [`STATE_OLDEST`] reaches it, the
+/// start-less branch is dead and goes.
+const STATE_STARTS: u32 = 3;
 
 /// The oldest version the reader still takes: the current one and the one
 /// before it.
@@ -4554,14 +4628,20 @@ fn wall_ms() -> u64 {
         })
 }
 
+/// [`wall_ms`] in whole seconds as a block's start keeps it
+/// ([`Outcome::Finished`]'s `started`); `0` — unknown — past what a `u32`
+/// holds, not a wrapped time.
+fn wall_secs() -> u32 {
+    u32::try_from(wall_ms() / 1000).unwrap_or(0)
+}
+
 /// One block trail as the blob carries it ([`BlockTrack`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CarriedTrack {
     state: Option<ShellState>,
     /// When the running command started, in wall-clock milliseconds since
     /// the Unix epoch — an `Instant` does not cross processes, and a start
-    /// (version 2) rather than an age (version 1) counts the time the blob
-    /// waited in a holder.
+    /// rather than an age counts the time the blob waited in a holder.
     running_since_ms: Option<u64>,
     /// The identity of `entries[0]`.
     first: u32,
@@ -4619,9 +4699,15 @@ impl CarriedTrack {
                     out.push(',');
                 }
                 match entry {
-                    Outcome::Pending => out.push('p'),
-                    Outcome::Finished { exit, elapsed_ms } => {
-                        let _ = write!(out, "{}/{elapsed_ms}", render_number(*exit));
+                    Outcome::Pending { started } => {
+                        let _ = write!(out, "p/{started}");
+                    }
+                    Outcome::Finished {
+                        exit,
+                        elapsed_ms,
+                        started,
+                    } => {
+                        let _ = write!(out, "{}/{elapsed_ms}/{started}", render_number(*exit));
                     }
                 }
             }
@@ -4634,8 +4720,15 @@ impl CarriedTrack {
         )
     }
 
-    /// One trail of a blob of `version`: version 1's clock field is the age
-    /// the command had when the blob was written, taken as a start from now.
+    /// One trail of a blob of `version`: an entry is `p/{start}` or
+    /// `{exit}/{elapsed}/{start}`; before [`STATE_STARTS`] it has no start
+    /// (`p`, `{exit}/{elapsed}`). Each version takes only its own form.
+    ///
+    /// A start-less blob still knows one start: a planted clock was planted
+    /// by a `C` of the ledger's last open block — the block that `C` would
+    /// stamp ([`BlockTrack::command`]) — so a command running across the
+    /// update keeps its time of day. Every other start-less entry reads as
+    /// unknown.
     fn parse(fields: &[&str], version: u32) -> Option<Self> {
         let [phase, exit, running, first, entries] = fields else {
             return None;
@@ -4654,29 +4747,37 @@ impl CarriedTrack {
             None if last_exit.is_none() => None,
             None => return None,
         };
-        let entries = if *entries == "-" {
+        let mut entries = if *entries == "-" {
             Vec::new()
         } else {
             entries
                 .split(',')
                 .map(|entry| {
-                    if entry == "p" {
-                        return Some(Outcome::Pending);
+                    let (fate, started) = if version < STATE_STARTS {
+                        (entry, 0)
+                    } else {
+                        let (fate, started) = entry.rsplit_once('/')?;
+                        (fate, started.parse().ok()?)
+                    };
+                    if fate == "p" {
+                        return Some(Outcome::Pending { started });
                     }
-                    let (exit, elapsed) = entry.split_once('/')?;
+                    let (exit, elapsed) = fate.split_once('/')?;
                     Some(Outcome::Finished {
                         exit: parse_number(exit)?,
                         elapsed_ms: elapsed.parse().ok()?,
+                        started,
                     })
                 })
                 .collect::<Option<Vec<_>>>()?
         };
-        let clock: Option<u64> = parse_number(running)?;
-        let running_since_ms = if version == 1 {
-            clock.map(|ran| wall_ms().saturating_sub(ran))
-        } else {
-            clock
-        };
+        let running_since_ms: Option<u64> = parse_number(running)?;
+        if version < STATE_STARTS
+            && let Some(since) = running_since_ms
+            && let Some(Outcome::Pending { started }) = entries.last_mut()
+        {
+            *started = u32::try_from(since / 1000).unwrap_or(0);
+        }
         Some(Self {
             state,
             running_since_ms,
@@ -5639,7 +5740,7 @@ mod tests {
     fn exit_of(log: &ShellLog, id: u32) -> Option<Option<i32>> {
         match log.local.blocks.get(id)? {
             Outcome::Finished { exit, .. } => Some(exit),
-            Outcome::Pending => None,
+            Outcome::Pending { .. } => None,
         }
     }
 
@@ -5653,8 +5754,84 @@ mod tests {
         assert_eq!(exit_of(&log, 1), Some(Some(0)));
         assert_eq!(exit_of(&log, 2), Some(Some(130)));
         // Open but not closed: running or an empty prompt.
-        assert_eq!(log.local.blocks.get(3), Some(Outcome::Pending));
+        assert_eq!(
+            log.local.blocks.get(3),
+            Some(Outcome::Pending { started: 0 })
+        );
         assert_eq!(log.local.blocks.get(4), None);
+    }
+
+    /// The start's value comes from the wall clock; the tests compare it
+    /// with the clock read around the mark and with itself, never with a
+    /// fixed instant.
+    fn started_of(log: &ShellLog, id: u32) -> Option<u32> {
+        match log.local.blocks.get(id)? {
+            Outcome::Pending { started } | Outcome::Finished { started, .. } => Some(started),
+        }
+    }
+
+    #[test]
+    fn a_block_keeps_the_start_its_first_command_mark_stamped() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply(Mark::PromptStart { id: Some(1) });
+        assert_eq!(started_of(&log, 1), Some(0), "no `C` yet: unknown");
+
+        let before = wall_secs();
+        log.apply(Mark::CommandStart);
+        let after = wall_secs();
+        let started = started_of(&log, 1).unwrap();
+        assert!(
+            started != 0 && (before..=after).contains(&started),
+            "{before} ≤ {started} ≤ {after}"
+        );
+
+        // A second integration's `C` does not move it (the stamp is set
+        // aside so that the same second would not hide an overwrite).
+        log.local.blocks.entries[0] = Outcome::Pending { started: 7 };
+        log.apply(Mark::CommandStart);
+        assert_eq!(started_of(&log, 1), Some(7));
+        // Nor does one after an identity-less `A` reset the clock: the open
+        // block is still the same command's.
+        log.apply(Mark::PromptStart { id: None });
+        log.apply(Mark::CommandStart);
+        assert_eq!(started_of(&log, 1), Some(7));
+
+        // `D` keeps it.
+        log.apply(Mark::CommandEnd {
+            exit: Some(2),
+            id: Some(1),
+        });
+        assert!(matches!(
+            log.local.blocks.get(1),
+            Some(Outcome::Finished {
+                exit: Some(2),
+                started: 7,
+                ..
+            })
+        ));
+
+        // A `C` after an identity-less `A` is not the finished block's.
+        log.apply(Mark::PromptStart { id: None });
+        log.apply(Mark::CommandStart);
+        assert_eq!(started_of(&log, 1), Some(7));
+
+        // A block that never saw `C` closes with its start unknown.
+        log.apply(Mark::PromptStart { id: Some(2) });
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(2),
+        });
+        assert_eq!(started_of(&log, 2), Some(0));
+        // Nor does a later `C` stamp it: it is finished, not unstamped.
+        log.apply(Mark::PromptStart { id: None });
+        log.apply(Mark::CommandStart);
+        assert_eq!(started_of(&log, 2), Some(0));
+
+        // A reopened identity starts over.
+        run_block(&mut log, 3, Some(0));
+        assert_ne!(started_of(&log, 3), Some(0));
+        log.apply(Mark::PromptStart { id: Some(3) });
+        assert_eq!(started_of(&log, 3), Some(0));
     }
 
     #[test]
@@ -8847,6 +9024,8 @@ mod tests {
         let mut log = ssh_log();
         log.end_since = Some(Instant::now());
         let since = log.local.running_since;
+        let ssh = log.local.blocks.last();
+        assert!(matches!(ssh, Some((1, Outcome::Pending { .. }))));
         let (command, open, ours) = (log.command, log.command_open, log.ours);
         let outcome = feed(
             &mut log,
@@ -8869,7 +9048,7 @@ mod tests {
             (command, open, ours)
         );
         assert!(log.end_since.is_some(), "a held line-finish is not ended");
-        assert_eq!(log.local.blocks.last(), Some((1, Outcome::Pending)));
+        assert_eq!(log.local.blocks.last(), ssh, "nor the local block's start");
         assert_eq!(
             log.running_blocks(),
             RunningBlocks {
@@ -8905,6 +9084,31 @@ mod tests {
             Some(Stripe::Running),
             "the ssh command itself"
         );
+    }
+
+    #[test]
+    fn a_remote_block_keeps_its_start_too() {
+        let mut log = ssh_log();
+        feed(&mut log, b"\x1b]133;A;bt_remote=1.9.1\x07");
+        assert_eq!(
+            log.remote.blocks.get(1),
+            Some(Outcome::Pending { started: 0 })
+        );
+        let before = wall_secs();
+        feed(&mut log, b"\x1b]133;C;bt_remote=1.9.1\x07");
+        let after = wall_secs();
+        let Some(Outcome::Pending { started }) = log.remote.blocks.get(1) else {
+            panic!("the remote block is open: {:?}", log.remote.blocks.get(1));
+        };
+        assert!(
+            started != 0 && (before..=after).contains(&started),
+            "{before} ≤ {started} ≤ {after}"
+        );
+        feed(&mut log, b"\x1b]133;D;0;bt_remote=1.9.1\x07");
+        assert!(matches!(
+            log.remote.blocks.get(1),
+            Some(Outcome::Finished { exit: Some(0), started: kept, .. }) if kept == started
+        ));
     }
 
     #[test]
@@ -9042,16 +9246,20 @@ mod tests {
     fn carried_log() -> ShellLog {
         let mut log = ShellLog::new(1000);
         log.local.blocks.start(7);
+        log.local.blocks.stamp(1_791_107_880);
         log.local.blocks.finish(7, Some(0), 120);
+        // No `C`: the start stays unknown.
         log.local.blocks.start(8);
         log.local.blocks.finish(8, None, 0);
         log.local.blocks.start(9);
+        log.local.blocks.stamp(1_791_108_000);
         log.local.state = Some(ShellState {
             phase: ShellPhase::Running,
             last_exit: Some(-2),
         });
         log.local.running_since = Some(RunClock::ran_for(Duration::from_secs(3)));
         log.remote.blocks.start(1);
+        log.remote.blocks.stamp(1_791_107_990);
         log.remote.blocks.finish(1, Some(130), 4_000);
         log.remote.state = Some(ShellState {
             phase: ShellPhase::Finished,
@@ -9139,13 +9347,17 @@ mod tests {
             [
                 Outcome::Finished {
                     exit: Some(0),
-                    elapsed_ms: 120
+                    elapsed_ms: 120,
+                    started: 1_791_107_880
                 },
                 Outcome::Finished {
                     exit: None,
-                    elapsed_ms: 0
+                    elapsed_ms: 0,
+                    started: 0
                 },
-                Outcome::Pending
+                Outcome::Pending {
+                    started: 1_791_108_000
+                }
             ]
         );
         assert_eq!(fresh.running_blocks().local, Some(9));
@@ -9205,7 +9417,7 @@ mod tests {
         }
         let mut carried = log.carried(None, 0);
         carried.local.first = 0;
-        carried.local.entries = vec![Outcome::Pending; 300];
+        carried.local.entries = vec![Outcome::Pending { started: 0 }; 300];
         let mut fresh = ShellLog::new(0);
         fresh.restore(carried, 0);
         assert_eq!(fresh.local.blocks.entries.len(), BLOCK_LOG_FLOOR);
@@ -9225,9 +9437,25 @@ mod tests {
             }
         }
         let swap = |from: &str, to: &str| Carried::decode(blob.replacen(from, to, 1).as_bytes());
-        assert!(swap("bateri-state 2", "bateri-state 3").is_none());
-        assert!(swap("bateri-state 2", "bateri-state 0").is_none());
-        assert!(swap("bateri-state 2", "bateri-session 2").is_none());
+        // The versions are derived, so the lines turn with the next bump.
+        let current = format!("bateri-state {STATE_VERSION}");
+        let header = |version: u32| format!("bateri-state {version}");
+        assert!(
+            swap(&current, &header(STATE_VERSION + 1)).is_none(),
+            "unknown"
+        );
+        assert!(
+            swap(&current, &header(STATE_OLDEST - 1)).is_none(),
+            "two versions back"
+        );
+        assert!(swap(&current, &header(0)).is_none());
+        assert!(swap(&current, &format!("bateri-session {STATE_VERSION}")).is_none());
+        // Each version takes only its own entry form: this blob's entries
+        // under a start-less header, and a current entry without its start.
+        assert!(swap(&current, &header(STATE_STARTS - 1)).is_none());
+        assert!(swap(",p/1791108000\n", ",p\n").is_none());
+        assert!(swap("-/0/0,", "-/0,").is_none());
+        assert!(swap("p/1791108000", "p/x").is_none());
         assert!(swap("ours 1", "ours 2").is_none());
         assert!(swap("ours 1", "ours 1\nours 1").is_none());
         assert!(swap("ours 1", "ours 1\nnew-key 1").is_none());
@@ -9329,100 +9557,12 @@ mod tests {
     }
 
     #[test]
-    fn the_version_1_fixture_still_reads() {
-        // Written by version 1; the reader takes the current version and
-        // the one before it, so this fixture stays until two bumps later.
-        let fixture = "bateri-state 1\n\
-                       local input 0 - 3 0/12,p\n\
-                       remote - - - 0 -\n\
-                       remote-shell -\n\
-                       cwd +/tmp/a\\sb\n\
-                       branch +main\n\
-                       remote-cwd +\n\
-                       remote-setup -\n\
-                       reconnect -\n\
-                       dock live 2 2 +s 1\n\
-                       predisplay +\n\
-                       buffer +ls\n\
-                       postdisplay +\n\
-                       prebuffer +\n\
-                       dock-fresh 1\n\
-                       editable 1\n\
-                       command 3\n\
-                       login -\n\
-                       remote-up -\n\
-                       typed -\n\
-                       ours 1\n\
-                       command-open 0\n\
-                       cleared -\n\
-                       hl 0 2 i2 - b\n\
-                       end\n";
-        let carried = Carried::decode(fixture.as_bytes()).unwrap();
-        assert_eq!(
-            carried.local.state,
-            Some(ShellState {
-                phase: ShellPhase::Input,
-                last_exit: Some(0)
-            })
-        );
-        assert_eq!(carried.local.first, 3);
-        assert_eq!(carried.cwd, "/tmp/a b");
-        assert_eq!(carried.dock.buffer, "ls");
-        assert_eq!(carried.dock.last_ink, Some('s'));
-        assert_eq!(carried.dock.highlights.len(), 1);
-        // Written again, it is the current version's.
-        let again = String::from_utf8(carried.encode()).unwrap();
-        assert_eq!(
-            again,
-            fixture.replacen(
-                "bateri-state 1",
-                &format!("bateri-state {STATE_VERSION}"),
-                1
-            )
-        );
-    }
-
-    /// Version 1's clock is the command's age when the blob was written: a
-    /// v1 blob of a running command still reads, its age counted from now.
-    #[test]
-    fn a_version_1_clock_is_an_age() {
-        let fixture = "bateri-state 1\n\
-                       local running - 5000 4 p\n\
-                       remote - - - 0 -\n\
-                       remote-shell -\n\
-                       cwd +\n\
-                       branch +\n\
-                       remote-cwd +\n\
-                       remote-setup -\n\
-                       reconnect -\n\
-                       dock idle 0 0 - 0\n\
-                       predisplay +\n\
-                       buffer +\n\
-                       postdisplay +\n\
-                       prebuffer +\n\
-                       dock-fresh 0\n\
-                       editable 0\n\
-                       command 4\n\
-                       login -\n\
-                       remote-up -\n\
-                       typed -\n\
-                       ours 1\n\
-                       command-open 1\n\
-                       cleared -\n\
-                       end\n";
-        let mut fresh = ShellLog::new(100);
-        fresh.restore(Carried::decode(fixture.as_bytes()).unwrap(), 0);
-        let ran = fresh.local.running_since.unwrap().elapsed();
-        assert!(
-            ran >= Duration::from_secs(5) && ran < Duration::from_secs(60),
-            "{ran:?}"
-        );
-    }
-
-    #[test]
-    fn the_version_2_fixture_reads_and_writes_byte_for_byte() {
-        // Written by version 2 — the current one: the running command's
-        // clock is its wall-clock start (here 2026-10-04T10:00:00Z).
+    fn the_version_2_fixture_still_reads() {
+        // Written by version 2 — the one before the current: the running
+        // command's clock is its wall-clock start (here
+        // 2026-10-04T10:00:00Z) and the entries carry no start. The reader
+        // takes the current version and the one before it, so this fixture
+        // stays as it is until two bumps later.
         let fixture = "bateri-state 2\n\
                        local running 0 1791108000000 7 0/120,p\n\
                        remote - - - 0 -\n\
@@ -9449,7 +9589,138 @@ mod tests {
                        end\n";
         let carried = Carried::decode(fixture.as_bytes()).unwrap();
         assert_eq!(carried.local.running_since_ms, Some(1_791_108_000_000));
+        assert_eq!(carried.local.first, 7);
+        // A version 2 entry's start is unknown, but the running block's is
+        // its clock's.
+        assert_eq!(
+            carried.local.entries,
+            [
+                Outcome::Finished {
+                    exit: Some(0),
+                    elapsed_ms: 120,
+                    started: 0
+                },
+                Outcome::Pending {
+                    started: 1_791_108_000
+                }
+            ]
+        );
+        assert!(carried.remote.entries.is_empty());
+        // Written again, it is version 3's: the same fields, every entry
+        // with its start.
+        let again = String::from_utf8(carried.encode()).unwrap();
+        assert_eq!(
+            again,
+            "bateri-state 3\n\
+             local running 0 1791108000000 7 0/120/0,p/1791108000\n\
+             remote - - - 0 -\n\
+             remote-shell -\n\
+             cwd +/tmp\n\
+             branch +\n\
+             remote-cwd +\n\
+             remote-setup -\n\
+             reconnect -\n\
+             dock idle 0 0 - 1\n\
+             predisplay +\n\
+             buffer +\n\
+             postdisplay +\n\
+             prebuffer +\n\
+             dock-fresh 0\n\
+             editable 1\n\
+             command 8\n\
+             login -\n\
+             remote-up -\n\
+             typed -\n\
+             ours 1\n\
+             command-open 1\n\
+             cleared -\n\
+             end\n"
+        );
+    }
+
+    #[test]
+    fn the_version_3_fixture_reads_and_writes_byte_for_byte() {
+        // Written by version 3 — the current one: every entry ends in its
+        // block's start, in Unix seconds, `0` when unknown. Here local
+        // block 8, an `ssh` started at 2026-10-04T10:00:00Z, runs the
+        // remote shell; the local block before it finished two minutes
+        // earlier, the remote ones started 10 and 40 seconds into the
+        // session.
+        let fixture = "bateri-state 3\n\
+                       local running 0 1791108000000 6 0/120/1791107880,-/0/0,p/1791108000\n\
+                       remote running 3 1791108040000 1 3/40/1791108010,p/1791108040\n\
+                       remote-shell 8.4242\n\
+                       cwd +/tmp\n\
+                       branch +\n\
+                       remote-cwd +\n\
+                       remote-setup -\n\
+                       reconnect -\n\
+                       dock idle 0 0 - 1\n\
+                       predisplay +\n\
+                       buffer +\n\
+                       postdisplay +\n\
+                       prebuffer +\n\
+                       dock-fresh 0\n\
+                       editable 1\n\
+                       command 8\n\
+                       login -\n\
+                       remote-up -\n\
+                       typed -\n\
+                       ours 1\n\
+                       command-open 1\n\
+                       cleared -\n\
+                       end\n";
+        let carried = Carried::decode(fixture.as_bytes()).unwrap();
+        assert_eq!(
+            carried.local.entries,
+            [
+                Outcome::Finished {
+                    exit: Some(0),
+                    elapsed_ms: 120,
+                    started: 1_791_107_880
+                },
+                Outcome::Finished {
+                    exit: None,
+                    elapsed_ms: 0,
+                    started: 0
+                },
+                Outcome::Pending {
+                    started: 1_791_108_000
+                }
+            ]
+        );
+        assert_eq!(
+            carried.remote.entries,
+            [
+                Outcome::Finished {
+                    exit: Some(3),
+                    elapsed_ms: 40,
+                    started: 1_791_108_010
+                },
+                Outcome::Pending {
+                    started: 1_791_108_040
+                }
+            ]
+        );
+        assert_eq!(carried.remote.running_since_ms, Some(1_791_108_040_000));
         assert_eq!(carried.encode(), fixture.as_bytes());
+        // The starts reach the ledgers.
+        let mut fresh = ShellLog::new(100);
+        fresh.restore(carried, 0);
+        assert_eq!(
+            fresh.local.blocks.get(8),
+            Some(Outcome::Pending {
+                started: 1_791_108_000
+            })
+        );
+        assert_eq!(
+            fresh.remote.blocks.get(1),
+            Some(Outcome::Finished {
+                exit: Some(3),
+                elapsed_ms: 40,
+                started: 1_791_108_010
+            })
+        );
     }
 
     /// The point of version 2: the time a blob spends in a holder (a night
