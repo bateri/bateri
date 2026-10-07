@@ -1146,6 +1146,15 @@ impl Motion {
         self.reduce
     }
 
+    /// Whether a change of geometry snaps instead of easing — `snap`, or
+    /// Reduce Motion: the offset's mode ([`Motion::origin_mode`]), which is
+    /// the same answer for anything that moves rather than fades. The scroll
+    /// bar's widening reads it when a transition starts
+    /// ([`crate::scrollbar`]); the reduction's one place stays here.
+    pub(crate) fn snaps(&self) -> bool {
+        self.origin_mode() == Mode::Snap
+    }
+
     /// Only whether the cursor's animation has stopped — the witness of the
     /// `motion=` token.
     ///

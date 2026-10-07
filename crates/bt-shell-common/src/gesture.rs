@@ -63,6 +63,12 @@ pub struct Gesture {
     /// [`LINK_DRAG_THRESHOLD`] from it turns the gesture into a drag
     /// ([`Drag::Link`]) and takes the press point and `link` down with it.
     link_from: Option<(f64, f64)>,
+    /// Where in the thumb the left button holds the scroll bar — the grab,
+    /// physical pixels below the thumb's top — while a press in the bar's
+    /// strip drags it ([`Gesture::pressed_scrollbar`]); `None` for every
+    /// other press. Like the link's, only the route is here: the view
+    /// turns each drag into a position with the drawn frame's layout.
+    scrollbar: Option<f32>,
 }
 
 /// How far (window points) a ⌘-press on a draggable link must move before the
@@ -82,7 +88,7 @@ pub enum Press {
 }
 
 /// The path of a held drag — from the route locked at the press.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Drag {
     /// The press was reported: motion is a report too.
     Report,
@@ -94,6 +100,9 @@ pub enum Drag {
     /// starts the file promise drag. Returned **once**; the gesture is then over in the
     /// ledger — AppKit owns the mouse for the drag session and the release does not open the link.
     Link,
+    /// The left button pressed in the scroll bar's strip: the thumb follows the pointer, held
+    /// this far (physical pixels) below its top — in or out of the strip, until the release.
+    Scrollbar(f32),
     /// Neither (the right/middle button has no gesture in the terminal, a press-less drag): the
     /// event is dropped.
     Ignore,
@@ -116,6 +125,9 @@ pub enum Release {
     /// the view opens the link if the pointer is still over the range locked at the press and
     /// the click count is one.
     Link,
+    /// The end of a drag on the scroll bar: the thumb is let go; nothing is reported and no
+    /// selection ends.
+    Scrollbar,
 }
 
 impl Gesture {
@@ -133,6 +145,7 @@ impl Gesture {
             self.dock = false;
             self.link = false;
             self.link_from = None;
+            self.scrollbar = None;
         }
     }
 
@@ -159,6 +172,33 @@ impl Gesture {
         self.dock = false;
         self.link = true;
         self.link_from = drag_from;
+        self.scrollbar = None;
+    }
+
+    /// A left-button press in the scroll bar's strip: the gesture is the **bar's** in every
+    /// mode — the strip is checked before anything else, so no report goes to the application,
+    /// no selection starts and no ⌘-link opens, whatever the modifiers ([`Gesture::pressed_link`]'s
+    /// precedent: the caller must have called [`Gesture::begin_press`] first and must not call
+    /// `Session::mouse_button`). `grab` is where in the thumb the pointer holds it, physical
+    /// pixels below its top.
+    ///
+    /// The route is locked here: every drag is [`Drag::Scrollbar`] — out of the strip too, the
+    /// thumb follows the pointer as long as the button is down — and the release is
+    /// [`Release::Scrollbar`]. No `sent` bit and no `dragging`: the lost-release path reports
+    /// nothing and a scroll during the drag moves no selection's end.
+    pub fn pressed_scrollbar(&mut self, grab: f32) {
+        self.dragging = false;
+        self.dock = false;
+        self.link = false;
+        self.link_from = None;
+        self.scrollbar = Some(grab);
+    }
+
+    /// The scroll bar's drag lost its release (AppKit sends a buttonless motion only while no
+    /// button is down): the route comes down; `true` if there was one — the caller lets the
+    /// thumb go, or it would stay held and dark until the next press.
+    pub fn lost_scrollbar(&mut self) -> bool {
+        self.scrollbar.take().is_some()
     }
 
     /// A left-button press on the dock's input line: the gesture is the **terminal's** (mouse mode
@@ -221,6 +261,11 @@ impl Gesture {
     /// after it is [`Release::Done`].
     pub fn dragged(&mut self, button: MouseButton, at: (f64, f64)) -> Drag {
         if button == MouseButton::Left
+            && let Some(grab) = self.scrollbar
+        {
+            return Drag::Scrollbar(grab);
+        }
+        if button == MouseButton::Left
             && self.link
             && let Some((x, y)) = self.link_from
         {
@@ -246,6 +291,9 @@ impl Gesture {
     /// left button's selection gesture ends (the selection stays on screen, Cmd-C copies it).
     pub fn released(&mut self, button: MouseButton) -> Release {
         let bit = button_bit(button);
+        if button == MouseButton::Left && self.scrollbar.take().is_some() {
+            return Release::Scrollbar;
+        }
         if button == MouseButton::Left && std::mem::take(&mut self.link) {
             self.link_from = None;
             return Release::Link;
@@ -607,6 +655,61 @@ mod tests {
             Drag::Ignore
         );
         assert_eq!(gesture.dragged(LEFT, (HERE.0 + 50.0, HERE.1)), Drag::Link);
+    }
+
+    #[test]
+    fn a_scroll_bar_press_drags_the_thumb_until_release() {
+        // The route is locked at the press: every left drag is the thumb's — out of the strip
+        // too — with the grab it was pressed with, and the release is the bar's, once.
+        let mut gesture = Gesture::default();
+        gesture.begin_press(LEFT);
+        gesture.pressed_scrollbar(7.5);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Scrollbar(7.5));
+        assert_eq!(
+            gesture.dragged(LEFT, (-500.0, 9000.0)),
+            Drag::Scrollbar(7.5)
+        );
+        // Neither a report nor a selection: no `sent` bit, no selection drag.
+        assert!(!gesture.dragging(), "a scroll bar drag moves a selection");
+        assert_eq!(gesture.take_lost_releases().count(), 0);
+        assert_eq!(gesture.released(LEFT), Release::Scrollbar);
+        assert_eq!(gesture.released(LEFT), Release::Done);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Ignore);
+    }
+
+    #[test]
+    fn a_scroll_bar_press_leaves_other_buttons_and_the_next_press_alone() {
+        let mut gesture = Gesture::default();
+        // A reported right-button press stays reported across a thumb drag.
+        gesture.begin_press(RIGHT);
+        gesture.pressed(RIGHT, Click::Sent, 1, false);
+        gesture.begin_press(LEFT);
+        gesture.pressed_scrollbar(3.0);
+        assert_eq!(gesture.dragged(RIGHT, HERE), Drag::Report);
+        assert_eq!(gesture.released(RIGHT), Release::Report);
+        // The thumb's release was lost: the next press clears the route, a selection releases
+        // as a selection.
+        press(&mut gesture, Click::Select, 1, false);
+        assert_eq!(gesture.dragged(LEFT, HERE), Drag::Select);
+        assert_eq!(gesture.released(LEFT), Release::Done);
+        // A press on the bar clears a stale selection drag and a link press.
+        press(&mut gesture, Click::Select, 1, false);
+        gesture.begin_press(LEFT);
+        gesture.pressed_link(Some(HERE));
+        gesture.begin_press(LEFT);
+        gesture.pressed_scrollbar(0.0);
+        assert!(!gesture.dragging());
+        assert_eq!(
+            gesture.dragged(LEFT, (HERE.0 + 50.0, HERE.1)),
+            Drag::Scrollbar(0.0)
+        );
+        assert_eq!(gesture.released(LEFT), Release::Scrollbar);
+        // A buttonless motion is the evidence of a lost release: the route comes down once.
+        gesture.begin_press(LEFT);
+        gesture.pressed_scrollbar(2.0);
+        assert!(gesture.lost_scrollbar());
+        assert!(!gesture.lost_scrollbar());
+        assert_eq!(gesture.released(LEFT), Release::Done);
     }
 
     #[test]

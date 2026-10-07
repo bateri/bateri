@@ -1673,6 +1673,24 @@ impl TerminalPane {
         }
     }
 
+    /// The pointer is over this pane's scroll bar strip, or not
+    /// (`bt_gpu::DisplayLink::set_scrollbar_hover`) — the view's tracking
+    /// area says so in an unfocused pane too. Silent before the link is born.
+    pub(crate) fn set_scrollbar_hover(&self, on: bool) {
+        if let Some(link) = self.link() {
+            link.set_scrollbar_hover(on);
+        }
+    }
+
+    /// The scroll bar's thumb is held, or let go
+    /// (`bt_gpu::DisplayLink::set_scrollbar_drag`). Silent before the link
+    /// is born.
+    pub(crate) fn set_scrollbar_drag(&self, on: bool) {
+        if let Some(link) = self.link() {
+            link.set_scrollbar_drag(on);
+        }
+    }
+
     /// The terminal view.
     pub(crate) fn view(&self) -> &BateriView {
         &self.ivars().view

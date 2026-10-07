@@ -82,9 +82,12 @@
 //! clock wakes the link at the hold's end in the motion flavour and the fade
 //! is drawn as motion frames. What shows it is scrolling **input**
 //! ([`DisplayLink::poke_scrollbar`], through [`Waker::resume`]), never
-//! output; a change of its form ([`DisplayLink::set_scrollbar_mode`]) goes
-//! the same way. The always-up form has no timeline: it is drawn with the
-//! content and puts nothing in flight.
+//! output; a change of its form ([`DisplayLink::set_scrollbar_mode`]) and the
+//! pointer over its strip ([`DisplayLink::set_scrollbar_hover`],
+//! [`DisplayLink::set_scrollbar_drag`]) go the same way. The always-up form
+//! has no timeline: it is drawn with the content and puts nothing in flight
+//! but the pointer's tone. A bar the pointer holds is up and settled: no
+//! clock, no frame until the pointer moves away.
 //!
 //! The contract's consequence in one sentence: a window with a running
 //! command, **a blinking cursor or a scroll bar shown by scrolling** is **not
@@ -300,7 +303,8 @@ impl Waker {
     }
 
     /// Starts the pacer **without planting damage** — the clock's second
-    /// flavour, and the scroll bar's poke ([`DisplayLink::poke_scrollbar`]).
+    /// flavour, and the scroll bar's poke ([`DisplayLink::poke_scrollbar`]),
+    /// form and pointer ([`DisplayLink::set_scrollbar_hover`]).
     ///
     /// [`Waker::wake`] with its middle job removed: the same gate, the same
     /// start; no `dirty.mark()`. The woken tick therefore lands on the "no
@@ -1789,6 +1793,9 @@ impl Core {
             &mut kept,
             fresh,
             now,
+            // Reduce Motion and `snap` live in `Motion`; the bar reads them
+            // here, where a widening it starts this tick is stamped.
+            self.motion.get().snaps(),
             frame,
             self.theme.get().foreground_linear(),
         );
@@ -1884,7 +1891,13 @@ impl Core {
             frame.origin_px(),
             frame.fill_rows(),
             frame.dock_hit(),
-            self.scrollbar_layout.get(),
+            // The mouse's region follows the form: none in `Never`. A change
+            // of form draws one frame ([`Scrollbar::set_mode`]), so it is
+            // published here too.
+            self.scrollbar
+                .get()
+                .mode()
+                .region(self.scrollbar_layout.get()),
         );
     }
 
@@ -2403,6 +2416,39 @@ impl DisplayLink {
         }
     }
 
+    /// The pointer came over the scroll bar's strip or left it
+    /// ([`Origin::scrollbar`]'s region): over it the bar shows wide and its
+    /// thumb darkens. Main thread, from `bt-shell`'s tracking area — which
+    /// sees the pointer over an unfocused pane and leaving the window too.
+    ///
+    /// **A no-op on the same value; a change starts the link through
+    /// [`Waker::resume`]**, never [`Waker::wake`] — the widening is a motion
+    /// frame — so a sleeping link widens the bar at once, not a second later.
+    /// While the pointer stays the bar is settled and asks for nothing.
+    /// Where no bar can be drawn the change wants no frame.
+    pub fn set_scrollbar_hover(&self, on: bool) {
+        let core = &self.core;
+        let mut bar = core.scrollbar.get();
+        let wanted = bar.set_hover(on, core.scrollbar_layout.get().drawable());
+        core.scrollbar.set(bar);
+        if wanted {
+            self.waker.resume();
+        }
+    }
+
+    /// The thumb was grabbed or let go — [`DisplayLink::set_scrollbar_hover`]'s
+    /// rule: held, the bar stays up and wide at its darkest tone however far
+    /// the pointer wanders; let go off the strip, it narrows, holds and fades.
+    pub fn set_scrollbar_drag(&self, on: bool) {
+        let core = &self.core;
+        let mut bar = core.scrollbar.get();
+        let wanted = bar.set_drag(on, core.scrollbar_layout.get().drawable());
+        core.scrollbar.set(bar);
+        if wanted {
+            self.waker.resume();
+        }
+    }
+
     /// The scroll bar's form changed — `bt-shell` gives the **resolved**
     /// value (the setting combined with the system's preference; this crate
     /// sees neither, the [`DisplayLink::set_reduce_motion`] precedent).
@@ -2803,13 +2849,14 @@ fn scrollbar_step(
     kept: &mut ScrollbarLayout,
     fresh: Option<ScrollbarLayout>,
     now: f64,
+    instant: bool,
     frame: &mut Frame,
     foreground: LinearRgba,
 ) -> BarStep {
     if let Some(layout) = fresh {
         *kept = layout;
     }
-    let changed = bar.advance(now, kept.drawable());
+    let changed = bar.advance(now, kept.drawable(), instant);
     frame.set_scrollbar(*kept, bar.look(now), foreground);
     BarStep {
         changed,
@@ -3355,6 +3402,7 @@ mod tests {
             &mut kept,
             Some(layout),
             -tick,
+            false,
             &mut frame,
             foreground,
         );
@@ -3371,6 +3419,7 @@ mod tests {
                 &mut kept,
                 Some(layout),
                 now,
+                false,
                 &mut frame,
                 foreground,
             );
@@ -3388,7 +3437,9 @@ mod tests {
         // so the link sleeps, and the clock is armed for the hold's end in
         // the **motion** flavour: no damage, so not a content frame and not a
         // request.
-        let step = scrollbar_step(&mut bar, &mut kept, None, now, &mut frame, foreground);
+        let step = scrollbar_step(
+            &mut bar, &mut kept, None, now, false, &mut frame, foreground,
+        );
         assert!(
             at_rest(Motion::default(), false, true, step.idle()),
             "{step:?}"
@@ -3404,7 +3455,9 @@ mod tests {
         let mut now = 1.0;
         let mut alpha = 1.0f32;
         loop {
-            let step = scrollbar_step(&mut bar, &mut kept, None, now, &mut frame, foreground);
+            let step = scrollbar_step(
+                &mut bar, &mut kept, None, now, false, &mut frame, foreground,
+            );
             assert!(
                 !at_rest(Motion::default(), false, true, step.idle()),
                 "the link slept mid-fade at {now}"
@@ -3431,10 +3484,87 @@ mod tests {
             &mut kept,
             None,
             now + tick,
+            false,
             &mut frame,
             foreground,
         );
         assert!(step.idle(), "the hidden bar keeps the link awake: {step:?}");
+    }
+
+    #[test]
+    fn a_bar_under_the_pointer_widens_awake_then_sleeps_without_a_clock() {
+        // A scroll showed the thin bar and the link sleeps in the hold; the
+        // pointer comes over the strip: motion frames widen the bar, then the
+        // link sleeps with **no** clock — a deadline left armed under the
+        // pointer would fire in the past and spin. The pointer leaves: awake
+        // for the narrowing, then the hold's clock in the motion flavour.
+        let foreground = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+        let (mut frame, layout) = bar_scene();
+        let mut bar = Scrollbar::default();
+        let mut kept = layout;
+        let rest = Motion::default();
+        let tick = 1.0 / 120.0;
+        let step = |bar: &mut Scrollbar, kept: &mut ScrollbarLayout, frame: &mut Frame, now| {
+            scrollbar_step(bar, kept, None, now, false, frame, foreground)
+        };
+        assert!(bar.poke(true));
+        step(&mut bar, &mut kept, &mut frame, 0.0);
+        step(&mut bar, &mut kept, &mut frame, 0.2);
+        assert!(
+            step(&mut bar, &mut kept, &mut frame, 0.3).idle(),
+            "the thin bar is not holding"
+        );
+        // Over the strip at 0.5: awake until the bar is wide.
+        assert!(bar.set_hover(true, true), "the hover asked for no frame");
+        let mut now = 0.5;
+        loop {
+            if at_rest(
+                rest,
+                false,
+                true,
+                step(&mut bar, &mut kept, &mut frame, now).idle(),
+            ) {
+                break;
+            }
+            now += tick;
+            assert!(now < 0.8, "the widening never settled");
+        }
+        assert!(now >= 0.65, "slept before the bar widened: {now}");
+        let [x0, _, x1, _] = layout.thumb(1.0);
+        let drawn = frame.scrollbar().expect("the bar is up").core;
+        assert_eq!([drawn[0], drawn[2]], [x0, x1], "the bar is not wide");
+        assert_eq!(
+            due_clock(None, [None, None, bar.next_deadline()]),
+            None,
+            "the engaged bar armed a clock"
+        );
+        for later in [now + 1.0, now + 30.0] {
+            assert!(
+                step(&mut bar, &mut kept, &mut frame, later).idle(),
+                "the engaged bar woke at {later}"
+            );
+        }
+        // Leaving: narrowing frames, then asleep until the hold's end.
+        let left = now + 31.0;
+        assert!(bar.set_hover(false, true));
+        let narrowing = step(&mut bar, &mut kept, &mut frame, left);
+        assert!(
+            !at_rest(rest, false, true, narrowing.idle()),
+            "slept mid-narrowing"
+        );
+        assert!(
+            step(&mut bar, &mut kept, &mut frame, left + 0.15).changed,
+            "the last narrowing step was not drawn"
+        );
+        assert!(
+            step(&mut bar, &mut kept, &mut frame, left + 0.2).idle(),
+            "the narrowed bar is not holding"
+        );
+        assert_eq!(
+            due_clock(None, [None, None, bar.next_deadline()]),
+            Some((left + 0.15 + 1.0, false)),
+            "the hold after leaving is not a motion-flavoured wakeup"
+        );
     }
 
     #[test]
@@ -3452,6 +3582,7 @@ mod tests {
             &mut kept,
             Some(layout),
             0.0,
+            false,
             &mut frame,
             foreground,
         );
@@ -3463,7 +3594,9 @@ mod tests {
         assert_eq!(frame.scrollbar_track().len(), 2, "no track under it");
         assert!(!bar.poke(kept.drawable()), "a poke asked for a frame");
         for now in [0.5, 1.0, 1.4, 30.0] {
-            let step = scrollbar_step(&mut bar, &mut kept, None, now, &mut frame, foreground);
+            let step = scrollbar_step(
+                &mut bar, &mut kept, None, now, false, &mut frame, foreground,
+            );
             assert!(
                 at_rest(Motion::default(), false, true, step.idle()),
                 "the link stayed awake for an always-up bar at {now}"
@@ -3475,7 +3608,9 @@ mod tests {
         // The form changes to `Never` between content frames: one motion
         // frame draws the bar away from the kept layout, then nothing.
         assert!(bar.set_mode(Mode::Never));
-        let step = scrollbar_step(&mut bar, &mut kept, None, 31.0, &mut frame, foreground);
+        let step = scrollbar_step(
+            &mut bar, &mut kept, None, 31.0, false, &mut frame, foreground,
+        );
         assert!(step.changed, "the form change was not drawn");
         assert!(frame.scrollbar().is_none() && frame.scrollbar_track().is_empty());
         assert!(
@@ -3487,6 +3622,7 @@ mod tests {
             &mut kept,
             Some(layout),
             32.0,
+            false,
             &mut frame,
             foreground,
         );
@@ -3510,12 +3646,15 @@ mod tests {
             &mut kept,
             Some(layout),
             -tick,
+            false,
             &mut frame,
             foreground,
         );
         assert!(bar.poke(kept.drawable()));
         let rest = Motion::default();
-        let stamped = scrollbar_step(&mut bar, &mut kept, None, 0.0, &mut frame, foreground);
+        let stamped = scrollbar_step(
+            &mut bar, &mut kept, None, 0.0, false, &mut frame, foreground,
+        );
         assert!(
             !at_rest(rest, false, true, stamped.idle()),
             "slept on a rising bar"
@@ -3524,14 +3663,20 @@ mod tests {
             nothing_to_draw(rest, false, true, stamped),
             "an identical frame was drawn"
         );
-        let rising = scrollbar_step(&mut bar, &mut kept, None, tick, &mut frame, foreground);
+        let rising = scrollbar_step(
+            &mut bar, &mut kept, None, tick, false, &mut frame, foreground,
+        );
         assert!(
             !nothing_to_draw(rest, false, true, rising),
             "the rise was not drawn"
         );
         // Up and holding: asleep until the clock; it fires at the hold's end.
-        scrollbar_step(&mut bar, &mut kept, None, 0.5, &mut frame, foreground);
-        let ending = scrollbar_step(&mut bar, &mut kept, None, 1.0, &mut frame, foreground);
+        scrollbar_step(
+            &mut bar, &mut kept, None, 0.5, false, &mut frame, foreground,
+        );
+        let ending = scrollbar_step(
+            &mut bar, &mut kept, None, 1.0, false, &mut frame, foreground,
+        );
         assert!(
             !at_rest(rest, false, true, ending.idle()),
             "slept at the hold's end"
@@ -3564,6 +3709,7 @@ mod tests {
                 &mut kept,
                 Some(layout),
                 now,
+                false,
                 &mut frame,
                 foreground,
             );

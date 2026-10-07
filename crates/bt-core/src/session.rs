@@ -9257,13 +9257,45 @@ impl Session {
             // frame is needed.
             return self.reset_scroll();
         }
-        let offset = term.grid().display_offset() as i32;
-        let delta = reveal_target(term, found, band) - visual_top(offset, band);
-        if delta == 0 {
-            return false;
+        let target = reveal_target(term, found, band);
+        self.move_top_locked(term, target, band, smooth)
+            .unwrap_or(false)
+    }
+
+    /// Moves the window so its top row is `target` rows deep — a **visual
+    /// top** ([`visual_top`]'s space) — and says whether it moved; `None` on
+    /// the alternate screen, which has no scrollback. **The one copy of
+    /// absolute scrolling**: the search jump ([`Session::reveal_locked`]) and
+    /// the scroll bar ([`Session::scroll_to`]) both land here, so they share
+    /// one rule for the band, the fraction and the glide. While the `Term`
+    /// lock is held, like all of scrolling's paths ([`scroll_locked`]); the
+    /// caller asks for the frame once the lock is released.
+    ///
+    /// The target is a whole row: a move resets the position from outside
+    /// like every such path — the in-flight glide drops, the fraction is
+    /// zeroed and the generation increments. A target that is the window's
+    /// own row moves nothing and resets nothing (the search jump to a match
+    /// already there); [`Session::scroll_to`] resets it itself. A target
+    /// inside the band's unseen offsets falls to the bottom ([`scroll_locked`]).
+    ///
+    /// `smooth` glides there instead of jumping (the caller's resolved
+    /// `smooth_scroll`); a target farther than a screen lands a screen short
+    /// and glides the last one.
+    fn move_top_locked(
+        &self,
+        term: &mut Term<Adapter>,
+        target: i32,
+        band: i32,
+        smooth: bool,
+    ) -> Option<bool> {
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return None;
         }
-        // Like every path that resets the position from outside: the
-        // in-flight glide drops, the fraction is zeroed, the generation increments.
+        let offset = term.grid().display_offset() as i32;
+        let delta = target.saturating_sub(visual_top(offset, band));
+        if delta == 0 {
+            return Some(false);
+        }
         self.reset_scroll();
         let rows = term.screen_lines() as i32;
         if !smooth {
@@ -9272,13 +9304,55 @@ impl Session {
             self.add_glide(f64::from(delta));
         } else {
             // **Land far and glide the last screen** (the precedent of
-            // `scroll_in`'s burst): every navigation is read with the same motion
+            // `scroll_in`'s burst): every jump is read with the same motion
             // and a long glide would pass thousands of rows before the eye.
             let screen = delta.signum() * rows;
             self.scroll_user(term, delta - screen, band);
             self.add_glide(f64::from(screen));
         }
-        true
+        Some(true)
+    }
+
+    /// Scrolls the window to `top` rows from the top of the history — the
+    /// position the scroll bar draws ([`ScrollPosition::top`], fractional,
+    /// rounded here to the nearest whole row) — at once or gliding (`smooth`,
+    /// the caller's resolved `smooth_scroll`). The scroll bar's drag and
+    /// track click; past either end the target clamps to the travel.
+    ///
+    /// **The scroll bar holds the window**: a glide still in flight (the
+    /// wheel's momentum) drops and the window lands on a whole row even
+    /// where the target is its own row — a thumb grabbed and held still must
+    /// not drift away from the pointer.
+    ///
+    /// `Some(true)` → the window moved, a glide is on its way or a fraction
+    /// dropped, and a frame was asked for; `Some(false)` → it is there
+    /// already (a still thumb asks for nothing); `None` → the alternate
+    /// screen, which has no scrollback. A position that is not a number is
+    /// the window's own place.
+    ///
+    /// **Journal-neutral:** moves only the view, which the snapshot does not
+    /// read — no side record ([`crate::journal`]). The move counts as the
+    /// user's ([`Session::user_scroll`]), so a search match does not take it
+    /// for output.
+    pub fn scroll_to(&self, top: f32, smooth: bool) -> Option<bool> {
+        let changed = {
+            let mut term = self.term.lock();
+            if term.mode().contains(TermMode::ALT_SCREEN) {
+                return None;
+            }
+            let band = self.band_shown();
+            let target = if top.is_finite() {
+                scroll_target(term.history_size(), band, top)
+            } else {
+                visual_top(term.grid().display_offset() as i32, band)
+            };
+            let dropped = self.reset_scroll();
+            self.move_top_locked(&mut term, target, band, smooth)? || dropped
+        };
+        if changed {
+            self.request_frame();
+        }
+        Some(changed)
     }
 
     /// The fill band's length for search: on the bottom-anchored primary screen
@@ -10467,6 +10541,24 @@ fn scroll_position(
         top: top as f32,
         visible: rows,
     })
+}
+
+/// [`scroll_position`] read backwards: the visual top ([`visual_top`]'s
+/// space) whose position is `top` rows from the top of the history —
+/// `band + room − top`, i.e. `history − top` — with `top` rounded to the
+/// nearest whole row and clamped to the travel. The scroll bar's
+/// [`Session::scroll_to`] lands there through [`Session::move_top_locked`].
+///
+/// The bottom of the travel is the band itself, which `scroll_locked` reads
+/// as "the bottom", so the thumb dragged to the end brings the band back. No
+/// travel (the history fits in the band) answers the band: nowhere to go.
+fn scroll_target(history: usize, band: i32, top: f32) -> i32 {
+    let history = i64::try_from(history).unwrap_or(i64::MAX);
+    let band = i64::from(band.max(0));
+    let room = (history - band).max(0);
+    // `as` saturates and the clamp keeps the row inside the travel.
+    let rows = (f64::from(top).round() as i64).clamp(0, room);
+    i32::try_from(band + room - rows).unwrap_or(i32::MAX)
 }
 
 /// Can the position move in the `up` direction — the glide request's end gate.
@@ -18968,6 +19060,28 @@ mod tests {
     }
 
     #[test]
+    fn the_scroll_target_is_the_positions_inverse() {
+        // 50 rows of history, a resting band of 3: every whole-row position
+        // maps back to the visual top it came from — the bottom to the band
+        // itself, the top of the history to its depth.
+        for offset in [0, 4, 5, 20, 50] {
+            let at = scroll_position(50, 3, offset, 0.0, 24).expect("a position");
+            assert_eq!(
+                scroll_target(50, 3, at.top),
+                visual_top(offset, 3),
+                "{offset}: {at:?}"
+            );
+        }
+        // Fractions round to the nearest row; past the travel clamps.
+        assert_eq!(scroll_target(50, 3, 46.4), 4);
+        assert_eq!(scroll_target(50, 3, 46.6), 3);
+        assert_eq!(scroll_target(50, 3, -9.0), 50);
+        assert_eq!(scroll_target(50, 3, 1e9), 3);
+        // No travel: the band, i.e. the bottom.
+        assert_eq!(scroll_target(2, 3, 0.0), 3);
+    }
+
+    #[test]
     fn the_frames_scroll_position_follows_the_window() {
         // The record's two fields come from the frame's own read: in the
         // banded bottom the position is the travel's end, a notch moves it by
@@ -19019,6 +19133,164 @@ mod tests {
         let cursor = cursor_now(&session);
         assert_eq!(cursor.history, 0, "{cursor:?}");
         assert_eq!(cursor.scroll_position(), None, "{cursor:?}");
+        // The scroll bar's absolute scroll has nothing to move either.
+        assert_eq!(session.scroll_to(0.0, false), None);
+        session.shutdown();
+    }
+
+    // --- Absolute scrolling (the scroll bar's drag and track click) ---
+
+    #[test]
+    fn scrolling_to_where_the_window_is_does_nothing() {
+        // The thumb held still: no move, no glide, no frame.
+        let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        let here = cursor_now(&session)
+            .scroll_position()
+            .expect("a scrollback to travel");
+        let before = wakes(&wake);
+        assert_eq!(session.scroll_to(here.top, false), Some(false));
+        assert_eq!(session.scroll_to(here.top, true), Some(false));
+        assert_eq!(wakes(&wake), before, "a still thumb asked for a frame");
+        assert_eq!(scroll_state(&session), (0, 0.0));
+        // A position that is not a number changes nothing either.
+        assert_eq!(session.scroll_to(f32::NAN, false), Some(false));
+        assert_eq!(scroll_state(&session), (0, 0.0));
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_still_thumb_stops_the_glide_and_lands_on_a_whole_row() {
+        // The wheel's glide is on its way and the window rests between rows
+        // when the thumb is grabbed: holding it still drops the glide and
+        // rounds the window to the row under the thumb.
+        let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        smooth(&session, 3.25, ScrollIntent::Direct);
+        session.scroll_wheel(4.0, 4, ScrollIntent::Glide, at(0, 0, CellHalf::Left), false);
+        let here = cursor_now(&session).scroll_position().expect("a position");
+        assert_eq!(here.top, 21.0 - 3.25, "{here:?}");
+        let before = wakes(&wake);
+        assert_eq!(session.scroll_to(here.top, false), Some(true));
+        assert!(
+            wakes(&wake) > before,
+            "the dropped fraction asked for no frame"
+        );
+        assert_eq!(scroll_state(&session), (3, 0.0), "the glide went on");
+        assert_eq!(cursor_now(&session).scroll_frac, 0.0);
+        session.shutdown();
+    }
+
+    #[test]
+    fn scrolling_to_either_end_reaches_it() {
+        // 21 rows of history, no band: the travel is 21 rows and the position
+        // counts from the top, so `0` is the oldest row on top.
+        let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        let room = cursor_now(&session)
+            .scroll_position()
+            .expect("a scrollback to travel")
+            .room;
+        assert_eq!(room, 21);
+        let before = wakes(&wake);
+        assert_eq!(session.scroll_to(0.0, false), Some(true));
+        assert!(wakes(&wake) > before, "the move asked for no frame");
+        assert_eq!(scroll_state(&session), (21, 0.0));
+        let top = cursor_now(&session).scroll_position().expect("a position");
+        assert_eq!(top.top, 0.0, "{top:?}");
+        // Past the ends the target clamps to the travel.
+        assert_eq!(session.scroll_to(-40.0, false), Some(false));
+        assert_eq!(session.scroll_to(room as f32 + 40.0, false), Some(true));
+        assert_eq!(scroll_state(&session), (0, 0.0));
+        // The bar's "past the end" (`f32::MAX`) is the bottom, whatever the
+        // travel.
+        session.scroll_to(0.0, false);
+        assert_eq!(session.scroll_to(f32::MAX, false), Some(true));
+        assert_eq!(scroll_state(&session), (0, 0.0));
+        // In between the target is the nearest whole row.
+        assert_eq!(session.scroll_to(10.4, false), Some(true));
+        assert_eq!(scroll_state(&session), (11, 0.0));
+        assert_eq!(
+            cursor_now(&session).scroll_position().map(|p| p.top),
+            Some(10.0)
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_target_on_the_bands_unseen_offsets_lands_at_the_bottom() {
+        // A resting band: the travel's last row is the bottom itself, and the
+        // offsets `1..=band` are never seen on screen — a target between them
+        // and the bottom lands at the bottom, the next row up at `band + 1`.
+        let (session, _wake) = gapped_session(true);
+        let start = cursor_now(&session);
+        let band = i32::from(start.resting_fill);
+        assert!(band > 0, "no resting band: {start:?}");
+        let room = start.scroll_position().expect("a travel").room as f32;
+        assert_eq!(session.scroll_to(0.0, false), Some(true));
+        assert_eq!(scroll_state(&session).0, start.history as i32);
+        assert_eq!(session.scroll_to(room - 0.4, false), Some(true));
+        assert_eq!(scroll_state(&session), (0, 0.0), "not at the bottom");
+        let bottom = cursor_now(&session);
+        assert_eq!(
+            bottom.resting_fill, start.resting_fill,
+            "the band did not come back: {bottom:?}"
+        );
+        assert_eq!(session.scroll_to(room - 1.0, false), Some(true));
+        assert_eq!(
+            scroll_state(&session).0,
+            band + 1,
+            "not the band's first notch"
+        );
+        assert_eq!(
+            cursor_now(&session).scroll_position().map(|p| p.top),
+            Some(room - 1.0)
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_smooth_scroll_to_glides_instead_of_moving_the_offset() {
+        // Within a screen (10 rows) the offset stays and the glide carries the
+        // whole way; farther the window lands a screen short and glides the
+        // last one — the search jump's rule, one copy.
+        let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        let before = wakes(&wake);
+        assert_eq!(session.scroll_to(16.0, true), Some(true));
+        assert!(wakes(&wake) > before, "the glide asked for no frame");
+        assert_eq!(scroll_state(&session), (0, 5.0));
+        assert_eq!(session.scroll_to(0.0, true), Some(true));
+        assert_eq!(scroll_state(&session), (11, 10.0));
+        session.shutdown();
+    }
+
+    #[test]
+    fn scrolling_to_a_place_keeps_the_current_match_on_its_content() {
+        // A saturated scrollback, the window moved by the scroll bar: the move
+        // is the user's, not output, so the match does not slide away from its
+        // row (`Session::user_scroll`).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_scrollback(
+            "stty -echo; seq 1 40; sleep 1; seq 41 43; sleep 5",
+            20,
+            Arc::clone(&wake),
+        );
+        wait_until("scrollback not full", Duration::from_secs(5), || {
+            line_text(&session, 8) == "40"
+        });
+        session.scroll_page(1);
+        session.set_search(&plain("25"));
+        assert_eq!(current_text(&session).as_deref(), Some("25"));
+        let here = cursor_now(&session).scroll_position().expect("a position");
+        assert_eq!(session.scroll_to(here.top - 3.0, false), Some(true));
+        assert_eq!(session.scroll_to(here.top - 1.0, false), Some(true));
+        wait_until("second output missing", Duration::from_secs(5), || {
+            line_text(&session, 8) == "43"
+        });
+        search_now(&session);
+        assert_eq!(
+            current_text(&session).as_deref(),
+            Some("25"),
+            "the scroll bar's move slid the match in the saturated scrollback"
+        );
+        session.shutdown();
     }
 
     #[test]
@@ -22216,6 +22488,57 @@ e\\314\\201.'; sleep 5";
         assert!(frames > 0, "no frame was produced during the race");
         let report = session.search_next(SearchDirection::Older, OPEN, true);
         assert!(report.found, "the pattern was lost in the race: {report:?}");
+        assert!(session.reader_alive(), "the reader thread died in the race");
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "runs with make test-race"]
+    fn race_scroll_to_and_frame() {
+        // The scroll bar's drag is a second holder of the `Term` lock beside
+        // the frame and the reader, and its glide request is the frame's
+        // input: if the lock order is broken the test hangs, if the glide's
+        // generation is broken the last move lands somewhere else.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "stty -echo; while :; do printf 'alpha beta\\n'; sleep 0.01; done",
+            Arc::clone(&wake),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let dragger = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut moves = 0u64;
+                while Instant::now() < deadline {
+                    let top = (moves % 40) as f32 * 0.75;
+                    session.scroll_to(top, moves % 3 == 0);
+                    moves += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                moves
+            })
+        };
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            let glide = session.take_scroll_glide();
+            session.frame(
+                |_| (),
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
+                &mut Clusters::default(),
+                glide,
+                BUDGET,
+            );
+            frames += 1;
+        }
+        assert!(dragger.join().unwrap() > 0, "no move ever happened");
+        assert!(frames > 0, "no frame was produced during the race");
+        // The last move is an instant one to the top: the window is there.
+        assert!(session.scroll_to(0.0, false).is_some());
+        let at = cursor_now(&session).scroll_position().expect("a position");
+        assert_eq!(at.top, 0.0, "the last move did not land: {at:?}");
         assert!(session.reader_alive(), "the reader thread died in the race");
         session.shutdown();
     }

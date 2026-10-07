@@ -782,6 +782,9 @@ define_class!(
                 pane.apply_focus(false);
                 pane.unhover_upload();
                 pane.view().clear_link();
+                // The scroll bar's strip is tracked in the key window only:
+                // no exit would come, and the bar would stay wide.
+                pane.view().release_scrollbar_hover();
             }
         }
 
@@ -1099,13 +1102,14 @@ impl TerminalWindow {
         window.setTabbingIdentifier(ns_string!("bateri.terminal"));
         // Mouse-moved events without a button are **off** by default; an
         // application asking for mouse reporting (1003) could never see the
-        // pointer without them. No `NSTrackingArea` is needed:
-        // `mouseEntered:`/`mouseExited:` are not wanted, the upload buttons'
-        // hand cursor comes from `NSView`'s own cursor rect
-        // (`BateriView::hand_cursor_rects`), and the view is already first
-        // responder — the window-level `mouseMoved:` reaches it. Turning them
-        // on and off by mode would want broadcasting the mode to
-        // `bt-shell-macos`.
+        // pointer without them. They reach the first responder only, which is
+        // all the report, the links and the upload buttons need (their hand
+        // cursor comes from `NSView`'s own cursor rect,
+        // `BateriView::hand_cursor_rects`). The one `NSTrackingArea` is the
+        // scroll bar's strip (`BateriView::track_scrollbar_strip`): it must
+        // see an unfocused pane and the pointer leaving, which this does
+        // not. Turning these on and off by mode would want broadcasting the
+        // mode to `bt-shell-macos`.
         window.setAcceptsMouseMovedEvents(true);
         // The keyboard's path to the PTY starts here. The view (even as the
         // pane's child) is NOT an automatic first responder; without this line

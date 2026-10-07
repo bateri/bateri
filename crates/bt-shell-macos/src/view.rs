@@ -38,16 +38,18 @@ use bt_core::{
     CellHalf, Click, MouseButton, MouseModifiers, ScrollIntent, SearchCover, SelectionPoint,
     Session, Wheel,
 };
-use bt_gpu::{CellMetrics, Origin};
+use bt_gpu::{CellMetrics, Origin, ScrollbarLayout};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
 use objc2::{
-    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+    AllocAnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class,
+    msg_send, sel,
 };
 use objc2_app_kit::{
     NSCursor, NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo,
     NSDraggingSession, NSDraggingSource, NSEvent, NSEventModifierFlags, NSEventPhase, NSMenuItem,
-    NSPasteboard, NSPasteboardTypeFileURL, NSTextInputClient, NSView,
+    NSPasteboard, NSPasteboardTypeFileURL, NSResponder, NSTextInputClient, NSTrackingArea,
+    NSTrackingAreaOptions, NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint,
@@ -546,6 +548,10 @@ pub(crate) struct ViewIvars {
     /// is set up) the origin is zero and the drawing is stuck to the ceiling,
     /// so the two are consistent.
     origin: OnceCell<Origin>,
+    /// The tracking area over the scroll bar's strip
+    /// ([`BateriView::track_scrollbar_strip`]): kept so the next rebuild
+    /// removes it. `None` before the first geometry.
+    strip_area: RefCell<Option<Retained<NSTrackingArea>>>,
 }
 
 define_class!(
@@ -768,6 +774,44 @@ define_class!(
             self.hand_cursor_rects();
         }
 
+        /// AppKit's call to rebuild the tracking areas — the view's size or
+        /// window changed: the scroll bar's strip moves with the right edge.
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {
+            self.track_scrollbar_strip();
+            // SAFETY: `NSView`'s argumentless method returning nothing.
+            let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
+        }
+
+        /// The pointer came into the scroll bar's strip column — the
+        /// tracking area's entry ([`BateriView::track_scrollbar_strip`]); the
+        /// exact region (above the dock, a bar to draw) is asked here.
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, event: &NSEvent) {
+            if self.is_strip_event(event) {
+                let inside = self.scrollbar_region(event.locationInWindow()).is_some();
+                self.set_scrollbar_hover(inside);
+            } else {
+                // SAFETY: `NSResponder`'s `mouseEntered:` takes an `NSEvent`,
+                // returns nothing.
+                let _: () = unsafe { msg_send![super(self), mouseEntered: event] };
+            }
+        }
+
+        /// The pointer left the strip — into the grid, or out of the window
+        /// across its right edge: the bar is let go. A window-level
+        /// `mouseMoved:` would see neither the exit nor an unfocused pane.
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, event: &NSEvent) {
+            if self.is_strip_event(event) {
+                self.set_scrollbar_hover(false);
+            } else {
+                // SAFETY: `NSResponder`'s `mouseExited:` takes an `NSEvent`,
+                // returns nothing.
+                let _: () = unsafe { msg_send![super(self), mouseExited: event] };
+            }
+        }
+
         /// A modifier key went down or up: ⌘ shows or clears the link
         /// under the pointer without the pointer moving
         /// ([`BateriView::link_flags`]). Then `NSResponder`'s default, which
@@ -792,9 +836,17 @@ define_class!(
         /// line is outside the grid and the report path rejects that area. The
         /// ⌘-hovered link ([`BateriView::link_motion`]) likewise: its hit
         /// test also covers the fill band, which the report keeps rejecting.
+        ///
+        /// **The scroll bar's strip comes first** ([`BateriView::scrollbar_motion`]):
+        /// a motion there is the bar's hover and goes no further — the
+        /// strip's tracking area delivers it here too, so a motion handled
+        /// twice must not reach the report twice.
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             self.note_interaction();
+            if self.scrollbar_motion(event) {
+                return;
+            }
             self.upload_hover(event);
             self.link_motion(event);
             self.motion_event(event, None);
@@ -1529,6 +1581,7 @@ impl BateriView {
             cursor_rects: RefCell::new(Vec::new()),
             link: RefCell::new(LinkState::default()),
             origin: OnceCell::new(),
+            strip_area: RefCell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -1576,6 +1629,9 @@ impl BateriView {
             .set(Some((grid.cell, (grid.cols, grid.rows))));
         self.ivars().dock_rows.set(dock_rows);
         self.ivars().dock_cols.set(grid.dock_cols);
+        // The strip's width comes from the cell's scale: a new screen or font
+        // re-sizes the tracking area even when the view's size is the same.
+        self.track_scrollbar_strip();
     }
 
     /// Whether scrolling goes smooth or by line steps - the window gives the
@@ -1680,6 +1736,206 @@ impl BateriView {
         }
     }
 
+    /// The pointer is over the scroll bar's strip, or not
+    /// (`bt_gpu::DisplayLink::set_scrollbar_hover`; a no-op on the same value).
+    fn set_scrollbar_hover(&self, on: bool) {
+        if let Some(pane) = self.pane() {
+            pane.set_scrollbar_hover(on);
+        }
+    }
+
+    /// The thumb is held, or let go (`bt_gpu::DisplayLink::set_scrollbar_drag`).
+    fn set_scrollbar_drag(&self, on: bool) {
+        if let Some(pane) = self.pane() {
+            pane.set_scrollbar_drag(on);
+        }
+    }
+
+    /// The pointer leaves the bar alone: the window resigned key, so the
+    /// tracking area — active in the key window only — will report no exit.
+    pub(crate) fn release_scrollbar_hover(&self) {
+        self.set_scrollbar_hover(false);
+    }
+
+    /// Rebuilds the tracking area over the scroll bar's strip: the column
+    /// the bar owns at the right edge, its width the bar's own conversion
+    /// ([`bt_gpu::scrollbar_strip_px`]), the view's full height — the exact
+    /// region (above the dock, a bar to draw) is the drawn frame's
+    /// ([`Self::scrollbar_region`]), asked on every event, because the dock's
+    /// top moves with its band and no event marks that.
+    ///
+    /// **Why a tracking area**: the window gives its buttonless motion to the
+    /// first responder only and never says the pointer left, so an
+    /// unfocused split pane's bar could not widen and one the pointer left
+    /// across the window's edge would stay wide. Entered, exited and moved,
+    /// in the key window.
+    fn track_scrollbar_strip(&self) {
+        let ivars = self.ivars();
+        // Taken out first: no borrow is held while AppKit runs.
+        let old = ivars.strip_area.borrow_mut().take();
+        if let Some(old) = old {
+            self.removeTrackingArea(&old);
+        }
+        let (Some((metrics, _)), Some(window)) = (ivars.metrics.get(), self.window()) else {
+            return;
+        };
+        let bounds = self.bounds();
+        let width = f64::from(bt_gpu::scrollbar_strip_px(metrics)) / window.backingScaleFactor();
+        let width = width.min(bounds.size.width);
+        if width <= 0.0 {
+            return;
+        }
+        let rect = NSRect::new(
+            NSPoint::new(bounds.size.width - width, 0.0),
+            NSSize::new(width, bounds.size.height),
+        );
+        let options = NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::MouseMoved
+            | NSTrackingAreaOptions::ActiveInKeyWindow;
+        // SAFETY: `owner` is this view, which outlives the area — the area is
+        // removed here before a new one is added and the view owns both; no
+        // user info.
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                rect,
+                options,
+                Some(self),
+                None,
+            )
+        };
+        self.addTrackingArea(&area);
+        ivars.strip_area.replace(Some(area));
+        // A removed area says no exit and a new one no entry: the strip moved
+        // under a resting pointer (a split, a font, a screen), so the hover
+        // is asked again — or an unfocused pane, which gets no window
+        // motion, would keep its bar wide. Outside the key window the area
+        // is inactive and so is the hover.
+        let inside = window.isKeyWindow()
+            && self
+                .scrollbar_region(window.mouseLocationOutsideOfEventStream())
+                .is_some();
+        self.set_scrollbar_hover(inside);
+    }
+
+    /// Whether an entered/exited event is the strip's tracking area's.
+    fn is_strip_event(&self, event: &NSEvent) -> bool {
+        let ours = self.ivars().strip_area.borrow();
+        match (event.trackingArea(), ours.as_ref()) {
+            (Some(area), Some(ours)) => std::ptr::eq(&*area, &**ours),
+            _ => false,
+        }
+    }
+
+    /// Whether this view is the window's first responder — a buttonless
+    /// motion from the window reaches only that one.
+    fn is_first_responder(&self) -> bool {
+        let me: &NSResponder = self;
+        self.window()
+            .and_then(|window| window.firstResponder())
+            .is_some_and(|responder| std::ptr::eq(&*responder, me))
+    }
+
+    /// A window point in the drawn frame's physical pixels, with the scroll
+    /// bar's layout from the same publication ([`bt_gpu::Origin::scrollbar`]):
+    /// the mouse side never lays the bar out a second time.
+    fn scrollbar_at(&self, in_window: NSPoint) -> Option<(ScrollbarLayout, f32, f32)> {
+        let layout = self.ivars().origin.get()?.scrollbar();
+        let scale = self.window()?.backingScaleFactor();
+        let point = self.convertPoint_fromView(in_window, None);
+        Some((layout, (point.x * scale) as f32, (point.y * scale) as f32))
+    }
+
+    /// The scroll bar's region at a window point: the layout and the point's
+    /// y, if the point is in the bar's strip **and** there is a bar to draw
+    /// and grab (history to travel, not the alternate screen, not `"never"`).
+    /// Anywhere else — or with no bar — the point is the grid's as before.
+    fn scrollbar_region(&self, in_window: NSPoint) -> Option<(ScrollbarLayout, f32)> {
+        let (layout, x, y) = self.scrollbar_at(in_window)?;
+        layout.contains(x, y).then_some((layout, y))
+    }
+
+    /// A press in the scroll bar's strip. The left button grabs the thumb:
+    /// on the thumb it holds it where it was pressed; on the track the
+    /// thumb's middle jumps to the pointer at once and the drag goes on from
+    /// there. The bar is held — up, wide, darkest — until the release.
+    /// Right and middle have no gesture on the bar and are swallowed: the
+    /// strip's presses never reach the application or the link menu.
+    fn scrollbar_press(
+        &self,
+        session: &Session,
+        button: MouseButton,
+        layout: ScrollbarLayout,
+        y: f32,
+    ) {
+        self.with_gesture(|g| g.begin_press(button));
+        if button != MouseButton::Left {
+            return;
+        }
+        // The thumb's vertical span is the same at either width. On the
+        // thumb the scroll goes to where the thumb already is: a glide still
+        // in flight stops, so a held thumb does not drift from the pointer.
+        let [_, top, _, bottom] = layout.thumb(0.0);
+        let grab = if (top..bottom).contains(&y) {
+            y - top
+        } else {
+            (bottom - top) / 2.0
+        };
+        session.scroll_to(layout.position_at(y, grab), false);
+        self.with_gesture(|g| g.pressed_scrollbar(grab));
+        self.set_scrollbar_drag(true);
+        self.poke_scrollbar();
+    }
+
+    /// `Drag::Scrollbar`: the thumb's top goes to the pointer less the grab,
+    /// read through the drawn frame's layout — out of the strip too.
+    fn scrollbar_drag(&self, event: &NSEvent, grab: f32) {
+        let Some(session) = self.ivars().session.get() else {
+            return;
+        };
+        let Some((layout, _, y)) = self.scrollbar_at(event.locationInWindow()) else {
+            return;
+        };
+        // The history went away mid-drag (cleared, the alternate screen):
+        // nothing to move until the release.
+        if layout.drawable() {
+            session.scroll_to(layout.position_at(y, grab), false);
+        }
+    }
+
+    /// `Release::Scrollbar`: the thumb is let go. A drag that ended off the
+    /// strip got no exit — the tracking area is quiet while a button is
+    /// down — so the hover is asked again here.
+    fn scrollbar_release(&self, event: &NSEvent) {
+        self.set_scrollbar_drag(false);
+        let inside = self.scrollbar_region(event.locationInWindow()).is_some();
+        self.set_scrollbar_hover(inside);
+    }
+
+    /// A buttonless motion's first stop: the scroll bar's strip. `true` →
+    /// the motion goes no further: it was the bar's hover, or it reached
+    /// this view only through the strip's tracking area — the column over
+    /// the dock of a view that is not first responder, whose report, link
+    /// and buttons are the first responder's to handle, as before.
+    ///
+    /// A buttonless motion is also the evidence that a thumb drag lost its
+    /// release ([`Gesture::lost_scrollbar`]): the bar is let go, or it would
+    /// stay held and dark until the next press.
+    fn scrollbar_motion(&self, event: &NSEvent) -> bool {
+        if self.with_gesture(Gesture::lost_scrollbar) {
+            self.set_scrollbar_drag(false);
+        }
+        let inside = self.scrollbar_region(event.locationInWindow()).is_some();
+        self.set_scrollbar_hover(inside);
+        if inside {
+            // The pointer on the bar is not over the grid's text: a
+            // ⌘-hovered link under the strip clears.
+            self.clear_link();
+            return true;
+        }
+        !self.is_first_responder()
+    }
+
     /// Reports the keyboard's place to the owner pane; silent if the view is
     /// not yet attached to a pane. The owner is from `superview()`:
     /// the pane is this view's direct parent.
@@ -1776,8 +2032,24 @@ impl BateriView {
                 // A ⌘-click on a link: opened if the pointer is still over the
                 // range locked at the press and this is the first click.
                 Release::Link => self.link_release(event),
+                Release::Scrollbar => self.scrollbar_release(event),
                 Release::Done => {}
             }
+            return;
+        }
+        // A thumb still held at a press lost its release: let the bar go
+        // (the ledger's `begin_press` forgets the route on its own, the link
+        // would keep the bar held and dark).
+        if button == MouseButton::Left && self.with_gesture(Gesture::lost_scrollbar) {
+            self.set_scrollbar_drag(false);
+        }
+        // **The scroll bar's strip before everything**: while there is a bar
+        // to draw and grab, a press there is the bar's in every mode — no
+        // report, no selection, no ⌘-link, no context button. A program
+        // asking for the mouse on the primary screen does not get the
+        // strip's presses; the overlay scroller's bargain.
+        if let Some((layout, y)) = self.scrollbar_region(event.locationInWindow()) {
+            self.scrollbar_press(session, button, layout, y);
             return;
         }
         // The upload line's buttons and the load indicator: on the
@@ -1872,6 +2144,8 @@ impl BateriView {
             // A ⌘-press on a remote link moved past the threshold: the file
             // promise drag to Finder. AppKit owns the mouse from here.
             Drag::Link => self.link_drag(event),
+            // The thumb follows the pointer, out of the strip too.
+            Drag::Scrollbar(grab) => self.scrollbar_drag(event, grab),
             Drag::Report => self.motion_event(event, Some(button)),
             Drag::Select => {
                 if let Some((session, cell)) = self.session_cell(event) {

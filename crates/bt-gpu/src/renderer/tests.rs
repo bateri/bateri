@@ -1604,7 +1604,10 @@ fn a_shown_scroll_bar_blends_the_foreground_and_stops_above_the_dock() {
     // ground, the dock's band is the dock's.
     const EDGE: usize = 64;
     let r = renderer();
-    let (frame, [x0, y0, x1, y1], floor) = scroll_bar_frame(EDGE, Some(Look::auto(1.0)));
+    let (frame, [x0, y0, x1, y1], floor) = scroll_bar_frame(
+        EDGE,
+        Some(Look::auto(1.0, 0.0, crate::scrollbar::THUMB_ALPHA)),
+    );
     assert!(
         y1 < floor,
         "the thumb reaches into the dock: {y1} ≥ {floor}"
@@ -1689,7 +1692,10 @@ fn a_hidden_scroll_bar_changes_no_pixel() {
     // frame is byte for byte the one that never had a bar.
     const EDGE: usize = 64;
     let r = renderer();
-    let (hidden, ..) = scroll_bar_frame(EDGE, Some(Look::auto(0.0)));
+    let (hidden, ..) = scroll_bar_frame(
+        EDGE,
+        Some(Look::auto(0.0, 0.0, crate::scrollbar::THUMB_ALPHA)),
+    );
     assert!(hidden.scrollbar().is_none(), "a hidden bar planned a draw");
     let (never, ..) = scroll_bar_frame(EDGE, None);
     assert_eq!(

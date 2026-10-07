@@ -119,6 +119,9 @@ objc2-foundation = { workspace = true, features = [
 # `objc2-foundation` headers; `Cargo.lock` did not move.
 # The scroll bar's "system" form: `NSScroller` (`preferredScrollerStyle` and
 # its change notification). Only a header flag; `Cargo.lock` did not move.
+# The pointer over the scroll bar's strip: `NSTrackingArea` (entered, exited
+# and moved, in an unfocused pane too). Only a header flag over
+# `objc2-foundation` headers already in its set; `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -132,7 +135,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSShadow", "NSTextFieldCell", "NSWindowTab", "block2", "NSDockTile", "NSProgressIndicator",
     "NSCursor", "NSPopover", "NSParagraphStyle", "NSOpenPanel", "NSPanel", "NSSavePanel",
     "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSSecureTextField",
-    "NSScreen", "NSWindowRestoration", "NSScroller",
+    "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

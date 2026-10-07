@@ -1000,7 +1000,7 @@ fn scene_scroll_bar() -> Scene {
     let layout = crate::scrollbar::ScrollbarLayout::new(Some(position), EDGE as f32, floor, cell);
     frame.set_scrollbar(
         layout,
-        crate::scrollbar::Look::auto(0.8),
+        crate::scrollbar::Look::auto(0.8, 0.0, crate::scrollbar::THUMB_ALPHA),
         Theme::BATERI.foreground_linear(),
     );
     assert!(frame.scrollbar().is_some(), "no bar in the scene");

@@ -38,7 +38,8 @@
 //! `bt-core` says where the window stands in the scrollback, this crate where
 //! that lands on the window and when it shows, and the track's width is the
 //! room `bt-shell`'s grid gives up in the always-up form
-//! ([`ScrollbarMode::reserve_px`], the [`DOCK_ROWS`] discipline).
+//! ([`ScrollbarMode::reserve_px`], the [`DOCK_ROWS`] discipline) and the
+//! pointer's region ([`scrollbar_strip_px`], [`ScrollbarLayout::contains`]).
 //! The shaders are WGSL (`shaders/*.wgsl`), embedded with `include_str!`;
 //! there is no shader build step.
 //!
@@ -68,7 +69,7 @@ pub use frame::{DOCK_ROWS, context_cols, context_row_offset, dock_px};
 pub use link::{DisplayLink, Layout, Origin, Pacer, TickTarget, Ticker, Waker};
 pub use metrics::{CellMetrics, FontNotice, family_notice};
 pub use renderer::Renderer;
-pub use scrollbar::{Mode as ScrollbarMode, ScrollbarLayout};
+pub use scrollbar::{Mode as ScrollbarMode, ScrollbarLayout, strip_px as scrollbar_strip_px};
 pub use stats::{MIN_SAMPLES, Samples, Stats};
 pub use surface::Surface;
 
