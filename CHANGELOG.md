@@ -12,6 +12,44 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-07
+
+### Added
+
+- **A scroll bar that shows up when you scroll and then gets out of the
+  way.** A thin bar appears at the terminal's right edge while you scroll —
+  the trackpad or the wheel, ⌘PgUp/⌘PgDn/⌘Home/⌘End, a jump to a search
+  match — and fades out about a second after you stop. Output arriving below
+  never brings it up. It runs from under the title bar to the top of the
+  dock, and it is not drawn in full-screen programs such as vim or less, nor
+  before anything has gone into the history.
+- **Point at the right edge to take hold of it.** With the pointer over the
+  bar it widens into a faint track: drag the thumb, or click the track to
+  jump to that spot. The wide bar marks every command in your history in the
+  colours of the marks beside the commands — success, failure, still
+  running — and pointing at a mark tells you the command, its exit code, how
+  long it ran and when it started; a click on it brings that command into
+  view.
+- **Search matches on the bar.** While a search (⌘F) is open, the bar shows
+  where its matches are across the whole history, the current one brightest.
+- **Jump to latest.** When output arrives below a window you have scrolled
+  up, a **Jump to latest** button at the bottom right says how many new lines
+  came; a click glides you back to the bottom.
+- **`[terminal] scrollbar`** chooses when the bar shows: `"system"` (the
+  default) follows **Show scroll bars** in System Settings ▸ Appearance,
+  `"auto"` shows it while you scroll, `"always"` keeps a wider bar in a track
+  of its own and the text makes room for it, `"never"` hides it. It is also
+  in Settings ▸ Appearance ▸ Scroll bar.
+
+### Changed
+
+- While there is history to scroll, the narrow strip at the terminal's right
+  edge where the bar lives belongs to the bar, even while it is hidden: a
+  selection or a ⌘-click on a link does not start there.
+- Updating straight from 0.4.0 does not carry running programs over to this
+  version: they end, and windows, tabs and history come back as after a
+  quit. Updating from 0.5.0 or 0.6.0 carries them over as before.
+
 ## [0.6.0] - 2026-10-05
 
 ### Added
