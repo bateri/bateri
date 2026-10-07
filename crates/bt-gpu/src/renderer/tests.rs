@@ -3524,7 +3524,8 @@ fn slot_quad_is_the_cell_at_or_above_one() {
             assert_eq!(quad.slot_offset, [0.0, 0.0], "offset, {at}");
             assert_eq!(quad.slot_px, [f32::from(cw), f32::from(ch)], "slot, {at}");
             assert_eq!(quad.overflow(), 0.0, "lift, {at}");
-            let imm = quad.glyph_immediates(CursorBlock::default(), [64.0; 2], quad.overflow());
+            let imm =
+                quad.glyph_immediates(CursorBlock::default(), [64.0; 2], quad.overflow(), 0.0);
             assert_eq!(imm.slot_offset, [0.0, 0.0], "immediate offset, {at}");
             assert_eq!(
                 imm.slot_px,
@@ -3803,5 +3804,349 @@ fn a_lifted_viewport_keeps_the_window_bottom() {
     assert_eq!(
         first, bottom,
         "the bottom row's glyph lost ink at the window's edge"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The content's top edge: the grid and the fill band fade towards the clear
+// colour inside `Frame::edge_px`; the scroll bar and the dock do not.
+// ---------------------------------------------------------------------------
+
+/// The fade's guards draw over a **midtone** clear: fading "towards the clear colour" and
+/// fading "towards black" are then two different pictures, and a ramp that darkened instead
+/// of thinning would show. Over black the two would coincide.
+const EDGE_CLEAR: LinearRgba = MIDTONE;
+
+/// How far a pixel is from `clear`: the sum of the three channels' distances.
+fn distance(seen: (u8, u8, u8), clear: (u8, u8, u8)) -> u32 {
+    u32::from(seen.0.abs_diff(clear.0))
+        + u32::from(seen.1.abs_diff(clear.1))
+        + u32::from(seen.2.abs_diff(clear.2))
+}
+
+/// The fade's shared claims over an `edge`-square texture, `on` drawn with a fade of `zone`
+/// pixels and `off` without, `clear` the clear colour's bytes as `off` painted them.
+///
+/// - **Below the zone the frame is untouched**, byte for byte: the ramp's factor is exactly
+///   `1.0` there, the contract that keeps a frame without a fade today's picture.
+/// - **Inside it every channel only moves towards the clear colour**: one layer blending
+///   towards the clear with a smaller alpha lands between the clear and the unfaded value.
+///   A pixel `off` left clear therefore stays clear — the fade paints no ground of its own.
+/// - **Each subject fades in order**: at its column the pixels at the zone's top and at its
+///   quarter, half and three-quarter rows are ever farther from the clear colour, and the
+///   last is still nearer than the unfaded pixel. Direction and order, not bytes: a
+///   fractional alpha is not byte-stable across GPUs, and the subjects are uniform down
+///   their column in `off` so the order is the ramp's alone.
+fn assert_fades(
+    on: &[u8],
+    off: &[u8],
+    edge: usize,
+    zone: usize,
+    clear: (u8, u8, u8),
+    subjects: &[(&str, usize)],
+) {
+    for y in zone..edge {
+        for x in 0..edge {
+            assert_eq!(
+                pixel_at(on, edge, x, y),
+                pixel_at(off, edge, x, y),
+                "({x}, {y}) is below the fade and changed"
+            );
+        }
+    }
+    let towards =
+        |seen: u8, unfaded: u8, clear: u8| seen.abs_diff(clear) <= unfaded.abs_diff(clear);
+    for y in 0..zone {
+        for x in 0..edge {
+            let (seen, unfaded) = (pixel_at(on, edge, x, y), pixel_at(off, edge, x, y));
+            assert!(
+                towards(seen.0, unfaded.0, clear.0)
+                    && towards(seen.1, unfaded.1, clear.1)
+                    && towards(seen.2, unfaded.2, clear.2),
+                "({x}, {y}) moved away from the clear colour: {seen:02x?}, unfaded {unfaded:02x?}"
+            );
+        }
+    }
+    let rows = [0, zone / 4, zone / 2, zone * 3 / 4];
+    for &(name, x) in subjects {
+        let unfaded = pixel_at(off, edge, x, rows[0]);
+        assert!(
+            distance(unfaded, clear) > 0,
+            "{name}: nothing drawn at ({x}, 0)"
+        );
+        assert!(
+            rows.iter().all(|&y| pixel_at(off, edge, x, y) == unfaded),
+            "{name}: not uniform down its column, the order would not be the ramp's"
+        );
+        let seen: Vec<u32> = rows
+            .iter()
+            .map(|&y| distance(pixel_at(on, edge, x, y), clear))
+            .collect();
+        assert!(
+            seen.windows(2).all(|pair| pair[0] < pair[1]),
+            "{name}: the fade is not ordered from the top down: {seen:?}"
+        );
+        assert!(
+            seen[3] < distance(unfaded, clear),
+            "{name}: the three-quarter row did not fade: {seen:?} / {}",
+            distance(unfaded, clear)
+        );
+    }
+}
+
+#[test]
+fn the_top_edge_fades_every_grid_list_towards_the_clear_colour() {
+    // The five fragments of the grid, each in its own columns of the top row, the fade one
+    // row tall: a ground, a selection run, a search match, a solid caret, a mask glyph (the
+    // procedural full block: full coverage, no font in the claim) and a colour glyph. The
+    // selection's and the search's draws build their own immediates and the glyphs theirs,
+    // so each of the three set-ups is witnessed by a pixel. A ground on the second row stays
+    // put.
+    const EDGE: usize = 192;
+    let r = renderer();
+    let (cw, ch) = fitting_cell_px(&r, EDGE, 16);
+    let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+    let green = LinearRgba::from_srgb(0x00, 0xff, 0x00);
+    let mut frame = Frame::default();
+    // A square caret: the fade's claim, not the corner's.
+    frame.clear(
+        grid(cw, ch),
+        CaretStyle {
+            radius_ratio: 0.0,
+            glow: 0.0,
+            ..CaretStyle::default()
+        },
+    );
+    frame.push(bg_cell(0, 0, WHITE));
+    frame.push(bg_cell(0, 1, WHITE));
+    frame.push_selection(
+        &[SelectionRun {
+            row: 0,
+            first: 2,
+            last: 4,
+        }],
+        red,
+    );
+    frame.push_search(&[search_run(0, 6, 8, false, false)], green, green);
+    push_settled(&mut frame, cursor_at(10, BACKGROUND), WHITE);
+    frame.push(glyph_cell(12, '█', None));
+    frame.push(Cell {
+        wide: true,
+        ..glyph_cell(14, '🎉', None)
+    });
+    let off = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    frame.set_edge(f32::from(ch));
+    let on = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+
+    let (cw, ch) = (usize::from(cw), usize::from(ch));
+    let centre = |col: usize| col * cw + cw / 2;
+    // Column 1 is never drawn: its pixel is the clear colour as the GPU encoded it.
+    let clear = pixel_at(&off, EDGE, centre(1), 0);
+    assert_fades(
+        &on,
+        &off,
+        EDGE,
+        ch,
+        clear,
+        &[
+            ("ground", centre(0)),
+            ("selection", centre(3)),
+            ("search", centre(7)),
+            ("caret", centre(10)),
+            ("mask glyph", centre(12)),
+        ],
+    );
+    // The emoji's ink is not uniform down its column, so its claim is the sum: the fade
+    // took it nearer the clear colour. Without a colour font there is no subject (the
+    // `🎉` precedent); the per-channel claim above still held for whatever was drawn.
+    if r.plane_textures().1 {
+        let ink = |pixels: &[u8]| -> u32 {
+            (0..ch)
+                .flat_map(|y| (14 * cw..16 * cw).map(move |x| (x, y)))
+                .map(|(x, y)| distance(pixel_at(pixels, EDGE, x, y), clear))
+                .sum()
+        };
+        assert!(ink(&off) > 0, "the colour glyph drew nothing");
+        assert!(
+            ink(&on) < ink(&off),
+            "the colour glyph did not fade: {} / {}",
+            ink(&on),
+            ink(&off)
+        );
+    }
+}
+
+#[test]
+fn the_top_edge_fades_the_fill_band_too() {
+    // The band's lists in the fade (ground, search, glyph — the band has no caret and no
+    // selection), the band's row being the window's top one and the grid's one row lower,
+    // below the fade: a decoration only the grid's draws carried would be missing here.
+    const EDGE: usize = 128;
+    let r = renderer();
+    let (cw, ch) = fitting_cell_px(&r, EDGE, 8);
+    let green = LinearRgba::from_srgb(0x00, 0xff, 0x00);
+    let mut frame = Frame::default();
+    frame.clear(grid(cw, ch), CaretStyle::default());
+    frame.push(bg_cell(0, 0, WHITE));
+    frame.set_fill_rows(1);
+    frame.push_fill(bg_cell(0, 0, WHITE));
+    frame.push_search(&[], green, green);
+    frame.push_fill_search(&[search_run(0, 2, 4, false, false)]);
+    frame.push_fill(glyph_cell(6, '█', None));
+    frame.set_origin_rows(1.0);
+    let off = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    frame.set_edge(f32::from(ch));
+    let on = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+
+    let (cw, ch) = (usize::from(cw), usize::from(ch));
+    let centre = |col: usize| col * cw + cw / 2;
+    let clear = pixel_at(&off, EDGE, centre(1), 0);
+    assert_fades(
+        &on,
+        &off,
+        EDGE,
+        ch,
+        clear,
+        &[
+            ("band ground", centre(0)),
+            ("band search", centre(3)),
+            ("band glyph", centre(6)),
+        ],
+    );
+}
+
+#[test]
+fn the_scroll_bar_and_the_dock_do_not_fade() {
+    // The fade covers the whole window and the frame carries the wide bar — track,
+    // hairline, thumb, a search mark and a block mark, all at the top — and a dock with a
+    // glyph: none of it moves a byte. One grid ground in the corner does fade, so the fade
+    // did reach this frame. The bar's draws and the dock's cover the shared immediates
+    // (track, thumb, dock ground), the selection's own (the marks) and the glyphs' own.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+    let cell = grid(cw, ch);
+    let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+    let mut frame = Frame::default();
+    frame.clear(cell, CaretStyle::default());
+    frame.push(bg_cell(0, 0, WHITE));
+    frame.set_dock_rows(1);
+    frame.push_dock(glyph_cell(0, 'M', None));
+    frame.open_dock(red, red, red);
+    frame.set_dock_band(EDGE as f32, 0.0);
+    let floor = frame.band_top_px(EDGE as f32);
+    let position = bt_core::ScrollPosition {
+        room: 100,
+        top: 0.0,
+        visible: 2,
+    };
+    let layout = crate::scrollbar::ScrollbarLayout::new(Some(position), EDGE as f32, floor, cell);
+    let marks = [TrackMark {
+        position: 0.0,
+        current: true,
+    }];
+    frame.set_scrollbar(
+        layout,
+        Look::ALWAYS,
+        WHITE,
+        &marks,
+        MARK_COLORS,
+        &[block(0.0, 0)],
+        BLOCK_COLORS,
+    );
+    assert!(frame.scrollbar().is_some(), "the bar is not shown");
+    let off = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    frame.set_edge(EDGE as f32);
+    let on = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+
+    let (cw, ch) = (usize::from(cw), usize::from(ch));
+    let ground = |x: usize, y: usize| x < cw && y < ch;
+    assert_ne!(
+        pixel_at(&on, EDGE, 0, 0),
+        pixel_at(&off, EDGE, 0, 0),
+        "the grid's ground did not fade: the fade never reached the frame"
+    );
+    for y in 0..EDGE {
+        for x in (0..EDGE).filter(|&x| !ground(x, y)) {
+            assert_eq!(
+                pixel_at(&on, EDGE, x, y),
+                pixel_at(&off, EDGE, x, y),
+                "({x}, {y}) faded: the bar and the dock are outside the content's edge"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_dock_climbing_to_the_top_does_not_fade_without_a_bar() {
+    // A window shorter than the dock: the dock covers it from the top, its glyph inside the
+    // fade, and there is no bar — the reset before the dock must not ride on the bar's draws.
+    const EDGE: usize = 32;
+    let r = renderer();
+    let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+    let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+    let mut frame = Frame::default();
+    frame.clear(grid(cw, ch), CaretStyle::default());
+    frame.set_dock_rows(2);
+    frame.push_dock(glyph_cell(0, 'M', None));
+    frame.open_dock(red, red, red);
+    assert!(
+        frame.dock_layout_px() >= EDGE as f32,
+        "the dock does not reach the window's top"
+    );
+    let off = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    // White ink on the red ground: only the glyph has a green channel.
+    assert!(
+        (0..EDGE).any(|y| (0..EDGE).any(|x| pixel_at(&off, EDGE, x, y).1 > 0x80)),
+        "the dock's glyph was not drawn"
+    );
+    frame.set_edge(EDGE as f32);
+    let on = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    let diff = off.iter().zip(&on).position(|(a, b)| a != b);
+    assert!(
+        diff.is_none(),
+        "the dock faded, first difference at byte {diff:?}"
+    );
+}
+
+#[test]
+fn a_frame_without_the_top_edge_draws_todays_picture() {
+    // **Rollback lane**, the fill band's pattern: with the fade back at zero the frame is
+    // **bit for bit** the one never drawn with it, and `clear` puts it back at zero — a
+    // content frame that does not say draws no fade. Only the GPU can say "bit for bit": the
+    // ramp's factor must be exactly `1.0`, not nearly.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+    let mut frame = Frame::default();
+    let today = |frame: &mut Frame| {
+        frame.clear(grid(cw, ch), CaretStyle::default());
+        frame.push(bg_cell(0, 0, WHITE));
+        frame.push(glyph_cell(1, '█', None));
+    };
+    today(&mut frame);
+    let before = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+
+    // With the fade on it **must** diverge, or the equalities below say nothing.
+    frame.set_edge(f32::from(ch));
+    let faded = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    assert!(before != faded, "the fade was never drawn");
+
+    frame.set_edge(0.0);
+    let back = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    let diff = before.iter().zip(&back).position(|(a, b)| a != b);
+    assert!(
+        diff.is_none(),
+        "the frame diverged from today's picture once the fade went back to zero, first difference at byte {diff:?}"
+    );
+
+    frame.set_edge(f32::from(ch));
+    today(&mut frame);
+    assert_eq!(frame.edge_px(), 0.0, "`clear` kept the fade");
+    let cleared = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    let diff = before.iter().zip(&cleared).position(|(a, b)| a != b);
+    assert!(
+        diff.is_none(),
+        "the frame diverged from today's picture after `clear`, first difference at byte {diff:?}"
     );
 }

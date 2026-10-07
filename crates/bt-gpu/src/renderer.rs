@@ -84,24 +84,30 @@ pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8U
 /// Field-for-field twin of `cell_bg.wgsl` → `Immediates`.
 ///
 /// In WGSL `vec4` aligns to 16, `vec2` to 8, and a struct's size rounds up to
-/// its largest alignment: core@0, shape@16, viewport_px@32, size 48. The
-/// trailing pad is WGSL's invisible 8 bytes — without it Rust would send 40
-/// bytes and the layout would silently come up short. Putting the `vec4`s
-/// first is deliberate: with `viewport_px` first the padding would land in
-/// the middle. The `selection` pipeline reads the same block with another
-/// meaning: `core` is the highlight's colour, `shape[0]` its radius.
+/// its largest alignment: core@0, shape@16, viewport_px@32, edge_px@40, size
+/// 48. The trailing pad is WGSL's invisible 4 bytes — without it Rust would
+/// send 44 bytes and the layout would silently come up short. Putting the
+/// `vec4`s first is deliberate: with `viewport_px` first the padding would
+/// land in the middle. The `selection` pipeline reads the same block with
+/// another meaning: `core` is the highlight's colour, `shape[0]` its radius.
+///
+/// `edge_px` is the content's top fade ([`Op::Edge`]). **No `Default`**: the
+/// one block the encode reuses across draws is built field by field, so a
+/// field added here is a compile error there, not a silent zero.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Immediates {
     core: [f32; 4],
     shape: [f32; 4],
     viewport_px: [f32; 2],
-    pad: [f32; 2],
+    edge_px: f32,
+    pad: f32,
 }
 
 const _: () = assert!(size_of::<Immediates>() == 48);
 const _: () = assert!(std::mem::offset_of!(Immediates, shape) == 16);
 const _: () = assert!(std::mem::offset_of!(Immediates, viewport_px) == 32);
+const _: () = assert!(std::mem::offset_of!(Immediates, edge_px) == 40);
 // Chosen **per struct** and by size: 48 ≤ 128, so this block stays
 // in immediates; no uniform-buffer fallback was needed.
 const _: () = assert!(size_of::<Immediates>() as u32 <= IMMEDIATE_BUDGET);
@@ -113,8 +119,9 @@ const _: () = assert!(size_of::<Immediates>() as u32 <= IMMEDIATE_BUDGET);
 /// `CursorBlock` is embedded **as is** (rect@0, rgba@16, its own asserts in
 /// `frame.rs`), so there is no second copy of the cursor's layout. Then the
 /// `vec2`s: viewport_px@32, slot_px@40, uv_size@48, slot_offset@56, then the
-/// `f32` lift@64; WGSL rounds 68 up to the struct's 16-byte alignment, and the
-/// trailing 12 bytes are the explicit `pad`.
+/// `f32`s lift@64 and edge_px@68 (the content's top fade, [`Op::Edge`]); WGSL
+/// rounds 72 up to the struct's 16-byte alignment, and the trailing 8 bytes
+/// are the explicit `pad`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct GlyphImmediates {
@@ -124,7 +131,8 @@ struct GlyphImmediates {
     uv_size: [f32; 2],
     slot_offset: [f32; 2],
     lift: f32,
-    pad: [f32; 3],
+    edge_px: f32,
+    pad: [f32; 2],
 }
 
 const _: () = assert!(size_of::<GlyphImmediates>() == 80);
@@ -133,6 +141,7 @@ const _: () = assert!(std::mem::offset_of!(GlyphImmediates, slot_px) == 40);
 const _: () = assert!(std::mem::offset_of!(GlyphImmediates, uv_size) == 48);
 const _: () = assert!(std::mem::offset_of!(GlyphImmediates, slot_offset) == 56);
 const _: () = assert!(std::mem::offset_of!(GlyphImmediates, lift) == 64);
+const _: () = assert!(std::mem::offset_of!(GlyphImmediates, edge_px) == 68);
 // 80 ≤ 128: this block stays in immediates too.
 const _: () = assert!(size_of::<GlyphImmediates>() as u32 <= IMMEDIATE_BUDGET);
 
@@ -269,8 +278,8 @@ unsafe impl GpuBytes for FxInstance {}
 // explicit field (`pad`), size 48 is asserted.
 unsafe impl GpuBytes for Immediates {}
 // SAFETY: `repr(C)`: a `CursorBlock` (`repr(C)`, two `[f32; 4]`, size 32
-// asserted in `frame.rs`) followed by `f32` pairs; WGSL's trailing padding is
-// the explicit `pad`, size 64 is asserted.
+// asserted in `frame.rs`) followed by `f32` fields; WGSL's trailing padding is
+// the explicit `pad`, size 80 is asserted.
 unsafe impl GpuBytes for GlyphImmediates {}
 // SAFETY: `repr(C)`, `f32` fields only; WGSL's trailing padding is the
 // explicit `pad`, size 48 is asserted.
@@ -298,6 +307,14 @@ enum Op {
     /// otherwise cut the ink of its bottom row. The list's `viewport_px`
     /// immediate carries the same taller height (the NDC scale's other half).
     Lifted { y: f32, lift: f32 },
+    /// The content's top fade for the draws that follow, pixels from the
+    /// window's top (`edge.wgsl`): every `cell_bg`, `caret`, `selection`,
+    /// `cell` and `emoji` draw after it carries the value in its immediates
+    /// until the next one. A **state**, like the viewport, because the
+    /// fade's subject is a span of the plan — the grid and the fill band —
+    /// not a pipeline: the scroll bar and the dock run the same pipelines
+    /// without it ([`Renderer::plan`]).
+    Edge(f32),
     /// Scissor: (x, y, width, height), inside the texture.
     Scissor([u32; 4]),
     /// The `cell_bg` pipeline over a range of the instance buffer.
@@ -373,12 +390,14 @@ impl SlotQuad {
         self.slot_offset[1]
     }
 
-    /// The `cell.wgsl` immediates of one glyph draw.
+    /// The `cell.wgsl` immediates of one glyph draw; `edge_px` is the
+    /// plan's fade state at the draw ([`Op::Edge`]).
     fn glyph_immediates(
         self,
         cursor: CursorBlock,
         viewport_px: [f32; 2],
         lift: f32,
+        edge_px: f32,
     ) -> GlyphImmediates {
         GlyphImmediates {
             cursor,
@@ -387,7 +406,8 @@ impl SlotQuad {
             uv_size: self.uv_size,
             slot_offset: self.slot_offset,
             lift,
-            pad: [0.0; 3],
+            edge_px,
+            pad: [0.0; 2],
         }
     }
 
@@ -893,7 +913,15 @@ impl Gpu {
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cell_bg.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/cell_bg.wgsl").into()),
+            // The top edge's ramp is appended: one copy of the curve for both
+            // modules, and naga's line numbers stay the host file's own.
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../shaders/cell_bg.wgsl"),
+                    include_str!("../shaders/edge.wgsl")
+                )
+                .into(),
+            ),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cell_bg"),
@@ -929,7 +957,13 @@ impl Gpu {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cell.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/cell.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../shaders/cell.wgsl"),
+                    include_str!("../shaders/edge.wgsl")
+                )
+                .into(),
+            ),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cell"),
@@ -1833,6 +1867,16 @@ impl Renderer {
     /// at the surface's origin. The dock's opaque ground is still drawn last
     /// and covers whatever spills into it.
     ///
+    /// **Top edge** — the grid's and the band's draws fade towards the clear
+    /// colour inside [`Frame::edge_px`] (`edge.wgsl`), set once before the
+    /// grid's first list ([`Op::Edge`]) and reset to zero after the band's
+    /// last, **unconditionally**: the scroll bar belongs to the window's edge
+    /// and the dock is its own panel, so neither fades — the dock climbing to
+    /// the top of a short window, the thumb at the top of its travel. The
+    /// state reaches all three immediates set-ups (the shared block, the
+    /// selection's own, the glyphs'). At zero the ramp's factor is exactly
+    /// `1.0` and the frame is bit for bit the one without the fade.
+    ///
     /// **Scroll bar** — between the band and the dock, in a viewport at the
     /// window's origin: the thumb belongs to the window's edge and must not
     /// slide with the grid's offset or the band's. After every grid and band
@@ -1911,6 +1955,7 @@ impl Renderer {
         let fill_origin = frame.fill_origin_px();
         let free = f32::INFINITY;
         plan.ops.push(Op::Viewport(origin));
+        plan.ops.push(Op::Edge(frame.edge_px()));
         self.glyph_draws(
             plan,
             atlas,
@@ -1968,6 +2013,10 @@ impl Renderer {
                 free,
             )?;
         }
+        // The content ends here: the bar and the dock do not fade. Pushed
+        // unconditionally, so the dock's exemption does not hang on the bar
+        // being shown.
+        plan.ops.push(Op::Edge(0.0));
         // The scroll bar: window space, over the grid and the band and under
         // the dock — the dock's opaque ground, drawn next, covers a track
         // that has not caught up with a growing band.
@@ -2160,9 +2209,15 @@ impl Renderer {
                 }),
                 ..wgpu::RenderPassDescriptor::default()
             });
+            // Every field spelled out (no `..Default`): the block lives across
+            // draws and carries the fade state, so a field added to it must be
+            // decided here.
             let mut imm = Immediates {
+                core: [0.0; 4],
+                shape: [0.0; 4],
                 viewport_px,
-                ..Immediates::default()
+                edge_px: 0.0,
+                pad: 0.0,
             };
             let cell_px = frame.cell_px();
             for op in &plan.ops {
@@ -2170,6 +2225,7 @@ impl Renderer {
                     Op::Viewport(y) => {
                         pass.set_viewport(0.0, *y, viewport_px[0], viewport_px[1], 0.0, 1.0);
                     }
+                    Op::Edge(px) => imm.edge_px = *px,
                     Op::Lifted { y, lift } => {
                         let h = viewport_px[1] + lift;
                         pass.set_viewport(0.0, y - lift, viewport_px[0], h, 0.0, 1.0);
@@ -2207,7 +2263,8 @@ impl Renderer {
                             core: *color,
                             shape: [*radius, 0.0, 0.0, 0.0],
                             viewport_px,
-                            pad: [0.0; 2],
+                            edge_px: imm.edge_px,
+                            pad: 0.0,
                         };
                         pass.set_pipeline(&self.gpu.selection);
                         pass.set_vertex_buffer(0, buffer.slice(..));
@@ -2232,7 +2289,7 @@ impl Renderer {
                         // A lifted list's viewport is taller by the lift
                         // (`Op::Lifted`); the NDC scale must match it.
                         let tall = [viewport_px[0], viewport_px[1] + lift];
-                        let glyph_imm = quad.glyph_immediates(*cursor, tall, *lift);
+                        let glyph_imm = quad.glyph_immediates(*cursor, tall, *lift, imm.edge_px);
                         pass.set_pipeline(pipeline);
                         pass.set_bind_group(0, &texture.bind, &[]);
                         pass.set_vertex_buffer(0, buffer.slice(..));

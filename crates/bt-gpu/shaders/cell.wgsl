@@ -39,10 +39,10 @@ struct GlyphInstance {
 //
 // **Order follows alignment**: the two `vec4`s first (the `CursorBlock`
 // struct, rect@0 rgba@16), then the `vec2`s: viewport_px@32, slot_px@40,
-// uv_size@48, slot_offset@56, then the `f32` lift@64. 68 bytes round up to the
-// struct's 16-byte alignment: size 80. The Rust twin is
+// uv_size@48, slot_offset@56, then the `f32`s lift@64 and edge_px@68. 72 bytes
+// round up to the struct's 16-byte alignment: size 80. The Rust twin is
 // `crate::renderer::GlyphImmediates`; it embeds `CursorBlock` as is and
-// spells the trailing 12 bytes as an explicit `pad`, pinned by
+// spells the trailing 8 bytes as an explicit `pad`, pinned by
 // `offset_of`/`size_of` asserts.
 //
 //   slot_px     = the atlas's slot size (its slot metric), pixels.
@@ -52,6 +52,9 @@ struct GlyphInstance {
 //                 origin so the overflow above the top row is not clipped
 //                 (`crate::renderer::Renderer::plan`); added back here, so a
 //                 glyph lands on the same window pixel. Zero at `>= 1`.
+//   edge_px     = the content's top fade, pixels from the window's top
+//                 (`edge.wgsl`, appended to this file); zero for the dock's
+//                 glyphs, which are outside the content.
 //
 //   cursor_rect = the caret block's pixel rectangle (x0, y0, x1, y1), top-left
 //                 origin, WINDOW space. Min/max, so the fragment test is two
@@ -73,6 +76,7 @@ struct Immediates {
     uv_size: vec2<f32>,
     slot_offset: vec2<f32>,
     lift: f32,
+    edge_px: f32,
 }
 
 var<immediate> imm: Immediates;
@@ -156,8 +160,9 @@ fn cell_fragment(in: Out) -> @location(0) vec4<f32> {
     // silently thinned. The block's own transparency is drawn by `cell_bg`.
     // WGSL has no ternary: `select(if_false, if_true, cond)`.
     let rgb = mix(in.rgba.rgb, imm.cursor_rgba.rgb, select(0.0, imm.cursor_rgba.a, inside));
-    // Straight alpha: the blend is src_alpha / one_minus_src_alpha.
-    return vec4<f32>(rgb, in.rgba.a * coverage);
+    // Straight alpha: the blend is src_alpha / one_minus_src_alpha. The
+    // content's top fade thins the coverage, not the colour.
+    return vec4<f32>(rgb, in.rgba.a * coverage * edge_alpha(in.position.y, imm.edge_px));
 }
 
 // **Emoji: the colour plane's sibling fragment.** It shares `cell_vertex`
@@ -196,5 +201,9 @@ fn emoji_fragment(in: Out) -> @location(0) vec4<f32> {
     // the palette, so "what colour is the emoji under the caret" has no
     // answer from the theme. Result: the block caret sits under the emoji's
     // ink and shows as a ring around it. Accepted behaviour.
-    return textureSample(atlas, atlas_sampler, in.uv);
+    //
+    // The content's top fade multiplies the texture's own alpha, as it does
+    // the mask's coverage.
+    let ink = textureSample(atlas, atlas_sampler, in.uv);
+    return vec4<f32>(ink.rgb, ink.a * edge_alpha(in.position.y, imm.edge_px));
 }

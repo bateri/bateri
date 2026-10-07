@@ -31,10 +31,10 @@ struct Instance {
 // **The order follows alignment**: `vec4` aligns to 16, `vec2` to 8. With
 // `viewport_px` first, `core` would be pushed to 16 and 8 invisible padding
 // bytes would sit in between, which the Rust side would have to spell out.
-// `vec4`s first, `vec2` last: core@0, shape@16, viewport_px@32, size 48 (the
-// struct aligns to 16, so 40 rounds up to 48). The Rust twin is
-// `crate::renderer::Immediates`; its fields and trailing pad are pinned to
-// these numbers by `offset_of`/`size_of` asserts.
+// `vec4`s first, then the `vec2`, then the `f32`: core@0, shape@16,
+// viewport_px@32, edge_px@40, size 48 (the struct aligns to 16, so 44 rounds
+// up to 48). The Rust twin is `crate::renderer::Immediates`; its fields and
+// trailing pad are pinned to these numbers by `offset_of`/`size_of` asserts.
 //
 //   core  = the caret's PAINTED rectangle (x0, y0, x1, y1), WINDOW space.
 //           The fragment's `@builtin(position)` is the coordinate AFTER the
@@ -44,13 +44,17 @@ struct Instance {
 //           with a content offset.
 //   shape = (corner radius, stroke width, glow margin, glow peak alpha)
 //   viewport_px = the target texture's size in pixels (the NDC scale's divisor).
+//   edge_px     = the content's top fade, pixels from the window's top
+//                 (`edge.wgsl`, appended to this file); zero for the draws
+//                 outside the content — the scroll bar, the dock.
 //
-// `cell_bg` reads only `viewport_px`; the whole block is still written on every
-// draw because both pipelines share one layout.
+// `cell_bg` reads only `viewport_px` and `edge_px`; the whole block is still
+// written on every draw because the three pipelines share one layout.
 struct Immediates {
     core: vec4<f32>,
     shape: vec4<f32>,
     viewport_px: vec2<f32>,
+    edge_px: f32,
 }
 
 var<immediate> imm: Immediates;
@@ -77,7 +81,7 @@ fn cell_bg_vertex(@builtin(vertex_index) vid: u32, it: Instance) -> Out {
 
 @fragment
 fn cell_bg_fragment(in: Out) -> @location(0) vec4<f32> {
-    return in.rgba;
+    return vec4<f32>(in.rgba.rgb, in.rgba.a * edge_alpha(in.position.y, imm.edge_px));
 }
 
 // ---------------------------------------------------------------------------
@@ -154,8 +158,10 @@ fn caret_fragment(in: Out) -> @location(0) vec4<f32> {
     }
 
     // The caret's own alpha (motion × blink) multiplies EVERYTHING: the glow
-    // fades with blink and no second path is written for it.
-    return vec4<f32>(in.rgba.rgb, in.rgba.a * max(body, halo));
+    // fades with blink and no second path is written for it. So does the
+    // content's top fade, the same way.
+    let edge = edge_alpha(in.position.y, imm.edge_px);
+    return vec4<f32>(in.rgba.rgb, in.rgba.a * max(body, halo) * edge);
 }
 
 // ---------------------------------------------------------------------------
@@ -241,5 +247,5 @@ fn selection_fragment(in: SelectionOut) -> @location(0) vec4<f32> {
         let d = rounded_box_sdf(p, in.half_size, code * radius);
         coverage = 1.0 - smoothstep(-0.5, 0.5, d);
     }
-    return vec4<f32>(color.rgb, color.a * coverage);
+    return vec4<f32>(color.rgb, color.a * coverage * edge_alpha(in.position.y, imm.edge_px));
 }

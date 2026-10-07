@@ -1053,6 +1053,21 @@ pub(crate) struct Frame {
     /// fraction can change only in a content frame — while a glide is in
     /// flight the link falls onto the content path.
     frac_px: f32,
+    /// The height of the fade at the content's top edge, pixels from the
+    /// window's top: the grid's and the fill band's fragments fade towards
+    /// the clear colour inside it (`edge.wgsl` → `edge_alpha`). Zero → no
+    /// fade, and the frame is bit for bit the one without it — the ramp's
+    /// factor is then exactly `1.0`.
+    ///
+    /// Read by [`crate::Renderer`]'s plan, which hands it to the grid's and
+    /// the band's draws and resets it to zero before the scroll bar and the
+    /// dock: those two belong to the window's edge and the dock's panel, not
+    /// to the content running into the top.
+    ///
+    /// [`Frame::clear`] zeroes it, under `origin_px`'s contract: a content
+    /// frame that does not say draws no fade. Written only by the tests
+    /// ([`Frame::set_edge`]) until the frame path computes it.
+    edge_px: f32,
     /// The caret's pixel rectangle and the colour of the text under the block;
     /// the `cell` pipeline's uniform.
     ///
@@ -1298,6 +1313,8 @@ impl Frame {
         // The fraction is under the same contract: a frame that does not say
         // draws on a whole row.
         self.frac_px = 0.0;
+        // And the top edge's fade: a frame that does not say draws none.
+        self.edge_px = 0.0;
         self.scrollbar = None;
         self.scrollbar_track = None;
         self.scrollbar_marks.iter_mut().for_each(Vec::clear);
@@ -1367,6 +1384,21 @@ impl Frame {
     /// is bit for bit the same as today's.
     pub(crate) fn origin_px(&self) -> f32 {
         self.origin_px + self.frac_px - self.band_excess().unwrap_or(0.0)
+    }
+
+    /// The height of the content's top fade, pixels from the window's top;
+    /// zero → none. Which surfaces fade is the plan's decision
+    /// ([`crate::Renderer`]).
+    pub(crate) fn edge_px(&self) -> f32 {
+        self.edge_px
+    }
+
+    /// Sets the content's top fade for this frame, pixels from the window's
+    /// top. Test only for now: nothing on the frame path computes the height
+    /// yet, and a production writer with no caller would be dead code.
+    #[cfg(test)]
+    pub(crate) fn set_edge(&mut self, px: f32) {
+        self.edge_px = px;
     }
 
     /// The band's excess as both consumers read it ([`Frame::dock_band`]):
