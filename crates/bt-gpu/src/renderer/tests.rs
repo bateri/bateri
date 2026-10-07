@@ -1,6 +1,6 @@
 use bt_core::{
-    Block, BlockHandle, CaretShape, Cell, Cursor, SearchRun, SelectionRun, Theme, TrackBlock,
-    TrackMark, UnderlineStyle,
+    Block, BlockHandle, CaretShape, Cell, ContentEdge, Cursor, SearchRun, SelectionRun, Theme,
+    TrackBlock, TrackMark, UnderlineStyle,
 };
 
 use super::*;
@@ -3894,6 +3894,15 @@ fn assert_fades(
     }
 }
 
+/// Sets a fade of `px` **in place**: the edge lowers the grid by its height (the fourth term
+/// of `Frame::origin_px`), and the offset `rows` takes it back up, so the frame differs from
+/// the unfaded one by the ramp alone — the claim of the guards below. `rows` is the offset
+/// the frame had without the fade.
+fn fade_in_place(frame: &mut Frame, px: f32, rows: f32) {
+    frame.set_edge(px);
+    frame.set_origin_rows(rows - px / frame.cell_px()[1]);
+}
+
 #[test]
 fn the_top_edge_fades_every_grid_list_towards_the_clear_colour() {
     // The five fragments of the grid, each in its own columns of the top row, the fade one
@@ -3935,7 +3944,7 @@ fn the_top_edge_fades_every_grid_list_towards_the_clear_colour() {
         ..glyph_cell(14, '🎉', None)
     });
     let off = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
-    frame.set_edge(f32::from(ch));
+    fade_in_place(&mut frame, f32::from(ch), 0.0);
     let on = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
 
     let (cw, ch) = (usize::from(cw), usize::from(ch));
@@ -3995,7 +4004,7 @@ fn the_top_edge_fades_the_fill_band_too() {
     frame.push_fill(glyph_cell(6, '█', None));
     frame.set_origin_rows(1.0);
     let off = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
-    frame.set_edge(f32::from(ch));
+    fade_in_place(&mut frame, f32::from(ch), 1.0);
     let on = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
 
     let (cw, ch) = (usize::from(cw), usize::from(ch));
@@ -4056,7 +4065,7 @@ fn the_scroll_bar_and_the_dock_do_not_fade() {
     );
     assert!(frame.scrollbar().is_some(), "the bar is not shown");
     let off = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
-    frame.set_edge(EDGE as f32);
+    fade_in_place(&mut frame, EDGE as f32, 0.0);
     let on = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
 
     let (cw, ch) = (usize::from(cw), usize::from(ch));
@@ -4127,12 +4136,13 @@ fn a_frame_without_the_top_edge_draws_todays_picture() {
     today(&mut frame);
     let before = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
 
-    // With the fade on it **must** diverge, or the equalities below say nothing.
-    frame.set_edge(f32::from(ch));
+    // With the fade on it **must** diverge, or the equalities below say nothing — in place,
+    // so it is the ramp that diverges, not the grid's move.
+    fade_in_place(&mut frame, f32::from(ch), 0.0);
     let faded = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
     assert!(before != faded, "the fade was never drawn");
 
-    frame.set_edge(0.0);
+    fade_in_place(&mut frame, 0.0, 0.0);
     let back = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
     let diff = before.iter().zip(&back).position(|(a, b)| a != b);
     assert!(
@@ -4148,5 +4158,96 @@ fn a_frame_without_the_top_edge_draws_todays_picture() {
     assert!(
         diff.is_none(),
         "the frame diverged from today's picture after `clear`, first difference at byte {diff:?}"
+    );
+}
+
+#[test]
+fn the_production_edge_fades_the_band_and_a_lifted_grid_and_cut_draws_todays_picture() {
+    // The fade **through the content arm's seam** (`link::place_edge`), not a forced height:
+    // the mode reaching the drawn fade is what the guards above cannot see. A dock-less 64 px
+    // window, a 8×12 cell and a 6 px margin, cut into rows the way the row arithmetic cuts it
+    // in `Fade`: `⌊(64 − 6) / 12⌋ = 4` rows, the 16 px leftover the fade at the top.
+    //
+    // A resting grid never enters the fade, so two frames put something there: a fill band
+    // standing above the grid at rest, and the grid's own top row lifted into it (an offset of
+    // minus a row — what a band taller than the share does). Direction only, the pixel tests'
+    // rule for a fractional alpha: the fade's top is nearer the clear colour than its middle,
+    // its middle than its bottom, and the first row under it is untouched.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let cell = grid_with_gutter(8, 12, 6);
+    let rows = 4;
+    let at = |col: usize| 6 + col * 8 + 4;
+    let place = |frame: &mut Frame, edge: ContentEdge| {
+        crate::link::place_edge(frame, edge, EDGE as f32, 0, rows, cell);
+    };
+
+    let band = |edge: Option<ContentEdge>| {
+        let mut frame = Frame::default();
+        frame.clear(cell, CaretStyle::default());
+        for row in 0..rows {
+            frame.push(bg_cell(0, row, WHITE));
+        }
+        frame.set_fill_rows(2);
+        frame.push_fill(bg_cell(0, 0, WHITE));
+        frame.push_fill(bg_cell(0, 1, WHITE));
+        if let Some(edge) = edge {
+            place(&mut frame, edge);
+        }
+        frame.set_origin_rows(0.0);
+        frame
+    };
+    let frame = band(Some(ContentEdge::Fade));
+    assert_eq!(frame.edge_px(), 16.0, "the fade is not the leftover");
+    assert_eq!(
+        frame.origin_px(),
+        16.0,
+        "the resting grid is not under the fade"
+    );
+    let pixels = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    let clear = pixel_at(&pixels, EDGE, 1, 0);
+    let white = pixel_at(&pixels, EDGE, at(0), 16);
+    assert_eq!(white, (0xff, 0xff, 0xff), "the grid's top row faded");
+    let seen = [0, 8, 15].map(|y| distance(pixel_at(&pixels, EDGE, at(0), y), clear));
+    assert!(
+        seen.windows(2).all(|pair| pair[0] < pair[1]) && seen[2] < distance(white, clear),
+        "the band did not fade from the top down: {seen:?}"
+    );
+
+    let mut frame = Frame::default();
+    frame.clear(cell, CaretStyle::default());
+    for row in 0..rows {
+        frame.push(bg_cell(2, row, WHITE));
+    }
+    place(&mut frame, ContentEdge::Fade);
+    frame.set_origin_rows(-1.0);
+    assert_eq!(
+        frame.origin_px(),
+        4.0,
+        "the grid's top row is not in the fade"
+    );
+    let pixels = render_offscreen(&r, EDGE, EDGE_CLEAR, &frame);
+    assert_eq!(
+        pixel_at(&pixels, EDGE, at(2), 2),
+        clear,
+        "the fade painted a ground of its own"
+    );
+    let white = pixel_at(&pixels, EDGE, at(2), 16);
+    assert_eq!(white, (0xff, 0xff, 0xff), "the row under the fade faded");
+    let seen = [4, 10, 15].map(|y| distance(pixel_at(&pixels, EDGE, at(2), y), clear));
+    assert!(
+        seen.windows(2).all(|pair| pair[0] < pair[1]) && seen[2] < distance(white, clear),
+        "the lifted grid did not fade from the top down: {seen:?}"
+    );
+
+    // **`Cut` through the same seam is today's frame, byte for byte**: no fade, no move.
+    let today = render_offscreen(&r, EDGE, EDGE_CLEAR, &band(None));
+    let cut = band(Some(ContentEdge::Cut));
+    assert_eq!(cut.edge_px(), 0.0);
+    let cut = render_offscreen(&r, EDGE, EDGE_CLEAR, &cut);
+    let diff = today.iter().zip(&cut).position(|(a, b)| a != b);
+    assert!(
+        diff.is_none(),
+        "`Cut` diverged from today's picture, first difference at byte {diff:?}"
     );
 }

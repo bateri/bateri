@@ -12,6 +12,17 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Changed
+
+- **Text no longer gets cut in half at the top of the window.** Where the
+  terminal meets the tab bar — or the divider above a split pane — a line
+  scrolling up now fades out over a few pixels instead of being sliced through
+  its letters, and lines from your history fade into that strip too. The
+  first line of a screen at rest always stands fully readable below it. Full
+  screen programs such as vim keep the strip empty. The strip is never
+  shorter than the left margin, so at some window heights the terminal shows
+  one line fewer than before.
+
 ## [0.7.0] - 2026-10-07
 
 ### Added

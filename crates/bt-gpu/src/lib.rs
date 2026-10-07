@@ -40,6 +40,11 @@
 //! room `bt-shell`'s grid gives up in the always-up form
 //! ([`ScrollbarMode::reserve_px`], the [`DOCK_ROWS`] discipline) and the
 //! pointer's region ([`scrollbar_strip_px`], [`ScrollbarLayout::contains`]).
+//! The content's **top edge** follows the same discipline, beside
+//! [`dock_px`]: what the rows keep free at the pane's top
+//! ([`edge_reserve_px`], which `bt-shell`'s row arithmetic consumes), the fade
+//! drawn over the leftover ([`edge_drawn_px`]) and how many history rows the
+//! fill band stands there ([`edge_ceiling_rows`]) have their one copy here.
 //! The shaders are WGSL (`shaders/*.wgsl`), embedded with `include_str!`;
 //! there is no shader build step.
 //!
@@ -65,7 +70,10 @@ mod stats;
 mod surface;
 
 pub use error::GpuError;
-pub use frame::{DOCK_ROWS, context_cols, context_row_offset, dock_px};
+pub use frame::{
+    DOCK_ROWS, context_cols, context_row_offset, dock_px, edge_ceiling_rows, edge_drawn_px,
+    edge_reserve_px,
+};
 pub use link::{DisplayLink, Layout, Origin, Pacer, TickTarget, Ticker, Waker};
 pub use metrics::{CellMetrics, FontNotice, family_notice};
 pub use renderer::Renderer;

@@ -487,6 +487,30 @@ impl Scrollbar {
     }
 }
 
+/// What the text does where it meets the pane's top edge — the tab bar, or a
+/// divider above a split pane.
+///
+/// One type for the whole road: `bt-gpu` takes it as it is, there is no
+/// request to resolve (the precedent of [`CursorMotion`]). The drawing side
+/// owns the numbers — how tall the fade is and what it costs the grid — and
+/// reads `Line` as `Cut`: the line is the window's chrome, not the grid's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ContentEdge {
+    /// The text fades out as it reaches the top: the pane keeps a strip at
+    /// least as tall as the left margin there, a row scrolling or resting in
+    /// it thins into the window's background, and a row at rest never enters
+    /// it. The cost is a row less at the window heights whose leftover is
+    /// shorter than that strip.
+    #[default]
+    Fade,
+    /// The text is cut at the top as in `Cut`, under a hairline in the
+    /// divider's colour along the top of the panes.
+    Line,
+    /// The text is cut where the pane ends, through a letter if it falls so:
+    /// every row the height allows, the leftover below the last one.
+    Cut,
+}
+
 /// `[terminal] cursor_radius` and `cursor_glow`: the cursor's **drawing**
 /// numbers.
 ///

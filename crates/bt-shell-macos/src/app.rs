@@ -955,12 +955,25 @@ pub(crate) struct Grid {
 /// form alone, never of the history or the alternate screen: a reserve that
 /// came and went with them would resize the grid on the first line into
 /// history, every clear and every full-screen program.
+///
+/// **The top edge's reserve is subtracted from the rows** (`top_px`,
+/// [`bt_gpu::edge_reserve_px`]): with the content fading at the pane's top,
+/// that much of the height is kept free above the grid **even when the height
+/// divides into rows**, and the leftover goes **to the top** — the grid sits
+/// on the dock's share, a row at rest never enters the fade, and the drawing
+/// side fades the whole leftover ([`bt_gpu::edge_drawn_px`]). Its source is the
+/// left margin, so changing the margin moves the row count too. The cost is a
+/// row less at the heights whose leftover is shorter than the reserve; zero
+/// where the content is cut instead, every row the height allows as before.
+/// Like the scroll bar's reserve it is a function of the mode and the cell
+/// alone — never of the history or the alternate screen.
 pub(crate) fn split_into_grid(
     width_px: f64,
     height_px: f64,
     cell: CellMetrics,
     dock_rows: u16,
     reserve_px: f32,
+    top_px: f32,
 ) -> Grid {
     let (cell_w, cell_h) = cell.cell_px();
     // `as u16` saturates in f64 (NaN and negative → 0, large → 65535) and the
@@ -994,7 +1007,10 @@ pub(crate) fn split_into_grid(
     // the dock's share carries two breathing margins next to the rows and were
     // it rewritten here it would diverge for one frame on resize — the same
     // discipline as consuming `DOCK_ROWS`, no second copy is kept.
-    let usable_height = height_px - f64::from(bt_gpu::dock_px(dock_rows, cell));
+    //
+    // The top edge's reserve is subtracted the same way: it is a pixel height
+    // like the dock's share, and the window that cannot hold it gets no rows.
+    let usable_height = height_px - f64::from(bt_gpu::dock_px(dock_rows, cell)) - f64::from(top_px);
     Grid {
         cols: (grid_width / f64::from(cell_w)) as u16,
         rows: (usable_height / f64::from(cell_h)) as u16,
@@ -4982,6 +4998,8 @@ impl AppDelegate {
 
 #[cfg(test)]
 mod tests {
+    use bt_core::ContentEdge;
+
     use super::*;
 
     /// The **measured** tail of a healthy smoke run (2026-09-16, the lowest of
@@ -5006,6 +5024,11 @@ mod tests {
     /// No scroll bar reserve: the self-hiding forms' grid, and the one every
     /// test that is not about the reserve asks about.
     const NO_RESERVE: f32 = 0.0;
+
+    /// No top edge reserve: the content cut at the top, every row the height
+    /// allows — the row arithmetic every test that is not about the fade asks
+    /// about, word for word as it was before the fade.
+    const NO_TOP: f32 = 0.0;
 
     fn report(counters: Counters, workload: Workload) -> Report {
         Report {
@@ -5202,8 +5225,15 @@ mod tests {
         // would make the two equal and this test would fail.
         // Gutter zero: what is asked is that the cell size determines the grid, not the gutter's
         // effect. The gutter's own test is `the_gutter_costs_columns`.
-        let narrow = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK, NO_RESERVE);
-        let wide = split_into_grid(900.0, 600.0, metrics(18, 36, 0), NO_DOCK, NO_RESERVE);
+        let narrow = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK, NO_RESERVE, NO_TOP);
+        let wide = split_into_grid(
+            900.0,
+            600.0,
+            metrics(18, 36, 0),
+            NO_DOCK,
+            NO_RESERVE,
+            NO_TOP,
+        );
         assert_eq!((narrow.cols, narrow.rows), (100, 33));
         assert_eq!((wide.cols, wide.rows), (50, 16));
     }
@@ -5213,8 +5243,8 @@ mod tests {
         // The left gutter is deducted from columns: so the stripe does not
         // sit on top of the text. 900 pixels, 9-pixel cells → 100 columns with no gutter; an 8-pixel
         // gutter takes one column, and so does 9 pixels (a full cell).
-        let plain = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK, NO_RESERVE);
-        let gutter = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE);
+        let plain = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK, NO_RESERVE, NO_TOP);
+        let gutter = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE, NO_TOP);
         assert_eq!(plain.cols, 100);
         assert_eq!(gutter.cols, 99, "the gutter takes one column");
         // Rows **do not see** the gutter: the gutter is only on the left and does not
@@ -5231,8 +5261,15 @@ mod tests {
         // not a single row should go from a window without a dock (an unintegrated shell, the smoke recipe) —
         // `smoke_shell`'s `cells=8 glyphs=6`
         // contract is measured in that window.
-        let without = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE);
-        let with = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS, NO_RESERVE);
+        let without = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE, NO_TOP);
+        let with = split_into_grid(
+            900.0,
+            600.0,
+            metrics(9, 18, 8),
+            DOCK_ROWS,
+            NO_RESERVE,
+            NO_TOP,
+        );
         // 600 / 18 = 33.3 → 33.
         assert_eq!(without.rows, 33);
         // The dock takes **two rows, two breathing gutters and one row gap**:
@@ -5249,12 +5286,63 @@ mod tests {
     }
 
     #[test]
+    fn the_fade_keeps_the_margin_free_at_the_top_and_takes_the_leftover() {
+        // In `Fade` the rows keep the top edge's reserve free — the left
+        // margin, 8 px here: a leftover at or above it costs nothing, one under
+        // it costs a row. The drawing side's fade over those rows is the whole
+        // leftover, never under the reserve and never a cell of it.
+        let cell = metrics(9, 18, 8);
+        let top = bt_gpu::edge_reserve_px(ContentEdge::Fade, cell);
+        assert_eq!(top, 8.0, "the reserve is not the left margin");
+        let edge = |height: f64, dock_rows: u16, rows: u16| {
+            bt_gpu::edge_drawn_px(ContentEdge::Fade, height as f32, dock_rows, rows, cell)
+        };
+        // (height, dock, rows cut, rows faded, the fade)
+        // 600 with the dock: 532 / 18 = 29.5, a 10 px leftover — the same rows.
+        // 596 with the dock: 528 / 18 = 29.3, a 6 px leftover — a row less.
+        // 600 without: 600 / 18 = 33.3, a 6 px leftover — a row less.
+        for (height, dock_rows, cut_rows, fade_rows, fade_px) in [
+            (600.0, DOCK_ROWS, 29, 29, 10.0),
+            (596.0, DOCK_ROWS, 29, 28, 24.0),
+            (600.0, NO_DOCK, 33, 32, 24.0),
+        ] {
+            let cut = split_into_grid(900.0, height, cell, dock_rows, NO_RESERVE, NO_TOP);
+            let fade = split_into_grid(900.0, height, cell, dock_rows, NO_RESERVE, top);
+            assert_eq!((cut.rows, fade.rows), (cut_rows, fade_rows), "{height}");
+            assert_eq!(fade.cols, cut.cols, "{height}: the fade took columns");
+            assert_eq!(edge(height, dock_rows, fade.rows), fade_px, "{height}");
+        }
+        // `Cut` and `Line` keep nothing free: today's rows to the row.
+        for mode in [ContentEdge::Cut, ContentEdge::Line] {
+            assert_eq!(bt_gpu::edge_reserve_px(mode, cell), 0.0, "{mode:?}");
+        }
+        // A window that cannot hold the reserve gets no rows: the subtraction
+        // saturates in `f64`, it does not wrap.
+        let g = split_into_grid(900.0, 4.0, cell, NO_DOCK, NO_RESERVE, top);
+        assert_eq!(g.rows, 0);
+    }
+
+    #[test]
     fn the_dock_breathing_room_scales_with_the_gutter() {
         // The breathing gutter is **derived**, not chosen: its source is the left
         // gutter itself. With a fixed pixel count the gutter would stay the same while the font
         // grows with Cmd +/− and the ratio would break; this test holds exactly that link.
-        let tight = split_into_grid(900.0, 600.0, metrics(9, 18, 0), DOCK_ROWS, NO_RESERVE);
-        let loose = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS, NO_RESERVE);
+        let tight = split_into_grid(
+            900.0,
+            600.0,
+            metrics(9, 18, 0),
+            DOCK_ROWS,
+            NO_RESERVE,
+            NO_TOP,
+        );
+        let loose = split_into_grid(
+            900.0,
+            600.0,
+            metrics(9, 18, 8),
+            DOCK_ROWS,
+            NO_RESERVE,
+            NO_TOP,
+        );
         // A dock without gutters takes only its rows: 600 − 36 = 564 → 31.
         assert_eq!(tight.rows, 31);
         assert!(
@@ -5273,8 +5361,8 @@ mod tests {
         // window's 99, and the rows do not see the track at all.
         let cell = metrics(9, 18, 8);
         let reserve = ScrollbarMode::Always.reserve_px(cell);
-        let plain = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, NO_RESERVE);
-        let always = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, reserve);
+        let plain = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, NO_RESERVE, NO_TOP);
+        let always = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, reserve, NO_TOP);
         assert_eq!((plain.cols, plain.dock_cols), (99, 99));
         assert_eq!(always.cols, 97, "the track's columns stayed in the grid");
         assert_eq!(always.dock_cols, 99, "the dock lost columns to the track");
@@ -5284,12 +5372,13 @@ mod tests {
         assert!(text_end <= 900.0 - f64::from(reserve), "{text_end}");
         // The self-hiding forms reserve nothing.
         for mode in [ScrollbarMode::Auto, ScrollbarMode::Never] {
-            let grid = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, mode.reserve_px(cell));
+            let grid =
+                split_into_grid(900.0, 600.0, cell, DOCK_ROWS, mode.reserve_px(cell), NO_TOP);
             assert_eq!((grid.cols, grid.dock_cols), (99, 99), "{mode:?}");
         }
         // Narrower than the gutter and the track: no columns — the
         // subtraction is `f64` and saturates, it does not wrap to 65535.
-        let narrow = split_into_grid(20.0, 600.0, cell, NO_DOCK, reserve);
+        let narrow = split_into_grid(20.0, 600.0, cell, NO_DOCK, reserve, NO_TOP);
         assert_eq!((narrow.cols, narrow.dock_cols), (0, 1));
     }
 
@@ -5300,7 +5389,7 @@ mod tests {
         // right edge — lands on that column, not clamped back to the grid's.
         let cell = metrics(9, 18, 8);
         let reserve = ScrollbarMode::Always.reserve_px(cell);
-        let grid = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, reserve);
+        let grid = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, reserve, NO_TOP);
         let top = crate::view::dock_input_top_px(600.0, cell, DOCK_ROWS);
         let last = grid.dock_cols - 1;
         let x = f64::from(cell.gutter_px()) + (f64::from(last) + 0.25) * 9.0;
@@ -5370,7 +5459,14 @@ mod tests {
         // `as u16` saturates to zero. Done in `u16` it would overflow and
         // produce a 65535-row `TIOCSWINSZ`. `Session::resize` already
         // ignores a zero-row size.
-        let g = split_into_grid(900.0, 20.0, metrics(9, 18, 8), DOCK_ROWS, NO_RESERVE);
+        let g = split_into_grid(
+            900.0,
+            20.0,
+            metrics(9, 18, 8),
+            DOCK_ROWS,
+            NO_RESERVE,
+            NO_TOP,
+        );
         assert_eq!(g.rows, 0);
         // Columns stand: a short window eliminates only rows.
         assert_eq!(g.cols, 99);
@@ -5384,7 +5480,7 @@ mod tests {
         // ignores a zero-column size. Done in `u16` the same subtraction would
         // **overflow** and produce a `TIOCSWINSZ` with a column count near
         // 65535 — that is the breakage this test guards.
-        let g = split_into_grid(4.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE);
+        let g = split_into_grid(4.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE, NO_TOP);
         assert_eq!(g.cols, 0);
         // Rows stand: a narrow window eliminates only columns.
         assert_eq!(g.rows, 33);
@@ -6382,7 +6478,7 @@ mod tests {
         // A minimized window gives 0×0 bounds; `Session::resize` ignores a
         // zero grid but the path leading here must not panic —
         // not the split, the `as u16` saturation carries it.
-        let g = split_into_grid(0.0, 0.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE);
+        let g = split_into_grid(0.0, 0.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE, NO_TOP);
         assert_eq!((g.cols, g.rows), (0, 0));
     }
 

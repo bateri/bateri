@@ -77,11 +77,15 @@ use crate::quote::{paste_quote, shell_quote};
 /// continuation of an already started gesture and there sticking to the edge
 /// is both xterm's behaviour and a requirement (a dropped release leaves a
 /// button stuck in the application).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum OutOfGrid {
     /// Snap to the nearest cell. `fill_rows` is the fill band's length: above
-    /// the origin, if it is **full**, still `None`, because there is drawn text there.
-    Clamp { fill_rows: u16 },
+    /// the origin, if it is **full**, still `None`, because there is drawn text
+    /// there — **except in the fade**: `edge_px` is the content's top fade,
+    /// physical pixels from the window's top, and a point in it (or above the
+    /// window) is the window's edge and snaps to row 0. Zero → no fade, the
+    /// rule as it was. Both from the drawn frame ([`bt_gpu::Origin`]).
+    Clamp { fill_rows: u16, edge_px: f64 },
     /// `None` if the point is outside `[0, cols) × [0, rows)`.
     Reject,
 }
@@ -139,6 +143,18 @@ pub(crate) enum OutOfGrid {
 /// blank, and besides the real protection against `u16` overflow is in that
 /// clamping (`the_origin_shifts_the_grid_down_and_the_blank_area_clamps`).
 ///
+/// **The fade at the top is the edge, not the band** (`Clamp`'s `edge_px`):
+/// a point in it, or above the window, sticks to row 0 even while the band
+/// stands behind it. The fade is where a row thins away, not text to aim at,
+/// and with it a window that has history has a band there for good — refused,
+/// a drag running past the top of a full window would freeze where it left,
+/// at whatever row the pointer last crossed, where it sticks to the top row
+/// today. The rejection stays on the band rows **below** the fade, where the
+/// text stands clear (a scrolled window's, a lowered grid's, the fraction's
+/// top row). A real grid row lifted into the fade by a tall dock band is not
+/// above the origin and keeps its own row. With no fade the rule is exactly
+/// the one above.
+///
 /// Floor rounding (the `as u16` truncation): the question is **which** cell
 /// the mouse is in and the arithmetic is the same as `split_into_grid`. The
 /// left/top sticking is not a separate clamp, it is two rules of the
@@ -172,7 +188,8 @@ pub(crate) fn point_to_cell(
     // overflow and a click on the window's upper half would select the last
     // row; in `f64` it stays negative and `as u16` **saturates** it to zero -
     // the same path the padding uses horizontally, no separate clamping arm.
-    let y = view_px.1 * scale - origin_px;
+    let window_y = view_px.1 * scale;
+    let y = window_y - origin_px;
     match outside {
         // **Above the origin, if full, rejection, not clamping.** Clamping is
         // right only when that area is *blank*: when the fill band is drawn the
@@ -180,9 +197,14 @@ pub(crate) fn point_to_cell(
         // highlight somewhere other than where the eye sees it. The filled rows
         // cannot be represented by the boundary's row numbers (all in the
         // scrollback, so negative) - between "selected wrongly" and "cannot be
-        // selected" the second is the honest one.
-        OutOfGrid::Clamp { fill_rows } if fill_rows > 0 && y < 0.0 => return None,
-        OutOfGrid::Clamp { .. } => {}
+        // selected" the second is the honest one. **The fade is the edge**:
+        // the row thinning away there is not aimed at, and the point clamps.
+        OutOfGrid::Clamp { fill_rows, edge_px } => {
+            let in_fade = edge_px > 0.0 && window_y < edge_px;
+            if fill_rows > 0 && y < 0.0 && !in_fade {
+                return None;
+            }
+        }
         OutOfGrid::Reject
             if x < 0.0
                 || y < 0.0
@@ -1014,7 +1036,10 @@ define_class!(
             // as today: the application does not know about the fill anyway, it
             // is a terminal drawing.
             let Some(pointer) =
-                self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp { fill_rows: 0 })
+                self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp {
+                fill_rows: 0,
+                edge_px: 0.0,
+            })
             else {
                 return;
             };
@@ -1704,9 +1729,13 @@ impl BateriView {
         }
         // The pointer's cell and the fill rejection's zero, with the
         // rationale in the line arm (`scrollWheel:`).
-        let Some(pointer) =
-            self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp { fill_rows: 0 })
-        else {
+        let Some(pointer) = self.window_point_cell(
+            event.locationInWindow(),
+            OutOfGrid::Clamp {
+                fill_rows: 0,
+                edge_px: 0.0,
+            },
+        ) else {
             return;
         };
         let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
@@ -2137,7 +2166,10 @@ impl BateriView {
         if !pressed {
             match self.with_gesture(|g| g.released(button)) {
                 Release::Report => {
-                    let clamp = OutOfGrid::Clamp { fill_rows: 0 };
+                    let clamp = OutOfGrid::Clamp {
+                        fill_rows: 0,
+                        edge_px: 0.0,
+                    };
                     if let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) {
                         self.report_button(session, button, false, cell, event);
                     }
@@ -2275,7 +2307,10 @@ impl BateriView {
             // beyond the edge - there is no periodic timer.
             Drag::SelectDock => {
                 let at = event.locationInWindow();
-                let clamp = OutOfGrid::Clamp { fill_rows: 0 };
+                let clamp = OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                };
                 if let Some(session) = self.ivars().session.get() {
                     let edge = self.dock_edge(at);
                     if edge != 0 {
@@ -2324,7 +2359,10 @@ impl BateriView {
             return;
         }
         // The continuation of a gesture, not its start: the coordinate is clamped.
-        let clamp = OutOfGrid::Clamp { fill_rows: 0 };
+        let clamp = OutOfGrid::Clamp {
+            fill_rows: 0,
+            edge_px: 0.0,
+        };
         let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) else {
             return;
         };
@@ -2350,7 +2388,10 @@ impl BateriView {
             return;
         };
         let outside = if button.is_some() {
-            OutOfGrid::Clamp { fill_rows: 0 }
+            OutOfGrid::Clamp {
+                fill_rows: 0,
+                edge_px: 0.0,
+            }
         } else {
             self.flush_lost_releases(session, event);
             OutOfGrid::Reject
@@ -2367,7 +2408,8 @@ impl BateriView {
     /// The session + the end under the event (cell and its half). `None` if
     /// the three (`session`, metrics, grid) are not all present: the
     /// selection's end cannot be moved with half the information. A point
-    /// falling above the fill band is also `None` ([`point_to_cell`]).
+    /// falling on the fill band below the top fade is also `None`
+    /// ([`point_to_cell`]).
     ///
     /// Today its only consumer is the drag; the button events want the session
     /// and the cell separately ([`BateriView::button_event`]), because the
@@ -2380,10 +2422,10 @@ impl BateriView {
 
     /// Lowers the event point to a selection end. `None` while the metrics or
     /// the window do not exist yet, while the grid is zero-sized and above the
-    /// fill band - a point beyond the edge sticks.
+    /// fill band below the top fade - a point beyond the edge sticks, and the
+    /// fade is the edge.
     fn event_cell(&self, event: &NSEvent) -> Option<SelectionPoint> {
-        let fill_rows = self.fill_rows();
-        self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp { fill_rows })
+        self.window_point_cell(event.locationInWindow(), self.clamp_above())
     }
 
     /// Lowers a point in window coordinates to a selection end - [`Self::event_cell`]'s
@@ -2655,11 +2697,16 @@ impl BateriView {
         }
     }
 
-    /// The drawn frame's fill band length - from the **same body** as the
-    /// origin ([`bt_gpu::Origin`]), so the two belong to the same frame. Zero if
-    /// there is no link: no band and no drawing.
-    fn fill_rows(&self) -> u16 {
-        self.ivars().origin.get().map_or(0, Origin::fill_rows)
+    /// The selection's clamp over the drawn frame: the fill band's length and
+    /// the top fade's height - from the **same body** as the origin
+    /// ([`bt_gpu::Origin`]), so the three belong to the same frame. Zero and
+    /// zero if there is no link: no band, no fade and no drawing.
+    fn clamp_above(&self) -> OutOfGrid {
+        let origin = self.ivars().origin.get();
+        OutOfGrid::Clamp {
+            fill_rows: origin.map_or(0, Origin::fill_rows),
+            edge_px: origin.map_or(0.0, |origin| f64::from(origin.edge_px())),
+        }
     }
 
     /// A window scroll; if there is a held drag it moves the selection's end to
@@ -2689,12 +2736,13 @@ impl BateriView {
         let Some(window) = self.window() else {
             return;
         };
-        // If `None` comes the end is **not moved**: if the mouse went above the
-        // fill band the selection stays at its last valid cell, it does not jump to row 0.
-        let fill_rows = self.fill_rows();
+        // If `None` comes the end is **not moved**: if the mouse went over the
+        // fill band the selection stays at its last valid cell, it does not
+        // jump to row 0. In the top fade, or above the window, it does — that
+        // is the window's edge.
         if let Some(cell) = self.window_point_cell(
             window.mouseLocationOutsideOfEventStream(),
-            OutOfGrid::Clamp { fill_rows },
+            self.clamp_above(),
         ) {
             session.update_selection(cell);
         }
@@ -2849,7 +2897,10 @@ mod tests {
             view_px,
             grid(0),
             0.0,
-            OutOfGrid::Clamp { fill_rows: 0 },
+            OutOfGrid::Clamp {
+                fill_rows: 0,
+                edge_px: 0.0,
+            },
             2.0,
             100,
             33,
@@ -2955,7 +3006,14 @@ mod tests {
         assert_eq!(at((5.0, 49.0), OutOfGrid::Reject), None);
         // Without fill `Clamp` keeps sticking that area to row 0.
         assert_eq!(
-            at((5.0, 49.0), OutOfGrid::Clamp { fill_rows: 0 }).map(|p| p.row),
+            at(
+                (5.0, 49.0),
+                OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                }
+            )
+            .map(|p| p.row),
             Some(0)
         );
         // Right below the origin is valid.
@@ -3017,7 +3075,10 @@ mod tests {
                 (x, 9.0),
                 grid(8),
                 0.0,
-                OutOfGrid::Clamp { fill_rows: 0 },
+                OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                },
                 2.0,
                 100,
                 33,
@@ -3062,7 +3123,10 @@ mod tests {
                 (5.0, 9.0),
                 grid(0),
                 0.0,
-                OutOfGrid::Clamp { fill_rows: 0 },
+                OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                },
                 2.0,
                 100,
                 33
@@ -3089,7 +3153,10 @@ mod tests {
                 (451.5, 9.0),
                 grid(0),
                 0.0,
-                OutOfGrid::Clamp { fill_rows: 0 },
+                OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                },
                 2.0,
                 100,
                 33
@@ -3122,7 +3189,10 @@ mod tests {
                 (0.0, y),
                 grid(0),
                 ORIGIN_PX,
-                OutOfGrid::Clamp { fill_rows: 0 },
+                OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                },
                 2.0,
                 100,
                 33,
@@ -3152,7 +3222,10 @@ mod tests {
                 (0.0, 99.0),
                 grid(0),
                 0.0,
-                OutOfGrid::Clamp { fill_rows: 0 },
+                OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                },
                 2.0,
                 100,
                 33
@@ -3176,7 +3249,10 @@ mod tests {
                 (0.0, y),
                 grid(0),
                 ORIGIN_PX + 9.0,
-                OutOfGrid::Clamp { fill_rows: 0 },
+                OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                },
                 2.0,
                 100,
                 33,
@@ -3205,7 +3281,10 @@ mod tests {
                 (0.0, y),
                 grid(0),
                 ORIGIN_PX,
-                OutOfGrid::Clamp { fill_rows: 10 },
+                OutOfGrid::Clamp {
+                    fill_rows: 10,
+                    edge_px: 0.0,
+                },
                 2.0,
                 100,
                 33,
@@ -3242,7 +3321,10 @@ mod tests {
                 (0.0, y),
                 grid(0),
                 ORIGIN_PX,
-                OutOfGrid::Clamp { fill_rows: 1 },
+                OutOfGrid::Clamp {
+                    fill_rows: 1,
+                    edge_px: 0.0,
+                },
                 2.0,
                 100,
                 33,
@@ -3250,6 +3332,53 @@ mod tests {
         };
         assert_eq!(thin(0.0), None, "the gap left above the band");
         assert_eq!(thin(89.0), None, "inside the band");
+    }
+
+    /// The fade at the top is the window's edge, not the band (`Clamp`'s
+    /// `edge_px`): the twin of the test above with a fade. The scene: 9×18
+    /// cell, @2x, a 20 px fade and the origin 92 px down — a full window at
+    /// rest has its origin right under the fade; this one has a band row of
+    /// history between the fade and the grid (a lowered grid, a fraction's top
+    /// row), so the three regions can be told apart. In the view the fade is
+    /// 10 points and the origin 46.
+    #[test]
+    fn the_top_fade_is_the_edge_and_the_band_under_it_is_refused() {
+        const EDGE_PX: f64 = 20.0;
+        let clamp = |fill_rows: u16, edge_px: f64| OutOfGrid::Clamp { fill_rows, edge_px };
+        let at = |y: f64, outside: OutOfGrid| {
+            point_to_cell((0.0, y), grid(0), 92.0, outside, 2.0, 100, 33).map(|p| p.row)
+        };
+        // **In the fade, row 0**: its top, its middle, its last point — and
+        // above the window, where a drag past the top runs on.
+        for y in [0.0, 5.0, 9.5, -40.0] {
+            assert_eq!(at(y, clamp(4, EDGE_PX)), Some(0), "y = {y}: the fade");
+        }
+        // **Under the fade, the band row: refused**, as it is with no fade.
+        for y in [10.0, 30.0, 45.5] {
+            assert_eq!(at(y, clamp(4, EDGE_PX)), None, "y = {y}: the band");
+        }
+        // The grid itself is untouched.
+        assert_eq!(at(46.0, clamp(4, EDGE_PX)), Some(0), "the grid's top row");
+        assert_eq!(at(55.0, clamp(4, EDGE_PX)), Some(1), "one row lower");
+        // **With no fade the rule is the one above, to the point**: the band
+        // and the area above the window are refused.
+        for y in [0.0, 5.0, -40.0, 30.0] {
+            assert_eq!(at(y, clamp(4, 0.0)), None, "y = {y}: no fade");
+        }
+        // With no band the fade has nothing to change: everything above the
+        // origin is blank and clamps.
+        for y in [0.0, 30.0, -40.0] {
+            assert_eq!(at(y, clamp(0, EDGE_PX)), Some(0), "y = {y}: no band");
+        }
+        // **A tall dock band lifts the grid into the fade** (a negative
+        // origin): the row under the pointer there is a real grid row and
+        // keeps its number — the fade clamps only what is above the origin.
+        let lifted = |y: f64| {
+            point_to_cell((0.0, y), grid(0), -16.0, clamp(4, EDGE_PX), 2.0, 100, 33).map(|p| p.row)
+        };
+        assert_eq!(lifted(0.0), Some(0), "the grid's row 0, partly clipped");
+        assert_eq!(lifted(9.0), Some(1), "row 1 in the fade keeps its row");
+        assert_eq!(lifted(-40.0), Some(0), "above the window");
     }
 
     /// **The full grid is a band higher up**: when the dock grows to
@@ -3294,7 +3423,10 @@ mod tests {
             (1000.0, 390.0),
             metrics,
             top,
-            OutOfGrid::Clamp { fill_rows: 0 },
+            OutOfGrid::Clamp {
+                fill_rows: 0,
+                edge_px: 0.0,
+            },
             1.0,
             40,
             1,
@@ -3311,7 +3443,10 @@ mod tests {
                 (1.0, 1.0),
                 grid(0),
                 0.0,
-                OutOfGrid::Clamp { fill_rows: 0 },
+                OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                },
                 2.0,
                 0,
                 33
@@ -3323,7 +3458,10 @@ mod tests {
                 (1.0, 1.0),
                 grid(0),
                 0.0,
-                OutOfGrid::Clamp { fill_rows: 0 },
+                OutOfGrid::Clamp {
+                    fill_rows: 0,
+                    edge_px: 0.0,
+                },
                 2.0,
                 100,
                 0
@@ -3559,7 +3697,10 @@ mod tests {
             (90.0, 150.0),
             grid(0),
             0.0,
-            OutOfGrid::Clamp { fill_rows: 0 },
+            OutOfGrid::Clamp {
+                fill_rows: 0,
+                edge_px: 0.0,
+            },
             1.0,
             100,
             33,
@@ -3568,7 +3709,10 @@ mod tests {
             (90.0, 150.0),
             grid(0),
             0.0,
-            OutOfGrid::Clamp { fill_rows: 0 },
+            OutOfGrid::Clamp {
+                fill_rows: 0,
+                edge_px: 0.0,
+            },
             2.0,
             100,
             33,

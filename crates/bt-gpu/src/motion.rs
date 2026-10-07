@@ -630,8 +630,11 @@ impl Motion {
     /// above fills with the ledger's newest rows, what comes down is not a gap but
     /// **history arriving** from above — the "reads as falling" reason is moot in
     /// that branch. So the rule is not lifted, it is **narrowed**: with `fill == 0`
-    /// shrinking content still snaps — a window with no dock, a deliberately cleared
-    /// screen (Ctrl-L, `clear` on a full screen) and a window scrolled into history.
+    /// shrinking content still snaps — a window with no dock whose grid is not full,
+    /// a deliberately cleared screen (Ctrl-L, `clear` on a full screen) and, where
+    /// the content is cut at the top, a window scrolled into history. With the top
+    /// fade a scrolled window holds the fade's history rows and `fill` is above
+    /// zero there, but what moves its content is the wheel, and the wheel snaps.
     ///
     /// **Leaving the alternate screen is not in this list and once was written in**
     /// (measured 2026-09-20): because `vim`'s entry `2J` does not set the
@@ -654,11 +657,15 @@ impl Motion {
     /// in the fill. Its guards are `scrolling_and_geometry_snap_the_origin` and
     /// `snap_style_never_slides_the_origin`.
     ///
-    /// **Known limit:** `snap` today is `scrolled || geometry` and `fill` is already
-    /// zero while `display_offset != 0`, so `filled` and `scrolled` normally cannot
-    /// both be true in the same frame — the one exception is the wheel landing on
-    /// the frame in which `fill` is computed. The guard's `!snap` swallows it (that
-    /// frame snaps) and the error's direction is safe.
+    /// **`filled` and `scrolled` together are the ordinary state**: with the top
+    /// fade the fill band stands at the top of a scrolled window and of a full one
+    /// for good (`bt_core::Cursor::fill`, the fade's rows), so every notch of the
+    /// wheel arrives with `filled` set. `snap` is `scrolled || geometry` and the
+    /// guard's `!snap` swallows it — a frame that scrolled snaps whatever the fill —
+    /// so the behaviour is the one `filled` alone would give, and the error's
+    /// direction is safe. (Where the content is cut at the top, `fill` is zero while
+    /// `display_offset != 0` and the two meet only when the wheel lands on the frame
+    /// in which `fill` is computed.)
     ///
     /// **Retargeting to the same target is a no-op** (the same requirement as
     /// [`Motion::sync`]): frames that do not grow the content (a colour change,

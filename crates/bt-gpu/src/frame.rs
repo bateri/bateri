@@ -34,8 +34,8 @@ use std::mem::offset_of;
 
 use bt_atlas::{Face, RuleKind, SizeClass};
 use bt_core::{
-    Block, ButtonState, CaretShape, CaretStyle, Cell, ClusterId, Clusters, DockButton, LinearRgba,
-    SearchRun, SelectionRun, TrackBlock, TrackMark, UnderlineStyle, UnfocusedCaret,
+    Block, ButtonState, CaretShape, CaretStyle, Cell, ClusterId, Clusters, ContentEdge, DockButton,
+    LinearRgba, SearchRun, SelectionRun, TrackBlock, TrackMark, UnderlineStyle, UnfocusedCaret,
 };
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
@@ -712,6 +712,77 @@ pub(crate) fn band_top(height_px: f32, band_px: f32) -> f32 {
     (height_px - band_px).max(0.0)
 }
 
+/// The height the grid's **row arithmetic** keeps free at the pane's top, in
+/// pixels: in `Fade` the content's top edge fades inside the leftover above
+/// the grid, and this much of it is kept even when the height divides into
+/// rows — so a row at rest never enters the fade. Zero in `Line` and `Cut`:
+/// every row the height allows, as before the fade.
+///
+/// **The left margin itself** ([`CellMetrics::gutter_px`]), the third use of
+/// one inner indent after the margin and the dock's breathing room
+/// ([`dock_px`]): no second design constant, and the strip grows with the
+/// point size. Changing the margin changes the row count too.
+///
+/// `bt-shell` **consumes** it as a parameter of its row arithmetic
+/// (`split_into_grid`), the [`dock_px`] discipline: a second copy would put
+/// the grid's rows and the drawn fade a row apart for a frame on resize.
+pub fn edge_reserve_px(edge: ContentEdge, cell: CellMetrics) -> f32 {
+    match edge {
+        ContentEdge::Fade => f32::from(cell.gutter_px()),
+        ContentEdge::Line | ContentEdge::Cut => 0.0,
+    }
+}
+
+/// The **drawn** height of the content's top fade, in pixels from the
+/// window's top: the whole leftover the grid's rows leave above them once the
+/// grid sits on the dock's PTY share — `band_top(height, dock_px(share)) −
+/// rows · cell`, clamped at zero. Zero in `Line` and `Cut`: the leftover stays
+/// below the grid and nothing fades.
+///
+/// `dock_rows` is the PTY share's rows (the number the row arithmetic
+/// subtracted, one on a remote alternate screen), not the drawn band's; `rows`
+/// is the grid's height from the frame's own read (`bt_core::Cursor::rows`),
+/// so this layer keeps no second copy of the row count ([`crate::Layout`]).
+/// Since the rows were cut with [`edge_reserve_px`] kept free, the result is
+/// in `[reserve, reserve + cell)` — the window's height is a whole number of
+/// pixels and so is every term, so there is nothing to round.
+pub fn edge_drawn_px(
+    edge: ContentEdge,
+    height_px: f32,
+    dock_rows: u16,
+    rows: u16,
+    cell: CellMetrics,
+) -> f32 {
+    match edge {
+        ContentEdge::Fade => (band_top(height_px, dock_px(dock_rows, cell))
+            - f32::from(rows) * f32::from(cell.cell_px().1))
+        .max(0.0),
+        ContentEdge::Line | ContentEdge::Cut => 0.0,
+    }
+}
+
+/// How many history rows the fill band must stand above the grid's top to
+/// cover the fade, at most — **stateless**, a function of the mode and the
+/// cell alone: `⌈(reserve + cell) / cell⌉` in `Fade`, zero otherwise.
+///
+/// It is asked **before** the scan (`bt_core::Session::set_grid_top`), when
+/// this frame's drawn height ([`edge_drawn_px`]) is not known yet; the drawn
+/// height is always under `reserve + cell`, so the ceiling covers it in every
+/// frame — the first one, a resize and a change of mode included. The error
+/// is always on the long side: a row or so of history beyond the fade sits
+/// above the window and is clipped, the grid top's own contract ("a little
+/// larger than needed, so the excess is off screen").
+pub fn edge_ceiling_rows(edge: ContentEdge, cell: CellMetrics) -> u16 {
+    match edge {
+        ContentEdge::Fade => {
+            let cell_h = u32::from(cell.cell_px().1);
+            let rows = (u32::from(cell.gutter_px()) + cell_h).div_ceil(cell_h);
+            u16::try_from(rows).unwrap_or(u16::MAX)
+        }
+        ContentEdge::Line | ContentEdge::Cut => 0,
+    }
+}
+
 /// The ceiling of the dock's input rows: **half** of the grid's rows — a
 /// **design constant**, not a measured number (the precedent of
 /// [`bt_atlas::CONTEXT_SCALE`]).
@@ -1064,9 +1135,16 @@ pub(crate) struct Frame {
     /// dock: those two belong to the window's edge and the dock's panel, not
     /// to the content running into the top.
     ///
+    /// **Its one home**: the content frame writes it once, after the scan, from
+    /// the grid's row count of the same read ([`Frame::set_edge`],
+    /// [`crate::edge_drawn_px`]); [`Frame::origin_px`], the mouse's
+    /// publication and the plan read it from here, so the grid's place, the
+    /// fade's height and the zone the mouse treats as the edge cannot part.
+    ///
     /// [`Frame::clear`] zeroes it, under `origin_px`'s contract: a content
-    /// frame that does not say draws no fade. Written only by the tests
-    /// ([`Frame::set_edge`]) until the frame path computes it.
+    /// frame that does not say draws no fade and sits the grid at the top. A
+    /// motion frame does not call `clear` and **keeps** it — the edge is
+    /// static, and the motion arm never reaches the row count.
     edge_px: f32,
     /// The caret's pixel rectangle and the colour of the text under the block;
     /// the `cell` pipeline's uniform.
@@ -1375,15 +1453,27 @@ impl Frame {
     }
 
     /// This frame's vertical origin, in pixels; `setViewport`'s `originY` —
-    /// the offset plus the scroll fraction, **minus the band's excess**.
+    /// the offset plus the scroll fraction **plus the top edge's fade, minus
+    /// the band's excess**.
     ///
     /// As the band's drawn height exceeds the PTY share, the grid is drawn
     /// that much higher: the full grid's top is clipped, and the fill band and
     /// the mouse mapping read the same value ([`Frame::dock_band`]). If there
     /// is no band or it is the share's height, the term is zero and the frame
     /// is bit for bit the same as today's.
+    ///
+    /// **The fade is the fraction's static twin** ([`Frame::edge_px`]): it
+    /// lowers the grid's whole world by the leftover the rows leave at the
+    /// pane's top, so the grid sits on the dock's share and a row at rest
+    /// never enters the fade. Like the fraction it moves the caret with the
+    /// grid — the caret's target carries it and its rectangle gives the
+    /// origin back ([`Frame::grid_caret`]) — and unlike the fraction it never
+    /// changes between content frames, so a motion frame keeps it. Being a
+    /// term here is what makes the fill band ([`Frame::fill_origin_px`]), the
+    /// mouse's publication and the caret follow it with no second reader.
+    /// Zero (`Cut`, `Line`) is today's frame.
     pub(crate) fn origin_px(&self) -> f32 {
-        self.origin_px + self.frac_px - self.band_excess().unwrap_or(0.0)
+        self.origin_px + self.frac_px + self.edge_px - self.band_excess().unwrap_or(0.0)
     }
 
     /// The height of the content's top fade, pixels from the window's top;
@@ -1394,9 +1484,11 @@ impl Frame {
     }
 
     /// Sets the content's top fade for this frame, pixels from the window's
-    /// top. Test only for now: nothing on the frame path computes the height
-    /// yet, and a production writer with no caller would be dead code.
-    #[cfg(test)]
+    /// top — and with it the grid's place: [`Frame::origin_px`] adds it.
+    ///
+    /// The content frame's one writer is `link.rs`'s `place_edge`, after the
+    /// scan and **before** the caret and the origin: the caret's rectangle
+    /// and the grid's viewport both read it.
     pub(crate) fn set_edge(&mut self, px: f32) {
         self.edge_px = px;
     }

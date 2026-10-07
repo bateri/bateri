@@ -109,9 +109,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    BlockHandle, Blocks, CaretStyle, Clusters, Cursor, CursorMotion, DirtyFlag, DockBudget,
-    DockCols, DockContext, DockState, Erase, Keypress, LinearRgba, SearchRuns, SelectionRun,
-    SelectionRuns, Session, Theme, TrackBlock, TrackMarks,
+    BlockHandle, Blocks, CaretStyle, Clusters, ContentEdge, Cursor, CursorMotion, DirtyFlag,
+    DockBudget, DockCols, DockContext, DockState, Erase, Keypress, LinearRgba, SearchRuns,
+    SelectionRun, SelectionRuns, Session, Theme, TrackBlock, TrackMarks,
 };
 
 use crate::blink::Blink;
@@ -412,6 +412,8 @@ struct Published {
 struct Drawn {
     px: f32,
     fill_rows: u16,
+    /// The top edge's fade, pixels from the window's top (`Frame::edge_px`).
+    edge_px: f32,
     /// The top of the dock's input block (physical pixels, from the top) and
     /// the number of input rows; `None` → no dock in this frame.
     dock: Option<(f32, u16)>,
@@ -434,6 +436,18 @@ impl Origin {
     /// selected either, like the band's.
     pub fn fill_rows(&self) -> u16 {
         self.0.drawn.get().fill_rows
+    }
+
+    /// The drawn frame's top fade, **physical pixels** from the window's top;
+    /// zero → none (`Cut`, `Line`).
+    ///
+    /// **In the same body as the origin**: the fade is the origin's fourth
+    /// term, and the mouse treats it as the window's edge — a point in it
+    /// clings to the top row, where above the origin it is otherwise refused
+    /// while the fill band stands there. Pixels, because the fade can be
+    /// shorter than a cell.
+    pub fn edge_px(&self) -> f32 {
+        self.0.drawn.get().edge_px
     }
 
     /// The drawn frame's dock geometry: the top of the input block
@@ -499,6 +513,7 @@ impl Origin {
         &self,
         px: f32,
         fill_rows: u16,
+        edge_px: f32,
         dock: Option<(f32, u16)>,
         scrollbar: ScrollbarLayout,
         blocks: &[TrackBlock],
@@ -506,6 +521,7 @@ impl Origin {
         let before = self.0.drawn.replace(Drawn {
             px,
             fill_rows,
+            edge_px,
             dock,
             scrollbar,
         });
@@ -800,6 +816,12 @@ struct Core {
     /// sources differ: the cell size is refreshed only if the session accepts
     /// the size, the column count is the window's own answer.
     dock_cols: Cell<u16>,
+    /// What the content does at the pane's top edge; `Fade` until the
+    /// settings say otherwise. The content frame reads it twice — the fill
+    /// band's ceiling before the scan ([`crate::edge_ceiling_rows`]) and the
+    /// drawn fade after it ([`place_edge`]) — and it must be the mode
+    /// `bt-shell` cut the rows with, or the fade and the rows part.
+    content_edge: Cell<ContentEdge>,
     /// `CellMetrics`, not a tuple: the grid geometry (cell size **and**
     /// gutter) arrives here from `Renderer::cell_metrics` through `bt-shell`
     /// as a type, **stays** a type while stored and enters `Frame::clear` as
@@ -1220,9 +1242,19 @@ impl Core {
         // The band being shorter than the PTY share (remote session) is
         // separate: the grid is that much lower for good and the strip must be
         // covered in a scrolled window too (`Session::slide_fill_rows`).
-        let lowered = (-motion.band()).max(0.0).ceil() as u16;
-        self.session
-            .set_grid_top(grid_top.max(0.0).ceil() as u16, lowered);
+        //
+        // **The top edge's fade is the same kind of lowering** and both
+        // numbers carry its ceiling ([`grid_top_rows`]): stateless, so it is
+        // known here, before the scan that yields this frame's row count, and
+        // never one frame stale — the first frame, a resize or a change of
+        // mode fill the fade at once. Its error is on the long side, off
+        // screen.
+        let (grid_top, lowered) = grid_top_rows(
+            grid_top,
+            motion.band(),
+            crate::frame::edge_ceiling_rows(self.content_edge.get(), self.cell.get()),
+        );
+        self.session.set_grid_top(grid_top, lowered);
         // The cluster table is **outside** `Frame` for the call: the sinks
         // borrow `frame` (`Frame::take_clusters`). `clear` above emptied it;
         // both sinks write to the same table.
@@ -1359,6 +1391,18 @@ impl Core {
         // too high. The renderer's dock viewport is built with the same
         // subtraction, so both are the same line.
         let viewport_height = texture.texture.height() as f32;
+        // **The top edge, once, from this read's row count** (`Cursor::rows`,
+        // no second copy kept — `Layout`'s doc): before the caret's target,
+        // which carries it, and before `set_origin`, whose drawn origin adds
+        // it. The motion frame keeps it.
+        place_edge(
+            &mut frame,
+            self.content_edge.get(),
+            viewport_height,
+            dock_rows,
+            cursor.rows,
+            self.cell.get(),
+        );
         let mut dock_caret = None;
         // The typing effects' clock advances on the content frame too: in fast
         // typing every tick finds damage and the motion arm never runs.
@@ -1467,7 +1511,9 @@ impl Core {
         // **The band's excess in both targets**: the grid's caret is
         // that much higher together with the grid by the band's **target**
         // excess, the dock's is in the bottom-aligned input block, on the
-        // wrapped row's own row.
+        // wrapped row's own row. The grid's is lower by the top edge too, as
+        // the grid is ([`grid_caret_at`]); the dock's is not — the dock is
+        // its own panel.
         let band_target = band_target(band_rows, dock_rows, self.cell.get());
         let caret = dock_caret
             .map(|(at, text)| {
@@ -1484,13 +1530,15 @@ impl Core {
             })
             .or_else(|| {
                 cursor.visible.then(|| {
-                    (
-                        [
-                            f32::from(cursor.col),
-                            f32::from(cursor.row) + f32::from(origin_target(cursor)) - band_target,
-                        ],
-                        cursor.text,
-                    )
+                    let at = grid_caret_at(
+                        cursor.col,
+                        cursor.row,
+                        origin_target(cursor),
+                        band_target,
+                        frame.edge_px(),
+                        self.cell.get(),
+                    );
+                    (at, cursor.text)
                 })
             });
         self.last_caret_text.set(caret.map(|(_, text)| text));
@@ -1934,7 +1982,8 @@ impl Core {
     /// **Nothing is clipped in a resting frame** and it is the offset's
     /// *definition* that guarantees it, not `setViewport`'s clipping: the
     /// content is in `0..content_rows`, the offset is `rows - content_rows`,
-    /// so the lowest filled row ends exactly at `rows` rows. An arbitrary
+    /// so the lowest filled row ends exactly at `rows` rows — under the top
+    /// edge's fade, on the dock's share. An arbitrary
     /// offset (or a defect inflating `content_rows`) would push the bottom
     /// rows off the texture and the symptom would be "the last row is
     /// missing". **During the slide the offset is larger than its target** —
@@ -1965,8 +2014,8 @@ impl Core {
         compose(frame, motion, bottom_px, self.dock_rows.get());
     }
 
-    /// Publishes the drawn offset **and the fill band's height** to the mouse
-    /// mapping — only when `draw` returns `Ok`.
+    /// Publishes the drawn offset, **the fill band's height and the top
+    /// fade's** to the mouse mapping — only when `draw` returns `Ok`.
     ///
     /// A separate step, because [`Origin`]'s contract speaks of the
     /// **encoded** frame: in the `Err` arm the previous frame stays on screen
@@ -1975,11 +2024,11 @@ impl Core {
     /// "submitted", not "on screen"; asynchronous completion can still fail,
     /// which is why the contract says "encoded" and not "drawn".
     ///
-    /// Both values go in **one** write: they are the same frame's geometry,
+    /// The values go in **one** write: they are the same frame's geometry,
     /// and published separately the mouse could translate against a new
-    /// origin and an old band. The motion frame comes here too — the band is
-    /// kept there (`Frame` is not cleared), so the value published through
-    /// the slide is constant.
+    /// origin and an old band, or an old fade. The motion frame comes here
+    /// too — the band and the fade are kept there (`Frame` is not cleared),
+    /// so the values published through the slide are constant.
     fn publish_origin(&self, frame: &Frame) {
         // The block marks the pointer can take are the ones this frame drew:
         // none while the bar is thin or hidden.
@@ -1991,6 +2040,7 @@ impl Core {
         let moved = self.origin.set(
             frame.origin_px(),
             frame.fill_rows(),
+            frame.edge_px(),
             frame.dock_hit(),
             // The mouse's region follows the form: none in `Never`. A change
             // of form draws one frame ([`Scrollbar::set_mode`]), so it is
@@ -2150,6 +2200,10 @@ fn band_target(input_rows: Option<u16>, dock_rows: u16, cell: CellMetrics) -> f3
 /// infinity. A separate function, because the composition guard runs it
 /// without a `Core`.
 ///
+/// **The top edge is not written here**: it is static, the content arm
+/// writes it once ([`place_edge`]) and the motion frame keeps it, so this
+/// common point of the two paths only reads it through `Frame::origin_px`.
+///
 /// The gate is the window's dock **and** this frame's open surface: leaving
 /// the alternate screen, the window's share is back but the last content
 /// frame may be dockless, and a motion frame running in between that wrote
@@ -2163,13 +2217,81 @@ fn compose(frame: &mut Frame, motion: Motion, bottom_px: f32, dock_rows: u16) {
     frame.set_origin_rows(motion.origin());
 }
 
+/// Where the grid's top is drawn, rows down from the window's top and rounded
+/// up, and the share of it the fill band must close in a scrolled window too —
+/// [`Session::set_grid_top`]'s two numbers, from the slide's place `top`
+/// (`origin − band` before this frame's step), the band's current extra rows
+/// `band` and the top edge's stateless ceiling `ceiling`
+/// ([`crate::edge_ceiling_rows`]).
+///
+/// The ceiling goes into **both**: the fade at the top is the grid's
+/// permanent lowering, like a remote band's shortness, so a scrolled window's
+/// fade fills with the next history row too — had it entered the slide's
+/// share alone, the fade would hold history only while a finger moves and
+/// stand empty at rest. Zero (`Cut`, `Line`) is today's pair to the bit.
+///
+/// A separate function for [`content_deadline`]'s reason: the tick's body
+/// cannot be tested, this arithmetic can.
+fn grid_top_rows(top: f32, band: f32, ceiling: u16) -> (u16, u16) {
+    let lowered = (-band).max(0.0).ceil() as u16;
+    let top = top.max(0.0).ceil() as u16;
+    (top.saturating_add(ceiling), lowered.saturating_add(ceiling))
+}
+
+/// Writes this frame's top fade into the frame — **the content arm's one
+/// writer** of [`Frame::set_edge`], after the scan (the row count is the
+/// frame's own read, `rows`) and before the caret's target and the origin,
+/// both of which read it. The mode's numbers are [`crate::edge_drawn_px`]'s.
+///
+/// A separate function because it is the production path's seam: the pixel
+/// tests build a faded frame through it, so the mode reaching the drawn fade
+/// is witnessed, not only the fade itself.
+pub(crate) fn place_edge(
+    frame: &mut Frame,
+    edge: ContentEdge,
+    height_px: f32,
+    dock_rows: u16,
+    rows: u16,
+    cell: CellMetrics,
+) {
+    frame.set_edge(crate::frame::edge_drawn_px(
+        edge, height_px, dock_rows, rows, cell,
+    ));
+}
+
+/// The grid caret's target, in **screen cells** — [`Motion`]'s space, the
+/// sibling of [`dock_caret_at`]: the cursor's row, lowered by the offset's
+/// target, raised by the band's target excess and lowered by the top edge's
+/// drawn height (`edge_px`, pixels).
+///
+/// **The edge is static and moves the caret with the grid**: it is the
+/// fourth term of the grid's origin (`Frame::origin_px`) and the caret's
+/// rectangle gives the whole origin back (`Frame::grid_caret`), so a target
+/// without it would stand the fade's height above its letter. In rows it is
+/// fractional, and that is right — the dock's target is too.
+fn grid_caret_at(
+    col: u16,
+    row: u16,
+    origin_rows: u16,
+    band_target: f32,
+    edge_px: f32,
+    cell: CellMetrics,
+) -> [f32; 2] {
+    let edge_rows = edge_px / f32::from(cell.cell_px().1);
+    [
+        f32::from(col),
+        f32::from(row) + f32::from(origin_rows) - band_target + edge_rows,
+    ]
+}
+
 /// The dock caret's target, in **screen cells** — [`Motion`]'s space.
 ///
 /// The vertical component is **not** an integer and cannot be: the dock band
 /// starts a breathing gap lower and the band itself does not sit on the
-/// grid's cell raster either (when the height is not a multiple of the cell,
-/// the leftover strip stays between the dock and the content). A fractional
-/// target is therefore not an evasion but the right answer.
+/// grid's cell raster either (in `Cut` and `Line`, when the height is not a
+/// multiple of the cell, the leftover strip stays between the dock and the
+/// content; in `Fade` it is the top edge's). A fractional target is therefore
+/// not an evasion but the right answer.
 ///
 /// **Why cells and not pixels:** `Motion`'s spring constants and stop
 /// threshold are tuned in cells. Switching the space to pixels would change
@@ -2239,7 +2361,9 @@ pub struct DisplayLink {
 /// **No** row count, on purpose: the grid's height is the session's
 /// (`SessionOptions.rows`) and the frame path takes it from `Cursor::rows`
 /// **in the same read** (`bt_core::Cursor::rows`' doc). A second copy is
-/// banned exactly there.
+/// banned exactly there — the top edge's fade, which is the leftover the
+/// rows leave, is computed from that read too ([`place_edge`]), not from a
+/// row count kept here.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     /// The dock's width, columns — the window's, the scroll bar's reserve
@@ -2323,6 +2447,7 @@ impl DisplayLink {
             alt_screen_changed,
             marks_published: RefCell::new(None),
             dock_cols: Cell::new(layout.dock_cols),
+            content_edge: Cell::new(ContentEdge::default()),
             cell: Cell::new(layout.cell),
             // Zero: no offset until the first content frame, and that frame
             // says the value. The mouse path reads a ceiling-aligned grid in
@@ -3052,11 +3177,11 @@ mod tests {
         });
         let origin = Origin::default();
         assert!(
-            origin.set(0.0, 0, None, layout, &marks),
+            origin.set(0.0, 0, 0.0, None, layout, &marks),
             "new marks, no news"
         );
         assert!(
-            !origin.set(0.0, 0, None, layout, &marks),
+            !origin.set(0.0, 0, 0.0, None, layout, &marks),
             "the same marks told"
         );
         let target = layout.block_target(50.0);
@@ -3071,7 +3196,10 @@ mod tests {
             None,
             "the grid's point took a mark"
         );
-        assert!(origin.set(0.0, 0, None, layout, &[]), "gone marks, no news");
+        assert!(
+            origin.set(0.0, 0, 0.0, None, layout, &[]),
+            "gone marks, no news"
+        );
         assert_eq!(origin.block_at(x, y), None, "a mark the frame did not draw");
         assert!(origin.block_targets().is_empty());
     }
@@ -3080,10 +3208,11 @@ mod tests {
     fn the_dock_caret_target_lands_on_the_band_not_the_grid_row() {
         // **The fractional target is not a dodge, it is the right answer.** The
         // dock band slips off the grid's cell lattice in two ways: it starts
-        // lower by the breathing gutter, and when the window height is not
-        // exactly divisible by the cell height the band itself sits below the
-        // leftover stripe. Had we rounded the target to an integer, the caret
-        // would sit up to a cell too high.
+        // lower by the breathing gutter, and the band itself is anchored to the
+        // window's bottom, not to the grid's raster — the leftover stripe stands
+        // between the two (in `Cut` and `Line`) or above the grid (the top
+        // fade). Had we rounded the target to an integer, the caret would sit
+        // up to a cell too high.
         let cell = CellMetrics::new(9, 18, 9, 8, 1, 1.0).expect("metrics");
         // A 600 px window, a two-row dock: 2×18 rows + 2×8 outer gutter +
         // 1×16 row gap = 68, so the band starts at 532.
@@ -3436,6 +3565,445 @@ mod tests {
             0.0,
             "a band was written in a surface-less frame"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The content's top edge in `Fade`: the twins of the three composition
+    // guards above, which stay as they are — they are the `Cut` arm (no
+    // `place_edge`, an edge of zero, today's frame).
+    // -----------------------------------------------------------------------
+
+    /// The fade twins' window: the composition guards' own (@1x, 9×18 cell,
+    /// gutter 8, 600 px, a two-row PTY share of 68 px), cut into rows the way
+    /// `bt-shell`'s row arithmetic cuts it in `Fade` — the reserve kept free:
+    /// `⌊(600 − 68 − 8) / 18⌋ = 29`, the same rows as `Cut` at this height,
+    /// and the 10 px leftover now at the top.
+    const FADE_BOTTOM: f32 = 600.0;
+    const FADE_ROWS: u16 = 29;
+    const FADE_EDGE: f32 = 10.0;
+
+    fn fade_cell() -> CellMetrics {
+        CellMetrics::new(9, 18, 9, 8, 1, 1.0).expect("metrics")
+    }
+
+    /// The cursor's grid row in the fade twins: the content's last row, five
+    /// rows of offset above the content (`29 − 24`).
+    const FADE_OFFSET: u16 = 5;
+    const FADE_CARET_ROW: u16 = 23;
+
+    /// A frame the way the content arm builds it: the layout, the fill
+    /// channel and the fraction, the surface, **the edge through the
+    /// production seam** (`place_edge`), then the band and the origin
+    /// (`compose`) and the caret where the animator stands.
+    fn fade_frame(
+        motion: Motion,
+        dock_rows: u16,
+        layout: impl FnOnce(&mut Frame),
+        fill: u16,
+        frac: f32,
+    ) -> Frame {
+        let cell = fade_cell();
+        let mut frame = Frame::default();
+        frame.clear(cell, CaretStyle::default());
+        layout(&mut frame);
+        frame.set_fill_rows(fill);
+        frame.set_scroll_frac(frac);
+        frame.open_dock(
+            Theme::BATERI.background_linear(),
+            Theme::BATERI.separator_linear(),
+            Theme::BATERI.separator_linear(),
+        );
+        place_edge(
+            &mut frame,
+            ContentEdge::Fade,
+            FADE_BOTTOM,
+            dock_rows,
+            FADE_ROWS,
+            cell,
+        );
+        compose(&mut frame, motion, FADE_BOTTOM, dock_rows);
+        if let Some(at) = motion.position() {
+            frame.push_caret(
+                at,
+                Theme::BATERI.background_linear(),
+                Theme::BATERI.cursor_linear(),
+                1.0,
+                bt_core::CaretShape::Block,
+                true,
+            );
+        }
+        frame
+    }
+
+    /// The fade twins' per-frame claims: the fade is the leftover and at
+    /// least the reserve, the grid's bottom row meets the band's top with **no
+    /// strip**, and the fill band stays glued to the grid.
+    fn assert_fade_meets(frame: &Frame, fill: u16, scene: &str) {
+        let cell = fade_cell();
+        assert_eq!(frame.edge_px(), FADE_EDGE, "{scene}: the fade's height");
+        let reserve = crate::frame::edge_reserve_px(ContentEdge::Fade, cell);
+        assert!(
+            frame.edge_px() >= reserve && frame.edge_px() < reserve + 18.0,
+            "{scene}: the fade left [reserve, reserve + cell)"
+        );
+        let content = f32::from(FADE_ROWS - FADE_OFFSET);
+        let grid_bottom = frame.origin_px() + content * 18.0;
+        let band_top = FADE_BOTTOM - frame.dock_band_px();
+        assert_eq!(
+            band_top - grid_bottom,
+            0.0,
+            "{scene}: a strip opened between the grid and the band"
+        );
+        assert_eq!(
+            frame.fill_origin_px() + f32::from(fill) * 18.0,
+            frame.origin_px(),
+            "{scene}: the fill band came off the grid"
+        );
+    }
+
+    /// The caret stands on its letter: its painted top is the grid row's drawn
+    /// top, fraction and fade included. Asked of settled frames — the caret
+    /// and the band are two animators and meet only at rest.
+    fn assert_caret_on_its_letter(frame: &Frame, scene: &str) {
+        let letter = frame.origin_px() + f32::from(FADE_CARET_ROW) * 18.0;
+        assert!(
+            (frame.caret_core()[1] - letter).abs() < 1e-3,
+            "{scene}: the caret stands at {}, its letter at {letter}",
+            frame.caret_core()[1]
+        );
+    }
+
+    /// The grid caret's target for the twins' cursor ([`grid_caret_at`]).
+    fn fade_caret(band_target: f32) -> [f32; 2] {
+        grid_caret_at(
+            0,
+            FADE_CARET_ROW,
+            FADE_OFFSET,
+            band_target,
+            FADE_EDGE,
+            fade_cell(),
+        )
+    }
+
+    #[test]
+    fn in_fade_the_grid_sits_on_the_band_and_the_leftover_fades_at_the_top_in_every_frame() {
+        // The twin of `the_grid_the_fill_band_and_the_dock_band_meet_in_every_frame`:
+        // the band grows to three input rows, the grid rises with it, and in
+        // `Fade` there is no strip between them — the leftover is the fade.
+        let cell = fade_cell();
+        let reserve = crate::frame::edge_reserve_px(ContentEdge::Fade, cell);
+        let share = crate::frame::dock_px(DOCK_ROWS, cell);
+        assert_eq!(
+            ((FADE_BOTTOM - share - reserve) / 18.0) as u16,
+            FADE_ROWS,
+            "the scene's rows are not the fade's row arithmetic"
+        );
+        const FILL: u16 = 2;
+        let layout = |frame: &mut Frame| frame.set_dock_rows(4);
+        let mut motion = Motion::default();
+        motion.sync(Some(fade_caret(0.0)), FADE_OFFSET, 0.0, 0, false, false);
+        let frame = fade_frame(motion, DOCK_ROWS, layout, FILL, 0.0);
+        assert_fade_meets(&frame, FILL, "at rest");
+        assert_caret_on_its_letter(&frame, "at rest");
+        // The resting content's top row is below the fade.
+        assert!(
+            frame.origin_px() + f32::from(FADE_OFFSET) * 18.0 >= FADE_EDGE,
+            "a resting row entered the fade"
+        );
+
+        motion.sync(Some(fade_caret(2.0)), FADE_OFFSET, 2.0, 0, false, false);
+        let mut frames = 0;
+        let mut mid = false;
+        loop {
+            let frame = fade_frame(motion, DOCK_ROWS, layout, FILL, 0.0);
+            assert_fade_meets(&frame, FILL, &format!("frame {frames}"));
+            mid |= motion.band() > 0.0 && motion.band() < 2.0;
+            if motion.settled() {
+                assert_caret_on_its_letter(&frame, "three input rows");
+                break;
+            }
+            motion.advance(1.0 / 120.0);
+            frames += 1;
+            assert!(frames < 1000, "the band did not settle");
+        }
+        assert!(mid, "the middle of the animation was never tested");
+
+        // **The fraction's frames**: the grid and the caret go down by it
+        // together, the band stays glued.
+        let frame = fade_frame(motion, DOCK_ROWS, layout, FILL, 0.5);
+        assert_eq!(
+            frame.origin_px(),
+            FADE_EDGE + f32::from(FADE_OFFSET - 2) * 18.0 + 9.0,
+            "the fraction"
+        );
+        assert_eq!(
+            frame.fill_origin_px() + f32::from(FILL) * 18.0,
+            frame.origin_px()
+        );
+        assert_caret_on_its_letter(&frame, "the fraction");
+    }
+
+    #[test]
+    fn in_fade_a_resting_top_row_never_enters_the_fade() {
+        // A full grid (no offset): its top row stands right under the fade at
+        // rest and a fraction lowers it further; only a band taller than the
+        // share lifts the grid, and then a real row is drawn in the fade —
+        // the grid is clipped from the top, as it is today.
+        let mut motion = Motion::default();
+        motion.sync(None, 0, 0.0, 0, true, false);
+        let layout = |frame: &mut Frame| frame.set_dock_rows(DOCK_ROWS);
+        let frame = fade_frame(motion, DOCK_ROWS, layout, 0, 0.0);
+        assert_eq!(frame.origin_px(), FADE_EDGE, "at rest");
+        let frame = fade_frame(motion, DOCK_ROWS, layout, 0, 0.5);
+        assert_eq!(frame.origin_px(), FADE_EDGE + 9.0, "with a fraction");
+        motion.sync(None, 0, 2.0, 0, true, false);
+        let frame = fade_frame(motion, DOCK_ROWS, |f| f.set_dock_rows(4), 0, 0.0);
+        assert_eq!(frame.origin_px(), FADE_EDGE - 36.0, "a three-row input");
+        // A dock-less window (a full-screen program): the grid sits on the
+        // window's bottom and the leftover is still the fade.
+        let mut frame = Frame::default();
+        frame.clear(fade_cell(), CaretStyle::default());
+        place_edge(
+            &mut frame,
+            ContentEdge::Fade,
+            FADE_BOTTOM,
+            0,
+            33,
+            fade_cell(),
+        );
+        compose(&mut frame, Motion::default(), FADE_BOTTOM, 0);
+        assert_eq!(frame.edge_px(), 600.0 - 33.0 * 18.0);
+        assert_eq!(frame.origin_px() + 33.0 * 18.0, FADE_BOTTOM);
+    }
+
+    #[test]
+    fn in_fade_no_band_drops_the_grid_to_the_window_bottom_in_every_frame() {
+        // The twin of `no_band_drops_the_grid_to_the_window_bottom_in_every_frame`.
+        let cell = fade_cell();
+        const FILL: u16 = 7;
+        let share = crate::frame::dock_px(DOCK_ROWS, cell);
+        let none = band_target(None, DOCK_ROWS, cell);
+        let mut motion = Motion::default();
+        motion.sync(Some(fade_caret(0.0)), FADE_OFFSET, 0.0, 0, false, false);
+        let local = fade_frame(
+            motion,
+            DOCK_ROWS,
+            |f| f.set_dock_input_rows(Some(1)),
+            FILL,
+            0.0,
+        );
+        assert_fade_meets(&local, FILL, "local");
+        for style in [CursorMotion::Ease, CursorMotion::Spring] {
+            motion.set_style(style);
+            for (band, target) in [(None, none), (Some(1), 0.0)] {
+                motion.sync(
+                    Some(fade_caret(target)),
+                    FADE_OFFSET,
+                    target,
+                    0,
+                    false,
+                    false,
+                );
+                let mut frames = 0;
+                loop {
+                    let frame = fade_frame(
+                        motion,
+                        DOCK_ROWS,
+                        |f| f.set_dock_input_rows(band),
+                        FILL,
+                        0.0,
+                    );
+                    let scene = format!("{style:?} {band:?}/{frames}");
+                    assert_fade_meets(&frame, FILL, &scene);
+                    if motion.settled() {
+                        assert_caret_on_its_letter(&frame, &scene);
+                        break;
+                    }
+                    motion.advance(1.0 / 120.0);
+                    frames += 1;
+                    assert!(frames < 1000, "the band did not settle");
+                }
+            }
+        }
+        motion.set_style(CursorMotion::Ease);
+        motion.sync(Some(fade_caret(none)), FADE_OFFSET, none, 0, true, false);
+        let frame = fade_frame(
+            motion,
+            DOCK_ROWS,
+            |f| f.set_dock_input_rows(None),
+            FILL,
+            0.0,
+        );
+        assert_eq!(frame.dock_band_px(), 0.0, "no band");
+        assert_eq!(frame.origin_px(), local.origin_px() + share);
+        // No strip at the bottom either: the grid's last row ends on the
+        // window's bottom edge.
+        assert_eq!(
+            frame.origin_px() + f32::from(FADE_ROWS - FADE_OFFSET) * 18.0,
+            FADE_BOTTOM
+        );
+    }
+
+    #[test]
+    fn in_fade_a_remote_band_drops_the_input_row_and_the_grid_moves_down() {
+        // The twin of `a_remote_band_drops_the_input_row_and_the_grid_moves_down`.
+        let cell = fade_cell();
+        const FILL: u16 = 7;
+        let mut motion = Motion::default();
+        motion.sync(Some(fade_caret(0.0)), FADE_OFFSET, 0.0, 0, false, false);
+        let local = fade_frame(
+            motion,
+            DOCK_ROWS,
+            |f| f.set_dock_input_rows(Some(1)),
+            FILL,
+            0.0,
+        );
+        assert_eq!(
+            local.origin_px(),
+            FADE_EDGE + f32::from(FADE_OFFSET) * 18.0,
+            "a single input row: the offset under the fade"
+        );
+        assert_caret_on_its_letter(&local, "local");
+        let remote = band_target(Some(0), DOCK_ROWS, cell);
+        for (input_rows, target) in [(0, remote), (1, 0.0)] {
+            motion.sync(
+                Some(fade_caret(target)),
+                FADE_OFFSET,
+                target,
+                0,
+                false,
+                false,
+            );
+            let mut frames = 0;
+            let mut mid = false;
+            loop {
+                let frame = fade_frame(
+                    motion,
+                    DOCK_ROWS,
+                    |f| f.set_dock_input_rows(Some(input_rows)),
+                    FILL,
+                    0.0,
+                );
+                let scene = format!("{input_rows}/{frames}");
+                assert_fade_meets(&frame, FILL, &scene);
+                mid |= motion.band() < 0.0 && motion.band() > remote;
+                if motion.settled() {
+                    assert_caret_on_its_letter(&frame, &scene);
+                    break;
+                }
+                motion.advance(1.0 / 120.0);
+                frames += 1;
+                assert!(frames < 1000, "the band did not settle");
+            }
+            assert!(
+                mid,
+                "{input_rows}: the middle of the animation was never tested"
+            );
+        }
+        motion.sync(
+            Some(fade_caret(remote)),
+            FADE_OFFSET,
+            remote,
+            0,
+            true,
+            false,
+        );
+        let frame = fade_frame(
+            motion,
+            DOCK_ROWS,
+            |f| f.set_dock_input_rows(Some(0)),
+            FILL,
+            0.0,
+        );
+        assert_eq!(frame.origin_px(), local.origin_px() + 18.0 + 16.0);
+        assert_caret_on_its_letter(&frame, "remote, settled");
+    }
+
+    #[test]
+    fn cut_and_line_place_no_edge() {
+        // The production seam in `Cut` and `Line`: the edge stays zero and the
+        // frame is today's — the composition guards above are their arm.
+        let cell = fade_cell();
+        for edge in [ContentEdge::Cut, ContentEdge::Line] {
+            let mut frame = Frame::default();
+            frame.clear(cell, CaretStyle::default());
+            place_edge(&mut frame, edge, FADE_BOTTOM, DOCK_ROWS, 29, cell);
+            assert_eq!(frame.edge_px(), 0.0, "{edge:?}");
+            assert_eq!(crate::frame::edge_reserve_px(edge, cell), 0.0, "{edge:?}");
+            assert_eq!(crate::frame::edge_ceiling_rows(edge, cell), 0, "{edge:?}");
+        }
+        // The caret's target without an edge is today's expression.
+        assert_eq!(
+            grid_caret_at(3, 7, 5, 2.0, 0.0, cell),
+            [3.0, 7.0 + 5.0 - 2.0]
+        );
+    }
+
+    #[test]
+    fn the_fade_is_the_leftover_and_its_ceiling_covers_it_at_every_height() {
+        // Every height the row arithmetic can be asked about, in `Fade`: the
+        // drawn fade is in `[reserve, reserve + cell)` and the stateless
+        // ceiling's rows reach past it — the band never leaves the top of the
+        // fade empty, whatever the remainder. A height whose remainder is under
+        // the reserve costs a row against `Cut`.
+        for (gutter, cell_h) in [(8, 18), (16, 36), (8, 8), (12, 7)] {
+            let cell = CellMetrics::new(9, cell_h, 9, gutter, 1, 1.0).expect("metrics");
+            let reserve = crate::frame::edge_reserve_px(ContentEdge::Fade, cell);
+            assert_eq!(reserve, f32::from(gutter));
+            let ceiling = crate::frame::edge_ceiling_rows(ContentEdge::Fade, cell);
+            for dock_rows in [0, 1, DOCK_ROWS] {
+                let share = crate::frame::dock_px(dock_rows, cell);
+                for height in 200..400u16 {
+                    let height = f32::from(height);
+                    let rows = ((height - share - reserve) / f32::from(cell_h)) as u16;
+                    let edge = crate::frame::edge_drawn_px(
+                        ContentEdge::Fade,
+                        height,
+                        dock_rows,
+                        rows,
+                        cell,
+                    );
+                    let scene = format!("{gutter}/{cell_h} {dock_rows} {height}");
+                    assert!(edge >= reserve, "{scene}: {edge}");
+                    assert!(edge < reserve + f32::from(cell_h), "{scene}: {edge}");
+                    assert!(
+                        f32::from(ceiling) * f32::from(cell_h) >= edge,
+                        "{scene}: {ceiling} rows leave the fade's top empty"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_grid_top_carries_the_edge_ceiling_into_both_numbers() {
+        // `Session::set_grid_top`'s two numbers: in `Cut` (ceiling zero)
+        // today's pair, in `Fade` the ceiling on both.
+        let cell = fade_cell();
+        let ceiling = crate::frame::edge_ceiling_rows(ContentEdge::Fade, cell);
+        // ⌈(8 + 18) / 18⌉: the drawn fade is under 26 px, two rows cover it.
+        assert_eq!(ceiling, 2);
+        let remote = band_target(Some(0), DOCK_ROWS, cell);
+        // (scene, the slide's place `origin − band`, the band, cut, fade)
+        let table = [
+            ("bottom-anchored at rest", 5.0, 0.0, (5, 0), (7, 2)),
+            ("mid-slide", 3.4, 0.0, (4, 0), (6, 2)),
+            ("a full or scrolled-back window", 0.0, 0.0, (0, 0), (2, 2)),
+            (
+                "remote: shortness and fade",
+                -remote,
+                remote,
+                (2, 2),
+                (4, 4),
+            ),
+            ("a band taller than the fade", -2.0, 2.0, (0, 0), (2, 2)),
+        ];
+        for (scene, top, band, cut, fade) in table {
+            assert_eq!(grid_top_rows(top, band, 0), cut, "{scene}: cut");
+            assert_eq!(grid_top_rows(top, band, ceiling), fade, "{scene}: fade");
+        }
+        // The ceiling saturates rather than wraps.
+        assert_eq!(grid_top_rows(f32::MAX, 0.0, 2).0, u16::MAX);
     }
 
     #[test]

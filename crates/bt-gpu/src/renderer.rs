@@ -1845,8 +1845,10 @@ impl Renderer {
     /// origin **may go negative** and is left so: the band's oldest rows that
     /// do not fit spill over the top and are clipped (measured).
     /// A band of zero rows sets no viewport and the frame is bit-identical to
-    /// the one without it; a window without a dock never gets rows
-    /// (`Session::fill_rows` returns zero). Search after the band's ground,
+    /// the one without it; a window without a dock gets rows only while its
+    /// grid is full — the slide's strip and the top fade, never its blank
+    /// (`Session::fill_rows`, `Session::slide_fill_rows`). Search after the
+    /// band's ground,
     /// before its letters; no selection in the band. Its
     /// inversion rectangle is **degenerate**: the band has no caret slot and
     /// in a settled frame the caret's screen row is always inside the
@@ -1868,7 +1870,9 @@ impl Renderer {
     /// and covers whatever spills into it.
     ///
     /// **Top edge** — the grid's and the band's draws fade towards the clear
-    /// colour inside [`Frame::edge_px`] (`edge.wgsl`), set once before the
+    /// colour inside [`Frame::edge_px`] (`edge.wgsl`) — the leftover the rows
+    /// leave at the pane's top, which the content frame writes and the grid's
+    /// origin already stands under (`Frame::origin_px`) — set once before the
     /// grid's first list ([`Op::Edge`]) and reset to zero after the band's
     /// last, **unconditionally**: the scroll bar belongs to the window's edge
     /// and the dock is its own panel, so neither fades — the dock climbing to
@@ -1893,9 +1897,11 @@ impl Renderer {
     /// exemption arithmetically (`- origin_px`) **does not work** —
     /// `Frame::clear` resets the offset and `set_origin_rows` runs after the
     /// sink, so the value is unknown when dock cells are pushed. The origin
-    /// sits at the texture's **bottom** (`height − dock`), and the leftover
-    /// strip under the grid (pixels not divisible by the cell) stays between
-    /// dock and content. Last because during a slide the grid's offset target
+    /// sits at the texture's **bottom** (`height − dock`); the leftover strip
+    /// (pixels not divisible by the cell) stays between dock and content where
+    /// the content is cut at the top, and is the top fade above the grid where
+    /// it fades — then the grid sits on the dock. Last because during a slide
+    /// the grid's offset target
     /// is overshot and its bottom row spills over the dock; the dock's opaque
     /// ground covers it. The origin is **clamped at zero**: in a window
     /// shorter than the dock the right answer is degenerate (the dock covers

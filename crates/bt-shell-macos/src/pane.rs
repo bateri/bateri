@@ -43,9 +43,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use bt_core::{
-    BlockHandle, BlockInfo, FontOptions, ProgramBar, RemoteFiles, RemoteTarget, SearchCover,
-    SearchDirection, SearchReport, SearchStatus, Session, SessionOptions, Settings, TabId, Theme,
-    TtyModes, Wake,
+    BlockHandle, BlockInfo, ContentEdge, FontOptions, ProgramBar, RemoteFiles, RemoteTarget,
+    SearchCover, SearchDirection, SearchReport, SearchStatus, Session, SessionOptions, Settings,
+    TabId, Theme, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{
@@ -3110,6 +3110,12 @@ impl TerminalPane {
     /// Before [`TerminalPane::start`] the dock reserve is the birth package's
     /// (the one `start` will set): session restore checks the saved tree
     /// against this limit before any shell starts.
+    ///
+    /// **Without the top edge's reserve** too ([`bt_gpu::edge_reserve_px`]),
+    /// for the same reason as the scroll bar's: a larger limit would not fit
+    /// split layouts saved before it and would reset them. Where the content
+    /// fades at the top, the smallest pane can therefore have a row less than
+    /// [`MIN_PANE_ROWS`].
     pub(crate) fn min_size(&self) -> Option<NSSize> {
         let scale = self.window()?.backingScaleFactor();
         let cell = self.ivars().renderer.cell_metrics(scale);
@@ -3712,12 +3718,17 @@ impl TerminalPane {
         // ([`ScrollbarMode::reserve_px`]), so neither the alternate screen
         // nor the history moves the grid.
         let reserve = self.ivars().scrollbar.get().reserve_px(cell);
+        // The top edge's reserve, the same kind of function: of the mode and
+        // the cell alone. `Fade` is the link's own mode (`DisplayLink`'s
+        // default), so the rows cut here and the fade drawn over them agree.
+        let top = bt_gpu::edge_reserve_px(ContentEdge::Fade, cell);
         Some(split_into_grid(
             width_px,
             height_px,
             cell,
             self.ivars().dock_rows.get(),
             reserve,
+            top,
         ))
     }
 }

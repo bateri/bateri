@@ -456,9 +456,13 @@ pub struct Cursor {
     /// **While a slide is in flight the band extends**: by the grid top the
     /// drawing side reported ([`Session::set_grid_top`]) and the rows sliding
     /// in this frame ([`Cursor::scrolled`]), so that no blank strip opens at
-    /// the top while the grid is below its target. The extension falls off
-    /// screen once settled; its computation is in
-    /// [`Session::slide_fill_rows`].
+    /// the top while the grid is below its target. The slide's share falls
+    /// off screen once settled; **the drawing side's permanent lowering does
+    /// not** — the fade at the pane's top and a remote band's shortness keep
+    /// the grid lower for good, and the history rows above it stay on screen
+    /// there, in a scrolled window too. So with history, a band standing at
+    /// the top is the ordinary state, not only a slide's. The computation is
+    /// in [`Session::slide_fill_rows`].
     ///
     /// **The fraction's top row does not enter here** ([`Cursor::top_row`]):
     /// that row passes through the same channel but its count is separate, so
@@ -4625,13 +4629,13 @@ pub struct Session {
     /// be closed with history only if this number is known. The animation itself
     /// is in `bt-gpu` and this crate does not see it; what it sees is a row count.
     grid_top: AtomicU16,
-    /// The share of `grid_top` that comes from **the band's shortness**: the
-    /// dock band is drawn shorter than the PTY share (in a remote session only
-    /// the context row) and the grid is that much lower — not a
-    /// temporary shift, permanent for the whole remote session. A separate
-    /// number, because it must be closed in a scrolled window too and there
-    /// the rest of `grid_top` (the offset's blank) must not be filled
-    /// ([`Session::slide_fill_rows`]).
+    /// The share of `grid_top` that is **permanent**: the rows the drawing
+    /// side keeps the grid lower by for good, not for a slide — the dock band
+    /// drawn shorter than the PTY share (in a remote session only the context
+    /// row) and the fade at the pane's top, whose rows show history as they
+    /// thin away. A separate number, because it must be closed in a scrolled
+    /// window too and there the rest of `grid_top` (the offset's blank) must
+    /// not be filled ([`Session::slide_fill_rows`]).
     grid_lowered: AtomicU16,
     /// The scroll's **fraction**: `[0, 1)` rows, `f64` bits ([`Cursor::scroll_frac`]).
     ///
@@ -6127,6 +6131,14 @@ impl Session {
         // drops below zero, Metal clips), i.e. it is not part of the virtual
         // scroll. Were it counted, on a full grid the wheel's first notch would skip
         // that many rows.
+        //
+        // **The fade's rows are on screen and still not counted**, and this must
+        // stay so: the drawing side's permanent lowering (the fade at the pane's
+        // top, `grid_lowered`) shows a history row thinning away above the grid,
+        // but it is the window's edge, not the band the wheel scrolls through. A
+        // reader that "fixed" this by writing `fill` would make the first notch of
+        // every full window with history skip the fade's rows — silently, since
+        // nothing else reads the number.
         if offset == 0 {
             self.fill_shown.store(gap_fill, Ordering::Relaxed);
         }
@@ -6853,18 +6865,20 @@ impl Session {
     /// scrolled window, the clear flag and the clamp on rows arrived since the
     /// clear — with one difference: it runs in a dock-less window too, but only
     /// while the grid is **full** (`gap == 0`). There is no permanent blank at
-    /// the top there, i.e. once settled the extension stays entirely off screen
-    /// and does not touch the dock-less window's "the blank stays blank" rule.
-    /// In an unfilled dock-less window the extension would overflow into the
-    /// blank and stay there.
+    /// the top there, i.e. once settled the extension stays off screen but for
+    /// the drawing side's fade at the top, and does not touch the dock-less
+    /// window's "the blank stays blank" rule. In an unfilled dock-less window
+    /// the extension would overflow into the blank and stay there — the fade
+    /// included, which stays empty there.
     ///
     /// The ceiling is `gap + grid_rows`: the drawing side starts the slide at
     /// most one screen below the target, anything of the band beyond that is
     /// never visible.
     ///
-    /// **In a scrolled window only the band's shortness** ([`Session::grid_lowered`],
-    /// in a remote session the grid is one row plus the gap lower and the
-    /// strip at the top is open while looking at the history too. That share is
+    /// **In a scrolled window only the permanent share** ([`Session::grid_lowered`]):
+    /// in a remote session the grid is one row plus the gap lower, and the fade
+    /// at the pane's top keeps it lower everywhere, so the strip at the top is
+    /// open while looking at the history too. That share is
     /// the **same** at every notch, i.e. scrolling advances a full row at every
     /// notch — what was rejected was filling the offset's blank that changes with
     /// the notch and that is not filled here. The rows are those above the
@@ -6921,10 +6935,13 @@ impl Session {
     /// The writer is the drawing side (`bt-gpu`) and **before** every content
     /// frame: this crate does not see the animation, it receives only its result
     /// as a row count. If it is not written the value is zero and the band stays
-    /// at today's length.
+    /// at today's length. The count is **at least** what the drawing needs — a
+    /// row or so too many is fine, its rows land above the window and are clipped.
     ///
-    /// `lowered` is the share of it that comes from **the band's shortness**
-    /// ([`Session::grid_lowered`]): the only part closed in a scrolled window too.
+    /// `lowered` is the share of it that is **permanent** — the band's
+    /// shortness and the fade at the pane's top ([`Session::grid_lowered`]):
+    /// the only part closed in a scrolled window too, so the fade holds the
+    /// next history row there as well.
     pub fn set_grid_top(&self, rows: u16, lowered: u16) {
         self.grid_top.store(rows, Ordering::Relaxed);
         self.grid_lowered.store(lowered, Ordering::Relaxed);
@@ -20991,6 +21008,132 @@ mod tests {
         // Only the slide's extension: there is no band in a scrolled window.
         session.set_grid_top(2, 0);
         assert_eq!(fill_now(&session).0.fill, 0);
+    }
+
+    /// The rows the drawing side adds to **both** of [`Session::set_grid_top`]'s
+    /// numbers for the fade at the pane's top, at this file's test grid (a 9×18
+    /// cell, an 8 px margin): its stateless ceiling `⌈(8 + 18) / 18⌉`. The
+    /// number is `bt-gpu`'s (`edge_ceiling_rows`) and this crate cannot see
+    /// it; the tests pass what the link passes.
+    const FADE_ROWS: u16 = 2;
+
+    /// The fill band's rows as text, top to bottom.
+    fn fill_text(cursor: &Cursor, cells: &[Cell]) -> Vec<String> {
+        (0..cursor.fill).map(|r| row_text(cells, r)).collect()
+    }
+
+    #[test]
+    fn the_fade_at_the_top_holds_the_next_history_rows() {
+        // **At rest in a full window**: no blank, and the fade above the grid
+        // shows the history's newest rows — `20` and `21` over `22`.
+        let (session, _wake) = history_session("stty -echo; seq 1 30; read _; sleep 5");
+        session.set_grid_top(FADE_ROWS, FADE_ROWS);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(fill_text(&cursor, &cells), ["20", "21"], "{cursor:?}");
+        // On screen, but not the virtual scroll's: the wheel's first notch
+        // moves one row, not one plus the fade's.
+        assert_eq!(session.fill_shown.load(Ordering::Relaxed), 0);
+        assert_eq!(cursor.resting_fill, 0);
+
+        // **Scrolled back**: the fade holds the rows above the window's top.
+        session.term.lock().scroll_display(Scroll::Delta(1));
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.display_offset, 1);
+        assert_eq!(fill_text(&cursor, &cells), ["19", "20"], "{cursor:?}");
+
+        // **A remote session**: the band's shortness (two rows) and the fade,
+        // scrolled back and at rest alike.
+        session.set_grid_top(2 + FADE_ROWS, 2 + FADE_ROWS);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(
+            fill_text(&cursor, &cells),
+            ["17", "18", "19", "20"],
+            "{cursor:?}"
+        );
+        session.term.lock().scroll_display(Scroll::Bottom);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(
+            fill_text(&cursor, &cells),
+            ["18", "19", "20", "21"],
+            "{cursor:?}"
+        );
+
+        // **A docked window with a blank**: the blank fills as before and the
+        // fade takes the rows above it; the virtual scroll still counts the
+        // blank's alone.
+        let (session, _wake) = gapped_session(true);
+        let gap = {
+            let cursor = cursor_now(&session);
+            cursor.rows - cursor.content_rows
+        };
+        session.set_grid_top(gap + FADE_ROWS, FADE_ROWS);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(
+            fill_text(&cursor, &cells),
+            ["15", "16", "17", "18", "19", "20", "21"],
+            "{cursor:?}"
+        );
+        assert_eq!(session.fill_shown.load(Ordering::Relaxed), gap);
+    }
+
+    #[test]
+    fn the_fade_stays_empty_where_the_blank_does() {
+        // The fade is history only where the fill band may stand: the
+        // alternate screen, a deliberate clear and an unfilled window without
+        // a dock leave it empty — "the blank stays blank", the fade included.
+
+        // **An unfilled window without a dock**: a four-row blank, no band.
+        let (session, _wake) = gapped_session(false);
+        let gap = {
+            let cursor = cursor_now(&session);
+            cursor.rows - cursor.content_rows
+        };
+        assert!(gap > 0, "the window filled");
+        session.set_grid_top(gap + FADE_ROWS, FADE_ROWS);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.fill, 0, "the dock-less blank filled: {cursor:?}");
+        assert!(cells.is_empty(), "{cells:?}");
+
+        // **A deliberate clear**.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+        session.write(b"\n");
+        wait_until("the screen was not cleared", Duration::from_secs(5), || {
+            cursor_now(&session).content_rows == 1
+        });
+        let cursor = cursor_now(&session);
+        session.set_grid_top(cursor.rows - cursor.content_rows + FADE_ROWS, FADE_ROWS);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.fill, 0, "the cleared screen came back: {cursor:?}");
+        assert!(cells.is_empty(), "{cells:?}");
+
+        // **The alternate screen**.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[?1049h'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+        session.write(b"\n");
+        wait_until(
+            "the alternate screen was not entered",
+            Duration::from_secs(5),
+            || {
+                cursor_now(&session);
+                session.alt_screen()
+            },
+        );
+        session.set_grid_top(FADE_ROWS, FADE_ROWS);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(
+            cursor.fill, 0,
+            "the alternate screen was filled: {cursor:?}"
+        );
+        assert!(cells.is_empty(), "{cells:?}");
     }
 
     #[test]

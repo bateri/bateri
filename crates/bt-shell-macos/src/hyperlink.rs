@@ -310,7 +310,11 @@ fn spans_contain(spans: &[LinkSpan], in_dock: bool, cell: LinkCell) -> bool {
 /// `None` outside the grid's columns, in the left padding and below the grid
 /// (the dock band). Above the origin nothing is rejected here: whether a band
 /// row stands on screen is `bt-core`'s question (`drawn_lines`), asked under the
-/// `Term` lock with the frame's own numbers.
+/// `Term` lock with the frame's own numbers. **The top fade is a band row too**
+/// here: a link in the text thinning away there underlines on ⌘-hover and
+/// opens on ⌘-click, where the selection takes the fade for the window's edge
+/// ([`crate::view::point_to_cell`]) — the gesture aimed at what the eye sees
+/// works where it sees it.
 pub(crate) fn link_cell_at(
     view_px: (f64, f64),
     metrics: CellMetrics,
