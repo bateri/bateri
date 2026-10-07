@@ -988,6 +988,18 @@ define_class!(
 /// of the content layout rect. In full screen the hidden toolbar leaves no
 /// inset, and the height the row had in a window stays — one copy, read from
 /// the window, never written as a constant.
+///
+/// **It is read in the layout pass, never in `resizeSubviewsWithOldSize:`.**
+/// While the window's frame changes AppKit resizes the content view first
+/// and settles its own chrome after: at that hook the content layout rect,
+/// the window frame's top inset and the title bar's buttons all still
+/// describe the previous size, so the inset came out as the row plus the
+/// resize's delta — measured: a window grown by 200 pt got a 240 pt row —
+/// and it stayed, since nothing laid the root out again. The layout pass
+/// that follows every frame change (`layout`) sees the settled rect. Pinning
+/// the bar to `contentLayoutGuide` with constraints instead would not keep
+/// the row: in full screen the guide's top reaches the view's top and the
+/// row would collapse, so the height would still need a remembered copy.
 pub(crate) struct RootIvars {
     bar: Retained<TabBar>,
     /// The title row's last measured height; `0` until the window reports one.
@@ -1012,9 +1024,21 @@ define_class!(
             true
         }
 
-        /// The window's size changed: the bar and every container follow.
+        /// The window's size changed: the bar and every container follow at
+        /// the row's last height — what AppKit reports here is the previous
+        /// size's (the header) — and the layout pass measures it again.
         #[unsafe(method(resizeSubviewsWithOldSize:))]
         fn resize_subviews(&self, _old: NSSize) {
+            self.place(self.ivars().row.get());
+            self.setNeedsLayout(true);
+        }
+
+        /// AppKit's layout pass: the window's chrome is settled, so the row
+        /// is measured and everything placed by it.
+        #[unsafe(method(layout))]
+        fn layout_pass(&self) {
+            // SAFETY: `NSView`'s argumentless method returning nothing.
+            let _: () = unsafe { msg_send![super(self), layout] };
             self.lay_out();
         }
     }
@@ -1038,7 +1062,8 @@ impl RootView {
 
     /// The title row's height: the content layout rect's top inset — what
     /// the compact toolbar leaves above the content. Kept when the window
-    /// reports none (full screen with the toolbar hidden).
+    /// reports none (full screen with the toolbar hidden). Only outside a
+    /// frame change, where the rect is settled ([`RootIvars`]).
     fn title_row(&self) -> f64 {
         let Some(window) = self.window() else {
             return self.ivars().row.get();
@@ -1051,10 +1076,16 @@ impl RootView {
         self.ivars().row.get()
     }
 
-    /// Puts the bar in the title row and every container under it.
+    /// Measures the title row and puts the bar in it, every container under
+    /// it.
     pub(crate) fn lay_out(&self) {
+        self.place(self.title_row());
+    }
+
+    /// Puts the bar in a `row` tall title row and every container under it.
+    fn place(&self, row: f64) {
         let bounds = self.bounds();
-        let row = self.title_row().min(bounds.size.height);
+        let row = row.min(bounds.size.height);
         let bar = &self.ivars().bar;
         bar.setFrame(NSRect::new(
             NSPoint::ZERO,
