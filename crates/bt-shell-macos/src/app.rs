@@ -160,7 +160,11 @@ use crate::{child, focus, jobs, settings};
 /// to the same limit (the 2026-09-15 broken bundle runs fired it). An interactive run never evaluates this limit.
 ///
 /// **When to re-measure:** when a set arrives that changes the frame path or
-/// the window's visibility (motion, tabs).
+/// the window's visibility (motion, tabs). Tabs arrived (2026-10-08): the
+/// smoke run now measures the second of two tabs, born the way ⌘T opens one,
+/// with the deadline at its birth — re-observed over three runs, its
+/// `content`, `motion` and `quiet` stayed inside the bands above; not
+/// re-measured.
 ///
 /// **Known false positive (stays):** `DisplayLink::resize` requests a frame
 /// unconditionally, so dragging the window during the run produces legitimate
@@ -220,6 +224,14 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// with `BT_RUN_SECONDS=2` the tail shrinks to ~0.75 seconds and the gate
 /// falls while the code is right. If the three are spread over three files,
 /// when one moves the gate silently becomes fragile.
+///
+/// **A fifth input arrived with tabs:** the smoke run's background tab is
+/// born first, from the same recipe, and its `\033[2G` must land while it is
+/// hidden (the `back_wakes=` witness). The deadline counts from the measured
+/// tab's birth, so this floor's tail is the measured tab's alone — but the
+/// sleep now serves two clocks: shortened below the background tab's first
+/// frame, its print lands before it hides and the run falls red on the
+/// background arm, not here.
 ///
 /// **Known false positive** (same root as [`IDLE_FRAME_LIMIT`]'s): dragging
 /// the window, covering and uncovering it or waking the screen during the
@@ -1242,6 +1254,21 @@ pub(crate) struct Ivars {
     /// The timed run's recipe; `None` → the user's own session. The deadline,
     /// the guard, the fixed shell and the report **all** depend on this together.
     run: Option<Run>,
+    /// The timed run's measured pane: the one whose counters, `quiet=` and
+    /// `teardown=` the report prints ([`AppDelegate::measured_pane`]). Set
+    /// when it is born — the first window's pane under [`Workload::Load`],
+    /// the second tab's under [`Workload::Smoke`]
+    /// ([`AppDelegate::open_measured_tab`]). Held by identity because a
+    /// smoke run has two tabs and "the first window's focused pane" would
+    /// silently become whichever is selected at the deadline.
+    measured: Cell<Option<u64>>,
+    /// The smoke run asked for its measured tab — once, by whichever came
+    /// first: the background tab's first content frame or the backstop
+    /// ([`AppDelegate::open_measured_after_first_frame`]).
+    measured_asked: Cell<bool>,
+    /// The smoke run's background tab, from the moment it left the screen;
+    /// `None` in every other run and before then.
+    background: Cell<Option<Hidden>>,
     /// The subtitle's slots; written only by [`AppDelegate::post_notices`].
     /// App-wide, because their sources (settings, theme, font, write) are too:
     /// every window's subtitle shows the same text.
@@ -1471,21 +1498,16 @@ define_class!(
             self.observe_power_off();
 
             if let Some(run) = self.ivars().run {
-                // The timer is not a block but `performSelector`: the selector is
-                // in this class and needs no cancelling.
-                // SAFETY: `runDeadline:` is defined in this class and takes a single
-                // Option<&AnyObject> argument. Delegate properties are weak
-                // references; what keeps self alive is the `Retained` in `run()`,
-                // which outlives `app.run()`. The timer also holds its target itself.
-                // Common modes: live resizing puts the run loop in tracking mode,
-                // a timer set up in the default mode would be postponed there.
-                unsafe {
-                    self.performSelector_withObject_afterDelay_inModes(
-                        sel!(runDeadline:),
-                        None,
-                        run.seconds as f64,
-                        &NSArray::from_slice(&[NSRunLoopCommonModes]),
-                    );
+                match run.workload {
+                    // One tab: measured from its birth, which was just now.
+                    Workload::Load => {
+                        let first = self.first_pane().map(|pane| pane.id());
+                        self.ivars().measured.set(first);
+                        self.arm_deadline(run);
+                    }
+                    // Two tabs: this one draws first, then goes behind the
+                    // measured one ([`AppDelegate::open_measured_tab`]).
+                    Workload::Smoke => self.open_measured_after_first_frame(),
                 }
             }
         }
@@ -1988,6 +2010,81 @@ enum MotionState {
     Unsettled,
 }
 
+/// The smoke run's background tab as it left the screen
+/// ([`AppDelegate::open_measured_tab`]) — the baseline [`Background`] is
+/// counted from.
+#[derive(Clone, Copy, Debug)]
+struct Hidden {
+    /// Its pane (the recipe's tab has one).
+    pane: u64,
+    /// Its link's main-thread frames then ([`drawn_frames`]).
+    frames: u64,
+    /// Its link's damage notices then ([`DisplayLink::requests`]).
+    wakes: u64,
+}
+
+/// What the smoke run's background tab did while hidden, from the moment it
+/// left the screen to the deadline — the `back=` and `back_wakes=` tokens.
+///
+/// **Two numbers, two gates, and neither means anything alone:** `frames`
+/// must be zero (a hidden tab draws nothing), `wakes` must not be — without
+/// a damage notice arriving while it was hidden, a zero would only say that
+/// nothing asked it to draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Background {
+    /// Content, motion and slide frames — the **main-thread** counters, decided
+    /// frames. Not the GPU's finished `frames`: a frame legitimately in flight
+    /// as the tab hid finishes afterwards and would read as a hidden frame.
+    frames: u64,
+    /// Damage notices ([`bt_gpu::Waker::wake`]'s count, which rises before the
+    /// visibility gate) — of **any** source: output, a resize's request.
+    /// Each is a request a visible tab would have drawn; the one the recipe
+    /// guarantees is its second print, and it counts only if it lands after
+    /// the baseline, taken once the measured tab is born — a print that
+    /// lands earlier makes a false **red**, never a false green.
+    wakes: u64,
+}
+
+/// A link's main-thread frame counters summed: content, motion and slide —
+/// the frames it **decided** to draw ([`Background::frames`]). A frame both
+/// animators kept alive counts twice; the gate asks only whether it is zero.
+fn drawn_frames(link: &DisplayLink) -> u64 {
+    link.content_frames() + link.motion_frames() + link.slide_frames()
+}
+
+/// The teardown the report gets ([`AppDelegate::shutdown`]), from every
+/// pane's `(id, result)`: the `measured` pane's (the first pane's when there
+/// is none) — unless a pane's panicked, and then the first such: a panic must
+/// not pass the gate because it happened in the smoke run's background tab,
+/// which is not measured.
+fn reported_teardown(
+    results: &[(u64, Option<Teardown>)],
+    measured: Option<u64>,
+) -> Option<Teardown> {
+    let teardowns = || results.iter().map(|(_, teardown)| *teardown);
+    teardowns()
+        .find(|teardown| panic_site(*teardown).is_some())
+        .or_else(|| match measured {
+            Some(measured) => results
+                .iter()
+                .find(|(pane, _)| *pane == measured)
+                .map(|(_, teardown)| *teardown),
+            None => teardowns().next(),
+        })
+        .flatten()
+}
+
+/// Where a teardown panicked; `None` if it did not. The gate's
+/// [`Verdict::ShutdownPanicked`] and the choice of which pane's teardown the
+/// report gets ([`AppDelegate::shutdown`]) read the same answer.
+fn panic_site(teardown: Option<Teardown>) -> Option<&'static str> {
+    match teardown {
+        Some(Teardown::ReaderPanicked) => Some("reader thread"),
+        Some(Teardown::Panicked) => Some("teardown thread"),
+        _ => None,
+    }
+}
+
 /// The measurement ledger's summary at shutdown: read from the ring, not yet formatted.
 ///
 /// The counter half (`samples`, `dropped`, `discarded`) is read **before** p95, because
@@ -2080,6 +2177,11 @@ struct Report {
     teardown: Option<Teardown>,
     /// Measurement ledger; `None` → the gate was closed (`BT_FRAME_STATS` not given).
     measured: Option<Measured>,
+    /// The smoke run's background tab while hidden; `None` → there was none
+    /// (the measurement load's single tab, or a measured tab that never
+    /// opened). **Gate** in the smoke load ([`Verdict::BackgroundUnwoken`],
+    /// [`Verdict::BackgroundDrew`]).
+    background: Option<Background>,
 }
 
 impl Report {
@@ -2169,6 +2271,16 @@ profile={profile}",
                 };
             }
         }
+        // The background tab's pair, last before `pipeline=ok`, so the line's
+        // start and the `slots=`/`slots2=` neighbours stay where they were.
+        // Without a background tab both say `none` — the `quiet=none` rule:
+        // `back=0` would read as "it stayed dark", which nothing measured.
+        let _ = match self.background {
+            Some(Background { frames, wakes }) => {
+                write!(line, " back={frames} back_wakes={wakes}")
+            }
+            None => write!(line, " back=none back_wakes=none"),
+        };
         line.push_str(" pipeline=ok");
         line
     }
@@ -2253,10 +2365,20 @@ enum Verdict {
     MissingCounter {
         required: &'static str,
     },
+    /// The smoke run's background tab got no damage notice while hidden — or
+    /// there was no background tab: the witness never ran, so its zero frames
+    /// ([`Verdict::BackgroundDrew`]) would prove nothing. A missing counter of
+    /// the second tab, hence right after the first tab's.
+    BackgroundUnwoken,
     /// The frame count exceeded the upper bound: zero-frames-at-idle is broken.
     ExcessFrames {
         limit: u64,
     },
+    /// The smoke run's background tab drew while hidden: zero frames in a
+    /// background tab is broken. Recognised by its count like
+    /// [`Verdict::ExcessFrames`], hence right after it; asked only once the
+    /// witness is in ([`Verdict::BackgroundUnwoken`]).
+    BackgroundDrew,
     /// At the deadline there was an animation that had not settled: its stop condition is broken.
     ///
     /// The **complement** of [`ExcessFrames`](Verdict::ExcessFrames), not a copy:
@@ -2311,6 +2433,7 @@ fn verdict(
     teardown: Option<Teardown>,
     motion: MotionState,
     quiet: Option<Duration>,
+    background: Option<Background>,
 ) -> Verdict {
     let Counters {
         frames: n,
@@ -2327,7 +2450,13 @@ fn verdict(
     // preference, not a gate decision: whichever arm is chosen, the run is red and the exit is 1.
     // The order was set as "the more fundamental fault first" — missing counter
     // (a link never ran) > flowing frames > unsettled animation > short tail >
-    // teardown panic. The three leak arms are ordered among themselves by
+    // teardown panic. The smoke run's background tab adds one arm to each of
+    // the first two classes and takes the second place in both: its missing
+    // witness right after the measured tab's missing counters, its drawn
+    // frames right after the measured tab's excess — the measured tab's own
+    // arms keep their order, and a background tab that drew is asked only
+    // once its witness is in (`a_background_tab_must_stay_dark`).
+    // The three leak arms are ordered among themselves by
     // **recognising power**: `content` recognises it by its count, the settling
     // question by its infrastructure; the tail only by the trace it leaves, i.e. it says the least.
     // Panic goes last, because the others say that what the run **measured** is
@@ -2336,11 +2465,7 @@ fn verdict(
     // `motion_and_panic_report_the_more_fundamental_fault` and
     // `a_short_tail_fails_the_gate` pin this order.
     // Reversing it would also break today's order of `ExcessFrames`.
-    let panicked = match teardown {
-        Some(Teardown::ReaderPanicked) => Some("reader thread"),
-        Some(Teardown::Panicked) => Some("teardown thread"),
-        _ => None,
-    };
+    let panicked = panic_site(teardown);
     match workload {
         // The measurement load streams plain text: there is **no** background or
         // rule and there will not be. Asking for them would be asking a run that
@@ -2373,10 +2498,16 @@ fn verdict(
                 Verdict::MissingCounter {
                     required: "all five must be >0",
                 }
+            } else if background.is_none_or(|back| back.wakes == 0) {
+                // No background tab is the same answer: nothing was shown to
+                // stay dark while hidden.
+                Verdict::BackgroundUnwoken
             } else if c > IDLE_FRAME_LIMIT {
                 Verdict::ExcessFrames {
                     limit: IDLE_FRAME_LIMIT,
                 }
+            } else if background.is_some_and(|back| back.frames > 0) {
+                Verdict::BackgroundDrew
             } else if motion == MotionState::Unsettled {
                 Verdict::MotionUnsettled
             } else if quiet.is_none_or(|q| q < QUIET_FLOOR) {
@@ -2488,6 +2619,9 @@ impl AppDelegate {
             });
         let this = Self::alloc(mtm).set_ivars(Ivars {
             run: opts.run,
+            measured: Cell::new(None),
+            measured_asked: Cell::new(false),
+            background: Cell::new(None),
             notices: RefCell::new(Notices::default()),
             settings: RefCell::new(Settings::default()),
             config_watch: RefCell::new(None),
@@ -3941,16 +4075,133 @@ impl AppDelegate {
         (Saved { windows }, histories)
     }
 
-    /// The quiet stamp of the timed run's single window (`quiet=`).
-    ///
-    /// A timed run has a single window and a single pane and the report
-    /// reads it; it is the first in the list.
+    /// The quiet stamp of the timed run's measured pane (`quiet=`).
     fn quiet_since(&self) -> Option<Duration> {
-        let pane = self
-            .windows()
+        self.measured_pane()
+            .and_then(|pane| pane.link().and_then(DisplayLink::quiet_since))
+    }
+
+    /// The first window's selected tab's focused pane — the launch's only
+    /// pane in a timed run, before the smoke run's second tab.
+    fn first_pane(&self) -> Option<Retained<TerminalPane>> {
+        self.windows()
             .first()
-            .map(|window| window.selected_tab().focused_pane());
-        pane.and_then(|pane| pane.link().and_then(DisplayLink::quiet_since))
+            .map(|window| window.selected_tab().focused_pane())
+    }
+
+    /// The pane with id `id`, **closing or not**: the report reads its
+    /// counters after shutdown has begun every pane's closing, which
+    /// [`AppDelegate::pane`] would skip.
+    fn timed_pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
+        self.all_panes().into_iter().find(|pane| pane.id() == id)
+    }
+
+    /// The timed run's measured pane ([`Ivars::measured`]); `None` before
+    /// it is born — or if it never was, and then the report's counters are
+    /// zero and the gate says `MissingCounter`.
+    fn measured_pane(&self) -> Option<Retained<TerminalPane>> {
+        self.timed_pane(self.ivars().measured.get()?)
+    }
+
+    /// Arms the timed run's deadline (`runDeadline:`), `run.seconds` from
+    /// now — when the measured pane is born, so its timeline to the deadline
+    /// is the same in both workloads.
+    fn arm_deadline(&self, run: Run) {
+        // The timer is not a block but `performSelector`: the selector is
+        // in this class and needs no cancelling.
+        // SAFETY: `runDeadline:` is defined in this class and takes a single
+        // Option<&AnyObject> argument. Delegate properties are weak
+        // references; what keeps self alive is the `Retained` in `run()`,
+        // which outlives `app.run()`. The timer also holds its target itself.
+        // Common modes: live resizing puts the run loop in tracking mode,
+        // a timer set up in the default mode would be postponed there.
+        unsafe {
+            self.performSelector_withObject_afterDelay_inModes(
+                sel!(runDeadline:),
+                None,
+                run.seconds as f64,
+                &NSArray::from_slice(&[NSRunLoopCommonModes]),
+            );
+        }
+    }
+
+    /// The smoke run's first step: the launch's tab — the background one —
+    /// draws its first content frame **selected**, and only then does the
+    /// measured tab open over it ([`AppDelegate::open_measured_tab`]). After
+    /// that frame the background tab's zero is its hiding's doing, not a
+    /// link that never ran.
+    ///
+    /// The notifier only queues the opening: it is told from inside that
+    /// link's tick, and the opening hides that very link.
+    ///
+    /// **A backstop bounds the run:** a link that never draws (a surface
+    /// never sized, a window occluded from birth) never tells, and the
+    /// deadline is armed only when the measured tab opens — so the opening
+    /// also comes `run.seconds` after launch, whichever is first, and the
+    /// run stays within twice its seconds instead of waiting on the recipe's
+    /// shell to exit. A pane without a link (no session) opens at once.
+    fn open_measured_after_first_frame(&self) {
+        let Some(run) = self.ivars().run else {
+            return;
+        };
+        let pane = self.first_pane();
+        let Some(link) = pane.as_deref().and_then(TerminalPane::link) else {
+            self.open_measured_tab();
+            return;
+        };
+        let open = || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = delegate(mtm) {
+                app.open_measured_tab();
+            }
+        };
+        link.on_first_content_frame(Box::new(move || DispatchQueue::main().exec_async(open)));
+        if let Ok(when) = DispatchTime::try_from(Duration::from_secs(run.seconds)) {
+            let _ = DispatchQueue::main().after(when, open);
+        }
+    }
+
+    /// The smoke run's second step: the measured tab opens by ⌘T's own path
+    /// (the bar's `+`, [`AppDelegate::new_tab_in`]) and the launch's tab
+    /// goes behind it, hidden; its main-thread frames and damage notices
+    /// are noted at that moment ([`Hidden`]) — **after** the switch, so the
+    /// notice its own focus change plants while leaving the screen is not
+    /// its witness. The deadline counts from here, the measured tab's birth:
+    /// its timeline to the deadline is the single tab's of before. The
+    /// measured tab is never hidden.
+    ///
+    /// If the tab could not open, nothing is measured: the counters read
+    /// zero and the gate says `MissingCounter` at the same deadline.
+    fn open_measured_tab(&self) {
+        let Some(run) = self.ivars().run else {
+            return;
+        };
+        if self.ivars().measured_asked.replace(true) {
+            return;
+        }
+        let window = self.windows().first().cloned();
+        let opened = window.is_some_and(|window| {
+            let background = window.selected_tab().focused_pane();
+            self.new_tab_in(window.id());
+            let measured = window.selected_tab().focused_pane();
+            if measured.id() == background.id() {
+                return false;
+            }
+            self.ivars().measured.set(Some(measured.id()));
+            let hidden = background.link().map(|link| Hidden {
+                pane: background.id(),
+                frames: drawn_frames(link),
+                wakes: link.requests(),
+            });
+            self.ivars().background.set(hidden);
+            true
+        });
+        // The counters will read zero and say only that; this says why.
+        if !opened {
+            eprintln!("bateri: the smoke run's measured tab did not open");
+        }
+        self.arm_deadline(run);
     }
 
     /// The current settings — the path windows read. The borrow must be kept short:
@@ -4837,10 +5088,13 @@ impl AppDelegate {
     /// so the copies left on the `"PTY teardown"` thread when the bound expires
     /// carry no `Waker` (`wake.rs` → Sahiplik).
     ///
-    /// The returned result is the **first** window's first pane's: the only path asking for a report is
-    /// the timed run and there is a single window and a single pane there.
-    /// On an interactive close the result
-    /// is dropped — not collected, since nobody reads it.
+    /// The returned result is the timed run's **measured** pane's
+    /// ([`Ivars::measured`]; the first pane when there is none) — unless
+    /// another pane's teardown panicked, which is returned instead: the smoke
+    /// run's background tab closes here too, and a panic must not pass the
+    /// gate because it happened in the tab that is not measured. On an
+    /// interactive close the result is dropped — not collected, since nobody
+    /// reads it.
     fn shutdown(&self) -> Option<Teardown> {
         // The watchdog's budget starts at **shutdown**, not at process start:
         // startup (GPU device, pipeline setup, first window) can take seconds
@@ -4920,17 +5174,14 @@ impl AppDelegate {
         });
         // The result feeds the report (`teardown=`): if the session was never
         // born it is `None`, and that is an answer too — nothing to close.
-        let mut first = None;
-        for (index, closing) in closing.into_iter().enumerate() {
-            let teardown = closing.map(|closing| closing.wait_until(deadline));
-            if index == 0 {
-                first = teardown;
-            }
-        }
+        let results: Vec<_> = closing
+            .into_iter()
+            .map(|(pane, closing)| (pane, closing.map(|closing| closing.wait_until(deadline))))
+            .collect();
         if let Some(masters) = masters {
             let _ = masters.join();
         }
-        first
+        reported_teardown(&results, self.ivars().measured.get())
     }
 
     /// The smoke run's report and exit — called **after shutdown**.
@@ -4950,15 +5201,12 @@ impl AppDelegate {
     /// value must be read **before** shutdown (in both callers' docs) and if
     /// read here `shutdown()`'s wait would be written into the quiet time.
     ///
-    /// The counters are read from the smoke run's **only** window (the first
-    /// in the list). With no window (if startup never built one the process
-    /// had already exited) the counters are zero and the gate says `MissingCounter`.
+    /// The counters are read from the **measured** pane ([`Ivars::measured`]),
+    /// the background tab's from its own ([`Hidden`]). With no measured pane
+    /// (it never opened; with no window at all startup had already exited)
+    /// the counters are zero and the gate says `MissingCounter`.
     fn report_and_exit(&self, run: Run, teardown: Option<Teardown>, quiet: Option<Duration>) -> ! {
-        let windows = self.windows();
-        // The smoke run's only window's only pane.
-        let pane = windows
-            .first()
-            .map(|window| window.selected_tab().focused_pane());
+        let pane = self.measured_pane();
         // The frames still in flight are counted **before** `frames=` is read:
         // completion is polled by the ticks, and the link is
         // stopped, so nothing else would count them.
@@ -5018,6 +5266,17 @@ impl AppDelegate {
         } else {
             MotionState::Unsettled
         };
+        // The background tab since it left the screen: its link is stopped
+        // like the measured one, so these are the deadline's numbers. Not
+        // drained — its finished GPU frames are not what is asked.
+        let background = self.ivars().background.get().and_then(|hidden| {
+            let pane = self.timed_pane(hidden.pane)?;
+            let link = pane.link()?;
+            Some(Background {
+                frames: drawn_frames(link).saturating_sub(hidden.frames),
+                wakes: link.requests().saturating_sub(hidden.wakes),
+            })
+        });
         // The fifth token `slots=U/T` is a **counter**, not a gate: it says how many of the atlas's
         // slots are filled and a measurement will read the occupancy ratio from it. It stays out of the
         // gate because of its meaning: an empty atlas is legitimate (a frame with no glyphs) and so
@@ -5038,13 +5297,14 @@ impl AppDelegate {
             measured: self.ivars().stats.as_deref().map(|stats| {
                 Measured::read(stats, renderer.is_some_and(Renderer::gpu_timing_supported))
             }),
+            background,
         };
         // Tokens appear **only** on the success line and only on stdout: that is
         // the machine contract. Error lines carry the same numbers but not in
         // token form, or a CI step looking for `frames=` would read a frame
         // count from a failed run.
         let secs = run.seconds;
-        match verdict(counters, run.workload, teardown, motion, quiet) {
+        match verdict(counters, run.workload, teardown, motion, quiet, background) {
             Verdict::Pass => {
                 println!("{}", report.token_line());
                 std::process::exit(0);
@@ -5060,6 +5320,25 @@ impl AppDelegate {
                 report.requests,
                 quiet_phrase(report.quiet),
                 c = counters.content,
+            ),
+            // The witness never came, so the background tab's zero says
+            // nothing; the message names which half was missing.
+            Verdict::BackgroundUnwoken => match background {
+                Some(back) => eprintln!(
+                    "bateri: the background tab got no damage notice while hidden in the {secs}-second run — its {} frames drawn while hidden prove nothing (the recipe's second print must arrive after the measured tab opens)",
+                    back.frames,
+                ),
+                None => eprintln!(
+                    "bateri: the {secs}-second smoke run recorded no background tab — the first tab had no link when the measured one opened"
+                ),
+            },
+            // A hidden tab drew: the count and the notices that came while it
+            // was hidden, so the reader can tell "the gate let damage through"
+            // (both high) from "something draws without damage".
+            Verdict::BackgroundDrew => eprintln!(
+                "bateri: zero-frames-in-a-background-tab broke — the hidden tab drew {} frames in the {secs}-second run (content, motion and slide frames since it left the screen; {} damage notices while hidden)",
+                background.map_or(0, |back| back.frames),
+                background.map_or(0, |back| back.wakes),
             ),
             Verdict::MissingCounter { required } => eprintln!(
                 "bateri: in the {secs}-second run frames drawn {n}, content frames {c}, cells produced {k}, glyphs drawn {g}, rules drawn {r}, motion frames {m}, {} ({required})",
@@ -5112,6 +5391,14 @@ mod tests {
     /// floor explicitly.
     const HEALTHY_QUIET: Option<Duration> = Some(Duration::from_millis(1742));
 
+    /// A healthy smoke run's background tab: no frame while hidden, the
+    /// recipe's second print as its one damage notice. Tests that do not ask
+    /// about the background arms get this; theirs name it explicitly.
+    const HEALTHY_BACK: Option<Background> = Some(Background {
+        frames: 0,
+        wakes: 1,
+    });
+
     /// Grid metrics; the gutter is an **argument**, because `split_into_grid` is asked two
     /// separate things: the cell split (gutter zero) and the gutter's deduction from columns.
     fn metrics(w: u16, h: u16, gutter: u16) -> CellMetrics {
@@ -5145,6 +5432,9 @@ mod tests {
             quiet: Some(Duration::from_millis(2950)),
             teardown: Some(Teardown::Clean),
             measured: None,
+            // The smoke run's background tab stayed dark while a notice came;
+            // the measurement load has none.
+            background: HEALTHY_BACK.filter(|_| workload == Workload::Smoke),
         }
     }
 
@@ -5210,9 +5500,17 @@ mod tests {
             // day, because the "never deleted" promise is a promise only if
             // a guard exists — the list above protects only the **old** tokens.
             "slots2=0/2048",
+            // The background tab's pair arrived with tabs and is **permanent**
+            // from that day, in its place: last before `pipeline=ok`.
+            "back=0",
+            "back_wakes=1",
         ] {
             assert!(line.contains(token), "{token} yok: {line}");
         }
+        assert!(
+            line.ends_with(" back=0 back_wakes=1 pipeline=ok"),
+            "the background pair stands last, before pipeline=ok: {line}"
+        );
         // Its position is part of the contract too: `slots=` and `slots2=` side by side. Were they apart,
         // someone reading the line by eye could not connect the two planes.
         assert!(
@@ -5242,6 +5540,9 @@ mod tests {
         )
         .token_line();
         assert!(load.contains("load=load"), "{load}");
+        // The measurement load has one tab: the pair says so in its own word,
+        // not with a zero that would read "it stayed dark".
+        assert!(load.contains(" back=none back_wakes=none "), "{load}");
     }
 
     #[test]
@@ -5618,6 +5919,7 @@ mod tests {
                 clean,
                 settled,
                 HEALTHY_QUIET,
+                HEALTHY_BACK,
             )
         };
         let load = |n, k, g, r| {
@@ -5627,6 +5929,7 @@ mod tests {
                 clean,
                 settled,
                 HEALTHY_QUIET,
+                None,
             )
         };
         let excess = Verdict::ExcessFrames {
@@ -5652,6 +5955,7 @@ mod tests {
                 clean,
                 settled,
                 HEALTHY_QUIET,
+                HEALTHY_BACK,
             )
         };
         assert_eq!(
@@ -5742,7 +6046,8 @@ mod tests {
                 Workload::Smoke,
                 clean,
                 MotionState::Unsettled,
-                HEALTHY_QUIET
+                HEALTHY_QUIET,
+                HEALTHY_BACK
             ),
             Verdict::MotionUnsettled
         );
@@ -5752,7 +6057,8 @@ mod tests {
                 Workload::Smoke,
                 clean,
                 MotionState::Settled,
-                HEALTHY_QUIET
+                HEALTHY_QUIET,
+                HEALTHY_BACK
             ),
             Verdict::Pass
         );
@@ -5774,6 +6080,7 @@ mod tests {
                 clean,
                 MotionState::Unsettled,
                 HEALTHY_QUIET,
+                None,
             ),
             Verdict::Pass
         );
@@ -5788,6 +6095,7 @@ mod tests {
                 clean,
                 MotionState::Settled,
                 HEALTHY_QUIET,
+                HEALTHY_BACK,
             ),
             Verdict::MissingCounter {
                 required: "all five must be >0"
@@ -5806,6 +6114,7 @@ mod tests {
                 clean,
                 MotionState::Unsettled,
                 HEALTHY_QUIET,
+                HEALTHY_BACK,
             ),
             Verdict::ExcessFrames {
                 limit: IDLE_FRAME_LIMIT
@@ -5831,7 +6140,7 @@ mod tests {
         };
         let clean = Some(Teardown::Clean);
         let settled = MotionState::Settled;
-        let smoke = |quiet| verdict(good, Workload::Smoke, clean, settled, quiet);
+        let smoke = |quiet| verdict(good, Workload::Smoke, clean, settled, quiet, HEALTHY_BACK);
         let short = Verdict::QuietTooShort { floor: QUIET_FLOOR };
 
         // The tail of the measured slow leak (highest `129,25 ms`) and the lowest
@@ -5862,6 +6171,7 @@ mod tests {
                 clean,
                 settled,
                 Some(Duration::ZERO),
+                None,
             ),
             Verdict::Pass
         );
@@ -5878,6 +6188,7 @@ mod tests {
                 clean,
                 settled,
                 Some(Duration::ZERO),
+                HEALTHY_BACK,
             ),
             Verdict::ExcessFrames {
                 limit: IDLE_FRAME_LIMIT
@@ -5890,6 +6201,7 @@ mod tests {
                 clean,
                 MotionState::Unsettled,
                 Some(Duration::ZERO),
+                HEALTHY_BACK,
             ),
             Verdict::MotionUnsettled
         );
@@ -5904,9 +6216,178 @@ mod tests {
                 Some(Teardown::ReaderPanicked),
                 settled,
                 Some(Duration::ZERO),
+                HEALTHY_BACK,
             ),
             short
         );
+    }
+
+    #[test]
+    fn a_background_tab_must_stay_dark() {
+        // The smoke run's second tab: the first one draws, hides behind the
+        // measured one and must draw **nothing** while its recipe's second
+        // print arrives. Two arms, and the second is worthless without the
+        // first — a zero drawn while nothing asked is no proof.
+        let good = Counters {
+            frames: 28,
+            content: 2,
+            cells: 8,
+            glyphs: 6,
+            rules: 15,
+            motion: 26,
+            slide: 0,
+        };
+        let clean = Some(Teardown::Clean);
+        let settled = MotionState::Settled;
+        let smoke = |background| {
+            verdict(
+                good,
+                Workload::Smoke,
+                clean,
+                settled,
+                HEALTHY_QUIET,
+                background,
+            )
+        };
+        let back = |frames, wakes| Some(Background { frames, wakes });
+        assert_eq!(smoke(back(0, 1)), Verdict::Pass);
+        assert_eq!(smoke(back(0, 3)), Verdict::Pass);
+        // One frame while hidden is the fault: the gate has no tolerance,
+        // the counters are decided frames and a hidden tab decides none.
+        assert_eq!(smoke(back(1, 1)), Verdict::BackgroundDrew);
+        // No notice while hidden: the zero proves nothing, and nor does a
+        // missing background tab.
+        assert_eq!(smoke(back(0, 0)), Verdict::BackgroundUnwoken);
+        assert_eq!(smoke(None), Verdict::BackgroundUnwoken);
+        // A tab that drew with no notice still reads as unwoken: the witness
+        // is asked first, like a missing counter before an excess.
+        assert_eq!(smoke(back(4, 0)), Verdict::BackgroundUnwoken);
+
+        // **The measurement load is exempt**: it has one tab.
+        assert_eq!(
+            verdict(
+                Counters {
+                    cells: 0,
+                    rules: 0,
+                    motion: 0,
+                    slide: 0,
+                    ..good
+                },
+                Workload::Load,
+                clean,
+                settled,
+                Some(Duration::ZERO),
+                None,
+            ),
+            Verdict::Pass
+        );
+
+        // Order: the measured tab's missing counter before the background's
+        // missing witness; that witness before the measured tab's excess;
+        // the excess before the background's frames; those before the
+        // measured tab's settling, tail and panic.
+        assert_eq!(
+            verdict(
+                Counters { cells: 0, ..good },
+                Workload::Smoke,
+                clean,
+                settled,
+                HEALTHY_QUIET,
+                None,
+            ),
+            Verdict::MissingCounter {
+                required: "all five must be >0"
+            }
+        );
+        let excess = Counters {
+            content: IDLE_FRAME_LIMIT + 1,
+            ..good
+        };
+        assert_eq!(
+            verdict(
+                excess,
+                Workload::Smoke,
+                clean,
+                settled,
+                HEALTHY_QUIET,
+                back(0, 0)
+            ),
+            Verdict::BackgroundUnwoken
+        );
+        assert_eq!(
+            verdict(
+                excess,
+                Workload::Smoke,
+                clean,
+                settled,
+                HEALTHY_QUIET,
+                back(2, 1)
+            ),
+            Verdict::ExcessFrames {
+                limit: IDLE_FRAME_LIMIT
+            }
+        );
+        assert_eq!(
+            verdict(
+                good,
+                Workload::Smoke,
+                Some(Teardown::Panicked),
+                MotionState::Unsettled,
+                Some(Duration::ZERO),
+                back(2, 1),
+            ),
+            Verdict::BackgroundDrew
+        );
+    }
+
+    #[test]
+    fn the_report_takes_a_panic_from_any_pane() {
+        // The smoke run closes two tabs and `teardown=` is the measured
+        // pane's — but a panic in the other pane's teardown must not pass the
+        // gate (`ShutdownPanicked` reads this one value).
+        let clean = Some(Teardown::Clean);
+        let abandoned = Some(Teardown::Abandoned);
+        let panicked = Some(Teardown::ReaderPanicked);
+        // The background tab (pane 1) first, the measured one (pane 3)
+        // second, in closing order: the measured's, found by id.
+        assert_eq!(
+            reported_teardown(&[(1, clean), (3, abandoned)], Some(3)),
+            abandoned
+        );
+        assert_eq!(reported_teardown(&[(1, clean), (3, None)], Some(3)), None);
+        // No measured pane (an interactive quit): the first pane's.
+        assert_eq!(
+            reported_teardown(&[(1, abandoned), (3, clean)], None),
+            abandoned
+        );
+        // A panic anywhere wins over the measured pane's quiet result.
+        assert_eq!(
+            reported_teardown(&[(1, panicked), (3, clean)], Some(3)),
+            panicked
+        );
+        assert_eq!(
+            reported_teardown(&[(1, clean), (3, panicked)], Some(1)),
+            panicked
+        );
+        // No pane, or a measured id that closed nowhere: nothing to report.
+        assert_eq!(reported_teardown(&[], None), None);
+        assert_eq!(reported_teardown(&[(1, clean)], Some(9)), None);
+        // The two panic sites and nothing else.
+        assert_eq!(panic_site(panicked), Some("reader thread"));
+        assert_eq!(
+            panic_site(Some(Teardown::Panicked)),
+            Some("teardown thread")
+        );
+        for quiet in [
+            None,
+            clean,
+            abandoned,
+            Some(Teardown::Unbounded),
+            Some(Teardown::AlreadyDone),
+            Some(Teardown::HungUp),
+        ] {
+            assert_eq!(panic_site(quiet), None, "{quiet:?}");
+        }
     }
 
     #[test]
@@ -5935,6 +6416,7 @@ mod tests {
                 Some(Teardown::Panicked),
                 MotionState::Unsettled,
                 HEALTHY_QUIET,
+                HEALTHY_BACK,
             ),
             Verdict::MotionUnsettled
         );
@@ -5946,6 +6428,7 @@ mod tests {
                 Some(Teardown::Panicked),
                 MotionState::Settled,
                 HEALTHY_QUIET,
+                HEALTHY_BACK,
             ),
             Verdict::ShutdownPanicked { .. }
         ));
@@ -5975,7 +6458,8 @@ mod tests {
                         Workload::Smoke,
                         Some(teardown),
                         settled,
-                        HEALTHY_QUIET
+                        HEALTHY_QUIET,
+                        HEALTHY_BACK
                     ),
                     Verdict::ShutdownPanicked { .. }
                 ),
@@ -5983,7 +6467,14 @@ mod tests {
             );
             assert!(
                 matches!(
-                    verdict(good, Workload::Load, Some(teardown), settled, HEALTHY_QUIET),
+                    verdict(
+                        good,
+                        Workload::Load,
+                        Some(teardown),
+                        settled,
+                        HEALTHY_QUIET,
+                        None
+                    ),
                     Verdict::ShutdownPanicked { .. }
                 ),
                 "{teardown:?} cannot pass green under the measurement workload either"
@@ -6001,7 +6492,14 @@ mod tests {
             None,
         ] {
             assert_eq!(
-                verdict(good, Workload::Smoke, teardown, settled, HEALTHY_QUIET),
+                verdict(
+                    good,
+                    Workload::Smoke,
+                    teardown,
+                    settled,
+                    HEALTHY_QUIET,
+                    HEALTHY_BACK
+                ),
                 Verdict::Pass
             );
         }
@@ -6015,6 +6513,7 @@ mod tests {
                 Some(Teardown::Panicked),
                 settled,
                 HEALTHY_QUIET,
+                HEALTHY_BACK,
             ),
             Verdict::MissingCounter {
                 required: "all five must be >0"

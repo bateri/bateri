@@ -1953,9 +1953,9 @@ impl TerminalWindow {
     /// deadline). The order is the pane's ([`TerminalPane::begin_close`]: the
     /// upload queue, rhythm, `Waker`, `SIGHUP`) and is for **every** pane of
     /// every tab ([`TerminalTab::begin_close`]); the return is one result per
-    /// pane, tab by tab in tree order. Idempotent; the place of a pane whose
-    /// session never came to be is `None`.
-    pub(crate) fn begin_close(&self) -> Vec<Option<Closing>> {
+    /// pane beside its id, tab by tab in tree order. Idempotent; the result
+    /// of a pane whose session never came to be is `None`.
+    pub(crate) fn begin_close(&self) -> Vec<(u64, Option<Closing>)> {
         self.tabs()
             .iter()
             .flat_map(|tab| tab.begin_close())

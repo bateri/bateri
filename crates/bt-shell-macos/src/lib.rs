@@ -253,9 +253,14 @@ pub enum Workload {
     /// `rules` counts and the guard of zero frames at idle — content frames
     /// are **upper-bounded** here (`app::IDLE_FRAME_LIMIT`), while the quiet
     /// at the end of the run is **lower-bounded** (`app::QUIET_FLOOR`).
+    ///
+    /// **Two tabs**, the only workload with a second: the first draws, then
+    /// hides behind the measured one and must draw nothing while its recipe
+    /// still prints (`back=`/`back_wakes=`, `app::AppDelegate::open_measured_tab`).
     Smoke,
     /// `BT_SCROLL_TEST`: output streaming for the whole run. The frame flow
-    /// is the point of the work, there is no upper bound.
+    /// is the point of the work, there is no upper bound. One tab: the
+    /// measurement's numbers do not move with the smoke run's second.
     Load,
 }
 

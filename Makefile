@@ -102,7 +102,8 @@ test:
 # Opens the window, and when BT_RUN_SECONDS expires looks at the number of
 # frames, cells, glyphs, rule lines and atlas slots:
 # frames=N cells=K glyphs=G rules=R slots=U/T slots2=U/T load=smoke requests=I content=C \
-#   motion=M slide=S quiet=Sms teardown=clean profile=debug samples=off pipeline=ok
+#   motion=M slide=S quiet=Sms teardown=clean profile=debug samples=off back=B back_wakes=W \
+#   pipeline=ok
 # Red if ONE of the first four (frames, cells, glyphs, rules) or `motion` is 0;
 # `slots`, `slots2`, `load`, `requests`, `slide` and `profile` are not gates,
 # they are counters and labels. `slots` is the atlas's **mask** plane, `slots2`
@@ -147,6 +148,15 @@ test:
 # known debt.
 # `samples=off` = the measurement gate (BT_FRAME_STATS) was off; measurement
 # tokens are NEVER printed in that run.
+# TWO TABS: the smoke run opens its first tab with the smoke recipe, waits for
+# that tab's first content frame (at most BT_RUN_SECONDS), then opens the
+# MEASURED tab the way Cmd-T does; the deadline counts from the measured tab's birth and every token
+# above is the measured tab's. The first tab goes behind it, hidden, and its
+# recipe's second print (bt-core smoke_shell) lands while it is hidden:
+# `back` = the frames it decided to draw while hidden (content + motion +
+# slide, NOT the GPU's `frames`) — red if > 0; `back_wakes` = the damage
+# notices it got while hidden — red if 0, because without one `back=0` proves
+# nothing. Both say `none` under the measurement load, which has one tab.
 # The full list of tokens and their contract: app.rs Report::token_line;
 # the `teardown` values are in teardown_token, `insufficient` in push_span.
 # In a headless environment the binary prints "SKIPPED" to stdout and exits

@@ -1723,6 +1723,15 @@ impl DirtyFlag {
 /// red while the code is correct. Shortening the sleep brings that race back.
 /// In a three-second run 1 s of sleep + settling leaves a comfortable tail
 /// for `quiet=`.
+///
+/// **The smoke run's background tab leans on the same print.** The run opens
+/// two tabs from this recipe: the first draws, then goes behind the measured
+/// one as soon as its first content frame is drawn, and its `\033[2G` — 1 s
+/// after its birth, so it lands while it is hidden — is the damage notice the
+/// `back_wakes=` token counts. Without a notice while hidden its `back=0`
+/// would prove nothing and the gate goes red. Whoever moves or drops the
+/// print, or shortens the sleep below the background tab's first frame, must
+/// think of that token too.
 pub fn smoke_shell() -> (String, Vec<String>) {
     (
         "/bin/sh".to_owned(),

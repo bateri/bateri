@@ -785,9 +785,14 @@ impl TerminalTab {
     /// The closing sequence's steps that fall to the tab — **starts, does
     /// not wait**: the pane's order ([`TerminalPane::begin_close`]: the
     /// upload queue, rhythm, `Waker`, `SIGHUP`) for **every** pane; one
-    /// result per pane in tree order. Idempotent; the place of a pane whose
-    /// session never came to be is `None`.
-    pub(crate) fn begin_close(&self) -> Vec<Option<Closing>> {
-        self.panes().iter().map(|pane| pane.begin_close()).collect()
+    /// result per pane in tree order, beside the pane's id — whoever wants
+    /// one pane's result finds it by id, not by a second walk's position.
+    /// Idempotent; the result of a pane whose session never came to be is
+    /// `None`.
+    pub(crate) fn begin_close(&self) -> Vec<(u64, Option<Closing>)> {
+        self.panes()
+            .iter()
+            .map(|pane| (pane.id(), pane.begin_close()))
+            .collect()
     }
 }

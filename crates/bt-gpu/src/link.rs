@@ -859,6 +859,10 @@ struct Core {
     /// main thread; the reader is on the main thread too
     /// ([`DisplayLink::content_frames`]).
     content_frames: Cell<u64>,
+    /// Told once, when [`Self::content_frames`] leaves zero
+    /// ([`DisplayLink::on_first_content_frame`]). The marks notifier's
+    /// contract: main thread, no payload, only work sent to the main queue.
+    first_content: Cell<Option<Box<dyn FnOnce()>>>,
     /// **Motion** frame: no damage but an animation that has not settled.
     ///
     /// `content_frames`' sibling and separate from it on purpose: both count
@@ -1357,7 +1361,14 @@ impl Core {
         // The gate's operand rises here: damage was found, the frame will be
         // drawn. Before `frames` and independent of it — it does not wait for
         // the GPU to finish (see `Core::content_frames`).
-        self.content_frames.set(self.content_frames.get() + 1);
+        let content = self.content_frames.get() + 1;
+        self.content_frames.set(content);
+        // One comparison per content frame; the notifier only queues work.
+        if content == 1
+            && let Some(notify) = self.first_content.take()
+        {
+            notify();
+        }
         // `frame()` just refreshed the scroll bar's marks: none are owed.
         self.marks_stale.set(false);
         // Clear and cursor colour from the session's theme: the same source as
@@ -2456,6 +2467,7 @@ impl DisplayLink {
             // what is drawn too.
             origin: Origin::default(),
             content_frames: Cell::new(0),
+            first_content: Cell::new(None),
             motion_frames: Cell::new(0),
             slide_frames: Cell::new(0),
             motion: Cell::new(Motion::default()),
@@ -2677,6 +2689,24 @@ impl DisplayLink {
     /// the notifier must only send that work to the main queue.
     pub fn on_marks_published(&self, notify: Box<dyn Fn()>) {
         self.core.marks_published.replace(Some(notify));
+    }
+
+    /// Sets who is told **once**, when this link decides its first content
+    /// frame — at once if it already has. The timed run's two-tab recipe
+    /// waits on it: the measured tab opens only after the background tab has
+    /// drawn, so the background tab's zero frames afterwards are its hiding's
+    /// doing, not a link that never ran.
+    ///
+    /// Told from inside the tick, with the frame borrowed: the notifier must
+    /// only send work to the main queue ([`Self::on_marks_published`]'s
+    /// contract) — hiding this very link from there would re-enter it. A
+    /// second call replaces a notifier not yet told.
+    pub fn on_first_content_frame(&self, notify: Box<dyn FnOnce()>) {
+        if self.core.content_frames.get() > 0 {
+            notify();
+        } else {
+            self.core.first_content.set(Some(notify));
+        }
     }
 
     /// The scroll bar's marks of the whole history changed — a search pass
