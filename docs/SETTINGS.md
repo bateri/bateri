@@ -525,6 +525,14 @@ the first line has gone into history.
   match is marked at once, the others once the search has counted the
   history; their colours come from the theme's `warning` (see
   [Themes](#themes)).
+- The wider bar — with the pointer over its strip, and always under
+  `"always"` — also marks every command in the whole history, in its track's
+  left part and in the colours of the marks beside the commands (`success`,
+  `error`, and `accent` for one still running). With the pointer on a mark a
+  tip tells the command, its exit code, how long it ran and the time it
+  started — what is known: a command restored from an earlier session shows
+  its text alone. A click on a mark brings that command near the top of the
+  window, two rows down.
 - It takes effect the moment you save. Moving to or from `"always"` resizes
   the grid by the track's width; in a split, the panes keep their
   proportions, and a pane already at its narrowest gives the track's columns
@@ -1532,13 +1540,13 @@ is text in the form `"#rrggbb"` (uppercase works too; no `#rgb` and no alpha).
 | `background` | default background, the window's backdrop |
 | `foreground` | default foreground; the scroll bar's thumb and its track, translucent |
 | `dim` | default foreground written dim (SGR 2) |
-| `accent` | accent; the mark of a **running** command |
+| `accent` | accent; the mark of a **running** command, beside it and on the wide scroll bar |
 | `cursor` | the color of the cursor block |
 | `selection` | the highlight of a mouse selection; selected text keeps its own color, and in an unfocused window the highlight fades towards the background |
 | `search_match` | the highlight of all matches of a search through history (⌘F); text keeps its own color, and it fades in an unfocused window |
 | `search_current` | the highlight of the current match — the one ⏎/⌘G shows; more prominent than `search_match`, and the selection is drawn above both |
-| `success` | status: success; the mark of a command that ended with exit code zero |
-| `error` | status: error; the mark of a command that ended with a non-zero exit code |
+| `success` | status: success; the mark of a command that ended with exit code zero, beside it and on the wide scroll bar |
+| `error` | status: error; the mark of a command that ended with a non-zero exit code, beside it and on the wide scroll bar |
 | `info` | status: info; a remote session — the host on the context line and the dock's top line |
 | `warning` | status: warning; a remote host marked `staging` — the host on the context line and the dock's top line; the scroll bar's marks of search matches (⌘F), laid over the background at 55% |
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |

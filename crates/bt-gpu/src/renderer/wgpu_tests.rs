@@ -1019,6 +1019,8 @@ fn scene_scroll_bar() -> Scene {
             Theme::BATERI.search_mark_linear(),
             Theme::BATERI.search_current_mark_linear(),
         ],
+        &[],
+        [Theme::BATERI.foreground_linear(); 3],
     );
     assert!(frame.scrollbar().is_some(), "no bar in the scene");
     (
@@ -1055,13 +1057,24 @@ fn scene_scroll_bar_always() -> Scene {
             Theme::BATERI.search_mark_linear(),
             Theme::BATERI.search_current_mark_linear(),
         ],
+        // A block mark in its lane: the wide form's third `selection` draw.
+        &[bt_core::TrackBlock {
+            position: 30.0,
+            color: 2,
+            handle: bt_core::BlockHandle::default(),
+        }],
+        [
+            Theme::BATERI.success_linear(),
+            Theme::BATERI.accent_linear(),
+            Theme::BATERI.error_linear(),
+        ],
     );
     assert!(
         frame.scrollbar().is_some() && !frame.scrollbar_track().is_empty(),
         "no track in the scene"
     );
     (
-        "always-up scroll bar over its track, a mark in its lane",
+        "always-up scroll bar over its track, marks in their lanes",
         EDGE,
         frame,
     )

@@ -109,9 +109,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    Blocks, CaretStyle, Clusters, Cursor, CursorMotion, DirtyFlag, DockBudget, DockCols,
-    DockContext, DockState, Erase, Keypress, LinearRgba, SearchRuns, SelectionRun, SelectionRuns,
-    Session, Theme, TrackMarks,
+    BlockHandle, Blocks, CaretStyle, Clusters, Cursor, CursorMotion, DirtyFlag, DockBudget,
+    DockCols, DockContext, DockState, Erase, Keypress, LinearRgba, SearchRuns, SelectionRun,
+    SelectionRuns, Session, Theme, TrackBlock, TrackMarks,
 };
 
 use crate::blink::Blink;
@@ -389,9 +389,25 @@ impl Waker {
 /// remaining window is one frame, because `draw_failed` plants the damage
 /// flag again and the next frame is drawn again with the same offset.
 #[derive(Clone, Default)]
-pub struct Origin(Rc<Cell<Drawn>>);
+pub struct Origin(Rc<Published>);
 
-/// [`Origin`]'s body: one frame's geometry, published together.
+/// What [`Origin`] holds: one drawn frame's publication, written in one
+/// call ([`Origin::set`]).
+///
+/// **The block marks beside the geometry, not in it**: `Drawn` is copied out
+/// whole on every mouse event, and the marks are a list — up to a mark per
+/// bucket of the track. A list kept next to the copied geometry, written in
+/// the same call, is still one frame's picture: both are written on the
+/// frame path and read by the mouse on the same thread, never in between.
+#[derive(Default)]
+struct Published {
+    drawn: Cell<Drawn>,
+    /// The block marks the frame **drew** (`bt_core::TrackMarks::blocks`);
+    /// empty when it drew none — a thin bar has no block lane.
+    blocks: RefCell<Vec<TrackBlock>>,
+}
+
+/// [`Origin`]'s geometry: one frame's, published together.
 #[derive(Clone, Copy, Default)]
 struct Drawn {
     px: f32,
@@ -408,7 +424,7 @@ impl Origin {
     /// fraction included (`Frame::set_scroll_frac`), so the mouse reads the
     /// grid where it was drawn.
     pub fn px(&self) -> f32 {
-        self.0.get().px
+        self.0.drawn.get().px
     }
 
     /// The height of the fill channel above the origin, **rows**: the band
@@ -417,7 +433,7 @@ impl Origin {
     /// history — in a fractional position the half row at the top cannot be
     /// selected either, like the band's.
     pub fn fill_rows(&self) -> u16 {
-        self.0.get().fill_rows
+        self.0.drawn.get().fill_rows
     }
 
     /// The drawn frame's dock geometry: the top of the input block
@@ -431,7 +447,7 @@ impl Origin {
     /// (`Frame::dock_hit`): the text is bottom-aligned and stays in place
     /// through the animation.
     pub fn dock(&self) -> Option<(f32, u16)> {
-        self.0.get().dock
+        self.0.drawn.get().dock
     }
 
     /// The drawn frame's scroll bar layout — where the thumb, its track and
@@ -444,17 +460,61 @@ impl Origin {
     /// scroll, and the mouse reads that from here, not from a second copy of
     /// the bar's arithmetic.
     pub fn scrollbar(&self) -> ScrollbarLayout {
-        self.0.get().scrollbar
+        self.0.drawn.get().scrollbar
     }
 
-    /// Only the frame path writes; not `pub`, and must not be.
-    fn set(&self, px: f32, fill_rows: u16, dock: Option<(f32, u16)>, scrollbar: ScrollbarLayout) {
-        self.0.set(Drawn {
+    /// The drawn block mark under a point — physical pixels from the
+    /// window's top-left — as its handle, for `bt_core::Session::block_info`,
+    /// and its target ([`ScrollbarLayout::block_target`]); `None` off every
+    /// mark, or when the frame drew none. The hit is the layout's
+    /// ([`ScrollbarLayout::block_at`]) against the drawn marks, so the
+    /// pointer takes what is on screen.
+    pub fn block_at(&self, x: f32, y: f32) -> Option<(BlockHandle, [f32; 4])> {
+        let layout = self.scrollbar();
+        let blocks = self.0.blocks.borrow();
+        let at = layout.block_at(x, y, blocks.iter().map(|block| block.position))?;
+        blocks
+            .get(at)
+            .map(|block| (block.handle, layout.block_target(block.position)))
+    }
+
+    /// The drawn block marks' targets, `[x0, y0, x1, y1]` in physical
+    /// pixels — where the pointer takes them
+    /// ([`ScrollbarLayout::block_target`]): the hand cursor's rectangles.
+    pub fn block_targets(&self) -> Vec<[f32; 4]> {
+        let layout = self.scrollbar();
+        self.0
+            .blocks
+            .borrow()
+            .iter()
+            .map(|block| layout.block_target(block.position))
+            .collect()
+    }
+
+    /// Only the frame path writes; not `pub`, and must not be. `blocks` are
+    /// the drawn block marks, or empty. `true` when where the pointer takes
+    /// a mark changed — other marks, or the same ones on another layout
+    /// (the track grew, the thumb they may lie on moved).
+    fn set(
+        &self,
+        px: f32,
+        fill_rows: u16,
+        dock: Option<(f32, u16)>,
+        scrollbar: ScrollbarLayout,
+        blocks: &[TrackBlock],
+    ) -> bool {
+        let before = self.0.drawn.replace(Drawn {
             px,
             fill_rows,
             dock,
             scrollbar,
         });
+        let mut kept = self.0.blocks.borrow_mut();
+        let changed =
+            kept.as_slice() != blocks || (!blocks.is_empty() && before.scrollbar != scrollbar);
+        kept.clear();
+        kept.extend_from_slice(blocks);
+        changed
     }
 }
 
@@ -719,6 +779,11 @@ struct Core {
     /// `None` in a window without a dock, and **structurally**: the path is
     /// never set up in that session, not switched off by a condition.
     alt_screen_changed: Option<Box<dyn Fn()>>,
+    /// Told when the published block marks changed
+    /// ([`DisplayLink::on_marks_published`]) — the pointer's targets moved
+    /// under a still pointer. The alternate-screen notifier's contract: main
+    /// thread, no block, only work sent to the main queue, no payload.
+    marks_published: RefCell<Option<Box<dyn Fn()>>>,
     /// The dock's width, columns; goes into [`Session::frame`]'s budget and
     /// [`Session::dock`] so the dock wraps its overflowing row at the width
     /// it is drawn in.
@@ -1797,6 +1862,8 @@ impl Core {
                 theme.search_mark_linear(),
                 theme.search_current_mark_linear(),
             ],
+            &[],
+            self.marks.borrow().block_colors(),
         );
     }
 
@@ -1914,7 +1981,14 @@ impl Core {
     /// kept there (`Frame` is not cleared), so the value published through
     /// the slide is constant.
     fn publish_origin(&self, frame: &Frame) {
-        self.origin.set(
+        // The block marks the pointer can take are the ones this frame drew:
+        // none while the bar is thin or hidden.
+        let drawn = frame
+            .scrollbar_block_marks()
+            .iter()
+            .any(|(marks, _)| !marks.is_empty());
+        let marks = self.marks.borrow();
+        let moved = self.origin.set(
             frame.origin_px(),
             frame.fill_rows(),
             frame.dock_hit(),
@@ -1925,7 +1999,14 @@ impl Core {
                 .get()
                 .mode()
                 .region(self.scrollbar_layout.get()),
+            if drawn { marks.blocks() } else { &[] },
         );
+        drop(marks);
+        // Only on a change: a notifier called every frame would wake the main
+        // queue every frame.
+        if moved && let Some(notify) = self.marks_published.borrow().as_ref() {
+            notify();
+        }
     }
 
     /// **The clock**: the third reason to ask for a frame (module header).
@@ -2240,6 +2321,7 @@ impl DisplayLink {
             dock_rows: Cell::new(layout.dock_rows),
             alt_screen: Cell::new(alt_screen),
             alt_screen_changed,
+            marks_published: RefCell::new(None),
             dock_cols: Cell::new(layout.dock_cols),
             cell: Cell::new(layout.cell),
             // Zero: no offset until the first content frame, and that frame
@@ -2460,6 +2542,15 @@ impl DisplayLink {
         } else {
             self.waker.resume();
         }
+    }
+
+    /// Sets who is told when the drawn block marks change under a still
+    /// pointer — the bar widened and drew them, output moved them, the thumb
+    /// moved over them — so the pointer's hand and tip follow without a
+    /// mouse move. `bt-shell` re-asks the pointer's place on its next turn;
+    /// the notifier must only send that work to the main queue.
+    pub fn on_marks_published(&self, notify: Box<dyn Fn()>) {
+        self.core.marks_published.replace(Some(notify));
     }
 
     /// The scroll bar's marks of the whole history changed — a search pass
@@ -2929,6 +3020,8 @@ fn scrollbar_step(
         foreground,
         marks.search(),
         [marks.match_color(), marks.current_color()],
+        marks.blocks(),
+        marks.block_colors(),
     );
     BarStep {
         changed,
@@ -2940,6 +3033,48 @@ fn scrollbar_step(
 mod tests {
     use super::*;
     use crate::frame::DOCK_ROWS;
+
+    #[test]
+    fn the_origin_publishes_the_drawn_block_marks_for_the_pointer() {
+        // The marks the frame drew are what the pointer takes, by the
+        // layout's own rectangles; a frame that drew none leaves none.
+        let cell = CellMetrics::new(8, 16, 8, 8, 1, 1.0).expect("metrics");
+        let position = bt_core::ScrollPosition {
+            room: 100,
+            top: 40.0,
+            visible: 20,
+        };
+        let layout = ScrollbarLayout::new(Some(position), 400.0, 260.0, cell);
+        let marks = [10.0, 50.0].map(|position| TrackBlock {
+            position,
+            color: 0,
+            handle: BlockHandle::default(),
+        });
+        let origin = Origin::default();
+        assert!(
+            origin.set(0.0, 0, None, layout, &marks),
+            "new marks, no news"
+        );
+        assert!(
+            !origin.set(0.0, 0, None, layout, &marks),
+            "the same marks told"
+        );
+        let target = layout.block_target(50.0);
+        let (x, y) = ((target[0] + target[2]) / 2.0, (target[1] + target[3]) / 2.0);
+        assert_eq!(
+            origin.block_at(x, y),
+            Some((BlockHandle::default(), target))
+        );
+        assert_eq!(origin.block_targets().len(), 2);
+        assert_eq!(
+            origin.block_at(x - 30.0, y),
+            None,
+            "the grid's point took a mark"
+        );
+        assert!(origin.set(0.0, 0, None, layout, &[]), "gone marks, no news");
+        assert_eq!(origin.block_at(x, y), None, "a mark the frame did not draw");
+        assert!(origin.block_targets().is_empty());
+    }
 
     #[test]
     fn the_dock_caret_target_lands_on_the_band_not_the_grid_row() {

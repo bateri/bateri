@@ -32,8 +32,12 @@ objc2 = { workspace = true }
 # NSUUID: the tab's persistent id (`window::new_tab_id`) —
 # `TERM_SESSION_ID` and `bateri://tab/<id>`. Only a header flag, not a new
 # crate; `Cargo.lock` did not move.
+# NSDateFormatter (with its superclass's NSFormatter): the scroll bar block
+# tip's time of day in the user's short time style. Only header flags of the
+# default set, written here for the day of trimming; `Cargo.lock` did not move.
 objc2-foundation = { workspace = true, features = [
     "NSRunLoop", "NSDate", "NSLocale", "NSURL", "NSKeyValueObserving", "NSUUID",
+    "NSDateFormatter", "NSFormatter",
 ] }
 # NSAppearance: the system's light/dark appearance. NSMenu and
 # NSMenuItem: the main menu; NSWorkspace: "Settings…" opening the file in the

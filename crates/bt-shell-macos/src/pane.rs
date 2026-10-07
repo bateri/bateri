@@ -42,8 +42,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bt_core::{
-    FontOptions, ProgramBar, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
-    SearchStatus, Session, SessionOptions, Settings, TabId, Theme, TtyModes, Wake,
+    BlockHandle, BlockInfo, FontOptions, ProgramBar, RemoteFiles, RemoteTarget, SearchCover,
+    SearchDirection, SearchReport, SearchStatus, Session, SessionOptions, Settings, TabId, Theme,
+    TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{
@@ -60,8 +61,8 @@ use objc2_app_kit::{
     NSTextFieldDelegate, NSTitlePosition, NSView, NSViewFrameDidChangeNotification,
 };
 use objc2_foundation::{
-    NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
-    NSUUID, ns_string,
+    NSDate, NSDateFormatter, NSDateFormatterStyle, NSNotification, NSNotificationCenter,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUUID, ns_string,
 };
 use objc2_quartz_core::CAMetalLayer;
 
@@ -254,20 +255,186 @@ impl LinkLabel {
         (this, text)
     }
 
-    /// The theme's background and separator tone (sRGB, `DimOverlay::paint`'s
-    /// rule): the label reads as the terminal's own surface.
+    /// The terminal's own surface ([`paint_surface`]).
     fn paint(&self, theme: &Theme) {
-        let srgb = |[r, g, b]: [u8; 3]| {
-            NSColor::colorWithSRGBRed_green_blue_alpha(
-                f64::from(r) / 255.0,
-                f64::from(g) / 255.0,
-                f64::from(b) / 255.0,
-                1.0,
-            )
-        };
-        self.setFillColor(&srgb(theme.background_srgb()));
-        self.setBorderColor(&srgb(theme.separator_srgb()));
+        paint_surface(self, theme);
     }
+}
+
+/// The block tip's inset from its border and the gaps between its parts,
+/// points — design constants (not measured), the link label's padding.
+const TIP_PAD_X: f64 = 8.0;
+const TIP_PAD_Y: f64 = 4.0;
+const TIP_GAP: f64 = 6.0;
+/// The colour dot's diameter, points.
+const TIP_DOT: f64 = 8.0;
+/// How far left of the scroll bar's strip the tip ends, points: clear of the
+/// thumb the pointer is next to.
+const TIP_OFFSET: f64 = 24.0;
+/// The tip's widest, points: a long command is cut in its middle, the
+/// metadata never.
+const TIP_MAX_WIDTH: f64 = 440.0;
+/// The tip's least distance from the pane's edges, points.
+const TIP_MARGIN: f64 = 4.0;
+
+define_class!(
+    // SAFETY: NSBox is designed for subclassing; BlockTip implements no
+    // `Drop`, has no ivar and is born with NSBox's constructor (`new`).
+    #[unsafe(super(NSBox))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriBlockTip"]
+    pub(crate) struct BlockTip;
+
+    unsafe impl NSObjectProtocol for BlockTip {}
+
+    impl BlockTip {
+        /// Never takes part in hit testing ([`LinkLabel`]'s rule): the tip
+        /// floats over the grid, and a click under it is the grid's.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+    }
+);
+
+/// The scroll bar block mark's tip: a box on the terminal's own surface
+/// ([`LinkLabel`]'s paint), born hidden — a dot in the block's stripe
+/// colour, the command in bold (cut in the middle), then quieter
+/// "exit N · 3.4s · 14:04" or "running · since 14:04"; what the ledger does
+/// not know is left out. Shown by [`TerminalPane::show_block_tip`].
+pub(crate) struct BlockTipParts {
+    tip: Retained<BlockTip>,
+    dot: Retained<NSBox>,
+    command: Retained<NSTextField>,
+    meta: Retained<NSTextField>,
+}
+
+impl BlockTipParts {
+    fn new(mtm: MainThreadMarker) -> Self {
+        // SAFETY: `NSBox`'s `init`; the subclass has no ivar.
+        let tip = BlockTip::alloc(mtm).set_ivars(());
+        let tip: Retained<BlockTip> = unsafe { msg_send![super(tip), init] };
+        tip.setBoxType(NSBoxType::Custom);
+        tip.setTitlePosition(NSTitlePosition::NoTitle);
+        tip.setBorderWidth(1.0);
+        tip.setCornerRadius(4.0);
+        tip.setHidden(true);
+        tip.setContentViewMargins(NSSize::new(TIP_PAD_X, TIP_PAD_Y));
+        let content = NSView::new(mtm);
+        let dot = NSBox::new(mtm);
+        dot.setBoxType(NSBoxType::Custom);
+        dot.setTitlePosition(NSTitlePosition::NoTitle);
+        dot.setBorderWidth(0.0);
+        dot.setCornerRadius(TIP_DOT / 2.0);
+        let size = NSFont::smallSystemFontSize();
+        let command = NSTextField::labelWithString(ns_string!(""), mtm);
+        command.setFont(Some(&NSFont::boldSystemFontOfSize(size)));
+        command.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+        let meta = NSTextField::labelWithString(ns_string!(""), mtm);
+        meta.setFont(Some(&NSFont::systemFontOfSize(size)));
+        meta.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        content.addSubview(&dot);
+        content.addSubview(&command);
+        content.addSubview(&meta);
+        // The content is the box's **content view** (the link label's
+        // reason): frames inside it are its own, unshifted by the margins.
+        tip.setContentView(Some(&content));
+        Self {
+            tip,
+            dot,
+            command,
+            meta,
+        }
+    }
+
+    /// The terminal's own surface ([`paint_surface`]).
+    fn paint(&self, theme: &Theme) {
+        paint_surface(&self.tip, theme);
+    }
+
+    /// Writes `info` into the parts and lays them out on one line, at most
+    /// `room` points wide in all; returns the tip's content size.
+    fn fill(&self, info: &BlockInfo, meta: &str, room: f64) -> NSSize {
+        self.dot.setFillColor(&srgb_color(info.color));
+        self.command
+            .setStringValue(&NSString::from_str(&info.command));
+        self.meta.setStringValue(&NSString::from_str(meta));
+        self.meta.setHidden(meta.is_empty());
+        let command = self.command.fittingSize();
+        let meta_size = if meta.is_empty() {
+            NSSize::new(0.0, 0.0)
+        } else {
+            self.meta.fittingSize()
+        };
+        let meta_room = if meta.is_empty() {
+            0.0
+        } else {
+            TIP_GAP + meta_size.width
+        };
+        let room = (room - 2.0 * TIP_PAD_X - TIP_DOT - TIP_GAP - meta_room).max(0.0);
+        let command_width = command.width.min(room);
+        let height = command.height.max(meta_size.height).max(TIP_DOT);
+        let middle = |h: f64| ((height - h) / 2.0).max(0.0);
+        self.dot.setFrame(NSRect::new(
+            NSPoint::new(0.0, middle(TIP_DOT)),
+            NSSize::new(TIP_DOT, TIP_DOT),
+        ));
+        let x = TIP_DOT + TIP_GAP;
+        self.command.setFrame(NSRect::new(
+            NSPoint::new(x, middle(command.height)),
+            NSSize::new(command_width, command.height),
+        ));
+        self.meta.setFrame(NSRect::new(
+            NSPoint::new(x + command_width + TIP_GAP, middle(meta_size.height)),
+            meta_size,
+        ));
+        NSSize::new(x + command_width + meta_room, height)
+    }
+}
+
+/// A floating box painted as the terminal's own surface — the theme's
+/// background and its separator tone (sRGB, `DimOverlay::paint`'s rule): the
+/// link label and the block tip, one rule.
+fn paint_surface(surface: &NSBox, theme: &Theme) {
+    surface.setFillColor(&srgb_color(theme.background_srgb()));
+    surface.setBorderColor(&srgb_color(theme.separator_srgb()));
+}
+
+/// An sRGB `NSColor` from three bytes, opaque — the theme's colours cross
+/// the boundary as sRGB for AppKit (`Theme::background_srgb`).
+fn srgb_color([r, g, b]: [u8; 3]) -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(
+        f64::from(r) / 255.0,
+        f64::from(g) / 255.0,
+        f64::from(b) / 255.0,
+        1.0,
+    )
+}
+
+/// The tip's quieter half: "exit N · 3.4s · 14:04" for a finished block,
+/// "running · since 14:04" for a running one, each part only when known —
+/// a restored block says nothing. `clock` renders a start (Unix seconds) as
+/// the user's short time of day.
+fn block_meta(info: &BlockInfo, clock: impl Fn(u32) -> String) -> String {
+    if info.running {
+        return match info.started {
+            Some(started) => format!("running · since {}", clock(started)),
+            None => "running".to_owned(),
+        };
+    }
+    let mut parts = Vec::new();
+    if let Some(exit) = info.exit {
+        parts.push(format!("exit {exit}"));
+    }
+    if let Some(duration) = &info.duration {
+        parts.push(duration.clone());
+    }
+    if info.exit.is_some()
+        && let Some(started) = info.started
+    {
+        parts.push(clock(started));
+    }
+    parts.join(" · ")
 }
 
 /// The path by which main-queue returns find the pane by id; the owner
@@ -465,6 +632,9 @@ struct ShellWake {
     /// Whether the stale-link news is waiting on the main queue —
     /// `search_pending`'s twin: at most one job.
     link_pending: Arc<AtomicBool>,
+    /// Whether the block index's news is waiting on the main queue —
+    /// `search_pending`'s twin: at most one job.
+    blocks_pending: Arc<AtomicBool>,
     /// Whether the bootstrap's `up` check is waiting on the main queue
     /// ([`TerminalPane::check_remote_up`]) — at most one job.
     up_pending: Arc<AtomicBool>,
@@ -540,6 +710,13 @@ impl RemoteProbe {
         self.pending.store(false, Ordering::Release);
     }
 }
+
+/// How long an unfinished block index waits for its next step while output
+/// streams ([`TerminalPane::drive_chunk`]) — a display frame at 60 Hz, a
+/// **design constant**: the frame path tells the index of output at most
+/// once a frame, and a scan that keeps restarting under streaming output
+/// must not take the main thread and `Term` turn after turn.
+const BLOCK_PACE: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// How long after an edge (`C`, output) the program probe reads the PTY's
 /// modes — a **design constant**, not a measurement.
@@ -907,6 +1084,26 @@ impl Wake for ShellWake {
             }
         });
     }
+
+    fn blocks_changed(&self) {
+        // The frame path (main thread, after the `Term` lock): the history
+        // moved while the block marks are wanted. The index is driven on the
+        // next main-queue turn, not inside the frame; at most one job
+        // (`search_changed`'s pattern).
+        if self.blocks_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.blocks_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.swap(false, Ordering::AcqRel);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.kick_search();
+            }
+        });
+    }
 }
 
 /// `bt-gpu`'s alternate-screen notifier: throws the work **to the main queue**.
@@ -939,6 +1136,21 @@ fn alt_screen_notifier(id: u64, lookup: PaneLookup) -> Box<dyn Fn()> {
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(pane) = lookup(mtm, id) {
                 pane.alt_screen_did_change();
+            }
+        });
+    })
+}
+
+/// `bt-gpu`'s block-marks notifier ([`alt_screen_notifier`]'s pattern): the
+/// drawn block marks changed under a still pointer, so the view asks again
+/// where the pointer is — on the next main-queue turn, not inside the frame.
+fn marks_notifier(id: u64, lookup: PaneLookup) -> Box<dyn Fn()> {
+    Box::new(move || {
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.view().recheck_block_hover();
             }
         });
     })
@@ -1072,9 +1284,29 @@ pub(crate) struct PaneIvars {
     search: OnceCell<SearchBar>,
     /// The state of the last query given to the session — the label's input.
     search_status: Cell<SearchStatus>,
-    /// Whether the count index's driver is waiting one turn in the main queue
-    /// ([`TerminalPane::kick_search`]): so that a second driver is not set up.
-    search_driving: Cell<bool>,
+    /// Whether the driver of the two indexes — the search's count and the
+    /// scroll bar's blocks — is waiting one turn in the main queue
+    /// ([`TerminalPane::kick_search`]): so that a second driver is not set
+    /// up.
+    driving: Cell<bool>,
+    /// The pointer over the scroll bar's strip, and the thumb held — what
+    /// the view last said ([`TerminalPane::set_scrollbar_hover`],
+    /// [`TerminalPane::set_scrollbar_drag`]); with the form and the pane's
+    /// visibility, whether the block marks are wanted.
+    bar_pointer: Cell<(bool, bool)>,
+    /// Whether the pane can be seen — [`TerminalPane::set_visible`]'s last
+    /// word; a pane is born seen.
+    seen: Cell<bool>,
+    /// Whether the block marks are wanted, as last told to the session
+    /// ([`TerminalPane::refresh_marks_wanted`]).
+    marks_wanted: Cell<bool>,
+    /// The scroll bar block mark's tip ([`BlockTipParts`]) and the mark it
+    /// shows — the same mark again is a no-op.
+    block_tip: BlockTipParts,
+    tip_for: Cell<Option<BlockHandle>>,
+    /// The tip's time of day: the user's short time style (12 or 24 hours),
+    /// made at the first tip.
+    time_format: OnceCell<Retained<NSDateFormatter>>,
     /// Upload of a Finder drop to the remote directory: queue,
     /// progress and result line ([`crate::upload::Transfers`]). The queue is
     /// **this pane's ssh connection's** — switching to another tab does not stop it.
@@ -1463,6 +1695,9 @@ impl TerminalPane {
         dim.paint(&theme);
         let link_label = LinkLabel::new(mtm);
         link_label.0.paint(&theme);
+        let block_tip = BlockTipParts::new(mtm);
+        block_tip.paint(&theme);
+        let tip = block_tip.tip.clone();
         let this = Self::alloc(mtm).set_ivars(PaneIvars {
             id,
             run,
@@ -1500,6 +1735,7 @@ impl TerminalPane {
                 login_probe: Arc::default(),
                 program_probe: Arc::default(),
                 link_pending: Arc::default(),
+                blocks_pending: Arc::default(),
                 up_pending: Arc::default(),
                 typed_pending: Arc::default(),
                 kept: keeper.as_ref().map(|keeper| keeper.active_flag()),
@@ -1515,7 +1751,13 @@ impl TerminalPane {
             closed: Cell::new(false),
             search: OnceCell::new(),
             search_status: Cell::new(SearchStatus::Empty),
-            search_driving: Cell::new(false),
+            driving: Cell::new(false),
+            bar_pointer: Cell::new((false, false)),
+            seen: Cell::new(true),
+            marks_wanted: Cell::new(false),
+            block_tip,
+            tip_for: Cell::new(None),
+            time_format: OnceCell::new(),
             uploads: RefCell::new(Transfers::default()),
             upload_alert: RefCell::new(None),
             upload_stop: RefCell::new(None),
@@ -1559,6 +1801,8 @@ impl TerminalPane {
         this.addSubview(&view);
         // The link label under the veil (an unfocused pane gets no hover anyway).
         this.addSubview(&link_label.0);
+        // The block tip beside it, under the veil too.
+        this.addSubview(&tip);
         // The veil is on top: the search panel goes right above `view`
         // (`SearchBar::new`), so it too stays under the veil and the dimmed
         // pane's panel is dimmed too.
@@ -1677,18 +1921,146 @@ impl TerminalPane {
     /// (`bt_gpu::DisplayLink::set_scrollbar_hover`) — the view's tracking
     /// area says so in an unfocused pane too. Silent before the link is born.
     pub(crate) fn set_scrollbar_hover(&self, on: bool) {
+        let (_, drag) = self.ivars().bar_pointer.get();
+        self.ivars().bar_pointer.set((on, drag));
         if let Some(link) = self.link() {
             link.set_scrollbar_hover(on);
         }
+        self.refresh_marks_wanted();
     }
 
     /// The scroll bar's thumb is held, or let go
     /// (`bt_gpu::DisplayLink::set_scrollbar_drag`). Silent before the link
     /// is born.
     pub(crate) fn set_scrollbar_drag(&self, on: bool) {
+        let (hover, _) = self.ivars().bar_pointer.get();
+        self.ivars().bar_pointer.set((hover, on));
         if let Some(link) = self.link() {
             link.set_scrollbar_drag(on);
         }
+        self.refresh_marks_wanted();
+    }
+
+    /// Whether the block marks are wanted — the bar is wide, so its block
+    /// lane is on screen: the always-up form, or the pointer over the strip
+    /// or holding the thumb; in a pane that can be seen and in a form that
+    /// draws at all. A change goes to the session
+    /// (`bt_core::Session::set_block_marks`); becoming wanted drives the index
+    /// at once — a motion frame never reaches `bt-core`, so waiting for one
+    /// would never bring the marks. While not wanted the index stops where it
+    /// is; the tip goes with the marks.
+    pub(crate) fn refresh_marks_wanted(&self) {
+        let ivars = self.ivars();
+        let (hover, drag) = ivars.bar_pointer.get();
+        let wanted = ivars.seen.get()
+            && match ivars.scrollbar.get() {
+                ScrollbarMode::Always => true,
+                ScrollbarMode::Auto => hover || drag,
+                ScrollbarMode::Never => false,
+            };
+        // Before the session there is nobody to tell: its start asks again.
+        let Some(session) = self.session() else {
+            return;
+        };
+        if ivars.marks_wanted.replace(wanted) == wanted {
+            return;
+        }
+        session.set_block_marks(wanted);
+        if wanted {
+            self.kick_search();
+        } else {
+            self.hide_block_tip();
+        }
+    }
+
+    /// Whether the scroll bar's thumb is held — a drag in progress.
+    pub(crate) fn thumb_held(&self) -> bool {
+        self.ivars().bar_pointer.get().1
+    }
+
+    /// The pane became seen or covered ([`TerminalPane::set_visible`]'s
+    /// half for the block marks): a covered pane drives no index.
+    pub(crate) fn set_seen(&self, seen: bool) {
+        self.ivars().seen.set(seen);
+        self.refresh_marks_wanted();
+    }
+
+    /// Shows the tip of the block mark `handle` beside it — `mark` is the
+    /// mark's target and `strip` the bar's left edge, both in the terminal
+    /// view's points — or hides it (`None`, or a block that is gone). The
+    /// same mark again is a no-op; asks for no frame.
+    pub(crate) fn show_block_tip(&self, handle: Option<BlockHandle>, mark: NSRect, strip: f64) {
+        let ivars = self.ivars();
+        if handle.is_some() && ivars.tip_for.get() == handle {
+            return;
+        }
+        let info = handle
+            .zip(self.session())
+            .and_then(|(handle, session)| session.block_info(handle));
+        let Some(info) = info else {
+            self.hide_block_tip();
+            return;
+        };
+        ivars.tip_for.set(handle);
+        let parts = &ivars.block_tip;
+        let meta = block_meta(&info, |started| self.time_of_day(started));
+        let border = parts.tip.borderWidth();
+        let room = (strip - TIP_OFFSET - TIP_MARGIN - 2.0 * border).min(TIP_MAX_WIDTH);
+        let size = parts.fill(&info, &meta, room);
+        parts
+            .tip
+            .setFrameFromContentFrame(NSRect::new(NSPoint::new(0.0, 0.0), size));
+        let frame = parts.tip.frame();
+        // The view is flipped, the pane is not: the mark's middle in the
+        // pane's own space, then the tip clamped inside the pane.
+        let view = self.view();
+        let middle = NSPoint::new(strip, mark.origin.y + mark.size.height / 2.0);
+        let at = self.convertPoint_fromView(middle, Some(view));
+        let bounds = self.bounds();
+        let x = (at.x - TIP_OFFSET - frame.size.width)
+            .min(bounds.size.width - TIP_MARGIN - frame.size.width)
+            .max(TIP_MARGIN);
+        let y = (at.y - frame.size.height / 2.0)
+            .min(bounds.size.height - TIP_MARGIN - frame.size.height)
+            .max(TIP_MARGIN);
+        parts.tip.setFrameOrigin(NSPoint::new(x, y));
+        parts.tip.setHidden(false);
+    }
+
+    /// Hides the block tip.
+    pub(crate) fn hide_block_tip(&self) {
+        self.ivars().tip_for.set(None);
+        self.ivars().block_tip.tip.setHidden(true);
+    }
+
+    /// A click on the block mark `handle`: the block's row goes two rows
+    /// below the window's top — gliding, or at once where the scroll is not
+    /// smooth (Reduce Motion, `snap`) — and the bar shows the move. `true` if
+    /// the mark still pointed at a block.
+    pub(crate) fn go_to_block(&self, handle: BlockHandle) -> bool {
+        let Some(session) = self.session() else {
+            return false;
+        };
+        let Some(info) = session.block_info(handle) else {
+            return false;
+        };
+        let top = info.depth.saturating_sub(2) as f32;
+        session.scroll_to(top, self.ivars().smooth_scroll.get());
+        self.poke_scrollbar();
+        true
+    }
+
+    /// A start (Unix seconds) as the user's short time of day — `NSDateFormatter`'s
+    /// short time style follows the 12/24-hour preference.
+    fn time_of_day(&self, started: u32) -> String {
+        let format = self.ivars().time_format.get_or_init(|| {
+            let format = NSDateFormatter::new();
+            format.setDateStyle(NSDateFormatterStyle::NoStyle);
+            format.setTimeStyle(NSDateFormatterStyle::ShortStyle);
+            format
+        });
+        let date = NSDate::dateWithTimeIntervalSince1970(f64::from(started));
+        format.stringFromDate(&date).to_string()
     }
 
     /// The terminal view.
@@ -1979,6 +2351,9 @@ impl TerminalPane {
         // The scroll bar's form, for the same reason; the grid above was
         // already sized with its reserve (`sync_geometry`).
         link.set_scrollbar_mode(self.ivars().scrollbar.get());
+        // The pointer's hand and tip over the block marks follow the drawn
+        // marks, not only the pointer's moves.
+        link.on_marks_published(marks_notifier(self.ivars().id, self.ivars().lookup));
         // Opening frame: `Session` is born dirty, we open the link once by hand.
         link.request_frame();
         let _ = self.ivars().link.set(link);
@@ -2006,6 +2381,9 @@ impl TerminalPane {
         // arrive and `focused` would stay `true`: an unfocused window would
         // draw a filled caret and set up the blink clock.
         self.apply_focus(self.window().is_some_and(|window| window.isKeyWindow()));
+        // The block marks, for the same ordering: the always-up form wants
+        // them from the first frame, and no change will say so.
+        self.refresh_marks_wanted();
         // A carried-on session can be on the alternate screen already (vim
         // across the update): the link was born seeing it, so no transition
         // will ever take the dock away — the reserve is matched here, once.
@@ -2263,6 +2641,7 @@ impl TerminalPane {
         }
         self.ivars().dim.paint(&theme);
         self.ivars().link_label.0.paint(&theme);
+        self.ivars().block_tip.paint(&theme);
     }
 
     /// Shows or hides the dim veil. The decision is the
@@ -2364,6 +2743,7 @@ impl TerminalPane {
         if before.reserves() != mode.reserves() {
             self.refresh_geometry();
         }
+        self.refresh_marks_wanted();
     }
 
     /// Gives the view the scrolling's **resolved** mode
@@ -3295,54 +3675,95 @@ impl TerminalPane {
         true
     }
 
-    /// Sets up the count index's driver: one chunk on
-    /// the next turn of the main queue. A no-op if already set up, if the
-    /// panel is closed or if the query is not a pattern to count.
+    /// Sets up the indexes' driver: one chunk on the next turn of the main
+    /// queue. A no-op if already set up, or if neither index has work — the
+    /// panel is closed or its query is not a pattern to count, and the block
+    /// marks are not wanted.
     ///
     /// Its callers: a query change, navigation (a new match whose order is
     /// unknown may want another pass) and the scrollback news
     /// ([`Wake::search_changed`]) — the last one in a background tab too.
+    ///
+    /// **One latch, two indexes**: the same driver steps the scroll bar's
+    /// block index while its marks are wanted
+    /// ([`TerminalPane::refresh_marks_wanted`]) — its callers are the marks
+    /// becoming wanted and the frame's news (`Wake::blocks_changed`). Each
+    /// index says when it is done; the latch drops when both are.
     pub(crate) fn kick_search(&self) {
-        let shown = self.ivars().search.get().is_some_and(SearchBar::is_shown);
-        if !shown
-            || self.ivars().search_status.get() != SearchStatus::Ready
-            || self.ivars().search_driving.replace(true)
+        if !(self.search_wants_steps() || self.ivars().marks_wanted.get())
+            || self.ivars().driving.replace(true)
         {
             return;
         }
-        self.schedule_search_chunk();
+        self.schedule_chunk();
+    }
+
+    /// Whether the search's count has steps to take: the panel is shown and
+    /// its query is a pattern to count.
+    fn search_wants_steps(&self) -> bool {
+        self.ivars().search.get().is_some_and(SearchBar::is_shown)
+            && self.ivars().search_status.get() == SearchStatus::Ready
     }
 
     /// One turn of the driver onto the main queue: the pane is found by id
     /// (`ShellWake`'s pattern), the job drops for a pane that closed.
-    fn schedule_search_chunk(&self) {
+    fn schedule_chunk(&self) {
         let (id, lookup) = (self.ivars().id, self.ivars().lookup);
         DispatchQueue::main().exec_async(move || {
             // audit: a block running on the main queue is on the main thread by definition.
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(pane) = lookup(mtm, id) {
-                pane.search_chunk();
+                pane.drive_chunk();
             }
         });
     }
 
-    /// A chunk of the index and the label; if the count is not finished it is
-    /// set up again for the next turn — key events slip in between turns. The
-    /// stop condition is the core's `complete` (the pass is done **and** no
-    /// pending scrollback news), the panel closing or the search being dropped.
-    fn search_chunk(&self) {
-        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.session()) else {
-            self.ivars().search_driving.set(false);
+    /// One turn of the driver: a chunk of each index that has work, then
+    /// set up again for the next turn while either has more — key events
+    /// slip in between turns. The next turn comes at once, but for an
+    /// unfinished block index while output streams: then a display frame
+    /// later ([`BLOCK_PACE`]), a step a frame.
+    fn drive_chunk(&self) {
+        let search_done = self.search_chunk();
+        let (blocks_done, streaming) = self.blocks_chunk();
+        if search_done && blocks_done {
+            self.ivars().driving.set(false);
+        } else if search_done && streaming {
+            self.schedule_chunk_paced();
+        } else {
+            self.schedule_chunk();
+        }
+    }
+
+    /// [`TerminalPane::schedule_chunk`] a display frame later; at once if the
+    /// delay cannot be told.
+    fn schedule_chunk_paced(&self) {
+        let Ok(when) = DispatchTime::try_from(BLOCK_PACE) else {
+            self.schedule_chunk();
             return;
         };
-        let status = self.ivars().search_status.get();
-        if !bar.is_shown() || status != SearchStatus::Ready {
-            self.ivars().search_driving.set(false);
-            return;
+        let (id, lookup) = (self.ivars().id, self.ivars().lookup);
+        let _ = DispatchQueue::main().after(when, move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.drive_chunk();
+            }
+        });
+    }
+
+    /// A chunk of the count and the label; `true` → done. The stop
+    /// condition is the core's `complete` (the pass is done **and** no
+    /// pending scrollback news), the panel closing or the search being dropped.
+    fn search_chunk(&self) -> bool {
+        if !self.search_wants_steps() {
+            return true;
         }
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.session()) else {
+            return true;
+        };
         let Some(report) = session.search_step() else {
-            self.ivars().search_driving.set(false);
-            return;
+            return true;
         };
         // A pass reached the top with other rows: the scroll bar's marks of
         // the whole history changed, and the step itself asks for no frame.
@@ -3351,12 +3772,28 @@ impl TerminalPane {
         {
             link.marks_changed();
         }
-        bar.set_count(status, report);
-        if report.complete {
-            self.ivars().search_driving.set(false);
-        } else {
-            self.schedule_search_chunk();
+        bar.set_count(self.ivars().search_status.get(), report);
+        report.complete
+    }
+
+    /// A step of the block index; `true` → done (the marks are not wanted,
+    /// or every row is looked at and no news waits), and whether output is
+    /// streaming. A different picture asks for the frame that draws it
+    /// through the link — only while a bar is up to show it
+    /// (`bt_gpu::DisplayLink::marks_changed`).
+    fn blocks_chunk(&self) -> (bool, bool) {
+        if !self.ivars().marks_wanted.get() {
+            return (true, false);
         }
+        let Some(report) = self.session().and_then(|session| session.block_step()) else {
+            return (true, false);
+        };
+        if report.marks_changed
+            && let Some(link) = self.link()
+        {
+            link.marks_changed();
+        }
+        (report.complete, report.streaming)
     }
 
     /// ⏎ / ⌘G / ⇧⏎ / ⇧⌘G: if the panel is closed it is opened first (focus
@@ -3730,5 +4167,52 @@ mod tests {
         assert!(probe.command_started());
         probe.release();
         assert!(probe.output(), "the slot was given back");
+    }
+
+    #[test]
+    fn a_block_tip_says_only_what_the_ledger_knows() {
+        use bt_core::BlockInfo;
+        let clock = |started: u32| format!("@{started}");
+        let info = BlockInfo {
+            command: "make".into(),
+            color: [0, 0, 0],
+            running: false,
+            exit: Some(2),
+            duration: Some("3.4s".into()),
+            started: Some(7),
+            depth: 0,
+        };
+        assert_eq!(super::block_meta(&info, clock), "exit 2 · 3.4s · @7");
+        // Over an update from an older build: no time of day.
+        let older = BlockInfo {
+            started: None,
+            ..info.clone()
+        };
+        assert_eq!(super::block_meta(&older, clock), "exit 2 · 3.4s");
+        let quick = BlockInfo {
+            duration: None,
+            ..info.clone()
+        };
+        assert_eq!(super::block_meta(&quick, clock), "exit 2 · @7");
+        let running = BlockInfo {
+            running: true,
+            exit: None,
+            duration: None,
+            ..info.clone()
+        };
+        assert_eq!(super::block_meta(&running, clock), "running · since @7");
+        let unstamped = BlockInfo {
+            started: None,
+            ..running
+        };
+        assert_eq!(super::block_meta(&unstamped, clock), "running");
+        // A restored block: its text alone.
+        let restored = BlockInfo {
+            exit: None,
+            duration: None,
+            started: None,
+            ..info
+        };
+        assert_eq!(super::block_meta(&restored, clock), "");
     }
 }

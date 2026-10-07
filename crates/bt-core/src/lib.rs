@@ -6,7 +6,8 @@
 //! `Blocks`,
 //! `SelectionPoint`, `SelectKind`, `CellHalf`, `Arrow`, `Wheel`, `ScrollIntent`,
 //! search's `SearchQuery`, `SearchStatus`, `SearchRun`, `SearchRuns`,
-//! the scroll bar's `ScrollPosition`, `TrackMark` and `TrackMarks`,
+//! the scroll bar's `ScrollPosition`, `TrackMark`, `TrackBlock`, `TrackMarks`,
+//! the block marks' `BlockHandle`, `BlockInfo` and `BlockReport`,
 //! `ScrollGlide`, `LinearRgba`, `Theme`,
 //! `ShellState`, `ShellPhase`, the mirror's `DockState`, `DockStatus`, `DockFault`,
 //! `Highlight`, `HighlightStyle`, `HighlightColor`, the context line's
@@ -45,6 +46,7 @@
 //! proxy at the dependency level; the real gate is building with
 //! `--target x86_64-unknown-linux-gnu`, closed until `rustup` arrives.
 
+mod block_index;
 mod cluster;
 mod color;
 mod dock;
@@ -82,12 +84,12 @@ pub use search::{
     escape as escape_search,
 };
 pub use session::{
-    AdoptMode, Adoption, Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, Frozen,
-    InitialInput, LinkHit, LinkHover, LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52,
-    PathCandidate, PtyOps, PtySize, SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, ScrollPosition,
-    SelectKind, SelectionPoint, SelectionRun, SelectionRuns, Session, SessionOptions,
-    ShutdownHandle, Teardown, TerminalOptions, TrackMark, TrackMarks, UnderlineStyle, Wheel,
-    load_shell, smoke_shell,
+    AdoptMode, Adoption, Block, BlockHandle, BlockInfo, BlockReport, Blocks, Cell, CellHalf, Click,
+    Cursor, DirtyFlag, DockKey, Frozen, InitialInput, LinkHit, LinkHover, LinkKind, LinkPoint,
+    LinkSpan, LinkStamp, Osc52, PathCandidate, PtyOps, PtySize, SHUTDOWN_GRACE, ScrollGlide,
+    ScrollIntent, ScrollPosition, SelectKind, SelectionPoint, SelectionRun, SelectionRuns, Session,
+    SessionOptions, ShutdownHandle, Teardown, TerminalOptions, TrackBlock, TrackMark, TrackMarks,
+    UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,

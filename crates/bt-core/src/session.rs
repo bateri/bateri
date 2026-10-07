@@ -20,9 +20,10 @@
 //! their doc. A new site that changes the content records one too.
 //! The lock **order** is the same everywhere — `term` first, `size` second;
 //! when adding a new site this order is followed, because if the two locks
-//! are taken in reverse order a deadlock arises. `theme`, `shell` and `search`
-//! are **leaf** locks outside this order: while one is held no other lock is
-//! taken, so which lock it is taken under does not matter — `frame` takes
+//! are taken in reverse order a deadlock arises. `theme`, `shell`, `search`
+//! and `block_index` are **leaf** locks outside this order: while one is
+//! held no other lock is taken, so which lock it is taken under does not
+//! matter — `frame` takes
 //! the theme's copy before `term` and releases it, the colour query reads
 //! while `term` is held, `set_theme` writes on its own; `frame` borrows the
 //! search pattern before `term` and puts it back after releasing
@@ -77,6 +78,7 @@ use alacritty_terminal::vte::ansi::{self, ClearMode, CursorShape, CursorStyle, H
 // `polling`'s never appears outside `TappedPty`, that one is aliased.
 use polling::{Event as PollingEvent, PollMode, Poller};
 
+use crate::block_index::{self, BlockPass, Observation};
 use crate::cluster::{ClusterId, Clusters};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
@@ -100,8 +102,8 @@ use crate::search::{
 use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule, MarkSubject};
 use crate::shell::{
     BlockKey, COUNTER_FLOOR, CaretHome, Carried, Counter, DockContext, DockPrediction,
-    DockSelection, DockState, DockStatus, HistoryCut, Precision, RemoteStats, RemoteTarget,
-    Scanner, ShellLog, ShellState, Stripe, Transfer, TtyModes,
+    DockSelection, DockState, DockStatus, HistoryCut, Outcome, Precision, RemoteStats,
+    RemoteTarget, Scanner, ShellLog, ShellState, Stripe, Transfer, TtyModes,
 };
 use crate::snapshot;
 use crate::wake::Wake;
@@ -669,11 +671,17 @@ pub struct TrackMark {
 /// frames, so it costs no allocation and its last value is what the drawing
 /// side keeps between content frames.
 ///
-/// **Today one lane, search**: the rows the last finished pass found matches
-/// on, at most one mark per bucket ([`TRACK_BUCKETS`]), the current match's
-/// in front of a match's in its bucket. Empty while search is closed, on the
+/// **Two lanes.** Search: the rows the last finished pass found matches on,
+/// at most one mark per bucket ([`TRACK_BUCKETS`]), the current match's in
+/// front of a match's in its bucket. Empty while search is closed, on the
 /// alternate screen and when there is nothing to scroll; until the query's
-/// first pass reaches the top, only the current match is marked.
+/// first pass reaches the top, only the current match is marked. Blocks: the
+/// command blocks of the whole history ([`crate::block_index`]), coloured by
+/// the stripe's own mapping ([`Theme::stripe_linear`]) — at most one per
+/// bucket, an error over a running command over a success — each with a
+/// handle the tip asks about ([`Session::block_info`]). Filled only while
+/// the marks are wanted ([`Session::set_block_marks`]); otherwise kept as
+/// last drawn, and empty on the alternate screen and with nothing to scroll.
 ///
 /// **Not a [`Cursor`] field**: the bar is mostly hidden, and a list of up to
 /// [`TRACK_BUCKETS`] marks copied in every cursor would be paid for nothing.
@@ -705,6 +713,141 @@ pub struct TrackMarks {
     follow: Option<Follow>,
     /// What `search` was built from; `None` → nothing built.
     built: Option<TrackKey>,
+    /// The block lane, by position from the top.
+    blocks: Vec<TrackBlock>,
+    /// Its colours, in draw order ([`TrackBlock::color`]).
+    block_colors: [LinearRgba; 3],
+    /// Where the block index's published rows stand ([`Follow`]; its `pass`
+    /// is the publication's serial).
+    block_follow: Option<Follow>,
+    /// What `blocks` was built from; `None` → nothing built.
+    blocks_built: Option<BlockLaneKey>,
+}
+
+/// One block's mark on the scroll bar's track ([`TrackMarks::blocks`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackBlock {
+    /// The block's row, rows from the history's top — [`TrackMark::position`]'s
+    /// space.
+    pub position: f32,
+    /// Which of [`TrackMarks::block_colors`] the mark is drawn in; the list
+    /// is in draw order, so a higher one goes over a lower one where two
+    /// marks touch.
+    pub color: usize,
+    /// What the tip asks about ([`Session::block_info`]).
+    pub handle: BlockHandle,
+}
+
+/// A block mark's handle — **opaque**: the drawing side carries it from the
+/// drawn marks to the pointer and back to [`Session::block_info`], and never
+/// reads it. It says which block and where it stood as of the frame that
+/// drew the mark. The default points at nothing (no block answers it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockHandle(Option<HandleBody>);
+
+/// [`BlockHandle`]'s body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HandleBody {
+    key: BlockKey,
+    /// The row's depth from the history's top, as of `mark`.
+    depth: u64,
+    /// The scrollback as the frame that drew the mark saw it.
+    mark: search::LedgerMark,
+}
+
+/// What a step of the block index reports ([`Session::block_step`]) — its
+/// driver's two questions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockReport {
+    /// Every row is looked at and no news is pending: the driver may stop
+    /// until the next [`Wake::blocks_changed`].
+    pub complete: bool,
+    /// The step published a different picture: the block marks changed and
+    /// a content frame draws them (the step itself asks for none — only the
+    /// drawing side knows whether a bar is up to show them).
+    pub marks_changed: bool,
+    /// Output arrived since the previous step: the history is moving, so an
+    /// unfinished index is driven at the display's pace, a step a frame,
+    /// not at once — a scan that has to restart while output streams would
+    /// otherwise hold the main thread and `Term` turn after turn.
+    pub streaming: bool,
+}
+
+/// What a block mark tells about its block — the scroll bar tip's content
+/// ([`Session::block_info`]), resolved here; the shell only lays it out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockInfo {
+    /// The command's row as text — the rows that carry the prompt's anchor,
+    /// a wrapped or multi-line command joined into one line. **Known
+    /// limits:** with `[shell] integration = "blocks"` the anchor covers the
+    /// user's own prompt, so its text leads; a right prompt on the same row
+    /// trails.
+    pub command: String,
+    /// The block's stripe — the mark's colour — as **sRGB** bytes.
+    pub color: [u8; 3],
+    /// The command is running: no exit and no duration yet.
+    pub running: bool,
+    /// The finished command's exit code; `None` while running and for a
+    /// block no ledger of this shell knows (a restored history's).
+    pub exit: Option<i32>,
+    /// The finished command's duration in the duration counter's own form
+    /// (`3.4s`, `1m 05s`); `None` while running, for a block that never
+    /// saw its start, and where `exit` is `None` for want of a ledger.
+    pub duration: Option<String>,
+    /// When the command started, seconds since the Unix epoch; `None` →
+    /// unknown (a block carried over an update by an older build, one that
+    /// never saw its start, a restored one).
+    pub started: Option<u32>,
+    /// The block's row, rows from the history's top
+    /// ([`ScrollPosition::top`]'s space) — where a click on the mark takes
+    /// the window.
+    pub depth: u32,
+}
+
+/// The inputs [`TrackMarks::blocks`] was last built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlockLaneKey {
+    /// The index's publication ([`crate::block_index::BlockPass::serial`]).
+    pass: u64,
+    /// Where its rows stand ([`Follow::shift`]).
+    shift: Option<i64>,
+    /// The track's whole length, rows.
+    total: u32,
+    /// The ledgers the stripes were read from.
+    ledger: crate::shell::LedgerRevision,
+}
+
+/// One frame's input to the block lane ([`TrackMarks::update_blocks`]).
+struct BlockLane<'a> {
+    /// The block index's last publication.
+    pass: &'a BlockPass,
+    /// The scrollback as this frame saw it.
+    now: search::LedgerMark,
+    /// The scrollback's limit, rows.
+    limit: usize,
+    /// The track's whole length, rows: the travel plus the visible rows.
+    total: u32,
+    /// The shell's ledgers — the stripes' source, held for the bucketing.
+    shell: &'a ShellLog,
+}
+
+/// The block lane's layers ([`TrackMarks::block_colors`]): the draw order,
+/// and the bucket's precedence — an error over a running command over a
+/// success. The one place the order is written.
+const BLOCK_LAYERS: [Stripe; 3] = [Stripe::Success, Stripe::Running, Stripe::Error];
+
+/// A stripe's place in [`BLOCK_LAYERS`].
+fn stripe_layer(stripe: Stripe) -> usize {
+    BLOCK_LAYERS
+        .iter()
+        .position(|&layer| layer == stripe)
+        .unwrap_or(0)
+}
+
+/// The block lane's colours in [`BLOCK_LAYERS`]' order, from the stripe's
+/// own mapping.
+fn block_colors(theme: &Theme) -> [LinearRgba; 3] {
+    BLOCK_LAYERS.map(|stripe| theme.stripe_linear(stripe))
 }
 
 /// Where a pass's rows stand, followed frame by frame ([`TrackMarks`]).
@@ -758,6 +901,10 @@ impl Default for TrackMarks {
             current_color: Theme::BATERI.search_current_mark_linear(),
             follow: None,
             built: None,
+            blocks: Vec::new(),
+            block_colors: block_colors(&Theme::BATERI),
+            block_follow: None,
+            blocks_built: None,
         }
     }
 }
@@ -779,17 +926,109 @@ impl TrackMarks {
         self.current_color
     }
 
-    /// No marks, and nothing followed: a pass met again starts from its own
-    /// observation.
-    fn clear(&mut self) {
+    /// The block lane, by position from the top: at most one mark per
+    /// bucket.
+    pub fn blocks(&self) -> &[TrackBlock] {
+        &self.blocks
+    }
+
+    /// The block lane's colours — a success's, a running command's, an
+    /// error's, in draw order ([`TrackBlock::color`]); the stripes' own
+    /// ([`Theme::stripe_linear`]).
+    pub fn block_colors(&self) -> [LinearRgba; 3] {
+        self.block_colors
+    }
+
+    /// No search marks, and nothing followed: a pass met again starts from
+    /// its own observation.
+    fn clear_search(&mut self) {
         self.search.clear();
         self.follow = None;
         self.built = None;
     }
 
+    /// No block marks, and nothing followed.
+    fn clear_blocks(&mut self) {
+        self.blocks.clear();
+        self.block_follow = None;
+        self.blocks_built = None;
+    }
+
     fn set_colors(&mut self, theme: &Theme) {
         self.match_color = theme.search_mark_linear();
         self.current_color = theme.search_current_mark_linear();
+        self.block_colors = block_colors(theme);
+    }
+
+    /// Moves the index's published rows to this frame's observation and
+    /// buckets the block lane — unless it was built from the same inputs and
+    /// the same picture of the ledgers.
+    fn update_blocks(&mut self, lane: BlockLane<'_>) {
+        let BlockLane {
+            pass,
+            now,
+            limit,
+            total,
+            shell,
+        } = lane;
+        let follow = self
+            .block_follow
+            .filter(|follow| follow.pass == pass.serial)
+            .unwrap_or(Follow {
+                pass: pass.serial,
+                seen: pass.mark,
+                shift: Some(0),
+            });
+        let follow = follow_to(follow, now, limit);
+        self.block_follow = Some(follow);
+        let key = BlockLaneKey {
+            pass: pass.serial,
+            shift: follow.shift,
+            total,
+            ledger: shell.revision(),
+        };
+        if self.blocks_built == Some(key) {
+            return;
+        }
+        self.blocks_built = Some(key);
+        self.blocks.clear();
+        let Some(shift) = follow.shift else {
+            return;
+        };
+        let running = shell.running_blocks();
+        let total = u64::from(total);
+        let mut last_bucket = None;
+        for &(depth, block) in &pass.rows {
+            let Ok(depth) = u64::try_from(i64::from(depth) + shift) else {
+                continue;
+            };
+            if depth >= total {
+                break;
+            }
+            // "Unknown is not drawn" — the stripe's own rule.
+            let Some(stripe) = shell.stripe(block, running) else {
+                continue;
+            };
+            let mark = TrackBlock {
+                position: depth as f32,
+                color: stripe_layer(stripe),
+                handle: BlockHandle(Some(HandleBody {
+                    key: block,
+                    depth,
+                    mark: now,
+                })),
+            };
+            let bucket = track_bucket(depth, total);
+            match self.blocks.last_mut() {
+                Some(last) if last_bucket == Some(bucket) => {
+                    if mark.color > last.color {
+                        *last = mark;
+                    }
+                }
+                _ => self.blocks.push(mark),
+            }
+            last_bucket = Some(bucket);
+        }
     }
 
     /// Moves the pass's rows to this frame's observation and buckets the
@@ -2813,12 +3052,96 @@ fn last_ink_in_row<T>(term: &Term<T>, row: u16, offset: i32) -> Option<char> {
 /// (`-history..rows`); the row cannot be cell-less but an iterator is used
 /// instead of indexing, because panic is banned in `bt-core` (the precedent is
 /// the fill loop's `zip`).
-fn row_identity<T>(term: &Term<T>, line: Line) -> usize {
+pub(crate) fn row_identity<T>(term: &Term<T>, line: Line) -> usize {
     let line = line.grid_clamp(term, Boundary::Grid);
     (&term.grid()[line])
         .into_iter()
         .next()
         .map_or(0, |cell| std::ptr::from_ref(cell) as usize)
+}
+
+/// How deep in the scrollback the row whose identity is `probe`
+/// ([`row_identity`]) sits now — `k` when it is at `Line(-k)`, i.e. `k` rows
+/// were pushed into the history since it stood at the screen's top; `None`
+/// when no history row is it.
+///
+/// **The one probe search**: [`Session::scrolled_rows`] counts the slide's
+/// rows with it and the block index ([`crate::block_index`]) the rows its
+/// entries moved by. The walk goes up to the whole scrollback, because fast
+/// output can push more than a screen between two looks; its cost is a
+/// pointer comparison per row.
+///
+/// **Known limit, the ring's**: once the scrollback is full a row's buffer is
+/// reused as a new bottom row, so after more than a whole history's worth of
+/// output the probe can be met again at the wrong depth. The callers say what
+/// that costs them.
+pub(crate) fn probe_depth<T>(term: &Term<T>, probe: usize) -> Option<i32> {
+    let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
+    (1..=history).find(|&k| row_identity(term, Line(-k)) == probe)
+}
+
+/// The start row of block `key` nearest `line` — the start rule of the
+/// frame's stripe ([`row_block`] and [`block_row_continues`]), within a
+/// screen's rows either way: a mark's handle says where its frame drew the
+/// block, and in a full history with output streaming the rows moved by an
+/// amount nobody knows ([`search::depth_moved`]'s `None`). `None` if no
+/// start of the block is that near.
+fn block_start_near<T>(term: &Term<T>, line: i64, key: BlockKey, boundary: usize) -> Option<i32> {
+    let (top, bottom) = (term.topmost_line().0, term.bottommost_line().0);
+    let line = i32::try_from(line.clamp(i64::from(top), i64::from(bottom))).ok()?;
+    let reach = i32::try_from(term.screen_lines()).unwrap_or(i32::MAX);
+    (0..=reach)
+        .flat_map(|step| [line.saturating_sub(step), line.saturating_add(step)])
+        .filter(|probe| (top..=bottom).contains(probe))
+        .find(|&probe| {
+            row_block(term, Line(probe)) == Some(key)
+                && !block_row_continues(term, Line(probe - 1), key, boundary)
+        })
+}
+
+/// The command's text from its start row: the rows carrying `key`, a
+/// wrapped row run on into the next, the others joined with a space, trimmed
+/// — one line for the tip. Bounded: a pasted script carries the anchor on
+/// every row and the tip shows only its beginning anyway.
+fn block_text<T>(term: &Term<T>, start: i32, key: BlockKey) -> String {
+    const MOST_ROWS: i32 = 8;
+    const MOST_CHARS: usize = 512;
+    let bottom = term.bottommost_line().0;
+    let mut text = String::new();
+    let mut line = start;
+    while line <= bottom.min(start.saturating_add(MOST_ROWS - 1))
+        && row_block(term, Line(line)) == Some(key)
+    {
+        let row = &term.grid()[Line(line)];
+        let mut piece = String::new();
+        let mut wrapped = false;
+        for cell in row {
+            wrapped = cell.flags.contains(Flags::WRAPLINE);
+            if cell.flags.intersects(SPACERS) {
+                continue;
+            }
+            piece.push(if cell.flags.contains(Flags::HIDDEN) {
+                ' '
+            } else {
+                cell.c
+            });
+            if let Some(marks) = cell.zerowidth() {
+                piece.extend(marks);
+            }
+        }
+        if wrapped {
+            text.push_str(&piece);
+        } else {
+            text.push_str(piece.trim_end());
+            text.push(' ');
+        }
+        line += 1;
+    }
+    let text = text.trim();
+    match text.char_indices().nth(MOST_CHARS) {
+        Some((cut, _)) => text[..cut].to_owned(),
+        None => text.to_owned(),
+    }
 }
 
 /// Starting from the given row **upwards**, the first row carrying the block's
@@ -2917,7 +3240,7 @@ enum ClearKind {
 /// found wins: two blocks' anchors cannot be on one row (the link closes at
 /// `preexec`). Both namespaces: inside ssh the remote prompt's anchor is what
 /// tells ⌘K which rows are the input's.
-fn row_block<T>(term: &Term<T>, line: Line) -> Option<BlockKey> {
+pub(crate) fn row_block<T>(term: &Term<T>, line: Line) -> Option<BlockKey> {
     term.grid()[line]
         .into_iter()
         .find_map(|cell| cell.hyperlink().and_then(|link| block_key(link.uri())))
@@ -3805,7 +4128,12 @@ fn link_spans<T>(term: &Term<T>, first: Point, last: Point, offset: i32) -> Vec<
 /// [`Session::clear_boundary`]) is `false` too: the prompt Ctrl-L reprints
 /// carries the same id and must not lose its marker. The scan stops at the
 /// first match, once per row.
-fn block_row_continues<T>(term: &Term<T>, line: Line, id: BlockKey, boundary: usize) -> bool {
+pub(crate) fn block_row_continues<T>(
+    term: &Term<T>,
+    line: Line,
+    id: BlockKey,
+    boundary: usize,
+) -> bool {
     if line < term.topmost_line() || line > term.bottommost_line() {
         return false;
     }
@@ -4111,6 +4439,18 @@ pub struct Session {
     /// The search's compiled pattern and generation in the scrollback —
     /// a **leaf lock**, precedent `theme`; the borrowing rule is in [`SearchSlot`].
     search: Mutex<SearchSlot>,
+    /// The command blocks of the whole history — the scroll bar's block
+    /// marks ([`crate::block_index`]); a **leaf lock**, the borrowing rule
+    /// is [`block_index::BlockSlot`]'s.
+    block_index: Mutex<block_index::BlockSlot>,
+    /// Whether the block marks are wanted ([`Session::set_block_marks`]) —
+    /// the gate of the index's steps, of its news and of the frame's block
+    /// lane.
+    blocks_wanted: AtomicBool,
+    /// The frame's news to the index's driver is pending
+    /// ([`Wake::blocks_changed`]) — an **edge**, consumed by
+    /// [`Session::block_step`].
+    block_news: AtomicBool,
     /// The scrollback's ceiling (`scrollback`) — the "did the scrollback
     /// saturate" question of the current search match's drift
     /// ([`search::ledger_shift`]). Its writers are opening and [`Session::set_terminal_options`].
@@ -4703,6 +5043,10 @@ impl Session {
             alt_screen: AtomicBool::new(false),
             caret_in_dock: AtomicBool::new(false),
             search: Mutex::new(SearchSlot::default()),
+            // Nothing wanted at opening: the shell asks when a bar is wide.
+            block_index: Mutex::new(block_index::BlockSlot::default()),
+            blocks_wanted: AtomicBool::new(false),
+            block_news: AtomicBool::new(false),
             scrollback: AtomicUsize::new(scrollback),
             user_scroll: AtomicI64::new(0),
             dock_window: Mutex::new(None),
@@ -4818,9 +5162,13 @@ impl Session {
     /// the scan does not run.
     ///
     /// **`marks` is the scroll bar's marks of the whole history**
-    /// ([`TrackMarks`]): the last finished search pass's rows, bucketed after
-    /// the `Term` lock is released; kept as they are when this frame's inputs
-    /// are the ones they were built from.
+    /// ([`TrackMarks`]): the last finished search pass's rows and, while the
+    /// block marks are wanted, the block index's last publication, bucketed
+    /// after the `Term` lock is released; kept as they are when this frame's
+    /// inputs are the ones they were built from. While they are wanted and
+    /// the history moved since the index looked, the frame tells the index's
+    /// driver ([`Wake::blocks_changed`]) — after the lock, once per pending
+    /// news.
     ///
     /// **The journal:** the cursor-style reset on leaving the alternate screen
     /// is recorded in this lock round; the glide moves only the view, which
@@ -5936,11 +6284,14 @@ impl Session {
         // scrollback's observation and the current match's row. Their
         // bucketing reads the last pass, which lives in the search slot — a
         // leaf lock, taken after `Term` is released ([`TrackMarks`]).
+        // The scrollback's observation, once: search's tracking and the block
+        // lane read the same one.
+        let ledger = self.ledger_now(&term);
         let mut search_seen = None;
         if let Some(regex) = search_pattern.as_mut() {
             // The current match is first pinned to its content: if output
             // scrolled the scrollback its highlight is at its scrolled place.
-            let now = self.ledger_now(&term);
+            let now = ledger;
             search::track(
                 &term,
                 &mut search_tracking,
@@ -6132,7 +6483,43 @@ impl Session {
             }
             (Some(_), None, _) => {}
             (None, ..) if search_lent => {}
-            _ => marks.clear(),
+            _ => marks.clear_search(),
+        }
+        // **The block lane after the lock too**, from the index's last
+        // publication: the index's slot and `shell` one after the other,
+        // never nested. Only while the marks are wanted — otherwise the
+        // index is not told of output and the lane stays as last drawn
+        // ([`Session::set_block_marks`]).
+        if self.blocks_wanted.load(Ordering::Acquire) && !alt_screen {
+            let (pass, stale) = {
+                let slot = lock(&self.block_index);
+                let stale = !slot.busy
+                    && slot
+                        .index
+                        .seen()
+                        .is_none_or(|seen| block_index::moved(seen, ledger));
+                (slot.pass.clone(), stale)
+            };
+            // Edge-triggered: one news until a step takes it, so a frame
+            // asks for at most one look.
+            if stale && !self.block_news.swap(true, Ordering::AcqRel) {
+                self.adapter.0.wake.blocks_changed();
+            }
+            match (pass, cursor.scroll_position()) {
+                (Some(pass), Some(position)) => {
+                    let shell = lock(&self.shell);
+                    marks.update_blocks(BlockLane {
+                        pass: &pass,
+                        now: ledger,
+                        limit: self.scrollback.load(Ordering::Relaxed),
+                        total: position.room.saturating_add(u32::from(position.visible)),
+                        shell: &shell,
+                    });
+                }
+                _ => marks.clear_blocks(),
+            }
+        } else if alt_screen {
+            marks.clear_blocks();
         }
         marks.set_colors(&theme);
 
@@ -6435,10 +6822,7 @@ impl Session {
         if probe == 0 || prev == 0 || prev == probe || prev_size != size {
             return 0;
         }
-        let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
-        (1..=history)
-            .find(|&k| row_identity(term, Line(-k)) == prev)
-            .map_or(0, |k| u16::try_from(k).unwrap_or(u16::MAX))
+        probe_depth(term, prev).map_or(0, |k| u16::try_from(k).unwrap_or(u16::MAX))
     }
 
     /// The length of the fill band that closes the strip the slide opens
@@ -6678,11 +7062,7 @@ impl Session {
             };
             resolved.push(Block {
                 row,
-                stripe: match stripe {
-                    Stripe::Running => theme.accent_linear(),
-                    Stripe::Success => theme.success_linear(),
-                    Stripe::Error => theme.error_linear(),
-                },
+                stripe: theme.stripe_linear(stripe),
             });
         }
         // **The band's stripes from the same ledger, into a separate list**
@@ -6696,11 +7076,7 @@ impl Session {
             };
             fill_resolved.push(Block {
                 row,
-                stripe: match stripe {
-                    Stripe::Running => theme.accent_linear(),
-                    Stripe::Success => theme.success_linear(),
-                    Stripe::Error => theme.error_linear(),
-                },
+                stripe: theme.stripe_linear(stripe),
             });
         }
         next_tick
@@ -9461,6 +9837,199 @@ impl Session {
         }
     }
 
+    /// Whether the scroll bar's block marks are wanted — the bar is wide (the
+    /// pointer over its strip, the always-up form) in a pane that can be
+    /// seen. The shell says so; this crate does not see the bar.
+    ///
+    /// **Wanted, the index is driven** ([`Session::block_step`]) and the
+    /// frame tells its driver of output ([`Wake::blocks_changed`]) and fills
+    /// the block lane ([`TrackMarks::blocks`]). **Not wanted, it stops but
+    /// is not dropped**: no step, no news, the lane kept as last drawn — the
+    /// next time it is wanted the index catches up from where it stood
+    /// instead of rescanning the history. Becoming wanted again owes one
+    /// published picture, so the lane is redrawn even if no row moved — a
+    /// command that finished meanwhile changed only its colour.
+    ///
+    /// **Journal-neutral:** writes no `Term` state.
+    pub fn set_block_marks(&self, wanted: bool) {
+        let was = self.blocks_wanted.swap(wanted, Ordering::AcqRel);
+        if wanted && !was {
+            lock(&self.block_index).owed = true;
+        }
+    }
+
+    /// One step of the block index ([`crate::block_index`]): moves it to
+    /// this look of the grid, scans at most [`search::CHUNK_LINES`]
+    /// unscanned history rows and the screen. `None` while the marks are not
+    /// wanted ([`Session::set_block_marks`]).
+    ///
+    /// Its driver is `bt-shell`, the search's latch: one step per turn of the
+    /// main queue until `complete`, and again on the frame's news
+    /// ([`Wake::blocks_changed`]) — at most one step per drawn frame while
+    /// output streams. **A step requests no frame**: when it publishes a
+    /// different picture it says so ([`BlockReport::marks_changed`]) and the
+    /// driver asks for the content frame only if a bar is up to show it.
+    ///
+    /// The index is taken out of its leaf slot before `Term` and put back
+    /// after; on the alternate screen the step does nothing — its grid is not
+    /// the history's.
+    ///
+    /// **Journal-neutral:** reads the grid only.
+    pub fn block_step(&self) -> Option<BlockReport> {
+        if !self.blocks_wanted.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut index = {
+            let mut slot = lock(&self.block_index);
+            if slot.busy {
+                // Another step is in flight (only tests can run it): it
+                // takes the news.
+                return Some(BlockReport::default());
+            }
+            slot.busy = true;
+            std::mem::take(&mut slot.index)
+        };
+        // Consumed before the look: news a frame raises from here on asks for
+        // the step after this one.
+        self.block_news.store(false, Ordering::Release);
+        let limit = self.scrollback.load(Ordering::Relaxed);
+        let look = {
+            let term = self.term.lock();
+            (!term.mode().contains(TermMode::ALT_SCREEN)).then(|| {
+                let at = Observation {
+                    now: self.ledger_now(&term),
+                    limit,
+                    clear_boundary: self.clear_boundary.load(Ordering::Relaxed),
+                };
+                index.step(&term, at, search::CHUNK_LINES)
+            })
+        };
+        let stepped = look.is_some();
+        let complete = !stepped || index.complete();
+        let mut slot = lock(&self.block_index);
+        slot.busy = false;
+        let mut marks_changed = false;
+        // **A restart takes the old picture down**: the index dropped what it
+        // knew, and in a full history with output streaming the frame cannot
+        // move the old marks either (the shift is unknowable) — they would
+        // stand for blocks long gone. No marks until the rescan publishes.
+        if look.is_some_and(|look| look.restarted)
+            && let Some(mark) = index.seen()
+            && slot.pass.as_ref().is_some_and(|pass| !pass.rows.is_empty())
+        {
+            slot.passes += 1;
+            let serial = slot.passes;
+            slot.pass = Some(Arc::new(BlockPass {
+                rows: Vec::new(),
+                mark,
+                serial,
+            }));
+            marks_changed = true;
+        }
+        if let Some(mark) = index.seen().filter(|_| stepped && index.complete())
+            && (slot.owed
+                || !slot
+                    .pass
+                    .as_ref()
+                    .is_some_and(|pass| pass.same_as(&index, limit)))
+        {
+            // The old picture's memory comes back when nobody else holds it.
+            let mut rows = match slot.pass.take().map(Arc::try_unwrap) {
+                Some(Ok(old)) => old.rows,
+                _ => Vec::new(),
+            };
+            rows.clear();
+            rows.extend(index.depths());
+            slot.passes += 1;
+            let serial = slot.passes;
+            slot.pass = Some(Arc::new(BlockPass { rows, mark, serial }));
+            slot.owed = false;
+            marks_changed = true;
+        }
+        slot.index = index;
+        drop(slot);
+        Some(BlockReport {
+            complete: complete && !self.block_news.load(Ordering::Acquire),
+            marks_changed,
+            streaming: look.is_some_and(|look| look.moved),
+        })
+    }
+
+    /// What the block mark `handle` points at — the scroll bar tip's text
+    /// ([`BlockInfo`]); `None` when the block is gone (it left the history,
+    /// the history was laid out anew, the alternate screen is up) or is no
+    /// longer drawn as a mark.
+    ///
+    /// **Two rounds, one after the other**: the `Term` round finds the
+    /// block's row now — where the handle's frame drew it, moved by what
+    /// output did since, and if that row is not the block's start, the
+    /// nearest start of the same block within a screen — and reads its text
+    /// from the grid, nothing kept; the `shell` round reads its stripe,
+    /// exit, duration and start from the ledger.
+    ///
+    /// **Journal-neutral:** reads only.
+    pub fn block_info(&self, handle: BlockHandle) -> Option<BlockInfo> {
+        let HandleBody { key, depth, mark } = handle.0?;
+        let limit = self.scrollback.load(Ordering::Relaxed);
+        let (command, depth) = {
+            let term = self.term.lock();
+            if term.mode().contains(TermMode::ALT_SCREEN) {
+                return None;
+            }
+            let now = self.ledger_now(&term);
+            if search::layout_changed(mark, now) {
+                return None;
+            }
+            let moved = search::depth_moved(mark, now, limit).unwrap_or(0);
+            let history = i64::try_from(term.history_size()).ok()?;
+            let near = i64::try_from(depth).ok()? + moved - history;
+            let boundary = self.clear_boundary.load(Ordering::Relaxed);
+            let line = block_start_near(&term, near, key, boundary)?;
+            let depth = u32::try_from(i64::from(line) + history).ok()?;
+            (block_text(&term, line, key), depth)
+        };
+        let theme = self.theme();
+        let (stripe, outcome) = {
+            let shell = lock(&self.shell);
+            (
+                shell.stripe(key, shell.running_blocks()),
+                shell.outcome(key),
+            )
+        };
+        let stripe = stripe?;
+        let (running, exit, elapsed, started) = match outcome {
+            Some((outcome, running)) => {
+                let (Outcome::Pending { started } | Outcome::Finished { started, .. }) = outcome;
+                match outcome {
+                    Outcome::Finished {
+                        exit, elapsed_ms, ..
+                    } if !running => (false, exit, elapsed_ms, started),
+                    _ => (running, None, 0, started),
+                }
+            }
+            None => (false, None, 0, 0),
+        };
+        // The duration counter's own text — the tenths a finished one
+        // settles on. Zero is the ledger's "never saw its start" too: a
+        // stamped start says the zero was measured (a builtin under a
+        // millisecond), an older build's block with no stamp has its
+        // duration all the same.
+        let duration = (!running && (elapsed > 0 || started != 0)).then(|| {
+            Counter::new(Duration::from_millis(elapsed.into()), Precision::Tenths)
+                .as_str()
+                .to_owned()
+        });
+        Some(BlockInfo {
+            command,
+            color: theme.stripe_srgb(stripe),
+            running,
+            exit,
+            duration,
+            started: (started != 0).then_some(started),
+            depth,
+        })
+    }
+
     /// Makes the current match the grid's selection (Esc, the close button):
     /// ⌘C copies it at once. The window does not move. `false` if there is
     /// no match.
@@ -11128,6 +11697,8 @@ mod tests {
         edges: u32,
         /// How many times [`Wake::mirror_changed`] came.
         mirrors: u32,
+        /// How many times [`Wake::blocks_changed`] came.
+        blocks: u32,
     }
 
     impl TestWake {
@@ -11238,6 +11809,11 @@ mod tests {
 
         fn mirror_changed(&self) {
             self.state.lock().unwrap().mirrors += 1;
+            self.cond.notify_all();
+        }
+
+        fn blocks_changed(&self) {
+            self.state.lock().unwrap().blocks += 1;
             self.cond.notify_all();
         }
     }
@@ -23241,6 +23817,355 @@ e\\314\\201.'; sleep 5";
         lock(&session.search).pass.as_ref().map(|pass| pass.serial)
     }
 
+    /// Steps the block index until it is complete; the reports' `marks_changed`, ored.
+    fn settle_blocks(session: &Session) -> bool {
+        let mut changed = false;
+        for _ in 0..1000 {
+            let report = session.block_step().expect("the marks are wanted");
+            changed |= report.marks_changed;
+            if report.complete {
+                return changed;
+            }
+        }
+        panic!("the block index never completed");
+    }
+
+    /// The block lane's `(position, colour)` pairs, top first.
+    fn block_lane(marks: &TrackMarks) -> Vec<(f32, LinearRgba)> {
+        marks
+            .blocks()
+            .iter()
+            .map(|mark| (mark.position, marks.block_colors()[mark.color]))
+            .collect()
+    }
+
+    #[test]
+    fn block_marks_wear_the_stripes_colour_and_tell_their_block() {
+        // Block 1 succeeded, block 2 failed after a while, block 3 runs; enough
+        // output between them that the first two are history rows.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '{}cmd1{}{}cmd2\\033]133;C\\007\\r\\n'; sleep 0.3; \
+                 printf 'out2\\r\\n\\033]133;D;2;bt_block=2\\007'; \
+                 for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'line\\r\\n'; done; \
+                 printf '{}cmd3\\033]133;C\\007\\r\\n'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out1"),
+                anchored_prompt(2),
+                anchored_prompt(3),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until("cmd3 did not start", Duration::from_secs(5), || {
+            session
+                .shell_state()
+                .is_some_and(|state| state.phase == ShellPhase::Running)
+                && !rows_holding(&session, "cmd3").is_empty()
+        });
+        assert_eq!(
+            session.block_step(),
+            None,
+            "a step while nobody wants the marks"
+        );
+        session.set_block_marks(true);
+        assert!(
+            settle_blocks(&session),
+            "the first picture was not published"
+        );
+        let mut marks = TrackMarks::default();
+        let mut blocks = Blocks::default();
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut marks,
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        let depth = |needle: &str| rows_holding(&session, needle)[0] as f32;
+        assert_eq!(
+            block_lane(&marks),
+            [
+                (depth("$ cmd1"), THEME.success_linear()),
+                (depth("$ cmd2"), THEME.error_linear()),
+                (depth("$ cmd3"), THEME.accent_linear()),
+            ]
+        );
+        // The running block is on screen: its mark is its stripe.
+        let stripe = blocks
+            .as_slice()
+            .last()
+            .expect("the running block's stripe")
+            .stripe;
+        assert_eq!(block_lane(&marks)[2].1, stripe);
+        let info = |at: usize| {
+            session
+                .block_info(marks.blocks()[at].handle)
+                .expect("a block")
+        };
+        let failed = info(1);
+        assert_eq!(failed.command, "$ cmd2");
+        assert_eq!(failed.exit, Some(2));
+        assert!(!failed.running);
+        assert_eq!(failed.color, THEME.stripe_srgb(Stripe::Error));
+        assert_eq!(failed.depth as f32, depth("$ cmd2"));
+        let duration = failed.duration.expect("the finished block's duration");
+        assert!(
+            duration.starts_with("0.") && duration.ends_with('s'),
+            "{duration}"
+        );
+        let now = wall_seconds();
+        let started = failed.started.expect("the start was stamped");
+        assert!(started <= now && now - started < 60, "{started} vs {now}");
+        let running = info(2);
+        assert_eq!(running.command, "$ cmd3");
+        assert!(running.running);
+        assert_eq!((running.exit, running.duration), (None, None));
+        assert!(running.started.is_some());
+        assert_eq!(session.block_info(BlockHandle::default()), None);
+        session.shutdown();
+    }
+
+    /// The wall clock in Unix seconds — the ledger's stamps' clock.
+    fn wall_seconds() -> u32 {
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        u32::try_from(since.as_secs()).unwrap()
+    }
+
+    #[test]
+    fn a_restored_block_tells_only_its_text_and_an_unstamped_one_no_time() {
+        // A restored history's anchor carries its colour, no ledger knows its
+        // exit; a block that never saw `C` — or came over an update from an
+        // older build — has no start.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '\\033]8;;bateri://sblock/4.error\\007$ old\\033]8;;\\007\\r\\nx\\r\\n\
+                 {}cmd1\\r\\n\\033]133;D;0;bt_block=1\\007'; \
+                 for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'line\\r\\n'; done; \
+                 printf '{}'; sleep 5",
+                anchored_prompt(1),
+                anchored_prompt(2),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until(
+            "the second prompt did not come",
+            Duration::from_secs(5),
+            || rows_holding(&session, "$").len() >= 3,
+        );
+        session.set_block_marks(true);
+        settle_blocks(&session);
+        let marks = frame_marks(&session);
+        let lane = marks.blocks();
+        assert_eq!(lane.len(), 2, "{lane:?}");
+        let restored = session
+            .block_info(lane[0].handle)
+            .expect("the restored block");
+        assert_eq!(restored.command, "$ old");
+        assert_eq!(restored.color, THEME.stripe_srgb(Stripe::Error));
+        assert_eq!(
+            (restored.exit, restored.duration, restored.started),
+            (None, None, None)
+        );
+        let unstamped = session.block_info(lane[1].handle).expect("block 1");
+        assert_eq!(unstamped.exit, Some(0));
+        assert_eq!((unstamped.duration, unstamped.started), (None, None));
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_frame_tells_the_index_of_output_only_while_the_marks_are_wanted() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; while read x; do echo \"$x\"; done",
+            Arc::clone(&wake),
+        );
+        let news = || wake.state.lock().unwrap().blocks;
+        session.write(b"a\r");
+        wait_until("no echo", Duration::from_secs(5), || {
+            !rows_holding(&session, "a").is_empty()
+        });
+        frame_marks(&session);
+        assert_eq!(news(), 0, "news while nobody wants the marks");
+        session.set_block_marks(true);
+        frame_marks(&session);
+        assert_eq!(news(), 1, "the index was never told");
+        frame_marks(&session);
+        assert_eq!(news(), 1, "a pending news was told twice");
+        settle_blocks(&session);
+        frame_marks(&session);
+        assert_eq!(news(), 1, "news with nothing moved");
+        session.write(b"b\r");
+        wait_until("no echo", Duration::from_secs(5), || {
+            !rows_holding(&session, "b").is_empty()
+        });
+        frame_marks(&session);
+        assert_eq!(news(), 2, "output was not told");
+        session.set_block_marks(false);
+        session.write(b"c\r");
+        wait_until("no echo", Duration::from_secs(5), || {
+            !rows_holding(&session, "c").is_empty()
+        });
+        frame_marks(&session);
+        assert_eq!(news(), 2, "news after the marks were let go");
+        session.shutdown();
+    }
+
+    #[test]
+    fn marks_wanted_again_publish_once_even_unchanged() {
+        // A finished command changes only its colour, which no row the index
+        // sees: wanting the marks again owes one picture — one frame.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '{}cmd1{}'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out")
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until("no block", Duration::from_secs(5), || {
+            !rows_holding(&session, "out").is_empty()
+        });
+        session.set_block_marks(true);
+        assert!(settle_blocks(&session));
+        assert!(
+            !settle_blocks(&session),
+            "an unchanged picture was published"
+        );
+        session.set_block_marks(false);
+        session.set_block_marks(true);
+        assert!(
+            settle_blocks(&session),
+            "the owed picture was not published"
+        );
+        assert!(!settle_blocks(&session));
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_restart_takes_the_old_picture_down_until_the_rescan_publishes() {
+        // ⌥⌘K lays the history out anew: the index drops what it knew, and
+        // the marks it published go with it — an empty picture first, the
+        // rescanned one when it completes.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '{}cmd1{}'; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'line\\r\\n'; done; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out"),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until("no history", Duration::from_secs(5), || {
+            session.term.lock().history_size() > 0
+        });
+        session.set_block_marks(true);
+        settle_blocks(&session);
+        let rows = |session: &Session| {
+            lock(&session.block_index)
+                .pass
+                .as_ref()
+                .map(|pass| pass.rows.len())
+        };
+        assert_eq!(rows(&session), Some(1));
+        session.clear_scrollback();
+        let report = session.block_step().expect("wanted");
+        assert!(report.marks_changed, "the old picture stayed up");
+        settle_blocks(&session);
+        assert_eq!(rows(&session), Some(0), "a cleared history kept its block");
+        session.shutdown();
+    }
+
+    #[test]
+    fn one_block_mark_per_bucket_an_error_over_a_success() {
+        // A track of 8192 rows: two rows to a bucket.
+        let shell = ShellLog::new(100);
+        let saved = |id, stripe| BlockKey::Saved { id, stripe };
+        let mark = search::LedgerMark {
+            history: 8000,
+            offset: 0,
+            user: 0,
+            epoch: 1,
+            wipes: 0,
+            columns: 40,
+            lines: 192,
+            alt: false,
+        };
+        let pass = BlockPass {
+            rows: vec![
+                (100, saved(1, Stripe::Success)),
+                (101, saved(2, Stripe::Error)),
+                (200, saved(3, Stripe::Error)),
+                (201, saved(4, Stripe::Success)),
+                (300, saved(5, Stripe::Success)),
+            ],
+            mark,
+            serial: 1,
+        };
+        let mut marks = TrackMarks::default();
+        marks.update_blocks(BlockLane {
+            pass: &pass,
+            now: mark,
+            limit: 10_000,
+            total: 8192,
+            shell: &shell,
+        });
+        let found: Vec<(f32, usize)> = marks
+            .blocks()
+            .iter()
+            .map(|mark| (mark.position, mark.color))
+            .collect();
+        let error = stripe_layer(Stripe::Error);
+        assert_eq!(
+            found,
+            [
+                (101.0, error),
+                (200.0, error),
+                (300.0, stripe_layer(Stripe::Success))
+            ]
+        );
+        assert_eq!(
+            marks.blocks()[0].handle,
+            BlockHandle(Some(HandleBody {
+                key: saved(2, Stripe::Error),
+                depth: 101,
+                mark,
+            }))
+        );
+        assert_eq!(marks.block_colors()[error], THEME.error_linear());
+        session_free_rebuild(&mut marks, &pass, &shell, mark);
+    }
+
+    /// The same inputs build nothing again: the lane a test emptied by hand
+    /// stays empty.
+    fn session_free_rebuild(
+        marks: &mut TrackMarks,
+        pass: &BlockPass,
+        shell: &ShellLog,
+        mark: search::LedgerMark,
+    ) {
+        marks.blocks.clear();
+        marks.update_blocks(BlockLane {
+            pass,
+            now: mark,
+            limit: 10_000,
+            total: 8192,
+            shell,
+        });
+        assert!(
+            marks.blocks().is_empty(),
+            "the same inputs were bucketed again"
+        );
+    }
+
     #[test]
     fn a_pass_marks_the_rows_it_counts() {
         // `seq 1 60`: every row holding a `1` is marked once, `11` too — the
@@ -23924,6 +24849,121 @@ e\\314\\201.'; sleep 5";
             "the index was lost in the race"
         );
         assert!(session.reader_alive(), "the reader thread died in the race");
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "runs with make test-race"]
+    fn race_block_step_and_frame() {
+        // The block index is another holder of the `Term` lock, its slot a
+        // leaf the frame takes after `Term`; while prompts and output stream,
+        // a driver steps it, lets the marks go and wants them again, and asks
+        // a drawn mark's tip. A broken lock order hangs the test; a lost
+        // index fails the last step.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "i=1; while :; do printf '\\033]133;A;bt_block='$i'\\007\
+             \\033]8;;bateri://block/'$i'\\007$ \\033]8;;\\007\\033]133;B\\007cmd\\r\\n\
+             \\033]133;C\\007\\r\\nout\\r\\n\\033]133;D;0;bt_block='$i'\\007'; \
+             i=$((i+1)); sleep 0.01; done",
+            Arc::clone(&wake),
+        ));
+        session.set_block_marks(true);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let driver = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut steps = 0u64;
+                while Instant::now() < deadline {
+                    session.block_step();
+                    if steps % 40 == 0 {
+                        session.set_block_marks(false);
+                        session.set_block_marks(true);
+                    }
+                    steps += 1;
+                }
+                steps
+            })
+        };
+        let mut frames = 0u64;
+        let mut marks = TrackMarks::default();
+        while Instant::now() < deadline {
+            frame_into(&session, &mut marks);
+            if let Some(mark) = marks.blocks().last() {
+                session.block_info(mark.handle);
+            }
+            frames += 1;
+        }
+        assert!(driver.join().unwrap() > 0, "the index never stepped");
+        assert!(frames > 0, "no frame was produced during the race");
+        assert!(
+            session.block_step().is_some(),
+            "the index was lost in the race"
+        );
+        assert!(session.reader_alive(), "the reader thread died in the race");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_frame_takes_the_block_slot_only_outside_the_term_lock() {
+        // While the frame is inside its `Term` round a second thread takes
+        // the block index's slot and holds it: a frame that reached for the
+        // slot under `Term` would wait holding `Term`, and the thread would
+        // never see it free.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '{}cmd1{}'; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'line\\r\\n'; done; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out"),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until("no history", Duration::from_secs(5), || {
+            session.term.lock().history_size() > 0
+        });
+        session.set_block_marks(true);
+        settle_blocks(&session);
+        let session = Arc::new(session);
+        let (entered, inside) = mpsc::channel();
+        let (held, hold) = mpsc::channel();
+        let holder = {
+            let session = Arc::clone(&session);
+            thread::spawn(move || {
+                inside.recv().expect("the frame entered its round");
+                let slot = lock(&session.block_index);
+                held.send(()).expect("the frame waits");
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut free = false;
+                while !free && Instant::now() < deadline {
+                    free = session.term.try_lock_unfair().is_some();
+                    thread::sleep(Duration::from_millis(1));
+                }
+                drop(slot);
+                free
+            })
+        };
+        let mut signal = Some((entered, hold));
+        session.frame(
+            |_| {
+                if let Some((entered, hold)) = signal.take() {
+                    entered.send(()).expect("the holder listens");
+                    hold.recv().expect("the holder took the slot");
+                }
+            },
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        assert!(
+            holder.join().expect("the holder"),
+            "the frame waited for the block slot while holding `Term`"
+        );
         session.shutdown();
     }
 

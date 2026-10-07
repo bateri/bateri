@@ -178,4 +178,19 @@ pub trait Wake: Send + Sync + 'static {
     /// prohibitions above apply. The implementor posts **at most one** job to its
     /// queue.
     fn link_hover_lost(&self);
+
+    /// The scroll bar's block marks are wanted
+    /// ([`crate::Session::set_block_marks`]) and the history moved since the
+    /// block index last looked — output, a clear, a resize. The receiver
+    /// drives the index ([`crate::Session::block_step`]).
+    ///
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::search_changed`]): a pending notification does not produce a
+    /// second one until a step consumes it, so while output streams it comes
+    /// at most once per drawn frame. It arrives on the **frame path's**
+    /// thread, after the `Term` lock and the index's leaf lock are released;
+    /// the three prohibitions above apply. It never arrives while the marks
+    /// are not wanted. The implementor posts **at most one** job to its
+    /// queue.
+    fn blocks_changed(&self);
 }

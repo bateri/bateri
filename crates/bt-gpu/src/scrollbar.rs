@@ -54,7 +54,10 @@
 //! They are content, not animation: when a pass changes them the frame that
 //! draws them is a content frame, asked for only while the bar is up
 //! ([`Scrollbar::up`]); a bar that was down asks for it when it next shows
-//! (`DisplayLink::marks_changed`).
+//! (`DisplayLink::marks_changed`). **The command blocks' marks** ride the
+//! wide form only, in the lane left of the search's
+//! ([`ScrollbarLayout::block_mark`]), in the stripes' colours; the pointer
+//! takes them through the same rectangles ([`ScrollbarLayout::block_at`]).
 
 use bt_core::ScrollPosition;
 
@@ -103,6 +106,14 @@ const MARK_RADIUS_PT: f32 = 1.0;
 /// form the mark sits in the thumb's own column, the only part of the strip
 /// on screen.
 const SEARCH_LANE_PT: [f32; 2] = [9.0, 14.0];
+/// The block lane, points from the strip's left edge: the command blocks'
+/// marks, only in the wide form — the thin bar has no room beside its thumb.
+/// Left of the search lane, clear of the hairline.
+const BLOCK_LANE_PT: [f32; 2] = [2.0, 8.0];
+/// How far around a block mark the pointer still takes it, points: a
+/// two-point line is too thin to land on; the target is the lane widened by
+/// a point each side and this much above and below the mark's middle.
+const BLOCK_REACH_PT: f32 = 3.0;
 
 /// The thumb's opacity over the theme's foreground while scrolling.
 pub(crate) const THUMB_ALPHA: f32 = 0.36;
@@ -648,6 +659,10 @@ pub struct ScrollbarLayout {
     total: f32,
     /// The wide form's search lane, left and right edge.
     search_x: [f32; 2],
+    /// The block lane, left and right edge.
+    block_x: [f32; 2],
+    /// A block mark's reach around its middle, pixels ([`BLOCK_REACH_PT`]).
+    block_reach: f32,
     /// A mark's height, whole pixels.
     mark_h: f32,
     /// A mark's corner radius, pixels.
@@ -700,6 +715,8 @@ impl ScrollbarLayout {
             top: position.top,
             total: total as f32,
             search_x: SEARCH_LANE_PT.map(|x| strip_x + cell.pt_px(x)),
+            block_x: BLOCK_LANE_PT.map(|x| strip_x + cell.pt_px(x)),
+            block_reach: cell.pt_px(BLOCK_REACH_PT),
             mark_h: cell.pt_px(MARK_PT).round().max(1.0),
             mark_radius: cell.pt_px(MARK_RADIUS_PT),
         }
@@ -741,19 +758,80 @@ impl ScrollbarLayout {
     pub(crate) fn search_mark(&self, position: f32, wide: f32) -> [f32; 4] {
         let wide = wide.clamp(0.0, 1.0);
         let lerp = |thin: f32, lane: f32| thin + (lane - thin) * wide;
-        let [top, bottom] = self.track;
-        let row = ((position + 0.5) / self.total.max(1.0)).clamp(0.0, 1.0);
-        let middle = top + (bottom - top) * row;
-        let y0 = (middle - self.mark_h * 0.5)
-            .round()
-            .min(bottom - self.mark_h)
-            .max(top);
+        let y0 = self.mark_top(position);
         [
             lerp(self.thin_x[0], self.search_x[0]),
             y0,
             lerp(self.thin_x[1], self.search_x[1]),
             y0 + self.mark_h,
         ]
+    }
+
+    /// A block mark's rectangle, `[x0, y0, x1, y1]`, for the row `position`
+    /// rows from the history's top (`bt_core::TrackBlock::position`) — in
+    /// the block lane, at a search mark's height and on the same scale
+    /// ([`ScrollbarLayout::search_mark`]).
+    pub(crate) fn block_mark(&self, position: f32) -> [f32; 4] {
+        let y0 = self.mark_top(position);
+        [self.block_x[0], y0, self.block_x[1], y0 + self.mark_h]
+    }
+
+    /// Where the pointer takes the block mark at `position`, `[x0, y0, x1,
+    /// y1]` — the mark's rectangle widened by a point each side and reaching
+    /// [`BLOCK_REACH_PT`] above and below its middle: the hit test's and the
+    /// hand cursor's one rectangle ([`ScrollbarLayout::block_at`]).
+    pub fn block_target(&self, position: f32) -> [f32; 4] {
+        let [x0, y0, x1, y1] = self.block_mark(position);
+        let (slop, middle) = (self.hairline, (y0 + y1) * 0.5);
+        [
+            x0 - slop,
+            middle - self.block_reach,
+            x1 + slop,
+            middle + self.block_reach,
+        ]
+    }
+
+    /// Which of `positions` (the drawn block marks', top first) the point —
+    /// physical pixels from the window's top-left — is on: the nearest whose
+    /// target holds it ([`ScrollbarLayout::block_target`]); `None` off every
+    /// mark, or with no bar.
+    pub fn block_at(
+        &self,
+        x: f32,
+        y: f32,
+        positions: impl IntoIterator<Item = f32>,
+    ) -> Option<usize> {
+        if !self.drawable() {
+            return None;
+        }
+        positions
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, position)| {
+                let [x0, y0, x1, y1] = self.block_target(position);
+                (x0..x1).contains(&x) && (y0..=y1).contains(&y)
+            })
+            .min_by(|(_, a), (_, b)| {
+                let off = |position: f32| {
+                    let [_, y0, _, y1] = self.block_mark(position);
+                    ((y0 + y1) * 0.5 - y).abs()
+                };
+                off(*a).total_cmp(&off(*b))
+            })
+            .map(|(at, _)| at)
+    }
+
+    /// A mark's top edge for the row `position` rows from the history's top:
+    /// centred on its row on the track's scale, on whole pixels, kept inside
+    /// the travel — both lanes' one vertical arithmetic.
+    fn mark_top(&self, position: f32) -> f32 {
+        let [top, bottom] = self.track;
+        let row = ((position + 0.5) / self.total.max(1.0)).clamp(0.0, 1.0);
+        let middle = top + (bottom - top) * row;
+        (middle - self.mark_h * 0.5)
+            .round()
+            .min(bottom - self.mark_h)
+            .max(top)
     }
 
     /// A mark's corner radius, pixels.
@@ -1014,6 +1092,57 @@ mod tests {
         let [top, bottom] = layout.track();
         assert_eq!(layout.search_mark(0.0, 0.0)[1], top);
         assert_eq!(layout.search_mark(119.0, 0.0)[3], bottom);
+    }
+
+    #[test]
+    fn a_block_mark_sits_on_its_row_in_its_own_lane() {
+        let cell = at_1x();
+        let layout = ScrollbarLayout::new(position(100, 40.0, 20), 400.0, 260.0, cell);
+        let strip = layout.strip_x();
+        let block = layout.block_mark(50.0);
+        let search = layout.search_mark(50.0, 1.0);
+        assert_eq!([block[0] - strip, block[2] - strip], BLOCK_LANE_PT);
+        assert_eq!(
+            [block[1], block[3]],
+            [search[1], search[3]],
+            "not the search mark's row"
+        );
+        assert!(block[2] <= search[0], "the lanes overlap");
+    }
+
+    #[test]
+    fn the_pointer_takes_the_nearest_block_mark_around_its_lane() {
+        // Rows 10, 12 and 50 of 120 on a 254-pixel track: the first two a few
+        // pixels apart, the nearer one wins; beside the lane, or between
+        // marks, nothing.
+        let cell = at_1x();
+        let layout = ScrollbarLayout::new(position(100, 40.0, 20), 400.0, 260.0, cell);
+        let marks = [10.0, 12.0, 50.0];
+        let middle = |position: f32| {
+            let [_, y0, _, y1] = layout.block_mark(position);
+            (y0 + y1) / 2.0
+        };
+        let lane = layout.strip_x() + 5.0;
+        assert_eq!(layout.block_at(lane, middle(10.0), marks), Some(0));
+        assert_eq!(layout.block_at(lane, middle(12.0), marks), Some(1));
+        assert_eq!(layout.block_at(lane, middle(50.0) + 2.5, marks), Some(2));
+        assert_eq!(layout.block_at(lane, middle(50.0) + 4.0, marks), None);
+        assert_eq!(layout.block_at(lane, middle(30.0), marks), None);
+        // A point either side of the lane still takes it; the search lane does not.
+        let [x0, _, x1, _] = layout.block_mark(50.0);
+        assert_eq!(layout.block_at(x0 - 0.5, middle(50.0), marks), Some(2));
+        assert_eq!(layout.block_at(x1 + 0.5, middle(50.0), marks), Some(2));
+        assert_eq!(
+            layout.block_at(layout.strip_x() + 11.0, middle(50.0), marks),
+            None
+        );
+        // The target is the hand cursor's rectangle and holds the mark.
+        let [tx0, ty0, tx1, ty1] = layout.block_target(50.0);
+        let [_, y0, _, y1] = layout.block_mark(50.0);
+        assert!(tx0 < x0 && tx1 > x1 && ty0 < y0 && ty1 > y1);
+        // No bar, nothing to take.
+        let none = ScrollbarLayout::new(None, 400.0, 260.0, cell);
+        assert_eq!(none.block_at(lane, middle(10.0), marks), None);
     }
 
     #[test]

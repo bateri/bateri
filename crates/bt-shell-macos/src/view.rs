@@ -35,8 +35,8 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 
 use bt_core::{
-    CellHalf, Click, MouseButton, MouseModifiers, ScrollIntent, SearchCover, SelectionPoint,
-    Session, Wheel,
+    BlockHandle, CellHalf, Click, MouseButton, MouseModifiers, ScrollIntent, SearchCover,
+    SelectionPoint, Session, Wheel,
 };
 use bt_gpu::{CellMetrics, Origin, ScrollbarLayout};
 use objc2::rc::Retained;
@@ -805,6 +805,7 @@ define_class!(
         fn mouse_exited(&self, event: &NSEvent) {
             if self.is_strip_event(event) {
                 self.set_scrollbar_hover(false);
+                self.block_hover(event.locationInWindow(), false);
             } else {
                 // SAFETY: `NSResponder`'s `mouseExited:` takes an `NSEvent`,
                 // returns nothing.
@@ -1855,7 +1856,9 @@ impl BateriView {
         layout.contains(x, y).then_some((layout, y))
     }
 
-    /// A press in the scroll bar's strip. The left button grabs the thumb:
+    /// A press in the scroll bar's strip. On a drawn block mark the left
+    /// button takes the window to that block ([`TerminalPane::go_to_block`])
+    /// and starts no drag. Elsewhere it grabs the thumb:
     /// on the thumb it holds it where it was pressed; on the track the
     /// thumb's middle jumps to the pointer at once and the drag goes on from
     /// there. The bar is held — up, wide, darkest — until the release.
@@ -1867,16 +1870,34 @@ impl BateriView {
         button: MouseButton,
         layout: ScrollbarLayout,
         y: f32,
+        in_window: NSPoint,
     ) {
         self.with_gesture(|g| g.begin_press(button));
+        // A press puts the tip away: a drag moves no tip along, a click
+        // takes the window elsewhere.
+        if let Some(pane) = self.pane() {
+            pane.hide_block_tip();
+        }
         if button != MouseButton::Left {
             return;
         }
-        // The thumb's vertical span is the same at either width. On the
-        // thumb the scroll goes to where the thumb already is: a glide still
-        // in flight stops, so a held thumb does not drift from the pointer.
+        // The thumb's vertical span is the same at either width.
         let [_, top, _, bottom] = layout.thumb(0.0);
-        let grab = if (top..bottom).contains(&y) {
+        let on_thumb = (top..bottom).contains(&y);
+        // A block mark off the thumb: its block comes two rows below the
+        // window's top and the press starts no drag. On the thumb the thumb
+        // wins — the marks there are the window's own blocks, and the
+        // thumb's left half must stay grabbable ([`Self::block_rects`]).
+        if !on_thumb
+            && let Some((handle, _)) = self.block_under(in_window)
+            && self.pane().is_some_and(|pane| pane.go_to_block(handle))
+        {
+            return;
+        }
+        // On the thumb the scroll goes to where the thumb already is: a glide
+        // still in flight stops, so a held thumb does not drift from the
+        // pointer.
+        let grab = if on_thumb {
             y - top
         } else {
             (bottom - top) / 2.0
@@ -1903,6 +1924,87 @@ impl BateriView {
         }
     }
 
+    /// The drawn block mark at a window point, as its handle and its
+    /// target in the view's points — the drawn frame's publication
+    /// ([`bt_gpu::Origin::block_at`]); `None` off every mark, or with the
+    /// bar thin (it draws no block lane).
+    fn block_under(&self, in_window: NSPoint) -> Option<(BlockHandle, NSRect)> {
+        let origin = self.ivars().origin.get()?;
+        let (_, x, y) = self.scrollbar_at(in_window)?;
+        let (handle, target) = origin.block_at(x, y)?;
+        Some((handle, self.px_rect(target)?))
+    }
+
+    /// A rectangle in the drawn frame's physical pixels, `[x0, y0, x1, y1]`
+    /// from the top-left, as the view's points — the view is flipped, so y
+    /// keeps its direction.
+    fn px_rect(&self, [x0, y0, x1, y1]: [f32; 4]) -> Option<NSRect> {
+        let scale = self.window()?.backingScaleFactor();
+        let point = |value: f32| f64::from(value) / scale;
+        Some(NSRect::new(
+            NSPoint::new(point(x0), point(y0)),
+            NSSize::new(point(x1 - x0), point(y1 - y0)),
+        ))
+    }
+
+    /// The pointer moved on the scroll bar's strip (`inside`) or left it: the
+    /// block mark under it shows its tip, anywhere else none; the hand cursor
+    /// follows the drawn marks. The same mark again asks nothing
+    /// ([`TerminalPane::show_block_tip`]).
+    fn block_hover(&self, in_window: NSPoint, inside: bool) {
+        let Some(pane) = self.pane() else {
+            return;
+        };
+        // A held thumb shows no tip: the drag moves the thumb over the marks
+        // frame by frame, and each move asks again (`recheck_block_hover`).
+        let inside = inside && !pane.thumb_held();
+        match inside.then(|| self.block_under(in_window)).flatten() {
+            Some((handle, mark)) => {
+                let strip = self.scrollbar_at(in_window).zip(self.window()).map_or(
+                    mark.origin.x,
+                    |((layout, ..), window)| {
+                        f64::from(layout.strip_x()) / window.backingScaleFactor()
+                    },
+                );
+                pane.show_block_tip(Some(handle), mark, strip);
+            }
+            None => pane.hide_block_tip(),
+        }
+        self.sync_cursor_rects();
+    }
+
+    /// The drawn block marks' targets in the view's points — the hand
+    /// cursor's rectangles ([`bt_gpu::Origin::block_targets`]); none while the
+    /// bar is thin. A mark whose middle lies on the thumb has none: a press
+    /// there grabs the thumb ([`Self::scrollbar_press`]), and the hand would
+    /// promise a click that does not come.
+    fn block_rects(&self) -> Vec<NSRect> {
+        let Some(origin) = self.ivars().origin.get() else {
+            return Vec::new();
+        };
+        let [_, top, _, bottom] = origin.scrollbar().thumb(0.0);
+        origin
+            .block_targets()
+            .into_iter()
+            .filter(|&[_, y0, _, y1]| !(top..bottom).contains(&((y0 + y1) / 2.0)))
+            .filter_map(|target| self.px_rect(target))
+            .collect()
+    }
+
+    /// Asks again where the pointer is over the block marks — the drawn
+    /// marks changed under a still pointer (`bt_gpu::DisplayLink::on_marks_published`):
+    /// the bar widened and drew them, output moved them, the thumb moved over
+    /// them. Outside the key window the strip's tracking area is quiet and so
+    /// is this.
+    pub(crate) fn recheck_block_hover(&self) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        let at = window.mouseLocationOutsideOfEventStream();
+        let inside = window.isKeyWindow() && self.scrollbar_region(at).is_some();
+        self.block_hover(at, inside);
+    }
+
     /// `Release::Scrollbar`: the thumb is let go. A drag that ended off the
     /// strip got no exit — the tracking area is quiet while a button is
     /// down — so the hover is asked again here.
@@ -1927,6 +2029,7 @@ impl BateriView {
         }
         let inside = self.scrollbar_region(event.locationInWindow()).is_some();
         self.set_scrollbar_hover(inside);
+        self.block_hover(event.locationInWindow(), inside);
         if inside {
             // The pointer on the bar is not over the grid's text: a
             // ⌘-hovered link under the strip clears.
@@ -2049,7 +2152,7 @@ impl BateriView {
         // asking for the mouse on the primary screen does not get the
         // strip's presses; the overlay scroller's bargain.
         if let Some((layout, y)) = self.scrollbar_region(event.locationInWindow()) {
-            self.scrollbar_press(session, button, layout, y);
+            self.scrollbar_press(session, button, layout, y, event.locationInWindow());
             return;
         }
         // The upload line's buttons and the load indicator: on the
@@ -2416,13 +2519,14 @@ impl BateriView {
         self.ivars().cursor_rects.replace(rects);
     }
 
-    /// Every hand-cursor rectangle: the upload buttons, the load indicator
-    /// and the shown link.
+    /// Every hand-cursor rectangle: the upload buttons, the load indicator,
+    /// the shown link and the scroll bar's drawn block marks.
     fn hand_rects(&self) -> Vec<NSRect> {
         let mut rects = self.upload_button_rects();
         rects.extend(self.stats_rect());
         rects.extend(self.sign_in_rect());
         rects.extend(self.link_rects());
+        rects.extend(self.block_rects());
         rects
     }
 

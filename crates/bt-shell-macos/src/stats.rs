@@ -151,6 +151,8 @@ impl TerminalPane {
             .schedule
             .set_visible(Instant::now(), visible);
         self.run_stats(actions);
+        // The same answer stops the scroll bar's block index.
+        self.set_seen(visible);
     }
 
     /// A key, a press, the wheel, a mouse move or the window becoming key.

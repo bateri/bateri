@@ -35,7 +35,7 @@ use std::mem::offset_of;
 use bt_atlas::{Face, RuleKind, SizeClass};
 use bt_core::{
     Block, ButtonState, CaretShape, CaretStyle, Cell, ClusterId, Clusters, DockButton, LinearRgba,
-    SearchRun, SelectionRun, TrackMark, UnderlineStyle, UnfocusedCaret,
+    SearchRun, SelectionRun, TrackBlock, TrackMark, UnderlineStyle, UnfocusedCaret,
 };
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
@@ -1196,6 +1196,13 @@ pub(crate) struct Frame {
     scrollbar_marks: [Vec<Instance>; 2],
     /// The two marks' colours, the bar's visibility in their alpha.
     scrollbar_mark_rgba: [[f32; 4]; 2],
+    /// The command blocks' marks in the wide form's block lane
+    /// ([`Frame::set_scrollbar`]), one list per colour in draw order — a
+    /// success's, a running command's, an error's — one `selection` draw
+    /// each. Written and emptied with the thumb.
+    scrollbar_blocks: [Vec<Instance>; 3],
+    /// Their colours, the bar's visibility and its width in their alpha.
+    scrollbar_block_rgba: [[f32; 4]; 3],
     /// The marks' corner radius, pixels.
     scrollbar_mark_radius: f32,
     /// The number of **background** instances drawn; the caret is not counted.
@@ -1294,6 +1301,7 @@ impl Frame {
         self.scrollbar = None;
         self.scrollbar_track = None;
         self.scrollbar_marks.iter_mut().for_each(Vec::clear);
+        self.scrollbar_blocks.iter_mut().for_each(Vec::clear);
     }
 
     /// This frame's vertical origin, in **rows**: the content starts this much
@@ -2339,6 +2347,15 @@ impl Frame {
     /// the wide form in the strip's search lane, moving between the two with
     /// the width. They are the last content frame's — a motion frame redraws
     /// them from the same list as the bar fades — and a hidden bar has none.
+    ///
+    /// **The command blocks' marks** (`bt_core::TrackMarks::blocks` and its
+    /// three colours) only in the wide form, in its block lane, appearing
+    /// with the width like the track; each colour is one list, drawn in the
+    /// order given, so an error's mark lies over its neighbours'.
+    // The bar's look, its two lanes and their colours: gathering them in a
+    // struct would create a type only for this call (`Session::frame`'s
+    // precedent), and `bt-gpu`'s tests cannot build `bt_core::TrackMarks`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_scrollbar(
         &mut self,
         layout: ScrollbarLayout,
@@ -2346,20 +2363,22 @@ impl Frame {
         foreground: LinearRgba,
         marks: &[TrackMark],
         mark_colors: [LinearRgba; 2],
+        blocks: &[TrackBlock],
+        block_colors: [LinearRgba; 3],
     ) {
         let shown = layout.drawable() && look.alpha > 0.0;
+        let mark = |[x0, y0, x1, y1]: [f32; 4]| Instance {
+            pos: [x0, y0],
+            size: [x1 - x0, y1 - y0],
+            rgba: [1.0; 4],
+        };
         let [matched, current] = &mut self.scrollbar_marks;
         matched.clear();
         current.clear();
         if shown {
-            for mark in marks {
-                let [x0, y0, x1, y1] = layout.search_mark(mark.position, look.wide);
-                let instance = Instance {
-                    pos: [x0, y0],
-                    size: [x1 - x0, y1 - y0],
-                    rgba: [1.0; 4],
-                };
-                if mark.current {
+            for each in marks {
+                let instance = mark(layout.search_mark(each.position, look.wide));
+                if each.current {
                     current.push(instance);
                 } else {
                     matched.push(instance);
@@ -2367,6 +2386,16 @@ impl Frame {
             }
         }
         self.scrollbar_mark_rgba = mark_colors.map(|color| with_alpha(color, look.alpha));
+        self.scrollbar_blocks.iter_mut().for_each(Vec::clear);
+        if shown && look.wide > 0.0 {
+            for block in blocks {
+                if let Some(list) = self.scrollbar_blocks.get_mut(block.color) {
+                    list.push(mark(layout.block_mark(block.position)));
+                }
+            }
+        }
+        self.scrollbar_block_rgba =
+            block_colors.map(|color| with_alpha(color, look.alpha * look.wide));
         self.scrollbar_mark_radius = layout.mark_radius();
         self.scrollbar = shown.then(|| {
             let core = layout.thumb(look.wide);
@@ -2412,6 +2441,15 @@ impl Frame {
         let [matched, current] = &self.scrollbar_marks;
         let [matched_rgba, current_rgba] = self.scrollbar_mark_rgba;
         [(matched, matched_rgba), (current, current_rgba)]
+    }
+
+    /// This frame's block marks in the wide form's lane, in draw order, each
+    /// list with its colour; empty lists when the bar is thin, hidden or has
+    /// nothing to mark.
+    pub(crate) fn scrollbar_block_marks(&self) -> [(&[Instance], [f32; 4]); 3] {
+        let [success, running, error] = &self.scrollbar_blocks;
+        let [a, b, c] = self.scrollbar_block_rgba;
+        [(success, a), (running, b), (error, c)]
     }
 
     /// The marks' corner radius, pixels.

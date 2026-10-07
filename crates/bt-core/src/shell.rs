@@ -105,6 +105,7 @@
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use unicode_width::UnicodeWidthChar;
@@ -1350,6 +1351,19 @@ pub(crate) struct BlockLog {
     /// The identity of `entries[0]`; meaningless while the ledger is empty.
     first: u32,
     capacity: usize,
+    /// Which picture of the ledger this is ([`LedgerRevision`]): renewed by
+    /// every change a stripe can see.
+    revision: u64,
+}
+
+/// The source of [`BlockLog::revision`]: one counter for the process, so two
+/// ledgers — a fresh one and the one it replaced — never share a revision
+/// whatever they hold.
+static REVISIONS: AtomicU64 = AtomicU64::new(0);
+
+/// A revision no ledger has had.
+fn next_revision() -> u64 {
+    REVISIONS.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 impl BlockLog {
@@ -1358,7 +1372,14 @@ impl BlockLog {
             entries: VecDeque::new(),
             first: 0,
             capacity: Self::capacity_for(scrollback),
+            revision: next_revision(),
         }
+    }
+
+    /// The ledger changed in a way a stripe can see: a new revision
+    /// ([`LedgerRevision`]).
+    fn touch(&mut self) {
+        self.revision = next_revision();
     }
 
     /// Deriving the ceiling from `scrollback` — the **single** source of
@@ -1382,6 +1403,7 @@ impl BlockLog {
         while self.entries.len() > self.capacity {
             self.entries.pop_front();
             self.first = self.first.wrapping_add(1);
+            self.touch();
         }
     }
 
@@ -1389,10 +1411,12 @@ impl BlockLog {
     fn clear(&mut self) {
         self.entries.clear();
         self.first = 0;
+        self.touch();
     }
 
     /// Writes the block opened with `A` into the ledger.
     fn start(&mut self, id: u32) {
+        self.touch();
         // An identity inside the range being opened a second time: we reopen the block,
         // we do not delete the ledger. The ones after it are now invalid — those
         // identities are left over from a previous round.
@@ -1439,6 +1463,7 @@ impl BlockLog {
     /// in the ledger is ignored. The start stays what `C` stamped.
     fn finish(&mut self, id: u32, exit: Option<i32>, elapsed_ms: u32) {
         if let Some(at) = self.index_of(id) {
+            self.touch();
             let (Outcome::Pending { started } | Outcome::Finished { started, .. }) =
                 self.entries[at];
             self.entries[at] = Outcome::Finished {
@@ -3097,6 +3122,38 @@ impl ShellLog {
         let (track, id) = self.track(key)?;
         track.duration(id, running.is(key))
     }
+
+    /// Which picture of the ledgers [`Self::stripe`] would read now: when
+    /// two answers are equal, every block's stripe is what it was — the
+    /// scroll bar's block marks are not resolved again from the same picture
+    /// (`TrackMarks`).
+    pub(crate) fn revision(&self) -> LedgerRevision {
+        LedgerRevision {
+            local: self.local.blocks.revision,
+            remote: self
+                .remote_shell
+                .map(|shell| (shell, self.remote.blocks.revision)),
+            running: self.running_blocks(),
+        }
+    }
+
+    /// A block's record as its ledger keeps it, and whether it is the
+    /// running one — the scroll bar tip's exit, duration and start
+    /// (`Session::block_info`). `None` for a restored block, whose ledger
+    /// died with the old shell, and for an identity the ring lost.
+    pub(crate) fn outcome(&self, key: BlockKey) -> Option<(Outcome, bool)> {
+        let (track, id) = self.track(key)?;
+        Some((track.blocks.get(id)?, self.running_blocks().is(key)))
+    }
+}
+
+/// [`ShellLog::revision`]'s answer: the ledgers' revisions and the running
+/// blocks — everything a stripe is read from but the key itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LedgerRevision {
+    local: u64,
+    remote: Option<(RemoteShell, u64)>,
+    running: RunningBlocks,
 }
 
 /// Reduces a [`Duration`] to milliseconds, saturating.
@@ -4671,6 +4728,7 @@ impl CarriedTrack {
             .map(|start| RunClock::ran_for(Duration::from_millis(wall_ms().saturating_sub(start))));
         track.blocks.entries = self.entries.into();
         track.blocks.first = self.first;
+        track.blocks.touch();
         while track.blocks.entries.len() > track.blocks.capacity {
             track.blocks.entries.pop_front();
             track.blocks.first = track.blocks.first.wrapping_add(1);

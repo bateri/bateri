@@ -16,6 +16,7 @@ use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
 use crate::settings::HostMark;
+use crate::shell::Stripe;
 
 /// Color in the draw target's space: **linear** RGBA.
 ///
@@ -471,6 +472,30 @@ impl Theme {
     /// The stripe color of a block that ended with an error, **linear** RGBA.
     pub const fn error_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.error))
+    }
+
+    /// A command block's stripe colour, **linear** — the **one** mapping from
+    /// a block's drawable state to its role (running `accent`, success
+    /// `success`, error `error`): the grid's and the band's markers and the
+    /// scroll bar's block marks all read it, so a mark on the track and the
+    /// stripe beside its command cannot differ.
+    pub(crate) const fn stripe_linear(&self, stripe: Stripe) -> LinearRgba {
+        linear_rgba(rgb(self.stripe_rgb(stripe)))
+    }
+
+    /// [`Theme::stripe_linear`] as **sRGB** bytes (`[r, g, b]`) — the
+    /// scroll bar tip's dot (`bt-shell`, `NSColor` sRGB); the same mapping.
+    pub(crate) const fn stripe_srgb(&self, stripe: Stripe) -> [u8; 3] {
+        let Rgb { r, g, b } = rgb(self.stripe_rgb(stripe));
+        [r, g, b]
+    }
+
+    const fn stripe_rgb(&self, stripe: Stripe) -> u32 {
+        match stripe {
+            Stripe::Running => self.accent,
+            Stripe::Success => self.success,
+            Stripe::Error => self.error,
+        }
     }
 
     /// The info role, **linear** RGBA — the remote session's host and the

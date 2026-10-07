@@ -1979,6 +1979,9 @@ impl Renderer {
                 thumb.core,
                 thumb.shape,
             );
+            for (marks, color) in frame.scrollbar_block_marks() {
+                plan.selection(marks, color, frame.scrollbar_mark_radius());
+            }
             for (marks, color) in frame.scrollbar_marks() {
                 plan.selection(marks, color, frame.scrollbar_mark_radius());
             }

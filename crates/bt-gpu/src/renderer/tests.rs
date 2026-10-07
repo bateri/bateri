@@ -1,5 +1,6 @@
 use bt_core::{
-    Block, CaretShape, Cell, Cursor, SearchRun, SelectionRun, Theme, TrackMark, UnderlineStyle,
+    Block, BlockHandle, CaretShape, Cell, Cursor, SearchRun, SelectionRun, Theme, TrackBlock,
+    TrackMark, UnderlineStyle,
 };
 
 use super::*;
@@ -1580,6 +1581,14 @@ const MARK_COLORS: [LinearRgba; 2] = [
     LinearRgba::from_srgb(0x00, 0x00, 0xff),
 ];
 
+/// The block marks' three colours in the pixel tests, in draw order — pure
+/// channels again, a different one in each.
+const BLOCK_COLORS: [LinearRgba; 3] = [
+    LinearRgba::from_srgb(0xff, 0xff, 0x00),
+    LinearRgba::from_srgb(0x00, 0xff, 0xff),
+    LinearRgba::from_srgb(0xff, 0x00, 0xff),
+];
+
 /// A frame with a dock and a scroll bar at the bottom of its travel, drawn
 /// with `look` (`None` → the bar is never set) and `marks`: the frame, the
 /// layout and the floor the track ends at.
@@ -1587,6 +1596,16 @@ fn scroll_bar_marked(
     edge: usize,
     look: Option<Look>,
     marks: &[TrackMark],
+) -> (Frame, crate::scrollbar::ScrollbarLayout, f32) {
+    scroll_bar_with_blocks(edge, look, marks, &[])
+}
+
+/// [`scroll_bar_marked`] with block marks too, in [`BLOCK_COLORS`].
+fn scroll_bar_with_blocks(
+    edge: usize,
+    look: Option<Look>,
+    marks: &[TrackMark],
+    blocks: &[TrackBlock],
 ) -> (Frame, crate::scrollbar::ScrollbarLayout, f32) {
     let cell = grid(8, 16);
     let mut frame = Frame::default();
@@ -1603,7 +1622,15 @@ fn scroll_bar_marked(
     };
     let layout = crate::scrollbar::ScrollbarLayout::new(Some(position), edge as f32, floor, cell);
     if let Some(look) = look {
-        frame.set_scrollbar(layout, look, WHITE, marks, MARK_COLORS);
+        frame.set_scrollbar(
+            layout,
+            look,
+            WHITE,
+            marks,
+            MARK_COLORS,
+            blocks,
+            BLOCK_COLORS,
+        );
     }
     (frame, layout, floor)
 }
@@ -1705,6 +1732,73 @@ fn a_wide_bar_draws_its_search_marks_in_the_right_lane() {
         left.0 == left.1 && left.1 == left.2 && left.0 > 0,
         "the mark spilled out of its lane: {left:02x?}"
     );
+}
+
+/// A block mark at `position` drawn in `color` ([`BLOCK_COLORS`]).
+fn block(position: f32, color: usize) -> TrackBlock {
+    TrackBlock {
+        position,
+        color,
+        handle: BlockHandle::default(),
+    }
+}
+
+#[test]
+fn a_wide_bar_draws_its_block_marks_in_the_left_lane_in_their_colours() {
+    // The block lane is the strip's 2–8 points: each mark in its own colour,
+    // the wide thumb's grey around it; where two marks meet the later colour
+    // (an error's) lies over the earlier.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let blocks = [block(10.0, 0), block(30.0, 1), block(30.0, 2)];
+    let (frame, layout, _) = scroll_bar_with_blocks(EDGE, Some(Look::ALWAYS), &[], &blocks);
+    let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+    let first = layout.block_mark(10.0);
+    let strip = layout.strip_x();
+    assert_eq!((first[0] - strip, first[2] - strip), (2.0, 8.0));
+    assert_eq!(centre_of(&pixels, EDGE, first), (0xff, 0xff, 0x00));
+    assert_eq!(
+        centre_of(&pixels, EDGE, layout.block_mark(30.0)),
+        (0xff, 0x00, 0xff),
+        "the error's mark is not on top"
+    );
+    let right = pixel_at(
+        &pixels,
+        EDGE,
+        strip as usize + 10,
+        ((first[1] + first[3]) / 2.0) as usize,
+    );
+    assert!(
+        right.0 == right.1 && right.1 == right.2,
+        "the mark spilled out of its lane: {right:02x?}"
+    );
+}
+
+#[test]
+fn a_thin_bar_draws_no_block_marks() {
+    // The thin bar has no block lane: the marks appear with the width.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let blocks = [block(10.0, 2)];
+    let thin = Look::auto(1.0, 0.0, crate::scrollbar::THUMB_ALPHA);
+    let (frame, ..) = scroll_bar_with_blocks(EDGE, Some(thin), &[], &blocks);
+    assert!(
+        frame
+            .scrollbar_block_marks()
+            .iter()
+            .all(|(marks, _)| marks.is_empty())
+    );
+    let (bare, ..) = scroll_bar_with_blocks(EDGE, Some(thin), &[], &[]);
+    assert_eq!(
+        render_offscreen(&r, EDGE, BACKGROUND, &frame),
+        render_offscreen(&r, EDGE, BACKGROUND, &bare),
+        "a thin bar's block marks changed pixels"
+    );
+    let half = Look::auto(1.0, 0.5, crate::scrollbar::THUMB_ALPHA);
+    let (widening, ..) = scroll_bar_with_blocks(EDGE, Some(half), &[], &blocks);
+    let [.., (marks, rgba)] = widening.scrollbar_block_marks();
+    assert_eq!(marks.len(), 1);
+    assert!((rgba[3] - 0.5).abs() < 1e-6, "{rgba:?}");
 }
 
 #[test]
