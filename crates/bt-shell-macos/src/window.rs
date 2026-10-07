@@ -1,22 +1,47 @@
 //! Terminal window: an `NSWindow` and its `NSWindowDelegate`, and what
 //! belongs to the **window** rather than to one of its tabs — chrome, the
-//! title and tab dot it writes, the close question and its scope, and the
+//! title row and its tab bar (`tab_bar::TabBar`), the order and selection of
+//! its tabs, the title it writes, the close question and its scope, and the
 //! tab and split actions (`closeTab:`, `closeWindow:`, `selectTab:`,
-//! `splitRight:`, `splitDown:`, `selectPreviousSplit:`/`selectNextSplit:`,
-//! `selectSplit:`, `resizeSplit:`, `equalizeSplits:`, `toggleSplitZoom:`).
-//! The responder chain reaches the window's delegate, never a tab, so the
-//! actions are here and hand the tab's work to its tab
-//! (`tab::TerminalTab`: the splits container, the panes, the focused pane,
-//! the title's read). Today a window carries one tab.
+//! `showNextTab:`/`showPreviousTab:`, `splitRight:`, `splitDown:`,
+//! `selectPreviousSplit:`/`selectNextSplit:`, `selectSplit:`,
+//! `resizeSplit:`, `equalizeSplits:`, `toggleSplitZoom:`). The responder
+//! chain reaches the window's delegate, never a tab, so the actions are
+//! here and hand the tab's work to its tab (`tab::TerminalTab`: the splits
+//! container, the panes, the focused pane, the title's read).
+//!
+//! **One window, several tabs.** macOS's own tabs are off
+//! (`tabbingMode = Disallowed`): its tab bar cannot be hidden or drawn in
+//! the theme's colours through public API, so the window carries its tabs
+//! itself. The content reaches under the title row (`FullSizeContentView`,
+//! the title hidden) and an empty compact toolbar raises that row and
+//! centres the traffic lights in it; the root view ([`RootView`]) puts the
+//! bar in the row — its height read from AppKit, never a constant here —
+//! and every tab's splits container below it. Only the selected tab's
+//! container is shown; the others stay in the hierarchy, hidden, sized with
+//! the window, so their panes keep their grids and draw nothing.
+//!
+//! **Every change to the tab list goes through one applier** (select, add,
+//! close — [`TerminalWindow::select_tab`], [`TerminalWindow::add_tab`],
+//! [`TerminalWindow::close_tab_now`]) and ends in a layout edge
+//! (`AppDelegate::layout_changed`): the selection and the order are part of
+//! the layout the bound holder keeps and the crash restore reads, and
+//! nothing else would carry them — selecting a tab no longer makes another
+//! window key. The applier's order is fixed: a container is shown or hidden
+//! **first**, and only then are its panes told — visibility and focus read
+//! the hierarchy as it stands (`isHiddenOrHasHiddenAncestor`). While the
+//! window holds a sheet the selection does not move (a beep): the sheet
+//! belongs to the tab on screen or to the whole window, and another tab
+//! must not come up under it.
 //!
 //! The window's inputs come from `AppDelegate::open_window`; the panes'
 //! events reach their tab (`tab::TabHost`) and through it the window or the
-//! application. The application-wide parts (settings, watching, subtitle
+//! application. The application-wide parts (settings, watching, notice
 //! slots, measurement ledger, timed-run recipe, window list) are in `app`;
 //! the save-time paths coming from there reach **every tab**. The window's
-//! geometry, occlusion and focus notifications are distributed to **all**
-//! panes too. There is no drawing call here either; this file's job is
-//! wiring.
+//! geometry and occlusion reach **every** tab (a hidden one answers
+//! "hidden" by itself); its key focus only the selected one. There is no
+//! terminal drawing call here either; this file's job is wiring.
 //!
 //! Renderer per pane (`pane`'s header).
 
@@ -34,13 +59,14 @@ use bt_gpu::GpuError;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSBox,
-    NSBoxType, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSFloatingWindowLevel,
-    NSMenuItem, NSModalResponse, NSModalResponseCancel, NSTitlePosition, NSTitlebarSeparatorStyle,
-    NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSColor,
+    NSControlStateValueOff, NSControlStateValueOn, NSFloatingWindowLevel, NSMenuItem,
+    NSModalResponse, NSModalResponseCancel, NSTitlebarSeparatorStyle, NSToolbar, NSView, NSWindow,
+    NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
 use objc2_foundation::{
     NSKeyValueObservingOptions, NSNotification, NSObject, NSObjectNSKeyValueObserverRegistration,
@@ -48,14 +74,17 @@ use objc2_foundation::{
 };
 
 use crate::Run;
-use crate::app::{self, AppDelegate};
+use crate::app;
 use crate::jobs::Foreground;
 use crate::pane::{PaneLaunch, TerminalPane};
+use crate::preview::beep;
 use crate::restore::SavedTab;
 use crate::sheets::{self, Asker};
 use crate::split::{Axis, Direction};
+use crate::split_view::SplitView;
 use crate::tab::{self, TerminalTab};
-use crate::tabs::tab_index;
+use crate::tab_bar::TabBar;
+use crate::tabs::Tabs;
 
 /// Whether the theme's background is dark — the window chrome's appearance
 /// (Aqua / DarkAqua) comes from this ([`TerminalWindow::apply_chrome`]).
@@ -96,7 +125,9 @@ impl Closing {
 /// looked up again at answer time.
 #[derive(Clone, Debug)]
 enum CloseTarget {
-    /// Tabs (window ids), with all their panes.
+    /// The whole window, every tab.
+    Window,
+    /// Some of the window's tabs (tab ids), with all their panes.
     Tabs(Vec<u64>),
     /// A single pane of a tab (tab and pane ids); the tab stays open.
     Pane { tab: u64, pane: u64 },
@@ -114,24 +145,24 @@ pub(crate) fn close_title(panes: usize) -> &'static str {
 pub(crate) enum CloseScope {
     /// A pane whose tab has other panes (⌘W).
     Pane,
-    /// A tab whose group has other tabs (⌘W).
+    /// A tab whose window has other tabs (⌘W, the tab's `×`, a middle click).
     Tab,
-    /// Part of the group, several tabs ("Close Other Tabs").
+    /// Part of the window, several tabs ("Close Other Tabs").
     Tabs(usize),
-    /// The whole window: ⌘W in a single-tab window, or ⇧⌘W.
+    /// The whole window: ⌘W in a single-tab window, ⇧⌘W, the red button.
     Window,
     /// The application (⌘Q, Dock ▸ Quit, logout).
     Quit,
 }
 
-/// The number of tabs a gesture asks for and the group's size → the
+/// The number of tabs a gesture asks for and the window's tab count → the
 /// question's scope.
 ///
-/// The whole group is the window (red button, ⌘W in a single-tab window), a
-/// single tab is the tab (⌘W), everything in between is counted tabs
+/// Every tab is the window (red button, ⇧⌘W, ⌘W in a single-tab window), a
+/// single tab is the tab (⌘W, `×`), everything in between is counted tabs
 /// ("Close Other Tabs").
-pub(crate) fn close_scope(requested: usize, group: usize) -> CloseScope {
-    if requested >= group {
+pub(crate) fn close_scope(requested: usize, tabs: usize) -> CloseScope {
+    if requested >= tabs {
         CloseScope::Window
     } else if requested == 1 {
         CloseScope::Tab
@@ -407,26 +438,12 @@ fn direction_of(sender: Option<&AnyObject>) -> Option<Direction> {
     Direction::from_tag(item.tag())
 }
 
-/// Collects the `windowShouldClose:` requests at the end of the turn: a
-/// single decision per group with the flag set ([`TerminalWindow::should_close_now`]).
-fn close_requested_tabs(app: &AppDelegate) {
-    while let Some(anchor) = app
-        .windows()
-        .into_iter()
-        .find(|window| window.ivars().close_requested.get())
-    {
-        anchor.close_requested_group(app);
-        // A flag that fell outside a group (in the list but whose group
-        // cannot be resolved) must not lock the loop.
-        anchor.ivars().close_requested.set(false);
-    }
-}
-
-/// The window's state — chrome, tab dot, the close question and its tab.
-/// The splits container, the panes and the focused pane are the tab's
-/// ([`TerminalTab`]); the session's core is in the panes ([`TerminalPane`]).
+/// The window's state — chrome, the title row and its bar, the tabs and
+/// their order, the close question. The splits container, the panes and the
+/// focused pane are each tab's ([`TerminalTab`]); the session's core is in
+/// the panes ([`TerminalPane`]).
 pub(crate) struct WindowIvars {
-    /// Our own counter ([`AppDelegate`] hands it out): the key by which the
+    /// Our own counter (`AppDelegate` hands it out): the key by which the
     /// close question and removal from the list find the window. The tab's
     /// and the pane's ids are separate ([`TerminalTab::id`],
     /// [`TerminalPane::id`]) and from the same counter.
@@ -436,25 +453,34 @@ pub(crate) struct WindowIvars {
     /// reaching the application delegate ([`TerminalWindow::should_close_now`]).
     run: Option<Run>,
     window: Retained<NSWindow>,
-    /// The window's tab: its container is the `contentView`. The only strong
-    /// reference to the tab object — the list finds it through the window
-    /// ([`TerminalWindow::tabs`]).
-    tab: Retained<TerminalTab>,
+    /// The `contentView`: the bar on top, the tabs' containers below.
+    root: Retained<RootView>,
+    /// The empty compact toolbar that gives the title row its height; hidden
+    /// in full screen, where AppKit moves it into a window of its own over
+    /// the bar ([`TerminalWindow`]'s full-screen hooks).
+    toolbar: Retained<NSToolbar>,
+    /// The tabs' order and the selected one — the pure model
+    /// (`tabs::Tabs`); [`WindowIvars::tabs`] holds the objects. Never empty
+    /// while the window lives: closing the last tab closes the window.
+    order: RefCell<Tabs<u64>>,
+    /// The window's tabs — the only strong references to the tab objects;
+    /// the list finds them through the window ([`TerminalWindow::tabs`]).
+    /// Their order is [`WindowIvars::order`]'s, not this vector's.
+    tabs: RefCell<Vec<Retained<TerminalTab>>>,
+    /// Tabs closed this turn, dropped on the next: the close is reached
+    /// from inside the tab's own methods ([`TerminalWindow::close_tab_now`]).
+    retired: RefCell<Vec<Retained<TerminalTab>>>,
+    /// The settings diagnostic the bar shows (`AppDelegate::post_notices`);
+    /// empty without one.
+    notice: RefCell<String>,
     /// The background the chrome was last painted with (the gate of
     /// [`TerminalWindow::apply_chrome`]); `None`: not painted yet.
     chrome: Cell<Option<u32>>,
-    /// The last colour set for the tab's dot, sRGB (the gate of
-    /// [`TerminalWindow::refresh_tab_mark`]); `None`: no dot.
-    tab_mark: Cell<Option<u32>>,
     /// The open close question in this window: keeps the `NSAlert`
     /// alive for the sheet's duration and is the "no second question while the
     /// sheet is open" gate ([`TerminalWindow::asking`]). The completion block
     /// empties it on every answer.
     alert: RefCell<Option<Retained<NSAlert>>>,
-    /// In this turn `windowShouldClose:` asked for this tab — the gesture's
-    /// scope is gathered from these flags at the end of the turn
-    /// ([`TerminalWindow::close_requested_tabs`]).
-    close_requested: Cell<bool>,
 }
 
 /// The new shell's birth information — the two decisions the birth package
@@ -593,10 +619,12 @@ define_class!(
         // scale does; nobody but us writes that in a layer-hosting view.
         //
         // The split boundaries sit on the device pixel, so on a scale change
-        // first the re-layout, then **every** pane's geometry: the notification
-        // of a pane whose frame did not change does not arrive.
+        // first the re-layout, then **every** pane's geometry — of every tab,
+        // a hidden one's too: the notification of a pane whose frame did not
+        // change does not arrive.
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, _n: &NSNotification) {
+            self.ivars().root.lay_out();
             for tab in self.tabs() {
                 tab.refresh_geometry();
             }
@@ -609,20 +637,18 @@ define_class!(
         //
         // A single hook suffices: both miniaturizing and occlusion drop
         // `occlusionState`, so `windowDidDeminiaturize:` would be a subset of
-        // it. **The non-selected tab goes through this path too** (measured): when a tab goes to the back `visible=false` arrives, when
-        // it comes to the front `true`, so a background tab draws zero frames
-        // and there is no tab-specific hook. Stacking special cases on top of
-        // the general signal would mean the list never closes (full screen,
-        // Space, `unhide`, screen wake...).
+        // it. **Every tab hears it**: a background tab's panes answer
+        // "hidden" by themselves (their container is hidden,
+        // `SplitView::apply_visibility`), so they stay at zero frames when the
+        // window comes back, and selecting a tab is the applier's own call to
+        // the same path. Stacking special cases on top of the general signal
+        // would mean the list never closes (full screen, Space, `unhide`,
+        // screen wake...).
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
             // The notification comes in both directions; asking for a frame
             // while GOING occluded would mean drawing a frame nobody will see.
-            let visible = self
-                .ivars()
-                .window
-                .occlusionState()
-                .contains(NSWindowOcclusionState::Visible);
+            let visible = self.window_visible();
             // A hidden pane behind the zoom is counted as occluded
             // (`SplitView::apply_visibility`).
             for tab in self.tabs() {
@@ -640,19 +666,20 @@ define_class!(
         // and AppKit gives them with separate notifications — there is no
         // general signal to merge them.
         //
-        // The window's key bit goes to **all** panes; an
-        // unfocused pane's hollow caret comes from the second bit, from its
-        // own `BateriView`'s first-responder hooks.
+        // The window's key bit goes to the **selected** tab's panes — a
+        // background tab's are not the user's (`TerminalPane::is_active`);
+        // an unfocused pane's hollow caret comes from the second bit, from
+        // its own `BateriView`'s first-responder hooks.
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
-            for pane in self.panes() {
+            for pane in self.selected_tab().panes() {
                 pane.apply_focus(true);
                 pane.rehover_upload();
                 // Coming back to the window is an interaction: the remote load
                 // indicator samples again at once.
                 pane.note_interaction();
             }
-            // The key window and the selected tab are part of the layout.
+            // The key window is part of the layout.
             self.layout_changed();
         }
 
@@ -671,11 +698,38 @@ define_class!(
             }
         }
 
-        /// The red button and the tab bar's menu (Close Tab, Close Other
-        /// Tabs): whether to ask before closing. `false` stops
-        /// the closing; if a question was asked the closing is in its answer
-        /// ([`TerminalWindow::ask`]). The main menu's ⌘W does not go through
-        /// here (`closeTab:`).
+        /// A sheet ended on the window: a question the selected tab parked
+        /// while it was in the background — or behind this sheet — opens
+        /// now ([`TerminalTab::shown`]).
+        #[unsafe(method(windowDidEndSheet:))]
+        fn window_did_end_sheet(&self, _n: &NSNotification) {
+            self.selected_tab().shown();
+        }
+
+        /// Full screen moves the toolbar into a window of its own that
+        /// covers the bar and takes its clicks (measured); hidden there, the
+        /// bar is on top and keeps the row's height it had.
+        #[unsafe(method(windowWillEnterFullScreen:))]
+        fn window_will_enter_full_screen(&self, _n: &NSNotification) {
+            self.ivars().toolbar.setVisible(false);
+        }
+
+        /// The lights left the row: the strip starts at the edge.
+        #[unsafe(method(windowDidEnterFullScreen:))]
+        fn window_did_enter_full_screen(&self, _n: &NSNotification) {
+            self.ivars().root.lay_out();
+        }
+
+        #[unsafe(method(windowDidExitFullScreen:))]
+        fn window_did_exit_full_screen(&self, _n: &NSNotification) {
+            self.ivars().toolbar.setVisible(true);
+            self.ivars().root.lay_out();
+        }
+
+        /// The red button: whether to ask before closing the whole window.
+        /// `false` stops the closing; if a question was asked the closing is
+        /// in its answer ([`TerminalWindow::ask`]). The main menu's ⌘W and
+        /// ⇧⌘W do not go through here (`closeTab:`, `closeWindow:`).
         ///
         /// The shell's exit does **not** go through here: `close` does not ask
         /// the delegate.
@@ -684,12 +738,12 @@ define_class!(
             self.should_close_now()
         }
 
-        /// The window (or tab) is closing: the red button, ⌘W, ⇧⌘W and the
-        /// shell's exit (`ShellWake::child_exit` → `close`) arrive here.
+        /// The window is closing: the red button, ⇧⌘W, ⌘W in its last tab
+        /// and the last tab's shell exit arrive here.
         ///
         /// Closing is **not waited on**: it is started and the
         /// handle drops, the `"PTY teardown"` thread finishes its work in the
-        /// background — closing a single tab must not stall the main thread for
+        /// background — closing a window must not stall the main thread for
         /// up to half a second. The order is in [`TerminalWindow::begin_close`].
         ///
         /// In a timed run this path does not run: the shell's exit goes to
@@ -740,6 +794,11 @@ define_class!(
     // pane → container → window → **window delegate** → `NSApp` → app
     // delegate; so if this object implemented a spreading selector the key
     // window would swallow it and the other windows would never hear it.
+    //
+    // **The tab actions are named apart from `NSWindow`'s**
+    // (`showNextTab:`, not `selectNextTab:`): the window itself answers its
+    // own tab selectors before the chain reaches its delegate, so a shared
+    // name would never arrive here.
     impl TerminalWindow {
 
         /// The window's first responder changed (`observe_focus`): if the
@@ -765,7 +824,8 @@ define_class!(
         /// ⌘W's title and the split's enabled state; **an unknown item is
         /// `true`**. With several panes ⌘W is "Close" (the focused pane), with
         /// one pane "Close Tab". A split is grey if one of the
-        /// halves would drop below the smallest pane limit.
+        /// halves would drop below the smallest pane limit. Previous and Next
+        /// Tab are grey with a single tab.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             let action = item.action();
@@ -774,6 +834,8 @@ define_class!(
             if action == Some(sel!(closeTab:)) {
                 item.setTitle(&NSString::from_str(close_title(tab.panes().len())));
                 true
+            } else if action == Some(sel!(showNextTab:)) || action == Some(sel!(showPreviousTab:)) {
+                self.ivars().order.borrow().len() > 1
             } else if action == Some(sel!(splitRight:)) {
                 tab.can_split(Axis::Horizontal)
             } else if action == Some(sel!(splitDown:)) {
@@ -860,51 +922,162 @@ define_class!(
         }
 
         /// Shell ▸ Close Tab (⌘W): with several panes the **focused pane**,
-        /// with one pane **only this tab**; asking if needed.
-        ///
-        /// Not `performClose:`, because AppKit's interpretation of it is
-        /// stateful (measured): when the red
-        /// button's group close was stopped by a `windowShouldClose:` `false`,
-        /// the next `performClose:` also sent `windowShouldClose:` to every
-        /// tab of the group and ⌘W ended up asking about the window. Our own
-        /// action knows the scope itself; the question and the closing take the
-        /// same path as ⇧⌘W's.
+        /// with one pane **only this tab** (the window in its last tab);
+        /// asking if needed. The question and the closing take the same path
+        /// as the tab's `×`.
         #[unsafe(method(closeTab:))]
         fn close_tab(&self, _sender: Option<&AnyObject>) {
-            self.close_tab_asking();
+            let tab = self.selected_tab();
+            if tab.panes().len() > 1 {
+                self.close_pane_asking(&tab);
+            } else {
+                self.close_tab_asking(tab.id());
+            }
         }
 
         /// Shell ▸ Close Window (⇧⌘W): the window **with all its tabs and
-        /// panes**.
-        ///
-        /// A **single** question for the whole group and on confirm
-        /// every tab closes with `close` — not `performClose:`, because that
-        /// goes through each tab's `windowShouldClose:` and would produce a
-        /// second question per tab. The closing itself is still every tab's
-        /// `windowWillClose:`.
+        /// panes**, under a single question.
         #[unsafe(method(closeWindow:))]
         fn close_window(&self, _sender: Option<&AnyObject>) {
-            self.close_group_asking();
+            self.close_window_asking();
         }
 
         /// Window ▸ Select Tab ▸ Tab n (⌘1…⌘8) and Last Tab (⌘9): the item's
-        /// `tag` ([`crate::menu`]) lands on an index in the tab group
-        /// ([`tab_index`]). A nonexistent tab is a no-op.
+        /// `tag` ([`crate::menu`]) lands on a tab (`tabs::tab_index`). A
+        /// nonexistent tab is a no-op.
         #[unsafe(method(selectTab:))]
-        fn select_tab(&self, sender: Option<&AnyObject>) {
+        fn select_tab_action(&self, sender: Option<&AnyObject>) {
             let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>()) else {
                 return;
             };
             let Ok(tag) = u8::try_from(item.tag()) else {
                 return;
             };
-            let windows = self.tab_windows();
-            if let Some(window) = tab_index(tag, windows.len()).map(|index| &windows[index]) {
-                window.makeKeyAndOrderFront(None);
+            let target = self.ivars().order.borrow().by_shortcut(tag);
+            if let Some(tab) = target {
+                self.select_tab(tab);
+            }
+        }
+
+        /// Window ▸ Show Next Tab (⇧⌘], ⌃⇥): the selected tab's right
+        /// neighbour, wrapping around.
+        #[unsafe(method(showNextTab:))]
+        fn show_next_tab(&self, _sender: Option<&AnyObject>) {
+            let target = self.ivars().order.borrow().adjacent(true);
+            if let Some(tab) = target {
+                self.select_tab(tab);
+            }
+        }
+
+        /// Window ▸ Show Previous Tab (⇧⌘[, ⌃⇧⇥).
+        #[unsafe(method(showPreviousTab:))]
+        fn show_previous_tab(&self, _sender: Option<&AnyObject>) {
+            let target = self.ivars().order.borrow().adjacent(false);
+            if let Some(tab) = target {
+                self.select_tab(tab);
             }
         }
     }
 );
+
+/// The window's `contentView`: the tab bar along the top, the title row's
+/// height tall, and every tab's splits container below it — all the same
+/// frame, only the selected one shown ([`TerminalWindow`]'s header).
+///
+/// The row's height is AppKit's: the inset the toolbar leaves at the top
+/// of the content layout rect. In full screen the hidden toolbar leaves no
+/// inset, and the height the row had in a window stays — one copy, read from
+/// the window, never written as a constant.
+pub(crate) struct RootIvars {
+    bar: Retained<TabBar>,
+    /// The title row's last measured height; `0` until the window reports one.
+    row: Cell<f64>,
+}
+
+define_class!(
+    // SAFETY: NSView is designed for subclassing; RootView implements no
+    // `Drop` and is born with `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriWindowRoot"]
+    #[ivars = RootIvars]
+    pub(crate) struct RootView;
+
+    unsafe impl NSObjectProtocol for RootView {}
+
+    impl RootView {
+        /// Top-down coordinates, like the bar and the containers.
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        /// The window's size changed: the bar and every container follow.
+        #[unsafe(method(resizeSubviewsWithOldSize:))]
+        fn resize_subviews(&self, _old: NSSize) {
+            self.lay_out();
+        }
+    }
+);
+
+impl RootView {
+    fn new(mtm: MainThreadMarker, frame: NSRect, bar: &TabBar) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(RootIvars {
+            bar: bar.retain(),
+            row: Cell::new(0.0),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
+        // ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        // The panes' Metal layers sit under it: a layer-backed tree all the
+        // way up, so their compositing mode does not change.
+        this.setWantsLayer(true);
+        this.addSubview(bar);
+        this
+    }
+
+    /// The title row's height: the content layout rect's top inset — what
+    /// the compact toolbar leaves above the content. Kept when the window
+    /// reports none (full screen with the toolbar hidden).
+    fn title_row(&self) -> f64 {
+        let Some(window) = self.window() else {
+            return self.ivars().row.get();
+        };
+        let layout = window.contentLayoutRect();
+        let inset = self.frame().size.height - (layout.origin.y + layout.size.height);
+        if inset > 0.0 {
+            self.ivars().row.set(inset);
+        }
+        self.ivars().row.get()
+    }
+
+    /// Puts the bar in the title row and every container under it.
+    pub(crate) fn lay_out(&self) {
+        let bounds = self.bounds();
+        let row = self.title_row().min(bounds.size.height);
+        let bar = &self.ivars().bar;
+        bar.setFrame(NSRect::new(
+            NSPoint::ZERO,
+            NSSize::new(bounds.size.width, row),
+        ));
+        let below = NSRect::new(
+            NSPoint::new(0.0, row),
+            NSSize::new(bounds.size.width, bounds.size.height - row),
+        );
+        for view in self.subviews() {
+            if let Ok(container) = view.downcast::<SplitView>() {
+                container.setFrame(below);
+            }
+        }
+        bar.lay_out();
+    }
+
+    /// A tab's container joins under the bar, at the content's frame.
+    fn add_container(&self, container: &SplitView) {
+        self.addSubview(container);
+        self.lay_out();
+    }
+}
 
 /// A new window's first size, before the caller places it — also the first
 /// frame of its tab's container and panes.
@@ -918,8 +1091,8 @@ impl TerminalWindow {
     /// ([`TerminalWindow::start`]).
     ///
     /// The reason for two steps is the work in between: the settings must be
-    /// read **after** the window is born (so a notice can be written to the
-    /// subtitle) and **before** the geometry — the font setting determines the
+    /// read **after** the window is born (so a notice can reach the bar) and
+    /// **before** the geometry — the font setting determines the
     /// cell size, i.e. the first grid and the first `TIOCSWINSZ` the shell
     /// sees. A single constructor would either break that order or move the
     /// settings read inside the window.
@@ -954,10 +1127,12 @@ impl TerminalWindow {
     ) -> Retained<Self> {
         let rect = initial_rect();
         let tab = TerminalTab::new(mtm, tab, id, pane);
+        // The content reaches under the title row: the tab bar is drawn in it.
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
-            | NSWindowStyleMask::Resizable;
+            | NSWindowStyleMask::Resizable
+            | NSWindowStyleMask::FullSizeContentView;
         // SAFETY: with defer=false the window is created immediately. The
         // constructor is unsafe because of `releasedWhenClosed`: without a
         // window controller AppKit releases the window on close and the
@@ -977,27 +1152,41 @@ impl TerminalWindow {
         // restore its own copy of the window one day, every window would come
         // back twice.
         window.setRestorable(false);
-        // The content view is the tab's splits container; the window sets its
-        // frame, the container lays the panes out (`SplitView::layout_panes`;
+        // **macOS's own tabs are off**: the window carries its tabs itself
+        // (the module header). Without this AppKit would still gather a new
+        // window into a tab of its own bar under the system's "Prefer tabs"
+        // setting — which ⌘N honours by hand instead (`AppDelegate`).
+        window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+        // The title row: the title itself hidden (the bar draws it), and an
+        // empty compact toolbar that raises the row and centres the traffic
+        // lights in it. The identifier is the window's own: toolbars sharing
+        // one are kept in step by AppKit, and hiding a full-screen window's
+        // would hide every window's.
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        let toolbar = NSToolbar::initWithIdentifier(
+            NSToolbar::alloc(mtm),
+            &NSString::from_str(&format!("bateri.title-row.{id}")),
+        );
+        window.setToolbar(Some(&toolbar));
+        window.setToolbarStyle(NSWindowToolbarStyle::UnifiedCompact);
+        let bar = TabBar::new(mtm, id);
+        let root = RootView::new(mtm, rect, &bar);
+        // The content view is the root: the bar on top, the tabs' containers
+        // below; each container lays its panes out (`SplitView::layout_panes`;
         // with a single pane the whole boundary).
-        window.setContentView(Some(tab.container()));
+        window.setContentView(Some(&root));
+        root.add_container(tab.container());
         window.setTitle(ns_string!("bateri"));
-        // **Native tabs**: AppKit gathers windows carrying the
-        // same identifier into a single window as tabs. `tabbingMode` is
-        // deliberately left at the default — respecting the system's "Prefer
-        // tabs" setting. This is the only place the identifier is written, so
-        // all windows share one identifier.
-        window.setTabbingIdentifier(ns_string!("bateri.terminal"));
         // Mouse-moved events without a button are **off** by default; an
         // application asking for mouse reporting (1003) could never see the
         // pointer without them. They reach the first responder only, which is
         // all the report, the links and the upload buttons need (their hand
         // cursor comes from `NSView`'s own cursor rect,
-        // `BateriView::hand_cursor_rects`). The one `NSTrackingArea` is the
-        // scroll bar's strip (`BateriView::track_scrollbar_strip`): it must
-        // see an unfocused pane and the pointer leaving, which this does
-        // not. Turning these on and off by mode would want broadcasting the
-        // mode to `bt-shell-macos`.
+        // `BateriView::hand_cursor_rects`). The `NSTrackingArea`s are the
+        // scroll bar's strip (`BateriView::track_scrollbar_strip`) and the
+        // tab bar's hover: they must see an unfocused view and the pointer
+        // leaving, which this does not. Turning these on and off by mode would
+        // want broadcasting the mode to `bt-shell-macos`.
         window.setAcceptsMouseMovedEvents(true);
         // The keyboard's path to the PTY starts here. The view (even as the
         // pane's child) is NOT an automatic first responder; without this line
@@ -1009,11 +1198,14 @@ impl TerminalWindow {
             id,
             run,
             window: window.clone(),
-            tab,
+            root,
+            toolbar,
+            order: RefCell::new(Tabs::new(tab.id())),
+            tabs: RefCell::new(vec![tab]),
+            retired: RefCell::new(Vec::new()),
+            notice: RefCell::new(String::new()),
             chrome: Cell::new(None),
-            tab_mark: Cell::new(None),
             alert: RefCell::new(None),
-            close_requested: Cell::new(false),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1022,25 +1214,26 @@ impl TerminalWindow {
         // draw with a stale size. The delegate property is weak; the owner is
         // `AppDelegate`'s window list.
         window.setDelegate(Some(ProtocolObject::from_ref(&*this)));
-        // The content's size changes independently of the window too (the tab
-        // bar); so the geometry comes from the view's own notification, its
-        // observer the pane (`TerminalPane::observe_frame`). The constructor's
-        // last step: the earlier steps' layout must not make the geometry be
-        // built before the window is ready.
+        // The content's size changes independently of the window too (the
+        // title row); so the geometry comes from the view's own notification,
+        // its observer the pane (`TerminalPane::observe_frame`). The
+        // constructor's last step: the earlier steps' layout must not make the
+        // geometry be built before the window is ready.
         pane.observe_frame();
         this.observe_focus();
+        this.refresh_bar();
         this
     }
 
-    /// Session restore's **single** setup path for a window and its tab
-    /// `tab`: every pane is born ([`tab::restored_panes`]), laid out in the
-    /// saved `shape` with its ratios at once ([`TerminalTab::adopt`]), the
+    /// Session restore's **single** setup path for a window and its first
+    /// tab `tab`: every pane is born ([`tab::restored_panes`]), laid out in
+    /// the saved `shape` with its ratios at once ([`TerminalTab::adopt`]), the
     /// window is placed by the caller (`place`: the list, the theme, the
-    /// frame or the tab group — the application's business) and only
-    /// **then** do the shells start ([`TerminalTab::start_restored`]), so
-    /// each sees its final size in its first `TIOCSWINSZ` and the replayed
-    /// history wraps once. The live handover hands file descriptors here
-    /// instead of shells.
+    /// frame — the application's business) and only **then** do the shells
+    /// start ([`TerminalTab::start_restored`]), so each sees its final size
+    /// in its first `TIOCSWINSZ` and the replayed history wraps once. The
+    /// live handover hands file descriptors here instead of shells. The
+    /// window's later tabs come back through [`TerminalWindow::restore_tab`].
     ///
     /// `launches` is indexed by `saved`'s shape's leaves. If no shell starts
     /// the window closes and the error returns.
@@ -1071,21 +1264,45 @@ impl TerminalWindow {
         Ok(this)
     }
 
-    /// The `NSWindow` — session restore reads its frame and tab group.
+    /// Session restore's later tabs: tab `tab` joins this already placed
+    /// window ([`TerminalWindow::add_tab`]) with its panes born and laid
+    /// out the way [`TerminalWindow::restore`] does it, then its shells
+    /// start — the container is attached and sized, so each shell sees its
+    /// final size first. The theme and the top edge are the window's. A tab
+    /// whose shells do not start leaves again and the error returns.
+    pub(crate) fn restore_tab(
+        &self,
+        mtm: MainThreadMarker,
+        tab: u64,
+        saved: &SavedTab,
+        launches: Vec<PaneLaunch>,
+        look: (Theme, ContentEdge),
+    ) -> Result<Retained<TerminalTab>, String> {
+        let (tree, panes) = tab::restored_panes(mtm, &saved.shape, launches)?;
+        let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
+        let (first, extra) = panes
+            .split_first()
+            .ok_or_else(|| "a saved tab without panes".to_owned())?;
+        let tab = TerminalTab::new(mtm, tab, self.id(), first);
+        self.add_tab(&tab, look);
+        first.observe_frame();
+        tab.adopt(tree, extra);
+        if let Err(e) = tab.start_restored(mtm, &ids, saved.focused, saved.zoomed) {
+            self.close_tab_now(tab.id());
+            return Err(e);
+        }
+        self.refresh_title();
+        tab.refresh_dim();
+        Ok(tab)
+    }
+
+    /// The `NSWindow` — session restore reads its frame.
     pub(crate) fn ns_window(&self) -> &NSWindow {
         &self.ivars().window
     }
 
-    /// The tab group's windows in tab-bar order and its selected one; only
-    /// this window if there is no group (the [`Self::tab_windows`] precedent).
-    pub(crate) fn tab_group_windows(
-        &self,
-    ) -> (Vec<Retained<NSWindow>>, Option<Retained<NSWindow>>) {
-        let window = &self.ivars().window;
-        match window.tabGroup() {
-            Some(group) => (group.windows().to_vec(), group.selectedWindow()),
-            None => (vec![window.clone()], Some(window.clone())),
-        }
+    fn bar(&self) -> &TabBar {
+        &self.ivars().root.ivars().bar
     }
 
     /// Brings a restored window to the front at its saved `frame` (already
@@ -1094,10 +1311,11 @@ impl TerminalWindow {
         let window = &self.ivars().window;
         window.setFrame_display(frame, false);
         window.makeKeyAndOrderFront(None);
+        self.ivars().root.lay_out();
     }
 
-    /// Makes the window its group's selected tab and key — the restored
-    /// selection and key window.
+    /// Makes the window key and brings it to the front — the restored key
+    /// window.
     pub(crate) fn select(&self) {
         self.ivars().window.makeKeyAndOrderFront(None);
     }
@@ -1106,20 +1324,52 @@ impl TerminalWindow {
         self.ivars().id
     }
 
-    /// The window's tabs, in order — today the one.
+    /// The window's tabs, in strip order.
     pub(crate) fn tabs(&self) -> Vec<Retained<TerminalTab>> {
-        vec![self.ivars().tab.clone()]
+        let tabs = self.ivars().tabs.borrow();
+        self.ivars()
+            .order
+            .borrow()
+            .ids()
+            .iter()
+            .filter_map(|id| tabs.iter().find(|tab| tab.id() == *id).cloned())
+            .collect()
     }
 
-    /// The tab on screen: the title, the dot, the menu's split actions and
-    /// the inheritance of a new tab or window are its — today the window's
-    /// one tab.
+    /// The window's tab with id `id`.
+    fn tab(&self, id: u64) -> Option<Retained<TerminalTab>> {
+        self.ivars()
+            .tabs
+            .borrow()
+            .iter()
+            .find(|tab| tab.id() == id)
+            .cloned()
+    }
+
+    /// How many tabs the window carries.
+    pub(crate) fn tab_count(&self) -> usize {
+        self.ivars().order.borrow().len()
+    }
+
+    /// The tab on screen: the title, the menu's split actions and the
+    /// inheritance of a new tab or window are its.
     pub(crate) fn selected_tab(&self) -> Retained<TerminalTab> {
-        self.ivars().tab.clone()
+        let selected = self.ivars().order.borrow().selected();
+        selected
+            .and_then(|id| self.tab(id))
+            // audit: the order is never empty while the window lives — closing
+            // the last tab closes the window (`close_tab_now`) — and every id
+            // in it has its object (the applier adds and removes both).
+            .expect("a window has a selected tab")
+    }
+
+    /// The selected tab's position in the strip.
+    pub(crate) fn selected_index(&self) -> usize {
+        self.ivars().order.borrow().selected_index().unwrap_or(0)
     }
 
     /// Every tab's panes, tab by tab in tree order — the window-wide
-    /// distributions (scale, key, the close question) reach them all.
+    /// distributions (scale, resigning key, the close question) reach them all.
     pub(crate) fn panes(&self) -> Vec<Retained<TerminalPane>> {
         self.tabs().iter().flat_map(|tab| tab.panes()).collect()
     }
@@ -1148,21 +1398,175 @@ impl TerminalWindow {
         }
     }
 
+    /// Whether the window is visible (`occlusionState`).
+    fn window_visible(&self) -> bool {
+        self.ivars()
+            .window
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible)
+    }
+
+    /// Whether the selection may move: not while the window holds a sheet
+    /// (the module header) — the close question, or a tab's own question,
+    /// which sits on the window too.
+    pub(crate) fn selection_free(&self) -> bool {
+        !sheets::seat(Asker::Window(&self.ivars().window)).is_some_and(|seat| seat.is_taken())
+    }
+
+    /// **The applier: selection.** Tab `id` comes on screen; `true` if it is
+    /// (or already was) the selected one. A beep and `false` while the
+    /// window holds a sheet ([`Self::selection_free`]). ⌘1…⌘9, the next and
+    /// previous tab, a press on a chip, `bateri://tab` and the close
+    /// question's "the tab the eye is on" all come here.
+    pub(crate) fn select_tab(&self, id: u64) -> bool {
+        let current = self.ivars().order.borrow().selected();
+        if current == Some(id) {
+            return true;
+        }
+        if self.tab(id).is_none() {
+            return false;
+        }
+        if !self.selection_free() {
+            beep();
+            return false;
+        }
+        let old = current.and_then(|current| self.tab(current));
+        self.ivars().order.borrow_mut().select(id);
+        self.switch(old.as_deref());
+        self.layout_changed();
+        true
+    }
+
+    /// **The applier: a new tab.** `tab` (its first pane born, not started)
+    /// joins right of the selected one and is selected; its container goes
+    /// under the bar at the content's size, so its shell's first
+    /// `TIOCSWINSZ` is the final one. `look` is the window's theme and top
+    /// edge — the tab's panes were born with the same, the container's
+    /// separator and line take them here. The caller checked
+    /// [`Self::selection_free`] before building the tab.
+    pub(crate) fn add_tab(&self, tab: &TerminalTab, look: (Theme, ContentEdge)) {
+        let (theme, edge) = look;
+        let old = self.ivars().order.borrow().selected();
+        let old = old.and_then(|old| self.tab(old));
+        tab.set_theme(theme);
+        tab.set_content_edge(edge);
+        // Hidden until the switch shows it, so its panes never answer
+        // "visible" from in between.
+        tab.container().setHidden(true);
+        self.ivars().root.add_container(tab.container());
+        // The window's list is the tab's owner.
+        self.ivars().tabs.borrow_mut().push(tab.retain());
+        self.ivars().order.borrow_mut().insert(tab.id());
+        self.switch(old.as_deref());
+        self.layout_changed();
+    }
+
+    /// **The applier: a tab closes**, without asking (its last pane's shell
+    /// exited, a confirmed question). The window's last tab closes the
+    /// window. A selected tab hands the screen to its right neighbour (the
+    /// left one at the end — `tabs::Tabs::close`) **before** its panes
+    /// start closing, so the window is never left without a responder; its
+    /// object drops a turn later — this is reached from inside its own
+    /// methods.
+    pub(crate) fn close_tab_now(&self, id: u64) {
+        let Some(tab) = self.tab(id) else {
+            return;
+        };
+        if self.tab_count() <= 1 {
+            self.close();
+            return;
+        }
+        let was_selected = self.ivars().order.borrow().selected() == Some(id);
+        self.ivars().order.borrow_mut().close(id);
+        if was_selected {
+            self.switch(Some(&tab));
+        }
+        drop(tab.begin_close());
+        tab.container().removeFromSuperview();
+        self.ivars()
+            .tabs
+            .borrow_mut()
+            .retain(|kept| kept.id() != id);
+        self.retire(tab);
+        self.refresh_title();
+        if let Some(app) = app::delegate(self.mtm()) {
+            // The closed panes' queues are gone from the Dock icon's total.
+            app.refresh_dock_tile();
+        }
+        self.layout_changed();
+    }
+
+    /// Keeps a closed tab's object until the next main-queue turn
+    /// ([`Self::close_tab_now`]).
+    fn retire(&self, tab: Retained<TerminalTab>) {
+        self.ivars().retired.borrow_mut().push(tab);
+        let id = self.id();
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
+                let retired = window.ivars().retired.take();
+                drop(retired);
+            }
+        });
+    }
+
+    /// The applier's one switch: `old` (the tab that was on screen, if it is
+    /// not the selected one now) leaves the screen and the selected tab
+    /// comes on it. **The order is fixed**: the containers' `setHidden`
+    /// first, then the panes — visibility and focus read the hierarchy
+    /// (`SplitView::apply_visibility`, `TerminalPane::is_active`).
+    fn switch(&self, old: Option<&TerminalTab>) {
+        let new = self.selected_tab();
+        let old = old.filter(|old| old.id() != new.id());
+        if let Some(old) = old {
+            old.container().setHidden(true);
+        }
+        new.container().setHidden(false);
+        let visible = self.window_visible();
+        if let Some(old) = old {
+            old.apply_visibility(visible);
+            old.leave_screen();
+        }
+        new.apply_visibility(visible);
+        let key = self.ivars().window.isKeyWindow();
+        for pane in new.panes() {
+            pane.apply_focus(key);
+            if key {
+                pane.rehover_upload();
+            }
+        }
+        // The keyboard to the tab's focused pane — the one it had when it
+        // left the screen; the old tab's responder is hidden now.
+        let _ = self
+            .ivars()
+            .window
+            .makeFirstResponder(Some(new.focused_pane().view()));
+        self.refresh_title();
+        new.refresh_dim();
+        // A question one of its panes asked in the background opens now.
+        new.shown();
+    }
+
     /// `bateri://tab/<id>`'s only effect:
-    /// reopens it if miniaturized, makes it the selected tab and key, brings
-    /// the application to the front and gives the keyboard to the id's pane
-    /// (in `tab`). Sends no byte to the shell.
+    /// reopens the window if miniaturized, selects `tab`, makes the window
+    /// key, brings the application to the front and gives the keyboard to
+    /// the id's pane (in `tab`). Sends no byte to the shell. While the
+    /// window holds a sheet the tab is not selected (the applier's beep); the
+    /// window still comes forward.
     ///
-    /// `makeKeyAndOrderFront` makes the window in a tab group the selected tab
-    /// (the precedent of `selectTab:`); on a miniaturized window it would only
-    /// change the order and leave it in the Dock, so `deminiaturize` comes first.
+    /// `makeKeyAndOrderFront` on a miniaturized window would only change the
+    /// order and leave it in the Dock, so `deminiaturize` comes first.
     pub(crate) fn bring_to_front(&self, tab: &TerminalTab, pane: &TerminalPane) {
         let window = &self.ivars().window;
         if window.isMiniaturized() {
             window.deminiaturize(None);
         }
+        let selected = self.select_tab(tab.id());
         window.makeKeyAndOrderFront(None);
-        tab.focus_pane(pane);
+        if selected {
+            tab.focus_pane(pane);
+        }
         NSApplication::sharedApplication(self.mtm()).activate();
     }
 
@@ -1173,15 +1577,11 @@ impl TerminalWindow {
     }
 
     /// Closes the window (via the `windowWillClose:` path), **without
-    /// asking**: the shell's exit and a confirmed close question.
+    /// asking**: the last tab's shell exit and a confirmed close question.
     ///
     /// If there is an open question in this window it is dropped first, with
     /// a `Cancel` answer: the block waiting for the answer counts every answer
-    /// other than "close" as a cancel. If the question was for other tabs
-    /// ("Close Other Tabs" and the shell of the selected tab carrying the
-    /// sheet exited) the gesture is dropped and those tabs stay open — a
-    /// **known limit**, the wrong direction is the safe one: nothing closes
-    /// without asking, the gesture can be repeated.
+    /// other than "close" as a cancel.
     pub(crate) fn close(&self) {
         let alert = self.ivars().alert.take();
         if let (Some(alert), Some(seat)) =
@@ -1197,109 +1597,98 @@ impl TerminalWindow {
         self.ivars().alert.borrow().is_some()
     }
 
-    /// The tab group's terminal windows, in order; only this one if there is no group.
-    fn tab_group(&self, app: &AppDelegate) -> Vec<Retained<TerminalWindow>> {
-        self.tab_windows()
-            .iter()
-            .filter_map(|window| app.window_owning(window))
-            .collect()
-    }
-
-    /// `windowShouldClose:`'s body (⌘W, Close Tab, the red button, "Close
-    /// Other Tabs"): whether to close now.
-    ///
-    /// **The decision is not made in this call, but one turn later and for
-    /// the whole gesture** ([`close_requested`]). Measured: in a multi-tab
-    /// window the red button sends a
-    /// `windowShouldClose:` to **every** tab of the group, "Close Other Tabs"
-    /// to every other tab, both in the same event turn. A decision looking at
-    /// a single tab would open a question tab by tab on the red button or ask
-    /// the first tab "Close this tab?" and leave the rest; "one gesture, at
-    /// most one question" holds only by seeing the gesture's scope.
-    ///
-    /// A timed run and `never` never ask: the answer is settled now, i.e.
-    /// AppKit's own closing (`true`) — the only reason for deferring is the
-    /// question. If a question is already open in the group a second request is not born.
+    /// `windowShouldClose:`'s body — the red button: whether to close now.
+    /// The scope is the whole window, every tab under one question; `true`
+    /// lets AppKit close it at once (a timed run, nothing to ask), `false`
+    /// stops it — the question is open or was already, and its answer closes.
     fn should_close_now(&self) -> bool {
         if self.ivars().run.is_some() {
             return true;
         }
+        if self.asking() {
+            return false;
+        }
         let Some(app) = app::delegate(self.mtm()) else {
             return true;
         };
-        if app.settings().confirm_close == ConfirmClose::Never {
+        let confirm = app.settings().confirm_close;
+        let panes = self.panes();
+        let Some(foregrounds) = foregrounds_to_ask(false, confirm, &panes) else {
             return true;
-        }
-        let Some(group) = self.group_unless_asking(&app) else {
-            return false;
         };
-        // The gesture's first request sets up a single job at the end of the
-        // turn; the later ones only set their flag and enter the same job's
-        // scope. The job looks for the **flags**, not the requesting window:
-        // if the first requester closed in the meantime (its shell exited in
-        // the same turn) the other tabs' flags would stay set permanently and
-        // the red button would never set up a job again.
-        let first = !group.iter().any(|tab| tab.ivars().close_requested.get());
-        self.ivars().close_requested.set(true);
-        if first {
-            DispatchQueue::main().exec_async(|| {
-                // audit: a block running on the main queue is on the main thread by definition.
-                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                if let Some(app) = app::delegate(mtm) {
-                    close_requested_tabs(&app);
-                }
-            });
-        }
+        let unit = unit_for(panes.len(), self.tab_count());
+        self.ask(
+            &prompt(CloseScope::Window, unit, &foregrounds),
+            CloseTarget::Window,
+        );
         false
     }
 
-    /// The group's tabs — if there is no open question in the group. The
-    /// single copy of the "one gesture, at most one question" gate.
-    fn group_unless_asking(&self, app: &AppDelegate) -> Option<Vec<Retained<TerminalWindow>>> {
-        let group = self.tab_group(app);
-        (!group.iter().any(|tab| tab.asking())).then_some(group)
-    }
-
-    /// A single decision for the group of this turn's requests; the flags are reset.
-    fn close_requested_group(&self, app: &AppDelegate) {
-        let group = self.tab_group(app);
-        let mut targets = Vec::new();
-        for tab in &group {
-            if tab.ivars().close_requested.replace(false) {
-                targets.push(tab.clone());
-            }
-        }
-        if targets.is_empty() || group.iter().any(|tab| tab.asking()) {
+    /// ⇧⌘W: a single question for the whole window, or closes at once if it
+    /// will not ask.
+    fn close_window_asking(&self) {
+        if self.asking() {
             return;
         }
-        let scope = close_scope(targets.len(), group.len());
-        self.confirm_close(app, &group, &targets, scope);
-    }
-
-    /// ⌘W: with several panes a question for the focused pane; with one pane
-    /// for this tab. Closes at once if it will not ask.
-    fn close_tab_asking(&self) {
         let Some(app) = app::delegate(self.mtm()) else {
             return;
         };
-        let Some(group) = self.group_unless_asking(&app) else {
+        let confirm = app.settings().confirm_close;
+        let panes = self.panes();
+        let Some(foregrounds) = foregrounds_to_ask(self.ivars().run.is_some(), confirm, &panes)
+        else {
+            self.close();
             return;
         };
-        if self.selected_tab().panes().len() > 1 {
-            self.close_pane_asking(&app);
+        let unit = unit_for(panes.len(), self.tab_count());
+        self.ask(
+            &prompt(CloseScope::Window, unit, &foregrounds),
+            CloseTarget::Window,
+        );
+    }
+
+    /// Tab `id` closes, asking if needed: ⌘W in a single-pane tab, the tab's
+    /// `×`, a middle click. In the window's last tab the question is the
+    /// window's. Closes at once if it will not ask.
+    ///
+    /// **A background tab is selected first** when it asks: "Close this
+    /// tab?" must ask about the tab the eye is on. Without a question it
+    /// just closes where it stands.
+    pub(crate) fn close_tab_asking(&self, id: u64) {
+        if self.asking() {
             return;
         }
-        let Some(this) = app.window(self.id()) else {
+        let (Some(tab), Some(app)) = (self.tab(id), app::delegate(self.mtm())) else {
             return;
         };
-        let scope = close_scope(1, group.len());
-        self.confirm_close(&app, &group, &[this], scope);
+        let confirm = app.settings().confirm_close;
+        let panes = tab.panes();
+        let Some(foregrounds) = foregrounds_to_ask(self.ivars().run.is_some(), confirm, &panes)
+        else {
+            self.close_tab_now(id);
+            return;
+        };
+        if !self.select_tab(id) {
+            return;
+        }
+        let scope = close_scope(1, self.tab_count());
+        let target = match scope {
+            CloseScope::Window => CloseTarget::Window,
+            _ => CloseTarget::Tabs(vec![id]),
+        };
+        let unit = unit_for(panes.len(), 1);
+        self.ask(&prompt(scope, unit, &foregrounds), target);
     }
 
     /// ⌘W in a multi-pane tab: only the focused pane, asking only about the
     /// running job if there is one.
-    fn close_pane_asking(&self, app: &AppDelegate) {
-        let tab = self.selected_tab();
+    fn close_pane_asking(&self, tab: &TerminalTab) {
+        if self.asking() {
+            return;
+        }
+        let Some(app) = app::delegate(self.mtm()) else {
+            return;
+        };
         let pane = tab.focused_pane();
         let confirm = app.settings().confirm_close;
         let Some(foregrounds) = foregrounds_to_ask(
@@ -1319,73 +1708,15 @@ impl TerminalWindow {
         );
     }
 
-    /// ⇧⌘W: a single question for the whole group, or closes at once if it will not ask.
-    fn close_group_asking(&self) {
-        let Some(app) = app::delegate(self.mtm()) else {
-            return;
-        };
-        if let Some(group) = self.group_unless_asking(&app) {
-            self.confirm_close(&app, &group, &group, CloseScope::Window);
-        }
-    }
-
-    /// `targets` will close; if it will ask the question opens as a sheet on
-    /// the group's **selected** tab, otherwise they all close at once.
-    ///
-    /// The sheet is on the selected tab, because a sheet attached to a
-    /// background tab is invisible — and in "Close Other Tabs" none of the
-    /// tabs to be closed is selected. **If the single target is a background
-    /// tab** (a background tab's × in the tab bar) that tab is selected first
-    /// and the question is on it: "Close this tab?" must ask about the tab the
-    /// eye is on, not another.
-    fn confirm_close(
-        &self,
-        app: &AppDelegate,
-        group: &[Retained<TerminalWindow>],
-        targets: &[Retained<TerminalWindow>],
-        scope: CloseScope,
-    ) {
-        let Some(first) = targets.first() else {
-            return;
-        };
-        let panes: Vec<Retained<TerminalPane>> =
-            targets.iter().flat_map(|tab| tab.panes()).collect();
-        let unit = unit_for(panes.len(), targets.len());
-        let confirm = app.settings().confirm_close;
-        let Some(foregrounds) = foregrounds_to_ask(self.ivars().run.is_some(), confirm, &panes)
-        else {
-            targets.iter().for_each(|tab| tab.close());
-            return;
-        };
-        let selected = self
-            .ivars()
-            .window
-            .tabGroup()
-            .and_then(|tab_group| tab_group.selectedWindow())
-            .and_then(|window| app.window_owning(&window));
-        let host = match (targets, selected.as_ref()) {
-            ([only], Some(selected)) if only.id() != selected.id() => {
-                only.ivars().window.makeKeyAndOrderFront(None);
-                only
-            }
-            _ => selected
-                .as_ref()
-                .or_else(|| group.iter().find(|tab| tab.id() == self.id()))
-                .unwrap_or(first),
-        };
-        let ids = targets.iter().map(|tab| tab.id()).collect();
-        host.ask(&prompt(scope, unit, &foregrounds), CloseTarget::Tabs(ids));
-    }
-
     /// Opens the question on this window as a sheet; on confirm closes the
-    /// tabs in `targets` or the pane.
+    /// window, the tabs in `targets` or the pane.
     ///
     /// **The block captures only ids** (the alternate-screen notifier's
-    /// pattern): it looks the windows up in the list at answer time and skips
-    /// those it cannot find. Only `NSAlertFirstButtonReturn` closes — if the
-    /// shell exits while the sheet is open [`TerminalWindow::close`] drops the
-    /// sheet with `Cancel`, and since `forget_window` is deferred by one turn
-    /// the window can still be found in the list in the meantime.
+    /// pattern): it looks the window and tabs up at answer time and skips
+    /// what it cannot find. Only `NSAlertFirstButtonReturn` closes — if the
+    /// window closes while the sheet is open [`TerminalWindow::close`] drops
+    /// the sheet with `Cancel`, and since `forget_window` is deferred by one
+    /// turn the window can still be found in the list in the meantime.
     ///
     /// The closing is **deferred by one main-queue turn** (`windowWillClose:`'s
     /// pattern): the answer comes inside AppKit's sheet teardown and closing
@@ -1416,9 +1747,16 @@ impl TerminalWindow {
                     return;
                 };
                 match &targets {
-                    CloseTarget::Tabs(ids) => {
-                        for window in ids.iter().filter_map(|&id| app.window(id)) {
+                    CloseTarget::Window => {
+                        if let Some(window) = app.window(host) {
                             window.close();
+                        }
+                    }
+                    CloseTarget::Tabs(ids) => {
+                        if let Some(window) = app.window(host) {
+                            for &id in ids {
+                                window.close_tab_now(id);
+                            }
                         }
                     }
                     // If the pane closed in the meantime (its shell exited) a no-op.
@@ -1432,15 +1770,6 @@ impl TerminalWindow {
         });
         self.ivars().alert.replace(Some(alert.clone()));
         seat.begin(&alert, &answered);
-    }
-
-    /// Adds the window to `from`'s tab group, to the **right** of the selected
-    /// tab, and brings it to the front.
-    pub(crate) fn show_as_tab_of(&self, from: &TerminalWindow) {
-        from.ivars()
-            .window
-            .addTabbedWindow_ordered(&self.ivars().window, NSWindowOrderingMode::Above);
-        self.ivars().window.makeKeyAndOrderFront(None);
     }
 
     /// Brings it to the front as a separate window; cascaded from `from` if
@@ -1458,6 +1787,7 @@ impl TerminalWindow {
             None => window.center(),
         }
         window.makeKeyAndOrderFront(None);
+        self.ivars().root.lay_out();
     }
 
     /// Timed run only (`make smoke`): keeps the window above every other
@@ -1477,97 +1807,50 @@ impl TerminalWindow {
         window.orderFrontRegardless();
     }
 
-    /// The windows in the window's tab group, in order; only itself if there
-    /// is no group.
-    ///
-    /// `tabGroup`, not `tabbedWindows`: the former gives `nil` while the bar
-    /// is not visible, so with a single tab ⇧⌘W would close nothing.
-    fn tab_windows(&self) -> Vec<Retained<NSWindow>> {
-        let window = &self.ivars().window;
-        match window.tabGroup() {
-            Some(group) => group.windows().to_vec(),
-            None => vec![window.clone()],
-        }
-    }
-
-    /// Reads the selected tab's title ([`TerminalTab::title`]: the
-    /// **focused** pane's session) and writes it to the window — the pane's
-    /// `PaneHost::title_changed` event ([`tab::TabHost`]) and the focus
-    /// change ([`TerminalTab::pane_focused`]).
-    /// The frame path computes no title; writing is only on **change**. If there is no session yet the title stays the constructor's
-    /// `bateri`.
-    ///
-    /// The tab's dot is refreshed from here too ([`Self::refresh_tab_mark`]):
-    /// the remote state's two edges (the return of `set_remote`, the
-    /// `title_changed` that `D`/`A`'s deletion brings) are the same as the
-    /// title's. The upload queue's connection edge is the
-    /// pane's, **before** the event (`TerminalPane::remote_or_title_changed`).
+    /// Writes the titles: the window's from the selected tab
+    /// ([`TerminalTab::title`]: the **focused** pane's session, an
+    /// upload's prefix included — the Window menu and Mission Control show
+    /// it) and every tab's label in the bar. The pane's
+    /// `PaneHost::title_changed` event ([`tab::TabHost`]), the focus change
+    /// ([`TerminalTab::pane_focused`]) and every change of the tab list call
+    /// it. The frame path computes no title. If there is no session yet the
+    /// window's title stays what it was (the constructor's `bateri`).
     pub(crate) fn refresh_title(&self) {
-        self.apply_title();
-        self.refresh_tab_mark();
-    }
-
-    /// Writes the window's (and tab's) title from the selected tab.
-    fn apply_title(&self) {
         if let Some(title) = self.selected_tab().title() {
             self.ivars().window.setTitle(&NSString::from_str(&title));
         }
+        self.refresh_bar();
     }
 
-    /// The tab's dot: on a marked remote host a small filled
-    /// circle in the mark's colour next to the tab title
-    /// (`NSWindowTab.accessoryView`); none on an unmarked remote or locally —
-    /// an unmarked remote tab already carries `⇄` in its title and a dot on
-    /// every ssh tab would dilute prod's red.
-    ///
-    /// The colour is from the session's theme, from the same mapping as the
-    /// dock's (`Theme::mark_rgb`), sRGB — `NSColor` encodes it itself. Its
-    /// triggers are the remote state's edges ([`Self::refresh_title`]), the
-    /// settings ([`Self::set_host_marks`]) and the theme ([`Self::set_theme`]);
-    /// a no-op on the same colour, so a new view does not go to AppKit on
-    /// every title news.
-    /// The drawing is an `NSBox` (the precedent of the search panel): asking for
-    /// a colour through the layer would want `CGColor`, i.e. the
-    /// `objc2-core-graphics` edge. The dot exists only while the tab bar is
-    /// visible; in a single-tab window the indicator is the dock's top line.
-    fn refresh_tab_mark(&self) {
-        let color = self.selected_tab().mark_rgb();
-        if self.ivars().tab_mark.replace(color) == color {
+    /// Gives the bar every tab's label, the selection and the diagnostic. A
+    /// single tab's label is the window's title (an upload's prefix
+    /// included); among several each tab shows its session title.
+    fn refresh_bar(&self) {
+        let tabs = self.tabs();
+        let single = tabs.len() == 1;
+        let labels = tabs
+            .iter()
+            .map(|tab| {
+                let label = if single {
+                    tab.title()
+                } else {
+                    tab.session_title()
+                };
+                (tab.id(), label.unwrap_or_else(|| "bateri".to_owned()))
+            })
+            .collect();
+        let notice = self.ivars().notice.borrow().clone();
+        self.bar().show(labels, self.selected_index(), notice);
+    }
+
+    /// The settings diagnostic (`AppDelegate::post_notices`, the only
+    /// writer): beside a single tab's title, a `⚠` among several.
+    pub(crate) fn set_notice(&self, notice: &str) {
+        if *self.ivars().notice.borrow() == notice {
             return;
         }
-        let tab = self.ivars().window.tab();
-        let Some(color) = color else {
-            tab.setAccessoryView(None);
-            return;
-        };
-        const DIAMETER: f64 = 8.0;
-        let mtm = self.mtm();
-        let dot = NSBox::new(mtm);
-        dot.setBoxType(NSBoxType::Custom);
-        dot.setTitlePosition(NSTitlePosition::NoTitle);
-        dot.setBorderWidth(0.0);
-        dot.setCornerRadius(DIAMETER / 2.0);
-        let byte = |shift: u32| f64::from((color >> shift) & 0xff) / 255.0;
-        dot.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
-            byte(16),
-            byte(8),
-            byte(0),
-            1.0,
-        ));
-        // Auto Layout sizes the tab accessory: constrain the size.
-        dot.setTranslatesAutoresizingMaskIntoConstraints(false);
-        dot.widthAnchor()
-            .constraintEqualToConstant(DIAMETER)
-            .setActive(true);
-        dot.heightAnchor()
-            .constraintEqualToConstant(DIAMETER)
-            .setActive(true);
-        tab.setAccessoryView(Some(&dot));
-    }
-
-    /// Writing the subtitle; the text is built by `AppDelegate::post_notices`.
-    pub(crate) fn set_subtitle(&self, subtitle: &NSString) {
-        self.ivars().window.setSubtitle(subtitle);
+        self.ivars().notice.replace(notice.to_owned());
+        self.bar().set_notice(notice.to_owned());
     }
 
     /// Opens the first pane's session ([`TerminalTab::start`], from the
@@ -1575,7 +1858,7 @@ impl TerminalWindow {
     /// notification that arrived before the session entered the slot may have
     /// found an empty slot and dropped; this read closes that (writes the same
     /// `bateri` if unchanged). The error returns to the caller: in the first
-    /// window the process exits, in ⌘T/⌘N only that window closes.
+    /// window the process exits, in ⌘N only that window closes.
     pub(crate) fn start(&self, mtm: MainThreadMarker) -> std::io::Result<()> {
         self.selected_tab().start(mtm)?;
         self.refresh_title();
@@ -1583,29 +1866,27 @@ impl TerminalWindow {
     }
 
     /// `[remote] hosts` changed — the pattern list goes to every tab's panes
-    /// ([`TerminalTab::set_host_marks`]), the tab's dot from the new resolution.
+    /// ([`TerminalTab::set_host_marks`]).
     pub(crate) fn set_host_marks(&self, settings: &Settings) {
         for tab in self.tabs() {
             tab.set_host_marks(settings);
         }
-        self.refresh_tab_mark();
     }
 
     /// Gives the theme to the tabs ([`TerminalTab::set_theme`]: the panes'
-    /// sessions and search panels, the separator) and paints the chrome with
-    /// it ([`TerminalWindow::apply_chrome`]).
+    /// sessions and search panels, the separator), paints the chrome with
+    /// it ([`TerminalWindow::apply_chrome`]) and the bar.
     ///
-    /// Both in a single call, because there are two paths that change the
+    /// All in a single call, because there are two paths that change the
     /// theme (`AppDelegate::reload_settings`, `AppDelegate::apply_appearance`)
     /// and if one forgot the chrome the grid would be in the new theme and the
-    /// title bar in the old — the symptom is exactly the seam the user would see.
+    /// title row in the old — the symptom is exactly the seam the user would see.
     pub(crate) fn set_theme(&self, theme: Theme) {
         for tab in self.tabs() {
             tab.set_theme(theme);
         }
         self.apply_chrome(&theme);
-        // The tab's dot is from the mark's role; the role is another colour in the new theme.
-        self.refresh_tab_mark();
+        self.bar().set_theme(&theme);
     }
 
     /// Gives what the content does at the panes' top edge (`[appearance]
@@ -1618,12 +1899,12 @@ impl TerminalWindow {
     }
 
     /// Paints the window chrome with the theme: the
-    /// title bar transparent and separatorless, the window's background the
-    /// theme's `background`, its appearance (traffic lights, title text, tab
-    /// bar) from the background's lightness ([`is_dark_background`]).
+    /// title row transparent and separatorless, the window's background the
+    /// theme's `background`, its appearance (traffic lights) from the
+    /// background's lightness ([`is_dark_background`]).
     ///
-    /// What shows under the transparent title bar is the window's background,
-    /// so in a single tab the title and content are **a single surface**: the
+    /// What shows under the transparent title row is the window's background,
+    /// so the bar and the content are **a single surface**: the
     /// clear colour is from the same theme (`Theme::background_linear`). The
     /// colour is set here in **sRGB**, not linear — the linear value is
     /// `bt-gpu`'s, because the hardware encodes it to sRGB; giving `NSColor`
@@ -1637,7 +1918,7 @@ impl TerminalWindow {
     /// Called for the first time not in the constructor but right before the
     /// window is shown (`AppDelegate::open_window` → [`TerminalWindow::set_theme`]):
     /// the theme comes from there and painting afterwards would show the
-    /// system's grey bar for a frame on every ⌘T.
+    /// system's grey bar for a frame on every ⌘N.
     pub(crate) fn apply_chrome(&self, theme: &Theme) {
         // The chrome derives only from the background; giving AppKit the colour
         // and appearance again on the same background would redraw all title
@@ -1876,8 +2157,8 @@ mod tests {
 
     #[test]
     fn the_gesture_scope_comes_from_how_many_tabs_it_asked_for() {
-        // The measured gestures: ⌘W a single tab,
-        // the red button the whole group, "Close Other Tabs" the unselected ones.
+        // ⌘W and a tab's `×` ask for a single tab, the red button and ⇧⌘W
+        // for every tab, "Close Other Tabs" for the unselected ones.
         assert_eq!(close_scope(1, 1), CloseScope::Window, "single-tab window");
         assert_eq!(close_scope(1, 3), CloseScope::Tab, "⌘W");
         assert_eq!(close_scope(3, 3), CloseScope::Window, "red button");

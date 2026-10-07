@@ -30,7 +30,7 @@ use objc2_app_kit::{
     NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
     NSControlStateValueOn, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate, NSMenuItem,
     NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSScroller, NSScrollerStyle, NSWindow,
-    NSWindowNumberListOptions, NSWorkspace,
+    NSWindowNumberListOptions, NSWindowStyleMask, NSWindowUserTabbingPreference, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
     NSWorkspaceWillPowerOffNotification,
 };
@@ -367,8 +367,8 @@ fn resolve_smooth_scroll(settings: &Settings, reduce: bool) -> bool {
 enum Opening {
     /// ⌘N, Dock icon, the startup's first window: a separate window, local shell.
     Window,
-    /// ⌘T and the tab bar's `+`: a tab in `from`'s group; to the same host if
-    /// `from` is remote.
+    /// ⌘T and the tab bar's `+`: a tab in `from`'s window, right of the
+    /// selected one; to the same host if `from` is remote.
     Tab,
     /// Shell ▸ New Local Tab (⌥⌘T): a tab, always a local shell.
     LocalTab,
@@ -380,6 +380,25 @@ enum Opening {
     /// history and ready remote line come from the save, not from a `from`
     /// ([`restored_launch`]).
     Restore,
+}
+
+/// A restored window and its built tabs: each tab's id with its index in
+/// the saved window's tab list ([`AppDelegate::restore_window`]).
+type RestoredWindow = (Retained<TerminalWindow>, Vec<(usize, u64)>);
+
+/// Whether ⌘N opens a tab in `key` rather than a window — the system's
+/// "Prefer tabs when opening documents" (Desktop & Dock): always, or in full
+/// screen while `key` is. With macOS's own tabs off this is no longer
+/// AppKit's to do, so it is read here.
+fn prefers_tabs(mtm: MainThreadMarker, key: &TerminalWindow) -> bool {
+    match NSWindow::userTabbingPreference(mtm) {
+        NSWindowUserTabbingPreference::Always => true,
+        NSWindowUserTabbingPreference::InFullScreen => key
+            .ns_window()
+            .styleMask()
+            .contains(NSWindowStyleMask::FullScreen),
+        _ => false,
+    }
 }
 
 /// The new shell's first input: only with ⌘T and splits and only from a remote
@@ -1365,9 +1384,11 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
             disable_press_and_hold();
-            // Native tabs are on: `setAllowsAutomaticWindowTabbing`
-            // at its default, the windows carry a common `tabbingIdentifier`
-            // (`TerminalWindow::new`).
+            // macOS's own tabs are off: every window carries its tabs itself
+            // (`window`'s header). Turned off before the menu exists, so AppKit
+            // adds no Show Tab Bar / Show All Tabs to View and no tab items
+            // to Window — they would act on a tab bar that is not there.
+            NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
             // The updater comes **before** the menu: it is its item's target. A
             // timed run does not go out to the network and an update question must not cover the window.
             if self.ivars().run.is_none()
@@ -1782,9 +1803,10 @@ define_class!(
             }
         }
 
-        /// Shell ▸ New Tab (⌘T): a new tab in the active window's group; a new
-        /// window if there is no window. If the active tab is remote the new tab
-        /// is born with the same ssh/mosh command ([`initial_line`]).
+        /// Shell ▸ New Tab (⌘T): a new tab in the active window, right of the
+        /// selected one; a new window if there is no window. If the active tab
+        /// is remote the new tab is born with the same ssh/mosh command
+        /// ([`initial_line`]).
         #[unsafe(method(newTab:))]
         fn new_tab(&self, _sender: Option<&AnyObject>) {
             self.open_from_key_window(Opening::Tab);
@@ -1796,14 +1818,6 @@ define_class!(
         #[unsafe(method(newLocalTab:))]
         fn new_local_tab(&self, _sender: Option<&AnyObject>) {
             self.open_from_key_window(Opening::LocalTab);
-        }
-
-        /// The tab bar's `+` button. AppKit shows the button only if someone in
-        /// the responder chain recognizes this selector; the job is ⌘T's, the
-        /// same host included in a remote tab.
-        #[unsafe(method(newWindowForTab:))]
-        fn new_window_for_tab(&self, _sender: Option<&AnyObject>) {
-            self.open_from_key_window(Opening::Tab);
         }
 
         /// bateri ▸ Settings… (Cmd-,), from the targetless menu item (`menu`):
@@ -2582,7 +2596,9 @@ impl AppDelegate {
 
     /// What an update's relaunch waits for across every pane:
     /// the unfinished transfers — their bytes pass through
-    /// bateri — and whether a password sheet is open (its answer does too).
+    /// bateri — and whether a password question is open (its answer does
+    /// too) — a background tab's parked one counts the same: its slot holds
+    /// the job's reply until it opens (`crate::sheets`).
     fn update_waits_for(&self) -> UpdateWait {
         let panes = self.all_panes();
         UpdateWait {
@@ -2682,8 +2698,9 @@ impl AppDelegate {
 
     /// The focus query's answer for pane `id`: `pane=none` if no
     /// open pane has it ([`Self::pane_by_tab`] — a closing pane is none);
-    /// otherwise `focused` — bateri active, the pane's window key **and** the
-    /// tab's focused pane this one (the search field included,
+    /// otherwise `focused` — bateri active, the pane active (its window key
+    /// **and** its tab the one on screen, `TerminalPane::is_active`) **and**
+    /// the tab's focused pane this one (the search field included,
     /// [`TerminalTab::focused_pane`]) — and the whole seconds since its last
     /// input. Main thread, at the moment of the question.
     fn focus_answer(&self, id: &TabId) -> focus::Answer {
@@ -2691,7 +2708,7 @@ impl AppDelegate {
             return focus::Answer::None;
         };
         let focused = NSApplication::sharedApplication(self.mtm()).isActive()
-            && pane.window().is_some_and(|window| window.isKeyWindow())
+            && pane.is_active()
             && tab.focused_pane().id() == pane.id();
         focus::Answer::Live {
             focused,
@@ -2699,12 +2716,15 @@ impl AppDelegate {
         }
     }
 
-    /// The active window: `NSApp.keyWindow` is looked up in the list. `None` if the
-    /// settings window or a panel is key, and the new window is born at home. The
-    /// source of inheritance is its selected tab's **focused pane**
-    /// (`TerminalTab::focused_pane`).
+    /// The active window: `NSApp.keyWindow` is looked up in the list — a
+    /// key sheet stands for the window it sits on, so ⌘T while a question
+    /// is open reaches that window (and its selection guard) instead of
+    /// opening a window of its own. `None` if the settings window or a panel
+    /// is key, and the new window is born at home. The source of inheritance
+    /// is its selected tab's **focused pane** (`TerminalTab::focused_pane`).
     fn key_window(&self) -> Option<Retained<TerminalWindow>> {
         let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
+        let key = key.sheetParent().unwrap_or(key);
         self.window_owning(&key)
     }
 
@@ -2845,7 +2865,7 @@ impl AppDelegate {
         let confirm = self.settings().confirm_close;
         // The question collects the running job from the panes.
         let panes = self.all_panes();
-        let unit = window::unit_for(panes.len(), windows.len());
+        let unit = window::unit_for(panes.len(), self.tabs().len());
         let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &panes) else {
             return NSApplicationTerminateReply::TerminateNow;
         };
@@ -3259,22 +3279,20 @@ impl AppDelegate {
         self.layout_changed();
     }
 
-    /// Opens a new window (or a new tab in `from`'s group) — the **only** path that
-    /// spawns windows: the launch's first window (`from = None`), ⌘N, ⌘T, the tab
-    /// bar's `+` and the Dock icon.
+    /// Opens a new window — the **only** path that spawns windows: the
+    /// launch's first window (`from = None`), ⌘N, a tab request without a
+    /// window and the Dock icon. A new tab in an existing window is
+    /// [`AppDelegate::open_tab`]'s.
     ///
     /// `from` is the active window; the new shell starts in its OSC 7 directory (home
     /// if none), the temporary point-size delta comes from it and the theme from its
     /// session — all windows share the same theme; without `from` the theme is
-    /// resolved from settings. A tab request without `from` is a separate window.
-    /// The shell's first input comes from `opening` and `from`'s remote target
-    /// ([`initial_line`]); directory inheritance is the same in all three openings — in a remote tab
-    /// `working_directory()` returns the local directory.
+    /// resolved from settings. The shell's first input comes from `opening` and
+    /// `from`'s remote target ([`initial_line`]).
     ///
-    /// Order: point size, subtitle and chrome before the window is visible, the list before placement
+    /// Order: point size, notice and chrome before the window is visible, the list before placement
     /// (so geometry events find the window in the list), the session **after**
-    /// placement — a window added to a tab takes the group's size and the shell must see the first
-    /// `TIOCSWINSZ` with that size.
+    /// placement — the shell must see its first `TIOCSWINSZ` at the final size.
     ///
     /// The error returns to the caller; if the session could not be born, the window is closed.
     fn open_window(
@@ -3289,11 +3307,9 @@ impl AppDelegate {
         let source = from.map(|from| from.selected_tab().focused_pane());
         let (launch, theme) = self.pane_launch(tab, source.as_deref(), opening);
         let window = TerminalWindow::new(mtm, id, tab, launch).map_err(|e| e.to_string())?;
-        window.set_subtitle(&NSString::from_str(
-            &self.ivars().notices.borrow().subtitle(),
-        ));
+        window.set_notice(&self.ivars().notices.borrow().subtitle());
         self.ivars().windows.borrow_mut().push(window.clone());
-        // Chrome **before** the window is visible: if painted afterwards, every ⌘T
+        // Chrome **before** the window is visible: if painted afterwards, every ⌘N
         // would show the system's grey title bar for a frame. The separator's colour
         // comes from the same theme too (the first form of `TerminalWindow::set_theme`).
         window.set_theme(theme);
@@ -3301,10 +3317,7 @@ impl AppDelegate {
         // already has it from its birth settings, the same slot.
         let edge = self.settings().content_edge;
         window.set_content_edge(edge);
-        match from {
-            Some(from) if opening != Opening::Window => window.show_as_tab_of(from),
-            _ => window.show_after(from),
-        }
+        window.show_after(from);
         // Timed run: the smoke gate must not depend on which app is in front
         // (`TerminalWindow::float_for_timed_run`).
         if self.ivars().run.is_some() {
@@ -3315,6 +3328,48 @@ impl AppDelegate {
             return Err(format!("failed to start the shell: {e}"));
         }
         Ok(window)
+    }
+
+    /// Opens a new tab in `window`, right of its selected tab
+    /// (`TerminalWindow::add_tab`, the window's applier) — ⌘T, ⌥⌘T, the
+    /// bar's `+` and ⌘N under the system's "Prefer tabs". Inheritance as
+    /// [`AppDelegate::open_window`]'s, from the window's selected tab; the
+    /// theme and top edge are the window's.
+    ///
+    /// While the window holds a sheet nothing is born: a beep, the
+    /// selection guard's (`TerminalWindow::selection_free`) — the new tab
+    /// would come up under the question. If the session cannot be born the
+    /// tab closes again and the error returns.
+    fn open_tab(&self, window: &TerminalWindow, opening: Opening) -> Result<(), String> {
+        if !window.selection_free() {
+            crate::preview::beep();
+            return Ok(());
+        }
+        let mtm = self.mtm();
+        let tab_id = self.next_id();
+        let source = window.selected_tab().focused_pane();
+        let (launch, theme) = self.pane_launch(tab_id, Some(&source), opening);
+        let pane = TerminalPane::new(mtm, crate::window::initial_rect(), launch)
+            .map_err(|e| e.to_string())?;
+        let tab = TerminalTab::new(mtm, tab_id, window.id(), &pane);
+        let edge = self.settings().content_edge;
+        window.add_tab(&tab, (theme, edge));
+        // After the container is attached and sized: the geometry is built
+        // from the final frame (`TerminalWindow::with_pane`'s order).
+        pane.observe_frame();
+        if let Err(e) = tab.start(mtm) {
+            window.close_tab_now(tab.id());
+            return Err(format!("failed to start the shell: {e}"));
+        }
+        window.refresh_title();
+        Ok(())
+    }
+
+    /// The bar's `+` in window `window` (`tab_bar::TabBar`): ⌘T's job there.
+    pub(crate) fn new_tab_in(&self, window: u64) {
+        if let Some(window) = self.window(window) {
+            self.open_window_or_report(Some(&window), Opening::Tab);
+        }
     }
 
     /// The new pane's birth package and its theme — the single source
@@ -3376,17 +3431,27 @@ impl AppDelegate {
         }
     }
 
-    /// A new window or tab derived from the active window (⌘N, ⌘T, ⌥⌘T, `+`).
+    /// A new window or tab derived from the active window (⌘N, ⌘T, ⌥⌘T).
     fn open_from_key_window(&self, opening: Opening) {
         let from = self.key_window();
         self.open_window_or_report(from.as_deref(), opening);
     }
 
-    /// [`AppDelegate::open_window`], with the error to stderr — the path of ⌘N/⌘T/`+`/Dock.
-    /// The process does **not** exit: the other windows' shells must not die because a new one
-    /// could not be born (only the first window exits, `didFinishLaunching`).
+    /// A new tab ([`AppDelegate::open_tab`]) or window
+    /// ([`AppDelegate::open_window`]), with the error to stderr — the path of
+    /// ⌘N/⌘T/`+`/Dock. A tab request with a window is a tab in it, and so
+    /// is ⌘N when the system prefers tabs ([`prefers_tabs`]); otherwise a
+    /// window. The process does **not** exit: the other windows' shells must
+    /// not die because a new one could not be born (only the first window
+    /// exits, `didFinishLaunching`).
     fn open_window_or_report(&self, from: Option<&TerminalWindow>, opening: Opening) {
-        if let Err(e) = self.open_window(from, opening) {
+        let result = match from {
+            Some(from) if opening != Opening::Window || prefers_tabs(self.mtm(), from) => {
+                self.open_tab(from, opening)
+            }
+            _ => self.open_window(from, opening).map(drop),
+        };
+        if let Err(e) = result {
             eprintln!("bateri: {e}");
         }
     }
@@ -3576,13 +3641,17 @@ impl AppDelegate {
         restored
     }
 
-    /// The saved windows: per window the first tab at
+    /// The saved windows: per window the first tab that can be built at
     /// its frame (clamped onto a visible screen, [`clamp_frame`]) and the
-    /// rest into its tab group, in order, each through
-    /// [`TerminalWindow::restore`] — placed before its shells start; then
-    /// every window's selected tab. A tab that cannot be built is skipped
-    /// (its error to stderr). `true` if at least one window came back, and
-    /// the key window's selected tab for the caller to select last.
+    /// rest joining it as tabs, in order — each placed before its shells
+    /// start ([`TerminalWindow::restore`], [`TerminalWindow::restore_tab`]);
+    /// then every window's saved selected tab. A tab that cannot be built is
+    /// skipped (its error to stderr). `true` if at least one window came
+    /// back, and the key window for the caller to bring forward last.
+    ///
+    /// A save from the time a window's tabs were macOS's own reads the same:
+    /// its tab group was already one saved window, and it comes back as one
+    /// window with those tabs.
     fn restore_windows(
         &self,
         saved: &Saved,
@@ -3604,43 +3673,47 @@ impl AppDelegate {
         let mut key = None;
         let mut restored = false;
         for window in &saved.windows {
-            let tabs = self.restore_window(window, &screens, arriving.as_deref_mut());
+            let Some((built, tabs)) =
+                self.restore_window(window, &screens, arriving.as_deref_mut())
+            else {
+                continue;
+            };
             let selected = tabs
                 .iter()
                 .find(|(index, _)| *index == window.selected)
                 .or_else(|| tabs.first())
-                .map(|(_, tab)| tab.clone());
+                .map(|(_, tab)| *tab);
             if let Some(selected) = selected {
-                selected.select();
-                restored = true;
-                if window.key {
-                    key = Some(selected);
-                }
+                built.select_tab(selected);
+            }
+            restored = true;
+            if window.key {
+                key = Some(built);
             }
         }
         (restored, key)
     }
 
-    /// One saved window's tabs, built in order; the return pairs each built
-    /// tab with its index in `window.tabs`. A pane that does not come back
-    /// ([`AppDelegate::restored_pane_launch`]'s `None`) leaves its tab
-    /// without it ([`restore::SavedTab::retain`]), a tab left with none is
-    /// not built.
+    /// One saved window: its tabs built in order into one window; the
+    /// return pairs each built tab's id with its index in `window.tabs`. A
+    /// pane that does not come back ([`AppDelegate::restored_pane_launch`]'s
+    /// `None`) leaves its tab without it ([`restore::SavedTab::retain`]), a
+    /// tab left with none is not built; `None` if no tab was.
     fn restore_window(
         &self,
         window: &SavedWindow,
         screens: &[Frame],
         mut arriving: Option<&mut Arriving<'_>>,
-    ) -> Vec<(usize, Retained<TerminalWindow>)> {
+    ) -> Option<RestoredWindow> {
         let mtm = self.mtm();
         let frame = clamp_frame(window.frame, screens);
         let frame = NSRect::new(
             NSPoint::new(frame.x, frame.y),
             NSSize::new(frame.width, frame.height),
         );
-        let mut built: Vec<(usize, Retained<TerminalWindow>)> = Vec::new();
+        let mut built: Option<Retained<TerminalWindow>> = None;
+        let mut tabs: Vec<(usize, u64)> = Vec::new();
         for (index, tab) in window.tabs.iter().enumerate() {
-            let id = self.next_id();
             let tab_id = self.next_id();
             let mut theme = None;
             let launches: Vec<Option<PaneLaunch>> = tab
@@ -3659,27 +3732,30 @@ impl AppDelegate {
             };
             let launches: Vec<PaneLaunch> = launches.into_iter().flatten().collect();
             let theme = theme.unwrap_or_else(|| self.resolve_theme());
-            let first = built.first().map(|(_, first)| first.clone());
-            let result = TerminalWindow::restore(mtm, id, tab_id, &tab, launches, |this| {
-                // `open_window`'s order: subtitle, list, chrome, then shown.
-                this.set_subtitle(&NSString::from_str(
-                    &self.ivars().notices.borrow().subtitle(),
-                ));
-                self.ivars().windows.borrow_mut().push(this.clone());
-                this.set_theme(theme);
-                let edge = self.settings().content_edge;
-                this.set_content_edge(edge);
-                match &first {
-                    Some(first) => this.show_as_tab_of(first),
-                    None => this.show_at(frame),
+            let edge = self.settings().content_edge;
+            let result = match built.clone() {
+                Some(window) => window
+                    .restore_tab(mtm, tab_id, &tab, launches, (theme, edge))
+                    .map(|_| ()),
+                None => {
+                    let id = self.next_id();
+                    TerminalWindow::restore(mtm, id, tab_id, &tab, launches, |this| {
+                        // `open_window`'s order: notice, list, chrome, then shown.
+                        this.set_notice(&self.ivars().notices.borrow().subtitle());
+                        self.ivars().windows.borrow_mut().push(this.clone());
+                        this.set_theme(theme);
+                        this.set_content_edge(edge);
+                        this.show_at(frame);
+                    })
+                    .map(|this| built = Some(this))
                 }
-            });
+            };
             match result {
-                Ok(tab) => built.push((index, tab)),
+                Ok(()) => tabs.push((index, tab_id)),
                 Err(e) => eprintln!("bateri: could not restore a tab: {e}"),
             }
         }
-        built
+        built.map(|window| (window, tabs))
     }
 
     /// A saved pane's birth package: [`AppDelegate::pane_launch`]'s without a
@@ -3814,14 +3890,14 @@ impl AppDelegate {
         })
     }
 
-    /// The live windows as the save's model: one saved window per tab group,
-    /// in the window list's order; its tabs in tab-bar order, its selected tab
-    /// and whether it holds the front terminal window (`keyWindow`, else
+    /// The live windows as the save's model: one saved window per window,
+    /// in the window list's order; its tabs in strip order, its selected tab
+    /// and whether it is the front terminal window (`keyWindow`, else
     /// `mainWindow` — the first of them that is ours —, else our frontmost
     /// window, [`AppDelegate::front_terminal_window`]: ⌘Q's alert can leave
-    /// no key window and the Settings window can be key and main). The frame
-    /// is the group's (tabs share it). A tab with nothing live to save is left out, a window
-    /// without tabs too ([`TerminalTab::saved_tab`]).
+    /// no key window and the Settings window can be key and main). A tab
+    /// with nothing live to save is left out, a window without tabs too
+    /// ([`TerminalTab::saved_tab`]).
     fn saved_session(&self, with_history: bool) -> (Saved, Histories) {
         let app = NSApplication::sharedApplication(self.mtm());
         let key = app
@@ -3830,36 +3906,21 @@ impl AppDelegate {
             .chain(app.mainWindow())
             .find(|window| self.window_owning(window).is_some())
             .or_else(|| self.front_terminal_window());
-        let mut seen = std::collections::HashSet::new();
         let mut windows = Vec::new();
         let mut histories = Vec::new();
         for window in self.windows() {
-            if seen.contains(&window.id()) {
-                continue;
-            }
-            let (group, selected) = window.tab_group_windows();
-            let members: Vec<Retained<TerminalWindow>> = group
-                .iter()
-                .filter_map(|member| self.window_owning(member))
-                .collect();
-            seen.insert(window.id());
-            seen.extend(members.iter().map(|member| member.id()));
+            let selected = window.selected_tab().id();
             let mut tabs = Vec::new();
             let mut selected_index = 0;
-            for member in &members {
-                for live in member.tabs() {
-                    let Some((tab, tab_histories)) = live.saved_tab(with_history) else {
-                        continue;
-                    };
-                    if selected
-                        .as_deref()
-                        .is_some_and(|selected| member.owns(selected))
-                    {
-                        selected_index = tabs.len();
-                    }
-                    histories.extend(tab_histories);
-                    tabs.push(tab);
+            for live in window.tabs() {
+                let Some((tab, tab_histories)) = live.saved_tab(with_history) else {
+                    continue;
+                };
+                if live.id() == selected {
+                    selected_index = tabs.len();
                 }
+                histories.extend(tab_histories);
+                tabs.push(tab);
             }
             if tabs.is_empty() {
                 continue;
@@ -3874,9 +3935,7 @@ impl AppDelegate {
                 },
                 tabs,
                 selected: selected_index,
-                key: key
-                    .as_deref()
-                    .is_some_and(|key| members.iter().any(|member| member.owns(key))),
+                key: key.as_deref().is_some_and(|key| window.owns(key)),
             });
         }
         (Saved { windows }, histories)
@@ -4746,9 +4805,8 @@ impl AppDelegate {
             notices.replace(source, messages);
             notices.subtitle()
         };
-        let subtitle = NSString::from_str(&subtitle);
         for window in self.windows() {
-            window.set_subtitle(&subtitle);
+            window.set_notice(&subtitle);
         }
     }
 

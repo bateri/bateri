@@ -7,9 +7,9 @@
 //! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
 //! Page Down) and Window (Minimize,
-//! Zoom, tab switching, Select Tab ▸, splits — Select Previous/Next Split,
-//! Select Split ▸, Resize Split ▸, Equalize Splits, Zoom Split —, Move Tab
-//! to New Window, Merge All Windows, Bring All to Front). Settings… (⌘,) opens the settings window
+//! Zoom, Show Previous/Next Tab, Select Tab ▸, splits — Select Previous/Next
+//! Split, Select Split ▸, Resize Split ▸, Equalize Splits, Zoom Split —, Move
+//! Tab to New Window, Merge All Windows, Bring All to Front). Settings… (⌘,) opens the settings window
 //! (`settings_window`; it used to open the file in the editor, that job is now
 //! on the window's "Open settings.toml" button); the item and shortcut are the same.
 //!
@@ -21,13 +21,17 @@
 //! actions, Find ▸'s four actions, the two clearing actions, the four
 //! scrolling actions (grey on the alternate screen) and `cancelUpload:`
 //! to the focused pane (`pane::TerminalPane`, `BateriView`'s parent view);
-//! `closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`,
+//! `closeTab:`, `closeWindow:`, `selectTab:`, `showNextTab:`,
+//! `showPreviousTab:` (grey with a single tab), `splitRight:`,
 //! `splitDown:` and the splits' navigation/layout actions
 //! (`selectPreviousSplit:`, `selectNextSplit:`, `selectSplit:`,
 //! `resizeSplit:`, `equalizeSplits:`, `toggleSplitZoom:`; grey with a single pane)
-//! to the key window's delegate (`window::TerminalWindow` — belongs to the tab);
-//! `performMiniaturize:`, `performZoom:` and the tab actions
-//! (`selectNextTab:`, `moveTabToNewWindow:`…) to `NSWindow` itself;
+//! to the key window's delegate (`window::TerminalWindow`, which carries the
+//! tabs — the tab actions are named apart from `NSWindow`'s own, which the
+//! window would answer before its delegate); `performMiniaturize:` and
+//! `performZoom:` to `NSWindow` itself; `detachTab:` and `mergeWindows:`
+//! (Move Tab to New Window, Merge All Windows) to nobody yet, so AppKit
+//! shows them grey;
 //! `openSettings:`, the theme actions, `markHost:`, `toggleHostIntegration:`
 //! (its title, checkmark and grey state in the app delegate's
 //! `validateMenuItem:`, from [`integration_menu`]) and
@@ -74,11 +78,10 @@
 //! `keyDown:`'s three-key Cmd allow-list (⌘⌫, ⌘←, ⌘→) and the dock's ⇧⏎ do not
 //! change, because the menu matches them together with their modifiers.
 //!
-//! **AppKit does not add the tab items** (measured): with tabbing on, Show Tab Bar /
-//! Show All Tabs come to View and window-placement items to Window, but Show
-//! Previous/Next Tab, Move Tab to New Window and Merge All Windows do not — that is
-//! why they are here. AppKit adds Close All itself to Shell (⌥⌘W, ⌘W's
-//! alternative).
+//! **AppKit adds no tab items**: macOS's own tabs are off
+//! (`NSWindow.allowsAutomaticWindowTabbing = false`, set before this menu is
+//! built), so Show Tab Bar / Show All Tabs do not come to View — the tab
+//! items here are bateri's own, acting on its own tab bar.
 //!
 //! Strings are English. The app menu's title in the menu bar
 //! comes from the process name, not from here; the "bateri" in the items' names is
@@ -523,14 +526,14 @@ pub(crate) fn install(
             NSMenuItem::separatorItem(mtm),
             // `{`/`}` are Shift characters: the menu matches ⇧⌘[ / ⇧⌘] (the same idiom as
             // Bigger's `+`).
-            item(mtm, "Show Previous Tab", sel!(selectPreviousTab:), "{"),
-            item(mtm, "Show Next Tab", sel!(selectNextTab:), "}"),
+            item(mtm, "Show Previous Tab", sel!(showPreviousTab:), "{"),
+            item(mtm, "Show Next Tab", sel!(showNextTab:), "}"),
             hidden_shortcut(with_modifiers(
-                item(mtm, "Show Previous Tab", sel!(selectPreviousTab:), "\t"),
+                item(mtm, "Show Previous Tab", sel!(showPreviousTab:), "\t"),
                 NSEventModifierFlags::Control | NSEventModifierFlags::Shift,
             )),
             hidden_shortcut(with_modifiers(
-                item(mtm, "Show Next Tab", sel!(selectNextTab:), "\t"),
+                item(mtm, "Show Next Tab", sel!(showNextTab:), "\t"),
                 NSEventModifierFlags::Control,
             )),
             submenu(mtm, "Select Tab", &select_tab),
@@ -555,8 +558,8 @@ pub(crate) fn install(
                 command | NSEventModifierFlags::Shift,
             ),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, "Move Tab to New Window", sel!(moveTabToNewWindow:), ""),
-            item(mtm, "Merge All Windows", sel!(mergeAllWindows:), ""),
+            item(mtm, "Move Tab to New Window", sel!(detachTab:), ""),
+            item(mtm, "Merge All Windows", sel!(mergeWindows:), ""),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Bring All to Front", sel!(arrangeInFront:), ""),
         ],

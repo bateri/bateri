@@ -6,10 +6,14 @@
 //! the theme, the top edge and the host marks.
 //!
 //! **The boundary with the window.** The window (`window::TerminalWindow`)
-//! is the `NSWindow` and its delegate: chrome, the title and the tab dot it
-//! writes, the close question and its scope, and the menu actions — the
-//! responder chain reaches the window's delegate, never a tab, so the
-//! selectors stay there and call the tab. Today a window carries one tab.
+//! is the `NSWindow` and its delegate: chrome, the tab bar, the title it
+//! writes, the order and selection of its tabs, the close question and its
+//! scope, and the menu actions — the responder chain reaches the window's
+//! delegate, never a tab, so the selectors stay there and call the tab. A
+//! window carries one or more tabs; only the selected one's container is
+//! shown, the others stay in the hierarchy hidden — so a background tab's
+//! panes draw nothing and ask nothing on screen ([`TerminalTab::leave_screen`],
+//! [`TerminalTab::shown`]).
 //!
 //! **A tab is not a `TabId`.** `bt_core::TabId` (`TERM_SESSION_ID`,
 //! `bateri://tab/<id>`) is a **pane's** identity, and a tab holds several
@@ -24,8 +28,8 @@
 //! `window()`.
 //!
 //! **The focused pane** is the pane of the window's first responder
-//! ([`TerminalTab::focused_pane`]): the title, `⇄`, upload percentage, tab
-//! dot and the inheritance of a new tab or split come from it. ⌘W closes it,
+//! ([`TerminalTab::focused_pane`]): the title, `⇄`, upload percentage and
+//! the inheritance of a new tab or split come from it. ⌘W closes it,
 //! and in the last pane the tab. The other panes are under the dim veil
 //! ([`TerminalTab::refresh_dim`]). Split, navigation, resizing, equalizing
 //! and pane closing drop the zoom (⇧⌘↩) — resizing and equalizing because the
@@ -45,6 +49,7 @@ use crate::app;
 use crate::notices::Source;
 use crate::pane::{PaneHost, PaneLaunch, TerminalPane};
 use crate::restore::{SavedTab, Shape};
+use crate::sheets;
 use crate::split::{Axis, Direction, Removal, Tree};
 use crate::split_view::SplitView;
 use crate::upload;
@@ -124,6 +129,13 @@ impl PaneHost for TabHost {
     }
 }
 
+/// The splits container `pane` sits in — its tab's ([`TerminalPane::tab_shown`]
+/// reads the same superview). `None` before the pane is placed.
+pub(crate) fn container_of(pane: &TerminalPane) -> Option<Retained<SplitView>> {
+    // SAFETY: reading the superview; we are on the main thread (`MainThreadOnly`).
+    unsafe { pane.superview() }?.downcast::<SplitView>().ok()
+}
+
 /// The pane of `view` or one of its ancestors — from the first responder to
 /// the focused pane (`BateriView`, the search field's field editor).
 fn pane_containing(view: Retained<NSView>) -> Option<Retained<TerminalPane>> {
@@ -174,11 +186,12 @@ pub(crate) struct TabIvars {
     /// From the application's one counter (windows, tabs and panes share
     /// it): the key by which the panes' events find the tab ([`TabHost`]).
     id: u64,
-    /// The id of the window this tab is in — the way up to the title bar
-    /// and the window's closing ([`TerminalTab::window`]).
+    /// The id of the window this tab is in — the way up to the tab bar,
+    /// the title and the tab's closing ([`TerminalTab::window`]).
     window: u64,
-    /// The splits container; the window's `contentView` holds it strongly,
-    /// this copy is for typed access ([`TerminalTab::panes`]).
+    /// The splits container; the window's root view holds it strongly
+    /// (under the tab bar, hidden while the tab is not selected), this copy
+    /// is for typed access ([`TerminalTab::panes`]).
     container: Retained<SplitView>,
     /// The id of the last focused pane — the answer of focus when the first
     /// responder is not inside a pane (the window itself)
@@ -224,7 +237,7 @@ impl TerminalTab {
         self.ivars().id
     }
 
-    /// The splits container — the window makes it its `contentView`.
+    /// The splits container — the window puts it under its tab bar.
     pub(crate) fn container(&self) -> &SplitView {
         &self.ivars().container
     }
@@ -288,8 +301,8 @@ impl TerminalTab {
     }
 
     /// The pane's `BateriView` became first responder (`PaneHost::focused`,
-    /// and the window's focus watch): the focus moved to it, the title and
-    /// tab dot are its.
+    /// and the window's focus watch): the focus moved to it, the title is
+    /// its.
     ///
     /// The title is read **one main-queue turn later**: the event comes from
     /// inside `becomeFirstResponder`, the window's `firstResponder` may still
@@ -519,8 +532,8 @@ impl TerminalTab {
     }
 
     /// Closes only the pane `id`, **without asking** (the shell's exit, a
-    /// confirmed question). If it is the last pane, the tab's closing — today
-    /// its window's ([`TerminalWindow::close`]).
+    /// confirmed question). If it is the last pane, the tab's closing
+    /// ([`TerminalWindow::close_tab_now`]; the window's own in its last tab).
     ///
     /// If the focused pane is closing the focus goes to the neighbour in the
     /// tree ([`Removal::Removed`]) and **before the teardown**: taking apart
@@ -538,7 +551,7 @@ impl TerminalTab {
             Removal::Missing => {}
             Removal::Last => {
                 if let Some(window) = self.window() {
-                    window.close();
+                    window.close_tab_now(self.id());
                 }
             }
             Removal::Removed { focus } => {
@@ -558,9 +571,9 @@ impl TerminalTab {
         }
     }
 
-    /// The window writes this tab's title and dot again
-    /// ([`TerminalWindow::refresh_title`]) — the pane's title news and the
-    /// focus change.
+    /// The window writes the titles again — this tab's in the bar and, if it
+    /// is the selected one, the window's ([`TerminalWindow::refresh_title`])
+    /// — the pane's title news and the focus change.
     pub(crate) fn refresh_title(&self) {
         if let Some(window) = self.window() {
             window.refresh_title();
@@ -571,7 +584,8 @@ impl TerminalTab {
     /// session title; while an upload flows `↑ N% · ` in front
     /// (`upload::titled_as`; `↓` while only downloads flow; the arrow and
     /// percentage from the pane's queue). `None` while there is no session
-    /// yet — the window keeps what it shows.
+    /// yet — the window keeps what it shows. The window's own title and a
+    /// single tab's bar read this.
     pub(crate) fn title(&self) -> Option<String> {
         let pane = self.focused_pane();
         let session = pane.session()?;
@@ -579,15 +593,38 @@ impl TerminalTab {
         Some(upload::titled_as(prefix, &session.title()))
     }
 
-    /// The colour of the tab's dot, sRGB: on a marked remote host the
-    /// mark's, from the session's theme with the dock's mapping
-    /// (`Theme::mark_rgb`); `None` on an unmarked remote and locally.
-    pub(crate) fn mark_rgb(&self) -> Option<u32> {
-        let pane = self.focused_pane();
-        pane.session().and_then(|session| {
-            let (_, mark) = session.remote_mark()?;
-            (mark != HostMark::None).then(|| session.theme().mark_rgb(mark))
-        })
+    /// The focused pane's session title alone — a tab's label among
+    /// several, where an upload is not a prefix (the bar shows the tab's
+    /// own title; the window's title keeps the prefix). `None` while there
+    /// is no session yet.
+    pub(crate) fn session_title(&self) -> Option<String> {
+        Some(self.focused_pane().session()?.title())
+    }
+
+    /// The tab leaves the screen (another one is selected): its panes are
+    /// no longer the user's — focus off, and what floats over a pane or
+    /// follows the pointer goes, since nothing would close it while hidden:
+    /// the popovers, the ⌘-hovered link, the scroll bar's hover and the
+    /// upload buttons' hover. Called after the container is hidden.
+    pub(crate) fn leave_screen(&self) {
+        for pane in self.panes() {
+            pane.apply_focus(false);
+            pane.close_stats_popover();
+            pane.close_upload_list();
+            pane.unhover_upload();
+            pane.view().clear_link();
+            pane.view().release_scrollbar_hover();
+        }
+    }
+
+    /// The tab came on screen (selected): a question one of its panes asked
+    /// while it was in the background opens now ([`sheets::open_parked`]).
+    /// Called once the container is shown; the window's sheet ending calls
+    /// it again for the next one.
+    pub(crate) fn shown(&self) {
+        for pane in self.panes() {
+            sheets::open_parked(&pane);
+        }
     }
 
     /// The focused pane's remote host and resolved mark; `None` locally
@@ -712,7 +749,7 @@ impl TerminalTab {
     }
 
     /// `[remote] hosts` changed — the pattern list goes to every pane's
-    /// session ([`TerminalPane::set_host_marks`]); the dot is the window's.
+    /// session ([`TerminalPane::set_host_marks`]).
     pub(crate) fn set_host_marks(&self, settings: &Settings) {
         for pane in self.panes() {
             pane.set_host_marks(settings);

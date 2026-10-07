@@ -108,14 +108,14 @@ use crate::{child, locale};
 /// either.
 pub(crate) trait PaneHost {
     /// Title, working directory, remote state or upload percentage changed:
-    /// the window's title and the tab's dot must be re-read from the pane.
+    /// the window's title and the tab's label must be re-read from the pane.
     fn title_changed(&self, pane: u64);
     /// The shell exited: the pane has nothing left to stand on and must close —
     /// only this pane, not the tab.
     fn shell_exited(&self, pane: u64);
     /// The keyboard arrived at this pane's terminal (`BateriView` became first
-    /// responder): the focused pane is now this one — the title, the tab dot
-    /// and the new split's inheritance come from it.
+    /// responder): the focused pane is now this one — the title and the new
+    /// split's inheritance come from it.
     fn focused(&self, pane: u64);
     /// The upload queue's progress or existence changed — the application's
     /// Dock icon is the total of all panes ([`TerminalPane::upload_totals`]).
@@ -939,7 +939,7 @@ impl ShellWake {
             };
             let outcome = pane.probe_remote();
             // The remote state's edge is the edge of the upload queue, the
-            // window title and the tab's dot ([`TerminalPane::remote_or_title_changed`]).
+            // window title and the tab's label ([`TerminalPane::remote_or_title_changed`]).
             if outcome.changed {
                 pane.remote_or_title_changed();
             }
@@ -1368,7 +1368,7 @@ fn marks_notifier(id: u64, lookup: PaneLookup) -> Box<dyn Fn()> {
 /// Result of the remote-session probe ([`TerminalPane::probe_remote`]): two
 /// separate answers, because their consumers are separate — undecidedness
 /// re-arms (the pane's job), a change in the remote state refreshes the title
-/// and the tab's dot (the window's job).
+/// and the tab's label (the window's job).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RemoteProbeOutcome {
     /// The answer is undecided: the arm stays set, the next output probes again.
@@ -1597,6 +1597,10 @@ pub(crate) struct PaneIvars {
     /// The file promises of ⌘-dragged remote links: the delegates
     /// kept alive and the Finder downloads that fulfil them.
     finder: RefCell<FinderDrops>,
+    /// The questions this pane asked while its tab was not on screen,
+    /// waiting to open when it is ([`crate::sheets`]); emptied with a
+    /// `Cancel` answer when the pane closes.
+    parked: RefCell<crate::sheets::ParkedQueue>,
 }
 
 define_class!(
@@ -2021,6 +2025,7 @@ impl TerminalPane {
             remote_files: RefCell::new(remote_files),
             previews: RefCell::new(HashMap::new()),
             finder: RefCell::new(FinderDrops::default()),
+            parked: RefCell::new(crate::sheets::ParkedQueue::new()),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -2065,7 +2070,7 @@ impl TerminalPane {
 
     /// Subscribes to the terminal view's frame notification
     /// (`viewFrameDidChange:`). The content's size changes independently of the
-    /// window too (the tab bar); so the geometry comes from the view's own
+    /// window too (the title row, a split); so the geometry comes from the view's own
     /// notification. `postsFrameChangedNotifications` is on by default.
     ///
     /// The **last** step of the window's constructor: a notification arriving
@@ -2100,6 +2105,28 @@ impl TerminalPane {
     /// Whether closing has begun ([`PaneIvars::closed`]).
     pub(crate) fn is_closed(&self) -> bool {
         self.ivars().closed.get()
+    }
+
+    /// Whether this pane's **tab** is on screen in its window: the tab's
+    /// container (the pane's superview) is not hidden, nor anything above
+    /// it. A window carries several tabs and only the selected one's
+    /// container is shown; the others stay in the hierarchy, hidden.
+    ///
+    /// The container, not the pane itself: a pane hidden behind the zoom
+    /// (⇧⌘↩) is still in the tab on screen — its focus bit must be right
+    /// the moment the zoom drops, and nothing else would send it again.
+    pub(crate) fn tab_shown(&self) -> bool {
+        // SAFETY: reading the superview; we are on the main thread (`MainThreadOnly`).
+        unsafe { self.superview() }
+            .is_some_and(|container| !container.isHiddenOrHasHiddenAncestor())
+    }
+
+    /// Whether this pane is the user's: its window is key **and** its tab
+    /// is the one on screen ([`Self::tab_shown`]). The single answer to
+    /// "is this pane focused" — a pane of a background tab sits in the key
+    /// window too, so reading `isKeyWindow` alone would call it focused.
+    pub(crate) fn is_active(&self) -> bool {
+        self.window().is_some_and(|window| window.isKeyWindow()) && self.tab_shown()
     }
 
     /// This pane's temporary point-size delta — a new tab inherits it.
@@ -2711,7 +2738,7 @@ impl TerminalPane {
         // open while another application is in front) no notification would
         // arrive and `focused` would stay `true`: an unfocused window would
         // draw a filled caret and set up the blink clock.
-        self.apply_focus(self.window().is_some_and(|window| window.isKeyWindow()));
+        self.apply_focus(self.is_active());
         // The block marks, for the same ordering: the always-up form wants
         // them from the first frame, and no change will say so.
         self.refresh_marks_wanted();
@@ -2961,7 +2988,7 @@ impl TerminalPane {
     /// Swaps the theme into the session (no-op on the same theme,
     /// `Session::set_theme`) and paints the search panel with it; if the panel
     /// is not born yet it is painted with the session's theme on the first ⌘F.
-    /// The window paints the chrome and the tab's dot (`TerminalWindow::set_theme`,
+    /// The window paints the chrome and the tab bar (`TerminalWindow::set_theme`,
     /// the only caller of this call).
     pub(crate) fn set_theme(&self, theme: Theme) {
         if let Some(session) = self.ivars().session.get() {
@@ -3554,7 +3581,7 @@ impl TerminalPane {
     /// shell's `SIGHUP`.
     ///
     /// 0. Count the pane as closed ([`PaneIvars::closed`]) and remove the frame
-    ///    observer: while the tab bar closes AppKit can re-lay-out the content
+    ///    observer: while its tab or window closes AppKit can re-lay-out the content
     ///    and if the observer stayed the dying session would receive a resize
     ///    (and a `Msg::Resize` that cannot be written to a dropped reader).
     /// 1. Cut the rhythm (`DisplayLink::stop`): the link stops, leaves the
@@ -3656,6 +3683,10 @@ impl TerminalPane {
         // First: a job's thread waiting at the password sheet holds the helper's
         // worker too — dropping the sender answers it, then `close` is served.
         self.close_password();
+        // The questions a background tab parked go the way an open sheet
+        // goes: answered `Cancel`, each asker clearing its own gate — while
+        // the pane can still be found by its blocks.
+        crate::sheets::answer_parked(self);
         self.abandon_uploads();
         // Finder's pending promises fail now (cancelled), not with the last reference.
         self.finder_abandon();
@@ -3781,7 +3812,7 @@ impl TerminalPane {
     /// Remote state or title changed: first the upload queue's connection edge
     /// ([`TerminalPane::check_upload_connection`]; if ssh closed the waiting
     /// ones are cancelled), then the owner
-    /// re-reads the title and the tab's dot ([`PaneHost::title_changed`]).
+    /// re-reads the title and the tab's label ([`PaneHost::title_changed`]).
     pub(crate) fn remote_or_title_changed(&self) {
         self.remote_edge();
         // The remote session ended: its helper ssh is not held open until idle.
@@ -4325,6 +4356,12 @@ impl TerminalPane {
     /// The open password sheet's slot.
     pub(crate) fn password(&self) -> &RefCell<Option<PasswordSheet>> {
         &self.ivars().password
+    }
+
+    /// The questions waiting for this pane's tab to come on screen — the
+    /// sheet gate's slot ([`crate::sheets`]).
+    pub(crate) fn parked(&self) -> &RefCell<crate::sheets::ParkedQueue> {
+        &self.ivars().parked
     }
 
     /// The application's ssh masters; `None` in a timed run.

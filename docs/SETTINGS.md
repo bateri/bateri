@@ -389,19 +389,23 @@ saved readable and valid.
 
 ## If something goes wrong
 
-The error appears in English in the window's title bar, next to the title:
+The error appears in English in the window's title bar. With a single tab it
+stands next to the title:
 
 ```
 bateri – settings.toml: line 2: `terminal.scrollback` must be an integer, found a string; using 10000
 ```
 
+With several tabs the title bar holds the tabs, so the error becomes a ⚠
+button left of `+`: hover over it to read the text, click it to open the
+settings window, which shows the file's state.
+
 If there are several errors, the first one and the number of the rest are
 shown (`(+2 more)`); all of them are also printed to standard error with the
 prefix `bateri:`. The terminal opens in every case.
 
-**In full screen** the title bar is hidden and the warning may become
-invisible with it (not tried); what remains is opening the file in windowed
-mode or reading the copy on stderr.
+**In full screen** the title bar stays at the top of the screen, so the
+error (or the ⚠) stays visible there too.
 
 | at launch | result |
 |---|---|

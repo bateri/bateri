@@ -22,6 +22,16 @@ of every installed copy. A version without a section is not released.
 
 ### Changed
 
+- **Tabs in the title bar, in your theme's colors.** A window's tabs are now
+  bateri's own: they sit in the title bar beside the traffic lights, drawn in
+  the theme instead of the system's grey, with `+` at the right end. A window
+  with one tab looks as before — its title in the middle. Click a tab to
+  switch to it; middle-click it or use the × that appears on hover to close
+  it. ⌘1–⌘9, ⇧⌘[ / ⇧⌘] and ⌃⇥ switch tabs as before, and ⌘N follows the
+  system's "Prefer tabs" setting. A question a background tab asks — a
+  password, an upload's confirmation — waits until you switch to that tab
+  instead of covering the one you are looking at. With several tabs a
+  settings error shows as a ⚠ beside `+`; hover over it to read it.
 - **Text no longer gets cut in half at the top of the window.** Where the
   terminal meets the tab bar — or the divider above a split pane — a line
   scrolling up now fades out over a few pixels instead of being sliced through

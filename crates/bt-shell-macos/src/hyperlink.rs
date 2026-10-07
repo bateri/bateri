@@ -506,7 +506,7 @@ impl BateriView {
     /// everything clears — the only thing that stops the drop → re-find cycle
     /// when the window is not the user's.
     pub(crate) fn link_lost(&self) {
-        let key = self.window().is_some_and(|window| window.isKeyWindow());
+        let key = self.pane().is_some_and(|pane| pane.is_active());
         if key {
             let (at, command) = (self.pointer_link_cell(), command_down());
             {
@@ -787,7 +787,7 @@ impl BateriView {
         found: Option<impl FnOnce(LinkHit) -> Verified>,
         note: Option<String>,
     ) {
-        let key = self.window().is_some_and(|window| window.isKeyWindow());
+        let key = self.pane().is_some_and(|pane| pane.is_active());
         let command = command_down();
         let pending = {
             let mut state = self.link_state().borrow_mut();
@@ -1052,7 +1052,7 @@ impl BateriView {
             }
             state.menu_pending.take()
         };
-        let key = self.window().is_some_and(|window| window.isKeyWindow());
+        let key = self.pane().is_some_and(|pane| pane.is_active());
         if let (Some(query), Some(make), true) = (pending, found, key) {
             self.pop_link_menu(make(query), at);
         }

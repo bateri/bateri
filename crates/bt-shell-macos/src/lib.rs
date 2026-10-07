@@ -57,6 +57,7 @@ mod split_view;
 mod stats;
 mod stats_popover;
 mod tab;
+mod tab_bar;
 mod updater;
 mod uploader;
 mod view;

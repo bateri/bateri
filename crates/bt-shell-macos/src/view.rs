@@ -1846,7 +1846,7 @@ impl BateriView {
         // is asked again — or an unfocused pane, which gets no window
         // motion, would keep its bar wide. Outside the key window the area
         // is inactive and so is the hover.
-        let inside = window.isKeyWindow()
+        let inside = self.pane().is_some_and(|pane| pane.is_active())
             && self
                 .scrollbar_region(window.mouseLocationOutsideOfEventStream())
                 .is_some();
@@ -2041,7 +2041,8 @@ impl BateriView {
             return;
         };
         let at = window.mouseLocationOutsideOfEventStream();
-        let inside = window.isKeyWindow() && self.scrollbar_region(at).is_some();
+        let inside =
+            self.pane().is_some_and(|pane| pane.is_active()) && self.scrollbar_region(at).is_some();
         if !inside && !self.pane().is_some_and(|pane| pane.block_tip_shown()) {
             return;
         }

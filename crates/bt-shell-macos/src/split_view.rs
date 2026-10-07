@@ -1,11 +1,12 @@
-//! Container for the splits: a plain `NSView` that is the window's
-//! `contentView`. It holds the tab's panes and the split tree
+//! Container for the splits: a plain `NSView`, one per tab, under the
+//! window's tab bar (`window::RootView`; hidden while its tab is not the
+//! selected one). It holds the tab's panes and the split tree
 //! ([`crate::split`]), applies the tree's frames to the panes and shows the
 //! dividers. It is not on the frame path: it draws no cells, only
 //! `NSBox` fills — the dividers' and `line`'s hairline.
 //!
 //! **The tree lives here, not in the window**: the container's own size
-//! changes independently of the window (the tab bar shortens the content)
+//! changes independently of the window (the title row shortens the content)
 //! and the notification about it is AppKit's
 //! `resizeSubviewsWithOldSize:` call on this view. Were the tree in the
 //! window, the view would have to reach back to the window on every size
@@ -471,14 +472,18 @@ impl SplitView {
     }
 
     /// The panes' visibility: the window is visible **and** the pane is not
-    /// hidden. A hidden pane (left behind the zoom) draws zero frames like an
-    /// occluded window; when it returns it asks for a frame
-    /// (`DisplayLink::set_visible`). The same answer pauses the remote load
-    /// indicator's sampling (`TerminalPane::set_visible`).
+    /// hidden — neither itself (left behind the zoom) nor through an
+    /// ancestor (this container, when its tab is not the selected one). One
+    /// AppKit read answers both, so a background tab needs no signal of its
+    /// own. A hidden pane draws zero frames like an occluded window; when it
+    /// returns it asks for a frame (`DisplayLink::set_visible`). The same
+    /// answer pauses the remote load indicator's sampling
+    /// (`TerminalPane::set_visible`). Called after any `setHidden` it must
+    /// see: the read is of the hierarchy as it stands.
     pub(crate) fn apply_visibility(&self, window_visible: bool) {
         let panes = self.ivars().panes.borrow().clone();
         for pane in &panes {
-            let visible = window_visible && !pane.isHidden();
+            let visible = window_visible && !pane.isHiddenOrHasHiddenAncestor();
             if let Some(link) = pane.link() {
                 link.set_visible(visible);
             }

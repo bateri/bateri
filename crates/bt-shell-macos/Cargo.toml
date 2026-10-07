@@ -53,9 +53,6 @@ objc2-foundation = { workspace = true, features = [
 # protocol's methods are `#[optional]`, so implementing two is enough.
 # NSColor: the window chrome's background comes from the theme's `background`
 # (`window::TerminalWindow::apply_chrome`).
-# NSWindowTabGroup: the tab group's windows (⇧⌘W, ⌘1…⌘9) —
-# `tabbedWindows` gives `nil` while the bar is not showing. It pulls in only
-# the NSArray/NSString headers, both already on; `Cargo.lock` did not move.
 # `NSPasteboardTypeFileURL` and `readObjectsForClasses:options:` do **not**
 # need a flag here: both are inside the `NSPasteboard` header that the
 # workspace manifest turns on (this line does not trim that set) and the
@@ -96,8 +93,6 @@ objc2-foundation = { workspace = true, features = [
 # wants `CGColor` would add an `objc2-core-graphics` edge) and the
 # open/close animation (`NSAnimationContext`, `animator()` is in the
 # `NSAnimation` header). Only header flags; `Cargo.lock` did not move.
-# The tab's dot: `NSWindowTab` (`window.tab()` and
-# `setAccessoryView`); only a header flag, `Cargo.lock` did not move.
 # Progress of the remote upload in the Dock icon:
 # `NSDockTile` (`NSApp.dockTile`, the content view) and `NSProgressIndicator`
 # (the bar). Only header flags; `Cargo.lock` did not move.
@@ -130,6 +125,14 @@ objc2-foundation = { workspace = true, features = [
 # attribute keys (`NSForegroundColorAttributeName`, `NSFontAttributeName`).
 # Only a header flag over `objc2-foundation` headers and the `bitflags`
 # already in the graph; `Cargo.lock` did not move.
+# The window's own tab bar (`tab_bar`): `NSToolbar` — an empty compact
+# toolbar raises the title row and centres the traffic lights in it, the
+# row the bar sits in (`window::TerminalWindow`); `NSBezierPath` — the `+`
+# and `×` glyphs and the chip's corners, drawn in `drawRect:` (the layer
+# path would want `CGColor`, an `objc2-core-graphics` edge);
+# `NSAccessibilityConstants` and `NSAccessibilityProtocols` — VoiceOver's
+# tab group, tab button and button roles on our own views. Only header
+# flags over `objc2-foundation` headers; `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -137,13 +140,14 @@ objc2-app-kit = { workspace = true, features = [
     "NSPopUpButton", "NSScrollView", "NSSlider", "NSSplitView", "NSSplitViewController",
     "NSSplitViewItem", "NSStackView", "NSStepper", "NSSwitch", "NSTableCellView",
     "NSTableColumn", "NSTableHeaderView", "NSTableView", "NSText", "NSTextField",
-    "NSTextInputClient", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSViewController", "NSWindowTabGroup", "NSWorkspace",
+    "NSTextInputClient", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSViewController", "NSWorkspace",
     "NSActionCell", "NSAnimation", "NSAnimationContext", "NSButtonCell", "NSSearchField",
     "NSSearchFieldCell",
-    "NSShadow", "NSTextFieldCell", "NSWindowTab", "block2", "NSDockTile", "NSProgressIndicator",
+    "NSShadow", "NSTextFieldCell", "block2", "NSDockTile", "NSProgressIndicator",
     "NSCursor", "NSPopover", "NSParagraphStyle", "NSOpenPanel", "NSPanel", "NSSavePanel",
     "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSSecureTextField",
     "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea", "NSAttributedString",
+    "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".
