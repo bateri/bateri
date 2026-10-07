@@ -3,8 +3,8 @@
 //! (an upload's or a download's — the latter quarantined before it lands), from
 //! the stream to the dock's status line, to the "Show transfers (N)" popover
 //! and to the stop question. The queue
-//! is **the pane's**: sheets attach to the pane view's window,
-//! the popover to the pane's `BateriView`; the title's `↑ N%` prefix, the
+//! is **the pane's**: its sheets sit where the pane's questions do
+//! ([`crate::sheets`]), the popover on the pane's `BateriView`; the title's `↑ N%` prefix, the
 //! notification and the Dock tile come from the pane's owner
 //! ([`crate::pane::PaneHost`] - `title_changed`, `notify`, `uploads_changed`),
 //! and the Dock tile itself is the total over all panes
@@ -59,6 +59,7 @@ use crate::preview::beep;
 use crate::preview_cache;
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{Answer, Query, Request};
+use crate::sheets::{self, Asker};
 use crate::ssh_route;
 use crate::upload::{
     self, Direction, Ended, Job, Lane, Local, Outcome, ProbeReply, RowAction, RowStatus, Shared,
@@ -193,9 +194,9 @@ impl TerminalPane {
             .session()
             .and_then(|session| session.remote_target())
             .is_some_and(|(command, ..)| command == asked.command);
-        // The sheet's window is the pane view's; if the pane was detached from
-        // the window there is nowhere to ask either.
-        let Some(window) = self.window().filter(|_| alive) else {
+        // The sheet's seat is the pane's ([`sheets`]); if the pane was
+        // detached from the window there is nowhere to ask either.
+        let Some(seat) = alive.then(|| sheets::seat(Asker::Pane(self))).flatten() else {
             self.uploads().borrow_mut().set_asking(false);
             return;
         };
@@ -267,7 +268,7 @@ impl TerminalPane {
             }
         });
         self.upload_alert().replace(Some(alert.clone()));
-        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
+        seat.begin(&alert, &answered);
     }
 
     /// Confirmation (an upload's, a download's or a preview's): the items go to
@@ -365,7 +366,7 @@ impl TerminalPane {
             .session()
             .and_then(|session| session.remote_target())
             .is_some_and(|(command, ..)| command == prepared.command);
-        let Some(window) = self.window().filter(|_| alive) else {
+        let Some(seat) = alive.then(|| sheets::seat(Asker::Pane(self))).flatten() else {
             self.uploads().borrow_mut().set_asking(false);
             beep();
             return;
@@ -459,7 +460,7 @@ impl TerminalPane {
             }
         });
         self.upload_alert().replace(Some(alert.clone()));
-        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
+        seat.begin(&alert, &answered);
     }
 
     /// The download goes to the queue's end under `conflict` (a
@@ -832,7 +833,7 @@ impl TerminalPane {
         alert.addButtonWithTitle(&NSString::from_str(keep));
         let stop = alert.addButtonWithTitle(ns_string!("Stop"));
         stop.setHasDestructiveAction(true);
-        let Some(window) = self.window() else {
+        let Some(seat) = sheets::seat(Asker::Pane(self)) else {
             return;
         };
         let (id, lookup) = (self.id(), self.lookup());
@@ -866,8 +867,8 @@ impl TerminalPane {
             if !on_sheet {
                 return false;
             }
-            if let Some(window) = lookup(mtm, id).and_then(|pane| pane.window()) {
-                window.endSheet_returnCode(&sheet_window, NSAlertFirstButtonReturn);
+            if let Some(seat) = lookup(mtm, id).and_then(|pane| sheets::seat(Asker::Pane(&pane))) {
+                seat.end(&sheet_window, NSAlertFirstButtonReturn);
             }
             true
         });
@@ -876,7 +877,7 @@ impl TerminalPane {
             id: item,
             monitor,
         }));
-        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
+        seat.begin(&alert, &answered);
     }
 
     /// If the stop question was about an item that no longer flows, closes the
@@ -888,8 +889,8 @@ impl TerminalPane {
             .as_ref()
             .filter(|sheet| !self.uploads().borrow().is_running(sheet.id))
             .map(|sheet| sheet.alert.window());
-        if let (Some(sheet_window), Some(window)) = (stale, self.window()) {
-            window.endSheet_returnCode(&sheet_window, NSModalResponseAbort);
+        if let (Some(sheet_window), Some(seat)) = (stale, sheets::seat(Asker::Pane(self))) {
+            seat.end(&sheet_window, NSModalResponseAbort);
         }
     }
 
@@ -1446,7 +1447,7 @@ pub(crate) fn remove_monitor(monitor: Option<Retained<AnyObject>>) {
 /// queue finished, failed or the connection dropped. None while in the
 /// foreground - the result is in the dock and the title. The pane's request
 /// goes through the owner ([`crate::pane::PaneHost::notify`]); today's owner
-/// lands here (`window::WindowHost`).
+/// lands here (`tab::TabHost`).
 ///
 /// `UNUserNotificationCenter` (a user-approved dependency). Three rules:
 ///

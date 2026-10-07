@@ -7,12 +7,12 @@
 //! `TerminalPane` is an `NSView` subclass and is the very same thing as
 //! today's content container: `BateriView` is its child that
 //! fills it via autoresizing, and the search panel floats inside it as a
-//! sibling of the Metal layer. The window (`window::TerminalWindow`) plugs the
-//! pane into the splits container (`split_view::SplitView`) and keeps the
-//! work that belongs to the **tab**: chrome, title, tab, the close question;
-//! geometry, occlusion and focus are distributed from the window to all
-//! panes. A tab can hold several panes (splits): each with its own
-//! session, link and renderer.
+//! sibling of the Metal layer. The tab (`tab::TerminalTab`) plugs the pane
+//! into the splits container (`split_view::SplitView`) and keeps the focused
+//! pane and the title's read; the window (`window::TerminalWindow`) keeps
+//! chrome, the title bar and the close question; geometry, occlusion and
+//! focus are distributed from the window to all panes. A tab can hold
+//! several panes (splits): each with its own session, link and renderer.
 //!
 //! **The boundary has three parts**: the pane takes its inputs
 //! at birth in a single package ([`PaneLaunch`]: settings snapshot, theme,
@@ -97,13 +97,15 @@ use crate::{Run, Workload};
 use crate::{child, locale};
 
 /// Events the pane hands to its owner — today
-/// `window::WindowHost`, tomorrow an embedding application.
+/// `tab::TabHost`, tomorrow an embedding application.
 ///
 /// All of them are called **on the main thread** and with the pane's id
 /// ([`TerminalPane::id`]): the owner holds several panes (splits) and must
 /// know which one the event came from. The methods carry no AppKit types, so
-/// the owner can be tested with a fake application. Sheets and the popover
-/// use the pane view's own `window()`; the owner is not asked for them.
+/// the owner can be tested with a fake application. Sheets go through the
+/// sheet gate (`crate::sheets`), which resolves where they sit from the pane
+/// itself; the popover uses the pane's own view. The owner is not asked for
+/// either.
 pub(crate) trait PaneHost {
     /// Title, working directory, remote state or upload percentage changed:
     /// the window's title and the tab's dot must be re-read from the pane.
@@ -2975,8 +2977,8 @@ impl TerminalPane {
     }
 
     /// Shows or hides the dim veil. The decision is the
-    /// owner's ("not focused and more than one pane in the window",
-    /// `TerminalWindow::refresh_dim`); it asks for no frame — the veil is AppKit's.
+    /// owner's ("not focused and more than one pane in the tab",
+    /// `TerminalTab::refresh_dim`); it asks for no frame — the veil is AppKit's.
     pub(crate) fn set_dimmed(&self, dimmed: bool) {
         self.ivars().dim.setHidden(!dimmed);
     }
@@ -3077,7 +3079,7 @@ impl TerminalPane {
     }
 
     /// Gives the pane what the content does at its top edge (`[appearance]
-    /// content_edge`; `TerminalWindow::set_content_edge` is the one caller).
+    /// content_edge`; `TerminalTab::set_content_edge` is the one caller).
     /// A no-op on the same mode. A new one goes to the link, and when the
     /// fade comes or goes ([`bt_gpu::edge_fades`]) the grid is resized
     /// through the one geometry path ([`TerminalPane::refresh_geometry`]) —
@@ -3172,7 +3174,7 @@ impl TerminalPane {
     }
 
     /// A cell's size, in points — the step of keyboard resizing
-    /// (`TerminalWindow::resize_split`). `None` if not attached to a window.
+    /// (`TerminalTab::resize_split`). `None` if not attached to a window.
     pub(crate) fn cell_size(&self) -> Option<NSSize> {
         let scale = self.window()?.backingScaleFactor();
         let (cell_w, cell_h) = self.ivars().renderer.cell_metrics(scale).cell_px();
@@ -3538,10 +3540,10 @@ impl TerminalPane {
     }
 
     /// The pane's share of the closing sequence — **starts, does not wait**.
-    /// Its callers are the window's `begin_close` — the window's closing
+    /// Its callers are the tab's `begin_close` — the window's closing
     /// (`windowWillClose:`, the handle drops) and the application's closing
     /// (`AppDelegate::shutdown`, all handles waited on until a single
-    /// deadline) — and a single pane's closing (`TerminalWindow::close_pane`,
+    /// deadline) — and a single pane's closing (`TerminalTab::close_pane`,
     /// the handle drops; if the split could not be born, `add_pane`'s rollback).
     ///
     /// The order is required: first the bound holder lets its copy of the

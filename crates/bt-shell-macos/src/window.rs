@@ -1,31 +1,22 @@
-//! Terminal window: an `NSWindow`, its splits container
-//! (`split_view::SplitView`, the `contentView`) and its panes
-//! (`pane::TerminalPane` — session, link, renderer, surface, `BateriView`,
-//! search panel, upload queue), and everything that belongs to the **tab**:
-//! chrome, title, tab dot, the close question, tab and split actions
-//! (`closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`, `splitDown:`,
-//! `selectPreviousSplit:`/`selectNextSplit:`, `selectSplit:`, `resizeSplit:`,
-//! `equalizeSplits:`, `toggleSplitZoom:`); the window's `NSWindowDelegate` is
-//! here too.
+//! Terminal window: an `NSWindow` and its `NSWindowDelegate`, and what
+//! belongs to the **window** rather than to one of its tabs — chrome, the
+//! title and tab dot it writes, the close question and its scope, and the
+//! tab and split actions (`closeTab:`, `closeWindow:`, `selectTab:`,
+//! `splitRight:`, `splitDown:`, `selectPreviousSplit:`/`selectNextSplit:`,
+//! `selectSplit:`, `resizeSplit:`, `equalizeSplits:`, `toggleSplitZoom:`).
+//! The responder chain reaches the window's delegate, never a tab, so the
+//! actions are here and hand the tab's work to its tab
+//! (`tab::TerminalTab`: the splits container, the panes, the focused pane,
+//! the title's read). Today a window carries one tab.
 //!
-//! **The focused pane** is the pane of the window's first responder
-//! ([`TerminalWindow::focused_pane`]): the title, `⇄`, upload
-//! percentage, tab dot and the inheritance of a new tab/split come from it.
-//! ⌘W closes it, and in the last pane the tab. The other panes are
-//! under the dim veil ([`TerminalWindow::refresh_dim`]). Split,
-//! navigation, resizing, equalizing and pane closing drop the zoom (⇧⌘↩)
-//! (resizing and equalizing because the user asked for a layout
-//! change — silently changing a hidden layout would be an invisible effect).
-//!
-//! This is the pane's owner: the pane's events come through
-//! [`WindowHost`] (`PaneHost`) and reach the window or the application, its
-//! inputs from the `PaneLaunch` that `AppDelegate::open_window` builds. The
-//! application-wide parts (settings, watching, subtitle slots, measurement
-//! ledger, timed-run recipe, window list) are in `app`; the save-time paths
-//! coming from there reach **every pane** (`TerminalWindow::panes`). The
-//! window's geometry, occlusion and focus notifications are distributed to
-//! **all** panes too. There is no drawing call here either; this file's job
-//! is wiring.
+//! The window's inputs come from `AppDelegate::open_window`; the panes'
+//! events reach their tab (`tab::TabHost`) and through it the window or the
+//! application. The application-wide parts (settings, watching, subtitle
+//! slots, measurement ledger, timed-run recipe, window list) are in `app`;
+//! the save-time paths coming from there reach **every tab**. The window's
+//! geometry, occlusion and focus notifications are distributed to **all**
+//! panes too. There is no drawing call here either; this file's job is
+//! wiring.
 //!
 //! Renderer per pane (`pane`'s header).
 
@@ -36,8 +27,8 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use bt_core::{
-    ConfirmClose, ContentEdge, HostMark, InitialInput, MarkSubject, Settings, ShutdownHandle,
-    TabId, Teardown, Theme, contrast_ratio,
+    ConfirmClose, ContentEdge, InitialInput, Settings, ShutdownHandle, TabId, Teardown, Theme,
+    contrast_ratio,
 };
 use bt_gpu::GpuError;
 use dispatch2::DispatchQueue;
@@ -49,8 +40,7 @@ use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSBox,
     NSBoxType, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSFloatingWindowLevel,
     NSMenuItem, NSModalResponse, NSModalResponseCancel, NSTitlePosition, NSTitlebarSeparatorStyle,
-    NSView, NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode,
-    NSWindowStyleMask,
+    NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSKeyValueObservingOptions, NSNotification, NSObject, NSObjectNSKeyValueObserverRegistration,
@@ -60,14 +50,12 @@ use objc2_foundation::{
 use crate::Run;
 use crate::app::{self, AppDelegate};
 use crate::jobs::Foreground;
-use crate::notices::Source;
-use crate::pane::{PaneHost, PaneLaunch, TerminalPane};
-use crate::restore::{SavedTab, Shape};
-use crate::split::{Axis, Direction, Removal};
-use crate::split_view::SplitView;
+use crate::pane::{PaneLaunch, TerminalPane};
+use crate::restore::SavedTab;
+use crate::sheets::{self, Asker};
+use crate::split::{Axis, Direction};
+use crate::tab::{self, TerminalTab};
 use crate::tabs::tab_index;
-use crate::upload;
-use crate::uploader;
 
 /// Whether the theme's background is dark — the window chrome's appearance
 /// (Aqua / DarkAqua) comes from this ([`TerminalWindow::apply_chrome`]).
@@ -83,76 +71,6 @@ use crate::uploader;
 /// a translation into AppKit's appearance vocabulary.
 pub(crate) fn is_dark_background(theme: &Theme) -> bool {
     contrast_ratio(theme.background, 0xffffff) > contrast_ratio(theme.background, 0x000000)
-}
-
-/// The owner handle the window gives the pane ([`PaneHost`]).
-///
-/// **It finds the window by id**, does not hold it by reference: the window
-/// holds the pane strongly (`contentView` and ivar), a back reference would
-/// be a cycle. The id is known before the window is born
-/// (`AppDelegate::open_window`'s counter draws first), so the handle can go
-/// into the birth package — there is no slot set up afterwards. If the window
-/// left the list the event is dropped.
-pub(crate) struct WindowHost {
-    window: u64,
-}
-
-impl WindowHost {
-    pub(crate) fn new(window: u64) -> Self {
-        Self { window }
-    }
-
-    /// We are on the main thread: all of `PaneHost`'s calls come from the
-    /// pane, on the main thread.
-    fn mtm() -> MainThreadMarker {
-        // audit: `PaneHost` is called only on the main thread (the trait's doc).
-        MainThreadMarker::new().expect("PaneHost is called on the main thread")
-    }
-
-    fn window(&self) -> Option<Retained<TerminalWindow>> {
-        app::delegate(Self::mtm())?.window(self.window)
-    }
-}
-
-impl PaneHost for WindowHost {
-    fn title_changed(&self, _pane: u64) {
-        // The title is from the focused pane; a background pane's news does
-        // the same read and rewrites the unchanged title — cheap and branchless.
-        if let Some(window) = self.window() {
-            window.refresh_title();
-            // The news also says a directory moved: a layout edge.
-            window.layout_changed();
-        }
-    }
-
-    fn shell_exited(&self, pane: u64) {
-        // Only that pane; the last pane closes the tab.
-        if let Some(window) = self.window() {
-            window.close_pane(pane);
-        }
-    }
-
-    fn focused(&self, pane: u64) {
-        if let Some(window) = self.window() {
-            window.pane_focused(pane);
-        }
-    }
-
-    fn uploads_changed(&self, _pane: u64) {
-        if let Some(app) = app::delegate(Self::mtm()) {
-            app.refresh_dock_tile();
-        }
-    }
-
-    fn notify(&self, _pane: u64, title: &str, body: &str) {
-        uploader::notify(Self::mtm(), title, body);
-    }
-
-    fn post_notices(&self, _pane: u64, source: Source, messages: Vec<String>) {
-        if let Some(app) = app::delegate(Self::mtm()) {
-            app.post_notices(source, messages);
-        }
-    }
 }
 
 /// A window closing that has begun ([`TerminalWindow::begin_close`]).
@@ -180,8 +98,8 @@ impl Closing {
 enum CloseTarget {
     /// Tabs (window ids), with all their panes.
     Tabs(Vec<u64>),
-    /// A single pane (pane id); the tab stays open.
-    Pane(u64),
+    /// A single pane of a tab (tab and pane ids); the tab stays open.
+    Pane { tab: u64, pane: u64 },
 }
 
 /// Title of the Shell ▸ Close Tab item: with several panes ⌘W
@@ -483,20 +401,6 @@ pub(crate) fn alert(mtm: MainThreadMarker, prompt: &Prompt) -> Retained<NSAlert>
     alert
 }
 
-/// The pane of `view` or one of its ancestors — from the first responder to
-/// the focused pane (`BateriView`, the search field's field editor).
-fn pane_containing(view: Retained<NSView>) -> Option<Retained<TerminalPane>> {
-    let mut current = Some(view);
-    while let Some(view) = current {
-        match view.downcast::<TerminalPane>() {
-            Ok(pane) => return Some(pane),
-            // SAFETY: reading the parent view; we are on the main thread (`MainThreadOnly`).
-            Err(view) => current = unsafe { view.superview() },
-        }
-    }
-    None
-}
-
 /// The direction of a Select/Resize Split ▸ item: the sender's `tag`.
 fn direction_of(sender: Option<&AnyObject>) -> Option<Direction> {
     let item = sender?.downcast_ref::<NSMenuItem>()?;
@@ -518,29 +422,24 @@ fn close_requested_tabs(app: &AppDelegate) {
     }
 }
 
-/// The window's state — what belongs to the **tab**: chrome, tab dot, the
-/// close question and focus. The session's core (session, link, renderer,
-/// surface, view, dock reserve, point size, identity, search, upload) is in
-/// the panes ([`TerminalPane`]), the panes and the split tree
-/// in the container ([`SplitView`]).
+/// The window's state — chrome, tab dot, the close question and its tab.
+/// The splits container, the panes and the focused pane are the tab's
+/// ([`TerminalTab`]); the session's core is in the panes ([`TerminalPane`]).
 pub(crate) struct WindowIvars {
     /// Our own counter ([`AppDelegate`] hands it out): the key by which the
-    /// close question and removal from the list find the window. The pane's
-    /// id is separate ([`TerminalPane::id`]) and from the same counter.
+    /// close question and removal from the list find the window. The tab's
+    /// and the pane's ids are separate ([`TerminalTab::id`],
+    /// [`TerminalPane::id`]) and from the same counter.
     id: u64,
     /// The timed run's recipe, a copy of `AppDelegate`'s (`Copy`): the close
     /// question is never asked in a timed run and must be answerable without
     /// reaching the application delegate ([`TerminalWindow::should_close_now`]).
     run: Option<Run>,
     window: Retained<NSWindow>,
-    /// The splits container and the `contentView`: `NSWindow` already holds it
-    /// strongly, this copy is for typed access ([`TerminalWindow::panes`]).
-    container: Retained<SplitView>,
-    /// The id of the last focused pane — the answer of focus when the first
-    /// responder is not inside a pane (the window itself)
-    /// ([`TerminalWindow::focused_pane`]). Written by the pane's
-    /// `PaneHost::focused` event when `BateriView` becomes first responder.
-    focused: Cell<u64>,
+    /// The window's tab: its container is the `contentView`. The only strong
+    /// reference to the tab object — the list finds it through the window
+    /// ([`TerminalWindow::tabs`]).
+    tab: Retained<TerminalTab>,
     /// The background the chrome was last painted with (the gate of
     /// [`TerminalWindow::apply_chrome`]); `None`: not painted yet.
     chrome: Cell<Option<u32>>,
@@ -698,9 +597,8 @@ define_class!(
         // of a pane whose frame did not change does not arrive.
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, _n: &NSNotification) {
-            self.ivars().container.layout_panes();
-            for pane in self.panes() {
-                pane.refresh_geometry();
+            for tab in self.tabs() {
+                tab.refresh_geometry();
             }
         }
 
@@ -727,7 +625,9 @@ define_class!(
                 .contains(NSWindowOcclusionState::Visible);
             // A hidden pane behind the zoom is counted as occluded
             // (`SplitView::apply_visibility`).
-            self.ivars().container.apply_visibility(visible);
+            for tab in self.tabs() {
+                tab.apply_visibility(visible);
+            }
         }
 
         // **Focus path.** In an unfocused window the caret's inside empties and
@@ -832,13 +732,14 @@ define_class!(
     }
 
     // **Actions that belong to the tab** are here (closing, tab selection,
-    // split); the pane-level ones (point size, find, clear, scroll, upload
-    // cancel) are in the pane, those that spread application-wide
-    // (`settingsDidChange:`, theme, `openSettings:`) in `AppDelegate`.
-    // The responder chain of a targetless action is view → pane → container →
-    // window → **window delegate** → `NSApp` → app delegate; so if this object
-    // implemented a spreading selector the key window would swallow it and
-    // the other windows would never hear it.
+    // split) and the split ones hand their work to the selected tab — the
+    // tab object is not on the responder chain; the pane-level ones (point
+    // size, find, clear, scroll, upload cancel) are in the pane, those that
+    // spread application-wide (`settingsDidChange:`, theme, `openSettings:`)
+    // in `AppDelegate`. The responder chain of a targetless action is view →
+    // pane → container → window → **window delegate** → `NSApp` → app
+    // delegate; so if this object implemented a spreading selector the key
+    // window would swallow it and the other windows would never hear it.
     impl TerminalWindow {
 
         /// The window's first responder changed (`observe_focus`): if the
@@ -855,8 +756,9 @@ define_class!(
             _change: Option<&AnyObject>,
             _context: *mut c_void,
         ) {
-            if let Some(pane) = self.responder_pane() {
-                self.pane_focused(pane.id());
+            let tab = self.selected_tab();
+            if let Some(pane) = tab.responder_pane() {
+                tab.pane_focused(pane.id());
             }
         }
 
@@ -867,22 +769,23 @@ define_class!(
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             let action = item.action();
+            let tab = self.selected_tab();
             // No `return`: `define_class!` converts the `bool` at the end of the body.
             if action == Some(sel!(closeTab:)) {
-                item.setTitle(&NSString::from_str(close_title(self.panes().len())));
+                item.setTitle(&NSString::from_str(close_title(tab.panes().len())));
                 true
             } else if action == Some(sel!(splitRight:)) {
-                self.can_split(Axis::Horizontal)
+                tab.can_split(Axis::Horizontal)
             } else if action == Some(sel!(splitDown:)) {
-                self.can_split(Axis::Vertical)
+                tab.can_split(Axis::Vertical)
             } else if action == Some(sel!(toggleSplitZoom:)) {
-                let zoomed = self.ivars().container.zoomed().is_some();
+                let zoomed = tab.zoomed().is_some();
                 item.setState(if zoomed {
                     NSControlStateValueOn
                 } else {
                     NSControlStateValueOff
                 });
-                self.panes().len() > 1
+                tab.panes().len() > 1
             } else if [
                 sel!(selectPreviousSplit:),
                 sel!(selectNextSplit:),
@@ -894,7 +797,7 @@ define_class!(
             .any(|split| action == Some(split))
             {
                 // With a single pane there is nothing to navigate or resize.
-                self.panes().len() > 1
+                tab.panes().len() > 1
             } else {
                 true
             }
@@ -904,13 +807,13 @@ define_class!(
         /// order, cyclic.
         #[unsafe(method(selectPreviousSplit:))]
         fn select_previous_split(&self, _sender: Option<&AnyObject>) {
-            self.select_split(false);
+            self.selected_tab().select_split(false);
         }
 
         /// Window ▸ Select Next Split (⌘]).
         #[unsafe(method(selectNextSplit:))]
         fn select_next_split(&self, _sender: Option<&AnyObject>) {
-            self.select_split(true);
+            self.selected_tab().select_split(true);
         }
 
         /// Window ▸ Select Split ▸ (⌥⌘ + arrow): the item's `tag` is the
@@ -918,7 +821,7 @@ define_class!(
         #[unsafe(method(selectSplit:))]
         fn select_split_action(&self, sender: Option<&AnyObject>) {
             if let Some(direction) = direction_of(sender) {
-                self.select_split_toward(direction);
+                self.selected_tab().select_split_toward(direction);
             }
         }
 
@@ -926,34 +829,34 @@ define_class!(
         #[unsafe(method(resizeSplit:))]
         fn resize_split_action(&self, sender: Option<&AnyObject>) {
             if let Some(direction) = direction_of(sender) {
-                self.resize_split(direction);
+                self.selected_tab().resize_split(direction);
             }
         }
 
         /// Window ▸ Equalize Splits (⌃⌘=).
         #[unsafe(method(equalizeSplits:))]
         fn equalize_splits_action(&self, _sender: Option<&AnyObject>) {
-            self.equalize_splits();
+            self.selected_tab().equalize_splits();
         }
 
         /// Window ▸ Zoom Split (⇧⌘↩).
         #[unsafe(method(toggleSplitZoom:))]
         fn toggle_split_zoom_action(&self, _sender: Option<&AnyObject>) {
-            self.toggle_split_zoom();
+            self.selected_tab().toggle_split_zoom();
         }
 
         /// Shell ▸ Split Right (⌘D): splits the focused pane in two, the new
         /// one on the right.
         #[unsafe(method(splitRight:))]
         fn split_right(&self, _sender: Option<&AnyObject>) {
-            self.split(Axis::Horizontal);
+            self.selected_tab().split(Axis::Horizontal);
         }
 
         /// Shell ▸ Split Down (⇧⌘D): splits the focused pane in two, the new
         /// one below.
         #[unsafe(method(splitDown:))]
         fn split_down(&self, _sender: Option<&AnyObject>) {
-            self.split(Axis::Vertical);
+            self.selected_tab().split(Axis::Vertical);
         }
 
         /// Shell ▸ Close Tab (⌘W): with several panes the **focused pane**,
@@ -1003,17 +906,16 @@ define_class!(
     }
 );
 
-/// Saved scrollback, `(tab id, VT bytes)` per pane (`restore::save`'s input).
-pub(crate) type Histories = Vec<(TabId, Vec<u8>)>;
-
-/// A new window's first size, before the caller places it.
-fn initial_rect() -> NSRect {
+/// A new window's first size, before the caller places it — also the first
+/// frame of its tab's container and panes.
+pub(crate) fn initial_rect() -> NSRect {
     NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0))
 }
 
 impl TerminalWindow {
-    /// Builds the window and its single pane (view, surface, renderer); the
-    /// session and link are **not there yet** ([`TerminalWindow::start`]).
+    /// Builds the window, its tab and the tab's single pane (view, surface,
+    /// renderer); the session and link are **not there yet**
+    /// ([`TerminalWindow::start`]).
     ///
     /// The reason for two steps is the work in between: the settings must be
     /// read **after** the window is born (so a notice can be written to the
@@ -1025,30 +927,33 @@ impl TerminalWindow {
     /// The renderer is born with the pane and its error returns to the
     /// caller: if the GPU device or the pipelines cannot be built the window
     /// has nothing to draw. `launch` is the first pane's birth package (its id
-    /// from the same counter as the window's id, its owner this window's
-    /// [`WindowHost`]); the window bears it as the container's single pane,
-    /// splits come afterwards ([`TerminalWindow::add_pane`]).
+    /// from the same counter as the window's and the tab's, its owner tab
+    /// `tab`'s [`tab::TabHost`]); the tab bears it as the container's single
+    /// pane, splits come afterwards ([`TerminalTab::add_pane`]).
     pub(crate) fn new(
         mtm: MainThreadMarker,
         id: u64,
+        tab: u64,
         launch: PaneLaunch,
     ) -> Result<Retained<Self>, GpuError> {
         let run = launch.run;
         let pane = TerminalPane::new(mtm, initial_rect(), launch)?;
-        Ok(Self::with_pane(mtm, id, run, &pane))
+        Ok(Self::with_pane(mtm, id, tab, run, &pane))
     }
 
-    /// The window around its first pane — [`TerminalWindow::new`]'s body and
-    /// the start of [`TerminalWindow::restore`]: one constructor, so a
-    /// restored window is the same window a new one is.
+    /// The window around a new tab `tab` and its first pane —
+    /// [`TerminalWindow::new`]'s body and the start of
+    /// [`TerminalWindow::restore`]: one constructor, so a restored window is
+    /// the same window a new one is.
     fn with_pane(
         mtm: MainThreadMarker,
         id: u64,
+        tab: u64,
         run: Option<Run>,
         pane: &TerminalPane,
     ) -> Retained<Self> {
         let rect = initial_rect();
-        let container = SplitView::new(mtm, rect, pane);
+        let tab = TerminalTab::new(mtm, tab, id, pane);
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
@@ -1072,10 +977,10 @@ impl TerminalWindow {
         // restore its own copy of the window one day, every window would come
         // back twice.
         window.setRestorable(false);
-        // The content view is the splits container; the window sets its frame,
-        // the container lays the panes out (`SplitView::layout_panes`; with a
-        // single pane the whole boundary).
-        window.setContentView(Some(&container));
+        // The content view is the tab's splits container; the window sets its
+        // frame, the container lays the panes out (`SplitView::layout_panes`;
+        // with a single pane the whole boundary).
+        window.setContentView(Some(tab.container()));
         window.setTitle(ns_string!("bateri"));
         // **Native tabs**: AppKit gathers windows carrying the
         // same identifier into a single window as tabs. `tabbingMode` is
@@ -1104,8 +1009,7 @@ impl TerminalWindow {
             id,
             run,
             window: window.clone(),
-            container: container.clone(),
-            focused: Cell::new(pane.id()),
+            tab,
             chrome: Cell::new(None),
             tab_mark: Cell::new(None),
             alert: RefCell::new(None),
@@ -1128,129 +1032,43 @@ impl TerminalWindow {
         this
     }
 
-    /// Session restore's **single** setup path for a tab: every
-    /// pane is born, laid out in the saved `shape` with its ratios at once
-    /// ([`SplitView::adopt`]), the window is placed by the caller (`place`:
-    /// the list, the theme, the frame or the tab group — the application's
-    /// business) and only **then** do the shells start, so each sees its
-    /// final size in its first `TIOCSWINSZ` and the replayed history wraps
-    /// once. The live handover hands file descriptors here instead of
-    /// shells.
+    /// Session restore's **single** setup path for a window and its tab
+    /// `tab`: every pane is born ([`tab::restored_panes`]), laid out in the
+    /// saved `shape` with its ratios at once ([`TerminalTab::adopt`]), the
+    /// window is placed by the caller (`place`: the list, the theme, the
+    /// frame or the tab group — the application's business) and only
+    /// **then** do the shells start ([`TerminalTab::start_restored`]), so
+    /// each sees its final size in its first `TIOCSWINSZ` and the replayed
+    /// history wraps once. The live handover hands file descriptors here
+    /// instead of shells.
     ///
-    /// `launches` is indexed by `shape`'s leaves. A tree that does not fit
-    /// the panes' smallest size on this screen is equalized; the zoom comes
-    /// before the focus, so a focus on another pane drops the zoom (the
-    /// keyboard is never given to a hidden pane, [`Self::focus_pane`]). A pane
-    /// whose shell cannot start leaves the tree (the precedent of
-    /// [`Self::add_pane`]); if none starts the window closes and the error
-    /// returns.
+    /// `launches` is indexed by `saved`'s shape's leaves. If no shell starts
+    /// the window closes and the error returns.
     pub(crate) fn restore(
         mtm: MainThreadMarker,
         id: u64,
-        shape: &Shape,
+        tab: u64,
+        saved: &SavedTab,
         launches: Vec<PaneLaunch>,
-        focused: usize,
-        zoomed: Option<usize>,
         place: impl FnOnce(&Retained<Self>),
     ) -> Result<Retained<Self>, String> {
-        let ids: Vec<u64> = launches.iter().map(|launch| launch.id).collect();
-        let tree = shape
-            .to_tree(&ids)
-            .filter(|tree| {
-                let mut leaves = tree.leaves();
-                leaves.sort_unstable();
-                let mut wanted = ids.clone();
-                wanted.sort_unstable();
-                leaves == wanted
-            })
-            .ok_or_else(|| "the saved split tree does not match its panes".to_owned())?;
         let run = launches.first().and_then(|launch| launch.run);
-        let rect = initial_rect();
-        let panes = launches
-            .into_iter()
-            .map(|launch| TerminalPane::new(mtm, rect, launch).map_err(|e| e.to_string()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let (tree, panes) = tab::restored_panes(mtm, &saved.shape, launches)?;
+        let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
         let (first, extra) = panes
             .split_first()
             .ok_or_else(|| "a saved tab without panes".to_owned())?;
-        let this = Self::with_pane(mtm, id, run, first);
-        let container = this.ivars().container.clone();
-        // Cannot fail: the leaves were matched against the panes above.
-        let adopted = container.adopt(tree, extra);
-        debug_assert!(adopted, "the checked tree must be adopted");
-        for pane in extra {
-            pane.observe_frame();
-        }
+        let this = Self::with_pane(mtm, id, tab, run, first);
+        let tab = this.selected_tab();
+        tab.adopt(tree, extra);
         place(&this);
-        if !container.fits() {
-            container.equalize();
+        if let Err(e) = tab.start_restored(mtm, &ids, saved.focused, saved.zoomed) {
+            this.close();
+            return Err(e);
         }
-        // The zoom after the plain layout: the hidden panes keep real frames.
-        let zoomed = zoomed.and_then(|index| ids.get(index).copied());
-        if panes.len() > 1 {
-            container.set_zoomed(zoomed);
-        }
-        for pane in this.panes() {
-            if let Err(e) = pane.start(mtm) {
-                eprintln!("bateri: could not start a restored pane's shell: {e}");
-                if let Removal::Last = container.remove_leaf(pane.id()) {
-                    this.close();
-                    return Err(format!("could not start the shell: {e}"));
-                }
-                drop(pane.begin_close());
-                drop(container.detach(pane.id()));
-            }
-        }
-        if container
-            .zoomed()
-            .is_some_and(|zoomed| container.pane(zoomed).is_none())
-        {
-            container.set_zoomed(None);
-        }
-        let focus = ids
-            .get(focused)
-            .and_then(|id| container.pane(*id))
-            .or_else(|| this.panes().into_iter().next());
-        if let Some(focus) = focus {
-            this.focus_pane(&focus);
-        }
-        // The links were born after the zoom hid its panes; they learn it now.
-        let visible = this
-            .ivars()
-            .window
-            .occlusionState()
-            .contains(NSWindowOcclusionState::Visible);
-        container.apply_visibility(visible);
         this.refresh_title();
-        this.refresh_dim();
+        tab.refresh_dim();
         Ok(this)
-    }
-
-    /// What session restore saves of this tab and, with
-    /// `with_history`, its panes' scrollback (`(tab id, bytes)`). `None` if a
-    /// pane has nothing live to save ([`TerminalPane::saved`]): a tab whose
-    /// tree would not match its panes is not saved at all.
-    pub(crate) fn saved_tab(&self, with_history: bool) -> Option<(SavedTab, Histories)> {
-        let panes = self.panes();
-        let mut saved = Vec::with_capacity(panes.len());
-        let mut histories = Vec::new();
-        for pane in &panes {
-            let (entry, history) = pane.saved(with_history)?;
-            if let Some(history) = history {
-                histories.push((entry.tab_id.clone(), history));
-            }
-            saved.push(entry);
-        }
-        let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
-        let shape = Shape::from_tree(&self.ivars().container.tree(), &ids)?;
-        let position = |id: u64| ids.iter().position(|candidate| *candidate == id);
-        let tab = SavedTab {
-            shape,
-            panes: saved,
-            focused: position(self.focused_pane().id()).unwrap_or(0),
-            zoomed: self.ivars().container.zoomed().and_then(position),
-        };
-        Some((tab, histories))
     }
 
     /// The `NSWindow` — session restore reads its frame and tab group.
@@ -1288,42 +1106,22 @@ impl TerminalWindow {
         self.ivars().id
     }
 
-    /// The tab's panes, in tree order (left to right, top to bottom). Never
-    /// empty: when the last pane closes the tab closes. A single pane in a
-    /// timed run.
+    /// The window's tabs, in order — today the one.
+    pub(crate) fn tabs(&self) -> Vec<Retained<TerminalTab>> {
+        vec![self.ivars().tab.clone()]
+    }
+
+    /// The tab on screen: the title, the dot, the menu's split actions and
+    /// the inheritance of a new tab or window are its — today the window's
+    /// one tab.
+    pub(crate) fn selected_tab(&self) -> Retained<TerminalTab> {
+        self.ivars().tab.clone()
+    }
+
+    /// Every tab's panes, tab by tab in tree order — the window-wide
+    /// distributions (scale, key, the close question) reach them all.
     pub(crate) fn panes(&self) -> Vec<Retained<TerminalPane>> {
-        self.ivars().container.panes()
-    }
-
-    /// The focused pane: the pane of the window's first
-    /// responder — `BateriView` or the search field's field editor, both
-    /// descendants of the pane. If the first responder is not inside a pane
-    /// (the window itself) the last focused pane ([`WindowIvars::focused`]),
-    /// and if there is none the first pane.
-    pub(crate) fn focused_pane(&self) -> Retained<TerminalPane> {
-        let panes = self.panes();
-        let focused = self.ivars().focused.get();
-        self.responder_pane()
-            .or_else(|| panes.iter().find(|pane| pane.id() == focused).cloned())
-            .or_else(|| panes.first().cloned())
-            // audit: the container never empties (`SplitIvars::panes`): closing
-            // the last pane closes the tab and the window constructor is born
-            // with a pane.
-            .expect("the tab has at least one pane")
-    }
-
-    /// The first responder's pane — if it is one of this tab's panes
-    /// (`BateriView` or the search field's field editor); otherwise `None`.
-    fn responder_pane(&self) -> Option<Retained<TerminalPane>> {
-        let pane = self
-            .ivars()
-            .window
-            .firstResponder()
-            .and_then(|responder| responder.downcast::<NSView>().ok())
-            .and_then(pane_containing)?;
-        self.panes()
-            .into_iter()
-            .find(|candidate| candidate.id() == pane.id())
+        self.tabs().iter().flat_map(|tab| tab.panes()).collect()
     }
 
     /// Watches the window's first responder (KVO; compatible since macOS
@@ -1343,144 +1141,6 @@ impl TerminalWindow {
         }
     }
 
-    /// The pane's `BateriView` became first responder (`PaneHost::focused`):
-    /// the focus moved to it, the title and tab dot are its.
-    ///
-    /// The title is read **one main-queue turn later**: the event comes from
-    /// inside `becomeFirstResponder`, the window's `firstResponder` may still
-    /// be the old view at that moment and [`Self::focused_pane`] asks it
-    /// before the ivar — the title would be written from the old pane. The
-    /// job captures the id (the pattern of `windowWillClose:`).
-    pub(crate) fn pane_focused(&self, id: u64) {
-        if self.ivars().focused.replace(id) == id {
-            return;
-        }
-        self.layout_changed();
-        let window = self.id();
-        DispatchQueue::main().exec_async(move || {
-            // audit: a block running on the main queue is on the main thread by definition.
-            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(window)) {
-                window.refresh_title();
-                window.refresh_dim();
-            }
-        });
-    }
-
-    /// Gives the keyboard to `pane` (first responder) and moves the focus to
-    /// it. If another pane is zoomed the zoom is dropped first: the keyboard
-    /// is never given to a hidden pane (navigation, the closing's neighbour,
-    /// `bateri://tab/`).
-    fn focus_pane(&self, pane: &TerminalPane) {
-        if self
-            .ivars()
-            .container
-            .zoomed()
-            .is_some_and(|zoomed| zoomed != pane.id())
-        {
-            self.set_zoom(None);
-        }
-        let _ = self.ivars().window.makeFirstResponder(Some(pane.view()));
-        self.pane_focused(pane.id());
-        self.refresh_dim();
-    }
-
-    /// The dim veil of unfocused panes: with several panes
-    /// in the window, those other than the focused one. No veil with a single
-    /// pane. AppKit's work, it asks for no frame.
-    pub(crate) fn refresh_dim(&self) {
-        let panes = self.panes();
-        let focused = self.focused_pane().id();
-        let many = panes.len() > 1;
-        for pane in &panes {
-            pane.set_dimmed(many && pane.id() != focused);
-        }
-    }
-
-    /// Sets or drops the zoom; the links of hidden panes sleep, those of
-    /// returning ones ask for a frame (if the window is visible).
-    fn set_zoom(&self, zoomed: Option<u64>) {
-        let container = &self.ivars().container;
-        if container.zoomed() == zoomed {
-            return;
-        }
-        container.set_zoomed(zoomed);
-        let visible = self
-            .ivars()
-            .window
-            .occlusionState()
-            .contains(NSWindowOcclusionState::Visible);
-        container.apply_visibility(visible);
-        self.refresh_dim();
-    }
-
-    /// ⌘] / ⌘[: the next or previous pane in tree order.
-    pub(crate) fn select_split(&self, forward: bool) {
-        let from = self.focused_pane();
-        if let Some(next) = self
-            .ivars()
-            .container
-            .cycle(from.id(), forward)
-            .and_then(|id| self.ivars().container.pane(id))
-        {
-            self.focus_pane(&next);
-        }
-    }
-
-    /// ⌥⌘ + arrow: the pane in that direction; a no-op at the edge.
-    /// The neighbour is from the layout without zoom — the panes' real places
-    /// even while zoomed.
-    pub(crate) fn select_split_toward(&self, direction: Direction) {
-        let from = self.focused_pane();
-        if let Some(next) = self
-            .ivars()
-            .container
-            .neighbour(from.id(), direction)
-            .and_then(|id| self.ivars().container.pane(id))
-        {
-            self.focus_pane(&next);
-        }
-    }
-
-    /// ⌃⌘ + arrow: moves the focused pane's divider on that axis by one cell.
-    /// The step is the focused pane's **one cell** — every press
-    /// changes the grid by one column or row; a design decision, the number
-    /// from the font. Stops at the smallest pane limit.
-    pub(crate) fn resize_split(&self, direction: Direction) {
-        self.set_zoom(None);
-        let pane = self.focused_pane();
-        let Some(cell) = pane.cell_size() else {
-            return;
-        };
-        let step = match direction {
-            Direction::Left | Direction::Right => cell.width,
-            Direction::Up | Direction::Down => cell.height,
-        };
-        self.ivars().container.resize(pane.id(), direction, step);
-        self.layout_changed();
-    }
-
-    /// ⌃⌘=: the panes on the same axis are equal.
-    pub(crate) fn equalize_splits(&self) {
-        self.set_zoom(None);
-        self.ivars().container.equalize();
-        self.layout_changed();
-    }
-
-    /// ⇧⌘↩: zooms the focused pane or undoes the zoom. A no-op
-    /// with a single pane.
-    pub(crate) fn toggle_split_zoom(&self) {
-        if self.panes().len() < 2 {
-            return;
-        }
-        let zoomed = match self.ivars().container.zoomed() {
-            Some(_) => None,
-            None => Some(self.focused_pane().id()),
-        };
-        self.set_zoom(zoomed);
-        self.layout_changed();
-    }
-
     /// A layout edge for the bound holder (`AppDelegate::layout_changed`).
     pub(crate) fn layout_changed(&self) {
         if let Some(app) = app::delegate(self.mtm()) {
@@ -1488,122 +1148,21 @@ impl TerminalWindow {
         }
     }
 
-    /// Whether the focused pane can be split on `axis`: both
-    /// halves' grids must pass the smallest pane limit
-    /// ([`TerminalPane::grid_fits`]). Since the new pane inherits the focused
-    /// one's point-size delta the measure is from the focused one's cell.
-    fn can_split(&self, axis: Axis) -> bool {
-        let pane = self.focused_pane();
-        self.ivars()
-            .container
-            .halves(pane.id(), axis)
-            .is_some_and(|(first, second)| pane.grid_fits(first) && pane.grid_fits(second))
-    }
-
-    /// ⌘D / ⇧⌘D: a new split from the focused pane — the application builds
-    /// the birth package (`AppDelegate::open_split`: directory, point-size
-    /// delta, theme and remote line from the focused one). A
-    /// no-op if it would drop below the limit.
-    fn split(&self, axis: Axis) {
-        // The zoom is dropped first: the split's limit is asked from
-        // the layout without zoom (`can_split`) and the new pane must be visible.
-        self.set_zoom(None);
-        if !self.can_split(axis) {
-            return;
-        }
-        let Some(app) = app::delegate(self.mtm()) else {
-            return;
-        };
-        let from = self.focused_pane();
-        if let Some(this) = app.window(self.id()) {
-            app.open_split(&this, &from, axis);
-        }
-    }
-
-    /// Puts the new pane in `target`'s second half on `axis`, opens its
-    /// session and gives it the keyboard. The order is required: the pane's
-    /// `start` reads the scale from the window, so it is first attached to
-    /// the container; the frame observer after layout. If the session cannot
-    /// be born the pane is taken apart again — no sessionless leaf remains —
-    /// and the error goes to the caller.
-    pub(crate) fn add_pane(
-        &self,
-        mtm: MainThreadMarker,
-        launch: PaneLaunch,
-        target: u64,
-        axis: Axis,
-    ) -> Result<(), String> {
-        let container = &self.ivars().container;
-        let (_, half) = container
-            .halves(target, axis)
-            .ok_or_else(|| "no pane to split".to_owned())?;
-        let frame = NSRect::new(NSPoint::new(0.0, 0.0), half);
-        let pane = TerminalPane::new(mtm, frame, launch).map_err(|e| e.to_string())?;
-        if !container.insert(target, axis, &pane) {
-            return Err("no pane to split".to_owned());
-        }
-        pane.observe_frame();
-        if let Err(e) = pane.start(mtm) {
-            drop(pane.begin_close());
-            let _ = container.remove_leaf(pane.id());
-            drop(container.detach(pane.id()));
-            return Err(format!("could not start the shell: {e}"));
-        }
-        self.focus_pane(&pane);
-        Ok(())
-    }
-
-    /// Closes only the pane `id`, **without asking** (the shell's exit, a
-    /// confirmed question). If it is the last pane, the tab's closing
-    /// ([`TerminalWindow::close`]).
-    ///
-    /// If the focused pane is closing the focus goes to the neighbour in the
-    /// tree ([`Removal::Removed`]) and **before the teardown**: taking apart
-    /// the view that carries the first responder would leave the window
-    /// without a responder. The closing is the pane's own sequence
-    /// ([`TerminalPane::begin_close`], not waited on); the Dock icon's total
-    /// again, because the closed pane's queue is gone.
-    pub(crate) fn close_pane(&self, id: u64) {
-        let container = &self.ivars().container;
-        let Some(pane) = container.pane(id) else {
-            return;
-        };
-        let was_focused = self.focused_pane().id() == id;
-        match container.remove_leaf(id) {
-            Removal::Missing => {}
-            Removal::Last => self.close(),
-            Removal::Removed { focus } => {
-                self.set_zoom(None);
-                if was_focused && let Some(next) = container.pane(focus) {
-                    self.focus_pane(&next);
-                }
-                drop(pane.begin_close());
-                drop(container.detach(id));
-                self.refresh_title();
-                self.refresh_dim();
-                if let Some(app) = app::delegate(self.mtm()) {
-                    app.refresh_dock_tile();
-                    app.layout_changed();
-                }
-            }
-        }
-    }
-
     /// `bateri://tab/<id>`'s only effect:
     /// reopens it if miniaturized, makes it the selected tab and key, brings
-    /// the application to the front and gives the keyboard to the id's pane.
-    /// Sends no byte to the shell.
+    /// the application to the front and gives the keyboard to the id's pane
+    /// (in `tab`). Sends no byte to the shell.
     ///
     /// `makeKeyAndOrderFront` makes the window in a tab group the selected tab
     /// (the precedent of `selectTab:`); on a miniaturized window it would only
     /// change the order and leave it in the Dock, so `deminiaturize` comes first.
-    pub(crate) fn bring_to_front(&self, pane: &TerminalPane) {
+    pub(crate) fn bring_to_front(&self, tab: &TerminalTab, pane: &TerminalPane) {
         let window = &self.ivars().window;
         if window.isMiniaturized() {
             window.deminiaturize(None);
         }
         window.makeKeyAndOrderFront(None);
-        self.focus_pane(pane);
+        tab.focus_pane(pane);
         NSApplication::sharedApplication(self.mtm()).activate();
     }
 
@@ -1625,10 +1184,10 @@ impl TerminalWindow {
     /// without asking, the gesture can be repeated.
     pub(crate) fn close(&self) {
         let alert = self.ivars().alert.take();
-        if let Some(alert) = alert {
-            self.ivars()
-                .window
-                .endSheet_returnCode(&alert.window(), NSModalResponseCancel);
+        if let (Some(alert), Some(seat)) =
+            (alert, sheets::seat(Asker::Window(&self.ivars().window)))
+        {
+            seat.end(&alert.window(), NSModalResponseCancel);
         }
         self.ivars().window.close();
     }
@@ -1726,7 +1285,7 @@ impl TerminalWindow {
         let Some(group) = self.group_unless_asking(&app) else {
             return;
         };
-        if self.panes().len() > 1 {
+        if self.selected_tab().panes().len() > 1 {
             self.close_pane_asking(&app);
             return;
         }
@@ -1740,19 +1299,23 @@ impl TerminalWindow {
     /// ⌘W in a multi-pane tab: only the focused pane, asking only about the
     /// running job if there is one.
     fn close_pane_asking(&self, app: &AppDelegate) {
-        let pane = self.focused_pane();
+        let tab = self.selected_tab();
+        let pane = tab.focused_pane();
         let confirm = app.settings().confirm_close;
         let Some(foregrounds) = foregrounds_to_ask(
             self.ivars().run.is_some(),
             confirm,
             std::slice::from_ref(&pane),
         ) else {
-            self.close_pane(pane.id());
+            tab.close_pane(pane.id());
             return;
         };
         self.ask(
             &prompt(CloseScope::Pane, Unit::Pane, &foregrounds),
-            CloseTarget::Pane(pane.id()),
+            CloseTarget::Pane {
+                tab: tab.id(),
+                pane: pane.id(),
+            },
         );
     }
 
@@ -1827,7 +1390,13 @@ impl TerminalWindow {
     /// The closing is **deferred by one main-queue turn** (`windowWillClose:`'s
     /// pattern): the answer comes inside AppKit's sheet teardown and closing
     /// the window there would pull the rug from under the teardown.
+    ///
+    /// The question is the **window's** (its seat in [`crate::sheets`]): it
+    /// asks about the window, its tabs or one of its panes.
     fn ask(&self, prompt: &Prompt, targets: CloseTarget) {
+        let Some(seat) = sheets::seat(Asker::Window(&self.ivars().window)) else {
+            return;
+        };
         let alert = alert(self.mtm(), prompt);
         let host = self.id();
         let answered = RcBlock::new(move |response: NSModalResponse| {
@@ -1852,18 +1421,17 @@ impl TerminalWindow {
                             window.close();
                         }
                     }
-                    // The pane's tab is the window carrying the question; if
-                    // the pane closed in the meantime (its shell exited) a no-op.
-                    CloseTarget::Pane(pane) => {
-                        if let Some(window) = app.window(host) {
-                            window.close_pane(*pane);
+                    // If the pane closed in the meantime (its shell exited) a no-op.
+                    CloseTarget::Pane { tab, pane } => {
+                        if let Some(tab) = app.tab(*tab) {
+                            tab.close_pane(*pane);
                         }
                     }
                 }
             });
         });
         self.ivars().alert.replace(Some(alert.clone()));
-        alert.beginSheetModalForWindow_completionHandler(&self.ivars().window, Some(&answered));
+        seat.begin(&alert, &answered);
     }
 
     /// Adds the window to `from`'s tab group, to the **right** of the selected
@@ -1922,9 +1490,10 @@ impl TerminalWindow {
         }
     }
 
-    /// Reads the title from the **focused** pane's session and writes it to
-    /// the window — the pane's `PaneHost::title_changed` event ([`WindowHost`])
-    /// and the focus change ([`TerminalWindow::pane_focused`]).
+    /// Reads the selected tab's title ([`TerminalTab::title`]: the
+    /// **focused** pane's session) and writes it to the window — the pane's
+    /// `PaneHost::title_changed` event ([`tab::TabHost`]) and the focus
+    /// change ([`TerminalTab::pane_focused`]).
     /// The frame path computes no title; writing is only on **change**. If there is no session yet the title stays the constructor's
     /// `bateri`.
     ///
@@ -1938,41 +1507,11 @@ impl TerminalWindow {
         self.refresh_tab_mark();
     }
 
-    /// Writes the window's (and tab's) title from the session; while an upload
-    /// flows `↑ N% · ` in front (`upload::titled_as`; `↓` while
-    /// only downloads flow; the arrow and percentage from the
-    /// pane's queue).
+    /// Writes the window's (and tab's) title from the selected tab.
     fn apply_title(&self) {
-        let pane = self.focused_pane();
-        if let Some(session) = pane.session() {
-            let prefix = pane.upload_title_prefix();
-            self.ivars()
-                .window
-                .setTitle(&NSString::from_str(&upload::titled_as(
-                    prefix,
-                    &session.title(),
-                )));
+        if let Some(title) = self.selected_tab().title() {
+            self.ivars().window.setTitle(&NSString::from_str(&title));
         }
-    }
-
-    /// The focused pane's remote host and resolved mark; `None` locally
-    /// (`Session::remote_mark`).
-    pub(crate) fn remote_mark(&self) -> Option<(String, HostMark)> {
-        self.focused_pane().session()?.remote_mark()
-    }
-
-    /// The host Shell ▸ Mark … as ▸ marks in the focused pane: the remote
-    /// host, else the server or Kubernetes context a guide bar names
-    /// (`Session::program_mark`); with its resolved mark and how the
-    /// patterns meet it. Only the marks read this — "Forget Password" and
-    /// "Shell Integration on" are ssh's and stay on [`Self::remote_mark`].
-    pub(crate) fn mark_target(&self) -> Option<(String, HostMark, MarkSubject)> {
-        let pane = self.focused_pane();
-        let session = pane.session()?;
-        session
-            .remote_mark()
-            .map(|(host, mark)| (host, mark, MarkSubject::Host))
-            .or_else(|| session.program_mark())
     }
 
     /// The tab's dot: on a marked remote host a small filled
@@ -1992,11 +1531,7 @@ impl TerminalWindow {
     /// `objc2-core-graphics` edge. The dot exists only while the tab bar is
     /// visible; in a single-tab window the indicator is the dock's top line.
     fn refresh_tab_mark(&self) {
-        let pane = self.focused_pane();
-        let color = pane.session().and_then(|session| {
-            let (_, mark) = session.remote_mark()?;
-            (mark != HostMark::None).then(|| session.theme().mark_rgb(mark))
-        });
+        let color = self.selected_tab().mark_rgb();
         if self.ivars().tab_mark.replace(color) == color {
             return;
         }
@@ -2035,59 +1570,51 @@ impl TerminalWindow {
         self.ivars().window.setSubtitle(subtitle);
     }
 
-    /// Opens the first pane's session ([`TerminalPane::start`], from the
+    /// Opens the first pane's session ([`TerminalTab::start`], from the
     /// birth package) and reads the title from the session once: a title
     /// notification that arrived before the session entered the slot may have
     /// found an empty slot and dropped; this read closes that (writes the same
     /// `bateri` if unchanged). The error returns to the caller: in the first
     /// window the process exits, in ⌘T/⌘N only that window closes.
     pub(crate) fn start(&self, mtm: MainThreadMarker) -> std::io::Result<()> {
-        self.focused_pane().start(mtm)?;
+        self.selected_tab().start(mtm)?;
         self.refresh_title();
         Ok(())
     }
 
-    /// `[remote] hosts` changed — the pattern list goes to every pane's
-    /// session ([`TerminalPane::set_host_marks`]), the tab's dot from the new resolution.
+    /// `[remote] hosts` changed — the pattern list goes to every tab's panes
+    /// ([`TerminalTab::set_host_marks`]), the tab's dot from the new resolution.
     pub(crate) fn set_host_marks(&self, settings: &Settings) {
-        for pane in self.panes() {
-            pane.set_host_marks(settings);
+        for tab in self.tabs() {
+            tab.set_host_marks(settings);
         }
         self.refresh_tab_mark();
     }
 
-    /// Gives the theme to the panes ([`TerminalPane::set_theme`]: session and
-    /// search panel), the separator ([`SplitView::set_theme`]) and paints the
-    /// chrome with it ([`TerminalWindow::apply_chrome`]).
+    /// Gives the theme to the tabs ([`TerminalTab::set_theme`]: the panes'
+    /// sessions and search panels, the separator) and paints the chrome with
+    /// it ([`TerminalWindow::apply_chrome`]).
     ///
     /// Both in a single call, because there are two paths that change the
     /// theme (`AppDelegate::reload_settings`, `AppDelegate::apply_appearance`)
     /// and if one forgot the chrome the grid would be in the new theme and the
     /// title bar in the old — the symptom is exactly the seam the user would see.
     pub(crate) fn set_theme(&self, theme: Theme) {
-        for pane in self.panes() {
-            pane.set_theme(theme);
+        for tab in self.tabs() {
+            tab.set_theme(theme);
         }
-        self.ivars().container.set_theme(&theme);
         self.apply_chrome(&theme);
         // The tab's dot is from the mark's role; the role is another colour in the new theme.
         self.refresh_tab_mark();
     }
 
     /// Gives what the content does at the panes' top edge (`[appearance]
-    /// content_edge`) to the panes ([`TerminalPane::set_content_edge`]: the
-    /// rows and the fade) and to the container ([`SplitView::set_content_edge`]:
-    /// `line`'s line) — one call for both, for [`Self::set_theme`]'s reason:
-    /// two callers (the window's birth, the settings' save) and a half applied
-    /// mode would put a line over a fading pane.
-    ///
-    /// A pane born later in this window (a split) takes the mode from its
-    /// birth settings, the same source as this call's.
+    /// content_edge`) to every tab ([`TerminalTab::set_content_edge`]: its
+    /// panes and its container's line, in one call).
     pub(crate) fn set_content_edge(&self, edge: ContentEdge) {
-        for pane in self.panes() {
-            pane.set_content_edge(edge);
+        for tab in self.tabs() {
+            tab.set_content_edge(edge);
         }
-        self.ivars().container.set_content_edge(edge);
     }
 
     /// Paints the window chrome with the theme: the
@@ -2143,11 +1670,15 @@ impl TerminalWindow {
     /// (`windowWillClose:`, the handles drop) and the application's closing
     /// (`AppDelegate::shutdown`, all handles waited on until a single
     /// deadline). The order is the pane's ([`TerminalPane::begin_close`]: the
-    /// upload queue, rhythm, `Waker`, `SIGHUP`) and is for **every** pane; the
-    /// return is one result per pane in tree order. Idempotent; the place of a
-    /// pane whose session never came to be is `None`.
+    /// upload queue, rhythm, `Waker`, `SIGHUP`) and is for **every** pane of
+    /// every tab ([`TerminalTab::begin_close`]); the return is one result per
+    /// pane, tab by tab in tree order. Idempotent; the place of a pane whose
+    /// session never came to be is `None`.
     pub(crate) fn begin_close(&self) -> Vec<Option<Closing>> {
-        self.panes().iter().map(|pane| pane.begin_close()).collect()
+        self.tabs()
+            .iter()
+            .flat_map(|tab| tab.begin_close())
+            .collect()
     }
 }
 

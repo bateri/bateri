@@ -11,8 +11,9 @@
 //!   ([`Prompt::Password`]; a passphrase or a code is never kept) and
 //!   **ticked by default** (the user's decision, 2026-10-02). It is written
 //!   after the master is up, never before: a wrong password is not saved.
-//! - **Arbitration**: never on top of another sheet (the window's attached
-//!   sheet — another pane's too, the close question); a job that does not
+//! - **Arbitration**: never on top of another sheet (one open where the
+//!   pane's questions attach, [`crate::sheets`] — another pane's too, the
+//!   close question); a job that does not
 //!   already hold the pane's sheet gate (`Transfers::set_asking`) takes it for
 //!   the sheet's lifetime. Refused → beep and "nobody answered".
 //! - **Nobody answered** is the dropped sender: the sheet's Cancel, a refused
@@ -46,6 +47,7 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
 use crate::pane::TerminalPane;
 use crate::preview::beep;
 use crate::remote_helper::Dial;
+use crate::sheets::{self, Asker};
 use crate::ssh_route::{self, Answerer, Ask, Denied, Prompt, Question, Route, Typed};
 use crate::uploader::on_pane;
 
@@ -148,14 +150,14 @@ impl TerminalPane {
         if self.is_closed() || self.password().borrow().is_some() {
             return;
         }
-        let Some(window) = self.window() else {
+        let Some(seat) = sheets::seat(Asker::Pane(self)) else {
             return;
         };
         let gate_taken = {
             let uploads = self.uploads().borrow();
             uploads.asking() || self.upload_alert().borrow().is_some()
         } || self.upload_stop().borrow().is_some();
-        if window.attachedSheet().is_some() || (!holds && gate_taken) {
+        if seat.is_taken() || (!holds && gate_taken) {
             beep();
             return;
         }
@@ -213,7 +215,7 @@ impl TerminalPane {
             // A postponed update may have waited for this sheet.
             pane.host().uploads_changed(pane.id());
         });
-        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
+        seat.begin(&alert, &answered);
     }
 
     /// The pane closes (or the application quits): the waiting job is answered
@@ -231,8 +233,8 @@ impl TerminalPane {
         if releases {
             self.uploads().borrow_mut().set_asking(false);
         }
-        if let Some(window) = self.window() {
-            window.endSheet_returnCode(&alert.window(), NSModalResponseCancel);
+        if let Some(seat) = sheets::seat(Asker::Pane(self)) {
+            seat.end(&alert.window(), NSModalResponseCancel);
         }
     }
 

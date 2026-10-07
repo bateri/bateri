@@ -7,14 +7,16 @@
 //! pane, the session and the display link together and the rest is `bt-gpu`'s
 //! rhythm; the vsync ticks come from this crate's `Pacer` (`pacer`:
 //! `NSView.displayLink` used as a timer, `CACurrentMediaTime` as the time base).
-//! App-wide state (`app`), per-window state (`window`: chrome, tabs, the close
-//! question, tab actions) and per-session state (`pane`: an `NSView` subclass;
-//! the session's core, the search bar, the upload queue and the pane-level menu
-//! selectors) live in separate objects. The boundary between a pane and its
-//! owner has three parts: inputs arrive in one package at birth
+//! App-wide state (`app`), per-window state (`window`: chrome, the close
+//! question, tab actions), per-tab state (`tab`: the splits container, the
+//! focused pane, the title's read) and per-session state (`pane`: an `NSView`
+//! subclass; the session's core, the search bar, the upload queue and the
+//! pane-level menu selectors) live in separate objects. The boundary between a
+//! pane and its owner has three parts: inputs arrive in one package at birth
 //! (`pane::PaneLaunch`), events go through a trait (`pane::PaneHost`; today's
-//! owner is `window::WindowHost`), and every menu job is a named method on the
-//! pane — the selector is a wrapper calling it. The pane module does not reach
+//! owner is `tab::TabHost`), and every menu job is a named method on the
+//! pane — the selector is a wrapper calling it. Every sheet begins, ends and
+//! is asked about through one gate (`sheets`), which decides where it sits. The pane module does not reach
 //! into `AppDelegate`; main-queue callbacks find the pane by id through the
 //! path its owner hands over (`pane::PaneLookup`).
 //!
@@ -50,9 +52,11 @@ mod preview;
 mod promise;
 mod search_bar;
 mod settings_window;
+mod sheets;
 mod split_view;
 mod stats;
 mod stats_popover;
+mod tab;
 mod updater;
 mod uploader;
 mod view;

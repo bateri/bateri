@@ -79,6 +79,7 @@ use crate::clipboard;
 use crate::links::{self, Content, LinkAction, Resolved};
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{self, Answer, Query, Request};
+use crate::sheets::{self, Asker};
 use crate::uploader::{ESCAPE, add_key_monitor, remove_monitor};
 use crate::view::{BateriView, OutOfGrid};
 
@@ -1209,10 +1210,7 @@ impl BateriView {
             pane.download_remote(path, None);
             return;
         }
-        let Some(window) = self
-            .window()
-            .filter(|window| window.attachedSheet().is_none())
-        else {
+        let Some(seat) = sheets::seat(Asker::Pane(&pane)).filter(|seat| !seat.is_taken()) else {
             return;
         };
         let panel = NSOpenPanel::openPanel(self.mtm());
@@ -1239,7 +1237,7 @@ impl BateriView {
                 pane.download_remote(path.clone(), Some(folder));
             }
         });
-        panel.beginSheetModalForWindow_completionHandler(&window, &answered);
+        seat.begin_panel(&panel, &answered);
     }
 
     /// The sheet for an OSC 8 link with an uncommon scheme: the whole target,
@@ -1249,10 +1247,13 @@ impl BateriView {
     /// Esc by hand, for the reason `uploader`'s stop question gives: the first
     /// button carries Return and a button has one key equivalent.
     fn confirm_open(&self, target: String) {
-        let (Some(window), Some(pane)) = (self.window(), self.pane()) else {
+        let Some(pane) = self.pane() else {
             return;
         };
-        if window.attachedSheet().is_some() {
+        let Some(seat) = sheets::seat(Asker::Pane(&pane)) else {
+            return;
+        };
+        if seat.is_taken() {
             return;
         }
         let mtm = self.mtm();
@@ -1275,8 +1276,11 @@ impl BateriView {
             let on_sheet = event
                 .window(mtm)
                 .is_some_and(|window| Retained::as_ptr(&window) == Retained::as_ptr(&sheet_window));
-            if on_sheet && let Some(parent) = lookup(mtm, id).and_then(|pane| pane.window()) {
-                parent.endSheet_returnCode(&sheet_window, objc2_app_kit::NSAlertFirstButtonReturn);
+            if on_sheet
+                && let Some(seat) =
+                    lookup(mtm, id).and_then(|pane| sheets::seat(Asker::Pane(&pane)))
+            {
+                seat.end(&sheet_window, objc2_app_kit::NSAlertFirstButtonReturn);
             }
             on_sheet
         });
@@ -1288,7 +1292,7 @@ impl BateriView {
                 open_url(&target);
             }
         });
-        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
+        seat.begin(&alert, &answered);
     }
 }
 

@@ -60,6 +60,13 @@ fmt:
 #   bt-shell-common`. Its only macOS-specific dependency is `dispatch2`, under
 #   `cfg(macos)`; in the source `objc2`/`dispatch2`/`block2` appear only in
 #   `watch`'s macOS body (`watch/dispatch.rs`).
+# - Sheets: in bt-shell-macos every sheet is begun, ended and asked about
+#   through one gate (`sheets.rs`), which decides where a question sits; a
+#   `beginSheet…`/`endSheet…`/`attachedSheet` call anywhere else would open a
+#   background tab's question over the front one once a window holds several
+#   tabs, and nothing else would notice. The settings window's own panel
+#   (`settings_window.rs`, a window of its own) is exempt; comment lines are
+#   skipped.
 # - It does NOT fail on a dependency change, it warns: a deliberate dependency
 #   decision also changes Cargo.lock; review looks for the decision's record.
 audit:
@@ -77,6 +84,7 @@ audit:
 		awk -v file="$$f" '/^[[:space:]]*#\[cfg\(test\)\]/{exit} /\.unwrap\(\)|\.expect\(|panic!|unreachable!/ && !/\/\/ audit: / && !/^[[:space:]]*\/\//{print file":"NR": "$$0; hit=1} END{exit hit}' "$$f" \
 			|| { echo "audit: unjustified panic path in bt-core ($$f)"; fail=1; }; \
 	done; \
+	if grep -rnE "beginSheet|endSheet|attachedSheet" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/sheets.rs:" | grep -v "^crates/bt-shell-macos/src/settings_window.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: a sheet begun, ended or asked about outside the sheet gate (bt-shell-macos sheets.rs)"; fail=1; fi; \
 	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshenv|\.zprofile|\.zshrc|\.zlogin|\.zlogout|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "audit: shell integration writes to the user's rc file"; fail=1; fi; \
 	git diff --quiet HEAD -- Cargo.lock $$(git ls-files '*Cargo.toml') || echo "audit: warning — Cargo.toml/Cargo.lock differs from HEAD; is the dependency decision recorded?"; \
 	test $$fail -eq 0 && echo "audit: clean"

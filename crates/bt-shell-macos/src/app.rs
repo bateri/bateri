@@ -52,10 +52,9 @@ use crate::restore::{self, Frame, Saved, SavedPane, SavedWindow};
 use crate::settings_window::SettingsWindow;
 use crate::split::Axis;
 use crate::ssh_route::{self, Masters};
+use crate::tab::{Histories, TabHost, TerminalTab};
 use crate::watch::{Notify, Watch};
-use crate::window::{
-    self, Adopted, CloseScope, Histories, Launch, Note, TerminalWindow, WindowHost, fallen_back,
-};
+use crate::window::{self, Adopted, CloseScope, Launch, Note, TerminalWindow, fallen_back};
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
 use crate::{child, focus, jobs, settings};
@@ -1260,10 +1259,11 @@ pub(crate) struct Ivars {
     /// it ([`AppDelegate::windows`]): a call going to a window can come back
     /// and reach here (`sync_geometry` → [`AppDelegate::post_notices`]).
     windows: RefCell<Vec<Retained<TerminalWindow>>>,
-    /// The window-id counter ([`TerminalWindow::id`]);
-    /// ids are not reused, so
-    /// a stale message going to a closed window cannot find another window.
-    next_window_id: Cell<u64>,
+    /// The one id counter: windows, tabs and panes draw from it
+    /// ([`TerminalWindow::id`], [`TerminalTab::id`], [`TerminalPane::id`] —
+    /// one namespace); ids are not reused, so a stale message going to a
+    /// closed window, tab or pane cannot find another.
+    next_id: Cell<u64>,
     /// Was the last-seen system appearance dark — the gate of
     /// [`AppDelegate::apply_appearance`]. `None`: no change has arrived yet (the first news always passes).
     ///
@@ -1525,7 +1525,7 @@ define_class!(
                     continue;
                 };
                 match self.pane_by_tab(&id) {
-                    Some((window, pane)) => window.bring_to_front(&pane),
+                    Some((window, tab, pane)) => window.bring_to_front(&tab, &pane),
                     None => NSApplication::sharedApplication(self.mtm()).activate(),
                 }
             }
@@ -2480,7 +2480,7 @@ impl AppDelegate {
             theme_watch: RefCell::new(None),
             stats,
             windows: RefCell::new(Vec::new()),
-            next_window_id: Cell::new(0),
+            next_id: Cell::new(0),
             appearance_dark: Cell::new(None),
             scrollbar: Cell::new(None),
             settings_window: RefCell::new(None),
@@ -2507,10 +2507,10 @@ impl AppDelegate {
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Identity of the new window; the counter only goes up.
-    fn next_window_id(&self) -> u64 {
-        let id = self.ivars().next_window_id.get();
-        self.ivars().next_window_id.set(id + 1);
+    /// Identity of a new window, tab or pane; the counter only goes up.
+    fn next_id(&self) -> u64 {
+        let id = self.ivars().next_id.get();
+        self.ivars().next_id.set(id + 1);
         id
     }
 
@@ -2524,8 +2524,9 @@ impl AppDelegate {
         self.ivars().windows.borrow().clone()
     }
 
-    /// The window with identity `id`; `None` if it has left the list — the pane's owner
-    /// handle (`window::WindowHost`), the close question and the search paths.
+    /// The window with identity `id`; `None` if it has left the list — a
+    /// tab's way up (`TerminalTab`'s title and closing), the close question
+    /// and the search paths.
     pub(crate) fn window(&self, id: u64) -> Option<Retained<TerminalWindow>> {
         self.ivars()
             .windows
@@ -2535,26 +2536,38 @@ impl AppDelegate {
             .cloned()
     }
 
+    /// Every window's tabs, window by window — a copy, like the window list.
+    pub(crate) fn tabs(&self) -> Vec<Retained<TerminalTab>> {
+        self.windows()
+            .iter()
+            .flat_map(|window| window.tabs())
+            .collect()
+    }
+
+    /// The tab with identity `id`; `None` if its window has left the list —
+    /// the panes' owner handle (`tab::TabHost`), the close question's pane
+    /// arm and the split path.
+    pub(crate) fn tab(&self, id: u64) -> Option<Retained<TerminalTab>> {
+        self.tabs().into_iter().find(|tab| tab.id() == id)
+    }
+
     /// The pane with identity `id`; `None` if it is closed — the path of the jobs
     /// that return from the reader thread to the main queue (`ShellWake`, the
     /// alternate-screen notifier, uploads) ([`pane_by_id`]). It asks the pane's
-    /// owner for window-level work (`window::WindowHost`).
+    /// owner for tab- and window-level work (`tab::TabHost`).
     ///
     /// Unlike [`AppDelegate::window`], it does **not** find a pane whose
     /// teardown has started ([`find_open`]): the window leaves the list a turn
     /// later and a stale notification arriving in between must not do work on a
-    /// closed session. The search covers all panes of all windows (splits).
+    /// closed session. The search covers all panes of all tabs (splits).
     pub(crate) fn pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
         find_open(self.all_panes(), |pane| (pane.id() == id, pane.is_closed()))
     }
 
-    /// All panes of all windows — the list for the walking paths (settings
+    /// All panes of all tabs — the list for the walking paths (settings
     /// distribution, Dock icon, lookup by identity); a copy, like the window list.
     fn all_panes(&self) -> Vec<Retained<TerminalPane>> {
-        self.windows()
-            .iter()
-            .flat_map(|window| window.panes())
-            .collect()
+        self.tabs().iter().flat_map(|tab| tab.panes()).collect()
     }
 
     /// The upload bar on the app's Dock icon — the total of all panes
@@ -2646,35 +2659,40 @@ impl AppDelegate {
         }
     }
 
-    /// The pane with tab identity `id` and its window; `None` if closed
-    /// (`bateri://tab/`, `application:openURLs:`): bringing to the front a pane
-    /// whose teardown has started but which has not yet left the list would put
-    /// a sessionless window on screen ([`find_open`]). The identity is per pane.
+    /// The pane with tab identity `id`, its tab and its window; `None` if
+    /// closed (`bateri://tab/`, `application:openURLs:`): bringing to the
+    /// front a pane whose teardown has started but which has not yet left the
+    /// list would put a sessionless window on screen ([`find_open`]). The
+    /// identity is per pane — a tab holds several (`TerminalTab`'s header).
     fn pane_by_tab(
         &self,
         id: &TabId,
-    ) -> Option<(Retained<TerminalWindow>, Retained<TerminalPane>)> {
+    ) -> Option<(
+        Retained<TerminalWindow>,
+        Retained<TerminalTab>,
+        Retained<TerminalPane>,
+    )> {
         self.windows().into_iter().find_map(|window| {
-            let pane = find_open(window.panes(), |pane| {
-                (pane.tab_id() == id, pane.is_closed())
-            })?;
-            Some((window, pane))
+            window.tabs().into_iter().find_map(|tab| {
+                let pane = find_open(tab.panes(), |pane| (pane.tab_id() == id, pane.is_closed()))?;
+                Some((window.clone(), tab, pane))
+            })
         })
     }
 
     /// The focus query's answer for pane `id`: `pane=none` if no
     /// open pane has it ([`Self::pane_by_tab`] — a closing pane is none);
     /// otherwise `focused` — bateri active, the pane's window key **and** the
-    /// window's focused pane this one (the search field included,
-    /// [`TerminalWindow::focused_pane`]) — and the whole seconds since its last
+    /// tab's focused pane this one (the search field included,
+    /// [`TerminalTab::focused_pane`]) — and the whole seconds since its last
     /// input. Main thread, at the moment of the question.
     fn focus_answer(&self, id: &TabId) -> focus::Answer {
-        let Some((window, pane)) = self.pane_by_tab(id) else {
+        let Some((_, tab, pane)) = self.pane_by_tab(id) else {
             return focus::Answer::None;
         };
         let focused = NSApplication::sharedApplication(self.mtm()).isActive()
             && pane.window().is_some_and(|window| window.isKeyWindow())
-            && window.focused_pane().id() == pane.id();
+            && tab.focused_pane().id() == pane.id();
         focus::Answer::Live {
             focused,
             idle_secs: focus::idle_secs(pane.input_stamp().get(), focus::Moment::now()),
@@ -2683,24 +2701,30 @@ impl AppDelegate {
 
     /// The active window: `NSApp.keyWindow` is looked up in the list. `None` if the
     /// settings window or a panel is key, and the new window is born at home. The
-    /// source of inheritance is its **focused pane** (`TerminalWindow::focused_pane`).
+    /// source of inheritance is its selected tab's **focused pane**
+    /// (`TerminalTab::focused_pane`).
     fn key_window(&self) -> Option<Retained<TerminalWindow>> {
         let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
         self.window_owning(&key)
     }
 
+    /// The active tab: the key window's selected tab.
+    fn key_tab(&self) -> Option<Retained<TerminalTab>> {
+        Some(self.key_window()?.selected_tab())
+    }
+
     /// The active tab's remote host and its resolved mark; `None` in a local tab or
     /// when no terminal window is key — the input of Shell ▸ Mark … as ▸.
     pub(crate) fn key_remote_mark(&self) -> Option<(String, HostMark)> {
-        self.key_window()?.remote_mark()
+        self.key_tab()?.remote_mark()
     }
 
     /// The active tab's markable host — its remote host, else the server
     /// its database client is connected to — and its resolved mark; `None`
     /// when there is neither or no terminal window is key. The input of
-    /// Shell ▸ Mark … as ▸ (`TerminalWindow::mark_target`).
+    /// Shell ▸ Mark … as ▸ (`TerminalTab::mark_target`).
     pub(crate) fn key_mark_target(&self) -> Option<(String, HostMark, MarkSubject)> {
-        self.key_window()?.mark_target()
+        self.key_tab()?.mark_target()
     }
 
     /// [`Self::toggle_host_integration`]'s `plain` forgetting: the key tab's
@@ -2713,9 +2737,8 @@ impl AppDelegate {
         let off = |delegate: &Self, host: String| {
             delegate.save_edit(&SettingsEdit::RemoteHostIntegration { host, on: false });
         };
-        let target = self.key_window().and_then(|window| {
-            window
-                .focused_pane()
+        let target = self.key_tab().and_then(|tab| {
+            tab.focused_pane()
                 .session()
                 .and_then(|session| session.remote_target())
         });
@@ -3260,11 +3283,12 @@ impl AppDelegate {
         opening: Opening,
     ) -> Result<Retained<TerminalWindow>, String> {
         let mtm = self.mtm();
-        let id = self.next_window_id();
-        // Inheritance comes from the active window's **focused pane**.
-        let source = from.map(TerminalWindow::focused_pane);
-        let (launch, theme) = self.pane_launch(id, source.as_deref(), opening);
-        let window = TerminalWindow::new(mtm, id, launch).map_err(|e| e.to_string())?;
+        let id = self.next_id();
+        let tab = self.next_id();
+        // Inheritance comes from the active window's selected tab's **focused pane**.
+        let source = from.map(|from| from.selected_tab().focused_pane());
+        let (launch, theme) = self.pane_launch(tab, source.as_deref(), opening);
+        let window = TerminalWindow::new(mtm, id, tab, launch).map_err(|e| e.to_string())?;
         window.set_subtitle(&NSString::from_str(
             &self.ivars().notices.borrow().subtitle(),
         ));
@@ -3296,7 +3320,7 @@ impl AppDelegate {
     /// The new pane's birth package and its theme — the single source
     /// for both the window-spawning path and splitting. All inputs are here, the pane
     /// does not reach into `AppDelegate`. The pane identity comes from the same counter as
-    /// windows' (one namespace); its owner is `window`'s [`WindowHost`].
+    /// windows' and tabs' (one namespace); its owner is tab `tab`'s [`TabHost`].
     ///
     /// `from` is the source of inheritance (the focused pane): the OSC 7 directory (home
     /// if none), the point-size delta, the theme and the remote line ([`initial_line`]);
@@ -3304,7 +3328,7 @@ impl AppDelegate {
     /// and gives both answers at once (environment + dock share).
     fn pane_launch(
         &self,
-        window: u64,
+        tab: u64,
         from: Option<&TerminalPane>,
         opening: Opening,
     ) -> (PaneLaunch, Theme) {
@@ -3315,9 +3339,9 @@ impl AppDelegate {
             .or_else(child::working_directory);
         let initial = initial_line(opening, session.and_then(|session| session.remote_line()));
         let launch = PaneLaunch {
-            id: self.next_window_id(),
+            id: self.next_id(),
             run: self.ivars().run,
-            host: Rc::new(WindowHost::new(window)),
+            host: Rc::new(TabHost::new(tab)),
             lookup: pane_by_id,
             stats: self.stats(),
             settings: self.settings().clone(),
@@ -3340,13 +3364,14 @@ impl AppDelegate {
         (launch, theme)
     }
 
-    /// ⌘D / ⇧⌘D (`TerminalWindow`'s `splitRight:`/`splitDown:`): a new pane next
-    /// to `from`, with `from`'s inheritance ([`Opening::Split`]). The error goes to
+    /// ⌘D / ⇧⌘D (`TerminalWindow`'s `splitRight:`/`splitDown:`, through
+    /// [`TerminalTab::split`]): a new pane next to `from` in `tab`, with
+    /// `from`'s inheritance ([`Opening::Split`]). The error goes to
     /// stderr; the tab stays open — the other panes' shells must not die because a new one
     /// could not be born.
-    pub(crate) fn open_split(&self, window: &TerminalWindow, from: &TerminalPane, axis: Axis) {
-        let (launch, _) = self.pane_launch(window.id(), Some(from), Opening::Split);
-        if let Err(e) = window.add_pane(self.mtm(), launch, from.id(), axis) {
+    pub(crate) fn open_split(&self, tab: &TerminalTab, from: &TerminalPane, axis: Axis) {
+        let (launch, _) = self.pane_launch(tab.id(), Some(from), Opening::Split);
+        if let Err(e) = tab.add_pane(self.mtm(), launch, from.id(), axis) {
             eprintln!("bateri: {e}");
         }
     }
@@ -3615,14 +3640,15 @@ impl AppDelegate {
         );
         let mut built: Vec<(usize, Retained<TerminalWindow>)> = Vec::new();
         for (index, tab) in window.tabs.iter().enumerate() {
-            let id = self.next_window_id();
+            let id = self.next_id();
+            let tab_id = self.next_id();
             let mut theme = None;
             let launches: Vec<Option<PaneLaunch>> = tab
                 .panes
                 .iter()
                 .map(|pane| {
                     let (launch, pane_theme) =
-                        self.restored_pane_launch(id, pane, arriving.as_deref_mut())?;
+                        self.restored_pane_launch(tab_id, pane, arriving.as_deref_mut())?;
                     theme.get_or_insert(pane_theme);
                     Some(launch)
                 })
@@ -3634,28 +3660,20 @@ impl AppDelegate {
             let launches: Vec<PaneLaunch> = launches.into_iter().flatten().collect();
             let theme = theme.unwrap_or_else(|| self.resolve_theme());
             let first = built.first().map(|(_, first)| first.clone());
-            let result = TerminalWindow::restore(
-                mtm,
-                id,
-                &tab.shape,
-                launches,
-                tab.focused,
-                tab.zoomed,
-                |this| {
-                    // `open_window`'s order: subtitle, list, chrome, then shown.
-                    this.set_subtitle(&NSString::from_str(
-                        &self.ivars().notices.borrow().subtitle(),
-                    ));
-                    self.ivars().windows.borrow_mut().push(this.clone());
-                    this.set_theme(theme);
-                    let edge = self.settings().content_edge;
-                    this.set_content_edge(edge);
-                    match &first {
-                        Some(first) => this.show_as_tab_of(first),
-                        None => this.show_at(frame),
-                    }
-                },
-            );
+            let result = TerminalWindow::restore(mtm, id, tab_id, &tab, launches, |this| {
+                // `open_window`'s order: subtitle, list, chrome, then shown.
+                this.set_subtitle(&NSString::from_str(
+                    &self.ivars().notices.borrow().subtitle(),
+                ));
+                self.ivars().windows.borrow_mut().push(this.clone());
+                this.set_theme(theme);
+                let edge = self.settings().content_edge;
+                this.set_content_edge(edge);
+                match &first {
+                    Some(first) => this.show_as_tab_of(first),
+                    None => this.show_at(frame),
+                }
+            });
             match result {
                 Ok(tab) => built.push((index, tab)),
                 Err(e) => eprintln!("bateri: could not restore a tab: {e}"),
@@ -3679,7 +3697,7 @@ impl AppDelegate {
     /// no pane without its program.
     fn restored_pane_launch(
         &self,
-        window: u64,
+        tab: u64,
         pane: &SavedPane,
         arriving: Option<&mut Arriving<'_>>,
     ) -> Option<(PaneLaunch, Theme)> {
@@ -3751,7 +3769,7 @@ impl AppDelegate {
                 }
             }
         };
-        let (mut launch, theme) = self.pane_launch(window, None, Opening::Restore);
+        let (mut launch, theme) = self.pane_launch(tab, None, Opening::Restore);
         launch.launch = restored_launch(pane, replay);
         launch.launch.adopt = adopt;
         launch.zoom = Zoom::from_steps(pane.zoom_steps, &launch.settings.font);
@@ -3803,7 +3821,7 @@ impl AppDelegate {
     /// window, [`AppDelegate::front_terminal_window`]: ⌘Q's alert can leave
     /// no key window and the Settings window can be key and main). The frame
     /// is the group's (tabs share it). A tab with nothing live to save is left out, a window
-    /// without tabs too ([`TerminalWindow::saved_tab`]).
+    /// without tabs too ([`TerminalTab::saved_tab`]).
     fn saved_session(&self, with_history: bool) -> (Saved, Histories) {
         let app = NSApplication::sharedApplication(self.mtm());
         let key = app
@@ -3829,17 +3847,19 @@ impl AppDelegate {
             let mut tabs = Vec::new();
             let mut selected_index = 0;
             for member in &members {
-                let Some((tab, tab_histories)) = member.saved_tab(with_history) else {
-                    continue;
-                };
-                if selected
-                    .as_deref()
-                    .is_some_and(|selected| member.owns(selected))
-                {
-                    selected_index = tabs.len();
+                for live in member.tabs() {
+                    let Some((tab, tab_histories)) = live.saved_tab(with_history) else {
+                        continue;
+                    };
+                    if selected
+                        .as_deref()
+                        .is_some_and(|selected| member.owns(selected))
+                    {
+                        selected_index = tabs.len();
+                    }
+                    histories.extend(tab_histories);
+                    tabs.push(tab);
                 }
-                histories.extend(tab_histories);
-                tabs.push(tab);
             }
             if tabs.is_empty() {
                 continue;
@@ -3867,7 +3887,10 @@ impl AppDelegate {
     /// A timed run has a single window and a single pane and the report
     /// reads it; it is the first in the list.
     fn quiet_since(&self) -> Option<Duration> {
-        let pane = self.windows().first().map(|window| window.focused_pane());
+        let pane = self
+            .windows()
+            .first()
+            .map(|window| window.selected_tab().focused_pane());
         pane.and_then(|pane| pane.link().and_then(DisplayLink::quiet_since))
     }
 
@@ -3990,8 +4013,12 @@ impl AppDelegate {
                     if report.rescued.is_empty() {
                         return;
                     }
-                    let window = NSApplication::sharedApplication(mtm).keyWindow();
-                    crate::preview::report_rescued(mtm, window.as_deref(), &report.rescued, || {});
+                    // The application's own report: a window-wide seat, the key window's.
+                    let key = NSApplication::sharedApplication(mtm).keyWindow();
+                    let seat = key
+                        .as_deref()
+                        .and_then(|key| crate::sheets::seat(crate::sheets::Asker::Window(key)));
+                    crate::preview::report_rescued(mtm, seat, &report.rescued, || {});
                 });
             });
     }
@@ -4218,8 +4245,8 @@ impl AppDelegate {
             if changes.scrollbar {
                 self.apply_scrollbar();
             }
-            // The top edge's mode goes to every **window** — its panes and its
-            // container's line together (`TerminalWindow::set_content_edge`).
+            // The top edge's mode goes to every **window** — each tab's panes
+            // and its container's line together (`TerminalTab::set_content_edge`).
             // A save that also changes the font resizes the grid twice, the
             // scroll bar's case above.
             if changes.content_edge {
@@ -4871,7 +4898,9 @@ impl AppDelegate {
     fn report_and_exit(&self, run: Run, teardown: Option<Teardown>, quiet: Option<Duration>) -> ! {
         let windows = self.windows();
         // The smoke run's only window's only pane.
-        let pane = windows.first().map(|window| window.focused_pane());
+        let pane = windows
+            .first()
+            .map(|window| window.selected_tab().focused_pane());
         // The frames still in flight are counted **before** `frames=` is read:
         // completion is polled by the ticks, and the link is
         // stopped, so nothing else would count them.

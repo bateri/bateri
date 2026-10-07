@@ -35,7 +35,7 @@ use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{MainThreadMarker, MainThreadOnly, msg_send};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertThirdButtonReturn,
-    NSApplication, NSModalResponse, NSWindow, NSWorkspace,
+    NSApplication, NSModalResponse, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSError, NSString, NSURL, ns_string};
 
@@ -48,6 +48,7 @@ use crate::password_sheet::Job as SheetJob;
 use crate::preview_cache;
 use crate::remote_files::{self, CacheState, PreviewOpen, RemoteEntry};
 use crate::remote_helper::{Answer, Query, Request};
+use crate::sheets::{self, Asker, Seat};
 use crate::upload::{Job, Lane, format_bytes};
 use crate::uploader::{self, Confirmed, on_pane};
 
@@ -182,12 +183,12 @@ pub(crate) fn open_copy(path: &Path, open: PreviewOpen) {
 }
 
 /// Tells the user that edited previews were kept, not removed: a sheet
-/// on `window` when bateri is in front (a notification would not show), a
+/// on `seat` when bateri is in front (a notification would not show), a
 /// notification otherwise; `then` runs when the sheet is dismissed (at once
 /// without one). "Show in Finder" reveals the moved files.
 pub(crate) fn report_rescued(
     mtm: MainThreadMarker,
-    window: Option<&NSWindow>,
+    seat: Option<Seat>,
     rescued: &[PathBuf],
     then: impl FnOnce() + 'static,
 ) {
@@ -217,7 +218,7 @@ pub(crate) fn report_rescued(
         )
     };
     let active = NSApplication::sharedApplication(mtm).isActive();
-    let Some(window) = window.filter(|window| active && window.attachedSheet().is_none()) else {
+    let Some(seat) = seat.filter(|seat| active && !seat.is_taken()) else {
         uploader::deliver_notification(&title, &body);
         then();
         return;
@@ -244,7 +245,7 @@ pub(crate) fn report_rescued(
             then();
         }
     });
-    alert.beginSheetModalForWindow_completionHandler(window, Some(&answered));
+    seat.begin(&alert, &answered);
 }
 
 impl TerminalPane {
@@ -397,7 +398,8 @@ impl TerminalPane {
             Some(path) => {
                 // One main-queue turn later: the rescue sheet has detached by
                 // then and the size question can attach.
-                report_rescued(self.mtm(), self.window().as_deref(), &[path], move || {
+                let seat = sheets::seat(Asker::Pane(self));
+                report_rescued(self.mtm(), seat, &[path], move || {
                     DispatchQueue::main().exec_async(go);
                 });
             }
@@ -451,9 +453,8 @@ impl TerminalPane {
     /// (the right-click download's path). The text says the copy is temporary
     /// (and read-only) and removed at a later launch.
     fn ask_preview_limit(&self, fetch: Fetch) {
-        let Some(window) = self
-            .window()
-            .filter(|window| window.attachedSheet().is_none() && self.accepts_drop())
+        let Some(seat) =
+            sheets::seat(Asker::Pane(self)).filter(|seat| !seat.is_taken() && self.accepts_drop())
         else {
             beep();
             return;
@@ -499,7 +500,7 @@ impl TerminalPane {
             }
         });
         self.upload_alert().replace(Some(alert.clone()));
-        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
+        seat.begin(&alert, &answered);
     }
 
     /// "Can't preview from {host}" with the reason; a beep if another sheet is open.
@@ -510,9 +511,8 @@ impl TerminalPane {
     /// A remote job's error sheet — title, ssh's reason, OK — through the
     /// pane's sheet gate; a beep when another sheet is up.
     pub(crate) fn failure_sheet(&self, title: &str, text: &str) {
-        let Some(window) = self
-            .window()
-            .filter(|window| window.attachedSheet().is_none() && self.accepts_drop())
+        let Some(seat) =
+            sheets::seat(Asker::Pane(self)).filter(|seat| !seat.is_taken() && self.accepts_drop())
         else {
             beep();
             return;
@@ -532,7 +532,7 @@ impl TerminalPane {
             }
         });
         self.upload_alert().replace(Some(alert.clone()));
-        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
+        seat.begin(&alert, &answered);
     }
 
     /// A finished preview's copy opens by its ticket's policy (the popover's
