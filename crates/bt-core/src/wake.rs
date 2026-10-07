@@ -193,4 +193,19 @@ pub trait Wake: Send + Sync + 'static {
     /// are not wanted. The implementor posts **at most one** job to its
     /// queue.
     fn blocks_changed(&self);
+
+    /// The count of rows output pushed below a window scrolled up the
+    /// history changed ([`crate::Session::unseen_rows`]): it grew, or the
+    /// window went back to the bottom and it dropped to zero. The receiver
+    /// shows, relabels or hides its "Jump to latest".
+    ///
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::title_changed`]): once per change of the number, which the
+    /// frame takes at most once per drawn frame; the receiver reads the
+    /// count itself, so two changes chasing each other cannot act on a
+    /// stale value. It arrives on the **frame path's** thread, after the
+    /// `Term` lock and the count's leaf lock are released; the three
+    /// prohibitions above apply. The implementor posts **at most one** job
+    /// to its queue.
+    fn unseen_changed(&self);
 }

@@ -791,6 +791,9 @@ define_class!(
             if self.is_strip_event(event) {
                 let inside = self.scrollbar_region(event.locationInWindow()).is_some();
                 self.set_scrollbar_hover(inside);
+                // The marks may have moved while the pointer was away
+                // (`recheck_block_hover`): the tip and the hand rects catch up.
+                self.block_hover(event.locationInWindow(), inside);
             } else {
                 // SAFETY: `NSResponder`'s `mouseEntered:` takes an `NSEvent`,
                 // returns nothing.
@@ -1996,12 +1999,21 @@ impl BateriView {
     /// the bar widened and drew them, output moved them, the thumb moved over
     /// them. Outside the key window the strip's tracking area is quiet and so
     /// is this.
+    ///
+    /// **Away from the strip a moved mark matters to nobody**: no tip
+    /// stands, and the hand rects are synced again when the pointer comes
+    /// into the strip (`mouseEntered:`, [`Self::scrollbar_motion`]). Output
+    /// streaming under the always-up bar moves the marks every drawn frame;
+    /// without this the window's cursor rects were rebuilt every frame.
     pub(crate) fn recheck_block_hover(&self) {
         let Some(window) = self.window() else {
             return;
         };
         let at = window.mouseLocationOutsideOfEventStream();
         let inside = window.isKeyWindow() && self.scrollbar_region(at).is_some();
+        if !inside && !self.pane().is_some_and(|pane| pane.block_tip_shown()) {
+            return;
+        }
         self.block_hover(at, inside);
     }
 

@@ -414,6 +414,7 @@ impl bt_core::Wake for SilentWake {
     fn phase_edge(&self) {}
     fn mirror_changed(&self) {}
     fn blocks_changed(&self) {}
+    fn unseen_changed(&self) {}
 }
 
 /// Waits until `ready` says true; if time runs out, fails with `message`.

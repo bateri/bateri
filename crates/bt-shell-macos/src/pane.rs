@@ -40,6 +40,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 use bt_core::{
     BlockHandle, BlockInfo, FontOptions, ProgramBar, RemoteFiles, RemoteTarget, SearchCover,
@@ -56,12 +57,14 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSAutoresizingMaskOptions, NSBox, NSBoxType, NSButton, NSColor,
-    NSControlTextEditingDelegate, NSEventModifierFlags, NSFont, NSLineBreakMode, NSMenuItem,
-    NSPasteboard, NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextField,
+    NSControlTextEditingDelegate, NSCursor, NSEventModifierFlags, NSFont, NSFontAttributeName,
+    NSFontWeightRegular, NSForegroundColorAttributeName, NSLineBreakMode, NSMenuItem, NSPasteboard,
+    NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextField,
     NSTextFieldDelegate, NSTitlePosition, NSView, NSViewFrameDidChangeNotification,
 };
 use objc2_foundation::{
-    NSDate, NSDateFormatter, NSDateFormatterStyle, NSNotification, NSNotificationCenter,
+    NSAttributedString, NSAttributedStringKey, NSDate, NSDateFormatter, NSDateFormatterStyle,
+    NSDictionary, NSMutableAttributedString, NSNotification, NSNotificationCenter,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUUID, ns_string,
 };
 use objc2_quartz_core::CAMetalLayer;
@@ -411,6 +414,187 @@ fn srgb_color([r, g, b]: [u8; 3]) -> Retained<NSColor> {
     )
 }
 
+/// "Jump to latest"'s distance from the pane's right edge — and from the
+/// always-up track's left edge, when there is one — and from the top of the
+/// dock's reserve, points. Design constants (not measured): clear of the
+/// thin bar's strip, floating above the dock's hairline.
+const JUMP_RIGHT: f64 = 20.0;
+const JUMP_ABOVE: f64 = 12.0;
+/// The box's inset around its button, points — the block tip's.
+const JUMP_PAD_X: f64 = TIP_PAD_X;
+const JUMP_PAD_Y: f64 = TIP_PAD_Y;
+
+define_class!(
+    // SAFETY: NSButton is designed for subclassing; JumpButton implements no
+    // `Drop`, has no ivar and is born with NSButton's constructor (`new`).
+    #[unsafe(super(NSButton))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriJumpButton"]
+    pub(crate) struct JumpButton;
+
+    unsafe impl NSObjectProtocol for JumpButton {}
+
+    impl JumpButton {
+        /// The hand cursor over the whole button: AppKit's cursor rect, the
+        /// upload buttons' rule (`BateriView::hand_cursor_rects` — a cursor
+        /// set by hand turns back into the arrow at the next evaluation).
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            if !self.isHiddenOrHasHiddenAncestor() {
+                self.addCursorRect_cursor(self.bounds(), &NSCursor::pointingHandCursor());
+            }
+        }
+    }
+);
+
+/// "Jump to latest": a real button on the terminal's own surface (the block
+/// tip's paint) in the pane's bottom-right corner, above the dock — a down
+/// arrow and the verb, then the quieter count of the lines that came below
+/// a window scrolled up ([`Session::unseen_rows`]). Born hidden; shown,
+/// relabelled and hidden by [`TerminalPane::refresh_jump`]; a click is
+/// [`TerminalPane::jump_to_latest`]. AppKit's, outside the frame path: it
+/// asks for no frame.
+pub(crate) struct JumpLatest {
+    surface: Retained<NSBox>,
+    button: Retained<JumpButton>,
+    /// The count the title says; `None` before the first. While output
+    /// streams under a scrolled window the count moves every drawn frame,
+    /// and an unchanged one is not laid out again.
+    count: Cell<Option<u32>>,
+}
+
+impl JumpLatest {
+    /// The box and its button; the target is set once the pane is born
+    /// ([`JumpLatest::aim`]).
+    fn new(mtm: MainThreadMarker) -> Self {
+        let surface = NSBox::new(mtm);
+        surface.setBoxType(NSBoxType::Custom);
+        surface.setTitlePosition(NSTitlePosition::NoTitle);
+        surface.setBorderWidth(1.0);
+        surface.setCornerRadius(4.0);
+        surface.setHidden(true);
+        // The corner it sits in stays put while the pane resizes.
+        surface.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        );
+        // No margins: the button fills the box and carries the padding
+        // itself, so the whole box takes the click and the hand cursor.
+        surface.setContentViewMargins(NSSize::new(0.0, 0.0));
+        // SAFETY: `NSButton`'s `init`; the subclass has no ivar.
+        let button = JumpButton::alloc(mtm).set_ivars(());
+        let button: Retained<JumpButton> = unsafe { msg_send![super(button), init] };
+        button.setBordered(false);
+        // The keyboard stays with the terminal.
+        button.setRefusesFirstResponder(true);
+        // The button is the box's **content view** (the link label's
+        // reason): its frame is the content's, unshifted by the margins.
+        surface.setContentView(Some(&button));
+        Self {
+            surface,
+            button,
+            count: Cell::new(None),
+        }
+    }
+
+    /// Points the button at the pane's `jumpToLatest:`.
+    fn aim(&self, pane: &TerminalPane) {
+        let target: &AnyObject = pane.as_ref();
+        // SAFETY: the selector is the pane's `jumpToLatest:`, which takes a
+        // single `Option<&AnyObject>`; the pane holds the button (the target
+        // is weak).
+        unsafe {
+            self.button.setTarget(Some(target));
+            self.button.setAction(Some(sel!(jumpToLatest:)));
+        }
+    }
+
+    /// The terminal's own surface ([`paint_surface`]).
+    fn paint(&self, theme: &Theme) {
+        paint_surface(&self.surface, theme);
+    }
+
+    /// Shows the box saying `rows` where `place` puts a box of its size (the
+    /// pane's points), or hides it (`None` either way). The hand cursor's
+    /// rect is rebuilt only when the box appeared, went or moved.
+    fn set(&self, rows: Option<u32>, place: impl FnOnce(NSSize) -> Option<NSPoint>) {
+        let before = (!self.surface.isHidden()).then(|| self.surface.frame());
+        let origin = rows.and_then(|rows| place(self.fill(rows)));
+        match origin {
+            Some(origin) => {
+                self.surface.setFrameOrigin(origin);
+                self.surface.setHidden(false);
+            }
+            None => self.surface.setHidden(true),
+        }
+        let after = origin.map(|_| self.surface.frame());
+        if before != after
+            && let Some(window) = self.button.window()
+        {
+            window.invalidateCursorRectsForView(&self.button);
+        }
+    }
+
+    /// Writes the count into the title and sizes the box around it — only
+    /// when it changed; returns the box's size. The count's digits are
+    /// fixed-width, so the box keeps its width while the number climbs.
+    fn fill(&self, rows: u32) -> NSSize {
+        if self.count.replace(Some(rows)) == Some(rows) {
+            return self.surface.frame().size;
+        }
+        let size = NSFont::smallSystemFontSize();
+        let verb = NSFont::systemFontOfSize(size);
+        // SAFETY: a constant AppKit exposes, it lives for the whole process.
+        let digits =
+            NSFont::monospacedDigitSystemFontOfSize_weight(size, unsafe { NSFontWeightRegular });
+        let part = |text: &str, color: &NSColor, font: &NSFont| {
+            let values: [&AnyObject; 2] = [color.as_ref(), font.as_ref()];
+            // SAFETY: AppKit's two attribute keys (extern statics), each with
+            // the value type it documents — an `NSColor` and an `NSFont`.
+            unsafe {
+                let attributes = NSDictionary::<NSAttributedStringKey, AnyObject>::from_slices(
+                    &[NSForegroundColorAttributeName, NSFontAttributeName],
+                    &values,
+                );
+                NSAttributedString::new_with_attributes(&NSString::from_str(text), &attributes)
+            }
+        };
+        let title = NSMutableAttributedString::new();
+        title.appendAttributedString(&part("↓  Jump to latest", &NSColor::labelColor(), &verb));
+        title.appendAttributedString(&part(
+            &format!("   {}", jump_count(rows)),
+            &NSColor::secondaryLabelColor(),
+            &digits,
+        ));
+        self.button.setAttributedTitle(&title);
+        let fit = self.button.fittingSize();
+        let content = NSSize::new(fit.width + 2.0 * JUMP_PAD_X, fit.height + 2.0 * JUMP_PAD_Y);
+        self.surface
+            .setFrameFromContentFrame(NSRect::new(NSPoint::new(0.0, 0.0), content));
+        self.surface.frame().size
+    }
+}
+
+/// The quieter half of "Jump to latest": "1 new line", "12 new lines".
+fn jump_count(rows: u32) -> String {
+    if rows == 1 {
+        "1 new line".to_owned()
+    } else {
+        format!("{rows} new lines")
+    }
+}
+
+/// Where "Jump to latest" stands in the pane's (unflipped) points: its right
+/// edge [`JUMP_RIGHT`] in from the pane's right, and further in by the
+/// always-up track (`track`, points; zero in the other forms), its bottom
+/// [`JUMP_ABOVE`] above the dock's reserve (`dock`, points; zero without a
+/// dock) — never past the pane's left edge.
+fn jump_origin(pane: NSSize, size: NSSize, track: f64, dock: f64) -> NSPoint {
+    NSPoint::new(
+        (pane.width - JUMP_RIGHT - track - size.width).max(TIP_MARGIN),
+        dock + JUMP_ABOVE,
+    )
+}
+
 /// The tip's quieter half: "exit N · 3.4s · 14:04" for a finished block,
 /// "running · since 14:04" for a running one, each part only when known —
 /// a restored block says nothing. `clock` renders a start (Unix seconds) as
@@ -635,6 +819,9 @@ struct ShellWake {
     /// Whether the block index's news is waiting on the main queue —
     /// `search_pending`'s twin: at most one job.
     blocks_pending: Arc<AtomicBool>,
+    /// Whether "Jump to latest"'s news is waiting on the main queue —
+    /// `search_pending`'s twin: at most one job.
+    unseen_pending: Arc<AtomicBool>,
     /// Whether the bootstrap's `up` check is waiting on the main queue
     /// ([`TerminalPane::check_remote_up`]) — at most one job.
     up_pending: Arc<AtomicBool>,
@@ -1104,6 +1291,26 @@ impl Wake for ShellWake {
             }
         });
     }
+
+    fn unseen_changed(&self) {
+        // The frame path (main thread, after the `Term` lock): the count of
+        // lines below a scrolled window changed. The button follows on the
+        // next main-queue turn, not inside the frame; at most one job
+        // (`search_changed`'s pattern) — the job reads the latest count.
+        if self.unseen_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.unseen_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.swap(false, Ordering::AcqRel);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.refresh_jump();
+            }
+        });
+    }
 }
 
 /// `bt-gpu`'s alternate-screen notifier: throws the work **to the main queue**.
@@ -1300,6 +1507,10 @@ pub(crate) struct PaneIvars {
     /// Whether the block marks are wanted, as last told to the session
     /// ([`TerminalPane::refresh_marks_wanted`]).
     marks_wanted: Cell<bool>,
+    /// When the block index last stepped while output streamed and it was
+    /// unfinished — the start of its pace ([`TerminalPane::blocks_chunk`]);
+    /// `None` otherwise.
+    block_paced: Cell<Option<Instant>>,
     /// The scroll bar block mark's tip ([`BlockTipParts`]) and the mark it
     /// shows — the same mark again is a no-op.
     block_tip: BlockTipParts,
@@ -1307,6 +1518,15 @@ pub(crate) struct PaneIvars {
     /// The tip's time of day: the user's short time style (12 or 24 hours),
     /// made at the first tip.
     time_format: OnceCell<Retained<NSDateFormatter>>,
+    /// "Jump to latest" ([`JumpLatest`]): above the terminal, under the
+    /// dim veil.
+    jump: JumpLatest,
+    /// "Jump to latest" was clicked and the window is on its way down, with
+    /// the count it had then: the button stays hidden until the count is
+    /// zero — output during the glide must not bring it back for a moment
+    /// — or another scroll input takes the window
+    /// ([`TerminalPane::poke_scrollbar`]).
+    jumping: Cell<Option<u32>>,
     /// Upload of a Finder drop to the remote directory: queue,
     /// progress and result line ([`crate::upload::Transfers`]). The queue is
     /// **this pane's ssh connection's** — switching to another tab does not stop it.
@@ -1626,6 +1846,12 @@ define_class!(
             self.forget_password();
         }
 
+        /// "Jump to latest"'s button ([`JumpLatest`]).
+        #[unsafe(method(jumpToLatest:))]
+        fn jump_to_latest_sent(&self, _sender: Option<&AnyObject>) {
+            self.jump_to_latest();
+        }
+
         /// The popover row's button (`Cancel`/`Remove`): `tag` is the item's
         /// id, not its position — positions shift with finished and removed items.
         #[unsafe(method(uploadRowAction:))]
@@ -1698,6 +1924,9 @@ impl TerminalPane {
         let block_tip = BlockTipParts::new(mtm);
         block_tip.paint(&theme);
         let tip = block_tip.tip.clone();
+        let jump = JumpLatest::new(mtm);
+        jump.paint(&theme);
+        let jump_surface = jump.surface.clone();
         let this = Self::alloc(mtm).set_ivars(PaneIvars {
             id,
             run,
@@ -1736,6 +1965,7 @@ impl TerminalPane {
                 program_probe: Arc::default(),
                 link_pending: Arc::default(),
                 blocks_pending: Arc::default(),
+                unseen_pending: Arc::default(),
                 up_pending: Arc::default(),
                 typed_pending: Arc::default(),
                 kept: keeper.as_ref().map(|keeper| keeper.active_flag()),
@@ -1755,9 +1985,12 @@ impl TerminalPane {
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
             marks_wanted: Cell::new(false),
+            block_paced: Cell::new(None),
             block_tip,
             tip_for: Cell::new(None),
             time_format: OnceCell::new(),
+            jump,
+            jumping: Cell::new(None),
             uploads: RefCell::new(Transfers::default()),
             upload_alert: RefCell::new(None),
             upload_stop: RefCell::new(None),
@@ -1803,6 +2036,9 @@ impl TerminalPane {
         this.addSubview(&link_label.0);
         // The block tip beside it, under the veil too.
         this.addSubview(&tip);
+        // "Jump to latest" too; its button's target is this pane.
+        this.addSubview(&jump_surface);
+        this.ivars().jump.aim(&this);
         // The veil is on top: the search panel goes right above `view`
         // (`SearchBar::new`), so it too stays under the veil and the dimmed
         // pane's panel is dimmed too.
@@ -1911,9 +2147,85 @@ impl TerminalPane {
     /// (`bt_gpu::DisplayLink::poke_scrollbar`). Every scroll gate calls this
     /// and nothing on the output path does, so streaming output never lights
     /// the bar. Silent before the link is born.
+    ///
+    /// Scrolling input also ends a jump to the latest line on its way
+    /// ([`PaneIvars::jumping`]): the window is the user's again, so "Jump to
+    /// latest" may come back at once.
     pub(crate) fn poke_scrollbar(&self) {
+        if self.ivars().jumping.take().is_some() {
+            self.refresh_jump();
+        }
         if let Some(link) = self.link() {
             link.poke_scrollbar();
+        }
+    }
+
+    /// Shows, relabels or hides "Jump to latest" ([`JumpLatest`]) from the
+    /// session's count of lines below a scrolled window
+    /// (`bt_core::Session::unseen_rows`) and puts it in the pane's
+    /// bottom-right corner, above the dock. A zero count — the window back
+    /// at the bottom — hides it and ends a jump on its way.
+    ///
+    /// **A count that moved during the jump lands it at once**: the glide
+    /// was booked as a distance, and a window scrolled up stays on its rows
+    /// while output comes, so it would stop that many rows short of a
+    /// bottom that moved — under a flood, never arrive. The rest of the way
+    /// is a jump. Asks for no frame itself.
+    pub(crate) fn refresh_jump(&self) {
+        let ivars = self.ivars();
+        let rows = self.session().map_or(0, |session| session.unseen_rows());
+        if rows == 0 {
+            ivars.jumping.set(None);
+        }
+        match ivars.jumping.get() {
+            _ if rows == 0 => ivars.jump.set(None, |_| None),
+            Some(at) => {
+                if rows != at
+                    && let Some(session) = self.session()
+                {
+                    ivars.jumping.set(Some(rows));
+                    session.scroll_to(f32::MAX, false);
+                }
+                ivars.jump.set(None, |_| None);
+            }
+            None => ivars.jump.set(Some(rows), |size| self.jump_place(size)),
+        }
+    }
+
+    /// Where "Jump to latest" of `size` stands ([`jump_origin`]), from the
+    /// grid's own two reserves in this pane's cell
+    /// ([`TerminalPane::sync_geometry`]): the always-up track's
+    /// (`ScrollbarMode::reserve_px`) and the dock's (`bt_gpu::dock_px`) —
+    /// so a resize or a new point size places it without waiting for a
+    /// frame. The dock's band grows past its reserve only while a command is
+    /// typed, and typing returns the window to the bottom, which hides the
+    /// button. `None` off a window.
+    fn jump_place(&self, size: NSSize) -> Option<NSPoint> {
+        let scale = self.window()?.backingScaleFactor();
+        let ivars = self.ivars();
+        let cell = ivars.renderer.cell_metrics(scale);
+        let track = f64::from(ivars.scrollbar.get().reserve_px(cell)) / scale;
+        let dock = f64::from(bt_gpu::dock_px(ivars.dock_rows.get(), cell)) / scale;
+        Some(jump_origin(self.bounds().size, size, track, dock))
+    }
+
+    /// "Jump to latest" was clicked: the window goes to the bottom — gliding,
+    /// or at once where the scroll is not smooth (Reduce Motion, `snap`) —
+    /// and the bar shows the move (`go_to_block`'s shape). A window that
+    /// moved hides the button until the count is zero
+    /// ([`PaneIvars::jumping`]); one that did not keeps it, or nothing would
+    /// bring it back.
+    pub(crate) fn jump_to_latest(&self) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        let rows = session.unseen_rows();
+        // The travel's end is the bottom: `scroll_to` clamps past it.
+        let moved = session.scroll_to(f32::MAX, self.ivars().smooth_scroll.get());
+        self.poke_scrollbar();
+        if moved == Some(true) {
+            self.ivars().jumping.set(Some(rows));
+            self.ivars().jump.set(None, |_| None);
         }
     }
 
@@ -2025,6 +2337,11 @@ impl TerminalPane {
             .max(TIP_MARGIN);
         parts.tip.setFrameOrigin(NSPoint::new(x, y));
         parts.tip.setHidden(false);
+    }
+
+    /// Whether the block tip is showing.
+    pub(crate) fn block_tip_shown(&self) -> bool {
+        self.ivars().tip_for.get().is_some()
     }
 
     /// Hides the block tip.
@@ -2642,6 +2959,7 @@ impl TerminalPane {
         self.ivars().dim.paint(&theme);
         self.ivars().link_label.0.paint(&theme);
         self.ivars().block_tip.paint(&theme);
+        self.ivars().jump.paint(&theme);
     }
 
     /// Shows or hides the dim veil. The decision is the
@@ -3343,6 +3661,8 @@ impl TerminalPane {
                 grid.dock_cols,
             );
         }
+        // "Jump to latest" stands on the reserves that just moved.
+        self.refresh_jump();
     }
 
     /// Matches the layer's drawable size to the view's backing geometry **and**
@@ -3781,9 +4101,22 @@ impl TerminalPane {
     /// streaming. A different picture asks for the frame that draws it
     /// through the link — only while a bar is up to show it
     /// (`bt_gpu::DisplayLink::marks_changed`).
+    ///
+    /// **The pace is the index's own**, not the driver's: while output
+    /// streams an unfinished index steps at most once per [`BLOCK_PACE`]
+    /// however often the search's count turns the driver — a turn inside
+    /// the pace skips the step and answers "not done, streaming".
     fn blocks_chunk(&self) -> (bool, bool) {
-        if !self.ivars().marks_wanted.get() {
+        let ivars = self.ivars();
+        if !ivars.marks_wanted.get() {
             return (true, false);
+        }
+        if ivars
+            .block_paced
+            .get()
+            .is_some_and(|at| at.elapsed() < BLOCK_PACE)
+        {
+            return (false, true);
         }
         let Some(report) = self.session().and_then(|session| session.block_step()) else {
             return (true, false);
@@ -3793,6 +4126,9 @@ impl TerminalPane {
         {
             link.marks_changed();
         }
+        ivars
+            .block_paced
+            .set((report.streaming && !report.complete).then(Instant::now));
         (report.complete, report.streaming)
     }
 
@@ -4167,6 +4503,35 @@ mod tests {
         assert!(probe.command_started());
         probe.release();
         assert!(probe.output(), "the slot was given back");
+    }
+
+    #[test]
+    fn jump_to_latest_counts_its_lines_in_the_singular_and_the_plural() {
+        assert_eq!(super::jump_count(1), "1 new line");
+        assert_eq!(super::jump_count(2), "2 new lines");
+        assert_eq!(super::jump_count(12_345), "12345 new lines");
+    }
+
+    #[test]
+    fn jump_to_latest_stands_above_the_dock_clear_of_the_track() {
+        use objc2_foundation::{NSPoint, NSSize};
+        let (pane, size) = (NSSize::new(600.0, 400.0), NSSize::new(180.0, 24.0));
+        // The self-hiding forms leave no track; the dock's reserve below.
+        assert_eq!(
+            super::jump_origin(pane, size, 0.0, 50.0),
+            NSPoint::new(600.0 - 20.0 - 180.0, 50.0 + 12.0)
+        );
+        // "always": further in by the track's width; no dock: above the bottom.
+        assert_eq!(
+            super::jump_origin(pane, size, 16.0, 0.0),
+            NSPoint::new(600.0 - 20.0 - 16.0 - 180.0, 12.0)
+        );
+        // A pane narrower than the button keeps it inside its left edge.
+        let narrow = NSSize::new(150.0, 400.0);
+        assert_eq!(
+            super::jump_origin(narrow, size, 0.0, 0.0).x,
+            super::TIP_MARGIN
+        );
     }
 
     #[test]

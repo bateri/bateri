@@ -533,6 +533,12 @@ the first line has gone into history.
   started — what is known: a command restored from an earlier session shows
   its text alone. A click on a mark brings that command near the top of the
   window, two rows down.
+- In every form, `"never"` too: when output arrives below a window you have
+  scrolled up, a **Jump to latest** button at the bottom right, above the
+  dock, says how many new lines came — roughly, once the history is full
+  (`scrollback`). A click glides the window to the bottom (at once where
+  `smooth_scroll` is off, see below); back at the bottom, however you got
+  there, the button goes.
 - It takes effect the moment you save. Moving to or from `"always"` resizes
   the grid by the track's width; in a split, the panes keep their
   proportions, and a pane already at its narrowest gives the track's columns

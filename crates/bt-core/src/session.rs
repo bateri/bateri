@@ -4451,6 +4451,10 @@ pub struct Session {
     /// ([`Wake::blocks_changed`]) — an **edge**, consumed by
     /// [`Session::block_step`].
     block_news: AtomicBool,
+    /// The rows output pushed below a window scrolled up ([`Unseen`]) — a
+    /// **leaf lock**: its writer is the frame path, after the `Term` lock;
+    /// its reader [`Session::unseen_rows`].
+    unseen: Mutex<Unseen>,
     /// The scrollback's ceiling (`scrollback`) — the "did the scrollback
     /// saturate" question of the current search match's drift
     /// ([`search::ledger_shift`]). Its writers are opening and [`Session::set_terminal_options`].
@@ -5047,6 +5051,7 @@ impl Session {
             block_index: Mutex::new(block_index::BlockSlot::default()),
             blocks_wanted: AtomicBool::new(false),
             block_news: AtomicBool::new(false),
+            unseen: Mutex::new(Unseen::default()),
             scrollback: AtomicUsize::new(scrollback),
             user_scroll: AtomicI64::new(0),
             dock_window: Mutex::new(None),
@@ -5169,6 +5174,10 @@ impl Session {
     /// the history moved since the index looked, the frame tells the index's
     /// driver ([`Wake::blocks_changed`]) — after the lock, once per pending
     /// news.
+    ///
+    /// **The same observation counts the rows that came below a window
+    /// scrolled up** ([`Session::unseen_rows`]); a change of the number is
+    /// told after the lock ([`Wake::unseen_changed`]).
     ///
     /// **The journal:** the cursor-style reset on leaving the alternate screen
     /// is recorded in this lock round; the glide moves only the view, which
@@ -6520,6 +6529,13 @@ impl Session {
             }
         } else if alt_screen {
             marks.clear_blocks();
+        }
+        // **The rows below a scrolled window**, from the same observation
+        // and after the lock: the count's leaf lock is released before the
+        // news, which goes out only when the number changed.
+        let unseen = lock(&self.unseen).observe(ledger, self.scrollback.load(Ordering::Relaxed));
+        if unseen {
+            self.adapter.0.wake.unseen_changed();
         }
         marks.set_colors(&theme);
 
@@ -9837,6 +9853,22 @@ impl Session {
         }
     }
 
+    /// How many rows output pushed below the window since it was scrolled up
+    /// the history — "Jump to latest · N new lines"; zero while the window
+    /// is at the bottom, on the alternate screen, or before any frame.
+    /// Scrolling up or down without reaching the bottom leaves it as it is.
+    ///
+    /// **As of the last drawn frame**: the frame path counts
+    /// ([`Session::frame`]) and tells a change ([`Wake::unseen_changed`]);
+    /// an output that has not been drawn yet is not in it. On a full
+    /// history the number is approximate ([`search::ledger_shift`]'s
+    /// unknowable shifts keep it as it was).
+    ///
+    /// **Journal-neutral:** reads no `Term` state.
+    pub fn unseen_rows(&self) -> u32 {
+        lock(&self.unseen).rows
+    }
+
     /// Whether the scroll bar's block marks are wanted — the bar is wide (the
     /// pointer over its strip, the always-up form) in a pane that can be
     /// seen. The shell says so; this crate does not see the bar.
@@ -11489,6 +11521,49 @@ fn scroll_target(history: usize, band: i32, top: f32) -> i32 {
     i32::try_from(band + room - rows).unwrap_or(i32::MAX)
 }
 
+/// The rows output pushed below a window scrolled up the history since it
+/// left the bottom — what "Jump to latest" says ([`Session::unseen_rows`]).
+/// The frame path's own state: one observation per drawn frame, after the
+/// `Term` lock, from the frame's single look at the scrollback.
+#[derive(Debug, Default)]
+struct Unseen {
+    /// The count so far.
+    rows: u32,
+    /// The scrollback at the last observation; `None` before the first.
+    seen: Option<search::LedgerMark>,
+}
+
+impl Unseen {
+    /// Takes one look at the scrollback; `true` when the count changed.
+    ///
+    /// **The shift is the search match's** ([`search::ledger_shift`], the one
+    /// copy): a window scrolled up stays on its rows while output scrolls
+    /// them, so how far every row moved up is how many came in below it —
+    /// and the user's own scrolling is already taken out of it. A window at
+    /// the bottom sees what comes, so the count is zero there; a window that
+    /// just left the bottom starts from zero too, because whatever came
+    /// between the two looks may have come while it was still there. A shift
+    /// that cannot be known (output at the very top of a full history, a
+    /// resize) keeps the count — on a full history the number is
+    /// approximate, which a label can afford.
+    fn observe(&mut self, now: search::LedgerMark, limit: usize) -> bool {
+        let prev = self.seen.replace(now);
+        let rows = match prev {
+            _ if now.offset == 0 => 0,
+            Some(prev) if prev.offset > 0 => match search::ledger_shift(prev, now, limit) {
+                search::Shift::By(moved) => {
+                    self.rows.saturating_add(u32::try_from(moved).unwrap_or(0))
+                }
+                search::Shift::Still | search::Shift::Lost => self.rows,
+            },
+            _ => 0,
+        };
+        let changed = rows != self.rows;
+        self.rows = rows;
+        changed
+    }
+}
+
 /// Can the position move in the `up` direction — the glide request's end gate.
 ///
 /// If the fraction is greater than zero both directions are open (the row above
@@ -11699,6 +11774,8 @@ mod tests {
         mirrors: u32,
         /// How many times [`Wake::blocks_changed`] came.
         blocks: u32,
+        /// How many times [`Wake::unseen_changed`] came.
+        unseen: u32,
     }
 
     impl TestWake {
@@ -11814,6 +11891,11 @@ mod tests {
 
         fn blocks_changed(&self) {
             self.state.lock().unwrap().blocks += 1;
+            self.cond.notify_all();
+        }
+
+        fn unseen_changed(&self) {
+            self.state.lock().unwrap().unseen += 1;
             self.cond.notify_all();
         }
     }
@@ -24019,6 +24101,62 @@ e\\314\\201.'; sleep 5";
     }
 
     #[test]
+    fn the_frame_counts_the_rows_below_a_scrolled_window_and_tells_each_change() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; i=0; while [ $i -lt 30 ]; do echo fill$i; i=$((i + 1)); done; \
+             while read x; do echo \"$x\"; done",
+            Arc::clone(&wake),
+        );
+        let state = || (session.unseen_rows(), wake.state.lock().unwrap().unseen);
+        // Input returns the window to the bottom; output while it is up
+        // comes from a send that does not.
+        let output = |line: &str| {
+            session.send_or_hold(format!("{line}\r").into_bytes());
+            wait_until("no echo", Duration::from_secs(5), || {
+                !rows_holding(&session, line).is_empty()
+            });
+        };
+        wait_until("no fill", Duration::from_secs(5), || {
+            !rows_holding(&session, "fill29").is_empty()
+        });
+        session.write(b"first\r");
+        wait_until("no echo", Duration::from_secs(5), || {
+            !rows_holding(&session, "first").is_empty()
+        });
+        frame_marks(&session);
+        assert_eq!(state(), (0, 0), "output at the bottom was counted");
+        session.scroll_page(1);
+        frame_marks(&session);
+        assert_eq!(state(), (0, 0), "leaving the bottom counted");
+        output("up1");
+        frame_marks(&session);
+        assert_eq!(state(), (1, 1));
+        output("up2");
+        output("up3");
+        output("up4");
+        frame_marks(&session);
+        assert_eq!(state(), (4, 2));
+        frame_marks(&session);
+        assert_eq!(state(), (4, 2), "an unchanged count was told");
+        session.scroll_page(1);
+        frame_marks(&session);
+        session.scroll_page(-1);
+        frame_marks(&session);
+        assert_eq!(state(), (4, 2), "scrolling moved the count");
+        assert_eq!(session.scroll_to(f32::MAX, false), Some(true));
+        frame_marks(&session);
+        assert_eq!(state(), (0, 3), "the bottom did not zero the count");
+        session.write(b"last\r");
+        wait_until("no echo", Duration::from_secs(5), || {
+            !rows_holding(&session, "last").is_empty()
+        });
+        frame_marks(&session);
+        assert_eq!(state(), (0, 3));
+        session.shutdown();
+    }
+
+    #[test]
     fn marks_wanted_again_publish_once_even_unchanged() {
         // A finished command changes only its colour, which no row the index
         // sees: wanting the marks again owes one picture — one frame.
@@ -24346,6 +24484,77 @@ e\\314\\201.'; sleep 5";
             lines: 10,
             alt: false,
         }
+    }
+
+    /// The count after each look, and whether that look changed it.
+    fn unseen_after(unseen: &mut Unseen, now: search::LedgerMark, limit: usize) -> (u32, bool) {
+        let changed = unseen.observe(now, limit);
+        (unseen.rows, changed)
+    }
+
+    #[test]
+    fn rows_count_only_below_a_window_scrolled_up() {
+        let mut unseen = Unseen::default();
+        let mut look = |now| unseen_after(&mut unseen, now, 100);
+        assert_eq!(look(observed(20, 0, 1)), (0, false));
+        assert_eq!(look(observed(25, 0, 2)), (0, false), "seen at the bottom");
+        // The window leaves the bottom: nothing yet.
+        assert_eq!(look(observed(25, 5, 2)), (0, false));
+        // Three rows come below it; alacritty keeps the window on its rows.
+        assert_eq!(look(observed(28, 8, 3)), (3, true));
+        // Scrolling up and down without reaching the bottom moves nothing.
+        let user = |offset, user| search::LedgerMark {
+            user,
+            ..observed(28, offset, 3)
+        };
+        assert_eq!(look(user(10, 2)), (3, false));
+        assert_eq!(look(user(6, -2)), (3, false));
+        assert_eq!(
+            look(observed(29, 0, 4)),
+            (0, true),
+            "the bottom did not zero it"
+        );
+    }
+
+    #[test]
+    fn a_window_that_just_left_the_bottom_starts_from_zero() {
+        // Output and the scroll up between two looks: what came may have come
+        // while the window was still at the bottom, seen.
+        let mut unseen = Unseen::default();
+        assert_eq!(
+            unseen_after(&mut unseen, observed(20, 0, 1), 100),
+            (0, false)
+        );
+        assert_eq!(
+            unseen_after(&mut unseen, observed(23, 5, 2), 100),
+            (0, false)
+        );
+    }
+
+    #[test]
+    fn a_full_history_counts_by_the_offset_and_keeps_what_it_cannot_know() {
+        let mut unseen = Unseen::default();
+        let mut look = |now| unseen_after(&mut unseen, now, 100);
+        assert_eq!(look(observed(100, 10, 1)), (0, false));
+        assert_eq!(look(observed(100, 14, 2)), (4, true));
+        // The user's own scroll is not output.
+        let scrolled = search::LedgerMark {
+            user: 3,
+            ..observed(100, 17, 2)
+        };
+        assert_eq!(look(scrolled), (4, false));
+        // At the history's very top the shift cannot be known: kept.
+        let ceiling = search::LedgerMark {
+            user: 86,
+            ..observed(100, 100, 3)
+        };
+        assert_eq!(look(ceiling), (4, false));
+        // So is a resize: its rows are not the rows they were.
+        let resized = search::LedgerMark {
+            columns: 30,
+            ..ceiling
+        };
+        assert_eq!(look(resized), (4, false));
     }
 
     #[test]

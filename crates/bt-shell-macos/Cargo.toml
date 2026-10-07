@@ -126,6 +126,10 @@ objc2-foundation = { workspace = true, features = [
 # The pointer over the scroll bar's strip: `NSTrackingArea` (entered, exited
 # and moved, in an unfocused pane too). Only a header flag over
 # `objc2-foundation` headers already in its set; `Cargo.lock` did not move.
+# "Jump to latest"'s two-tone title: `NSAttributedString` for AppKit's
+# attribute keys (`NSForegroundColorAttributeName`, `NSFontAttributeName`).
+# Only a header flag over `objc2-foundation` headers and the `bitflags`
+# already in the graph; `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -139,7 +143,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSShadow", "NSTextFieldCell", "NSWindowTab", "block2", "NSDockTile", "NSProgressIndicator",
     "NSCursor", "NSPopover", "NSParagraphStyle", "NSOpenPanel", "NSPanel", "NSSavePanel",
     "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSSecureTextField",
-    "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea",
+    "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea", "NSAttributedString",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

@@ -3695,6 +3695,7 @@ exit $code
         fn phase_edge(&self) {}
         fn mirror_changed(&self) {}
         fn blocks_changed(&self) {}
+        fn unseen_changed(&self) {}
     }
 
     /// The terminal session's sharing against a real password sshd (the one
