@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use bt_core::{
     AdoptMode, CursorMotion, HostMark, InitialInput, KeepRunning, MarkSubject, ReduceMotion,
-    RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration,
-    SmoothScroll, TabId, Teardown, Theme,
+    RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit,
+    ShellIntegration, SmoothScroll, TabId, Teardown, Theme,
 };
-use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Stats};
+use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -29,15 +29,16 @@ use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
     NSControlStateValueOn, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSScreen, NSWindow, NSWindowNumberListOptions, NSWorkspace,
+    NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSScroller, NSScrollerStyle, NSWindow,
+    NSWindowNumberListOptions, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
     NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
-    NSArray, NSBundle, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSNumber,
-    NSObject, NSObjectNSDelayedPerforming, NSObjectNSKeyValueObserverRegistration,
-    NSObjectProtocol, NSPoint, NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL,
-    NSUserDefaults, ns_string,
+    NSArray, NSBundle, NSDictionary, NSKeyValueObservingOptions, NSNotification,
+    NSNotificationCenter, NSNumber, NSObject, NSObjectNSDelayedPerforming,
+    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect,
+    NSRunLoopCommonModes, NSSize, NSString, NSURL, NSUserDefaults, ns_string,
 };
 
 use crate::handover::{self, Arrival, HeldPane, PaneState};
@@ -310,6 +311,37 @@ fn resolve_reduce_motion(
         ReduceMotion::On => true,
         ReduceMotion::Off => false,
         ReduceMotion::System => system(),
+    }
+}
+
+/// `[terminal] scrollbar` + the system's scroll bar preference → the bar's
+/// one resolved form ([`ScrollbarMode`]).
+///
+/// The [`resolve_reduce_motion`] precedent, for its reasons: this is the
+/// layer that sees the system, `bt-gpu` gets the resolved value. `overlay`
+/// is a **closure** — "Show scroll bars" in System Settings, as
+/// `NSScroller.preferredScrollerStyle` answers it: macOS already resolves
+/// "Automatically based on mouse or trackpad" for the devices attached, so
+/// no device detection is written here. Overlay scrollers are the
+/// self-hiding form (`Auto`), legacy ones the permanent one (`Always`).
+///
+/// **A timed run never asks the system and gets `Auto`** — `make smoke`'s
+/// grid and tokens must not depend on the measuring machine's preference
+/// (or a mouse plugged into it): `Always` would take columns from the grid.
+fn resolve_scrollbar(
+    inputs: &Inputs,
+    setting: Scrollbar,
+    overlay: impl FnOnce() -> bool,
+) -> ScrollbarMode {
+    if let Inputs::Hermetic = inputs {
+        return ScrollbarMode::Auto;
+    }
+    match setting {
+        Scrollbar::Auto => ScrollbarMode::Auto,
+        Scrollbar::Always => ScrollbarMode::Always,
+        Scrollbar::Never => ScrollbarMode::Never,
+        Scrollbar::System if overlay() => ScrollbarMode::Auto,
+        Scrollbar::System => ScrollbarMode::Always,
     }
 }
 
@@ -870,6 +902,12 @@ fn with_bateri_bin(
 pub(crate) struct Grid {
     pub(crate) cols: u16,
     pub(crate) rows: u16,
+    /// The dock's width, columns: the window's, with no scroll bar reserve
+    /// taken off — the always-up bar's track stops at the dock's top, and
+    /// the dock below it stays full width. Equal to `cols` unless the grid
+    /// reserves the track. The link's dock readings and the mouse's dock hit
+    /// come from here ([`split_into_grid`] is the owner).
+    pub(crate) dock_cols: u16,
     /// Not a tuple but `CellMetrics`: the metrics pass from here to
     /// `DisplayLink::resize` as they are. The value stored in `Grid` alone
     /// descends to a tuple when it enters `SessionOptions` — the tuple that
@@ -908,11 +946,21 @@ pub(crate) struct Grid {
 /// `TerminalPane::alt_screen_did_change`). The cost of varying is one `TIOCSWINSZ` and that cost is paid **per
 /// transition, not per command** — commands like `git log` that do not enter
 /// the alternate screen never move the flag, so this function is not called again either.
+///
+/// **The scroll bar's reserve is subtracted from the grid's columns only**
+/// (`reserve_px`, [`ScrollbarMode::reserve_px`]): in the always-up form the
+/// track takes the window's right edge down to the dock's top, so the grid
+/// gives its width up and the dock does not — the dock's column count is a
+/// separate answer ([`Grid::dock_cols`]). The reserve is a function of the
+/// form alone, never of the history or the alternate screen: a reserve that
+/// came and went with them would resize the grid on the first line into
+/// history, every clear and every full-screen program.
 pub(crate) fn split_into_grid(
     width_px: f64,
     height_px: f64,
     cell: CellMetrics,
     dock_rows: u16,
+    reserve_px: f32,
 ) -> Grid {
     let (cell_w, cell_h) = cell.cell_px();
     // `as u16` saturates in f64 (NaN and negative → 0, large → 65535) and the
@@ -930,6 +978,14 @@ pub(crate) fn split_into_grid(
     // **overflow** and produce a column count near 65535, a `TIOCSWINSZ` of
     // that size. No new lower bound is deliberately introduced: the end of the chain is already right.
     let usable_width = width_px - f64::from(cell.gutter_px());
+    // The scroll bar's reserve is subtracted the same way and for the same
+    // reason: in a window narrower than the gutter and the track the
+    // difference goes negative and saturates to zero columns. The width here
+    // is unrounded and the drawn track's left edge is the texture's rounded
+    // width minus the same reserve; the text still ends at or before it,
+    // because where the text ends — the gutter plus whole cells — is a whole
+    // pixel not past `width − reserve`, so not past its floor either.
+    let grid_width = usable_width - f64::from(reserve_px);
     // The dock share is also **in `f64`** and for the same reason: in a window
     // shorter than the dock the difference goes negative, the division stays
     // negative and `as u16` saturates it to zero — `Session::resize` already
@@ -940,8 +996,9 @@ pub(crate) fn split_into_grid(
     // discipline as consuming `DOCK_ROWS`, no second copy is kept.
     let usable_height = height_px - f64::from(bt_gpu::dock_px(dock_rows, cell));
     Grid {
-        cols: (usable_width / f64::from(cell_w)) as u16,
+        cols: (grid_width / f64::from(cell_w)) as u16,
         rows: (usable_height / f64::from(cell_h)) as u16,
+        dock_cols: (usable_width / f64::from(cell_w)) as u16,
         cell,
     }
 }
@@ -1199,6 +1256,11 @@ pub(crate) struct Ivars {
     /// contrast) and the theme depends only on the light/dark bit; if the bit
     /// is the same there is no reason to reread the theme file and repaint all windows.
     appearance_dark: Cell<Option<bool>>,
+    /// The scroll bar's last applied resolved form — the gate of
+    /// [`AppDelegate::apply_scrollbar`], the one "the resolved value changed"
+    /// point the settings file and the system's preference both reach.
+    /// `None`: nothing applied yet (the launch's call always passes).
+    scrollbar: Cell<Option<ScrollbarMode>>,
     /// The settings window (bateri ▸ Settings…): born on first open, hidden
     /// when closed and lives for the whole process. **Not** a
     /// terminal window — it does not enter [`Ivars::windows`], i.e. ⌘Q's
@@ -1362,6 +1424,9 @@ define_class!(
             // The system's Reduce Motion notification is app-wide and once; the
             // window's first value descended to its own link in `start`.
             self.observe_reduce_motion();
+            // The scroll bar's system preference likewise; the panes were born
+            // with the resolved form (their grid's first `TIOCSWINSZ` sees it).
+            self.observe_scroller_style();
             // The light/dark appearance is also app-wide and once; the first
             // window's theme was already chosen from the appearance (`open_window` → `resolve_theme`).
             self.observe_appearance();
@@ -1593,6 +1658,32 @@ define_class!(
             // (`settings_window::motion_override`): if open it must refresh too,
             // otherwise Reduce Motion turned on from the system would not look like it overrides the rows.
             self.refresh_settings_window();
+        }
+
+        /// macOS's "Show scroll bars" changed — or its automatic choice did,
+        /// a mouse plugged in or out; the sender is the **default** centre
+        /// ([`AppDelegate::observe_scroller_style`]). The path rereads the
+        /// preference and does nothing if the resolved form stayed the same.
+        ///
+        /// The centre delivers on the posting thread and Apple documents no
+        /// thread for this notification, while the work underneath wants the
+        /// main one (the settings' `RefCell`, the panes' geometry). Off the
+        /// main thread the change **hops** there rather than being refused —
+        /// a panic here could not unwind out of an Objective-C method and
+        /// would abort every window.
+        #[unsafe(method(preferredScrollerStyleDidChange:))]
+        fn preferred_scroller_style_did_change(&self, _note: Option<&AnyObject>) {
+            if MainThreadMarker::new().is_some() {
+                self.scroller_style_changed();
+                return;
+            }
+            DispatchQueue::main().exec_async(|| {
+                if let Some(mtm) = MainThreadMarker::new()
+                    && let Some(app) = delegate(mtm)
+                {
+                    app.scroller_style_changed();
+                }
+            });
         }
 
         /// bateri ▸ Quit and End Programs (⌥⌘Q, only under `keep_running =
@@ -2375,6 +2466,7 @@ impl AppDelegate {
             windows: RefCell::new(Vec::new()),
             next_window_id: Cell::new(0),
             appearance_dark: Cell::new(None),
+            scrollbar: Cell::new(None),
             settings_window: RefCell::new(None),
             settings_state: RefCell::new(settings::FileState::Missing),
             shell_menu: OnceCell::new(),
@@ -3220,6 +3312,7 @@ impl AppDelegate {
             integration: self.shell_integration(),
             reduce_motion: self.reduce_motion(),
             smooth_scroll: self.smooth_scroll(),
+            scrollbar: self.scrollbar_mode(),
             zoom: from.map_or_else(Zoom::default, TerminalPane::zoom),
             masters: self.ivars().masters.clone(),
             keeper: self.ivars().keeper.clone(),
@@ -4094,6 +4187,15 @@ impl AppDelegate {
                     pane.set_font(&font);
                 }
             }
+            // The scroll bar's form, by `apply_reduce_motion`'s reasoning: the
+            // shared path reads the slot. Its note in the settings window is
+            // refreshed at the end. A save that changes the font **and** moves
+            // to or from `"always"` resizes the grid twice (each path is its
+            // own geometry refresh); only a hand edit does that — the window
+            // writes one key at a time.
+            if changes.scrollbar {
+                self.apply_scrollbar();
+            }
             self.post_notices(Source::Write, Vec::new());
         }
         // The borrow is dropped before `set_theme`; the calls inside do not touch
@@ -4255,8 +4357,11 @@ impl AppDelegate {
         let write = self.ivars().notices.borrow().get(Source::Write).to_vec();
         let embedded: Vec<&str> = Theme::embedded_names().collect();
         let user = settings::user_theme_names(&root);
-        let reduce = self.reduce_motion();
-        window.refresh(&settings, reduce, &state, &write, &embedded, &user);
+        let resolved = crate::settings_window::Resolved {
+            reduce: self.reduce_motion(),
+            scrollbar: self.scrollbar_mode(),
+        };
+        window.refresh(&settings, resolved, &state, &write, &embedded, &user);
         // On every refresh, not only on open: a changed `preview_dir` is
         // another folder. The scan is off the main thread.
         self.measure_preview_usage();
@@ -4449,6 +4554,73 @@ impl AppDelegate {
             pane.set_reduce_motion(reduce);
             pane.set_smooth_scroll(smooth);
         }
+    }
+
+    /// Starts watching the system's scroll bar preference — **only in a user
+    /// session** ([`Inputs`]; a timed run does not read it,
+    /// [`resolve_scrollbar`]).
+    ///
+    /// Unlike Reduce Motion's, this notification is posted on the **default**
+    /// centre (`NSScroller`'s header), not `NSWorkspace`'s; subscribing to
+    /// the wrong one would silently never hear anything. Not removed: the
+    /// [`AppDelegate::observe_reduce_motion`] precedent. The launch's
+    /// resolved form is applied here once, which seeds the gate.
+    fn observe_scroller_style(&self) {
+        let Inputs::User { .. } = self.inputs() else {
+            return;
+        };
+        let center = NSNotificationCenter::defaultCenter();
+        // SAFETY: `preferredScrollerStyleDidChange:` is defined on this class
+        // and takes a single `Option<&AnyObject>` argument; `self` lives for
+        // the process's lifetime, so the centre's non-owning reference does
+        // not dangle. The constant `NSString` is a name AppKit exposes.
+        unsafe {
+            center.addObserver_selector_name_object(
+                self,
+                sel!(preferredScrollerStyleDidChange:),
+                Some(NSPreferredScrollerStyleDidChangeNotification),
+                None,
+            );
+        }
+        self.apply_scrollbar();
+    }
+
+    /// The system's scroll bar preference changed (main thread): the form is
+    /// re-resolved, and the settings window's note, which says what
+    /// "system" gives, follows a change.
+    fn scroller_style_changed(&self) {
+        if self.apply_scrollbar() {
+            self.refresh_settings_window();
+        }
+    }
+
+    /// **The one point where the scroll bar's resolved form changes**: the
+    /// settings file's save ([`AppDelegate::reload_settings`]), the system's
+    /// notification and the launch all come here and re-ask the same
+    /// question ([`AppDelegate::scrollbar_mode`]). The same answer as last
+    /// time does nothing; a new one goes to every pane — which hands it to
+    /// its link and, when the always-up form comes or goes, resizes its grid
+    /// by the track (`TerminalPane::set_scrollbar_mode`). `true` → the form
+    /// changed, and the settings window's note with it.
+    fn apply_scrollbar(&self) -> bool {
+        let mode = self.scrollbar_mode();
+        if self.ivars().scrollbar.replace(Some(mode)) == Some(mode) {
+            return false;
+        }
+        for pane in self.all_panes() {
+            pane.set_scrollbar_mode(mode);
+        }
+        true
+    }
+
+    /// The setting and the system's preference, in the form merged in
+    /// [`resolve_scrollbar`].
+    pub(crate) fn scrollbar_mode(&self) -> ScrollbarMode {
+        let setting = self.ivars().settings.borrow().scrollbar;
+        let mtm = self.mtm();
+        resolve_scrollbar(&self.inputs(), setting, || {
+            NSScroller::preferredScrollerStyle(mtm) == NSScrollerStyle::Overlay
+        })
     }
 
     /// Is the wheel smooth ([`resolve_smooth_scroll`]).
@@ -4831,6 +5003,10 @@ mod tests {
     /// is below and names `DOCK_ROWS` explicitly.
     const NO_DOCK: u16 = 0;
 
+    /// No scroll bar reserve: the self-hiding forms' grid, and the one every
+    /// test that is not about the reserve asks about.
+    const NO_RESERVE: f32 = 0.0;
+
     fn report(counters: Counters, workload: Workload) -> Report {
         Report {
             counters,
@@ -5026,8 +5202,8 @@ mod tests {
         // would make the two equal and this test would fail.
         // Gutter zero: what is asked is that the cell size determines the grid, not the gutter's
         // effect. The gutter's own test is `the_gutter_costs_columns`.
-        let narrow = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK);
-        let wide = split_into_grid(900.0, 600.0, metrics(18, 36, 0), NO_DOCK);
+        let narrow = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK, NO_RESERVE);
+        let wide = split_into_grid(900.0, 600.0, metrics(18, 36, 0), NO_DOCK, NO_RESERVE);
         assert_eq!((narrow.cols, narrow.rows), (100, 33));
         assert_eq!((wide.cols, wide.rows), (50, 16));
     }
@@ -5037,8 +5213,8 @@ mod tests {
         // The left gutter is deducted from columns: so the stripe does not
         // sit on top of the text. 900 pixels, 9-pixel cells → 100 columns with no gutter; an 8-pixel
         // gutter takes one column, and so does 9 pixels (a full cell).
-        let plain = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK);
-        let gutter = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK);
+        let plain = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK, NO_RESERVE);
+        let gutter = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE);
         assert_eq!(plain.cols, 100);
         assert_eq!(gutter.cols, 99, "the gutter takes one column");
         // Rows **do not see** the gutter: the gutter is only on the left and does not
@@ -5055,8 +5231,8 @@ mod tests {
         // not a single row should go from a window without a dock (an unintegrated shell, the smoke recipe) —
         // `smoke_shell`'s `cells=8 glyphs=6`
         // contract is measured in that window.
-        let without = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK);
-        let with = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS);
+        let without = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE);
+        let with = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS, NO_RESERVE);
         // 600 / 18 = 33.3 → 33.
         assert_eq!(without.rows, 33);
         // The dock takes **two rows, two breathing gutters and one row gap**:
@@ -5067,8 +5243,8 @@ mod tests {
         // The number's source is `bt_gpu::dock_px`, not `DOCK_ROWS`; if the two
         // drift apart this goes red.
         assert_eq!(with.rows, 29, "dock gutter was not deducted from rows");
-        // Columns **do not see** the dock: the dock uses the same columns as the grid
-        // and its gutter is vertical only.
+        // Columns **do not see** the dock: without the scroll bar's reserve the
+        // dock uses the same columns as the grid and its gutter is vertical only.
         assert_eq!(with.cols, without.cols);
     }
 
@@ -5077,8 +5253,8 @@ mod tests {
         // The breathing gutter is **derived**, not chosen: its source is the left
         // gutter itself. With a fixed pixel count the gutter would stay the same while the font
         // grows with Cmd +/− and the ratio would break; this test holds exactly that link.
-        let tight = split_into_grid(900.0, 600.0, metrics(9, 18, 0), DOCK_ROWS);
-        let loose = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS);
+        let tight = split_into_grid(900.0, 600.0, metrics(9, 18, 0), DOCK_ROWS, NO_RESERVE);
+        let loose = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS, NO_RESERVE);
         // A dock without gutters takes only its rows: 600 − 36 = 564 → 31.
         assert_eq!(tight.rows, 31);
         assert!(
@@ -5086,6 +5262,73 @@ mod tests {
             "the gutter grew but the dock covered the same space: {} / {}",
             loose.rows,
             tight.rows
+        );
+    }
+
+    #[test]
+    fn the_always_up_scroll_bar_costs_grid_columns_and_not_dock_columns() {
+        // 900 px, 9 px cells, an 8 px gutter: 99 columns. The always-up
+        // form's track is 16 pt — 16 px at @1x — so the grid ends at 892 px
+        // − 16: 876 / 9 = 97 columns. The dock below the track keeps the
+        // window's 99, and the rows do not see the track at all.
+        let cell = metrics(9, 18, 8);
+        let reserve = ScrollbarMode::Always.reserve_px(cell);
+        let plain = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, NO_RESERVE);
+        let always = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, reserve);
+        assert_eq!((plain.cols, plain.dock_cols), (99, 99));
+        assert_eq!(always.cols, 97, "the track's columns stayed in the grid");
+        assert_eq!(always.dock_cols, 99, "the dock lost columns to the track");
+        assert_eq!(always.rows, plain.rows, "the track took rows");
+        // The text ends left of the track: nothing runs under the bar.
+        let text_end = f64::from(cell.gutter_px()) + f64::from(always.cols) * 9.0;
+        assert!(text_end <= 900.0 - f64::from(reserve), "{text_end}");
+        // The self-hiding forms reserve nothing.
+        for mode in [ScrollbarMode::Auto, ScrollbarMode::Never] {
+            let grid = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, mode.reserve_px(cell));
+            assert_eq!((grid.cols, grid.dock_cols), (99, 99), "{mode:?}");
+        }
+        // Narrower than the gutter and the track: no columns — the
+        // subtraction is `f64` and saturates, it does not wrap to 65535.
+        let narrow = split_into_grid(20.0, 600.0, cell, NO_DOCK, reserve);
+        assert_eq!((narrow.cols, narrow.dock_cols), (0, 1));
+    }
+
+    #[test]
+    fn a_click_on_the_docks_last_column_beside_the_track_is_the_docks() {
+        // The always-up form narrows the grid, not the dock: a click on the
+        // dock's last column — under where the track ends, beside the grid's
+        // right edge — lands on that column, not clamped back to the grid's.
+        let cell = metrics(9, 18, 8);
+        let reserve = ScrollbarMode::Always.reserve_px(cell);
+        let grid = split_into_grid(900.0, 600.0, cell, DOCK_ROWS, reserve);
+        let top = crate::view::dock_input_top_px(600.0, cell, DOCK_ROWS);
+        let last = grid.dock_cols - 1;
+        let x = f64::from(cell.gutter_px()) + (f64::from(last) + 0.25) * 9.0;
+        let hit = crate::view::point_to_cell(
+            (x, top + 4.0),
+            cell,
+            top,
+            crate::view::OutOfGrid::Reject,
+            1.0,
+            grid.dock_cols,
+            1,
+        )
+        .expect("the dock's last column was rejected");
+        assert_eq!(hit.col, last);
+        assert!(hit.col >= grid.cols, "the column is not beyond the grid's");
+        // With the grid's columns the same click is rejected: the reading
+        // the dock must not use.
+        assert!(
+            crate::view::point_to_cell(
+                (x, top + 4.0),
+                cell,
+                top,
+                crate::view::OutOfGrid::Reject,
+                1.0,
+                grid.cols,
+                1,
+            )
+            .is_none()
         );
     }
 
@@ -5127,7 +5370,7 @@ mod tests {
         // `as u16` saturates to zero. Done in `u16` it would overflow and
         // produce a 65535-row `TIOCSWINSZ`. `Session::resize` already
         // ignores a zero-row size.
-        let g = split_into_grid(900.0, 20.0, metrics(9, 18, 8), DOCK_ROWS);
+        let g = split_into_grid(900.0, 20.0, metrics(9, 18, 8), DOCK_ROWS, NO_RESERVE);
         assert_eq!(g.rows, 0);
         // Columns stand: a short window eliminates only rows.
         assert_eq!(g.cols, 99);
@@ -5141,7 +5384,7 @@ mod tests {
         // ignores a zero-column size. Done in `u16` the same subtraction would
         // **overflow** and produce a `TIOCSWINSZ` with a column count near
         // 65535 — that is the breakage this test guards.
-        let g = split_into_grid(4.0, 600.0, metrics(9, 18, 8), NO_DOCK);
+        let g = split_into_grid(4.0, 600.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE);
         assert_eq!(g.cols, 0);
         // Rows stand: a narrow window eliminates only columns.
         assert_eq!(g.rows, 33);
@@ -5642,6 +5885,48 @@ mod tests {
     }
 
     #[test]
+    fn the_scroll_bar_form_follows_the_setting_and_the_system() {
+        // A timed run never asks the system and never reserves the track:
+        // `make smoke`'s grid and tokens must not depend on the measuring
+        // machine's "Show scroll bars" (or a mouse plugged into it).
+        for setting in [
+            Scrollbar::System,
+            Scrollbar::Auto,
+            Scrollbar::Always,
+            Scrollbar::Never,
+        ] {
+            assert_eq!(
+                resolve_scrollbar(&Inputs::Hermetic, setting, || panic!(
+                    "timed run read the system's scroller style"
+                )),
+                ScrollbarMode::Auto,
+                "{setting:?}"
+            );
+        }
+        let user = Inputs::User { config_root: None };
+        // `"system"`: overlay scrollers hide themselves, legacy ones stay.
+        assert_eq!(
+            resolve_scrollbar(&user, Scrollbar::System, || true),
+            ScrollbarMode::Auto
+        );
+        assert_eq!(
+            resolve_scrollbar(&user, Scrollbar::System, || false),
+            ScrollbarMode::Always
+        );
+        // The other values decide for themselves: the system is never asked.
+        for (setting, mode) in [
+            (Scrollbar::Auto, ScrollbarMode::Auto),
+            (Scrollbar::Always, ScrollbarMode::Always),
+            (Scrollbar::Never, ScrollbarMode::Never),
+        ] {
+            assert_eq!(
+                resolve_scrollbar(&user, setting, || panic!("{setting:?} read the system")),
+                mode
+            );
+        }
+    }
+
+    #[test]
     fn hermetic_run_does_not_read_reduce_motion() {
         // `Inputs`'s fifth condition: a timed run does **not** read the
         // system's Reduce Motion setting. If it did, `make smoke`'s
@@ -6097,7 +6382,7 @@ mod tests {
         // A minimized window gives 0×0 bounds; `Session::resize` ignores a
         // zero grid but the path leading here must not panic —
         // not the split, the `as u16` saturation carries it.
-        let g = split_into_grid(0.0, 0.0, metrics(9, 18, 8), NO_DOCK);
+        let g = split_into_grid(0.0, 0.0, metrics(9, 18, 8), NO_DOCK, NO_RESERVE);
         assert_eq!((g.cols, g.rows), (0, 0));
     }
 

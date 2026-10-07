@@ -444,6 +444,49 @@ impl KeepRunning {
     }
 }
 
+/// `[terminal] scrollbar`: when the scroll bar at the grid's right edge shows.
+///
+/// It **doesn't enter** `TerminalOptions`: the bar is pure painting plus one
+/// geometry decision (in `Always` the grid's columns make room for the
+/// track), so the session never sees it. Its own field in [`Changes`] — a
+/// change goes to the drawing side and, when `Always` comes or goes, to the
+/// grid's size, never to the session's options. An ordinary key: a value that
+/// isn't accepted is the default at launch and leaves the value in effect at
+/// save time.
+///
+/// `System` is a request, not a form: the platform shell resolves it from the
+/// system's scroll bar preference (macOS's "Show scroll bars"), which already
+/// decides "automatically based on mouse or trackpad" for the devices
+/// attached — the resolved value is one of the other three.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scrollbar {
+    /// Follows the system's scroll bar preference, live.
+    #[default]
+    System,
+    /// Shows while scrolling and fades a second after the last scroll.
+    Auto,
+    /// Always shown, in a track of its own the text never runs under.
+    Always,
+    /// Never shown.
+    Never,
+}
+
+impl Scrollbar {
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("system", Self::System),
+        ("auto", Self::Auto),
+        ("always", Self::Always),
+        ("never", Self::Never),
+    ];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[terminal] cursor_radius` and `cursor_glow`: the cursor's **drawing**
 /// numbers.
 ///
@@ -1222,6 +1265,9 @@ pub struct Settings {
     /// `[terminal] keep_running`: when the programs outlive bateri
     /// ([`KeepRunning`]). Doesn't enter `TerminalOptions`.
     pub keep_running: KeepRunning,
+    /// `[terminal] scrollbar`: when the scroll bar shows ([`Scrollbar`]).
+    /// Doesn't enter `TerminalOptions`.
+    pub scrollbar: Scrollbar,
     /// `[remote] hosts`: the remote hosts' mark patterns, in the file's order
     /// (matching is [`host_mark`]). Empty by default.
     pub remote_hosts: Vec<HostRule>,
@@ -1271,6 +1317,7 @@ impl Default for Settings {
             confirm_close: ConfirmClose::default(),
             restore_windows: RestoreWindows::default(),
             keep_running: KeepRunning::default(),
+            scrollbar: Scrollbar::default(),
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
@@ -1334,6 +1381,7 @@ pub enum SettingsEdit {
     ConfirmClose(ConfirmClose),
     RestoreWindows(RestoreWindows),
     KeepRunning(KeepRunning),
+    Scrollbar(Scrollbar),
     Theme(String),
     LightTheme(String),
     DarkTheme(String),
@@ -1420,6 +1468,7 @@ impl SettingsEdit {
             Self::ConfirmClose(_) => ("terminal", "confirm_close", "terminal.confirm_close"),
             Self::RestoreWindows(_) => ("terminal", "restore_windows", "terminal.restore_windows"),
             Self::KeepRunning(_) => ("terminal", "keep_running", "terminal.keep_running"),
+            Self::Scrollbar(_) => ("terminal", "scrollbar", "terminal.scrollbar"),
             Self::Theme(_) => ("appearance", "theme", "appearance.theme"),
             Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
             Self::DarkTheme(_) => ("appearance", "dark_theme", "appearance.dark_theme"),
@@ -1467,6 +1516,7 @@ impl SettingsEdit {
             Self::ConfirmClose(confirm) => confirm.name().into(),
             Self::RestoreWindows(restore) => restore.name().into(),
             Self::KeepRunning(keep) => keep.name().into(),
+            Self::Scrollbar(scrollbar) => scrollbar.name().into(),
             Self::Osc52(mode) => mode.name().into(),
             Self::CursorMotion(motion) => motion.name().into(),
             Self::ReduceMotion(reduce) => reduce.name().into(),
@@ -1528,6 +1578,11 @@ impl Settings {
 [terminal]
 # 0 to 100000. Lines of history kept above the screen.
 scrollback = 10000
+# "system" | "auto" | "always" | "never". The scroll bar at the right edge:
+# system follows "Show scroll bars" in System Settings > Appearance, auto
+# shows it while you scroll and fades it a second later, always keeps it on
+# screen in a track of its own that the text makes room for, never hides it.
+scrollbar = "system"
 # "block" | "underline" | "beam". The cursor's default shape: block fills the
 # cell, underline sits below it, beam stands at its left edge. Programs such as
 # vim may ask for a different shape while they run; this is the shape when none
@@ -1882,6 +1937,16 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = terminal.get("scrollbar") {
+                    parsed.settings.scrollbar = named_enum(
+                        text,
+                        item,
+                        "terminal.scrollbar",
+                        Scrollbar::NAMES,
+                        fallback.scrollbar,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("terminal") => {
                 parsed.settings.scrollback = fallback.scrollback;
@@ -1892,6 +1957,7 @@ stats_interval = 3
                 parsed.settings.confirm_close = fallback.confirm_close;
                 parsed.settings.restore_windows = RestoreWindows::Layout;
                 parsed.settings.keep_running = fallback.keep_running;
+                parsed.settings.scrollbar = fallback.scrollbar;
             }
             None => {}
         }
@@ -2187,6 +2253,7 @@ stats_interval = 3
             caret: self.caret != new.caret || self.blink_interval != new.blink_interval,
             remote: self.remote_hosts != new.remote_hosts || self.remote_files != new.remote_files,
             stats: self.remote_stats != new.remote_stats,
+            scrollbar: self.scrollbar != new.scrollbar,
         }
     }
 
@@ -2867,6 +2934,12 @@ pub struct Changes {
     /// sampling interval go to every pane. **Not** folded into
     /// [`Self::remote`]: that field re-sends the pattern list to every session.
     pub stats: bool,
+    /// [`Settings::scrollbar`] changed: the platform shell resolves it again
+    /// (with the system's preference) and gives the panes the resolved form.
+    /// A field of its own, for [`Self::caret`]'s reason: the key doesn't
+    /// enter `TerminalOptions`, and its applier — the resolution the system's
+    /// preference notification shares — is no other section's.
+    pub scrollbar: bool,
 }
 
 /// Parses the text into a TOML document; a one-line diagnostic if it can't be
@@ -3676,6 +3749,7 @@ mod tests {
             ("terminal", "cursor_blink_interval"),
             ("terminal", "confirm_close"),
             ("terminal", "restore_windows"),
+            ("terminal", "scrollbar"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -3850,6 +3924,7 @@ mod tests {
                 caret: false,
                 remote: false,
                 stats: false,
+                scrollbar: false,
             }
         );
         assert_eq!(
@@ -3894,6 +3969,7 @@ mod tests {
             confirm_close: ConfirmClose::Always,
             restore_windows: RestoreWindows::Off,
             keep_running: KeepRunning::Quit,
+            scrollbar: Scrollbar::Always,
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
@@ -4066,6 +4142,7 @@ mod tests {
             caret: false,
             remote: false,
             stats: false,
+            scrollbar: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
         assert_eq!(
@@ -4158,6 +4235,7 @@ mod tests {
                 caret: false,
                 remote: false,
                 stats: false,
+                scrollbar: false,
             }
         );
         assert_eq!(
@@ -4306,6 +4384,7 @@ found {found}; using \"spring\""
                 caret: false,
                 remote: false,
                 stats: false,
+                scrollbar: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -4394,6 +4473,7 @@ found {found}; using \"system\""
                 caret: false,
                 remote: false,
                 stats: false,
+                scrollbar: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -4899,6 +4979,94 @@ found 1.5; using 0.1"
     }
 
     #[test]
+    fn scrollbar_is_read_and_defaults_to_the_system() {
+        // Not in the file: the system's preference decides.
+        assert_eq!(clean("").scrollbar, Scrollbar::System);
+        for (value, expected) in [
+            ("system", Scrollbar::System),
+            ("auto", Scrollbar::Auto),
+            ("always", Scrollbar::Always),
+            ("never", Scrollbar::Never),
+        ] {
+            let text = format!("[terminal]\nscrollbar = \"{value}\"\n");
+            assert_eq!(clean(&text).scrollbar, expected, "{value}");
+        }
+        assert_eq!(Settings::for_unusable_file().scrollbar, Scrollbar::System);
+    }
+
+    #[test]
+    fn unrecognized_scrollbar_keeps_its_own_key() {
+        for (value, found) in [("\"Always\"", "\"Always\""), ("true", "a boolean")] {
+            let text = format!("[terminal]\nscrollback = 42\nscrollbar = {value}\n");
+            let (settings, diagnostic) = rejected(&text);
+            assert_eq!(
+                settings,
+                Settings {
+                    scrollback: 42,
+                    ..Settings::default()
+                },
+                "{value}"
+            );
+            assert_eq!(diagnostic.key, Some("terminal.scrollbar"), "{value}");
+            assert_eq!(diagnostic.line, Some(3), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`terminal.scrollbar` must be \"system\", \"auto\", \"always\" or \"never\", \
+                     found {found}; using \"system\""
+                )
+            );
+        }
+        // At save time the current value stands in; also when the section has
+        // the wrong type.
+        let current = Settings {
+            scrollbar: Scrollbar::Never,
+            ..Settings::default()
+        };
+        for text in ["[terminal]\nscrollbar = \"hidden\"\n", "terminal = 5\n"] {
+            let parsed = Settings::parse_keeping(text, &current).expect("parseable text");
+            assert_eq!(parsed.settings.scrollbar, Scrollbar::Never, "{text}");
+        }
+    }
+
+    #[test]
+    fn scrollbar_change_is_its_own_change() {
+        // Resolved and applied by the platform shell: nothing goes to the
+        // sessions, the font or the cursor, and the field says so alone.
+        let before = clean("");
+        let after = clean("[terminal]\nscrollbar = \"always\"\n");
+        assert_eq!(before.terminal(), after.terminal());
+        assert_eq!(
+            before.changes(&after),
+            Changes {
+                scrollbar: true,
+                ..Changes::default()
+            }
+        );
+    }
+
+    #[test]
+    fn scrollbar_write_keeps_comments_and_unknown_keys() {
+        let text = "[terminal]\nscrollbar = \"system\" # keep\nask_twice = true\n";
+        let written = Settings::with_edit(text, &SettingsEdit::Scrollbar(Scrollbar::Always))
+            .expect("editable text");
+        assert!(
+            written.contains("scrollbar = \"always\" # keep"),
+            "{written}"
+        );
+        assert!(written.contains("ask_twice = true"), "{written}");
+        assert_eq!(clean(&written).scrollbar, Scrollbar::Always);
+        // A file without the key gets it in its section, the rest untouched.
+        let written = Settings::with_edit(
+            "[terminal]\nscrollback = 5\n",
+            &SettingsEdit::Scrollbar(Scrollbar::Never),
+        )
+        .expect("editable text");
+        assert_eq!(clean(&written).scrollbar, Scrollbar::Never);
+        assert_eq!(clean(&written).scrollback, 5);
+    }
+
+    #[test]
     fn remote_integration_is_read_and_a_rejected_value_is_off() {
         assert!(clean("").remote_integration);
         assert!(!clean("[remote]\nintegration = false\n").remote_integration);
@@ -5268,6 +5436,7 @@ found 1.5; using 0.1"
                     caret: false,
                     remote: false,
                     stats: false,
+                    scrollbar: false,
                 },
                 "{text}"
             );
@@ -5332,6 +5501,7 @@ found 1.5; using 0.1"
                 caret: false,
                 remote: false,
                 stats: false,
+                scrollbar: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -5857,6 +6027,7 @@ cursor = \"spring\"
             SettingsEdit::ConfirmClose(confirm) => settings.confirm_close = confirm,
             SettingsEdit::RestoreWindows(restore) => settings.restore_windows = restore,
             SettingsEdit::KeepRunning(keep) => settings.keep_running = keep,
+            SettingsEdit::Scrollbar(scrollbar) => settings.scrollbar = scrollbar,
             SettingsEdit::Theme(name) => settings.theme = name,
             SettingsEdit::LightTheme(name) => settings.light_theme = name,
             SettingsEdit::DarkTheme(name) => settings.dark_theme = name,
@@ -5929,6 +6100,7 @@ cursor = \"spring\"
             SettingsEdit::ConfirmClose(ConfirmClose::Always),
             SettingsEdit::RestoreWindows(RestoreWindows::Layout),
             SettingsEdit::KeepRunning(KeepRunning::Quit),
+            SettingsEdit::Scrollbar(Scrollbar::Always),
             SettingsEdit::Theme("paper".to_owned()),
             SettingsEdit::LightTheme("paper".to_owned()),
             SettingsEdit::DarkTheme("ink".to_owned()),

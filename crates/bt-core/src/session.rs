@@ -8791,7 +8791,7 @@ impl Session {
             // holds the same lock, i.e. the range belongs to this mirror's text.
             let range = shell.dock_selection.and_then(|selection| selection.range());
             let link = hover_taken.as_deref().and_then(|hover| {
-                hover.dock_link(&shell.dock, cols.grid, input_rows, shell.dock_scroll)
+                hover.dock_link(&shell.dock, cols.input, input_rows, shell.dock_scroll)
             });
             (shell.local.state, change, range, shell.dock_scroll, link)
         };
@@ -8842,7 +8842,7 @@ impl Session {
             // dock — there is no input row to click.
             shown: input_rows,
             rows,
-            cols: cols.grid,
+            cols: cols.input,
             buffer_bytes: into.prebuffer.len() + into.buffer.len(),
         });
         dock
@@ -12526,7 +12526,7 @@ mod tests {
         assert!(!cursor.caret_in_dock, "{cursor:?}");
         let dock = session.dock(
             DockCols {
-                grid: 40,
+                input: 40,
                 context: 40,
             },
             Some(1),
@@ -13421,7 +13421,7 @@ mod tests {
         let mut dock_cells = Vec::new();
         let drawn = session.dock(
             DockCols {
-                grid: 60,
+                input: 60,
                 context: 60,
             },
             cursor.band_rows(),
@@ -15670,7 +15670,7 @@ mod tests {
         let mut runs = Vec::new();
         let dock = session.dock(
             DockCols {
-                grid: 40,
+                input: 40,
                 context: 40,
             },
             cursor.band_rows(),
@@ -15854,7 +15854,7 @@ mod tests {
         let mut chars = String::new();
         session.dock(
             DockCols {
-                grid: 60,
+                input: 60,
                 context: 60,
             },
             Some(0),
@@ -16317,7 +16317,7 @@ mod tests {
         let mut row = String::new();
         let dock = session.dock(
             DockCols {
-                grid: 40,
+                input: 40,
                 context: 40,
             },
             cursor.band_rows(),
@@ -16404,7 +16404,7 @@ mod tests {
         let mut count = 0;
         session.dock(
             DockCols {
-                grid: 40,
+                input: 40,
                 context: 40,
             },
             band,
@@ -16580,6 +16580,72 @@ mod tests {
         // `BUFFER` — with its wrapped visual rows.
         session.dock_select(SelectKind::Line, at(5, 2, CellHalf::Left));
         assert_eq!(session.selection_text().map(|text| text.len()), Some(100));
+        session.shutdown();
+    }
+
+    /// The dock is as wide as the window, not the grid: a grid that gives
+    /// columns up at its right edge (the drawing side's always-up scroll bar)
+    /// leaves the dock below it alone. The band `frame()` sizes and the rows
+    /// the dock draws come from one width, so a line that fits the dock is
+    /// one row even where the grid would wrap it.
+    #[test]
+    fn a_dock_wider_than_the_grid_wraps_at_its_own_width() {
+        let wake = Arc::new(TestWake::default());
+        // 40 `a` in a 40-column grid: two rows at the grid's 38 text columns,
+        // one at a 44-column dock's 42.
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}{}'; sleep 5",
+                anchored_prompt(1),
+                mirror(&format!("{}YQ==", "YWFh".repeat(13)), 40),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        for (cols, rows) in [(40, 2), (44, 1)] {
+            let cursor = session.frame(
+                |_| (),
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
+                &mut Clusters::default(),
+                ScrollGlide::default(),
+                DockBudget { share: 0.5, cols },
+            );
+            assert_eq!(cursor.input_rows, rows, "the band at {cols} columns");
+            let mut cells = Vec::new();
+            session.dock(
+                DockCols {
+                    input: cols,
+                    context: cols,
+                },
+                cursor.band_rows(),
+                &mut DockState::default(),
+                &mut DockContext::default(),
+                cursor.caret_in_dock,
+                &mut Vec::new(),
+                &mut Clusters::default(),
+                |cell| cells.push(cell),
+                |_| (),
+            );
+            let input = input_cells(&cells, cursor.input_rows);
+            let drawn: std::collections::BTreeSet<u16> = input
+                .iter()
+                .filter(|cell| cell.ch == Some('a'))
+                .map(|cell| cell.row)
+                .collect();
+            assert_eq!(
+                drawn.len(),
+                usize::from(cursor.input_rows),
+                "the band and the dock disagree at {cols} columns"
+            );
+            assert_eq!(
+                input.iter().filter(|cell| cell.ch == Some('a')).count(),
+                40,
+                "the line is not whole at {cols} columns"
+            );
+        }
         session.shutdown();
     }
 
@@ -21215,7 +21281,7 @@ e\\314\\201.'; sleep 5";
                 if session
                     .dock(
                         DockCols {
-                            grid: 80,
+                            input: 80,
                             context: 80,
                         },
                         Some(1),
@@ -23571,7 +23637,7 @@ e\\314\\201.'; sleep 5";
         let mut cells = Vec::new();
         session.dock(
             DockCols {
-                grid: 40,
+                input: 40,
                 context: 40,
             },
             cursor.band_rows(),

@@ -40,7 +40,7 @@ use bt_core::{
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
 use crate::metrics::CellMetrics;
-use crate::scrollbar::{ScrollbarLayout, THUMB_ALPHA};
+use crate::scrollbar::{HAIRLINE_ALPHA, Look, ScrollbarLayout, TRACK_ALPHA};
 
 /// Identical to `shaders/cell_bg.wgsl` -> `Instance`, field by field.
 ///
@@ -1184,6 +1184,10 @@ pub(crate) struct Frame {
     /// motion frames), and `clear` empties it so a frame that does not say
     /// draws no bar.
     scrollbar: Option<RoundedDraw>,
+    /// The wide form's track and hairline under the thumb
+    /// ([`Frame::set_scrollbar`]); `None` → thin, or no bar. Written and
+    /// emptied with the thumb.
+    scrollbar_track: Option<[Instance; 2]>,
     /// The number of **background** instances drawn; the caret is not counted.
     ///
     /// `make smoke`'s `cells=K` token reads this: the proof that the sink
@@ -1278,6 +1282,7 @@ impl Frame {
         // draws on a whole row.
         self.frac_px = 0.0;
         self.scrollbar = None;
+        self.scrollbar_track = None;
     }
 
     /// This frame's vertical origin, in **rows**: the content starts this much
@@ -2301,41 +2306,63 @@ impl Frame {
         })
     }
 
-    /// The scroll bar's thumb for this frame: `layout`'s rectangle in the
-    /// theme's foreground at the thumb's opacity times `alpha` (the bar's
-    /// visibility, [`crate::scrollbar::Scrollbar::alpha`]). Nothing when the
-    /// layout has no bar or the bar is fully transparent — a hidden bar costs
-    /// not one op.
+    /// The scroll bar for this frame, as `look` paints it
+    /// ([`crate::scrollbar::Scrollbar::look`]): the thumb is `layout`'s
+    /// rectangle at the look's width, in the theme's foreground at the
+    /// thumb's opacity times the bar's visibility; a widened bar adds its
+    /// track and the track's hairline under it, in proportion to the width.
+    /// Nothing when the layout has no bar or the look is fully transparent —
+    /// a hidden bar costs not one op.
     ///
     /// The thumb is a pill: `caret_fragment`'s rounded rectangle with the
     /// radius half its width, so the ends are round and the edges
     /// anti-aliased (the dock buttons' precedent — no new pipeline). The quad
     /// and the core are the same rectangle, because the bar is drawn in a
-    /// viewport at the window's origin ([`crate::Renderer`]'s plan).
+    /// viewport at the window's origin ([`crate::Renderer`]'s plan). The
+    /// track and hairline are square quads (`cell_bg`, the dock ground's
+    /// road), side by side so each reads at its own opacity.
     pub(crate) fn set_scrollbar(
         &mut self,
         layout: ScrollbarLayout,
-        alpha: f32,
+        look: Look,
         foreground: LinearRgba,
     ) {
-        self.scrollbar = (layout.drawable() && alpha > 0.0).then(|| {
-            let core = layout.thumb();
+        let shown = layout.drawable() && look.alpha > 0.0;
+        self.scrollbar = shown.then(|| {
+            let core = layout.thumb(look.wide);
             let [x0, y0, x1, y1] = core;
             RoundedDraw {
                 instance: Instance {
                     pos: [x0, y0],
                     size: [x1 - x0, y1 - y0],
-                    rgba: with_alpha(foreground, THUMB_ALPHA * alpha),
+                    rgba: with_alpha(foreground, look.thumb * look.alpha),
                 },
                 core,
                 shape: [(x1 - x0) * 0.5, 0.0, 0.0, 0.0],
             }
+        });
+        self.scrollbar_track = (shown && look.wide > 0.0).then(|| {
+            let quad = |[x0, y0, x1, y1]: [f32; 4], alpha: f32| Instance {
+                pos: [x0, y0],
+                size: [x1 - x0, y1 - y0],
+                rgba: with_alpha(foreground, alpha * look.wide * look.alpha),
+            };
+            let [track, hairline] = layout.track_parts();
+            [quad(track, TRACK_ALPHA), quad(hairline, HAIRLINE_ALPHA)]
         });
     }
 
     /// This frame's scroll bar thumb; `None` → no bar.
     pub(crate) fn scrollbar(&self) -> Option<RoundedDraw> {
         self.scrollbar
+    }
+
+    /// This frame's scroll bar track and hairline, drawn under the thumb;
+    /// empty → a thin bar, or none.
+    pub(crate) fn scrollbar_track(&self) -> &[Instance] {
+        self.scrollbar_track
+            .as_ref()
+            .map_or(&[], |parts| parts.as_slice())
     }
 
     /// The top of the dock's **drawn** band in window space — the floor of

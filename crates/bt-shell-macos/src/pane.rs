@@ -46,7 +46,9 @@ use bt_core::{
     SearchStatus, Session, SessionOptions, Settings, TabId, Theme, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
-use bt_gpu::{DisplayLink, GpuError, Layout, Pacer, Renderer, Stats, Surface, Waker};
+use bt_gpu::{
+    DisplayLink, GpuError, Layout, Pacer, Renderer, ScrollbarMode, Stats, Surface, Waker,
+};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -331,6 +333,10 @@ pub(crate) struct PaneLaunch {
     pub(crate) reduce_motion: bool,
     /// Resolved mode of the wheel.
     pub(crate) smooth_scroll: bool,
+    /// Resolved form of the scroll bar — in the birth package because the
+    /// grid's first size depends on it (the always-up form's reserve), and
+    /// that size is computed before the session is born.
+    pub(crate) scrollbar: ScrollbarMode,
     /// Inherited temporary point-size delta.
     pub(crate) zoom: Zoom,
     /// bateri's ssh masters: the application's registry, shared by every
@@ -980,6 +986,11 @@ pub(crate) struct PaneIvars {
     /// Resolved mode of the wheel — the search's trip to a match looks at it
     /// too; its live change is [`TerminalPane::set_smooth_scroll`].
     smooth_scroll: Cell<bool>,
+    /// Resolved form of the scroll bar: the grid's reserve
+    /// ([`TerminalPane::sync_geometry`]) reads it from the first geometry on,
+    /// the link gets it in `start_session`; its live change is
+    /// [`TerminalPane::set_scrollbar_mode`].
+    scrollbar: Cell<ScrollbarMode>,
     /// `Rc`: the renderer is pinned to the main thread (see `bt_gpu::DisplayLink`)
     /// and the link holds a copy too.
     renderer: Rc<Renderer>,
@@ -1425,6 +1436,7 @@ impl TerminalPane {
             integration,
             reduce_motion,
             smooth_scroll,
+            scrollbar,
             zoom,
             masters,
             keeper,
@@ -1466,6 +1478,7 @@ impl TerminalPane {
             font: RefCell::new(font),
             reduce_motion: Cell::new(reduce_motion),
             smooth_scroll: Cell::new(smooth_scroll),
+            scrollbar: Cell::new(scrollbar),
             renderer,
             layer,
             surface,
@@ -1908,7 +1921,7 @@ impl TerminalPane {
             Rc::clone(&self.ivars().renderer),
             session,
             Layout {
-                cols: grid.cols,
+                dock_cols: grid.dock_cols,
                 dock_rows: self.ivars().dock_rows.get(),
                 cell: grid.cell,
             },
@@ -1945,6 +1958,9 @@ impl TerminalPane {
         // The dock's typing effects are here for the same reason.
         link.set_cursor_motion(settings.cursor_motion);
         link.set_glyph_fx(settings.keypress, settings.erase);
+        // The scroll bar's form, for the same reason; the grid above was
+        // already sized with its reserve (`sync_geometry`).
+        link.set_scrollbar_mode(self.ivars().scrollbar.get());
         // Opening frame: `Session` is born dirty, we open the link once by hand.
         link.request_frame();
         let _ = self.ivars().link.set(link);
@@ -2307,6 +2323,31 @@ impl TerminalPane {
         }
     }
 
+    /// Gives the pane the scroll bar's **resolved** form
+    /// (`AppDelegate::scrollbar_mode`). A no-op on the same form. A new one
+    /// goes to the link, and when the always-up form comes or goes the grid
+    /// is resized by the track through the one geometry path
+    /// ([`TerminalPane::refresh_geometry`]: the PTY's size, the mouse's
+    /// metrics and the link's, the dock's columns staying the window's).
+    ///
+    /// **The split's proportions are not touched**: no `equalize`, and the
+    /// smallest pane's size ([`TerminalPane::min_size`]) does not grow by the
+    /// track — a pane already at its narrowest gives the track's columns up
+    /// from its text rather than having the user's layout reset when a mouse
+    /// is plugged in.
+    pub(crate) fn set_scrollbar_mode(&self, mode: ScrollbarMode) {
+        let before = self.ivars().scrollbar.replace(mode);
+        if before == mode {
+            return;
+        }
+        if let Some(link) = self.ivars().link.get() {
+            link.set_scrollbar_mode(mode);
+        }
+        if before.reserves() != mode.reserves() {
+            self.refresh_geometry();
+        }
+    }
+
     /// Gives the view the scrolling's **resolved** mode
     /// (`AppDelegate::smooth_scroll`). To the view, not the link: the decision
     /// is made in the event's classification, in `scrollWheel:`, and the
@@ -2339,7 +2380,12 @@ impl TerminalPane {
 
     /// The smallest pane's size, in points: a pane whose grid
     /// is exactly [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`] — the inverse of
-    /// [`split_into_grid`] (left gutter + columns, dock reserve + rows). The
+    /// [`split_into_grid`] (left gutter + columns, dock reserve + rows)
+    /// **without the scroll bar's always-up reserve**, on purpose: with it,
+    /// a mouse plugged in would make saved and current split layouts not fit
+    /// and reset the user's proportions, and the dividers at the limit would
+    /// freeze. A pane at its narrowest gives the track's columns up from its
+    /// text instead — splits too, in that form. The
     /// measure is this pane's cell and dock reserve: the point-size delta is
     /// per pane. The split's gate ([`TerminalPane::grid_fits`]) and the
     /// resizing's limit (`SplitView::resize`) come from here. `None` if not
@@ -2896,6 +2942,7 @@ impl TerminalPane {
                 grid.rows,
                 grid.cell,
                 self.ivars().dock_rows.get(),
+                grid.dock_cols,
             );
         }
     }
@@ -2943,11 +2990,16 @@ impl TerminalPane {
             Source::Font,
             font_messages(renderer.font_notice()),
         );
+        // The scroll bar's reserve: a function of its form alone
+        // ([`ScrollbarMode::reserve_px`]), so neither the alternate screen
+        // nor the history moves the grid.
+        let reserve = self.ivars().scrollbar.get().reserve_px(cell);
         Some(split_into_grid(
             width_px,
             height_px,
             cell,
             self.ivars().dock_rows.get(),
+            reserve,
         ))
     }
 }

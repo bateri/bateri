@@ -3,6 +3,7 @@ use bt_core::{Block, CaretShape, Cell, Cursor, SearchRun, SelectionRun, Theme, U
 use super::*;
 use crate::Renderer;
 use crate::glyph_fx::{Effect, Fx, Kind};
+use crate::scrollbar::Look;
 use bt_atlas::fixture::{CHAIN_FAMILIES, ONE_CELL_WIDE_CHAR, PAIR_CHAR, PROPORTIONAL_FAMILY};
 use bt_atlas::{Face, SizeClass};
 use bt_core::CaretStyle;
@@ -1571,9 +1572,9 @@ fn srgb_byte(linear: f32) -> u8 {
 }
 
 /// A frame with a dock and a scroll bar at the bottom of its travel, drawn
-/// at `alpha` (`None` → the bar is never set): the frame, the thumb and the
+/// with `look` (`None` → the bar is never set): the frame, the thumb and the
 /// floor the track ends at.
-fn scroll_bar_frame(edge: usize, alpha: Option<f32>) -> (Frame, [f32; 4], f32) {
+fn scroll_bar_frame(edge: usize, look: Option<Look>) -> (Frame, [f32; 4], f32) {
     let cell = grid(8, 16);
     let mut frame = Frame::default();
     frame.clear(cell, CaretStyle::default());
@@ -1588,10 +1589,11 @@ fn scroll_bar_frame(edge: usize, alpha: Option<f32>) -> (Frame, [f32; 4], f32) {
         visible: 2,
     };
     let layout = crate::scrollbar::ScrollbarLayout::new(Some(position), edge as f32, floor, cell);
-    if let Some(alpha) = alpha {
-        frame.set_scrollbar(layout, alpha, WHITE);
+    if let Some(look) = look {
+        frame.set_scrollbar(layout, look, WHITE);
     }
-    (frame, layout.thumb(), floor)
+    let wide = look.map_or(0.0, |look| look.wide);
+    (frame, layout.thumb(wide), floor)
 }
 
 #[test]
@@ -1602,7 +1604,7 @@ fn a_shown_scroll_bar_blends_the_foreground_and_stops_above_the_dock() {
     // ground, the dock's band is the dock's.
     const EDGE: usize = 64;
     let r = renderer();
-    let (frame, [x0, y0, x1, y1], floor) = scroll_bar_frame(EDGE, Some(1.0));
+    let (frame, [x0, y0, x1, y1], floor) = scroll_bar_frame(EDGE, Some(Look::auto(1.0)));
     assert!(
         y1 < floor,
         "the thumb reaches into the dock: {y1} ≥ {floor}"
@@ -1627,12 +1629,67 @@ fn a_shown_scroll_bar_blends_the_foreground_and_stops_above_the_dock() {
 }
 
 #[test]
+fn an_always_up_scroll_bar_paints_its_track_inside_the_reserve() {
+    // The wide form: a faint track the full height down to the dock, a
+    // brighter hairline at its left edge, the thumb at its quieter opacity
+    // over the track — and nothing left of the track, the room the grid
+    // gives up.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let (frame, [x0, y0, x1, y1], floor) = scroll_bar_frame(EDGE, Some(Look::ALWAYS));
+    let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+    let near = |(r, g, b): (u8, u8, u8), linear: f32, what: &str| {
+        let expected = srgb_byte(linear);
+        assert!(
+            r.abs_diff(expected) <= 2 && r == g && g == b,
+            "{what}: {:02x?} ≠ ~{expected:02x}",
+            (r, g, b)
+        );
+    };
+    let strip_x = EDGE as f32 - crate::scrollbar::Mode::Always.reserve_px(grid(8, 16));
+    let mid_y = ((y0 + y1) / 2.0) as usize;
+    let track = crate::scrollbar::TRACK_ALPHA;
+    // Over the track the thumb blends twice: the track, then the thumb.
+    let thumb = crate::scrollbar::ALWAYS_THUMB_ALPHA;
+    near(
+        pixel_at(&pixels, EDGE, ((x0 + x1) / 2.0) as usize, mid_y),
+        thumb + track * (1.0 - thumb),
+        "the thumb",
+    );
+    near(
+        pixel_at(&pixels, EDGE, strip_x as usize, mid_y),
+        crate::scrollbar::HAIRLINE_ALPHA,
+        "the hairline",
+    );
+    near(
+        pixel_at(&pixels, EDGE, strip_x as usize + 1, mid_y),
+        track,
+        "the track",
+    );
+    near(
+        pixel_at(&pixels, EDGE, strip_x as usize + 1, (floor - 1.0) as usize),
+        track,
+        "the track's foot",
+    );
+    assert_eq!(
+        pixel_at(&pixels, EDGE, strip_x as usize - 1, mid_y),
+        (0, 0, 0),
+        "the bar painted left of its reserve"
+    );
+    assert_eq!(
+        pixel_at(&pixels, EDGE, strip_x as usize + 1, (floor + 1.0) as usize),
+        (0xff, 0, 0),
+        "the track ran into the dock"
+    );
+}
+
+#[test]
 fn a_hidden_scroll_bar_changes_no_pixel() {
     // A fully faded bar is not a transparent quad, it is no op at all: the
     // frame is byte for byte the one that never had a bar.
     const EDGE: usize = 64;
     let r = renderer();
-    let (hidden, ..) = scroll_bar_frame(EDGE, Some(0.0));
+    let (hidden, ..) = scroll_bar_frame(EDGE, Some(Look::auto(0.0)));
     assert!(hidden.scrollbar().is_none(), "a hidden bar planned a draw");
     let (never, ..) = scroll_bar_frame(EDGE, None);
     assert_eq!(

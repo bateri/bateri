@@ -13,6 +13,9 @@ font size), `clipboard.rs` and the `ShellWake` of `app.rs`
 `crates/bt-gpu/src/motion.rs` and `link.rs` (applying cursor motion and Reduce
 Motion; the place where the three-valued setting comes down to a single `bool`
 is `resolve_reduce_motion` in `crates/bt-shell-macos/src/app.rs`),
+`crates/bt-gpu/src/scrollbar.rs` (the scroll bar: its sizes, timing, forms and
+the track `"always"` reserves; the system's preference is resolved by
+`resolve_scrollbar` in `crates/bt-shell-macos/src/app.rs`),
 `crates/bt-shell-common/src/child.rs` (which shell runs, where the wrapper
 script is), `shell_integration_env` in `crates/bt-shell-macos/src/app.rs`
 (whether shell integration is set up, and with which environment),
@@ -72,7 +75,9 @@ right. Remote Files shows `[remote] integration` at the top ("Set up shell
 integration on servers"; see [Remote shell
 integration](#remote-shell-integration)), then the eight preview/download keys
 of `[remote]` and the two keys of the load indicator (`stats`,
-`stats_interval`; eleven keys in all); on folder rows Change… opens a folder
+`stats_interval`; eleven keys in all), and Appearance also carries
+`[terminal] scrollbar` ("Scroll bar"), because it changes how the window
+looks; on folder rows Change… opens a folder
 picker (a folder under your home directory is written as `~/…`), on the
 preview folder Show in Finder opens it, and the "In use" row shows the total
 size of the copies in the folder — Clear Now deletes the previews at once (a
@@ -135,6 +140,11 @@ enough.
 [terminal]
 # 0 to 100000. Lines of history kept above the screen.
 scrollback = 10000
+# "system" | "auto" | "always" | "never". The scroll bar at the right edge:
+# system follows "Show scroll bars" in System Settings > Appearance, auto
+# shows it while you scroll and fades it a second later, always keeps it on
+# screen in a track of its own that the text makes room for, never hides it.
+scrollbar = "system"
 # "block" | "underline" | "beam". The cursor's default shape: block fills the
 # cell, underline sits below it, beam stands at its left edge. Programs such as
 # vim may ask for a different shape while they run; this is the shape when none
@@ -452,6 +462,7 @@ would believe they had ended.
 ```toml
 [terminal]
 scrollback = 10000
+scrollbar = "system"
 cursor = "block"
 cursor_blink = "off"
 cursor_radius = 0.10
@@ -466,6 +477,7 @@ keep_running = "crash"
 | key | type | default | meaning |
 |---|---|---|---|
 | `scrollback` | integer, `0`–`100000` | `10000` | number of lines kept in history |
+| `scrollbar` | `"system"` \| `"auto"` \| `"always"` \| `"never"` | `"system"` | when the scroll bar at the right edge shows |
 | `cursor` | `"block"` \| `"underline"` \| `"beam"` | `"block"` | the cursor's **default** shape |
 | `cursor_blink` | `"auto"` \| `"on"` \| `"off"` | `"off"` | whether the cursor blinks |
 | `cursor_radius` | decimal, `0.0`–`0.5` | `0.10` | roundness of the cursor's corners, as a fraction of the cell's **height** |
@@ -486,6 +498,36 @@ keep_running = "crash"
   lowering it deletes the extra lines at that moment, and raising it later
   does not bring back what was deleted. In an editor that saves by itself as
   you type, an intermediate value (`100000` → `1`) is a save too.
+
+`scrollbar` says when the scroll bar at the grid's right edge shows. It runs
+from under the title bar to the top of the dock and is drawn only where there
+is history to scroll: not in full-screen programs (vim, less) and not before
+the first line has gone into history.
+
+- `"system"` (the default) follows **Show scroll bars** in System Settings ▸
+  Appearance, live: "When scrolling" behaves as `"auto"`, "Always" as
+  `"always"`, and "Automatically based on mouse or trackpad" as whichever of
+  the two macOS picks for the devices attached — plugging in a mouse can
+  switch it while the window is open.
+- `"auto"` shows a thin bar while you scroll — the trackpad or the wheel,
+  ⌘PgUp/⌘PgDn/⌘Home/⌘End, Shift+PgUp, a jump to a search match — and fades
+  it out about a second after the last scroll. Output arriving below never
+  shows it, and while it waits to fade the window draws nothing.
+- `"always"` keeps a wider bar on screen in a faint track of its own, and the
+  text makes room for the track: the grid has that many fewer columns, so
+  nothing runs under the bar. The dock below stays full width. The track is
+  kept in full-screen programs and before there is history too, empty, so a
+  program never sees its window resized when it starts or exits.
+- `"never"` never shows it.
+- It takes effect the moment you save. Moving to or from `"always"` resizes
+  the grid by the track's width; in a split, the panes keep their
+  proportions, and a pane already at its narrowest gives the track's columns
+  up from its text.
+- Reduce Motion leaves the bar alone: its appearing and fading are not
+  movement.
+- In Settings it is Appearance ▸ "Scroll bar:" — Follow System Settings, When
+  scrolling, Always, Never; under Follow System Settings the line below says
+  what the system's preference gives right now.
 
 `cursor` only sets the **default**: the application in the terminal can
 change the shape with DECSCUSR (`\e[5 q`) and that request is honored — if vim
@@ -1482,7 +1524,7 @@ is text in the form `"#rrggbb"` (uppercase works too; no `#rgb` and no alpha).
 | key | meaning |
 |---|---|
 | `background` | default background, the window's backdrop |
-| `foreground` | default foreground; the scroll bar's thumb, translucent |
+| `foreground` | default foreground; the scroll bar's thumb and its track, translucent |
 | `dim` | default foreground written dim (SGR 2) |
 | `accent` | accent; the mark of a **running** command |
 | `cursor` | the color of the cursor block |

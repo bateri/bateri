@@ -30,10 +30,10 @@ use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
     CursorBlink, CursorMotion, DownloadConflict, Erase, KeepRunning, Keypress,
     LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion, RemoteStatsMode,
-    RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME, Settings, SettingsEdit,
-    ShellIntegration, SmoothScroll, UnfocusedCaret,
+    RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME, Scrollbar, Settings,
+    SettingsEdit, ShellIntegration, SmoothScroll, UnfocusedCaret,
 };
-use bt_gpu::FontNotice;
+use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{
@@ -194,11 +194,12 @@ enum Key {
     RemoteIntegration,
     RestoreWindows,
     KeepRunning,
+    Scrollbar,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 35] = [
+    const ALL: [Key; 36] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -234,6 +235,7 @@ impl Key {
         Key::RemoteIntegration,
         Key::RestoreWindows,
         Key::KeepRunning,
+        Key::Scrollbar,
     ];
 
     fn tag(self) -> NSInteger {
@@ -252,6 +254,7 @@ impl Key {
             Key::ConfirmClose => "terminal.confirm_close",
             Key::RestoreWindows => "terminal.restore_windows",
             Key::KeepRunning => "terminal.keep_running",
+            Key::Scrollbar => "terminal.scrollbar",
             Key::Clipboard => "clipboard.osc52",
             Key::Scrollback => "terminal.scrollback",
             Key::ShellIntegration => "shell.integration",
@@ -414,12 +417,57 @@ fn keep_running_note(keep: KeepRunning) -> &'static str {
     }
 }
 
+impl Choice for Scrollbar {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            Scrollbar::System => "Follow System Settings",
+            Scrollbar::Auto => "When scrolling",
+            Scrollbar::Always => "Always",
+            Scrollbar::Never => "Never",
+        }
+    }
+}
+
+/// The note under "Scroll bar:": under "Follow System Settings" it says what
+/// the system's preference gives **right now** (`resolved`, the setting and
+/// the system merged), in the popup's own words — "Automatically based on
+/// mouse or trackpad" resolves by device, so the choice in System Settings
+/// alone would not tell. Nothing under the other values: they say it
+/// themselves. Pure.
+fn scrollbar_note(setting: Scrollbar, resolved: ScrollbarMode) -> Option<&'static str> {
+    match (setting, resolved) {
+        (Scrollbar::System, ScrollbarMode::Auto) => {
+            Some("Right now that is When scrolling, from System Settings \u{203a} Appearance.")
+        }
+        (Scrollbar::System, ScrollbarMode::Always) => {
+            Some("Right now that is Always, from System Settings \u{203a} Appearance.")
+        }
+        _ => None,
+    }
+}
+
+/// The resolved answers some rows explain — the setting merged with the
+/// system's (`app`'s resolvers). In the window they decide notes and
+/// overrides, never a value: the value shown is always the file's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Resolved {
+    /// Reduce Motion's resolved answer ([`motion_override`]).
+    pub(crate) reduce: bool,
+    /// The scroll bar's resolved form ([`scrollbar_note`]).
+    pub(crate) scrollbar: ScrollbarMode,
+}
+
 /// A row's description that follows the file's value; `None` → the row's
 /// fixed one. The window keeps no state of its own: the text is chosen on
-/// every refresh from the settings it shows.
-fn row_description(key: Key, settings: &Settings) -> Option<&'static str> {
+/// every refresh from the settings it shows (and, for "Scroll bar:", what
+/// the system resolves them to).
+fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<&'static str> {
     match key {
         Key::KeepRunning => Some(keep_running_note(settings.keep_running)),
+        Key::Scrollbar => scrollbar_note(settings.scrollbar, resolved.scrollbar),
         _ => None,
     }
 }
@@ -926,6 +974,7 @@ struct Controls {
     size: Number,
     line_height: Number,
     letter_spacing: Number,
+    scrollbar: Retained<NSPopUpButton>,
     shape: Retained<NSPopUpButton>,
     blink: Retained<NSPopUpButton>,
     blink_speed: Slide,
@@ -1105,6 +1154,7 @@ define_class!(
                 Key::ConfirmClose => choice_at(index).map(SettingsEdit::ConfirmClose),
                 Key::RestoreWindows => choice_at(index).map(SettingsEdit::RestoreWindows),
                 Key::KeepRunning => choice_at(index).map(SettingsEdit::KeepRunning),
+                Key::Scrollbar => choice_at(index).map(SettingsEdit::Scrollbar),
                 Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
                 Key::Shape => choice_at(index).map(SettingsEdit::Cursor),
                 Key::Blink => choice_at(index).map(SettingsEdit::CursorBlink),
@@ -1426,13 +1476,14 @@ impl SettingsWindow {
     /// The file's state (`state`) and the write slot (`write`) build the lock,
     /// the banner and the row diagnostics ([`status`]); since every refresh
     /// rebuilds all of them from scratch no trace of a healed state is left.
-    /// `reduce` is Reduce Motion's **resolved** answer (setting + system):
-    /// whether the motion rows are overridden comes from it
-    /// ([`motion_override`]), not from the setting itself.
+    /// `resolved` holds the **resolved** answers (setting + system): whether
+    /// the motion rows are overridden comes from Reduce Motion's
+    /// ([`motion_override`]), not from the setting itself, and the scroll
+    /// bar's note from the form "system" gives right now ([`scrollbar_note`]).
     pub(crate) fn refresh(
         &self,
         settings: &Settings,
-        reduce: bool,
+        resolved: Resolved,
         state: &FileState,
         write: &[String],
         embedded: &[&str],
@@ -1481,6 +1532,7 @@ impl SettingsWindow {
             settings.font.letter_spacing,
             &decimal_label(settings.font.letter_spacing),
         );
+        select_choice(&c.scrollbar, settings.scrollbar);
 
         select_choice(&c.shape, settings.cursor);
         select_choice(&c.blink, settings.cursor_blink);
@@ -1540,7 +1592,7 @@ impl SettingsWindow {
 
         let status = status(state, write);
         for row in &c.rows {
-            let forced = motion_override(row.key, settings, reduce);
+            let forced = motion_override(row.key, settings, resolved.reduce);
             let depends = match row.key {
                 Key::LightTheme | Key::DarkTheme => follows,
                 Key::BlinkSpeed => blinks,
@@ -1557,7 +1609,7 @@ impl SettingsWindow {
             row.set_note(
                 diagnostic,
                 forced.map(|forced| forced.note),
-                row_description(row.key, settings),
+                row_description(row.key, settings, resolved),
                 enabled,
             );
         }
@@ -2131,6 +2183,7 @@ impl SettingsWindow {
             0.1,
             56.0,
         );
+        let scrollbar = self.popup::<Scrollbar>(Key::Scrollbar);
         let mut appearance = Form::new(mtm);
         appearance.row(Key::Theme, "Theme:", &theme, &[&theme], None);
         appearance.row(
@@ -2167,6 +2220,15 @@ impl SettingsWindow {
             "Letter spacing:",
             &number_view(mtm, &letter_spacing),
             &number_controls(&letter_spacing),
+            None,
+        );
+        // Under "Follow System Settings" the note says what that gives right
+        // now ([`row_description`]).
+        appearance.row(
+            Key::Scrollbar,
+            "Scroll bar:",
+            &scrollbar,
+            &[&scrollbar],
             None,
         );
 
@@ -2426,6 +2488,7 @@ impl SettingsWindow {
             size,
             line_height,
             letter_spacing,
+            scrollbar,
             shape,
             blink,
             blink_speed,
@@ -2896,7 +2959,7 @@ mod tests {
         let text = "[terminal]\nscrollback = []\ncursor = []\ncursor_blink = []\n\
                     cursor_radius = []\ncursor_glow = []\ncursor_unfocused = []\n\
                     cursor_blink_interval = []\nconfirm_close = []\n\
-                    restore_windows = []\nkeep_running = []\n\
+                    restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
@@ -2920,6 +2983,7 @@ mod tests {
                 Key::ConfirmClose => SettingsEdit::ConfirmClose(ConfirmClose::Never),
                 Key::RestoreWindows => SettingsEdit::RestoreWindows(RestoreWindows::Off),
                 Key::KeepRunning => SettingsEdit::KeepRunning(KeepRunning::Quit),
+                Key::Scrollbar => SettingsEdit::Scrollbar(Scrollbar::Never),
                 Key::Clipboard => SettingsEdit::Osc52(Osc52::Off),
                 Key::Scrollback => SettingsEdit::Scrollback(1),
                 Key::ShellIntegration => SettingsEdit::ShellIntegration(ShellIntegration::Off),
@@ -3013,6 +3077,7 @@ mod tests {
         check::<ConfirmClose>();
         check::<RestoreWindows>();
         check::<KeepRunning>();
+        check::<Scrollbar>();
         check::<ShellIntegration>();
         check::<CaretShape>();
         check::<CursorBlink>();
@@ -3031,19 +3096,26 @@ mod tests {
     /// only what ends the programs anyway; no other row's note moves.
     #[test]
     fn keep_running_note_follows_the_value() {
+        // A scroll bar value with no note of its own: this test asks about
+        // `keep_running` alone.
         let with = |keep| Settings {
             keep_running: keep,
+            scrollbar: Scrollbar::Auto,
             ..Settings::default()
         };
+        let resolved = Resolved {
+            reduce: false,
+            scrollbar: ScrollbarMode::Auto,
+        };
         assert_eq!(
-            row_description(Key::KeepRunning, &with(KeepRunning::Update)),
+            row_description(Key::KeepRunning, &with(KeepRunning::Update), resolved),
             Some("Restarting the Mac ends them.")
         );
         assert_eq!(
-            row_description(Key::KeepRunning, &with(KeepRunning::Crash)),
+            row_description(Key::KeepRunning, &with(KeepRunning::Crash), resolved),
             Some("Restarting the Mac ends them.")
         );
-        let quit = row_description(Key::KeepRunning, &with(KeepRunning::Quit))
+        let quit = row_description(Key::KeepRunning, &with(KeepRunning::Quit), resolved)
             .expect("the row has a note");
         assert!(
             quit.starts_with("Programs keep running after you quit"),
@@ -3053,7 +3125,55 @@ mod tests {
         assert!(quit.ends_with("Restarting the Mac ends them."), "{quit}");
         for key in Key::ALL.into_iter().filter(|&key| key != Key::KeepRunning) {
             assert_eq!(
-                row_description(key, &with(KeepRunning::Quit)),
+                row_description(key, &with(KeepRunning::Quit), resolved),
+                None,
+                "{key:?}"
+            );
+        }
+    }
+
+    /// "Scroll bar:"'s note says what "Follow System Settings" gives right
+    /// now — the system's resolved form, which a mouse plugged in can change —
+    /// and nothing under the values that say it themselves; no other row's
+    /// note moves.
+    #[test]
+    fn scrollbar_note_follows_what_the_system_gives() {
+        let with = |scrollbar| Settings {
+            scrollbar,
+            ..Settings::default()
+        };
+        let resolved = |scrollbar| Resolved {
+            reduce: false,
+            scrollbar,
+        };
+        let system = with(Scrollbar::System);
+        let hiding = row_description(Key::Scrollbar, &system, resolved(ScrollbarMode::Auto))
+            .expect("the system's form has a note");
+        assert!(hiding.contains("When scrolling"), "{hiding}");
+        let always = row_description(Key::Scrollbar, &system, resolved(ScrollbarMode::Always))
+            .expect("the system's form has a note");
+        assert!(always.contains("Always"), "{always}");
+        assert_ne!(hiding, always, "the note did not follow the system");
+        // The note names the popup's own titles.
+        assert!(hiding.contains(Scrollbar::Auto.title()), "{hiding}");
+        assert!(always.contains(Scrollbar::Always.title()), "{always}");
+        for (setting, mode) in [
+            (Scrollbar::Auto, ScrollbarMode::Auto),
+            (Scrollbar::Always, ScrollbarMode::Always),
+            (Scrollbar::Never, ScrollbarMode::Never),
+        ] {
+            assert_eq!(
+                row_description(Key::Scrollbar, &with(setting), resolved(mode)),
+                None,
+                "{setting:?}"
+            );
+        }
+        for key in Key::ALL
+            .into_iter()
+            .filter(|&key| key != Key::Scrollbar && key != Key::KeepRunning)
+        {
+            assert_eq!(
+                row_description(key, &system, resolved(ScrollbarMode::Always)),
                 None,
                 "{key:?}"
             );

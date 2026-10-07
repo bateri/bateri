@@ -722,11 +722,12 @@ pub(crate) struct Gpu {
     queue: wgpu::Queue,
     /// Cell backgrounds and the dock's ground; an instanced quad.
     ///
-    /// Blending is on but has **no customer today**: backgrounds always have
-    /// alpha `1.0` (`bt_core::LinearRgba`'s only constructor says so), so the
-    /// result equals an opaque write. It stays on because the first consumer
-    /// that wants alpha will come through this pipeline; turning it off would
-    /// make that day a silent defect.
+    /// Blending is on and **has a customer**: backgrounds always have alpha
+    /// `1.0` (`bt_core::LinearRgba`'s only constructor says so), so for them
+    /// the result equals an opaque write, but the always-up scroll bar's
+    /// track and hairline are translucent quads of this pipeline
+    /// (`Frame::scrollbar_track`). Turning blending off would paint them as a
+    /// solid bar of the foreground.
     cell_bg: wgpu::RenderPipeline,
     /// The caret: `cell_bg`'s vertex, its own fragment (`caret_fragment`).
     ///
@@ -1837,8 +1838,9 @@ impl Renderer {
     /// slide with the grid's offset or the band's. After every grid and band
     /// list, so text never covers it; before the dock, so the dock's opaque
     /// ground covers a track whose end has not yet followed a growing band.
-    /// One rounded quad from `caret_fragment` (the dock buttons' road), and
-    /// no op at all while the bar is hidden.
+    /// One rounded quad from `caret_fragment` (the dock buttons' road) over,
+    /// in the wide form, two square ones for the track and its hairline
+    /// (`cell_bg`), and no op at all while the bar is hidden.
     ///
     /// **Dock** — the second coordinate space, **last**. Its own viewport is
     /// structural: the dock must be exempt from the offset and building the
@@ -1969,6 +1971,7 @@ impl Renderer {
         // that has not caught up with a growing band.
         if let Some(thumb) = frame.scrollbar() {
             plan.ops.push(Op::Viewport(0.0));
+            plan.quads(frame.scrollbar_track());
             plan.rounded(
                 std::slice::from_ref(&thumb.instance),
                 thumb.core,

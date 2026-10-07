@@ -998,9 +998,40 @@ fn scene_scroll_bar() -> Scene {
     };
     let floor = frame.band_top_px(EDGE as f32);
     let layout = crate::scrollbar::ScrollbarLayout::new(Some(position), EDGE as f32, floor, cell);
-    frame.set_scrollbar(layout, 0.8, Theme::BATERI.foreground_linear());
+    frame.set_scrollbar(
+        layout,
+        crate::scrollbar::Look::auto(0.8),
+        Theme::BATERI.foreground_linear(),
+    );
     assert!(frame.scrollbar().is_some(), "no bar in the scene");
     ("scroll bar between the band and the dock", EDGE, frame)
+}
+
+/// The always-up scroll bar: its track and hairline (`cell_bg`) under the
+/// wide thumb, over a grid that ends where the track starts.
+fn scene_scroll_bar_always() -> Scene {
+    const EDGE: u32 = 128;
+    let cell = grid(CELL.0, CELL.1);
+    let mut frame = Frame::default();
+    frame.clear(cell, CaretStyle::default());
+    frame.push(bg_cell(0, 0, MIDTONE));
+    let position = bt_core::ScrollPosition {
+        room: 40,
+        top: 40.0,
+        visible: 4,
+    };
+    let layout =
+        crate::scrollbar::ScrollbarLayout::new(Some(position), EDGE as f32, EDGE as f32, cell);
+    frame.set_scrollbar(
+        layout,
+        crate::scrollbar::Look::ALWAYS,
+        Theme::BATERI.foreground_linear(),
+    );
+    assert!(
+        frame.scrollbar().is_some() && !frame.scrollbar_track().is_empty(),
+        "no track in the scene"
+    );
+    ("always-up scroll bar over its track", EDGE, frame)
 }
 
 fn scenes(m: CellMetrics) -> Vec<Scene> {
@@ -1031,6 +1062,7 @@ fn scenes(m: CellMetrics) -> Vec<Scene> {
         scene_search(),
         scene_three_viewports(m),
         scene_scroll_bar(),
+        scene_scroll_bar_always(),
     ];
     scenes.extend(scenes_fx(m));
     scenes

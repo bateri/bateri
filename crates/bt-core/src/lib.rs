@@ -13,7 +13,7 @@
 //! `DockEdit`, `EditCells` and the text's column (`DOCK_TEXT_COL`),
 //! `Wake` and the settings model's `Settings`, `SettingsEdit`, `Parsed`, `Diagnostic`,
 //! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose`, `RestoreWindows`,
-//! `KeepRunning` and the tables
+//! `KeepRunning`, `Scrollbar` and the tables
 //! of valid values (`NAMES`, `*_RANGE`), the journal's `Journal`,
 //! `JournalStore`, `JournalStream`, `JournalRecords` and `JournalCut` (the full
 //! list is the `pub use` block below). `Osc52` is the counterpart of
@@ -94,8 +94,8 @@ pub use settings::{
     LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, MAX_LETTER_SPACING, MAX_LINE_HEIGHT, MIN_SPACING,
     MarkSubject, Parsed, PreviewKeep, ReduceMotion, RemoteFiles, RemoteStatsMode,
     RemoteStatsSettings, RestoreWindows, SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE,
-    SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll, UnfocusedCaret,
-    bare_host, expand_home, format_size, parse_size,
+    SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
+    UnfocusedCaret, bare_host, expand_home, format_size, parse_size,
 };
 pub use shell::{
     ButtonState, DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor,

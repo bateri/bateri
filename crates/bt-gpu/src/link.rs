@@ -82,14 +82,17 @@
 //! clock wakes the link at the hold's end in the motion flavour and the fade
 //! is drawn as motion frames. What shows it is scrolling **input**
 //! ([`DisplayLink::poke_scrollbar`], through [`Waker::resume`]), never
-//! output.
+//! output; a change of its form ([`DisplayLink::set_scrollbar_mode`]) goes
+//! the same way. The always-up form has no timeline: it is drawn with the
+//! content and puts nothing in flight.
 //!
 //! The contract's consequence in one sentence: a window with a running
-//! command, **a blinking cursor or a scroll bar on screen** is **not idle**;
-//! every other window is idle and draws zero frames. All carry a named stop
-//! condition — the command ends; blink is off by default and even when on
-//! stops after keyboard silence ([`crate::blink::Blink`]); the bar fades out
-//! a second after the last scrolling input.
+//! command, **a blinking cursor or a scroll bar shown by scrolling** is **not
+//! idle**; every other window — one whose bar is always up included — is idle
+//! and draws zero frames. All carry a named stop condition — the command
+//! ends; blink is off by default and even when on stops after keyboard
+//! silence ([`crate::blink::Blink`]); the bar fades out a second after the
+//! last scrolling input.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -108,7 +111,7 @@ use crate::frame::Frame;
 use crate::glyph_fx::GlyphFx;
 use crate::metrics::CellMetrics;
 use crate::motion::Motion;
-use crate::scrollbar::{Scrollbar, ScrollbarLayout};
+use crate::scrollbar::{Look, Mode, Scrollbar, ScrollbarLayout};
 use crate::stats::Stats;
 use crate::surface::{self, Acquired};
 use crate::{GpuError, Renderer, Surface};
@@ -698,14 +701,22 @@ struct Core {
     /// `None` in a window without a dock, and **structurally**: the path is
     /// never set up in that session, not switched off by a condition.
     alt_screen_changed: Option<Box<dyn Fn()>>,
-    /// The grid's width, columns; goes into [`Session::dock`] so the dock can
-    /// wrap its overflowing row.
+    /// The dock's width, columns; goes into [`Session::frame`]'s budget and
+    /// [`Session::dock`] so the dock wraps its overflowing row at the width
+    /// it is drawn in.
+    ///
+    /// **Not the grid's width**: in the scroll bar's `Always` form the grid
+    /// gives the track's columns up and the dock below the bar does not —
+    /// `bt-shell`'s `split_into_grid` computes both. One value for every
+    /// reading here (the wrap's budget, the dock's columns, the context row's
+    /// budget): were one of them the grid's, the band would be a row short of
+    /// what the dock draws, or the dock's last columns would not count.
     ///
     /// `Cell`: [`DisplayLink::resize`] writes, the content frame reads — both
     /// on the main thread. Kept **separately** from `cell` because their
     /// sources differ: the cell size is refreshed only if the session accepts
     /// the size, the column count is the window's own answer.
-    cols: Cell<u16>,
+    dock_cols: Cell<u16>,
     /// `CellMetrics`, not a tuple: the grid geometry (cell size **and**
     /// gutter) arrives here from `Renderer::cell_metrics` through `bt-shell`
     /// as a type, **stays** a type while stored and enters `Frame::clear` as
@@ -1145,11 +1156,11 @@ impl Core {
             glide,
             // **The cap is a ratio** (`DOCK_MAX_SHARE`): `frame()`
             // reads the row count under the `Term` lock, this layer keeps no
-            // copy of it. The wrapping width is the grid's — the dock uses the
-            // same columns.
+            // copy of it. The wrapping width is the dock's, the one
+            // `Session::dock` draws at below (`Core::dock_cols`).
             DockBudget {
                 share: crate::frame::DOCK_MAX_SHARE,
-                cols: self.cols.get(),
+                cols: self.dock_cols.get(),
             },
         );
         // **The generation a second time, after `frame()`**: when `frame()`
@@ -1292,14 +1303,14 @@ impl Core {
             // freshness).
             let dock = self.session.dock(
                 DockCols {
-                    grid: self.cols.get(),
+                    input: self.dock_cols.get(),
                     // The context row's budget: **the same pixel width, a
                     // smaller step**. The dock shares the gutter with the grid
                     // (`Frame::dock_pos`), so the strip both rows occupy is the
                     // same; the only thing that differs is how many pixels a
                     // letter advances. The arithmetic is here, because
                     // `bt-core` does not see pixels.
-                    context: crate::frame::context_cols(self.cols.get(), self.cell.get()),
+                    context: crate::frame::context_cols(self.dock_cols.get(), self.cell.get()),
                 },
                 // The number passes from where it was computed, the dock does
                 // not derive it again (`caret_in_dock`'s precedent).
@@ -1756,7 +1767,7 @@ impl Core {
         self.scrollbar.set(bar);
         frame.set_scrollbar(
             self.scrollbar_layout.get(),
-            0.0,
+            Look::HIDDEN,
             self.theme.get().foreground_linear(),
         );
     }
@@ -2095,7 +2106,7 @@ pub struct DisplayLink {
     waker: Waker,
 }
 
-/// The frame path's **opening geometry**: the grid's width, the dock share and
+/// The frame path's **opening geometry**: the dock's width, the dock share and
 /// the cell size.
 ///
 /// The three are one type because they are born at the same moment from the
@@ -2110,9 +2121,10 @@ pub struct DisplayLink {
 /// banned exactly there.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
-    /// The grid's width, columns; needed for the dock to wrap its
+    /// The dock's width, columns — the window's, the scroll bar's reserve
+    /// not taken off (`Core::dock_cols`); needed for the dock to wrap its
     /// overflowing row. [`DisplayLink::resize`] refreshes it.
-    pub cols: u16,
+    pub dock_cols: u16,
     /// How many rows the dock has; `0` → no dock in this window.
     ///
     /// **The birth value is the session's constant** (is the
@@ -2186,7 +2198,7 @@ impl DisplayLink {
             dock_rows: Cell::new(layout.dock_rows),
             alt_screen: Cell::new(alt_screen),
             alt_screen_changed,
-            cols: Cell::new(layout.cols),
+            dock_cols: Cell::new(layout.dock_cols),
             cell: Cell::new(layout.cell),
             // Zero: no offset until the first content frame, and that frame
             // says the value. The mouse path reads a ceiling-aligned grid in
@@ -2387,6 +2399,26 @@ impl DisplayLink {
         let wanted = bar.poke(core.scrollbar_layout.get().drawable());
         core.scrollbar.set(bar);
         if wanted {
+            self.waker.resume();
+        }
+    }
+
+    /// The scroll bar's form changed — `bt-shell` gives the **resolved**
+    /// value (the setting combined with the system's preference; this crate
+    /// sees neither, the [`DisplayLink::set_reduce_motion`] precedent).
+    ///
+    /// **A no-op on the same value; a change starts the link through
+    /// [`Waker::resume`]**, never [`Waker::wake`]: the new form changes only
+    /// the bar, so the tick draws it as a motion frame over the kept layout
+    /// and `content=` does not rise. When `Always` comes or goes the grid's
+    /// width changes too — that is `bt-shell`'s [`DisplayLink::resize`], which
+    /// asks for its own content frame.
+    pub fn set_scrollbar_mode(&self, mode: Mode) {
+        let core = &self.core;
+        let mut bar = core.scrollbar.get();
+        let changed = bar.set_mode(mode);
+        core.scrollbar.set(bar);
+        if changed {
             self.waker.resume();
         }
     }
@@ -2629,7 +2661,7 @@ impl DisplayLink {
     /// it coming from where it never was. The flag is planted
     /// unconditionally, not tied to `Session::resize`'s acceptance: the window
     /// may have moved even if the cell size did not.
-    pub fn resize(&self, cols: u16, rows: u16, cell: CellMetrics, dock_rows: u16) {
+    pub fn resize(&self, cols: u16, rows: u16, cell: CellMetrics, dock_rows: u16, dock_cols: u16) {
         let core = &self.core;
         // The rest of the metric (gutter, scale, rule) follows the cell size
         // whenever the cell size is the one the grid already has: the gate
@@ -2645,12 +2677,14 @@ impl DisplayLink {
         // but leaving the share at the old value would bring the dock back one
         // frame late when leaving the alternate screen.
         core.dock_rows.set(dock_rows);
-        // The column count is **outside the gate**: the dock's wrapping must
-        // see the drawn width, and at a rejected size (a minimised window)
-        // `cols` is zero anyway — the dock draws no text in that frame
+        // The dock's column count is **outside the gate**: the dock's wrapping
+        // must see the drawn width, and at a rejected size (a minimised
+        // window) it is zero anyway — the dock draws no text in that frame
         // (`bt_core::dock::render`), so it does nothing contradicting the grid
-        // staying at the old size.
-        core.cols.set(cols);
+        // staying at the old size. `cols` itself is the grid's and goes only to
+        // the session: in the scroll bar's `Always` form the two differ by the
+        // track (`Core::dock_cols`).
+        core.dock_cols.set(dock_cols);
         core.geometry_changed.set(true);
         // The typing effects end too (the sibling of `Motion`'s geometry
         // snap): when the column count or the cell changes, the dock's
@@ -2776,7 +2810,7 @@ fn scrollbar_step(
         *kept = layout;
     }
     let changed = bar.advance(now, kept.drawable());
-    frame.set_scrollbar(*kept, bar.alpha(now), foreground);
+    frame.set_scrollbar(*kept, bar.look(now), foreground);
     BarStep {
         changed,
         settled: bar.settled(now),
@@ -3401,6 +3435,62 @@ mod tests {
             foreground,
         );
         assert!(step.idle(), "the hidden bar keeps the link awake: {step:?}");
+    }
+
+    #[test]
+    fn the_always_up_form_is_drawn_with_the_content_and_sleeps() {
+        // `Always`: drawn wide over its track by the content frame, then idle
+        // — no clock, no motion frame, a poke wants nothing. `Never`: no op
+        // in any frame and the poke is ignored.
+        let foreground = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+        let (mut frame, layout) = bar_scene();
+        let mut bar = Scrollbar::default();
+        let mut kept = ScrollbarLayout::default();
+        assert!(bar.set_mode(Mode::Always));
+        let step = scrollbar_step(
+            &mut bar,
+            &mut kept,
+            Some(layout),
+            0.0,
+            &mut frame,
+            foreground,
+        );
+        assert!(step.changed && step.settled, "{step:?}");
+        assert!(
+            frame.scrollbar().is_some(),
+            "the always-up bar is not drawn"
+        );
+        assert_eq!(frame.scrollbar_track().len(), 2, "no track under it");
+        assert!(!bar.poke(kept.drawable()), "a poke asked for a frame");
+        for now in [0.5, 1.0, 1.4, 30.0] {
+            let step = scrollbar_step(&mut bar, &mut kept, None, now, &mut frame, foreground);
+            assert!(
+                at_rest(Motion::default(), false, true, step.idle()),
+                "the link stayed awake for an always-up bar at {now}"
+            );
+            assert!(frame.scrollbar().is_some(), "the bar left at {now}");
+        }
+        assert_eq!(due_clock(None, [None, None, bar.next_deadline()]), None);
+
+        // The form changes to `Never` between content frames: one motion
+        // frame draws the bar away from the kept layout, then nothing.
+        assert!(bar.set_mode(Mode::Never));
+        let step = scrollbar_step(&mut bar, &mut kept, None, 31.0, &mut frame, foreground);
+        assert!(step.changed, "the form change was not drawn");
+        assert!(frame.scrollbar().is_none() && frame.scrollbar_track().is_empty());
+        assert!(
+            !bar.poke(kept.drawable()),
+            "a poke on `Never` asked for a frame"
+        );
+        let step = scrollbar_step(
+            &mut bar,
+            &mut kept,
+            Some(layout),
+            32.0,
+            &mut frame,
+            foreground,
+        );
+        assert!(step.idle() && frame.scrollbar().is_none(), "{step:?}");
     }
 
     #[test]

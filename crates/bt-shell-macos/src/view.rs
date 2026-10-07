@@ -520,6 +520,12 @@ pub(crate) struct ViewIvars {
     /// (`set_metrics`): when the dock goes away on the alternate screen the
     /// grid is resized too, so the two are two halves of the same geometry.
     dock_rows: Cell<u16>,
+    /// The dock's width, columns — the window's, not the grid's: the
+    /// always-up scroll bar's track narrows the grid only
+    /// (`app::Grid::dock_cols`). Written in the **same** call as `metrics`;
+    /// every dock hit (the input block's clamp, the context row's column and
+    /// budget) reads it, so a click on the dock's last columns is the dock's.
+    dock_cols: Cell<u16>,
     /// The hand-cursor rectangles the last `resetCursorRects` set up (what
     /// [`BateriView::sync_cursor_rects`] compares): the upload buttons' and the
     /// ⌘-hovered link's, one list.
@@ -1519,6 +1525,7 @@ impl BateriView {
             smooth_scroll: Cell::new(true),
             metrics: Cell::new(None),
             dock_rows: Cell::new(0),
+            dock_cols: Cell::new(0),
             cursor_rects: RefCell::new(Vec::new()),
             link: RefCell::new(LinkState::default()),
             origin: OnceCell::new(),
@@ -1560,13 +1567,15 @@ impl BateriView {
 
     /// Refreshes the mouse translation's inputs: from the `start_session` and
     /// `resize` path, with the very grid that goes to the session and the
-    /// link. The three are written at the same call site; one cannot change
-    /// while another stays stale.
+    /// link. They are written at the same call site — the metrics, the dock's
+    /// rows and the dock's columns; one cannot change while another stays
+    /// stale.
     pub(crate) fn set_metrics(&self, grid: crate::app::Grid, dock_rows: u16) {
         self.ivars()
             .metrics
             .set(Some((grid.cell, (grid.cols, grid.rows))));
         self.ivars().dock_rows.set(dock_rows);
+        self.ivars().dock_cols.set(grid.dock_cols);
     }
 
     /// Whether scrolling goes smooth or by line steps - the window gives the
@@ -2033,7 +2042,10 @@ impl BateriView {
         in_window: NSPoint,
         outside: OutOfGrid,
     ) -> Option<SelectionPoint> {
-        let (metrics, (cols, _)) = self.ivars().metrics.get()?;
+        let (metrics, _) = self.ivars().metrics.get()?;
+        // The dock's own width, in both arms below: the grid's would clamp a
+        // click on the dock's last columns to the grid's edge.
+        let cols = self.ivars().dock_cols.get();
         let dock_rows = self.ivars().dock_rows.get();
         if dock_rows == 0 {
             return None;
@@ -2079,7 +2091,8 @@ impl BateriView {
     /// comes from the same layout as the drawing (`bt_core::transfer_button_at`),
     /// so the column the two see and the drawn fill cannot diverge.
     fn context_column(&self, in_window: NSPoint) -> Option<(u16, u16)> {
-        let (metrics, (cols, _)) = self.ivars().metrics.get()?;
+        let (metrics, _) = self.ivars().metrics.get()?;
+        let cols = self.ivars().dock_cols.get();
         let (top, rows) = self.ivars().origin.get().and_then(Origin::dock)?;
         let scale = self.window()?.backingScaleFactor();
         let at = self.convertPoint_fromView(in_window, None);
@@ -2105,8 +2118,8 @@ impl BateriView {
 
     /// The context line's budget ([`bt_gpu::context_cols`]); `None` if there is no metrics.
     pub(crate) fn context_budget(&self) -> Option<u16> {
-        let (metrics, (cols, _)) = self.ivars().metrics.get()?;
-        Some(bt_gpu::context_cols(cols, metrics))
+        let (metrics, _) = self.ivars().metrics.get()?;
+        Some(bt_gpu::context_cols(self.ivars().dock_cols.get(), metrics))
     }
 
     /// The upload buttons' hand cursor: AppKit's **cursor

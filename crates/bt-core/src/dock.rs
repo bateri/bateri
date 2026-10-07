@@ -140,14 +140,18 @@ pub struct DockCaret {
 /// ([`crate::Session::dock`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DockCols {
-    /// The width of the input block: the grid's column count. The dock uses
-    /// the same columns and a line that overflows **wraps**.
-    pub grid: u16,
+    /// The width of the input block, in the grid's cells: the window's
+    /// columns. A line that overflows **wraps**. **Not** the grid's column
+    /// count by definition: a grid that gives columns up at its right edge
+    /// (the drawing side's always-up scroll bar) does not narrow the dock
+    /// below it, so the drawing side supplies the number — reading the
+    /// grid's here would wrap the dock where it is not drawn.
+    pub input: u16,
     /// The context row's budget. A separate number, because that row is drawn
     /// in a **small point size**: more letters fit in the same pixel strip.
     /// The drawing side supplies the number (`bt_gpu`'s `context_cols`), this
     /// crate sees no pixels — the value is a **budget**, not a point-size
-    /// decision. Passed equal to `grid`, the row behaves as it does today.
+    /// decision. Passed equal to `input`, the row behaves as it does today.
     pub context: u16,
 }
 
@@ -175,8 +179,9 @@ pub struct DockBudget {
     /// half); rounded down, and `0` also means at least one row (the dock's
     /// input row never disappears).
     pub share: f32,
-    /// The width of the wrap, in columns: the width the dock's input block
-    /// shares with the grid ([`DockCols::grid`]).
+    /// The width of the wrap, in columns: the dock's input block's
+    /// ([`DockCols::input`]) — the same number, or the band would be sized for
+    /// a wrap the dock does not draw.
     pub cols: u16,
 }
 
@@ -1467,7 +1472,7 @@ pub(crate) fn render_with(
         settle(change, &mut edits);
         return (surface, 0, 0);
     }
-    if cols.grid == 0 {
+    if cols.input == 0 {
         settle(change, &mut edits);
         // With no input row the trace is zero rows (the rule of the
         // `input_rows == 0` arm below): the wheel must find no window to scroll.
@@ -1500,7 +1505,7 @@ pub(crate) fn render_with(
         settle(change, &mut edits);
         return (surface, 0, 0);
     }
-    if cols.grid <= TEXT_COL {
+    if cols.input <= TEXT_COL {
         settle(change, &mut edits);
         return (surface, 0, 1);
     }
@@ -1550,7 +1555,7 @@ pub(crate) fn render_with(
     // at full width grows the dock by a row too.
     // The arm above took zero: here `input_rows ≥ 1`.
     let shown = usize::from(input_rows);
-    let (top, rows) = window_of(state, cols.grid, input_rows, scroll);
+    let (top, rows) = window_of(state, cols.input, input_rows, scroll);
     let window = top..top + shown;
     // If the first row is outside the window so is the mark: the prompt's place is not on screen.
     if top > 0 {
@@ -1582,7 +1587,7 @@ pub(crate) fn render_with(
     let end = dock_layout(
         stream,
         shift + state.cursor,
-        cols.grid,
+        cols.input,
         state.cluster,
         |_| {},
         |placed| {
@@ -1590,7 +1595,7 @@ pub(crate) fn render_with(
             // character that does not fit (a wide glyph in a one-column
             // window, [`layout`]'s "overflows" rule) are not drawn: one would
             // fall outside the context row, the other outside the grid.
-            if !window.contains(&placed.row) || !placed.fits(cols.grid) {
+            if !window.contains(&placed.row) || !placed.fits(cols.input) {
                 return;
             }
             let Placed {
@@ -1701,7 +1706,7 @@ pub(crate) fn render_with(
         && state.prebuffer.is_empty()
         && state.postdisplay.is_empty()
     {
-        render_reconnect(state, offer, theme, cols.grid, &window, top, &mut sink);
+        render_reconnect(state, offer, theme, cols.input, &window, top, &mut sink);
     }
 
     // audit: the caret's column is `< cols` ([`layout`]'s caret rule: where
@@ -1738,7 +1743,7 @@ pub(crate) fn render_with(
             layout_with(
                 ghosts.as_slice().iter().copied(),
                 usize::MAX,
-                usize::from(cols.grid),
+                usize::from(cols.input),
                 end.caret_col,
                 usize::from(TEXT_COL),
                 // The ghost list carries **all** the deleted code points
@@ -1748,7 +1753,7 @@ pub(crate) fn render_with(
                 |_| {},
                 |placed| {
                     let row = end.caret_row + placed.row;
-                    if !window.contains(&row) || !placed.fits(cols.grid) {
+                    if !window.contains(&row) || !placed.fits(cols.input) {
                         return;
                     }
                     // audit: `row - top < shown ≤ input_rows` and `fits` →
@@ -3663,7 +3668,7 @@ mod tests {
     /// (`context_line_spends_its_own_budget`).
     fn same(cols: u16) -> DockCols {
         DockCols {
-            grid: cols,
+            input: cols,
             context: cols,
         }
     }
@@ -5561,7 +5566,7 @@ mod tests {
         let mut cells = Vec::new();
         let owned = caret_home(None, state.status, false) == CaretHome::Dock;
         let wide = DockCols {
-            grid: 9,
+            input: 9,
             context: 21,
         };
         render(
