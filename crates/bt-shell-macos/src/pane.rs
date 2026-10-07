@@ -3344,6 +3344,13 @@ impl TerminalPane {
             self.ivars().search_driving.set(false);
             return;
         };
+        // A pass reached the top with other rows: the scroll bar's marks of
+        // the whole history changed, and the step itself asks for no frame.
+        if report.marks_changed
+            && let Some(link) = self.link()
+        {
+            link.marks_changed();
+        }
         bar.set_count(status, report);
         if report.complete {
             self.ivars().search_driving.set(false);

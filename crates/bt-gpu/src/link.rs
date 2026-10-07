@@ -87,7 +87,12 @@
 //! [`DisplayLink::set_scrollbar_drag`]) go the same way. The always-up form
 //! has no timeline: it is drawn with the content and puts nothing in flight
 //! but the pointer's tone. A bar the pointer holds is up and settled: no
-//! clock, no frame until the pointer moves away.
+//! clock, no frame until the pointer moves away. **Its marks are not motion**:
+//! a search pass that changes them asks for one content frame
+//! ([`DisplayLink::marks_changed`], [`Waker::wake`]) while the bar is up, and
+//! a bar that was down when they changed asks for it as it comes up — the
+//! marks are bucketed in `bt-core`'s frame, which a motion frame never
+//! reaches.
 //!
 //! The contract's consequence in one sentence: a window with a running
 //! command, **a blinking cursor or a scroll bar shown by scrolling** is **not
@@ -106,7 +111,7 @@ use std::time::{Duration, Instant};
 use bt_core::{
     Blocks, CaretStyle, Clusters, Cursor, CursorMotion, DirtyFlag, DockBudget, DockCols,
     DockContext, DockState, Erase, Keypress, LinearRgba, SearchRuns, SelectionRun, SelectionRuns,
-    Session, Theme,
+    Session, Theme, TrackMarks,
 };
 
 use crate::blink::Blink;
@@ -640,6 +645,15 @@ struct Core {
     /// The search highlight's runs; same lifetime and reason as
     /// `selection`.
     search: RefCell<SearchRuns>,
+    /// The scroll bar's marks of the whole history; same lifetime and reason
+    /// as `search` — and kept between content frames like the bar's layout,
+    /// because the motion frame that fades the bar draws them from here.
+    marks: RefCell<TrackMarks>,
+    /// The marks changed while the bar was down ([`DisplayLink::marks_changed`]),
+    /// and no content frame has drawn them since: the next time the bar
+    /// shows, it asks for a **content** frame instead of a motion one, or it
+    /// would come up over the old marks.
+    marks_stale: Cell<bool>,
     /// The dock selection's runs per visual row; same reason as
     /// `selection` — `bt_core::Session::dock` empties and refills it every
     /// content frame, the capacity is kept.
@@ -1154,6 +1168,7 @@ impl Core {
             &mut self.blocks.borrow_mut(),
             &mut self.selection.borrow_mut(),
             &mut self.search.borrow_mut(),
+            &mut self.marks.borrow_mut(),
             &mut clusters,
             // The share **does not wake**: this tick draws the frame anyway
             // (`Session::frame`). If its generation changed it drops there.
@@ -1245,6 +1260,8 @@ impl Core {
         // drawn. Before `frames` and independent of it — it does not wait for
         // the GPU to finish (see `Core::content_frames`).
         self.content_frames.set(self.content_frames.get() + 1);
+        // `frame()` just refreshed the scroll bar's marks: none are owed.
+        self.marks_stale.set(false);
         // Clear and cursor colour from the session's theme: the same source as
         // `frame()`'s background skip and the colour query's answer. The
         // theme is read only on a full frame — the idle tick returned above —
@@ -1769,10 +1786,17 @@ impl Core {
         let mut bar = self.scrollbar.get();
         bar.hide();
         self.scrollbar.set(bar);
+        // Hidden: no marks either, whatever the list holds.
+        let theme = self.theme.get();
         frame.set_scrollbar(
             self.scrollbar_layout.get(),
             Look::HIDDEN,
-            self.theme.get().foreground_linear(),
+            theme.foreground_linear(),
+            &[],
+            [
+                theme.search_mark_linear(),
+                theme.search_current_mark_linear(),
+            ],
         );
     }
 
@@ -1798,6 +1822,9 @@ impl Core {
             self.motion.get().snaps(),
             frame,
             self.theme.get().foreground_linear(),
+            // The last content frame's marks: the motion frame never reaches
+            // `bt-core`, so the bar fades over the marks it was shown with.
+            &self.marks.borrow(),
         );
         self.scrollbar.set(bar);
         self.scrollbar_layout.set(kept);
@@ -2204,6 +2231,8 @@ impl DisplayLink {
             blocks: RefCell::new(Blocks::default()),
             selection: RefCell::new(SelectionRuns::default()),
             search: RefCell::new(SearchRuns::default()),
+            marks: RefCell::new(TrackMarks::default()),
+            marks_stale: Cell::new(false),
             dock_selection: RefCell::new(Vec::new()),
             fill: RefCell::new(Vec::new()),
             dock: RefCell::new(DockState::default()),
@@ -2403,16 +2432,52 @@ impl DisplayLink {
     /// Ignored when the last content frame had no bar to draw (no travel,
     /// the alternate screen): a poke there would wake the link for invisible
     /// fade frames. Otherwise the poke is a bit the next tick stamps and the
-    /// link is started through [`Waker::resume`] — **never** [`Waker::wake`]:
-    /// the bar's frames change only the bar, so they are motion frames and
-    /// stay out of `content=` and `requests=`.
+    /// link is started through [`Waker::resume`] — **never** [`Waker::wake`]
+    /// for the bar itself: its frames change only the bar, so they are motion
+    /// frames and stay out of `content=` and `requests=`. The one content
+    /// frame a showing bar asks for is for marks owed to it
+    /// ([`DisplayLink::marks_changed`]).
     pub fn poke_scrollbar(&self) {
         let core = &self.core;
         let mut bar = core.scrollbar.get();
         let wanted = bar.poke(core.scrollbar_layout.get().drawable());
         core.scrollbar.set(bar);
-        if wanted {
+        self.show_scrollbar(wanted);
+    }
+
+    /// Starts the link for a bar that is coming up: a motion frame, through
+    /// [`Waker::resume`] — unless its marks changed while it was down
+    /// ([`DisplayLink::marks_changed`]): then the frame is a **content** one,
+    /// [`Waker::wake`], because what it draws first is the new marks and
+    /// those come only from `bt-core`. Not the bar asking for content: the
+    /// marks are content that was left undrawn while nobody could see it.
+    fn show_scrollbar(&self, wanted: bool) {
+        if !wanted {
+            return;
+        }
+        if self.core.marks_stale.get() {
+            self.waker.wake();
+        } else {
             self.waker.resume();
+        }
+    }
+
+    /// The scroll bar's marks of the whole history changed — a search pass
+    /// reached the top with different rows (`bt_core::SearchReport::marks_changed`).
+    /// Main thread, from `bt-shell`'s search driver.
+    ///
+    /// **A content frame**, [`Waker::wake`]: the marks are bucketed in
+    /// `bt-core`'s frame, so only a content frame draws them — but only while
+    /// the bar is up or on its way ([`Scrollbar::up`]). A bar that is down
+    /// owes them instead: the next time it shows it asks for the content
+    /// frame itself, so a pass that ends unseen costs no frame. The stop
+    /// condition is the pass's end, which sends this once.
+    pub fn marks_changed(&self) {
+        let core = &self.core;
+        if core.scrollbar_layout.get().drawable() && core.scrollbar.get().up() {
+            self.waker.wake();
+        } else {
+            core.marks_stale.set(true);
         }
     }
 
@@ -2423,7 +2488,8 @@ impl DisplayLink {
     ///
     /// **A no-op on the same value; a change starts the link through
     /// [`Waker::resume`]**, never [`Waker::wake`] — the widening is a motion
-    /// frame — so a sleeping link widens the bar at once, not a second later.
+    /// frame (but for marks owed to it, [`DisplayLink::marks_changed`]) — so
+    /// a sleeping link widens the bar at once, not a second later.
     /// While the pointer stays the bar is settled and asks for nothing.
     /// Where no bar can be drawn the change wants no frame.
     pub fn set_scrollbar_hover(&self, on: bool) {
@@ -2431,9 +2497,7 @@ impl DisplayLink {
         let mut bar = core.scrollbar.get();
         let wanted = bar.set_hover(on, core.scrollbar_layout.get().drawable());
         core.scrollbar.set(bar);
-        if wanted {
-            self.waker.resume();
-        }
+        self.show_scrollbar(wanted);
     }
 
     /// The thumb was grabbed or let go — [`DisplayLink::set_scrollbar_hover`]'s
@@ -2444,9 +2508,7 @@ impl DisplayLink {
         let mut bar = core.scrollbar.get();
         let wanted = bar.set_drag(on, core.scrollbar_layout.get().drawable());
         core.scrollbar.set(bar);
-        if wanted {
-            self.waker.resume();
-        }
+        self.show_scrollbar(wanted);
     }
 
     /// The scroll bar's form changed — `bt-shell` gives the **resolved**
@@ -2456,7 +2518,8 @@ impl DisplayLink {
     /// **A no-op on the same value; a change starts the link through
     /// [`Waker::resume`]**, never [`Waker::wake`]: the new form changes only
     /// the bar, so the tick draws it as a motion frame over the kept layout
-    /// and `content=` does not rise. When `Always` comes or goes the grid's
+    /// and `content=` does not rise (but for marks owed to it,
+    /// [`DisplayLink::marks_changed`]). When `Always` comes or goes the grid's
     /// width changes too — that is `bt-shell`'s [`DisplayLink::resize`], which
     /// asks for its own content frame.
     pub fn set_scrollbar_mode(&self, mode: Mode) {
@@ -2464,9 +2527,7 @@ impl DisplayLink {
         let mut bar = core.scrollbar.get();
         let changed = bar.set_mode(mode);
         core.scrollbar.set(bar);
-        if changed {
-            self.waker.resume();
-        }
+        self.show_scrollbar(changed);
     }
 
     /// The window's visibility changed.
@@ -2844,6 +2905,10 @@ impl BarStep {
 /// **No waker anywhere in here**: the step only answers; the link's clock and
 /// sleep question use the answer in the motion flavour, so the bar never
 /// counts in `content=` or `requests=`.
+// The step's inputs are the bar's state, its two layouts, the clock and
+// the frame's colours and marks; gathering them in a struct would create a
+// type only for this call (`Session::frame`'s precedent).
+#[allow(clippy::too_many_arguments)]
 fn scrollbar_step(
     bar: &mut Scrollbar,
     kept: &mut ScrollbarLayout,
@@ -2852,12 +2917,19 @@ fn scrollbar_step(
     instant: bool,
     frame: &mut Frame,
     foreground: LinearRgba,
+    marks: &TrackMarks,
 ) -> BarStep {
     if let Some(layout) = fresh {
         *kept = layout;
     }
     let changed = bar.advance(now, kept.drawable(), instant);
-    frame.set_scrollbar(*kept, bar.look(now), foreground);
+    frame.set_scrollbar(
+        *kept,
+        bar.look(now),
+        foreground,
+        marks.search(),
+        [marks.match_color(), marks.current_color()],
+    );
     BarStep {
         changed,
         settled: bar.settled(now),
@@ -3405,6 +3477,7 @@ mod tests {
             false,
             &mut frame,
             foreground,
+            &TrackMarks::default(),
         );
         assert!(step.idle() && frame.scrollbar().is_none(), "{step:?}");
         // Scrolling: the wheel's poke, then **content** frames back to back
@@ -3422,6 +3495,7 @@ mod tests {
                 false,
                 &mut frame,
                 foreground,
+                &TrackMarks::default(),
             );
             let next = bar.alpha(now);
             assert!(
@@ -3438,7 +3512,14 @@ mod tests {
         // the **motion** flavour: no damage, so not a content frame and not a
         // request.
         let step = scrollbar_step(
-            &mut bar, &mut kept, None, now, false, &mut frame, foreground,
+            &mut bar,
+            &mut kept,
+            None,
+            now,
+            false,
+            &mut frame,
+            foreground,
+            &TrackMarks::default(),
         );
         assert!(
             at_rest(Motion::default(), false, true, step.idle()),
@@ -3456,7 +3537,14 @@ mod tests {
         let mut alpha = 1.0f32;
         loop {
             let step = scrollbar_step(
-                &mut bar, &mut kept, None, now, false, &mut frame, foreground,
+                &mut bar,
+                &mut kept,
+                None,
+                now,
+                false,
+                &mut frame,
+                foreground,
+                &TrackMarks::default(),
             );
             assert!(
                 !at_rest(Motion::default(), false, true, step.idle()),
@@ -3487,6 +3575,7 @@ mod tests {
             false,
             &mut frame,
             foreground,
+            &TrackMarks::default(),
         );
         assert!(step.idle(), "the hidden bar keeps the link awake: {step:?}");
     }
@@ -3505,7 +3594,16 @@ mod tests {
         let rest = Motion::default();
         let tick = 1.0 / 120.0;
         let step = |bar: &mut Scrollbar, kept: &mut ScrollbarLayout, frame: &mut Frame, now| {
-            scrollbar_step(bar, kept, None, now, false, frame, foreground)
+            scrollbar_step(
+                bar,
+                kept,
+                None,
+                now,
+                false,
+                frame,
+                foreground,
+                &TrackMarks::default(),
+            )
         };
         assert!(bar.poke(true));
         step(&mut bar, &mut kept, &mut frame, 0.0);
@@ -3585,6 +3683,7 @@ mod tests {
             false,
             &mut frame,
             foreground,
+            &TrackMarks::default(),
         );
         assert!(step.changed && step.settled, "{step:?}");
         assert!(
@@ -3595,7 +3694,14 @@ mod tests {
         assert!(!bar.poke(kept.drawable()), "a poke asked for a frame");
         for now in [0.5, 1.0, 1.4, 30.0] {
             let step = scrollbar_step(
-                &mut bar, &mut kept, None, now, false, &mut frame, foreground,
+                &mut bar,
+                &mut kept,
+                None,
+                now,
+                false,
+                &mut frame,
+                foreground,
+                &TrackMarks::default(),
             );
             assert!(
                 at_rest(Motion::default(), false, true, step.idle()),
@@ -3609,7 +3715,14 @@ mod tests {
         // frame draws the bar away from the kept layout, then nothing.
         assert!(bar.set_mode(Mode::Never));
         let step = scrollbar_step(
-            &mut bar, &mut kept, None, 31.0, false, &mut frame, foreground,
+            &mut bar,
+            &mut kept,
+            None,
+            31.0,
+            false,
+            &mut frame,
+            foreground,
+            &TrackMarks::default(),
         );
         assert!(step.changed, "the form change was not drawn");
         assert!(frame.scrollbar().is_none() && frame.scrollbar_track().is_empty());
@@ -3625,6 +3738,7 @@ mod tests {
             false,
             &mut frame,
             foreground,
+            &TrackMarks::default(),
         );
         assert!(step.idle() && frame.scrollbar().is_none(), "{step:?}");
     }
@@ -3649,11 +3763,19 @@ mod tests {
             false,
             &mut frame,
             foreground,
+            &TrackMarks::default(),
         );
         assert!(bar.poke(kept.drawable()));
         let rest = Motion::default();
         let stamped = scrollbar_step(
-            &mut bar, &mut kept, None, 0.0, false, &mut frame, foreground,
+            &mut bar,
+            &mut kept,
+            None,
+            0.0,
+            false,
+            &mut frame,
+            foreground,
+            &TrackMarks::default(),
         );
         assert!(
             !at_rest(rest, false, true, stamped.idle()),
@@ -3664,7 +3786,14 @@ mod tests {
             "an identical frame was drawn"
         );
         let rising = scrollbar_step(
-            &mut bar, &mut kept, None, tick, false, &mut frame, foreground,
+            &mut bar,
+            &mut kept,
+            None,
+            tick,
+            false,
+            &mut frame,
+            foreground,
+            &TrackMarks::default(),
         );
         assert!(
             !nothing_to_draw(rest, false, true, rising),
@@ -3672,10 +3801,24 @@ mod tests {
         );
         // Up and holding: asleep until the clock; it fires at the hold's end.
         scrollbar_step(
-            &mut bar, &mut kept, None, 0.5, false, &mut frame, foreground,
+            &mut bar,
+            &mut kept,
+            None,
+            0.5,
+            false,
+            &mut frame,
+            foreground,
+            &TrackMarks::default(),
         );
         let ending = scrollbar_step(
-            &mut bar, &mut kept, None, 1.0, false, &mut frame, foreground,
+            &mut bar,
+            &mut kept,
+            None,
+            1.0,
+            false,
+            &mut frame,
+            foreground,
+            &TrackMarks::default(),
         );
         assert!(
             !at_rest(rest, false, true, ending.idle()),
@@ -3712,6 +3855,7 @@ mod tests {
                 false,
                 &mut frame,
                 foreground,
+                &TrackMarks::default(),
             );
             if now > 0.2 {
                 assert_eq!(bar.alpha(now), 1.0, "the bar faded mid-scroll at {now}");

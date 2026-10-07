@@ -1840,7 +1840,9 @@ impl Renderer {
     /// ground covers a track whose end has not yet followed a growing band.
     /// One rounded quad from `caret_fragment` (the dock buttons' road) over,
     /// in the wide form, two square ones for the track and its hairline
-    /// (`cell_bg`), and no op at all while the bar is hidden.
+    /// (`cell_bg`), then its marks over the thumb — the matches', then the
+    /// current match's, one `selection` draw per colour — and no op at all
+    /// while the bar is hidden.
     ///
     /// **Dock** — the second coordinate space, **last**. Its own viewport is
     /// structural: the dock must be exempt from the offset and building the
@@ -1977,6 +1979,9 @@ impl Renderer {
                 thumb.core,
                 thumb.shape,
             );
+            for (marks, color) in frame.scrollbar_marks() {
+                plan.selection(marks, color, frame.scrollbar_mark_radius());
+            }
             plan.ops.push(Op::Viewport(origin));
         }
         // Dock: last, with two origins.

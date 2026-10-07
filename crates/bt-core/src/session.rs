@@ -627,6 +627,275 @@ pub struct ScrollPosition {
     pub visible: u16,
 }
 
+/// How many buckets the scroll bar's track is cut into for its marks
+/// ([`TrackMarks`]): at most one mark per bucket.
+///
+/// **A design constant, from one requirement:** a bucket must be finer than
+/// a point on any track a window can have, or two matches a point apart
+/// would merge where the eye can still tell them apart. A track is shorter
+/// than its window and a display's height at its default scale is under this
+/// many points, turned portrait included (a 6K panel on its side is 3008
+/// points tall). Finer buckets would draw the same pixels — a mark is two
+/// points tall — and only cost more marks.
+pub const TRACK_BUCKETS: u32 = 4096;
+
+/// The bucket a row `depth` rows from the history's top falls in, on a
+/// track whose whole length is `total` rows ([`TrackMarks`]).
+fn track_bucket(depth: u64, total: u64) -> u64 {
+    depth * u64::from(TRACK_BUCKETS) / total.max(1)
+}
+
+/// The first depth that falls in `bucket` — [`track_bucket`] read backwards.
+fn bucket_start(bucket: u64, total: u64) -> u64 {
+    (bucket * total).div_ceil(u64::from(TRACK_BUCKETS))
+}
+
+/// One mark on the scroll bar's track ([`TrackMarks`]).
+///
+/// No [`Eq`]: the position carries `f32` (precedent: [`ScrollPosition`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackMark {
+    /// The marked row's depth from the history's top, rows — the scroll
+    /// position's space ([`ScrollPosition::top`]): the whole track is
+    /// `room + visible` rows long, so the row sits that far down it.
+    pub position: f32,
+    /// The current match's mark — drawn in its own, brighter tone and over
+    /// the others.
+    pub current: bool,
+}
+
+/// The scroll bar's marks of the whole history — [`Session::frame`]'s
+/// target, the precedent of [`SearchRuns`]: a buffer the caller keeps across
+/// frames, so it costs no allocation and its last value is what the drawing
+/// side keeps between content frames.
+///
+/// **Today one lane, search**: the rows the last finished pass found matches
+/// on, at most one mark per bucket ([`TRACK_BUCKETS`]), the current match's
+/// in front of a match's in its bucket. Empty while search is closed, on the
+/// alternate screen and when there is nothing to scroll; until the query's
+/// first pass reaches the top, only the current match is marked.
+///
+/// **Not a [`Cursor`] field**: the bar is mostly hidden, and a list of up to
+/// [`TRACK_BUCKETS`] marks copied in every cursor would be paid for nothing.
+///
+/// **The lock split** ([`Session::frame`]): the `Term` round gives only
+/// scalars — the scrollback's observation and the current match's row; the
+/// pass's rows are taken from the search slot after `Term` is released and
+/// bucketed outside every lock. The same inputs — the pass, where its rows
+/// stand, the track's length, the current match — are **not** bucketed
+/// again: at a full history's bottom with output flowing, a frame costs a
+/// comparison; while the history still grows, the track grows with it and
+/// the lane is bucketed anew.
+///
+/// **Where the rows stand** is followed frame by frame, like the current
+/// match ([`search::track`]): each observation moves them by the shift since
+/// the previous one ([`search::depth_moved`]). A shift that cannot be known —
+/// the bottom of a full history with output flowing — leaves them where they
+/// were drawn rather than guessing, and the next pass, which the same output
+/// starts, redraws them. A history laid out anew ([`search::layout_changed`]:
+/// a resize, the alternate screen, a clear) leaves them pointing at nothing,
+/// so the lane is empty until the next pass. The colors are resolved here,
+/// from the frame's theme.
+#[derive(Debug)]
+pub struct TrackMarks {
+    search: Vec<TrackMark>,
+    match_color: LinearRgba,
+    current_color: LinearRgba,
+    /// Where the last pass's rows stand; `None` → no pass followed.
+    follow: Option<Follow>,
+    /// What `search` was built from; `None` → nothing built.
+    built: Option<TrackKey>,
+}
+
+/// Where a pass's rows stand, followed frame by frame ([`TrackMarks`]).
+#[derive(Clone, Copy, Debug)]
+struct Follow {
+    /// The pass's serial ([`search::SearchPass::serial`]).
+    pass: u64,
+    /// The observation the rows were last moved to.
+    seen: search::LedgerMark,
+    /// How far the rows' depths moved since the pass, rows; `None` → the
+    /// history was laid out anew and they point at nothing.
+    shift: Option<i64>,
+}
+
+/// The inputs [`TrackMarks::search`] was last built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrackKey {
+    /// The pass's serial; `None` → no finished pass, only the current match.
+    pass: Option<u64>,
+    /// Where its rows stand ([`Follow::shift`]).
+    shift: Option<i64>,
+    /// The track's whole length, rows.
+    total: u32,
+    /// The current match's depth from the history's top.
+    current: Option<i64>,
+}
+
+/// One frame's input to the search lane ([`TrackMarks::update_search`]).
+struct SearchTrack<'a> {
+    /// The last finished pass; `None` → none has finished for this query yet.
+    pass: Option<&'a search::SearchPass>,
+    /// The scrollback as this frame saw it.
+    now: search::LedgerMark,
+    /// The scrollback's limit, rows.
+    limit: usize,
+    /// The history's length in this frame ([`Cursor::history`]).
+    history: u32,
+    /// The track's whole length, rows: the travel plus the visible rows.
+    total: u32,
+    /// The current match's start row, as of `now`.
+    current: Option<i32>,
+}
+
+/// An empty list with the embedded theme's colors; the first frame writes
+/// over them (the reasoning of [`SearchRuns`]'s `Default`).
+impl Default for TrackMarks {
+    fn default() -> Self {
+        Self {
+            search: Vec::new(),
+            match_color: Theme::BATERI.search_mark_linear(),
+            current_color: Theme::BATERI.search_current_mark_linear(),
+            follow: None,
+            built: None,
+        }
+    }
+}
+
+impl TrackMarks {
+    /// The search lane, by position from the top: at most one mark per
+    /// bucket.
+    pub fn search(&self) -> &[TrackMark] {
+        &self.search
+    }
+
+    /// A match's mark ([`Theme::search_mark_linear`]).
+    pub fn match_color(&self) -> LinearRgba {
+        self.match_color
+    }
+
+    /// The current match's mark ([`Theme::search_current_mark_linear`]).
+    pub fn current_color(&self) -> LinearRgba {
+        self.current_color
+    }
+
+    /// No marks, and nothing followed: a pass met again starts from its own
+    /// observation.
+    fn clear(&mut self) {
+        self.search.clear();
+        self.follow = None;
+        self.built = None;
+    }
+
+    fn set_colors(&mut self, theme: &Theme) {
+        self.match_color = theme.search_mark_linear();
+        self.current_color = theme.search_current_mark_linear();
+    }
+
+    /// Moves the pass's rows to this frame's observation and buckets the
+    /// search lane — unless it was built from the same inputs.
+    fn update_search(&mut self, input: SearchTrack<'_>) {
+        let SearchTrack {
+            pass,
+            now,
+            limit,
+            history,
+            total,
+            current,
+        } = input;
+        self.follow = pass.map(|pass| {
+            let follow = self
+                .follow
+                .filter(|follow| follow.pass == pass.serial)
+                .unwrap_or(Follow {
+                    pass: pass.serial,
+                    seen: pass.mark,
+                    shift: Some(0),
+                });
+            follow_to(follow, now, limit)
+        });
+        let shift = self.follow.and_then(|follow| follow.shift);
+        let key = TrackKey {
+            pass: pass.map(|pass| pass.serial),
+            shift,
+            total,
+            current: current.map(|line| i64::from(line) + i64::from(history)),
+        };
+        if self.built == Some(key) {
+            return;
+        }
+        self.built = Some(key);
+        self.search.clear();
+        let total = u64::from(total);
+        if let (Some(pass), Some(shift)) = (pass, shift) {
+            // From the first row still in the history, one mark per bucket:
+            // after a hit the walk jumps to the next bucket's first row.
+            let mut from = u64::try_from(-shift).unwrap_or(0);
+            while let Some(row) = usize::try_from(from)
+                .ok()
+                .and_then(|from| pass.rows.next_from(from))
+            {
+                let Ok(depth) = u64::try_from(row as i64 + shift) else {
+                    break;
+                };
+                if depth >= total {
+                    break;
+                }
+                self.search.push(TrackMark {
+                    position: depth as f32,
+                    current: false,
+                });
+                let next = bucket_start(track_bucket(depth, total) + 1, total);
+                from = u64::try_from(next as i64 - shift).unwrap_or(u64::MAX);
+            }
+        }
+        // The current match over a match in its bucket.
+        if let Some(depth) = key.current.and_then(|depth| u64::try_from(depth).ok())
+            && depth < total
+        {
+            let bucket = track_bucket(depth, total);
+            let mark = TrackMark {
+                position: depth as f32,
+                current: true,
+            };
+            match self
+                .search
+                .binary_search_by_key(&bucket, |mark| track_bucket(mark.position as u64, total))
+            {
+                Ok(at) => {
+                    if let Some(slot) = self.search.get_mut(at) {
+                        *slot = mark;
+                    }
+                }
+                Err(at) => self.search.insert(at, mark),
+            }
+        }
+    }
+}
+
+/// Moves a followed pass's rows from their last observation to `now`.
+///
+/// **An observation older than the one they stand at moves nothing**: the
+/// frame reads the scrollback under `Term` and takes the pass from the
+/// search slot after, so a pass published in between was taken later than
+/// the frame looked — its rows are the newer picture and stay as taken. The
+/// output and clear generations only grow, so a smaller one is an older
+/// observation.
+fn follow_to(mut follow: Follow, now: search::LedgerMark, limit: usize) -> Follow {
+    if now.epoch < follow.seen.epoch || now.wipes < follow.seen.wipes {
+        return follow;
+    }
+    follow.shift = follow.shift.and_then(|shift| {
+        if search::layout_changed(follow.seen, now) {
+            return None;
+        }
+        // An unknowable shift leaves the rows where they were drawn.
+        Some(shift + search::depth_moved(follow.seen, now, limit).unwrap_or(0))
+    });
+    follow.seen = now;
+    follow
+}
+
 /// A command block's trace in the frame: **the command's row** and that
 /// command's colour.
 ///
@@ -4548,6 +4817,11 @@ impl Session {
     /// channel in separate lists; if there is no pattern both lists are empty and
     /// the scan does not run.
     ///
+    /// **`marks` is the scroll bar's marks of the whole history**
+    /// ([`TrackMarks`]): the last finished search pass's rows, bucketed after
+    /// the `Term` lock is released; kept as they are when this frame's inputs
+    /// are the ones they were built from.
+    ///
     /// **The journal:** the cursor-style reset on leaving the alternate screen
     /// is recorded in this lock round; the glide moves only the view, which
     /// the snapshot does not read.
@@ -4562,6 +4836,7 @@ impl Session {
         blocks: &mut Blocks,
         selection: &mut SelectionRuns,
         search: &mut SearchRuns,
+        marks: &mut TrackMarks,
         clusters: &mut Clusters,
         glide: ScrollGlide,
         budget: DockBudget,
@@ -4660,9 +4935,13 @@ impl Session {
         // invalid) the scan does not run at all and the two lists stay empty.
         search.clear();
         search.colors = search::SearchColors::of(&theme);
-        let (search_generation, mut search_pattern, mut search_tracking) = {
+        // A pattern lent out (navigation's own `Term` round) leaves search
+        // open with nothing to borrow: the scroll bar's marks stay as they
+        // are for this frame rather than being taken for a closed search.
+        let (search_generation, mut search_pattern, mut search_tracking, search_lent) = {
             let mut slot = lock(&self.search);
-            (slot.generation, slot.pattern.take(), slot.tracking())
+            let lent = slot.active && slot.pattern.is_none();
+            (slot.generation, slot.pattern.take(), slot.tracking(), lent)
         };
         let search_taken = search_tracking.mark;
         // **The link hover too, before the `Term` lock**: the theme's
@@ -5653,6 +5932,11 @@ impl Session {
         // channel's bottom to the grid's top is split into two lists but stays a
         // single match. **After** the loops, because the suppression's upper end is
         // born in the grid loop (the selection filter's rationale).
+        // **The scroll bar's marks take only scalars from this round**: the
+        // scrollback's observation and the current match's row. Their
+        // bucketing reads the last pass, which lives in the search slot — a
+        // leaf lock, taken after `Term` is released ([`TrackMarks`]).
+        let mut search_seen = None;
         if let Some(regex) = search_pattern.as_mut() {
             // The current match is first pinned to its content: if output
             // scrolled the scrollback its highlight is at its scrolled place.
@@ -5663,6 +5947,13 @@ impl Session {
                 now,
                 self.scrollback.load(Ordering::Relaxed),
             );
+            search_seen = Some((
+                now,
+                search_tracking
+                    .current
+                    .as_ref()
+                    .map(|found| found.start().line.0),
+            ));
             search_visible(
                 &term,
                 regex,
@@ -5806,17 +6097,44 @@ impl Session {
         // must exclude what the highlight excludes ([`search::eligible`]) — the
         // first query too (when search has had no frame yet). Its cost is a
         // contention-free leaf lock per content frame.
-        {
+        //
+        // **The last pass is taken in the same round**, shared: its rows are
+        // bucketed below, outside every lock. A slot that moved on to another
+        // query keeps its pass from this frame's marks — the new query asked
+        // for its own frame.
+        let search_pass = {
             let mut slot = lock(&self.search);
             slot.hidden = search_hidden;
+            let current = slot.generation == search_generation;
             if let Some(pattern) = search_pattern
-                && slot.generation == search_generation
+                && current
                 && slot.pattern.is_none()
             {
                 slot.pattern = Some(pattern);
                 slot.settle(search_taken, search_tracking);
             }
+            current.then(|| slot.pass.clone())
+        };
+        // **The marks after the lock.** Search closed, the alternate screen
+        // and a history with nothing to scroll have none; a query that changed
+        // mid-frame, or a pattern lent out, leaves the last ones in place for
+        // the next frame to redo.
+        match (search_seen, search_pass, cursor.scroll_position()) {
+            (Some((now, current)), Some(pass), Some(position)) if !alt_screen => {
+                marks.update_search(SearchTrack {
+                    pass: pass.as_deref(),
+                    now,
+                    limit: self.scrollback.load(Ordering::Relaxed),
+                    history: cursor.history,
+                    total: position.room.saturating_add(u32::from(position.visible)),
+                    current,
+                });
+            }
+            (Some(_), None, _) => {}
+            (None, ..) if search_lent => {}
+            _ => marks.clear(),
         }
+        marks.set_colors(&theme);
 
         // **Phase 2**, after the `Term` lock is dropped: the ids are coloured from
         // the shell ledger and the duration counters are printed.
@@ -9004,6 +9322,12 @@ impl Session {
     /// match lost through the scrollback's shift ([`search::Relocate`]): its
     /// highlight changes place on screen.
     ///
+    /// **A pass that reaches the top publishes its rows** — the scroll bar's
+    /// marks ([`TrackMarks`]) — and says so in
+    /// [`SearchReport::marks_changed`] when they differ from the last pass's.
+    /// The frame for them is the driver's to ask, not this call's: only the
+    /// drawing side knows whether a bar is up to show them.
+    ///
     /// The pattern is the index's **own** copy ([`search::SearchIndex::pattern`]):
     /// it does not race with the pattern the frame path borrows; no lock is taken
     /// under `Term`.
@@ -9036,13 +9360,10 @@ impl Session {
             )
         };
         let taken = tracking.mark;
+        let limit = self.scrollback.load(Ordering::Relaxed);
         let term = self.term.lock();
-        search::track(
-            &term,
-            &mut tracking,
-            self.ledger_now(&term),
-            self.scrollback.load(Ordering::Relaxed),
-        );
+        let now = self.ledger_now(&term);
+        search::track(&term, &mut tracking, now, limit);
         let offset = term.grid().display_offset() as i32;
         let window = drawn_lines(&term, offset, self.search_band(&term));
         search::index_chunk(
@@ -9062,6 +9383,35 @@ impl Session {
                 return Some(self.report_of(&slot));
             }
             index.pattern = Some(pattern);
+            // **The pass reached the top in this piece**: its rows become the
+            // marks, as of this piece's observation. Not `complete` — on a
+            // full scrollback with output flowing the news never lets a pass
+            // be complete, yet each pass that reaches the top is the best
+            // picture there is. A pass that moved nothing keeps the old one,
+            // so the frame does not rebuild the same marks.
+            //
+            // **The set's memory goes round**: a kept pass leaves its rows
+            // with the index, a replaced one hands its set back when nobody
+            // else holds it — the next pass reuses either allocation instead
+            // of growing a new one word by word (`restart` empties it).
+            let marks_changed = index.next.is_none()
+                && !slot
+                    .pass
+                    .as_ref()
+                    .is_some_and(|pass| pass.same_as(&index.rows, now, limit));
+            if marks_changed {
+                slot.passes += 1;
+                let published = search::SearchPass {
+                    rows: std::mem::take(&mut index.rows),
+                    mark: now,
+                    serial: slot.passes,
+                };
+                if let Some(old) = slot.pass.replace(Arc::new(published))
+                    && let Ok(old) = Arc::try_unwrap(old)
+                {
+                    index.rows = old.rows;
+                }
+            }
             let mut relocated = false;
             // The lost current match is re-selected only at the end of the **last**
             // pass: if there is pending news the index's coordinates may already
@@ -9080,7 +9430,11 @@ impl Session {
             }
             slot.index = index;
             let settled = slot.settle(taken, tracking);
-            (self.report_of(&slot), relocated && settled)
+            let report = SearchReport {
+                marks_changed,
+                ..self.report_of(&slot)
+            };
+            (report, relocated && settled)
         };
         if relocated {
             self.request_frame();
@@ -9102,6 +9456,8 @@ impl Session {
                 && slot.index.pattern.is_some()
                 && slot.index.next.is_none()
                 && !pending,
+            // Only the step that publishes a pass says so (`search_step`).
+            marks_changed: false,
         }
     }
 
@@ -9382,6 +9738,9 @@ impl Session {
             let mut slot = lock(&self.search);
             slot.generation = slot.generation.wrapping_add(1);
             slot.index = search::SearchIndex::default();
+            // The old query's marks go with it: until the new query's first
+            // pass reaches the top the bar shows only its current match.
+            slot.pass = None;
             if let Some(pattern) = &pattern {
                 slot.index.restart(Some(pattern.clone()));
             }
@@ -10687,6 +11046,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
@@ -10707,6 +11067,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut runs,
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
@@ -10729,6 +11090,7 @@ mod tests {
                 blocks,
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
@@ -11023,6 +11385,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
@@ -11512,6 +11875,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
@@ -11699,6 +12063,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 DockBudget { share, cols: 80 },
@@ -11850,6 +12215,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
@@ -11964,6 +12330,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
@@ -12020,6 +12387,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
@@ -12066,6 +12434,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
@@ -12093,6 +12462,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
@@ -12174,6 +12544,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12222,6 +12593,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12242,6 +12614,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12278,6 +12651,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
@@ -12291,6 +12665,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12336,6 +12711,7 @@ mod tests {
                         &mut Blocks::default(),
                         &mut SelectionRuns::default(),
                         &mut SearchRuns::default(),
+                        &mut TrackMarks::default(),
                         &mut Clusters::default(),
                         ScrollGlide::default(),
                         BUDGET,
@@ -12349,6 +12725,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12392,6 +12769,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12421,6 +12799,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12456,6 +12835,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12483,6 +12863,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12521,6 +12902,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12553,6 +12935,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12598,6 +12981,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12672,6 +13056,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12715,6 +13100,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12761,6 +13147,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
@@ -12802,6 +13189,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12853,6 +13241,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12905,6 +13294,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -12955,6 +13345,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13012,6 +13403,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13038,6 +13430,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
@@ -13057,6 +13450,7 @@ mod tests {
                         &mut Blocks::default(),
                         &mut SelectionRuns::default(),
                         &mut SearchRuns::default(),
+                        &mut TrackMarks::default(),
                         &mut Clusters::default(),
                         ScrollGlide::default(),
                         BUDGET,
@@ -13071,6 +13465,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13185,6 +13580,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13226,6 +13622,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13242,6 +13639,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13372,6 +13770,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 budget,
@@ -13755,6 +14154,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13775,6 +14175,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13793,6 +14194,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13899,6 +14301,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -13930,6 +14333,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -15755,6 +16159,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -16630,6 +17035,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut TrackMarks::default(),
                     &mut Clusters::default(),
                     ScrollGlide::default(),
                     DockBudget { share, cols: 40 },
@@ -16701,6 +17107,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 DockBudget { share: 0.5, cols },
@@ -17472,6 +17879,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut runs,
                 &mut search,
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
@@ -17701,6 +18109,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -18286,6 +18695,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -18317,6 +18727,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -18627,6 +19038,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -18699,6 +19111,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -18741,6 +19154,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -19587,6 +20001,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             stale,
             BUDGET,
@@ -19605,6 +20020,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             live,
             BUDGET,
@@ -19697,6 +20113,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 glide,
                 BUDGET,
@@ -20805,6 +21222,7 @@ e\\314\\201.'; sleep 5";
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut clusters,
                 ScrollGlide::default(),
                 BUDGET,
@@ -21772,6 +22190,7 @@ e\\314\\201.'; sleep 5";
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut runs,
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -22177,6 +22596,8 @@ e\\314\\201.'; sleep 5";
                 total: 3,
                 ordinal: Some(1),
                 complete: true,
+                // The one piece reached the top: the first pass's marks.
+                marks_changed: true,
             },
             "the bottommost is the newest"
         );
@@ -22527,6 +22948,7 @@ e\\314\\201.'; sleep 5";
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
                 &mut Clusters::default(),
                 glide,
                 BUDGET,
@@ -22737,6 +23159,523 @@ e\\314\\201.'; sleep 5";
             line_text(&session, 8) == "d"
         });
         assert_eq!(searches(), base + 2, "news went to a closed search");
+        session.shutdown();
+    }
+
+    // --- The scroll bar's marks ---
+
+    /// The rows the index marked, driven by itself to the end in chunks of
+    /// `chunk` rows (the counterpart of [`index_with`]).
+    fn rows_with(session: &Session, query: &SearchQuery, chunk: i32) -> Vec<usize> {
+        let (_, pattern) = search::compile(query);
+        let mut regex = pattern.expect("a valid pattern");
+        let mut index = search::SearchIndex::default();
+        index.restart(None);
+        let term = session.term.lock();
+        while index.next.is_some() {
+            search::index_chunk(
+                &term,
+                &mut regex,
+                &mut index,
+                None,
+                &search::Tracking::default(),
+                0..=0,
+                chunk,
+            );
+        }
+        set_rows(&index.rows)
+    }
+
+    /// A row set's rows, top first.
+    fn set_rows(rows: &search::RowSet) -> Vec<usize> {
+        std::iter::successors(rows.next_from(0), |row| rows.next_from(row + 1)).collect()
+    }
+
+    /// The rows whose text holds `needle`, as depths from the history's top —
+    /// the test's own reading of the scrollback.
+    fn rows_holding(session: &Session, needle: &str) -> Vec<usize> {
+        let (top, bottom) = {
+            let term = session.term.lock();
+            (term.topmost_line().0, term.bottommost_line().0)
+        };
+        (top..=bottom)
+            .filter(|&line| line_text(session, line).contains(needle))
+            .map(|line| (line - top) as usize)
+            .collect()
+    }
+
+    /// The marks' `(position, current)` pairs, top first.
+    fn positions(marks: &TrackMarks) -> Vec<(f32, bool)> {
+        marks
+            .search()
+            .iter()
+            .map(|mark| (mark.position, mark.current))
+            .collect()
+    }
+
+    /// One frame's marks, damaged or not.
+    fn frame_marks(session: &Session) -> TrackMarks {
+        let mut marks = TrackMarks::default();
+        frame_into(session, &mut marks);
+        marks
+    }
+
+    /// One frame into the caller's marks — the drawing side's buffer kept
+    /// across frames.
+    fn frame_into(session: &Session, marks: &mut TrackMarks) {
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            marks,
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+    }
+
+    /// The serial of the slot's finished pass.
+    fn pass_serial(session: &Session) -> Option<u64> {
+        lock(&session.search).pass.as_ref().map(|pass| pass.serial)
+    }
+
+    #[test]
+    fn a_pass_marks_the_rows_it_counts() {
+        // `seq 1 60`: every row holding a `1` is marked once, `11` too — the
+        // set holds rows where the count holds matches — and no seam between
+        // pieces loses or adds one.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("stty -echo; seq 1 60; sleep 5", Arc::clone(&wake));
+        wait_until("scrollback not full", Duration::from_secs(5), || {
+            line_text(&session, 8) == "60"
+        });
+        let expected = rows_holding(&session, "1");
+        assert_eq!(expected.len(), 15, "{expected:?}");
+        for chunk in [1, 2, 7, search::CHUNK_LINES] {
+            assert_eq!(
+                rows_with(&session, &plain("1"), chunk),
+                expected,
+                "chunk {chunk}"
+            );
+        }
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_dot_marks_rows_not_matches() {
+        // `.` matches every character: the count runs to the characters, the
+        // set stays a bit per row of the scrollback.
+        let wake = Arc::new(TestWake::default());
+        let session =
+            spawn_with_scrollback("stty -echo; seq 1 300; sleep 5", 400, Arc::clone(&wake));
+        wait_until("scrollback not full", Duration::from_secs(5), || {
+            line_text(&session, 8) == "300"
+        });
+        let (_, pattern) = search::compile(&SearchQuery {
+            text: ".".into(),
+            regex: true,
+            case_sensitive: false,
+        });
+        let mut regex = pattern.expect("a valid pattern");
+        let mut index = search::SearchIndex::default();
+        index.restart(None);
+        let lines = {
+            let term = session.term.lock();
+            while index.next.is_some() {
+                search::index_chunk(
+                    &term,
+                    &mut regex,
+                    &mut index,
+                    None,
+                    &search::Tracking::default(),
+                    0..=0,
+                    search::CHUNK_LINES,
+                );
+            }
+            term.history_size() + term.screen_lines()
+        };
+        // 9 one-digit, 90 two-digit, 201 three-digit numbers.
+        assert_eq!(index.total, 9 + 90 * 2 + 201 * 3);
+        assert_eq!(set_rows(&index.rows).len(), 300);
+        assert!(
+            index.rows.words() <= lines.div_ceil(64),
+            "{} words for {lines} rows",
+            index.rows.words()
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_half_pass_leaves_the_last_finished_one() {
+        // More history than one piece: the marks change when a pass reaches
+        // the top, never piece by piece — a pass restarted by output leaves
+        // the last one standing until it finishes itself, and one that finds
+        // the same rows at the same depths changes nothing.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_scrollback(
+            "stty -echo; seq 1 1200; while read x; do echo \"$x\"; done",
+            2000,
+            Arc::clone(&wake),
+        );
+        wait_until("history did not fill", Duration::from_secs(5), || {
+            line_text(&session, 8) == "1200"
+        });
+        session.set_search(&plain("7"));
+        let first = session.search_step().expect("search is open");
+        assert!(
+            !first.marks_changed && pass_serial(&session).is_none(),
+            "a half pass was published: {first:?}"
+        );
+        count_all(&session);
+        let serial = pass_serial(&session).expect("the finished pass was not published");
+        // A row without a match: the history is not full, so no row's depth
+        // moved — the same marks, no frame for them.
+        session.write(b"x\n");
+        wait_until("the output did not come", Duration::from_secs(5), || {
+            line_text(&session, 8) == "x"
+        });
+        let report = count_all(&session);
+        assert!(
+            !report.marks_changed && pass_serial(&session) == Some(serial),
+            "an unchanged pass was published again: {report:?}"
+        );
+        // A row with one: its pass is new, but not before it reaches the top.
+        session.write(b"7\n");
+        wait_until("the output did not come", Duration::from_secs(5), || {
+            line_text(&session, 8) == "7"
+        });
+        let step = session.search_step().expect("search is open");
+        assert!(
+            !step.marks_changed && pass_serial(&session) == Some(serial),
+            "the restarted pass replaced the marks half way: {step:?}"
+        );
+        count_all(&session);
+        assert!(
+            pass_serial(&session) > Some(serial),
+            "the restarted pass was not published"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_pass_that_reaches_the_top_is_published_while_output_flows() {
+        // Output arriving while a pass climbs keeps its count from being
+        // complete — on a full scrollback with output flowing no pass ever
+        // is — yet the pass that reaches the top is the marks' best picture
+        // and is published.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_scrollback(
+            "stty -echo; seq 1 1200; while read x; do echo \"$x\"; done",
+            2000,
+            Arc::clone(&wake),
+        );
+        wait_until("history did not fill", Duration::from_secs(5), || {
+            line_text(&session, 8) == "1200"
+        });
+        session.set_search(&plain("7"));
+        let first = session.search_step().expect("search is open");
+        assert!(!first.complete, "one piece counted the whole history");
+        session.write(b"x\n");
+        wait_until("the output did not come", Duration::from_secs(5), || {
+            line_text(&session, 8) == "x"
+        });
+        let mut report = first;
+        for _ in 0..10 {
+            if pass_serial(&session).is_some() {
+                break;
+            }
+            report = session.search_step().expect("search is open");
+        }
+        assert!(
+            report.marks_changed && !report.complete,
+            "the pass that reached the top under news: {report:?}"
+        );
+        session.shutdown();
+    }
+
+    /// A finished pass over `rows`, observed at `mark`.
+    fn pass_of(rows: &[usize], mark: search::LedgerMark, serial: u64) -> search::SearchPass {
+        let mut set = search::RowSet::default();
+        for &row in rows {
+            set.insert(row);
+        }
+        search::SearchPass {
+            rows: set,
+            mark,
+            serial,
+        }
+    }
+
+    /// The scrollback observed with `history` rows, the window `offset` rows
+    /// up and output generation `epoch`.
+    fn observed(history: usize, offset: usize, epoch: u64) -> search::LedgerMark {
+        search::LedgerMark {
+            history,
+            offset,
+            user: 0,
+            epoch,
+            wipes: 0,
+            columns: 40,
+            lines: 10,
+            alt: false,
+        }
+    }
+
+    #[test]
+    fn a_bucket_holds_one_mark_and_the_current_in_front() {
+        // A track twice as long as its buckets: rows 0 and 1 share a bucket,
+        // so do 2 and 3 — one mark each; the current match takes its bucket's
+        // place, or a place of its own.
+        let total = TRACK_BUCKETS * 2;
+        let history = total - 10;
+        let now = observed(history as usize, 0, 1);
+        let pass = pass_of(&[0, 1, 2, 3, 9], now, 1);
+        let marks = |current: Option<i32>| {
+            let mut marks = TrackMarks::default();
+            marks.update_search(SearchTrack {
+                pass: Some(&pass),
+                now,
+                limit: 100_000,
+                history,
+                total,
+                current,
+            });
+            positions(&marks)
+        };
+        assert_eq!(marks(None), [(0.0, false), (2.0, false), (9.0, false)]);
+        // `Line(depth - history)` is the row `depth` rows from the top.
+        let line = |depth: u32| depth as i32 - history as i32;
+        assert_eq!(
+            marks(Some(line(1))),
+            [(1.0, true), (2.0, false), (9.0, false)],
+            "the current match did not take its bucket"
+        );
+        assert_eq!(
+            marks(Some(line(5))),
+            [(0.0, false), (2.0, false), (5.0, true), (9.0, false)],
+            "the current match did not get a place of its own"
+        );
+        // A track shorter than its buckets: every row is a bucket.
+        let short = pass_of(&[6, 16, 26], observed(21, 0, 1), 2);
+        let mut marks = TrackMarks::default();
+        marks.update_search(SearchTrack {
+            pass: Some(&short),
+            now: observed(21, 0, 1),
+            limit: 100,
+            history: 21,
+            total: 31,
+            current: None,
+        });
+        assert_eq!(
+            positions(&marks),
+            [(6.0, false), (16.0, false), (26.0, false)]
+        );
+    }
+
+    #[test]
+    fn the_marks_follow_the_shift_and_stay_when_it_is_lost() {
+        let mut marks = TrackMarks::default();
+        let mut at = |pass: &search::SearchPass, now, limit: usize| {
+            marks.update_search(SearchTrack {
+                pass: Some(pass),
+                now,
+                limit,
+                history: now.history as u32,
+                total: 60,
+                current: None,
+            });
+            positions(&marks)
+        };
+        // A history not yet full: new rows land at the bottom and a row's
+        // depth from the top does not move.
+        let pass = pass_of(&[5, 12], observed(20, 0, 1), 1);
+        assert_eq!(
+            at(&pass, observed(25, 0, 2), 100),
+            [(5.0, false), (12.0, false)]
+        );
+        // A full history scrolled up 5: output scrolls it 3 rows further and
+        // the top row falls off.
+        let pass = pass_of(&[1, 10, 20], observed(50, 5, 1), 2);
+        assert_eq!(
+            at(&pass, observed(50, 5, 1), 50),
+            [(1.0, false), (10.0, false), (20.0, false)]
+        );
+        assert_eq!(
+            at(&pass, observed(50, 8, 2), 50),
+            [(7.0, false), (17.0, false)],
+            "the marks did not follow the output"
+        );
+        // Back at the bottom with more output: the shift cannot be known, and
+        // the marks stay where they were drawn rather than move to a guess.
+        assert_eq!(
+            at(&pass, observed(50, 0, 3), 50),
+            [(7.0, false), (17.0, false)],
+            "a lost shift moved the marks"
+        );
+        // A pass lost from its first frame is drawn where it was taken.
+        let pass = pass_of(&[30], observed(50, 0, 4), 3);
+        assert_eq!(at(&pass, observed(50, 0, 5), 50), [(30.0, false)]);
+        // A frame that looked before the pass was taken (its output
+        // generation is older) moves nothing: the pass is the newer picture.
+        let pass = pass_of(&[12], observed(30, 0, 9), 4);
+        assert_eq!(at(&pass, observed(25, 0, 8), 100), [(12.0, false)]);
+        assert_eq!(
+            at(&pass, observed(36, 0, 10), 100),
+            [(12.0, false)],
+            "the older look shifted the rows when the history grew"
+        );
+    }
+
+    #[test]
+    fn a_history_laid_out_anew_empties_the_lane_until_the_next_pass() {
+        // A resize reflows the rows and the alternate screen is another grid:
+        // the pass's rows point at nothing, so the lane is empty — and stays
+        // so for that pass — while the current match, read anew each frame,
+        // is still marked.
+        let mut marks = TrackMarks::default();
+        let pass = pass_of(&[5, 12], observed(20, 0, 1), 1);
+        let mut at = |now: search::LedgerMark, current: Option<i32>| {
+            marks.update_search(SearchTrack {
+                pass: Some(&pass),
+                now,
+                limit: 100,
+                history: now.history as u32,
+                total: 60,
+                current,
+            });
+            positions(&marks)
+        };
+        assert_eq!(at(observed(20, 0, 1), None), [(5.0, false), (12.0, false)]);
+        let resized = search::LedgerMark {
+            columns: 50,
+            ..observed(20, 0, 2)
+        };
+        assert_eq!(at(resized, Some(-10)), [(10.0, true)]);
+        assert_eq!(
+            at(
+                search::LedgerMark {
+                    columns: 50,
+                    ..observed(21, 0, 3)
+                },
+                None
+            ),
+            [],
+            "the reflowed pass came back"
+        );
+    }
+
+    #[test]
+    fn the_frame_marks_the_finished_pass_and_brightens_the_current() {
+        // `7` on depths 6, 16 and 26 (`Line(-15)`, `Line(-5)`, `Line(5)` under
+        // 21 rows of history); the current match is `27`'s.
+        let (session, _wake) = sevens();
+        assert_eq!(
+            positions(&frame_marks(&session)),
+            [(26.0, true)],
+            "before the pass finishes only the current match is marked"
+        );
+        count_all(&session);
+        let marks = frame_marks(&session);
+        assert_eq!(
+            positions(&marks),
+            [(6.0, false), (16.0, false), (26.0, true)]
+        );
+        assert_eq!(marks.match_color(), THEME.search_mark_linear());
+        assert_eq!(marks.current_color(), THEME.search_current_mark_linear());
+        // A frame that finds the pattern lent out (navigation's own round)
+        // keeps the marks it has: search is still open.
+        let mut kept = TrackMarks::default();
+        frame_into(&session, &mut kept);
+        let lent = lock(&session.search).pattern.take();
+        frame_into(&session, &mut kept);
+        assert_eq!(
+            positions(&kept),
+            [(6.0, false), (16.0, false), (26.0, true)],
+            "a lent pattern cleared the marks"
+        );
+        lock(&session.search).pattern = lent;
+        session.clear_search();
+        assert!(
+            frame_marks(&session).search().is_empty(),
+            "a closed search left marks"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_alternate_screen_has_no_marks() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; seq 1 30; read x; printf '\\033[?1049h'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+        session.set_search(&plain("7"));
+        count_all(&session);
+        assert!(!frame_marks(&session).search().is_empty());
+        session.write(b"\n");
+        wait_until(
+            "the alternate screen did not come",
+            Duration::from_secs(5),
+            || session.term.lock().mode().contains(TermMode::ALT_SCREEN),
+        );
+        assert!(
+            frame_marks(&session).search().is_empty(),
+            "the alternate screen kept the marks"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_frame_takes_the_search_slot_only_outside_the_term_lock() {
+        // While the frame is inside its `Term` round (the sink runs there) a
+        // second thread takes the search slot and holds it: a frame that
+        // reached for the slot under `Term` would wait holding `Term`, and
+        // the thread would never see it free.
+        let (session, _wake) = sevens();
+        count_all(&session);
+        let session = Arc::new(session);
+        let (entered, inside) = mpsc::channel();
+        let (held, hold) = mpsc::channel();
+        let holder = {
+            let session = Arc::clone(&session);
+            thread::spawn(move || {
+                inside.recv().expect("the frame entered its round");
+                let slot = lock(&session.search);
+                held.send(()).expect("the frame waits");
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut free = false;
+                while !free && Instant::now() < deadline {
+                    free = session.term.try_lock_unfair().is_some();
+                    thread::sleep(Duration::from_millis(1));
+                }
+                drop(slot);
+                free
+            })
+        };
+        let mut signal = Some((entered, hold));
+        session.frame(
+            |_| {
+                if let Some((entered, hold)) = signal.take() {
+                    entered.send(()).expect("the holder listens");
+                    hold.recv().expect("the holder took the slot");
+                }
+            },
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
+            &mut Clusters::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        assert!(
+            holder.join().expect("the holder"),
+            "the frame waited for the search slot while holding `Term`"
+        );
         session.shutdown();
     }
 
@@ -23672,6 +24611,7 @@ e\\314\\201.'; sleep 5";
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -23793,6 +24733,7 @@ e\\314\\201.'; sleep 5";
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -23953,6 +24894,7 @@ e\\314\\201.'; sleep 5";
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -24304,6 +25246,7 @@ e\\314\\201.'; sleep 5";
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
@@ -24320,6 +25263,7 @@ e\\314\\201.'; sleep 5";
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut TrackMarks::default(),
             &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,

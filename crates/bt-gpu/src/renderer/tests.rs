@@ -1,4 +1,6 @@
-use bt_core::{Block, CaretShape, Cell, Cursor, SearchRun, SelectionRun, Theme, UnderlineStyle};
+use bt_core::{
+    Block, CaretShape, Cell, Cursor, SearchRun, SelectionRun, Theme, TrackMark, UnderlineStyle,
+};
 
 use super::*;
 use crate::Renderer;
@@ -1571,10 +1573,21 @@ fn srgb_byte(linear: f32) -> u8 {
     (encoded * 255.0).round() as u8
 }
 
+/// The scroll bar marks' two colours in the pixel tests: a match's, then
+/// the current match's — pure channels, so a pixel says which one it is.
+const MARK_COLORS: [LinearRgba; 2] = [
+    LinearRgba::from_srgb(0x00, 0xff, 0x00),
+    LinearRgba::from_srgb(0x00, 0x00, 0xff),
+];
+
 /// A frame with a dock and a scroll bar at the bottom of its travel, drawn
-/// with `look` (`None` → the bar is never set): the frame, the thumb and the
-/// floor the track ends at.
-fn scroll_bar_frame(edge: usize, look: Option<Look>) -> (Frame, [f32; 4], f32) {
+/// with `look` (`None` → the bar is never set) and `marks`: the frame, the
+/// layout and the floor the track ends at.
+fn scroll_bar_marked(
+    edge: usize,
+    look: Option<Look>,
+    marks: &[TrackMark],
+) -> (Frame, crate::scrollbar::ScrollbarLayout, f32) {
     let cell = grid(8, 16);
     let mut frame = Frame::default();
     frame.clear(cell, CaretStyle::default());
@@ -1590,10 +1603,136 @@ fn scroll_bar_frame(edge: usize, look: Option<Look>) -> (Frame, [f32; 4], f32) {
     };
     let layout = crate::scrollbar::ScrollbarLayout::new(Some(position), edge as f32, floor, cell);
     if let Some(look) = look {
-        frame.set_scrollbar(layout, look, WHITE);
+        frame.set_scrollbar(layout, look, WHITE, marks, MARK_COLORS);
     }
+    (frame, layout, floor)
+}
+
+/// [`scroll_bar_marked`] with no marks: the frame, the thumb and the floor.
+fn scroll_bar_frame(edge: usize, look: Option<Look>) -> (Frame, [f32; 4], f32) {
+    let (frame, layout, floor) = scroll_bar_marked(edge, look, &[]);
     let wide = look.map_or(0.0, |look| look.wide);
     (frame, layout.thumb(wide), floor)
+}
+
+/// The pixel at a rectangle's centre.
+fn centre_of(pixels: &[u8], edge: usize, [x0, y0, x1, y1]: [f32; 4]) -> (u8, u8, u8) {
+    pixel_at(
+        pixels,
+        edge,
+        ((x0 + x1) / 2.0) as usize,
+        ((y0 + y1) / 2.0) as usize,
+    )
+}
+
+#[test]
+fn a_thin_bar_draws_its_search_marks_over_the_thumb_in_its_column() {
+    // The window at the bottom shows the history's last two rows (100, 101):
+    // their marks land on the thumb, in its column, opaque over it — the
+    // current one in its own colour. A row far up the history lands on the
+    // bare track above the thumb (a texture tall enough for a track longer
+    // than the thumb's minimum).
+    const EDGE: usize = 128;
+    let r = renderer();
+    let marks = [
+        TrackMark {
+            position: 10.0,
+            current: false,
+        },
+        TrackMark {
+            position: 101.0,
+            current: true,
+        },
+    ];
+    let (frame, layout, _) = scroll_bar_marked(
+        EDGE,
+        Some(Look::auto(1.0, 0.0, crate::scrollbar::THUMB_ALPHA)),
+        &marks,
+    );
+    let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+    let thumb = layout.thumb(0.0);
+    let current = layout.search_mark(101.0, 0.0);
+    assert_eq!(
+        (current[0], current[2]),
+        (thumb[0], thumb[2]),
+        "the mark left the thumb's column"
+    );
+    assert!(
+        current[1] >= thumb[1] && current[3] <= thumb[3],
+        "the window's row is not on the thumb: {current:?} / {thumb:?}"
+    );
+    assert_eq!(
+        centre_of(&pixels, EDGE, current),
+        (0x00, 0x00, 0xff),
+        "the current mark is not over the thumb"
+    );
+    let far = layout.search_mark(10.0, 0.0);
+    assert!(far[3] < thumb[1], "{far:?} / {thumb:?}");
+    assert_eq!(centre_of(&pixels, EDGE, far), (0x00, 0xff, 0x00));
+    // The thumb around the mark is still the thumb.
+    let x = ((thumb[0] + thumb[2]) / 2.0) as usize;
+    let above = pixel_at(&pixels, EDGE, x, current[1] as usize - 2);
+    assert!(
+        above.0 == above.1 && above.1 == above.2 && above.0 > 0,
+        "the thumb beside the mark: {above:02x?}"
+    );
+}
+
+#[test]
+fn a_wide_bar_draws_its_search_marks_in_the_right_lane() {
+    // Wide, the mark leaves the thumb's column for the strip's right lane
+    // (9–14 points of 16): the lane is the mark's, the wide thumb's left
+    // part at the same height stays the thumb's grey.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let marks = [TrackMark {
+        position: 10.0,
+        current: false,
+    }];
+    let (frame, layout, _) = scroll_bar_marked(EDGE, Some(Look::ALWAYS), &marks);
+    let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+    let mark = layout.search_mark(10.0, 1.0);
+    let strip = layout.strip_x();
+    assert_eq!((mark[0] - strip, mark[2] - strip), (9.0, 14.0));
+    assert_eq!(centre_of(&pixels, EDGE, mark), (0x00, 0xff, 0x00));
+    let left = pixel_at(
+        &pixels,
+        EDGE,
+        strip as usize + 4,
+        ((mark[1] + mark[3]) / 2.0) as usize,
+    );
+    assert!(
+        left.0 == left.1 && left.1 == left.2 && left.0 > 0,
+        "the mark spilled out of its lane: {left:02x?}"
+    );
+}
+
+#[test]
+fn a_hidden_bar_draws_no_marks() {
+    // Marks are the bar's: a faded bar is no op at all, its marks included.
+    const EDGE: usize = 64;
+    let r = renderer();
+    let marks = [TrackMark {
+        position: 101.0,
+        current: true,
+    }];
+    let (hidden, ..) = scroll_bar_marked(
+        EDGE,
+        Some(Look::auto(0.0, 0.0, crate::scrollbar::THUMB_ALPHA)),
+        &marks,
+    );
+    assert!(
+        hidden
+            .scrollbar_marks()
+            .iter()
+            .all(|(marks, _)| marks.is_empty())
+    );
+    let (never, ..) = scroll_bar_frame(EDGE, None);
+    assert_eq!(
+        render_offscreen(&r, EDGE, BACKGROUND, &hidden),
+        render_offscreen(&r, EDGE, BACKGROUND, &never),
+        "the hidden bar's marks changed pixels"
+    );
 }
 
 #[test]

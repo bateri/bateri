@@ -374,6 +374,12 @@ pub struct SearchReport {
     /// The index has counted the whole scrollback and no scrollback change is
     /// pending.
     pub complete: bool,
+    /// This step finished a pass whose matched rows differ from the last
+    /// finished pass's — the scroll bar's marks of the whole history
+    /// ([`crate::TrackMarks`]) changed, and the next content frame draws
+    /// them. Not the panel's: the driver hands it to whoever draws the bar,
+    /// because a step requests no frame of its own.
+    pub marks_changed: bool,
 }
 
 /// Whether the match is **in the highlight's set** (the two exclusions):
@@ -468,6 +474,92 @@ pub(crate) fn same_place(a: &Match, b: &Match) -> bool {
 /// piece by at most [`WRAP_REACH`].
 pub(crate) const CHUNK_LINES: i32 = 500;
 
+/// A set of scrollback rows, one bit per row — the rows a pass found
+/// matches on ([`SearchIndex::rows`]).
+///
+/// A row is its **depth from the history's top** when it was set (`line +
+/// history_size`): in a scrollback that has not filled up yet that number
+/// does not move as output arrives (new rows land at the bottom), so the rows
+/// of a pass whose pieces straddle output agree with each other there.
+///
+/// **Bounded by the scrollback, not by the matches**: `.` in a hundred
+/// thousand rows is a hundred thousand bits, not millions of matches — and
+/// the depth of a row is at most the scrollback plus the screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RowSet {
+    words: Vec<u64>,
+}
+
+impl RowSet {
+    /// Adds the row at `depth`.
+    pub(crate) fn insert(&mut self, depth: usize) {
+        let (word, bit) = (depth / 64, depth % 64);
+        if self.words.len() <= word {
+            self.words.resize(word + 1, 0);
+        }
+        if let Some(bits) = self.words.get_mut(word) {
+            *bits |= 1 << bit;
+        }
+    }
+
+    /// Empties the set; the allocation stays for the next pass.
+    pub(crate) fn clear(&mut self) {
+        self.words.clear();
+    }
+
+    /// The first row in the set at `depth` or deeper.
+    pub(crate) fn next_from(&self, depth: usize) -> Option<usize> {
+        let (mut word, bit) = (depth / 64, depth % 64);
+        let mut bits = self.words.get(word)? & (u64::MAX << bit);
+        loop {
+            if bits != 0 {
+                return Some(word * 64 + bits.trailing_zeros() as usize);
+            }
+            word += 1;
+            bits = *self.words.get(word)?;
+        }
+    }
+
+    /// The memory the set holds, in words — what its bound is measured by.
+    #[cfg(test)]
+    pub(crate) fn words(&self) -> usize {
+        self.words.len()
+    }
+}
+
+/// A pass of the index that reached the history's top — the rows the scroll
+/// bar's marks are drawn from ([`crate::TrackMarks`]).
+///
+/// **Only a finished pass is drawn**: a pass in flight has counted only the
+/// bottom of the history, and drawing it would show marks crowding toward
+/// the bottom and then spreading upward as it climbs. Its rows are as of
+/// `mark`, the scrollback's state when the pass reached the top; the frame
+/// follows them from there ([`crate::TrackMarks`], [`depth_moved`]).
+///
+/// **Known limit:** a pass that spans output on a full scrollback set its
+/// lower pieces' rows before the output scrolled them, so its marks can be
+/// off by the rows that flowed during the pass; the next pass — the output's
+/// own news starts one — puts them right.
+#[derive(Debug)]
+pub(crate) struct SearchPass {
+    pub(crate) rows: RowSet,
+    pub(crate) mark: LedgerMark,
+    /// Which pass this is, counted per session ([`SearchSlot::passes`]): the
+    /// frame's marks are not rebuilt from the same pass and the same
+    /// geometry.
+    pub(crate) serial: u64,
+}
+
+impl SearchPass {
+    /// Whether `rows` taken at `mark` are this pass's rows where they stand:
+    /// the same set at the same depths ([`depth_moved`] is zero — output
+    /// into a history that is not full moves no depth) — a pass that changes
+    /// no mark asks for no frame.
+    pub(crate) fn same_as(&self, rows: &RowSet, mark: LedgerMark, limit: usize) -> bool {
+        self.rows == *rows && depth_moved(self.mark, mark, limit) == Some(0)
+    }
+}
+
 /// Counting the whole scrollback: **anchorless** and bottom-up piece
 /// by piece (`row_identity` can't be a long-held anchor).
 ///
@@ -475,7 +567,8 @@ pub(crate) const CHUNK_LINES: i32 = 500;
 /// count and the current match's ordinal, and a pattern like `.` means millions
 /// of matches in ten thousand rows. Navigation doesn't use the index
 /// (`Term::search_next`); the ordinal is carried ±1 on navigation
-/// ([`crate::Session::search_next`]).
+/// ([`crate::Session::search_next`]). What the pass does keep is a bit per
+/// matched **row** ([`SearchIndex::rows`]) — the scroll bar's marks.
 ///
 /// It is rebuilt **from scratch** when the query changes
 /// ([`SearchSlot::generation`]) and when the scrollback changes (the pending
@@ -496,6 +589,10 @@ pub(crate) struct SearchIndex {
     /// The candidate for the lost current match ([`Relocate`]): the match and its
     /// ordinal.
     pub(crate) candidate: Option<(Match, usize, i32)>,
+    /// The rows this pass has found matches on so far — the row each counted
+    /// match **starts** on, where the eye finds it. Published only when the
+    /// pass reaches the top ([`SearchPass`]).
+    pub(crate) rows: RowSet,
 }
 
 /// [`SearchIndex::next`]'s "from scratch" value: the first piece from the
@@ -513,6 +610,7 @@ impl SearchIndex {
         self.total = 0;
         self.ordinal = None;
         self.candidate = None;
+        self.rows.clear();
     }
 }
 
@@ -572,12 +670,7 @@ pub(crate) enum Shift {
 ///   no row shifted (⌥⌘K's empty history): a clear doesn't say the shift, it
 ///   only says it happened, and an unknown shift is lost.
 pub(crate) fn ledger_shift(prev: LedgerMark, now: LedgerMark, limit: usize) -> Shift {
-    if prev.columns != now.columns
-        || prev.lines != now.lines
-        || prev.alt != now.alt
-        || prev.wipes != now.wipes
-        || now.history < prev.history
-    {
+    if layout_changed(prev, now) {
         return Shift::Lost;
     }
     if now.history < limit {
@@ -607,6 +700,36 @@ pub(crate) fn ledger_shift(prev: LedgerMark, now: LedgerMark, limit: usize) -> S
         Shift::Still
     } else {
         Shift::Lost
+    }
+}
+
+/// Whether the scrollback was laid out anew between two observations — a
+/// resize (columns or lines), a switch to or from the alternate screen, a
+/// terminal-side clear, a history that shrank: its rows are not the rows they
+/// were, so no shift relates the two ([`ledger_shift`]'s first guard). Unlike
+/// output at a full history's bottom, which only hides how far the rows
+/// moved, a row kept from before such a change points at nothing.
+pub(crate) fn layout_changed(prev: LedgerMark, now: LedgerMark) -> bool {
+    prev.columns != now.columns
+        || prev.lines != now.lines
+        || prev.alt != now.alt
+        || prev.wipes != now.wipes
+        || now.history < prev.history
+}
+
+/// How far a row's **depth from the history's top** moved between two
+/// observations, rows (negative: up, toward the top); `None` when the shift
+/// cannot be known ([`ledger_shift`]'s `Lost`).
+///
+/// The depth, not the line: while the history is not full, output scrolls
+/// every row up by as many lines as the history grows, and the depth stays —
+/// only rows falling off a full history's top move it.
+pub(crate) fn depth_moved(prev: LedgerMark, now: LedgerMark, limit: usize) -> Option<i64> {
+    let growth = now.history as i64 - prev.history as i64;
+    match ledger_shift(prev, now, limit) {
+        Shift::Still => Some(growth),
+        Shift::By(rows) => Some(growth - i64::from(rows)),
+        Shift::Lost => None,
     }
 }
 
@@ -704,6 +827,13 @@ pub(crate) fn index_chunk<T>(
             found.push(each.clone());
         }
     });
+    // The depth from the history's top is `line - topmost`; a wrapped
+    // match's start reaches above the piece, never above the history.
+    for each in &found {
+        if let Ok(depth) = usize::try_from(each.start().line.0 - top) {
+            index.rows.insert(depth);
+        }
+    }
     for each in found.into_iter().rev() {
         index.total += 1;
         let ordinal = index.total;
@@ -780,6 +910,16 @@ pub(crate) struct SearchSlot {
     pub(crate) relocate: Option<Relocate>,
     /// The count of the whole scrollback.
     pub(crate) index: SearchIndex,
+    /// The last pass that reached the history's top — what the scroll bar's
+    /// marks are drawn from. Shared, not copied: the frame takes it out of
+    /// this leaf lock and buckets it after, never under `Term`. Dropped with
+    /// the query (a new query has no marks until its first pass finishes); a
+    /// pass restarted by scrollback news leaves it in place until it is
+    /// replaced.
+    pub(crate) pass: Option<std::sync::Arc<SearchPass>>,
+    /// Passes published so far in this session — [`SearchPass::serial`].
+    /// Never reset, so a serial is never reused for another query's pass.
+    pub(crate) passes: u64,
 }
 
 impl SearchSlot {

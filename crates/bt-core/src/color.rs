@@ -154,7 +154,9 @@ pub struct Theme {
     /// background (3:1, `color::tests`): the host is text in the context line.
     pub info: u32,
     /// Status: warning. Today the remote host marked **staging**:
-    /// `⇄ host`, the dock's top hairline and the tab's dot.
+    /// `⇄ host`, the dock's top hairline and the tab's dot — and the search
+    /// matches' marks on the scroll bar's track
+    /// ([`Theme::search_mark_linear`]).
     ///
     /// Its value is the theme's own ANSI yellow (the precedent of `info`'s
     /// cyan). [`Self::cursor`] is gold and deliberately distinct from the
@@ -482,6 +484,50 @@ impl Theme {
         linear_rgba(rgb(self.warning))
     }
 
+    /// A search match's mark on the scroll bar's track, **linear**: `warning`
+    /// laid over the background at [`SEARCH_MARK_PERCENT`] and drawn
+    /// **opaque** — the mark sits over the thumb and must hide it, not mix
+    /// with it.
+    ///
+    /// **Not `search_match`**: that highlight is a ground for text, tuned dark
+    /// enough to read over (`0x3a3212` on black), and a two-point line of it
+    /// does not show at all. A mark is read by itself, against the
+    /// background, so it takes the theme's yellow role. Not a new role but a
+    /// derived value (the precedent of [`Theme::quiet_linear`]).
+    pub const fn search_mark_linear(&self) -> LinearRgba {
+        linear_rgba(self.search_mark_rgb())
+    }
+
+    /// The **current** match's mark: whichever of `warning` and the palette's
+    /// bright yellow (`[ansi] bright_yellow`) stands further from the
+    /// background ([`contrast`]).
+    ///
+    /// The choice is a measure, not a per-theme constant: on the dark theme
+    /// the brighter yellow is the brighter mark, on the light theme
+    /// `warning`'s darker yellow is — and a user theme whose bright yellow
+    /// is not a yellow at all still gets the one that reads.
+    pub const fn search_current_mark_linear(&self) -> LinearRgba {
+        linear_rgba(self.search_current_mark_rgb())
+    }
+
+    const fn search_mark_rgb(&self) -> Rgb {
+        over(
+            rgb(self.warning),
+            SEARCH_MARK_PERCENT,
+            self.background_rgb(),
+        )
+    }
+
+    const fn search_current_mark_rgb(&self) -> Rgb {
+        let (warning, bright) = (rgb(self.warning), rgb(self.ansi[11]));
+        let ground = self.background_rgb();
+        if contrast(bright, ground) > contrast(warning, ground) {
+            bright
+        } else {
+            warning
+        }
+    }
+
     /// The **single** path from a remote host's mark to a color,
     /// **linear**: production is `error`, staging `warning`, development
     /// `success`, unmarked `info`; a direct color is itself, linearized from
@@ -596,6 +642,57 @@ const fn dim_toward(color: Rgb, background: Rgb) -> Rgb {
 const fn dim_channel(color: u8, background: u8) -> u8 {
     // audit: at most (2·255 + 255) / 3 = 255, fits in `u8`.
     ((2 * color as u16 + background as u16) / 3) as u8
+}
+
+/// How strongly a search match's mark lays `warning` over the background,
+/// percent ([`Theme::search_mark_linear`]) — a design constant (the approved
+/// design's value): quieter than the current match's full-strength mark, so
+/// the one ⏎ points at stands out among many, yet still clear of the
+/// background on both embedded themes (`search_marks_read_on_the_ground`).
+pub(crate) const SEARCH_MARK_PERCENT: u16 = 55;
+
+/// `color` laid over `background` at `percent`, as an **opaque** color —
+/// [`dim_toward`]'s space and arithmetic (sRGB 8-bit, truncating), with the
+/// weight as a parameter.
+const fn over(color: Rgb, percent: u16, background: Rgb) -> Rgb {
+    const fn channel(color: u8, percent: u16, background: u8) -> u8 {
+        // audit: `percent ≤ 100` keeps the sum at most 255·100, so the result
+        // fits in `u8`.
+        ((color as u16 * percent + background as u16 * (100 - percent)) / 100) as u8
+    }
+    let percent = if percent > 100 { 100 } else { percent };
+    Rgb {
+        r: channel(color.r, percent, background.r),
+        g: channel(color.g, percent, background.g),
+        b: channel(color.b, percent, background.b),
+    }
+}
+
+/// A color's relative luminance (WCAG 2), `0..=1` — **the one copy** of the
+/// measure the theme's choices and their guards are made with. The channels
+/// come from the transfer table ([`SRGB_LINEAR`]), summed in `f64`.
+pub(crate) const fn luminance(color: Rgb) -> f64 {
+    const fn channel(c: u8) -> f64 {
+        // audit: `u8 as usize` is 0..=255 and the table has 256 entries.
+        SRGB_LINEAR[c as usize] as f64
+    }
+    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+}
+
+/// The contrast ratio between two colors (WCAG 2), `1..=21` — whichever
+/// order they come in.
+pub(crate) const fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let (x, y) = (luminance(a), luminance(b));
+    let (light, dark) = if x > y { (x, y) } else { (y, x) };
+    (light + 0.05) / (dark + 0.05)
+}
+
+/// [`contrast`] between two `0xRRGGBB` colors — the theme's format — for the
+/// shell's questions about a theme (is its background dark; is a surface
+/// distinct from it), so they ask the very measure the theme's own choices
+/// are made with.
+pub const fn contrast_ratio(a: u32, b: u32) -> f64 {
+    contrast(rgb(a), rgb(b))
 }
 
 /// The channel steps of the 6×6×6 color cube (the xterm convention).
@@ -998,11 +1095,18 @@ mod tests {
         assert_eq!(resolve(Color::Indexed(2), &colors, &THEME), green);
     }
 
-    /// WCAG contrast ratio between two `0xRRGGBB` — the very measure used for
-    /// the selection color.
+    /// WCAG contrast ratio between two `0xRRGGBB` — the production measure
+    /// the theme's own choices are made with, not a second copy of it.
     fn contrast(a: u32, b: u32) -> f64 {
-        let luminance = |hex: u32| {
-            let channel = |shift: u32| {
+        contrast_ratio(a, b)
+    }
+
+    #[test]
+    fn luminance_follows_the_transfer_function() {
+        // The table path gives what the formula gives: the guards below (and
+        // their margins of a hundredth) were tuned against the formula.
+        for hex in [0x000000, 0xffffff, 0x3a3212, 0xd6b16a, 0x8f6a00, 0xf5f6f8] {
+            let formula = |shift: u32| {
                 let c = f64::from((hex >> shift) & 0xff) / 255.0;
                 if c <= 0.04045 {
                     c / 12.92
@@ -1010,10 +1114,54 @@ mod tests {
                     ((c + 0.055) / 1.055).powf(2.4)
                 }
             };
-            0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+            let expected = 0.2126 * formula(16) + 0.7152 * formula(8) + 0.0722 * formula(0);
+            let got = luminance(rgb(hex));
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "#{hex:06x}: {got} ≠ {expected}"
+            );
+        }
+        assert!((contrast(0xffffff, 0x000000) - 21.0).abs() < 1e-6);
+        assert_eq!(contrast(0xd6b16a, 0x000000), contrast(0x000000, 0xd6b16a));
+    }
+
+    #[test]
+    fn search_marks_read_on_the_ground() {
+        // The current match's mark is the brighter of the two yellows on the
+        // dark theme and `warning` itself on the light one — the approved
+        // design's two values — and reads on the background like text (3:1).
+        // A match's mark is quieter than it and still clear of the background
+        // (2:1); it is opaque, so it hides the thumb it sits over.
+        let hex = |color: Rgb| {
+            (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
         };
-        let (x, y) = (luminance(a), luminance(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        for (theme, expected) in [(Theme::BATERI, 0xe8c988), (Theme::BATERI_LIGHT, 0x8f6a00)] {
+            let current = hex(theme.search_current_mark_rgb());
+            assert_eq!(current, expected, "the current mark");
+            assert_eq!(
+                theme.search_current_mark_linear(),
+                linear_rgba(rgb(expected))
+            );
+            let matched = hex(theme.search_mark_rgb());
+            assert_eq!(theme.search_mark_linear(), linear_rgba(rgb(matched)));
+            let (current, matched) = (
+                contrast(current, theme.background),
+                contrast(matched, theme.background),
+            );
+            assert!(
+                current >= 3.0,
+                "the current mark on the ground: {current:.2}"
+            );
+            assert!(
+                matched >= 2.0 && matched < current,
+                "a match's mark: {matched:.2} (current {current:.2})"
+            );
+        }
+        // A bright yellow that is not the brighter mark is not taken: a theme
+        // whose `bright_yellow` sinks into the ground keeps `warning`.
+        let mut theme = Theme::BATERI;
+        theme.ansi[11] = 0x101010;
+        assert_eq!(hex(theme.search_current_mark_rgb()), theme.warning);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! `Blocks`,
 //! `SelectionPoint`, `SelectKind`, `CellHalf`, `Arrow`, `Wheel`, `ScrollIntent`,
 //! search's `SearchQuery`, `SearchStatus`, `SearchRun`, `SearchRuns`,
+//! the scroll bar's `ScrollPosition`, `TrackMark` and `TrackMarks`,
 //! `ScrollGlide`, `LinearRgba`, `Theme`,
 //! `ShellState`, `ShellPhase`, the mirror's `DockState`, `DockStatus`, `DockFault`,
 //! `Highlight`, `HighlightStyle`, `HighlightColor`, the context line's
@@ -62,7 +63,7 @@ mod theme;
 mod wake;
 
 pub use cluster::{ClusterId, Clusters};
-pub use color::{LinearRgba, Theme};
+pub use color::{LinearRgba, Theme, contrast_ratio};
 pub use dock::{
     Dock, DockBudget, DockButton, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells,
     PROGRAM_GLYPHS, STATS_GLYPHS, STATS_THRESHOLDS, StatsLevel, StatsMetric, StatsThreshold,
@@ -85,7 +86,8 @@ pub use session::{
     InitialInput, LinkHit, LinkHover, LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52,
     PathCandidate, PtyOps, PtySize, SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, ScrollPosition,
     SelectKind, SelectionPoint, SelectionRun, SelectionRuns, Session, SessionOptions,
-    ShutdownHandle, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
+    ShutdownHandle, Teardown, TerminalOptions, TrackMark, TrackMarks, UnderlineStyle, Wheel,
+    load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,

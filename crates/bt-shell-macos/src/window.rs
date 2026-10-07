@@ -37,7 +37,7 @@ use std::time::Instant;
 use block2::RcBlock;
 use bt_core::{
     ConfirmClose, HostMark, InitialInput, MarkSubject, Settings, ShutdownHandle, TabId, Teardown,
-    Theme,
+    Theme, contrast_ratio,
 };
 use bt_gpu::GpuError;
 use dispatch2::DispatchQueue;
@@ -72,21 +72,16 @@ use crate::uploader;
 /// (Aqua / DarkAqua) comes from this ([`TerminalWindow::apply_chrome`]).
 ///
 /// The question is "which text reads better on this background: white or
-/// black" and the answer is from WCAG's contrast ratio: if the background's
-/// relative luminance (Rec. 709 coefficients, from the **linear** components)
-/// gives a higher contrast with white, the background is dark. The threshold
-/// is not invented, it arises from the equality of the two ratios; the
-/// system's dark appearance means exactly "light text".
+/// black" and the answer is from WCAG's contrast ratio
+/// ([`bt_core::contrast_ratio`], the measure the theme's own choices are made
+/// with): if the background gives a higher contrast with white, it is dark.
+/// The threshold is not invented, it arises from the equality of the two
+/// ratios; the system's dark appearance means exactly "light text".
 ///
 /// Not in `bt-core`'s `Theme` but here: lightness is not a theme role, it is
 /// a translation into AppKit's appearance vocabulary.
 pub(crate) fn is_dark_background(theme: &Theme) -> bool {
-    let [r, g, b, _] = theme.background_linear().to_array();
-    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    // WCAG: ratio = (light + 0.05) / (dark + 0.05); white's luminance is 1.
-    let against_white = 1.05 / (luminance + 0.05);
-    let against_black = (luminance + 0.05) / 0.05;
-    against_white > against_black
+    contrast_ratio(theme.background, 0xffffff) > contrast_ratio(theme.background, 0x000000)
 }
 
 /// The owner handle the window gives the pane ([`PaneHost`]).

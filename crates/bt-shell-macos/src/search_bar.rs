@@ -519,6 +519,7 @@ mod tests {
             total,
             ordinal,
             complete,
+            marks_changed: false,
         };
         let ready = |r| count_label(SearchStatus::Ready, r);
         assert_eq!(
@@ -591,21 +592,9 @@ mod tests {
         }
     }
 
-    /// The WCAG contrast ratio, between two `0xRRGGBB` values (the same measure
-    /// as in `bt_core::color`'s test).
+    /// The WCAG contrast ratio, between two `0xRRGGBB` values — the
+    /// production measure, not a copy of it.
     fn contrast(a: u32, b: u32) -> f64 {
-        let luminance = |hex: u32| {
-            let channel = |shift: u32| {
-                let c = f64::from((hex >> shift) & 0xff) / 255.0;
-                if c <= 0.04045 {
-                    c / 12.92
-                } else {
-                    ((c + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-        };
-        let (x, y) = (luminance(a), luminance(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        bt_core::contrast_ratio(a, b)
     }
 }

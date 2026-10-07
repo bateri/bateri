@@ -998,13 +998,34 @@ fn scene_scroll_bar() -> Scene {
     };
     let floor = frame.band_top_px(EDGE as f32);
     let layout = crate::scrollbar::ScrollbarLayout::new(Some(position), EDGE as f32, floor, cell);
+    // A match far up the history and the current one on the window's rows:
+    // the marks' two `selection` draws over the thumb.
+    let marks = [
+        bt_core::TrackMark {
+            position: 3.0,
+            current: false,
+        },
+        bt_core::TrackMark {
+            position: 14.0,
+            current: true,
+        },
+    ];
     frame.set_scrollbar(
         layout,
         crate::scrollbar::Look::auto(0.8, 0.0, crate::scrollbar::THUMB_ALPHA),
         Theme::BATERI.foreground_linear(),
+        &marks,
+        [
+            Theme::BATERI.search_mark_linear(),
+            Theme::BATERI.search_current_mark_linear(),
+        ],
     );
     assert!(frame.scrollbar().is_some(), "no bar in the scene");
-    ("scroll bar between the band and the dock", EDGE, frame)
+    (
+        "scroll bar and its marks between the band and the dock",
+        EDGE,
+        frame,
+    )
 }
 
 /// The always-up scroll bar: its track and hairline (`cell_bg`) under the
@@ -1026,12 +1047,24 @@ fn scene_scroll_bar_always() -> Scene {
         layout,
         crate::scrollbar::Look::ALWAYS,
         Theme::BATERI.foreground_linear(),
+        &[bt_core::TrackMark {
+            position: 20.0,
+            current: false,
+        }],
+        [
+            Theme::BATERI.search_mark_linear(),
+            Theme::BATERI.search_current_mark_linear(),
+        ],
     );
     assert!(
         frame.scrollbar().is_some() && !frame.scrollbar_track().is_empty(),
         "no track in the scene"
     );
-    ("always-up scroll bar over its track", EDGE, frame)
+    (
+        "always-up scroll bar over its track, a mark in its lane",
+        EDGE,
+        frame,
+    )
 }
 
 fn scenes(m: CellMetrics) -> Vec<Scene> {

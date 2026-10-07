@@ -5601,6 +5601,7 @@ mod tests {
             &mut bt_core::Blocks::default(),
             &mut bt_core::SelectionRuns::default(),
             &mut bt_core::SearchRuns::default(),
+            &mut bt_core::TrackMarks::default(),
             &mut bt_core::Clusters::default(),
             bt_core::ScrollGlide::default(),
             bt_core::DockBudget {

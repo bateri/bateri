@@ -46,6 +46,15 @@
 //! reversal midway does not jump. Reduce Motion and `snap` make the widening
 //! instant, read when a transition **starts** (the one in flight ends on its
 //! own within 150 ms); the fades and the tone stay, they move nothing.
+//!
+//! **The marks ride the bar**: where search found matches in the whole
+//! history (`bt_core::TrackMarks`, bucketed by the content frame), drawn over
+//! the thumb at the bar's visibility — in the thumb's column while thin, in
+//! the strip's search lane once wide ([`ScrollbarLayout::search_mark`]).
+//! They are content, not animation: when a pass changes them the frame that
+//! draws them is a content frame, asked for only while the bar is up
+//! ([`Scrollbar::up`]); a bar that was down asks for it when it next shows
+//! (`DisplayLink::marks_changed`).
 
 use bt_core::ScrollPosition;
 
@@ -81,6 +90,19 @@ const TRACK_PAD_PT: f32 = 3.0;
 /// runs under any of it. Published with the layout so the mouse side never
 /// computes it a second time.
 pub(crate) const TRACK_PT: f32 = 16.0;
+
+/// A mark's height on the track, points ([`ScrollbarLayout::search_mark`]):
+/// a line, not a block — two marks a row apart in a short history stay two.
+const MARK_PT: f32 = 2.0;
+/// A mark's corner radius, points: half its height would make a pill of a
+/// two-point line; one point keeps it a line with soft ends.
+const MARK_RADIUS_PT: f32 = 1.0;
+/// The wide form's search lane: where on the strip, points from its left
+/// edge, a search mark sits once the bar is wide — the strip's right part,
+/// clear of the hairline, the command blocks' lane to its left. In the thin
+/// form the mark sits in the thumb's own column, the only part of the strip
+/// on screen.
+const SEARCH_LANE_PT: [f32; 2] = [9.0, 14.0];
 
 /// The thumb's opacity over the theme's foreground while scrolling.
 pub(crate) const THUMB_ALPHA: f32 = 0.36;
@@ -539,6 +561,19 @@ impl Scrollbar {
         rise.min(fall) as f32
     }
 
+    /// Whether the bar is on screen or on its way there — a pending poke, the
+    /// pointer over its strip, the fade not yet over, or the always-up form:
+    /// what a change of its **marks** must ask a frame for. A poke not yet
+    /// stamped counts: a search pass can finish before the tick that would
+    /// show the bar its query poked.
+    pub(crate) fn up(self) -> bool {
+        match self.mode {
+            Mode::Always => true,
+            Mode::Never => false,
+            Mode::Auto => self.poked || self.since.is_some() || self.hover || self.drag,
+        }
+    }
+
     /// Whether the bar needs no frames at `now`: hidden, or fully up and
     /// holding or engaged, with its width and tone at rest — and always
     /// outside `Auto` once the tone rests. A pending poke, pointer change or
@@ -608,6 +643,15 @@ pub struct ScrollbarLayout {
     /// The window's distance from the top of the history, rows — what a
     /// thumb with no travel left answers to the pixel inverse.
     top: f32,
+    /// The track's whole length in rows — the travel plus the visible rows:
+    /// the scale a mark's row is placed on.
+    total: f32,
+    /// The wide form's search lane, left and right edge.
+    search_x: [f32; 2],
+    /// A mark's height, whole pixels.
+    mark_h: f32,
+    /// A mark's corner radius, pixels.
+    mark_radius: f32,
 }
 
 impl ScrollbarLayout {
@@ -654,6 +698,10 @@ impl ScrollbarLayout {
             hairline: cell.pt_px(HAIRLINE_PT),
             room: position.room,
             top: position.top,
+            total: total as f32,
+            search_x: SEARCH_LANE_PT.map(|x| strip_x + cell.pt_px(x)),
+            mark_h: cell.pt_px(MARK_PT).round().max(1.0),
+            mark_radius: cell.pt_px(MARK_RADIUS_PT),
         }
     }
 
@@ -678,6 +726,39 @@ impl ScrollbarLayout {
     /// The thumb's travel: the track's top and bottom.
     pub fn track(&self) -> [f32; 2] {
         self.track
+    }
+
+    /// A search mark's rectangle, `[x0, y0, x1, y1]`, for the row `position`
+    /// rows from the history's top (`bt_core::TrackMark::position`), `wide`
+    /// of the way from the thin form to the wide one.
+    ///
+    /// **The thumb's own scale**: the track is the whole history, travel
+    /// plus visible rows, so the rows on screen land inside the thumb — the
+    /// thumb's share of the track is theirs (until its minimum length takes
+    /// over in a long history). The mark is centred on its row, on whole
+    /// pixels, and kept inside the travel. In the thin form it sits in the
+    /// thumb's column, in the wide form in the strip's search lane.
+    pub(crate) fn search_mark(&self, position: f32, wide: f32) -> [f32; 4] {
+        let wide = wide.clamp(0.0, 1.0);
+        let lerp = |thin: f32, lane: f32| thin + (lane - thin) * wide;
+        let [top, bottom] = self.track;
+        let row = ((position + 0.5) / self.total.max(1.0)).clamp(0.0, 1.0);
+        let middle = top + (bottom - top) * row;
+        let y0 = (middle - self.mark_h * 0.5)
+            .round()
+            .min(bottom - self.mark_h)
+            .max(top);
+        [
+            lerp(self.thin_x[0], self.search_x[0]),
+            y0,
+            lerp(self.thin_x[1], self.search_x[1]),
+            y0 + self.mark_h,
+        ]
+    }
+
+    /// A mark's corner radius, pixels.
+    pub(crate) fn mark_radius(&self) -> f32 {
+        self.mark_radius
     }
 
     /// The left edge of the strip the bar owns at the window's right edge.
@@ -902,6 +983,57 @@ mod tests {
             "the bottom is not the track's end, above the dock: {bottom:?}"
         );
         assert_eq!(bottom.strip_x(), 400.0 - TRACK_PT);
+    }
+
+    #[test]
+    fn a_search_mark_sits_on_its_row_in_the_thumbs_column_or_the_lane() {
+        // A 400×300 window, the dock's top at 260, 100 rows of travel and 20
+        // on screen: the track is the whole 120 rows, so the rows the window
+        // shows land inside the thumb.
+        let cell = at_1x();
+        let layout = ScrollbarLayout::new(position(100, 40.0, 20), 400.0, 260.0, cell);
+        let thumb = layout.thumb(0.0);
+        for row in [40.0, 50.0, 59.0] {
+            let [x0, y0, x1, y1] = layout.search_mark(row, 0.0);
+            assert_eq!([x0, x1], [thumb[0], thumb[2]], "row {row}: thin");
+            assert_eq!(y1 - y0, MARK_PT);
+            assert_eq!(y0, y0.round(), "row {row}: off the pixel grid");
+            assert!(
+                y0 >= thumb[1].floor() && y1 <= thumb[3].ceil(),
+                "row {row} is on screen, not on the thumb: {:?} / {thumb:?}",
+                [y0, y1]
+            );
+        }
+        // Wide: the strip's search lane, the same height.
+        let thin = layout.search_mark(50.0, 0.0);
+        let wide = layout.search_mark(50.0, 1.0);
+        let strip = layout.strip_x();
+        assert_eq!([wide[0] - strip, wide[2] - strip], SEARCH_LANE_PT);
+        assert_eq!([wide[1], wide[3]], [thin[1], thin[3]]);
+        // The history's two ends stay inside the travel.
+        let [top, bottom] = layout.track();
+        assert_eq!(layout.search_mark(0.0, 0.0)[1], top);
+        assert_eq!(layout.search_mark(119.0, 0.0)[3], bottom);
+    }
+
+    #[test]
+    fn a_bar_on_its_way_up_is_up_for_its_marks() {
+        // The marks' frame is wanted while the bar is on screen or about to
+        // be — a poke not yet stamped included, a pass can end before the
+        // tick — and not once it has faded.
+        let mut bar = Scrollbar::default();
+        assert!(!bar.up(), "a hidden bar is up");
+        bar.poke(true);
+        assert!(bar.up(), "a poked bar is not on its way");
+        bar.advance(0.0, true, false);
+        assert!(bar.up());
+        bar.advance(HOLD + FADE_OUT, true, false);
+        assert!(!bar.up(), "a faded bar is up");
+        assert!(bar.set_hover(true, true) && bar.up(), "the pointer");
+        bar.set_mode(Mode::Always);
+        assert!(bar.up());
+        bar.set_mode(Mode::Never);
+        assert!(!bar.up());
     }
 
     #[test]

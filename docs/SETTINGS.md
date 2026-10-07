@@ -519,6 +519,12 @@ the first line has gone into history.
   kept in full-screen programs and before there is history too, empty, so a
   program never sees its window resized when it starts or exits.
 - `"never"` never shows it.
+- While a search (⌘F) is open the bar marks where its matches are in the
+  whole history — short lines in the thumb's column, the current match's
+  brighter; the wider bar keeps them in its track's right part. The current
+  match is marked at once, the others once the search has counted the
+  history; their colours come from the theme's `warning` (see
+  [Themes](#themes)).
 - It takes effect the moment you save. Moving to or from `"always"` resizes
   the grid by the track's width; in a split, the panes keep their
   proportions, and a pane already at its narrowest gives the track's columns
@@ -1534,9 +1540,9 @@ is text in the form `"#rrggbb"` (uppercase works too; no `#rgb` and no alpha).
 | `success` | status: success; the mark of a command that ended with exit code zero |
 | `error` | status: error; the mark of a command that ended with a non-zero exit code |
 | `info` | status: info; a remote session — the host on the context line and the dock's top line |
-| `warning` | status: warning; a remote host marked `staging` — the host on the context line and the dock's top line |
+| `warning` | status: warning; a remote host marked `staging` — the host on the context line and the dock's top line; the scroll bar's marks of search matches (⌘F), laid over the background at 55% |
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |
-| `[ansi]` `bright_black` … `bright_white` | ANSI 8–15, in the same order |
+| `[ansi]` `bright_black` … `bright_white` | ANSI 8–15, in the same order; `bright_yellow` is also the scroll bar's mark of the current match when it stands out from the background more than `warning` does (otherwise `warning` itself is) |
 
 - **Every key is optional.** A missing key comes from the built-in `bateri`
   theme; a two-line file that only changes the background is a valid theme.

@@ -35,7 +35,7 @@ use std::mem::offset_of;
 use bt_atlas::{Face, RuleKind, SizeClass};
 use bt_core::{
     Block, ButtonState, CaretShape, CaretStyle, Cell, ClusterId, Clusters, DockButton, LinearRgba,
-    SearchRun, SelectionRun, UnderlineStyle, UnfocusedCaret,
+    SearchRun, SelectionRun, TrackMark, UnderlineStyle, UnfocusedCaret,
 };
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
@@ -1188,6 +1188,16 @@ pub(crate) struct Frame {
     /// ([`Frame::set_scrollbar`]); `None` → thin, or no bar. Written and
     /// emptied with the thumb.
     scrollbar_track: Option<[Instance; 2]>,
+    /// The marks over the thumb ([`Frame::set_scrollbar`]): the matches',
+    /// then the current match's — one `selection` draw each, in that order,
+    /// so the current one sits on top. The instance's `rgba` is the
+    /// selection pipeline's corner mask (all four round); the colour is the
+    /// draw's, in `scrollbar_mark_rgba`. Written and emptied with the thumb.
+    scrollbar_marks: [Vec<Instance>; 2],
+    /// The two marks' colours, the bar's visibility in their alpha.
+    scrollbar_mark_rgba: [[f32; 4]; 2],
+    /// The marks' corner radius, pixels.
+    scrollbar_mark_radius: f32,
     /// The number of **background** instances drawn; the caret is not counted.
     ///
     /// `make smoke`'s `cells=K` token reads this: the proof that the sink
@@ -1283,6 +1293,7 @@ impl Frame {
         self.frac_px = 0.0;
         self.scrollbar = None;
         self.scrollbar_track = None;
+        self.scrollbar_marks.iter_mut().for_each(Vec::clear);
     }
 
     /// This frame's vertical origin, in **rows**: the content starts this much
@@ -2321,13 +2332,42 @@ impl Frame {
     /// viewport at the window's origin ([`crate::Renderer`]'s plan). The
     /// track and hairline are square quads (`cell_bg`, the dock ground's
     /// road), side by side so each reads at its own opacity.
+    ///
+    /// **The marks** (`bt_core::TrackMarks`: the list and its two colours,
+    /// a match's and the current match's) go over the thumb, opaque but for
+    /// the bar's visibility: in the thin form in the thumb's own column, in
+    /// the wide form in the strip's search lane, moving between the two with
+    /// the width. They are the last content frame's — a motion frame redraws
+    /// them from the same list as the bar fades — and a hidden bar has none.
     pub(crate) fn set_scrollbar(
         &mut self,
         layout: ScrollbarLayout,
         look: Look,
         foreground: LinearRgba,
+        marks: &[TrackMark],
+        mark_colors: [LinearRgba; 2],
     ) {
         let shown = layout.drawable() && look.alpha > 0.0;
+        let [matched, current] = &mut self.scrollbar_marks;
+        matched.clear();
+        current.clear();
+        if shown {
+            for mark in marks {
+                let [x0, y0, x1, y1] = layout.search_mark(mark.position, look.wide);
+                let instance = Instance {
+                    pos: [x0, y0],
+                    size: [x1 - x0, y1 - y0],
+                    rgba: [1.0; 4],
+                };
+                if mark.current {
+                    current.push(instance);
+                } else {
+                    matched.push(instance);
+                }
+            }
+        }
+        self.scrollbar_mark_rgba = mark_colors.map(|color| with_alpha(color, look.alpha));
+        self.scrollbar_mark_radius = layout.mark_radius();
         self.scrollbar = shown.then(|| {
             let core = layout.thumb(look.wide);
             let [x0, y0, x1, y1] = core;
@@ -2363,6 +2403,20 @@ impl Frame {
         self.scrollbar_track
             .as_ref()
             .map_or(&[], |parts| parts.as_slice())
+    }
+
+    /// This frame's marks over the thumb, in draw order — the matches', then
+    /// the current match's — each with its colour; empty lists when there
+    /// is no bar or nothing to mark.
+    pub(crate) fn scrollbar_marks(&self) -> [(&[Instance], [f32; 4]); 2] {
+        let [matched, current] = &self.scrollbar_marks;
+        let [matched_rgba, current_rgba] = self.scrollbar_mark_rgba;
+        [(matched, matched_rgba), (current, current_rgba)]
+    }
+
+    /// The marks' corner radius, pixels.
+    pub(crate) fn scrollbar_mark_radius(&self) -> f32 {
+        self.scrollbar_mark_radius
     }
 
     /// The top of the dock's **drawn** band in window space — the floor of
