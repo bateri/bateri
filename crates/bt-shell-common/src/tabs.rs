@@ -181,16 +181,22 @@ pub const MAX_WIDTH: f64 = 184.0;
 /// so a title stays readable.
 pub const MIN_WIDTH: f64 = 120.0;
 
-/// Empty space always kept between the last tab and the buttons on the right: the window is
-/// moved from there. Tabs shrink before giving it up.
-pub const DRAG_MARGIN: f64 = 48.0;
+/// Empty space always kept between the last tab and the buttons on the right, with [`EDGE`]
+/// beside it: the visible gap from the last tab to the leftmost button is 24 pt = 16 + 8. The
+/// window is moved from there; tabs shrink before giving it up. Enough to grab with the pointer
+/// without pushing `+` away from the tabs it adds to.
+pub const DRAG_MARGIN: f64 = 16.0;
 
 /// Side of a square button on the right of the bar (`+`, Show All Tabs, the settings warning).
 pub const BUTTON: f64 = 28.0;
 
-/// Space between the window's right edge and `+`, and between the drag margin and the leftmost
-/// button.
+/// Space between the window's right edge and `+` where the window's corner is square or small
+/// ([`Fit::of`]), and between the drag margin and the leftmost button.
 pub const EDGE: f64 = 8.0;
+
+/// A tab's corner radius; also the bar's buttons' where the window's corner is square or small
+/// ([`Fit::of`]).
+pub const TAB_RADIUS: f64 = 7.0;
 
 /// Space between two neighbouring buttons on the right.
 pub const BUTTON_GAP: f64 = 4.0;
@@ -241,6 +247,40 @@ pub struct Bar {
     /// A settings diagnostic is showing: its warning button joins the right side. With one tab
     /// the diagnostic stays beside the title instead, so this is ignored there.
     pub warning: bool,
+    /// The radius of the window's own top-right corner, the one `+` sits in; 0 where the corner
+    /// is square (full screen). The caller gives what it measured for its window, as the
+    /// corner changes with the window's state ([`Fit::of`]).
+    pub corner: f64,
+}
+
+/// How the buttons on the right meet the window's top-right corner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fit {
+    /// Space between the window's right edge and `+`.
+    pub inset: f64,
+    /// The buttons' corner radius.
+    pub radius: f64,
+}
+
+impl Fit {
+    /// The fit for a window corner of radius `corner`. `+`'s corner shares the window corner's
+    /// centre across — `inset + radius == corner` — so the space round the corner does not pinch
+    /// at the diagonal: with a 20 pt corner and the tabs' radius it pinched to 4.3 pt against
+    /// 6 pt at the top (measured on screen). The radius gives way before the inset: it is at
+    /// least a tab's, so a square or small corner keeps [`EDGE`] and the tabs' look, and at
+    /// most a circle, past which a rounder corner draws `+` inwards.
+    ///
+    /// Up and down the button is centred in the title row, whose height is the platform's
+    /// (40 pt on macOS 26.4.1, so a 6 pt top gap): with a 20 pt corner the button's corner
+    /// centre sits 2 pt above the window's, and the gap runs from 6 pt at the top to [`EDGE`]
+    /// at the side. Exactly concentric in a row twice the corner's radius would take a circle.
+    pub fn of(corner: f64) -> Self {
+        let radius = (corner - EDGE).clamp(TAB_RADIUS, BUTTON / 2.0);
+        Self {
+            inset: (corner - radius).max(EDGE),
+            radius,
+        }
+    }
 }
 
 /// Where everything in the bar sits ([`Bar::layout`]).
@@ -267,6 +307,8 @@ pub struct Strip {
     pub list: Option<f64>,
     /// The settings warning, left of everything else on the right.
     pub warning: Option<f64>,
+    /// How the buttons meet the window's corner: `+`'s inset and every button's radius.
+    pub fit: Fit,
     /// A tab's width plus [`GAP`]: the step from one tab to the next.
     slot: f64,
 }
@@ -280,7 +322,8 @@ impl Bar {
     /// [`MIN_WIDTH`] does not fit, the tabs stay at that width, Show All Tabs joins the buttons
     /// (taking its space from the strip) and the strip scrolls.
     pub fn layout(&self) -> Strip {
-        let new_tab = self.width - EDGE - BUTTON;
+        let fit = Fit::of(self.corner);
+        let new_tab = self.width - fit.inset - BUTTON;
         let left_of = |x: f64| x - BUTTON_GAP - BUTTON;
         let strip_until = |leftmost: f64| {
             Span::new(
@@ -305,6 +348,7 @@ impl Bar {
                 new_tab,
                 list: None,
                 warning: None,
+                fit,
                 slot: 0.0,
             };
         }
@@ -358,6 +402,7 @@ impl Bar {
             new_tab,
             list,
             warning,
+            fit,
             slot,
         }
     }
@@ -634,6 +679,7 @@ mod tests {
             dragged: None,
             scroll: 0.0,
             warning: false,
+            corner: 20.0,
         }
     }
 
@@ -673,6 +719,88 @@ mod tests {
     }
 
     #[test]
+    fn the_buttons_follow_the_windows_corner() {
+        let fit = |inset: f64, radius: f64| Fit { inset, radius };
+        assert_eq!(
+            Fit::of(0.0),
+            fit(EDGE, TAB_RADIUS),
+            "square: the tabs' look"
+        );
+        assert_eq!(
+            Fit::of(12.0),
+            fit(EDGE, TAB_RADIUS),
+            "small: still the tabs' look"
+        );
+        assert_eq!(Fit::of(20.0), fit(EDGE, 12.0), "the radius gives way first");
+        assert_eq!(Fit::of(30.0), fit(16.0, BUTTON / 2.0), "then the inset");
+        for corner in [16.0, 20.0, 24.0, 30.0] {
+            let Fit { inset, radius } = Fit::of(corner);
+            assert_eq!(
+                inset + radius,
+                corner,
+                "a {corner} pt corner shares its centre across"
+            );
+        }
+
+        // The whole right side moves with `+`; the strip yields the space.
+        let square = Bar {
+            warning: true,
+            corner: 0.0,
+            ..bar(1000.0, 3)
+        }
+        .layout();
+        assert_eq!((square.new_tab, square.warning), (964.0, Some(932.0)));
+        assert_eq!(square.fit.radius, TAB_RADIUS);
+        let round = Bar {
+            warning: true,
+            corner: 30.0,
+            ..bar(1000.0, 3)
+        }
+        .layout();
+        assert_eq!((round.new_tab, round.warning), (956.0, Some(924.0)));
+        assert_eq!(round.span, Span::new(84.0, 816.0));
+        let single = Bar {
+            corner: 30.0,
+            ..bar(1000.0, 1)
+        }
+        .layout();
+        assert_eq!(single.new_tab, 956.0);
+        assert!(single.chips[0].end() <= single.new_tab - EDGE);
+    }
+
+    #[test]
+    fn the_plus_keeps_an_even_gap_round_a_rounded_corner() {
+        // macOS 26.4.1's: a 20 pt corner and a 40 pt title row the button is centred in.
+        let (corner, row) = (20.0, 40.0);
+        let Fit { inset, radius } = Fit::of(corner);
+        let top = (row - BUTTON) / 2.0;
+        // Distance from a point of the button's outline to the window's outline, in points
+        // from the right edge (`x`) and from the top (`y`).
+        let to_window = |x: f64, y: f64| {
+            if x < corner && y < corner {
+                corner - (x - corner).hypot(y - corner)
+            } else {
+                x.min(y)
+            }
+        };
+        // The narrowest gap round the corner of a button `inset` from the right edge.
+        let narrowest = |inset: f64, radius: f64| {
+            let (cx, cy) = (inset + radius, top + radius);
+            (0..=90)
+                .map(|degree| f64::from(degree).to_radians())
+                .map(|angle| to_window(cx - radius * angle.cos(), cy - radius * angle.sin()))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let gap = narrowest(inset, radius);
+        assert!(
+            gap >= top - 1e-9,
+            "pinches to {gap} below the top gap {top}"
+        );
+        let pinched = narrowest(EDGE, TAB_RADIUS);
+        assert!(pinched < top - 1.0, "the tabs' radius pinched: {pinched}");
+    }
+
+    #[test]
     fn the_centred_title_keeps_clear_of_the_plus_without_lights() {
         // Full screen: the lights are hidden and the strip may start near the edge.
         let strip = Bar {
@@ -689,8 +817,8 @@ mod tests {
         let strip = bar(1000.0, 3).layout();
         assert_eq!(
             strip.span,
-            Span::new(84.0, 824.0),
-            "plus − 8 − 48 is the strip's end"
+            Span::new(84.0, 856.0),
+            "plus − 8 − 16 is the strip's end: a 24 pt gap"
         );
         assert_eq!(xs(&strip), [(84.0, 184.0), (270.0, 184.0), (456.0, 184.0)]);
         assert!(!strip.overflow);
@@ -701,14 +829,17 @@ mod tests {
     #[test]
     fn more_tabs_shrink_to_share_the_strip() {
         let strip = bar(1000.0, 5).layout();
-        // (824 + 2) / 5 − 2 = 163.2, whole points.
-        assert_eq!(strip.chips[0].width, 163.0);
-        assert_eq!(strip.chips[4].x, 84.0 + 4.0 * 165.0);
+        // (856 + 2) / 5 − 2 = 169.6, whole points.
+        assert_eq!(strip.chips[0].width, 169.0);
+        assert_eq!(strip.chips[4].x, 84.0 + 4.0 * 171.0);
         assert!(!strip.overflow);
-        assert_eq!(bar(1000.0, 6).layout().chips[0].width, 135.0);
+        assert_eq!(bar(1000.0, 6).layout().chips[0].width, 141.0);
         let seven = bar(1000.0, 7).layout();
-        assert!(seven.overflow, "116 would be below the minimum");
+        assert!(!seven.overflow, "120.57 still fits");
         assert_eq!(seven.chips[0].width, MIN_WIDTH);
+        let eight = bar(1000.0, 8).layout();
+        assert!(eight.overflow, "105 would be below the minimum");
+        assert_eq!(eight.chips[0].width, MIN_WIDTH);
     }
 
     #[test]
@@ -718,15 +849,15 @@ mod tests {
         assert!(strip.overflow);
         assert_eq!(strip.new_tab, 684.0);
         assert_eq!(strip.list, Some(652.0), "Show All Tabs, 4 left of +");
-        assert_eq!(strip.span, Span::new(84.0, 512.0));
+        assert_eq!(strip.span, Span::new(84.0, 544.0));
         assert!(strip.chips.iter().all(|chip| chip.width == MIN_WIDTH));
         assert_eq!(strip.chips[11].x, 84.0 + 11.0 * 122.0);
-        // 12 × 122 − 2 = 1462 of tabs in a 512 strip.
-        assert_eq!(strip.max_scroll, 950.0);
+        // 12 × 122 − 2 = 1462 of tabs in a 544 strip.
+        assert_eq!(strip.max_scroll, 918.0);
         assert!(!strip.fade_leading && strip.fade_trailing, "at the start");
 
         let end = Bar {
-            scroll: 950.0,
+            scroll: 918.0,
             ..bar(720.0, 12)
         }
         .layout();
@@ -750,7 +881,7 @@ mod tests {
             ..bar(720.0, 12)
         }
         .layout();
-        assert_eq!(past.scroll, 950.0, "clamped");
+        assert_eq!(past.scroll, 918.0, "clamped");
         let before = Bar {
             scroll: -3.0,
             ..bar(720.0, 12)
@@ -758,7 +889,7 @@ mod tests {
         .layout();
         assert_eq!(before.scroll, 0.0);
         let almost = Bar {
-            scroll: 949.5,
+            scroll: 917.5,
             ..bar(720.0, 12)
         }
         .layout();
@@ -778,7 +909,7 @@ mod tests {
         assert_eq!((strip.new_tab, strip.warning), (964.0, Some(932.0)));
         assert_eq!(
             strip.span,
-            Span::new(84.0, 792.0),
+            Span::new(84.0, 824.0),
             "the strip yields its space"
         );
         let overflowing = Bar {
@@ -792,12 +923,12 @@ mod tests {
             "Show All Tabs stays next to +"
         );
         assert_eq!(overflowing.warning, Some(620.0));
-        assert_eq!(overflowing.span, Span::new(84.0, 480.0));
+        assert_eq!(overflowing.span, Span::new(84.0, 512.0));
     }
 
     #[test]
     fn a_window_too_narrow_for_its_tabs_still_lays_out() {
-        let strip = bar(200.0, 3).layout();
+        let strip = bar(170.0, 3).layout();
         assert!(strip.overflow);
         assert_eq!(strip.span.width, 0.0, "no room left, not negative");
         assert_eq!(strip.max_scroll, 3.0 * 122.0 - 2.0);
@@ -834,9 +965,9 @@ mod tests {
     #[test]
     fn selecting_a_tab_scrolls_it_into_view_with_a_margin() {
         let strip = bar(720.0, 12).layout();
-        assert_eq!(strip.revealing(11), 950.0, "the last one: the strip's end");
+        assert_eq!(strip.revealing(11), 918.0, "the last one: the strip's end");
         // Tab 5 spans 610..730; brought to 24 from the trailing edge.
-        assert_eq!(strip.revealing(5), 730.0 - 512.0 + REVEAL_MARGIN);
+        assert_eq!(strip.revealing(5), 730.0 - 544.0 + REVEAL_MARGIN);
         assert_eq!(strip.revealing(0), 0.0);
         let scrolled = Bar {
             scroll: 242.0,
@@ -863,7 +994,7 @@ mod tests {
             "vertical wheels scroll too"
         );
         assert_eq!(strip.wheeled(-500.0, 0.0), 0.0);
-        assert_eq!(strip.wheeled(0.0, 5000.0), 950.0);
+        assert_eq!(strip.wheeled(0.0, 5000.0), 918.0);
         assert_eq!(bar(1000.0, 3).layout().wheeled(40.0, 0.0), 0.0);
     }
 

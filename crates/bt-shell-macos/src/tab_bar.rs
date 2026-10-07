@@ -10,7 +10,9 @@
 //! lights leave the row and the strip starts at the gap alone.
 //!
 //! **What is where** comes from the pure model (`tabs::Bar::layout`): every
-//! chip's span, `+` and the settings warning. With one tab the bar is
+//! chip's span, `+` and the settings warning, and how `+` meets the
+//! window's rounded corner — given here as measured, square in full screen
+//! ([`TabBar::corner`]). With one tab the bar is
 //! today's title bar — the title centred, a settings diagnostic beside it
 //! ([`single_label`]), `+` on the right — and the title takes no click: a
 //! press anywhere but `+` moves the window, a double click does what the
@@ -61,7 +63,7 @@ use objc2_foundation::{
 };
 
 use crate::app;
-use crate::tabs::{BUTTON, Bar, Indicator};
+use crate::tabs::{BUTTON, Bar, Indicator, TAB_RADIUS};
 use crate::window::{TerminalWindow, is_dark_background};
 
 /// Space between the zoom button's right edge and the strip — the design's
@@ -69,9 +71,20 @@ use crate::window::{TerminalWindow, is_dark_background};
 /// lights are not in the row and the strip starts this far from the edge.
 const LIGHTS_GAP: f64 = 12.0;
 
-/// A chip's height and corner radius, points (the design's anatomy).
+/// The radius of the window's top-right corner outside full screen, which
+/// `+` is fitted to (`tabs::Fit`). AppKit does not say it; it was measured
+/// on macOS 26.4.1 from the alpha of a screenshot of a window built like
+/// ours (titled, content under the title row, an empty compact toolbar):
+/// 20 pt — and the same zoomed and tiled to a half or to fill the screen.
+/// Without the toolbar the corner is 16 pt. In full screen it is square
+/// ([`TabBar::corner`]). Not measured: macOS 14 and 15, and a full-screen
+/// split. A smaller corner than this lies outside this one, so where the
+/// real corner is smaller the gap round `+` only widens.
+const WINDOW_CORNER: f64 = 20.0;
+
+/// A chip's height, points (the design's anatomy); its corner radius is
+/// `tabs::TAB_RADIUS`, shared with the buttons on a square corner.
 const CHIP_HEIGHT: f64 = 28.0;
-const CHIP_RADIUS: f64 = 7.0;
 
 /// The label's inset from a chip's sides: room for `×` on the left, the
 /// same on the right so the title stays centred.
@@ -838,10 +851,10 @@ define_class!(
             let bounds = self.bounds();
             match self.ivars().face.get() {
                 Face::Bare => {}
-                Face::Hovered => rounded(bounds, CHIP_RADIUS, palette.hover, None),
+                Face::Hovered => rounded(bounds, TAB_RADIUS, palette.hover, None),
                 Face::Selected => rounded(
                     bounds,
-                    CHIP_RADIUS,
+                    TAB_RADIUS,
                     palette.selected,
                     Some(palette.selected_line),
                 ),
@@ -899,6 +912,8 @@ pub(crate) struct ButtonIvars {
     hot: Cell<bool>,
     pressed: Cell<bool>,
     palette: Cell<Option<Palette>>,
+    /// The corner radius, from how the bar meets the window's corner.
+    radius: Cell<f64>,
 }
 
 define_class!(
@@ -926,7 +941,7 @@ define_class!(
             };
             let hot = iv.hot.get();
             let fill = if hot { palette.button_hover } else { palette.button };
-            rounded(self.bounds(), CHIP_RADIUS, fill, Some(palette.button_line));
+            rounded(self.bounds(), iv.radius.get(), fill, Some(palette.button_line));
             let at = centre(self.bounds());
             let path = NSBezierPath::bezierPath();
             match iv.kind {
@@ -1007,6 +1022,7 @@ impl BarButton {
             hot: Cell::new(false),
             pressed: Cell::new(false),
             palette: Cell::new(None),
+            radius: Cell::new(TAB_RADIUS),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -1022,8 +1038,10 @@ impl BarButton {
         this
     }
 
-    fn set_palette(&self, palette: Palette) {
-        if self.ivars().palette.replace(Some(palette)) != Some(palette) {
+    fn set_look(&self, palette: Palette, radius: f64) {
+        let iv = self.ivars();
+        let repaint = iv.palette.replace(Some(palette)) != Some(palette);
+        if iv.radius.replace(radius) != radius || repaint {
             self.setNeedsDisplay(true);
         }
     }
@@ -1212,6 +1230,16 @@ impl TabBar {
             })
     }
 
+    /// The radius of the window's top-right corner: square in full screen,
+    /// [`WINDOW_CORNER`] otherwise. The window lays the bar out again when
+    /// it enters and leaves full screen, so `+` follows the corner.
+    fn corner(&self) -> f64 {
+        match self.window() {
+            Some(window) if window.styleMask().contains(NSWindowStyleMask::FullScreen) => 0.0,
+            _ => WINDOW_CORNER,
+        }
+    }
+
     /// Places every part from the pure layout ([`Bar::layout`]) and gives
     /// the chips their tabs. Chips are made or taken apart only when the
     /// count changes.
@@ -1240,6 +1268,7 @@ impl TabBar {
             dragged: None,
             scroll: 0.0,
             warning: !shown.notice.is_empty(),
+            corner: self.corner(),
         }
         .layout();
         let top = ((bounds.size.height - CHIP_HEIGHT) / 2.0).max(0.0);
@@ -1280,11 +1309,11 @@ impl TabBar {
         }
         let button = |x: f64| NSRect::new(NSPoint::new(x, top), NSSize::new(BUTTON, BUTTON));
         iv.new_tab.setFrame(button(strip.new_tab));
-        iv.new_tab.set_palette(palette);
+        iv.new_tab.set_look(palette, strip.fit.radius);
         match strip.warning {
             Some(x) => {
                 iv.warning.setFrame(button(x));
-                iv.warning.set_palette(palette);
+                iv.warning.set_look(palette, strip.fit.radius);
                 let text = NSString::from_str(&shown.notice);
                 iv.warning.setToolTip(Some(&text));
                 iv.warning.setAccessibilityLabel(Some(&text));
