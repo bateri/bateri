@@ -2366,6 +2366,10 @@ mod tests {
         std::fs::set_permissions(&exec, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .expect("chmod");
         std::fs::write(dir.join("pyvenv.cfg"), "home = /usr/bin\n").expect("cfg");
+        // macOS looks a file over the first time it runs, before it starts —
+        // measured at up to 1.7 s on a loaded machine, against the job's 2 s.
+        // One run with room first, so the job's own is the second.
+        let _ = run_version(&exec, Duration::from_secs(20));
         let program = Program {
             pid: 1,
             family: Family::Python,
