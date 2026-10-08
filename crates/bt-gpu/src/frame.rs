@@ -38,7 +38,7 @@ use bt_core::{
     LinearRgba, SearchRun, SelectionRun, TrackBlock, TrackMark, UnderlineStyle, UnfocusedCaret,
 };
 
-use crate::arrival::dust::{BEAM_HEIGHT_PT, BEAM_SLOPE, BEAM_WIDTH_PT, Dust, HOT_LENGTH_PT, Zone};
+use crate::arrival::dust::{self, HOT_LENGTH_PT, Zone};
 use crate::arrival::{Scene, WAVE_REACH_PT};
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
 use crate::metrics::CellMetrics;
@@ -674,20 +674,17 @@ pub(crate) struct WaveDraw {
 }
 
 /// The colours the dust scene is drawn in, linear: the motes' (the text's,
-/// moving to the accent as they land), the accent, and the beam's — a faint
-/// veil of the text's colour, or a white one over a light window.
+/// moving to the accent as they land) and the accent; with the relative
+/// luminance of each and of the ground they are drawn over, which a mote's
+/// opacity is fitted to ([`dust::opacity_over`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct DustTones {
     text: [f32; 4],
     accent: [f32; 4],
-    beam: [f32; 4],
+    text_luminance: f32,
+    accent_luminance: f32,
+    ground_luminance: f32,
 }
-
-/// The beam's opacity at its middle: over a dark window the text's colour at
-/// this, over a light one a white at [`BEAM_LIGHT_ALPHA`]. The design's
-/// numbers — chosen by eye.
-const BEAM_DARK_ALPHA: f32 = 0.045;
-const BEAM_LIGHT_ALPHA: f32 = 0.75;
 
 /// What is too faint to be worth a quad: under half an 8-bit step.
 const INVISIBLE: f32 = 1.0 / 512.0;
@@ -2507,52 +2504,47 @@ impl Frame {
         })
     }
 
-    /// The colours of the dust scene: the motes' and the accent (written with
-    /// the scene, like [`Frame::set_dock_quiet`]), and whether the window is
-    /// light — the beam is a white veil there and the text's colour over a
-    /// dark one.
+    /// The colours of the dust scene: the motes' and the accent, and the
+    /// window's ground they are drawn over (written with the scene, like
+    /// [`Frame::set_dock_quiet`]).
     pub(crate) fn set_dock_dust_tones(
         &mut self,
         text: LinearRgba,
         accent: LinearRgba,
-        light_window: bool,
+        ground: LinearRgba,
     ) {
-        let [r, g, b, _] = text.to_array();
         self.dock_dust_tones = DustTones {
             text: text.to_array(),
             accent: accent.to_array(),
-            beam: if light_window {
-                [1.0, 1.0, 1.0, BEAM_LIGHT_ALPHA]
-            } else {
-                [r, g, b, BEAM_DARK_ALPHA]
-            },
+            text_luminance: text.luminance(),
+            accent_luminance: accent.luminance(),
+            ground_luminance: ground.luminance(),
         };
     }
 
-    /// The dust scene's field: the beam of light (returned) and the motes
-    /// (pushed to `motes` as soft dots: `pos` the centre, `size` the diameter
-    /// and blur, pixels), in window space. `band_y` is the top of the drawn
-    /// band in window space — the motes live from `dust::ABOVE_PT` above it
-    /// to the band's floor. Nothing when the scene has no dust.
+    /// The dust scene's motes, pushed to `motes` as soft dots (`pos` the
+    /// centre, `size` the diameter and blur, pixels) in window space. `band_y`
+    /// is the top of the drawn band in window space — the motes live from
+    /// `dust::ABOVE_PT` above it to the band's floor. Nothing when the scene
+    /// has no dust.
     ///
-    /// The scene gives points and the dock's top; the pixels are made here,
-    /// where the scale and the width are known.
-    pub(crate) fn dock_dust(
-        &self,
-        band_y: f32,
-        width_px: f32,
-        motes: &mut Vec<Instance>,
-    ) -> Option<WaveDraw> {
-        self.dock?;
-        let dust = self.dock_scene?.dust?;
+    /// The scene gives points, the dock's top and how far each mote stands
+    /// out; the pixels are made here, where the scale and the width are known,
+    /// and the opacity, where the ground is ([`dust::opacity_over`]).
+    pub(crate) fn dock_dust(&self, band_y: f32, width_px: f32, motes: &mut Vec<Instance>) {
+        let Some(dust) = self.dock.and(self.dock_scene).and_then(|scene| scene.dust) else {
+            return;
+        };
         let scale = self.scale.max(1.0);
         let tones = self.dock_dust_tones;
         let zone = Zone::for_dock(width_px / scale, self.dock_band_px() / scale);
         motes.extend(
             dust.motes(zone)
-                .filter(|mote| mote.alpha > INVISIBLE)
                 .map(|mote| {
                     let mix = |from: f32, to: f32| from * (1.0 - mote.tint) + to * mote.tint;
+                    // Luminance is linear in linear light: the mix's is the
+                    // mix of the two.
+                    let ink = mix(tones.text_luminance, tones.accent_luminance);
                     Instance {
                         pos: [mote.x * scale, band_y + mote.y * scale],
                         size: [mote.size * scale, mote.blur * scale],
@@ -2560,38 +2552,12 @@ impl Frame {
                             mix(tones.text[0], tones.accent[0]),
                             mix(tones.text[1], tones.accent[1]),
                             mix(tones.text[2], tones.accent[2]),
-                            mote.alpha.min(1.0),
+                            dust::opacity_over(mote.alpha, ink, tones.ground_luminance),
                         ],
                     }
-                }),
+                })
+                .filter(|mote| mote.rgba[3] > INVISIBLE),
         );
-        self.dust_beam(&dust, band_y, width_px)
-    }
-
-    /// The beam: a band whose bounding box is the quad; the fragment finds the
-    /// slant ([`BEAM_SLOPE`]).
-    fn dust_beam(&self, dust: &Dust, band_y: f32, width_px: f32) -> Option<WaveDraw> {
-        let scale = self.scale.max(1.0);
-        let [r, g, b, peak] = self.dock_dust_tones.beam;
-        let alpha = peak * dust.beam;
-        if alpha <= INVISIBLE {
-            return None;
-        }
-        let width = BEAM_WIDTH_PT * scale;
-        let half_height = BEAM_HEIGHT_PT * 0.5 * scale;
-        let left = dust.beam_left(width_px / scale) * scale;
-        let middle = band_y + Dust::beam_middle() * scale;
-        // The slant moves the top edge right and the bottom edge left by this.
-        let lean = BEAM_SLOPE * half_height;
-        Some(WaveDraw {
-            instance: Instance {
-                pos: [left - lean, middle - half_height],
-                size: [width + 2.0 * lean, 2.0 * half_height],
-                rgba: [r, g, b, alpha],
-            },
-            core: [left, middle, 1.0, width],
-            shape: [BEAM_SLOPE, 0.0, 0.0, 0.0],
-        })
     }
 
     /// The lit tip of the line the dust weaves: a ramp (returned) trailing the
@@ -2635,7 +2601,7 @@ impl Frame {
                 size: [length, SEPARATOR_PX],
                 rgba: [ar, ag, ab, hot],
             },
-            core: [front - length, 0.0, 2.0, front],
+            core: [front - length, 0.0, 1.0, front],
             shape: [0.0; 4],
         })
     }
@@ -6397,13 +6363,14 @@ mod tests {
     }
 
     const TEXT_TONE: LinearRgba = bt_core::Theme::BATERI.foreground_linear();
+    const GROUND: LinearRgba = bt_core::Theme::BATERI.background_linear();
 
     /// The dock at 2x with a dust scene written; the dock's band 80 px high
     /// on a 400 px window.
     fn dusty_dock(scene: Option<Scene>) -> Frame {
         let mut frame = rippling_dock(None);
         frame.set_dock_band(400.0, 0.0);
-        frame.set_dock_dust_tones(TEXT_TONE, CURSOR, false);
+        frame.set_dock_dust_tones(TEXT_TONE, CURSOR, GROUND);
         arrive(&mut frame, scene);
         frame
     }
@@ -6413,8 +6380,7 @@ mod tests {
         let frame = dusty_dock(Some(dust_at(1.0, true)));
         let band_y = frame.band_top_px(400.0);
         let mut motes = Vec::new();
-        let beam = frame.dock_dust(band_y, 600.0, &mut motes);
-        assert!(beam.is_some(), "the beam is lit");
+        frame.dock_dust(band_y, 600.0, &mut motes);
         assert!(
             (40..=dust::MOTES).contains(&motes.len()),
             "{} motes",
@@ -6443,47 +6409,76 @@ mod tests {
             Some(ripple_at(1.0, true)),
         ] {
             let mut none = Vec::new();
-            assert!(
-                dusty_dock(scene)
-                    .dock_dust(band_y, 600.0, &mut none)
-                    .is_none()
-            );
+            dusty_dock(scene).dock_dust(band_y, 600.0, &mut none);
             assert!(none.is_empty());
         }
     }
 
     #[test]
-    fn the_dust_is_drawn_in_the_text_and_the_beam_in_a_veil() {
-        let mut dark = dusty_dock(Some(dust_at(1.0, true)));
+    fn the_dust_is_drawn_in_the_text_and_the_accent_only() {
+        // Nothing but the motes: each in the text's colour or the accent.
+        let frame = dusty_dock(Some(dust_at(1.0, true)));
         let mut motes = Vec::new();
-        let beam = dark.dock_dust(200.0, 600.0, &mut motes).expect("lit");
-        let [r, g, b, _] = TEXT_TONE.to_array();
-        assert_eq!(&beam.instance.rgba[..3], &[r, g, b], "the text's colour");
-        assert!(beam.instance.rgba[3] <= BEAM_DARK_ALPHA && beam.instance.rgba[3] > 0.0);
-        // Slanted: the quad is wider than the band and the fragment gets the
-        // slope; its middle row is the quad's middle.
-        assert_eq!(beam.core[2], 1.0, "the beam's mode");
-        assert!(beam.instance.size[0] > beam.core[3], "room for the slant");
-        assert!((beam.instance.pos[1] + beam.instance.size[1] * 0.5 - beam.core[1]).abs() < 1e-3);
-        assert_eq!(beam.shape[0], BEAM_SLOPE);
-        // A light window gets a white veil.
-        dark.set_dock_dust_tones(TEXT_TONE, CURSOR, true);
-        let light = dark.dock_dust(200.0, 600.0, &mut Vec::new()).expect("lit");
-        assert_eq!(&light.instance.rgba[..3], &[1.0, 1.0, 1.0]);
-        assert!(light.instance.rgba[3] > beam.instance.rgba[3]);
+        frame.dock_dust(200.0, 600.0, &mut motes);
+        let text = &TEXT_TONE.to_array()[..3];
+        let accent = &CURSOR.to_array()[..3];
+        assert!(motes.iter().any(|mote| &mote.rgba[..3] == text));
+        assert!(motes.iter().any(|mote| &mote.rgba[..3] == accent));
+        assert!(
+            motes
+                .iter()
+                .all(|mote| &mote.rgba[..3] == text || &mote.rgba[..3] == accent)
+        );
     }
 
     #[test]
-    fn the_beam_goes_out_and_the_motes_with_it() {
-        let band_y = dusty_dock(None).band_top_px(400.0);
-        let beam_at = |since| {
-            dusty_dock(Some(dust_at(since, false)))
-                .dock_dust(band_y, 600.0, &mut Vec::new())
-                .map(|draw| draw.instance.rgba[3])
+    fn a_light_ground_draws_the_motes_more_opaque_and_black_as_the_scene_says() {
+        // The same scene over the dark theme's black and over the light
+        // theme's ground, each in its theme's text and accent.
+        let light = bt_core::Theme::BATERI_LIGHT;
+        let draw = |text, accent, ground| {
+            let mut frame = dusty_dock(Some(dust_at(1.0, true)));
+            frame.set_dock_dust_tones(text, accent, ground);
+            let mut motes = Vec::new();
+            frame.dock_dust(200.0, 600.0, &mut motes);
+            motes
         };
-        let (early, later) = (beam_at(0.0).expect("lit"), beam_at(0.2).expect("lit"));
-        assert!(later < early, "{later} < {early}");
-        assert_eq!(beam_at(0.34), None, "out inside a third of a second");
+        let dark = draw(TEXT_TONE, CURSOR, GROUND);
+        let lit = draw(
+            light.foreground_linear(),
+            light.accent_linear(),
+            light.background_linear(),
+        );
+        // On black the opacity is the scene's own.
+        let scene = dust_at(1.0, true).dust.expect("dust");
+        let zone = Zone::for_dock(300.0, dusty_dock(None).dock_band_px() / 2.0);
+        let model: Vec<f32> = scene
+            .motes(zone)
+            .map(|mote| mote.alpha)
+            .filter(|&alpha| alpha > INVISIBLE)
+            .collect();
+        let drawn: Vec<f32> = dark.iter().map(|mote| mote.rgba[3]).collect();
+        assert_eq!(drawn.len(), model.len());
+        for (drawn, model) in drawn.iter().zip(&model) {
+            assert!((drawn - model).abs() < 1e-4, "{drawn} vs {model}");
+        }
+        // Over the light ground the same motes, each more opaque.
+        assert!(lit.len() >= dark.len());
+        let mean = |motes: &[Instance]| {
+            motes.iter().map(|mote| mote.rgba[3]).sum::<f32>() / motes.len() as f32
+        };
+        assert!(
+            mean(&lit) > 2.0 * mean(&dark),
+            "{} vs {}",
+            mean(&lit),
+            mean(&dark)
+        );
+        assert!(lit.iter().all(|mote| mote.rgba[3] <= 1.0));
+    }
+
+    #[test]
+    fn the_motes_are_gone_once_they_have_glowed_out() {
+        let band_y = dusty_dock(None).band_top_px(400.0);
         let mut left = Vec::new();
         dusty_dock(Some(dust_at(0.71, false))).dock_dust(band_y, 600.0, &mut left);
         assert!(left.is_empty(), "{} motes after the glow", left.len());
@@ -6510,7 +6505,7 @@ mod tests {
             (ramp.core[3] - front).abs() < 0.01,
             "the ramp ends at the front"
         );
-        assert_eq!(ramp.core[2], 2.0, "the ramp's mode");
+        assert_eq!(ramp.core[2], 1.0, "the ramp's mode");
         assert_eq!(ramp.instance.pos[1], band_y, "on the line's row");
         assert!((ramp.instance.size[0] - front.min(HOT_LENGTH_PT * 2.0)).abs() < 0.01);
         assert_eq!(ramp.instance.rgba[3], 1.0);

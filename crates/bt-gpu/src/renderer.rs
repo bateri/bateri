@@ -92,8 +92,8 @@ pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8U
 /// another meaning: `core` is the highlight's colour, `shape[0]` its radius.
 /// The `wave` pipeline reads it as geometry: `core[0]` is the line's centre y,
 /// `core[1]` the pixels per point, `shape` the peaks, the phase and the ring's
-/// front (the colour rides in the instance); `core[2]` picks the dust scene's
-/// beam (1) or ramp (2) instead, which read the block as `cell_bg.wgsl` says.
+/// front (the colour rides in the instance); `core[2]` = 1 picks the dust
+/// scene's ramp instead, which reads the block as `cell_bg.wgsl` says.
 /// The `dots` pipeline reads none of it but `viewport_px`.
 ///
 /// `edge_px` is the content's top fade ([`Op::Edge`]). **No `Default`**: the
@@ -465,11 +465,10 @@ struct Plan {
     spark: Vec<Instance>,
 }
 
-/// The dust scene's field once pushed: the beam and the motes, to be drawn
-/// twice — above the dock's band under the grid's text, below it over the
-/// dock's ground ([`Plan::dust`]).
+/// The dust scene's motes once pushed, to be drawn twice — above the dock's
+/// band under the grid's text, below it over the dock's ground
+/// ([`Plan::dust`]).
 struct DustField {
-    beam: Option<Op>,
     motes: Range<u32>,
 }
 
@@ -500,37 +499,21 @@ impl Plan {
         self.ops.push(Op::Dots(range));
     }
 
-    /// Pushes the dust scene's beam and motes (the scratch list) once and
-    /// returns them for [`Plan::dust`], or `None` when there is nothing to draw.
-    fn dust_field(&mut self, beam: Option<WaveDraw>) -> Option<DustField> {
+    /// Pushes the dust scene's motes (the scratch list) once and returns them
+    /// for [`Plan::dust`], or `None` when there is nothing to draw.
+    fn dust_field(&mut self) -> Option<DustField> {
         let motes = std::mem::take(&mut self.motes);
         let range = (!motes.is_empty()).then(|| self.push(&motes));
         self.motes = motes;
-        let beam = beam.map(|draw| {
-            let range = self.push(std::slice::from_ref(&draw.instance));
-            Op::Wave {
-                range,
-                core: draw.core,
-                shape: draw.shape,
-            }
-        });
-        (beam.is_some() || range.is_some()).then(|| DustField {
-            beam,
-            motes: range.unwrap_or(0..0),
-        })
+        range.map(|motes| DustField { motes })
     }
 
-    /// Draws the dust field inside `scissor`, in window space: the beam under
-    /// the motes. The caller restores the viewport and the scissor.
+    /// Draws the dust field inside `scissor`, in window space. The caller
+    /// restores the viewport and the scissor.
     fn dust(&mut self, field: &DustField, scissor: [u32; 4]) {
         self.ops.push(Op::Scissor(scissor));
         self.ops.push(Op::Viewport(0.0));
-        if let Some(beam) = &field.beam {
-            self.ops.push(beam.clone());
-        }
-        if !field.motes.is_empty() {
-            self.ops.push(Op::Dots(field.motes.clone()));
-        }
+        self.ops.push(Op::Dots(field.motes.clone()));
     }
 
     fn rounded(&mut self, instances: &[Instance], core: [f32; 4], shape: [f32; 4]) {
@@ -2057,9 +2040,9 @@ impl Renderer {
             .then(|| frame.band_top_px(viewport_px[1]) + frame.dock_rise_px());
         let dust = dock_top.and_then(|band_y| {
             let mut motes = std::mem::take(&mut plan.motes);
-            let beam = frame.dock_dust(band_y, viewport_px[0], &mut motes);
+            frame.dock_dust(band_y, viewport_px[0], &mut motes);
             plan.motes = motes;
-            plan.dust_field(beam)
+            plan.dust_field()
         });
         // Grid: the offset lives in one viewport. Command marks first (sprites,
         // degenerate inversion rectangle), then ground → search → selection →

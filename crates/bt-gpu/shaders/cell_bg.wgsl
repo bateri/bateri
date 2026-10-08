@@ -299,21 +299,15 @@ fn wave_height(x: f32, scale: f32) -> f32 {
         + select(0.0, spread, behind <= 0.0);
 }
 
-// The dust scene's two gradients ride in the same fragment, picked by `core.z`
+// The dust scene's gradient rides in the same fragment, picked by `core.z`
 // (zero is the wave above):
 //
-//   1 = the beam of light: a band that is `core.w` pixels wide at its middle
-//       row `core.y`, its left edge at `core.x` there, slanted so that a row
-//       `d` pixels below the middle is shifted left by `shape.x · d`. The
-//       alpha is a tent across the band — nothing at either edge, the
-//       instance's alpha at the middle. The quad is the band's bounding box.
-//   2 = the lit tip of the woven line: the instance's alpha ramps from nothing
+//   1 = the lit tip of the woven line: the instance's alpha ramps from nothing
 //       at `core.x` to whole at `core.w` (a row of pixels, left to right).
 //
-// Neither carries the content's top fade: they are drawn in window space like
+// It does not carry the content's top fade: it is drawn in window space like
 // the wave.
-const MODE_BEAM: f32 = 1.0;
-const MODE_RAMP: f32 = 2.0;
+const MODE_RAMP: f32 = 1.0;
 
 @fragment
 fn wave_fragment(in: Out) -> @location(0) vec4<f32> {
@@ -321,11 +315,6 @@ fn wave_fragment(in: Out) -> @location(0) vec4<f32> {
     if (mode > MODE_RAMP - 0.5) {
         let across = clamp((in.position.x - imm.core.x) / max(imm.core.w - imm.core.x, 1.0), 0.0, 1.0);
         return vec4<f32>(in.rgba.rgb, in.rgba.a * across);
-    }
-    if (mode > MODE_BEAM - 0.5) {
-        // The position in the band's own, unslanted, frame.
-        let u = (in.position.x + imm.shape.x * (in.position.y - imm.core.y) - imm.core.x) / imm.core.w;
-        return vec4<f32>(in.rgba.rgb, in.rgba.a * clamp(1.0 - abs(2.0 * u - 1.0), 0.0, 1.0));
     }
     let scale = imm.core.y;
     let x = in.position.x;

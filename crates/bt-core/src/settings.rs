@@ -785,9 +785,9 @@ pub enum DockArrival {
     /// little, its lines draw from the left, the `›` pops in, the path and branch
     /// type themselves out and the cursor comes last.
     Type,
-    /// Specks of dust drift in a slanted beam of light around the dock while the
-    /// shell starts; at the first prompt they are drawn left to right onto the
-    /// top line, which is woven behind them.
+    /// Specks of dust drift around the dock while the shell starts; at the
+    /// first prompt they are drawn left to right onto the top line, which is
+    /// woven behind them.
     Dust,
     /// The top line ripples faintly while the shell starts; at the first prompt
     /// the `›` drops, a ring spreads from where it lands and fades, and the line
@@ -1816,9 +1816,9 @@ erase = "recede"
 # window or tab arrives. Until the shell shows its first prompt the dock waits
 # empty, with no prompt mark, no cursor, no folder and no branch. type then
 # lifts it a little, draws its lines from the left, pops the prompt mark in,
-# types the folder and branch out and brings the cursor last. dust drifts
-# specks of dust through a slanted beam of light around the dock while it
-# waits, then draws them onto the top line, which is woven behind them.
+# types the folder and branch out and brings the cursor last. dust lets
+# specks of dust drift around the dock while it waits, then draws them onto
+# the top line, which is woven behind them.
 # ripple lets the top line ripple faintly while it waits, then drops the
 # prompt mark onto it and sends a ring out from where it lands. off shows the
 # dock as it is, from the start. Pressing a key, or leaving the window, ends

@@ -23,7 +23,7 @@
 //!   asleep on a settled animation is not ticked again. **One calendar waits
 //!   with motion**: the ripple's top line is a wave that stirs from [`SHOW`]
 //!   until the prompt or the cap ([`Arrival::stirs`]); so does the dust's
-//!   ([`dust`]), whose motes drift in a beam of light. It is unsettled in
+//!   ([`dust`]), whose motes drift around the dock. It is unsettled in
 //!   that stretch — stopped by the cap, which arrives the scene — and only for
 //!   a pane someone is watching, so a window in the background still sleeps.
 //! - *Playing* (prompt, or [`CAP`] without one → the calendar's end): unsettled,
@@ -1287,7 +1287,7 @@ mod tests {
         }
     }
 
-    // **The dust**: motes drift in a beam of light while the shell starts and
+    // **The dust**: motes drift around the dock while the shell starts and
     // are pulled onto the top line when it speaks.
 
     /// A dust scene whose prompt came `prompt` seconds after birth, with
@@ -1328,7 +1328,7 @@ mod tests {
         // It keeps drifting, and is whole once faded in.
         arrival.advance(BORN + 1.0, true);
         let later = arrival.scene().expect("armed").dust.expect("drifting");
-        assert_eq!((later.appear, later.beam), (1.0, 1.0));
+        assert_eq!(later.appear, 1.0);
         assert!(later.drift > dust.drift);
         assert!(!arrival.settled());
         // The cap arrives the scene: the motes stop where they were then.
@@ -1449,16 +1449,12 @@ mod tests {
         arrival.arrive(BORN + 0.25, true);
         let at = arrival.scene().expect("armed").dust.expect("pulled");
         assert_eq!(at.appear, before.appear, "the prompt moved the opacity");
-        assert_eq!(at.beam, before.beam);
         let mut last = at.appear;
         for step in 1..=10 {
             let dust = dust_at(&mut arrival, 0.25, f64::from(step) * 0.01);
             assert!(dust.appear >= last);
             last = dust.appear;
         }
-        // The beam goes out within a third of a second of the arrival.
-        let gone = dust_at(&mut arrival, 0.25, 0.33);
-        assert_eq!(gone.beam, 0.0);
     }
 
     #[test]

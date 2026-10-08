@@ -1,16 +1,17 @@
 //! The dust scene's model — **pure**: positions, opacities and times as
 //! functions of a few numbers, no GPU and no clock.
 //!
-//! Specks of dust drift in a slanted beam of light around the dock while the
-//! shell starts; at the first prompt they are pulled onto the dock's top line
-//! from left to right and the line is woven behind them, its tip lit.
+//! Specks of dust drift around the dock while the shell starts; at the first
+//! prompt they are pulled onto the dock's top line from left to right and the
+//! line is woven behind them, its tip lit. Only the dust: no light is drawn
+//! behind it, and no part of the window lights the motes more than another.
 //!
 //! **One mote is a function of its index, the width and the time.** Its place,
 //! depth and wandering come from a seeded generator, so the same pane width at
 //! the same time draws the same dust and nothing is kept between frames. About
 //! a third gather in three loose clouds, the rest are scattered; most are small
-//! and far, a few are near, large and soft. They glint where the beam crosses
-//! them. Every number is the design's — chosen by eye, not measured; the
+//! and far, a few are near, large and soft, and each glints now and then.
+//! Every number is the design's — chosen by eye, not measured; the
 //! generator is the design's too, ported with its draws in the design's order
 //! so the dust is the dust that was approved.
 //!
@@ -40,23 +41,14 @@ const FLOOR_PT: f32 = 6.0;
 /// The zone's least height below the dock's top, points.
 const FLOOR_MIN_PT: f32 = 8.0;
 
-/// The beam: a slanted band of light, points.
-pub(crate) const BEAM_WIDTH_PT: f32 = 260.0;
-pub(crate) const BEAM_HEIGHT_PT: f32 = 220.0;
-/// The tangent of its slant (24° from the vertical): a row `d` below its middle
-/// is shifted left by `d` times this.
-pub(crate) const BEAM_SLOPE: f32 = 0.445;
-/// The beam's top edge above the dock's top, points.
-const BEAM_TOP_PT: f32 = -150.0;
-/// Where the beam's centre sits across the window, and how far it sways.
-const BEAM_AT: f32 = 0.62;
-const BEAM_SWAY_PT: f32 = 10.0;
-
 /// How long the scene takes to fade in after the hold, seconds.
 const FADE_IN: f32 = 0.22;
 
-/// How long the beam takes to go out once the motes are pulled, seconds.
-const BEAM_OUT: f32 = 0.32;
+/// How brightly every mote is lit: a mote's opacity is its depth times this
+/// times its glint. The same across the window — motes lit more in one band
+/// would read as a beam of light, and the scene is the dust alone. Chosen by
+/// eye.
+const LIGHT: f32 = 1.0;
 
 // The landing. A mote's turn comes `LAND_BASE + LAND_SWEEP·(x / width) +
 // LAND_RISE·(height above the line)` seconds after the arrival; it then takes
@@ -100,6 +92,56 @@ fn unit(x: f32) -> f32 {
 fn ease_out(x: f32) -> f32 {
     1.0 - (1.0 - unit(x)).powi(3)
 }
+
+/// The opacity a mote is drawn with in an ink of relative luminance `ink`
+/// over a ground of `ground`, for a mote of opacity `alpha` in the scene.
+///
+/// **The scene's opacities are how far a mote stands out, measured on black.**
+/// The window blends in linear light, which spends little of the difference
+/// between two dark colors and much between two light ones: the same opacity
+/// that sets a light mote well apart from a black ground leaves a dark one
+/// barely off a white ground (`0.15`: 39 points of lightness on black, 6 on
+/// a light theme). So the opacity drawn is the one that sets the mote as far
+/// from this ground in lightness (CIE L*) as `alpha` sets it from black, with
+/// an ink as far from black as `ink` is from `ground` — on a black ground
+/// exactly `alpha`, so the dark theme's dust is the dust it was tuned as. Any
+/// theme, a user's too, gets dust that stands out alike.
+pub(crate) fn opacity_over(alpha: f32, ink: f32, ground: f32) -> f32 {
+    let (ink_l, ground_l) = (lightness(ink), lightness(ground));
+    let reach = ink_l - ground_l;
+    // An ink the ground's own colour shows nothing at any opacity.
+    if reach.abs() < 0.5 {
+        return alpha;
+    }
+    let apart = lightness(unit(alpha) * luminance_at(reach.abs()));
+    let target = luminance_at(ground_l + apart.copysign(reach));
+    unit((target - ground) / (ink - ground))
+}
+
+/// CIE lightness L* (`0..=100`) of a relative luminance.
+fn lightness(luminance: f32) -> f32 {
+    let y = luminance.clamp(0.0, 1.0);
+    if y <= LAB_EPSILON {
+        y * LAB_KAPPA
+    } else {
+        116.0 * y.cbrt() - 16.0
+    }
+}
+
+/// The relative luminance of a CIE lightness: [`lightness`]'s inverse.
+fn luminance_at(lightness: f32) -> f32 {
+    let l = lightness.clamp(0.0, 100.0);
+    if l <= LAB_EPSILON * LAB_KAPPA {
+        l / LAB_KAPPA
+    } else {
+        ((l + 16.0) / 116.0).powi(3)
+    }
+}
+
+/// CIE L*'s two constants: where its cube root gives way to a line, and the
+/// line's slope (CIE's exact ratios, 216/24389 and 24389/27).
+const LAB_EPSILON: f32 = 216.0 / 24389.0;
+const LAB_KAPPA: f32 = 24389.0 / 27.0;
 
 /// When a mote at `share` of the width (`0..=1`) and `rise` points above the
 /// line is on the line, seconds after the arrival.
@@ -174,33 +216,27 @@ pub(crate) struct Dust {
     pub(crate) appear: f32,
     /// Seconds since the arrival; `None` while the shell has not spoken.
     pub(crate) landing: Option<f32>,
-    /// The beam's opacity, `0..=1`.
-    pub(crate) beam: f32,
 }
 
 impl Dust {
     /// The scene `waited` seconds after the pane was born, before the shell
     /// has spoken (after the hold, which the caller keeps).
     pub(crate) fn waiting(waited: f32) -> Self {
-        let appear = fade_in(waited);
         Self {
             drift: waited.min(CAP as f32),
-            appear,
+            appear: fade_in(waited),
             landing: None,
-            beam: appear,
         }
     }
 
     /// The scene `since` seconds after the shell spoke, `waited` seconds after
-    /// the pane was born: the motes stopped drifting then, the fade-in
-    /// carries on and the beam goes out.
+    /// the pane was born: the motes stopped drifting then and the fade-in
+    /// carries on.
     pub(crate) fn pulled(waited: f32, since: f32) -> Self {
-        let appear = fade_in(waited + since);
         Self {
             drift: waited.min(CAP as f32),
-            appear,
+            appear: fade_in(waited + since),
             landing: Some(since),
-            beam: appear * (1.0 - unit(since / BEAM_OUT)),
         }
     }
 
@@ -215,17 +251,6 @@ impl Dust {
             Some(since) if front_at(since) > 0.0 => 1.0 - unit((since - HOT_AT) / HOT_SPAN),
             _ => 0.0,
         }
-    }
-
-    /// The beam's left edge at its middle row, points across the window. It
-    /// sways a little while the dust waits.
-    pub(crate) fn beam_left(&self, width: f32) -> f32 {
-        width * BEAM_AT - BEAM_WIDTH_PT * 0.5 + BEAM_SWAY_PT * (self.drift * 0.5).sin()
-    }
-
-    /// The beam's middle row, points below the dock's top.
-    pub(crate) fn beam_middle() -> f32 {
-        BEAM_TOP_PT + BEAM_HEIGHT_PT * 0.5
     }
 
     /// Every mote, in index order — those that cannot be seen too (`alpha` is
@@ -250,15 +275,13 @@ impl Dust {
             * unit((zone.floor - y) / 8.0)
             * unit(x / 16.0)
             * unit((zone.width - x) / 16.0);
-        // Lit where the beam crosses them, glinting now and then.
-        let across = x - (zone.width * BEAM_AT + (-40.0 - y) * BEAM_SLOPE);
-        let lit = 0.75 + 2.2 * (-(across * across) / (2.0 * 75.0 * 75.0)).exp();
+        // Lit alike wherever they are, glinting now and then.
         let glint = {
             let s = 0.5 + 0.5 * (TAU * seed.glint.0 * tm + seed.glint.1).sin();
             0.5 + 0.5 * s * s * s
         };
         let depth = if seed.near { 0.16 } else { 0.07 + 0.3 * seed.z };
-        let base = (depth * lit * glint).min(0.85) * edge;
+        let base = (depth * LIGHT * glint).min(0.85) * edge;
         let tint = if seed.accent { 1.0 } else { 0.0 };
         let blur = if seed.near {
             0.8 + 1.4 * (seed.z - 0.9) / 0.1
@@ -437,7 +460,6 @@ mod tests {
             drift,
             appear: 1.0,
             landing: None,
-            beam: 1.0,
         }
     }
 
@@ -446,7 +468,6 @@ mod tests {
             drift,
             appear: 1.0,
             landing: Some(since),
-            beam: 1.0,
         }
     }
 
@@ -619,6 +640,83 @@ mod tests {
         let z = zone(800.0, 68.0);
         let late = landing_at(1.2, END_SECS - GLOW - 0.2);
         assert!(list(&late, z).iter().any(|mote| mote.alpha > 0.0));
+    }
+
+    /// The relative luminance of `0xRRGGBB`.
+    fn luminance(hex: u32) -> f32 {
+        let [r, g, b] = [16, 8, 0].map(|shift| ((hex >> shift) & 0xff) as u8);
+        bt_core::LinearRgba::from_srgb(r, g, b).luminance()
+    }
+
+    #[test]
+    fn on_black_a_mote_is_drawn_as_the_scene_says() {
+        for ink in [0xd8d9dd, 0x7a9cc6, 0xffffff, 0x404040] {
+            for step in 0..=20 {
+                let alpha = step as f32 / 20.0;
+                let drawn = opacity_over(alpha, luminance(ink), 0.0);
+                assert!((drawn - alpha).abs() < 1e-4, "#{ink:06x} {alpha}: {drawn}");
+            }
+        }
+    }
+
+    #[test]
+    fn on_a_light_ground_a_mote_stands_out_as_much_as_on_black() {
+        // The light themes' text on their grounds. Drawn there, a mote is as
+        // far from the ground in lightness as it is over black in an ink as far
+        // from black — the blend worked out here, not by the function — and
+        // a little less than the dark theme's own dust, as their text is a
+        // little nearer its ground (82 and 79 points of lightness to 88).
+        let apart = |alpha: f32, ink: f32, ground: f32| {
+            (lightness(alpha * ink + (1.0 - alpha) * ground) - lightness(ground)).abs()
+        };
+        let dark_ink = luminance(0xd8d9dd);
+        for (ink, ground) in [(0x24262c, 0xf5f6f8), (0x2a2520, 0xf3efe7)] {
+            let (ink, ground) = (luminance(ink), luminance(ground));
+            let mirror = luminance_at((lightness(ink) - lightness(ground)).abs());
+            let mut last = 0.0;
+            for step in 1..20 {
+                let alpha = step as f32 / 20.0;
+                let drawn = opacity_over(alpha, ink, ground);
+                assert!(drawn > alpha && drawn <= 1.0, "{alpha}: {drawn}");
+                assert!(drawn > last, "the order is kept: {alpha}");
+                last = drawn;
+                let here = apart(drawn, ink, ground);
+                let mirrored = apart(alpha, mirror, 0.0);
+                assert!(
+                    (here - mirrored).abs() < 0.1,
+                    "{alpha}: {here} vs {mirrored}"
+                );
+                let dark = apart(alpha, dark_ink, 0.0);
+                assert!(
+                    here <= dark && here >= dark * 0.85,
+                    "{alpha}: {here} vs the dark {dark}"
+                );
+            }
+            assert!(
+                opacity_over(0.0, ink, ground) < 1e-6,
+                "nothing stays nothing"
+            );
+            assert!(
+                (opacity_over(1.0, ink, ground) - 1.0).abs() < 1e-4,
+                "the ink itself"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ink_the_grounds_own_colour_is_left_as_it_is() {
+        let grey = luminance(0x808080);
+        assert_eq!(opacity_over(0.3, grey, grey), 0.3);
+    }
+
+    #[test]
+    fn lightness_and_its_inverse_meet() {
+        for step in 0..=100 {
+            let l = step as f32;
+            assert!((lightness(luminance_at(l)) - l).abs() < 1e-3, "{l}");
+        }
+        assert_eq!(lightness(0.0), 0.0);
+        assert!((lightness(1.0) - 100.0).abs() < 1e-3);
     }
 
     #[test]

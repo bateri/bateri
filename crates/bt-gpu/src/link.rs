@@ -1986,12 +1986,11 @@ impl Core {
         }
         if scene.is_some_and(|scene| scene.dust.is_some()) {
             let theme = self.theme.get();
-            // The window is light when black reads better on it than white (the
-            // question the window's own appearance asks of the theme): the beam
-            // is then a white veil instead of a faint one of the text's colour.
-            let light = bt_core::contrast_ratio(theme.background, 0x00_00_00)
-                >= bt_core::contrast_ratio(theme.background, 0xff_ff_ff);
-            frame.set_dock_dust_tones(theme.foreground_linear(), theme.accent_linear(), light);
+            frame.set_dock_dust_tones(
+                theme.foreground_linear(),
+                theme.accent_linear(),
+                theme.background_linear(),
+            );
         }
     }
 

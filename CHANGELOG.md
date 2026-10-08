@@ -20,14 +20,14 @@ of every installed copy. A version without a section is not released.
   in Settings ▸ Motion ▸ Dock arrival (`[motion] dock_arrival` in
   `settings.toml`). `ripple` (the default): the dock's top line ripples faintly
   while the shell starts, the prompt mark drops onto it and a ring spreads from
-  where it lands. `dust`: specks of dust drift through a slanted beam of light
-  around the dock, then are drawn left to right onto the top line, which is
-  woven behind them. `type`: the dock rises a little, its lines are drawn from
-  the left and the folder and branch type themselves out. `off` keeps today's
-  dock. Nothing moves for the first moment, so a quick shell never flickers; a
-  shell that takes longer than three seconds gets the arrival anyway; pressing
-  a key, or leaving the window or tab, ends it at once; Reduce Motion turns it
-  into a short fade and the cursor motion setting `snap` turns it off.
+  where it lands. `dust`: specks of dust drift around the dock, then are
+  drawn left to right onto the top line, which is woven behind them. `type`:
+  the dock rises a little, its lines are drawn from the left and the folder and
+  branch type themselves out. `off` keeps today's dock. Nothing moves for the
+  first moment, so a quick shell never flickers; a shell that takes longer than
+  three seconds gets the arrival anyway; pressing a key, or leaving the window
+  or tab, ends it at once; Reduce Motion turns it into a short fade and the
+  cursor motion setting `snap` turns it off.
 
 ### Changed
 

@@ -67,6 +67,14 @@ impl LinearRgba {
     pub const fn to_array(self) -> [f32; 4] {
         self.0
     }
+
+    /// Its relative luminance (WCAG 2), `0..=1` — [`luminance`]'s measure of a
+    /// color already linear, so a drawing that weighs colors by how bright they
+    /// look weighs them as the theme's choices are made.
+    pub const fn luminance(self) -> f32 {
+        let [r, g, b, _] = self.0;
+        weigh(r as f64, g as f64, b as f64) as f32
+    }
 }
 
 /// A color theme: the **single source**.
@@ -753,7 +761,12 @@ pub(crate) const fn luminance(color: Rgb) -> f64 {
         // audit: `u8 as usize` is 0..=255 and the table has 256 entries.
         SRGB_LINEAR[c as usize] as f64
     }
-    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+    weigh(channel(color.r), channel(color.g), channel(color.b))
+}
+
+/// The luminance of three linear channels: WCAG 2's weights, written once.
+const fn weigh(r: f64, g: f64, b: f64) -> f64 {
+    0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
 /// The contrast ratio between two colors (WCAG 2), `1..=21` — whichever
@@ -1225,6 +1238,10 @@ mod tests {
                 (got - expected).abs() < 1e-6,
                 "#{hex:06x}: {got} ≠ {expected}"
             );
+            // A linear color weighs the same, to `f32`'s precision.
+            let [r, g, b] = [16, 8, 0].map(|shift| ((hex >> shift) & 0xff) as u8);
+            let linear = f64::from(LinearRgba::from_srgb(r, g, b).luminance());
+            assert!((linear - expected).abs() < 1e-6, "#{hex:06x}: {linear}");
         }
         assert!((contrast(0xffffff, 0x000000) - 21.0).abs() < 1e-6);
         assert_eq!(contrast(0xd6b16a, 0x000000), contrast(0x000000, 0xd6b16a));
