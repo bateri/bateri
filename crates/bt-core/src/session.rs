@@ -5061,6 +5061,12 @@ impl Session {
                 bytes,
             );
         }
+        // The screen the replay left: a carried session can be on the
+        // alternate screen already (vim, or an agent's full-screen interface,
+        // across an update). Published at birth rather than left to the first
+        // content frame, because a tab in the background draws none and its
+        // ring reads this ([`Session::alt_screen`]).
+        let alt_at_birth = term.lock().mode().contains(TermMode::ALT_SCREEN);
         // The journal's base is what this `Term` starts from: the bytes just
         // replayed, at the same size and options — moved, not copied.
         if let Some(journal) = &journal {
@@ -5099,8 +5105,8 @@ impl Session {
             adapter,
             reader: Mutex::new(None),
             shell,
-            // There is no alternate screen at opening; the first content frame will write it anyway.
-            alt_screen: AtomicBool::new(false),
+            // From then on the content frames write it.
+            alt_screen: AtomicBool::new(alt_at_birth),
             caret_in_dock: AtomicBool::new(false),
             search: Mutex::new(SearchSlot::default()),
             // Nothing wanted at opening: the shell asks when a bar is wide.
@@ -12327,6 +12333,23 @@ mod tests {
         let mut dock = DockState::default();
         session.dock_state(&mut dock);
         assert_eq!(dock, DockState::default());
+    }
+
+    #[test]
+    fn a_replayed_alternate_screen_is_known_before_any_frame() {
+        // A tab carried across an update in the background draws no frame,
+        // yet its ring asks whether a full-screen program is open.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(sh("sleep 5"), 40);
+        options.replay = Some(b"OLD\r\n\x1b[?1049hVIM".to_vec());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        assert!(session.alt_screen(), "on the alternate screen from birth");
+        session.shutdown();
+
+        let options = test_options(sh("sleep 5"), 40);
+        let session = Session::spawn(options, wake as Arc<dyn Wake>).unwrap();
+        assert!(!session.alt_screen(), "a fresh shell is on the main screen");
+        session.shutdown();
     }
 
     /// The fake shell's output once `until` is on screen, then the quit-time
