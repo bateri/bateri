@@ -580,6 +580,27 @@ pub struct Cursor {
     /// handover hold remains. In all four the clock goes out and the window
     /// returns to zero frames when idle.
     pub next_tick: Option<Duration>,
+    /// Whether the shell has given its **first** OSC 133 mark: `true` exactly
+    /// when [`Session::shell_state`] is `Some`, read in the same leaf-lock round
+    /// as the caret's owner and the band's row count.
+    ///
+    /// The one fact that tells "the shell is still starting" from "the shell
+    /// is at a prompt" before the first prompt has drawn anything. It is **not**
+    /// read off [`DockStatus`]: `Idle` there means both "no mirror ever came" and
+    /// "`line-finish` came", so a pane between two commands would look like a
+    /// pane that has just been born.
+    ///
+    /// **It stays `true` between commands** — the state is `None` only until the
+    /// first mark and never returns to it — so it answers "has this shell ever
+    /// spoken", not "is it at a prompt now" (that is [`ShellState::phase`]). It
+    /// is also true in a window with no dock, where nothing reads it; and false
+    /// forever in a shell without our integration, which gives no marks.
+    ///
+    /// **It flips on the mark, not on what the prompt shows.** zsh's wrapper
+    /// prints the prompt-start mark first, then the working directory (OSC 7),
+    /// then forks `git` for the branch: a frame drawn right after the flip can
+    /// still have an empty path, and the branch arrives later still.
+    pub shell_ready: bool,
 }
 
 impl Cursor {
@@ -5294,7 +5315,17 @@ impl Session {
         // **The raw program, its guide bar and the upload row are from this round
         // too**, for the same reason: the band's state and the caret's owner must
         // see one ledger.
-        let (suppressed_block, caret, needed_rows, end_left, remote, raw, transfer, program) = {
+        let (
+            suppressed_block,
+            caret,
+            needed_rows,
+            end_left,
+            remote,
+            raw,
+            transfer,
+            program,
+            shell_ready,
+        ) = {
             let now = Instant::now();
             let mut log = lock(&self.shell);
             let end_left = log.expire_end(now);
@@ -5312,6 +5343,10 @@ impl Session {
                 log.raw_active(),
                 log.context.transfer.is_some(),
                 log.context.program.is_some(),
+                // **The first mark, from this round too**: the same field
+                // `Session::shell_state` reads, so the two never disagree, and
+                // no extra lock turn is opened for it.
+                log.local.state.is_some(),
             )
         };
         blocks.anchors.clear();
@@ -6481,6 +6516,7 @@ impl Session {
             // this frame is known only there and the clock's stopping condition is
             // exactly that.
             next_tick: None,
+            shell_ready,
         };
         drop(term);
         // **The stale hover drops here**, after the `Term` lock (a leaf lock does
@@ -12877,6 +12913,54 @@ mod tests {
             Duration::from_secs(5),
             || session.shell_state() == Some(finished),
         );
+    }
+
+    #[test]
+    fn the_first_mark_flips_shell_ready_and_it_stays() {
+        // The dock arrival waits on this one bool. The fake shell stops at a
+        // `read` between every step, so each state is observed before the next
+        // mark exists — no sleeps, no race with the scanner: the text after a mark
+        // is on the grid only once the mark has been scanned.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf 'BOOT'; read x; \
+             printf '\\033]133;A\\007PROMPT'; read x; \
+             printf '\\033]133;C\\007RUN'; read x; \
+             printf '\\033]133;D;0\\007DONE'; read x; \
+             printf '\\033]133;A\\007AGAIN'; sleep 5",
+            Arc::clone(&wake),
+        );
+        // Before any mark: the shell is still starting.
+        wait_text(&session, "BOOT");
+        assert!(!cursor_now(&session).shell_ready, "before the first mark");
+        assert_eq!(session.shell_state(), None);
+        session.write(b"\r");
+
+        // The first `A` flips it, and the read is the same fact `shell_state` gives.
+        wait_text(&session, "PROMPT");
+        assert!(cursor_now(&session).shell_ready, "after the first A");
+        assert!(session.shell_state().is_some());
+        session.write(b"\r");
+
+        // A command running, finishing and the next prompt: the flag never goes
+        // back, whatever phase the shell is in.
+        for (text, phase) in [
+            ("RUN", ShellPhase::Running),
+            ("DONE", ShellPhase::Finished),
+            ("AGAIN", ShellPhase::Prompt),
+        ] {
+            wait_text(&session, text);
+            assert!(cursor_now(&session).shell_ready, "{text}");
+            assert_eq!(
+                session.shell_state().map(|s| s.phase),
+                Some(phase),
+                "{text}"
+            );
+            if text != "AGAIN" {
+                session.write(b"\r");
+            }
+        }
+        session.shutdown();
     }
 
     /// A **anchored prompt** to go into `printf`: OSC 133 `A` (identified), `$ `

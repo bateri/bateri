@@ -3452,6 +3452,9 @@ mod tests {
             // module's cursor tests do not draw it.
             history: 0,
             resting_fill: 0,
+            // The shell's first mark is the dock arrival's question, not this
+            // list's.
+            shell_ready: true,
         }
     }
 

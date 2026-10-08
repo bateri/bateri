@@ -763,6 +763,55 @@ impl Erase {
     }
 }
 
+/// `[motion] dock_arrival`: how the dock arrives when a new shell gives its
+/// first prompt.
+///
+/// [`Keypress`]'s sibling, with the same rules: only drawable names, the raw
+/// value to `bt-gpu` — the reduction by `cursor_motion = "snap"` and Reduce Motion
+/// is there, next to the other motion keys.
+///
+/// The default is **[`Self::Ripple`]**: the user explicitly asked for the arrival
+/// to be visible out of the box, not behind a setting.
+///
+/// A change reaches open panes at save time, but a scene already playing is
+/// finished instead of switched; the new kind plays at the next shell's birth.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DockArrival {
+    /// The dock is there from the start, as it always was: the `›` and the
+    /// cursor stand while the shell starts, and the path and branch fill in
+    /// with the first prompt.
+    Off,
+    /// Nothing while the shell starts; at the first prompt the dock rises a
+    /// little, its lines draw from the left, the `›` pops in, the path and branch
+    /// type themselves out and the cursor comes last.
+    Type,
+    /// Specks of dust drift in a slanted beam of light around the dock while the
+    /// shell starts; at the first prompt they are drawn left to right onto the
+    /// top line, which is woven behind them.
+    Dust,
+    /// The top line ripples faintly while the shell starts; at the first prompt
+    /// the `›` drops, a ring spreads from where it lands and fades, and the line
+    /// settles flat.
+    #[default]
+    Ripple,
+}
+
+impl DockArrival {
+    /// The single list of spellings in the settings file, in the order the
+    /// settings window lists them.
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("off", Self::Off),
+        ("type", Self::Type),
+        ("dust", Self::Dust),
+        ("ripple", Self::Ripple),
+    ];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[shell] integration`: whether our wrapper is installed into the shell.
 ///
 /// The key's meaning is narrow and deliberately so: **"don't install the
@@ -1301,6 +1350,9 @@ pub struct Settings {
     pub keypress: Keypress,
     /// `[motion] erase`: the effect of a glyph erased in the dock.
     pub erase: Erase,
+    /// `[motion] dock_arrival`: how the dock arrives at a new shell's first
+    /// prompt ([`DockArrival`]).
+    pub dock_arrival: DockArrival,
     /// `[shell] integration`: whether the shell wrapper is installed. Takes effect
     /// **in the next session** ([`ShellIntegration`]).
     pub shell_integration: ShellIntegration,
@@ -1362,6 +1414,7 @@ impl Default for Settings {
             smooth_scroll: SmoothScroll::default(),
             keypress: Keypress::default(),
             erase: Erase::default(),
+            dock_arrival: DockArrival::default(),
             shell_integration: ShellIntegration::default(),
             confirm_close: ConfirmClose::default(),
             restore_windows: RestoreWindows::default(),
@@ -1447,6 +1500,7 @@ pub enum SettingsEdit {
     SmoothScroll(SmoothScroll),
     Keypress(Keypress),
     Erase(Erase),
+    DockArrival(DockArrival),
     ShellIntegration(ShellIntegration),
     /// Shell ▸ Mark … as ▸: the `[remote] hosts` edit that makes
     /// `host`'s mark `mark`. Not a single key's value but the array's entries —
@@ -1533,6 +1587,7 @@ impl SettingsEdit {
             Self::SmoothScroll(_) => ("motion", "smooth_scroll", "motion.smooth_scroll"),
             Self::Keypress(_) => ("motion", "keypress", "motion.keypress"),
             Self::Erase(_) => ("motion", "erase", "motion.erase"),
+            Self::DockArrival(_) => ("motion", "dock_arrival", "motion.dock_arrival"),
             Self::ShellIntegration(_) => ("shell", "integration", "shell.integration"),
             Self::RemoteHostMark { .. } | Self::RemoteHostIntegration { .. } => {
                 ("remote", "hosts", "remote.hosts")
@@ -1575,6 +1630,7 @@ impl SettingsEdit {
             Self::SmoothScroll(smooth) => smooth.name().into(),
             Self::Keypress(keypress) => keypress.name().into(),
             Self::Erase(erase) => erase.name().into(),
+            Self::DockArrival(arrival) => arrival.name().into(),
             Self::ShellIntegration(integration) => integration.name().into(),
             // Not the array itself, but the written entry's `mark`.
             Self::RemoteHostMark { mark, .. } => mark.written().into(),
@@ -2169,6 +2225,16 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = motion.get("dock_arrival") {
+                    parsed.settings.dock_arrival = named_enum(
+                        text,
+                        item,
+                        "motion.dock_arrival",
+                        DockArrival::NAMES,
+                        fallback.dock_arrival,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("motion") => {
                 parsed.settings.cursor_motion = fallback.cursor_motion;
@@ -2176,6 +2242,7 @@ stats_interval = 3
                 parsed.settings.smooth_scroll = fallback.smooth_scroll;
                 parsed.settings.keypress = fallback.keypress;
                 parsed.settings.erase = fallback.erase;
+                parsed.settings.dock_arrival = fallback.dock_arrival;
             }
             None => {}
         }
@@ -2319,7 +2386,8 @@ stats_interval = 3
                 || self.reduce_motion != new.reduce_motion
                 || self.smooth_scroll != new.smooth_scroll
                 || self.keypress != new.keypress
-                || self.erase != new.erase,
+                || self.erase != new.erase
+                || self.dock_arrival != new.dock_arrival,
             caret: self.caret != new.caret || self.blink_interval != new.blink_interval,
             remote: self.remote_hosts != new.remote_hosts || self.remote_files != new.remote_files,
             stats: self.remote_stats != new.remote_stats,
@@ -4044,6 +4112,7 @@ mod tests {
             smooth_scroll: SmoothScroll::On,
             keypress: Keypress::Fade,
             erase: Erase::Recede,
+            dock_arrival: DockArrival::Ripple,
             shell_integration: ShellIntegration::Auto,
             confirm_close: ConfirmClose::Always,
             restore_windows: RestoreWindows::Off,
@@ -5628,6 +5697,142 @@ found 1.5; using 0.1"
     }
 
     #[test]
+    fn dock_arrival_is_read() {
+        // `ripple` if not in the file: the arrival must be visible out of the box.
+        assert_eq!(clean("").dock_arrival, DockArrival::Ripple);
+        assert_eq!(DockArrival::default(), DockArrival::Ripple);
+        for &(name, arrival) in DockArrival::NAMES {
+            let table = clean(&format!("[motion]\ndock_arrival = \"{name}\"\n"));
+            assert_eq!(table.dock_arrival, arrival, "{name}");
+            let inline = clean(&format!("motion = {{ dock_arrival = \"{name}\" }}\n"));
+            assert_eq!(inline.dock_arrival, arrival, "{name}");
+            assert_eq!(arrival.name(), name);
+        }
+        // The four spellings, in the order the settings window lists them.
+        assert_eq!(
+            DockArrival::NAMES
+                .iter()
+                .map(|&(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["off", "type", "dust", "ripple"]
+        );
+        // Neighbors don't override each other.
+        let all = clean("[motion]\nkeypress = \"off\"\ndock_arrival = \"dust\"\nerase = \"off\"\n");
+        assert_eq!(
+            (all.keypress, all.dock_arrival, all.erase),
+            (Keypress::Off, DockArrival::Dust, Erase::Off)
+        );
+    }
+
+    #[test]
+    fn unrecognized_dock_arrival_keeps_its_own_key() {
+        // `Ripple` and `fizz` are in no list: a name that does nothing when
+        // selected isn't accepted.
+        for (value, found) in [
+            ("\"fizz\"", "\"fizz\""),
+            ("\"Ripple\"", "\"Ripple\""),
+            ("1", "an integer"),
+            ("true", "a boolean"),
+        ] {
+            let text = format!("[motion]\ncursor_motion = \"snap\"\ndock_arrival = {value}\n");
+            let (settings, diagnostic) = rejected(&text);
+            assert_eq!(
+                settings,
+                Settings {
+                    cursor_motion: CursorMotion::Snap,
+                    ..Settings::default()
+                },
+                "{value}"
+            );
+            assert_eq!(diagnostic.key, Some("motion.dock_arrival"), "{value}");
+            assert_eq!(diagnostic.line, Some(3), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`motion.dock_arrival` must be \"off\", \"type\", \"dust\" or \
+                     \"ripple\", found {found}; using \"ripple\""
+                )
+            );
+        }
+        // The value that stands in at save time is the **current** setting, not
+        // the default — in the key's own arm and in the not-a-table arm.
+        let current = Settings {
+            dock_arrival: DockArrival::Type,
+            ..Settings::default()
+        };
+        let parsed = Settings::parse_keeping("[motion]\ndock_arrival = \"x\"\n", &current)
+            .expect("parseable text");
+        assert_eq!(parsed.settings.dock_arrival, DockArrival::Type);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert_eq!(
+            parsed.diagnostics[0].message,
+            "`motion.dock_arrival` must be \"off\", \"type\", \"dust\" or \"ripple\", \
+             found \"x\"; using \"type\""
+        );
+        let parsed = Settings::parse_keeping("motion = 5\n", &current).expect("parseable text");
+        assert_eq!(parsed.settings.dock_arrival, DockArrival::Type);
+    }
+
+    #[test]
+    fn dock_arrival_changes_are_motion_changes() {
+        // It goes to the link with the rest of `[motion]`, so in the `motion`
+        // arm; it mustn't move the session or the font. Alone, the key is enough.
+        let before = clean("");
+        assert_eq!(
+            before.changes(&clean("[motion]\ndock_arrival = \"off\"\n")),
+            Changes {
+                terminal: false,
+                font: false,
+                motion: true,
+                caret: false,
+                remote: false,
+                stats: false,
+                scrollbar: false,
+                content_edge: false,
+            }
+        );
+        // The same value again is no change.
+        assert_eq!(
+            before.changes(&clean("[motion]\ndock_arrival = \"ripple\"\n")),
+            Changes::default()
+        );
+    }
+
+    #[test]
+    fn a_dock_arrival_edit_writes_only_its_line() {
+        // A key we don't recognize and a comment beside the neighbor stay where
+        // they are; the new key lands inside the section it belongs to.
+        let text = "[motion]\nkeypress = \"pop\"  # my pick\nfuture = true\n\n[notes]\nx = 1\n";
+        let written = Settings::with_edit(text, &SettingsEdit::DockArrival(DockArrival::Dust))
+            .expect("writable text");
+        assert_eq!(
+            written,
+            "[motion]\nkeypress = \"pop\"  # my pick\nfuture = true\ndock_arrival = \"dust\"\n\n\
+             [notes]\nx = 1\n"
+        );
+        // An existing line is rewritten in place, its comment kept.
+        let written = Settings::with_edit(
+            "[motion]\ndock_arrival = \"type\" # slow shell\nerase = \"off\"\n",
+            &SettingsEdit::DockArrival(DockArrival::Off),
+        )
+        .expect("writable text");
+        assert_eq!(
+            written,
+            "[motion]\ndock_arrival = \"off\" # slow shell\nerase = \"off\"\n"
+        );
+        // The inline-table spelling survives.
+        let written = Settings::with_edit(
+            "motion = { erase = \"off\", dock_arrival = \"type\" }\n",
+            &SettingsEdit::DockArrival(DockArrival::Ripple),
+        )
+        .expect("writable text");
+        assert_eq!(
+            written,
+            "motion = { erase = \"off\", dock_arrival = \"ripple\" }\n"
+        );
+    }
+
+    #[test]
     fn unrecognized_smooth_scroll_keeps_its_own_key() {
         // The same rule as `cursor_motion`: only its own key is affected, with a
         // diagnostic beside it.
@@ -6229,6 +6434,7 @@ cursor = \"spring\"
             SettingsEdit::SmoothScroll(smooth) => settings.smooth_scroll = smooth,
             SettingsEdit::Keypress(keypress) => settings.keypress = keypress,
             SettingsEdit::Erase(erase) => settings.erase = erase,
+            SettingsEdit::DockArrival(arrival) => settings.dock_arrival = arrival,
             SettingsEdit::ShellIntegration(integration) => {
                 settings.shell_integration = integration;
             }
@@ -6302,6 +6508,7 @@ cursor = \"spring\"
             SettingsEdit::SmoothScroll(SmoothScroll::Off),
             SettingsEdit::Keypress(Keypress::Off),
             SettingsEdit::Erase(Erase::Off),
+            SettingsEdit::DockArrival(DockArrival::Dust),
             SettingsEdit::ShellIntegration(ShellIntegration::Blocks),
             SettingsEdit::RemoteHostMark {
                 host: "deploy@prod".to_owned(),
@@ -6868,6 +7075,13 @@ cursor = \"spring\"
             "motion",
             "smooth_scroll",
             |s| s.smooth_scroll,
+        );
+        check(
+            DockArrival::NAMES,
+            DockArrival::name,
+            "motion",
+            "dock_arrival",
+            |s| s.dock_arrival,
         );
         check(
             ShellIntegration::NAMES,

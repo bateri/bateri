@@ -2222,6 +2222,8 @@ pub(crate) fn cursor_at(col: u16, text: LinearRgba) -> Cursor {
         // No scrollback: the scroll bar is not drawn and these tests ask about cells.
         history: 0,
         resting_fill: 0,
+        // The shell's first mark is the dock arrival's question; these tests ask about cells.
+        shell_ready: true,
     }
 }
 
