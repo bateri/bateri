@@ -1270,7 +1270,10 @@ impl Chip {
             text.setTextColor(Some(&Tint::of(color, 1.0).color()));
             text.setStringValue(&NSString::from_str(title));
         }
-        let natural = text.intrinsicContentSize();
+        // The frame the whole title draws in, not `intrinsicContentSize`:
+        // that is the alignment rect, 2 pt in from each side, and a frame
+        // that narrow truncates the text it was measured for to "…".
+        let natural = text.fittingSize();
         let inner = (size.width - 2.0 * pad).max(0.0);
         let (glyph_x, text_x, text_width) = title_row(inner, natural.width, indicator.is_some());
         text.setFrame(NSRect::new(
@@ -1312,7 +1315,9 @@ impl Chip {
             field.setStringValue(&NSString::from_str(hint));
         }
         field.setTextColor(Some(&Tint::of(palette.dim, 1.0).color()));
-        let natural = field.intrinsicContentSize();
+        // The drawing frame, as the title's (an alignment-rect width cut
+        // "⌘1" to "…").
+        let natural = field.fittingSize();
         let width = natural.width.ceil().min(CHIP_PAD);
         field.setFrame(NSRect::new(
             NSPoint::new(
