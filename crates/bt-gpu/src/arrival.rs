@@ -22,7 +22,8 @@
 //!   link is woken for them. Without the clock the cap would never fire: a link
 //!   asleep on a settled animation is not ticked again. **One calendar waits
 //!   with motion**: the ripple's top line is a wave that stirs from [`SHOW`]
-//!   until the prompt or the cap ([`Arrival::stirs`]). It is unsettled in
+//!   until the prompt or the cap ([`Arrival::stirs`]); so does the dust's
+//!   ([`dust`]), whose motes drift in a beam of light. It is unsettled in
 //!   that stretch — stopped by the cap, which arrives the scene — and only for
 //!   a pane someone is watching, so a window in the background still sleeps.
 //! - *Playing* (prompt, or [`CAP`] without one → the calendar's end): unsettled,
@@ -38,8 +39,11 @@
 
 use bt_core::{DockArrival, Keypress};
 
+pub(crate) mod dust;
+
 use crate::glyph_fx::Effect;
 use crate::motion::ease_axis;
+use dust::Dust;
 
 /// How long a new pane shows nothing before a waiting scene may start
 /// moving, seconds — **a chosen number, not a measured one**: a prompt that
@@ -135,6 +139,9 @@ enum Line {
     /// The wave draws it until the scene is over ([`WAVE_END`]); the dock's
     /// own line is held back meanwhile.
     Waved,
+    /// Woven behind the dust as it lands, left to right ([`dust::front_at`]);
+    /// the lit tip fades after it is whole.
+    Welded,
 }
 
 impl Line {
@@ -144,6 +151,7 @@ impl Line {
             Self::Whole => 0.0,
             Self::Drawn(start, length) => start + length,
             Self::Waved => WAVE_END,
+            Self::Welded => dust::END_SECS,
         }
     }
 }
@@ -164,6 +172,9 @@ struct Calendar {
     /// Whether the top line ripples: it waves while the shell starts and a
     /// ring spreads from the › when it speaks.
     wave: bool,
+    /// Whether dust drifts around the dock while the shell starts and is
+    /// pulled onto the top line when it speaks.
+    dust: bool,
     /// `(start, duration)` of the ›'s entrance.
     mark: (f32, f32),
     /// The first context letter's start, the step to the next column and one
@@ -183,6 +194,7 @@ const TYPED: Calendar = Calendar {
     band: 0.20,
     lines: [Line::Drawn(0.04, 0.24), Line::Drawn(0.09, 0.24)],
     wave: false,
+    dust: false,
     mark: (0.10, 0.24),
     letters: (0.16, 0.011, 0.17),
     caret: (0.06, 0.06),
@@ -199,9 +211,28 @@ const RIPPLED: Calendar = Calendar {
     band: 0.16,
     lines: [Line::Waved, Line::Drawn(0.12, 0.24)],
     wave: true,
+    dust: false,
     mark: (0.04, 0.24),
     letters: (0.20, 0.0, 0.22),
     caret: (0.02, 0.06),
+};
+
+/// What the dock does at the first prompt when dust has been drifting around
+/// it: the ground is there at once (the dust is pulled across it), the dust
+/// lands on the top line from left to right and the line is woven behind it,
+/// the › pops in as the first motes land, the second line is drawn from the
+/// left and the context row fades in all at once, the cursor just before it.
+const DUSTED: Calendar = Calendar {
+    entrance: Entrance::Pop,
+    letters_entrance: Entrance::Fade,
+    rise: false,
+    band: 0.001,
+    lines: [Line::Welded, Line::Drawn(0.30, 0.24)],
+    wave: false,
+    dust: true,
+    mark: (0.25, 0.16),
+    letters: (0.33, 0.0, 0.22),
+    caret: (-0.03, 0.06),
 };
 
 /// Reduce Motion: everything fades in together and nothing moves.
@@ -212,6 +243,7 @@ const REDUCED: Calendar = Calendar {
     band: 0.12,
     lines: [Line::Whole; 2],
     wave: false,
+    dust: false,
     mark: (0.0, 0.12),
     letters: (0.0, 0.0, 0.12),
     caret: (0.0, 0.09),
@@ -276,6 +308,10 @@ pub(crate) struct Scene {
     /// The top line as a wave, while the scene gives it one; the lines'
     /// `[0]` is `0` meanwhile so the dock's own line stays out of the way.
     pub(crate) wave: Option<Wave>,
+    /// The dust, while the scene has some: drifting while the shell starts,
+    /// pulled onto the top line once it has spoken. The lines' `[0]` is the
+    /// woven share meanwhile.
+    pub(crate) dust: Option<Dust>,
     letters: Letters,
 }
 
@@ -321,7 +357,7 @@ impl Scene {
     /// Everything held back: what the dock shows while the shell starts. A
     /// calendar that does not climb is not lowered either — the wave's line
     /// stands where the dock's will.
-    fn waiting(calendar: &Calendar, wave: Option<Wave>) -> Self {
+    fn waiting(calendar: &Calendar, wave: Option<Wave>, dust: Option<Dust>) -> Self {
         Self {
             rise: if calendar.rise { 1.0 } else { 0.0 },
             band: 0.0,
@@ -331,6 +367,7 @@ impl Scene {
             entrance: calendar.entrance,
             letter_entrance: calendar.letters_entrance,
             wave,
+            dust,
             letters: Letters::Hidden,
         }
     }
@@ -389,9 +426,14 @@ impl Arrival {
             return &REDUCED;
         }
         match self.kind {
-            // `dust` plays this calendar until it has its own.
-            DockArrival::Off | DockArrival::Type | DockArrival::Dust => &TYPED,
+            DockArrival::Off | DockArrival::Type => &TYPED,
             DockArrival::Ripple => &RIPPLED,
+            // A shell faster than the hold had no dust to gather: it plays
+            // the still entrance instead.
+            DockArrival::Dust => match self.arrived {
+                Some(arrived) if arrived - self.born < SHOW => &TYPED,
+                _ => &DUSTED,
+            },
         }
     }
 
@@ -407,13 +449,14 @@ impl Arrival {
         self.ended || (self.arrived.is_none() && !self.stirs())
     }
 
-    /// Whether a waiting scene is moving: its top line is a wave, the hold is
-    /// over and someone is watching. The cap ends it, by arriving the scene.
+    /// Whether a waiting scene is moving: its top line is a wave or dust drifts
+    /// around the dock, the hold is over and someone is watching. The cap ends
+    /// it, by arriving the scene.
     fn stirs(&self) -> bool {
         !self.ended
             && self.arrived.is_none()
             && self.active
-            && self.calendar().wave
+            && (self.calendar().wave || self.calendar().dust)
             && self.at >= self.born + SHOW
     }
 
@@ -573,6 +616,23 @@ impl Arrival {
         })
     }
 
+    /// The dust at the stamp the scene was stepped to, if the calendar has any
+    /// and it is time for it: none until the hold is over, and none for a
+    /// pane nobody watches. Once the shell has spoken the motes stop where they
+    /// were and are pulled onto the line.
+    fn dust(&self, calendar: &Calendar) -> Option<Dust> {
+        if !calendar.dust {
+            return None;
+        }
+        let Some(arrived) = self.arrived else {
+            let waited = ((self.at - self.born) as f32).max(0.0);
+            return (self.active && waited >= SHOW as f32).then(|| Dust::waiting(waited));
+        };
+        let since = ((self.at - arrived) as f32).max(0.0);
+        let waited = ((arrived - self.born) as f32).max(0.0);
+        Some(Dust::pulled(waited, since))
+    }
+
     /// The scene to draw, or `None` once it is over.
     pub(crate) fn scene(&self) -> Option<Scene> {
         if self.ended {
@@ -580,8 +640,9 @@ impl Arrival {
         }
         let calendar = self.calendar();
         let wave = self.wave(calendar);
+        let dust = self.dust(calendar);
         let Some(arrived) = self.arrived else {
-            return Some(Scene::waiting(calendar, wave));
+            return Some(Scene::waiting(calendar, wave, dust));
         };
         let since = ((self.at - arrived) as f32).max(0.0);
         let (at, step, span) = calendar.letters;
@@ -596,12 +657,14 @@ impl Arrival {
                 Line::Whole => 1.0,
                 Line::Drawn(start, length) => ease((since - start) / length),
                 Line::Waved => 0.0,
+                Line::Welded => dust::front_at(since),
             }),
             mark: unit((since - calendar.mark.0) / calendar.mark.1),
             caret: unit((since - self.caret_start()) / calendar.caret.1),
             entrance: calendar.entrance,
             letter_entrance: calendar.letters_entrance,
             wave,
+            dust,
             letters: if self.forced {
                 Letters::Settled
             } else {
@@ -821,10 +884,13 @@ mod tests {
             assert!(arrival.end_secs() <= longest(&TYPED), "{columns}");
             let ripple = rippling(PROMPT, columns);
             assert!(ripple.end_secs() <= longest(&RIPPLED), "{columns}");
+            let dusty = dusting(PROMPT, columns);
+            assert!(dusty.end_secs() <= longest(&DUSTED), "{columns}");
         }
         // The bound is the calendars', not the belt's: the belt never fires.
         assert!(longest(&TYPED) < ARRIVAL_MAX as f32);
         assert!(longest(&RIPPLED) < ARRIVAL_MAX as f32);
+        assert!(longest(&DUSTED) < ARRIVAL_MAX as f32);
         assert!(longest(&REDUCED) < ARRIVAL_MAX as f32);
     }
 
@@ -1074,12 +1140,15 @@ mod tests {
         reduced.advance(BORN + 1.0, true);
         assert!(reduced.settled(), "Reduce Motion adds no waiting motion");
         assert!(reduced.scene().expect("armed").wave.is_none());
-        for kind in [DockArrival::Type, DockArrival::Dust] {
-            let mut arrival = Arrival::new(kind, BORN, false);
-            arrival.advance(BORN + 1.0, true);
-            assert!(arrival.settled(), "{kind:?}");
-            assert!(arrival.scene().expect("armed").wave.is_none(), "{kind:?}");
-        }
+        let mut reduced = Arrival::new(DockArrival::Dust, BORN, true);
+        reduced.advance(BORN + 1.0, true);
+        assert!(reduced.settled(), "no dust under Reduce Motion");
+        assert!(reduced.scene().expect("armed").dust.is_none());
+        let mut still = Arrival::new(DockArrival::Type, BORN, false);
+        still.advance(BORN + 1.0, true);
+        assert!(still.settled());
+        let scene = still.scene().expect("armed");
+        assert!(scene.wave.is_none() && scene.dust.is_none());
     }
 
     #[test]
@@ -1211,6 +1280,201 @@ mod tests {
     fn the_ripple_scene_is_deterministic() {
         let mut one = rippling(1.2, 25);
         let mut two = rippling(1.2, 25);
+        for since in [0.0, 0.03, 0.11, 0.2, 0.37, 0.5] {
+            one.advance(BORN + 1.2 + since, true);
+            two.advance(BORN + 1.2 + since, true);
+            assert_eq!(one.scene(), two.scene(), "{since}");
+        }
+    }
+
+    // **The dust**: motes drift in a beam of light while the shell starts and
+    // are pulled onto the top line when it speaks.
+
+    /// A dust scene whose prompt came `prompt` seconds after birth, with
+    /// `columns` of context text noted. Stepped to the prompt.
+    fn dusting(prompt: f64, columns: u16) -> Arrival {
+        let mut arrival = Arrival::new(DockArrival::Dust, BORN, false);
+        arrival.advance(BORN + prompt, true);
+        arrival.arrive(BORN + prompt, true);
+        arrival.note_letters(columns);
+        arrival
+    }
+
+    /// The dust `since` seconds after a prompt at `prompt`.
+    fn dust_at(arrival: &mut Arrival, prompt: f64, since: f64) -> Dust {
+        arrival.advance(BORN + prompt + since, true);
+        arrival
+            .scene()
+            .expect("armed")
+            .dust
+            .expect("the dust is there")
+    }
+
+    #[test]
+    fn a_waiting_dust_scene_is_still_for_the_hold_then_stirs_until_the_cap() {
+        let mut arrival = Arrival::new(DockArrival::Dust, BORN, false);
+        assert!(arrival.settled(), "the hold is spent asleep");
+        assert!(!arrival.advance(BORN + SHOW - 0.01, true));
+        assert!(arrival.settled());
+        assert!(arrival.scene().expect("armed").dust.is_none());
+        assert!(arrival.advance(BORN + SHOW + 0.05, true), "the step drew");
+        assert!(!arrival.settled(), "drifting dust keeps the link awake");
+        let scene = arrival.scene().expect("armed");
+        let dust = scene.dust.expect("drifting");
+        assert!(dust.landing.is_none() && dust.appear > 0.0 && dust.appear < 1.0);
+        // The ground and the lines are held back: only the dust shows.
+        assert_eq!((scene.band, scene.lines), (0.0, [0.0; 2]));
+        assert!(scene.wave.is_none());
+        // It keeps drifting, and is whole once faded in.
+        arrival.advance(BORN + 1.0, true);
+        let later = arrival.scene().expect("armed").dust.expect("drifting");
+        assert_eq!((later.appear, later.beam), (1.0, 1.0));
+        assert!(later.drift > dust.drift);
+        assert!(!arrival.settled());
+        // The cap arrives the scene: the motes stop where they were then.
+        arrival.advance(BORN + CAP, true);
+        assert!(!arrival.settled(), "the arrival plays");
+        let forced = arrival.scene().expect("armed").dust.expect("pulled");
+        assert_eq!((forced.drift, forced.landing), (CAP as f32, Some(0.0)));
+    }
+
+    #[test]
+    fn the_motes_stop_drifting_where_the_prompt_found_them() {
+        let mut arrival = dusting(1.2, 20);
+        let first = dust_at(&mut arrival, 1.2, 0.0);
+        assert_eq!(first.landing, Some(0.0));
+        assert!((first.drift - 1.2).abs() < 1e-5, "{}", first.drift);
+        for since in [0.05, 0.2, 0.4, 0.6] {
+            let dust = dust_at(&mut arrival, 1.2, since);
+            assert_eq!(dust.drift, first.drift, "{since}");
+            assert_eq!(dust.landing, Some(since as f32));
+        }
+    }
+
+    #[test]
+    fn the_line_is_woven_left_to_right_and_whole_when_the_last_mote_lands() {
+        let mut arrival = dusting(1.2, 20);
+        arrival.advance(BORN + 1.2, true);
+        let first = arrival.scene().expect("armed");
+        assert_eq!(first.lines, [0.0; 2], "no line before the first lands");
+        let mut last = 0.0;
+        let mut whole_at = None;
+        let mut since = 0.0;
+        while arrival.is_armed() {
+            since += 0.004;
+            arrival.advance(BORN + 1.2 + since, true);
+            let Some(scene) = arrival.scene() else { break };
+            assert!(scene.lines[0] >= last, "the front only moves right");
+            assert_eq!(scene.lines[0], dust::front_at(since as f32), "{since}");
+            last = scene.lines[0];
+            if last >= 1.0 && whole_at.is_none() {
+                whole_at = Some(since);
+            }
+        }
+        let whole = whole_at.expect("the line was woven");
+        assert!(
+            (whole - f64::from(dust::landing(1.0, 0.0))).abs() < 0.01,
+            "whole at {whole}"
+        );
+        assert!(arrival.scene().is_none() && arrival.settled());
+    }
+
+    #[test]
+    fn the_dust_plays_its_own_calendar() {
+        let mut arrival = dusting(1.2, 20);
+        let early = {
+            arrival.advance(BORN + 1.2 + 0.01, true);
+            arrival.scene().expect("armed")
+        };
+        assert_eq!(
+            (early.entrance, early.letter_entrance),
+            (Entrance::Pop, Entrance::Fade)
+        );
+        assert_eq!(early.rise, 0.0, "the dust does not climb");
+        assert_eq!(early.band, 1.0, "the ground is there at once");
+        assert_eq!(early.mark, 0.0, "the › waits for the first landings");
+        assert_eq!(early.caret, 0.0);
+        arrival.advance(BORN + 1.2 + 0.31, true);
+        let middle = arrival.scene().expect("armed");
+        assert!(middle.mark > 0.0, "{middle:?}");
+        assert!(middle.lines[1] > 0.0, "the second line starts at 300 ms");
+        assert_eq!(middle.letter(0), 0.0, "the context row starts at 330 ms");
+        assert!(
+            middle.caret > 0.0,
+            "the cursor starts at 300 ms: {middle:?}"
+        );
+        arrival.advance(BORN + 1.2 + 0.4, true);
+        let late = arrival.scene().expect("armed");
+        assert!(late.letter(0) > 0.0 && late.letter(0) < 1.0, "{late:?}");
+        assert_eq!(late.letter(0), late.letter(19), "all at once");
+        assert!(late.lines[1] > 0.0);
+        assert!(run_from(&mut arrival, BORN + 1.2) <= ARRIVAL_MAX);
+        assert!(arrival.settled());
+    }
+
+    #[test]
+    fn a_dust_scene_plays_to_the_end_inside_the_maximum_for_any_text() {
+        for columns in [0, 1, 12, LETTER_CAP, u16::MAX] {
+            let mut arrival = dusting(1.2, columns);
+            assert!(!arrival.settled());
+            let took = run_from(&mut arrival, BORN + 1.2);
+            assert!(took <= ARRIVAL_MAX + 1.0 / 120.0, "{columns}: {took}s");
+            assert!(arrival.settled());
+        }
+        let mut forced = Arrival::new(DockArrival::Dust, BORN, false);
+        forced.advance(BORN + CAP, true);
+        assert!(run_from(&mut forced, BORN + CAP) <= ARRIVAL_MAX);
+    }
+
+    #[test]
+    fn a_shell_faster_than_the_hold_gets_the_still_entrance() {
+        let mut fast = dusting(0.1, 20);
+        fast.advance(BORN + 0.1, true);
+        let scene = fast.scene().expect("armed");
+        assert!(scene.dust.is_none(), "no dust to gather");
+        assert_eq!(scene.rise, 1.0, "the type entrance climbs");
+        assert_eq!(scene.letter_entrance, Entrance::Pop);
+        assert!(run_from(&mut fast, BORN + 0.1) <= ARRIVAL_MAX);
+        // Just past the hold the dust is there.
+        let slow = dusting(SHOW + 0.01, 20);
+        assert!(slow.scene().expect("armed").dust.is_some());
+    }
+
+    #[test]
+    fn the_dust_keeps_its_opacity_across_the_prompt() {
+        let mut arrival = Arrival::new(DockArrival::Dust, BORN, false);
+        arrival.advance(BORN + 0.25, true);
+        let before = arrival.scene().expect("armed").dust.expect("drifting");
+        assert!(before.appear > 0.0 && before.appear < 1.0);
+        arrival.arrive(BORN + 0.25, true);
+        let at = arrival.scene().expect("armed").dust.expect("pulled");
+        assert_eq!(at.appear, before.appear, "the prompt moved the opacity");
+        assert_eq!(at.beam, before.beam);
+        let mut last = at.appear;
+        for step in 1..=10 {
+            let dust = dust_at(&mut arrival, 0.25, f64::from(step) * 0.01);
+            assert!(dust.appear >= last);
+            last = dust.appear;
+        }
+        // The beam goes out within a third of a second of the arrival.
+        let gone = dust_at(&mut arrival, 0.25, 0.33);
+        assert_eq!(gone.beam, 0.0);
+    }
+
+    #[test]
+    fn a_pane_nobody_watches_does_not_drift_its_dust() {
+        let mut arrival = Arrival::new(DockArrival::Dust, BORN, false);
+        assert!(!arrival.advance(BORN + 1.0, false));
+        assert!(arrival.settled(), "an unwatched pane sleeps");
+        assert!(arrival.scene().expect("armed").dust.is_none());
+        assert!(arrival.advance(BORN + 1.1, true));
+        assert!(!arrival.settled(), "watched from now on: it drifts");
+    }
+
+    #[test]
+    fn the_dust_scene_is_deterministic() {
+        let mut one = dusting(1.2, 25);
+        let mut two = dusting(1.2, 25);
         for since in [0.0, 0.03, 0.11, 0.2, 0.37, 0.5] {
             one.advance(BORN + 1.2 + since, true);
             two.advance(BORN + 1.2 + since, true);

@@ -1161,8 +1161,8 @@ impl Motion {
     /// sleep in the middle of the band's growth and the grid and the band would freeze
     /// halfway. The dock's arrival is the fifth: a scene that is playing must keep
     /// the link awake, one that is waiting is settled and the clock wakes it
-    /// ([`Motion::arrival_deadline`]) — except a waiting wave, which moves from the
-    /// end of the hold to the cap and is not ([`Arrival::settled`]). The timed run's gate
+    /// ([`Motion::arrival_deadline`]) — except a waiting wave or dust, which move from
+    /// the end of the hold to the cap and are not ([`Arrival::settled`]). The timed run's gate
     /// (`Verdict::MotionUnsettled`) reads this too.
     pub(crate) fn settled(&self) -> bool {
         self.cursor_settled()

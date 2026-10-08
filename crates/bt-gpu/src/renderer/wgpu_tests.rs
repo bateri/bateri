@@ -1367,6 +1367,233 @@ fn a_waiting_ripple_draws_its_line_and_nothing_else() {
     );
 }
 
+/// The dust scene: `since` seconds after a prompt at 1.2 s (`waiting` → that
+/// long after birth, before any prompt).
+fn dust_scene(since: f64, waiting: bool) -> crate::arrival::Scene {
+    use crate::arrival::Arrival;
+    let mut arrival = Arrival::new(bt_core::DockArrival::Dust, 10.0, false);
+    if waiting {
+        arrival.advance(10.0 + since, true);
+    } else {
+        arrival.advance(11.2, true);
+        arrival.arrive(11.2, true);
+        arrival.advance(11.2 + since, true);
+    }
+    arrival.scene().expect("the scene is still armed")
+}
+
+/// How much of the dock's ground the scene shows.
+fn scene_band(scene: crate::arrival::Scene) -> f32 {
+    scene.band
+}
+
+/// `scene` with its dust changed by `change`.
+fn dust_changed(
+    mut scene: crate::arrival::Scene,
+    change: impl FnOnce(crate::arrival::dust::Dust) -> crate::arrival::dust::Dust,
+) -> crate::arrival::Scene {
+    scene.dust = Some(change(scene.dust.expect("the scene has dust")));
+    scene
+}
+
+/// [`waving_dock_frame`] with the dust's colours: white motes, the accent.
+fn dusting_dock_frame(m: CellMetrics, edge: u32, scene: Option<crate::arrival::Scene>) -> Frame {
+    let mut frame = waving_dock_frame(m, edge, scene);
+    frame.set_dock_dust_tones(WHITE, ACCENT, false);
+    frame
+}
+
+/// The same pixels, window by window: how many of `a`'s and `b`'s differ in
+/// `rows` (all columns).
+fn differing_in(a: &[u8], b: &[u8], edge: u32, rows: std::ops::Range<usize>) -> usize {
+    rows.flat_map(|y| (0..edge as usize).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixel_at(a, edge as usize, x, y) != pixel_at(b, edge as usize, x, y))
+        .count()
+}
+
+#[test]
+fn waiting_dust_paints_inside_its_zone_and_nowhere_else() {
+    // The ground is held back while the shell starts, so what is on the pixels
+    // is the dust: motes in the zone, from `ABOVE_PT` above the dock to its
+    // floor. The beam is left out (it reaches higher than the motes).
+    const EDGE: u32 = 256;
+    let w = Renderer::new();
+    let m = flush_left(w.cell_metrics(1.0));
+    let scene = dust_changed(dust_scene(1.5, true), |dust| crate::arrival::dust::Dust {
+        beam: 0.0,
+        ..dust
+    });
+    let frame = dusting_dock_frame(m, EDGE, Some(scene));
+    let top = frame.band_top_px(EDGE as f32) as usize;
+    let floor = (frame.dock_band_px() - 6.0).max(8.0) as usize;
+    let above = crate::arrival::dust::ABOVE_PT as usize;
+    assert!(top > above + 16, "the test window is too short: {top}");
+    let pixels = w.render_offscreen(EDGE, BACKGROUND, &frame);
+    let all = 0..EDGE as usize;
+    assert!(
+        inked_in(&pixels, EDGE, top - above..top + floor, all.clone()) > 20,
+        "no dust in its zone"
+    );
+    assert_eq!(
+        inked_in(&pixels, EDGE, 0..top - above - 8, all),
+        0,
+        "dust above its zone"
+    );
+}
+
+#[test]
+fn the_beam_is_slanted_and_goes_where_the_dust_does_not() {
+    // Motes taken away (they are invisible at zero opacity), only the beam is
+    // left: a band of light that leans, its middle row on the band's.
+    const EDGE: u32 = 256;
+    let w = Renderer::new();
+    let m = flush_left(w.cell_metrics(1.0));
+    let scene = dust_changed(dust_scene(1.5, true), |dust| crate::arrival::dust::Dust {
+        appear: 0.0,
+        beam: 1.0,
+        ..dust
+    });
+    let frame = dusting_dock_frame(m, EDGE, Some(scene));
+    let top = frame.band_top_px(EDGE as f32);
+    let beam = frame
+        .dock_dust(top, EDGE as f32, &mut Vec::new())
+        .expect("the beam is lit");
+    let (left, middle) = (beam.core[0], beam.core[1]);
+    let pixels = w.render_offscreen(EDGE, BACKGROUND, &frame);
+    let lit = |dx: f32, dy: f32| {
+        pixel_at(
+            &pixels,
+            EDGE as usize,
+            (left + dx) as usize,
+            (middle + dy) as usize,
+        ) != (0, 0, 0)
+    };
+    assert!(lit(130.0, 0.0), "the middle of the band");
+    assert!(lit(30.0, 0.0), "its left part, in the middle row");
+    assert!(!lit(-12.0, 0.0), "outside the band");
+    // A hundred rows up the band has leaned right by 44.5 pixels.
+    assert!(!lit(30.0, -100.0), "the band did not lean");
+    assert!(lit(130.0 + 44.0, -100.0), "the band's middle, up there");
+    // Nothing above the band's top.
+    assert_eq!(
+        inked_in(
+            &pixels,
+            EDGE,
+            0..(middle - 111.0) as usize,
+            0..EDGE as usize
+        ),
+        0
+    );
+}
+
+#[test]
+fn dust_still_on_its_way_shows_over_the_docks_ground() {
+    // The dock's ground is opaque from the arrival's first moment; the motes
+    // that are inside the band are drawn after it, or they would vanish.
+    const EDGE: u32 = 256;
+    let w = Renderer::new();
+    let m = flush_left(w.cell_metrics(1.0));
+    let with = dust_scene(0.1, false);
+    let without = dust_changed(with, |dust| crate::arrival::dust::Dust {
+        appear: 0.0,
+        beam: 0.0,
+        ..dust
+    });
+    let frame = dusting_dock_frame(m, EDGE, Some(with));
+    let top = frame.band_top_px(EDGE as f32) as usize;
+    assert_eq!(scene_band(with), 1.0, "the dock's ground is whole");
+    let a = w.render_offscreen(EDGE, BACKGROUND, &frame);
+    let b = w.render_offscreen(
+        EDGE,
+        BACKGROUND,
+        &dusting_dock_frame(m, EDGE, Some(without)),
+    );
+    assert!(
+        differing_in(&a, &b, EDGE, top + 1..EDGE as usize) > 0,
+        "the dock's ground hid the dust"
+    );
+}
+
+#[test]
+fn dust_is_drawn_over_the_grids_ground() {
+    // The grid's ground is under the dust (its text is over it): over a field
+    // of ground cells the motes still show.
+    const EDGE: u32 = 256;
+    let w = Renderer::new();
+    let m = flush_left(w.cell_metrics(1.0));
+    let (cw, ch) = m.cell_px();
+    let with = dust_scene(1.5, true);
+    let without = dust_changed(with, |dust| crate::arrival::dust::Dust {
+        appear: 0.0,
+        beam: 0.0,
+        ..dust
+    });
+    let render = |scene| {
+        let mut frame = dusting_dock_frame(m, EDGE, Some(scene));
+        let top = frame.band_top_px(EDGE as f32) as u16;
+        for row in 0..top / ch {
+            for col in 0..EDGE as u16 / cw {
+                frame.push(bg_cell(col, row, MIDTONE));
+            }
+        }
+        (frame, top as usize)
+    };
+    let (frame, top) = render(with);
+    let (control, _) = render(without);
+    let a = w.render_offscreen(EDGE, BACKGROUND, &frame);
+    let b = w.render_offscreen(EDGE, BACKGROUND, &control);
+    // The field is drawn: the control's pixels there are the ground.
+    assert_eq!(
+        pixel_at(&b, EDGE as usize, 40, 40),
+        pixel_at(&b, EDGE as usize, 41, 41)
+    );
+    assert!(
+        differing_in(&a, &b, EDGE, top.saturating_sub(120)..top) > 20,
+        "the dust did not show over the grid's ground"
+    );
+}
+
+#[test]
+fn the_woven_line_ends_in_a_lit_tip_and_nothing_is_woven_ahead_of_it() {
+    // Motes and beam out of the way (zero opacity), a prompt 300 ms ago: the
+    // line is drawn to the front, the accent's ramp trails it and the ground
+    // is bare ahead of it.
+    const EDGE: u32 = 256;
+    let w = Renderer::new();
+    let m = flush_left(w.cell_metrics(1.0));
+    let scene = dust_changed(dust_scene(0.3, false), |dust| crate::arrival::dust::Dust {
+        appear: 0.0,
+        beam: 0.0,
+        ..dust
+    });
+    let frame = dusting_dock_frame(m, EDGE, Some(scene));
+    let top = frame.band_top_px(EDGE as f32) as usize;
+    let front = (crate::arrival::dust::front_at(0.3) * EDGE as f32) as usize;
+    assert!((20..EDGE as usize - 40).contains(&front), "{front}");
+    let pixels = w.render_offscreen(EDGE, BACKGROUND, &frame);
+    let at = |x: usize| pixel_at(&pixels, EDGE as usize, x, top);
+    assert_eq!(at(front + 20), (0x00, 0x80, 0x00), "bare ground ahead");
+    let tip = at(front - 3);
+    assert!(
+        tip.0 < 0xc0 && tip.2 > 0x90,
+        "{tip:?}: the accent, not the white line"
+    );
+    assert!(at(2).0 > 0xe0, "the ramp is faint at its start");
+    // Once the tip has faded only the woven line is left.
+    let late = dust_changed(dust_scene(0.71, false), |dust| crate::arrival::dust::Dust {
+        appear: 0.0,
+        beam: 0.0,
+        landing: Some(0.719),
+        ..dust
+    });
+    let after = w.render_offscreen(EDGE, BACKGROUND, &dusting_dock_frame(m, EDGE, Some(late)));
+    assert_eq!(
+        pixel_at(&after, EDGE as usize, EDGE as usize - 3, top),
+        (0xff, 0xff, 0xff),
+        "the line is whole and white"
+    );
+}
+
 /// Pixels in `rows` × `cols` (window pixels) that are close to white.
 fn white_in(
     pixels: &[u8],
@@ -1420,6 +1647,22 @@ fn scene_dock_wave(m: CellMetrics) -> Scene {
     )
 }
 
+/// The dock under the dust: motes on their way to the top line, which is
+/// being woven, and the beam going out.
+fn scene_dock_dust(m: CellMetrics) -> Scene {
+    const EDGE: u32 = 256;
+    let scene = dust_scene(0.2, false);
+    assert!(scene.dust.is_some_and(|dust| dust.landing.is_some()));
+    let mut frame = arriving_dock_frame(m, EDGE, Some(scene), 0.0);
+    frame.set_dock_dust_tones(WHITE, ACCENT, false);
+    frame.set_dock_fx(std::iter::empty(), &Clusters::default(), WHITE);
+    (
+        "dock arrival: dust pulled onto the line being woven",
+        EDGE,
+        frame,
+    )
+}
+
 fn scenes(m: CellMetrics) -> Vec<Scene> {
     let mut scenes = vec![
         scene_midtone(),
@@ -1444,6 +1687,7 @@ fn scenes(m: CellMetrics) -> Vec<Scene> {
         scene_dock_glyphs(m),
         scene_dock_arrival(m),
         scene_dock_wave(m),
+        scene_dock_dust(m),
         scene_growing_band_glyphs(m),
         scene_selection_corners(),
         scene_unfocused_selection(),

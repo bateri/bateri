@@ -299,8 +299,34 @@ fn wave_height(x: f32, scale: f32) -> f32 {
         + select(0.0, spread, behind <= 0.0);
 }
 
+// The dust scene's two gradients ride in the same fragment, picked by `core.z`
+// (zero is the wave above):
+//
+//   1 = the beam of light: a band that is `core.w` pixels wide at its middle
+//       row `core.y`, its left edge at `core.x` there, slanted so that a row
+//       `d` pixels below the middle is shifted left by `shape.x · d`. The
+//       alpha is a tent across the band — nothing at either edge, the
+//       instance's alpha at the middle. The quad is the band's bounding box.
+//   2 = the lit tip of the woven line: the instance's alpha ramps from nothing
+//       at `core.x` to whole at `core.w` (a row of pixels, left to right).
+//
+// Neither carries the content's top fade: they are drawn in window space like
+// the wave.
+const MODE_BEAM: f32 = 1.0;
+const MODE_RAMP: f32 = 2.0;
+
 @fragment
 fn wave_fragment(in: Out) -> @location(0) vec4<f32> {
+    let mode = imm.core.z;
+    if (mode > MODE_RAMP - 0.5) {
+        let across = clamp((in.position.x - imm.core.x) / max(imm.core.w - imm.core.x, 1.0), 0.0, 1.0);
+        return vec4<f32>(in.rgba.rgb, in.rgba.a * across);
+    }
+    if (mode > MODE_BEAM - 0.5) {
+        // The position in the band's own, unslanted, frame.
+        let u = (in.position.x + imm.shape.x * (in.position.y - imm.core.y) - imm.core.x) / imm.core.w;
+        return vec4<f32>(in.rgba.rgb, in.rgba.a * clamp(1.0 - abs(2.0 * u - 1.0), 0.0, 1.0));
+    }
     let scale = imm.core.y;
     let x = in.position.x;
     // The distance to the curve measured across it, not straight down: a
@@ -310,4 +336,58 @@ fn wave_fragment(in: Out) -> @location(0) vec4<f32> {
     let across = abs(in.position.y - (imm.core.x + wave_height(x, scale)))
         * inverseSqrt(1.0 + slope * slope);
     return vec4<f32>(in.rgba.rgb, in.rgba.a * clamp(1.0 - across, 0.0, 1.0));
+}
+
+// ---------------------------------------------------------------------------
+// The dust scene's motes
+// ---------------------------------------------------------------------------
+//
+// A soft round dot per instance: `pos` is its CENTRE, `size` is (diameter,
+// blur) — both pixels — and `rgba` its colour. The blur is a Gaussian's
+// spread; a dot as small as a mote is mostly edge, so a blurred one is also
+// fainter, as a real blur would leave it. The quad is larger than the
+// diameter by what the edge needs, so it has its own vertex (the selection's
+// precedent: the quad reaches the fragment). No top fade: the dust is drawn in
+// window space.
+
+struct DotOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) rgba: vec4<f32>,
+    // Pixels from the dot's centre.
+    @location(1) local: vec2<f32>,
+    // (radius, blur), pixels.
+    @location(2) @interpolate(flat) shape: vec2<f32>,
+}
+
+// How far past the radius the edge reaches, in blurs, and the sharp edge's own
+// half width, pixels.
+const DOT_SOFT: f32 = 1.5;
+const DOT_EDGE: f32 = 0.5;
+
+@vertex
+fn dot_vertex(@builtin(vertex_index) vid: u32, it: Instance) -> DotOut {
+    let corner = vec2<f32>(f32(vid & 1u), f32(vid >> 1u));
+    let radius = it.size.x * 0.5;
+    let blur = it.size.y;
+    let reach = radius + DOT_EDGE + DOT_SOFT * blur + 0.5;
+    let local = (corner * 2.0 - 1.0) * reach;
+    let ndc = (it.pos + local) / imm.viewport_px * 2.0 - 1.0;
+    var o: DotOut;
+    o.position = vec4<f32>(ndc.x, -ndc.y, 0.0, 1.0);
+    o.rgba = it.rgba;
+    o.local = local;
+    o.shape = vec2<f32>(radius, blur);
+    return o;
+}
+
+@fragment
+fn dot_fragment(in: DotOut) -> @location(0) vec4<f32> {
+    let radius = in.shape.x;
+    let blur = in.shape.y;
+    let soft = DOT_EDGE + DOT_SOFT * blur;
+    let coverage = 1.0 - smoothstep(-soft, soft, length(in.local) - radius);
+    // The peak a Gaussian blur leaves of a disc this size; one, for a sharp dot.
+    let spread = max(blur, 0.001);
+    let peak = select(1.0, 1.0 - exp(-(radius * radius) / (2.0 * spread * spread)), blur > 0.0);
+    return vec4<f32>(in.rgba.rgb, in.rgba.a * coverage * peak);
 }

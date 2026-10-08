@@ -92,7 +92,9 @@ pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8U
 /// another meaning: `core` is the highlight's colour, `shape[0]` its radius.
 /// The `wave` pipeline reads it as geometry: `core[0]` is the line's centre y,
 /// `core[1]` the pixels per point, `shape` the peaks, the phase and the ring's
-/// front (the colour rides in the instance).
+/// front (the colour rides in the instance); `core[2]` picks the dust scene's
+/// beam (1) or ramp (2) instead, which read the block as `cell_bg.wgsl` says.
+/// The `dots` pipeline reads none of it but `viewport_px`.
 ///
 /// `edge_px` is the content's top fade ([`Op::Edge`]). **No `Default`**: the
 /// one block the encode reuses across draws is built field by field, so a
@@ -335,6 +337,9 @@ enum Op {
         core: [f32; 4],
         shape: [f32; 4],
     },
+    /// The `dots` pipeline over a range of the instance buffer: the dust's
+    /// motes and the woven line's spark ([`Plan::dust`], [`Plan::dots`]).
+    Dots(Range<u32>),
     /// The `selection` pipeline over a range of the instance buffer: the
     /// selection, or one search role ([`Plan::selection`], [`Plan::search`]).
     Selection {
@@ -454,6 +459,18 @@ struct Plan {
     mask: Vec<GlyphInstance>,
     color: Vec<GlyphInstance>,
     fx_scratch: Vec<FxInstance>,
+    /// The dust scene's motes and the woven line's spark for this plan, kept
+    /// for their capacity ([`Renderer::plan`]).
+    motes: Vec<Instance>,
+    spark: Vec<Instance>,
+}
+
+/// The dust scene's field once pushed: the beam and the motes, to be drawn
+/// twice — above the dock's band under the grid's text, below it over the
+/// dock's ground ([`Plan::dust`]).
+struct DustField {
+    beam: Option<Op>,
+    motes: Range<u32>,
 }
 
 impl Plan {
@@ -472,6 +489,48 @@ impl Plan {
             core: draw.core,
             shape: draw.shape,
         });
+    }
+
+    /// A list of soft dots, one draw.
+    fn dots(&mut self, instances: &[Instance]) {
+        if instances.is_empty() {
+            return;
+        }
+        let range = self.push(instances);
+        self.ops.push(Op::Dots(range));
+    }
+
+    /// Pushes the dust scene's beam and motes (the scratch list) once and
+    /// returns them for [`Plan::dust`], or `None` when there is nothing to draw.
+    fn dust_field(&mut self, beam: Option<WaveDraw>) -> Option<DustField> {
+        let motes = std::mem::take(&mut self.motes);
+        let range = (!motes.is_empty()).then(|| self.push(&motes));
+        self.motes = motes;
+        let beam = beam.map(|draw| {
+            let range = self.push(std::slice::from_ref(&draw.instance));
+            Op::Wave {
+                range,
+                core: draw.core,
+                shape: draw.shape,
+            }
+        });
+        (beam.is_some() || range.is_some()).then(|| DustField {
+            beam,
+            motes: range.unwrap_or(0..0),
+        })
+    }
+
+    /// Draws the dust field inside `scissor`, in window space: the beam under
+    /// the motes. The caller restores the viewport and the scissor.
+    fn dust(&mut self, field: &DustField, scissor: [u32; 4]) {
+        self.ops.push(Op::Scissor(scissor));
+        self.ops.push(Op::Viewport(0.0));
+        if let Some(beam) = &field.beam {
+            self.ops.push(beam.clone());
+        }
+        if !field.motes.is_empty() {
+            self.ops.push(Op::Dots(field.motes.clone()));
+        }
     }
 
     fn rounded(&mut self, instances: &[Instance], core: [f32; 4], shape: [f32; 4]) {
@@ -536,6 +595,8 @@ impl Plan {
         self.glyphs.clear();
         self.fx.clear();
         self.ops.clear();
+        self.motes.clear();
+        self.spark.clear();
     }
 
     /// Moves the scratch list of `plane` into `glyphs` and records its draw.
@@ -791,6 +852,10 @@ pub(crate) struct Gpu {
     /// which a flat quad's fragment does not do. One quad per frame, and only
     /// while an arrival scene gives the top line a wave.
     wave: wgpu::RenderPipeline,
+    /// The dust scene's soft dots (`dot_fragment`): its own vertex, since the
+    /// quad is a little larger than the dot. At most 122 instances, only while
+    /// a scene has dust.
+    dots: wgpu::RenderPipeline,
     /// Glyphs and rules: the same quad, sampling the atlas's mask plane.
     /// Glyphs blend over the backgrounds: the atlas is a coverage mask and the
     /// colour comes from the instance.
@@ -959,6 +1024,7 @@ impl Gpu {
         // module, layout and instance buffer.
         let selection = pipeline(&device, quads, "selection_vertex", "selection_fragment");
         let wave = pipeline(&device, quads, "cell_bg_vertex", "wave_fragment");
+        let dots = pipeline(&device, quads, "dot_vertex", "dot_fragment");
 
         let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -1054,6 +1120,7 @@ impl Gpu {
             caret,
             selection,
             wave,
+            dots,
             cell,
             emoji,
             glyph_fx,
@@ -1980,6 +2047,20 @@ impl Renderer {
         plan: &mut Plan,
     ) -> Result<(), GpuError> {
         plan.clear();
+        // **The dock's drawn top is decided first** (the one place it is
+        // worked out), and with it the dust scene's field: that is drawn twice,
+        // in two places of the plan, from one list. Both places are in window
+        // space and the dock's band is where they meet.
+        let dock_top = frame
+            .dock()
+            .is_some()
+            .then(|| frame.band_top_px(viewport_px[1]) + frame.dock_rise_px());
+        let dust = dock_top.and_then(|band_y| {
+            let mut motes = std::mem::take(&mut plan.motes);
+            let beam = frame.dock_dust(band_y, viewport_px[0], &mut motes);
+            plan.motes = motes;
+            plan.dust_field(beam)
+        });
         // Grid: the offset lives in one viewport. Command marks first (sprites,
         // degenerate inversion rectangle), then ground → search → selection →
         // caret; the grid's glyphs wait for the band's ground.
@@ -2021,6 +2102,19 @@ impl Renderer {
             plan.quads(frame.fill_bg());
             plan.search(frame, true);
             plan.ops.push(Op::Viewport(origin));
+        }
+        // **The dust above the dock's band: over the grid's ground, under its
+        // text** — a restored pane's old lines stay in front of the motes.
+        // Its other half, inside the band, waits for the dock's ground. The
+        // two scissors share the band's top, so each pixel is drawn once.
+        if let (Some(field), Some(band_y)) = (&dust, dock_top) {
+            let above = band_y.round().max(0.0) as u32;
+            if above >= 1 {
+                let width = viewport_px[0].max(0.0) as u32;
+                plan.dust(field, [0, 0, width, above.min(viewport_px[1] as u32)]);
+                plan.ops.push(Op::Scissor(scissor_below(0.0, viewport_px)));
+                plan.ops.push(Op::Viewport(origin));
+            }
         }
         self.glyph_draws(
             plan,
@@ -2069,7 +2163,7 @@ impl Renderer {
             plan.ops.push(Op::Viewport(origin));
         }
         // Dock: last, with two origins.
-        if frame.dock().is_some() {
+        if let Some(band_y) = dock_top {
             // **The arrival scene's climb is a lever on the viewports**: the
             // band's, the cells' and the scissor all move by `rise`, and every
             // window-space number that is compared with a fragment position
@@ -2078,7 +2172,6 @@ impl Renderer {
             // born in window space and converted with the layout's own origin;
             // the viewport it is drawn in is the lowered one.
             let rise = frame.dock_rise_px();
-            let band_y = frame.band_top_px(viewport_px[1]) + rise;
             let layout_y = (viewport_px[1] - frame.dock_layout_px()).max(0.0);
             let origin_y = layout_y + rise;
             plan.ops.push(Op::Viewport(band_y));
@@ -2091,6 +2184,24 @@ impl Renderer {
                 plan.ops.push(Op::Viewport(0.0));
                 plan.wave(&wave);
             }
+            // **The dust inside the band, over the dock's ground** (its ground
+            // is opaque from the arrival on, and the motes still on their way
+            // to the line would vanish under it), then the lit tip of the line
+            // they weave, over the ground and the line.
+            if let Some(field) = &dust {
+                plan.dust(field, scissor_below(band_y, viewport_px));
+                plan.ops.push(Op::Scissor(scissor_below(0.0, viewport_px)));
+            }
+            let mut spark = std::mem::take(&mut plan.spark);
+            let tip = frame.dock_weld_tip(band_y, viewport_px[0], &mut spark);
+            if tip.is_some() || !spark.is_empty() {
+                plan.ops.push(Op::Viewport(0.0));
+                if let Some(tip) = &tip {
+                    plan.wave(tip);
+                }
+                plan.dots(&spark);
+            }
+            plan.spark = spark;
             plan.ops.push(Op::Viewport(origin_y));
             let clipped = band_y > origin_y;
             // The dock's glyphs may rise above the layout's top only up to the
@@ -2286,6 +2397,15 @@ impl Renderer {
                             continue;
                         };
                         pass.set_pipeline(&self.gpu.cell_bg);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.set_immediates(0, bytes_of(std::slice::from_ref(&imm)));
+                        pass.draw(0..4, range.clone());
+                    }
+                    Op::Dots(range) => {
+                        let Some(buffer) = state.quads.as_ref() else {
+                            continue;
+                        };
+                        pass.set_pipeline(&self.gpu.dots);
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         pass.set_immediates(0, bytes_of(std::slice::from_ref(&imm)));
                         pass.draw(0..4, range.clone());
@@ -2590,10 +2710,11 @@ fn uv_size(atlas: &Atlas) -> [f32; 2] {
 /// The names are separate parameters, not derived as `{name}_vertex`: the
 /// failing pipeline is reported by name ([`Gpu::new`]'s error scope).
 ///
-/// The blend is **not a parameter**: all seven pipelines want it, each for its
+/// The blend is **not a parameter**: all eight pipelines want it, each for its
 /// own reason — `cell` makes alpha from the atlas's coverage, `caret` has a
 /// translucent halo, `glyph_fx`'s effect is itself transparency, `selection`
-/// softens its round corner, `wave` softens the curve's edge. All seven output
+/// softens its round corner, `wave` softens the curve's edge, `dots` the
+/// round dot's. All eight output
 /// **straight** alpha, emoji included: CoreGraphics writes colour glyphs premultiplied, but
 /// `raster::draw_color` undoes it before upload (`raster::unpremultiply`'s doc:
 /// premultiplying in sRGB-encoded space darkened them).

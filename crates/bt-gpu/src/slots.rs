@@ -12,7 +12,7 @@
 //! has its own counter): uvs are baked at list-building time from the atlas's
 //! own slot origins.
 
-use bt_atlas::{Atlas, Face, Half, Metrics, Placed, Plane, SizeClass, Sprite};
+use bt_atlas::{Atlas, Face, Half, Metrics, Placed, Plane, RuleKind, SizeClass, Sprite};
 use bt_core::Clusters;
 
 use crate::frame::{FxCell, FxInstance, GlyphCell, GlyphInstance, RuleCell};
@@ -99,25 +99,7 @@ pub(crate) fn glyph_lists(
         }
     }
     for rule in rules {
-        let (uv0, _) = slot_uv(
-            atlas,
-            upload,
-            metrics,
-            inv,
-            SlotAsk {
-                sprite: Sprite::Rule(rule.kind),
-                // Rules are **always** `Face::Regular`: the line under bold
-                // text is not bold. `Atlas::slot` normalises this too; asking
-                // for the right face here keeps that normalisation a second
-                // line of defence, not the only one.
-                face: Face::Regular,
-                // Rules are always at display size: the context row has none,
-                // and `Atlas::slot` normalises this as well.
-                size: SizeClass::Normal,
-                // A rule is one cell by definition; same normalisation.
-                want: Half::Whole,
-            },
-        );
+        let (uv0, _) = slot_uv(atlas, upload, metrics, inv, rule_ask(rule.kind));
         mask.push(GlyphInstance {
             pos: rule.pos,
             uv0,
@@ -136,6 +118,25 @@ pub(crate) fn glyph_lists(
 /// packing is the one `shaders/glyph_fx.*` decode:
 /// `id | plane << 5 | half << 6`, a small integer that is exact in `f32`
 /// ([`FxInstance`]).
+/// What a rule sprite is asked for as: the one question both lists put, so
+/// the dock's › arriving as an effect resolves to the very slot the static
+/// one is drawn from.
+fn rule_ask(kind: RuleKind) -> SlotAsk {
+    SlotAsk {
+        sprite: Sprite::Rule(kind),
+        // Rules are **always** `Face::Regular`: the line under bold text is
+        // not bold. `Atlas::slot` normalises this too; asking for the right
+        // face here keeps that normalisation a second line of defence, not
+        // the only one.
+        face: Face::Regular,
+        // Rules are always at display size: the context row has none, and
+        // `Atlas::slot` normalises this as well.
+        size: SizeClass::Normal,
+        // A rule is one cell by definition; same normalisation.
+        want: Half::Whole,
+    }
+}
+
 pub(crate) fn fx_list(
     atlas: &mut Atlas,
     upload: &mut impl SlotUpload,
@@ -153,18 +154,7 @@ pub(crate) fn fx_list(
         // A rule sprite (the dock's › arriving) is one whole cell of the mask
         // plane; the same instance, the same packing, only the slot differs.
         if let Some(kind) = cell.rule {
-            let (uv0, placed) = slot_uv(
-                atlas,
-                upload,
-                metrics,
-                inv,
-                SlotAsk {
-                    sprite: Sprite::Rule(kind),
-                    face: Face::Regular,
-                    size: SizeClass::Normal,
-                    want: Half::Whole,
-                },
-            );
+            let (uv0, placed) = slot_uv(atlas, upload, metrics, inv, rule_ask(kind));
             out.push(FxInstance {
                 pos: cell.glyph.pos,
                 uv0,

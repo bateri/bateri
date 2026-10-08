@@ -96,17 +96,20 @@
 //!
 //! **The dock's arrival takes the motion road too** ([`crate::arrival`]): it
 //! is a term of `Motion`, so the sleep test sees it without a question of its
-//! own. What is new is that most of its life is *waiting*, which is settled —
-//! the link sleeps through the shell's startup — and its two deadlines (the
-//! end of the quiet hold, the cap that arrives without a prompt) are the
-//! motion clock's fourth entry, woken through [`Waker::resume`]. Its frames
-//! are motion frames: no damage, no `content=`. A pane that was never armed
-//! (a carried-over one, one without a dock, the timed run) has no entry and
-//! changes nothing.
+//! own. What is new is that its life is *waiting* first: still for `type`,
+//! which is settled — the link sleeps through the shell's startup — and moving
+//! for `ripple` and `dust`, which keep the link awake from the end of the quiet
+//! hold to the cap (a new pane with a slow shell is not idle for at most
+//! those three seconds; the cap that arrives without a prompt is the stop
+//! condition). The still wait's two deadlines (the end of the quiet hold, the
+//! cap) are the motion clock's fourth entry, woken through [`Waker::resume`].
+//! Its frames are motion frames: no damage, no `content=`. A pane that was
+//! never armed (a carried-over one, one without a dock, the timed run) has no
+//! entry and changes nothing.
 //!
 //! The contract's consequence in one sentence: a window with a running
-//! command, **a blinking cursor or a scroll bar shown by scrolling** is **not
-//! idle**; every other window — one whose bar is always up included — is idle
+//! command, **a blinking cursor, a scroll bar shown by scrolling or a new
+//! pane's moving wait for its shell** is **not idle**; every other window — one whose bar is always up included — is idle
 //! and draws zero frames. All carry a named stop condition — the command
 //! ends; blink is off by default and even when on stops after keyboard
 //! silence ([`crate::blink::Blink`]); the bar fades out a second after the
@@ -1972,13 +1975,23 @@ impl Core {
     /// paths take, so what a motion frame replays is what the content frame
     /// wrote. The climb is in whole pixels (an edge that does not land on the
     /// device grid would fade). The wave line starts in the context row's quiet
-    /// tone, the theme's. Call before `Frame::set_dock_fx`.
+    /// tone, the theme's, and the dust is drawn in the theme's text and accent.
+    /// Call before `Frame::set_dock_fx`.
     fn write_arrival(&self, frame: &mut Frame, motion: &Motion) {
         let scene = motion.arrival_scene();
         let rise = scene.map_or(0.0, |scene| self.rise_px(scene));
         frame.set_dock_scene(scene, rise);
         if scene.is_some_and(|scene| scene.wave.is_some()) {
             frame.set_dock_quiet(self.theme.get().quiet_linear());
+        }
+        if scene.is_some_and(|scene| scene.dust.is_some()) {
+            let theme = self.theme.get();
+            // The window is light when black reads better on it than white (the
+            // question the window's own appearance asks of the theme): the beam
+            // is then a white veil instead of a faint one of the text's colour.
+            let light = bt_core::contrast_ratio(theme.background, 0x00_00_00)
+                >= bt_core::contrast_ratio(theme.background, 0xff_ff_ff);
+            frame.set_dock_dust_tones(theme.foreground_linear(), theme.accent_linear(), light);
         }
     }
 
@@ -4948,9 +4961,14 @@ mod tests {
         watched: bool,
     }
 
-    /// The kinds that wait in their own way: a still dock, and a line that
-    /// ripples. Every test that holds for all of them runs through both.
-    const KINDS: [DockArrival; 2] = [DockArrival::Type, DockArrival::Ripple];
+    /// The kinds that wait in their own way: a still dock, a line that
+    /// ripples and dust that drifts. Every test that holds for all of them
+    /// runs through each.
+    const KINDS: [DockArrival; 3] = [DockArrival::Type, DockArrival::Ripple, DockArrival::Dust];
+
+    /// The kinds whose wait moves: the link is awake from the end of the hold
+    /// to the cap.
+    const MOVING: [DockArrival; 2] = [DockArrival::Ripple, DockArrival::Dust];
 
     impl Rig {
         /// A pane born at `BORN` whose arrival is armed, awake for its first
@@ -5198,44 +5216,58 @@ mod tests {
     }
 
     #[test]
-    fn a_rippling_wait_sleeps_through_the_hold_then_stirs_until_the_cap() {
+    fn a_moving_wait_sleeps_through_the_hold_then_stirs_until_the_cap() {
         use crate::arrival::{ARRIVAL_MAX, CAP, SHOW};
-        let mut rig = Rig::born(DockArrival::Ripple, false);
-        assert!(rig.asleep, "the hold is spent asleep");
-        assert_eq!(rig.armed, Some(BORN + SHOW));
-        let born = rig.drawn;
-        rig.run_until(BORN + SHOW - 0.01);
-        assert_eq!(rig.drawn, born, "a frame during the hold");
-        // The hold's wake-up starts the wave: the link stays awake, a frame
-        // per vsync, and needs no clock for the cap.
-        rig.run_until(BORN + 1.0);
-        assert!(!rig.asleep && !rig.motion.settled());
-        let stirred = f64::from(rig.drawn - born);
-        assert!(stirred >= (1.0 - SHOW) / VSYNC - 3.0, "{stirred} frames");
-        assert_eq!(rig.wakeups, [BORN + SHOW], "nothing armed while awake");
-        // The cap arrives the scene, which plays out and settles for good.
-        rig.run_until(BORN + CAP + ARRIVAL_MAX + 2.0 * VSYNC);
-        assert!(rig.motion.settled() && rig.motion.arrival_scene().is_none());
-        assert!(rig.asleep && rig.armed.is_none(), "zero frames at idle");
-        let total = f64::from(rig.drawn - born);
-        assert!(
-            total <= (CAP - SHOW + ARRIVAL_MAX) / VSYNC + 3.0,
-            "{total} frames: the wait did not stop at the cap"
-        );
+        for kind in MOVING {
+            let mut rig = Rig::born(kind, false);
+            assert!(rig.asleep, "{kind:?}: the hold is spent asleep");
+            assert_eq!(rig.armed, Some(BORN + SHOW));
+            let born = rig.drawn;
+            rig.run_until(BORN + SHOW - 0.01);
+            assert_eq!(rig.drawn, born, "{kind:?}: a frame during the hold");
+            // The hold's wake-up starts the motion: the link stays awake, a
+            // frame per vsync, and needs no clock for the cap.
+            rig.run_until(BORN + 1.0);
+            assert!(!rig.asleep && !rig.motion.settled(), "{kind:?}");
+            let stirred = f64::from(rig.drawn - born);
+            assert!(
+                stirred >= (1.0 - SHOW) / VSYNC - 3.0,
+                "{kind:?}: {stirred} frames"
+            );
+            assert_eq!(
+                rig.wakeups,
+                [BORN + SHOW],
+                "{kind:?}: nothing armed while awake"
+            );
+            // The cap arrives the scene, which plays out and settles for good.
+            rig.run_until(BORN + CAP + ARRIVAL_MAX + 2.0 * VSYNC);
+            assert!(rig.motion.settled() && rig.motion.arrival_scene().is_none());
+            assert!(
+                rig.asleep && rig.armed.is_none(),
+                "{kind:?}: zero frames at idle"
+            );
+            let total = f64::from(rig.drawn - born);
+            assert!(
+                total <= (CAP - SHOW + ARRIVAL_MAX) / VSYNC + 3.0,
+                "{kind:?}: {total} frames: the wait did not stop at the cap"
+            );
+        }
     }
 
     #[test]
-    fn an_unwatched_rippling_pane_sleeps_through_the_wait_and_the_cap_ends_it() {
+    fn an_unwatched_moving_pane_sleeps_through_the_wait_and_the_cap_ends_it() {
         use crate::arrival::{CAP, SHOW};
-        let mut rig = Rig::born(DockArrival::Ripple, false);
-        rig.watched = false;
-        let born = rig.drawn;
-        rig.run_until(BORN + CAP - 0.1);
-        assert_eq!(rig.drawn, born, "an unwatched wave drew frames");
-        assert_eq!(rig.wakeups, [BORN + SHOW, BORN + CAP]);
-        rig.run_until(BORN + CAP + 1.0);
-        assert!(rig.motion.settled() && rig.motion.arrival_scene().is_none());
-        assert!(rig.asleep && rig.armed.is_none());
+        for kind in MOVING {
+            let mut rig = Rig::born(kind, false);
+            rig.watched = false;
+            let born = rig.drawn;
+            rig.run_until(BORN + CAP - 0.1);
+            assert_eq!(rig.drawn, born, "{kind:?}: an unwatched wait drew frames");
+            assert_eq!(rig.wakeups, [BORN + SHOW, BORN + CAP]);
+            rig.run_until(BORN + CAP + 1.0);
+            assert!(rig.motion.settled() && rig.motion.arrival_scene().is_none());
+            assert!(rig.asleep && rig.armed.is_none());
+        }
     }
 
     #[test]
