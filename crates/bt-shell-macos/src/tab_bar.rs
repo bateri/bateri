@@ -61,6 +61,18 @@
 //! command runs, when the window is not visible and — for the rings, not
 //! the card's seconds — under Reduce Motion, where the ring stands still.
 //!
+//! **A tab is dragged** by its chip. A press that moves past the slop along the
+//! strip lifts the chip: it follows the pointer at once, the others slide to
+//! make room (the same slide as any change of order — [`TabBar::lay_out`] lays
+//! the tabs out in the preview order and the chip at the pointer), and the
+//! window's list changes **once**, at the release, through its applier
+//! ([`TerminalWindow::move_tab`]). The arithmetic — where the chip is, the
+//! place it would take, when the pointer has left the bar — is `tabs::Grip`.
+//! Out of the bar a drag session takes over (`tab_drag`): the chip stays,
+//! faint, in its place; another window's bar opens a gap where the tab would
+//! go ([`TabBar::open_gap`]) and takes the drop, anywhere else the tab becomes
+//! a window of its own (`AppDelegate::tab_drag_ended`).
+//!
 //! **Motion** is AppKit's (`NSAnimationContext`, the design's curve): the
 //! hover fill fades in 80 ms, `×` in 120 ms, chips slide when tabs come,
 //! go or move, and a new one fades in, in 200 ms. Only the applier's
@@ -74,7 +86,8 @@
 //! design's.
 //!
 //! **Who acts.** The bar knows its window by id and calls the window's one
-//! applier (`TerminalWindow::select_tab`, `close_tab_asking`, `rename_tab`) —
+//! applier (`TerminalWindow::select_tab`, `close_tab_asking`, `rename_tab`,
+//! `move_tab`) —
 //! the bar never changes the tab list itself. The chip's menu and the list act
 //! through the window too: each item's target is the window, its `tag` the
 //! tab it was opened for (`tabs::menu_tag`). A close or a new tab is done **one
@@ -103,23 +116,24 @@ use objc2_app_kit::{
     NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityRadioButtonRole,
     NSAccessibilityTabButtonSubrole, NSAccessibilityTabGroupRole, NSAnimatablePropertyContainer,
     NSAnimationContext, NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSColor,
-    NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSFontWeightMedium,
-    NSFontWeightRegular, NSFontWeightSemibold, NSGradient, NSImage, NSLineBreakMode,
-    NSLineCapStyle, NSLineJoinStyle, NSMenu, NSMenuItem, NSShadow, NSTextAlignment, NSTextField,
-    NSTextFieldDelegate, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindowButton,
-    NSWindowOrderingMode, NSWindowStyleMask,
+    NSControlStateValueOn, NSControlTextEditingDelegate, NSDragOperation, NSDraggingDestination,
+    NSDraggingInfo, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFocusRingType,
+    NSFont, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSGradient, NSImage,
+    NSLineBreakMode, NSLineCapStyle, NSLineJoinStyle, NSMenu, NSMenuItem, NSShadow,
+    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTrackingArea, NSTrackingAreaOptions,
+    NSView, NSWindowButton, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSNotification, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
-    ns_string,
+    NSArray, NSNotification, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSUserDefaults, ns_string,
 };
 use objc2_quartz_core::CAMediaTimingFunction;
 
 use crate::app;
+use crate::tab_drag;
 use crate::tabs::{
-    self, BUTTON, Bar, Card, CardCommand, Clock, FADE, Indicator, RING_STEP_DEGREES, Strip,
-    TAB_RADIUS, Tone,
+    self, BUTTON, Bar, Card, CardCommand, Clock, Drag, FADE, Grip, Indicator, Over,
+    RING_STEP_DEGREES, Strip, TAB_RADIUS, Tone,
 };
 use crate::window::{TerminalWindow, is_dark_background};
 
@@ -178,6 +192,10 @@ const SEPARATOR_HEIGHT: f64 = 16.0;
 const HOVER_FADE: f64 = 0.08;
 const CLOSE_FADE: f64 = 0.12;
 const REFLOW: f64 = 0.2;
+
+/// How much of a chip shows while its tab is carried away in a drag session: the place it
+/// left stays, faint, so the strip does not close up under the pointer that may come back.
+const GHOST_ALPHA: f64 = 0.35;
 
 /// How long the pointer rests on a chip before its summary card opens (the
 /// design's 450 ms), and how long after a card closed the next chip's opens
@@ -279,6 +297,11 @@ struct Palette {
     selected_line: Tint,
     /// The selected chip's drop shadow; `None` on a dark theme.
     shadow: Option<Tint>,
+    /// A chip lifted by the pointer (the design's dragged tab): its face, its edge and the shadow
+    /// it casts on the row.
+    lifted: Tint,
+    lifted_line: Tint,
+    lift_shadow: Tint,
     hover: Tint,
     close: Tint,
     close_hover: Tint,
@@ -311,6 +334,9 @@ impl Palette {
             selected: ink(0.10),
             selected_line: ink(0.07),
             shadow: None,
+            lifted: ink(0.14),
+            lifted_line: ink(0.10),
+            lift_shadow: Tint::of(0x000000, 0.6),
             hover: ink(0.05),
             close: ink(0.07),
             close_hover: ink(0.16),
@@ -330,6 +356,9 @@ impl Palette {
                 selected: Tint::of(0xffffff, 1.0),
                 selected_line: ink(0.08),
                 shadow: Some(ink(0.08)),
+                lifted: Tint::of(0xffffff, 1.0),
+                lifted_line: ink(0.08),
+                lift_shadow: ink(0.18),
                 close: ink(0.06),
                 close_hover: ink(0.14),
                 button: ink(0.05),
@@ -956,6 +985,10 @@ pub(crate) struct ChipIvars {
     /// The selected fill, below the label: its own view so the light
     /// theme's shadow falls from the face alone, not from the text.
     face: Retained<ChipFace>,
+    /// The fill of a chip lifted by the pointer, in place of the selected one.
+    lift: Retained<ChipFace>,
+    /// Its tab is carried away: only a faint place is left ([`GHOST_ALPHA`]).
+    ghost: Cell<bool>,
     /// The host's and the transfer's lines.
     lines: Retained<ChipLines>,
     /// The indicator, left of the title.
@@ -1004,17 +1037,37 @@ define_class!(
 
         /// A press selects — on the press, like the system's tabs — and
         /// puts the summary card away. The second press of a double click
-        /// names the tab.
+        /// names the tab; any other may become a drag.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             if let Some(bar) = self.bar() {
                 bar.pressed(self.ivars().tab.get());
             }
-            self.select_tab();
-            if event.clickCount() == 2
-                && let Some(bar) = self.bar()
-            {
+            let selected = self.select_tab();
+            let Some(bar) = self.bar() else {
+                return;
+            };
+            if event.clickCount() == 2 {
                 bar.begin_rename(self.ivars().tab.get());
+            } else if selected {
+                bar.grip(self.ivars().tab.get(), event);
+            }
+        }
+
+        /// The pointer moves with the button down: the tab follows it along the
+        /// strip, or comes away from the bar ([`TabBar::drag`]).
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            if let Some(bar) = self.bar() {
+                bar.drag(self.ivars().tab.get(), event);
+            }
+        }
+
+        /// The button is let go: a tab moved along the strip settles in its place.
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            if let Some(bar) = self.bar() {
+                bar.release(self.ivars().tab.get(), event);
             }
         }
 
@@ -1051,7 +1104,7 @@ define_class!(
 
         #[unsafe(method(accessibilityPerformPress))]
         fn accessibility_press(&self) -> bool {
-            self.select_tab();
+            let _ = self.select_tab();
             true
         }
     }
@@ -1070,6 +1123,7 @@ impl Chip {
     fn new(mtm: MainThreadMarker, tab: u64) -> Retained<Self> {
         let hover = ChipFace::new(mtm, Face::Hovered);
         let face = ChipFace::new(mtm, Face::Selected);
+        let lift = ChipFace::new(mtm, Face::Lifted);
         let lines = ChipLines::new(mtm);
         let glyph = Glyph::new(mtm);
         let text = label(mtm);
@@ -1085,6 +1139,8 @@ impl Chip {
             palette: Cell::new(None),
             hover: hover.clone(),
             face: face.clone(),
+            lift: lift.clone(),
+            ghost: Cell::new(false),
             lines: lines.clone(),
             glyph: glyph.clone(),
             label: text.clone(),
@@ -1095,13 +1151,15 @@ impl Chip {
         // ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         hover.setAlphaValue(0.0);
+        lift.setHidden(true);
         let fill = NSAutoresizingMaskOptions::ViewWidthSizable
             | NSAutoresizingMaskOptions::ViewHeightSizable;
-        for view in [&**hover as &NSView, &**face, &**lines] {
+        for view in [&**hover as &NSView, &**face, &**lift, &**lines] {
             view.setAutoresizingMask(fill);
         }
         this.addSubview(&hover);
         this.addSubview(&face);
+        this.addSubview(&lift);
         this.addSubview(&lines);
         this.addSubview(&glyph);
         this.addSubview(&text);
@@ -1147,10 +1205,20 @@ impl Chip {
             .or_else(|| Some(Retained::into_super(self.retain())))
     }
 
-    fn select_tab(&self) {
-        if let Some(bar) = self.bar() {
-            bar.select(self.ivars().tab.get());
-        }
+    /// Moves the chip to `x` in the strip's space and nothing else: the held chip following the
+    /// pointer while the others stay where the last layout put them. The frame is recorded as the
+    /// one asked for, so the next layout moves it from here.
+    fn follow(&self, x: f64) {
+        let mut frame = self.frame();
+        frame.origin.x = x;
+        self.ivars().target.set(frame);
+        self.setFrame(frame);
+    }
+
+    /// Selects the chip's tab; `false` if the window would not (a question of its own is up).
+    fn select_tab(&self) -> bool {
+        self.bar()
+            .is_some_and(|bar| bar.select(self.ivars().tab.get()))
     }
 
     fn close_tab(&self) {
@@ -1182,8 +1250,11 @@ impl Chip {
             selected,
             hovered,
             single,
+            lifted,
+            ghost,
         } = look;
         let (selected, hovered, single) = (*selected, *hovered, *single);
+        let (lifted, ghost) = (*lifted && !single, *ghost && !single);
         // The one-tab form is today's title bar: no indicator, no lines, no
         // hint.
         let indicator = indicator.filter(|_| !single);
@@ -1232,6 +1303,7 @@ impl Chip {
             let whole = NSRect::new(NSPoint::ZERO, size);
             iv.hover.setFrame(whole);
             iv.face.setFrame(whole);
+            iv.lift.setFrame(whole);
             iv.lines.setFrame(whole);
         }
         iv.hover.set(palette);
@@ -1241,7 +1313,12 @@ impl Chip {
             motion.hover,
         );
         iv.face.set(palette);
-        iv.face.setHidden(single || !selected);
+        iv.face.setHidden(single || !selected || lifted);
+        iv.lift.set(palette);
+        iv.lift.setHidden(!lifted);
+        if iv.ghost.replace(ghost) != ghost {
+            self.setAlphaValue(if ghost { GHOST_ALPHA } else { 1.0 });
+        }
         iv.lines.set(lines, palette);
         let text = &iv.label;
         let (size_pt, weight, color, pad) = if single {
@@ -1348,14 +1425,20 @@ struct Look<'a> {
     hovered: bool,
     /// The one-tab form: a centred title, no fill, no `×`, no click.
     single: bool,
+    /// Lifted by the pointer: the tab is being dragged along the strip.
+    lifted: bool,
+    /// Its tab is carried away from the strip in a drag session.
+    ghost: bool,
 }
 
 /// Which fill a chip's face view draws: the hover's, which fades in and
-/// out, or the selected tab's, shown or hidden.
+/// out, the selected tab's, shown or hidden, or the dragged tab's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Face {
     Hovered,
     Selected,
+    /// A chip lifted by the pointer: the fill of a tab being dragged.
+    Lifted,
 }
 
 pub(crate) struct FaceIvars {
@@ -1394,6 +1477,12 @@ define_class!(
                     palette.selected,
                     Some(palette.selected_line),
                 ),
+                Face::Lifted => rounded(
+                    bounds,
+                    TAB_RADIUS,
+                    palette.lifted,
+                    Some(palette.lifted_line),
+                ),
             }
         }
     }
@@ -1416,17 +1505,20 @@ impl ChipFace {
             return;
         }
         // The light theme's selected face lifts off the row with a thin
-        // shadow; every other face lies flat.
-        let shadow = palette
-            .shadow
-            .filter(|_| iv.face == Face::Selected)
-            .map(|tint| {
-                let shadow = NSShadow::new();
-                shadow.setShadowOffset(NSSize::new(0.0, -1.0));
-                shadow.setShadowBlurRadius(2.0);
-                shadow.setShadowColor(Some(&tint.color()));
-                shadow
-            });
+        // shadow, a dragged one with a wider, softer one (as much as the
+        // strip's margin lets fall); every other face lies flat.
+        let cast = |tint: Tint, blur: f64, drop: f64| {
+            let shadow = NSShadow::new();
+            shadow.setShadowOffset(NSSize::new(0.0, -drop));
+            shadow.setShadowBlurRadius(blur);
+            shadow.setShadowColor(Some(&tint.color()));
+            shadow
+        };
+        let shadow = match iv.face {
+            Face::Selected => palette.shadow.map(|tint| cast(tint, 2.0, 1.0)),
+            Face::Lifted => Some(cast(palette.lift_shadow, 5.0, 2.0)),
+            Face::Hovered => None,
+        };
         self.setShadow(shadow.as_deref());
         self.setNeedsDisplay(true);
     }
@@ -2011,12 +2103,33 @@ impl OpenCard {
     }
 }
 
+/// A press on a chip that may be, or has become, a drag ([`TabBar::grip`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Dragging {
+    tab: u64,
+    grip: Grip,
+    /// Once the tab moves along the strip: where its chip is drawn (the bar's space) and the
+    /// place it would take if let go now. The other chips lay out around that place.
+    at: Option<(f64, usize)>,
+    /// The tab came away from the bar: a drag session carries it and its chip waits, faint,
+    /// in the place it left until the session ends ([`TabBar::drag_ended`]).
+    torn: bool,
+}
+
 pub(crate) struct BarIvars {
     /// The window's id (`TerminalWindow::id`) — the way to its applier.
     window: u64,
     shown: RefCell<Shown>,
     /// The tab under the pointer.
     hovered: Cell<Option<u64>>,
+    /// The press on a chip that is, or may become, a drag.
+    drag: Cell<Option<Dragging>>,
+    /// A tab carried over this bar from another window: the place it would be
+    /// inserted at, where the chips open a gap ([`TabBar::open_gap`]).
+    gap: Cell<Option<usize>>,
+    /// The next layout slides every chip to its place, though the order is the
+    /// same: a drag ended, or a gap opened or closed.
+    glide: Cell<bool>,
     palette: Cell<Option<Palette>>,
     /// The theme the palette came from — a host mark's colour is its
     /// mapping (`Theme::mark_rgb`), the dock's.
@@ -2170,6 +2283,39 @@ define_class!(
     // the ones used are above.
     unsafe impl NSControlTextEditingDelegate for TabBar {}
     unsafe impl NSTextFieldDelegate for TabBar {}
+
+    /// The side of a tab dropped on this bar from a drag session ([`tab_drag`]): a tab of this
+    /// process only ([`tab_drag::carried`]). The pointer over the bar opens a gap in the strip
+    /// at the place the tab would take; letting go records the landing, which is carried out
+    /// when the session has ended (`AppDelegate::tab_drag_ended`).
+    unsafe impl NSDraggingDestination for TabBar {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(
+            &self,
+            info: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            self.carried_over(info)
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(
+            &self,
+            info: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            self.carried_over(info)
+        }
+
+        /// The tab went away from this bar (or was taken back): the gap closes.
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _info: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            self.open_gap(None);
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            self.accept_drop(info)
+        }
+    }
 );
 
 impl TabBar {
@@ -2196,6 +2342,9 @@ impl TabBar {
             window,
             shown: RefCell::new(Shown::default()),
             hovered: Cell::new(None),
+            drag: Cell::new(None),
+            gap: Cell::new(None),
+            glide: Cell::new(false),
             palette: Cell::new(None),
             theme: Cell::new(None),
             chips: RefCell::new(Vec::new()),
@@ -2244,6 +2393,8 @@ impl TabBar {
         // SAFETY: AppKit's constant role string, alive for the process.
         this.setAccessibilityRole(Some(unsafe { NSAccessibilityTabGroupRole }));
         this.setAccessibilityLabel(Some(ns_string!("Tabs")));
+        // A tab carried out of another window's strip may be let go here.
+        this.registerForDraggedTypes(&NSArray::from_slice(&[tab_drag::tab_type()]));
         this
     }
 
@@ -2367,6 +2518,29 @@ impl TabBar {
         (chips, changed)
     }
 
+    /// The pure layout's input for `count` places: the bar's width, where the strip may start,
+    /// the settings diagnostic and the corner, and the scroll as it stands.
+    fn bar_for(
+        &self,
+        count: usize,
+        selected: usize,
+        hovered: Option<usize>,
+        dragged: Option<usize>,
+    ) -> Bar {
+        let iv = self.ivars();
+        Bar {
+            width: self.bounds().size.width,
+            leading: self.leading(),
+            count,
+            selected,
+            hovered,
+            dragged,
+            scroll: iv.scroll.get(),
+            warning: !iv.shown.borrow().notice.is_empty(),
+            corner: self.corner(),
+        }
+    }
+
     /// Places every part from the pure layout ([`Bar::layout`]) and gives
     /// the chips their tabs; then the card follows its chip and the clock is
     /// set again ([`Self::arm_clock`]).
@@ -2375,45 +2549,73 @@ impl TabBar {
     /// scrolls it to the selected chip (`Strip::revealing`) and, like the
     /// applier's changes, slides there; nothing else moves it but the wheel,
     /// which does not slide.
+    ///
+    /// **Two things in flight change what is laid out, neither of them the window's list.** A tab
+    /// dragged along the strip is laid out at the place it would take, and its chip at the
+    /// pointer, not at its place ([`Dragging::at`]); the others slide around it the way they slide
+    /// for any change of order, so a drag has no animation path of its own. A tab carried over
+    /// from another window opens a gap at its place ([`BarIvars::gap`]): the layout has one more
+    /// place and the chips from the gap on take the next. The list itself changes once, when the
+    /// tab is let go, through the window's applier.
     pub(crate) fn lay_out(&self) {
         let iv = self.ivars();
         let (Some(palette), Some(theme)) = (iv.palette.get(), iv.theme.get()) else {
             return;
         };
-        let shown = iv.shown.borrow().clone();
+        let mut shown = iv.shown.borrow().clone();
         let count = shown.tabs.len();
         if count == 0 {
             return;
         }
-        let single = count == 1;
-        // A tab gone takes its name field away.
+        // A tab gone takes its name field away, and its drag.
         if let Some(tab) = iv.renaming.get()
             && !shown.tabs.iter().any(|label| label.tab == tab)
         {
             self.end_rename(false);
             return;
         }
-        let bounds = self.bounds();
-        let hovered = iv
-            .hovered
+        let drag = iv
+            .drag
             .get()
-            .and_then(|id| shown.tabs.iter().position(|label| label.tab == id));
-        let bar = Bar {
-            width: bounds.size.width,
-            leading: self.leading(),
-            count,
-            selected: shown.selected,
-            hovered,
-            dragged: None,
-            scroll: iv.scroll.get(),
-            warning: !shown.notice.is_empty(),
-            corner: self.corner(),
-        };
+            .filter(|drag| shown.tabs.iter().any(|label| label.tab == drag.tab));
+        iv.drag.set(drag);
+        // The tabs in the order the strip shows them now: the dragged one at its place.
+        if let Some(Dragging {
+            tab,
+            at: Some((_, to)),
+            torn: false,
+            ..
+        }) = drag
+        {
+            let selected = shown.tabs.get(shown.selected).map(|label| label.tab);
+            if let Some(from) = shown.tabs.iter().position(|label| label.tab == tab) {
+                tabs::reordered(&mut shown.tabs, from, to);
+            }
+            shown.selected = shown
+                .tabs
+                .iter()
+                .position(|label| Some(label.tab) == selected)
+                .unwrap_or(0);
+        }
+        let position = |tab: u64| shown.tabs.iter().position(|label| label.tab == tab);
+        let dragged = drag.and_then(|drag| position(drag.tab));
+        let hovered = iv.hovered.get().and_then(position);
+        let gap = iv.gap.get().map(|gap| gap.min(count));
+        // The lone tab is today's title bar; with a tab on its way in it is the first chip.
+        let single = count == 1 && gap.is_none();
+        // The layout's place for the tab at `index`: past the gap, one on.
+        let seat = |index: usize| tabs::seat(index, gap);
+        let bar = self.bar_for(
+            count + usize::from(gap.is_some()),
+            seat(shown.selected),
+            hovered.map(seat),
+            dragged.map(seat),
+        );
         let mut strip = bar.layout();
         let selected_tab = shown.tabs.get(shown.selected).map(|label| label.tab);
         let mut revealed = false;
         let was_overflowing = iv.overflowed.replace(strip.overflow);
-        let resized = (iv.width.replace(bounds.size.width) - bounds.size.width).abs() > 0.5;
+        let resized = (iv.width.replace(bar.width) - bar.width).abs() > 0.5;
         if single {
             iv.revealed.set(None);
         } else {
@@ -2423,7 +2625,7 @@ impl TabBar {
             // change of the selection slides there.
             let kept_in_sight = strip.overflow && (!was_overflowing || resized);
             if selection_changed || kept_in_sight {
-                let target = strip.revealing(shown.selected);
+                let target = strip.revealing(seat(shown.selected));
                 if target != strip.scroll {
                     strip = Bar {
                         scroll: target,
@@ -2435,6 +2637,7 @@ impl TabBar {
             }
         }
         iv.scroll.set(strip.scroll);
+        let bounds = self.bounds();
         let top = ((bounds.size.height - CHIP_HEIGHT) / 2.0).max(0.0);
         // The chips live in the strip's space: its left edge is theirs.
         iv.strip.setFrame(NSRect::new(
@@ -2444,10 +2647,12 @@ impl TabBar {
         let (chips, reflow) = self.chips_for(&shown.tabs);
         let reduce = self.reduce_motion();
         let motion = Motion::of(reduce);
-        let slide = ((reflow || revealed) && motion.reflow > 0.0).then_some(motion.reflow);
+        let glide = iv.glide.take();
+        let slide = ((reflow || revealed || glide) && motion.reflow > 0.0).then_some(motion.reflow);
         let hints = iv.hints.get();
-        for (index, (chip, span)) in chips.iter().zip(&strip.chips).enumerate() {
+        for (index, chip) in chips.iter().enumerate() {
             let label = &shown.tabs[index];
+            let span = strip.chips[seat(index)];
             // The tab being named shows its field instead of title and indicator.
             let naming = iv.renaming.get() == Some(label.tab);
             let title = if naming {
@@ -2457,8 +2662,12 @@ impl TabBar {
             } else {
                 label.title.clone()
             };
+            // A tab dragged along the strip is at the pointer, at once; the rest slide.
+            let carried = drag
+                .filter(|drag| !drag.torn && dragged == Some(index))
+                .and_then(|drag| drag.at);
             let frame = NSRect::new(
-                NSPoint::new(span.x - strip.span.x, top),
+                NSPoint::new(carried.map_or(span.x, |(left, _)| left) - strip.span.x, top),
                 NSSize::new(span.width, CHIP_HEIGHT),
             );
             let mark = (label.mark != HostMark::None).then(|| theme.mark_rgb(label.mark));
@@ -2481,12 +2690,20 @@ impl TabBar {
                     label.mark,
                 ),
                 selected: index == shown.selected,
-                hovered: hovered == Some(index) && !naming,
+                hovered: (hovered == Some(index) || carried.is_some()) && !naming,
                 single,
+                lifted: carried.is_some(),
+                ghost: drag.is_some_and(|drag| drag.torn && dragged == Some(index)),
             };
-            chip.set(frame, &look, palette, motion, slide);
+            chip.set(
+                frame,
+                &look,
+                palette,
+                motion,
+                slide.filter(|_| carried.is_none()),
+            );
             if naming {
-                self.place_field(*span, top, palette, single);
+                self.place_field(span, top, palette, single);
             }
         }
         let inside = |x: f64| x - strip.span.x;
@@ -2749,11 +2966,270 @@ impl TabBar {
         }
     }
 
-    /// A chip was pressed: the window's applier selects it.
-    fn select(&self, tab: u64) {
-        if let Some(window) = self.terminal_window() {
-            window.select_tab(tab);
+    /// A chip was pressed: the window's applier selects it; `false` if it would not.
+    fn select(&self, tab: u64) -> bool {
+        self.terminal_window()
+            .is_some_and(|window| window.select_tab(tab))
+    }
+
+    // ─── Dragging a tab ──────────────────────────────────────────────────
+
+    /// The chip of tab `tab`.
+    fn chip(&self, tab: u64) -> Option<Retained<Chip>> {
+        self.ivars()
+            .chips
+            .borrow()
+            .iter()
+            .find(|chip| chip.tab() == tab)
+            .cloned()
+    }
+
+    /// The tab whose chip is under `point` (the bar's space), if any — a chip scrolled out of
+    /// the strip's sight is not under anything.
+    fn tab_under(&self, point: NSPoint) -> Option<u64> {
+        let iv = self.ivars();
+        let local = self.convertPoint_toView(point, Some(&iv.strip));
+        if !contains(iv.strip.bounds(), local) {
+            return None;
         }
+        let chips = iv.chips.borrow();
+        chips
+            .iter()
+            .find(|chip| contains(chip.frame(), local))
+            .map(|chip| chip.tab())
+    }
+
+    /// The strip as the window's list lays it out — without a drag's preview or a gap — with
+    /// `room` more places than it has tabs: 0 is the strip as it is, 1 the strip a carried tab
+    /// would make. Places are measured on the one that is on screen when the tab lets go
+    /// ([`Strip::slot_at`]), so the room that opens is under the pointer.
+    fn strip_with_room(&self, room: usize) -> Option<Strip> {
+        let count = self.ivars().shown.borrow().tabs.len();
+        (count > 0).then(|| self.bar_for(count + room, 0, None, None).layout())
+    }
+
+    /// The press on tab `tab`'s chip, as `event` reports it, may become a drag. Not among
+    /// fewer than two tabs (a lone title is the window's), not while a name is being typed, and
+    /// not while the window holds a question of its own: the tab could not move then.
+    fn grip(&self, tab: u64, event: &NSEvent) {
+        let iv = self.ivars();
+        iv.drag.set(None);
+        let free = self
+            .terminal_window()
+            .is_some_and(|window| window.selection_free());
+        if iv.renaming.get().is_some() || !free {
+            return;
+        }
+        let press = self.convertPoint_fromView(event.locationInWindow(), None);
+        let index = iv
+            .shown
+            .borrow()
+            .tabs
+            .iter()
+            .position(|label| label.tab == tab);
+        let grip = index.and_then(|index| {
+            let laid = iv.laid.borrow();
+            Grip::new(laid.as_ref()?, index, press.x)
+        });
+        if let Some(grip) = grip {
+            iv.drag.set(Some(Dragging {
+                tab,
+                grip,
+                at: None,
+                torn: false,
+            }));
+        }
+    }
+
+    /// The pointer moved with the button down on tab `tab`'s chip ([`Grip::track`]): past
+    /// the slop the chip follows it along the strip and the others make room; out of the bar the
+    /// tab is carried away in a drag session.
+    fn drag(&self, tab: u64, event: &NSEvent) {
+        let iv = self.ivars();
+        let Some(mut drag) = iv.drag.get().filter(|drag| drag.tab == tab && !drag.torn) else {
+            return;
+        };
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let size = self.bounds().size;
+        let (tracked, strip_x) = {
+            let laid = iv.laid.borrow();
+            let Some(laid) = laid.as_ref() else {
+                return;
+            };
+            (
+                drag.grip
+                    .track(laid, (point.x, point.y), (size.width, size.height)),
+                laid.span.x,
+            )
+        };
+        match tracked {
+            Drag::Press => iv.drag.set(Some(drag)),
+            Drag::Reorder { left, to } => {
+                let first = drag.at.is_none();
+                let same_place = drag.at.is_some_and(|(_, place)| place == to);
+                drag.at = Some((left, to));
+                iv.drag.set(Some(drag));
+                let chip = self.chip(tab);
+                if first && let Some(chip) = &chip {
+                    // Above its neighbours for as long as it is held.
+                    iv.strip.addSubview_positioned_relativeTo(
+                        chip,
+                        NSWindowOrderingMode::Above,
+                        None,
+                    );
+                }
+                match chip {
+                    // Only the held chip moved: the rest of the strip is as it was laid out.
+                    Some(chip) if same_place && !first => chip.follow(left - strip_x),
+                    _ => self.lay_out(),
+                }
+            }
+            Drag::TearOff => {
+                // Only a tab a session has taken is torn: were none started, the press goes on
+                // as a drag along the strip and no faint place is left behind.
+                if self.tear_off(tab, event) {
+                    drag.at = None;
+                    drag.torn = true;
+                    iv.drag.set(Some(drag));
+                    iv.glide.set(true);
+                    self.lay_out();
+                }
+            }
+        }
+    }
+
+    /// The tab leaves the bar: a drag session carries it (`tab_drag`), and the application keeps
+    /// the session's source until it ends. `false` if none could start.
+    fn tear_off(&self, tab: u64, event: &NSEvent) -> bool {
+        let (Some(chip), Some(app)) = (self.chip(tab), app::delegate(self.mtm())) else {
+            return false;
+        };
+        app.hold_tab_drag(tab_drag::begin(&chip, tab, event));
+        true
+    }
+
+    /// The button is let go on tab `tab`'s chip: a tab moved along the strip settles in the place
+    /// it was carried to — the window's applier orders it, once, however many places it passed
+    /// — and the chip glides there from the pointer.
+    fn release(&self, tab: u64, event: &NSEvent) {
+        let iv = self.ivars();
+        let Some(drag) = iv.drag.get().filter(|drag| drag.tab == tab) else {
+            return;
+        };
+        if drag.torn {
+            // The session has it; this release is not its end.
+            return;
+        }
+        iv.drag.set(None);
+        // A click that never moved the tab is only a click.
+        let Some((_, to)) = drag.at else {
+            return;
+        };
+        iv.glide.set(true);
+        // Where the tab stands in the list now, not where it stood at the press: the list can
+        // change under a held button (a background tab's shell exits).
+        let now = iv
+            .shown
+            .borrow()
+            .tabs
+            .iter()
+            .position(|label| label.tab == tab);
+        match self.terminal_window() {
+            Some(window) if now.is_some_and(|now| now != to) => window.move_tab(tab, to),
+            _ => self.lay_out(),
+        }
+        // No enter or exit comes while the button is down: the chip under the pointer now is
+        // the hovered one.
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.hover(self.tab_under(point));
+    }
+
+    /// The drag session that carried a tab away from this bar is over, wherever the tab went: its
+    /// chip returns to full strength in its place, or is gone with its tab, and the chip under
+    /// the pointer is the hovered one (no enter came during the drag).
+    pub(crate) fn drag_ended(&self) {
+        let iv = self.ivars();
+        iv.drag.set(None);
+        let under = self.window().and_then(|window| {
+            let point =
+                self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
+            self.tab_under(point)
+        });
+        iv.hovered.set(under);
+        iv.glide.set(true);
+        self.lay_out();
+    }
+
+    /// A tab carried over this bar opens room at slot `gap` (`None` closes it).
+    pub(crate) fn open_gap(&self, gap: Option<usize>) {
+        let iv = self.ivars();
+        if iv.gap.replace(gap) != gap {
+            iv.glide.set(true);
+            self.lay_out();
+        }
+    }
+
+    /// Closes the gap **without** a layout of its own — the window's list is about to take the
+    /// tab in, and that layout is the one that matters: the chips move from where they stand
+    /// (gap open) to where they will stand (the tab there), not through a gap closing first.
+    pub(crate) fn close_gap_quietly(&self) {
+        self.ivars().gap.set(None);
+    }
+
+    /// `draggingEntered:` and `draggingUpdated:`: the carried tab over this bar. A tab from
+    /// another window opens room at the slot under the pointer **of the strip it would make**, so
+    /// the room is under the pointer and the answer does not depend on the room; one of this
+    /// window's own shows no gap (its faint chip is its place) and is simply taken. Anything that
+    /// is not a tab of this process, or that this window cannot take now (it holds a question
+    /// of its own), is not taken: the drop is then on nothing, and the tab becomes a window.
+    fn carried_over(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        let Some(tab) = tab_drag::carried(info) else {
+            return NSDragOperation::None;
+        };
+        let Some(window) = self
+            .terminal_window()
+            .filter(|window| window.selection_free())
+        else {
+            self.open_gap(None);
+            return NSDragOperation::None;
+        };
+        let gap = window.index_of(tab).is_none().then(|| {
+            let point = self.convertPoint_fromView(info.draggingLocation(), None);
+            self.strip_with_room(1)
+                .map_or(0, |strip| strip.slot_at(point.x))
+        });
+        self.open_gap(gap);
+        NSDragOperation::Move
+    }
+
+    /// `performDragOperation:`: the carried tab is let go here. What it comes to is decided now
+    /// ([`tabs::landing`]) and carried out when the session has ended, in a turn of its own; the
+    /// gap stays open until then, so the strip does not close up and open again. Always
+    /// accepted if it is a tab this window takes: a refusal would read as a drop on nothing and
+    /// make a window.
+    fn accept_drop(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+        let Some(tab) = tab_drag::carried(info) else {
+            return false;
+        };
+        let (Some(window), Some(app)) = (self.terminal_window(), app::delegate(self.mtm())) else {
+            return false;
+        };
+        let point = self.convertPoint_fromView(info.draggingLocation(), None);
+        let over = if window.index_of(tab).is_some() {
+            Over::Own {
+                place: self
+                    .strip_with_room(0)
+                    .map_or(0, |strip| strip.slot_at(point.x)),
+            }
+        } else {
+            Over::Other {
+                gap: self
+                    .strip_with_room(1)
+                    .map_or(0, |strip| strip.slot_at(point.x)),
+            }
+        };
+        app.tab_dropped(window.id(), tabs::landing(Some(over)));
+        true
     }
 
     /// A chip's `×` or middle click: the window asks and closes, a turn

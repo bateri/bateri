@@ -22,7 +22,8 @@
 //!
 //! The keyboard flows to the PTY from here (`view`, `clipboard`) and the mouse
 //! to the session (selection and scrolling, `view`); a file dropped from Finder
-//! lands on the input line through `view`'s drag destination. The main menu
+//! lands on the input line through `view`'s drag destination, and a tab dragged
+//! out of its strip travels as a drag session of its own (`tab_drag`). The main menu
 //! (`menu`), the settings window (`settings_window`, writing through the
 //! settings edit path), the floating search bar (`search_bar`), the split
 //! container (`split_view`), the remote upload's sheet, queue driver and
@@ -58,6 +59,7 @@ mod stats;
 mod stats_popover;
 mod tab;
 mod tab_bar;
+mod tab_drag;
 mod updater;
 mod uploader;
 mod view;

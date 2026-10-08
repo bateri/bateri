@@ -31,6 +31,13 @@ of every installed copy. A version without a section is not released.
   trackpad — fading out at the edges, and a button beside `+` (Window ▸ Show
   All Tabs, ⇧⌘\) lists every tab, with the one you are on ticked and a dot
   for what is going on in it. Selecting a tab brings it into view.
+- **Drag a tab to put it where you want it, or to give it a window.** Drag a
+  tab along the row and the others make room; let go and it stays there. Pull
+  it down into the window, or out of it, and it becomes a window of its own
+  where you let go; drop it on another bateri window's row and it joins that
+  window at the place you point to, with a gap opening there as you come over.
+  Nothing restarts: the tab keeps its shell, its running command and any
+  question it was asking.
 - **Move a tab to a window of its own, or gather your windows into one.**
   Right-click a tab for Close Tab, Close Other Tabs (one question for all of
   them), Move Tab to New Window and Rename Tab…. Window ▸ Move Tab to New

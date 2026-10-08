@@ -11,7 +11,14 @@
 //! them, so the relation is one to many and nothing here assumes otherwise. The identity type
 //! is generic: the shell picks whatever names its tabs.
 //!
-//! Coordinates are points, horizontal only, in the **bar's** space: the bar spans the window's
+//! **A dragged tab** is pure here too: [`Grip`] turns the pointer's travel after a press into
+//! "not yet a drag", "the tab is at this x and would take this place" or "it left the bar"
+//! (the slop, the place and the tear-off distance are decided here once), [`Strip::slot_at`]
+//! says which slot of a strip is under a point, and [`landing`] what letting go
+//! comes to — a place in its own strip, a place in another window's, or a window of its own.
+//!
+//! Coordinates are points in the **bar's** space (the layout is horizontal only; the other axis
+//! appears only in how far a dragged pointer is from the bar): the bar spans the window's
 //! full width and its origin is the window's left edge. The title row's height is not here — it
 //! is whatever AppKit reports for the window's title row, a single copy read from the window.
 
@@ -92,6 +99,25 @@ impl<K: Copy + Eq> Tabs<K> {
         }
         self.order.push(id);
         true
+    }
+
+    /// Puts a tab **at** `index` (past the end is the end) and selects it — where a tab let go on
+    /// the strip lands: the user chose the place, and the tab they carried is the one they look
+    /// at. A tab already here moves instead of being added twice.
+    pub fn insert_at(&mut self, id: K, index: usize) {
+        if self.index_of(id).is_some() {
+            self.move_to(id, index);
+        } else {
+            let at = index.min(self.order.len());
+            self.order.insert(at, id);
+            // The selection is an index into the order: it follows its tab past the new one.
+            if let Some(selected) = self.selected.as_mut()
+                && *selected >= at
+            {
+                *selected += 1;
+            }
+        }
+        self.select(id);
     }
 
     /// Removes a tab; `false` if it was not here. Closing the selected tab selects its **right**
@@ -496,6 +522,165 @@ impl Strip {
     pub fn wheeled(&self, dx: f64, dy: f64) -> f64 {
         let step = if dx.abs() > dy.abs() { dx } else { dy };
         (self.scroll + step).clamp(0.0, self.max_scroll)
+    }
+}
+
+/// How far along the strip the pointer travels from a press before the press is a drag: a click
+/// that slides a pixel or two is still a click, and its tab stays where it is.
+pub const DRAG_SLOP: f64 = 4.0;
+
+/// How far outside the bar the pointer may wander with a tab held before the tab comes away from
+/// it. The tab is 28 pt in a row of about 40, so the pointer is already near the row's edge when
+/// it leaves the tab, and a gesture along the strip drifts a few points up or down without
+/// meaning to leave; this much beyond the row is a pull, not a drift. Measured from the bar's
+/// edge on all four sides, so a pointer taken out of the window sideways tears too.
+pub const TEAR_DISTANCE: f64 = 12.0;
+
+/// How far `(x, y)` is outside a `width × height` bar at the origin: 0 inside, otherwise the
+/// larger of the two overshoots — a corner is no further than its worse side.
+pub fn distance_outside(x: f64, y: f64, width: f64, height: f64) -> f64 {
+    let along = (-x).max(x - width).max(0.0);
+    let across = (-y).max(y - height).max(0.0);
+    along.max(across)
+}
+
+/// What the pointer's travel since a press on a tab means ([`Grip::track`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Drag {
+    /// Not far enough yet: still a click.
+    Press,
+    /// The tab follows the pointer along the strip. `left` is where its left edge is drawn (the
+    /// bar's space), `to` the place it would take if let go now.
+    Reorder { left: f64, to: usize },
+    /// The pointer left the bar: the tab comes away from the strip.
+    TearOff,
+}
+
+/// A press on a tab, until the pointer is let go or the tab comes away: where in the tab it was
+/// held and whether it has become a drag. Once a drag, a press is one for good — moving back to
+/// where it began does not take the tab out of the pointer's hand.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grip {
+    from: usize,
+    /// Where along the bar the pointer went down.
+    press: f64,
+    /// How far into the tab it was held: the tab's left edge is the pointer less this.
+    grab: f64,
+    moving: bool,
+}
+
+impl Grip {
+    /// The grip of a press at `x` (the bar's space) on tab `from` of `strip`; `None` for a tab
+    /// that is not there and for a lone tab, whose title is not a tab to carry.
+    pub fn new(strip: &Strip, from: usize, x: f64) -> Option<Self> {
+        let chip = strip.chips.get(from).filter(|_| strip.slot > 0.0)?;
+        Some(Self {
+            from,
+            press: x,
+            grab: x - chip.x,
+            moving: false,
+        })
+    }
+
+    /// The tab pressed: its place in the strip when the press began.
+    pub fn from(&self) -> usize {
+        self.from
+    }
+
+    /// Reads the pointer at `(x, y)` in a `bar` of `(width, height)`. The tab is held where it was
+    /// grabbed, kept within what the strip shows (a scrolled-away place cannot be dropped on) and
+    /// among the places that exist; `strip` is the layout now, so a strip the wheel has moved
+    /// since the press is read where it is.
+    pub fn track(&mut self, strip: &Strip, (x, y): (f64, f64), bar: (f64, f64)) -> Drag {
+        if distance_outside(x, y, bar.0, bar.1) > TEAR_DISTANCE {
+            return Drag::TearOff;
+        }
+        if !self.moving && (x - self.press).abs() < DRAG_SLOP {
+            return Drag::Press;
+        }
+        self.moving = true;
+        let last = strip.chips.len().saturating_sub(1);
+        let width = strip
+            .chips
+            .get(self.from)
+            .map_or(MIN_WIDTH, |chip| chip.width);
+        let least = strip.span.x;
+        let most = (strip.span.end() - width)
+            .min(strip.span.x - strip.scroll + last as f64 * strip.slot)
+            .max(least);
+        let left = (x - self.grab).clamp(least, most);
+        let place = (left - strip.span.x + strip.scroll) / strip.slot;
+        Drag::Reorder {
+            left,
+            to: (place.round().max(0.0) as usize).min(last),
+        }
+    }
+}
+
+impl Strip {
+    /// The place under `x`: the slot of the strip that holds that point, among `0..chips.len()`
+    /// — the first for a point left of the strip, the last from its visible end on (over the
+    /// buttons, in the drag margin). It is a function of the layout and `x` alone, so a tab carried over a
+    /// strip can be placed by it while the strip is laid out **with room made** at the answer: the
+    /// room opens where the pointer is, and moves nothing the answer depends on.
+    pub fn slot_at(&self, x: f64) -> usize {
+        let last = self.chips.len().saturating_sub(1);
+        if self.slot <= 0.0 || x < self.span.x {
+            return 0;
+        }
+        if x >= self.span.end() {
+            // Past the strip's visible end, over the buttons or the drag margin: the end of the
+            // tabs, whichever of them are scrolled in view.
+            return last;
+        }
+        let place = ((x - self.span.x + self.scroll) / self.slot).floor();
+        (place.max(0.0) as usize).min(last)
+    }
+}
+
+/// The layout's place for the tab at `index` when room is made at `gap` (a tab on its way in):
+/// the tabs from the gap on take the next place.
+pub fn seat(index: usize, gap: Option<usize>) -> usize {
+    index + usize::from(gap.is_some_and(|gap| index >= gap))
+}
+
+/// `items` with the one at `from` taken out and put back so that it stands at `to` (past the end
+/// is the end) — the order a dragged tab's neighbours lay out in while it is held.
+pub fn reordered<T>(items: &mut Vec<T>, from: usize, to: usize) {
+    if from < items.len() {
+        let item = items.remove(from);
+        items.insert(to.min(items.len()), item);
+    }
+}
+
+/// What a carried tab is let go over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Over {
+    /// Its own window's strip, over the slot `place` ([`Strip::slot_at`] of the strip as it is).
+    Own { place: usize },
+    /// Another bateri window's strip, over the slot `gap` of that strip **with the room made**
+    /// for it ([`Strip::slot_at`]): where the tab is inserted.
+    Other { gap: usize },
+}
+
+/// What letting a carried tab go does ([`landing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    /// It stays in its window, at this place in the order.
+    Reorder(usize),
+    /// It joins another window, at this place.
+    Join(usize),
+    /// It was let go over no strip: a window of its own, where the pointer was.
+    Detach,
+}
+
+/// The decision of a release: over a strip (`Some`) the tab lands there, over nothing — the
+/// desktop, a pane, another application — it becomes a window.
+pub fn landing(over: Option<Over>) -> Landing {
+    match over {
+        Some(Over::Own { place }) => Landing::Reorder(place),
+        Some(Over::Other { gap }) => Landing::Join(gap),
+        None => Landing::Detach,
     }
 }
 
@@ -971,6 +1156,27 @@ mod tests {
         assert_eq!(t.selected(), Some(2));
     }
 
+    /// A tab let go on a strip lands where the pointer let it go and is the one on screen.
+    #[test]
+    fn a_dropped_tab_lands_at_its_place_and_is_selected() {
+        let mut t = tabs(&[1, 2, 3], 2);
+        t.insert_at(9, 1);
+        assert_eq!(t.ids(), &[1, 9, 2, 3]);
+        assert_eq!((t.selected(), t.selected_index()), (Some(9), Some(1)));
+        t.insert_at(8, 0);
+        assert_eq!(t.ids(), &[8, 1, 9, 2, 3], "before the first");
+        t.insert_at(7, 99);
+        assert_eq!(t.ids(), &[8, 1, 9, 2, 3, 7], "past the end is the end");
+        assert_eq!(t.selected(), Some(7));
+        t.insert_at(8, 5);
+        assert_eq!(
+            t.ids(),
+            &[1, 9, 2, 3, 7, 8],
+            "a known id moves instead of being added twice"
+        );
+        assert_eq!(t.selected(), Some(8));
+    }
+
     /// The name a rename field's text asks for: trimmed, and no name at all when it is empty or
     /// says what the tab's own title already says — the tab goes back to its title.
     #[test]
@@ -1375,6 +1581,249 @@ mod tests {
         assert_eq!(strip.wheeled(-500.0, 0.0), 0.0);
         assert_eq!(strip.wheeled(0.0, 5000.0), 918.0);
         assert_eq!(bar(1000.0, 3).layout().wheeled(40.0, 0.0), 0.0);
+    }
+
+    /// A strip of `count` tabs in a 1000 pt window, chips at 84, 270, 456 …, and a grip on
+    /// `from` pressed `grab` points into it.
+    fn gripped(count: usize, from: usize, grab: f64) -> (Strip, Grip) {
+        let strip = bar(1000.0, count).layout();
+        let grip = Grip::new(&strip, from, strip.chips[from].x + grab).unwrap();
+        (strip, grip)
+    }
+
+    /// The pointer inside the bar, level with the chips: a 40 pt row.
+    fn level(x: f64) -> (f64, f64) {
+        (x, 20.0)
+    }
+
+    const ROW: (f64, f64) = (1000.0, 40.0);
+
+    #[test]
+    fn a_press_becomes_a_drag_past_the_slop_and_stays_one() {
+        let (strip, mut grip) = gripped(3, 0, 16.0);
+        assert_eq!(grip.track(&strip, level(102.0), ROW), Drag::Press);
+        assert_eq!(
+            grip.track(&strip, level(97.0), ROW),
+            Drag::Press,
+            "either way"
+        );
+        assert_eq!(
+            grip.track(&strip, level(105.0), ROW),
+            Drag::Reorder { left: 89.0, to: 0 }
+        );
+        assert_eq!(
+            grip.track(&strip, level(101.0), ROW),
+            Drag::Reorder { left: 85.0, to: 0 },
+            "back near the press it is still the drag it became"
+        );
+    }
+
+    #[test]
+    fn a_dragged_tab_takes_the_place_its_left_edge_is_nearest() {
+        let (strip, mut grip) = gripped(3, 0, 16.0);
+        // The chip's left edge is the pointer less where it was held; slots are 186 apart.
+        assert_eq!(
+            grip.track(&strip, level(290.0), ROW),
+            Drag::Reorder { left: 274.0, to: 1 }
+        );
+        assert_eq!(
+            grip.track(&strip, level(190.0), ROW),
+            Drag::Reorder { left: 174.0, to: 0 },
+            "less than half a slot is still the first place"
+        );
+        assert_eq!(
+            grip.track(&strip, level(192.0), ROW),
+            Drag::Reorder { left: 176.0, to: 0 },
+            "92 of the 186 points to the next place"
+        );
+        assert_eq!(
+            grip.track(&strip, level(193.0), ROW),
+            Drag::Reorder { left: 177.0, to: 1 },
+            "…and 93, half, is the next one"
+        );
+        // A tab dragged left from the last place.
+        let (strip, mut grip) = gripped(3, 2, 100.0);
+        assert_eq!(
+            grip.track(&strip, level(500.0), ROW),
+            Drag::Reorder { left: 400.0, to: 2 }
+        );
+        assert_eq!(
+            grip.track(&strip, level(300.0), ROW),
+            Drag::Reorder { left: 200.0, to: 1 }
+        );
+    }
+
+    #[test]
+    fn a_dragged_tab_stays_inside_the_strip_and_its_places() {
+        let (strip, mut grip) = gripped(3, 1, 50.0);
+        assert_eq!(
+            grip.track(&strip, level(5.0), ROW),
+            Drag::Reorder { left: 84.0, to: 0 },
+            "not left of the strip"
+        );
+        assert_eq!(
+            grip.track(&strip, level(990.0), ROW),
+            Drag::Reorder { left: 456.0, to: 2 },
+            "not right of the last place, though the strip goes on"
+        );
+        // A scrolled strip: the places are the ones in view, and the place is read from the
+        // scroll now, not the one at the press.
+        let scrolled = Bar {
+            scroll: 400.0,
+            ..bar(720.0, 12)
+        }
+        .layout();
+        let mut grip = Grip::new(&scrolled, 5, scrolled.chips[5].x + 10.0).unwrap();
+        let end = scrolled.span.end() - MIN_WIDTH;
+        assert_eq!(
+            grip.track(&scrolled, level(719.0), (720.0, 40.0)),
+            Drag::Reorder {
+                left: end,
+                to: ((end - scrolled.span.x + 400.0) / 122.0).round() as usize
+            },
+            "no further than the edge it can be seen at"
+        );
+        assert_eq!(
+            grip.track(&scrolled, level(0.0), (720.0, 40.0)),
+            Drag::Reorder {
+                left: scrolled.span.x,
+                to: 3
+            },
+            "the first place in view: 400 / 122 rounds to 3"
+        );
+    }
+
+    #[test]
+    fn a_tab_pulled_away_from_the_bar_leaves_it() {
+        let (strip, mut grip) = gripped(3, 1, 20.0);
+        // Within TEAR_DISTANCE of the row, below or above: still reordering.
+        assert!(matches!(
+            grip.track(&strip, (300.0, 40.0 + TEAR_DISTANCE), ROW),
+            Drag::Reorder { .. }
+        ));
+        assert!(matches!(
+            grip.track(&strip, (300.0, -TEAR_DISTANCE), ROW),
+            Drag::Reorder { .. }
+        ));
+        // Past it: the tab comes away, with no slop to cross first.
+        let (strip, mut fresh) = gripped(3, 1, 20.0);
+        let press = strip.chips[1].x + 20.0;
+        assert_eq!(
+            fresh.track(&strip, (press, 41.0 + TEAR_DISTANCE), ROW),
+            Drag::TearOff
+        );
+        assert_eq!(
+            grip.track(&strip, (300.0, -TEAR_DISTANCE - 1.0), ROW),
+            Drag::TearOff,
+            "up and out of the window too"
+        );
+        assert_eq!(
+            grip.track(&strip, (-TEAR_DISTANCE - 1.0, 20.0), ROW),
+            Drag::TearOff,
+            "and sideways"
+        );
+        assert_eq!(
+            grip.track(&strip, (1000.0 + TEAR_DISTANCE + 1.0, 20.0), ROW),
+            Drag::TearOff
+        );
+    }
+
+    #[test]
+    fn a_lone_tab_or_an_absent_one_cannot_be_gripped() {
+        let single = bar(1000.0, 1).layout();
+        assert_eq!(
+            Grip::new(&single, 0, 500.0),
+            None,
+            "its title moves the window"
+        );
+        let three = bar(1000.0, 3).layout();
+        assert_eq!(Grip::new(&three, 3, 500.0), None);
+    }
+
+    #[test]
+    fn the_slot_under_a_point_is_the_one_whose_extent_holds_it() {
+        let strip = bar(1000.0, 3).layout();
+        // Slots are 186 apart from 84: 84..270, 270..456, 456..642.
+        assert_eq!(strip.slot_at(100.0), 0);
+        assert_eq!(strip.slot_at(269.9), 0);
+        assert_eq!(
+            strip.slot_at(270.0),
+            1,
+            "the gap between two tabs is the later one's"
+        );
+        assert_eq!(strip.slot_at(500.0), 2);
+        assert_eq!(strip.slot_at(9999.0), 2, "right of the strip: the last");
+        assert_eq!(strip.slot_at(10.0), 0, "left of it: the first");
+        let scrolled = Bar {
+            scroll: 242.0,
+            ..bar(720.0, 12)
+        }
+        .layout();
+        // Slots of 122 from 84 − 242: tab 2 holds 86..208, so the places follow what is in view.
+        assert_eq!(scrolled.slot_at(146.0), 2);
+        assert_eq!(scrolled.slot_at(207.9), 2);
+        assert_eq!(scrolled.slot_at(208.0), 3);
+        assert_eq!(
+            scrolled.slot_at(700.0),
+            11,
+            "over the buttons: the end, though the tabs there are scrolled out of sight"
+        );
+        let single = bar(1000.0, 1).layout();
+        assert_eq!(single.slot_at(700.0), 0, "a lone title has one place");
+    }
+
+    #[test]
+    fn room_made_for_a_tab_moves_the_places_not_the_answer() {
+        // A tab carried over a strip of 5 is placed on the strip of 6 it will make: the room
+        // opens under the pointer, whatever the tabs' widths become with one more.
+        let six = bar(1000.0, 6).layout();
+        let x = 400.0;
+        let gap = six.slot_at(x);
+        let seated: Vec<usize> = (0..5).map(|index| seat(index, Some(gap))).collect();
+        assert!(
+            !seated.contains(&gap),
+            "no tab sits where the carried one goes: {seated:?} / {gap}"
+        );
+        assert!(
+            six.chips[gap].x <= x && x < six.chips[gap].end() + GAP,
+            "the pointer is over the room that opened"
+        );
+    }
+
+    #[test]
+    fn the_tabs_from_a_gap_on_take_the_next_place() {
+        assert_eq!(seat(0, None), 0);
+        assert_eq!(seat(3, None), 3);
+        assert_eq!(seat(0, Some(2)), 0);
+        assert_eq!(seat(1, Some(2)), 1);
+        assert_eq!(seat(2, Some(2)), 3, "the tab at the gap moves on");
+        assert_eq!(seat(4, Some(2)), 5);
+        assert_eq!(seat(0, Some(0)), 1);
+    }
+
+    #[test]
+    fn a_held_tab_stands_at_its_place_among_the_others() {
+        let order = |from, to| {
+            let mut items = vec!['a', 'b', 'c', 'd'];
+            reordered(&mut items, from, to);
+            items.into_iter().collect::<String>()
+        };
+        assert_eq!(order(0, 2), "bcad");
+        assert_eq!(order(3, 0), "dabc");
+        assert_eq!(order(1, 1), "abcd");
+        assert_eq!(order(0, 99), "bcda", "past the end is the end");
+        assert_eq!(order(9, 0), "abcd", "an absent tab is no move");
+    }
+
+    #[test]
+    fn a_tab_let_go_lands_where_the_pointer_was() {
+        assert_eq!(landing(Some(Over::Own { place: 2 })), Landing::Reorder(2));
+        assert_eq!(landing(Some(Over::Other { gap: 1 })), Landing::Join(1));
+        assert_eq!(
+            landing(None),
+            Landing::Detach,
+            "over no strip: a window of its own"
+        );
     }
 
     /// Every combination of the five signals: the indicator is the first one that is on, in

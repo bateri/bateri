@@ -28,9 +28,10 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_clas
 use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
-    NSControlStateValueOn, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSScroller, NSScrollerStyle, NSWindow,
-    NSWindowNumberListOptions, NSWindowStyleMask, NSWindowUserTabbingPreference, NSWorkspace,
+    NSControlStateValueOn, NSDragOperation, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate,
+    NSMenuItem, NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSScroller,
+    NSScrollerStyle, NSWindow, NSWindowNumberListOptions, NSWindowStyleMask,
+    NSWindowUserTabbingPreference, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
     NSWorkspaceWillPowerOffNotification,
 };
@@ -53,8 +54,12 @@ use crate::settings_window::SettingsWindow;
 use crate::split::Axis;
 use crate::ssh_route::{self, Masters};
 use crate::tab::{Histories, TabHost, TerminalTab};
+use crate::tab_drag::TabDragSource;
+use crate::tabs::Landing;
 use crate::watch::{Notify, Watch};
-use crate::window::{self, Adopted, CloseScope, Launch, Note, TerminalWindow, fallen_back};
+use crate::window::{
+    self, Adopted, CloseScope, Launch, Note, Placement, TerminalWindow, fallen_back,
+};
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
 use crate::{child, focus, jobs, settings};
@@ -1402,6 +1407,16 @@ pub(crate) struct Ivars {
     /// ⌘ was last seen held alone: only then does a release or a key
     /// press walk the bars ([`AppDelegate::command_held`]).
     command_hinted: Cell<bool>,
+    /// The source of the tab being carried between windows
+    /// ([`tab_drag`](crate::tab_drag)), kept here from the session's start to a
+    /// turn after its end: the window the drag began in may close first, and
+    /// the session's own hold on its source is not relied on.
+    tab_drag: RefCell<Option<Retained<TabDragSource>>>,
+    /// Where the carried tab was let go on a bar — the window and the decision
+    /// ([`tabs::landing`](crate::tabs::landing)) — until the session ends and
+    /// [`AppDelegate::tab_drag_ended`] carries it out: the windows are not
+    /// touched inside the drop.
+    tab_drop: Cell<Option<(u64, Landing)>>,
 }
 
 define_class!(
@@ -2676,6 +2691,8 @@ impl AppDelegate {
             layout_save_pending: Cell::new(false),
             command_monitor: RefCell::new(None),
             command_hinted: Cell::new(false),
+            tab_drag: RefCell::new(None),
+            tab_drop: Cell::new(None),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -3454,6 +3471,23 @@ impl AppDelegate {
         self.layout_changed();
     }
 
+    /// Every screen's visible area (no menu bar, no Dock) as frames — what a window frame is
+    /// clamped onto ([`clamp_frame`]).
+    fn visible_frames(&self) -> Vec<Frame> {
+        NSScreen::screens(self.mtm())
+            .iter()
+            .map(|screen| {
+                let rect = screen.visibleFrame();
+                Frame {
+                    x: rect.origin.x,
+                    y: rect.origin.y,
+                    width: rect.size.width,
+                    height: rect.size.height,
+                }
+            })
+            .collect()
+    }
+
     /// Takes window `id` out of the list at once; its closing is the caller's.
     fn unlist_window(&self, id: u64) {
         let removed = {
@@ -3566,6 +3600,14 @@ impl AppDelegate {
     /// builds one), and the tab comes up in it ([`TerminalWindow::show_arrived`]).
     /// No shell is started or told to end.
     pub(crate) fn move_tab_to_new_window(&self, from: &TerminalWindow, tab: u64) {
+        self.tab_to_new_window(from, tab, None);
+    }
+
+    /// A tab let go over no bar becomes a window of its own, its title row under the
+    /// pointer at `at` (screen points) and the window kept on a visible screen — Move Tab to
+    /// New Window, where the user chose the place. Otherwise as
+    /// [`AppDelegate::move_tab_to_new_window`], whose cascade a chosen place replaces.
+    fn tab_to_new_window(&self, from: &TerminalWindow, tab: u64, at: Option<NSPoint>) {
         if from.tab_count() < 2 || !from.selection_free() {
             crate::preview::beep();
             return;
@@ -3577,19 +3619,141 @@ impl AppDelegate {
             .focused_pane()
             .session()
             .map_or_else(|| self.resolve_theme(), |session| session.theme());
-        let frame = from.ns_window().frame();
+        let source = from.ns_window().frame();
+        let frame = match at {
+            Some(at) => {
+                // The pointer lands in the middle of the title row: the bar's height, which is
+                // the window's one copy of it.
+                let row = from.bar().frame().size.height;
+                let wanted = Frame {
+                    x: at.x - source.size.width / 2.0,
+                    y: at.y + row / 2.0 - source.size.height,
+                    width: source.size.width,
+                    height: source.size.height,
+                };
+                let placed = clamp_frame(wanted, &self.visible_frames());
+                NSRect::new(
+                    NSPoint::new(placed.x, placed.y),
+                    NSSize::new(placed.width, placed.height),
+                )
+            }
+            None => source,
+        };
         let window =
             TerminalWindow::with_tab(self.mtm(), self.next_id(), from.run(), moved, Some(frame));
         window.set_notice(&self.ivars().notices.borrow().subtitle());
         self.ivars().windows.borrow_mut().push(window.clone());
         window.set_theme(theme);
         window.set_content_edge(self.settings().content_edge);
-        window.show_after(Some(from));
+        if at.is_some() {
+            window.show_at(frame);
+        } else {
+            window.show_after(Some(from));
+        }
         if self.ivars().run.is_some() {
             window.float_for_timed_run();
         }
         window.show_arrived();
         self.layout_changed();
+    }
+
+    /// The window that holds tab `tab` now.
+    fn window_holding(&self, tab: u64) -> Option<Retained<TerminalWindow>> {
+        self.windows()
+            .into_iter()
+            .find(|window| window.index_of(tab).is_some())
+    }
+
+    /// A tab carried out of its strip is in a session ([`crate::tab_drag`]); its source is kept
+    /// until the session's end is carried out ([`AppDelegate::tab_drag_ended`]).
+    pub(crate) fn hold_tab_drag(&self, source: Retained<TabDragSource>) {
+        self.ivars().tab_drag.replace(Some(source));
+    }
+
+    /// The carried tab was let go on window `onto`'s bar with the decision `landing`
+    /// ([`crate::tabs::landing`]); carried out when the session ends
+    /// ([`AppDelegate::tab_drag_ended`]).
+    pub(crate) fn tab_dropped(&self, onto: u64, landing: Landing) {
+        self.ivars().tab_drop.set(Some((onto, landing)));
+    }
+
+    /// The carried tab's session ended at screen point `at` with `operation`, `taken_back` if the
+    /// user ended it with Esc ([`crate::tab_drag::TabDragSource`]). Carried
+    /// out one main-queue turn later, outside AppKit's teardown of the session: a drop on a bar
+    /// lands the tab where it was let go ([`AppDelegate::land_tab`]); a drop on nothing makes it a
+    /// window there; a tab taken back stays in its strip.
+    pub(crate) fn tab_drag_ended(
+        &self,
+        tab: u64,
+        at: NSPoint,
+        operation: NSDragOperation,
+        taken_back: bool,
+    ) {
+        let dropped = self.ivars().tab_drop.take();
+        let detach = dropped.is_none() && operation == NSDragOperation::None && !taken_back;
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            let Some(app) = delegate(mtm) else {
+                return;
+            };
+            // The session is over; its source may go.
+            drop(app.ivars().tab_drag.take());
+            if let Some(from) = app.window_holding(tab) {
+                from.bar().drag_ended();
+            }
+            match dropped {
+                Some((onto, landing)) => {
+                    if let Some(onto) = app.window(onto) {
+                        app.land_tab(tab, &onto, landing);
+                    }
+                }
+                None if detach => {
+                    if let Some(from) = app.window_holding(tab) {
+                        app.tab_to_new_window(&from, tab, Some(at));
+                    }
+                }
+                None => {}
+            }
+            // The room a carried tab made on a bar closes — where it landed the window already
+            // took the tab into it, and where it did not (a refusal, a vow taken back) this does.
+            for window in app.windows() {
+                window.bar().open_gap(None);
+            }
+        });
+    }
+
+    /// A carried tab lands on window `onto`'s strip ([`crate::tabs::Landing`]): in its own
+    /// window it takes its place, in another it leaves its window as itself and joins at the
+    /// place ([`TerminalWindow::release_tab`], [`TerminalWindow::adopt_tab`]) — and the
+    /// window it left closes if that was its last tab, as in Merge All Windows. Nothing moves while either
+    /// window holds a question of its own (a beep).
+    fn land_tab(&self, tab: u64, onto: &TerminalWindow, landing: Landing) {
+        let Some(from) = self.window_holding(tab) else {
+            return;
+        };
+        match landing {
+            Landing::Reorder(index) => from.move_tab(tab, index),
+            Landing::Join(index) if from.id() != onto.id() => {
+                if !from.selection_free() || !onto.selection_free() {
+                    crate::preview::beep();
+                    return;
+                }
+                let Some(moved) = from.release_tab(tab) else {
+                    return;
+                };
+                onto.adopt_tab(&moved, Placement::At(index));
+                if from.tab_count() == 0 {
+                    // Out of the list now, as in `merge_all_windows`.
+                    self.unlist_window(from.id());
+                    from.close();
+                }
+                onto.select();
+                self.layout_changed();
+            }
+            // A join on its own window is a reorder; the bar says so, not this.
+            Landing::Join(_) | Landing::Detach => {}
+        }
     }
 
     /// Merge All Windows: every other terminal window's tabs, in strip order,
@@ -3628,7 +3792,7 @@ impl AppDelegate {
             moved.extend(other.release_tab(selected));
             moved.sort_by_key(|tab| tabs.iter().position(|first| first.id() == tab.id()));
             for tab in &moved {
-                into.adopt_tab(tab);
+                into.adopt_tab(tab, Placement::End);
             }
             // Out of the list now, not a turn after it closes
             // ([`AppDelegate::forget_window`]): a delayed save that fires in
@@ -3934,19 +4098,7 @@ impl AppDelegate {
         saved: &Saved,
         mut arriving: Option<&mut Arriving<'_>>,
     ) -> (bool, Option<Retained<TerminalWindow>>) {
-        let mtm = self.mtm();
-        let screens: Vec<Frame> = NSScreen::screens(mtm)
-            .iter()
-            .map(|screen| {
-                let rect = screen.visibleFrame();
-                Frame {
-                    x: rect.origin.x,
-                    y: rect.origin.y,
-                    width: rect.size.width,
-                    height: rect.size.height,
-                }
-            })
-            .collect();
+        let screens = self.visible_frames();
         let mut key = None;
         let mut restored = false;
         for window in &saved.windows {
@@ -5670,7 +5822,7 @@ mod tests {
             "back=0",
             "back_wakes=1",
         ] {
-            assert!(line.contains(token), "{token} yok: {line}");
+            assert!(line.contains(token), "{token} missing: {line}");
         }
         assert!(
             line.ends_with(" back=0 back_wakes=1 pipeline=ok"),
@@ -5770,7 +5922,7 @@ mod tests {
             "gpu_max=5.00ms",
             "startup=284.00ms",
         ] {
-            assert!(line.contains(token), "{token} yok: {line}");
+            assert!(line.contains(token), "{token} missing: {line}");
         }
         // A column below the floor **prints no number** and the reason can be read in the same
         // line's `samples=`/`floor=` pair. p95 and worst are silent

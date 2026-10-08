@@ -136,6 +136,11 @@ objc2-foundation = { workspace = true, features = [
 # The strip's scrolled edges fade out (`tab_bar`): `NSGradient` draws the
 # ramp from the theme's background to nothing. Only a header flag over
 # `objc2-foundation` headers already in the set; `Cargo.lock` did not move.
+# A tab carried out of its strip (`tab_drag`): `NSPasteboardItem` is the
+# writer that puts the tab's id on the drag pasteboard under bateri's own
+# type (the drag session's items are `NSDraggingItem`s above). Only a header
+# flag over `objc2-foundation` headers already in the set; `Cargo.lock` did not
+# move.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -151,7 +156,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSSecureTextField",
     "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea", "NSAttributedString",
     "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
-    "NSGradient",
+    "NSGradient", "NSPasteboardItem",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

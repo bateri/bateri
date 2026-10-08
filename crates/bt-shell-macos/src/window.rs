@@ -22,10 +22,11 @@
 //! the window, so their panes keep their grids and draw nothing.
 //!
 //! **Every change to the tab list goes through one applier** (select, add,
-//! close, name, leave for another window, join from one —
+//! close, name, reorder, leave for another window, join from one —
 //! [`TerminalWindow::select_tab`], [`TerminalWindow::add_tab`],
 //! [`TerminalWindow::close_tab_now`], [`TerminalWindow::rename_tab`],
-//! [`TerminalWindow::release_tab`], [`TerminalWindow::adopt_tab`]) and ends
+//! [`TerminalWindow::move_tab`], [`TerminalWindow::release_tab`],
+//! [`TerminalWindow::adopt_tab`]) and ends
 //! in a layout edge (`AppDelegate::layout_changed`): the selection, the
 //! order, the names and which window a tab is in are part of the layout the
 //! bound holder keeps and the crash restore reads, and nothing else would
@@ -37,7 +38,9 @@
 //! must not come up under it.
 //!
 //! **A tab moves between windows as itself** (Move Tab to New Window, Merge
-//! All Windows): it is taken out of one window's order and hierarchy and put
+//! All Windows, and a tab dragged out of its strip or onto another window's —
+//! the drag only picks the place, the move is the same one): it is taken out
+//! of one window's order and hierarchy and put
 //! into another's, never closed — its panes, shells, questions, indicators
 //! and name go on. It leaves the screen the way a closing tab does, hidden
 //! before its panes are told, and comes up the way a selected tab does; its
@@ -145,6 +148,15 @@ enum CloseTarget {
     Tabs(Vec<u64>),
     /// A single pane of a tab (tab and pane ids); the tab stays open.
     Pane { tab: u64, pane: u64 },
+}
+
+/// Where a tab that comes from another window goes ([`TerminalWindow::adopt_tab`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// Last, and the window keeps showing what it showed: Merge All Windows.
+    End,
+    /// At this place in the strip, and the tab is the one on screen: a tab let go on the strip.
+    At(usize),
 }
 
 /// Title of the Shell ▸ Close Tab item: with several panes ⌘W
@@ -1538,6 +1550,11 @@ impl TerminalWindow {
         self.ivars().order.borrow().len()
     }
 
+    /// Tab `id`'s place in the strip; `None` if it is not this window's.
+    pub(crate) fn index_of(&self, id: u64) -> Option<usize> {
+        self.ivars().order.borrow().index_of(id)
+    }
+
     /// The tab on screen: the title, the menu's split actions and the
     /// inheritance of a new tab or window are its.
     pub(crate) fn selected_tab(&self) -> Retained<TerminalTab> {
@@ -1793,21 +1810,47 @@ impl TerminalWindow {
         Some(tab)
     }
 
-    /// **The applier: a tab joins** from another window, at the end, not
-    /// selected — Merge All Windows brings tabs in without changing what this
-    /// window shows. It comes in hidden, its panes hidden with it, and learns
-    /// this window's screen ([`TerminalTab::refresh_geometry`]: the scale is
-    /// read from the window the container is in, and a move between screens of
-    /// the same size sends no notice). Its questions, indicators and name came
-    /// with it. A layout edge.
-    pub(crate) fn adopt_tab(&self, tab: &Retained<TerminalTab>) {
+    /// **The applier: a tab joins** from another window ([`Placement`]). It comes in hidden, its
+    /// panes hidden with it, and learns this window's screen
+    /// ([`TerminalTab::refresh_geometry`]: the scale is read from the window the container is
+    /// in, and a move between screens of the same size sends no notice). Its questions,
+    /// indicators and name came with it. A layout edge.
+    ///
+    /// At the end and unselected (Merge All Windows) the window shows what it showed. At a place
+    /// (a tab let go on the strip) the tab is selected and comes up the way a selected tab does
+    /// ([`Self::switch`]) — what the window showed before leaves the screen first.
+    pub(crate) fn adopt_tab(&self, tab: &Retained<TerminalTab>, placement: Placement) {
         tab.moved_to(self.id());
         tab.container().setHidden(true);
         self.ivars().root.add_container(tab.container());
         self.ivars().tabs.borrow_mut().push(tab.clone());
-        self.ivars().order.borrow_mut().append(tab.id());
-        tab.refresh_geometry();
-        tab.apply_visibility(self.window_visible());
+        match placement {
+            Placement::End => {
+                self.ivars().order.borrow_mut().append(tab.id());
+                tab.refresh_geometry();
+                tab.apply_visibility(self.window_visible());
+                self.refresh_bar();
+            }
+            Placement::At(index) => {
+                let old = self.ivars().order.borrow().selected();
+                let old = old.and_then(|old| self.tab(old));
+                // The gap the tab was carried over is the place it takes now.
+                self.bar().close_gap_quietly();
+                self.ivars().order.borrow_mut().insert_at(tab.id(), index);
+                tab.refresh_geometry();
+                self.switch(old.as_deref());
+            }
+        }
+        self.layout_changed();
+    }
+
+    /// **The applier: a place.** Tab `id` takes `index` in the strip (a tab let go on its own
+    /// window's strip); what is on screen does not change. A layout edge — once for the
+    /// drag, not for every place it passed on the way.
+    pub(crate) fn move_tab(&self, id: u64, index: usize) {
+        if self.tab(id).is_none() || !self.ivars().order.borrow_mut().move_to(id, index) {
+            return;
+        }
         self.refresh_bar();
         self.layout_changed();
     }
