@@ -38,6 +38,14 @@ of every installed copy. A version without a section is not released.
   says how long the program has been open; when it ends while you are in
   another tab, the tab still shows a green tick or a red dot.
 
+### Fixed
+
+- **Dragging a tab moves the tab, not the window.** Dragging a tab moved the
+  whole window instead, so a tab could not be put in a new place, pulled out
+  into a window of its own or dropped on another window's tabs. Now the tab
+  follows the pointer; dragging the empty part of the title row still moves
+  the window, and Window ▸ Move & Resize works as before.
+
 ## [0.8.0] - 2026-10-08
 
 ### Added

@@ -115,7 +115,7 @@ use objc2::{
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityRadioButtonRole,
     NSAccessibilityTabButtonSubrole, NSAccessibilityTabGroupRole, NSAnimatablePropertyContainer,
-    NSAnimationContext, NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSColor,
+    NSAnimationContext, NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSControl,
     NSControlStateValueOn, NSControlTextEditingDelegate, NSDragOperation, NSDraggingDestination,
     NSDraggingInfo, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFocusRingType,
     NSFont, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSGradient, NSImage,
@@ -2029,6 +2029,71 @@ impl EdgeFade {
     }
 }
 
+// ─── The bar's claim on the title row ────────────────────────────────────
+
+define_class!(
+    /// An empty control the bar's size, under everything in it, taking no click: it keeps the
+    /// title row from the window server, so a press in the bar is the bar's to decide.
+    ///
+    /// **Why.** The window's content reaches under the title row (`FullSizeContentView`), and
+    /// there the window server moves the window itself, before any view sees the drag. It moves
+    /// it from the whole row less what the views in it claim for themselves — AppKit asks each
+    /// visible view (`_opaqueRectForWindowMoveWhenInTitlebar`, a private method) — and a plain
+    /// `NSView` claims nothing; its `mouseDownCanMoveWindow` returning `NO` does not count
+    /// there. So a press on a chip reached the chip, but the drag that followed moved the
+    /// window: a tab could not be moved along the strip, torn off or dropped on another
+    /// window's bar. An enabled `NSControl` that accepts the keyboard claims its bounds —
+    /// measured on macOS 26.4.1: `NSView` claims nothing, `NSControl`, `NSButton` and
+    /// `NSTextField` their bounds, and a control disabled or refusing the keyboard nothing.
+    /// This one claims the whole bar, and every press goes on to the bar as
+    /// before ([`TabBar`]'s `mouseDown:`): a chip's drag is the tab's, the empty part's moves
+    /// the window (`performWindowDragWithEvent:`), a double click does the system's setting.
+    ///
+    /// **Not** `NSWindow.isMovable = NO`, which also stops the server: the system then greys out
+    /// Window ▸ Move & Resize, taking a window it believes cannot move. **Not** the bar itself
+    /// as a control: `NSControl` changes how a view takes the mouse and the keyboard; this one
+    /// only claims, its `hitTest:` is `nil`, so neither a click nor the keyboard reaches it.
+    ///
+    /// Should a macOS stop honouring the claim, the tabs move the window again and no test sees
+    /// it: a synthetic event never reaches the window server's drag, only a real pointer does.
+    // SAFETY: NSControl is designed for subclassing; RowClaim implements no
+    // `Drop`, has no ivar and is born with `initWithFrame:`.
+    #[unsafe(super(NSControl))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriTabRowClaim"]
+    pub(crate) struct RowClaim;
+
+    unsafe impl NSObjectProtocol for RowClaim {}
+
+    impl RowClaim {
+        /// Takes no click: the bar and what is in it do.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+    }
+);
+
+impl RowClaim {
+    /// The claim, following the size of the view it is put in.
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: `initWithFrame:` is NSView's designated initializer; the
+        // subclass has no ivar.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        this.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        // It still accepts the keyboard, as a bare control does: the claim
+        // holds only while it does (measured — refusing it, by the flag or by
+        // `acceptsFirstResponder`, drops the claim to nothing). The keyboard
+        // never comes: no click reaches it and it is no key view.
+        this.setAccessibilityElement(false);
+        this
+    }
+}
+
 // ─── The bar ─────────────────────────────────────────────────────────────
 
 /// A transfer flowing in a tab ([`Label::upload`]).
@@ -2376,6 +2441,8 @@ impl TabBar {
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        // Under everything: the title row is the bar's, not the window server's.
+        this.addSubview(&RowClaim::new(mtm));
         this.addSubview(&new_tab);
         this.addSubview(&list);
         this.addSubview(&warning);
