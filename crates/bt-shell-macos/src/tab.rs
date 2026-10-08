@@ -197,8 +197,12 @@ pub(crate) struct TabIvars {
     /// it): the key by which the panes' events find the tab ([`TabHost`]).
     id: u64,
     /// The id of the window this tab is in — the way up to the tab bar,
-    /// the title and the tab's closing ([`TerminalTab::window`]).
-    window: u64,
+    /// the title and the tab's closing ([`TerminalTab::window`]). It changes
+    /// when the tab moves to another window ([`TerminalTab::moved_to`]).
+    window: Cell<u64>,
+    /// The name the user gave the tab; `None` shows the title its focused
+    /// pane's session reports ([`TerminalTab::title`]).
+    name: RefCell<Option<String>>,
     /// The splits container; the window's root view holds it strongly
     /// (under the tab bar, hidden while the tab is not selected), this copy
     /// is for typed access ([`TerminalTab::panes`]).
@@ -242,7 +246,8 @@ impl TerminalTab {
         let container = SplitView::new(mtm, initial_rect(), pane);
         let this = Self::alloc(mtm).set_ivars(TabIvars {
             id,
-            window,
+            window: Cell::new(window),
+            name: RefCell::new(None),
             container,
             focused: Cell::new(pane.id()),
             unseen: Cell::new(Unseen::default()),
@@ -263,7 +268,25 @@ impl TerminalTab {
 
     /// The tab's window from the list; `None` once it has left it.
     fn window(&self) -> Option<Retained<TerminalWindow>> {
-        app::delegate(self.mtm())?.window(self.ivars().window)
+        app::delegate(self.mtm())?.window(self.ivars().window.get())
+    }
+
+    /// The tab now belongs to window `window`: its panes' news and its
+    /// questions' marks find that window's bar from here on. Called by the
+    /// window that takes the tab in ([`TerminalWindow::adopt_tab`]).
+    pub(crate) fn moved_to(&self, window: u64) {
+        self.ivars().window.set(window);
+    }
+
+    /// The name the user gave the tab, if any.
+    pub(crate) fn name(&self) -> Option<String> {
+        self.ivars().name.borrow().clone()
+    }
+
+    /// Names the tab, or takes the name away (`None`: its own title shows
+    /// again). The window writes the titles after ([`TerminalWindow::rename_tab`]).
+    pub(crate) fn set_name(&self, name: Option<String>) {
+        self.ivars().name.replace(name);
     }
 
     /// The `NSWindow` the container is in — the first responder and the
@@ -609,14 +632,24 @@ impl TerminalTab {
         let pane = self.focused_pane();
         let session = pane.session()?;
         let prefix = pane.upload_title_prefix();
-        Some(upload::titled_as(prefix, &session.title()))
+        let title = self.name().unwrap_or_else(|| session.title());
+        Some(upload::titled_as(prefix, &title))
     }
 
-    /// The focused pane's session title alone — a tab's label among
-    /// several, where an upload is not a prefix (the bar shows the tab's
-    /// own title; the window's title keeps the prefix). `None` while there
+    /// The title a tab shows among several — its name, else the focused
+    /// pane's session title — where an upload is not a prefix (the bar shows
+    /// the tab's own title; the window's title keeps the prefix). The card,
+    /// the Show All Tabs list and VoiceOver read this too. `None` while there
     /// is no session yet.
     pub(crate) fn session_title(&self) -> Option<String> {
+        let title = self.automatic_title()?;
+        Some(self.name().unwrap_or(title))
+    }
+
+    /// The title the focused pane's session reports, whatever the tab is
+    /// called: what a name is measured against ([`tabs::custom_name`]) and
+    /// what comes back when the name goes. `None` while there is no session.
+    pub(crate) fn automatic_title(&self) -> Option<String> {
         Some(self.focused_pane().session()?.title())
     }
 
@@ -876,6 +909,7 @@ impl TerminalTab {
             panes: saved,
             focused: position(self.focused_pane().id()).unwrap_or(0),
             zoomed: self.ivars().container.zoomed().and_then(position),
+            name: self.name(),
         };
         Some((tab, histories))
     }

@@ -12,7 +12,11 @@
 //! **The format** follows `remote-hosts` (`ssh_wrap`): line based, the first line names the
 //! version ([`HEADER`] + [`VERSION`]), then one `W` line per window, one `T` line per tab under it
 //! and one `P` line per pane under that; the tree is a pre-order token run (`S h|v {ratio} … L
-//! {index}`). Text fields (directory, remote line) are escaped so that a field never holds a
+//! {index}`). **Two versions are read**, the current one and the one before it: version 2 gave a
+//! tab its own name (a `T` line's third field), version 1 has none. The writer says version 1
+//! whenever no tab is named, so a session nobody named stays readable by the bateri that only
+//! knew version 1 — whose reader drops any other number and, with it, a holder's programs.
+//! A version's frozen text stays in the tests: its reader must keep reading it. Text fields (directory, remote line) are escaped so that a field never holds a
 //! space, a tab or a line break ([`escape`]); an absent field is `-`, a present one `+` followed
 //! by the escaped text, so the empty string and absence stay apart. Reading is strict: an
 //! unknown version, a malformed line, an index out of range, a tree whose leaves are not exactly
@@ -54,9 +58,13 @@ use crate::split::{Axis, Tree};
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-session";
 
-/// The format's version. Any other number is not read (a newer bateri's file after a downgrade
-/// is dropped, not misread).
-pub const VERSION: u32 = 1;
+/// The format's current version: a tab may carry its own name. The previous one ([`UNNAMED`]) is
+/// read too; any other number is not read (a newer bateri's file after a downgrade is dropped, not
+/// misread).
+pub const VERSION: u32 = 2;
+
+/// The version before names, which a session with no named tab is still written in.
+const UNNAMED: u32 = 1;
 
 /// The layout file's name inside the directory.
 const LAYOUT: &str = "layout";
@@ -108,6 +116,8 @@ pub struct SavedTab {
     pub focused: usize,
     /// The zoomed pane's index (⇧⌘↩), if any.
     pub zoomed: Option<usize>,
+    /// The name the user gave the tab; `None` shows the tab's own title.
+    pub name: Option<String>,
 }
 
 /// A pane.
@@ -355,6 +365,7 @@ impl SavedTab {
             },
             zoomed: self.zoomed.filter(|index| kept(*index)).map(moved),
             panes,
+            name: self.name.clone(),
         })
     }
 }
@@ -434,7 +445,13 @@ impl Saved {
     /// The file's text. Only a model that [`Saved::parse`] accepts round-trips; the caller builds
     /// it from live windows, which are always consistent.
     pub fn render(&self) -> String {
-        let mut out = format!("{HEADER} {VERSION}\n");
+        let named = self
+            .windows
+            .iter()
+            .flat_map(|window| &window.tabs)
+            .any(|tab| tab.name.is_some());
+        let version = if named { VERSION } else { UNNAMED };
+        let mut out = format!("{HEADER} {version}\n");
         for window in &self.windows {
             let Frame {
                 x,
@@ -450,6 +467,12 @@ impl Saved {
             for tab in &window.tabs {
                 let zoomed = tab.zoomed.map_or("-".to_owned(), |z| z.to_string());
                 out.push_str(&format!("T {} {zoomed}", tab.focused));
+                // The name sits before the shape: a field of fixed place, where the shape is a
+                // run of tokens of any length.
+                if named {
+                    out.push(' ');
+                    out.push_str(&render_optional(tab.name.as_deref()));
+                }
                 tab.shape.render(&mut out);
                 out.push('\n');
                 for pane in &tab.panes {
@@ -472,10 +495,11 @@ impl Saved {
     pub fn parse(text: &str) -> Option<Saved> {
         let mut lines = text.split('\n');
         let mut header = lines.next()?.split(' ');
-        if header.next()? != HEADER || header.next()?.parse::<u32>().ok()? != VERSION {
+        if header.next()? != HEADER {
             return None;
         }
-        if header.next().is_some() {
+        let version = header.next()?.parse::<u32>().ok()?;
+        if ![UNNAMED, VERSION].contains(&version) || header.next().is_some() {
             return None;
         }
         let mut windows: Vec<SavedWindow> = Vec::new();
@@ -492,7 +516,10 @@ impl Saved {
             let mut tokens = line.split(' ');
             match tokens.next()? {
                 "W" => windows.push(parse_window(&mut tokens)?),
-                "T" => windows.last_mut()?.tabs.push(parse_tab(&mut tokens)?),
+                "T" => windows
+                    .last_mut()?
+                    .tabs
+                    .push(parse_tab(&mut tokens, version)?),
                 "P" => windows
                     .last_mut()?
                     .tabs
@@ -552,11 +579,17 @@ fn parse_window<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<SavedW
     })
 }
 
-fn parse_tab<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<SavedTab> {
+fn parse_tab<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Option<SavedTab> {
     let focused = tokens.next()?.parse().ok()?;
     let zoomed = match tokens.next()? {
         "-" => None,
         index => Some(index.parse().ok()?),
+    };
+    // Version 1 has no name field. An empty name is no name: the title it would show is blank.
+    let name = if version >= VERSION {
+        parse_optional(tokens.next()?)?.filter(|name| !name.is_empty())
+    } else {
+        None
     };
     let shape = Shape::parse(tokens, 0)?;
     Some(SavedTab {
@@ -564,6 +597,7 @@ fn parse_tab<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<SavedTab>
         panes: Vec::new(),
         focused,
         zoomed,
+        name,
     })
 }
 
@@ -852,6 +886,7 @@ mod tests {
             panes: vec![pane(tab)],
             focused: 0,
             zoomed: None,
+            name: None,
         }
     }
 
@@ -908,6 +943,7 @@ mod tests {
             ],
             focused: 1,
             zoomed: Some(2),
+            name: None,
         };
         let mut first = window(vec![single(B), split]);
         first.selected = 1;
@@ -918,12 +954,124 @@ mod tests {
         }
     }
 
+    /// [`rich`] with two tabs named: the model of [`V2_FIXTURE`].
+    fn rich_named() -> Saved {
+        let mut saved = rich();
+        saved.windows[0].tabs[1].name = Some("release notes".to_owned());
+        saved.windows[1].tabs[0].name = Some("ünï çode".to_owned());
+        saved
+    }
+
+    /// Version 1 as the writer of that version produced it for [`rich`], frozen: a bateri that
+    /// only knows version 1 reads what an unnamed session is still written as, and this
+    /// bateri reads what that one wrote. Never updated — a change of the format is a new
+    /// version with a new fixture beside this one.
+    const V1_FIXTURE: &str = concat!(
+        "bateri-session 1\n",
+        "W 120.5 -30 800 600.25 1 1\n",
+        "T 0 - L 0\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - -\n",
+        "T 1 2 S h 0.3333333333333333 L 2 S v 0.71 L 0 L 1\n",
+        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya -",
+        "\n",
+        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod",
+        "\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + +\n",
+        "W 120.5 -30 800 600.25 0 0\n",
+        "T 0 - L 0\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - -\n",
+    );
+
+    /// Version 2 for [`rich_named`], frozen the same way: the name is the third field of a `T`
+    /// line, `-` where a tab has none.
+    const V2_FIXTURE: &str = concat!(
+        "bateri-session 2\n",
+        "W 120.5 -30 800 600.25 1 1\n",
+        "T 0 - - L 0\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - -\n",
+        r"T 1 2 +release\snotes S h 0.3333333333333333 L 2 S v 0.71 L 0 L 1",
+        "\n",
+        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya -",
+        "\n",
+        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod",
+        "\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + +\n",
+        "W 120.5 -30 800 600.25 0 0\n",
+        "T 0 - +ünï\\sçode L 0\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - -\n",
+    );
+
+    #[test]
+    fn the_previous_version_is_read_byte_for_byte() {
+        assert_eq!(Saved::parse(V1_FIXTURE), Some(rich()));
+    }
+
+    #[test]
+    fn the_current_version_is_read_byte_for_byte() {
+        assert_eq!(Saved::parse(V2_FIXTURE), Some(rich_named()));
+    }
+
+    /// The writer says the version before names while no tab is named — the bateri that only
+    /// knew that version still reads such a session — and the current one as soon as one is.
+    #[test]
+    fn an_unnamed_session_is_written_as_the_previous_version() {
+        assert_eq!(rich().render(), V1_FIXTURE);
+        assert_eq!(rich_named().render(), V2_FIXTURE);
+    }
+
     #[test]
     fn format_round_trips() {
-        let saved = rich();
-        let text = saved.render();
-        assert!(text.starts_with("bateri-session 1\n"), "{text}");
-        assert_eq!(Saved::parse(&text), Some(saved));
+        for (saved, header) in [
+            (rich(), "bateri-session 1\n"),
+            (rich_named(), "bateri-session 2\n"),
+        ] {
+            let text = saved.render();
+            assert!(text.starts_with(header), "{text}");
+            assert_eq!(Saved::parse(&text), Some(saved));
+        }
+    }
+
+    /// A name is whatever the user typed: it is escaped like a path, so spaces, escapes, a
+    /// leading `-` or `+` and non-ASCII text come back as written, and it stays on its line.
+    #[test]
+    fn a_name_round_trips_whatever_it_holds() {
+        for name in [
+            "-",
+            "+",
+            "a b",
+            "\\s",
+            "ğüşiöç",
+            "x\\",
+            "\t\n\r \\",
+            " lead and trail ",
+        ] {
+            let mut saved = rich();
+            saved.windows[1].tabs[0].name = Some(name.to_owned());
+            let text = saved.render();
+            assert_eq!(
+                text.lines().count(),
+                rich().render().lines().count(),
+                "{name:?}"
+            );
+            assert_eq!(Saved::parse(&text), Some(saved), "{name:?}");
+        }
+    }
+
+    /// An empty name would show a blank title: read as no name.
+    #[test]
+    fn an_empty_name_is_no_name() {
+        let text = V2_FIXTURE.replace("T 0 - - L 0", "T 0 - + L 0");
+        assert_eq!(Saved::parse(&text), Some(rich_named()));
+    }
+
+    /// Retaining some panes of a tab keeps the tab's name with it.
+    #[test]
+    fn retaining_panes_keeps_the_name() {
+        let tab = rich_named().windows[0].tabs[1].clone();
+        let kept = tab
+            .retain(&[true, false, true])
+            .expect("two panes are left");
+        assert_eq!(kept.name.as_deref(), Some("release notes"));
     }
 
     #[test]
@@ -953,7 +1101,8 @@ mod tests {
         };
         let cases = [
             // Unknown version, wrong header.
-            replaced("bateri-session 1", "bateri-session 2"),
+            replaced("bateri-session 1", "bateri-session 3"),
+            replaced("bateri-session 1", "bateri-session 0"),
             replaced("bateri-session 1", "bateri-sessions 1"),
             replaced("bateri-session 1", "bateri-session 1 x"),
             // Truncated: no final line break, cut mid-file, empty.
@@ -990,10 +1139,23 @@ mod tests {
         for text in cases {
             assert_eq!(Saved::parse(&text), None, "{text}");
         }
+        // Version 2 without its name field, version 1 with one, a name that does not escape.
+        let named = rich_named().render();
+        for text in [
+            named.replacen("T 0 - - L 0", "T 0 - L 0", 1),
+            named.replacen("+release\\snotes", "release", 1),
+            named.replacen("+release\\snotes", "+release\\q", 1),
+            good.replacen("T 0 - L 0", "T 0 - +x L 0", 1),
+            named.replacen("bateri-session 2", "bateri-session 3", 1),
+        ] {
+            assert_eq!(Saved::parse(&text), None, "{text}");
+        }
         // Nothing panics on arbitrary prefixes and garbage either.
-        for end in 0..good.len() {
-            if good.is_char_boundary(end) {
-                let _ = Saved::parse(&good[..end]);
+        for text in [&good, &named] {
+            for end in 0..text.len() {
+                if text.is_char_boundary(end) {
+                    let _ = Saved::parse(&text[..end]);
+                }
             }
         }
         let deep = format!(

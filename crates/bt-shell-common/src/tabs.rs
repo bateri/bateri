@@ -83,6 +83,17 @@ impl<K: Copy + Eq> Tabs<K> {
         self.selected = Some(index);
     }
 
+    /// Adds a tab at the **end** and leaves the selection where it was — a tab that joins from
+    /// another window (Merge All Windows) does not change what this window shows. `false` if the
+    /// id is already here.
+    pub fn append(&mut self, id: K) -> bool {
+        if self.index_of(id).is_some() {
+            return false;
+        }
+        self.order.push(id);
+        true
+    }
+
     /// Removes a tab; `false` if it was not here. Closing the selected tab selects its **right**
     /// neighbour, or the left one when it was the last — the tab that slides under the pointer
     /// that just closed it. Closing another tab leaves the selection on the same tab.
@@ -165,15 +176,51 @@ pub fn tab_index(tag: u8, count: usize) -> Option<usize> {
 /// when it is past them, nothing on the tabs in between — exactly the tabs [`tab_index`] reaches,
 /// each with the key that reaches it.
 pub fn shortcut_hint(index: usize, count: usize) -> Option<String> {
+    shortcut_digit(index, count).map(|digit| format!("⌘{digit}"))
+}
+
+/// The digit of [`shortcut_hint`]: the key that reaches the tab at `index` with ⌘. The Show All
+/// Tabs list gives its rows the same keys.
+pub fn shortcut_digit(index: usize, count: usize) -> Option<u8> {
     if index >= count {
         return None;
     }
-    let digit = match index {
-        0..=7 => index + 1,
-        _ if index + 1 == count => 9,
-        _ => return None,
-    };
-    Some(format!("⌘{digit}"))
+    match index {
+        0..=7 => u8::try_from(index + 1).ok(),
+        _ if index + 1 == count => Some(9),
+        _ => None,
+    }
+}
+
+/// The name a rename field's text asks a tab to carry: the draft without the whitespace round it,
+/// and no name at all when that is empty or says what the tab's own title (`automatic`) already
+/// says — emptying the field, or typing the title back, returns the tab to its title.
+pub fn custom_name(draft: &str, automatic: &str) -> Option<String> {
+    let name = draft.trim();
+    (!name.is_empty() && name != automatic.trim()).then(|| name.to_owned())
+}
+
+/// The `tag` a menu item carries for tab `id` — the chip's context menu acts on the chip it was
+/// opened on, not the selected tab. Zero is "no tab", which the menu bar's items carry and which
+/// then means the selected one; ids count from zero, so the tag is the id plus one.
+pub fn menu_tag(id: u64) -> isize {
+    isize::try_from(id.saturating_add(1)).unwrap_or(isize::MAX)
+}
+
+/// [`menu_tag`]'s inverse: the tab a `tag` names, `None` for zero and anything below it.
+pub fn tab_of_menu_tag(tag: isize) -> Option<u64> {
+    u64::try_from(tag).ok()?.checked_sub(1)
+}
+
+/// The role of a Show All Tabs row's status dot for what its tab reports: a running command, a
+/// question and a transfer in `accent`, a failure in `error`, a success in `success` — the
+/// colours the chip's own indicators wear.
+pub fn list_dot(indicator: Indicator) -> Tone {
+    match indicator {
+        Indicator::Question | Indicator::Running | Indicator::Uploading => Tone::Accent,
+        Indicator::Failed => Tone::Error,
+        Indicator::Finished => Tone::Success,
+    }
 }
 
 /// Space between two neighbouring tabs. Also where the separator line sits.
@@ -216,6 +263,11 @@ pub const REVEAL_MARGIN: f64 = 24.0;
 /// A scroll within this distance of an end counts as at that end: a sub-point remainder must not
 /// light a fade over nothing.
 const SCROLL_SLACK: f64 = 1.0;
+
+/// Where a button sits left of the button at `x`: one [`BUTTON_GAP`] away.
+fn beside(x: f64) -> f64 {
+    x - BUTTON_GAP - BUTTON
+}
 
 /// A horizontal extent in the bar's space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -329,7 +381,7 @@ impl Bar {
     pub fn layout(&self) -> Strip {
         let fit = Fit::of(self.corner);
         let new_tab = self.width - fit.inset - BUTTON;
-        let left_of = |x: f64| x - BUTTON_GAP - BUTTON;
+        let left_of = beside;
         let strip_until = |leftmost: f64| {
             Span::new(
                 self.leading,
@@ -414,6 +466,12 @@ impl Bar {
 }
 
 impl Strip {
+    /// Where Show All Tabs sits — or would, while the tabs fit and its button is not there: the
+    /// list opens at that place from its shortcut too.
+    pub fn list_slot(&self) -> f64 {
+        self.list.unwrap_or_else(|| beside(self.new_tab))
+    }
+
     /// The scroll that brings tab `index` into view, [`REVEAL_MARGIN`] from the edge it was
     /// beyond; the current scroll if it is already in view (or nothing scrolls).
     pub fn revealing(&self, index: usize) -> f64 {
@@ -898,6 +956,96 @@ mod tests {
                 assert_eq!(tab_index(digit, count), Some(index), "{hint} of {count}");
             }
         }
+    }
+
+    /// A tab that joins from another window goes to the end and leaves the selection where
+    /// it was — Merge All Windows brings tabs in without changing what the window shows.
+    #[test]
+    fn an_appended_tab_goes_last_and_selects_nothing() {
+        let mut t = tabs(&[1, 2, 3], 2);
+        assert!(t.append(9));
+        assert_eq!(t.ids(), &[1, 2, 3, 9]);
+        assert_eq!((t.selected(), t.selected_index()), (Some(2), Some(1)));
+        assert!(!t.append(2), "a known id is not added twice");
+        assert_eq!(t.ids(), &[1, 2, 3, 9]);
+        assert_eq!(t.selected(), Some(2));
+    }
+
+    /// The name a rename field's text asks for: trimmed, and no name at all when it is empty or
+    /// says what the tab's own title already says — the tab goes back to its title.
+    #[test]
+    fn a_name_is_the_trimmed_draft_unless_it_is_empty_or_the_title() {
+        assert_eq!(custom_name("build", "zsh"), Some("build".to_owned()));
+        assert_eq!(
+            custom_name("  build server\t", "zsh"),
+            Some("build server".to_owned())
+        );
+        assert_eq!(custom_name("", "zsh"), None);
+        assert_eq!(custom_name(" \t\n ", "zsh"), None, "blank is empty");
+        assert_eq!(custom_name("zsh", "zsh"), None, "the title is no name");
+        assert_eq!(
+            custom_name(" zsh ", "zsh "),
+            None,
+            "up to the edges of both"
+        );
+        assert_eq!(
+            custom_name("Zsh", "zsh"),
+            Some("Zsh".to_owned()),
+            "case counts"
+        );
+        assert_eq!(custom_name("ünï çode", ""), Some("ünï çode".to_owned()));
+    }
+
+    /// A menu item carries a tab in its `tag`; zero is the selected tab, which no tab id may
+    /// be taken for (ids count from zero).
+    #[test]
+    fn a_menu_tag_names_a_tab_and_zero_names_none() {
+        assert_eq!(tab_of_menu_tag(0), None);
+        assert_eq!(tab_of_menu_tag(-1), None);
+        for id in [0, 1, 7, 12_345, u32::MAX.into()] {
+            assert_eq!(tab_of_menu_tag(menu_tag(id)), Some(id));
+            assert_ne!(menu_tag(id), 0);
+        }
+    }
+
+    #[test]
+    fn the_list_dot_wears_the_role_of_what_the_tab_reports() {
+        assert_eq!(list_dot(Indicator::Running), Tone::Accent);
+        assert_eq!(list_dot(Indicator::Question), Tone::Accent);
+        assert_eq!(list_dot(Indicator::Uploading), Tone::Accent);
+        assert_eq!(list_dot(Indicator::Failed), Tone::Error);
+        assert_eq!(list_dot(Indicator::Finished), Tone::Success);
+    }
+
+    /// The list's row key is the digit of the hint, for exactly the tabs that have a hint.
+    #[test]
+    fn a_list_row_has_the_digit_its_hint_names() {
+        for count in 1..=12 {
+            for index in 0..count {
+                let digit = shortcut_digit(index, count);
+                let hint = shortcut_hint(index, count);
+                assert_eq!(
+                    hint,
+                    digit.map(|digit| format!("⌘{digit}")),
+                    "{index}/{count}"
+                );
+            }
+        }
+        assert_eq!(shortcut_digit(3, 3), None);
+    }
+
+    /// Show All Tabs opens where its button is — or would be, when the tabs fit and the button
+    /// is not there: one place for both, the same step left of `+`.
+    #[test]
+    fn the_list_has_a_place_even_when_no_button_shows() {
+        let overflowing = bar(720.0, 12).layout();
+        assert_eq!(overflowing.list, Some(652.0));
+        assert_eq!(overflowing.list_slot(), 652.0);
+        let fitting = bar(1000.0, 3).layout();
+        assert_eq!(fitting.list, None);
+        assert_eq!(fitting.list_slot(), fitting.new_tab - BUTTON_GAP - BUTTON);
+        let single = bar(1000.0, 1).layout();
+        assert_eq!(single.list_slot(), single.new_tab - BUTTON_GAP - BUTTON);
     }
 
     fn bar(width: f64, count: usize) -> Bar {

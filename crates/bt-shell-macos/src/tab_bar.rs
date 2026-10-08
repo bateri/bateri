@@ -18,9 +18,28 @@
 //! press anywhere but `+` moves the window, a double click does what the
 //! system says ([`title_double_click`]). With several tabs each tab is a
 //! chip: a press selects it (on the press, like macOS's tabs), a middle
-//! click closes it, and while the pointer is over it a `×` shows at its
-//! left. A diagnostic becomes a `⚠` left of `+`: its tooltip is the text
-//! and a click opens the settings window.
+//! click closes it, a double click names it, a right click opens its menu,
+//! and while the pointer is over it a `×` shows at its left. A diagnostic
+//! becomes a `⚠` left of `+`: its tooltip is the text and a click opens the
+//! settings window.
+//!
+//! **When the tabs do not fit** they stop at their narrowest, the strip
+//! scrolls (a wheel or a trackpad, a vertical wheel too) and the chips run
+//! under its edges, cut by the strip's own view ([`ChipStrip`]) and faded out
+//! where more lies beyond ([`EdgeFade`]); Show All Tabs joins the buttons.
+//! A **change of the selection** scrolls the strip to the selected chip, and
+//! so does the tabs' ceasing to fit. The list is a menu under its button (or
+//! where the button would be, from ⇧⌘\): every tab, the selected one ticked,
+//! a dot in the colour of what it reports, its ⌘ key. Where a chip is and how
+//! far the strip scrolls are `tabs`' arithmetic; this file places views at it.
+//!
+//! **A tab is named in place** (a double click, Rename Tab…, the chip's menu):
+//! a text field over the chip's title, Return keeps the text, Esc leaves the
+//! name, the keyboard going elsewhere keeps it. What the text means — empty
+//! or the tab's own title is no name — is `tabs::custom_name`, the window's
+//! applier writes it ([`TerminalWindow::rename_tab`]). The chip does not
+//! draw its title while the field is up, so the layouts that come with every
+//! tick and hover never overwrite what is being typed.
 //!
 //! **What a chip shows besides its title** (several tabs only — one tab is
 //! today's title bar and shows none of it): left of the title one
@@ -55,8 +74,10 @@
 //! design's.
 //!
 //! **Who acts.** The bar knows its window by id and calls the window's one
-//! applier (`TerminalWindow::select_tab`, `close_tab_asking`) — the bar never
-//! changes the tab list itself. A close or a new tab is done **one
+//! applier (`TerminalWindow::select_tab`, `close_tab_asking`, `rename_tab`) —
+//! the bar never changes the tab list itself. The chip's menu and the list act
+//! through the window too: each item's target is the window, its `tag` the
+//! tab it was opened for (`tabs::menu_tag`). A close or a new tab is done **one
 //! main-queue turn later**: either rebuilds the chips, and the chip whose
 //! event is being handled would be taken apart under it.
 //!
@@ -74,27 +95,31 @@ use block2::RcBlock;
 use bt_core::{HostMark, Theme};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityRadioButtonRole,
     NSAccessibilityTabButtonSubrole, NSAccessibilityTabGroupRole, NSAnimatablePropertyContainer,
-    NSAnimationContext, NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSEvent,
-    NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSFontWeightMedium,
-    NSFontWeightRegular, NSFontWeightSemibold, NSLineBreakMode, NSLineCapStyle, NSLineJoinStyle,
-    NSShadow, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWindowButton, NSWindowOrderingMode, NSWindowStyleMask,
+    NSAnimationContext, NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSColor,
+    NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSEventType, NSFocusRingType, NSFont, NSFontWeightMedium,
+    NSFontWeightRegular, NSFontWeightSemibold, NSGradient, NSImage, NSLineBreakMode,
+    NSLineCapStyle, NSLineJoinStyle, NSMenu, NSMenuItem, NSShadow, NSTextAlignment, NSTextField,
+    NSTextFieldDelegate, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindowButton,
+    NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUserDefaults, ns_string,
+    NSNotification, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
+    ns_string,
 };
 use objc2_quartz_core::CAMediaTimingFunction;
 
 use crate::app;
 use crate::tabs::{
-    self, BUTTON, Bar, Card, CardCommand, Clock, Indicator, RING_STEP_DEGREES, TAB_RADIUS, Tone,
+    self, BUTTON, Bar, Card, CardCommand, Clock, FADE, Indicator, RING_STEP_DEGREES, Strip,
+    TAB_RADIUS, Tone,
 };
 use crate::window::{TerminalWindow, is_dark_background};
 
@@ -170,6 +195,10 @@ const CARD_PAD_Y: f64 = 10.0;
 const CARD_LINE_GAP: f64 = 3.0;
 const CARD_DROP: f64 = 8.0;
 
+/// How far a notch of a mouse wheel scrolls the strip, points: a wheel reports
+/// lines where a trackpad reports points.
+const WHEEL_STEP: f64 = 12.0;
+
 /// How long ⌘ is held alone before the tabs show their keys — a design
 /// constant: ⌘ goes down before every shortcut (⌘C, ⌘V), and hints shown
 /// at once would flash across the bar at each; a hand that holds ⌘ to read
@@ -240,6 +269,8 @@ impl Tint {
 struct Palette {
     title: u32,
     dim: u32,
+    /// The theme's background, which a scrolled strip's edges fade out to.
+    ground: u32,
     warning: u32,
     accent: u32,
     success: u32,
@@ -272,6 +303,7 @@ impl Palette {
         let base = Self {
             title: fg,
             dim: theme.dim,
+            ground: theme.background,
             warning: theme.warning,
             accent: theme.accent,
             success: theme.success,
@@ -657,12 +689,14 @@ define_class!(
             let (Some(indicator), Some(palette)) = (iv.shown.get(), iv.palette.get()) else {
                 return;
             };
+            // The role is `tabs`' one table, the Show All Tabs dots' too.
+            let role = palette.tone(tabs::list_dot(indicator), 0);
             match indicator {
-                Indicator::Question => draw_question(palette.accent),
-                Indicator::Running => draw_ring(iv.step.get(), palette),
-                Indicator::Finished => draw_tick(palette.success),
-                Indicator::Failed => draw_dot(palette.error),
-                Indicator::Uploading => draw_arrow(iv.down.get(), palette.accent),
+                Indicator::Question => draw_question(role),
+                Indicator::Running => draw_ring(iv.step.get(), role, palette),
+                Indicator::Finished => draw_tick(role),
+                Indicator::Failed => draw_dot(role),
+                Indicator::Uploading => draw_arrow(iv.down.get(), role),
             }
         }
     }
@@ -700,7 +734,7 @@ fn draw_question(color: u32) {
 
 /// "Running": a faint ring and a quarter arc in `accent`, turned
 /// `tabs::RING_STEP_DEGREES` per step clockwise from the top.
-fn draw_ring(step: u8, palette: Palette) {
+fn draw_ring(step: u8, color: u32, palette: Palette) {
     let at = NSPoint::new(GLYPH_SIDE / 2.0, GLYPH_SIDE / 2.0);
     let radius = GLYPH_SIDE / 2.0 - 1.4;
     let track = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
@@ -719,7 +753,7 @@ fn draw_ring(step: u8, palette: Palette) {
         start + 90.0,
         false,
     );
-    stroke(&arc, 1.6, Tint::of(palette.accent, 1.0));
+    stroke(&arc, 1.6, Tint::of(color, 1.0));
 }
 
 /// "Finished while you were away": a tick in `success`.
@@ -969,13 +1003,28 @@ define_class!(
         }
 
         /// A press selects — on the press, like the system's tabs — and
-        /// puts the summary card away.
+        /// puts the summary card away. The second press of a double click
+        /// names the tab.
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, _event: &NSEvent) {
+        fn mouse_down(&self, event: &NSEvent) {
             if let Some(bar) = self.bar() {
                 bar.pressed(self.ivars().tab.get());
             }
             self.select_tab();
+            if event.clickCount() == 2
+                && let Some(bar) = self.bar()
+            {
+                bar.begin_rename(self.ivars().tab.get());
+            }
+        }
+
+        /// The chip's own menu, on a right click or a control click: what
+        /// can be done to this tab, selected or not.
+        #[unsafe(method_id(menuForEvent:))]
+        fn menu_for_event(&self, _event: &NSEvent) -> Option<Retained<NSMenu>> {
+            // No `?`: `define_class!` converts the body's last expression.
+            self.bar()
+                .and_then(|bar| bar.context_menu(self.ivars().tab.get()))
         }
 
         /// The middle button closes the tab.
@@ -1077,12 +1126,15 @@ impl Chip {
         self.ivars().tab.get()
     }
 
+    /// The bar the chip is in: its strip's superview.
     fn bar(&self) -> Option<Retained<TabBar>> {
-        // SAFETY: reading the superview; we are on the main thread.
-        unsafe { self.superview() }?.downcast::<TabBar>().ok()
+        // SAFETY: reading the superviews; we are on the main thread.
+        unsafe { self.superview()?.superview() }?
+            .downcast::<TabBar>()
+            .ok()
     }
 
-    /// `hitTest:`'s body: `point` is in the bar's space.
+    /// `hitTest:`'s body: `point` is in the strip's space.
     fn hit(&self, point: NSPoint) -> Option<Retained<NSView>> {
         let iv = self.ivars();
         if iv.single.get() || self.isHidden() || !contains(self.frame(), point) {
@@ -1165,6 +1217,11 @@ impl Chip {
             }
             Some(_) => false,
             None if moved => {
+                // A slide still on its way (the chip was brought into view a
+                // moment ago) would carry on to its old place and snap back.
+                if let Some(layer) = self.layer() {
+                    layer.removeAllAnimations();
+                }
                 self.setFrame(frame);
                 true
             }
@@ -1483,6 +1540,8 @@ fn card_x(chip_x: f64, bar_width: f64) -> f64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     NewTab,
+    /// Show All Tabs, only while the tabs do not fit.
+    List,
     Warning,
 }
 
@@ -1529,6 +1588,14 @@ define_class!(
                     path.lineToPoint(NSPoint::new(at.x, at.y + 4.5));
                     path.moveToPoint(NSPoint::new(at.x - 4.5, at.y));
                     path.lineToPoint(NSPoint::new(at.x + 4.5, at.y));
+                    let color = if hot { palette.title } else { palette.dim };
+                    stroke(&path, 1.6, Tint::of(color, 1.0));
+                }
+                Kind::List => {
+                    // A chevron pointing down: the list opens below.
+                    path.moveToPoint(NSPoint::new(at.x - 4.5, at.y - 2.0));
+                    path.lineToPoint(NSPoint::new(at.x, at.y + 2.5));
+                    path.lineToPoint(NSPoint::new(at.x + 4.5, at.y - 2.0));
                     let color = if hot { palette.title } else { palette.dim };
                     stroke(&path, 1.6, Tint::of(color, 1.0));
                 }
@@ -1610,9 +1677,16 @@ impl BarButton {
         this.setAccessibilityElement(true);
         // SAFETY: AppKit's constant role string, alive for the process.
         this.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
-        if kind == Kind::NewTab {
-            this.setAccessibilityLabel(Some(ns_string!("New Tab")));
-            this.setToolTip(Some(ns_string!("New Tab  \u{2318}T")));
+        match kind {
+            Kind::NewTab => {
+                this.setAccessibilityLabel(Some(ns_string!("New Tab")));
+                this.setToolTip(Some(ns_string!("New Tab  \u{2318}T")));
+            }
+            Kind::List => {
+                this.setAccessibilityLabel(Some(ns_string!("Show All Tabs")));
+                this.setToolTip(Some(ns_string!("Show All Tabs  \u{21e7}\u{2318}\\")));
+            }
+            Kind::Warning => {}
         }
         track_hover(&this);
         this
@@ -1627,14 +1701,21 @@ impl BarButton {
     }
 
     fn act(&self) {
+        // SAFETY: reading the superview; we are on the main thread.
+        let bar = || unsafe { self.superview() }.and_then(|view| view.downcast::<TabBar>().ok());
         match self.ivars().kind {
             Kind::NewTab => {
-                // SAFETY: reading the superview; we are on the main thread.
-                let bar =
-                    unsafe { self.superview() }.and_then(|view| view.downcast::<TabBar>().ok());
-                if let Some(bar) = bar {
+                if let Some(bar) = bar() {
                     bar.new_tab();
                 }
+            }
+            Kind::List => {
+                if let Some(bar) = bar() {
+                    bar.show_list();
+                }
+                // The menu's tracking swallowed the pointer's exit.
+                self.ivars().hot.set(false);
+                self.setNeedsDisplay(true);
             }
             // The settings window shows the file's state; the target-less
             // action reaches the application delegate like the menu's.
@@ -1644,6 +1725,209 @@ impl BarButton {
                 // SAFETY: `openSettings:` takes one optional sender argument.
                 unsafe { app.sendAction_to_from(sel!(openSettings:), None, Some(sender)) };
             }
+        }
+    }
+}
+
+/// A menu item that acts through `window`'s applier: `action` is one of the
+/// window's tab selectors, `tag` names the tab ([`tabs::menu_tag`]).
+fn window_item(
+    mtm: MainThreadMarker,
+    window: &TerminalWindow,
+    title: &str,
+    action: Sel,
+    tag: isize,
+) -> Retained<NSMenuItem> {
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(title));
+    item.setTag(tag);
+    let target: &AnyObject = window;
+    // SAFETY: every `action` passed is defined by `TerminalWindow` as a
+    // no-return action with a single `Option<&AnyObject>` argument; the
+    // item holds its target weakly and the application's window list owns it.
+    unsafe {
+        item.setAction(Some(action));
+        item.setTarget(Some(target));
+    }
+    item
+}
+
+/// A status dot for a menu row, a few points across, in `rgb`: the colour of
+/// what the tab reports, as the chip's own indicator wears it. `None` is a
+/// clear image of the same size.
+fn dot_image(rgb: Option<u32>) -> Retained<NSImage> {
+    let draw = RcBlock::new(move |rect: NSRect| -> Bool {
+        if let Some(rgb) = rgb {
+            Tint::of(rgb, 1.0).color().setFill();
+            NSBezierPath::bezierPathWithOvalInRect(rect).fill();
+        }
+        Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(8.0, 8.0), false, &draw)
+}
+
+// ─── The strip the chips scroll in ───────────────────────────────────────
+
+pub(crate) struct StripIvars {
+    palette: Cell<Option<Palette>>,
+    /// The separators' centres, in the strip's own space.
+    separators: RefCell<Vec<f64>>,
+}
+
+define_class!(
+    // SAFETY: NSView is designed for subclassing; ChipStrip implements no
+    // `Drop` and is born with `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriTabStrip"]
+    #[ivars = StripIvars]
+    pub(crate) struct ChipStrip;
+
+    unsafe impl NSObjectProtocol for ChipStrip {}
+
+    impl ChipStrip {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        /// The separators between two quiet tabs; the chips draw over the
+        /// rest. Drawn here, not in the bar, so the strip's clip cuts a
+        /// separator of a scrolled-away tab too.
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let iv = self.ivars();
+            let Some(palette) = iv.palette.get() else {
+                return;
+            };
+            let height = self.bounds().size.height;
+            let y = ((height - SEPARATOR_HEIGHT) / 2.0).max(0.0);
+            palette.separator.color().setFill();
+            for &x in iv.separators.borrow().iter() {
+                let line = NSBezierPath::bezierPathWithRect(NSRect::new(
+                    NSPoint::new(x - 0.5, y),
+                    NSSize::new(1.0, SEPARATOR_HEIGHT.min(height)),
+                ));
+                line.fill();
+            }
+        }
+
+        /// Like the bar under it: the first click on an inactive window
+        /// moves it (or selects a chip).
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        /// A press on the strip's empty part goes on to the bar, which moves
+        /// the window itself ([`TabBar`]'s `mouseDown:`).
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn can_move_window(&self) -> bool {
+            false
+        }
+    }
+);
+
+impl ChipStrip {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(StripIvars {
+            palette: Cell::new(None),
+            separators: RefCell::new(Vec::new()),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
+        // ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        // The chips of a scrolled strip run under its edges and are cut
+        // there, not drawn over the traffic lights or the buttons.
+        this.setClipsToBounds(true);
+        this
+    }
+
+    /// The separators (centres in the strip's space) and the colours they
+    /// are drawn in.
+    fn set_separators(&self, separators: Vec<f64>, palette: Palette) {
+        let iv = self.ivars();
+        let repaint = iv.palette.replace(Some(palette)) != Some(palette)
+            || *iv.separators.borrow() != separators;
+        if repaint {
+            iv.separators.replace(separators);
+            self.setNeedsDisplay(true);
+        }
+    }
+}
+
+// ─── The fade at a scrolled strip's edge ─────────────────────────────────
+
+pub(crate) struct FadeIvars {
+    /// The strip's leading edge: opaque on the left. Otherwise the trailing
+    /// edge, opaque on the right.
+    leading: bool,
+    palette: Cell<Option<Palette>>,
+}
+
+define_class!(
+    // SAFETY: NSView is designed for subclassing; EdgeFade implements no
+    // `Drop` and is born with `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriTabFade"]
+    #[ivars = FadeIvars]
+    pub(crate) struct EdgeFade;
+
+    unsafe impl NSObjectProtocol for EdgeFade {}
+
+    impl EdgeFade {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        /// Takes no click: the chips under it do.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+
+        /// The theme's background, running out to nothing towards the strip's
+        /// middle: what runs under the edge dissolves into the window.
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let iv = self.ivars();
+            let Some(palette) = iv.palette.get() else {
+                return;
+            };
+            let solid = Tint::of(palette.ground, 1.0).color();
+            let clear = Tint::of(palette.ground, 0.0).color();
+            let (from, to) = if iv.leading {
+                (&solid, &clear)
+            } else {
+                (&clear, &solid)
+            };
+            let gradient = NSGradient::initWithStartingColor_endingColor(NSGradient::alloc(), from, to);
+            if let Some(gradient) = gradient {
+                gradient.drawInRect_angle(self.bounds(), 0.0);
+            }
+        }
+    }
+);
+
+impl EdgeFade {
+    fn new(mtm: MainThreadMarker, leading: bool) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(FadeIvars {
+            leading,
+            palette: Cell::new(None),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
+        // ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        this.setHidden(true);
+        this.setAccessibilityElement(false);
+        this
+    }
+
+    fn set_palette(&self, palette: Palette) {
+        if self.ivars().palette.replace(Some(palette)) != Some(palette) {
+            self.setNeedsDisplay(true);
         }
     }
 }
@@ -1734,10 +2018,35 @@ pub(crate) struct BarIvars {
     theme: Cell<Option<Theme>>,
     /// One chip per tab, in strip order, each keeping its tab.
     chips: RefCell<Vec<Retained<Chip>>>,
-    /// The separators' centres, from the last layout.
-    separators: RefCell<Vec<f64>>,
+    /// The view the chips sit in and are cut by.
+    strip: Retained<ChipStrip>,
+    /// The fades at the strip's two edges, lit where tabs run under them.
+    fade_leading: Retained<EdgeFade>,
+    fade_trailing: Retained<EdgeFade>,
+    /// The strip's scroll as last applied (the layout clamps it).
+    scroll: Cell<f64>,
+    /// The layout last made: the wheel and the list work from it.
+    laid: RefCell<Option<Strip>>,
+    /// The tab whose selection was last brought into view — a layout scrolls
+    /// to the selection only when it changed (or when the tabs stopped
+    /// fitting), so a hover or a clock tick never undoes the user's
+    /// scrolling.
+    revealed: Cell<Option<u64>>,
+    /// The tabs did not fit at the last layout.
+    overflowed: Cell<bool>,
     new_tab: Retained<BarButton>,
+    /// Show All Tabs, only while the tabs do not fit.
+    list: Retained<BarButton>,
     warning: Retained<BarButton>,
+    /// The field a tab is named in, in the bar while `renaming` says whose.
+    field: Retained<NSTextField>,
+    renaming: Cell<Option<u64>>,
+    /// What the field held when it opened: unchanged text is not a name
+    /// (the title it showed may be stale by the time the field closes).
+    opened_with: RefCell<String>,
+    /// The bar's width at the last layout: narrowing a window with
+    /// overflowing tabs brings the selected one back into view.
+    width: Cell<f64>,
     /// The bar's one delayed wake ([`TabBar::arm_clock`]): the generation a
     /// fire must carry to count, and when the live one is due.
     clock: Cell<u64>,
@@ -1773,25 +2082,6 @@ define_class!(
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
-        }
-
-        /// The separators between two quiet tabs; the chips draw over the
-        /// rest.
-        #[unsafe(method(drawRect:))]
-        fn draw_rect(&self, _dirty: NSRect) {
-            let Some(palette) = self.ivars().palette.get() else {
-                return;
-            };
-            let height = self.bounds().size.height;
-            let y = ((height - SEPARATOR_HEIGHT) / 2.0).max(0.0);
-            palette.separator.color().setFill();
-            for &x in self.ivars().separators.borrow().iter() {
-                let line = NSBezierPath::bezierPathWithRect(NSRect::new(
-                    NSPoint::new(x - 0.5, y),
-                    NSSize::new(1.0, SEPARATOR_HEIGHT.min(height)),
-                ));
-                line.fill();
-            }
         }
 
         /// The first click on an inactive window moves it (or selects a
@@ -1831,13 +2121,72 @@ define_class!(
                 TitleAction::Nothing => {}
             }
         }
+
+        /// A wheel or a trackpad moves the strip once the tabs no longer fit
+        /// ([`Strip::wheeled`]: a vertical wheel scrolls it too). Without
+        /// overflow nothing scrolls and the event goes on.
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            if !self.wheel(event) {
+                // SAFETY: `NSView`'s `scrollWheel:` takes the event.
+                let _: () = unsafe { msg_send![super(self), scrollWheel: event] };
+            }
+        }
+
+        /// The rename field's command hook: Return keeps the name, Esc
+        /// leaves the tab's as it was. The rest is the field's own.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn control_do_command(
+            &self,
+            _control: &AnyObject,
+            _text_view: &AnyObject,
+            command: Sel,
+        ) -> bool {
+            if command == sel!(insertNewline:) {
+                self.end_rename(true);
+                true
+            } else if command == sel!(cancelOperation:) {
+                self.end_rename(false);
+                true
+            } else {
+                false
+            }
+        }
+
+        /// The field lost the keyboard to something else — a click in a
+        /// pane, another tab: the name typed is kept.
+        #[unsafe(method(controlTextDidEndEditing:))]
+        fn control_end_editing(&self, _notification: &NSNotification) {
+            self.end_rename(true);
+        }
     }
+
+    // The rename field's delegate: both protocols' methods are optional;
+    // the ones used are above.
+    unsafe impl NSControlTextEditingDelegate for TabBar {}
+    unsafe impl NSTextFieldDelegate for TabBar {}
 );
 
 impl TabBar {
     pub(crate) fn new(mtm: MainThreadMarker, window: u64) -> Retained<Self> {
         let new_tab = BarButton::new(mtm, Kind::NewTab);
+        let list = BarButton::new(mtm, Kind::List);
         let warning = BarButton::new(mtm, Kind::Warning);
+        let strip = ChipStrip::new(mtm);
+        let fade_leading = EdgeFade::new(mtm, true);
+        let fade_trailing = EdgeFade::new(mtm, false);
+        let field = NSTextField::textFieldWithString(ns_string!(""), mtm);
+        // A tab's name is one line that scrolls as it is typed, on the chip's
+        // own face: no bezel, no ring, no ground of its own.
+        field.setBezeled(false);
+        field.setDrawsBackground(false);
+        field.setFocusRingType(NSFocusRingType::None);
+        field.setAlignment(NSTextAlignment::Center);
+        if let Some(cell) = field.cell() {
+            cell.setUsesSingleLineMode(true);
+            cell.setScrollable(true);
+        }
+        field.setAccessibilityLabel(Some(ns_string!("Tab name")));
         let this = Self::alloc(mtm).set_ivars(BarIvars {
             window,
             shown: RefCell::new(Shown::default()),
@@ -1845,9 +2194,20 @@ impl TabBar {
             palette: Cell::new(None),
             theme: Cell::new(None),
             chips: RefCell::new(Vec::new()),
-            separators: RefCell::new(Vec::new()),
+            strip: strip.clone(),
+            fade_leading: fade_leading.clone(),
+            fade_trailing: fade_trailing.clone(),
+            scroll: Cell::new(0.0),
+            laid: RefCell::new(None),
+            revealed: Cell::new(None),
+            overflowed: Cell::new(false),
             new_tab: new_tab.clone(),
+            list: list.clone(),
             warning: warning.clone(),
+            field: field.clone(),
+            renaming: Cell::new(None),
+            opened_with: RefCell::new(String::new()),
+            width: Cell::new(0.0),
             clock: Cell::new(0),
             clock_due: Cell::new(None),
             card_view: SummaryCard::new(mtm),
@@ -1863,8 +2223,18 @@ impl TabBar {
         // ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         this.addSubview(&new_tab);
+        this.addSubview(&list);
         this.addSubview(&warning);
+        // The fades over the strip: what runs under an edge dissolves.
+        this.addSubview(&strip);
+        this.addSubview(&fade_leading);
+        this.addSubview(&fade_trailing);
+        list.setHidden(true);
         warning.setHidden(true);
+        // SAFETY: `TabBar` implements the field's delegate protocols (the
+        // two optional methods it uses are defined above); the field holds
+        // its delegate weakly and the bar owns the field.
+        unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*this))) };
         this.setAccessibilityElement(true);
         // SAFETY: AppKit's constant role string, alive for the process.
         this.setAccessibilityRole(Some(unsafe { NSAccessibilityTabGroupRole }));
@@ -1975,7 +2345,7 @@ impl TabBar {
                 Some(at) => chips.push(old.remove(at)),
                 None => {
                     let chip = Chip::new(self.mtm(), label.tab);
-                    self.addSubview(&chip);
+                    iv.strip.addSubview(&chip);
                     chips.push(chip);
                 }
             }
@@ -1995,6 +2365,11 @@ impl TabBar {
     /// Places every part from the pure layout ([`Bar::layout`]) and gives
     /// the chips their tabs; then the card follows its chip and the clock is
     /// set again ([`Self::arm_clock`]).
+    ///
+    /// The strip scrolls by [`BarIvars::scroll`]. A **change of the selection**
+    /// scrolls it to the selected chip (`Strip::revealing`) and, like the
+    /// applier's changes, slides there; nothing else moves it but the wheel,
+    /// which does not slide.
     pub(crate) fn lay_out(&self) {
         let iv = self.ivars();
         let (Some(palette), Some(theme)) = (iv.palette.get(), iv.theme.get()) else {
@@ -2005,45 +2380,86 @@ impl TabBar {
         if count == 0 {
             return;
         }
+        let single = count == 1;
+        // A tab gone takes its name field away.
+        if let Some(tab) = iv.renaming.get()
+            && !shown.tabs.iter().any(|label| label.tab == tab)
+        {
+            self.end_rename(false);
+            return;
+        }
         let bounds = self.bounds();
         let hovered = iv
             .hovered
             .get()
             .and_then(|id| shown.tabs.iter().position(|label| label.tab == id));
-        let single = count == 1;
-        let strip = Bar {
+        let bar = Bar {
             width: bounds.size.width,
             leading: self.leading(),
             count,
             selected: shown.selected,
             hovered,
             dragged: None,
-            scroll: 0.0,
+            scroll: iv.scroll.get(),
             warning: !shown.notice.is_empty(),
             corner: self.corner(),
+        };
+        let mut strip = bar.layout();
+        let selected_tab = shown.tabs.get(shown.selected).map(|label| label.tab);
+        let mut revealed = false;
+        let was_overflowing = iv.overflowed.replace(strip.overflow);
+        let resized = (iv.width.replace(bounds.size.width) - bounds.size.width).abs() > 0.5;
+        if single {
+            iv.revealed.set(None);
+        } else {
+            let selection_changed = iv.revealed.replace(selected_tab) != selected_tab;
+            // The tabs stopped fitting, or the room they scroll in changed
+            // while they do not: the selected one stays in sight. Only a
+            // change of the selection slides there.
+            let kept_in_sight = strip.overflow && (!was_overflowing || resized);
+            if selection_changed || kept_in_sight {
+                let target = strip.revealing(shown.selected);
+                if target != strip.scroll {
+                    strip = Bar {
+                        scroll: target,
+                        ..bar
+                    }
+                    .layout();
+                    revealed = selection_changed;
+                }
+            }
         }
-        .layout();
+        iv.scroll.set(strip.scroll);
         let top = ((bounds.size.height - CHIP_HEIGHT) / 2.0).max(0.0);
+        // The chips live in the strip's space: its left edge is theirs.
+        iv.strip.setFrame(NSRect::new(
+            NSPoint::new(strip.span.x, 0.0),
+            NSSize::new(strip.span.width, bounds.size.height),
+        ));
         let (chips, reflow) = self.chips_for(&shown.tabs);
         let reduce = self.reduce_motion();
         let motion = Motion::of(reduce);
-        let slide = (reflow && motion.reflow > 0.0).then_some(motion.reflow);
+        let slide = ((reflow || revealed) && motion.reflow > 0.0).then_some(motion.reflow);
         let hints = iv.hints.get();
         for (index, (chip, span)) in chips.iter().zip(&strip.chips).enumerate() {
             let label = &shown.tabs[index];
-            let title = if single {
+            // The tab being named shows its field instead of title and indicator.
+            let naming = iv.renaming.get() == Some(label.tab);
+            let title = if naming {
+                String::new()
+            } else if single {
                 single_label(&label.title, &shown.notice)
             } else {
                 label.title.clone()
             };
             let frame = NSRect::new(
-                NSPoint::new(span.x, top),
+                NSPoint::new(span.x - strip.span.x, top),
                 NSSize::new(span.width, CHIP_HEIGHT),
             );
             let mark = (label.mark != HostMark::None).then(|| theme.mark_rgb(label.mark));
             let look = Look {
                 title: &title,
-                indicator: label.indicator,
+                indicator: label.indicator.filter(|_| !naming),
                 step: label
                     .running
                     .map_or(0, |elapsed| tabs::ring_step(elapsed, reduce)),
@@ -2060,18 +2476,44 @@ impl TabBar {
                     label.mark,
                 ),
                 selected: index == shown.selected,
-                hovered: hovered == Some(index),
+                hovered: hovered == Some(index) && !naming,
                 single,
             };
             chip.set(frame, &look, palette, motion, slide);
+            if naming {
+                self.place_field(*span, top, palette, single);
+            }
         }
-        if *iv.separators.borrow() != strip.separators {
-            iv.separators.replace(strip.separators.clone());
-            self.setNeedsDisplay(true);
+        let inside = |x: f64| x - strip.span.x;
+        iv.strip.set_separators(
+            strip.separators.iter().map(|&x| inside(x)).collect(),
+            palette,
+        );
+        let height = bounds.size.height;
+        let edge = |x: f64| NSRect::new(NSPoint::new(x, 0.0), NSSize::new(FADE, height));
+        for (fade, on, x) in [
+            (&iv.fade_leading, strip.fade_leading, strip.span.x),
+            (
+                &iv.fade_trailing,
+                strip.fade_trailing,
+                strip.span.end() - FADE,
+            ),
+        ] {
+            fade.setFrame(edge(x));
+            fade.set_palette(palette);
+            fade.setHidden(!on);
         }
         let button = |x: f64| NSRect::new(NSPoint::new(x, top), NSSize::new(BUTTON, BUTTON));
         iv.new_tab.setFrame(button(strip.new_tab));
         iv.new_tab.set_look(palette, strip.fit.radius);
+        match strip.list {
+            Some(x) => {
+                iv.list.setFrame(button(x));
+                iv.list.set_look(palette, strip.fit.radius);
+                iv.list.setHidden(false);
+            }
+            None => iv.list.setHidden(true),
+        }
         match strip.warning {
             Some(x) => {
                 iv.warning.setFrame(button(x));
@@ -2083,8 +2525,206 @@ impl TabBar {
             }
             None => iv.warning.setHidden(true),
         }
+        iv.laid.replace(Some(strip));
         self.place_card();
         self.arm_clock();
+    }
+
+    /// A wheel or trackpad step over the bar ([`Strip::wheeled`]); `false`
+    /// when nothing scrolls (the tabs fit) and the event is not the bar's.
+    fn wheel(&self, event: &NSEvent) -> bool {
+        let iv = self.ivars();
+        // A trackpad reports points, a wheel lines. The strip moves the way
+        // the fingers (or the wheel) take the content: positive towards the
+        // later tabs, the opposite of AppKit's delta.
+        let unit = if event.hasPreciseScrollingDeltas() {
+            1.0
+        } else {
+            WHEEL_STEP
+        };
+        let step = {
+            let laid = iv.laid.borrow();
+            let Some(laid) = laid.as_ref().filter(|laid| laid.overflow) else {
+                return false;
+            };
+            let to = laid.wheeled(
+                -event.scrollingDeltaX() * unit,
+                -event.scrollingDeltaY() * unit,
+            );
+            (to != laid.scroll).then_some(to)
+        };
+        if let Some(to) = step {
+            iv.scroll.set(to);
+            self.lay_out();
+        }
+        true
+    }
+
+    // ─── Naming a tab ────────────────────────────────────────────────────
+
+    /// Opens the name field over tab `tab`'s chip, its title selected: a
+    /// double click, Rename Tab…. A lone tab's title is the window's and is
+    /// named from the menu only (the title takes no click). A name under way
+    /// elsewhere is kept first, and the chip is brought into view.
+    pub(crate) fn begin_rename(&self, tab: u64) {
+        let iv = self.ivars();
+        let (index, shown_title) = {
+            let shown = iv.shown.borrow();
+            let Some(index) = shown.tabs.iter().position(|label| label.tab == tab) else {
+                return;
+            };
+            (index, shown.tabs[index].title.clone())
+        };
+        // The window's title carries a transfer's prefix; a name does not.
+        let title = self
+            .terminal_window()
+            .and_then(|window| window.tab_title(tab))
+            .unwrap_or(shown_title);
+        if iv.renaming.get() == Some(tab) {
+            return;
+        }
+        self.end_rename(true);
+        self.pressed(tab);
+        let to = iv
+            .laid
+            .borrow()
+            .as_ref()
+            .map(|laid| laid.revealing(index))
+            .filter(|_| iv.shown.borrow().tabs.len() > 1);
+        if let Some(to) = to {
+            iv.scroll.set(to);
+        }
+        iv.renaming.set(Some(tab));
+        iv.opened_with.replace(title.clone());
+        iv.field.setStringValue(&NSString::from_str(&title));
+        self.addSubview(&iv.field);
+        self.lay_out();
+        // SAFETY: `selectText:` takes an optional sender, unused.
+        unsafe { iv.field.selectText(None) };
+    }
+
+    /// Takes the name field away — Return and a lost keyboard keep what was
+    /// typed (`commit`), Esc leaves the tab as it was. The window's applier
+    /// decides what the text means ([`TerminalWindow::rename_tab`]).
+    fn end_rename(&self, commit: bool) {
+        let iv = self.ivars();
+        // Taken first: handing the keyboard back ends the field's editing,
+        // which says so again ([`TabBar`]'s `controlTextDidEndEditing:`).
+        let Some(tab) = iv.renaming.take() else {
+            return;
+        };
+        let draft = iv.field.stringValue().to_string();
+        // Text nobody changed is not a name: the title it was opened with may
+        // be stale by now (a shell that rewrites it on every command).
+        let commit = commit && draft != *iv.opened_with.borrow();
+        let window = self.terminal_window();
+        if iv.field.currentEditor().is_some()
+            && let Some(window) = &window
+        {
+            window.focus_selected_tab();
+        }
+        iv.field.removeFromSuperview();
+        if commit && let Some(window) = &window {
+            window.rename_tab(tab, &draft);
+        }
+        self.lay_out();
+    }
+
+    /// Puts the name field over `chip` (the bar's space), in the type the
+    /// title wears there: the selected chip's, or the lone tab's.
+    fn place_field(&self, chip: tabs::Span, top: f64, palette: Palette, single: bool) {
+        let field = &self.ivars().field;
+        // SAFETY: AppKit's constant font weight.
+        let weight = unsafe { NSFontWeightSemibold };
+        let (size, color, pad) = if single {
+            (SINGLE_TEXT, palette.dim, SINGLE_PAD)
+        } else {
+            (CHIP_TEXT, palette.title, CHIP_PAD)
+        };
+        field.setFont(Some(&NSFont::systemFontOfSize_weight(size, weight)));
+        field.setTextColor(Some(&Tint::of(color, 1.0).color()));
+        let height = field.intrinsicContentSize().height;
+        field.setFrame(NSRect::new(
+            NSPoint::new(chip.x + pad, top + ((CHIP_HEIGHT - height) / 2.0).max(0.0)),
+            NSSize::new((chip.width - 2.0 * pad).max(0.0), height),
+        ));
+    }
+
+    // ─── The menus ───────────────────────────────────────────────────────
+
+    /// The chip's menu for tab `tab` — what can be done to that tab whether
+    /// or not it is selected. Every item names it in its `tag`
+    /// ([`tabs::menu_tag`]) and acts through the window's applier.
+    fn context_menu(&self, tab: u64) -> Option<Retained<NSMenu>> {
+        let window = self.terminal_window()?;
+        if self.ivars().shown.borrow().tabs.len() < 2 {
+            return None;
+        }
+        // A menu is no place for the card; and the pointer resting on the
+        // chip after it closes is not a reason to open it.
+        self.pressed(tab);
+        let mtm = self.mtm();
+        let menu = NSMenu::new(mtm);
+        let tag = tabs::menu_tag(tab);
+        let add = |title: &str, action: Sel| {
+            menu.addItem(&window_item(mtm, &window, title, action, tag));
+        };
+        add("Close Tab", sel!(closeChipTab:));
+        add("Close Other Tabs", sel!(closeOtherTabs:));
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        add("Move Tab to New Window", sel!(detachTab:));
+        add("Rename Tab\u{2026}", sel!(renameTab:));
+        Some(menu)
+    }
+
+    /// Show All Tabs: every tab in a menu under the list button (or where it
+    /// would be), the selected one ticked, a status dot in the colour of what
+    /// the tab reports, its ⌘ key — a click selects it, the strip scrolls to
+    /// it. Among several tabs only.
+    pub(crate) fn show_list(&self) {
+        let iv = self.ivars();
+        let (shown, slot, palette) = (
+            iv.shown.borrow().clone(),
+            iv.laid.borrow().as_ref().map(Strip::list_slot),
+            iv.palette.get(),
+        );
+        let (Some(window), Some(slot), Some(palette)) = (self.terminal_window(), slot, palette)
+        else {
+            return;
+        };
+        let count = shown.tabs.len();
+        if count < 2 {
+            return;
+        }
+        self.close_card();
+        let mtm = self.mtm();
+        let menu = NSMenu::new(mtm);
+        for (index, label) in shown.tabs.iter().enumerate() {
+            let item = window_item(
+                mtm,
+                &window,
+                &label.title,
+                sel!(pickTab:),
+                tabs::menu_tag(label.tab),
+            );
+            if index == shown.selected {
+                item.setState(NSControlStateValueOn);
+            }
+            // Every row has an image, a clear one where the tab reports
+            // nothing: the titles start at one x.
+            let dot = label
+                .indicator
+                .map(|indicator| palette.tone(tabs::list_dot(indicator), 0));
+            item.setImage(Some(&dot_image(dot)));
+            if let Some(digit) = tabs::shortcut_digit(index, count) {
+                item.setKeyEquivalent(&NSString::from_str(&digit.to_string()));
+                item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+            }
+            menu.addItem(&item);
+        }
+        let height = self.bounds().size.height;
+        let at = NSPoint::new(slot, height);
+        menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));
     }
 
     /// The pointer came over tab `tab`'s chip (`Some`), or left the bar;
@@ -2348,10 +2988,14 @@ impl TabBar {
             self.close_card();
             return;
         };
+        // The chip's frame is in the strip's space.
         let at = chip.frame();
         let size = iv.card_view.frame().size;
         let origin = NSPoint::new(
-            card_x(at.origin.x, self.bounds().size.width),
+            card_x(
+                iv.strip.frame().origin.x + at.origin.x,
+                self.bounds().size.width,
+            ),
             self.frame().origin.y + at.origin.y + at.size.height + CARD_DROP,
         );
         let card = &iv.card_view;
@@ -2467,7 +3111,7 @@ mod tests {
         CARD_PAD_X, CARD_WIDTH, GLYPH_GAP, GLYPH_SIDE, Motion, Palette, TAB_RADIUS, TitleAction,
         card_x, command_alone, line_span, single_label, title_double_click, title_row,
     };
-    use crate::tabs::Tone;
+    use crate::tabs::{self, Indicator, Tone};
     use bt_core::Theme;
     use objc2_app_kit::NSEventModifierFlags;
 
@@ -2518,6 +3162,34 @@ mod tests {
         assert_eq!(light.error, Theme::BATERI_LIGHT.error);
         assert_eq!(light.card.rgb, Theme::BATERI_LIGHT.background);
         assert_eq!(dark.separator.rgb, Theme::BATERI.foreground);
+    }
+
+    /// A scrolled strip's edge fades out to the window's own background —
+    /// the theme's, light or dark — or it would show as a band.
+    #[test]
+    fn the_strips_edges_fade_to_the_themes_background() {
+        for theme in [Theme::BATERI, Theme::BATERI_LIGHT, Theme::LINEN] {
+            assert_eq!(Palette::of(&theme).ground, theme.background);
+        }
+    }
+
+    /// A Show All Tabs row's dot is drawn in the same role the chip's
+    /// indicator wears for what it reports.
+    #[test]
+    fn a_list_dot_takes_the_colour_of_its_role() {
+        let palette = Palette::of(&Theme::BATERI);
+        assert_eq!(
+            palette.tone(tabs::list_dot(Indicator::Running), 0),
+            palette.accent
+        );
+        assert_eq!(
+            palette.tone(tabs::list_dot(Indicator::Failed), 0),
+            palette.error
+        );
+        assert_eq!(
+            palette.tone(tabs::list_dot(Indicator::Finished), 0),
+            palette.success
+        );
     }
 
     /// A card line's colour is its tone's role; the host line is the mark's

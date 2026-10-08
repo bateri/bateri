@@ -7,7 +7,7 @@
 //! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
 //! Page Down) and Window (Minimize,
-//! Zoom, Show Previous/Next Tab, Select Tab ▸, splits — Select Previous/Next
+//! Zoom, Show Previous/Next Tab, Select Tab ▸, Show All Tabs, Rename Tab…, splits — Select Previous/Next
 //! Split, Select Split ▸, Resize Split ▸, Equalize Splits, Zoom Split —, Move
 //! Tab to New Window, Merge All Windows, Bring All to Front). Settings… (⌘,) opens the settings window
 //! (`settings_window`; it used to open the file in the editor, that job is now
@@ -22,16 +22,16 @@
 //! scrolling actions (grey on the alternate screen) and `cancelUpload:`
 //! to the focused pane (`pane::TerminalPane`, `BateriView`'s parent view);
 //! `closeTab:`, `closeWindow:`, `selectTab:`, `showNextTab:`,
-//! `showPreviousTab:` (grey with a single tab), `splitRight:`,
+//! `showPreviousTab:`, `showTabList:` and `detachTab:` (all grey with a single
+//! tab), `renameTab:` (a lone tab is named from here too), `splitRight:`,
 //! `splitDown:` and the splits' navigation/layout actions
 //! (`selectPreviousSplit:`, `selectNextSplit:`, `selectSplit:`,
 //! `resizeSplit:`, `equalizeSplits:`, `toggleSplitZoom:`; grey with a single pane)
 //! to the key window's delegate (`window::TerminalWindow`, which carries the
 //! tabs — the tab actions are named apart from `NSWindow`'s own, which the
 //! window would answer before its delegate); `performMiniaturize:` and
-//! `performZoom:` to `NSWindow` itself; `detachTab:` and `mergeWindows:`
-//! (Move Tab to New Window, Merge All Windows) to nobody yet, so AppKit
-//! shows them grey;
+//! `performZoom:` to `NSWindow` itself; `mergeWindows:` (Merge All Windows,
+//! grey with a single window) to the app delegate, which reaches every window;
 //! `openSettings:`, the theme actions, `markHost:`, `toggleHostIntegration:`
 //! (its title, checkmark and grey state in the app delegate's
 //! `validateMenuItem:`, from [`integration_menu`]) and
@@ -537,6 +537,10 @@ pub(crate) fn install(
                 NSEventModifierFlags::Control,
             )),
             submenu(mtm, "Select Tab", &select_tab),
+            // `|` is the Shift character of `\`: the menu matches ⇧⌘\. Grey with a single
+            // tab (`TerminalWindow`'s `validateMenuItem:`).
+            item(mtm, "Show All Tabs", sel!(showTabList:), "|"),
+            item(mtm, "Rename Tab\u{2026}", sel!(renameTab:), ""),
             NSMenuItem::separatorItem(mtm),
             // Splits (Ghostty/iTerm2 precedent): the handler is
             // `TerminalWindow`; grey with a single pane (`validateMenuItem:`).

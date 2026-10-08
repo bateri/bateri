@@ -1296,10 +1296,12 @@ pub(crate) struct Ivars {
     /// `bt-gpu`'s type but its owner is here: `DisplayLink` and the completion
     /// block each write a copy, and the one read at shutdown (the report) is this copy.
     stats: Option<Arc<Stats>>,
-    /// The open windows (each tab is a window). **Owned here**: the window's
+    /// The open windows, each carrying its tabs. **Owned here**: the window's
     /// delegate property is weak and `TerminalWindow` is held nowhere else.
-    /// The only path that creates is [`AppDelegate::open_window`]; a closing
-    /// window leaves one turn later ([`AppDelegate::forget_window`]).
+    /// Windows are created by [`AppDelegate::open_window`], the restore, and
+    /// the move of a tab to a window of its own
+    /// ([`AppDelegate::move_tab_to_new_window`]); a closing window leaves one
+    /// turn later ([`AppDelegate::forget_window`]).
     ///
     /// The on-save paths walk this list and, while walking, take a **copy** of
     /// it ([`AppDelegate::windows`]): a call going to a window can come back
@@ -1813,6 +1815,7 @@ define_class!(
             if item.action() == Some(sel!(closeTab:)) {
                 item.setTitle(&NSString::from_str(window::close_title(1)));
             }
+
             // Shell ▸ Shell Integration on “{host}”: the key tab's host
             // and its resolved answer; locally grey.
             if item.action() == Some(sel!(toggleHostIntegration:)) {
@@ -1830,6 +1833,9 @@ define_class!(
                     NSControlStateValueOff
                 });
                 model.enabled
+            } else if item.action() == Some(sel!(mergeWindows:)) {
+                // Merging needs a second window to take tabs from.
+                self.windows().len() > 1
             } else {
                 true
             }
@@ -1842,6 +1848,14 @@ define_class!(
         #[unsafe(method(newTab:))]
         fn new_tab(&self, _sender: Option<&AnyObject>) {
             self.open_from_key_window(Opening::Tab);
+        }
+
+        /// Window ▸ Merge All Windows: every other window's tabs join the key
+        /// window's, at its end; the emptied windows close without ending a
+        /// shell. Here, not in the window: it reaches all of them.
+        #[unsafe(method(mergeWindows:))]
+        fn merge_windows(&self, _sender: Option<&AnyObject>) {
+            self.merge_all_windows();
         }
 
         /// Shell ▸ New Local Tab (⌥⌘T): **always** a local tab, even from a
@@ -3440,6 +3454,19 @@ impl AppDelegate {
         self.layout_changed();
     }
 
+    /// Takes window `id` out of the list at once; its closing is the caller's.
+    fn unlist_window(&self, id: u64) {
+        let removed = {
+            let mut windows = self.ivars().windows.borrow_mut();
+            windows
+                .iter()
+                .position(|window| window.id() == id)
+                .map(|index| windows.remove(index))
+        };
+        // Dropped after the borrow is released, like `forget_window`'s.
+        drop(removed);
+    }
+
     /// Opens a new window — the **only** path that spawns windows: the
     /// launch's first window (`from = None`), ⌘N, a tab request without a
     /// window and the Dock icon. A new tab in an existing window is
@@ -3524,6 +3551,95 @@ impl AppDelegate {
         }
         window.refresh_title();
         Ok(())
+    }
+
+    /// Move Tab to New Window: tab `tab` of window `from` leaves it for a
+    /// window of its own, the size and place it had, cascaded — the tab
+    /// itself, not a copy: its shells go on and its questions, indicators and
+    /// name come with it. Nothing moves while either window holds a question
+    /// of its own (a beep, like a selection would), and a window's only tab
+    /// stays where it is.
+    ///
+    /// The order is the applier's: the tab leaves the source
+    /// ([`TerminalWindow::release_tab`]), a window is built around it
+    /// ([`TerminalWindow::with_tab`]'s order, as [`AppDelegate::open_window`]
+    /// builds one), and the tab comes up in it ([`TerminalWindow::show_arrived`]).
+    /// No shell is started or told to end.
+    pub(crate) fn move_tab_to_new_window(&self, from: &TerminalWindow, tab: u64) {
+        if from.tab_count() < 2 || !from.selection_free() {
+            crate::preview::beep();
+            return;
+        }
+        let Some(moved) = from.release_tab(tab) else {
+            return;
+        };
+        let theme = moved
+            .focused_pane()
+            .session()
+            .map_or_else(|| self.resolve_theme(), |session| session.theme());
+        let frame = from.ns_window().frame();
+        let window =
+            TerminalWindow::with_tab(self.mtm(), self.next_id(), from.run(), moved, Some(frame));
+        window.set_notice(&self.ivars().notices.borrow().subtitle());
+        self.ivars().windows.borrow_mut().push(window.clone());
+        window.set_theme(theme);
+        window.set_content_edge(self.settings().content_edge);
+        window.show_after(Some(from));
+        if self.ivars().run.is_some() {
+            window.float_for_timed_run();
+        }
+        window.show_arrived();
+        self.layout_changed();
+    }
+
+    /// Merge All Windows: every other terminal window's tabs, in strip order,
+    /// join the key window's at its end, the key window's selection staying
+    /// where it was; each emptied window closes — it holds no tab, so no shell
+    /// ends with it. Nothing moves if any of the windows holds a question of
+    /// its own (a beep).
+    pub(crate) fn merge_all_windows(&self) {
+        let Some(into) = self.key_window().or_else(|| {
+            self.front_terminal_window()
+                .and_then(|window| self.window_owning(&window))
+        }) else {
+            return;
+        };
+        let others: Vec<Retained<TerminalWindow>> = self
+            .windows()
+            .into_iter()
+            .filter(|window| window.id() != into.id())
+            .collect();
+        if others.is_empty() {
+            return;
+        }
+        if !into.selection_free() || others.iter().any(|window| !window.selection_free()) {
+            crate::preview::beep();
+            return;
+        }
+        for other in &others {
+            // Strip order in, the selected tab last out: it is the one that
+            // leaves the screen, and the window it leaves is closing anyway.
+            let tabs = other.tabs();
+            let selected = other.selected_tab().id();
+            let mut moved: Vec<Retained<TerminalTab>> = Vec::new();
+            for tab in tabs.iter().filter(|tab| tab.id() != selected) {
+                moved.extend(other.release_tab(tab.id()));
+            }
+            moved.extend(other.release_tab(selected));
+            moved.sort_by_key(|tab| tabs.iter().position(|first| first.id() == tab.id()));
+            for tab in &moved {
+                into.adopt_tab(tab);
+            }
+            // Out of the list now, not a turn after it closes
+            // ([`AppDelegate::forget_window`]): a delayed save that fires in
+            // between must not walk a window without a tab. `other` keeps it
+            // alive through its closing.
+            self.unlist_window(other.id());
+            other.close();
+        }
+        into.refresh_title();
+        into.select();
+        self.layout_changed();
     }
 
     /// The bar's `+` in window `window` (`tab_bar::TabBar`): ⌘T's job there.
@@ -4070,7 +4186,10 @@ impl AppDelegate {
         let mut windows = Vec::new();
         let mut histories = Vec::new();
         for window in self.windows() {
-            let selected = window.selected_tab().id();
+            // A window that gave up its last tab and is closing has none.
+            let Some(selected) = window.try_selected_tab().map(|tab| tab.id()) else {
+                continue;
+            };
             let mut tabs = Vec::new();
             let mut selected_index = 0;
             for live in window.tabs() {

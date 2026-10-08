@@ -133,6 +133,9 @@ objc2-foundation = { workspace = true, features = [
 # `NSAccessibilityConstants` and `NSAccessibilityProtocols` — VoiceOver's
 # tab group, tab button and button roles on our own views. Only header
 # flags over `objc2-foundation` headers; `Cargo.lock` did not move.
+# The strip's scrolled edges fade out (`tab_bar`): `NSGradient` draws the
+# ramp from the theme's background to nothing. Only a header flag over
+# `objc2-foundation` headers already in the set; `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -148,6 +151,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSSecureTextField",
     "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea", "NSAttributedString",
     "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
+    "NSGradient",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

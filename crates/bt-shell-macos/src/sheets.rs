@@ -28,6 +28,14 @@
 //! (measured), so it is fitted to the container wherever the container is
 //! placed and when the window moves ([`fit_owner`]).
 //!
+//! **A tab that moves to another window takes its question along.** The tab
+//! leaves the screen of the old window (its owner is ordered out and so
+//! detached, [`hide_owner`]) and the owner is attached to whatever window
+//! the container is in when the tab is shown again ([`show_owner`] reads it
+//! from the container), so a tab moved hidden into a window keeps its owner
+//! out until it is selected there. A parked question sits in its pane and
+//! does not care which window that is in.
+//!
 //! A **window's** question still sits on the window and blocks it, bar
 //! included: the selection does not move under it ([`window_asks`]). A
 //! window's question does not open over a tab's question on screen, nor a

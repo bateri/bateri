@@ -23,6 +23,20 @@ of every installed copy. A version without a section is not released.
   burnt-orange cursor and input mark. Pick it from View ▸ Theme ▸, or set
   `theme = "linen"` (or `light_theme = "linen"` to use it whenever macOS is in
   light mode).
+- **Name your tabs, and scroll through as many as you open.** Double-click a
+  tab (or choose Window ▸ Rename Tab…) and type: Return keeps the name, Esc
+  leaves it, and emptying the field gives the tab back the title its shell
+  sets. The name is kept when you quit, relaunch or update. When the tabs no
+  longer fit they stop shrinking and the row scrolls — with the wheel or the
+  trackpad — fading out at the edges, and a button beside `+` (Window ▸ Show
+  All Tabs, ⇧⌘\) lists every tab, with the one you are on ticked and a dot
+  for what is going on in it. Selecting a tab brings it into view.
+- **Move a tab to a window of its own, or gather your windows into one.**
+  Right-click a tab for Close Tab, Close Other Tabs (one question for all of
+  them), Move Tab to New Window and Rename Tab…. Window ▸ Move Tab to New
+  Window does the same for the tab you are on, and Window ▸ Merge All Windows
+  puts every window's tabs into the current one. Nothing restarts: the tab
+  keeps its shell, its running command and any question it was asking.
 
 ### Changed
 
