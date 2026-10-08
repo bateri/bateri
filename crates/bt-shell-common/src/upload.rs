@@ -2383,6 +2383,17 @@ impl Transfers {
         self.titled
     }
 
+    /// The local name of the item the status line speaks of (the queue lane's,
+    /// else the longest-streaming one); `None` while nothing streams — the tab
+    /// bar's summary card names it beside the percentage.
+    pub fn flowing_name(&self) -> Option<&str> {
+        let queue = self.queue.as_ref()?;
+        let current = queue.subject()?;
+        queue
+            .entry(current.id)
+            .map(|(_, item)| item.job.local.name.as_str())
+    }
+
     /// The wait is over: the line goes away if the result line is still this generation
     /// and no new queue has started.
     pub fn linger_over(&self, serial: u64) -> bool {

@@ -127,6 +127,23 @@ pub trait Wake: Send + Sync + 'static {
     /// job to its queue.
     fn phase_edge(&self);
 
+    /// Our **remote** shell's command started (its `C` moved the remote trail
+    /// to `Running`) or ended (its `D`) — the edges of a command run on the
+    /// far end of ssh, which the local phase does not see: there the local
+    /// command is `ssh` itself, running throughout. The receiver reads what
+    /// it wants with [`crate::Session::activity`].
+    ///
+    /// **Separate from [`Wake::phase_edge`]**, whose receiver also sends the
+    /// state to a bound holder: every remote command would add that traffic.
+    ///
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::command_started`]): a second remote `C` in the same command is
+    /// not a transition. It arrives on the reader thread after the ledger's
+    /// leaf lock has been released; the contract assumes the `Term` lock may
+    /// be held and the three prohibitions above apply. The implementor posts
+    /// **at most one** job to its queue.
+    fn remote_command_edge(&self);
+
     /// The dock's mirror or its context changed (OSC 8133: the line, its
     /// end, a mirror that could not be read, the branch) — the part of
     /// [`crate::Session::state_blob`] that moves with every keystroke.

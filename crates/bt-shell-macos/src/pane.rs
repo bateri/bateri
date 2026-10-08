@@ -120,6 +120,12 @@ pub(crate) trait PaneHost {
     /// The upload queue's progress or existence changed — the application's
     /// Dock icon is the total of all panes ([`TerminalPane::upload_totals`]).
     fn uploads_changed(&self, pane: u64);
+    /// A command started or ended in this pane — the local shell's `C`, our
+    /// `A` or a `D`, or our remote shell's `C`/`D`: the tab's running ring and
+    /// its "finished while you were away" mark are read again
+    /// (`Session::activity`). Comes for a background tab too: the news is the
+    /// reader thread's, not the frame path's.
+    fn activity_changed(&self, pane: u64);
     /// Notification to the user (upload finished, failed, connection lost).
     fn notify(&self, pane: u64, title: &str, body: &str);
     /// Subtitle notices (today only the font's, `sync_geometry`).
@@ -840,6 +846,10 @@ struct ShellWake {
     /// Whether the delayed state send of a mirror change is waiting
     /// ([`MIRROR_DELAY`]) — at most one.
     mirror_pending: Arc<AtomicBool>,
+    /// Whether the activity news ([`PaneHost::activity_changed`]) is waiting
+    /// on the main queue — `title_pending`'s twin: at most one job, which
+    /// reads the latest activity.
+    activity_pending: Arc<AtomicBool>,
 }
 
 /// The two bits of the remote-session probe — and of the login
@@ -1004,6 +1014,25 @@ impl ShellWake {
     /// it drops on the main thread ([`ShellWake::waker`]). The second call is `None`.
     fn detach(&self) -> Option<Waker> {
         self.slot().take()
+    }
+
+    /// A command's edge: the owner reads the pane's activity again on the
+    /// next main-queue turn ([`PaneHost::activity_changed`]). The flag drops
+    /// before the job reads, so an edge after the read schedules the next.
+    fn announce_activity(&self) {
+        if self.activity_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.activity_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.swap(false, Ordering::AcqRel);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.host().activity_changed(id);
+            }
+        });
     }
 
     /// Whether a holder keeps this pane's program — one atomic read.
@@ -1193,6 +1222,9 @@ impl Wake for ShellWake {
     }
 
     fn command_started(&self) {
+        // The tab's ring hears every start; it asks for no frame, so the
+        // timed run's tokens are not its concern.
+        self.announce_activity();
         // Reader thread, lock-free. A timed run does not detect: its tokens
         // must stay as today (and the fixed script has no integration either).
         if self.timed {
@@ -1209,8 +1241,16 @@ impl Wake for ShellWake {
 
     fn phase_edge(&self) {
         // Reader thread, lock-free: a prompt or a command's end — the
-        // holder's copy of the state must not lag a command behind.
+        // holder's copy of the state must not lag a command behind, and the
+        // tab's ring stops or its "finished" mark comes.
         self.push_state_soon();
+        self.announce_activity();
+    }
+
+    fn remote_command_edge(&self) {
+        // Reader thread, lock-free: a command on the far end of ssh started
+        // or ended — the tab's indicator alone hears it.
+        self.announce_activity();
     }
 
     fn mirror_changed(&self) {
@@ -1985,6 +2025,7 @@ impl TerminalPane {
                 kept: keeper.as_ref().map(|keeper| keeper.active_flag()),
                 state_pending: Arc::default(),
                 mirror_pending: Arc::default(),
+                activity_pending: Arc::default(),
             }),
             zoom: Cell::new(zoom),
             // No dock at launch: `start` decides and computes the geometry
@@ -4405,6 +4446,16 @@ impl TerminalPane {
     pub(crate) fn upload_title_prefix(&self) -> Option<(&'static str, u8)> {
         self.ivars().uploads.borrow().title_prefix()
     }
+
+    /// The name of the item the transfer line speaks of; `None` while
+    /// nothing streams — the tab bar's summary card.
+    pub(crate) fn upload_flowing_name(&self) -> Option<String> {
+        self.ivars()
+            .uploads
+            .borrow()
+            .flowing_name()
+            .map(str::to_owned)
+    }
 }
 
 /// [`adopt_session`]'s failure: why, and the carried history for the
@@ -4523,6 +4574,9 @@ mod tests {
         }
         fn uploads_changed(&self, pane: u64) {
             self.0.borrow_mut().push((pane, "uploads".into()));
+        }
+        fn activity_changed(&self, pane: u64) {
+            self.0.borrow_mut().push((pane, "activity".into()));
         }
         fn notify(&self, pane: u64, title: &str, _body: &str) {
             self.0.borrow_mut().push((pane, format!("notify {title}")));

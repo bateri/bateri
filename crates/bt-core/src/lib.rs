@@ -84,12 +84,13 @@ pub use search::{
     escape as escape_search,
 };
 pub use session::{
-    AdoptMode, Adoption, Block, BlockHandle, BlockInfo, BlockReport, Blocks, Cell, CellHalf, Click,
-    Cursor, DirtyFlag, DockKey, Frozen, InitialInput, LinkHit, LinkHover, LinkKind, LinkPoint,
-    LinkSpan, LinkStamp, Osc52, PathCandidate, PtyOps, PtySize, SHUTDOWN_GRACE, ScrollGlide,
-    ScrollIntent, ScrollPosition, SelectKind, SelectionPoint, SelectionRun, SelectionRuns, Session,
-    SessionOptions, ShutdownHandle, Teardown, TerminalOptions, TrackBlock, TrackMark, TrackMarks,
-    UnderlineStyle, Wheel, load_shell, smoke_shell,
+    Activity, AdoptMode, Adoption, Block, BlockHandle, BlockInfo, BlockReport, Blocks, Cell,
+    CellHalf, Click, Cursor, DirtyFlag, DockKey, Frozen, InitialInput, LinkHit, LinkHover,
+    LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52, PathCandidate, PtyOps, PtySize,
+    SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, ScrollPosition, SelectKind, SelectionPoint,
+    SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Teardown,
+    TerminalOptions, TrackBlock, TrackMark, TrackMarks, UnderlineStyle, Wheel, load_shell,
+    smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,
@@ -105,7 +106,8 @@ pub use shell::{
     ButtonState, DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor,
     HighlightStyle, ProgramBar, ProgramTone, Reconnect, RemoteKind, RemoteSetupFault, RemoteStats,
     RemoteTarget, STATS_HISTORY, ShellPhase, ShellState, SignIn, StatsForm, Transfer,
-    TransferAction, TransferControls, TransferTone, TtyModes, decode_percent,
+    TransferAction, TransferControls, TransferTone, TtyModes, counter_period, decode_percent,
+    next_tick, running_counter,
 };
 pub use wake::Wake;
 

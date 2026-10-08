@@ -3693,6 +3693,7 @@ exit $code
         fn remote_typed(&self) {}
         fn link_hover_lost(&self) {}
         fn phase_edge(&self) {}
+        fn remote_command_edge(&self) {}
         fn mirror_changed(&self) {}
         fn blocks_changed(&self) {}
         fn unseen_changed(&self) {}

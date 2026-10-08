@@ -48,7 +48,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{
@@ -84,7 +84,7 @@ use crate::split::{Axis, Direction};
 use crate::split_view::SplitView;
 use crate::tab::{self, TerminalTab};
 use crate::tab_bar::{Label, TabBar};
-use crate::tabs::Tabs;
+use crate::tabs::{Card, Tabs};
 
 /// Whether the theme's background is dark — the window chrome's appearance
 /// (Aqua / DarkAqua) comes from this ([`TerminalWindow::apply_chrome`]).
@@ -657,6 +657,10 @@ define_class!(
             for tab in self.tabs() {
                 tab.apply_visibility(visible);
             }
+            // The bar's clock runs only while the window is seen: a window
+            // coming back steps its rings to now and sets it again, one
+            // going away lets it lapse.
+            self.refresh_bar();
         }
 
         // **Focus path.** In an unfocused window the caret's inside empties and
@@ -698,6 +702,10 @@ define_class!(
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _n: &NSNotification) {
+            // ⌘'s release, or the pointer's leaving, may go to the
+            // application ⌘-Tab brings forward: the tabs' key hints and the
+            // summary card go now, not at an event we never see.
+            self.bar().resigned();
             // The ⌘-hovered link clears too: ⌘'s release may go to
             // another application. The key window also resigns key when the
             // application deactivates, so this one hook covers both.
@@ -1347,7 +1355,9 @@ impl TerminalWindow {
         &self.ivars().window
     }
 
-    fn bar(&self) -> &TabBar {
+    /// The window's tab bar — its delayed jobs find it again through the
+    /// window by id (`tab_bar`'s clock, card and hints).
+    pub(crate) fn bar(&self) -> &TabBar {
         &self.ivars().root.ivars().bar
     }
 
@@ -1409,6 +1419,27 @@ impl TerminalWindow {
             .expect("a window has a selected tab")
     }
 
+    /// Whether tab `id` is the selected one — the tab the user left on
+    /// screen, whether or not the window is in front.
+    pub(crate) fn is_selected(&self, id: u64) -> bool {
+        self.ivars().order.borrow().selected() == Some(id)
+    }
+
+    /// Every tab's running time (`TerminalTab::running_for`) — the bar's
+    /// clock steps its rings with these, without reading titles again.
+    pub(crate) fn running_times(&self) -> Vec<(u64, Option<Duration>)> {
+        self.tabs()
+            .iter()
+            .map(|tab| (tab.id(), tab.running_for()))
+            .collect()
+    }
+
+    /// Tab `id`'s summary card (`TerminalTab::card`); `None` if it is not
+    /// this window's.
+    pub(crate) fn tab_card(&self, id: u64) -> Option<Card> {
+        self.tab(id).map(|tab| tab.card())
+    }
+
     /// The selected tab's position in the strip.
     pub(crate) fn selected_index(&self) -> usize {
         self.ivars().order.borrow().selected_index().unwrap_or(0)
@@ -1444,8 +1475,9 @@ impl TerminalWindow {
         }
     }
 
-    /// Whether the window is visible (`occlusionState`).
-    fn window_visible(&self) -> bool {
+    /// Whether the window is visible (`occlusionState`) — the panes' links
+    /// and the bar's clock ask the same.
+    pub(crate) fn window_visible(&self) -> bool {
         self.ivars()
             .window
             .occlusionState()
@@ -1576,6 +1608,9 @@ impl TerminalWindow {
         if let Some(old) = old {
             old.apply_visibility(visible);
             old.leave_screen();
+            // What ended while it was on screen was seen, even if its
+            // news is still in the main queue behind this switch.
+            old.look();
         }
         new.apply_visibility(visible);
         let key = self.ivars().window.isKeyWindow();
@@ -1591,6 +1626,9 @@ impl TerminalWindow {
             .ivars()
             .window
             .makeFirstResponder(Some(new.focused_pane().view()));
+        // What ended while it was away is seen now: its tick or dot goes
+        // before the bar is drawn.
+        new.look();
         self.refresh_title();
         new.refresh_dim();
         // A question one of its panes asked in the background opens now.
@@ -1885,10 +1923,13 @@ impl TerminalWindow {
 
     /// Gives the bar every tab's label and indicator, the selection and the
     /// diagnostic. A single tab's label is the window's title (an upload's
-    /// prefix included); among several each tab shows its session title and
-    /// its indicator ([`TerminalTab::indicator`]). Every change of the tab
-    /// list and of a title calls it, and the sheet gate when a tab's
-    /// question starts or stops waiting (`sheets`).
+    /// prefix included); among several each tab shows its session title, its
+    /// indicator ([`TerminalTab::indicator`]), its running time, transfer
+    /// and marked host. Every change of the tab list and of a title calls
+    /// it, a command's edge in a pane (`TerminalTab::activity_changed`), the
+    /// window's occlusion and Reduce Motion — the bar's clock is set again
+    /// from what it is given — and the sheet gate when a tab's question
+    /// starts or stops waiting (`sheets`).
     pub(crate) fn refresh_bar(&self) {
         let tabs = self.tabs();
         let single = tabs.len() == 1;
@@ -1904,6 +1945,9 @@ impl TerminalWindow {
                     tab: tab.id(),
                     title: title.unwrap_or_else(|| "bateri".to_owned()),
                     indicator: tab.indicator(),
+                    running: tab.running_for(),
+                    upload: tab.upload(),
+                    mark: tab.host_mark(),
                 }
             })
             .collect();
@@ -1939,6 +1983,8 @@ impl TerminalWindow {
         for tab in self.tabs() {
             tab.set_host_marks(settings);
         }
+        // A host's mark is a chip's top line: the bar reads them again.
+        self.refresh_bar();
     }
 
     /// Gives the theme to the tabs ([`TerminalTab::set_theme`]: the panes'

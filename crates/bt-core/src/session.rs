@@ -808,6 +808,25 @@ pub struct BlockInfo {
     pub depth: u32,
 }
 
+/// What a tab's indicator reads from its session ([`Session::activity`]):
+/// whether a command runs and for how long, and how many commands have
+/// ended so far.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// How long the running command has run; `None` when none runs. Locally
+    /// the shell's phase; in a remote session our remote shell's command —
+    /// a plain ssh with no shell of ours on the far end runs nothing.
+    pub running: Option<Duration>,
+    /// How many commands ended with `0` — the local shell's (our identified
+    /// `D`) and our remote shell's. A count that only grows: the reader
+    /// compares it with the one it saw last, so a command that started and
+    /// ended between two looks is not missed.
+    pub finished: u64,
+    /// How many ended with another code. A `D` whose code could not be read
+    /// counts in neither — unknown is not drawn.
+    pub failed: u64,
+}
+
 /// The inputs [`TrackMarks::blocks`] was last built from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BlockLaneKey {
@@ -2363,6 +2382,9 @@ impl io::Read for TappedPty {
             }
             if outcome.prompt || outcome.ended {
                 wake.phase_edge();
+            }
+            if outcome.remote_edge {
+                wake.remote_command_edge();
             }
             if outcome.mirrored {
                 wake.mirror_changed();
@@ -8801,6 +8823,60 @@ impl Session {
         lock(&self.shell).local.state
     }
 
+    /// What a tab's indicator reads ([`Activity`]): the running command's
+    /// age and the ended commands' counts, in one leaf-lock turn so the two
+    /// agree.
+    ///
+    /// [`Session::shell_state`]'s shape: takes the leaf lock, copies,
+    /// releases; does not touch the `Term` lock, so a background tab's bar
+    /// reads it while its link sleeps. Its news is [`Wake::command_started`],
+    /// [`Wake::phase_edge`] and [`Wake::remote_command_edge`].
+    ///
+    /// **Journal-neutral:** reads only.
+    pub fn activity(&self) -> Activity {
+        let log = lock(&self.shell);
+        Activity {
+            running: log.running_for(),
+            finished: log.ends.ok,
+            failed: log.ends.failed,
+        }
+    }
+
+    /// The newest block's [`BlockInfo`] — the tab bar's summary card, which
+    /// has no mark's handle to ask [`Session::block_info`] with: our remote
+    /// shell's last block while its session runs, else the local shell's.
+    /// `None` before any block, on the alternate screen (the block's row is
+    /// in the primary screen, out of reach) and when its row is no longer in
+    /// the history or past a terminal-side clear.
+    ///
+    /// **Two rounds**, `block_info`'s: the `shell` round names the block, the
+    /// `Term` round finds its start row walking up from the bottom — the
+    /// newest block's start is the last one there, so the walk stops at the
+    /// first match; its worst case is a command whose output filled the
+    /// history, a pointer check per cell of every row. Called on the pointer's
+    /// hover, never on the frame path.
+    ///
+    /// **Journal-neutral:** reads only.
+    pub fn last_block_info(&self) -> Option<BlockInfo> {
+        let key = lock(&self.shell).last_block()?;
+        let (command, depth) = {
+            let term = self.term.lock();
+            if term.mode().contains(TermMode::ALT_SCREEN) {
+                return None;
+            }
+            let boundary = self.clear_boundary.load(Ordering::Relaxed);
+            let (top, bottom) = (term.topmost_line().0, term.bottommost_line().0);
+            let line = (top..=bottom).rev().find(|&probe| {
+                row_block(&term, Line(probe)) == Some(key)
+                    && !block_row_continues(&term, Line(probe - 1), key, boundary)
+            })?;
+            let history = i64::try_from(term.history_size()).ok()?;
+            let depth = u32::try_from(i64::from(line) + history).ok()?;
+            (block_text(&term, line, key), depth)
+        };
+        self.ledger_info(key, command, depth)
+    }
+
     /// The shell's last OSC 7 directory; `None` if none ever came.
     ///
     /// The same shape as [`Session::shell_state`]: takes the leaf lock, copies,
@@ -10047,6 +10123,16 @@ impl Session {
             let depth = u32::try_from(i64::from(line) + history).ok()?;
             (block_text(&term, line, key), depth)
         };
+        self.ledger_info(key, command, depth)
+    }
+
+    /// The `shell` round of [`Session::block_info`] and
+    /// [`Session::last_block_info`]: block `key`'s stripe, exit, duration and
+    /// start from its ledger, around the `command` text and `depth` the
+    /// `Term` round read. `None` when the block is no longer drawn as a mark.
+    /// One copy, so the card and the scroll bar's tip say a block the same
+    /// way.
+    fn ledger_info(&self, key: BlockKey, command: String, depth: u32) -> Option<BlockInfo> {
         let theme = self.theme();
         let (stripe, outcome) = {
             let shell = lock(&self.shell);
@@ -11803,6 +11889,8 @@ mod tests {
         blocks: u32,
         /// How many times [`Wake::unseen_changed`] came.
         unseen: u32,
+        /// How many times [`Wake::remote_command_edge`] came.
+        remote_edges: u32,
     }
 
     impl TestWake {
@@ -11908,6 +11996,11 @@ mod tests {
 
         fn phase_edge(&self) {
             self.state.lock().unwrap().edges += 1;
+            self.cond.notify_all();
+        }
+
+        fn remote_command_edge(&self) {
+            self.state.lock().unwrap().remote_edges += 1;
             self.cond.notify_all();
         }
 
@@ -22349,6 +22442,91 @@ e\\314\\201.'; sleep 5";
         let state = wake.state.lock().unwrap();
         assert_eq!((state.edges, state.mirrors), (2, 1));
         assert_eq!(state.commands, 1);
+    }
+
+    #[test]
+    fn a_remote_commands_edges_reach_the_wake_and_the_activity() {
+        // Under the local `ssh` (block 1) our remote shell runs a command and
+        // ends it: its `C` and `D` are one news each — the second `C` none —
+        // and the local news stays the `ssh`'s single start. `activity` says
+        // the remote command runs, then counts its end.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf '\\033]133;A;bt_block=1\\007\\033]133;C\\007'; read _; \
+             printf '\\033]133;A;bt_remote=1.9.1\\007\\033]133;C;bt_remote=1.9.1\\007\
+             \\033]133;C;bt_remote=1.9.1\\007'; read _; \
+             printf '\\033]133;D;3;bt_remote=1.9.1\\007'; sleep 5",
+            Arc::clone(&wake),
+        );
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let ssh = session.running_command().expect("ssh runs");
+        assert!(session.set_remote(ssh, Some(&RemoteTarget::ssh("prod"))));
+        assert_eq!(
+            session.activity().running,
+            None,
+            "a plain ssh session runs nothing"
+        );
+        let remote_edges = |target: u32| {
+            wake.cond
+                .wait_timeout_while(
+                    wake.state.lock().unwrap(),
+                    Duration::from_secs(5),
+                    |state| state.remote_edges < target,
+                )
+                .unwrap()
+                .0
+                .remote_edges
+        };
+        session.write(b"\n");
+        assert_eq!(remote_edges(1), 1);
+        assert!(session.activity().running.is_some(), "the remote command");
+        session.write(b"\n");
+        assert_eq!(remote_edges(2), 2);
+        let activity = session.activity();
+        assert_eq!(
+            (activity.running, activity.finished, activity.failed),
+            (None, 0, 1)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        let state = wake.state.lock().unwrap();
+        assert_eq!(state.remote_edges, 2, "the second `C` was no edge");
+        assert_eq!(state.commands, 1, "the local news is the ssh's alone");
+        drop(state);
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_newest_block_is_read_without_a_marks_handle() {
+        // The tab's summary card has no scroll bar mark to ask with: the
+        // newest block's start row is found from the bottom, past the
+        // output of the command, and read like the tip's.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf '\\033]133;A;bt_block=1\\007\\033]8;;bateri://block/1\\007$ true\
+             \\033]8;;\\007\\033]133;C\\007\\r\\n\\033]133;D;0;bt_block=1\\007\
+             \\033]133;A;bt_block=2\\007\\033]8;;bateri://block/2\\007$ make\
+             \\033]8;;\\007\\033]133;C\\007\\r\\none\\r\\ntwo\\r\\n'; read _; \
+             printf '\\033]133;D;2;bt_block=2\\007'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until("block 2 did not start", Duration::from_secs(5), || {
+            session
+                .last_block_info()
+                .is_some_and(|info| info.command == "$ make")
+        });
+        let running = session.last_block_info().expect("the running block");
+        assert!(running.running && running.exit.is_none());
+        session.write(b"\n");
+        wait_until("block 2 did not end", Duration::from_secs(5), || {
+            session.activity().failed == 1
+        });
+        let ended = session.last_block_info().expect("the ended block");
+        assert_eq!(
+            (ended.command.as_str(), ended.running, ended.exit),
+            ("$ make", false, Some(2))
+        );
+        assert_eq!(session.activity().finished, 1, "block 1");
+        session.shutdown();
     }
 
     #[test]

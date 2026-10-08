@@ -15,6 +15,11 @@
 //! full width and its origin is the window's left edge. The title row's height is not here — it
 //! is whatever AppKit reports for the window's title row, a single copy read from the window.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
+use bt_core::HostMark;
+
 /// A window's tabs in strip order, and the selected one.
 ///
 /// Invariant: a selection exists exactly when there is at least one tab. A window is born with
@@ -498,6 +503,232 @@ pub fn indicator(signals: Signals) -> Option<Indicator> {
     ]
     .into_iter()
     .find_map(|(on, indicator)| on.then_some(indicator))
+}
+
+/// A marked host's kind as the bar says it — the summary card's line and VoiceOver; `None` for an
+/// unmarked host, which shows no line either (the top line's rule: an unmarked host must not
+/// water down Production's red).
+pub fn host_name(mark: HostMark) -> Option<&'static str> {
+    match mark {
+        HostMark::Production => Some("Production"),
+        HostMark::Staging => Some("Staging"),
+        HostMark::Development => Some("Development"),
+        HostMark::Rgb(_) => Some("Marked"),
+        HostMark::None => None,
+    }
+}
+
+/// What VoiceOver says for a chip: its title, its indicator — an upload with its percentage — and
+/// a marked host's kind ("Production host"), the things the chip shows beside its title.
+pub fn spoken(
+    title: &str,
+    indicator: Option<Indicator>,
+    upload: Option<u8>,
+    mark: HostMark,
+) -> String {
+    let mut said = title.to_owned();
+    match (indicator, upload) {
+        (Some(Indicator::Uploading), Some(percent)) => {
+            said.push_str(&format!(", uploading {percent}%"));
+        }
+        (Some(indicator), _) => {
+            said.push_str(", ");
+            said.push_str(indicator.spoken());
+        }
+        (None, _) => {}
+    }
+    if let Some(name) = host_name(mark) {
+        said.push_str(&format!(", {name} host"));
+    }
+    said
+}
+
+/// What a tab's newest command did, for its summary card ([`Card`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CardCommand {
+    /// It runs for `elapsed`. `command` is its row's text, empty where the row cannot be read (a
+    /// full-screen program covers it).
+    Running { command: String, elapsed: Duration },
+    /// It ended with `0`; `duration` is the duration counter's settled text.
+    Finished {
+        command: String,
+        duration: Option<String>,
+    },
+    /// It ended with another code.
+    Failed { command: String, exit: i32 },
+}
+
+/// What a tab's summary card tells ([`card_lines`]); the platform shell reads each from the tab's
+/// focused pane.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Card {
+    pub title: String,
+    /// The shell's directory, absolute; shown with the home as `~`.
+    pub directory: Option<PathBuf>,
+    pub home: Option<PathBuf>,
+    /// In a remote session: the host and the remote directory, empty when the server says none.
+    pub remote: Option<(String, String)>,
+    pub command: Option<CardCommand>,
+    /// A transfer flowing: the item's name, the percentage, and `true` when it is a download.
+    pub upload: Option<(String, u8, bool)>,
+    pub mark: HostMark,
+    pub panes: usize,
+}
+
+/// The theme role a card line is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Title,
+    Dim,
+    Accent,
+    Success,
+    Error,
+    /// The host mark's own colour.
+    Mark,
+}
+
+/// The card's lines, top to bottom: the title; the directory (`host:path` in a remote session);
+/// what the newest command did — "Running · {command} · {time}", "Finished · {command} · {time}",
+/// "Exit {n} · {command}"; a flowing transfer; a marked host's kind; how many panes, past one.
+/// A part nobody knows is left out rather than shown empty.
+pub fn card_lines(card: &Card) -> Vec<(String, Tone)> {
+    let mut lines = vec![(card.title.clone(), Tone::Title)];
+    let directory = match &card.remote {
+        Some((host, dir)) if dir.is_empty() => Some(host.clone()),
+        Some((host, dir)) => Some(format!("{host}:{dir}")),
+        None => card
+            .directory
+            .as_deref()
+            .map(|dir| crate::program::tilde(dir, card.home.as_deref())),
+    };
+    if let Some(directory) = directory {
+        lines.push((directory, Tone::Dim));
+    }
+    let joined = |parts: &[&str]| {
+        parts
+            .iter()
+            .filter(|part| !part.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    match &card.command {
+        Some(CardCommand::Running { command, elapsed }) => {
+            let time = bt_core::running_counter(*elapsed).unwrap_or_default();
+            lines.push((joined(&["Running", command, &time]), Tone::Accent));
+        }
+        Some(CardCommand::Finished { command, duration }) => {
+            let time = duration.as_deref().unwrap_or_default();
+            lines.push((joined(&["Finished", command, time]), Tone::Success));
+        }
+        Some(CardCommand::Failed { command, exit }) => {
+            lines.push((joined(&[&format!("Exit {exit}"), command]), Tone::Error));
+        }
+        None => {}
+    }
+    if let Some((name, percent, down)) = &card.upload {
+        let verb = if *down {
+            "↓ Downloading"
+        } else {
+            "↑ Uploading"
+        };
+        lines.push((
+            joined(&[&format!("{verb} {name}"), &format!("{percent}%")]),
+            Tone::Accent,
+        ));
+    }
+    if let Some(name) = host_name(card.mark) {
+        lines.push((format!("{name} host"), Tone::Mark));
+    }
+    if card.panes > 1 {
+        lines.push((format!("{} panes", card.panes), Tone::Dim));
+    }
+    lines
+}
+
+/// How many of a pane's commands have ended, by outcome, as last looked at — `bt_core::Activity`'s
+/// two counts. Counts only grow, so the difference between two looks is what ended in between,
+/// however fast: a command that started and ended between them still counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub finished: u64,
+    pub failed: u64,
+}
+
+/// A tab's commands that ended while the user was not looking at it: the "finished" tick and the
+/// "failed" dot, until the tab is selected ([`Unseen::looked`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Unseen {
+    pub finished: bool,
+    pub failed: bool,
+}
+
+impl Unseen {
+    /// A pane of the tab moved from `seen` to `now`. What ended while the tab was **not selected**
+    /// marks it — a failure as failed, a success as finished, both kept until the tab is looked
+    /// at, so a later success does not hide an earlier failure. While the tab is selected nothing
+    /// is marked, even with its window behind another: the tab is the one the user left on screen.
+    pub fn observe(&mut self, seen: Tally, now: Tally, selected: bool) {
+        if selected {
+            return;
+        }
+        self.failed |= now.failed != seen.failed;
+        self.finished |= now.finished != seen.finished;
+    }
+
+    /// The tab came on screen: what it showed is seen.
+    pub fn looked(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// The step the running ring shows for a command that has run `elapsed`: one step per tick of the
+/// command's duration counter (`bt_core::counter_period`, the tiers `bt_core::next_tick` wakes
+/// on — a second, from an hour on a minute), twelve to a turn. Under Reduce Motion the ring
+/// stands still at its first step.
+pub fn ring_step(elapsed: Duration, reduce_motion: bool) -> u8 {
+    if reduce_motion {
+        return 0;
+    }
+    let period = bt_core::counter_period(elapsed).as_secs().max(1);
+    ((elapsed.as_secs() / period) % 12) as u8
+}
+
+/// The ring's turn for [`ring_step`], degrees clockwise from the top.
+pub const RING_STEP_DEGREES: f64 = 30.0;
+
+/// What the bar's one delayed wake is set from ([`Clock::delay`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Clock {
+    /// The window is on screen (its occlusion state): an occluded or minimized window's bar
+    /// changes nothing anybody sees.
+    pub visible: bool,
+    pub reduce_motion: bool,
+    /// How long each tab's running command has run, for every tab with one.
+    pub running: Vec<Duration>,
+    /// How long the command of the tab whose summary card is open has run, when it runs.
+    pub card: Option<Duration>,
+}
+
+impl Clock {
+    /// When the bar must look again, `None` for never: the nearest moment a running ring or the
+    /// open card's running time changes what it shows — `bt_core::next_tick`, the duration
+    /// counter's own clock, so both step on the counter's tick.
+    ///
+    /// **Two arms, one wake.** The rings turn only while the window is visible and Reduce Motion is
+    /// off; the card's seconds are text, not motion, so they go on under Reduce Motion — still
+    /// only while the window is visible. No running command and no card: no wake, the bar is idle.
+    pub fn delay(&self) -> Option<Duration> {
+        if !self.visible {
+            return None;
+        }
+        let rings = self
+            .running
+            .iter()
+            .filter(|_| !self.reduce_motion)
+            .map(|&elapsed| bt_core::next_tick(elapsed));
+        rings.chain(self.card.map(bt_core::next_tick)).min()
+    }
 }
 
 #[cfg(test)]
@@ -1074,5 +1305,284 @@ mod tests {
         ] {
             assert!(!indicator.spoken().is_empty());
         }
+    }
+
+    /// What ends while the tab is in the background marks it, by outcome; what ends while it is
+    /// selected — in a window behind another too — marks nothing; looking clears both.
+    #[test]
+    fn an_end_the_user_did_not_see_marks_the_tab_until_it_is_selected() {
+        let seen = Tally::default();
+        let mut unseen = Unseen::default();
+        unseen.observe(
+            seen,
+            Tally {
+                finished: 1,
+                failed: 0,
+            },
+            true,
+        );
+        assert_eq!(unseen, Unseen::default(), "the selected tab");
+        unseen.observe(
+            seen,
+            Tally {
+                finished: 1,
+                failed: 0,
+            },
+            false,
+        );
+        assert_eq!(
+            unseen,
+            Unseen {
+                finished: true,
+                failed: false
+            }
+        );
+        let after = Tally {
+            finished: 1,
+            failed: 0,
+        };
+        unseen.observe(
+            after,
+            Tally {
+                finished: 1,
+                failed: 1,
+            },
+            false,
+        );
+        assert!(unseen.failed && unseen.finished, "a failure joins");
+        unseen.observe(
+            Tally {
+                finished: 1,
+                failed: 1,
+            },
+            Tally {
+                finished: 2,
+                failed: 1,
+            },
+            false,
+        );
+        assert!(unseen.failed, "a later success does not hide the failure");
+        assert_eq!(
+            indicator(Signals {
+                failed: unseen.failed,
+                finished: unseen.finished,
+                ..Signals::default()
+            }),
+            Some(Indicator::Failed)
+        );
+        unseen.looked();
+        assert_eq!(unseen, Unseen::default());
+        unseen.observe(after, after, false);
+        assert_eq!(unseen, Unseen::default(), "nothing ended");
+    }
+
+    /// Several ends between two looks are one mark, the counts' wrap included.
+    #[test]
+    fn ends_between_two_looks_are_one_mark() {
+        let mut unseen = Unseen::default();
+        unseen.observe(
+            Tally {
+                finished: u64::MAX,
+                failed: 3,
+            },
+            Tally {
+                finished: 1,
+                failed: 3,
+            },
+            false,
+        );
+        assert_eq!(
+            unseen,
+            Unseen {
+                finished: true,
+                failed: false
+            }
+        );
+    }
+
+    /// One step a second, twelve to a turn; a minute a step from an hour on, where the counter
+    /// moves once a minute; still under Reduce Motion.
+    #[test]
+    fn the_ring_steps_with_the_counter() {
+        let secs = Duration::from_secs;
+        assert_eq!(ring_step(Duration::from_millis(900), false), 0);
+        assert_eq!(ring_step(secs(1), false), 1);
+        assert_eq!(ring_step(Duration::from_millis(11_999), false), 11);
+        assert_eq!(ring_step(secs(12), false), 0, "a whole turn");
+        assert_eq!(ring_step(secs(3599), false), 11);
+        assert_eq!(ring_step(secs(3600), false), 0);
+        assert_eq!(ring_step(secs(3660), false), 1, "a minute a step");
+        assert_eq!(ring_step(secs(3661), false), 1, "not a second");
+        assert_eq!(ring_step(secs(5), true), 0, "Reduce Motion: still");
+        assert_eq!(
+            f64::from(ring_step(secs(3), false)) * RING_STEP_DEGREES,
+            90.0
+        );
+    }
+
+    fn clock(visible: bool, reduce_motion: bool, running: &[u64], card: Option<u64>) -> Clock {
+        Clock {
+            visible,
+            reduce_motion,
+            running: running
+                .iter()
+                .map(|&ms| Duration::from_millis(ms))
+                .collect(),
+            card: card.map(Duration::from_millis),
+        }
+    }
+
+    /// The bar's clock: set only while something on a visible bar changes with time, at the
+    /// nearest tick of the duration counters.
+    #[test]
+    fn the_clock_runs_only_while_a_visible_ring_turns_or_a_card_counts() {
+        let ms = Duration::from_millis;
+        assert_eq!(clock(true, false, &[], None).delay(), None, "nothing runs");
+        assert_eq!(
+            clock(true, false, &[300], None).delay(),
+            Some(ms(700)),
+            "to the counter's first second"
+        );
+        assert_eq!(
+            clock(true, false, &[2_400, 5_900], None).delay(),
+            Some(ms(100)),
+            "the nearest of the running tabs"
+        );
+        assert_eq!(
+            clock(false, false, &[2_400], Some(2_400)).delay(),
+            None,
+            "an occluded window"
+        );
+        assert_eq!(
+            clock(true, true, &[2_400], None).delay(),
+            None,
+            "Reduce Motion stops the rings"
+        );
+        assert_eq!(
+            clock(true, true, &[2_400], Some(2_400)).delay(),
+            Some(ms(600)),
+            "but not the open card's seconds, which are text"
+        );
+        assert_eq!(
+            clock(true, false, &[1_200], Some(4_900)).delay(),
+            Some(ms(100)),
+            "the card's tick is nearer"
+        );
+        assert_eq!(
+            clock(true, false, &[3_600_000 + 20_000], None).delay(),
+            Some(Duration::from_secs(40)),
+            "an hour on: the counter's minute"
+        );
+    }
+
+    /// VoiceOver hears what the chip shows: the indicator — an upload with its percentage — and
+    /// a marked host; an unmarked host says nothing.
+    #[test]
+    fn a_chip_says_its_indicator_and_its_host() {
+        assert_eq!(spoken("make", None, None, HostMark::None), "make");
+        assert_eq!(
+            spoken("make", Some(Indicator::Running), None, HostMark::None),
+            "make, running"
+        );
+        assert_eq!(
+            spoken(
+                "scp",
+                Some(Indicator::Uploading),
+                Some(42),
+                HostMark::Production
+            ),
+            "scp, uploading 42%, Production host"
+        );
+        assert_eq!(
+            spoken(
+                "x",
+                Some(Indicator::Failed),
+                Some(42),
+                HostMark::Rgb(0x123456)
+            ),
+            "x, failed, Marked host",
+            "the upload's percentage only beside its own indicator"
+        );
+        assert_eq!(host_name(HostMark::None), None);
+    }
+
+    /// The card's lines in the design's order and roles; a part nobody knows is left out.
+    #[test]
+    fn the_card_tells_the_tabs_story_in_lines() {
+        let card = Card {
+            title: "api".into(),
+            directory: Some("/Users/me/src/api".into()),
+            home: Some("/Users/me".into()),
+            command: Some(CardCommand::Running {
+                command: "$ make test".into(),
+                elapsed: Duration::from_secs(65),
+            }),
+            upload: Some(("logs.tgz".into(), 42, false)),
+            mark: HostMark::Staging,
+            panes: 2,
+            ..Card::default()
+        };
+        assert_eq!(
+            card_lines(&card),
+            [
+                ("api".to_owned(), Tone::Title),
+                ("~/src/api".to_owned(), Tone::Dim),
+                ("Running · $ make test · 1m 05s".to_owned(), Tone::Accent),
+                ("↑ Uploading logs.tgz · 42%".to_owned(), Tone::Accent),
+                ("Staging host".to_owned(), Tone::Mark),
+                ("2 panes".to_owned(), Tone::Dim),
+            ]
+        );
+        let remote = Card {
+            title: "⇄ prod".into(),
+            remote: Some(("prod".into(), "/var/www".into())),
+            directory: Some("/Users/me".into()),
+            command: Some(CardCommand::Failed {
+                command: "r$ false".into(),
+                exit: 1,
+            }),
+            panes: 1,
+            ..Card::default()
+        };
+        assert_eq!(
+            card_lines(&remote),
+            [
+                ("⇄ prod".to_owned(), Tone::Title),
+                ("prod:/var/www".to_owned(), Tone::Dim),
+                ("Exit 1 · r$ false".to_owned(), Tone::Error),
+            ]
+        );
+        let quiet = Card {
+            title: "vim".into(),
+            remote: Some(("prod".into(), String::new())),
+            command: Some(CardCommand::Running {
+                command: String::new(),
+                elapsed: Duration::from_millis(400),
+            }),
+            upload: Some(("a.txt".into(), 7, true)),
+            ..Card::default()
+        };
+        assert_eq!(
+            card_lines(&quiet),
+            [
+                ("vim".to_owned(), Tone::Title),
+                ("prod".to_owned(), Tone::Dim),
+                ("Running".to_owned(), Tone::Accent),
+                ("↓ Downloading a.txt · 7%".to_owned(), Tone::Accent),
+            ],
+            "no row, no time below the counter's floor, no remote directory"
+        );
+        let done = Card {
+            title: "t".into(),
+            command: Some(CardCommand::Finished {
+                command: "$ ls".into(),
+                duration: Some("0.2s".into()),
+            }),
+            ..Card::default()
+        };
+        assert_eq!(
+            card_lines(&done)[1],
+            ("Finished · $ ls · 0.2s".to_owned(), Tone::Success)
+        );
     }
 }

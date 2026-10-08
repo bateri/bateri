@@ -2073,6 +2073,33 @@ pub(crate) struct ShellLog {
     /// to see `Live` throughout the hold; a new state variant would change all nine of
     /// nine consumers.
     end_since: Option<Instant>,
+    /// How many commands ended, by their code ([`Ends`]) — the local shell's
+    /// identified `D`s and our remote shell's. A tally, not a phase: the tab bar's
+    /// "finished while you were away" mark compares two looks
+    /// ([`crate::Session::activity`]), and a `C`…`D` pair that falls between them
+    /// still moves it.
+    pub(crate) ends: Ends,
+}
+
+/// How many commands ended, by code: `ok` with `0`, `failed` with any other;
+/// a `D` whose code could not be read counts in neither — unknown is not
+/// drawn, the stripe's rule. Counts only grow; whoever reads them keeps
+/// the last value it saw.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Ends {
+    pub(crate) ok: u64,
+    pub(crate) failed: u64,
+}
+
+impl Ends {
+    /// A command ended with `exit`.
+    fn note(&mut self, exit: Option<i32>) {
+        match exit {
+            Some(0) => self.ok = self.ok.wrapping_add(1),
+            Some(_) => self.failed = self.failed.wrapping_add(1),
+            None => {}
+        }
+    }
 }
 
 /// The caret's owner: the grid or the dock.
@@ -2318,6 +2345,7 @@ impl ShellLog {
             caret_raw: CaretHome::Dock,
             caret_since: Instant::now(),
             end_since: None,
+            ends: Ends::default(),
         }
     }
 
@@ -2434,6 +2462,11 @@ impl ShellLog {
                 }
                 outcome.title = self.context.clear_remote();
                 outcome.ended = true;
+                // Counted by **our** `D` alone, the clock's rule: iTerm2's
+                // identity-less `D` before ours would count the command twice.
+                if id.is_some() {
+                    self.ends.note(exit);
+                }
                 // The code, and the clock consumed **only by OUR `D`** — the one carrying the
                 // identity ([`BlockTrack::end`]).
                 self.local.end(exit, id);
@@ -2443,20 +2476,39 @@ impl ShellLog {
     }
 
     /// Applies our remote shell's mark to the remote trail — and
-    /// **only** there: no local field, no notification ([`RemoteMark`]'s doc).
+    /// **only** there: no local field and none of the local notifications
+    /// ([`RemoteMark`]'s doc). Its one notification is its own: `true` at a
+    /// remote command's two edges — `C` moving the trail to `Running` (a
+    /// second `C` is not a transition, the local rule) and `D` — the
+    /// [`crate::Wake::remote_command_edge`] the tab bar's indicator hears; a
+    /// `D` is counted in [`Self::ends`].
     ///
     /// A new remote shell starts a new trail: the old session's ledger cannot
     /// be read under the new one's numbers (two sessions' `rblock/1`s).
-    fn apply_remote(&mut self, remote: RemoteMark) {
+    fn apply_remote(&mut self, remote: RemoteMark) -> bool {
         if self.remote_shell != Some(remote.shell) {
             self.remote.clear();
             self.remote_shell = Some(remote.shell);
         }
         match remote.mark {
-            Mark::PromptStart { .. } => self.remote.prompt(Some(remote.id)),
-            Mark::PromptEnd => self.remote.state().phase = ShellPhase::Input,
-            Mark::CommandStart => self.remote.command(),
-            Mark::CommandEnd { exit, .. } => self.remote.end(exit, Some(remote.id)),
+            Mark::PromptStart { .. } => {
+                self.remote.prompt(Some(remote.id));
+                false
+            }
+            Mark::PromptEnd => {
+                self.remote.state().phase = ShellPhase::Input;
+                false
+            }
+            Mark::CommandStart => {
+                let edge = self.remote.state().phase != ShellPhase::Running;
+                self.remote.command();
+                edge
+            }
+            Mark::CommandEnd { exit, .. } => {
+                self.ends.note(exit);
+                self.remote.end(exit, Some(remote.id));
+                true
+            }
         }
     }
 
@@ -2494,7 +2546,7 @@ impl ShellLog {
             // command's closing and the three notifications never see it — the
             // remote `A` must not hand ⌘T's first input to the remote shell
             // (`outcome.prompt`) nor end the remote session.
-            ScanEvent::RemoteMark(remote) => self.apply_remote(remote),
+            ScanEvent::RemoteMark(remote) => outcome.remote_edge = self.apply_remote(remote),
             // **While a remote session is active OSC 8133 is ignored**: the
             // local shell is behind ssh and the only 8133 that can arrive is a remote
             // one — a remote mirror would draw a foreign line in the local dock, and
@@ -2898,6 +2950,48 @@ impl ShellLog {
         }
     }
 
+    /// How long the command a tab calls "running" has run; `None` when none
+    /// runs — the tab bar's ring and its clock ([`crate::Session::activity`]).
+    ///
+    /// **In a remote session** (the probe set a target) it is our remote
+    /// shell's command, and only while its `ssh` block is the open local
+    /// command ([`Self::running_blocks`], the one copy of the dropped
+    /// connection's rule): the local command there is `ssh` itself, running
+    /// throughout, and a plain ssh with no remote shell of ours is a session,
+    /// not a running job. **Locally** it is the phase — any `C` the shell
+    /// printed, ours or a nested shell's, as the dock's caret reads it.
+    pub(crate) fn running_for(&self) -> Option<Duration> {
+        let (running, clock) = if self.context.remote.is_some() {
+            (
+                self.running_blocks().remote.is_some(),
+                self.remote.running_since,
+            )
+        } else {
+            (
+                self.local
+                    .state
+                    .is_some_and(|state| state.phase == ShellPhase::Running),
+                self.local.running_since,
+            )
+        };
+        running.then(|| clock.map_or(Duration::ZERO, |clock| clock.elapsed()))
+    }
+
+    /// The newest block the tab's summary card tells of
+    /// ([`crate::Session::last_block_info`]): our remote shell's last one
+    /// while the remote session runs under its `ssh` block, else the local
+    /// shell's last one; `None` before any block.
+    pub(crate) fn last_block(&self) -> Option<BlockKey> {
+        if self.context.remote.is_some()
+            && let Some(shell) = self.remote_shell
+            && self.local.blocks.last().map(|(id, _)| id) == Some(shell.parent)
+            && let Some((id, _)) = self.remote.blocks.last()
+        {
+            return Some(BlockKey::Remote { shell, id });
+        }
+        self.local.blocks.last().map(|(id, _)| BlockKey::Local(id))
+    }
+
     /// The trail and the identity a key points to; `None` for a remote key
     /// of a shell the remote trail no longer holds.
     fn track(&self, key: BlockKey) -> Option<(&BlockTrack, u32)> {
@@ -3211,25 +3305,48 @@ pub(crate) enum Precision {
 /// Below the threshold the next change is the counter's **appearance**: if the
 /// first frame of `sleep 5` is drawn before the threshold the clock is set to 1
 /// second, not 16 ms.
-pub(crate) fn next_tick(elapsed: Duration) -> Duration {
+///
+/// **Two consumers, one copy:** the counter's frame clock (`Cursor::next_tick`)
+/// and the tab bar's running ring, whose step is meant to land on the same
+/// tick as the counter it stands for — so it asks here rather than keeping a
+/// second idea of "the next second".
+pub fn next_tick(elapsed: Duration) -> Duration {
     if elapsed < COUNTER_FLOOR {
         return COUNTER_FLOOR - elapsed;
     }
-    // **A separate resolution per tier.** In the hour tier the text (`1h 07m`)
-    // changes once a minute; waking every second would have an hour draw 3540
-    // **identical** frames (found in review) and we would be the first to
-    // violate the "content must genuinely change" condition we just wrote into the
-    // module header.
-    let period = if elapsed.as_secs() < 3600 {
-        Duration::from_secs(1)
-    } else {
-        Duration::from_secs(60)
-    };
+    let period = counter_period(elapsed);
     // The time remaining to the next whole boundary. If the remainder is zero the
     // full period returns: a zero-duration clock would put the callback in a loop.
     let since =
         Duration::from_nanos(u64::try_from(elapsed.as_nanos() % period.as_nanos()).unwrap_or(0));
     period - since
+}
+
+/// How long one visible step of a running counter lasts at `elapsed`: a
+/// second, and a minute from the hour tier on — [`next_tick`]'s period and
+/// the tab bar's ring's step (`elapsed / period` ticks), one copy of the
+/// tiers.
+///
+/// **A separate resolution per tier.** In the hour tier the text (`1h 07m`)
+/// changes once a minute; waking every second would have an hour draw 3540
+/// **identical** frames (found in review) and we would be the first to
+/// violate the "content must genuinely change" condition we just wrote into the
+/// module header.
+pub fn counter_period(elapsed: Duration) -> Duration {
+    if elapsed.as_secs() < 3600 {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(60)
+    }
+}
+
+/// A running command's counter text for `elapsed` — whole seconds, then the
+/// minutes and hours tiers ([`Counter`], [`Precision::Whole`]) — or `None`
+/// below [`COUNTER_FLOOR`], where the counter does not show. The tab bar's
+/// summary card says a running command's time with it, the same text the
+/// block's row shows; an allocation per call, so not for the frame path.
+pub fn running_counter(elapsed: Duration) -> Option<String> {
+    (elapsed >= COUNTER_FLOOR).then(|| Counter::new(elapsed, Precision::Whole).as_str().to_owned())
 }
 
 /// The counter's text — **on the stack**, no per-frame allocation.
@@ -3539,6 +3656,11 @@ pub(crate) struct ScanOutcome {
     pub(crate) ended: bool,
     /// The dock's mirror or context changed → [`crate::Wake::mirror_changed`].
     pub(crate) mirrored: bool,
+    /// Our remote shell's command started or ended ([`ShellLog::apply_remote`])
+    /// → [`crate::Wake::remote_command_edge`]. Not [`Self::ended`]: that edge
+    /// also sends the state to a bound holder, and every remote command would
+    /// add that traffic for a trail the next local edge carries anyway.
+    pub(crate) remote_edge: bool,
 }
 
 /// The event the scanner hands out.
@@ -9073,6 +9195,8 @@ mod tests {
             outcome.started |= one.started;
             outcome.prompt |= one.prompt;
             outcome.up |= one.up;
+            outcome.ended |= one.ended;
+            outcome.remote_edge |= one.remote_edge;
         });
         outcome
     }
@@ -9092,8 +9216,12 @@ mod tests {
         );
         assert_eq!(
             outcome,
-            ScanOutcome::default(),
-            "no title, no command start, no prompt (⌘T's first input)"
+            ScanOutcome {
+                remote_edge: true,
+                ..ScanOutcome::default()
+            },
+            "no title, no command start, no prompt (⌘T's first input), no local end: \
+             only the remote edge"
         );
         assert_eq!(log.context.remote_host(), Some("prod"), "the session stays");
         assert_eq!(
@@ -9114,6 +9242,118 @@ mod tests {
                 remote: Some((shell(1), 2)),
             }
         );
+    }
+
+    /// A remote command's `C` and `D` are its two edges; a second `C`, an
+    /// `A` and a `B` are not, and no local mark ever is.
+    #[test]
+    fn a_remote_command_reports_its_two_edges_once() {
+        let mut log = ssh_log();
+        let edge = |log: &mut ShellLog, bytes: &[u8]| feed(log, bytes).remote_edge;
+        assert!(!edge(&mut log, b"\x1b]133;A;bt_remote=1.9.1\x07"));
+        assert!(!edge(&mut log, b"\x1b]133;B;bt_remote=1.9.1\x07"));
+        assert!(edge(&mut log, b"\x1b]133;C;bt_remote=1.9.1\x07"), "C");
+        assert!(
+            !edge(&mut log, b"\x1b]133;C;bt_remote=1.9.1\x07"),
+            "a second C is not a transition"
+        );
+        assert!(edge(&mut log, b"\x1b]133;D;0;bt_remote=1.9.1\x07"), "D");
+        assert!(!edge(&mut log, b"\x1b]133;A;bt_remote=1.9.2\x07"));
+        // The local marks keep their own notifications and never this one.
+        let mut local = ShellLog::new(BLOCK_LOG_FLOOR);
+        let outcome = feed(
+            &mut local,
+            b"\x1b]133;A;bt_block=1\x07\x1b]133;C\x07\x1b]133;D;0;bt_block=1\x07",
+        );
+        assert!(outcome.started && outcome.ended && outcome.prompt);
+        assert!(!outcome.remote_edge);
+    }
+
+    /// The ended commands' tallies: our identified `D` and our remote
+    /// shell's, by code; an identity-less `D` (iTerm2's, before ours) and a
+    /// code that could not be read count in neither.
+    #[test]
+    fn ended_commands_are_counted_by_their_code() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_block=1\x07\x1b]133;C\x07\x1b]133;D;0\x07\
+              \x1b]133;D;0;bt_block=1\x07\
+              \x1b]133;A;bt_block=2\x07\x1b]133;C\x07\x1b]133;D;2;bt_block=2\x07\
+              \x1b]133;A;bt_block=3\x07\x1b]133;C\x07\x1b]133;D;bt_block=3\x07",
+        );
+        assert_eq!(log.ends, Ends { ok: 1, failed: 1 });
+        let mut log = ssh_log();
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;C;bt_remote=1.9.1\x07\
+              \x1b]133;D;130;bt_remote=1.9.1\x07",
+        );
+        assert_eq!(log.ends, Ends { ok: 0, failed: 1 }, "the remote one");
+    }
+
+    /// The tab's "running": the local phase; in a remote session our remote
+    /// shell's command alone — a plain ssh runs nothing — and only while its
+    /// `ssh` block is the open command.
+    #[test]
+    fn running_is_the_local_phase_or_the_remote_shells_command() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        assert_eq!(log.running_for(), None, "no integration");
+        let local = running_log();
+        assert!(local.running_for().is_some(), "local C");
+
+        // A plain ssh: the local `ssh` runs, the session is remote, nothing of
+        // ours on the far end.
+        log = ssh_log();
+        assert_eq!(log.running_for(), None, "a plain ssh is a session");
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;C;bt_remote=1.9.1\x07",
+        );
+        assert!(log.running_for().is_some(), "the remote command runs");
+        feed(&mut log, b"\x1b]133;D;0;bt_remote=1.9.1\x07");
+        assert_eq!(log.running_for(), None, "and ends");
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.2\x07\x1b]133;C;bt_remote=1.9.2\x07",
+        );
+        // The connection drops: our `D` closes `ssh` and the remote trail,
+        // left without its `D`, runs nothing any more.
+        log.apply(Mark::CommandEnd {
+            exit: Some(255),
+            id: Some(1),
+        });
+        assert_eq!(log.running_for(), None, "the dropped connection");
+    }
+
+    /// The card's block: the remote shell's newest while its `ssh` runs,
+    /// the local newest otherwise.
+    #[test]
+    fn the_newest_block_is_the_remote_ones_while_its_session_runs() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        assert_eq!(log.last_block(), None);
+        log = ssh_log();
+        assert_eq!(
+            log.last_block(),
+            Some(BlockKey::Local(1)),
+            "no remote mark yet"
+        );
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.4\x07\x1b]133;C;bt_remote=1.9.4\x07",
+        );
+        assert_eq!(
+            log.last_block(),
+            Some(BlockKey::Remote {
+                shell: shell(1),
+                id: 4
+            })
+        );
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert_eq!(log.last_block(), Some(BlockKey::Local(1)), "ssh ended");
     }
 
     #[test]

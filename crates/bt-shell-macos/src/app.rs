@@ -1394,6 +1394,12 @@ pub(crate) struct Ivars {
     layout_writer: Cell<bool>,
     /// A delayed layout write is in the main queue (at most one).
     layout_save_pending: Cell<bool>,
+    /// The ⌘ watch of the tabs' key hints (`tab_bar::watch_command_key`):
+    /// the monitor's token, kept for the process's lifetime.
+    command_monitor: RefCell<Option<Retained<AnyObject>>>,
+    /// ⌘ was last seen held alone: only then does a release or a key
+    /// press walk the bars ([`AppDelegate::command_held`]).
+    command_hinted: Cell<bool>,
 }
 
 define_class!(
@@ -1488,6 +1494,10 @@ define_class!(
             // The system's Reduce Motion notification is app-wide and once; the
             // window's first value descended to its own link in `start`.
             self.observe_reduce_motion();
+            // ⌘ held alone shows the tabs' keys; one watch for every window.
+            self.ivars()
+                .command_monitor
+                .replace(crate::tab_bar::watch_command_key());
             // The scroll bar's system preference likewise; the panes were born
             // with the resolved form (their grid's first `TIOCSWINSZ` sees it).
             self.observe_scroller_style();
@@ -2650,6 +2660,8 @@ impl AppDelegate {
             attempt_marks: RefCell::new(Vec::new()),
             layout_writer: Cell::new(false),
             layout_save_pending: Cell::new(false),
+            command_monitor: RefCell::new(None),
+            command_hinted: Cell::new(false),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -4937,6 +4949,25 @@ impl AppDelegate {
         for pane in self.all_panes() {
             pane.set_reduce_motion(reduce);
             pane.set_smooth_scroll(smooth);
+        }
+        // The tab bars ask Reduce Motion themselves when they draw: their
+        // rings stand still or turn, and their clocks follow.
+        for window in self.windows() {
+            window.refresh_bar();
+        }
+    }
+
+    /// ⌘ is held alone (`held`) or not — the key watch
+    /// (`tab_bar::watch_command_key`): the key window's bar shows its tabs'
+    /// keys, every other bar hides them.
+    pub(crate) fn command_held(&self, held: bool) {
+        // Every key press says "not held": walk the bars only when ⌘ was.
+        if self.ivars().command_hinted.replace(held) == held && !held {
+            return;
+        }
+        let key = self.key_window().map(|window| window.id());
+        for window in self.windows() {
+            window.bar().command_held(held && Some(window.id()) == key);
         }
     }
 

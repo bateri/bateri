@@ -1081,8 +1081,9 @@ fn venv_config(path: &Path) -> Option<PathBuf> {
 }
 
 /// `path` with the home directory written as `~`. A home of `/` (or one
-/// that is not absolute) shortens nothing.
-fn tilde(path: &Path, home: Option<&Path>) -> String {
+/// that is not absolute) shortens nothing. Also the tab bar's summary card's
+/// directory (`tabs::card_lines`).
+pub(crate) fn tilde(path: &Path, home: Option<&Path>) -> String {
     let rest = home
         .filter(|home| home.is_absolute() && home.components().count() > 1)
         .and_then(|home| path.strip_prefix(home).ok());

@@ -37,7 +37,8 @@
 //! user asked for a layout change, and silently changing a hidden layout
 //! would be an invisible effect.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::time::Duration;
 
 use bt_core::{ContentEdge, HostMark, MarkSubject, Settings, TabId, Theme};
 use dispatch2::DispatchQueue;
@@ -53,7 +54,8 @@ use crate::restore::{SavedTab, Shape};
 use crate::sheets;
 use crate::split::{Axis, Direction, Removal, Tree};
 use crate::split_view::SplitView;
-use crate::tabs::{self, Indicator, Signals};
+use crate::tab_bar::Upload;
+use crate::tabs::{self, Card, CardCommand, Indicator, Signals, Tally, Unseen};
 use crate::upload;
 use crate::uploader;
 use crate::window::{Closing, TerminalWindow, initial_rect};
@@ -117,6 +119,12 @@ impl PaneHost for TabHost {
     fn uploads_changed(&self, _pane: u64) {
         if let Some(app) = app::delegate(Self::mtm()) {
             app.refresh_dock_tile();
+        }
+    }
+
+    fn activity_changed(&self, _pane: u64) {
+        if let Some(tab) = self.tab() {
+            tab.activity_changed();
         }
     }
 
@@ -200,6 +208,13 @@ pub(crate) struct TabIvars {
     /// ([`TerminalTab::focused_pane`]). Written by the pane's
     /// `PaneHost::focused` event when `BateriView` becomes first responder.
     focused: Cell<u64>,
+    /// Commands that ended while the tab was not selected — the chip's tick
+    /// and dot until the tab is selected ([`TerminalTab::activity_changed`],
+    /// [`TerminalTab::look`]).
+    unseen: Cell<Unseen>,
+    /// Each pane's ended-command counts as last looked at (pane id, counts):
+    /// the difference to `Session::activity`'s is what ended since.
+    tallies: RefCell<Vec<(u64, Tally)>>,
 }
 
 define_class!(
@@ -230,6 +245,8 @@ impl TerminalTab {
             window,
             container,
             focused: Cell::new(pane.id()),
+            unseen: Cell::new(Unseen::default()),
+            tallies: RefCell::new(Vec::new()),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars are set.
         unsafe { msg_send![super(this), init] }
@@ -640,13 +657,174 @@ impl TerminalTab {
     }
 
     /// What the tab's chip shows left of its title — the most urgent of its
-    /// signals (`tabs::indicator`). Read today: a question of the tab that
-    /// waits for an answer the user cannot see ([`sheets::question_waiting`]).
+    /// signals (`tabs::indicator`): a question of the tab that waits for an
+    /// answer the user cannot see ([`sheets::question_waiting`]), a command
+    /// running in any pane ([`Self::running_for`]), a command that ended
+    /// while the tab was away ([`TabIvars::unseen`]) and a transfer flowing
+    /// ([`Self::upload`]).
     pub(crate) fn indicator(&self) -> Option<Indicator> {
+        let Unseen { finished, failed } = self.ivars().unseen.get();
         tabs::indicator(Signals {
             question: sheets::question_waiting(self.container()),
-            ..Signals::default()
+            running: self.running_for().is_some(),
+            failed,
+            finished,
+            uploading: self.upload().is_some(),
         })
+    }
+
+    /// How long the tab's running command has run — the focused pane's if
+    /// one runs there, else the first running pane's in tree order; `None`
+    /// when no pane runs one (`Session::activity`). The ring's step and the
+    /// bar's clock come from it. A leaf lock per pane, no `Term`.
+    pub(crate) fn running_for(&self) -> Option<Duration> {
+        let running = |pane: &TerminalPane| pane.session()?.activity().running;
+        running(&self.focused_pane()).or_else(|| self.panes().iter().find_map(|pane| running(pane)))
+    }
+
+    /// A transfer flowing in any of the tab's panes: its direction (the
+    /// focused pane's, else the first flowing one's — the title prefix's
+    /// arrow), the percentage the title shows and the fraction of all of
+    /// them together for the chip's underline; `None` when nothing flows.
+    pub(crate) fn upload(&self) -> Option<Upload> {
+        let panes = self.panes();
+        let focused = self.focused_pane();
+        let (arrow, percent) = focused
+            .upload_title_prefix()
+            .or_else(|| panes.iter().find_map(|pane| pane.upload_title_prefix()))?;
+        let (sent, total) = panes
+            .iter()
+            .filter(|pane| pane.upload_title_prefix().is_some())
+            .filter_map(|pane| pane.upload_totals())
+            .fold((0u64, 0u64), |(sent, total), (s, t)| {
+                (sent.saturating_add(s), total.saturating_add(t))
+            });
+        let fraction = if total == 0 {
+            f64::from(percent) / 100.0
+        } else {
+            sent as f64 / total as f64
+        };
+        Some(Upload {
+            down: arrow == "↓",
+            percent,
+            fraction: fraction.clamp(0.0, 1.0),
+        })
+    }
+
+    /// The focused pane's marked host, for the chip's top line and the
+    /// card; `HostMark::None` locally and for an unmarked host
+    /// (`Session::remote_mark`, the dock's mapping).
+    pub(crate) fn host_mark(&self) -> HostMark {
+        self.remote_mark().map_or(HostMark::None, |(_, mark)| mark)
+    }
+
+    /// A command started or ended in one of the panes
+    /// ([`PaneHost::activity_changed`]): what ended while the tab was not
+    /// selected marks it ([`Unseen::observe`]), and the bar draws the tab's
+    /// indicator again. The selection is the window's
+    /// (`TerminalWindow::is_selected`) — a selected tab in a window behind
+    /// another gets no mark.
+    pub(crate) fn activity_changed(&self) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        self.observe_ends(window.is_selected(self.id()));
+        window.refresh_bar();
+    }
+
+    /// The user saw the tab: its ends so far are seen and its tick or dot
+    /// goes. The window's switch calls it for the tab coming on screen —
+    /// before the bar is drawn — and for the one leaving it: an end whose
+    /// news is still in the main queue behind the switch happened on screen.
+    pub(crate) fn look(&self) {
+        self.observe_ends(true);
+        let mut unseen = self.ivars().unseen.get();
+        unseen.looked();
+        self.ivars().unseen.set(unseen);
+    }
+
+    /// Reads every pane's ended-command counts against the ones last seen,
+    /// marks what ended unseen and keeps the new counts — a closed pane's
+    /// entry goes with it.
+    fn observe_ends(&self, selected: bool) {
+        let mut unseen = self.ivars().unseen.get();
+        let mut tallies = self.ivars().tallies.borrow_mut();
+        let mut next = Vec::new();
+        for pane in self.panes() {
+            let Some(activity) = pane.session().map(|session| session.activity()) else {
+                continue;
+            };
+            let now = Tally {
+                finished: activity.finished,
+                failed: activity.failed,
+            };
+            let seen = tallies
+                .iter()
+                .find(|(id, _)| *id == pane.id())
+                .map_or(Tally::default(), |(_, tally)| *tally);
+            unseen.observe(seen, now, selected);
+            next.push((pane.id(), now));
+        }
+        *tallies = next;
+        self.ivars().unseen.set(unseen);
+    }
+
+    /// What the tab's summary card tells, from the focused pane: its title,
+    /// directory (`host:path` remotely), newest command, transfer, marked
+    /// host and the pane count (`tabs::card_lines` lays them out). The
+    /// newest command's row is read from the grid — a `Term` round, never
+    /// on the frame path: when the card opens and, while it is open, when
+    /// what the tab's chip shows changes (`tab_bar::TabBar::show`;
+    /// `Session::last_block_info`).
+    pub(crate) fn card(&self) -> Card {
+        let pane = self.focused_pane();
+        let session = pane.session();
+        let remote = session.and_then(|session| {
+            session
+                .remote_mark()
+                .map(|(host, _)| (host, session.remote_link_directory()))
+        });
+        let running = session.and_then(|session| session.activity().running);
+        let block = session.and_then(|session| session.last_block_info());
+        let command = match (running, block) {
+            (Some(elapsed), block) => Some(CardCommand::Running {
+                command: block
+                    .filter(|block| block.running)
+                    .map(|block| block.command)
+                    .unwrap_or_default(),
+                elapsed,
+            }),
+            (None, Some(block)) if block.running => None,
+            (None, Some(block)) => match block.exit {
+                Some(0) => Some(CardCommand::Finished {
+                    command: block.command,
+                    duration: block.duration,
+                }),
+                Some(exit) => Some(CardCommand::Failed {
+                    command: block.command,
+                    exit,
+                }),
+                None => None,
+            },
+            (None, None) => None,
+        };
+        let upload = pane.upload_title_prefix().map(|(arrow, percent)| {
+            (
+                pane.upload_flowing_name().unwrap_or_default(),
+                percent,
+                arrow == "↓",
+            )
+        });
+        Card {
+            title: self.session_title().unwrap_or_else(|| "bateri".to_owned()),
+            directory: session.and_then(|session| session.working_directory()),
+            home: crate::child::home(),
+            remote,
+            command,
+            upload,
+            mark: self.host_mark(),
+            panes: self.panes().len(),
+        }
     }
 
     /// The window became key: a question up in this tab takes the keyboard

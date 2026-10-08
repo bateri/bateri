@@ -30,8 +30,21 @@ of every installed copy. A version without a section is not released.
   it. ⌘1–⌘9, ⇧⌘[ / ⇧⌘] and ⌃⇥ switch tabs as before, and ⌘N follows the
   system's "Prefer tabs" setting. A question a background tab asks — a
   password, an upload's confirmation — waits until you switch to that tab
-  instead of covering the one you are looking at. With several tabs a
-  settings error shows as a ⚠ beside `+`; hover over it to read it.
+  instead of covering the one you are looking at, and a question that is open
+  stays with its tab when you switch away: it is there as you left it, half
+  typed, when you come back. A tab with a question waiting shows a ? in a
+  ring. With several tabs a settings error shows as a ⚠ beside `+`; hover
+  over it to read it.
+- **Each tab shows what goes on in it.** A ring turns while a command runs —
+  on the far end of ssh too, where bateri's shell integration runs. A command
+  that finishes while you are in another tab leaves a green tick, one that
+  fails a red dot, until you look at that tab. An upload or download shows an
+  arrow and fills a line along the tab's bottom, and a host you marked as
+  production, staging or development colors a line along its top. Rest the
+  pointer on a tab for a summary card: its folder, what its last command did
+  and for how long, a transfer, the host. Hold ⌘ to see the key that reaches
+  each tab. Tabs slide into place as they open and close; with Reduce Motion
+  on everything changes at once and the ring stands still.
 - **Text no longer gets cut in half at the top of the window.** Where the
   terminal meets the tab bar — or the divider above a split pane — a line
   scrolling up now fades out over a few pixels instead of being sliced through
