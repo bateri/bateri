@@ -57,6 +57,7 @@
 //! meaningful ([`MIN_SAMPLES`]) is defined next to the book, `bt-shell`
 //! **prints** it as `taban=` but does not choose its value.
 
+mod arrival;
 mod blink;
 mod error;
 mod frame;

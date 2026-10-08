@@ -1812,6 +1812,19 @@ keypress = "fade"
 # Pasting, history and deleting a whole word or line are instant. cursor_motion = "snap" turns both off; Reduce Motion
 # keeps only a fade for typing.
 erase = "recede"
+# "off" | "type" | "dust" | "ripple". How the dock at the bottom of a new
+# window or tab arrives. Until the shell shows its first prompt the dock waits
+# empty, with no prompt mark, no cursor, no folder and no branch. type then
+# lifts it a little, draws its lines from the left, pops the prompt mark in,
+# types the folder and branch out and brings the cursor last. dust drifts
+# specks of dust through a slanted beam of light around the dock while it
+# waits, then draws them onto the top line, which is woven behind them.
+# ripple lets the top line ripple faintly while it waits, then drops the
+# prompt mark onto it and sends a ring out from where it lands. off shows the
+# dock as it is, from the start. Pressing a key, or leaving the window, ends
+# it at once; a change applies to windows and tabs opened afterwards.
+# cursor_motion = "snap" turns it off; Reduce Motion keeps only a short fade.
+dock_arrival = "ripple"
 
 [shell]
 # "auto" | "blocks" | "off". Whether bateri sets up the shell so it can report
@@ -3907,6 +3920,7 @@ mod tests {
             ("motion", "smooth_scroll"),
             ("motion", "keypress"),
             ("motion", "erase"),
+            ("motion", "dock_arrival"),
             ("shell", "integration"),
             ("remote", "hosts"),
             ("remote", "preview_max_size"),

@@ -94,6 +94,16 @@
 //! marks are bucketed in `bt-core`'s frame, which a motion frame never
 //! reaches.
 //!
+//! **The dock's arrival takes the motion road too** ([`crate::arrival`]): it
+//! is a term of `Motion`, so the sleep test sees it without a question of its
+//! own. What is new is that most of its life is *waiting*, which is settled —
+//! the link sleeps through the shell's startup — and its two deadlines (the
+//! end of the quiet hold, the cap that arrives without a prompt) are the
+//! motion clock's fourth entry, woken through [`Waker::resume`]. Its frames
+//! are motion frames: no damage, no `content=`. A pane that was never armed
+//! (a carried-over one, one without a dock, the timed run) has no entry and
+//! changes nothing.
+//!
 //! The contract's consequence in one sentence: a window with a running
 //! command, **a blinking cursor or a scroll bar shown by scrolling** is **not
 //! idle**; every other window — one whose bar is always up included — is idle
@@ -110,10 +120,11 @@ use std::time::{Duration, Instant};
 
 use bt_core::{
     BlockHandle, Blocks, CaretStyle, Clusters, ContentEdge, Cursor, CursorMotion, DirtyFlag,
-    DockBudget, DockCols, DockContext, DockState, Erase, Keypress, LinearRgba, SearchRuns,
-    SelectionRun, SelectionRuns, Session, Theme, TrackBlock, TrackMarks,
+    DockArrival, DockBudget, DockCols, DockContext, DockState, Erase, Keypress, LinearRgba,
+    SearchRuns, SelectionRun, SelectionRuns, Session, Theme, TrackBlock, TrackMarks,
 };
 
+use crate::arrival::{RISE_PT, Scene};
 use crate::blink::Blink;
 use crate::frame::Frame;
 use crate::glyph_fx::GlyphFx;
@@ -902,6 +913,11 @@ struct Core {
     /// paths borrow it, both on the main thread and both release it at the
     /// call boundary.
     glyph_fx: RefCell<GlyphFx>,
+    /// The dock arrival the user chose, as last told
+    /// ([`DisplayLink::set_dock_arrival`]): kept so a save that rewrites the
+    /// same value, or changes another motion key, does not end a scene that is
+    /// playing.
+    dock_arrival: Cell<DockArrival>,
     /// The geometry (window, font, zoom) moved: the next content frame should
     /// move the cursor without animation.
     ///
@@ -1240,6 +1256,10 @@ impl Core {
         // cursor and the offset the order is unchanged — `advance` still
         // before `sync`, and nobody reads `motion` in between.
         motion.advance(dt);
+        // The dock's arrival is stepped to the tick's stamp, not by `dt`: it
+        // spends its waiting asleep, where `dt` would be clamped to a tenth of
+        // a second. This frame is drawn anyway, so the answer is dropped.
+        motion.advance_arrival(now, self.focused.get());
         // The request comes **after** `advance` (`Motion::request_glide`): a
         // link waking from sleep must not apply its clamped `dt` to the new
         // notch.
@@ -1298,6 +1318,14 @@ impl Core {
             (cursor.display_offset, cursor.scroll_frac),
             glide.rows,
         );
+        // **The shell's first prompt starts the dock's arrival** — if the pane
+        // is the user's right now (the window key; the gate is open or this
+        // tick would not be here). A pane that was hidden or in the
+        // background when the prompt came gets the dock as it is: the scene is
+        // for the person watching the shell start.
+        if cursor.shell_ready {
+            motion.arrival_prompt(now, self.focused.get());
+        }
         // The fraction **before** the origin (`Frame::set_origin_rows` adds it
         // the moment it is written) and before the caret (`Frame::push_caret`
         // adds it to the grid's caret).
@@ -1467,6 +1495,26 @@ impl Core {
                 |dock_edit| edit = Some(dock_edit),
             );
             frame.put_dock_clusters(dock_clusters);
+            // No mark → the input's first row is outside the vertical window.
+            // **The mark is pushed with the cells, before the effects**: the
+            // arrival scene hides it and turns it into an effect in
+            // `set_dock_fx`, which can only find a mark that is already there.
+            if let Some(sigil) = dock.sigil {
+                frame.push_dock_sigil(sigil);
+            }
+            // **The arrival scene is decided here, from this frame's dock**:
+            // a program that has the dock step aside ends it (the band is
+            // gone, there is nothing to arrive), the text the dock holds sizes
+            // its typing, and the scene — whichever way it went — is written
+            // before the effects, which turn its letters and › into effects.
+            if band_rows.is_none() {
+                motion.end_arrival();
+            }
+            // Only a pane that still has a scene counts its letters.
+            if motion.arrival_armed() {
+                motion.note_arrival_letters(frame.dock_letter_span());
+            }
+            self.write_arrival(&mut frame, &motion);
             // The order is required: an edit can shift and finish the ones in
             // flight, an arrival whose static glyph cannot be found is only
             // known **after** the dock is printed, and the list to draw comes
@@ -1490,18 +1538,16 @@ impl Core {
             // the colour was written above with `push_selection` — one
             // selection per window, one colour.
             frame.push_dock_selection(&self.dock_selection.borrow());
-            // No mark → the input's first row is outside the vertical window.
-            if let Some(sigil) = dock.sigil {
-                frame.push_dock_sigil(sigil);
-            }
             // The surface opens **after** the cells: the call bringing the
             // colours is the very call printing the cells (`Frame::open_dock`).
             frame.open_dock(dock.ground, dock.edge, dock.separator);
             frame.set_dock_progress(dock.progress, dock.track);
             frame.set_dock_buttons(dock.buttons);
         } else {
-            // No dock (alternate screen): the effect has no subject either.
+            // No dock (alternate screen): the effect has no subject either,
+            // nor has the arrival.
             glyph_fx.finish();
+            motion.end_arrival();
         }
         drop(glyph_fx);
         // **The caret's single target.** There are two homes and both enter
@@ -1656,7 +1702,10 @@ impl Core {
                 at,
                 text,
                 theme.cursor_linear(),
-                motion.alpha() * blink.alpha(),
+                // The arrival scene hides the cursor until the dock has
+                // arrived; its opacity is the third factor, and without a
+                // scene it is `1.0`.
+                motion.alpha() * blink.alpha() * motion.arrival_caret(),
                 cursor.shape,
                 focused,
             );
@@ -1714,6 +1763,11 @@ impl Core {
     /// both end here — sleep, or draw a **motion** frame.
     fn motion_tick(&self, frame: &mut Frame, mut motion: Motion, now: f64, dt: f32) {
         motion.advance(dt);
+        // **The dock's arrival is stepped to the stamp** (a sleeping link's
+        // `dt` is clamped); the answer is "the scene was playing when this step
+        // began, or it ended in it", the same rule as the typing effects' below:
+        // the step that ends the scene is still drawn.
+        let arrival_moved = motion.advance_arrival(now, self.focused.get());
         // **The sleep test's third question.** Blink lives outside `Motion`,
         // so `settled()` does not see it; without this line a tick woken by
         // `Waker::resume` would go back to sleep without drawing anything and
@@ -1739,6 +1793,9 @@ impl Core {
         // is acquired; that is fine, the list is state, and on the sleep path
         // the opacity written is the one already on screen.
         let mut bar = self.step_scrollbar(frame, now, None);
+        // The blink's turn and the arrival's step are the same kind of fact for
+        // the two questions below: something on screen is out of date.
+        let flipped = flipped || arrival_moved;
         if at_rest(motion, flipped, fx_idle, bar.idle()) {
             // Zero frames at idle: neither new content nor an unsettled
             // animation, the pacer sleeps. The next `Wakeup` starts it again
@@ -1782,6 +1839,7 @@ impl Core {
             motion.finish();
             self.motion.set(motion);
             glyph_fx.finish();
+            frame.set_dock_scene(None, 0.0);
             frame.set_dock_fx(
                 std::iter::empty(),
                 &Clusters::default(),
@@ -1817,7 +1875,7 @@ impl Core {
                 at,
                 text,
                 theme.cursor_linear(),
-                motion.alpha() * self.blink.get().alpha(),
+                motion.alpha() * self.blink.get().alpha() * motion.arrival_caret(),
                 // **Focus is read fresh every frame**, not from what `Frame`
                 // kept: this bit is `bt-gpu`'s own decision and the motion
                 // frame reaches it too.
@@ -1825,8 +1883,12 @@ impl Core {
             );
         }
         // The dock's static lists are kept, only the effects are printed
-        // again (`move_caret`'s precedent).
-        if !fx_idle {
+        // again (`move_caret`'s precedent) — and the arrival scene with them:
+        // its pieces are effects of the same lists, so while it plays, and in
+        // the step it ends in, both are written together.
+        let arrival_live = arrival_moved || !motion.arrival_settled();
+        if !fx_idle || arrival_live {
+            self.write_arrival(frame, &motion);
             frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), theme.cursor_linear());
         }
         // No CPU sample is **written**, and that is not a gap: `cpu_frame`
@@ -1879,7 +1941,9 @@ impl Core {
                     // The effect lists in `Frame` empty too: the pacer sleeps
                     // and the next damage-free frame (blink's tick) would
                     // redraw the old lists frozen halfway without passing
-                    // through `set_dock_fx`.
+                    // through `set_dock_fx`. The arrival scene goes first: it
+                    // is what that call turns into effects.
+                    frame.set_dock_scene(None, 0.0);
                     frame.set_dock_fx(
                         std::iter::empty(),
                         &Clusters::default(),
@@ -1902,6 +1966,22 @@ impl Core {
             self.waker.pacer().set_running(false);
             self.arm_clock(now);
         }
+    }
+
+    /// Writes the dock's arrival scene into the frame — the one step both frame
+    /// paths take, so what a motion frame replays is what the content frame
+    /// wrote. The climb is in whole pixels (an edge that does not land on the
+    /// device grid would fade). Call before `Frame::set_dock_fx`.
+    fn write_arrival(&self, frame: &mut Frame, motion: &Motion) {
+        let scene = motion.arrival_scene();
+        let rise = scene.map_or(0.0, |scene| self.rise_px(scene));
+        frame.set_dock_scene(scene, rise);
+    }
+
+    /// How far below its place the dock is, in pixels, at this point of the
+    /// scene's climb ([`RISE_PT`] points at the start).
+    fn rise_px(&self, scene: Scene) -> f32 {
+        (scene.rise * self.cell.get().pt_px(RISE_PT)).round()
     }
 
     /// Hides the scroll bar at once and takes its thumb out of the kept
@@ -2111,11 +2191,12 @@ impl Core {
         let generation = self.clock_generation.fetch_add(1, Ordering::Relaxed) + 1;
         // A frame still in flight: its completion is polled once more.
         let poll = self.renderer.in_flight().then_some(now + POLL_DELAY);
-        // **Four deadlines, one wakeup.** Whichever is due first is armed and
+        // **Five deadlines, one wakeup.** Whichever is due first is armed and
         // decides the flavour: the content tick plants damage (counting
-        // `content=` is right, the grid really changes), blink, the poll and
-        // the scroll bar's hold do not (only the caret's alpha changes /
-        // nothing is drawn / only the bar fades). Armed separately, since
+        // `content=` is right, the grid really changes), blink, the poll, the
+        // scroll bar's hold and the dock arrival's hold and cap do not (only
+        // the caret's alpha changes / nothing is drawn / only the bar fades /
+        // only how the dock is drawn changes). Armed separately, since
         // `after` cannot be cancelled, one would void the other's generation.
         let Some((due, damages)) = due_clock(
             self.content_deadline.get(),
@@ -2123,6 +2204,7 @@ impl Core {
                 self.blink.get().next_flip(),
                 poll,
                 self.scrollbar.get().next_deadline(),
+                self.motion.get().arrival_deadline(now),
             ],
         ) else {
             // No running counter, no blinking cursor, no frame in flight, no
@@ -2473,6 +2555,7 @@ impl DisplayLink {
             slide_frames: Cell::new(0),
             motion: Cell::new(Motion::default()),
             glyph_fx: RefCell::new(GlyphFx::default()),
+            dock_arrival: Cell::new(DockArrival::default()),
             geometry_changed: Cell::new(false),
             last_frame_at: Cell::new(None),
             last_update_at: Cell::new(None),
@@ -2892,6 +2975,68 @@ impl DisplayLink {
         }
     }
 
+    /// A new pane's shell is starting: the dock holds back (no ›, no cursor, no
+    /// path) until the shell's first prompt, then comes in with the scene
+    /// `kind` names ([`crate::arrival`]).
+    ///
+    /// **Only for a pane born with a shell of its own.** A carried-over pane
+    /// (the update's handover, a crash recovery) has a shell that is at its
+    /// prompt already, a pane without a dock has nothing to hold back, and the
+    /// timed run never asks — none of them calls this, and an unarmed link has
+    /// no scene.
+    ///
+    /// Nothing is armed for a pane that is hidden at this moment (it has no one
+    /// to watch), nor under `snap` (the arrival is motion; [`Motion::arm_arrival`]).
+    /// Focus is **not** asked here: a tab born in a window that is key is
+    /// still waiting to be shown, and its focus is told after the link is born.
+    /// It is asked when the prompt comes, and losing it before that ends the
+    /// scene ([`DisplayLink::set_focused`]).
+    ///
+    /// Asks for a frame, so the held-back dock is the first one drawn.
+    pub fn arm_arrival(&self, kind: DockArrival) {
+        let core = &self.core;
+        core.dock_arrival.set(kind);
+        if !self.waker.gate().is_open() || core.dock_rows.get() == 0 {
+            return;
+        }
+        let mut motion = core.motion.get();
+        let armed = motion.arm_arrival(kind, self.waker.pacer().now());
+        core.motion.set(motion);
+        if armed {
+            self.request_frame();
+        }
+    }
+
+    /// The user changed `[motion] dock_arrival`, or the pane is opening
+    /// (`bt-shell` seeds it): a scene that is waiting or playing ends at the
+    /// dock's last state; **the new kind applies to the next shell's birth**
+    /// ([`DisplayLink::arm_arrival`]).
+    ///
+    /// A no-op on the same value, and that is the point: a save that changes
+    /// another motion key tells every pane the whole `[motion]` table, and
+    /// must not cut a scene that is playing. Asks for a frame only if a scene
+    /// ended — the "no damage" branch sleeps without drawing a settled
+    /// animation, and a waiting dock would stay on screen.
+    pub fn set_dock_arrival(&self, kind: DockArrival) {
+        if self.core.dock_arrival.replace(kind) == kind {
+            return;
+        }
+        self.skip_arrival();
+    }
+
+    /// Ends the dock's arrival at the dock's last state, waiting or playing —
+    /// for the paths the scene has no business running through: a key pressed,
+    /// a setting changed. A no-op without a scene, so a keystroke pays one
+    /// copy of `Motion`.
+    pub fn skip_arrival(&self) {
+        let core = &self.core;
+        let mut motion = core.motion.get();
+        if motion.end_arrival() {
+            core.motion.set(motion);
+            self.request_frame();
+        }
+    }
+
     /// Reduce Motion was switched on or off — `bt-shell` gives the
     /// **resolved** value: it combines the three-valued `reduce_motion` with
     /// the system's answer, and `bt-gpu` sees neither the settings file nor
@@ -2987,6 +3132,14 @@ impl DisplayLink {
     pub fn set_focused(&self, focused: bool) {
         if self.core.focused.replace(focused) == focused {
             return;
+        }
+        // **A pane that loses the focus ends the dock's arrival**: a scene is
+        // for the person watching it, and a window that comes back later finds
+        // the dock as it is. The frame the change asks for draws it.
+        if !focused {
+            let mut motion = self.core.motion.get();
+            motion.end_arrival();
+            self.core.motion.set(motion);
         }
         self.request_frame();
     }
@@ -3099,9 +3252,9 @@ fn content_deadline(now: f64, tick: Option<Duration>) -> Option<f64> {
 /// Which of the clock's deadlines is due first and **which flavour** it wants
 /// (`true` → the damage-planting content flavour, `false` → the damage-free
 /// motion flavour). `motion` is the motion flavour's deadlines: blink's phase
-/// change, the completion poll of a frame still in flight (it draws nothing)
-/// and the scroll bar's hold; the nearest of them competes with the content
-/// tick.
+/// change, the completion poll of a frame still in flight (it draws nothing),
+/// the scroll bar's hold and the dock arrival's hold or cap; the nearest of
+/// them competes with the content tick.
 ///
 /// A separate function, because the new guise of a defect fixed earlier
 /// lives exactly here and could not be tested inside `arm_clock`'s
@@ -3113,7 +3266,7 @@ fn content_deadline(now: f64, tick: Option<Duration>) -> Option<f64> {
 /// command's one-second tick one second forward every time and it would
 /// never fire. **On a tie the content wins**: the frame will be drawn anyway,
 /// the motion flavour needs no second wakeup.
-fn due_clock(content: Option<f64>, motion: [Option<f64>; 3]) -> Option<(f64, bool)> {
+fn due_clock(content: Option<f64>, motion: [Option<f64>; 4]) -> Option<(f64, bool)> {
     let motion = motion.into_iter().flatten().reduce(f64::min);
     match (content, motion) {
         (Some(content), Some(motion)) if motion < content => Some((motion, false)),
@@ -3123,9 +3276,11 @@ fn due_clock(content: Option<f64>, motion: [Option<f64>; 3]) -> Option<(f64, boo
     }
 }
 
-/// The "no damage" branch's sleep question: motion settled, blink's phase
-/// did not turn, **before this step** nothing was in flight in the typing
-/// effects, and the scroll bar is idle ([`BarStep::idle`]).
+/// The "no damage" branch's sleep question: motion settled, nothing else on
+/// screen is out of date (`flipped`: blink's phase turned, or the dock's
+/// arrival was playing when the step began or ended in it), **before this
+/// step** nothing was in flight in the typing effects, and the scroll bar is
+/// idle ([`BarStep::idle`]).
 ///
 /// The effect's question looks at the state before `advance` and that is
 /// required: the last state of an effect finishing in this step (an arrival
@@ -4228,42 +4383,51 @@ mod tests {
         // A content tick plants damage (the grid really changes), a blink does
         // not (only the caret's alpha).
         assert_eq!(
-            due_clock(Some(1.0), [Some(0.5), None, None]),
+            due_clock(Some(1.0), [Some(0.5), None, None, None]),
             Some((0.5, false))
         );
-        assert_eq!(due_clock(Some(1.0), [None, None, None]), Some((1.0, true)));
-        assert_eq!(due_clock(None, [Some(0.5), None, None]), Some((0.5, false)));
         assert_eq!(
-            due_clock(None, [None, None, None]),
+            due_clock(Some(1.0), [None, None, None, None]),
+            Some((1.0, true))
+        );
+        assert_eq!(
+            due_clock(None, [Some(0.5), None, None, None]),
+            Some((0.5, false))
+        );
+        assert_eq!(
+            due_clock(None, [None, None, None, None]),
             None,
             "a clock was set while idle"
         );
         // On a tie the content wins: the frame will be drawn anyway, the
         // motion flavour needs no second wakeup.
         assert_eq!(
-            due_clock(Some(1.0), [Some(1.0), None, None]),
+            due_clock(Some(1.0), [Some(1.0), None, None, None]),
             Some((1.0, true))
         );
         // The completion poll of a frame in flight rides the motion
         // flavour: it draws nothing, so it plants no damage, and the nearest
         // of blink and the poll competes with the content tick.
-        assert_eq!(due_clock(None, [None, Some(0.2), None]), Some((0.2, false)));
         assert_eq!(
-            due_clock(Some(1.0), [Some(0.5), Some(0.2), None]),
+            due_clock(None, [None, Some(0.2), None, None]),
             Some((0.2, false))
         );
         assert_eq!(
-            due_clock(Some(0.1), [None, Some(0.2), None]),
+            due_clock(Some(1.0), [Some(0.5), Some(0.2), None, None]),
+            Some((0.2, false))
+        );
+        assert_eq!(
+            due_clock(Some(0.1), [None, Some(0.2), None, None]),
             Some((0.1, true))
         );
         // The scroll bar's hold rides the motion flavour too: its fade
         // changes only the bar.
         assert_eq!(
-            due_clock(Some(2.0), [Some(0.5), None, Some(0.3)]),
+            due_clock(Some(2.0), [Some(0.5), None, Some(0.3), None]),
             Some((0.3, false))
         );
         assert_eq!(
-            due_clock(Some(0.2), [None, None, Some(0.3)]),
+            due_clock(Some(0.2), [None, None, Some(0.3), None]),
             Some((0.2, true))
         );
     }
@@ -4352,7 +4516,7 @@ mod tests {
             "{step:?}"
         );
         assert_eq!(
-            due_clock(None, [None, None, bar.next_deadline()]),
+            due_clock(None, [None, None, bar.next_deadline(), None]),
             Some((1.0, false)),
             "the hold's end is not a motion-flavoured wakeup"
         );
@@ -4389,7 +4553,7 @@ mod tests {
             assert!(now < 1.5, "the fade never ended");
         }
         assert_eq!(
-            due_clock(None, [None, None, bar.next_deadline()]),
+            due_clock(None, [None, None, bar.next_deadline(), None]),
             None,
             "a hidden bar armed a clock"
         );
@@ -4458,7 +4622,7 @@ mod tests {
         let drawn = frame.scrollbar().expect("the bar is up").core;
         assert_eq!([drawn[0], drawn[2]], [x0, x1], "the bar is not wide");
         assert_eq!(
-            due_clock(None, [None, None, bar.next_deadline()]),
+            due_clock(None, [None, None, bar.next_deadline(), None]),
             None,
             "the engaged bar armed a clock"
         );
@@ -4485,7 +4649,7 @@ mod tests {
             "the narrowed bar is not holding"
         );
         assert_eq!(
-            due_clock(None, [None, None, bar.next_deadline()]),
+            due_clock(None, [None, None, bar.next_deadline(), None]),
             Some((left + 0.15 + 1.0, false)),
             "the hold after leaving is not a motion-flavoured wakeup"
         );
@@ -4535,7 +4699,10 @@ mod tests {
             );
             assert!(frame.scrollbar().is_some(), "the bar left at {now}");
         }
-        assert_eq!(due_clock(None, [None, None, bar.next_deadline()]), None);
+        assert_eq!(
+            due_clock(None, [None, None, bar.next_deadline(), None]),
+            None
+        );
 
         // The form changes to `Never` between content frames: one motion
         // frame draws the bar away from the kept layout, then nothing.
@@ -4714,7 +4881,7 @@ mod tests {
 
         // t=0: the blink is nearer, the motion flavour is set.
         assert_eq!(
-            due_clock(content, [blink.next_flip(), None, None]),
+            due_clock(content, [blink.next_flip(), None, None, None]),
             Some((0.5, false))
         );
 
@@ -4722,7 +4889,7 @@ mod tests {
         assert!(blink.advance(0.5), "the blink did not flip");
         assert_eq!(blink.next_flip(), Some(1.0));
         assert_eq!(
-            due_clock(content, [blink.next_flip(), None, None]),
+            due_clock(content, [blink.next_flip(), None, None, None]),
             Some((1.0, true)),
             "the counter's tick was pushed by the blink"
         );
@@ -4745,8 +4912,273 @@ mod tests {
         );
         // A cleared deadline and a non-blinking cursor: no clock is set at all.
         assert_eq!(
-            due_clock(content_deadline(5.0, None), [None, None, None]),
+            due_clock(content_deadline(5.0, None), [None, None, None, None]),
             None
+        );
+    }
+
+    // **The dock's arrival around the link's sleep decision.** The tick's body
+    // cannot be tested (it needs a window), so the rig drives the real pieces
+    // the motion arm decides with — `Motion`, `at_rest`, `due_clock` — through a
+    // fake clock: the link sleeps when it is at rest and is next ticked at the
+    // wake-up it armed, which is exactly what the pacer does.
+
+    /// Birth stamp of the rig's pane.
+    const BORN: f64 = 50.0;
+    /// One vsync.
+    const VSYNC: f64 = 1.0 / 120.0;
+
+    struct Rig {
+        motion: Motion,
+        /// The stamp of the last tick.
+        now: f64,
+        /// Frames the motion arm drew.
+        drawn: u32,
+        /// The wake-up armed as the link went to sleep; `None` → asleep for
+        /// good (zero frames at idle).
+        armed: Option<f64>,
+        asleep: bool,
+        /// Every wake-up the link armed, in order.
+        wakeups: Vec<f64>,
+    }
+
+    impl Rig {
+        /// A pane born at `BORN` whose arrival is armed, awake for its first
+        /// frame.
+        fn born(kind: DockArrival, reduce: bool) -> Self {
+            let mut motion = Motion::default();
+            motion.set_reduce(reduce);
+            assert!(motion.arm_arrival(kind, BORN));
+            let mut rig = Self {
+                motion,
+                now: BORN,
+                drawn: 0,
+                armed: None,
+                asleep: false,
+                wakeups: Vec::new(),
+            };
+            rig.tick(BORN);
+            rig
+        }
+
+        /// One tick of `motion_tick`'s arrival terms.
+        fn tick(&mut self, now: f64) {
+            self.now = now;
+            self.asleep = false;
+            self.armed = None;
+            let moved = self.motion.advance_arrival(now, true);
+            if at_rest(self.motion, moved, true, true) {
+                self.sleep();
+                return;
+            }
+            self.drawn += 1;
+            if self.motion.settled() {
+                self.sleep();
+            }
+        }
+
+        /// The sleep point: the pacer stops and the clock is armed.
+        fn sleep(&mut self) {
+            self.asleep = true;
+            self.armed = due_clock(
+                None,
+                [None, None, None, self.motion.arrival_deadline(self.now)],
+            )
+            .map(|(due, _)| due);
+            self.wakeups.extend(self.armed);
+        }
+
+        /// The shell's first prompt at `now`: a content frame (damage woke the
+        /// link).
+        fn prompt(&mut self, now: f64, active: bool) {
+            self.now = now;
+            self.motion.advance_arrival(now, true);
+            self.motion.arrival_prompt(now, active);
+            self.drawn += 1;
+            self.asleep = false;
+            self.armed = None;
+        }
+
+        /// Runs the clock and the vsync until `until`; stops early when the
+        /// link sleeps with nothing armed.
+        fn run_until(&mut self, until: f64) {
+            loop {
+                let next = if self.asleep {
+                    match self.armed {
+                        Some(due) if due <= until => due,
+                        _ => return,
+                    }
+                } else {
+                    self.now + VSYNC
+                };
+                if next > until {
+                    return;
+                }
+                self.tick(next);
+            }
+        }
+    }
+
+    #[test]
+    fn a_waiting_dock_draws_nothing_and_the_clock_wakes_it_for_the_cap() {
+        let mut rig = Rig::born(DockArrival::Type, false);
+        assert!(rig.asleep, "waiting is spent asleep");
+        assert!(rig.motion.settled());
+        assert_eq!(rig.armed, Some(BORN + crate::arrival::SHOW));
+        let frames_after_birth = rig.drawn;
+        // The hold's wake-up draws nothing and arms the cap.
+        rig.run_until(BORN + 2.9);
+        assert_eq!(rig.drawn, frames_after_birth, "a frame while waiting");
+        assert_eq!(
+            rig.wakeups,
+            [BORN + crate::arrival::SHOW, BORN + crate::arrival::CAP]
+        );
+        assert!(rig.asleep);
+        // The cap's wake-up starts the arrival, which plays and settles.
+        rig.run_until(BORN + 5.0);
+        assert!(rig.drawn > frames_after_birth + 5, "the cap drew no scene");
+        assert!(
+            rig.drawn - frames_after_birth <= 121,
+            "{} frames",
+            rig.drawn
+        );
+        assert!(rig.motion.settled());
+        assert!(rig.motion.arrival_scene().is_none());
+        assert_eq!(rig.armed, None, "nothing armed: zero frames at idle");
+    }
+
+    #[test]
+    fn a_prompt_at_one_point_two_seconds_plays_and_settles_inside_the_maximum() {
+        let mut rig = Rig::born(DockArrival::Type, false);
+        rig.run_until(BORN + 1.2);
+        let waiting = rig.drawn;
+        rig.prompt(BORN + 1.2, true);
+        assert!(!rig.motion.settled(), "the prompt starts the scene");
+        rig.run_until(BORN + 1.2 + crate::arrival::ARRIVAL_MAX + 2.0 * VSYNC);
+        assert!(rig.motion.settled(), "not settled inside the maximum");
+        assert!(rig.motion.arrival_scene().is_none());
+        assert!(
+            rig.asleep && rig.armed.is_none(),
+            "the link did not go to sleep for good"
+        );
+        let frames = rig.drawn - waiting;
+        assert!(frames >= 10, "{frames}: the entrance was not drawn");
+        assert!(
+            f64::from(frames) <= crate::arrival::ARRIVAL_MAX / VSYNC + 3.0,
+            "{frames} frames"
+        );
+        // A prompt that comes later still (the next command) opens nothing.
+        rig.prompt(BORN + 11.2, true);
+        assert!(rig.motion.settled() && rig.motion.arrival_scene().is_none());
+    }
+
+    #[test]
+    fn a_prompt_after_the_cap_opens_no_scene_and_the_link_stays_asleep() {
+        let mut rig = Rig::born(DockArrival::Type, false);
+        rig.run_until(BORN + 5.0);
+        let frames = rig.drawn;
+        rig.prompt(BORN + 6.0, true);
+        rig.tick(BORN + 6.0 + VSYNC);
+        assert!(rig.asleep && rig.armed.is_none());
+        assert_eq!(rig.drawn, frames + 1, "only the prompt's own content frame");
+    }
+
+    #[test]
+    fn a_prompt_in_a_pane_that_is_not_the_users_plays_nothing() {
+        let mut rig = Rig::born(DockArrival::Type, false);
+        rig.run_until(BORN + 1.0);
+        rig.prompt(BORN + 1.0, false);
+        assert!(rig.motion.arrival_scene().is_none());
+        assert!(rig.motion.settled());
+    }
+
+    #[test]
+    fn every_path_that_ends_the_scene_leaves_the_link_settled() {
+        // Mid-wait and mid-play, each way the scene is cut: a key
+        // (`skip_arrival`), losing focus (`set_focused`), the dock going away
+        // (the content arm), the pane being hidden (`Motion::finish`), Reduce
+        // Motion, `cursor_motion` and `dock_arrival` changing. Each must leave
+        // the motion settled and the scene gone — the frame the caller owes is
+        // what draws the final dock.
+        type Cut = fn(&mut Motion) -> bool;
+        let cuts: [(&str, Cut); 6] = [
+            ("a key, focus lost or the dock gone", |motion| {
+                motion.end_arrival()
+            }),
+            ("hidden", |motion| {
+                motion.finish();
+                true
+            }),
+            ("Reduce Motion on", |motion| motion.set_reduce(true)),
+            ("cursor_motion", |motion| {
+                motion.set_style(CursorMotion::Ease)
+            }),
+            ("snap", |motion| motion.set_style(CursorMotion::Snap)),
+            ("dock_arrival", |motion| motion.end_arrival()),
+        ];
+        for (path, cut) in cuts {
+            for playing in [false, true] {
+                let mut rig = Rig::born(DockArrival::Type, false);
+                rig.run_until(BORN + 1.0);
+                if playing {
+                    rig.prompt(BORN + 1.0, true);
+                    rig.run_until(BORN + 1.0 + 0.1);
+                    assert!(!rig.motion.settled(), "{path}: the scene was not playing");
+                }
+                let owed = cut(&mut rig.motion);
+                assert!(owed, "{path} (playing {playing}): no frame is owed");
+                assert!(rig.motion.settled(), "{path} (playing {playing})");
+                assert!(
+                    rig.motion.arrival_scene().is_none(),
+                    "{path} (playing {playing})"
+                );
+                assert_eq!(
+                    rig.motion.arrival_deadline(rig.now),
+                    None,
+                    "{path}: a stale wake-up"
+                );
+                rig.tick(rig.now + VSYNC);
+                assert!(
+                    rig.asleep && rig.armed.is_none(),
+                    "{path}: the link stayed awake"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reduce_motion_plays_a_short_fade_and_settles() {
+        let mut rig = Rig::born(DockArrival::Type, true);
+        rig.run_until(BORN + 0.5);
+        rig.prompt(BORN + 0.5, true);
+        rig.run_until(BORN + 0.5 + 0.3);
+        assert!(rig.motion.settled(), "the fade is over inside 300 ms");
+        assert!(rig.drawn <= 1 + 1 + 20, "{} frames", rig.drawn);
+    }
+
+    #[test]
+    fn a_pane_without_a_scene_never_arms_a_clock() {
+        // The carried-over pane, the dockless pane and the timed run never arm
+        // the arrival: zero frames at idle must not change.
+        let mut motion = Motion::default();
+        let moved = motion.advance_arrival(100.0, true);
+        assert!(!moved);
+        assert!(at_rest(motion, moved, true, true));
+        assert_eq!(
+            due_clock(None, [None, None, None, motion.arrival_deadline(100.0)]),
+            None
+        );
+    }
+
+    #[test]
+    fn the_clock_picks_the_arrival_among_the_motion_deadlines() {
+        assert_eq!(
+            due_clock(None, [Some(0.5), None, None, Some(0.18)]),
+            Some((0.18, false))
+        );
+        assert_eq!(
+            due_clock(Some(0.1), [None, None, None, Some(0.18)]),
+            Some((0.1, true))
         );
     }
 }

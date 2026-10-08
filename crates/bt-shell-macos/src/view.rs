@@ -1134,6 +1134,10 @@ define_class!(
             if !reaches_terminal(flags, chars.as_deref()) {
                 return;
             }
+            // Typing ends the dock's arrival scene (a key that is a shortcut,
+            // swallowed above, does not): whoever types is waiting for no
+            // entrance.
+            self.skip_arrival();
             let command = flags.contains(NSEventModifierFlags::Command);
             // Shift+PgUp/PgDn is the terminal's scrolling, not the
             // application's key - but only if the session accepts. On the
@@ -2490,6 +2494,13 @@ impl BateriView {
     fn note_interaction(&self) {
         if let Some(pane) = self.pane() {
             pane.note_interaction();
+        }
+    }
+
+    /// A key reached the terminal: the pane's dock arrival, if any, ends.
+    fn skip_arrival(&self) {
+        if let Some(pane) = self.pane() {
+            pane.skip_arrival();
         }
     }
 

@@ -38,6 +38,7 @@ use bt_core::{
     LinearRgba, SearchRun, SelectionRun, TrackBlock, TrackMark, UnderlineStyle, UnfocusedCaret,
 };
 
+use crate::arrival::Scene;
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
 use crate::metrics::CellMetrics;
 use crate::scrollbar::{HAIRLINE_ALPHA, Look, ScrollbarLayout, TRACK_ALPHA};
@@ -513,6 +514,9 @@ pub(crate) fn copy_cluster(
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FxCell {
     pub(crate) glyph: GlyphCell,
+    /// `Some` → the effect draws this rule sprite at the glyph's position and
+    /// colour instead of the glyph's character (the dock's › arriving).
+    pub(crate) rule: Option<RuleKind>,
     /// Progress, `0..=1`.
     pub(crate) t: f32,
     /// The shader's effect id ([`crate::glyph_fx`]).
@@ -564,6 +568,24 @@ fn face(bold: bool, italic: bool) -> Face {
 fn with_alpha(rgba: LinearRgba, alpha: f32) -> [f32; 4] {
     let [r, g, b, _] = rgba.to_array();
     [r, g, b, alpha]
+}
+
+/// `rgba` at `share` of its own opacity. `1.0` returns it untouched.
+fn faded(rgba: [f32; 4], share: f32) -> [f32; 4] {
+    let [r, g, b, a] = rgba;
+    [r, g, b, a * share]
+}
+
+/// How wide a line is when `share` of it is drawn: a whole number of pixels
+/// (an edge that does not land on the device grid would fade), and exactly
+/// `width_px` when all of it is — so a surface without a scene is today's
+/// to the bit.
+fn drawn(width_px: f32, share: f32) -> f32 {
+    if share >= 1.0 {
+        width_px
+    } else {
+        (width_px * share).round()
+    }
 }
 
 /// Underline variant → rule sprite; [`UnderlineStyle::None`] wants no line.
@@ -1249,6 +1271,36 @@ pub(crate) struct Frame {
     /// effect has finished must still be there to come back. When no arrival
     /// is in flight this list is not read ([`Frame::dock_glyphs`]).
     dock_shown: Vec<GlyphCell>,
+    /// Whether `dock_shown` is the list to draw ([`Frame::dock_glyphs`]): some
+    /// static glyph is hidden because an effect or the arrival scene draws it.
+    dock_shown_active: bool,
+    /// The dock's arrival scene for this frame ([`Frame::set_dock_scene`]);
+    /// `None` → the dock is drawn as it always is.
+    ///
+    /// It is read at encode time (`dock_ground`, `dock_rise_px`) and by
+    /// [`Frame::set_dock_fx`], so the motion frame that keeps the dock's
+    /// lists replays the scene by writing it again, the way it replays the
+    /// effects.
+    dock_scene: Option<Scene>,
+    /// How far below its place the dock is drawn this frame, pixels
+    /// ([`Frame::set_dock_scene`]).
+    dock_rise_px: f32,
+    /// The context row's glyphs the scene types out: the index into
+    /// `dock_glyphs` and the column on the row, in push order.
+    dock_letters: Vec<(usize, u16)>,
+    /// The index of the dock's › in `dock_rules`, once pushed.
+    dock_sigil: Option<usize>,
+    /// `dock_rules` without the ›, while the scene draws it as an effect
+    /// instead ([`Frame::dock_rules`]).
+    dock_rules_shown: Vec<RuleCell>,
+    dock_rules_hidden: bool,
+    /// The glyph indices [`Frame::set_dock_fx`] hides, kept to reuse the
+    /// allocation: the context row can hide a whole line of them.
+    dock_hidden: Vec<usize>,
+    /// Whether [`Frame::set_dock_fx`] has run since the last
+    /// [`Frame::clear`]: the › must be pushed before it
+    /// ([`Frame::push_dock_sigil`]).
+    dock_fx_written: bool,
     /// The history rows that fill the gap at the top; the **third** twin of
     /// the grid's `bg` (after `stripes` and `dock_bg`).
     ///
@@ -1357,6 +1409,16 @@ impl Frame {
         self.dock_ghosts.clear();
         self.dock_arrivals.clear();
         self.dock_shown.clear();
+        self.dock_shown_active = false;
+        // The scene is a content frame's statement like the surface itself: a
+        // frame that does not say (no dock) draws none.
+        self.dock_scene = None;
+        self.dock_rise_px = 0.0;
+        self.dock_letters.clear();
+        self.dock_sigil = None;
+        self.dock_rules_shown.clear();
+        self.dock_rules_hidden = false;
+        self.dock_fx_written = false;
         self.fill_bg.clear();
         self.fill_glyphs.clear();
         self.fill_rules.clear();
@@ -2136,6 +2198,11 @@ impl Frame {
     pub(crate) fn push_dock(&mut self, cell: Cell) {
         let pos = self.dock_pos(cell.col, cell.row);
         if let Some(glyph) = self.dock_glyph(cell) {
+            // The context row's letters are what the arrival scene types out;
+            // the column is kept because the glyph itself carries only pixels.
+            if self.is_context_row(cell.row) {
+                self.dock_letters.push((self.dock_glyphs.len(), cell.col));
+            }
             self.dock_glyphs.push(glyph);
         }
         if let Some(bg) = cell.bg {
@@ -2227,7 +2294,9 @@ impl Frame {
 
     /// Writes the typing effects for this frame; both the content frame and
     /// the motion frame pass through here (the dock's static lists are kept
-    /// in the motion frame, only the effects advance).
+    /// in the motion frame, only the effects advance). The dock's arrival
+    /// scene ([`Frame::set_dock_scene`]) is turned into effects here too, from
+    /// the same lists.
     ///
     /// The static glyph of an in-flight arrival is **removed** from the list to
     /// be drawn (`dock_shown`), otherwise `fade` would fade in on top of the
@@ -2252,11 +2321,16 @@ impl Frame {
         self.fx_clusters.clear();
         self.dock_arrivals.clear();
         self.dock_shown.clear();
-        let mut hidden = [usize::MAX; crate::glyph_fx::FX_MAX];
-        let mut hidden_len = 0;
+        self.dock_rules_shown.clear();
+        self.dock_rules_hidden = false;
+        self.dock_shown_active = false;
+        self.dock_fx_written = true;
+        let mut hidden = std::mem::take(&mut self.dock_hidden);
+        hidden.clear();
         for fx in fx {
             let fx_cell = |glyph| FxCell {
                 glyph,
+                rule: None,
                 t: fx.t,
                 effect: fx.effect,
                 seed: fx.seed,
@@ -2276,10 +2350,7 @@ impl Frame {
                     let Some(index) = self.static_arrival(&fx) else {
                         continue;
                     };
-                    if let Some(slot) = hidden.get_mut(hidden_len) {
-                        *slot = index;
-                        hidden_len += 1;
-                    }
+                    hidden.push(index);
                     // **The glyph is the hidden static glyph itself**, not the
                     // cell from the moment it was written: the highlight can
                     // change afterwards (`zsh-syntax-highlighting` paints `l`
@@ -2290,15 +2361,110 @@ impl Frame {
                 }
             }
         }
-        if hidden_len > 0 {
-            let hidden = &hidden[..hidden_len];
+        self.scene_arrivals(&mut hidden);
+        if !hidden.is_empty() {
+            hidden.sort_unstable();
             self.dock_shown.extend(
                 self.dock_glyphs
                     .iter()
                     .enumerate()
-                    .filter(|(index, _)| !hidden.contains(index))
+                    .filter(|(index, _)| hidden.binary_search(index).is_err())
                     .map(|(_, glyph)| *glyph),
             );
+            self.dock_shown_active = true;
+        }
+        self.dock_hidden = hidden;
+    }
+
+    /// The dock's arrival scene for this frame and how far below its place the
+    /// dock is drawn, in pixels; `None` clears it. Both frame paths call it
+    /// **before** [`Frame::set_dock_fx`], which turns the scene's letters and
+    /// › into effects.
+    pub(crate) fn set_dock_scene(&mut self, scene: Option<Scene>, rise_px: f32) {
+        self.dock_scene = scene;
+        self.dock_rise_px = if scene.is_some() {
+            rise_px.max(0.0)
+        } else {
+            0.0
+        };
+    }
+
+    /// How far below its place the dock is drawn in this frame, pixels: the
+    /// scene's climb. The plan moves the dock's whole viewport by it.
+    pub(crate) fn dock_rise_px(&self) -> f32 {
+        self.dock_rise_px
+    }
+
+    /// How many columns of context text the dock holds: one past the last
+    /// letter's column. The scene sizes its typing by it.
+    pub(crate) fn dock_letter_span(&self) -> u16 {
+        self.dock_letters
+            .iter()
+            .map(|&(_, col)| col.saturating_add(1))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Hides what the scene has not brought in yet and adds the pieces
+    /// coming in as effects: the context row's letters and the ›.
+    ///
+    /// **Through the same lists as the typing effects**, not a path of its own:
+    /// a hidden static glyph is left out of `dock_shown` and its effect is an
+    /// arrival that equals the static glyph at `t = 1`, so the frame the scene
+    /// finishes in has nothing to hand over. Letters whose time has come and
+    /// gone are simply the static glyph; the scene itself is gone from the
+    /// frame once it ends.
+    fn scene_arrivals(&mut self, hidden: &mut Vec<usize>) {
+        let Some(scene) = self.dock_scene else {
+            return;
+        };
+        let effect = scene.entrance.fx_id();
+        for &(index, col) in &self.dock_letters {
+            let t = scene.letter(col);
+            if t >= 1.0 {
+                continue;
+            }
+            hidden.push(index);
+            if t > 0.0 {
+                self.dock_arrivals.push(FxCell {
+                    glyph: self.dock_glyphs[index],
+                    rule: None,
+                    t,
+                    effect,
+                    seed: 0.0,
+                });
+            }
+        }
+        let Some(sigil) = self.dock_sigil.filter(|_| scene.mark < 1.0) else {
+            return;
+        };
+        let rule = self.dock_rules[sigil];
+        self.dock_rules_shown.extend(
+            self.dock_rules
+                .iter()
+                .enumerate()
+                .filter(|&(index, _)| index != sigil)
+                .map(|(_, rule)| *rule),
+        );
+        self.dock_rules_hidden = true;
+        if scene.mark > 0.0 {
+            self.dock_arrivals.push(FxCell {
+                // A rule has no character: the cell only carries where it is
+                // and what colour, and `rule` says what to draw there.
+                glyph: GlyphCell {
+                    pos: rule.pos,
+                    ch: ' ',
+                    face: Face::Regular,
+                    size: SizeClass::Normal,
+                    rgba: rule.rgba,
+                    wide: false,
+                    cluster: None,
+                },
+                rule: Some(rule.kind),
+                t: scene.mark,
+                effect,
+                seed: 0.0,
+            });
         }
     }
 
@@ -2311,7 +2477,17 @@ impl Frame {
     /// user's font's `>` would be drawn; but the mark is the terminal itself
     /// and is the **same** sprite as the grid's block mark
     /// ([`Frame::push_block`]).
+    ///
+    /// **Before [`Frame::set_dock_fx`] in a content frame**: the arrival scene
+    /// hides this mark and draws it as an effect there, and it finds only a
+    /// mark that has been pushed. A mark pushed after the effects would stay
+    /// on screen through the whole wait.
     pub(crate) fn push_dock_sigil(&mut self, rgba: LinearRgba) {
+        debug_assert!(
+            !self.dock_fx_written,
+            "the dock's › must be pushed before the effects are written"
+        );
+        self.dock_sigil = Some(self.dock_rules.len());
         self.dock_rules.push(RuleCell {
             pos: self.dock_pos(0, 0),
             kind: RuleKind::Chevron,
@@ -2732,6 +2908,14 @@ impl Frame {
             track: [0.0; 4],
             buttons: [None; 2],
         });
+        // **The arrival scene shapes the surface here and nowhere else**: the
+        // ground and the lines fade in together and the two lines are drawn
+        // from the left. Without a scene both factors are the identity, bit
+        // for bit (`drawn`, `faded`).
+        let (band_alpha, lines) = self
+            .dock_scene
+            .map_or((1.0, [1.0; 2]), |scene| (scene.band, scene.lines));
+        let width = |share: f32, px: f32| drawn(px, share);
         // While progress is present the line's ground is the empty track and
         // the filled part on top is in the edge's colour; when absent the
         // ground is the edge itself and the fill has zero width (the array's
@@ -2753,7 +2937,7 @@ impl Frame {
                 // the overflowing grid row exactly where the breathing room is.
                 pos: [0.0, 0.0],
                 size: [width_px, band],
-                rgba: dock.ground,
+                rgba: faded(dock.ground, band_alpha),
             },
             // The separator is **above** the ground and in the dock's topmost
             // pixel: that is the boundary between the grid and the dock. Its
@@ -2761,8 +2945,8 @@ impl Frame {
             // edge says the distance, it is not a divider.
             Instance {
                 pos: [0.0, 0.0],
-                size: [width_px, SEPARATOR_PX],
-                rgba: edge_base,
+                size: [width(lines[0], width_px), SEPARATOR_PX],
+                rgba: faded(edge_base, band_alpha),
             },
             // While an upload runs, the part of the line that
             // fills from the left: by the bytes of the whole queue, in the
@@ -2770,8 +2954,8 @@ impl Frame {
             // that does not land on the device grid would fade).
             Instance {
                 pos: [0.0, 0.0],
-                size: [fill.round(), SEPARATOR_PX],
-                rgba: dock.edge,
+                size: [width(lines[0], fill.round()), SEPARATOR_PX],
+                rgba: faded(dock.edge, band_alpha),
             },
             // **The second separator: between the input row and the context
             // row.** Locally the same colour and the same thickness as the top
@@ -2793,8 +2977,11 @@ impl Frame {
                     0.0,
                     band - self.dock_layout_px() + self.dock_row_divider_y(rows),
                 ],
-                size: [width_px, if rows < 2 { 0.0 } else { SEPARATOR_PX }],
-                rgba: dock.separator,
+                size: [
+                    width(lines[1], width_px),
+                    if rows < 2 { 0.0 } else { SEPARATOR_PX },
+                ],
+                rgba: faded(dock.separator, band_alpha),
             },
         ]
     }
@@ -2825,10 +3012,10 @@ impl Frame {
     /// The dock's glyphs to draw: if an arrival is in flight, the list with
     /// their static glyph removed ([`Frame::set_dock_fx`]).
     pub(crate) fn dock_glyphs(&self) -> &[GlyphCell] {
-        if self.dock_arrivals.is_empty() {
-            &self.dock_glyphs
-        } else {
+        if self.dock_shown_active {
             &self.dock_shown
+        } else {
+            &self.dock_glyphs
         }
     }
 
@@ -2847,8 +3034,14 @@ impl Frame {
         &self.dock_fx_heat
     }
 
+    /// The dock's rules to draw: without the › while the arrival scene draws it
+    /// as an effect ([`Frame::set_dock_scene`]).
     pub(crate) fn dock_rules(&self) -> &[RuleCell] {
-        &self.dock_rules
+        if self.dock_rules_hidden {
+            &self.dock_rules_shown
+        } else {
+            &self.dock_rules
+        }
     }
 
     /// The caret's grid slot; `None` → the caret is not on the grid in this frame.
@@ -5539,5 +5732,257 @@ mod tests {
         assert_eq!(face(true, false), Face::Bold);
         assert_eq!(face(false, true), Face::Italic);
         assert_eq!(face(true, true), Face::BoldItalic);
+    }
+
+    // **The dock's arrival scene** (`crate::arrival`): what it does to the
+    // frame's lists, with the scene taken from the real calendar.
+
+    /// The scene `since` seconds after a prompt that came with `columns` of
+    /// context text; `waiting` → the scene before any prompt.
+    fn scene_at(since: f64, columns: u16, waiting: bool) -> Scene {
+        use crate::arrival::Arrival;
+        let mut arrival = Arrival::new(bt_core::DockArrival::Type, 100.0, false);
+        if !waiting {
+            arrival.advance(101.2, true);
+            arrival.arrive(101.2, true);
+            arrival.note_letters(columns);
+        }
+        arrival.advance(101.2 + since, true);
+        arrival.scene().expect("the scene is still armed")
+    }
+
+    fn context_cell(col: u16, ch: char) -> Cell {
+        Cell {
+            row: 1,
+            ..typed_cell(col, ch)
+        }
+    }
+
+    /// A dock of one input row (`ls` typed) and the context row `~/src|main`,
+    /// with the prompt's ›.
+    fn arriving_dock() -> Frame {
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.set_dock_input_rows(Some(1));
+        frame.push_dock(typed_cell(2, 'l'));
+        frame.push_dock(typed_cell(3, 's'));
+        for (col, ch) in (0u16..).zip("~/src|main".chars()) {
+            frame.push_dock(context_cell(col, ch));
+        }
+        frame.push_dock_sigil(CURSOR);
+        frame.open_dock(BG, SUCCESS, CURSOR);
+        frame
+    }
+
+    fn arrive(frame: &mut Frame, scene: Option<Scene>) {
+        frame.set_dock_scene(scene, 6.0);
+        frame.set_dock_fx(std::iter::empty(), &Clusters::default(), CURSOR);
+    }
+
+    #[test]
+    fn a_waiting_scene_hides_the_context_row_and_the_chevron() {
+        let mut frame = arriving_dock();
+        let chevron_free = frame.dock_rules().len() - 1;
+        arrive(&mut frame, Some(scene_at(0.5, 0, true)));
+        let shown: Vec<char> = frame.dock_glyphs().iter().map(|glyph| glyph.ch).collect();
+        assert_eq!(shown, ['l', 's'], "only the input row is left");
+        assert_eq!(frame.dock_rules().len(), chevron_free, "the › is not drawn");
+        assert!(frame.dock_arrivals().is_empty(), "nothing is coming in yet");
+        assert_eq!(frame.dock_letter_span(), 10);
+    }
+
+    #[test]
+    fn a_playing_scene_draws_each_context_letter_once() {
+        // At every moment a context letter is exactly one of: not yet there,
+        // coming in as an effect, or the static glyph. Twice would be the
+        // doubled letter a missing `hidden` entry makes; none would be a hole.
+        // Ten columns of text: the scene is over at 0.44 s.
+        for since in [0.0, 0.1, 0.2, 0.25, 0.3, 0.35, 0.4] {
+            let mut frame = arriving_dock();
+            arrive(&mut frame, Some(scene_at(since, 10, false)));
+            let scene = scene_at(since, 10, false);
+            for (col, ch) in (0u16..).zip("~/src|main".chars()) {
+                let t = scene.letter(col);
+                let still = frame
+                    .dock_glyphs()
+                    .iter()
+                    .filter(|glyph| glyph.ch == ch && glyph.pos[1] > 0.0)
+                    .count();
+                let flying = frame
+                    .dock_arrivals()
+                    .iter()
+                    .filter(|fx| fx.rule.is_none() && fx.glyph.ch == ch)
+                    .count();
+                let letters = "~/src|main".chars().filter(|&c| c == ch).count();
+                assert!(
+                    still + flying <= letters,
+                    "{since}: '{ch}' drawn {still}+{flying} times"
+                );
+                if t >= 1.0 {
+                    assert!(still >= 1, "{since}: '{ch}' is settled but not static");
+                }
+            }
+            // The input row never goes anywhere.
+            assert!(
+                frame
+                    .dock_glyphs()
+                    .iter()
+                    .filter(|glyph| "ls".contains(glyph.ch))
+                    .count()
+                    >= 2,
+                "{since}: the input row was touched"
+            );
+            let in_effects = frame
+                .dock_arrivals()
+                .iter()
+                .filter(|fx| fx.rule.is_none())
+                .count();
+            let static_context = frame.dock_glyphs().len() - 2;
+            let hidden = 10 - in_effects - static_context;
+            let expected_hidden = (0u16..10).filter(|&col| scene.letter(col) <= 0.0).count();
+            assert_eq!(hidden, expected_hidden, "{since}");
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "before the effects")]
+    fn a_chevron_pushed_after_the_effects_is_refused_where_the_scene_would_miss_it() {
+        // The content frame wrote the effects first once, and the › stayed on
+        // screen through the whole wait: the scene finds only a mark that is
+        // already pushed. The order is now an assertion, not a convention.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.set_dock_input_rows(Some(1));
+        frame.set_dock_scene(Some(scene_at(0.5, 0, true)), 0.0);
+        frame.set_dock_fx(std::iter::empty(), &Clusters::default(), CURSOR);
+        frame.push_dock_sigil(CURSOR);
+    }
+
+    #[test]
+    fn a_new_content_frame_may_push_the_chevron_again() {
+        let mut frame = arriving_dock();
+        arrive(&mut frame, Some(scene_at(0.5, 0, true)));
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.set_dock_input_rows(Some(1));
+        frame.push_dock_sigil(CURSOR);
+        arrive(&mut frame, None);
+        assert_eq!(frame.dock_rules().len(), 1);
+    }
+
+    #[test]
+    fn the_chevron_comes_in_as_a_rule_effect_and_then_is_the_static_rule() {
+        let mut frame = arriving_dock();
+        arrive(&mut frame, Some(scene_at(0.2, 10, false)));
+        let scene = scene_at(0.2, 10, false);
+        assert!(
+            scene.mark > 0.0 && scene.mark < 1.0,
+            "the scene was not set up"
+        );
+        let chevron: Vec<_> = frame
+            .dock_arrivals()
+            .iter()
+            .filter(|fx| fx.rule.is_some())
+            .collect();
+        assert_eq!(chevron.len(), 1);
+        assert_eq!(chevron[0].rule, Some(RuleKind::Chevron));
+        assert_eq!(chevron[0].t, scene.mark);
+        assert_eq!(chevron[0].effect, crate::arrival::Entrance::Pop.fx_id());
+        assert_eq!(chevron[0].glyph.pos, frame.dock_pos(0, 0));
+        assert!(frame.dock_rules().is_empty(), "the static › was drawn too");
+        // The scene is over: the static rule is back and nothing else is.
+        arrive(&mut frame, None);
+        assert_eq!(frame.dock_rules().len(), 1);
+        assert!(frame.dock_arrivals().is_empty());
+        assert_eq!(frame.dock_glyphs().len(), 12, "every glyph is static again");
+    }
+
+    #[test]
+    fn without_a_scene_the_dock_is_the_one_that_was_pushed() {
+        let mut plain = arriving_dock();
+        plain.set_dock_fx(std::iter::empty(), &Clusters::default(), CURSOR);
+        let mut after = arriving_dock();
+        arrive(&mut after, Some(scene_at(0.1, 10, false)));
+        arrive(&mut after, None);
+        assert_eq!(after.dock_glyphs(), plain.dock_glyphs());
+        assert_eq!(after.dock_rules(), plain.dock_rules());
+        assert_eq!(after.dock_ground(500.0), plain.dock_ground(500.0));
+        assert_eq!(after.dock_rise_px(), 0.0);
+    }
+
+    #[test]
+    fn the_scene_composes_with_a_typing_arrival_on_the_input_row() {
+        // A letter typed during the scene is an effect of the same lists: both
+        // hide their own static glyphs and neither takes the other's.
+        let mut frame = arriving_dock();
+        frame.set_dock_scene(Some(scene_at(0.3, 10, false)), 0.0);
+        frame.set_dock_fx(
+            [fx(typed_cell(3, 's'), Kind::Arrival)],
+            &Clusters::default(),
+            CURSOR,
+        );
+        let still: Vec<char> = frame
+            .dock_glyphs()
+            .iter()
+            .filter(|glyph| glyph.pos[1] < frame.dock_pos(0, 1)[1])
+            .map(|glyph| glyph.ch)
+            .collect();
+        assert_eq!(still, ['l'], "the typed letter is an effect, not both");
+        assert!(
+            frame
+                .dock_arrivals()
+                .iter()
+                .any(|fx| fx.glyph.ch == 's' && fx.rule.is_none())
+        );
+    }
+
+    #[test]
+    fn the_scene_shapes_the_ground_and_the_lines() {
+        let mut frame = arriving_dock();
+        let plain = frame.dock_ground(500.0);
+        // Before the prompt the surface is not there.
+        arrive(&mut frame, Some(scene_at(0.5, 0, true)));
+        let waiting = frame.dock_ground(500.0);
+        assert_eq!(waiting[0].rgba[3], 0.0, "the ground is transparent");
+        assert_eq!(waiting[1].size[0], 0.0, "no top line yet");
+        assert_eq!(waiting[3].size[0], 0.0, "no second line yet");
+        assert_eq!(waiting[0].size, plain[0].size, "its place does not change");
+        // Part-way the lines have drawn part of their width, the second later
+        // than the first, and the ground has faded in part.
+        arrive(&mut frame, Some(scene_at(0.1, 10, false)));
+        let partway = frame.dock_ground(500.0);
+        assert!(partway[0].rgba[3] > 0.0 && partway[0].rgba[3] < 1.0);
+        assert!(partway[1].size[0] > 0.0 && partway[1].size[0] < 500.0);
+        assert!(
+            partway[3].size[0] <= partway[1].size[0],
+            "the first line leads"
+        );
+        assert_eq!(
+            partway[1].size[0].fract(),
+            0.0,
+            "an edge on the device grid"
+        );
+        // Over: the surface is today's, bit for bit.
+        arrive(&mut frame, None);
+        assert_eq!(frame.dock_ground(500.0), plain);
+    }
+
+    #[test]
+    fn the_climb_belongs_to_the_scene_and_goes_with_the_frame() {
+        let mut frame = arriving_dock();
+        assert_eq!(frame.dock_rise_px(), 0.0);
+        frame.set_dock_scene(Some(scene_at(0.0, 0, false)), 6.0);
+        assert_eq!(frame.dock_rise_px(), 6.0);
+        // The layout the mouse reads is the resting one.
+        assert_eq!(frame.dock_hit().map(|hit| hit.1), None, "no band told");
+        frame.set_dock_scene(None, 6.0);
+        assert_eq!(frame.dock_rise_px(), 0.0, "no scene, no climb");
+        frame.set_dock_scene(Some(scene_at(0.0, 0, false)), 6.0);
+        frame.clear(grid(8, 16), CaretStyle::default());
+        assert_eq!(
+            frame.dock_rise_px(),
+            0.0,
+            "a new content frame says it again"
+        );
     }
 }

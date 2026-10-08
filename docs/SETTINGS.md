@@ -270,6 +270,19 @@ keypress = "fade"
 # Pasting, history and deleting a whole word or line are instant. cursor_motion = "snap" turns both off; Reduce Motion
 # keeps only a fade for typing.
 erase = "recede"
+# "off" | "type" | "dust" | "ripple". How the dock at the bottom of a new
+# window or tab arrives. Until the shell shows its first prompt the dock waits
+# empty, with no prompt mark, no cursor, no folder and no branch. type then
+# lifts it a little, draws its lines from the left, pops the prompt mark in,
+# types the folder and branch out and brings the cursor last. dust drifts
+# specks of dust through a slanted beam of light around the dock while it
+# waits, then draws them onto the top line, which is woven behind them.
+# ripple lets the top line ripple faintly while it waits, then drops the
+# prompt mark onto it and sends a ring out from where it lands. off shows the
+# dock as it is, from the start. Pressing a key, or leaving the window, ends
+# it at once; a change applies to windows and tabs opened afterwards.
+# cursor_motion = "snap" turns it off; Reduce Motion keeps only a short fade.
+dock_arrival = "ripple"
 
 [shell]
 # "auto" | "blocks" | "off". Whether bateri sets up the shell so it can report
@@ -994,6 +1007,7 @@ reduce_motion = "system"
 smooth_scroll = "on"
 keypress = "fade"
 erase = "recede"
+dock_arrival = "ripple"
 ```
 
 | key | type | default | meaning |
@@ -1003,6 +1017,7 @@ erase = "recede"
 | `smooth_scroll` | `"on"` or `"off"` | `"on"` | whether scrolling through history is smooth or line by line |
 | `keypress` | `"off"`, `"fade"`, `"rise"`, `"pop"`, `"extrude"`, `"heat"`, `"echo"`, `"drop"`, `"ink"` or `"squeeze"` | `"fade"` | how a letter typed in the dock arrives |
 | `erase` | `"off"`, `"iris"`, `"undertow"`, `"echo"`, `"bleed"`, `"unravel"`, `"recede"`, `"sublime"` or `"shatter"` | `"recede"` | how a letter deleted in the dock goes |
+| `dock_arrival` | `"off"`, `"type"`, `"dust"` or `"ripple"` | `"ripple"` | how the dock of a new window or tab arrives |
 
 - **`"spring"`** — the cursor glides to its new place on a spring and settles
   as it slows down; it does not overshoot. A long jump takes a little longer
@@ -1012,7 +1027,7 @@ erase = "recede"
 - **`"snap"`** — no glide, the cursor appears directly in the new cell and the
   content also moves into place at once. This is the way to turn motion off
   completely: the typing and deleting effects in the dock (`keypress`,
-  `erase`) turn off too.
+  `erase`) and the dock's arrival (`dock_arrival`) turn off too.
 - The same style also drives **the content rising**: bateri anchors the
   content to the bottom of the window, so when a new line arrives, the history
   moves up and the cursor stays on its bottom row. What moves is the whole
@@ -1070,6 +1085,10 @@ erase = "recede"
   is; a deleted letter goes at once, without an effect. The same rule as the
   cursor: what is toned down is the motion, not the confirmation of what you
   typed. `keypress = "off"` stays off.
+- The dock's arrival (`dock_arrival`) is reduced to **a short fade-in** (about
+  a tenth of a second): the dock, the prompt mark, the folder and branch and
+  the cursor fade in together, with no rise and no lines drawn from the left.
+  `dock_arrival = "off"` stays off.
 - `cursor_motion = "snap"` sits **above** this: Reduce Motion does not *add* a
   fade-in for a user who has already turned motion off.
 - It takes effect the moment you save. If a cursor is gliding at that moment,
@@ -1164,6 +1183,59 @@ bottom of the window — the line where you type your command:
 - An unrecognized value (`"bounce"`, `"Fade"`, `1`, `"dissolve"`) only affects
   its own key (the default at launch, the effect on screen when saving) and a
   warning appears.
+
+`dock_arrival` says how the dock — the line at the bottom of the window where
+you type your command — arrives in a **new window or tab**, in the time
+between the shell starting and its first prompt (the longer a shell's startup
+files take, the longer that is):
+
+- **`"off"`** — the dock is there from the start, as it always was: the
+  prompt mark and the cursor stand while the shell starts and the folder and
+  branch fill in with the first prompt.
+- **`"type"`** — nothing shows while the shell starts. At the first prompt the
+  dock rises a little (about 10 points) as it fades in, its two lines are drawn
+  from the left, the prompt mark pops in, the folder and branch type
+  themselves out letter by letter and the cursor comes last.
+- **`"dust"`** — specks of dust drift through a slanted beam of light around the
+  dock while the shell starts. At the first prompt they are drawn left to
+  right onto the top line, which is woven behind them.
+- **`"ripple"`** (the default) — the top line ripples faintly while the shell
+  starts. At the first prompt the prompt mark drops onto it, a ring spreads
+  from where it lands and fades, and the line settles flat.
+
+The rules are the same for all of them:
+
+- **Nothing is shown before the shell can say where it is.** The folder and
+  branch come from the shell, so they never show before the first prompt; the
+  prompt mark and the cursor are held back with them.
+- **The first 180 ms are quiet.** Nothing moves before then; a shell that is
+  faster does not get a waiting scene. `"dust"` plays `"type"`'s arrival in
+  that case, since there is no dust to gather; `"ripple"` plays its own.
+- **The wait is cut at 3 seconds.** A shell that has not given its first
+  prompt by then gets the arrival anyway; the folder and branch fill in without
+  animation when the prompt does come. The waiting motion itself stops after
+  those 3 seconds.
+- **The arrival takes at most a second**, and when it is over the window is
+  idle again: no frame is drawn while nothing changes.
+- **Pressing a key ends it at once**, and so does leaving the window or the tab,
+  a full-screen program taking the dock away, and changing this setting,
+  Reduce Motion or `cursor_motion`: the dock is simply as it would have been.
+- **It plays only in the window you are looking at.** A tab opened in the
+  background, or a window that is not the active one when the prompt comes,
+  gets the dock as it is.
+- **It plays only for a shell started in that window or tab.** A window that
+  restores itself at launch starts new shells and plays it; one that is carried
+  across an update with its programs running does not.
+- Reduce Motion reduces it to a short fade (above); `cursor_motion = "snap"`
+  turns it off. In the settings window (Motion) the row appears disabled under
+  `"snap"` and says why.
+- The dock of an `ssh` session is not part of this: the arrival is for the
+  window's own shell, once.
+- It takes effect the moment you save: a scene in progress ends at once, and the
+  new choice plays in windows and tabs opened afterwards.
+- An unrecognized value (`"fade"`, `"Ripple"`, `true`) only affects its own key
+  (the default at launch, the choice on screen when saving) and a warning
+  appears.
 
 ### `[shell]`
 

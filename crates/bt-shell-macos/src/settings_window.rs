@@ -28,10 +28,10 @@ use std::path::Path;
 use block2::RcBlock;
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
-    ContentEdge, CursorBlink, CursorMotion, DownloadConflict, Erase, KeepRunning, Keypress,
-    LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion, RemoteStatsMode,
-    RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME, Scrollbar, Settings,
-    SettingsEdit, ShellIntegration, SmoothScroll, UnfocusedCaret,
+    ContentEdge, CursorBlink, CursorMotion, DockArrival, DownloadConflict, Erase, KeepRunning,
+    Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion,
+    RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME, Scrollbar,
+    Settings, SettingsEdit, ShellIntegration, SmoothScroll, UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::Retained;
@@ -181,6 +181,7 @@ enum Key {
     ReduceMotion,
     Keypress,
     Erase,
+    DockArrival,
     PreviewMaxSize,
     PreviewReadOnly,
     PreviewDir,
@@ -200,7 +201,7 @@ enum Key {
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 37] = [
+    const ALL: [Key; 38] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -223,6 +224,7 @@ impl Key {
         Key::ReduceMotion,
         Key::Keypress,
         Key::Erase,
+        Key::DockArrival,
         Key::PreviewMaxSize,
         Key::PreviewReadOnly,
         Key::PreviewDir,
@@ -279,6 +281,7 @@ impl Key {
             Key::ReduceMotion => "motion.reduce_motion",
             Key::Keypress => "motion.keypress",
             Key::Erase => "motion.erase",
+            Key::DockArrival => "motion.dock_arrival",
             Key::PreviewMaxSize => "remote.preview_max_size",
             Key::PreviewReadOnly => "remote.preview_read_only",
             Key::PreviewDir => "remote.preview_dir",
@@ -604,6 +607,20 @@ impl Choice for Erase {
     }
 }
 
+impl Choice for DockArrival {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            DockArrival::Off => "Off",
+            DockArrival::Type => "Type",
+            DockArrival::Dust => "Dust",
+            DockArrival::Ripple => "Ripple",
+        }
+    }
+}
+
 impl Choice for PreviewKeep {
     fn names() -> &'static [(&'static str, Self)] {
         PreviewKeep::NAMES
@@ -674,13 +691,19 @@ fn motion_override(key: Key, settings: &Settings, reduce: bool) -> Option<Overri
     };
     let snap = settings.cursor_motion == CursorMotion::Snap;
     match key {
-        Key::Keypress | Key::Erase if snap => disabled("Off while cursor motion is Snap."),
+        Key::Keypress | Key::Erase | Key::DockArrival if snap => {
+            disabled("Off while cursor motion is Snap.")
+        }
         Key::SmoothScroll if snap => disabled("Line by line while cursor motion is Snap."),
         Key::Erase if reduce => disabled("Off while Reduce motion is on."),
         Key::SmoothScroll if reduce => disabled("Line by line while Reduce motion is on."),
         Key::Keypress if reduce && settings.keypress != Keypress::Off => Some(Override {
             enabled: true,
             note: "Letters only fade in while Reduce motion is on.",
+        }),
+        Key::DockArrival if reduce && settings.dock_arrival != DockArrival::Off => Some(Override {
+            enabled: true,
+            note: "Fades in while Reduce motion is on.",
         }),
         _ => None,
     }
@@ -1003,6 +1026,7 @@ struct Controls {
     reduce_motion: Retained<NSPopUpButton>,
     keypress: Retained<NSPopUpButton>,
     erase: Retained<NSPopUpButton>,
+    dock_arrival: Retained<NSPopUpButton>,
     preview_max_size: Retained<NSPopUpButton>,
     preview_read_only: Retained<NSSwitch>,
     preview_dir: Folder,
@@ -1181,6 +1205,7 @@ define_class!(
                 Key::ReduceMotion => choice_at(index).map(SettingsEdit::ReduceMotion),
                 Key::Keypress => choice_at(index).map(SettingsEdit::Keypress),
                 Key::Erase => choice_at(index).map(SettingsEdit::Erase),
+                Key::DockArrival => choice_at(index).map(SettingsEdit::DockArrival),
                 Key::Theme => theme_edit(&self.ivars().themes.borrow(), index)
                     .map(SettingsEdit::Theme),
                 Key::LightTheme => theme_edit(&self.ivars().light_themes.borrow(), index)
@@ -1578,6 +1603,7 @@ impl SettingsWindow {
         select_choice(&c.reduce_motion, settings.reduce_motion);
         select_choice(&c.keypress, settings.keypress);
         select_choice(&c.erase, settings.erase);
+        select_choice(&c.dock_arrival, settings.dock_arrival);
 
         set_switch(&c.remote_integration, settings.remote_integration);
         let files = &settings.remote_files;
@@ -2324,6 +2350,7 @@ impl SettingsWindow {
         let reduce_motion = self.popup::<ReduceMotion>(Key::ReduceMotion);
         let keypress = self.popup::<Keypress>(Key::Keypress);
         let erase = self.popup::<Erase>(Key::Erase);
+        let dock_arrival = self.popup::<DockArrival>(Key::DockArrival);
         let mut motion = Form::new(mtm);
         motion.row(
             Key::CursorMotion,
@@ -2345,6 +2372,13 @@ impl SettingsWindow {
             &erase,
             &[&erase],
             Some("How a letter you delete at the prompt goes."),
+        );
+        motion.row(
+            Key::DockArrival,
+            "Dock arrival:",
+            &dock_arrival,
+            &[&dock_arrival],
+            Some("How the prompt arrives when a shell starts."),
         );
         motion.row(
             Key::SmoothScroll,
@@ -2528,6 +2562,7 @@ impl SettingsWindow {
             reduce_motion,
             keypress,
             erase,
+            dock_arrival,
             preview_max_size,
             preview_read_only,
             preview_dir,
@@ -2993,7 +3028,7 @@ mod tests {
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
-                    keypress = []\nerase = []\n\
+                    keypress = []\nerase = []\ndock_arrival = []\n\
                     [shell]\nintegration = []\n\
                     [remote]\npreview_max_size = []\npreview_read_only = []\n\
                     preview_dir = []\npreview_keep = []\npreview_limit = []\n\
@@ -3035,6 +3070,7 @@ mod tests {
                 Key::ReduceMotion => SettingsEdit::ReduceMotion(ReduceMotion::On),
                 Key::Keypress => SettingsEdit::Keypress(Keypress::Off),
                 Key::Erase => SettingsEdit::Erase(Erase::Off),
+                Key::DockArrival => SettingsEdit::DockArrival(DockArrival::Off),
                 Key::PreviewMaxSize => SettingsEdit::PreviewMaxSize(1),
                 Key::PreviewReadOnly => SettingsEdit::PreviewReadOnly(false),
                 Key::PreviewDir => SettingsEdit::PreviewDir("~".to_owned()),
@@ -3117,6 +3153,7 @@ mod tests {
         check::<ReduceMotion>();
         check::<Keypress>();
         check::<Erase>();
+        check::<DockArrival>();
         check::<PreviewKeep>();
         check::<DownloadConflict>();
         check::<RemoteStatsMode>();
@@ -3286,7 +3323,12 @@ mod tests {
             cursor_motion: CursorMotion::Snap,
             ..Settings::default()
         };
-        for key in [Key::Keypress, Key::Erase, Key::SmoothScroll] {
+        for key in [
+            Key::Keypress,
+            Key::Erase,
+            Key::SmoothScroll,
+            Key::DockArrival,
+        ] {
             let forced = motion_override(key, &snap, false).expect("snap overrides");
             assert!(!forced.enabled, "{key:?}");
             // `snap` is above Reduce Motion: with both inputs on, the reason
@@ -3300,6 +3342,16 @@ mod tests {
         let fades = motion_override(Key::Keypress, &plain, true).expect("fades in");
         assert!(fades.enabled);
         assert!(fades.note.contains("fade"), "{}", fades.note);
+        // The arrival is reduced to a short fade too, and the row stays
+        // enabled for the same reason: `off` is still a difference.
+        let arrives = motion_override(Key::DockArrival, &plain, true).expect("fades in");
+        assert!(arrives.enabled);
+        assert!(arrives.note.contains("Fades in"), "{}", arrives.note);
+        let arrival_off = Settings {
+            dock_arrival: DockArrival::Off,
+            ..Settings::default()
+        };
+        assert_eq!(motion_override(Key::DockArrival, &arrival_off, true), None);
         // Disabled typing stays disabled: Reduce Motion adds no animation,
         // there is nothing to say.
         let off = Settings {

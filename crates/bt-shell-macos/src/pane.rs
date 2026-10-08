@@ -2743,6 +2743,7 @@ impl TerminalPane {
         // The dock's typing effects are here for the same reason.
         link.set_cursor_motion(settings.cursor_motion);
         link.set_glyph_fx(settings.keypress, settings.erase);
+        link.set_dock_arrival(settings.dock_arrival);
         // The scroll bar's form, for the same reason; the grid above was
         // already sized with its reserve (`sync_geometry`).
         link.set_scrollbar_mode(self.ivars().scrollbar.get());
@@ -2780,6 +2781,19 @@ impl TerminalPane {
         // arrive and `focused` would stay `true`: an unfocused window would
         // draw a filled caret and set up the blink clock.
         self.apply_focus(self.is_active());
+        // **The dock's arrival**, for a shell born here and only that: a pane
+        // that adopted a running session (the update's handover, a crash
+        // recovery) has a shell at its prompt already, and the timed run
+        // (`run`) has no dock. After the focus above: a tab born in a window
+        // that is key is still hidden at this point, and the link asks for
+        // focus only when the prompt comes. The link itself arms nothing for a
+        // pane without a dock or one that is hidden.
+        if !adopting
+            && self.ivars().run.is_none()
+            && let Some(link) = self.link()
+        {
+            link.arm_arrival(settings.dock_arrival);
+        }
         // The block marks, for the same ordering: the always-up form wants
         // them from the first frame, and no change will say so.
         self.refresh_marks_wanted();
@@ -3089,6 +3103,18 @@ impl TerminalPane {
         if let Some(link) = self.ivars().link.get() {
             link.set_cursor_motion(settings.cursor_motion);
             link.set_glyph_fx(settings.keypress, settings.erase);
+            // A scene playing now is finished; the new kind plays at the next
+            // shell's birth.
+            link.set_dock_arrival(settings.dock_arrival);
+        }
+    }
+
+    /// A key was pressed in this pane: the dock's arrival, if it is still
+    /// waiting or playing, ends at the dock's last state. Silent before the
+    /// link is born.
+    pub(crate) fn skip_arrival(&self) {
+        if let Some(link) = self.link() {
+            link.skip_arrival();
         }
     }
 

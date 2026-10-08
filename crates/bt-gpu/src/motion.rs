@@ -4,8 +4,11 @@
 //! platform-independent, so it lives in a separate type and is tested without a
 //! real window. Buried in `link.rs` it could only be tried on screen.
 //!
-//! **Three animators, one type** ([`Motion`]): the cursor ([`State`], two axes),
-//! the offset's slide and the notch's glide (both [`Slide`], one axis).
+//! **Four animators and the dock's arrival, one type** ([`Motion`]): the cursor
+//! ([`State`], two axes), the offset's slide and the notch's glide (both
+//! [`Slide`], one axis), the dock band's growth (a third [`Slide`]) and the
+//! arrival of a new pane's dock ([`Arrival`]; a function of stamps, not a
+//! physics).
 //! They were not split into separate types because the link's sleep decision is
 //! single: `motion.settled()` (the "no damage" branch of `link.rs`). An animator
 //! left **outside** that gate would let the link sleep mid-slide and the content
@@ -54,7 +57,9 @@
 //! resolved: `bt-shell-macos` combines the three-valued `reduce_motion` with the
 //! system's answer, because `bt-gpu` does not see AppKit.
 
-use bt_core::{CursorMotion, Erase, Keypress, ScrollGlide};
+use bt_core::{CursorMotion, DockArrival, Erase, Keypress, ScrollGlide};
+
+use crate::arrival::{Arrival, Scene};
 
 /// Spring stiffness, rad/s. **A chosen number, not a measured one.**
 ///
@@ -268,6 +273,16 @@ pub(crate) struct Motion {
     /// An `Option`, the same contract as the offset's: absence and the first frame
     /// both mean "sit at the next target at once".
     band: Option<Slide>,
+    /// The dock's arrival scene: nothing while a new pane's shell starts, an
+    /// entrance at its first prompt ([`crate::arrival`]).
+    ///
+    /// Inert by default — only a pane born with a shell of its own arms it
+    /// ([`Motion::arm_arrival`]), so a carried-over pane, the timed run's and
+    /// every pane without a dock never have a scene. It is a term of
+    /// [`Motion::settled`] because a playing scene must keep the link awake and
+    /// every path that finishes an animation must end it; waiting counts as
+    /// settled and is woken by the clock instead ([`Motion::arrival_deadline`]).
+    arrival: Arrival,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -777,15 +792,20 @@ impl Motion {
         let in_flight = !self.settled();
         let was_fading = self.mode() == Mode::Fade;
         self.style = style;
+        // **Any change of style ends the dock's arrival**, waiting included: a
+        // scene is not taken over like a slide, and `snap` has no scene at all.
+        // A waiting scene is settled, so only this return tells the caller the
+        // dock on screen is not the final one.
+        let arrival_ended = self.arrival.end();
         if !in_flight {
-            return false;
+            return arrival_ended;
         }
         if style == CursorMotion::Snap {
             self.finish();
             return true;
         }
         if was_fading {
-            return false;
+            return arrival_ended;
         }
         if let Some(state) = &mut self.state {
             state.from = state.pos;
@@ -805,7 +825,7 @@ impl Motion {
         }
         self.glide.from = self.glide.pos;
         self.glide.elapsed = 0.0;
-        false
+        arrival_ended
     }
 
     /// Reduce Motion was turned on or off (system setting or
@@ -833,8 +853,11 @@ impl Motion {
         }
         let in_flight = !self.settled();
         self.reduce = reduce;
+        // The dock's arrival ends in both directions, waiting included — its
+        // calendar is picked once, when it is armed.
+        let arrival_ended = self.arrival.end();
         if !in_flight {
-            return false;
+            return arrival_ended;
         }
         self.finish();
         true
@@ -1080,6 +1103,10 @@ impl Motion {
         glide.from = glide.target;
         glide.vel = 0.0;
         glide.elapsed = 0.0;
+        // The dock's arrival ends at its last state too: a hidden pane's link
+        // stops, so a scene left playing would stay "unsettled" until it came
+        // back, and show up half entered.
+        self.arrival.end();
     }
 
     /// Where the cursor will be drawn this frame, in **screen cells** — not grid
@@ -1125,16 +1152,92 @@ impl Motion {
         self.band.map_or(0.0, |slide| slide.pos)
     }
 
-    /// Have **all four** animations stopped — the link's "may I sleep" question.
+    /// Have **all five** animations stopped — the link's "may I sleep" question.
     ///
     /// The offset has to be **inside** this gate: left outside, the link would
     /// sleep mid-slide in the "no damage" branch and the content would freeze halfway.
     /// The glide is here for the same reason, together with its undelivered share
     /// ([`Motion::glide_idle`]). The band too: left outside, the link would
     /// sleep in the middle of the band's growth and the grid and the band would freeze
-    /// halfway. The timed run's gate (`Verdict::MotionUnsettled`) reads this too.
+    /// halfway. The dock's arrival is the fifth: a scene that is playing must keep
+    /// the link awake, one that is waiting is settled and the clock wakes it
+    /// ([`Motion::arrival_deadline`]). The timed run's gate
+    /// (`Verdict::MotionUnsettled`) reads this too.
     pub(crate) fn settled(&self) -> bool {
-        self.cursor_settled() && self.origin_settled() && self.glide_idle() && self.band_settled()
+        self.cursor_settled()
+            && self.origin_settled()
+            && self.glide_idle()
+            && self.band_settled()
+            && self.arrival.settled()
+    }
+
+    /// Arms the dock's arrival scene for a pane born at `now` with a shell of
+    /// its own; says whether anything was armed. `off` and `snap` arm nothing —
+    /// `snap` is the declaration of one who has turned motion off, and the
+    /// arrival is motion. A scene already armed is replaced.
+    pub(crate) fn arm_arrival(&mut self, kind: DockArrival, now: f64) -> bool {
+        if self.mode() == Mode::Snap {
+            self.arrival = Arrival::default();
+            return false;
+        }
+        self.arrival = Arrival::new(kind, now, self.reduce);
+        self.arrival.is_armed()
+    }
+
+    /// Steps the scene to the tick's stamp; the answer is
+    /// [`Arrival::advance`]'s — the link adds it to its "something changed on
+    /// screen" term, so the step a scene ends in is still drawn.
+    pub(crate) fn advance_arrival(&mut self, now: f64, active: bool) -> bool {
+        self.arrival.advance(now, active)
+    }
+
+    /// Whether an arrival is still to come or under way — what the frame path
+    /// asks before doing the arrival's per-frame work for a pane that has none.
+    pub(crate) fn arrival_armed(&self) -> bool {
+        self.arrival.is_armed()
+    }
+
+    /// The shell gave its first prompt ([`Arrival::arrive`]); `active` is
+    /// whether the pane is on screen in the key window.
+    pub(crate) fn arrival_prompt(&mut self, now: f64, active: bool) {
+        self.arrival.arrive(now, active);
+    }
+
+    /// Ends the arrival at its last state; says whether it was still armed —
+    /// whether the dock on screen may not be the final one, i.e. whether the
+    /// caller owes a frame.
+    pub(crate) fn end_arrival(&mut self) -> bool {
+        self.arrival.end()
+    }
+
+    /// Columns of context text the dock holds this frame ([`Arrival::note_letters`]).
+    pub(crate) fn note_arrival_letters(&mut self, columns: u16) {
+        self.arrival.note_letters(columns);
+    }
+
+    /// The scene to draw this frame; `None` → the dock is as it always is.
+    pub(crate) fn arrival_scene(&self) -> Option<Scene> {
+        self.arrival.scene()
+    }
+
+    /// The cursor's opacity under the scene — `1.0` when there is none. The
+    /// fade mode's [`Motion::alpha`] and the blink's multiply with it; the three
+    /// never share a writer.
+    pub(crate) fn arrival_caret(&self) -> f32 {
+        self.arrival.scene().map_or(1.0, |scene| scene.caret)
+    }
+
+    /// Only whether the arrival is not playing (waiting and ended both are
+    /// not). Part of [`Motion::settled`], asked on its own where the sleeping
+    /// link has to tell "the scene needs no frames" from "there is no scene".
+    pub(crate) fn arrival_settled(&self) -> bool {
+        self.arrival.settled()
+    }
+
+    /// The nearest time a sleeping link has to be woken for the arrival
+    /// ([`Arrival::next_deadline`]); `None` → nothing waits.
+    pub(crate) fn arrival_deadline(&self, now: f64) -> Option<f64> {
+        self.arrival.next_deadline(now)
     }
 
     /// Only whether the band's glide has stopped. It has no token (`slide=` is the
@@ -1300,7 +1403,7 @@ impl Slide {
 /// Where overshoot is **structurally** impossible: `1 − (1−t)³` is monotonic and
 /// does not exceed `1`, so the clamp the spring requires is never needed in this
 /// style.
-fn ease_axis(from: f32, target: f32, t: f32) -> f32 {
+pub(crate) fn ease_axis(from: f32, target: f32, t: f32) -> f32 {
     let eased = 1.0 - (1.0 - t).powi(3);
     from + (target - from) * eased
 }
@@ -3227,5 +3330,114 @@ mod tests {
             motion.origin_settled(),
             "the band did not change but the target glided"
         );
+    }
+
+    /// A motion with a scene armed at `1.0` and, if `prompt`, the shell's
+    /// prompt taken at `2.0`.
+    fn arriving(prompt: bool) -> Motion {
+        let mut motion = Motion::default();
+        assert!(motion.arm_arrival(DockArrival::Type, 1.0));
+        if prompt {
+            motion.advance_arrival(2.0, true);
+            motion.arrival_prompt(2.0, true);
+        }
+        motion
+    }
+
+    #[test]
+    fn a_pane_never_armed_has_no_scene() {
+        // The carried-over pane, the timed run's and the dockless pane never
+        // call `arm_arrival`: the default is inert, settled and drawn as today.
+        let motion = Motion::default();
+        assert!(motion.arrival_scene().is_none());
+        assert!(motion.settled());
+        assert_eq!(motion.arrival_caret(), 1.0);
+        assert_eq!(motion.arrival_deadline(0.0), None);
+    }
+
+    #[test]
+    fn off_and_snap_arm_nothing() {
+        let mut motion = Motion::default();
+        assert!(!motion.arm_arrival(DockArrival::Off, 1.0));
+        assert!(motion.arrival_scene().is_none());
+        motion.set_style(CursorMotion::Snap);
+        for kind in [DockArrival::Type, DockArrival::Dust, DockArrival::Ripple] {
+            assert!(!motion.arm_arrival(kind, 1.0), "{kind:?} under snap");
+            assert!(motion.arrival_scene().is_none());
+        }
+        // Reduce Motion arms the short fade, not nothing.
+        let mut reduced = Motion::default();
+        reduced.set_reduce(true);
+        assert!(reduced.arm_arrival(DockArrival::Type, 1.0));
+    }
+
+    #[test]
+    fn the_arrival_is_a_term_of_the_sleep_question() {
+        let mut motion = arriving(false);
+        assert!(motion.settled(), "waiting is spent asleep");
+        assert_eq!(
+            motion.arrival_deadline(1.0),
+            Some(1.0 + crate::arrival::SHOW)
+        );
+        motion = arriving(true);
+        assert!(!motion.settled(), "a playing scene keeps the link awake");
+        assert!(!motion.arrival_settled());
+        assert_eq!(motion.arrival_deadline(2.0), None, "awake: no clock");
+        // Stepping to its end settles it.
+        assert!(motion.advance_arrival(2.0 + crate::arrival::ARRIVAL_MAX, true));
+        assert!(motion.settled());
+        assert!(motion.arrival_scene().is_none());
+    }
+
+    #[test]
+    fn finishing_ends_the_arrival_wherever_it_is() {
+        for prompt in [false, true] {
+            let mut motion = arriving(prompt);
+            motion.finish();
+            assert!(motion.settled(), "prompt {prompt}");
+            assert!(motion.arrival_scene().is_none(), "prompt {prompt}");
+        }
+    }
+
+    #[test]
+    fn a_change_of_style_or_reduce_ends_a_waiting_scene_and_asks_for_a_frame() {
+        // A waiting scene is settled, so the usual "was something in flight"
+        // answer would be `false`; the dock on screen is the waiting one and
+        // only a frame puts the final one there.
+        let mut motion = arriving(false);
+        assert!(
+            motion.set_style(CursorMotion::Ease),
+            "style change owes a frame"
+        );
+        assert!(motion.arrival_scene().is_none());
+        assert!(
+            !motion.set_style(CursorMotion::Ease),
+            "the same style is a no-op"
+        );
+
+        let mut motion = arriving(false);
+        assert!(motion.set_reduce(true), "Reduce Motion on owes a frame");
+        assert!(motion.arrival_scene().is_none());
+        let mut motion = arriving(true);
+        assert!(motion.set_reduce(true));
+        assert!(motion.settled());
+
+        let mut motion = arriving(false);
+        assert!(motion.set_style(CursorMotion::Snap));
+        assert!(motion.arrival_scene().is_none());
+        // And nothing owed when no scene was armed.
+        assert!(!Motion::default().set_style(CursorMotion::Ease));
+        assert!(!Motion::default().set_reduce(true));
+    }
+
+    #[test]
+    fn the_cursor_is_hidden_under_a_scene_and_whole_without_one() {
+        let mut motion = arriving(false);
+        assert_eq!(motion.arrival_caret(), 0.0, "waiting hides the cursor");
+        // The cap arrives at birth + 3 s, and a second later it is over.
+        motion.advance_arrival(4.0, true);
+        assert_eq!(motion.arrival_caret(), 0.0, "the cursor comes last");
+        motion.advance_arrival(5.0, true);
+        assert_eq!(motion.arrival_caret(), 1.0, "the scene is over");
     }
 }

@@ -150,32 +150,66 @@ pub(crate) fn fx_list(
     let inv = (1.0 / f32::from(tw), 1.0 / f32::from(th));
     out.clear();
     for cell in cells {
+        // A rule sprite (the dock's › arriving) is one whole cell of the mask
+        // plane; the same instance, the same packing, only the slot differs.
+        if let Some(kind) = cell.rule {
+            let (uv0, placed) = slot_uv(
+                atlas,
+                upload,
+                metrics,
+                inv,
+                SlotAsk {
+                    sprite: Sprite::Rule(kind),
+                    face: Face::Regular,
+                    size: SizeClass::Normal,
+                    want: Half::Whole,
+                },
+            );
+            out.push(FxInstance {
+                pos: cell.glyph.pos,
+                uv0,
+                rgba: cell.glyph.rgba,
+                fx: [
+                    cell.t,
+                    fx_packed(cell.effect, placed.plane, placed.half),
+                    cell.seed,
+                    0.0,
+                ],
+            });
+            continue;
+        }
         for part in fan(atlas, upload, metrics, inv, &cell.glyph, clusters)
             .into_iter()
             .flatten()
         {
-            let plane = match part.plane {
-                Plane::Mask => 0,
-                Plane::Color => 1,
-            };
-            let half = match part.half {
-                Half::Whole => 0,
-                Half::Left => 1,
-                Half::Right => 2,
-            };
             out.push(FxInstance {
                 pos: part.pos,
                 uv0: part.uv0,
                 rgba: cell.glyph.rgba,
                 fx: [
                     cell.t,
-                    (cell.effect | plane << 5 | half << 6) as f32,
+                    fx_packed(cell.effect, part.plane, part.half),
                     cell.seed,
                     0.0,
                 ],
             });
         }
     }
+}
+
+/// The effect id, the plane and the half of a wide glyph in the one `f32` the
+/// shader unpacks (`id | plane << 5 | half << 6`).
+fn fx_packed(effect: u32, plane: Plane, half: Half) -> f32 {
+    let plane = match plane {
+        Plane::Mask => 0,
+        Plane::Color => 1,
+    };
+    let half = match half {
+        Half::Whole => 0,
+        Half::Left => 1,
+        Half::Right => 2,
+    };
+    (effect | plane << 5 | half << 6) as f32
 }
 
 /// Whether an effect instance samples the colour plane (bit 5 of `fx[1]`, the

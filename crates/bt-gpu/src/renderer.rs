@@ -2044,8 +2044,17 @@ impl Renderer {
         }
         // Dock: last, with two origins.
         if frame.dock().is_some() {
-            let band_y = frame.band_top_px(viewport_px[1]);
-            let origin_y = (viewport_px[1] - frame.dock_layout_px()).max(0.0);
+            // **The arrival scene's climb is a lever on the viewports**: the
+            // band's, the cells' and the scissor all move by `rise`, and every
+            // window-space number that is compared with a fragment position
+            // (the caret's core) moves with them. The cells and rules need no
+            // other change — they are dock-local. The caret's instance is
+            // born in window space and converted with the layout's own origin;
+            // the viewport it is drawn in is the lowered one.
+            let rise = frame.dock_rise_px();
+            let band_y = frame.band_top_px(viewport_px[1]) + rise;
+            let layout_y = (viewport_px[1] - frame.dock_layout_px()).max(0.0);
+            let origin_y = layout_y + rise;
             plan.ops.push(Op::Viewport(band_y));
             plan.quads(&frame.dock_ground(viewport_px[0]));
             plan.ops.push(Op::Viewport(origin_y));
@@ -2074,9 +2083,10 @@ impl Renderer {
             if clipped {
                 plan.ops.push(open.clone());
             }
+            let [x0, y0, x1, y1] = frame.caret_core();
             plan.rounded(
-                frame.dock_caret(origin_y).as_slice(),
-                frame.caret_core(),
+                frame.dock_caret(layout_y).as_slice(),
+                [x0, y0 + rise, x1, y1 + rise],
                 frame.caret_sdf(),
             );
             if clipped {

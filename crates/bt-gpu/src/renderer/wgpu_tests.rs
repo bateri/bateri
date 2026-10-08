@@ -244,6 +244,87 @@ fn a_rule_is_drawn_over_its_glyph() {
     );
 }
 
+#[test]
+fn the_climbing_dock_is_drawn_lower_by_its_rise() {
+    // The scene's climb is a lever on the dock's viewports (`Renderer::plan`):
+    // the ground and the top line move down together by `rise`, the window
+    // above shows the clear colour where the dock was.
+    const EDGE: u32 = 128;
+    const RISE: f32 = 8.0;
+    let w = Renderer::new();
+    let m = flush_left(w.cell_metrics(SCALE));
+    let ground = LinearRgba::from_srgb(0x00, 0x80, 0x00);
+    let top_line = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+    let build = |scene: Option<crate::arrival::Scene>, rise: f32| {
+        let mut frame = glyph_frame(m);
+        frame.set_dock_input_rows(Some(1));
+        frame.set_dock_band(EDGE as f32, 0.0);
+        frame.open_dock(ground, top_line, ground);
+        frame.set_dock_scene(scene, rise);
+        frame.set_dock_fx(std::iter::empty(), &Clusters::default(), WHITE);
+        frame
+    };
+    let rested = build(None, 0.0);
+    let top = rested.band_top_px(EDGE as f32) as usize;
+    let at_rest = w.render_offscreen(EDGE, BACKGROUND, &rested);
+    let x = 40;
+    assert_eq!(
+        pixel_at(&at_rest, EDGE as usize, x, top),
+        (0xff, 0xff, 0xff)
+    );
+    // Scene time 0.3 s: the ground is whole and the first line is drawn
+    // across, so the only difference is where the dock stands.
+    let lowered = build(Some(arrival_scene(0.3, 0, false)), RISE);
+    assert_eq!(lowered.dock_rise_px(), RISE);
+    let climbing = w.render_offscreen(EDGE, BACKGROUND, &lowered);
+    let row = top + RISE as usize;
+    assert_eq!(
+        pixel_at(&climbing, EDGE as usize, x, row),
+        (0xff, 0xff, 0xff),
+        "the line is {RISE}px lower"
+    );
+    let clear = pixel_at(&at_rest, EDGE as usize, x, top - 2);
+    assert_eq!(
+        pixel_at(&climbing, EDGE as usize, x, top),
+        clear,
+        "the dock left its place"
+    );
+    let (_, g, _) = pixel_at(&climbing, EDGE as usize, x, row + 6);
+    assert!(g > 0x70, "the ground moved with the line: {g:#x}");
+}
+
+#[test]
+fn the_chevron_is_held_back_then_drawn_as_an_effect_then_static() {
+    // The sigil is a rule sprite: while the scene owns it the static rule is
+    // out of the list and the effect pipeline draws the same sprite
+    // (`slots::fx_list`). Three moments, one cell: nothing, in flight, there.
+    const EDGE: u32 = 128;
+    let w = Renderer::new();
+    let m = w.cell_metrics(SCALE);
+    let cell_w = usize::from(m.cell_px().0);
+    let ink = |scene: Option<crate::arrival::Scene>| {
+        let frame = arriving_dock_frame(m, EDGE, scene, 0.0);
+        let pixels = w.render_offscreen(EDGE, BACKGROUND, &frame);
+        // The input row's first cell, everywhere below the dock's top.
+        let top = frame.band_top_px(EDGE as f32) as usize;
+        white_in(
+            &pixels,
+            EDGE,
+            top..top + usize::from(m.cell_px().1) * 2,
+            0..cell_w * 2,
+        )
+    };
+    assert_eq!(
+        ink(Some(arrival_scene(0.5, 0, true))),
+        0,
+        "the waiting dock shows a chevron"
+    );
+    let flying = ink(Some(arrival_scene(0.2, 12, false)));
+    assert!(flying > 0, "the chevron in flight left no ink");
+    let static_ink = ink(None);
+    assert!(static_ink > 0, "the static chevron left no ink");
+}
+
 // **Completion model**: four jobs carried by the submission index
 // and `poll` — `frames=` counts only finished frames, a failed frame goes to
 // `Retry`, `startup=` closes on the first finished frame, and a frame in
@@ -1080,6 +1161,82 @@ fn scene_scroll_bar_always() -> Scene {
     )
 }
 
+/// The dock's arrival scene `since` seconds after a prompt that came with
+/// `columns` of context text (`waiting` → before any prompt).
+fn arrival_scene(since: f64, columns: u16, waiting: bool) -> crate::arrival::Scene {
+    use crate::arrival::Arrival;
+    let mut arrival = Arrival::new(bt_core::DockArrival::Type, 10.0, false);
+    if !waiting {
+        arrival.advance(11.2, true);
+        arrival.arrive(11.2, true);
+        arrival.note_letters(columns);
+    }
+    arrival.advance(11.2 + since, true);
+    arrival.scene().expect("the scene is still armed")
+}
+
+/// A dock of one input row and the context row `~/src | main`, with the
+/// prompt's ›, on a `EDGE`-high texture, under `scene` raised `rise` pixels.
+fn arriving_dock_frame(
+    m: CellMetrics,
+    edge: u32,
+    scene: Option<crate::arrival::Scene>,
+    rise: f32,
+) -> Frame {
+    let mut frame = glyph_frame(m);
+    frame.set_dock_input_rows(Some(1));
+    frame.set_dock_band(edge as f32, 0.0);
+    frame.push_dock_sigil(WHITE);
+    for (col, ch) in (0u16..).zip("~/src | main".chars()) {
+        if ch != ' ' {
+            frame.push_dock(glyph_cell(col, 1, ch));
+        }
+    }
+    // The lines share the ground's colour: what the pixels can then show is
+    // ink, not hairlines.
+    let ground = LinearRgba::from_srgb(0x20, 0x22, 0x28);
+    frame.open_dock(ground, ground, ground);
+    frame.set_dock_scene(scene, rise);
+    frame.set_dock_fx(std::iter::empty(), &Clusters::default(), WHITE);
+    frame
+}
+
+/// Pixels in `rows` × `cols` (window pixels) that are close to white.
+fn white_in(
+    pixels: &[u8],
+    edge: u32,
+    rows: std::ops::Range<usize>,
+    cols: std::ops::Range<usize>,
+) -> usize {
+    rows.flat_map(|y| cols.clone().map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let (r, g, b) = pixel_at(pixels, edge as usize, x, y);
+            r > 0xa0 && g > 0xa0 && b > 0xa0
+        })
+        .count()
+}
+
+/// The dock under an arrival scene: the chevron as a rule effect over its
+/// hidden static rule, the context letters typing out, the dock lowered by
+/// its climb.
+fn scene_dock_arrival(m: CellMetrics) -> Scene {
+    const EDGE: u32 = 192;
+    let frame = arriving_dock_frame(m, EDGE, Some(arrival_scene(0.2, 12, false)), 6.0);
+    assert!(
+        frame.dock_arrivals().iter().any(|fx| fx.rule.is_some()),
+        "the scene did not put the chevron in flight"
+    );
+    assert!(
+        frame.dock_arrivals().iter().any(|fx| fx.rule.is_none()),
+        "the scene did not put a letter in flight"
+    );
+    (
+        "dock arrival: chevron and letters in flight, climbing",
+        EDGE,
+        frame,
+    )
+}
+
 fn scenes(m: CellMetrics) -> Vec<Scene> {
     let mut scenes = vec![
         scene_midtone(),
@@ -1102,6 +1259,7 @@ fn scenes(m: CellMetrics) -> Vec<Scene> {
         scene_inverse_and_caret(m),
         scene_fill_glyphs(m),
         scene_dock_glyphs(m),
+        scene_dock_arrival(m),
         scene_growing_band_glyphs(m),
         scene_selection_corners(),
         scene_unfocused_selection(),
