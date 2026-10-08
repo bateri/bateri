@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-08
+
 ### Added
 
 - **A new tab's dock now arrives instead of popping in.** Until the shell gives
