@@ -45,6 +45,10 @@ of every installed copy. A version without a section is not released.
   into a window of its own or dropped on another window's tabs. Now the tab
   follows the pointer; dragging the empty part of the title row still moves
   the window, and Window ▸ Move & Resize works as before.
+- **The Dock icon's menu keeps a steady width.** A window is listed there, and
+  in the Window menu, by the title of what runs in it, and a program can set a
+  whole sentence as its title — the menu grew as wide as that sentence. A long
+  title now ends in "…" at a fixed width; the tab still shows its full title.
 
 ## [0.8.0] - 2026-10-08
 

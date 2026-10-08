@@ -141,6 +141,10 @@ objc2-foundation = { workspace = true, features = [
 # type (the drag session's items are `NSDraggingItem`s above). Only a header
 # flag over `objc2-foundation` headers already in the set; `Cargo.lock` did not
 # move.
+# A window's title as the Dock icon's menu and the Window menu list it
+# (`window::listed_title`): `NSStringDrawing` measures it in the menu font
+# (`sizeWithAttributes:`). Only a header flag over headers already in the set;
+# `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -156,7 +160,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSSecureTextField",
     "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea", "NSAttributedString",
     "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
-    "NSGradient", "NSPasteboardItem",
+    "NSGradient", "NSPasteboardItem", "NSStringDrawing",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

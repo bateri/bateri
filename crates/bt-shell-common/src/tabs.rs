@@ -226,6 +226,40 @@ pub fn custom_name(draft: &str, automatic: &str) -> Option<String> {
     (!name.is_empty() && name != automatic.trim()).then(|| name.to_owned())
 }
 
+/// A window's title as the system lists it — the Dock icon's menu, the Window menu — at most
+/// `max` wide as `width` measures it: whole when it fits, otherwise cut where it still fits with a
+/// trailing "…". Those lists are as wide as their longest title and a program's title can be a
+/// whole sentence; a cap keeps them at one width, whatever runs.
+///
+/// The cut falls between characters, never inside one, and takes back what would dangle before
+/// the "…": a space, or the joiner or variation selector of an emoji it split.
+pub fn fit_title(title: &str, max: f64, width: impl Fn(&str) -> f64) -> String {
+    if width(title) <= max {
+        return title.to_owned();
+    }
+    let cut = |chars: usize| -> String {
+        let end = title
+            .char_indices()
+            .nth(chars)
+            .map_or(title.len(), |(at, _)| at);
+        let kept = title[..end].trim_end_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '\u{200d}' | '\u{fe0e}' | '\u{fe0f}')
+        });
+        format!("{kept}…")
+    };
+    // The longest cut that fits: a width grows with what it holds.
+    let (mut fits, mut over) = (0, title.chars().count());
+    while over - fits > 1 {
+        let middle = (fits + over) / 2;
+        if width(&cut(middle)) <= max {
+            fits = middle;
+        } else {
+            over = middle;
+        }
+    }
+    cut(fits)
+}
+
 /// The `tag` a menu item carries for tab `id` — the chip's context menu acts on the chip it was
 /// opened on, not the selected tab. Zero is "no tab", which the menu bar's items carry and which
 /// then means the selected one; ids count from zero, so the tag is the id plus one.
@@ -1185,6 +1219,58 @@ mod tests {
             "a known id moves instead of being added twice"
         );
         assert_eq!(t.selected(), Some(8));
+    }
+
+    /// One unit a character: a title's width is how many it has.
+    fn counted(text: &str) -> f64 {
+        text.chars().count() as f64
+    }
+
+    #[test]
+    fn a_title_that_fits_is_left_whole() {
+        assert_eq!(fit_title("zsh", 10.0, counted), "zsh");
+        assert_eq!(
+            fit_title("exactly10!", 10.0, counted),
+            "exactly10!",
+            "to the edge"
+        );
+        assert_eq!(fit_title("", 0.0, counted), "");
+    }
+
+    #[test]
+    fn a_long_title_is_cut_to_fit_with_an_ellipsis() {
+        let fitted = fit_title("Reviewing the tab drag in the title bar", 12.0, counted);
+        assert_eq!(fitted, "Reviewing t…");
+        assert!(counted(&fitted) <= 12.0);
+        // Nothing dangles before the ellipsis: the space before a word goes.
+        assert_eq!(fit_title("abc def ghi", 5.0, counted), "abc…");
+        // Too narrow for any of it: the ellipsis alone.
+        assert_eq!(fit_title("abcdef", 1.0, counted), "…");
+    }
+
+    #[test]
+    fn a_cut_falls_between_characters_and_takes_back_an_emojis_joiner() {
+        // Two-byte letters are cut whole.
+        assert_eq!(fit_title("çğıöşüçğıöşü", 5.0, counted), "çğıö…");
+        // The family emoji's joiner, left at the end of a cut, goes too.
+        let family = "ab\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}cdef";
+        let fitted = fit_title(family, 5.0, counted);
+        assert_eq!(fitted, "ab\u{1f468}…");
+        assert_eq!(
+            fit_title("ab\u{2764}\u{fe0f}cdefgh", 4.0, counted),
+            "ab\u{2764}…"
+        );
+    }
+
+    #[test]
+    fn the_cut_is_the_longest_that_fits_whatever_the_widths() {
+        // Wide and narrow characters: the cut is measured, not counted.
+        let width =
+            |text: &str| -> f64 { text.chars().map(|c| if c == 'W' { 3.0 } else { 1.0 }).sum() };
+        let fitted = fit_title("WWiiiiiiiiii", 9.0, width);
+        assert_eq!(fitted, "WWii…");
+        assert!(width(&fitted) <= 9.0);
+        assert!(width("WWiii…") > 9.0, "one more would not fit");
     }
 
     /// The name a rename field's text asks for: trimmed, and no name at all when it is empty or

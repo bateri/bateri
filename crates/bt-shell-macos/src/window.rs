@@ -80,14 +80,16 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_clas
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSColor,
-    NSControlStateValueOff, NSControlStateValueOn, NSFloatingWindowLevel, NSMenuItem,
-    NSModalResponse, NSModalResponseCancel, NSTitlebarSeparatorStyle, NSToolbar, NSView, NSWindow,
-    NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask, NSWindowTabbingMode,
-    NSWindowTitleVisibility, NSWindowToolbarStyle,
+    NSControlStateValueOff, NSControlStateValueOn, NSFloatingWindowLevel, NSFont,
+    NSFontAttributeName, NSMenuItem, NSModalResponse, NSModalResponseCancel, NSStringDrawing,
+    NSTitlebarSeparatorStyle, NSToolbar, NSView, NSWindow, NSWindowDelegate,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
+    NSWindowToolbarStyle,
 };
 use objc2_foundation::{
-    NSKeyValueObservingOptions, NSNotification, NSObject, NSObjectNSKeyValueObserverRegistration,
-    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
+    NSAttributedStringKey, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSObject,
+    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    ns_string,
 };
 
 use crate::Run;
@@ -1111,6 +1113,35 @@ define_class!(
         }
     }
 );
+
+/// How wide a window's title may be in the menu font, points. The system lists
+/// a window by its title — the Dock icon's menu, the Window menu — and draws
+/// the list as wide as its longest title; a program's title can be a whole
+/// sentence. A design number: room for a folder's path or a short sentence,
+/// so the list stays one width whatever runs.
+const LISTED_TITLE_PT: f64 = 320.0;
+
+/// `title` as the window carries it: at most [`LISTED_TITLE_PT`] wide in the
+/// menu font, cut with "…" past that ([`tabs::fit_title`]). Nothing in
+/// bateri reads the window's title back — the bar draws each tab's own —
+/// so only the system's lists, Mission Control and VoiceOver's window name see
+/// the cut.
+fn listed_title(title: &str) -> String {
+    let font = NSFont::menuFontOfSize(0.0);
+    let values: [&AnyObject; 1] = [font.as_ref()];
+    // SAFETY: AppKit's font attribute key (an extern static) with the
+    // `NSFont` it documents.
+    let attributes = unsafe {
+        NSDictionary::<NSAttributedStringKey, AnyObject>::from_slices(
+            &[NSFontAttributeName],
+            &values,
+        )
+    };
+    tabs::fit_title(title, LISTED_TITLE_PT, |text| {
+        // SAFETY: the dictionary is the font attribute with an `NSFont`.
+        unsafe { NSString::from_str(text).sizeWithAttributes(Some(&attributes)) }.width
+    })
+}
 
 /// The tab a menu item's `tag` names ([`tabs::menu_tag`]); `None` for a
 /// bar item (zero), which acts on the selected tab.
@@ -2277,7 +2308,8 @@ impl TerminalWindow {
     /// window's title stays what it was (the constructor's `bateri`).
     pub(crate) fn refresh_title(&self) {
         if let Some(title) = self.try_selected_tab().and_then(|tab| tab.title()) {
-            self.ivars().window.setTitle(&NSString::from_str(&title));
+            let listed = listed_title(&title);
+            self.ivars().window.setTitle(&NSString::from_str(&listed));
         }
         self.refresh_bar();
     }
