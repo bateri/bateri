@@ -792,8 +792,9 @@ struct Core {
     /// truth, so two transitions chasing each other (vim open–close) cannot
     /// act on a stale value.
     ///
-    /// `None` in a window without a dock, and **structurally**: the path is
-    /// never set up in that session, not switched off by a condition.
+    /// `None` only where nobody listens (the tests' links): the shell sets
+    /// it up in every pane, since a transition moves the tab's running ring
+    /// as well as the dock.
     alt_screen_changed: Option<Box<dyn Fn()>>,
     /// Told when the published block marks changed
     /// ([`DisplayLink::on_marks_published`]) — the pointer's targets moved

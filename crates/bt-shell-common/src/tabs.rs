@@ -925,6 +925,16 @@ impl Unseen {
     }
 }
 
+/// How long a pane's command has run **as the tab's ring counts it**: `running` (the pane's
+/// `bt_core::Activity::running`), `None` while the pane is on the alternate screen. A full-screen
+/// program — an editor, a pager, `htop`, an agent's full-screen interface — runs for as long as it
+/// is open, and a ring turning beside it for hours reads as a tab that is still loading. Only the
+/// ring forgets it: the summary card reads the pane itself and still says how long it has been
+/// open, and its end marks the tab like any command's.
+pub fn ring_running(running: Option<Duration>, full_screen: bool) -> Option<Duration> {
+    running.filter(|_| !full_screen)
+}
+
 /// The step the running ring shows for a command that has run `elapsed`: one step per tick of the
 /// command's duration counter (`bt_core::counter_period`, the tiers `bt_core::next_tick` wakes
 /// on — a second, from an hour on a minute), twelve to a turn. Under Reduce Motion the ring
@@ -2069,6 +2079,35 @@ mod tests {
             clock(true, false, &[3_600_000 + 20_000], None).delay(),
             Some(Duration::from_secs(40)),
             "an hour on: the counter's minute"
+        );
+    }
+
+    /// A full-screen program runs as long as it is open: no ring, and so no clock for it — but the
+    /// tab's other signals are read as before.
+    #[test]
+    fn a_full_screen_program_turns_no_ring() {
+        let ten = Some(Duration::from_secs(10));
+        assert_eq!(
+            ring_running(ten, false),
+            ten,
+            "a command on the main screen"
+        );
+        assert_eq!(
+            ring_running(ten, true),
+            None,
+            "vim, htop, an agent's interface"
+        );
+        assert_eq!(ring_running(None, true), None, "a shell at its prompt");
+        let signals = |full_screen| Signals {
+            running: ring_running(ten, full_screen).is_some(),
+            failed: true,
+            ..Signals::default()
+        };
+        assert_eq!(indicator(signals(false)), Some(Indicator::Running));
+        assert_eq!(
+            indicator(signals(true)),
+            Some(Indicator::Failed),
+            "an earlier failure shows through"
         );
     }
 

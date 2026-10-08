@@ -12,6 +12,15 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Changed
+
+- **No spinning ring beside full-screen programs.** vim, less, htop or an
+  agent like Claude Code run for as long as they are open, so the ring that
+  turns on a tab while a command runs no longer turns for them — it made a
+  tab look as if it were still loading. Hover over the tab and the card still
+  says how long the program has been open; when it ends while you are in
+  another tab, the tab still shows a green tick or a red dot.
+
 ## [0.8.0] - 2026-10-08
 
 ### Added

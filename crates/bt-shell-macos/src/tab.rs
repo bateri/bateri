@@ -708,10 +708,17 @@ impl TerminalTab {
 
     /// How long the tab's running command has run — the focused pane's if
     /// one runs there, else the first running pane's in tree order; `None`
-    /// when no pane runs one (`Session::activity`). The ring's step and the
-    /// bar's clock come from it. A leaf lock per pane, no `Term`.
+    /// when no pane runs one (`Session::activity`). A pane on the alternate
+    /// screen counts as running none (`tabs::ring_running`): a full-screen
+    /// program gets no ring. The ring, its step and the bar's clock come
+    /// from it; the summary card reads the pane itself. A leaf lock and an
+    /// atomic per pane, no `Term` — the screen is the one the pane last
+    /// drew (`Session::alt_screen`).
     pub(crate) fn running_for(&self) -> Option<Duration> {
-        let running = |pane: &TerminalPane| pane.session()?.activity().running;
+        let running = |pane: &TerminalPane| {
+            let session = pane.session()?;
+            tabs::ring_running(session.activity().running, session.alt_screen())
+        };
         running(&self.focused_pane()).or_else(|| self.panes().iter().find_map(|pane| running(pane)))
     }
 

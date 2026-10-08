@@ -121,10 +121,12 @@ pub(crate) trait PaneHost {
     /// Dock icon is the total of all panes ([`TerminalPane::upload_totals`]).
     fn uploads_changed(&self, pane: u64);
     /// A command started or ended in this pane — the local shell's `C`, our
-    /// `A` or a `D`, or our remote shell's `C`/`D`: the tab's running ring and
-    /// its "finished while you were away" mark are read again
-    /// (`Session::activity`). Comes for a background tab too: the news is the
-    /// reader thread's, not the frame path's.
+    /// `A` or a `D`, or our remote shell's `C`/`D` — or the pane went onto or
+    /// off the alternate screen: the tab's running ring and its "finished
+    /// while you were away" mark are read again (`Session::activity`). A
+    /// command's edge comes for a background tab too, being the reader
+    /// thread's news; the screen's is the frame path's, so a tab that draws
+    /// nothing hears it when it is next drawn.
     fn activity_changed(&self, pane: u64);
     /// Notification to the user (upload finished, failed, connection lost).
     fn notify(&self, pane: u64, title: &str, body: &str);
@@ -2711,13 +2713,11 @@ impl TerminalPane {
                 cell: grid.cell,
             },
             stats,
-            // **The path is set up only in a window that has a dock** and this
-            // is structural: in a dockless session an alternate-screen
-            // transition cannot change anything, so there is no watch either.
-            // Had it been shut off by a condition, the claim "no resize at all"
-            // would depend on the correctness of a branch.
-            (self.ivars().dock_rows_at_birth.get() > 0)
-                .then(|| alt_screen_notifier(self.ivars().id, self.ivars().lookup)),
+            // **Every pane watches**: a transition turns the tab's ring off or
+            // on (`tabs::ring_running`), dock or not. In a dockless session it
+            // still resizes nothing — `app::dock_rows_for` gives a zero-row
+            // birth zero on both screens, so the reserve never moves.
+            Some(alt_screen_notifier(self.ivars().id, self.ivars().lookup)),
         );
         pacer.attach(mtm, link.ticker());
         // We do not want frames before the wake path is closed: a `Wakeup`
@@ -2927,7 +2927,8 @@ impl TerminalPane {
         }
     }
 
-    /// The alternate screen changed: the dock goes away or comes back.
+    /// The alternate screen changed: the tab's ring is read again and the
+    /// dock goes away or comes back.
     ///
     /// The sender is the frame path's notifier ([`alt_screen_notifier`]) and
     /// this method runs **on the next main-queue turn** — so as not to pull
@@ -2935,13 +2936,18 @@ impl TerminalPane {
     ///
     /// **It re-reads the truth**, ignoring what the notification carried: if
     /// two transitions chase each other (vim open-close) both jobs waiting in
-    /// the queue see the same, current answer. If nothing changed it **does
-    /// nothing** — this gate upholds the "one resize per transition"
-    /// claim.
+    /// the queue see the same, current answer. If the dock's share did not
+    /// change it **does not resize** — this gate upholds the "one resize per
+    /// transition" claim.
     pub(crate) fn alt_screen_did_change(&self) {
         let Some(session) = self.ivars().session.get() else {
             return;
         };
+        // Before the dock's gate: a full-screen program gets no ring
+        // (`tabs::ring_running`) whether or not the window has a dock to give
+        // back. Reading again is idempotent — the ended commands' counts it
+        // also reads only mark what is new.
+        self.host().activity_changed(self.ivars().id);
         let wanted = app::dock_rows_for(
             session.alt_screen(),
             session.remote_mark().is_some(),
