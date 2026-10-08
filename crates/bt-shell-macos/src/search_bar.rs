@@ -510,6 +510,7 @@ fn symbol(
 #[cfg(test)]
 mod tests {
     use super::{count_label, mix, selection_query, surface_colors};
+    use crate::window::is_dark_background;
     use bt_core::{SearchReport, SearchStatus, Theme};
 
     #[test]
@@ -577,11 +578,12 @@ mod tests {
         // apart from the terminal's, the controls read like terminal text
         // (the user saw it: the 0.11 step was ≈ #191919 on pure black). The
         // lower bounds are a design constant, by WCAG ratio: a clear step in
-        // the dark theme, as much as Safari's find bar in the light theme.
-        for (theme, dark, floor) in [
-            (Theme::BATERI, true, 1.4),
-            (Theme::BATERI_LIGHT, false, 1.12),
-        ] {
+        // a dark theme, as much as Safari's find bar in a light theme. Every
+        // embedded theme, with the darkness the pane paints it with.
+        for name in Theme::embedded_names() {
+            let theme = Theme::embedded(name).expect("an embedded name");
+            let dark = is_dark_background(&theme);
+            let floor = if dark { 1.4 } else { 1.12 };
             let (fill, _) = surface_colors(theme.background, theme.foreground, dark);
             let ratio = contrast(fill, theme.background);
             assert!(

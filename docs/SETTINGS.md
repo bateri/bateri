@@ -203,7 +203,8 @@ keep_running = "crash"
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
 # any other value is a theme used in both — a file themes/NAME.toml next to
-# this one, or a built-in theme, "bateri" (dark) or "bateri-light" (light).
+# this one, or a built-in theme, "bateri" (dark), "bateri-light" or "linen"
+# (light).
 theme = "system"
 # Theme names, used while theme = "system".
 light_theme = "bateri-light"
@@ -346,7 +347,7 @@ The menu is rebuilt every time it opens:
 
 - **Match System** — `theme = "system"`: the theme follows the macOS
   appearance (`light_theme` / `dark_theme`).
-- Built-in themes: `bateri`, `bateri-light`.
+- Built-in themes: `bateri`, `bateri-light`, `linen`.
 - Every `{name}.toml` under `~/.config/bateri/themes/`, by its name. Putting a
   new file in the directory updates the menu the next time it opens. Files
   starting with a dot and `system.toml` are not listed; a file that shadows a
@@ -788,8 +789,8 @@ content_edge = "fade"
   `light_theme`/`dark_theme` do not accept this value (they fall back to their
   own default and give a warning).
 - A name is first looked up as `~/.config/bateri/themes/{name}.toml`,
-  otherwise among the built-in themes. There are two built-in themes: `bateri`
-  (dark) and `bateri-light` (light).
+  otherwise among the built-in themes. There are three built-in themes:
+  `bateri` (dark), `bateri-light` and `linen` (light).
 - A file with the same name **shadows** the built-in theme: a user who writes
   `themes/bateri.toml` sees their own file, not the built-in `bateri`.
 - A name found nowhere falls back to the built-in theme matching the
@@ -1702,6 +1703,46 @@ bright_cyan = "#2f8a92"
 bright_white = "#dcdee3"
 ```
 
-Both blocks are tied to their built-in theme by a test
+### Embedded `linen`
+
+A warm light theme: warm ink on a cream background, with a burnt-orange
+cursor and input mark. Not part of the light/dark pair; choose it from
+**View ▸ Theme ▸** or with `theme = "linen"`. The ANSI colors are earth tones
+and, like `bateri-light`'s, keep white at the light end.
+
+```toml
+background = "#f3efe7"
+foreground = "#2a2520"
+dim = "#6d6862"
+accent = "#a95200"
+cursor = "#a95200"
+selection = "#efdfcf"
+search_match = "#f2e9cc"
+search_current = "#f6dca8"
+success = "#4f7a32"
+error = "#b23a32"
+info = "#2d7672"
+warning = "#8a6500"
+
+[ansi]
+black = "#2f2a25"
+red = "#b23a32"
+green = "#4f7a32"
+yellow = "#8a6500"
+blue = "#3b6488"
+magenta = "#8d4f7f"
+cyan = "#2d7672"
+white = "#bdb5a8"
+bright_black = "#766d63"
+bright_red = "#c8503f"
+bright_green = "#578535"
+bright_yellow = "#977200"
+bright_blue = "#4a76a0"
+bright_magenta = "#a0608f"
+bright_cyan = "#33847b"
+bright_white = "#ddd6ca"
+```
+
+Every block is tied to its built-in theme by a test
 (`documented_blocks_are_the_embedded_themes`): if the built-in theme changes
 and the block does not, the test fails.

@@ -2191,6 +2191,7 @@ mod tests {
             !is_dark_background(&Theme::BATERI_LIGHT),
             "bateri-light is light"
         );
+        assert!(!is_dark_background(&Theme::LINEN), "linen is light");
     }
 
     #[test]

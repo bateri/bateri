@@ -19,6 +19,10 @@ of every installed copy. A version without a section is not released.
   fade, cuts the text under a thin line in the dividers' color, or cuts it
   where the pane ends as before. The last two give back the line some window
   heights lose to the fade.
+- **A warm light theme, `linen`.** Warm ink on a cream background with a
+  burnt-orange cursor and input mark. Pick it from View ▸ Theme ▸, or set
+  `theme = "linen"` (or `light_theme = "linen"` to use it whenever macOS is in
+  light mode).
 
 ### Changed
 

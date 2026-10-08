@@ -301,6 +301,57 @@ impl Theme {
         ],
     };
 
+    /// The embedded warm light theme: warm ink on unbleached cream.
+    ///
+    /// The five roles a screenshot shows were sampled from one, pixel by
+    /// pixel; the rest is drawn from the same warm family against the
+    /// criteria of [`Self::BATERI_LIGHT`]:
+    ///
+    /// - **The background is flat.** The sampled surface is a top-to-bottom
+    ///   gradient (`0xf7f4ed` → `0xebe4da`); with no material layer to draw
+    ///   one, the value is the tone where the text sits.
+    /// - **The foreground** is the median of the glyph cores, a warm
+    ///   near-black. `dim` is that foreground blended into the background
+    ///   ([`dim_toward`]), the rule `BATERI_LIGHT` follows.
+    /// - **`accent` and `cursor` are the same burnt orange:** the sample's
+    ///   input mark and caret are both that color, and the dock draws its mark
+    ///   with `accent` at rest. The letter under the cursor is drawn in the
+    ///   background color, 4.70 on the block.
+    /// - **The ANSI names keep their meaning** (white is the light end) in
+    ///   earth tones; every colored entry, bright ones included, is at least
+    ///   3.81 on the background so it stays above 3:1 on the highlights.
+    #[rustfmt::skip]
+    pub const LINEN: Theme = Theme {
+        background: 0xf3efe7,
+        foreground: 0x2a2520,
+        dim: 0x6d6862,
+        accent: 0xa95200,
+        cursor: 0xa95200,
+        // A pale apricot from `accent`'s family, a step darker than the
+        // background (1.14). The criterion is the other themes': every text
+        // color that exceeds 3:1 on the background also exceeds it on the
+        // selection (the weakest is `bright_green`, 3.35).
+        selection: 0xefdfcf,
+        // Matches a pale cream (1.06), the current match a honey (1.17) — the
+        // same yellow family, told apart by brightness so the distinction
+        // survives the unfocused fade. The weakest is `bright_green` on the
+        // current match, 3.27.
+        search_match: 0xf2e9cc,
+        search_current: 0xf6dca8,
+        success: 0x4f7a32,
+        error: 0xb23a32,
+        // The theme's own ANSI cyan.
+        info: 0x2d7672,
+        // The theme's own ANSI yellow; distinct in hue from the orange cursor.
+        warning: 0x8a6500,
+        ansi: [
+            0x2f2a25, 0xb23a32, 0x4f7a32, 0x8a6500, // black   red      green    yellow
+            0x3b6488, 0x8d4f7f, 0x2d7672, 0xbdb5a8, // blue    magenta  cyan     white
+            0x766d63, 0xc8503f, 0x578535, 0x977200, // the bright eight, same order
+            0x4a76a0, 0xa0608f, 0x33847b, 0xddd6ca,
+        ],
+    };
+
     /// The themes embedded in the application, by name. The user's
     /// `themes/{name}.toml` shadows the same name; that decision is in
     /// `bt-shell`'s name resolution.
@@ -625,9 +676,10 @@ impl Theme {
 }
 
 /// The table of embedded themes; [`Theme::embedded`] reads it.
-const EMBEDDED: [(&str, Theme); 2] = [
+const EMBEDDED: [(&str, Theme); 3] = [
     ("bateri", Theme::BATERI),
     ("bateri-light", Theme::BATERI_LIGHT),
+    ("linen", Theme::LINEN),
 ];
 
 /// The **single rule** for a dim (SGR 2) color: the color moves one third of
@@ -917,7 +969,7 @@ mod tests {
         // The splits' separator (sRGB, `NSColor`) and the dock's hairlines
         // (linear, GPU) come from the same value: if they part ways, the split
         // line sits in a different tone than the dock's line.
-        for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
+        for (_, theme) in EMBEDDED {
             let [r, g, b] = theme.separator_srgb();
             let hex = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
             assert_eq!(linear_hex(hex), theme.separator_linear());
@@ -977,9 +1029,36 @@ mod tests {
     }
 
     #[test]
+    fn linen_palette_is_pinned() {
+        // The warm light theme's counterpart of `bateri_light_palette_is_pinned`,
+        // same reasoning.
+        #[rustfmt::skip]
+        const EXPECTED: [(usize, u32); 20] = [
+            (0, 0x2f2a25), (1, 0xb23a32), (2, 0x4f7a32), (3, 0x8a6500),
+            (4, 0x3b6488), (5, 0x8d4f7f), (6, 0x2d7672), (7, 0xbdb5a8),
+            (8, 0x766d63), (9, 0xc8503f), (10, 0x578535), (11, 0x977200),
+            (12, 0x4a76a0), (13, 0xa0608f), (14, 0x33847b), (15, 0xddd6ca),
+            (256, 0x2a2520), // foreground
+            (257, 0xf3efe7), // background
+            (258, 0xa95200), // cursor
+            (268, 0x6d6862), // dim foreground
+        ];
+        let linen = Theme::LINEN;
+        for (index, hex) in EXPECTED {
+            assert_eq!(linen.default(index), rgb(hex), "{index}");
+        }
+        assert_ne!(linen.ansi[15], linen.background);
+        assert_eq!(
+            rgb(linen.dim),
+            dim_toward(rgb(linen.foreground), linen.background_rgb())
+        );
+    }
+
+    #[test]
     fn embedded_themes_are_found_by_name() {
         assert_eq!(Theme::embedded("bateri"), Some(Theme::BATERI));
         assert_eq!(Theme::embedded("bateri-light"), Some(Theme::BATERI_LIGHT));
+        assert_eq!(Theme::embedded("linen"), Some(Theme::LINEN));
         assert_eq!(
             Theme::embedded("Bateri"),
             None,
@@ -1033,9 +1112,10 @@ mod tests {
     fn dim_colors_move_toward_the_background() {
         // The rule's real invariant: a dim color sits between its source and the
         // background — channel by channel. On the dark theme that means "darkens",
-        // on the light one "lightens"; both backgrounds are tested so that the
-        // light theme fails if the rule goes back to multiplying toward black.
-        for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
+        // on the light ones "lightens"; every embedded background is tested so
+        // that a light theme fails if the rule goes back to multiplying toward
+        // black.
+        for (_, theme) in EMBEDDED {
             let bg = theme.background_rgb();
             for index in 259..=266 {
                 let (source, dimmed) = (theme.default(index - 259), theme.default(index));
@@ -1153,14 +1233,18 @@ mod tests {
     #[test]
     fn search_marks_read_on_the_ground() {
         // The current match's mark is the brighter of the two yellows on the
-        // dark theme and `warning` itself on the light one — the approved
-        // design's two values — and reads on the background like text (3:1).
+        // dark theme and `warning` itself on the light ones — the approved
+        // design's values — and reads on the background like text (3:1).
         // A match's mark is quieter than it and still clear of the background
         // (2:1); it is opaque, so it hides the thumb it sits over.
         let hex = |color: Rgb| {
             (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
         };
-        for (theme, expected) in [(Theme::BATERI, 0xe8c988), (Theme::BATERI_LIGHT, 0x8f6a00)] {
+        for (theme, expected) in [
+            (Theme::BATERI, 0xe8c988),
+            (Theme::BATERI_LIGHT, 0x8f6a00),
+            (Theme::LINEN, 0x8a6500),
+        ] {
             let current = hex(theme.search_current_mark_rgb());
             assert_eq!(current, expected, "the current mark");
             assert_eq!(
@@ -1194,7 +1278,7 @@ mod tests {
         // The host is **text** in the context line, so the criterion is
         // text's — 3:1 on the background. `warning` is in the
         // same place (the host marked staging) with the same criterion.
-        for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
+        for (_, theme) in EMBEDDED {
             for role in [theme.info, theme.warning] {
                 let ratio = contrast(role, theme.background);
                 assert!(ratio >= 3.0, "#{role:06x} on the background {ratio:.2}");
@@ -1234,7 +1318,7 @@ mod tests {
         // distinct** than the other and the role values must say so in
         // brightness too — a distinction left to hue alone would vanish when it
         // fades in an unfocused window.
-        for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
+        for (_, theme) in EMBEDDED {
             let texts = [theme.foreground, theme.dim]
                 .into_iter()
                 .chain(theme.ansi)

@@ -1689,7 +1689,8 @@ keep_running = "crash"
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
 # any other value is a theme used in both — a file themes/NAME.toml next to
-# this one, or a built-in theme, "bateri" (dark) or "bateri-light" (light).
+# this one, or a built-in theme, "bateri" (dark), "bateri-light" or "linen"
+# (light).
 theme = "system"
 # Theme names, used while theme = "system".
 light_theme = "bateri-light"

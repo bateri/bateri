@@ -360,7 +360,7 @@ mod tests {
         // table itself: an added embedded theme has to come with its block.
         let doc = include_str!("../../../docs/SETTINGS.md");
         let names: Vec<_> = Theme::embedded_names().collect();
-        assert_eq!(names, ["bateri", "bateri-light"]);
+        assert_eq!(names, ["bateri", "bateri-light", "linen"]);
         for name in names {
             let theme = Theme::embedded(name);
             // The heading is searched with its line ending: "`bateri`" is a
