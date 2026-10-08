@@ -41,7 +41,7 @@ use bt_core::{Clusters, FontOptions, LinearRgba};
 use crate::GpuError;
 use crate::frame::{
     CursorBlock, FX_INSTANCE_OFFSETS, Frame, FxCell, FxInstance, GLYPH_INSTANCE_OFFSETS, GlyphCell,
-    GlyphInstance, INSTANCE_OFFSETS, Instance, RuleCell,
+    GlyphInstance, INSTANCE_OFFSETS, Instance, RuleCell, WaveDraw,
 };
 use crate::metrics::{CellMetrics, FontNotice};
 use crate::slots::{self, SlotUpload};
@@ -90,6 +90,9 @@ pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8U
 /// `vec4`s first is deliberate: with `viewport_px` first the padding would
 /// land in the middle. The `selection` pipeline reads the same block with
 /// another meaning: `core` is the highlight's colour, `shape[0]` its radius.
+/// The `wave` pipeline reads it as geometry: `core[0]` is the line's centre y,
+/// `core[1]` the pixels per point, `shape` the peaks, the phase and the ring's
+/// front (the colour rides in the instance).
 ///
 /// `edge_px` is the content's top fade ([`Op::Edge`]). **No `Default`**: the
 /// one block the encode reuses across draws is built field by field, so a
@@ -325,6 +328,13 @@ enum Op {
         core: [f32; 4],
         shape: [f32; 4],
     },
+    /// A `wave_fragment` draw: one quad with its own `core`/`shape`
+    /// ([`Plan::wave`]).
+    Wave {
+        range: Range<u32>,
+        core: [f32; 4],
+        shape: [f32; 4],
+    },
     /// The `selection` pipeline over a range of the instance buffer: the
     /// selection, or one search role ([`Plan::selection`], [`Plan::search`]).
     Selection {
@@ -453,6 +463,15 @@ impl Plan {
         }
         let range = self.push(instances);
         self.ops.push(Op::Quads(range));
+    }
+
+    fn wave(&mut self, draw: &WaveDraw) {
+        let range = self.push(std::slice::from_ref(&draw.instance));
+        self.ops.push(Op::Wave {
+            range,
+            core: draw.core,
+            shape: draw.shape,
+        });
     }
 
     fn rounded(&mut self, instances: &[Instance], core: [f32; 4], shape: [f32; 4]) {
@@ -767,6 +786,11 @@ pub(crate) struct Gpu {
     /// quad — the caret takes its one quad from an immediate, the selection
     /// has one per instance. Blending softens the round corner's edge.
     selection: wgpu::RenderPipeline,
+    /// The dock's wave line (`wave_fragment`): `cell_bg`'s vertex again, its
+    /// own fragment — the curve's edge wants coverage computed per pixel,
+    /// which a flat quad's fragment does not do. One quad per frame, and only
+    /// while an arrival scene gives the top line a wave.
+    wave: wgpu::RenderPipeline,
     /// Glyphs and rules: the same quad, sampling the atlas's mask plane.
     /// Glyphs blend over the backgrounds: the atlas is a coverage mask and the
     /// colour comes from the instance.
@@ -934,6 +958,7 @@ impl Gpu {
         // Selection: its own vertex (the quad reaches the fragment), the same
         // module, layout and instance buffer.
         let selection = pipeline(&device, quads, "selection_vertex", "selection_fragment");
+        let wave = pipeline(&device, quads, "cell_bg_vertex", "wave_fragment");
 
         let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -1028,6 +1053,7 @@ impl Gpu {
             cell_bg,
             caret,
             selection,
+            wave,
             cell,
             emoji,
             glyph_fx,
@@ -2057,6 +2083,14 @@ impl Renderer {
             let origin_y = layout_y + rise;
             plan.ops.push(Op::Viewport(band_y));
             plan.quads(&frame.dock_ground(viewport_px[0]));
+            // **The wave over the ground, in window space**: it leaves its row
+            // above the band's top, which the band's viewport would clip. The
+            // dock's own top line is held back meanwhile (the scene gives it
+            // no width) and comes back when the scene ends.
+            if let Some(wave) = frame.dock_wave(band_y, viewport_px[0]) {
+                plan.ops.push(Op::Viewport(0.0));
+                plan.wave(&wave);
+            }
             plan.ops.push(Op::Viewport(origin_y));
             let clipped = band_y > origin_y;
             // The dock's glyphs may rise above the layout's top only up to the
@@ -2252,6 +2286,17 @@ impl Renderer {
                             continue;
                         };
                         pass.set_pipeline(&self.gpu.cell_bg);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.set_immediates(0, bytes_of(std::slice::from_ref(&imm)));
+                        pass.draw(0..4, range.clone());
+                    }
+                    Op::Wave { range, core, shape } => {
+                        let Some(buffer) = state.quads.as_ref() else {
+                            continue;
+                        };
+                        imm.core = *core;
+                        imm.shape = *shape;
+                        pass.set_pipeline(&self.gpu.wave);
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         pass.set_immediates(0, bytes_of(std::slice::from_ref(&imm)));
                         pass.draw(0..4, range.clone());
@@ -2545,11 +2590,11 @@ fn uv_size(atlas: &Atlas) -> [f32; 2] {
 /// The names are separate parameters, not derived as `{name}_vertex`: the
 /// failing pipeline is reported by name ([`Gpu::new`]'s error scope).
 ///
-/// The blend is **not a parameter**: all six pipelines want it, each for its
+/// The blend is **not a parameter**: all seven pipelines want it, each for its
 /// own reason — `cell` makes alpha from the atlas's coverage, `caret` has a
 /// translucent halo, `glyph_fx`'s effect is itself transparency, `selection`
-/// softens its round corner. All six output **straight** alpha, emoji
-/// included: CoreGraphics writes colour glyphs premultiplied, but
+/// softens its round corner, `wave` softens the curve's edge. All seven output
+/// **straight** alpha, emoji included: CoreGraphics writes colour glyphs premultiplied, but
 /// `raster::draw_color` undoes it before upload (`raster::unpremultiply`'s doc:
 /// premultiplying in sRGB-encoded space darkened them).
 ///

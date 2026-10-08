@@ -49,7 +49,8 @@ struct Instance {
 //                 outside the content — the scroll bar, the dock.
 //
 // `cell_bg` reads only `viewport_px` and `edge_px`; the whole block is still
-// written on every draw because the three pipelines share one layout.
+// written on every draw because the pipelines share one layout. The wave's
+// fragment reads `core.xy` and `shape` (below).
 struct Immediates {
     core: vec4<f32>,
     shape: vec4<f32>,
@@ -248,4 +249,65 @@ fn selection_fragment(in: SelectionOut) -> @location(0) vec4<f32> {
         coverage = 1.0 - smoothstep(-0.5, 0.5, d);
     }
     return vec4<f32>(color.rgb, color.a * coverage * edge_alpha(in.position.y, imm.edge_px));
+}
+
+// ---------------------------------------------------------------------------
+// The dock's wave line (the arrival scene's `ripple`)
+// ---------------------------------------------------------------------------
+//
+// One quad per frame through `cell_bg_vertex`, in WINDOW space: the line
+// leaves its row on both sides, so it is drawn from a viewport at the window's
+// top, not the dock's. The colour (alpha included) rides in the instance, like
+// `cell_bg`'s; the block carries the geometry:
+//
+//   core  = (the line's centre y in window space, pixels per point, 0, 0)
+//   shape = (the resting wave's peak, its phase, the ring's front x, the
+//            ring's peak)
+//
+// The peaks and the front are PIXELS, the phase radians. The wavelengths and
+// the ring's reach are DESIGN lengths — points — and the fragment scales them
+// by `core.y`, so the wave is the same size on a 1x and a 2x screen.
+//
+//   height(x) = rest·sin(τx/λ_rest + phase)
+//             + (x ≤ front) · ring·exp(−|x − front|/reach)·sin(τ(x − front)/λ_ring)
+//
+// The ring exists only behind its front: it spreads from the › and leaves a
+// calm line ahead of it.
+//
+// **Zero peaks are today's line, exactly.** The coverage is a one-pixel tent
+// round the curve: a line at a pixel centre covers that row fully and its
+// neighbours not at all, so with both peaks at zero the pixels are the ones the
+// dock's own hairline draws and the swap between them is invisible.
+
+const TAU: f32 = 6.2831855;
+// Design lengths, points.
+const WAVE_REST_LENGTH: f32 = 140.0;
+const WAVE_RING_LENGTH: f32 = 60.0;
+const WAVE_RING_REACH: f32 = 90.0;
+
+// How far the line is from its row at window x, pixels (down is positive).
+fn wave_height(x: f32, scale: f32) -> f32 {
+    let rest = imm.shape.x;
+    let phase = imm.shape.y;
+    let front = imm.shape.z;
+    let ring = imm.shape.w;
+    let behind = x - front;
+    let spread = ring
+        * exp(-abs(behind) / (WAVE_RING_REACH * scale))
+        * sin(TAU * behind / (WAVE_RING_LENGTH * scale));
+    return rest * sin(TAU * x / (WAVE_REST_LENGTH * scale) + phase)
+        + select(0.0, spread, behind <= 0.0);
+}
+
+@fragment
+fn wave_fragment(in: Out) -> @location(0) vec4<f32> {
+    let scale = imm.core.y;
+    let x = in.position.x;
+    // The distance to the curve measured across it, not straight down: a
+    // steep stretch would otherwise come out thinner than a flat one. The
+    // slope is the height's change over one pixel.
+    let slope = wave_height(x + 0.5, scale) - wave_height(x - 0.5, scale);
+    let across = abs(in.position.y - (imm.core.x + wave_height(x, scale)))
+        * inverseSqrt(1.0 + slope * slope);
+    return vec4<f32>(in.rgba.rgb, in.rgba.a * clamp(1.0 - across, 0.0, 1.0));
 }

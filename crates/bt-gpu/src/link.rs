@@ -1971,11 +1971,15 @@ impl Core {
     /// Writes the dock's arrival scene into the frame — the one step both frame
     /// paths take, so what a motion frame replays is what the content frame
     /// wrote. The climb is in whole pixels (an edge that does not land on the
-    /// device grid would fade). Call before `Frame::set_dock_fx`.
+    /// device grid would fade). The wave line starts in the context row's quiet
+    /// tone, the theme's. Call before `Frame::set_dock_fx`.
     fn write_arrival(&self, frame: &mut Frame, motion: &Motion) {
         let scene = motion.arrival_scene();
         let rise = scene.map_or(0.0, |scene| self.rise_px(scene));
         frame.set_dock_scene(scene, rise);
+        if scene.is_some_and(|scene| scene.wave.is_some()) {
+            frame.set_dock_quiet(self.theme.get().quiet_linear());
+        }
     }
 
     /// How far below its place the dock is, in pixels, at this point of the
@@ -4940,7 +4944,13 @@ mod tests {
         asleep: bool,
         /// Every wake-up the link armed, in order.
         wakeups: Vec<f64>,
+        /// Whether the pane is on screen in the key window at the ticks.
+        watched: bool,
     }
+
+    /// The kinds that wait in their own way: a still dock, and a line that
+    /// ripples. Every test that holds for all of them runs through both.
+    const KINDS: [DockArrival; 2] = [DockArrival::Type, DockArrival::Ripple];
 
     impl Rig {
         /// A pane born at `BORN` whose arrival is armed, awake for its first
@@ -4956,6 +4966,7 @@ mod tests {
                 armed: None,
                 asleep: false,
                 wakeups: Vec::new(),
+                watched: true,
             };
             rig.tick(BORN);
             rig
@@ -4966,7 +4977,7 @@ mod tests {
             self.now = now;
             self.asleep = false;
             self.armed = None;
-            let moved = self.motion.advance_arrival(now, true);
+            let moved = self.motion.advance_arrival(now, self.watched);
             if at_rest(self.motion, moved, true, true) {
                 self.sleep();
                 return;
@@ -5049,47 +5060,66 @@ mod tests {
 
     #[test]
     fn a_prompt_at_one_point_two_seconds_plays_and_settles_inside_the_maximum() {
-        let mut rig = Rig::born(DockArrival::Type, false);
-        rig.run_until(BORN + 1.2);
-        let waiting = rig.drawn;
-        rig.prompt(BORN + 1.2, true);
-        assert!(!rig.motion.settled(), "the prompt starts the scene");
-        rig.run_until(BORN + 1.2 + crate::arrival::ARRIVAL_MAX + 2.0 * VSYNC);
-        assert!(rig.motion.settled(), "not settled inside the maximum");
-        assert!(rig.motion.arrival_scene().is_none());
-        assert!(
-            rig.asleep && rig.armed.is_none(),
-            "the link did not go to sleep for good"
-        );
-        let frames = rig.drawn - waiting;
-        assert!(frames >= 10, "{frames}: the entrance was not drawn");
-        assert!(
-            f64::from(frames) <= crate::arrival::ARRIVAL_MAX / VSYNC + 3.0,
-            "{frames} frames"
-        );
-        // A prompt that comes later still (the next command) opens nothing.
-        rig.prompt(BORN + 11.2, true);
-        assert!(rig.motion.settled() && rig.motion.arrival_scene().is_none());
+        for kind in KINDS {
+            let mut rig = Rig::born(kind, false);
+            rig.run_until(BORN + 1.2);
+            let waiting = rig.drawn;
+            rig.prompt(BORN + 1.2, true);
+            assert!(
+                !rig.motion.settled(),
+                "{kind:?}: the prompt starts the scene"
+            );
+            rig.run_until(BORN + 1.2 + crate::arrival::ARRIVAL_MAX + 2.0 * VSYNC);
+            assert!(
+                rig.motion.settled(),
+                "{kind:?}: not settled inside the maximum"
+            );
+            assert!(rig.motion.arrival_scene().is_none());
+            assert!(
+                rig.asleep && rig.armed.is_none(),
+                "{kind:?}: the link did not go to sleep for good"
+            );
+            let frames = rig.drawn - waiting;
+            assert!(
+                frames >= 10,
+                "{kind:?}: {frames}: the entrance was not drawn"
+            );
+            assert!(
+                f64::from(frames) <= crate::arrival::ARRIVAL_MAX / VSYNC + 3.0,
+                "{kind:?}: {frames} frames"
+            );
+            // A prompt that comes later still (the next command) opens nothing.
+            rig.prompt(BORN + 11.2, true);
+            assert!(rig.motion.settled() && rig.motion.arrival_scene().is_none());
+        }
     }
 
     #[test]
     fn a_prompt_after_the_cap_opens_no_scene_and_the_link_stays_asleep() {
-        let mut rig = Rig::born(DockArrival::Type, false);
-        rig.run_until(BORN + 5.0);
-        let frames = rig.drawn;
-        rig.prompt(BORN + 6.0, true);
-        rig.tick(BORN + 6.0 + VSYNC);
-        assert!(rig.asleep && rig.armed.is_none());
-        assert_eq!(rig.drawn, frames + 1, "only the prompt's own content frame");
+        for kind in KINDS {
+            let mut rig = Rig::born(kind, false);
+            rig.run_until(BORN + 5.0);
+            let frames = rig.drawn;
+            rig.prompt(BORN + 6.0, true);
+            rig.tick(BORN + 6.0 + VSYNC);
+            assert!(rig.asleep && rig.armed.is_none(), "{kind:?}");
+            assert_eq!(
+                rig.drawn,
+                frames + 1,
+                "{kind:?}: only the prompt's own content frame"
+            );
+        }
     }
 
     #[test]
     fn a_prompt_in_a_pane_that_is_not_the_users_plays_nothing() {
-        let mut rig = Rig::born(DockArrival::Type, false);
-        rig.run_until(BORN + 1.0);
-        rig.prompt(BORN + 1.0, false);
-        assert!(rig.motion.arrival_scene().is_none());
-        assert!(rig.motion.settled());
+        for kind in KINDS {
+            let mut rig = Rig::born(kind, false);
+            rig.run_until(BORN + 1.0);
+            rig.prompt(BORN + 1.0, false);
+            assert!(rig.motion.arrival_scene().is_none(), "{kind:?}");
+            assert!(rig.motion.settled(), "{kind:?}");
+        }
     }
 
     #[test]
@@ -5117,43 +5147,95 @@ mod tests {
             ("dock_arrival", |motion| motion.end_arrival()),
         ];
         for (path, cut) in cuts {
-            for playing in [false, true] {
-                let mut rig = Rig::born(DockArrival::Type, false);
-                rig.run_until(BORN + 1.0);
-                if playing {
-                    rig.prompt(BORN + 1.0, true);
-                    rig.run_until(BORN + 1.0 + 0.1);
-                    assert!(!rig.motion.settled(), "{path}: the scene was not playing");
+            for kind in KINDS {
+                for playing in [false, true] {
+                    let mut rig = Rig::born(kind, false);
+                    rig.run_until(BORN + 1.0);
+                    if playing {
+                        rig.prompt(BORN + 1.0, true);
+                        rig.run_until(BORN + 1.0 + 0.1);
+                        assert!(!rig.motion.settled(), "{path}: the scene was not playing");
+                    }
+                    // The ripple's wait is awake; the still one's is not.
+                    assert_eq!(
+                        rig.motion.settled(),
+                        kind == DockArrival::Type && !playing,
+                        "{kind:?}: the wait's sleep"
+                    );
+                    let owed = cut(&mut rig.motion);
+                    let what = format!("{path} ({kind:?}, playing {playing})");
+                    assert!(owed, "{what}: no frame is owed");
+                    assert!(rig.motion.settled(), "{what}");
+                    assert!(rig.motion.arrival_scene().is_none(), "{what}");
+                    assert_eq!(
+                        rig.motion.arrival_deadline(rig.now),
+                        None,
+                        "{what}: a stale wake-up"
+                    );
+                    rig.tick(rig.now + VSYNC);
+                    assert!(
+                        rig.asleep && rig.armed.is_none(),
+                        "{what}: the link stayed awake"
+                    );
                 }
-                let owed = cut(&mut rig.motion);
-                assert!(owed, "{path} (playing {playing}): no frame is owed");
-                assert!(rig.motion.settled(), "{path} (playing {playing})");
-                assert!(
-                    rig.motion.arrival_scene().is_none(),
-                    "{path} (playing {playing})"
-                );
-                assert_eq!(
-                    rig.motion.arrival_deadline(rig.now),
-                    None,
-                    "{path}: a stale wake-up"
-                );
-                rig.tick(rig.now + VSYNC);
-                assert!(
-                    rig.asleep && rig.armed.is_none(),
-                    "{path}: the link stayed awake"
-                );
             }
         }
     }
 
     #[test]
     fn reduce_motion_plays_a_short_fade_and_settles() {
-        let mut rig = Rig::born(DockArrival::Type, true);
-        rig.run_until(BORN + 0.5);
-        rig.prompt(BORN + 0.5, true);
-        rig.run_until(BORN + 0.5 + 0.3);
-        assert!(rig.motion.settled(), "the fade is over inside 300 ms");
-        assert!(rig.drawn <= 1 + 1 + 20, "{} frames", rig.drawn);
+        for kind in KINDS {
+            let mut rig = Rig::born(kind, true);
+            rig.run_until(BORN + 0.5);
+            rig.prompt(BORN + 0.5, true);
+            rig.run_until(BORN + 0.5 + 0.3);
+            assert!(
+                rig.motion.settled(),
+                "{kind:?}: the fade is over inside 300 ms"
+            );
+            assert!(rig.drawn <= 1 + 1 + 20, "{kind:?}: {} frames", rig.drawn);
+        }
+    }
+
+    #[test]
+    fn a_rippling_wait_sleeps_through_the_hold_then_stirs_until_the_cap() {
+        use crate::arrival::{ARRIVAL_MAX, CAP, SHOW};
+        let mut rig = Rig::born(DockArrival::Ripple, false);
+        assert!(rig.asleep, "the hold is spent asleep");
+        assert_eq!(rig.armed, Some(BORN + SHOW));
+        let born = rig.drawn;
+        rig.run_until(BORN + SHOW - 0.01);
+        assert_eq!(rig.drawn, born, "a frame during the hold");
+        // The hold's wake-up starts the wave: the link stays awake, a frame
+        // per vsync, and needs no clock for the cap.
+        rig.run_until(BORN + 1.0);
+        assert!(!rig.asleep && !rig.motion.settled());
+        let stirred = f64::from(rig.drawn - born);
+        assert!(stirred >= (1.0 - SHOW) / VSYNC - 3.0, "{stirred} frames");
+        assert_eq!(rig.wakeups, [BORN + SHOW], "nothing armed while awake");
+        // The cap arrives the scene, which plays out and settles for good.
+        rig.run_until(BORN + CAP + ARRIVAL_MAX + 2.0 * VSYNC);
+        assert!(rig.motion.settled() && rig.motion.arrival_scene().is_none());
+        assert!(rig.asleep && rig.armed.is_none(), "zero frames at idle");
+        let total = f64::from(rig.drawn - born);
+        assert!(
+            total <= (CAP - SHOW + ARRIVAL_MAX) / VSYNC + 3.0,
+            "{total} frames: the wait did not stop at the cap"
+        );
+    }
+
+    #[test]
+    fn an_unwatched_rippling_pane_sleeps_through_the_wait_and_the_cap_ends_it() {
+        use crate::arrival::{CAP, SHOW};
+        let mut rig = Rig::born(DockArrival::Ripple, false);
+        rig.watched = false;
+        let born = rig.drawn;
+        rig.run_until(BORN + CAP - 0.1);
+        assert_eq!(rig.drawn, born, "an unwatched wave drew frames");
+        assert_eq!(rig.wakeups, [BORN + SHOW, BORN + CAP]);
+        rig.run_until(BORN + CAP + 1.0);
+        assert!(rig.motion.settled() && rig.motion.arrival_scene().is_none());
+        assert!(rig.asleep && rig.armed.is_none());
     }
 
     #[test]

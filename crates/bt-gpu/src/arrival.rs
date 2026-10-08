@@ -20,7 +20,11 @@
 //!   **settled** — the link sleeps — and its two deadlines ([`SHOW`], [`CAP`])
 //!   are armed on the motion clock ([`Arrival::next_deadline`]) so the sleeping
 //!   link is woken for them. Without the clock the cap would never fire: a link
-//!   asleep on a settled animation is not ticked again.
+//!   asleep on a settled animation is not ticked again. **One calendar waits
+//!   with motion**: the ripple's top line is a wave that stirs from [`SHOW`]
+//!   until the prompt or the cap ([`Arrival::stirs`]). It is unsettled in
+//!   that stretch — stopped by the cap, which arrives the scene — and only for
+//!   a pane someone is watching, so a window in the background still sleeps.
 //! - *Playing* (prompt, or [`CAP`] without one → the calendar's end): unsettled,
 //!   so every vsync draws. Its stop condition is the calendar's own end, which
 //!   [`ARRIVAL_MAX`] bounds for every input ([`Arrival::advance`]).
@@ -59,6 +63,47 @@ pub(crate) const RISE_PT: f32 = 10.0;
 /// long path would stretch the arrival past [`ARRIVAL_MAX`].
 const LETTER_CAP: u16 = 48;
 
+// The wave. Lengths are in points (the design's unit, scaled to pixels where
+// the line is drawn), times in seconds. Every number is the design's — chosen
+// by eye, not measured.
+
+/// The resting wave's peak while the shell starts, points.
+const WAVE_AMP_PT: f32 = 1.8;
+
+/// How long the resting wave takes to reach its height after [`SHOW`].
+const WAVE_FADE_IN: f32 = 0.22;
+
+/// How long the resting wave takes to calm after [`CAP`]. A live scene is
+/// arrived by the cap and never waits that long: the tail is the envelope's
+/// own shape, kept so the function says what the design says.
+const WAVE_CALM: f32 = 0.30;
+
+/// Seconds the resting wave's phase takes to move one radian.
+const WAVE_PHASE_SECS: f32 = 0.24;
+
+/// The resting wave dies away after the prompt as `exp(−t / WAVE_SETTLE)`.
+const WAVE_SETTLE: f32 = 0.09;
+
+/// How fast the ring's front leaves the ›, points per second.
+const RING_SPEED: f32 = 1600.0;
+
+/// The ring's peak at the prompt, points, and how it dies away
+/// (`exp(−t / RING_FADE)`).
+const RING_KICK_PT: f32 = 2.4;
+const RING_FADE: f32 = 0.17;
+
+/// When the line stops being a wave, seconds after the prompt: it is flat by
+/// now and the dock draws it.
+const WAVE_END: f32 = 0.56;
+
+/// The line's colour moves from the quiet tone to its own between these.
+const TONE_AT: f32 = 0.20;
+const TONE_SPAN: f32 = 0.34;
+
+/// How far the line may leave its row, points: both peaks at once. The
+/// renderer reserves this much room above and below the dock's top.
+pub(crate) const WAVE_REACH_PT: f32 = WAVE_AMP_PT + RING_KICK_PT;
+
 /// How the › and the letters come in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Entrance {
@@ -80,16 +125,45 @@ impl Entrance {
     }
 }
 
+/// How one of the dock's two lines comes in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Line {
+    /// There from the start.
+    Whole,
+    /// Drawn from the left: `(start, duration)`.
+    Drawn(f32, f32),
+    /// The wave draws it until the scene is over ([`WAVE_END`]); the dock's
+    /// own line is held back meanwhile.
+    Waved,
+}
+
+impl Line {
+    /// Seconds from the arrival at which the line is whole.
+    const fn ends_at(self) -> f32 {
+        match self {
+            Self::Whole => 0.0,
+            Self::Drawn(start, length) => start + length,
+            Self::Waved => WAVE_END,
+        }
+    }
+}
+
 /// One kind's timetable, seconds from the arrival.
 struct Calendar {
+    /// The ›'s.
     entrance: Entrance,
+    /// The context row's letters'.
+    letters_entrance: Entrance,
     /// Whether the dock climbs from [`RISE_PT`] below its place.
     rise: bool,
     /// The dock's fade-in (ground and lines).
     band: f32,
-    /// `(start, duration)` of the two lines' drawing from the left; `None` →
-    /// both are there from the start.
-    lines: Option<[(f32, f32); 2]>,
+    /// How the top line and the one between the input and the context row
+    /// come in.
+    lines: [Line; 2],
+    /// Whether the top line ripples: it waves while the shell starts and a
+    /// ring spreads from the › when it speaks.
+    wave: bool,
     /// `(start, duration)` of the ›'s entrance.
     mark: (f32, f32),
     /// The first context letter's start, the step to the next column and one
@@ -104,20 +178,40 @@ struct Calendar {
 /// branch type themselves out column by column and the cursor comes last.
 const TYPED: Calendar = Calendar {
     entrance: Entrance::Pop,
+    letters_entrance: Entrance::Pop,
     rise: true,
     band: 0.20,
-    lines: Some([(0.04, 0.24), (0.09, 0.24)]),
+    lines: [Line::Drawn(0.04, 0.24), Line::Drawn(0.09, 0.24)],
+    wave: false,
     mark: (0.10, 0.24),
     letters: (0.16, 0.011, 0.17),
     caret: (0.06, 0.06),
 };
 
+/// What the dock does at the first prompt when its top line has been rippling:
+/// the › pops in and a ring spreads from it along the line, which settles
+/// flat; the second line is drawn from the left and the context row fades in
+/// all at once, the cursor right behind it.
+const RIPPLED: Calendar = Calendar {
+    entrance: Entrance::Pop,
+    letters_entrance: Entrance::Fade,
+    rise: false,
+    band: 0.16,
+    lines: [Line::Waved, Line::Drawn(0.12, 0.24)],
+    wave: true,
+    mark: (0.04, 0.24),
+    letters: (0.20, 0.0, 0.22),
+    caret: (0.02, 0.06),
+};
+
 /// Reduce Motion: everything fades in together and nothing moves.
 const REDUCED: Calendar = Calendar {
     entrance: Entrance::Fade,
+    letters_entrance: Entrance::Fade,
     rise: false,
     band: 0.12,
-    lines: None,
+    lines: [Line::Whole; 2],
+    wave: false,
     mark: (0.0, 0.12),
     letters: (0.0, 0.0, 0.12),
     caret: (0.0, 0.09),
@@ -145,6 +239,9 @@ pub(crate) struct Arrival {
     ended: bool,
     /// The last stamp the scene was stepped to.
     at: f64,
+    /// Whether the pane was on screen in the key window at that step: a wave
+    /// stirs for a pane someone is watching.
+    active: bool,
     /// Columns of context text seen so far (the high-water mark).
     letters: u16,
     /// Where the cursor's fade-in started, once it has: it must not move later
@@ -172,8 +269,36 @@ pub(crate) struct Scene {
     pub(crate) mark: f32,
     /// The cursor's opacity.
     pub(crate) caret: f32,
+    /// How the › comes in.
     pub(crate) entrance: Entrance,
+    /// How the context row's letters come in.
+    pub(crate) letter_entrance: Entrance,
+    /// The top line as a wave, while the scene gives it one; the lines'
+    /// `[0]` is `0` meanwhile so the dock's own line stays out of the way.
+    pub(crate) wave: Option<Wave>,
     letters: Letters,
+}
+
+/// The top line as a wave at one moment — a resting ripple that fades in
+/// while the shell starts, and the ring that spreads from the › once it has
+/// spoken. Lengths in points; the frame turns them into pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Wave {
+    /// The line's opacity, `0 → 1`.
+    pub(crate) alpha: f32,
+    /// The resting wave's peak. It fades in while waiting and dies away
+    /// after the prompt.
+    pub(crate) amp: f32,
+    /// The resting wave's phase, radians. It moves while waiting and stops
+    /// at the prompt.
+    pub(crate) phase: f32,
+    /// How far the ring's front has travelled from the ›.
+    pub(crate) travel: f32,
+    /// The ring's peak; `0` before the prompt.
+    pub(crate) kick: f32,
+    /// Where the line's colour is between the quiet tone (`0`) and its own
+    /// (`1`).
+    pub(crate) tone: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -193,15 +318,19 @@ enum Letters {
 }
 
 impl Scene {
-    /// Everything held back: what the dock shows while the shell starts.
-    fn waiting(entrance: Entrance) -> Self {
+    /// Everything held back: what the dock shows while the shell starts. A
+    /// calendar that does not climb is not lowered either — the wave's line
+    /// stands where the dock's will.
+    fn waiting(calendar: &Calendar, wave: Option<Wave>) -> Self {
         Self {
-            rise: 1.0,
+            rise: if calendar.rise { 1.0 } else { 0.0 },
             band: 0.0,
             lines: [0.0; 2],
             mark: 0.0,
             caret: 0.0,
-            entrance,
+            entrance: calendar.entrance,
+            letter_entrance: calendar.letters_entrance,
+            wave,
             letters: Letters::Hidden,
         }
     }
@@ -231,6 +360,13 @@ fn ease(x: f32) -> f32 {
     ease_axis(0.0, 1.0, unit(x))
 }
 
+/// How much of its height the resting wave has `waited` seconds after the pane
+/// was born: nothing during the hold, up to full height over
+/// [`WAVE_FADE_IN`], and calming over [`WAVE_CALM`] after the cap.
+fn envelope(waited: f32) -> f32 {
+    unit((waited - SHOW as f32) / WAVE_FADE_IN) * (1.0 - unit((waited - CAP as f32) / WAVE_CALM))
+}
+
 impl Arrival {
     /// A scene armed at `born`. `Off` is inert.
     pub(crate) fn new(kind: DockArrival, born: f64, reduce: bool) -> Self {
@@ -242,6 +378,7 @@ impl Arrival {
             forced: false,
             ended: kind == DockArrival::Off,
             at: born,
+            active: false,
             letters: 0,
             caret_at: None,
         }
@@ -252,10 +389,9 @@ impl Arrival {
             return &REDUCED;
         }
         match self.kind {
-            // `ripple` and `dust` play this calendar until they have their own.
-            DockArrival::Off | DockArrival::Type | DockArrival::Dust | DockArrival::Ripple => {
-                &TYPED
-            }
+            // `dust` plays this calendar until it has its own.
+            DockArrival::Off | DockArrival::Type | DockArrival::Dust => &TYPED,
+            DockArrival::Ripple => &RIPPLED,
         }
     }
 
@@ -265,9 +401,20 @@ impl Arrival {
     }
 
     /// The sleep question. Waiting is settled — nothing moves — and so is an
-    /// ended scene; only a playing one keeps the link awake.
+    /// ended scene; only a playing one keeps the link awake, and a wave that
+    /// has started to stir ([`Arrival::stirs`]).
     pub(crate) fn settled(&self) -> bool {
-        self.ended || self.arrived.is_none()
+        self.ended || (self.arrived.is_none() && !self.stirs())
+    }
+
+    /// Whether a waiting scene is moving: its top line is a wave, the hold is
+    /// over and someone is watching. The cap ends it, by arriving the scene.
+    fn stirs(&self) -> bool {
+        !self.ended
+            && self.arrived.is_none()
+            && self.active
+            && self.calendar().wave
+            && self.at >= self.born + SHOW
     }
 
     /// Steps the scene to `now` and says whether the last drawn frame may
@@ -284,6 +431,7 @@ impl Arrival {
             return false;
         }
         self.at = now;
+        self.active = active;
         let playing = self.arrived.is_some();
         if !playing && now >= self.born + CAP {
             if active {
@@ -307,7 +455,7 @@ impl Arrival {
                 self.ended = true;
             }
         }
-        playing || self.ended
+        playing || self.ended || self.stirs()
     }
 
     /// The shell gave its first prompt at `now`. A scene that has not
@@ -374,13 +522,55 @@ impl Arrival {
         if calendar.rise {
             end = end.max(RISE_SECS);
         }
-        for (start, length) in calendar.lines.into_iter().flatten() {
-            end = end.max(start + length);
+        for line in calendar.lines {
+            end = end.max(line.ends_at());
         }
         if !self.forced {
             end = end.max(at + f32::from(self.typed()) * step + span);
         }
         end.max(self.caret_start() + calendar.caret.1)
+    }
+
+    /// The top line as a wave at the stamp the scene was stepped to, if the
+    /// calendar has one and it is time for it.
+    ///
+    /// **Waiting**: nothing until the hold is over (and none for a pane nobody
+    /// watches), then a ripple that fades in and moves. **Arrived**: the ripple
+    /// keeps the height and opacity it had and the phase it stopped at, and dies
+    /// away, and a
+    /// ring spreads right from the ›; the line moves from the quiet tone to its
+    /// own as it goes flat.
+    fn wave(&self, calendar: &Calendar) -> Option<Wave> {
+        if !calendar.wave {
+            return None;
+        }
+        let rest = |waited: f32| WAVE_AMP_PT * envelope(waited);
+        let phase = |waited: f32| waited / WAVE_PHASE_SECS;
+        let Some(arrived) = self.arrived else {
+            let waited = ((self.at - self.born) as f32).max(0.0);
+            return (self.active && waited >= SHOW as f32).then(|| Wave {
+                alpha: unit((waited - SHOW as f32) / WAVE_FADE_IN),
+                amp: rest(waited),
+                phase: phase(waited),
+                travel: 0.0,
+                kick: 0.0,
+                tone: 0.0,
+            });
+        };
+        let since = ((self.at - arrived) as f32).max(0.0);
+        let waited = ((arrived - self.born) as f32).max(0.0);
+        // The opacity the waiting line had at the prompt carries on and rises
+        // to whole with the ground: a prompt in the middle of the fade-in must
+        // not make the line jump.
+        let carried = unit((waited - SHOW as f32) / WAVE_FADE_IN);
+        (since < WAVE_END).then(|| Wave {
+            alpha: carried + (1.0 - carried) * unit(since / calendar.band),
+            amp: rest(waited) * (-since / WAVE_SETTLE).exp(),
+            phase: phase(waited),
+            travel: RING_SPEED * since,
+            kick: RING_KICK_PT * (-since / RING_FADE).exp(),
+            tone: unit((since - TONE_AT) / TONE_SPAN),
+        })
     }
 
     /// The scene to draw, or `None` once it is over.
@@ -389,8 +579,9 @@ impl Arrival {
             return None;
         }
         let calendar = self.calendar();
+        let wave = self.wave(calendar);
         let Some(arrived) = self.arrived else {
-            return Some(Scene::waiting(calendar.entrance));
+            return Some(Scene::waiting(calendar, wave));
         };
         let since = ((self.at - arrived) as f32).max(0.0);
         let (at, step, span) = calendar.letters;
@@ -401,13 +592,16 @@ impl Arrival {
                 0.0
             },
             band: unit(since / calendar.band),
-            lines: match calendar.lines {
-                Some(lines) => lines.map(|(start, length)| ease((since - start) / length)),
-                None => [1.0; 2],
-            },
+            lines: calendar.lines.map(|line| match line {
+                Line::Whole => 1.0,
+                Line::Drawn(start, length) => ease((since - start) / length),
+                Line::Waved => 0.0,
+            }),
             mark: unit((since - calendar.mark.0) / calendar.mark.1),
             caret: unit((since - self.caret_start()) / calendar.caret.1),
             entrance: calendar.entrance,
+            letter_entrance: calendar.letters_entrance,
+            wave,
             letters: if self.forced {
                 Letters::Settled
             } else {
@@ -446,9 +640,10 @@ mod tests {
         if calendar.rise {
             end = later(end, RISE_SECS);
         }
-        if let Some(lines) = calendar.lines {
-            end = later(end, lines[0].0 + lines[0].1);
-            end = later(end, lines[1].0 + lines[1].1);
+        let mut index = 0;
+        while index < 2 {
+            end = later(end, calendar.lines[index].ends_at());
+            index += 1;
         }
         end
     }
@@ -624,9 +819,12 @@ mod tests {
         for columns in [0, 1, 20, LETTER_CAP, u16::MAX] {
             let arrival = playing(columns);
             assert!(arrival.end_secs() <= longest(&TYPED), "{columns}");
+            let ripple = rippling(PROMPT, columns);
+            assert!(ripple.end_secs() <= longest(&RIPPLED), "{columns}");
         }
         // The bound is the calendars', not the belt's: the belt never fires.
         assert!(longest(&TYPED) < ARRIVAL_MAX as f32);
+        assert!(longest(&RIPPLED) < ARRIVAL_MAX as f32);
         assert!(longest(&REDUCED) < ARRIVAL_MAX as f32);
     }
 
@@ -765,6 +963,7 @@ mod tests {
         at(&mut arrival, 0.06);
         let scene = arrival.scene().expect("armed");
         assert_eq!(scene.entrance, Entrance::Fade);
+        assert_eq!(scene.letter_entrance, Entrance::Fade);
         assert_eq!(scene.rise, 0.0, "no climb");
         assert_eq!(scene.lines, [1.0; 2], "no drawing from the left");
         assert!(scene.band > 0.0 && scene.band < 1.0);
@@ -791,6 +990,230 @@ mod tests {
         for since in [0.0, 0.03, 0.11, 0.2, 0.37, 0.5] {
             at(&mut one, since);
             at(&mut two, since);
+            assert_eq!(one.scene(), two.scene(), "{since}");
+        }
+    }
+
+    // **The ripple**: the top line is a wave while the shell starts and a ring
+    // spreads from the › when it speaks.
+
+    /// A ripple scene whose prompt came `prompt` seconds after birth, with
+    /// `columns` of context text noted. Stepped to the prompt.
+    fn rippling(prompt: f64, columns: u16) -> Arrival {
+        let mut arrival = Arrival::new(DockArrival::Ripple, BORN, false);
+        arrival.advance(BORN + prompt, true);
+        arrival.arrive(BORN + prompt, true);
+        arrival.note_letters(columns);
+        arrival
+    }
+
+    /// Steps a ripple scene to `since` seconds after its prompt at `prompt`.
+    fn ripple_at(arrival: &mut Arrival, prompt: f64, since: f64) -> Wave {
+        arrival.advance(BORN + prompt + since, true);
+        arrival
+            .scene()
+            .expect("armed")
+            .wave
+            .expect("the wave owns the line")
+    }
+
+    #[test]
+    fn a_waiting_wave_is_still_for_the_hold_then_stirs_until_the_cap() {
+        let mut arrival = Arrival::new(DockArrival::Ripple, BORN, false);
+        assert!(arrival.settled(), "the hold is spent asleep");
+        assert!(!arrival.advance(BORN + SHOW - 0.01, true));
+        assert!(arrival.settled(), "nothing moves before the hold is over");
+        assert!(arrival.scene().expect("armed").wave.is_none());
+        // The hold is over: the line starts to ripple and the link stays awake.
+        assert!(arrival.advance(BORN + SHOW + 0.05, true), "the step drew");
+        assert!(!arrival.settled(), "a moving wave keeps the link awake");
+        let wave = arrival.scene().expect("armed").wave.expect("stirring");
+        assert!(wave.amp > 0.0 && wave.amp < WAVE_AMP_PT, "{wave:?}");
+        assert!(wave.alpha > 0.0 && wave.alpha < 1.0, "fading in: {wave:?}");
+        assert_eq!(wave.kick, 0.0, "no ring before the shell speaks");
+        // Full height by the time it has faded in; it keeps moving.
+        let early = wave.phase;
+        arrival.advance(BORN + 1.0, true);
+        let full = arrival.scene().expect("armed").wave.expect("stirring");
+        assert_eq!(full.amp, WAVE_AMP_PT);
+        assert_eq!(full.alpha, 1.0);
+        assert!(full.phase > early, "the wave travels");
+        assert!(!arrival.settled());
+        // The cap arrives the scene: the wave is the arrival's from here.
+        arrival.advance(BORN + CAP, true);
+        assert!(!arrival.settled(), "the arrival plays");
+        assert!(arrival.scene().expect("armed").wave.is_some());
+    }
+
+    #[test]
+    fn the_waiting_amplitude_is_zero_a_calm_after_the_cap() {
+        assert_eq!(envelope(0.0), 0.0);
+        assert_eq!(envelope(SHOW as f32), 0.0, "nothing before the hold ends");
+        assert_eq!(envelope(SHOW as f32 + WAVE_FADE_IN), 1.0);
+        assert_eq!(envelope(CAP as f32), 1.0, "full when the cap arrives it");
+        let calm = CAP as f32 + WAVE_CALM;
+        assert!(envelope(calm) < 1e-5, "{WAVE_CALM} s after the cap");
+        assert_eq!(envelope(calm + 1.0), 0.0);
+        assert!(envelope(CAP as f32 + WAVE_CALM / 2.0) < 1.0);
+    }
+
+    #[test]
+    fn a_pane_nobody_watches_does_not_stir() {
+        let mut arrival = Arrival::new(DockArrival::Ripple, BORN, false);
+        assert!(!arrival.advance(BORN + 1.0, false));
+        assert!(arrival.settled(), "an unwatched pane sleeps");
+        assert!(arrival.scene().expect("armed").wave.is_none());
+        // The pane is watched from now on: the wave starts at once.
+        assert!(arrival.advance(BORN + 1.1, true));
+        assert!(!arrival.settled());
+    }
+
+    #[test]
+    fn reduce_motion_and_the_other_kinds_wait_without_moving() {
+        let mut reduced = Arrival::new(DockArrival::Ripple, BORN, true);
+        reduced.advance(BORN + 1.0, true);
+        assert!(reduced.settled(), "Reduce Motion adds no waiting motion");
+        assert!(reduced.scene().expect("armed").wave.is_none());
+        for kind in [DockArrival::Type, DockArrival::Dust] {
+            let mut arrival = Arrival::new(kind, BORN, false);
+            arrival.advance(BORN + 1.0, true);
+            assert!(arrival.settled(), "{kind:?}");
+            assert!(arrival.scene().expect("armed").wave.is_none(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_ring_spreads_from_the_chevron_and_the_line_flattens() {
+        let mut arrival = rippling(1.2, 20);
+        let first = ripple_at(&mut arrival, 1.2, 0.0);
+        assert_eq!(first.travel, 0.0, "the ring starts at the ›");
+        assert_eq!(first.kick, RING_KICK_PT);
+        assert_eq!(first.alpha, 1.0, "a line that was whole stays whole");
+        assert_eq!(first.tone, 0.0, "it starts in the quiet tone");
+        let mut last = first;
+        for step in 1..=55 {
+            let wave = ripple_at(&mut arrival, 1.2, f64::from(step) * 0.01);
+            assert!(wave.travel > last.travel, "the front moves right");
+            assert!(wave.kick < last.kick, "the ring dies away");
+            assert!(wave.amp < last.amp || last.amp == 0.0, "the rest settles");
+            assert_eq!(wave.phase, last.phase, "the phase stops at the prompt");
+            assert!(wave.tone >= last.tone, "the tone only moves one way");
+            last = wave;
+        }
+        assert!(
+            (last.travel - RING_SPEED * 0.55).abs() < 0.01,
+            "{RING_SPEED} points per second: {}",
+            last.travel
+        );
+        assert_eq!(last.tone, 1.0, "the line has its own colour by 540 ms");
+        // While the wave is drawn the top line is its own and held back.
+        assert_eq!(arrival.scene().expect("armed").lines[0], 0.0);
+        // 560 ms: the scene is over and the dock draws its straight line.
+        arrival.advance(BORN + 1.2 + f64::from(WAVE_END), true);
+        assert!(arrival.scene().is_none());
+        assert!(arrival.settled());
+    }
+
+    #[test]
+    fn the_ring_rises_from_the_waiting_wave_it_found() {
+        // A prompt after the wave found its height: the rest decays from it.
+        let mut arrival = rippling(1.2, 0);
+        let start = ripple_at(&mut arrival, 1.2, 0.0);
+        assert_eq!(start.amp, WAVE_AMP_PT);
+        let later = ripple_at(&mut arrival, 1.2, WAVE_SETTLE as f64);
+        assert!((later.amp - WAVE_AMP_PT / std::f32::consts::E).abs() < 1e-3);
+        // A prompt in the hold's first moments: no resting wave, only the ring.
+        let mut fast = rippling(0.1, 0);
+        let wave = ripple_at(&mut fast, 0.1, 0.0);
+        assert_eq!(wave.amp, 0.0);
+        assert_eq!(wave.kick, RING_KICK_PT);
+        // The cap's arrival finds the wave at full height too.
+        let mut forced = Arrival::new(DockArrival::Ripple, BORN, false);
+        forced.advance(BORN + CAP, true);
+        let wave = forced.scene().expect("armed").wave.expect("owns the line");
+        assert_eq!(wave.amp, WAVE_AMP_PT);
+    }
+
+    #[test]
+    fn the_line_keeps_its_opacity_across_the_prompt() {
+        // A prompt in the middle of the line's fade-in: no jump, then whole.
+        let mut arrival = Arrival::new(DockArrival::Ripple, BORN, false);
+        arrival.advance(BORN + 0.25, true);
+        let before = arrival
+            .scene()
+            .expect("armed")
+            .wave
+            .expect("stirring")
+            .alpha;
+        assert!(before > 0.0 && before < 1.0, "{before}");
+        arrival.arrive(BORN + 0.25, true);
+        let at = arrival
+            .scene()
+            .expect("armed")
+            .wave
+            .expect("owns the line")
+            .alpha;
+        assert_eq!(at, before, "the prompt moved the opacity");
+        let mut last = at;
+        for step in 1..=17 {
+            let wave = ripple_at(&mut arrival, 0.25, f64::from(step) * 0.01);
+            assert!(wave.alpha >= last, "the line faded back");
+            last = wave.alpha;
+        }
+        assert_eq!(last, 1.0, "whole with the ground");
+        // A shell faster than the hold had no line: it comes in with the ground.
+        let mut fast = rippling(0.1, 0);
+        assert_eq!(ripple_at(&mut fast, 0.1, 0.0).alpha, 0.0);
+        assert!(ripple_at(&mut fast, 0.1, 0.08).alpha > 0.0);
+    }
+
+    #[test]
+    fn the_ripple_plays_its_own_calendar() {
+        let mut arrival = rippling(1.2, 20);
+        arrival.advance(BORN + 1.2 + 0.03, true);
+        let early = arrival.scene().expect("armed");
+        assert_eq!(
+            (early.entrance, early.letter_entrance),
+            (Entrance::Pop, Entrance::Fade)
+        );
+        assert_eq!(early.rise, 0.0, "the ripple does not climb");
+        assert!(early.band > 0.0 && early.band < 1.0);
+        assert_eq!(early.mark, 0.0, "the › starts at 40 ms");
+        assert_eq!(early.letter(0), 0.0);
+        arrival.advance(BORN + 1.2 + 0.1, true);
+        let middle = arrival.scene().expect("armed");
+        assert!(middle.mark > 0.0, "{middle:?}");
+        assert_eq!(middle.lines[1], 0.0, "the second line starts at 120 ms");
+        assert_eq!(middle.caret, 0.0);
+        arrival.advance(BORN + 1.2 + 0.15, true);
+        assert!(arrival.scene().expect("armed").lines[1] > 0.0);
+        // The context row fades in all at once from 200 ms, the cursor after.
+        arrival.advance(BORN + 1.2 + 0.25, true);
+        let late = arrival.scene().expect("armed");
+        assert!(late.letter(0) > 0.0 && late.letter(0) < 1.0, "{late:?}");
+        assert_eq!(late.letter(0), late.letter(19), "all at once");
+        assert!(late.caret > 0.0, "the cursor starts at 220 ms: {late:?}");
+        assert!(run_from(&mut arrival, BORN + 1.2) <= ARRIVAL_MAX);
+    }
+
+    #[test]
+    fn a_ripple_plays_to_the_end_inside_the_maximum_for_any_text() {
+        for columns in [0, 1, 12, LETTER_CAP, u16::MAX] {
+            let mut arrival = rippling(1.2, columns);
+            assert!(!arrival.settled());
+            let took = run_from(&mut arrival, BORN + 1.2);
+            assert!(took <= ARRIVAL_MAX + 1.0 / 120.0, "{columns}: {took}s");
+            assert!(arrival.settled());
+        }
+    }
+
+    #[test]
+    fn the_ripple_scene_is_deterministic() {
+        let mut one = rippling(1.2, 25);
+        let mut two = rippling(1.2, 25);
+        for since in [0.0, 0.03, 0.11, 0.2, 0.37, 0.5] {
+            one.advance(BORN + 1.2 + since, true);
+            two.advance(BORN + 1.2 + since, true);
             assert_eq!(one.scene(), two.scene(), "{since}");
         }
     }

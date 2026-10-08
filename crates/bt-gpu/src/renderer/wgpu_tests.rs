@@ -1201,6 +1201,172 @@ fn arriving_dock_frame(
     frame
 }
 
+/// The ripple's scene: `since` seconds after a prompt at 1.2 s (`waiting` →
+/// that long after birth, before any prompt).
+fn ripple_scene(since: f64, waiting: bool) -> crate::arrival::Scene {
+    use crate::arrival::Arrival;
+    let mut arrival = Arrival::new(bt_core::DockArrival::Ripple, 10.0, false);
+    if waiting {
+        arrival.advance(10.0 + since, true);
+    } else {
+        arrival.advance(11.2, true);
+        arrival.arrive(11.2, true);
+        arrival.advance(11.2 + since, true);
+    }
+    arrival.scene().expect("the scene is still armed")
+}
+
+/// A scene whose wave is `wave`, whatever time says.
+fn waved(mut scene: crate::arrival::Scene, wave: crate::arrival::Wave) -> crate::arrival::Scene {
+    scene.wave = Some(wave);
+    scene
+}
+
+/// A bare dock of one input row on an `EDGE`-high texture: opaque green
+/// ground, a white top line, red for the wave's quiet tone and no letters
+/// or › — what the pixels can show is the line.
+fn waving_dock_frame(m: CellMetrics, edge: u32, scene: Option<crate::arrival::Scene>) -> Frame {
+    let mut frame = glyph_frame(m);
+    frame.set_dock_input_rows(Some(1));
+    frame.set_dock_band(edge as f32, 0.0);
+    let ground = LinearRgba::from_srgb(0x00, 0x80, 0x00);
+    frame.open_dock(ground, WHITE, ground);
+    frame.set_dock_quiet(LinearRgba::from_srgb(0xff, 0x00, 0x00));
+    frame.set_dock_scene(scene, 0.0);
+    frame.set_dock_fx(std::iter::empty(), &Clusters::default(), WHITE);
+    frame
+}
+
+/// Pixels in `rows` (all columns, or `cols`) that are not the black clear
+/// colour.
+fn inked_in(
+    pixels: &[u8],
+    edge: u32,
+    rows: std::ops::Range<usize>,
+    cols: std::ops::Range<usize>,
+) -> usize {
+    rows.flat_map(|y| cols.clone().map(move |x| (x, y)))
+        .filter(|&(x, y)| pixel_at(pixels, edge as usize, x, y) != (0, 0, 0))
+        .count()
+}
+
+#[test]
+fn a_flat_wave_is_the_docks_own_line_pixel_for_pixel() {
+    // The swap between the wave and the dock's line is invisible only if a
+    // wave with no height lands on the same row in the same colour, edge
+    // pixels included. Whole frames compared: the line, the ground, the rest.
+    const EDGE: u32 = 128;
+    let w = Renderer::new();
+    let m = flush_left(w.cell_metrics(SCALE));
+    let flat = crate::arrival::Wave {
+        alpha: 1.0,
+        amp: 0.0,
+        phase: 0.0,
+        travel: 0.0,
+        kick: 0.0,
+        tone: 1.0,
+    };
+    let rested = w.render_offscreen(EDGE, BACKGROUND, &waving_dock_frame(m, EDGE, None));
+    // Partway through the arrival: the ground is whole, the dock's own top line
+    // is held back, the wave draws it.
+    let scene = waved(ripple_scene(0.3, false), flat);
+    let frame = waving_dock_frame(m, EDGE, Some(scene));
+    assert!(frame.dock_wave(100.0, EDGE as f32).is_some());
+    let wave = w.render_offscreen(EDGE, BACKGROUND, &frame);
+    let top = frame.band_top_px(EDGE as f32) as usize;
+    assert_eq!(
+        pixel_at(&wave, EDGE as usize, 40, top),
+        (0xff, 0xff, 0xff),
+        "the line is on the dock's top row, in its colour"
+    );
+    assert_eq!(wave, rested, "a flat wave is today's line");
+}
+
+#[test]
+fn a_wave_with_height_paints_beyond_its_row_and_the_ring_only_behind_its_front() {
+    const EDGE: u32 = 128;
+    let w = Renderer::new();
+    let m = flush_left(w.cell_metrics(SCALE));
+    let flat = crate::arrival::Wave {
+        alpha: 1.0,
+        amp: 0.0,
+        phase: 0.0,
+        travel: 0.0,
+        kick: 0.0,
+        tone: 1.0,
+    };
+    let top = waving_dock_frame(m, EDGE, None).band_top_px(EDGE as f32) as usize;
+    let above = top - 10..top;
+    let render = |wave| {
+        let scene = waved(ripple_scene(0.3, false), wave);
+        w.render_offscreen(EDGE, BACKGROUND, &waving_dock_frame(m, EDGE, Some(scene)))
+    };
+    let all = 0..EDGE as usize;
+    // No height: nothing above the dock's top row.
+    assert_eq!(inked_in(&render(flat), EDGE, above.clone(), all.clone()), 0);
+    // A resting wave a quarter-cycle out of phase: crests and troughs both,
+    // so the line climbs over the dock's top somewhere along the window.
+    let resting = render(crate::arrival::Wave {
+        amp: 1.8,
+        phase: std::f32::consts::FRAC_PI_2,
+        ..flat
+    });
+    assert!(
+        inked_in(&resting, EDGE, above.clone(), all.clone()) > 0,
+        "the wave stayed on its row"
+    );
+    // The ring is behind its front: ahead of it the line is flat.
+    let (cell_w, _) = m.cell_px();
+    let front = 64.0;
+    let ring = render(crate::arrival::Wave {
+        kick: 2.4,
+        travel: (front - f32::from(cell_w) * 0.5) / m.scale() as f32,
+        ..flat
+    });
+    let behind = inked_in(&ring, EDGE, above.clone(), 0..front as usize);
+    let ahead = inked_in(&ring, EDGE, above, front as usize + 2..EDGE as usize);
+    assert!(behind > 0, "the ring left no trace behind its front");
+    assert_eq!(ahead, 0, "the line is disturbed ahead of the ring");
+}
+
+#[test]
+fn a_waiting_ripple_draws_its_line_and_nothing_else() {
+    // The waiting scene holds the ground and the lines back: what is on the
+    // pixels is the wave, in its quiet tone, within its reach of the dock's
+    // top row.
+    const EDGE: u32 = 128;
+    let w = Renderer::new();
+    let m = flush_left(w.cell_metrics(SCALE));
+    let frame = waving_dock_frame(m, EDGE, Some(ripple_scene(1.0, true)));
+    let top = frame.band_top_px(EDGE as f32) as usize;
+    let pixels = w.render_offscreen(EDGE, BACKGROUND, &frame);
+    let reach = (crate::arrival::WAVE_REACH_PT * m.scale() as f32).ceil() as usize + 2;
+    let all = 0..EDGE as usize;
+    assert!(
+        inked_in(&pixels, EDGE, top - reach..top + reach + 1, all.clone()) > 0,
+        "no line"
+    );
+    assert_eq!(
+        inked_in(&pixels, EDGE, 0..top - reach, all.clone()),
+        0,
+        "ink above the wave's reach"
+    );
+    assert_eq!(
+        inked_in(&pixels, EDGE, top + reach + 1..EDGE as usize, all),
+        0,
+        "the held-back ground was drawn"
+    );
+    let (r, g, b) = (0..EDGE as usize)
+        .flat_map(|x| (top - reach..top + reach + 1).map(move |y| (x, y)))
+        .map(|(x, y)| pixel_at(&pixels, EDGE as usize, x, y))
+        .max_by_key(|&(r, ..)| r)
+        .expect("pixels");
+    assert!(
+        r > 0x40 && g == 0 && b == 0,
+        "not the quiet tone: {r} {g} {b}"
+    );
+}
+
 /// Pixels in `rows` × `cols` (window pixels) that are close to white.
 fn white_in(
     pixels: &[u8],
@@ -1237,6 +1403,23 @@ fn scene_dock_arrival(m: CellMetrics) -> Scene {
     )
 }
 
+/// The dock under the ripple: the line a wave with the ring spreading from
+/// the ›, the › and the letters coming in.
+fn scene_dock_wave(m: CellMetrics) -> Scene {
+    const EDGE: u32 = 192;
+    let scene = ripple_scene(0.15, false);
+    assert!(scene.wave.is_some_and(|wave| wave.kick > 0.0));
+    let mut frame = arriving_dock_frame(m, EDGE, Some(scene), 0.0);
+    frame.set_dock_quiet(Theme::BATERI.quiet_linear());
+    frame.set_dock_fx(std::iter::empty(), &Clusters::default(), WHITE);
+    assert!(frame.dock_wave(100.0, EDGE as f32).is_some());
+    (
+        "dock arrival: the top line as a wave with the ring spreading",
+        EDGE,
+        frame,
+    )
+}
+
 fn scenes(m: CellMetrics) -> Vec<Scene> {
     let mut scenes = vec![
         scene_midtone(),
@@ -1260,6 +1443,7 @@ fn scenes(m: CellMetrics) -> Vec<Scene> {
         scene_fill_glyphs(m),
         scene_dock_glyphs(m),
         scene_dock_arrival(m),
+        scene_dock_wave(m),
         scene_growing_band_glyphs(m),
         scene_selection_corners(),
         scene_unfocused_selection(),

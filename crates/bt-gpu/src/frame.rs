@@ -38,7 +38,7 @@ use bt_core::{
     LinearRgba, SearchRun, SelectionRun, TrackBlock, TrackMark, UnderlineStyle, UnfocusedCaret,
 };
 
-use crate::arrival::Scene;
+use crate::arrival::{Scene, WAVE_REACH_PT};
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
 use crate::metrics::CellMetrics;
 use crate::scrollbar::{HAIRLINE_ALPHA, Look, ScrollbarLayout, TRACK_ALPHA};
@@ -632,6 +632,18 @@ pub(crate) struct DockSurface {
     buttons: [Option<DockButton>; 2],
 }
 
+impl DockSurface {
+    /// The colour the top line is drawn in: its own, or the progress bar's
+    /// empty track while an upload fills it.
+    fn top_line(&self) -> [f32; 4] {
+        if self.progress.is_some() {
+            self.track
+        } else {
+            self.edge
+        }
+    }
+}
+
 /// Alpha of the upload button's fill and border, per state —
 /// a **design constant**, the values of the approved design: a resting button
 /// is a faint fill and a distinct border, under the pointer both darken, and
@@ -646,6 +658,18 @@ const fn button_alpha(state: ButtonState) -> (f32, f32) {
         ButtonState::Hover => (0.34, 0.7),
         ButtonState::Pressed => (0.5, 0.7),
     }
+}
+
+/// The dock's top line drawn as a wave ([`Frame::dock_wave`]): one quad in
+/// **window** space with the `wave_fragment`'s `core` and `shape`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WaveDraw {
+    pub(crate) instance: Instance,
+    /// `(the line's centre y in window space, pixels per point, 0, 0)`.
+    pub(crate) core: [f32; 4],
+    /// `(resting peak, phase, the ring's front x, the ring's peak)`, all in
+    /// pixels but the phase.
+    pub(crate) shape: [f32; 4],
 }
 
 /// One draw of a rounded rectangle: the quad (dock-local), `caret_fragment`'s
@@ -1043,6 +1067,12 @@ pub(crate) struct Frame {
     /// separate constant it could diverge from the `cols` computation — its
     /// having a single source for all three is the condition for the gutter.
     gutter_px: f32,
+    /// The backing scale, physical pixels per point — the design lengths the
+    /// wave is drawn in are points ([`CellMetrics::scale`]). Carried by
+    /// [`Frame::clear`] with the rest of the metrics.
+    scale: f32,
+    /// The tone the dock's wave line starts in ([`Frame::set_dock_quiet`]).
+    dock_quiet: [f32; 4],
     /// The **drawn** top of the dock band, **in pixels in window space**; if
     /// there is no dock, infinity (the caret never falls into the dock slot).
     ///
@@ -1441,6 +1471,7 @@ impl Frame {
         self.context_cell_px = f32::from(metrics.context_cell_px());
         self.rule_px = f32::from(metrics.rule_px());
         self.gutter_px = f32::from(metrics.gutter_px());
+        self.scale = metrics.scale() as f32;
         // **Infinity**, not zero: zero would mean "the dock band is at the
         // top of the window" and every caret would fall into the dock slot.
         // The caller overwrites it in every dock frame
@@ -2395,6 +2426,58 @@ impl Frame {
         self.dock_rise_px
     }
 
+    /// The tone the dock's wave line starts in (`bt_core::Theme::quiet_linear`,
+    /// the context row's own); it moves to the line's colour as the line goes
+    /// flat. Written with the scene, by both frame paths.
+    pub(crate) fn set_dock_quiet(&mut self, quiet: LinearRgba) {
+        self.dock_quiet = quiet.to_array();
+    }
+
+    /// The dock's top line as a wave, when the scene gives it one: the quad
+    /// and the numbers `wave_fragment` draws it from. `band_y` is the top of
+    /// the drawn band in window space, rise included — the line's centre is
+    /// the middle of the row the dock's own line occupies.
+    ///
+    /// **Window space, not the band's**: the line leaves its row on both
+    /// sides, and a viewport at the band's top would clip what rises above
+    /// it. The quad reaches [`WAVE_REACH_PT`] past the row and a pixel or two
+    /// more for the edge's softness.
+    ///
+    /// The scene gives lengths in points; the ring's front starts at the
+    /// middle of the ›'s cell and the line's colour is the dock's own top
+    /// line by the time it is flat — the one the dock draws when the scene
+    /// ends ([`DockSurface::top_line`], one copy).
+    pub(crate) fn dock_wave(&self, band_y: f32, width_px: f32) -> Option<WaveDraw> {
+        let dock = self.dock?;
+        let wave = self.dock_scene?.wave?;
+        let scale = self.scale.max(1.0);
+        let [qr, qg, qb, qa] = self.dock_quiet;
+        let [er, eg, eb, ea] = dock.top_line();
+        let tone = wave.tone.clamp(0.0, 1.0);
+        // Exact at both ends: a flat line is the dock's own colour to the bit.
+        let mix = |from: f32, to: f32| from * (1.0 - tone) + to * tone;
+        let alpha = mix(qa, ea) * wave.alpha;
+        if alpha <= 0.0 || width_px <= 0.0 {
+            return None;
+        }
+        let reach = (WAVE_REACH_PT * scale).ceil() + 2.0;
+        let origin = self.gutter_px + self.cell_px.0 * 0.5;
+        Some(WaveDraw {
+            instance: Instance {
+                pos: [0.0, band_y - reach],
+                size: [width_px, reach * 2.0 + SEPARATOR_PX],
+                rgba: [mix(qr, er), mix(qg, eg), mix(qb, eb), alpha],
+            },
+            core: [band_y + SEPARATOR_PX * 0.5, scale, 0.0, 0.0],
+            shape: [
+                wave.amp * scale,
+                wave.phase,
+                origin + wave.travel * scale,
+                wave.kick * scale,
+            ],
+        })
+    }
+
     /// How many columns of context text the dock holds: one past the last
     /// letter's column. The scene sizes its typing by it.
     pub(crate) fn dock_letter_span(&self) -> u16 {
@@ -2418,7 +2501,7 @@ impl Frame {
         let Some(scene) = self.dock_scene else {
             return;
         };
-        let effect = scene.entrance.fx_id();
+        let letter_effect = scene.letter_entrance.fx_id();
         for &(index, col) in &self.dock_letters {
             let t = scene.letter(col);
             if t >= 1.0 {
@@ -2430,7 +2513,7 @@ impl Frame {
                     glyph: self.dock_glyphs[index],
                     rule: None,
                     t,
-                    effect,
+                    effect: letter_effect,
                     seed: 0.0,
                 });
             }
@@ -2462,7 +2545,7 @@ impl Frame {
                 },
                 rule: Some(rule.kind),
                 t: scene.mark,
-                effect,
+                effect: scene.entrance.fx_id(),
                 seed: 0.0,
             });
         }
@@ -2920,10 +3003,8 @@ impl Frame {
         // the filled part on top is in the edge's colour; when absent the
         // ground is the edge itself and the fill has zero width (the array's
         // length is fixed, so the caller does not branch).
-        let (edge_base, fill) = match dock.progress {
-            Some(p) => (dock.track, width_px * p.clamp(0.0, 1.0)),
-            None => (dock.edge, 0.0),
-        };
+        let edge_base = dock.top_line();
+        let fill = dock.progress.map_or(0.0, |p| width_px * p.clamp(0.0, 1.0));
         let band = self.dock_band_px();
         let rows = if self.dock.is_some() {
             self.dock_rows
@@ -5965,6 +6046,175 @@ mod tests {
         // Over: the surface is today's, bit for bit.
         arrive(&mut frame, None);
         assert_eq!(frame.dock_ground(500.0), plain);
+    }
+
+    /// A ripple scene: `since` seconds after a prompt at 1.2 s with ten
+    /// columns of text, or — `waiting` — `since` seconds after birth.
+    fn ripple_at(since: f64, waiting: bool) -> Scene {
+        use crate::arrival::Arrival;
+        let mut arrival = Arrival::new(bt_core::DockArrival::Ripple, 100.0, false);
+        if waiting {
+            arrival.advance(100.0 + since, true);
+        } else {
+            arrival.advance(101.2, true);
+            arrival.arrive(101.2, true);
+            arrival.note_letters(10);
+            arrival.advance(101.2 + since, true);
+        }
+        arrival.scene().expect("the scene is still armed")
+    }
+
+    /// The dock at 2x with a ripple scene written, quiet tone `QUIET`.
+    fn rippling_dock(scene: Option<Scene>) -> Frame {
+        let mut frame = Frame::default();
+        frame.clear(
+            CellMetrics::new(8, 16, 8, 6, 1, 2.0).expect("non-zero cell"),
+            CaretStyle::default(),
+        );
+        frame.set_dock_input_rows(Some(1));
+        frame.push_dock(typed_cell(2, 'l'));
+        for (col, ch) in (0u16..).zip("~/src|main".chars()) {
+            frame.push_dock(context_cell(col, ch));
+        }
+        frame.push_dock_sigil(CURSOR);
+        frame.open_dock(BG, SUCCESS, CURSOR);
+        frame.set_dock_quiet(QUIET);
+        arrive(&mut frame, scene);
+        frame
+    }
+
+    const QUIET: LinearRgba = bt_core::Theme::BATERI.quiet_linear();
+
+    #[test]
+    fn the_wave_owns_the_top_line_and_gives_it_back_when_the_scene_ends() {
+        let plain = rippling_dock(None);
+        assert!(plain.dock_wave(100.0, 500.0).is_none(), "no scene, no wave");
+        // Nothing is drawn while the hold lasts.
+        let held = rippling_dock(Some(ripple_at(0.1, true)));
+        assert!(held.dock_wave(100.0, 500.0).is_none());
+        for (scene, what) in [
+            (ripple_at(1.0, true), "waiting"),
+            (ripple_at(0.0, false), "at the prompt"),
+            (ripple_at(0.3, false), "partway"),
+        ] {
+            let frame = rippling_dock(Some(scene));
+            assert_eq!(
+                frame.dock_ground(500.0)[1].size[0],
+                0.0,
+                "{what}: the dock's own line is held back"
+            );
+            assert_eq!(frame.dock_ground(500.0)[2].size[0], 0.0, "{what}: fill");
+            assert!(frame.dock_wave(100.0, 500.0).is_some(), "{what}");
+        }
+        // Over: the dock draws its own line again, in full, and there is no wave.
+        let over = rippling_dock(None);
+        assert_eq!(over.dock_ground(500.0)[1].size[0], 500.0);
+    }
+
+    #[test]
+    fn the_wave_quad_is_centred_on_the_docks_top_row_with_room_for_both_peaks() {
+        let frame = rippling_dock(Some(ripple_at(1.0, true)));
+        let wave = frame.dock_wave(100.0, 500.0).expect("waving");
+        let quad = wave.instance;
+        assert_eq!(quad.pos[0], 0.0);
+        assert_eq!(quad.size[0], 500.0, "the window's width");
+        assert_eq!(
+            quad.pos[1] + quad.size[1] * 0.5,
+            wave.core[0],
+            "centred on the line"
+        );
+        assert_eq!(wave.core[0], 100.5, "the middle of the row the line fills");
+        assert_eq!(wave.core[1], 2.0, "pixels per point");
+        assert!(
+            quad.size[1] * 0.5 > WAVE_REACH_PT * 2.0,
+            "room above and below for both peaks at 2x"
+        );
+        // The resting peak reached its height by 1 s, in pixels.
+        assert_eq!(wave.shape[0], 1.8 * 2.0);
+        assert_eq!(wave.shape[3], 0.0, "no ring before the prompt");
+    }
+
+    #[test]
+    fn the_rings_front_starts_at_the_chevron_and_moves_right_in_pixels() {
+        let at = |since| {
+            rippling_dock(Some(ripple_at(since, false)))
+                .dock_wave(100.0, 500.0)
+                .expect("waving")
+        };
+        let (first, later) = (at(0.0), at(0.1));
+        // Gutter 6 + half a cell of 8, at the prompt.
+        assert_eq!(first.shape[2], 6.0 + 4.0);
+        assert!(
+            (later.shape[2] - first.shape[2] - 160.0 * 2.0).abs() < 0.1,
+            "{} points a second, 2x: {} → {}",
+            1600,
+            first.shape[2],
+            later.shape[2]
+        );
+        assert!(later.shape[3] < first.shape[3], "the ring dies away");
+    }
+
+    #[test]
+    fn the_wave_goes_from_the_quiet_tone_to_the_lines_own() {
+        let rgb = |wave: WaveDraw| {
+            [
+                wave.instance.rgba[0],
+                wave.instance.rgba[1],
+                wave.instance.rgba[2],
+            ]
+        };
+        let quiet = QUIET.to_array();
+        let own = SUCCESS.to_array();
+        let tone = |since, waiting| {
+            rippling_dock(Some(ripple_at(since, waiting)))
+                .dock_wave(100.0, 500.0)
+                .map(rgb)
+        };
+        assert_eq!(tone(1.0, true), Some([quiet[0], quiet[1], quiet[2]]));
+        assert_eq!(tone(0.1, false), Some([quiet[0], quiet[1], quiet[2]]));
+        let middle = tone(0.4, false).expect("waving");
+        assert!(middle != [quiet[0], quiet[1], quiet[2]] && middle != [own[0], own[1], own[2]]);
+        // Flat: the colour the dock draws it in when the scene ends, to the bit.
+        assert_eq!(tone(0.55, false), Some([own[0], own[1], own[2]]));
+        // A progress bar's line is its track while an upload fills it.
+        let mut frame = rippling_dock(Some(ripple_at(0.55, false)));
+        frame.set_dock_progress(Some(5_000), QUIET);
+        let wave = frame.dock_wave(100.0, 500.0).expect("waving");
+        assert_eq!(rgb(wave), [quiet[0], quiet[1], quiet[2]]);
+    }
+
+    #[test]
+    fn the_wave_is_transparent_before_it_fades_in() {
+        // At the hold's end the line has no opacity yet: nothing to draw.
+        let frame = rippling_dock(Some(ripple_at(0.18, true)));
+        assert!(frame.dock_wave(100.0, 500.0).is_none());
+        let frame = rippling_dock(Some(ripple_at(0.29, true)));
+        let alpha = frame
+            .dock_wave(100.0, 500.0)
+            .expect("fading in")
+            .instance
+            .rgba[3];
+        assert!(alpha > 0.0 && alpha < 1.0, "{alpha}");
+    }
+
+    #[test]
+    fn the_ripple_pops_its_chevron_and_fades_its_letters() {
+        use crate::arrival::Entrance;
+        let frame = rippling_dock(Some(ripple_at(0.25, false)));
+        let arrivals = frame.dock_arrivals();
+        let mark = arrivals
+            .iter()
+            .find(|fx| fx.rule.is_some())
+            .expect("› in flight");
+        assert_eq!(mark.effect, Entrance::Pop.fx_id());
+        let letters: Vec<_> = arrivals.iter().filter(|fx| fx.rule.is_none()).collect();
+        assert!(!letters.is_empty(), "the context row is coming in");
+        assert!(letters.iter().all(|fx| fx.effect == Entrance::Fade.fx_id()));
+        let first = letters[0].t;
+        assert!(
+            letters.iter().all(|fx| fx.t == first),
+            "all the letters at once"
+        );
     }
 
     #[test]
