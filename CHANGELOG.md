@@ -38,6 +38,14 @@ of every installed copy. A version without a section is not released.
   sideways whenever a `cpu` or `mem` number gained or lost a digit (`9%` →
   `10%`). Each number now has a column of its own, so the line moves only when
   a value turns critical.
+- **Text stays readable on a light theme.** A program set up for a dark
+  terminal printed its text white, which vanished on `bateri-light` and
+  `linen`; the light themes' own white and dim colors read poorly too. Text a
+  program colors too close to its background is now drawn darker or lighter
+  until it reaches a 3:1 contrast. Only the text changes: backgrounds a program
+  paints keep their color, and box, block and Powerline characters are left as
+  they are. Choose how strict it is, or turn it off, in Settings ▸ Appearance
+  ▸ Minimum contrast (`[appearance] minimum_contrast` in `settings.toml`).
 
 ## [0.9.0] - 2026-10-08
 

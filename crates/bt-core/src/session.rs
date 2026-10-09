@@ -3378,8 +3378,22 @@ fn cell_cluster(
 /// The fields resolved **after** the skip gate; `inverse`, `dim` and `ruled`
 /// come in resolved **before** the gate.
 ///
-/// The sharing is not a style decision: this block has two traps and both
+/// The sharing is not a style decision: this block has three traps and each
 /// would silently diverge in a second copy.
+///
+/// **The foreground keeps `contrast` against the cell's own ground**
+/// ([`LinearRgba::legible_on`], `[appearance] minimum_contrast`): the ground
+/// is the colour the inverse-video swap leaves behind the text — the same
+/// pair, resolved the same way — so white text a dark-theme program paints on
+/// a light theme darkens until it reads, while the ground it was painted on
+/// stays. A `selected` cell's ground is not drawn (the selection's shape is
+/// beneath it), so it measures against the theme's selection instead — the
+/// focused one; the unfocused fade sits closer to the background, which the
+/// theme's selection is held to anyway. Picture characters ([`color::is_drawing`])
+/// keep their ink. The rule lives here because this is the one place the
+/// grid and the fill band resolve ink — the band's row must read the way it
+/// will when it reaches the screen; the dock's mirror text has its own call
+/// (`dock::cell`).
 ///
 /// **The five flags are asked separately and the curl comes first.**
 /// `UNDERCURL` does **not contain** `UNDERLINE`: `Attr::Undercurl` first
@@ -3400,13 +3414,16 @@ fn cell_cluster(
 /// colour and the drawer reading it would paint the strikeout red. It goes
 /// down to the side table (`CellExtra`), i.e. the cost is paid only for cells
 /// that pass the gate.
+#[allow(clippy::too_many_arguments)]
 fn cell_style(
     cell: &TermCell,
     inverse: bool,
     dim: bool,
     ruled: bool,
+    selected: bool,
     colors: &Colors,
     theme: &Theme,
+    contrast: f64,
 ) -> CellStyle {
     let flags = cell.flags;
     // Foreground **unconditionally**: it must be what the field name says, or
@@ -3420,10 +3437,26 @@ fn cell_style(
     // `cell.fg` — in inverse video that colour has become the background.
     // The rule is single in `color::resolve_fg`: both arms go through the same
     // function, the inverse-video arm cannot forget the dim role.
-    let fg = if inverse {
-        color::resolve(cell.bg, colors, theme)
+    let (fg, ground) = if inverse {
+        (
+            color::resolve(cell.bg, colors, theme),
+            color::resolve_fg(cell.fg, dim, colors, theme),
+        )
     } else {
-        color::resolve_fg(cell.fg, dim, colors, theme)
+        (
+            color::resolve_fg(cell.fg, dim, colors, theme),
+            color::resolve(cell.bg, colors, theme),
+        )
+    };
+    let ground = if selected {
+        theme.selection_linear()
+    } else {
+        color::linear_rgba(ground)
+    };
+    let fg = if color::is_drawing(cell.c) {
+        color::linear_rgba(fg)
+    } else {
+        color::linear_rgba(fg).legible_on(ground, contrast)
     };
     let underline = if !ruled {
         UnderlineStyle::None
@@ -3441,7 +3474,7 @@ fn cell_style(
         UnderlineStyle::None
     };
     CellStyle {
-        fg: color::linear_rgba(fg),
+        fg,
         underline,
         strikeout: ruled && flags.contains(Flags::STRIKEOUT),
         // `None` → the drawing side uses `fg`; exactly the same pattern as `bg`
@@ -4492,6 +4525,19 @@ pub struct Session {
     /// owns the caret and re-deriving that decision would mean
     /// writing `frame()`'s three preconditions a second time.
     caret_in_dock: AtomicBool,
+    /// `[appearance] minimum_contrast` as `f64` bits — the ratio a program's
+    /// text keeps against its ground in [`Session::frame`]
+    /// ([`LinearRgba::legible_on`]); [`Session::set_minimum_contrast`]
+    /// writes it.
+    ///
+    /// **Atomic, not a lock**: one number, read once per frame before the
+    /// `Term` lock (the theme's rule — no second mutex goes under it) and
+    /// paired with no other data, so `Relaxed` suffices. Born at the
+    /// setting's default ([`crate::settings::MINIMUM_CONTRAST`]) — a timed
+    /// run reads no file and draws with the default, and the shell gives a
+    /// window's own value on the same main-thread turn the session is born,
+    /// before the first frame.
+    minimum_contrast: AtomicU64,
     /// The search's compiled pattern and generation in the scrollback —
     /// a **leaf lock**, precedent `theme`; the borrowing rule is in [`SearchSlot`].
     search: Mutex<SearchSlot>,
@@ -5108,6 +5154,7 @@ impl Session {
             // From then on the content frames write it.
             alt_screen: AtomicBool::new(alt_at_birth),
             caret_in_dock: AtomicBool::new(false),
+            minimum_contrast: AtomicU64::new(crate::settings::MINIMUM_CONTRAST.to_bits()),
             search: Mutex::new(SearchSlot::default()),
             // Nothing wanted at opening: the shell asks when a bar is wide.
             block_index: Mutex::new(block_index::BlockSlot::default()),
@@ -5265,6 +5312,9 @@ impl Session {
         // lock. A swap falling between the copy and the lock draws at most one
         // frame with the old colour; whoever writes the swap requests a frame anyway.
         let theme = *lock(&self.adapter.0.theme);
+        // The ink's floor, read once beside the theme: the grid and the fill
+        // band draw this frame with one value ([`Session::dock`] reads its own).
+        let contrast = f64::from_bits(self.minimum_contrast.load(Ordering::Relaxed));
         // The theme's neighbour, in the same round and for the same reason: a
         // leaf lock does not go under `Term`.
         let blink = *lock(&self.adapter.0.blink);
@@ -6001,7 +6051,9 @@ impl Session {
             // while the `Term` lock is held (colour resolution, descent to the side
             // table) and on an empty grid nearly all the cells are not drawn. The
             // shared piece ([`cell_style`]): the fill loop passes through the same place.
-            let style = cell_style(cell, inverse, dim, ruled, colors, &theme);
+            let style = cell_style(
+                cell, inverse, dim, ruled, selected, colors, &theme, contrast,
+            );
 
             // **The duration counter's collision criterion**, collected in phase 1:
             // the command row's last inked column. Since `display_iter` comes in row
@@ -6344,7 +6396,8 @@ impl Session {
                 if bg.is_none() && ch.is_none() && !ruled && hovered.is_none() {
                     continue;
                 }
-                let style = cell_style(cell, inverse, dim, ruled, colors, &theme);
+                // Fill rows are never selected (the loop's head says why).
+                let style = cell_style(cell, inverse, dim, ruled, false, colors, &theme, contrast);
                 let mut drawn = Cell {
                     col,
                     row: fill_row,
@@ -9690,6 +9743,8 @@ impl Session {
         edits: impl FnMut(DockEdit),
     ) -> Dock {
         let theme = *lock(&self.adapter.0.theme);
+        // The mirror's text keeps the grid's floor ([`cell_style`]'s rule).
+        let contrast = f64::from_bits(self.minimum_contrast.load(Ordering::Relaxed));
         // No band has no input row either: the hover, the window and the trace
         // below read the remote session's zero.
         let input_rows = band.unwrap_or(0);
@@ -9735,6 +9790,7 @@ impl Session {
             context,
             shell,
             &theme,
+            contrast,
             cols,
             band,
             scroll,
@@ -10611,6 +10667,23 @@ impl Session {
             changed
         };
         if changed {
+            self.request_frame();
+        }
+    }
+
+    /// Sets the least contrast ratio a program's text keeps against its own
+    /// ground (`[appearance] minimum_contrast`; `1` = off) and requests a
+    /// frame — the next frame's grid, fill band and dock are drawn with it.
+    ///
+    /// The same value is a no-op, by [`Session::set_theme`]'s reasoning: no
+    /// frame is requested, so a save that changes another key keeps zero
+    /// frames when idle. The `Term` lock is not touched — the rule acts on
+    /// the drawn colour, not on the grid.
+    pub fn set_minimum_contrast(&self, ratio: f64) {
+        let previous = self
+            .minimum_contrast
+            .swap(ratio.to_bits(), Ordering::Relaxed);
+        if previous != ratio.to_bits() {
             self.request_frame();
         }
     }
@@ -15963,6 +16036,61 @@ mod tests {
     }
 
     #[test]
+    fn minimum_contrast_lifts_the_ink_only() {
+        // A dark-theme program on the light theme: white text in truecolor
+        // (past the palette — no theme value reaches it) and ANSI white, both
+        // drawn at the floor. The ground a program painted keeps its colour,
+        // ink that already reads keeps its own, and a half block keeps its
+        // ink — it is a picture.
+        let wake = Arc::new(TestWake::default());
+        let light = Theme::BATERI_LIGHT;
+        let session = spawn_session(
+            "printf '\\033[38;2;255;255;255mW\\033[37mw\
+             \\033[38;2;255;255;255;48;2;40;40;40mX\
+             \\033[0;38;2;255;255;255m\\342\\226\\200\\033[0ma'; sleep 5",
+            Arc::clone(&wake),
+        );
+        session.set_theme(light);
+        let cells = wait_frame(&session, &wake, |cells| glyph_text(cells) == "WwX▀a");
+        let at = |cells: &[Cell], col| *cells.iter().find(|c| c.col == col).expect("cell");
+        let apart = |a: LinearRgba, b: LinearRgba| {
+            let (x, y) = (f64::from(a.luminance()), f64::from(b.luminance()));
+            let (light, dark) = if x > y { (x, y) } else { (y, x) };
+            (light + 0.05) / (dark + 0.05)
+        };
+        let ground = light.background_linear();
+        let white = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+        for col in [0, 1] {
+            let cell = at(&cells, col);
+            assert!((apart(cell.fg, ground) - 3.0).abs() < 1e-3, "{cell:?}");
+            assert_eq!(cell.bg, None, "{cell:?}");
+        }
+        let painted = at(&cells, 2);
+        assert_eq!(
+            (painted.fg, painted.bg),
+            (white, Some(LinearRgba::from_srgb(40, 40, 40))),
+            "{painted:?}"
+        );
+        assert_eq!(at(&cells, 3).fg, white);
+        assert_eq!(at(&cells, 4).fg, light.foreground_linear());
+
+        // Off: the program's own white comes back, in a frame of its own.
+        session.set_minimum_contrast(1.0);
+        let mut cells = Vec::new();
+        assert!(
+            frame_if_damaged(&session, |c| cells.push(c)).is_some(),
+            "turning the floor off did not request a frame"
+        );
+        assert_eq!(at(&cells, 0).fg, white);
+        // The same value is a no-op: no frame.
+        session.set_minimum_contrast(1.0);
+        assert!(
+            frame_if_damaged(&session, |_| ()).is_none(),
+            "the same floor requested a frame"
+        );
+    }
+
+    #[test]
     fn set_theme_repaints_from_the_new_theme() {
         // The swap must request a frame and the next frame must skip the **new**
         // theme's background. `b`'s background is the dark theme's background in
@@ -18624,6 +18752,11 @@ mod tests {
             "printf 'h\\033[41mell\\033[0mo'; sleep 5",
             Arc::clone(&wake),
         );
+        // The foreground stands 2.55:1 on the red, so the contrast floor lifts
+        // it there and not on the selection — the ink would differ for that
+        // reason, not the selection's; the floor has its own test
+        // (`minimum_contrast_lifts_the_ink_only`).
+        session.set_minimum_contrast(1.0);
         let cells = wait_frame(&session, &wake, |cells| {
             cells.iter().filter_map(|c| c.ch).collect::<String>() == "hello"
         });
@@ -18669,6 +18802,10 @@ mod tests {
             "printf '\\033[7;31;42mab\\033[2mcd\\033[0;7m \\033[0m'; sleep 5",
             Arc::clone(&wake),
         );
+        // Red and green stand 1.6:1 apart, so the contrast floor would move
+        // the unselected cells' ink; this test is about which colour lands
+        // where, the floor has its own (`minimum_contrast_lifts_the_ink_only`).
+        session.set_minimum_contrast(1.0);
         assert_eq!(wait_cells(&session, &wake, 5).len(), 5);
         let red = color::linear_rgba(THEME.default(1));
         let green = color::linear_rgba(THEME.default(2));

@@ -80,7 +80,9 @@ integration](#remote-shell-integration)), then the eight preview/download keys
 of `[remote]` and the two keys of the load indicator (`stats`,
 `stats_interval`; eleven keys in all), and Appearance also carries
 `[terminal] scrollbar` ("Scroll bar"), because it changes how the window
-looks, and `[appearance] content_edge` ("Content edge"); on folder rows
+looks, `[appearance] content_edge` ("Content edge") and
+`[appearance] minimum_contrast` ("Minimum contrast", under the themes); on
+folder rows
 Change… opens a folder
 picker (a folder under your home directory is written as `~/…`), on the
 preview folder Show in Finder opens it, and the "In use" row shows the total
@@ -215,6 +217,12 @@ dark_theme = "bateri"
 # heights that costs one line; line cuts the text under a thin line in the
 # divider's color; cut cuts it where the pane ends, as before.
 content_edge = "fade"
+# 1 to 21. The least contrast a program's text keeps against its own
+# background: text colored closer than this — white text on a light theme — is
+# drawn darker or lighter until it reads. Backgrounds keep their color, and
+# box, block and Powerline characters are left as they are, since programs draw
+# pictures with them. 1 turns it off; 4.5 and 7 are stricter.
+minimum_contrast = 3.0
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -789,6 +797,7 @@ theme = "system"
 light_theme = "bateri-light"
 dark_theme = "bateri"
 content_edge = "fade"
+minimum_contrast = 3.0
 ```
 
 | key | type | default | meaning |
@@ -797,6 +806,7 @@ content_edge = "fade"
 | `light_theme` | theme name | `"bateri-light"` | the light appearance's theme while `theme = "system"` |
 | `dark_theme` | theme name | `"bateri"` | the dark appearance's theme while `theme = "system"` |
 | `content_edge` | `"fade"` \| `"line"` \| `"cut"` | `"fade"` | what the text does where it meets the tab bar, or the divider above a split pane |
+| `minimum_contrast` | decimal, `1.0`–`21.0` | `3.0` | the least contrast ratio a program's text keeps against its background; `1` turns it off |
 
 - `theme = "system"` leaves the theme to the macOS appearance: `light_theme`
   in light, `dark_theme` in dark. When the appearance changes, the theme
@@ -833,6 +843,32 @@ content_edge = "fade"
 - Changing the value applies at once; between `"fade"` and the other two the
   panes may gain or lose a line, which the program running in them sees as a
   resize.
+- `minimum_contrast` is a WCAG 2 contrast ratio. Text a program colors closer
+  to its background than that — the white text of a program set up for a
+  dark terminal, shown on a light theme, or `\e[37m` white on `bateri-light`
+  (1.8:1) — is drawn darker or lighter until it reaches the ratio. This works
+  on any color a program uses, including colors it gives directly
+  (`\e[38;2;255;255;255m`) that no theme value reaches.
+- Only the text moves: the background a program painted keeps its color, so a
+  `\e[47m` bar stays light gray and the text on it is what changes. Dark text
+  gets darker and light text lighter; text crosses to the other side only when
+  its own side cannot reach the ratio — white on a light theme has nothing
+  lighter to go to, so it becomes the gray that reads. Selected text is
+  measured against the selection's color.
+- Box drawing, block, Braille and Powerline characters are left as they are:
+  programs draw pictures and borders with them, and a half-block image or a
+  faint indent guide would get seams or turn loud.
+- It applies to the screen, to the history above it and to the command line
+  in the dock. bateri's own text — the dock's bottom line, the tab bar — is
+  in the theme's colors and is not changed, and neither is the answer to a
+  program asking for the theme's colors (OSC 10/11).
+- `3.0` lifts what cannot be read and leaves alone the colors the built-in
+  themes chose: their light themes' colored bright tones stand at 3.5–4.2.
+  `4.5` and `7.0` are WCAG's stricter levels for small text and also repaint
+  some of a theme's own colors. `1.0` turns it off. A change applies at once.
+- A program with a light theme of its own still looks best in it; many pick
+  it by themselves from the background bateri reports (OSC 11) when their
+  theme is set to automatic.
 
 ### `[font]`
 

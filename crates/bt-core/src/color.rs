@@ -75,6 +75,64 @@ impl LinearRgba {
         let [r, g, b, _] = self.0;
         weigh(r as f64, g as f64, b as f64) as f32
     }
+
+    /// This colour as **ink on `ground`**, moved just far enough that the two
+    /// stand at least `minimum` apart ([`ratio`], WCAG 2); unchanged when they
+    /// already do, or when `minimum` is `1` or less (the rule is off).
+    ///
+    /// Only the ink moves: the ground is what the program painted and other
+    /// text may sit on it. The ink keeps its own side of the ground — dark
+    /// text darkens, light text lightens — and crosses over only when its
+    /// side cannot reach the ratio: white text on a light ground has no
+    /// lighter to go to, so it darkens to the grey that reads. When neither
+    /// side reaches (a mid-grey ground under a ratio above ~4.6) it takes the
+    /// end that stands further.
+    ///
+    /// The arithmetic is **closed-form**, in the linear space the colour is
+    /// already in: luminance is a weighted sum of the linear channels whose
+    /// weights add up to one, so scaling every channel toward black scales the
+    /// luminance by the same factor, and blending every channel toward white
+    /// moves it toward one by the same factor. The hue stays (toward black) or
+    /// pales (toward white); no search, no 8-bit rounding.
+    ///
+    /// Not a second constructor in the sense [`Self::from_srgb`] closes off:
+    /// the input is already a linear colour and the result is derived from it
+    /// inside the type, so no sRGB float can get in this way.
+    pub(crate) fn legible_on(self, ground: LinearRgba, minimum: f64) -> LinearRgba {
+        let [r, g, b, alpha] = self.0;
+        let ink = weigh(r as f64, g as f64, b as f64);
+        let [gr, gg, gb, _] = ground.0;
+        let base = weigh(gr as f64, gg as f64, gb as f64);
+        if minimum <= 1.0 || ratio(ink, base) >= minimum {
+            return self;
+        }
+        // The luminance each side needs: [`ratio`] solved for the ink.
+        let darker = (base + 0.05) / minimum - 0.05;
+        let lighter = minimum * (base + 0.05) - 0.05;
+        let down = match (darker >= 0.0, lighter <= 1.0) {
+            (true, true) => ink <= base,
+            (true, false) => true,
+            (false, true) => false,
+            (false, false) => ratio(0.0, base) >= ratio(1.0, base),
+        };
+        if down {
+            let scale = if ink > 0.0 {
+                (darker.max(0.0) / ink).min(1.0)
+            } else {
+                0.0
+            };
+            let channel = |c: f32| (c as f64 * scale) as f32;
+            Self([channel(r), channel(g), channel(b), alpha])
+        } else {
+            let toward = if ink < 1.0 {
+                ((lighter.min(1.0) - ink) / (1.0 - ink)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let channel = |c: f32| (c as f64 + (1.0 - c as f64) * toward) as f32;
+            Self([channel(r), channel(g), channel(b), alpha])
+        }
+    }
 }
 
 /// A color theme: the **single source**.
@@ -772,9 +830,35 @@ const fn weigh(r: f64, g: f64, b: f64) -> f64 {
 /// The contrast ratio between two colors (WCAG 2), `1..=21` — whichever
 /// order they come in.
 pub(crate) const fn contrast(a: Rgb, b: Rgb) -> f64 {
-    let (x, y) = (luminance(a), luminance(b));
+    ratio(luminance(a), luminance(b))
+}
+
+/// WCAG 2's ratio between two **luminances**, `1..=21`, whichever order they
+/// come in — the formula written once: [`contrast`] measures two palette
+/// colors with it, [`LinearRgba::legible_on`] two drawn ones.
+const fn ratio(x: f64, y: f64) -> f64 {
     let (light, dark) = if x > y { (x, y) } else { (y, x) };
     (light + 0.05) / (dark + 0.05)
+}
+
+/// Whether `c` is drawn as a **picture**, not read as a letter: box drawing,
+/// block elements, Braille, the legacy computing symbols and Powerline's
+/// separators. [`LinearRgba::legible_on`] leaves these alone.
+///
+/// A program that paints with them chooses the colour pair on purpose: an
+/// image in half blocks (`▀` with a foreground one shade off its background),
+/// a faint indent guide (`│`), a Powerline arrow whose ink is the next
+/// segment's ground. Lifting their ink would put seams in the picture and
+/// make the guides shout — the rule is for text that cannot be read, and
+/// these are not text.
+pub(crate) const fn is_drawing(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2500}'..='\u{259f}'
+            | '\u{2800}'..='\u{28ff}'
+            | '\u{1fb00}'..='\u{1fbff}'
+            | '\u{e0a0}'..='\u{e0d7}'
+    )
 }
 
 /// [`contrast`] between two `0xRRGGBB` colors — the theme's format — for the
@@ -1357,6 +1441,134 @@ mod tests {
                 matched > 1.0 && current > matched,
                 "the current match isn't more distinct than the other: {matched:.2} / {current:.2}"
             );
+        }
+    }
+
+    /// How far apart two drawn colours stand — [`ratio`] on their linear
+    /// channels, at `f64` (the precision `legible_on` solves in).
+    fn apart(a: LinearRgba, b: LinearRgba) -> f64 {
+        let lum = |c: LinearRgba| {
+            let [r, g, b, _] = c.to_array();
+            weigh(f64::from(r), f64::from(g), f64::from(b))
+        };
+        ratio(lum(a), lum(b))
+    }
+
+    fn linear(hex: u32) -> LinearRgba {
+        linear_hex(hex)
+    }
+
+    #[test]
+    fn legible_ink_is_left_alone() {
+        // Already apart, or the rule off: the very colour comes back.
+        let light = Theme::BATERI_LIGHT;
+        let ground = light.background_linear();
+        let ink = light.foreground_linear();
+        assert_eq!(ink.legible_on(ground, 3.0), ink);
+        let white = linear(0xffffff);
+        assert_eq!(white.legible_on(ground, 1.0), white);
+        assert_eq!(white.legible_on(ground, 0.5), white);
+    }
+
+    #[test]
+    fn white_on_a_light_ground_darkens_to_the_floor() {
+        // The case that asked for the rule: a dark-theme program's white text
+        // (truecolor, past the palette) on the light theme, 1.08:1. White has
+        // no lighter side, so it crosses over and lands on the floor exactly.
+        let ground = Theme::BATERI_LIGHT.background_linear();
+        let white = linear(0xffffff);
+        assert!(apart(white, ground) < 1.1);
+        for floor in [3.0, 4.5, 7.0] {
+            let lifted = white.legible_on(ground, floor);
+            let got = apart(lifted, ground);
+            assert!((got - floor).abs() < 1e-4, "{floor}: {got}");
+            assert!(lifted.luminance() < ground.luminance(), "{lifted:?}");
+        }
+    }
+
+    #[test]
+    fn ink_keeps_its_own_side_while_that_side_reaches() {
+        // A dark ink on a dark ground lightens only when darker cannot reach:
+        // ANSI black on black (1.37) has nothing darker to go to.
+        let black = Theme::BATERI.background_linear();
+        let ansi_black = linear(Theme::BATERI.ansi[0]);
+        let lifted = ansi_black.legible_on(black, 3.0);
+        assert!(lifted.luminance() > ansi_black.luminance(), "{lifted:?}");
+        assert!((apart(lifted, black) - 3.0).abs() < 1e-4);
+        // A grey darker than a light ground darkens, a grey lighter than a dark
+        // ground lightens — neither flips over the ground.
+        let paper = Theme::BATERI_LIGHT.background_linear();
+        let grey = linear(0xb0b0b0);
+        assert!(grey.legible_on(paper, 3.0).luminance() < grey.luminance());
+        let ink = linear(0x3a3a3a);
+        assert!(ink.legible_on(black, 3.0).luminance() > ink.luminance());
+    }
+
+    #[test]
+    fn darkening_keeps_the_hue() {
+        // Toward black every channel scales by one factor: the ratios between
+        // them, i.e. the hue, stay.
+        let ground = Theme::BATERI_LIGHT.background_linear();
+        let pale = linear(0xb1b9f9); // a dark theme's suggestion blue
+        let [r, g, b, a] = pale.to_array();
+        let [r2, g2, b2, a2] = pale.legible_on(ground, 3.0).to_array();
+        assert!((r2 / r - b2 / b).abs() < 1e-5 && (g2 / g - b2 / b).abs() < 1e-5);
+        assert!(r2 < r && a2 == a);
+    }
+
+    #[test]
+    fn an_unreachable_floor_takes_the_end_that_stands_further() {
+        // A mid grey stands below 21:1 from both ends; the ink goes all the
+        // way to the further one rather than stopping short.
+        let ground = linear(0x777777);
+        let ink = linear(0x808080);
+        let lifted = ink.legible_on(ground, 21.0);
+        let (to_black, to_white) = (
+            apart(linear(0x000000), ground),
+            apart(linear(0xffffff), ground),
+        );
+        assert!((apart(lifted, ground) - to_black.max(to_white)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn every_palette_colour_reaches_the_floor_on_every_embedded_theme() {
+        // The property behind the default: whatever a program picks from the
+        // palette — the 256 colours and the named ones' dim — reads at 3:1 on
+        // the background, and a colour that already did is not touched.
+        for (name, theme) in EMBEDDED {
+            let ground = theme.background_linear();
+            let colours = (0..256).map(|index| theme.default(index)).chain(
+                (0..16).map(|index| dim_toward(rgb(theme.ansi[index]), rgb(theme.background))),
+            );
+            for colour in colours {
+                let ink = linear_rgba(colour);
+                let lifted = ink.legible_on(ground, 3.0);
+                assert!(apart(lifted, ground) >= 3.0 - 1e-4, "{name}: {colour:?}");
+                if apart(ink, ground) >= 3.0 {
+                    assert_eq!(lifted, ink, "{name}: {colour:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pictures_are_not_text() {
+        for c in [
+            '─',
+            '│',
+            '╭',
+            '▀',
+            '█',
+            '░',
+            '⠿',
+            '\u{1fb00}',
+            '\u{e0b0}',
+            '\u{e0b6}',
+        ] {
+            assert!(is_drawing(c), "{c:?}");
+        }
+        for c in ['a', 'W', '→', '✻', '·', '…', ' ', 'ş'] {
+            assert!(!is_drawing(c), "{c:?}");
         }
     }
 }

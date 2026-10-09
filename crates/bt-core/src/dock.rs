@@ -868,12 +868,16 @@ fn render_reconnect(
             // come from `u16`, they cannot overflow.
             let lead = Cell {
                 row: (row - top) as u16,
+                // `1.0`: the hint is bateri's own text in the theme's roles
+                // (the host's mark, `dim`), not a program's colour — the
+                // floor is for the latter.
                 ..cell(
                     placed.ch,
                     placed.col as u16,
                     color,
                     HighlightStyle::default(),
                     theme,
+                    1.0,
                     placed.width == 2,
                     false,
                 )
@@ -1443,6 +1447,7 @@ pub(crate) fn render_with(
     context: &DockContext,
     shell: Option<ShellState>,
     theme: &Theme,
+    contrast: f64,
     cols: DockCols,
     band: Option<u16>,
     scroll: Option<usize>,
@@ -1644,7 +1649,16 @@ pub(crate) fn render_with(
                 cluster: placed_cluster(end - index, width, clusters, || {
                     self::stream(state).skip(index).take(end - index)
                 }),
-                ..cell(ch, col, base, style, theme, width == 2, is_selected)
+                ..cell(
+                    ch,
+                    col,
+                    base,
+                    style,
+                    theme,
+                    contrast,
+                    width == 2,
+                    is_selected,
+                )
             };
             // **A selection creates no content** (the grid's rule):
             // the run extends from the first drawable selected cell to the
@@ -1800,6 +1814,7 @@ pub(crate) fn render_with(
                             fixed,
                             placed.tag,
                             theme,
+                            contrast,
                             placed.width == 2,
                             false,
                         )
@@ -1887,6 +1902,7 @@ pub(crate) fn render(
         context,
         shell,
         theme,
+        crate::settings::MINIMUM_CONTRAST,
         cols,
         Some(CONTEXT_ROW),
         None,
@@ -2352,12 +2368,21 @@ pub(crate) fn grid_span(
 /// foreground, reverse video resolved, the ground dropped — the selection's
 /// color takes its place. `region_highlight`'s `standout` (zsh's paste
 /// highlight is that by default) reads in its normal foreground in a selection.
+///
+/// **The ink keeps `contrast` against its ground**, the grid's rule
+/// (`session::cell_style`): the command line is the same text the grid would
+/// show without the dock, so a `region_highlight` colour that would be lifted
+/// there is lifted here — against the range's own ground, or the surface's
+/// when it has none (a selected cell's included, as in the grid). The context
+/// row is not drawn here: it is bateri's own text in the theme's roles.
+#[allow(clippy::too_many_arguments)]
 fn cell(
     ch: char,
     col: u16,
     base: LinearRgba,
     style: HighlightStyle,
     theme: &Theme,
+    contrast: f64,
     wide: bool,
     selected: bool,
 ) -> Cell {
@@ -2372,6 +2397,9 @@ fn cell(
         let behind = bg.unwrap_or_else(|| theme.background_linear());
         bg = Some(fg);
         fg = behind;
+    }
+    if !color::is_drawing(ch) {
+        fg = fg.legible_on(bg.unwrap_or_else(|| theme.background_linear()), contrast);
     }
     Cell {
         col,
@@ -2446,6 +2474,33 @@ mod tests {
     };
 
     const THEME: Theme = Theme::BATERI;
+
+    #[test]
+    fn mirror_ink_keeps_the_grid_floor() {
+        // A `region_highlight` colour that the grid would lift is lifted in
+        // the dock too: the command line is the same text either way.
+        let light = Theme::BATERI_LIGHT;
+        let white = color::linear_hex(0xffffff);
+        let painted = HighlightStyle {
+            fg: Some(HighlightColor::Rgb(0xffffff)),
+            ..HighlightStyle::default()
+        };
+        let base = light.foreground_linear();
+        let ink = |ch, style, contrast| cell(ch, 0, base, style, &light, contrast, false, false).fg;
+        let lifted = ink('x', painted, 3.0);
+        assert_ne!(lifted, white);
+        assert!(lifted.luminance() < light.background_linear().luminance());
+        // Off, and a picture: the colour as written.
+        assert_eq!(ink('x', painted, 1.0), white);
+        assert_eq!(ink('│', painted, 3.0), white);
+        // Measured against the range's own ground: white on a dark highlight
+        // already reads.
+        let on_dark = HighlightStyle {
+            bg: Some(HighlightColor::Rgb(0x202020)),
+            ..painted
+        };
+        assert_eq!(ink('x', on_dark, 3.0), white);
+    }
 
     /// The load indicator's range — [`footer_span`]'s question about it.
     fn stats_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
@@ -2644,6 +2699,7 @@ mod tests {
             &DockContext::default(),
             None,
             &THEME,
+            crate::settings::MINIMUM_CONTRAST,
             same(cols),
             Some(input_rows),
             scroll,
@@ -2941,6 +2997,7 @@ mod tests {
             &context("/tmp/x", "main"),
             None,
             &THEME,
+            crate::settings::MINIMUM_CONTRAST,
             same(COLS),
             Some(3),
             None,
@@ -3950,6 +4007,7 @@ mod tests {
                 &context,
                 None,
                 &THEME,
+                crate::settings::MINIMUM_CONTRAST,
                 same(COLS),
                 band,
                 None,
@@ -4212,6 +4270,7 @@ mod tests {
             context,
             None,
             &THEME,
+            crate::settings::MINIMUM_CONTRAST,
             same(cols),
             Some(0),
             None,
@@ -5575,6 +5634,7 @@ mod tests {
             &DockContext::default(),
             None,
             &THEME,
+            crate::settings::MINIMUM_CONTRAST,
             same(cols),
             Some(rows),
             None,
@@ -6117,6 +6177,7 @@ mod tests {
             &DockContext::default(),
             None,
             &THEME,
+            crate::settings::MINIMUM_CONTRAST,
             same(COLS),
             Some(CONTEXT_ROW),
             None,

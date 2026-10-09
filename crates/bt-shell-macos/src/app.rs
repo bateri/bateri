@@ -4806,6 +4806,13 @@ impl AppDelegate {
                     pane.set_stats_settings(&new.remote_stats);
                 }
             }
+            // The text's contrast floor: every pane's session draws its next
+            // frame with it.
+            if changes.contrast {
+                for pane in &panes {
+                    pane.set_minimum_contrast(new.minimum_contrast);
+                }
+            }
             // The listening ports start or stop at once in every pane.
             if changes.ports {
                 for pane in &panes {

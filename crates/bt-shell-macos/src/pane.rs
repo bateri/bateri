@@ -2822,6 +2822,9 @@ impl TerminalPane {
         // The host marks' list at birth; its live change comes
         // from `AppDelegate::reload_settings` ([`Self::set_host_marks`]).
         session.set_host_marks(&settings.remote_hosts);
+        // The text's contrast floor, before the first frame (this turn of the
+        // main thread); its live change is [`Self::set_minimum_contrast`].
+        session.set_minimum_contrast(settings.minimum_contrast);
         // A title notification that arrived before the session entered the slot
         // may have found an empty slot and dropped; the window's `start` closes
         // that (`TerminalWindow::start` → `refresh_title`), right after this call returns.
@@ -3170,6 +3173,15 @@ impl TerminalPane {
         self.ivars()
             .remote_files
             .replace(settings.remote_files.clone());
+    }
+
+    /// `[appearance] minimum_contrast` changed — to the session, which draws
+    /// its next frame with it (no-op on the same value,
+    /// `Session::set_minimum_contrast`).
+    pub(crate) fn set_minimum_contrast(&self, ratio: f64) {
+        if let Some(session) = self.ivars().session.get() {
+            session.set_minimum_contrast(ratio);
+        }
     }
 
     /// Terminal options changed — to the session, **in full**.

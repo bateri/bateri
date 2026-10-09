@@ -297,6 +297,23 @@ pub const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
 /// to cut off unboundedness.
 pub const CURSOR_GLOW_RANGE: std::ops::RangeInclusive<f64> = 0.0..=3.0;
 
+/// `[appearance] minimum_contrast`'s default: text a program colours closer to
+/// its ground than 3:1 is moved to 3:1 when drawn (`LinearRgba::legible_on`).
+///
+/// **Chosen, not measured.** 3:1 is the bar the embedded themes already hold
+/// their own text to (every text colour that clears it on the background
+/// clears it on the selection and the search highlights too). It lifts what
+/// cannot be read — white text on a light theme, the light themes' dim
+/// colours at 2.2–2.9 — and leaves alone what a theme chose on purpose: the
+/// light themes' coloured bright tones stand at 3.5–4.2, and 4.5:1 would
+/// repaint them too.
+pub const MINIMUM_CONTRAST: f64 = 3.0;
+
+/// The accepted range of `[appearance] minimum_contrast`: WCAG 2's whole
+/// scale. `1` turns the rule off — any two colours stand at least 1:1 apart —
+/// and 21 is black on white.
+pub const MINIMUM_CONTRAST_RANGE: std::ops::RangeInclusive<f64> = 1.0..=21.0;
+
 /// `[terminal] cursor_unfocused`: what the cursor is in an unfocused window.
 ///
 /// The cursor is hollowed out when focus is lost; this key turns that off. **It
@@ -1336,6 +1353,11 @@ pub struct Settings {
     /// `[appearance] content_edge`: what the text does at the pane's top edge
     /// ([`ContentEdge`]). Doesn't enter `TerminalOptions`.
     pub content_edge: ContentEdge,
+    /// `[appearance] minimum_contrast`: the least contrast ratio a program's
+    /// text keeps against its own ground when drawn, `1` = off
+    /// ([`MINIMUM_CONTRAST_RANGE`]). Goes to every session
+    /// (`Session::set_minimum_contrast`); doesn't enter `TerminalOptions`.
+    pub minimum_contrast: f64,
     /// `[font] family` and `size`.
     pub font: FontOptions,
     /// `[clipboard] osc52`: `"copy"` or `"off"`.
@@ -1411,6 +1433,7 @@ impl Default for Settings {
             light_theme: "bateri-light".to_owned(),
             dark_theme: "bateri".to_owned(),
             content_edge: ContentEdge::default(),
+            minimum_contrast: MINIMUM_CONTRAST,
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::default(),
@@ -1493,6 +1516,7 @@ pub enum SettingsEdit {
     LightTheme(String),
     DarkTheme(String),
     ContentEdge(ContentEdge),
+    MinimumContrast(f64),
     /// An empty string is the default family (the chain): the parser reads
     /// `family = ""` that way and the key isn't deleted.
     FontFamily(String),
@@ -1584,6 +1608,11 @@ impl SettingsEdit {
             Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
             Self::DarkTheme(_) => ("appearance", "dark_theme", "appearance.dark_theme"),
             Self::ContentEdge(_) => ("appearance", "content_edge", "appearance.content_edge"),
+            Self::MinimumContrast(_) => (
+                "appearance",
+                "minimum_contrast",
+                "appearance.minimum_contrast",
+            ),
             Self::FontFamily(_) => ("font", "family", "font.family"),
             Self::FontSize(_) => ("font", "size", "font.size"),
             Self::LineHeight(_) => ("font", "line_height", "font.line_height"),
@@ -1656,6 +1685,7 @@ impl SettingsEdit {
             Self::CursorRadius(value)
             | Self::CursorGlow(value)
             | Self::BlinkInterval(value)
+            | Self::MinimumContrast(value)
             | Self::FontSize(value)
             | Self::LineHeight(value)
             | Self::LetterSpacing(value) => decimal(*value),
@@ -1766,6 +1796,12 @@ dark_theme = "bateri"
 # heights that costs one line; line cuts the text under a thin line in the
 # divider's color; cut cuts it where the pane ends, as before.
 content_edge = "fade"
+# 1 to 21. The least contrast a program's text keeps against its own
+# background: text colored closer than this — white text on a light theme — is
+# drawn darker or lighter until it reads. Backgrounds keep their color, and
+# box, block and Powerline characters are left as they are, since programs draw
+# pictures with them. 1 turns it off; 4.5 and 7 are stricter.
+minimum_contrast = 3.0
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -2147,12 +2183,23 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = appearance.get("minimum_contrast") {
+                    parsed.settings.minimum_contrast = ranged_float(
+                        text,
+                        item,
+                        "appearance.minimum_contrast",
+                        MINIMUM_CONTRAST_RANGE,
+                        fallback.minimum_contrast,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("appearance") => {
                 for (_, _, slot, kept) in names {
                     slot.clone_from(kept);
                 }
                 parsed.settings.content_edge = fallback.content_edge;
+                parsed.settings.minimum_contrast = fallback.minimum_contrast;
             }
             None => {}
         }
@@ -2431,6 +2478,7 @@ stats_interval = 3
             stats: self.remote_stats != new.remote_stats,
             scrollbar: self.scrollbar != new.scrollbar,
             content_edge: self.content_edge != new.content_edge,
+            contrast: self.minimum_contrast != new.minimum_contrast,
             ports: self.shell_ports != new.shell_ports,
         }
     }
@@ -3123,6 +3171,10 @@ pub struct Changes {
     /// A field of its own, for [`Self::caret`]'s reason: the key doesn't
     /// enter `TerminalOptions`, so a change must not resend them.
     pub content_edge: bool,
+    /// [`Settings::minimum_contrast`] changed: the platform shell gives the
+    /// ratio to every pane's session, which draws its next frame with it. A
+    /// field of its own, for [`Self::caret`]'s reason.
+    pub contrast: bool,
     /// [`Settings::shell_ports`] changed: the platform shell starts or stops
     /// every pane's port probe. A field of its own, for [`Self::caret`]'s
     /// reason.
@@ -3941,6 +3993,7 @@ mod tests {
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
             ("appearance", "content_edge"),
+            ("appearance", "minimum_contrast"),
             ("font", "size"),
             ("font", "line_height"),
             ("font", "letter_spacing"),
@@ -4116,6 +4169,7 @@ mod tests {
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                contrast: false,
                 ports: false,
             }
         );
@@ -4151,6 +4205,7 @@ mod tests {
             light_theme: "chalk".to_owned(),
             dark_theme: "ink".to_owned(),
             content_edge: ContentEdge::Line,
+            minimum_contrast: 4.5,
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::Spring,
@@ -4340,6 +4395,7 @@ mod tests {
             stats: false,
             scrollbar: false,
             content_edge: false,
+            contrast: false,
             ports: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
@@ -4350,6 +4406,39 @@ mod tests {
         // A default written explicitly isn't a difference: saving doesn't make the
         // atlas be rebuilt.
         assert_eq!(Settings::default().changes(&before), Changes::default());
+    }
+
+    #[test]
+    fn minimum_contrast_is_read() {
+        assert_eq!(Settings::default().minimum_contrast, MINIMUM_CONTRAST);
+        assert_eq!(
+            clean("[appearance]\nminimum_contrast = 4.5\n").minimum_contrast,
+            4.5
+        );
+        // An integer is a number too; 1 turns the rule off.
+        assert_eq!(
+            clean("[appearance]\nminimum_contrast = 1\n").minimum_contrast,
+            1.0
+        );
+        for value in ["0.5", "22", "\"high\""] {
+            let parsed = Settings::parse(&format!("[appearance]\nminimum_contrast = {value}\n"))
+                .expect("parseable text");
+            assert_eq!(
+                parsed.settings.minimum_contrast, MINIMUM_CONTRAST,
+                "{value}"
+            );
+            let keys: Vec<_> = parsed.diagnostics.iter().map(|d| d.key).collect();
+            assert_eq!(keys, [Some("appearance.minimum_contrast")], "{value}");
+        }
+        // A change is its own news: it goes to the sessions, nothing else.
+        let after = clean("[appearance]\nminimum_contrast = 7\n");
+        assert_eq!(
+            Settings::default().changes(&after),
+            Changes {
+                contrast: true,
+                ..Changes::default()
+            }
+        );
     }
 
     #[test]
@@ -4435,6 +4524,7 @@ mod tests {
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                contrast: false,
                 ports: false,
             }
         );
@@ -4586,6 +4676,7 @@ found {found}; using \"spring\""
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                contrast: false,
                 ports: false,
             }
         );
@@ -4677,6 +4768,7 @@ found {found}; using \"system\""
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                contrast: false,
                 ports: false,
             }
         );
@@ -5741,6 +5833,7 @@ found 1.5; using 0.1"
                     stats: false,
                     scrollbar: false,
                     content_edge: false,
+                    contrast: false,
                     ports: false,
                 },
                 "{text}"
@@ -5841,6 +5934,7 @@ found 1.5; using 0.1"
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                contrast: false,
                 ports: false,
             }
         );
@@ -5945,6 +6039,7 @@ found 1.5; using 0.1"
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                contrast: false,
                 ports: false,
             }
         );
@@ -6476,6 +6571,7 @@ cursor = \"spring\"
             SettingsEdit::LightTheme(name) => settings.light_theme = name,
             SettingsEdit::DarkTheme(name) => settings.dark_theme = name,
             SettingsEdit::ContentEdge(edge) => settings.content_edge = edge,
+            SettingsEdit::MinimumContrast(ratio) => settings.minimum_contrast = two(ratio),
             SettingsEdit::FontFamily(name) => {
                 settings.font.family = (!name.is_empty()).then_some(name);
             }
@@ -6552,6 +6648,7 @@ cursor = \"spring\"
             SettingsEdit::LightTheme("paper".to_owned()),
             SettingsEdit::DarkTheme("ink".to_owned()),
             SettingsEdit::ContentEdge(ContentEdge::Cut),
+            SettingsEdit::MinimumContrast(4.5),
             SettingsEdit::FontFamily("Menlo".to_owned()),
             SettingsEdit::FontFamily(String::new()),
             SettingsEdit::FontSize(14.5),

@@ -114,6 +114,10 @@ const PREVIEW_LIMIT_PRESETS: &[u64] = &[
     10_000_000_000,
     20_000_000_000,
 ];
+/// The contrast popup's presets: off, then WCAG 2's three levels for text
+/// (the key's default among them). A design constant; a value the file holds
+/// that is not here is still shown ([`contrast_items`]).
+const CONTRAST_PRESETS: &[f64] = &[1.0, 3.0, 4.5, 7.0];
 
 /// The sidebar's rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,11 +202,12 @@ enum Key {
     Scrollbar,
     ContentEdge,
     Ports,
+    MinimumContrast,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 39] = [
+    const ALL: [Key; 40] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -242,6 +247,7 @@ impl Key {
         Key::Scrollbar,
         Key::ContentEdge,
         Key::Ports,
+        Key::MinimumContrast,
     ];
 
     fn tag(self) -> NSInteger {
@@ -268,6 +274,7 @@ impl Key {
             Key::LightTheme => "appearance.light_theme",
             Key::DarkTheme => "appearance.dark_theme",
             Key::ContentEdge => "appearance.content_edge",
+            Key::MinimumContrast => "appearance.minimum_contrast",
             Key::Font => "font.family",
             Key::Size => "font.size",
             Key::LineHeight => "font.line_height",
@@ -940,6 +947,57 @@ fn size_title(bytes: u64) -> String {
     }
 }
 
+/// An item of the contrast popup — [`SizeItem`]'s shape for a ratio.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ContrastItem {
+    Preset(f64),
+    Separator,
+    /// The file's value that is not a preset; choosing it writes nothing (it already is).
+    Current(f64),
+}
+
+/// The contrast popup's items and the selected one's index: the presets, and
+/// the file's value after a separator when it is not one of them —
+/// [`size_items`]'s rule. Exact comparison is sound: the presets are exact in
+/// binary and the window writes two decimals, which a preset reads back as
+/// itself.
+fn contrast_items(current: f64) -> (Vec<ContrastItem>, usize) {
+    let mut items: Vec<ContrastItem> = CONTRAST_PRESETS
+        .iter()
+        .copied()
+        .map(ContrastItem::Preset)
+        .collect();
+    if let Some(index) = CONTRAST_PRESETS.iter().position(|&ratio| ratio == current) {
+        return (items, index);
+    }
+    items.push(ContrastItem::Separator);
+    items.push(ContrastItem::Current(current));
+    let index = items.len() - 1;
+    (items, index)
+}
+
+/// The action's contrast item → the ratio to write.
+fn contrast_edit(items: &[ContrastItem], index: NSInteger) -> Option<f64> {
+    match items.get(usize::try_from(index).ok()?)? {
+        ContrastItem::Preset(ratio) => Some(*ratio),
+        ContrastItem::Separator | ContrastItem::Current(_) => None,
+    }
+}
+
+/// A ratio as the popup shows it: the presets by name with their ratio, so
+/// the file's spelling stays readable from the window; any other value as the
+/// ratio alone.
+fn contrast_title(ratio: f64) -> String {
+    let name = match ratio {
+        1.0 => return "Off".to_owned(),
+        3.0 => "Standard",
+        4.5 => "Strong",
+        7.0 => "Strongest",
+        _ => return format!("{}:1", decimal_label(ratio)),
+    };
+    format!("{name} ({}:1)", decimal_label(ratio))
+}
+
 /// A folder the panel chose → the file's spelling: under the home directory
 /// as `~/…` (the template's convention, and the file stays valid on another
 /// account), anywhere else absolute.
@@ -1018,6 +1076,7 @@ struct Controls {
     letter_spacing: Number,
     scrollbar: Retained<NSPopUpButton>,
     content_edge: Retained<NSPopUpButton>,
+    minimum_contrast: Retained<NSPopUpButton>,
     shape: Retained<NSPopUpButton>,
     blink: Retained<NSPopUpButton>,
     blink_speed: Slide,
@@ -1135,6 +1194,7 @@ pub(crate) struct Ivars {
     fonts: RefCell<Vec<FontItem>>,
     max_sizes: RefCell<Vec<SizeItem>>,
     limits: RefCell<Vec<SizeItem>>,
+    contrasts: RefCell<Vec<ContrastItem>>,
     /// `preview_dir` and `download_dir` as the file writes them — what Change…
     /// starts the panel in and Show in Finder opens. From the last refresh.
     folders: RefCell<(String, String)>,
@@ -1218,6 +1278,8 @@ define_class!(
                     .map(SettingsEdit::DarkTheme),
                 Key::Font => font_edit(&self.ivars().fonts.borrow(), index)
                     .map(SettingsEdit::FontFamily),
+                Key::MinimumContrast => contrast_edit(&self.ivars().contrasts.borrow(), index)
+                    .map(SettingsEdit::MinimumContrast),
                 Key::PreviewMaxSize => size_edit(&self.ivars().max_sizes.borrow(), index)
                     .map(SettingsEdit::PreviewMaxSize),
                 Key::PreviewLimit => size_edit(&self.ivars().limits.borrow(), index)
@@ -1482,6 +1544,7 @@ impl SettingsWindow {
             dark_themes: RefCell::new(Vec::new()),
             fonts: RefCell::new(Vec::new()),
             max_sizes: RefCell::new(Vec::new()),
+            contrasts: RefCell::new(Vec::new()),
             limits: RefCell::new(Vec::new()),
             folders: RefCell::new((String::new(), String::new())),
             usage_generation: Cell::new(0),
@@ -1561,6 +1624,9 @@ impl SettingsWindow {
         let (items, index) = theme_items(&settings.dark_theme, false, embedded, user);
         fill_themes(&c.dark_theme, &items, index);
         self.ivars().dark_themes.replace(items);
+        let (items, index) = contrast_items(settings.minimum_contrast);
+        fill_contrasts(&c.minimum_contrast, &items, index);
+        self.ivars().contrasts.replace(items);
 
         let (items, index) = font_items(settings.font.family.as_deref(), &self.ivars().families);
         fill_fonts(&c.font, &items, index);
@@ -2226,6 +2292,7 @@ impl SettingsWindow {
         let theme = self.string_popup(Key::Theme);
         let light_theme = self.string_popup(Key::LightTheme);
         let dark_theme = self.string_popup(Key::DarkTheme);
+        let minimum_contrast = self.string_popup(Key::MinimumContrast);
         let font = self.string_popup(Key::Font);
         let size = self.number(Key::Size, MIN_SIZE, MAX_SIZE, 1.0, 56.0);
         let line_height = self.number(
@@ -2259,6 +2326,13 @@ impl SettingsWindow {
             &dark_theme,
             &[&dark_theme],
             Some("Used when Theme is Match System."),
+        );
+        appearance.row(
+            Key::MinimumContrast,
+            "Minimum contrast:",
+            &minimum_contrast,
+            &[&minimum_contrast],
+            Some("Text a program colors too close to its background, like white on a light theme, is drawn darker or lighter until it reads."),
         );
         appearance.row(Key::Font, "Font:", &font, &[&font], None);
         appearance.row(
@@ -2565,6 +2639,7 @@ impl SettingsWindow {
             letter_spacing,
             scrollbar,
             content_edge,
+            minimum_contrast,
             shape,
             blink,
             blink_speed,
@@ -2961,6 +3036,14 @@ fn fill_sizes(popup: &NSPopUpButton, items: &[SizeItem], selected: usize) {
     fill_popup(popup, titles, selected);
 }
 
+fn fill_contrasts(popup: &NSPopUpButton, items: &[ContrastItem], selected: usize) {
+    let titles = items.iter().map(|item| match item {
+        ContrastItem::Preset(ratio) | ContrastItem::Current(ratio) => Some(contrast_title(*ratio)),
+        ContrastItem::Separator => None,
+    });
+    fill_popup(popup, titles, selected);
+}
+
 fn fill_fonts(popup: &NSPopUpButton, items: &[FontItem], selected: usize) {
     let titles = items.iter().map(|item| match item {
         FontItem::Default => Some("Default (SF Mono, or Menlo)".to_owned()),
@@ -3039,7 +3122,7 @@ mod tests {
                     cursor_blink_interval = []\nconfirm_close = []\n\
                     restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
-                    content_edge = []\n\
+                    content_edge = []\nminimum_contrast = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
@@ -3064,6 +3147,7 @@ mod tests {
                 Key::KeepRunning => SettingsEdit::KeepRunning(KeepRunning::Quit),
                 Key::Scrollbar => SettingsEdit::Scrollbar(Scrollbar::Never),
                 Key::ContentEdge => SettingsEdit::ContentEdge(ContentEdge::Cut),
+                Key::MinimumContrast => SettingsEdit::MinimumContrast(4.5),
                 Key::Clipboard => SettingsEdit::Osc52(Osc52::Off),
                 Key::Scrollback => SettingsEdit::Scrollback(1),
                 Key::ShellIntegration => SettingsEdit::ShellIntegration(ShellIntegration::Off),
@@ -3267,6 +3351,30 @@ mod tests {
     /// The size popups show the file's value even when it is not a preset,
     /// and only a preset writes; the defaults are presets, and every title is
     /// the spelling written with a space before the unit.
+    #[test]
+    fn the_contrast_popup_keeps_the_file_value_visible() {
+        // A preset is selected in place; the default is one of them.
+        let (items, index) = contrast_items(bt_core::MINIMUM_CONTRAST);
+        assert_eq!(
+            items[index],
+            ContrastItem::Preset(bt_core::MINIMUM_CONTRAST)
+        );
+        assert_eq!(contrast_edit(&items, index as NSInteger), Some(3.0));
+        // A value written by hand is shown after the presets and choosing it
+        // writes nothing (it already is the file's).
+        let (items, index) = contrast_items(3.5);
+        assert_eq!(items[index], ContrastItem::Current(3.5));
+        assert_eq!(items[index - 1], ContrastItem::Separator);
+        assert_eq!(contrast_edit(&items, index as NSInteger), None);
+        // Every preset is one the file accepts, and its title says its ratio.
+        for &ratio in CONTRAST_PRESETS {
+            assert!(bt_core::MINIMUM_CONTRAST_RANGE.contains(&ratio), "{ratio}");
+        }
+        assert_eq!(contrast_title(1.0), "Off");
+        assert_eq!(contrast_title(4.5), "Strong (4.5:1)");
+        assert_eq!(contrast_title(3.25), "3.25:1");
+    }
+
     #[test]
     fn size_popups_keep_the_file_value_visible() {
         let defaults = bt_core::RemoteFiles::default();
