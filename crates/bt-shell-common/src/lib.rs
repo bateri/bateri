@@ -43,6 +43,8 @@ pub mod journal;
 pub mod keys;
 pub mod links;
 pub mod notices;
+pub mod port_forward;
+pub mod ports;
 pub mod preview_cache;
 pub mod program;
 pub mod quote;

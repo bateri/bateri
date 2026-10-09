@@ -140,6 +140,8 @@ impl TerminalPane {
         };
         self.run_stats(actions);
         self.stats_gauge_changed();
+        // The server's ports start with the login and end with the session.
+        self.request_remote_ports();
     }
 
     /// The pane became visible or covered (a background tab, a minimised

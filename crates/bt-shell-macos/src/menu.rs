@@ -1,7 +1,7 @@
 //! Main menu: the app menu (About, Check for Updates…, Settings…, Hide, Quit
 //! and — ⌥ held, under `keep_running = "quit"` only — Quit and End Programs), Shell (New
 //! Window, New Tab, New Local Tab, Mark Host as ▸, Shell Integration on Host,
-//! Forget Password, Cancel Upload, Split
+//! Forget Password, Cancel Upload, Open Port ▸, Split
 //! Right, Split Down, Close Tab/Close, Close Window), Edit (Cut, Copy, Paste, Paste
 //! Escaped Text, Select All, Clear to Start, Clear Scrollback, Find ▸
 //! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
@@ -106,6 +106,10 @@ const MARK_HOLDER_TAG: isize = 37;
 /// The `tag` of Shell ▸ Forget Password for “{host}”:
 /// [`ShellMenuDelegate`] writes the host into its title.
 const FORGET_TAG: isize = 47;
+
+/// The `tag` of the Shell ▸ Open Port ▸ holder: [`ShellMenuDelegate`] fills
+/// its submenu with the focused pane's listening ports.
+const PORTS_HOLDER_TAG: isize = 58;
 
 /// The `tag` of bateri ▸ Quit and End Programs: [`set_end_programs_visible`]
 /// finds it in the app menu with this.
@@ -253,6 +257,15 @@ define_class!(
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, menu: &NSMenu) {
             let app = crate::app::delegate(self.mtm());
+            // Open Port ▸: the focused pane's listening ports, grey without
+            // one — also while a full-screen program hides the dock.
+            if let Some(holder) = menu.itemWithTag(PORTS_HOLDER_TAG) {
+                let model = app.as_ref().map(|app| app.key_ports()).unwrap_or_default();
+                holder.setEnabled(!model.is_empty());
+                if let Some(submenu) = holder.submenu() {
+                    crate::footer::fill_ports_menu(&submenu, &model, None);
+                }
+            }
             if let Some(forget) = menu.itemWithTag(FORGET_TAG) {
                 let remote = app.as_ref().and_then(|app| app.key_remote_mark());
                 let host = remote.as_ref().map(|(host, _)| host.as_str());
@@ -464,6 +477,14 @@ pub(crate) fn install(
             // The whole queue of uploads to the remote directory; enabled only
             // while there is a queue (`TerminalPane`'s `validateMenuItem:`).
             item(mtm, "Cancel Upload", sel!(cancelUpload:), "."),
+            // The focused pane's listening ports (`[shell] ports`): filled on
+            // opening ([`ShellMenuDelegate`]); an item opens its address in the
+            // browser, the focused pane handles it (`openPort:`).
+            {
+                let ports = submenu(mtm, "Open Port", &[]);
+                ports.setTag(PORTS_HOLDER_TAG);
+                ports
+            },
             NSMenuItem::separatorItem(mtm),
             // Splits (Ghostty/iTerm2 precedent): the handler is
             // `TerminalWindow` (splits the focused pane); grey at the smallest pane

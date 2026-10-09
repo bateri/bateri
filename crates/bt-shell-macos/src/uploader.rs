@@ -30,7 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
-use bt_core::{HostMark, Transfer, TransferAction};
+use bt_core::{HostMark, Transfer};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
@@ -599,7 +599,7 @@ impl TerminalPane {
         let status = self.uploads().borrow_mut().status(Instant::now());
         if let Some(status) = status {
             self.show_transfer(Some(status));
-            self.rehover_upload();
+            self.rehover_footer();
         }
         self.refresh_upload_list();
         self.refresh_upload_title();
@@ -714,61 +714,6 @@ impl TerminalPane {
         // An upload row takes the load indicator's place: its popover closes
         // and the hand cursor's rects are refreshed there.
         self.stats_gauge_changed();
-    }
-
-    /// The dock-local column ranges of the shown line's buttons (`context` is
-    /// the context line's budget) - the cursor rects' input, from the same
-    /// layout as click and hover (`bt_core::transfer_button_span`).
-    pub(crate) fn upload_button_spans(&self, context: u16) -> Vec<(u16, u16)> {
-        let uploads = self.uploads().borrow();
-        let Some(shown) = uploads.shown() else {
-            return Vec::new();
-        };
-        [TransferAction::List, TransferAction::Cancel]
-            .into_iter()
-            .filter_map(|action| bt_core::transfer_button_span(shown, context, action))
-            .collect()
-    }
-
-    /// The mouse is on the context line at dock-local column `col` (`None` →
-    /// outside the line; `context` is the context line's budget): if the
-    /// button under it **changed**, rewrites the line - the hover tone, a
-    /// frame only on that edge. It does not set the cursor: the
-    /// hand comes from the cursor rect, only refreshed here if stale. Without
-    /// an upload it exits on the first question - every motion of an idle
-    /// window would cost a borrow.
-    pub(crate) fn upload_hover(&self, at: Option<(u16, u16)>) {
-        // The status bar's other button (Sign In…) shares this funnel.
-        self.sign_in_hover(at);
-        let fresh = {
-            let mut uploads = self.uploads().borrow_mut();
-            let Some(shown) = uploads.shown() else {
-                return;
-            };
-            let hover =
-                at.and_then(|(col, context)| bt_core::transfer_button_at(shown, context, col));
-            uploads.set_hover(hover)
-        };
-        match fresh {
-            Some(fresh) => self.show_transfer(Some(fresh)),
-            // If the dock's drawn place moved (point size, window size, band) the
-            // hand cursor's rectangle must move too.
-            None => self.view().sync_cursor_rects(),
-        }
-    }
-
-    /// Recomputes the hover from the pointer's **current** place: the buttons
-    /// are right-aligned and their widths come from the state (item count), so
-    /// the line can change under a motionless pointer.
-    pub(crate) fn rehover_upload(&self) {
-        let at = self.view().pointer_context_column();
-        self.upload_hover(at);
-    }
-
-    /// The window stopped being key: `mouseMoved:` no longer arrives, the
-    /// button must not hang in hover.
-    pub(crate) fn unhover_upload(&self) {
-        self.upload_hover(None);
     }
 
     /// Stop request: ⌘., the line's `Cancel`/`Cancel all` and
@@ -963,28 +908,6 @@ impl TerminalPane {
         self.uploads_changed();
     }
 
-    /// A click on dock-local column `col` of the status line (on the context
-    /// line, at the small class's pitch): if it lands on a button, does its
-    /// work and `true`. `context` is the context line's budget (`bt_gpu::context_cols`).
-    pub(crate) fn upload_click(&self, col: u16, context: u16) -> bool {
-        let (action, span) = {
-            let uploads = self.uploads().borrow();
-            let Some(shown) = uploads.shown() else {
-                return false;
-            };
-            (
-                bt_core::transfer_button_at(shown, context, col),
-                bt_core::transfer_button_span(shown, context, TransferAction::List),
-            )
-        };
-        match action {
-            Some(TransferAction::Cancel) => self.request_stop(true),
-            Some(TransferAction::List) => self.toggle_upload_list(span),
-            None => return false,
-        }
-        true
-    }
-
     /// "Show transfers (N)": the queue's popover - attached to the
     /// button, `transient`: a click outside, Esc or pressing the button again closes it.
     ///
@@ -992,7 +915,7 @@ impl TerminalPane {
     /// press outside and that same press reaches here too - so as not to
     /// reopen a popover that looks open, the time of the event that triggered
     /// the close is stored (`popoverWillClose:`) and nothing is done for that event.
-    fn toggle_upload_list(&self, span: Option<(u16, u16)>) {
+    pub(crate) fn toggle_upload_list(&self, span: Option<(u16, u16)>) {
         let shown = self
             .upload_list()
             .borrow()
@@ -1099,7 +1022,7 @@ impl TerminalPane {
             self.show_transfer(Some(line));
         }
         // While the popover was open motion went to it: the mouse may be elsewhere now.
-        self.rehover_upload();
+        self.rehover_footer();
     }
 
     /// While the popover is open refreshes progress in place; if the items or

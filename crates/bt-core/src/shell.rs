@@ -662,6 +662,34 @@ pub struct DockContext {
     /// [`ShellLog::set_host_rules`]). [`HostMark::None`] without a bar or a
     /// host.
     pub program_mark: HostMark,
+    /// The TCP ports the pane's programs listen on, ascending and without
+    /// repeats — the context row's innermost trailing item (`↗ :3000  :6006`),
+    /// in every form. Empty when none listens or the setting is off. In a
+    /// remote session the server's ports join them ([`FooterPort::open`]).
+    ///
+    /// Its writer is `bt-shell`'s port probe ([`crate::Session::set_ports`]);
+    /// it belongs to the pane's processes, not to a command: a server started
+    /// in the background keeps its port across prompts, and it goes only when
+    /// its process stops listening.
+    pub ports: Vec<FooterPort>,
+    /// The context row's part under the mouse — the **one** hover slot of its
+    /// controls: an upload button's fill darkens, Sign In…'s too. A field of
+    /// its own, so the rows' refreshes (an upload's progress) do not write it.
+    /// Its writer is `bt-shell`'s pointer ([`crate::Session::set_footer_hover`]);
+    /// a part that is not drawn ignores it.
+    pub footer_hover: Option<crate::FooterControl>,
+}
+
+/// A listening port as the context row shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FooterPort {
+    pub port: u16,
+    /// Whether it opens from this Mac as it is — a local port, a server's
+    /// port reachable from here or one already forwarded: drawn in the
+    /// theme's `success`. `false`: a server's port only reachable through the
+    /// ssh connection (bound to its loopback, or blocked from here) — drawn
+    /// dim, and opening it forwards it first.
+    pub open: bool,
 }
 
 /// What a program's guide bar says ([`DockContext::program`]): which
@@ -765,12 +793,11 @@ impl RemoteSetupFault {
     }
 }
 
-/// The Sign In… button's drawing state ([`DockContext::sign_in`]).
+/// The ssh status bar's Sign In… button ([`DockContext::sign_in`]): its
+/// presence is the state; its hover is the context row's one hover slot
+/// ([`DockContext::footer_hover`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SignIn {
-    /// Under the mouse: the fill darkens (the upload buttons' rule).
-    pub hover: bool,
-}
+pub struct SignIn;
 
 /// The form of the load indicator that is drawn —
 /// [`RemoteStatsMode`] without `Off`: with `Off` there is no value at all.
@@ -919,11 +946,13 @@ pub enum TransferTone {
 /// The state of the upload line's buttons: the labels and the
 /// number of buttons are born from this ([`crate::dock`]'s layout).
 ///
-/// The button under the mouse and the list's openness are **here**, with the
-/// line: the line is rewritten on every refresh and if the mouse state lived on a
-/// separate path, either that path or the refresh would overwrite the other.
-/// Its change goes through [`crate::Session::set_transfer`]'s equality gate, so a
-/// frame is requested only when the state changes.
+/// The list's openness is **here**, with the line: the line is rewritten on
+/// every refresh and if that state lived on a path of its own, either that
+/// path or the refresh would overwrite the other. Its change goes through
+/// [`crate::Session::set_transfer`]'s equality gate, so a frame is requested
+/// only when the state changes. The button under the mouse is not: it is the
+/// context row's one hover slot ([`DockContext::footer_hover`]), a field the
+/// refresh does not write.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransferControls {
     /// The number of items visible in the list — finished, flowing and waiting.
@@ -932,8 +961,6 @@ pub struct TransferControls {
     pub items: u16,
     /// The list (popover) is open: the list button is in the pressed tone; its label does not change.
     pub list_open: bool,
-    /// The button under the mouse.
-    pub hover: Option<TransferAction>,
 }
 
 /// The job of one of the upload line's buttons.
@@ -1011,6 +1038,8 @@ impl Clone for DockContext {
         self.remote_setup = source.remote_setup;
         self.program.clone_from(&source.program);
         self.program_mark = source.program_mark;
+        self.ports.clone_from(&source.ports);
+        self.footer_hover = source.footer_hover;
     }
 }
 
@@ -2948,6 +2977,22 @@ impl ShellLog {
             local: self.local.running(),
             remote,
         }
+    }
+
+    /// Our remote shell's pid while it runs under the open `ssh` block — the
+    /// server-side root of the pane's listening ports. `None` locally, before
+    /// our remote shell's first mark, and once its `ssh` block is no longer
+    /// the open local command (the dropped connection's rule,
+    /// [`Self::running_blocks`]).
+    pub(crate) fn remote_shell_pid(&self) -> Option<u32> {
+        let shell = self.remote_shell?;
+        let open = self.context.remote.is_some()
+            && self.running_command().is_some()
+            && matches!(
+                self.local.blocks.last(),
+                Some((id, Outcome::Pending { .. })) if id == shell.parent
+            );
+        open.then_some(shell.pid)
     }
 
     /// How long the command a tab calls "running" has run; `None` when none
@@ -9354,6 +9399,24 @@ mod tests {
             id: Some(1),
         });
         assert_eq!(log.last_block(), Some(BlockKey::Local(1)), "ssh ended");
+    }
+
+    /// The server's ports are scanned under our remote shell only while
+    /// its `ssh` block is the open local command.
+    #[test]
+    fn the_remote_shell_pid_is_known_only_under_its_open_ssh() {
+        let mut log = ssh_log();
+        assert_eq!(log.remote_shell_pid(), None, "no remote mark yet");
+        feed(&mut log, b"\x1b]133;A;bt_remote=1.9.4\x07");
+        assert_eq!(log.remote_shell_pid(), Some(9));
+        let mut foreign = ssh_log();
+        feed(&mut foreign, b"\x1b]133;A;bt_remote=7.9.4\x07");
+        assert_eq!(foreign.remote_shell_pid(), None, "another block's shell");
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert_eq!(log.remote_shell_pid(), None, "ssh ended");
     }
 
     #[test]

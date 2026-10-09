@@ -2939,6 +2939,15 @@ impl AppDelegate {
         self.key_tab()?.mark_target()
     }
 
+    /// The ports of the key tab's focused pane — its programs' and, in a
+    /// remote session, the server's: the input of Shell ▸ Open Port ▸; empty
+    /// when no terminal window is key.
+    pub(crate) fn key_ports(&self) -> crate::footer::PortsModel {
+        self.key_tab()
+            .map(|tab| tab.focused_pane().ports_model())
+            .unwrap_or_default()
+    }
+
     /// [`Self::toggle_host_integration`]'s `plain` forgetting: the key tab's
     /// remote ssh argv, `ssh -G` and the state file on a thread of its own.
     /// `turn_off` is the host to turn the integration off for when **no**
@@ -4795,6 +4804,12 @@ impl AppDelegate {
             if changes.stats {
                 for pane in &panes {
                     pane.set_stats_settings(&new.remote_stats);
+                }
+            }
+            // The listening ports start or stop at once in every pane.
+            if changes.ports {
+                for pane in &panes {
+                    pane.set_ports_shown(new.shell_ports);
                 }
             }
             // The style and the dock's typing effects go to the link, not the session:

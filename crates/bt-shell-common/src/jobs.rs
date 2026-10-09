@@ -928,7 +928,7 @@ fn short_info(pid: u32) -> Option<libc::proc_bsdshortinfo> {
 /// `T` must be a plain C struct for which the all-zero-bits value is valid, and
 /// `flavor` must be the flavor for which the kernel writes that struct.
 #[cfg(target_os = "macos")]
-unsafe fn pid_info<T>(pid: u32, flavor: c_int) -> Option<T> {
+pub(crate) unsafe fn pid_info<T>(pid: u32, flavor: c_int) -> Option<T> {
     let pid = c_int::try_from(pid).ok()?;
     let size = c_int::try_from(size_of::<T>()).ok()?;
     // SAFETY: the caller's promise — a zeroed `T` is valid.

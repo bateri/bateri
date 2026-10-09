@@ -1356,6 +1356,10 @@ pub struct Settings {
     /// `[shell] integration`: whether the shell wrapper is installed. Takes effect
     /// **in the next session** ([`ShellIntegration`]).
     pub shell_integration: ShellIntegration,
+    /// `[shell] ports`: whether the dock's context row shows the TCP ports the
+    /// pane's programs listen on (`↗ :3000`), and Shell ▸ Open Port ▸ lists
+    /// them. Takes effect at once. Doesn't enter `TerminalOptions`.
+    pub shell_ports: bool,
     /// `[terminal] confirm_close`: when to ask on close ([`ConfirmClose`]).
     /// Doesn't enter `TerminalOptions`.
     pub confirm_close: ConfirmClose,
@@ -1416,6 +1420,7 @@ impl Default for Settings {
             erase: Erase::default(),
             dock_arrival: DockArrival::default(),
             shell_integration: ShellIntegration::default(),
+            shell_ports: true,
             confirm_close: ConfirmClose::default(),
             restore_windows: RestoreWindows::default(),
             keep_running: KeepRunning::default(),
@@ -1502,6 +1507,8 @@ pub enum SettingsEdit {
     Erase(Erase),
     DockArrival(DockArrival),
     ShellIntegration(ShellIntegration),
+    /// The settings window's "Show listening ports": `[shell] ports`.
+    ShellPorts(bool),
     /// Shell ▸ Mark … as ▸: the `[remote] hosts` edit that makes
     /// `host`'s mark `mark`. Not a single key's value but the array's entries —
     /// the rule is in this arm of [`Settings::with_edit`]. `host` is the form the
@@ -1589,6 +1596,7 @@ impl SettingsEdit {
             Self::Erase(_) => ("motion", "erase", "motion.erase"),
             Self::DockArrival(_) => ("motion", "dock_arrival", "motion.dock_arrival"),
             Self::ShellIntegration(_) => ("shell", "integration", "shell.integration"),
+            Self::ShellPorts(_) => ("shell", "ports", "shell.ports"),
             Self::RemoteHostMark { .. } | Self::RemoteHostIntegration { .. } => {
                 ("remote", "hosts", "remote.hosts")
             }
@@ -1641,9 +1649,10 @@ impl SettingsEdit {
             Self::RemoteStats(mode) => mode.name().into(),
             Self::StatsInterval(seconds) => i64::from(*seconds).into(),
             Self::PreviewMaxSize(bytes) | Self::PreviewLimit(bytes) => format_size(*bytes).into(),
-            Self::PreviewReadOnly(on) | Self::DownloadNotify(on) | Self::RemoteIntegration(on) => {
-                (*on).into()
-            }
+            Self::PreviewReadOnly(on)
+            | Self::DownloadNotify(on)
+            | Self::RemoteIntegration(on)
+            | Self::ShellPorts(on) => (*on).into(),
             Self::CursorRadius(value)
             | Self::CursorGlow(value)
             | Self::BlinkInterval(value)
@@ -1836,6 +1845,12 @@ dock_arrival = "ripple"
 # Unlike every other key here, this one only takes effect in shells started
 # after the change; shells already open keep what they were started with.
 integration = "auto"
+# true | false. Shows the ports your programs listen on at the right of the
+# dock's bottom line, like ↗ :3000 for a dev server, and lists them under
+# Shell > Open Port. Click one to see them all, Command-click a port to open
+# it in your browser. Every program started in the tab counts, in the
+# background too; a container's ports and programs run with sudo don't show.
+ports = true
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
@@ -2271,6 +2286,15 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = shell.get("ports") {
+                    parsed.settings.shell_ports = boolean(
+                        text,
+                        item,
+                        "shell.ports",
+                        fallback.shell_ports,
+                        &mut parsed.diagnostics,
+                    );
+                }
                 // Retired keys: the value isn't read, its presence is reported.
                 for (key, message) in RETIRED {
                     if let Some(item) = shell.get(key) {
@@ -2284,6 +2308,7 @@ stats_interval = 3
             }
             None if root.contains_key("shell") => {
                 parsed.settings.shell_integration = fallback.shell_integration;
+                parsed.settings.shell_ports = fallback.shell_ports;
             }
             None => {}
         }
@@ -2406,6 +2431,7 @@ stats_interval = 3
             stats: self.remote_stats != new.remote_stats,
             scrollbar: self.scrollbar != new.scrollbar,
             content_edge: self.content_edge != new.content_edge,
+            ports: self.shell_ports != new.shell_ports,
         }
     }
 
@@ -3097,6 +3123,10 @@ pub struct Changes {
     /// A field of its own, for [`Self::caret`]'s reason: the key doesn't
     /// enter `TerminalOptions`, so a change must not resend them.
     pub content_edge: bool,
+    /// [`Settings::shell_ports`] changed: the platform shell starts or stops
+    /// every pane's port probe. A field of its own, for [`Self::caret`]'s
+    /// reason.
+    pub ports: bool,
 }
 
 /// Parses the text into a TOML document; a one-line diagnostic if it can't be
@@ -3922,6 +3952,7 @@ mod tests {
             ("motion", "erase"),
             ("motion", "dock_arrival"),
             ("shell", "integration"),
+            ("shell", "ports"),
             ("remote", "hosts"),
             ("remote", "preview_max_size"),
             ("remote", "preview_read_only"),
@@ -4085,6 +4116,7 @@ mod tests {
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                ports: false,
             }
         );
         assert_eq!(
@@ -4128,6 +4160,7 @@ mod tests {
             erase: Erase::Recede,
             dock_arrival: DockArrival::Ripple,
             shell_integration: ShellIntegration::Auto,
+            shell_ports: true,
             confirm_close: ConfirmClose::Always,
             restore_windows: RestoreWindows::Off,
             keep_running: KeepRunning::Quit,
@@ -4307,6 +4340,7 @@ mod tests {
             stats: false,
             scrollbar: false,
             content_edge: false,
+            ports: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
         assert_eq!(
@@ -4401,6 +4435,7 @@ mod tests {
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                ports: false,
             }
         );
         assert_eq!(
@@ -4551,6 +4586,7 @@ found {found}; using \"spring\""
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                ports: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -4641,6 +4677,7 @@ found {found}; using \"system\""
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                ports: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -5704,6 +5741,7 @@ found 1.5; using 0.1"
                     stats: false,
                     scrollbar: false,
                     content_edge: false,
+                    ports: false,
                 },
                 "{text}"
             );
@@ -5803,6 +5841,7 @@ found 1.5; using 0.1"
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                ports: false,
             }
         );
         // The same value again is no change.
@@ -5906,6 +5945,7 @@ found 1.5; using 0.1"
                 stats: false,
                 scrollbar: false,
                 content_edge: false,
+                ports: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -6452,6 +6492,7 @@ cursor = \"spring\"
             SettingsEdit::ShellIntegration(integration) => {
                 settings.shell_integration = integration;
             }
+            SettingsEdit::ShellPorts(on) => settings.shell_ports = on,
             // The oracle is right only from an empty list: both of `every_edit`'s
             // texts carry `hosts = []`. The filled list's rule is in its own test.
             SettingsEdit::RemoteHostMark {
@@ -6539,6 +6580,7 @@ cursor = \"spring\"
                 on: false,
             },
             SettingsEdit::RemoteIntegration(false),
+            SettingsEdit::ShellPorts(false),
             // Written as "250MB" and "1500KB": the largest exact unit.
             SettingsEdit::PreviewMaxSize(250_000_000),
             SettingsEdit::PreviewReadOnly(false),

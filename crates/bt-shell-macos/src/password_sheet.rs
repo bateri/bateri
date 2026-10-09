@@ -257,11 +257,10 @@ impl TerminalPane {
         if current != Some(command) || session.sign_in().is_some() {
             return;
         }
-        session.set_sign_in(command, Some(SignIn::default()));
+        session.set_sign_in(command, Some(SignIn));
         self.view().sync_cursor_rects();
         // The pointer may already be over the new button.
-        let at = self.view().pointer_context_column();
-        self.sign_in_hover(at);
+        self.rehover_footer();
     }
 
     /// A background job logged in (a sample, a link check): the button goes
@@ -305,46 +304,13 @@ impl TerminalPane {
         self.retry_stats();
     }
 
-    /// The mouse is on the context row at dock-local column `col` (`None` →
-    /// off it): the button's hover tone, a frame only on its edge.
-    pub(crate) fn sign_in_hover(&self, at: Option<(u16, u16)>) {
-        let Some(session) = self.session() else {
-            return;
-        };
-        let Some((command, shown)) = session.sign_in() else {
-            return;
-        };
-        let hover = at.is_some_and(|(col, context)| self.sign_in_hit(col, context));
-        if hover != shown.hover {
-            session.set_sign_in(command, Some(SignIn { hover }));
-        }
-    }
-
-    /// Whether dock-local column `col` of the context row (`context` is the
-    /// row's budget) is on the drawn button — the drawing's layout
-    /// (`Session::sign_in_span`).
-    fn sign_in_hit(&self, col: u16, context: u16) -> bool {
-        self.session()
-            .and_then(|session| session.sign_in_span(context))
-            .is_some_and(|(start, end)| (start..end).contains(&col))
-    }
-
-    /// A click on the context row: on the button it signs in and `true`.
-    pub(crate) fn sign_in_click(&self, col: u16, context: u16) -> bool {
-        if !self.sign_in_hit(col, context) {
-            return false;
-        }
-        self.sign_in();
-        true
-    }
-
     /// The button's job: the route gate with the sheet, on its own thread.
     /// Our master up is a login: the button goes and the background tries
     /// again. Today's argv (no socket of ours possible, the user's own master)
     /// only retries — the background's own success or failure decides. A
     /// cancel says nothing more; a failure (ssh's reason, an unknown host key)
     /// is a sheet.
-    fn sign_in(&self) {
+    pub(crate) fn sign_in(&self) {
         let (Some(masters), Some((_, target, _))) = (
             self.masters(),
             self.session().and_then(|session| session.remote_target()),

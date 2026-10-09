@@ -36,10 +36,14 @@ use std::time::{Duration, Instant};
 
 use crate::links::{self, Entry};
 use crate::remote_files::{
-    Ask, LoadSample, RemoteEntry, ends_reply, helper_script, load_request_line, parse_greeting,
-    parse_load, parse_reply, request_line,
+    Ask, LoadSample, RemoteEntry, RemoteListener, ends_reply, helper_script, load_request_line,
+    parse_greeting, parse_load, parse_ports, parse_reply, ports_request_line, request_line,
 };
 use crate::upload::{collect_stderr, is_safe, last_line, remote_command};
+
+/// How long a scan of the server's listening ports may take — a `/proc`
+/// walk, [`LOAD_TIMEOUT`]'s kind of work.
+pub const PORTS_TIMEOUT: Duration = LOAD_TIMEOUT;
 
 /// How long the helper may take to greet — an ssh handshake, a jump host. A
 /// **design constant**, not a measurement: generous, because a server that
@@ -211,6 +215,20 @@ impl HelperSession {
         parse_load(&out, seq).map_err(|_| "The server's answer could not be read".to_owned())
     }
 
+    /// The server's listening ports under our remote shell `shell`:
+    /// `Ok(None)` without a Linux `/proc` (`BT-NOPROC`). `Err` as
+    /// [`Self::ask`]'s — the session is dropped after it.
+    pub fn ports(
+        &mut self,
+        shell: u32,
+        timeout: Duration,
+    ) -> Result<Option<Vec<RemoteListener>>, String> {
+        self.seq += 1;
+        let seq = self.seq;
+        let out = self.exchange(&ports_request_line(seq, shell), seq, timeout)?;
+        parse_ports(&out, seq).map_err(|_| "The server's answer could not be read".to_owned())
+    }
+
     /// Writes one request line and reads up to its reply's end line, within
     /// `timeout`.
     fn exchange(&mut self, line: &str, seq: u64, timeout: Duration) -> Result<String, String> {
@@ -373,6 +391,9 @@ pub enum Query {
     /// A load sample for the ssh status bar's indicator;
     /// `detail` while the popover is open (OS, cores, top processes).
     Load { detail: bool },
+    /// The server's listening ports under our remote shell `shell` (its pid
+    /// there) — the dock's remote ports.
+    Ports { shell: u32 },
 }
 
 /// The answer to a [`Query`].
@@ -385,6 +406,8 @@ pub enum Answer {
     Counted(Option<RemoteEntry>),
     /// The load sample, or why there is none.
     Load(LoadReply),
+    /// The listening ports; `None` without a Linux `/proc` on the server.
+    Ports(Option<Vec<RemoteListener>>),
 }
 
 /// The answer to a [`Query::Load`]. Its failures are split by what the
@@ -683,6 +706,7 @@ fn answer(
     query: Query,
 ) -> Result<Answer, String> {
     match query {
+        Query::Ports { shell } => Ok(Answer::Ports(session.ports(shell, PORTS_TIMEOUT)?)),
         Query::Load { detail } => Ok(Answer::Load(match session.load(detail, LOAD_TIMEOUT)? {
             Some(sample) => LoadReply::Sample(sample),
             None => LoadReply::NoProc,
@@ -815,6 +839,39 @@ mod tests {
                 .is_err()
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `bt_ports` end to end on this machine: macOS has no `/proc` and
+    /// answers `BT-NOPROC`; `make linux` reads a real one. The root is this
+    /// test's own process — a shell's tree includes the shell — and its
+    /// listening socket must come back with its port and binding; a
+    /// connected socket and a gone root list nothing.
+    #[test]
+    fn a_port_scan_answers_through_a_local_shell() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let _client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let mut session =
+            HelperSession::open(&local_ssh(), "local", OPEN_TIMEOUT).expect("the helper greets");
+        let found = session
+            .ports(std::process::id(), PORTS_TIMEOUT)
+            .expect("a reply");
+        if Path::new("/proc/net/tcp").exists() {
+            let found = found.expect("a Linux /proc gives a scan");
+            let ours: Vec<_> = found.iter().filter(|l| l.port == port).collect();
+            assert_eq!(ours.len(), 1, "{found:?}");
+            assert_eq!(ours[0].pid, std::process::id());
+            assert_eq!(ours[0].bound, crate::ports::Bound::Loopback);
+            assert_eq!(
+                ours[0].address,
+                std::net::IpAddr::from([127, 0, 0, 1]),
+                "{found:?}"
+            );
+            let gone = session.ports(u32::MAX - 3, PORTS_TIMEOUT).expect("a reply");
+            assert_eq!(gone, Some(Vec::new()), "a gone root has no tree");
+        } else {
+            assert_eq!(found, None, "no /proc: no scan");
+        }
     }
 
     /// `bt_load` end to end on this machine: macOS has no

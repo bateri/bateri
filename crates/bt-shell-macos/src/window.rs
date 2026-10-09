@@ -728,7 +728,7 @@ define_class!(
             }
             for pane in tab.panes() {
                 pane.apply_focus(true);
-                pane.rehover_upload();
+                pane.rehover_footer();
                 // Coming back to the window is an interaction: the remote load
                 // indicator samples again at once.
                 pane.note_interaction();
@@ -746,7 +746,7 @@ define_class!(
             // application deactivates, so this one hook covers both.
             for pane in self.panes() {
                 pane.apply_focus(false);
-                pane.unhover_upload();
+                pane.unhover_footer();
                 pane.view().clear_link();
                 // The scroll bar's strip is tracked in the key window only:
                 // no exit would come, and the bar would stay wide.
@@ -2009,7 +2009,7 @@ impl TerminalWindow {
         for pane in new.panes() {
             pane.apply_focus(key);
             if key {
-                pane.rehover_upload();
+                pane.rehover_footer();
             }
         }
         // The keyboard to the tab's focused pane — the one it had when it

@@ -4480,6 +4480,28 @@ mod tests {
         }
     }
 
+    // Calibration: names a font.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_ports_mark_has_no_box_in_the_small_class() {
+        // The listening ports sit in the context line, i.e. the small class.
+        // A hand copy of `bt-core`'s `PORTS_GLYPHS` (this crate cannot see it;
+        // `the_ports_mark_is_the_one_the_atlas_checks` links them) — the twin
+        // of `the_stats_glyphs_have_no_box_in_the_small_class`. Menlo, by name.
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
+        assert_eq!(menlo.font_issue(), None, "Menlo did not open");
+        let slot = menlo
+            .slot(
+                Sprite::Char('↗'),
+                Face::Regular,
+                SizeClass::Small,
+                Half::Whole,
+            )
+            .0
+            .slot;
+        assert_ne!(slot, TOFU, "'↗' is a box in Menlo's small class");
+    }
+
     #[test]
     fn pattern_period_divides_cell_evenly() {
         // The dot/dash pattern is tiled with `x % period` and the sprite is one

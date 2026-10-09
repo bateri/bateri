@@ -664,7 +664,7 @@ impl TerminalTab {
             pane.apply_focus(false);
             pane.close_stats_popover();
             pane.close_upload_list();
-            pane.unhover_upload();
+            pane.unhover_footer();
             pane.view().clear_link();
             pane.view().release_scrollbar_hover();
         }

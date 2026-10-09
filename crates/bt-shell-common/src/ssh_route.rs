@@ -260,6 +260,20 @@ fn config(runner: &dyn SshRunner, target: &RemoteTarget) -> Option<SshConfig> {
         .and_then(|(_, out, _)| parse_config(&out))
 }
 
+/// The name this Mac reaches the server by **directly** — `ssh -G`'s
+/// `hostname`, the real name behind an `~/.ssh/config` alias. `None` when
+/// the configuration cannot be read or a jump host stands between: a jump
+/// host's inner address (`10.0.0.5`) may name another machine on this Mac's
+/// own network, and opening it would open the wrong server. Blocking (one
+/// `ssh -G`); for a thread of its own.
+pub fn direct_hostname(runner: &dyn SshRunner, target: &RemoteTarget) -> Option<String> {
+    let config = config(runner, target)?;
+    config
+        .proxyjump
+        .eq_ignore_ascii_case("none")
+        .then_some(config.hostname)
+}
+
 /// [`plan`] and the configuration it read — the saved password's key
 /// ([`Account::from_config`]); `None` for a target that names its own socket.
 fn resolve(runner: &dyn SshRunner, target: &RemoteTarget, bases: &[PathBuf]) -> Resolved {

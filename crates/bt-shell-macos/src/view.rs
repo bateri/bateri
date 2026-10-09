@@ -867,7 +867,7 @@ define_class!(
         /// publishing the mode to `bt-shell-macos`, i.e. a new piece of shared
         /// state; if a symptom is seen we return to that arm.
         ///
-        /// The upload line's button ([`BateriView::upload_hover`]) is asked
+        /// The context row's parts ([`BateriView::footer_hover`]) are asked
         /// **before** the motion report and independently of it: the context
         /// line is outside the grid and the report path rejects that area. The
         /// ⌘-hovered link ([`BateriView::link_motion`]) likewise: its hit
@@ -883,7 +883,7 @@ define_class!(
             if self.scrollbar_motion(event) {
                 return;
             }
-            self.upload_hover(event);
+            self.footer_hover(event);
             self.link_motion(event);
             self.motion_event(event, None);
         }
@@ -2575,43 +2575,25 @@ impl BateriView {
         self.ivars().cursor_rects.replace(rects);
     }
 
-    /// Every hand-cursor rectangle: the upload buttons, the load indicator,
-    /// the shown link and the scroll bar's drawn block marks.
+    /// Every hand-cursor rectangle: the context row's parts, the shown link
+    /// and the scroll bar's drawn block marks.
     fn hand_rects(&self) -> Vec<NSRect> {
-        let mut rects = self.upload_button_rects();
-        rects.extend(self.stats_rect());
-        rects.extend(self.sign_in_rect());
+        let mut rects = self.footer_rects();
         rects.extend(self.link_rects());
         rects.extend(self.block_rects());
         rects
     }
 
-    /// The load indicator's rectangle, in view points — the same range as its
-    /// click and its popover's anchor (`Session::stats_span`); `None` if it is
-    /// not drawn.
-    fn stats_rect(&self) -> Option<NSRect> {
-        let budget = self.context_budget()?;
-        let (start, end) = self.pane()?.session()?.stats_span(budget)?;
-        self.context_span_rect(start, end)
-    }
-
-    /// The Sign In… button's rectangle, in view points — its click's range
-    /// (`Session::sign_in_span`); `None` if it is not drawn.
-    fn sign_in_rect(&self) -> Option<NSRect> {
-        let budget = self.context_budget()?;
-        let (start, end) = self.pane()?.session()?.sign_in_span(budget)?;
-        self.context_span_rect(start, end)
-    }
-
-    /// The buttons' current rectangles, in view points - from click and hover's
-    /// geometry ([`Self::context_span_rect`]); empty if there is no upload.
-    fn upload_button_rects(&self) -> Vec<NSRect> {
+    /// The context row's clickable parts, in view points — the same ranges as
+    /// their clicks and their popovers' anchors (`TerminalPane::footer_spans`,
+    /// the drawing's plan); empty without a row.
+    fn footer_rects(&self) -> Vec<NSRect> {
         let (Some(pane), Some(context)) = (self.pane(), self.context_budget()) else {
             return Vec::new();
         };
-        pane.upload_button_spans(context)
+        pane.footer_spans(context)
             .into_iter()
-            .filter_map(|(start, end)| self.context_span_rect(start, end))
+            .filter_map(|(_, start, end)| self.context_span_rect(start, end))
             .collect()
     }
 
@@ -2621,7 +2603,7 @@ impl BateriView {
     /// alternate screen. The rectangle is read from the last drawn frame and
     /// AppKit's own triggers (the frame) can run before that frame, so the
     /// criterion is the geometry itself. The callers are every motion and every
-    /// refresh (`TerminalPane::upload_hover`, `show_transfer`); on the same
+    /// refresh (`TerminalPane::footer_hover`, `show_transfer`); on the same
     /// rectangle it is a no-op, i.e. the cursor is not re-evaluated.
     pub(crate) fn sync_cursor_rects(&self) {
         let fresh = self.hand_rects();
@@ -2633,18 +2615,17 @@ impl BateriView {
         }
     }
 
-    /// Whether the click landed on one of the upload line's buttons
-    /// or, failing that, on the load indicator (never both —
-    /// the indicator is not drawn while an upload row is); `true` → the click
-    /// was consumed. The geometry is [`Self::context_column`]'s.
+    /// Whether the click landed on a part of the context row — an upload
+    /// button, the load indicator, Sign In…, the listening ports — and did its
+    /// work (`TerminalPane::footer_click`; ⌘ opens the port under it); `true`
+    /// → the click was consumed. The geometry is [`Self::context_column`]'s.
     fn context_control(&self, event: &NSEvent) -> bool {
+        let command = event
+            .modifierFlags()
+            .contains(NSEventModifierFlags::Command);
         self.context_column(event.locationInWindow())
             .zip(self.pane())
-            .is_some_and(|((col, context), pane)| {
-                pane.upload_click(col, context)
-                    || pane.stats_click(col, context)
-                    || pane.sign_in_click(col, context)
-            })
+            .is_some_and(|((col, context), pane)| pane.footer_click(col, context, command))
     }
 
     /// The mouse's **current** place on the context line ([`Self::context_column`]):
@@ -2654,12 +2635,11 @@ impl BateriView {
         self.context_column(self.window()?.mouseLocationOutsideOfEventStream())
     }
 
-    /// The upload button under the mouse: a window change asks
-    /// for a frame only when the button changes and turns the cursor
-    /// (`TerminalPane::upload_hover`).
-    fn upload_hover(&self, event: &NSEvent) {
+    /// The context row's part under the mouse: a frame only when the part
+    /// changes (`TerminalPane::footer_hover`).
+    fn footer_hover(&self, event: &NSEvent) {
         if let Some(pane) = self.pane() {
-            pane.upload_hover(self.context_column(event.locationInWindow()));
+            pane.footer_hover(self.context_column(event.locationInWindow()));
         }
     }
 

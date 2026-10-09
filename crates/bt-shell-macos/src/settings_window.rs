@@ -197,11 +197,12 @@ enum Key {
     KeepRunning,
     Scrollbar,
     ContentEdge,
+    Ports,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 38] = [
+    const ALL: [Key; 39] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -240,6 +241,7 @@ impl Key {
         Key::KeepRunning,
         Key::Scrollbar,
         Key::ContentEdge,
+        Key::Ports,
     ];
 
     fn tag(self) -> NSInteger {
@@ -293,6 +295,7 @@ impl Key {
             Key::RemoteStats => "remote.stats",
             Key::StatsInterval => "remote.stats_interval",
             Key::RemoteIntegration => "remote.integration",
+            Key::Ports => "shell.ports",
         }
     }
 }
@@ -1040,6 +1043,7 @@ struct Controls {
     remote_stats: Retained<NSPopUpButton>,
     stats_interval: Number,
     remote_integration: Retained<NSSwitch>,
+    ports: Retained<NSSwitch>,
     /// The panes' rows: the lock, the dependent row and the row's
     /// diagnostic come from here.
     rows: Vec<Row>,
@@ -1246,6 +1250,7 @@ define_class!(
                 Some(Key::PreviewReadOnly) => Some(SettingsEdit::PreviewReadOnly(on)),
                 Some(Key::DownloadNotify) => Some(SettingsEdit::DownloadNotify(on)),
                 Some(Key::RemoteIntegration) => Some(SettingsEdit::RemoteIntegration(on)),
+                Some(Key::Ports) => Some(SettingsEdit::ShellPorts(on)),
                 _ => None,
             };
             self.save(edit);
@@ -1606,6 +1611,7 @@ impl SettingsWindow {
         select_choice(&c.dock_arrival, settings.dock_arrival);
 
         set_switch(&c.remote_integration, settings.remote_integration);
+        set_switch(&c.ports, settings.shell_ports);
         let files = &settings.remote_files;
         let (items, index) = size_items(files.preview_max_size, PREVIEW_SIZE_PRESETS);
         fill_sizes(&c.preview_max_size, &items, index);
@@ -2163,6 +2169,7 @@ impl SettingsWindow {
         let clipboard = self.switch(Key::Clipboard);
         let scrollback = self.number(Key::Scrollback, 0.0, SCROLLBACK_MAX as f64, 1000.0, 80.0);
         let shell_integration = self.popup::<ShellIntegration>(Key::ShellIntegration);
+        let ports = self.switch(Key::Ports);
         let mut general = Form::new(mtm);
         general.row(
             Key::ConfirmClose,
@@ -2206,6 +2213,13 @@ impl SettingsWindow {
             &shell_integration,
             &[&shell_integration],
             Some("Takes effect in new tabs and windows."),
+        );
+        general.row(
+            Key::Ports,
+            "Show listening ports:",
+            &ports,
+            &[&ports],
+            Some("The ports your programs listen on, at the right of the dock (↗ :3000). Click to list them, Cmd-click to open one."),
         );
 
         // Appearance
@@ -2575,6 +2589,7 @@ impl SettingsWindow {
             remote_stats,
             stats_interval,
             remote_integration,
+            ports,
             rows,
         };
         (panes, controls)
@@ -3029,7 +3044,7 @@ mod tests {
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
                     keypress = []\nerase = []\ndock_arrival = []\n\
-                    [shell]\nintegration = []\n\
+                    [shell]\nintegration = []\nports = []\n\
                     [remote]\npreview_max_size = []\npreview_read_only = []\n\
                     preview_dir = []\npreview_keep = []\npreview_limit = []\n\
                     download_dir = []\ndownload_conflict = []\ndownload_notify = []\n\
@@ -3082,6 +3097,7 @@ mod tests {
                 Key::RemoteStats => SettingsEdit::RemoteStats(RemoteStatsMode::Off),
                 Key::StatsInterval => SettingsEdit::StatsInterval(3),
                 Key::RemoteIntegration => SettingsEdit::RemoteIntegration(false),
+                Key::Ports => SettingsEdit::ShellPorts(false),
             };
             assert_eq!(edit.path(), key.path(), "{key:?}");
         }

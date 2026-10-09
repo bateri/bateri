@@ -33,7 +33,7 @@
 //! includes scale and point size, and the point-size delta belongs to the pane.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::ptr::NonNull;
@@ -78,11 +78,13 @@ use crate::keeper::{Keeper, MIRROR_DELAY};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::password_sheet::PasswordSheet;
+use crate::ports::Listener;
 use crate::preview::PreviewTicket;
 use crate::program;
 use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
+use crate::remote_ports::RemotePorts;
 use crate::restore::SavedPane;
 use crate::search_bar::{SearchBar, selection_query};
 use crate::ssh_route::Masters;
@@ -823,6 +825,9 @@ struct ShellWake {
     /// ([`PROBE_DELAY`]) and reads the moment it runs, so a burst of output
     /// is one probe and an idle pane runs none.
     program_probe: Arc<RemoteProbe>,
+    /// The listening ports' probe ([`PortProbe`]): on with `[shell] ports`,
+    /// every edge (output, `C`, a prompt) schedules one delayed scan.
+    pub(crate) port_probe: Arc<PortProbe>,
     /// Whether the stale-link news is waiting on the main queue —
     /// `search_pending`'s twin: at most one job.
     link_pending: Arc<AtomicBool>,
@@ -912,6 +917,61 @@ impl RemoteProbe {
     }
 }
 
+/// The listening ports' probe: whether it is **on** (`[shell] ports`; never in a
+/// timed run) and the **pending** delayed job — at most one in the main
+/// queue ([`PORTS_DELAY`]), `title_pending`'s pattern. Not armed per command
+/// like [`RemoteProbe`]: a background server outlives its command, so every
+/// edge may have opened or closed a port. An idle pane has no edge and runs
+/// no scan; an edge costs one atomic swap.
+#[derive(Debug, Default)]
+pub(crate) struct PortProbe {
+    on: AtomicBool,
+    pending: AtomicBool,
+}
+
+impl PortProbe {
+    fn new(on: bool) -> Self {
+        Self {
+            on: AtomicBool::new(on),
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    /// An edge: `true` if the probe is on and no job is waiting — the caller
+    /// schedules one.
+    fn edge(&self) -> bool {
+        self.on.load(Ordering::Acquire) && !self.pending.swap(true, Ordering::AcqRel)
+    }
+
+    /// The head of the job: releases the slot; `false` if the probe was
+    /// turned off meanwhile.
+    fn begin(&self) -> bool {
+        self.pending.store(false, Ordering::Release);
+        self.on.load(Ordering::Acquire)
+    }
+
+    /// A claimed job that could not be scheduled gives its slot back.
+    fn release(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn is_on(&self) -> bool {
+        self.on.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_on(&self, on: bool) {
+        self.on.store(on, Ordering::Release);
+    }
+}
+
+/// How long after an edge (output, `C`, a prompt) the listening ports are
+/// scanned — a **design constant**, not a measurement. A server prints its
+/// address once its port is open (measured on `next dev`: the port is open
+/// when `Local:` prints), so the scan after that line finds it; the delay
+/// folds a burst of output into one scan and stays short next to the time it
+/// takes to read the line and reach for the mouse.
+const PORTS_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// How long an unfinished block index waits for its next step while output
 /// streams ([`TerminalPane::drive_chunk`]) — a display frame at 60 Hz, a
 /// **design constant**: the frame path tells the index of output at most
@@ -976,6 +1036,32 @@ impl ShellWake {
             };
             if pane.login_check() {
                 probe.rearm();
+            }
+        });
+    }
+
+    /// Schedules the listening ports' scan on the main queue **after
+    /// [`PORTS_DELAY`]** if the probe is on and none is waiting
+    /// ([`PortProbe`]); the job releases its slot before scanning, so an edge
+    /// that arrives meanwhile schedules the next one.
+    fn poke_ports(&self) {
+        if !self.port_probe.edge() {
+            return;
+        }
+        let Ok(when) = DispatchTime::try_from(PORTS_DELAY) else {
+            self.port_probe.release();
+            return;
+        };
+        let probe = Arc::clone(&self.port_probe);
+        let (id, lookup) = (self.id, self.lookup);
+        let _ = DispatchQueue::main().after(when, move || {
+            if !probe.begin() {
+                return;
+            }
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.scan_ports();
             }
         });
     }
@@ -1114,6 +1200,8 @@ impl Wake for ShellWake {
         if self.program_probe.output() {
             self.dispatch_program_probe();
         }
+        // A server prints its address once it listens; a burst is one scan.
+        self.poke_ports();
     }
 
     fn child_exit(&self, _code: Option<i32>) {
@@ -1239,6 +1327,7 @@ impl Wake for ShellWake {
         if self.program_probe.command_started() {
             self.dispatch_program_probe();
         }
+        self.poke_ports();
     }
 
     fn phase_edge(&self) {
@@ -1247,6 +1336,9 @@ impl Wake for ShellWake {
         // tab's ring stops or its "finished" mark comes.
         self.push_state_soon();
         self.announce_activity();
+        // A command's end: its servers stopped listening, or a background
+        // one started without a word.
+        self.poke_ports();
     }
 
     fn remote_command_edge(&self) {
@@ -1613,6 +1705,15 @@ pub(crate) struct PaneIvars {
     list_closed_at: Cell<Option<f64>>,
     /// The open load indicator popover ([`crate::stats_popover`]).
     stats_popover: RefCell<Option<StatsPopover>>,
+    /// The ports the pane's programs listen on, as the last scan found them
+    /// ([`crate::footer`]): the dock shows their numbers, the ports menu
+    /// these records.
+    listeners: RefCell<Vec<Listener>>,
+    /// The listening processes whose exit is watched — `(pid, start)`, one
+    /// thread each ([`crate::footer`]).
+    watched: RefCell<HashSet<(u32, u64)>>,
+    /// The server's listening ports in a remote session ([`crate::remote_ports`]).
+    remote_ports: RefCell<RemotePorts>,
     /// Time of the event that closed the load popover — its own slot, so a
     /// press on one control never swallows the other's.
     stats_closed_at: Cell<Option<f64>>,
@@ -1900,6 +2001,33 @@ define_class!(
             self.forget_password();
         }
 
+        /// A listening port's item (the dock's ports menu, Shell ▸ Open
+        /// Port ▸): opens `http://localhost:{tag}` ([`crate::footer`]).
+        #[unsafe(method(openPort:))]
+        fn open_port_action(&self, sender: Option<&AnyObject>) {
+            self.open_port_sent(sender);
+        }
+
+        /// The item's ⌥ alternate: copies the address.
+        #[unsafe(method(copyPortURL:))]
+        fn copy_port_url_action(&self, sender: Option<&AnyObject>) {
+            self.copy_port_url_sent(sender);
+        }
+
+        /// A server's port (the ports menu's "On {host}" half): opens it,
+        /// forwarding it first when it does not open from this Mac
+        /// ([`crate::remote_ports`]).
+        #[unsafe(method(openRemotePort:))]
+        fn open_remote_port_action(&self, sender: Option<&AnyObject>) {
+            self.open_remote_port_sent(sender);
+        }
+
+        /// Its ⌥ alternate: copies the address that opens it.
+        #[unsafe(method(copyRemotePortURL:))]
+        fn copy_remote_port_url_action(&self, sender: Option<&AnyObject>) {
+            self.copy_remote_port_url_sent(sender);
+        }
+
         /// "Jump to latest"'s button ([`JumpLatest`]).
         #[unsafe(method(jumpToLatest:))]
         fn jump_to_latest_sent(&self, _sender: Option<&AnyObject>) {
@@ -1972,6 +2100,7 @@ impl TerminalPane {
         let content_edge = settings.content_edge;
         let remote_files = settings.remote_files.clone();
         let stats_driver = StatsDriver::new(&settings.remote_stats);
+        let ports_on = run.is_none() && settings.shell_ports;
         let dim = DimOverlay::new(mtm);
         dim.paint(&theme);
         let link_label = LinkLabel::new(mtm);
@@ -2019,6 +2148,7 @@ impl TerminalPane {
                 remote_probe: Arc::default(),
                 login_probe: Arc::default(),
                 program_probe: Arc::default(),
+                port_probe: Arc::new(PortProbe::new(ports_on)),
                 link_pending: Arc::default(),
                 blocks_pending: Arc::default(),
                 unseen_pending: Arc::default(),
@@ -2062,6 +2192,9 @@ impl TerminalPane {
             list_closed_at: Cell::new(None),
             stats_popover: RefCell::new(None),
             stats_closed_at: Cell::new(None),
+            listeners: RefCell::new(Vec::new()),
+            watched: RefCell::new(HashSet::new()),
+            remote_ports: RefCell::new(RemotePorts::default()),
             remote_helper: RefCell::new(RemoteHelper::default()),
             stats: RefCell::new(stats_driver),
             last_input: Cell::new(Moment::now()),
@@ -3076,6 +3209,12 @@ impl TerminalPane {
     /// with ⌘ and only for an OSC 8 link — a plain-text link is its own target.
     /// The width is the text's, at most the pane's minus the margins; asks for
     /// no frame.
+    /// The bottom-left label's text while it shows; `None` hidden.
+    pub(crate) fn link_target_text(&self) -> Option<String> {
+        let (label, text) = &self.ivars().link_label;
+        (!label.isHidden()).then(|| text.stringValue().to_string())
+    }
+
     pub(crate) fn set_link_target(&self, target: Option<&str>) {
         let (label, text) = &self.ivars().link_label;
         let Some(target) = target else {
@@ -3777,6 +3916,8 @@ impl TerminalPane {
         // list's goes in `abandon_uploads`).
         self.close_stats_popover();
         self.stop_stats();
+        // A forward tunnel of ours goes with the pane.
+        self.end_remote_ports();
         self.ivars().closed.set(true);
         // SAFETY: the observer is this object, registered in `observe_frame`;
         // a no-op if it is not registered.
@@ -4455,6 +4596,33 @@ impl TerminalPane {
     /// The open load indicator popover.
     pub(crate) fn stats_popover(&self) -> &RefCell<Option<StatsPopover>> {
         &self.ivars().stats_popover
+    }
+
+    pub(crate) fn listeners(&self) -> &RefCell<Vec<Listener>> {
+        &self.ivars().listeners
+    }
+
+    pub(crate) fn watched(&self) -> &RefCell<HashSet<(u32, u64)>> {
+        &self.ivars().watched
+    }
+
+    pub(crate) fn remote_ports(&self) -> &RefCell<RemotePorts> {
+        &self.ivars().remote_ports
+    }
+
+    /// The listening ports' probe — on or off with `[shell] ports`.
+    pub(crate) fn port_probe(&self) -> &PortProbe {
+        &self.ivars().wake.port_probe
+    }
+
+    /// Schedules a scan of the listening ports, as an edge would
+    /// ([`ShellWake::poke_ports`]).
+    pub(crate) fn poke_ports(&self) {
+        self.ivars().wake.poke_ports();
+    }
+
+    pub(crate) fn shell_parent(&self) -> Option<ShellParent> {
+        self.ivars().shell_parent.get().copied()
     }
 
     /// The time of the event that closed the load popover.

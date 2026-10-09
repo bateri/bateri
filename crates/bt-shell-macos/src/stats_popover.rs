@@ -4,7 +4,7 @@
 //!
 //! - **The upload list's pattern** (`uploader`'s "Show transfers (N)"):
 //!   `transient`, anchored to the indicator's column range
-//!   (`Session::stats_span` → `BateriView::context_span_rect`, the drawing's
+//!   (`Session::footer_span` → `BateriView::context_span_rect`, the drawing's
 //!   own layout), Esc swallowed by a local key monitor in the pane's window —
 //!   the terminal window stays key, so Esc would otherwise reach the remote
 //!   shell. The pane is the delegate of both popovers and tells them apart by
@@ -25,7 +25,7 @@
 //! ([`StatsMetric::level`]) → the theme's `info`/`warning`/`error`; swap has
 //! no threshold and stays `info`.
 
-use bt_core::{StatsLevel, StatsMetric, Theme};
+use bt_core::{FooterControl, StatsLevel, StatsMetric, Theme};
 use bt_shell_common::remote_files::Process;
 use bt_shell_common::remote_stats::{Detail, TOP_PROCESSES};
 use objc2::rc::Retained;
@@ -90,29 +90,11 @@ pub(crate) struct StatsPopover {
 
 /// The detail popover's half of the pane.
 impl TerminalPane {
-    /// A click on dock-local column `col` of the context row (`context` is the
-    /// row's budget): if it lands on the load indicator the popover toggles and
-    /// `true`. The range is the drawing's ([`bt_core::Session::stats_span`]);
-    /// while an upload row is shown there is none, so the two clicks cannot clash.
-    pub(crate) fn stats_click(&self, col: u16, context: u16) -> bool {
-        let Some(span) = self
-            .session()
-            .and_then(|session| session.stats_span(context))
-        else {
-            return false;
-        };
-        if !(span.0..span.1).contains(&col) {
-            return false;
-        }
-        self.toggle_stats_popover(span);
-        true
-    }
-
     /// Opens the popover, or closes it if it is open. A `transient` popover
     /// closes itself on a press outside and that same press reaches here too:
     /// the close time is kept (`popoverWillClose:`) and nothing is done for
     /// that event (the upload list's rule).
-    fn toggle_stats_popover(&self, (start, end): (u16, u16)) {
+    pub(crate) fn toggle_stats_popover(&self, (start, end): (u16, u16)) {
         let shown = self
             .stats_popover()
             .borrow()
@@ -241,7 +223,7 @@ impl TerminalPane {
                 .view()
                 .context_budget()
                 .zip(self.session())
-                .and_then(|(budget, session)| session.stats_span(budget));
+                .and_then(|(budget, session)| session.footer_span(budget, FooterControl::Stats));
             match span.and_then(|(start, end)| self.view().context_span_rect(start, end)) {
                 Some(rect) => popover.setPositioningRect(rect),
                 None => self.close_stats_popover(),

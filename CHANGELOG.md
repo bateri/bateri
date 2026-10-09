@@ -12,6 +12,33 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **The ports your programs listen on, in the dock.** Start a dev server —
+  `npm run dev`, `rails s`, `python -m http.server` — and its port shows at
+  the right of the dock's bottom line: `↗ :3000`. Every program started in the
+  tab counts, not only the one in front: a job sent to the background, a
+  server's worker that does the listening. Click the ports to list them with
+  the program behind each; choose one to open it in your browser, or hold
+  Option to copy its address. Command-click a port to open it at once. Shell ▸
+  Open Port lists the same ports, also while vim or an agent covers the dock.
+  Turn it off in Settings ▸ General ▸ Show listening ports (`[shell] ports` in
+  `settings.toml`).
+- **The server's ports too, over ssh.** In an ssh session with the shell
+  integration on, the ports that the programs you start on the server listen
+  on show beside this Mac's. A port this Mac reaches as it is shows green and
+  opens directly. One that listens only on the server itself — a dev server's
+  usual `127.0.0.1` — shows dim, and opening it forwards it through your ssh
+  connection to the same port here first. The forward ends with the ssh
+  session.
+
+### Fixed
+
+- **The load indicator holds still.** In an ssh session the indicator moved
+  sideways whenever a `cpu` or `mem` number gained or lost a digit (`9%` →
+  `10%`). Each number now has a column of its own, so the line moves only when
+  a value turns critical.
+
 ## [0.9.0] - 2026-10-08
 
 ### Added

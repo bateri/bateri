@@ -31,9 +31,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bt_core::{
-    HostMark, RemoteKind, RemoteTarget, Transfer, TransferAction, TransferControls, TransferTone,
-};
+use bt_core::{HostMark, RemoteKind, RemoteTarget, Transfer, TransferControls, TransferTone};
 
 use crate::download::Conflict;
 use crate::jobs::SSH_VALUED;
@@ -1642,10 +1640,10 @@ pub struct Transfers {
     serial: u64,
     /// The line last written to the dock ([`Self::shown`]).
     shown: Option<Transfer>,
-    /// The button under the mouse and whether the list is open: the line
-    /// is reborn on every refresh and these two are stamped on it at each birth —
-    /// otherwise the 200 ms refresh would overwrite the mouse state.
-    hover: Option<TransferAction>,
+    /// Whether the list is open: the line is reborn on every refresh and this
+    /// is stamped on it at each birth — otherwise the 200 ms refresh would
+    /// overwrite it. (The button under the mouse is the session's one hover
+    /// slot, `Session::set_footer_hover`, which the refresh does not write.)
     list_open: bool,
     /// The arrow and percentage last written to the title ([`Self::title_percent_changed`]).
     titled: Option<(&'static str, u8)>,
@@ -2268,41 +2266,18 @@ impl Transfers {
         })
     }
 
-    /// The status line last written to the dock — the input of the mouse's button
-    /// question (`bt_core::transfer_button_at` reads the same layout as drawing).
+    /// The status line last written to the dock.
     pub fn shown(&self) -> Option<&Transfer> {
         self.shown.as_ref()
     }
 
-    /// Writes [`Self::shown`]. A line without buttons (a result, or none) drops the
-    /// mouse state too: there is no button left under it.
+    /// Writes [`Self::shown`]. A line without buttons (a result, or none) closes
+    /// the list too: there is no button left to hold it open.
     pub fn set_shown(&mut self, transfer: Option<Transfer>) {
         if transfer.as_ref().is_none_or(|t| t.controls.items == 0) {
-            self.hover = None;
             self.list_open = false;
         }
         self.shown = transfer;
-    }
-
-    /// Whether the button under the mouse changed; if so, the stamped line — the one to
-    /// write (the caller hands it to the session). Movement staying on the same button
-    /// is `None`: no frame is requested.
-    pub fn set_hover(&mut self, hover: Option<TransferAction>) -> Option<Transfer> {
-        // On a line without buttons the mouse is over no button.
-        let buttons = self.shown.as_ref().is_some_and(|t| t.controls.items > 0);
-        let hover = hover.filter(|_| buttons);
-        if self.hover == hover {
-            return None;
-        }
-        self.hover = hover;
-        self.restamp()
-    }
-
-    /// The button under the mouse. Only tests ask: AppKit's cursor rect sets the
-    /// pointer, hover is only the fill's tone.
-    #[cfg(test)]
-    pub(crate) fn hover(&self) -> Option<TransferAction> {
-        self.hover
     }
 
     /// The list opened/closed; if it changed, the stamped line.
@@ -2320,7 +2295,6 @@ impl Transfers {
         if shown.controls.items == 0 {
             return None;
         }
-        shown.controls.hover = self.hover;
         shown.controls.list_open = self.list_open;
         Some(shown)
     }
@@ -2599,7 +2573,6 @@ impl Transfers {
                 // audit: queue items come per drop; clamped to `u16`.
                 items: u16::try_from(items).unwrap_or(u16::MAX),
                 list_open: self.list_open,
-                hover: self.hover,
             },
             progress: Some(progress),
             ..Transfer::default()
@@ -3481,36 +3454,26 @@ mod tests {
     }
 
     #[test]
-    fn the_pointer_state_survives_the_refresh_and_changes_only_on_edges() {
+    fn the_open_list_survives_the_refresh_and_changes_only_on_edges() {
         let mut uploads = queue_of(vec![job("a", false, 1, 10), job("b", false, 1, 10)]);
         let now = Instant::now();
         let (_, _, _shared) = uploads.start_next(now).expect("first item");
         let status = uploads.status(now).expect("line");
         uploads.set_shown(Some(status));
-        let hovered = uploads
-            .set_hover(Some(TransferAction::Cancel))
-            .expect("changed");
-        assert_eq!(hovered.controls.hover, Some(TransferAction::Cancel));
-        uploads.set_shown(Some(hovered));
-        assert_eq!(
-            uploads.set_hover(Some(TransferAction::Cancel)),
-            None,
-            "moving on the same button requests no frame"
-        );
-        // The 200 ms refresh does not overwrite the mouse state.
-        let status = uploads.status(now).expect("line");
-        assert_eq!(status.controls.hover, Some(TransferAction::Cancel));
         let open = uploads.set_list_open(true).expect("changed");
         assert!(open.controls.list_open);
-        // A line without buttons (a result) drops the mouse state.
-        uploads.set_shown(Some(Transfer::default()));
-        assert_eq!(uploads.hover(), None);
+        uploads.set_shown(Some(open));
         assert_eq!(
-            uploads.set_hover(Some(TransferAction::List)),
+            uploads.set_list_open(true),
             None,
-            "no button"
+            "the same state requests no frame"
         );
-        assert_eq!(uploads.hover(), None);
+        // The 200 ms refresh does not overwrite it.
+        let status = uploads.status(now).expect("line");
+        assert!(status.controls.list_open);
+        // A line without buttons (a result) closes it.
+        uploads.set_shown(Some(Transfer::default()));
+        assert_eq!(uploads.set_list_open(false), None, "already closed");
     }
 
     #[test]

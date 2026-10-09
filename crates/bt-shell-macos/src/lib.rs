@@ -41,6 +41,7 @@
 
 pub(crate) mod app;
 mod clipboard;
+mod footer;
 mod hyperlink;
 mod keeper;
 mod keychain;
@@ -51,6 +52,7 @@ mod pane;
 mod password_sheet;
 mod preview;
 mod promise;
+mod remote_ports;
 mod search_bar;
 mod settings_window;
 mod sheets;
@@ -68,9 +70,9 @@ mod window;
 // The platform-independent half lives in `bt-shell-common`; imported
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
-    child, download, focus, gesture, handover, jobs, journal, keys, links, notices, preview_cache,
-    program, quote, remote_files, remote_helper, restore, settings, split, ssh_route, tabs, upload,
-    watch, zoom,
+    child, download, focus, gesture, handover, jobs, journal, keys, links, notices, port_forward,
+    ports, preview_cache, program, quote, remote_files, remote_helper, restore, settings, split,
+    ssh_route, tabs, upload, watch, zoom,
 };
 
 use std::time::{Duration, Instant};

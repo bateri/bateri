@@ -9333,6 +9333,17 @@ impl Session {
         Some((command, target, log.context.remote_cwd.clone()))
     }
 
+    /// Our remote shell's pid on the server and the remote session's
+    /// generation ([`Self::remote_target`]'s command) — the root of the
+    /// server's listening ports. `None` locally, before our remote shell's
+    /// first mark (an unwrapped ssh never gives one) and once its `ssh` block
+    /// closed. One leaf-lock round; `Term` is not touched.
+    pub fn remote_shell(&self) -> Option<(u64, u32)> {
+        let log = lock(&self.shell);
+        let pid = log.remote_shell_pid()?;
+        Some((log.running_command()?, pid))
+    }
+
     /// Why the remote bootstrap fell back to a plain login shell, from
     /// the stream ([`crate::DockContext::remote_setup`]); `None` if it did not
     /// say so. The pane's label reads it next to "Remote folder unknown". One
@@ -9457,7 +9468,58 @@ impl Session {
         changed
     }
 
-    /// Shows (`Some`, with its hover) or hides the ssh status bar's Sign In…
+    /// Writes the TCP ports the pane's programs listen on
+    /// ([`crate::DockContext::ports`]) — stored ascending and one per number,
+    /// whatever order `ports` comes in; a number that is both open and not
+    /// (a local server and a server's on the same number) shows open. Requests a frame **if it
+    /// changed** and returns `true` ([`Session::set_transfer`]'s pattern: the
+    /// context row is not in alacritty's damage); the same set costs nothing.
+    ///
+    /// **Not generation gated**: the ports belong to the pane's processes, not
+    /// to a command — a server started in the background keeps its port
+    /// across prompts, and the probe that writes them owns their lifetime. The
+    /// leaf lock drops before `request_frame`; `Term` is not touched.
+    pub fn set_ports(&self, ports: &[crate::FooterPort]) -> bool {
+        let mut sorted = ports.to_vec();
+        // Open first within a number, so the dedup keeps it.
+        sorted.sort_unstable_by_key(|port| (port.port, !port.open));
+        sorted.dedup_by_key(|port| port.port);
+        let changed = {
+            let mut log = lock(&self.shell);
+            if log.context.ports == sorted {
+                false
+            } else {
+                log.context.ports = sorted;
+                true
+            }
+        };
+        if changed {
+            self.request_frame();
+        }
+        changed
+    }
+
+    /// Writes the context row's part under the mouse
+    /// ([`crate::DockContext::footer_hover`]; `None` → none). Requests a frame
+    /// **if it changed** and returns `true` — a frame only on the edge, not on
+    /// every motion. Takes only the leaf lock.
+    pub fn set_footer_hover(&self, hover: Option<crate::FooterControl>) -> bool {
+        let changed = {
+            let mut log = lock(&self.shell);
+            if log.context.footer_hover == hover {
+                false
+            } else {
+                log.context.footer_hover = hover;
+                true
+            }
+        };
+        if changed {
+            self.request_frame();
+        }
+        changed
+    }
+
+    /// Shows (`Some`) or hides the ssh status bar's Sign In…
     /// button of remote generation `command`; `true` if it changed.
     /// The [`Self::set_remote_stats`] gates: another generation's or a finished
     /// ssh's late word is a no-op, the same value asks for no frame (zero
@@ -9491,35 +9553,40 @@ impl Session {
         Some((log.running_command()?, shown))
     }
 
-    /// The Sign In… button's dock-local column range on the context row
-    /// ([`crate::dock::sign_in_span`]; `budget` is the context row's budget) —
-    /// `None` while it is not drawn. The click, the hover and the hand cursor
-    /// read this one range, from the drawing's layout. Takes only the leaf lock.
-    pub fn sign_in_span(&self, budget: u16) -> Option<(u16, u16)> {
-        let mut context = {
-            let log = lock(&self.shell);
-            // The common case — no button — copies nothing.
-            log.context.sign_in?;
-            log.context.clone()
-        };
-        if context.remote.is_some() {
-            self.title_folder_into(&mut context.remote_cwd);
-        }
-        crate::dock::sign_in_span(&context, budget)
+    /// The context row's clickable parts and their dock-local column ranges
+    /// ([`crate::footer_spans`]; `budget` is the context row's budget) — the
+    /// hand cursor's rectangles. The click ([`Self::footer_hit`]), the hover,
+    /// the popovers' anchors ([`Self::footer_span`]) and the cursor read this
+    /// one plan, the drawing's. Takes only the leaf lock.
+    pub fn footer_spans(&self, budget: u16) -> Vec<(crate::FooterControl, u16, u16)> {
+        let context = self.footer_context();
+        crate::footer_spans(&context, budget).collect()
     }
 
-    /// The load indicator's dock-local column range on the context row
-    /// ([`crate::dock::stats_span`]; `budget` is the context row's budget) —
-    /// `None` while it is not drawn (no value, an upload row in its place, it
-    /// did not fit). The mouse's hit test, the popover's anchor and the hand
-    /// cursor read this one range, from the drawing's layout. Takes
-    /// only the leaf lock.
-    pub fn stats_span(&self, budget: u16) -> Option<(u16, u16)> {
+    /// What lies under dock-local column `col` of the context row
+    /// ([`crate::footer_hit`]); `None` → nothing clickable. Takes only the
+    /// leaf lock.
+    pub fn footer_hit(&self, budget: u16, col: u16) -> Option<crate::FooterHit> {
+        let context = self.footer_context();
+        crate::footer_hit(&context, budget, col)
+    }
+
+    /// `control`'s dock-local column range on the context row
+    /// ([`crate::footer_span`]); `None` while it is not drawn — a popover's
+    /// anchor. Takes only the leaf lock.
+    pub fn footer_span(&self, budget: u16, control: crate::FooterControl) -> Option<(u16, u16)> {
+        let context = self.footer_context();
+        crate::footer_span(&context, budget, control)
+    }
+
+    /// The context as the dock draws it: the remote folder's title fallback
+    /// applied ([`Self::title_folder_into`]). Takes the leaf locks in sequence.
+    fn footer_context(&self) -> DockContext {
         let mut context = lock(&self.shell).context.clone();
         if context.remote.is_some() {
             self.title_folder_into(&mut context.remote_cwd);
         }
-        crate::dock::stats_span(&context, budget)
+        context
     }
 
     /// Whether the application is on the alternate screen — the state **in the
@@ -17170,11 +17237,15 @@ mod tests {
         assert!(session.set_remote_stats(command, Some(&stats)));
         assert_eq!(shown(), Some(stats));
         assert!(session.take_damage(), "a change requests a frame");
-        let span = session.stats_span(80);
+        let span = session.footer_span(80, crate::FooterControl::Stats);
         assert!(span.is_some(), "a drawn indicator has a range");
         assert_eq!(
             span,
-            crate::dock::stats_span(&lock(&session.shell).context, 80),
+            crate::footer_span(
+                &lock(&session.shell).context,
+                80,
+                crate::FooterControl::Stats
+            ),
             "the hit test reads the drawing's layout"
         );
         // The return value is the frame request (`request_frame` runs only on a
@@ -17186,15 +17257,15 @@ mod tests {
         );
         assert!(session.set_transfer(Some(&Transfer::default())));
         assert_eq!(
-            session.stats_span(80),
+            session.footer_span(80, crate::FooterControl::Stats),
             None,
             "the upload row stands in its place"
         );
         assert!(session.set_transfer(None));
-        assert_eq!(session.stats_span(80), span);
+        assert_eq!(session.footer_span(80, crate::FooterControl::Stats), span);
         assert!(session.set_remote_stats(command, None), "hide");
         assert_eq!(
-            session.stats_span(80),
+            session.footer_span(80, crate::FooterControl::Stats),
             None,
             "a hidden indicator is not hit"
         );
@@ -17204,7 +17275,7 @@ mod tests {
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
         assert_eq!(shown(), None);
         // The Sign In… button has the same gates and the same fate.
-        let sign_in = Some(crate::SignIn::default());
+        let sign_in = Some(crate::SignIn);
         assert!(
             !session.set_sign_in(command + 1, sign_in),
             "another generation"
@@ -17212,12 +17283,20 @@ mod tests {
         assert!(session.set_sign_in(command, sign_in));
         assert!(!session.set_sign_in(command, sign_in), "the same value");
         assert_eq!(
-            session.sign_in_span(80),
-            crate::dock::sign_in_span(&lock(&session.shell).context, 80),
+            session.footer_span(80, crate::FooterControl::SignIn),
+            crate::footer_span(
+                &lock(&session.shell).context,
+                80,
+                crate::FooterControl::SignIn
+            ),
             "the hit test reads the drawing's layout"
         );
-        assert!(session.sign_in_span(80).is_some());
-        assert_eq!(session.sign_in(), Some((command, crate::SignIn::default())));
+        assert!(
+            session
+                .footer_span(80, crate::FooterControl::SignIn)
+                .is_some()
+        );
+        assert_eq!(session.sign_in(), Some((command, crate::SignIn)));
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
         assert_eq!(
             session.sign_in(),
@@ -17288,8 +17367,8 @@ mod tests {
         let mut context = lock(&session.shell).context.clone();
         context.remote_cwd = "~".to_owned();
         assert_eq!(
-            session.stats_span(30),
-            crate::dock::stats_span(&context, 30)
+            session.footer_span(30, crate::FooterControl::Stats),
+            crate::footer_span(&context, 30, crate::FooterControl::Stats)
         );
         assert!(session.set_remote_stats(command, None));
 

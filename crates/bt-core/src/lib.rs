@@ -68,9 +68,9 @@ pub use cluster::{ClusterId, Clusters};
 pub use color::{LinearRgba, Theme, contrast_ratio};
 pub use dock::{
     Dock, DockBudget, DockButton, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells,
-    PROGRAM_GLYPHS, STATS_GLYPHS, STATS_THRESHOLDS, StatsLevel, StatsMetric, StatsThreshold,
-    TEXT_COL as DOCK_TEXT_COL, UPLOAD_GLYPHS, sign_in_span, stats_at, stats_span,
-    transfer_button_at, transfer_button_span,
+    FooterControl, FooterHit, PORTS_GLYPHS, PROGRAM_GLYPHS, STATS_GLYPHS, STATS_THRESHOLDS,
+    StatsLevel, StatsMetric, StatsThreshold, TEXT_COL as DOCK_TEXT_COL, UPLOAD_GLYPHS, footer_hit,
+    footer_span, footer_spans,
 };
 pub use identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
 pub use input::{Arrow, MouseButton, MouseModifiers};
@@ -103,11 +103,11 @@ pub use settings::{
     SmoothScroll, UnfocusedCaret, bare_host, expand_home, format_size, parse_size,
 };
 pub use shell::{
-    ButtonState, DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor,
-    HighlightStyle, ProgramBar, ProgramTone, Reconnect, RemoteKind, RemoteSetupFault, RemoteStats,
-    RemoteTarget, STATS_HISTORY, ShellPhase, ShellState, SignIn, StatsForm, Transfer,
-    TransferAction, TransferControls, TransferTone, TtyModes, counter_period, decode_percent,
-    next_tick, running_counter,
+    ButtonState, DockContext, DockFault, DockState, DockStatus, FooterPort, Highlight,
+    HighlightColor, HighlightStyle, ProgramBar, ProgramTone, Reconnect, RemoteKind,
+    RemoteSetupFault, RemoteStats, RemoteTarget, STATS_HISTORY, ShellPhase, ShellState, SignIn,
+    StatsForm, Transfer, TransferAction, TransferControls, TransferTone, TtyModes, counter_period,
+    decode_percent, next_tick, running_counter,
 };
 pub use wake::Wake;
 

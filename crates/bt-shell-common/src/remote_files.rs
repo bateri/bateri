@@ -42,6 +42,7 @@ use bt_core::{DownloadConflict, PreviewKeep, RemoteKind, RemoteTarget};
 use crate::download::Conflict;
 use crate::jobs::SSH_VALUED;
 use crate::links::Content;
+use crate::ports::{Bound, bound_of, parse_proc_address};
 use crate::upload::{NO_DIRECTORY, format_bytes, is_safe, sq};
 
 // ─── helper session protocol ─────────────────────────────────────────────
@@ -101,10 +102,39 @@ pub fn helper_script() -> String {
          echo \"BT-L self $$\"; awk '{PROC_AWK}' /proc/[0-9]*/stat 2>/dev/null; \
          fi; \
          else echo BT-NOPROC; fi; echo \"BT-END $bt_s\"; }}; \
+         bt_ports() {{ bt_s=$1; echo \"BT-R $bt_s\"; \
+         if [ -r /proc/net/tcp ]; then \
+         awk -v r=\"$2\" '{PORTS_TREE_AWK}' /proc/[0-9]*/stat 2>/dev/null | \
+         while read bt_p bt_c; do echo \"BT-N $bt_p $bt_c\"; \
+         ls -l /proc/$bt_p/fd 2>/dev/null | awk -v p=\"$bt_p\" '{PORTS_SOCKET_AWK}'; done; \
+         awk '$4 == \"0A\" {{print \"BT-T \" $2 \" \" $10}}' /proc/net/tcp /proc/net/tcp6 2>/dev/null; \
+         else echo BT-NOPROC; fi; echo \"BT-END $bt_s\"; }}; \
          echo {HELPER_MARK}; printf 'BT-HOME %s\\n' \"$HOME\"; \
          while IFS= read -r bt_line; do eval \"$bt_line\"; done"
     )
 }
+
+/// The `awk` program of `bt_ports` that finds the remote shell's tree: it
+/// reads every `/proc/[pid]/stat` the glob names ([`PROC_AWK`]'s way — one
+/// file at a time in `BEGIN`, `comm` split at the last `)`, zombies and dead
+/// tasks skipped) and prints `{pid} {comm}` for the shell `r` and each of its
+/// descendants. Nothing when `r` is not alive (the session ended under the
+/// request).
+pub const PORTS_TREE_AWK: &str = "BEGIN { for (i = 1; i < ARGC; i++) { f = ARGV[i]; \
+     if ((getline l < f) > 0 && match(l, /[)] [^)]*$/)) { h = substr(l, 1, RSTART - 1); \
+     n = split(substr(l, RSTART + 2), s, \" \"); p = index(h, \" (\"); \
+     if (n >= 2 && p > 1 && s[1] != \"Z\" && s[1] != \"X\") { k = substr(h, 1, p - 1); \
+     up[k] = s[2]; nm[k] = substr(h, p + 2) } } \
+     close(f) } \
+     if (!(r in up)) exit; d[r] = 1; c = 1; \
+     while (c) { c = 0; for (k in up) if (!(k in d) && (up[k] in d)) { d[k] = 1; c = 1 } } \
+     for (k in d) print k \" \" nm[k] }";
+
+/// The `awk` program of `bt_ports` over one process's `ls -l /proc/[p]/fd`:
+/// `BT-S {p} {inode}` for each `socket:[inode]` link. An unreadable folder
+/// (another user's process) lists nothing.
+pub const PORTS_SOCKET_AWK: &str = "{ n = $NF; if (substr(n, 1, 8) == \"socket:[\") \
+     print \"BT-S \" p \" \" substr(n, 9, length(n) - 9) }";
 
 /// The `awk` program that reads every `/proc/[pid]/stat` the glob names and
 /// prints `BT-L proc {pid} {ppid} {starttime} {utime} {stime} {comm}` for each
@@ -277,6 +307,94 @@ fn reply_line(line: &str) -> Option<(usize, Option<RemoteEntry>)> {
         _ => return None,
     };
     Some((index, answer))
+}
+
+// ─── listening ports ─────────────────────────────────────────────────────
+
+/// The request line of a scan of the server's listening ports under our
+/// remote shell `shell` (newline included): `bt_ports 9 4242`.
+pub fn ports_request_line(seq: u64, shell: u32) -> String {
+    format!("bt_ports {seq} {shell}\n")
+}
+
+/// A TCP port a process under our remote shell listens on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteListener {
+    pub port: u16,
+    /// The address it is bound to, as the server's `/proc` says it — where a
+    /// forward points (`127.0.0.1`, `::1`, or the address itself).
+    pub address: std::net::IpAddr,
+    pub bound: Bound,
+    pub pid: u32,
+    /// `/proc/[pid]/stat`'s `comm`, control characters dropped.
+    pub name: String,
+}
+
+/// The helper's output → the `bt_ports` reply to request `seq`: `Ok(None)`
+/// for `BT-NOPROC` (no Linux `/proc`). One listener per port and process,
+/// ascending, the widest binding kept (`0.0.0.0` beside `::1`). Lines it does
+/// not know are skipped (a newer script); never a panic — the bytes are the
+/// server's.
+pub fn parse_ports(out: &str, seq: u64) -> Result<Option<Vec<RemoteListener>>, ReplyError> {
+    let begin = format!("BT-R {seq}");
+    let mut lines = out.lines().map(str::trim).skip_while(|line| *line != begin);
+    if lines.next().is_none() {
+        return Err(ReplyError::NotStarted);
+    }
+    let mut names: BTreeMap<u32, String> = BTreeMap::new();
+    let mut sockets: BTreeMap<u64, u32> = BTreeMap::new();
+    let mut rows: Vec<(std::net::IpAddr, u16, u64)> = Vec::new();
+    let mut no_proc = false;
+    for line in lines {
+        if ends_reply(line, seq) {
+            if no_proc {
+                return Ok(None);
+            }
+            let mut found: Vec<RemoteListener> = rows
+                .into_iter()
+                .filter_map(|(address, port, inode)| {
+                    let pid = *sockets.get(&inode)?;
+                    Some(RemoteListener {
+                        port,
+                        address,
+                        bound: bound_of(address),
+                        pid,
+                        name: names.get(&pid).cloned().unwrap_or_default(),
+                    })
+                })
+                .filter(|listener| listener.port != 0)
+                .collect();
+            found.sort_by_key(|listener| (listener.port, listener.pid, listener.bound));
+            found.dedup_by(|later, kept| later.port == kept.port && later.pid == kept.pid);
+            return Ok(Some(found));
+        }
+        if line == "BT-NOPROC" {
+            no_proc = true;
+            continue;
+        }
+        let mut fields = line.splitn(3, ' ');
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some("BT-N"), Some(pid), name) => {
+                if let Ok(pid) = pid.parse() {
+                    names.insert(pid, clean(name.unwrap_or_default()));
+                }
+            }
+            (Some("BT-S"), Some(pid), Some(inode)) => {
+                if let (Ok(pid), Ok(inode)) = (pid.parse(), inode.trim().parse()) {
+                    sockets.insert(inode, pid);
+                }
+            }
+            (Some("BT-T"), Some(local), Some(inode)) => {
+                if let (Some((address, port)), Ok(inode)) =
+                    (parse_proc_address(local), inode.trim().parse())
+                {
+                    rows.push((address, port, inode));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(ReplyError::Unterminated)
 }
 
 // ─── load sample ─────────────────────────────────────────────────────────
@@ -1164,6 +1282,43 @@ pub fn cache_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_port_reply_joins_sockets_to_their_processes() {
+        let out = "noise from an rc file\n\
+                   BT-R 4\n\
+                   BT-N 900 node\n\
+                   BT-S 900 777\n\
+                   BT-S 900 778\n\
+                   BT-N 901 python3 -m\n\
+                   BT-S 901 779\n\
+                   BT-T 0100007F:1435 777\n\
+                   BT-T 00000000000000000000000001000000:1435 778\n\
+                   BT-T 00000000:1F90 779\n\
+                   BT-T 00000000:0016 12\n\
+                   BT-Z something newer\n\
+                   BT-END 4\n";
+        let found = parse_ports(out, 4).expect("a reply").expect("a /proc");
+        assert_eq!(
+            found
+                .iter()
+                .map(|l| (l.port, l.pid, l.bound, l.name.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (5173, 900, Bound::Loopback, "node"),
+                (8080, 901, Bound::Any, "python3 -m"),
+            ],
+            "one per port and process; sshd's :22 (not ours) is not there"
+        );
+        assert_eq!(found[0].address, std::net::IpAddr::from([127, 0, 0, 1]));
+        assert_eq!(parse_ports("BT-R 5\nBT-NOPROC\nBT-END 5\n", 5), Ok(None));
+        assert_eq!(parse_ports("BT-R 5\n", 5), Err(ReplyError::Unterminated));
+        assert_eq!(
+            parse_ports("BT-R 6\nBT-END 6\n", 5),
+            Err(ReplyError::NotStarted)
+        );
+        assert_eq!(ports_request_line(9, 4242), "bt_ports 9 4242\n");
+    }
     use std::process::Command;
 
     fn words(argv: &[&str]) -> Vec<String> {

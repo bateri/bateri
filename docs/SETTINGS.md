@@ -294,6 +294,12 @@ dock_arrival = "ripple"
 # Unlike every other key here, this one only takes effect in shells started
 # after the change; shells already open keep what they were started with.
 integration = "auto"
+# true | false. Shows the ports your programs listen on at the right of the
+# dock's bottom line, like ↗ :3000 for a dev server, and lists them under
+# Shell > Open Port. Click one to see them all, Command-click a port to open
+# it in your browser. Every program started in the tab counts, in the
+# background too; a container's ports and programs run with sudo don't show.
+ports = true
 
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
@@ -1242,11 +1248,13 @@ The rules are the same for all of them:
 ```toml
 [shell]
 integration = "auto"
+ports = true
 ```
 
 | key | type | default | meaning |
 |---|---|---|---|
 | `integration` | `"auto"`, `"blocks"` or `"off"` | `"auto"` | whether to set up integration in the shell, and how much |
+| `ports` | `true` or `false` | `true` | whether the dock shows the ports the tab's programs listen on |
 
 > **Retired key:** `[shell] prompt` is no longer read; `integration =
 > "blocks"` replaced it. Leaving it in your file is harmless (no key is ever
@@ -1350,6 +1358,51 @@ should stay in the grid", the key was retired.
 
 The handover happens only in **zsh**. bash, fish, the far side of SSH and an
 `integration = "off"` session already show your prompt as it is.
+
+#### Listening ports
+
+When a program started in the tab listens on a TCP port — a dev server
+(`npm run dev`, `rails s`, `python -m http.server`), `kubectl port-forward`,
+an `ssh -L` tunnel — the port shows at the right of the dock's bottom line:
+`↗ :3000`. Several show side by side in order (`↗ :3000  :6006`); when the
+line gets narrow they fold to the first and a count (`↗ :3000 +1`), then to
+a count alone (`↗ 2`). A port number is never cut.
+
+- **Click** the ports to list them: each with the program that listens and
+  whether it is reachable from other machines (`all interfaces`) or only from
+  this Mac. Choosing one opens it in your browser; hold Option to copy its
+  address instead.
+- **Command-click** a port to open `http://localhost:<port>` directly.
+- **Shell ▸ Open Port** lists the same ports — also while a full-screen
+  program (vim, an agent) hides the dock.
+
+Every program started in the tab counts: the one in front, a job you sent to
+the background with `&`, a program a script started, a server's worker that
+does the listening. A port goes away when its program stops listening.
+
+What does not show: a container's published ports (`docker run -p` — the
+port belongs to Docker, not to the tab), a program started with `sudo` (its
+sockets are another user's) and a service that detaches itself into the
+background (`brew services`, `pm2`).
+
+**Over ssh the server's ports show too**, beside the ones on this Mac: the
+ports the programs you start in that ssh session listen on. A port shows
+**green** when it opens from this Mac as it is — it listens on all of the
+server's interfaces and this Mac reaches it (bateri tries one connection when
+the port first shows). It shows **dim** when it does not: it listens only on
+the server itself (`127.0.0.1`, a dev server's usual default), a firewall
+keeps this Mac out, or the server sits behind a jump host. Opening a dim port
+forwards it through your ssh connection first — to the same port number on
+this Mac when that is free — then opens `http://localhost:<port>`, and the
+port turns green. The forward ends when the ssh session does. This needs the
+shell integration on the server (`[remote] integration`, below) and a Linux
+server; a port of a program started with `sudo` or in a container on the
+server does not show.
+
+Ports are looked up only when something happens in the tab — a command
+starts or ends, or a program prints — never on a timer, so an idle tab costs
+nothing. `ports = false` turns all of this off and the line shows what it
+showed before.
 
 ### `[remote]`
 

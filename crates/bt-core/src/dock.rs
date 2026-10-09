@@ -27,8 +27,18 @@ use crate::settings::HostMark;
 use crate::shell::{
     ButtonState, DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ProgramBar,
     ProgramTone, Reconnect, RemoteStats, STATS_HISTORY, ShellPhase, ShellState, StatsForm,
-    Transfer, TransferAction, TransferTone,
+    Transfer, TransferTone,
 };
+
+mod footer;
+
+#[cfg(test)]
+use footer::{CANCEL_HINT, GAUGE_MAX, GaugeStep, gauge};
+pub use footer::{
+    FooterControl, FooterHit, STATS_THRESHOLDS, StatsLevel, StatsMetric, StatsThreshold,
+    footer_hit, footer_span, footer_spans,
+};
+use footer::{program_color, render_context};
 
 /// The dock's surface in a frame — everything **outside** the cells, resolved.
 ///
@@ -296,6 +306,17 @@ const STATS_CALM: char = '●';
 
 /// The lowest sparkline block (U+2581); level `n` is this plus `n`.
 const SPARK_BASE: u32 = 0x2581;
+
+/// The listening ports' mark, from the font: an ordinary cell of the context
+/// row, like [`REMOTE_MARK`]. It says "opens" and keeps a port apart from a
+/// number that is not one (a database bar's `db.prod:5432`).
+const PORTS_MARK: char = '↗';
+
+/// The ports' non-ASCII characters drawn from the **font**. `bt-atlas` checks a
+/// hand copy of this list in Menlo's small class
+/// (`the_ports_mark_has_no_box_in_the_small_class`); the two are tied by
+/// `the_ports_mark_is_the_one_the_atlas_checks`.
+pub const PORTS_GLYPHS: [char; 1] = [PORTS_MARK];
 
 /// The most glyphs an edit can carry — a **design constant**.
 ///
@@ -1890,1206 +1911,6 @@ fn settle(change: Option<&Change>, edits: &mut impl FnMut(DockEdit)) {
     }
 }
 
-/// The dock's **bottom** row: `{full path} | {branch}`, bottom left and dim;
-/// in a remote session `⇄ {host}  {remote path}` ([`render_remote_context`]),
-/// and while a recognized program reads the keyboard its guide bar
-/// ([`render_program`]).
-///
-/// **On overflow the path is shortened from the left, the branch never.**
-/// Two separate reasons: the path's information is in its tail (which folder
-/// you are in), so cutting from the front would throw away the most
-/// informative half; while **no** half of the branch can be thrown away — a
-/// shortened branch name (`mai…`) can make the user think they are on another
-/// branch, and that is the "silently wrong" class this repository forbids.
-///
-/// The shortening is in **character** units and does not lean on component
-/// boundaries: leaning on a boundary would leave some of the available columns
-/// empty, and its gain would be taste, its loss information. **This row stays
-/// in character units** and its reason differs from the input row's: the
-/// context row is drawn in the **small size class**, the column pitch is the
-/// small face's advance and the wide path is closed there (the precedent of the
-/// procedural characters). So a path with CJK still shifts columns here — a
-/// known limit, guarded by `the_context_line_keeps_character_columns`.
-///
-/// **The separator is drawn if both sides are filled.** A dangling `|` in a
-/// directory that is not a repo would say "the branch could not be read";
-/// there is no branch to read.
-///
-/// The return is the upload row's buttons ([`Dock::buttons`]); none in other
-/// forms.
-fn render_context(
-    context: &DockContext,
-    theme: &Theme,
-    cols: u16,
-    row: u16,
-    sink: &mut impl FnMut(Cell),
-) -> [Option<DockButton>; 2] {
-    let available = usize::from(cols.saturating_sub(CONTEXT_COL));
-    if available == 0 {
-        return [None; 2];
-    }
-    // The upload row **before** the remote form: it carries its own host and
-    // must show its result after ssh has closed too.
-    if let Some(transfer) = &context.transfer {
-        return render_transfer(transfer, theme, available, row, sink);
-    }
-    if let Some(host) = context.remote_host() {
-        let color = theme.mark_linear(context.remote_mark);
-        return render_remote_context(context, host, color, theme, available, row, sink);
-    }
-    // A recognized program's guide bar after both: the upload's result and
-    // the remote session say more about where the keys go.
-    if let Some(bar) = &context.program {
-        let tone = program_color(bar.tone, context.program_mark, theme);
-        render_program(bar, tone, theme, available, row, sink);
-        return [None; 2];
-    }
-    let branch_chars = context.branch.chars().count();
-    // The budget is set aside **for the branch first**; the path gets the
-    // rest. The separator is counted on the path's side, because if the path
-    // drops the separator drops too.
-    //
-    // **A branch that does not fit is not clipped, it drops.** This is the
-    // degenerate-width counterpart of the branch's "no half can be thrown
-    // away" rule (doc above): showing the branch `release/2.1` as `release`
-    // in twelve columns would tell the user they are on **a branch that does
-    // not exist**, and putting a marker (`rele…`) would not fix that either —
-    // a shortened branch name can be misread anyway. Not showing it at all is
-    // a loss of information but not wrong information; a window that narrow
-    // is unreadable anyway.
-    let shows_branch = branch_chars > 0 && branch_chars <= available;
-    let path_budget = if shows_branch {
-        available
-            .saturating_sub(branch_chars)
-            .saturating_sub(SEPARATOR.chars().count())
-    } else {
-        // If the branch is not drawn the whole width is the path's: its
-        // shortening is **marked** (`…`), so it cannot be misread.
-        available
-    };
-
-    let normal = theme.dim_linear();
-    let quiet = theme.quiet_linear();
-    let (shows_path, path) = path_cells(&context.cwd, path_budget, normal, quiet);
-    let separator = if shows_path && shows_branch {
-        SEPARATOR
-    } else {
-        ""
-    };
-    let line = path
-        // The separator is a division mark, not content: in the quietest tone.
-        .chain(separator.chars().map(|ch| (ch, quiet)))
-        .chain(
-            shows_branch
-                .then(|| context.branch.chars().map(|ch| (ch, normal)))
-                .into_iter()
-                .flatten(),
-        );
-    emit_context(line, available, row, sink);
-    [None; 2]
-}
-
-/// The context row's **remote** form: `⇄ {host}` in the mark's
-/// color (`color`, the theme's `info` when unmarked), two
-/// spaces, then the remote path in the two tiers of the local path; no branch
-/// and no `|` — the branch belongs to the local repo, the remote side's is
-/// unknown. The remote host's load indicator, if any, is right-aligned.
-///
-/// **The budget goes to `⇄ host` first.** The host is **not shortened**, for
-/// the same reason as the branch rule: a shortened host name (`prod-we…`) can
-/// be read as another machine. If it does not fit only `⇄` remains — saying
-/// we are remote is still correct information. The path and the indicator
-/// share the rest by [`stats_layout`]'s ladder; the path is shortened from
-/// the left; if the remote shell prints no OSC 7 there is no path at all.
-///
-/// The return is the Sign In… button, in the upload buttons'
-/// place and drawing: label in the foreground, fill and border in the mark's
-/// color.
-fn render_remote_context(
-    context: &DockContext,
-    host: &str,
-    info: LinearRgba,
-    theme: &Theme,
-    available: usize,
-    row: u16,
-    sink: &mut impl FnMut(Cell),
-) -> [Option<DockButton>; 2] {
-    let (remote_cwd, stats) = (&context.remote_cwd, context.stats.as_ref());
-    let mark = std::iter::once((REMOTE_MARK, info));
-    let layout = stats_layout(
-        host,
-        remote_cwd,
-        stats,
-        context.sign_in.is_some(),
-        available,
-    );
-    if !layout.head {
-        emit_context(mark, available, row, sink);
-        return [None; 2];
-    }
-    let (_, path) = path_cells(
-        remote_cwd,
-        layout.path_budget,
-        theme.dim_linear(),
-        theme.quiet_linear(),
-    );
-    let line = mark
-        .chain(std::iter::once((' ', info)))
-        .chain(host.chars().map(|ch| (ch, info)))
-        .chain(REMOTE_GAP.chars().map(|ch| (ch, info)))
-        .chain(path);
-    emit_context(line, available, row, sink);
-    if let (Some(stats), Some(span)) = (stats, layout.gauge) {
-        let gauge = gauge(stats, span.step);
-        let cells = gauge.cells().iter().map(|&(ch, tone)| {
-            let color = match tone {
-                Tone::Quiet | Tone::Level(StatsLevel::Normal) => theme.dim_linear(),
-                Tone::Level(StatsLevel::Warning) => theme.warning_linear(),
-                Tone::Level(StatsLevel::Critical) => theme.error_linear(),
-                Tone::Calm => theme.success_linear(),
-            };
-            (ch, color)
-        });
-        emit_context_at(span.start, cells, available, row, sink);
-    }
-    let (Some(sign_in), Some((start, end))) = (context.sign_in, layout.sign_in) else {
-        return [None; 2];
-    };
-    let label = ButtonLabel::SignIn
-        .chars()
-        .map(|ch| (ch, theme.foreground_linear()));
-    emit_context_at(start + BUTTON_PAD, label, available, row, sink);
-    [
-        None,
-        Some(DockButton {
-            // audit: `end ≤ available ≤ cols` and `cols` is `u16`.
-            start: CONTEXT_COL + start as u16,
-            end: CONTEXT_COL + end as u16,
-            color: info,
-            state: if sign_in.hover {
-                ButtonState::Hover
-            } else {
-                ButtonState::Idle
-            },
-        }),
-    ]
-}
-
-/// A guide bar's tone as a color: the title and the top hairline — its
-/// host's mark ([`DockContext::program_mark`]), `info` when unmarked, the
-/// remote status bar's mapping; a root shell's `error` whatever the mark.
-fn program_color(tone: ProgramTone, mark: HostMark, theme: &Theme) -> LinearRgba {
-    match tone {
-        ProgramTone::Info => theme.mark_linear(mark),
-        ProgramTone::Error => theme.error_linear(),
-    }
-}
-
-/// Which parts of a guide bar show on `available` columns
-/// ([`program_layout`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ProgramLayout {
-    /// The title shows; when it does not, nothing does.
-    title: bool,
-    /// The separator and the detail show after the title.
-    detail: bool,
-    /// The path's budget in characters ([`path_cells`]); `0` = no path.
-    path_budget: usize,
-    /// The hint's context-local start column; `None` = dropped.
-    hint: Option<usize>,
-}
-
-/// A guide bar's layout: `{title} · {detail}  {path}` from the left, the
-/// hint right-aligned.
-///
-/// **What drops first is what the user needs least**: the hint (how to
-/// leave — the program's own prompt usually says it too), then the path is
-/// shortened from the left (its tail names the interpreter) and dropped,
-/// then the detail; **the title is never shortened** — a cut version
-/// (`Python 3.1…`) reads as another one, the remote host's rule. A title
-/// that does not fit leaves the row empty; the hairline still says the band
-/// is a program's. Monotonic: a part that dropped does not come back when
-/// a more important one drops in turn.
-fn program_layout(bar: &ProgramBar, available: usize) -> ProgramLayout {
-    let none = ProgramLayout {
-        title: false,
-        detail: false,
-        path_budget: 0,
-        hint: None,
-    };
-    let title = bar.title.chars().count();
-    if title == 0 || title > available {
-        return none;
-    }
-    let detail_chars = bar.detail.chars().count();
-    let detail_cols = if detail_chars == 0 {
-        0
-    } else {
-        PROGRAM_DETAIL.chars().count() + detail_chars
-    };
-    if title + detail_cols > available {
-        return ProgramLayout {
-            title: true,
-            ..none
-        };
-    }
-    let head = title + detail_cols;
-    let path = bar.path.chars().count();
-    let path_cols = if path == 0 {
-        0
-    } else {
-        REMOTE_GAP.chars().count() + path
-    };
-    let hint = bar.hint.chars().count();
-    let placed = ProgramLayout {
-        title: true,
-        detail: detail_chars > 0,
-        path_budget: path,
-        hint: None,
-    };
-    if hint > 0 && head + path_cols + STATS_GAP + hint <= available {
-        return ProgramLayout {
-            hint: Some(available - hint),
-            ..placed
-        };
-    }
-    ProgramLayout {
-        path_budget: if path == 0 {
-            0
-        } else {
-            available.saturating_sub(head + REMOTE_GAP.chars().count())
-        },
-        ..placed
-    }
-}
-
-/// The context row's **program** form ([`DockContext::program`]): the
-/// title in the bar's `tone` ([`program_color`]: its host's mark, `info`
-/// unmarked — the remote host's colors, both bars are the same kind of
-/// guide), the separator quiet, the detail dim, the path quiet (a location,
-/// the remote path's quieter tier) and the hint dim; [`program_layout`]
-/// decides what shows.
-fn render_program(
-    bar: &ProgramBar,
-    tone: LinearRgba,
-    theme: &Theme,
-    available: usize,
-    row: u16,
-    sink: &mut impl FnMut(Cell),
-) {
-    let layout = program_layout(bar, available);
-    if !layout.title {
-        return;
-    }
-    let (dim, quiet) = (theme.dim_linear(), theme.quiet_linear());
-    let (shows_path, path) = path_cells(&bar.path, layout.path_budget, quiet, quiet);
-    let line = bar
-        .title
-        .chars()
-        .map(|ch| (ch, tone))
-        .chain(
-            layout
-                .detail
-                .then(|| {
-                    PROGRAM_DETAIL
-                        .chars()
-                        .map(|ch| (ch, quiet))
-                        .chain(bar.detail.chars().map(|ch| (ch, dim)))
-                })
-                .into_iter()
-                .flatten(),
-        )
-        .chain(
-            shows_path
-                .then(|| REMOTE_GAP.chars().map(|ch| (ch, quiet)))
-                .into_iter()
-                .flatten(),
-        )
-        .chain(path);
-    emit_context(line, available, row, sink);
-    if let Some(start) = layout.hint {
-        let hint = bar.hint.chars().map(|ch| (ch, dim));
-        emit_context_at(start, hint, available, row, sink);
-    }
-}
-
-/// One of the load indicator's three values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StatsMetric {
-    Cpu,
-    Mem,
-    /// The root file system.
-    Disk,
-}
-
-/// A value's two thresholds, in percent: at `warning` the number takes the
-/// theme's `warning`, at `critical` its `error` and a `▲`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StatsThreshold {
-    pub warning: u8,
-    pub critical: u8,
-}
-
-/// The thresholds of [`StatsMetric::Cpu`], `Mem` and `Disk`, in that order — a
-/// **design constant**, not a measurement (the approved design's numbers). The
-/// context row's colors and the popover's bars read this single table. Disk's
-/// warning is also the line below which disk is not shown at all: a full disk
-/// is news, a half-full one is not.
-pub const STATS_THRESHOLDS: [StatsThreshold; 3] = [
-    StatsThreshold {
-        warning: 70,
-        critical: 90,
-    },
-    StatsThreshold {
-        warning: 80,
-        critical: 92,
-    },
-    StatsThreshold {
-        warning: 85,
-        critical: 95,
-    },
-];
-
-/// How severe a value is ([`StatsMetric::level`]); ordered, the worst is the
-/// largest.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum StatsLevel {
-    #[default]
-    Normal,
-    Warning,
-    Critical,
-}
-
-impl StatsMetric {
-    /// The label drawn before the number — a UI string.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Cpu => "cpu",
-            Self::Mem => "mem",
-            Self::Disk => "disk",
-        }
-    }
-
-    /// This value's thresholds, from [`STATS_THRESHOLDS`].
-    pub fn threshold(self) -> StatsThreshold {
-        STATS_THRESHOLDS[self as usize]
-    }
-
-    /// The severity of `percent`; a threshold is reached **at** its value.
-    pub fn level(self, percent: u8) -> StatsLevel {
-        let threshold = self.threshold();
-        if percent >= threshold.critical {
-            StatsLevel::Critical
-        } else if percent >= threshold.warning {
-            StatsLevel::Warning
-        } else {
-            StatsLevel::Normal
-        }
-    }
-}
-
-/// A rung of the indicator's ladder, widest first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GaugeStep {
-    /// `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%`.
-    Spark,
-    /// `cpu 23%  mem 61%`.
-    Numbers,
-    /// `●`, or only the values past their threshold.
-    Alerts,
-    /// The worst single value: severity first, then the number.
-    Worst,
-}
-
-/// The ladder of each form; the last rung is always [`GaugeStep::Worst`].
-fn ladder(form: StatsForm) -> &'static [GaugeStep] {
-    match form {
-        StatsForm::Sparkline => &[GaugeStep::Spark, GaugeStep::Numbers, GaugeStep::Worst],
-        StatsForm::Numbers => &[GaugeStep::Numbers, GaugeStep::Worst],
-        StatsForm::Alerts => &[GaugeStep::Alerts, GaugeStep::Worst],
-    }
-}
-
-/// A gauge character's tone; the color is resolved at drawing (the theme is
-/// not the layout's input).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tone {
-    /// Labels, the sparkline and the gaps: dim.
-    Quiet,
-    /// A number and its `▲`: dim below the threshold, then `warning`/`error`.
-    Level(StatsLevel),
-    /// The alerts form's `●`: `success`.
-    Calm,
-}
-
-/// The widest gauge: `cpu ▁▁▁▁▁▁▁▁ ▲100%  mem ▲100%  disk ▲100%` is 41
-/// characters; a fixed capacity keeps per-frame allocation at zero.
-const GAUGE_MAX: usize = 48;
-
-/// A rung's characters, in a fixed buffer. The context row counts characters
-/// (`render_context`'s doc), and every character here is one column.
-#[derive(Clone, Copy)]
-struct Gauge {
-    cells: [(char, Tone); GAUGE_MAX],
-    len: usize,
-}
-
-impl Gauge {
-    fn new() -> Self {
-        Self {
-            cells: [(' ', Tone::Quiet); GAUGE_MAX],
-            len: 0,
-        }
-    }
-
-    fn cells(&self) -> &[(char, Tone)] {
-        &self.cells[..self.len]
-    }
-
-    fn width(&self) -> usize {
-        self.len
-    }
-
-    /// The capacity is a guard, not a policy: [`GAUGE_MAX`] holds the widest rung.
-    fn push(&mut self, ch: char, tone: Tone) {
-        if let Some(slot) = self.cells.get_mut(self.len) {
-            *slot = (ch, tone);
-            self.len += 1;
-        }
-    }
-
-    fn text(&mut self, text: &str, tone: Tone) {
-        for ch in text.chars() {
-            self.push(ch, tone);
-        }
-    }
-
-    /// The gap between two values: two columns, the remote form's own gap;
-    /// nothing before the first.
-    fn gap(&mut self) {
-        if self.len > 0 {
-            self.text(REMOTE_GAP, Tone::Quiet);
-        }
-    }
-
-    /// `[label ][▲]{n}%`: the label dim, the number in its severity; `▲` glued
-    /// to the number when critical.
-    fn value(&mut self, metric: StatsMetric, percent: u8, label: bool) {
-        if label {
-            self.text(metric.label(), Tone::Quiet);
-            self.push(' ', Tone::Quiet);
-        }
-        let level = metric.level(percent);
-        if level == StatsLevel::Critical {
-            self.push(STATS_CRITICAL, Tone::Level(level));
-        }
-        for digit in decimal(u16::from(percent)) {
-            self.push(digit, Tone::Level(level));
-        }
-        self.push('%', Tone::Level(level));
-    }
-
-    /// The sparkline's eight columns, right-aligned: missing samples on the
-    /// left are blank — a group whose width changed with every sample would
-    /// move the path's budget too.
-    fn spark(&mut self, history: &[u8]) {
-        let shown = &history[history.len().saturating_sub(STATS_HISTORY)..];
-        for _ in shown.len()..STATS_HISTORY {
-            self.push(' ', Tone::Quiet);
-        }
-        for &level in shown {
-            let block = char::from_u32(SPARK_BASE + u32::from(level.min(7))).unwrap_or(' ');
-            self.push(block, Tone::Quiet);
-        }
-    }
-}
-
-/// The values shown at all: CPU once it has a value (the first sample has
-/// none), memory always, disk only past its warning.
-fn shown_values(stats: &RemoteStats) -> impl Iterator<Item = (StatsMetric, u8)> {
-    let disk = (StatsMetric::Disk.level(stats.disk) > StatsLevel::Normal).then_some(stats.disk);
-    stats
-        .cpu
-        .map(|cpu| (StatsMetric::Cpu, cpu))
-        .into_iter()
-        .chain(std::iter::once((StatsMetric::Mem, stats.mem)))
-        .chain(disk.map(|disk| (StatsMetric::Disk, disk)))
-}
-
-/// The worst shown value: severity first, then the number; on a tie the
-/// first in `cpu, mem, disk` order.
-fn worst(stats: &RemoteStats) -> (StatsMetric, u8) {
-    let rank = |(metric, value): (StatsMetric, u8)| (metric.level(value), value);
-    let mut shown = shown_values(stats);
-    // Memory is always shown, so the first value always exists.
-    let first = shown.next().unwrap_or((StatsMetric::Mem, stats.mem));
-    shown.fold(
-        first,
-        |best, next| if rank(next) > rank(best) { next } else { best },
-    )
-}
-
-/// A rung's characters. **CPU without a value is left out** rather than
-/// guessed: the first sample carries only counters and the second follows a
-/// second later.
-fn gauge(stats: &RemoteStats, step: GaugeStep) -> Gauge {
-    let mut gauge = Gauge::new();
-    match step {
-        GaugeStep::Spark => {
-            for (metric, value) in shown_values(stats) {
-                if metric == StatsMetric::Cpu {
-                    gauge.text(metric.label(), Tone::Quiet);
-                    gauge.push(' ', Tone::Quiet);
-                    gauge.spark(stats.history());
-                    gauge.push(' ', Tone::Quiet);
-                    gauge.value(metric, value, false);
-                } else {
-                    gauge.gap();
-                    gauge.value(metric, value, true);
-                }
-            }
-        }
-        GaugeStep::Numbers => {
-            for (metric, value) in shown_values(stats) {
-                gauge.gap();
-                gauge.value(metric, value, true);
-            }
-        }
-        GaugeStep::Alerts => {
-            for (metric, value) in shown_values(stats) {
-                if metric.level(value) > StatsLevel::Normal {
-                    gauge.gap();
-                    gauge.value(metric, value, true);
-                }
-            }
-            if gauge.width() == 0 {
-                gauge.push(STATS_CALM, Tone::Calm);
-            }
-        }
-        GaugeStep::Worst => {
-            let (metric, value) = worst(stats);
-            gauge.value(metric, value, true);
-        }
-    }
-    gauge
-}
-
-/// The minimum gap between the path and the indicator.
-const STATS_GAP: usize = 2;
-
-/// Where the indicator sits: the rung and its context-local column range
-/// `[start, end)` — right-aligned, so `end` is the row's budget.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct GaugeSpan {
-    step: GaugeStep,
-    start: usize,
-    end: usize,
-}
-
-/// The remote form's layout ([`stats_layout`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RemoteLayout {
-    /// Whether `⇄ host` fit; if not, the row is only `⇄`.
-    head: bool,
-    /// The path's budget, for [`path_cells`].
-    path_budget: usize,
-    /// The indicator; `None` → not drawn.
-    gauge: Option<GaugeSpan>,
-    /// The Sign In… button's context-local range `[start, end)` — the whole
-    /// fill and the hit area; `None` → not drawn.
-    sign_in: Option<(usize, usize)>,
-}
-
-/// The remote form's layout: `⇄ {host}  {path}` on the left, the load
-/// indicator right-aligned.
-///
-/// **The ladder** — the indicator is less important than the path, because
-/// the row's real answer is "where am I": each rung of the form is tried with
-/// the **whole** path and at least [`STATS_GAP`] columns between them, widest
-/// first. If none fits and the worst value is past its threshold, that value
-/// stays as long as `⇄ host` + gap + it fits and the path is shortened from
-/// the left into the rest — at that moment "disk 96%" matters more than the
-/// path. Otherwise the indicator drops and the path takes today's budget. The
-/// host is never shortened.
-///
-/// **The Sign In… button** takes the indicator's place — there is
-/// no sample without a login — and goes **before the path**: it is the row's
-/// only action and the path is shortened from the left into the rest. If even
-/// `⇄ host` + gap + button does not fit it drops and the path takes today's
-/// budget.
-///
-/// Drawing ([`render_remote_context`]), the mouse ([`stats_at`],
-/// [`sign_in_span`]) and the popover's anchor ([`stats_span`]) read this; had
-/// they diverged a click would fall next to the indicator or the button.
-fn stats_layout(
-    host: &str,
-    remote_cwd: &str,
-    stats: Option<&RemoteStats>,
-    sign_in: bool,
-    available: usize,
-) -> RemoteLayout {
-    // `⇄` + space + host.
-    let head_chars = 2 + host.chars().count();
-    if head_chars > available {
-        return RemoteLayout {
-            head: false,
-            path_budget: 0,
-            gauge: None,
-            sign_in: None,
-        };
-    }
-    let left = head_chars + REMOTE_GAP.chars().count();
-    let path_budget = available.saturating_sub(left);
-    let bare = RemoteLayout {
-        head: true,
-        path_budget,
-        gauge: None,
-        sign_in: None,
-    };
-    if sign_in {
-        let width = button_width(ButtonLabel::SignIn, false);
-        if left + STATS_GAP + width > available {
-            return bare;
-        }
-        return RemoteLayout {
-            path_budget: available - left - STATS_GAP - width,
-            sign_in: Some((available - width, available)),
-            ..bare
-        };
-    }
-    let Some(stats) = stats else {
-        return bare;
-    };
-    let placed = |step: GaugeStep, width: usize| RemoteLayout {
-        head: true,
-        path_budget: available - left - STATS_GAP - width,
-        gauge: Some(GaugeSpan {
-            step,
-            start: available - width,
-            end: available,
-        }),
-        sign_in: None,
-    };
-    let path_chars = remote_cwd.chars().count();
-    for &step in ladder(stats.form) {
-        let width = gauge(stats, step).width();
-        if left + path_chars + STATS_GAP + width <= available {
-            return placed(step, width);
-        }
-    }
-    let (metric, value) = worst(stats);
-    let width = gauge(stats, GaugeStep::Worst).width();
-    if metric.level(value) > StatsLevel::Normal && left + STATS_GAP + width <= available {
-        return placed(GaugeStep::Worst, width);
-    }
-    bare
-}
-
-/// The drawn indicator's context-local range; `None` while the upload row
-/// stands in the context row's place, locally, without a value or
-/// when it did not fit.
-fn stats_range(context: &DockContext, budget: u16) -> Option<GaugeSpan> {
-    remote_layout(context, budget)?.gauge
-}
-
-/// The remote form's layout of `context` on a `budget`-column context row;
-/// `None` while the upload row stands in its place or locally.
-fn remote_layout(context: &DockContext, budget: u16) -> Option<RemoteLayout> {
-    if context.transfer.is_some() {
-        return None;
-    }
-    let host = context.remote_host()?;
-    let available = usize::from(budget.saturating_sub(CONTEXT_COL));
-    Some(stats_layout(
-        host,
-        &context.remote_cwd,
-        context.stats.as_ref(),
-        context.sign_in.is_some(),
-        available,
-    ))
-}
-
-/// The Sign In… button's **dock-local** column range `[start, end)` on the
-/// context row — the whole fill, the click's and the hand cursor's range;
-/// `None` if it is not drawn. From the drawing's layout
-/// ([`stats_layout`]), so a click cannot fall next to it.
-pub fn sign_in_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
-    context.sign_in?;
-    // audit: `end ≤ available ≤ budget` and `budget` is `u16`.
-    remote_layout(context, budget)?
-        .sign_in
-        .map(|(start, end)| (CONTEXT_COL + start as u16, CONTEXT_COL + end as u16))
-}
-
-/// Whether the dock-local column `col` of the context row falls on the load
-/// indicator; `budget` is the context row's budget ([`DockCols::context`]).
-/// The mouse's only input — the twin of [`transfer_button_at`], from the same
-/// layout as the drawing ([`stats_layout`]); the range is the whole indicator,
-/// the sparkline's blank columns included.
-pub fn stats_at(context: &DockContext, budget: u16, col: u16) -> bool {
-    let Some(col) = col.checked_sub(CONTEXT_COL) else {
-        return false;
-    };
-    stats_range(context, budget)
-        .is_some_and(|span| (span.start..span.end).contains(&usize::from(col)))
-}
-
-/// The indicator's **dock-local** column range `[start, end)` on the context
-/// row; `None` if it is not drawn. The popover's anchor — the
-/// inverse of [`stats_at`], from the same layout.
-pub fn stats_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
-    // audit: `end ≤ available ≤ budget` and `budget` is `u16`.
-    stats_range(context, budget).map(|span| {
-        (
-            CONTEXT_COL + span.start as u16,
-            CONTEXT_COL + span.end as u16,
-        )
-    })
-}
-
-/// The upload row's layout ([`transfer_layout`]): how far the row shows what.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TransferLayout {
-    /// Whether `⇄ host` fit; if not, the row is only `⇄`.
-    head: bool,
-    /// The number of body characters shown (excluding the clipping mark).
-    body: usize,
-    /// Whether the body was clipped (`…` at the end).
-    clipped: bool,
-    /// The buttons, left to right; `None` for one that does not fit or is absent.
-    buttons: [Option<ButtonSpan>; 2],
-}
-
-/// A button of the layout: the context-local column range `[start, end)` —
-/// inner padding included, i.e. the whole of the fill and the hit area.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ButtonSpan {
-    action: TransferAction,
-    label: ButtonLabel,
-    /// Whether the `⌘.` hint is to the right of the label.
-    hint: bool,
-    start: usize,
-    end: usize,
-}
-
-/// The button's label — a UI string. **A verb, not an icon** (the user,
-/// visual check: `✕` also read as "close", `▴` could not be told from text at
-/// the small point size).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ButtonLabel {
-    Cancel,
-    CancelAll,
-    /// With the number of items in the list; the same label while the list is
-    /// open (`Hide files` was dropped, the button is in the pressed tone).
-    /// "Transfers", not "files": the list carries both directions.
-    ShowFiles(u16),
-    /// The ssh status bar's login: the ellipsis says a sheet opens.
-    SignIn,
-}
-
-impl ButtonLabel {
-    /// The label's characters — no per-frame allocation, the number is printed in place.
-    fn chars(self) -> impl Iterator<Item = char> + Clone {
-        let (head, count, tail) = match self {
-            Self::Cancel => ("Cancel", None, ""),
-            Self::CancelAll => ("Cancel all", None, ""),
-            Self::ShowFiles(items) => ("Show transfers (", Some(items), ")"),
-            Self::SignIn => ("Sign In\u{2026}", None, ""),
-        };
-        head.chars()
-            .chain(count.into_iter().flat_map(decimal))
-            .chain(tail.chars())
-    }
-
-    fn len(self) -> usize {
-        self.chars().count()
-    }
-}
-
-/// The decimal digits of `n`, without separators.
-fn decimal(n: u16) -> impl Iterator<Item = char> + Clone {
-    let n = u32::from(n);
-    let digits = n.checked_ilog10().unwrap_or(0) + 1;
-    (0..digits)
-        .rev()
-        // audit: `n / 10^p % 10` 0..=9, `from_digit` hep `Some`.
-        .map(move |p| char::from_digit(n / 10u32.pow(p) % 10, 10).unwrap_or('0'))
-}
-
-/// The minimum gap between the body and the buttons.
-const CONTROLS_GAP: usize = 2;
-
-/// The button's inner padding, in columns — one empty column on each side of
-/// the label and the fill covers them too. A design constant: one column of
-/// the small class is roughly half a large cell, the approved design's inner
-/// padding.
-const BUTTON_PAD: usize = 1;
-
-/// The gap between the two buttons, in columns: so the fills do not touch.
-const BUTTON_GAP: usize = 1;
-
-/// The cancel's keyboard hint — a UI string; the menu's Cancel Upload (⌘.)
-/// key. Inside the button and dim: it teaches cancelling from the keyboard,
-/// it does not compete with the label.
-const CANCEL_HINT: &str = "⌘.";
-
-/// A button's width, in columns: `pad + label [+ space + ⌘.] + pad`.
-fn button_width(label: ButtonLabel, hint: bool) -> usize {
-    let hint = if hint {
-        1 + CANCEL_HINT.chars().count()
-    } else {
-        0
-    };
-    BUTTON_PAD + label.len() + hint + BUTTON_PAD
-}
-
-/// The upload row's layout: `⇄ {host}  {body}` on the left, the buttons
-/// **right-aligned**.
-///
-/// **The budget goes first to `⇄ host`, then the buttons, the rest to the
-/// body.** The host is not shortened (the remote form's reason: a shortened
-/// host reads as another machine); the buttons are not shortened either — a
-/// half label does not say what to click. If they do not fit they drop in
-/// order: first the `⌘.` hint, then the list button, `Cancel` last — cancel is
-/// the row's only urgent job. The body is shortened from the right with `…`:
-/// its information is at the start (which file, which number).
-///
-/// Right-aligned, because the body changes size on every refresh (speed,
-/// remaining time) and buttons stuck behind it would slide out from under the
-/// mouse.
-///
-/// Drawing ([`render_transfer`]) and the mouse ([`transfer_button_at`]) read
-/// this; had the two arithmetics diverged a click would fall next to the
-/// button.
-fn transfer_layout(transfer: &Transfer, available: usize) -> TransferLayout {
-    let head_chars = 2 + transfer.host.chars().count();
-    if head_chars > available {
-        return TransferLayout {
-            head: false,
-            body: 0,
-            clipped: false,
-            buttons: [None; 2],
-        };
-    }
-    let rest = available - head_chars;
-    let rest = rest.saturating_sub(REMOTE_GAP.chars().count());
-    let body_chars = transfer.body.chars().count();
-
-    let controls = transfer.controls;
-    let cancel = if controls.items > 1 {
-        ButtonLabel::CancelAll
-    } else {
-        ButtonLabel::Cancel
-    };
-    let list = (controls.items > 1).then_some(ButtonLabel::ShowFiles(controls.items));
-    // Drop order: hint, list, (if there is no cancel there is no button).
-    let options = [(list, true), (list, false), (None, false)];
-    let chosen = (controls.items > 0)
-        .then(|| {
-            options.into_iter().find(|&(list, hint)| {
-                let list_width = list.map_or(0, |label| button_width(label, false) + BUTTON_GAP);
-                list_width + button_width(cancel, hint) <= rest
-            })
-        })
-        .flatten();
-    let mut buttons = [None; 2];
-    let mut controls_width = 0;
-    if let Some((list, hint)) = chosen {
-        let cancel_width = button_width(cancel, hint);
-        // The right edge is the context-local `head + gap + rest`, i.e.
-        // `available` itself (if the gap was clipped `rest` has dropped to zero and there is no button).
-        let right = head_chars + REMOTE_GAP.chars().count() + rest;
-        let cancel_start = right - cancel_width;
-        buttons[1] = Some(ButtonSpan {
-            action: TransferAction::Cancel,
-            label: cancel,
-            hint,
-            start: cancel_start,
-            end: right,
-        });
-        controls_width = cancel_width;
-        if let Some(label) = list {
-            let end = cancel_start - BUTTON_GAP;
-            let start = end - button_width(label, false);
-            buttons[0] = Some(ButtonSpan {
-                action: TransferAction::List,
-                label,
-                hint: false,
-                start,
-                end,
-            });
-            controls_width = right - start;
-        }
-    }
-    let with_controls = controls_width > 0;
-    let budget = rest - controls_width;
-    // A gap between the body and the buttons only if both exist; if there is
-    // no room for the gap the body withdraws, not the buttons.
-    let budget = if with_controls && body_chars > 0 {
-        budget.saturating_sub(CONTROLS_GAP)
-    } else {
-        budget
-    };
-    let (body, clipped) = if body_chars <= budget {
-        (body_chars, false)
-    } else {
-        // The mark itself is a column too.
-        (budget.saturating_sub(1), budget > 0)
-    };
-    TransferLayout {
-        head: true,
-        body,
-        clipped,
-        buttons,
-    }
-}
-
-/// Which button of the upload row the dock-local column `col` of the context
-/// row falls in; `None` → none, or there is no button. `context` is the
-/// context row's budget ([`DockCols::context`]).
-///
-/// The mouse's only input: from the same layout as the drawing
-/// ([`transfer_layout`]) and the range is the whole of the fill — inner
-/// padding included, so a click that lands on the empty column next to the
-/// label still finds the button.
-pub fn transfer_button_at(transfer: &Transfer, context: u16, col: u16) -> Option<TransferAction> {
-    let available = usize::from(context.saturating_sub(CONTEXT_COL));
-    let col = usize::from(col.checked_sub(CONTEXT_COL)?);
-    transfer_layout(transfer, available)
-        .buttons
-        .into_iter()
-        .flatten()
-        .find(|button| (button.start..button.end).contains(&col))
-        .map(|button| button.action)
-}
-
-/// The button's **dock-local** column range `[start, end)` on the context row
-/// — the whole of the fill; `None` if there is no button or it did not fit.
-/// The anchor of the list popover: the popover is tied to the
-/// button, not to the clicked point. The inverse of [`transfer_button_at`],
-/// from the same layout.
-pub fn transfer_button_span(
-    transfer: &Transfer,
-    context: u16,
-    action: TransferAction,
-) -> Option<(u16, u16)> {
-    let available = usize::from(context.saturating_sub(CONTEXT_COL));
-    transfer_layout(transfer, available)
-        .buttons
-        .into_iter()
-        .flatten()
-        .find(|button| button.action == action)
-        // audit: `end ≤ available ≤ context` and `context` is `u16`.
-        .map(|button| {
-            (
-                CONTEXT_COL + button.start as u16,
-                CONTEXT_COL + button.end as u16,
-            )
-        })
-}
-
-/// The context row's **upload** form: `⇄ {host}` in the mark's color (the remote form's prefix
-/// and color are kept), the body dim, buttons on the right.
-///
-/// The button's label is in the **foreground** — the row's only foreground
-/// text, so what is to be clicked stands apart from what is to be read; the
-/// `⌘.` hint is dim, in the foreground when the mouse is over. The fill and
-/// border are not cells, they are in the return ([`Dock::buttons`]).
-fn render_transfer(
-    transfer: &Transfer,
-    theme: &Theme,
-    available: usize,
-    row: u16,
-    sink: &mut impl FnMut(Cell),
-) -> [Option<DockButton>; 2] {
-    let accent = theme.mark_linear(transfer.mark);
-    let layout = transfer_layout(transfer, available);
-    let mark = std::iter::once((REMOTE_MARK, accent));
-    if !layout.head {
-        emit_context(mark, available, row, sink);
-        return [None; 2];
-    }
-    let dim = theme.dim_linear();
-    // The result's tone at the start of the body: success green,
-    // error text red; the rest dim.
-    let toned = match transfer.tone {
-        TransferTone::Quiet => dim,
-        TransferTone::Success => theme.success_linear(),
-        TransferTone::Error => theme.error_linear(),
-    };
-    let lead = transfer.lead;
-    let line = mark
-        .chain(std::iter::once((' ', accent)))
-        .chain(transfer.host.chars().map(move |ch| (ch, accent)))
-        .chain(REMOTE_GAP.chars().map(move |ch| (ch, accent)))
-        .chain(
-            transfer
-                .body
-                .chars()
-                .take(layout.body)
-                .enumerate()
-                .map(move |(i, ch)| (ch, if i < lead { toned } else { dim })),
-        )
-        .chain(layout.clipped.then_some((ELLIPSIS, dim)));
-    emit_context(line, available, row, sink);
-
-    let controls = transfer.controls;
-    layout.buttons.map(|button| {
-        let button = button?;
-        let state = match button.action {
-            TransferAction::List if controls.list_open => ButtonState::Pressed,
-            action if controls.hover == Some(action) => ButtonState::Hover,
-            _ => ButtonState::Idle,
-        };
-        let hint_color = if state == ButtonState::Idle {
-            dim
-        } else {
-            theme.foreground_linear()
-        };
-        let label = button
-            .label
-            .chars()
-            .map(|ch| (ch, theme.foreground_linear()))
-            .chain(
-                button
-                    .hint
-                    .then(|| {
-                        std::iter::once((' ', dim))
-                            .chain(CANCEL_HINT.chars().map(|ch| (ch, hint_color)))
-                    })
-                    .into_iter()
-                    .flatten(),
-            );
-        emit_context_at(button.start + BUTTON_PAD, label, available, row, sink);
-        Some(DockButton {
-            // audit: `end ≤ available ≤ context` and `context` is `u16`.
-            start: CONTEXT_COL + button.start as u16,
-            end: CONTEXT_COL + button.end as u16,
-            color: accent,
-            state,
-        })
-    })
-}
-
-/// A path's cells on the context row, shortened **from the left** to `budget`
-/// characters and in two tiers; the first value is whether the path shows.
-///
-/// The part common to the local and remote forms: the rule is the same in
-/// both, because both are the answer to the "which folder are you in"
-/// question.
-fn path_cells(
-    path: &str,
-    budget: usize,
-    normal: LinearRgba,
-    quiet: LinearRgba,
-) -> (bool, impl Iterator<Item = (char, LinearRgba)> + '_) {
-    let path_chars = path.chars().count();
-    // `skip` is the number of characters dropped from the **start** of the
-    // path; `mark` is the shortening's visible mark. If the path is not drawn
-    // at all both are silent from the start.
-    let (mark, skip) = if budget == 0 || path_chars == 0 {
-        (None, path_chars)
-    } else if path_chars <= budget {
-        (None, 0)
-    } else {
-        // The mark itself is a column too: `budget - 1` characters from the tail.
-        (Some(ELLIPSIS), path_chars - (budget - 1))
-    };
-    let shows = mark.is_some() || skip < path_chars;
-
-    // **The path's last component stands out, what precedes it recedes.** The
-    // information the user looks for is "which folder am I in"; the parent
-    // directories are the context that places it. With both in the same tone
-    // the eye had to search for the last component.
-    //
-    // The dim one is **not a new color**: the dim of the dim
-    // (`Theme::quiet_linear`), i.e. the second application of the same rule
-    // (`dim_toward`). The hairline is one step further out and there is a
-    // reason it stops there: it is **not ink**, this is still a path that
-    // needs to be read.
-    //
-    // The **character** index of the last component in the path: what is
-    // after the last `/`. No splitting, `enumerate` not `char_indices`: the
-    // `skip` above also counts characters and the two must be in the same unit.
-    let head_end = path
-        .chars()
-        .enumerate()
-        .filter(|(_, ch)| *ch == '/')
-        .map(|(index, _)| index + 1)
-        .last()
-        .unwrap_or(0);
-    // If the last component is empty (`/`, or a trailing slash) no distinction
-    // is made: the whole path stands out. The wrong side is the safe side —
-    // over-emphasizing hides no information, dimming everything would.
-    let head_end = if head_end >= path_chars { 0 } else { head_end };
-
-    let cells = mark
-        // The shortening mark stands in the place of the dropped **parent**
-        // directories, i.e. in the same tone as them.
-        .map(|ch| (ch, quiet))
-        .into_iter()
-        .chain(
-            path.chars()
-                .skip(skip)
-                .enumerate()
-                .map(move |(offset, ch)| {
-                    (
-                        ch,
-                        if skip + offset < head_end {
-                            quiet
-                        } else {
-                            normal
-                        },
-                    )
-                }),
-        );
-    (shows, cells)
-}
-
-/// Prints the context row's cells to the sink within `available` columns.
-fn emit_context(
-    line: impl Iterator<Item = (char, LinearRgba)>,
-    available: usize,
-    row: u16,
-    sink: &mut impl FnMut(Cell),
-) {
-    emit_context_at(0, line, available, row, sink);
-}
-
-/// [`emit_context`], starting at the context-local column `start` (the upload
-/// row's right-aligned buttons).
-fn emit_context_at(
-    start: usize,
-    line: impl Iterator<Item = (char, LinearRgba)>,
-    available: usize,
-    row: u16,
-    sink: &mut impl FnMut(Cell),
-) {
-    // `take` is a guard, not a policy: the caller's budget already does not
-    // exceed `available` columns. A cell overflowing on the right would write
-    // outside the grid and that arithmetic error stops silently here.
-    for (offset, (ch, fg)) in line.take(available.saturating_sub(start)).enumerate() {
-        let offset = start + offset;
-        // A space produces no glyph (`cell`'s rule); both sides of the
-        // separator are eliminated here.
-        if ch == ' ' {
-            continue;
-        }
-        sink(Cell {
-            // audit: `offset < available ≤ cols` and `cols` is `u16`; the sum cannot overflow.
-            col: CONTEXT_COL + offset as u16,
-            row,
-            ch: Some(ch),
-            // The whole row stays dim — the context is readable but does not
-            // compete with the input row — and there is a second tier **inside**
-            // it (above). The remote form's host is the one exception: distance
-            // is this row's actual news.
-            fg,
-            ..Cell::default()
-        });
-    }
-}
-
 /// The color of the `>` mark: the shell's phase.
 ///
 /// The **same vocabulary** as the block stripe (`ShellLog::stripe`): a
@@ -3621,10 +2442,55 @@ mod tests {
     // predicate, in production `Session::frame` gives the answer.
     use crate::settings::HostMark;
     use crate::shell::{
-        CaretHome, DockFault, Highlight, RemoteTarget, TransferControls, caret_home,
+        CaretHome, DockFault, Highlight, RemoteTarget, TransferAction, TransferControls, caret_home,
     };
 
     const THEME: Theme = Theme::BATERI;
+
+    /// The load indicator's range — [`footer_span`]'s question about it.
+    fn stats_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
+        footer_span(context, budget, FooterControl::Stats)
+    }
+
+    /// Whether `col` is on the load indicator — [`footer_hit`]'s answer.
+    fn stats_at(context: &DockContext, budget: u16, col: u16) -> bool {
+        footer_hit(context, budget, col).is_some_and(|hit| hit.control == FooterControl::Stats)
+    }
+
+    /// The Sign In… button's range.
+    fn sign_in_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
+        footer_span(context, budget, FooterControl::SignIn)
+    }
+
+    /// The upload row of `transfer` alone, the way the mouse asks about it.
+    fn transfer_context(transfer: &Transfer) -> DockContext {
+        DockContext {
+            transfer: Some(transfer.clone()),
+            ..DockContext::default()
+        }
+    }
+
+    /// The upload button under `col`.
+    fn transfer_button_at(transfer: &Transfer, context: u16, col: u16) -> Option<TransferAction> {
+        match footer_hit(&transfer_context(transfer), context, col)?.control {
+            FooterControl::List => Some(TransferAction::List),
+            FooterControl::Cancel => Some(TransferAction::Cancel),
+            _ => None,
+        }
+    }
+
+    /// An upload button's range.
+    fn transfer_button_span(
+        transfer: &Transfer,
+        context: u16,
+        action: TransferAction,
+    ) -> Option<(u16, u16)> {
+        let control = match action {
+            TransferAction::List => FooterControl::List,
+            TransferAction::Cancel => FooterControl::Cancel,
+        };
+        footer_span(&transfer_context(transfer), context, control)
+    }
 
     /// The column count: most tests do not ask about wrapping and this width
     /// holds their text comfortably.
@@ -4392,6 +3258,8 @@ mod tests {
             remote_setup: None,
             program: None,
             program_mark: HostMark::None,
+            ports: Vec::new(),
+            footer_hover: None,
         }
     }
 
@@ -4468,15 +3336,16 @@ mod tests {
         assert_eq!(color_at(&cells, 1, 57), warning, "disk's number");
         assert_eq!(color_at(&cells, 1, 52), dim, "disk's label");
         // Critical: `▲` glued to the number, both `error`; the label stays dim.
+        // Its column is `▲100%`'s, the number right-aligned in it.
         let (row, cells) = load_row(&loaded(load(StatsForm::Numbers, Some(95), 85, 0, &[])), 60);
-        assert!(row.ends_with("cpu ▲95%  mem 85%"), "{row}");
-        let cpu = row.chars().count() - "cpu ▲95%  mem 85%".chars().count();
+        assert!(row.ends_with("cpu  ▲95%  mem 85%"), "{row}");
+        let cpu = row.chars().count() - "cpu  ▲95%  mem 85%".chars().count();
         let cpu = cpu as u16;
         assert_eq!(color_at(&cells, 1, cpu), dim, "label");
-        assert_eq!(color_at(&cells, 1, cpu + 4), error, "▲");
-        assert_eq!(color_at(&cells, 1, cpu + 5), error, "number");
+        assert_eq!(color_at(&cells, 1, cpu + 5), error, "▲");
+        assert_eq!(color_at(&cells, 1, cpu + 6), error, "number");
         assert_eq!(
-            color_at(&cells, 1, cpu + 14),
+            color_at(&cells, 1, cpu + 15),
             warning,
             "mem 85% is a warning"
         );
@@ -4488,7 +3357,7 @@ mod tests {
         assert_eq!(StatsMetric::Disk.level(95), StatsLevel::Critical);
         // Alerts: only the values past their threshold.
         let (row, _) = load_row(&loaded(load(StatsForm::Alerts, Some(75), 93, 40, &[])), 60);
-        assert!(row.ends_with("cpu 75%  mem ▲93%"), "{row}");
+        assert!(row.ends_with("cpu 75%  mem  ▲93%"), "{row}");
     }
 
     #[test]
@@ -4546,20 +3415,59 @@ mod tests {
     }
 
     #[test]
+    fn the_gauge_keeps_its_place_while_the_digits_change() {
+        // Right-aligned, a gauge sized by its digits would start one column
+        // further right at `cpu 9%` than at `cpu 23%` — and the ports to its
+        // left would move under a still pointer. Its numbers are tabular:
+        // within a level the place holds; past the critical threshold (`▲`,
+        // `error`) it is a change of state.
+        for form in [StatsForm::Sparkline, StatsForm::Numbers] {
+            for level in [&[0, 9, 23, 89][..], &[90, 99, 100][..]] {
+                let spans: Vec<_> = level
+                    .iter()
+                    .map(|&cpu| {
+                        let context = DockContext {
+                            ports: open_ports(&[3000]),
+                            ..loaded(load(form, Some(cpu), 61, 54, &[1, 2, 3]))
+                        };
+                        (
+                            stats_span(&context, 80),
+                            footer_span(&context, 80, FooterControl::Ports),
+                        )
+                    })
+                    .collect();
+                assert!(
+                    spans.iter().all(|span| *span == spans[0]),
+                    "{form:?} {level:?}: {spans:?}"
+                );
+            }
+        }
+        // A calm gauge leaves no hole before itself: `cpu  9%`, the number's
+        // own column.
+        let calm = loaded(load(StatsForm::Numbers, Some(9), 61, 54, &[]));
+        let (row, _) = load_row(&calm, 40);
+        assert!(row.ends_with(" cpu  9%  mem 61%"), "{row:?}");
+    }
+
+    #[test]
     fn an_alarm_comes_before_the_path() {
         // The worst value past its threshold stays and the path shortens from
         // the left with `…`; the host never does.
+        // A critical number's column is `▲100%`'s: `▲95%` right-aligned in it.
         let context = loaded(load(StatsForm::Sparkline, Some(23), 95, 0, &[]));
-        let (row, cells) = load_row(&context, 20);
-        assert_eq!(row, "⇄ prod  …p  mem ▲95%");
+        let (row, cells) = load_row(&context, 21);
+        assert_eq!(row, "⇄ prod  …p  mem  ▲95%");
         assert_eq!(color_at(&cells, 1, 17), Some(THEME.error_linear()));
-        let (row, _) = load_row(&context, 19);
+        let (row, _) = load_row(&context, 20);
         assert_eq!(
-            row, "⇄ prod  …  mem ▲95%",
+            row, "⇄ prod  …  mem  ▲95%",
             "a one-column path budget is the mark alone"
         );
-        // `⇄ prod` + gap + the alarm no longer fit: the alarm drops too.
+        // The path has given way entirely: `⇄ prod`, the gap and the alarm.
         let (row, _) = load_row(&context, 17);
+        assert_eq!(row, "⇄ prod  mem  ▲95%");
+        // `⇄ prod` + gap + the alarm no longer fit: the alarm drops too.
+        let (row, _) = load_row(&context, 16);
         assert_eq!(row, "⇄ prod  /srv/app");
         // A calm worst value never pushes the path.
         let calm = loaded(calm(StatsForm::Sparkline));
@@ -4653,7 +3561,7 @@ mod tests {
     fn the_sign_in_button_is_drawn_where_it_is_hit() {
         let context = DockContext {
             stats: Some(calm(StatsForm::Sparkline)),
-            sign_in: Some(crate::SignIn::default()),
+            sign_in: Some(crate::SignIn),
             ..remote("prod", "/srv/app")
         };
         let (cells, dock) = draw_with(&live("", "", "", 0), &context, 60);
@@ -4677,7 +3585,7 @@ mod tests {
         assert_eq!(stats_span(&context, 60), None);
         // The hover darkens the fill only.
         let hovered = DockContext {
-            sign_in: Some(crate::SignIn { hover: true }),
+            footer_hover: Some(FooterControl::SignIn),
             ..context.clone()
         };
         let (_, dock) = draw_with(&live("", "", "", 0), &hovered, 60);
@@ -4697,7 +3605,7 @@ mod tests {
         }
         // The upload row wins; locally and without the flag there is none.
         let uploading = DockContext {
-            sign_in: Some(crate::SignIn::default()),
+            sign_in: Some(crate::SignIn),
             ..uploading("↑ a.tar", 1, Some(2_500))
         };
         assert_eq!(sign_in_span(&uploading, 60), None);
@@ -4707,6 +3615,166 @@ mod tests {
             ..context
         };
         assert_eq!(sign_in_span(&local, 60), None);
+    }
+
+    #[test]
+    fn the_ports_mark_is_the_one_the_atlas_checks() {
+        // `bt-atlas` asks by hand about the ports' font glyph in the small
+        // class (`the_ports_mark_has_no_box_in_the_small_class`); every
+        // non-ASCII character any rung of the ports draws is there.
+        assert_eq!(PORTS_GLYPHS, ['↗']);
+        let context = DockContext {
+            ports: open_ports(&[3000, 6006, 65535]),
+            ..context("/Users/me/proj", "main")
+        };
+        for cols in 0..=60 {
+            let (cells, _) = draw_with(&live("", "", "", 0), &context, cols);
+            for ch in cells.iter().filter_map(|cell| cell.ch) {
+                assert!(
+                    ch.is_ascii() || PORTS_GLYPHS.contains(&ch) || ch == ELLIPSIS,
+                    "'{ch}' at {cols} columns"
+                );
+            }
+        }
+    }
+
+    /// `ports` on the local row `{cwd} | main` — ascending, as
+    /// `Session::set_ports` stores them.
+    fn serving(cwd: &str, ports: &[u16]) -> DockContext {
+        DockContext {
+            ports: open_ports(ports),
+            ..context(cwd, "main")
+        }
+    }
+
+    /// `ports` as open ports, ascending.
+    fn open_ports(ports: &[u16]) -> Vec<crate::FooterPort> {
+        let mut ports: Vec<_> = ports
+            .iter()
+            .map(|&port| crate::FooterPort { port, open: true })
+            .collect();
+        ports.sort_unstable();
+        ports
+    }
+
+    #[test]
+    fn the_ports_stand_at_the_right_of_every_form_and_fold_before_the_path() {
+        let state = live("", "", "", 0);
+        let row = |context: &DockContext, cols: u16| {
+            let (cells, _) = draw_with(&state, context, cols);
+            row_text(&cells, 1)
+        };
+        let local = serving("/Users/me/web", &[6006, 3000]);
+        // Ascending, right-aligned, the path and branch untouched.
+        assert_eq!(
+            row(&local, 50),
+            format!("{:<36}↗ :3000  :6006", "/Users/me/web | main")
+        );
+        // Not enough room for both: the first and how many more, the whole path.
+        assert_eq!(row(&local, 32), "/Users/me/web | main  ↗ :3000 +1");
+        // Less still: the path gives way from the left, the ports stay.
+        assert_eq!(row(&local, 26), "…me/web | main  ↗ :3000 +1");
+        // The core (the branch) and the shortened ports no longer fit: a count.
+        assert_eq!(row(&local, 13), "… | main  ↗ 2");
+        // Not even that: the ports drop and the row is today's.
+        assert_eq!(row(&local, 8), row(&context("/Users/me/web", "main"), 8));
+        // A program's hint stays at the edge, the ports inside it; with less
+        // room the hint drops first.
+        let program = DockContext {
+            ports: open_ports(&[8000]),
+            ..program("Python 3.13", "", "", "⌃D exit")
+        };
+        assert_eq!(
+            row(&program, 40),
+            format!("{:<24}↗ :8000  ⌃D exit", "Python 3.13")
+        );
+        assert_eq!(row(&program, 22), format!("{:<15}↗ :8000", "Python 3.13"));
+        // The upload buttons keep the edge; the ports stand left of them and
+        // the text shortens first.
+        let upload = DockContext {
+            ports: open_ports(&[3000]),
+            ..uploading("↑ backup.tar.gz  18.2 / 44.6 MB", 1, None)
+        };
+        let (cells, dock) = draw_with(&state, &upload, 64);
+        let text = row_text(&cells, 1);
+        assert!(text.contains("↗ :3000"), "{text}");
+        let cancel = dock.buttons[1].expect("cancel");
+        assert_eq!(cancel.end, 64, "the cancel stays at the edge");
+        let at = text.chars().position(|ch| ch == '↗').expect("mark") as u16;
+        assert!(at + 7 + 2 <= cancel.start, "{text}");
+    }
+
+    #[test]
+    fn a_port_that_needs_forwarding_is_dim_and_one_that_opens_is_green() {
+        let context = DockContext {
+            ports: vec![
+                crate::FooterPort {
+                    port: 5173,
+                    open: false,
+                },
+                crate::FooterPort {
+                    port: 8080,
+                    open: true,
+                },
+            ],
+            ..remote("db1", "/srv/app")
+        };
+        let (cells, _) = draw_with(&live("", "", "", 0), &context, 60);
+        let text = row_text(&cells, 1);
+        let at = |needle: &str| {
+            text.find(needle)
+                .map(|byte| text[..byte].chars().count() as u16)
+        };
+        let closed = at(":5173").expect("drawn");
+        let open = at(":8080").expect("drawn");
+        assert_eq!(color_at(&cells, 1, closed + 1), Some(THEME.dim_linear()));
+        assert_eq!(color_at(&cells, 1, open + 1), Some(THEME.success_linear()));
+    }
+
+    #[test]
+    fn a_port_number_is_never_cut() {
+        let local = serving("/a", &[3000, 6006, 51234]);
+        for cols in 0..=60 {
+            let (cells, _) = draw_with(&live("", "", "", 0), &local, cols);
+            let text = row_text(&cells, 1);
+            for token in text
+                .split_whitespace()
+                .filter(|token| token.starts_with(':'))
+            {
+                assert!(
+                    [":3000", ":6006", ":51234"].contains(&token),
+                    "{token:?} in {text:?} at {cols}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_hit_finds_the_ports_and_the_port_under_the_column() {
+        let local = serving("/a", &[3000, 6006]);
+        // `/a | main` … `↗ :3000  :6006` on 40 columns: the item is 26..40.
+        let (start, end) = footer_span(&local, 40, FooterControl::Ports).expect("drawn");
+        assert_eq!((start, end), (26, 40));
+        let port = |col| footer_hit(&local, 40, col).and_then(|hit| hit.port);
+        assert_eq!(
+            footer_hit(&local, 40, 26).map(|hit| hit.control),
+            Some(FooterControl::Ports)
+        );
+        assert_eq!(port(26), None, "the mark");
+        assert_eq!((28..33).map(port).collect::<Vec<_>>(), [Some(3000); 5]);
+        assert_eq!(port(33), None, "the gap");
+        assert_eq!((35..40).map(port).collect::<Vec<_>>(), [Some(6006); 5]);
+        assert_eq!(footer_hit(&local, 40, 25), None);
+        // Folded, only the first is a port; the `+1` is the list's.
+        assert_eq!(
+            footer_hit(&local, 20, 19).map(|hit| (hit.control, hit.port)),
+            Some((FooterControl::Ports, None))
+        );
+        // The hand cursor's ranges are the same plan.
+        assert_eq!(
+            footer_spans(&local, 40).collect::<Vec<_>>(),
+            [(FooterControl::Ports, 26, 40)]
+        );
     }
 
     #[test]
@@ -4946,7 +4014,10 @@ mod tests {
         );
 
         // Mouse over cancel: state and hint in the foreground; the list is unaffected.
-        let hovered = with_controls(context.clone(), |c| c.hover = Some(TransferAction::Cancel));
+        let hovered = DockContext {
+            footer_hover: Some(FooterControl::Cancel),
+            ..context.clone()
+        };
         let (cells, dock) = draw_with(&state, &hovered, 64);
         assert_eq!(
             dock.buttons.map(|b| b.map(|b| b.state)),
@@ -5055,25 +4126,20 @@ mod tests {
             "↑ 1 of 3 · a  18.2 / 44.6 MB · 0.1 MB/s · 12m 05s",
             "↑ 3 of 3 · a-very-long-file-name-that-clips.tar.gz  44.6 / 44.6 MB",
         ];
-        let spans = |body: &str, hover: Option<TransferAction>, list_open: bool| {
+        let spans = |body: &str, hover: Option<FooterControl>, list_open: bool| {
             let mut context = uploading(body, 3, Some(5_000));
+            context.footer_hover = hover;
             let transfer = context.transfer.as_mut().unwrap();
-            transfer.controls.hover = hover;
             transfer.controls.list_open = list_open;
-            let transfer = context.transfer.as_ref().unwrap();
             (0..80)
-                .map(|col| transfer_button_at(transfer, 80, col))
+                .map(|col| footer_hit(&context, 80, col).map(|hit| hit.control))
                 .collect::<Vec<_>>()
         };
         let first = spans(bodies[0], None, false);
-        assert!(first.contains(&Some(TransferAction::List)));
-        assert!(first.contains(&Some(TransferAction::Cancel)));
+        assert!(first.contains(&Some(FooterControl::List)));
+        assert!(first.contains(&Some(FooterControl::Cancel)));
         for body in bodies {
-            for hover in [
-                None,
-                Some(TransferAction::List),
-                Some(TransferAction::Cancel),
-            ] {
+            for hover in [None, Some(FooterControl::List), Some(FooterControl::Cancel)] {
                 for list_open in [false, true] {
                     assert_eq!(spans(body, hover, list_open), first, "{body}");
                 }
