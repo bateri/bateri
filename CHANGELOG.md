@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-09
+
 ### Added
 
 - **The ports your programs listen on, in the dock.** Start a dev server —
