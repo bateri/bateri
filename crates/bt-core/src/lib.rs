@@ -55,6 +55,7 @@ mod identity;
 mod input;
 mod journal;
 mod link;
+mod program_status;
 mod reader;
 mod search;
 mod session;
@@ -79,6 +80,7 @@ pub use journal::{
     JournalStore, JournalStream, Rebuilt, STALL as JOURNAL_STALL, due as journal_due,
     rebuild as journal_rebuild,
 };
+pub use program_status::ProgramActivity;
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,
     escape as escape_search,

@@ -111,6 +111,10 @@ use std::time::{Duration, Instant, SystemTime};
 use unicode_width::UnicodeWidthChar;
 
 use crate::dock::{self, DockPoint};
+use crate::program_status::{
+    self, PROGRESS_OSC, PROGRESS_PAYLOAD_LIMIT, ProgramStatus, Report, STATUS_OSC,
+    STATUS_PAYLOAD_LIMIT,
+};
 use crate::session::{CellHalf, SelectKind};
 use crate::settings::{HostMark, HostRule, MarkSubject, RemoteStatsMode};
 
@@ -2108,6 +2112,11 @@ pub(crate) struct ShellLog {
     /// ([`crate::Session::activity`]), and a `C`…`D` pair that falls between them
     /// still moves it.
     pub(crate) ends: Ends,
+    /// What programs say they are doing (`OSC 7501`): one record per id, the
+    /// tab's indicator reads them ([`ProgramStatus::activity`]). Next to the
+    /// marks, not in them: a program reports whether or not the shell has
+    /// integration, and the shell's next prompt ends what it reported.
+    pub(crate) program: ProgramStatus,
 }
 
 /// How many commands ended, by code: `ok` with `0`, `failed` with any other;
@@ -2375,6 +2384,7 @@ impl ShellLog {
             caret_since: Instant::now(),
             end_since: None,
             ends: Ends::default(),
+            program: ProgramStatus::default(),
         }
     }
 
@@ -2569,13 +2579,37 @@ impl ShellLog {
     ) -> ScanOutcome {
         let mut outcome = ScanOutcome::default();
         match event {
-            ScanEvent::Mark(mark) => outcome = self.apply(mark),
+            ScanEvent::Mark(mark) => {
+                // A new prompt ends what a program reported — ours, or the one of
+                // a shell that never printed our identity (the same rule that
+                // closes the command, [`Self::apply`]).
+                let ended = matches!(mark, Mark::PromptStart { id } if id.is_some() || !self.ours)
+                    && self.program.prompt();
+                outcome = self.apply(mark);
+                outcome.status |= ended;
+            }
             // **Our remote shell's mark is separated before anything local**:
             // `apply`'s identity, the held `line-finish`, the
             // command's closing and the three notifications never see it — the
             // remote `A` must not hand ⌘T's first input to the remote shell
             // (`outcome.prompt`) nor end the remote session.
-            ScanEvent::RemoteMark(remote) => outcome.remote_edge = self.apply_remote(remote),
+            ScanEvent::RemoteMark(remote) => {
+                // Our remote shell's prompt ends what a program on that side
+                // reported, as the local one does.
+                outcome.status =
+                    matches!(remote.mark, Mark::PromptStart { .. }) && self.program.prompt();
+                outcome.remote_edge = self.apply_remote(remote);
+            }
+            // The question was answered by the reader before this lock; the
+            // reports are **not** gated by the remote session: a program over ssh
+            // reporting its state is the case the protocol is for.
+            ScanEvent::StatusQuery => {}
+            ScanEvent::Status(report) => {
+                outcome.status = self.program.apply(report, Instant::now());
+            }
+            ScanEvent::Progress(report) => {
+                outcome.status = self.program.apply_progress(report, Instant::now());
+            }
             // **While a remote session is active OSC 8133 is ignored**: the
             // local shell is behind ssh and the only 8133 that can arrive is a remote
             // one — a remote mirror would draw a foreign line in the local dock, and
@@ -3673,6 +3707,10 @@ enum Arm {
     Dock,
     /// [`CWD_OSC`] — dizin kolu.
     Cwd,
+    /// [`STATUS_OSC`] — the program status arm.
+    Status,
+    /// [`PROGRESS_OSC`] — ConEmu's progress, on iTerm2's notification number.
+    Progress,
 }
 
 /// The answer of [`ShellLog::apply_scan_answering`]: the notifications the reader
@@ -3706,6 +3744,9 @@ pub(crate) struct ScanOutcome {
     /// also sends the state to a bound holder, and every remote command would
     /// add that traffic for a trail the next local edge carries anyway.
     pub(crate) remote_edge: bool,
+    /// A program status record changed or went (`OSC 7501`, or the prompt that
+    /// ended what it reported) → [`crate::Wake::program_status_changed`].
+    pub(crate) status: bool,
 }
 
 /// The event the scanner hands out.
@@ -3747,6 +3788,16 @@ pub(crate) enum ScanEvent<'a> {
     /// ([`ShellLog::remote_up`]). `f`'s twin: on the mirror's number, not a
     /// [`DockEvent`]. Owned: it arrives once per connection.
     RemoteUp(String),
+    /// `OSC 7501 ; ?`: a program asks whether the terminal reads program status.
+    /// Answered by the reader ([`crate::program_status::SUPPORT_REPLY`]); it touches
+    /// no state, so it never takes the ledger's lock.
+    StatusQuery,
+    /// A program status report ([`crate::program_status::parse`]): owned, because
+    /// it is rare — a program reports when its state changes, not per keystroke.
+    Status(Report),
+    /// `OSC 9 ; 4 ; …` mapped onto the root record ([`program_status::progress`]);
+    /// applied only until a program has reported with `OSC 7501`.
+    Progress(Report),
 }
 
 /// The mirror arm's events.
@@ -3788,6 +3839,11 @@ pub(crate) struct Scanner {
     /// The payload after `7;`. A third buffer, a third bound — the same reason: one
     /// buffer cannot fit three bounds at once.
     cwd: Vec<u8>,
+    /// The payload after `7501;`. A fourth buffer, a fourth bound (the protocol's
+    /// 4096): one buffer cannot fit four bounds at once.
+    status: Vec<u8>,
+    /// The payload after `9;`: a fifth buffer, a fifth (small) bound.
+    progress: Vec<u8>,
     /// The intermediate buffer base64 output lands in; reused for every field.
     decoded: Vec<u8>,
     /// The mirror's decoded state — the buffer [`DockEvent::Update`] lends.
@@ -3827,6 +3883,9 @@ impl Scanner {
             // allocated up front, because its size is 4 KiB and a buffer that arrives by
             // growing would allocate in the first prompts.
             cwd: Vec::with_capacity(CWD_PAYLOAD_LIMIT),
+            // Allocated on the **first** report instead: most sessions never see one.
+            status: Vec::new(),
+            progress: Vec::new(),
             decoded: Vec::new(),
             line: DockState::default(),
             path: String::new(),
@@ -3942,6 +4001,14 @@ impl Scanner {
                             self.cwd.clear();
                             ScanState::Payload(Arm::Cwd)
                         }
+                        (true, STATUS_OSC) => {
+                            self.status.clear();
+                            ScanState::Payload(Arm::Status)
+                        }
+                        (true, PROGRESS_OSC) => {
+                            self.progress.clear();
+                            ScanState::Payload(Arm::Progress)
+                        }
                         _ => ScanState::Skip,
                     };
                 }
@@ -4027,6 +4094,42 @@ impl Scanner {
                     self.cwd.push(byte);
                 }
             }
+            ScanState::Payload(Arm::Status) => {
+                if is_terminator(byte) {
+                    // Parsing happens **before** `close`: `close` empties the buffer.
+                    let report = program_status::parse(&self.status, &mut self.decoded);
+                    self.close(byte);
+                    match report {
+                        Some(Report::Query) => on_event(ScanEvent::StatusQuery),
+                        Some(report) => on_event(ScanEvent::Status(report)),
+                        None => {}
+                    }
+                } else if is_ignored(byte) {
+                } else if self.status.len() == STATUS_PAYLOAD_LIMIT {
+                    // Dropped, silently, and skipped to the terminator so the
+                    // sequence after it is still seen: the protocol discards a
+                    // report that breaks a limit.
+                    self.state = ScanState::Skip;
+                } else {
+                    self.status.push(byte);
+                }
+            }
+            ScanState::Payload(Arm::Progress) => {
+                if is_terminator(byte) {
+                    let report = program_status::progress(&self.progress);
+                    self.close(byte);
+                    if let Some(report) = report {
+                        on_event(ScanEvent::Progress(report));
+                    }
+                } else if is_ignored(byte) {
+                } else if self.progress.len() == PROGRESS_PAYLOAD_LIMIT {
+                    // Past the bound it is not a progress report but a notification's
+                    // text: dropped, skipped to the terminator.
+                    self.state = ScanState::Skip;
+                } else {
+                    self.progress.push(byte);
+                }
+            }
             ScanState::Skip => {
                 if is_terminator(byte) {
                     self.close(byte);
@@ -4098,6 +4201,8 @@ impl Scanner {
         self.payload.clear();
         self.dock.clear();
         self.cwd.clear();
+        self.status.clear();
+        self.progress.clear();
         self.state = if terminator == 0x1b {
             ScanState::Escape
         } else {
@@ -4760,7 +4865,7 @@ const B64_DECODE: [u8; 256] = {
 /// channel to an implementation detail of the encoder. After padding the body
 /// length must be divisible by 4 or leave a remainder of 2/3 — a remainder of 1 is
 /// not base64.
-fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
+pub(crate) fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
     let body = match input {
         [rest @ .., b'=', b'='] => rest,
         [rest @ .., b'='] => rest,
@@ -7663,7 +7768,10 @@ mod tests {
             ScanEvent::PasteOn
             | ScanEvent::RemoteSetup(_)
             | ScanEvent::RemoteUp(_)
-            | ScanEvent::RemoteMark(_) => {}
+            | ScanEvent::RemoteMark(_)
+            | ScanEvent::StatusQuery
+            | ScanEvent::Status(_)
+            | ScanEvent::Progress(_) => {}
         });
 
         assert_eq!(marks, vec![Mark::PromptEnd]);
@@ -9242,8 +9350,111 @@ mod tests {
             outcome.up |= one.up;
             outcome.ended |= one.ended;
             outcome.remote_edge |= one.remote_edge;
+            outcome.status |= one.status;
         });
         outcome
+    }
+
+    #[test]
+    fn program_status_reports_are_read_in_stream_order_and_across_reads() {
+        let mut scanner = Scanner::new();
+        let mut seen = Vec::new();
+        let mut take = |event: ScanEvent<'_>| {
+            seen.push(match event {
+                ScanEvent::StatusQuery => "query".to_owned(),
+                ScanEvent::Status(report) => format!("{report:?}"),
+                ScanEvent::Mark(mark) => format!("{mark:?}"),
+                _ => "other".to_owned(),
+            });
+        };
+        // A report split over two reads, a query after it, a report that is not
+        // one (an unknown state) and a mark that must still be seen after it.
+        scanner.feed(b"\x1b]7501;state=wor", &mut take);
+        scanner.feed(
+            b"king:id=build\x1b\\\x1b]7501;?\x07\x1b]7501;state=sleeping\x07\x1b]133;B\x07",
+            &mut take,
+        );
+        assert_eq!(
+            seen,
+            [
+                "Set { id: \"build\", state: Working }",
+                "query",
+                "PromptEnd"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_oversized_program_status_report_is_dropped_and_the_next_sequence_is_seen() {
+        let mut scanner = Scanner::new();
+        let mut seen = 0;
+        let mut marks = 0;
+        let mut stream = b"\x1b]7501;state=idle:msg=".to_vec();
+        stream.extend(std::iter::repeat_n(b'A', STATUS_PAYLOAD_LIMIT));
+        stream.extend_from_slice(b"\x07\x1b]133;B\x07");
+        scanner.feed(&stream, |event| match event {
+            ScanEvent::Mark(_) => marks += 1,
+            _ => seen += 1,
+        });
+        assert_eq!((seen, marks), (0, 1));
+    }
+
+    #[test]
+    fn program_status_moves_the_ledger_and_a_prompt_ends_it() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let outcome = feed(&mut log, b"\x1b]7501;state=working\x07");
+        assert!(outcome.status);
+        assert!(log.program.activity(Instant::now()).is_some());
+        let outcome = feed(&mut log, b"\x1b]7501;state=working\x07");
+        assert!(
+            outcome.status,
+            "a repeat is still a report the tab may redraw for"
+        );
+        let outcome = feed(&mut log, b"\x1b]133;A;bt_block=1\x07");
+        assert!(outcome.status, "the prompt ended it");
+        assert!(log.program.activity(Instant::now()).is_none());
+        let outcome = feed(&mut log, b"\x1b]133;A;bt_block=2\x07");
+        assert!(!outcome.status, "nothing was left to end");
+    }
+
+    #[test]
+    fn a_progress_bar_turns_the_ring_and_a_program_report_takes_over() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let outcome = feed(&mut log, b"\x1b]9;4;1;40\x07");
+        assert!(outcome.status);
+        assert!(
+            log.program
+                .activity(Instant::now())
+                .is_some_and(|a| a.working.is_some())
+        );
+        let outcome = feed(&mut log, b"\x1b]9;4;0\x07");
+        assert!(outcome.status);
+        assert!(log.program.activity(Instant::now()).is_none());
+        // iTerm2's notification on the same number is not ours, long or short.
+        let long = format!("\x1b]9;{}\x07", "x".repeat(PROGRESS_PAYLOAD_LIMIT * 4));
+        assert!(!feed(&mut log, long.as_bytes()).status);
+        assert!(!feed(&mut log, b"\x1b]9;build done\x07").status);
+        feed(&mut log, b"\x1b]7501;state=idle\x07");
+        assert!(
+            !feed(&mut log, b"\x1b]9;4;1;5\x07").status,
+            "the program speaks for itself"
+        );
+    }
+
+    #[test]
+    fn program_status_is_not_gated_by_a_remote_session() {
+        let mut log = ssh_log();
+        let outcome = feed(&mut log, b"\x1b]7501;state=blocked:kind=question\x07");
+        assert!(outcome.status);
+        assert!(
+            log.program
+                .activity(Instant::now())
+                .is_some_and(|a| a.blocked)
+        );
+        // The remote shell's own prompt ends it too.
+        let outcome = feed(&mut log, b"\x1b]133;A;bt_remote=1.9.2\x07");
+        assert!(outcome.status);
+        assert!(log.program.activity(Instant::now()).is_none());
     }
 
     #[test]
@@ -9885,6 +10096,9 @@ mod tests {
                 ScanEvent::PasteOn => "paste".to_owned(),
                 ScanEvent::RemoteSetup(fault) => format!("setup {}", fault.code()),
                 ScanEvent::RemoteUp(nonce) => format!("up {nonce}"),
+                ScanEvent::StatusQuery => "status?".to_owned(),
+                ScanEvent::Status(report) => format!("status {report:?}"),
+                ScanEvent::Progress(report) => format!("progress {report:?}"),
             });
         });
         assert_eq!(

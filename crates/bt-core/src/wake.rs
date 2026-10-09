@@ -225,4 +225,17 @@ pub trait Wake: Send + Sync + 'static {
     /// prohibitions above apply. The implementor posts **at most one** job
     /// to its queue.
     fn unseen_changed(&self);
+
+    /// A program's status record changed or went (`OSC 7501`, or the prompt
+    /// that ended what it reported): the receiver reads
+    /// [`crate::Session::activity`] again — the tab's ring, its "waiting" mark
+    /// and its "finished" tick.
+    ///
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::remote_command_edge`]): once per report that changed something,
+    /// which a program makes when its state moves, not per frame. It arrives on
+    /// the reader thread after the ledger's leaf lock has been released; the
+    /// contract assumes the `Term` lock may be held and the three prohibitions
+    /// above apply. The implementor posts **at most one** job to its queue.
+    fn program_status_changed(&self);
 }

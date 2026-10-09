@@ -691,19 +691,40 @@ impl TerminalTab {
 
     /// What the tab's chip shows left of its title — the most urgent of its
     /// signals (`tabs::indicator`): a question of the tab that waits for an
-    /// answer the user cannot see ([`sheets::question_waiting`]), a command
+    /// answer the user cannot see ([`sheets::question_waiting`], or a program
+    /// that reported itself blocked, [`Self::program_blocked`]), a command
     /// running in any pane ([`Self::running_for`]), a command that ended
     /// while the tab was away ([`TabIvars::unseen`]) and a transfer flowing
     /// ([`Self::upload`]).
     pub(crate) fn indicator(&self) -> Option<Indicator> {
         let Unseen { finished, failed } = self.ivars().unseen.get();
         tabs::indicator(Signals {
-            question: sheets::question_waiting(self.container()),
+            question: sheets::question_waiting(self.container()) || self.program_blocked(),
             running: self.running_for().is_some(),
             failed,
             finished,
             uploading: self.upload().is_some(),
         })
+    }
+
+    /// A program in one of the tab's panes reported itself blocked on the user
+    /// (`OSC 7501`) while the tab is **not** the one on screen: the question
+    /// the user cannot see. On screen the program's own prompt is in front of
+    /// them and the chip stays quiet. A leaf lock per pane
+    /// (`Session::activity`).
+    fn program_blocked(&self) -> bool {
+        let Some(window) = self.window() else {
+            return false;
+        };
+        !window.is_selected(self.id())
+            && self.panes().iter().any(|pane| {
+                pane.session().is_some_and(|session| {
+                    session
+                        .activity()
+                        .program
+                        .is_some_and(|program| program.blocked)
+                })
+            })
     }
 
     /// How long the tab's running command has run — the focused pane's if
@@ -717,7 +738,8 @@ impl TerminalTab {
     pub(crate) fn running_for(&self) -> Option<Duration> {
         let running = |pane: &TerminalPane| {
             let session = pane.session()?;
-            tabs::ring_running(session.activity().running, session.alt_screen())
+            let activity = session.activity();
+            tabs::ring_running(activity.running, activity.program, session.alt_screen())
         };
         running(&self.focused_pane()).or_else(|| self.panes().iter().find_map(|pane| running(pane)))
     }

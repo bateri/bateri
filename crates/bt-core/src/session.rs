@@ -92,6 +92,7 @@ use crate::input::{
 };
 use crate::journal::{Base, Journal, Side as JournalSide};
 use crate::link;
+use crate::program_status::{self, ProgramActivity};
 use crate::reader::{
     EventLoop, EventLoopSender, Msg, PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN, State,
 };
@@ -103,7 +104,7 @@ use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule, MarkSubject};
 use crate::shell::{
     BlockKey, COUNTER_FLOOR, CaretHome, Carried, Counter, DockContext, DockPrediction,
     DockSelection, DockState, DockStatus, HistoryCut, Outcome, Precision, RemoteStats,
-    RemoteTarget, Scanner, ShellLog, ShellState, Stripe, Transfer, TtyModes,
+    RemoteTarget, ScanEvent, Scanner, ShellLog, ShellState, Stripe, Transfer, TtyModes,
 };
 use crate::snapshot;
 use crate::wake::Wake;
@@ -846,6 +847,13 @@ pub struct Activity {
     /// How many ended with another code. A `D` whose code could not be read
     /// counts in neither — unknown is not drawn.
     pub failed: u64,
+    /// What a program that reports its status (`OSC 7501`) says it is doing;
+    /// `None` while none does. A reporting program **owns** the tab's ring —
+    /// the shell's `running` only says the command is still open, which a
+    /// program waiting for its user is too — and a record entering `done` or
+    /// `error` is counted in [`Self::finished`] / [`Self::failed`] like a
+    /// command's end.
+    pub program: Option<ProgramActivity>,
 }
 
 /// The inputs [`TrackMarks::blocks`] was last built from.
@@ -2386,6 +2394,13 @@ impl io::Read for TappedPty {
         let held_input = &self.held_input;
         let adapter = &self.adapter;
         self.scanner.feed(&buf[..read], |event| {
+            // The support question is answered here, lock-free: fixed bytes
+            // through the same channel the parser's replies take (muted for an
+            // adopted prefix, like them).
+            if matches!(event, ScanEvent::StatusQuery) {
+                adapter.reply(program_status::SUPPORT_REPLY.to_owned());
+                return;
+            }
             let answers = key_gen.load(Ordering::Acquire);
             let outcome = lock(&self.shell).apply_scan_answering(event, answers);
             if outcome.title {
@@ -2409,6 +2424,9 @@ impl io::Read for TappedPty {
             }
             if outcome.mirrored {
                 wake.mirror_changed();
+            }
+            if outcome.status {
+                wake.program_status_changed();
             }
             if outcome.prompt
                 && let Some(line) = initial_input.take()
@@ -8932,8 +8950,9 @@ impl Session {
         let log = lock(&self.shell);
         Activity {
             running: log.running_for(),
-            finished: log.ends.ok,
-            failed: log.ends.failed,
+            finished: log.ends.ok.wrapping_add(log.program.done),
+            failed: log.ends.failed.wrapping_add(log.program.failed),
+            program: log.program.activity(Instant::now()),
         }
     }
 
@@ -12073,6 +12092,8 @@ mod tests {
         unseen: u32,
         /// How many times [`Wake::remote_command_edge`] came.
         remote_edges: u32,
+        /// How many times [`Wake::program_status_changed`] came.
+        statuses: u32,
     }
 
     impl TestWake {
@@ -12188,6 +12209,11 @@ mod tests {
 
         fn mirror_changed(&self) {
             self.state.lock().unwrap().mirrors += 1;
+            self.cond.notify_all();
+        }
+
+        fn program_status_changed(&self) {
+            self.state.lock().unwrap().statuses += 1;
             self.cond.notify_all();
         }
 
@@ -22815,6 +22841,66 @@ e\\314\\201.'; sleep 5";
         assert_eq!(state.remote_edges, 2, "the second `C` was no edge");
         assert_eq!(state.commands, 1, "the local news is the ssh's alone");
         drop(state);
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_support_question_is_answered_and_a_report_reaches_the_activity() {
+        // The program asks `OSC 7501 ; ?`, reads the terminal's answer byte for
+        // byte, and only then reports `done`: the report arriving is the proof
+        // that the answer was exactly the question's body in a string
+        // terminator. A `done` is counted like a command's end.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty raw -echo; printf '\\033]7501;?\\033\\\\'; \
+             r=$(dd bs=1 count=10 2>/dev/null); \
+             [ \"$r\" = \"$(printf '\\033]7501;?\\033\\\\')\" ] && \
+             printf '\\033]7501;state=done\\033\\\\'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until("the report did not arrive", Duration::from_secs(5), || {
+            wake.state.lock().unwrap().statuses >= 1
+        });
+        let activity = session.activity();
+        assert_eq!(activity.finished, 1, "a `done` ends like a command");
+        assert_eq!(
+            activity.program, None,
+            "a result is not a program that is there"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_working_program_owns_the_ring_until_the_next_prompt() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf '\\033]133;A;bt_block=1\\007\\033]133;C\\007'; \
+             printf '\\033]7501;state=working\\033\\\\'; read _; \
+             printf '\\033]7501;state=blocked:kind=permission\\033\\\\'; read _; \
+             printf '\\033]133;D;0;bt_block=1\\007\\033]133;A;bt_block=2\\007'; sleep 5",
+            Arc::clone(&wake),
+        );
+        let statuses = |target: u32| {
+            wake.cond
+                .wait_timeout_while(
+                    wake.state.lock().unwrap(),
+                    Duration::from_secs(5),
+                    |state| state.statuses < target,
+                )
+                .unwrap()
+                .0
+                .statuses
+        };
+        assert_eq!(statuses(1), 1);
+        let working = session.activity().program.expect("the program reports");
+        assert!(working.working.is_some() && !working.blocked);
+        session.write(b"\n");
+        assert_eq!(statuses(2), 2);
+        let blocked = session.activity().program.expect("still reporting");
+        assert!(blocked.working.is_none() && blocked.blocked);
+        session.write(b"\n");
+        assert_eq!(statuses(3), 3, "the prompt ends what it reported");
+        assert_eq!(session.activity().program, None);
         session.shutdown();
     }
 

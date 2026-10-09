@@ -2265,6 +2265,7 @@ pub(crate) mod tests {
         fn mirror_changed(&self) {}
         fn blocks_changed(&self) {}
         fn unseen_changed(&self) {}
+        fn program_status_changed(&self) {}
     }
 
     impl ExitWake {

@@ -12,6 +12,18 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **A tab says what the program in it is doing.** Programs that report their
+  status (the `OSC 7501` protocol, which Claude Code speaks) now drive the tab's
+  chip: the ring turns only while the program works and stands still while it
+  waits for you, a question mark shows on a tab you are not looking at when the
+  program is blocked on you — a permission, a question — and a green tick or
+  red dot waits for you when it finishes or fails. Before, the ring turned for
+  as long as the program was open. Progress bars printed with `OSC 9;4` (cargo,
+  zig) turn the ring the same way, until a program starts reporting its own
+  status. Works over ssh too.
+
 ## [0.10.0] - 2026-10-09
 
 ### Added

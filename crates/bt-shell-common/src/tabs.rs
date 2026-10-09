@@ -25,7 +25,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bt_core::HostMark;
+use bt_core::{HostMark, ProgramActivity};
 
 /// A window's tabs in strip order, and the selected one.
 ///
@@ -723,8 +723,9 @@ pub fn landing(over: Option<Over>) -> Landing {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Indicator {
     /// A question of the tab waits for an answer the user cannot see — asked while the tab was in
-    /// the background, or left up when the user switched away. First: nothing goes on in that tab
-    /// until it is answered.
+    /// the background, or left up when the user switched away — or a program in it reported itself
+    /// blocked on the user (`OSC 7501`: a permission, a question, a login). First: nothing goes on
+    /// in that tab until it is answered.
     Question,
     /// A command runs.
     Running,
@@ -959,14 +960,25 @@ impl Unseen {
     }
 }
 
-/// How long a pane's command has run **as the tab's ring counts it**: `running` (the pane's
+/// How long a pane has worked **as the tab's ring counts it**. A program that reports its status
+/// (`program`, `bt_core::Activity::program`) **owns** the ring: it turns while the program says it
+/// works and stands still while it waits for its user — the shell's command stays open for as long
+/// as the program does, and a ring turning beside an agent that has asked a question reads as a tab
+/// that is still working. Without a report it is the command: `running` (the pane's
 /// `bt_core::Activity::running`), `None` while the pane is on the alternate screen. A full-screen
 /// program — an editor, a pager, `htop`, an agent's full-screen interface — runs for as long as it
 /// is open, and a ring turning beside it for hours reads as a tab that is still loading. Only the
 /// ring forgets it: the summary card reads the pane itself and still says how long it has been
 /// open, and its end marks the tab like any command's.
-pub fn ring_running(running: Option<Duration>, full_screen: bool) -> Option<Duration> {
-    running.filter(|_| !full_screen)
+pub fn ring_running(
+    running: Option<Duration>,
+    program: Option<ProgramActivity>,
+    full_screen: bool,
+) -> Option<Duration> {
+    match program {
+        Some(program) => program.working,
+        None => running.filter(|_| !full_screen),
+    }
 }
 
 /// The step the running ring shows for a command that has run `elapsed`: one step per tick of the
@@ -2174,18 +2186,22 @@ mod tests {
     fn a_full_screen_program_turns_no_ring() {
         let ten = Some(Duration::from_secs(10));
         assert_eq!(
-            ring_running(ten, false),
+            ring_running(ten, None, false),
             ten,
             "a command on the main screen"
         );
         assert_eq!(
-            ring_running(ten, true),
+            ring_running(ten, None, true),
             None,
             "vim, htop, an agent's interface"
         );
-        assert_eq!(ring_running(None, true), None, "a shell at its prompt");
+        assert_eq!(
+            ring_running(None, None, true),
+            None,
+            "a shell at its prompt"
+        );
         let signals = |full_screen| Signals {
-            running: ring_running(ten, full_screen).is_some(),
+            running: ring_running(ten, None, full_screen).is_some(),
             failed: true,
             ..Signals::default()
         };
@@ -2194,6 +2210,35 @@ mod tests {
             indicator(signals(true)),
             Some(Indicator::Failed),
             "an earlier failure shows through"
+        );
+    }
+
+    /// A program that reports its status owns the ring: it turns while the program works, stands
+    /// still while it waits, and the full-screen rule does not apply to what the program says.
+    #[test]
+    fn a_reporting_program_owns_the_ring() {
+        let ten = Some(Duration::from_secs(10));
+        let five = Some(Duration::from_secs(5));
+        let program = |working, blocked| Some(ProgramActivity { working, blocked });
+        assert_eq!(
+            ring_running(ten, program(five, false), false),
+            five,
+            "the program's clock, not the command's"
+        );
+        assert_eq!(
+            ring_running(ten, program(None, false), false),
+            None,
+            "an agent waiting for its user: the command is open, nothing turns"
+        );
+        assert_eq!(
+            ring_running(ten, program(None, true), true),
+            None,
+            "blocked is a question, not work"
+        );
+        assert_eq!(
+            ring_running(None, program(five, false), true),
+            five,
+            "a full-screen program that says it works turns the ring"
         );
     }
 

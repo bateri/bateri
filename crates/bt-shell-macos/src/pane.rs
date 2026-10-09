@@ -1352,6 +1352,12 @@ impl Wake for ShellWake {
         self.push_state_later();
     }
 
+    fn program_status_changed(&self) {
+        // Reader thread, lock-free: a program said what it is doing — the
+        // tab's ring, its waiting mark and its finished tick alone hear it.
+        self.announce_activity();
+    }
+
     fn remote_up(&self) {
         // Reader thread, lock-free: `command_started`'s gate (a timed run
         // learns nothing) and `title_changed`'s at-most-one job.
