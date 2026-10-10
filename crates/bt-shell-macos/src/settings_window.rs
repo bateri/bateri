@@ -31,7 +31,7 @@ use bt_core::{
     ContentEdge, CursorBlink, CursorMotion, DockArrival, DownloadConflict, Erase, KeepRunning,
     Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep, ReduceMotion,
     RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE, SYSTEM_THEME, Scrollbar,
-    Settings, SettingsEdit, ShellIntegration, SmoothScroll, UnfocusedCaret,
+    Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle, UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::Retained;
@@ -204,11 +204,12 @@ enum Key {
     Ports,
     MinimumContrast,
     DimSplits,
+    SplitStyle,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 41] = [
+    const ALL: [Key; 42] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -250,6 +251,7 @@ impl Key {
         Key::Ports,
         Key::MinimumContrast,
         Key::DimSplits,
+        Key::SplitStyle,
     ];
 
     fn tag(self) -> NSInteger {
@@ -278,6 +280,7 @@ impl Key {
             Key::ContentEdge => "appearance.content_edge",
             Key::MinimumContrast => "appearance.minimum_contrast",
             Key::DimSplits => "appearance.dim_unfocused_splits",
+            Key::SplitStyle => "appearance.split_style",
             Key::Font => "font.family",
             Key::Size => "font.size",
             Key::LineHeight => "font.line_height",
@@ -446,6 +449,18 @@ impl Choice for Scrollbar {
             Scrollbar::Auto => "When scrolling",
             Scrollbar::Always => "Always",
             Scrollbar::Never => "Never",
+        }
+    }
+}
+
+impl Choice for SplitStyle {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            SplitStyle::Cards => "Cards",
+            SplitStyle::Lines => "Lines",
         }
     }
 }
@@ -1079,6 +1094,7 @@ struct Controls {
     letter_spacing: Number,
     scrollbar: Retained<NSPopUpButton>,
     content_edge: Retained<NSPopUpButton>,
+    split_style: Retained<NSPopUpButton>,
     minimum_contrast: Retained<NSPopUpButton>,
     shape: Retained<NSPopUpButton>,
     blink: Retained<NSPopUpButton>,
@@ -1265,6 +1281,7 @@ define_class!(
                 Key::KeepRunning => choice_at(index).map(SettingsEdit::KeepRunning),
                 Key::Scrollbar => choice_at(index).map(SettingsEdit::Scrollbar),
                 Key::ContentEdge => choice_at(index).map(SettingsEdit::ContentEdge),
+                Key::SplitStyle => choice_at(index).map(SettingsEdit::SplitStyle),
                 Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
                 Key::Shape => choice_at(index).map(SettingsEdit::Cursor),
                 Key::Blink => choice_at(index).map(SettingsEdit::CursorBlink),
@@ -1653,6 +1670,7 @@ impl SettingsWindow {
         );
         select_choice(&c.scrollbar, settings.scrollbar);
         select_choice(&c.content_edge, settings.content_edge);
+        select_choice(&c.split_style, settings.split_style);
 
         select_choice(&c.shape, settings.cursor);
         select_choice(&c.blink, settings.cursor_blink);
@@ -2318,6 +2336,7 @@ impl SettingsWindow {
         let scrollbar = self.popup::<Scrollbar>(Key::Scrollbar);
         let content_edge = self.popup::<ContentEdge>(Key::ContentEdge);
         let dim_splits = self.switch(Key::DimSplits);
+        let split_style = self.popup::<SplitStyle>(Key::SplitStyle);
         let mut appearance = Form::new(mtm);
         appearance.row(Key::Theme, "Theme:", &theme, &[&theme], None);
         appearance.row(
@@ -2384,7 +2403,14 @@ impl SettingsWindow {
             "Dim unfocused splits:",
             &dim_splits,
             &[&dim_splits],
-            Some("Veil the panes of a split tab that don't have the focus. Off: the focused pane is told by its frame."),
+            Some("Veil the panes of a split tab that don't have the focus. Off: the focused pane is told by the card standing nearer."),
+        );
+        appearance.row(
+            Key::SplitStyle,
+            "Split style:",
+            &split_style,
+            &[&split_style],
+            Some("Cards stand on a ground with a gap round them; lines let the panes touch with one line between them."),
         );
 
         // Cursor
@@ -2653,6 +2679,7 @@ impl SettingsWindow {
             letter_spacing,
             scrollbar,
             content_edge,
+            split_style,
             minimum_contrast,
             shape,
             blink,
@@ -3138,6 +3165,7 @@ mod tests {
                     restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     content_edge = []\nminimum_contrast = []\ndim_unfocused_splits = []\n\
+                    split_style = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
@@ -3198,6 +3226,7 @@ mod tests {
                 Key::RemoteIntegration => SettingsEdit::RemoteIntegration(false),
                 Key::Ports => SettingsEdit::ShellPorts(false),
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
+                Key::SplitStyle => SettingsEdit::SplitStyle(SplitStyle::Lines),
             };
             assert_eq!(edit.path(), key.path(), "{key:?}");
         }
@@ -3261,6 +3290,7 @@ mod tests {
         check::<KeepRunning>();
         check::<Scrollbar>();
         check::<ContentEdge>();
+        check::<SplitStyle>();
         check::<ShellIntegration>();
         check::<CaretShape>();
         check::<CursorBlink>();

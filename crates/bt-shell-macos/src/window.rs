@@ -3246,6 +3246,16 @@ impl TerminalWindow {
         }
     }
 
+    /// `[appearance] split_style` changed: every tab's container is laid out
+    /// again, as cards or divided by a line, and the ground follows the one
+    /// on screen.
+    pub(crate) fn apply_split_style(&self) {
+        for tab in self.tabs() {
+            tab.container().layout_panes();
+            tab.refresh_look();
+        }
+    }
+
     /// Paints the window chrome with the theme: the
     /// title row transparent and separatorless, the window's background the
     /// theme's `background`, its appearance (traffic lights) from the

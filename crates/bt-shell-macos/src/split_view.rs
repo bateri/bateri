@@ -67,7 +67,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use bt_core::{ContentEdge, Theme};
+use bt_core::{ContentEdge, SplitStyle, Theme};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
@@ -93,12 +93,14 @@ const HANDLE_PT: f64 = 3.0;
 /// the arithmetic of the split limit sees it ([`SplitView::halves`]).
 const HYPOTHETICAL: u64 = u64::MAX;
 
-/// The space the tree is laid out with when it has `leaves` panes: none of
-/// the card gap for one pane (the pane fills the area, with the one-pixel
-/// divider the tree never draws), the card gap between and around otherwise
-/// — except at the top, where the cards start right under the title row.
-fn spacing(leaves: usize, scale: f64) -> Spacing {
-    if leaves > 1 {
+/// The space the tree is laid out with when it has `leaves` panes in
+/// `style`: none of the card gap for one pane (the pane fills the area, with
+/// the one-pixel divider the tree never draws), the card gap between and
+/// around otherwise — except at the top, where the cards start right under
+/// the title row. Under [`SplitStyle::Lines`] the panes always touch, one
+/// pixel apart.
+fn spacing(leaves: usize, scale: f64, style: SplitStyle) -> Spacing {
+    if leaves > 1 && style == SplitStyle::Cards {
         Spacing::gapped(GAP_PT, GAP_PT, scale).with_top(0.0, scale)
     } else {
         Spacing::DIVIDED
@@ -278,6 +280,13 @@ pub(crate) struct SplitIvars {
     /// is for typed access. **Never becomes empty**: removing the last pane
     /// means closing the window ([`Removal::Last`]).
     panes: RefCell<Vec<Retained<TerminalPane>>>,
+    /// The divider's fill under [`SplitStyle::Lines`]: a box in the theme's
+    /// `separator` tone behind the panes, filling the container, which shows
+    /// through the one pixel left open between two panes.
+    backdrop: Retained<NSBox>,
+    /// The tab is lifted for arranging: the backdrop would show round the
+    /// shrunk panes.
+    lifted: Cell<bool>,
     /// `line`'s hairline: the fill above the panes along the top edge, shown
     /// only while the mode is `line` and the panes touch that edge (the
     /// module header).
@@ -334,9 +343,16 @@ impl SplitView {
         first: &TerminalPane,
     ) -> Retained<Self> {
         let hairline = Hairline::new(mtm);
+        let backdrop = NSBox::new(mtm);
+        backdrop.setBoxType(NSBoxType::Custom);
+        backdrop.setTitlePosition(NSTitlePosition::NoTitle);
+        backdrop.setBorderWidth(0.0);
+        backdrop.setHidden(true);
         let this = Self::alloc(mtm).set_ivars(SplitIvars {
             tree: RefCell::new(Tree::Leaf(first.id())),
             panes: RefCell::new(vec![first.retain()]),
+            backdrop: backdrop.clone(),
+            lifted: Cell::new(false),
             hairline: hairline.clone(),
             edge: Cell::new(ContentEdge::default()),
             zoomed: Cell::new(None),
@@ -349,6 +365,7 @@ impl SplitView {
         // The previous `contentView` (the pane) was layer-backed; the Metal
         // layer's compositing mode must not change.
         this.setWantsLayer(true);
+        this.addSubview(&backdrop);
         this.addSubview(first);
         this.addSubview(&hairline);
         this.layout_panes();
@@ -416,7 +433,7 @@ impl SplitView {
         if !tree.split(id, axis, HYPOTHETICAL) {
             return None;
         }
-        let spacing = spacing(tree.leaves().len(), scale);
+        let spacing = spacing(tree.leaves().len(), scale, self.style());
         let layout = tree.layout_spaced(self.bounds_rect(), scale, spacing);
         let frame_of = |wanted: u64| {
             let (_, rect) = layout.panes.iter().find(|(pane, _)| *pane == wanted)?;
@@ -515,7 +532,11 @@ impl SplitView {
         let room = Room {
             bounds: self.bounds_rect(),
             scale,
-            spacing: spacing(tree.leaves().len() + incoming.leaves().len(), scale),
+            spacing: spacing(
+                tree.leaves().len() + incoming.leaves().len(),
+                scale,
+                self.style(),
+            ),
             min: &min,
         };
         tree.plan_beside(leaf, side, incoming, &room)
@@ -609,7 +630,7 @@ impl SplitView {
         let room = Room {
             bounds: self.bounds_rect(),
             scale,
-            spacing: spacing(here.len() + foreign, scale),
+            spacing: spacing(here.len() + foreign, scale, self.style()),
             min: &min,
         };
         tree.verdict(carried, &room, (at.x, at.y))
@@ -623,7 +644,7 @@ impl SplitView {
         tree.layout_spaced(
             self.bounds_rect(),
             scale,
-            spacing(tree.leaves().len(), scale),
+            spacing(tree.leaves().len(), scale, self.style()),
         )
         .panes
         .into_iter()
@@ -733,7 +754,7 @@ impl SplitView {
         tree.layout_spaced(
             self.bounds_rect(),
             scale,
-            spacing(tree.leaves().len(), scale),
+            spacing(tree.leaves().len(), scale, self.style()),
         )
     }
 
@@ -768,7 +789,11 @@ impl SplitView {
         Room {
             bounds: self.bounds_rect(),
             scale,
-            spacing: spacing(self.ivars().tree.borrow().leaves().len(), scale),
+            spacing: spacing(
+                self.ivars().tree.borrow().leaves().len(),
+                scale,
+                self.style(),
+            ),
             min,
         }
     }
@@ -838,6 +863,7 @@ impl SplitView {
         let [r, g, b] = theme.separator_srgb().map(|byte| f64::from(byte) / 255.0);
         let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0);
         self.ivars().hairline.setFillColor(&color);
+        self.ivars().backdrop.setFillColor(&color);
     }
 
     /// What the content does at the panes' top edge: the hairline shows only
@@ -859,10 +885,31 @@ impl SplitView {
 
     /// Whether the panes are cards now: two or more and none zoomed.
     pub(crate) fn carded(&self) -> bool {
+        self.split() && self.style() == SplitStyle::Cards
+    }
+
+    /// Two or more panes in view: not one pane, not a zoomed one.
+    fn split(&self) -> bool {
         let zoomed = self.ivars().zoomed.get();
         let tree = self.ivars().tree.borrow();
         let leaves = tree.leaves();
         leaves.len() > 1 && !zoomed.is_some_and(|id| leaves.contains(&id))
+    }
+
+    /// `[appearance] split_style`: cards on a ground or panes divided by a
+    /// line. Read at every layout; a change lays every container out again.
+    fn style(&self) -> SplitStyle {
+        crate::app::delegate(self.mtm())
+            .map_or(SplitStyle::default(), |app| app.settings().split_style)
+    }
+
+    /// The divider's fill shows under [`SplitStyle::Lines`] while two panes
+    /// or more are in view and the tab is not lifted.
+    fn sync_backdrop(&self) {
+        let backdrop = &self.ivars().backdrop;
+        backdrop.setFrame(self.bounds());
+        let shown = self.split() && self.style() == SplitStyle::Lines && !self.ivars().lifted.get();
+        backdrop.setHidden(!shown);
     }
 
     /// Where every pane stands and whether it is a card, **after** settling
@@ -954,7 +1001,8 @@ impl SplitView {
             let zoomed = self.ivars().zoomed.get().filter(|id| leaves.contains(id));
             (leaves.len(), zoomed)
         };
-        let carded = leaves > 1 && zoomed.is_none();
+        let carded = leaves > 1 && zoomed.is_none() && self.style() == SplitStyle::Cards;
+        self.sync_backdrop();
         // The hairline's frame is the container's top edge, whatever the
         // tree: set **before** the single-pane branch, so one pane, splits
         // and zoom all get it. One device pixel, from the same scale the
@@ -977,7 +1025,7 @@ impl SplitView {
             self.bounds_rect(),
             scale,
             zoomed,
-            spacing(leaves, scale),
+            spacing(leaves, scale, self.style()),
         );
         for pane in &panes {
             match layout.panes.iter().find(|(id, _)| *id == pane.id()) {
@@ -1015,6 +1063,8 @@ impl SplitView {
     /// The tab is lifted for arranging, or set down: the lift's own plates
     /// stand under the shrunk cards, the window's shade steps aside.
     pub(crate) fn lifted(&self, lifted: bool) {
+        self.ivars().lifted.set(lifted);
+        self.sync_backdrop();
         if let Some(root) = self.root() {
             root.shade_lifted(lifted);
         }
@@ -1037,14 +1087,23 @@ mod tests {
         // The one-pane layout is the tree's own, bit for bit: the pane is the
         // area. From two panes on, the gap is the card gap at the scale, and
         // none at the top: the cards start right under the title row.
-        assert_eq!(spacing(1, 2.0), Spacing::DIVIDED);
-        let cards = spacing(2, 2.0);
+        assert_eq!(spacing(1, 2.0, SplitStyle::Cards), Spacing::DIVIDED);
+        let cards = spacing(2, 2.0, SplitStyle::Cards);
         assert_eq!(cards.between_px(), GAP_PT * 2.0);
         assert_eq!(cards.around_px(), GAP_PT * 2.0);
         assert_eq!(cards.top_px(), 0.0);
         assert_eq!(
-            spacing(5, 1.0),
+            spacing(5, 1.0, SplitStyle::Cards),
             Spacing::gapped(GAP_PT, GAP_PT, 1.0).with_top(0.0, 1.0)
         );
+    }
+
+    #[test]
+    fn lines_let_the_panes_touch_however_many() {
+        // Under `lines` there are no cards: every pane count is laid out with
+        // the one-pixel divider, the layout from before the cards.
+        for leaves in [1, 2, 5] {
+            assert_eq!(spacing(leaves, 2.0, SplitStyle::Lines), Spacing::DIVIDED);
+        }
     }
 }

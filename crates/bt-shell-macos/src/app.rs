@@ -5372,6 +5372,12 @@ impl AppDelegate {
                     window.refresh_split_look();
                 }
             }
+            // Cards or lines: every split tab is laid out again.
+            if changes.split_style {
+                for window in &windows {
+                    window.apply_split_style();
+                }
+            }
             self.post_notices(Source::Write, Vec::new());
         }
         // The borrow is dropped before `set_theme`; the calls inside do not touch

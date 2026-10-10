@@ -549,6 +549,36 @@ impl ContentEdge {
     }
 }
 
+/// `[appearance] split_style`: how a split tab sets its panes apart.
+///
+/// Only the platform shell reads it (the container's layout and look); the
+/// session and the drawing never see it. Its own field in [`Changes`], for
+/// [`Scrollbar`]'s reason. An ordinary key: a value that isn't accepted is the
+/// default at launch and leaves the value in effect at save time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SplitStyle {
+    /// Every pane a card on the window's ground: a gap round and between
+    /// them, rounded corners, no line — a card stands off the ground by its
+    /// light and its shadow, the focused one nearer.
+    #[default]
+    Cards,
+    /// The panes touch, one line in the divider's colour between them,
+    /// square corners and the plain background: the most room for text.
+    Lines,
+}
+
+impl SplitStyle {
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
+    pub const NAMES: &'static [(&'static str, Self)] =
+        &[("cards", Self::Cards), ("lines", Self::Lines)];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[terminal] cursor_radius` and `cursor_glow`: the cursor's **drawing**
 /// numbers.
 ///
@@ -1360,9 +1390,12 @@ pub struct Settings {
     pub minimum_contrast: f64,
     /// `[appearance] dim_unfocused_splits`: whether the panes of a split tab
     /// that don't hold the focus sit under a veil of the theme's background.
-    /// Off by default: a split tab tells its focused pane by the pane's frame
-    /// alone. Doesn't enter `TerminalOptions`.
+    /// Off by default: a split tab tells its focused pane by the pane itself
+    /// (a card standing nearer, the cursor). Doesn't enter `TerminalOptions`.
     pub dim_unfocused_splits: bool,
+    /// `[appearance] split_style`: cards on a ground or panes divided by a
+    /// line ([`SplitStyle`]). Doesn't enter `TerminalOptions`.
+    pub split_style: SplitStyle,
     /// `[font] family` and `size`.
     pub font: FontOptions,
     /// `[clipboard] osc52`: `"copy"` or `"off"`.
@@ -1440,6 +1473,7 @@ impl Default for Settings {
             content_edge: ContentEdge::default(),
             minimum_contrast: MINIMUM_CONTRAST,
             dim_unfocused_splits: false,
+            split_style: SplitStyle::default(),
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::default(),
@@ -1542,6 +1576,8 @@ pub enum SettingsEdit {
     /// The settings window's "Dim unfocused splits": `[appearance]
     /// dim_unfocused_splits`.
     DimUnfocusedSplits(bool),
+    /// The settings window's "Split style": `[appearance] split_style`.
+    SplitStyle(SplitStyle),
     /// Shell ▸ Mark … as ▸: the `[remote] hosts` edit that makes
     /// `host`'s mark `mark`. Not a single key's value but the array's entries —
     /// the rule is in this arm of [`Settings::with_edit`]. `host` is the form the
@@ -1627,6 +1663,7 @@ impl SettingsEdit {
                 "dim_unfocused_splits",
                 "appearance.dim_unfocused_splits",
             ),
+            Self::SplitStyle(_) => ("appearance", "split_style", "appearance.split_style"),
             Self::FontFamily(_) => ("font", "family", "font.family"),
             Self::FontSize(_) => ("font", "size", "font.size"),
             Self::LineHeight(_) => ("font", "line_height", "font.line_height"),
@@ -1675,6 +1712,7 @@ impl SettingsEdit {
             Self::KeepRunning(keep) => keep.name().into(),
             Self::Scrollbar(scrollbar) => scrollbar.name().into(),
             Self::ContentEdge(edge) => edge.name().into(),
+            Self::SplitStyle(style) => style.name().into(),
             Self::Osc52(mode) => mode.name().into(),
             Self::CursorMotion(motion) => motion.name().into(),
             Self::ReduceMotion(reduce) => reduce.name().into(),
@@ -1819,8 +1857,13 @@ content_edge = "fade"
 minimum_contrast = 3.0
 # true | false. Dims the panes of a split tab that don't have the focus under
 # a veil of the theme's background. Off: every pane reads at full strength and
-# the focused one is told by its brighter frame.
+# the focused one is told by the card standing nearer and by the cursor.
 dim_unfocused_splits = false
+# "cards" | "lines". How a split tab sets its panes apart: cards stand on a
+# ground of their own with a gap round them, rounded and lit from above;
+# lines lets the panes touch with one thin line between them, for the most
+# room.
+split_style = "cards"
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -2221,6 +2264,16 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = appearance.get("split_style") {
+                    parsed.settings.split_style = named_enum(
+                        text,
+                        item,
+                        "appearance.split_style",
+                        SplitStyle::NAMES,
+                        fallback.split_style,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("appearance") => {
                 for (_, _, slot, kept) in names {
@@ -2229,6 +2282,7 @@ stats_interval = 3
                 parsed.settings.content_edge = fallback.content_edge;
                 parsed.settings.minimum_contrast = fallback.minimum_contrast;
                 parsed.settings.dim_unfocused_splits = fallback.dim_unfocused_splits;
+                parsed.settings.split_style = fallback.split_style;
             }
             None => {}
         }
@@ -2509,6 +2563,7 @@ stats_interval = 3
             content_edge: self.content_edge != new.content_edge,
             contrast: self.minimum_contrast != new.minimum_contrast,
             dim_splits: self.dim_unfocused_splits != new.dim_unfocused_splits,
+            split_style: self.split_style != new.split_style,
             ports: self.shell_ports != new.shell_ports,
         }
     }
@@ -3209,6 +3264,10 @@ pub struct Changes {
     /// the choice to every tab, which veils or unveils its unfocused panes.
     /// A field of its own, for [`Self::caret`]'s reason.
     pub dim_splits: bool,
+    /// [`Settings::split_style`] changed: the platform shell lays every
+    /// split tab out again, as cards or divided by a line. A field of its
+    /// own, for [`Self::caret`]'s reason.
+    pub split_style: bool,
     /// [`Settings::shell_ports`] changed: the platform shell starts or stops
     /// every pane's port probe. A field of its own, for [`Self::caret`]'s
     /// reason.
@@ -4029,6 +4088,7 @@ mod tests {
             ("appearance", "content_edge"),
             ("appearance", "minimum_contrast"),
             ("appearance", "dim_unfocused_splits"),
+            ("appearance", "split_style"),
             ("font", "size"),
             ("font", "line_height"),
             ("font", "letter_spacing"),
@@ -4206,6 +4266,7 @@ mod tests {
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                split_style: false,
                 ports: false,
             }
         );
@@ -4243,6 +4304,7 @@ mod tests {
             content_edge: ContentEdge::Line,
             minimum_contrast: 4.5,
             dim_unfocused_splits: true,
+            split_style: SplitStyle::Lines,
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::Spring,
@@ -4434,6 +4496,7 @@ mod tests {
             content_edge: false,
             contrast: false,
             dim_splits: false,
+            split_style: false,
             ports: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
@@ -4495,6 +4558,7 @@ mod tests {
             Settings::default().changes(&after),
             Changes {
                 dim_splits: true,
+                split_style: false,
                 ..Changes::default()
             }
         );
@@ -4595,6 +4659,7 @@ mod tests {
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                split_style: false,
                 ports: false,
             }
         );
@@ -4748,6 +4813,7 @@ found {found}; using \"spring\""
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                split_style: false,
                 ports: false,
             }
         );
@@ -4841,6 +4907,7 @@ found {found}; using \"system\""
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                split_style: false,
                 ports: false,
             }
         );
@@ -5455,6 +5522,20 @@ found 1.5; using 0.1"
     }
 
     #[test]
+    fn split_style_is_read_and_defaults_to_cards() {
+        assert_eq!(clean("").split_style, SplitStyle::Cards);
+        for (value, expected) in [("cards", SplitStyle::Cards), ("lines", SplitStyle::Lines)] {
+            let text = format!("[appearance]\nsplit_style = \"{value}\"\n");
+            assert_eq!(clean(&text).split_style, expected, "{value}");
+            assert_eq!(expected.name(), value);
+        }
+        // A change is its own: only the split tabs are laid out again.
+        let lines = clean("[appearance]\nsplit_style = \"lines\"\n");
+        assert!(clean("").changes(&lines).split_style);
+        assert!(!clean("").changes(&clean("")).split_style);
+    }
+
+    #[test]
     fn unrecognized_content_edge_keeps_its_own_key() {
         for (value, found) in [("\"Cut\"", "\"Cut\""), ("1", "an integer")] {
             let text = format!("[appearance]\ntheme = \"ink\"\ncontent_edge = {value}\n");
@@ -5907,6 +5988,7 @@ found 1.5; using 0.1"
                     content_edge: false,
                     contrast: false,
                     dim_splits: false,
+                    split_style: false,
                     ports: false,
                 },
                 "{text}"
@@ -6009,6 +6091,7 @@ found 1.5; using 0.1"
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                split_style: false,
                 ports: false,
             }
         );
@@ -6115,6 +6198,7 @@ found 1.5; using 0.1"
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                split_style: false,
                 ports: false,
             }
         );
@@ -6648,6 +6732,7 @@ cursor = \"spring\"
             SettingsEdit::ContentEdge(edge) => settings.content_edge = edge,
             SettingsEdit::MinimumContrast(ratio) => settings.minimum_contrast = two(ratio),
             SettingsEdit::DimUnfocusedSplits(on) => settings.dim_unfocused_splits = on,
+            SettingsEdit::SplitStyle(style) => settings.split_style = style,
             SettingsEdit::FontFamily(name) => {
                 settings.font.family = (!name.is_empty()).then_some(name);
             }
@@ -6726,6 +6811,7 @@ cursor = \"spring\"
             SettingsEdit::ContentEdge(ContentEdge::Cut),
             SettingsEdit::MinimumContrast(4.5),
             SettingsEdit::DimUnfocusedSplits(true),
+            SettingsEdit::SplitStyle(SplitStyle::Lines),
             SettingsEdit::FontFamily("Menlo".to_owned()),
             SettingsEdit::FontFamily(String::new()),
             SettingsEdit::FontSize(14.5),

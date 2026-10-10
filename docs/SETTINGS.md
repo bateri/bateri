@@ -82,7 +82,8 @@ of `[remote]` and the two keys of the load indicator (`stats`,
 `[terminal] scrollbar` ("Scroll bar"), because it changes how the window
 looks, `[appearance] content_edge` ("Content edge") and
 `[appearance] minimum_contrast` ("Minimum contrast", under the themes) and
-`[appearance] dim_unfocused_splits` ("Dim unfocused splits"); on
+`[appearance] dim_unfocused_splits` ("Dim unfocused splits") and
+`[appearance] split_style` ("Split style"); on
 folder rows
 Change… opens a folder
 picker (a folder under your home directory is written as `~/…`), on the
@@ -226,8 +227,13 @@ content_edge = "fade"
 minimum_contrast = 3.0
 # true | false. Dims the panes of a split tab that don't have the focus under
 # a veil of the theme's background. Off: every pane reads at full strength and
-# the focused one is told by its brighter frame.
+# the focused one is told by the card standing nearer and by the cursor.
 dim_unfocused_splits = false
+# "cards" | "lines". How a split tab sets its panes apart: cards stand on a
+# ground of their own with a gap round them, rounded and lit from above;
+# lines lets the panes touch with one thin line between them, for the most
+# room.
+split_style = "cards"
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -804,6 +810,7 @@ dark_theme = "bateri"
 content_edge = "fade"
 minimum_contrast = 3.0
 dim_unfocused_splits = false
+split_style = "cards"
 ```
 
 | key | type | default | meaning |
@@ -814,6 +821,7 @@ dim_unfocused_splits = false
 | `content_edge` | `"fade"` \| `"line"` \| `"cut"` | `"fade"` | what the text does where it meets the tab bar, or the frame of a split pane |
 | `minimum_contrast` | decimal, `1.0`–`21.0` | `3.0` | the least contrast ratio a program's text keeps against its background; `1` turns it off |
 | `dim_unfocused_splits` | `true` \| `false` | `false` | dim the panes of a split tab that don't have the focus |
+| `split_style` | `"cards"` \| `"lines"` | `"cards"` | how a split tab sets its panes apart: cards on a ground, or panes divided by a line |
 
 - `theme = "system"` leaves the theme to the macOS appearance: `light_theme`
   in light, `dark_theme` in dark. When the appearance changes, the theme
@@ -876,14 +884,21 @@ dim_unfocused_splits = false
 - A program with a light theme of its own still looks best in it; many pick
   it by themselves from the background bateri reports (OSC 11) when their
   theme is set to automatic.
-- A tab with one pane shows it edge to edge. With two or more, the panes are
-  cards: a 6 pt gap between them and around them, rounded corners and a
-  one-pixel frame in the color of the dividers; the focused pane's frame is
-  brighter. Nothing is dimmed, so every pane reads at once. Going from one
-  pane to two (and back) slides the panes into place in a fifth of a second —
-  at once with Reduce Motion — and the program in each pane is resized once,
-  not on every frame. A zoomed pane (Shift Cmd Return) fills the tab again,
-  without the frame.
+- A tab with one pane shows it edge to edge. With two or more, under
+  `split_style = "cards"`, the panes are cards on a ground of their own (the
+  theme's gradient, see [Themes](#themes)): an 8 pt gap round and between
+  them, none under the tab bar, corners rounded with the window's. No line
+  draws a card: its top edge catches a light, a dark theme's card has a faint
+  sheen under its top, and its shadow is tucked under its foot. The focused
+  card stands nearer — a deeper shadow, and on a dark theme a warm light.
+  Nothing is dimmed, so every pane reads at once. Going from one pane to two
+  (and back) slides the panes into place in a fifth of a second — at once
+  with Reduce Motion — and the program in each pane is resized once, not on
+  every frame. A zoomed pane (Shift Cmd Return) fills the tab again.
+- `split_style = "lines"` lets the panes touch instead, with a one-pixel line
+  in the divider's color between them, square corners and the plain
+  background — the most room for text. The focused pane is then told by its
+  cursor alone, or also by `dim_unfocused_splits`. It applies at once.
 - `dim_unfocused_splits = true` brings back the veil over the panes that
   don't have the focus: the theme's background at 30% over their text, as
   other terminals do. It applies at once.
