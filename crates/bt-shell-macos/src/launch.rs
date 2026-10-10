@@ -6,10 +6,181 @@
 //! The pane's own vocabulary, apart from the windows and tabs that hold panes: whoever opens a
 //! pane — bateri's tabs, or an application that embeds one — speaks it.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use bt_core::{InitialInput, PaneUuid, ShutdownHandle, Teardown};
+use bt_core::{InitialInput, PaneUuid, ShellIntegration, ShutdownHandle, Teardown};
+use bt_gpu::DOCK_ROWS;
+
+use crate::child;
+
+/// Who the application that opens a pane is, where bateri would say "bateri" —
+/// given by whoever opens the pane, never guessed from the running program
+/// (an application that embeds a pane is not bateri's executable, and a
+/// guess would fail quietly).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Identity {
+    /// The application's name where a pane names whose it is: a downloaded
+    /// file's quarantine record, which Gatekeeper shows.
+    pub(crate) app_name: String,
+    /// The program that answers the shell integration's helper calls
+    /// (`ssh-argv`, `ssh-fell-back`, which the wrapper's `ssh` function asks
+    /// through `BATERI_BIN`) — bateri's own executable. `None`: the wrapper's
+    /// `ssh` runs plain `ssh`.
+    pub(crate) helper: Option<PathBuf>,
+    /// The shell integration's zsh scripts (bateri's `Resources/shell/zsh`).
+    /// `None`: no integration — the pane is a plain terminal, without the
+    /// dock and the command blocks.
+    pub(crate) zsh_wrapper_dir: Option<PathBuf>,
+}
+
+/// The wrapper's environment `wrapper` ([`integration_env`]) completed: the
+/// helper beside it ([`with_helper`]) and the dock share it makes
+/// ([`dock_rows_at_birth`]).
+pub(crate) fn with_dock(
+    identity: &Identity,
+    setting: ShellIntegration,
+    wrapper: Vec<(String, String)>,
+    instance: Option<&str>,
+) -> (Vec<(String, String)>, u16) {
+    let integration = with_helper(wrapper, identity.helper.clone(), instance);
+    let birth = dock_rows_at_birth(&integration, setting);
+    (integration, birth)
+}
+
+/// The environment shell integration adds to the child — empty if not set up.
+///
+/// **The whole decision is here and pure**: which shell, which setting, where
+/// the script is. Whoever opens a pane asks it the same way; bateri's timed
+/// run never does (its gate is the application's).
+///
+/// `shell` and `script_dir` are **closures**: in the session of a user who
+/// says `"off"` neither is ever consulted.
+///
+/// `zdotdir` is **eager**: it is our own process's environment, not an entry
+/// open to the user's world, and in the hermetic arm its value never reaches the child anyway.
+///
+/// The return is a `Vec`, not an `Option`: the environment set up can be not
+/// one pair but **two** (if the user has an original `ZDOTDIR` the second goes
+/// too) and the caller chains it next to `locale_env()`.
+pub(crate) fn integration_env(
+    setting: ShellIntegration,
+    shell: impl FnOnce() -> Option<PathBuf>,
+    script_dir: impl FnOnce() -> Option<PathBuf>,
+    zdotdir: Option<OsString>,
+) -> Vec<(String, String)> {
+    if !setting.installs_wrapper() {
+        return Vec::new();
+    }
+    // A shell we do not recognize silently falls back: the terminal works as
+    // today, only the marks do not arrive.
+    if !shell().is_some_and(|shell| child::is_zsh(&shell)) {
+        return Vec::new();
+    }
+    // A non-UTF-8 path is the same silent fallback: `SessionOptions.env`
+    // wants a `String` and a session without integration is better than a
+    // half-set-up `ZDOTDIR`.
+    let Some(dir) = script_dir().and_then(|dir| dir.into_os_string().into_string().ok()) else {
+        return Vec::new();
+    };
+    // The user's original `ZDOTDIR`: the script will put it back. All three
+    // arms say "the second pair should not go" but their reasons differ:
+    let original = match zdotdir {
+        // An empty value counts as undefined (`decide_locale`'s rule) —
+        // "putting back" an empty `ZDOTDIR` would create a variable pointing
+        // at `$HOME`.
+        None => None,
+        Some(value) if value.is_empty() => None,
+        Some(value) => match value.into_string() {
+            // **A self-pointing value** (found in code review): if the
+            // `ZDOTDIR` in the environment already points at the script's
+            // directory (set by hand or leaked), handing it back as "the
+            // user's original value" makes the script reload its own
+            // `.zshenv` and recurse to zsh's `FUNCNEST` limit; the session is
+            // left without `ZDOTDIR`. The script has a layer for this too, this is the first layer.
+            Ok(value) if value == dir => None,
+            Ok(value) => Some(value),
+            // **A non-UTF-8 value rejects the integration entirely** and this
+            // arm is the reason it wants `var_os` instead of `var`
+            // (found in code review): `var().ok()` dropped it to `None`,
+            // i.e. it counted as "the user had no `ZDOTDIR`" and the script
+            // **deleted** the variable at the end of the session — the user's
+            // entire configuration would be lost without a diagnostic. Every
+            // neighboring edge (a non-UTF-8 script path, an unrecognized
+            // `$SHELL`) falls back by rejecting the integration; `decide_locale`
+            // also deliberately separates "absent" from "unusable".
+            Err(_) => return Vec::new(),
+        },
+    };
+    let mut env = vec![("ZDOTDIR".to_owned(), dir)];
+    if let Some(original) = original {
+        env.push(("BATERI_ZDOTDIR".to_owned(), original));
+    }
+    // **Sent only at the `blocks` tier** (the same shape as `BATERI_ZDOTDIR`
+    // being conditional): in the default arm we add not a single byte to the
+    // environment and the script's "no variable → the prompt is the terminal's" rule becomes the default's **only** record. If it were
+    // written in two places, when one changed the other would silently age.
+    //
+    // The variable's name states the decision, not its result: the script
+    // derives **three** things from it (should the prompt be reset, should the
+    // mirror be set up, should the branch be printed) and all three are the
+    // answer to "is there a dock in this session". The terminal gives the
+    // decision, the shell is not asked (`ShellIntegration::wants_dock`).
+    if !setting.wants_dock() {
+        env.push(("BATERI_DOCK".to_owned(), "off".to_owned()));
+    }
+    env
+}
+
+/// Adds `BATERI_BIN` to a session's shell integration: the path of the
+/// helper program ([`Identity::helper`], bateri's own executable in bateri), which the wrapper's `ssh` function asks for the wrapping
+/// decision (`bateri ssh-argv`). Only where the wrapper is installed — an
+/// empty `env` stays empty, so neither the timed run nor a non-zsh shell nor
+/// `[shell] integration = "off"` gets it — and only a UTF-8 path
+/// (`SessionOptions.env` wants a `String`; without it the function falls back
+/// to plain `ssh`). With it, `BATERI_SSH_INSTANCE`: the masters' instance
+/// directory name, where a wrapped session becomes a master
+/// (`ssh_route::session_socket`) — none without masters (the timed run).
+pub(crate) fn with_helper(
+    mut env: Vec<(String, String)>,
+    bin: Option<PathBuf>,
+    instance: Option<&str>,
+) -> Vec<(String, String)> {
+    if env.is_empty() {
+        return env;
+    }
+    if let Some(bin) = bin.and_then(|bin| bin.into_os_string().into_string().ok()) {
+        env.push(("BATERI_BIN".to_owned(), bin));
+        if let Some(instance) = instance {
+            env.push(("BATERI_SSH_INSTANCE".to_owned(), instance.to_owned()));
+        }
+    }
+    env
+}
+
+/// The dock share to reserve while the session is born.
+///
+/// **Both conditions are necessary and separate questions.** If `integration`
+/// is empty the wrapper was never set up — hermetic run, `"off"`, an
+/// unrecognized shell, a non-UTF-8 script path — i.e. there is no mirror to
+/// fill the dock. `wants_dock` is **the user's choice**: at the `"blocks"`
+/// tier the wrapper is set up (blocks and marks are its whole reason) but the
+/// input line stays in the grid, i.e. no share is reserved.
+///
+/// Deriving one from the other would bring back a closed defect:
+/// **two prompts** on screen (the user's in the grid, the dock's
+/// below) and a caret jumping between them.
+pub(crate) fn dock_rows_at_birth(
+    integration: &[(String, String)],
+    setting: ShellIntegration,
+) -> u16 {
+    if integration.is_empty() || !setting.wants_dock() {
+        0
+    } else {
+        DOCK_ROWS
+    }
+}
 
 /// A pane's closing that has begun (`TerminalPane::begin_close`), and so a
 /// tab's and a window's, made of their panes'.

@@ -548,6 +548,7 @@ impl TerminalPane {
             self.finder_started(job.landing(), item, &shared);
         }
         let (id, lookup) = (self.id(), self.lookup());
+        let agent = self.identity().app_name.clone();
         let spawned = thread::Builder::new().name("transfer".into()).spawn({
             let shared = Arc::clone(&shared);
             move || {
@@ -564,7 +565,7 @@ impl TerminalPane {
                         conflict,
                         &shared,
                         progress,
-                        quarantine,
+                        |landed: &Path| quarantine(landed, &agent),
                     ),
                 };
                 let open = match (&outcome, &landed, ticket) {
@@ -1506,7 +1507,7 @@ fn file_url(path: &Path) -> Retained<NSURL> {
 /// in its hidden temporary folder, so the item never has its name unmarked.
 /// Foundation's resource values are thread-safe. A failure leaves the item
 /// unmarked and is not an error: the bytes arrived.
-fn quarantine(path: &Path) {
+fn quarantine(path: &Path, agent: &str) {
     let properties = NSDictionary::<NSString, NSString>::from_slices(
         &[
             ns_string!("LSQuarantineType"),
@@ -1514,7 +1515,7 @@ fn quarantine(path: &Path) {
         ],
         &[
             ns_string!("LSQuarantineTypeOtherDownload"),
-            ns_string!("bateri"),
+            &NSString::from_str(agent),
         ],
     );
     let mark = |path: &Path| {

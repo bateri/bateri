@@ -20,7 +20,7 @@ use bt_core::{
     ReduceMotion, RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit,
     ShellIntegration, SmoothScroll, Teardown, Theme,
 };
-use bt_gpu::{DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
+use bt_gpu::{DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -47,7 +47,7 @@ use objc2_foundation::{
 use crate::arrange::{self, HOLD_DELAY, Hold, Tool};
 use crate::handover::{self, Arrival, HeldPane, PaneState};
 use crate::keeper::{self, Keeper, QuitKind, QuitPath};
-use crate::launch::{Adopted, Launch, Note, fallen_back};
+use crate::launch::{self, Adopted, Identity, Launch, Note, fallen_back};
 use crate::menu::ShellMenuDelegate;
 use crate::moves::{self, Move, Plan, Refusal, Slot, Step};
 use crate::notices::{Notices, Source};
@@ -816,25 +816,11 @@ fn clamp_frame(frame: Frame, screens: &[Frame]) -> Frame {
     }
 }
 
-/// The environment shell integration adds to the child — empty if not set up.
-///
-/// **The whole decision is here and pure**: which shell, which setting, where
-/// the script is. Its place is `app` not `child`, because the gate's first tier is [`Inputs`] and it is private to this module
-/// ([`resolve_reduce_motion`] precedent; there too the side that reads the
-/// system is `bt-shell-macos` but the decision is gated by `Inputs`).
-///
-/// `shell` and `script_dir` are **closures**: in a timed run and in the
-/// session of a user who says `"off"` neither is ever consulted. The timed
-/// run's is not laziness but a **gate** — `make smoke`'s result would be tied
-/// to the measuring machine's shell configuration and a test whose closure
-/// panics holds the gate (`hermetic_run_does_not_set_up_shell_integration`).
-///
-/// `zdotdir` is **eager**: it is our own process's environment, not an entry
-/// open to the user's world, and in the hermetic arm its value never reaches the child anyway.
-///
-/// The return is a `Vec`, not an `Option`: the environment set up can be not
-/// one pair but **two** (if the user has an original `ZDOTDIR` the second goes
-/// too) and the caller chains it next to `locale_env()`.
+/// The environment shell integration adds to the child — empty if not set up,
+/// and never in a timed run: `make smoke`'s result must not depend on the
+/// measuring machine's shell or its configuration, so neither `shell` nor
+/// `script_dir` is consulted there (`hermetic_run_does_not_set_up_shell_integration`).
+/// The decision itself is the pane's ([`launch::integration_env`]).
 fn shell_integration_env(
     inputs: &Inputs,
     setting: ShellIntegration,
@@ -842,93 +828,10 @@ fn shell_integration_env(
     script_dir: impl FnOnce() -> Option<PathBuf>,
     zdotdir: Option<OsString>,
 ) -> Vec<(String, String)> {
-    if matches!(inputs, Inputs::Hermetic) || !setting.installs_wrapper() {
+    if matches!(inputs, Inputs::Hermetic) {
         return Vec::new();
     }
-    // A shell we do not recognize silently falls back: the terminal works as
-    // today, only the marks do not arrive.
-    if !shell().is_some_and(|shell| child::is_zsh(&shell)) {
-        return Vec::new();
-    }
-    // A non-UTF-8 path is the same silent fallback: `SessionOptions.env`
-    // wants a `String` and a session without integration is better than a
-    // half-set-up `ZDOTDIR`.
-    let Some(dir) = script_dir().and_then(|dir| dir.into_os_string().into_string().ok()) else {
-        return Vec::new();
-    };
-    // The user's original `ZDOTDIR`: the script will put it back. All three
-    // arms say "the second pair should not go" but their reasons differ:
-    let original = match zdotdir {
-        // An empty value counts as undefined (`decide_locale`'s rule) —
-        // "putting back" an empty `ZDOTDIR` would create a variable pointing
-        // at `$HOME`.
-        None => None,
-        Some(value) if value.is_empty() => None,
-        Some(value) => match value.into_string() {
-            // **A self-pointing value** (found in code review): if the
-            // `ZDOTDIR` in the environment already points at the script's
-            // directory (set by hand or leaked), handing it back as "the
-            // user's original value" makes the script reload its own
-            // `.zshenv` and recurse to zsh's `FUNCNEST` limit; the session is
-            // left without `ZDOTDIR`. The script has a layer for this too, this is the first layer.
-            Ok(value) if value == dir => None,
-            Ok(value) => Some(value),
-            // **A non-UTF-8 value rejects the integration entirely** and this
-            // arm is the reason it wants `var_os` instead of `var`
-            // (found in code review): `var().ok()` dropped it to `None`,
-            // i.e. it counted as "the user had no `ZDOTDIR`" and the script
-            // **deleted** the variable at the end of the session — the user's
-            // entire configuration would be lost without a diagnostic. Every
-            // neighboring edge (a non-UTF-8 script path, an unrecognized
-            // `$SHELL`) falls back by rejecting the integration; `decide_locale`
-            // also deliberately separates "absent" from "unusable".
-            Err(_) => return Vec::new(),
-        },
-    };
-    let mut env = vec![("ZDOTDIR".to_owned(), dir)];
-    if let Some(original) = original {
-        env.push(("BATERI_ZDOTDIR".to_owned(), original));
-    }
-    // **Sent only at the `blocks` tier** (the same shape as `BATERI_ZDOTDIR`
-    // being conditional): in the default arm we add not a single byte to the
-    // environment and the script's "no variable → the prompt is the terminal's" rule becomes the default's **only** record. If it were
-    // written in two places, when one changed the other would silently age.
-    //
-    // The variable's name states the decision, not its result: the script
-    // derives **three** things from it (should the prompt be reset, should the
-    // mirror be set up, should the branch be printed) and all three are the
-    // answer to "is there a dock in this session". The terminal gives the
-    // decision, the shell is not asked (`ShellIntegration::wants_dock`).
-    if !setting.wants_dock() {
-        env.push(("BATERI_DOCK".to_owned(), "off".to_owned()));
-    }
-    env
-}
-
-/// Adds `BATERI_BIN` to a session's shell integration: the path of the
-/// running bateri, which the wrapper's `ssh` function asks for the wrapping
-/// decision (`bateri ssh-argv`). Only where the wrapper is installed — an
-/// empty `env` stays empty, so neither the timed run nor a non-zsh shell nor
-/// `[shell] integration = "off"` gets it — and only a UTF-8 path
-/// (`SessionOptions.env` wants a `String`; without it the function falls back
-/// to plain `ssh`). With it, `BATERI_SSH_INSTANCE`: the masters' instance
-/// directory name, where a wrapped session becomes a master
-/// (`ssh_route::session_socket`) — none without masters (the timed run).
-fn with_bateri_bin(
-    mut env: Vec<(String, String)>,
-    bin: Option<PathBuf>,
-    instance: Option<&str>,
-) -> Vec<(String, String)> {
-    if env.is_empty() {
-        return env;
-    }
-    if let Some(bin) = bin.and_then(|bin| bin.into_os_string().into_string().ok()) {
-        env.push(("BATERI_BIN".to_owned(), bin));
-        if let Some(instance) = instance {
-            env.push(("BATERI_SSH_INSTANCE".to_owned(), instance.to_owned()));
-        }
-    }
-    env
+    launch::integration_env(setting, shell, script_dir, zdotdir)
 }
 
 /// The daily preview sweep's period — "once a day", a design
@@ -1003,26 +906,6 @@ fn notify_settings_changed() {
     // `Option<&AnyObject>` argument and does not look at the sender. If there
     // is no receiver (the delegate is not bound yet) it returns `false` and the event drops; the next save arrives again.
     let _ = unsafe { app.sendAction_to_from(sel!(settingsDidChange:), None, None) };
-}
-
-/// The dock share to reserve while the session is born.
-///
-/// **Both conditions are necessary and separate questions.** If `integration`
-/// is empty the wrapper was never set up — hermetic run, `"off"`, an
-/// unrecognized shell, a non-UTF-8 script path — i.e. there is no mirror to
-/// fill the dock. `wants_dock` is **the user's choice**: at the `"blocks"`
-/// tier the wrapper is set up (blocks and marks are its whole reason) but the
-/// input line stays in the grid, i.e. no share is reserved.
-///
-/// Deriving one from the other would bring back a closed defect:
-/// **two prompts** on screen (the user's in the grid, the dock's
-/// below) and a caret jumping between them.
-fn dock_rows_at_birth(integration: &[(String, String)], setting: ShellIntegration) -> u16 {
-    if integration.is_empty() || !setting.wants_dock() {
-        0
-    } else {
-        DOCK_ROWS
-    }
 }
 
 /// The first item that holds the key and is **not closed** — the single rule
@@ -1207,6 +1090,9 @@ pub(crate) struct Ivars {
     /// (no askpass, no master — the remote jobs take today's argv) and when the
     /// running binary's path is unknown (it is the askpass program).
     masters: Option<Arc<Masters>>,
+    /// Who bateri is to its panes ([`launch::Identity`]): its name, its own
+    /// executable as the integration's helper, its bundled zsh scripts.
+    identity: Rc<Identity>,
     /// The session directory's lock, held from launch to the
     /// save at quit ([`AppDelegate::save_session`] takes it — the one-shot).
     /// `None`: a timed run, an unbundled process, or another instance of the
@@ -2600,6 +2486,11 @@ impl AppDelegate {
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
             masters,
+            identity: Rc::new(Identity {
+                app_name: "bateri".to_owned(),
+                helper: std::env::current_exe().ok(),
+                zsh_wrapper_dir: child::zsh_wrapper_dir(),
+            }),
             restore_lock: RefCell::new(None),
             arrival: RefCell::new(arrival),
             holder: RefCell::new(None),
@@ -4122,6 +4013,7 @@ impl AppDelegate {
                 .keeper
                 .clone()
                 .map(|keeper| keeper as Rc<dyn crate::pane::Holder>),
+            identity: self.ivars().identity.clone(),
         };
         (launch, theme)
     }
@@ -4780,25 +4672,27 @@ impl AppDelegate {
     }
 
     /// The new session's shell integration: the environment to add to the child **and** the dock
-    /// share, from a single question ([`shell_integration_env`], [`dock_rows_at_birth`]).
+    /// share, from a single question ([`shell_integration_env`] behind the timed
+    /// run's gate, then [`launch::with_dock`]).
     ///
     /// Both keys from **one borrow**: a reload falling between separate `borrow()`s
     /// could read the two from different files.
     pub(crate) fn shell_integration(&self) -> (Vec<(String, String)>, u16) {
         let setting = self.ivars().settings.borrow().shell_integration;
-        let integration = with_bateri_bin(
-            shell_integration_env(
-                &self.inputs(),
-                setting,
-                child::shell,
-                child::zsh_wrapper_dir,
-                std::env::var_os("ZDOTDIR"),
-            ),
-            std::env::current_exe().ok(),
-            self.ivars().masters.as_deref().map(Masters::instance),
+        let identity = &self.ivars().identity;
+        let wrapper = shell_integration_env(
+            &self.inputs(),
+            setting,
+            child::shell,
+            || identity.zsh_wrapper_dir.clone(),
+            std::env::var_os("ZDOTDIR"),
         );
-        let birth = dock_rows_at_birth(&integration, setting);
-        (integration, birth)
+        launch::with_dock(
+            identity,
+            setting,
+            wrapper,
+            self.ivars().masters.as_deref().map(Masters::instance),
+        )
     }
 
     /// Reads the settings at launch, writes them to [`Ivars::settings`] and hands the diagnostics
@@ -6144,7 +6038,10 @@ impl AppDelegate {
 
 #[cfg(test)]
 mod tests {
+    use bt_gpu::DOCK_ROWS;
+
     use super::*;
+    use crate::launch::{dock_rows_at_birth, with_helper};
 
     /// The **measured** tail of a healthy smoke run (2026-09-16, the lowest of
     /// thirty-seven runs: `1742,29 ms`).
@@ -7149,7 +7046,7 @@ mod tests {
             "/Applications/bateri.app/Contents/MacOS/bateri",
         ));
         assert_eq!(
-            with_bateri_bin(wrapper.clone(), bin.clone(), None).last(),
+            with_helper(wrapper.clone(), bin.clone(), None).last(),
             Some(&(
                 "BATERI_BIN".to_owned(),
                 "/Applications/bateri.app/Contents/MacOS/bateri".to_owned()
@@ -7157,18 +7054,18 @@ mod tests {
         );
         // The masters' instance rides with the binary, never alone.
         assert_eq!(
-            with_bateri_bin(wrapper.clone(), bin.clone(), Some("0a1b2c3d")).last(),
+            with_helper(wrapper.clone(), bin.clone(), Some("0a1b2c3d")).last(),
             Some(&("BATERI_SSH_INSTANCE".to_owned(), "0a1b2c3d".to_owned()))
         );
-        assert!(with_bateri_bin(Vec::new(), bin, Some("0a1b2c3d")).is_empty());
+        assert!(with_helper(Vec::new(), bin, Some("0a1b2c3d")).is_empty());
         assert_eq!(
-            with_bateri_bin(wrapper.clone(), None, Some("0a1b2c3d")),
+            with_helper(wrapper.clone(), None, Some("0a1b2c3d")),
             wrapper
         );
         use std::os::unix::ffi::OsStringExt as _;
         let odd = std::ffi::OsString::from_vec(b"/x/\xff".to_vec());
         assert_eq!(
-            with_bateri_bin(wrapper.clone(), Some(PathBuf::from(odd)), None),
+            with_helper(wrapper.clone(), Some(PathBuf::from(odd)), None),
             wrapper
         );
     }

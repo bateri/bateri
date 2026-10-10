@@ -76,7 +76,7 @@ use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::journal::PaneJournal;
-use crate::launch::{Adopted, Closing, Launch};
+use crate::launch::{Adopted, Closing, Identity, Launch};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::password_sheet::PasswordSheet;
@@ -767,6 +767,8 @@ pub(crate) struct PaneLaunch {
     /// with it when its session is born and releases at its close. `None` in
     /// a timed run and an unbundled process.
     pub(crate) keeper: Option<Rc<dyn Holder>>,
+    /// Who the application opening the pane is ([`Identity`]).
+    pub(crate) identity: Rc<Identity>,
 }
 
 /// The half of the birth package that only [`TerminalPane::start`] consumes.
@@ -1750,6 +1752,8 @@ pub(crate) struct PaneIvars {
     masters: Option<Arc<Masters>>,
     /// The bound holder's driver ([`PaneLaunch::keeper`]).
     keeper: Option<Rc<dyn Holder>>,
+    /// Who the application that opened the pane is ([`PaneLaunch::identity`]).
+    identity: Rc<Identity>,
     /// The socket of the holder a carried-on pane was taken from, until
     /// its registration ([`TerminalPane::register_with_holder`]): the new
     /// holder must not drain the master while that one still does.
@@ -2150,6 +2154,7 @@ impl TerminalPane {
             zoom,
             masters,
             keeper,
+            identity,
         } = launch;
         // The saved identity of a restored pane, a new one otherwise.
         let uuid = launch.uuid.take().unwrap_or_else(new_pane_uuid);
@@ -2256,6 +2261,7 @@ impl TerminalPane {
             password: RefCell::new(None),
             masters,
             keeper,
+            identity,
             taken_from: RefCell::new(None),
             journal: RefCell::new(None),
             ssh_session: Cell::new(None),
@@ -2419,6 +2425,11 @@ impl TerminalPane {
     /// Owner of the events ([`PaneHost`]).
     pub(crate) fn host(&self) -> &dyn PaneHost {
         &*self.ivars().host
+    }
+
+    /// Who the application that opened the pane is.
+    pub(crate) fn identity(&self) -> &Identity {
+        &self.ivars().identity
     }
 
     /// The path by which main-queue returns find the pane (`uploader`'s jobs
