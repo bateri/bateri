@@ -28,7 +28,7 @@
 //! [`TerminalWindow::move_tab`], [`TerminalWindow::release_tab`],
 //! [`TerminalWindow::adopt_tab`]; and the same for a **pane** carried
 //! between panes and tabs — [`TerminalWindow::swap_panes`],
-//! [`TerminalWindow::pane_to_tab`], [`TerminalWindow::pane_to_new_tab`],
+//! [`TerminalWindow::move_pane`], [`TerminalWindow::pane_to_tab`], [`TerminalWindow::pane_to_new_tab`],
 //! [`TerminalWindow::release_pane`] with [`TerminalWindow::adopt_pane`],
 //! [`TerminalWindow::merge_tab`]) and ends
 //! in a layout edge (`AppDelegate::layout_changed`): the selection, the
@@ -43,9 +43,12 @@
 //!
 //! **Undo Move is the appliers' too.** A move of panes writes down what it is
 //! about to change and leaves that picture ([`Record`]) after its last layout
-//! edge; every other applier of the tab list drops it
+//! edge; every other applier of the tab list that changes its shape — adding,
+//! closing, naming, reordering, a tab leaving or joining — drops it
 //! ([`TerminalWindow::forget_undo`]), because the picture restores the whole
-//! strip. Taking it back is [`TerminalWindow::undo_lift`] then
+//! strip. Selecting a tab does not: the picture carries the selection and
+//! puts it back, so "move a pane to web, open web, Undo Move" brings the pane
+//! back. Taking it back is [`TerminalWindow::undo_lift`] then
 //! [`TerminalWindow::undo_place`] — the steps the moves are made of, ending in
 //! one layout edge.
 //!
@@ -489,7 +492,7 @@ fn take_panes(
 }
 
 /// What a pane is called to VoiceOver: its session's title.
-fn pane_name(pane: &TerminalPane) -> String {
+pub(crate) fn pane_name(pane: &TerminalPane) -> String {
     pane.session()
         .map_or_else(|| "Split".to_owned(), |session| session.title())
 }
@@ -1872,7 +1875,8 @@ impl TerminalWindow {
         !sheets::window_asks(&self.ivars().window)
     }
 
-    /// **The applier: selection.** Tab `id` comes on screen; `true` if it is
+    /// **The applier: selection** — the only one that leaves Undo Move's record
+    /// standing (see the module header). Tab `id` comes on screen; `true` if it is
     /// (or already was) the selected one. A beep and `false` while the
     /// window holds a question of its own ([`Self::selection_free`]); a
     /// tab's question leaves the screen with its tab. ⌘1…⌘9, the next and
@@ -1890,7 +1894,6 @@ impl TerminalWindow {
             beep();
             return false;
         }
-        self.forget_undo();
         let old = current.and_then(|current| self.tab(current));
         self.ivars().order.borrow_mut().select(id);
         self.switch(old.as_deref());
@@ -2140,6 +2143,31 @@ impl TerminalWindow {
             pane_name(&first),
             pane_name(&second)
         ));
+        self.layout_changed();
+        self.remember(vec![before], Vec::new());
+        true
+    }
+
+    /// **The applier: a move inside a tab.** Pane `pane` of tab `tab` is let go
+    /// beside another pane or at the window's edge, and the panes take the
+    /// places of `tree` ([`Tree::verdict`]'s landing) — all of them laid out
+    /// once, so a program is resized once, and sliding there. The pane never
+    /// leaves its tab, so its question, its focus and its programs stay where
+    /// they are. A beep and `false` if the tree is not this tab's panes or a
+    /// pane would be left below its smallest. A layout edge.
+    pub(crate) fn move_pane(&self, tab: u64, pane: u64, tree: Tree) -> bool {
+        let Some(tab) = self.tab(tab) else {
+            return false;
+        };
+        let Some(moved) = tab.container().pane(pane) else {
+            return false;
+        };
+        let before = self.undo_scene(&[tab.id()]);
+        if !tab.rearrange(tree) {
+            beep();
+            return false;
+        }
+        self.announce(&format!("{} moved", pane_name(&moved)));
         self.layout_changed();
         self.remember(vec![before], Vec::new());
         true
@@ -3170,6 +3198,41 @@ impl TerminalWindow {
 
 #[cfg(test)]
 mod tests {
+    /// The guard of "selecting does not drop Undo Move": nothing but the source
+    /// can tell, since the applier is AppKit's. The record is a picture that
+    /// carries the selection and puts it back; a `forget_undo` in the
+    /// selection applier would make "move a pane to web, open web, Undo Move"
+    /// a grey item. The appliers that change the strip's shape still drop it.
+    #[test]
+    fn selecting_a_tab_leaves_the_undo_record_standing() {
+        let source = include_str!("window.rs");
+        // The text of the method that begins with `signature`, up to the next
+        // method of the impl.
+        let body = |signature: &str| {
+            let start = source.find(signature).expect("the applier is in this file");
+            let rest = &source[start + signature.len()..];
+            let end = rest.find("\n    pub(crate) fn ").unwrap_or(rest.len());
+            &rest[..end]
+        };
+        assert!(
+            !body("pub(crate) fn select_tab(").contains("self.forget_undo()"),
+            "selecting a tab must not drop the undo record"
+        );
+        for applier in [
+            "pub(crate) fn add_tab(",
+            "pub(crate) fn close_tab_now(",
+            "pub(crate) fn rename_tab(",
+            "pub(crate) fn release_tab(",
+            "pub(crate) fn adopt_tab(",
+            "pub(crate) fn move_tab(",
+        ] {
+            assert!(
+                body(applier).contains("self.forget_undo()"),
+                "{applier} drops the record"
+            );
+        }
+    }
+
     #[test]
     fn term_program_version_is_the_workspace_version() {
         // The guard: `bt-core`'s constant and the application's version

@@ -47,7 +47,11 @@ pub(crate) const GAP_PT: f64 = 6.0;
 pub(crate) const CORNER_PT: f64 = 10.0;
 
 /// The slide's length, in seconds. A design constant, the canvas's 220 ms.
-const SLIDE_SECS: f64 = 0.22;
+pub(crate) const SLIDE_SECS: f64 = 0.22;
+
+/// A move's slide: panes that change places settle in 200 ms, a touch quicker
+/// than a pane count changing.
+pub(crate) const MOVE_SECS: f64 = 0.20;
 
 /// The frame's opacity on the focused pane and on the others: the dividers'
 /// tone at full strength, and at half. Design constants (the canvas's frame
@@ -257,13 +261,8 @@ const IDENTITY: CATransform3D = CATransform3D {
 };
 
 /// One explicit animation of `key_path` on `layer`, from `from` to `to`, over
-/// the slide's length. The layer's model value is already the end of it, and
-/// the animation removes itself on completion: there is nothing to clean up.
-fn play(layer: &CALayer, key_path: &NSString, from: &AnyObject, to: &AnyObject, key: &NSString) {
-    play_for(layer, key_path, from, to, key, SLIDE_SECS);
-}
-
-/// [`play`] over `secs`.
+/// `secs`. The layer's model value is already the end of it, and the animation
+/// removes itself on completion: there is nothing to clean up.
 fn play_for(
     layer: &CALayer,
     key_path: &NSString,
@@ -356,10 +355,10 @@ pub(crate) struct Change {
     pub is_card: bool,
 }
 
-/// Plays the slide of one pane: the pane's layer from its old look to none,
+/// Plays the slide of one pane over `secs`: the pane's layer from its old look to none,
 /// and — if the pane gained or lost its card — the corners and the frame with
 /// it. The model values are already final ([`round`], [`FrameBox::set_carded`]).
-pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change) {
+pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change, secs: f64) {
     let Some(layer) = pane.layer() else {
         return;
     };
@@ -372,12 +371,13 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change) {
                 NSValue::valueWithCATransform3D(IDENTITY),
             )
         };
-        play(
+        play_for(
             &layer,
             ns_string!("transform"),
             &from,
             &to,
             ns_string!("bateri.slide"),
+            secs,
         );
     }
     if change.was_card == change.is_card {
@@ -387,21 +387,23 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change) {
     // corners are still round while they open out; the radius is already 0.
     layer.setMasksToBounds(true);
     let corners = |card: bool| NSNumber::numberWithDouble(if card { CORNER_PT } else { 0.0 });
-    play(
+    play_for(
         &layer,
         ns_string!("cornerRadius"),
         corners(change.was_card).as_ref(),
         corners(change.is_card).as_ref(),
         ns_string!("bateri.slide.corners"),
+        secs,
     );
     if let Some(frame_layer) = frame.layer() {
         let opacity = |card: bool| NSNumber::numberWithDouble(if card { 1.0 } else { 0.0 });
-        play(
+        play_for(
             &frame_layer,
             ns_string!("opacity"),
             opacity(change.was_card).as_ref(),
             opacity(change.is_card).as_ref(),
             ns_string!("bateri.slide.frame"),
+            secs,
         );
     }
 }

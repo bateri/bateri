@@ -2232,8 +2232,18 @@ impl BateriView {
         // reaches neither the program (no report), nor a selection, nor a
         // ⌘-link, nor the context line and the dock — the bar above has
         // already been served, so it works with the keys down. Nothing begins
-        // a gesture here; the release finds none and the drag ignores itself.
+        // a gesture here; the release finds none and the drag ignores itself
+        // (the carry, once it begins, swallows the drag and the release before
+        // they get here).
         if arrange::swallows(event.modifierFlags()) {
+            // The press is the pane's carry in the making: it becomes one
+            // once the pointer travels ([`crate::pane_drag`]).
+            if button == MouseButton::Left
+                && let Some(pane) = self.pane()
+                && let Some(app) = crate::app::delegate(self.mtm())
+            {
+                app.pane_press(pane.id(), event.locationInWindow());
+            }
             return;
         }
         // The upload line's buttons and the load indicator: on the

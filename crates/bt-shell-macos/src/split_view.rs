@@ -26,6 +26,13 @@
 //! to where it stands ([`crate::card::slide`]). The pane count in between
 //! (3 → 2, a restore) just lays out.
 //!
+//! **A move slides the same way** ([`SplitView::rearrange`], a swap): one
+//! layout at the final frames — a program is resized once, at the drop —
+//! and each pane that changed place plays its transform ([`card::MOVE_SECS`]).
+//! What a carried pane would do at a point is [`SplitView::verdict`], the
+//! tree's answer ([`Tree::verdict`]) in this container's room; asking
+//! changes nothing.
+//!
 //! When a pane's frame changes the pane refreshes its own geometry
 //! (`TerminalPane::observe_frame`); only `setFrame` happens here, so while a
 //! divider is being dragged the PTY resizes by the same path as window
@@ -72,7 +79,7 @@ use crate::card::{self, Change, GAP_PT};
 use crate::pane::TerminalPane;
 use crate::sheets::OwnerSlot;
 use crate::split::{
-    self, Axis, Direction, Divider, Placement, Rect, Removal, Room, Size, Spacing, Tree,
+    self, Axis, Direction, Divider, Placement, Rect, Removal, Room, Size, Spacing, Tree, Verdict,
 };
 
 /// Half of the least width of a divider's hit area, in points. A design
@@ -434,7 +441,7 @@ impl SplitView {
         // One pane became two: the first slides into its card, the newcomer
         // grows from the edge it was split off.
         if before.len() == 1 {
-            self.slide(&before, Some((pane.id(), axis)));
+            self.slide(&before, Some((pane.id(), axis)), card::SLIDE_SECS);
         }
         true
     }
@@ -475,7 +482,7 @@ impl SplitView {
             return false;
         }
         if before.len() == 1 {
-            self.slide(&before, None);
+            self.slide(&before, None, card::SLIDE_SECS);
         }
         true
     }
@@ -520,6 +527,7 @@ impl SplitView {
     /// its smallest in the other's place (a pane at a larger point size has
     /// a larger smallest).
     pub(crate) fn swap(&self, a: u64, b: u64) -> bool {
+        let before = self.snapshot();
         if !self.ivars().tree.borrow_mut().swap(a, b) {
             return false;
         }
@@ -528,7 +536,51 @@ impl SplitView {
             return false;
         }
         self.layout_panes();
+        self.slide(&before, None, card::MOVE_SECS);
         true
+    }
+
+    /// The panes take the places of `tree`, which holds exactly the panes of
+    /// this container (a pane let go beside another or at the window's edge,
+    /// [`Tree::verdict`]): the panes are laid out **once**, so each program
+    /// is resized once, and every pane whose place changed slides there
+    /// ([`card::MOVE_SECS`]). `false` and nothing changes if the leaves are
+    /// not these panes, or a pane would be left below its smallest.
+    pub(crate) fn rearrange(&self, tree: Tree) -> bool {
+        let mut wanted = tree.leaves();
+        wanted.sort_unstable();
+        let mut have = self.ivars().tree.borrow().leaves();
+        have.sort_unstable();
+        if wanted != have {
+            return false;
+        }
+        let before = self.snapshot();
+        let old = self.ivars().tree.replace(tree);
+        if !self.fits() {
+            self.ivars().tree.replace(old);
+            return false;
+        }
+        self.layout_panes();
+        self.slide(&before, None, card::MOVE_SECS);
+        true
+    }
+
+    /// What carrying pane `carried` with the pointer at `at` (window
+    /// coordinates) shows and does: [`Tree::verdict`] in this container's
+    /// room, read against the layout as it stands — nothing moves while a
+    /// pane is carried. Nothing while a pane is zoomed: the splits are not
+    /// on screen to be let go beside.
+    pub(crate) fn verdict(&self, carried: u64, at: NSPoint) -> Verdict {
+        if self.ivars().zoomed.get().is_some() {
+            return Verdict::Nothing;
+        }
+        let at = self.convertPoint_fromView(at, None);
+        let limits = self.limits();
+        let room = self.room(&limits);
+        self.ivars()
+            .tree
+            .borrow()
+            .verdict(&Tree::Leaf(carried), &room, (at.x, at.y))
     }
 
     /// Takes every pane out of the container, in tree order, and leaves it
@@ -582,7 +634,7 @@ impl SplitView {
         // Two panes became one: the survivor opens out to the whole area (the
         // closed one is already gone, closing does not wait for a slide).
         if before.len() == 2 {
-            self.slide(&before, None);
+            self.slide(&before, None, card::SLIDE_SECS);
         }
         Some(removed)
     }
@@ -785,7 +837,7 @@ impl SplitView {
     /// where it stood in `before` to where it stands now. The pane in `grows`
     /// did not exist: it begins as a line along the far edge of the split it
     /// was made by. Honors Reduce Motion by not playing.
-    fn slide(&self, before: &[Before], grows: Option<(u64, Axis)>) {
+    fn slide(&self, before: &[Before], grows: Option<(u64, Axis)>, secs: f64) {
         let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
         if still {
             return;
@@ -817,13 +869,17 @@ impl SplitView {
                     _ => continue,
                 },
             };
+            // A pane that stands where it stood has nothing to play.
+            if from == to && was_card == pane.is_card() {
+                continue;
+            }
             let change = Change {
                 from,
                 to,
                 was_card,
                 is_card: pane.is_card(),
             };
-            card::slide(pane, pane.frame_view(), &change);
+            card::slide(pane, pane.frame_view(), &change, secs);
         }
     }
 

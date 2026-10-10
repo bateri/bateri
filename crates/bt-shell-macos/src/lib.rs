@@ -51,6 +51,7 @@ mod locale;
 mod menu;
 mod pacer;
 mod pane;
+mod pane_drag;
 mod password_sheet;
 mod preview;
 mod promise;

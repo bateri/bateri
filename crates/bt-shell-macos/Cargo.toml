@@ -145,6 +145,10 @@ objc2-foundation = { workspace = true, features = [
 # behind it inside the window — the Reduce Transparency setting is the
 # system's own to apply. Only a header flag over headers already in the set;
 # `Cargo.lock` did not move.
+# A carried pane's refused regions are hatched (`pane_drag`): the stripes are
+# clipped to the region's rounded path, which wants the graphics state saved
+# and restored around it (`NSGraphicsContext`). Only a header flag over headers
+# already in the set; `Cargo.lock` did not move.
 # A window's title as the Dock icon's menu and the Window menu list it
 # (`window::listed_title`): `NSStringDrawing` measures it in the menu font
 # (`sizeWithAttributes:`). Only a header flag over headers already in the set;
@@ -165,6 +169,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea", "NSAttributedString",
     "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
     "NSGradient", "NSPasteboardItem", "NSStringDrawing", "NSVisualEffectView",
+    "NSGraphicsContext",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

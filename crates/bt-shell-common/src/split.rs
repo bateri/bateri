@@ -937,6 +937,77 @@ pub enum Zone {
     Outside,
 }
 
+impl Zone {
+    /// The word a preview writes in the region the zone asks for: where the block lands next
+    /// to the pane, the full-length column or row at the window's edge, or the swap. `None`
+    /// for the zones that ask for nothing.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Zone::Beside { side, .. } => Some(match side {
+                Direction::Left => "Left",
+                Direction::Right => "Right",
+                Direction::Up => "Above",
+                Direction::Down => "Below",
+            }),
+            Zone::WindowEdge(side) => Some(match side {
+                Direction::Left | Direction::Right => "Full height",
+                Direction::Up | Direction::Down => "Full width",
+            }),
+            Zone::Swap { .. } => Some("Swap"),
+            Zone::Own | Zone::Outside => None,
+        }
+    }
+}
+
+/// What a carried block shows under the pointer, and so what letting go would do
+/// ([`Tree::verdict`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Verdict {
+    /// Letting go changes nothing: the pointer is over the pane's own place or outside the area,
+    /// or there is nothing to move it beside.
+    Nothing,
+    /// The block lands: `placement` is where and in what tree, `zone` what the pointer asked for.
+    Lands { zone: Zone, placement: Placement },
+    /// The carried pane trades places with `target`, whose frame is `frame`; `fits` is whether
+    /// both panes keep their minimum in each other's place.
+    Swaps {
+        target: u64,
+        frame: Rect,
+        fits: bool,
+    },
+    /// The block does not fit where the pointer asks (`zone`): `region` is the part of the
+    /// layout it pointed at and `edges` the edges of the area that would take it, each with the
+    /// place it would land.
+    TooSmall {
+        zone: Zone,
+        region: Rect,
+        edges: Vec<(Direction, Rect)>,
+    },
+    /// The block fits nowhere in this tab: no pane, no group and no edge has room.
+    NoRoom,
+}
+
+/// The `share` of `frame` along `side`: the half a drop beside a pane asks for, the stretch of
+/// the area a drop at the window's edge asks for.
+fn share_of(frame: Rect, side: Direction, share: f64) -> Rect {
+    match side {
+        Direction::Left => Rect::new(frame.x, frame.y, frame.width * share, frame.height),
+        Direction::Right => Rect::new(
+            frame.x + frame.width * (1.0 - share),
+            frame.y,
+            frame.width * share,
+            frame.height,
+        ),
+        Direction::Up => Rect::new(frame.x, frame.y, frame.width, frame.height * share),
+        Direction::Down => Rect::new(
+            frame.x,
+            frame.y + frame.height * (1.0 - share),
+            frame.width,
+            frame.height * share,
+        ),
+    }
+}
+
 impl Layout {
     /// What the pointer at `point` (points, the area's space) asks for inside `bounds`, in this
     /// order: the strip [`WINDOW_EDGE_STRIP`] wide along the area's edge, nearest edge first —
@@ -1145,6 +1216,103 @@ impl Tree {
         .collect()
     }
 
+    /// What `carried` shows with the pointer at `point` (points, the area's space) and so what
+    /// letting go there does — the one answer the preview, the drop and the menu stand on, in
+    /// `room`'s ground.
+    ///
+    /// The pointer is read against the layout **as it stands**, `carried` still in it when it is
+    /// a pane of this tree ([`Layout::zone_at`]); nothing moves while it is carried. The plan is
+    /// made on the tree without it ([`Tree::plan_beside`], [`Tree::plan_edge`]), so `room`'s
+    /// spacing is the one of the tree it would become. A pane of another tab (or a block) is no
+    /// pane here: it has no place to fall back on and nothing to trade with.
+    ///
+    /// Swapping needs no room, so it is judged first; every other zone is refused with the
+    /// edges that would take the block, or with [`Verdict::NoRoom`] when none does.
+    pub fn verdict(&self, carried: &Tree, room: &Room<'_>, point: (f64, f64)) -> Verdict {
+        let layout = self.layout_spaced(room.bounds, room.scale, room.spacing);
+        let own = match carried {
+            Tree::Leaf(id) if self.holds(*id) => Some(*id),
+            _ => None,
+        };
+        let zone = layout.zone_at(room.bounds, point, own);
+        let frame_of = |pane: u64| {
+            layout
+                .panes
+                .iter()
+                .find(|(id, _)| *id == pane)
+                .map(|(_, frame)| *frame)
+        };
+        if let Zone::Swap { target } = zone {
+            let (Some(own), Some(frame)) = (own, frame_of(target)) else {
+                return Verdict::Nothing;
+            };
+            let mut swapped = self.clone();
+            if !swapped.swap(own, target) {
+                return Verdict::Nothing;
+            }
+            let after = swapped.layout_spaced(room.bounds, room.scale, room.spacing);
+            let fits = after.panes.iter().all(|(id, frame)| {
+                let min = (room.min)(*id);
+                frame.width >= min.width && frame.height >= min.height
+            });
+            return Verdict::Swaps {
+                target,
+                frame,
+                fits,
+            };
+        }
+        let mut rest = self.clone();
+        match own {
+            Some(id) => {
+                if !matches!(rest.remove(id), Removal::Removed { .. }) {
+                    return Verdict::Nothing;
+                }
+            }
+            None if self.shares_a_pane_with(carried) => return Verdict::Nothing,
+            None => {}
+        }
+        let (placement, region) = match zone {
+            Zone::Beside { target, side } => {
+                let Some(frame) = frame_of(target) else {
+                    return Verdict::Nothing;
+                };
+                (
+                    rest.plan_beside(target, side, carried, room),
+                    share_of(frame, side, PANE_EDGE_SHARE),
+                )
+            }
+            Zone::WindowEdge(side) => (
+                rest.plan_edge(side, carried, room),
+                share_of(room.bounds, side, WINDOW_EDGE_SHARE),
+            ),
+            Zone::Swap { .. } | Zone::Own | Zone::Outside => return Verdict::Nothing,
+        };
+        if let Some(placement) = placement {
+            return Verdict::Lands { zone, placement };
+        }
+        let edges: Vec<(Direction, Rect)> = [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ]
+        .into_iter()
+        .filter_map(|side| {
+            rest.plan_edge(side, carried, room)
+                .map(|placement| (side, placement.landing))
+        })
+        .collect();
+        if edges.is_empty() {
+            Verdict::NoRoom
+        } else {
+            Verdict::TooSmall {
+                zone,
+                region,
+                edges,
+            }
+        }
+    }
+
     /// The plan at the node `path` leads to, then at each node above it up to the root, the
     /// first that has room.
     fn plan_climbing(
@@ -1298,8 +1466,8 @@ fn wrap(node: &mut Tree, side: Direction, incoming: Tree, ratio: f64) {
 mod tests {
     use super::{
         Axis, Direction, Divider, Layout, PANE_EDGE_SHARE, Placement, Rect, Removal, Room,
-        SWAP_CORE, Share, Size, Slide, Spacing, Tree, WINDOW_EDGE_SHARE, WINDOW_EDGE_STRIP, Zone,
-        slide, sliver, solve_share, split_halves, split_halves_spaced,
+        SWAP_CORE, Share, Size, Slide, Spacing, Tree, Verdict, WINDOW_EDGE_SHARE,
+        WINDOW_EDGE_STRIP, Zone, slide, sliver, solve_share, split_halves, split_halves_spaced,
     };
 
     fn area(rect: &Rect) -> f64 {
@@ -2502,5 +2670,198 @@ mod tests {
             206.0,
             "the gap is the gap"
         );
+    }
+
+    // ----- the verdict -----
+
+    fn stacked(count: u64) -> Tree {
+        // Panes 1…count one above the other, equal.
+        let mut tree = Tree::Leaf(1);
+        for id in 2..=count {
+            assert!(tree.split(id - 1, Axis::Vertical, id));
+        }
+        tree.equalize();
+        tree
+    }
+
+    #[test]
+    fn a_zone_names_what_it_asks_for() {
+        let beside = |side| Zone::Beside { target: 1, side };
+        assert_eq!(beside(Direction::Left).label(), Some("Left"));
+        assert_eq!(beside(Direction::Right).label(), Some("Right"));
+        assert_eq!(beside(Direction::Up).label(), Some("Above"));
+        assert_eq!(beside(Direction::Down).label(), Some("Below"));
+        assert_eq!(
+            Zone::WindowEdge(Direction::Left).label(),
+            Some("Full height")
+        );
+        assert_eq!(
+            Zone::WindowEdge(Direction::Down).label(),
+            Some("Full width")
+        );
+        assert_eq!(Zone::Swap { target: 2 }.label(), Some("Swap"));
+        assert_eq!(Zone::Own.label(), None);
+        assert_eq!(Zone::Outside.label(), None);
+    }
+
+    #[test]
+    fn a_pane_over_the_edge_half_of_another_lands_there() {
+        let min = min_100_by_60;
+        let room = room_in(1001.0, 600.0, Spacing::DIVIDED, &min);
+        let tree = pair(Axis::Horizontal, 0.5, 1, 2);
+        // Pane 1 carried over the right edge of pane 2.
+        let verdict = tree.verdict(&Tree::Leaf(1), &room, (950.0, 300.0));
+        let Verdict::Lands { zone, placement } = verdict else {
+            panic!("expected a landing, got {verdict:?}");
+        };
+        assert_eq!(
+            zone,
+            Zone::Beside {
+                target: 2,
+                side: Direction::Right
+            }
+        );
+        assert_eq!(placement.tree, pair(Axis::Horizontal, 0.5, 2, 1));
+        assert!(placement.landing.x > 500.0, "{:?}", placement.landing);
+        assert!(!placement.made_room);
+    }
+
+    #[test]
+    fn the_middle_of_another_pane_is_a_swap_that_asks_for_no_room() {
+        let min = min_100_by_60;
+        let room = room_in(1001.0, 600.0, Spacing::DIVIDED, &min);
+        let tree = pair(Axis::Horizontal, 0.5, 1, 2);
+        let verdict = tree.verdict(&Tree::Leaf(1), &room, (750.0, 300.0));
+        let Verdict::Swaps {
+            target,
+            frame,
+            fits,
+        } = verdict
+        else {
+            panic!("expected a swap, got {verdict:?}");
+        };
+        assert_eq!(target, 2);
+        assert!(frame.x > 500.0);
+        assert!(fits);
+    }
+
+    #[test]
+    fn a_swap_that_leaves_a_pane_under_its_minimum_says_so() {
+        // Pane 1 is the narrow one (≈200 px) and pane 2 asks for 300: they cannot trade.
+        let min = |id: u64| {
+            if id == 2 {
+                Size::new(300.0, 60.0)
+            } else {
+                Size::new(100.0, 60.0)
+            }
+        };
+        let room = room_in(1001.0, 600.0, Spacing::DIVIDED, &min);
+        let tree = pair(Axis::Horizontal, 0.2, 1, 2);
+        let verdict = tree.verdict(&Tree::Leaf(1), &room, (600.0, 300.0));
+        assert!(
+            matches!(verdict, Verdict::Swaps { fits: false, .. }),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn a_block_from_another_tab_has_no_swap() {
+        let min = min_100_by_60;
+        let room = room_in(1001.0, 600.0, Spacing::DIVIDED, &min);
+        let tree = pair(Axis::Horizontal, 0.5, 1, 2);
+        // The same point that swaps a pane of this tab: for pane 9 it is the nearest edge's half.
+        let verdict = tree.verdict(&Tree::Leaf(9), &room, (750.0, 300.0));
+        assert!(matches!(verdict, Verdict::Lands { .. }), "{verdict:?}");
+    }
+
+    #[test]
+    fn the_carried_panes_own_place_and_the_outside_ask_for_nothing() {
+        let min = min_100_by_60;
+        let room = room_in(1001.0, 600.0, Spacing::DIVIDED, &min);
+        let tree = pair(Axis::Horizontal, 0.5, 1, 2);
+        assert_eq!(
+            tree.verdict(&Tree::Leaf(1), &room, (250.0, 300.0)),
+            Verdict::Nothing
+        );
+        assert_eq!(
+            tree.verdict(&Tree::Leaf(1), &room, (-5.0, 300.0)),
+            Verdict::Nothing
+        );
+    }
+
+    #[test]
+    fn a_tabs_only_pane_has_nowhere_to_go_inside_it() {
+        let min = min_100_by_60;
+        let room = room_in(1001.0, 600.0, Spacing::DIVIDED, &min);
+        let tree = Tree::Leaf(1);
+        for point in [(500.0, 300.0), (5.0, 300.0), (990.0, 20.0)] {
+            let verdict = tree.verdict(&Tree::Leaf(1), &room, point);
+            assert!(
+                matches!(verdict, Verdict::Nothing),
+                "{point:?}: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_edge_asks_for_the_whole_edge_and_lands_there() {
+        let min = min_100_by_60;
+        let room = room_in(1001.0, 600.0, Spacing::DIVIDED, &min);
+        let tree = pair(Axis::Horizontal, 0.5, 1, 2);
+        // Pane 2 carried to the window's left edge strip.
+        let verdict = tree.verdict(&Tree::Leaf(2), &room, (5.0, 300.0));
+        let Verdict::Lands { zone, placement } = verdict else {
+            panic!("expected a landing, got {verdict:?}");
+        };
+        assert_eq!(zone, Zone::WindowEdge(Direction::Left));
+        assert_eq!(placement.landing.x, 0.0);
+        assert_eq!(placement.landing.height, 600.0);
+    }
+
+    #[test]
+    fn a_block_that_does_not_fit_there_is_refused_with_the_edges_that_would_take_it() {
+        // Four panes stacked in 300 px with a 60 px minimum: a fifth cannot go above or below
+        // anything, but a column on either side takes it.
+        let min = min_100_by_60;
+        let room = room_in(1001.0, 300.0, Spacing::DIVIDED, &min);
+        let tree = stacked(4);
+        let layout = tree.layout_spaced(room.bounds, room.scale, room.spacing);
+        let top = frame_of(&layout, 2).y + 4.0;
+        let verdict = tree.verdict(&Tree::Leaf(5), &room, (500.0, top));
+        let Verdict::TooSmall {
+            zone,
+            region,
+            edges,
+        } = verdict
+        else {
+            panic!("expected a refusal, got {verdict:?}");
+        };
+        assert_eq!(
+            zone,
+            Zone::Beside {
+                target: 2,
+                side: Direction::Up
+            }
+        );
+        let pane = frame_of(&layout, 2);
+        assert_eq!(region.y, pane.y);
+        assert!((region.height - pane.height * PANE_EDGE_SHARE).abs() < 1e-9);
+        let sides: Vec<Direction> = edges.iter().map(|(side, _)| *side).collect();
+        assert_eq!(sides, [Direction::Left, Direction::Right]);
+    }
+
+    #[test]
+    fn a_block_that_fits_nowhere_says_there_is_no_room() {
+        let min = |id: u64| {
+            if id == 5 {
+                Size::new(2000.0, 60.0)
+            } else {
+                Size::new(100.0, 60.0)
+            }
+        };
+        let room = room_in(1001.0, 300.0, Spacing::DIVIDED, &min);
+        let tree = stacked(4);
+        let verdict = tree.verdict(&Tree::Leaf(5), &room, (500.0, 100.0));
+        assert_eq!(verdict, Verdict::NoRoom);
     }
 }

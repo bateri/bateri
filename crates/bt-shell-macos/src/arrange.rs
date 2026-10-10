@@ -438,6 +438,8 @@ struct FaceIvars {
     colors: Colors,
     status: Status,
     spans: Spans,
+    /// The pane the capsule is over: a press on the capsule takes it.
+    pane: u64,
 }
 
 define_class!(
@@ -481,6 +483,16 @@ define_class!(
             true
         }
 
+        /// A press on the capsule — its hold or its text, not a tool — takes
+        /// the pane: it is carried once the pointer travels
+        /// ([`crate::pane_drag`]). The rest of the gesture is the carry's own.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.pane_press(self.ivars().pane, event.locationInWindow());
+            }
+        }
+
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
             if let Some(at) = self.ivars().spans.grip {
@@ -520,7 +532,7 @@ define_class!(
 );
 
 /// Six dots in two columns: the hold.
-fn draw_grip(left: f64, middle: f64, ink: Tint) {
+pub(crate) fn draw_grip(left: f64, middle: f64, ink: Tint) {
     ink.color().setFill();
     for column in 0..2 {
         for row in 0..3 {
@@ -806,7 +818,7 @@ impl Overlay {
 // ─── Building a capsule and a plate ──────────────────────────────────────
 
 /// A label that never takes a press: the face under it decides.
-fn label(
+pub(crate) fn label(
     mtm: MainThreadMarker,
     text: &str,
     size: f64,
@@ -878,6 +890,7 @@ fn capsule(
         colors,
         status: entry.status,
         spans: laid.clone(),
+        pane: entry.pane,
     });
     // SAFETY: `initWithFrame:` is NSView's designated initializer and the
     // ivars are set.
@@ -934,7 +947,7 @@ fn plate(mtm: MainThreadMarker, theme: &Theme, frame: NSRect) -> Retained<NSBox>
 
 /// Runs `change` as an AppKit animation of `secs` on the app's curve
 /// (`cubic-bezier(0.2, 0.8, 0.2, 1)`), then `done`.
-fn animate(secs: f64, change: impl Fn() + 'static, done: impl Fn() + 'static) {
+pub(crate) fn animate(secs: f64, change: impl Fn() + 'static, done: impl Fn() + 'static) {
     let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
         // SAFETY: AppKit gives the block a live context, for the block's duration.
         let context = unsafe { context.as_ref() };

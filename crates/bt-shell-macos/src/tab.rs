@@ -751,6 +751,16 @@ impl TerminalTab {
         self.ivars().container.swap(a, b)
     }
 
+    /// The panes take the places of `tree`, which holds exactly this tab's
+    /// panes — one let go beside another or at the window's edge
+    /// ([`SplitView::rearrange`]). The zoom is dropped first: a move is a
+    /// layout change the user should see. `false` and nothing changes if the
+    /// tree is not these panes or a pane would be left below its smallest.
+    pub(crate) fn rearrange(&self, tree: Tree) -> bool {
+        self.set_zoom(None);
+        self.ivars().container.rearrange(tree)
+    }
+
     /// Where `incoming` (the tree of `moving`) would land if it joined this
     /// tab beside its focused pane, on `side` ([`SplitView::plan_beside`]).
     /// `None` when not even the whole area has room. The panes are asked

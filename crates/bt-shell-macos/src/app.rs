@@ -50,6 +50,7 @@ use crate::keeper::{self, Keeper, QuitKind, QuitPath};
 use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
 use crate::pane::{PaneLaunch, TerminalPane};
+use crate::pane_drag::Session;
 use crate::preview_cache;
 use crate::remote_files::Sweep;
 use crate::restore::{self, Frame, Saved, SavedPane, SavedWindow};
@@ -1437,6 +1438,9 @@ pub(crate) struct Ivars {
     /// ([`AppDelegate::forget_undo`]) and by what the picture no longer
     /// matches ([`AppDelegate::undo_ready`]).
     undo: RefCell<Option<Record>>,
+    /// A press with ⌥⌘ held that is, or may become, a pane's carry
+    /// ([`crate::pane_drag`]). One at a time; its monitor lives with it.
+    pane_drag: RefCell<Option<Session>>,
 }
 
 define_class!(
@@ -2730,6 +2734,7 @@ impl AppDelegate {
             tab_drag: RefCell::new(None),
             tab_drop: Cell::new(None),
             undo: RefCell::new(None),
+            pane_drag: RefCell::new(None),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -3766,8 +3771,9 @@ impl AppDelegate {
         self.ivars().undo.replace(Some(record));
     }
 
-    /// The tab list changed in a way the record does not know — selecting,
-    /// adding, closing, naming, reordering, a tab leaving or joining a window:
+    /// The tab list changed in a way the record does not know — adding,
+    /// closing, naming, reordering, a tab leaving or joining a window (not
+    /// selecting: the picture carries the selection and puts it back):
     /// the record is no longer a picture of what is there, and Undo Move
     /// goes grey. (A pane that closed or was born since is found out by the
     /// record's own question, [`Self::undo_ready`], since nothing of the tab
@@ -5516,7 +5522,10 @@ impl AppDelegate {
             self.arrange_lower(true);
             return;
         }
-        if iv.files_dragged.get() || iv.arranged.get().is_some() || iv.arrange_pending.replace(true)
+        if iv.files_dragged.get()
+            || iv.arranged.get().is_some()
+            || self.pane_dragging()
+            || iv.arrange_pending.replace(true)
         {
             return;
         }
@@ -5533,7 +5542,10 @@ impl AppDelegate {
 
     /// Lifts the key window's selected tab.
     fn arrange_raise(&self) {
-        if self.ivars().files_dragged.get() || self.ivars().arranged.get().is_some() {
+        if self.ivars().files_dragged.get()
+            || self.ivars().arranged.get().is_some()
+            || self.pane_dragging()
+        {
             return;
         }
         if let Some(window) = self.key_window() {
@@ -5560,12 +5572,55 @@ impl AppDelegate {
         if let Some(window) = self.window(window) {
             window.arrange_act(pane, tool);
         }
+        self.arrange_again();
+    }
+
+    /// Once a slide has played — a split, a move — the panes lift again if
+    /// the keys are still down.
+    fn arrange_again(&self) {
         arrange::after(Duration::from_millis(280), |app| {
             let iv = app.ivars();
             if iv.hold.get() == Hold::Arrange && !iv.arrange_pending.get() {
                 app.arrange_raise();
             }
         });
+    }
+
+    // ── Carrying a pane ([`crate::pane_drag`]) ───────────────────────────
+
+    /// The session's cell: [`Session`] is out of it while it handles an event.
+    pub(crate) fn pane_drag_cell(&self) -> &RefCell<Option<Session>> {
+        &self.ivars().pane_drag
+    }
+
+    /// Whether a carry (or a press that may become one) is on.
+    pub(crate) fn pane_dragging(&self) -> bool {
+        self.ivars().pane_drag.borrow().is_some()
+    }
+
+    /// A press with ⌥⌘ held on pane `pane`, at `at` (window coordinates): the
+    /// start of a carry if the pane has anywhere to go. A session that was
+    /// left behind (a release the app never saw) is ended first.
+    pub(crate) fn pane_press(&self, pane: u64, at: NSPoint) {
+        self.ivars().pane_drag.replace(None);
+        if let Some(session) = Session::press(self, pane, at) {
+            self.ivars().pane_drag.replace(Some(session));
+        }
+    }
+
+    /// The pointer went past the slop: the pane is carried, so the lift and
+    /// the capsules go — the keys may be let go from here on.
+    pub(crate) fn pane_drag_started(&self) {
+        let iv = self.ivars();
+        iv.arrange_wait.set(iv.arrange_wait.get().wrapping_add(1));
+        iv.arrange_pending.set(false);
+        self.arrange_lower(true);
+    }
+
+    /// The carry is over: if the keys are still down the panes lift again
+    /// once the slide has played.
+    pub(crate) fn pane_drag_ended(&self) {
+        self.arrange_again();
     }
 
     /// A Finder drag of files entered a pane (`entered`) or left or ended:
@@ -5582,6 +5637,7 @@ impl AppDelegate {
 
     /// The key window changed: whatever was lifted is set down.
     pub(crate) fn key_window_resigned(&self) {
+        self.ivars().pane_drag.replace(None);
         self.arrange_hold(false);
     }
 
