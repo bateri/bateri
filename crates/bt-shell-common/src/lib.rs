@@ -4,7 +4,7 @@
 //! touching a UI toolkit: the settings file and its diagnostics (`settings`,
 //! `notices`), the split layout tree (`split`), a window's tabs — their order,
 //! selection, ⌘1…⌘9, where the tab strip's parts sit and which indicator a
-//! tab shows (`tabs`), temporary
+//! tab shows (`tabs`), what Undo Move takes back (`undo`), temporary
 //! font size (`zoom`), the mouse gesture ledger (`gesture`), shell quoting
 //! (`quote`), key encoding (`keys`), what a ⌘-clicked link resolves to and
 //! what opening it does (`links`), the remote upload rules, processes and the
@@ -57,6 +57,7 @@ pub mod split;
 pub mod ssh_route;
 pub mod ssh_wrap;
 pub mod tabs;
+pub mod undo;
 pub mod upload;
 // Bodies exist for macOS and Linux only; elsewhere the module is absent
 // rather than half-present (a `Notify` without a `Watch`).

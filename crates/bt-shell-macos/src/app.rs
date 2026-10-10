@@ -24,13 +24,15 @@ use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Scrollb
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
     NSControlStateValueOn, NSDragOperation, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate,
     NSMenuItem, NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSScroller,
-    NSScrollerStyle, NSWindow, NSWindowNumberListOptions, NSWindowStyleMask,
+    NSScrollerStyle, NSText, NSWindow, NSWindowNumberListOptions, NSWindowStyleMask,
     NSWindowUserTabbingPreference, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
     NSWorkspaceWillPowerOffNotification,
@@ -56,6 +58,7 @@ use crate::ssh_route::{self, Masters};
 use crate::tab::{Histories, TabHost, TerminalTab};
 use crate::tab_drag::TabDragSource;
 use crate::tabs::Landing;
+use crate::undo::{Now, Record};
 use crate::watch::{Notify, Watch};
 use crate::window::{
     self, Adopted, CloseScope, Launch, Note, Placement, TerminalWindow, fallen_back,
@@ -1417,6 +1420,12 @@ pub(crate) struct Ivars {
     /// [`AppDelegate::tab_drag_ended`] carries it out: the windows are not
     /// touched inside the drop.
     tab_drop: Cell<Option<(u64, Landing)>>,
+    /// What Undo Move takes back: the last move of panes between tabs and
+    /// windows, as a picture of what it changed ([`Record`]). One step, and
+    /// dropped by every other change of the tab list
+    /// ([`AppDelegate::forget_undo`]) and by what the picture no longer
+    /// matches ([`AppDelegate::undo_ready`]).
+    undo: RefCell<Option<Record>>,
 }
 
 define_class!(
@@ -1851,9 +1860,21 @@ define_class!(
             } else if item.action() == Some(sel!(mergeWindows:)) {
                 // Merging needs a second window to take tabs from.
                 self.windows().len() > 1
+            } else if item.action() == Some(sel!(undoMove:)) {
+                // Edit ▸ Undo Move.
+                let ready = self.undo_ready();
+                item.setTitle(&NSString::from_str(if ready { "Undo Move" } else { "Undo" }));
+                ready
             } else {
                 true
             }
+        }
+
+        /// Edit ▸ Undo Move (⌘Z): the last move of panes between tabs and
+        /// windows goes back ([`AppDelegate::undo_move`]).
+        #[unsafe(method(undoMove:))]
+        fn undo_move_action(&self, _sender: Option<&AnyObject>) {
+            self.undo_move();
         }
 
         /// Shell ▸ New Tab (⌘T): a new tab in the active window, right of the
@@ -2693,6 +2714,7 @@ impl AppDelegate {
             command_hinted: Cell::new(false),
             tab_drag: RefCell::new(None),
             tab_drop: Cell::new(None),
+            undo: RefCell::new(None),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
@@ -3486,6 +3508,7 @@ impl AppDelegate {
                 .map(|index| windows.remove(index))
         };
         drop(removed);
+        self.forget_undo_of(id);
         self.layout_changed();
     }
 
@@ -3655,23 +3678,29 @@ impl AppDelegate {
             crate::preview::beep();
             return;
         }
+        let before = from.undo_scene(&[tab.id()]);
         let Some(released) = from.release_pane(tab.id(), pane) else {
             return;
         };
         let moved = TerminalTab::new(self.mtm(), self.next_id(), from.id(), &released);
-        self.open_window_around(from, moved, None);
+        let window = self.open_window_around(from, moved, None);
+        self.remember_undo(Record {
+            scenes: vec![before],
+            born: vec![window.id()],
+        });
     }
 
     /// A window around `moved`, a tab that has left `from`: the size and
     /// place `from` has (or, with `at`, its title row under that screen
     /// point), the theme of its focused pane, shown and brought up
     /// ([`TerminalWindow::show_arrived`]). No shell is started or told to end.
+    /// The window is returned.
     fn open_window_around(
         &self,
         from: &TerminalWindow,
         moved: Retained<TerminalTab>,
         at: Option<NSPoint>,
-    ) {
+    ) -> Retained<TerminalWindow> {
         let theme = moved
             .focused_pane()
             .session()
@@ -3711,6 +3740,143 @@ impl AppDelegate {
             window.float_for_timed_run();
         }
         window.show_arrived();
+        self.layout_changed();
+        window
+    }
+
+    /// A move is done and can be taken back: this is the one step Undo Move
+    /// has ([`Record`]), replacing the last. Written by the move that ends,
+    /// after its last layout edge.
+    pub(crate) fn remember_undo(&self, record: Record) {
+        self.ivars().undo.replace(Some(record));
+    }
+
+    /// The tab list changed in a way the record does not know — selecting,
+    /// adding, closing, naming, reordering, a tab leaving or joining a window:
+    /// the record is no longer a picture of what is there, and Undo Move
+    /// goes grey. (A pane that closed or was born since is found out by the
+    /// record's own question, [`Self::undo_ready`], since nothing of the tab
+    /// list announces it.)
+    pub(crate) fn forget_undo(&self) {
+        self.ivars().undo.replace(None);
+    }
+
+    /// Window `id` is gone: a record that names it is dropped.
+    fn forget_undo_of(&self, id: u64) {
+        let named = self
+            .ivars()
+            .undo
+            .borrow()
+            .as_ref()
+            .is_some_and(|record| record.involves(id));
+        if named {
+            self.forget_undo();
+        }
+    }
+
+    /// What the windows `record` names hold now ([`Record::holds`]); a
+    /// window that is gone has nothing to say.
+    fn undo_world(&self, record: &Record) -> Vec<Now> {
+        record
+            .scenes
+            .iter()
+            .map(|scene| scene.window)
+            .chain(record.born.iter().copied())
+            .filter_map(|id| self.window(id))
+            .map(|window| window.undo_now())
+            .collect()
+    }
+
+    /// Whether Undo Move can act: there is a record, the key window is one of
+    /// the windows it names and not editing text, and the picture is still true. A record whose
+    /// picture is not (a pane closed or was born since) is dropped here, the
+    /// first time anyone asks.
+    fn undo_ready(&self) -> bool {
+        let Some(key) = self.key_window() else {
+            return false;
+        };
+        // A field being edited (the search panel, a tab's name) has ⌘Z to
+        // itself: typing never moves a split.
+        let editing = key
+            .ns_window()
+            .firstResponder()
+            .is_some_and(|responder| responder.isKindOfClass(NSText::class()));
+        if editing {
+            return false;
+        }
+        let stale = match self.ivars().undo.borrow().as_ref() {
+            None => return false,
+            Some(record) if record.holds(&self.undo_world(record)) => {
+                return record.involves(key.id());
+            }
+            Some(_) => true,
+        };
+        if stale {
+            self.forget_undo();
+        }
+        false
+    }
+
+    /// Edit ▸ Undo Move: the picture of the last move goes back, as one step
+    /// with one layout edge, through the steps the moves are made of —
+    /// first what the move made comes apart and every pane involved lands in
+    /// one pool (a window the move made is emptied and closed, its tabs
+    /// leaving as in Merge All Windows, so no shell ends with it), then each
+    /// tab and strip is put as it was ([`TerminalWindow::undo_place`]). There
+    /// is no redo: the record is taken, and what follows is a new layout.
+    /// Nothing moves while a window of the record holds a question of its
+    /// own (a beep, like a selection would), and the record stays.
+    fn undo_move(&self) {
+        let Some(record) = self.ivars().undo.take() else {
+            return;
+        };
+        let world = self.undo_world(&record);
+        let windows: Vec<Retained<TerminalWindow>> = record
+            .scenes
+            .iter()
+            .map(|scene| scene.window)
+            .chain(record.born.iter().copied())
+            .filter_map(|id| self.window(id))
+            .collect();
+        if !record.holds(&world) {
+            crate::preview::beep();
+            return;
+        }
+        if windows.iter().any(|window| !window.selection_free()) {
+            crate::preview::beep();
+            self.ivars().undo.replace(Some(record));
+            return;
+        }
+        let mut pool: Vec<Retained<TerminalPane>> = Vec::new();
+        for scene in &record.scenes {
+            if let Some(window) = self.window(scene.window) {
+                window.undo_lift(scene, &mut pool);
+            }
+        }
+        for id in &record.born {
+            if let Some(window) = self.window(*id) {
+                window.undo_empty(&mut pool);
+                // Out of the list now, as Merge All Windows does: it holds no
+                // tab, so no shell ends with it.
+                self.unlist_window(*id);
+                window.close();
+            }
+        }
+        for scene in &record.scenes {
+            if let Some(window) = self.window(scene.window) {
+                window.undo_place(scene, &mut pool);
+            }
+        }
+        debug_assert!(pool.is_empty(), "every pane of the picture has a place");
+        if !record.born.is_empty()
+            && let Some(window) = record
+                .scenes
+                .first()
+                .and_then(|scene| self.window(scene.window))
+        {
+            // The window the move made was the key one and is gone.
+            window.select();
+        }
         self.layout_changed();
     }
 

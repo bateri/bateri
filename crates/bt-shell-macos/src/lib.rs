@@ -73,7 +73,7 @@ mod window;
 use bt_shell_common::{
     child, download, focus, gesture, handover, jobs, journal, keys, links, notices, port_forward,
     ports, preview_cache, program, quote, remote_files, remote_helper, restore, settings, split,
-    ssh_route, tabs, upload, watch, zoom,
+    ssh_route, tabs, undo, upload, watch, zoom,
 };
 
 use std::time::{Duration, Instant};

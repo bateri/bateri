@@ -2,7 +2,7 @@
 //! and — ⌥ held, under `keep_running = "quit"` only — Quit and End Programs), Shell (New
 //! Window, New Tab, New Local Tab, Mark Host as ▸, Shell Integration on Host,
 //! Forget Password, Cancel Upload, Open Port ▸, Split
-//! Right, Split Down, Close Tab/Close, Close Window), Edit (Cut, Copy, Paste, Paste
+//! Right, Split Down, Close Tab/Close, Close Window), Edit (Undo Move, Cut, Copy, Paste, Paste
 //! Escaped Text, Select All, Clear to Start, Clear Scrollback, Find ▸
 //! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
@@ -423,6 +423,13 @@ pub(crate) fn install(
         mtm,
         "Edit",
         &[
+            // Not the standard `undo:`: `NSWindow` answers that one itself (through
+            // its own, empty, undo manager) before the chain reaches the
+            // application, and the item would be grey for good. The application
+            // (`AppDelegate`'s `validateMenuItem:`) takes the last move of splits
+            // back, and is grey with none or while a text field is being edited.
+            item(mtm, "Undo", sel!(undoMove:), "z"),
+            NSMenuItem::separatorItem(mtm),
             item(mtm, "Cut", sel!(cut:), "x"),
             item(mtm, "Copy", sel!(copy:), "c"),
             item(mtm, "Paste", sel!(paste:), "v"),
@@ -797,6 +804,20 @@ fn submenu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2::ClassType;
+    use objc2_app_kit::NSWindow;
+
+    /// Edit ▸ Undo Move has a selector of its own because `NSWindow` answers the
+    /// standard `undo:` before the chain reaches the application (through its
+    /// own, empty, undo manager: the item would be grey for good, and nothing
+    /// shows it but a menu opened by hand); the application's delegate must
+    /// answer the one the item carries.
+    #[test]
+    fn undo_move_is_answered_by_the_application_and_not_by_the_window() {
+        assert!(NSWindow::class().responds_to(sel!(undo:)));
+        assert!(!NSWindow::class().responds_to(sel!(undoMove:)));
+        assert!(crate::app::AppDelegate::class().responds_to(sel!(undoMove:)));
+    }
 
     #[test]
     fn quit_and_end_programs_shows_only_while_quit_keeps_the_programs() {

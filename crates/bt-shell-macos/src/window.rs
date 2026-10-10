@@ -41,6 +41,14 @@
 //! belongs to the tab on screen or to the whole window, and another tab
 //! must not come up under it.
 //!
+//! **Undo Move is the appliers' too.** A move of panes writes down what it is
+//! about to change and leaves that picture ([`Record`]) after its last layout
+//! edge; every other applier of the tab list drops it
+//! ([`TerminalWindow::forget_undo`]), because the picture restores the whole
+//! strip. Taking it back is [`TerminalWindow::undo_lift`] then
+//! [`TerminalWindow::undo_place`] — the steps the moves are made of, ending in
+//! one layout edge.
+//!
 //! **A tab moves between windows as itself** (Move Tab to New Window, Merge
 //! All Windows, and a tab dragged out of its strip or onto another window's —
 //! the drag only picks the place, the move is the same one): it is taken out
@@ -109,6 +117,7 @@ use crate::split_view::SplitView;
 use crate::tab::{self, TerminalTab};
 use crate::tab_bar::{Label, TabBar};
 use crate::tabs::{self, Card, NewTab, Tabs};
+use crate::undo::{Now, Record, Scene, Shape};
 
 /// Whether the theme's background is dark — the window chrome's appearance
 /// (Aqua / DarkAqua) comes from this ([`TerminalWindow::apply_chrome`]).
@@ -465,13 +474,26 @@ pub(crate) fn alert(mtm: MainThreadMarker, prompt: &Prompt) -> Retained<NSAlert>
     alert
 }
 
-/// The direction of a Select/Resize Split ▸ item: the sender's `tag`.
+/// The panes of `pool` named by `ids`, in that order; each leaves the pool.
+fn take_panes(
+    pool: &mut Vec<Retained<TerminalPane>>,
+    ids: impl IntoIterator<Item = u64>,
+) -> Vec<Retained<TerminalPane>> {
+    ids.into_iter()
+        .filter_map(|id| {
+            let index = pool.iter().position(|pane| pane.id() == id)?;
+            Some(pool.remove(index))
+        })
+        .collect()
+}
+
 /// What a pane is called to VoiceOver: its session's title.
 fn pane_name(pane: &TerminalPane) -> String {
     pane.session()
         .map_or_else(|| "Split".to_owned(), |session| session.title())
 }
 
+/// The direction of a Select/Resize Split ▸ item: the sender's `tag`.
 fn direction_of(sender: Option<&AnyObject>) -> Option<Direction> {
     let item = sender?.downcast_ref::<NSMenuItem>()?;
     Direction::from_tag(item.tag())
@@ -1813,6 +1835,7 @@ impl TerminalWindow {
             beep();
             return false;
         }
+        self.forget_undo();
         let old = current.and_then(|current| self.tab(current));
         self.ivars().order.borrow_mut().select(id);
         self.switch(old.as_deref());
@@ -1829,6 +1852,7 @@ impl TerminalWindow {
     /// [`Self::selection_free`] before building the tab.
     pub(crate) fn add_tab(&self, tab: &TerminalTab, look: (Theme, ContentEdge)) {
         let (theme, edge) = look;
+        self.forget_undo();
         let old = self.ivars().order.borrow().selected();
         let old = old.and_then(|old| self.tab(old));
         tab.set_theme(theme);
@@ -1855,6 +1879,7 @@ impl TerminalWindow {
         let Some(tab) = self.tab(id) else {
             return;
         };
+        self.forget_undo();
         if self.tab_count() <= 1 {
             self.close();
             return;
@@ -1888,6 +1913,7 @@ impl TerminalWindow {
         if tab.name() == name {
             return;
         }
+        self.forget_undo();
         tab.set_name(name);
         self.refresh_title();
         self.layout_changed();
@@ -1926,6 +1952,7 @@ impl TerminalWindow {
     /// ([`Self::try_selected_tab`]). `None` if the tab is not here.
     pub(crate) fn release_tab(&self, id: u64) -> Option<Retained<TerminalTab>> {
         let tab = self.tab(id)?;
+        self.forget_undo();
         if self.tab_count() > 1 {
             self.leave_order(&tab);
         } else {
@@ -1955,6 +1982,7 @@ impl TerminalWindow {
     /// (a tab let go on the strip) the tab is selected and comes up the way a selected tab does
     /// ([`Self::switch`]) — what the window showed before leaves the screen first.
     pub(crate) fn adopt_tab(&self, tab: &Retained<TerminalTab>, placement: Placement) {
+        self.forget_undo();
         tab.moved_to(self.id());
         tab.container().setHidden(true);
         self.ivars().root.add_container(tab.container());
@@ -1986,6 +2014,7 @@ impl TerminalWindow {
         if self.tab(id).is_none() || !self.ivars().order.borrow_mut().move_to(id, index) {
             return;
         }
+        self.forget_undo();
         self.refresh_bar();
         self.layout_changed();
     }
@@ -2046,6 +2075,7 @@ impl TerminalWindow {
         let (Some(first), Some(second)) = (tab.container().pane(a), tab.container().pane(b)) else {
             return false;
         };
+        let before = self.undo_scene(&[tab.id()]);
         if !tab.swap(a, b) {
             beep();
             return false;
@@ -2056,6 +2086,7 @@ impl TerminalWindow {
             pane_name(&second)
         ));
         self.layout_changed();
+        self.remember(vec![before], Vec::new());
         true
     }
 
@@ -2128,10 +2159,15 @@ impl TerminalWindow {
             beep();
             return false;
         };
+        let before = self.undo_scene(&[source.id(), target]);
         let Some(released) = self.release_pane(source.id(), pane) else {
             return false;
         };
-        self.adopt_pane(&into, &[released], placement.tree)
+        let joined = self.adopt_pane(&into, &[released], placement.tree);
+        if joined {
+            self.remember(vec![before], Vec::new());
+        }
+        joined
     }
 
     /// **The applier: a tab joins another** as panes, beside the target's
@@ -2161,6 +2197,7 @@ impl TerminalWindow {
         };
         let focus = from.focused_pane().id();
         let was_selected = self.is_selected(source);
+        let before = self.undo_scene(&[source, into]);
         if !self
             .ivars()
             .order
@@ -2192,6 +2229,9 @@ impl TerminalWindow {
             }
         }
         self.refresh_title();
+        if joined {
+            self.remember(vec![before], Vec::new());
+        }
         true
     }
 
@@ -2206,6 +2246,7 @@ impl TerminalWindow {
         };
         let panes = source.panes().len();
         if panes <= 1 {
+            let before = self.undo_scene(&[]);
             let moved = self.ivars().order.borrow_mut().pane_to_new_tab(
                 source.id(),
                 panes,
@@ -2215,6 +2256,7 @@ impl TerminalWindow {
             if moved {
                 self.refresh_bar();
                 self.layout_changed();
+                self.remember(vec![before], Vec::new());
             }
             return moved;
         }
@@ -2238,30 +2280,215 @@ impl TerminalWindow {
         if !created {
             return false;
         }
+        let before = self.undo_scene(&[source.id()]);
         let Some(released) = self.release_pane(source.id(), pane) else {
             return false;
         };
-        let tab = TerminalTab::new(self.mtm(), new, self.id(), &released);
-        if let Some(session) = released.session() {
-            tab.set_theme(session.theme());
-        }
-        tab.set_content_edge(app.settings().content_edge);
-        // Hidden until selected, so its pane never answers "visible" from in
-        // between ([`Self::add_tab`]).
-        tab.container().setHidden(true);
-        self.ivars().root.add_container(tab.container());
-        self.ivars().tabs.borrow_mut().push(tab.clone());
+        let tab = self.born_tab(new, &released);
         self.ivars()
             .order
             .borrow_mut()
             .pane_to_new_tab(source.id(), panes, new, gap);
-        tab.apply_visibility(self.window_visible());
-        released.leave_screen();
-        tab.refresh_geometry();
+        self.settle_born(&tab, &released);
         self.announce(&format!("{} moved to a new tab", pane_name(&released)));
         self.refresh_title();
         self.layout_changed();
+        self.remember(vec![before], Vec::new());
         true
+    }
+
+    /// A tab `id` born around `first`, a pane that came from another tab: it
+    /// has the pane's theme and the application's top edge, and sits in the
+    /// window's hierarchy and list **hidden** — so its pane never answers
+    /// "visible" from in between ([`Self::add_tab`]) — but not yet in the
+    /// strip, which is the caller's ([`Self::settle_born`] after it).
+    fn born_tab(&self, id: u64, first: &TerminalPane) -> Retained<TerminalTab> {
+        let tab = TerminalTab::new(self.mtm(), id, self.id(), first);
+        if let Some(session) = first.session() {
+            tab.set_theme(session.theme());
+        }
+        if let Some(app) = app::delegate(self.mtm()) {
+            tab.set_content_edge(app.settings().content_edge);
+        }
+        tab.container().setHidden(true);
+        self.ivars().root.add_container(tab.container());
+        self.ivars().tabs.borrow_mut().push(tab.clone());
+        tab
+    }
+
+    /// A [`Self::born_tab`] that is in the strip learns where it is: its
+    /// pane hidden with it, the screen it is on.
+    fn settle_born(&self, tab: &TerminalTab, first: &TerminalPane) {
+        tab.apply_visibility(self.window_visible());
+        first.leave_screen();
+        tab.refresh_geometry();
+    }
+
+    /// What a move writes down before it changes anything: the strip as it
+    /// stands and the tabs `tabs` as they stand — name, split tree with its
+    /// ratios, the pane that has the keyboard ([`Scene`]).
+    pub(crate) fn undo_scene(&self, tabs: &[u64]) -> Scene {
+        Scene {
+            window: self.id(),
+            order: self.ivars().order.borrow().clone(),
+            shapes: tabs
+                .iter()
+                .filter_map(|&id| self.tab(id))
+                .map(|tab| Shape {
+                    tab: tab.id(),
+                    name: tab.name(),
+                    tree: tab.container().tree(),
+                    focus: tab.focused_pane().id(),
+                })
+                .collect(),
+        }
+    }
+
+    /// What this window holds now — the question a record asks to know it
+    /// is still true ([`Record::holds`]).
+    pub(crate) fn undo_now(&self) -> Now {
+        Now {
+            window: self.id(),
+            tabs: self
+                .tabs()
+                .iter()
+                .map(|tab| (tab.id(), tab.panes().iter().map(|pane| pane.id()).collect()))
+                .collect(),
+        }
+    }
+
+    /// A move is done: the record Undo Move takes back. Written by the move
+    /// that ends here, **after** its last layout edge — the outermost move,
+    /// not the steps it is made of ([`Self::release_pane`] with
+    /// [`Self::adopt_pane`] undo nothing alone).
+    fn remember(&self, scenes: Vec<Scene>, born: Vec<u64>) {
+        if let Some(app) = app::delegate(self.mtm()) {
+            app.remember_undo(Record { scenes, born });
+        }
+    }
+
+    /// The tab list changed in a way the record does not know: it is no
+    /// longer a picture of what is here ([`AppDelegate::forget_undo`]).
+    /// Every applier of the tab list but the moves calls it.
+    fn forget_undo(&self) {
+        if let Some(app) = app::delegate(self.mtm()) {
+            app.forget_undo();
+        }
+    }
+
+    /// **Undo Move, first half: what the move made comes apart.** Each tab
+    /// of `scene` that the move touched gives back the panes that are not
+    /// its own in the picture, and each tab the move made is taken apart —
+    /// all their panes go to `pool`, moved and not closed (their shells,
+    /// programs and questions go on). The picture is checked first
+    /// ([`Record::holds`]): a touched tab keeps at least one of its own, so
+    /// none is left empty.
+    pub(crate) fn undo_lift(&self, scene: &Scene, pool: &mut Vec<Retained<TerminalPane>>) {
+        for tab in self.tabs() {
+            if let Some(shape) = scene.shape(tab.id()) {
+                let own = shape.tree.leaves();
+                let foreign: Vec<u64> = tab
+                    .panes()
+                    .iter()
+                    .map(|pane| pane.id())
+                    .filter(|id| !own.contains(id))
+                    .collect();
+                for id in foreign {
+                    pool.extend(tab.release_pane(id));
+                }
+            } else if scene.made(tab.id()) {
+                tab.container().removeFromSuperview();
+                self.ivars()
+                    .tabs
+                    .borrow_mut()
+                    .retain(|kept| kept.id() != tab.id());
+                pool.extend(tab.drain());
+                self.retire(tab);
+            }
+        }
+    }
+
+    /// **Undo Move, for a window the move made:** its tabs leave with their
+    /// panes, which go to `pool` ([`Self::release_tab`]'s way for the last
+    /// tab, as Merge All Windows empties one); the caller closes the window.
+    pub(crate) fn undo_empty(&self, pool: &mut Vec<Retained<TerminalPane>>) {
+        for tab in self.tabs() {
+            if let Some(tab) = self.release_tab(tab.id()) {
+                pool.extend(tab.drain());
+            }
+        }
+    }
+
+    /// **Undo Move, second half: the picture goes back.** Each tab of
+    /// `scene` gets the panes of its shape from `pool` — a tab the move
+    /// closed is born again under its own identity — in its saved tree and
+    /// ratios, and its name; then the strip as it was, the selection with
+    /// it. The keyboard goes to the pane that had it there (as
+    /// [`Self::merge_tab`] does: on screen into the pane, off it into the
+    /// tab's memory), and a tree that no longer fits the window's smallest
+    /// panes is equalized, as a restored one ([`SplitView::fits`]).
+    pub(crate) fn undo_place(&self, scene: &Scene, pool: &mut Vec<Retained<TerminalPane>>) {
+        let old = self
+            .ivars()
+            .order
+            .borrow()
+            .selected()
+            .and_then(|id| self.tab(id));
+        let mut restored: Vec<(Retained<TerminalTab>, &Shape)> = Vec::new();
+        for shape in &scene.shapes {
+            let tab = if let Some(tab) = self.tab(shape.tab) {
+                let have: Vec<u64> = tab.panes().iter().map(|pane| pane.id()).collect();
+                let incoming = take_panes(
+                    pool,
+                    shape
+                        .tree
+                        .leaves()
+                        .into_iter()
+                        .filter(|id| !have.contains(id)),
+                );
+                let placed = tab.receive(&incoming, shape.tree.clone());
+                debug_assert!(placed, "the picture holds, so its tree is these panes");
+                for pane in &incoming {
+                    sheets::reopen_later(pane);
+                }
+                tab
+            } else {
+                let mut panes = take_panes(pool, shape.tree.leaves()).into_iter();
+                let Some(first) = panes.next() else {
+                    continue;
+                };
+                let rest: Vec<Retained<TerminalPane>> = panes.collect();
+                let tab = self.born_tab(shape.tab, &first);
+                self.settle_born(&tab, &first);
+                let placed = tab.receive(&rest, shape.tree.clone());
+                debug_assert!(placed, "the picture holds, so its tree is these panes");
+                sheets::reopen_later(&first);
+                for pane in &rest {
+                    sheets::reopen_later(pane);
+                }
+                tab
+            };
+            tab.set_name(shape.name.clone());
+            restored.push((tab, shape));
+        }
+        let selected = scene.order.selected();
+        self.ivars().order.replace(scene.order.clone());
+        self.switch(old.as_deref());
+        for (tab, shape) in &restored {
+            if let Some(pane) = tab.container().pane(shape.focus) {
+                if selected == Some(tab.id()) {
+                    tab.focus_pane(&pane);
+                } else {
+                    tab.pane_focused(shape.focus);
+                }
+            }
+            if !tab.container().fits() {
+                tab.container().equalize();
+            }
+        }
+        self.refresh_bar();
+        self.refresh_title();
+        self.announce("Move undone");
     }
 
     /// A window built around a tab that came from another one is on screen:
