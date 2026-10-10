@@ -26,7 +26,9 @@
 //! the window holds the tab strongly and the tab holds the panes, so a back
 //! reference either way would be a cycle. The AppKit facts the tab needs —
 //! the first responder, the occlusion state — come from its container's own
-//! `window()`.
+//! `window()`. A pane that moves to another tab is given the new tab's id
+//! ([`PaneHost::rehomed`]); without it its events would go on reaching the tab
+//! it left.
 //!
 //! **The focused pane** is the pane of the window's first responder
 //! ([`TerminalTab::focused_pane`]): the title, `⇄`, upload percentage and
@@ -53,7 +55,7 @@ use crate::notices::Source;
 use crate::pane::{PaneHost, PaneLaunch, TerminalPane};
 use crate::restore::{SavedTab, Shape};
 use crate::sheets;
-use crate::split::{Axis, Direction, Removal, Tree};
+use crate::split::{Axis, Direction, Placement, Removal, Tree};
 use crate::split_view::SplitView;
 use crate::tab_bar::Upload;
 use crate::tabs::{self, Card, CardCommand, Indicator, Signals, Tally, Unseen};
@@ -73,12 +75,16 @@ pub(crate) type Histories = Vec<(TabId, Vec<u8>)>;
 /// slot set up afterwards. If the tab's window left the list the event is
 /// dropped.
 pub(crate) struct TabHost {
-    tab: u64,
+    /// The tab the pane is in; it changes when the pane is moved to another
+    /// ([`PaneHost::rehomed`]).
+    tab: Cell<u64>,
 }
 
 impl TabHost {
     pub(crate) fn new(tab: u64) -> Self {
-        Self { tab }
+        Self {
+            tab: Cell::new(tab),
+        }
     }
 
     /// We are on the main thread: all of `PaneHost`'s calls come from the
@@ -89,7 +95,7 @@ impl TabHost {
     }
 
     fn tab(&self) -> Option<Retained<TerminalTab>> {
-        app::delegate(Self::mtm())?.tab(self.tab)
+        app::delegate(Self::mtm())?.tab(self.tab.get())
     }
 }
 
@@ -137,6 +143,10 @@ impl PaneHost for TabHost {
         if let Some(app) = app::delegate(Self::mtm()) {
             app.post_notices(source, messages);
         }
+    }
+
+    fn rehomed(&self, _pane: u64, tab: u64) {
+        self.tab.set(tab);
     }
 }
 
@@ -245,6 +255,9 @@ impl TerminalTab {
         pane: &TerminalPane,
     ) -> Retained<Self> {
         let container = SplitView::new(mtm, initial_rect(), pane);
+        // A pane that came from another tab (split off, moved here) reaches
+        // this one from now on.
+        pane.host().rehomed(pane.id(), id);
         let this = Self::alloc(mtm).set_ivars(TabIvars {
             id,
             window: Cell::new(window),
@@ -617,6 +630,129 @@ impl TerminalTab {
         }
     }
 
+    /// The focused pane and its neighbour toward `direction`, the two a
+    /// swap trades; `None` at the edge.
+    pub(crate) fn swap_toward(&self, direction: Direction) -> Option<(u64, u64)> {
+        let from = self.focused_pane().id();
+        let to = self.ivars().container.neighbour(from, direction)?;
+        Some((from, to))
+    }
+
+    /// Panes `a` and `b` trade places ([`SplitView::swap`]); the zoom is
+    /// dropped first, a swap is a layout change the user should see. `false`
+    /// if a pane would have to be smaller than its smallest in the other's
+    /// place.
+    pub(crate) fn swap(&self, a: u64, b: u64) -> bool {
+        self.set_zoom(None);
+        self.ivars().container.swap(a, b)
+    }
+
+    /// Where `incoming` (the tree of `moving`) would land if it joined this
+    /// tab beside its focused pane, on `side` ([`SplitView::plan_beside`]).
+    /// `None` when not even the whole area has room. The panes are asked
+    /// about **before** they leave their tab.
+    pub(crate) fn plan_beside(
+        &self,
+        side: Direction,
+        incoming: &Tree,
+        moving: &[Retained<TerminalPane>],
+    ) -> Option<Placement> {
+        let leaf = self.focused_pane().id();
+        self.ivars()
+            .container
+            .plan_beside(leaf, side, incoming, moving)
+    }
+
+    /// Pane `id` leaves the tab for another (not its last: a tab's only pane
+    /// is the tab, [`Self::drain`]) — **moved, not closed**: its shell, its
+    /// questions and its programs go on. Its questions are lowered while it
+    /// still stands here ([`sheets::lift`]), the focus goes to its neighbour
+    /// first when it had it (the window must not be left without a
+    /// responder, as in [`Self::close_pane`]) and the zoom drops. `None` if
+    /// it is not here or is the last.
+    pub(crate) fn release_pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
+        let container = &self.ivars().container;
+        let pane = container.pane(id)?;
+        if container.panes().len() < 2 {
+            return None;
+        }
+        let was_focused = self.focused_pane().id() == id;
+        self.set_zoom(None);
+        let Removal::Removed { focus } = container.remove_leaf(id) else {
+            return None;
+        };
+        sheets::lift(&pane);
+        if was_focused && let Some(next) = container.pane(focus) {
+            self.focus_pane(&next);
+        }
+        let released = container.detach(id)?;
+        self.refresh_title();
+        self.refresh_look();
+        Some(released)
+    }
+
+    /// Every pane leaves — the tab has left the window's order and is
+    /// thrown away, its panes carried on elsewhere ([`Self::release_pane`]'s
+    /// way for all of them): questions lowered, then the panes out in tree
+    /// order, then the tab's question owner taken apart. The tab must not be
+    /// asked for its focused pane afterwards.
+    pub(crate) fn drain(&self) -> Vec<Retained<TerminalPane>> {
+        let container = &self.ivars().container;
+        for pane in container.panes() {
+            sheets::lift(&pane);
+        }
+        let panes = container.drain();
+        sheets::dismantle(container);
+        panes
+    }
+
+    /// Panes arrive in this tab as `tree` lays them out ([`Placement::tree`]
+    /// of a plan, [`Self::plan_beside`]): they join the container at their
+    /// final size, are told they are this tab's ([`PaneHost::rehomed`]) and
+    /// their ended-command counts are taken as seen, so what ended before
+    /// the move is not news here. A tab not on screen puts them off screen
+    /// like its own; one on screen shows them. The keyboard stays where it
+    /// is: giving it to a pane here is the caller's ([`Self::focus_pane`] on
+    /// screen, [`Self::pane_focused`] off it).
+    pub(crate) fn receive(&self, panes: &[Retained<TerminalPane>], tree: Tree) -> bool {
+        self.set_zoom(None);
+        if !self.ivars().container.receive(tree, panes) {
+            return false;
+        }
+        for pane in panes {
+            pane.host().rehomed(pane.id(), self.id());
+            self.take_as_seen(pane);
+        }
+        self.apply_visibility(self.window_visible());
+        let key = self.ns_window().is_some_and(|window| window.isKeyWindow());
+        let shown = !self.ivars().container.isHiddenOrHasHiddenAncestor();
+        for pane in panes {
+            if shown {
+                pane.apply_focus(key);
+            } else {
+                pane.leave_screen();
+            }
+            pane.refresh_geometry();
+        }
+        self.refresh_look();
+        true
+    }
+
+    /// `pane`'s ended-command counts so far are seen: the baseline the next
+    /// read ([`Self::observe_ends`]) compares with.
+    fn take_as_seen(&self, pane: &TerminalPane) {
+        let Some(activity) = pane.session().map(|session| session.activity()) else {
+            return;
+        };
+        self.ivars().tallies.borrow_mut().push((
+            pane.id(),
+            Tally {
+                finished: activity.finished,
+                failed: activity.failed,
+            },
+        ));
+    }
+
     /// The window writes the titles again — this tab's in the bar and, if it
     /// is the selected one, the window's ([`TerminalWindow::refresh_title`])
     /// — the pane's title news and the focus change.
@@ -665,12 +801,7 @@ impl TerminalTab {
     /// open ([`sheets::hide_owner`]). Called after the container is hidden.
     pub(crate) fn leave_screen(&self) {
         for pane in self.panes() {
-            pane.apply_focus(false);
-            pane.close_stats_popover();
-            pane.close_upload_list();
-            pane.unhover_footer();
-            pane.view().clear_link();
-            pane.view().release_scrollbar_hover();
+            pane.leave_screen();
         }
         sheets::hide_owner(self.container());
     }

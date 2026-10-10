@@ -1199,6 +1199,78 @@ mod tests {
         ));
     }
 
+    /// A pane carried from one tab to another leaves both tabs saved whole,
+    /// and the carried pane's identity (its `bateri://tab/` URL, its history
+    /// file) is in the tab it went to: what a crash restores is the layout the
+    /// move made.
+    #[test]
+    fn a_moved_pane_is_saved_in_the_tab_it_went_to() {
+        use crate::split::{Direction, Removal, Room, Size, Spacing};
+
+        let ids = [
+            A,
+            B,
+            C,
+            "22222222-3333-4444-5555-666666666666",
+            "33333333-4444-5555-6666-777777777777",
+        ];
+        let leaf = |n: u64| Box::new(Tree::Leaf(n));
+        let split = |axis, ratio, first, second| Tree::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        };
+        // Tab one: 1 | (2 / 3). Tab two: 4 | 5. Pane 3 goes under pane 5.
+        let mut source = split(
+            Axis::Horizontal,
+            0.4,
+            leaf(1),
+            Box::new(split(Axis::Vertical, 0.5, leaf(2), leaf(3))),
+        );
+        let target = split(Axis::Horizontal, 0.5, leaf(4), leaf(5));
+        assert!(matches!(source.remove(3), Removal::Removed { .. }));
+        let min = |_: u64| Size::new(80.0, 60.0);
+        let room = Room {
+            bounds: crate::split::Rect::new(0.0, 0.0, 1000.0, 700.0),
+            scale: 2.0,
+            spacing: Spacing::gapped(6.0, 6.0, 2.0),
+            min: &min,
+        };
+        let placed = target
+            .plan_beside(5, Direction::Down, &Tree::Leaf(3), &room)
+            .expect("room for one pane");
+        let saved_tab = |tree: &Tree| {
+            let order = tree.leaves();
+            SavedTab {
+                shape: Shape::from_tree(tree, &order).expect("every leaf is known"),
+                panes: order.iter().map(|&n| pane(ids[n as usize - 1])).collect(),
+                focused: 0,
+                zoomed: None,
+                name: None,
+            }
+        };
+        let saved = Saved {
+            windows: vec![window(vec![saved_tab(&source), saved_tab(&placed.tree)])],
+        };
+        let back = Saved::parse(&saved.render()).expect("the layout reads back");
+        assert_eq!(back, saved);
+        let [first, second] = &back.windows[0].tabs[..] else {
+            panic!("two tabs");
+        };
+        let held = |tab: &SavedTab| -> Vec<TabId> {
+            tab.panes.iter().map(|pane| pane.tab_id.clone()).collect()
+        };
+        assert!(!held(first).contains(&id(ids[2])));
+        assert!(held(second).contains(&id(ids[2])));
+        // Both shapes rebuild the trees the move made.
+        assert_eq!(first.shape.to_tree(&source.leaves()), Some(source));
+        assert_eq!(
+            second.shape.to_tree(&placed.tree.leaves()),
+            Some(placed.tree)
+        );
+    }
+
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).expect("metadata").permissions().mode() & 0o777
     }

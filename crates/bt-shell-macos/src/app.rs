@@ -2699,7 +2699,7 @@ impl AppDelegate {
     }
 
     /// Identity of a new window, tab or pane; the counter only goes up.
-    fn next_id(&self) -> u64 {
+    pub(crate) fn next_id(&self) -> u64 {
         let id = self.ivars().next_id.get();
         self.ivars().next_id.set(id + 1);
         id
@@ -2937,6 +2937,15 @@ impl AppDelegate {
     /// Shell ▸ Mark … as ▸ (`TerminalTab::mark_target`).
     pub(crate) fn key_mark_target(&self) -> Option<(String, HostMark, MarkSubject)> {
         self.key_tab()?.mark_target()
+    }
+
+    /// The tabs a split of the key window's selected tab can be moved to
+    /// (id, title): the list Window ▸ Move Split to Tab ▸ is filled with on
+    /// opening; empty when no terminal window is key or it has one tab.
+    pub(crate) fn key_move_targets(&self) -> Vec<(u64, String)> {
+        self.key_window()
+            .map(|window| window.move_targets())
+            .unwrap_or_default()
     }
 
     /// The ports of the key tab's focused pane — its programs' and, in a
@@ -3624,6 +3633,45 @@ impl AppDelegate {
         let Some(moved) = from.release_tab(tab) else {
             return;
         };
+        self.open_window_around(from, moved, at);
+    }
+
+    /// Move Split to New Window: pane `pane` of `from` becomes a window of
+    /// its own, the size and place its window had, cascaded — the pane itself,
+    /// not a copy: its shell, programs and questions go on. It is a tab of
+    /// that window ([`TerminalTab::new`]), not a split of one. A tab's only
+    /// pane is its tab, so that moves as it does in Move Tab to New Window
+    /// and a window's only pane stays where it is. Nothing moves while the
+    /// window holds a question of its own (a beep).
+    pub(crate) fn pane_to_new_window(&self, from: &TerminalWindow, pane: u64) {
+        let Some(tab) = from.tab_holding(pane) else {
+            return;
+        };
+        if tab.panes().len() == 1 {
+            self.tab_to_new_window(from, tab.id(), None);
+            return;
+        }
+        if !from.selection_free() {
+            crate::preview::beep();
+            return;
+        }
+        let Some(released) = from.release_pane(tab.id(), pane) else {
+            return;
+        };
+        let moved = TerminalTab::new(self.mtm(), self.next_id(), from.id(), &released);
+        self.open_window_around(from, moved, None);
+    }
+
+    /// A window around `moved`, a tab that has left `from`: the size and
+    /// place `from` has (or, with `at`, its title row under that screen
+    /// point), the theme of its focused pane, shown and brought up
+    /// ([`TerminalWindow::show_arrived`]). No shell is started or told to end.
+    fn open_window_around(
+        &self,
+        from: &TerminalWindow,
+        moved: Retained<TerminalTab>,
+        at: Option<NSPoint>,
+    ) {
         let theme = moved
             .focused_pane()
             .session()

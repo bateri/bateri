@@ -99,6 +99,11 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 
+/// The title of Window ▸ Move Split to Tab ▸ — also how its delegate knows the
+/// menu ([`ShellMenuDelegate`]): the list is the key window's other tabs, built
+/// on opening.
+const MOVE_TO_TAB_TITLE: &str = "Move Split to Tab";
+
 /// The `tag` of the Shell ▸ Mark … as ▸ holder: [`ShellMenuDelegate`] finds it in
 /// the Shell menu with this.
 const MARK_HOLDER_TAG: isize = 37;
@@ -257,6 +262,11 @@ define_class!(
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, menu: &NSMenu) {
             let app = crate::app::delegate(self.mtm());
+            if menu.title().to_string() == MOVE_TO_TAB_TITLE {
+                let targets = app.as_ref().map(|app| app.key_move_targets());
+                fill_move_targets(self.mtm(), menu, &targets.unwrap_or_default());
+                return;
+            }
             // Open Port ▸: the focused pane's listening ports, grey without
             // one — also while a full-screen program hides the dock.
             if let Some(holder) = menu.itemWithTag(PORTS_HOLDER_TAG) {
@@ -294,6 +304,25 @@ define_class!(
         }
     }
 );
+
+/// Fills Window ▸ Move Split to Tab ▸ with the tabs a split can go to: one
+/// item each, its `tag` the tab ([`crate::tabs::menu_tag`]) — the window's
+/// `movePaneToTab:` reads it. A window with one tab lists a grey placeholder.
+fn fill_move_targets(mtm: MainThreadMarker, menu: &NSMenu, targets: &[(u64, String)]) {
+    menu.removeAllItems();
+    for (id, title) in targets {
+        let entry = item(mtm, title, sel!(movePaneToTab:), "");
+        entry.setTag(crate::tabs::menu_tag(*id));
+        menu.addItem(&entry);
+    }
+    if targets.is_empty() {
+        // No tab tag: the window's validation greys it too, but this menu is
+        // filled as it opens, so it is said here as well.
+        let none = item(mtm, "No Other Tabs", sel!(movePaneToTab:), "");
+        none.setEnabled(false);
+        menu.addItem(&none);
+    }
+}
 
 impl ShellMenuDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
@@ -538,6 +567,18 @@ pub(crate) fn install(
     };
     let select_split = directed(sel!(selectSplit:), command | NSEventModifierFlags::Option);
     let resize_split = directed(sel!(resizeSplit:), command | NSEventModifierFlags::Control);
+    let swap_split = directed(
+        sel!(swapSplit:),
+        command | NSEventModifierFlags::Option | NSEventModifierFlags::Shift,
+    );
+    // The tabs a split can go to are filled when the menu opens
+    // ([`ShellMenuDelegate`]); the placeholder is what a menu that never
+    // opened would show.
+    let move_to_tab = submenu(
+        mtm,
+        MOVE_TO_TAB_TITLE,
+        &[item(mtm, "No Other Tabs", sel!(movePaneToTab:), "")],
+    );
     let window_menu = submenu(
         mtm,
         "Window",
@@ -574,6 +615,7 @@ pub(crate) fn install(
             item(mtm, "Select Next Split", sel!(selectNextSplit:), "]"),
             submenu(mtm, "Select Split", &select_split),
             submenu(mtm, "Resize Split", &resize_split),
+            submenu(mtm, "Swap Split", &swap_split),
             with_modifiers(
                 item(mtm, "Equalize Splits", sel!(equalizeSplits:), "="),
                 command | NSEventModifierFlags::Control,
@@ -581,6 +623,31 @@ pub(crate) fn install(
             with_modifiers(
                 item(mtm, "Zoom Split", sel!(toggleSplitZoom:), "\r"),
                 command | NSEventModifierFlags::Shift,
+            ),
+            NSMenuItem::separatorItem(mtm),
+            // A split leaves for a tab or a window (`TerminalWindow`'s
+            // appliers); the shortcuts are Previous / Next Tab's with ⌥ —
+            // `{`/`}` carry the Shift as there. Greyed by `validateMenuItem:`.
+            item(mtm, "Move Split to New Tab", sel!(movePaneToNewTab:), ""),
+            move_to_tab.clone(),
+            item(
+                mtm,
+                "Move Split to New Window",
+                sel!(movePaneToNewWindow:),
+                "",
+            ),
+            with_modifiers(
+                item(
+                    mtm,
+                    "Move Split to Previous Tab",
+                    sel!(movePaneToPreviousTab:),
+                    "{",
+                ),
+                command | NSEventModifierFlags::Option,
+            ),
+            with_modifiers(
+                item(mtm, "Move Split to Next Tab", sel!(movePaneToNextTab:), "}"),
+                command | NSEventModifierFlags::Option,
             ),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Move Tab to New Window", sel!(detachTab:), ""),
@@ -600,6 +667,9 @@ pub(crate) fn install(
     app.setWindowsMenu(window_menu.submenu().as_deref());
     let shell_delegate = ShellMenuDelegate::new(mtm);
     if let Some(menu) = shell_menu.submenu() {
+        menu.setDelegate(Some(ProtocolObject::from_ref(&*shell_delegate)));
+    }
+    if let Some(menu) = move_to_tab.submenu() {
         menu.setDelegate(Some(ProtocolObject::from_ref(&*shell_delegate)));
     }
     shell_delegate

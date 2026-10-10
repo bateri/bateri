@@ -36,6 +36,14 @@
 //! out until it is selected there. A parked question sits in its pane and
 //! does not care which window that is in.
 //!
+//! **A pane that moves to another tab takes its question along too**, but
+//! the question sits on the tab it leaves, so it is lowered first and asked
+//! again where the pane lands ([`lift`]): the sheet ends without its asker
+//! hearing an answer and goes back to the front of the pane's parked
+//! questions, which open as for any pane whose tab is not on screen. A
+//! question is kept as begun, so what it holds goes with it; a text typed
+//! into it may not.
+//!
 //! A **window's** question still sits on the window and blocks it, bar
 //! included: the selection does not move under it ([`window_asks`]). A
 //! window's question does not open over a tab's question on screen, nor a
@@ -73,8 +81,9 @@
 //! this file; the settings window's own panel (a window of its own, never a
 //! terminal's) is exempt.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use block2::{DynBlock, RcBlock};
 use dispatch2::{DispatchQueue, MainThreadBound};
@@ -122,9 +131,21 @@ pub(crate) struct Parked {
     answered: RcBlock<dyn Fn(NSModalResponse)>,
 }
 
+#[derive(Clone)]
 enum Sheet {
     Alert(Retained<NSAlert>),
     Panel(Retained<NSSavePanel>),
+}
+
+/// A question a pane has up on its tab's owner: what [`lift`] needs to
+/// lower it without an answer and put it back in the pane's queue.
+pub(crate) struct Opened {
+    sheet: Sheet,
+    /// The asker's own completion block, as begun.
+    answered: RcBlock<dyn Fn(NSModalResponse)>,
+    /// Set by [`lift`] before it ends the sheet: the block AppKit holds then
+    /// forwards nothing, so the asker hears no answer.
+    lifted: Rc<Cell<bool>>,
 }
 
 impl Sheet {
@@ -136,6 +157,17 @@ impl Sheet {
             Sheet::Panel(panel) => {
                 let panel: &NSWindow = panel;
                 std::ptr::eq(panel, window)
+            }
+        }
+    }
+
+    /// The sheet's own window.
+    fn window(&self) -> Retained<NSWindow> {
+        match self {
+            Sheet::Alert(alert) => alert.window(),
+            Sheet::Panel(panel) => {
+                let panel: &NSWindow = panel;
+                panel.retain()
             }
         }
     }
@@ -246,7 +278,7 @@ impl Seat {
         };
         if may_open(pane.tab_shown(), self.sheet_up()) {
             let owner = owner_of(&container, &self.window);
-            sheet.begin(&owner, answered);
+            open_on(pane, &owner, sheet, answered.copy());
             return;
         }
         pane.parked().borrow_mut().push_back(Parked {
@@ -299,9 +331,83 @@ pub(crate) fn open_parked(pane: &TerminalPane) {
     let parked = pane.parked().borrow_mut().pop_front();
     if let Some(parked) = parked {
         let owner = owner_of(&container, &seat.window);
-        parked.sheet.begin(&owner, &parked.answered);
+        open_on(pane, &owner, parked.sheet, parked.answered);
         marks_changed(&seat.window);
     }
+}
+
+/// Opens `sheet` on the tab's `owner` as `pane`'s question and records it
+/// ([`Opened`]). AppKit holds a block of ours that forgets the record when
+/// the sheet ends and forwards to the asker's `answered` — unless [`lift`]
+/// ended it.
+fn open_on(
+    pane: &TerminalPane,
+    owner: &NSWindow,
+    sheet: Sheet,
+    answered: RcBlock<dyn Fn(NSModalResponse)>,
+) {
+    let lifted = Rc::new(Cell::new(false));
+    let gate = lifted.clone();
+    let inner = answered.clone();
+    let weak = Weak::new(pane);
+    let forward = RcBlock::new(move |code: NSModalResponse| {
+        if gate.get() {
+            return;
+        }
+        if let Some(pane) = weak.load() {
+            pane.opened()
+                .borrow_mut()
+                .retain(|open| !Rc::ptr_eq(&open.lifted, &gate));
+        }
+        inner.call((code,));
+    });
+    pane.opened().borrow_mut().push(Opened {
+        sheet: sheet.clone(),
+        answered,
+        lifted,
+    });
+    sheet.begin(owner, &forward);
+}
+
+/// The pane is about to move to another tab: every question it has up on
+/// this tab's owner is lowered **without an answer** and goes to the front
+/// of its parked questions, oldest first — it opens where the pane lands,
+/// when that tab is on screen ([`reopen_later`]). The asker's own slot and
+/// gate stay as they were: it asked once and is still waiting. Before the
+/// pane leaves its container (the seat is resolved from where the pane
+/// stands, [`seat`]) and before anything that would answer `Cancel`
+/// ([`dismantle`]).
+pub(crate) fn lift(pane: &TerminalPane) {
+    let opened: Vec<Opened> = pane.opened().borrow_mut().drain(..).collect();
+    let mut lowered = Vec::with_capacity(opened.len());
+    for open in opened {
+        open.lifted.set(true);
+        let window = open.sheet.window();
+        if let Some(parent) = window.sheetParent() {
+            parent.endSheet_returnCode(&window, NSModalResponseCancel);
+        }
+        lowered.push(Parked {
+            sheet: open.sheet,
+            answered: open.answered,
+        });
+    }
+    let mut queue = pane.parked().borrow_mut();
+    for parked in lowered.into_iter().rev() {
+        queue.push_front(parked);
+    }
+}
+
+/// A lowered question ([`lift`]) opens where its pane landed, a main-queue
+/// turn after the sheet it was lowered from has gone — the same turn would
+/// begin a sheet while the first is still leaving. A no-op in a tab that is
+/// not on screen (it opens when the tab comes up, [`open_parked`]).
+pub(crate) fn reopen_later(pane: &TerminalPane) {
+    let pane = MainThreadBound::new(pane.retain(), pane.mtm());
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        open_parked(pane.get(mtm));
+    });
 }
 
 /// The pane is closing: every parked question is answered `Cancel`

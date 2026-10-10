@@ -71,7 +71,9 @@ use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 use crate::card::{self, Change, GAP_PT};
 use crate::pane::TerminalPane;
 use crate::sheets::OwnerSlot;
-use crate::split::{self, Axis, Direction, Divider, Rect, Removal, Room, Size, Spacing, Tree};
+use crate::split::{
+    self, Axis, Direction, Divider, Placement, Rect, Removal, Room, Size, Spacing, Tree,
+};
 
 /// Half of the least width of a divider's hit area, in points. A design
 /// constant, not a measured one: a band under six points is hard to grab with
@@ -459,6 +461,87 @@ impl SplitView {
         }
         self.layout_panes();
         true
+    }
+
+    /// Panes join the tab as it moves them in: `tree` is the new tree
+    /// (every pane of the container and every one of `panes`, nothing else)
+    /// and the panes are laid out in it at once — a pane meets only its final
+    /// size, so its program is resized once. A single pane becoming several
+    /// slides into its card as it does when it splits ([`SplitView::insert`]).
+    /// `false` and nothing changes if the leaves are not exactly those.
+    pub(crate) fn receive(&self, tree: Tree, panes: &[Retained<TerminalPane>]) -> bool {
+        let before = self.snapshot();
+        if !self.adopt(tree, panes) {
+            return false;
+        }
+        if before.len() == 1 {
+            self.slide(&before, None);
+        }
+        true
+    }
+
+    /// Where `incoming` (the tree of `moving`, panes that may be in another
+    /// tab) would land if let go on `side` of `leaf` — the placement the
+    /// drop makes ([`Tree::plan_beside`]), in this container's room with the
+    /// cards' spacing of the tree it would become. The smallest pane
+    /// each of `moving` is held to is its own, measured where it is now: ask
+    /// **before** the pane leaves its window.
+    pub(crate) fn plan_beside(
+        &self,
+        leaf: u64,
+        side: Direction,
+        incoming: &Tree,
+        moving: &[Retained<TerminalPane>],
+    ) -> Option<Placement> {
+        let scale = self.scale();
+        let own = self.ivars().panes.borrow().clone();
+        let min = move |id: u64| {
+            own.iter()
+                .chain(moving.iter())
+                .find(|pane| pane.id() == id)
+                .and_then(|pane| pane.min_size())
+                .map_or(Size::new(0.0, 0.0), |min| Size::new(min.width, min.height))
+        };
+        let tree = self.ivars().tree.borrow();
+        let room = Room {
+            bounds: self.bounds_rect(),
+            scale,
+            spacing: spacing(tree.leaves().len() + incoming.leaves().len(), scale),
+            min: &min,
+        };
+        tree.plan_beside(leaf, side, incoming, &room)
+    }
+
+    /// Panes `a` and `b` trade places ([`Tree::swap`]): each takes the
+    /// other's frame and the ratios stay, so the grids change size only if
+    /// the two frames differ.
+    ///
+    /// `false` and nothing changes if a pane would have to be smaller than
+    /// its smallest in the other's place (a pane at a larger point size has
+    /// a larger smallest).
+    pub(crate) fn swap(&self, a: u64, b: u64) -> bool {
+        if !self.ivars().tree.borrow_mut().swap(a, b) {
+            return false;
+        }
+        if !self.fits() {
+            self.ivars().tree.borrow_mut().swap(a, b);
+            return false;
+        }
+        self.layout_panes();
+        true
+    }
+
+    /// Takes every pane out of the container, in tree order, and leaves it
+    /// without any: a tab that is about to be thrown away, its panes carried
+    /// on elsewhere. Nothing is laid out again; the container is on its way
+    /// out of the window and must not be asked about its panes afterwards.
+    pub(crate) fn drain(&self) -> Vec<Retained<TerminalPane>> {
+        let panes = self.panes();
+        self.ivars().panes.borrow_mut().clear();
+        for pane in &panes {
+            pane.removeFromSuperview();
+        }
+        panes
     }
 
     /// A copy of the split tree — what session restore saves.

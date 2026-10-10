@@ -2962,6 +2962,21 @@ impl TabBar {
         add("Close Other Tabs", sel!(closeOtherTabs:));
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add("Move Tab to New Window", sel!(detachTab:));
+        // The tab on screen is the one it would join: its own chip has
+        // nothing to merge into.
+        if !window.is_selected(tab) {
+            let merge = NSMenu::new(mtm);
+            for (title, action) in [
+                ("Split Right", sel!(mergeTabRight:)),
+                ("Split Down", sel!(mergeTabDown:)),
+            ] {
+                merge.addItem(&window_item(mtm, &window, title, action, tag));
+            }
+            let holder = NSMenuItem::new(mtm);
+            holder.setTitle(&NSString::from_str("Merge into Current Tab"));
+            holder.setSubmenu(Some(&merge));
+            menu.addItem(&holder);
+        }
         add("Rename Tab\u{2026}", sel!(renameTab:));
         Some(menu)
     }

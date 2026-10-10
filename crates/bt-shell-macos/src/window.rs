@@ -26,7 +26,11 @@
 //! [`TerminalWindow::select_tab`], [`TerminalWindow::add_tab`],
 //! [`TerminalWindow::close_tab_now`], [`TerminalWindow::rename_tab`],
 //! [`TerminalWindow::move_tab`], [`TerminalWindow::release_tab`],
-//! [`TerminalWindow::adopt_tab`]) and ends
+//! [`TerminalWindow::adopt_tab`]; and the same for a **pane** carried
+//! between panes and tabs — [`TerminalWindow::swap_panes`],
+//! [`TerminalWindow::pane_to_tab`], [`TerminalWindow::pane_to_new_tab`],
+//! [`TerminalWindow::release_pane`] with [`TerminalWindow::adopt_pane`],
+//! [`TerminalWindow::merge_tab`]) and ends
 //! in a layout edge (`AppDelegate::layout_changed`): the selection, the
 //! order, the names and which window a tab is in are part of the layout the
 //! bound holder keeps and the crash restore reads, and nothing else would
@@ -78,13 +82,14 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSColor,
-    NSControlStateValueOff, NSControlStateValueOn, NSFloatingWindowLevel, NSFont,
-    NSFontAttributeName, NSMenuItem, NSModalResponse, NSModalResponseCancel, NSStringDrawing,
-    NSTitlebarSeparatorStyle, NSToolbar, NSView, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
-    NSWindowToolbarStyle,
+    NSAccessibilityAnnouncementKey, NSAccessibilityAnnouncementRequestedNotification,
+    NSAccessibilityNotificationUserInfoKey, NSAccessibilityPostNotificationWithUserInfo, NSAlert,
+    NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
+    NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSColor, NSControlStateValueOff,
+    NSControlStateValueOn, NSFloatingWindowLevel, NSFont, NSFontAttributeName, NSMenuItem,
+    NSModalResponse, NSModalResponseCancel, NSStringDrawing, NSTitlebarSeparatorStyle, NSToolbar,
+    NSView, NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask,
+    NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
 use objc2_foundation::{
     NSAttributedStringKey, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSObject,
@@ -99,11 +104,11 @@ use crate::pane::{PaneLaunch, TerminalPane};
 use crate::preview::beep;
 use crate::restore::SavedTab;
 use crate::sheets::{self, Asker};
-use crate::split::{Axis, Direction};
+use crate::split::{Axis, Direction, Tree};
 use crate::split_view::SplitView;
 use crate::tab::{self, TerminalTab};
 use crate::tab_bar::{Label, TabBar};
-use crate::tabs::{self, Card, Tabs};
+use crate::tabs::{self, Card, NewTab, Tabs};
 
 /// Whether the theme's background is dark — the window chrome's appearance
 /// (Aqua / DarkAqua) comes from this ([`TerminalWindow::apply_chrome`]).
@@ -461,6 +466,12 @@ pub(crate) fn alert(mtm: MainThreadMarker, prompt: &Prompt) -> Retained<NSAlert>
 }
 
 /// The direction of a Select/Resize Split ▸ item: the sender's `tag`.
+/// What a pane is called to VoiceOver: its session's title.
+fn pane_name(pane: &TerminalPane) -> String {
+    pane.session()
+        .map_or_else(|| "Split".to_owned(), |session| session.title())
+}
+
 fn direction_of(sender: Option<&AnyObject>) -> Option<Direction> {
     let item = sender?.downcast_ref::<NSMenuItem>()?;
     Direction::from_tag(item.tag())
@@ -929,12 +940,33 @@ define_class!(
                 sel!(selectSplit:),
                 sel!(resizeSplit:),
                 sel!(equalizeSplits:),
+                sel!(swapSplit:),
+                sel!(movePaneToNewTab:),
             ]
             .into_iter()
             .any(|split| action == Some(split))
             {
-                // With a single pane there is nothing to navigate or resize.
+                // With a single pane there is nothing to navigate, resize,
+                // swap, and a tab's only pane made a tab is the tab.
                 tab.panes().len() > 1
+            } else if action == Some(sel!(movePaneToTab:)) {
+                // A tab the menu lists, other than the one on screen: the
+                // placeholder of a window with one tab names none.
+                tabs::tab_of_menu_tag(item.tag()).is_some_and(|target| {
+                    self.tab(target).is_some() && !self.is_selected(target)
+                })
+            } else if [
+                sel!(movePaneToPreviousTab:),
+                sel!(movePaneToNextTab:),
+            ]
+            .into_iter()
+            .any(|to| action == Some(to))
+            {
+                self.ivars().order.borrow().len() > 1
+            } else if action == Some(sel!(movePaneToNewWindow:)) {
+                // A tab's only pane is the tab (Move Tab to New Window); a
+                // lone pane of a lone tab has nothing to leave.
+                tab.panes().len() > 1 || self.ivars().order.borrow().len() > 1
             } else {
                 true
             }
@@ -960,6 +992,78 @@ define_class!(
             if let Some(direction) = direction_of(sender) {
                 self.selected_tab().select_split_toward(direction);
             }
+        }
+
+        /// Window ▸ Swap Split ▸ (⇧⌥⌘ + arrow): the focused pane trades places
+        /// with its neighbour in that direction; a no-op at the edge.
+        #[unsafe(method(swapSplit:))]
+        fn swap_split_action(&self, sender: Option<&AnyObject>) {
+            let Some(direction) = direction_of(sender) else {
+                return;
+            };
+            let tab = self.selected_tab();
+            if let Some((focused, neighbour)) = tab.swap_toward(direction) {
+                self.swap_panes(tab.id(), focused, neighbour);
+            }
+        }
+
+        /// Window ▸ Move Split to New Tab: the focused pane becomes a tab of
+        /// its own right of this one, not selected.
+        #[unsafe(method(movePaneToNewTab:))]
+        fn move_pane_to_new_tab_action(&self, _sender: Option<&AnyObject>) {
+            let tab = self.selected_tab();
+            let gap = self.index_of(tab.id()).map_or(0, |index| index + 1);
+            self.pane_to_new_tab(tab.focused_pane().id(), gap);
+        }
+
+        /// Window ▸ Move Split to Tab ▸ (the item's `tag` names the tab,
+        /// [`tabs::menu_tag`]): the focused pane joins that tab beside its
+        /// focused pane, on the right.
+        #[unsafe(method(movePaneToTab:))]
+        fn move_pane_to_tab_action(&self, sender: Option<&AnyObject>) {
+            if let Some(target) = tagged_tab(sender) {
+                let pane = self.selected_tab().focused_pane().id();
+                self.pane_to_tab(pane, target, Direction::Right);
+            }
+        }
+
+        /// Window ▸ Move Split to Previous Tab (⇧⌥⌘[).
+        #[unsafe(method(movePaneToPreviousTab:))]
+        fn move_pane_to_previous_tab_action(&self, _sender: Option<&AnyObject>) {
+            self.move_pane_to_adjacent(false);
+        }
+
+        /// Window ▸ Move Split to Next Tab (⇧⌥⌘]).
+        #[unsafe(method(movePaneToNextTab:))]
+        fn move_pane_to_next_tab_action(&self, _sender: Option<&AnyObject>) {
+            self.move_pane_to_adjacent(true);
+        }
+
+        /// Window ▸ Move Split to New Window: the focused pane becomes a
+        /// window of its own (a tab's only pane takes its tab, as Move Tab to
+        /// New Window). A turn later, as that action.
+        #[unsafe(method(movePaneToNewWindow:))]
+        fn move_pane_to_new_window_action(&self, _sender: Option<&AnyObject>) {
+            let pane = self.selected_tab().focused_pane().id();
+            self.later(move |window| {
+                if let Some(app) = app::delegate(window.mtm()) {
+                    app.pane_to_new_window(window, pane);
+                }
+            });
+        }
+
+        /// The chip menu's Merge into Current Tab ▸ Split Right: the chip's
+        /// tab joins the selected one, its panes as a block on the right of
+        /// the selected tab's focused pane. A turn later (the chip).
+        #[unsafe(method(mergeTabRight:))]
+        fn merge_tab_right_action(&self, sender: Option<&AnyObject>) {
+            self.merge_chip_tab(sender, Direction::Right);
+        }
+
+        /// The chip menu's Merge into Current Tab ▸ Split Down.
+        #[unsafe(method(mergeTabDown:))]
+        fn merge_tab_down_action(&self, sender: Option<&AnyObject>) {
+            self.merge_chip_tab(sender, Direction::Down);
         }
 
         /// Window ▸ Resize Split ▸ (⌃⌘ + arrow).
@@ -1126,7 +1230,7 @@ const LISTED_TITLE_PT: f64 = 320.0;
 /// bateri reads the window's title back — the bar draws each tab's own —
 /// so only the system's lists, Mission Control and VoiceOver's window name see
 /// the cut.
-fn listed_title(title: &str) -> String {
+pub(crate) fn listed_title(title: &str) -> String {
     let font = NSFont::menuFontOfSize(0.0);
     let values: [&AnyObject; 1] = [font.as_ref()];
     // SAFETY: AppKit's font attribute key (an extern static) with the
@@ -1886,6 +1990,280 @@ impl TerminalWindow {
         self.layout_changed();
     }
 
+    /// The tab that holds pane `pane`.
+    pub(crate) fn tab_holding(&self, pane: u64) -> Option<Retained<TerminalTab>> {
+        self.tabs()
+            .into_iter()
+            .find(|tab| tab.container().pane(pane).is_some())
+    }
+
+    /// The tabs a split of the selected tab can be moved to, in strip order,
+    /// each with the title the menu lists it by: every tab but the selected one.
+    pub(crate) fn move_targets(&self) -> Vec<(u64, String)> {
+        let selected = self.ivars().order.borrow().selected();
+        self.tabs()
+            .iter()
+            .filter(|tab| Some(tab.id()) != selected)
+            .map(|tab| {
+                let title = tab.session_title().unwrap_or_else(|| "bateri".to_owned());
+                (tab.id(), listed_title(&title))
+            })
+            .collect()
+    }
+
+    /// Tells VoiceOver what happened to a split — a move shows only as
+    /// panes changing places, which nothing else says.
+    fn announce(&self, text: &str) {
+        let message = NSString::from_str(text);
+        let objects: [&AnyObject; 1] = [message.as_ref()];
+        // SAFETY: AppKit's announcement key (an extern static) with the
+        // `NSString` it documents.
+        let info = unsafe {
+            NSDictionary::<NSAccessibilityNotificationUserInfoKey, AnyObject>::from_slices(
+                &[NSAccessibilityAnnouncementKey],
+                &objects,
+            )
+        };
+        let element: &AnyObject = self.ns_window();
+        // SAFETY: the window is an accessibility element and the user info is
+        // the announcement the notification documents.
+        unsafe {
+            NSAccessibilityPostNotificationWithUserInfo(
+                element,
+                NSAccessibilityAnnouncementRequestedNotification,
+                Some(&info),
+            );
+        }
+    }
+
+    /// **The applier: a swap.** Panes `a` and `b` of tab `tab` trade places
+    /// (⇧⌥⌘ + arrow); nothing leaves the tab. A beep and `false` if a pane
+    /// would be left smaller than its smallest. A layout edge.
+    pub(crate) fn swap_panes(&self, tab: u64, a: u64, b: u64) -> bool {
+        let Some(tab) = self.tab(tab) else {
+            return false;
+        };
+        let (Some(first), Some(second)) = (tab.container().pane(a), tab.container().pane(b)) else {
+            return false;
+        };
+        if !tab.swap(a, b) {
+            beep();
+            return false;
+        }
+        self.announce(&format!(
+            "{} swapped with {}",
+            pane_name(&first),
+            pane_name(&second)
+        ));
+        self.layout_changed();
+        true
+    }
+
+    /// **The applier: a pane leaves** its tab for another place — moved, not
+    /// closed: its shell, programs and questions go on ([`Self::adopt_pane`]
+    /// takes it in). Not a tab's last pane: that pane is the tab
+    /// ([`Self::merge_tab`], [`Self::release_tab`]); `None` then, or if it is
+    /// not here. A layout edge.
+    pub(crate) fn release_pane(&self, tab: u64, pane: u64) -> Option<Retained<TerminalPane>> {
+        let released = self.tab(tab)?.release_pane(pane)?;
+        self.refresh_bar();
+        self.layout_changed();
+        Some(released)
+    }
+
+    /// **The applier: panes arrive** in tab `tab` of this window, laid out as
+    /// `tree` says (a plan, [`TerminalTab::plan_beside`]). The tab is not
+    /// selected by it and the keyboard stays where it is; a question one of
+    /// them had up opens again once the tab is on screen. `false` if the
+    /// tree does not hold exactly the tab's panes and these. A layout edge.
+    pub(crate) fn adopt_pane(
+        &self,
+        tab: &TerminalTab,
+        panes: &[Retained<TerminalPane>],
+        tree: Tree,
+    ) -> bool {
+        if !tab.receive(panes, tree) {
+            return false;
+        }
+        for pane in panes {
+            sheets::reopen_later(pane);
+        }
+        let name = tab.session_title().unwrap_or_else(|| "bateri".to_owned());
+        let what = match panes {
+            [one] => pane_name(one),
+            many => format!("{} splits", many.len()),
+        };
+        self.announce(&format!("{what} moved to {name}"));
+        self.refresh_bar();
+        self.layout_changed();
+        true
+    }
+
+    /// **The applier: a pane goes to another tab** of this window, beside the
+    /// target's focused pane on `side` — Move Split to Tab, to Previous /
+    /// Next Tab. The planned place makes room (neighbours shrink to their
+    /// smallest, [`TerminalTab::plan_beside`]); a beep and `false` where
+    /// there is none. The target is **not** selected and the keyboard stays
+    /// in the tab it came from. A tab's only pane is the tab, so it joins as a
+    /// block ([`Self::merge_tab`]) and the tab closes.
+    pub(crate) fn pane_to_tab(&self, pane: u64, target: u64, side: Direction) -> bool {
+        let (Some(source), Some(into)) = (self.tab_holding(pane), self.tab(target)) else {
+            return false;
+        };
+        if source.id() == target {
+            return false;
+        }
+        if source.panes().len() == 1 {
+            return self.merge_tab(source.id(), target, side);
+        }
+        if !self.selection_free() {
+            beep();
+            return false;
+        }
+        let Some(moving) = source.container().pane(pane) else {
+            return false;
+        };
+        let moving = [moving];
+        let Some(placement) = into.plan_beside(side, &Tree::Leaf(pane), &moving) else {
+            beep();
+            return false;
+        };
+        let Some(released) = self.release_pane(source.id(), pane) else {
+            return false;
+        };
+        self.adopt_pane(&into, &[released], placement.tree)
+    }
+
+    /// **The applier: a tab joins another** as panes, beside the target's
+    /// focused pane on `side`, with its own inner layout and ratios as a
+    /// block (a chip's Merge into Current Tab; a tab's only pane going to
+    /// another tab). The tab leaves the strip — `tabs::Tabs::pane_to_tab`: if
+    /// it was the selected one the screen goes to the tab its panes went to,
+    /// not to a neighbour — and is thrown away without closing anything;
+    /// its name goes with it. The keyboard goes to the pane that had it
+    /// there. A beep and `false` where the block does not fit.
+    pub(crate) fn merge_tab(&self, source: u64, into: u64, side: Direction) -> bool {
+        if source == into {
+            return false;
+        }
+        let (Some(from), Some(target)) = (self.tab(source), self.tab(into)) else {
+            return false;
+        };
+        if !self.selection_free() {
+            beep();
+            return false;
+        }
+        let incoming = from.container().tree();
+        let moving = from.panes();
+        let Some(placement) = target.plan_beside(side, &incoming, &moving) else {
+            beep();
+            return false;
+        };
+        let focus = from.focused_pane().id();
+        let was_selected = self.is_selected(source);
+        if !self
+            .ivars()
+            .order
+            .borrow_mut()
+            .pane_to_tab(source, true, into)
+        {
+            return false;
+        }
+        if was_selected {
+            self.switch(Some(&from));
+        }
+        from.container().removeFromSuperview();
+        self.ivars()
+            .tabs
+            .borrow_mut()
+            .retain(|kept| kept.id() != source);
+        let panes = from.drain();
+        self.retire(from);
+        let joined = self.adopt_pane(&target, &panes, placement.tree);
+        debug_assert!(
+            joined,
+            "the planned tree holds the target's panes and these"
+        );
+        if joined && let Some(pane) = panes.iter().find(|pane| pane.id() == focus) {
+            if self.is_selected(into) {
+                target.focus_pane(pane);
+            } else {
+                target.pane_focused(focus);
+            }
+        }
+        self.refresh_title();
+        true
+    }
+
+    /// **The applier: a pane becomes a tab** of its own, in the strip before
+    /// tab number `gap` (`tab_count()` is the end), **not** selected — the
+    /// user stays where they were ([`tabs::Tabs::pane_to_new_tab`]). A tab's
+    /// only pane is the tab: it is moved to that place, its name and
+    /// identity and all.
+    pub(crate) fn pane_to_new_tab(&self, pane: u64, gap: usize) -> bool {
+        let Some(source) = self.tab_holding(pane) else {
+            return false;
+        };
+        let panes = source.panes().len();
+        if panes <= 1 {
+            let moved = self.ivars().order.borrow_mut().pane_to_new_tab(
+                source.id(),
+                panes,
+                source.id(),
+                gap,
+            ) == NewTab::Reordered;
+            if moved {
+                self.refresh_bar();
+                self.layout_changed();
+            }
+            return moved;
+        }
+        let Some(app) = app::delegate(self.mtm()) else {
+            return false;
+        };
+        if !self.selection_free() {
+            beep();
+            return false;
+        }
+        // The model decides before anything moves: it is the one that places
+        // the new tab's id in the strip.
+        let new = app.next_id();
+        let created =
+            self.ivars()
+                .order
+                .borrow()
+                .clone()
+                .pane_to_new_tab(source.id(), panes, new, gap)
+                == NewTab::Created;
+        if !created {
+            return false;
+        }
+        let Some(released) = self.release_pane(source.id(), pane) else {
+            return false;
+        };
+        let tab = TerminalTab::new(self.mtm(), new, self.id(), &released);
+        if let Some(session) = released.session() {
+            tab.set_theme(session.theme());
+        }
+        tab.set_content_edge(app.settings().content_edge);
+        // Hidden until selected, so its pane never answers "visible" from in
+        // between ([`Self::add_tab`]).
+        tab.container().setHidden(true);
+        self.ivars().root.add_container(tab.container());
+        self.ivars().tabs.borrow_mut().push(tab.clone());
+        self.ivars()
+            .order
+            .borrow_mut()
+            .pane_to_new_tab(source.id(), panes, new, gap);
+        tab.apply_visibility(self.window_visible());
+        released.leave_screen();
+        tab.refresh_geometry();
+        self.announce(&format!("{} moved to a new tab", pane_name(&released)));
+        self.refresh_title();
+        self.layout_changed();
+        true
+    }
+
     /// A window built around a tab that came from another one is on screen:
     /// the tab learns the screen it is on and comes up the way a selected tab
     /// does ([`Self::switch`]) — its frames, focus and a question left up.
@@ -1942,6 +2320,31 @@ impl TerminalWindow {
             &prompt(scope, unit, &foregrounds),
             CloseTarget::Tabs(others),
         );
+    }
+
+    /// Move Split to Previous / Next Tab: the focused pane goes to the
+    /// strip's neighbour of the selected tab, wrapping around.
+    fn move_pane_to_adjacent(&self, forward: bool) {
+        let target = self.ivars().order.borrow().adjacent(forward);
+        if let Some(target) = target {
+            let pane = self.selected_tab().focused_pane().id();
+            self.pane_to_tab(pane, target, Direction::Right);
+        }
+    }
+
+    /// The chip menu's merge: the chip's tab (named by the item's `tag`)
+    /// joins the selected tab on `side`, a turn later — the chip whose event
+    /// is still being handled goes with the tab.
+    fn merge_chip_tab(&self, sender: Option<&AnyObject>, side: Direction) {
+        let Some(source) = self.menu_tab(sender) else {
+            return;
+        };
+        let Some(into) = self.try_selected_tab().map(|tab| tab.id()) else {
+            return;
+        };
+        self.later(move |window| {
+            window.merge_tab(source, into, side);
+        });
     }
 
     /// Runs `job` on this window one main-queue turn later — what a menu

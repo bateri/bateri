@@ -142,6 +142,10 @@ pub(crate) trait PaneHost {
     fn copy_to_clipboard(&self, _pane: u64, text: String) {
         clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
     }
+    /// The pane now belongs to tab `tab` (it was moved there): every event
+    /// from here on reaches that tab. Without it a moved pane's shell exit
+    /// would close nothing and its news would land on the tab it left.
+    fn rehomed(&self, _pane: u64, _tab: u64) {}
 }
 
 /// Column count of the smallest pane: a split that would drop
@@ -1755,6 +1759,10 @@ pub(crate) struct PaneIvars {
     /// waiting to open when it is ([`crate::sheets`]); emptied with a
     /// `Cancel` answer when the pane closes.
     parked: RefCell<crate::sheets::ParkedQueue>,
+    /// The questions this pane has up on its tab's owner right now, so a
+    /// pane that moves to another tab can lower them and ask again where it
+    /// lands ([`crate::sheets::lift`]).
+    opened: RefCell<Vec<crate::sheets::Opened>>,
 }
 
 define_class!(
@@ -2215,6 +2223,7 @@ impl TerminalPane {
             previews: RefCell::new(HashMap::new()),
             finder: RefCell::new(FinderDrops::default()),
             parked: RefCell::new(crate::sheets::ParkedQueue::new()),
+            opened: RefCell::new(Vec::new()),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -3808,6 +3817,21 @@ impl TerminalPane {
         }
     }
 
+    /// The pane leaves the screen (its tab is not the one shown): focus off,
+    /// and what floats over it or follows the pointer goes, since nothing
+    /// would close it while hidden — the popovers, the ⌘-hovered link, the
+    /// scroll bar's hover and the upload buttons' hover. The tab's whole
+    /// leaving ([`crate::tab::TerminalTab::leave_screen`]) and a pane that
+    /// moves into a tab that is not shown both come here.
+    pub(crate) fn leave_screen(&self) {
+        self.apply_focus(false);
+        self.close_stats_popover();
+        self.close_upload_list();
+        self.unhover_footer();
+        self.view().clear_link();
+        self.view().release_scrollbar_hover();
+    }
+
     /// The focus changed — forwards it to `bt-gpu`.
     ///
     /// **Never called in a hermetic run** and the gate is here, not in
@@ -4632,6 +4656,12 @@ impl TerminalPane {
     /// sheet gate's slot ([`crate::sheets`]).
     pub(crate) fn parked(&self) -> &RefCell<crate::sheets::ParkedQueue> {
         &self.ivars().parked
+    }
+
+    /// The questions this pane has up on its tab's owner — the sheet gate's
+    /// slot ([`crate::sheets`]).
+    pub(crate) fn opened(&self) -> &RefCell<Vec<crate::sheets::Opened>> {
+        &self.ivars().opened
     }
 
     /// The application's ssh masters; `None` in a timed run.
