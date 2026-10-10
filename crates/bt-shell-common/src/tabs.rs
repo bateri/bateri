@@ -17,6 +17,12 @@
 //! says which slot of a strip is under a point, and [`landing`] what letting go
 //! comes to — a place in its own strip, a place in another window's, or a window of its own.
 //!
+//! **A carried pane** is read here too: [`Strip::pane_over`] says whether a point over the strip
+//! means "into this tab" or "a new tab at this place", and the pane operations of [`Tabs`]
+//! ([`Tabs::pane_to_tab`], [`Tabs::pane_to_new_tab`], [`Tabs::pane_arrived_as_tab`],
+//! [`Tabs::pane_left`]) are the list's half of every way a pane changes tab or window: which tab
+//! opens where, which one closes because it was emptied and which one stays selected.
+//!
 //! Coordinates are points in the **bar's** space (the layout is horizontal only; the other axis
 //! appears only in how far a dragged pointer is from the bar): the bar spans the window's
 //! full width and its origin is the window's left edge. The title row's height is not here — it
@@ -108,16 +114,22 @@ impl<K: Copy + Eq> Tabs<K> {
         if self.index_of(id).is_some() {
             self.move_to(id, index);
         } else {
-            let at = index.min(self.order.len());
-            self.order.insert(at, id);
-            // The selection is an index into the order: it follows its tab past the new one.
-            if let Some(selected) = self.selected.as_mut()
-                && *selected >= at
-            {
-                *selected += 1;
-            }
+            self.place(id, index);
         }
         self.select(id);
+    }
+
+    /// Puts a tab at `index` (past the end is the end) and leaves the selection on the tab it was
+    /// on. Only for an id that is not here.
+    fn place(&mut self, id: K, index: usize) {
+        let at = index.min(self.order.len());
+        self.order.insert(at, id);
+        // The selection is an index into the order: it follows its tab past the new one.
+        match self.selected.as_mut() {
+            Some(selected) if *selected >= at => *selected += 1,
+            Some(_) => {}
+            None => self.selected = Some(at),
+        }
     }
 
     /// Removes a tab; `false` if it was not here. Closing the selected tab selects its **right**
@@ -163,6 +175,73 @@ impl<K: Copy + Eq> Tabs<K> {
         let moved = self.order.remove(from);
         self.order.insert(to, moved);
         self.selected = selected.and_then(|id| self.index_of(id));
+        true
+    }
+
+    /// A pane of tab `source` went into tab `target` of this window; `emptied` says it was
+    /// `source`'s last. The pane going in changes nothing here — the tab it went into is not
+    /// selected by it — but an emptied `source` closes. If it was the selected one the tab the
+    /// pane went to is selected in its place, not the neighbour a plain close would pick: the
+    /// pane's new place is what the user follows. `true` if `source` was removed (the shell then
+    /// tears the tab down).
+    ///
+    /// A whole tab taken into another as panes is the same event with `emptied`.
+    pub fn pane_to_tab(&mut self, source: K, emptied: bool, target: K) -> bool {
+        if !emptied
+            || source == target
+            || self.index_of(source).is_none()
+            || self.index_of(target).is_none()
+        {
+            return false;
+        }
+        let selected = self.selected() == Some(source);
+        self.close(source);
+        if selected {
+            self.select(target);
+        }
+        true
+    }
+
+    /// A pane of tab `source` left this window for another; `emptied` says it was `source`'s
+    /// last. An emptied tab closes by the usual rule (the selection goes to its right neighbour,
+    /// else its left) and the model is empty when it was the window's last tab, which is the
+    /// window's cue to close. `true` if `source` was removed.
+    pub fn pane_left(&mut self, source: K, emptied: bool) -> bool {
+        emptied && self.close(source)
+    }
+
+    /// A pane of tab `source`, which holds `panes` of them, was let go between the tabs at `gap`
+    /// (the tab it goes before; `len` is the end). From a tab with several panes it becomes a new
+    /// tab `new` at that place — **not** selected, the user stays where they were
+    /// ([`NewTab::Created`]; the shell makes the tab). A tab's only pane is the tab: letting it go
+    /// between tabs moves the tab to that place, name and identity and all, and `new` is not used
+    /// ([`NewTab::Reordered`], or [`NewTab::Unchanged`] when the place is its own).
+    pub fn pane_to_new_tab(&mut self, source: K, panes: usize, new: K, gap: usize) -> NewTab {
+        let Some(from) = self.index_of(source) else {
+            return NewTab::Unchanged;
+        };
+        if panes <= 1 {
+            return if self.move_to(source, gap_to_index(from, gap)) {
+                NewTab::Reordered
+            } else {
+                NewTab::Unchanged
+            };
+        }
+        if self.index_of(new).is_some() {
+            return NewTab::Unchanged;
+        }
+        self.place(new, gap);
+        NewTab::Created
+    }
+
+    /// A pane that came from another window was let go between this window's tabs at `gap`: it
+    /// becomes the tab `new` there, **not** selected — the same rule as a pane let go between
+    /// the tabs of its own window. `false` if the id is already here.
+    pub fn pane_arrived_as_tab(&mut self, new: K, gap: usize) -> bool {
+        if self.index_of(new).is_some() {
+            return false;
+        }
+        self.place(new, gap);
         true
     }
 
@@ -672,6 +751,70 @@ impl Strip {
     }
 }
 
+/// How far into a tab, as a fraction of its width, the middle that means "into this tab" begins.
+/// Left of it the point is at the tab's left edge: the gap before it. A design constant: the
+/// middle is 64% of the tab, wide enough to hit without aiming, and each edge keeps 18% (about
+/// 33 pt at the widest tab) for "between".
+pub const TAB_CORE_FROM: f64 = 0.18;
+
+/// Where the middle of a tab ends, as a fraction of its width ([`TAB_CORE_FROM`]).
+pub const TAB_CORE_TO: f64 = 0.82;
+
+/// How long a carried pane rests on a tab's middle before that tab opens under it: long enough
+/// that passing over tabs on the way to another does not open them, short enough not to feel
+/// like waiting. A design constant, the pace of a spring-loaded folder.
+pub const SPRING_DELAY: Duration = Duration::from_millis(550);
+
+/// What a carried pane is over on the strip ([`Strip::pane_over`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneOver {
+    /// The middle of the tab at `index`: the pane joins that tab.
+    OnTab { index: usize },
+    /// Between tabs, before the tab at `gap` (`len` is the end): the pane becomes a tab there.
+    Between { gap: usize },
+}
+
+impl Strip {
+    /// What a carried pane at `x` (the bar's space) is over: the middle of a tab
+    /// ([`TAB_CORE_FROM`] to [`TAB_CORE_TO`] of its width, both ends in) means that tab; the
+    /// edge of a tab, the gap between two tabs and anywhere else along the strip mean a new tab,
+    /// at the place of the tabs' centres the point stands between. Left of the strip's visible
+    /// extent is the first place and right of it the end, as for [`Strip::slot_at`]. A lone
+    /// tab's title is a tab like the rest.
+    pub fn pane_over(&self, x: f64) -> PaneOver {
+        if x < self.span.x {
+            return PaneOver::Between { gap: 0 };
+        }
+        if x >= self.span.end() {
+            return PaneOver::Between {
+                gap: self.chips.len(),
+            };
+        }
+        let held = self
+            .chips
+            .iter()
+            .position(|chip| chip.width > 0.0 && x >= chip.x && x < chip.end());
+        if let Some(index) = held {
+            let chip = self.chips[index];
+            let at = (x - chip.x) / chip.width;
+            return if at < TAB_CORE_FROM {
+                PaneOver::Between { gap: index }
+            } else if at > TAB_CORE_TO {
+                PaneOver::Between { gap: index + 1 }
+            } else {
+                PaneOver::OnTab { index }
+            };
+        }
+        PaneOver::Between {
+            gap: self
+                .chips
+                .iter()
+                .filter(|chip| chip.x + chip.width / 2.0 < x)
+                .count(),
+        }
+    }
+}
+
 /// The layout's place for the tab at `index` when room is made at `gap` (a tab on its way in):
 /// the tabs from the gap on take the next place.
 pub fn seat(index: usize, gap: Option<usize>) -> usize {
@@ -685,6 +828,25 @@ pub fn reordered<T>(items: &mut Vec<T>, from: usize, to: usize) {
         let item = items.remove(from);
         items.insert(to.min(items.len()), item);
     }
+}
+
+/// What letting a pane go between tabs did to the list ([`Tabs::pane_to_new_tab`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewTab {
+    /// A tab was added: the shell builds it, holding the pane.
+    Created,
+    /// The pane was its tab's only one, so the tab itself moved to the place.
+    Reordered,
+    /// Nothing changed: the place is the tab's own, or the tab is not here.
+    Unchanged,
+}
+
+/// Where a tab at `from` ends up when it is let go in the gap before tab `gap` (`len` is the
+/// end): the index [`Tabs::move_to`] takes. The gap counts the tabs **before** the tab is taken
+/// out, so a gap to its right is one less once it has gone — `[A, B, C]` with A let go in gap 2
+/// is `[B, A, C]`, index 1.
+pub fn gap_to_index(from: usize, gap: usize) -> usize {
+    if gap > from { gap - 1 } else { gap }
 }
 
 /// What a carried tab is let go over.
@@ -1846,6 +2008,244 @@ mod tests {
         );
         let three = bar(1000.0, 3).layout();
         assert_eq!(Grip::new(&three, 3, 500.0), None);
+    }
+
+    #[test]
+    fn a_carried_pane_over_a_tabs_middle_means_that_tab() {
+        let strip = bar(1000.0, 3).layout();
+        // Tabs are 184 wide from 84, 270 and 456; the middle is 18%..82% of a tab.
+        let first = strip.chips[0];
+        assert_eq!(
+            strip.pane_over(first.x + first.width / 2.0),
+            PaneOver::OnTab { index: 0 }
+        );
+        assert_eq!(
+            strip.pane_over(strip.chips[1].x + 92.0),
+            PaneOver::OnTab { index: 1 }
+        );
+        assert_eq!(
+            strip.pane_over(strip.chips[2].x + 92.0),
+            PaneOver::OnTab { index: 2 }
+        );
+        let core_from = first.x + TAB_CORE_FROM * first.width;
+        let core_to = first.x + TAB_CORE_TO * first.width;
+        assert_eq!(
+            strip.pane_over(core_from - 1e-6),
+            PaneOver::Between { gap: 0 }
+        );
+        assert_eq!(
+            strip.pane_over(core_from + 1e-6),
+            PaneOver::OnTab { index: 0 }
+        );
+        assert_eq!(
+            strip.pane_over(core_to - 1e-6),
+            PaneOver::OnTab { index: 0 }
+        );
+        assert_eq!(
+            strip.pane_over(core_to + 1e-6),
+            PaneOver::Between { gap: 1 }
+        );
+        assert_eq!(
+            strip.pane_over(first.x),
+            PaneOver::Between { gap: 0 },
+            "a tab's own edge"
+        );
+    }
+
+    #[test]
+    fn a_carried_pane_between_tabs_means_a_new_tab_at_that_place() {
+        let strip = bar(1000.0, 3).layout();
+        // The 2 pt gaps: 268..270 and 454..456. A point there is between the tabs either side.
+        assert_eq!(strip.pane_over(269.0), PaneOver::Between { gap: 1 });
+        assert_eq!(strip.pane_over(455.0), PaneOver::Between { gap: 2 });
+        // The edges of a tab lead to the gap on their side.
+        assert_eq!(
+            strip.pane_over(strip.chips[1].x + 5.0),
+            PaneOver::Between { gap: 1 }
+        );
+        assert_eq!(
+            strip.pane_over(strip.chips[1].end() - 5.0),
+            PaneOver::Between { gap: 2 }
+        );
+        // Past the last tab but inside the strip, and outside the strip altogether.
+        assert_eq!(
+            strip.pane_over(strip.chips[2].end() + 10.0),
+            PaneOver::Between { gap: 3 }
+        );
+        assert_eq!(
+            strip.pane_over(strip.span.end()),
+            PaneOver::Between { gap: 3 }
+        );
+        assert_eq!(strip.pane_over(9999.0), PaneOver::Between { gap: 3 });
+        assert_eq!(strip.pane_over(10.0), PaneOver::Between { gap: 0 });
+    }
+
+    #[test]
+    fn a_lone_tabs_title_takes_a_carried_pane_like_any_tab() {
+        let strip = bar(1000.0, 1).layout();
+        let title = strip.chips[0];
+        assert_eq!(
+            strip.pane_over(title.x + title.width / 2.0),
+            PaneOver::OnTab { index: 0 }
+        );
+        assert_eq!(
+            strip.pane_over(title.x + 0.1 * title.width),
+            PaneOver::Between { gap: 0 }
+        );
+        assert_eq!(
+            strip.pane_over(title.end() - 0.1 * title.width),
+            PaneOver::Between { gap: 1 }
+        );
+    }
+
+    #[test]
+    fn a_scrolled_strip_is_read_where_its_tabs_are_in_view() {
+        let scrolled = Bar {
+            scroll: 242.0,
+            ..bar(720.0, 12)
+        }
+        .layout();
+        // Tab 2 is 86..206 on screen.
+        assert_eq!(scrolled.pane_over(146.0), PaneOver::OnTab { index: 2 });
+        assert_eq!(scrolled.pane_over(100.0), PaneOver::Between { gap: 2 });
+        assert_eq!(
+            scrolled.pane_over(10.0),
+            PaneOver::Between { gap: 0 },
+            "left of the strip"
+        );
+        assert_eq!(SPRING_DELAY, Duration::from_millis(550));
+    }
+
+    #[test]
+    fn a_pane_going_into_a_tab_does_not_select_it() {
+        let mut t = tabs(&[1, 2, 3], 2);
+        assert!(
+            !t.pane_to_tab(2, false, 3),
+            "the source tab keeps its other panes"
+        );
+        assert_eq!((t.ids(), t.selected()), (&[1, 2, 3][..], Some(2)));
+        assert!(!t.pane_to_tab(2, true, 2), "into its own tab is no move");
+        assert!(!t.pane_to_tab(2, true, 9), "into a tab that is not here");
+        assert!(!t.pane_to_tab(9, true, 3), "out of a tab that is not here");
+        assert_eq!((t.ids(), t.selected()), (&[1, 2, 3][..], Some(2)));
+    }
+
+    #[test]
+    fn an_emptied_tab_closes_and_the_tab_the_pane_went_to_comes_forward() {
+        // The selected tab emptied: the pane's new tab is selected, not the right neighbour.
+        let mut t = tabs(&[1, 2, 3], 2);
+        assert!(t.pane_to_tab(2, true, 3));
+        assert_eq!((t.ids(), t.selected()), (&[1, 3][..], Some(3)));
+        // The other side, so the choice is not the neighbour by luck.
+        let mut t = tabs(&[1, 2, 3], 2);
+        assert!(t.pane_to_tab(2, true, 1));
+        assert_eq!((t.ids(), t.selected()), (&[1, 3][..], Some(1)));
+        // A background tab emptied: what is on screen stays.
+        let mut t = tabs(&[1, 2, 3], 3);
+        assert!(t.pane_to_tab(1, true, 2));
+        assert_eq!((t.ids(), t.selected()), (&[2, 3][..], Some(3)));
+        // The target was opened by resting on it, and the source — behind it — empties.
+        let mut t = tabs(&[1, 2, 3], 3);
+        assert!(t.pane_to_tab(2, true, 3));
+        assert_eq!((t.ids(), t.selected()), (&[1, 3][..], Some(3)));
+    }
+
+    #[test]
+    fn a_pane_leaving_the_window_closes_its_emptied_tab_by_the_usual_rule() {
+        let mut t = tabs(&[1, 2, 3], 2);
+        assert!(!t.pane_left(2, false));
+        assert_eq!(t.ids(), &[1, 2, 3]);
+        assert!(t.pane_left(2, true));
+        assert_eq!(
+            (t.ids(), t.selected()),
+            (&[1, 3][..], Some(3)),
+            "the right neighbour"
+        );
+        let mut lone = Tabs::new(7);
+        assert!(lone.pane_left(7, true));
+        assert!(
+            lone.is_empty(),
+            "the window's last pane leaves: the window closes"
+        );
+        assert_eq!(lone.selected(), None);
+    }
+
+    #[test]
+    fn a_pane_let_go_between_tabs_becomes_a_tab_that_is_not_selected() {
+        let mut t = tabs(&[1, 2, 3], 2);
+        assert_eq!(t.pane_to_new_tab(2, 3, 9, 0), NewTab::Created);
+        assert_eq!((t.ids(), t.selected()), (&[9, 1, 2, 3][..], Some(2)));
+        let mut t = tabs(&[1, 2, 3], 1);
+        assert_eq!(t.pane_to_new_tab(1, 2, 9, 2), NewTab::Created);
+        assert_eq!((t.ids(), t.selected()), (&[1, 2, 9, 3][..], Some(1)));
+        let mut t = tabs(&[1, 2, 3], 1);
+        assert_eq!(t.pane_to_new_tab(1, 2, 9, 99), NewTab::Created);
+        assert_eq!(
+            (t.ids(), t.selected()),
+            (&[1, 2, 3, 9][..], Some(1)),
+            "past the end is the end"
+        );
+        assert_eq!(
+            t.pane_to_new_tab(1, 2, 9, 0),
+            NewTab::Unchanged,
+            "the id is taken"
+        );
+        assert_eq!(
+            t.pane_to_new_tab(8, 2, 10, 0),
+            NewTab::Unchanged,
+            "no such source"
+        );
+    }
+
+    #[test]
+    fn a_tabs_only_pane_let_go_between_tabs_moves_the_tab() {
+        // [A, B, C] with A let go in gap 2 — between B and C — is [B, A, C], not [B, C, A].
+        let mut t = tabs(&[1, 2, 3], 1);
+        assert_eq!(t.pane_to_new_tab(1, 1, 9, 2), NewTab::Reordered);
+        assert_eq!(
+            (t.ids(), t.selected()),
+            (&[2, 1, 3][..], Some(1)),
+            "the tab keeps its id"
+        );
+        assert_eq!(t.selected_index(), Some(1), "and the selection stays on it");
+        let mut t = tabs(&[1, 2, 3], 2);
+        assert_eq!(t.pane_to_new_tab(1, 1, 9, 3), NewTab::Reordered);
+        assert_eq!((t.ids(), t.selected()), (&[2, 3, 1][..], Some(2)));
+        // Its own place, either side of it, is no change.
+        for gap in [0, 1] {
+            let mut t = tabs(&[1, 2, 3], 1);
+            assert_eq!(
+                t.pane_to_new_tab(1, 1, 9, gap),
+                NewTab::Unchanged,
+                "gap {gap}"
+            );
+            assert_eq!(t.ids(), &[1, 2, 3]);
+        }
+        for gap in [2, 3] {
+            let mut t = tabs(&[1, 2, 3], 1);
+            assert_eq!(
+                t.pane_to_new_tab(3, 1, 9, gap),
+                NewTab::Unchanged,
+                "gap {gap}"
+            );
+        }
+        let mut t = tabs(&[1, 2, 3], 1);
+        assert_eq!(t.pane_to_new_tab(3, 1, 9, 0), NewTab::Reordered);
+        assert_eq!(t.ids(), &[3, 1, 2]);
+        assert_eq!(
+            (0..=3).map(|gap| gap_to_index(1, gap)).collect::<Vec<_>>(),
+            vec![0, 1, 1, 2]
+        );
+    }
+
+    #[test]
+    fn a_pane_arriving_from_another_window_becomes_an_unselected_tab() {
+        let mut t = tabs(&[1, 2], 1);
+        assert!(t.pane_arrived_as_tab(9, 0));
+        assert_eq!((t.ids(), t.selected()), (&[9, 1, 2][..], Some(1)));
+        assert!(t.pane_arrived_as_tab(8, 99));
+        assert_eq!((t.ids(), t.selected_index()), (&[9, 1, 2, 8][..], Some(1)));
+        assert!(!t.pane_arrived_as_tab(8, 0), "already here");
     }
 
     #[test]
