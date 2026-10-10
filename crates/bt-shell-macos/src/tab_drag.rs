@@ -71,9 +71,11 @@ define_class!(
         /// The picture moved: the application reads what the tab is over — with ⌥⌘ down,
         /// panes that would take its block ([`crate::tab_merge`]).
         #[unsafe(method(draggingSession:movedToPoint:))]
-        fn session_moved(&self, _session: &NSDraggingSession, at: NSPoint) {
+        fn session_moved(&self, _session: &NSDraggingSession, _at: NSPoint) {
+            // Read at the pointer, not at the picture's reported place: the regions are the
+            // pointer's.
             if let Some(app) = app::delegate(self.mtm()) {
-                app.tab_merge_read(Some(at));
+                app.tab_merge_read(None);
             }
         }
 
@@ -96,12 +98,7 @@ define_class!(
             at: NSPoint,
             operation: NSDragOperation,
         ) {
-            let escaped = NSApplication::sharedApplication(self.mtm())
-                .currentEvent()
-                .is_some_and(|event| {
-                    event.r#type() == NSEventType::KeyDown && event.keyCode() == ESCAPE
-                });
-            let taken_back = escaped || NSEvent::pressedMouseButtons() & 1 != 0;
+            let taken_back = taken_back(self.mtm());
             if let Some(app) = app::delegate(self.mtm()) {
                 app.tab_drag_ended(self.ivars().tab, at, operation, taken_back);
             }
@@ -137,9 +134,55 @@ pub(crate) fn carried(info: &ProtocolObject<dyn NSDraggingInfo>) -> Option<u64> 
 
 /// `view` as a picture: what the drag shows under the pointer. A vector one (the same route as the
 /// remote-file drag's image), so it is sharp on every screen the pointer takes it to.
-fn picture(view: &NSView) -> Option<Retained<NSImage>> {
+pub(crate) fn picture(view: &NSView) -> Option<Retained<NSImage>> {
     let data = view.dataWithPDFInsideRect(view.bounds());
     NSImage::initWithData(NSImage::alloc(), &data)
+}
+
+/// Whether the drag session that is ending was taken back with Esc rather than let go.
+/// Esc ends a session with no operation, as a drop on nothing does, and AppKit does not say
+/// which: it is read off what ended the session — the last event is an Esc key press, or the
+/// button is still held (Esc ends the session with the finger still down).
+pub(crate) fn taken_back(mtm: MainThreadMarker) -> bool {
+    let escaped = NSApplication::sharedApplication(mtm)
+        .currentEvent()
+        .is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.keyCode() == ESCAPE);
+    escaped || NSEvent::pressedMouseButtons() & 1 != 0
+}
+
+/// Starts a drag session of one carried thing — the tab or pane `id`, written as a string
+/// under `kind` — drawn as `image` (`size` points, or none) centred on the pointer that `event`
+/// reports, in `view`'s window. The thing is in the hand that holds it, not where it was
+/// pulled from, and the picture does not slide back to its start when nothing takes it: a
+/// drop on nothing is the carrier's to read (a window where the pointer let go).
+pub(crate) fn start(
+    view: &NSView,
+    kind: &NSString,
+    id: u64,
+    event: &NSEvent,
+    image: Option<&NSImage>,
+    size: NSSize,
+    source: &ProtocolObject<dyn NSDraggingSource>,
+) {
+    let item = NSPasteboardItem::new();
+    item.setString_forType(&NSString::from_str(&id.to_string()), kind);
+    let dragged = NSDraggingItem::initWithPasteboardWriter(
+        NSDraggingItem::alloc(),
+        ProtocolObject::from_ref(&*item),
+    );
+    let at = view.convertPoint_fromView(event.locationInWindow(), None);
+    let frame = NSRect::new(
+        NSPoint::new(at.x - size.width / 2.0, at.y - size.height / 2.0),
+        size,
+    );
+    // SAFETY: an `NSImage` (or nothing) is a documented dragging frame content.
+    unsafe { dragged.setDraggingFrame_contents(frame, image.map(|image| image.as_ref())) };
+    let session = view.beginDraggingSessionWithItems_event_source(
+        &NSArray::from_retained_slice(&[dragged]),
+        event,
+        source,
+    );
+    session.setAnimatesToStartingPositionsOnCancelOrFail(false);
 }
 
 /// Starts the session that carries tab `tab`, drawn as `view` (its chip) under the pointer that
@@ -147,34 +190,15 @@ fn picture(view: &NSView) -> Option<Retained<NSImage>> {
 /// (`AppDelegate::tab_drag_ended`) — AppKit's hold on it is not something to lean on when the
 /// window it began in may close first.
 pub(crate) fn begin(view: &NSView, tab: u64, event: &NSEvent) -> Retained<TabDragSource> {
-    let mtm = view.mtm();
-    let item = NSPasteboardItem::new();
-    item.setString_forType(&NSString::from_str(&tab.to_string()), tab_type());
-    let dragged = NSDraggingItem::initWithPasteboardWriter(
-        NSDraggingItem::alloc(),
-        ProtocolObject::from_ref(&*item),
-    );
-    // The picture is centred on the pointer, as the remote-file drag's: the tab is in the hand
-    // that holds it, not where it was pulled from.
-    let size = view.bounds().size;
-    let at = view.convertPoint_fromView(event.locationInWindow(), None);
-    let frame = NSRect::new(
-        NSPoint::new(at.x - size.width / 2.0, at.y - size.height / 2.0),
-        NSSize::new(size.width, size.height),
-    );
-    let image = picture(view);
-    // SAFETY: an `NSImage` (or nothing) is a documented dragging frame content.
-    unsafe {
-        dragged.setDraggingFrame_contents(frame, image.as_deref().map(|image| image.as_ref()))
-    };
-    let source = TabDragSource::new(mtm, tab);
-    let session = view.beginDraggingSessionWithItems_event_source(
-        &NSArray::from_retained_slice(&[dragged]),
+    let source = TabDragSource::new(view.mtm(), tab);
+    start(
+        view,
+        tab_type(),
+        tab,
         event,
+        picture(view).as_deref(),
+        view.bounds().size,
         ProtocolObject::from_ref(&*source),
     );
-    // A drop on nothing makes a window where the pointer is: the picture does not fly back to
-    // the strip first.
-    session.setAnimatesToStartingPositionsOnCancelOrFail(false);
     source
 }

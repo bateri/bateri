@@ -529,7 +529,7 @@ pub(crate) fn stroke(path: &NSBezierPath, width: f64, color: Tint) {
 }
 
 /// Whether `rect` holds `point` (the half-open rule AppKit's hit test uses).
-fn contains(rect: NSRect, point: NSPoint) -> bool {
+pub(crate) fn contains(rect: NSRect, point: NSPoint) -> bool {
     point.x >= rect.origin.x
         && point.y >= rect.origin.y
         && point.x < rect.origin.x + rect.size.width
@@ -3881,11 +3881,26 @@ pub(crate) fn watch_command_key() -> Option<Retained<AnyObject>> {
 mod tests {
     use super::{
         CARD_PAD_X, CARD_WIDTH, GLYPH_GAP, GLYPH_SIDE, Motion, Palette, TAB_RADIUS, TitleAction,
-        card_x, command_alone, line_span, single_label, title_double_click, title_row,
+        card_x, command_alone, contains, line_span, single_label, title_double_click, title_row,
     };
     use crate::tabs::{self, Indicator, Tone};
     use bt_core::Theme;
     use objc2_app_kit::NSEventModifierFlags;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    /// A frame holds its left and bottom edge and not its right and top — the rule AppKit's hit
+    /// test uses, which is also how the window under a screen point is found.
+    #[test]
+    fn a_rect_holds_its_near_edges_and_not_its_far_ones() {
+        let rect = NSRect::new(NSPoint::new(100.0, 50.0), NSSize::new(400.0, 300.0));
+        assert!(contains(rect, NSPoint::new(100.0, 50.0)));
+        assert!(contains(rect, NSPoint::new(499.9, 349.9)));
+        assert!(!contains(rect, NSPoint::new(500.0, 100.0)));
+        assert!(!contains(rect, NSPoint::new(200.0, 350.0)));
+        assert!(!contains(rect, NSPoint::new(99.9, 100.0)));
+        // A second screen to the left has negative x: nothing of the first holds a pointer there.
+        assert!(!contains(rect, NSPoint::new(-300.0, 100.0)));
+    }
 
     /// The system's setting decides; the newer key wins over the older one,
     /// and absent both the row zooms.

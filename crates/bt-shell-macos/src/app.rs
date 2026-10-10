@@ -55,16 +55,16 @@ use crate::preview_cache;
 use crate::remote_files::Sweep;
 use crate::restore::{self, Frame, Saved, SavedPane, SavedWindow};
 use crate::settings_window::SettingsWindow;
-use crate::split::Axis;
+use crate::split::{Axis, Tree};
 use crate::ssh_route::{self, Masters};
 use crate::tab::{Histories, TabHost, TerminalTab};
 use crate::tab_drag::TabDragSource;
 use crate::tab_merge::{End, Merge};
 use crate::tabs::Landing;
-use crate::undo::{Now, Record};
+use crate::undo::{Now, Record, Scene};
 use crate::watch::{Notify, Watch};
 use crate::window::{
-    self, Adopted, CloseScope, Launch, Note, Placement, TerminalWindow, fallen_back,
+    self, Adopted, CloseScope, Joins, Launch, Note, Placement, TerminalWindow, fallen_back,
 };
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
@@ -3668,22 +3668,23 @@ impl AppDelegate {
     /// builds one), and the tab comes up in it ([`TerminalWindow::show_arrived`]).
     /// No shell is started or told to end.
     pub(crate) fn move_tab_to_new_window(&self, from: &TerminalWindow, tab: u64) {
-        self.tab_to_new_window(from, tab, None);
+        let _ = self.tab_to_new_window(from, tab, None);
     }
 
     /// A tab let go over no bar becomes a window of its own, its title row under the
     /// pointer at `at` (screen points) and the window kept on a visible screen — Move Tab to
     /// New Window, where the user chose the place. Otherwise as
     /// [`AppDelegate::move_tab_to_new_window`], whose cascade a chosen place replaces.
-    fn tab_to_new_window(&self, from: &TerminalWindow, tab: u64, at: Option<NSPoint>) {
+    fn tab_to_new_window(&self, from: &TerminalWindow, tab: u64, at: Option<NSPoint>) -> bool {
         if from.tab_count() < 2 || !from.selection_free() {
             crate::preview::beep();
-            return;
+            return false;
         }
         let Some(moved) = from.release_tab(tab) else {
-            return;
+            return false;
         };
         self.open_window_around(from, moved, at);
+        true
     }
 
     /// Move Split to New Window: pane `pane` of `from` becomes a window of
@@ -3694,27 +3695,250 @@ impl AppDelegate {
     /// and a window's only pane stays where it is. Nothing moves while the
     /// window holds a question of its own (a beep).
     pub(crate) fn pane_to_new_window(&self, from: &TerminalWindow, pane: u64) {
+        self.pane_to_window(from, pane, None);
+    }
+
+    /// [`Self::pane_to_new_window`], or — with `at`, the screen point a carried
+    /// pane was let go over no window of ours — a window with its title row
+    /// under that point. `true` if a window was made.
+    pub(crate) fn pane_to_window(
+        &self,
+        from: &TerminalWindow,
+        pane: u64,
+        at: Option<NSPoint>,
+    ) -> bool {
         let Some(tab) = from.tab_holding(pane) else {
-            return;
+            return false;
         };
         if tab.panes().len() == 1 {
-            self.tab_to_new_window(from, tab.id(), None);
-            return;
+            return self.tab_to_new_window(from, tab.id(), at);
         }
         if !from.selection_free() {
             crate::preview::beep();
-            return;
+            return false;
         }
         let before = from.undo_scene(&[tab.id()]);
         let Some(released) = from.release_pane(tab.id(), pane) else {
-            return;
+            return false;
         };
         let moved = TerminalTab::new(self.mtm(), self.next_id(), from.id(), &released);
-        let window = self.open_window_around(from, moved, None);
+        let window = self.open_window_around(from, moved, at);
         self.remember_undo(Record {
             scenes: vec![before],
             born: vec![window.id()],
         });
+        true
+    }
+
+    /// **A pane crosses to another window's tab** (a carried pane let go on its chip or
+    /// in its panes): pane `pane` of `from` joins tab `target` of `onto`, where `place`
+    /// says — moved, not copied; its shell, programs and questions go on, and it is
+    /// drawn at the scale of the screen it arrived on. A tab's only pane is the tab: it
+    /// goes as a block ([`Self::tab_to_other_tab`]), its name staying behind.
+    /// Nothing moves while either window holds a question of its own (a beep); `false`
+    /// where the pane does not fit.
+    pub(crate) fn pane_to_other_tab(
+        &self,
+        from: &TerminalWindow,
+        pane: u64,
+        onto: &TerminalWindow,
+        target: u64,
+        place: Joins,
+    ) -> bool {
+        let Some(source) = from.tab_holding(pane) else {
+            return false;
+        };
+        if source.panes().len() == 1 {
+            return self.tab_to_other_tab(from, source.id(), onto, target, place);
+        }
+        let (Some(into), Some(moving)) = (onto.tab(target), source.container().pane(pane)) else {
+            return false;
+        };
+        if from.id() == onto.id() {
+            return false;
+        }
+        if !from.selection_free() || !onto.selection_free() {
+            crate::preview::beep();
+            return false;
+        }
+        let moving = [moving];
+        let Some(tree) = place.tree(&into, &Tree::Leaf(pane), &moving) else {
+            crate::preview::beep();
+            return false;
+        };
+        let scenes = vec![from.undo_scene(&[source.id()]), onto.undo_scene(&[target])];
+        let Some(released) = from.release_pane(source.id(), pane) else {
+            return false;
+        };
+        let joined = onto.adopt_pane(&into, &[released], tree);
+        if joined {
+            self.arrived_in(onto, &into, pane, false, scenes);
+        }
+        joined
+    }
+
+    /// **A tab crosses to another window's tab** as a block of panes (a tab let go on
+    /// another window's panes with ⌥⌘, a pane that is its tab's only one): the tab
+    /// leaves `from` as itself ([`TerminalWindow::release_tab`]) and its panes join tab
+    /// `host` of `onto` as `place` says, with the layout and ratios the tab had. The
+    /// tab is thrown away, its name with it. The window it leaves closes if that was
+    /// its last tab, as in Merge All Windows — and then the move cannot be taken back
+    /// (a window is not a picture Undo Move can paint again).
+    pub(crate) fn tab_to_other_tab(
+        &self,
+        from: &TerminalWindow,
+        tab: u64,
+        onto: &TerminalWindow,
+        host: u64,
+        place: Joins,
+    ) -> bool {
+        let (Some(carried), Some(into)) = (from.tab(tab), onto.tab(host)) else {
+            return false;
+        };
+        if from.id() == onto.id() {
+            return false;
+        }
+        if !from.selection_free() || !onto.selection_free() {
+            crate::preview::beep();
+            return false;
+        }
+        let moving = carried.panes();
+        let Some(tree) = place.tree(&into, &carried.container().tree(), &moving) else {
+            crate::preview::beep();
+            return false;
+        };
+        let focus = carried.focused_pane().id();
+        let scenes = vec![from.undo_scene(&[tab]), onto.undo_scene(&[host])];
+        let Some(left) = from.release_tab(tab) else {
+            return false;
+        };
+        let panes = left.drain();
+        from.retire(left);
+        let joined = onto.adopt_pane(&into, &panes, tree);
+        debug_assert!(
+            joined,
+            "the planned tree holds the target's panes and these"
+        );
+        let emptied = self.close_if_emptied(from);
+        if joined {
+            self.arrived_in(
+                onto,
+                &into,
+                focus,
+                true,
+                if emptied { Vec::new() } else { scenes },
+            );
+        }
+        joined
+    }
+
+    /// **A pane crosses to another window as a tab of its own**, in the strip before
+    /// tab number `gap` of `onto` (a carried pane let go between the chips of another
+    /// window's strip). A tab's only pane is the tab: it moves, its name and identity
+    /// and all. The tab comes up selected there. Nothing moves while either window holds a
+    /// question of its own (a beep).
+    pub(crate) fn pane_to_other_new_tab(
+        &self,
+        from: &TerminalWindow,
+        pane: u64,
+        onto: &TerminalWindow,
+        gap: usize,
+    ) -> bool {
+        let Some(source) = from.tab_holding(pane) else {
+            return false;
+        };
+        if from.id() == onto.id() {
+            return false;
+        }
+        if !from.selection_free() || !onto.selection_free() {
+            crate::preview::beep();
+            return false;
+        }
+        let scenes = vec![from.undo_scene(&[source.id()]), onto.undo_scene(&[])];
+        let single = source.panes().len() == 1;
+        let tab = if single {
+            let Some(tab) = from.release_tab(source.id()) else {
+                return false;
+            };
+            tab
+        } else {
+            let Some(released) = from.release_pane(source.id(), pane) else {
+                return false;
+            };
+            TerminalTab::around(
+                self.mtm(),
+                self.next_id(),
+                from.id(),
+                &released,
+                Some(self.settings().content_edge),
+            )
+        };
+        onto.adopt_tab(&tab, Placement::At(gap));
+        let emptied = self.close_if_emptied(from);
+        onto.select();
+        onto.bar().pulse(tab.id());
+        if !emptied {
+            self.remember_undo(Record {
+                scenes,
+                born: Vec::new(),
+            });
+        }
+        self.layout_changed();
+        true
+    }
+
+    /// What a crossing leaves when it has landed in tab `into` of `onto`: the window
+    /// comes up with the pane the keyboard goes to (`focus`; on a tab that is not on screen
+    /// only a block, a tab's whole set of panes, carries it), the chip glows once, and
+    /// the picture Undo Move takes back (`scenes`, none when the move closed a window).
+    fn arrived_in(
+        &self,
+        onto: &TerminalWindow,
+        into: &TerminalTab,
+        focus: u64,
+        block: bool,
+        scenes: Vec<Scene>,
+    ) {
+        onto.select();
+        if block {
+            // A tab arriving whole is what the user was holding: its tab comes up, as it does
+            // in its own window when the tab it was is gone.
+            onto.select_tab(into.id());
+        }
+        if let Some(pane) = into.container().pane(focus) {
+            if onto.is_selected(into.id()) {
+                into.focus_pane(&pane);
+            } else if block {
+                into.pane_focused(focus);
+            }
+        }
+        onto.bar().pulse(into.id());
+        if !scenes.is_empty() {
+            self.remember_undo(Record {
+                scenes,
+                born: Vec::new(),
+            });
+        }
+        self.layout_changed();
+    }
+
+    /// The terminal window that is under the screen point `screen`, the one in front
+    /// where several are: what a carried pane or tab is over when it has left its own
+    /// window. A window of ours with a panel or the Settings window above it is still
+    /// the answer (those are not drop targets and do not hide one).
+    pub(crate) fn window_at(&self, screen: NSPoint) -> Option<Retained<TerminalWindow>> {
+        let numbers = NSWindow::windowNumbersWithOptions(NSWindowNumberListOptions(0), self.mtm())?;
+        let windows = self.windows();
+        numbers.iter().find_map(|number| {
+            windows
+                .iter()
+                .find(|window| window.ns_window().windowNumber() == number.integerValue())
+                .filter(|window| {
+                    let ns = window.ns_window();
+                    ns.isVisible() && crate::tab_bar::contains(ns.frame(), screen)
+                })
+                .cloned()
+        })
     }
 
     /// A window around `moved`, a tab that has left `from`: the size and
@@ -3954,7 +4178,9 @@ impl AppDelegate {
             // The session is over; its source may go.
             drop(app.ivars().tab_drag.take());
             // With ⌥⌘ down over panes, a drop on nothing is the block's.
-            let end = app.tab_merge_end(app.tab_merge_take(), tab, at, detach);
+            // The block lands where the pointer let go, as the regions it showed were read.
+            let end =
+                app.tab_merge_end(app.tab_merge_take(), tab, NSEvent::mouseLocation(), detach);
             if let Some(from) = app.window_holding(tab) {
                 from.bar().drag_ended();
             }
@@ -3999,17 +4225,25 @@ impl AppDelegate {
                     return;
                 };
                 onto.adopt_tab(&moved, Placement::At(index));
-                if from.tab_count() == 0 {
-                    // Out of the list now, as in `merge_all_windows`.
-                    self.unlist_window(from.id());
-                    from.close();
-                }
+                self.close_if_emptied(&from);
                 onto.select();
                 self.layout_changed();
             }
             // A join on its own window is a reorder; the bar says so, not this.
             Landing::Join(_) | Landing::Detach => {}
         }
+    }
+
+    /// A window a move left without a tab closes, out of the list first as in
+    /// [`Self::merge_all_windows`]: it holds no tab, so no shell ends with it. `true` if it
+    /// closed.
+    fn close_if_emptied(&self, window: &TerminalWindow) -> bool {
+        if window.tab_count() > 0 {
+            return false;
+        }
+        self.unlist_window(window.id());
+        window.close();
+        true
     }
 
     /// Merge All Windows: every other terminal window's tabs, in strip order,
@@ -5609,7 +5843,14 @@ impl AppDelegate {
 
     /// Whether a carry (or a press that may become one) is on.
     pub(crate) fn pane_dragging(&self) -> bool {
-        self.ivars().pane_drag.borrow().is_some()
+        // A carry that has left its window is a drag session and ends with the button: one
+        // that is still here with the button up never heard its end, and must not keep the
+        // lift dead.
+        self.ivars()
+            .pane_drag
+            .borrow()
+            .as_ref()
+            .is_some_and(|session| !session.flying() || NSEvent::pressedMouseButtons() & 1 != 0)
     }
 
     /// A press with ⌥⌘ held on pane `pane`, at `at` (window coordinates): the
@@ -5651,7 +5892,18 @@ impl AppDelegate {
 
     /// The key window changed: whatever was lifted is set down.
     pub(crate) fn key_window_resigned(&self) {
-        self.ivars().pane_drag.replace(None);
+        // A carry that has left its window is a drag session, and the key moving away from the
+        // window it is from (the system took it, an app switch) does not end it: it ends
+        // with its session, whose source the cell keeps alive.
+        let flying = self
+            .ivars()
+            .pane_drag
+            .borrow()
+            .as_ref()
+            .is_some_and(Session::flying);
+        if !flying {
+            self.ivars().pane_drag.replace(None);
+        }
         self.arrange_hold(false);
     }
 

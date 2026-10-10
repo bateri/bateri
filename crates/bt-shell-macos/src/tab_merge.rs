@@ -1,8 +1,9 @@
 //! A tab let go **in** the panes of the tab on screen: with ⌥⌘ held, a tab pulled out of
 //! its strip is a block of panes, and the panes it is over answer for it with their regions —
 //! the same ones a carried pane gets ([`crate::pane_drag`]), drawn for the whole block — and
-//! letting go lands the block there ([`TerminalWindow::merge_tab_at`]). Without the keys the
-//! drop is what it always was: a window where the pointer is ([`crate::tab_drag`]).
+//! letting go lands the block there ([`TerminalWindow::merge_tab_at`]; in another window,
+//! [`AppDelegate::tab_to_other_tab`]). Without the keys the drop is what it always was: a
+//! window where the pointer is ([`crate::tab_drag`]).
 //!
 //! **The session is AppKit's, so this reads it from the outside.** A tab dragged out of the
 //! strip is a dragging session whose destinations are the bars; nothing else of ours is asked
@@ -30,7 +31,7 @@ use crate::arrange;
 use crate::pane_drag::{Zones, preview};
 use crate::split::Verdict;
 use crate::tab::TerminalTab;
-use crate::window::TerminalWindow;
+use crate::window::{Joins, TerminalWindow};
 
 /// How often the keys are read while a tab is carried: the system reports no move when only a
 /// key changes.
@@ -83,7 +84,11 @@ fn arranging() -> bool {
 
 /// Where a carried tab's block would land.
 struct Aim {
+    /// The window the pointer is over, whose tab on screen (or the one the press left, in the
+    /// carried tab's own window) takes the block.
     window: Retained<TerminalWindow>,
+    /// The window the tab is carried out of.
+    from: Retained<TerminalWindow>,
     carried: Retained<TerminalTab>,
     host: Retained<TerminalTab>,
     /// The pointer, in the window's coordinates.
@@ -131,27 +136,34 @@ impl AppDelegate {
     }
 
     /// The tab and window a block at `screen` would land in, if the keys are down and the
-    /// pointer is over panes: not over the bar (a drop there is the bar's), and a tab that
-    /// is not the carried one is the one to land in.
+    /// pointer is over panes: not over a bar (a drop there is the bar's). In the carried tab's
+    /// own window a tab that is not the carried one is the one to land in; in another window
+    /// the tab it shows is.
     fn aim(&self, tab: u64, screen: NSPoint) -> Option<Aim> {
         if !arranging() {
             return None;
         }
-        let window = self.window_holding(tab)?;
+        let from = self.window_holding(tab)?;
         let carried = self.tab(tab)?;
+        let window = self.window_at(screen)?;
         let point = window.ns_window().convertPointFromScreen(screen);
         if window.bar().holds(point) {
             return None;
         }
-        let host = host_of(
-            window.try_selected_tab().map(|open| open.id()),
-            window.bar().selected_before(tab),
-            tab,
-            |candidate| window.index_of(candidate).is_some(),
-        )
+        let host = if window.id() == from.id() {
+            host_of(
+                window.try_selected_tab().map(|open| open.id()),
+                window.bar().selected_before(tab),
+                tab,
+                |candidate| window.index_of(candidate).is_some(),
+            )
+        } else {
+            window.try_selected_tab().map(|open| open.id())
+        }
         .and_then(|host| self.tab(host))?;
         Some(Aim {
             window,
+            from,
             carried,
             host,
             point,
@@ -251,15 +263,22 @@ impl AppDelegate {
             return End::Free;
         };
         let landed = match Self::weigh(&aim) {
-            Verdict::Lands { placement, .. } => {
+            Verdict::Lands { placement, .. } if aim.window.id() == aim.from.id() => {
                 aim.window.merge_tab_at(tab, aim.host.id(), placement.tree)
             }
+            Verdict::Lands { placement, .. } => self.tab_to_other_tab(
+                &aim.from,
+                tab,
+                &aim.window,
+                aim.host.id(),
+                Joins::Planned(placement.tree),
+            ),
             _ => false,
         };
         if landed {
             End::Merged
         } else {
-            back(&aim.window);
+            back(&aim.from);
             End::Kept
         }
     }

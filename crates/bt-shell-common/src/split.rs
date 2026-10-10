@@ -232,20 +232,6 @@ fn halves_px(rect: Rect, axis: Axis, ratio: f64, between: f64) -> (Rect, Rect, R
     }
 }
 
-/// The sizes of a pane's two halves if it were split, in points — the question of the split limit:
-/// the **same** arithmetic as the frame computation, so the half the check approves
-/// is exactly the half that will be drawn.
-pub fn split_halves(frame: Rect, axis: Axis, scale: f64) -> (Rect, Rect) {
-    split_halves_spaced(frame, axis, scale, Spacing::DIVIDED)
-}
-
-/// [`split_halves`] with the gap `spacing` puts between two panes. Only the gap *between* counts:
-/// `frame` is a pane's frame, already inside whatever margin the layout keeps around its panes.
-pub fn split_halves_spaced(frame: Rect, axis: Axis, scale: f64, spacing: Spacing) -> (Rect, Rect) {
-    let (first, _, second) = halves_px(snap(frame, scale), axis, 0.5, spacing.between);
-    (first.scaled(1.0 / scale), second.scaled(1.0 / scale))
-}
-
 /// What a pane that already stands at `to` must undergo to **look** as if it stood at `from`: a
 /// scale about its centre, then a shift of that centre. The pane is laid out once, at its final
 /// frame (its program is resized once), and a slide plays from this transform back to none —
@@ -1467,7 +1453,7 @@ mod tests {
     use super::{
         Axis, Direction, Divider, Layout, PANE_EDGE_SHARE, Placement, Rect, Removal, Room,
         SWAP_CORE, Share, Size, Slide, Spacing, Tree, Verdict, WINDOW_EDGE_SHARE,
-        WINDOW_EDGE_STRIP, Zone, slide, sliver, solve_share, split_halves, split_halves_spaced,
+        WINDOW_EDGE_STRIP, Zone, slide, sliver, solve_share,
     };
 
     fn area(rect: &Rect) -> f64 {
@@ -1846,18 +1832,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn split_halves_match_the_drawn_frames() {
-        // The halves the split limit asks about are the same as the frames to be drawn.
-        let bounds = Rect::new(0.0, 0.0, 700.5, 400.0);
-        let (first, second) = split_halves(bounds, Axis::Horizontal, 2.0);
-        let mut tree = Tree::Leaf(1);
-        assert!(tree.split(1, Axis::Horizontal, 2));
-        let layout = tree.layout(bounds, 2.0);
-        assert_eq!(layout.panes[0].1, first);
-        assert_eq!(layout.panes[1].1, second);
-    }
-
     // ----- spacing -----
 
     #[test]
@@ -1872,11 +1846,6 @@ mod tests {
                 "scale {scale}"
             );
         }
-        let bounds = Rect::new(0.0, 0.0, 700.5, 400.0);
-        assert_eq!(
-            split_halves_spaced(bounds, Axis::Horizontal, 2.0, Spacing::DIVIDED),
-            split_halves(bounds, Axis::Horizontal, 2.0)
-        );
         assert_eq!(Spacing::DIVIDED.between_px(), 1.0);
         assert_eq!(Spacing::DIVIDED.around_px(), 0.0);
     }

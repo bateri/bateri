@@ -500,7 +500,7 @@ pub(crate) fn pane_name(pane: &TerminalPane) -> String {
 
 /// Where panes joining a tab stand: beside its focused pane (the menu's and
 /// the chip's way), or where a landing the pointer chose put them.
-enum Joins {
+pub(crate) enum Joins {
     Beside(Direction),
     Planned(Tree),
 }
@@ -510,7 +510,7 @@ impl Joins {
     /// make once they have joined: the plan beside the focused pane, or the
     /// landing if it is exactly these panes — a landing shown for a tab that
     /// has since changed is refused, not applied.
-    fn tree(
+    pub(crate) fn tree(
         self,
         target: &TerminalTab,
         incoming: &Tree,
@@ -1740,7 +1740,7 @@ impl TerminalWindow {
     }
 
     /// The window's tab with id `id`.
-    fn tab(&self, id: u64) -> Option<Retained<TerminalTab>> {
+    pub(crate) fn tab(&self, id: u64) -> Option<Retained<TerminalTab>> {
         self.ivars()
             .tabs
             .borrow()
@@ -2454,13 +2454,8 @@ impl TerminalWindow {
     /// "visible" from in between ([`Self::add_tab`]) — but not yet in the
     /// strip, which is the caller's ([`Self::settle_born`] after it).
     fn born_tab(&self, id: u64, first: &TerminalPane) -> Retained<TerminalTab> {
-        let tab = TerminalTab::new(self.mtm(), id, self.id(), first);
-        if let Some(session) = first.session() {
-            tab.set_theme(session.theme());
-        }
-        if let Some(app) = app::delegate(self.mtm()) {
-            tab.set_content_edge(app.settings().content_edge);
-        }
+        let edge = app::delegate(self.mtm()).map(|app| app.settings().content_edge);
+        let tab = TerminalTab::around(self.mtm(), id, self.id(), first, edge);
         tab.container().setHidden(true);
         self.ivars().root.add_container(tab.container());
         self.ivars().tabs.borrow_mut().push(tab.clone());
@@ -2752,7 +2747,7 @@ impl TerminalWindow {
 
     /// Keeps a closed tab's object until the next main-queue turn
     /// ([`Self::close_tab_now`]).
-    fn retire(&self, tab: Retained<TerminalTab>) {
+    pub(crate) fn retire(&self, tab: Retained<TerminalTab>) {
         self.ivars().retired.borrow_mut().push(tab);
         let id = self.id();
         DispatchQueue::main().exec_async(move || {

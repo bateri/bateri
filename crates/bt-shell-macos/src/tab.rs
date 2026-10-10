@@ -276,6 +276,26 @@ impl TerminalTab {
         unsafe { msg_send![super(this), init] }
     }
 
+    /// A tab around `first`, a pane that came from another tab, dressed as the tabs of the
+    /// window it goes to: the pane's theme, and the application's top edge when it is known
+    /// (`edge`). [`Self::new`] and nothing else a window's list needs.
+    pub(crate) fn around(
+        mtm: MainThreadMarker,
+        id: u64,
+        window: u64,
+        first: &TerminalPane,
+        edge: Option<ContentEdge>,
+    ) -> Retained<Self> {
+        let tab = Self::new(mtm, id, window, first);
+        if let Some(session) = first.session() {
+            tab.set_theme(session.theme());
+        }
+        if let Some(edge) = edge {
+            tab.set_content_edge(edge);
+        }
+        tab
+    }
+
     pub(crate) fn id(&self) -> u64 {
         self.ivars().id
     }

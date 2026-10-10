@@ -1,9 +1,9 @@
-//! Carrying a pane inside its tab: ⌥⌘ held, a pane is taken by its capsule or
-//! by any point of its body, carried by a small card, and let go beside
-//! another pane, at the window's edge or in the middle of another pane (a
-//! swap). The drop is [`TerminalWindow::move_pane`] or
-//! [`TerminalWindow::swap_panes`] — the appliers; nothing here changes a tab itself, only
-//! the selection while a chip is waited on.
+//! Carrying a pane: ⌥⌘ held, a pane is taken by its capsule or by any point of its body,
+//! carried by a small card, and let go beside another pane, at the window's edge, in the
+//! middle of another pane (a swap), on a tab's chip, between chips — in its own window or in
+//! another — or over no window at all. The drop is the appliers' ([`TerminalWindow::move_pane`],
+//! [`TerminalWindow::swap_panes`], and across windows [`AppDelegate::pane_to_other_tab`] and
+//! its kin); nothing here changes a tab itself, only the selection while a chip is waited on.
 //!
 //! **The press only starts a session.** [`AppDelegate::pane_press`] keeps where
 //! the press was and installs a local event monitor for the mouse drag, the
@@ -15,6 +15,19 @@
 //! keys may be let go — the capsules and the lift go with them, the carry
 //! does not need them.
 //!
+//! **Two halves, one reading.** Inside its window the carry is the monitor's: the card hangs
+//! from the pointer. When the pointer is no longer over the window (off it, or under another
+//! of ours) the carry becomes a drag session ([`PaneDragSource`], the pane's id under
+//! [`pane_type`]) — only a session shows a picture outside the window and goes on when the
+//! pointer is over another — and the monitor goes. The session is the system's, so the
+//! windows are **read from the outside**: no strip or pane container is a drag destination
+//! (nothing of ours accepts the drop; the session always ends with no operation), the source
+//! reports every move of the picture and the pointer's place on screen is read against the
+//! window under it ([`AppDelegate::window_at`]). The same reading serves both halves
+//! ([`Session::read`]), and the drop is carried out one turn after the session ends
+//! ([`AppDelegate::pane_flight_ended`], [`Session::finish`]). A carry that comes back over its
+//! own window goes on there with its regions (the picture stays the system's).
+//!
 //! **Nothing moves while a pane is carried.** What the pointer asks for is
 //! read against the layout as it stands and answered by [`Tree::verdict`]
 //! (the one answer the drop acts on, in the container's room): a region
@@ -25,16 +38,22 @@
 //! is set, so no program is resized until the drop, where the panes settle in
 //! one layout and slide to their places ([`SplitView::rearrange`]).
 //!
-//! **The strip is a place to let go too.** Over the tab bar the pane is over no pane: the
-//! middle of a chip lights it and, waited on ([`SPRING_DELAY`]), opens its tab — the regions
+//! **The strip is a place to let go too.** Over a tab bar the pane is over no pane: the
+//! middle of a chip lights it and, waited on ([`SPRING_DELAY`]), opens its tab — in another
+//! window it brings that window up — the regions
 //! then answer in that tab, and a carry that ends without landing there puts the selection
 //! back — while between chips room opens. Letting go on a chip is
 //! [`TerminalWindow::pane_to_tab`] (the selection stays), between chips
 //! [`TerminalWindow::pane_to_new_tab`], and in the panes of a tab opened that way
-//! [`TerminalWindow::pane_to_tab_at`] with the landing the regions showed.
+//! [`TerminalWindow::pane_to_tab_at`] with the landing the regions showed; in another
+//! window the same three are [`AppDelegate::pane_to_other_tab`] and
+//! [`AppDelegate::pane_to_other_new_tab`]. Let go over no window of ours, a pane becomes a
+//! window there ([`AppDelegate::pane_to_window`]); a window's last pane goes to another window
+//! and leaves its own empty, which closes.
 //!
 //! **A drop that does nothing flies back**: the card goes to where the pane
-//! stands and fades out, in [`FLY_SECS`]; under Reduce Motion it just goes.
+//! stands and fades out, in [`FLY_SECS`]; under Reduce Motion it just goes. (A carry
+//! that has left its window has no card: its picture is the system's and just goes.)
 //!
 //! The drawing is AppKit's, a transparent view over the panes ([`Zones`])
 //! and the card on the window's content view ([`Card`]); neither asks for a
@@ -44,17 +63,20 @@ use std::cell::RefCell;
 use std::ptr::NonNull;
 
 use block2::RcBlock;
-use bt_core::Theme;
+use bt_core::{Theme, contrast_ratio};
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSCursor,
-    NSEvent, NSEventMask, NSEventType, NSFont, NSFontAttributeName, NSFontWeightSemibold,
-    NSForegroundColorAttributeName, NSGraphicsContext, NSShadow, NSStringDrawing, NSView,
+    NSDragOperation, NSDraggingContext, NSDraggingSession, NSDraggingSource, NSEvent, NSEventMask,
+    NSEventType, NSFont, NSFontAttributeName, NSFontWeightSemibold, NSForegroundColorAttributeName,
+    NSGraphicsContext, NSImage, NSShadow, NSStringDrawing, NSView,
 };
 use objc2_foundation::{
-    NSAttributedStringKey, NSDictionary, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSAttributedStringKey, NSDictionary, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
+    NSString, ns_string,
 };
 
 use crate::app::{self, AppDelegate};
@@ -63,7 +85,7 @@ use crate::card::CORNER_PT;
 use crate::split::{Direction, Rect, Tree, Verdict};
 use crate::tab_bar::{self, PaneTarget, Tint};
 use crate::tabs::{DRAG_SLOP, SPRING_DELAY};
-use crate::window::{TerminalWindow, pane_name};
+use crate::window::{Joins, TerminalWindow, pane_name};
 
 /// The card's flight back to its pane, and how fast it fades when the drop
 /// worked and the panes take over.
@@ -247,20 +269,10 @@ pub(crate) fn card_size(pane: NSSize) -> NSSize {
     NSSize::new(width.round(), (CARD_HEADER + body).round())
 }
 
-/// Black or white ink for text on a fill of `rgb`: whichever reads better.
+/// Black or white ink for text on a fill of `rgb`: whichever contrasts more
+/// ([`bt_core::contrast_ratio`], the measure the theme's own choices are made by).
 pub(crate) fn ink_on(rgb: u32) -> u32 {
-    let channel = |shift: u32| {
-        let value = f64::from((rgb >> shift) & 0xff) / 255.0;
-        if value <= 0.03928 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    let luminance = 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0);
-    // Black reads better than white from the luminance where the two contrast
-    // ratios cross, ((L + 0.05) / 0.05 = 1.05 / (L + 0.05)).
-    if luminance > 0.179 {
+    if contrast_ratio(rgb, 0x000000) >= contrast_ratio(rgb, 0xffffff) {
         0x000000
     } else {
         0xffffff
@@ -650,29 +662,96 @@ fn card_frame(parent: &NSView, at: NSPoint, size: NSSize) -> NSRect {
 
 // ─── The session ─────────────────────────────────────────────────────────
 
+/// Where the regions are painted now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// Over the carried pane's own tab, on its veil.
+    Home,
+    /// Over another tab: its window and its id.
+    Far(u64, u64),
+}
+
 /// What a started carry holds.
 struct Carry {
-    card: Retained<Card>,
-    zones: Retained<Zones>,
+    /// The card hanging from the pointer while the carry is inside its window. A carry that
+    /// has left it is a drag session's picture ([`PaneDragSource`]) and has none.
+    card: Option<Retained<Card>>,
+    /// The carried pane's place, veiled, in its own tab — which paints the regions too while
+    /// the pointer is over that tab.
+    home: Retained<Zones>,
+    /// The regions of another tab (window, tab, layer) while the pointer is over it.
+    far: Option<(u64, u64, Retained<Zones>)>,
+    stage: Stage,
     /// The last verdict, to repaint only when it changed.
     verdict: Verdict,
     /// How many panes are carried (one, today).
     panes: usize,
-    /// The tab the zones are drawn in: the carried pane's own, until a wait on a chip opens
-    /// another.
-    shown: u64,
     /// What the strip was last told the pointer is over (a chip of the pane's own tab is not
     /// lit: letting go there is taking the pane back).
     over: Option<PaneTarget>,
+    /// The window whose strip the pointer is in, and so the one that is lit, holds room open
+    /// or waits.
+    strip: Option<u64>,
     /// The chip the pointer waits on to open its tab, and the generation of that wait: a fire
     /// of an older one finds it stale.
     dwell: Option<u64>,
     wait: u64,
-    /// A wait moved the selection away from the carried pane's tab: finishing without a
-    /// landing in the tab on screen puts it back.
-    opened: bool,
-    /// Where the pointer was last, in the window's coordinates.
+    /// Where a wait opened a tab: the window and the tab that was open there before. Finishing
+    /// without a landing in the tab on screen puts each selection back.
+    opened: Vec<(u64, u64)>,
+    /// A wait brought another window up: finishing without a landing returns the keyboard to
+    /// the window the pane is from.
+    raised: bool,
+    /// Where the pointer was last, in screen points.
     at: NSPoint,
+}
+
+impl Carry {
+    /// The strip the carry lit lets go: no chip lit, no room held open, no wait.
+    fn release_strip(&mut self, app: &AppDelegate) {
+        if let Some(window) = self.strip.take().and_then(|id| app.window(id)) {
+            window.bar().show_pane_target(None);
+            window.bar().dwell(None);
+        }
+        self.over = None;
+        if self.dwell.take().is_some() {
+            self.wait = self.wait.wrapping_add(1);
+        }
+    }
+
+    /// What waits changed is put back when the carry is over: every window where a wait opened
+    /// a tab gets the tab it had open (except the one the pane landed in by the regions of the
+    /// tab on screen, `stays`), and a window a wait brought up gives the keyboard back to the
+    /// pane's own (`home`) unless the pane crossed to another window (`crossed`), where the
+    /// landing took it.
+    fn put_back(&mut self, app: &AppDelegate, home: u64, stays: Option<u64>, crossed: bool) {
+        for (opened, before) in restore_selections(&self.opened, stays) {
+            if app.tab(before).is_some()
+                && let Some(opened) = app.window(opened)
+            {
+                opened.select_tab(before);
+            }
+        }
+        self.opened.clear();
+        if self.raised && !crossed {
+            if let Some(window) = app.window(home) {
+                window.select();
+            }
+        }
+        self.raised = false;
+    }
+
+    /// Takes everything the carry put on screen off it.
+    fn take_down(&mut self) {
+        self.home.removeFromSuperview();
+        if let Some((_, _, far)) = self.far.take() {
+            far.removeFromSuperview();
+        }
+        if let Some(card) = self.card.take() {
+            card.removeFromSuperview();
+            NSCursor::pop_class();
+        }
+    }
 }
 
 /// A press that may become a carry, and the carry once it has.
@@ -683,6 +762,10 @@ pub(crate) struct Session {
     /// Where the press was, in the window's coordinates.
     origin: NSPoint,
     monitor: Option<Retained<AnyObject>>,
+    /// The drag session the carry became when it left its window, whose callbacks drive it
+    /// from there ([`PaneDragSource`]); kept here because AppKit's hold on it is not
+    /// something to lean on.
+    source: Option<Retained<PaneDragSource>>,
     carry: Option<Carry>,
 }
 
@@ -710,8 +793,14 @@ impl Session {
             pane,
             origin: at,
             monitor: watch(),
+            source: None,
             carry: None,
         })
+    }
+
+    /// Whether the carry has left its window and is a drag session now.
+    pub(crate) fn flying(&self) -> bool {
+        self.source.is_some()
     }
 
     /// The window and the tab the pane is in, if they still stand.
@@ -728,6 +817,10 @@ impl Session {
     /// An event of the monitor. `true` when the session took it (it goes no
     /// further); the step says whether the session lives on.
     fn handle(&mut self, app: &AppDelegate, event: &NSEvent) -> (bool, Step) {
+        if self.flying() {
+            // The drag session has the gesture; the monitor is about to go.
+            return (false, Step::Keep);
+        }
         let Some((window, tab)) = self.place(app) else {
             // The pane or its window went away under the gesture.
             self.abandon();
@@ -751,14 +844,15 @@ impl Session {
                 }
                 let at = event.locationInWindow();
                 if event.r#type() == NSEventType::LeftMouseUp {
-                    self.finish(app, &window, &tab, Some(at));
+                    let screen = window.ns_window().convertPointToScreen(at);
+                    self.finish(app, &window, &tab, Some(screen));
                     return (true, Step::End);
                 }
                 if self.carry.is_none() && past_slop(self.origin, at) {
                     self.begin(app, &window, &tab, at);
                 }
                 if self.carry.is_some() {
-                    self.moved(app, &window, &tab, at);
+                    self.moved(app, &window, at, event);
                 }
                 (true, Step::Keep)
             }
@@ -787,8 +881,8 @@ impl Session {
         };
         app.pane_drag_started();
         let mtm = app.mtm();
-        let zones = Zones::new(mtm, container.bounds(), &theme, Some(pane.frame()));
-        container.addSubview(&zones);
+        let home = Zones::new(mtm, container.bounds(), &theme, Some(pane.frame()));
+        container.addSubview(&home);
         let size = card_size(pane.frame().size);
         let card = Card::new(
             mtm,
@@ -799,105 +893,196 @@ impl Session {
         content.addSubview(&card);
         NSCursor::closedHandCursor().push();
         self.carry = Some(Carry {
-            card,
-            zones,
+            card: Some(card),
+            home,
+            far: None,
+            stage: Stage::Home,
             verdict: Verdict::Nothing,
             panes: 1,
-            shown: tab.id(),
             over: None,
+            strip: None,
             dwell: None,
             wait: 0,
-            opened: false,
-            at,
+            opened: Vec::new(),
+            raised: false,
+            at: window.ns_window().convertPointToScreen(at),
         });
     }
 
-    /// The pointer moved: the card follows, then the strip and the panes read where it is.
-    fn moved(
-        &mut self,
-        app: &AppDelegate,
-        window: &TerminalWindow,
-        tab: &crate::tab::TerminalTab,
-        at: NSPoint,
-    ) {
+    /// The pointer moved, in the window: the card follows, then the strip and the panes read
+    /// where it is. A pointer that is no longer over the window — off it, or under another —
+    /// turns the carry into a drag session ([`Self::fly`]).
+    fn moved(&mut self, app: &AppDelegate, window: &TerminalWindow, at: NSPoint, event: &NSEvent) {
+        let screen = window.ns_window().convertPointToScreen(at);
+        let under = app.window_at(screen);
+        let leaves = under.as_ref().is_none_or(|under| under.id() != self.window);
+        if leaves && self.fly(app, window, event) {
+            return;
+        }
         let Some(carry) = self.carry.as_mut() else {
             return;
         };
-        carry.at = at;
-        // SAFETY: reading the superview; we are on the main thread.
-        if let Some(content) = unsafe { carry.card.superview() } {
-            carry
-                .card
-                .setFrame(card_frame(&content, at, carry.card.frame().size));
+        if let Some(card) = &carry.card {
+            // SAFETY: reading the superview; we are on the main thread.
+            if let Some(content) = unsafe { card.superview() } {
+                card.setFrame(card_frame(&content, at, card.frame().size));
+            }
         }
-        self.sense(app, window, tab);
+        self.read_in(app, screen, under);
     }
 
-    /// Reads the pointer's last place against the strip and the panes.
+    /// The carry leaves its window: from here it is a drag session, because only a session
+    /// finds the window under the pointer when that is another, and shows the pane's picture
+    /// outside the window it is from. The card goes, its picture is the session's; the regions
+    /// keep being read from where the pointer is ([`Self::read`], by the session's reports).
+    /// `false` if it cannot begin (the carry stays where it is).
+    fn fly(&mut self, app: &AppDelegate, window: &TerminalWindow, event: &NSEvent) -> bool {
+        let Some(content) = window.ns_window().contentView() else {
+            return false;
+        };
+        let Some(carry) = self.carry.as_mut() else {
+            return false;
+        };
+        let Some(card) = carry.card.take() else {
+            return false;
+        };
+        let image = crate::tab_drag::picture(&card);
+        let size = card.frame().size;
+        card.removeFromSuperview();
+        NSCursor::pop_class();
+        self.source = Some(begin_flight(
+            &content,
+            self.pane,
+            event,
+            image.as_deref(),
+            size,
+        ));
+        if let Some(token) = self.monitor.take() {
+            // SAFETY: the token is the one `addLocalMonitor…` gave.
+            unsafe { NSEvent::removeMonitor(&token) };
+        }
+        self.read(app, NSEvent::mouseLocation());
+        true
+    }
+
+    /// Reads the pointer's place on screen against the windows' strips and panes.
     ///
-    /// **In the strip** the pane is not over any pane: the chip it is over the middle of is
-    /// lit and, waited on, opens its tab (the line under it fills; [`SPRING_DELAY`]); between
-    /// chips room opens, where it would become a tab. **Elsewhere** the tab on screen answers
-    /// with its regions — the carried pane's own tab as always, another one (a chip waited on
-    /// opened it) for a pane that is not in it, whose regions are drawn in that tab.
-    fn sense(&mut self, app: &AppDelegate, window: &TerminalWindow, tab: &crate::tab::TerminalTab) {
+    /// **In a strip** the pane is not over any pane: the chip it is over the middle of is
+    /// lit and, waited on, opens its tab (the line under it fills; [`SPRING_DELAY`]) and — in
+    /// another window — brings the window up; between chips room opens, where it would
+    /// become a tab. **Elsewhere** the tab on screen of the window under the pointer
+    /// answers with its regions: the carried pane's own tab on its veil, any other (a chip
+    /// waited on opened it, or it is another window's) with regions drawn in that tab. Over no
+    /// window of ours nothing is painted.
+    fn read(&mut self, app: &AppDelegate, screen: NSPoint) {
+        self.read_in(app, screen, app.window_at(screen));
+    }
+
+    /// [`Self::read`] with the window under the pointer already found.
+    fn read_in(
+        &mut self,
+        app: &AppDelegate,
+        screen: NSPoint,
+        target: Option<Retained<TerminalWindow>>,
+    ) {
         let (pane, source) = (self.pane, self.tab);
         let Some(carry) = self.carry.as_mut() else {
             return;
         };
-        let at = carry.at;
-        let bar = window.bar();
-        let over = bar.pane_target(at);
-        let (lit, wait) = strip_reading(over, source, |chip| window.is_selected(chip));
-        if lit != carry.over {
-            bar.show_pane_target(lit);
-            carry.over = lit;
-        }
-        if wait != carry.dwell {
-            carry.dwell = wait;
-            carry.wait = carry.wait.wrapping_add(1);
-            bar.dwell(wait);
-            if let Some(chip) = wait {
-                let generation = carry.wait;
-                arrange::after(SPRING_DELAY, move |app| {
-                    app.pane_drag_dwell(generation, chip);
-                });
+        carry.at = screen;
+        let Some(moving) = app.tab(source).and_then(|tab| tab.container().pane(pane)) else {
+            return;
+        };
+        let mut far_in = None;
+        let (stage, verdict) = match &target {
+            None => {
+                carry.release_strip(app);
+                (Stage::Home, Verdict::Nothing)
             }
-        }
-        let Some(shown) = window.try_selected_tab() else {
-            return;
+            Some(window) => {
+                let at = window.ns_window().convertPointFromScreen(screen);
+                if carry.strip != Some(window.id()) {
+                    carry.release_strip(app);
+                    carry.strip = Some(window.id());
+                }
+                let bar = window.bar();
+                let over = bar.pane_target(at);
+                let (lit, wait) = strip_reading(over, source, |chip| window.is_selected(chip));
+                if lit != carry.over {
+                    bar.show_pane_target(lit);
+                    carry.over = lit;
+                }
+                if wait != carry.dwell {
+                    carry.dwell = wait;
+                    carry.wait = carry.wait.wrapping_add(1);
+                    bar.dwell(wait);
+                    if let Some(chip) = wait {
+                        let generation = carry.wait;
+                        arrange::after(SPRING_DELAY, move |app| {
+                            app.pane_drag_dwell(generation, chip);
+                        });
+                    }
+                }
+                match window.try_selected_tab() {
+                    None => (Stage::Home, Verdict::Nothing),
+                    Some(shown) => {
+                        let verdict = if over.is_some() {
+                            Verdict::Nothing
+                        } else if shown.id() == source {
+                            shown.container().verdict(pane, at)
+                        } else {
+                            shown.container().verdict_of(
+                                &Tree::Leaf(pane),
+                                std::slice::from_ref(&moving),
+                                at,
+                            )
+                        };
+                        if shown.id() == source {
+                            (Stage::Home, verdict)
+                        } else {
+                            let stage = Stage::Far(window.id(), shown.id());
+                            far_in = Some(shown);
+                            (stage, verdict)
+                        }
+                    }
+                }
+            }
         };
-        let Some(moving) = tab.container().pane(pane) else {
-            return;
-        };
-        if shown.id() != carry.shown {
-            // The tab on screen is another: the regions go where the panes are.
-            let Some(theme) = moving.session().map(|session| session.theme()) else {
-                return;
-            };
-            carry.zones.removeFromSuperview();
-            let own = (shown.id() == source).then(|| moving.frame());
-            carry.zones = Zones::new(app.mtm(), shown.container().bounds(), &theme, own);
-            shown.container().addSubview(&carry.zones);
-            carry.shown = shown.id();
+        if stage != carry.stage {
+            // The regions go where the pointer is.
+            match carry.stage {
+                Stage::Home => carry.home.show(Preview::default()),
+                Stage::Far(..) => {
+                    if let Some((_, _, far)) = carry.far.take() {
+                        far.removeFromSuperview();
+                    }
+                }
+            }
+            if let (Stage::Far(window, tab), Some(shown)) = (stage, &far_in) {
+                let Some(theme) = moving.session().map(|session| session.theme()) else {
+                    return;
+                };
+                let far = Zones::new(app.mtm(), shown.container().bounds(), &theme, None);
+                shown.container().addSubview(&far);
+                carry.far = Some((window, tab, far));
+            }
+            carry.stage = stage;
             carry.verdict = Verdict::Nothing;
         }
-        let verdict = if over.is_some() {
-            Verdict::Nothing
-        } else if shown.id() == source {
-            shown.container().verdict(pane, at)
-        } else {
-            shown
-                .container()
-                .verdict_of(&Tree::Leaf(pane), &[moving], at)
-        };
         if verdict != carry.verdict {
-            carry.zones.show(preview(&verdict, carry.panes));
+            let layer = match carry.stage {
+                Stage::Home => Some(&carry.home),
+                Stage::Far(..) => carry.far.as_ref().map(|(_, _, far)| far),
+            };
+            if let Some(layer) = layer {
+                layer.show(preview(&verdict, carry.panes));
+            }
             carry.verdict = verdict;
         }
     }
 
-    /// A chip has been waited on for [`SPRING_DELAY`]: its tab opens, and the regions move to it.
+    /// A chip has been waited on for [`SPRING_DELAY`]: its tab opens — and its window comes up
+    /// if it is not the one in front — and the regions move to it.
     fn dwell_fired(&mut self, app: &AppDelegate, wait: u64, chip: u64) {
         let stale = self
             .carry
@@ -906,27 +1091,46 @@ impl Session {
         if stale {
             return;
         }
-        let Some((window, tab)) = self.place(app) else {
+        let Some(carry) = self.carry.as_mut() else {
             return;
         };
+        let Some(window) = carry.strip.and_then(|id| app.window(id)) else {
+            return;
+        };
+        let before = window.try_selected_tab().map(|tab| tab.id());
         if !window.select_tab(chip) {
+            // The tab will not open (the window holds a question): the wait is over.
+            carry.dwell = None;
+            window.bar().dwell(None);
             return;
         }
-        if let Some(carry) = self.carry.as_mut() {
-            carry.opened = chip != self.tab;
-            carry.dwell = None;
+        if !window.ns_window().isKeyWindow() {
+            window.select();
+            carry.raised = true;
         }
+        if let Some(before) = before
+            && !carry
+                .opened
+                .iter()
+                .any(|(opened, _)| *opened == window.id())
+        {
+            carry.opened.push((window.id(), before));
+        }
+        carry.dwell = None;
         window.bar().dwell(None);
-        self.sense(app, &window, &tab);
+        let at = carry.at;
+        self.read(app, at);
     }
 
-    /// The gesture ends: let go at `at`, or `None` for Esc. The drop is the
+    /// The gesture ends: let go at `at` (a screen point), or `None` for Esc. The drop is the
     /// applier's; what does nothing flies back.
     ///
-    /// Over a chip's middle the pane joins that tab, between chips it becomes a tab (a tab's
-    /// only pane moves its tab) — the selection stays where it is, so a tab a wait opened is
-    /// left for the carried pane's own. Over the panes the verdict of the tab on screen is the
-    /// drop: a move in the pane's own tab, a join in another, which stays on screen.
+    /// Over a window's strip, over a chip's middle the pane joins that tab, between chips it
+    /// becomes a tab (a tab's only pane moves its tab) — the selection stays where it is, so a
+    /// tab a wait opened is left for the one it was. Over a window's panes the verdict of the
+    /// tab on screen is the drop: a move in the pane's own tab, a join in another, which
+    /// stays on screen. Over no window of ours the pane becomes a window there. In
+    /// another window the tab comes up and the window with it.
     fn finish(
         &mut self,
         app: &AppDelegate,
@@ -934,83 +1138,150 @@ impl Session {
         tab: &crate::tab::TerminalTab,
         at: Option<NSPoint>,
     ) {
-        let Some(carry) = self.carry.take() else {
+        let Some(mut carry) = self.carry.take() else {
             // A press that never travelled: nothing was carried.
             return;
         };
         let still = app.reduce_motion();
-        carry.zones.removeFromSuperview();
-        NSCursor::pop_class();
-        let lands = at.map(|at| (at, lands_at(window.bar().pane_target(at), self.tab)));
-        if let Some((_, Lands::NewTab(_))) = lands {
-            window.bar().settle_pane_target();
-        } else {
-            window.bar().show_pane_target(None);
+        let card = carry.card.take();
+        // The window under the pointer, where in it, and what letting go there means.
+        let here = at.and_then(|at| {
+            let target = app.window_at(at)?;
+            let point = target.ns_window().convertPointFromScreen(at);
+            let lands = lands_at(target.bar().pane_target(point), self.tab);
+            Some((target, point, lands))
+        });
+        // The strips: a gap a landing between chips fills is closed by the landing.
+        let settled = match &here {
+            Some((target, _, Lands::NewTab(_))) => {
+                target.bar().settle_pane_target();
+                Some(target.id())
+            }
+            _ => None,
+        };
+        if let Some(strip) = carry.strip.take().and_then(|id| app.window(id)) {
+            if Some(strip.id()) != settled {
+                strip.bar().show_pane_target(None);
+            }
+            strip.bar().dwell(None);
         }
-        window.bar().dwell(None);
-        let (mut done, mut stays) = (false, false);
-        if let Some((at, lands)) = lands {
-            match lands {
-                Lands::Tab(chip) => {
-                    done = window.pane_to_tab(self.pane, chip, Direction::Right);
-                    if done && app.tab(self.tab).is_none() {
-                        // A tab's only pane was the tab: it joined as a block and the
-                        // tab is gone, so the screen goes to the tab it joined.
-                        window.select_tab(chip);
+        carry.take_down();
+        if card.is_some() {
+            NSCursor::pop_class();
+        }
+        let (mut done, mut stays, mut crossed) = (false, None, false);
+        match (at, &here) {
+            // Esc.
+            (None, _) => {}
+            // Over no window of ours: a window of its own, there.
+            (Some(at), None) => {
+                done = app.pane_to_window(window, self.pane, Some(at));
+            }
+            (Some(_), Some((target, point, lands))) if target.id() == window.id() => {
+                match *lands {
+                    Lands::Tab(chip) => {
+                        done = window.pane_to_tab(self.pane, chip, Direction::Right);
+                        if done && app.tab(self.tab).is_none() {
+                            // A tab's only pane was the tab: it joined as a block and the
+                            // tab is gone, so the screen goes to the tab it joined.
+                            window.select_tab(chip);
+                        }
                     }
-                }
-                Lands::NewTab(gap) => {
-                    done = window.pane_to_new_tab(self.pane, gap);
-                }
-                Lands::Back => {}
-                Lands::Panes => {
-                    if let Some(shown) = window.try_selected_tab() {
-                        if shown.id() == self.tab {
-                            done = match act_of(&shown.container().verdict(self.pane, at)) {
-                                Act::Move(tree) => window.move_pane(self.tab, self.pane, tree),
-                                Act::Swap(target) => window.swap_panes(self.tab, self.pane, target),
-                                Act::Back => false,
-                            };
-                        } else if let Some(moving) = tab.container().pane(self.pane)
-                            && let Act::Move(tree) = act_of(&shown.container().verdict_of(
-                                &Tree::Leaf(self.pane),
-                                &[moving],
-                                at,
-                            ))
-                        {
-                            done = window.pane_to_tab_at(self.pane, shown.id(), tree);
-                            stays = done;
+                    Lands::NewTab(gap) => {
+                        done = window.pane_to_new_tab(self.pane, gap);
+                    }
+                    Lands::Back => {}
+                    Lands::Panes => {
+                        if let Some(shown) = window.try_selected_tab() {
+                            if shown.id() == self.tab {
+                                done = match act_of(&shown.container().verdict(self.pane, *point)) {
+                                    Act::Move(tree) => window.move_pane(self.tab, self.pane, tree),
+                                    Act::Swap(target) => {
+                                        window.swap_panes(self.tab, self.pane, target)
+                                    }
+                                    Act::Back => false,
+                                };
+                            } else if let Some(moving) = tab.container().pane(self.pane)
+                                && let Act::Move(tree) = act_of(&shown.container().verdict_of(
+                                    &Tree::Leaf(self.pane),
+                                    &[moving],
+                                    *point,
+                                ))
+                            {
+                                done = window.pane_to_tab_at(self.pane, shown.id(), tree);
+                                stays = done.then(|| window.id());
+                            }
                         }
                     }
                 }
             }
+            // Over another window of ours: it takes the pane.
+            (Some(_), Some((target, point, lands))) => {
+                match *lands {
+                    Lands::Tab(chip) => {
+                        done = app.pane_to_other_tab(
+                            window,
+                            self.pane,
+                            target,
+                            chip,
+                            Joins::Beside(Direction::Right),
+                        );
+                    }
+                    Lands::NewTab(gap) => {
+                        done = app.pane_to_other_new_tab(window, self.pane, target, gap);
+                    }
+                    Lands::Back => {}
+                    Lands::Panes => {
+                        if let Some(shown) = target.try_selected_tab()
+                            && let Some(moving) = tab.container().pane(self.pane)
+                            && let Act::Move(tree) = act_of(&shown.container().verdict_of(
+                                &Tree::Leaf(self.pane),
+                                &[moving],
+                                *point,
+                            ))
+                        {
+                            done = app.pane_to_other_tab(
+                                window,
+                                self.pane,
+                                target,
+                                shown.id(),
+                                Joins::Planned(tree),
+                            );
+                            stays = done.then(|| target.id());
+                        }
+                    }
+                }
+                crossed = done;
+            }
         }
-        if carry.opened && !stays && app.tab(self.tab).is_some() {
-            window.select_tab(self.tab);
-        }
+        carry.put_back(app, self.window, stays, crossed);
         if !done {
-            // Room the strip held open for a tab that did not come.
+            // Room a strip held open for a tab that did not come (the window the pane is
+            // from, and the one it was let go in).
             window.bar().lay_out();
+            if let Some((target, ..)) = &here {
+                target.bar().lay_out();
+            }
         }
-        if done {
-            fade_out(&carry.card, still);
-        } else {
-            fly_back(&carry.card, tab, self.pane, still);
+        if let Some(card) = card {
+            if done {
+                fade_out(&card, still);
+            } else {
+                fly_back(&card, tab, self.pane, still);
+            }
         }
     }
 
     /// The pane or the window is gone: the carry is taken apart without a drop.
     fn abandon(&mut self) {
-        if let Some(carry) = self.carry.take() {
-            carry.zones.removeFromSuperview();
-            carry.card.removeFromSuperview();
-            NSCursor::pop_class();
+        if let Some(mut carry) = self.carry.take() {
+            carry.take_down();
             // The strip may still be lit or holding room open.
             if let Some(mtm) = MainThreadMarker::new()
-                && let Some(window) = app::delegate(mtm).and_then(|app| app.window(self.window))
+                && let Some(app) = app::delegate(mtm)
             {
-                window.bar().show_pane_target(None);
-                window.bar().dwell(None);
+                carry.release_strip(&app);
+                carry.put_back(&app, self.window, None, false);
             }
         }
     }
@@ -1026,6 +1297,17 @@ impl Drop for Session {
             unsafe { NSEvent::removeMonitor(&token) };
         }
     }
+}
+
+/// The selections a carry's waits changed that finishing puts back: every window where a wait
+/// opened a tab, to the tab that was open there before — except the window the pane landed
+/// in by the regions of the tab on screen (`stays`), which is where the user's eyes are.
+fn restore_selections(opened: &[(u64, u64)], stays: Option<u64>) -> Vec<(u64, u64)> {
+    opened
+        .iter()
+        .copied()
+        .filter(|(window, _)| Some(*window) != stays)
+        .collect()
 }
 
 /// The card leaves the screen at once: the panes are sliding to their places.
@@ -1091,6 +1373,115 @@ fn watch() -> Option<Retained<AnyObject>> {
     }
 }
 
+// ─── The drag session ────────────────────────────────────────────────────
+
+/// The pasteboard type a carried pane is written as.
+pub(crate) fn pane_type() -> &'static NSString {
+    ns_string!("dev.bateri.pane")
+}
+
+pub(crate) struct SourceIvars {
+    /// The pane being carried.
+    pane: u64,
+}
+
+define_class!(
+    // SAFETY: NSObject subclassing has no requirements; `PaneDragSource` implements no `Drop`.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPaneDragSource"]
+    #[ivars = SourceIvars]
+    pub(crate) struct PaneDragSource;
+
+    unsafe impl NSObjectProtocol for PaneDragSource {}
+
+    unsafe impl NSDraggingSource for PaneDragSource {
+        /// A move inside the application, nothing outside it: no other application takes a
+        /// pane, and the cursor over one says so.
+        #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+        fn source_operation_mask(
+            &self,
+            _session: &NSDraggingSession,
+            context: NSDraggingContext,
+        ) -> NSDragOperation {
+            if context == NSDraggingContext::WithinApplication {
+                NSDragOperation::Move
+            } else {
+                NSDragOperation::None
+            }
+        }
+
+        /// The picture moved: the application reads what the pane is over, at the pointer.
+        #[unsafe(method(draggingSession:movedToPoint:))]
+        fn session_moved(&self, _session: &NSDraggingSession, _at: NSPoint) {
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.pane_flight_moved();
+            }
+        }
+
+        /// ⌘ or ⌥ held at the drop would turn a move into a copy or a link; a pane is only
+        /// moved (and the keys are the carry's own).
+        #[unsafe(method(ignoreModifierKeysForDraggingSession:))]
+        fn ignore_modifier_keys(&self, _session: &NSDraggingSession) -> bool {
+            true
+        }
+
+        /// The drag is over — let go anywhere (no window of ours takes a drop: the pane is
+        /// read from the outside, so the operation is `None` whatever happened) or taken back
+        /// with Esc, which also reports `None` ([`crate::tab_drag::taken_back`]).
+        #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+        fn session_ended(
+            &self,
+            _session: &NSDraggingSession,
+            _at: NSPoint,
+            _operation: NSDragOperation,
+        ) {
+            // Where the pointer let go, not where the picture was: the regions that were
+            // read from the pointer are the ones the drop acts on.
+            let at = NSEvent::mouseLocation();
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.pane_flight_ended(
+                    self.ivars().pane,
+                    at,
+                    crate::tab_drag::taken_back(self.mtm()),
+                );
+            }
+        }
+    }
+);
+
+impl PaneDragSource {
+    fn new(mtm: MainThreadMarker, pane: u64) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SourceIvars { pane });
+        // SAFETY: NSObject's init takes no arguments and the ivars are set.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Starts the drag session a carry becomes at the window's edge: pane `pane` drawn as `image`
+/// (the card, `size` points) under the pointer `event` reports, in `view`'s window. The
+/// string on the pasteboard is the pane's id, meaningful in this process only (ids count from
+/// zero in every process).
+fn begin_flight(
+    view: &NSView,
+    pane: u64,
+    event: &NSEvent,
+    image: Option<&NSImage>,
+    size: NSSize,
+) -> Retained<PaneDragSource> {
+    let source = PaneDragSource::new(view.mtm(), pane);
+    crate::tab_drag::start(
+        view,
+        pane_type(),
+        pane,
+        event,
+        image,
+        size,
+        ProtocolObject::from_ref(&*source),
+    );
+    source
+}
+
 impl AppDelegate {
     /// A chip a carried pane waits on has been waited on long enough (`wait` is the
     /// generation of the wait): its tab opens. Found stale if the pointer left it, or the
@@ -1121,6 +1512,46 @@ impl AppDelegate {
             }
         }
         taken
+    }
+
+    /// The picture of a carry that has left its window moved: the windows' strips and panes
+    /// read where the pointer is. Out of its cell while it reads, like an event.
+    pub(crate) fn pane_flight_moved(&self) {
+        let Some(mut session) = self.pane_drag_cell().take() else {
+            return;
+        };
+        if session.flying() {
+            session.read(self, NSEvent::mouseLocation());
+        }
+        self.pane_drag_cell().replace(Some(session));
+    }
+
+    /// The drag session of pane `pane` ended at the screen point `at`, `taken_back` if the
+    /// user ended it with Esc. Carried out one main-queue turn later, outside AppKit's
+    /// teardown of the session, as for a tab: what the carry came to is read where the pointer
+    /// let go ([`Session::finish`]).
+    pub(crate) fn pane_flight_ended(&self, pane: u64, at: NSPoint, taken_back: bool) {
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            let Some(app) = app::delegate(mtm) else {
+                return;
+            };
+            let Some(mut session) = app.pane_drag_cell().take() else {
+                return;
+            };
+            if session.pane == pane {
+                match session.place(&app) {
+                    Some((window, tab)) => {
+                        session.finish(&app, &window, &tab, (!taken_back).then_some(at));
+                    }
+                    None => session.abandon(),
+                }
+            }
+            // The session is over; its source may go.
+            drop(session);
+            app.pane_drag_ended();
+        });
     }
 }
 
@@ -1288,5 +1719,33 @@ mod tests {
         assert!(!past_slop(origin, NSPoint::new(100.0, 100.0)));
         assert!(past_slop(origin, NSPoint::new(104.0, 100.0)));
         assert!(past_slop(origin, NSPoint::new(103.0, 103.0)));
+    }
+
+    #[test]
+    fn another_windows_chips_are_never_the_panes_own() {
+        // Tab ids are one namespace for the whole process: a chip of another window's strip is
+        // lit and landed on like any other tab's, and waited on unless it is the one showing
+        // there (a window that is not the pane's own has no chip with the pane's tab id).
+        let showing = |chip| chip == 20;
+        assert_eq!(
+            strip_reading(Some(PaneTarget::Tab(20)), 1, showing),
+            (Some(PaneTarget::Tab(20)), None)
+        );
+        assert_eq!(
+            strip_reading(Some(PaneTarget::Tab(21)), 1, showing),
+            (Some(PaneTarget::Tab(21)), Some(21))
+        );
+        assert_eq!(lands_at(Some(PaneTarget::Tab(20)), 1), Lands::Tab(20));
+        assert_eq!(lands_at(Some(PaneTarget::Between(1)), 1), Lands::NewTab(1));
+    }
+
+    #[test]
+    fn a_wait_that_opened_a_tab_is_undone_except_where_the_pane_landed() {
+        // Window 10 had tab 1 open and a wait opened another; window 20 had tab 5 open.
+        let opened = [(10, 1), (20, 5)];
+        assert_eq!(restore_selections(&opened, None), vec![(10, 1), (20, 5)]);
+        // Landed by the regions of the tab on screen in window 20: that tab stays on screen.
+        assert_eq!(restore_selections(&opened, Some(20)), vec![(10, 1)]);
+        assert_eq!(restore_selections(&[], Some(20)), Vec::new());
     }
 }

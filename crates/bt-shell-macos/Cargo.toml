@@ -181,6 +181,9 @@ objc2-app-kit = { workspace = true, features = [
 # used as a timer — with `CACurrentMediaTime` as its time base (`CABase`;
 # `objc2-core-foundation` for the `CFTimeInterval` stamps). Header features
 # of an existing dependency; wgpu already enables the same ones in the graph.
+# `CAAnimation`, `CAMediaTiming`, `CATransaction` and `CATransform3D`: a card's
+# slide and lift play as layer animations and transforms (`card`), so the
+# pane is laid out once; header flags too.
 objc2-quartz-core = { workspace = true, features = [
     "CABase", "CADisplayLink", "CALayer", "CAMediaTimingFunction", "CAMetalLayer",
     "CAAnimation", "CAMediaTiming", "CATransaction", "CATransform3D", "objc2-core-foundation",
