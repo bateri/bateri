@@ -145,6 +145,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-embed"
+version = "0.11.0"
+dependencies = [
+ "bt-core",
+ "bt-shell-macos",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "bt-gpu"
 version = "0.11.0"
 dependencies = [

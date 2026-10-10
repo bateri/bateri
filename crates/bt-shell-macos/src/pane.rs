@@ -2496,6 +2496,14 @@ impl TerminalPane {
         self.set_visible(visible);
     }
 
+    /// Gives the keyboard to the pane: its terminal view becomes its window's
+    /// first responder, and the pane's host hears [`PaneHost::focused`].
+    /// `false` when the pane is in no window or the window refused.
+    pub fn focus(&self) -> bool {
+        self.window()
+            .is_some_and(|window| window.makeFirstResponder(Some(self.view())))
+    }
+
     /// The host hid or showed the pane, or a view above it: the pane reads
     /// where it stands again. Hidden, it leaves the screen
     /// ([`Self::leave_screen`]); shown, it draws if its window is seen, takes
@@ -3449,9 +3457,9 @@ impl TerminalPane {
     /// Swaps the theme into the session (no-op on the same theme,
     /// `Session::set_theme`) and paints the search panel with it; if the panel
     /// is not born yet it is painted with the session's theme on the first ⌘F.
-    /// The window paints the chrome and the tab bar (`TerminalWindow::set_theme`,
-    /// the only caller of this call).
-    pub(crate) fn set_theme(&self, theme: Theme) {
+    /// In bateri the window paints the chrome and the tab bar around it
+    /// (`TerminalWindow::set_theme`); a host paints its own.
+    pub fn set_theme(&self, theme: Theme) {
         if let Some(session) = self.ivars().session.get() {
             session.set_theme(theme);
         }

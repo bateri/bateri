@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -67,6 +67,13 @@ fmt:
 #   tabs, and nothing else would notice. The settings window's own panel
 #   (`settings_window.rs`, a window of its own) is exempt; comment lines are
 #   skipped.
+# - The pane stands without bateri's application: in bt-shell-macos a module
+#   that is the pane's reaches no application module (app, window, tab, menu,
+#   …) — what it needs comes through its host (`PaneHost`) — and a pane is
+#   opened only in `embed.rs`, bateri's own tabs included. bt-embed, the C
+#   interface, reaches bt-shell-macos only through `embed`. A shortcut past
+#   that door would work in bateri and silently not in an application that
+#   hosts the pane.
 # - It does NOT fail on a dependency change, it warns: a deliberate dependency
 #   decision also changes Cargo.lock; review looks for the decision's record.
 audit:
@@ -92,6 +99,7 @@ audit:
 		if grep -nE "crate::($$app_mods)\b|^use crate::\{[^}]*\b($$app_mods)\b" "$$f" | grep -vE "^[0-9]+:[[:space:]]*//"; then echo "audit: $$f is the pane's and reaches an application module (app, window, tab, …): what it needs goes through the pane's host (PaneHost) or comes down to the pane"; fail=1; fi; \
 	done; \
 	if grep -rn "TerminalPane::new(" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/embed.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: a pane opened outside embed::open — bateri opens its panes the way an embedding application does"; fail=1; fi; \
+	if grep -rnE "bt_shell_macos::" crates/bt-embed --include='*.rs' | grep -vE "bt_shell_macos::embed\b" | grep -v ":[[:space:]]*//"; then echo "audit: bt-embed reaches bt-shell-macos past its embedding door (bt_shell_macos::embed) — what a C host needs comes through embed, as bateri's own panes do"; fail=1; fi; \
 	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshenv|\.zprofile|\.zshrc|\.zlogin|\.zlogout|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "audit: shell integration writes to the user's rc file"; fail=1; fi; \
 	git diff --quiet HEAD -- Cargo.lock $$(git ls-files '*Cargo.toml') || echo "audit: warning — Cargo.toml/Cargo.lock differs from HEAD; is the dependency decision recorded?"; \
 	test $$fail -eq 0 && echo "audit: clean"
@@ -565,7 +573,7 @@ release-gate:
 		| awk 'NF { p = 1 } p' | awk '{ l[NR] = $$0 } END { n = NR; while (n > 0 && l[n] ~ /^[[:space:]]*$$/) n--; for (i = 1; i <= n; i++) print l[i] }' > $(NOTES); \
 	grep -q '[^[:space:]]' $(NOTES) || { echo "release: CHANGELOG.md has no '## [$(VERSION)]' section or it is empty (turn Unreleased into the version)"; exit 1; }
 
-release: release-gate package
+release: release-gate embed-swift package
 	@spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' && xcrun stapler validate -q $(APP) || \
 		{ echo "release: the package is not notarized, it does not enter the release"; exit 1; }
 	@spctl -a -vv -t open --context context:primary-signature $(DMG) 2>&1 | grep -q 'source=Notarized Developer ID' || \
@@ -657,6 +665,28 @@ terminfo:
 #    bound to `/w`, outputs go to `target/linux` (so they do not mix with the
 #    macOS build; `/target/` is already in .gitignore), crate downloads in a
 #    named volume.
+# The C interface's sample host (`crates/bt-embed`): a Swift application built with swiftc from
+# the hand-written header opens a pane, gives its shell a variable, a directory and a command
+# that writes both to a file and exits, and passes when the shell's exit reaches it as an event
+# and the file holds what it gave. Not in `make check` (swiftc and a window); the release runs it.
+# The static library is built here only — in a debug build it is ~400 MB, and nothing else
+# links it. The system libraries are what rustc prints for it (`cargo rustc -p bt-embed --lib
+# --crate-type staticlib -- --print native-static-libs`); one gone missing fails the link loudly.
+EMBED_DIR = target/embed-swift
+EMBED_LIBS = -framework UserNotifications -framework Security -framework AppKit -framework QuartzCore \
+	-framework Metal -framework Foundation -framework CoreText -framework CoreGraphics \
+	-framework CoreFoundation -lobjc -liconv
+
+embed-swift:
+	$(CARGO) rustc -q -p bt-embed --lib --crate-type staticlib
+	@mkdir -p $(EMBED_DIR)
+	xcrun swiftc -swift-version 5 -import-objc-header crates/bt-embed/include/bt_embed.h \
+		crates/bt-embed/examples/swift-host/main.swift target/debug/libbt_embed.a $(EMBED_LIBS) \
+		-o $(EMBED_DIR)/swift-host
+	@if [ "$$(launchctl managername 2>/dev/null)" != Aqua ]; then \
+		echo "embed-swift: SKIPPED (no window server session)"; exit 0; fi; \
+	$(EMBED_DIR)/swift-host
+
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)

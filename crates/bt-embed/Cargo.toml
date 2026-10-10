@@ -1,0 +1,30 @@
+[package]
+name = "bt-embed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# bateri's terminal pane behind a C interface, for an application that is not
+# written in Rust (a Swift host). `staticlib` is what such a host links;
+# `rlib` lets this crate's own tests build.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# The pane is opened through `bt_shell_macos::embed` alone — the same door
+# bateri's own tabs use (`make audit` holds the rest of the shell out of reach).
+bt-shell-macos = { workspace = true }
+# The settings and the theme a host hands over as text are parsed here.
+bt-core = { workspace = true }
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true }
+objc2-foundation = { workspace = true }
+
+# The C interface driven the way a host in another language drives it, through the exported
+# functions alone: a window without bateri's delegate, a handler that closes the pane from inside
+# its own event. Its own `main`: AppKit wants the main thread, which libtest's harness does not
+# run tests on.
+[[test]]
+name = "c_host"
+harness = false
