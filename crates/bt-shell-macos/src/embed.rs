@@ -16,7 +16,9 @@
 //!
 //! **What a host does after [`open`]**: it puts the pane — an `NSView` — in its view hierarchy,
 //! tells it its frame is set ([`TerminalPane::observe_frame`]) and starts its shell
-//! ([`TerminalPane::start`]); [`TerminalPane::close`] ends it.
+//! ([`TerminalPane::start`]); [`TerminalPane::close`] ends it. The pane follows its window by
+//! itself ([`Config::follow_window`]); when the host hides or shows the pane or a view above it,
+//! it says so ([`TerminalPane::refresh_visibility`]) — no notification tells a view that.
 //!
 //! **A pane is found by its id** ([`pane`]): the jobs a pane sends to the main queue from its
 //! reader thread and its background work find it here, whoever its host is. A pane opened here is
@@ -67,6 +69,10 @@ pub struct Config {
     pub uuid: Option<PaneUuid>,
     /// A previous session's history, replayed before the shell starts.
     pub replay: Option<Vec<u8>>,
+    /// Variables added to the shell's environment. The locale's and the shell
+    /// integration's own win over them on a clash; `TERM` and the identity
+    /// family (`TERM_SESSION_ID`, `BATERI_TAB_URL`, …) are never overridden.
+    pub env: Vec<(String, String)>,
     /// The temporary point-size step the pane is born with (an inherited ⌘+/⌘−).
     pub zoom: Zoom,
     /// The application's ssh masters, one registry for every pane, if it keeps them: remote
@@ -81,6 +87,10 @@ pub struct Config {
     pub smooth_scroll: bool,
     /// The scroll bar's form, resolved.
     pub scrollbar: ScrollbarMode,
+    /// Whether the pane follows its window by itself ([`TerminalPane::follow_window`]):
+    /// its focus, drawing, scale and parked questions. bateri's window does it for its
+    /// panes; a host that only places the pane in a view leaves it on.
+    pub follow_window: bool,
     /// bateri's timed run's recipe; `None` → interactive.
     pub(crate) run: Option<Run>,
     /// bateri's measurement ledger (the timed run's `BT_FRAME_STATS`).
@@ -111,6 +121,7 @@ impl Config {
             smooth_scroll: launch::smooth_scroll(&settings, reduce_motion),
             scrollbar: launch::scrollbar(settings.scrollbar, || launch::overlay_scrollers(mtm)),
             reduce_motion,
+            follow_window: true,
             id,
             host,
             identity,
@@ -120,6 +131,7 @@ impl Config {
             initial_input: None,
             uuid: None,
             replay: None,
+            env: Vec::new(),
             zoom: Zoom::default(),
             masters: None,
             run: None,
@@ -140,6 +152,7 @@ impl Config {
             uuid,
             replay,
             adopt,
+            env,
         } = launch;
         Self {
             working_directory,
@@ -147,6 +160,7 @@ impl Config {
             uuid,
             replay,
             adopt,
+            env,
             ..self
         }
     }
@@ -187,12 +201,14 @@ pub fn open(
         initial_input,
         uuid,
         replay,
+        env,
         zoom,
         masters,
         integration,
         reduce_motion,
         smooth_scroll,
         scrollbar,
+        follow_window,
         run,
         stats,
         keeper,
@@ -215,6 +231,7 @@ pub fn open(
                 uuid,
                 replay,
                 adopt,
+                env,
             },
             integration,
             reduce_motion,
@@ -226,6 +243,9 @@ pub fn open(
             identity,
         },
     )?;
+    if follow_window {
+        pane.follow_window();
+    }
     OPENED.with(|opened| opened.borrow_mut().push((id, Weak::new(&pane))));
     Ok(pane)
 }

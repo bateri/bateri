@@ -646,11 +646,7 @@ define_class!(
                 return;
             }
             for pane in tab.panes() {
-                pane.apply_focus(true);
-                pane.rehover_footer();
-                // Coming back to the window is an interaction: the remote load
-                // indicator samples again at once.
-                pane.note_interaction();
+                pane.window_became_key();
             }
         }
 
@@ -668,12 +664,7 @@ define_class!(
             // another application. The key window also resigns key when the
             // application deactivates, so this one hook covers both.
             for pane in self.panes() {
-                pane.apply_focus(false);
-                pane.unhover_footer();
-                pane.view().clear_link();
-                // The scroll bar's strip is tracked in the key window only:
-                // no exit would come, and the bar would stay wide.
-                pane.view().release_scrollbar_hover();
+                pane.window_resigned_key();
             }
         }
 

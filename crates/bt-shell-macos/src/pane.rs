@@ -61,6 +61,9 @@ use objc2_app_kit::{
     NSFontWeightRegular, NSForegroundColorAttributeName, NSLineBreakMode, NSMenuItem, NSPasteboard,
     NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextField,
     NSTextFieldDelegate, NSTitlePosition, NSView, NSViewFrameDidChangeNotification,
+    NSWindowDidBecomeKeyNotification, NSWindowDidChangeBackingPropertiesNotification,
+    NSWindowDidChangeOcclusionStateNotification, NSWindowDidEndSheetNotification,
+    NSWindowDidResignKeyNotification, NSWindowOcclusionState,
 };
 use objc2_foundation::{
     NSAttributedString, NSAttributedStringKey, NSDate, NSDateFormatter, NSDateFormatterStyle,
@@ -1848,6 +1851,54 @@ define_class!(
         fn view_frame_did_change(&self, _n: &NSNotification) {
             self.refresh_geometry();
         }
+
+        /// A window became key — this pane's, if [`TerminalPane::follow_window`]
+        /// set it up: what bateri's window does for the panes of its tab on
+        /// screen. A host hides the pane itself, not a container: hidden, the
+        /// pane is not the user's.
+        #[unsafe(method(hostWindowDidBecomeKey:))]
+        fn host_window_did_become_key(&self, n: &NSNotification) {
+            if self.is_my_window(n) && !self.isHiddenOrHasHiddenAncestor() {
+                self.window_became_key();
+            }
+        }
+
+        /// This pane's window resigned key ([`TerminalPane::follow_window`]).
+        #[unsafe(method(hostWindowDidResignKey:))]
+        fn host_window_did_resign_key(&self, n: &NSNotification) {
+            if self.is_my_window(n) {
+                self.window_resigned_key();
+            }
+        }
+
+        /// This pane's window was covered, uncovered, miniaturized or brought
+        /// back ([`TerminalPane::follow_window`]): a window the compositor may
+        /// have emptied needs a frame, and a covered one draws none.
+        #[unsafe(method(hostWindowDidChangeOcclusionState:))]
+        fn host_window_did_change_occlusion(&self, n: &NSNotification) {
+            if self.is_my_window(n) {
+                self.set_visibility(self.window_seen() && !self.isHiddenOrHasHiddenAncestor());
+            }
+        }
+
+        /// This pane's window moved to a screen of another scale
+        /// ([`TerminalPane::follow_window`]): the size in points did not change,
+        /// so no frame notification comes.
+        #[unsafe(method(hostWindowDidChangeBackingProperties:))]
+        fn host_window_did_change_backing(&self, n: &NSNotification) {
+            if self.is_my_window(n) {
+                self.refresh_geometry();
+            }
+        }
+
+        /// A question on this pane's window ended ([`TerminalPane::follow_window`]):
+        /// one the pane parked behind it opens now.
+        #[unsafe(method(hostWindowDidEndSheet:))]
+        fn host_window_did_end_sheet(&self, n: &NSNotification) {
+            if self.is_my_window(n) {
+                crate::sheets::open_parked(self);
+            }
+        }
     }
 
     /// Closing of the "Show files (N)" popover and of the load
@@ -2354,6 +2405,116 @@ impl TerminalPane {
         }
     }
 
+    /// The pane follows its window by itself: its focus with the window's
+    /// key state, its drawing with the window's occlusion, its geometry with
+    /// the window's scale, and a question it parked behind the window's own
+    /// question opens when that one ends. bateri's window does all of it for
+    /// its tabs' panes and does not call this; a host that only places the
+    /// pane in a view of its own needs it, or its pane silently keeps the
+    /// state it was born with. Ends with the pane's closing.
+    pub fn follow_window(&self) {
+        let center = NSNotificationCenter::defaultCenter();
+        // SAFETY: each selector is defined on this class and takes a single
+        // `&NSNotification`; the names are constants AppKit exposes. No
+        // object: the pane may change windows, so each handler checks the
+        // notification's window is the pane's own.
+        unsafe {
+            for (selector, name) in [
+                (
+                    sel!(hostWindowDidBecomeKey:),
+                    NSWindowDidBecomeKeyNotification,
+                ),
+                (
+                    sel!(hostWindowDidResignKey:),
+                    NSWindowDidResignKeyNotification,
+                ),
+                (
+                    sel!(hostWindowDidChangeOcclusionState:),
+                    NSWindowDidChangeOcclusionStateNotification,
+                ),
+                (
+                    sel!(hostWindowDidChangeBackingProperties:),
+                    NSWindowDidChangeBackingPropertiesNotification,
+                ),
+                (
+                    sel!(hostWindowDidEndSheet:),
+                    NSWindowDidEndSheetNotification,
+                ),
+            ] {
+                center.addObserver_selector_name_object(self, selector, Some(name), None);
+            }
+        }
+    }
+
+    /// Whether `n` is about the window this pane is in.
+    fn is_my_window(&self, n: &NSNotification) -> bool {
+        let (Some(object), Some(window)) = (n.object(), self.window()) else {
+            return false;
+        };
+        std::ptr::eq(
+            Retained::as_ptr(&object).cast::<u8>(),
+            Retained::as_ptr(&window).cast::<u8>(),
+        )
+    }
+
+    /// Whether the pane's window can be seen — not covered, not miniaturized.
+    fn window_seen(&self) -> bool {
+        self.window().is_some_and(|window| {
+            window
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible)
+        })
+    }
+
+    /// The pane's window became key and the pane is on screen in it: the
+    /// caret fills, the pointer's footer hover comes back, and coming back
+    /// counts as an interaction (the remote load indicator samples at once).
+    pub fn window_became_key(&self) {
+        self.apply_focus(true);
+        self.rehover_footer();
+        self.note_interaction();
+    }
+
+    /// The pane's window resigned key: focus off, and what follows the
+    /// pointer or ⌘ goes — ⌘'s release, or the pointer's leaving, may reach
+    /// another application: the ⌘-hovered link, the footer's hover and the
+    /// scroll bar's wide strip (tracked in the key window only).
+    pub fn window_resigned_key(&self) {
+        self.apply_focus(false);
+        self.unhover_footer();
+        self.view().clear_link();
+        self.view().release_scrollbar_hover();
+    }
+
+    /// Whether the pane can be seen (`visible`): a covered pane draws no
+    /// frame and drives no sampling or block index, and one coming back is
+    /// drawn again — the compositor may have emptied its layer.
+    pub fn set_visibility(&self, visible: bool) {
+        if let Some(link) = self.link() {
+            link.set_visible(visible);
+        }
+        self.set_visible(visible);
+    }
+
+    /// The host hid or showed the pane, or a view above it: the pane reads
+    /// where it stands again. Hidden, it leaves the screen
+    /// ([`Self::leave_screen`]); shown, it draws if its window is seen, takes
+    /// the focus if its window is key, and a question it parked opens.
+    pub fn refresh_visibility(&self) {
+        if self.isHiddenOrHasHiddenAncestor() {
+            self.set_visibility(false);
+            self.leave_screen();
+            return;
+        }
+        self.set_visibility(self.window_seen());
+        let key = self.is_active();
+        self.apply_focus(key);
+        if key {
+            self.rehover_footer();
+        }
+        crate::sheets::open_parked(self);
+    }
+
     pub fn id(&self) -> u64 {
         self.ivars().id
     }
@@ -2775,6 +2936,7 @@ impl TerminalPane {
             uuid: _,
             replay,
             adopt,
+            env: extra_env,
         } = launch;
         // In smoke and measurement runs the shell is fixed: the result must not
         // depend on the user's `$SHELL` and rc file. The owner of the scripts
@@ -2837,8 +2999,9 @@ impl TerminalPane {
             // same answer also determines the dock's existence (`start`)
             // and if it were asked a second time here the two decisions
             // could diverge.
-            env: child::locale_env(locale::system_locale())
+            env: extra_env
                 .into_iter()
+                .chain(child::locale_env(locale::system_locale()))
                 .chain(integration)
                 .collect(),
             cols: grid.cols,
@@ -3910,7 +4073,7 @@ impl TerminalPane {
     /// scroll bar's hover and the upload buttons' hover. The tab's whole
     /// leaving ([`crate::tab::TerminalTab::leave_screen`]) and a pane that
     /// moves into a tab that is not shown both come here.
-    pub(crate) fn leave_screen(&self) {
+    pub fn leave_screen(&self) {
         self.apply_focus(false);
         self.close_stats_popover();
         self.close_upload_list();

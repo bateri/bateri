@@ -424,6 +424,7 @@ fn restored_launch(pane: &SavedPane, replay: Option<Vec<u8>>) -> Launch {
         uuid: Some(pane.uuid.clone()),
         replay,
         adopt: None,
+        env: Vec::new(),
     }
 }
 
@@ -3949,6 +3950,7 @@ impl AppDelegate {
             reduce_motion: self.reduce_motion(),
             smooth_scroll: self.smooth_scroll(),
             scrollbar: self.scrollbar_mode(),
+            follow_window: false,
             run: self.ivars().run,
             stats: self.stats(),
             keeper: self
@@ -3957,6 +3959,7 @@ impl AppDelegate {
                 .clone()
                 .map(|keeper| keeper as Rc<dyn crate::pane::Holder>),
             adopt: None,
+            env: Vec::new(),
         };
         (config, theme)
     }

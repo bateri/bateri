@@ -283,6 +283,10 @@ pub(crate) struct Launch {
     /// The update's handover: a running program to carry on
     /// instead of a new shell; `None` → a shell is born.
     pub(crate) adopt: Option<Adopted>,
+    /// Variables the opener adds to the shell's environment. The locale's and
+    /// the shell integration's own win over them on a clash, and `TERM` and
+    /// the identity family are never overridden (`Session::spawn`).
+    pub(crate) env: Vec<(String, String)>,
 }
 
 /// A pane the previous bateri froze and its holder gave, checked to be

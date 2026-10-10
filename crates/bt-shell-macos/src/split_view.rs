@@ -739,11 +739,7 @@ impl SplitView {
     pub(crate) fn apply_visibility(&self, window_visible: bool) {
         let panes = self.ivars().panes.borrow().clone();
         for pane in &panes {
-            let visible = window_visible && !pane.isHiddenOrHasHiddenAncestor();
-            if let Some(link) = pane.link() {
-                link.set_visible(visible);
-            }
-            pane.set_visible(visible);
+            pane.set_visibility(window_visible && !pane.isHiddenOrHasHiddenAncestor());
         }
     }
 
