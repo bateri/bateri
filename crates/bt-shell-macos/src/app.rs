@@ -48,7 +48,7 @@ use crate::arrange::{self, HOLD_DELAY, Hold, Tool};
 use crate::handover::{self, Arrival, HeldPane, PaneState};
 use crate::keeper::{self, Keeper, QuitKind, QuitPath};
 use crate::menu::ShellMenuDelegate;
-use crate::moves::{self, Move, Plan, Refusal, Step};
+use crate::moves::{self, Move, Plan, Refusal, Slot, Step};
 use crate::notices::{Notices, Source};
 use crate::pane::{PaneLaunch, TerminalPane};
 use crate::pane_drag::Session;
@@ -1311,8 +1311,8 @@ pub(crate) struct Ivars {
     /// The open windows, each carrying its tabs. **Owned here**: the window's
     /// delegate property is weak and `TerminalWindow` is held nowhere else.
     /// Windows are created by [`AppDelegate::open_window`], the restore, and
-    /// the move of a tab to a window of its own
-    /// ([`AppDelegate::move_tab_to_new_window`]); a closing window leaves one
+    /// the move of a tab or a pane to a window of its own
+    /// ([`AppDelegate::open_window_around`]); a closing window leaves one
     /// turn later ([`AppDelegate::forget_window`]).
     ///
     /// The on-save paths walk this list and, while walking, take a **copy** of
@@ -2667,13 +2667,14 @@ fn focus_answerer() -> focus::Answerer {
 }
 
 /// What a plan's steps hold between them ([`AppDelegate::carry_out`]): the panes
-/// and tabs taken out and not yet put in, the windows a tab folded in, and
-/// whether panes failed to land.
+/// and tabs taken out and not yet put in, the windows whose strip lost a tab
+/// into another or gained one (their titles are written again once the steps
+/// are done), and whether panes failed to land.
 #[derive(Default)]
 struct Hands {
     panes: Vec<Retained<TerminalPane>>,
     tabs: Vec<Retained<TerminalTab>>,
-    folded: Vec<Retained<TerminalWindow>>,
+    retitle: Vec<Retained<TerminalWindow>>,
     failed: bool,
 }
 
@@ -3689,81 +3690,6 @@ impl AppDelegate {
         Ok(())
     }
 
-    /// Move Tab to New Window: tab `tab` of window `from` leaves it for a
-    /// window of its own, the size and place it had, cascaded — the tab
-    /// itself, not a copy: its shells go on and its questions, indicators and
-    /// name come with it. Nothing moves while either window holds a question
-    /// of its own (a beep, like a selection would), and a window's only tab
-    /// stays where it is.
-    ///
-    /// The order is the applier's: the tab leaves the source
-    /// ([`TerminalWindow::release_tab`]), a window is built around it
-    /// ([`TerminalWindow::with_tab`]'s order, as [`AppDelegate::open_window`]
-    /// builds one), and the tab comes up in it ([`TerminalWindow::show_arrived`]).
-    /// No shell is started or told to end.
-    pub(crate) fn move_tab_to_new_window(&self, from: &TerminalWindow, tab: u64) {
-        let _ = self.tab_to_new_window(from, tab, None);
-    }
-
-    /// A tab let go over no bar becomes a window of its own, its title row under the
-    /// pointer at `at` (screen points) and the window kept on a visible screen — Move Tab to
-    /// New Window, where the user chose the place. Otherwise as
-    /// [`AppDelegate::move_tab_to_new_window`], whose cascade a chosen place replaces.
-    fn tab_to_new_window(&self, from: &TerminalWindow, tab: u64, at: Option<NSPoint>) -> bool {
-        if from.tab_count() < 2 || !from.selection_free() {
-            crate::preview::beep();
-            return false;
-        }
-        let Some(moved) = from.release_tab(tab) else {
-            return false;
-        };
-        self.open_window_around(from, moved, at);
-        true
-    }
-
-    /// Move Split to New Window: pane `pane` of `from` becomes a window of
-    /// its own, the size and place its window had, cascaded — the pane itself,
-    /// not a copy: its shell, programs and questions go on. It is a tab of
-    /// that window ([`TerminalTab::new`]), not a split of one. A tab's only
-    /// pane is its tab, so that moves as it does in Move Tab to New Window
-    /// and a window's only pane stays where it is. Nothing moves while the
-    /// window holds a question of its own (a beep).
-    pub(crate) fn pane_to_new_window(&self, from: &TerminalWindow, pane: u64) {
-        self.pane_to_window(from, pane, None);
-    }
-
-    /// [`Self::pane_to_new_window`], or — with `at`, the screen point a carried
-    /// pane was let go over no window of ours — a window with its title row
-    /// under that point. `true` if a window was made.
-    pub(crate) fn pane_to_window(
-        &self,
-        from: &TerminalWindow,
-        pane: u64,
-        at: Option<NSPoint>,
-    ) -> bool {
-        let Some(tab) = from.tab_holding(pane) else {
-            return false;
-        };
-        if tab.panes().len() == 1 {
-            return self.tab_to_new_window(from, tab.id(), at);
-        }
-        if !from.selection_free() {
-            crate::preview::beep();
-            return false;
-        }
-        let before = from.undo_scene(&[tab.id()]);
-        let Some(released) = from.release_pane(tab.id(), pane) else {
-            return false;
-        };
-        let moved = TerminalTab::new(self.mtm(), self.next_id(), from.id(), &released);
-        let window = self.open_window_around(from, moved, at);
-        self.remember_undo(Record {
-            scenes: vec![before],
-            born: vec![window.id()],
-        });
-        true
-    }
-
     /// **A pane or a tab moves** to another tab or becomes one, in its own window
     /// or another ([`Move`]): what it comes to is the planner's ([`moves::plan`])
     /// — which panes and tabs leave, what is selected and focused after, what
@@ -3803,7 +3729,7 @@ impl AppDelegate {
                 return false;
             }
         }
-        for window in &hands.folded {
+        for window in &hands.retitle {
             window.refresh_title();
         }
         if hands.failed {
@@ -3856,7 +3782,7 @@ impl AppDelegate {
                     return false;
                 };
                 hands.panes.extend(taken);
-                hands.folded.push(window);
+                hands.retitle.push(window);
                 true
             }
             Step::AdoptPanes { window, tab, tree } => {
@@ -3893,14 +3819,35 @@ impl AppDelegate {
                 ));
                 true
             }
-            Step::AdoptTab { window, tab, gap } => {
+            Step::AdoptTab { window, tab, slot } => {
                 let Some(index) = hands.tabs.iter().position(|held| held.id() == tab) else {
                     return false;
                 };
                 let Some(window) = self.window(window) else {
                     return false;
                 };
-                window.adopt_tab(&hands.tabs.remove(index), Placement::At(gap));
+                let placement = match slot {
+                    Slot::At(gap) => Placement::At(gap),
+                    Slot::End => Placement::End,
+                };
+                window.adopt_tab(&hands.tabs.remove(index), placement);
+                hands.retitle.push(window);
+                true
+            }
+            Step::OpenWindow {
+                window,
+                from,
+                tab,
+                at,
+            } => {
+                let Some(index) = hands.tabs.iter().position(|held| held.id() == tab) else {
+                    return false;
+                };
+                let Some(from) = self.window(from) else {
+                    return false;
+                };
+                let at = at.map(|(x, y)| NSPoint::new(x, y));
+                self.open_window_around(&from, hands.tabs.remove(index), at, window);
                 true
             }
             Step::MoveTab { window, tab, index } => {
@@ -3968,17 +3915,19 @@ impl AppDelegate {
         })
     }
 
-    /// A window around `moved`, a tab that has left `from`: the size and
+    /// **The applier: a window around a tab** ([`moves::Step::OpenWindow`]):
+    /// window `id` around `moved`, a tab that has left `from` — the size and
     /// place `from` has (or, with `at`, its title row under that screen
     /// point), the theme of its focused pane, shown and brought up
     /// ([`TerminalWindow::show_arrived`]). No shell is started or told to end.
-    /// The window is returned.
+    /// A layout edge.
     fn open_window_around(
         &self,
         from: &TerminalWindow,
         moved: Retained<TerminalTab>,
         at: Option<NSPoint>,
-    ) -> Retained<TerminalWindow> {
+        id: u64,
+    ) {
         let theme = moved
             .focused_pane()
             .session()
@@ -4003,8 +3952,7 @@ impl AppDelegate {
             }
             None => source,
         };
-        let window =
-            TerminalWindow::with_tab(self.mtm(), self.next_id(), from.run(), moved, Some(frame));
+        let window = TerminalWindow::with_tab(self.mtm(), id, from.run(), moved, Some(frame));
         window.set_notice(&self.ivars().notices.borrow().subtitle());
         self.ivars().windows.borrow_mut().push(window.clone());
         window.set_theme(theme);
@@ -4019,7 +3967,6 @@ impl AppDelegate {
         }
         window.show_arrived();
         self.layout_changed();
-        window
     }
 
     /// A move is done and can be taken back: this is the one step Undo Move
@@ -4218,9 +4165,10 @@ impl AppDelegate {
                     }
                 }
                 None if detach && end == End::Free => {
-                    if let Some(from) = app.window_holding(tab) {
-                        app.tab_to_new_window(&from, tab, Some(at));
-                    }
+                    app.make_move(Move::TabToNewWindow {
+                        tab,
+                        at: Some((at.x, at.y)),
+                    });
                 }
                 None => {}
             }
@@ -4234,31 +4182,20 @@ impl AppDelegate {
 
     /// A carried tab lands on window `onto`'s strip ([`crate::tabs::Landing`]): in its own
     /// window it takes its place, in another it leaves its window as itself and joins at the
-    /// place ([`TerminalWindow::release_tab`], [`TerminalWindow::adopt_tab`]) — and the
-    /// window it left closes if that was its last tab, as in Merge All Windows. Nothing moves while either
-    /// window holds a question of its own (a beep).
+    /// place, and the window it left closes if that was its last tab — what that comes to is
+    /// the planner's ([`Move::TabToStrip`]). Nothing moves between windows while either holds
+    /// a question of its own (a beep).
     fn land_tab(&self, tab: u64, onto: &TerminalWindow, landing: Landing) {
         let Some(from) = self.window_holding(tab) else {
             return;
         };
-        match landing {
-            Landing::Reorder(index) => from.move_tab(tab, index),
-            Landing::Join(index) if from.id() != onto.id() => {
-                if !from.selection_free() || !onto.selection_free() {
-                    crate::preview::beep();
-                    return;
-                }
-                let Some(moved) = from.release_tab(tab) else {
-                    return;
-                };
-                onto.adopt_tab(&moved, Placement::At(index));
-                self.close_if_emptied(&from);
-                onto.select();
-                self.layout_changed();
-            }
+        let (window, index) = match landing {
+            Landing::Reorder(index) => (from.id(), index),
+            Landing::Join(index) if from.id() != onto.id() => (onto.id(), index),
             // A join on its own window is a reorder; the bar says so, not this.
-            Landing::Join(_) | Landing::Detach => {}
-        }
+            Landing::Join(_) | Landing::Detach => return,
+        };
+        self.make_move(Move::TabToStrip { tab, window, index });
     }
 
     /// A window a move left without a tab closes, out of the list first as in
@@ -4276,8 +4213,8 @@ impl AppDelegate {
     /// Merge All Windows: every other terminal window's tabs, in strip order,
     /// join the key window's at its end, the key window's selection staying
     /// where it was; each emptied window closes — it holds no tab, so no shell
-    /// ends with it. Nothing moves if any of the windows holds a question of
-    /// its own (a beep).
+    /// ends with it ([`Move::MergeAllWindows`]). Nothing moves if any of the
+    /// windows holds a question of its own (a beep).
     pub(crate) fn merge_all_windows(&self) {
         let Some(into) = self.key_window().or_else(|| {
             self.front_terminal_window()
@@ -4285,42 +4222,7 @@ impl AppDelegate {
         }) else {
             return;
         };
-        let others: Vec<Retained<TerminalWindow>> = self
-            .windows()
-            .into_iter()
-            .filter(|window| window.id() != into.id())
-            .collect();
-        if others.is_empty() {
-            return;
-        }
-        if !into.selection_free() || others.iter().any(|window| !window.selection_free()) {
-            crate::preview::beep();
-            return;
-        }
-        for other in &others {
-            // Strip order in, the selected tab last out: it is the one that
-            // leaves the screen, and the window it leaves is closing anyway.
-            let tabs = other.tabs();
-            let selected = other.selected_tab().id();
-            let mut moved: Vec<Retained<TerminalTab>> = Vec::new();
-            for tab in tabs.iter().filter(|tab| tab.id() != selected) {
-                moved.extend(other.release_tab(tab.id()));
-            }
-            moved.extend(other.release_tab(selected));
-            moved.sort_by_key(|tab| tabs.iter().position(|first| first.id() == tab.id()));
-            for tab in &moved {
-                into.adopt_tab(tab, Placement::End);
-            }
-            // Out of the list now, not a turn after it closes
-            // ([`AppDelegate::forget_window`]): a delayed save that fires in
-            // between must not walk a window without a tab. `other` keeps it
-            // alive through its closing.
-            self.unlist_window(other.id());
-            other.close();
-        }
-        into.refresh_title();
-        into.select();
-        self.layout_changed();
+        self.make_move(Move::MergeAllWindows { into: into.id() });
     }
 
     /// The bar's `+` in window `window` (`tab_bar::TabBar`): ⌘T's job there.

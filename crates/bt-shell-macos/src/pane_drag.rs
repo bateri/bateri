@@ -47,7 +47,7 @@
 //! pane (the selection stays), in the panes of a tab opened that way with the landing the
 //! regions showed, and between chips it becomes a tab there — in any window, one move each
 //! ([`AppDelegate::make_move`]). Let go over no window of ours, a pane becomes a
-//! window there ([`AppDelegate::pane_to_window`]); a window's last pane goes to another window
+//! window there, by the same way; a window's last pane goes to another window
 //! and leaves its own empty, which closes.
 //!
 //! **A drop that does nothing flies back**: the card goes to where the pane
@@ -1173,7 +1173,10 @@ impl Session {
             (None, _) => {}
             // Over no window of ours: a window of its own, there.
             (Some(at), None) => {
-                done = app.pane_to_window(window, self.pane, Some(at));
+                done = app.make_move(Move::PaneToNewWindow {
+                    pane: self.pane,
+                    at: Some((at.x, at.y)),
+                });
             }
             (Some(_), Some((target, point, lands))) if target.id() == window.id() => {
                 match *lands {

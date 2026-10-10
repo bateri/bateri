@@ -124,6 +124,22 @@ pub enum Move {
     /// pane let go between chips of its own window or another's. A tab's only pane is the tab:
     /// the tab itself moves there, name and identity and all.
     PaneToNewTab { pane: u64, window: u64, gap: usize },
+    /// Tab `tab` becomes a window of its own — Move Tab to New Window, a tab dragged out of its
+    /// strip and let go over nothing. `at` is where it was let go (a point on the screen, in
+    /// the platform's coordinates): the new window's title row goes under it; without it the
+    /// window takes its old window's size and place, cascaded. A window's only tab stays.
+    TabToNewWindow { tab: u64, at: Option<(f64, f64)> },
+    /// Pane `pane` becomes a window of its own, as the one tab of it — Move Split to New
+    /// Window, a pane let go over no window. A tab's only pane is the tab: it moves as in
+    /// [`Move::TabToNewWindow`].
+    PaneToNewWindow { pane: u64, at: Option<(f64, f64)> },
+    /// Tab `tab` takes place `index` in window `window`'s strip — a tab dragged along its own
+    /// strip, or let go on another window's, where it leaves its window whole and comes up
+    /// selected.
+    TabToStrip { tab: u64, window: u64, index: usize },
+    /// Every other window's tabs join window `into`'s at its end, in strip order, the
+    /// selection staying where it was; the windows they leave close.
+    MergeAllWindows { into: u64 },
 }
 
 /// Why nothing moves.
@@ -157,12 +173,20 @@ pub enum Step {
     /// The pane the step before took becomes tab `tab`, held in no strip yet; it is born in
     /// window `window`, the one it leaves.
     Wrap { window: u64, tab: u64 },
-    /// The held tab `tab` joins window `window`'s strip before tab number `gap` and comes up
-    /// selected there: the user carried it there to look at it.
-    AdoptTab { window: u64, tab: u64, gap: usize },
+    /// The held tab `tab` joins window `window`'s strip at `slot`.
+    AdoptTab { window: u64, tab: u64, slot: Slot },
     /// Tab `tab` takes place `index` in window `window`'s strip; what is on screen does not
     /// change.
     MoveTab { window: u64, tab: u64, index: usize },
+    /// The held tab `tab` is the one tab of a new window `window`, which comes up: window
+    /// `from`'s size, at the screen point `at` if there is one (its title row under it, kept on
+    /// a visible screen), else at `from`'s place, cascaded.
+    OpenWindow {
+        window: u64,
+        from: u64,
+        tab: u64,
+        at: Option<(f64, f64)>,
+    },
     /// The panes the steps before took join tab `tab` of window `window`, laid out as `tree`.
     /// The tab is not selected by it.
     AdoptPanes { window: u64, tab: u64, tree: Tree },
@@ -177,6 +201,17 @@ pub enum Step {
     Focus { window: u64, tab: u64, pane: u64 },
     /// Tab `tab`'s chip in window `window` glows once: where the panes went.
     Pulse { window: u64, tab: u64 },
+}
+
+/// Where a tab joining a strip goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    /// Before tab number `n` (the strip's length is the end), and it comes up selected: the user
+    /// carried it there to look at it.
+    At(usize),
+    /// At the end, the strip's selection where it was: it joined with others (Merge All
+    /// Windows).
+    End,
 }
 
 /// What a move comes to.
@@ -201,6 +236,10 @@ pub fn plan(world: &[Window], wanted: Move, host: &dyn Host) -> Result<Plan, Ref
         Move::PaneToTab { pane, into, place } => pane_to_tab(world, pane, into, place, host),
         Move::TabToTab { tab, into, place } => tab_to_tab(world, tab, into, place, host),
         Move::PaneToNewTab { pane, window, gap } => pane_to_new_tab(world, pane, window, gap, host),
+        Move::TabToNewWindow { tab, at } => tab_to_new_window(world, tab, at, host),
+        Move::PaneToNewWindow { pane, at } => pane_to_new_window(world, pane, at, host),
+        Move::TabToStrip { tab, window, index } => tab_to_strip(world, tab, window, index),
+        Move::MergeAllWindows { into } => merge_all_windows(world, into),
     }
 }
 
@@ -496,7 +535,7 @@ fn pane_to_new_tab(
     steps.push(Step::AdoptTab {
         window: onto.id,
         tab,
-        gap,
+        slot: Slot::At(gap),
     });
     steps.push(Step::CloseIfEmptied { window: from.id });
     let emptied = panes == 1 && from.order.len() == 1;
@@ -516,11 +555,170 @@ fn pane_to_new_tab(
     })
 }
 
+fn tab_to_new_window(
+    world: &[Window],
+    tab: u64,
+    at: Option<(f64, f64)>,
+    host: &dyn Host,
+) -> Result<Plan, Refusal> {
+    let (from, _) = holding_tab(world, tab).ok_or(Refusal::Quiet)?;
+    if from.order.len() < 2 || from.asking {
+        return Err(Refusal::Beep);
+    }
+    // Nothing to undo: a window is not a picture Undo Move can paint again, and the tab leaving
+    // its strip drops the record there was.
+    Ok(Plan {
+        steps: vec![
+            Step::ReleaseTab {
+                window: from.id,
+                tab,
+            },
+            Step::OpenWindow {
+                window: host.fresh_id(),
+                from: from.id,
+                tab,
+                at,
+            },
+        ],
+        after: Vec::new(),
+        undo: None,
+    })
+}
+
+fn pane_to_new_window(
+    world: &[Window],
+    pane: u64,
+    at: Option<(f64, f64)>,
+    host: &dyn Host,
+) -> Result<Plan, Refusal> {
+    let (from, source) = holding_pane(world, pane).ok_or(Refusal::Quiet)?;
+    if source.tree.leaves().len() == 1 {
+        return tab_to_new_window(world, source.tab, at, host);
+    }
+    if from.asking {
+        return Err(Refusal::Beep);
+    }
+    let tab = host.fresh_id();
+    let window = host.fresh_id();
+    // Undo Move takes the pane back from the window it made, and closes that window.
+    Ok(Plan {
+        steps: vec![
+            Step::ReleasePane {
+                window: from.id,
+                tab: source.tab,
+                pane,
+            },
+            Step::Wrap {
+                window: from.id,
+                tab,
+            },
+            Step::OpenWindow {
+                window,
+                from: from.id,
+                tab,
+                at,
+            },
+        ],
+        after: Vec::new(),
+        undo: Some(Record {
+            scenes: vec![from.scene(&[source.tab])],
+            born: vec![window],
+        }),
+    })
+}
+
+fn tab_to_strip(world: &[Window], tab: u64, window: u64, index: usize) -> Result<Plan, Refusal> {
+    let (from, _) = holding_tab(world, tab).ok_or(Refusal::Quiet)?;
+    let onto = world
+        .iter()
+        .find(|onto| onto.id == window)
+        .ok_or(Refusal::Quiet)?;
+    if from.id == onto.id {
+        // Along its own strip nothing is shown or hidden, so a question up does not hold it back;
+        // nothing to undo either: the strip is all it changed.
+        if !from.order.clone().move_to(tab, index) {
+            return Err(Refusal::Quiet);
+        }
+        return Ok(Plan {
+            steps: vec![Step::MoveTab {
+                window: from.id,
+                tab,
+                index,
+            }],
+            after: Vec::new(),
+            undo: None,
+        });
+    }
+    if from.asking || onto.asking {
+        return Err(Refusal::Beep);
+    }
+    Ok(Plan {
+        steps: vec![
+            Step::ReleaseTab {
+                window: from.id,
+                tab,
+            },
+            Step::AdoptTab {
+                window: onto.id,
+                tab,
+                slot: Slot::At(index),
+            },
+            Step::CloseIfEmptied { window: from.id },
+        ],
+        after: vec![Step::Raise { window: onto.id }],
+        undo: None,
+    })
+}
+
+fn merge_all_windows(world: &[Window], into: u64) -> Result<Plan, Refusal> {
+    let target = world
+        .iter()
+        .find(|window| window.id == into)
+        .ok_or(Refusal::Quiet)?;
+    let others: Vec<&Window> = world.iter().filter(|window| window.id != into).collect();
+    if others.is_empty() {
+        return Err(Refusal::Quiet);
+    }
+    if target.asking || others.iter().any(|window| window.asking) {
+        return Err(Refusal::Beep);
+    }
+    let mut steps = Vec::new();
+    for other in others {
+        // Its selected tab leaves last: it is the one that leaves the screen, and the window it
+        // leaves is closing anyway. They join in strip order.
+        let selected = other.order.selected();
+        let ids = other.order.ids();
+        for &tab in ids.iter().filter(|&&tab| Some(tab) != selected) {
+            steps.push(Step::ReleaseTab {
+                window: other.id,
+                tab,
+            });
+        }
+        steps.extend(selected.map(|tab| Step::ReleaseTab {
+            window: other.id,
+            tab,
+        }));
+        for &tab in ids {
+            steps.push(Step::AdoptTab {
+                window: into,
+                tab,
+                slot: Slot::End,
+            });
+        }
+        steps.push(Step::CloseIfEmptied { window: other.id });
+    }
+    Ok(Plan {
+        steps,
+        after: vec![Step::Raise { window: into }],
+        undo: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use crate::split::Axis;
 
@@ -530,6 +728,8 @@ mod tests {
     struct Roomy {
         world: Vec<Window>,
         asked: RefCell<Vec<(u64, Direction, Tree)>>,
+        /// The next fresh id: [`NEW`], then counting up.
+        next: Cell<u64>,
     }
 
     impl Host for Roomy {
@@ -540,7 +740,9 @@ mod tests {
         }
 
         fn fresh_id(&self) -> u64 {
-            NEW
+            let id = self.next.get();
+            self.next.set(id + 1);
+            id
         }
     }
 
@@ -619,6 +821,7 @@ mod tests {
         Roomy {
             world: world.to_vec(),
             asked: RefCell::new(Vec::new()),
+            next: Cell::new(NEW),
         }
     }
 
@@ -1060,7 +1263,7 @@ mod tests {
                 Step::AdoptTab {
                     window: 2,
                     tab: NEW,
-                    gap: 1
+                    slot: Slot::At(1)
                 },
                 Step::CloseIfEmptied { window: 1 },
             ]
@@ -1101,7 +1304,7 @@ mod tests {
                 Step::AdoptTab {
                     window: 2,
                     tab: 11,
-                    gap: 0
+                    slot: Slot::At(0)
                 },
                 Step::CloseIfEmptied { window: 1 },
             ]
@@ -1128,6 +1331,225 @@ mod tests {
         );
         world[1].asking = true;
         assert_eq!(super::plan(&world, crossing, &host), Err(Refusal::Beep));
+    }
+
+    #[test]
+    fn a_tab_becomes_a_window_of_its_own_where_it_was_let_go() {
+        let mut world = world();
+        let host = roomy(&world);
+        let at = Some((640.0, 480.0));
+        let plan = plan(&world, Move::TabToNewWindow { tab: 10, at }, &host).unwrap();
+        assert_eq!(
+            plan.steps,
+            vec![
+                Step::ReleaseTab { window: 1, tab: 10 },
+                Step::OpenWindow {
+                    window: NEW,
+                    from: 1,
+                    tab: 10,
+                    at
+                },
+            ]
+        );
+        assert!(plan.after.is_empty());
+        assert_eq!(plan.undo, None, "a window is not a picture to paint again");
+
+        // A window's only tab stays, and a question holds the window.
+        let lone = Move::TabToNewWindow { tab: 20, at: None };
+        let mut alone = world.clone();
+        alone[1] = window(2, vec![shape(20, Tree::Leaf(200), 200)], 20);
+        assert_eq!(super::plan(&alone, lone, &host), Err(Refusal::Beep));
+        world[0].asking = true;
+        assert_eq!(
+            super::plan(&world, Move::TabToNewWindow { tab: 10, at: None }, &host),
+            Err(Refusal::Beep)
+        );
+    }
+
+    #[test]
+    fn a_pane_becomes_a_window_undo_move_takes_back() {
+        let world = world();
+        let host = roomy(&world);
+        let plan = plan(
+            &world,
+            Move::PaneToNewWindow {
+                pane: 101,
+                at: None,
+            },
+            &host,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.steps,
+            vec![
+                Step::ReleasePane {
+                    window: 1,
+                    tab: 10,
+                    pane: 101
+                },
+                Step::Wrap {
+                    window: 1,
+                    tab: NEW
+                },
+                Step::OpenWindow {
+                    window: NEW + 1,
+                    from: 1,
+                    tab: NEW,
+                    at: None
+                },
+            ]
+        );
+        assert_eq!(
+            plan.undo,
+            Some(Record {
+                scenes: vec![world[0].scene(&[10])],
+                born: vec![NEW + 1],
+            })
+        );
+
+        // A tab's only pane takes its tab, as Move Tab to New Window does.
+        assert_eq!(
+            super::plan(
+                &world,
+                Move::PaneToNewWindow {
+                    pane: 110,
+                    at: None
+                },
+                &roomy(&world)
+            ),
+            super::plan(
+                &world,
+                Move::TabToNewWindow { tab: 11, at: None },
+                &roomy(&world)
+            )
+        );
+        let mut asking = world.clone();
+        asking[0].asking = true;
+        assert_eq!(
+            super::plan(
+                &asking,
+                Move::PaneToNewWindow {
+                    pane: 101,
+                    at: None
+                },
+                &host
+            ),
+            Err(Refusal::Beep)
+        );
+    }
+
+    #[test]
+    fn a_tab_let_go_on_a_strip_takes_its_place_there() {
+        let mut world = world();
+        let along = Move::TabToStrip {
+            tab: 10,
+            window: 1,
+            index: 1,
+        };
+        let plan = plan(&world, along.clone(), &Cramped).unwrap();
+        assert_eq!(
+            plan.steps,
+            vec![Step::MoveTab {
+                window: 1,
+                tab: 10,
+                index: 1
+            }]
+        );
+        assert!(plan.after.is_empty());
+        assert_eq!(plan.undo, None);
+        assert_eq!(
+            super::plan(
+                &world,
+                Move::TabToStrip {
+                    tab: 10,
+                    window: 1,
+                    index: 0
+                },
+                &Cramped
+            ),
+            Err(Refusal::Quiet),
+            "its own place"
+        );
+
+        let across = Move::TabToStrip {
+            tab: 10,
+            window: 2,
+            index: 1,
+        };
+        let plan = super::plan(&world, across.clone(), &Cramped).unwrap();
+        assert_eq!(
+            plan.steps,
+            vec![
+                Step::ReleaseTab { window: 1, tab: 10 },
+                Step::AdoptTab {
+                    window: 2,
+                    tab: 10,
+                    slot: Slot::At(1)
+                },
+                Step::CloseIfEmptied { window: 1 },
+            ]
+        );
+        assert_eq!(plan.after, vec![Step::Raise { window: 2 }]);
+        assert_eq!(plan.undo, None);
+
+        world[1].asking = true;
+        assert_eq!(super::plan(&world, across, &Cramped), Err(Refusal::Beep));
+        world[1].asking = false;
+        world[0].asking = true;
+        assert!(
+            super::plan(&world, along, &Cramped).is_ok(),
+            "a reorder shows and hides nothing"
+        );
+    }
+
+    #[test]
+    fn merging_all_windows_brings_their_tabs_to_the_end_and_closes_them() {
+        let mut world = world();
+        world.push(window(
+            3,
+            vec![
+                shape(30, Tree::Leaf(300), 300),
+                shape(31, Tree::Leaf(310), 310),
+                shape(32, Tree::Leaf(320), 320),
+            ],
+            31,
+        ));
+        let plan = plan(&world, Move::MergeAllWindows { into: 2 }, &Cramped).unwrap();
+        let end = |tab| Step::AdoptTab {
+            window: 2,
+            tab,
+            slot: Slot::End,
+        };
+        assert_eq!(
+            plan.steps,
+            vec![
+                Step::ReleaseTab { window: 1, tab: 11 },
+                Step::ReleaseTab { window: 1, tab: 10 },
+                end(10),
+                end(11),
+                Step::CloseIfEmptied { window: 1 },
+                Step::ReleaseTab { window: 3, tab: 30 },
+                Step::ReleaseTab { window: 3, tab: 32 },
+                Step::ReleaseTab { window: 3, tab: 31 },
+                end(30),
+                end(31),
+                end(32),
+                Step::CloseIfEmptied { window: 3 },
+            ]
+        );
+        assert_eq!(plan.after, vec![Step::Raise { window: 2 }]);
+        assert_eq!(plan.undo, None);
+
+        assert_eq!(
+            super::plan(&world[1..2], Move::MergeAllWindows { into: 2 }, &Cramped),
+            Err(Refusal::Quiet),
+            "no other window"
+        );
+        world[2].asking = true;
+        assert_eq!(
+            super::plan(&world, Move::MergeAllWindows { into: 2 }, &Cramped),
+            Err(Refusal::Beep)
+        );
     }
 
     #[test]
@@ -1164,6 +1586,11 @@ mod tests {
                 pane: 101,
                 window: 9,
                 gap: 0,
+            },
+            Move::TabToNewWindow { tab: 99, at: None },
+            Move::PaneToNewWindow {
+                pane: 999,
+                at: None,
             },
         ] {
             assert_eq!(

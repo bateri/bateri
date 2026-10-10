@@ -42,7 +42,9 @@
 //! must not come up under it.
 //!
 //! **What a move comes to is not decided here.** A pane or a tab joining
-//! another tab or becoming one, in this window or another, is planned by `moves` from the
+//! another tab or becoming a tab or a window of its own, a tab let go on a
+//! strip, Merge All Windows — in this window or another — is planned by
+//! `moves` from the
 //! windows' pictures ([`TerminalWindow::picture`]) — which steps, in which
 //! order, what is selected and focused after, what Undo Move keeps — and the
 //! application carries the plan out through the appliers above
@@ -1092,9 +1094,7 @@ define_class!(
         fn move_pane_to_new_window_action(&self, _sender: Option<&AnyObject>) {
             let pane = self.selected_tab().focused_pane().id();
             self.later(move |window| {
-                if let Some(app) = app::delegate(window.mtm()) {
-                    app.pane_to_new_window(window, pane);
-                }
+                window.make_move(Move::PaneToNewWindow { pane, at: None });
             });
         }
 
@@ -1236,9 +1236,7 @@ define_class!(
         fn detach_tab(&self, sender: Option<&AnyObject>) {
             if let Some(id) = self.menu_tab(sender) {
                 self.later(move |window| {
-                    if let Some(app) = app::delegate(window.mtm()) {
-                        app.move_tab_to_new_window(window, id);
-                    }
+                    window.make_move(Move::TabToNewWindow { tab: id, at: None });
                 });
             }
         }
