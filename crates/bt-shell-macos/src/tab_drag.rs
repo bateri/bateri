@@ -68,6 +68,15 @@ define_class!(
             }
         }
 
+        /// The picture moved: the application reads what the tab is over — with ⌥⌘ down,
+        /// panes that would take its block ([`crate::tab_merge`]).
+        #[unsafe(method(draggingSession:movedToPoint:))]
+        fn session_moved(&self, _session: &NSDraggingSession, at: NSPoint) {
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.tab_merge_read(Some(at));
+            }
+        }
+
         /// ⌘ or ⌥ held at the drop would turn a move into a copy or a link; a tab is only moved.
         #[unsafe(method(ignoreModifierKeysForDraggingSession:))]
         fn ignore_modifier_keys(&self, _session: &NSDraggingSession) -> bool {

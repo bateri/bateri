@@ -571,16 +571,63 @@ impl SplitView {
     /// pane is carried. Nothing while a pane is zoomed: the splits are not
     /// on screen to be let go beside.
     pub(crate) fn verdict(&self, carried: u64, at: NSPoint) -> Verdict {
+        self.verdict_of(&Tree::Leaf(carried), &[], at)
+    }
+
+    /// The same question for a block `carried` that may come from another
+    /// tab: `moving` are its panes, whose own smallest sizes count where the
+    /// block would stand, and the spacing is that of the tree it would make
+    /// (a block landing in a lone pane makes cards).
+    pub(crate) fn verdict_of(
+        &self,
+        carried: &Tree,
+        moving: &[Retained<TerminalPane>],
+        at: NSPoint,
+    ) -> Verdict {
         if self.ivars().zoomed.get().is_some() {
             return Verdict::Nothing;
         }
         let at = self.convertPoint_fromView(at, None);
-        let limits = self.limits();
-        let room = self.room(&limits);
-        self.ivars()
-            .tree
-            .borrow()
-            .verdict(&Tree::Leaf(carried), &room, (at.x, at.y))
+        let own = self.ivars().panes.borrow().clone();
+        let min = |id: u64| {
+            own.iter()
+                .chain(moving.iter())
+                .find(|pane| pane.id() == id)
+                .and_then(|pane| pane.min_size())
+                .map_or(Size::new(0.0, 0.0), |min| Size::new(min.width, min.height))
+        };
+        let tree = self.ivars().tree.borrow();
+        let here = tree.leaves();
+        let foreign = carried
+            .leaves()
+            .iter()
+            .filter(|id| !here.contains(id))
+            .count();
+        let scale = self.scale();
+        let room = Room {
+            bounds: self.bounds_rect(),
+            scale,
+            spacing: spacing(here.len() + foreign, scale),
+            min: &min,
+        };
+        tree.verdict(carried, &room, (at.x, at.y))
+    }
+
+    /// The frames panes `ids` of `tree` would have in this container, in
+    /// points — where a block's panes stand once it has landed
+    /// (`tree` a placement's), for the preview to outline.
+    pub(crate) fn frames_of(&self, tree: &Tree, ids: &[u64]) -> Vec<Rect> {
+        let scale = self.scale();
+        tree.layout_spaced(
+            self.bounds_rect(),
+            scale,
+            spacing(tree.leaves().len(), scale),
+        )
+        .panes
+        .into_iter()
+        .filter(|(id, _)| ids.contains(id))
+        .map(|(_, rect)| rect)
+        .collect()
     }
 
     /// Takes every pane out of the container, in tree order, and leaves it

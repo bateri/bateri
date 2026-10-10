@@ -65,6 +65,7 @@ mod stats_popover;
 mod tab;
 mod tab_bar;
 mod tab_drag;
+mod tab_merge;
 mod updater;
 mod uploader;
 mod view;

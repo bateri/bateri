@@ -115,13 +115,13 @@ use objc2::{
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityRadioButtonRole,
     NSAccessibilityTabButtonSubrole, NSAccessibilityTabGroupRole, NSAnimatablePropertyContainer,
-    NSAnimationContext, NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSControl,
-    NSControlStateValueOn, NSControlTextEditingDelegate, NSDragOperation, NSDraggingDestination,
-    NSDraggingInfo, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFocusRingType,
-    NSFont, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSGradient, NSImage,
-    NSLineBreakMode, NSLineCapStyle, NSLineJoinStyle, NSMenu, NSMenuItem, NSShadow,
-    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTrackingArea, NSTrackingAreaOptions,
-    NSView, NSWindowButton, NSWindowOrderingMode, NSWindowStyleMask,
+    NSAnimationContext, NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSBox, NSBoxType,
+    NSColor, NSControl, NSControlStateValueOn, NSControlTextEditingDelegate, NSDragOperation,
+    NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
+    NSFocusRingType, NSFont, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold,
+    NSGradient, NSImage, NSLineBreakMode, NSLineCapStyle, NSLineJoinStyle, NSMenu, NSMenuItem,
+    NSShadow, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTitlePosition, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindowButton, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSNotification, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -193,6 +193,8 @@ const SEPARATOR_HEIGHT: f64 = 16.0;
 const HOVER_FADE: f64 = 0.08;
 const CLOSE_FADE: f64 = 0.12;
 const REFLOW: f64 = 0.2;
+/// How long the glow of a chip a pane joined takes to fade.
+const PULSE_SECS: f64 = 0.7;
 
 /// How much of a chip shows while its tab is carried away in a drag session: the place it
 /// left stays, faint, so the strip does not close up under the pointer that may come back.
@@ -423,6 +425,30 @@ fn animate(secs: f64, change: impl Fn() + 'static) {
         change();
     });
     NSAnimationContext::runAnimationGroup(&changes);
+}
+
+/// Like [`animate`], at a constant pace: a line filling to tell how long a wait has left.
+fn animate_linear(secs: f64, change: impl Fn() + 'static) {
+    let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
+        // SAFETY: AppKit gives the block a live context, for the block's duration.
+        let context = unsafe { context.as_ref() };
+        context.setDuration(secs);
+        let curve = CAMediaTimingFunction::functionWithControlPoints(0.0, 0.0, 1.0, 1.0);
+        context.setTimingFunction(Some(&curve));
+        change();
+    });
+    NSAnimationContext::runAnimationGroup(&changes);
+}
+
+/// A plain filled, rounded box: a mark laid over a chip.
+fn plain_box(mtm: MainThreadMarker, fill: Tint, radius: f64) -> Retained<NSBox> {
+    let plate = NSBox::new(mtm);
+    plate.setBoxType(NSBoxType::Custom);
+    plate.setTitlePosition(NSTitlePosition::NoTitle);
+    plate.setBorderWidth(0.0);
+    plate.setCornerRadius(radius);
+    plate.setFillColor(&fill.color());
+    plate
 }
 
 /// Brings `view`'s opacity to `to`, over `secs` (at once for zero). A view
@@ -998,6 +1024,9 @@ pub(crate) struct ChipIvars {
     /// The ⌘ key that reaches the tab, right of the title while ⌘ is held.
     hint: Retained<NSTextField>,
     close: Retained<CloseButton>,
+    /// The line that fills under the chip while a carried pane waits on it to
+    /// open the tab ([`Chip::dwell`]).
+    dwell: RefCell<Option<Retained<NSBox>>>,
 }
 
 define_class!(
@@ -1147,6 +1176,7 @@ impl Chip {
             label: text.clone(),
             hint: hint.clone(),
             close: close.clone(),
+            dwell: RefCell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -1183,6 +1213,55 @@ impl Chip {
 
     fn tab(&self) -> u64 {
         self.ivars().tab.get()
+    }
+
+    /// The line under the chip fills over `secs` (`Some(0.0)`: it stands full at
+    /// once), or is taken away (`None`): a carried pane has waited on the chip,
+    /// and the tab opens when the line is full.
+    fn dwell(&self, secs: Option<f64>) {
+        let iv = self.ivars();
+        if let Some(line) = iv.dwell.take() {
+            line.removeFromSuperview();
+        }
+        let (Some(secs), Some(palette)) = (secs, iv.palette.get()) else {
+            return;
+        };
+        let size = self.bounds().size;
+        let (x, width) = line_span(size.width);
+        let y = size.height - LINE;
+        let full = NSRect::new(NSPoint::new(x, y), NSSize::new(width, LINE));
+        let line = plain_box(self.mtm(), Tint::of(palette.accent, 1.0), LINE / 2.0);
+        line.setFrame(if secs > 0.0 {
+            NSRect::new(NSPoint::new(x, y), NSSize::new(0.0, LINE))
+        } else {
+            full
+        });
+        self.addSubview(&line);
+        iv.dwell.replace(Some(line.clone()));
+        if secs > 0.0 {
+            animate_linear(secs, move || line.animator().setFrame(full));
+        }
+    }
+
+    /// The chip glows once and fades: a pane has joined its tab, or become a
+    /// tab beside it, and the user stayed where they were.
+    fn pulse(&self) {
+        let Some(palette) = self.ivars().palette.get() else {
+            return;
+        };
+        let glow = plain_box(self.mtm(), Tint::of(palette.accent, 0.34), TAB_RADIUS);
+        glow.setFrame(self.bounds());
+        glow.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        self.addSubview(&glow);
+        let fading = glow.clone();
+        arrange::animate(
+            PULSE_SECS,
+            move || fading.animator().setAlphaValue(0.0),
+            move || glow.removeFromSuperview(),
+        );
     }
 
     /// The bar the chip is in: its strip's superview.
@@ -2169,6 +2248,16 @@ impl OpenCard {
     }
 }
 
+/// What a pane carried over the strip is let go as ([`TabBar::pane_target`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneTarget {
+    /// The middle of tab `tab`'s chip: the pane joins that tab.
+    Tab(u64),
+    /// Between chips, at slot `gap`: the pane becomes a tab there (a tab's only pane
+    /// moves its tab).
+    Between(usize),
+}
+
 /// A press on a chip that may be, or has become, a drag ([`TabBar::grip`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Dragging {
@@ -2193,6 +2282,14 @@ pub(crate) struct BarIvars {
     /// A tab carried over this bar from another window: the place it would be
     /// inserted at, where the chips open a gap ([`TabBar::open_gap`]).
     gap: Cell<Option<usize>>,
+    /// The tab a carried pane is over the middle of: its chip is lit like a hovered
+    /// one ([`TabBar::show_pane_target`]).
+    target: Cell<Option<u64>>,
+    /// The tab a carried pane waits on to open it (the line under its chip).
+    dwelling: Cell<Option<u64>>,
+    /// The tab on screen when the last press on a chip began — a press selects, so
+    /// the tab a chip was pulled from is the one before it ([`TabBar::selected_before`]).
+    before: Cell<Option<u64>>,
     /// The next layout slides every chip to its place, though the order is the
     /// same: a drag ended, or a gap opened or closed.
     glide: Cell<bool>,
@@ -2438,6 +2535,9 @@ impl TabBar {
             hints: Cell::new(false),
             hint_wait: Cell::new(0),
             hint_pending: Cell::new(false),
+            target: Cell::new(None),
+            dwelling: Cell::new(None),
+            before: Cell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -2758,7 +2858,10 @@ impl TabBar {
                     label.mark,
                 ),
                 selected: index == shown.selected,
-                hovered: (hovered == Some(index) || carried.is_some()) && !naming,
+                hovered: (hovered == Some(index)
+                    || carried.is_some()
+                    || iv.target.get() == Some(label.tab))
+                    && !naming,
                 single,
                 lifted: carried.is_some(),
                 ghost: drag.is_some_and(|drag| drag.torn && dragged == Some(index)),
@@ -3188,6 +3291,7 @@ impl TabBar {
             return false;
         };
         app.hold_tab_drag(tab_drag::begin(&chip, tab, event));
+        app.tab_merge_begin(tab);
         true
     }
 
@@ -3257,6 +3361,101 @@ impl TabBar {
     /// (gap open) to where they will stand (the tab there), not through a gap closing first.
     pub(crate) fn close_gap_quietly(&self) {
         self.ivars().gap.set(None);
+    }
+
+    // ─── A pane carried over the strip ───────────────────────────────────
+
+    /// What a pane carried with the pointer at `at` (window coordinates) is over in
+    /// the strip, `None` when the pointer is not in the bar. The strip is read as it
+    /// is, without a gap: the room a gap opens is not under the pointer's reach, so
+    /// the answer does not depend on it ([`tabs::Strip::pane_over`]).
+    pub(crate) fn pane_target(&self, at: NSPoint) -> Option<PaneTarget> {
+        let point = self.convertPoint_fromView(at, None);
+        if !contains(self.bounds(), point) {
+            return None;
+        }
+        let strip = self.strip_with_room(0)?;
+        match strip.pane_over(point.x) {
+            tabs::PaneOver::OnTab { index } => self
+                .ivars()
+                .shown
+                .borrow()
+                .tabs
+                .get(index)
+                .map(|label| PaneTarget::Tab(label.tab)),
+            tabs::PaneOver::Between { gap } => Some(PaneTarget::Between(gap)),
+        }
+    }
+
+    /// Whether `at` (window coordinates) is in the bar: a drop there is the bar's.
+    pub(crate) fn holds(&self, at: NSPoint) -> bool {
+        contains(self.bounds(), self.convertPoint_fromView(at, None))
+    }
+
+    /// The strip's answer to a carried pane: the chip it is over the middle of is lit,
+    /// or room opens between the chips where it would become a tab; `None` when it
+    /// is over neither (or has left).
+    pub(crate) fn show_pane_target(&self, target: Option<PaneTarget>) {
+        let iv = self.ivars();
+        let tab = match target {
+            Some(PaneTarget::Tab(tab)) => Some(tab),
+            _ => None,
+        };
+        if iv.target.replace(tab) != tab {
+            self.lay_out();
+        }
+        self.open_gap(match target {
+            Some(PaneTarget::Between(gap)) => Some(gap),
+            _ => None,
+        });
+    }
+
+    /// The pane is about to become a tab here: the lit chip and the room between chips are
+    /// forgotten **without** a layout of their own — the window's list is about to take the
+    /// tab in, and that layout is the one that matters ([`Self::close_gap_quietly`]). If the
+    /// pane does not become a tab after all, [`Self::lay_out`] puts the chips right.
+    pub(crate) fn settle_pane_target(&self) {
+        let iv = self.ivars();
+        iv.target.set(None);
+        iv.gap.set(None);
+    }
+
+    /// A carried pane waits on tab `tab`'s chip (`Some`): the line under it fills over
+    /// [`tabs::SPRING_DELAY`] and the carrier opens the tab when it is full. Under Reduce
+    /// Motion there is no line to fill: the tab opens all the same, and the chip is lit.
+    /// `None` takes the line away.
+    pub(crate) fn dwell(&self, tab: Option<u64>) {
+        let iv = self.ivars();
+        let before = iv.dwelling.replace(tab);
+        if before == tab {
+            return;
+        }
+        if let Some(chip) = before.and_then(|before| self.chip(before)) {
+            chip.dwell(None);
+        }
+        if !self.reduce_motion()
+            && let Some(chip) = tab.and_then(|tab| self.chip(tab))
+        {
+            chip.dwell(Some(tabs::SPRING_DELAY.as_secs_f64()));
+        }
+    }
+
+    /// Tab `tab`'s chip glows once: a pane joined it or became a tab beside it, and the
+    /// selection stayed where it was. Not under Reduce Motion.
+    pub(crate) fn pulse(&self, tab: u64) {
+        if self.reduce_motion() {
+            return;
+        }
+        if let Some(chip) = self.chip(tab) {
+            chip.pulse();
+        }
+    }
+
+    /// The tab that was on screen before the press on tab `tab`'s chip that is, or was,
+    /// a drag: a press selects, so it is the tab the chip's tab can be let go into.
+    /// `None` if it was `tab` itself.
+    pub(crate) fn selected_before(&self, tab: u64) -> Option<u64> {
+        self.ivars().before.get().filter(|before| *before != tab)
     }
 
     /// `draggingEntered:` and `draggingUpdated:`: the carried tab over this bar. A tab from
@@ -3462,6 +3661,11 @@ impl TabBar {
     /// leaves the chip.
     fn pressed(&self, tab: u64) {
         let iv = self.ivars();
+        iv.before.set(
+            self.terminal_window()
+                .and_then(|window| window.try_selected_tab())
+                .map(|selected| selected.id()),
+        );
         iv.card_wait.set(iv.card_wait.get().wrapping_add(1));
         iv.card_quiet.set(Some(tab));
         self.close_card();

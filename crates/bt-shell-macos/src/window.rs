@@ -30,7 +30,8 @@
 //! between panes and tabs — [`TerminalWindow::swap_panes`],
 //! [`TerminalWindow::move_pane`], [`TerminalWindow::pane_to_tab`], [`TerminalWindow::pane_to_new_tab`],
 //! [`TerminalWindow::release_pane`] with [`TerminalWindow::adopt_pane`],
-//! [`TerminalWindow::merge_tab`]) and ends
+//! [`TerminalWindow::merge_tab`], and the forms of the last and of `pane_to_tab` that take the
+//! tree a pointer's landing showed — `merge_tab_at`, `pane_to_tab_at`) and ends
 //! in a layout edge (`AppDelegate::layout_changed`): the selection, the
 //! order, the names and which window a tab is in are part of the layout the
 //! bound holder keeps and the crash restore reads, and nothing else would
@@ -495,6 +496,44 @@ fn take_panes(
 pub(crate) fn pane_name(pane: &TerminalPane) -> String {
     pane.session()
         .map_or_else(|| "Split".to_owned(), |session| session.title())
+}
+
+/// Where panes joining a tab stand: beside its focused pane (the menu's and
+/// the chip's way), or where a landing the pointer chose put them.
+enum Joins {
+    Beside(Direction),
+    Planned(Tree),
+}
+
+impl Joins {
+    /// The tree the target's panes and `moving` (whose tree is `incoming`)
+    /// make once they have joined: the plan beside the focused pane, or the
+    /// landing if it is exactly these panes — a landing shown for a tab that
+    /// has since changed is refused, not applied.
+    fn tree(
+        self,
+        target: &TerminalTab,
+        incoming: &Tree,
+        moving: &[Retained<TerminalPane>],
+    ) -> Option<Tree> {
+        match self {
+            Self::Beside(side) => target
+                .plan_beside(side, incoming, moving)
+                .map(|placement| placement.tree),
+            Self::Planned(tree) => {
+                let mut wanted = tree.leaves();
+                wanted.sort_unstable();
+                let mut have: Vec<u64> = target
+                    .panes()
+                    .iter()
+                    .chain(moving)
+                    .map(|pane| pane.id())
+                    .collect();
+                have.sort_unstable();
+                (wanted == have).then_some(tree)
+            }
+        }
+    }
 }
 
 /// The direction of a Select/Resize Split ▸ item: the sender's `tag`.
@@ -2215,12 +2254,25 @@ impl TerminalWindow {
 
     /// **The applier: a pane goes to another tab** of this window, beside the
     /// target's focused pane on `side` — Move Split to Tab, to Previous /
-    /// Next Tab. The planned place makes room (neighbours shrink to their
-    /// smallest, [`TerminalTab::plan_beside`]); a beep and `false` where
-    /// there is none. The target is **not** selected and the keyboard stays
-    /// in the tab it came from. A tab's only pane is the tab, so it joins as a
-    /// block ([`Self::merge_tab`]) and the tab closes.
+    /// Next Tab, a pane let go on a chip. The planned place makes room
+    /// (neighbours shrink to their smallest, [`TerminalTab::plan_beside`]); a
+    /// beep and `false` where there is none. The target is **not** selected
+    /// and the keyboard stays in the tab it came from. A tab's only pane is
+    /// the tab, so it joins as a block ([`Self::merge_tab`]) and the tab
+    /// closes.
     pub(crate) fn pane_to_tab(&self, pane: u64, target: u64, side: Direction) -> bool {
+        self.pane_to_tab_where(pane, target, Joins::Beside(side))
+    }
+
+    /// The same applier for a pane let go **in** the target's open panes: the
+    /// panes of tab `target` and this one take the places of `tree`, the
+    /// landing a [`Tree::verdict`] over them showed. A beep and `false` if the
+    /// tree is not exactly those panes.
+    pub(crate) fn pane_to_tab_at(&self, pane: u64, target: u64, tree: Tree) -> bool {
+        self.pane_to_tab_where(pane, target, Joins::Planned(tree))
+    }
+
+    fn pane_to_tab_where(&self, pane: u64, target: u64, place: Joins) -> bool {
         let (Some(source), Some(into)) = (self.tab_holding(pane), self.tab(target)) else {
             return false;
         };
@@ -2228,7 +2280,7 @@ impl TerminalWindow {
             return false;
         }
         if source.panes().len() == 1 {
-            return self.merge_tab(source.id(), target, side);
+            return self.merge_tab_where(source.id(), target, place);
         }
         if !self.selection_free() {
             beep();
@@ -2238,7 +2290,7 @@ impl TerminalWindow {
             return false;
         };
         let moving = [moving];
-        let Some(placement) = into.plan_beside(side, &Tree::Leaf(pane), &moving) else {
+        let Some(tree) = place.tree(&into, &Tree::Leaf(pane), &moving) else {
             beep();
             return false;
         };
@@ -2246,9 +2298,10 @@ impl TerminalWindow {
         let Some(released) = self.release_pane(source.id(), pane) else {
             return false;
         };
-        let joined = self.adopt_pane(&into, &[released], placement.tree);
+        let joined = self.adopt_pane(&into, &[released], tree);
         if joined {
             self.remember(vec![before], Vec::new());
+            self.bar().pulse(target);
         }
         joined
     }
@@ -2262,6 +2315,18 @@ impl TerminalWindow {
     /// its name goes with it. The keyboard goes to the pane that had it
     /// there. A beep and `false` where the block does not fit.
     pub(crate) fn merge_tab(&self, source: u64, into: u64, side: Direction) -> bool {
+        self.merge_tab_where(source, into, Joins::Beside(side))
+    }
+
+    /// The same applier for a tab let go **in** the target's open panes: the
+    /// panes of both take the places of `tree`, the landing a
+    /// [`Tree::verdict`] over the target showed for the tab's block. A beep
+    /// and `false` if the tree is not exactly those panes.
+    pub(crate) fn merge_tab_at(&self, source: u64, into: u64, tree: Tree) -> bool {
+        self.merge_tab_where(source, into, Joins::Planned(tree))
+    }
+
+    fn merge_tab_where(&self, source: u64, into: u64, place: Joins) -> bool {
         if source == into {
             return false;
         }
@@ -2274,7 +2339,7 @@ impl TerminalWindow {
         }
         let incoming = from.container().tree();
         let moving = from.panes();
-        let Some(placement) = target.plan_beside(side, &incoming, &moving) else {
+        let Some(tree) = place.tree(&target, &incoming, &moving) else {
             beep();
             return false;
         };
@@ -2299,7 +2364,7 @@ impl TerminalWindow {
             .retain(|kept| kept.id() != source);
         let panes = from.drain();
         self.retire(from);
-        let joined = self.adopt_pane(&target, &panes, placement.tree);
+        let joined = self.adopt_pane(&target, &panes, tree);
         debug_assert!(
             joined,
             "the planned tree holds the target's panes and these"
@@ -2314,6 +2379,7 @@ impl TerminalWindow {
         self.refresh_title();
         if joined {
             self.remember(vec![before], Vec::new());
+            self.bar().pulse(into);
         }
         true
     }
@@ -2340,6 +2406,7 @@ impl TerminalWindow {
                 self.refresh_bar();
                 self.layout_changed();
                 self.remember(vec![before], Vec::new());
+                self.bar().pulse(source.id());
             }
             return moved;
         }
@@ -2377,6 +2444,7 @@ impl TerminalWindow {
         self.refresh_title();
         self.layout_changed();
         self.remember(vec![before], Vec::new());
+        self.bar().pulse(new);
         true
     }
 

@@ -59,6 +59,7 @@ use crate::split::Axis;
 use crate::ssh_route::{self, Masters};
 use crate::tab::{Histories, TabHost, TerminalTab};
 use crate::tab_drag::TabDragSource;
+use crate::tab_merge::{End, Merge};
 use crate::tabs::Landing;
 use crate::undo::{Now, Record};
 use crate::watch::{Notify, Watch};
@@ -1426,7 +1427,11 @@ pub(crate) struct Ivars {
     /// ([`tab_drag`](crate::tab_drag)), kept here from the session's start to a
     /// turn after its end: the window the drag began in may close first, and
     /// the session's own hold on its source is not relied on.
-    tab_drag: RefCell<Option<Retained<TabDragSource>>>,
+    pub(crate) tab_drag: RefCell<Option<Retained<TabDragSource>>>,
+    /// What the carried tab's block shows over the panes with ⌥⌘ down, and the generation of
+    /// the poll that reads the keys while the session runs ([`crate::tab_merge`]).
+    pub(crate) tab_merge: RefCell<Option<Merge>>,
+    pub(crate) tab_poll: Cell<u64>,
     /// Where the carried tab was let go on a bar — the window and the decision
     /// ([`tabs::landing`](crate::tabs::landing)) — until the session ends and
     /// [`AppDelegate::tab_drag_ended`] carries it out: the windows are not
@@ -2732,6 +2737,8 @@ impl AppDelegate {
             arrange_pending: Cell::new(false),
             files_dragged: Cell::new(false),
             tab_drag: RefCell::new(None),
+            tab_merge: RefCell::new(None),
+            tab_poll: Cell::new(0),
             tab_drop: Cell::new(None),
             undo: RefCell::new(None),
             pane_drag: RefCell::new(None),
@@ -3902,7 +3909,7 @@ impl AppDelegate {
     }
 
     /// The window that holds tab `tab` now.
-    fn window_holding(&self, tab: u64) -> Option<Retained<TerminalWindow>> {
+    pub(crate) fn window_holding(&self, tab: u64) -> Option<Retained<TerminalWindow>> {
         self.windows()
             .into_iter()
             .find(|window| window.index_of(tab).is_some())
@@ -3935,6 +3942,9 @@ impl AppDelegate {
     ) {
         let dropped = self.ivars().tab_drop.take();
         let detach = dropped.is_none() && operation == NSDragOperation::None && !taken_back;
+        // The keys are read no more; the state is taken a turn later with the rest.
+        let poll = &self.ivars().tab_poll;
+        poll.set(poll.get().wrapping_add(1));
         DispatchQueue::main().exec_async(move || {
             // audit: a block running on the main queue is on the main thread by definition.
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
@@ -3943,6 +3953,8 @@ impl AppDelegate {
             };
             // The session is over; its source may go.
             drop(app.ivars().tab_drag.take());
+            // With ⌥⌘ down over panes, a drop on nothing is the block's.
+            let end = app.tab_merge_end(app.tab_merge_take(), tab, at, detach);
             if let Some(from) = app.window_holding(tab) {
                 from.bar().drag_ended();
             }
@@ -3952,7 +3964,7 @@ impl AppDelegate {
                         app.land_tab(tab, &onto, landing);
                     }
                 }
-                None if detach => {
+                None if detach && end == End::Free => {
                     if let Some(from) = app.window_holding(tab) {
                         app.tab_to_new_window(&from, tab, Some(at));
                     }
@@ -5525,6 +5537,7 @@ impl AppDelegate {
         if iv.files_dragged.get()
             || iv.arranged.get().is_some()
             || self.pane_dragging()
+            || self.tab_dragging()
             || iv.arrange_pending.replace(true)
         {
             return;
@@ -5545,6 +5558,7 @@ impl AppDelegate {
         if self.ivars().files_dragged.get()
             || self.ivars().arranged.get().is_some()
             || self.pane_dragging()
+            || self.tab_dragging()
         {
             return;
         }
