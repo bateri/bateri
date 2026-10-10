@@ -174,7 +174,7 @@ objc2-app-kit = { workspace = true, features = [
 # of an existing dependency; wgpu already enables the same ones in the graph.
 objc2-quartz-core = { workspace = true, features = [
     "CABase", "CADisplayLink", "CALayer", "CAMediaTimingFunction", "CAMetalLayer",
-    "objc2-core-foundation",
+    "CAAnimation", "CAMediaTiming", "CATransaction", "CATransform3D", "objc2-core-foundation",
 ] }
 # The upload's notification: `UNUserNotificationCenter`. A new crate,
 # user-approved; the rationale for the flags is in the workspace manifest.

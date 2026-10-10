@@ -81,7 +81,8 @@ of `[remote]` and the two keys of the load indicator (`stats`,
 `stats_interval`; eleven keys in all), and Appearance also carries
 `[terminal] scrollbar` ("Scroll bar"), because it changes how the window
 looks, `[appearance] content_edge` ("Content edge") and
-`[appearance] minimum_contrast` ("Minimum contrast", under the themes); on
+`[appearance] minimum_contrast` ("Minimum contrast", under the themes) and
+`[appearance] dim_unfocused_splits` ("Dim unfocused splits"); on
 folder rows
 Change… opens a folder
 picker (a folder under your home directory is written as `~/…`), on the
@@ -211,8 +212,8 @@ theme = "system"
 # Theme names, used while theme = "system".
 light_theme = "bateri-light"
 dark_theme = "bateri"
-# "fade" | "line" | "cut". Where the text meets the tab bar, or the divider
-# above a split pane: fade thins a line scrolling up into a strip at least as
+# "fade" | "line" | "cut". Where the text meets the tab bar, or the frame
+# of a split pane: fade thins a line scrolling up into a strip at least as
 # tall as the left margin, so no letter is cut in half — at some window
 # heights that costs one line; line cuts the text under a thin line in the
 # divider's color; cut cuts it where the pane ends, as before.
@@ -223,6 +224,10 @@ content_edge = "fade"
 # box, block and Powerline characters are left as they are, since programs draw
 # pictures with them. 1 turns it off; 4.5 and 7 are stricter.
 minimum_contrast = 3.0
+# true | false. Dims the panes of a split tab that don't have the focus under
+# a veil of the theme's background. Off: every pane reads at full strength and
+# the focused one is told by its brighter frame.
+dim_unfocused_splits = false
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -798,6 +803,7 @@ light_theme = "bateri-light"
 dark_theme = "bateri"
 content_edge = "fade"
 minimum_contrast = 3.0
+dim_unfocused_splits = false
 ```
 
 | key | type | default | meaning |
@@ -805,8 +811,9 @@ minimum_contrast = 3.0
 | `theme` | `"system"` or a theme name | `"system"` | the color theme to use |
 | `light_theme` | theme name | `"bateri-light"` | the light appearance's theme while `theme = "system"` |
 | `dark_theme` | theme name | `"bateri"` | the dark appearance's theme while `theme = "system"` |
-| `content_edge` | `"fade"` \| `"line"` \| `"cut"` | `"fade"` | what the text does where it meets the tab bar, or the divider above a split pane |
+| `content_edge` | `"fade"` \| `"line"` \| `"cut"` | `"fade"` | what the text does where it meets the tab bar, or the frame of a split pane |
 | `minimum_contrast` | decimal, `1.0`–`21.0` | `3.0` | the least contrast ratio a program's text keeps against its background; `1` turns it off |
+| `dim_unfocused_splits` | `true` \| `false` | `false` | dim the panes of a split tab that don't have the focus |
 
 - `theme = "system"` leaves the theme to the macOS appearance: `light_theme`
   in light, `dark_theme` in dark. When the appearance changes, the theme
@@ -836,8 +843,8 @@ minimum_contrast = 3.0
   heights whose leftover is shorter than the margin, the pane shows one line
   fewer than with the other two values.
 - `content_edge = "line"` cuts the text at the top as `"cut"` does, under a
-  one-pixel line in the color of the dividers between split panes, along the
-  top of the window's panes.
+  one-pixel line in the color of the split panes' frames, along the top of the
+  window's panes (a split pane's own frame is that line).
 - `content_edge = "cut"` cuts the text where the pane ends, through a letter
   if it falls so — every line the height allows.
 - Changing the value applies at once; between `"fade"` and the other two the
@@ -869,6 +876,17 @@ minimum_contrast = 3.0
 - A program with a light theme of its own still looks best in it; many pick
   it by themselves from the background bateri reports (OSC 11) when their
   theme is set to automatic.
+- A tab with one pane shows it edge to edge. With two or more, the panes are
+  cards: a 6 pt gap between them and around them, rounded corners and a
+  one-pixel frame in the color of the dividers; the focused pane's frame is
+  brighter. Nothing is dimmed, so every pane reads at once. Going from one
+  pane to two (and back) slides the panes into place in a fifth of a second —
+  at once with Reduce Motion — and the program in each pane is resized once,
+  not on every frame. A zoomed pane (Shift Cmd Return) fills the tab again,
+  without the frame.
+- `dim_unfocused_splits = true` brings back the veil over the panes that
+  don't have the focus: the theme's background at 30% over their text, as
+  other terminals do. It applies at once.
 
 ### `[font]`
 

@@ -4885,6 +4885,12 @@ impl AppDelegate {
                     window.set_content_edge(edge);
                 }
             }
+            // The veil over unfocused splits: each tab reads the choice again.
+            if changes.dim_splits {
+                for window in &windows {
+                    window.refresh_split_look();
+                }
+            }
             self.post_notices(Source::Write, Vec::new());
         }
         // The borrow is dropped before `set_theme`; the calls inside do not touch

@@ -40,6 +40,7 @@
 //! so `crate::settings` and friends keep resolving.
 
 pub(crate) mod app;
+mod card;
 mod clipboard;
 mod footer;
 mod hyperlink;

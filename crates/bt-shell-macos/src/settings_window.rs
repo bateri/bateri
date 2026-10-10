@@ -203,11 +203,12 @@ enum Key {
     ContentEdge,
     Ports,
     MinimumContrast,
+    DimSplits,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 40] = [
+    const ALL: [Key; 41] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -248,6 +249,7 @@ impl Key {
         Key::ContentEdge,
         Key::Ports,
         Key::MinimumContrast,
+        Key::DimSplits,
     ];
 
     fn tag(self) -> NSInteger {
@@ -275,6 +277,7 @@ impl Key {
             Key::DarkTheme => "appearance.dark_theme",
             Key::ContentEdge => "appearance.content_edge",
             Key::MinimumContrast => "appearance.minimum_contrast",
+            Key::DimSplits => "appearance.dim_unfocused_splits",
             Key::Font => "font.family",
             Key::Size => "font.size",
             Key::LineHeight => "font.line_height",
@@ -1103,6 +1106,7 @@ struct Controls {
     stats_interval: Number,
     remote_integration: Retained<NSSwitch>,
     ports: Retained<NSSwitch>,
+    dim_splits: Retained<NSSwitch>,
     /// The panes' rows: the lock, the dependent row and the row's
     /// diagnostic come from here.
     rows: Vec<Row>,
@@ -1313,6 +1317,7 @@ define_class!(
                 Some(Key::DownloadNotify) => Some(SettingsEdit::DownloadNotify(on)),
                 Some(Key::RemoteIntegration) => Some(SettingsEdit::RemoteIntegration(on)),
                 Some(Key::Ports) => Some(SettingsEdit::ShellPorts(on)),
+                Some(Key::DimSplits) => Some(SettingsEdit::DimUnfocusedSplits(on)),
                 _ => None,
             };
             self.save(edit);
@@ -1678,6 +1683,7 @@ impl SettingsWindow {
 
         set_switch(&c.remote_integration, settings.remote_integration);
         set_switch(&c.ports, settings.shell_ports);
+        set_switch(&c.dim_splits, settings.dim_unfocused_splits);
         let files = &settings.remote_files;
         let (items, index) = size_items(files.preview_max_size, PREVIEW_SIZE_PRESETS);
         fill_sizes(&c.preview_max_size, &items, index);
@@ -2311,6 +2317,7 @@ impl SettingsWindow {
         );
         let scrollbar = self.popup::<Scrollbar>(Key::Scrollbar);
         let content_edge = self.popup::<ContentEdge>(Key::ContentEdge);
+        let dim_splits = self.switch(Key::DimSplits);
         let mut appearance = Form::new(mtm);
         appearance.row(Key::Theme, "Theme:", &theme, &[&theme], None);
         appearance.row(
@@ -2371,6 +2378,13 @@ impl SettingsWindow {
             &content_edge,
             &[&content_edge],
             Some("Where text meets the tab bar."),
+        );
+        appearance.row(
+            Key::DimSplits,
+            "Dim unfocused splits:",
+            &dim_splits,
+            &[&dim_splits],
+            Some("Veil the panes of a split tab that don't have the focus. Off: the focused pane is told by its frame."),
         );
 
         // Cursor
@@ -2665,6 +2679,7 @@ impl SettingsWindow {
             stats_interval,
             remote_integration,
             ports,
+            dim_splits,
             rows,
         };
         (panes, controls)
@@ -3122,7 +3137,7 @@ mod tests {
                     cursor_blink_interval = []\nconfirm_close = []\n\
                     restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
-                    content_edge = []\nminimum_contrast = []\n\
+                    content_edge = []\nminimum_contrast = []\ndim_unfocused_splits = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
@@ -3182,6 +3197,7 @@ mod tests {
                 Key::StatsInterval => SettingsEdit::StatsInterval(3),
                 Key::RemoteIntegration => SettingsEdit::RemoteIntegration(false),
                 Key::Ports => SettingsEdit::ShellPorts(false),
+                Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
             };
             assert_eq!(edit.path(), key.path(), "{key:?}");
         }

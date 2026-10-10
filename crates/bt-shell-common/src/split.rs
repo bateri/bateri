@@ -119,6 +119,11 @@ impl Rect {
         }
     }
 
+    /// The centre point.
+    pub fn center(self) -> (f64, f64) {
+        (self.x + self.width / 2.0, self.y + self.height / 2.0)
+    }
+
     /// The start and length along the axis.
     fn span(self, axis: Axis) -> (f64, f64) {
         match axis {
@@ -239,6 +244,54 @@ pub fn split_halves(frame: Rect, axis: Axis, scale: f64) -> (Rect, Rect) {
 pub fn split_halves_spaced(frame: Rect, axis: Axis, scale: f64, spacing: Spacing) -> (Rect, Rect) {
     let (first, _, second) = halves_px(snap(frame, scale), axis, 0.5, spacing.between);
     (first.scaled(1.0 / scale), second.scaled(1.0 / scale))
+}
+
+/// What a pane that already stands at `to` must undergo to **look** as if it stood at `from`: a
+/// scale about its centre, then a shift of that centre. The pane is laid out once, at its final
+/// frame (its program is resized once), and a slide plays from this transform back to none —
+/// the frames in between are never laid out. Linear in `from`'s edges, so the slide moves every
+/// edge at the same pace.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Slide {
+    pub scale_x: f64,
+    pub scale_y: f64,
+    /// The shift of the centre, in points, in the frames' own (top-down) direction.
+    pub dx: f64,
+    pub dy: f64,
+}
+
+impl Slide {
+    /// No transform: the pane looks as it stands.
+    pub const NONE: Self = Self {
+        scale_x: 1.0,
+        scale_y: 1.0,
+        dx: 0.0,
+        dy: 0.0,
+    };
+}
+
+/// The [`Slide`] from `from` to `to`. A `to` with no extent along an axis keeps scale one there:
+/// nothing stands at zero size at rest.
+pub fn slide(from: Rect, to: Rect) -> Slide {
+    let ratio = |was: f64, is: f64| if is > 0.0 { was / is } else { 1.0 };
+    let (from_x, from_y) = from.center();
+    let (to_x, to_y) = to.center();
+    Slide {
+        scale_x: ratio(from.width, to.width),
+        scale_y: ratio(from.height, to.height),
+        dx: from_x - to_x,
+        dy: from_y - to_y,
+    }
+}
+
+/// Where a pane that did not exist begins to grow: a line along its far edge on the axis it was
+/// split on (the right edge of a pane split side by side, the bottom of one split above and below),
+/// as long as the pane is across. A new pane is always the second of its split.
+pub fn sliver(to: Rect, axis: Axis) -> Rect {
+    match axis {
+        Axis::Horizontal => Rect::new(to.x + to.width, to.y, 0.0, to.height),
+        Axis::Vertical => Rect::new(to.x, to.y + to.height, to.width, 0.0),
+    }
 }
 
 /// From points to pixels, rounded to whole pixels.
@@ -464,12 +517,25 @@ impl Tree {
     /// container hides them). `None` or a leaf not in the tree gives the ordinary layout — since
     /// undoing does not change the tree, the old frames come back bit for bit.
     pub fn layout_zoomed(&self, bounds: Rect, scale: f64, zoomed: Option<u64>) -> Layout {
+        self.layout_zoomed_spaced(bounds, scale, zoomed, Spacing::DIVIDED)
+    }
+
+    /// [`Tree::layout_zoomed`] with the space `spacing` leaves when nothing is zoomed. The zoomed
+    /// pane covers the whole area whatever the spacing: a margin around the one pane in view
+    /// would read as a card, and a zoomed pane is meant to look like a tab of one.
+    pub fn layout_zoomed_spaced(
+        &self,
+        bounds: Rect,
+        scale: f64,
+        zoomed: Option<u64>,
+        spacing: Spacing,
+    ) -> Layout {
         match zoomed {
             Some(id) if self.leaves().contains(&id) => Layout {
                 panes: vec![(id, snap(bounds, scale).scaled(1.0 / scale))],
                 dividers: Vec::new(),
             },
-            _ => self.layout(bounds, scale),
+            _ => self.layout_spaced(bounds, scale, spacing),
         }
     }
 
@@ -1232,8 +1298,8 @@ fn wrap(node: &mut Tree, side: Direction, incoming: Tree, ratio: f64) {
 mod tests {
     use super::{
         Axis, Direction, Divider, Layout, PANE_EDGE_SHARE, Placement, Rect, Removal, Room,
-        SWAP_CORE, Share, Size, Spacing, Tree, WINDOW_EDGE_SHARE, WINDOW_EDGE_STRIP, Zone,
-        solve_share, split_halves, split_halves_spaced,
+        SWAP_CORE, Share, Size, Slide, Spacing, Tree, WINDOW_EDGE_SHARE, WINDOW_EDGE_STRIP, Zone,
+        slide, sliver, solve_share, split_halves, split_halves_spaced,
     };
 
     fn area(rect: &Rect) -> f64 {
@@ -2386,6 +2452,41 @@ mod tests {
                 side: Direction::Left
             }
         );
+    }
+
+    #[test]
+    fn a_slide_puts_the_final_frame_back_where_it_was() {
+        let from = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        let to = Rect::new(6.0, 6.0, 494.0, 588.0);
+        let moved = slide(from, to);
+        // The scaled frame about its own centre, shifted: `from` again.
+        let (cx, cy) = to.center();
+        let width = to.width * moved.scale_x;
+        let height = to.height * moved.scale_y;
+        assert!((cx + moved.dx - width / 2.0 - from.x).abs() < 1e-9);
+        assert!((cy + moved.dy - height / 2.0 - from.y).abs() < 1e-9);
+        assert!((width - from.width).abs() < 1e-9);
+        assert!((height - from.height).abs() < 1e-9);
+        // A pane that does not move does not slide.
+        assert_eq!(slide(to, to), Slide::NONE);
+    }
+
+    #[test]
+    fn a_new_pane_grows_from_its_far_edge() {
+        let to = Rect::new(503.0, 6.0, 491.0, 588.0);
+        assert_eq!(
+            sliver(to, Axis::Horizontal),
+            Rect::new(994.0, 6.0, 0.0, 588.0)
+        );
+        assert_eq!(
+            sliver(to, Axis::Vertical),
+            Rect::new(503.0, 594.0, 491.0, 0.0)
+        );
+        // Nothing to divide by at rest: the zero-size end is the start, never the rest.
+        let from = sliver(to, Axis::Horizontal);
+        assert_eq!(slide(from, to).scale_x, 0.0);
+        assert_eq!(slide(from, to).scale_y, 1.0);
+        assert_eq!(slide(to, from).scale_x, 1.0);
     }
 
     #[test]

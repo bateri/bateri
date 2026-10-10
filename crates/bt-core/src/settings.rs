@@ -505,7 +505,7 @@ impl Scrollbar {
 }
 
 /// `[appearance] content_edge`: what the text does where it meets the pane's
-/// top edge — the tab bar, or a divider above a split pane.
+/// top edge — the tab bar, or the frame of a split pane.
 ///
 /// One type for the whole road: `bt-gpu` takes it as it is, there is no
 /// request to resolve (the precedent of [`CursorMotion`]). The drawing side
@@ -1358,6 +1358,11 @@ pub struct Settings {
     /// ([`MINIMUM_CONTRAST_RANGE`]). Goes to every session
     /// (`Session::set_minimum_contrast`); doesn't enter `TerminalOptions`.
     pub minimum_contrast: f64,
+    /// `[appearance] dim_unfocused_splits`: whether the panes of a split tab
+    /// that don't hold the focus sit under a veil of the theme's background.
+    /// Off by default: a split tab tells its focused pane by the pane's frame
+    /// alone. Doesn't enter `TerminalOptions`.
+    pub dim_unfocused_splits: bool,
     /// `[font] family` and `size`.
     pub font: FontOptions,
     /// `[clipboard] osc52`: `"copy"` or `"off"`.
@@ -1434,6 +1439,7 @@ impl Default for Settings {
             dark_theme: "bateri".to_owned(),
             content_edge: ContentEdge::default(),
             minimum_contrast: MINIMUM_CONTRAST,
+            dim_unfocused_splits: false,
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::default(),
@@ -1533,6 +1539,9 @@ pub enum SettingsEdit {
     ShellIntegration(ShellIntegration),
     /// The settings window's "Show listening ports": `[shell] ports`.
     ShellPorts(bool),
+    /// The settings window's "Dim unfocused splits": `[appearance]
+    /// dim_unfocused_splits`.
+    DimUnfocusedSplits(bool),
     /// Shell ▸ Mark … as ▸: the `[remote] hosts` edit that makes
     /// `host`'s mark `mark`. Not a single key's value but the array's entries —
     /// the rule is in this arm of [`Settings::with_edit`]. `host` is the form the
@@ -1613,6 +1622,11 @@ impl SettingsEdit {
                 "minimum_contrast",
                 "appearance.minimum_contrast",
             ),
+            Self::DimUnfocusedSplits(_) => (
+                "appearance",
+                "dim_unfocused_splits",
+                "appearance.dim_unfocused_splits",
+            ),
             Self::FontFamily(_) => ("font", "family", "font.family"),
             Self::FontSize(_) => ("font", "size", "font.size"),
             Self::LineHeight(_) => ("font", "line_height", "font.line_height"),
@@ -1681,7 +1695,8 @@ impl SettingsEdit {
             Self::PreviewReadOnly(on)
             | Self::DownloadNotify(on)
             | Self::RemoteIntegration(on)
-            | Self::ShellPorts(on) => (*on).into(),
+            | Self::ShellPorts(on)
+            | Self::DimUnfocusedSplits(on) => (*on).into(),
             Self::CursorRadius(value)
             | Self::CursorGlow(value)
             | Self::BlinkInterval(value)
@@ -1790,8 +1805,8 @@ theme = "system"
 # Theme names, used while theme = "system".
 light_theme = "bateri-light"
 dark_theme = "bateri"
-# "fade" | "line" | "cut". Where the text meets the tab bar, or the divider
-# above a split pane: fade thins a line scrolling up into a strip at least as
+# "fade" | "line" | "cut". Where the text meets the tab bar, or the frame
+# of a split pane: fade thins a line scrolling up into a strip at least as
 # tall as the left margin, so no letter is cut in half — at some window
 # heights that costs one line; line cuts the text under a thin line in the
 # divider's color; cut cuts it where the pane ends, as before.
@@ -1802,6 +1817,10 @@ content_edge = "fade"
 # box, block and Powerline characters are left as they are, since programs draw
 # pictures with them. 1 turns it off; 4.5 and 7 are stricter.
 minimum_contrast = 3.0
+# true | false. Dims the panes of a split tab that don't have the focus under
+# a veil of the theme's background. Off: every pane reads at full strength and
+# the focused one is told by its brighter frame.
+dim_unfocused_splits = false
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -2193,6 +2212,15 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = appearance.get("dim_unfocused_splits") {
+                    parsed.settings.dim_unfocused_splits = boolean(
+                        text,
+                        item,
+                        "appearance.dim_unfocused_splits",
+                        fallback.dim_unfocused_splits,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("appearance") => {
                 for (_, _, slot, kept) in names {
@@ -2200,6 +2228,7 @@ stats_interval = 3
                 }
                 parsed.settings.content_edge = fallback.content_edge;
                 parsed.settings.minimum_contrast = fallback.minimum_contrast;
+                parsed.settings.dim_unfocused_splits = fallback.dim_unfocused_splits;
             }
             None => {}
         }
@@ -2479,6 +2508,7 @@ stats_interval = 3
             scrollbar: self.scrollbar != new.scrollbar,
             content_edge: self.content_edge != new.content_edge,
             contrast: self.minimum_contrast != new.minimum_contrast,
+            dim_splits: self.dim_unfocused_splits != new.dim_unfocused_splits,
             ports: self.shell_ports != new.shell_ports,
         }
     }
@@ -3175,6 +3205,10 @@ pub struct Changes {
     /// ratio to every pane's session, which draws its next frame with it. A
     /// field of its own, for [`Self::caret`]'s reason.
     pub contrast: bool,
+    /// [`Settings::dim_unfocused_splits`] changed: the platform shell gives
+    /// the choice to every tab, which veils or unveils its unfocused panes.
+    /// A field of its own, for [`Self::caret`]'s reason.
+    pub dim_splits: bool,
     /// [`Settings::shell_ports`] changed: the platform shell starts or stops
     /// every pane's port probe. A field of its own, for [`Self::caret`]'s
     /// reason.
@@ -3994,6 +4028,7 @@ mod tests {
             ("appearance", "dark_theme"),
             ("appearance", "content_edge"),
             ("appearance", "minimum_contrast"),
+            ("appearance", "dim_unfocused_splits"),
             ("font", "size"),
             ("font", "line_height"),
             ("font", "letter_spacing"),
@@ -4170,6 +4205,7 @@ mod tests {
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
+                dim_splits: false,
                 ports: false,
             }
         );
@@ -4206,6 +4242,7 @@ mod tests {
             dark_theme: "ink".to_owned(),
             content_edge: ContentEdge::Line,
             minimum_contrast: 4.5,
+            dim_unfocused_splits: true,
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::Spring,
@@ -4396,6 +4433,7 @@ mod tests {
             scrollbar: false,
             content_edge: false,
             contrast: false,
+            dim_splits: false,
             ports: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
@@ -4438,6 +4476,37 @@ mod tests {
                 contrast: true,
                 ..Changes::default()
             }
+        );
+    }
+
+    #[test]
+    fn dim_unfocused_splits_is_read() {
+        // Off by default: a split tab tells its focused pane by the frame.
+        assert!(!Settings::default().dim_unfocused_splits);
+        assert!(clean("[appearance]\ndim_unfocused_splits = true\n").dim_unfocused_splits);
+        assert!(!clean("[appearance]\ndim_unfocused_splits = false\n").dim_unfocused_splits);
+        // A wrong type is rejected with the default and a diagnostic of its own.
+        let (settings, diagnostic) = rejected("[appearance]\ndim_unfocused_splits = \"yes\"\n");
+        assert!(!settings.dim_unfocused_splits);
+        assert_eq!(diagnostic.key, Some("appearance.dim_unfocused_splits"));
+        // A change is its own news: it goes to the tabs, nothing else.
+        let after = clean("[appearance]\ndim_unfocused_splits = true\n");
+        assert_eq!(
+            Settings::default().changes(&after),
+            Changes {
+                dim_splits: true,
+                ..Changes::default()
+            }
+        );
+        // The edit writes the one line and keeps what it doesn't know.
+        let written = Settings::with_edit(
+            "[appearance]\ntheme = \"system\"\nfuture = 1\n",
+            &SettingsEdit::DimUnfocusedSplits(true),
+        )
+        .expect("writable text");
+        assert_eq!(
+            written,
+            "[appearance]\ntheme = \"system\"\nfuture = 1\ndim_unfocused_splits = true\n"
         );
     }
 
@@ -4525,6 +4594,7 @@ mod tests {
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
+                dim_splits: false,
                 ports: false,
             }
         );
@@ -4677,6 +4747,7 @@ found {found}; using \"spring\""
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
+                dim_splits: false,
                 ports: false,
             }
         );
@@ -4769,6 +4840,7 @@ found {found}; using \"system\""
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
+                dim_splits: false,
                 ports: false,
             }
         );
@@ -5834,6 +5906,7 @@ found 1.5; using 0.1"
                     scrollbar: false,
                     content_edge: false,
                     contrast: false,
+                    dim_splits: false,
                     ports: false,
                 },
                 "{text}"
@@ -5935,6 +6008,7 @@ found 1.5; using 0.1"
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
+                dim_splits: false,
                 ports: false,
             }
         );
@@ -6040,6 +6114,7 @@ found 1.5; using 0.1"
                 scrollbar: false,
                 content_edge: false,
                 contrast: false,
+                dim_splits: false,
                 ports: false,
             }
         );
@@ -6572,6 +6647,7 @@ cursor = \"spring\"
             SettingsEdit::DarkTheme(name) => settings.dark_theme = name,
             SettingsEdit::ContentEdge(edge) => settings.content_edge = edge,
             SettingsEdit::MinimumContrast(ratio) => settings.minimum_contrast = two(ratio),
+            SettingsEdit::DimUnfocusedSplits(on) => settings.dim_unfocused_splits = on,
             SettingsEdit::FontFamily(name) => {
                 settings.font.family = (!name.is_empty()).then_some(name);
             }
@@ -6649,6 +6725,7 @@ cursor = \"spring\"
             SettingsEdit::DarkTheme("ink".to_owned()),
             SettingsEdit::ContentEdge(ContentEdge::Cut),
             SettingsEdit::MinimumContrast(4.5),
+            SettingsEdit::DimUnfocusedSplits(true),
             SettingsEdit::FontFamily("Menlo".to_owned()),
             SettingsEdit::FontFamily(String::new()),
             SettingsEdit::FontSize(14.5),

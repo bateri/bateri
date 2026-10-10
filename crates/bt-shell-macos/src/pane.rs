@@ -69,6 +69,8 @@ use objc2_foundation::{
 };
 use objc2_quartz_core::CAMetalLayer;
 
+use crate::card::{self, FrameBox};
+
 use crate::app::{self, Grid, split_into_grid};
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
@@ -1571,10 +1573,13 @@ pub(crate) struct PaneIvars {
     /// The inputs of the mouse translation are refreshed with the pane's size
     /// (`set_metrics`); this view is also the source of the geometry (`sync_geometry`).
     view: Retained<BateriView>,
-    /// The unfocused pane's dim veil: the pane's topmost child,
+    /// The unfocused pane's dim veil (`[appearance] dim_unfocused_splits`),
     /// a sibling of the Metal layer — it is not in the frame path, its
     /// composition is CoreAnimation's. The owner determines its visibility.
     dim: Retained<DimOverlay>,
+    /// The card's frame: the topmost child, above the veil
+    /// ([`crate::card`]). Invisible unless the pane is one of several.
+    card_frame: Retained<FrameBox>,
     /// The ⌘-hovered OSC 8 link's target and its text: above the
     /// terminal and the search panel, below the dim veil. AppKit's, outside the
     /// frame path; shown by [`TerminalPane::set_link_target`].
@@ -2109,6 +2114,7 @@ impl TerminalPane {
         let ports_on = run.is_none() && settings.shell_ports;
         let dim = DimOverlay::new(mtm);
         dim.paint(&theme);
+        let card_frame = FrameBox::new(mtm, &theme);
         let link_label = LinkLabel::new(mtm);
         link_label.0.paint(&theme);
         let block_tip = BlockTipParts::new(mtm);
@@ -2139,6 +2145,7 @@ impl TerminalPane {
             surface,
             view: view.clone(),
             dim: dim.clone(),
+            card_frame: card_frame.clone(),
             link_label: link_label.clone(),
             link: OnceCell::new(),
             session: OnceCell::new(),
@@ -2245,6 +2252,14 @@ impl TerminalPane {
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         this.addSubview(&dim);
+        // The card's frame lies over the veil: a quiet pane keeps its frame
+        // at full clarity, the veil dims only the grid.
+        card_frame.setFrame(this.bounds());
+        card_frame.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        this.addSubview(&card_frame);
         let font = this.ivars().font.borrow().clone();
         this.request_font(&font);
         Ok(this)
@@ -3210,16 +3225,39 @@ impl TerminalPane {
             bar.paint(&theme, is_dark_background(&theme));
         }
         self.ivars().dim.paint(&theme);
+        self.ivars().card_frame.paint(&theme);
         self.ivars().link_label.0.paint(&theme);
         self.ivars().block_tip.paint(&theme);
         self.ivars().jump.paint(&theme);
     }
 
-    /// Shows or hides the dim veil. The decision is the
-    /// owner's ("not focused and more than one pane in the tab",
-    /// `TerminalTab::refresh_dim`); it asks for no frame — the veil is AppKit's.
-    pub(crate) fn set_dimmed(&self, dimmed: bool) {
-        self.ivars().dim.setHidden(!dimmed);
+    /// What tells this pane's focus: the card's frame is brighter on the
+    /// focused pane, and `veiled` shows the dim veil over an unfocused one
+    /// (`[appearance] dim_unfocused_splits`). The decision is the owner's
+    /// (`TerminalTab::refresh_look`); it asks for no frame — both are AppKit's.
+    pub(crate) fn set_focus_look(&self, focused: bool, veiled: bool) {
+        self.ivars().card_frame.set_focused(focused);
+        self.ivars().dim.setHidden(!veiled);
+    }
+
+    /// Makes the pane one of several cards, or the whole tab again: rounds and
+    /// clips its layer and shows or hides its frame, at the window's `scale`
+    /// ([`crate::card`]). The container calls it on every layout.
+    pub(crate) fn set_card(&self, carded: bool, scale: f64) {
+        self.ivars().card_frame.set_carded(carded, scale);
+        if let Some(layer) = self.layer() {
+            card::round(&layer, carded);
+        }
+    }
+
+    /// Whether the pane is a card now.
+    pub(crate) fn is_card(&self) -> bool {
+        self.ivars().card_frame.carded()
+    }
+
+    /// The card's frame, for the slide that fades it.
+    pub(crate) fn frame_view(&self) -> &NSView {
+        &self.ivars().card_frame
     }
 
     /// Shows the ⌘-hovered OSC 8 link's target in the bottom-left label, or

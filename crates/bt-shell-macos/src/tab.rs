@@ -31,8 +31,9 @@
 //! **The focused pane** is the pane of the window's first responder
 //! ([`TerminalTab::focused_pane`]): the title, `⇄`, upload percentage and
 //! the inheritance of a new tab or split come from it. ⌘W closes it,
-//! and in the last pane the tab. The other panes are under the dim veil
-//! ([`TerminalTab::refresh_dim`]). Split, navigation, resizing, equalizing
+//! and in the last pane the tab. Its card's frame is the brighter one — the
+//! other panes sit under the dim veil only with `dim_unfocused_splits`
+//! ([`TerminalTab::refresh_look`]). Split, navigation, resizing, equalizing
 //! and pane closing drop the zoom (⇧⌘↩) — resizing and equalizing because the
 //! user asked for a layout change, and silently changing a hidden layout
 //! would be an invisible effect.
@@ -362,7 +363,7 @@ impl TerminalTab {
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(tab) = app::delegate(mtm).and_then(|app| app.tab(tab)) {
                 tab.refresh_title();
-                tab.refresh_dim();
+                tab.refresh_look();
             }
         });
     }
@@ -384,18 +385,21 @@ impl TerminalTab {
             let _ = window.makeFirstResponder(Some(pane.view()));
         }
         self.pane_focused(pane.id());
-        self.refresh_dim();
+        self.refresh_look();
     }
 
-    /// The dim veil of unfocused panes: with several panes in the tab, those
-    /// other than the focused one. No veil with a single pane. AppKit's
+    /// What tells the focused pane from the others: its card's frame is
+    /// brighter, and — only with `[appearance] dim_unfocused_splits` — the
+    /// others sit under the dim veil. No veil with a single pane. AppKit's
     /// work, it asks for no frame.
-    pub(crate) fn refresh_dim(&self) {
+    pub(crate) fn refresh_look(&self) {
         let panes = self.panes();
         let focused = self.focused_pane().id();
-        let many = panes.len() > 1;
+        let dim = panes.len() > 1
+            && app::delegate(self.mtm()).is_some_and(|app| app.settings().dim_unfocused_splits);
         for pane in &panes {
-            pane.set_dimmed(many && pane.id() != focused);
+            let own = pane.id() == focused;
+            pane.set_focus_look(own, dim && !own);
         }
     }
 
@@ -413,7 +417,7 @@ impl TerminalTab {
         }
         container.set_zoomed(zoomed);
         container.apply_visibility(self.window_visible());
-        self.refresh_dim();
+        self.refresh_look();
     }
 
     /// The window's visibility reached the tab (occlusion, miniaturizing):
@@ -604,7 +608,7 @@ impl TerminalTab {
                 drop(pane.begin_close());
                 drop(container.detach(id));
                 self.refresh_title();
-                self.refresh_dim();
+                self.refresh_look();
                 if let Some(app) = app::delegate(self.mtm()) {
                     app.refresh_dock_tile();
                     app.layout_changed();

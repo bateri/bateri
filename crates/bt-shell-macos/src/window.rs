@@ -1487,7 +1487,7 @@ impl TerminalWindow {
             return Err(e);
         }
         this.refresh_title();
-        tab.refresh_dim();
+        tab.refresh_look();
         Ok(this)
     }
 
@@ -1520,7 +1520,7 @@ impl TerminalWindow {
             return Err(e);
         }
         self.refresh_title();
-        tab.refresh_dim();
+        tab.refresh_look();
         Ok(tab)
     }
 
@@ -2022,7 +2022,7 @@ impl TerminalWindow {
         // before the bar is drawn.
         new.look();
         self.refresh_title();
-        new.refresh_dim();
+        new.refresh_look();
         // A question one of its panes asked in the background opens now.
         new.shown();
     }
@@ -2402,6 +2402,15 @@ impl TerminalWindow {
     pub(crate) fn set_content_edge(&self, edge: ContentEdge) {
         for tab in self.tabs() {
             tab.set_content_edge(edge);
+        }
+    }
+
+    /// Gives `[appearance] dim_unfocused_splits` to every tab: each reads the
+    /// setting again and veils or unveils its unfocused panes
+    /// ([`TerminalTab::refresh_look`]).
+    pub(crate) fn refresh_split_look(&self) {
+        for tab in self.tabs() {
+            tab.refresh_look();
         }
     }
 
