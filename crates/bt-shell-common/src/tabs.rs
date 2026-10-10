@@ -19,9 +19,10 @@
 //!
 //! **A carried pane** is read here too: [`Strip::pane_over`] says whether a point over the strip
 //! means "into this tab" or "a new tab at this place", and the pane operations of [`Tabs`]
-//! ([`Tabs::pane_to_tab`], [`Tabs::pane_to_new_tab`], [`Tabs::pane_arrived_as_tab`],
-//! [`Tabs::pane_left`]) are the list's half of every way a pane changes tab or window: which tab
-//! opens where, which one closes because it was emptied and which one stays selected.
+//! ([`Tabs::pane_to_tab`], [`Tabs::pane_to_new_tab`], [`Tabs::place_new`]) are the list's half
+//! of the ways a pane changes tab within a window: which tab opens where, which one closes
+//! because it was emptied and which one stays selected. Across windows a tab leaves and joins
+//! whole ([`Tabs::close`], [`Tabs::insert_at`]); what each move comes to is `moves`'.
 //!
 //! Coordinates are points in the **bar's** space (the layout is horizontal only; the other axis
 //! appears only in how far a dragged pointer is from the bar): the bar spans the window's
@@ -202,14 +203,6 @@ impl<K: Copy + Eq> Tabs<K> {
         true
     }
 
-    /// A pane of tab `source` left this window for another; `emptied` says it was `source`'s
-    /// last. An emptied tab closes by the usual rule (the selection goes to its right neighbour,
-    /// else its left) and the model is empty when it was the window's last tab, which is the
-    /// window's cue to close. `true` if `source` was removed.
-    pub fn pane_left(&mut self, source: K, emptied: bool) -> bool {
-        emptied && self.close(source)
-    }
-
     /// A pane of tab `source`, which holds `panes` of them, was let go between the tabs at `gap`
     /// (the tab it goes before; `len` is the end). From a tab with several panes it becomes a new
     /// tab `new` at that place — **not** selected, the user stays where they were
@@ -234,10 +227,10 @@ impl<K: Copy + Eq> Tabs<K> {
         NewTab::Created
     }
 
-    /// A pane that came from another window was let go between this window's tabs at `gap`: it
-    /// becomes the tab `new` there, **not** selected — the same rule as a pane let go between
-    /// the tabs of its own window. `false` if the id is already here.
-    pub fn pane_arrived_as_tab(&mut self, new: K, gap: usize) -> bool {
+    /// A new tab `new` before tab number `gap` (`len` is the end), the selection left where it
+    /// was — a pane of this window let go between its tabs, once [`Self::pane_to_new_tab`] has
+    /// said it makes one. `false` if the id is already here.
+    pub fn place_new(&mut self, new: K, gap: usize) -> bool {
         if self.index_of(new).is_some() {
             return false;
         }
@@ -2151,26 +2144,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_leaving_the_window_closes_its_emptied_tab_by_the_usual_rule() {
-        let mut t = tabs(&[1, 2, 3], 2);
-        assert!(!t.pane_left(2, false));
-        assert_eq!(t.ids(), &[1, 2, 3]);
-        assert!(t.pane_left(2, true));
-        assert_eq!(
-            (t.ids(), t.selected()),
-            (&[1, 3][..], Some(3)),
-            "the right neighbour"
-        );
-        let mut lone = Tabs::new(7);
-        assert!(lone.pane_left(7, true));
-        assert!(
-            lone.is_empty(),
-            "the window's last pane leaves: the window closes"
-        );
-        assert_eq!(lone.selected(), None);
-    }
-
-    #[test]
     fn a_pane_let_go_between_tabs_becomes_a_tab_that_is_not_selected() {
         let mut t = tabs(&[1, 2, 3], 2);
         assert_eq!(t.pane_to_new_tab(2, 3, 9, 0), NewTab::Created);
@@ -2239,13 +2212,13 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_arriving_from_another_window_becomes_an_unselected_tab() {
+    fn a_new_tab_placed_between_tabs_leaves_the_selection() {
         let mut t = tabs(&[1, 2], 1);
-        assert!(t.pane_arrived_as_tab(9, 0));
+        assert!(t.place_new(9, 0));
         assert_eq!((t.ids(), t.selected()), (&[9, 1, 2][..], Some(1)));
-        assert!(t.pane_arrived_as_tab(8, 99));
+        assert!(t.place_new(8, 99));
         assert_eq!((t.ids(), t.selected_index()), (&[9, 1, 2, 8][..], Some(1)));
-        assert!(!t.pane_arrived_as_tab(8, 0), "already here");
+        assert!(!t.place_new(8, 0), "already here");
     }
 
     #[test]

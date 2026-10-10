@@ -2668,19 +2668,20 @@ fn focus_answerer() -> focus::Answerer {
 
 /// What a plan's steps hold between them ([`AppDelegate::carry_out`]): the panes
 /// and tabs taken out and not yet put in, the windows a tab folded in, and
-/// whether the panes landed.
+/// whether panes failed to land.
 #[derive(Default)]
 struct Hands {
     panes: Vec<Retained<TerminalPane>>,
     tabs: Vec<Retained<TerminalTab>>,
     folded: Vec<Retained<TerminalWindow>>,
-    landed: bool,
+    failed: bool,
 }
 
 /// Where panes fit is the panes' own: their cells and their window's screen
 /// set the room ([`TerminalTab::plan_beside`]), and the panes that join are
-/// asked wherever they still are.
-impl moves::Fit for AppDelegate {
+/// asked wherever they still are. A new tab's id comes from the one counter
+/// windows, tabs and panes share.
+impl moves::Host for AppDelegate {
     fn beside(&self, tab: u64, side: Direction, incoming: &Tree) -> Option<Tree> {
         let target = self.tab(tab)?;
         let moving: Vec<Retained<TerminalPane>> = incoming
@@ -2691,6 +2692,10 @@ impl moves::Fit for AppDelegate {
         target
             .plan_beside(side, incoming, &moving)
             .map(|placement| placement.tree)
+    }
+
+    fn fresh_id(&self) -> u64 {
+        self.next_id()
     }
 }
 
@@ -3759,13 +3764,14 @@ impl AppDelegate {
         true
     }
 
-    /// **A pane or a tab joins another tab**, in its own window or another
-    /// ([`Move`]): what it comes to is the planner's ([`moves::plan`]) — which
-    /// panes leave, what is selected and focused after, what Undo Move keeps —
-    /// and it is carried out here ([`Self::carry_out`]). A refusal beeps when the
-    /// user asked for something that cannot be done now (a window holds a question
-    /// of its own, the panes do not fit). `true` if the panes landed.
-    pub(crate) fn join(&self, wanted: Move) -> bool {
+    /// **A pane or a tab moves** to another tab or becomes one, in its own window
+    /// or another ([`Move`]): what it comes to is the planner's ([`moves::plan`])
+    /// — which panes and tabs leave, what is selected and focused after, what
+    /// Undo Move keeps — and it is carried out here ([`Self::carry_out`]). A
+    /// refusal beeps when the user asked for something that cannot be done now (a
+    /// window holds a question of its own, the panes do not fit). `true` if the
+    /// move was made.
+    pub(crate) fn make_move(&self, wanted: Move) -> bool {
         match moves::plan(&self.world(), wanted, self) {
             Ok(plan) => self.carry_out(plan),
             Err(Refusal::Beep) => {
@@ -3786,10 +3792,10 @@ impl AppDelegate {
 
     /// **The applier of a plan.** Its steps go through the window appliers in
     /// order, the panes and tabs a step takes out held here until a later step
-    /// puts them in, so nothing closes on the way; then — if the panes landed —
-    /// the steps that follow, the record Undo Move keeps (last: a tab leaving its
-    /// window drops the one there was) and a layout edge. `true` if the panes
-    /// landed.
+    /// puts them in, so nothing closes on the way; then — unless panes failed to
+    /// land — the steps that follow, the record Undo Move keeps (last: a tab
+    /// leaving its window drops the one there was) and a layout edge. `true` if
+    /// the move was made.
     fn carry_out(&self, plan: Plan) -> bool {
         let mut hands = Hands::default();
         for step in plan.steps {
@@ -3800,7 +3806,7 @@ impl AppDelegate {
         for window in &hands.folded {
             window.refresh_title();
         }
-        if !hands.landed {
+        if hands.failed {
             return false;
         }
         for step in plan.after {
@@ -3858,11 +3864,49 @@ impl AppDelegate {
                     return false;
                 };
                 let panes = std::mem::take(&mut hands.panes);
-                hands.landed = window.adopt_pane(&into, &panes, tree);
+                let landed = window.adopt_pane(&into, &panes, tree);
                 debug_assert!(
-                    hands.landed,
+                    landed,
                     "the planned tree holds the target's panes and these"
                 );
+                hands.failed |= !landed;
+                true
+            }
+            Step::NewTab { window, tab, gap } => {
+                let (Some(window), Some(pane)) = (self.window(window), hands.panes.pop()) else {
+                    return false;
+                };
+                window.new_tab_of(&pane, tab, gap);
+                true
+            }
+            Step::Wrap { window, tab } => {
+                let Some(pane) = hands.panes.pop() else {
+                    return false;
+                };
+                let edge = self.settings().content_edge;
+                hands.tabs.push(TerminalTab::around(
+                    self.mtm(),
+                    tab,
+                    window,
+                    &pane,
+                    Some(edge),
+                ));
+                true
+            }
+            Step::AdoptTab { window, tab, gap } => {
+                let Some(index) = hands.tabs.iter().position(|held| held.id() == tab) else {
+                    return false;
+                };
+                let Some(window) = self.window(window) else {
+                    return false;
+                };
+                window.adopt_tab(&hands.tabs.remove(index), Placement::At(gap));
+                true
+            }
+            Step::MoveTab { window, tab, index } => {
+                if let Some(window) = self.window(window) {
+                    window.move_tab(tab, index);
+                }
                 true
             }
             Step::CloseIfEmptied { window } => {
@@ -3903,61 +3947,6 @@ impl AppDelegate {
                 true
             }
         }
-    }
-
-    /// **A pane crosses to another window as a tab of its own**, in the strip before
-    /// tab number `gap` of `onto` (a carried pane let go between the chips of another
-    /// window's strip). A tab's only pane is the tab: it moves, its name and identity
-    /// and all. The tab comes up selected there. Nothing moves while either window holds a
-    /// question of its own (a beep).
-    pub(crate) fn pane_to_other_new_tab(
-        &self,
-        from: &TerminalWindow,
-        pane: u64,
-        onto: &TerminalWindow,
-        gap: usize,
-    ) -> bool {
-        let Some(source) = from.tab_holding(pane) else {
-            return false;
-        };
-        if from.id() == onto.id() {
-            return false;
-        }
-        if !from.selection_free() || !onto.selection_free() {
-            crate::preview::beep();
-            return false;
-        }
-        let scenes = vec![from.undo_scene(&[source.id()]), onto.undo_scene(&[])];
-        let single = source.panes().len() == 1;
-        let tab = if single {
-            let Some(tab) = from.release_tab(source.id()) else {
-                return false;
-            };
-            tab
-        } else {
-            let Some(released) = from.release_pane(source.id(), pane) else {
-                return false;
-            };
-            TerminalTab::around(
-                self.mtm(),
-                self.next_id(),
-                from.id(),
-                &released,
-                Some(self.settings().content_edge),
-            )
-        };
-        onto.adopt_tab(&tab, Placement::At(gap));
-        let emptied = self.close_if_emptied(from);
-        onto.select();
-        onto.bar().pulse(tab.id());
-        if !emptied {
-            self.remember_undo(Record {
-                scenes,
-                born: Vec::new(),
-            });
-        }
-        self.layout_changed();
-        true
     }
 
     /// The terminal window that is under the screen point `screen`, the one in front

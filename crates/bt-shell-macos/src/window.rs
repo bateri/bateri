@@ -28,7 +28,7 @@
 //! [`TerminalWindow::move_tab`], [`TerminalWindow::release_tab`],
 //! [`TerminalWindow::adopt_tab`]; and the same for a **pane** carried
 //! between panes and tabs — [`TerminalWindow::swap_panes`],
-//! [`TerminalWindow::move_pane`], [`TerminalWindow::pane_to_new_tab`],
+//! [`TerminalWindow::move_pane`], [`TerminalWindow::new_tab_of`],
 //! [`TerminalWindow::release_pane`] with [`TerminalWindow::adopt_pane`],
 //! [`TerminalWindow::fold_tab`]) and ends
 //! in a layout edge (`AppDelegate::layout_changed`): the selection, the
@@ -41,12 +41,12 @@
 //! belongs to the tab on screen or to the whole window, and another tab
 //! must not come up under it.
 //!
-//! **What a join comes to is not decided here.** A pane or a tab joining
-//! another tab, in this window or another, is planned by `moves` from the
+//! **What a move comes to is not decided here.** A pane or a tab joining
+//! another tab or becoming one, in this window or another, is planned by `moves` from the
 //! windows' pictures ([`TerminalWindow::picture`]) — which steps, in which
 //! order, what is selected and focused after, what Undo Move keeps — and the
 //! application carries the plan out through the appliers above
-//! (`AppDelegate::join`).
+//! (`AppDelegate::make_move`).
 //!
 //! **Undo Move is the appliers' too.** A move of panes writes down what it is
 //! about to change and leaves that picture ([`Record`]) after its last layout
@@ -128,7 +128,7 @@ use crate::split::{Axis, Direction, Tree};
 use crate::split_view::SplitView;
 use crate::tab::{self, TerminalTab};
 use crate::tab_bar::{Label, TabBar};
-use crate::tabs::{self, Card, NewTab, Tabs};
+use crate::tabs::{self, Card, Tabs};
 use crate::undo::{Now, Record, Scene, Shape};
 
 /// Whether the theme's background is dark — the window chrome's appearance
@@ -1051,7 +1051,11 @@ define_class!(
         fn move_pane_to_new_tab_action(&self, _sender: Option<&AnyObject>) {
             let tab = self.selected_tab();
             let gap = self.index_of(tab.id()).map_or(0, |index| index + 1);
-            self.pane_to_new_tab(tab.focused_pane().id(), gap);
+            self.make_move(Move::PaneToNewTab {
+                pane: tab.focused_pane().id(),
+                window: self.id(),
+                gap,
+            });
         }
 
         /// Window ▸ Move Split to Tab ▸ (the item's `tag` names the tab,
@@ -1061,7 +1065,7 @@ define_class!(
         fn move_pane_to_tab_action(&self, sender: Option<&AnyObject>) {
             if let Some(target) = tagged_tab(sender) {
                 let pane = self.selected_tab().focused_pane().id();
-                self.join(Move::PaneToTab {
+                self.make_move(Move::PaneToTab {
                     pane,
                     into: target,
                     place: Joins::Beside(Direction::Right),
@@ -1820,7 +1824,11 @@ impl TerminalWindow {
             }
             Tool::NewTab => {
                 let gap = self.index_of(tab.id()).map_or(0, |index| index + 1);
-                self.pane_to_new_tab(pane, gap);
+                self.make_move(Move::PaneToNewTab {
+                    pane,
+                    window: self.id(),
+                    gap,
+                });
             }
             Tool::Close => {
                 if tab.panes().len() > 1 {
@@ -2280,13 +2288,14 @@ impl TerminalWindow {
         true
     }
 
-    /// **A pane or a tab joins another tab** — Move Split to Tab, to Previous /
-    /// Next Tab, a chip's Merge into Current Tab, a pane let go on a chip or in a
-    /// tab's panes, a tab let go with ⌥⌘ on one — in this window or another:
-    /// what it comes to is [`moves::plan`]'s, carried out by the application
-    /// ([`AppDelegate::join`]). `true` if the panes landed.
-    pub(crate) fn join(&self, wanted: Move) -> bool {
-        app::delegate(self.mtm()).is_some_and(|app| app.join(wanted))
+    /// **A pane or a tab moves** to another tab or becomes one — Move Split to
+    /// Tab, to Previous / Next / New Tab, a chip's Merge into Current Tab, a pane
+    /// let go on a chip, between chips or in a tab's panes, a tab let go with ⌥⌘
+    /// on one — in this window or another: what it comes to is
+    /// [`moves::plan`]'s, carried out by the application
+    /// ([`AppDelegate::make_move`]). `true` if it was made.
+    pub(crate) fn make_move(&self, wanted: Move) -> bool {
+        app::delegate(self.mtm()).is_some_and(|app| app.make_move(wanted))
     }
 
     /// **The applier: a tab folds into another** of this window ([`Step::Fold`]):
@@ -2318,68 +2327,18 @@ impl TerminalWindow {
         Some(panes)
     }
 
-    /// **The applier: a pane becomes a tab** of its own, in the strip before
-    /// tab number `gap` (`tab_count()` is the end), **not** selected — the
-    /// user stays where they were ([`tabs::Tabs::pane_to_new_tab`]). A tab's
-    /// only pane is the tab: it is moved to that place, its name and
-    /// identity and all.
-    pub(crate) fn pane_to_new_tab(&self, pane: u64, gap: usize) -> bool {
-        let Some(source) = self.tab_holding(pane) else {
-            return false;
-        };
-        let panes = source.panes().len();
-        if panes <= 1 {
-            let before = self.undo_scene(&[]);
-            let moved = self.ivars().order.borrow_mut().pane_to_new_tab(
-                source.id(),
-                panes,
-                source.id(),
-                gap,
-            ) == NewTab::Reordered;
-            if moved {
-                self.refresh_bar();
-                self.layout_changed();
-                self.remember(vec![before], Vec::new());
-                self.bar().pulse(source.id());
-            }
-            return moved;
-        }
-        let Some(app) = app::delegate(self.mtm()) else {
-            return false;
-        };
-        if !self.selection_free() {
-            beep();
-            return false;
-        }
-        // The model decides before anything moves: it is the one that places
-        // the new tab's id in the strip.
-        let new = app.next_id();
-        let created =
-            self.ivars()
-                .order
-                .borrow()
-                .clone()
-                .pane_to_new_tab(source.id(), panes, new, gap)
-                == NewTab::Created;
-        if !created {
-            return false;
-        }
-        let before = self.undo_scene(&[source.id()]);
-        let Some(released) = self.release_pane(source.id(), pane) else {
-            return false;
-        };
-        let tab = self.born_tab(new, &released);
-        self.ivars()
-            .order
-            .borrow_mut()
-            .pane_to_new_tab(source.id(), panes, new, gap);
-        self.settle_born(&tab, &released);
-        self.announce(&format!("{} moved to a new tab", pane_name(&released)));
+    /// **The applier: a pane becomes a tab** of its own ([`moves::Step::NewTab`]):
+    /// `pane`, taken from a tab of this window, is the first pane of tab `id`,
+    /// in the strip before tab number `gap` (`tab_count()` is the end), **not**
+    /// selected — the user stays where they were ([`tabs::Tabs::place_new`]).
+    /// A layout edge.
+    pub(crate) fn new_tab_of(&self, pane: &TerminalPane, id: u64, gap: usize) {
+        let tab = self.born_tab(id, pane);
+        self.ivars().order.borrow_mut().place_new(id, gap);
+        self.settle_born(&tab, pane);
+        self.announce(&format!("{} moved to a new tab", pane_name(pane)));
         self.refresh_title();
         self.layout_changed();
-        self.remember(vec![before], Vec::new());
-        self.bar().pulse(new);
-        true
     }
 
     /// A tab `id` born around `first`, a pane that came from another tab: it
@@ -2642,7 +2601,7 @@ impl TerminalWindow {
         let target = self.ivars().order.borrow().adjacent(forward);
         if let Some(target) = target {
             let pane = self.selected_tab().focused_pane().id();
-            self.join(Move::PaneToTab {
+            self.make_move(Move::PaneToTab {
                 pane,
                 into: target,
                 place: Joins::Beside(Direction::Right),
@@ -2661,7 +2620,7 @@ impl TerminalWindow {
             return;
         };
         self.later(move |window| {
-            window.join(Move::TabToTab {
+            window.make_move(Move::TabToTab {
                 tab: source,
                 into,
                 place: Joins::Beside(side),

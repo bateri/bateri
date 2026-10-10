@@ -2,9 +2,9 @@
 //! carried by a small card, and let go beside another pane, at the window's edge, in the
 //! middle of another pane (a swap), on a tab's chip, between chips — in its own window or in
 //! another — or over no window at all. The drop is the appliers' ([`TerminalWindow::move_pane`],
-//! [`TerminalWindow::swap_panes`], a join planned by `moves` and carried out by
-//! [`AppDelegate::join`], and across windows [`AppDelegate::pane_to_other_new_tab`] and its kin);
-//! nothing here changes a tab itself, only the selection while a chip is waited on.
+//! [`TerminalWindow::swap_panes`], and a move into a tab or into a tab of its own planned by
+//! `moves` and carried out by [`AppDelegate::make_move`]); nothing here changes a tab itself,
+//! only the selection while a chip is waited on.
 //!
 //! **The press only starts a session.** [`AppDelegate::pane_press`] keeps where
 //! the press was and installs a local event monitor for the mouse drag, the
@@ -44,10 +44,9 @@
 //! window it brings that window up — the regions
 //! then answer in that tab, and a carry that ends without landing there puts the selection
 //! back — while between chips room opens. Letting go on a chip joins its tab beside the focused
-//! pane (the selection stays), and in the panes of a tab opened that way with the landing the
-//! regions showed — in any window, one move ([`AppDelegate::join`]); between chips it is
-//! [`TerminalWindow::pane_to_new_tab`], in another window
-//! [`AppDelegate::pane_to_other_new_tab`]. Let go over no window of ours, a pane becomes a
+//! pane (the selection stays), in the panes of a tab opened that way with the landing the
+//! regions showed, and between chips it becomes a tab there — in any window, one move each
+//! ([`AppDelegate::make_move`]). Let go over no window of ours, a pane becomes a
 //! window there ([`AppDelegate::pane_to_window`]); a window's last pane goes to another window
 //! and leaves its own empty, which closes.
 //!
@@ -1179,7 +1178,7 @@ impl Session {
             (Some(_), Some((target, point, lands))) if target.id() == window.id() => {
                 match *lands {
                     Lands::Tab(chip) => {
-                        done = window.join(Move::PaneToTab {
+                        done = window.make_move(Move::PaneToTab {
                             pane: self.pane,
                             into: chip,
                             place: Joins::Beside(Direction::Right),
@@ -1191,7 +1190,11 @@ impl Session {
                         }
                     }
                     Lands::NewTab(gap) => {
-                        done = window.pane_to_new_tab(self.pane, gap);
+                        done = window.make_move(Move::PaneToNewTab {
+                            pane: self.pane,
+                            window: window.id(),
+                            gap,
+                        });
                     }
                     Lands::Back => {}
                     Lands::Panes => {
@@ -1211,7 +1214,7 @@ impl Session {
                                     *point,
                                 ))
                             {
-                                done = window.join(Move::PaneToTab {
+                                done = window.make_move(Move::PaneToTab {
                                     pane: self.pane,
                                     into: shown.id(),
                                     place: Joins::Planned(tree),
@@ -1226,14 +1229,18 @@ impl Session {
             (Some(_), Some((target, point, lands))) => {
                 match *lands {
                     Lands::Tab(chip) => {
-                        done = app.join(Move::PaneToTab {
+                        done = app.make_move(Move::PaneToTab {
                             pane: self.pane,
                             into: chip,
                             place: Joins::Beside(Direction::Right),
                         });
                     }
                     Lands::NewTab(gap) => {
-                        done = app.pane_to_other_new_tab(window, self.pane, target, gap);
+                        done = app.make_move(Move::PaneToNewTab {
+                            pane: self.pane,
+                            window: target.id(),
+                            gap,
+                        });
                     }
                     Lands::Back => {}
                     Lands::Panes => {
@@ -1245,7 +1252,7 @@ impl Session {
                                 *point,
                             ))
                         {
-                            done = app.join(Move::PaneToTab {
+                            done = app.make_move(Move::PaneToTab {
                                 pane: self.pane,
                                 into: shown.id(),
                                 place: Joins::Planned(tree),

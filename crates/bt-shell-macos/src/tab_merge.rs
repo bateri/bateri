@@ -1,7 +1,7 @@
 //! A tab let go **in** the panes of the tab on screen: with ⌥⌘ held, a tab pulled out of
 //! its strip is a block of panes, and the panes it is over answer for it with their regions —
 //! the same ones a carried pane gets ([`crate::pane_drag`]), drawn for the whole block — and
-//! letting go lands the block there, in its own window or another ([`AppDelegate::join`]).
+//! letting go lands the block there, in its own window or another ([`AppDelegate::make_move`]).
 //! Without the keys the drop is what it always was: a
 //! window where the pointer is ([`crate::tab_drag`]).
 //!
@@ -264,7 +264,7 @@ impl AppDelegate {
             return End::Free;
         };
         let landed = match Self::weigh(&aim) {
-            Verdict::Lands { placement, .. } => self.join(Move::TabToTab {
+            Verdict::Lands { placement, .. } => self.make_move(Move::TabToTab {
                 tab,
                 into: aim.host.id(),
                 place: Joins::Planned(placement.tree),
