@@ -28,10 +28,9 @@
 //! [`TerminalWindow::move_tab`], [`TerminalWindow::release_tab`],
 //! [`TerminalWindow::adopt_tab`]; and the same for a **pane** carried
 //! between panes and tabs — [`TerminalWindow::swap_panes`],
-//! [`TerminalWindow::move_pane`], [`TerminalWindow::pane_to_tab`], [`TerminalWindow::pane_to_new_tab`],
+//! [`TerminalWindow::move_pane`], [`TerminalWindow::pane_to_new_tab`],
 //! [`TerminalWindow::release_pane`] with [`TerminalWindow::adopt_pane`],
-//! [`TerminalWindow::merge_tab`], and the forms of the last and of `pane_to_tab` that take the
-//! tree a pointer's landing showed — `merge_tab_at`, `pane_to_tab_at`) and ends
+//! [`TerminalWindow::fold_tab`]) and ends
 //! in a layout edge (`AppDelegate::layout_changed`): the selection, the
 //! order, the names and which window a tab is in are part of the layout the
 //! bound holder keeps and the crash restore reads, and nothing else would
@@ -41,6 +40,13 @@
 //! window holds a sheet the selection does not move (a beep): the sheet
 //! belongs to the tab on screen or to the whole window, and another tab
 //! must not come up under it.
+//!
+//! **What a join comes to is not decided here.** A pane or a tab joining
+//! another tab, in this window or another, is planned by `moves` from the
+//! windows' pictures ([`TerminalWindow::picture`]) — which steps, in which
+//! order, what is selected and focused after, what Undo Move keeps — and the
+//! application carries the plan out through the appliers above
+//! (`AppDelegate::join`).
 //!
 //! **Undo Move is the appliers' too.** A move of panes writes down what it is
 //! about to change and leaves that picture ([`Record`]) after its last layout
@@ -113,6 +119,7 @@ use crate::app;
 use crate::arrange::Tool;
 use crate::card::{Ground, Shade};
 use crate::jobs::Foreground;
+use crate::moves::{self, Joins, Move};
 use crate::pane::{PaneLaunch, TerminalPane};
 use crate::preview::beep;
 use crate::restore::SavedTab;
@@ -496,44 +503,6 @@ fn take_panes(
 pub(crate) fn pane_name(pane: &TerminalPane) -> String {
     pane.session()
         .map_or_else(|| "Split".to_owned(), |session| session.title())
-}
-
-/// Where panes joining a tab stand: beside its focused pane (the menu's and
-/// the chip's way), or where a landing the pointer chose put them.
-pub(crate) enum Joins {
-    Beside(Direction),
-    Planned(Tree),
-}
-
-impl Joins {
-    /// The tree the target's panes and `moving` (whose tree is `incoming`)
-    /// make once they have joined: the plan beside the focused pane, or the
-    /// landing if it is exactly these panes — a landing shown for a tab that
-    /// has since changed is refused, not applied.
-    pub(crate) fn tree(
-        self,
-        target: &TerminalTab,
-        incoming: &Tree,
-        moving: &[Retained<TerminalPane>],
-    ) -> Option<Tree> {
-        match self {
-            Self::Beside(side) => target
-                .plan_beside(side, incoming, moving)
-                .map(|placement| placement.tree),
-            Self::Planned(tree) => {
-                let mut wanted = tree.leaves();
-                wanted.sort_unstable();
-                let mut have: Vec<u64> = target
-                    .panes()
-                    .iter()
-                    .chain(moving)
-                    .map(|pane| pane.id())
-                    .collect();
-                have.sort_unstable();
-                (wanted == have).then_some(tree)
-            }
-        }
-    }
 }
 
 /// The direction of a Select/Resize Split ▸ item: the sender's `tag`.
@@ -1092,7 +1061,11 @@ define_class!(
         fn move_pane_to_tab_action(&self, sender: Option<&AnyObject>) {
             if let Some(target) = tagged_tab(sender) {
                 let pane = self.selected_tab().focused_pane().id();
-                self.pane_to_tab(pane, target, Direction::Right);
+                self.join(Move::PaneToTab {
+                    pane,
+                    into: target,
+                    place: Joins::Beside(Direction::Right),
+                });
             }
         }
 
@@ -2270,7 +2243,7 @@ impl TerminalWindow {
     /// **The applier: a pane leaves** its tab for another place — moved, not
     /// closed: its shell, programs and questions go on ([`Self::adopt_pane`]
     /// takes it in). Not a tab's last pane: that pane is the tab
-    /// ([`Self::merge_tab`], [`Self::release_tab`]); `None` then, or if it is
+    /// ([`Self::fold_tab`], [`Self::release_tab`]); `None` then, or if it is
     /// not here. A layout edge.
     pub(crate) fn release_pane(&self, tab: u64, pane: u64) -> Option<Retained<TerminalPane>> {
         let released = self.tab(tab)?.release_pane(pane)?;
@@ -2307,107 +2280,30 @@ impl TerminalWindow {
         true
     }
 
-    /// **The applier: a pane goes to another tab** of this window, beside the
-    /// target's focused pane on `side` — Move Split to Tab, to Previous /
-    /// Next Tab, a pane let go on a chip. The planned place makes room
-    /// (neighbours shrink to their smallest, [`TerminalTab::plan_beside`]); a
-    /// beep and `false` where there is none. The target is **not** selected
-    /// and the keyboard stays in the tab it came from. A tab's only pane is
-    /// the tab, so it joins as a block ([`Self::merge_tab`]) and the tab
-    /// closes.
-    pub(crate) fn pane_to_tab(&self, pane: u64, target: u64, side: Direction) -> bool {
-        self.pane_to_tab_where(pane, target, Joins::Beside(side))
+    /// **A pane or a tab joins another tab** — Move Split to Tab, to Previous /
+    /// Next Tab, a chip's Merge into Current Tab, a pane let go on a chip or in a
+    /// tab's panes, a tab let go with ⌥⌘ on one — in this window or another:
+    /// what it comes to is [`moves::plan`]'s, carried out by the application
+    /// ([`AppDelegate::join`]). `true` if the panes landed.
+    pub(crate) fn join(&self, wanted: Move) -> bool {
+        app::delegate(self.mtm()).is_some_and(|app| app.join(wanted))
     }
 
-    /// The same applier for a pane let go **in** the target's open panes: the
-    /// panes of tab `target` and this one take the places of `tree`, the
-    /// landing a [`Tree::verdict`] over them showed. A beep and `false` if the
-    /// tree is not exactly those panes.
-    pub(crate) fn pane_to_tab_at(&self, pane: u64, target: u64, tree: Tree) -> bool {
-        self.pane_to_tab_where(pane, target, Joins::Planned(tree))
-    }
-
-    fn pane_to_tab_where(&self, pane: u64, target: u64, place: Joins) -> bool {
-        let (Some(source), Some(into)) = (self.tab_holding(pane), self.tab(target)) else {
-            return false;
-        };
-        if source.id() == target {
-            return false;
-        }
-        if source.panes().len() == 1 {
-            return self.merge_tab_where(source.id(), target, place);
-        }
-        if !self.selection_free() {
-            beep();
-            return false;
-        }
-        let Some(moving) = source.container().pane(pane) else {
-            return false;
-        };
-        let moving = [moving];
-        let Some(tree) = place.tree(&into, &Tree::Leaf(pane), &moving) else {
-            beep();
-            return false;
-        };
-        let before = self.undo_scene(&[source.id(), target]);
-        let Some(released) = self.release_pane(source.id(), pane) else {
-            return false;
-        };
-        let joined = self.adopt_pane(&into, &[released], tree);
-        if joined {
-            self.remember(vec![before], Vec::new());
-            self.bar().pulse(target);
-        }
-        joined
-    }
-
-    /// **The applier: a tab joins another** as panes, beside the target's
-    /// focused pane on `side`, with its own inner layout and ratios as a
-    /// block (a chip's Merge into Current Tab; a tab's only pane going to
-    /// another tab). The tab leaves the strip — `tabs::Tabs::pane_to_tab`: if
-    /// it was the selected one the screen goes to the tab its panes went to,
-    /// not to a neighbour — and is thrown away without closing anything;
-    /// its name goes with it. The keyboard goes to the pane that had it
-    /// there. A beep and `false` where the block does not fit.
-    pub(crate) fn merge_tab(&self, source: u64, into: u64, side: Direction) -> bool {
-        self.merge_tab_where(source, into, Joins::Beside(side))
-    }
-
-    /// The same applier for a tab let go **in** the target's open panes: the
-    /// panes of both take the places of `tree`, the landing a
-    /// [`Tree::verdict`] over the target showed for the tab's block. A beep
-    /// and `false` if the tree is not exactly those panes.
-    pub(crate) fn merge_tab_at(&self, source: u64, into: u64, tree: Tree) -> bool {
-        self.merge_tab_where(source, into, Joins::Planned(tree))
-    }
-
-    fn merge_tab_where(&self, source: u64, into: u64, place: Joins) -> bool {
-        if source == into {
-            return false;
-        }
-        let (Some(from), Some(target)) = (self.tab(source), self.tab(into)) else {
-            return false;
-        };
-        if !self.selection_free() {
-            beep();
-            return false;
-        }
-        let incoming = from.container().tree();
-        let moving = from.panes();
-        let Some(tree) = place.tree(&target, &incoming, &moving) else {
-            beep();
-            return false;
-        };
-        let focus = from.focused_pane().id();
+    /// **The applier: a tab folds into another** of this window ([`Step::Fold`]):
+    /// it leaves the strip — `tabs::Tabs::pane_to_tab`: if it was the selected
+    /// one the screen goes to `into`, not to a neighbour — and is thrown away
+    /// without closing anything; its panes are handed back to join `into`.
+    /// `None` if either tab is not here.
+    pub(crate) fn fold_tab(&self, source: u64, into: u64) -> Option<Vec<Retained<TerminalPane>>> {
+        let from = self.tab(source)?;
         let was_selected = self.is_selected(source);
-        let before = self.undo_scene(&[source, into]);
         if !self
             .ivars()
             .order
             .borrow_mut()
             .pane_to_tab(source, true, into)
         {
-            return false;
+            return None;
         }
         if was_selected {
             self.switch(Some(&from));
@@ -2419,24 +2315,7 @@ impl TerminalWindow {
             .retain(|kept| kept.id() != source);
         let panes = from.drain();
         self.retire(from);
-        let joined = self.adopt_pane(&target, &panes, tree);
-        debug_assert!(
-            joined,
-            "the planned tree holds the target's panes and these"
-        );
-        if joined && let Some(pane) = panes.iter().find(|pane| pane.id() == focus) {
-            if self.is_selected(into) {
-                target.focus_pane(pane);
-            } else {
-                target.pane_focused(focus);
-            }
-        }
-        self.refresh_title();
-        if joined {
-            self.remember(vec![before], Vec::new());
-            self.bar().pulse(into);
-        }
-        true
+        Some(panes)
     }
 
     /// **The applier: a pane becomes a tab** of its own, in the strip before
@@ -2529,12 +2408,18 @@ impl TerminalWindow {
     /// stands and the tabs `tabs` as they stand — name, split tree with its
     /// ratios, the pane that has the keyboard ([`Scene`]).
     pub(crate) fn undo_scene(&self, tabs: &[u64]) -> Scene {
-        Scene {
-            window: self.id(),
+        self.picture().scene(tabs)
+    }
+
+    /// The window as a move sees it ([`moves::Window`]): the strip, every tab's
+    /// shape and whether a question of its own holds the window.
+    pub(crate) fn picture(&self) -> moves::Window {
+        moves::Window {
+            id: self.id(),
             order: self.ivars().order.borrow().clone(),
-            shapes: tabs
+            tabs: self
+                .tabs()
                 .iter()
-                .filter_map(|&id| self.tab(id))
                 .map(|tab| Shape {
                     tab: tab.id(),
                     name: tab.name(),
@@ -2542,6 +2427,7 @@ impl TerminalWindow {
                     focus: tab.focused_pane().id(),
                 })
                 .collect(),
+            asking: !self.selection_free(),
         }
     }
 
@@ -2624,8 +2510,8 @@ impl TerminalWindow {
     /// `scene` gets the panes of its shape from `pool` — a tab the move
     /// closed is born again under its own identity — in its saved tree and
     /// ratios, and its name; then the strip as it was, the selection with
-    /// it. The keyboard goes to the pane that had it there (as
-    /// [`Self::merge_tab`] does: on screen into the pane, off it into the
+    /// it. The keyboard goes to the pane that had it there (as a join's
+    /// `moves::Step::Focus` does: on screen into the pane, off it into the
     /// tab's memory), and a tree that no longer fits the window's smallest
     /// panes is equalized, as a restored one ([`SplitView::fits`]).
     pub(crate) fn undo_place(&self, scene: &Scene, pool: &mut Vec<Retained<TerminalPane>>) {
@@ -2756,7 +2642,11 @@ impl TerminalWindow {
         let target = self.ivars().order.borrow().adjacent(forward);
         if let Some(target) = target {
             let pane = self.selected_tab().focused_pane().id();
-            self.pane_to_tab(pane, target, Direction::Right);
+            self.join(Move::PaneToTab {
+                pane,
+                into: target,
+                place: Joins::Beside(Direction::Right),
+            });
         }
     }
 
@@ -2771,7 +2661,11 @@ impl TerminalWindow {
             return;
         };
         self.later(move |window| {
-            window.merge_tab(source, into, side);
+            window.join(Move::TabToTab {
+                tab: source,
+                into,
+                place: Joins::Beside(side),
+            });
         });
     }
 

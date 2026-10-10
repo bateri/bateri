@@ -2,8 +2,9 @@
 //! carried by a small card, and let go beside another pane, at the window's edge, in the
 //! middle of another pane (a swap), on a tab's chip, between chips — in its own window or in
 //! another — or over no window at all. The drop is the appliers' ([`TerminalWindow::move_pane`],
-//! [`TerminalWindow::swap_panes`], and across windows [`AppDelegate::pane_to_other_tab`] and
-//! its kin); nothing here changes a tab itself, only the selection while a chip is waited on.
+//! [`TerminalWindow::swap_panes`], a join planned by `moves` and carried out by
+//! [`AppDelegate::join`], and across windows [`AppDelegate::pane_to_other_new_tab`] and its kin);
+//! nothing here changes a tab itself, only the selection while a chip is waited on.
 //!
 //! **The press only starts a session.** [`AppDelegate::pane_press`] keeps where
 //! the press was and installs a local event monitor for the mouse drag, the
@@ -42,11 +43,10 @@
 //! middle of a chip lights it and, waited on ([`SPRING_DELAY`]), opens its tab — in another
 //! window it brings that window up — the regions
 //! then answer in that tab, and a carry that ends without landing there puts the selection
-//! back — while between chips room opens. Letting go on a chip is
-//! [`TerminalWindow::pane_to_tab`] (the selection stays), between chips
-//! [`TerminalWindow::pane_to_new_tab`], and in the panes of a tab opened that way
-//! [`TerminalWindow::pane_to_tab_at`] with the landing the regions showed; in another
-//! window the same three are [`AppDelegate::pane_to_other_tab`] and
+//! back — while between chips room opens. Letting go on a chip joins its tab beside the focused
+//! pane (the selection stays), and in the panes of a tab opened that way with the landing the
+//! regions showed — in any window, one move ([`AppDelegate::join`]); between chips it is
+//! [`TerminalWindow::pane_to_new_tab`], in another window
 //! [`AppDelegate::pane_to_other_new_tab`]. Let go over no window of ours, a pane becomes a
 //! window there ([`AppDelegate::pane_to_window`]); a window's last pane goes to another window
 //! and leaves its own empty, which closes.
@@ -82,10 +82,11 @@ use objc2_foundation::{
 use crate::app::{self, AppDelegate};
 use crate::arrange;
 use crate::card::corner_pt;
+use crate::moves::{Joins, Move};
 use crate::split::{Direction, Rect, Tree, Verdict};
 use crate::tab_bar::{self, PaneTarget, Tint};
 use crate::tabs::{DRAG_SLOP, SPRING_DELAY};
-use crate::window::{Joins, TerminalWindow, pane_name};
+use crate::window::{TerminalWindow, pane_name};
 
 /// The card's flight back to its pane, and how fast it fades when the drop
 /// worked and the panes take over.
@@ -1178,7 +1179,11 @@ impl Session {
             (Some(_), Some((target, point, lands))) if target.id() == window.id() => {
                 match *lands {
                     Lands::Tab(chip) => {
-                        done = window.pane_to_tab(self.pane, chip, Direction::Right);
+                        done = window.join(Move::PaneToTab {
+                            pane: self.pane,
+                            into: chip,
+                            place: Joins::Beside(Direction::Right),
+                        });
                         if done && app.tab(self.tab).is_none() {
                             // A tab's only pane was the tab: it joined as a block and the
                             // tab is gone, so the screen goes to the tab it joined.
@@ -1206,7 +1211,11 @@ impl Session {
                                     *point,
                                 ))
                             {
-                                done = window.pane_to_tab_at(self.pane, shown.id(), tree);
+                                done = window.join(Move::PaneToTab {
+                                    pane: self.pane,
+                                    into: shown.id(),
+                                    place: Joins::Planned(tree),
+                                });
                                 stays = done.then(|| window.id());
                             }
                         }
@@ -1217,13 +1226,11 @@ impl Session {
             (Some(_), Some((target, point, lands))) => {
                 match *lands {
                     Lands::Tab(chip) => {
-                        done = app.pane_to_other_tab(
-                            window,
-                            self.pane,
-                            target,
-                            chip,
-                            Joins::Beside(Direction::Right),
-                        );
+                        done = app.join(Move::PaneToTab {
+                            pane: self.pane,
+                            into: chip,
+                            place: Joins::Beside(Direction::Right),
+                        });
                     }
                     Lands::NewTab(gap) => {
                         done = app.pane_to_other_new_tab(window, self.pane, target, gap);
@@ -1238,13 +1245,11 @@ impl Session {
                                 *point,
                             ))
                         {
-                            done = app.pane_to_other_tab(
-                                window,
-                                self.pane,
-                                target,
-                                shown.id(),
-                                Joins::Planned(tree),
-                            );
+                            done = app.join(Move::PaneToTab {
+                                pane: self.pane,
+                                into: shown.id(),
+                                place: Joins::Planned(tree),
+                            });
                             stays = done.then(|| target.id());
                         }
                     }

@@ -48,6 +48,7 @@ use crate::arrange::{self, HOLD_DELAY, Hold, Tool};
 use crate::handover::{self, Arrival, HeldPane, PaneState};
 use crate::keeper::{self, Keeper, QuitKind, QuitPath};
 use crate::menu::ShellMenuDelegate;
+use crate::moves::{self, Move, Plan, Refusal, Step};
 use crate::notices::{Notices, Source};
 use crate::pane::{PaneLaunch, TerminalPane};
 use crate::pane_drag::Session;
@@ -55,16 +56,16 @@ use crate::preview_cache;
 use crate::remote_files::Sweep;
 use crate::restore::{self, Frame, Saved, SavedPane, SavedWindow};
 use crate::settings_window::SettingsWindow;
-use crate::split::{Axis, Tree};
+use crate::split::{Axis, Direction, Tree};
 use crate::ssh_route::{self, Masters};
 use crate::tab::{Histories, TabHost, TerminalTab};
 use crate::tab_drag::TabDragSource;
 use crate::tab_merge::{End, Merge};
 use crate::tabs::Landing;
-use crate::undo::{Now, Record, Scene};
+use crate::undo::{Now, Record};
 use crate::watch::{Notify, Watch};
 use crate::window::{
-    self, Adopted, CloseScope, Joins, Launch, Note, Placement, TerminalWindow, fallen_back,
+    self, Adopted, CloseScope, Launch, Note, Placement, TerminalWindow, fallen_back,
 };
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
@@ -2665,6 +2666,34 @@ fn focus_answerer() -> focus::Answerer {
     })
 }
 
+/// What a plan's steps hold between them ([`AppDelegate::carry_out`]): the panes
+/// and tabs taken out and not yet put in, the windows a tab folded in, and
+/// whether the panes landed.
+#[derive(Default)]
+struct Hands {
+    panes: Vec<Retained<TerminalPane>>,
+    tabs: Vec<Retained<TerminalTab>>,
+    folded: Vec<Retained<TerminalWindow>>,
+    landed: bool,
+}
+
+/// Where panes fit is the panes' own: their cells and their window's screen
+/// set the room ([`TerminalTab::plan_beside`]), and the panes that join are
+/// asked wherever they still are.
+impl moves::Fit for AppDelegate {
+    fn beside(&self, tab: u64, side: Direction, incoming: &Tree) -> Option<Tree> {
+        let target = self.tab(tab)?;
+        let moving: Vec<Retained<TerminalPane>> = incoming
+            .leaves()
+            .into_iter()
+            .filter_map(|pane| self.pane(pane))
+            .collect();
+        target
+            .plan_beside(side, incoming, &moving)
+            .map(|placement| placement.tree)
+    }
+}
+
 impl AppDelegate {
     pub(crate) fn new(
         mtm: MainThreadMarker,
@@ -3730,106 +3759,150 @@ impl AppDelegate {
         true
     }
 
-    /// **A pane crosses to another window's tab** (a carried pane let go on its chip or
-    /// in its panes): pane `pane` of `from` joins tab `target` of `onto`, where `place`
-    /// says — moved, not copied; its shell, programs and questions go on, and it is
-    /// drawn at the scale of the screen it arrived on. A tab's only pane is the tab: it
-    /// goes as a block ([`Self::tab_to_other_tab`]), its name staying behind.
-    /// Nothing moves while either window holds a question of its own (a beep); `false`
-    /// where the pane does not fit.
-    pub(crate) fn pane_to_other_tab(
-        &self,
-        from: &TerminalWindow,
-        pane: u64,
-        onto: &TerminalWindow,
-        target: u64,
-        place: Joins,
-    ) -> bool {
-        let Some(source) = from.tab_holding(pane) else {
-            return false;
-        };
-        if source.panes().len() == 1 {
-            return self.tab_to_other_tab(from, source.id(), onto, target, place);
+    /// **A pane or a tab joins another tab**, in its own window or another
+    /// ([`Move`]): what it comes to is the planner's ([`moves::plan`]) — which
+    /// panes leave, what is selected and focused after, what Undo Move keeps —
+    /// and it is carried out here ([`Self::carry_out`]). A refusal beeps when the
+    /// user asked for something that cannot be done now (a window holds a question
+    /// of its own, the panes do not fit). `true` if the panes landed.
+    pub(crate) fn join(&self, wanted: Move) -> bool {
+        match moves::plan(&self.world(), wanted, self) {
+            Ok(plan) => self.carry_out(plan),
+            Err(Refusal::Beep) => {
+                crate::preview::beep();
+                false
+            }
+            Err(Refusal::Quiet) => false,
         }
-        let (Some(into), Some(moving)) = (onto.tab(target), source.container().pane(pane)) else {
-            return false;
-        };
-        if from.id() == onto.id() {
-            return false;
-        }
-        if !from.selection_free() || !onto.selection_free() {
-            crate::preview::beep();
-            return false;
-        }
-        let moving = [moving];
-        let Some(tree) = place.tree(&into, &Tree::Leaf(pane), &moving) else {
-            crate::preview::beep();
-            return false;
-        };
-        let scenes = vec![from.undo_scene(&[source.id()]), onto.undo_scene(&[target])];
-        let Some(released) = from.release_pane(source.id(), pane) else {
-            return false;
-        };
-        let joined = onto.adopt_pane(&into, &[released], tree);
-        if joined {
-            self.arrived_in(onto, &into, pane, false, scenes);
-        }
-        joined
     }
 
-    /// **A tab crosses to another window's tab** as a block of panes (a tab let go on
-    /// another window's panes with ⌥⌘, a pane that is its tab's only one): the tab
-    /// leaves `from` as itself ([`TerminalWindow::release_tab`]) and its panes join tab
-    /// `host` of `onto` as `place` says, with the layout and ratios the tab had. The
-    /// tab is thrown away, its name with it. The window it leaves closes if that was
-    /// its last tab, as in Merge All Windows — and then the move cannot be taken back
-    /// (a window is not a picture Undo Move can paint again).
-    pub(crate) fn tab_to_other_tab(
-        &self,
-        from: &TerminalWindow,
-        tab: u64,
-        onto: &TerminalWindow,
-        host: u64,
-        place: Joins,
-    ) -> bool {
-        let (Some(carried), Some(into)) = (from.tab(tab), onto.tab(host)) else {
-            return false;
-        };
-        if from.id() == onto.id() {
+    /// Every window as a move sees it ([`TerminalWindow::picture`]).
+    fn world(&self) -> Vec<moves::Window> {
+        self.windows()
+            .iter()
+            .map(|window| window.picture())
+            .collect()
+    }
+
+    /// **The applier of a plan.** Its steps go through the window appliers in
+    /// order, the panes and tabs a step takes out held here until a later step
+    /// puts them in, so nothing closes on the way; then — if the panes landed —
+    /// the steps that follow, the record Undo Move keeps (last: a tab leaving its
+    /// window drops the one there was) and a layout edge. `true` if the panes
+    /// landed.
+    fn carry_out(&self, plan: Plan) -> bool {
+        let mut hands = Hands::default();
+        for step in plan.steps {
+            if !self.take_step(step, &mut hands) {
+                return false;
+            }
+        }
+        for window in &hands.folded {
+            window.refresh_title();
+        }
+        if !hands.landed {
             return false;
         }
-        if !from.selection_free() || !onto.selection_free() {
-            crate::preview::beep();
-            return false;
+        for step in plan.after {
+            self.take_step(step, &mut hands);
         }
-        let moving = carried.panes();
-        let Some(tree) = place.tree(&into, &carried.container().tree(), &moving) else {
-            crate::preview::beep();
-            return false;
-        };
-        let focus = carried.focused_pane().id();
-        let scenes = vec![from.undo_scene(&[tab]), onto.undo_scene(&[host])];
-        let Some(left) = from.release_tab(tab) else {
-            return false;
-        };
-        let panes = left.drain();
-        from.retire(left);
-        let joined = onto.adopt_pane(&into, &panes, tree);
-        debug_assert!(
-            joined,
-            "the planned tree holds the target's panes and these"
-        );
-        let emptied = self.close_if_emptied(from);
-        if joined {
-            self.arrived_in(
-                onto,
-                &into,
-                focus,
-                true,
-                if emptied { Vec::new() } else { scenes },
-            );
+        if let Some(record) = plan.undo {
+            self.remember_undo(record);
         }
-        joined
+        self.layout_changed();
+        true
+    }
+
+    /// One step of a plan ([`Step`]) through its applier; `false` if what it
+    /// names is gone and the plan cannot go on.
+    fn take_step(&self, step: Step, hands: &mut Hands) -> bool {
+        match step {
+            Step::ReleasePane { window, tab, pane } => {
+                let released = self
+                    .window(window)
+                    .and_then(|window| window.release_pane(tab, pane));
+                hands.panes.extend(released.clone());
+                released.is_some()
+            }
+            Step::ReleaseTab { window, tab } => {
+                let released = self
+                    .window(window)
+                    .and_then(|window| window.release_tab(tab));
+                hands.tabs.extend(released.clone());
+                released.is_some()
+            }
+            Step::Unpack { window, tab } => {
+                let Some(index) = hands.tabs.iter().position(|held| held.id() == tab) else {
+                    return false;
+                };
+                let unpacked = hands.tabs.remove(index);
+                hands.panes.extend(unpacked.drain());
+                if let Some(window) = self.window(window) {
+                    window.retire(unpacked);
+                }
+                true
+            }
+            Step::Fold { window, tab, into } => {
+                let Some(window) = self.window(window) else {
+                    return false;
+                };
+                let Some(taken) = window.fold_tab(tab, into) else {
+                    return false;
+                };
+                hands.panes.extend(taken);
+                hands.folded.push(window);
+                true
+            }
+            Step::AdoptPanes { window, tab, tree } => {
+                let (Some(window), Some(into)) = (self.window(window), self.tab(tab)) else {
+                    return false;
+                };
+                let panes = std::mem::take(&mut hands.panes);
+                hands.landed = window.adopt_pane(&into, &panes, tree);
+                debug_assert!(
+                    hands.landed,
+                    "the planned tree holds the target's panes and these"
+                );
+                true
+            }
+            Step::CloseIfEmptied { window } => {
+                if let Some(window) = self.window(window) {
+                    self.close_if_emptied(&window);
+                }
+                true
+            }
+            Step::Raise { window } => {
+                if let Some(window) = self.window(window) {
+                    window.select();
+                }
+                true
+            }
+            Step::Select { window, tab } => {
+                if let Some(window) = self.window(window) {
+                    window.select_tab(tab);
+                }
+                true
+            }
+            Step::Focus { window, tab, pane } => {
+                if let Some(window) = self.window(window)
+                    && let Some(into) = window.tab(tab)
+                    && let Some(focused) = into.container().pane(pane)
+                {
+                    if window.is_selected(tab) {
+                        into.focus_pane(&focused);
+                    } else {
+                        into.pane_focused(pane);
+                    }
+                }
+                true
+            }
+            Step::Pulse { window, tab } => {
+                if let Some(window) = self.window(window) {
+                    window.bar().pulse(tab);
+                }
+                true
+            }
+        }
     }
 
     /// **A pane crosses to another window as a tab of its own**, in the strip before
@@ -3885,41 +3958,6 @@ impl AppDelegate {
         }
         self.layout_changed();
         true
-    }
-
-    /// What a crossing leaves when it has landed in tab `into` of `onto`: the window
-    /// comes up with the pane the keyboard goes to (`focus`; on a tab that is not on screen
-    /// only a block, a tab's whole set of panes, carries it), the chip glows once, and
-    /// the picture Undo Move takes back (`scenes`, none when the move closed a window).
-    fn arrived_in(
-        &self,
-        onto: &TerminalWindow,
-        into: &TerminalTab,
-        focus: u64,
-        block: bool,
-        scenes: Vec<Scene>,
-    ) {
-        onto.select();
-        if block {
-            // A tab arriving whole is what the user was holding: its tab comes up, as it does
-            // in its own window when the tab it was is gone.
-            onto.select_tab(into.id());
-        }
-        if let Some(pane) = into.container().pane(focus) {
-            if onto.is_selected(into.id()) {
-                into.focus_pane(&pane);
-            } else if block {
-                into.pane_focused(focus);
-            }
-        }
-        onto.bar().pulse(into.id());
-        if !scenes.is_empty() {
-            self.remember_undo(Record {
-                scenes,
-                born: Vec::new(),
-            });
-        }
-        self.layout_changed();
     }
 
     /// The terminal window that is under the screen point `screen`, the one in front

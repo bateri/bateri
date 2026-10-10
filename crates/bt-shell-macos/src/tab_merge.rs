@@ -1,8 +1,8 @@
 //! A tab let go **in** the panes of the tab on screen: with ⌥⌘ held, a tab pulled out of
 //! its strip is a block of panes, and the panes it is over answer for it with their regions —
 //! the same ones a carried pane gets ([`crate::pane_drag`]), drawn for the whole block — and
-//! letting go lands the block there ([`TerminalWindow::merge_tab_at`]; in another window,
-//! [`AppDelegate::tab_to_other_tab`]). Without the keys the drop is what it always was: a
+//! letting go lands the block there, in its own window or another ([`AppDelegate::join`]).
+//! Without the keys the drop is what it always was: a
 //! window where the pointer is ([`crate::tab_drag`]).
 //!
 //! **The session is AppKit's, so this reads it from the outside.** A tab dragged out of the
@@ -28,10 +28,11 @@ use objc2_foundation::NSPoint;
 
 use crate::app::AppDelegate;
 use crate::arrange;
+use crate::moves::{Joins, Move};
 use crate::pane_drag::{Zones, preview};
 use crate::split::Verdict;
 use crate::tab::TerminalTab;
-use crate::window::{Joins, TerminalWindow};
+use crate::window::TerminalWindow;
 
 /// How often the keys are read while a tab is carried: the system reports no move when only a
 /// key changes.
@@ -263,16 +264,11 @@ impl AppDelegate {
             return End::Free;
         };
         let landed = match Self::weigh(&aim) {
-            Verdict::Lands { placement, .. } if aim.window.id() == aim.from.id() => {
-                aim.window.merge_tab_at(tab, aim.host.id(), placement.tree)
-            }
-            Verdict::Lands { placement, .. } => self.tab_to_other_tab(
-                &aim.from,
+            Verdict::Lands { placement, .. } => self.join(Move::TabToTab {
                 tab,
-                &aim.window,
-                aim.host.id(),
-                Joins::Planned(placement.tree),
-            ),
+                into: aim.host.id(),
+                place: Joins::Planned(placement.tree),
+            }),
             _ => false,
         };
         if landed {

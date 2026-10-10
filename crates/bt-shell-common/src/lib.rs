@@ -4,7 +4,8 @@
 //! touching a UI toolkit: the settings file and its diagnostics (`settings`,
 //! `notices`), the split layout tree (`split`), a window's tabs — their order,
 //! selection, ⌘1…⌘9, where the tab strip's parts sit and which indicator a
-//! tab shows (`tabs`), what Undo Move takes back (`undo`), temporary
+//! tab shows (`tabs`), what a move of panes and tabs between tabs and windows
+//! comes to (`moves`), what Undo Move takes back (`undo`), temporary
 //! font size (`zoom`), the mouse gesture ledger (`gesture`), shell quoting
 //! (`quote`), key encoding (`keys`), what a ⌘-clicked link resolves to and
 //! what opening it does (`links`), the remote upload rules, processes and the
@@ -42,6 +43,7 @@ pub mod jobs;
 pub mod journal;
 pub mod keys;
 pub mod links;
+pub mod moves;
 pub mod notices;
 #[cfg(test)]
 mod outward_contract;
