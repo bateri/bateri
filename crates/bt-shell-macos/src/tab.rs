@@ -439,6 +439,7 @@ impl TerminalTab {
             let own = pane.id() == focused;
             pane.set_focus_look(own, dim && !own);
         }
+        self.ivars().container.ground_follows();
     }
 
     /// The zoomed pane; `None` → the splits are visible.
@@ -489,6 +490,7 @@ impl TerminalTab {
             let raised = self.ivars().raised.take();
             if let Some(raised) = raised {
                 raised.lower(container, &self.panes(), animate);
+                container.lifted(false);
             }
             return;
         }
@@ -555,6 +557,7 @@ impl TerminalTab {
             },
         );
         *self.ivars().raised.borrow_mut() = Some(raised);
+        container.lifted(true);
     }
 
     /// The pointer moved while this tab is lifted: the pane under it lifts a

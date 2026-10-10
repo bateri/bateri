@@ -86,7 +86,6 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use bt_core::{
     ConfirmClose, ContentEdge, InitialInput, Settings, ShutdownHandle, TabId, Teardown, Theme,
-    contrast_ratio,
 };
 use bt_gpu::GpuError;
 use dispatch2::DispatchQueue;
@@ -112,6 +111,7 @@ use objc2_foundation::{
 use crate::Run;
 use crate::app;
 use crate::arrange::Tool;
+use crate::card::{Ground, Shade};
 use crate::jobs::Foreground;
 use crate::pane::{PaneLaunch, TerminalPane};
 use crate::preview::beep;
@@ -129,15 +129,15 @@ use crate::undo::{Now, Record, Scene, Shape};
 ///
 /// The question is "which text reads better on this background: white or
 /// black" and the answer is from WCAG's contrast ratio
-/// ([`bt_core::contrast_ratio`], the measure the theme's own choices are made
+/// (`bt_core::contrast_ratio`, the measure the theme's own choices are made
 /// with): if the background gives a higher contrast with white, it is dark.
 /// The threshold is not invented, it arises from the equality of the two
 /// ratios; the system's dark appearance means exactly "light text".
 ///
-/// Not in `bt-core`'s `Theme` but here: lightness is not a theme role, it is
-/// a translation into AppKit's appearance vocabulary.
+/// The answer is `Theme::is_dark`'s: the split tab's ground (`bt-core`) asks
+/// the same question, and one threshold lives in one place.
 pub(crate) fn is_dark_background(theme: &Theme) -> bool {
-    contrast_ratio(theme.background, 0xffffff) > contrast_ratio(theme.background, 0x000000)
+    theme.is_dark()
 }
 
 /// A window closing that has begun ([`TerminalWindow::begin_close`]).
@@ -1345,6 +1345,12 @@ fn tagged_tab(sender: Option<&AnyObject>) -> Option<u64> {
 /// row would collapse, so the height would still need a remembered copy.
 pub(crate) struct RootIvars {
     bar: Retained<TabBar>,
+    /// The ground under a split tab's cards (`card::Ground`): the bottom of
+    /// the stack, under the bar and every container.
+    ground: Retained<Ground>,
+    /// The cards' shadows and cuts (`card::Shade`): over the ground, under
+    /// the containers.
+    shade: Retained<Shade>,
     /// The title row's last measured height; `0` until the window reports one.
     row: Cell<f64>,
 }
@@ -1389,8 +1395,12 @@ define_class!(
 
 impl RootView {
     fn new(mtm: MainThreadMarker, frame: NSRect, bar: &TabBar) -> Retained<Self> {
+        let ground = Ground::new(mtm, NSRect::new(NSPoint::ZERO, frame.size));
+        let shade = Shade::new(mtm, NSRect::new(NSPoint::ZERO, frame.size));
         let this = Self::alloc(mtm).set_ivars(RootIvars {
             bar: bar.retain(),
+            ground: ground.clone(),
+            shade: shade.clone(),
             row: Cell::new(0.0),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
@@ -1399,8 +1409,49 @@ impl RootView {
         // The panes' Metal layers sit under it: a layer-backed tree all the
         // way up, so their compositing mode does not change.
         this.setWantsLayer(true);
+        this.addSubview(&ground);
+        this.addSubview(&shade);
         this.addSubview(bar);
         this
+    }
+
+    /// The ground follows the tab on screen: shown under a split one, gone
+    /// under one pane or a zoomed pane. Asked after every switch and every
+    /// container layout; a no-op when nothing changed.
+    pub(crate) fn sync_ground(&self) {
+        let shown = self.subviews().iter().find_map(|view| {
+            view.downcast::<SplitView>()
+                .ok()
+                .filter(|container| !container.isHidden() && container.carded())
+        });
+        let shade = &self.ivars().shade;
+        let cards = shown.as_ref().map_or_else(Vec::new, |container| {
+            container
+                .panes()
+                .iter()
+                .filter(|pane| !pane.isHidden())
+                .map(|pane| {
+                    let at = shade.convertRect_fromView(pane.frame(), Some(container));
+                    (at, pane.shows_focus())
+                })
+                .collect()
+        });
+        shade.set_cards(cards);
+        let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
+        let on_screen = self.window().is_some_and(|window| window.isVisible());
+        self.ivars()
+            .ground
+            .show(shown.is_some(), still || !on_screen);
+    }
+
+    /// The cards slide for `secs`: the shade waits it out.
+    pub(crate) fn hold_shade(&self, secs: f64) {
+        self.ivars().shade.hold(secs);
+    }
+
+    /// The tab on screen is lifted for arranging, or set down.
+    pub(crate) fn shade_lifted(&self, lifted: bool) {
+        self.ivars().shade.set_lifted(lifted);
     }
 
     /// The title row's height: the content layout rect's top inset — what
@@ -1430,6 +1481,10 @@ impl RootView {
     fn place(&self, row: f64) {
         let bounds = self.bounds();
         let row = row.min(bounds.size.height);
+        // The whole view, the title row too: this view places its subviews
+        // itself (`resizeSubviewsWithOldSize:`), so no autoresizing reaches it.
+        self.ivars().ground.setFrame(bounds);
+        self.ivars().shade.setFrame(bounds);
         let bar = &self.ivars().bar;
         bar.setFrame(NSRect::new(
             NSPoint::ZERO,
@@ -2772,6 +2827,7 @@ impl TerminalWindow {
             old.container().setHidden(true);
         }
         new.container().setHidden(false);
+        self.ivars().root.sync_ground();
         let visible = self.window_visible();
         if let Some(old) = old {
             old.apply_visibility(visible);
@@ -3212,6 +3268,10 @@ impl TerminalWindow {
     /// the theme comes from there and painting afterwards would show the
     /// system's grey bar for a frame on every ⌘N.
     pub(crate) fn apply_chrome(&self, theme: &Theme) {
+        // The ground derives from four roles, the rest of the chrome below
+        // only from the background.
+        self.ivars().root.ivars().ground.paint(theme);
+        self.ivars().root.ivars().shade.paint(theme);
         // The chrome derives only from the background; giving AppKit the colour
         // and appearance again on the same background would redraw all title
         // bars on every settings save (the twin of `Session::set_theme` being a

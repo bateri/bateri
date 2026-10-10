@@ -154,6 +154,8 @@ const DIVIDER_PX: f64 = 1.0;
 pub struct Spacing {
     between: f64,
     around: f64,
+    /// The margin at the area's top edge: `around` unless [`Spacing::with_top`] said otherwise.
+    top: f64,
 }
 
 impl Spacing {
@@ -161,6 +163,7 @@ impl Spacing {
     pub const DIVIDED: Self = Self {
         between: DIVIDER_PX,
         around: 0.0,
+        top: 0.0,
     };
 
     /// A gap of `between` points between panes and `around` points between the panes and the
@@ -170,6 +173,17 @@ impl Spacing {
         Self {
             between: pixels(between),
             around: pixels(around),
+            top: pixels(around),
+        }
+    }
+
+    /// The same spacing with `top` points at the area's top edge instead of the margin around:
+    /// a split tab's cards start right under the title row, whose own height already sets them
+    /// off from the tabs — a full margin there read as the content drifting away from its tabs.
+    pub fn with_top(self, top: f64, scale: f64) -> Self {
+        Self {
+            top: (top * scale).round().max(0.0),
+            ..self
         }
     }
 
@@ -181,6 +195,21 @@ impl Spacing {
     /// The margin around the panes, in device pixels.
     pub fn around_px(self) -> f64 {
         self.around
+    }
+
+    /// The margin at the area's top edge, in device pixels.
+    pub fn top_px(self) -> f64 {
+        self.top
+    }
+
+    /// `rect` (whole pixels) less this spacing's margins: where the root node is laid out.
+    fn inside(self, rect: Rect) -> Rect {
+        Rect::new(
+            rect.x + self.around,
+            rect.y + self.top,
+            (rect.width - 2.0 * self.around).max(0.0),
+            (rect.height - self.around - self.top).max(0.0),
+        )
     }
 }
 
@@ -292,15 +321,6 @@ fn snap(rect: Rect, scale: f64) -> Rect {
 }
 
 /// `rect` pulled in by `margin` on every side (a side cannot go below nothing).
-fn inset(rect: Rect, margin: f64) -> Rect {
-    Rect::new(
-        rect.x + margin,
-        rect.y + margin,
-        (rect.width - 2.0 * margin).max(0.0),
-        (rect.height - 2.0 * margin).max(0.0),
-    )
-}
-
 /// The split tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tree {
@@ -486,7 +506,7 @@ impl Tree {
     /// `bounds` with no overlap, every edge on a device pixel.
     pub fn layout_spaced(&self, bounds: Rect, scale: f64, spacing: Spacing) -> Layout {
         let mut out = Layout::default();
-        let root = inset(snap(bounds, scale), spacing.around);
+        let root = spacing.inside(snap(bounds, scale));
         self.place(root, spacing.between, &mut out);
         let points = 1.0 / scale;
         for (_, rect) in &mut out.panes {
@@ -710,7 +730,7 @@ pub struct Room<'a> {
 impl<'a> Room<'a> {
     /// The area inside the margin, on whole pixels: where the root node is laid out.
     fn root(&self) -> Rect {
-        inset(snap(self.bounds, self.scale), self.spacing.around)
+        self.spacing.inside(snap(self.bounds, self.scale))
     }
 
     fn limits(&self) -> Limits<'a> {
@@ -1858,6 +1878,29 @@ mod tests {
         assert_eq!((spacing.between_px(), spacing.around_px()), (2.0, 0.0));
         let spacing = Spacing::gapped(-3.0, -1.0, 2.0);
         assert_eq!((spacing.between_px(), spacing.around_px()), (0.0, 0.0));
+        let spacing = Spacing::gapped(8.0, 8.0, 2.0).with_top(0.0, 2.0);
+        assert_eq!((spacing.around_px(), spacing.top_px()), (16.0, 0.0));
+    }
+
+    #[test]
+    fn a_top_margin_of_its_own_moves_only_the_top_edge() {
+        // Two panes side by side: with no top margin they start at the area's top and keep the
+        // margin round the other three sides.
+        let mut tree = Tree::Leaf(1);
+        assert!(tree.split(1, Axis::Horizontal, 2));
+        let bounds = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let even = tree.layout_spaced(bounds, 1.0, Spacing::gapped(8.0, 8.0, 1.0));
+        let open = tree.layout_spaced(
+            bounds,
+            1.0,
+            Spacing::gapped(8.0, 8.0, 1.0).with_top(0.0, 1.0),
+        );
+        for ((_, a), (_, b)) in even.panes.iter().zip(&open.panes) {
+            assert_eq!((b.x, b.width), (a.x, a.width));
+            assert_eq!(b.y, 0.0);
+            assert_eq!(a.y, 8.0);
+            assert_eq!(b.y + b.height, a.y + a.height, "the bottom margin stays");
+        }
     }
 
     #[test]

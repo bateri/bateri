@@ -3240,20 +3240,26 @@ impl TerminalPane {
         self.ivars().jump.paint(&theme);
     }
 
-    /// What tells this pane's focus: the card's frame is a step stronger on the
-    /// focused pane, and `veiled` shows the dim veil over an unfocused one
-    /// (`[appearance] dim_unfocused_splits`). The decision is the owner's
-    /// (`TerminalTab::refresh_look`); it asks for no frame — both are AppKit's.
+    /// Whether the pane shows the focus (its card's light, its footing).
+    pub(crate) fn shows_focus(&self) -> bool {
+        self.ivars().card_frame.focused()
+    }
+
+    /// What tells this pane's focus: the focused card stands nearer (its
+    /// light and its footing, [`crate::card`]), and `veiled` shows the dim
+    /// veil over an unfocused one (`[appearance] dim_unfocused_splits`). The
+    /// decision is the owner's (`TerminalTab::refresh_look`); it asks for no
+    /// frame — both are AppKit's.
     pub(crate) fn set_focus_look(&self, focused: bool, veiled: bool) {
         self.ivars().card_frame.set_focused(focused);
         self.ivars().dim.setHidden(!veiled);
     }
 
     /// Makes the pane one of several cards, or the whole tab again: rounds and
-    /// clips its layer and shows or hides its frame, at the window's `scale`
-    /// ([`crate::card`]). The container calls it on every layout.
-    pub(crate) fn set_card(&self, carded: bool, scale: f64) {
-        self.ivars().card_frame.set_carded(carded, scale);
+    /// clips its layer and shows or hides the light on it ([`crate::card`]).
+    /// The container calls it on every layout.
+    pub(crate) fn set_card(&self, carded: bool) {
+        self.ivars().card_frame.set_carded(carded);
         if let Some(layer) = self.layer() {
             card::round(&layer, carded);
         }

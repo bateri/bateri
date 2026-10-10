@@ -1,19 +1,25 @@
 //! A pane's look in a split tab: the **card**. With one pane the tab shows it
 //! edge to edge; with two or more every pane is a card — a gap between and
 //! around ([`GAP_PT`], the frame computation's: `split::Spacing`), corners
-//! rounded and clipped ([`corner_pt`], concentric with the window's corner), a frame [`FRAME_PT`] wide in the
-//! dividers' tone at full strength — as plain as the divider a split had before the
-//! cards, and no fainter: two quiet frames side by side are what tells the
-//! panes apart — and one step stronger on the focused pane (the quiet text's
-//! tone, `Theme::quiet_srgb`). Nothing is veiled: all panes read at once (the veil is `[appearance] dim_unfocused_splits`, the pane's own
-//! `DimOverlay`).
+//! rounded and clipped ([`corner_pt`], concentric with the window's corner),
+//! standing on the window's **ground** ([`Ground`], `Theme::ground_srgb`).
+//! No line draws a card: it reads as a card by **depth**, light from above.
+//! Its top edge catches the light, a dark theme's card has a faint sheen
+//! under it, and its shadow is tucked under its foot instead of spreading
+//! over the ground ([`Shade`]) — a shadow that spread muddied the ground on
+//! black, and a frame line round every card was what read as plain. The
+//! focused card is nearer: a deeper shadow, a warm light on a dark theme.
+//! Nothing is veiled: all panes read at once (the veil is
+//! `[appearance] dim_unfocused_splits`, the pane's own `DimOverlay`).
 //!
-//! **Two layers, two jobs.** The corners are the pane's *own* backing layer
-//! (`cornerRadius` + `masksToBounds`: the Metal child and every overlay are
-//! clipped by one mask). The frame is a separate topmost child, [`FrameBox`]:
-//! a border on the pane's layer would sit *under* its sublayers — the Metal
-//! view fills the pane — and the frame must lie over the grid. It takes no
-//! part in hit testing, like the veil.
+//! **Three views, three jobs.** The corners are the pane's *own* backing
+//! layer (`cornerRadius` + `masksToBounds`: the Metal child and every overlay
+//! are clipped by one mask). The light on the card is a separate topmost
+//! child, [`FrameBox`]: on the pane's layer it would sit *under* the Metal
+//! view. The shadow and the dark cut round the card are outside it, so they
+//! cannot be the pane's (its clip would cut them): one [`Shade`] for the
+//! window, between the ground and the containers. None of them takes part
+//! in hit testing, like the veil.
 //!
 //! **The slide** (one pane ↔ two, [`slide`]) plays on the layers and never on
 //! the frames. The pane is laid out once, at its final frame, so the program
@@ -24,30 +30,35 @@
 //! the compositor stretches the drawable that is already there, and the next
 //! content frame replaces it at the final size.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 
 use bt_core::Theme;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSBox, NSBoxType, NSColor, NSTitlePosition, NSView};
+use objc2::{
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
+};
+use objc2_app_kit::{
+    NSAnimatablePropertyContainer, NSBezierPath, NSColor, NSGradient, NSGraphicsContext, NSShadow,
+    NSView, NSWindingRule,
+};
 use objc2_core_foundation::CGRect;
 use objc2_foundation::{
-    NSNumber, NSObjectProtocol, NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSString,
-    NSValue, ns_string,
+    NSNumber, NSObjectProtocol, NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSRect, NSSize,
+    NSString, NSValue, ns_string,
 };
 use objc2_quartz_core::{
-    CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CATransaction, CATransform3D,
-    NSValueCATransform3DAdditions,
+    CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming, CAMediaTimingFunction,
+    CATransaction, CATransform3D, NSValueCATransform3DAdditions, kCAFillModeBackwards,
 };
 
 use crate::split::{self, Rect, Slide};
 
-/// The gap between cards and around them, in points. The canvas's number, a
-/// design constant: wide enough that two cards read as two, narrow enough
-/// that a split keeps the room a divider would have taken.
-pub(crate) const GAP_PT: f64 = 6.0;
+/// The gap between cards and around them, in points. A design constant: wide
+/// enough that the ground reads between two cards, narrow enough that a split
+/// keeps most of the room a divider would have taken.
+pub(crate) const GAP_PT: f64 = 8.0;
 
 /// The window's own corner radius, in points. AppKit has no public reading
 /// of it, so it is measured: macOS 26 draws this app's window (a compact
@@ -81,38 +92,62 @@ pub(crate) fn corner_pt() -> f64 {
 /// The slide's length, in seconds. A design constant, the canvas's 220 ms.
 pub(crate) const SLIDE_SECS: f64 = 0.22;
 
-/// The frame's width, in points, snapped to whole device pixels: two on a
-/// Retina screen. One device pixel was a line the eye lost on a light theme,
-/// and the frame is all that tells two cards apart.
+/// The width of the light on a card's top edge and of the focused card's
+/// warm ring, in points.
 pub(crate) const FRAME_PT: f64 = 1.0;
+
+/// How far down a dark card's sheen reaches, as a share of its height.
+const SHEEN_SHARE: f64 = 0.26;
+
+/// White, and the warm white of the focused card's light on a dark theme.
+const WHITE: [u8; 3] = [255, 255, 255];
+const WARM: [u8; 3] = [255, 246, 232];
+
+fn srgb([r, g, b]: [u8; 3], alpha: f64) -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(
+        f64::from(r) / 255.0,
+        f64::from(g) / 255.0,
+        f64::from(b) / 255.0,
+        alpha,
+    )
+}
+
+fn rounded(rect: NSRect, radius: f64) -> Retained<NSBezierPath> {
+    let radius = radius.max(0.0);
+    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius)
+}
+
+fn grown(rect: NSRect, by: f64) -> NSRect {
+    NSRect::new(
+        NSPoint::new(rect.origin.x - by, rect.origin.y - by),
+        NSSize::new(
+            (rect.size.width + 2.0 * by).max(0.0),
+            (rect.size.height + 2.0 * by).max(0.0),
+        ),
+    )
+}
 
 /// A move's slide: panes that change places settle in 200 ms, a touch quicker
 /// than a pane count changing.
 pub(crate) const MOVE_SECS: f64 = 0.20;
 
 pub(crate) struct FrameIvars {
-    /// The dividers' tone (`Theme::separator_srgb`): the frame of a pane
-    /// without the focus.
-    ink: Cell<[u8; 3]>,
-    /// One step stronger (`Theme::quiet_srgb`): the focused pane's frame, and
-    /// every frame while lifted.
-    focus_ink: Cell<[u8; 3]>,
-    /// Whether the pane holds the focus: the frame is a step stronger.
+    /// Whether the theme is dark (`Theme::is_dark`): the sheen and the warm
+    /// light are a dark theme's; a light card's top edge is plain white.
+    dark: Cell<bool>,
+    /// Whether the pane holds the focus: its light is warm.
     focused: Cell<bool>,
     /// Whether the pane is a card now.
     carded: Cell<bool>,
     /// Whether the pane is lifted for arranging ([`crate::arrange`]): every
-    /// frame reads as the focused one.
+    /// card reads as the focused one.
     raised: Cell<bool>,
-    /// The frame's width, in points: [`FRAME_PT`] snapped to the window's
-    /// device pixels.
-    width: Cell<f64>,
 }
 
 define_class!(
-    // SAFETY: NSBox is designed for subclassing; FrameBox implements no
-    // `Drop` and is born with NSBox's constructor (`init`).
-    #[unsafe(super(NSBox))]
+    // SAFETY: NSView is designed for subclassing; FrameBox implements no
+    // `Drop` and is born with NSView's `init`.
+    #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "BateriFrameBox"]
     #[ivars = FrameIvars]
@@ -127,6 +162,59 @@ define_class!(
         fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
             None
         }
+
+        /// The light on the card, in bottom-up coordinates: the sheen under
+        /// its top (dark), the light on its top edge, the focused card's warm
+        /// ring (dark).
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let iv = self.ivars();
+            let bounds = self.bounds();
+            let radius = corner_pt();
+            let (dark, lit) = (iv.dark.get(), iv.focused.get() || iv.raised.get());
+            NSGraphicsContext::saveGraphicsState_class();
+            rounded(bounds, radius).addClip();
+            if dark {
+                let (tone, alpha) = if lit { (WARM, 0.07) } else { (WHITE, 0.05) };
+                let height = bounds.size.height * SHEEN_SHARE;
+                let band = NSRect::new(
+                    NSPoint::new(bounds.origin.x, bounds.origin.y + bounds.size.height - height),
+                    NSSize::new(bounds.size.width, height),
+                );
+                let sheen = NSGradient::initWithStartingColor_endingColor(
+                    NSGradient::alloc(),
+                    &srgb(tone, alpha),
+                    &srgb(tone, 0.0),
+                );
+                if let Some(sheen) = sheen {
+                    sheen.drawInRect_angle(band, -90.0);
+                }
+            }
+            // The top edge's light: the card less itself moved one line down,
+            // so it thins out round the top corners the way light does.
+            let edge = rounded(bounds, radius);
+            let below = NSRect::new(
+                NSPoint::new(bounds.origin.x, bounds.origin.y - FRAME_PT),
+                bounds.size,
+            );
+            edge.appendBezierPath(&rounded(below, radius));
+            edge.setWindingRule(NSWindingRule::EvenOdd);
+            let (tone, alpha) = match (dark, lit) {
+                (true, true) => (WARM, 0.32),
+                (true, false) => (WHITE, 0.13),
+                (false, _) => (WHITE, 1.0),
+            };
+            srgb(tone, alpha).setFill();
+            edge.fill();
+            if dark && lit {
+                let half = FRAME_PT / 2.0;
+                let ring = rounded(grown(bounds, -half), radius - half);
+                ring.setLineWidth(FRAME_PT);
+                srgb(WARM, 0.08).setStroke();
+                ring.stroke();
+            }
+            NSGraphicsContext::restoreGraphicsState_class();
+        }
     }
 );
 
@@ -134,77 +222,54 @@ impl FrameBox {
     /// Born invisible: a pane is no card until its container says so.
     pub(crate) fn new(mtm: MainThreadMarker, theme: &Theme) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(FrameIvars {
-            ink: Cell::new(theme.separator_srgb()),
-            focus_ink: Cell::new(theme.quiet_srgb()),
+            dark: Cell::new(theme.is_dark()),
             focused: Cell::new(false),
             carded: Cell::new(false),
             raised: Cell::new(false),
-            width: Cell::new(0.0),
         });
-        // SAFETY: `NSBox`'s `init`; the ivars are set.
+        // SAFETY: `NSView`'s `init`; the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
-        this.setBoxType(NSBoxType::Custom);
-        this.setTitlePosition(NSTitlePosition::NoTitle);
-        this.setFillColor(&NSColor::clearColor());
-        this.setCornerRadius(corner_pt());
-        this.setBorderWidth(0.0);
         this.setAlphaValue(0.0);
-        this.repaint();
         this
     }
 
-    /// The theme's dividers' tone.
+    /// The theme's lightness: a dark card's light is warm and has a sheen.
     pub(crate) fn paint(&self, theme: &Theme) {
-        self.ivars().ink.set(theme.separator_srgb());
-        self.ivars().focus_ink.set(theme.quiet_srgb());
-        self.repaint();
+        if self.ivars().dark.replace(theme.is_dark()) != theme.is_dark() {
+            self.setNeedsDisplay(true);
+        }
     }
 
-    /// Whether the pane holds the focus: the frame is a step stronger.
+    /// Whether the pane holds the focus: its light is warm.
     pub(crate) fn set_focused(&self, focused: bool) {
         if self.ivars().focused.replace(focused) != focused {
-            self.repaint();
+            self.setNeedsDisplay(true);
         }
+    }
+
+    pub(crate) fn focused(&self) -> bool {
+        self.ivars().focused.get()
     }
 
     pub(crate) fn carded(&self) -> bool {
         self.ivars().carded.get()
     }
 
-    /// The pane is lifted for arranging, or set down: while lifted the frame
-    /// reads at the focused strength on every pane.
+    /// The pane is lifted for arranging, or set down: while lifted every
+    /// card's light reads as the focused one's.
     pub(crate) fn set_raised(&self, raised: bool) {
         if self.ivars().raised.replace(raised) != raised {
-            self.repaint();
+            self.setNeedsDisplay(true);
         }
     }
 
-    /// Makes the pane a card, or not, at the window's `scale` (the frame is
-    /// [`FRAME_PT`] in whole device pixels). `true` if the answer changed.
+    /// Makes the pane a card, or not. `true` if the answer changed.
     ///
-    /// Leaving the card only turns the frame **invisible**; what it drew stays
+    /// Leaving the card only turns the light **invisible**; what it drew stays
     /// drawn, so a slide can fade it out instead of cutting it.
-    pub(crate) fn set_carded(&self, carded: bool, scale: f64) -> bool {
-        let iv = self.ivars();
-        if carded {
-            let width = (FRAME_PT * scale).round().max(1.0) / scale;
-            if iv.width.replace(width) != width {
-                self.setBorderWidth(width);
-            }
-        }
+    pub(crate) fn set_carded(&self, carded: bool) -> bool {
         self.setAlphaValue(if carded { 1.0 } else { 0.0 });
-        iv.carded.replace(carded) != carded
-    }
-
-    fn repaint(&self) {
-        let iv = self.ivars();
-        let ink = if iv.focused.get() || iv.raised.get() {
-            iv.focus_ink.get()
-        } else {
-            iv.ink.get()
-        };
-        let [r, g, b] = ink.map(|byte| f64::from(byte) / 255.0);
-        self.setBorderColor(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0));
+        self.ivars().carded.replace(carded) != carded
     }
 }
 
@@ -444,3 +509,284 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change, secs: f64) {
         );
     }
 }
+
+// ─── The ground under the cards ──────────────────────────────────────────
+
+pub(crate) struct GroundIvars {
+    /// `Theme::ground_srgb`'s two stops; `None` until painted.
+    stops: Cell<Option<[[u8; 3]; 2]>>,
+    /// Whether it is meant to show: the tab on screen is split into cards.
+    shown: Cell<bool>,
+}
+
+define_class!(
+    // SAFETY: NSView is designed for subclassing; Ground implements no `Drop`
+    // and is born with `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriGround"]
+    #[ivars = GroundIvars]
+    pub(crate) struct Ground;
+
+    unsafe impl NSObjectProtocol for Ground {}
+
+    impl Ground {
+        /// Never takes a press: the title row's drag belongs to the bar's
+        /// claim above it, the gaps' to the split's handles.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let Some([start, end]) = self.ivars().stops.get() else {
+                return;
+            };
+            let color = |[r, g, b]: [u8; 3]| {
+                NSColor::colorWithSRGBRed_green_blue_alpha(
+                    f64::from(r) / 255.0,
+                    f64::from(g) / 255.0,
+                    f64::from(b) / 255.0,
+                    1.0,
+                )
+            };
+            let gradient = NSGradient::initWithStartingColor_endingColor(
+                NSGradient::alloc(),
+                &color(start),
+                &color(end),
+            );
+            if let Some(gradient) = gradient {
+                // Bottom-up coordinates: -45° runs from the top left to the
+                // bottom right.
+                gradient.drawInRect_angle(self.bounds(), -45.0);
+            }
+        }
+    }
+);
+
+impl Ground {
+    /// The window's ground: the whole root view, under the title row and the
+    /// containers; born hidden, a window opens on a tab of one pane.
+    pub(crate) fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(GroundIvars {
+            stops: Cell::new(None),
+            shown: Cell::new(false),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
+        // ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        this.setWantsLayer(true);
+        this.setAlphaValue(0.0);
+        this
+    }
+
+    /// The theme's ground (`Theme::ground_srgb`); redrawn only when it changed.
+    pub(crate) fn paint(&self, theme: &Theme) {
+        let stops = Some(theme.ground_srgb());
+        if self.ivars().stops.replace(stops) != stops {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// Shows the ground (the tab on screen is split) or gives the title row
+    /// back to the background (one pane, or a zoomed one). A change fades over
+    /// the slide's length, the same 220 ms the panes take to become cards, so
+    /// switching between a split tab and a single one does not flash the
+    /// title row; `at_once` under Reduce Motion or off screen.
+    pub(crate) fn show(&self, shown: bool, at_once: bool) {
+        if self.ivars().shown.replace(shown) == shown {
+            return;
+        }
+        let alpha = if shown { 1.0 } else { 0.0 };
+        if at_once {
+            self.setAlphaValue(alpha);
+            return;
+        }
+        let this = self.retain();
+        crate::arrange::animate(
+            SLIDE_SECS,
+            move || this.animator().setAlphaValue(alpha),
+            || {},
+        );
+    }
+}
+
+// ─── The shade under the cards ───────────────────────────────────────────
+
+/// How a card stands off the ground: the shadow under its foot (`offset`
+/// down, `blur`, cast by a fill `spread` points inside the card, so it shows
+/// under the foot and not round the sides) and the cut round it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Footing {
+    pub offset: f64,
+    pub blur: f64,
+    pub spread: f64,
+    /// The shadow's tone and opacity.
+    pub shadow: ([u8; 3], f64),
+    /// The cut's width in points, its tone and opacity.
+    pub cut: (f64, [u8; 3], f64),
+}
+
+/// A card's footing: nearer when it holds the focus. On a dark theme the cut
+/// is black, a clean edge on the lighter ground; on a light one a faint line,
+/// the shadow doing most of the work.
+pub(crate) fn footing(dark: bool, focused: bool) -> Footing {
+    const BLACK: [u8; 3] = [0, 0, 0];
+    const INK: [u8; 3] = [30, 32, 40];
+    match (dark, focused) {
+        (true, false) => Footing {
+            offset: 9.0,
+            blur: 16.0,
+            spread: 8.0,
+            shadow: (BLACK, 0.75),
+            cut: (1.0, BLACK, 0.55),
+        },
+        (true, true) => Footing {
+            offset: 14.0,
+            blur: 22.0,
+            spread: 10.0,
+            shadow: (BLACK, 0.9),
+            cut: (1.0, BLACK, 0.6),
+        },
+        (false, false) => Footing {
+            offset: 6.0,
+            blur: 12.0,
+            spread: 6.0,
+            shadow: (INK, 0.18),
+            cut: (0.5, INK, 0.10),
+        },
+        (false, true) => Footing {
+            offset: 14.0,
+            blur: 24.0,
+            spread: 10.0,
+            shadow: (INK, 0.30),
+            cut: (0.5, INK, 0.12),
+        },
+    }
+}
+
+/// Draws `footing` for a card at `rect` (bottom-up coordinates): its shadow,
+/// cast by a fill the card hides, then the cut just outside it.
+pub(crate) fn draw_footing(rect: NSRect, footing: Footing) {
+    let radius = corner_pt();
+    NSGraphicsContext::saveGraphicsState_class();
+    let shadow = NSShadow::new();
+    shadow.setShadowOffset(NSSize::new(0.0, -footing.offset));
+    shadow.setShadowBlurRadius(footing.blur);
+    shadow.setShadowColor(Some(&srgb(footing.shadow.0, footing.shadow.1)));
+    shadow.set();
+    srgb([0, 0, 0], 1.0).setFill();
+    rounded(grown(rect, -footing.spread), radius - footing.spread).fill();
+    NSGraphicsContext::restoreGraphicsState_class();
+    let (width, tone, alpha) = footing.cut;
+    srgb(tone, alpha).setFill();
+    rounded(grown(rect, width), radius + width).fill();
+}
+
+pub(crate) struct ShadeIvars {
+    /// The cards on screen, in this view's coordinates, and whether each
+    /// holds the focus.
+    cards: RefCell<Vec<(NSRect, bool)>>,
+    dark: Cell<bool>,
+    /// The tab on screen is lifted for arranging: the lift's own plates
+    /// stand under the shrunk panes and this shade would show round them.
+    lifted: Cell<bool>,
+}
+
+define_class!(
+    // SAFETY: NSView is designed for subclassing; Shade implements no `Drop`
+    // and is born with `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriShade"]
+    #[ivars = ShadeIvars]
+    pub(crate) struct Shade;
+
+    unsafe impl NSObjectProtocol for Shade {}
+
+    impl Shade {
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let iv = self.ivars();
+            let dark = iv.dark.get();
+            for (rect, focused) in iv.cards.borrow().iter() {
+                draw_footing(*rect, footing(dark, *focused));
+            }
+        }
+    }
+);
+
+impl Shade {
+    pub(crate) fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ShadeIvars {
+            cards: RefCell::new(Vec::new()),
+            dark: Cell::new(true),
+            lifted: Cell::new(false),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
+        // ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        this.setWantsLayer(true);
+        this
+    }
+
+    /// The theme's lightness: which footing the cards stand on.
+    pub(crate) fn paint(&self, theme: &Theme) {
+        if self.ivars().dark.replace(theme.is_dark()) != theme.is_dark() {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// The cards on screen now; redrawn only when they changed.
+    pub(crate) fn set_cards(&self, cards: Vec<(NSRect, bool)>) {
+        if *self.ivars().cards.borrow() != cards {
+            *self.ivars().cards.borrow_mut() = cards;
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// The tab on screen is lifted, or set down.
+    pub(crate) fn set_lifted(&self, lifted: bool) {
+        if self.ivars().lifted.replace(lifted) == lifted {
+            return;
+        }
+        if let Some(layer) = self.layer() {
+            layer.removeAnimationForKey(ns_string!("bateri.hold"));
+        }
+        self.setAlphaValue(if lifted { 0.0 } else { 1.0 });
+    }
+
+    /// The cards are sliding for `secs`: the shade already stands at their
+    /// final places, so it waits out the slide unseen and then fades in.
+    /// Core Animation's own delay — a timer would have to find this view
+    /// again.
+    pub(crate) fn hold(&self, secs: f64) {
+        if self.ivars().lifted.get() {
+            return;
+        }
+        let Some(layer) = self.layer() else {
+            return;
+        };
+        self.setAlphaValue(1.0);
+        let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+        // SAFETY: plain `NSNumber`s, what `opacity` takes.
+        unsafe {
+            fade.setFromValue(Some(&NSNumber::numberWithDouble(0.0)));
+            fade.setToValue(Some(&NSNumber::numberWithDouble(1.0)));
+        }
+        fade.setBeginTime(layer.convertTime_fromLayer(CACurrentMediaTime(), None) + secs);
+        fade.setDuration(HOLD_FADE_SECS);
+        // SAFETY: a constant `NSString` Core Animation exposes, only read.
+        fade.setFillMode(unsafe { kCAFillModeBackwards });
+        layer.addAnimation_forKey(&fade, Some(ns_string!("bateri.hold")));
+    }
+}
+
+/// How long the shade takes to come back after a slide.
+const HOLD_FADE_SECS: f64 = 0.15;

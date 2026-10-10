@@ -1757,8 +1757,8 @@ is text in the form `"#rrggbb"` (uppercase works too; no `#rgb` and no alpha).
 | `background` | default background, the window's backdrop |
 | `foreground` | default foreground; the scroll bar's thumb and its track, translucent |
 | `dim` | default foreground written dim (SGR 2) |
-| `accent` | accent; the mark of a **running** command, beside it and on the wide scroll bar |
-| `cursor` | the color of the cursor block |
+| `accent` | accent; the mark of a **running** command, beside it and on the wide scroll bar; the top left of a split tab's ground |
+| `cursor` | the color of the cursor block; the bottom right of a split tab's ground |
 | `selection` | the highlight of a mouse selection; selected text keeps its own color, and in an unfocused window the highlight fades towards the background |
 | `search_match` | the highlight of all matches of a search through history (⌘F); text keeps its own color, and it fades in an unfocused window |
 | `search_current` | the highlight of the current match — the one ⏎/⌘G shows; more prominent than `search_match`, and the selection is drawn above both |
@@ -1793,6 +1793,12 @@ is text in the form `"#rrggbb"` (uppercase works too; no `#rgb` and no alpha).
   darkens in a dark theme and lightens in a light theme. On a black
   background this is the same as the "two thirds of the color" rule of
   alacritty and vte.
+- **A split tab's ground** — the title row and the gaps round its panes — is
+  not a key either: it is drawn from the theme. The background is lifted a
+  step toward the foreground (lighter in a dark theme, darker in a light one)
+  and runs as a gradient from a touch of `accent` at the top left to a touch
+  of `cursor` at the bottom right. A tab with one pane keeps the plain
+  background, and switching between the two fades the title row over.
 - `dim`, `success`, `error` and `selection`, like every key, come from
   `bateri` when missing: in a light theme, if `dim` is not written, dim
   default text is drawn with the dark theme's gray (`#909093`); if

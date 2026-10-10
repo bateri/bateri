@@ -81,6 +81,7 @@ use crate::sheets::OwnerSlot;
 use crate::split::{
     self, Axis, Direction, Divider, Placement, Rect, Removal, Room, Size, Spacing, Tree, Verdict,
 };
+use crate::window::RootView;
 
 /// Half of the least width of a divider's hit area, in points. A design
 /// constant, not a measured one: a band under six points is hard to grab with
@@ -94,10 +95,11 @@ const HYPOTHETICAL: u64 = u64::MAX;
 
 /// The space the tree is laid out with when it has `leaves` panes: none of
 /// the card gap for one pane (the pane fills the area, with the one-pixel
-/// divider the tree never draws), the card gap between and around otherwise.
+/// divider the tree never draws), the card gap between and around otherwise
+/// — except at the top, where the cards start right under the title row.
 fn spacing(leaves: usize, scale: f64) -> Spacing {
     if leaves > 1 {
-        Spacing::gapped(GAP_PT, GAP_PT, scale)
+        Spacing::gapped(GAP_PT, GAP_PT, scale).with_top(0.0, scale)
     } else {
         Spacing::DIVIDED
     }
@@ -889,6 +891,13 @@ impl SplitView {
         if still {
             return;
         }
+        // The shade already stands at the cards' final places: it waits out
+        // the slide.
+        if let Some(root) = self.root()
+            && !self.isHidden()
+        {
+            root.hold_shade(secs);
+        }
         let panes = self.ivars().panes.borrow().clone();
         for pane in &panes {
             if pane.isHidden() {
@@ -958,9 +967,10 @@ impl SplitView {
         self.show_hairline(!carded);
         if let [only] = panes.as_slice() {
             only.setHidden(false);
-            only.set_card(false, scale);
+            only.set_card(false);
             only.setFrame(self.bounds());
             self.sync_handles(&[]);
+            self.ground_follows();
             return;
         }
         let layout = self.ivars().tree.borrow().layout_zoomed_spaced(
@@ -973,7 +983,7 @@ impl SplitView {
             match layout.panes.iter().find(|(id, _)| *id == pane.id()) {
                 Some((_, rect)) => {
                     pane.setHidden(false);
-                    pane.set_card(carded, scale);
+                    pane.set_card(carded);
                     pane.setFrame(NSRect::new(
                         NSPoint::new(rect.x, rect.y),
                         NSSize::new(rect.width, rect.height),
@@ -983,6 +993,31 @@ impl SplitView {
             }
         }
         self.sync_handles(&layout.dividers);
+        self.ground_follows();
+    }
+
+    /// The window this container stands in, if it is laid out in one.
+    fn root(&self) -> Option<Retained<RootView>> {
+        // SAFETY: reading the superview; we are on the main thread.
+        unsafe { self.superview() }.and_then(|view| view.downcast::<RootView>().ok())
+    }
+
+    /// The window's ground and shade follow this container if it is the tab
+    /// on screen: one pane ↔ cards, the cards' places and focus.
+    pub(crate) fn ground_follows(&self) {
+        if let Some(root) = self.root()
+            && !self.isHidden()
+        {
+            root.sync_ground();
+        }
+    }
+
+    /// The tab is lifted for arranging, or set down: the lift's own plates
+    /// stand under the shrunk cards, the window's shade steps aside.
+    pub(crate) fn lifted(&self, lifted: bool) {
+        if let Some(root) = self.root() {
+            root.shade_lifted(lifted);
+        }
     }
 }
 
@@ -1000,11 +1035,16 @@ mod tests {
     #[test]
     fn one_pane_fills_and_several_are_cards() {
         // The one-pane layout is the tree's own, bit for bit: the pane is the
-        // area. From two panes on, the gap is the card gap at the scale.
+        // area. From two panes on, the gap is the card gap at the scale, and
+        // none at the top: the cards start right under the title row.
         assert_eq!(spacing(1, 2.0), Spacing::DIVIDED);
         let cards = spacing(2, 2.0);
-        assert_eq!(cards.between_px(), 12.0);
-        assert_eq!(cards.around_px(), 12.0);
-        assert_eq!(spacing(5, 1.0), Spacing::gapped(GAP_PT, GAP_PT, 1.0));
+        assert_eq!(cards.between_px(), GAP_PT * 2.0);
+        assert_eq!(cards.around_px(), GAP_PT * 2.0);
+        assert_eq!(cards.top_px(), 0.0);
+        assert_eq!(
+            spacing(5, 1.0),
+            Spacing::gapped(GAP_PT, GAP_PT, 1.0).with_top(0.0, 1.0)
+        );
     }
 }

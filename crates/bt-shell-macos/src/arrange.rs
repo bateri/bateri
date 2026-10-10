@@ -936,24 +936,42 @@ fn capsule(
     (pill, size)
 }
 
-/// The rounded fill behind a lifted pane, which casts the shadow the pane's
-/// own clipped layer cannot.
-fn plate(mtm: MainThreadMarker, theme: &Theme, frame: NSRect) -> Retained<NSBox> {
+/// The fill behind a lifted pane at `card` (its smallest look), which casts
+/// the shadow the pane's own clipped layer cannot: the focused card's footing
+/// (`card::footing`), so a lifted card stands as near as the focused one at
+/// rest and its shadow stays tucked under its foot — a shadow spreading round
+/// it muddied the ground. The plate is the footing's caster, the spread
+/// inside the card, hidden behind it.
+fn plate(mtm: MainThreadMarker, theme: &Theme, card: NSRect) -> Retained<NSBox> {
+    let footing = card::footing(theme.is_dark(), true);
     let plate = NSBox::new(mtm);
     plate.setWantsLayer(true);
     plate.setBoxType(NSBoxType::Custom);
     plate.setTitlePosition(NSTitlePosition::NoTitle);
     plate.setBorderWidth(0.0);
-    plate.setCornerRadius(corner_pt());
+    plate.setCornerRadius((corner_pt() - footing.spread).max(0.0));
     plate.setFillColor(&Tint::of(theme.background, 1.0).color());
     let shadow = NSShadow::new();
-    shadow.setShadowBlurRadius(22.0);
-    shadow.setShadowOffset(NSSize::new(0.0, -7.0));
+    shadow.setShadowBlurRadius(footing.blur);
+    shadow.setShadowOffset(NSSize::new(0.0, -footing.offset));
+    let ([r, g, b], alpha) = footing.shadow;
     shadow.setShadowColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-        0.0, 0.0, 0.0, 0.42,
+        f64::from(r) / 255.0,
+        f64::from(g) / 255.0,
+        f64::from(b) / 255.0,
+        alpha,
     )));
     plate.setShadow(Some(&shadow));
-    plate.setFrame(frame);
+    plate.setFrame(NSRect::new(
+        NSPoint::new(
+            card.origin.x + footing.spread,
+            card.origin.y + footing.spread,
+        ),
+        NSSize::new(
+            (card.size.width - 2.0 * footing.spread).max(0.0),
+            (card.size.height - 2.0 * footing.spread).max(0.0),
+        ),
+    ));
     plate.setAlphaValue(0.0);
     plate
 }
@@ -1016,7 +1034,6 @@ impl Raised {
             pointer,
         } = scene;
         let overlay = Overlay::new(mtm, container.bounds());
-        let scale = container.scale();
         let sheet = sheets::question_bottom(container);
         let hover = pointer.and_then(|at| pane_at(panes, at));
         let mut plates = Vec::new();
@@ -1027,7 +1044,7 @@ impl Raised {
             let frame = pane.frame();
             let at = rect_of(frame);
             if !pane.is_card() {
-                pane.set_card(true, scale);
+                pane.set_card(true);
                 forced.push(pane.id());
             }
             pane.set_raised(true);
@@ -1156,7 +1173,6 @@ impl Raised {
             // SAFETY: the token is the one `addLocalMonitor…` gave.
             unsafe { NSEvent::removeMonitor(&token) };
         }
-        let scale = container.scale();
         let secs = if animate && !self.still {
             LIFT_SECS
         } else {
@@ -1168,7 +1184,7 @@ impl Raised {
             }
             pane.set_raised(false);
             if self.forced.contains(&pane.id()) && !container.carded() {
-                pane.set_card(false, scale);
+                pane.set_card(false);
             }
         }
         let views: Vec<Retained<NSView>> = self

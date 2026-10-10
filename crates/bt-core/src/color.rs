@@ -536,17 +536,43 @@ impl Theme {
         linear_rgba(self.quiet_rgb())
     }
 
-    /// The same tone as **sRGB** bytes (`[r, g, b]`) — the focused card's
-    /// frame in a split tab (`bt-shell`, `NSColor` sRGB): one step above the
-    /// separator the other cards are framed in, the pair
-    /// [`Theme::separator_srgb`] has.
-    pub const fn quiet_srgb(&self) -> [u8; 3] {
-        let Rgb { r, g, b } = self.quiet_rgb();
-        [r, g, b]
-    }
-
     const fn quiet_rgb(&self) -> Rgb {
         dim_toward(rgb(self.dim), self.background_rgb())
+    }
+
+    /// Whether the background is dark: it gives a higher contrast ratio with
+    /// white than with black (WCAG), so light text is what reads on it. The
+    /// threshold is not invented, it is where the two ratios are equal. One
+    /// answer for everything that differs between a dark and a light theme:
+    /// the window's appearance (`bt-shell`) and the split tab's ground
+    /// ([`Theme::ground_srgb`]).
+    pub const fn is_dark(&self) -> bool {
+        let background = self.background_rgb();
+        contrast(background, rgb(0xffffff)) > contrast(background, rgb(0x000000))
+    }
+
+    /// The split tab's ground, **sRGB** bytes: a gradient from `[0]` at the
+    /// window's top left to `[1]` at its bottom right, under the title row and
+    /// round the cards (`bt-shell`). A tab with one pane has none, its title
+    /// row is the background.
+    ///
+    /// **Not a role but a value derived from four** (a role that isn't drawn
+    /// isn't added): the background is lifted a step toward the foreground —
+    /// a dark theme's ground is lighter than its panes, a light theme's
+    /// darker, so the cards read as cards on it — and from there the top left
+    /// leans toward the accent and the bottom right toward the cursor. Every
+    /// theme gets its own ground from its own colours; the steps are larger
+    /// on a dark theme, where a small difference from black does not show.
+    pub const fn ground_srgb(&self) -> [[u8; 3]; 2] {
+        let (lift, start, end) = if self.is_dark() {
+            (8, 38, 28)
+        } else {
+            (4, 28, 22)
+        };
+        let base = toward(self.background_rgb(), rgb(self.foreground), lift);
+        let start = toward(base, rgb(self.accent), start);
+        let end = toward(base, rgb(self.cursor), end);
+        [[start.r, start.g, start.b], [end.r, end.g, end.b]]
     }
 
     /// The hairlines' color, **linear** RGBA.
@@ -790,6 +816,22 @@ const fn dim_toward(color: Rgb, background: Rgb) -> Rgb {
         g: dim_channel(color.g, background.g),
         b: dim_channel(color.b, background.b),
     }
+}
+
+/// `color` moved `percent` of the way toward `target`, channel by channel in
+/// sRGB, rounded.
+const fn toward(color: Rgb, target: Rgb, percent: u16) -> Rgb {
+    Rgb {
+        r: toward_channel(color.r, target.r, percent),
+        g: toward_channel(color.g, target.g, percent),
+        b: toward_channel(color.b, target.b, percent),
+    }
+}
+
+const fn toward_channel(color: u8, target: u8, percent: u16) -> u8 {
+    // audit: the callers pass at most 100, so at most
+    // ((100 - p)·255 + p·255 + 50) / 100 = 255, fits in `u8`.
+    (((100 - percent) * color as u16 + percent * target as u16 + 50) / 100) as u8
 }
 
 const fn dim_channel(color: u8, background: u8) -> u8 {
@@ -1051,6 +1093,45 @@ mod tests {
     use super::*;
 
     const THEME: Theme = Theme::BATERI;
+
+    #[test]
+    fn a_theme_is_dark_when_white_reads_better_on_it() {
+        assert!(Theme::BATERI.is_dark());
+        assert!(!Theme::BATERI_LIGHT.is_dark());
+        assert!(!Theme::LINEN.is_dark());
+    }
+
+    #[test]
+    fn the_ground_leans_from_the_accent_to_the_cursor() {
+        // Black lifted 8 % toward the foreground, then 38 % toward the accent
+        // and 28 % toward the cursor; the light theme takes the smaller steps.
+        assert_eq!(
+            Theme::BATERI.ground_srgb(),
+            [[0x39, 0x46, 0x56], [0x49, 0x3e, 0x29]]
+        );
+        assert_eq!(
+            Theme::BATERI_LIGHT.ground_srgb(),
+            [[0xbc, 0xc9, 0xdc], [0xd7, 0xd0, 0xbf]]
+        );
+    }
+
+    #[test]
+    fn the_ground_follows_the_theme_it_is_drawn_from() {
+        // Derived, not stored: another accent moves the top left and nothing
+        // else, another cursor the bottom right.
+        let accent = Theme {
+            accent: 0xff0000,
+            ..Theme::BATERI
+        };
+        assert_ne!(accent.ground_srgb()[0], Theme::BATERI.ground_srgb()[0]);
+        assert_eq!(accent.ground_srgb()[1], Theme::BATERI.ground_srgb()[1]);
+        let cursor = Theme {
+            cursor: 0x00ff00,
+            ..Theme::BATERI
+        };
+        assert_eq!(cursor.ground_srgb()[0], Theme::BATERI.ground_srgb()[0]);
+        assert_ne!(cursor.ground_srgb()[1], Theme::BATERI.ground_srgb()[1]);
+    }
 
     #[test]
     fn default_background_has_one_source() {
