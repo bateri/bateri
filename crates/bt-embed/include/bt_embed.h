@@ -89,6 +89,17 @@ typedef void (*BtEventHandler)(void *context, const BtEvent *event);
 #define BT_EVENT_DIRECTORY 13u
 /* The listening ports changed: read them again (bt_pane_port_count). */
 #define BT_EVENT_PORTS 14u
+/* A program's status record (OSC 7501, or OSC 9;4 for the root one) changed
+ * or went: text = its id (empty for the root record), number = its state
+ * (BT_PROGRAM_*; GONE when it went), bt_event_progress. */
+#define BT_EVENT_PROGRAM_STATUS 15u
+
+#define BT_PROGRAM_GONE 0u      /* cleared, or ended by the next prompt */
+#define BT_PROGRAM_IDLE 1u
+#define BT_PROGRAM_WORKING 2u
+#define BT_PROGRAM_BLOCKED 3u   /* waits for the user */
+#define BT_PROGRAM_DONE 4u
+#define BT_PROGRAM_ERROR 5u
 
 /* A notice's source (BT_EVENT_NOTICES' number). */
 #define BT_NOTICE_SOURCE_WRITE 0
@@ -121,6 +132,8 @@ bool bt_event_exit_code(const BtEvent *event, int32_t *code);
 int64_t bt_event_duration_ms(const BtEvent *event);
 /* Command events: when it started, seconds since the Unix epoch; 0 unknown. */
 int64_t bt_event_started(const BtEvent *event);
+/* PROGRAM_STATUS: the progress, 0 to 100; -1 when the record gives none. */
+int32_t bt_event_progress(const BtEvent *event);
 
 /* ---- Configuration ----------------------------------------------------- */
 
@@ -228,6 +241,13 @@ char *bt_pane_foreground(BtPane *pane);
  * the caller's to free; NULL locally (and before a directory came). */
 char *bt_pane_remote_host(BtPane *pane);
 char *bt_pane_remote_directory(BtPane *pane);
+/* The program status records, by id: what reporting programs say they do. */
+size_t bt_pane_program_count(BtPane *pane);
+/* The index-th record's id (empty for the root record), the caller's. */
+char *bt_pane_program_id(BtPane *pane, size_t index);
+uint32_t bt_pane_program_state(BtPane *pane, size_t index);
+/* 0 to 100; -1 when none. */
+int32_t bt_pane_program_progress(BtPane *pane, size_t index);
 /* The listening ports: the pane's programs' and, remotely, the server's. */
 size_t bt_pane_port_count(BtPane *pane);
 bool bt_pane_port_at(BtPane *pane, size_t index, uint16_t *port, bool *remote);

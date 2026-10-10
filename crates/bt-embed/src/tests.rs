@@ -96,6 +96,7 @@ fn the_header_numbers_what_the_library_numbers() {
             ),
             ("BT_EVENT_DIRECTORY", i64::from(kind::DIRECTORY)),
             ("BT_EVENT_PORTS", i64::from(kind::PORTS)),
+            ("BT_EVENT_PROGRAM_STATUS", i64::from(kind::PROGRAM_STATUS)),
         ])
     );
     assert_eq!(
@@ -120,6 +121,17 @@ fn the_header_numbers_what_the_library_numbers() {
             .map(|(name, value)| ((*name).to_owned(), i64::from(*value)))
             .collect()
     };
+    assert_eq!(
+        defines("BT_PROGRAM_"),
+        unsigned(&[
+            ("BT_PROGRAM_GONE", program::GONE),
+            ("BT_PROGRAM_IDLE", program::IDLE),
+            ("BT_PROGRAM_WORKING", program::WORKING),
+            ("BT_PROGRAM_BLOCKED", program::BLOCKED),
+            ("BT_PROGRAM_DONE", program::DONE),
+            ("BT_PROGRAM_ERROR", program::ERROR),
+        ])
+    );
     assert_eq!(
         defines("BT_PHASE_"),
         unsigned(&[

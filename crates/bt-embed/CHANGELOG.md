@@ -66,6 +66,11 @@ listed here under **Going**, with what replaces it.
 - Queries: the shell's phase (`bt_pane_phase`), the foreground programs
   (`bt_pane_foreground`), the remote host and directory, and the listening
   ports.
+- `BT_EVENT_PROGRAM_STATUS`: what a program that reports its status (`OSC
+  7501`, or `OSC 9;4` for the root record) says it is doing. Each record
+  that changed, came or went is told with its id, state (`BT_PROGRAM_*`) and
+  progress (`bt_event_progress`). The records can also be queried
+  (`bt_pane_program_count` and the getters beside it).
 - `BT_EVENT_SHELL_EXITED` carries an exit code. It is the code of the
   shell's login process, and on macOS `login` answers 0 whatever the shell's
   own code was: it tells a normal exit from a killed one, not the shell's

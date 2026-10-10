@@ -9003,6 +9003,15 @@ impl Session {
         Some((block_text(&term, line, key), depth))
     }
 
+    /// Every program status record (`OSC 7501`, or `OSC 9;4` standing in for the root one), by
+    /// id: its state and its progress — what a host embedding the pane shows of a program that
+    /// reports. Its news is [`Wake::program_status_changed`]. One leaf-lock round.
+    ///
+    /// **Journal-neutral:** reads only.
+    pub fn program_records(&self) -> Vec<crate::ProgramRecord> {
+        lock(&self.shell).program.records()
+    }
+
     /// The newest command as the shell's ledger knows it ([`CommandState`]) — what a host
     /// that reports commands one by one looks at on every activity edge
     /// ([`crate::command_news`]). Our remote shell's while its session runs, else the local

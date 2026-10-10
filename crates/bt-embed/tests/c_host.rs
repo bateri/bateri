@@ -32,6 +32,8 @@ struct Host {
     directories: Vec<String>,
     /// The shell's exit code, when it exited.
     exit: Option<Option<i32>>,
+    /// The program status records' news: id, state, progress.
+    programs: Vec<(String, i64, i32)>,
 }
 
 /// The pane's id: any number the host picks.
@@ -65,6 +67,12 @@ unsafe extern "C" fn heard(context: *mut c_void, event: *const BtEvent) {
             assert!(unsafe { bt_pane_write(host.pane, b"exit 3\n".as_ptr(), 7) });
         }
         kind::DIRECTORY => host.directories.extend(text),
+        kind::PROGRAM_STATUS => {
+            // SAFETY: as above.
+            let (state, progress) = unsafe { (bt_event_number(event), bt_event_progress(event)) };
+            host.programs
+                .push((text.unwrap_or_default(), state, progress));
+        }
         kind::SHELL_EXITED => {
             host.exit = Some(exit);
             let handle = std::mem::replace(&mut host.pane, null_mut());
@@ -125,6 +133,7 @@ fn main() {
         finished: None,
         directories: Vec::new(),
         exit: None,
+        programs: Vec::new(),
     });
     let scripts = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -162,7 +171,11 @@ fn main() {
         ));
         assert!(bt_pane_config_set_command(
             config,
-            c(r#"printf '%s|%s' "$BT_EMBED_PROBE" "$PWD" > "$BT_EMBED_OUT"; false"#).as_ptr()
+            c(concat!(
+                r#"printf '%s|%s' "$BT_EMBED_PROBE" "$PWD" > "$BT_EMBED_OUT"; "#,
+                r#"printf '\033]7501;state=done:id=build:progress=100\033\\'; false"#
+            ))
+            .as_ptr()
         ));
         let pane = bt_pane_open(Retained::as_ptr(&content).cast_mut().cast(), config);
         assert!(!pane.is_null(), "the pane opens");
@@ -208,6 +221,12 @@ fn main() {
     assert!(started < finished, "{heard:?}");
     let (exit, duration, line) = host.finished.expect("a finished command");
     assert_eq!(exit, Some(1), "`false` ended it");
+    assert!(
+        host.programs
+            .contains(&("build".to_owned(), i64::from(program::DONE), 100)),
+        "the program's report: {:?}",
+        host.programs
+    );
     assert!(duration >= 0, "its duration was measured");
     assert!(line.contains("BT_EMBED_PROBE"), "its line: {line:?}");
     assert!(

@@ -29,7 +29,9 @@ use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::rc::Rc;
 
-use bt_core::{CommandNews, CommandState, InitialInput, Session, Settings, Theme};
+use bt_core::{
+    CommandNews, CommandState, InitialInput, ProgramRecord, ProgramState, Session, Settings, Theme,
+};
 use bt_shell_macos::embed::{self, Cover, Foreground, Host, Identity, Source, TerminalPane};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -79,6 +81,35 @@ pub mod kind {
     /// The ports the pane's programs (or its server) listen on changed: read them again
     /// (`bt_pane_port_count`).
     pub const PORTS: u32 = 14;
+    /// A program's status record (`OSC 7501`, or `OSC 9;4` standing in for the root one)
+    /// changed or went: its id in the text (empty for the root record), its state in the number
+    /// (a `BT_PROGRAM_*`; 0: it went) and its progress ([`bt_event_progress`]).
+    pub const PROGRAM_STATUS: u32 = 15;
+}
+
+/// A program status record's state ([`kind::PROGRAM_STATUS`], `bt_pane_program_state`).
+pub mod program {
+    /// The record went: cleared, or ended by the shell's next prompt.
+    pub const GONE: u32 = 0;
+    /// At rest, waiting for the user's next instruction.
+    pub const IDLE: u32 = 1;
+    pub const WORKING: u32 = 2;
+    /// It cannot go on until the user acts.
+    pub const BLOCKED: u32 = 3;
+    /// Finished, with a result the user has not seen.
+    pub const DONE: u32 = 4;
+    /// Failed and stopped.
+    pub const ERROR: u32 = 5;
+}
+
+fn program_code(state: ProgramState) -> u32 {
+    match state {
+        ProgramState::Idle => program::IDLE,
+        ProgramState::Working => program::WORKING,
+        ProgramState::Blocked => program::BLOCKED,
+        ProgramState::Done => program::DONE,
+        ProgramState::Error => program::ERROR,
+    }
 }
 
 /// What the shell is doing ([`bt_pane_phase`]); 0 without the shell integration.
@@ -582,6 +613,7 @@ pub unsafe extern "C" fn bt_pane_open(
             closed: Cell::new(false),
             command: Cell::new(None),
             place: RefCell::new(None),
+            programs: RefCell::new(Vec::new()),
         });
         let mut config =
             embed::Config::new(mtm, id, host.clone(), Rc::new(identity), settings, theme);
@@ -934,6 +966,72 @@ pub unsafe extern "C" fn bt_pane_remote_directory(pane: *mut BtPane) -> *mut c_c
     }
 }
 
+/// The program status record at `index` (by id), if there is one.
+fn program_at(pane: &TerminalPane, index: usize) -> Option<ProgramRecord> {
+    pane.session()?.program_records().into_iter().nth(index)
+}
+
+/// How many program status records the pane holds — what programs that report their status
+/// (`OSC 7501`, `OSC 9;4`) say they are doing.
+///
+/// # Safety
+/// As [`bt_pane_start`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_program_count(pane: *mut BtPane) -> usize {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_pane(pane, 0, |pane, _| {
+            pane.session()
+                .map_or(0, |session| session.program_records().len())
+        })
+    }
+}
+
+/// The `index`th record's id (by id order; the root record's is empty), the caller's to free;
+/// NULL past the end.
+///
+/// # Safety
+/// As [`bt_pane_start`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_program_id(pane: *mut BtPane, index: usize) -> *mut c_char {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_pane(pane, null_mut(), |pane, _| {
+            program_at(pane, index).map_or(null_mut(), |record| handed(record.id.as_bytes()))
+        })
+    }
+}
+
+/// The `index`th record's state (a `BT_PROGRAM_*`); 0 past the end.
+///
+/// # Safety
+/// As [`bt_pane_start`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_program_state(pane: *mut BtPane, index: usize) -> u32 {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_pane(pane, program::GONE, |pane, _| {
+            program_at(pane, index).map_or(program::GONE, |record| program_code(record.state))
+        })
+    }
+}
+
+/// The `index`th record's progress, from 0 to 100; -1 when it gives none or past the end.
+///
+/// # Safety
+/// As [`bt_pane_start`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_program_progress(pane: *mut BtPane, index: usize) -> i32 {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_pane(pane, -1, |pane, _| {
+            program_at(pane, index)
+                .and_then(|record| record.progress)
+                .map_or(-1, i32::from)
+        })
+    }
+}
+
 /// How many listening ports the pane knows: its programs' and, in a remote session, its
 /// server's. Kept up to date while `[shell] ports` is on; a PORTS event says when they changed.
 ///
@@ -1036,6 +1134,7 @@ pub struct BtEvent {
     exit: Option<i32>,
     duration_ms: Option<u64>,
     started: Option<u32>,
+    progress: Option<u8>,
 }
 
 impl BtEvent {
@@ -1052,6 +1151,7 @@ impl BtEvent {
             exit: None,
             duration_ms: None,
             started: None,
+            progress: None,
         }
     }
 
@@ -1219,6 +1319,16 @@ pub unsafe extern "C" fn bt_event_duration_ms(event: *const BtEvent) -> i64 {
     }
 }
 
+/// A PROGRAM_STATUS event's progress, from 0 to 100; -1 when the record gives none.
+///
+/// # Safety
+/// As [`bt_event_kind`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_event_progress(event: *const BtEvent) -> i32 {
+    // SAFETY: the caller's promise.
+    unsafe { with_event(event, -1, |event| event.progress.map_or(-1, i32::from)) }
+}
+
 /// When a command event's command started, seconds since the Unix epoch; 0 when unknown.
 ///
 /// # Safety
@@ -1267,6 +1377,8 @@ struct CHost {
     command: Cell<Option<CommandState>>,
     /// Where the shell stood at the last look.
     place: RefCell<Option<Place>>,
+    /// The program status records at the last look.
+    programs: RefCell<Vec<ProgramRecord>>,
 }
 
 impl CHost {
@@ -1317,6 +1429,35 @@ impl CHost {
         }
     }
 
+    /// The program status records' news: each record that changed or came, and each that went.
+    fn programs(&self, pane: u64) {
+        let Some(session) = Self::session(pane) else {
+            return;
+        };
+        let now = session.program_records();
+        let before = self.programs.replace(now.clone());
+        for record in &now {
+            if !before.contains(record) {
+                self.send(BtEvent {
+                    text: c_text(record.id.as_bytes()),
+                    number: i64::from(program_code(record.state)),
+                    progress: record.progress,
+                    ..BtEvent::new(kind::PROGRAM_STATUS, pane)
+                });
+            }
+        }
+        for gone in before
+            .iter()
+            .filter(|old| !now.iter().any(|record| record.id == old.id))
+        {
+            self.send(BtEvent {
+                text: c_text(gone.id.as_bytes()),
+                number: i64::from(program::GONE),
+                ..BtEvent::new(kind::PROGRAM_STATUS, pane)
+            });
+        }
+    }
+
     /// The directory's news: where the shell stands, if it moved since the last look.
     fn place(&self, pane: u64) {
         let Some(session) = Self::session(pane) else {
@@ -1361,6 +1502,7 @@ impl Host for CHost {
     }
     fn activity_changed(&self, pane: u64) {
         self.commands(pane);
+        self.programs(pane);
         self.plain(kind::ACTIVITY, pane);
     }
     fn ports_changed(&self, pane: u64) {
