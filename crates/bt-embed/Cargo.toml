@@ -17,6 +17,8 @@ crate-type = ["rlib"]
 bt-shell-macos = { workspace = true }
 # The settings and the theme a host hands over as text are parsed here.
 bt-core = { workspace = true }
+# The layout engine (moves, split trees, strips) the C interface carries: pure, no AppKit.
+bt-shell-common = { workspace = true }
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true }
 objc2-foundation = { workspace = true }

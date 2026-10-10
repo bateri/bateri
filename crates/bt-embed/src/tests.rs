@@ -48,10 +48,18 @@ fn the_header_declares_every_function_the_library_exports_and_no_other() {
             && line.contains("bt_")
             && line.contains('(')
     });
-    let library = functions(include_str!("lib.rs"), |line| {
-        line.starts_with("pub extern \"C\" fn bt_")
-            || line.starts_with("pub unsafe extern \"C\" fn bt_")
-    });
+    let library = functions(
+        &[
+            include_str!("lib.rs"),
+            include_str!("layout.rs"),
+            include_str!("strip.rs"),
+        ]
+        .concat(),
+        |line| {
+            line.starts_with("pub extern \"C\" fn bt_")
+                || line.starts_with("pub unsafe extern \"C\" fn bt_")
+        },
+    );
     assert!(!library.is_empty());
     assert_eq!(header, library);
 }
@@ -90,6 +98,103 @@ fn the_header_numbers_what_the_library_numbers() {
             ("BT_NOTICE_SOURCE_SETTINGS", notice_source::SETTINGS),
             ("BT_NOTICE_SOURCE_THEME", notice_source::THEME),
             ("BT_NOTICE_SOURCE_FONT", notice_source::FONT),
+        ])
+    );
+    assert_eq!(
+        defines("BT_TREE_TEXT_VERSION"),
+        numbered(&[(
+            "BT_TREE_TEXT_VERSION",
+            i64::from(bt_shell_common::tree_text::VERSION)
+        )])
+    );
+    let unsigned = |pairs: &[(&str, u32)]| -> BTreeMap<String, i64> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), i64::from(*value)))
+            .collect()
+    };
+    assert_eq!(
+        defines("BT_AXIS_"),
+        unsigned(&[
+            ("BT_AXIS_HORIZONTAL", axis::HORIZONTAL),
+            ("BT_AXIS_VERTICAL", axis::VERTICAL),
+        ])
+    );
+    assert_eq!(
+        defines("BT_SIDE_"),
+        unsigned(&[
+            ("BT_SIDE_LEFT", side::LEFT),
+            ("BT_SIDE_RIGHT", side::RIGHT),
+            ("BT_SIDE_UP", side::UP),
+            ("BT_SIDE_DOWN", side::DOWN),
+        ])
+    );
+    assert_eq!(
+        defines("BT_SPACING_"),
+        unsigned(&[
+            ("BT_SPACING_LONE", spacing::LONE),
+            ("BT_SPACING_SPLIT", spacing::SPLIT),
+        ])
+    );
+    assert_eq!(
+        defines("BT_REFUSAL_"),
+        numbered(&[
+            ("BT_REFUSAL_QUIET", i64::from(refusal::QUIET)),
+            ("BT_REFUSAL_BEEP", i64::from(refusal::BEEP)),
+            ("BT_REFUSAL_STALE", i64::from(refusal::STALE)),
+        ])
+    );
+    assert_eq!(
+        defines("BT_PART_"),
+        unsigned(&[("BT_PART_MAIN", part::MAIN), ("BT_PART_AFTER", part::AFTER)])
+    );
+    assert_eq!(
+        defines("BT_STEP_"),
+        unsigned(&[
+            ("BT_STEP_RELEASE_PANE", step::RELEASE_PANE),
+            ("BT_STEP_RELEASE_TAB", step::RELEASE_TAB),
+            ("BT_STEP_UNPACK", step::UNPACK),
+            ("BT_STEP_FOLD", step::FOLD),
+            ("BT_STEP_NEW_TAB", step::NEW_TAB),
+            ("BT_STEP_WRAP", step::WRAP),
+            ("BT_STEP_ADOPT_TAB", step::ADOPT_TAB),
+            ("BT_STEP_MOVE_TAB", step::MOVE_TAB),
+            ("BT_STEP_DISSOLVE", step::DISSOLVE),
+            ("BT_STEP_RESHAPE", step::RESHAPE),
+            ("BT_STEP_PUT_STRIP", step::PUT_STRIP),
+            ("BT_STEP_FIT", step::FIT),
+            ("BT_STEP_UNDONE", step::UNDONE),
+            ("BT_STEP_OPEN_WINDOW", step::OPEN_WINDOW),
+            ("BT_STEP_ADOPT_PANES", step::ADOPT_PANES),
+            ("BT_STEP_CLOSE_IF_EMPTIED", step::CLOSE_IF_EMPTIED),
+            ("BT_STEP_RAISE", step::RAISE),
+            ("BT_STEP_SELECT", step::SELECT),
+            ("BT_STEP_FOCUS", step::FOCUS),
+            ("BT_STEP_PULSE", step::PULSE),
+        ])
+    );
+    assert_eq!(
+        defines("BT_SLOT_"),
+        unsigned(&[("BT_SLOT_AT", slot::AT), ("BT_SLOT_END", slot::END)])
+    );
+    assert_eq!(
+        defines("BT_VERDICT_"),
+        unsigned(&[
+            ("BT_VERDICT_NOTHING", verdict::NOTHING),
+            ("BT_VERDICT_LANDS", verdict::LANDS),
+            ("BT_VERDICT_SWAPS", verdict::SWAPS),
+            ("BT_VERDICT_TOO_SMALL", verdict::TOO_SMALL),
+            ("BT_VERDICT_NO_ROOM", verdict::NO_ROOM),
+        ])
+    );
+    assert_eq!(
+        defines("BT_ZONE_"),
+        unsigned(&[
+            ("BT_ZONE_WINDOW_EDGE", zone::WINDOW_EDGE),
+            ("BT_ZONE_BESIDE", zone::BESIDE),
+            ("BT_ZONE_SWAP", zone::SWAP),
+            ("BT_ZONE_OWN", zone::OWN),
+            ("BT_ZONE_OUTSIDE", zone::OUTSIDE),
         ])
     );
     assert_eq!(

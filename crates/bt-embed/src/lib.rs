@@ -35,6 +35,12 @@ use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
 
+mod layout;
+mod strip;
+
+pub use layout::*;
+pub use strip::*;
+
 /// The interface's version — what [`bt_embed_abi_version`] answers.
 pub const ABI_VERSION: u32 = 1;
 
@@ -792,6 +798,35 @@ pub unsafe extern "C" fn bt_pane_uuid(pane: *mut BtPane) -> *mut c_char {
     unsafe {
         with_pane(pane, null_mut(), |pane, _| {
             handed(pane.uuid().as_str().as_bytes())
+        })
+    }
+}
+
+/// The smallest size the pane can be laid out at, in points — the columns and rows a terminal
+/// needs at its font and screen, for the layout engine (`bt_world_set_minimum`). `false` while it
+/// is in no window.
+///
+/// # Safety
+/// As [`bt_pane_start`]; `width` and `height` NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_min_size(
+    pane: *mut BtPane,
+    width: *mut f64,
+    height: *mut f64,
+) -> bool {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_pane(pane, false, |pane, _| {
+            let Some(size) = pane.min_size() else {
+                return false;
+            };
+            if !width.is_null() {
+                width.write(size.width);
+            }
+            if !height.is_null() {
+                height.write(size.height);
+            }
+            true
         })
     }
 }

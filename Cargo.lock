@@ -149,6 +149,7 @@ name = "bt-embed"
 version = "0.11.0"
 dependencies = [
  "bt-core",
+ "bt-shell-common",
  "bt-shell-macos",
  "objc2",
  "objc2-app-kit",

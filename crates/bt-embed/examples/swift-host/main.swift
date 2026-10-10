@@ -3,7 +3,8 @@
 //
 // With no argument it is the check `make embed-swift` runs: the pane's shell is given a variable
 // and a directory and a command that writes both to a file and exits; the shell's exit must reach
-// this host as an event, and the file must hold what was given. With `--interactive` it is a plain
+// this host as an event, and the file must hold what was given — after the layout engine has
+// answered a drag and planned its landing. With `--interactive` it is a plain
 // window with a shell, for a person to try.
 
 import AppKit
@@ -57,7 +58,7 @@ final class Host {
         if !heard.contains(BT_EVENT_TITLE) { failures.append("no title event") }
         if uuid.count != 36 || uuid != uuid.uppercased() { failures.append("uuid \"\(uuid)\"") }
         if failures.isEmpty {
-            print("embed-swift: ok (\(heard.count) events)")
+            print("embed-swift: ok (layout, \(heard.count) events)")
             exit(0)
         }
         print("embed-swift: FAILED — " + failures.joined(separator: "; "))
@@ -66,6 +67,71 @@ final class Host {
 }
 
 let host = Host()
+
+/// The layout engine asked the way a host asks it: a picture of a workspace window with two tabs,
+/// a verdict under the pointer while pane 110 is carried over pane 101, the landing planned, and a
+/// strip's New Tab. What does not hold comes back as a list.
+func checkLayout() -> [String] {
+    var failures: [String] = []
+    guard let world = bt_world_new(1000) else { return ["no picture"] }
+    defer { bt_world_free(world) }
+    _ = bt_world_add_window(world, 1, true, false)
+    let pair = bt_tree_split(BT_AXIS_HORIZONTAL, 0.5, bt_tree_leaf(100), bt_tree_leaf(101))
+    _ = bt_world_add_tab(world, 1, 10, pair, 101, "build", true)
+    bt_tree_free(pair)
+    let lone = bt_tree_leaf(110)
+    _ = bt_world_add_tab(world, 1, 11, lone, 110, nil, false)
+    bt_tree_free(lone)
+    _ = bt_world_set_area(world, 10, 0, 0, 800, 600, 2)
+    for pane: UInt64 in [100, 101, 110] {
+        _ = bt_world_set_minimum(world, pane, 100, 100)
+    }
+
+    let carried = bt_tree_leaf(110)
+    defer { bt_tree_free(carried) }
+    guard let verdict = bt_verdict_new(world, 10, carried, 700, 300) else { return ["no verdict"] }
+    defer { bt_verdict_free(verdict) }
+    if bt_verdict_kind(verdict) != BT_VERDICT_LANDS || bt_verdict_zone(verdict) != BT_ZONE_BESIDE {
+        failures.append("verdict \(bt_verdict_kind(verdict))/\(bt_verdict_zone(verdict)), expected lands beside")
+    }
+    guard let move = bt_move_pane_to_tab_planned(110, 10, bt_verdict_tree(verdict)) else {
+        return failures + ["no move"]
+    }
+    defer { bt_move_free(move) }
+    var refusal: Int32 = -1
+    guard let plan = bt_plan_new(world, move, &refusal) else { return failures + ["refused \(refusal)"] }
+    defer { bt_plan_free(plan) }
+    var kinds: [UInt32] = []
+    for index in 0..<bt_plan_step_count(plan, BT_PART_MAIN) {
+        kinds.append(bt_plan_step_kind(plan, BT_PART_MAIN, index))
+    }
+    // A host refuses a plan with a main step it does not know.
+    if kinds.contains(where: { $0 < BT_STEP_RELEASE_PANE || $0 > BT_STEP_PULSE }) {
+        failures.append("unknown main step in \(kinds)")
+    }
+    if let landed = kinds.firstIndex(of: BT_STEP_ADOPT_PANES) {
+        let tree = bt_plan_step_tree(plan, BT_PART_MAIN, landed)
+        if bt_tree_pane_count(tree) != 3 { failures.append("the landing holds \(bt_tree_pane_count(tree)) panes") }
+    } else {
+        failures.append("no ADOPT_PANES in \(kinds)")
+    }
+    if let record = bt_plan_take_undo(plan) {
+        bt_record_free(record)
+    } else {
+        failures.append("no Undo Move record")
+    }
+
+    guard let strip = bt_strip_new() else { return failures + ["no strip"] }
+    defer { bt_strip_free(strip) }
+    _ = bt_strip_append(strip, 1)
+    _ = bt_strip_append(strip, 2)
+    _ = bt_strip_insert(strip, 3)
+    var selected: UInt64 = 0
+    if !bt_strip_selected(strip, &selected) || selected != 3 || bt_strip_tab_at(strip, 1) != 3 {
+        failures.append("New Tab did not open right of the selected tab")
+    }
+    return failures
+}
 
 let handler: BtEventHandler = { context, event in
     let host = Unmanaged<Host>.fromOpaque(context!).takeUnretainedValue()
@@ -97,6 +163,14 @@ let window = NSWindow(
 )
 window.title = "bt-embed"
 window.isReleasedWhenClosed = false
+
+if !interactive {
+    let failures = checkLayout()
+    if !failures.isEmpty {
+        print("embed-swift: FAILED — layout: " + failures.joined(separator: "; "))
+        exit(1)
+    }
+}
 
 guard let config = bt_pane_config_new(1, "bt-embed sample") else {
     print("embed-swift: FAILED — no configuration")

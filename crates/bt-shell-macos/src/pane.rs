@@ -3719,7 +3719,7 @@ impl TerminalPane {
     /// split layouts saved before it and would reset them. Where the content
     /// fades at the top, the smallest pane can therefore have a row less than
     /// [`MIN_PANE_ROWS`].
-    pub(crate) fn min_size(&self) -> Option<NSSize> {
+    pub fn min_size(&self) -> Option<NSSize> {
         let scale = self.window()?.backingScaleFactor();
         let cell = self.ivars().renderer.cell_metrics(scale);
         let (cell_w, cell_h) = cell.cell_px();
