@@ -4117,7 +4117,11 @@ impl AppDelegate {
             scrollbar: self.scrollbar_mode(),
             zoom: from.map_or_else(Zoom::default, TerminalPane::zoom),
             masters: self.ivars().masters.clone(),
-            keeper: self.ivars().keeper.clone(),
+            keeper: self
+                .ivars()
+                .keeper
+                .clone()
+                .map(|keeper| keeper as Rc<dyn crate::pane::Holder>),
         };
         (launch, theme)
     }

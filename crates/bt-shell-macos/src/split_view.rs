@@ -77,7 +77,7 @@ use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 
 use crate::card::{self, Change, GAP_PT};
 use crate::pane::TerminalPane;
-use crate::sheets::OwnerSlot;
+use crate::sheets::{self, OwnerSlot};
 use crate::split::{
     self, Axis, Direction, Divider, Placement, Rect, Removal, Room, Size, Spacing, Tree, Verdict,
 };
@@ -1076,6 +1076,30 @@ struct Before {
     id: u64,
     frame: NSRect,
     card: bool,
+}
+
+/// A tab's questions cover its splits container: a sheet over it blocks the
+/// tab, not the window or the bar ([`sheets::Cover`]).
+impl sheets::Cover for SplitView {
+    fn view(&self) -> &NSView {
+        self
+    }
+
+    fn panes(&self) -> Vec<Retained<TerminalPane>> {
+        SplitView::panes(self)
+    }
+
+    fn owner_slot(&self) -> &OwnerSlot {
+        self.sheet_owner()
+    }
+
+    fn weak(&self) -> sheets::WeakCover {
+        let weak = objc2::rc::Weak::new(self);
+        sheets::WeakCover::new(move || {
+            weak.load()
+                .map(|container| std::rc::Rc::new(container) as std::rc::Rc<dyn sheets::Cover>)
+        })
+    }
 }
 
 #[cfg(test)]

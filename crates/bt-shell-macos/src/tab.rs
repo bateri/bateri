@@ -42,6 +42,7 @@
 //! would be an invisible effect.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::Duration;
 
 use bt_core::{ContentEdge, HostMark, MarkSubject, PaneUuid, Settings, Theme};
@@ -150,6 +151,32 @@ impl PaneHost for TabHost {
 
     fn rehomed(&self, _pane: u64, tab: u64) {
         self.tab.set(tab);
+    }
+
+    fn files_dragged(&self, _pane: u64, over: bool) {
+        if let Some(app) = app::delegate(Self::mtm()) {
+            app.files_dragged(over);
+        }
+    }
+
+    fn carry_press(&self, pane: u64, (x, y): (f64, f64)) {
+        if let Some(app) = app::delegate(Self::mtm()) {
+            app.pane_press(pane, NSPoint::new(x, y));
+        }
+    }
+
+    fn questions_changed(&self, _pane: u64) {
+        // The tab's "waiting for an answer" mark: its window's bar draws its
+        // chips again.
+        if let Some(window) = self.tab().and_then(|tab| tab.window()) {
+            window.refresh_bar();
+        }
+    }
+
+    fn cover(&self, pane: &TerminalPane) -> Option<Rc<dyn sheets::Cover>> {
+        // The container the pane stands in — read from the pane, not by id: a
+        // closing pane has left the lists an id lookup walks.
+        container_of(pane).map(|container| Rc::new(container) as Rc<dyn sheets::Cover>)
     }
 }
 

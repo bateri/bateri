@@ -92,15 +92,12 @@ use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAlert, NSAppearanceCustomization, NSBackingStoreType, NSColor, NSModalResponse,
-    NSModalResponseCancel, NSSavePanel, NSWindow, NSWindowDelegate, NSWindowOrderingMode,
+    NSModalResponseCancel, NSSavePanel, NSView, NSWindow, NSWindowDelegate, NSWindowOrderingMode,
     NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSRect};
 
-use crate::app;
 use crate::pane::TerminalPane;
-use crate::split_view::SplitView;
-use crate::tab::container_of;
 
 /// Whose question a sheet asks.
 pub(crate) enum Asker<'a> {
@@ -109,6 +106,68 @@ pub(crate) enum Asker<'a> {
     /// A question about a whole window (closing it), or the application's
     /// report shown on the key window.
     Window(&'a NSWindow),
+}
+
+/// What a pane's questions cover when the pane shares its window with others —
+/// bateri's tab (its splits container): a sheet over it blocks that tab, not
+/// the window or its bar. The pane's owner names it ([`PaneHost::cover`]);
+/// a pane it names none for asks on its window, which the question blocks
+/// whole.
+///
+/// [`PaneHost::cover`]: crate::pane::PaneHost::cover
+pub(crate) trait Cover {
+    /// The view the questions' owner window lies over.
+    fn view(&self) -> &NSView;
+    /// The panes under it, in their order: whose parked questions open on it.
+    fn panes(&self) -> Vec<Retained<TerminalPane>>;
+    /// Where this module keeps the owner window while a question is up.
+    fn owner_slot(&self) -> &OwnerSlot;
+    /// The same cover, held weakly: the owner's delegate keeps one, and the
+    /// cover keeps the owner.
+    fn weak(&self) -> WeakCover;
+}
+
+/// A cover held weakly ([`Cover::weak`]): the way back to it, if it is still
+/// there.
+pub(crate) struct WeakCover(Box<dyn Fn() -> Option<Rc<dyn Cover>>>);
+
+impl WeakCover {
+    pub(crate) fn new(load: impl Fn() -> Option<Rc<dyn Cover>> + 'static) -> Self {
+        Self(Box::new(load))
+    }
+
+    fn load(&self) -> Option<Rc<dyn Cover>> {
+        (self.0)()
+    }
+}
+
+impl<T: Cover + Message> Cover for Retained<T> {
+    fn view(&self) -> &NSView {
+        (**self).view()
+    }
+
+    fn panes(&self) -> Vec<Retained<TerminalPane>> {
+        (**self).panes()
+    }
+
+    fn owner_slot(&self) -> &OwnerSlot {
+        (**self).owner_slot()
+    }
+
+    fn weak(&self) -> WeakCover {
+        (**self).weak()
+    }
+}
+
+/// What `pane`'s questions cover, if anything does but its window.
+fn cover_of(pane: &TerminalPane) -> Option<Rc<dyn Cover>> {
+    pane.host().cover(pane)
+}
+
+/// A question of `pane` was put off or taken up: its owner's mark of a
+/// waiting question may have changed.
+fn marks_changed(pane: &TerminalPane) {
+    pane.host().questions_changed(pane.id());
 }
 
 /// Where an asker's sheets sit. Opaque: the asker begins, ends and asks
@@ -202,14 +261,14 @@ pub(crate) fn seat(asker: Asker<'_>) -> Option<Seat> {
 /// Whether a pane of `pane`'s tab has a parked question — the one sheet
 /// that tab holds while its question cannot be shown.
 fn tab_parked(pane: &TerminalPane) -> bool {
-    match container_of(pane) {
-        Some(container) => parked_in(&container),
+    match cover_of(pane) {
+        Some(container) => parked_in(&*container),
         None => !pane.parked().borrow().is_empty(),
     }
 }
 
 /// Whether a pane of `container`'s tab has a parked question.
-fn parked_in(container: &SplitView) -> bool {
+fn parked_in(container: &dyn Cover) -> bool {
     container
         .panes()
         .iter()
@@ -232,7 +291,7 @@ impl Seat {
             return true;
         }
         match self.pane.as_deref() {
-            Some(pane) => container_of(pane).is_some_and(|container| owner_busy(&container)),
+            Some(pane) => cover_of(pane).is_some_and(|container| owner_busy(&*container)),
             None => self.window.childWindows().is_some_and(|children| {
                 children.iter().any(|child| child.attachedSheet().is_some())
             }),
@@ -270,14 +329,14 @@ impl Seat {
             sheet.begin(&self.window, answered);
             return;
         };
-        let Some(container) = container_of(pane) else {
-            // Not in a tab (never seen: a pane in a window is in its tab's
-            // container) — on the window, as before tabs had owners.
+        let Some(container) = cover_of(pane) else {
+            // Nothing covers it but its window (an owner that names no cover;
+            // in bateri, a pane not placed in a tab yet): on the window.
             sheet.begin(&self.window, answered);
             return;
         };
         if may_open(pane.tab_shown(), self.sheet_up()) {
-            let owner = owner_of(&container, &self.window);
+            let owner = owner_of(&*container, &self.window);
             open_on(pane, &owner, sheet, answered.copy());
             return;
         }
@@ -285,7 +344,7 @@ impl Seat {
             sheet,
             answered: answered.copy(),
         });
-        marks_changed(&self.window);
+        marks_changed(pane);
     }
 
     /// Ends the sheet whose window is `sheet` with `code` — its completion
@@ -302,7 +361,7 @@ impl Seat {
             };
             if let Some(parked) = parked {
                 parked.answered.call((code,));
-                marks_changed(&self.window);
+                marks_changed(pane);
                 return;
             }
         }
@@ -322,7 +381,7 @@ pub(crate) fn open_parked(pane: &TerminalPane) {
     if pane.is_closed() {
         return;
     }
-    let (Some(seat), Some(container)) = (seat(Asker::Pane(pane)), container_of(pane)) else {
+    let (Some(seat), Some(container)) = (seat(Asker::Pane(pane)), cover_of(pane)) else {
         return;
     };
     if !may_open(pane.tab_shown(), seat.sheet_up()) {
@@ -330,9 +389,9 @@ pub(crate) fn open_parked(pane: &TerminalPane) {
     }
     let parked = pane.parked().borrow_mut().pop_front();
     if let Some(parked) = parked {
-        let owner = owner_of(&container, &seat.window);
+        let owner = owner_of(&*container, &seat.window);
         open_on(pane, &owner, parked.sheet, parked.answered);
-        marks_changed(&seat.window);
+        marks_changed(pane);
     }
 }
 
@@ -438,18 +497,19 @@ pub(crate) fn window_asks(window: &NSWindow) -> bool {
 /// Whether `container`'s tab has a question the user cannot see: one
 /// parked in a pane's slot, or one up on its owner while the tab is off
 /// screen — the tab's "waiting for an answer" mark.
-pub(crate) fn question_waiting(container: &SplitView) -> bool {
-    parked_in(container) || (container.isHiddenOrHasHiddenAncestor() && owner_busy(container))
+pub(crate) fn question_waiting(container: &dyn Cover) -> bool {
+    parked_in(container)
+        || (container.view().isHiddenOrHasHiddenAncestor() && owner_busy(container))
 }
 
 /// Where the question up on `container`'s tab ends: the sheet's bottom
 /// edge as a distance from the container's top (the container is flipped),
 /// or `None` with no question up. The arrangement's capsules slide below it.
-pub(crate) fn question_bottom(container: &SplitView) -> Option<f64> {
+pub(crate) fn question_bottom(container: &dyn Cover) -> Option<f64> {
     let sheet = owner_window(container)?.attachedSheet()?;
-    let window = container.window()?;
+    let window = container.view().window()?;
     let in_window = window.convertRectFromScreen(sheet.frame());
-    let rect = container.convertRect_fromView(in_window, None);
+    let rect = container.view().convertRect_fromView(in_window, None);
     Some(rect.origin.y + rect.size.height)
 }
 
@@ -469,16 +529,16 @@ pub(crate) struct Owner {
 pub(crate) type OwnerSlot = RefCell<Option<Owner>>;
 
 /// The owner's window, if the tab has one.
-fn owner_window(container: &SplitView) -> Option<Retained<NSWindow>> {
+fn owner_window(container: &dyn Cover) -> Option<Retained<NSWindow>> {
     container
-        .sheet_owner()
+        .owner_slot()
         .borrow()
         .as_ref()
         .map(|owner| owner.window.clone())
 }
 
 /// Whether the tab's owner holds a sheet.
-fn owner_busy(container: &SplitView) -> bool {
+fn owner_busy(container: &dyn Cover) -> bool {
     owner_window(container).is_some_and(|owner| owner.attachedSheet().is_some())
 }
 
@@ -486,8 +546,9 @@ fn owner_busy(container: &SplitView) -> bool {
 /// content, never the bar, whose clicks must still reach the window. From
 /// the container rather than the window's content layout rect, which in
 /// full screen reaches over the bar.
-fn frame_of(container: &SplitView, window: &NSWindow) -> NSRect {
-    let in_window = container.convertRect_toView(container.bounds(), None);
+fn frame_of(container: &dyn Cover, window: &NSWindow) -> NSRect {
+    let view = container.view();
+    let in_window = view.convertRect_toView(view.bounds(), None);
     window.convertRectToScreen(in_window)
 }
 
@@ -497,11 +558,11 @@ fn frame_of(container: &SplitView, window: &NSWindow) -> NSRect {
 /// way a window under a sheet keeps it (`ignoresMouseEvents` would let it
 /// through to the pane, measured) — and never becomes key itself
 /// (borderless); its sheet takes the window's appearance from it.
-fn owner_of(container: &SplitView, window: &NSWindow) -> Retained<NSWindow> {
+fn owner_of(container: &dyn Cover, window: &NSWindow) -> Retained<NSWindow> {
     if let Some(owner) = owner_window(container) {
         return owner;
     }
-    let mtm = container.mtm();
+    let mtm = container.view().mtm();
     // SAFETY: with defer=false the window is created at once; it is not
     // released on close (below) — the slot's `Retained` is its owner.
     let owner = unsafe {
@@ -527,7 +588,7 @@ fn owner_of(container: &SplitView, window: &NSWindow) -> Retained<NSWindow> {
     // SAFETY: both windows are alive and the owner is not a child of
     // another window; above, so it covers the content.
     unsafe { window.addChildWindow_ordered(&owner, NSWindowOrderingMode::Above) };
-    container.sheet_owner().replace(Some(Owner {
+    container.owner_slot().replace(Some(Owner {
         window: owner.clone(),
         _watch: watch,
     }));
@@ -537,8 +598,8 @@ fn owner_of(container: &SplitView, window: &NSWindow) -> Retained<NSWindow> {
 /// The tab's container moved or changed size: its owner follows. A no-op
 /// without an owner or while it is ordered out — it is fitted when it
 /// comes back ([`show_owner`]).
-pub(crate) fn fit_owner(container: &SplitView) {
-    let (Some(owner), Some(window)) = (owner_window(container), container.window()) else {
+pub(crate) fn fit_owner(container: &dyn Cover) {
+    let (Some(owner), Some(window)) = (owner_window(container), container.view().window()) else {
         return;
     };
     if owner.isVisible() {
@@ -550,8 +611,8 @@ pub(crate) fn fit_owner(container: &SplitView) {
 /// attached again — ordering out took it off its parent (measured) —
 /// fitted, and its sheet takes the keyboard when the window has it (a sheet
 /// shown again is not key by itself, measured).
-pub(crate) fn show_owner(container: &SplitView) {
-    let (Some(owner), Some(window)) = (owner_window(container), container.window()) else {
+pub(crate) fn show_owner(container: &dyn Cover) {
+    let (Some(owner), Some(window)) = (owner_window(container), container.view().window()) else {
         return;
     };
     owner.setFrame_display(frame_of(container, &window), false);
@@ -570,7 +631,7 @@ pub(crate) fn show_owner(container: &SplitView) {
 /// still up and answerable when the tab comes back. A sheet that had the
 /// keyboard leaves no key window behind (measured), so the window takes it
 /// back.
-pub(crate) fn hide_owner(container: &SplitView) {
+pub(crate) fn hide_owner(container: &dyn Cover) {
     let Some(owner) = owner_window(container) else {
         return;
     };
@@ -588,7 +649,7 @@ pub(crate) fn hide_owner(container: &SplitView) {
 /// question takes the keyboard, the way a sheet on the window itself would
 /// keep it; `true` if it did. A sheet on its way out is still attached but
 /// no longer visible (measured) and keeps nothing.
-pub(crate) fn key_to_sheet(container: &SplitView) -> bool {
+pub(crate) fn key_to_sheet(container: &dyn Cover) -> bool {
     let sheet = owner_window(container)
         .filter(|owner| owner.isVisible())
         .and_then(|owner| owner.attachedSheet())
@@ -604,13 +665,13 @@ pub(crate) fn key_to_sheet(container: &SplitView) -> bool {
 
 /// Whether `window` is `container`'s tab's owner — the key sheet's parent
 /// then stands for the terminal window it covers (`AppDelegate::key_window`).
-pub(crate) fn is_owner(container: &SplitView, window: &NSWindow) -> bool {
+pub(crate) fn is_owner(container: &dyn Cover, window: &NSWindow) -> bool {
     owner_window(container).is_some_and(|owner| std::ptr::eq(&*owner, window))
 }
 
 /// The window's appearance changed (the theme): the tab's owner, and the
 /// sheet on it, follow.
-pub(crate) fn follow_appearance(container: &SplitView, window: &NSWindow) {
+pub(crate) fn follow_appearance(container: &dyn Cover, window: &NSWindow) {
     if let Some(owner) = owner_window(container) {
         owner.setAppearance(window.appearance().as_deref());
     }
@@ -623,8 +684,8 @@ pub(crate) fn follow_appearance(container: &SplitView, window: &NSWindow) {
 /// it is only hidden), so the tab's closing calls this. The delegate goes
 /// first, so the end is not heard as a reason to open the next question.
 /// Idempotent.
-pub(crate) fn dismantle(container: &SplitView) {
-    let owner = container.sheet_owner().take();
+pub(crate) fn dismantle(container: &dyn Cover) {
+    let owner = container.owner_slot().take();
     let Some(Owner { window: owner, .. }) = owner else {
         return;
     };
@@ -643,7 +704,7 @@ pub(crate) fn dismantle(container: &SplitView) {
 /// owner is taken apart. A turn later because the end comes from inside
 /// AppKit's sheet teardown and, when a pane closes, before its other parked
 /// questions are answered — by then they are, and the pane is closed.
-fn owner_sheet_ended(container: &SplitView) {
+fn owner_sheet_ended(container: &dyn Cover) {
     for pane in container.panes() {
         open_parked(&pane);
     }
@@ -651,26 +712,15 @@ fn owner_sheet_ended(container: &SplitView) {
         // No sheet is left on it to end.
         dismantle(container);
     }
-    if let Some(window) = container.window() {
-        marks_changed(&window);
-    }
-}
-
-/// A tab's "waiting for an answer" mark may have changed: the bar of
-/// `window` draws its chips again.
-fn marks_changed(window: &NSWindow) {
-    let Some(app) = app::delegate(window.mtm()) else {
-        return;
-    };
-    if let Some(window) = app.window_owning(window) {
-        window.refresh_bar();
+    if let Some(pane) = container.panes().first() {
+        marks_changed(pane);
     }
 }
 
 pub(crate) struct WatchIvars {
-    /// The tab the owner covers — weakly: the container holds the owner,
-    /// and the owner holds this delegate.
-    container: Weak<SplitView>,
+    /// What the owner covers — weakly: the cover holds the owner, and the
+    /// owner holds this delegate.
+    container: WeakCover,
 }
 
 define_class!(
@@ -695,16 +745,16 @@ define_class!(
             DispatchQueue::main().exec_async(move || {
                 // audit: a block running on the main queue is on the main thread by definition.
                 let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                owner_sheet_ended(container.get(mtm));
+                owner_sheet_ended(&**container.get(mtm));
             });
         }
     }
 );
 
 impl OwnerWatch {
-    fn new(mtm: MainThreadMarker, container: &SplitView) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, container: &dyn Cover) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(WatchIvars {
-            container: Weak::new(container),
+            container: container.weak(),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars are set.
         unsafe { msg_send![super(this), init] }

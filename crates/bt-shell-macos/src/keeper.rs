@@ -54,14 +54,6 @@ pub(crate) const RESPAWN_LIMIT: u32 = 3;
 /// ([`Keeper::add`]).
 pub(crate) const LAYOUT_DELAY: Duration = Duration::from_secs(1);
 
-/// The delay of a pane's state after its dock mirror moved. The mirror moves
-/// with every keystroke and its copy only serves the dock after a crash, which
-/// marks a carried mirror stale anyway: one copy per second while typing
-/// costs one blob encode a second and loses at most the last second's typing.
-/// The shell's edges (a prompt, a command's start and end) do not wait — a
-/// state behind them would miss a command.
-pub(crate) const MIRROR_DELAY: Duration = Duration::from_secs(1);
-
 /// How long ⌘Q waits for the holder's answer before it skips the question:
 /// an idle holder answers in a scheduling round, and one that does not
 /// within half a second is not one to trust the programs to.
@@ -500,6 +492,34 @@ impl HolderId {
         // SAFETY: `kill` has no memory preconditions; the pid is the holder
         // this process spawned, checked by its start time just above.
         unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
+/// The pane's side of the bound holder ([`crate::pane::Holder`]): what a pane
+/// asks of it, and nothing of the application's.
+impl crate::pane::Holder for Keeper {
+    fn active_flag(&self) -> Arc<AtomicBool> {
+        Keeper::active_flag(self)
+    }
+
+    fn is_active(&self) -> bool {
+        Keeper::is_active(self)
+    }
+
+    fn add(&self, mtm: MainThreadMarker, pane: BoundPane) -> Option<Box<dyn BaseSink>> {
+        Keeper::add(self, mtm, pane)
+    }
+
+    fn release(&self, pane: &PaneUuid) {
+        Keeper::release(self, pane);
+    }
+
+    fn state(&self, pane: &PaneUuid, blob: Vec<u8>) {
+        Keeper::state(self, pane, blob);
+    }
+
+    fn layout_changed(&self) {
+        Keeper::layout_changed(self);
     }
 }
 

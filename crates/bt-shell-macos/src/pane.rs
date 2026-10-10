@@ -40,7 +40,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bt_core::{
     BlockHandle, BlockInfo, ContentEdge, FontOptions, PaneUuid, ProgramBar, RemoteFiles,
@@ -76,7 +76,6 @@ use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::journal::PaneJournal;
-use crate::keeper::{Keeper, MIRROR_DELAY};
 use crate::launch::{Adopted, Closing, Launch};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
@@ -146,6 +145,23 @@ pub(crate) trait PaneHost {
     /// from here on reaches that tab. Without it a moved pane's shell exit
     /// would close nothing and its news would land on the tab it left.
     fn rehomed(&self, _pane: u64, _tab: u64) {}
+    /// Files are being dragged over the pane (`over`) or no longer are: while
+    /// they are, ⌥⌘ are the drag's own keys, so nothing the owner starts with
+    /// ⌥⌘ may start (bateri's arrangement of panes).
+    fn files_dragged(&self, pane: u64, over: bool);
+    /// A press with ⌥⌘ landed on the pane ([`crate::pointer::swallows`]) —
+    /// never the program's: the owner's to carry the pane, if it carries
+    /// panes. `at` is the press in the window's points.
+    fn carry_press(&self, pane: u64, at: (f64, f64));
+    /// A question of this pane was put off (its pane is not on screen) or
+    /// taken up: a mark the owner shows for a question waiting to be seen
+    /// may have changed.
+    fn questions_changed(&self, pane: u64);
+    /// What this pane's questions cover ([`crate::sheets::Cover`]): bateri's
+    /// tab container, so a question blocks that tab and not the window.
+    /// `None` puts them on the pane's window, blocking all of it. Asked
+    /// from where the pane stands, even while it closes.
+    fn cover(&self, pane: &TerminalPane) -> Option<Rc<dyn crate::sheets::Cover>>;
 }
 
 /// Column count of the smallest pane: a split that would drop
@@ -675,6 +691,41 @@ struct WrapProof {
     login: Option<u64>,
 }
 
+/// The delay of a pane's state after its dock mirror moved. The mirror moves
+/// with every keystroke and its copy only serves the dock after a crash, which
+/// marks a carried mirror stale anyway: one copy per second while typing
+/// costs one blob encode a second and loses at most the last second's typing.
+/// The shell's edges (a prompt, a command's start and end) do not wait — a
+/// state behind them would miss a command.
+const MIRROR_DELAY: Duration = Duration::from_secs(1);
+
+/// The bound holder a pane registers with — bateri's own (`keeper::Keeper`),
+/// which keeps the pane's programs through a crash or a quit. A host that
+/// keeps nothing gives none ([`PaneLaunch::keeper`]); the pane then holds its
+/// programs itself, as an unbundled bateri does.
+pub(crate) trait Holder {
+    /// The flag the reader thread reads to know whether a holder keeps the
+    /// pane's journal.
+    fn active_flag(&self) -> Arc<AtomicBool>;
+    /// Whether a holder is bound now.
+    fn is_active(&self) -> bool;
+    /// The pane's program joins the holder; the journal's sink if the
+    /// holder keeps one.
+    fn add(
+        &self,
+        mtm: MainThreadMarker,
+        pane: crate::handover::BoundPane,
+    ) -> Option<Box<dyn crate::journal::BaseSink>>;
+    /// The pane is gone: the holder lets its program go.
+    fn release(&self, pane: &PaneUuid);
+    /// The pane's state now (`Session::state_blob`), for a restore after a
+    /// crash.
+    fn state(&self, pane: &PaneUuid, blob: Vec<u8>);
+    /// The layout changed: the holder's copy of it is written again once the
+    /// burst settles.
+    fn layout_changed(&self);
+}
+
 /// The pane's birth package: all inputs in a single struct,
 /// from the owner. Live changes go a separate way, through the pane's `set_*`
 /// methods.
@@ -715,7 +766,7 @@ pub(crate) struct PaneLaunch {
     /// The bound holder's driver, the application's: the pane registers
     /// with it when its session is born and releases at its close. `None` in
     /// a timed run and an unbundled process.
-    pub(crate) keeper: Option<Rc<Keeper>>,
+    pub(crate) keeper: Option<Rc<dyn Holder>>,
 }
 
 /// The half of the birth package that only [`TerminalPane::start`] consumes.
@@ -1698,7 +1749,7 @@ pub(crate) struct PaneIvars {
     /// The application's ssh masters ([`PaneLaunch::masters`]).
     masters: Option<Arc<Masters>>,
     /// The bound holder's driver ([`PaneLaunch::keeper`]).
-    keeper: Option<Rc<Keeper>>,
+    keeper: Option<Rc<dyn Holder>>,
     /// The socket of the holder a carried-on pane was taken from, until
     /// its registration ([`TerminalPane::register_with_holder`]): the new
     /// holder must not drain the master while that one still does.
@@ -4897,6 +4948,21 @@ mod tests {
         }
         fn copy_to_clipboard(&self, pane: u64, text: String) {
             self.0.borrow_mut().push((pane, format!("copy {text}")));
+        }
+        fn files_dragged(&self, pane: u64, over: bool) {
+            self.0.borrow_mut().push((pane, format!("files {over}")));
+        }
+        fn carry_press(&self, pane: u64, _at: (f64, f64)) {
+            self.0.borrow_mut().push((pane, "carry".into()));
+        }
+        fn questions_changed(&self, pane: u64) {
+            self.0.borrow_mut().push((pane, "questions".into()));
+        }
+        fn cover(
+            &self,
+            _pane: &super::TerminalPane,
+        ) -> Option<std::rc::Rc<dyn crate::sheets::Cover>> {
+            None
         }
     }
 

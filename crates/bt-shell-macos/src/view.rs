@@ -56,7 +56,6 @@ use objc2_foundation::{
     NSRange, NSRangePointer, NSRect, NSSize, NSString, NSUInteger, NSURL,
 };
 
-use crate::app;
 use crate::clipboard;
 use crate::gesture::{Drag, Gesture, Press, Release};
 use crate::hyperlink::LinkState;
@@ -1470,8 +1469,8 @@ define_class!(
         ) -> NSDragOperation {
             // ⌥⌘ is a drag's own modifier keys while files are over the pane:
             // no arrangement lifts for the length of it.
-            if let Some(app) = app::delegate(self.mtm()) {
-                app.files_dragged(true);
+            if let Some(pane) = self.pane() {
+                pane.host().files_dragged(pane.id(), true);
             }
             if self.pane().is_none_or(|pane| pane.accepts_drop()) {
                 NSDragOperation::Copy
@@ -1506,23 +1505,23 @@ define_class!(
         /// false` would conflict with the outer signature and break the compilation.
         #[unsafe(method(draggingExited:))]
         fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
-            if let Some(app) = app::delegate(self.mtm()) {
-                app.files_dragged(false);
+            if let Some(pane) = self.pane() {
+                pane.host().files_dragged(pane.id(), false);
             }
         }
 
         /// The drag ended over the pane, taken or not.
         #[unsafe(method(draggingEnded:))]
         fn dragging_ended(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) {
-            if let Some(app) = app::delegate(self.mtm()) {
-                app.files_dragged(false);
+            if let Some(pane) = self.pane() {
+                pane.host().files_dragged(pane.id(), false);
             }
         }
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-            if let Some(app) = app::delegate(self.mtm()) {
-                app.files_dragged(false);
+            if let Some(pane) = self.pane() {
+                pane.host().files_dragged(pane.id(), false);
             }
             let paths = dropped_paths(&sender.draggingPasteboard());
             match self.ivars().session.get() {
@@ -2240,9 +2239,9 @@ impl BateriView {
             // once the pointer travels ([`crate::pane_drag`]).
             if button == MouseButton::Left
                 && let Some(pane) = self.pane()
-                && let Some(app) = crate::app::delegate(self.mtm())
             {
-                app.pane_press(pane.id(), event.locationInWindow());
+                let at = event.locationInWindow();
+                pane.host().carry_press(pane.id(), (at.x, at.y));
             }
             return;
         }
