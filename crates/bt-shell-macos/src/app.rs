@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{
-    AdoptMode, CursorMotion, HostMark, InitialInput, KeepRunning, MarkSubject, PaneUuid,
-    ReduceMotion, RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit,
-    ShellIntegration, SmoothScroll, Teardown, Theme,
+    AdoptMode, HostMark, InitialInput, KeepRunning, MarkSubject, PaneUuid, ReduceMotion,
+    RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit,
+    ShellIntegration, Teardown, Theme,
 };
 use bt_gpu::{DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -31,9 +31,8 @@ use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationDelegate, NSApplicationTerminateReply, NSControlStateValueOff,
     NSControlStateValueOn, NSDragOperation, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate,
-    NSMenuItem, NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSScroller,
-    NSScrollerStyle, NSText, NSWindow, NSWindowNumberListOptions, NSWindowStyleMask,
-    NSWindowUserTabbingPreference, NSWorkspace,
+    NSMenuItem, NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSText, NSWindow,
+    NSWindowNumberListOptions, NSWindowStyleMask, NSWindowUserTabbingPreference, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
     NSWorkspaceWillPowerOffNotification,
 };
@@ -45,13 +44,14 @@ use objc2_foundation::{
 };
 
 use crate::arrange::{self, HOLD_DELAY, Hold, Tool};
+use crate::embed;
 use crate::handover::{self, Arrival, HeldPane, PaneState};
 use crate::keeper::{self, Keeper, QuitKind, QuitPath};
 use crate::launch::{self, Adopted, Identity, Launch, Note, fallen_back};
 use crate::menu::ShellMenuDelegate;
 use crate::moves::{self, Move, Plan, Refusal, Slot, Step};
 use crate::notices::{Notices, Source};
-use crate::pane::{PaneLaunch, TerminalPane};
+use crate::pane::TerminalPane;
 use crate::pane_drag::Session;
 use crate::preview_cache;
 use crate::remote_files::Sweep;
@@ -307,19 +307,10 @@ fn decide_inputs(run: Option<Run>, home: Option<PathBuf>) -> Inputs {
     }
 }
 
-/// Three-valued `[motion] reduce_motion` + the system's answer → a single `bool`.
-///
-/// **The combination is here because this is the layer that sees the system:**
-/// `bt-gpu` does not see AppKit (the layer rule) and `bt-core`'s
-/// settings model is already the counterpart of a file, not of an
-/// accessibility setting. A **resolved** `bool` descends below (the `Renderer::set_font` precedent).
-///
-/// `system` is a **closure**, not a `bool`: in the session of a user who says
-/// `"on"`/`"off"` `NSWorkspace` is never consulted. A timed run never
-/// consults it either and this is not laziness but a gate — in
-/// [`Inputs::Hermetic`] `make smoke`'s line would be tied to the measuring
-/// machine's accessibility setting.
-/// Pure and therefore testable: no real `AppDelegate` is needed
+/// Three-valued `[motion] reduce_motion` + the system's answer → a single
+/// `bool` ([`launch::reduce_motion`]) — except in a timed run, which never
+/// consults the system: in [`Inputs::Hermetic`] `make smoke`'s line would be
+/// tied to the measuring machine's accessibility setting
 /// (`hermetic_run_does_not_read_reduce_motion`).
 fn resolve_reduce_motion(
     inputs: &Inputs,
@@ -329,27 +320,14 @@ fn resolve_reduce_motion(
     if let Inputs::Hermetic = inputs {
         return false;
     }
-    match setting {
-        ReduceMotion::On => true,
-        ReduceMotion::Off => false,
-        ReduceMotion::System => system(),
-    }
+    launch::reduce_motion(setting, system)
 }
 
 /// `[terminal] scrollbar` + the system's scroll bar preference → the bar's
-/// one resolved form ([`ScrollbarMode`]).
-///
-/// The [`resolve_reduce_motion`] precedent, for its reasons: this is the
-/// layer that sees the system, `bt-gpu` gets the resolved value. `overlay`
-/// is a **closure** — "Show scroll bars" in System Settings, as
-/// `NSScroller.preferredScrollerStyle` answers it: macOS already resolves
-/// "Automatically based on mouse or trackpad" for the devices attached, so
-/// no device detection is written here. Overlay scrollers are the
-/// self-hiding form (`Auto`), legacy ones the permanent one (`Always`).
-///
-/// **A timed run never asks the system and gets `Auto`** — `make smoke`'s
-/// grid and tokens must not depend on the measuring machine's preference
-/// (or a mouse plugged into it): `Always` would take columns from the grid.
+/// one resolved form ([`launch::scrollbar`]). **A timed run never asks the
+/// system and gets `Auto`** — `make smoke`'s grid and tokens must not depend
+/// on the measuring machine's preference (or a mouse plugged into it):
+/// `Always` would take columns from the grid.
 fn resolve_scrollbar(
     inputs: &Inputs,
     setting: Scrollbar,
@@ -358,30 +336,7 @@ fn resolve_scrollbar(
     if let Inputs::Hermetic = inputs {
         return ScrollbarMode::Auto;
     }
-    match setting {
-        Scrollbar::Auto => ScrollbarMode::Auto,
-        Scrollbar::Always => ScrollbarMode::Always,
-        Scrollbar::Never => ScrollbarMode::Never,
-        Scrollbar::System if overlay() => ScrollbarMode::Auto,
-        Scrollbar::System => ScrollbarMode::Always,
-    }
-}
-
-/// `[motion] smooth_scroll` + Reduce Motion + `cursor_motion` → a single
-/// `bool`: does the wheel go smooth.
-///
-/// If any of the three turns motion off, line stepping — scrolling does not
-/// *add* animation for one who turned motion off (the same as
-/// `cursor_motion = "snap"`'s relation to Reduce Motion). Quantization is
-/// **at the source**, not in `bt-gpu`'s `Motion`: the `false` arm stays as
-/// today's line path.
-///
-/// `reduce` is [`resolve_reduce_motion`]'s resolved answer, i.e. a timed run
-/// does not read the system here either. Pure, tested.
-fn resolve_smooth_scroll(settings: &Settings, reduce: bool) -> bool {
-    settings.smooth_scroll == SmoothScroll::On
-        && !reduce
-        && settings.cursor_motion != CursorMotion::Snap
+    launch::scrollbar(setting, overlay)
 }
 
 /// How a new window is opened — [`AppDelegate::open_window`]'s two decisions
@@ -851,14 +806,6 @@ pub(crate) fn delegate(mtm: MainThreadMarker) -> Option<Retained<AppDelegate>> {
     let delegate = NSApplication::sharedApplication(mtm).delegate()?;
     let object: &AnyObject = (*delegate).as_ref();
     object.downcast_ref::<AppDelegate>().map(Message::retain)
-}
-
-/// The open pane whose id is `id` — the lookup path in the pane's birth
-/// package (`pane::PaneLookup`): jobs returning to the main queue from the
-/// reader thread and from background jobs find the pane with it.
-/// A plain `fn`, i.e. `Send`, and the pane's module does not see `AppDelegate`.
-pub(crate) fn pane_by_id(mtm: MainThreadMarker, id: u64) -> Option<Retained<TerminalPane>> {
-    delegate(mtm)?.pane(id)
 }
 
 /// The notification of the watch sources ([`notify_settings_changed`]).
@@ -2566,10 +2513,9 @@ impl AppDelegate {
         self.tabs().into_iter().find(|tab| tab.id() == id)
     }
 
-    /// The pane with identity `id`; `None` if it is closed — the path of the jobs
-    /// that return from the reader thread to the main queue (`ShellWake`, the
-    /// alternate-screen notifier, uploads) ([`pane_by_id`]). It asks the pane's
-    /// owner for tab- and window-level work (`tab::TabHost`).
+    /// The pane with identity `id` in the application's windows; `None` if it
+    /// is closed. (The jobs that return from the reader thread to the main
+    /// queue find their pane through [`embed::pane`], whoever hosts it.)
     ///
     /// Unlike [`AppDelegate::window`], it does **not** find a pane whose
     /// teardown has started ([`find_open`]): the window leaves the list a turn
@@ -3414,8 +3360,8 @@ impl AppDelegate {
         let tab_id = self.next_id();
         let source = window.selected_tab().focused_pane();
         let (launch, theme) = self.pane_launch(tab_id, Some(&source), opening);
-        let pane = TerminalPane::new(mtm, crate::window::initial_rect(), launch)
-            .map_err(|e| e.to_string())?;
+        let pane =
+            embed::open(mtm, crate::window::initial_rect(), launch).map_err(|e| e.to_string())?;
         let tab = TerminalTab::new(mtm, tab_id, window.id(), &pane);
         let edge = self.settings().content_edge;
         window.add_tab(&tab, (theme, edge));
@@ -3980,42 +3926,39 @@ impl AppDelegate {
         tab: u64,
         from: Option<&TerminalPane>,
         opening: Opening,
-    ) -> (PaneLaunch, Theme) {
+    ) -> (embed::Config, Theme) {
         let session = from.and_then(|from| from.session());
         let theme = session.map_or_else(|| self.resolve_theme(), |session| session.theme());
         let dir = session
             .and_then(|session| session.working_directory())
             .or_else(child::working_directory);
         let initial = initial_line(opening, session.and_then(|session| session.remote_line()));
-        let launch = PaneLaunch {
+        let config = embed::Config {
             id: self.next_id(),
-            run: self.ivars().run,
             host: Rc::new(TabHost::new(tab)),
-            lookup: pane_by_id,
-            stats: self.stats(),
+            identity: self.ivars().identity.clone(),
             settings: self.settings().clone(),
             theme,
-            launch: Launch {
-                working_directory: dir,
-                initial_input: initial.map(InitialInput::run),
-                uuid: None,
-                replay: None,
-                adopt: None,
-            },
+            working_directory: dir,
+            initial_input: initial.map(InitialInput::run),
+            uuid: None,
+            replay: None,
+            zoom: from.map_or_else(Zoom::default, TerminalPane::zoom),
+            masters: self.ivars().masters.clone(),
             integration: self.shell_integration(),
             reduce_motion: self.reduce_motion(),
             smooth_scroll: self.smooth_scroll(),
             scrollbar: self.scrollbar_mode(),
-            zoom: from.map_or_else(Zoom::default, TerminalPane::zoom),
-            masters: self.ivars().masters.clone(),
+            run: self.ivars().run,
+            stats: self.stats(),
             keeper: self
                 .ivars()
                 .keeper
                 .clone()
                 .map(|keeper| keeper as Rc<dyn crate::pane::Holder>),
-            identity: self.ivars().identity.clone(),
+            adopt: None,
         };
-        (launch, theme)
+        (config, theme)
     }
 
     /// ⌘D / ⇧⌘D (`TerminalWindow`'s `splitRight:`/`splitDown:`, through
@@ -4303,7 +4246,7 @@ impl AppDelegate {
         for (index, tab) in window.tabs.iter().enumerate() {
             let tab_id = self.next_id();
             let mut theme = None;
-            let launches: Vec<Option<PaneLaunch>> = tab
+            let launches: Vec<Option<embed::Config>> = tab
                 .panes
                 .iter()
                 .map(|pane| {
@@ -4317,7 +4260,7 @@ impl AppDelegate {
             let Some(tab) = tab.retain(&keep) else {
                 continue;
             };
-            let launches: Vec<PaneLaunch> = launches.into_iter().flatten().collect();
+            let launches: Vec<embed::Config> = launches.into_iter().flatten().collect();
             let theme = theme.unwrap_or_else(|| self.resolve_theme());
             let edge = self.settings().content_edge;
             let result = match built.clone() {
@@ -4363,7 +4306,7 @@ impl AppDelegate {
         tab: u64,
         pane: &SavedPane,
         arriving: Option<&mut Arriving<'_>>,
-    ) -> Option<(PaneLaunch, Theme)> {
+    ) -> Option<(embed::Config, Theme)> {
         let setting = self.settings().restore_windows;
         let saved_history = || {
             if pane.history {
@@ -4432,9 +4375,9 @@ impl AppDelegate {
                 }
             }
         };
-        let (mut launch, theme) = self.pane_launch(tab, None, Opening::Restore);
-        launch.launch = restored_launch(pane, replay);
-        launch.launch.adopt = adopt;
+        let (launch, theme) = self.pane_launch(tab, None, Opening::Restore);
+        let mut launch = launch.with_launch(restored_launch(pane, replay));
+        launch.adopt = adopt;
         launch.zoom = Zoom::from_steps(pane.zoom_steps, &launch.settings.font);
         Some((launch, theme))
     }
@@ -5401,7 +5344,7 @@ impl AppDelegate {
     /// skip it.
     fn apply_reduce_motion(&self) {
         let reduce = self.reduce_motion();
-        let smooth = resolve_smooth_scroll(&self.ivars().settings.borrow(), reduce);
+        let smooth = launch::smooth_scroll(&self.ivars().settings.borrow(), reduce);
         for pane in self.all_panes() {
             pane.set_reduce_motion(reduce);
             pane.set_smooth_scroll(smooth);
@@ -5645,24 +5588,20 @@ impl AppDelegate {
     pub(crate) fn scrollbar_mode(&self) -> ScrollbarMode {
         let setting = self.ivars().settings.borrow().scrollbar;
         let mtm = self.mtm();
-        resolve_scrollbar(&self.inputs(), setting, || {
-            NSScroller::preferredScrollerStyle(mtm) == NSScrollerStyle::Overlay
-        })
+        resolve_scrollbar(&self.inputs(), setting, || launch::overlay_scrollers(mtm))
     }
 
     /// Is the wheel smooth ([`resolve_smooth_scroll`]).
     pub(crate) fn smooth_scroll(&self) -> bool {
         let reduce = self.reduce_motion();
-        resolve_smooth_scroll(&self.ivars().settings.borrow(), reduce)
+        launch::smooth_scroll(&self.ivars().settings.borrow(), reduce)
     }
 
     /// The setting's three values and the system's answer, in the form merged in
     /// [`resolve_reduce_motion`].
     pub(crate) fn reduce_motion(&self) -> bool {
         let setting = self.ivars().settings.borrow().reduce_motion;
-        resolve_reduce_motion(&self.inputs(), setting, || {
-            NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
-        })
+        resolve_reduce_motion(&self.inputs(), setting, launch::system_reduce_motion)
     }
 
     /// The app's effective appearance, i.e. whether the system's light/dark setting is dark.
@@ -6038,10 +5977,11 @@ impl AppDelegate {
 
 #[cfg(test)]
 mod tests {
+    use bt_core::{CursorMotion, SmoothScroll};
     use bt_gpu::DOCK_ROWS;
 
     use super::*;
-    use crate::launch::{dock_rows_at_birth, with_helper};
+    use crate::launch::{dock_rows_at_birth, smooth_scroll as resolve_smooth_scroll, with_helper};
 
     /// The **measured** tail of a healthy smoke run (2026-09-16, the lowest of
     /// thirty-seven runs: `1742,29 ms`).

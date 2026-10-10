@@ -115,7 +115,7 @@ pub(crate) enum Asker<'a> {
 /// whole.
 ///
 /// [`PaneHost::cover`]: crate::pane::PaneHost::cover
-pub(crate) trait Cover {
+pub trait Cover {
     /// The view the questions' owner window lies over.
     fn view(&self) -> &NSView;
     /// The panes under it, in their order: whose parked questions open on it.
@@ -129,10 +129,10 @@ pub(crate) trait Cover {
 
 /// A cover held weakly ([`Cover::weak`]): the way back to it, if it is still
 /// there.
-pub(crate) struct WeakCover(Box<dyn Fn() -> Option<Rc<dyn Cover>>>);
+pub struct WeakCover(Box<dyn Fn() -> Option<Rc<dyn Cover>>>);
 
 impl WeakCover {
-    pub(crate) fn new(load: impl Fn() -> Option<Rc<dyn Cover>> + 'static) -> Self {
+    pub fn new(load: impl Fn() -> Option<Rc<dyn Cover>> + 'static) -> Self {
         Self(Box::new(load))
     }
 
@@ -518,7 +518,7 @@ pub(crate) fn question_bottom(container: &dyn Cover) -> Option<f64> {
 /// A tab's sheet owner: the child window its panes' sheets sit on, and the
 /// delegate that hears them end (a window's delegate property is weak, so
 /// the owner keeps it).
-pub(crate) struct Owner {
+pub struct Owner {
     window: Retained<NSWindow>,
     _watch: Retained<OwnerWatch>,
 }
@@ -526,7 +526,7 @@ pub(crate) struct Owner {
 /// A tab's slot for its owner — on the tab's splits container, which the
 /// asking pane reaches through its superview even while it closes. Empty
 /// while the tab holds no sheet.
-pub(crate) type OwnerSlot = RefCell<Option<Owner>>;
+pub type OwnerSlot = RefCell<Option<Owner>>;
 
 /// The owner's window, if the tab has one.
 fn owner_window(container: &dyn Cover) -> Option<Retained<NSWindow>> {

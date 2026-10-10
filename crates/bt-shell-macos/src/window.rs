@@ -118,10 +118,11 @@ use crate::Run;
 use crate::app;
 use crate::arrange::Tool;
 use crate::card::{Ground, Shade};
+use crate::embed;
 use crate::jobs::Foreground;
 use crate::launch::Closing;
 use crate::moves::{self, Joins, Move};
-use crate::pane::{PaneLaunch, TerminalPane};
+use crate::pane::TerminalPane;
 use crate::preview::beep;
 use crate::restore::SavedTab;
 use crate::sheets::{self, Asker};
@@ -1384,10 +1385,10 @@ impl TerminalWindow {
         mtm: MainThreadMarker,
         id: u64,
         tab: u64,
-        launch: PaneLaunch,
+        launch: embed::Config,
     ) -> Result<Retained<Self>, GpuError> {
         let run = launch.run;
-        let pane = TerminalPane::new(mtm, initial_rect(), launch)?;
+        let pane = embed::open(mtm, initial_rect(), launch)?;
         Ok(Self::with_pane(mtm, id, tab, run, &pane))
     }
 
@@ -1542,7 +1543,7 @@ impl TerminalWindow {
         id: u64,
         tab: u64,
         saved: &SavedTab,
-        launches: Vec<PaneLaunch>,
+        launches: Vec<embed::Config>,
         place: impl FnOnce(&Retained<Self>),
     ) -> Result<Retained<Self>, String> {
         let run = launches.first().and_then(|launch| launch.run);
@@ -1576,7 +1577,7 @@ impl TerminalWindow {
         mtm: MainThreadMarker,
         tab: u64,
         saved: &SavedTab,
-        launches: Vec<PaneLaunch>,
+        launches: Vec<embed::Config>,
         look: (Theme, ContentEdge),
     ) -> Result<Retained<TerminalTab>, String> {
         let (tree, panes) = tab::restored_panes(mtm, &saved.shape, launches)?;

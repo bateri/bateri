@@ -85,6 +85,13 @@ audit:
 			|| { echo "audit: unjustified panic path in bt-core ($$f)"; fail=1; }; \
 	done; \
 	if grep -rnE "beginSheet|endSheet|attachedSheet" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/sheets.rs:" | grep -v "^crates/bt-shell-macos/src/settings_window.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: a sheet begun, ended or asked about outside the sheet gate (bt-shell-macos sheets.rs)"; fail=1; fi; \
+	app_mods="app|arrange|keeper|menu|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_merge|updater|window"; \
+	for f in crates/bt-shell-macos/src/*.rs; do \
+		m=$$(basename "$$f" .rs); \
+		if echo "$$m" | grep -qxE "lib|$$app_mods"; then continue; fi; \
+		if grep -nE "crate::($$app_mods)\b|^use crate::\{[^}]*\b($$app_mods)\b" "$$f" | grep -vE "^[0-9]+:[[:space:]]*//"; then echo "audit: $$f is the pane's and reaches an application module (app, window, tab, …): what it needs goes through the pane's host (PaneHost) or comes down to the pane"; fail=1; fi; \
+	done; \
+	if grep -rn "TerminalPane::new(" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/embed.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: a pane opened outside embed::open — bateri opens its panes the way an embedding application does"; fail=1; fi; \
 	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshenv|\.zprofile|\.zshrc|\.zlogin|\.zlogout|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "audit: shell integration writes to the user's rc file"; fail=1; fi; \
 	git diff --quiet HEAD -- Cargo.lock $$(git ls-files '*Cargo.toml') || echo "audit: warning — Cargo.toml/Cargo.lock differs from HEAD; is the dependency decision recorded?"; \
 	test $$fail -eq 0 && echo "audit: clean"

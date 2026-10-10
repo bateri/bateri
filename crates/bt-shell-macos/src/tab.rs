@@ -54,9 +54,10 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect};
 
 use crate::app;
 use crate::arrange::{self, Entry, Raised, Scene, Status, Wants};
+use crate::embed;
 use crate::launch::Closing;
 use crate::notices::Source;
-use crate::pane::{PaneHost, PaneLaunch, TerminalPane};
+use crate::pane::{PaneHost, TerminalPane};
 use crate::restore::{SavedTab, Shape};
 use crate::sheets;
 use crate::split::{Axis, Direction, Placement, Removal, Tree};
@@ -208,7 +209,7 @@ fn pane_containing(view: Retained<NSView>) -> Option<Retained<TerminalPane>> {
 pub(crate) fn restored_panes(
     mtm: MainThreadMarker,
     shape: &Shape,
-    launches: Vec<PaneLaunch>,
+    launches: Vec<embed::Config>,
 ) -> Result<(Tree, Vec<Retained<TerminalPane>>), String> {
     let ids: Vec<u64> = launches.iter().map(|launch| launch.id).collect();
     let tree = shape
@@ -224,7 +225,7 @@ pub(crate) fn restored_panes(
     let rect = initial_rect();
     let panes = launches
         .into_iter()
-        .map(|launch| TerminalPane::new(mtm, rect, launch).map_err(|e| e.to_string()))
+        .map(|launch| embed::open(mtm, rect, launch).map_err(|e| e.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((tree, panes))
 }
@@ -722,7 +723,7 @@ impl TerminalTab {
     pub(crate) fn add_pane(
         &self,
         mtm: MainThreadMarker,
-        launch: PaneLaunch,
+        launch: embed::Config,
         target: u64,
         axis: Axis,
     ) -> Result<(), String> {
@@ -731,7 +732,7 @@ impl TerminalTab {
             .halves(target, axis)
             .ok_or_else(|| "no pane to split".to_owned())?;
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), half);
-        let pane = TerminalPane::new(mtm, frame, launch).map_err(|e| e.to_string())?;
+        let pane = embed::open(mtm, frame, launch).map_err(|e| e.to_string())?;
         if !container.insert(target, axis, &pane) {
             return Err("no pane to split".to_owned());
         }

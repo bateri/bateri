@@ -109,7 +109,7 @@ use crate::{child, locale};
 /// sheet gate (`crate::sheets`), which resolves where they sit from the pane
 /// itself; the popover uses the pane's own view. The owner is not asked for
 /// either.
-pub(crate) trait PaneHost {
+pub trait PaneHost {
     /// Title, working directory, remote state or upload percentage changed:
     /// the window's title and the tab's label must be re-read from the pane.
     fn title_changed(&self, pane: u64);
@@ -655,8 +655,8 @@ fn block_meta(info: &BlockInfo, clock: impl Fn(u32) -> String) -> String {
     parts.join(" · ")
 }
 
-/// The path by which main-queue returns find the pane by id; the owner
-/// supplies it (today `app::pane_by_id`). A plain `fn` pointer, not a
+/// The path by which main-queue returns find the pane by id — every pane's is
+/// [`crate::embed::pane`], whoever its owner. A plain `fn` pointer, not a
 /// closure: `Send` and `Copy`, so every job thrown from the reader thread to
 /// the main queue can capture it and it opens no reference cycle. It must not
 /// find a pane whose close has begun ([`TerminalPane::is_closed`]).
@@ -1583,7 +1583,7 @@ pub(crate) struct RemoteProbeOutcome {
 /// **The window is not held here**: the pane is the window's `contentView`,
 /// i.e. the window holds it strongly and a back reference would be a cycle.
 /// The window is looked at with `NSView::window` whenever needed (scale, key bit).
-pub(crate) struct PaneIvars {
+pub struct PaneIvars {
     /// Our own counter ([`AppDelegate`] hands it out, from the same counter as
     /// the windows'): the key by which jobs returning from the reader thread
     /// to the main queue find the pane (`AppDelegate::pane`).
@@ -1827,7 +1827,7 @@ define_class!(
     #[thread_kind = MainThreadOnly]
     #[name = "BateriTerminalPane"]
     #[ivars = PaneIvars]
-    pub(crate) struct TerminalPane;
+    pub struct TerminalPane;
 
     unsafe impl NSObjectProtocol for TerminalPane {}
 
@@ -2340,7 +2340,7 @@ impl TerminalPane {
     /// before the pane becomes `contentView` would try to build the geometry
     /// without a window. The observer is removed when the pane closes
     /// ([`TerminalPane::begin_close`]), without waiting for the window's closing.
-    pub(crate) fn observe_frame(&self) {
+    pub fn observe_frame(&self) {
         // SAFETY: the selector is defined on this class and takes a single
         // `&NSNotification`; the name is a constant AppKit exposes, the object
         // is this pane's view.
@@ -2354,19 +2354,19 @@ impl TerminalPane {
         }
     }
 
-    pub(crate) fn id(&self) -> u64 {
+    pub fn id(&self) -> u64 {
         self.ivars().id
     }
 
     /// The session's persistent identity (`TERM_SESSION_ID`, `bateri://tab/<id>`).
     /// Separate from the in-process [`TerminalPane::id`]: that one is
     /// the key of main-queue returns, this is the name given outward.
-    pub(crate) fn uuid(&self) -> &PaneUuid {
+    pub fn uuid(&self) -> &PaneUuid {
         &self.ivars().uuid
     }
 
     /// Whether closing has begun ([`PaneIvars::closed`]).
-    pub(crate) fn is_closed(&self) -> bool {
+    pub fn is_closed(&self) -> bool {
         self.ivars().closed.get()
     }
 
@@ -2690,7 +2690,7 @@ impl TerminalPane {
         &self.ivars().view
     }
 
-    pub(crate) fn session(&self) -> Option<&Arc<Session>> {
+    pub fn session(&self) -> Option<&Arc<Session>> {
         self.ivars().session.get()
     }
 
@@ -2738,7 +2738,7 @@ impl TerminalPane {
     /// The pane must be attached to a window (`contentView`): the scale is
     /// read from it ([`TerminalPane::sync_geometry`]); if not, an error. A
     /// second call is an error too: the package is consumed once.
-    pub(crate) fn start(&self, mtm: MainThreadMarker) -> std::io::Result<()> {
+    pub fn start(&self, mtm: MainThreadMarker) -> std::io::Result<()> {
         let Some(birth) = self.ivars().birth.take() else {
             return Err(std::io::Error::other("pane started a second time"));
         };
@@ -3982,6 +3982,12 @@ impl TerminalPane {
     /// latched, `detach` is `take`, `begin_shutdown` is an `Option`, removing
     /// the observer is a no-op if unregistered). `None` if the session was
     /// never born — there is nothing to close.
+    /// The pane closes: its shell is told to end and nothing waits for it —
+    /// what a host does with a pane it no longer shows.
+    pub fn close(&self) {
+        drop(self.begin_close());
+    }
+
     pub(crate) fn begin_close(&self) -> Option<Closing> {
         // The holder lets its copy go **first**: a program with unread
         // output cannot finish exiting while an unread copy of its master is

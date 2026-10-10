@@ -11,14 +11,19 @@
 //! question, tab actions), per-tab state (`tab`: the splits container, the
 //! focused pane, the title's read) and per-session state (`pane`: an `NSView`
 //! subclass; the session's core, the search bar, the upload queue and the
-//! pane-level menu selectors) live in separate objects. The boundary between a
-//! pane and its owner has three parts: inputs arrive in one package at birth
-//! (`pane::PaneLaunch`), events go through a trait (`pane::PaneHost`; today's
-//! owner is `tab::TabHost`), and every menu job is a named method on the
-//! pane — the selector is a wrapper calling it. Every sheet begins, ends and
-//! is asked about through one gate (`sheets`), which decides where it sits. The pane module does not reach
-//! into `AppDelegate`; main-queue callbacks find the pane by id through the
-//! path its owner hands over (`pane::PaneLookup`).
+//! pane-level menu selectors) live in separate objects.
+//!
+//! **A pane is opened one way, bateri's and any host's** ([`embed`]): what it is
+//! born with ([`embed::Config`]), the owner that hears its events
+//! ([`embed::Host`]; bateri's is `tab::TabHost`) and who the application is
+//! ([`embed::Identity`]); main-queue callbacks find the pane by its id wherever
+//! it is hosted ([`embed::pane`]). The pane and the modules it is made of never
+//! reach the application's (`app`, `window`, `tab`, `menu`, …): what they need
+//! goes through the owner or comes down to them — `make audit` holds both
+//! rules, and a test opens a pane with no bateri application object at all
+//! (`tests/embed.rs`). Every menu job is a named method on the pane — the
+//! selector is a wrapper calling it. Every sheet begins, ends and is asked
+//! about through one gate (`sheets`), which decides where it sits.
 //!
 //! The keyboard flows to the PTY from here (`view`, `clipboard`) and the mouse
 //! to the session (selection and scrolling, `view`); a file dropped from Finder
@@ -43,6 +48,7 @@ pub(crate) mod app;
 mod arrange;
 mod card;
 mod clipboard;
+pub mod embed;
 mod footer;
 mod hyperlink;
 mod keeper;

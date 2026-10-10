@@ -10,8 +10,13 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use bt_core::{InitialInput, PaneUuid, ShellIntegration, ShutdownHandle, Teardown};
-use bt_gpu::DOCK_ROWS;
+use bt_core::{
+    CursorMotion, InitialInput, PaneUuid, ReduceMotion, Scrollbar, Settings, ShellIntegration,
+    ShutdownHandle, SmoothScroll, Teardown,
+};
+use bt_gpu::{DOCK_ROWS, ScrollbarMode};
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSScroller, NSScrollerStyle, NSWorkspace};
 
 use crate::child;
 
@@ -20,19 +25,19 @@ use crate::child;
 /// (an application that embeds a pane is not bateri's executable, and a
 /// guess would fail quietly).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Identity {
+pub struct Identity {
     /// The application's name where a pane names whose it is: a downloaded
     /// file's quarantine record, which Gatekeeper shows.
-    pub(crate) app_name: String,
+    pub app_name: String,
     /// The program that answers the shell integration's helper calls
     /// (`ssh-argv`, `ssh-fell-back`, which the wrapper's `ssh` function asks
     /// through `BATERI_BIN`) — bateri's own executable. `None`: the wrapper's
     /// `ssh` runs plain `ssh`.
-    pub(crate) helper: Option<PathBuf>,
+    pub helper: Option<PathBuf>,
     /// The shell integration's zsh scripts (bateri's `Resources/shell/zsh`).
     /// `None`: no integration — the pane is a plain terminal, without the
     /// dock and the command blocks.
-    pub(crate) zsh_wrapper_dir: Option<PathBuf>,
+    pub zsh_wrapper_dir: Option<PathBuf>,
 }
 
 /// The wrapper's environment `wrapper` ([`integration_env`]) completed: the
@@ -180,6 +185,63 @@ pub(crate) fn dock_rows_at_birth(
     } else {
         DOCK_ROWS
     }
+}
+
+/// Three-valued `[motion] reduce_motion` + the system's answer → a single
+/// `bool`.
+///
+/// **The combination is here because this is the layer that sees the system:**
+/// `bt-gpu` does not see AppKit (the layer rule) and `bt-core`'s settings
+/// model is already the counterpart of a file, not of an accessibility
+/// setting. A **resolved** `bool` descends below (the `Renderer::set_font`
+/// precedent). `system` is a **closure**, not a `bool`: in the session of a
+/// user who says `"on"`/`"off"` the system is never consulted.
+pub(crate) fn reduce_motion(setting: ReduceMotion, system: impl FnOnce() -> bool) -> bool {
+    match setting {
+        ReduceMotion::On => true,
+        ReduceMotion::Off => false,
+        ReduceMotion::System => system(),
+    }
+}
+
+/// The system's Reduce Motion (System Settings ▸ Accessibility ▸ Display).
+pub(crate) fn system_reduce_motion() -> bool {
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+/// `[terminal] scrollbar` + the system's scroll bar preference → the bar's
+/// one resolved form ([`ScrollbarMode`]). `overlay` is a **closure** — "Show
+/// scroll bars" in System Settings ([`overlay_scrollers`]): macOS already
+/// resolves "Automatically based on mouse or trackpad" for the devices
+/// attached, so no device detection is written here. Overlay scrollers are
+/// the self-hiding form (`Auto`), legacy ones the permanent one (`Always`).
+pub(crate) fn scrollbar(setting: Scrollbar, overlay: impl FnOnce() -> bool) -> ScrollbarMode {
+    match setting {
+        Scrollbar::Auto => ScrollbarMode::Auto,
+        Scrollbar::Always => ScrollbarMode::Always,
+        Scrollbar::Never => ScrollbarMode::Never,
+        Scrollbar::System if overlay() => ScrollbarMode::Auto,
+        Scrollbar::System => ScrollbarMode::Always,
+    }
+}
+
+/// Whether the system shows overlay scrollers (`NSScroller.preferredScrollerStyle`).
+pub(crate) fn overlay_scrollers(mtm: MainThreadMarker) -> bool {
+    NSScroller::preferredScrollerStyle(mtm) == NSScrollerStyle::Overlay
+}
+
+/// `[motion] smooth_scroll` + Reduce Motion + `cursor_motion` → a single
+/// `bool`: does the wheel go smooth.
+///
+/// If any of the three turns motion off, line stepping — scrolling does not
+/// *add* animation for one who turned motion off (the same as
+/// `cursor_motion = "snap"`'s relation to Reduce Motion). Quantization is
+/// **at the source**, not in `bt-gpu`'s `Motion`: the `false` arm stays as
+/// today's line path. `reduce` is [`reduce_motion`]'s resolved answer.
+pub(crate) fn smooth_scroll(settings: &Settings, reduce: bool) -> bool {
+    settings.smooth_scroll == SmoothScroll::On
+        && !reduce
+        && settings.cursor_motion != CursorMotion::Snap
 }
 
 /// A pane's closing that has begun (`TerminalPane::begin_close`), and so a
