@@ -71,12 +71,13 @@ use objc2_quartz_core::CAMetalLayer;
 
 use crate::card::{self, FrameBox};
 
-use crate::app::{self, Grid, split_into_grid};
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
+use crate::grid::{self, Grid, split_into_grid};
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::journal::PaneJournal;
 use crate::keeper::{Keeper, MIRROR_DELAY};
+use crate::launch::{Adopted, Closing, Launch};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::password_sheet::PasswordSheet;
@@ -95,7 +96,6 @@ use crate::stats_popover::StatsPopover;
 use crate::upload::Transfers;
 use crate::uploader::{StopSheet, UploadPopover};
 use crate::view::BateriView;
-use crate::window::{Closing, Launch, is_dark_background};
 use crate::zoom::Zoom;
 use crate::{Run, Workload};
 use crate::{child, locale};
@@ -2828,7 +2828,7 @@ impl TerminalPane {
                         eprintln!("bateri: could not carry a pane over: {error}");
                         nudge = false;
                         let options = SessionOptions {
-                            replay: Some(crate::window::fallen_back(history, note)),
+                            replay: Some(crate::launch::fallen_back(history, note)),
                             ..options
                         };
                         (Session::spawn(options, wake)?, shell_parent)
@@ -2881,7 +2881,7 @@ impl TerminalPane {
             stats,
             // **Every pane watches**: a transition turns the tab's ring off or
             // on (`tabs::ring_running`), dock or not. In a dockless session it
-            // still resizes nothing — `app::dock_rows_for` gives a zero-row
+            // still resizes nothing — `grid::dock_rows_for` gives a zero-row
             // birth zero on both screens, so the reserve never moves.
             Some(alt_screen_notifier(self.ivars().id, self.ivars().lookup)),
         );
@@ -3128,7 +3128,7 @@ impl TerminalPane {
         // back. Reading again is idempotent — the ended commands' counts it
         // also reads only mark what is new.
         self.host().activity_changed(self.ivars().id);
-        let wanted = app::dock_rows_for(
+        let wanted = grid::dock_rows_for(
             session.alt_screen(),
             session.remote_mark().is_some(),
             self.ivars().dock_rows_at_birth.get(),
@@ -3231,7 +3231,7 @@ impl TerminalPane {
             session.set_theme(theme);
         }
         if let Some(bar) = self.ivars().search.get() {
-            bar.paint(&theme, is_dark_background(&theme));
+            bar.paint(&theme, theme.is_dark());
         }
         self.ivars().dim.paint(&theme);
         self.ivars().card_frame.paint(&theme);
@@ -4341,7 +4341,7 @@ impl TerminalPane {
             );
             if let Some(session) = self.session() {
                 let theme = session.theme();
-                bar.paint(&theme, is_dark_background(&theme));
+                bar.paint(&theme, theme.is_dark());
             }
             bar
         })
@@ -4779,11 +4779,11 @@ type NotAdopted = (std::io::Error, Option<Vec<u8>>);
 /// fallback.
 fn adopt_session(
     options: SessionOptions,
-    adopted: crate::window::Adopted,
+    adopted: Adopted,
     grid: Grid,
     wake: &Arc<dyn Wake>,
 ) -> Result<(Session, ShellParent), NotAdopted> {
-    let crate::window::Adopted {
+    let Adopted {
         master,
         exit,
         pid,

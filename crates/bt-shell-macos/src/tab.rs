@@ -53,6 +53,7 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect};
 
 use crate::app;
 use crate::arrange::{self, Entry, Raised, Scene, Status, Wants};
+use crate::launch::Closing;
 use crate::notices::Source;
 use crate::pane::{PaneHost, PaneLaunch, TerminalPane};
 use crate::restore::{SavedTab, Shape};
@@ -63,7 +64,7 @@ use crate::tab_bar::Upload;
 use crate::tabs::{self, Card, CardCommand, Indicator, Signals, Tally, Unseen};
 use crate::upload;
 use crate::uploader;
-use crate::window::{Closing, TerminalWindow, initial_rect};
+use crate::window::{TerminalWindow, initial_rect};
 
 /// Saved scrollback, `(tab id, VT bytes)` per pane (`restore::save`'s input).
 pub(crate) type Histories = Vec<(PaneUuid, Vec<u8>)>;

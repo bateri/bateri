@@ -1331,7 +1331,7 @@ fn fade_out(card: &Retained<Card>, still: bool) {
     }
     let fading = card.clone();
     let gone = card.clone();
-    arrange::animate(
+    crate::card::animate(
         FADE_SECS,
         move || fading.animator().setAlphaValue(0.0),
         move || gone.removeFromSuperview(),
@@ -1351,7 +1351,7 @@ fn fly_back(card: &Retained<Card>, tab: &crate::tab::TerminalTab, pane: u64, sti
     };
     let moving = card.clone();
     let gone = card.clone();
-    arrange::animate(
+    crate::card::animate(
         FLY_SECS,
         move || {
             moving.animator().setFrame(target);

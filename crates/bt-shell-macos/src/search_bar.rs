@@ -510,7 +510,6 @@ fn symbol(
 #[cfg(test)]
 mod tests {
     use super::{count_label, mix, selection_query, surface_colors};
-    use crate::window::is_dark_background;
     use bt_core::{SearchReport, SearchStatus, Theme};
 
     #[test]
@@ -582,7 +581,7 @@ mod tests {
         // embedded theme, with the darkness the pane paints it with.
         for name in Theme::embedded_names() {
             let theme = Theme::embedded(name).expect("an embedded name");
-            let dark = is_dark_background(&theme);
+            let dark = theme.is_dark();
             let floor = if dark { 1.4 } else { 1.12 };
             let (fill, _) = surface_colors(theme.background, theme.foreground, dark);
             let ratio = contrast(fill, theme.background);

@@ -57,7 +57,6 @@ use objc2_foundation::{
 };
 
 use crate::app;
-use crate::arrange;
 use crate::clipboard;
 use crate::gesture::{Drag, Gesture, Press, Release};
 use crate::hyperlink::LinkState;
@@ -66,6 +65,7 @@ use crate::keys::{
     page_scroll,
 };
 use crate::pane::TerminalPane;
+use crate::pointer;
 use crate::quote::{paste_quote, shell_quote};
 
 /// What happens to a point that falls outside the grid - [`point_to_cell`]'s
@@ -558,7 +558,7 @@ pub(crate) struct ViewIvars {
     dock_rows: Cell<u16>,
     /// The dock's width, columns — the window's, not the grid's: the
     /// always-up scroll bar's track narrows the grid only
-    /// (`app::Grid::dock_cols`). Written in the **same** call as `metrics`;
+    /// (`grid::Grid::dock_cols`). Written in the **same** call as `metrics`;
     /// every dock hit (the input block's clamp, the context row's column and
     /// budget) reads it, so a click on the dock's last columns is the dock's.
     dock_cols: Cell<u16>,
@@ -1688,7 +1688,7 @@ impl BateriView {
     /// link. They are written at the same call site — the metrics, the dock's
     /// rows and the dock's columns; one cannot change while another stays
     /// stale.
-    pub(crate) fn set_metrics(&self, grid: crate::app::Grid, dock_rows: u16) {
+    pub(crate) fn set_metrics(&self, grid: crate::grid::Grid, dock_rows: u16) {
         self.ivars()
             .metrics
             .set(Some((grid.cell, (grid.cols, grid.rows))));
@@ -2235,7 +2235,7 @@ impl BateriView {
         // a gesture here; the release finds none and the drag ignores itself
         // (the carry, once it begins, swallows the drag and the release before
         // they get here).
-        if arrange::swallows(event.modifierFlags()) {
+        if pointer::swallows(event.modifierFlags()) {
             // The press is the pane's carry in the making: it becomes one
             // once the pointer travels ([`crate::pane_drag`]).
             if button == MouseButton::Left
@@ -2825,6 +2825,46 @@ mod tests {
     /// separate things are asked: the cell arithmetic (padding zero) and the padding itself.
     fn grid(gutter: u16) -> CellMetrics {
         CellMetrics::new(9, 18, 9, gutter, 1, 1.0).expect("non-zero cell")
+    }
+
+    #[test]
+    fn a_click_on_the_docks_last_column_beside_the_track_is_the_docks() {
+        // The always-up form narrows the grid, not the dock: a click on the
+        // dock's last column — under where the track ends, beside the grid's
+        // right edge — lands on that column, not clamped back to the grid's.
+        let cell = grid(8);
+        let reserve = bt_gpu::ScrollbarMode::Always.reserve_px(cell);
+        let grid =
+            crate::grid::split_into_grid(900.0, 600.0, cell, bt_gpu::DOCK_ROWS, reserve, 0.0);
+        let top = crate::view::dock_input_top_px(600.0, cell, bt_gpu::DOCK_ROWS);
+        let last = grid.dock_cols - 1;
+        let x = f64::from(cell.gutter_px()) + (f64::from(last) + 0.25) * 9.0;
+        let hit = crate::view::point_to_cell(
+            (x, top + 4.0),
+            cell,
+            top,
+            crate::view::OutOfGrid::Reject,
+            1.0,
+            grid.dock_cols,
+            1,
+        )
+        .expect("the dock's last column was rejected");
+        assert_eq!(hit.col, last);
+        assert!(hit.col >= grid.cols, "the column is not beyond the grid's");
+        // With the grid's columns the same click is rejected: the reading
+        // the dock must not use.
+        assert!(
+            crate::view::point_to_cell(
+                (x, top + 4.0),
+                cell,
+                top,
+                crate::view::OutOfGrid::Reject,
+                1.0,
+                grid.cols,
+                1,
+            )
+            .is_none()
+        );
     }
 
     #[test]

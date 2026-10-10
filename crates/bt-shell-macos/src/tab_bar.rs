@@ -1257,7 +1257,7 @@ impl Chip {
         );
         self.addSubview(&glow);
         let fading = glow.clone();
-        arrange::animate(
+        crate::card::animate(
             PULSE_SECS,
             move || fading.animator().setAlphaValue(0.0),
             move || glow.removeFromSuperview(),

@@ -80,7 +80,7 @@ fn host_of(
 /// Whether ⌥⌘ are both down now. Read off the hardware: no flags event is delivered to us
 /// while a session runs.
 fn arranging() -> bool {
-    arrange::swallows(NSEvent::modifierFlags_class())
+    crate::pointer::swallows(NSEvent::modifierFlags_class())
 }
 
 /// Where a carried tab's block would land.

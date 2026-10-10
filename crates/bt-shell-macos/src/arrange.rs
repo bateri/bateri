@@ -48,7 +48,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityButtonRole, NSAnimatablePropertyContainer, NSAnimationContext,
+    NSAccessibility, NSAccessibilityButtonRole, NSAnimatablePropertyContainer,
     NSAutoresizingMaskOptions, NSBezierPath, NSBox, NSBoxType, NSColor, NSCursor, NSEvent,
     NSEventMask, NSEventModifierFlags, NSFont, NSFontWeightMedium, NSImage, NSImageScaling,
     NSImageView, NSLineBreakMode, NSShadow, NSTextField, NSTitlePosition, NSView,
@@ -56,7 +56,6 @@ use objc2_app_kit::{
     NSWindowOrderingMode, NSWorkspace,
 };
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
-use objc2_quartz_core::CAMediaTimingFunction;
 
 use crate::app;
 use crate::card::{self, corner_pt};
@@ -101,18 +100,6 @@ pub(crate) fn hold_of(flags: NSEventModifierFlags) -> Hold {
     } else {
         Hold::Nothing
     }
-}
-
-/// Whether a mouse event carrying `flags` is the arrangement's, not the
-/// program's: ⌘ and ⌥ both down (a third modifier does not hand it back — a
-/// ⇧⌥⌘ press is nothing the program was ever told about).
-pub(crate) fn swallows(flags: NSEventModifierFlags) -> bool {
-    flags.contains(NSEventModifierFlags::Command) && flags.contains(NSEventModifierFlags::Option)
-}
-
-/// Whether ⌘ is down **as a link's key**: with ⌥ it is the arrangement's.
-pub(crate) fn link_command(flags: NSEventModifierFlags) -> bool {
-    flags.contains(NSEventModifierFlags::Command) && !flags.contains(NSEventModifierFlags::Option)
 }
 
 /// Runs `job` on the main queue after `delay`, with the application: found
@@ -976,21 +963,6 @@ fn plate(mtm: MainThreadMarker, theme: &Theme, card: NSRect) -> Retained<NSBox> 
     plate
 }
 
-/// Runs `change` as an AppKit animation of `secs` on the app's curve
-/// (`cubic-bezier(0.2, 0.8, 0.2, 1)`), then `done`.
-pub(crate) fn animate(secs: f64, change: impl Fn() + 'static, done: impl Fn() + 'static) {
-    let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
-        // SAFETY: AppKit gives the block a live context, for the block's duration.
-        let context = unsafe { context.as_ref() };
-        context.setDuration(secs);
-        let curve = CAMediaTimingFunction::functionWithControlPoints(0.2, 0.8, 0.2, 1.0);
-        context.setTimingFunction(Some(&curve));
-        change();
-    });
-    let finished = RcBlock::new(done);
-    NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&finished));
-}
-
 // ─── What the tab lifted ─────────────────────────────────────────────────
 
 /// What `Raised::raise` is told.
@@ -1113,7 +1085,7 @@ impl Raised {
                 plate.setAlphaValue(1.0);
             }
         } else {
-            animate(
+            crate::card::animate(
                 CAPSULE_SECS,
                 move || {
                     for plate in &fade_in {
@@ -1209,7 +1181,7 @@ impl Raised {
 
 /// Fades `fading` out and then takes `views` out of their superview.
 fn animate_out(secs: f64, fading: Vec<Retained<NSView>>, views: Vec<Retained<NSView>>) {
-    animate(
+    crate::card::animate(
         secs,
         move || {
             for view in &fading {
@@ -1312,19 +1284,6 @@ mod tests {
         );
         assert_eq!(hold_of(option), Hold::Nothing);
         assert_eq!(hold_of(NSEventModifierFlags::empty()), Hold::Nothing);
-    }
-
-    #[test]
-    fn a_press_with_option_and_command_is_the_arrangements() {
-        let both = NSEventModifierFlags::Command | NSEventModifierFlags::Option;
-        assert!(swallows(both));
-        assert!(swallows(both | NSEventModifierFlags::Shift));
-        assert!(!swallows(NSEventModifierFlags::Command));
-        assert!(!swallows(NSEventModifierFlags::Option));
-        // The link's key is ⌘ alone of the two.
-        assert!(link_command(NSEventModifierFlags::Command));
-        assert!(!link_command(both));
-        assert!(!link_command(NSEventModifierFlags::empty()));
     }
 
     #[test]

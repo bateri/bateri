@@ -31,8 +31,10 @@
 //! content frame replaces it at the final size.
 
 use std::cell::{Cell, RefCell};
+use std::ptr::NonNull;
 use std::sync::OnceLock;
 
+use block2::RcBlock;
 use bt_core::Theme;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -40,8 +42,8 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
 };
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSBezierPath, NSColor, NSGradient, NSGraphicsContext, NSShadow,
-    NSView, NSWindingRule,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSBezierPath, NSColor, NSGradient,
+    NSGraphicsContext, NSShadow, NSView, NSWindingRule,
 };
 use objc2_core_foundation::CGRect;
 use objc2_foundation::{
@@ -604,12 +606,27 @@ impl Ground {
             return;
         }
         let this = self.retain();
-        crate::arrange::animate(
+        animate(
             SLIDE_SECS,
             move || this.animator().setAlphaValue(alpha),
             || {},
         );
     }
+}
+
+/// Runs `change` as an AppKit animation of `secs` on the app's curve
+/// (`cubic-bezier(0.2, 0.8, 0.2, 1)`), then `done`.
+pub(crate) fn animate(secs: f64, change: impl Fn() + 'static, done: impl Fn() + 'static) {
+    let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
+        // SAFETY: AppKit gives the block a live context, for the block's duration.
+        let context = unsafe { context.as_ref() };
+        context.setDuration(secs);
+        let curve = CAMediaTimingFunction::functionWithControlPoints(0.2, 0.8, 0.2, 1.0);
+        context.setTimingFunction(Some(&curve));
+        change();
+    });
+    let finished = RcBlock::new(done);
+    NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&finished));
 }
 
 // ─── The shade under the cards ───────────────────────────────────────────
