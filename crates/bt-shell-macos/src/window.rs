@@ -2386,6 +2386,8 @@ impl TerminalWindow {
                 })
                 .collect(),
             asking: !self.selection_free(),
+            // A window whose last tab leaves closes: bateri has no window without a tab.
+            stays_empty: false,
         }
     }
 

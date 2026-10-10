@@ -36,9 +36,10 @@ use bt_core::{HostMark, ProgramActivity};
 
 /// A window's tabs in strip order, and the selected one.
 ///
-/// Invariant: a selection exists exactly when there is at least one tab. A window is born with
-/// one tab ([`Tabs::new`]); closing the last one leaves the model empty, which is the window's
-/// cue to close.
+/// Invariant: a selection exists exactly when there is at least one tab. A bateri window is born
+/// with one tab ([`Tabs::new`]); closing the last one leaves the model empty, which is its cue to
+/// close. A host whose windows outlive their tabs keeps an empty one, and may have one born
+/// without a tab ([`Tabs::empty`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tabs<K> {
     order: Vec<K>,
@@ -51,6 +52,14 @@ impl<K: Copy + Eq> Tabs<K> {
         Self {
             order: vec![first],
             selected: Some(0),
+        }
+    }
+
+    /// No tabs and nothing selected: a window that holds none yet, or no more.
+    pub fn empty() -> Self {
+        Self {
+            order: Vec::new(),
+            selected: None,
         }
     }
 
@@ -98,13 +107,14 @@ impl<K: Copy + Eq> Tabs<K> {
     }
 
     /// Adds a tab at the **end** and leaves the selection where it was — a tab that joins from
-    /// another window (Merge All Windows) does not change what this window shows. `false` if the
-    /// id is already here.
+    /// another window (Merge All Windows) does not change what this window shows; into an empty
+    /// strip it is the one shown. `false` if the id is already here.
     pub fn append(&mut self, id: K) -> bool {
         if self.index_of(id).is_some() {
             return false;
         }
         self.order.push(id);
+        self.selected.get_or_insert(self.order.len() - 1);
         true
     }
 
@@ -2209,6 +2219,21 @@ mod tests {
             (0..=3).map(|gap| gap_to_index(1, gap)).collect::<Vec<_>>(),
             vec![0, 1, 1, 2]
         );
+    }
+
+    #[test]
+    fn an_empty_strip_selects_the_first_tab_that_comes() {
+        let mut t: Tabs<u64> = Tabs::empty();
+        assert!(t.is_empty());
+        assert_eq!((t.selected(), t.adjacent(true)), (None, None));
+        t.insert(4);
+        assert_eq!((t.ids(), t.selected()), (&[4][..], Some(4)));
+        let mut t: Tabs<u64> = Tabs::empty();
+        assert!(t.append(5));
+        assert_eq!(t.selected(), Some(5), "a strip with a tab has a selection");
+        let mut t: Tabs<u64> = Tabs::empty();
+        t.insert_at(6, 3);
+        assert_eq!((t.ids(), t.selected()), (&[6][..], Some(6)));
     }
 
     #[test]
