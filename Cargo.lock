@@ -85,7 +85,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bateri"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bt-shell-macos",
 ]
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "bt-atlas"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "fontconfig",
  "freetype-rs",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "bt-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "alacritty_terminal",
  "cursor-icon",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "bt-gpu"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bt-atlas",
  "bt-core",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "bt-shell-common"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bt-core",
  "bt-gpu",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "bt-shell-macos"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "block2",
  "bt-core",

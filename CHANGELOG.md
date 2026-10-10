@@ -12,8 +12,38 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-10
+
 ### Added
 
+- **Move a split anywhere with Option-Command.** Hold Option-Command for a
+  moment and the panes of the tab lift, each with a small bar on top. Grab the
+  bar — or, with the keys held, any point of a pane — and drop it beside
+  another pane, on any side of it, or in its middle to swap the two; along the
+  window's edge it becomes a full-height column or a full-width row. Before you
+  let go, the place it would take is painted with its name (Left, Right, Above,
+  Below, Swap). If it does not fit, room is made by shrinking the panes around
+  it, none below 20 columns by 5 rows; a place that is still too small says so
+  and shows the edges where it would fit. Esc puts it back. The bar also splits
+  the pane right or down, opens it in a tab of its own and closes it.
+- **Across tabs and windows.** Drop a pane on another tab's chip to add it to
+  that tab, or hold it over the chip for a moment to open the tab and place it
+  yourself. Drop it between two chips to make it a tab of its own. Drag it out
+  of the window and it opens in a new window where you let go; drop it on
+  another bateri window's panes or tabs and it moves there. The program in the
+  pane keeps running — a build, vim, an ssh session — and is resized once, when
+  it lands.
+- **Pull a tab into the one in front.** With Option-Command held, drag a tab's
+  chip down onto the open panes: the whole tab comes in as splits and keeps its
+  own layout. Without the keys, dragging a chip down still opens it in a new
+  window. A tab's right-click menu does the same with Merge into Current Tab ▸
+  Split Right / Split Down.
+- **From the menu and the keyboard.** Window ▸ Swap Split
+  (Shift-Option-Command-arrow), Move Split to New Tab, Move Split to Tab ▸,
+  Move Split to New Window, and Move Split to Previous / Next Tab
+  (Shift-Option-Command-[ and ]).
+- **Undo Move.** Edit ▸ Undo Move (Command-Z) takes back the last move, swap,
+  merge or split-off, and a tab name lost in a merge comes back with it.
 - **A tab says what the program in it is doing.** Programs that report their
   status (the `OSC 7501` protocol, which Claude Code speaks) now drive the tab's
   chip: the ring turns only while the program works and stands still while it
@@ -23,6 +53,28 @@ of every installed copy. A version without a section is not released.
   as long as the program was open. Progress bars printed with `OSC 9;4` (cargo,
   zig) turn the ring the same way, until a program starts reporting its own
   status. Works over ssh too.
+- **A choice of how split tabs look.** Settings ▸ Appearance ▸ Split style
+  (`[appearance] split_style`) keeps the new cards by default; "Lines" lets the
+  panes touch with a one-pixel line between them, square corners and the plain
+  background — the most room for text, as before this release.
+
+### Changed
+
+- **Split tabs are cards.** Two or more panes in a tab now stand as cards on a
+  ground of their own: a soft gradient drawn from your theme's accent and
+  cursor colors, a gap round and between the cards, corners rounded to match
+  the window's. No line draws them — each card's top edge catches a light, a
+  dark theme's card has a faint sheen under its top, and its shadow is tucked
+  under its foot. The focused card stands nearer, with a deeper shadow and, on
+  a dark theme, a warm light. Panes without the focus are no longer dimmed, so
+  every pane reads at once; Settings ▸ Appearance ▸ Dim unfocused splits
+  (`[appearance] dim_unfocused_splits`) brings the veil back. Going from one
+  pane to two and back slides them into place, at once with Reduce Motion. A
+  tab with one pane looks as it always has.
+- **Full-screen programs reach the pane's edges.** btop, vim and other
+  programs that paint their own background now fill the margin round the text
+  too, instead of standing in a frame of the theme's color that was a
+  different width on every side. Your shell's own lines look as before.
 
 ## [0.10.0] - 2026-10-09
 
