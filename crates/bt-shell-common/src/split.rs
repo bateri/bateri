@@ -1111,6 +1111,19 @@ impl Tree {
         self.min_px(axis, &room.limits())
     }
 
+    /// Whether every pane of this tree, laid out in `room`, keeps at least its smallest size
+    /// (`room.min`): what a swap or a rearrangement must leave true, or it is not made — a pane
+    /// at a larger point size has a larger smallest.
+    pub fn fits(&self, room: &Room<'_>) -> bool {
+        self.layout_spaced(room.bounds, room.scale, room.spacing)
+            .panes
+            .iter()
+            .all(|(id, rect)| {
+                let min = (room.min)(*id);
+                rect.width >= min.width && rect.height >= min.height
+            })
+    }
+
     /// Makes panes `a` and `b` trade places: each takes the other's frame, the ratios stay.
     /// `false` and no change if they are the same pane or either is missing.
     pub fn swap(&mut self, a: u64, b: u64) -> bool {

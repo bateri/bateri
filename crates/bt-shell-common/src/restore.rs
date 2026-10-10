@@ -212,13 +212,13 @@ impl Shape {
     }
 
     /// Whether the leaves are exactly `0..count`, each once.
-    fn covers(&self, count: usize) -> bool {
+    pub(crate) fn covers(&self, count: usize) -> bool {
         let mut leaves = self.leaves();
         leaves.sort_unstable();
         leaves.len() == count && leaves.iter().enumerate().all(|(i, leaf)| i == *leaf)
     }
 
-    fn render(&self, out: &mut String) {
+    pub(crate) fn render(&self, out: &mut String) {
         match self {
             Shape::Leaf(index) => out.push_str(&format!(" L {index}")),
             Shape::Split {
@@ -240,7 +240,10 @@ impl Shape {
 
     /// Reads one pre-order tree from `tokens`; the depth bound keeps a hostile file from
     /// recursing without limit.
-    fn parse<'a>(tokens: &mut impl Iterator<Item = &'a str>, depth: usize) -> Option<Shape> {
+    pub(crate) fn parse<'a>(
+        tokens: &mut impl Iterator<Item = &'a str>,
+        depth: usize,
+    ) -> Option<Shape> {
         if depth > MAX_DEPTH {
             return None;
         }

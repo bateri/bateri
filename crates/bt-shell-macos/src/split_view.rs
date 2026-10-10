@@ -675,11 +675,8 @@ impl SplitView {
     /// limit ([`TerminalPane::min_size`]) — a restored tree from a larger
     /// screen or a smaller font may not.
     pub(crate) fn fits(&self) -> bool {
-        self.plain_layout().panes.iter().all(|(id, rect)| {
-            self.pane(*id)
-                .and_then(|pane| pane.min_size())
-                .is_none_or(|min| rect.width >= min.width && rect.height >= min.height)
-        })
+        let limits = self.limits();
+        self.ivars().tree.borrow().fits(&self.room(&limits))
     }
 
     /// Removes `id` from the tree ([`Tree::remove`]); the pane stays in the

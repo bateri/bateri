@@ -62,6 +62,7 @@ pub mod split;
 pub mod ssh_route;
 pub mod ssh_wrap;
 pub mod tabs;
+pub mod tree_text;
 pub mod undo;
 pub mod upload;
 // Bodies exist for macOS and Linux only; elsewhere the module is absent
