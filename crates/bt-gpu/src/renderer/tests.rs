@@ -2219,6 +2219,7 @@ pub(crate) fn cursor_at(col: u16, text: LinearRgba) -> Cursor {
         scroll_frac: 0.0,
         scroll_generation: 0,
         rows: 1,
+        cols: 1,
         // No scrollback: the scroll bar is not drawn and these tests ask about cells.
         history: 0,
         resting_fill: 0,

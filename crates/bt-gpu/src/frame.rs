@@ -988,6 +988,29 @@ const SEPARATOR_PX: f32 = 1.0;
 /// a motion frame draws without finding the grid dirty, so it cannot clear the
 /// list — [`Frame::move_caret`] moves only the caret, preserving it. The only
 /// place `clear` is called is the content frame.
+/// A grid row's ends as the padding reads them ([`Frame::padding`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct RowEdge {
+    /// Columns with a background of their own (not the theme's).
+    painted: u16,
+    /// The first column's background, if it has one.
+    first: Option<[f32; 4]>,
+    /// The rightmost column with a background of its own, and that background.
+    last: Option<(u16, [f32; 4])>,
+    /// A powerline glyph in the row.
+    powerline: bool,
+}
+
+/// Powerline's separators and caps: shapes drawn to fit their cell exactly,
+/// which read wrong once the cell's background is stretched beside them
+/// (Ghostty's list for the same rule).
+fn is_powerline(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0xe0b0..=0xe0c8 | 0xe0ca | 0xe0cc..=0xe0d2 | 0xe0d4
+    )
+}
+
 #[derive(Default)]
 pub(crate) struct Frame {
     /// The command blocks' stripes in the left margin; through the **same**
@@ -1089,6 +1112,13 @@ pub(crate) struct Frame {
     /// separate constant it could diverge from the `cols` computation — its
     /// having a single source for all three is the condition for the gutter.
     gutter_px: f32,
+    /// The grid's columns and rows in this frame (`Cursor::cols`, `rows`):
+    /// the padding needs a row's last column.
+    grid_cols: u16,
+    grid_rows: u16,
+    /// What each grid row's ends are painted with, gathered as its cells come
+    /// in ([`Frame::push`]); the padding takes them ([`Frame::padding`]).
+    row_edges: Vec<RowEdge>,
     /// The backing scale, physical pixels per point — the design lengths the
     /// wave is drawn in are points ([`CellMetrics::scale`]). Carried by
     /// [`Frame::clear`] with the rest of the metrics.
@@ -1448,6 +1478,7 @@ impl Frame {
         self.glyphs.clear();
         self.rules.clear();
         self.bg_count = 0;
+        self.row_edges.clear();
         // The dock is in the content frame's contract too: its surface is
         // **reopened every frame** (`Frame::open_dock`). Had it been kept, in
         // a session with no dock the last frame's surface would hang on
@@ -1648,6 +1679,7 @@ impl Frame {
         // underline, strikeout) once: calling `pos()` four times per cell has
         // no gain and would mean four copies that could diverge.
         let pos = self.pos(cell.col, cell.row);
+        self.note_edge(&cell);
         if let Some(bg) = cell.bg {
             // The counter and the list having the **same** length is the
             // proof that nothing not counted, like the caret, leaked into
@@ -3528,6 +3560,109 @@ impl Frame {
         &self.bg
     }
 
+    /// The grid's size in this frame, from the cursor's read.
+    pub(crate) fn set_grid(&mut self, cols: u16, rows: u16) {
+        self.grid_cols = cols;
+        self.grid_rows = rows;
+    }
+
+    /// One grid cell's part in its row's ends: a background of its own counts
+    /// the column as painted and may be the first or the last one; a
+    /// powerline glyph rules the row out.
+    fn note_edge(&mut self, cell: &Cell) {
+        let row = usize::from(cell.row);
+        if self.row_edges.len() <= row {
+            self.row_edges.resize(row + 1, RowEdge::default());
+        }
+        let edge = &mut self.row_edges[row];
+        if let Some(bg) = cell.bg {
+            let rgba = bg.to_array();
+            edge.painted = edge.painted.saturating_add(1);
+            if cell.col == 0 {
+                edge.first = Some(rgba);
+            }
+            if edge.last.is_none_or(|(col, _)| cell.col >= col) {
+                edge.last = Some((cell.col, rgba));
+            }
+        }
+        if cell.ch.is_some_and(is_powerline) {
+            edge.powerline = true;
+        }
+    }
+
+    /// The pane's padding painted with the grid's edge cells, in **window
+    /// space**: the gutter at the left, what the columns leave at the right,
+    /// above the grid and below it. A program that paints its own background
+    /// (btop, a vim colour scheme) then reaches the card's edge on every side,
+    /// instead of standing in a frame of the theme's background as wide as
+    /// the arithmetic left on each side — 8 pt at the left, a few points at
+    /// the right, the row leftover above.
+    ///
+    /// A row lends its ends only when the program painted it to both ends —
+    /// every column a background of its own, so a shell's line with the
+    /// theme's background lends nothing — and it has no powerline glyph, a
+    /// shape made to fit its cell that reads wrong stretched (the rule of
+    /// Ghostty's `window-padding-color = extend`). Above and below, the first
+    /// and the last row lend each of their cells' backgrounds the same way.
+    ///
+    /// **Only the grid alone:** with the dock open or the history band drawn
+    /// above, the padding is theirs and stays the background — a padding
+    /// derived from the grid would have to be the band's and the dock's too,
+    /// and both are the shell's own surfaces, never a program's.
+    pub(crate) fn padding(&self, viewport: [f32; 2]) -> Vec<Instance> {
+        let mut out = Vec::new();
+        let (cols, rows) = (self.grid_cols, self.grid_rows);
+        let (w, h) = self.cell_px;
+        if self.dock.is_some()
+            || self.fill_rows != 0
+            || cols == 0
+            || rows == 0
+            || w <= 0.0
+            || h <= 0.0
+        {
+            return out;
+        }
+        let top = self.origin_px();
+        let left = self.gutter_px;
+        let right = left + f32::from(cols) * w;
+        let right_w = viewport[0] - right;
+        let bottom = top + f32::from(rows) * h;
+        let ends = |row: u16| -> Option<([f32; 4], [f32; 4])> {
+            let edge = self.row_edges.get(usize::from(row))?;
+            let (last_col, last) = edge.last?;
+            (!edge.powerline && edge.painted >= cols && last_col + 1 == cols)
+                .then_some((edge.first?, last))
+        };
+        let mut quad = |x: f32, y: f32, width: f32, height: f32, rgba: [f32; 4]| {
+            if width > 0.0 && height > 0.0 {
+                out.push(Instance {
+                    pos: [x, y],
+                    size: [width, height],
+                    rgba,
+                });
+            }
+        };
+        for row in 0..rows {
+            if let Some((first, last)) = ends(row) {
+                let y = top + f32::from(row) * h;
+                quad(0.0, y, left, h, first);
+                quad(right, y, right_w, h, last);
+            }
+        }
+        for (row, y, height) in [(0, 0.0, top), (rows - 1, bottom, viewport[1] - bottom)] {
+            let Some((first, last)) = ends(row) else {
+                continue;
+            };
+            let at = f32::from(row) * h;
+            for cell in self.bg.iter().filter(|cell| (cell.pos[1] - at).abs() < 0.5) {
+                quad(cell.pos[0], y, cell.size[0], height, cell.rgba);
+            }
+            quad(0.0, y, left, height, first);
+            quad(right, y, right_w, height, last);
+        }
+        out
+    }
+
     /// This frame's command block stripes.
     ///
     /// It has **no** counter, deliberately: its three siblings (`bg_count`,
@@ -3851,6 +3986,7 @@ mod tests {
             scroll_frac: 0.0,
             scroll_generation: 0,
             rows: 1,
+            cols: 1,
             // No scrollback: the scroll bar is a separate list and this
             // module's cursor tests do not draw it.
             history: 0,
@@ -3882,6 +4018,89 @@ mod tests {
             bg: Some(BG),
             ..Default::default()
         }
+    }
+
+    /// Row `row` painted end to end, `cols` wide, in `rgba`.
+    fn painted_row(frame: &mut Frame, row: u16, cols: u16, rgba: LinearRgba) {
+        for col in 0..cols {
+            frame.push(Cell {
+                col,
+                row,
+                fg: CURSOR,
+                bg: Some(rgba),
+                ..Default::default()
+            });
+        }
+    }
+
+    /// 10×20 cells after a 10-pixel gutter.
+    fn gutted() -> CellMetrics {
+        CellMetrics::new(10, 20, 10, 10, 1, 1.0).expect("non-zero cell")
+    }
+
+    fn quads(padding: &[Instance]) -> Vec<([f32; 2], [f32; 2])> {
+        padding.iter().map(|quad| (quad.pos, quad.size)).collect()
+    }
+
+    #[test]
+    fn a_grid_painted_to_its_ends_lends_them_to_the_padding() {
+        // A 3×2 grid of 10×20 cells after a 10-pixel gutter, in a window of
+        // 100×80: 60 pixels are left at the right and 40 below.
+        let mut frame = Frame::default();
+        frame.clear(gutted(), CaretStyle::default());
+        frame.set_grid(3, 2);
+        painted_row(&mut frame, 0, 3, BG);
+        painted_row(&mut frame, 1, 3, BG);
+        let padding = frame.padding([100.0, 80.0]);
+        assert_eq!(
+            quads(&padding),
+            vec![
+                ([0.0, 0.0], [10.0, 20.0]),
+                ([40.0, 0.0], [60.0, 20.0]),
+                ([0.0, 20.0], [10.0, 20.0]),
+                ([40.0, 20.0], [60.0, 20.0]),
+                // Below: the last row's three cells, then its two ends.
+                ([10.0, 40.0], [10.0, 40.0]),
+                ([20.0, 40.0], [10.0, 40.0]),
+                ([30.0, 40.0], [10.0, 40.0]),
+                ([0.0, 40.0], [10.0, 40.0]),
+                ([40.0, 40.0], [60.0, 40.0]),
+            ]
+        );
+        assert!(padding.iter().all(|quad| quad.rgba == BG.to_array()));
+    }
+
+    #[test]
+    fn a_row_with_the_themes_background_lends_nothing() {
+        // The second row stops a column short (a shell's line: the rest is
+        // the theme's background): only the first row lends its ends, and the
+        // last row lends nothing below.
+        let mut frame = Frame::default();
+        frame.clear(gutted(), CaretStyle::default());
+        frame.set_grid(3, 2);
+        painted_row(&mut frame, 0, 3, BG);
+        painted_row(&mut frame, 1, 2, BG);
+        assert_eq!(
+            quads(&frame.padding([100.0, 80.0])),
+            vec![([0.0, 0.0], [10.0, 20.0]), ([40.0, 0.0], [60.0, 20.0])]
+        );
+    }
+
+    #[test]
+    fn a_powerline_glyph_keeps_its_row_from_lending() {
+        let mut frame = Frame::default();
+        frame.clear(gutted(), CaretStyle::default());
+        frame.set_grid(3, 1);
+        painted_row(&mut frame, 0, 3, BG);
+        frame.push(Cell {
+            col: 2,
+            row: 0,
+            ch: Some('\u{e0b0}'),
+            fg: CURSOR,
+            bg: Some(BG),
+            ..Default::default()
+        });
+        assert!(frame.padding([100.0, 80.0]).is_empty());
     }
 
     #[test]

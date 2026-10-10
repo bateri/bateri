@@ -2050,6 +2050,14 @@ impl Renderer {
         let origin = frame.origin_px();
         let fill_origin = frame.fill_origin_px();
         let free = f32::INFINITY;
+        // The padding first, in window space and unfaded
+        // ([`Frame::padding`]): everything else is drawn over it.
+        let padding = frame.padding(viewport_px);
+        if !padding.is_empty() {
+            plan.ops.push(Op::Viewport(0.0));
+            plan.ops.push(Op::Edge(0.0));
+            plan.quads(&padding);
+        }
         plan.ops.push(Op::Viewport(origin));
         plan.ops.push(Op::Edge(frame.edge_px()));
         self.glyph_draws(

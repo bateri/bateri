@@ -533,6 +533,10 @@ pub struct Cursor {
     /// drawing side's copy would have written it and the offset would be
     /// computed from the wrong grid height for one frame.
     pub rows: u16,
+    /// This frame's grid width, columns — from the same read, for `rows`'
+    /// reason: the drawing side tells a row's last column by it (the padding
+    /// takes an edge cell's background only from a row painted to its end).
+    pub cols: u16,
     /// The scrollback's length in this frame, rows — the scale of the scroll
     /// position ([`Cursor::scroll_position`]).
     ///
@@ -6579,6 +6583,7 @@ impl Session {
             scroll_generation: ScrollGlide::unpack(self.scroll_glide.load(Ordering::Relaxed))
                 .generation,
             rows: grid_rows,
+            cols: grid_cols,
             // The scroll position's two inputs, from this round's reads. The
             // alternate screen's zero is explicit: its grid has no history today
             // anyway, but the position's "nothing to scroll there" must not rest

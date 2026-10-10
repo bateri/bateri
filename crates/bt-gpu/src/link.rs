@@ -1447,6 +1447,7 @@ impl Core {
             cursor.rows,
             self.cell.get(),
         );
+        frame.set_grid(cursor.cols, cursor.rows);
         let mut dock_caret = None;
         // The typing effects' clock advances on the content frame too: in fast
         // typing every tick finds damage and the motion arm never runs.
